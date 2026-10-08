@@ -17,7 +17,7 @@
 (* requires the run lock's guard.                                          *)
 (*                                                                         *)
 (* READER_HOLDS_LOCK = FALSE breaks the assumption the fix rests on, which *)
-(* no type checks: that a reader of another process's record holds the    *)
+(* the historical reader omitted: a reader of another process holds the   *)
 (* run lock from probe to read. With the fix in place and this assumption *)
 (* broken, TLC must find the violation again -- the fix alone is not      *)
 (* enough, and this variant is what says so.                               *)

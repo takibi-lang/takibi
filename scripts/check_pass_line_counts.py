@@ -10,8 +10,8 @@ stopped at a conflict marker, and two more.
 
 Every one had the same repair available and unused: compute the number that
 is zero when nothing was examined, and ASSERT it. Several checks in this
-directory had already written that guard by hand -- `check_dead_slot_peek`'s
-`calls == 0`, `check_kernel_asm_invariants`'s `total_switches == 0`,
+directory had already written that guard by hand --
+`check_kernel_asm_invariants`'s `total_switches == 0`,
 `check_qemu_lane_ports`'s `not claimed` -- which is the evidence that the
 rule is right and that remembering it case by case is what fails.
 

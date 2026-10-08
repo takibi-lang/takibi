@@ -397,12 +397,15 @@ buffers and the RPi5 mailbox. `exception_evidence.tkb` keeps crash snapshots
 and capture guards per core while preserving the historical core-0 symbols
 for debugger scripts. `CrashSnapshot` itself now also carries
 `wait4_status_ptr` and the current process's `fd_kind`/`fd_object`
-arrays (closing #294's own diagnostic-snapshot acceptance criterion --
-process/parent/wait-reason/address-space identity/syscall continuation/
-descriptor ownership are all now one allocation-free, read-only capture,
-populated via the same `kernel_process_crash_*()`/
-`kernel_fd_table_crash_*()` accessor pattern, never touching a linear
-owner or lock from a fail-stop path).
+arrays. Process, parent, wait reason, address-space identity, syscall
+continuation and descriptor ownership are one allocation-free value capture.
+Shared process, VM and FD reads require the complete MachineStopped authority
+and refuse busy metadata without acquiring a lock or pin. A partial or busy
+stop preserves architectural registers and cached trace only; shared fields
+are explicitly unavailable. `image_kind=2` marks unavailable process data,
+`vm_available` distinguishes captured translations, and FD kinds 7/8 mean
+busy/stale. The crash console keeps the complete authority for its terminal
+`ps`/`proc` commands, while a refused stop admits only cached commands.
 
 **Why global:** #294's own design constraints say so explicitly --
 "Interrupt paths and early boot may need explicitly scoped global

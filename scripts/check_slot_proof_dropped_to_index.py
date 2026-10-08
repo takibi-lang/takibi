@@ -19,8 +19,8 @@ about three `make cicheck` runs in eight. The walk skipped the slot correctly
 -- what was wrong was that a counter called it a missing record, and a view
 asserted that counter at zero.
 
-Both sites below are legitimate: each answers a question that is inherently a
-snapshot. The point is not to forbid the shape, it is that a NEW one is a
+The declared cursor, predicate and scalar-copy sites answer questions that
+are inherently snapshots. The point is not to forbid the shape, it is that a NEW one is a
 decision somebody made rather than a line somebody wrote. That is the same
 argument scripts/check_liveness_proof_escapes.py makes about a DIFFERENT
 escape -- that one is about a payload POINTER outliving its proof
@@ -50,6 +50,11 @@ FUNCTION_RE = re.compile(r"^(?:private )?(?:inline |noinline )?fn ([A-Za-z_0-9]+
 # Functions that drop the proof and keep only a slot address, and why that is
 # the right answer there. Each entry is a claim that can stop being true.
 INDEX_ONLY_ALLOWED = {
+    "scheduled_process_scalar_snapshot":
+        "a value snapshot, not an index or payload pointer: it copies pid, "
+        "state, wait reason, saved frame address and stack-run address before "
+        "consuming its pool view. Saved addresses do not grant access rights; "
+        "the frame/stack mints separately validate them",
     "scheduled_process_live_pool_slot_from":
         "a cursor. Its whole job is to answer 'the next occupied slot as of "
         "now', and a caller that wanted a lasting answer would be asking the "

@@ -174,6 +174,7 @@ private linear struct MachineSlotView[stop: addr, pool: addr] {
 }
 
 must_use variant MachineSlotProbe[stop: addr, pool: addr] {
+    Busy;
     Missing;
     Live(MachineSlotView[stop, pool]);
 }
@@ -394,6 +395,7 @@ fn machine_stopped_mask(machine: borrow MachineStopped[id]) -> usize {
 fn machine_pool_probe(T: type, pool: &mut IntrusivePool(T) @ pool_id,
                       stopped: borrow MachineStopped[stop], slot: usize)
         -> MachineSlotProbe[stop, pool_id] !{unsafe, irq_masking_guard} {
+    if (intrusive_pool_inspection_busy(pool)) { return MachineSlotProbe::Busy; }
     match intrusive_pool_probe_slot_unproven(pool, slot) {
         IntrusiveSlotProbe::NoPayload => { return MachineSlotProbe::Missing; }
         IntrusiveSlotProbe::Live(live) => {
@@ -421,7 +423,8 @@ fn cpu_start_reserve(core: {0..<KERNEL_MAX_CORES as usize})
           changes_witness_MachineSlotView,
           changes_witness_RegionInspection__AddressSpaceBacking,
           changes_witness_RegionInspection__ProcessFdContext,
-          changes_witness_RegionInspection__FdBlock} {
+          changes_witness_RegionInspection__FdBlock,
+          changes_witness_RegionInspection__ProcessImageRecord} {
     if (core == 0 || cpu_id() != 0) { return CpuStartResult::Busy; }
     let irq_flags: usize = mutex_irq_save();
     if (world_stop_claim(&kernel_world_stop) != 0) {
@@ -460,7 +463,8 @@ private fn cpu_start_gate_release()
           changes_witness_MachineStopped, changes_witness_MachineSlotView,
           changes_witness_RegionInspection__AddressSpaceBacking,
           changes_witness_RegionInspection__ProcessFdContext,
-          changes_witness_RegionInspection__FdBlock} {
+          changes_witness_RegionInspection__FdBlock,
+          changes_witness_RegionInspection__ProcessImageRecord} {
     atomic_word_store(&kernel_world_stop.claimed, 0);
 }
 
@@ -508,7 +512,8 @@ private fn world_stop_resume(stop: *WorldStop @ id)
           changes_witness_MachineSlotView,
           changes_witness_RegionInspection__AddressSpaceBacking,
           changes_witness_RegionInspection__ProcessFdContext,
-          changes_witness_RegionInspection__FdBlock} {
+          changes_witness_RegionInspection__FdBlock,
+          changes_witness_RegionInspection__ProcessImageRecord} {
     atomic_word_store(&(*stop).requested, 0);
     // owner remains stable until the next successful claimant publishes it.
     // Releasing the gate last prevents a new publication being cleared here.
@@ -531,12 +536,6 @@ fn world_stop_partial_release(partial: sink WorldStopPartial[id],
     world_stop_partial_end(partial);
     world_stop_resume(stop);
 }
-
-// A fail-stop that stopped the world never resumes it (GitHub issue #619):
-// the other cores stay in world_stop_interrupt_hold for as long as the
-// machine is on. This spends the token without the release the ordinary
-// callers owe, and is for that terminal path only.
-fn world_stop_keep_forever(stopped: sink WorldStopped[id]) {}
 
 // What DDB prints when it is refused a stop (GitHub issue #632): who holds
 // it, which request is out, and what each core last acknowledged. Plain
@@ -571,15 +570,6 @@ fn world_stop_partial_mask(partial: borrow WorldStopPartial[id]) -> usize {
 // The complete token does not need to store a second copy of its mask: every
 // non-owner core in the requested mask acknowledged, exactly the set the SGI
 // targeted and the set release resumes.
-fn world_stopped_mask(stopped: borrow WorldStopped[id]) -> usize {
-    let mut mask: usize = 0;
-    for cpu: usize in 0..<KERNEL_MAX_CORES {
-        if ((stopped.mask & (1 << cpu)) != 0 && cpu != stopped.owner) {
-            mask = mask | (1 << cpu);
-        }
-    }
-    return mask;
-}
 
 private fn occupancy_cpu() -> {0..<KERNEL_MAX_CORES as usize} {
     let raw: usize = cpu_id();

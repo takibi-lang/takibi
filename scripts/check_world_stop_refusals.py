@@ -11,7 +11,7 @@ fail-stopped the whole kernel at the ASID counter's first wrap.
 The rule: in every WorldStopResult or MachineStopResult Busy/Partial arm
 under kernel/, no fail-stop call. The arm may retry, yield, report or return
 an error; the fail-stop is reserved for a Complete stop that a terminal path
-keeps (world_stop_keep_forever).
+keeps (machine_stop_keep_forever).
 
 Lexical: an arm is the text from its `=>` to the next stop-result constructor
 or the end of the enclosing match. What it cannot see is a refusal turned into

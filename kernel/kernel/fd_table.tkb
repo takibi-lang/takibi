@@ -3996,71 +3996,11 @@ fn kernel_fd_table_stopped_pool_busy_probe() -> bool {
     return fd_context_stopped_pool_busy_probe() && fd_block_stopped_pool_busy_probe();
 }
 
-// Allocation-free diagnostic view for the terminal exception path (issue
-// #294's last acceptance criterion), mirroring kernel/kernel/process.tkb's
-// own kernel_process_crash_*() accessors: reads plain ProcessFdContext data
-// only, never object_pool's RefcountSlotMap internals -- a crash report
-// must not acquire a lock after a fatal exception. The record's handle is
-// read with the diagnostic peek for the same reason: the crashing CPU may
-// hold the run lock.
-fn kernel_fd_table_crash_kind(process: usize, fd: usize) -> usize !{unsafe} {
-    let mut words: ProcessPoolHandleWords =
-        scheduled_process_fd_context_handle_peek(process);
-    if (words.address == 0) { return 0; }
-    let RegionPinned(ProcessFdContext)::Pinned(ctx_pin) =
-            fd_context_pin_words(&fd_context_pool, words) else {
-        RegionPinned(ProcessFdContext)::Stale => { return 0; }
-    };
-    let ctx: *ProcessFdContext = region_pin_at(ctx_pin);
-    let (block, block_generation) = fd_block_lookup(ctx, fd);
-    if (block == 0) { { let __ctx_result: usize = 0; fd_context_unpin(ctx_pin); return __ctx_result; } }
-    let RegionPinned(FdBlock)::Pinned(entries_pin) =
-            fd_block_pin(&fd_block_pool, block, block_generation) else {
-        RegionPinned(FdBlock)::Stale => { let __ctx_result: usize = 0; fd_context_unpin(ctx_pin); return __ctx_result; }
-    };
-    let entries: *FdBlock = region_pin_at(entries_pin);
-    let index: {0..<FD_BLOCK_SLOTS as usize} = fd_slot_index(fd);
-    let mut entry: FdDiagnosticEntry = fd_diagnostic_entry_copy(entries, index);
-    match entry.kind {
-        UnifiedFdKind::Empty => { let __ctx_result: usize = 0; fd_context_unpin(ctx_pin); { let __entries_result: usize = __ctx_result; fd_block_unpin(entries_pin); return __entries_result; } }
-        UnifiedFdKind::Terminal => { let __ctx_result: usize = 1; fd_context_unpin(ctx_pin); { let __entries_result: usize = __ctx_result; fd_block_unpin(entries_pin); return __entries_result; } }
-        UnifiedFdKind::OpenFile => { let __ctx_result: usize = 2; fd_context_unpin(ctx_pin); { let __entries_result: usize = __ctx_result; fd_block_unpin(entries_pin); return __entries_result; } }
-        UnifiedFdKind::Directory => { let __ctx_result: usize = 3; fd_context_unpin(ctx_pin); { let __entries_result: usize = __ctx_result; fd_block_unpin(entries_pin); return __entries_result; } }
-        UnifiedFdKind::Listener => { let __ctx_result: usize = 4; fd_context_unpin(ctx_pin); { let __entries_result: usize = __ctx_result; fd_block_unpin(entries_pin); return __entries_result; } }
-        UnifiedFdKind::Connection => { let __ctx_result: usize = 5; fd_context_unpin(ctx_pin); { let __entries_result: usize = __ctx_result; fd_block_unpin(entries_pin); return __entries_result; } }
-    }
-}
-
-fn kernel_fd_table_crash_object(process: usize, fd: usize) -> usize !{unsafe} {
-    let mut words: ProcessPoolHandleWords =
-        scheduled_process_fd_context_handle_peek(process);
-    if (words.address == 0) { return 0; }
-    let RegionPinned(ProcessFdContext)::Pinned(ctx_pin) =
-            fd_context_pin_words(&fd_context_pool, words) else {
-        RegionPinned(ProcessFdContext)::Stale => { return 0; }
-    };
-    let ctx: *ProcessFdContext = region_pin_at(ctx_pin);
-    let (block, block_generation) = fd_block_lookup(ctx, fd);
-    if (block == 0) { { let __ctx_result: usize = 0; fd_context_unpin(ctx_pin); return __ctx_result; } }
-    let RegionPinned(FdBlock)::Pinned(entries_pin) =
-            fd_block_pin(&fd_block_pool, block, block_generation) else {
-        RegionPinned(FdBlock)::Stale => { let __ctx_result: usize = 0; fd_context_unpin(ctx_pin); return __ctx_result; }
-    };
-    let entries: *FdBlock = region_pin_at(entries_pin);
-    let index: {0..<FD_BLOCK_SLOTS as usize} = fd_slot_index(fd);
-    let mut entry: FdDiagnosticEntry = fd_diagnostic_entry_copy(entries, index);
-    { let __ctx_result: usize = entry.object; fd_context_unpin(ctx_pin); { let __entries_result: usize = __ctx_result; fd_block_unpin(entries_pin); return __entries_result; } }
-}
-
-// GitHub issue #479. SharedObject.refs and fd_slot_total are guarded by one
-// fd-class lock. The descriptor block pool guards mutation, while each chain
-// belongs to one process lifecycle: only its current syscall path operates on
-// a runnable chain; clone's destination is not runnable until copying ends;
-// reap releases only an Exited process. Two cores may therefore operate on
-// different chains without sharing their links or entries. Crash diagnostics
-// remain lockless under the separate world-stop execution-model blocker.
-// This file consequently has no KERNEL_ACTIVE_CORES dependency today.
-
+// SharedObject refs and the slot total share their refcount guard. Each
+// descriptor chain belongs to its process lifecycle; stopped diagnostics
+// require MachineStopped and refuse busy allocator metadata without waiting.
+// This ownership argument does not depend on KERNEL_ACTIVE_CORES or
+// KERNEL_PREEMPTIBLE; it does not authorize a shared per-thread fd table.
 // Samples allocator metadata while holding only this pool allocation guard.
 fn fd_context_pool_space_stats() -> (usize, usize, usize, usize) !{unsafe} {
     let guard = fd_context_pool_lock(&fd_context_pool);

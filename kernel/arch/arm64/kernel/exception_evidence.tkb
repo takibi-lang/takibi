@@ -65,6 +65,9 @@ struct CrashSnapshot {
     root0_l1: usize;
     root0_asid: usize;
     image_kind: usize;
+    vm_available: usize;
+    far_physical: usize;
+    elr_physical: usize;
     saved_frame_available: usize;
     saved_sp_el0: usize;
     saved_elr_el1: usize;
@@ -73,7 +76,8 @@ struct CrashSnapshot {
     trace_count: usize;
     trace: [usize; KERNEL_CRASH_TRACE_WORDS];
     // Issue #294: current process's own descriptor table -- fd_kind[i]
-    // (0=Empty/1=Terminal/2=OpenFile/3=Directory/4=Listener/5=Connection)
+    // (0=Empty/1=Terminal/2=OpenFile/3=Directory/4=Listener/5=Connection,
+    // 7=Busy/8=Stale)
     // and fd_object[i] (the shared-object slot it holds, meaningless when
     // fd_kind[i] is Empty), so a diagnostic snapshot can identify relevant
     // descriptor/socket ownership, not just process/scheduler/VM state.
@@ -2331,6 +2335,9 @@ private fn kernel_ddb_enter_stopped(
     ddb_snapshot.scheduler_enabled = kernel_process_ddb_scheduler_enabled();
     ddb_snapshot.reschedule_pending = kernel_process_ddb_reschedule_pending();
     ddb_snapshot.frame_sp = frame_sp;
+    if (kernel_process_stopped_metadata_busy(stopped_world)) {
+        ddb_puts("ddb: process metadata unavailable reason=pool-busy\n");
+    }
     let mut current_record = kernel_process_current_stopped_record(stopped_world);
     ddb_snapshot.process_pid = current_record.pid;
     ddb_snapshot.parent_pid = current_record.ppid;
@@ -2743,12 +2750,13 @@ private fn crash_snapshot_render_from(record: *CrashSnapshot,
     // answer "not a page from this allocator" for exactly the case worth
     // reporting. Issue #373 was a process's text page that was also a
     // kernel stack; that reads here as one line.
-    crash_snapshot_put_page_owner("far", record.far_el1, root_slot);
-    crash_snapshot_put_page_owner("elr", record.elr_el1, root_slot);
+    crash_snapshot_put_page_owner("far", record.far_el1, root_slot, record.far_physical, record.vm_available != 0);
+    crash_snapshot_put_page_owner("elr", record.elr_el1, root_slot, record.elr_physical, record.vm_available != 0);
     kernel_boot_log("oops: live sp_el0="); uart_put_hex(record.sp_el0);
     kernel_boot_log(" tpidr_el0="); uart_put_hex(record.tpidr_el0);
     kernel_boot_log(" ttbr0="); uart_put_hex(record.ttbr0_el1);
     kernel_boot_log("\n");
+    if (record.image_kind == 2) { kernel_boot_log("oops: process unavailable reason=shared-state-not-inspected\n"); }
     kernel_boot_log("oops: process pid="); uart_put_udec(record.process_pid);
     kernel_boot_log(" parent="); uart_put_udec(record.parent_pid);
     kernel_boot_log(" state="); uart_put_udec(record.process_state);
@@ -2759,6 +2767,7 @@ private fn crash_snapshot_render_from(record: *CrashSnapshot,
     kernel_boot_log(" l1="); uart_put_hex(record.root_l1);
     kernel_boot_log(" image=");
     if (record.image_kind == 1) { kernel_boot_log("exec\n"); }
+    else if (record.image_kind == 2) { kernel_boot_log("unavailable\n"); }
     else { kernel_boot_log("bootstrap\n"); }
     kernel_boot_log("oops: activity=");
     kernel_boot_log(kernel_activity_name_for_code(record.activity));
@@ -2856,33 +2865,53 @@ private fn crash_console_parse_proc(
     return CrashConsolePidResult::Parsed(pid);
 }
 
-private fn crash_console_dispatch(
+private fn crash_console_dispatch_cached(
         line: borrow [u8; CRASH_CONSOLE_LINE_BYTES..], length: usize)
-        !{unsafe} {
+        -> bool !{unsafe} {
     if (crash_console_command_is(line, length, bs"oops")) {
         crash_snapshot_render_every_core();
-        return;
+        return true;
     }
     if (crash_console_command_is(line, length, bs"trace")) {
         kernel_process_trace_render(
             crash_snapshot_here().trace as []usize, crash_snapshot_here().trace_count,
             "trace" as *u8);
+        return true;
+    }
+    if (crash_console_command_is(line, length, bs"help")) {
+        kernel_boot_log("commands: oops trace ps proc PID\n");
+        return true;
+    }
+    return false;
+}
+
+private fn crash_console_dispatch_stopped(
+        stopped: borrow MachineStopped[&kernel_world_stop],
+        line: borrow [u8; CRASH_CONSOLE_LINE_BYTES..], length: usize) !{unsafe} {
+    if (crash_console_dispatch_cached(line, length)) { return; }
+    if (crash_console_command_is(line, length, bs"ps")) {
+        kernel_process_monitor_ps(stopped);
         return;
     }
+    match crash_console_parse_proc(line, length) {
+        CrashConsolePidResult::Parsed(pid) => { kernel_process_monitor_proc(stopped, pid); return; }
+        CrashConsolePidResult::Invalid => {}
+    }
+    kernel_boot_log("ddb: unknown command; try help\n");
+}
+
+private fn crash_console_dispatch_unavailable(
+        line: borrow [u8; CRASH_CONSOLE_LINE_BYTES..], length: usize) !{unsafe} {
+    if (crash_console_dispatch_cached(line, length)) { return; }
     if (crash_console_command_is(line, length, bs"ps")) {
-        kernel_process_monitor_ps();
+        kernel_boot_log("ps: unavailable reason=machine-not-stopped\n");
         return;
     }
     match crash_console_parse_proc(line, length) {
         CrashConsolePidResult::Parsed(pid) => {
-            kernel_process_monitor_proc(pid);
-            return;
+            kernel_boot_log("proc: unavailable reason=machine-not-stopped\n"); return;
         }
         CrashConsolePidResult::Invalid => {}
-    }
-    if (crash_console_command_is(line, length, bs"help")) {
-        kernel_boot_log("commands: oops trace ps proc PID\n");
-        return;
     }
     kernel_boot_log("ddb: unknown command; try help\n");
 }
@@ -2907,37 +2936,47 @@ private fn crash_console_append(
 // mode, #634) makes the stop Partial. That one is released, not kept: a
 // request left standing would stop a core that takes it later, possibly
 // before that core reports a fault of its own. It is reported, and the
-// console runs anyway: best effort, like every reporter.
-private fn crash_world_stop() !{unsafe} {
-    match world_stop_begin(&kernel_world_stop, kernel_online_core_count(),
-                           DDB_WORLD_STOP_SPINS) {
-        WorldStopResult::Busy => {
+// console retains cached reporting, while shared process commands require
+// the complete stop authority.
+must_use variant CrashStopResult {
+    Unavailable;
+    Stopped(MachineStopped[&kernel_world_stop]);
+}
+
+private fn crash_world_stop() -> CrashStopResult !{unsafe, irq_masking_guard} {
+    match world_stop_machine_begin(DDB_WORLD_STOP_SPINS) {
+        MachineStopResult::Busy => {
             crash_report_claim();
+            // The peer can fault halfway through a bootstrap log fragment.
+            kernel_boot_log("\n");
             kernel_boot_log("oops: world-stop busy; other cores still run\n");
             crash_report_release();
+            return CrashStopResult::Unavailable;
         }
-        WorldStopResult::Partial(partial) => {
-            let mask: usize = world_stop_partial_mask(partial);
-            world_stop_partial_release(partial, &kernel_world_stop);
+        MachineStopResult::Partial(partial) => {
+            let mask: usize = machine_stop_partial_mask(partial);
+            machine_stop_partial_release(partial, &kernel_world_stop);
             crash_report_claim();
-            kernel_boot_log("oops: world-stop partial mask=");
-            uart_put_hex(mask);
+            // The peer can fault halfway through a bootstrap log fragment.
+            kernel_boot_log("\n");
+            kernel_boot_log("oops: world-stop partial mask="); uart_put_hex(mask);
             kernel_boot_log(" released; other cores still run\n");
             crash_report_release();
+            return CrashStopResult::Unavailable;
         }
-        WorldStopResult::Complete(stopped) => {
-            let mask: usize = world_stopped_mask(stopped);
-            world_stop_keep_forever(stopped);
+        MachineStopResult::Complete(stopped) => {
+            let mask: usize = machine_stopped_mask(stopped);
             crash_report_claim();
-            kernel_boot_log("oops: world-stop complete mask=");
-            uart_put_hex(mask);
+            // The peer can fault halfway through a bootstrap log fragment.
             kernel_boot_log("\n");
-            crash_report_release();
+            kernel_boot_log("oops: world-stop complete mask="); uart_put_hex(mask);
+            kernel_boot_log("\n"); crash_report_release();
+            return CrashStopResult::Stopped(stopped);
         }
     }
 }
 
-private fn crash_console_run() !{unsafe} {
+private fn crash_console_prepare() !{unsafe} {
     // The ordinary UART RX handler belongs to the suspended kernel and may
     // wake a process. Keep it out of a terminal exception monitor and poll
     // the device directly instead.
@@ -2965,45 +3004,65 @@ private fn crash_console_run() !{unsafe} {
     crash_report_claim();
     kernel_boot_log("ddb: read-only crash console\n");
     crash_report_release();
-    let mut line: [u8; CRASH_CONSOLE_LINE_BYTES];
+}
+
+private fn crash_console_read(line: borrow [u8; CRASH_CONSOLE_LINE_BYTES..])
+        -> usize !{unsafe} {
     let mut length: usize = 0;
-    while (true) {
-        // GitHub issue #486: the prompt is one of this file's writes and
-        // takes the claim like the rest. The BLOCKING READ below does not --
-        // holding it across uart_debug_getc() is the one thing that would
-        // turn this into the lock a crash reporter must not have, and a core
-        // still trying to report would wait for a person to type.
-        //
-        // The first version left the prompt unclaimed. A core that had just
-        // lost the console wrote its parking line into the middle of the
-        // word `ddb> `, and the lane's driver -- which counts prompts --
-        // stopped counting. Two cores' output racing is not only ugly; it
-        // silently disables whatever is reading it.
-        crash_report_claim();
-        kernel_boot_log("ddb> ");
-        crash_report_release();
-        let mut reading: bool = true;
-        while (reading) {
-            let byte: u8 = uart_debug_getc();
-            if (byte == 0x0A || byte == 0x0D) {
-                crash_report_claim();
-                kernel_boot_log("\n");
-                crash_report_release();
-                reading = false;
+    // GitHub issue #486: the prompt is one of this file's writes and
+    // takes the claim like the rest. The BLOCKING READ below does not --
+    // holding it across uart_debug_getc() is the one thing that would
+    // turn this into the lock a crash reporter must not have, and a core
+    // still trying to report would wait for a person to type.
+    //
+    // The first version left the prompt unclaimed. A core that had just
+    // lost the console wrote its parking line into the middle of the
+    // word `ddb> `, and the lane's driver -- which counts prompts --
+    // stopped counting. Two cores' output racing is not only ugly; it
+    // silently disables whatever is reading it.
+    crash_report_claim();
+    kernel_boot_log("ddb> ");
+    crash_report_release();
+    let mut reading: bool = true;
+    while (reading) {
+        let byte: u8 = uart_debug_getc();
+        if (byte == 0x0A || byte == 0x0D) {
+            crash_report_claim();
+            kernel_boot_log("\n");
+            crash_report_release();
+            reading = false;
+        } else {
+            if (byte == 0x08 || byte == 0x7F) {
+                // Editing is deliberately absent from the first crash
+                // console; ignore erase rather than complicating its
+                // bounded input state.
             } else {
-                if (byte == 0x08 || byte == 0x7F) {
-                    // Editing is deliberately absent from the first crash
-                    // console; ignore erase rather than complicating its
-                    // bounded input state.
-                } else {
-                    length = crash_console_append(line as []u8, length, byte);
-                }
+                length = crash_console_append(line as []u8, length, byte);
             }
         }
+    }
+    return length;
+}
+
+private fn crash_console_run_stopped(stopped: borrow MachineStopped[&kernel_world_stop]) !{unsafe} {
+    crash_console_prepare();
+    let mut line: [u8; CRASH_CONSOLE_LINE_BYTES];
+    while (true) {
+        let length: usize = crash_console_read(line as []u8);
         crash_report_claim();
-        crash_console_dispatch(line as []u8, length);
+        crash_console_dispatch_stopped(stopped, line as []u8, length);
         crash_report_release();
-        length = 0;
+    }
+}
+
+private fn crash_console_run() !{unsafe} {
+    crash_console_prepare();
+    let mut line: [u8; CRASH_CONSOLE_LINE_BYTES];
+    while (true) {
+        let length: usize = crash_console_read(line as []u8);
+        crash_report_claim();
+        crash_console_dispatch_unavailable(line as []u8, length);
+        crash_report_release();
     }
 }
 
@@ -3016,7 +3075,8 @@ private fn crash_console_run() !{unsafe} {
 // translated through the FAULTING process's page table, and when this reader
 // is walking every core that is not the reading core's own.
 private fn crash_snapshot_put_page_owner(what: *u8, address: usize,
-                                         root_slot: usize) {
+                                         root_slot: usize, physical: usize,
+                                         inspected: bool) {
     kernel_boot_log("oops: ");
     kernel_boot_log(what);
     kernel_boot_log(" page ");
@@ -3026,8 +3086,10 @@ private fn crash_snapshot_put_page_owner(what: *u8, address: usize,
         kernel_boot_log("\n");
         return;
     }
-    let physical: usize =
-        address_space_user_physical(scheduled_process_address_space_root_peek(root_slot), address);
+    if (inspected == false) {
+        kernel_boot_log("translation unavailable; shared state was not inspected\n");
+        return;
+    }
     if (physical == 0) {
         kernel_boot_log("is ");
         kernel_boot_log(page_owner_description_reporter(address));
@@ -3043,6 +3105,113 @@ private fn crash_snapshot_put_page_owner(what: *u8, address: usize,
     kernel_boot_log(") is ");
     kernel_boot_log(page_owner_description_reporter(physical));
     kernel_boot_log("\n");
+}
+
+private fn crash_snapshot_shared_unavailable() {
+    crash_snapshot_here().process_pid = 0;
+    crash_snapshot_here().parent_pid = 0;
+    crash_snapshot_here().process_state = 0;
+    crash_snapshot_here().wait_reason = 0;
+    crash_snapshot_here().wait4_status_ptr = 0;
+    crash_snapshot_here().root_l1 = 0;
+    crash_snapshot_here().root_asid = 0;
+    crash_snapshot_here().root0_l1 = 0;
+    crash_snapshot_here().root0_asid = 0;
+    crash_snapshot_here().image_kind = 2;
+    crash_snapshot_here().vm_available = 0;
+    crash_snapshot_here().far_physical = 0;
+    crash_snapshot_here().elr_physical = 0;
+    for fd: usize in 0..<CRASH_FD_SNAPSHOT_SLOTS {
+        crash_snapshot_here().fd_kind[fd] = 7;
+        crash_snapshot_here().fd_object[fd] = 0;
+    }
+}
+
+// Capture translation while stop authority is borrowed, then retain only
+// a physical address. Later rendering never reopens a process or VM pool.
+private fn crash_snapshot_translate_stopped(
+        stopped: borrow MachineStopped[&kernel_world_stop], l2: usize,
+        virtual: usize) -> usize {
+    if (virtual < USER_TEXT_VA) { return 0; }
+    let index: usize = (virtual - USER_TEXT_VA) / PAGE_SIZE;
+    if (index >= USER_SPACE_PAGE_COUNT ||
+            page_ddb_kernel_address_readable(stopped, l2, PAGE_SIZE) == false) { return 0; }
+    let l3: usize = mmu_user_l3_physical(l2, index / USER_L3_PAGE_COUNT);
+    if (l3 == 0 || page_ddb_kernel_address_readable(stopped, l3, PAGE_SIZE) == false) { return 0; }
+    return mmu_pte_read(l3, index % USER_L3_PAGE_COUNT) & USER_PAGE_PHYS_MASK;
+}
+
+private fn crash_snapshot_shared_stopped(
+        stopped: borrow MachineStopped[&kernel_world_stop]) !{unsafe} {
+    if (kernel_process_stopped_metadata_busy(stopped)) { return; }
+    let mut current: ProcessDdbRecord = kernel_process_current_stopped_record(stopped);
+    let (wait4, image) = kernel_process_current_stopped_crash_detail(stopped);
+    crash_snapshot_here().process_pid = current.pid;
+    crash_snapshot_here().parent_pid = current.ppid;
+    crash_snapshot_here().process_state = current.state;
+    crash_snapshot_here().wait_reason = current.wait_reason;
+    crash_snapshot_here().wait4_status_ptr = wait4;
+    crash_snapshot_here().image_kind = image;
+    match address_space_diagnostic_snapshot(stopped,
+            scheduled_process_address_space_root_stopped(stopped, crash_snapshot_here().root_slot)) {
+        AddressSpaceDiagnosticResult::Busy => {
+            kernel_boot_log("oops: vm unavailable reason=pool-busy\n");
+        }
+        AddressSpaceDiagnosticResult::Stale => {
+            kernel_boot_log("oops: vm unavailable reason=stale-backing\n");
+        }
+        AddressSpaceDiagnosticResult::Ready(vm) => {
+            if (vm.live) { crash_snapshot_here().vm_available = 1; }
+            crash_snapshot_here().root_l1 = vm.l1_physical;
+            crash_snapshot_here().root_asid = vm.asid;
+            crash_snapshot_here().far_physical = crash_snapshot_translate_stopped(stopped, vm.l2_physical, crash_snapshot_here().far_el1);
+            crash_snapshot_here().elr_physical = crash_snapshot_translate_stopped(stopped, vm.l2_physical, crash_snapshot_here().elr_el1);
+        }
+    }
+    match address_space_diagnostic_snapshot(stopped, address_space_boot_root()) {
+        AddressSpaceDiagnosticResult::Busy => {}
+        AddressSpaceDiagnosticResult::Stale => {}
+        AddressSpaceDiagnosticResult::Ready(vm) => {
+            crash_snapshot_here().root0_l1 = vm.l1_physical;
+            crash_snapshot_here().root0_asid = vm.asid;
+        }
+    }
+    for fd: usize in 0..<CRASH_FD_SNAPSHOT_SLOTS {
+        match kernel_fd_table_stopped_entry(stopped, crash_snapshot_here().root_slot, fd) {
+            FdDiagnosticResult::Busy => { crash_snapshot_here().fd_kind[fd] = 7; }
+            FdDiagnosticResult::Stale => { crash_snapshot_here().fd_kind[fd] = 8; }
+            FdDiagnosticResult::Ready(entry) => {
+                crash_snapshot_here().fd_kind[fd] = diagnostic_fd_kind_code(entry.kind);
+                crash_snapshot_here().fd_object[fd] = entry.object;
+            }
+        }
+    }
+}
+
+private fn crash_snapshot_publish() !{unsafe} {
+    // Write back the exact structured record before UART output or a debugger
+    // observes it.  This is cache maintenance only, never a DMA submission.
+    dma_prepare_tx(crash_snapshot_here() as *usize, sizeof(CrashSnapshot));
+    // Published last, with release, so the payload above is visible to anyone
+    // who acquires this word. The cache maintenance is for the debugger on the
+    // other side of the wire; this store is for the other core.
+    unsafe { atomic_store_release(crash_snapshot_valid_address(cpu_id()), 1); }
+    // Published BEFORE the claim, so a core that never wins the render still
+    // has its record readable by the console, by DDB and by a debugger.
+    crash_report_claim();
+    crash_snapshot_render();
+    crash_report_release();
+}
+
+private fn crash_console_claim() -> bool !{unsafe} {
+    return unsafe { atomic_swap_acquire(crash_console_owner_address(), CRASH_CONSOLE_CLAIMED) } == CRASH_CONSOLE_FREE;
+}
+
+private fn crash_snapshot_park() {
+    crash_report_claim();
+    kernel_boot_log("oops: console owned by another core; parking\n");
+    crash_report_release();
+    while (true) { interrupt_wait(); }
 }
 
 fn crash_snapshot_capture(slot: usize, frame_sp: usize) !{unsafe} {
@@ -3069,26 +3238,8 @@ fn crash_snapshot_capture(slot: usize, frame_sp: usize) !{unsafe} {
     crash_snapshot_here().sp_el0 = crash_snapshot_read_sp_el0();
     crash_snapshot_here().tpidr_el0 = crash_snapshot_read_tpidr_el0();
     crash_snapshot_here().ttbr0_el1 = crash_snapshot_read_ttbr0_el1();
-    crash_snapshot_here().process_pid = kernel_process_current_pid();
-    crash_snapshot_here().parent_pid = kernel_process_crash_parent_pid();
-    crash_snapshot_here().process_state = kernel_process_crash_state();
-    crash_snapshot_here().wait_reason = kernel_process_crash_wait_reason();
-    crash_snapshot_here().wait4_status_ptr = kernel_process_crash_wait4_status_ptr();
     crash_snapshot_here().root_slot = kernel_process_current_slot();
     crash_snapshot_here().activity = kernel_activity_code_here();
-    crash_snapshot_here().root_l1 = address_space_l1_physical(scheduled_process_address_space_root_peek(crash_snapshot_here().root_slot));
-    crash_snapshot_here().root_asid = address_space_asid(scheduled_process_address_space_root_peek(crash_snapshot_here().root_slot));
-    // Slot 0 through the same two accessors the line above uses, so the pair
-    // is captured the same way and at the same moment (GitHub issue #468).
-    crash_snapshot_here().root0_l1 = address_space_l1_physical(address_space_boot_root());
-    crash_snapshot_here().root0_asid = address_space_asid(address_space_boot_root());
-    crash_snapshot_here().image_kind = kernel_process_crash_image_kind();
-    for fd: usize in 0..<CRASH_FD_SNAPSHOT_SLOTS {
-        crash_snapshot_here().fd_kind[fd] =
-            kernel_fd_table_crash_kind(crash_snapshot_here().root_slot, fd);
-        crash_snapshot_here().fd_object[fd] =
-            kernel_fd_table_crash_object(crash_snapshot_here().root_slot, fd);
-    }
     crash_snapshot_here().saved_frame_available = 0;
     if (frame_sp != 0) {
         crash_snapshot_copy_saved_frame(
@@ -3098,38 +3249,22 @@ fn crash_snapshot_capture(slot: usize, frame_sp: usize) !{unsafe} {
     }
     crash_snapshot_here().trace_count = kernel_process_crash_trace_copy(
         crash_snapshot_here().trace as *usize);
-    // Write back the exact structured record before UART output or a debugger
-    // observes it.  This is cache maintenance only, never a DMA submission.
-    dma_prepare_tx(crash_snapshot_here() as *usize, sizeof(CrashSnapshot));
-    // Published last, with release, so the payload above is visible to anyone
-    // who acquires this word. The cache maintenance is for the debugger on the
-    // other side of the wire; this store is for the other core.
-    unsafe { atomic_store_release(crash_snapshot_valid_address(cpu_id()), 1); }
-    // Published BEFORE the claim, so a core that never wins the render still
-    // has its record readable by the console, by DDB and by a debugger.
-    crash_report_claim();
-    crash_snapshot_render();
-    crash_report_release();
-    // GitHub issue #486: exactly one core runs the console.
-    //
-    // Every core that faults reports -- the lines above are already on the
-    // wire, and its record is published for any reader -- but two cores
-    // reading `uart_debug_getc()` would steal each other's bytes, so the
-    // second one to arrive parks instead. That is not a lock: the claim is
-    // one atomic swap that never waits, and a core that loses it is a core
-    // that has already said everything it knows.
-    if (unsafe { atomic_swap_acquire(crash_console_owner_address(),
-                                     CRASH_CONSOLE_CLAIMED) }
-            == CRASH_CONSOLE_FREE) {
-        crash_world_stop();
-        crash_console_run();
+    crash_snapshot_shared_unavailable();
+    match crash_world_stop() {
+        CrashStopResult::Unavailable => {
+            crash_snapshot_publish();
+            if (crash_console_claim()) { crash_console_run(); }
+        }
+        CrashStopResult::Stopped(stopped) => {
+            crash_snapshot_shared_stopped(stopped);
+            crash_snapshot_publish();
+            if (crash_console_claim()) { crash_console_run_stopped(stopped); }
+            // The console borrows the owner for its whole terminal loop.
+            // If it ever returns, end the authority without resuming peers.
+            machine_stop_keep_forever(stopped);
+        }
     }
-    // Under the claim like every other line this path writes: it was the
-    // last thing left interleaving after the reports stopped.
-    crash_report_claim();
-    kernel_boot_log("oops: console owned by another core; parking\n");
-    crash_report_release();
-    while (true) { interrupt_wait(); }
+    crash_snapshot_park();
 }
 
 // Vector-table targets have no universally valid saved ExceptionFrame.

@@ -28,9 +28,8 @@ them is zero:
 Pick the count that is zero when the check did no work. That is usually the
 size of the set it scanned, not the number of findings: a check that
 legitimately finds nothing still examined something, and it is the examining
-that has to be proved. `scripts/check_dead_slot_peek_not_retained.py` and
-`scripts/buildcheck_kernel_asm_invariants.py` wrote that guard by hand before this
-helper existed, and remain the worked examples.
+that has to be proved. `scripts/buildcheck_kernel_asm_invariants.py` wrote that guard by hand before
+this helper existed and remains a worked example.
 
 A nonzero count is not a claim that the set was COMPLETE. The depfile blind
 spot printed "7 generated depfiles" while missing an eighth in a directory

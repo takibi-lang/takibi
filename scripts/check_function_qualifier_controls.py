@@ -21,7 +21,6 @@ MATCHERS = {
     'check_platform_file_parity': 'FN_RE',
     'check_stack_proof_states': 'FUNCTION_RE',
     'check_ext2_mutation_guard': 'FUNCTION_RE',
-    'check_dead_slot_peek_not_retained': 'DEFINITION_RE',
     'check_slot_proof_dropped_to_index': 'FUNCTION_RE',
 }
 
@@ -43,8 +42,7 @@ def main():
             os.chdir(directory)
             source = Path('kernel/kernel/process.tkb')
             source.parent.mkdir(parents=True)
-            baseline = ('fn scheduled_process_record_peek() {\n'
-                        '    intrusive_pool_payload_unproven_of(live);\n}\n')
+            baseline = 'fn scalar_snapshot() {}\n'
             for qualifier in ['', 'inline ', 'noinline ', 'private inline ', 'private noinline ']:
                 source.write_text(baseline +
                     f'{qualifier}fn unreviewed() {{ intrusive_pool_ref_unproven(live); }}\n',

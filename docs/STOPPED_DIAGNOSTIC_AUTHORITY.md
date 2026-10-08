@@ -54,26 +54,30 @@ Busy restores immediately. Terminal keep-forever retains the physical mask.
 A derived pool view also carries IRQ-mask exclusion until it is dropped.
 The save/restore implementation and physical IRQ behavior remain trusted.
 
-DDB VM and first-block FD inspection now use a generation-checked
-`RegionInspection` under the borrowed machine authority. The three private
+DDB VM, process-image and first-block FD inspection now use a generation-checked
+`RegionInspection` under the borrowed machine authority. The four private
 mints retain IRQ exclusion. A held pool metadata lock returns Busy before
 traversal, because quiescence does not establish consistency of an interrupted
 update. Stale and Busy are explicit diagnostic outcomes, not empty live
-records. Resume and CPU-start context changes invalidate all three permission
+records. Resume and CPU-start context changes invalidate all four permission
 types. Local take, retire, free and chunk shrink also invalidate the matching
 inspection type through compiler-inferred summaries. No runtime pin or lock
 is taken by these DDB backing reads; bootstrap VM backing remains static.
 
-The source gate fixes the three unproven mint callers and checks their
+The source gate fixes the four unproven mint callers and checks their
 borrowed stop/IRQ contracts and complete physical invalidation markers.
 A native test validates real metadata behavior. The shared kernel fixture
-holds each real VM/FD guard on the initiating CPU while a full machine stop
+holds each real VM/image/FD guard on the initiating CPU while a full machine stop
 queries its actual diagnostic mint; each must return Busy without waiting.
 Compiler tests cover distinct pools/controllers, resume, local take/retire,
 post-consumption loans, and no_copy payloads. Model evidence does not establish
-physical holding or fault timing. The fatal console and normal diagnostic
-peek still retain weaker paths; their migration and raw-authority confinement
-remain unfinished.
+physical holding or fault timing. Fatal capture now copies shared fields only with complete machine authority.
+The terminal console borrows that retained authority for ps/proc; a refused
+stop admits cached commands and reports live commands unavailable. Rendering
+uses captured translation values, never a fresh VM lookup. Ordinary scalar
+diagnostics retain the pool view through copying and return no pointer. The
+legacy unproven payload accessors are removed; raw-authority file confinement
+remains separate work.
 
 ## Space review, 2026-10-07
 
@@ -210,3 +214,38 @@ reverting only sequence-base normalization emits `stopped root publication:
 failed`. The fixed UART DDB lane reports two matched roots with no attribution
 mismatches, walks the stopped peer, agrees with GDB and resumes. Publication
 still requires a separate clean exact-HEAD allcheck with actual RPi5 execution.
+
+## Terminal capture and scalar-copy review, 2026-10-08
+
+Workload: standard production QEMU/RPi5 linked images, the existing BRK,
+exec, peer-fault and concurrent-fault console workloads, the resumable DDB
+UART/software BREAK workloads, and the shared four-pool Busy-refusal probe.
+Baseline is published 3b02676c. The allocation workload and per-process payload
+are unchanged; the existing process-authority endpoint remains evidence only
+for pool metadata, occupied capacity, allocation and retained pages.
+
+| Boundary (bytes) | QEMU baseline | QEMU candidate | RPi5 baseline | RPi5 candidate |
+| --- | ---: | ---: | ---: | ---: |
+| llvm-size text | 700076 | 705468 | 709076 | 715540 |
+| data | 5022 | 5022 | 2888728 | 2888728 |
+| BSS | 1667888 | 1668000 | 1705120 | 1705120 |
+| reserved image span | 2392064 | 2392064 | 5308416 | 5341184 |
+
+Candidate ELF SHA-256:
+
+- QEMU: d2d5549eca5150390b9ca04f09acf47253bd52accce151e319f39266da7a5e45
+- RPi5: 0cddab0aa004c5b44b996fe8e4fd51e292ecc491e02967bffb926e8e89a36055
+
+Read-only allocation grows 5392 bytes on QEMU and 6464 bytes on RPi5. Three
+new scalar fields in each per-core crash cache retain availability and two
+physical translations; QEMU BSS grows 112 bytes including alignment, while
+RPi5's existing section padding absorbs it. Code growth crosses RPi5's next
+32 KiB image boundary, reducing its allocatable RAM by eight pages. Its
+reserved span remains below the checked 0x520000 image ceiling.
+
+Adopt the explicit refusals and stopped-only capture: no per-process field,
+new pin, or diagnostic blocking lock is added. Ordinary scalar readers extend
+the existing pool view through the copy. Complete-stop holding, allocator
+metadata interpretation and the named physical translation mints remain
+trusted. No cheaper representation change is supported by these measurements;
+file confinement and its final source union are the next measurement trigger.

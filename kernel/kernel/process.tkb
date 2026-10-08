@@ -1318,6 +1318,21 @@ fn kernel_process_current_stopped_record(
         scheduled_process_record_stopped(stopped, slot));
 }
 
+// Extra fatal fields are copied without enlarging every DDB process row.
+fn kernel_process_current_stopped_crash_detail(
+        stopped: borrow MachineStopped[&kernel_world_stop]) -> (usize, usize) {
+    if (execution_here().current_live == false) { return (0, 0); }
+    let record = scheduled_process_record_stopped(stopped, kernel_process_current_slot());
+    let mut image: usize = 0;
+    if (record.exec_image_live) { image = 1; }
+    return (record.wait4_status_ptr, image);
+}
+
+fn kernel_process_stopped_metadata_busy(
+        stopped: borrow MachineStopped[&kernel_world_stop]) -> bool !{unsafe} {
+    return scheduled_process_pool_ready && intrusive_pool_inspection_busy(&scheduled_process_pool);
+}
+
 fn scheduled_process_fd_context_handle_stopped(
         stopped: borrow MachineStopped[&kernel_world_stop], slot: usize)
         -> ProcessPoolHandleWords !{unsafe} {
@@ -1461,6 +1476,7 @@ private fn scheduled_process_record_stopped(
     if (slot == 0) { return &scheduled_process_boot_record; }
     if (scheduled_process_pool_ready == false) { return &scheduled_process_record_absent; }
     match machine_pool_probe(&scheduled_process_pool, stopped, slot) {
+        MachineSlotProbe::Busy => { return &scheduled_process_record_absent; }
         MachineSlotProbe::Missing => { return &scheduled_process_record_absent; }
         MachineSlotProbe::Live(scoped) => {
             let record = scheduled_process_stopped_transfer(scoped, stopped);
@@ -1497,6 +1513,9 @@ fn kernel_process_ddb_copy(
         stopped: borrow MachineStopped[&kernel_world_stop],
         output: borrow [ProcessDdbRecord; DDB_PROCESS_RECORDS..])
         -> ProcessDdbCopyResult !{unsafe} {
+    if (scheduled_process_pool_ready && intrusive_pool_inspection_busy(&scheduled_process_pool)) {
+        let mut refused: ProcessDdbCopyResult = { 0, true }; return refused;
+    }
     let mut count: usize = 0;
     if (scheduled_process_boot_live) {
         scheduled_process_ddb_copy_one(
@@ -1512,6 +1531,7 @@ fn kernel_process_ddb_copy(
             count < DDB_PROCESS_RECORDS) {
         let next: usize = intrusive_pool_next_slot(&scheduled_process_pool, slot);
         match machine_pool_probe(&scheduled_process_pool, stopped, slot) {
+        MachineSlotProbe::Busy => { let mut refused: ProcessDdbCopyResult = { count, true }; return refused; }
             MachineSlotProbe::Missing => {}
             MachineSlotProbe::Live(slot_view) => {
                 // The view is held across the read and released after,
@@ -1801,38 +1821,47 @@ private fn scheduled_process_record_reset_syscall_state(
 // conversion written inline at some twenty sites, each of which silently
 // assumed a slot is a small integer.
 //
-// A reaped slot keeps its pid until the slot is handed out again, which
-// is what `pid - 1` also did and what the exec-reap path depends on: it
-// asks about a child that has already exited but whose image has not yet
-// been reclaimed.
-// A pid lookup is a DIAGNOSTIC, and the crash/trace paths ask about a peer
-// that may already have been reaped -- so it reads through a peek that
-// tolerates a dead slot instead of the counted accessor, whose whole point
-// is to notice code that assumed a record outlives its process.
-private fn scheduled_process_record_peek(slot: usize) -> *ProcessRecord
-        !{unsafe} {
-    if (slot == 0) { return &scheduled_process_boot_record; }
+// Ordinary scalar diagnostics retain the existing pool guard through the
+// copy. They return values only; a stopped reporter uses its machine authority
+// instead and never reaches this blocking lookup.
+struct ProcessRecordScalarSnapshot {
+    pid: usize;
+    state: ProcessSlotState;
+    wait_reason: ProcessWaitReason;
+    saved_sp: usize;
+    stack_run: usize;
+}
+
+private inline fn scheduled_process_scalar_copy(record: borrow *ProcessRecord)
+        -> ProcessRecordScalarSnapshot {
+    let mut snapshot: ProcessRecordScalarSnapshot = {
+        record.pid, record.state, process_wait_reason(&record.wait),
+        record.saved_sp, record.stack_run
+    };
+    return snapshot;
+}
+
+private fn scheduled_process_scalar_snapshot(slot: usize)
+        -> ProcessRecordScalarSnapshot !{unsafe} {
+    if (slot == 0) { return scheduled_process_scalar_copy(&scheduled_process_boot_record); }
     if (scheduled_process_pool_ready == false) {
-        return &scheduled_process_record_absent;
+        return scheduled_process_scalar_copy(&scheduled_process_record_absent);
     }
     match intrusive_pool_probe_slot(&scheduled_process_pool, slot) {
         IntrusiveSlotProbe::NoPayload => {
-            return &scheduled_process_record_absent;
+            return scheduled_process_scalar_copy(&scheduled_process_record_absent);
         }
         IntrusiveSlotProbe::Live(slot_view) => {
-            // Unproven DELIBERATELY here, unlike the counted accessor
-            // above: this whole function exists to tolerate a dead slot,
-            // for crash and trace paths asking about an already-reaped
-            // peer. Its callers must not hold the pointer, and the header
-            // above says so. GitHub issue #488.
-            return intrusive_pool_payload_unproven_of(
-                &scheduled_process_pool, slot_view);
+            let mut snapshot: ProcessRecordScalarSnapshot = scheduled_process_scalar_copy(
+                intrusive_pool_payload_of(&scheduled_process_pool, slot_view));
+            intrusive_view_drop(slot_view);
+            return snapshot;
         }
     }
 }
 
 fn scheduled_process_pid_of_slot(slot: usize) -> usize !{unsafe} {
-    return scheduled_process_record_peek(slot).pid;
+    return scheduled_process_scalar_snapshot(slot).pid;
 }
 
 // The same tolerance for the other three fields a trace or a crash report
@@ -1841,16 +1870,16 @@ fn scheduled_process_pid_of_slot(slot: usize) -> usize !{unsafe} {
 // count -- these do not, because "the subject was reaped" is a normal
 // answer to a diagnostic and an abnormal one to the scheduler.
 fn scheduled_process_peek_state(slot: usize) -> ProcessSlotState !{unsafe} {
-    return scheduled_process_record_peek(slot).state;
+    return scheduled_process_scalar_snapshot(slot).state;
 }
 
 fn scheduled_process_peek_wait_reason(slot: usize) -> ProcessWaitReason
         !{unsafe} {
-    return process_wait_reason(&scheduled_process_record_peek(slot).wait);
+    return scheduled_process_scalar_snapshot(slot).wait_reason;
 }
 
 fn scheduled_process_peek_saved_sp(slot: usize) -> usize !{unsafe} {
-    return scheduled_process_record_peek(slot).saved_sp;
+    return scheduled_process_scalar_snapshot(slot).saved_sp;
 }
 
 fn scheduled_process_pid_of_handle(handle: ProcessHandle) -> usize
@@ -1887,80 +1916,94 @@ fn scheduled_process_slot_for_pid_locked(guard: borrow ProcessRunGuard[lock],
     return ProcessSlotForPidResult::Missing;
 }
 
-// The same walk for a report that must not take a lock (the monitor, with
-// every other CPU stopped) or already reads with the peek (the diagnostic
-// fill): its answer is a report's, not an authority to act on.
-fn scheduled_process_slot_for_pid_peek(pid: usize) -> ProcessSlotForPidResult
-        !{unsafe} {
+// A stopped reporter walks without taking any metadata lock.
+private fn scheduled_process_slot_for_pid_stopped(
+        stopped: borrow MachineStopped[&kernel_world_stop], pid: usize)
+        -> ProcessSlotForPidResult !{unsafe} {
     if (pid == 0) { return ProcessSlotForPidResult::Missing; }
-    let mut cursor = scheduled_process_first_slot();
-    let mut walking: bool = true;
-    while (walking) {
-        match cursor {
-            ProcessSlotCursor::Done => { walking = false; }
-            ProcessSlotCursor::At(slot) => {
-                if (scheduled_process_record_peek(slot).pid == pid) {
-                    return ProcessSlotForPidResult::Found(slot);
-                }
-                cursor = scheduled_process_next_slot(slot);
-            }
+    if (scheduled_process_boot_live && scheduled_process_boot_record.pid == pid) {
+        return ProcessSlotForPidResult::Found(0);
+    }
+    if (scheduled_process_pool_ready == false ||
+            intrusive_pool_inspection_busy(&scheduled_process_pool)) {
+        return ProcessSlotForPidResult::Missing;
+    }
+    let mut slot: usize = intrusive_pool_first_slot(&scheduled_process_pool);
+    while (slot != 0) {
+        if (scheduled_process_record_stopped(stopped, slot).pid == pid) {
+            return ProcessSlotForPidResult::Found(slot);
         }
+        slot = intrusive_pool_next_slot(&scheduled_process_pool, slot);
     }
     return ProcessSlotForPidResult::Missing;
 }
 
-// Allocation-free, kernel-owned procfs input. The caller receives a value
-// copy, never a ProcessRecord pointer or a userspace argv pointer.
-//
-// GitHub issue #618: under the process-run lock, from the pid lookup to the
-// last byte copied. procfs reads run on any CPU, a peer can reap the record
-// (#609) or exec can rewrite its command line in between, and #482's fix --
-// the reap's removal under this lock -- protects only a reader that holds
-// it. RecordLifetime.tla's READER_HOLDS_LOCK and EXEC_WRITES_UNDER_LOCK
-// variants are what goes wrong without it.
+// Allocation-free procfs copying retains the run guard from lookup through
+// the final command byte. The returned snapshot contains values only.
 fn scheduled_process_diagnostic_snapshot(pid: usize)
         -> ProcessDiagnosticResult !{unsafe} {
     let mut snapshot: ProcessDiagnosticSnapshot;
     let guard = process_run_lock();
-    let found: bool = scheduled_process_diagnostic_fill(pid, &snapshot);
+    let found: bool = match scheduled_process_slot_for_pid_locked(guard, pid) {
+        ProcessSlotForPidResult::Missing => { false }
+        ProcessSlotForPidResult::Found(slot) => {
+            let record = scheduled_process_record_locked(guard, slot);
+            let mut parent_pid: usize = 0;
+            if (record.has_parent) {
+                parent_pid = scheduled_process_record_of_locked(guard, record.parent).pid;
+            }
+            let mut words: ProcessPoolHandleWords = process_image_record_words(record);
+            let pages: usize = process_image_active_page_count_words(words);
+            scheduled_process_diagnostic_record_fill(record, parent_pid, pages, &snapshot);
+            true
+        }
+    };
     process_run_unlock(guard);
     if (found == false) { return ProcessDiagnosticResult::Missing; }
     return ProcessDiagnosticResult::Found(snapshot);
 }
 
-// The same copy with no lock, for the monitor's `ps` and `proc`: a reporter
-// must not take a lock (kernel/CONCURRENCY.md), and they run with every
-// other CPU stopped.
-private fn scheduled_process_diagnostic_copy(pid: usize)
-        -> ProcessDiagnosticResult !{unsafe} {
-    let mut snapshot: ProcessDiagnosticSnapshot;
-    if (scheduled_process_diagnostic_fill(pid, &snapshot) == false) {
-        return ProcessDiagnosticResult::Missing;
-    }
-    return ProcessDiagnosticResult::Found(snapshot);
+must_use variant ProcessStoppedDiagnosticResult {
+    Missing;
+    Busy;
+    Stale;
+    Found(ProcessDiagnosticSnapshot);
 }
 
-// The copy both share. It fills the caller's snapshot rather than returning
-// one: a second 600-byte value in flight on the way out of a wrapper
-// overflowed a debug build's 16 KiB kernel stack under BusyBox ps.
-private fn scheduled_process_diagnostic_fill(
-        pid: usize, snapshot: borrow *ProcessDiagnosticSnapshot) -> bool
-        !{unsafe} {
-    let slot: usize = match scheduled_process_slot_for_pid_peek(pid) {
-        ProcessSlotForPidResult::Missing => { return false; }
+// The monitor must not pin, take a pool lock, or wait on suspended metadata.
+private fn scheduled_process_diagnostic_copy(
+        stopped: borrow MachineStopped[&kernel_world_stop], pid: usize)
+        -> ProcessStoppedDiagnosticResult !{unsafe} {
+    if (scheduled_process_pool_ready && intrusive_pool_inspection_busy(&scheduled_process_pool)) {
+        return ProcessStoppedDiagnosticResult::Busy;
+    }
+    let slot: usize = match scheduled_process_slot_for_pid_stopped(stopped, pid) {
+        ProcessSlotForPidResult::Missing => { return ProcessStoppedDiagnosticResult::Missing; }
         ProcessSlotForPidResult::Found(found) => { found }
     };
-    // GitHub issue #693 step 6: a diagnostic read. procfs holds the run
-    // lock across the whole fill; the monitor runs with every other CPU
-    // stopped. Neither is the counted accessor's question.
-    snapshot.pid = scheduled_process_record_peek(slot).pid;
-    snapshot.session_id = scheduled_process_record_peek(slot).session_id;
-    snapshot.ppid = 0;
-    if (scheduled_process_record_peek(slot).has_parent) {
-        snapshot.ppid = scheduled_process_pid_of_handle(
-            scheduled_process_record_peek(slot).parent);
-    }
-    match scheduled_process_record_peek(slot).state {
+    let record = scheduled_process_record_stopped(stopped, slot);
+    let mut words: ProcessPoolHandleWords = process_image_record_words(record);
+    let pages: usize = match process_image_active_page_count_stopped(stopped, words) {
+        ProcessImageDiagnosticCount::Busy => { return ProcessStoppedDiagnosticResult::Busy; }
+        ProcessImageDiagnosticCount::Stale => { return ProcessStoppedDiagnosticResult::Stale; }
+        ProcessImageDiagnosticCount::Ready(count) => { count }
+    };
+    let mut parent_pid: usize = 0;
+    if (record.has_parent) { parent_pid = scheduled_process_parent_pid_stopped(stopped, record.parent); }
+    let mut snapshot: ProcessDiagnosticSnapshot;
+    scheduled_process_diagnostic_record_fill(record, parent_pid, pages, &snapshot);
+    return ProcessStoppedDiagnosticResult::Found(snapshot);
+}
+
+// Fill caller-owned storage: returning another 600-byte snapshot overflowed
+// a debug build's 16 KiB kernel stack. The caller retains its own authority.
+private fn scheduled_process_diagnostic_record_fill(
+        record: borrow *ProcessRecord, parent_pid: usize, resident_pages: usize,
+        snapshot: borrow *ProcessDiagnosticSnapshot) {
+    snapshot.pid = record.pid;
+    snapshot.session_id = record.session_id;
+    snapshot.ppid = parent_pid;
+    match record.state {
         ProcessSlotState::Free => { snapshot.state = 0x3F; }
         ProcessSlotState::Ready => { snapshot.state = 0x52; }
         ProcessSlotState::Running => { snapshot.state = 0x52; }
@@ -1968,25 +2011,22 @@ private fn scheduled_process_diagnostic_fill(
         ProcessSlotState::Exited => { snapshot.state = 0x5A; }
         ProcessSlotState::Constructing => { snapshot.state = 0x49; }
     }
-    let mut image_words: ProcessPoolHandleWords = {
-        scheduled_process_record_peek(slot).image_record,
-        scheduled_process_record_peek(slot).image_record_generation };
-    snapshot.resident_pages = process_image_active_page_count_words(image_words);
+    snapshot.resident_pages = resident_pages;
     snapshot.start_time_ticks =
-        scheduled_process_record_peek(slot).start_time_ticks;
+        record.start_time_ticks;
     snapshot.command_line_length =
-        scheduled_process_record_peek(slot).command_line_length &
+        record.command_line_length &
         PROCESS_COMMAND_LENGTH_MASK;
     for index: usize in 0..<512 {
         snapshot.command_line[index] =
-            scheduled_process_record_peek(slot).command_line[index];
+            record.command_line[index];
     }
-    return true;
-}
+ }
 
 // PID-ordered enumeration gives procfs deterministic directory output even
 // though the process pool is address-ordered internally.
 fn scheduled_process_diagnostic_next_pid(after: usize) -> usize !{unsafe} {
+    let guard = process_run_lock();
     let mut next: usize = 0;
     let mut cursor = scheduled_process_first_slot();
     let mut walking: bool = true;
@@ -1994,11 +2034,30 @@ fn scheduled_process_diagnostic_next_pid(after: usize) -> usize !{unsafe} {
         match cursor {
             ProcessSlotCursor::Done => { walking = false; }
             ProcessSlotCursor::At(slot) => {
-                let pid: usize = scheduled_process_pid_of_slot(slot);
+                let pid: usize = scheduled_process_record_locked(guard, slot).pid;
                 if (pid > after && (next == 0 || pid < next)) { next = pid; }
                 cursor = scheduled_process_next_slot(slot);
             }
         }
+    }
+    process_run_unlock(guard);
+    return next;
+}
+
+private fn scheduled_process_diagnostic_next_pid_stopped(
+        stopped: borrow MachineStopped[&kernel_world_stop], after: usize)
+        -> usize !{unsafe} {
+    let mut next: usize = 0;
+    if (scheduled_process_boot_live && scheduled_process_boot_record.pid > after) {
+        next = scheduled_process_boot_record.pid;
+    }
+    if (scheduled_process_pool_ready == false ||
+            intrusive_pool_inspection_busy(&scheduled_process_pool)) { return next; }
+    let mut slot: usize = intrusive_pool_first_slot(&scheduled_process_pool);
+    while (slot != 0) {
+        let pid: usize = scheduled_process_record_stopped(stopped, slot).pid;
+        if (pid > after && (next == 0 || pid < next)) { next = pid; }
+        slot = intrusive_pool_next_slot(&scheduled_process_pool, slot);
     }
     return next;
 }
@@ -2019,17 +2078,22 @@ private fn kernel_process_monitor_put_command(snapshot: ProcessDiagnosticSnapsho
 // Read-only monitor views deliberately consume the same value snapshot as
 // procfs. They never retain a ProcessRecord pointer while the kernel is
 // stopped, and the UART frontend does not become a second process model.
-fn kernel_process_monitor_ps() !{unsafe} {
+fn kernel_process_monitor_ps(stopped: borrow MachineStopped[&kernel_world_stop]) !{unsafe} {
+    if (kernel_process_stopped_metadata_busy(stopped)) {
+        kernel_boot_log("ps: unavailable reason=pool-busy\n"); return;
+    }
     kernel_boot_log("ps: pid ppid state pages command\n");
     let mut after: usize = 0;
     let mut walking: bool = true;
     while (walking) {
-        let pid: usize = scheduled_process_diagnostic_next_pid(after);
+        let pid: usize = scheduled_process_diagnostic_next_pid_stopped(stopped, after);
         if (pid == 0) { walking = false; }
         else {
-            match scheduled_process_diagnostic_copy(pid) {
-                ProcessDiagnosticResult::Missing => {}
-                ProcessDiagnosticResult::Found(snapshot) => {
+            match scheduled_process_diagnostic_copy(stopped, pid) {
+                ProcessStoppedDiagnosticResult::Missing => {}
+                ProcessStoppedDiagnosticResult::Busy => { kernel_boot_log("ps: unavailable reason=pool-busy\n"); }
+                ProcessStoppedDiagnosticResult::Stale => { kernel_boot_log("ps: unavailable reason=stale-image\n"); }
+                ProcessStoppedDiagnosticResult::Found(snapshot) => {
                     kernel_boot_log("ps: "); uart_put_udec(snapshot.pid);
                     kernel_boot_log(" "); uart_put_udec(snapshot.ppid);
                     kernel_boot_log(" "); uart_putc(snapshot.state);
@@ -2044,8 +2108,11 @@ fn kernel_process_monitor_ps() !{unsafe} {
     }
 }
 
-fn kernel_process_monitor_proc(pid: usize) !{unsafe} {
-    let slot: usize = match scheduled_process_slot_for_pid_peek(pid) {
+fn kernel_process_monitor_proc(stopped: borrow MachineStopped[&kernel_world_stop], pid: usize) !{unsafe} {
+    if (kernel_process_stopped_metadata_busy(stopped)) {
+        kernel_boot_log("proc: unavailable reason=pool-busy\n"); return;
+    }
+    let slot: usize = match scheduled_process_slot_for_pid_stopped(stopped, pid) {
         ProcessSlotForPidResult::Missing => {
             kernel_boot_log("proc: no such pid\n");
             return;
@@ -2053,18 +2120,20 @@ fn kernel_process_monitor_proc(pid: usize) !{unsafe} {
         ProcessSlotForPidResult::Found(found) => { found }
     };
     let snapshot: ProcessDiagnosticSnapshot =
-        match scheduled_process_diagnostic_copy(pid) {
-            ProcessDiagnosticResult::Missing => {
+        match scheduled_process_diagnostic_copy(stopped, pid) {
+            ProcessStoppedDiagnosticResult::Missing => {
                 kernel_boot_log("proc: no such pid\n");
                 return;
             }
-            ProcessDiagnosticResult::Found(found) => { found }
+            ProcessStoppedDiagnosticResult::Busy => { kernel_boot_log("proc: unavailable reason=pool-busy\n"); return; }
+            ProcessStoppedDiagnosticResult::Stale => { kernel_boot_log("proc: unavailable reason=stale-image\n"); return; }
+            ProcessStoppedDiagnosticResult::Found(found) => { found }
         };
     kernel_boot_log("proc: pid="); uart_put_udec(snapshot.pid);
     kernel_boot_log(" ppid="); uart_put_udec(snapshot.ppid);
     kernel_boot_log(" state="); uart_putc(snapshot.state);
     kernel_boot_log(" wait=");
-    match scheduled_process_peek_wait_reason(slot) {
+    match process_wait_reason(&scheduled_process_record_stopped(stopped, slot).wait) {
         ProcessWaitReason::None => { uart_put_udec(0); }
         ProcessWaitReason::UartRx => { uart_put_udec(1); }
         ProcessWaitReason::ChildExit => { uart_put_udec(2); }
@@ -2074,7 +2143,7 @@ fn kernel_process_monitor_proc(pid: usize) !{unsafe} {
         ProcessWaitReason::UartTx => { uart_put_udec(6); }
     }
     kernel_boot_log(" saved_sp=");
-    uart_put_hex(scheduled_process_peek_saved_sp(slot));
+    uart_put_hex(scheduled_process_record_stopped(stopped, slot).saved_sp);
     kernel_boot_log(" pages="); uart_put_udec(snapshot.resident_pages);
     kernel_boot_log(" command=");
     kernel_process_monitor_put_command(snapshot);
@@ -2196,16 +2265,7 @@ fn scheduled_process_set_fd_context(slot: usize, address: usize,
     process_run_unlock(guard);
 }
 
-// For the crash report and DDB, which must not take a lock: the diagnostic
-// peek, as the rest of their record reads use.
-fn scheduled_process_fd_context_handle_peek(slot: usize)
-        -> ProcessPoolHandleWords !{unsafe} {
-    let mut words: ProcessPoolHandleWords = {
-        scheduled_process_record_peek(slot).fd_context,
-        scheduled_process_record_peek(slot).fd_context_generation };
-    return words;
-}
-
+// Reaping reads the handle through its exclusive process owner.
 fn scheduled_process_fd_context_handle_owned(
         owner: borrow ScheduledProcessOwner[process])
         -> ProcessPoolHandleWords !{unsafe} {
@@ -2277,16 +2337,7 @@ fn scheduled_process_address_space_root_owned(
         process_backing_words(scheduled_process_record_owned(owner)));
 }
 
-// For the crash report and DDB, which must not take a lock: the diagnostic
-// peek, as their other record reads use. A dead slot reads the absent
-// record's zero handle, which pins nothing.
-fn scheduled_process_address_space_root_peek(slot: usize) -> AddressSpaceRoot !{unsafe} {
-    let mut words: ProcessPoolHandleWords = {
-        scheduled_process_record_peek(slot).address_space_backing,
-        scheduled_process_record_peek(slot).address_space_backing_generation };
-    return address_space_root_mint(slot, words);
-}
-
+// A caller already holding the run guard derives the root from that guard.
 fn scheduled_process_address_space_root_locked(
         guard: borrow ProcessRunGuard[lock], slot: usize) -> AddressSpaceRoot !{unsafe} {
     return address_space_root_mint(slot,
@@ -2322,8 +2373,7 @@ fn scheduled_process_set_address_space_backing(
     process_run_unlock(guard);
 }
 
-// The status pointer a blocked wait4 left, read through the parent's owner;
-// the crash report reads it with the peek.
+// The status pointer a blocked wait4 left, read through the parent's owner.
 fn scheduled_process_record_wait4_status_ptr_owned(
         owner: borrow ScheduledProcessOwner[process]) -> usize !{unsafe} {
     return scheduled_process_record_owned(owner).wait4_status_ptr;
@@ -2376,11 +2426,11 @@ private fn kernel_stack_run_usable(base: usize) -> bool {
 // there is nothing to look at" test still holds.
 // The run is fixed at allocation and given back only by the reap, and the
 // readers are stack checks on exception and diagnostic paths that cannot
-// take the run lock: the diagnostic peek, which answers 0 -- no usable run --
-// for a slot that is gone.
+// take the run lock. Copy under the pool view and release it before returning;
+// a slot that is gone yields 0, meaning no usable run.
 private fn kernel_stack_bottom(slot: usize)
         -> usize !{unsafe} {
-    let base: usize = scheduled_process_record_peek(slot).stack_run;
+    let base: usize = scheduled_process_scalar_snapshot(slot).stack_run;
     if (kernel_stack_run_usable(base) == false) { return 0; }
     return base + KERNEL_PROCESS_STACK_SIZE;
 }
@@ -4118,7 +4168,7 @@ private fn kernel_process_root_authorities_check(incoming: ProcessHandle,
                                                  frame: borrow FrameRef[process]) {
     let slot: usize = incoming.pool_index;
     let record_l1: usize = address_space_l1_physical(
-        scheduled_process_address_space_root_peek(slot));
+        scheduled_process_address_space_root_lookup(slot));
     let hardware_l1: usize = crash_snapshot_read_ttbr0_el1() & TTBR0_BADDR_MASK;
     let mut target: usize = 0xFFFFFFFFFFFFFFFF;
     match process_image_target_root_peek() {
@@ -4143,7 +4193,7 @@ private fn kernel_process_root_authorities_check(incoming: ProcessHandle,
         uart_put_udec(target);
         kernel_boot_log(" target_l1=");
         uart_put_hex(address_space_l1_physical(
-            scheduled_process_address_space_root_peek(target)));
+            scheduled_process_address_space_root_lookup(target)));
         kernel_boot_log("\n");
     }
     kernel_syscall_fail_stop(frame_ref_address(frame));
@@ -5986,7 +6036,7 @@ fn kernel_process_activate_stable_root(root: AddressSpaceRoot) {
         match process_image_prepare_activation(root) {
             AddressSpaceActivationPrepareResult::Invalid => {
                 let failing: usize = execution_here().current_handle.pool_index;
-                kernel_syscall_fail_stop(scheduled_process_record_peek(failing).saved_sp);
+                kernel_syscall_fail_stop(scheduled_process_scalar_snapshot(failing).saved_sp);
             }
             AddressSpaceActivationPrepareResult::RolloverNeeded => {
                 if (kernel_process_rollover_busy_injections != 0) {
@@ -6017,7 +6067,7 @@ fn kernel_process_activate_stable_root(root: AddressSpaceRoot) {
             AddressSpaceActivationPrepareResult::Prepared(prepared) => {
                 if (process_image_commit_activation(prepared) == false) {
                     let failing: usize = execution_here().current_handle.pool_index;
-                    kernel_syscall_fail_stop(scheduled_process_record_peek(failing).saved_sp);
+                    kernel_syscall_fail_stop(scheduled_process_scalar_snapshot(failing).saved_sp);
                 }
                 activating = false;
                 if (injected_busy != 0) {
@@ -6428,7 +6478,7 @@ private fn kernel_stack_owner_name(sp: usize) -> *u8 {
             ProcessSlotCursor::Done => { walking = false; }
             ProcessSlotCursor::At(slot) => {
                 let base: usize =
-                    scheduled_process_record_peek(slot).stack_run;
+                    scheduled_process_scalar_snapshot(slot).stack_run;
                 if (base != 0 && sp >= base &&
                     sp < base + KERNEL_STACK_RUN_BYTES) {
                     return "below a process kernel stack" as *u8;
@@ -9395,18 +9445,9 @@ fn kernel_process_current_pending_block_reason(current_authority: borrow Process
     return ProcessWaitReason::None;
 }
 
-// Allocation-free diagnostic view for the terminal exception path.  These
-// values are intentionally scalar rather than exposing ProcessRecord itself:
-// a crash report observes scheduler state but must not acquire its linear
-// owners or locks after a fatal exception.
-fn kernel_process_crash_parent_pid() -> usize {
-    if (execution_here().current_live == false) { return 0; }
-    let slot: usize = execution_here().current_handle.pool_index;
-    if (scheduled_process_record_peek(slot).has_parent == false) { return 0; }
-    return scheduled_process_pid_of_handle(
-        scheduled_process_record_peek(slot).parent);
-}
-
+// Ordinary trace diagnostics copy values under the pool view. Fatal
+// capture uses the separate MachineStopped readers and never reaches this
+// blocking scalar path.
 fn kernel_process_crash_state() -> usize !{unsafe} {
     if (execution_here().current_live == false) { return 0; }
     let state: ProcessSlotState = scheduled_process_peek_state(
@@ -9440,22 +9481,9 @@ fn kernel_process_crash_wait_reason() -> usize !{unsafe} {
 // moved wait4()'s status pointer into this same ProcessRecord field, so
 // a diagnostic snapshot naming the wait reason without this leaves half
 // of a blocked wait4()'s continuation state invisible.
-fn kernel_process_crash_wait4_status_ptr() -> usize {
-    if (execution_here().current_live == false) { return 0; }
-    let current: usize = execution_here().current_handle.pool_index;
-    return scheduled_process_record_peek(current).wait4_status_ptr;
-}
-
 fn kernel_process_current_slot() -> usize {
     if (execution_here().current_live == false) { return 0; }
     return execution_here().current_handle.pool_index;
-}
-
-fn kernel_process_crash_image_kind() -> usize {
-    if (execution_here().current_live == false) { return 0; }
-    let slot: usize = execution_here().current_handle.pool_index;
-    if (scheduled_process_record_peek(slot).exec_image_live) { return 1; }
-    return 0;
 }
 
 // GitHub issue #245: callers that need to (re)activate the current

@@ -72,6 +72,12 @@ fn scheduled_process_slot_valid(slot: usize) -> bool {
 '''
 
 DECLARED += """
+private fn scheduled_process_scalar_snapshot(slot: usize) -> ProcessRecordScalarSnapshot {
+    let slot_view = probe(slot);
+    let snapshot = copy_fields(payload(slot_view));
+    intrusive_view_drop(slot_view);
+    return snapshot;
+}
 private inline fn scheduled_process_locked_view_drop(source: sink ProcessRecordLockedView[l, p]) {
     intrusive_view_drop(source.live);
 }

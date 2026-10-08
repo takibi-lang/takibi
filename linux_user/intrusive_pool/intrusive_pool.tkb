@@ -225,6 +225,16 @@ fn check_allocation_transfer() -> AllocationTransferTest !{unsafe} {
 fn app_main() {
     page_allocator_init();
     uart_puts("intrusive_pool\n");
+    let mut inspection_pool: IntrusivePool(usize);
+    intrusive_pool_init(&inspection_pool);
+    // The lock-order backend is a tracking stand-in, so use the actual
+    // mutex word for this single-threaded metadata observation.
+    let inspection_flags: usize = mutex_acquire(&inspection_pool.lock);
+    let refused: bool = intrusive_pool_inspection_busy(&inspection_pool);
+    mutex_release(&inspection_pool.lock, inspection_flags);
+    uart_puts("inspection observes held metadata and unlock: ");
+    uart_print(refused && intrusive_pool_inspection_busy(&inspection_pool) == false);
+    uart_puts("\n");
     uart_puts("allocation proof transfer, unlock, foreign, stale and free: ");
     match check_allocation_transfer() {
         AllocationTransferTest::Unavailable => { uart_puts("allocation unavailable"); }

@@ -391,22 +391,21 @@ is occupied. The payload accessors take them as `borrow` and return `*T @ id`,
 so a payload pointer cannot outlive the proof.
 
 This is the at-view discipline: the VALUE (a handle) stays copyable and
-storable in a tree, the PROOF is linear and cannot be stored, and dereferencing
-requires the proof. Ownership is the wrong tool for a process tree, which needs
+storable in a tree, while the PROOF remains linear, including inside a
+compiler-checked linear struct; dereferencing requires the live proof. Ownership is the wrong tool for a process tree, which needs
 many non-owning references to one record; proof-separation is not.
 
-`intrusive_pool_payload_unproven_of` and `intrusive_pool_ref_unproven` are the
-named escapes for a caller that must return the pointer. They are `!{unsafe}`
-so each one is counted in the trusted-base inventory, and they still require a
-successful probe -- what they drop is the lifetime relation, not the occupancy
-check. Laundering is not forbidden; it is a number.
+The old unproven payload accessors are retired. Every maintained payload
+reader keeps its owner or view, transfers the loan to a stronger authority,
+or copies values before ending the view. The source gate rejects any renewed
+call to either legacy escape name.
 
 A normal view is also the pool-lock owner, so another core cannot free or
 replace its occupant until the view is consumed. A slot-only probe answers for
 whoever occupies that slot and therefore cannot compare the generation a
 caller expected; handle-based callers use `intrusive_pool_probe_handle` for
-that check. The explicitly unsafe unproven accessors discard the lifetime
-relation and leave exclusion to their stopped-world or caller-owned contract.
+that check. Stopped inspection instead needs MachineStopped, preserves that
+authority in its loan, and refuses busy metadata before traversing it.
 
 ## Reporters must not take locks
 

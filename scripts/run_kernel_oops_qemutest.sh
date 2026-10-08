@@ -364,6 +364,10 @@ if [ "$MODE" = concurrent_fault ]; then
             ! grep -q '^oops: console owned by another core; parking$' "$UART_LOG" ||
             ! grep -Eq '^oops: world-stop partial mask=0x0+ released; other cores still run$' "$UART_LOG" ||
             grep -Eq '^oops: world-stop (complete|busy)' "$UART_LOG" ||
+            ! grep -q '^ps: unavailable reason=machine-not-stopped$' "$UART_LOG" ||
+            ! grep -q '^proc: unavailable reason=machine-not-stopped$' "$UART_LOG" ||
+            grep -q '^ps: pid ppid state pages command$' "$UART_LOG" ||
+            grep -q '^proc: pid=' "$UART_LOG" ||
             ! grep -Eq '^oops: cores reported=2 faults=2 contended=[1-9][0-9]* abandoned=0$' "$UART_LOG"; then
         echo "FAIL kernel/qemu oops: two cores faulted together and the report does not show both" >&2
         sed 's/^/  /' "$UART_LOG" >&2 || true

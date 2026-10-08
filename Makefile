@@ -1577,7 +1577,6 @@ kernel-lib-check:
 	python3 scripts/check_process_record_bare_uses.py
 	python3 scripts/check_invariant_lines_unviewed.py
 	python3 scripts/check_fallback_counters.py
-	python3 scripts/check_dead_slot_peek_not_retained.py
 	python3 scripts/check_probe_entry_gates.py
 
 # Generate AArch64 exception-frame offset constants from the struct

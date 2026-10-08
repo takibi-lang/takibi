@@ -6,22 +6,11 @@ occupied -- an `IntrusiveSlotView` from a probe, an `IntrusiveOwner` from an
 allocation -- and its payload accessors return a pointer TIED to that proof,
 so the pointer cannot outlive it (GitHub issue #488).
 
-`intrusive_pool_payload_unproven_of` and `intrusive_pool_ref_unproven` are the
-escapes. They still require a successful probe, so they cannot read a free
-slot as a T; what they drop is the lifetime relation. `kernel/CONCURRENCY.md`
-says of them: "Laundering is not forbidden; it is a number."
-
-Nothing made it a number. This does. Adding a call site here is a claim that
-this particular caller cannot hold the proof for the pointer's life -- which
-in every current case means it RETURNS the pointer, so removing the escape is
-a migration of that accessor's callers rather than a local edit.
-
-Why this rather than a compiler rule: the escapes are legitimate, so the
-language cannot forbid them. What can go wrong is the SET growing quietly,
-one convenient call at a time, until the guarantee is decorative. A migration
-loop already over-applied them once by seven -- an escape and a `borrow`
-produce the same silence, so nothing but a declared list distinguishes "had
-to" from "was easier".
+The two historical escape names are retired. No maintained caller may drop
+the relation through either name. This gate preserves the completed migration
+and catches a reintroduced legacy definition or call outside the pool file.
+It is source containment; the compiler establishes the lifetime of actual
+authority-derived loans.
 
 Exit code only (0 = pass, 1 = fail).
 """
@@ -49,11 +38,7 @@ FN_RE = re.compile(r"^(?:private )?(?:inline |noinline )?fn ([A-Za-z_0-9]+)")
 # the pool's view is dropped -- the lifetime the caller supplies instead --
 # not merely that the function returns a pointer. A new entry has to find
 # its own answer.
-ALLOWED = {
-    ("kernel/kernel/process.tkb", "scheduled_process_record_peek"):
-        "deliberately tolerates a dead slot for crash and trace paths, and "
-        "returns the pointer",
-}
+ALLOWED = {}
 
 
 def escapes():

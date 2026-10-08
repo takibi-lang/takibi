@@ -3158,7 +3158,7 @@ The pointer cannot be used after consumption. Region take, retire, free,
 and chunk shrink invalidate live inspections and their lexical pointer loans.
 An external quiescence controller must additionally declare its own context
 change boundaries for each inspection type it permits. The maintained
-kernel has three private mints borrowing the production full-machine stop;
+kernel has four private mints borrowing the production full-machine stop;
 a source gate holds that set and its resume/start annotations complete.
 Physical CPU holding, IRQ masking and the mint's metadata interpretation
 remain trusted. The ordinary `no_copy` rule still forbids copying an entire

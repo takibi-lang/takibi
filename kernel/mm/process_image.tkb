@@ -196,6 +196,28 @@ private fn process_image_pool_unlock(
     mutex_irq_restore(region_pool_unlock_saved(guard));
 }
 
+// The initiator retains the allocator guard across a complete stop. The
+// diagnostic path must refuse it without waiting for this same CPU.
+fn process_image_stopped_pool_busy_probe() -> bool !{unsafe} {
+    let guard = process_image_pool_lock(&process_image_pool);
+    let mut refused: bool = false;
+    match world_stop_machine_begin(DDB_WORLD_STOP_SPINS) {
+        MachineStopResult::Busy => {}
+        MachineStopResult::Partial(partial) => { machine_stop_partial_release(partial, &kernel_world_stop); }
+        MachineStopResult::Complete(stopped) => {
+            let mut words: ProcessPoolHandleWords = { 0, 0 };
+            match process_image_inspect_stopped(stopped, &process_image_pool, words) {
+                RegionInspectionProbe(ProcessImageRecord)::Busy => { refused = true; }
+                RegionInspectionProbe(ProcessImageRecord)::Stale => {}
+                RegionInspectionProbe(ProcessImageRecord)::Inspected(inspected) => { region_inspection_drop(inspected); }
+            }
+            machine_stop_release(stopped, &kernel_world_stop);
+        }
+    }
+    process_image_pool_unlock(guard);
+    return refused;
+}
+
 // GitHub issue #392: how many root records the pool is holding. A
 // create-and-reap cycle must give every one of them back, and
 // scheduled_process_table_probe asserts exactly that -- the detector for
@@ -317,21 +339,59 @@ private fn process_image_record_value(
         }
         RegionPinned(ProcessImageRecord)::Pinned(pin) => {
             let record: *ProcessImageRecord = region_pin_at(pin);
-            value.active_page_count = record.active_page_count;
-            value.stack_lowest_l3 = record.stack_lowest_l3;
-            value.stack_growth_active = record.stack_growth_active;
-            value.stack_top_page = record.stack_top_page;
-            value.stack_low_page = record.stack_low_page;
-            value.heap_page_count = record.heap_page_count;
-            value.exec_image_installed = record.exec_image_installed;
-            value.exec_image_page_count = record.exec_image_page_count;
-            value.clone_vm_outstanding = record.clone_vm_outstanding;
-            value.clone_vm_source_root = record.clone_vm_source_root;
-            value.clone_vm_page_count = record.clone_vm_page_count;
+            value = process_image_record_copy(record);
             process_image_record_unpin(pin);
         }
     }
     return value;
+}
+
+// Both pinned and stopped inspection copy through this payload boundary.
+private fn process_image_record_copy(record: borrow *ProcessImageRecord)
+        -> ProcessImageRecord {
+    let mut value: ProcessImageRecord;
+    value.active_page_count = record.active_page_count;
+    value.stack_lowest_l3 = record.stack_lowest_l3;
+    value.stack_growth_active = record.stack_growth_active;
+    value.stack_top_page = record.stack_top_page;
+    value.stack_low_page = record.stack_low_page;
+    value.heap_page_count = record.heap_page_count;
+    value.exec_image_installed = record.exec_image_installed;
+    value.exec_image_page_count = record.exec_image_page_count;
+    value.clone_vm_outstanding = record.clone_vm_outstanding;
+    value.clone_vm_source_root = record.clone_vm_source_root;
+    value.clone_vm_page_count = record.clone_vm_page_count;
+    return value;
+}
+
+must_use variant ProcessImageDiagnosticCount {
+    Busy;
+    Stale;
+    Ready(usize);
+}
+
+private fn process_image_inspect_stopped(
+        stopped: borrow MachineStopped[&kernel_world_stop],
+        pool: *RegionPool(ProcessImageRecord) @ images, words: ProcessPoolHandleWords)
+        -> RegionInspectionProbe(ProcessImageRecord)[images, &kernel_world_stop]
+        !{unsafe, irq_masking_guard} {
+    return region_pool_inspect_unproven__ProcessImageRecord(pool, &kernel_world_stop,
+        words.address, words.generation);
+}
+
+fn process_image_active_page_count_stopped(
+        stopped: borrow MachineStopped[&kernel_world_stop],
+        words: ProcessPoolHandleWords) -> ProcessImageDiagnosticCount !{unsafe} {
+    if (words.address == 0) { return ProcessImageDiagnosticCount::Ready(0); }
+    match process_image_inspect_stopped(stopped, &process_image_pool, words) {
+        RegionInspectionProbe(ProcessImageRecord)::Busy => { return ProcessImageDiagnosticCount::Busy; }
+        RegionInspectionProbe(ProcessImageRecord)::Stale => { return ProcessImageDiagnosticCount::Stale; }
+        RegionInspectionProbe(ProcessImageRecord)::Inspected(inspected) => {
+            let mut value: ProcessImageRecord = process_image_record_copy(region_inspection_at(inspected));
+            region_inspection_drop(inspected);
+            return ProcessImageDiagnosticCount::Ready(value.active_page_count);
+        }
+    }
 }
 
 // One field of the ensured root's record, written under a fresh pin. The

@@ -21497,6 +21497,7 @@ let infer_production_stop_boundary code =
     linear struct RegionInspection__AddressSpaceBacking[p: addr, s: addr] { private address: usize; }
     linear struct RegionInspection__ProcessFdContext[p: addr, s: addr] { private address: usize; }
     linear struct RegionInspection__FdBlock[p: addr, s: addr] { private address: usize; }
+    linear struct RegionInspection__ProcessImageRecord[p: addr, s: addr] { private address: usize; }
     struct no_copy AtomicWord { private value: usize; }
     linear struct IntrusiveSlotView[p: addr] { private slot: usize; }
     fn atomic_word_store(cell: *AtomicWord, value: usize) !{unsafe} {}
@@ -21585,6 +21586,7 @@ let infer_production_machine_boundary ?(platform = "qemu") code =
     linear struct RegionInspection__AddressSpaceBacking[p: addr, s: addr] { private address: usize; }
     linear struct RegionInspection__ProcessFdContext[p: addr, s: addr] { private address: usize; }
     linear struct RegionInspection__FdBlock[p: addr, s: addr] { private address: usize; }
+    linear struct RegionInspection__ProcessImageRecord[p: addr, s: addr] { private address: usize; }
     struct no_copy AtomicWord { private value: usize; }
     linear struct IntrusiveSlotView[p: addr] { private slot: usize; }
     fn atomic_word_store(cell: *AtomicWord, value: usize) !{unsafe} {}
@@ -21594,6 +21596,7 @@ let infer_production_machine_boundary ?(platform = "qemu") code =
     must_use variant IntrusiveSlotProbe[p: addr] {
       NoPayload; Live(IntrusiveSlotView[p]);
     }
+    fn intrusive_pool_inspection_busy(T: type, pool: &mut IntrusivePool(T) @ p) -> bool { return false; }
     fn intrusive_pool_probe_slot_unproven(T: type, pool: &mut IntrusivePool(T) @ p,
                                          slot: usize) -> IntrusiveSlotProbe[p] !{unsafe} {
       return IntrusiveSlotProbe::NoPayload;
@@ -21621,6 +21624,13 @@ let infer_production_machine_boundary ?(platform = "qemu") code =
       return inspected;
     }
     fn native_fixture_end_FdBlock(inspected: sink RegionInspection__FdBlock[p, s]) {}
+    fn native_fixture_ProcessImageRecord(stopped: borrow MachineStopped[s])
+        -> RegionInspection__ProcessImageRecord[&kernel_world_stop, s] !{irq_masking_guard} {
+      let mut inspected: RegionInspection__ProcessImageRecord[&kernel_world_stop, s] = { 0 };
+      return inspected;
+    }
+    fn native_fixture_end_ProcessImageRecord(inspected: sink RegionInspection__ProcessImageRecord[p, s]) {}
+
     fn mutex_irq_save() -> usize { return 0; }
     fn mutex_irq_restore(flags: usize) !{restores_saved_irq} {}
     fn cpu_id() -> usize { return 0; }
@@ -21635,7 +21645,7 @@ let infer_production_machine_boundary ?(platform = "qemu") code =
     "cpu_start_reserve"; "cpu_start_core"; "cpu_start_finish";
     "cpu_start_end"; "cpu_start_gate_release"; "world_stop_resume";
     "world_stopped_end"; "world_stop_partial_end";
-    "world_stop_release"; "world_stop_partial_release"; "world_stopped_mask";
+    "world_stop_release"; "world_stop_partial_release";
     "machine_pool_probe"; "machine_pool_payload"; "machine_pool_view_drop";
     "machine_stop_partial_release"; "machine_stop_partial_mask"; "world_stop_partial_mask"] in
   let boundary = List.filter (function
@@ -21644,7 +21654,7 @@ let infer_production_machine_boundary ?(platform = "qemu") code =
     | Ast.FuncDef f -> List.mem f.name functions
     | Ast.VariantDef (name, _, _, _, _) -> List.mem name variants
     | _ -> false) (parse_here source) in
-  Alcotest.(check int) "all production machine declarations extracted" 38
+  Alcotest.(check int) "all production machine declarations extracted" 37
     (List.length boundary);
   let platform_path = "kernel/platform/" ^ platform ^ "/init.tkb" in
   let path = List.find Sys.file_exists ["../" ^ platform_path; platform_path] in
@@ -21834,6 +21844,12 @@ let production_machine_boundary_tests =
         machine_stop_release(stopped, &kernel_world_stop);
         native_fixture_end_FdBlock(inspected);
       |});
+    bad "production resume rejects native ProcessImageRecord inspection"
+      "live RegionInspection__ProcessImageRecord" (full {|
+        let inspected = native_fixture_ProcessImageRecord(stopped);
+        machine_stop_release(stopped, &kernel_world_stop);
+        native_fixture_end_ProcessImageRecord(inspected);
+      |});
     bad "native inspection retains IRQ exclusion after terminal stop consumption"
       "IRQ" (full {|
         let inspected = native_fixture_FdBlock(stopped);
@@ -21842,6 +21858,7 @@ let production_machine_boundary_tests =
       |});
     good "production machine pool read ends scope before resume" (full {|
       match machine_pool_probe(&record_pool, stopped, 1) {
+        MachineSlotProbe::Busy => {}
         MachineSlotProbe::Missing => {}
         MachineSlotProbe::Live(scoped) => {
           let ptr = machine_pool_payload(&record_pool, scoped);
@@ -21851,6 +21868,7 @@ let production_machine_boundary_tests =
     |});
     bad "production resume rejects retained pool view" "live MachineSlotView witness" (full {|
       match machine_pool_probe(&record_pool, stopped, 1) {
+        MachineSlotProbe::Busy => {}
         MachineSlotProbe::Missing => {}
         MachineSlotProbe::Live(scoped) => {
           machine_stop_release(stopped, &kernel_world_stop);
@@ -21860,6 +21878,7 @@ let production_machine_boundary_tests =
     |});
     bad "production resume rejects pool loan after view drop" "live MachineSlotView witness" (full {|
       match machine_pool_probe(&record_pool, stopped, 1) {
+        MachineSlotProbe::Busy => {}
         MachineSlotProbe::Missing => {}
         MachineSlotProbe::Live(scoped) => {
           let ptr = machine_pool_payload(&record_pool, scoped);
@@ -21870,6 +21889,7 @@ let production_machine_boundary_tests =
     |});
     bad "production reclamation rejects retained pool view" "live MachineSlotView witness" (full {|
       match machine_pool_probe(&record_pool, stopped, 1) {
+        MachineSlotProbe::Busy => {}
         MachineSlotProbe::Missing => {}
         MachineSlotProbe::Live(scoped) => {
           let guard = guard_new(&kernel_world_stop);
@@ -21880,6 +21900,7 @@ let production_machine_boundary_tests =
     |});
     good "production stop loan transfer keeps only destination" (full {|
       match machine_pool_probe(&record_pool, stopped, 1) {
+        MachineSlotProbe::Busy => {}
         MachineSlotProbe::Missing => {}
         MachineSlotProbe::Live(scoped) => {
           let ptr = scope_transfer(scoped, stopped);

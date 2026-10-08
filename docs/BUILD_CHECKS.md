@@ -51,7 +51,6 @@ suffix is description; dispatch reads only the prefix.
 | `check_ddb_signal_names_controls.py` | Controls for the DDB signal-vocabulary check |
 | `check_ddb_wait_reason_names.py` | DDB's wait view names every process state and wait reason the kernel encodes for the debugger snapshot, spelled from the enum case |
 | `check_ddb_wait_reason_names_controls.py` | Controls for the DDB wait-vocabulary check |
-| `check_dead_slot_peek_not_retained.py` | the dead-slot-tolerant record peek is read on the spot, never bound |
 | `check_diagnostic_event_ids.py` | fixed diagnostic event IDs are unique 16-bit values |
 | `check_direct_mmio_literals.py` | MMIO pointers derive from validated resource bases |
 | `check_direct_mmio_literals_controls.py` | Positive and negative controls for check_direct_mmio_literals.py |

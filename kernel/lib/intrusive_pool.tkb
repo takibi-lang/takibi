@@ -1984,6 +1984,13 @@ fn intrusive_pool_probe_slot(T: type, pool: &mut IntrusivePool(T) @ pool_id,
     return IntrusiveSlotProbe::Live(minted);
 }
 
+// An interrupted owner may hold metadata even after all peers stop.
+// Reporters refuse before traversing that metadata; this never waits.
+fn intrusive_pool_inspection_busy(T: type, pool: &mut IntrusivePool(T) @ pool_id)
+        -> bool !{unsafe} {
+    return mutex_is_held(&(*pool).lock);
+}
+
 // Reporter/test escape: validate and mint the same payload proof without
 // taking a lock. A production reporter calls this only after stopping every
 // peer; the pool-walk contention probe uses it to exercise a stale cursor.
@@ -2074,34 +2081,6 @@ fn intrusive_view_release(slot_view: sink IntrusiveSlotView[pool_id]) {
 fn intrusive_pool_lock_is_held_for_probe(
         T: type, pool: &mut IntrusivePool(T) @ pool_id) -> bool !{unsafe} {
     return mutex_is_held(&(*pool).lock);
-}
-
-// THE ESCAPE, and it is the old behaviour with its name changed to say so.
-//
-// GitHub issue #488: a caller that cannot yet hold the view for as long as
-// it uses the payload -- typically because it RETURNS the pointer -- takes
-// this instead. It still requires a successful probe, so it cannot read a
-// free slot as a T (which is what kept intrusive_pool_payload_at private
-// since issue #348); what it drops is the LIFETIME relation, not the
-// occupancy check.
-//
-// `!{unsafe}`, so every remaining launderer is counted in the trusted-base
-// inventory rather than being invisible. That is the whole shape of this
-// change: laundering did not stop existing, it stopped being the DEFAULT
-// and started being a number.
-fn intrusive_pool_payload_unproven_of(
-        T: type, pool: &mut IntrusivePool(T) @ pool_id,
-        slot_view: sink IntrusiveSlotView[pool_id]) -> *T !{unsafe} {
-    let slot_address: usize = intrusive_view_slot(slot_view).raw;
-    intrusive_view_unlock(slot_view);
-    return intrusive_pool_payload_at(pool, slot_address);
-}
-
-// The owner-shaped escape, same reasoning.
-fn intrusive_pool_ref_unproven(
-        T: type, pool: &mut IntrusivePool(T) @ pool_id,
-        owner: borrow IntrusiveOwner[pool_id, allocation]) -> *T !{unsafe} {
-    return intrusive_pool_payload_at(pool, intrusive_owner_slot(owner).raw);
 }
 
 // -- Iteration ---------------------------------------------------------

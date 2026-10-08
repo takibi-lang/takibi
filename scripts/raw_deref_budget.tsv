@@ -8,7 +8,7 @@
 # dereference and is made by hand with the reason written here.
 # Measured 2026-09-30. Columns: file, plain, io, reason (tab separated).
 kernel/arch/arm64/kernel/user_payload.tkb	2	0	EL0 syscall-ABI fixture: byte loads and stores for little-endian rlimit64 fields in syscall buffers
-kernel/arch/arm64/kernel/exception_evidence.tkb	141	0	DDB and the crash reporter read process records and stacks through raw pointers (#637 C, F)
+kernel/arch/arm64/kernel/exception_evidence.tkb	167	0	Private per-CPU crash caches and entry-frame mints; +26 scalar cache sites for stopped-only capture, explicit unavailable state and captured VA translations (2026-10-07). Shared ProcessRecord and RegionPool reads require MachineStopped and return values.
 kernel/arch/arm64/kernel/frame_ref.tkb	2	0	the exception-frame mint site: a FrameRef's words are read and written here and nowhere else (#637 C)
 kernel/arch/arm64/mm/asid.tkb	25	0	the ASID allocator's records, reached through pool pointers (#637 F)
 kernel/arch/arm64/mm/mmu.tkb	2	0	page-table entries as a raw table (#637 H)
@@ -21,7 +21,7 @@ kernel/fs/ext2/ext2.tkb	156	0	ext2 on-disk structures and cache blocks reached t
 kernel/init/test_driver.tkb	10	0	boot-time fixtures reaching process records directly (#637 F)
 kernel/kernel/fd_table.tkb	204	0	fd contexts, blocks and shared objects, each through a pointer derived from a region_pool pin; no liveness escape is left (#672)
 kernel/kernel/pool_walk_contention_evidence.tkb	5	0	a two-core boot probe (pool payload access)
-kernel/kernel/process.tkb	740	0	ProcessRecord loans derive from run guards, current phase views or scheduled owners; only the diagnostic peek drops its pool proof. CPU execution state, private physical mints, frame/crash diagnostics and spread fixtures remain reviewed raw accesses. The phase handoff adds 3 net sites over the 737-site baseline: the existing retry guard now reads current_live/current_handle and a guard-derived record after consuming the current witness, and an already-held guard supplies the parent predicate; no bare record lookup or lifetime escape is added.
+kernel/kernel/process.tkb	729	0	ProcessRecord loans derive from run guards, indexed current phases, owners or MachineStopped. Ordinary scalar diagnostics copy before releasing their pool view; no liveness escape remains. CPU state, private physical mints, frame diagnostics and fixtures await file confinement.
 kernel/kernel/signal_contention_evidence.tkb	2	0	a two-core boot probe (pool payload access)
 kernel/kernel/syscall.tkb	77	0	syscall frames and scratch buffers (#637 C)
 kernel/kernel/tcp_connection_contention_evidence.tkb	2	0	a two-core boot probe (pool payload access)

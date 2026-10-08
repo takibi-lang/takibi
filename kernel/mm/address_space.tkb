@@ -1028,16 +1028,6 @@ fn address_space_pte_read(root: AddressSpaceRoot, index: usize) -> usize {
 // behind them is the question issue #373 spent a day answering by hand --
 // a process's text page that is simultaneously a kernel stack shows up
 // here as one line.
-fn address_space_user_physical(root: AddressSpaceRoot, va: usize) -> usize {
-    let slot: usize = root.slot;
-    if (va < USER_TEXT_VA) { return 0; }
-    let offset: usize = va - USER_TEXT_VA;
-    let index: usize = offset / PAGE_SIZE;
-    if (index >= USER_SPACE_PAGE_COUNT) { return 0; }
-    let pte: usize = address_space_pte_read(root, index);
-    if (pte == 0) { return 0; }
-    return pte & USER_PAGE_PHYS_MASK;
-}
 
 fn address_space_pte_is_cow(pte: usize) -> bool {
     return (pte & USER_COW_BIT) != 0;

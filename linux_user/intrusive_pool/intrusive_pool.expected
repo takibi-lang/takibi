@@ -1,4 +1,5 @@
 intrusive_pool
+inspection observes held metadata and unlock: true
 allocation proof transfer, unlock, foreign, stale and free: true
 slot stride for usize (8-byte payload + 1 bookkeeping word): 16
 slots per chunk, derived from sizeof(T) alone: 248
