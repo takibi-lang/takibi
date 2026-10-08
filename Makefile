@@ -356,6 +356,7 @@ KERNEL_UNUSED_CHECKED := \
 	kernel/kernel/asid_contention_evidence.tkb \
 	kernel/kernel/ext2_mutation_contention_evidence.tkb \
 	kernel/kernel/fd_table.tkb \
+	kernel/kernel/irq_counts.tkb \
 	kernel/kernel/freelist_contention_evidence.tkb \
 	kernel/kernel/console_contention_evidence.tkb \
 	kernel/kernel/init_once_contention_evidence.tkb \

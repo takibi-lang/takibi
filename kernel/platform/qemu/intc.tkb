@@ -23,6 +23,7 @@
 use "kernel/platform/qemu/timer_irq.tkb";
 use "kernel/arch/arm64/kernel/secondary.tkb";
 use "kernel/arch/arm64/boot/cpu.tkb";
+use "kernel/kernel/irq_counts.tkb";
 
 let mut qemu_uart_gic_intid: u32 = 33; // bootstrap route until DTB comparison
 // The PMU overflow PPI. QEMU's `virt` machine wires each CPU's
@@ -45,11 +46,16 @@ fn platform_world_stop_notify(mask: usize, owner: usize) !{unsafe} {
         }
     }
     if (targets == 0) { return; }
+    platform_gic_sgi_send(targets, QEMU_WORLD_STOP_SGI);
+}
+
+// One SGI to the cores in `targets` (GICD_SGIR's CPU target list).
+fn platform_gic_sgi_send(targets: u32, sgi: u32) !{unsafe} {
     dsb_ishst();
     let gicd_sgir: *io u32 = unsafe {
         (qemu_gicd_base + 0xF00) as *io u32
     };
-    *gicd_sgir = (targets << 16) | QEMU_WORLD_STOP_SGI;
+    *gicd_sgir = (targets << 16) | (sgi & 0xF);
 }
 
 fn gic_uart_spi_setup() !{unsafe} {
@@ -146,6 +152,10 @@ fn platform_irq_dispatch_inner(frame: sink FrameRef[process], lower_el: bool)
     // requires to deactivate that sender's SGI.
     let iar: u32 = *gicc_iar;
     let id: u32 = iar & 0x3FF;
+    // GitHub issue #715: counted before any branch, so the world stop and
+    // every acknowledged INTID are in DDB's `intr` view. Only this CPU's
+    // own row is written.
+    irq_count_record(id);
 
     // Stop before touching profiling, scheduler, driver, or reporter state:
     // those are consumers of the proof the initiator is waiting to receive.

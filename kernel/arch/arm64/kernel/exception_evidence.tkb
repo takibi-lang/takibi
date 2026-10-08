@@ -4,6 +4,7 @@ use "kernel/kernel/fd_table.tkb";
 use "kernel/arch/arm64/kernel/user_entry_extern.tkb";
 use "kernel/lib/occupancy.tkb";
 use "kernel/kernel/syscall_unimplemented.tkb";
+use "kernel/kernel/irq_counts.tkb";
 
 // DDB stops the runtime online prefix, including idle secondaries: they still
 // execute timer and SGI handlers and must acknowledge inspection quiescence.
@@ -1588,6 +1589,34 @@ private fn ddb_render_intr() !{unsafe} {
     } else {
         ddb_puts("ddb: intr esr=unavailable far=unavailable\n");
     }
+    // GitHub issue #715: every nonzero per-CPU INTID count. A count that
+    // climbs between two BREAKs names an interrupt storm.
+    for raw: usize in 0..<KERNEL_MAX_CORES {
+        if (raw < kernel_online_core_count()) {
+            let core: {0..<KERNEL_MAX_CORES as usize} = raw;
+            for intid: usize in 0..<IRQ_COUNT_BANKED {
+                ddb_render_irq_count(raw, intid, irq_count_banked_of(core, intid));
+            }
+            for slot: usize in 0..<IRQ_COUNT_SPI_SLOTS {
+                ddb_render_irq_count(raw, irq_count_spi_intid_of(core, slot),
+                                     irq_count_spi_count_of(core, slot));
+            }
+            let other: usize = irq_count_other_of(core);
+            if (other != 0) {
+                ddb_puts("ddb: intr count cpu="); ddb_put_udec(raw);
+                ddb_puts(" other="); ddb_put_udec(other);
+                ddb_puts("\n");
+            }
+        }
+    }
+}
+
+private fn ddb_render_irq_count(cpu: usize, intid: usize, count: usize) !{unsafe} {
+    if (count == 0) { return; }
+    ddb_puts("ddb: intr count cpu="); ddb_put_udec(cpu);
+    ddb_puts(" intid="); ddb_put_udec(intid);
+    ddb_puts(" count="); ddb_put_udec(count);
+    ddb_puts("\n");
 }
 
 private fn ddb_render_blk_timeout(label: *u8,

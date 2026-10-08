@@ -134,6 +134,10 @@ EXEMPT = {
         "GitHub issue #479: mutable pool metadata is protected by the pool "
         "Mutex; mutations require its indexed guard and ordinary Live views "
         "own the same lock through payload use",
+    "kernel/irq_counts.tkb":
+        "per-CPU rows are indexed below KERNEL_MAX_CORES; each is written "
+        "only by its own CPU's IRQ dispatch and read by DDB under a world "
+        "stop or by the boot fixture through one acquire load",
     "kernel/profile_samples.tkb":
         "per-CPU samples are indexed below KERNEL_MAX_CORES and opened or "
         "read only for kernel_online_core_count() under a world stop",

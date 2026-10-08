@@ -91,12 +91,6 @@ MIN_SIGNIFICANT_RUN = 8
 # with. Unlike ALLOWED, every entry here is also a piece of work -- these are
 # extractable, and the reason says so.
 ALLOWED_RUNS = {
-    ("intc.tkb", "fn platform_world_stop_notify(mask: usize, owner: usize) "
-                 "!{unsafe} {"):
-        "a function whose bodies genuinely diverge -- each GIC writes its own "
-        "SGI register -- but whose target-list computation is written twice. "
-        "The function comparison cannot see this one, which is the case "
-        "GitHub issue #517 was filed about",
     ("intc.tkb", "timer_irq_handler();"):
         "the dispatch tail: timer, then the EL0/EL1 preemption branch that "
         "nine files assert against",

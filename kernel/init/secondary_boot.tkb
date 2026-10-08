@@ -18,6 +18,7 @@
 // separates NotStarted from a core that simply has not answered yet.
 use "kernel/printk/log.tkb";
 use "kernel/init/contention_probes.tkb";
+use "kernel/kernel/irq_counts.tkb";
 
 must_use variant SecondaryBootResult {
     Started;
@@ -107,5 +108,8 @@ fn kernel_secondary_boot_report() !{logs, unsafe} {
     }
     // The probes race core 1 against core 0 and nothing else; see the
     // matching gate in kernel_secondary_main.
-    if (core_one_started) { contention_probes(); }
+    if (core_one_started) {
+        contention_probes();
+        irq_count_fixture();
+    }
 }

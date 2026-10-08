@@ -21,6 +21,12 @@ REQUIREMENTS = (
     ('register sp_el0', '^ddb: sp_el0=0x', 1, None, 'both'),
     ('interrupt entry and source', '^ddb: intr cpu=[0-9]+ entry={entry} source={source} live_daif=0x[0-9a-f]+ saved_daif=0x[0-9a-f]+$', 1, None, 'both'),
     ('interrupt fault registers', '^ddb: intr esr=(0x[0-9a-f]+|unavailable) far=(0x[0-9a-f]+|unavailable)$', 1, None, 'both'),
+    # GitHub issue #715: the boot fixture raised SGI 2 on CPU 1 eight times,
+    # each after the last was counted. capture_problems refuses a count of it
+    # on CPU 0, which never took it.
+    ('fixture SGI counted on CPU 1', '^ddb: intr count cpu=1 intid=2 count=8$', 1, 1, 'both'),
+    ('world-stop SGI counted on CPU 1', '^ddb: intr count cpu=1 intid=1 count=[1-9][0-9]*$', 1, 1, 'both'),
+    ('CPU 1 timer PPI counted', '^ddb: intr count cpu=1 intid=30 count=[1-9][0-9]*$', 1, 1, 'both'),
     ('scheduler fields', '^ddb: sched enabled=[01] pending=[01] current=[0-9]+ ready=[0-9]+ running=[0-9]+ blocked=[0-9]+ exited=[0-9]+( constructing=[1-9][0-9]*)? truncated=[01]$', 1, None, 'both'),
     ('current process fields', '^ddb: current pid=[0-9]+ parent=[0-9]+ state=[0-9]+ wait=[0-9]+$', 1, None, 'both'),
     ('CPU 0 activity', '^ddb: activity cpu=0 [a-z-]+ current=[0-9]+ stack=[0-9]+$', 1, None, 'both'),
@@ -142,6 +148,9 @@ def capture_problems(text, metadata, hold_text=""):
 
     def has(expression):
         return re.search(expression, text, re.MULTILINE) is not None
+
+    if has(r"^ddb: intr count cpu=0 intid=2 "):
+        problems.append("fixture SGI on CPU 0: counted on a CPU it was not raised on")
 
     if source == "uart":
         if not re.search(r"^PASS console BREAK injection: peer guard and phase are held$",

@@ -1,0 +1,128 @@
+// Per-CPU, per-INTID interrupt counts, for DDB's `intr` view (GitHub issue
+// #715).
+//
+// A single BREAK snapshot that stops a CPU at `enable_irq` cannot say whether
+// that CPU was spinning or taking interrupts back to back. Two BREAKs a
+// second apart can, if something counts what each CPU acknowledged: a count
+// that climbs between them names the interrupt that is storming.
+//
+// Each platform's IRQ dispatch calls irq_count_record with the INTID it read
+// from GICC_IAR, on the CPU that took the interrupt, before any branch. SGIs
+// and PPIs (INTIDs 0..31) have a slot each. SPIs take one of a few slots,
+// claimed the first time this CPU sees that INTID; the platforms dispatch
+// only a handful. An INTID with no slot left, or the spurious 1023, counts
+// as `other`, so nothing taken goes uncounted.
+//
+// Current limitations (2026-10-08). Keep this list current; a stale one
+// invites relying on a guarantee that quietly stopped holding.
+// - ONE WRITER PER ROW. Only the CPU a row belongs to writes it, from its own
+//   IRQ dispatch with IRQs masked, so a slot claim needs no compare-exchange.
+//   A second writer -- a count made on behalf of another CPU -- would.
+// - READERS SEE A SNAPSHOT ONLY UNDER A WORLD STOP. DDB reads every row with
+//   the world stopped. The boot fixture below reads core 1's row while core 1
+//   runs, and relies on the acquire load of one word only.
+// - COUNTS WRAP. A usize counter does not overflow in any boot this kernel
+//   runs; a wrapped count would read as a small one.
+
+use "kernel/lib/atomic_word.tkb";
+use "kernel/lib/execution_model.tkb";
+
+// SGIs 0..15 and PPIs 16..31.
+const IRQ_COUNT_BANKED: usize = 32;
+// Distinct SPIs one CPU can count by INTID. QEMU dispatches the UART and
+// virtio-net; RPi5 the UART, USB, GEM and PMU.
+const IRQ_COUNT_SPI_SLOTS: usize = 8;
+
+// The SGI the boot fixture raises. 1 is the world stop; 2 has no handler, so
+// a core that takes it only acknowledges it.
+const IRQ_COUNT_FIXTURE_SGI: usize = 2;
+const IRQ_COUNT_FIXTURE_ROUNDS: usize = 8;
+
+struct no_copy IrqCountCore {
+    banked: [AtomicWord; IRQ_COUNT_BANKED];
+    spi_intid: [AtomicWord; IRQ_COUNT_SPI_SLOTS];
+    spi_count: [AtomicWord; IRQ_COUNT_SPI_SLOTS];
+    other: AtomicWord;
+}
+
+private let mut irq_count_cores: [IrqCountCore; KERNEL_MAX_CORES];
+
+// Called by the platform IRQ dispatch, on the interrupted CPU, with the
+// INTID it acknowledged.
+fn irq_count_record(id: u32) !{unsafe} {
+    let raw: usize = cpu_id();
+    if (raw >= KERNEL_MAX_CORES) { return; }
+    let core: {0..<KERNEL_MAX_CORES as usize} = raw;
+    let intid: usize = id as usize;
+    if (intid < IRQ_COUNT_BANKED) {
+        let previous: usize = atomic_word_fetch_add(
+            &irq_count_cores[core].banked[intid], 1);
+        return;
+    }
+    if (intid < 1020) {
+        for slot: usize in 0..<IRQ_COUNT_SPI_SLOTS {
+            let held: usize = atomic_word_load(&irq_count_cores[core].spi_intid[slot]);
+            if (held == 0) {
+                atomic_word_store(&irq_count_cores[core].spi_intid[slot], intid);
+            }
+            if (held == 0 || held == intid) {
+                let previous: usize = atomic_word_fetch_add(
+                    &irq_count_cores[core].spi_count[slot], 1);
+                return;
+            }
+        }
+    }
+    let previous: usize = atomic_word_fetch_add(&irq_count_cores[core].other, 1);
+}
+
+// One CPU's count for one SGI or PPI.
+fn irq_count_banked_of(core: {0..<KERNEL_MAX_CORES as usize},
+                       intid: {0..<IRQ_COUNT_BANKED as usize}) -> usize !{unsafe} {
+    return atomic_word_load(&irq_count_cores[core].banked[intid]);
+}
+
+// One CPU's SPI slot: the INTID it holds (0 when unclaimed) and its count.
+fn irq_count_spi_intid_of(core: {0..<KERNEL_MAX_CORES as usize},
+                          slot: {0..<IRQ_COUNT_SPI_SLOTS as usize}) -> usize !{unsafe} {
+    return atomic_word_load(&irq_count_cores[core].spi_intid[slot]);
+}
+
+fn irq_count_spi_count_of(core: {0..<KERNEL_MAX_CORES as usize},
+                          slot: {0..<IRQ_COUNT_SPI_SLOTS as usize}) -> usize !{unsafe} {
+    return atomic_word_load(&irq_count_cores[core].spi_count[slot]);
+}
+
+fn irq_count_other_of(core: {0..<KERNEL_MAX_CORES as usize}) -> usize !{unsafe} {
+    return atomic_word_load(&irq_count_cores[core].other);
+}
+
+// The deterministic control: raise IRQ_COUNT_FIXTURE_SGI on core 1 a fixed
+// number of times, each only after core 1 has counted the one before, so a
+// pending SGI is never raised again and merged with it. DDB's `intr` view
+// must then show exactly that count for that INTID on core 1, and nothing
+// for it on core 0. Each round waits at most a sixteenth of a second.
+fn irq_count_fixture() !{logs, unsafe} {
+    let core: {0..<KERNEL_MAX_CORES as usize} = 1;
+    let raw_intid: usize = IRQ_COUNT_FIXTURE_SGI;
+    if (raw_intid >= IRQ_COUNT_BANKED) { return; }
+    let intid: {0..<IRQ_COUNT_BANKED as usize} = raw_intid;
+    let start_count: usize = irq_count_banked_of(core, intid);
+    let window: i64 = read_cntfrq() >> 4;
+    let mut counted: usize = 0;
+    for round: usize in 0..<IRQ_COUNT_FIXTURE_ROUNDS {
+        if (counted == round) {
+            platform_gic_sgi_send((1 << core) as u32, IRQ_COUNT_FIXTURE_SGI as u32);
+            let start: i64 = read_cntpct();
+            while (irq_count_banked_of(core, intid) - start_count == round &&
+                   read_cntpct() - start < window) { }
+            counted = irq_count_banked_of(core, intid) - start_count;
+        }
+    }
+    kernel_boot_log("irq counts: cpu1 sgi");
+    uart_put_udec(intid);
+    kernel_boot_log(" raised=");
+    uart_put_udec(IRQ_COUNT_FIXTURE_ROUNDS);
+    kernel_boot_log(" counted=");
+    uart_put_udec(counted);
+    kernel_boot_log("\n");
+}

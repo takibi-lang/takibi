@@ -93,6 +93,7 @@ def main():
             run(text, {**metadata, "generated_start": 1, "generated_end": 2}, hold, "compiler frame outside")
             run(text.replace("boundary=assembly-bridge", "boundary=user"), metadata, hold, "backtrace root")
             run(text.replace("ddb: stack cpu=1 status=idle", "missing idle"), metadata, hold, "boot idle root")
+        run(text + "ddb: intr count cpu=0 intid=2 count=1\n", metadata, hold, "fixture SGI on CPU 0")
         # Several independent missing fields must be reported in one invocation.
         run(text.replace("ddb: world-stop complete", "missing stop").replace("ddb: console tx=queued", "missing queue"),
             metadata, hold, ["world stop acknowledgement", "console queued after continue"], external=True)

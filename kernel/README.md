@@ -550,7 +550,7 @@ probe/board setup. A successful run includes:
 [kernel/rpi5] BusyBox httpd curl passed
 [kernel/rpi5] second BusyBox httpd curl passed
 [kernel/rpi5] userspace connected I/O passed
-PASS kernel/rpi5 (68 views, one boot)
+PASS kernel/rpi5 (69 views, one boot)
 ```
 
 It tests negative and positive ARP/ICMP behavior, TCP lifecycle, USB ext2
@@ -1078,7 +1078,13 @@ only owner of register save/restore. `trace` takes a bounded copy of the
 committed lifecycle ring. `continue` returns through the existing IRQ restore
 path. `intr` identifies IRQ versus deliberate BRK entry and reports both the
 live and interrupted DAIF masks; ESR/FAR are shown only for synchronous entry,
-because those registers do not describe an IRQ. `sched` reports the frozen
+because those registers do not describe an IRQ. It then prints one `intr
+count` line per nonzero per-CPU INTID count (`kernel/kernel/irq_counts.tkb`):
+every SGI and PPI by INTID, a few SPIs by INTID as each CPU first sees them,
+and `other` for the rest. A count that climbs between two BREAKs names an
+interrupt storm. The boot raises SGI 2 on CPU 1 eight times, each after the
+last was counted, and the DDB lane requires exactly that count on CPU 1 and
+none on CPU 0. `sched` reports the frozen
 scheduler enable/pending bits and process-state counts from the same bounded
 snapshot as `ps`, including its truncation flag. It adds three lines only
 when they are nonzero: `start-refused` (Ready processes a CPU took and gave
