@@ -9,7 +9,7 @@ history, is archived in `HISTORY.md`.
 
 Live intermittents are listed in `docs/KNOWN_INTERMITTENTS.md`, not here.
 
-## Territories, re-cut 2026-09-25; queues refreshed 2026-10-06
+## Territories, re-cut 2026-09-25; queues refreshed 2026-10-08
 
 A territory is a role, not a set of directories and not a particular agent
 (`AGENTS.md`); which agent holds which is the maintainer's per-session
@@ -153,8 +153,14 @@ measurements first.
 
 1. **Safe-memory language support that A's route consumes** (nothing here
    waits for A): #131 (stored ownership, which feeds #637 stage 2's
-   option (c)). Step 2 is finished, so #637 stage 1's device
-   groups, MMIO and DMA, together with #622 and #623, can proceed.
+   option (c)). **#131 is the key open capability (maintainer,
+   2026-10-08):** #622, #707, #653, #590, #308, #686, #687, #704 and #343
+   need the same stored authority, and #672 stage 2 and #637 stage 2 must
+   adopt its rule rather than a parallel one. Do not advance those issues
+   with point fixes that add their own storage special case. #131 starts
+   once #637 stage 1 has landed, since both edit the ownership checker;
+   #622 is its first concrete driver. Step 2 is finished, so #637 stage
+   1's device groups, MMIO and DMA, together with #623, can proceed.
 2. **Resource use and measured performance:** #220 (telnet; lowered
    2026-09-30 by the maintainer, not urgent, and it waits on PTY and
    `pselect6` scoping), #389, #422, #497, #520, #553,
