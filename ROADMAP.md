@@ -126,10 +126,23 @@ before its issue closes. The steps keep their numbers, which issues cite.
      its three RPi5 pairs are 5.4-8.8 percent apart. Production packing stays
      unchanged; representative workload evidence is required for a
      subsequent optimization decision.
-   - **B, raw atomics:** a typed atomic cell (issue when C is under way);
-     the ordering argument stays with #613.
-   - **D, F, H** are already single files: declared as mint files in the
-     budget rather than retired.
+
+   The eleven declared liveness escapes are gone. Authority-indexed record
+   references, guarded value copies and checked per-CPU places cover process,
+   VM, FD, image and syscall consumers. The compiler file-confinement policy
+   exists but is not enabled for maintained kernel builds. Next in this stage:
+   #724's readonly array-slice permission gap, #725's fallible syscall copy
+   outcomes, bounded syscall copy forwarding, typed probe atomics, remaining
+   per-CPU consumers, then the reviewed finite mint list and kernel flag
+   activation.
+
+   - **B, raw atomics:** use the existing typed atomic cell at probe and
+     consumer boundaries; remaining raw-address operations must be confined.
+     The ordering argument stays with #613.
+   - **D, F, H:** retain genuine physical-memory, pool-carving and overlay
+     mints with their external evidence. The raw-dereference budget is a
+     ratchet, not a reviewed mint-file declaration. High-level consumers must
+     not become mint files merely to pass the confinement flag.
    Then the stage 2 decision (how a stored authority works) and the stage 3
    flip, which makes a FILE the unit of a mint site. #653's compile-time
    closure belongs there: its run-time fence and trace check have landed,
@@ -199,20 +212,17 @@ guarantee, and a time measurement method before the decisions waiting on it.
    #680-#682 wait on it, because space and time are both kept. #719 (every
    QEMU lane on four vCPUs under a host-wide vCPU budget) also waits for A:
    its runners and boot views overlap #637.
-2. **Signal delivery defects, after #637 stage 1 lands** (both edit
-   `process.tkb` and `syscall.tkb`): #629 (handlers other than SIGCHLD are
-   silently dropped; its scope needs a decision), then #628 (no delivery at
-   an interrupt return).
+2. **Signal delivery at interrupt return (#628), after #637 stage 1
+   lands** (both edit `process.tkb` and `syscall.tkb`).
 3. **Stored authority (#131),** which starts once #637 stage 1 has landed;
    its order is in "Ordered routes" above.
-4. **Remaining work, in this order:** #715 (per-CPU IRQ counts for stall
-   diagnosis), #520 (TCP throughput), #386 (retransmit frame copy and global chain head),
+4. **Remaining work, in this order:** #520 (TCP throughput), #386
+   (retransmit frame copy and global chain head),
    #220 (telnet; not urgent, waits on PTY and `pselect6` scoping).
 5. **Compiler safety and language research:** #608 (checked integer to
    enum conversion; not urgent), #203, #252, #200, #201, #282, #129, #417,
    #155, #28, #8.
-6. **Toolchain, portability and hardware-lane support:** #721 (a
-   preflight listing every registry a new kernel file joins), #706 (a design
+6. **Toolchain, portability and hardware-lane support:** #706 (a design
    investigation), #123, #124, #122, #95, #51, #50, #85.
 7. **Evaluations and maintainer decisions, not scheduled:** #648 and #688
    (evaluations), #702 (dedicated soak hardware), #9 (SMP process admission;
