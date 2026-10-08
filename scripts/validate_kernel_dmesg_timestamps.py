@@ -26,6 +26,8 @@ CPU_PREFIX = re.compile(rb"^cpu([0-9]) ")
 # what the block cache answered instead. Both are required, for the same
 # reason the total is: a field this is the only reader of, dropped from the
 # kernel's line, would retire the measurement with every lane green.
+VIRTIO_WAIT = re.compile(
+    rb"virtio-blk wait: completions=(\d+) total_ticks=(\d+) max_ticks=(\d+)")
 BLOCK_IO = re.compile(
     rb"block io: reads=(\d+) writes=(\d+) block_bytes=(\d+) "
     rb"cache_hits=(\d+) runs=(\d+) run_hits=(\d+)")
@@ -267,6 +269,24 @@ def main() -> None:
         fail(f"the boot reports {reads} block reads of {block_bytes} bytes, "
              "which cannot be right for a boot that mounts a filesystem and "
              "runs BusyBox from it -- the counter is not being reached")
+    # 2026-10-04: one virtio request per block. A driver that went back to a
+    # request per 512-byte sector doubled the boot's synchronous waits, and a
+    # loaded host turned their sum into a minute of UART silence that read as
+    # a hang. The equality is exact (each block read or write is one
+    # completion), so the reversion shows here, on an idle host, as a factor
+    # of two rather than as a stall under load.
+    if args.platform == "qemu":
+        wait = VIRTIO_WAIT.search(data)
+        if not wait:
+            fail("the boot reached its last milestone without printing "
+                 "`virtio-blk wait: completions=... total_ticks=... "
+                 "max_ticks=...`")
+        completions = int(wait.group(1))
+        if completions != reads + writes:
+            fail(f"virtio-blk completed {completions} requests for "
+                 f"{reads} block reads and {writes} block writes; one "
+                 f"request per block makes them equal, and twice the sum is "
+                 f"a request per sector again")
     uart_tx = UART_TX.search(data)
     if not uart_tx:
         fail("the boot reached its last milestone without printing "

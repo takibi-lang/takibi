@@ -103,6 +103,13 @@ if [ "$status" -ne 0 ]; then
     exit 1
 fi
 
+# The check built from the working tree, not from the commit: a tracked file
+# edited while it ran means the green result was for a tree nobody will
+# push (2026-10-04, an edit made for the next change during a land).
+if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+    echo "land: tracked files changed during the check; refusing to push a commit the check did not build" >&2
+    exit 2
+fi
 if [ "$(git rev-parse HEAD)" != "$tested" ]; then
     echo "land: HEAD moved during the check; refusing to push an untested commit" >&2
     exit 2

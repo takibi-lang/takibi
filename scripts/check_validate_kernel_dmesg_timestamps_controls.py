@@ -67,7 +67,11 @@ HEALTHY_BLOCK_IO = (b"block io: reads=31000 writes=55 block_bytes=1024 "
 # default carries a non-zero count that serves both platforms.
 HEALTHY_UART_TX = (b"uart tx: queue=512 low_water=256 writers_waited=5 "
                    b"writers_slept=3\r\n")
-HEALTHY_TAIL = HEALTHY_SPIN + HEALTHY_BLOCK_IO + HEALTHY_UART_TX
+# One virtio request per block: completions equal reads + writes above.
+HEALTHY_VIRTIO_WAIT = (b"virtio-blk wait: completions=31055 "
+                       b"total_ticks=50000000 max_ticks=300000\r\n")
+HEALTHY_TAIL = (HEALTHY_SPIN + HEALTHY_BLOCK_IO + HEALTHY_VIRTIO_WAIT +
+                HEALTHY_UART_TX)
 
 
 # GitHub issue #541: the host timing log the UART driver writes, reduced to
@@ -195,6 +199,21 @@ def main() -> int:
                   False, "were not both found in the host timing log",
                   session=None, mode="report"):
         return 1
+    for label, extra, needle in (
+            ("a QEMU boot with no virtio-blk wait line",
+             HEALTHY_SPIN + HEALTHY_BLOCK_IO + HEALTHY_UART_TX,
+             "without printing `virtio-blk wait"),
+            ("a request per sector again",
+             HEALTHY_SPIN + HEALTHY_BLOCK_IO +
+             HEALTHY_VIRTIO_WAIT.replace(b"=31055", b"=62110") +
+             HEALTHY_UART_TX,
+             "a request per sector again")):
+        CASES.note()
+        status, output = run(HEALTHY, extra=extra)
+        if status == 0 or needle not in output:
+            print(f"FAIL dmesg-timestamps control: {label} was not refused"
+                  f"\n{output}")
+            return 1
     status, output = run(HEALTHY, extra=b"", mode="report")
     if status == 0 or "without printing `console: tx spin" not in output:
         print("FAIL dmesg-timestamps control: report mode lost the resource "
@@ -274,12 +293,13 @@ def main() -> int:
     # platforms, and a board boot where no writer waited is refused. One
     # where writers waited and none slept passes: whether a waiting writer
     # sleeps depends on another process being ready at that moment.
-    status, output = run(HEALTHY, "qemu", HEALTHY_SPIN + HEALTHY_BLOCK_IO)
+    status, output = run(HEALTHY, "qemu",
+                         HEALTHY_SPIN + HEALTHY_BLOCK_IO + HEALTHY_VIRTIO_WAIT)
     if status == 0 or "uart tx: queue=" not in output:
         print("FAIL dmesg-timestamps control: a boot without the uart tx "
               f"line was accepted\n{output}")
         return 1
-    zero_waits = (HEALTHY_SPIN + HEALTHY_BLOCK_IO
+    zero_waits = (HEALTHY_SPIN + HEALTHY_BLOCK_IO + HEALTHY_VIRTIO_WAIT
                   + b"uart tx: queue=512 low_water=256 writers_waited=0 "
                   b"writers_slept=0\r\n")
     status, output = run(HEALTHY, "qemu", zero_waits)
@@ -339,7 +359,8 @@ def main() -> int:
     # and HEALTHY carries QEMU's network markers; the ticks are a real RPi5
     # sample, which is what makes the derived figures worth asserting.
     spin = b"console: tx spin ticks=136043016 bytes=31919 spun=31919 tickfreq=54000000\r\n"
-    status, output = run(HEALTHY, "qemu", spin + HEALTHY_BLOCK_IO + HEALTHY_UART_TX)
+    status, output = run(HEALTHY, "qemu", spin + HEALTHY_BLOCK_IO +
+                         HEALTHY_VIRTIO_WAIT + HEALTHY_UART_TX)
     if status != 0 or "console tx spin=2519 ms" not in output:
         print("FAIL dmesg-timestamps control: the console spin measurement "
               f"was not reported from a capture that carries it\n{output}")
@@ -372,7 +393,7 @@ def main() -> int:
         return 1
     status, output = run(
         HEALTHY, "qemu",
-        HEALTHY_BLOCK_IO + HEALTHY_UART_TX
+        HEALTHY_BLOCK_IO + HEALTHY_VIRTIO_WAIT + HEALTHY_UART_TX
         + b"console: tx spin ticks=136043016 bytes=0 spun=0 tickfreq=54000000\r\n")
     if status != 0 or "console tx spin" in output:
         print("FAIL dmesg-timestamps control: zero bytes were divided by, or "

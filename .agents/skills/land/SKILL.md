@@ -45,7 +45,7 @@ Act on its exit status:
 | --- | --- | --- |
 | 0 | pushed, or nothing to push | report |
 | 1 | allcheck red | see below |
-| 2 | precondition failed | fix the tree/branch or current space checkpoint, then rerun |
+| 2 | precondition failed, or a tracked file changed while allcheck ran | fix the tree/branch or current space checkpoint, then rerun; never edit the tree during a land |
 | 3 | `origin/main` moved | rerun; the whole allcheck runs again. After two such rounds, stop and report |
 | 4 | rebase stopped | usually a conflict: resolve it if you understand it, otherwise stop and ask; then rerun. The script supplies a committer identity for the rebase itself, so a missing git identity is not a cause |
 
