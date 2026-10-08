@@ -21281,7 +21281,44 @@ let raw_authority_policy_tests = [
       }|});
 ]
 
+let indexed_cell_copy_fixture = {|
+  generic struct CopyCell(T: type) { value: T; }
+  linear view CopyCellGuard[cell: addr];
+  private let mut copy_cell_a: CopyCell(usize);
+  private let mut copy_cell_b: CopyCell(usize);
+  fn copy_cell_take(cell: &mut CopyCell(usize) @ id) -> CopyCellGuard[id] {
+    return view CopyCellGuard[id];
+  }
+  fn copy_cell_give(guard: sink CopyCellGuard[id]) {}
+  fn copy_cell_load(T: type, guard: borrow CopyCellGuard[id],
+                   cell: borrow &mut CopyCell(T) @ id) -> T {
+    return (*cell).value;
+  }
+  fn copy_cell_store(T: type, guard: borrow CopyCellGuard[id],
+                    cell: borrow &mut CopyCell(T) @ id, value: T) {
+    (*cell).value = value;
+  }
+|}
+
 let indexed_reference_tests = [
+  Alcotest.test_case "indexed cell value copy codegens" `Quick
+    (fun () -> ignore (gen_codegen (indexed_cell_copy_fixture ^ {|
+      fn probe() -> usize { let guard = copy_cell_take(&copy_cell_a);
+        copy_cell_store(guard, &copy_cell_a, 42);
+        let value = copy_cell_load(guard, &copy_cell_a);
+        copy_cell_give(guard); return value; }
+    |})));
+  Alcotest.test_case "indexed cell copy rejects another cell guard" `Quick
+    (expect_type_error "static value mismatch" (indexed_cell_copy_fixture ^ {|
+      fn probe() -> usize { let guard = copy_cell_take(&copy_cell_a);
+        let value = copy_cell_load(guard, &copy_cell_b);
+        copy_cell_give(guard); return value; }
+    |}));
+  Alcotest.test_case "indexed cell copy rejects consumed guard" `Quick
+    (expect_type_error "consumed" (indexed_cell_copy_fixture ^ {|
+      fn probe() -> usize { let guard = copy_cell_take(&copy_cell_a);
+        copy_cell_give(guard); return copy_cell_load(guard, &copy_cell_a); }
+    |}));
   Alcotest.test_case "whole record reference copy codegens" `Quick
     (fun () -> ignore (gen_codegen {|
       struct Record { value: usize; words: [usize; 2]; }

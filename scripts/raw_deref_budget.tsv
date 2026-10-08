@@ -21,7 +21,7 @@ kernel/fs/elf64.tkb	16	0	ELF headers read from an image in memory (#637 D)
 kernel/fs/ext2/ext2.tkb	156	0	ext2 on-disk structures and cache blocks reached through pool pointers (#637 F)
 kernel/init/test_driver.tkb	10	0	boot-time fixtures reaching process records directly (#637 F)
 kernel/kernel/fd_table.tkb	17	0	RegionPool contexts, blocks and objects use indexed references; remaining raw sites access guarded scalar refcounts
-kernel/kernel/process.tkb	18	0	ProcessRecord loans derive from run guards, indexed current phases, owners or MachineStopped. Ordinary scalar diagnostics copy before releasing their pool view; no liveness escape remains. Per-CPU state uses bounded array places. PID cell values, physical stack mints and diagnostic output still await file confinement.
+kernel/kernel/process.tkb	12	0	ProcessRecord loans derive from run guards, indexed current phases, owners or MachineStopped. Ordinary scalar diagnostics copy before releasing their pool view; no liveness escape remains. Per-CPU state uses bounded array places. PID values use guarded copies; physical stack mints and diagnostic output still await file confinement.
 kernel/kernel/syscall.tkb	59	0	syscall frames and scratch buffers (#637 C)
 kernel/lib/diagnostic_ring.tkb	6	0	per-CPU log rings published by atomics (#637 B)
 kernel/lib/intrusive_pool.tkb	93	0	the pool's own chunk carving, the mint of every payload pointer (#637 F)

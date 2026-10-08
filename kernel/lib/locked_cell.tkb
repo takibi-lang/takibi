@@ -71,7 +71,8 @@
 //   which nothing here checks (issue #466). Prefer one cell holding a
 //   struct of everything the lock covers -- that is the shape
 //   kernel/arch/arm64/mm/asid.tkb uses.
-// - NO READER/WRITER DISTINCTION. locked_cell_value hands out a mutable
+// - NO READER/WRITER DISTINCTION. Guarded load/store take the same exclusion,
+//   and locked_cell_value hands out a mutable
 //   `*T`; a read-only holder gets the same exclusion a writer does.
 // - locked_cell_value_boot IS AN ESCAPE HATCH and is `!{unsafe}` so that
 //   every use is visible in the trusted-base inventory. It exists for the
@@ -126,6 +127,18 @@ fn locked_cell_give(T: type, cell: &mut LockedCell(T) @ id,
 fn locked_cell_value(T: type, g: borrow LockedCellGuard[id],
                      cell: &mut LockedCell(T) @ id) -> *T @ id {
     return &(*cell).value;
+}
+
+// Value operations do not export an alias. Both the guard and its cell are
+// borrowed for the operation, and their static cell identities must agree.
+fn locked_cell_load(T: type, g: borrow LockedCellGuard[id],
+                    cell: borrow &mut LockedCell(T) @ id) -> T {
+    return (*cell).value;
+}
+
+fn locked_cell_store(T: type, g: borrow LockedCellGuard[id],
+                     cell: borrow &mut LockedCell(T) @ id, value: T) {
+    (*cell).value = value;
 }
 
 // Observability, and public for the same reason spin_lock_is_held is: a
@@ -211,4 +224,17 @@ fn locked_cell_value_boot(T: type, cell: &mut LockedCell(T) @ id)
 fn locked_cell_value_reporter(T: type, cell: &mut LockedCell(T) @ id)
         -> *T !{unsafe} {
     return &(*cell).value;
+}
+
+// Unlocked value copies retain the boot accessor's explicit unsafe contract.
+// The PID contention fixture also uses them for its deliberate unlocked
+// negative control; ordinary PID minting uses guarded load/store instead.
+fn locked_cell_load_boot(T: type, cell: borrow &mut LockedCell(T) @ id)
+        -> T !{unsafe} {
+    return (*cell).value;
+}
+
+fn locked_cell_store_boot(T: type, cell: borrow &mut LockedCell(T) @ id,
+                         value: T) !{unsafe} {
+    (*cell).value = value;
 }

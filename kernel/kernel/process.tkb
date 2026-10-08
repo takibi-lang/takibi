@@ -576,9 +576,8 @@ private let mut scheduled_process_pid_cell: LockedCell(usize);
 // replaces rather than longer.
 private fn scheduled_process_mint_pid() -> usize {
     let guard = locked_cell_take(&scheduled_process_pid_cell);
-    let minted = locked_cell_value(guard, &scheduled_process_pid_cell);
-    let pid: usize = *minted + 1;
-    *minted = pid;
+    let pid: usize = locked_cell_load(guard, &scheduled_process_pid_cell) + 1;
+    locked_cell_store(guard, &scheduled_process_pid_cell, pid);
     locked_cell_give(&scheduled_process_pid_cell, guard);
     return pid;
 }
@@ -640,17 +639,14 @@ private fn scheduled_pid_probe_pending_new(pid: usize @ pending)
 
 fn scheduled_process_mint_pid_probe_begin()
         -> ScheduledPidProbeBeginResult !{unsafe} {
-    let minted: *usize =
-        locked_cell_value_boot(&scheduled_process_pid_cell);
+    let minted: usize = locked_cell_load_boot(&scheduled_process_pid_cell);
     return ScheduledPidProbeBeginResult::Pending(
-        scheduled_pid_probe_pending_new(*minted + 1));
+        scheduled_pid_probe_pending_new(minted + 1));
 }
 
 fn scheduled_process_mint_pid_probe_commit(
         pending: sink ScheduledPidProbePending[pending]) -> usize !{unsafe} {
-    let minted: *usize =
-        locked_cell_value_boot(&scheduled_process_pid_cell);
-    *minted = pending.pid;
+    locked_cell_store_boot(&scheduled_process_pid_cell, pending.pid);
     return pending.pid;
 }
 
@@ -663,16 +659,14 @@ fn scheduled_process_mint_pid_probe_cancel(
 // the shape that made the first ASID detector report an impossible number.
 fn scheduled_process_pid_counter() -> usize {
     let guard = locked_cell_take(&scheduled_process_pid_cell);
-    let minted = locked_cell_value(guard, &scheduled_process_pid_cell);
-    let count: usize = *minted;
+    let count: usize = locked_cell_load(guard, &scheduled_process_pid_cell);
     locked_cell_give(&scheduled_process_pid_cell, guard);
     return count;
 }
 
 fn scheduled_process_pid_counter_restore(value: usize) {
     let guard = locked_cell_take(&scheduled_process_pid_cell);
-    let minted = locked_cell_value(guard, &scheduled_process_pid_cell);
-    *minted = value;
+    locked_cell_store(guard, &scheduled_process_pid_cell, value);
     locked_cell_give(&scheduled_process_pid_cell, guard);
 }
 
