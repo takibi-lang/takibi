@@ -1,4 +1,4 @@
-// Focused malformed-ELF regression tests for the shared AArch64 validator.
+// Focused malformed-ELF tests for the common and maintained kernel validators.
 // The fixture builds with --forbid-trap and performs no ELF loading.
 
 use "linux_user/common/elf64_validate.tkb";
@@ -68,6 +68,24 @@ fn print_result(label: *u8, expected_valid: bool, image_len: usize) {
             else { uart_puts("FAIL\n"); }
         }
     }
+    // Run the same input through the maintained kernel implementation too.
+    // Its program-count limit is 16, rather than the common validator's 8;
+    // the nine-entry fixture below lacks a complete table in either case.
+    uart_puts("kernel ");
+    uart_puts(label);
+    let bytes = image as []u8;
+    if (image_len > bytes.len) { uart_puts("FAIL\n"); return; }
+    let checked = bytes[0..<image_len];
+    match distro_elf_validate_with_length(checked, image_len) {
+        DistroElfResult::Invalid => {
+            if (expected_valid == false) { uart_puts("PASS\n"); }
+            else { uart_puts("FAIL\n"); }
+        }
+        DistroElfResult::Valid(plan) => {
+            if (expected_valid) { uart_puts("PASS\n"); }
+            else { uart_puts("FAIL\n"); }
+        }
+    }
 }
 
 // Execute the production mint's packed record copies and prove that later
@@ -95,6 +113,12 @@ fn app_main() {
     print_result("truncated header: ", false, 63);
 
     valid_image_init();
+    print_result("empty header: ", false, 0);
+
+    valid_image_init();
+    print_result("truncated program header: ", false, 119);
+
+    valid_image_init();
     put_u64(32, 240);
     print_result("phoff outside table: ", false, 256);
 
@@ -118,5 +142,17 @@ fn app_main() {
     valid_image_init();
     put_u64(112, 3);
     print_result("non-power-two align: ", false, 256);
+
+    valid_image_init();
+    put_u64(80, 1);
+    print_result("incongruent alignment: ", false, 256);
+
+    valid_image_init();
+    put_u64(112, 0);
+    print_result("zero alignment: ", true, 256);
+
+    valid_image_init();
+    put_u64(112, 1);
+    print_result("unit alignment: ", true, 256);
     kernel_header_copy_probe();
 }

@@ -1,9 +1,27 @@
 valid: PASS
+kernel valid: PASS
 truncated header: PASS
+kernel truncated header: PASS
+empty header: PASS
+kernel empty header: PASS
+truncated program header: PASS
+kernel truncated program header: PASS
 phoff outside table: PASS
+kernel phoff outside table: PASS
 bad phentsize: PASS
+kernel bad phentsize: PASS
 too many phdrs: PASS
+kernel too many phdrs: PASS
 filesz over memsz: PASS
+kernel filesz over memsz: PASS
 wrapped segment extent: PASS
+kernel wrapped segment extent: PASS
 non-power-two align: PASS
+kernel non-power-two align: PASS
+incongruent alignment: PASS
+kernel incongruent alignment: PASS
+zero alignment: PASS
+kernel zero alignment: PASS
+unit alignment: PASS
+kernel unit alignment: PASS
 kernel header copies: PASS

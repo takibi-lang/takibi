@@ -122,10 +122,20 @@ fn distro_elf_validate_with_length(image: []u8,
                 let file_size: usize = item.file_size as usize;
                 let virtual_address: usize = item.virtual_address as usize;
                 let memory_size: usize = item.memory_size as usize;
+                let alignment: usize = item.alignment as usize;
                 if (file_size > memory_size || offset > length ||
                     file_size > length - offset ||
                     memory_size > 0xFFFFFFFFFFFFFFFF - virtual_address) {
                     return DistroElfResult::Invalid;
+                }
+                // ELF permits 0/1 (no requirement); otherwise the file and
+                // virtual offsets must agree modulo a power-of-two alignment.
+                if (alignment > 1) {
+                    let mask: usize = alignment - 1;
+                    if ((alignment & mask) != 0 ||
+                        (virtual_address & mask) != (offset & mask)) {
+                        return DistroElfResult::Invalid;
+                    }
                 }
                 let end_address: usize = virtual_address + memory_size;
                 if (end_address > maximum) { maximum = end_address; }
