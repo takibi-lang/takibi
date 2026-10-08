@@ -798,6 +798,39 @@ def lifecycle_refusal(before, after, hold):
     return None
 
 
+def transition_context(before, observed, hold):
+    """Show the small state needed to diagnose a refused action, not a trace dump."""
+    cores = sorted(set(hold.cores) | {hold.cpu})
+    processes = set(hold.processes) | hold.gone
+    for world in (before, observed):
+        for core in cores:
+            for pid in (world.current.get(core), world.stands.get(core),
+                        world.reserved.get(core)):
+                if isinstance(pid, int) and pid in world.state:
+                    processes.add(pid)
+    for world in (before, observed):
+        processes.update(world.parent.get(pid) for pid in tuple(processes)
+                         if world.parent.get(pid) in world.state)
+
+    def describe(world):
+        core_rows = [f"c{core}(current={world.current.get(core)}, "
+                     f"stands={world.stands.get(core)}, "
+                     f"reserved={world.reserved.get(core)}, "
+                     f"interrupted={world.interrupted.get(core)})"
+                     for core in cores]
+        process_rows = [f"p{pid}(state={world.state.get(pid, 'absent')}, "
+                        f"owner={world.owner.get(pid)}, "
+                        f"parent={world.parent.get(pid)}, "
+                        f"wait={world.reason.get(pid)})"
+                        for pid in sorted(processes)]
+        return "; ".join(core_rows + process_rows)
+
+    # Reserved/interrupt state is inferred by replay, not present in the UART
+    # diff; the observed copy retains it until a matching action updates it.
+    return (f"\n  replay before action: {describe(before)}"
+            f"\n  observed state/owner/current/stands: {describe(observed)}")
+
+
 def replay(cores, holds, without=None):
     """(errors, counts): every problem found, and each action's count."""
     world = initial_world(holds[0], cores)
@@ -857,18 +890,20 @@ def replay(cores, holds, without=None):
                 "a step no model action describes: " + \
                 f"processes {procs}, cores {cores_changed}, gone " \
                 f"{sorted(hold.gone)}"
-            errors.append(f"{where}: {detail}")
+            errors.append(f"{where}: {detail}" + transition_context(world, reported, hold))
             return errors, counts
         name, after = matched
         why = lifecycle_refusal(world, after, hold)
         if why:
-            errors.append(f"{where}: {why}")
+            errors.append(f"{where}: {why}" + transition_context(world, after, hold))
             return errors, counts
+        before = world
         world = after
         counts[name] += 1
         why = invariants(world)
         if why:
-            errors.append(f"{where}: after {name}, {why}")
+            errors.append(f"{where}: after {name}, {why}" +
+                          transition_context(before, after, hold))
             return errors, counts
     return errors, counts
 

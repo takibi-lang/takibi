@@ -170,6 +170,15 @@ def main() -> int:
         expect("that window without CloneReschedule",
                run(cloned, "--without", "CloneReschedule"), False,
                "sequence 339 (cpu 0): SwitchAway not enabled"),
+        expect("a refused clone transition reports the physical parent stack",
+               run(cloned, "--without", "CloneReschedule"), False,
+               "c0(current=87, stands=86, reserved=2, interrupted=False)"),
+        expect("a refused clone transition reports the unstarted child",
+               run(cloned, "--without", "CloneReschedule"), False,
+               "p87(state=Running, owner=None, parent=86, wait=0)"),
+        expect("a refused clone transition reports the observed successor",
+               run(cloned, "--without", "CloneReschedule"), False,
+               "c0(current=2, stands=86, reserved=2, interrupted=False)"),
         expect("clone reschedule cannot give the child an owned stack",
                run(cloned.replace("339 0 l p 87 1 - 0 86",
                                   "339 0 l p 87 1 1 0 86")), False,
@@ -254,7 +263,8 @@ def main() -> int:
         "wait published on a Running process are each refused; three recorded QEMU windows pass, one with Nap in SwitchAway's place; they fail without ChildExitStart "
         "and InterruptDepart; the recorded RPi5 clone reschedule passes only with "
         "CloneReschedule, and a child-owned stack, an unreserved successor "
-        "or a relabelled parent are refused; an allocation inside another CPU's hold is "
+        "or a relabelled parent are refused, with before/observed state for the "
+        "physical parent stack, unstarted child and reserved successor; an allocation inside another CPU's hold is "
         "absorbed, a tick leave passes only inside an interrupt, "
         "and #609's shared-stack start, a lost change, a cut report, an "
         "unlocked change, an unsafe snapshot, an unexercised window and a "

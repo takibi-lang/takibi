@@ -766,7 +766,11 @@ diffs each process's state and stack owner, and each core's current and
 stood-on process, at every hold of the process-run lock, and prints the
 changes at the close. `scripts/validate_protocol_trace.py` fails the lane
 on a hold no model action describes, a lost change, or a model action the
-window never exercised. Opening returns 0 while a Running reservation has
+window never exercised. A refused transition reports the involved cores and
+processes before the action and after applying the recorded diff, including
+the physical stack owner. Reserved and interrupt state in that context is
+inferred by replay, rather than directly observed in the UART diff.
+Opening returns 0 while a Running reservation has
 not yet appeared in a core's current or stood-on slot; the EL0 probe yields
 and retries up to 64 times. It returns 1 only after recording a complete
 initial snapshot under the process-run lock. A deterministic candidate
