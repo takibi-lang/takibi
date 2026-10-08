@@ -1,14 +1,12 @@
 {
   "date": "2026-10-08",
   "event": "incremental",
-  "decision": "reuse",
-  "source_sha256": "c31d3208e6d011808cb65ea9695b9183d5535808d4b1716d16f7d9f6f89dcffb",
-  "workload": "Standard production QEMU/RPi5 linked images against published aa30a644; shared bounded boot holds actual VM, FD context and descriptor pool guards and requires nonblocking Busy refusal. Native fixture covers inspection value, alignment, generation, membership, free and shrink. Pool payload, metadata, allocation, retained pages and occupancy are unchanged; existing endpoint evidence is reused only for those boundaries. Three consecutive real full-machine stop requests additionally validate each targeted peer's settled unwind root before release; reverting sequence normalization fails that fixture. 2026-10-08 reuse: 707db129 adds a run-guard parameter to scheduled_process_handle_of_slot (erased, no storage) and moves two handle reads in kernel_process_reap_own_zombies inside an existing hold.",
+  "decision": "measured",
+  "source_sha256": "fd8321ae2c030ee26a94c919994c62f01a063ae08e1de6dff5ef08e70b41b126",
+  "workload": "Standard production QEMU/RPi5 linked images and the QEMU main lane boot, before (87517a32) and after (b1897562) per-bucket block cache write retirement. Accounting boundaries: fixed image sections, allocator start pages, and block-device reads per boot. Pools, slots, allocation paths and retained pages are unchanged.",
   "evidence": [
-    "docs/STOPPED_DIAGNOSTIC_AUTHORITY.md",
-    "docs/CPU_PARTICIPANT_AUTHORITY.md",
-    "docs/PROCESS_RECORD_AUTHORITY_ENDPOINT_2026-10-06.tsv"
+    "docs/BLOCK_CACHE_BUCKETS_2026-10-08.md"
   ],
-  "assessment": "Reuse the 2026-10-07 measurement: no type, field, pool, allocation path, retained page or lock is added or removed; the change is an erased guard parameter and an ordering of two reads already made. Adopt three one-word scoped inspection types, explicit Busy/Stale diagnostics and corrected peer-root publication across repeated stops. Read-only allocation grows 5528 bytes QEMU and 5432 bytes RPi5 versus published aa30a644; data, BSS and reserved spans remain unchanged (2392064 and 5308416 bytes). No new pin, lock, pool metadata or per-process field. Static lifetime/IRQ rejection and bounded WorldStop evidence do not prove physical holding, root-sequence parity or native metadata validity; consecutive real-stop and DDB evidence cover usable root publication separately. Fatal-console/normal diagnostic migration and raw authority confinement remain unfinished.",
-  "next_trigger": "Measure at fatal-console migration, a changed allocation workload or completion of the safe-memory stage."
+  "assessment": "Adopt: 2 KiB of per-core per-bucket write counts (QEMU .bss +2048, RPi5 .bss +4096 with alignment, RPi5 allocator 8 pages fewer) buy a 79 percent cut in single-block device reads (6132 -> 1299) and 62 percent in total device reads (226297 -> 85411) on the QEMU main boot. Cache slot count and data size unchanged. RPi5 read latency was not measured in this review.",
+  "next_trigger": "Measure at a change to block cache slot or bucket count, a changed allocation workload, or completion of the safe-memory stage."
 }
