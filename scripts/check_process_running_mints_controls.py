@@ -20,11 +20,11 @@ def main():
         'commented context marker': original.replace('!{changes_witness_ProcessCurrent}',
                                                      '// !{changes_witness_ProcessCurrent}\n', 1),
         'new inline entry mint': original + '\ninline fn unreviewed() { process_running_here(); }\n',
-        'additional entry mint': original.replace('process_running_new(execution_here()',
-                                                 'process_running_here(); process_running_new(execution_here()', 1),
+        'additional entry mint': original.replace('process_running_new(execution_state[execution_cpu_index()]',
+                                                 'process_running_here(); process_running_new(execution_state[execution_cpu_index()]', 1),
         'global mint': original + '\nlet unreviewed = view ProcessCurrent[0, ProcessState::Running];\n',
         'new direct mint': original + '\nfn unreviewed() { view ProcessCurrent[0, ProcessState::Running]; }\n',
-        'new unmarked writer': original + '\nfn unreviewed() { execution_here().current_live = false; }\n',
+        'new unmarked writer': original + '\nfn unreviewed() { execution_state[execution_cpu_index()].current_live = false; }\n',
         'new unmarked phase writer': original + '''
 fn unreviewed(owner: borrow ScheduledProcessOwner[process],
         state: sink ScheduledProcessState[process, ProcessState::Running]) {
@@ -46,7 +46,7 @@ fn unreviewed(owner: borrow ScheduledProcessOwner[process],
         assert problems({**sources, path: changed}), function
         controls[function] = changed
     assert not problems({**sources, path: original +
-                         '\n// process_running_here(); execution_here().current_live = false;\n'}), 'prose is not code'
+                         '\n// process_running_here(); execution_state[execution_cpu_index()].current_live = false;\n'}), 'prose is not code'
     report_pass('process-running-mints controls',
                 f'production passes and {len(controls)} trusted-boundary regressions fail',
                 controls=len(controls))
