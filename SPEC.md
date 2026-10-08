@@ -2773,11 +2773,24 @@ Name)` consumes the device token, finishes the same RX range, and returns
 `*NameCpu`. The latter requires `unsafe { ... }`: the caller must have
 observed completion, including a completed error, or confirmed device
 quiescence/reset. An unobserved timeout alone is not sufficient evidence.
-`dma_device_addr(dev, Name)` borrows the device token and exports the array's
-address as `usize` inside `unsafe { ... }` for device address translation and
-a descriptor or MMIO boundary. That escape is trusted; converting the
-exported integer back to a CPU pointer or submitting it to another device is
-outside the ownership proof. The unprotected `dma_prepare_rx` and
+`dma_device_span(dev, Name, offset, length)` borrows the device token and
+returns a `DmaDeviceSpan`: the address of byte `offset` of the array and
+`length`. Both `offset` and `length` must be `usize` with a static bound (a
+constant `k`, read as `[k, k+1)`, or a refined `{lo..<hi as usize}`), and the
+largest offset plus the largest length must not exceed the array's byte
+extent; otherwise the call is a type error. A length of zero is accepted.
+`DmaDeviceSpan` is compiler-declared with private fields: no source file can
+construct one, read its fields, or obtain one any other way. A span is tied
+to the device token like a CPU pointer is to the CPU token: it cannot be
+used after the token is consumed, stored durably, or passed to a retaining
+parameter. A descriptor writer takes it as `span: borrow DmaDeviceSpan`.
+`dma_span_length(span)` returns the length as `usize`.
+`dma_span_address(span)` returns the address as `usize` and requires
+`unsafe { ... }`: it is the trusted export to a descriptor or MMIO boundary,
+where any bus translation is applied. Converting the exported integer back
+to a CPU pointer, or pairing it with a length other than the span's, is
+outside the proof.
+The unprotected `dma_prepare_rx` and
 `dma_finish_rx` builtins above
 remain available for legacy allocations but do not carry this guarantee.
 

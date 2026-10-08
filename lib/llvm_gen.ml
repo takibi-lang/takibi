@@ -4484,7 +4484,9 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
        | _ -> raise (Error (Printf.sprintf
            "%s has no fixed allocation for '%s'" operation record)))
 
-  | Call ("dma_device_addr", [owner; { desc = Var record; _ }]) ->
+  (* GitHub issue #623. Sync rule: type_inf.ml's dma_device_span proved
+     offset + length within the extent; this only computes the values. *)
+  | Call ("dma_device_span", [owner; { desc = Var record; _ }; offset_e; length_e]) ->
       let _ = gen_expr locals owner in
       (match Dma_fixed_registry.allocation_of record,
              Dma_fixed_registry.fields_of record with
@@ -4496,10 +4498,26 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
              [| const_int (i32_type context) 0;
                 const_int (i32_type context) field_index |]
              "dma.device.ptr" builder in
-           (TypeUsize, build_ptrtoint ptr (usize_lltype ())
-             "dma.device.addr" builder)
+           let base = build_ptrtoint ptr (usize_lltype ()) "dma.device.addr" builder in
+           let (_, offset) = gen_expr locals offset_e in
+           let (_, length) = gen_expr locals length_e in
+           let offset = coerce offset TypeUsize in
+           let length = coerce length TypeUsize in
+           let address = build_add base offset "dma.span.addr" builder in
+           let span = Dma_fixed_registry.span_type in
+           let span_llty = Hashtbl.find struct_lltypes span in
+           let (address_index, _) = field_info span "address" in
+           let (length_index, _) = field_info span "length" in
+           let value = build_insertvalue (undef span_llty) address
+             address_index "dma.span" builder in
+           let value = build_insertvalue value length
+             length_index "dma.span" builder in
+           (TypeNamed span, value)
        | _ -> raise (Error (Printf.sprintf
-           "dma_device_addr has no fixed allocation for '%s'" record)))
+           "dma_device_span has no fixed allocation for '%s'" record)))
+  | Call (("dma_span_address" | "dma_span_length") as operation, [span]) ->
+      let field = if operation = "dma_span_address" then "address" else "length" in
+      gen_expr locals { desc = FieldGet (span, field); loc = e.loc }
 
   | Call ("dma_refresh_live", [{ desc = Var name; _ }]) ->
       (match Hashtbl.find_opt global_vars name with

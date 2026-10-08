@@ -31,6 +31,10 @@ let device_token record = record ^ "Device"
 let authority_variant record = record ^ "Authority"
 let slot_type record = record ^ "Slot"
 let slot_global record = "dma_owner_" ^ record
+let span_type = "DmaDeviceSpan"
+(* A declaring file no source path can name, so the span's private fields
+   are unreachable from every program file. *)
+let span_loc = Ast.compiler_loc "dma_fixed"
 
 let record_of_token name =
   Hashtbl.fold (fun record _ found ->

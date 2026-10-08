@@ -29,4 +29,14 @@ let run (prog : toplevel list) : toplevel list =
           LetDef (global, Some (TypeNamed slot), None, None,
             true, true, loc) :: !additions
     | _ -> ()) prog;
+  (* GitHub issue #623: the one value a device-facing submission takes. Its
+     fields are private to a file no source can be, so only
+     dma_device_span constructs one and only the dma_span_* builtins read
+     it; a descriptor writer therefore cannot pair an address with a length
+     the extent check did not see. *)
+  if !additions <> [] then
+    additions := StructDef (Dma_fixed_registry.span_type,
+      ["address", TypeUsize; "length", TypeUsize],
+      false, None, ["address"; "length"],
+      Dma_fixed_registry.span_loc) :: !additions;
   prog @ List.rev !additions

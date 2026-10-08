@@ -4268,28 +4268,74 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       raise (TypeError (e.loc, Printf.sprintf
         "%s expects a CPU token and a fixed DMA record type" operation))
 
-  | Call ("dma_device_addr", [({ desc = Ast.Var _; _ } as owner);
-                               { desc = Ast.Var record; _ }]) ->
-      (match Dma_fixed_registry.allocation_of record with
-       | Some _ ->
+  (* GitHub issue #623: a device span binds one submitted range to one
+     allocation. Both ends must have a static bound -- a constant k is
+     [k, k+1), a refined value its own range -- and the largest offset plus
+     the largest length must fit the allocation's byte extent. Sync rule:
+     llvm_gen.ml's dma_device_span computes the same address. *)
+  | Call ("dma_device_span", [({ desc = Ast.Var _; _ } as owner);
+                               { desc = Ast.Var record; _ };
+                               offset_e; length_e]) ->
+      (match Dma_fixed_registry.fields_of record,
+             Dma_fixed_registry.allocation_of record with
+       | Some [(_, (Ast.TypeArray (_, _) as array_ty))], Some _ ->
            let owner_ty = infer_expr senv eenv tyenv fenv owner in
            (match repr owner_ty with
             | TPtr (TStruct token)
               when token = Dma_fixed_registry.device_token record -> ()
             | _ -> raise (TypeError (owner.loc, Printf.sprintf
-                "dma_device_addr for '%s' requires its device authority token"
+                "dma_device_span for '%s' requires its device authority token"
                 record)));
-           if !unsafe_depth = 0 then
+           let extent = match const_type_size senv array_ty with
+             | Some n -> n
+             | None -> raise (TypeError (e.loc,
+                 "fixed DMA allocation has no known byte extent")) in
+           let static_range what (be : Ast.expr) =
+             let bt = infer_expr senv eenv tyenv fenv be in
+             require_usize_index be.loc bt;
+             match Const_env.folded_value be with
+             | Some k -> (k, k + 1)
+             | None ->
+                 (match repr bt with
+                  | TRefinedInt (lo, hi, _) -> (lo, hi)
+                  | _ -> raise (TypeError (be.loc, Printf.sprintf
+                      "dma_device_span %s needs a static bound: a constant \
+                       or a refined {lo..<hi as usize}" what))) in
+           let (offset_lo, offset_hi) = static_range "offset" offset_e in
+           let (length_lo, length_hi) = static_range "length" length_e in
+           if offset_lo < 0 || length_lo < 0 then
              raise (TypeError (e.loc,
-               "dma_device_addr exports a raw bus address; use unsafe at the device descriptor boundary"));
-           note_type_checker_unsafe_use ();
-           TUsize
-       | None -> raise (TypeError (e.loc, Printf.sprintf
-           "dma_device_addr requires a registered fixed DMA record type, got '%s'"
+               "dma_device_span offset and length must be nonnegative"));
+           let largest_end = (offset_hi - 1) + (length_hi - 1) in
+           if largest_end > extent then
+             raise (TypeError (e.loc, Printf.sprintf
+               "dma_device_span may reach byte %d (offset up to %d, length \
+                up to %d) but '%s' is %d bytes"
+               largest_end (offset_hi - 1) (length_hi - 1) record extent));
+           TStruct Dma_fixed_registry.span_type
+       | _ -> raise (TypeError (e.loc, Printf.sprintf
+           "dma_device_span requires a registered fixed DMA record type, got '%s'"
            record)))
-  | Call ("dma_device_addr", _) ->
+  | Call ("dma_device_span", _) ->
       raise (TypeError (e.loc,
-        "dma_device_addr expects a device token and a fixed DMA record type"))
+        "dma_device_span expects a device token, a fixed DMA record type, \
+         an offset and a length"))
+  | Call (("dma_span_address" | "dma_span_length") as operation, [span]) ->
+      let span_ty = infer_expr senv eenv tyenv fenv span in
+      (match repr span_ty with
+       | TStruct name when name = Dma_fixed_registry.span_type -> ()
+       | _ -> raise (TypeError (span.loc, Printf.sprintf
+           "%s expects a %s" operation Dma_fixed_registry.span_type)));
+      if operation = "dma_span_address" then begin
+        if !unsafe_depth = 0 then
+          raise (TypeError (e.loc,
+            "dma_span_address exports a raw bus address; use unsafe at the device descriptor boundary"));
+        note_type_checker_unsafe_use ()
+      end;
+      TUsize
+  | Call (("dma_span_address" | "dma_span_length") as operation, _) ->
+      raise (TypeError (e.loc, Printf.sprintf
+        "%s expects one %s" operation Dma_fixed_registry.span_type))
 
   | Call (("dma_begin_rx" | "dma_finish_owned_rx") as operation,
           [({ desc = Ast.Var _; _ } as owner); { desc = Ast.Var record; _ }]) ->
@@ -7771,9 +7817,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       when is_kinded name -> validate_complete_type loc false inner
     | Ast.TypeBorrow (Ast.TypeVariant (name, _) as inner)
       when Hashtbl.mem variant_kinds name -> validate_complete_type loc false inner
+    (* GitHub issue #623: a device span is tied to its device token, so a
+       descriptor writer receives it as a nonretaining parameter. *)
+    | Ast.TypeBorrow (Ast.TypeNamed name as inner)
+      when name = Dma_fixed_registry.span_type ->
+        validate_complete_type loc false inner
     | Ast.TypeBorrow _ ->
         raise (TypeError (loc,
-          "borrow is only valid on a raw/aligned pointer, slice, affine/linear opaque pointer, indexed owner, erased view, or kinded variant parameter"))
+          "borrow is only valid on a raw/aligned pointer, slice, affine/linear opaque pointer, indexed owner, erased view, kinded variant, or device span parameter"))
     | Ast.TypeBorrowMut (Ast.TypeIndexed (name, _) as inner)
       when is_kinded name -> validate_complete_type loc false inner
     | Ast.TypeBorrowMut _ ->
@@ -10154,6 +10205,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.Call (("dma_cpu_ptr" | "dma_cpu_slice"),
                   [{ Ast.desc = Ast.Var owner; _ }; _]) ->
           PathSet.singleton (pvar owner)
+      (* GitHub issue #623: a span is usable only while its device token
+         is live, so it carries that token's taint. *)
+      | Ast.Call ("dma_device_span",
+                  ({ Ast.desc = Ast.Var owner; _ } :: _)) ->
+          PathSet.singleton (pvar owner)
       | Ast.Call (name, args) ->
           let target = Option.value
             (StringMap.find_opt (loc_key e.loc) !resolved_call_targets)
@@ -10184,6 +10240,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | _ -> expr_taint taints base
     in
     let accepts_region_borrow = function
+      | Some (Ast.TypeBorrow (Ast.TypeNamed name))
+        when name = Dma_fixed_registry.span_type -> true
       | Some (Ast.TypeBorrow inner) -> ast_region_kind inner <> None
       | _ -> false
     in

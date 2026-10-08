@@ -485,9 +485,11 @@ fn usb_await_event(want_type: u32, timeout_ms: usize) -> u32 !{unsafe} {
 // which case buf_dma is ignored. Returns the Transfer Event's completion
 // code (1 = Success, 0 = no event); the residual byte count lands in
 // xhci_last_residual.
-fn usb_ctrl_xfer(bm_request_type: u32, b_request: u32, w_value: u32,
-                 w_index: u32, w_length: u32, buf_dma: usize,
-                 dir_in: bool) -> u32 !{unsafe} {
+// Private: a device-written buffer reaches it only through usb_ctrl_in,
+// whose address and length come from one device span (GitHub issue #623).
+private fn usb_ctrl_xfer(bm_request_type: u32, b_request: u32, w_value: u32,
+                         w_index: u32, w_length: u32, buf_dma: usize,
+                         dir_in: bool) -> u32 !{unsafe} {
     let ep0_ring: *Trb = xhci_ep0_ring as *Trb;
     let has_data: bool = w_length > 0;
 
@@ -551,7 +553,9 @@ fn usb_ctrl_xfer(bm_request_type: u32, b_request: u32, w_value: u32,
 // bytes than asked still raises the event rather than leaving the
 // transfer outstanding. Returns the completion code -- 1 is Success and
 // 13 is Short Packet, both of which mean the data arrived.
-fn usb_bulk_xfer(dir_in: bool, buf_dma: usize, length: u32) -> u32 !{unsafe} {
+// Private for the same reason as usb_ctrl_xfer: an IN transfer is submitted
+// through usb_bulk_in, an OUT one through usb_bulk_out.
+private fn usb_bulk_xfer(dir_in: bool, buf_dma: usize, length: u32) -> u32 !{unsafe} {
     let mut ring: *Trb = xhci_bulk_out_ring as *Trb;
     let mut enq: usize = xhci_bulk_out_enq;
     let mut cyc: u32 = xhci_bulk_out_cycle;
@@ -682,14 +686,14 @@ fn xhci_recover_bulk_stall(dir_in: bool, ep_addr: u32, dci: usize) {
         xhci_reset_endpoint(dci, ring_dma, xhci_bulk_out_enq * 16,
                             xhci_bulk_out_cycle);
     }
-    usb_ctrl_xfer(0x02, 1, 0, ep_addr, 0, 0, false);
+    usb_ctrl_no_data(0x02, 1, 0, ep_addr);
 }
 
 // Bulk-Only Mass Storage Reset (class request, interface recipient, no
 // data stage) -- best-effort override of any inherited device state,
 // same reasoning as RPi3's own msc_bulk_only_reset.
 fn msc_bulk_only_reset() -> bool {
-    return usb_ctrl_xfer(0x21, 0xFF, 0, xhci_msc_interface_num, 0, 0, false) == 1;
+    return usb_ctrl_no_data(0x21, 0xFF, 0, xhci_msc_interface_num) == 1;
 }
 
 // Full USB Mass Storage BOT reset recovery, in the order the BOT spec
@@ -719,8 +723,8 @@ fn msc_bulk_only_reset() -> bool {
 // transport breakdown).
 fn msc_recover_transport() -> bool {
     msc_bulk_only_reset();
-    usb_ctrl_xfer(0x02, 1, 0, xhci_msc_bulk_in_ep, 0, 0, false);
-    usb_ctrl_xfer(0x02, 1, 0, xhci_msc_bulk_out_ep, 0, 0, false);
+    usb_ctrl_no_data(0x02, 1, 0, xhci_msc_bulk_in_ep);
+    usb_ctrl_no_data(0x02, 1, 0, xhci_msc_bulk_out_ep);
     return true;
 }
 
@@ -787,11 +791,10 @@ private fn xhci_receive_configuration(length: {1..<257 as u32}) -> u32 !{unsafe}
     match xhci_control_take() {
         XhciControlReceiveAuthority::Cpu(cpu) => {
             let device = dma_begin_rx(cpu, XhciControlReceive);
-            let buffer_dma: usize = unsafe {
-                dma_device_addr(device, XhciControlReceive)
-            } + rp1_dma_pci_offset;
-            let completion: u32 = usb_ctrl_xfer(0x80, 6, 0x0200, 0,
-                                                 length, buffer_dma, true);
+            let span_length: {1..<257 as usize} = length as usize;
+            let mut span = dma_device_span(device, XhciControlReceive,
+                                           0, span_length);
+            let completion: u32 = usb_ctrl_in(0x80, 6, 0x0200, 0, span);
             if (completion == 0) {
                 match msc_abort_unobserved_transfer() {
                     MscTimeoutResult::RestartRequired => {
@@ -838,10 +841,10 @@ private fn msc_data_receive_once(length: {1..<65537 as u32})
     match msc_data_take() {
         MscDataReceiveAuthority::Cpu(cpu) => {
             let device = dma_begin_rx(cpu, MscDataReceive);
-            let data_dma: usize = unsafe {
-                dma_device_addr(device, MscDataReceive)
-            } + rp1_dma_pci_offset;
-            let completion: u32 = usb_bulk_xfer(true, data_dma, length);
+            let span_length: {1..<65537 as usize} = length as usize;
+            let mut span = dma_device_span(device, MscDataReceive,
+                                           0, span_length);
+            let completion: u32 = usb_bulk_in(span);
             if (completion == 0) {
                 match msc_abort_unobserved_transfer() {
                     MscTimeoutResult::RestartRequired => {
@@ -880,10 +883,8 @@ private fn msc_csw_receive_attempt(cpu: sink *MscCswReceiveCpu,
     static_assert(sizeof(MscCswReceive) >= 13,
                   "the protected CSW extent covers its transfer");
     let device = dma_begin_rx(cpu, MscCswReceive);
-    let csw_dma: usize = unsafe {
-        dma_device_addr(device, MscCswReceive)
-    } + rp1_dma_pci_offset;
-    let completion: u32 = usb_bulk_xfer(true, csw_dma, 13);
+    let mut span = dma_device_span(device, MscCswReceive, 0, 13);
+    let completion: u32 = usb_bulk_in(span);
     if (completion == 0) {
         match msc_abort_unobserved_transfer() {
             MscTimeoutResult::RestartRequired => {
@@ -958,7 +959,7 @@ fn msc_run_command(data_len: {0..<65537 as u32}, dir_in: bool,
     let data_dma: usize = data_base + rp1_dma_pci_offset;
 
     dma_prepare_tx(msc_cbw_buf as *u8, 64);
-    let cbw_cc: u32 = usb_bulk_xfer(false, cbw_dma, 31);
+    let cbw_cc: u32 = usb_bulk_out(cbw_dma, 31);
     if (cbw_cc == 0) {
         match msc_abort_unobserved_transfer() {
             MscTimeoutResult::RestartRequired => {
@@ -990,7 +991,7 @@ fn msc_run_command(data_len: {0..<65537 as u32}, dir_in: bool,
             }
         } else {
             dma_prepare_tx(data as *u8, data_len as usize);
-            let data_cc: u32 = usb_bulk_xfer(false, data_dma, data_len);
+            let data_cc: u32 = usb_bulk_out(data_dma, data_len);
             if (data_cc == 0) {
                 match msc_abort_unobserved_transfer() {
                     MscTimeoutResult::RestartRequired => {
@@ -1507,7 +1508,7 @@ fn xhci_configure_endpoint(in_num: {1..<16 as usize},
         return XhciConfigureOutcome::Transfer(ce_cc);
     }
 
-    let setcfg_cc: u32 = usb_ctrl_xfer(0x00, 9, xhci_msc_config_value, 0, 0, 0, false);
+    let setcfg_cc: u32 = usb_ctrl_no_data(0x00, 9, xhci_msc_config_value, 0);
     if (setcfg_cc != 1) {
         return XhciConfigureOutcome::Transfer(setcfg_cc);
     }
@@ -1850,4 +1851,31 @@ fn disk_write_sectors(sector: u32, buf: []u8) -> DiskIoResult {
             return DiskIoResult::Err(-1);
         }
     }
+}
+
+// GitHub issue #623: the submission entry points. A device-written buffer's
+// address and length both come from one span that dma_device_span proved
+// inside its allocation; RP1's bus translation is applied here, once.
+fn usb_ctrl_in(bm_request_type: u32, b_request: u32, w_value: u32,
+               w_index: u32, span: borrow DmaDeviceSpan) -> u32 !{unsafe} {
+    let bus: usize = unsafe { dma_span_address(span) } + rp1_dma_pci_offset;
+    return usb_ctrl_xfer(bm_request_type, b_request, w_value, w_index,
+                         dma_span_length(span) as u32, bus, true);
+}
+
+fn usb_ctrl_no_data(bm_request_type: u32, b_request: u32, w_value: u32,
+                    w_index: u32) -> u32 !{unsafe} {
+    return usb_ctrl_xfer(bm_request_type, b_request, w_value, w_index,
+                         0, 0, false);
+}
+
+fn usb_bulk_in(span: borrow DmaDeviceSpan) -> u32 !{unsafe} {
+    let bus: usize = unsafe { dma_span_address(span) } + rp1_dma_pci_offset;
+    return usb_bulk_xfer(true, bus, dma_span_length(span) as u32);
+}
+
+// Device-read buffers are not yet protected allocations; their address and
+// length are still the caller's.
+fn usb_bulk_out(buf_dma: usize, length: u32) -> u32 !{unsafe} {
+    return usb_bulk_xfer(false, buf_dma, length);
 }

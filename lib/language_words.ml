@@ -32,7 +32,7 @@ let compiler_builtins = [
   "dma_prepare_tx"; "dma_prepare_rx"; "dma_finish_rx";
   "dma_refresh_live";
   "dma_cpu_ptr"; "dma_cpu_slice"; "dma_begin_rx"; "dma_finish_owned_rx";
-  "dma_device_addr";
+  "dma_device_span"; "dma_span_address"; "dma_span_length";
   "checked_add_usize"; "checked_mul_usize";
   "mrs_cntfrq_el0"; "mrs_cntpct_el0"; "mrs_sctlr_el1";
   "mrs_esr_el1"; "mrs_far_el1"; "mrs_elr_el1"; "mrs_spsr_el1";

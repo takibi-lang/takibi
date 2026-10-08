@@ -10853,15 +10853,179 @@ fn f() -> *usize { return &temp_address_outer().r.a; }");
           return cpu;
         }");
 
-  Alcotest.test_case "fixed DMA device address needs a trusted boundary" `Quick
+  (* GitHub issue #623: a submitted device range is one span, proved inside
+     one fixed allocation before code generation. The shapes are the
+     maintained ones: virtio-blk's data and status descriptors, xHCI's
+     refined control and mass-storage lengths, and the 13-byte CSW. *)
+  Alcotest.test_case "fixed DMA span address needs a trusted boundary" `Quick
     (expect_type_error
-       "dma_device_addr exports a raw bus address; use unsafe"
+       "dma_span_address exports a raw bus address; use unsafe"
        "struct no_copy Mutex { private word: usize; }
         struct dma_fixed DmaFixed596 { private bytes: [u8; 64]; }
         private let mut dma_fixed596: DmaFixed596 align(64);
-        fn bad(device: sink *DmaFixed596Device) -> usize {
-          return dma_device_addr(device, DmaFixed596);
+        fn bad(span: borrow DmaDeviceSpan) -> usize {
+          return dma_span_address(span);
         }");
+
+  Alcotest.test_case "fixed DMA span accepts virtio-blk data and status descriptors" `Quick
+    (expect_codegen_ok
+       "struct no_copy Mutex { private word: usize; }
+        struct dma_fixed Span623 { private bytes: [u8; 1088]; }
+        private let mut span623: Span623 align(64);
+        fn desc623(span: borrow DmaDeviceSpan) -> usize !{unsafe} {
+          return unsafe { dma_span_address(span) } + dma_span_length(span);
+        }
+        fn ok(device: borrow *Span623Device) -> usize !{unsafe} {
+          let mut data = dma_device_span(device, Span623, 0, 1024);
+          let mut status = dma_device_span(device, Span623, 1024, 1);
+          return desc623(data) + desc623(status);
+        }");
+
+  Alcotest.test_case "fixed DMA span accepts the exact extent and a zero length" `Quick
+    (expect_codegen_ok
+       "struct no_copy Mutex { private word: usize; }
+        struct dma_fixed Span623 { private bytes: [u8; 1088]; }
+        private let mut span623: Span623 align(64);
+        fn desc623(span: borrow DmaDeviceSpan) -> usize !{unsafe} {
+          return unsafe { dma_span_address(span) } + dma_span_length(span);
+        }
+        fn ok(device: borrow *Span623Device) -> usize !{unsafe} {
+          let mut whole = dma_device_span(device, Span623, 0, 1088);
+          let mut empty = dma_device_span(device, Span623, 1088, 0);
+          return desc623(whole) + desc623(empty);
+        }");
+
+  Alcotest.test_case "fixed DMA span accepts a refined length within the extent" `Quick
+    (expect_codegen_ok
+       "struct no_copy Mutex { private word: usize; }
+        struct dma_fixed Span623 { private bytes: [u8; 1088]; }
+        private let mut span623: Span623 align(64);
+        fn desc623(span: borrow DmaDeviceSpan) -> usize !{unsafe} {
+          return unsafe { dma_span_address(span) } + dma_span_length(span);
+        }
+        fn ok(device: borrow *Span623Device, n: {1..<1089 as usize}) -> usize !{unsafe} {
+          let mut span = dma_device_span(device, Span623, 0, n);
+          return desc623(span);
+        }");
+
+  Alcotest.test_case "fixed DMA span rejects one byte beyond the extent" `Quick
+    (expect_type_error
+       "may reach byte 1089 (offset up to 1024, length up to 65) but 'Span623' is 1088 bytes"
+       "struct no_copy Mutex { private word: usize; }
+        struct dma_fixed Span623 { private bytes: [u8; 1088]; }
+        private let mut span623: Span623 align(64);
+        fn desc623(span: borrow DmaDeviceSpan) -> usize !{unsafe} {
+          return unsafe { dma_span_address(span) } + dma_span_length(span);
+        }
+        fn bad(device: borrow *Span623Device) {
+          let mut span = dma_device_span(device, Span623, 1024, 65);
+        }");
+
+  Alcotest.test_case "fixed DMA span rejects a refined length one beyond" `Quick
+    (expect_type_error
+       "may reach byte 1089"
+       "struct no_copy Mutex { private word: usize; }
+        struct dma_fixed Span623 { private bytes: [u8; 1088]; }
+        private let mut span623: Span623 align(64);
+        fn desc623(span: borrow DmaDeviceSpan) -> usize !{unsafe} {
+          return unsafe { dma_span_address(span) } + dma_span_length(span);
+        }
+        fn bad(device: borrow *Span623Device, n: {1..<1090 as usize}) {
+          let mut span = dma_device_span(device, Span623, 0, n);
+        }");
+
+  Alcotest.test_case "fixed DMA span rejects an unbounded length" `Quick
+    (expect_type_error
+       "dma_device_span length needs a static bound"
+       "struct no_copy Mutex { private word: usize; }
+        struct dma_fixed Span623 { private bytes: [u8; 1088]; }
+        private let mut span623: Span623 align(64);
+        fn desc623(span: borrow DmaDeviceSpan) -> usize !{unsafe} {
+          return unsafe { dma_span_address(span) } + dma_span_length(span);
+        }
+        fn bad(device: borrow *Span623Device, n: usize) {
+          let mut span = dma_device_span(device, Span623, 0, n);
+        }");
+
+  Alcotest.test_case "fixed DMA span requires the device token" `Quick
+    (expect_type_error
+       "dma_device_span for 'Span623' requires its device authority token"
+       "struct no_copy Mutex { private word: usize; }
+        struct dma_fixed Span623 { private bytes: [u8; 1088]; }
+        private let mut span623: Span623 align(64);
+        fn desc623(span: borrow DmaDeviceSpan) -> usize !{unsafe} {
+          return unsafe { dma_span_address(span) } + dma_span_length(span);
+        }
+        fn bad(cpu: borrow *Span623Cpu) {
+          let mut span = dma_device_span(cpu, Span623, 0, 8);
+        }");
+
+  Alcotest.test_case "fixed DMA span cannot be forged" `Quick
+    (expect_type_error
+       "cannot construct struct 'DmaDeviceSpan' with a literal"
+       "struct no_copy Mutex { private word: usize; }
+        struct dma_fixed Span623 { private bytes: [u8; 1088]; }
+        private let mut span623: Span623 align(64);
+        fn desc623(span: borrow DmaDeviceSpan) -> usize !{unsafe} {
+          return unsafe { dma_span_address(span) } + dma_span_length(span);
+        }
+        fn bad() { let mut span: DmaDeviceSpan = { 0, 4096 }; }");
+
+  Alcotest.test_case "fixed DMA span fields are private" `Quick
+    (expect_type_error
+       "field 'DmaDeviceSpan.length' is private"
+       "struct no_copy Mutex { private word: usize; }
+        struct dma_fixed Span623 { private bytes: [u8; 1088]; }
+        private let mut span623: Span623 align(64);
+        fn desc623(span: borrow DmaDeviceSpan) -> usize !{unsafe} {
+          return unsafe { dma_span_address(span) } + dma_span_length(span);
+        }
+        fn bad(span: borrow DmaDeviceSpan) -> usize { return span.length; }");
+
+  Alcotest.test_case "fixed DMA span expires with its device token" `Quick
+    (expect_type_error
+       "value 'span' is derived from linear value 'device' and cannot be used after 'device' is consumed"
+       "struct no_copy Mutex { private word: usize; }
+        struct dma_fixed Span623 { private bytes: [u8; 1088]; }
+        private let mut span623: Span623 align(64);
+        fn desc623(span: borrow DmaDeviceSpan) -> usize !{unsafe} {
+          return unsafe { dma_span_address(span) } + dma_span_length(span);
+        }
+        fn bad(cpu: sink *Span623Cpu) -> *Span623Cpu !{unsafe} {
+          let device = dma_begin_rx(cpu, Span623);
+          let mut span = dma_device_span(device, Span623, 0, 8);
+          let back = unsafe { dma_finish_owned_rx(device, Span623) };
+          let n: usize = dma_span_length(span);
+          return back;
+        }");
+
+  Alcotest.test_case "fixed DMA span cannot be retained" `Quick
+    (expect_type_error
+       "cannot be stored into a global"
+       "struct no_copy Mutex { private word: usize; }
+        struct dma_fixed Span623 { private bytes: [u8; 1088]; }
+        private let mut span623: Span623 align(64);
+        fn desc623(span: borrow DmaDeviceSpan) -> usize !{unsafe} {
+          return unsafe { dma_span_address(span) } + dma_span_length(span);
+        }
+        let mut kept623: DmaDeviceSpan;
+        fn bad(span: borrow DmaDeviceSpan) { kept623 = span; }");
+
+  Alcotest.test_case "fixed DMA span needs a nonretaining parameter" `Quick
+    (expect_type_error
+       "cannot be passed to retaining parameter"
+       "struct no_copy Mutex { private word: usize; }
+        struct dma_fixed Span623 { private bytes: [u8; 1088]; }
+        private let mut span623: Span623 align(64);
+        fn desc623(span: borrow DmaDeviceSpan) -> usize !{unsafe} {
+          return unsafe { dma_span_address(span) } + dma_span_length(span);
+        }
+        fn keep(span: DmaDeviceSpan) {}
+        fn bad(device: borrow *Span623Device) {
+          let mut span = dma_device_span(device, Span623, 0, 8);
+          keep(span);
+        }");
+
 
   Alcotest.test_case "fixed DMA finish requires trusted completion" `Quick
     (expect_type_error
@@ -10972,7 +11136,8 @@ let codegen_tests = [
           let ptr = dma_cpu_ptr(cpu, DmaCodegen596);
           let value = ptr[0];
           let device = dma_begin_rx(cpu, DmaCodegen596);
-          let address = unsafe { dma_device_addr(device, DmaCodegen596) };
+          let mut span = dma_device_span(device, DmaCodegen596, 0, 64);
+          let address = unsafe { dma_span_address(span) };
           return unsafe { dma_finish_owned_rx(device, DmaCodegen596) };
         }");
 

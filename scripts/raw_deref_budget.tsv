@@ -13,7 +13,7 @@ kernel/arch/arm64/kernel/frame_ref.tkb	2	0	the exception-frame mint site: a Fram
 kernel/arch/arm64/mm/asid.tkb	25	0	the ASID allocator's records, reached through pool pointers (#637 F)
 kernel/arch/arm64/mm/mmu.tkb	2	0	page-table entries as a raw table (#637 H)
 kernel/boot/fdt.tkb	1	0	the device tree blob as raw memory (#637 H)
-kernel/drivers/block/virtio_blk.tkb	21	21	virtio rings and request buffers, plus device registers (#637 A, E); +1 plain +4 io for the completion-timeout snapshot DDB prints (2026-10-04)
+kernel/drivers/block/virtio_blk.tkb	20	21	virtio rings and request buffers, plus device registers (#637 A, E); +1 plain +4 io for the completion-timeout snapshot DDB prints (2026-10-04)
 kernel/drivers/net/rp1_gem.tkb	0	11	RP1 GEM registers (#637 A)
 kernel/drivers/net/virtio_net.tkb	5	21	virtio rings and frames, plus device registers (#637 A, E)
 kernel/fs/elf64.tkb	16	0	ELF headers read from an image in memory (#637 D)

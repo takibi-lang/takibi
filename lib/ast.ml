@@ -34,6 +34,11 @@ let monomorphization_of_loc (loc : loc) : string option =
 let source_loc (loc : loc) : loc =
   { loc with Lexing.pos_fname = source_file_of_loc loc }
 
+(* A declaration the compiler makes itself, in a "file" no source path can
+   name, so its private members are unreachable from every program file. *)
+let compiler_loc (name : string) : loc =
+  { Lexing.dummy_pos with Lexing.pos_fname = "<compiler: " ^ name ^ ">" }
+
 type 'a located = {
   desc: 'a;
   loc: loc [@printer pp_loc];
