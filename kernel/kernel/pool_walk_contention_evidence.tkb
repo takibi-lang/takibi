@@ -101,6 +101,7 @@
 // - The verdict is a LOWER BOUND on a real machine, like every QEMU
 //   concurrency result -- see kernel/CONCURRENCY.md.
 
+use "kernel/lib/peer_tick_window.tkb";
 use "kernel/lib/intrusive_pool.tkb";
 use "kernel/lib/execution_model.tkb";
 
@@ -140,11 +141,9 @@ const POOL_WALK_FLOOR: usize = 16;
 // other QEMU lanes let 250 ms pass without core 1's vCPU running and failed
 // the round as `walk-never-held-it` (GitHub issue #650). A vCPU the host is
 // not running takes no ticks, so the peer failing to arrive after
-// POOL_WALK_RENDEZVOUS_TICKS of its own ticks means it ran and did not come.
+// 16 of its own ticks means it ran and did not come.
 // 16 ticks is the 250 ms the time bound allowed a running peer. The wall
 // bound stays as a backstop for a peer that takes no ticks at all.
-const POOL_WALK_RENDEZVOUS_TICKS: usize = 16;
-const POOL_WALK_RENDEZVOUS_BACKSTOP_SECONDS: i64 = 10;
 
 private let mut pool_walk_pool: IntrusivePool(PoolWalkItem);
 private let mut pool_walk_ready: bool = false;
@@ -339,11 +338,10 @@ private fn pool_walk_once() !{unsafe} {
                 atomic_store_release(pool_walk_stale_address(), cursor);
                 atomic_store_release(pool_walk_held_seq_address(), round);
             }
-            let ticks_start: usize = pool_walk_peer_ticks();
-            let start: i64 = read_cntpct();
+            let mut window: PeerTickWindow = peer_tick_window_start(16);
             let mut released: bool = false;
             while (released == false &&
-                   pool_walk_window_open(ticks_start, start) &&
+                   peer_tick_window_open(window) &&
                    unsafe {
                        atomic_load_acquire(pool_walk_armed_address())
                    } == 1) {
@@ -398,11 +396,10 @@ private fn pool_view_hold_once() !{unsafe} {
                 intrusive_pool_record_of(&pool_walk_pool, slot_view);
             let first_ok: bool = payload.stamp == POOL_WALK_SENTINEL;
             unsafe { atomic_store_release(pool_view_held_address(), 1); }
-            let ticks_start: usize = pool_walk_peer_ticks();
-            let start: i64 = read_cntpct();
+            let mut window: PeerTickWindow = peer_tick_window_start(16);
             let mut released: bool = false;
             while (released == false &&
-                   pool_walk_window_open(ticks_start, start) &&
+                   peer_tick_window_open(window) &&
                    unsafe {
                        atomic_load_acquire(pool_walk_armed_address())
                    } == 1) {
@@ -536,24 +533,10 @@ private fn pool_walk_floor_give_back() -> bool !{unsafe} {
 // Wait, bounded in time, for the other core to reach `target` on one of
 // the rendezvous sequences. False means it did not, which is a give-up
 // this file reports rather than a hang.
-// The other of the two participants, whose ticks bound a wait.
-private fn pool_walk_peer_ticks() -> usize !{unsafe} {
-    if (cpu_id() == 0) { return kernel_tick_count_of(1); }
-    return kernel_tick_count_of(0);
-}
-
-private fn pool_walk_window_open(ticks_start: usize, start: i64) -> bool
-        !{unsafe} {
-    return read_cntpct() - start <
-               read_cntfrq() * POOL_WALK_RENDEZVOUS_BACKSTOP_SECONDS &&
-           pool_walk_peer_ticks() - ticks_start < POOL_WALK_RENDEZVOUS_TICKS;
-}
-
 private fn pool_walk_await(sequence_address: usize, target: usize)
         -> bool !{unsafe} {
-    let ticks_start: usize = pool_walk_peer_ticks();
-    let start: i64 = read_cntpct();
-    while (pool_walk_window_open(ticks_start, start)) {
+    let mut window: PeerTickWindow = peer_tick_window_start(16);
+    while (peer_tick_window_open(window)) {
         if (unsafe { atomic_load_acquire(sequence_address) } >= target) {
             return true;
         }
@@ -624,10 +607,9 @@ fn pool_walk_contention_probe() -> bool !{allocates, unsafe} {
     };
     unsafe { atomic_store_release(pool_walk_armed_address(), 1); }
 
-    let entry_window: i64 = read_cntfrq() >> 2;
-    let entry_start: i64 = read_cntpct();
+    let mut entry_window: PeerTickWindow = peer_tick_window_start(16);
     let mut entered: bool = false;
-    while (entered == false && read_cntpct() - entry_start < entry_window) {
+    while (entered == false && peer_tick_window_open(entry_window)) {
         if (unsafe {
                 atomic_load_acquire(pool_walk_entries_address())
             } > entries_before) {
@@ -687,10 +669,9 @@ fn pool_walk_contention_probe() -> bool !{allocates, unsafe} {
     // Provably out before the accounting is read, for the reason the pool
     // probe next door states: a core still inside would make a leak of a
     // page it is holding.
-    let settle_window: i64 = read_cntfrq() >> 2;
-    let settle_start: i64 = read_cntpct();
+    let mut settle_window: PeerTickWindow = peer_tick_window_start(16);
     let mut settled: bool = false;
-    while (settled == false && read_cntpct() - settle_start < settle_window) {
+    while (settled == false && peer_tick_window_open(settle_window)) {
         if (unsafe {
                 atomic_load_acquire(pool_walk_active_address())
             } == 0) {

@@ -1,5 +1,22 @@
 # takibi Engineering History
 
+## 2026-10-09: Boot-probe waits follow peer ticks
+
+Contention/occupancy rendezvous moved to one private-snapshot PeerTickWindow
+helper. Fifteen files use 46 window construction sites; six deliberate
+wall-clock holds/retry windows remain documented. A 750 ms IRQ-masked peer
+entry delay passes the 70-view QEMU boot, while restoring wall-clock arrival
+bounds fails with the console's missing-ready diagnosis. A separate control
+suppresses secondary entries and verifies seventeen real probe refusals.
+Signal phases stop after their first missed round; init-once abort releases
+its abandoned rendezvous; world-stop resume compares against the stopped
+interval's final tick. Restoring the old resume baseline and signal loop
+accepts a stale tick and attempts 32 rounds instead of two. Source checks cover
+helper waits and loss of the shared tick bound without claiming liveness or
+memory-ordering proof. The atomic predicate migration remains a distinct
+change. See `docs/PEER_TICK_RENDEZVOUS_2026-10-09.md` for evidence and trust.
+
+
 This file holds the detailed, per-feature engineering log for takibi:
 design rationale, bugs found and fixed, file-by-file change checklists,
 and the chronological "why" behind each decision. It was split out of

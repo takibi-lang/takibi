@@ -5,6 +5,7 @@
 // Current limitations (2026-10-03): init runs this once; only core 1
 // participates through the secondary probe dispatcher. This tests exclusion,
 // not physical UART timing or an abandoned lock holder.
+use "kernel/lib/peer_tick_window.tkb";
 use "kernel/lib/atomic_word.tkb";
 use "kernel/lib/execution_model.tkb";
 use "kernel/printk/console_lock.tkb";
@@ -48,9 +49,8 @@ fn console_contention_secondary_run() {
 }
 
 private fn console_probe_wait(cell: *AtomicWord) -> bool {
-    let start: i64 = read_cntpct();
-    let window: i64 = read_cntfrq() >> 1;
-    while (read_cntpct() - start < window) {
+    let mut window: PeerTickWindow = peer_tick_window_start(32);
+    while (peer_tick_window_open(window)) {
         if (atomic_word_load(cell) != 0) { return true; }
     }
     return false;
@@ -66,6 +66,7 @@ private fn console_probe_phase_run(phase: usize) -> bool {
     atomic_word_store(&console_probe_armed, 1);
     if (console_probe_wait(&console_probe_ready) == false) {
         atomic_word_store(&console_probe_armed, 0);
+        kernel_boot_log("console contention stage: secondary-never-ready\n");
         return false;
     }
     let guard = console_lock();
@@ -82,6 +83,11 @@ private fn console_probe_phase_run(phase: usize) -> bool {
     console_unlock(guard);
     let done: bool = console_probe_wait(&console_probe_done);
     atomic_word_store(&console_probe_armed, 0);
+    if (arrived == false) {
+        kernel_boot_log("console contention stage: secondary-never-arrived\n");
+    } else if (done == false) {
+        kernel_boot_log("console contention stage: secondary-never-finished\n");
+    }
     return arrived && expected && done &&
         atomic_word_load(&console_probe_entered) == 1;
 }
@@ -121,6 +127,7 @@ fn console_ddb_peer_hold() {
     let marker = bs"console lock probe: held for UART BREAK\n";
     for byte in marker { uart_debug_putc(byte); }
     let start: i64 = read_cntpct();
+    // Deliberate hold: wait for external UART BREAK while IRQs are masked.
     let budget: i64 = read_cntfrq() * 5;
     let mut reason: usize = 0;
     while (reason == 0 && read_cntpct() - start < budget) {

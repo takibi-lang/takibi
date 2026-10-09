@@ -37,6 +37,7 @@
 //   claims they are -- what matters is that BOTH advanced, which is what
 //   makes it contention rather than one core taking turns with itself.
 
+use "kernel/lib/peer_tick_window.tkb";
 use "kernel/lib/intrusive_pool.tkb";
 
 // Pointer-sized at least, which IntrusivePool requires because the free
@@ -301,10 +302,9 @@ fn pool_contention_probe() -> bool !{unsafe} {
     // secondary that never arrives fails the probe rather than hanging
     // the boot; the bound is several tick periods, since one is the
     // minimum wait by construction.
-    let entry_window: i64 = read_cntfrq() >> 2;
-    let entry_start: i64 = read_cntpct();
+    let mut entry_window: PeerTickWindow = peer_tick_window_start(16);
     let mut entered: bool = false;
-    while (entered == false && read_cntpct() - entry_start < entry_window) {
+    while (entered == false && peer_tick_window_open(entry_window)) {
         // A COMPLETED cycle, not the `active` flag. GitHub issue #510:
         // `active` is a level the secondary clears on its way out, so
         // polling it asks whether that core is inside the loop at this
@@ -347,10 +347,9 @@ fn pool_contention_probe() -> bool !{unsafe} {
     // secondary that cannot get there fails the probe instead of hanging
     // the boot -- generous, because how long this takes is exactly the
     // thing that varies between a board and an emulator.
-    let finish_window: i64 = read_cntfrq() * 2;
-    let finish_start: i64 = read_cntpct();
+    let mut finish_window: PeerTickWindow = peer_tick_window_start(128);
     let mut finished: bool = false;
-    while (finished == false && read_cntpct() - finish_start < finish_window) {
+    while (finished == false && peer_tick_window_open(finish_window)) {
         if (unsafe {
                 atomic_load_acquire(contention_secondary_cycles_address())
             } >= CONTENTION_ROUNDS) {
@@ -372,18 +371,16 @@ fn pool_contention_probe() -> bool !{unsafe} {
     // bound here was 4096 empty iterations, which this core burns through
     // in microseconds -- so on a busy host it expired before core 1 had
     // been scheduled at all, and a healthy kernel failed. Every other wait
-    // in this file is a CNTPCT window for that reason; this one was the
-    // exception and had no reason to be.
+    // now uses peer ticks so host starvation cannot consume the budget.
     //
     // And it REPORTS. This was the one exit path in this file that
     // returned false in silence, which is the defect this file's own
     // report comment says it had already fixed -- observed as a boot whose
     // whole record of the probe was the word `failed`, with no stage line
     // and no counts anywhere above it.
-    let settle_window: i64 = read_cntfrq() >> 2;
-    let settle_start: i64 = read_cntpct();
+    let mut settle_window: PeerTickWindow = peer_tick_window_start(16);
     let mut settled: bool = false;
-    while (settled == false && read_cntpct() - settle_start < settle_window) {
+    while (settled == false && peer_tick_window_open(settle_window)) {
         if (unsafe {
                 atomic_load_acquire(contention_secondary_active_address())
             } == 0) {

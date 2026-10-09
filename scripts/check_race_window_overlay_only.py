@@ -18,7 +18,9 @@ from pass_line import report_pass
 
 KERNEL = pathlib.Path("kernel")
 # The spin's own comment and its loop variable, as the builder writes them.
-MARKERS = ("scripts/build_qemu_race_window.py)", "race_window_start")
+MARKERS = ("scripts/build_qemu_race_window.py)", "race_window_start", "delayed_probe_entry",
+           "probe-ticks: missing-peer controls complete", "world_stop_resume_control",
+           "signal_round_control")
 
 
 def main() -> int:

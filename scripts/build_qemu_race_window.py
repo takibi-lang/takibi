@@ -199,6 +199,125 @@ WINDOWS = {
     },
 }
 
+# Delay each real secondary probe entry with IRQs masked: the host counter
+# advances for 750 ms while this participant takes no ticks. This is a
+# deterministic approximation of a descheduled vCPU, not cache/timing proof.
+PROBE_ENTRIES = (
+    "pool_contention", "freelist_contention", "page_contention",
+    "asid_contention", "fd_refcount_contention", "pid_contention",
+    "tag_contention", "schedule_contention", "occupancy_drain",
+    "console_contention", "init_once_contention", "tcp_connection_contention",
+    "world_stop_peer_probe", "pool_walk_contention", "ext2_mutation_contention",
+    "signal_contention",
+)
+PROBE_ENTRY_DELAY = (
+    "                    let saved_probe_irq: usize = mutex_irq_save();\n"
+    "                    let delayed_probe_entry: i64 = read_cntpct();\n"
+    "                    while (read_cntpct() - delayed_probe_entry <\n"
+    "                           (read_cntfrq() >> 1) + (read_cntfrq() >> 2)) {}\n"
+    "                    mutex_irq_restore(saved_probe_irq);\n"
+)
+WINDOWS["651"] = {
+    "spin": None,
+    "prepare": [
+        ("arch/arm64/kernel/secondary.tkb",
+         f"                    {name}_secondary_run();\n",
+         PROBE_ENTRY_DELAY + f"                    {name}_secondary_run();\n")
+        for name in PROBE_ENTRIES
+    ],
+    "check": ("lib/peer_tick_window.tkb",
+              "    return kernel_tick_count_of(window.peer) - window.ticks_start <\n"
+              "               window.tick_budget &&\n"
+              "           read_cntpct() - window.wall_start < read_cntfrq() * 10;\n",
+              "    return read_cntpct() - window.wall_start <\n"
+              "               (read_cntfrq() >> 6) * (window.tick_budget as i64);\n"),
+}
+WINDOWS["651-no-peer"] = {
+    "spin": None,
+    "check": [
+        ("arch/arm64/kernel/secondary.tkb",
+         f"                    {name}_secondary_run();\n",
+         f"                    if (cpu_id() == 0) {{ {name}_secondary_run(); }}\n")
+        for name in PROBE_ENTRIES
+    ] + [("kernel/occupancy_drain_evidence.tkb",
+          '    match world_stop_begin(\n'
+          '            &kernel_world_stop, 2, WORLD_STOP_PROBE_SPINS) {\n',
+          '    let chosen_stop = match world_stop_resume_control {\n'
+          '        0 => { world_stop_begin_nonack_probe(\n'
+          '            &kernel_world_stop, 2, WORLD_STOP_PROBE_SPINS) }\n'
+          '        _ => { world_stop_begin(\n'
+          '            &kernel_world_stop, 2, WORLD_STOP_PROBE_SPINS) }\n'
+          '    };\n'
+          '    match chosen_stop {\n'),
+         ("kernel/occupancy_drain_evidence.tkb",
+          'fn world_stop_probe() -> bool !{unsafe} {\n',
+          'let mut world_stop_resume_control: usize;\n'
+          'fn world_stop_probe() -> bool !{unsafe} {\n'),
+         ("kernel/occupancy_drain_evidence.tkb",
+          '    let mut full: bool = false;\n',
+          '    let mut observed_resume_ticks: usize = resume_ticks_before;\n'
+          '    if (world_stop_resume_control == 1) {\n'
+          '        while (secondary_tick_value() == resume_ticks_before) {}\n'
+          '    }\n'
+          '    let mut full: bool = false;\n'),
+         ("kernel/occupancy_drain_evidence.tkb",
+          '            resume_ticks_before = held_after;\n',
+          '            observed_resume_ticks = held_after;\n'
+          '            resume_ticks_before = held_after;\n'),
+         ("kernel/occupancy_drain_evidence.tkb",
+          '        resumed = secondary_tick_value() > resume_ticks_before;\n',
+          '        if (world_stop_resume_control == 1) {\n'
+          '            resumed = observed_resume_ticks > resume_ticks_before;\n'
+          '        } else {\n'
+          '            resumed = secondary_tick_value() > resume_ticks_before;\n'
+          '        }\n'),
+         ("kernel/signal_contention_evidence.tkb",
+          'private fn signal_probe_round(round: usize, locked: bool) -> usize\n'
+          '        !{unsafe} {\n',
+          'let mut signal_round_control: usize;\n'
+          'private fn signal_probe_round(round: usize, locked: bool) -> usize\n'
+          '        !{unsafe} {\n'
+          '    signal_round_control = signal_round_control + 1;\n'),
+         ("init/contention_probes.tkb",
+          '        kernel_boot_log("world stop from a peer: failed\\n");\n    }\n}\n',
+          '        kernel_boot_log("world stop from a peer: failed\\n");\n    }\n'
+          '    world_stop_resume_control = 1;\n'
+          '    if (world_stop_probe() == false) {\n'
+          '        kernel_boot_log("world stop resume control: refused\\n");\n'
+          '    } else {\n'
+          '        kernel_boot_log("world stop resume control: admitted\\n");\n'
+          '    }\n'
+          '    kernel_boot_log("signal phase control attempts: ");\n'
+          '    uart_put_udec(signal_round_control);\n'
+          '    kernel_boot_log("\\n");\n'
+          '    kernel_boot_log("probe-ticks: missing-peer controls complete\\n");\n'
+          '    while (true) { wfi(); }\n}\n')],
+}
+# Same forced observation with the old pre-stop baseline: the refusal test
+# must independently reject this kernel by its stale-resume diagnosis.
+WINDOWS["651-resume-old"] = {
+    "spin": None,
+    "check": list(WINDOWS["651-no-peer"]["check"]) + [
+        ("kernel/occupancy_drain_evidence.tkb",
+         '            observed_resume_ticks = held_after;\n'
+         '            resume_ticks_before = held_after;\n',
+         '            observed_resume_ticks = held_after;\n'),
+        ("kernel/signal_contention_evidence.tkb",
+         '        if (missed == false) {\n'
+         '            match signal_probe_round(index + 1, locked == 1) {\n'
+         '                0 => {}\n'
+         '                1 => { lost = lost + 1; }\n'
+         '                _ => { missed = true; }\n'
+         '            }\n'
+         '        }\n',
+         '        match signal_probe_round(index + 1, locked == 1) {\n'
+         '            0 => {}\n'
+         '            1 => { lost = lost + 1; }\n'
+         '            _ => { missed = true; }\n'
+         '        }\n')],
+}
+
+
 
 def replace_once(path: Path, before: str, after: str) -> None:
     source = path.read_text(encoding="ascii")
@@ -222,7 +341,8 @@ def main() -> None:
     checks = window["check"]
     if isinstance(checks, tuple):
         checks = [checks]
-    edited_files = {check_file for check_file, _, _ in checks}
+    preparation = window.get("prepare", [])
+    edited_files = {check_file for check_file, _, _ in checks + preparation}
     if window["spin"] is not None:
         spin_file, anchor, peer_only = window["spin"]
         edited_files.add(spin_file)
@@ -256,6 +376,8 @@ def main() -> None:
     if window["spin"] is not None:
         replace_once(overlay_kernel / spin_file, anchor,
                      anchor + spin(args[2], peer_only))
+    for file, before, after in preparation:
+        replace_once(overlay_kernel / file, before, after)
     if revert:
         for check_file, check, reverted in checks:
             replace_once(overlay_kernel / check_file, check, reverted)

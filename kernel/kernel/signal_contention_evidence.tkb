@@ -36,6 +36,7 @@
 //   forged phase reads as a missed round rather than a lost update; the
 //   phase then fails, which is the honest verdict for a race not shown.
 
+use "kernel/lib/peer_tick_window.tkb";
 use "kernel/kernel/process.tkb";
 use "kernel/lib/execution_model.tkb";
 
@@ -86,14 +87,26 @@ fn signal_contention_secondary_run() !{unsafe} {
     }
 }
 
-private fn signal_probe_wait_done(round: usize, window: i64) -> bool
+private fn signal_probe_hold_locked(round: usize) -> bool
         !{unsafe} {
+    // Deliberate hold: the run lock masks IRQs and prevents peer completion.
+    // This measures a short collision opportunity, not an arrival deadline.
     let start: i64 = read_cntpct();
+    let window: i64 = read_cntfrq() >> 10;
     while (read_cntpct() - start < window) {
         if (unsafe { atomic_load_acquire(signal_probe_addr(
                 &signal_probe_done)) } == round) {
             return true;
         }
+    }
+    return false;
+}
+
+private fn signal_probe_wait_done(round: usize) -> bool !{unsafe} {
+    let mut window: PeerTickWindow = peer_tick_window_start(64);
+    while (peer_tick_window_open(window)) {
+        if (unsafe { atomic_load_acquire(signal_probe_addr(
+                &signal_probe_done)) } == round) { return true; }
     }
     return false;
 }
@@ -104,19 +117,15 @@ private fn signal_probe_round(round: usize, locked: bool) -> usize
         !{unsafe} {
     let record: &mut ProcessRecord = &signal_probe_record;
     record.pending_signals = 0;
-    // Unlocked, core 1 can finish, so wait until it has (bounded at a
-    // second). Locked, it cannot until the store below, so the window only
-    // gives it time to reach the lock; it is short because core 0 spends it
-    // with IRQs masked.
-    let mut window: i64 = read_cntfrq();
-    if (locked) { window = read_cntfrq() >> 10; }
+    // Unlocked completion uses peer ticks. Under the real lock, only the
+    // short deliberate hold is possible; wait for completion after unlock.
     if (locked) {
         let guard = process_run_lock();
         let value: usize = process_signal_pending_raised(
             guard, record, SIGNAL_PRIMARY_BIT);
         unsafe { atomic_store_release(signal_probe_addr(&signal_probe_go),
                                       round); }
-        let early: bool = signal_probe_wait_done(round, window);
+        let early: bool = signal_probe_hold_locked(round);
         process_signal_pending_store(guard, record, value);
         process_run_unlock(guard);
     } else {
@@ -125,11 +134,11 @@ private fn signal_probe_round(round: usize, locked: bool) -> usize
             forged, record, SIGNAL_PRIMARY_BIT);
         unsafe { atomic_store_release(signal_probe_addr(&signal_probe_go),
                                       round); }
-        let early: bool = signal_probe_wait_done(round, window);
+        let early: bool = signal_probe_wait_done(round);
         process_signal_pending_store(forged, record, value);
         process_run_guard_discard_unlocked(forged);
     }
-    if (signal_probe_wait_done(round, read_cntfrq()) == false) { return 2; }
+    if (signal_probe_wait_done(round) == false) { return 2; }
     if ((record.pending_signals & SIGNAL_SECONDARY_BIT) == 0) { return 1; }
     return 0;
 }
@@ -146,10 +155,14 @@ private fn signal_contention_run_phase(locked: usize) -> usize !{unsafe} {
     let mut lost: usize = 0;
     let mut missed: bool = false;
     for index: usize in 0..<SIGNAL_CONTENTION_ROUNDS {
-        match signal_probe_round(index + 1, locked == 1) {
-            0 => {}
-            1 => { lost = lost + 1; }
-            _ => { missed = true; }
+        // A missing participant invalidates the phase. Retrying every
+        // remaining round would multiply its emergency timeout by the round count.
+        if (missed == false) {
+            match signal_probe_round(index + 1, locked == 1) {
+                0 => {}
+                1 => { lost = lost + 1; }
+                _ => { missed = true; }
+            }
         }
     }
     unsafe { atomic_store_release(signal_probe_addr(&signal_probe_armed), 0); }
@@ -170,5 +183,9 @@ fn signal_contention_probe() -> bool !{unsafe} {
     kernel_boot_log(" rounds=");
     uart_put_udec(SIGNAL_CONTENTION_ROUNDS);
     kernel_boot_log("\n");
+    if (unlocked_lost > SIGNAL_CONTENTION_ROUNDS ||
+            locked_lost > SIGNAL_CONTENTION_ROUNDS) {
+        kernel_boot_log("signal contention stage: secondary-missed-round\n");
+    }
     return unlocked_lost == SIGNAL_CONTENTION_ROUNDS && locked_lost == 0;
 }

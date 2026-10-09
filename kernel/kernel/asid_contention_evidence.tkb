@@ -37,6 +37,7 @@
 //   cannot happen, and checking is cheaper than arguing that it cannot.
 // - Measures exclusion, not ordering.
 
+use "kernel/lib/peer_tick_window.tkb";
 use "kernel/arch/arm64/mm/asid.tkb";
 use "kernel/lib/execution_model.tkb";
 
@@ -154,10 +155,9 @@ fn asid_contention_probe() -> bool !{unsafe} {
     // recorded at the time as something the remaining probes were fragile
     // about and should take "when one of them next moves". `tag` moved on
     // its own: it failed on RPi5 with overlap 18 of 2048 and then with 0.
-    let entry_window: i64 = read_cntfrq() >> 2;
-    let entry_start: i64 = read_cntpct();
+    let mut entry_window: PeerTickWindow = peer_tick_window_start(16);
     let mut entered: bool = false;
-    while (entered == false && read_cntpct() - entry_start < entry_window) {
+    while (entered == false && peer_tick_window_open(entry_window)) {
         if (unsafe {
                 atomic_load_acquire(asid_probe_secondary_address())
             } >= 1) {
@@ -182,10 +182,9 @@ fn asid_contention_probe() -> bool !{unsafe} {
             atomic_load_acquire(asid_probe_secondary_address()));
     }
 
-    let finish_window: i64 = read_cntfrq() * 2;
-    let finish_start: i64 = read_cntpct();
+    let mut finish_window: PeerTickWindow = peer_tick_window_start(128);
     let mut finished: bool = false;
-    while (finished == false && read_cntpct() - finish_start < finish_window) {
+    while (finished == false && peer_tick_window_open(finish_window)) {
         if (unsafe {
                 atomic_load_acquire(asid_probe_secondary_address())
             } >= ASID_CONTENTION_ROUNDS) {
@@ -201,10 +200,9 @@ fn asid_contention_probe() -> bool !{unsafe} {
     // fails on a kernel that did nothing wrong. GitHub issue #510: wait for
     // the secondary to be provably OUT first, the way the pool probe waits
     // before reading its live count.
-    let settle_window: i64 = read_cntfrq() >> 2;
-    let settle_start: i64 = read_cntpct();
+    let mut settle_window: PeerTickWindow = peer_tick_window_start(16);
     let mut settled: bool = false;
-    while (settled == false && read_cntpct() - settle_start < settle_window) {
+    while (settled == false && peer_tick_window_open(settle_window)) {
         if (unsafe {
                 atomic_load_acquire(asid_probe_active_address())
             } == 0) {

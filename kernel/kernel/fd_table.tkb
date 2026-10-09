@@ -1,3 +1,5 @@
+use "kernel/lib/peer_tick_window.tkb";
+
 use "kernel/lib/intrusive_pool.tkb";
 use "kernel/lib/execution_model.tkb";
 use "kernel/lib/pool_lock.tkb";
@@ -3581,10 +3583,9 @@ fn fd_refcount_contention_probe() -> bool !{unsafe} {
     };
     unsafe { atomic_store_release(fd_refcount_probe_armed_address(), 1); }
 
-    let entry_window: i64 = read_cntfrq() >> 2;
-    let entry_start: i64 = read_cntpct();
+    let mut entry_window: PeerTickWindow = peer_tick_window_start(16);
     let mut entered: bool = false;
-    while (entered == false && read_cntpct() - entry_start < entry_window) {
+    while (entered == false && peer_tick_window_open(entry_window)) {
         if (unsafe {
                 atomic_load_acquire(fd_refcount_probe_entries_address())
             } > entries_before) {
@@ -3605,11 +3606,10 @@ fn fd_refcount_contention_probe() -> bool !{unsafe} {
     // start handshake. Without this wait an interrupt immediately after the
     // active store can let the primary finish every round and report a false
     // overlap=0 failure even though the final reference count is correct.
-    let started_window: i64 = read_cntfrq() >> 2;
-    let started_start: i64 = read_cntpct();
+    let mut started_window: PeerTickWindow = peer_tick_window_start(16);
     let mut started: bool = false;
     while (started == false &&
-           read_cntpct() - started_start < started_window) {
+           peer_tick_window_open(started_window)) {
         if (unsafe {
                 atomic_load_acquire(fd_refcount_probe_secondary_address())
             } > 0) {
@@ -3637,10 +3637,9 @@ fn fd_refcount_contention_probe() -> bool !{unsafe} {
             atomic_load_acquire(fd_refcount_probe_secondary_address()));
     }
 
-    let finish_window: i64 = read_cntfrq() * 2;
-    let finish_start: i64 = read_cntpct();
+    let mut finish_window: PeerTickWindow = peer_tick_window_start(128);
     let mut finished: bool = false;
-    while (finished == false && read_cntpct() - finish_start < finish_window) {
+    while (finished == false && peer_tick_window_open(finish_window)) {
         if (unsafe {
                 atomic_load_acquire(fd_refcount_probe_secondary_address())
             } >= FD_REFCOUNT_CONTENTION_ROUNDS) {

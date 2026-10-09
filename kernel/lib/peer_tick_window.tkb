@@ -1,0 +1,39 @@
+// A boot-probe rendezvous expires after the other participant has run,
+// rather than after host time in which its vCPU may never have been scheduled.
+// The predicate and its atomic ordering stay with the caller.
+//
+// Current limitations (2026-10-09): callers are the non-migrating CPU 0/1
+// boot probes. CPU 0 waits on CPU 1; CPU 1 waits on CPU 0. This is not an
+// arbitrary online-CPU or scheduler deadline API. A tick is an interrupt,
+// not proof that the peer reached the awaited instruction. Masked IRQs,
+// a stopped peer and a dead peer may prevent ticks; a separate ten-second
+// wall-clock backstop therefore remains trusted recovery policy. Unsigned
+// tick subtraction wraps; a window must span less than a complete counter
+// cycle. The private snapshots prevent callers mixing the two clock origins,
+// but this type does not prove progress or the caller's predicate.
+
+use "kernel/lib/execution_model.tkb";
+
+struct PeerTickWindow {
+    private peer: {0..<KERNEL_MAX_CORES as usize};
+    private ticks_start: usize;
+    private tick_budget: usize;
+    private wall_start: i64;
+}
+
+fn peer_tick_window_start(tick_budget: usize) -> PeerTickWindow !{unsafe} {
+    let mut peer: {0..<KERNEL_MAX_CORES as usize} = 0;
+    if (cpu_id() == 0) { peer = 1; }
+    let mut window: PeerTickWindow = {
+        peer, kernel_tick_count_of(peer), tick_budget, read_cntpct()
+    };
+    return window;
+}
+
+// Wake-and-recheck style predicate: an open window never establishes that
+// the peer arrived. The caller must check its own condition on every pass.
+fn peer_tick_window_open(window: PeerTickWindow) -> bool !{unsafe} {
+    return kernel_tick_count_of(window.peer) - window.ticks_start <
+               window.tick_budget &&
+           read_cntpct() - window.wall_start < read_cntfrq() * 10;
+}

@@ -28,6 +28,7 @@
 //   cancels it, and ordinary PID allocation cannot call the split path.
 // - Measures exclusion, not ordering.
 
+use "kernel/lib/peer_tick_window.tkb";
 use "kernel/kernel/process.tkb";
 use "kernel/lib/execution_model.tkb";
 
@@ -123,8 +124,8 @@ private fn pid_probe_rendezvous(primary: bool, sequence: usize,
         peer_address = secondary_address;
     }
     unsafe { atomic_store_release(own_address, sequence); }
-    let deadline: i64 = read_cntpct() + read_cntfrq() * 2;
-    while (read_cntpct() < deadline &&
+    let mut deadline: PeerTickWindow = peer_tick_window_start(128);
+    while (peer_tick_window_open(deadline) &&
            unsafe { atomic_load_acquire(peer_address) } < sequence &&
            unsafe { atomic_load_acquire(pid_probe_armed_address()) } == 1) {
     }
@@ -240,8 +241,8 @@ private fn pid_contention_report(stage: *u8, advanced: usize,
 // it while the secondary may still mint would move the counter backwards.
 private fn pid_probe_disarm_and_quiesce() -> bool !{unsafe} {
     unsafe { atomic_store_release(pid_probe_armed_address(), 0); }
-    let deadline: i64 = read_cntpct() + read_cntfrq() * 2;
-    while (read_cntpct() < deadline &&
+    let mut deadline: PeerTickWindow = peer_tick_window_start(128);
+    while (peer_tick_window_open(deadline) &&
            unsafe {
                atomic_load_acquire(pid_probe_active_address())
            } == 1) {
@@ -273,10 +274,9 @@ private fn pid_contention_phase(locked: bool) -> bool !{unsafe} {
         atomic_store_release(pid_probe_armed_address(), 1);
     }
 
-    let entry_window: i64 = read_cntfrq() >> 2;
-    let entry_start: i64 = read_cntpct();
+    let mut entry_window: PeerTickWindow = peer_tick_window_start(16);
     let mut entered: bool = false;
-    while (entered == false && read_cntpct() - entry_start < entry_window) {
+    while (entered == false && peer_tick_window_open(entry_window)) {
         if (unsafe {
                 atomic_load_acquire(pid_probe_entries_address())
             } > entries_before) {
@@ -308,10 +308,9 @@ private fn pid_contention_phase(locked: bool) -> bool !{unsafe} {
             atomic_load_acquire(pid_probe_secondary_address()));
     }
 
-    let finish_window: i64 = read_cntfrq() * 2;
-    let finish_start: i64 = read_cntpct();
+    let mut finish_window: PeerTickWindow = peer_tick_window_start(128);
     let mut finished: bool = false;
-    while (finished == false && read_cntpct() - finish_start < finish_window) {
+    while (finished == false && peer_tick_window_open(finish_window)) {
         if (unsafe {
                 atomic_load_acquire(pid_probe_secondary_address())
             } >= PID_CONTENTION_ROUNDS) {

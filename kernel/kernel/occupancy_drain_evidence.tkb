@@ -52,6 +52,7 @@
 //   rather than whatever else shares a live instance -- the same reason
 //   every sibling probe owns its own instance.
 
+use "kernel/lib/peer_tick_window.tkb";
 use "kernel/lib/occupancy.tkb";
 use "kernel/lib/execution_model.tkb";
 
@@ -160,10 +161,9 @@ fn occupancy_drain_probe() -> bool !{unsafe} {
 
     // Bounded in TIME here, unlike the drain itself: this file has a clock
     // and occupancy.tkb deliberately does not.
-    let entry_window: i64 = read_cntfrq() >> 2;
-    let entry_start: i64 = read_cntpct();
+    let mut entry_window: PeerTickWindow = peer_tick_window_start(16);
     let mut entered: bool = false;
-    while (entered == false && read_cntpct() - entry_start < entry_window) {
+    while (entered == false && peer_tick_window_open(entry_window)) {
         if (unsafe {
                 atomic_load_acquire(occupancy_probe_entered_address())
             } == 1) {
@@ -202,10 +202,9 @@ fn occupancy_drain_probe() -> bool !{unsafe} {
     // Let it go, and wait until it has provably left -- not for a duration,
     // because "long enough" is the assumption this whole file is about.
     unsafe { atomic_store_release(occupancy_probe_release_address(), 1); }
-    let leave_window: i64 = read_cntfrq() >> 2;
-    let leave_start: i64 = read_cntpct();
+    let mut leave_window: PeerTickWindow = peer_tick_window_start(16);
     let mut left: bool = false;
-    while (left == false && read_cntpct() - leave_start < leave_window) {
+    while (left == false && peer_tick_window_open(leave_window)) {
         if (unsafe {
                 atomic_load_acquire(occupancy_probe_left_address())
             } == 1) {
@@ -249,8 +248,9 @@ private fn world_stop_probe_inspect(stopped: borrow WorldStopped[id]) {
 // peer deliberately does not acknowledge and must produce Partial.
 fn world_stop_probe() -> bool !{unsafe} {
     world_stop_probe_inspections = 0;
-    let ticks_before: usize = secondary_tick_value();
+    let mut resume_ticks_before: usize = secondary_tick_value();
     let mut full: bool = false;
+    let mut acknowledged: bool = false;
     match world_stop_begin(
             &kernel_world_stop, 2, WORLD_STOP_PROBE_SPINS) {
         WorldStopResult::Busy => { }
@@ -258,23 +258,33 @@ fn world_stop_probe() -> bool !{unsafe} {
             world_stop_partial_release(partial, &kernel_world_stop);
         }
         WorldStopResult::Complete(stopped) => {
+            acknowledged = true;
             let held_before: usize = secondary_tick_value();
+            // Deliberate hold: a stopped peer must take no ticks throughout.
             let hold_start: i64 = read_cntpct();
             let hold_window: i64 = read_cntfrq() >> 4;
             while (read_cntpct() - hold_start < hold_window) { }
             let held_after: usize = secondary_tick_value();
+            // Resume must observe a tick AFTER the stopped interval, not
+            // a tick that arrived between the initial sample and the SGI.
+            resume_ticks_before = held_after;
             world_stop_probe_inspect(stopped);
             full = held_before == held_after;
             world_stop_release(stopped, &kernel_world_stop);
         }
     }
 
-    let resume_start: i64 = read_cntpct();
-    let resume_window: i64 = read_cntfrq() >> 2;
+    let mut resume_window: PeerTickWindow = peer_tick_window_start(16);
     let mut resumed: bool = false;
     while (resumed == false &&
-           read_cntpct() - resume_start < resume_window) {
-        resumed = secondary_tick_value() > ticks_before;
+           peer_tick_window_open(resume_window)) {
+        resumed = secondary_tick_value() > resume_ticks_before;
+    }
+
+    if (acknowledged == false) {
+        kernel_boot_log("world stop stage: secondary-never-acknowledged\n");
+    } else if (resumed == false) {
+        kernel_boot_log("world stop stage: secondary-never-resumed\n");
     }
 
     let mut partial_ok: bool = false;
@@ -413,9 +423,8 @@ fn world_stop_peer_probe() -> bool !{unsafe} {
         atomic_store_release(world_stop_peer_probe_address(
             &world_stop_peer_probe_armed), 1);
     }
-    let start: i64 = read_cntpct();
-    let window: i64 = read_cntfrq();
-    while (read_cntpct() - start < window &&
+    let mut window: PeerTickWindow = peer_tick_window_start(64);
+    while (peer_tick_window_open(window) &&
            unsafe { atomic_load_acquire(world_stop_peer_probe_address(
                &world_stop_peer_probe_armed)) } == 1) { }
     unsafe {
@@ -429,5 +438,8 @@ fn world_stop_peer_probe() -> bool !{unsafe} {
     kernel_boot_log("world stop from a peer counts: result=" as *u8);
     uart_put_udec(result);
     kernel_boot_log("\n" as *u8);
+    if (result == 0) {
+        kernel_boot_log("world stop from a peer stage: secondary-never-finished\n");
+    }
     return result == 1;
 }

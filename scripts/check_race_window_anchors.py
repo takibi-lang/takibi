@@ -12,7 +12,7 @@ def validate(sources, windows):
     errors = []
     for name, window in windows.items():
         edited = dict(sources)
-        changes = []
+        changes = list(window.get("prepare", []))
         if window["spin"] is not None:
             file, anchor, peer_only = window["spin"]
             changes.append((file, anchor, anchor + spin(name, peer_only)))
@@ -30,6 +30,7 @@ def validate(sources, windows):
 def main():
     files = set()
     for window in WINDOWS.values():
+        files.update(file for file, _, _ in window.get("prepare", []))
         if window["spin"] is not None:
             files.add(window["spin"][0])
         checks = window["check"]

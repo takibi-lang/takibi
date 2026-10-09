@@ -4,6 +4,7 @@
 // Current limitations (2026-09-12): this uses one private connection and one
 // peer. secondary.tkb admits only core 1 to this probe even when more CPUs are
 // online. It tests exclusion and handoff, not network-device timing.
+use "kernel/lib/peer_tick_window.tkb";
 use "kernel/lib/execution_model.tkb";
 use "kernel/net/tcp.tkb";
 use "kernel/lib/atomic_word.tkb";
@@ -55,9 +56,8 @@ private fn tcp_owner_probe_run_phase(phase: usize) -> bool !{unsafe} {
         atomic_store_release(tcp_owner_probe_addr(&tcp_owner_probe_active), 0);
         atomic_store_release(tcp_owner_probe_addr(&tcp_owner_probe_armed), 1);
     }
-    let start: i64 = read_cntpct();
-    let window: i64 = read_cntfrq() >> 1;
-    while (read_cntpct() - start < window) {
+    let mut window: PeerTickWindow = peer_tick_window_start(32);
+    while (peer_tick_window_open(window)) {
         if (unsafe { atomic_load_acquire(tcp_owner_probe_addr(
                 &tcp_owner_probe_armed)) } == 0) { return true; }
     }
@@ -102,6 +102,9 @@ fn tcp_connection_contention_probe() -> bool !{unsafe} {
     kernel_boot_log(" advanced=");
     uart_put_udec(advanced);
     kernel_boot_log("\n");
+    if (held_phase == false || released_phase == false) {
+        kernel_boot_log("tcp owner contention stage: secondary-never-finished\n");
+    }
     return held_phase && released_phase && busy == 1 && advanced == 1 &&
            after == before + 1;
 }

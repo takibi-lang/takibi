@@ -1771,3 +1771,27 @@ The native region fixture separately exercises empty, grown, shrunken, Out,
 Dying, and retained-free samples. Linux SLUB and FreeBSD UMA measurements must
 use a declared matching workload and accounting boundary before their totals
 can be compared with these observations.
+
+### Boot-probe rendezvous budgets
+
+Contention and occupancy boot probes use `kernel/lib/peer_tick_window.tkb`
+for peer arrival, completion and exit. The CPU 0/1 participants do not migrate;
+each window captures the other participant's timer count. Budgets preserve the
+old nominal intervals at 64 Hz (16, 32, 64 or 128 peer ticks). Host time in
+which the peer takes no interrupts cannot consume that tick budget. A separate
+ten-second wall-clock backstop bounds a peer with masked interrupts or no
+progress; it is recovery policy, not a liveness proof.
+
+Intentional IRQ-masked collision holds, ext2 reader lingers, the stopped-peer
+hold, and the scheduler's whole-phase collision retry budget retain their
+stated wall-clock duration. The source gate checks direct counter waits in
+probe bodies and the shared helper's tick bound; it does not prove arbitrary
+callee behavior or protocol ordering.
+
+`make kernelcheck-probe-ticks-qemu` delays secondary entries for 750 ms with
+IRQs masked and requires all ordinary views to pass. Restoring the old
+wall-clock predicate must make that same run fail with an entry diagnosis.
+A separate overlay suppresses secondary probe entries while leaving real
+timer interrupts enabled; seventeen public probes must refuse the missing
+participant (including the existing world-stop non-ACK control), retaining their existing entry diagnoses. These controls are
+forced schedules, not physical cache-coherence or natural host-load evidence.

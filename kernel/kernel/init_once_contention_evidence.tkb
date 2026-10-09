@@ -5,6 +5,7 @@
 // Current limitations (2026-09-12): one primary and one secondary participate.
 // secondary.tkb admits only core 1 to this probe even when more CPUs are
 // online.
+use "kernel/lib/peer_tick_window.tkb";
 use "kernel/lib/execution_model.tkb";
 use "kernel/lib/init_once.tkb";
 
@@ -73,9 +74,8 @@ fn init_once_contention_secondary_run() !{unsafe} {
 }
 
 private fn init_once_probe_wait_arrived() -> bool !{unsafe} {
-    let start: i64 = read_cntpct();
-    let window: i64 = read_cntfrq() >> 1;
-    while (read_cntpct() - start < window) {
+    let mut window: PeerTickWindow = peer_tick_window_start(32);
+    while (peer_tick_window_open(window)) {
         if (unsafe { atomic_load_acquire(init_once_probe_address(
                 &init_once_probe_arrived)) } == 2) { return true; }
     }
@@ -83,9 +83,8 @@ private fn init_once_probe_wait_arrived() -> bool !{unsafe} {
 }
 
 private fn init_once_probe_wait_left() -> bool !{unsafe} {
-    let start: i64 = read_cntpct();
-    let window: i64 = read_cntfrq() >> 1;
-    while (read_cntpct() - start < window) {
+    let mut window: PeerTickWindow = peer_tick_window_start(32);
+    while (peer_tick_window_open(window)) {
         if (unsafe { atomic_load_acquire(init_once_probe_address(
                 &init_once_probe_secondary_active)) } == 0) { return true; }
     }
@@ -111,7 +110,14 @@ fn init_once_contention_probe() -> bool !{unsafe} {
     init_once_probe_naive_complete = 0;
     init_once_probe_prepare(1);
     let primary_saw_free: bool = init_once_probe_naive_complete == 0;
-    if (init_once_probe_wait_arrived() == false) { return false; }
+    if (init_once_probe_wait_arrived() == false) {
+        unsafe {
+            atomic_store_release(init_once_probe_address(&init_once_probe_armed), 0);
+            atomic_store_release(init_once_probe_address(&init_once_probe_release), 1);
+        }
+        kernel_boot_log("network init contention stage: secondary-never-arrived\n");
+        return false;
+    }
     unsafe { atomic_store_release(init_once_probe_address(
         &init_once_probe_release), 1); }
     if (primary_saw_free) {
@@ -119,20 +125,41 @@ fn init_once_contention_probe() -> bool !{unsafe} {
         unsafe { atomic_store_release(init_once_probe_address(
             &init_once_probe_primary_won), 1); }
     }
-    if (init_once_probe_wait_left() == false) { return false; }
+    if (init_once_probe_wait_left() == false) {
+        unsafe {
+            atomic_store_release(init_once_probe_address(&init_once_probe_armed), 0);
+            atomic_store_release(init_once_probe_address(&init_once_probe_release), 1);
+        }
+        kernel_boot_log("network init contention stage: secondary-never-left\n");
+        return false;
+    }
     let unlocked_winners: usize = unsafe {
         atomic_load_acquire(init_once_probe_address(&init_once_probe_primary_won)) +
         atomic_load_acquire(init_once_probe_address(&init_once_probe_secondary_won))
     };
 
     init_once_probe_prepare(2);
-    if (init_once_probe_wait_arrived() == false) { return false; }
+    if (init_once_probe_wait_arrived() == false) {
+        unsafe {
+            atomic_store_release(init_once_probe_address(&init_once_probe_armed), 0);
+            atomic_store_release(init_once_probe_address(&init_once_probe_release), 1);
+        }
+        kernel_boot_log("network init contention stage: secondary-never-arrived\n");
+        return false;
+    }
     unsafe { atomic_store_release(init_once_probe_address(
         &init_once_probe_release), 1); }
     let primary_won: usize = init_once_probe_locked_attempt();
     unsafe { atomic_store_release(init_once_probe_address(
         &init_once_probe_primary_won), primary_won); }
-    if (init_once_probe_wait_left() == false) { return false; }
+    if (init_once_probe_wait_left() == false) {
+        unsafe {
+            atomic_store_release(init_once_probe_address(&init_once_probe_armed), 0);
+            atomic_store_release(init_once_probe_address(&init_once_probe_release), 1);
+        }
+        kernel_boot_log("network init contention stage: secondary-never-left\n");
+        return false;
+    }
     let locked_winners: usize = unsafe {
         atomic_load_acquire(init_once_probe_address(&init_once_probe_primary_won)) +
         atomic_load_acquire(init_once_probe_address(&init_once_probe_secondary_won))

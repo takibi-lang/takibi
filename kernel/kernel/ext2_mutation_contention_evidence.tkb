@@ -56,6 +56,7 @@
 //   reader on core 0, the arrangement admitting mutation on a peer created.
 // - It does not exercise the five mutating syscall arms. Those are covered
 //   by the ext2_mutation view; this covers the lock they share.
+use "kernel/lib/peer_tick_window.tkb";
 use "kernel/fs/ext2/mutation_lock.tkb";
 use "kernel/lib/execution_model.tkb";
 
@@ -126,11 +127,11 @@ private fn ext2_mutation_probe_reader() !{unsafe} {
             &ext2_mutation_probe_inside), 1); }
         // Stay inside until core 0 has started taking the lock, then a
         // little longer, so a take that did not wait has time to return.
-        let start: i64 = read_cntpct();
-        let window: i64 = read_cntfrq() >> 2;
+        let mut window: PeerTickWindow = peer_tick_window_start(16);
         while (unsafe { atomic_load_acquire(ext2_mutation_probe_addr(
                    &ext2_mutation_probe_trying)) } == 0 &&
-               read_cntpct() - start < window) { }
+               peer_tick_window_open(window)) { }
+        // Deliberate linger: expose a mutation that failed to wait for readers.
         let linger: i64 = read_cntpct();
         while (read_cntpct() - linger < (read_cntfrq() >> 6)) { }
         if (unsafe { atomic_load_acquire(ext2_mutation_probe_addr(
@@ -155,7 +156,6 @@ private fn ext2_mutation_probe_reader() !{unsafe} {
 private fn ext2_mutation_probe_mutator(phase: usize) !{unsafe} {
     unsafe { atomic_store_release(ext2_mutation_probe_addr(
         &ext2_mutation_probe_trying), 1); }
-    let window: i64 = read_cntfrq() >> 1;
     if (phase == 6) {
         let guard = ext2_mutation_take();
         unsafe { atomic_store_release(ext2_mutation_probe_addr(
@@ -165,10 +165,10 @@ private fn ext2_mutation_probe_mutator(phase: usize) !{unsafe} {
         let guard = ext2_mutation_take_without_readers_unchecked();
         unsafe { atomic_store_release(ext2_mutation_probe_addr(
             &ext2_mutation_probe_taken), 1); }
-        let hold: i64 = read_cntpct();
+        let mut hold: PeerTickWindow = peer_tick_window_start(32);
         while (unsafe { atomic_load_acquire(ext2_mutation_probe_addr(
                    &ext2_mutation_probe_left)) } == 0 &&
-               read_cntpct() - hold < window) { }
+               peer_tick_window_open(hold)) { }
         ext2_mutation_give(guard);
     }
     unsafe { atomic_store_release(ext2_mutation_probe_addr(
@@ -191,13 +191,13 @@ private fn ext2_mutation_probe_core0_reader(phase: usize) -> usize
         atomic_store_release(ext2_mutation_probe_addr(&ext2_mutation_probe_phase), phase);
         atomic_store_release(ext2_mutation_probe_addr(&ext2_mutation_probe_armed), 1);
     }
-    let window: i64 = read_cntfrq() >> 1;
-    let start: i64 = read_cntpct();
+    let mut window: PeerTickWindow = peer_tick_window_start(32);
     while (unsafe { atomic_load_acquire(ext2_mutation_probe_addr(
                &ext2_mutation_probe_trying)) } == 0 &&
-           read_cntpct() - start < window) { }
+           peer_tick_window_open(window)) { }
     let started: usize = unsafe { atomic_load_acquire(ext2_mutation_probe_addr(
         &ext2_mutation_probe_trying)) };
+    // Deliberate linger: measure whether the peer bypassed reader exclusion.
     let linger: i64 = read_cntpct();
     while (read_cntpct() - linger < (read_cntfrq() >> 6)) { }
     let overlapped: usize = unsafe { atomic_load_acquire(
@@ -205,10 +205,10 @@ private fn ext2_mutation_probe_core0_reader(phase: usize) -> usize
     unsafe { atomic_store_release(ext2_mutation_probe_addr(
         &ext2_mutation_probe_left), 1); }
     ext2_read_leave();
-    let finish: i64 = read_cntpct();
+    let mut finish: PeerTickWindow = peer_tick_window_start(32);
     while (unsafe { atomic_load_acquire(ext2_mutation_probe_addr(
                &ext2_mutation_probe_armed)) } == 1 &&
-           read_cntpct() - finish < window) { }
+           peer_tick_window_open(finish)) { }
     if (started == 0) {
         unsafe { atomic_store_release(ext2_mutation_probe_addr(
             &ext2_mutation_probe_armed), 0); }
@@ -231,11 +231,10 @@ private fn ext2_mutation_probe_overlap(phase: usize) -> usize !{unsafe} {
         atomic_store_release(ext2_mutation_probe_addr(&ext2_mutation_probe_phase), phase);
         atomic_store_release(ext2_mutation_probe_addr(&ext2_mutation_probe_armed), 1);
     }
-    let start: i64 = read_cntpct();
-    let window: i64 = read_cntfrq() >> 1;
+    let mut window: PeerTickWindow = peer_tick_window_start(32);
     while (unsafe { atomic_load_acquire(ext2_mutation_probe_addr(
                &ext2_mutation_probe_inside)) } == 0 &&
-           read_cntpct() - start < window) { }
+           peer_tick_window_open(window)) { }
     if (unsafe { atomic_load_acquire(ext2_mutation_probe_addr(
             &ext2_mutation_probe_inside)) } == 0) {
         unsafe { atomic_store_release(ext2_mutation_probe_addr(
@@ -255,24 +254,24 @@ private fn ext2_mutation_probe_overlap(phase: usize) -> usize !{unsafe} {
             &ext2_mutation_probe_taken), 1); }
         // Keep the lock until the peer has left, as a real mutation would
         // still be running.
-        let hold: i64 = read_cntpct();
+        let mut hold: PeerTickWindow = peer_tick_window_start(32);
         while (unsafe { atomic_load_acquire(ext2_mutation_probe_addr(
                    &ext2_mutation_probe_left)) } == 0 &&
-               read_cntpct() - hold < window) { }
+               peer_tick_window_open(hold)) { }
         ext2_mutation_give(guard);
     }
-    let finish: i64 = read_cntpct();
+    let mut finish: PeerTickWindow = peer_tick_window_start(32);
     while (unsafe { atomic_load_acquire(ext2_mutation_probe_addr(
                &ext2_mutation_probe_armed)) } == 1 &&
-           read_cntpct() - finish < window) { }
+           peer_tick_window_open(finish)) { }
     return unsafe { atomic_load_acquire(ext2_mutation_probe_addr(
         &ext2_mutation_probe_overlapped)) };
 }
 
 // Arm one phase and wait for the peer to have finished it. Bounded by the
-// counter the peer clears, inside a window derived from read_cntfrq() so the
-// duration is the same on both boards and on an emulator -- never by a spin
-// count, which is a duration only if this core's speed is fixed.
+// counter the peer clears, inside a peer-tick window. Host scheduling
+// delay alone cannot consume that budget; the shared backstop still bounds
+// a peer that cannot take timer interrupts.
 private fn ext2_mutation_probe_run_phase(phase: usize) -> bool !{unsafe} {
     unsafe {
         atomic_store_release(ext2_mutation_probe_addr(
@@ -280,9 +279,8 @@ private fn ext2_mutation_probe_run_phase(phase: usize) -> bool !{unsafe} {
         atomic_store_release(ext2_mutation_probe_addr(
             &ext2_mutation_probe_armed), 1);
     }
-    let start: i64 = read_cntpct();
-    let window: i64 = read_cntfrq() >> 1;
-    while (read_cntpct() - start < window) {
+    let mut window: PeerTickWindow = peer_tick_window_start(32);
+    while (peer_tick_window_open(window)) {
         if (unsafe { atomic_load_acquire(ext2_mutation_probe_addr(
                 &ext2_mutation_probe_armed)) } == 0) { return true; }
     }

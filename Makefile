@@ -381,6 +381,7 @@ KERNEL_UNUSED_CHECKED := \
 	kernel/kernel/tcp_connection_contention_evidence.tkb \
 	kernel/kernel/workload_evidence.tkb \
 	kernel/lib/atomic_word.tkb \
+	kernel/lib/peer_tick_window.tkb \
 	kernel/lib/byte_slice.tkb \
 	kernel/lib/diagnostic_ring.tkb \
 	kernel/lib/init_once.tkb \
@@ -1413,9 +1414,9 @@ KERNEL_QEMU_NET_WAKE_CONTROL_O := $(KERNEL_QEMU_BUILD_DIR)/net-wake-control-main
 KERNEL_QEMU_NET_WAKE_CONTROL_ELF := $(KERNEL_QEMU_BUILD_DIR)/kernel-net-wake-control.elf
 # GitHub issue #615: one widened race window per overlay, armed and with the
 # check it exercises reverted. scripts/build_qemu_race_window.py names them.
-KERNEL_QEMU_RACE_WINDOWS := 609 603 633 678
+KERNEL_QEMU_RACE_WINDOWS := 609 603 633 678 651
 # Controls only: a reverted kernel, and no armed one (the ordinary kernel is it).
-KERNEL_QEMU_RACE_CONTROLS := 635 705 705-missed-arrival
+KERNEL_QEMU_RACE_CONTROLS := 635 705 705-missed-arrival 651-no-peer 651-resume-old
 KERNEL_QEMU_RACE_WINDOW_ELFS := $(foreach w,$(KERNEL_QEMU_RACE_WINDOWS),$(KERNEL_QEMU_BUILD_DIR)/kernel-race-$(w)-armed.elf $(KERNEL_QEMU_BUILD_DIR)/kernel-race-$(w)-reverted.elf) $(foreach w,$(KERNEL_QEMU_RACE_CONTROLS),$(KERNEL_QEMU_BUILD_DIR)/kernel-race-$(w)-reverted.elf)
 KERNEL_QEMU_LINK_LD      := $(KERNEL_DIR)/arch/arm64/boot/link_qemu.ld
 KERNEL_QEMU_ELF          := $(KERNEL_QEMU_BUILD_DIR)/kernel.elf
@@ -1912,6 +1913,15 @@ kernelcheck-race-window-678-qemu: kernelbuild-check
 _kernelcheck-race-window-678-qemu:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_RACE_WINDOW=678 KERNEL_QEMU_RACE_WINDOW_REQUIRE_FAILURE=1 KERNEL_QEMU_RACE_WINDOW_SIGNATURE='^freelist contention stage: incomplete$$' KERNEL_QEMU_SERIAL_PORT=18509 KERNEL_QEMU_QMP_PORT=18510 KERNEL_QEMU_NETDEV_LOCAL_PORT=18511 KERNEL_QEMU_NETDEV_REMOTE_PORT=18512 bash scripts/run_kernel_race_window_qemutest.sh
 
+.PHONY: kernelcheck-probe-ticks-qemu _kernelcheck-probe-ticks-qemu
+kernelcheck-probe-ticks-qemu: kernelbuild-check
+	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-probe-ticks-qemu
+
+_kernelcheck-probe-ticks-qemu:
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_RACE_WINDOW=651 KERNEL_QEMU_RACE_WINDOW_REQUIRE_FAILURE=1 KERNEL_QEMU_RACE_WINDOW_SIGNATURE='^console contention stage: secondary-never-ready$$' KERNEL_QEMU_SERIAL_PORT=18513 KERNEL_QEMU_QMP_PORT=18514 KERNEL_QEMU_NETDEV_LOCAL_PORT=18515 KERNEL_QEMU_NETDEV_REMOTE_PORT=18516 bash scripts/run_kernel_race_window_qemutest.sh
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_probe_refusals_qemutest.sh
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_PROBE_REFUSALS_CONTROL=old-baseline bash scripts/run_kernel_probe_refusals_qemutest.sh
+
 # A functional negative control: removing ToIdle must be observed as failure.
 .PHONY: kernelcheck-race-window-705-qemu _kernelcheck-race-window-705-qemu
 kernelcheck-race-window-705-qemu: kernelbuild-check
@@ -2066,7 +2076,7 @@ KERNELCHECK_QEMU_LANES := kernelcheck-qemu kernelcheck-qemu-debug \
 	kernelcheck-affinity-gdb-qemu kernelcheck-race-window-609-qemu \
 	kernelcheck-race-window-603-qemu kernelcheck-race-window-633-qemu \
 	kernelcheck-race-window-635-qemu kernelcheck-race-window-705-qemu kernelcheck-race-window-678-qemu \
-	kernelcheck-debug-return-abi-qemu
+	kernelcheck-debug-return-abi-qemu kernelcheck-probe-ticks-qemu
 
 KERNELCHECK_LANES := $(KERNELCHECK_QEMU_LANES) kernelcheck-rpi5
 
