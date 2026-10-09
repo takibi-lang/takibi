@@ -6,8 +6,10 @@ globals, allocator payload, metadata or resource lifetime. The diagnostic
 fixture starts QEMU before boot and seeds existing storage; those writes are
 restricted to the fixture and are not production logging.
 
-Measured with `python3 scripts/space_delta.py origin/main` against implementation
-`ef5f5219`, after rebasing onto the syscall copy-span migration. Both production
+Measured with `python3 scripts/space_delta.py origin/main` after rebasing onto
+the syscall copy-span migration. The candidate production source fingerprint
+was `93f1b344bfa80140998416a7ee443679745af65166bc621f390545272403cb38`;
+host-only fixes and the later roadmap rebase retained that fingerprint. Both production
 kernels were freshly linked at the same source boundary; the baseline was
 built in an isolated temporary worktree. `origin/main` resolved to
 `e3e8639f` throughout this measurement.

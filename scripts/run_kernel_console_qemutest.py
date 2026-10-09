@@ -128,13 +128,23 @@ put(addr('kernel_uart_rx_marks') + 4095, 1, 1)
                 state = sections(damaged)
                 assert "invalid indices" in state["rx"][0]["status"]
                 assert "invalid length" in state["peer"][1]["partial"]
+                seed(endpoint, directory, "word('uart_base', 0x08000000)")
+                unsafe_uart = artifacts / "unsafe-uart.log"
+                capture(endpoint, ELF, unsafe_uart, "fixture-invalid-uart", str(directory / "seed-gdb"))
+                try:
+                    state = sections(unsafe_uart)
+                except AssertionError as error:
+                    raise AssertionError("unsafe UART base terminated diagnostic collection") from error
+                assert "unsupported UART base" in state["uart"][0].get("status", ""), \
+                    "unsafe UART base was not refused"
+                assert not qmp(endpoint, "query-status")["running"]
             finally:
                 guest.terminate()
                 guest.wait(timeout=3)
         absent = artifacts / "unavailable.log"
         capture(directory / "absent", ELF, absent, "fixture-unavailable")
         assert "console snapshot status: unavailable:" in absent.read_text()
-    print("PASS kernel/console-qemu: empty, wrapped RX/current line, peer overwrite/publication, XOFF, echo, TX IRQ, corrupt bounds, paused guest and unavailable QMP")
+    print("PASS kernel/console-qemu: empty, wrapped RX/current line, peer overwrite/publication, XOFF, echo, TX IRQ, corrupt bounds/UART base, paused guest and unavailable QMP")
 
 
 if __name__ == "__main__":

@@ -98,11 +98,14 @@ class TakibiConsole(gdb.Command):
                  tx_tail=word("kernel_log_tx_tail"), tx_live=bool(integer(address("kernel_log_tx_live"), 1)),
                  tx_pending=word("kernel_log_tx_count") != 0)
             uart = word("uart_base")
-            if uart:
+            # Only this QEMU virt PL011 window is safe to inspect. A damaged
+            # base must not turn a diagnostic into an arbitrary MMIO read;
+            # GIC reads have previously terminated QEMU during debugging.
+            if uart == 0x09000000:
                 imsc = integer(uart + 0x38, 4)
                 emit("uart", base=hex(uart), imsc=hex(imsc), tx_irq_enabled=bool(imsc & (1 << 5)))
             else:
-                emit("uart", status="unavailable: UART not initialized")
+                emit("uart", base=hex(uart), status="unavailable: unsupported UART base")
             size = capacity("KERNEL_UART_RX_CAPACITY", 65536)
             head, tail = word("kernel_uart_rx_head"), word("kernel_uart_rx_tail")
             if head >= size or tail >= size:
