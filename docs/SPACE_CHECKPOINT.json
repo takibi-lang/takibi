@@ -1,9 +1,9 @@
 {
   "date": "2026-10-09",
-  "event": "milestone",
+  "event": "incremental",
   "decision": "measured",
-  "source_sha256": "2c881e00bf8b43464dc141db138a53b3d38f4fb03b8f5ee08cef3abd31183abf",
-  "workload": "Host-only four-core churn diagnostics rebased onto the checked-place reference typing in 3f43fa26. Fresh QEMU/RPi5 production links compared with that upstream; no new kernel allocation phase or pool occupancy workload.",
+  "source_sha256": "5cb0fb4a9ed4988a1112d45023e2feb6082a26bdc3887e451b38761d9a6516c2",
+  "workload": "#131 place rule first slice (compiler only: stored linear fields as places with field_take/field_put). Linked production kernels against base 0507d42b with scripts/space_delta.py.",
   "evidence": [
     "docs/CHURN_DIAGNOSTICS_SPACE_2026-10-09.md",
     "docs/CONSOLE_DIAGNOSTICS_SPACE_2026-10-09.md",
@@ -29,6 +29,6 @@
     "docs/DMA_MINT_FILES_2026-10-08.md",
     "docs/DMA_TRANSMIT_2026-10-08.md"
   ],
-  "assessment": "Zero text/data/BSS delta, unchanged data/BSS symbol sizes and usable_ram_start on both production platforms. Layout sidecars and GDB operations are host-only. Adopt at zero kernel image growth; seeded diagnostics and injected wrap evidence do not prove natural timing or physical cache behavior.",
+  "assessment": "Linked QEMU and RPi5 kernels are the same size in every section (text, data, BSS, usable_ram_start); no kernel source uses the new forms yet. Fullness is compile-time only. #622's kernel adoption is the next measurement. The preceding churn-diagnostics evidence is retained.",
   "next_trigger": "Measure when production diagnostics gain storage, a new resource/lifetime or allocation workload appears, or the next kernel feature/stage completes."
 }
