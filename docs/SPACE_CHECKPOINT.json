@@ -1,11 +1,12 @@
 {
   "date": "2026-10-09",
-  "event": "incremental",
-  "decision": "reuse",
-  "source_sha256": "f2bff8c15a640e5a6f153d6168a90138042840e14a4e43c695a2b5899f07a3fb",
-  "workload": "#637 group B typed probe atomics: fifteen probe files' shared words moved from usize globals with raw intrinsic addresses to AtomicWord. Linked production kernels (QEMU and RPi5) against base 50a6811f with scripts/space_delta.py. Plus the #556 correction: the world-stop claim gate records its holder (stop or CPU start reservation) in the existing claimed word, and the whole-machine stop waits, time-bounded, for a start reservation.",
+  "event": "milestone",
+  "decision": "measured",
+  "source_sha256": "c572d524422d95d94ac325c6d3e027b503cb63838efa7b5cf34819ed238754bc",
+  "workload": "Typed peer-clock windows at all 46 maintained CPU 0/1 boot waits and a linear world-stop resume observation ticket. Linked production QEMU/RPi5 kernels compared with base 50a6811f using scripts/space_delta.py; the 750 ms delayed-entry bounded QEMU boot exercises the waits and preserves fresh boot/bounded_end pool samples.",
   "evidence": [
-    "docs/PROBE_ATOMIC_WORD_SPACE_2026-10-09.md",
+    "docs/TYPED_PEER_CLOCKS_2026-10-09.md",
+    "docs/TYPED_PEER_CLOCK_POOL_ENDPOINT_2026-10-09.tsv",
     "docs/USER_WRITE_RESULT_SPACE_2026-10-09.md",
     "docs/PEER_TICK_RENDEZVOUS_2026-10-09.md",
     "docs/FREELIST_PHASE_REENTRY_2026-10-08.md",
@@ -24,6 +25,6 @@
     "docs/DMA_MINT_FILES_2026-10-08.md",
     "docs/DMA_TRANSMIT_2026-10-08.md"
   ],
-  "assessment": "Text -856 B (QEMU) and -288 B (RPi5); data, BSS and usable_ram_start unchanged and no data/BSS symbol changed size, since AtomicWord keeps the one-usize layout. No payload, pool, allocation or lifetime change. Adopted. The #556 correction adds two constants and a bounded wait loop in existing code; it adds no global, field, payload, pool or allocation, so the probe-migration measurement is reused.",
-  "next_trigger": "Measure at process trust-boundary separation, final raw-authority confinement, the #729 readonly-literal migration, or a changed allocation/lifetime workload."
+  "assessment": "Text +2544 B (QEMU) and +2704 B (RPi5). Data, BSS, every data/BSS symbol size and usable_ram_start unchanged. No new globals, allocator payload, metadata, allocation policy or lifetime; four-word peer windows and a two-word local resume ticket. Fresh candidate endpoint has pages=0, one empty 16384-byte process chunk and four occupied baseline pool slots. Adopt the small fixed code growth for typed clock/peer boundaries and explicit local obligations; endpoint is not an equal-size comparison with the older process-payload capture.",
+  "next_trigger": "Measure at the typed-atomic probe milestone, another new resource/lifetime, or a changed allocation workload."
 }
