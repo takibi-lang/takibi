@@ -55,6 +55,8 @@ let compiler_builtins = [
      publish_commit that did NOT commit would be the most misleading name
      available in this language. *)
   "publish_begin"; "publish_commit"; "publish_abandon"; "publish_copy";
+  (* GitHub issue #131: the two place operations of a stored linear field. *)
+  "field_take"; "field_put";
 ]
 
 let predeclared_names = ["DMA_CACHE_LINE"]

@@ -1460,9 +1460,50 @@ fn owner_release(o: sink Owner[b, k]) -> RegionPin(Conn)[b, k] {
   struct is not used afterwards.
 - A struct holding one is never dropped with it, not even as a `sink`
   parameter: the field must be moved out on every path.
-- One such field per struct; a field indexed by a static the struct does
-  not carry, or any other nested owner, is still refused. The field is not
-  assigned after construction.
+- A field indexed by a static the struct does not carry, or any other
+  nested owner, is still refused.
+
+**Places (GitHub issue #131, 2026-10-09).** A linear struct may hold
+several stored fields, and their content may also be a linear token -- a
+pointer to a linear opaque struct, such as a fixed-DMA CPU token. Each
+stored field is a place:
+
+```
+private linear struct Frame[desc: usize] {
+    private slot: {0..<1 as usize} @ desc;
+    private cpu: *GemRxCpu;                 // a token held in the owner
+}
+
+fn frame_bytes(frame: borrow Frame[desc]) -> [u8; 1514..] @ desc {
+    let bytes = dma_cpu_slice(frame.cpu, GemRx);   // borrowed in place
+    return bytes[0..<1514];
+}
+
+fn swap_cpu(frame: sink Frame[desc], next: sink *GemRxCpu) -> *GemRxCpu {
+    let old = field_take(frame.cpu);        // the place is now empty
+    field_put(frame.cpu, next);             // and full again
+    frame_release(frame);
+    return old;
+}
+```
+
+- `field_take(h.f)` moves the content out of a local (or `sink`) holder and
+  leaves the place empty; `field_put(h.f, v)` moves `v` into a place that is
+  empty on every path. Both are checked at compile time and cost nothing at
+  run time: a take is the field's load and a put its store.
+- While any place of `h` is empty, `h` cannot be used whole -- passed,
+  returned, borrowed or moved -- and the empty field cannot be read. Put it
+  back first. A holder whose every stored field has been taken is
+  discharged.
+- A value derived from a field borrowed in place (`dma_cpu_slice(h.f, ...)`)
+  is tied to `h` and to that field: it cannot be used after either is taken
+  or consumed. Through a `borrow` holder it may be returned with the
+  holder's `@` index.
+- A borrowed holder's fields can only be borrowed. With one stored field,
+  moving it out with a plain read (`return o.pin;`) still consumes the
+  holder; with several, use `field_take` for each.
+- The fields are filled at construction; the function forms are
+  provisional and may get lighter syntax later.
 
 ## Stable Owner Slots and `stable_replace`
 

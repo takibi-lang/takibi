@@ -4186,6 +4186,41 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            raise (TypeError (e.loc, Printf.sprintf
              "%s expects two arguments: %s(addr, value)" fname fname)))
 
+  | Call (("field_take" | "field_put") as fname, args) ->
+      (* GitHub issue #131, place rule first slice: a stored linear field
+         of a linear struct is a place. field_take moves its content out
+         and leaves the place empty; field_put refills an empty place.
+         Which places are empty is the obligation pass's business; here
+         only the shapes and types are checked. *)
+      let place, value = match fname, args with
+        | "field_take", [place] -> place, None
+        | "field_put", [place; value] -> place, Some value
+        | _ -> raise (TypeError (e.loc, Printf.sprintf
+            "%s expects %s" fname
+            (if fname = "field_take" then "one argument: field_take(holder.field)"
+             else "two arguments: field_put(holder.field, value)")))
+      in
+      let field_ty = match place.Ast.desc with
+        | FieldGet (({ desc = Var _; _ } as base), fld) ->
+            let base_ty = infer_expr senv eenv tyenv fenv base in
+            (match struct_instance (repr base_ty) with
+             | Some (sname, _) when Hashtbl.mem stored_owner_fields (sname, fld) ->
+                 infer_field_access ~decay:false senv eenv tyenv fenv
+                   place.Ast.loc base fld
+             | _ -> raise (TypeError (place.Ast.loc, Printf.sprintf
+                 "%s names a stored linear field of a linear struct held in a \
+                  local; '%s' is not one" fname fld)))
+        | _ -> raise (TypeError (place.Ast.loc, Printf.sprintf
+            "%s takes a field of a local holder: %s(holder.field%s)" fname fname
+            (if fname = "field_put" then ", value" else "")))
+      in
+      (match value with
+       | None -> field_ty
+       | Some v ->
+           let vt = infer_expr senv eenv tyenv fenv v in
+           unify_at v.Ast.loc vt field_ty;
+           TVoid)
+
   | Call (("publish_begin" | "publish_commit" | "publish_abandon"
           | "publish_copy") as fname, args) ->
       (* GitHub issue #299: the safe surface over #17's atomics that is not
@@ -4348,7 +4383,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            Printf.sprintf "%s expects six arguments: %s(nr, x0, x1, x2, x3, x4)" fname fname)))
 
   | Call (("dma_cpu_ptr" | "dma_cpu_slice") as operation,
-          [({ desc = Ast.Var _; _ } as owner);
+          [({ desc = (Ast.Var _ | Ast.FieldGet ({ desc = Ast.Var _; _ }, _)); _ } as owner);
            { desc = Ast.Var record; _ }]) ->
       (match Dma_fixed_registry.fields_of record,
              Dma_fixed_registry.allocation_of record with
@@ -8475,6 +8510,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
            the field's identity is exactly the struct's. It is borrowed
            while the struct lives and moved out only by consuming the
            whole struct (stored_owner_field_* below). *)
+        (* #131 place rule, first slice (2026-10-09): the content may also
+           be a linear token (a pointer to a linear opaque struct, such as a
+           fixed-DMA CPU token), and a struct may hold several. Each field
+           is a place: field_take empties it, field_put refills it. *)
         let stored_owner_field ty =
           okind = Ast.KindLinear &&
           (match ty with
@@ -8484,15 +8523,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                && List.for_all (function
                     | Ast.StaticName n -> List.mem_assoc n params
                     | _ -> false) args
+           | Ast.TypePtr (Ast.TypeNamed name) ->
+               StringSet.mem name !linear_opaque_names
            | _ -> false) in
         List.iter (fun (fname, ty) ->
           if stored_owner_field ty then begin
-            (* Moving the field out consumes the whole struct, so a second
-               such field would be dropped with it. *)
-            if holds_stored_owner (Ast.TypeIndexed (sname, [])) then
-              raise (TypeError (sloc, Printf.sprintf
-                "struct '%s' may hold one stored owner field; '%s' is a second"
-                sname fname));
             Hashtbl.replace stored_owner_fields (sname, fname) ();
             validate_nonparam_type sloc ty
           end else begin
@@ -10057,6 +10092,15 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           Hashtbl.mem stored_owner_fields (sname, fname)
       | _ -> false
     in
+    (* #131 place rule: the stored fields of a holder binding, each its own
+       place (PField) whose emptiness the flow tracks. *)
+    let stored_fields_of base_id base_name =
+      match strip_borrow (binding_type base_id base_name) with
+      | Ast.TypeIndexed (sname, _) | Ast.TypeSink (Ast.TypeIndexed (sname, _)) ->
+          Hashtbl.fold (fun (s, f) () acc -> if s = sname then f :: acc else acc)
+            stored_owner_fields []
+      | _ -> []
+    in
     let field_affine_type base_id base_name fname =
       match Some (binding_type base_id base_name) with
       | None -> None
@@ -10084,6 +10128,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           if is_linear_type ty || is_must_use_type ty then Some Ast.KindLinear
           else if is_affine_type ty then Some Ast.KindAffine else None
       | PField (id, base, fname) ->
+          if stored_owner_field_of id base fname then Some Ast.KindLinear
+          else
           (match field_affine_type id base fname with
            | Some _ -> Some Ast.KindAffine
            | None -> None)
@@ -10443,6 +10489,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.Call (("dma_cpu_ptr" | "dma_cpu_slice"),
                   [{ Ast.desc = Ast.Var owner; _ }; _]) ->
           PathSet.singleton (pvar owner)
+      (* #131 place rule: a token borrowed in place lives in its holder's
+         field, so the derived memory dies with the holder or with a take
+         of that field. *)
+      | Ast.Call (("dma_cpu_ptr" | "dma_cpu_slice"),
+                  [{ Ast.desc = Ast.FieldGet (({ Ast.desc = Ast.Var holder; _ } as base), fld); _ }; _]) ->
+          (match pvar_expr base holder with
+           | PVar (id, _) as hp -> PathSet.of_list [hp; PField (id, holder, fld)]
+           | hp -> PathSet.singleton hp)
       (* GitHub issue #623: a span is usable only while its device token
          is live, so it carries that token's taint. *)
       | Ast.Call ("dma_device_span",
@@ -10629,9 +10683,16 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                 "loan_transfer must return a pointer derived only from its source authority"));
             true
         | _ -> false in
+      (* #131 place rule: a field of a borrowed authority holder is that
+         holder's authority -- a borrow cannot take the field out. *)
+      let t_holders = PathSet.map (function
+        | PField (id, holder, _)
+          when PathSet.mem (PVar (id, holder)) borrowed_region_return_authorities ->
+            PVar (id, holder)
+        | p -> p) t in
       let borrowed_return = escape = `Return
-        && not (PathSet.is_empty t)
-        && PathSet.subset t borrowed_region_return_authorities in
+        && not (PathSet.is_empty t_holders)
+        && PathSet.subset t_holders borrowed_region_return_authorities in
       if not transferred && not borrowed_return && not (PathSet.is_empty t)
          && not (PathSet.subset t handoff_authorities) then
         let owner = path_to_string (PathSet.choose t) in
@@ -10698,6 +10759,18 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           moved
       | Ast.Var name ->
           let p = pvar_expr e name in
+          (* #131 place rule: a holder with an empty place cannot be used
+             whole (passed, returned, borrowed) until it is refilled. *)
+          (match p with
+           | PVar (id, _) ->
+               List.iter (fun f ->
+                 if ResourceFlow.may_be_consumed (PField (id, name, f)) moved
+                    && not (ResourceFlow.is_consumed_on_all_paths p moved) then
+                   raise (TypeError (e.loc, Printf.sprintf
+                     "'%s.%s' was taken out with field_take; put it back with \
+                      field_put before using '%s' whole" name f name)))
+                 (stored_fields_of id name)
+           | PField _ -> ());
           require_available e.loc moved p;
           require_handle_live e.loc moved p;
           require_region_live e.loc taints moved name;
@@ -10720,11 +10793,25 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                   borrowed. *)
                let p = pvar_expr base_expr base_name in
                require_available e.loc moved p;
+               (match p with
+                | PVar (id, _) ->
+                    if ResourceFlow.may_be_consumed (PField (id, base_name, fname)) moved then
+                      raise (TypeError (e.loc, Printf.sprintf
+                        "'%s.%s' was taken out with field_take and is empty"
+                        base_name fname))
+                | PField _ -> ());
                if consume then begin
                  if PathSet.mem p borrowed_params then
                    raise (TypeError (e.loc, Printf.sprintf
                      "cannot move '%s.%s' out of a borrowed '%s'; it can only \
                       be borrowed" base_name fname base_name));
+                 (match p with
+                  | PVar (id, _) when List.length (stored_fields_of id base_name) > 1 ->
+                      raise (TypeError (e.loc, Printf.sprintf
+                        "'%s' holds several stored fields; moving '%s.%s' out \
+                         would drop the others: use field_take for each"
+                        base_name base_name fname))
+                  | _ -> ());
                  mv_consume p moved
                end else moved
            | (Ast.Var base_name as base_desc) when is_tracked_path (pfield base_name fname) ->
@@ -10755,6 +10842,46 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.Call (("publish_commit" | "publish_abandon"), (token :: rest)) ->
           let moved = check_expr taints moved true token in
           List.fold_left (fun m a -> check_expr taints m false a) moved rest
+      | Ast.Call ("field_take",
+                  [{ desc = Ast.FieldGet (({ desc = Ast.Var holder; _ } as base), fld); _ }]) ->
+          let hp = pvar_expr base holder in
+          if not consume then
+            raise (TypeError (e.loc,
+              "the value field_take moves out must be moved into a binding, \
+               returned, or passed on"));
+          require_available e.loc moved hp;
+          if PathSet.mem hp borrowed_params then
+            raise (TypeError (e.loc, Printf.sprintf
+              "cannot take '%s.%s' out of a borrowed '%s'; it can only be borrowed"
+              holder fld holder));
+          (match hp with
+           | PVar (id, _) ->
+               let fp = PField (id, holder, fld) in
+               if ResourceFlow.may_be_consumed fp moved then
+                 raise (TypeError (e.loc, Printf.sprintf
+                   "'%s.%s' was already taken out" holder fld));
+               let moved = mv_consume fp moved in
+               (* Every place empty: the holder has nothing left to keep,
+                  and is discharged. field_put revives it. *)
+               if List.for_all (fun f ->
+                    ResourceFlow.is_consumed_on_all_paths (PField (id, holder, f)) moved)
+                    (stored_fields_of id holder)
+               then mv_consume hp moved else moved
+           | PField _ -> moved)
+      | Ast.Call ("field_put",
+                  [{ desc = Ast.FieldGet (({ desc = Ast.Var holder; _ } as base), fld); _ };
+                   value]) ->
+          let hp = pvar_expr base holder in
+          (match hp with
+           | PVar (id, _) ->
+               let fp = PField (id, holder, fld) in
+               if not (ResourceFlow.is_consumed_on_all_paths fp moved) then
+                 raise (TypeError (e.loc, Printf.sprintf
+                   "field_put into '%s.%s', which may still hold its value: \
+                    take it out first" holder fld));
+               let moved = check_expr taints moved true value in
+               mv_clear hp (mv_clear fp moved)
+           | PField _ -> check_expr taints moved true value)
       | Ast.Call ("publish_begin", args) ->
           if not consume then
             raise (TypeError (e.loc,

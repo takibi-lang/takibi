@@ -4578,6 +4578,12 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
        | _ -> raise (Error (Printf.sprintf
            "%s has no fixed allocation for '%s'" operation record)))
 
+  (* GitHub issue #131 place rule: emptiness is the checker's, so a take
+     is the field's ordinary load and a put its ordinary store. *)
+  | Call ("field_take", [place]) -> gen_expr locals place
+  | Call ("field_put", [place; value]) ->
+      gen_expr locals { e with desc = Assign (place, value) }
+
   | Call (("publish_begin" | "publish_commit" | "publish_abandon"
           | "publish_copy") as name, args) ->
       (* GitHub issue #299: the four operations of the publication record.

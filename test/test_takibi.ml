@@ -3802,6 +3802,206 @@ let infer_tests = [
          }
        }")));
 
+  (* GitHub issue #131 place rule (2026-10-09): stored linear fields are
+     places, emptied by field_take and refilled by field_put. *)
+  Alcotest.test_case "place: take, put back, use whole, drop" `Quick
+    (fun () -> ignore (infer {|
+      linear opaque struct Token;
+      private linear struct Holder[k: usize] {
+          private id: usize @ k;
+          private a: *Token;
+          private b: *Token;
+      }
+      extern fn token_drop(t: sink *Token);
+      extern fn holder_drop(h: sink Holder[k]);
+      extern fn token_use(t: borrow *Token) -> usize;
+      extern fn holder_peek(h: borrow Holder[k]) -> usize;
+      fn f(h: sink Holder[k], t: sink *Token) -> usize { let old = field_take(h.a); field_put(h.a, t); let n = holder_peek(h); holder_drop(h); token_drop(old); return n; }|}));
+  Alcotest.test_case "place: taking every field discharges the holder" `Quick
+    (fun () -> ignore (infer {|
+      linear opaque struct Token;
+      private linear struct Holder[k: usize] {
+          private id: usize @ k;
+          private a: *Token;
+          private b: *Token;
+      }
+      extern fn token_drop(t: sink *Token);
+      extern fn holder_drop(h: sink Holder[k]);
+      extern fn token_use(t: borrow *Token) -> usize;
+      extern fn holder_peek(h: borrow Holder[k]) -> usize;
+      fn f(h: sink Holder[k]) { let x = field_take(h.a); let y = field_take(h.b); token_drop(x); token_drop(y); }|}));
+  Alcotest.test_case "place: a field is borrowed through a borrowed holder" `Quick
+    (fun () -> ignore (infer {|
+      linear opaque struct Token;
+      private linear struct Holder[k: usize] {
+          private id: usize @ k;
+          private a: *Token;
+          private b: *Token;
+      }
+      extern fn token_drop(t: sink *Token);
+      extern fn holder_drop(h: sink Holder[k]);
+      extern fn token_use(t: borrow *Token) -> usize;
+      extern fn holder_peek(h: borrow Holder[k]) -> usize;
+      fn f(h: borrow Holder[k]) -> usize { return token_use(h.a); }|}));
+  Alcotest.test_case "place: double take" `Quick
+    (expect_type_error "already taken out" {|
+      linear opaque struct Token;
+      private linear struct Holder[k: usize] {
+          private id: usize @ k;
+          private a: *Token;
+          private b: *Token;
+      }
+      extern fn token_drop(t: sink *Token);
+      extern fn holder_drop(h: sink Holder[k]);
+      extern fn token_use(t: borrow *Token) -> usize;
+      extern fn holder_peek(h: borrow Holder[k]) -> usize;
+      fn f(h: sink Holder[k]) { let x = field_take(h.a); let y = field_take(h.a); token_drop(x); token_drop(y); let z = field_take(h.b); token_drop(z); }|});
+  Alcotest.test_case "place: use of an empty field" `Quick
+    (expect_type_error "is empty" {|
+      linear opaque struct Token;
+      private linear struct Holder[k: usize] {
+          private id: usize @ k;
+          private a: *Token;
+          private b: *Token;
+      }
+      extern fn token_drop(t: sink *Token);
+      extern fn holder_drop(h: sink Holder[k]);
+      extern fn token_use(t: borrow *Token) -> usize;
+      extern fn holder_peek(h: borrow Holder[k]) -> usize;
+      fn f(h: sink Holder[k]) { let x = field_take(h.a); let n = token_use(h.a); token_drop(x); holder_drop(h); }|});
+  Alcotest.test_case "place: whole use while a field is out" `Quick
+    (expect_type_error "put it back with field_put" {|
+      linear opaque struct Token;
+      private linear struct Holder[k: usize] {
+          private id: usize @ k;
+          private a: *Token;
+          private b: *Token;
+      }
+      extern fn token_drop(t: sink *Token);
+      extern fn holder_drop(h: sink Holder[k]);
+      extern fn token_use(t: borrow *Token) -> usize;
+      extern fn holder_peek(h: borrow Holder[k]) -> usize;
+      fn f(h: sink Holder[k]) { let x = field_take(h.a); holder_drop(h); token_drop(x); }|});
+  Alcotest.test_case "place: borrow whole while a field is out" `Quick
+    (expect_type_error "put it back with field_put" {|
+      linear opaque struct Token;
+      private linear struct Holder[k: usize] {
+          private id: usize @ k;
+          private a: *Token;
+          private b: *Token;
+      }
+      extern fn token_drop(t: sink *Token);
+      extern fn holder_drop(h: sink Holder[k]);
+      extern fn token_use(t: borrow *Token) -> usize;
+      extern fn holder_peek(h: borrow Holder[k]) -> usize;
+      fn f(h: sink Holder[k]) -> usize { let x = field_take(h.a); let n = holder_peek(h); field_put(h.a, x); holder_drop(h); return n; }|});
+  Alcotest.test_case "place: put into a full field" `Quick
+    (expect_type_error "may still hold its value" {|
+      linear opaque struct Token;
+      private linear struct Holder[k: usize] {
+          private id: usize @ k;
+          private a: *Token;
+          private b: *Token;
+      }
+      extern fn token_drop(t: sink *Token);
+      extern fn holder_drop(h: sink Holder[k]);
+      extern fn token_use(t: borrow *Token) -> usize;
+      extern fn holder_peek(h: borrow Holder[k]) -> usize;
+      fn f(h: sink Holder[k], t: sink *Token) { field_put(h.a, t); holder_drop(h); }|});
+  Alcotest.test_case "place: put on one path only" `Quick
+    (expect_type_error "put it back with field_put" {|
+      linear opaque struct Token;
+      private linear struct Holder[k: usize] {
+          private id: usize @ k;
+          private a: *Token;
+          private b: *Token;
+      }
+      extern fn token_drop(t: sink *Token);
+      extern fn holder_drop(h: sink Holder[k]);
+      extern fn token_use(t: borrow *Token) -> usize;
+      extern fn holder_peek(h: borrow Holder[k]) -> usize;
+      fn f(h: sink Holder[k], c: bool) { let x = field_take(h.a); if (c) { field_put(h.a, x); } else { token_drop(x); } holder_drop(h); }|});
+  Alcotest.test_case "place: a holder left with one field out" `Quick
+    (expect_type_error "still pending" {|
+      linear opaque struct Token;
+      private linear struct Holder[k: usize] {
+          private id: usize @ k;
+          private a: *Token;
+          private b: *Token;
+      }
+      extern fn token_drop(t: sink *Token);
+      extern fn holder_drop(h: sink Holder[k]);
+      extern fn token_use(t: borrow *Token) -> usize;
+      extern fn holder_peek(h: borrow Holder[k]) -> usize;
+      fn f(h: sink Holder[k]) -> *Token { return field_take(h.a); }|});
+  Alcotest.test_case "place: take through a borrow" `Quick
+    (expect_type_error "out of a borrowed" {|
+      linear opaque struct Token;
+      private linear struct Holder[k: usize] {
+          private id: usize @ k;
+          private a: *Token;
+          private b: *Token;
+      }
+      extern fn token_drop(t: sink *Token);
+      extern fn holder_drop(h: sink Holder[k]);
+      extern fn token_use(t: borrow *Token) -> usize;
+      extern fn holder_peek(h: borrow Holder[k]) -> usize;
+      fn f(h: borrow Holder[k]) -> *Token { return field_take(h.a); }|});
+  Alcotest.test_case "place: plain move from a holder of several" `Quick
+    (expect_type_error "use field_take for each" {|
+      linear opaque struct Token;
+      private linear struct Holder[k: usize] {
+          private id: usize @ k;
+          private a: *Token;
+          private b: *Token;
+      }
+      extern fn token_drop(t: sink *Token);
+      extern fn holder_drop(h: sink Holder[k]);
+      extern fn token_use(t: borrow *Token) -> usize;
+      extern fn holder_peek(h: borrow Holder[k]) -> usize;
+      fn f(h: sink Holder[k]) -> *Token { return h.a; }|});
+  Alcotest.test_case "place: take of a non-stored field" `Quick
+    (expect_type_error "stored linear field" {|
+      linear opaque struct Token;
+      private linear struct Holder[k: usize] {
+          private id: usize @ k;
+          private a: *Token;
+          private b: *Token;
+      }
+      extern fn token_drop(t: sink *Token);
+      extern fn holder_drop(h: sink Holder[k]);
+      extern fn token_use(t: borrow *Token) -> usize;
+      extern fn holder_peek(h: borrow Holder[k]) -> usize;
+      fn f(h: sink Holder[k]) -> usize { let i = field_take(h.id); holder_drop(h); return i; }|});
+  (* #622's shape: a fixed-DMA CPU token held in a frame owner, borrowed in
+     place to derive the frame's bytes, and refused once taken out. *)
+  Alcotest.test_case "place: a DMA token borrowed in place derives its bytes" `Quick
+    (fun () -> ignore (infer {|
+      struct dma_fixed GemRx { private bytes: [u8; 2048]; }
+      private let mut gem_rx: GemRx align(64);
+      private linear struct Frame[desc: usize] {
+          private slot: {0..<1 as usize} @ desc;
+          private cpu: *GemRxCpu;
+      }
+      fn frame_bytes(frame: borrow Frame[desc]) -> [u8; 1514..] @ desc {
+          let bytes = dma_cpu_slice(frame.cpu, GemRx);
+          return bytes[0..<1514];
+      }|}));
+  Alcotest.test_case "place: derived bytes die when the token is taken out" `Quick
+    (expect_type_error "cannot be used after" {|
+      struct dma_fixed GemRx { private bytes: [u8; 2048]; }
+      private let mut gem_rx: GemRx align(64);
+      private linear struct Frame[desc: usize] {
+          private slot: {0..<1 as usize} @ desc;
+          private cpu: *GemRxCpu;
+      }
+      fn stale(frame: sink Frame[desc]) -> *GemRxCpu {
+          let bytes = dma_cpu_slice(frame.cpu, GemRx);
+          let t = field_take(frame.cpu);
+          let b: u8 = bytes[0];
+          return t;
+      }|});
+
   (* GitHub issue #131, first slice: a linear struct holding a pin. *)
   Alcotest.test_case "stored owner: held, borrowed, moved out once" `Quick
     (fun () -> ignore (infer_regions (stored_owner_use
