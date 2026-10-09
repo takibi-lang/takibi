@@ -1,9 +1,9 @@
 {
   "date": "2026-10-09",
-  "event": "milestone",
-  "decision": "measured",
-  "source_sha256": "7fa04ece55e8f3d88345beb660d08c2861f3d3f09ad3d88f74363f192209b316",
-  "workload": "#637 group B typed probe atomics: fifteen probe files' shared words moved from usize globals with raw intrinsic addresses to AtomicWord. Linked production kernels (QEMU and RPi5) against base 50a6811f with scripts/space_delta.py.",
+  "event": "incremental",
+  "decision": "reuse",
+  "source_sha256": "f2bff8c15a640e5a6f153d6168a90138042840e14a4e43c695a2b5899f07a3fb",
+  "workload": "#637 group B typed probe atomics: fifteen probe files' shared words moved from usize globals with raw intrinsic addresses to AtomicWord. Linked production kernels (QEMU and RPi5) against base 50a6811f with scripts/space_delta.py. Plus the #556 correction: the world-stop claim gate records its holder (stop or CPU start reservation) in the existing claimed word, and the whole-machine stop waits, time-bounded, for a start reservation.",
   "evidence": [
     "docs/PROBE_ATOMIC_WORD_SPACE_2026-10-09.md",
     "docs/USER_WRITE_RESULT_SPACE_2026-10-09.md",
@@ -24,6 +24,6 @@
     "docs/DMA_MINT_FILES_2026-10-08.md",
     "docs/DMA_TRANSMIT_2026-10-08.md"
   ],
-  "assessment": "Text -856 B (QEMU) and -288 B (RPi5); data, BSS and usable_ram_start unchanged and no data/BSS symbol changed size, since AtomicWord keeps the one-usize layout. No payload, pool, allocation or lifetime change. Adopted.",
+  "assessment": "Text -856 B (QEMU) and -288 B (RPi5); data, BSS and usable_ram_start unchanged and no data/BSS symbol changed size, since AtomicWord keeps the one-usize layout. No payload, pool, allocation or lifetime change. Adopted. The #556 correction adds two constants and a bounded wait loop in existing code; it adds no global, field, payload, pool or allocation, so the probe-migration measurement is reused.",
   "next_trigger": "Measure at process trust-boundary separation, final raw-authority confinement, the #729 readonly-literal migration, or a changed allocation/lifetime workload."
 }
