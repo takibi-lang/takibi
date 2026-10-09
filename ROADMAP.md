@@ -224,7 +224,8 @@ allchecks, faster diagnosis -- and what finishes on its own.
 
 On 2026-10-09, #651's peer-tick waits and #688's evaluation led to the
 maintainer-selected existing-type clock and owned resume APIs in #730.
-Atomic predicates remain for A's separate typed-atomic migration.
+A's AtomicWord probe migration was integrated before the clock API was rebased;
+the clock changes preserve its predicates and memory orderings.
 
 1. **Diagnostics A uses on the next recurrence:** #679 (console state dump
    on a stalled shell; a gdb script first, since DDB's file is reshaped

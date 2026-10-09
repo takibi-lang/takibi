@@ -76,8 +76,10 @@ this work, before any guest ran.
 The source survey covers all 46 maintained peer windows. Ordinary historical
 measurements remain valid values; rejecting every retained scalar would need
 the larger provenance design that was not selected. Existing deliberate wall
-holds remain reviewed separately. Typed atomics are a subsequent migration;
-this change does not discharge their memory-ordering obligations.
+holds remain reviewed separately. After rebasing onto the independently published AtomicWord migration, the
+same consumer function scopes contain zero raw atomic calls, including the
+FD refcount probe. Clock ownership does not discharge memory-ordering proof
+obligations.
 
 ## Validation and space
 
@@ -128,3 +130,27 @@ trusted baseline and signal loop reports `resumed=1` and 32 attempts, and the
 host oracle fails with both specific diagnoses. Status and diagnostic are
 checked independently. The corrected refusal control completed in 11.8 host
 seconds locally; these are forced schedules, not a natural failure rate.
+
+## Rebased combination
+
+Territory A independently published the AtomicWord probe migration and the
+world-stop claim-holder correction through `be63bbdb`. The overlapping probe
+files were reconstructed from that upstream source, then the same 46 named
+windows and terminal calls were applied. No raw atomic operation was restored.
+The external-consumer compiler tests all pass on this combination.
+
+A fresh `python3 scripts/space_delta.py be63bbdb` comparison measures the
+combined candidate against the actual integrated baseline:
+
+| | QEMU base | QEMU candidate | RPi5 base | RPi5 candidate |
+| --- | ---: | ---: | ---: | ---: |
+| text | 723676 | 726084 | 734028 | 736484 |
+| data | 5078 | 5078 | 2888784 | 2888784 |
+| BSS | 1658608 | 1658608 | 1697600 | 1697600 |
+| usable_ram_start | 0x40248000 | 0x40248000 | 0x718000 | 0x718000 |
+
+The final delta is +2408 bytes QEMU and +2456 bytes RPi5; all data/BSS
+symbol sizes and reservation boundaries remain unchanged. This table
+supersedes the earlier standalone delta for the publication assessment.
+The pre-integration endpoint remains explicitly a candidate observation,
+with unchanged allocator and payload declarations in this rebase.
