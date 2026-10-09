@@ -2,8 +2,8 @@
   "date": "2026-10-09",
   "event": "incremental",
   "decision": "reuse",
-  "source_sha256": "5b5edc726e9cf5ae88f5d327cdc6070d1a328666c1d69fda09c2d3a9e33e8a10",
-  "workload": "Session audit: checker rejects casts to per-CPU store types, keyword-table and CPU-authority-mint build checks, the DMA slot initializer reads Full's tag from Place's definition (same value), a layout-check message names its field, and a kernel comment. Reuses the #707 GEM TX measurement.",
+  "source_sha256": "b9c876a85546ad37f3569bf6df7ed824ec7b76ad37e6c542a3e216a7a3135820",
+  "workload": "Session audit: checker rejects casts to per-CPU store types, keyword-table and CPU-authority-mint build checks, the DMA slot initializer reads Full's tag from Place's definition (same value), a layout-check message names its field, and a kernel comment. Reuses the #707 GEM TX measurement. Territory B adds only frame_ref.tkb comment clarification, a lexical source gate, and roadmap/documentation corrections; no further storage or allocation change.",
   "evidence": [
     "docs/GEM_TX_FIXED_SPACE_2026-10-09.md",
     "docs/PER_CPU_STORAGE_SPACE_2026-10-09.md",
