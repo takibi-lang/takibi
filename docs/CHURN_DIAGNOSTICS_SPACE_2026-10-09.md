@@ -40,3 +40,21 @@ world_stop_begin_claimed, all four acknowledgements zero, next=65536 and
 idle peers with CPSR 0x80000345 (IRQs open). Four subsequent DDB attempts
 reported world-stop busy. This is an observed 2/3 negative-sample failure
 rate, not a proven rate or deterministic protocol lane.
+
+## Review after upstream integration
+
+The feature was rebased onto 3f43fa26, including checked-place reference
+typing. Fresh production links from `scripts/space_delta.py origin/main`
+compare against that exact upstream:
+
+base origin/main -> working tree
+| | qemu base | qemu change | rpi5 base | rpi5 change |
+| text | 726276 | 726276 | 736644 | 736644 |
+| data | 5078 | 5078 | 2888784 | 2888784 |
+| bss | 1658608 | 1658608 | 1697600 | 1697600 |
+| usable_ram_start | 0x40248000 | 0x40248000 | 0x718000 | 0x718000 |
+no data/BSS symbol changed size
+
+The upstream's 40-byte text increase is included on both sides of this
+comparison; this host diagnostic feature still adds zero kernel bytes.
+Current production source fingerprint: `2c881e00bf8b43464dc141db138a53b3d38f4fb03b8f5ee08cef3abd31183abf`.

@@ -2,8 +2,8 @@
   "date": "2026-10-09",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "2b3076522f3b66a9e02f1548d83dcab8f43e02c86504cc8c22d113bbb0ca69c7",
-  "workload": "Host-only four-core churn diagnostics and forward-only ASID wrap acceleration. Fresh production QEMU/RPi5 links compared with d1c075ca; no kernel allocation phase or pool occupancy workload changes.",
+  "source_sha256": "2c881e00bf8b43464dc141db138a53b3d38f4fb03b8f5ee08cef3abd31183abf",
+  "workload": "Host-only four-core churn diagnostics rebased onto the checked-place reference typing in 3f43fa26. Fresh QEMU/RPi5 production links compared with that upstream; no new kernel allocation phase or pool occupancy workload.",
   "evidence": [
     "docs/CHURN_DIAGNOSTICS_SPACE_2026-10-09.md",
     "docs/CONSOLE_DIAGNOSTICS_SPACE_2026-10-09.md",
