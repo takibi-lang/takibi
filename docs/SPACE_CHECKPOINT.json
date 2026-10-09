@@ -2,8 +2,8 @@
   "date": "2026-10-09",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "02314e6da1b618acb44d230e7a7a2b615aeca8f19bd3d4704cc4969ee4dea88e",
-  "workload": "#622: GEM RX buffer as a dma_fixed allocation with its owner slot, the CPU token held in the frame owners (#131 place rule), and a symbolizer environment fix (host script only). Linked production kernels against base e2474f31 with scripts/space_delta.py.",
+  "source_sha256": "386fbdb41c6d6746e64050a8e3e106d79061dc59c2f55515d1a58ab36cdd2811",
+  "workload": "#732 generic variants (compiler only; no kernel source uses them yet). Linked production kernels against base fc096879 with scripts/space_delta.py.",
   "evidence": [
     "docs/GEM_RX_FIXED_SPACE_2026-10-09.md",
     "docs/CHURN_DIAGNOSTICS_SPACE_2026-10-09.md",
@@ -30,6 +30,6 @@
     "docs/DMA_MINT_FILES_2026-10-08.md",
     "docs/DMA_TRANSMIT_2026-10-08.md"
   ],
-  "assessment": "RPi5 BSS +32 B for the compiler-created owner slot dma_owner_GemRx and data +8 B; gem_rx_buf (2048 B) became gem_rx (2048 B). usable_ram_start unchanged on both targets; QEMU data/BSS unchanged. The slot is the standard fixed-DMA ownership cost. Adopted.",
+  "assessment": "Linked QEMU and RPi5 kernels are the same size in every section (text, data, BSS, usable_ram_start). Instances lower to ordinary variants, so a later kernel user pays only its own variant layouts. Place(T) and the stable_replace migration are the next measurement.",
   "next_trigger": "Measure when production diagnostics gain storage, a new resource/lifetime or allocation workload appears, or the next kernel feature/stage completes."
 }
