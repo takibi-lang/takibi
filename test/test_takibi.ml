@@ -430,10 +430,12 @@ let expect_multi_type_error fragments src () =
         "expected MultiTypeError with %d entries, got a single TypeError instead: %s"
         (List.length fragments) msg
 
-(* Expect inference to succeed *)
+(* Positive programs must survive inference and LLVM generation. *)
 let expect_ok src () =
-  match infer src with
+  match gen_codegen src with
   | _ -> ()
+  | exception Llvm_gen.Error msg ->
+      Alcotest.failf "unexpected codegen Error: %s" msg
   | exception Types.TypeError (_, msg) ->
       Alcotest.failf "unexpected TypeError: %s" msg
   | exception Types.MultiTypeError errors ->
@@ -11521,6 +11523,21 @@ let with_embed_fixture contents f =
   Fun.protect ~finally:(fun () -> Sys.remove path) (fun () -> f path)
 
 let codegen_tests = [
+  (* Replay #722's checker/backend disagreement without changing production
+     checking. The scoped initializer context deliberately restores the old
+     acceptance, so reverting expect_ok to inference-only makes this fail. *)
+  Alcotest.test_case "positive helper rejects a checker-accepted struct assignment (issue #727)"
+    `Quick (fun () ->
+      Type_inf.with_struct_literal_initializer true (fun () ->
+        Alcotest.match_raises "positive helper reaches the backend"
+          (fun exn -> contains_substring (Printexc.to_string exn)
+             "unexpected codegen Error: BUG: StructLit must be handled")
+          (expect_ok "struct Positive727 { value: usize; }
+             fn positive727() -> usize {
+               let mut p: Positive727 = { 1 };
+               p = { 2 };
+               return p.value;
+             }")));
   Alcotest.test_case "live DMA refresh codegens over the full private array" `Quick
     (expect_codegen_ok
        "private let mut live_ring596: [u32; 16] align(64);
