@@ -3354,31 +3354,31 @@ const FD_REFCOUNT_CONTENTION_OUTSIDE_WORK: usize = 64;
 
 private let mut fd_refcount_probe_handle: UnifiedObjectHandle;
 private let mut fd_refcount_probe_ready: bool = false;
-private let mut fd_refcount_probe_armed: usize;
-private let mut fd_refcount_probe_primary: usize;
-private let mut fd_refcount_probe_secondary: usize;
-private let mut fd_refcount_probe_refused: usize;
-private let mut fd_refcount_probe_active: usize;
-private let mut fd_refcount_probe_overlap: usize;
+private let mut fd_refcount_probe_armed: AtomicWord;
+private let mut fd_refcount_probe_primary: AtomicWord;
+private let mut fd_refcount_probe_secondary: AtomicWord;
+private let mut fd_refcount_probe_refused: AtomicWord;
+private let mut fd_refcount_probe_active: AtomicWord;
+private let mut fd_refcount_probe_overlap: AtomicWord;
 
-private fn fd_refcount_probe_armed_address() -> usize {
-    return (&fd_refcount_probe_armed) as usize;
+private fn fd_refcount_probe_armed_address() -> *AtomicWord {
+    return &fd_refcount_probe_armed;
 }
 
-private fn fd_refcount_probe_primary_address() -> usize {
-    return (&fd_refcount_probe_primary) as usize;
+private fn fd_refcount_probe_primary_address() -> *AtomicWord {
+    return &fd_refcount_probe_primary;
 }
 
-private fn fd_refcount_probe_secondary_address() -> usize {
-    return (&fd_refcount_probe_secondary) as usize;
+private fn fd_refcount_probe_secondary_address() -> *AtomicWord {
+    return &fd_refcount_probe_secondary;
 }
 
-private fn fd_refcount_probe_refused_address() -> usize {
-    return (&fd_refcount_probe_refused) as usize;
+private fn fd_refcount_probe_refused_address() -> *AtomicWord {
+    return &fd_refcount_probe_refused;
 }
 
-private fn fd_refcount_probe_active_address() -> usize {
-    return (&fd_refcount_probe_active) as usize;
+private fn fd_refcount_probe_active_address() -> *AtomicWord {
+    return &fd_refcount_probe_active;
 }
 
 // GitHub issue #510: entries into the secondary's run function, counted and
@@ -3391,38 +3391,32 @@ private fn fd_refcount_probe_active_address() -> usize {
 // and reports `secondary-never-entered` about a core that finished every
 // round. The `started` gate below is already monotonic and would have caught
 // it, but the `entered` gate runs first and fails first.
-private let mut fd_refcount_probe_entries: usize;
+private let mut fd_refcount_probe_entries: AtomicWord;
 
-private fn fd_refcount_probe_entries_address() -> usize {
-    return (&fd_refcount_probe_entries) as usize;
+private fn fd_refcount_probe_entries_address() -> *AtomicWord {
+    return &fd_refcount_probe_entries;
 }
 
-private fn fd_refcount_probe_overlap_address() -> usize {
-    return (&fd_refcount_probe_overlap) as usize;
+private fn fd_refcount_probe_overlap_address() -> *AtomicWord {
+    return &fd_refcount_probe_overlap;
 }
 
 // One retain/release pair. Both cores run this, on the same object.
 private fn fd_refcount_probe_cycle() !{unsafe} {
     match unified_object_retain(fd_refcount_probe_handle) {
         UnifiedObjectRetainResult::Invalid => {
-            unsafe {
-                atomic_fetch_add_relaxed(
-                    fd_refcount_probe_refused_address(), 1);
-            }
+            atomic_word_fetch_add(
+                fd_refcount_probe_refused_address(), 1);
         }
         UnifiedObjectRetainResult::Overflow => {
-            unsafe {
-                atomic_fetch_add_relaxed(
-                    fd_refcount_probe_refused_address(), 1);
-            }
+            atomic_word_fetch_add(
+                fd_refcount_probe_refused_address(), 1);
         }
         UnifiedObjectRetainResult::Ok => {
             match unified_object_release(fd_refcount_probe_handle) {
                 UnifiedObjectReleaseResult::Invalid => {
-                    unsafe {
-                        atomic_fetch_add_relaxed(
-                            fd_refcount_probe_refused_address(), 1);
-                    }
+                    atomic_word_fetch_add(
+                        fd_refcount_probe_refused_address(), 1);
                 }
                 UnifiedObjectReleaseResult::StillHeld => {}
                 UnifiedObjectReleaseResult::Freed => {}
@@ -3433,49 +3427,32 @@ private fn fd_refcount_probe_cycle() !{unsafe} {
 }
 
 fn fd_refcount_contention_is_armed() -> bool !{unsafe} {
-    return unsafe {
-        atomic_load_acquire(fd_refcount_probe_armed_address())
-    } == 1;
+    return atomic_word_load(fd_refcount_probe_armed_address()) == 1;
 }
 
 fn fd_refcount_contention_secondary_run() !{unsafe} {
-    unsafe {
-        atomic_fetch_add_relaxed(fd_refcount_probe_entries_address(), 1);
-        atomic_store_release(fd_refcount_probe_active_address(), 1);
-    }
+    atomic_word_fetch_add(fd_refcount_probe_entries_address(), 1);
+    atomic_word_store(fd_refcount_probe_active_address(), 1);
     // Complete one cycle before waiting for the primary. Together with the
     // primary-side wait below, this is a two-way start handshake: neither
     // core can finish all of its work before the other has begun. Merely
     // publishing active was insufficient because this core could be
     // interrupted between that store and its first cycle.
-    if (unsafe {
-            atomic_load_acquire(fd_refcount_probe_armed_address())
-        } == 1) {
+    if (atomic_word_load(fd_refcount_probe_armed_address()) == 1) {
         fd_refcount_probe_cycle();
-        unsafe {
-            atomic_fetch_add_relaxed(
-                fd_refcount_probe_secondary_address(), 1);
-        }
+        atomic_word_fetch_add(
+            fd_refcount_probe_secondary_address(), 1);
     }
-    while (unsafe {
-               atomic_load_acquire(fd_refcount_probe_primary_address())
-           } == 0 &&
-           unsafe {
-               atomic_load_acquire(fd_refcount_probe_armed_address())
-           } == 1) { }
-    while (unsafe {
-               atomic_load_acquire(fd_refcount_probe_secondary_address())
-           } < FD_REFCOUNT_CONTENTION_ROUNDS &&
-           unsafe {
-               atomic_load_acquire(fd_refcount_probe_armed_address())
-           } == 1) {
+    while (atomic_word_load(fd_refcount_probe_primary_address()) == 0 &&
+           atomic_word_load(fd_refcount_probe_armed_address()) == 1) { }
+    while (atomic_word_load(fd_refcount_probe_secondary_address()) <
+               FD_REFCOUNT_CONTENTION_ROUNDS &&
+           atomic_word_load(fd_refcount_probe_armed_address()) == 1) {
         fd_refcount_probe_cycle();
-        unsafe {
-            atomic_fetch_add_relaxed(
-                fd_refcount_probe_secondary_address(), 1);
-        }
+        atomic_word_fetch_add(
+            fd_refcount_probe_secondary_address(), 1);
     }
-    unsafe { atomic_store_release(fd_refcount_probe_active_address(), 0); }
+    atomic_word_store(fd_refcount_probe_active_address(), 0);
 }
 
 private fn fd_refcount_contention_report(stage: *u8, refs: usize,
@@ -3484,25 +3461,17 @@ private fn fd_refcount_contention_report(stage: *u8, refs: usize,
     kernel_boot_log(stage);
     kernel_boot_log("\n");
     kernel_boot_log("fd refcount contention counts: primary=");
-    uart_put_udec(unsafe {
-        atomic_load_acquire(fd_refcount_probe_primary_address())
-    });
+    uart_put_udec(atomic_word_load(fd_refcount_probe_primary_address()));
     kernel_boot_log(" secondary=");
-    uart_put_udec(unsafe {
-        atomic_load_acquire(fd_refcount_probe_secondary_address())
-    });
+    uart_put_udec(atomic_word_load(fd_refcount_probe_secondary_address()));
     kernel_boot_log(" refs=");
     uart_put_udec(refs);
     kernel_boot_log(" baseline=");
     uart_put_udec(baseline);
     kernel_boot_log(" refused=");
-    uart_put_udec(unsafe {
-        atomic_load_acquire(fd_refcount_probe_refused_address())
-    });
+    uart_put_udec(atomic_word_load(fd_refcount_probe_refused_address()));
     kernel_boot_log(" overlap=");
-    uart_put_udec(unsafe {
-        atomic_load_acquire(fd_refcount_probe_overlap_address())
-    });
+    uart_put_udec(atomic_word_load(fd_refcount_probe_overlap_address()));
     kernel_boot_log("\n");
 }
 
@@ -3578,24 +3547,18 @@ fn fd_refcount_contention_probe() -> bool !{unsafe} {
     }
     let baseline: usize = unified_object_refs_of(fd_refcount_probe_handle);
     let doubles_before: usize = unified_object_double_release_count();
-    let entries_before: usize = unsafe {
-        atomic_load_acquire(fd_refcount_probe_entries_address())
-    };
-    unsafe { atomic_store_release(fd_refcount_probe_armed_address(), 1); }
+    let entries_before: usize = atomic_word_load(fd_refcount_probe_entries_address());
+    atomic_word_store(fd_refcount_probe_armed_address(), 1);
 
     let mut entry_window: PeerTickWindow = peer_tick_window_start(16);
     let mut entered: bool = false;
     while (entered == false && peer_tick_window_open(entry_window)) {
-        if (unsafe {
-                atomic_load_acquire(fd_refcount_probe_entries_address())
-            } > entries_before) {
+        if (atomic_word_load(fd_refcount_probe_entries_address()) > entries_before) {
             entered = true;
         }
     }
     if (entered == false) {
-        unsafe {
-            atomic_store_release(fd_refcount_probe_armed_address(), 0);
-        }
+        atomic_word_store(fd_refcount_probe_armed_address(), 0);
         fd_refcount_contention_report("secondary-never-entered" as *u8,
                                       baseline, baseline);
         return false;
@@ -3610,16 +3573,12 @@ fn fd_refcount_contention_probe() -> bool !{unsafe} {
     let mut started: bool = false;
     while (started == false &&
            peer_tick_window_open(started_window)) {
-        if (unsafe {
-                atomic_load_acquire(fd_refcount_probe_secondary_address())
-            } > 0) {
+        if (atomic_word_load(fd_refcount_probe_secondary_address()) > 0) {
             started = true;
         }
     }
     if (started == false) {
-        unsafe {
-            atomic_store_release(fd_refcount_probe_armed_address(), 0);
-        }
+        atomic_word_store(fd_refcount_probe_armed_address(), 0);
         fd_refcount_contention_report("secondary-never-started" as *u8,
                                       baseline, baseline);
         return false;
@@ -3627,26 +3586,21 @@ fn fd_refcount_contention_probe() -> bool !{unsafe} {
 
     for round: usize in 0..<FD_REFCOUNT_CONTENTION_ROUNDS {
         fd_refcount_probe_cycle();
-        unsafe {
-            atomic_fetch_add_relaxed(fd_refcount_probe_primary_address(), 1);
-        }
+        atomic_word_fetch_add(fd_refcount_probe_primary_address(), 1);
     }
 
-    unsafe {
-        atomic_store_release(fd_refcount_probe_overlap_address(),
-            atomic_load_acquire(fd_refcount_probe_secondary_address()));
-    }
+    atomic_word_store(fd_refcount_probe_overlap_address(),
+        atomic_word_load(fd_refcount_probe_secondary_address()));
 
     let mut finish_window: PeerTickWindow = peer_tick_window_start(128);
     let mut finished: bool = false;
     while (finished == false && peer_tick_window_open(finish_window)) {
-        if (unsafe {
-                atomic_load_acquire(fd_refcount_probe_secondary_address())
-            } >= FD_REFCOUNT_CONTENTION_ROUNDS) {
+        if (atomic_word_load(fd_refcount_probe_secondary_address()) >=
+                FD_REFCOUNT_CONTENTION_ROUNDS) {
             finished = true;
         }
     }
-    unsafe { atomic_store_release(fd_refcount_probe_armed_address(), 0); }
+    atomic_word_store(fd_refcount_probe_armed_address(), 0);
 
     let refs: usize = unified_object_refs_of(fd_refcount_probe_handle);
     if (finished == false) {
@@ -3655,14 +3609,10 @@ fn fd_refcount_contention_probe() -> bool !{unsafe} {
         return false;
     }
     fd_refcount_contention_report("complete" as *u8, refs, baseline);
-    let overlap: usize = unsafe {
-        atomic_load_acquire(fd_refcount_probe_overlap_address())
-    };
+    let overlap: usize = atomic_word_load(fd_refcount_probe_overlap_address());
     return refs == baseline &&
            unified_object_double_release_count() == doubles_before &&
-           unsafe {
-               atomic_load_acquire(fd_refcount_probe_refused_address())
-           } == 0 &&
+           atomic_word_load(fd_refcount_probe_refused_address()) == 0 &&
            overlap > 0;
 }
 

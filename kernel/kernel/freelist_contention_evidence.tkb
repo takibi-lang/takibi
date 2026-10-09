@@ -56,7 +56,7 @@ private let mut freelist_probe_ready: bool = false;
 // One word per slot: 1 while some core believes it exclusively holds that
 // index. Two cores handed the same index find it already 1, which is the
 // double hand-out this probe exists to catch.
-private let mut freelist_probe_held: [usize; FREELIST_CONTENTION_SLOTS];
+private let mut freelist_probe_held: [AtomicWord; FREELIST_CONTENTION_SLOTS];
 
 // Phase 2's lock. The primitive still has none -- that is deliberate, see
 // freelist.tkb -- so what phase 2 demonstrates is the CALLER holding one,
@@ -64,42 +64,42 @@ private let mut freelist_probe_held: [usize; FREELIST_CONTENTION_SLOTS];
 // that matters (GitHub issue #479).
 private let mut freelist_probe_lock: Mutex;
 // 0 = phase 1, no lock, the race is expected. 1 = phase 2, locked.
-private let mut freelist_probe_locked_phase: usize;
+private let mut freelist_probe_locked_phase: AtomicWord;
 
-private let mut freelist_probe_armed: usize;
-private let mut freelist_probe_primary: usize;
-private let mut freelist_probe_secondary: usize;
-private let mut freelist_probe_duplicates: usize;
-private let mut freelist_probe_empty: usize;
-private let mut freelist_probe_active: usize;
-private let mut freelist_probe_overlap: usize;
-private let mut freelist_probe_primary_arrived: usize;
-private let mut freelist_probe_secondary_arrived: usize;
-private let mut freelist_probe_primary_marked: usize;
-private let mut freelist_probe_secondary_marked: usize;
+private let mut freelist_probe_armed: AtomicWord;
+private let mut freelist_probe_primary: AtomicWord;
+private let mut freelist_probe_secondary: AtomicWord;
+private let mut freelist_probe_duplicates: AtomicWord;
+private let mut freelist_probe_empty: AtomicWord;
+private let mut freelist_probe_active: AtomicWord;
+private let mut freelist_probe_overlap: AtomicWord;
+private let mut freelist_probe_primary_arrived: AtomicWord;
+private let mut freelist_probe_secondary_arrived: AtomicWord;
+private let mut freelist_probe_primary_marked: AtomicWord;
+private let mut freelist_probe_secondary_marked: AtomicWord;
 
-private fn freelist_probe_armed_address() -> usize {
-    return (&freelist_probe_armed) as usize;
+private fn freelist_probe_armed_address() -> *AtomicWord {
+    return &freelist_probe_armed;
 }
 
-private fn freelist_probe_primary_address() -> usize {
-    return (&freelist_probe_primary) as usize;
+private fn freelist_probe_primary_address() -> *AtomicWord {
+    return &freelist_probe_primary;
 }
 
-private fn freelist_probe_secondary_address() -> usize {
-    return (&freelist_probe_secondary) as usize;
+private fn freelist_probe_secondary_address() -> *AtomicWord {
+    return &freelist_probe_secondary;
 }
 
-private fn freelist_probe_duplicates_address() -> usize {
-    return (&freelist_probe_duplicates) as usize;
+private fn freelist_probe_duplicates_address() -> *AtomicWord {
+    return &freelist_probe_duplicates;
 }
 
-private fn freelist_probe_empty_address() -> usize {
-    return (&freelist_probe_empty) as usize;
+private fn freelist_probe_empty_address() -> *AtomicWord {
+    return &freelist_probe_empty;
 }
 
-private fn freelist_probe_active_address() -> usize {
-    return (&freelist_probe_active) as usize;
+private fn freelist_probe_active_address() -> *AtomicWord {
+    return &freelist_probe_active;
 }
 
 // GitHub issue #510: entries into the secondary's run function, counted and
@@ -118,39 +118,39 @@ private fn freelist_probe_active_address() -> usize {
 // rendezvous. Gating on the per-round cycle count instead would deadlock:
 // that count only advances after a rendezvous with core 0, and core 0 is the
 // one waiting.
-private let mut freelist_probe_entries: usize;
+private let mut freelist_probe_entries: AtomicWord;
 
-private fn freelist_probe_entries_address() -> usize {
-    return (&freelist_probe_entries) as usize;
+private fn freelist_probe_entries_address() -> *AtomicWord {
+    return &freelist_probe_entries;
 }
 
-private fn freelist_probe_overlap_address() -> usize {
-    return (&freelist_probe_overlap) as usize;
+private fn freelist_probe_overlap_address() -> *AtomicWord {
+    return &freelist_probe_overlap;
 }
 
-private fn freelist_probe_primary_arrived_address() -> usize {
-    return (&freelist_probe_primary_arrived) as usize;
+private fn freelist_probe_primary_arrived_address() -> *AtomicWord {
+    return &freelist_probe_primary_arrived;
 }
 
-private fn freelist_probe_secondary_arrived_address() -> usize {
-    return (&freelist_probe_secondary_arrived) as usize;
+private fn freelist_probe_secondary_arrived_address() -> *AtomicWord {
+    return &freelist_probe_secondary_arrived;
 }
 
-private fn freelist_probe_primary_marked_address() -> usize {
-    return (&freelist_probe_primary_marked) as usize;
+private fn freelist_probe_primary_marked_address() -> *AtomicWord {
+    return &freelist_probe_primary_marked;
 }
 
-private fn freelist_probe_secondary_marked_address() -> usize {
-    return (&freelist_probe_secondary_marked) as usize;
+private fn freelist_probe_secondary_marked_address() -> *AtomicWord {
+    return &freelist_probe_secondary_marked;
 }
 
-private fn freelist_probe_locked_phase_address() -> usize {
-    return (&freelist_probe_locked_phase) as usize;
+private fn freelist_probe_locked_phase_address() -> *AtomicWord {
+    return &freelist_probe_locked_phase;
 }
 
-private fn freelist_probe_held_address(index: usize) -> usize {
-    let base: *usize = freelist_probe_held;
-    return (base + (index as isize)) as usize;
+private fn freelist_probe_held_address(
+        index: {0..<FREELIST_CONTENTION_SLOTS as usize}) -> *AtomicWord {
+    return &freelist_probe_held[index];
 }
 
 private fn freelist_probe_init() {
@@ -168,30 +168,26 @@ private fn freelist_probe_init() {
 // while the thing under test is not: a probe whose own bookkeeping raced
 // would report duplicates that were its own fault.
 private fn freelist_probe_rendezvous(primary: bool, sequence: usize,
-                                     primary_address: usize,
-                                     secondary_address: usize)
+                                     primary_address: *AtomicWord,
+                                     secondary_address: *AtomicWord)
         -> FreelistProbeRendezvousResult !{unsafe} {
-    let mut own_address: usize = secondary_address;
-    let mut peer_address: usize = primary_address;
+    let mut own_address: *AtomicWord = secondary_address;
+    let mut peer_address: *AtomicWord = primary_address;
     if (primary) {
         own_address = primary_address;
         peer_address = secondary_address;
     }
-    unsafe { atomic_store_release(own_address, sequence); }
+    atomic_word_store(own_address, sequence);
     let mut deadline: PeerTickWindow = peer_tick_window_start(128);
     while (peer_tick_window_open(deadline) &&
-           unsafe { atomic_load_acquire(peer_address) } < sequence &&
-           unsafe {
-               atomic_load_acquire(freelist_probe_armed_address())
-           } == 1) {
+           atomic_word_load(peer_address) < sequence &&
+           atomic_word_load(freelist_probe_armed_address()) == 1) {
     }
-    if (unsafe { atomic_load_acquire(peer_address) } >= sequence &&
-        unsafe {
-            atomic_load_acquire(freelist_probe_armed_address())
-        } == 1) {
+    if (atomic_word_load(peer_address) >= sequence &&
+        atomic_word_load(freelist_probe_armed_address()) == 1) {
         return FreelistProbeRendezvousResult::Met;
     }
-    unsafe { atomic_store_release(freelist_probe_armed_address(), 0); }
+    atomic_word_store(freelist_probe_armed_address(), 0);
     return FreelistProbeRendezvousResult::TimedOut;
 }
 
@@ -200,10 +196,7 @@ private fn freelist_probe_record_pop(result: FreelistPopResult,
         -> bool !{unsafe} {
     match result {
         FreelistPopResult::Empty => {
-            if (unsafe {
-                    atomic_load_acquire(
-                        freelist_probe_locked_phase_address())
-                } == 0) {
+            if (atomic_word_load( freelist_probe_locked_phase_address()) == 0) {
                 match freelist_probe_rendezvous(
                         primary, sequence,
                         freelist_probe_primary_marked_address(),
@@ -212,27 +205,19 @@ private fn freelist_probe_record_pop(result: FreelistPopResult,
                     FreelistProbeRendezvousResult::Met => {}
                 }
             }
-            unsafe {
-                atomic_fetch_add_relaxed(freelist_probe_empty_address(), 1);
-            }
+            atomic_word_fetch_add(freelist_probe_empty_address(), 1);
             return false;
         }
         FreelistPopResult::Popped(owner) => {
             let index: usize = freelist_owner_index(owner);
             if (index < FREELIST_CONTENTION_SLOTS) {
-                let previous: usize = unsafe {
-                    atomic_swap_acquire(freelist_probe_held_address(index), 1)
-                };
+                let previous: usize =
+                    atomic_word_swap(freelist_probe_held_address(index), 1);
                 if (previous != 0) {
-                    unsafe {
-                        atomic_fetch_add_relaxed(
-                            freelist_probe_duplicates_address(), 1);
-                    }
+                    atomic_word_fetch_add(
+                        freelist_probe_duplicates_address(), 1);
                 }
-                if (unsafe {
-                        atomic_load_acquire(
-                            freelist_probe_locked_phase_address())
-                    } == 0) {
+                if (atomic_word_load( freelist_probe_locked_phase_address()) == 0) {
                     match freelist_probe_rendezvous(
                             primary, sequence,
                             freelist_probe_primary_marked_address(),
@@ -241,10 +226,8 @@ private fn freelist_probe_record_pop(result: FreelistPopResult,
                         FreelistProbeRendezvousResult::Met => {}
                     }
                 }
-                unsafe {
-                    atomic_store_release(
-                        freelist_probe_held_address(index), 0);
-                }
+                atomic_word_store(
+                    freelist_probe_held_address(index), 0);
             }
             freelist_core_remove(&freelist_probe, owner);
             return true;
@@ -254,9 +237,7 @@ private fn freelist_probe_record_pop(result: FreelistPopResult,
 
 private fn freelist_probe_cycle(primary: bool, sequence: usize)
         -> bool !{unsafe} {
-    let locked: bool = unsafe {
-        atomic_load_acquire(freelist_probe_locked_phase_address())
-    } == 1;
+    let locked: bool = atomic_word_load(freelist_probe_locked_phase_address()) == 1;
     let mut taken: bool = false;
     if (locked) {
         match freelist_probe_rendezvous(
@@ -311,35 +292,25 @@ private fn freelist_probe_cycle(primary: bool, sequence: usize)
 }
 
 fn freelist_contention_is_armed() -> bool !{unsafe} {
-    return unsafe {
-        atomic_load_acquire(freelist_probe_armed_address())
-    } == 1;
+    return atomic_word_load(freelist_probe_armed_address()) == 1;
 }
 
 fn freelist_contention_secondary_run() !{unsafe} {
-    unsafe {
-        atomic_fetch_add_relaxed(freelist_probe_entries_address(), 1);
-        atomic_store_release(freelist_probe_active_address(), 1);
-    }
+    atomic_word_fetch_add(freelist_probe_entries_address(), 1);
+    atomic_word_store(freelist_probe_active_address(), 1);
     // The idle loop may enter again before the primary disarms this phase.
     // Keep the round in the phase's published count, not a fresh local loop:
     // an old rendezvous sequence must never authorize another allocation.
-    while (unsafe {
-               atomic_load_acquire(freelist_probe_secondary_address())
-           } < FREELIST_CONTENTION_ROUNDS && unsafe {
-               atomic_load_acquire(freelist_probe_armed_address())
-           } == 1) {
-        let sequence: usize = unsafe {
-            atomic_load_acquire(freelist_probe_secondary_address())
-        } + 1;
+    while (atomic_word_load(freelist_probe_secondary_address()) <
+               FREELIST_CONTENTION_ROUNDS &&
+           atomic_word_load(freelist_probe_armed_address()) == 1) {
+        let sequence: usize =
+            atomic_word_load(freelist_probe_secondary_address()) + 1;
         if (freelist_probe_cycle(false, sequence)) {
-            unsafe {
-                atomic_fetch_add_relaxed(
-                    freelist_probe_secondary_address(), 1);
-            }
+            atomic_word_fetch_add(freelist_probe_secondary_address(), 1);
         }
     }
-    unsafe { atomic_store_release(freelist_probe_active_address(), 0); }
+    atomic_word_store(freelist_probe_active_address(), 0);
 }
 
 private fn freelist_contention_report(stage: *u8) !{unsafe} {
@@ -347,25 +318,15 @@ private fn freelist_contention_report(stage: *u8) !{unsafe} {
     kernel_boot_log(stage);
     kernel_boot_log("\n");
     kernel_boot_log("freelist contention counts: primary=");
-    uart_put_udec(unsafe {
-        atomic_load_acquire(freelist_probe_primary_address())
-    });
+    uart_put_udec(atomic_word_load(freelist_probe_primary_address()));
     kernel_boot_log(" secondary=");
-    uart_put_udec(unsafe {
-        atomic_load_acquire(freelist_probe_secondary_address())
-    });
+    uart_put_udec(atomic_word_load(freelist_probe_secondary_address()));
     kernel_boot_log(" duplicates=");
-    uart_put_udec(unsafe {
-        atomic_load_acquire(freelist_probe_duplicates_address())
-    });
+    uart_put_udec(atomic_word_load(freelist_probe_duplicates_address()));
     kernel_boot_log(" empty=");
-    uart_put_udec(unsafe {
-        atomic_load_acquire(freelist_probe_empty_address())
-    });
+    uart_put_udec(atomic_word_load(freelist_probe_empty_address()));
     kernel_boot_log(" overlap=");
-    uart_put_udec(unsafe {
-        atomic_load_acquire(freelist_probe_overlap_address())
-    });
+    uart_put_udec(atomic_word_load(freelist_probe_overlap_address()));
     kernel_boot_log("\n");
 }
 
@@ -373,32 +334,24 @@ private fn freelist_contention_report(stage: *u8) !{unsafe} {
 // finish. Returns the duplicate count, or a negative-shaped failure through
 // `ok`.
 private fn freelist_contention_phase(locked: bool) -> bool !{unsafe} {
-    unsafe {
-        atomic_store_release(freelist_probe_primary_address(), 0);
-        atomic_store_release(freelist_probe_secondary_address(), 0);
-        atomic_store_release(freelist_probe_duplicates_address(), 0);
-        atomic_store_release(freelist_probe_empty_address(), 0);
-        atomic_store_release(freelist_probe_overlap_address(), 0);
-        atomic_store_release(freelist_probe_primary_arrived_address(), 0);
-        atomic_store_release(freelist_probe_secondary_arrived_address(), 0);
-        atomic_store_release(freelist_probe_primary_marked_address(), 0);
-        atomic_store_release(freelist_probe_secondary_marked_address(), 0);
-        atomic_store_release(freelist_probe_active_address(), 0);
-    }
+    atomic_word_store(freelist_probe_primary_address(), 0);
+    atomic_word_store(freelist_probe_secondary_address(), 0);
+    atomic_word_store(freelist_probe_duplicates_address(), 0);
+    atomic_word_store(freelist_probe_empty_address(), 0);
+    atomic_word_store(freelist_probe_overlap_address(), 0);
+    atomic_word_store(freelist_probe_primary_arrived_address(), 0);
+    atomic_word_store(freelist_probe_secondary_arrived_address(), 0);
+    atomic_word_store(freelist_probe_primary_marked_address(), 0);
+    atomic_word_store(freelist_probe_secondary_marked_address(), 0);
+    atomic_word_store(freelist_probe_active_address(), 0);
     freelist_core_init(&freelist_probe);
     if (locked) {
-        unsafe {
-            atomic_store_release(freelist_probe_locked_phase_address(), 1);
-        }
+        atomic_word_store(freelist_probe_locked_phase_address(), 1);
     } else {
-        unsafe {
-            atomic_store_release(freelist_probe_locked_phase_address(), 0);
-        }
+        atomic_word_store(freelist_probe_locked_phase_address(), 0);
     }
-    let entries_before: usize = unsafe {
-        atomic_load_acquire(freelist_probe_entries_address())
-    };
-    unsafe { atomic_store_release(freelist_probe_armed_address(), 1); }
+    let entries_before: usize = atomic_word_load(freelist_probe_entries_address());
+    atomic_word_store(freelist_probe_armed_address(), 1);
 
     // Core 1 remains inside its first per-round rendezvous until core 0
     // arrives, so `active` can no longer be a pulse that a long QEMU vCPU
@@ -407,14 +360,12 @@ private fn freelist_contention_phase(locked: bool) -> bool !{unsafe} {
     let mut entry_window: PeerTickWindow = peer_tick_window_start(16);
     let mut entered: bool = false;
     while (entered == false && peer_tick_window_open(entry_window)) {
-        if (unsafe {
-                atomic_load_acquire(freelist_probe_entries_address())
-            } > entries_before) {
+        if (atomic_word_load(freelist_probe_entries_address()) > entries_before) {
             entered = true;
         }
     }
     if (entered == false) {
-        unsafe { atomic_store_release(freelist_probe_armed_address(), 0); }
+        atomic_word_store(freelist_probe_armed_address(), 0);
         freelist_contention_report("secondary-never-entered" as *u8);
         return false;
     }
@@ -422,36 +373,29 @@ private fn freelist_contention_phase(locked: bool) -> bool !{unsafe} {
 
     for round: usize in 0..<FREELIST_CONTENTION_ROUNDS {
         if (freelist_probe_cycle(true, round + 1)) {
-            unsafe {
-                atomic_fetch_add_relaxed(freelist_probe_primary_address(), 1);
-            }
+            atomic_word_fetch_add(freelist_probe_primary_address(), 1);
         }
     }
 
-    if (unsafe {
-            atomic_load_acquire(freelist_probe_armed_address())
-        } == 0) {
+    if (atomic_word_load(freelist_probe_armed_address()) == 0) {
         freelist_contention_report("rendezvous-timeout" as *u8);
         return false;
     }
 
     // With per-round rendezvous this is the secondary completion count at
     // the instant the primary finishes, not a scheduler-granularity metric.
-    unsafe {
-        atomic_store_release(freelist_probe_overlap_address(),
-            atomic_load_acquire(freelist_probe_secondary_address()));
-    }
+    atomic_word_store(freelist_probe_overlap_address(),
+        atomic_word_load(freelist_probe_secondary_address()));
 
     let mut finish_window: PeerTickWindow = peer_tick_window_start(128);
     let mut finished: bool = false;
     while (finished == false && peer_tick_window_open(finish_window)) {
-        if (unsafe {
-                atomic_load_acquire(freelist_probe_secondary_address())
-            } >= FREELIST_CONTENTION_ROUNDS) {
+        if (atomic_word_load(freelist_probe_secondary_address()) >=
+                FREELIST_CONTENTION_ROUNDS) {
             finished = true;
         }
     }
-    unsafe { atomic_store_release(freelist_probe_armed_address(), 0); }
+    atomic_word_store(freelist_probe_armed_address(), 0);
     if (finished == false) {
         freelist_contention_report("secondary-never-finished" as *u8);
         return false;
@@ -459,21 +403,15 @@ private fn freelist_contention_phase(locked: bool) -> bool !{unsafe} {
     // Disarming is a request, not an acknowledgement. Wait for the last
     // secondary invocation to leave before the next phase resets its state.
     let mut settle_window: PeerTickWindow = peer_tick_window_start(16);
-    while (unsafe { atomic_load_acquire(freelist_probe_active_address()) } != 0 &&
+    while (atomic_word_load(freelist_probe_active_address()) != 0 &&
            peer_tick_window_open(settle_window)) { }
-    if (unsafe { atomic_load_acquire(freelist_probe_active_address()) } != 0) {
+    if (atomic_word_load(freelist_probe_active_address()) != 0) {
         freelist_contention_report("secondary-never-left" as *u8);
         return false;
     }
-    let primary: usize = unsafe {
-        atomic_load_acquire(freelist_probe_primary_address())
-    };
-    let secondary: usize = unsafe {
-        atomic_load_acquire(freelist_probe_secondary_address())
-    };
-    let empty: usize = unsafe {
-        atomic_load_acquire(freelist_probe_empty_address())
-    };
+    let primary: usize = atomic_word_load(freelist_probe_primary_address());
+    let secondary: usize = atomic_word_load(freelist_probe_secondary_address());
+    let empty: usize = atomic_word_load(freelist_probe_empty_address());
     if (primary != FREELIST_CONTENTION_ROUNDS ||
         secondary != FREELIST_CONTENTION_ROUNDS || empty != 0) {
         freelist_contention_report("incomplete" as *u8);
@@ -483,9 +421,7 @@ private fn freelist_contention_phase(locked: bool) -> bool !{unsafe} {
 }
 
 fn freelist_contention_duplicates() -> usize !{unsafe} {
-    return unsafe {
-        atomic_load_acquire(freelist_probe_duplicates_address())
-    };
+    return atomic_word_load(freelist_probe_duplicates_address());
 }
 
 // TWO phases, and the verdict needs BOTH to come out right.

@@ -69,34 +69,6 @@ ATOMIC_ALLOWED = {
         "release ordering prevents an external debugger from accepting its "
         "fields before the completed sequence is published. A lock cannot "
         "help a halted out-of-band reader",
-    "kernel/fd_table.tkb":
-        "the shared-object contention probe lives in this file, because the "
-        "retain/release it exercises are private to it",
-    "kernel/pool_contention_evidence.tkb": "two-core contention probe",
-    "kernel/freelist_contention_evidence.tkb": "two-core contention probe",
-    "kernel/page_contention_evidence.tkb": "two-core contention probe",
-    "kernel/asid_contention_evidence.tkb": "two-core contention probe",
-    "kernel/pid_contention_evidence.tkb": "two-core contention probe",
-    "kernel/tag_contention_evidence.tkb": "two-core contention probe",
-    "kernel/schedule_contention_evidence.tkb": "two-core contention probe",
-    "kernel/signal_contention_evidence.tkb": "two-core contention probe",
-    "kernel/ext2_mutation_contention_evidence.tkb":
-        "two-core contention probe; GitHub issue #533's filesystem lock, "
-        "whose production reader asks rather than waits, so the answer is "
-        "what this observes from the other core",
-    "kernel/pool_walk_contention_evidence.tkb":
-        "GitHub issue #482's two-core probe: the walk side of a pool takes "
-        "no guard by design, and this measures what that costs",
-    "kernel/occupancy_drain_evidence.tkb":
-        "GitHub issue #508's two-core probe for occupancy_drain's give-up "
-        "path; the words it holds are the handshake with the core that "
-        "occupies the region",
-    "kernel/init_once_contention_evidence.tkb":
-        "GitHub issue #483's two-core probe; atomics are only its rendezvous "
-        "and counters, while the production gate goes through Mutex",
-    "kernel/tcp_connection_contention_evidence.tkb":
-        "GitHub issue #483's two-core TcpConnectionOwner probe; atomics are "
-        "only the cross-core phase publication and verdict counters",
 }
 
 

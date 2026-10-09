@@ -64,38 +64,36 @@ const OCCUPANCY_PROBE_DRAIN_SPINS: usize = 4096;
 const WORLD_STOP_PROBE_SPINS: usize = 10000000;
 
 private let mut occupancy_probe_region: Occupancy;
-private let mut occupancy_probe_armed: usize;
+private let mut occupancy_probe_armed: AtomicWord;
 // A LATCH, set by the secondary when it is inside and never cleared by it.
 // GitHub issue #510: a level flag that the other core clears on its way
 // out cannot answer "was it ever there", which is the question a report
 // that has to tell a harness fault from a kernel one is asking.
-private let mut occupancy_probe_entered: usize;
-private let mut occupancy_probe_release: usize;
-private let mut occupancy_probe_left: usize;
+private let mut occupancy_probe_entered: AtomicWord;
+private let mut occupancy_probe_release: AtomicWord;
+private let mut occupancy_probe_left: AtomicWord;
 private let mut occupancy_probe_teardowns: usize;
 private let mut world_stop_probe_inspections: usize;
 private let mut world_stop_stale_probe_controller: WorldStop;
 
-private fn occupancy_probe_armed_address() -> usize {
-    return (&occupancy_probe_armed) as usize;
+private fn occupancy_probe_armed_address() -> *AtomicWord {
+    return &occupancy_probe_armed;
 }
 
-private fn occupancy_probe_entered_address() -> usize {
-    return (&occupancy_probe_entered) as usize;
+private fn occupancy_probe_entered_address() -> *AtomicWord {
+    return &occupancy_probe_entered;
 }
 
-private fn occupancy_probe_release_address() -> usize {
-    return (&occupancy_probe_release) as usize;
+private fn occupancy_probe_release_address() -> *AtomicWord {
+    return &occupancy_probe_release;
 }
 
-private fn occupancy_probe_left_address() -> usize {
-    return (&occupancy_probe_left) as usize;
+private fn occupancy_probe_left_address() -> *AtomicWord {
+    return &occupancy_probe_left;
 }
 
 fn occupancy_drain_is_armed() -> bool !{unsafe} {
-    return unsafe {
-        atomic_load_acquire(occupancy_probe_armed_address())
-    } == 1;
+    return atomic_word_load(occupancy_probe_armed_address()) == 1;
 }
 
 // Enter, announce, and HOLD. Linear, so the leave is checked on every path
@@ -104,18 +102,14 @@ fn occupancy_drain_is_armed() -> bool !{unsafe} {
 // exercise.
 fn occupancy_drain_secondary_run() !{unsafe} {
     let visit = occupancy_enter(&occupancy_probe_region);
-    unsafe { atomic_store_release(occupancy_probe_entered_address(), 1); }
+    atomic_word_store(occupancy_probe_entered_address(), 1);
     // Held until core 0 says otherwise, or until it gives up on this probe
     // entirely -- a secondary that spun here after an abandoned probe would
     // hold the region for the rest of the boot.
-    while (unsafe {
-               atomic_load_acquire(occupancy_probe_release_address())
-           } == 0 &&
-           unsafe {
-               atomic_load_acquire(occupancy_probe_armed_address())
-           } == 1) { }
+    while (atomic_word_load(occupancy_probe_release_address()) == 0 &&
+           atomic_word_load(occupancy_probe_armed_address()) == 1) { }
     occupancy_leave(visit, &occupancy_probe_region);
-    unsafe { atomic_store_release(occupancy_probe_left_address(), 1); }
+    atomic_word_store(occupancy_probe_left_address(), 1);
 }
 
 private fn occupancy_drain_report(stage: *u8, busy: usize, empty: usize)
@@ -124,13 +118,9 @@ private fn occupancy_drain_report(stage: *u8, busy: usize, empty: usize)
     kernel_boot_log(stage);
     kernel_boot_log("\n");
     kernel_boot_log("occupancy drain counts: entered=");
-    uart_put_udec(unsafe {
-        atomic_load_acquire(occupancy_probe_entered_address())
-    });
+    uart_put_udec(atomic_word_load(occupancy_probe_entered_address()));
     kernel_boot_log(" left=");
-    uart_put_udec(unsafe {
-        atomic_load_acquire(occupancy_probe_left_address())
-    });
+    uart_put_udec(atomic_word_load(occupancy_probe_left_address()));
     kernel_boot_log(" busy=");
     uart_put_udec(busy);
     kernel_boot_log(" empty=");
@@ -151,27 +141,23 @@ private fn occupancy_probe_teardown(proof: borrow Quiesced[region]) {
 }
 
 fn occupancy_drain_probe() -> bool !{unsafe} {
-    unsafe {
-        atomic_store_release(occupancy_probe_entered_address(), 0);
-        atomic_store_release(occupancy_probe_release_address(), 0);
-        atomic_store_release(occupancy_probe_left_address(), 0);
-    }
+    atomic_word_store(occupancy_probe_entered_address(), 0);
+    atomic_word_store(occupancy_probe_release_address(), 0);
+    atomic_word_store(occupancy_probe_left_address(), 0);
     occupancy_probe_teardowns = 0;
-    unsafe { atomic_store_release(occupancy_probe_armed_address(), 1); }
+    atomic_word_store(occupancy_probe_armed_address(), 1);
 
     // Bounded in TIME here, unlike the drain itself: this file has a clock
     // and occupancy.tkb deliberately does not.
     let mut entry_window: PeerTickWindow = peer_tick_window_start(16);
     let mut entered: bool = false;
     while (entered == false && peer_tick_window_open(entry_window)) {
-        if (unsafe {
-                atomic_load_acquire(occupancy_probe_entered_address())
-            } == 1) {
+        if (atomic_word_load(occupancy_probe_entered_address()) == 1) {
             entered = true;
         }
     }
     if (entered == false) {
-        unsafe { atomic_store_release(occupancy_probe_armed_address(), 0); }
+        atomic_word_store(occupancy_probe_armed_address(), 0);
         // The distinction issue #508 asked for. A drain that comes back
         // Empty because nothing was ever inside is a HARNESS fault and
         // reads identically to a working give-up unless the probe says so
@@ -201,18 +187,16 @@ fn occupancy_drain_probe() -> bool !{unsafe} {
 
     // Let it go, and wait until it has provably left -- not for a duration,
     // because "long enough" is the assumption this whole file is about.
-    unsafe { atomic_store_release(occupancy_probe_release_address(), 1); }
+    atomic_word_store(occupancy_probe_release_address(), 1);
     let mut leave_window: PeerTickWindow = peer_tick_window_start(16);
     let mut left: bool = false;
     while (left == false && peer_tick_window_open(leave_window)) {
-        if (unsafe {
-                atomic_load_acquire(occupancy_probe_left_address())
-            } == 1) {
+        if (atomic_word_load(occupancy_probe_left_address()) == 1) {
             left = true;
         }
     }
     if (left == false) {
-        unsafe { atomic_store_release(occupancy_probe_armed_address(), 0); }
+        atomic_word_store(occupancy_probe_armed_address(), 0);
         occupancy_drain_report("secondary-never-left" as *u8, busy_seen,
                                empty_seen);
         return false;
@@ -228,7 +212,7 @@ fn occupancy_drain_probe() -> bool !{unsafe} {
             quiesced_release(proof);
         }
     }
-    unsafe { atomic_store_release(occupancy_probe_armed_address(), 0); }
+    atomic_word_store(occupancy_probe_armed_address(), 0);
 
     occupancy_drain_report("complete" as *u8, busy_seen, empty_seen);
     // One of each, in that order, and exactly one teardown -- the Busy arm
@@ -380,19 +364,12 @@ fn world_stop_probe() -> bool !{unsafe} {
 // unacknowledged. That hid until a four-core churn run rolled the ASID
 // counter over on a peer. Here core 1 begins a two-core stop and core 0,
 // waiting with interrupts open, must acknowledge it.
-private let mut world_stop_peer_probe_armed: usize;
+private let mut world_stop_peer_probe_armed: AtomicWord;
 // 0 not run, 1 Complete, 2 Partial, 3 Busy.
-private let mut world_stop_peer_probe_result: usize;
-
-private fn world_stop_peer_probe_address(value: *usize) -> usize {
-    return value as usize;
-}
+private let mut world_stop_peer_probe_result: AtomicWord;
 
 fn world_stop_peer_probe_is_armed() -> bool !{unsafe} {
-    return unsafe {
-        atomic_load_acquire(world_stop_peer_probe_address(
-            &world_stop_peer_probe_armed))
-    } == 1;
+    return atomic_word_load(&world_stop_peer_probe_armed) == 1;
 }
 
 fn world_stop_peer_probe_secondary_run() !{unsafe} {
@@ -408,33 +385,18 @@ fn world_stop_peer_probe_secondary_run() !{unsafe} {
             result = 1;
         }
     }
-    unsafe {
-        atomic_store_release(world_stop_peer_probe_address(
-            &world_stop_peer_probe_result), result);
-        atomic_store_release(world_stop_peer_probe_address(
-            &world_stop_peer_probe_armed), 0);
-    }
+    atomic_word_store(&world_stop_peer_probe_result, result);
+    atomic_word_store(&world_stop_peer_probe_armed, 0);
 }
 
 fn world_stop_peer_probe() -> bool !{unsafe} {
-    unsafe {
-        atomic_store_release(world_stop_peer_probe_address(
-            &world_stop_peer_probe_result), 0);
-        atomic_store_release(world_stop_peer_probe_address(
-            &world_stop_peer_probe_armed), 1);
-    }
+    atomic_word_store(&world_stop_peer_probe_result, 0);
+    atomic_word_store(&world_stop_peer_probe_armed, 1);
     let mut window: PeerTickWindow = peer_tick_window_start(64);
     while (peer_tick_window_open(window) &&
-           unsafe { atomic_load_acquire(world_stop_peer_probe_address(
-               &world_stop_peer_probe_armed)) } == 1) { }
-    unsafe {
-        atomic_store_release(world_stop_peer_probe_address(
-            &world_stop_peer_probe_armed), 0);
-    }
-    let result: usize = unsafe {
-        atomic_load_acquire(world_stop_peer_probe_address(
-            &world_stop_peer_probe_result))
-    };
+           atomic_word_load(&world_stop_peer_probe_armed) == 1) { }
+    atomic_word_store(&world_stop_peer_probe_armed, 0);
+    let result: usize = atomic_word_load(&world_stop_peer_probe_result);
     kernel_boot_log("world stop from a peer counts: result=" as *u8);
     uart_put_udec(result);
     kernel_boot_log("\n" as *u8);

@@ -9,60 +9,47 @@ use "kernel/lib/execution_model.tkb";
 use "kernel/net/tcp.tkb";
 use "kernel/lib/atomic_word.tkb";
 
-private let mut tcp_owner_probe_armed: usize;
-private let mut tcp_owner_probe_phase: usize;
-private let mut tcp_owner_probe_slot: usize;
-private let mut tcp_owner_probe_generation: usize;
-private let mut tcp_owner_probe_busy: usize;
-private let mut tcp_owner_probe_advanced: usize;
-private let mut tcp_owner_probe_active: usize;
-
-private fn tcp_owner_probe_addr(value: *usize) -> usize { return value as usize; }
+private let mut tcp_owner_probe_armed: AtomicWord;
+private let mut tcp_owner_probe_phase: AtomicWord;
+private let mut tcp_owner_probe_slot: AtomicWord;
+private let mut tcp_owner_probe_generation: AtomicWord;
+private let mut tcp_owner_probe_busy: AtomicWord;
+private let mut tcp_owner_probe_advanced: AtomicWord;
+private let mut tcp_owner_probe_active: AtomicWord;
 
 fn tcp_connection_contention_is_armed() -> bool !{unsafe} {
-    return unsafe { atomic_load_acquire(tcp_owner_probe_addr(
-        &tcp_owner_probe_armed)) } == 1;
+    return atomic_word_load(&tcp_owner_probe_armed) == 1;
 }
 
 fn tcp_connection_contention_secondary_run() !{unsafe} {
-    unsafe { atomic_store_release(tcp_owner_probe_addr(
-        &tcp_owner_probe_active), 1); }
-    let slot: usize = unsafe { atomic_load_acquire(tcp_owner_probe_addr(
-        &tcp_owner_probe_slot)) };
-    let generation: usize = unsafe { atomic_load_acquire(tcp_owner_probe_addr(
-        &tcp_owner_probe_generation)) };
-    let phase: usize = unsafe { atomic_load_acquire(tcp_owner_probe_addr(
-        &tcp_owner_probe_phase)) };
+    atomic_word_store(&tcp_owner_probe_active, 1);
+    let slot: usize = atomic_word_load(&tcp_owner_probe_slot);
+    let generation: usize = atomic_word_load(&tcp_owner_probe_generation);
+    let phase: usize = atomic_word_load(&tcp_owner_probe_phase);
     match tcp_connection_probe_step(slot, generation) {
         TcpConnectionProbeStep::Missing => {}
         TcpConnectionProbeStep::Busy => {
-            if (phase == 1) { unsafe { atomic_store_release(
-                tcp_owner_probe_addr(&tcp_owner_probe_busy), 1); } }
+            if (phase == 1) { atomic_word_store(
+            &tcp_owner_probe_busy, 1); }
         }
         TcpConnectionProbeStep::Advanced => {
-            if (phase == 2) { unsafe { atomic_store_release(
-                tcp_owner_probe_addr(&tcp_owner_probe_advanced), 1); } }
+            if (phase == 2) { atomic_word_store(
+            &tcp_owner_probe_advanced, 1); }
         }
     }
-    unsafe {
-        atomic_store_release(tcp_owner_probe_addr(&tcp_owner_probe_active), 0);
-        atomic_store_release(tcp_owner_probe_addr(&tcp_owner_probe_armed), 0);
-    }
+    atomic_word_store(&tcp_owner_probe_active, 0);
+    atomic_word_store(&tcp_owner_probe_armed, 0);
 }
 
 private fn tcp_owner_probe_run_phase(phase: usize) -> bool !{unsafe} {
-    unsafe {
-        atomic_store_release(tcp_owner_probe_addr(&tcp_owner_probe_phase), phase);
-        atomic_store_release(tcp_owner_probe_addr(&tcp_owner_probe_active), 0);
-        atomic_store_release(tcp_owner_probe_addr(&tcp_owner_probe_armed), 1);
-    }
+    atomic_word_store(&tcp_owner_probe_phase, phase);
+    atomic_word_store(&tcp_owner_probe_active, 0);
+    atomic_word_store(&tcp_owner_probe_armed, 1);
     let mut window: PeerTickWindow = peer_tick_window_start(32);
     while (peer_tick_window_open(window)) {
-        if (unsafe { atomic_load_acquire(tcp_owner_probe_addr(
-                &tcp_owner_probe_armed)) } == 0) { return true; }
+        if (atomic_word_load(&tcp_owner_probe_armed) == 0) { return true; }
     }
-    unsafe { atomic_store_release(tcp_owner_probe_addr(
-        &tcp_owner_probe_armed), 0); }
+    atomic_word_store(&tcp_owner_probe_armed, 0);
     return false;
 }
 
@@ -77,20 +64,15 @@ fn tcp_connection_contention_probe() -> bool !{unsafe} {
     let slot: usize = tcp_connection_slot(owner);
     let generation: usize = tcp_connection_identity(owner);
     let before: u32 = tcp_connection_of(owner).snd_nxt;
-    unsafe {
-        atomic_store_release(tcp_owner_probe_addr(&tcp_owner_probe_slot), slot);
-        atomic_store_release(tcp_owner_probe_addr(
-            &tcp_owner_probe_generation), generation);
-        atomic_store_release(tcp_owner_probe_addr(&tcp_owner_probe_busy), 0);
-        atomic_store_release(tcp_owner_probe_addr(&tcp_owner_probe_advanced), 0);
-    }
+    atomic_word_store(&tcp_owner_probe_slot, slot);
+    atomic_word_store(&tcp_owner_probe_generation, generation);
+    atomic_word_store(&tcp_owner_probe_busy, 0);
+    atomic_word_store(&tcp_owner_probe_advanced, 0);
     let held_phase: bool = tcp_owner_probe_run_phase(1);
-    let busy: usize = unsafe { atomic_load_acquire(tcp_owner_probe_addr(
-        &tcp_owner_probe_busy)) };
+    let busy: usize = atomic_word_load(&tcp_owner_probe_busy);
     tcp_connection_put(owner);
     let released_phase: bool = tcp_owner_probe_run_phase(2);
-    let advanced: usize = unsafe { atomic_load_acquire(tcp_owner_probe_addr(
-        &tcp_owner_probe_advanced)) };
+    let advanced: usize = atomic_word_load(&tcp_owner_probe_advanced);
     let final_owner = match tcp_connection_take(slot, generation) {
         TcpConnectionTakeResult::Missing => { return false; }
         TcpConnectionTakeResult::Ready(value) => { value }

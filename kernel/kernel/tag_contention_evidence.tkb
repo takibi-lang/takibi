@@ -36,30 +36,30 @@ const TAG_CONTENTION_ROUNDS: usize = 2048;
 // as enough (overlap 4096 of 4096 on the board).
 const TAG_CONTENTION_OUTSIDE_WORK: usize = 512;
 
-private let mut tag_probe_armed: usize;
-private let mut tag_probe_primary: usize;
-private let mut tag_probe_secondary: usize;
-private let mut tag_probe_active: usize;
-private let mut tag_probe_overlap: usize;
+private let mut tag_probe_armed: AtomicWord;
+private let mut tag_probe_primary: AtomicWord;
+private let mut tag_probe_secondary: AtomicWord;
+private let mut tag_probe_active: AtomicWord;
+private let mut tag_probe_overlap: AtomicWord;
 
-private fn tag_probe_armed_address() -> usize {
-    return (&tag_probe_armed) as usize;
+private fn tag_probe_armed_address() -> *AtomicWord {
+    return &tag_probe_armed;
 }
 
-private fn tag_probe_primary_address() -> usize {
-    return (&tag_probe_primary) as usize;
+private fn tag_probe_primary_address() -> *AtomicWord {
+    return &tag_probe_primary;
 }
 
-private fn tag_probe_secondary_address() -> usize {
-    return (&tag_probe_secondary) as usize;
+private fn tag_probe_secondary_address() -> *AtomicWord {
+    return &tag_probe_secondary;
 }
 
-private fn tag_probe_active_address() -> usize {
-    return (&tag_probe_active) as usize;
+private fn tag_probe_active_address() -> *AtomicWord {
+    return &tag_probe_active;
 }
 
-private fn tag_probe_overlap_address() -> usize {
-    return (&tag_probe_overlap) as usize;
+private fn tag_probe_overlap_address() -> *AtomicWord {
+    return &tag_probe_overlap;
 }
 
 private fn tag_probe_cycle() {
@@ -68,13 +68,11 @@ private fn tag_probe_cycle() {
 }
 
 fn tag_contention_is_armed() -> bool !{unsafe} {
-    return unsafe {
-        atomic_load_acquire(tag_probe_armed_address())
-    } == 1;
+    return atomic_word_load(tag_probe_armed_address()) == 1;
 }
 
 fn tag_contention_secondary_run() !{unsafe} {
-    unsafe { atomic_store_release(tag_probe_active_address(), 1); }
+    atomic_word_store(tag_probe_active_address(), 1);
     // One cycle, published, and then WAIT for the primary to have started.
     // GitHub issue #510: this is the second half of the start handshake
     // kernel/kernel/fd_table.tkb's probe already had and this one did not.
@@ -83,29 +81,19 @@ fn tag_contention_secondary_run() !{unsafe} {
     // probe after every `wfi` wake -- can run every round and leave before
     // core 0 gets a slice, and the overlap core 0 then asserts is a number
     // from a phase the two cores never shared.
-    while (unsafe {
-               atomic_load_acquire(tag_probe_secondary_address())
-           } == 0 &&
-           unsafe { atomic_load_acquire(tag_probe_armed_address()) } == 1) {
+    while (atomic_word_load(tag_probe_secondary_address()) == 0 &&
+           atomic_word_load(tag_probe_armed_address()) == 1) {
         tag_probe_cycle();
-        unsafe {
-            atomic_fetch_add_relaxed(tag_probe_secondary_address(), 1);
-        }
+        atomic_word_fetch_add(tag_probe_secondary_address(), 1);
     }
-    while (unsafe {
-               atomic_load_acquire(tag_probe_primary_address())
-           } == 0 &&
-           unsafe { atomic_load_acquire(tag_probe_armed_address()) } == 1) { }
-    while (unsafe {
-               atomic_load_acquire(tag_probe_secondary_address())
-           } < TAG_CONTENTION_ROUNDS &&
-           unsafe { atomic_load_acquire(tag_probe_armed_address()) } == 1) {
+    while (atomic_word_load(tag_probe_primary_address()) == 0 &&
+           atomic_word_load(tag_probe_armed_address()) == 1) { }
+    while (atomic_word_load(tag_probe_secondary_address()) < TAG_CONTENTION_ROUNDS &&
+           atomic_word_load(tag_probe_armed_address()) == 1) {
         tag_probe_cycle();
-        unsafe {
-            atomic_fetch_add_relaxed(tag_probe_secondary_address(), 1);
-        }
+        atomic_word_fetch_add(tag_probe_secondary_address(), 1);
     }
-    unsafe { atomic_store_release(tag_probe_active_address(), 0); }
+    atomic_word_store(tag_probe_active_address(), 0);
 }
 
 private fn tag_contention_report(stage: *u8, advanced: usize,
@@ -114,27 +102,21 @@ private fn tag_contention_report(stage: *u8, advanced: usize,
     kernel_boot_log(stage);
     kernel_boot_log("\n");
     kernel_boot_log("tag contention counts: primary=");
-    uart_put_udec(unsafe {
-        atomic_load_acquire(tag_probe_primary_address())
-    });
+    uart_put_udec(atomic_word_load(tag_probe_primary_address()));
     kernel_boot_log(" secondary=");
-    uart_put_udec(unsafe {
-        atomic_load_acquire(tag_probe_secondary_address())
-    });
+    uart_put_udec(atomic_word_load(tag_probe_secondary_address()));
     kernel_boot_log(" calls=");
     uart_put_udec(calls);
     kernel_boot_log(" advanced=");
     uart_put_udec(advanced);
     kernel_boot_log(" overlap=");
-    uart_put_udec(unsafe {
-        atomic_load_acquire(tag_probe_overlap_address())
-    });
+    uart_put_udec(atomic_word_load(tag_probe_overlap_address()));
     kernel_boot_log("\n");
 }
 
 fn tag_contention_probe() -> bool !{unsafe} {
     let next_before: usize = intrusive_pool_tag_counter();
-    unsafe { atomic_store_release(tag_probe_armed_address(), 1); }
+    atomic_word_store(tag_probe_armed_address(), 1);
 
     // GitHub issue #479: wait for a COMPLETED ROUND, not merely for
     // `active`, which the secondary sets BEFORE its first cycle. Under
@@ -149,40 +131,33 @@ fn tag_contention_probe() -> bool !{unsafe} {
     let mut entry_window: PeerTickWindow = peer_tick_window_start(16);
     let mut entered: bool = false;
     while (entered == false && peer_tick_window_open(entry_window)) {
-        if (unsafe {
-                atomic_load_acquire(tag_probe_secondary_address())
-            } >= 1) {
+        if (atomic_word_load(tag_probe_secondary_address()) >= 1) {
             entered = true;
         }
     }
     if (entered == false) {
-        unsafe { atomic_store_release(tag_probe_armed_address(), 0); }
+        atomic_word_store(tag_probe_armed_address(), 0);
         tag_contention_report("secondary-never-completed-a-round" as *u8, 0, 0);
         return false;
     }
 
     for round: usize in 0..<TAG_CONTENTION_ROUNDS {
         tag_probe_cycle();
-        unsafe {
-            atomic_fetch_add_relaxed(tag_probe_primary_address(), 1);
-        }
+        atomic_word_fetch_add(tag_probe_primary_address(), 1);
     }
 
-    unsafe {
-        atomic_store_release(tag_probe_overlap_address(),
-            atomic_load_acquire(tag_probe_secondary_address()));
-    }
+    atomic_word_store(tag_probe_overlap_address(),
+        atomic_word_load(tag_probe_secondary_address()));
 
     let mut finish_window: PeerTickWindow = peer_tick_window_start(128);
     let mut finished: bool = false;
     while (finished == false && peer_tick_window_open(finish_window)) {
-        if (unsafe {
-                atomic_load_acquire(tag_probe_secondary_address())
-            } >= TAG_CONTENTION_ROUNDS) {
+        if (atomic_word_load(tag_probe_secondary_address()) >=
+                TAG_CONTENTION_ROUNDS) {
             finished = true;
         }
     }
-    unsafe { atomic_store_release(tag_probe_armed_address(), 0); }
+    atomic_word_store(tag_probe_armed_address(), 0);
 
     // `advanced` and `calls` are read one after the other, and disarming
     // stops the other core at its next condition check rather than mid
@@ -194,17 +169,15 @@ fn tag_contention_probe() -> bool !{unsafe} {
     let mut settle_window: PeerTickWindow = peer_tick_window_start(16);
     let mut settled: bool = false;
     while (settled == false && peer_tick_window_open(settle_window)) {
-        if (unsafe {
-                atomic_load_acquire(tag_probe_active_address())
-            } == 0) {
+        if (atomic_word_load(tag_probe_active_address()) == 0) {
             settled = true;
         }
     }
 
     let advanced: usize = intrusive_pool_tag_counter() - next_before;
     let calls: usize =
-        unsafe { atomic_load_acquire(tag_probe_primary_address()) } +
-        unsafe { atomic_load_acquire(tag_probe_secondary_address()) };
+        atomic_word_load(tag_probe_primary_address()) +
+        atomic_word_load(tag_probe_secondary_address());
     if (finished == false) {
         tag_contention_report("secondary-never-finished" as *u8, advanced,
                                calls);
@@ -219,8 +192,6 @@ fn tag_contention_probe() -> bool !{unsafe} {
     // not also leave the counter moved.
     intrusive_pool_tag_counter_restore(next_before);
     tag_contention_report("complete" as *u8, advanced, calls);
-    let overlap: usize = unsafe {
-        atomic_load_acquire(tag_probe_overlap_address())
-    };
+    let overlap: usize = atomic_word_load(tag_probe_overlap_address());
     return advanced == calls && overlap > 0;
 }

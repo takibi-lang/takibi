@@ -160,41 +160,41 @@ private let mut pool_walk_floor_held: usize = 0;
 private let mut pool_walk_floor_base: usize = 0;
 private let mut pool_walk_floor_end: usize = 0;
 
-private let mut pool_walk_armed: usize;
-private let mut pool_walk_active: usize;
+private let mut pool_walk_armed: AtomicWord;
+private let mut pool_walk_active: AtomicWord;
 // The rendezvous, as a round number rather than a pair of flags: core 0
 // publishes `seq`, the walker answers `held_seq` when it is holding that
 // round's address, core 0 answers `released_seq` once the chunk is gone,
 // and the walker answers `probed_seq` once it has asked. A sequence
 // cannot be missed the way a flag can when the other core is late -- the
 // lesson issue #510 left on every probe in this directory.
-private let mut pool_walk_seq: usize;
-private let mut pool_walk_held_seq: usize;
-private let mut pool_walk_released_seq: usize;
-private let mut pool_walk_probed_seq: usize;
-private let mut pool_walk_stale: usize;
+private let mut pool_walk_seq: AtomicWord;
+private let mut pool_walk_held_seq: AtomicWord;
+private let mut pool_walk_released_seq: AtomicWord;
+private let mut pool_walk_probed_seq: AtomicWord;
+private let mut pool_walk_stale: AtomicWord;
 
 // GitHub issue #479: a second rendezvous around the ordinary (locked) probe.
 // The secondary holds a Live view until core 0 asks it to release; core 0
 // observes the underlying mutex on both sides of that release.
-private let mut pool_view_request: usize;
-private let mut pool_view_held: usize;
-private let mut pool_view_release: usize;
-private let mut pool_view_done: usize;
-private let mut pool_view_payload_ok: usize;
+private let mut pool_view_request: AtomicWord;
+private let mut pool_view_held: AtomicWord;
+private let mut pool_view_release: AtomicWord;
+private let mut pool_view_done: AtomicWord;
+private let mut pool_view_payload_ok: AtomicWord;
 
-private let mut pool_walk_rounds_met: usize;
-private let mut pool_walk_refused: usize;
-private let mut pool_walk_admitted: usize;
-private let mut pool_walk_floor_bad: usize;
-private let mut pool_walk_steps: usize;
+private let mut pool_walk_rounds_met: AtomicWord;
+private let mut pool_walk_refused: AtomicWord;
+private let mut pool_walk_admitted: AtomicWord;
+private let mut pool_walk_floor_bad: AtomicWord;
+private let mut pool_walk_steps: AtomicWord;
 
-private fn pool_walk_armed_address() -> usize {
-    return (&pool_walk_armed) as usize;
+private fn pool_walk_armed_address() -> *AtomicWord {
+    return &pool_walk_armed;
 }
 
-private fn pool_walk_active_address() -> usize {
-    return (&pool_walk_active) as usize;
+private fn pool_walk_active_address() -> *AtomicWord {
+    return &pool_walk_active;
 }
 
 // GitHub issue #510: entries, counted and never cleared. This probe's
@@ -204,70 +204,70 @@ private fn pool_walk_active_address() -> usize {
 // core's loop happens to be written" is the kind of reasoning that stops
 // being true when somebody edits that loop, and scripts/check_probe_entry_gates.py
 // cannot see it. A count that only grows needs no such argument.
-private let mut pool_walk_entries: usize;
+private let mut pool_walk_entries: AtomicWord;
 
-private fn pool_walk_entries_address() -> usize {
-    return (&pool_walk_entries) as usize;
+private fn pool_walk_entries_address() -> *AtomicWord {
+    return &pool_walk_entries;
 }
 
-private fn pool_walk_seq_address() -> usize {
-    return (&pool_walk_seq) as usize;
+private fn pool_walk_seq_address() -> *AtomicWord {
+    return &pool_walk_seq;
 }
 
-private fn pool_walk_held_seq_address() -> usize {
-    return (&pool_walk_held_seq) as usize;
+private fn pool_walk_held_seq_address() -> *AtomicWord {
+    return &pool_walk_held_seq;
 }
 
-private fn pool_walk_released_seq_address() -> usize {
-    return (&pool_walk_released_seq) as usize;
+private fn pool_walk_released_seq_address() -> *AtomicWord {
+    return &pool_walk_released_seq;
 }
 
-private fn pool_walk_probed_seq_address() -> usize {
-    return (&pool_walk_probed_seq) as usize;
+private fn pool_walk_probed_seq_address() -> *AtomicWord {
+    return &pool_walk_probed_seq;
 }
 
-private fn pool_walk_stale_address() -> usize {
-    return (&pool_walk_stale) as usize;
+private fn pool_walk_stale_address() -> *AtomicWord {
+    return &pool_walk_stale;
 }
 
-private fn pool_view_request_address() -> usize {
-    return (&pool_view_request) as usize;
+private fn pool_view_request_address() -> *AtomicWord {
+    return &pool_view_request;
 }
 
-private fn pool_view_held_address() -> usize {
-    return (&pool_view_held) as usize;
+private fn pool_view_held_address() -> *AtomicWord {
+    return &pool_view_held;
 }
 
-private fn pool_view_release_address() -> usize {
-    return (&pool_view_release) as usize;
+private fn pool_view_release_address() -> *AtomicWord {
+    return &pool_view_release;
 }
 
-private fn pool_view_done_address() -> usize {
-    return (&pool_view_done) as usize;
+private fn pool_view_done_address() -> *AtomicWord {
+    return &pool_view_done;
 }
 
-private fn pool_view_payload_ok_address() -> usize {
-    return (&pool_view_payload_ok) as usize;
+private fn pool_view_payload_ok_address() -> *AtomicWord {
+    return &pool_view_payload_ok;
 }
 
-private fn pool_walk_refused_address() -> usize {
-    return (&pool_walk_refused) as usize;
+private fn pool_walk_refused_address() -> *AtomicWord {
+    return &pool_walk_refused;
 }
 
-private fn pool_walk_admitted_address() -> usize {
-    return (&pool_walk_admitted) as usize;
+private fn pool_walk_admitted_address() -> *AtomicWord {
+    return &pool_walk_admitted;
 }
 
-private fn pool_walk_floor_bad_address() -> usize {
-    return (&pool_walk_floor_bad) as usize;
+private fn pool_walk_floor_bad_address() -> *AtomicWord {
+    return &pool_walk_floor_bad;
 }
 
-private fn pool_walk_steps_address() -> usize {
-    return (&pool_walk_steps) as usize;
+private fn pool_walk_steps_address() -> *AtomicWord {
+    return &pool_walk_steps;
 }
 
-private fn pool_walk_rounds_met_address() -> usize {
-    return (&pool_walk_rounds_met) as usize;
+private fn pool_walk_rounds_met_address() -> *AtomicWord {
+    return &pool_walk_rounds_met;
 }
 
 private fn pool_walk_init() {
@@ -289,9 +289,7 @@ private fn pool_walk_in_floor(address: usize) -> bool {
 // -- The walking core --------------------------------------------------
 
 fn pool_walk_contention_is_armed() -> bool !{unsafe} {
-    return unsafe {
-        atomic_load_acquire(pool_walk_armed_address())
-    } == 1;
+    return atomic_word_load(pool_walk_armed_address()) == 1;
 }
 
 // One enumeration. Floor slots are read and checked; the first address
@@ -303,7 +301,7 @@ private fn pool_walk_once() !{unsafe} {
     let mut crossed: bool = false;
     while (cursor != 0 && budget != 0 && crossed == false) {
         budget = budget - 1;
-        unsafe { atomic_fetch_add_relaxed(pool_walk_steps_address(), 1); }
+        atomic_word_fetch_add(pool_walk_steps_address(), 1);
         if (pool_walk_in_floor(cursor)) {
             match intrusive_pool_probe_slot_unproven(&pool_walk_pool, cursor) {
                 IntrusiveSlotProbe::NoPayload => {}
@@ -315,10 +313,8 @@ private fn pool_walk_once() !{unsafe} {
                     // deviation means the walk read something that is not
                     // the slot it named.
                     if (payload.stamp != POOL_WALK_SENTINEL) {
-                        unsafe {
-                            atomic_fetch_add_relaxed(
-                                pool_walk_floor_bad_address(), 1);
-                        }
+                        atomic_word_fetch_add(
+                            pool_walk_floor_bad_address(), 1);
                     }
                     intrusive_view_release(slot_view);
                 }
@@ -331,23 +327,15 @@ private fn pool_walk_once() !{unsafe} {
             // it and stop; core 0 will release the chunk it names and then
             // let this core ask about it.
             crossed = true;
-            let round: usize = unsafe {
-                atomic_load_acquire(pool_walk_seq_address())
-            };
-            unsafe {
-                atomic_store_release(pool_walk_stale_address(), cursor);
-                atomic_store_release(pool_walk_held_seq_address(), round);
-            }
+            let round: usize = atomic_word_load(pool_walk_seq_address());
+            atomic_word_store(pool_walk_stale_address(), cursor);
+            atomic_word_store(pool_walk_held_seq_address(), round);
             let mut window: PeerTickWindow = peer_tick_window_start(16);
             let mut released: bool = false;
             while (released == false &&
                    peer_tick_window_open(window) &&
-                   unsafe {
-                       atomic_load_acquire(pool_walk_armed_address())
-                   } == 1) {
-                if (unsafe {
-                        atomic_load_acquire(pool_walk_released_seq_address())
-                    } >= round) {
+                   atomic_word_load(pool_walk_armed_address()) == 1) {
+                if (atomic_word_load(pool_walk_released_seq_address()) >= round) {
                     released = true;
                 }
             }
@@ -357,27 +345,19 @@ private fn pool_walk_once() !{unsafe} {
                 // the walk is asking about it anyway.
                 match intrusive_pool_probe_slot_unproven(&pool_walk_pool, cursor) {
                     IntrusiveSlotProbe::NoPayload => {
-                        unsafe {
-                            atomic_fetch_add_relaxed(
-                                pool_walk_refused_address(), 1);
-                        }
+                        atomic_word_fetch_add(
+                            pool_walk_refused_address(), 1);
                     }
                     IntrusiveSlotProbe::Live(slot_view) => {
-                        unsafe {
-                            atomic_fetch_add_relaxed(
-                                pool_walk_admitted_address(), 1);
-                        }
+                        atomic_word_fetch_add(
+                            pool_walk_admitted_address(), 1);
                         intrusive_view_release(slot_view);
                     }
                 }
-                unsafe {
-                    atomic_fetch_add_relaxed(
-                        pool_walk_rounds_met_address(), 1);
-                }
+                atomic_word_fetch_add(
+                    pool_walk_rounds_met_address(), 1);
             }
-            unsafe {
-                atomic_store_release(pool_walk_probed_seq_address(), round);
-            }
+            atomic_word_store(pool_walk_probed_seq_address(), round);
         }
     }
 }
@@ -389,54 +369,42 @@ private fn pool_walk_once() !{unsafe} {
 private fn pool_view_hold_once() !{unsafe} {
     match intrusive_pool_probe_slot(&pool_walk_pool, pool_walk_floor_base) {
         IntrusiveSlotProbe::NoPayload => {
-            unsafe { atomic_store_release(pool_view_done_address(), 1); }
+            atomic_word_store(pool_view_done_address(), 1);
         }
         IntrusiveSlotProbe::Live(slot_view) => {
             let payload: &mut PoolWalkItem =
                 intrusive_pool_record_of(&pool_walk_pool, slot_view);
             let first_ok: bool = payload.stamp == POOL_WALK_SENTINEL;
-            unsafe { atomic_store_release(pool_view_held_address(), 1); }
+            atomic_word_store(pool_view_held_address(), 1);
             let mut window: PeerTickWindow = peer_tick_window_start(16);
             let mut released: bool = false;
             while (released == false &&
                    peer_tick_window_open(window) &&
-                   unsafe {
-                       atomic_load_acquire(pool_walk_armed_address())
-                   } == 1) {
-                released = unsafe {
-                    atomic_load_acquire(pool_view_release_address())
-                } == 1;
+                   atomic_word_load(pool_walk_armed_address()) == 1) {
+                released = atomic_word_load(pool_view_release_address()) == 1;
             }
             if (first_ok && released &&
                     payload.stamp == POOL_WALK_SENTINEL) {
-                unsafe {
-                    atomic_store_release(pool_view_payload_ok_address(), 1);
-                }
+                atomic_word_store(pool_view_payload_ok_address(), 1);
             }
             intrusive_view_release(slot_view);
-            unsafe { atomic_store_release(pool_view_done_address(), 1); }
+            atomic_word_store(pool_view_done_address(), 1);
         }
     }
 }
 
 fn pool_walk_contention_secondary_run() !{unsafe} {
-    unsafe {
-        atomic_fetch_add_relaxed(pool_walk_entries_address(), 1);
-        atomic_store_release(pool_walk_active_address(), 1);
-    }
-    while (unsafe {
-               atomic_load_acquire(pool_walk_armed_address())
-           } == 1) {
-        if (unsafe {
-                atomic_load_acquire(pool_view_request_address())
-            } == 1) {
+    atomic_word_fetch_add(pool_walk_entries_address(), 1);
+    atomic_word_store(pool_walk_active_address(), 1);
+    while (atomic_word_load(pool_walk_armed_address()) == 1) {
+        if (atomic_word_load(pool_view_request_address()) == 1) {
             pool_view_hold_once();
-            unsafe { atomic_store_release(pool_view_request_address(), 0); }
+            atomic_word_store(pool_view_request_address(), 0);
         } else {
             pool_walk_once();
         }
     }
-    unsafe { atomic_store_release(pool_walk_active_address(), 0); }
+    atomic_word_store(pool_walk_active_address(), 0);
 }
 
 // -- The churning core -------------------------------------------------
@@ -448,25 +416,15 @@ private fn pool_walk_report(stage: *u8) !{unsafe} {
     kernel_boot_log("pool walk counts: rounds=");
     uart_put_udec(POOL_WALK_ROUNDS);
     kernel_boot_log(" met=");
-    uart_put_udec(unsafe {
-        atomic_load_acquire(pool_walk_rounds_met_address())
-    });
+    uart_put_udec(atomic_word_load(pool_walk_rounds_met_address()));
     kernel_boot_log(" refused=");
-    uart_put_udec(unsafe {
-        atomic_load_acquire(pool_walk_refused_address())
-    });
+    uart_put_udec(atomic_word_load(pool_walk_refused_address()));
     kernel_boot_log(" admitted=");
-    uart_put_udec(unsafe {
-        atomic_load_acquire(pool_walk_admitted_address())
-    });
+    uart_put_udec(atomic_word_load(pool_walk_admitted_address()));
     kernel_boot_log(" floor_bad=");
-    uart_put_udec(unsafe {
-        atomic_load_acquire(pool_walk_floor_bad_address())
-    });
+    uart_put_udec(atomic_word_load(pool_walk_floor_bad_address()));
     kernel_boot_log(" steps=");
-    uart_put_udec(unsafe {
-        atomic_load_acquire(pool_walk_steps_address())
-    });
+    uart_put_udec(atomic_word_load(pool_walk_steps_address()));
     kernel_boot_log(" per_chunk=");
     uart_put_udec(intrusive_pool_slots_per_chunk(&pool_walk_pool));
     kernel_boot_log("\n");
@@ -533,15 +491,15 @@ private fn pool_walk_floor_give_back() -> bool !{unsafe} {
 // Wait, bounded in time, for the other core to reach `target` on one of
 // the rendezvous sequences. False means it did not, which is a give-up
 // this file reports rather than a hang.
-private fn pool_walk_await(sequence_address: usize, target: usize)
+private fn pool_walk_await(sequence_address: *AtomicWord, target: usize)
         -> bool !{unsafe} {
     let mut window: PeerTickWindow = peer_tick_window_start(16);
     while (peer_tick_window_open(window)) {
-        if (unsafe { atomic_load_acquire(sequence_address) } >= target) {
+        if (atomic_word_load(sequence_address) >= target) {
             return true;
         }
     }
-    return unsafe { atomic_load_acquire(sequence_address) } >= target;
+    return atomic_word_load(sequence_address) >= target;
 }
 
 // One round: make the extra chunk, wait for the walker to be holding an
@@ -555,7 +513,7 @@ private fn pool_walk_await(sequence_address: usize, target: usize)
 must_use variant PoolWalkRound { Met; Failed(*u8); }
 
 private fn pool_walk_round(round: usize) -> PoolWalkRound !{allocates, unsafe} {
-    unsafe { atomic_store_release(pool_walk_seq_address(), round); }
+    atomic_word_store(pool_walk_seq_address(), round);
     let guard = intrusive_pool_lock(&pool_walk_pool);
     let taken = intrusive_pool_insert_zeroed(&pool_walk_pool, guard);
     intrusive_pool_unlock(&pool_walk_pool, guard);
@@ -580,9 +538,7 @@ private fn pool_walk_round(round: usize) -> PoolWalkRound !{allocates, unsafe} {
             // send the reader to the wrong core.
             if (removed == false) { return PoolWalkRound::Failed("extra-chunk-not-removed" as *u8); }
             if (held == false) { return PoolWalkRound::Failed("walk-never-held-it" as *u8); }
-            unsafe {
-                atomic_store_release(pool_walk_released_seq_address(), round);
-            }
+            atomic_word_store(pool_walk_released_seq_address(), round);
             // Do not start the next round -- whose allocation could be
             // handed the very page just released -- until the walker has
             // asked about the address it is holding.
@@ -602,22 +558,18 @@ fn pool_walk_contention_probe() -> bool !{allocates, unsafe} {
         pool_walk_report("floor-not-taken" as *u8);
         return false;
     }
-    let entries_before: usize = unsafe {
-        atomic_load_acquire(pool_walk_entries_address())
-    };
-    unsafe { atomic_store_release(pool_walk_armed_address(), 1); }
+    let entries_before: usize = atomic_word_load(pool_walk_entries_address());
+    atomic_word_store(pool_walk_armed_address(), 1);
 
     let mut entry_window: PeerTickWindow = peer_tick_window_start(16);
     let mut entered: bool = false;
     while (entered == false && peer_tick_window_open(entry_window)) {
-        if (unsafe {
-                atomic_load_acquire(pool_walk_entries_address())
-            } > entries_before) {
+        if (atomic_word_load(pool_walk_entries_address()) > entries_before) {
             entered = true;
         }
     }
     if (entered == false) {
-        unsafe { atomic_store_release(pool_walk_armed_address(), 0); }
+        atomic_word_store(pool_walk_armed_address(), 0);
         pool_walk_report("secondary-never-entered" as *u8);
         return false;
     }
@@ -625,28 +577,26 @@ fn pool_walk_contention_probe() -> bool !{allocates, unsafe} {
     // First prove the new default read lifetime. The floor is immutable and
     // live for this whole phase, so any failure is the view/lock protocol,
     // not pool churn or address reuse.
-    unsafe { atomic_store_release(pool_view_request_address(), 1); }
+    atomic_word_store(pool_view_request_address(), 1);
     if (pool_walk_await(pool_view_held_address(), 1) == false) {
-        unsafe { atomic_store_release(pool_walk_armed_address(), 0); }
+        atomic_word_store(pool_walk_armed_address(), 0);
         pool_walk_report("view-never-held" as *u8);
         return false;
     }
     let locked_while_live: bool =
         intrusive_pool_lock_is_held_for_probe(&pool_walk_pool);
-    unsafe { atomic_store_release(pool_view_release_address(), 1); }
+    atomic_word_store(pool_view_release_address(), 1);
     if (pool_walk_await(pool_view_done_address(), 1) == false) {
-        unsafe { atomic_store_release(pool_walk_armed_address(), 0); }
+        atomic_word_store(pool_walk_armed_address(), 0);
         pool_walk_report("view-never-released" as *u8);
         return false;
     }
     let unlocked_after_release: bool =
         intrusive_pool_lock_is_held_for_probe(&pool_walk_pool) == false;
-    let view_payload_ok: bool = unsafe {
-        atomic_load_acquire(pool_view_payload_ok_address())
-    } == 1;
+    let view_payload_ok: bool = atomic_word_load(pool_view_payload_ok_address()) == 1;
     if (locked_while_live == false || unlocked_after_release == false ||
             view_payload_ok == false) {
-        unsafe { atomic_store_release(pool_walk_armed_address(), 0); }
+        atomic_word_store(pool_walk_armed_address(), 0);
         pool_walk_report("view-lifetime-failed" as *u8);
         return false;
     }
@@ -664,7 +614,7 @@ fn pool_walk_contention_probe() -> bool !{allocates, unsafe} {
             }
         }
     }
-    unsafe { atomic_store_release(pool_walk_armed_address(), 0); }
+    atomic_word_store(pool_walk_armed_address(), 0);
 
     // Provably out before the accounting is read, for the reason the pool
     // probe next door states: a core still inside would make a leak of a
@@ -672,9 +622,7 @@ fn pool_walk_contention_probe() -> bool !{allocates, unsafe} {
     let mut settle_window: PeerTickWindow = peer_tick_window_start(16);
     let mut settled: bool = false;
     while (settled == false && peer_tick_window_open(settle_window)) {
-        if (unsafe {
-                atomic_load_acquire(pool_walk_active_address())
-            } == 0) {
+        if (atomic_word_load(pool_walk_active_address()) == 0) {
             settled = true;
         }
     }
@@ -693,18 +641,10 @@ fn pool_walk_contention_probe() -> bool !{allocates, unsafe} {
         return false;
     }
 
-    let met: usize = unsafe {
-        atomic_load_acquire(pool_walk_rounds_met_address())
-    };
-    let refused: usize = unsafe {
-        atomic_load_acquire(pool_walk_refused_address())
-    };
-    let admitted: usize = unsafe {
-        atomic_load_acquire(pool_walk_admitted_address())
-    };
-    let floor_bad: usize = unsafe {
-        atomic_load_acquire(pool_walk_floor_bad_address())
-    };
+    let met: usize = atomic_word_load(pool_walk_rounds_met_address());
+    let refused: usize = atomic_word_load(pool_walk_refused_address());
+    let admitted: usize = atomic_word_load(pool_walk_admitted_address());
+    let floor_bad: usize = atomic_word_load(pool_walk_floor_bad_address());
     if (met != POOL_WALK_ROUNDS) {
         kernel_boot_log("pool walk: a round ended without the walk holding an address in the chunk that was released, so it proved nothing\n");
         return false;

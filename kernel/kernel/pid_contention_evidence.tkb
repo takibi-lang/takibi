@@ -40,31 +40,31 @@ must_use variant PidProbeRendezvousResult {
     TimedOut;
 }
 
-private let mut pid_probe_armed: usize;
-private let mut pid_probe_primary: usize;
-private let mut pid_probe_secondary: usize;
-private let mut pid_probe_active: usize;
-private let mut pid_probe_overlap: usize;
-private let mut pid_probe_primary_arrived: usize;
-private let mut pid_probe_secondary_arrived: usize;
-private let mut pid_probe_primary_committed: usize;
-private let mut pid_probe_secondary_committed: usize;
-private let mut pid_probe_locked_phase: usize;
+private let mut pid_probe_armed: AtomicWord;
+private let mut pid_probe_primary: AtomicWord;
+private let mut pid_probe_secondary: AtomicWord;
+private let mut pid_probe_active: AtomicWord;
+private let mut pid_probe_overlap: AtomicWord;
+private let mut pid_probe_primary_arrived: AtomicWord;
+private let mut pid_probe_secondary_arrived: AtomicWord;
+private let mut pid_probe_primary_committed: AtomicWord;
+private let mut pid_probe_secondary_committed: AtomicWord;
+private let mut pid_probe_locked_phase: AtomicWord;
 
-private fn pid_probe_armed_address() -> usize {
-    return (&pid_probe_armed) as usize;
+private fn pid_probe_armed_address() -> *AtomicWord {
+    return &pid_probe_armed;
 }
 
-private fn pid_probe_primary_address() -> usize {
-    return (&pid_probe_primary) as usize;
+private fn pid_probe_primary_address() -> *AtomicWord {
+    return &pid_probe_primary;
 }
 
-private fn pid_probe_secondary_address() -> usize {
-    return (&pid_probe_secondary) as usize;
+private fn pid_probe_secondary_address() -> *AtomicWord {
+    return &pid_probe_secondary;
 }
 
-private fn pid_probe_active_address() -> usize {
-    return (&pid_probe_active) as usize;
+private fn pid_probe_active_address() -> *AtomicWord {
+    return &pid_probe_active;
 }
 
 // GitHub issue #510: entries into the secondary's run function, counted and
@@ -83,64 +83,62 @@ private fn pid_probe_active_address() -> usize {
 // rendezvous. Gating on the per-round cycle count instead would deadlock:
 // that count only advances after a rendezvous with core 0, and core 0 is the
 // one waiting.
-private let mut pid_probe_entries: usize;
+private let mut pid_probe_entries: AtomicWord;
 
-private fn pid_probe_entries_address() -> usize {
-    return (&pid_probe_entries) as usize;
+private fn pid_probe_entries_address() -> *AtomicWord {
+    return &pid_probe_entries;
 }
 
-private fn pid_probe_overlap_address() -> usize {
-    return (&pid_probe_overlap) as usize;
+private fn pid_probe_overlap_address() -> *AtomicWord {
+    return &pid_probe_overlap;
 }
 
-private fn pid_probe_primary_arrived_address() -> usize {
-    return (&pid_probe_primary_arrived) as usize;
+private fn pid_probe_primary_arrived_address() -> *AtomicWord {
+    return &pid_probe_primary_arrived;
 }
 
-private fn pid_probe_secondary_arrived_address() -> usize {
-    return (&pid_probe_secondary_arrived) as usize;
+private fn pid_probe_secondary_arrived_address() -> *AtomicWord {
+    return &pid_probe_secondary_arrived;
 }
 
-private fn pid_probe_primary_committed_address() -> usize {
-    return (&pid_probe_primary_committed) as usize;
+private fn pid_probe_primary_committed_address() -> *AtomicWord {
+    return &pid_probe_primary_committed;
 }
 
-private fn pid_probe_secondary_committed_address() -> usize {
-    return (&pid_probe_secondary_committed) as usize;
+private fn pid_probe_secondary_committed_address() -> *AtomicWord {
+    return &pid_probe_secondary_committed;
 }
 
-private fn pid_probe_locked_phase_address() -> usize {
-    return (&pid_probe_locked_phase) as usize;
+private fn pid_probe_locked_phase_address() -> *AtomicWord {
+    return &pid_probe_locked_phase;
 }
 
 private fn pid_probe_rendezvous(primary: bool, sequence: usize,
-                                primary_address: usize,
-                                secondary_address: usize)
+                                primary_address: *AtomicWord,
+                                secondary_address: *AtomicWord)
         -> PidProbeRendezvousResult !{unsafe} {
-    let mut own_address: usize = secondary_address;
-    let mut peer_address: usize = primary_address;
+    let mut own_address: *AtomicWord = secondary_address;
+    let mut peer_address: *AtomicWord = primary_address;
     if (primary) {
         own_address = primary_address;
         peer_address = secondary_address;
     }
-    unsafe { atomic_store_release(own_address, sequence); }
+    atomic_word_store(own_address, sequence);
     let mut deadline: PeerTickWindow = peer_tick_window_start(128);
     while (peer_tick_window_open(deadline) &&
-           unsafe { atomic_load_acquire(peer_address) } < sequence &&
-           unsafe { atomic_load_acquire(pid_probe_armed_address()) } == 1) {
+           atomic_word_load(peer_address) < sequence &&
+           atomic_word_load(pid_probe_armed_address()) == 1) {
     }
-    if (unsafe { atomic_load_acquire(peer_address) } >= sequence &&
-        unsafe { atomic_load_acquire(pid_probe_armed_address()) } == 1) {
+    if (atomic_word_load(peer_address) >= sequence &&
+        atomic_word_load(pid_probe_armed_address()) == 1) {
         return PidProbeRendezvousResult::Met;
     }
-    unsafe { atomic_store_release(pid_probe_armed_address(), 0); }
+    atomic_word_store(pid_probe_armed_address(), 0);
     return PidProbeRendezvousResult::TimedOut;
 }
 
 private fn pid_probe_cycle(primary: bool, sequence: usize) -> bool !{unsafe} {
-    let locked: bool = unsafe {
-        atomic_load_acquire(pid_probe_locked_phase_address())
-    } == 1;
+    let locked: bool = atomic_word_load(pid_probe_locked_phase_address()) == 1;
     if (locked) {
         match pid_probe_rendezvous(
                 primary, sequence,
@@ -185,30 +183,20 @@ private fn pid_probe_cycle(primary: bool, sequence: usize) -> bool !{unsafe} {
 }
 
 fn pid_contention_is_armed() -> bool !{unsafe} {
-    return unsafe {
-        atomic_load_acquire(pid_probe_armed_address())
-    } == 1;
+    return atomic_word_load(pid_probe_armed_address()) == 1;
 }
 
 fn pid_contention_secondary_run() !{unsafe} {
-    unsafe {
-        atomic_fetch_add_relaxed(pid_probe_entries_address(), 1);
-        atomic_store_release(pid_probe_active_address(), 1);
-    }
-    while (unsafe {
-               atomic_load_acquire(pid_probe_secondary_address())
-           } < PID_CONTENTION_ROUNDS &&
-           unsafe { atomic_load_acquire(pid_probe_armed_address()) } == 1) {
-        let sequence: usize = unsafe {
-            atomic_load_acquire(pid_probe_secondary_address())
-        } + 1;
+    atomic_word_fetch_add(pid_probe_entries_address(), 1);
+    atomic_word_store(pid_probe_active_address(), 1);
+    while (atomic_word_load(pid_probe_secondary_address()) < PID_CONTENTION_ROUNDS &&
+           atomic_word_load(pid_probe_armed_address()) == 1) {
+        let sequence: usize = atomic_word_load(pid_probe_secondary_address()) + 1;
         if (pid_probe_cycle(false, sequence)) {
-            unsafe {
-                atomic_fetch_add_relaxed(pid_probe_secondary_address(), 1);
-            }
+            atomic_word_fetch_add(pid_probe_secondary_address(), 1);
         }
     }
-    unsafe { atomic_store_release(pid_probe_active_address(), 0); }
+    atomic_word_store(pid_probe_active_address(), 0);
 }
 
 private fn pid_contention_report(stage: *u8, advanced: usize,
@@ -217,21 +205,15 @@ private fn pid_contention_report(stage: *u8, advanced: usize,
     kernel_boot_log(stage);
     kernel_boot_log("\n");
     kernel_boot_log("pid contention counts: primary=");
-    uart_put_udec(unsafe {
-        atomic_load_acquire(pid_probe_primary_address())
-    });
+    uart_put_udec(atomic_word_load(pid_probe_primary_address()));
     kernel_boot_log(" secondary=");
-    uart_put_udec(unsafe {
-        atomic_load_acquire(pid_probe_secondary_address())
-    });
+    uart_put_udec(atomic_word_load(pid_probe_secondary_address()));
     kernel_boot_log(" calls=");
     uart_put_udec(calls);
     kernel_boot_log(" advanced=");
     uart_put_udec(advanced);
     kernel_boot_log(" overlap=");
-    uart_put_udec(unsafe {
-        atomic_load_acquire(pid_probe_overlap_address())
-    });
+    uart_put_udec(atomic_word_load(pid_probe_overlap_address()));
     kernel_boot_log("\n");
 }
 
@@ -240,80 +222,63 @@ private fn pid_contention_report(stage: *u8, advanced: usize,
 // A timeout must leave the monotonically advanced counter alone; restoring
 // it while the secondary may still mint would move the counter backwards.
 private fn pid_probe_disarm_and_quiesce() -> bool !{unsafe} {
-    unsafe { atomic_store_release(pid_probe_armed_address(), 0); }
+    atomic_word_store(pid_probe_armed_address(), 0);
     let mut deadline: PeerTickWindow = peer_tick_window_start(128);
     while (peer_tick_window_open(deadline) &&
-           unsafe {
-               atomic_load_acquire(pid_probe_active_address())
-           } == 1) {
+           atomic_word_load(pid_probe_active_address()) == 1) {
     }
-    return unsafe {
-        atomic_load_acquire(pid_probe_active_address())
-    } == 0;
+    return atomic_word_load(pid_probe_active_address()) == 0;
 }
 
 private fn pid_contention_phase(locked: bool) -> bool !{unsafe} {
     let next_before: usize = scheduled_process_pid_counter();
-    let entries_before: usize = unsafe {
-        atomic_load_acquire(pid_probe_entries_address())
-    };
-    unsafe {
-        atomic_store_release(pid_probe_primary_address(), 0);
-        atomic_store_release(pid_probe_secondary_address(), 0);
-        atomic_store_release(pid_probe_active_address(), 0);
-        atomic_store_release(pid_probe_overlap_address(), 0);
-        atomic_store_release(pid_probe_primary_arrived_address(), 0);
-        atomic_store_release(pid_probe_secondary_arrived_address(), 0);
-        atomic_store_release(pid_probe_primary_committed_address(), 0);
-        atomic_store_release(pid_probe_secondary_committed_address(), 0);
-        if (locked) {
-            atomic_store_release(pid_probe_locked_phase_address(), 1);
-        } else {
-            atomic_store_release(pid_probe_locked_phase_address(), 0);
-        }
-        atomic_store_release(pid_probe_armed_address(), 1);
+    let entries_before: usize = atomic_word_load(pid_probe_entries_address());
+    atomic_word_store(pid_probe_primary_address(), 0);
+    atomic_word_store(pid_probe_secondary_address(), 0);
+    atomic_word_store(pid_probe_active_address(), 0);
+    atomic_word_store(pid_probe_overlap_address(), 0);
+    atomic_word_store(pid_probe_primary_arrived_address(), 0);
+    atomic_word_store(pid_probe_secondary_arrived_address(), 0);
+    atomic_word_store(pid_probe_primary_committed_address(), 0);
+    atomic_word_store(pid_probe_secondary_committed_address(), 0);
+    if (locked) {
+        atomic_word_store(pid_probe_locked_phase_address(), 1);
+    } else {
+        atomic_word_store(pid_probe_locked_phase_address(), 0);
     }
+    atomic_word_store(pid_probe_armed_address(), 1);
 
     let mut entry_window: PeerTickWindow = peer_tick_window_start(16);
     let mut entered: bool = false;
     while (entered == false && peer_tick_window_open(entry_window)) {
-        if (unsafe {
-                atomic_load_acquire(pid_probe_entries_address())
-            } > entries_before) {
+        if (atomic_word_load(pid_probe_entries_address()) > entries_before) {
             entered = true;
         }
     }
     if (entered == false) {
-        unsafe { atomic_store_release(pid_probe_armed_address(), 0); }
+        atomic_word_store(pid_probe_armed_address(), 0);
         pid_contention_report("secondary-never-entered" as *u8, 0, 0);
         return false;
     }
 
     for round: usize in 0..<PID_CONTENTION_ROUNDS {
-        if (unsafe { atomic_load_acquire(pid_probe_armed_address()) } == 1 &&
+        if (atomic_word_load(pid_probe_armed_address()) == 1 &&
             pid_probe_cycle(true, round + 1)) {
-            unsafe {
-                atomic_fetch_add_relaxed(pid_probe_primary_address(), 1);
-            }
+            atomic_word_fetch_add(pid_probe_primary_address(), 1);
         }
     }
-    let rendezvous_failed: bool = unsafe {
-        atomic_load_acquire(pid_probe_armed_address())
-    } == 0;
+    let rendezvous_failed: bool = atomic_word_load(pid_probe_armed_address()) == 0;
 
     // With per-round rendezvous this is the secondary completion count at
     // the instant the primary finishes, not a scheduler-granularity metric.
-    unsafe {
-        atomic_store_release(pid_probe_overlap_address(),
-            atomic_load_acquire(pid_probe_secondary_address()));
-    }
+    atomic_word_store(pid_probe_overlap_address(),
+        atomic_word_load(pid_probe_secondary_address()));
 
     let mut finish_window: PeerTickWindow = peer_tick_window_start(128);
     let mut finished: bool = false;
     while (finished == false && peer_tick_window_open(finish_window)) {
-        if (unsafe {
-                atomic_load_acquire(pid_probe_secondary_address())
-            } >= PID_CONTENTION_ROUNDS) {
+        if (atomic_word_load(pid_probe_secondary_address()) >=
+                PID_CONTENTION_ROUNDS) {
             finished = true;
         }
     }
@@ -321,8 +286,8 @@ private fn pid_contention_phase(locked: bool) -> bool !{unsafe} {
 
     let advanced: usize = scheduled_process_pid_counter() - next_before;
     let calls: usize =
-        unsafe { atomic_load_acquire(pid_probe_primary_address()) } +
-        unsafe { atomic_load_acquire(pid_probe_secondary_address()) };
+        atomic_word_load(pid_probe_primary_address()) +
+        atomic_word_load(pid_probe_secondary_address());
     if (quiesced == false) {
         pid_contention_report("secondary-never-quiesced" as *u8,
                               advanced, calls);

@@ -71,10 +71,10 @@ private let mut schedule_probe_ready: bool = false;
 // 1 while some core believes it holds a claim on that handle. A core that
 // swaps in 1 and finds 1 already there is the second holder -- which is
 // two cores each about to make one process Running.
-private let mut schedule_probe_held: usize;
+private let mut schedule_probe_held: AtomicWord;
 
 // 0 = phase 1, forged guard, the race is expected. 1 = phase 2, locked.
-private let mut schedule_probe_phase: usize;
+private let mut schedule_probe_phase: AtomicWord;
 
 // GitHub issue #479: "the secondary is inside this loop", as a value
 // rather than as an atomic bool and a comment. See kernel/lib/occupancy.tkb
@@ -88,43 +88,43 @@ private let mut schedule_probe_occupancy: Occupancy;
 // magnitude of headroom and still bounded.
 const SCHEDULE_CONTENTION_DRAIN_SPINS: usize = 1048576;
 
-private let mut schedule_probe_armed: usize;
-private let mut schedule_probe_primary: usize;
-private let mut schedule_probe_secondary: usize;
-private let mut schedule_probe_overlap: usize;
-private let mut schedule_probe_duplicates: usize;
-private let mut schedule_probe_missing: usize;
+private let mut schedule_probe_armed: AtomicWord;
+private let mut schedule_probe_primary: AtomicWord;
+private let mut schedule_probe_secondary: AtomicWord;
+private let mut schedule_probe_overlap: AtomicWord;
+private let mut schedule_probe_duplicates: AtomicWord;
+private let mut schedule_probe_missing: AtomicWord;
 
-private fn schedule_probe_armed_address() -> usize {
-    return (&schedule_probe_armed) as usize;
+private fn schedule_probe_armed_address() -> *AtomicWord {
+    return &schedule_probe_armed;
 }
 
-private fn schedule_probe_primary_address() -> usize {
-    return (&schedule_probe_primary) as usize;
+private fn schedule_probe_primary_address() -> *AtomicWord {
+    return &schedule_probe_primary;
 }
 
-private fn schedule_probe_secondary_address() -> usize {
-    return (&schedule_probe_secondary) as usize;
+private fn schedule_probe_secondary_address() -> *AtomicWord {
+    return &schedule_probe_secondary;
 }
 
-private fn schedule_probe_overlap_address() -> usize {
-    return (&schedule_probe_overlap) as usize;
+private fn schedule_probe_overlap_address() -> *AtomicWord {
+    return &schedule_probe_overlap;
 }
 
-private fn schedule_probe_held_address() -> usize {
-    return (&schedule_probe_held) as usize;
+private fn schedule_probe_held_address() -> *AtomicWord {
+    return &schedule_probe_held;
 }
 
-private fn schedule_probe_duplicates_address() -> usize {
-    return (&schedule_probe_duplicates) as usize;
+private fn schedule_probe_duplicates_address() -> *AtomicWord {
+    return &schedule_probe_duplicates;
 }
 
-private fn schedule_probe_missing_address() -> usize {
-    return (&schedule_probe_missing) as usize;
+private fn schedule_probe_missing_address() -> *AtomicWord {
+    return &schedule_probe_missing;
 }
 
-private fn schedule_probe_phase_address() -> usize {
-    return (&schedule_probe_phase) as usize;
+private fn schedule_probe_phase_address() -> *AtomicWord {
+    return &schedule_probe_phase;
 }
 
 // One claim, through the REAL entry point.
@@ -138,9 +138,7 @@ private fn schedule_probe_claim(guard: borrow ProcessRunGuard[lock])
         !{unsafe} {
     match scheduled_process_ready_take(guard, schedule_probe_handle) {
         ScheduledProcessReadyTakeResult::Missing => {
-            unsafe {
-                atomic_fetch_add_relaxed(schedule_probe_missing_address(), 1);
-            }
+            atomic_word_fetch_add(schedule_probe_missing_address(), 1);
         }
         ScheduledProcessReadyTakeResult::Ready(resources) => {
             // Marked BEFORE the state is advanced, so the detector catches
@@ -148,30 +146,22 @@ private fn schedule_probe_claim(guard: borrow ProcessRunGuard[lock])
             // inside the same instruction". The mark is cleared only after
             // the release, which is what makes a window of a few
             // instructions observable at all.
-            let was: usize = unsafe {
-                atomic_swap_acquire(schedule_probe_held_address(), 1)
-            };
+            let was: usize = atomic_word_swap(schedule_probe_held_address(), 1);
             if (was != 0) {
-                unsafe {
-                    atomic_fetch_add_relaxed(
-                        schedule_probe_duplicates_address(), 1);
-                }
+                atomic_word_fetch_add(
+                    schedule_probe_duplicates_address(), 1);
             }
             let (owner, ready) = resources;
             let running = scheduled_process_start(owner, ready);
             let back = scheduled_process_yield(owner, running);
             scheduled_process_release(owner, back);
-            unsafe {
-                atomic_store_release(schedule_probe_held_address(), 0);
-            }
+            atomic_word_store(schedule_probe_held_address(), 0);
         }
     }
 }
 
 private fn schedule_probe_cycle() !{unsafe} {
-    if (unsafe {
-            atomic_load_acquire(schedule_probe_phase_address())
-        } == 1) {
+    if (atomic_word_load(schedule_probe_phase_address()) == 1) {
         let guard = process_run_lock();
         // Recheck the gate while holding the same lock the teardown takes.
         // The loop condition alone leaves a check/acquire gap: core 1 may
@@ -180,9 +170,7 @@ private fn schedule_probe_cycle() !{unsafe} {
         // pair on two different atomics does not close that gap.  Once core
         // 0 stores armed=0, either this section finishes before teardown, or
         // it enters afterwards and refuses to touch the handle.
-        if (unsafe {
-                atomic_load_acquire(schedule_probe_armed_address())
-            } == 1) {
+        if (atomic_word_load(schedule_probe_armed_address()) == 1) {
             schedule_probe_claim(guard);
         }
         process_run_unlock(guard);
@@ -195,9 +183,7 @@ private fn schedule_probe_cycle() !{unsafe} {
 }
 
 fn schedule_contention_is_armed() -> bool !{unsafe} {
-    return unsafe {
-        atomic_load_acquire(schedule_probe_armed_address())
-    } == 1;
+    return atomic_word_load(schedule_probe_armed_address()) == 1;
 }
 
 // How many times phase 1 may be re-run before its failure to reproduce the
@@ -240,31 +226,18 @@ fn schedule_contention_secondary_run() !{unsafe} {
     // and hand core 0 an `overlap` from a phase the two never shared.
     // kernel/kernel/fd_table.tkb's probe has had both halves since it was
     // written; this is the same pair.
-    while (unsafe {
-               atomic_load_acquire(schedule_probe_secondary_address())
-           } == 0 &&
-           unsafe {
-               atomic_load_acquire(schedule_probe_armed_address())
-           } == 1) {
+    while (atomic_word_load(schedule_probe_secondary_address()) == 0 &&
+           atomic_word_load(schedule_probe_armed_address()) == 1) {
         schedule_probe_cycle();
-        unsafe {
-            atomic_fetch_add_relaxed(schedule_probe_secondary_address(), 1);
-        }
+        atomic_word_fetch_add(schedule_probe_secondary_address(), 1);
     }
-    while (unsafe {
-               atomic_load_acquire(schedule_probe_primary_address())
-           } == 0 &&
-           unsafe {
-               atomic_load_acquire(schedule_probe_armed_address())
-           } == 1) { }
-    while (unsafe {
-               atomic_load_acquire(schedule_probe_secondary_address())
-           } < SCHEDULE_CONTENTION_ROUNDS &&
-           unsafe { atomic_load_acquire(schedule_probe_armed_address()) } == 1) {
+    while (atomic_word_load(schedule_probe_primary_address()) == 0 &&
+           atomic_word_load(schedule_probe_armed_address()) == 1) { }
+    while (atomic_word_load(schedule_probe_secondary_address()) <
+               SCHEDULE_CONTENTION_ROUNDS &&
+           atomic_word_load(schedule_probe_armed_address()) == 1) {
         schedule_probe_cycle();
-        unsafe {
-            atomic_fetch_add_relaxed(schedule_probe_secondary_address(), 1);
-        }
+        atomic_word_fetch_add(schedule_probe_secondary_address(), 1);
     }
     occupancy_leave(visit, &schedule_probe_occupancy);
 }
@@ -274,25 +247,15 @@ private fn schedule_contention_report(stage: *u8) !{unsafe} {
     kernel_boot_log(stage);
     kernel_boot_log("\n");
     kernel_boot_log("schedule contention counts: primary=");
-    uart_put_udec(unsafe {
-        atomic_load_acquire(schedule_probe_primary_address())
-    });
+    uart_put_udec(atomic_word_load(schedule_probe_primary_address()));
     kernel_boot_log(" secondary=");
-    uart_put_udec(unsafe {
-        atomic_load_acquire(schedule_probe_secondary_address())
-    });
+    uart_put_udec(atomic_word_load(schedule_probe_secondary_address()));
     kernel_boot_log(" duplicates=");
-    uart_put_udec(unsafe {
-        atomic_load_acquire(schedule_probe_duplicates_address())
-    });
+    uart_put_udec(atomic_word_load(schedule_probe_duplicates_address()));
     kernel_boot_log(" missing=");
-    uart_put_udec(unsafe {
-        atomic_load_acquire(schedule_probe_missing_address())
-    });
+    uart_put_udec(atomic_word_load(schedule_probe_missing_address()));
     kernel_boot_log(" overlap=");
-    uart_put_udec(unsafe {
-        atomic_load_acquire(schedule_probe_overlap_address())
-    });
+    uart_put_udec(atomic_word_load(schedule_probe_overlap_address()));
     kernel_boot_log(" attempts=");
     uart_put_udec(schedule_probe_attempts);
     kernel_boot_log("\n");
@@ -305,16 +268,14 @@ private fn schedule_contention_report(stage: *u8) !{unsafe} {
 // put a variable number of lines into a view that compares exactly.
 private fn schedule_contention_run_phase(locked: usize)
         -> bool !{unsafe} {
-    unsafe {
-        atomic_store_release(schedule_probe_phase_address(), locked);
-        atomic_store_release(schedule_probe_primary_address(), 0);
-        atomic_store_release(schedule_probe_secondary_address(), 0);
-        atomic_store_release(schedule_probe_duplicates_address(), 0);
-        atomic_store_release(schedule_probe_missing_address(), 0);
-        atomic_store_release(schedule_probe_overlap_address(), 0);
-        atomic_store_release(schedule_probe_held_address(), 0);
-        atomic_store_release(schedule_probe_armed_address(), 1);
-    }
+    atomic_word_store(schedule_probe_phase_address(), locked);
+    atomic_word_store(schedule_probe_primary_address(), 0);
+    atomic_word_store(schedule_probe_secondary_address(), 0);
+    atomic_word_store(schedule_probe_duplicates_address(), 0);
+    atomic_word_store(schedule_probe_missing_address(), 0);
+    atomic_word_store(schedule_probe_overlap_address(), 0);
+    atomic_word_store(schedule_probe_held_address(), 0);
+    atomic_word_store(schedule_probe_armed_address(), 1);
 
     // Wait for a COMPLETED round, not merely for `active`, which the
     // secondary sets before its first cycle. Under issue #478's
@@ -325,40 +286,33 @@ private fn schedule_contention_run_phase(locked: usize)
     let mut entry_window: PeerTickWindow = peer_tick_window_start(16);
     let mut entered: bool = false;
     while (entered == false && peer_tick_window_open(entry_window)) {
-        if (unsafe {
-                atomic_load_acquire(schedule_probe_secondary_address())
-            } >= 1) {
+        if (atomic_word_load(schedule_probe_secondary_address()) >= 1) {
             entered = true;
         }
     }
     if (entered == false) {
-        unsafe { atomic_store_release(schedule_probe_armed_address(), 0); }
+        atomic_word_store(schedule_probe_armed_address(), 0);
         schedule_contention_report("secondary-never-completed-a-round" as *u8);
         return false;
     }
 
     for round: usize in 0..<SCHEDULE_CONTENTION_ROUNDS {
         schedule_probe_cycle();
-        unsafe {
-            atomic_fetch_add_relaxed(schedule_probe_primary_address(), 1);
-        }
+        atomic_word_fetch_add(schedule_probe_primary_address(), 1);
     }
 
-    unsafe {
-        atomic_store_release(schedule_probe_overlap_address(),
-            atomic_load_acquire(schedule_probe_secondary_address()));
-    }
+    atomic_word_store(schedule_probe_overlap_address(),
+        atomic_word_load(schedule_probe_secondary_address()));
 
     let mut finish_window: PeerTickWindow = peer_tick_window_start(128);
     let mut finished: bool = false;
     while (finished == false && peer_tick_window_open(finish_window)) {
-        if (unsafe {
-                atomic_load_acquire(schedule_probe_secondary_address())
-            } >= SCHEDULE_CONTENTION_ROUNDS) {
+        if (atomic_word_load(schedule_probe_secondary_address()) >=
+                SCHEDULE_CONTENTION_ROUNDS) {
             finished = true;
         }
     }
-    unsafe { atomic_store_release(schedule_probe_armed_address(), 0); }
+    atomic_word_store(schedule_probe_armed_address(), 0);
     // Printed on EVERY exit path, including the give-ups. Two probes in
     // this tree shipped with early returns that printed nothing, and a run
     // that could not set itself up looked identical to one whose counter
@@ -371,9 +325,7 @@ private fn schedule_contention_run_phase(locked: usize)
 }
 
 fn schedule_contention_duplicate_count() -> usize !{unsafe} {
-    return unsafe {
-        atomic_load_acquire(schedule_probe_duplicates_address())
-    };
+    return atomic_word_load(schedule_probe_duplicates_address());
 }
 
 fn schedule_contention_probe() -> bool !{unsafe} {
@@ -477,9 +429,7 @@ fn schedule_contention_probe() -> bool !{unsafe} {
     // for. Asserted, because "no duplicates" from a phase the second core
     // barely joined says nothing -- and issue #478 makes that the default
     // outcome rather than an unlucky one.
-    let shared: usize = unsafe {
-        atomic_load_acquire(schedule_probe_overlap_address())
-    };
+    let shared: usize = atomic_word_load(schedule_probe_overlap_address());
 
     // Give the record and its kernel stack run back, so the boot
     // accounting still balances -- but only once the secondary has

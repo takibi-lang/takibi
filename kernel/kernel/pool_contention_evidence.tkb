@@ -79,40 +79,40 @@ private let mut contention_pool_ready: bool = false;
 // The handshake and the results. Atomics, not `io`, because these are read
 // and written by two cores at the same time -- which is the one situation
 // volatile does not cover.
-private let mut contention_armed: usize;
-private let mut contention_primary_cycles: usize;
-private let mut contention_secondary_cycles: usize;
-private let mut contention_failed_removes: usize;
+private let mut contention_armed: AtomicWord;
+private let mut contention_primary_cycles: AtomicWord;
+private let mut contention_secondary_cycles: AtomicWord;
+private let mut contention_failed_removes: AtomicWord;
 // 1 while the secondary is inside its cycle loop. Core 0 waits for this
 // rather than for a duration, because "the secondary is between an
 // allocate and its free" and "the secondary has stopped" are different
 // states and only one of them makes live_count meaningful.
-private let mut contention_secondary_active: usize;
+private let mut contention_secondary_active: AtomicWord;
 // The secondary's count at the moment the primary stopped competing.
-private let mut contention_overlap: usize;
+private let mut contention_overlap: AtomicWord;
 
-private fn contention_armed_address() -> usize {
-    return (&contention_armed) as usize;
+private fn contention_armed_address() -> *AtomicWord {
+    return &contention_armed;
 }
 
-private fn contention_primary_cycles_address() -> usize {
-    return (&contention_primary_cycles) as usize;
+private fn contention_primary_cycles_address() -> *AtomicWord {
+    return &contention_primary_cycles;
 }
 
-private fn contention_secondary_cycles_address() -> usize {
-    return (&contention_secondary_cycles) as usize;
+private fn contention_secondary_cycles_address() -> *AtomicWord {
+    return &contention_secondary_cycles;
 }
 
-private fn contention_failed_removes_address() -> usize {
-    return (&contention_failed_removes) as usize;
+private fn contention_failed_removes_address() -> *AtomicWord {
+    return &contention_failed_removes;
 }
 
-private fn contention_secondary_active_address() -> usize {
-    return (&contention_secondary_active) as usize;
+private fn contention_secondary_active_address() -> *AtomicWord {
+    return &contention_secondary_active;
 }
 
-private fn contention_overlap_address() -> usize {
-    return (&contention_overlap) as usize;
+private fn contention_overlap_address() -> *AtomicWord {
+    return &contention_overlap;
 }
 
 
@@ -149,10 +149,8 @@ private fn contention_cycle() -> bool !{unsafe} {
                 intrusive_pool_remove(&contention_pool, release, handle));
             intrusive_pool_unlock(&contention_pool, release);
             if (ok == false) {
-                unsafe {
-                    atomic_fetch_add_relaxed(
-                        contention_failed_removes_address(), 1);
-                }
+                atomic_word_fetch_add(
+                    contention_failed_removes_address(), 1);
                 return false;
             }
             // Outside the lock, on both cores, for the reason
@@ -167,7 +165,7 @@ private fn contention_cycle() -> bool !{unsafe} {
 // it armed, so the two are inside the same lock at the same time rather
 // than taking turns a timer tick apart.
 fn pool_contention_secondary_run() !{unsafe} {
-    unsafe { atomic_store_release(contention_secondary_active_address(), 1); }
+    atomic_word_store(contention_secondary_active_address(), 1);
     // Complete one cycle, then WAIT for the primary to have started.
     // GitHub issue #510: this is the second half of the start handshake
     // kernel/kernel/fd_table.tkb's probe already had and this one did not.
@@ -181,42 +179,33 @@ fn pool_contention_secondary_run() !{unsafe} {
     // cores never shared. A cycle that comes back false took no slot and
     // is not a round, so this retries rather than publishing one it did
     // not complete.
-    while (unsafe {
-               atomic_load_acquire(contention_secondary_cycles_address())
-           } == 0 &&
-           unsafe { atomic_load_acquire(contention_armed_address()) } == 1) {
+    while (atomic_word_load(contention_secondary_cycles_address()) == 0 &&
+           atomic_word_load(contention_armed_address()) == 1) {
         if (contention_cycle()) {
-            unsafe {
-                atomic_fetch_add_relaxed(
-                    contention_secondary_cycles_address(), 1);
-            }
+            atomic_word_fetch_add(
+                contention_secondary_cycles_address(), 1);
         }
     }
-    while (unsafe {
-               atomic_load_acquire(contention_primary_cycles_address())
-           } == 0 &&
-           unsafe { atomic_load_acquire(contention_armed_address()) } == 1) { }
+    while (atomic_word_load(contention_primary_cycles_address()) == 0 &&
+           atomic_word_load(contention_armed_address()) == 1) { }
     // The SAME count the primary does, so the verdict is not a comparison
     // between two numbers that depend on how fast each core happened to
     // run. Stops early only if the primary gives up on it.
-    while (unsafe {
-               atomic_load_acquire(contention_secondary_cycles_address())
-           } < CONTENTION_ROUNDS &&
-           unsafe { atomic_load_acquire(contention_armed_address()) } == 1) {
+    while (atomic_word_load(contention_secondary_cycles_address()) <
+               CONTENTION_ROUNDS &&
+           atomic_word_load(contention_armed_address()) == 1) {
         if (contention_cycle()) {
-            unsafe {
-                atomic_fetch_add_relaxed(
-                    contention_secondary_cycles_address(), 1);
-            }
+            atomic_word_fetch_add(
+                contention_secondary_cycles_address(), 1);
         }
     }
     // Released AFTER the last cycle's free, so a core 0 that sees zero
     // here knows every slot this core took is back.
-    unsafe { atomic_store_release(contention_secondary_active_address(), 0); }
+    atomic_word_store(contention_secondary_active_address(), 0);
 }
 
 fn pool_contention_is_armed() -> bool !{unsafe} {
-    return unsafe { atomic_load_acquire(contention_armed_address()) } == 1;
+    return atomic_word_load(contention_armed_address()) == 1;
 }
 
 // Every number this probe knows, printed on EVERY exit path including the
@@ -233,23 +222,15 @@ private fn contention_report(stage: *u8) !{unsafe} {
     kernel_boot_log(stage);
     kernel_boot_log("\n");
     kernel_boot_log("pool contention counts: primary=");
-    uart_put_udec(unsafe {
-        atomic_load_acquire(contention_primary_cycles_address())
-    });
+    uart_put_udec(atomic_word_load(contention_primary_cycles_address()));
     kernel_boot_log(" secondary=");
-    uart_put_udec(unsafe {
-        atomic_load_acquire(contention_secondary_cycles_address())
-    });
+    uart_put_udec(atomic_word_load(contention_secondary_cycles_address()));
     kernel_boot_log(" refused=");
-    uart_put_udec(unsafe {
-        atomic_load_acquire(contention_failed_removes_address())
-    });
+    uart_put_udec(atomic_word_load(contention_failed_removes_address()));
     kernel_boot_log(" live=");
     uart_put_udec(intrusive_pool_live_count(&contention_pool));
     kernel_boot_log(" overlap=");
-    uart_put_udec(unsafe {
-        atomic_load_acquire(contention_overlap_address())
-    });
+    uart_put_udec(atomic_word_load(contention_overlap_address()));
     kernel_boot_log("\n");
 }
 
@@ -288,7 +269,7 @@ fn pool_contention_probe() -> bool !{unsafe} {
         return false;
     }
 
-    unsafe { atomic_store_release(contention_armed_address(), 1); }
+    atomic_word_store(contention_armed_address(), 1);
 
     // Wait for the secondary to be IN, before starting. Arming and
     // immediately running was the first version and it measured nothing:
@@ -310,24 +291,20 @@ fn pool_contention_probe() -> bool !{unsafe} {
         // polling it asks whether that core is inside the loop at this
         // instant, and the question this gate needs answered is whether it
         // was ever there. The cycle count only grows.
-        if (unsafe {
-                atomic_load_acquire(contention_secondary_cycles_address())
-            } >= 1) {
+        if (atomic_word_load(contention_secondary_cycles_address()) >= 1) {
             entered = true;
         }
     }
     if (entered == false) {
-        unsafe { atomic_store_release(contention_armed_address(), 0); }
+        atomic_word_store(contention_armed_address(), 0);
         contention_report("secondary-never-entered" as *u8);
         return false;
     }
 
     for round: usize in 0..<CONTENTION_ROUNDS {
         if (contention_cycle()) {
-            unsafe {
-                atomic_fetch_add_relaxed(
-                    contention_primary_cycles_address(), 1);
-            }
+            atomic_word_fetch_add(
+                contention_primary_cycles_address(), 1);
         }
     }
 
@@ -338,10 +315,8 @@ fn pool_contention_probe() -> bool !{unsafe} {
     // and the emulator supplies a fairness the hardware does not. What is
     // asserted is only that it is not zero, which is what makes the run
     // contention rather than two cores taking turns.
-    unsafe {
-        atomic_store_release(contention_overlap_address(),
-            atomic_load_acquire(contention_secondary_cycles_address()));
-    }
+    atomic_word_store(contention_overlap_address(),
+        atomic_word_load(contention_secondary_cycles_address()));
 
     // Now let the secondary reach the same count, unimpeded. Bounded, so a
     // secondary that cannot get there fails the probe instead of hanging
@@ -350,13 +325,12 @@ fn pool_contention_probe() -> bool !{unsafe} {
     let mut finish_window: PeerTickWindow = peer_tick_window_start(128);
     let mut finished: bool = false;
     while (finished == false && peer_tick_window_open(finish_window)) {
-        if (unsafe {
-                atomic_load_acquire(contention_secondary_cycles_address())
-            } >= CONTENTION_ROUNDS) {
+        if (atomic_word_load(contention_secondary_cycles_address()) >=
+                CONTENTION_ROUNDS) {
             finished = true;
         }
     }
-    unsafe { atomic_store_release(contention_armed_address(), 0); }
+    atomic_word_store(contention_armed_address(), 0);
     if (finished == false) {
         contention_report("secondary-never-finished" as *u8);
         return false;
@@ -381,9 +355,7 @@ fn pool_contention_probe() -> bool !{unsafe} {
     let mut settle_window: PeerTickWindow = peer_tick_window_start(16);
     let mut settled: bool = false;
     while (settled == false && peer_tick_window_open(settle_window)) {
-        if (unsafe {
-                atomic_load_acquire(contention_secondary_active_address())
-            } == 0) {
+        if (atomic_word_load(contention_secondary_active_address()) == 0) {
             settled = true;
         }
     }
@@ -408,18 +380,10 @@ fn pool_contention_probe() -> bool !{unsafe} {
     }
 
     contention_report("complete" as *u8);
-    let primary: usize = unsafe {
-        atomic_load_acquire(contention_primary_cycles_address())
-    };
-    let secondary: usize = unsafe {
-        atomic_load_acquire(contention_secondary_cycles_address())
-    };
-    let refused: usize = unsafe {
-        atomic_load_acquire(contention_failed_removes_address())
-    };
-    let overlap: usize = unsafe {
-        atomic_load_acquire(contention_overlap_address())
-    };
+    let primary: usize = atomic_word_load(contention_primary_cycles_address());
+    let secondary: usize = atomic_word_load(contention_secondary_cycles_address());
+    let refused: usize = atomic_word_load(contention_failed_removes_address());
+    let overlap: usize = atomic_word_load(contention_overlap_address());
     let live: usize = intrusive_pool_live_count(&contention_pool);
     return primary == CONTENTION_ROUNDS && secondary == CONTENTION_ROUNDS &&
            overlap > 0 && refused == 0 && live == 0;

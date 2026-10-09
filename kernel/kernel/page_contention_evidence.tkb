@@ -34,44 +34,42 @@ use "kernel/lib/execution_model.tkb";
 const PAGE_CONTENTION_ROUNDS: usize = 2048;
 const PAGE_CONTENTION_OUTSIDE_WORK: usize = 64;
 
-private let mut page_probe_armed: usize;
-private let mut page_probe_primary: usize;
-private let mut page_probe_secondary: usize;
-private let mut page_probe_failed: usize;
-private let mut page_probe_active: usize;
-private let mut page_probe_overlap: usize;
+private let mut page_probe_armed: AtomicWord;
+private let mut page_probe_primary: AtomicWord;
+private let mut page_probe_secondary: AtomicWord;
+private let mut page_probe_failed: AtomicWord;
+private let mut page_probe_active: AtomicWord;
+private let mut page_probe_overlap: AtomicWord;
 
-private fn page_probe_armed_address() -> usize {
-    return (&page_probe_armed) as usize;
+private fn page_probe_armed_address() -> *AtomicWord {
+    return &page_probe_armed;
 }
 
-private fn page_probe_primary_address() -> usize {
-    return (&page_probe_primary) as usize;
+private fn page_probe_primary_address() -> *AtomicWord {
+    return &page_probe_primary;
 }
 
-private fn page_probe_secondary_address() -> usize {
-    return (&page_probe_secondary) as usize;
+private fn page_probe_secondary_address() -> *AtomicWord {
+    return &page_probe_secondary;
 }
 
-private fn page_probe_failed_address() -> usize {
-    return (&page_probe_failed) as usize;
+private fn page_probe_failed_address() -> *AtomicWord {
+    return &page_probe_failed;
 }
 
-private fn page_probe_active_address() -> usize {
-    return (&page_probe_active) as usize;
+private fn page_probe_active_address() -> *AtomicWord {
+    return &page_probe_active;
 }
 
-private fn page_probe_overlap_address() -> usize {
-    return (&page_probe_overlap) as usize;
+private fn page_probe_overlap_address() -> *AtomicWord {
+    return &page_probe_overlap;
 }
 
 // Take one page and give it straight back. Both cores run this.
 private fn page_probe_cycle() -> bool !{allocates, unsafe} {
     match page_alloc(PageOwnerTag::UserPage) {
         PageAllocResult::OutOfMemory => {
-            unsafe {
-                atomic_fetch_add_relaxed(page_probe_failed_address(), 1);
-            }
+            atomic_word_fetch_add(page_probe_failed_address(), 1);
             return false;
         }
         PageAllocResult::Allocated(owner) => {
@@ -83,13 +81,11 @@ private fn page_probe_cycle() -> bool !{allocates, unsafe} {
 }
 
 fn page_contention_is_armed() -> bool !{unsafe} {
-    return unsafe {
-        atomic_load_acquire(page_probe_armed_address())
-    } == 1;
+    return atomic_word_load(page_probe_armed_address()) == 1;
 }
 
 fn page_contention_secondary_run() !{allocates, unsafe} {
-    unsafe { atomic_store_release(page_probe_active_address(), 1); }
+    atomic_word_store(page_probe_active_address(), 1);
     // Complete one cycle, then WAIT for the primary to have started.
     // GitHub issue #510: this is the second half of the start handshake
     // kernel/kernel/fd_table.tkb's probe already had. Without it this core
@@ -100,31 +96,22 @@ fn page_contention_secondary_run() !{allocates, unsafe} {
     // from a phase the two cores never shared. A cycle that comes back
     // false took no page and is not one, so this retries rather than
     // publishing a round it did not complete.
-    while (unsafe {
-               atomic_load_acquire(page_probe_secondary_address())
-           } == 0 &&
-           unsafe { atomic_load_acquire(page_probe_armed_address()) } == 1) {
+    while (atomic_word_load(page_probe_secondary_address()) == 0 &&
+           atomic_word_load(page_probe_armed_address()) == 1) {
         if (page_probe_cycle()) {
-            unsafe {
-                atomic_fetch_add_relaxed(page_probe_secondary_address(), 1);
-            }
+            atomic_word_fetch_add(page_probe_secondary_address(), 1);
         }
     }
-    while (unsafe {
-               atomic_load_acquire(page_probe_primary_address())
-           } == 0 &&
-           unsafe { atomic_load_acquire(page_probe_armed_address()) } == 1) { }
-    while (unsafe {
-               atomic_load_acquire(page_probe_secondary_address())
-           } < PAGE_CONTENTION_ROUNDS &&
-           unsafe { atomic_load_acquire(page_probe_armed_address()) } == 1) {
+    while (atomic_word_load(page_probe_primary_address()) == 0 &&
+           atomic_word_load(page_probe_armed_address()) == 1) { }
+    while (atomic_word_load(page_probe_secondary_address()) <
+               PAGE_CONTENTION_ROUNDS &&
+           atomic_word_load(page_probe_armed_address()) == 1) {
         if (page_probe_cycle()) {
-            unsafe {
-                atomic_fetch_add_relaxed(page_probe_secondary_address(), 1);
-            }
+            atomic_word_fetch_add(page_probe_secondary_address(), 1);
         }
     }
-    unsafe { atomic_store_release(page_probe_active_address(), 0); }
+    atomic_word_store(page_probe_active_address(), 0);
 }
 
 private fn page_contention_report(stage: *u8, baseline: usize,
@@ -133,28 +120,22 @@ private fn page_contention_report(stage: *u8, baseline: usize,
     kernel_boot_log(stage);
     kernel_boot_log("\n");
     kernel_boot_log("page contention counts: primary=");
-    uart_put_udec(unsafe {
-        atomic_load_acquire(page_probe_primary_address())
-    });
+    uart_put_udec(atomic_word_load(page_probe_primary_address()));
     kernel_boot_log(" secondary=");
-    uart_put_udec(unsafe {
-        atomic_load_acquire(page_probe_secondary_address())
-    });
+    uart_put_udec(atomic_word_load(page_probe_secondary_address()));
     kernel_boot_log(" leaked=");
     uart_put_udec(page_allocator_live_count() - baseline);
     kernel_boot_log(" doublefree=");
     uart_put_udec(page_allocator_double_free_count() - doubles_before);
     kernel_boot_log(" overlap=");
-    uart_put_udec(unsafe {
-        atomic_load_acquire(page_probe_overlap_address())
-    });
+    uart_put_udec(atomic_word_load(page_probe_overlap_address()));
     kernel_boot_log("\n");
 }
 
 fn page_contention_probe() -> bool !{allocates, unsafe} {
     let baseline: usize = page_allocator_live_count();
     let doubles_before: usize = page_allocator_double_free_count();
-    unsafe { atomic_store_release(page_probe_armed_address(), 1); }
+    atomic_word_store(page_probe_armed_address(), 1);
 
     // GitHub issue #479 Group B: wait for the secondary to have COMPLETED A
     // ROUND, not merely to have set `active`. The difference is the whole
@@ -188,14 +169,12 @@ fn page_contention_probe() -> bool !{allocates, unsafe} {
         // into a level the secondary clears on its way out, so a core that
         // ran every round before this one got a slice was reported as
         // never having entered.
-        if (unsafe {
-                atomic_load_acquire(page_probe_secondary_address())
-            } >= 1) {
+        if (atomic_word_load(page_probe_secondary_address()) >= 1) {
             entered = true;
         }
     }
     if (entered == false) {
-        unsafe { atomic_store_release(page_probe_armed_address(), 0); }
+        atomic_word_store(page_probe_armed_address(), 0);
         page_contention_report("secondary-never-completed-a-round" as *u8,
                                baseline, doubles_before);
         return false;
@@ -203,27 +182,22 @@ fn page_contention_probe() -> bool !{allocates, unsafe} {
 
     for round: usize in 0..<PAGE_CONTENTION_ROUNDS {
         if (page_probe_cycle()) {
-            unsafe {
-                atomic_fetch_add_relaxed(page_probe_primary_address(), 1);
-            }
+            atomic_word_fetch_add(page_probe_primary_address(), 1);
         }
     }
 
-    unsafe {
-        atomic_store_release(page_probe_overlap_address(),
-            atomic_load_acquire(page_probe_secondary_address()));
-    }
+    atomic_word_store(page_probe_overlap_address(),
+        atomic_word_load(page_probe_secondary_address()));
 
     let mut finish_window: PeerTickWindow = peer_tick_window_start(128);
     let mut finished: bool = false;
     while (finished == false && peer_tick_window_open(finish_window)) {
-        if (unsafe {
-                atomic_load_acquire(page_probe_secondary_address())
-            } >= PAGE_CONTENTION_ROUNDS) {
+        if (atomic_word_load(page_probe_secondary_address()) >=
+                PAGE_CONTENTION_ROUNDS) {
             finished = true;
         }
     }
-    unsafe { atomic_store_release(page_probe_armed_address(), 0); }
+    atomic_word_store(page_probe_armed_address(), 0);
     if (finished == false) {
         page_contention_report("secondary-never-finished" as *u8, baseline,
                                doubles_before);
@@ -231,9 +205,7 @@ fn page_contention_probe() -> bool !{allocates, unsafe} {
     }
 
     page_contention_report("complete" as *u8, baseline, doubles_before);
-    let overlap: usize = unsafe {
-        atomic_load_acquire(page_probe_overlap_address())
-    };
+    let overlap: usize = atomic_word_load(page_probe_overlap_address());
     // Every page back where it started, nothing freed twice, and both cores
     // were inside the allocator at once.
     return page_allocator_live_count() == baseline &&

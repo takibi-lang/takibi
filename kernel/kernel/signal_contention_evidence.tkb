@@ -47,29 +47,23 @@ const SIGNAL_SECONDARY_BIT: usize = 2;
 private let mut signal_probe_record: ProcessRecord;
 
 // 0 = phase 1, forged guard. 1 = phase 2, locked.
-private let mut signal_probe_phase: usize;
-private let mut signal_probe_armed: usize;
+private let mut signal_probe_phase: AtomicWord;
+private let mut signal_probe_armed: AtomicWord;
 // Round core 1 may raise for, and the last round it finished raising.
-private let mut signal_probe_go: usize;
-private let mut signal_probe_done: usize;
-
-private fn signal_probe_addr(value: *usize) -> usize { return value as usize; }
+private let mut signal_probe_go: AtomicWord;
+private let mut signal_probe_done: AtomicWord;
 
 fn signal_contention_is_armed() -> bool !{unsafe} {
-    return unsafe { atomic_load_acquire(signal_probe_addr(
-        &signal_probe_armed)) } == 1;
+    return atomic_word_load(&signal_probe_armed) == 1;
 }
 
 fn signal_contention_secondary_run() !{unsafe} {
     let record: &mut ProcessRecord = &signal_probe_record;
     let mut served: usize = 0;
-    while (unsafe { atomic_load_acquire(signal_probe_addr(
-               &signal_probe_armed)) } == 1) {
-        let go: usize = unsafe { atomic_load_acquire(signal_probe_addr(
-            &signal_probe_go)) };
+    while (atomic_word_load(&signal_probe_armed) == 1) {
+        let go: usize = atomic_word_load(&signal_probe_go);
         if (go != served) {
-            if (unsafe { atomic_load_acquire(signal_probe_addr(
-                    &signal_probe_phase)) } == 1) {
+            if (atomic_word_load(&signal_probe_phase) == 1) {
                 let guard = process_run_lock();
                 process_signal_pending_raise(guard, record,
                                              SIGNAL_SECONDARY_BIT);
@@ -81,8 +75,7 @@ fn signal_contention_secondary_run() !{unsafe} {
                 process_run_guard_discard_unlocked(forged);
             }
             served = go;
-            unsafe { atomic_store_release(signal_probe_addr(
-                &signal_probe_done), go); }
+            atomic_word_store(&signal_probe_done, go);
         }
     }
 }
@@ -94,8 +87,7 @@ private fn signal_probe_hold_locked(round: usize) -> bool
     let start: i64 = read_cntpct();
     let window: i64 = read_cntfrq() >> 10;
     while (read_cntpct() - start < window) {
-        if (unsafe { atomic_load_acquire(signal_probe_addr(
-                &signal_probe_done)) } == round) {
+        if (atomic_word_load(&signal_probe_done) == round) {
             return true;
         }
     }
@@ -105,8 +97,7 @@ private fn signal_probe_hold_locked(round: usize) -> bool
 private fn signal_probe_wait_done(round: usize) -> bool !{unsafe} {
     let mut window: PeerTickWindow = peer_tick_window_start(64);
     while (peer_tick_window_open(window)) {
-        if (unsafe { atomic_load_acquire(signal_probe_addr(
-                &signal_probe_done)) } == round) { return true; }
+        if (atomic_word_load(&signal_probe_done) == round) { return true; }
     }
     return false;
 }
@@ -123,8 +114,8 @@ private fn signal_probe_round(round: usize, locked: bool) -> usize
         let guard = process_run_lock();
         let value: usize = process_signal_pending_raised(
             guard, record, SIGNAL_PRIMARY_BIT);
-        unsafe { atomic_store_release(signal_probe_addr(&signal_probe_go),
-                                      round); }
+        atomic_word_store(&signal_probe_go,
+                                  round);
         let early: bool = signal_probe_hold_locked(round);
         process_signal_pending_store(guard, record, value);
         process_run_unlock(guard);
@@ -132,8 +123,8 @@ private fn signal_probe_round(round: usize, locked: bool) -> usize
         let forged = process_run_guard_forge_unlocked();
         let value: usize = process_signal_pending_raised(
             forged, record, SIGNAL_PRIMARY_BIT);
-        unsafe { atomic_store_release(signal_probe_addr(&signal_probe_go),
-                                      round); }
+        atomic_word_store(&signal_probe_go,
+                                  round);
         let early: bool = signal_probe_wait_done(round);
         process_signal_pending_store(forged, record, value);
         process_run_guard_discard_unlocked(forged);
@@ -146,12 +137,10 @@ private fn signal_probe_round(round: usize, locked: bool) -> usize
 // Rounds that lost core 1's bit, or SIGNAL_CONTENTION_ROUNDS + 1 when core 1
 // missed a round and the phase says nothing.
 private fn signal_contention_run_phase(locked: usize) -> usize !{unsafe} {
-    unsafe {
-        atomic_store_release(signal_probe_addr(&signal_probe_phase), locked);
-        atomic_store_release(signal_probe_addr(&signal_probe_go), 0);
-        atomic_store_release(signal_probe_addr(&signal_probe_done), 0);
-        atomic_store_release(signal_probe_addr(&signal_probe_armed), 1);
-    }
+    atomic_word_store(&signal_probe_phase, locked);
+    atomic_word_store(&signal_probe_go, 0);
+    atomic_word_store(&signal_probe_done, 0);
+    atomic_word_store(&signal_probe_armed, 1);
     let mut lost: usize = 0;
     let mut missed: bool = false;
     for index: usize in 0..<SIGNAL_CONTENTION_ROUNDS {
@@ -165,7 +154,7 @@ private fn signal_contention_run_phase(locked: usize) -> usize !{unsafe} {
             }
         }
     }
-    unsafe { atomic_store_release(signal_probe_addr(&signal_probe_armed), 0); }
+    atomic_word_store(&signal_probe_armed, 0);
     signal_probe_record.pending_signals = 0;
     if (missed) { return SIGNAL_CONTENTION_ROUNDS + 1; }
     return lost;
