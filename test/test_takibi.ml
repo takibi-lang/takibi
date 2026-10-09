@@ -22215,6 +22215,8 @@ let infer_production_machine_boundary ?(platform = "qemu") code =
     fn atomic_word_store(cell: *AtomicWord, value: usize) !{unsafe} {}
     fn atomic_word_load(cell: *AtomicWord) -> usize !{unsafe} { return 0; }
     fn atomic_word_swap(cell: *AtomicWord, value: usize) -> usize !{unsafe} { return 0; }
+    fn atomic_word_compare_exchange(cell: *AtomicWord, expected: usize,
+                                    desired: usize) -> bool !{unsafe} { return true; }
     generic struct IntrusivePool(T: type) { value: T; }
     must_use variant IntrusiveSlotProbe[p: addr] {
       NoPayload; Live(IntrusiveSlotView[p]);
@@ -22257,12 +22259,14 @@ let infer_production_machine_boundary ?(platform = "qemu") code =
     fn mutex_irq_save() -> usize { return 0; }
     fn mutex_irq_restore(flags: usize) !{restores_saved_irq} {}
     fn cpu_id() -> usize { return 0; }
+    fn read_cntpct() -> i64 { return 0; }
+    fn read_cntfrq() -> i64 { return 1; }
     fn platform_world_stop_notify(mask: usize, owner: usize) !{unsafe} {}
   |} in
   let types = ["WorldStop"; "WorldStopped"; "WorldStopPartial";
     "CpuParticipants"; "MachineStopped"; "CpuStart"; "MachineSlotView"; "MachineStopPartial"] in
   let variants = ["WorldStopResult"; "MachineStopResult"; "CpuStartResult"; "MachineSlotProbe"] in
-  let functions = ["world_stop_claim"; "world_stop_begin_config";
+  let functions = ["world_stop_claim_as"; "world_stop_claim"; "world_stop_begin_config";
     "world_stop_begin_claimed"; "world_stop_begin"; "world_stop_machine_begin";
     "cpu_participants_end"; "machine_stop_release"; "machine_stop_keep_forever"; "machine_stopped_mask";
     "cpu_start_reserve"; "cpu_start_core"; "cpu_start_finish";
@@ -22276,8 +22280,10 @@ let infer_production_machine_boundary ?(platform = "qemu") code =
     | Ast.OwnedStructDef (name, _, _, _, _, _, _, _, _) -> List.mem name types
     | Ast.FuncDef f -> List.mem f.name functions
     | Ast.VariantDef (name, _, _, _, _) -> List.mem name variants
+    | Ast.ConstDef (name, _, _, _) ->
+        List.mem name ["WORLD_STOP_CLAIM_STOP"; "WORLD_STOP_CLAIM_START"]
     | _ -> false) (parse_here source) in
-  Alcotest.(check int) "all production machine declarations extracted" 37
+  Alcotest.(check int) "all production machine declarations extracted" 40
     (List.length boundary);
   let platform_path = "kernel/platform/" ^ platform ^ "/init.tkb" in
   let path = List.find Sys.file_exists ["../" ^ platform_path; platform_path] in
