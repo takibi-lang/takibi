@@ -1,9 +1,9 @@
 {
   "date": "2026-10-09",
-  "event": "milestone",
-  "decision": "measured",
-  "source_sha256": "5cad8192321bd23f62b98c3678c8f82d98b4c56cd066327b9db5ddbcccbe96eb",
-  "workload": "#707 GEM TX: gem_tx_buf as dma_fixed GemTx with a Place owner slot, completion-reporting gem_tx_wait, halt on unconfirmed completion. Linked production kernels against base 7c25199e with scripts/space_delta.py.",
+  "event": "incremental",
+  "decision": "reuse",
+  "source_sha256": "5b5edc726e9cf5ae88f5d327cdc6070d1a328666c1d69fda09c2d3a9e33e8a10",
+  "workload": "Session audit: checker rejects casts to per-CPU store types, keyword-table and CPU-authority-mint build checks, the DMA slot initializer reads Full's tag from Place's definition (same value), a layout-check message names its field, and a kernel comment. Reuses the #707 GEM TX measurement.",
   "evidence": [
     "docs/GEM_TX_FIXED_SPACE_2026-10-09.md",
     "docs/PER_CPU_STORAGE_SPACE_2026-10-09.md",
@@ -36,6 +36,6 @@
     "docs/DMA_MINT_FILES_2026-10-08.md",
     "docs/DMA_TRANSMIT_2026-10-08.md"
   ],
-  "assessment": "RPi5 text +1160 B, data +56 B (40 B owner slot created full, 1 B TX-down flag); the 1536 B TX buffer is renamed, not grown. QEMU unchanged; usable_ram_start unchanged on both. Adopted.",
+  "assessment": "No kernel code changes beyond a comment; the compiler changes add checks and a message, and the DMA initializer emits the same constant (tag 1). Linked kernel sizes are those recorded for #707 (docs/GEM_TX_FIXED_SPACE_2026-10-09.md). Reused.",
   "next_trigger": "A retained crash-layout or production allocation change, or completion of another kernel feature/stage."
 }
