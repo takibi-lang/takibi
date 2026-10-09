@@ -1,10 +1,11 @@
 {
   "date": "2026-10-09",
-  "event": "milestone",
+  "event": "incremental",
   "decision": "measured",
-  "source_sha256": "417cc42757205823e3c894aca9edc0b32655725a642ad09d60c0cc4f54c6de15",
-  "workload": "Typed peer-clock windows at all 46 maintained CPU 0/1 boot waits and a linear world-stop resume observation ticket, rebased onto the independently published AtomicWord probes and world-stop claim-holder correction. Linked production QEMU/RPi5 kernels freshly compared with base be63bbdb using scripts/space_delta.py; the pre-integration 750 ms delayed-entry bounded QEMU boot exercises the waits and preserves fresh boot/bounded_end pool samples.",
+  "source_sha256": "9bf1f9155e054c1dbecc3b159fc07a2067e51252dc57524e025cef86ec6a928e",
+  "workload": "#637 item 1: syscall kernel-buffer copies through checked slices (copy_from_user_span/copy_to_user_span) instead of raw pointers. Linked production kernels against base 3b805323 with scripts/space_delta.py.",
   "evidence": [
+    "docs/SYSCALL_COPY_SPAN_SPACE_2026-10-09.md",
     "docs/TYPED_PEER_CLOCKS_2026-10-09.md",
     "docs/TYPED_PEER_CLOCK_POOL_ENDPOINT_2026-10-09.tsv",
     "docs/PROBE_ATOMIC_WORD_SPACE_2026-10-09.md",
@@ -26,6 +27,6 @@
     "docs/DMA_MINT_FILES_2026-10-08.md",
     "docs/DMA_TRANSMIT_2026-10-08.md"
   ],
-  "assessment": "Final rebased text delta +2408 B (QEMU) and +2456 B (RPi5). Data, BSS, every data/BSS symbol size and usable_ram_start unchanged. No new globals, allocator payload, metadata, allocation policy or lifetime; four-word peer windows and a two-word local resume ticket. The recorded pre-integration candidate endpoint has pages=0, one empty 16384-byte process chunk and four occupied baseline pool slots. Adopt the fixed code growth for typed clock/peer boundaries and explicit local obligations; this endpoint is not an equal-size comparison with the older process-payload capture.",
+  "assessment": "Text +152 B (QEMU) and +120 B (RPi5) for span checks and copy-in failure arms; data, BSS and usable_ram_start unchanged, no data/BSS symbol changed size. No buffer, payload, pool or lifetime change. Adopted.",
   "next_trigger": "Measure at the typed-atomic probe milestone, another new resource/lifetime, or a changed allocation workload."
 }
