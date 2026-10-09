@@ -178,11 +178,13 @@ private fn freelist_probe_rendezvous(primary: bool, sequence: usize,
         peer_address = secondary_address;
     }
     atomic_word_store(own_address, sequence);
-    let mut deadline: PeerTickWindow = peer_tick_window_start(128);
+    let mut deadline = peer_tick_window_policy(
+        peer_tick_window_peer(), PeerTickPolicy::Finish);
     while (peer_tick_window_open(deadline) &&
            atomic_word_load(peer_address) < sequence &&
            atomic_word_load(freelist_probe_armed_address()) == 1) {
     }
+    peer_tick_window_end(deadline);
     if (atomic_word_load(peer_address) >= sequence &&
         atomic_word_load(freelist_probe_armed_address()) == 1) {
         return FreelistProbeRendezvousResult::Met;
@@ -357,13 +359,15 @@ private fn freelist_contention_phase(locked: bool) -> bool !{unsafe} {
     // arrives, so `active` can no longer be a pulse that a long QEMU vCPU
     // timeslice misses. In the unlocked phase each core has already read
     // the same freelist head before that rendezvous completes.
-    let mut entry_window: PeerTickWindow = peer_tick_window_start(16);
+    let mut entry_window = peer_tick_window_policy(
+        peer_tick_window_peer(), PeerTickPolicy::Entry);
     let mut entered: bool = false;
     while (entered == false && peer_tick_window_open(entry_window)) {
         if (atomic_word_load(freelist_probe_entries_address()) > entries_before) {
             entered = true;
         }
     }
+    peer_tick_window_end(entry_window);
     if (entered == false) {
         atomic_word_store(freelist_probe_armed_address(), 0);
         freelist_contention_report("secondary-never-entered" as *u8);
@@ -387,7 +391,8 @@ private fn freelist_contention_phase(locked: bool) -> bool !{unsafe} {
     atomic_word_store(freelist_probe_overlap_address(),
         atomic_word_load(freelist_probe_secondary_address()));
 
-    let mut finish_window: PeerTickWindow = peer_tick_window_start(128);
+    let mut finish_window = peer_tick_window_policy(
+        peer_tick_window_peer(), PeerTickPolicy::Finish);
     let mut finished: bool = false;
     while (finished == false && peer_tick_window_open(finish_window)) {
         if (atomic_word_load(freelist_probe_secondary_address()) >=
@@ -395,6 +400,7 @@ private fn freelist_contention_phase(locked: bool) -> bool !{unsafe} {
             finished = true;
         }
     }
+    peer_tick_window_end(finish_window);
     atomic_word_store(freelist_probe_armed_address(), 0);
     if (finished == false) {
         freelist_contention_report("secondary-never-finished" as *u8);
@@ -402,9 +408,11 @@ private fn freelist_contention_phase(locked: bool) -> bool !{unsafe} {
     }
     // Disarming is a request, not an acknowledgement. Wait for the last
     // secondary invocation to leave before the next phase resets its state.
-    let mut settle_window: PeerTickWindow = peer_tick_window_start(16);
+    let mut settle_window = peer_tick_window_policy(
+        peer_tick_window_peer(), PeerTickPolicy::Entry);
     while (atomic_word_load(freelist_probe_active_address()) != 0 &&
            peer_tick_window_open(settle_window)) { }
+    peer_tick_window_end(settle_window);
     if (atomic_word_load(freelist_probe_active_address()) != 0) {
         freelist_contention_report("secondary-never-left" as *u8);
         return false;

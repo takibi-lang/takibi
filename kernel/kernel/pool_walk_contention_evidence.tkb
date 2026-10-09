@@ -330,7 +330,8 @@ private fn pool_walk_once() !{unsafe} {
             let round: usize = atomic_word_load(pool_walk_seq_address());
             atomic_word_store(pool_walk_stale_address(), cursor);
             atomic_word_store(pool_walk_held_seq_address(), round);
-            let mut window: PeerTickWindow = peer_tick_window_start(16);
+            let mut window = peer_tick_window_policy(
+                peer_tick_window_peer(), PeerTickPolicy::Entry);
             let mut released: bool = false;
             while (released == false &&
                    peer_tick_window_open(window) &&
@@ -339,6 +340,7 @@ private fn pool_walk_once() !{unsafe} {
                     released = true;
                 }
             }
+            peer_tick_window_end(window);
             if (released) {
                 // The whole point, in one call: the chunk this address
                 // names has been unlinked, scrubbed and handed back, and
@@ -376,13 +378,15 @@ private fn pool_view_hold_once() !{unsafe} {
                 intrusive_pool_record_of(&pool_walk_pool, slot_view);
             let first_ok: bool = payload.stamp == POOL_WALK_SENTINEL;
             atomic_word_store(pool_view_held_address(), 1);
-            let mut window: PeerTickWindow = peer_tick_window_start(16);
+            let mut window = peer_tick_window_policy(
+                peer_tick_window_peer(), PeerTickPolicy::Entry);
             let mut released: bool = false;
             while (released == false &&
                    peer_tick_window_open(window) &&
                    atomic_word_load(pool_walk_armed_address()) == 1) {
                 released = atomic_word_load(pool_view_release_address()) == 1;
             }
+            peer_tick_window_end(window);
             if (first_ok && released &&
                     payload.stamp == POOL_WALK_SENTINEL) {
                 atomic_word_store(pool_view_payload_ok_address(), 1);
@@ -493,12 +497,14 @@ private fn pool_walk_floor_give_back() -> bool !{unsafe} {
 // this file reports rather than a hang.
 private fn pool_walk_await(sequence_address: *AtomicWord, target: usize)
         -> bool !{unsafe} {
-    let mut window: PeerTickWindow = peer_tick_window_start(16);
+    let mut window = peer_tick_window_policy(
+        peer_tick_window_peer(), PeerTickPolicy::Entry);
     while (peer_tick_window_open(window)) {
         if (atomic_word_load(sequence_address) >= target) {
-            return true;
+            peer_tick_window_end(window); return true;
         }
     }
+    peer_tick_window_end(window);
     return atomic_word_load(sequence_address) >= target;
 }
 
@@ -561,13 +567,15 @@ fn pool_walk_contention_probe() -> bool !{allocates, unsafe} {
     let entries_before: usize = atomic_word_load(pool_walk_entries_address());
     atomic_word_store(pool_walk_armed_address(), 1);
 
-    let mut entry_window: PeerTickWindow = peer_tick_window_start(16);
+    let mut entry_window = peer_tick_window_policy(
+        peer_tick_window_peer(), PeerTickPolicy::Entry);
     let mut entered: bool = false;
     while (entered == false && peer_tick_window_open(entry_window)) {
         if (atomic_word_load(pool_walk_entries_address()) > entries_before) {
             entered = true;
         }
     }
+    peer_tick_window_end(entry_window);
     if (entered == false) {
         atomic_word_store(pool_walk_armed_address(), 0);
         pool_walk_report("secondary-never-entered" as *u8);
@@ -619,13 +627,15 @@ fn pool_walk_contention_probe() -> bool !{allocates, unsafe} {
     // Provably out before the accounting is read, for the reason the pool
     // probe next door states: a core still inside would make a leak of a
     // page it is holding.
-    let mut settle_window: PeerTickWindow = peer_tick_window_start(16);
+    let mut settle_window = peer_tick_window_policy(
+        peer_tick_window_peer(), PeerTickPolicy::Entry);
     let mut settled: bool = false;
     while (settled == false && peer_tick_window_open(settle_window)) {
         if (atomic_word_load(pool_walk_active_address()) == 0) {
             settled = true;
         }
     }
+    peer_tick_window_end(settle_window);
 
     if (rounds_ok == false) {
         pool_walk_report(round_stage);

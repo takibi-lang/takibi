@@ -20,7 +20,7 @@ KERNEL = pathlib.Path("kernel")
 # The spin's own comment and its loop variable, as the builder writes them.
 MARKERS = ("scripts/build_qemu_race_window.py)", "race_window_start", "delayed_probe_entry",
            "probe-ticks: missing-peer controls complete", "world_stop_resume_control",
-           "signal_round_control")
+           "signal_round_control", "peer_tick_stamp_control")
 
 
 def main() -> int:

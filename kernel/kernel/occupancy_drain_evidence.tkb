@@ -149,13 +149,15 @@ fn occupancy_drain_probe() -> bool !{unsafe} {
 
     // Bounded in TIME here, unlike the drain itself: this file has a clock
     // and occupancy.tkb deliberately does not.
-    let mut entry_window: PeerTickWindow = peer_tick_window_start(16);
+    let mut entry_window = peer_tick_window_policy(
+        peer_tick_window_peer(), PeerTickPolicy::Entry);
     let mut entered: bool = false;
     while (entered == false && peer_tick_window_open(entry_window)) {
         if (atomic_word_load(occupancy_probe_entered_address()) == 1) {
             entered = true;
         }
     }
+    peer_tick_window_end(entry_window);
     if (entered == false) {
         atomic_word_store(occupancy_probe_armed_address(), 0);
         // The distinction issue #508 asked for. A drain that comes back
@@ -188,13 +190,15 @@ fn occupancy_drain_probe() -> bool !{unsafe} {
     // Let it go, and wait until it has provably left -- not for a duration,
     // because "long enough" is the assumption this whole file is about.
     atomic_word_store(occupancy_probe_release_address(), 1);
-    let mut leave_window: PeerTickWindow = peer_tick_window_start(16);
+    let mut leave_window = peer_tick_window_policy(
+        peer_tick_window_peer(), PeerTickPolicy::Entry);
     let mut left: bool = false;
     while (left == false && peer_tick_window_open(leave_window)) {
         if (atomic_word_load(occupancy_probe_left_address()) == 1) {
             left = true;
         }
     }
+    peer_tick_window_end(leave_window);
     if (left == false) {
         atomic_word_store(occupancy_probe_armed_address(), 0);
         occupancy_drain_report("secondary-never-left" as *u8, busy_seen,
@@ -232,9 +236,9 @@ private fn world_stop_probe_inspect(stopped: borrow WorldStopped[id]) {
 // peer deliberately does not acknowledge and must produce Partial.
 fn world_stop_probe() -> bool !{unsafe} {
     world_stop_probe_inspections = 0;
-    let mut resume_ticks_before: usize = secondary_tick_value();
     let mut full: bool = false;
     let mut acknowledged: bool = false;
+    let mut resumed: bool = false;
     match world_stop_begin(
             &kernel_world_stop, 2, WORLD_STOP_PROBE_SPINS) {
         WorldStopResult::Busy => { }
@@ -245,24 +249,20 @@ fn world_stop_probe() -> bool !{unsafe} {
             acknowledged = true;
             let held_before: usize = secondary_tick_value();
             // Deliberate hold: a stopped peer must take no ticks throughout.
-            let hold_start: i64 = read_cntpct();
-            let hold_window: i64 = read_cntfrq() >> 4;
-            while (read_cntpct() - hold_start < hold_window) { }
+            let mut hold_start: WallTickStamp = wall_tick_stamp();
+            let mut hold_window: WallHoldBudget = wall_stopped_hold_budget();
+            while (wall_hold_open(hold_start, hold_window)) { }
             let held_after: usize = secondary_tick_value();
-            // Resume must observe a tick AFTER the stopped interval, not
-            // a tick that arrived between the initial sample and the SGI.
-            resume_ticks_before = held_after;
             world_stop_probe_inspect(stopped);
             full = held_before == held_after;
-            world_stop_release(stopped, &kernel_world_stop);
+            let ticket = world_stop_release_for_tick(stopped, &kernel_world_stop, 1);
+            let mut resume_window = peer_tick_window_policy(1, PeerTickPolicy::Entry);
+            while (resumed == false && peer_tick_window_open(resume_window)) {
+                resumed = world_resume_tick_observed(ticket);
+            }
+            peer_tick_window_end(resume_window);
+            world_resume_tick_cancel(ticket);
         }
-    }
-
-    let mut resume_window: PeerTickWindow = peer_tick_window_start(16);
-    let mut resumed: bool = false;
-    while (resumed == false &&
-           peer_tick_window_open(resume_window)) {
-        resumed = secondary_tick_value() > resume_ticks_before;
     }
 
     if (acknowledged == false) {
@@ -392,9 +392,11 @@ fn world_stop_peer_probe_secondary_run() !{unsafe} {
 fn world_stop_peer_probe() -> bool !{unsafe} {
     atomic_word_store(&world_stop_peer_probe_result, 0);
     atomic_word_store(&world_stop_peer_probe_armed, 1);
-    let mut window: PeerTickWindow = peer_tick_window_start(64);
+    let mut window = peer_tick_window_policy(
+        peer_tick_window_peer(), PeerTickPolicy::Complete);
     while (peer_tick_window_open(window) &&
            atomic_word_load(&world_stop_peer_probe_armed) == 1) { }
+    peer_tick_window_end(window);
     atomic_word_store(&world_stop_peer_probe_armed, 0);
     let result: usize = atomic_word_load(&world_stop_peer_probe_result);
     kernel_boot_log("world stop from a peer counts: result=" as *u8);

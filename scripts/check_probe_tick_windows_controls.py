@@ -23,8 +23,8 @@ def main():
     cases.note()
     helper = 'kernel/lib/peer_tick_window.tkb'
     check({**tree, helper: tree[helper].replace(
-        'kernel_tick_count_of(window.peer) - window.ticks_start <\n'
-        '               window.tick_budget &&', 'true &&')}, 1,
+        'kernel_tick_count_of(window.peer) - window.ticks_start.value <\n'
+        '               window.tick_budget.ticks &&', 'true &&')}, 1,
         'shared window lost its peer-tick bound')
     cases.note()
     for path, name, binding in (

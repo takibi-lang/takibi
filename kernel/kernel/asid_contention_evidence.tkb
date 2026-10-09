@@ -138,13 +138,15 @@ fn asid_contention_probe() -> bool !{unsafe} {
     // recorded at the time as something the remaining probes were fragile
     // about and should take "when one of them next moves". `tag` moved on
     // its own: it failed on RPi5 with overlap 18 of 2048 and then with 0.
-    let mut entry_window: PeerTickWindow = peer_tick_window_start(16);
+    let mut entry_window = peer_tick_window_policy(
+        peer_tick_window_peer(), PeerTickPolicy::Entry);
     let mut entered: bool = false;
     while (entered == false && peer_tick_window_open(entry_window)) {
         if (atomic_word_load(asid_probe_secondary_address()) >= 1) {
             entered = true;
         }
     }
+    peer_tick_window_end(entry_window);
     if (entered == false) {
         atomic_word_store(asid_probe_armed_address(), 0);
         asid_contention_report("secondary-never-completed-a-round" as *u8, 0, 0);
@@ -159,7 +161,8 @@ fn asid_contention_probe() -> bool !{unsafe} {
     atomic_word_store(asid_probe_overlap_address(),
         atomic_word_load(asid_probe_secondary_address()));
 
-    let mut finish_window: PeerTickWindow = peer_tick_window_start(128);
+    let mut finish_window = peer_tick_window_policy(
+        peer_tick_window_peer(), PeerTickPolicy::Finish);
     let mut finished: bool = false;
     while (finished == false && peer_tick_window_open(finish_window)) {
         if (atomic_word_load(asid_probe_secondary_address()) >=
@@ -167,6 +170,7 @@ fn asid_contention_probe() -> bool !{unsafe} {
             finished = true;
         }
     }
+    peer_tick_window_end(finish_window);
     atomic_word_store(asid_probe_armed_address(), 0);
 
     // `advanced` and `calls` are read one after the other, and disarming
@@ -176,13 +180,15 @@ fn asid_contention_probe() -> bool !{unsafe} {
     // fails on a kernel that did nothing wrong. GitHub issue #510: wait for
     // the secondary to be provably OUT first, the way the pool probe waits
     // before reading its live count.
-    let mut settle_window: PeerTickWindow = peer_tick_window_start(16);
+    let mut settle_window = peer_tick_window_policy(
+        peer_tick_window_peer(), PeerTickPolicy::Entry);
     let mut settled: bool = false;
     while (settled == false && peer_tick_window_open(settle_window)) {
         if (atomic_word_load(asid_probe_active_address()) == 0) {
             settled = true;
         }
     }
+    peer_tick_window_end(settle_window);
 
     let advanced: usize = asid_next_value() - next_before;
     let calls: usize =

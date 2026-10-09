@@ -54,7 +54,7 @@ def main(tree=None):
             body = function_body('peer_tick_window_open', source)
             if body is None or not re.search(
                     r'kernel_tick_count_of\s*\(window\.peer\)\s*-\s*'
-                    r'window\.ticks_start\s*<\s*window\.tick_budget',
+                    r'window\.ticks_start\.value\s*<\s*window\.tick_budget\.ticks',
                     masked_sources(body)):
                 errors.append(f'{path}: shared window lost its peer-tick bound')
             continue
@@ -67,7 +67,9 @@ def main(tree=None):
                 continue
             for condition in conditions(body):
                 waits += 1
-                if re.search(r'\bread_cntpct\s*\(', condition):
+                if (re.search(r'\bread_cntpct\s*\(', condition) or
+                        (name == 'world_stop_probe' and
+                         re.search(r'\bwall_hold_open\s*\(', condition))):
                     if name not in HOLDS:
                         errors.append(f'{path}: {name}: wall-clock-only probe wait; '
                                       'use a PeerTickWindow for rendezvous')

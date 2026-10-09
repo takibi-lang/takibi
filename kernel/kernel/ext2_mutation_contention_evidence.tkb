@@ -114,9 +114,11 @@ private fn ext2_mutation_probe_reader() !{unsafe} {
         atomic_word_store(&ext2_mutation_probe_inside, 1);
         // Stay inside until core 0 has started taking the lock, then a
         // little longer, so a take that did not wait has time to return.
-        let mut window: PeerTickWindow = peer_tick_window_start(16);
+        let mut window = peer_tick_window_policy(
+            peer_tick_window_peer(), PeerTickPolicy::Entry);
         while (atomic_word_load(&ext2_mutation_probe_trying) == 0 &&
                peer_tick_window_open(window)) { }
+        peer_tick_window_end(window);
         // Deliberate linger: expose a mutation that failed to wait for readers.
         let linger: i64 = read_cntpct();
         while (read_cntpct() - linger < (read_cntfrq() >> 6)) { }
@@ -144,9 +146,11 @@ private fn ext2_mutation_probe_mutator(phase: usize) !{unsafe} {
     } else {
         let guard = ext2_mutation_take_without_readers_unchecked();
         atomic_word_store(&ext2_mutation_probe_taken, 1);
-        let mut hold: PeerTickWindow = peer_tick_window_start(32);
+        let mut hold = peer_tick_window_policy(
+            peer_tick_window_peer(), PeerTickPolicy::Arrival);
         while (atomic_word_load(&ext2_mutation_probe_left) == 0 &&
                peer_tick_window_open(hold)) { }
+        peer_tick_window_end(hold);
         ext2_mutation_give(guard);
     }
     atomic_word_store(&ext2_mutation_probe_armed, 0);
@@ -164,9 +168,11 @@ private fn ext2_mutation_probe_core0_reader(phase: usize) -> usize
     if (ext2_read_enter() == false) { return 2; }
     atomic_word_store(&ext2_mutation_probe_phase, phase);
     atomic_word_store(&ext2_mutation_probe_armed, 1);
-    let mut window: PeerTickWindow = peer_tick_window_start(32);
+    let mut window = peer_tick_window_policy(
+        peer_tick_window_peer(), PeerTickPolicy::Arrival);
     while (atomic_word_load(&ext2_mutation_probe_trying) == 0 &&
            peer_tick_window_open(window)) { }
+    peer_tick_window_end(window);
     let started: usize = atomic_word_load(&ext2_mutation_probe_trying);
     // Deliberate linger: measure whether the peer bypassed reader exclusion.
     let linger: i64 = read_cntpct();
@@ -174,9 +180,11 @@ private fn ext2_mutation_probe_core0_reader(phase: usize) -> usize
     let overlapped: usize = atomic_word_load( &ext2_mutation_probe_taken);
     atomic_word_store(&ext2_mutation_probe_left, 1);
     ext2_read_leave();
-    let mut finish: PeerTickWindow = peer_tick_window_start(32);
+    let mut finish = peer_tick_window_policy(
+        peer_tick_window_peer(), PeerTickPolicy::Arrival);
     while (atomic_word_load(&ext2_mutation_probe_armed) == 1 &&
            peer_tick_window_open(finish)) { }
+    peer_tick_window_end(finish);
     if (started == 0) {
         atomic_word_store(&ext2_mutation_probe_armed, 0);
         return 2;
@@ -196,9 +204,11 @@ private fn ext2_mutation_probe_overlap(phase: usize) -> usize !{unsafe} {
     atomic_word_store(&ext2_mutation_probe_left, 0);
     atomic_word_store(&ext2_mutation_probe_phase, phase);
     atomic_word_store(&ext2_mutation_probe_armed, 1);
-    let mut window: PeerTickWindow = peer_tick_window_start(32);
+    let mut window = peer_tick_window_policy(
+        peer_tick_window_peer(), PeerTickPolicy::Arrival);
     while (atomic_word_load(&ext2_mutation_probe_inside) == 0 &&
            peer_tick_window_open(window)) { }
+    peer_tick_window_end(window);
     if (atomic_word_load(&ext2_mutation_probe_inside) == 0) {
         atomic_word_store(&ext2_mutation_probe_armed, 0);
         return 2;
@@ -213,14 +223,18 @@ private fn ext2_mutation_probe_overlap(phase: usize) -> usize !{unsafe} {
         atomic_word_store(&ext2_mutation_probe_taken, 1);
         // Keep the lock until the peer has left, as a real mutation would
         // still be running.
-        let mut hold: PeerTickWindow = peer_tick_window_start(32);
+        let mut hold = peer_tick_window_policy(
+            peer_tick_window_peer(), PeerTickPolicy::Arrival);
         while (atomic_word_load(&ext2_mutation_probe_left) == 0 &&
                peer_tick_window_open(hold)) { }
+        peer_tick_window_end(hold);
         ext2_mutation_give(guard);
     }
-    let mut finish: PeerTickWindow = peer_tick_window_start(32);
+    let mut finish = peer_tick_window_policy(
+        peer_tick_window_peer(), PeerTickPolicy::Arrival);
     while (atomic_word_load(&ext2_mutation_probe_armed) == 1 &&
            peer_tick_window_open(finish)) { }
+    peer_tick_window_end(finish);
     return atomic_word_load(&ext2_mutation_probe_overlapped);
 }
 
@@ -231,10 +245,12 @@ private fn ext2_mutation_probe_overlap(phase: usize) -> usize !{unsafe} {
 private fn ext2_mutation_probe_run_phase(phase: usize) -> bool !{unsafe} {
     atomic_word_store(&ext2_mutation_probe_phase, phase);
     atomic_word_store(&ext2_mutation_probe_armed, 1);
-    let mut window: PeerTickWindow = peer_tick_window_start(32);
+    let mut window = peer_tick_window_policy(
+        peer_tick_window_peer(), PeerTickPolicy::Arrival);
     while (peer_tick_window_open(window)) {
-        if (atomic_word_load(&ext2_mutation_probe_armed) == 0) { return true; }
+        if (atomic_word_load(&ext2_mutation_probe_armed) == 0) { peer_tick_window_end(window); return true; }
     }
+    peer_tick_window_end(window);
     atomic_word_store(&ext2_mutation_probe_armed, 0);
     return false;
 }

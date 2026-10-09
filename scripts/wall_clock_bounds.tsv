@@ -21,4 +21,4 @@ kernel/net/arp.tkb	kernel_arp_reply_once	1	protocol	waits for the host peer's AR
 kernel/net/icmp.tkb	kernel_icmp_reply_once	1	protocol	waits for the host peer's echo request (15 s)
 kernel/net/tcp.tkb	kernel_tcp_echo_check	1	protocol	waits for the host peer's connection (30 s)
 kernel/net/tcp.tkb	kernel_tcp_receive_once	1	protocol	receive timeout (30 s)
-kernel/lib/peer_tick_window.tkb	peer_tick_window_open	1	backstop	10 s emergency bound for a peer that cannot take ticks; ordinary arrival uses the peer tick budget
+kernel/lib/peer_tick_window.tkb	wall_emergency_budget	1	backstop	10 s emergency bound for a peer that cannot take ticks; ordinary arrival uses the peer tick budget

@@ -90,6 +90,7 @@
 use "kernel/lib/atomic_word.tkb";
 use "kernel/arch/arm64/kernel/timer.tkb";
 use "kernel/lib/execution_model.tkb";
+use "kernel/lib/peer_tick_window.tkb";
 use "kernel/lib/intrusive_pool.tkb";
 
 // Shared bounded wait for diagnostics and their held-pool regression.
@@ -568,6 +569,29 @@ fn world_stop_release(stopped: sink WorldStopped[id],
     world_stopped_end(stopped);
     world_stop_resume(stop);
 }
+
+// A local release observation, not proof of remote progress or a full-machine stop.
+// The selected peer must belong to the caller's acknowledged stop mask.
+linear struct WorldResumeTick[stop: addr, peer: usize] {
+    private core: {0..<KERNEL_MAX_CORES as usize} @ peer;
+    private baseline: PeerTickStamp[peer];
+}
+fn world_stop_release_for_tick(stopped: sink WorldStopped[id],
+                               stop: *WorldStop @ id,
+                               peer: {0..<KERNEL_MAX_CORES as usize} @ p)
+        -> WorldResumeTick[id, p] !{unsafe} {
+    let mut baseline: PeerTickStamp[p] = peer_tick_stamp(peer);
+    world_stop_release(stopped, stop);
+    let mut ticket: WorldResumeTick[id, p] = { peer, baseline };
+    return ticket;
+}
+// Wake-and-recheck: false requires another observation or explicit cancellation.
+fn world_resume_tick_observed(ticket: borrow WorldResumeTick[id, p]) -> bool !{unsafe} {
+    let mut now: PeerTickStamp[p] = peer_tick_stamp(ticket.core);
+    return peer_tick_stamp_changed(ticket.baseline, now);
+}
+// Ends local bookkeeping only; it does not certify that the peer resumed.
+fn world_resume_tick_cancel(ticket: sink WorldResumeTick[id, p]) {}
 
 fn world_stop_partial_release(partial: sink WorldStopPartial[id],
                               stop: *WorldStop @ id) !{unsafe} {

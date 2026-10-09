@@ -1,5 +1,20 @@
 # takibi Engineering History
 
+## 2026-10-09: Typed peer clocks and owned resume observations
+
+The maintainer selected existing types and API ownership after comparing clock
+provenance and aggregate invalidation proposals. PeerTickWindow now carries a
+peer index, typed private snapshots and named budget policies. Forty-six waits
+borrow their window while polling and consume it at the end. A new negative
+test showed that private fields alone, including in an affine struct, permit
+zero-initialized local storage. The existing linear kind rejects that mint;
+its cost is an explicit terminal call on every wait path, with no compiler
+change. World-stop release captures its final stopped tick internally and
+returns a linear, stop/peer-indexed observation ticket. Old scalar snapshots
+cannot satisfy that API. The baseline mint, acknowledgement mask and physical
+progress remain trusted and retain their forced QEMU controls. See
+`docs/TYPED_PEER_CLOCKS_2026-10-09.md` for the guarantees and costs.
+
 ## 2026-10-09: Boot-probe waits follow peer ticks
 
 Contention/occupancy rendezvous moved to one private-snapshot PeerTickWindow

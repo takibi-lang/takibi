@@ -222,28 +222,28 @@ where acceptance is settled; leave design investigations and unmet
 implementation gates parked. Prefer what A consumes at once -- fewer red
 allchecks, faster diagnosis -- and what finishes on its own.
 
-1. **Fewer red allchecks:** #651 (contention-probe rendezvous bounded by
-   the peer's ticks, not host time; agree with A on order, since A's next
-   rung types the same probes' atomics), then #688 (evaluate typed clock
-   domains and peer-tick budgets) as its follow-up.
-2. **Diagnostics A uses on the next recurrence:** #679 (console state dump
+On 2026-10-09, #651's peer-tick waits and #688's evaluation led to the
+maintainer-selected existing-type clock and owned resume APIs in #730.
+Atomic predicates remain for A's separate typed-atomic migration.
+
+1. **Diagnostics A uses on the next recurrence:** #679 (console state dump
    on a stalled shell; a gdb script first, since DDB's file is reshaped
    often), #643 (churn runner: gdb stall dump and an ASID-jump option),
    #699 (symbolize DDB's captured EL0 top PC with exact ELF identity).
-3. **Fixtures for paths only refusal and boundary tests reach:** #642
+2. **Fixtures for paths only refusal and boundary tests reach:** #642
    (corrupted rt_sigreturn, signal-frame overflow, zero-fill on mmap
    reuse), #624 (DMA timeout and failed-reset ownership branches in QEMU).
-4. **Tooling:** #727 (positive compiler tests also run codegen, so a
+3. **Tooling:** #727 (positive compiler tests also run codegen, so a
    construct the checker accepts and codegen cannot lower fails `make test`), #728 (a qemu-user reference runner for the
    pinned BusyBox).
-5. **Compiler and language research, independent of the ownership
+4. **Compiler and language research, independent of the ownership
    checker:** #608 (checked integer to enum conversion; the signal table
    is its second instance, syntax deferred until more appear), #252, #200,
    #201, #282, #129, #417, #155, #28, #8.
-6. **Toolchain and portability:** #706 (explicit fail-stop provenance; a
+5. **Toolchain and portability:** #706 (explicit fail-stop provenance; a
    design investigation), #123, #124, #122, #95, #51, #50, #85.
-7. **Evaluations and maintainer decisions, not scheduled:** #648.
-8. **Deferred or not a scheduled work item:** #220 (telnet; waits on PTY
+6. **Evaluations and maintainer decisions, not scheduled:** #648.
+7. **Deferred or not a scheduled work item:** #220 (telnet; waits on PTY
    and `pselect6` scoping), #555, #250, #444, #429, #149, #567, #539, #536,
    #698 (ext2 metadata exhaustion as ENOSPC), #374 (physically contiguous
    memory; waits for a dynamic DMA allocation); #13 for `Phi`, with #216

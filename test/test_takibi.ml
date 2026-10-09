@@ -22105,7 +22105,8 @@ let stopped_diagnostic_tests =
 
 (* Use the production resume bodies, not a copied effect annotation. Only the
    atomic primitive and authority mint are stubbed; no CPU stop is simulated. *)
-let infer_production_stop_boundary code =
+let infer_production_stop_boundary ?(clock = false)
+    ?(consumer_file = "kernel/lib/occupancy.tkb") ?(codegen = false) code =
   let path = List.find Sys.file_exists
       ["../kernel/lib/occupancy.tkb"; "kernel/lib/occupancy.tkb"] in
   let channel = open_in_bin path in
@@ -22115,7 +22116,7 @@ let infer_production_stop_boundary code =
     let lexbuf = Lexing.from_string source in
     Lexing.set_filename lexbuf "kernel/lib/occupancy.tkb";
     Parser.program Lexer.read lexbuf in
-  let primitives = parse {|
+  let primitives = parse ({|
     const KERNEL_MAX_CORES: usize = 4;
     linear struct RegionInspection__AddressSpaceBacking[p: addr, s: addr] { private address: usize; }
     linear struct RegionInspection__ProcessFdContext[p: addr, s: addr] { private address: usize; }
@@ -22124,33 +22125,131 @@ let infer_production_stop_boundary code =
     struct no_copy AtomicWord { private value: usize; }
     linear struct IntrusiveSlotView[p: addr] { private slot: usize; }
     fn atomic_word_store(cell: *AtomicWord, value: usize) !{unsafe} {}
-  |} in
+  |} ^ (if clock then {|
+    fn kernel_tick_count_of(core: {0..<KERNEL_MAX_CORES as usize}) -> usize { return 0; }
+    fn cpu_id() -> usize { return 0; }
+    fn read_cntpct() -> i64 { return 0; }
+    fn read_cntfrq() -> i64 { return 64; }
+  |} else "")) in
+  let clocks = if not clock then [] else
+    let path = List.find Sys.file_exists
+        ["../kernel/lib/peer_tick_window.tkb"; "kernel/lib/peer_tick_window.tkb"] in
+    let source = In_channel.with_open_bin path In_channel.input_all in
+    let lexbuf = Lexing.from_string source in
+    Lexing.set_filename lexbuf "kernel/lib/peer_tick_window.tkb";
+    List.filter (function Ast.UseDef _ -> false | _ -> true)
+      (Parser.program Lexer.read lexbuf) in
   let types = ["WorldStop"; "WorldStopped"; "WorldStopPartial";
-    "CpuParticipants"; "MachineStopped"; "CpuStart"; "MachineSlotView"; "MachineStopPartial"] in
+    "CpuParticipants"; "MachineStopped"; "CpuStart"; "MachineSlotView"; "MachineStopPartial"]
+    @ (if clock then ["WorldResumeTick"] else []) in
   let functions = ["world_stop_resume"; "world_stopped_end";
-    "world_stop_partial_end"; "world_stop_release"; "world_stop_partial_release"] in
+    "world_stop_partial_end"; "world_stop_release"; "world_stop_partial_release"]
+    @ (if clock then ["world_stop_release_for_tick"; "world_resume_tick_observed";
+                      "world_resume_tick_cancel"] else []) in
   let boundary = List.filter (function
     | Ast.StructDef (name, _, _, _, _, _)
     | Ast.OwnedStructDef (name, _, _, _, _, _, _, _, _) -> List.mem name types
     | Ast.FuncDef f -> List.mem f.name functions
     | _ -> false) (parse_here source) in
-  Alcotest.(check int) "all production boundary declarations extracted" 13
+  Alcotest.(check int) "all production boundary declarations extracted" (if clock then 17 else 13)
     (List.length boundary);
   let harness = parse_here ({|
     struct Record { value: usize; }
-    private let mut machine: WorldStop;
+    let mut machine: WorldStop;
     private let mut record: Record;
-    private fn mint(controller: *WorldStop @ s) -> WorldStopped[s] {
+    fn mint(controller: *WorldStop @ s) -> WorldStopped[s] {
       let mut stopped: WorldStopped[s] = { 1, 0 }; return stopped;
     }
     private fn partial(controller: *WorldStop @ s) -> WorldStopPartial[s] {
       let mut stopped: WorldStopPartial[s] = { 1, 0, 0 }; return stopped;
     }
     private fn loan(stopped: borrow WorldStopped[s]) -> *Record @ s { return &record; }
-  |} ^ code) in
-  Type_inf.infer_program (Declared_type_resolver.run
+  |}) in
+  let consumer =
+    let lexbuf = Lexing.from_string code in
+    Lexing.set_filename lexbuf consumer_file;
+    Parser.program Lexer.read lexbuf in
+  let prog = Declared_type_resolver.run
     (Monomorphize.run (Dma_fixed_record.run
-      (Publish_record.run (primitives @ boundary @ harness)))))
+      (Publish_record.run (primitives @ clocks @ boundary @ harness @ consumer)))) in
+  let inferred = Type_inf.infer_program prog in
+  if codegen then begin
+    with_codegen_target "aarch64-none-elf" (fun () ->
+      ignore (Llvm_gen.gen_program ~prog_types:inferred prog);
+      Alcotest.(check int) "clock boundary has no emitted traps" 0
+        (List.length !Llvm_gen.trap_sites))
+  end;
+  inferred
+
+(* Use production declarations/bodies and a separate consumer filename: private
+   construction and ownership rejection must not depend on duplicated fixtures. *)
+let production_peer_clock_tests =
+  let bad name fragment code = Alcotest.test_case name `Quick (fun () ->
+    match infer_production_stop_boundary ~clock:true ~consumer_file:"clock_consumer.tkb" code with
+    | _ -> Alcotest.fail "production clock/resume API accepted an invalid consumer"
+    | exception Types.TypeError (_, message) ->
+        Alcotest.(check bool) "specific clock rejection" true
+          (contains_substring message fragment)
+    | exception Types.MultiTypeError errors ->
+        Alcotest.(check bool) "specific clock rejection" true
+          (List.exists (fun (_, message) -> contains_substring message fragment) errors)) in
+  [
+    Alcotest.test_case "production peer window, hold and resume compile without traps" `Quick
+      (fun () -> ignore (infer_production_stop_boundary ~clock:true ~codegen:true
+        ~consumer_file:"clock_consumer.tkb" {|
+        fn probe() -> bool {
+          let mut budget: PeerTickBudget[1] = peer_tick_budget(1, PeerTickPolicy::Entry);
+          let mut window: PeerTickWindow[1] = peer_tick_window_start(1, budget);
+          let mut old: PeerTickStamp[1] = peer_tick_stamp(1);
+          let mut hold: WallHoldBudget = wall_stopped_hold_budget();
+          let mut wall: WallTickStamp = wall_tick_stamp();
+          let stopped = mint(&machine);
+          let ticket = world_stop_release_for_tick(stopped, &machine, 1);
+          let resumed: bool = world_resume_tick_observed(ticket);
+          world_resume_tick_cancel(ticket);
+          let mut now: PeerTickStamp[1] = peer_tick_stamp(1);
+          let open: bool = peer_tick_window_open(window);
+          peer_tick_window_end(window);
+          return resumed || peer_tick_stamp_changed(old, now) ||
+                 open || wall_hold_open(wall, hold);
+        }|}));
+    bad "wall budget cannot bound a peer window" "cannot unify" {|
+      fn probe() { let mut wall: WallHoldBudget = wall_stopped_hold_budget();
+        let mut window = peer_tick_window_start(1, wall); }|};
+    bad "different peers cannot share a budget" "static value mismatch" {|
+      fn probe() { let mut budget: PeerTickBudget[0] = peer_tick_budget(0, PeerTickPolicy::Entry);
+        let mut window = peer_tick_window_start(1, budget); }|};
+    bad "different peers cannot compare observations" "static value mismatch" {|
+      fn probe() -> bool { let mut a: PeerTickStamp[0] = peer_tick_stamp(0);
+        let mut b: PeerTickStamp[1] = peer_tick_stamp(1); return peer_tick_stamp_changed(a, b); }|};
+    bad "clock snapshot literal cannot be constructed externally" "cannot construct struct" {|
+      fn probe() { let mut stamp: PeerTickStamp[1] = { 7 }; }|};
+    bad "old measurement is not a resume ticket" "struct type mismatch" {|
+      fn probe() -> bool { let mut old: PeerTickStamp[1] = peer_tick_stamp(1);
+        return world_resume_tick_observed(old); }|};
+    bad "stop cannot be released twice" "already consumed" {|
+      fn probe() { let stopped = mint(&machine);
+        let ticket = world_stop_release_for_tick(stopped, &machine, 1);
+        world_stop_release(stopped, &machine); world_resume_tick_cancel(ticket); }|};
+    bad "canceled resume ticket cannot be used" "already consumed" {|
+      fn probe() -> bool { let stopped = mint(&machine);
+        let ticket = world_stop_release_for_tick(stopped, &machine, 1);
+        world_resume_tick_cancel(ticket); return world_resume_tick_observed(ticket); }|};
+    bad "resume ticket cannot be fabricated" "cannot construct struct" {|
+      fn probe() { let mut start: PeerTickStamp[1] = peer_tick_stamp(1);
+        let mut ticket: WorldResumeTick[&machine, 1] = { 1, start };
+        world_resume_tick_cancel(ticket); }|};
+    bad "resume peer cannot be changed" "static value mismatch" {|
+      fn peer_zero(ticket: sink WorldResumeTick[&machine, 0]) { world_resume_tick_cancel(ticket); }
+      fn probe() { let stopped = mint(&machine);
+        let ticket = world_stop_release_for_tick(stopped, &machine, 1); peer_zero(ticket); }|};
+    bad "window cannot be default minted" "initialized" {|
+      fn probe() -> bool { let mut window: PeerTickWindow[1];
+        return peer_tick_window_open(window); }|};
+    bad "resume ticket cannot be default minted" "initialized" {|
+      fn probe() { let mut ticket: WorldResumeTick[&machine, 1];
+        world_resume_tick_cancel(ticket); }|};
+  ]
 
 let production_stop_boundary_tests =
   let good name code = Alcotest.test_case name `Quick
@@ -22562,6 +22661,7 @@ let named_groups_unisolated = [
   "record-loan-contracts", record_loan_contract_tests;
   "record-loan-boundaries", record_boundary_tests;
   "stopped-diagnostics", stopped_diagnostic_tests;
+  "production-peer-clock", production_peer_clock_tests;
   "production-stop-boundary", production_stop_boundary_tests;
   "production-machine-boundary", production_machine_boundary_tests;
   "region-inspection", region_inspection_tests;

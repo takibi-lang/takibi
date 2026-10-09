@@ -49,10 +49,12 @@ fn console_contention_secondary_run() {
 }
 
 private fn console_probe_wait(cell: *AtomicWord) -> bool {
-    let mut window: PeerTickWindow = peer_tick_window_start(32);
+    let mut window = peer_tick_window_policy(
+        peer_tick_window_peer(), PeerTickPolicy::Arrival);
     while (peer_tick_window_open(window)) {
-        if (atomic_word_load(cell) != 0) { return true; }
+        if (atomic_word_load(cell) != 0) { peer_tick_window_end(window); return true; }
     }
+    peer_tick_window_end(window);
     return false;
 }
 

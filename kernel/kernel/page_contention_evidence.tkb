@@ -161,7 +161,8 @@ fn page_contention_probe() -> bool !{allocates, unsafe} {
     // (2048, 2031, 2048...), because their cycles are short enough that
     // the secondary keeps up. They are fragile in the same way and should
     // follow this when one of them next moves.
-    let mut entry_window: PeerTickWindow = peer_tick_window_start(16);
+    let mut entry_window = peer_tick_window_policy(
+        peer_tick_window_peer(), PeerTickPolicy::Entry);
     let mut entered: bool = false;
     while (entered == false && peer_tick_window_open(entry_window)) {
         // The completed round is the whole gate. GitHub issue #510: the
@@ -173,6 +174,7 @@ fn page_contention_probe() -> bool !{allocates, unsafe} {
             entered = true;
         }
     }
+    peer_tick_window_end(entry_window);
     if (entered == false) {
         atomic_word_store(page_probe_armed_address(), 0);
         page_contention_report("secondary-never-completed-a-round" as *u8,
@@ -189,7 +191,8 @@ fn page_contention_probe() -> bool !{allocates, unsafe} {
     atomic_word_store(page_probe_overlap_address(),
         atomic_word_load(page_probe_secondary_address()));
 
-    let mut finish_window: PeerTickWindow = peer_tick_window_start(128);
+    let mut finish_window = peer_tick_window_policy(
+        peer_tick_window_peer(), PeerTickPolicy::Finish);
     let mut finished: bool = false;
     while (finished == false && peer_tick_window_open(finish_window)) {
         if (atomic_word_load(page_probe_secondary_address()) >=
@@ -197,6 +200,7 @@ fn page_contention_probe() -> bool !{allocates, unsafe} {
             finished = true;
         }
     }
+    peer_tick_window_end(finish_window);
     atomic_word_store(page_probe_armed_address(), 0);
     if (finished == false) {
         page_contention_report("secondary-never-finished" as *u8, baseline,

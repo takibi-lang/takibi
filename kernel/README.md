@@ -1782,6 +1782,21 @@ which the peer takes no interrupts cannot consume that tick budget. A separate
 ten-second wall-clock backstop bounds a peer with masked interrupts or no
 progress; it is recovery policy, not a liveness proof.
 
+`PeerTickPolicy` names the four budgets. `PeerTickWindow[p]` carries the
+peer index and private peer/wall snapshots; polling borrows it, and
+`peer_tick_window_end` consumes it on both success and timeout. Its linear
+kind also rejects a declaration without an initializer. Wall-clock hold
+budgets and peer-tick budgets are different types.
+
+The world-stop probe consumes `WorldStopped` through
+`world_stop_release_for_tick`, which samples the acknowledged peer before
+release and returns a linear `WorldResumeTick[stop, peer]`. It polls this
+ticket and cancels the local observation obligation when the wait ends.
+An older scalar measurement cannot be passed as a ticket. Cancellation does
+not prove progress: correct peer selection, stop acknowledgement and baseline
+sampling remain trusted implementation obligations. The frozen-observation
+negative control checks that using the pre-stop baseline is refused.
+
 Intentional IRQ-masked collision holds, ext2 reader lingers, the stopped-peer
 hold, and the scheduler's whole-phase collision retry budget retain their
 stated wall-clock duration. The source gate checks direct counter waits in

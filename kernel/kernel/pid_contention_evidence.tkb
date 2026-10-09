@@ -124,11 +124,13 @@ private fn pid_probe_rendezvous(primary: bool, sequence: usize,
         peer_address = secondary_address;
     }
     atomic_word_store(own_address, sequence);
-    let mut deadline: PeerTickWindow = peer_tick_window_start(128);
+    let mut deadline = peer_tick_window_policy(
+        peer_tick_window_peer(), PeerTickPolicy::Finish);
     while (peer_tick_window_open(deadline) &&
            atomic_word_load(peer_address) < sequence &&
            atomic_word_load(pid_probe_armed_address()) == 1) {
     }
+    peer_tick_window_end(deadline);
     if (atomic_word_load(peer_address) >= sequence &&
         atomic_word_load(pid_probe_armed_address()) == 1) {
         return PidProbeRendezvousResult::Met;
@@ -223,10 +225,12 @@ private fn pid_contention_report(stage: *u8, advanced: usize,
 // it while the secondary may still mint would move the counter backwards.
 private fn pid_probe_disarm_and_quiesce() -> bool !{unsafe} {
     atomic_word_store(pid_probe_armed_address(), 0);
-    let mut deadline: PeerTickWindow = peer_tick_window_start(128);
+    let mut deadline = peer_tick_window_policy(
+        peer_tick_window_peer(), PeerTickPolicy::Finish);
     while (peer_tick_window_open(deadline) &&
            atomic_word_load(pid_probe_active_address()) == 1) {
     }
+    peer_tick_window_end(deadline);
     return atomic_word_load(pid_probe_active_address()) == 0;
 }
 
@@ -248,13 +252,15 @@ private fn pid_contention_phase(locked: bool) -> bool !{unsafe} {
     }
     atomic_word_store(pid_probe_armed_address(), 1);
 
-    let mut entry_window: PeerTickWindow = peer_tick_window_start(16);
+    let mut entry_window = peer_tick_window_policy(
+        peer_tick_window_peer(), PeerTickPolicy::Entry);
     let mut entered: bool = false;
     while (entered == false && peer_tick_window_open(entry_window)) {
         if (atomic_word_load(pid_probe_entries_address()) > entries_before) {
             entered = true;
         }
     }
+    peer_tick_window_end(entry_window);
     if (entered == false) {
         atomic_word_store(pid_probe_armed_address(), 0);
         pid_contention_report("secondary-never-entered" as *u8, 0, 0);
@@ -274,7 +280,8 @@ private fn pid_contention_phase(locked: bool) -> bool !{unsafe} {
     atomic_word_store(pid_probe_overlap_address(),
         atomic_word_load(pid_probe_secondary_address()));
 
-    let mut finish_window: PeerTickWindow = peer_tick_window_start(128);
+    let mut finish_window = peer_tick_window_policy(
+        peer_tick_window_peer(), PeerTickPolicy::Finish);
     let mut finished: bool = false;
     while (finished == false && peer_tick_window_open(finish_window)) {
         if (atomic_word_load(pid_probe_secondary_address()) >=
@@ -282,6 +289,7 @@ private fn pid_contention_phase(locked: bool) -> bool !{unsafe} {
             finished = true;
         }
     }
+    peer_tick_window_end(finish_window);
     let quiesced: bool = pid_probe_disarm_and_quiesce();
 
     let advanced: usize = scheduled_process_pid_counter() - next_before;

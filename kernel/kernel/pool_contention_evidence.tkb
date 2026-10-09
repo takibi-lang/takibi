@@ -283,7 +283,8 @@ fn pool_contention_probe() -> bool !{unsafe} {
     // secondary that never arrives fails the probe rather than hanging
     // the boot; the bound is several tick periods, since one is the
     // minimum wait by construction.
-    let mut entry_window: PeerTickWindow = peer_tick_window_start(16);
+    let mut entry_window = peer_tick_window_policy(
+        peer_tick_window_peer(), PeerTickPolicy::Entry);
     let mut entered: bool = false;
     while (entered == false && peer_tick_window_open(entry_window)) {
         // A COMPLETED cycle, not the `active` flag. GitHub issue #510:
@@ -295,6 +296,7 @@ fn pool_contention_probe() -> bool !{unsafe} {
             entered = true;
         }
     }
+    peer_tick_window_end(entry_window);
     if (entered == false) {
         atomic_word_store(contention_armed_address(), 0);
         contention_report("secondary-never-entered" as *u8);
@@ -322,7 +324,8 @@ fn pool_contention_probe() -> bool !{unsafe} {
     // secondary that cannot get there fails the probe instead of hanging
     // the boot -- generous, because how long this takes is exactly the
     // thing that varies between a board and an emulator.
-    let mut finish_window: PeerTickWindow = peer_tick_window_start(128);
+    let mut finish_window = peer_tick_window_policy(
+        peer_tick_window_peer(), PeerTickPolicy::Finish);
     let mut finished: bool = false;
     while (finished == false && peer_tick_window_open(finish_window)) {
         if (atomic_word_load(contention_secondary_cycles_address()) >=
@@ -330,6 +333,7 @@ fn pool_contention_probe() -> bool !{unsafe} {
             finished = true;
         }
     }
+    peer_tick_window_end(finish_window);
     atomic_word_store(contention_armed_address(), 0);
     if (finished == false) {
         contention_report("secondary-never-finished" as *u8);
@@ -352,13 +356,15 @@ fn pool_contention_probe() -> bool !{unsafe} {
     // report comment says it had already fixed -- observed as a boot whose
     // whole record of the probe was the word `failed`, with no stage line
     // and no counts anywhere above it.
-    let mut settle_window: PeerTickWindow = peer_tick_window_start(16);
+    let mut settle_window = peer_tick_window_policy(
+        peer_tick_window_peer(), PeerTickPolicy::Entry);
     let mut settled: bool = false;
     while (settled == false && peer_tick_window_open(settle_window)) {
         if (atomic_word_load(contention_secondary_active_address()) == 0) {
             settled = true;
         }
     }
+    peer_tick_window_end(settle_window);
     if (settled == false) {
         contention_report("secondary-never-left" as *u8);
         return false;

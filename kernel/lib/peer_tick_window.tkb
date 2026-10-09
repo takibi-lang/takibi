@@ -14,26 +14,70 @@
 
 use "kernel/lib/execution_model.tkb";
 
-struct PeerTickWindow {
-    private peer: {0..<KERNEL_MAX_CORES as usize};
-    private ticks_start: usize;
-    private tick_budget: usize;
-    private wall_start: i64;
+// These policies preserve the existing boot windows at 64 ticks per second.
+enum PeerTickPolicy: usize { Entry = 16; Arrival = 32; Complete = 64; Finish = 128; }
+struct PeerTickStamp[p: usize] { private value: usize; }
+struct PeerTickBudget[p: usize] { private ticks: usize; }
+struct WallTickStamp { private value: i64; }
+struct WallHoldBudget { private cycles: i64; }
+struct WallBackstopBudget { private cycles: i64; }
+linear struct PeerTickWindow[p: usize] {
+    private peer: {0..<KERNEL_MAX_CORES as usize} @ p;
+    private ticks_start: PeerTickStamp[p];
+    private tick_budget: PeerTickBudget[p];
+    private wall_start: WallTickStamp;
 }
 
-fn peer_tick_window_start(tick_budget: usize) -> PeerTickWindow !{unsafe} {
-    let mut peer: {0..<KERNEL_MAX_CORES as usize} = 0;
-    if (cpu_id() == 0) { peer = 1; }
-    let mut window: PeerTickWindow = {
-        peer, kernel_tick_count_of(peer), tick_budget, read_cntpct()
+fn peer_tick_window_peer() -> {0..<KERNEL_MAX_CORES as usize} !{unsafe} {
+    if (cpu_id() == 0) { return 1; }
+    return 0;
+}
+fn peer_tick_stamp(peer: {0..<KERNEL_MAX_CORES as usize} @ p)
+        -> PeerTickStamp[p] !{unsafe} {
+    let mut stamp: PeerTickStamp[p] = { kernel_tick_count_of(peer) };
+    return stamp;
+}
+fn peer_tick_budget(peer: {0..<KERNEL_MAX_CORES as usize} @ p,
+                    policy: PeerTickPolicy) -> PeerTickBudget[p] {
+    let mut budget: PeerTickBudget[p] = { policy as usize };
+    return budget;
+}
+fn wall_tick_stamp() -> WallTickStamp !{unsafe} {
+    let mut stamp: WallTickStamp = { read_cntpct() }; return stamp;
+}
+fn wall_stopped_hold_budget() -> WallHoldBudget !{unsafe} {
+    let mut budget: WallHoldBudget = { read_cntfrq() >> 4 }; return budget;
+}
+private fn wall_emergency_budget() -> WallBackstopBudget !{unsafe} {
+    let mut budget: WallBackstopBudget = { read_cntfrq() * 10 }; return budget;
+}
+fn wall_hold_open(start: WallTickStamp, budget: WallHoldBudget) -> bool !{unsafe} {
+    return read_cntpct() - start.value < budget.cycles;
+}
+private fn wall_emergency_open(start: WallTickStamp) -> bool !{unsafe} {
+    let mut budget: WallBackstopBudget = wall_emergency_budget();
+    return read_cntpct() - start.value < budget.cycles;
+}
+fn peer_tick_window_start(peer: {0..<KERNEL_MAX_CORES as usize} @ p,
+                          budget: PeerTickBudget[p]) -> PeerTickWindow[p] !{unsafe} {
+    let mut window: PeerTickWindow[p] = {
+        peer, peer_tick_stamp(peer), budget, wall_tick_stamp()
     };
     return window;
 }
-
-// Wake-and-recheck style predicate: an open window never establishes that
-// the peer arrived. The caller must check its own condition on every pass.
-fn peer_tick_window_open(window: PeerTickWindow) -> bool !{unsafe} {
-    return kernel_tick_count_of(window.peer) - window.ticks_start <
-               window.tick_budget &&
-           read_cntpct() - window.wall_start < read_cntfrq() * 10;
+fn peer_tick_window_policy(peer: {0..<KERNEL_MAX_CORES as usize} @ p,
+                           policy: PeerTickPolicy) -> PeerTickWindow[p] !{unsafe} {
+    let mut budget: PeerTickBudget[p] = peer_tick_budget(peer, policy);
+    return peer_tick_window_start(peer, budget);
 }
+// Wake-and-recheck: the caller still checks its own atomic arrival predicate.
+fn peer_tick_window_open(window: borrow PeerTickWindow[p]) -> bool !{unsafe} {
+    return kernel_tick_count_of(window.peer) - window.ticks_start.value <
+               window.tick_budget.ticks && wall_emergency_open(window.wall_start);
+}
+fn peer_tick_stamp_changed(before: PeerTickStamp[p], now: PeerTickStamp[p]) -> bool {
+    return now.value - before.value != 0;
+}
+
+// End the local wait obligation, regardless of whether its predicate succeeded.
+fn peer_tick_window_end(window: sink PeerTickWindow[p]) {}

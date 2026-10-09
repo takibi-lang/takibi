@@ -45,10 +45,12 @@ private fn tcp_owner_probe_run_phase(phase: usize) -> bool !{unsafe} {
     atomic_word_store(&tcp_owner_probe_phase, phase);
     atomic_word_store(&tcp_owner_probe_active, 0);
     atomic_word_store(&tcp_owner_probe_armed, 1);
-    let mut window: PeerTickWindow = peer_tick_window_start(32);
+    let mut window = peer_tick_window_policy(
+        peer_tick_window_peer(), PeerTickPolicy::Arrival);
     while (peer_tick_window_open(window)) {
-        if (atomic_word_load(&tcp_owner_probe_armed) == 0) { return true; }
+        if (atomic_word_load(&tcp_owner_probe_armed) == 0) { peer_tick_window_end(window); return true; }
     }
+    peer_tick_window_end(window);
     atomic_word_store(&tcp_owner_probe_armed, 0);
     return false;
 }
