@@ -105,6 +105,17 @@ where acceptance is settled; leave design investigations and unmet
 implementation gates parked. Prefer what A consumes at once -- fewer red
 allchecks, faster diagnosis -- and what finishes on its own.
 
+
+On 2026-10-09, the maintainer authorized #734 as B's next bounded joint
+Region/refinement design and prototype, before #252's allocator migration.
+Use one arithmetic contract mechanism for runtime metadata extents and
+#200's Region-independent slice-length relations; test #216's cross-call
+index and wrong-pool boundary. Compose with A's Region/Place/mint route,
+without a parallel ownership model. General runtime-refinement syntax,
+external solvers and the production allocator migration are outside this
+unit. The maintainer requested a break after recording this plan; resume
+from #734's reproducible examples and acceptance conditions.
+
 1. **Soundness holes in the checker:** #735 (default initialization forges
    an opaque affine frame handle), #729 (byte-slice and string-literal
    slices readonly).
