@@ -259,22 +259,31 @@ variant ProcessVmState {
 
 struct ProcessVmStateStore {
     private lock: i32;
-    private state: ProcessVmState;
+    private state: Place(ProcessVmState);
 }
 private let mut process_vm_store: ProcessVmStateStore;
 
+// The store is a place (GitHub issue #131); an empty place reads as
+// ProcessVmState::Empty.
+fn process_vm_state_from_place(place: Place(ProcessVmState)) -> ProcessVmState {
+    match place {
+        Place::Empty => { return ProcessVmState::Empty; }
+        Place::Full(state) => { return state; }
+    }
+}
+
 fn process_vm_put(next: ProcessVmState) {
     let guard = process_vm_guard(&process_vm_store.lock);
-    let previous: ProcessVmState = stable_replace(
-        guard, &process_vm_store.lock, process_vm_store.state, next);
+    let previous: ProcessVmState = process_vm_state_from_place(place_put(
+        guard, &process_vm_store.lock, process_vm_store.state, next));
     process_vm_guard_done(guard);
     process_vm_state_discard(previous);
 }
 
 fn process_vm_take() -> ProcessVmState {
     let guard = process_vm_guard(&process_vm_store.lock);
-    let state: ProcessVmState = stable_replace(
-        guard, &process_vm_store.lock, process_vm_store.state, ProcessVmState::Empty);
+    let state: ProcessVmState = process_vm_state_from_place(place_take(
+        guard, &process_vm_store.lock, process_vm_store.state));
     process_vm_guard_done(guard);
     return state;
 }

@@ -187,9 +187,6 @@ private fn virtio_blk_submit_header(descs: *VirtioBlkDesc, request_type: u32,
             virtio_blk_request_put(
                 VirtioBlkRequestTransmitAuthority::Device(device));
         }
-        VirtioBlkRequestTransmitAuthority::Empty => {
-            kernel_syscall_fail_stop(0);
-        }
         VirtioBlkRequestTransmitAuthority::Device(stale) => {
             virtio_blk_request_fail_device(stale);
         }
@@ -207,9 +204,6 @@ private fn virtio_blk_submit_write_data(descs: *VirtioBlkDesc,
                                            0, VIRTIO_BLK_TRANSFER_BYTES);
             virtio_blk_desc_span(descs, 1, span);
             virtio_blk_data_put(VirtioBlkDataTransmitAuthority::Device(device));
-        }
-        VirtioBlkDataTransmitAuthority::Empty => {
-            kernel_syscall_fail_stop(0);
         }
         VirtioBlkDataTransmitAuthority::Device(stale) => {
             virtio_blk_data_fail_device(stale);
@@ -308,10 +302,6 @@ private fn virtio_blk_submit_owned(request_type: u32, sector: u32,
             virtio_blk_receive_put(VirtioBlkReceiveAuthority::Cpu(restored_cpu));
             return status_ok;
         }
-        VirtioBlkReceiveAuthority::Empty => {
-            kernel_syscall_fail_stop(0);
-            return false;
-        }
         VirtioBlkReceiveAuthority::Device(stale) => {
             virtio_blk_receive_fail_device(stale);
             return false;
@@ -327,9 +317,6 @@ fn virtio_blk_submit(request_type: u32, sector: u32,
         VirtioBlkReceiveAuthority::Cpu(receive_cpu) => {
             return virtio_blk_submit_owned(request_type, sector, buffer,
                                            write, receive_cpu);
-        }
-        VirtioBlkReceiveAuthority::Empty => {
-            kernel_syscall_fail_stop(0);
         }
         VirtioBlkReceiveAuthority::Device(stale) => {
             virtio_blk_receive_fail_device(stale);

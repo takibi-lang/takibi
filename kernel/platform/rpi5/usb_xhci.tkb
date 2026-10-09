@@ -638,7 +638,6 @@ fn msc_cbw_header(data_len: u32, dir_in: bool, cb_len: u32) {
             cbw[14] = cb_len as u8;
             msc_cbw_put(MscCbwTransmitAuthority::Cpu(cpu));
         }
-        MscCbwTransmitAuthority::Empty => { kernel_syscall_fail_stop(0); }
         MscCbwTransmitAuthority::Device(stale) => {
             msc_cbw_fail_device(stale);
         }
@@ -653,7 +652,6 @@ fn msc_cbw_set(index: {15..<31 as usize}, value: u8) {
             cbw[index] = value;
             msc_cbw_put(MscCbwTransmitAuthority::Cpu(cpu));
         }
-        MscCbwTransmitAuthority::Empty => { kernel_syscall_fail_stop(0); }
         MscCbwTransmitAuthority::Device(stale) => {
             msc_cbw_fail_device(stale);
         }
@@ -738,10 +736,6 @@ private fn msc_csw_receive_attempt(remaining_stall_retries: usize)
             if (tag_ok == false) { return MscCommandResult::CompletedError(5); }
             if (status_ok == false) { return MscCommandResult::CompletedError(6); }
             return MscCommandResult::Ok;
-        }
-        MscCswReceiveAuthority::Empty => {
-            kernel_syscall_fail_stop(0);
-            return MscCommandResult::ControllerUnusable;
         }
         MscCswReceiveAuthority::Device(stale) => {
             msc_csw_fail_device(stale);
@@ -1151,10 +1145,6 @@ fn xhci_configure() -> XhciConfigureOutcome {
             xhci_control_put(XhciControlReceiveAuthority::Cpu(cpu));
             length
         }
-        XhciControlReceiveAuthority::Empty => {
-            kernel_syscall_fail_stop(0);
-            return XhciConfigureOutcome::Transfer(0);
-        }
         XhciControlReceiveAuthority::Device(stale) => {
             xhci_control_fail_device(stale);
             return XhciConfigureOutcome::Transfer(0);
@@ -1181,10 +1171,6 @@ fn xhci_configure() -> XhciConfigureOutcome {
             let result = usb_config_descriptor_parse(bytes[0..<total_len]);
             xhci_control_put(XhciControlReceiveAuthority::Cpu(cpu));
             result
-        }
-        XhciControlReceiveAuthority::Empty => {
-            kernel_syscall_fail_stop(0);
-            return XhciConfigureOutcome::Transfer(0);
         }
         XhciControlReceiveAuthority::Device(stale) => {
             xhci_control_fail_device(stale);
@@ -1438,7 +1424,6 @@ fn usb_disk_initialize_stages() -> UsbInitOutcome {
             }
             msc_data_put(MscDataReceiveAuthority::Cpu(cpu));
         }
-        MscDataReceiveAuthority::Empty => { kernel_syscall_fail_stop(0); }
         MscDataReceiveAuthority::Device(stale) => {
             msc_data_fail_device(stale);
         }
@@ -1575,7 +1560,6 @@ fn disk_read_sectors(sector: u32, buf: []u8) -> DiskIoResult {
             }
             msc_data_put(MscDataReceiveAuthority::Cpu(cpu));
         }
-        MscDataReceiveAuthority::Empty => { kernel_syscall_fail_stop(0); }
         MscDataReceiveAuthority::Device(stale) => {
             msc_data_fail_device(stale);
         }
@@ -1622,7 +1606,6 @@ fn disk_write_sectors(sector: u32, buf: []u8) -> DiskIoResult {
             }
             msc_data_out_put(MscDataTransmitAuthority::Cpu(cpu));
         }
-        MscDataTransmitAuthority::Empty => { kernel_syscall_fail_stop(0); }
         MscDataTransmitAuthority::Device(stale) => {
             msc_data_out_fail_device(stale);
         }

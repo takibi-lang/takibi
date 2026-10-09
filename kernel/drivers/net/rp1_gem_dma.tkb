@@ -40,11 +40,16 @@ private fn gem_rx_unlock(guard: sink GemRxGuard[address],
 
 private fn gem_rx_take() -> GemRxAuthority {
     let guard = gem_rx_lock(&dma_owner_GemRx.mutex);
-    let previous: GemRxAuthority = stable_replace(
-        guard, &dma_owner_GemRx.mutex, dma_owner_GemRx.value,
-        GemRxAuthority::Empty);
+    let previous: Place(GemRxAuthority) = place_take(
+        guard, &dma_owner_GemRx.mutex, dma_owner_GemRx.value);
     gem_rx_unlock(guard, &dma_owner_GemRx.mutex);
-    return previous;
+    let Place::Full(authority) = previous else {
+        Place::Empty => {
+            kernel_syscall_fail_stop(0);
+            return gem_rx_take();
+        }
+    };
+    return authority;
 }
 
 private fn gem_rx_fail_cpu(stale: sink *GemRxCpu) {
@@ -57,11 +62,13 @@ private fn gem_rx_fail_device(stale: sink *GemRxDevice) {
 
 private fn gem_rx_put(value: sink GemRxAuthority) {
     let guard = gem_rx_lock(&dma_owner_GemRx.mutex);
-    let previous: GemRxAuthority = stable_replace(
+    let previous: Place(GemRxAuthority) = place_put(
         guard, &dma_owner_GemRx.mutex, dma_owner_GemRx.value, value);
     gem_rx_unlock(guard, &dma_owner_GemRx.mutex);
-    match previous {
-        GemRxAuthority::Empty => { return; }
+    let Place::Full(held) = previous else {
+        Place::Empty => { return; }
+    };
+    match held {
         GemRxAuthority::Cpu(stale) => { gem_rx_fail_cpu(stale); }
         GemRxAuthority::Device(stale) => { gem_rx_fail_device(stale); }
     }
@@ -73,7 +80,6 @@ private fn gem_rx_put(value: sink GemRxAuthority) {
 fn gem_rx_arm_initial() -> usize !{unsafe} {
     let GemRxAuthority::Cpu(cpu) = gem_rx_take() else {
         GemRxAuthority::Device(device) => { gem_rx_fail_device(device); return 0; }
-        GemRxAuthority::Empty => { kernel_syscall_fail_stop(0); return 0; }
     };
     return gem_rx_arm(cpu);
 }
@@ -96,10 +102,6 @@ fn gem_rx_settle_completed() -> *GemRxCpu {
     let GemRxAuthority::Device(device) = gem_rx_take() else {
         GemRxAuthority::Cpu(cpu) => {
             gem_rx_fail_cpu(cpu);
-            return gem_rx_settle_completed();
-        }
-        GemRxAuthority::Empty => {
-            kernel_syscall_fail_stop(0);
             return gem_rx_settle_completed();
         }
     };

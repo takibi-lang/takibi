@@ -1225,6 +1225,11 @@ ties stable exchange to one same-container lock place.
 
 #### 6.7.13 Lock-coupled stable owner exchange (implemented 2026-07-17)
 
+(Superseded in form, 2026-10-09, GitHub issue #131: stored linear state is
+now a `Place(T)` field, and `stable_replace` gave way to `place_take` and
+`place_put`. The guard, lock-identity, and same-container checks described
+here apply unchanged to those two operations.)
+
 `stable_replace` now takes four operands:
 `stable_replace(guard, &container.mutex, container.owner, replacement)`.
 The guard must be a linear erased view with exactly one `addr` index; that
@@ -1416,8 +1421,8 @@ The post-Slice-6 sequence now includes owner-derived region slices,
 existential `TcpConn[conn, state]` dispatch, typed copy-rendezvous requests,
 one concrete stable owner slot, asynchronous TX ownership, and guard-derived
 pointer lifetimes. A private, mutable, BSS-zeroed container
-may hold a linear variant behind a sealed field; `stable_replace` exchanges
-that value while preserving an erased linear guard, and `rtos_demo` uses it
+may hold a linear value in a sealed `Place(T)` field; `place_take` and
+`place_put` exchange it while preserving an erased linear guard, and `rtos_demo` uses it
 to transfer an existentially indexed `OwnerMessage[id]` between tasks.
 
 This is intentionally smaller than arbitrary stored-owner/place tracking.

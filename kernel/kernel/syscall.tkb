@@ -401,14 +401,9 @@ fn kernel_syscall_exec_argc() -> usize {
 // every active CPU, so each CPU owns a separate slot. Reserve and prepare
 // stay on that CPU in one non-preemptible EL1 action; the page is taken
 // before returning to EL0. This depends on KERNEL_PREEMPTIBLE == 0.
-variant ExecArgsValue {
-    Empty;
-    Held(exists page: usize. PageOwner[page]);
-}
-
 struct ExecArgsStore {
     private mutex: Mutex;
-    private value: ExecArgsValue;
+    private value: Place(exists page: usize. PageOwner[page]);
 }
 
 private let mut exec_args_store: [ExecArgsStore; KERNEL_MAX_CORES];
@@ -431,13 +426,12 @@ private fn exec_args_unlock(guard: sink ExecArgsGuard[address],
 private fn exec_args_put(core: {0..<KERNEL_MAX_CORES as usize},
                          page: sink PageOwner[p]) {
     let guard = exec_args_lock(&exec_args_store[core].mutex);
-    let previous: ExecArgsValue = stable_replace(
-        guard, &exec_args_store[core].mutex, exec_args_store[core].value,
-        ExecArgsValue::Held(page));
+    let previous: Place(exists page: usize. PageOwner[page]) = place_put(
+        guard, &exec_args_store[core].mutex, exec_args_store[core].value, page);
     exec_args_unlock(guard, &exec_args_store[core].mutex);
     match previous {
-        ExecArgsValue::Empty => {}
-        ExecArgsValue::Held(stale) => {
+        Place::Empty => {}
+        Place::Full(stale) => {
             // A second ChildExec before the first prepare took its page.
             page_free(stale);
             kernel_boot_log("exec argv: occupied CPU handoff slot\n");
@@ -478,21 +472,20 @@ private fn kernel_syscall_exec_args_reserve_for(
     }
 }
 
-fn kernel_syscall_exec_args_take() -> ExecArgsValue {
+fn kernel_syscall_exec_args_take() -> Place(exists page: usize. PageOwner[page]) {
     let core: usize = cpu_id();
     if (core < KERNEL_MAX_CORES) {
         return kernel_syscall_exec_args_take_for(core);
     }
     kernel_syscall_fail_stop(0);
-    return ExecArgsValue::Empty;
+    return Place::Empty;
 }
 
 private fn kernel_syscall_exec_args_take_for(
-        core: {0..<KERNEL_MAX_CORES as usize}) -> ExecArgsValue {
+        core: {0..<KERNEL_MAX_CORES as usize}) -> Place(exists page: usize. PageOwner[page]) {
     let guard = exec_args_lock(&exec_args_store[core].mutex);
-    let taken: ExecArgsValue = stable_replace(
-        guard, &exec_args_store[core].mutex, exec_args_store[core].value,
-        ExecArgsValue::Empty);
+    let taken: Place(exists page: usize. PageOwner[page]) = place_take(
+        guard, &exec_args_store[core].mutex, exec_args_store[core].value);
     exec_args_unlock(guard, &exec_args_store[core].mutex);
     return taken;
 }
@@ -517,8 +510,8 @@ private fn kernel_syscall_exec_args_overlap_probe() -> bool !{unsafe} {
     }
     for core: usize in 0..<KERNEL_MAX_CORES {
         match kernel_syscall_exec_args_take_for(core) {
-            ExecArgsValue::Empty => { ok = false; }
-            ExecArgsValue::Held(page) => {
+            Place::Empty => { ok = false; }
+            Place::Full(page) => {
                 let bytes: [u8; PAGE_SIZE..] = page_bytes(page);
                 if (page_physical_address(page) != expected[core] ||
                     bytes[0] != core as u8) { ok = false; }
@@ -526,8 +519,8 @@ private fn kernel_syscall_exec_args_overlap_probe() -> bool !{unsafe} {
             }
         }
         match kernel_syscall_exec_args_take_for(core) {
-            ExecArgsValue::Empty => {}
-            ExecArgsValue::Held(stray) => { page_free(stray); ok = false; }
+            Place::Empty => {}
+            Place::Full(stray) => { page_free(stray); ok = false; }
         }
     }
     return ok;
@@ -2127,9 +2120,9 @@ fn syscall_write_segment(current_authority: borrow ProcessCurrent[current_proces
                         return SyscallIoResult::NetWait;
                     }
                     NetworkCapabilityTakeResult::Ready(ready) => {
-                    let FrameLink::Some(rx) =
+                    let Place::Full(rx) =
                             tcp_connection_frame_hold(owner, TcpFrameRole::Rx) else {
-                        FrameLink::None => {
+                        Place::Empty => {
                             tcp_frame_missing();
                             tcp_connection_put(owner);
                             match network_capability_put(ready) {
@@ -2143,7 +2136,7 @@ fn syscall_write_segment(current_authority: borrow ProcessCurrent[current_proces
                     match user_range_check_read(kernel_process_current_root(current_authority), address, amount) {
                         UserReadRangeResult::Fault => {
                             tcp_connection_frame_unhold(owner, TcpFrameRole::Rx,
-                                                        FrameLink::Some(rx));
+                                                        rx);
                             tcp_connection_put(owner);
                             match network_capability_put(ready) {
                                 NetworkCapabilityPutResult::Stored => {}
@@ -2155,7 +2148,7 @@ fn syscall_write_segment(current_authority: borrow ProcessCurrent[current_proces
                             if (copy_from_user_span(range, socket_buffers, 0,
                                                     amount) == false) {
                                 tcp_connection_frame_unhold(owner, TcpFrameRole::Rx,
-                                                            FrameLink::Some(rx));
+                                                            rx);
                                 tcp_connection_put(owner);
                                 match network_capability_put(ready) {
                                     NetworkCapabilityPutResult::Stored => {}
@@ -2170,7 +2163,7 @@ fn syscall_write_segment(current_authority: borrow ProcessCurrent[current_proces
                             socket_buffers[0..<1460],
                             received_length, amount);
                     tcp_connection_frame_unhold(owner, TcpFrameRole::Rx,
-                                                FrameLink::Some(rx));
+                                                rx);
                     match sent {
                         KernelTcpSendResult::Invalid(after_invalid) => {
                             match network_capability_put(after_invalid) {
@@ -2225,9 +2218,9 @@ fn syscall_write_segment(current_authority: borrow ProcessCurrent[current_proces
                         tcp_connection_put(owner);
                         return SyscallIoResult::Errno(LINUX_EINVAL);
                     }
-                    let FrameLink::Some(inetd) =
+                    let Place::Full(inetd) =
                             tcp_connection_frame_hold(owner, TcpFrameRole::Inetd) else {
-                        FrameLink::None => {
+                        Place::Empty => {
                             tcp_frame_missing();
                             tcp_connection_put(owner);
                             return SyscallIoResult::Errno(LINUX_EINVAL);
@@ -2236,7 +2229,7 @@ fn syscall_write_segment(current_authority: borrow ProcessCurrent[current_proces
                     match user_range_check_read(kernel_process_current_root(current_authority), address, length) {
                         UserReadRangeResult::Fault => {
                             tcp_connection_frame_unhold(owner, TcpFrameRole::Inetd,
-                                                        FrameLink::Some(inetd));
+                                                        inetd);
                             tcp_connection_put(owner);
                             return SyscallIoResult::Errno(LINUX_EFAULT);
                         }
@@ -2245,14 +2238,14 @@ fn syscall_write_segment(current_authority: borrow ProcessCurrent[current_proces
                                                     conn.inetd_response_length,
                                                     length) == false) {
                                 tcp_connection_frame_unhold(owner, TcpFrameRole::Inetd,
-                                                            FrameLink::Some(inetd));
+                                                            inetd);
                                 tcp_connection_put(owner);
                                 return SyscallIoResult::Errno(LINUX_EFAULT);
                             }
                         }
                     }
                     tcp_connection_frame_unhold(owner, TcpFrameRole::Inetd,
-                                                FrameLink::Some(inetd));
+                                                inetd);
                     conn.inetd_response_length = conn.inetd_response_length + length;
                     tcp_connection_put(owner);
                     return SyscallIoResult::Transferred(length);
@@ -2348,9 +2341,9 @@ fn syscall_read_segment(current_authority: borrow ProcessCurrent[current_process
                        conn.socket_buffer_length - conn.socket_buffer_offset;
                    let mut buffered: usize = requested;
                    if (buffered > available) { buffered = available; }
-                   let FrameLink::Some(rx) =
+                   let Place::Full(rx) =
                            tcp_connection_frame_hold(owner, TcpFrameRole::Rx) else {
-                       FrameLink::None => {
+                       Place::Empty => {
                            tcp_frame_missing();
                            tcp_connection_put(owner);
                            return SyscallIoResult::Errno(LINUX_EINVAL);
@@ -2359,7 +2352,7 @@ fn syscall_read_segment(current_authority: borrow ProcessCurrent[current_process
                    match user_range_check_write(kernel_process_current_root(current_authority), address, buffered) {
                        UserWriteRangeResult::Fault => {
                            tcp_connection_frame_unhold(owner, TcpFrameRole::Rx,
-                                                       FrameLink::Some(rx));
+                                                       rx);
                            tcp_connection_put(owner);
                            return SyscallIoResult::Errno(LINUX_EFAULT);
                        }
@@ -2371,7 +2364,7 @@ fn syscall_read_segment(current_authority: borrow ProcessCurrent[current_process
                                    // Nothing was delivered: keep the bytes
                                    // readable and the offset where it was.
                                    tcp_connection_frame_unhold(owner, TcpFrameRole::Rx,
-                                                               FrameLink::Some(rx));
+                                                               rx);
                                    tcp_connection_put(owner);
                                    return SyscallIoResult::Errno(LINUX_EFAULT);
                                }
@@ -2380,7 +2373,7 @@ fn syscall_read_segment(current_authority: borrow ProcessCurrent[current_process
                        }
                    }
                    tcp_connection_frame_unhold(owner, TcpFrameRole::Rx,
-                                               FrameLink::Some(rx));
+                                               rx);
                    conn.socket_buffer_offset = conn.socket_buffer_offset + buffered;
                    tcp_connection_put(owner);
                    workload_peer_socket_served(false);
@@ -2393,9 +2386,9 @@ fn syscall_read_segment(current_authority: borrow ProcessCurrent[current_process
                  }
                  NetworkCapabilityTakeResult::Ready(r) => { r }
                };
-               let FrameLink::Some(rx) =
+               let Place::Full(rx) =
                        tcp_connection_frame_hold(owner, TcpFrameRole::Rx) else {
-                   FrameLink::None => {
+                   Place::Empty => {
                        tcp_frame_missing();
                        tcp_connection_put(owner);
                        match network_capability_put(ready) {
@@ -2409,7 +2402,7 @@ fn syscall_read_segment(current_authority: borrow ProcessCurrent[current_process
                let received_once = kernel_tcp_receive_once(
                     owner, ready, socket_buffers[0..<1460]);
                tcp_connection_frame_unhold(owner, TcpFrameRole::Rx,
-                                           FrameLink::Some(rx));
+                                           rx);
                match received_once {
                 KernelTcpReceiveResult::Pending(next) => {
                     match network_capability_put(next) {
@@ -2453,9 +2446,9 @@ fn syscall_read_segment(current_authority: borrow ProcessCurrent[current_process
                     tcp_connection_of(owner).socket_buffer_length = received;
                     let mut amount: usize = received;
                     if (amount > requested) { amount = requested; }
-                    let FrameLink::Some(received_rx) =
+                    let Place::Full(received_rx) =
                             tcp_connection_frame_hold(owner, TcpFrameRole::Rx) else {
-                        FrameLink::None => {
+                        Place::Empty => {
                             tcp_frame_missing();
                             match network_capability_put(next) {
                                 NetworkCapabilityPutResult::Stored => {}
@@ -2468,7 +2461,7 @@ fn syscall_read_segment(current_authority: borrow ProcessCurrent[current_process
                     match user_range_check_write(kernel_process_current_root(current_authority), address, amount) {
                         UserWriteRangeResult::Fault => {
                             tcp_connection_frame_unhold(owner, TcpFrameRole::Rx,
-                                                        FrameLink::Some(received_rx));
+                                                        received_rx);
                             match network_capability_put(next) {
                                 NetworkCapabilityPutResult::Stored => {}
                                 NetworkCapabilityPutResult::Conflict => {}
@@ -2485,7 +2478,7 @@ fn syscall_read_segment(current_authority: borrow ProcessCurrent[current_process
                                     // bytes stay buffered from offset 0 for
                                     // the next read.
                                     tcp_connection_frame_unhold(owner, TcpFrameRole::Rx,
-                                                                FrameLink::Some(received_rx));
+                                                                received_rx);
                                     tcp_connection_of(owner).socket_buffer_offset = 0;
                                     match network_capability_put(next) {
                                         NetworkCapabilityPutResult::Stored => {
@@ -2503,7 +2496,7 @@ fn syscall_read_segment(current_authority: borrow ProcessCurrent[current_process
                         }
                     }
                     tcp_connection_frame_unhold(owner, TcpFrameRole::Rx,
-                                                FrameLink::Some(received_rx));
+                                                received_rx);
                     tcp_connection_of(owner).socket_buffer_offset = amount;
                     match network_capability_put(next) {
                         NetworkCapabilityPutResult::Stored => {
@@ -6002,9 +5995,9 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EAGAIN), current_authority);
             }
             NetworkCapabilityTakeResult::Ready(ready) => {
-                let FrameLink::Some(inetd) =
+                let Place::Full(inetd) =
                         tcp_connection_frame_hold(owner, TcpFrameRole::Inetd) else {
-                    FrameLink::None => {
+                    Place::Empty => {
                         tcp_frame_missing();
                         match network_capability_put(ready) {
                             NetworkCapabilityPutResult::Stored => {}
@@ -6020,7 +6013,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                         received_length,
                         tcp_connection_of(owner).inetd_response_length);
                 tcp_connection_frame_unhold(owner, TcpFrameRole::Inetd,
-                                            FrameLink::Some(inetd));
+                                            inetd);
                 match sent {
                     KernelTcpSendResult::Invalid(after_invalid) => {
                         match network_capability_put(after_invalid) {
@@ -7046,9 +7039,9 @@ fn syscall_vectored_inetd_probe(address: usize) -> bool !{unsafe} {
     let slot: usize = tcp_connection_of(owner).self_address;
     let generation: usize = tcp_connection_identity(owner);
     tcp_connection_of(owner).connection_open = true;
-    let FrameLink::Some(rx) =
+    let Place::Full(rx) =
             tcp_connection_frame_hold(owner, TcpFrameRole::Rx) else {
-        FrameLink::None => {
+        Place::Empty => {
             tcp_frame_missing();
             tcp_connection_free(owner);
             kernel_connected_fd_clear(saved_fd);
@@ -7058,7 +7051,7 @@ fn syscall_vectored_inetd_probe(address: usize) -> bool !{unsafe} {
     let rx_bytes = tcp_frame_bytes(rx);
     rx_bytes[0] = 0x61;
     rx_bytes[1] = 0x62;
-    tcp_connection_frame_unhold(owner, TcpFrameRole::Rx, FrameLink::Some(rx));
+    tcp_connection_frame_unhold(owner, TcpFrameRole::Rx, rx);
     tcp_connection_of(owner).socket_buffer_length = 2;
     tcp_connection_put(owner);
     kernel_connected_fd_clear(1);
@@ -7145,9 +7138,9 @@ fn syscall_vectored_inetd_probe(address: usize) -> bool !{unsafe} {
         TcpConnectionTakeResult::Missing => { ok = false; }
         TcpConnectionTakeResult::Ready(after) => {
             let conn = tcp_connection_of(after);
-            let FrameLink::Some(inetd) =
+            let Place::Full(inetd) =
                     tcp_connection_frame_hold(after, TcpFrameRole::Inetd) else {
-                FrameLink::None => {
+                Place::Empty => {
                     tcp_frame_missing();
                     tcp_connection_free(after);
                     kernel_connected_fd_clear(1);
@@ -7159,7 +7152,7 @@ fn syscall_vectored_inetd_probe(address: usize) -> bool !{unsafe} {
             if (conn.inetd_response_length != 3 || response[0] != 0x61 ||
                 response[1] != 0x62 || response[2] != 0x61) { ok = false; }
             tcp_connection_frame_unhold(after, TcpFrameRole::Inetd,
-                                        FrameLink::Some(inetd));
+                                        inetd);
             tcp_connection_free(after);
         }
     }
@@ -7389,16 +7382,16 @@ fn kernel_syscall_subset_probe() -> bool !{unsafe} {
                 ExecArgsReserve::Reserved => { ok = false; }
             }
             match kernel_syscall_exec_args_take() {
-                ExecArgsValue::Empty => {}
-                ExecArgsValue::Held(stray) => { page_free(stray); ok = false; }
+                Place::Empty => {}
+                Place::Full(stray) => { page_free(stray); ok = false; }
             }
             match kernel_syscall_exec_args_reserve(
                     page_alloc(PageOwnerTag::ExecArgs)) {
                 ExecArgsReserve::OutOfMemory => { ok = false; }
                 ExecArgsReserve::Reserved => {
                     match kernel_syscall_exec_args_take() {
-                        ExecArgsValue::Empty => { ok = false; }
-                        ExecArgsValue::Held(args_page) => { page_free(args_page); }
+                        Place::Empty => { ok = false; }
+                        Place::Full(args_page) => { page_free(args_page); }
                     }
                 }
             }

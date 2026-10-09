@@ -10,7 +10,7 @@ variant CellLink[p: addr] {
 }
 struct Cell[p: addr] {
     private mutex: Mutex;
-    private owner: CellLink[p];
+    private owner: Place(CellLink[p]);
 }
 private let mut cells: IntrusivePool(Cell[&connections]);
 linear struct CellGuard[lock: addr] { private flags: usize; }
@@ -23,9 +23,12 @@ fn cell_unlock(mutex: *Mutex @ lock, guard: sink CellGuard[lock]) {
 }
 fn cell_exchange(cell: borrow *Cell[p], next: CellLink[p]) -> CellLink[p] {
     let guard = cell_lock(&cell.mutex);
-    let old = stable_replace(guard, &cell.mutex, cell.owner, next);
+    let old: Place(CellLink[p]) = place_put(guard, &cell.mutex, cell.owner, next);
     cell_unlock(&cell.mutex, guard);
-    return old;
+    match old {
+        Place::Empty => { return CellLink::Empty; }
+        Place::Full(link) => { return link; }
+    }
 }
 fn report_empty(link: CellLink[p]) {
     match link {

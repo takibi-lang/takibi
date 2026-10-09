@@ -18,14 +18,9 @@
 use "kernel/lib/execution_model.tkb";
 use "kernel/lib/mutex.tkb";
 
-variant NetworkCapabilityValue {
-    Empty;
-    Ready(NetRxCanAcquire);
-}
-
 struct NetworkCapabilityStore {
     private mutex: Mutex;
-    private value: NetworkCapabilityValue;
+    private value: Place(NetRxCanAcquire);
 }
 
 private let mut network_capability_store: NetworkCapabilityStore;
@@ -70,28 +65,26 @@ fn network_capability_unlock(guard: sink NetworkCapabilityGuard[address],
 fn network_capability_install(ready: sink NetRxCanAcquire)
         -> NetworkCapabilityInstallResult {
     let guard = network_capability_lock(&network_capability_store.mutex);
-    let previous: NetworkCapabilityValue = stable_replace(
+    let previous: Place(NetRxCanAcquire) = place_put(
         guard, &network_capability_store.mutex,
-        network_capability_store.value,
-        NetworkCapabilityValue::Ready(ready));
+        network_capability_store.value, ready);
     match previous {
-        NetworkCapabilityValue::Empty => {
+        Place::Empty => {
             network_capability_unlock(
                 guard, &network_capability_store.mutex);
             return NetworkCapabilityInstallResult::Installed;
         }
-        NetworkCapabilityValue::Ready(stale) => {
-            let displaced: NetworkCapabilityValue = stable_replace(
+        Place::Full(stale) => {
+            let displaced: Place(NetRxCanAcquire) = place_put(
                 guard, &network_capability_store.mutex,
-                network_capability_store.value,
-                NetworkCapabilityValue::Ready(stale));
+                network_capability_store.value, stale);
             network_capability_unlock(
                 guard, &network_capability_store.mutex);
             match displaced {
-                NetworkCapabilityValue::Empty => {
+                Place::Empty => {
                     return NetworkCapabilityInstallResult::Installed;
                 }
-                NetworkCapabilityValue::Ready(incoming) => {
+                Place::Full(incoming) => {
                     return NetworkCapabilityInstallResult::AlreadyInstalled(
                         incoming);
                 }
@@ -102,15 +95,15 @@ fn network_capability_install(ready: sink NetRxCanAcquire)
 
 fn network_capability_take() -> NetworkCapabilityTakeResult {
     let guard = network_capability_lock(&network_capability_store.mutex);
-    let previous: NetworkCapabilityValue = stable_replace(
+    let previous: Place(NetRxCanAcquire) = place_take(
         guard, &network_capability_store.mutex,
-        network_capability_store.value, NetworkCapabilityValue::Empty);
+        network_capability_store.value);
     network_capability_unlock(guard, &network_capability_store.mutex);
     match previous {
-        NetworkCapabilityValue::Empty => {
+        Place::Empty => {
             return NetworkCapabilityTakeResult::Empty;
         }
-        NetworkCapabilityValue::Ready(ready) => {
+        Place::Full(ready) => {
             return NetworkCapabilityTakeResult::Ready(ready);
         }
     }

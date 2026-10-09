@@ -26,15 +26,10 @@ private linear struct SlabOwner[id: usize] {
     private id: usize @ id;
 }
 
-variant SlabSlot {
-    Empty;
-    Full(exists id: usize. SlabOwner[id]);
-}
-
 struct RemoteFreeQueue align(64) {
     private mutex: i32;
     private state: io i32;
-    private owner: SlabSlot;
+    private owner: Place(exists id: usize. SlabOwner[id]);
 }
 
 private let mut remote_free: RemoteFreeQueue;
@@ -60,12 +55,12 @@ fn slab_init() {
     remote_free.state = 0;
 }
 
-fn slab_alloc_core0() -> SlabSlot {
+fn slab_alloc_core0() -> Place(exists id: usize. SlabOwner[id]) {
     if (local0_used == 0) {
         local0_used = 1;
-        return SlabSlot::Full(owner_new());
+        return Place::Full(owner_new());
     }
-    return SlabSlot::Empty;
+    return Place::Empty;
 }
 
 fn remote_free_discard(owner: sink SlabOwner[id]) {
@@ -74,11 +69,11 @@ fn remote_free_discard(owner: sink SlabOwner[id]) {
 
 fn remote_free_send(owner: SlabOwner[id], state: i32) {
     let g = mutex_lock(&remote_free.mutex);
-    let previous: SlabSlot = stable_replace(
-        g, &remote_free.mutex, remote_free.owner, SlabSlot::Full(owner));
+    let previous: Place(exists id: usize. SlabOwner[id]) = place_put(
+        g, &remote_free.mutex, remote_free.owner, owner);
     match previous {
-        SlabSlot::Empty => {}
-        SlabSlot::Full(stale) => { remote_free_discard(stale); }
+        Place::Empty => {}
+        Place::Full(stale) => { remote_free_discard(stale); }
     }
     dma_publish();
     remote_free.state = state;
@@ -86,12 +81,12 @@ fn remote_free_send(owner: SlabOwner[id], state: i32) {
     interrupt_notify();
 }
 
-fn remote_free_drain(expected: i32) -> SlabSlot {
+fn remote_free_drain(expected: i32) -> Place(exists id: usize. SlabOwner[id]) {
     while (remote_free.state != expected) { interrupt_wait(); }
     dma_consume();
     let g = mutex_lock(&remote_free.mutex);
-    let result: SlabSlot = stable_replace(
-        g, &remote_free.mutex, remote_free.owner, SlabSlot::Empty);
+    let result: Place(exists id: usize. SlabOwner[id]) = place_take(
+        g, &remote_free.mutex, remote_free.owner);
     remote_free.state = 0;
     mutex_unlock(g, &remote_free.mutex);
     return result;
@@ -100,8 +95,8 @@ fn remote_free_drain(expected: i32) -> SlabSlot {
 fn core1_main() {
     let returned = remote_free_drain(1);
     match returned {
-        SlabSlot::Empty => {}
-        SlabSlot::Full(owner) => {
+        Place::Empty => {}
+        Place::Full(owner) => {
             object_write(owner, 0, object_read(owner, 0) + 1);
             object_write(owner, 63, object_read(owner, 63) + 1);
             remote_free_send(owner, 2);
@@ -115,23 +110,23 @@ fn core0_main() {
     slab_init();
     uart_puts("smp_slab\n");
     match slab_alloc_core0() {
-        SlabSlot::Empty => { uart_puts("allocation failed\n"); }
-        SlabSlot::Full(owner) => {
+        Place::Empty => { uart_puts("allocation failed\n"); }
+        Place::Full(owner) => {
             object_write(owner, 0, 41);
             object_write(owner, 63, 98);
             uart_puts("core0 -> core1\n");
             remote_free_send(owner, 1);
             let returned = remote_free_drain(2);
             match returned {
-                SlabSlot::Empty => { uart_puts("remote free missing\n"); }
-                SlabSlot::Full(owner2) => {
+                Place::Empty => { uart_puts("remote free missing\n"); }
+                Place::Full(owner2) => {
                     if (object_read(owner2, 0) == 42 && object_read(owner2, 63) == 99) {
                         uart_puts("remote free: ok\n");
                     } else { uart_puts("remote free: corrupt\n"); }
                     remote_free_discard(owner2);
                     match slab_alloc_core0() {
-                        SlabSlot::Empty => { uart_puts("reuse failed\n"); }
-                        SlabSlot::Full(reused) => {
+                        Place::Empty => { uart_puts("reuse failed\n"); }
+                        Place::Full(reused) => {
                             uart_puts("reuse: ok\n");
                             remote_free_discard(reused);
                         }

@@ -6,14 +6,9 @@
 linear view StableLockGuard[lock: addr];
 linear view StableLockPermit;
 
-variant StableLockValue {
-    Empty;
-    Full(StableLockPermit);
-}
-
 struct StableLockSlot {
     private mutex: i32;
-    private value: StableLockValue;
+    private value: Place(StableLockPermit);
 }
 
 private let mut stable_lock_a: StableLockSlot;
@@ -23,12 +18,11 @@ fn stable_lock_acquire(m: *i32 @ lock) -> StableLockGuard[lock] {
     return view StableLockGuard[lock];
 }
 
-fn stable_replace_wrong_lock() -> StableLockValue {
+fn place_take_wrong_lock() -> Place(StableLockPermit) {
     let guard = stable_lock_acquire(&stable_lock_a.mutex);
-    return stable_replace(
+    return place_take(
         guard,
         &stable_lock_b.mutex,
-        stable_lock_b.value,
-        StableLockValue::Empty
+        stable_lock_b.value
     );
 }

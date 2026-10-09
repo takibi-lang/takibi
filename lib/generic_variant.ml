@@ -105,4 +105,47 @@ let instance_defs (prog : toplevel list)
     | _ -> ()
   in
   List.iter add instances;
+  (* A stored place no code exchanges yet (a fixed DMA record's slot whose
+     helpers are unused) still needs its layout: the global holds it. *)
+  List.iter (function
+    | StructDef (_, fields, _, _, _, _) ->
+        List.iter (fun (_, t) -> visit t) fields
+    | LetDef (_, Some t, _, _, _, _, _) -> visit t
+    | _ -> ()) prog;
   List.rev !defs
+
+(* GitHub issue #131 / #732: the built-in place. A stored slot holding
+   nothing or one value; place_take and place_put exchange it under the
+   slot's lock and answer what it held before. Zero initialization is
+   Empty, the first case. *)
+let place_name = "Place"
+
+let place_def =
+  GenericVariantDef (place_name, ["T"], [],
+    [("Empty", None); ("Full", Some (TypeNamed "T"))], false, Lexing.dummy_pos)
+
+(* Always added, so a program's own `Place` is a duplicate definition. *)
+let with_builtins (prog : toplevel list) : toplevel list =
+  if List.memq place_def prog then prog else place_def :: prog
+
+(* place_take / place_put as the exchange they are: the replacement is
+   Place::Empty or Place::Full(value), located at the call so the checker's
+   per-location records agree across passes. The exchange is named with a
+   leading '%', which no identifier can spell: it exists only here, and the
+   source language has no general exchange (GitHub issue #131). *)
+let exchange_prefix = "%"
+let exchange_name op = exchange_prefix ^ op
+let surface_name name =
+  let n = String.length exchange_prefix in
+  if String.length name > n && String.sub name 0 n = exchange_prefix
+  then String.sub name n (String.length name - n) else name
+
+let place_exchange (e : expr) : expr option =
+  match e.desc with
+  | Call ("place_take", [guard; lock; slot]) ->
+      Some { e with desc = Call (exchange_name "place_take",
+        [guard; lock; slot; { e with desc = EnumVariant (place_name, "Empty") }]) }
+  | Call ("place_put", [guard; lock; slot; value]) ->
+      Some { e with desc = Call (exchange_name "place_put",
+        [guard; lock; slot; { e with desc = VariantCtor (place_name, "Full", value) }]) }
+  | _ -> None

@@ -2655,10 +2655,9 @@ let async_tx_fixture =
 (* Issue #370: a durable cell preserves one concrete global pool brand. *)
 let issue370_cell_fixture = {|
   linear struct CellOwner[p: addr] { private value: usize; }
-  variant CellLink[p: addr] { Empty; Held(CellOwner[p]); }
   struct BrandCell[p: addr] {
     private mutex: usize;
-    private slot: CellLink[p];
+    private slot: Place(CellOwner[p]);
     bytes: [u8; 4];
   }
   private let mut brand_pool: usize;
@@ -2672,10 +2671,10 @@ let issue370_cell_fixture = {|
     return owner;
   }
   fn brand_drop(owner: sink CellOwner[p]) {}
-  fn brand_discharge(link: CellLink[p]) {
+  fn brand_discharge(link: Place(CellOwner[p])) {
     match link {
-      CellLink::Empty => {}
-      CellLink::Held(owner) => { brand_drop(owner); }
+      Place::Empty => {}
+      Place::Full(owner) => { brand_drop(owner); }
     }
   }
 |}
@@ -3558,6 +3557,55 @@ let infer_tests = [
      those bytes kept past the put does not compile. *)
   Alcotest.test_case "region pool: frame bytes held while the slot is out" `Quick
     (fun () -> ignore (infer_regions (frame_hold_use "")));
+  (* GitHub issue #131: the same frame parked in a Place. A Full arm opens
+     the place's existential payload as an ordinary variant's arm would, so
+     the bound slot meets region_slot_abandon's exact signature. Found
+     moving kernel/net/tcp.tkb's links into places. *)
+  Alcotest.test_case "region pool: a frame parked in a Place round-trips" `Quick
+    (fun () -> ignore (infer_regions
+      "struct NetFrame { bytes: [u8; 1514]; }
+       struct FrameCell { private mutex: i32;
+         private frame: Place(exists p: addr. exists k: usize. RegionSlot(NetFrame)[p, k]); }
+       private let mut frame_cell: FrameCell;
+       linear view FrameGuard131[lock: addr];
+       fn frame_lock(m: *i32 @ lock) -> FrameGuard131[lock] {
+         return view FrameGuard131[lock];
+       }
+       fn frame_unlock(g: sink FrameGuard131[lock], m: *i32 @ lock) {}
+       fn frame_bytes(slot: borrow RegionSlot(NetFrame)[p, k])
+           -> [u8; 1514..] @ p !{unsafe} {
+         return region_slot_at(slot).bytes as [u8; 1514..];
+       }
+       fn park(link: Place(exists p: addr. exists k: usize. RegionSlot(NetFrame)[p, k]))
+           !{unsafe} {
+         let g = frame_lock(&frame_cell.mutex);
+         let displaced: Place(exists p: addr. exists k: usize. RegionSlot(NetFrame)[p, k]) =
+           match link {
+             Place::Empty => { place_take(g, &frame_cell.mutex, frame_cell.frame) }
+             Place::Full(slot) => { place_put(g, &frame_cell.mutex, frame_cell.frame, slot) }
+           };
+         frame_unlock(g, &frame_cell.mutex);
+         match displaced {
+           Place::Empty => {}
+           Place::Full(stale) => { region_slot_abandon(stale); }
+         }
+       }
+       fn unpark() -> Place(exists p: addr. exists k: usize. RegionSlot(NetFrame)[p, k]) {
+         let g = frame_lock(&frame_cell.mutex);
+         let held: Place(exists p: addr. exists k: usize. RegionSlot(NetFrame)[p, k]) =
+           place_take(g, &frame_cell.mutex, frame_cell.frame);
+         frame_unlock(g, &frame_cell.mutex);
+         return held;
+       }
+       fn touch() -> bool !{unsafe} {
+         let Place::Full(tx) = unpark() else {
+           Place::Empty => { return false; }
+         };
+         let frame = frame_bytes(tx);
+         frame[0] = 1;
+         park(Place::Full(tx));
+         return true;
+       }"));
 
   Alcotest.test_case "region pool: frame bytes used after the slot went back"
     `Quick
@@ -9448,13 +9496,9 @@ fn f() -> *usize { return &temp_address_outer().r.a; }");
           id: usize @ n;
           value: i32;
         }
-        variant StableValue7e {
-          Empty;
-          Full(exists n: usize. StableOwner7e[n]);
-        }
         struct StableSlot7e {
           private mutex: i32;
-          private value: StableValue7e;
+          private value: Place(exists n: usize. StableOwner7e[n]);
         }
         private let mut stable_slot7e: StableSlot7e;
         fn stable_lock7e(m: *i32 @ lock) -> StableGuard7e[lock] {
@@ -9468,19 +9512,17 @@ fn f() -> *usize { return &temp_address_outer().r.a; }");
         fn stable_drop7e(owner: sink StableOwner7e[n]) {}
         fn stable_use7e() {
           let guard = stable_lock7e(&stable_slot7e.mutex);
-          let previous: StableValue7e = stable_replace(
-            guard, &stable_slot7e.mutex, stable_slot7e.value,
-            StableValue7e::Full(stable_new7e(7)));
+          let previous: Place(exists n: usize. StableOwner7e[n]) = place_put(
+            guard, &stable_slot7e.mutex, stable_slot7e.value, stable_new7e(7));
           match previous {
-            StableValue7e::Empty => {}
-            StableValue7e::Full(stale) => { stable_drop7e(stale); }
+            Place::Empty => {}
+            Place::Full(stale) => { stable_drop7e(stale); }
           }
-          let current: StableValue7e = stable_replace(
-            guard, &stable_slot7e.mutex, stable_slot7e.value,
-            StableValue7e::Empty);
+          let current: Place(exists n: usize. StableOwner7e[n]) = place_take(
+            guard, &stable_slot7e.mutex, stable_slot7e.value);
           match current {
-            StableValue7e::Empty => {}
-            StableValue7e::Full(owner) => { stable_drop7e(owner); }
+            Place::Empty => {}
+            Place::Full(owner) => { stable_drop7e(owner); }
           }
           stable_unlock7e(guard, &stable_slot7e.mutex);
         }");
@@ -9493,13 +9535,9 @@ fn f() -> *usize { return &temp_address_outer().r.a; }");
         linear struct PageRunOwner7el[run: usize] {
           id: usize @ run;
         }
-        variant SpareRunValue7el {
-          Empty;
-          Held(exists run: usize. PageRunOwner7el[run]);
-        }
         struct SpareRunCell7el {
           private mutex: i32;
-          private value: SpareRunValue7el;
+          private value: Place(exists run: usize. PageRunOwner7el[run]);
         }
         private let mut spare_run_cell7el: SpareRunCell7el;
         fn spare_run_lock7el(m: *i32 @ lock) -> SpareRunGuard7el[lock] {
@@ -9510,125 +9548,170 @@ fn f() -> *usize { return &temp_address_outer().r.a; }");
         fn spare_run_drop7el(owner: sink PageRunOwner7el[run]) {}
         fn spare_run_bad_park7el() {
           let guard = spare_run_lock7el(&spare_run_cell7el.mutex);
-          let previous: SpareRunValue7el = stable_replace(
-            guard, &spare_run_cell7el.mutex, spare_run_cell7el.value,
-            SpareRunValue7el::Empty);
+          let previous: Place(exists run: usize. PageRunOwner7el[run]) = place_take(
+            guard, &spare_run_cell7el.mutex, spare_run_cell7el.value);
           match previous {
-            SpareRunValue7el::Empty => {}
-            SpareRunValue7el::Held(displaced) => { return; }
+            Place::Empty => {}
+            Place::Full(displaced) => { return; }
           }
           spare_run_unlock7el(guard, &spare_run_cell7el.mutex);
         }");
 
-  Alcotest.test_case "stable_replace rejects a guard for another mutex" `Quick
-    (expect_type_error "stable_replace mutex does not match guard identity"
+  Alcotest.test_case "place_take rejects a guard for another mutex" `Quick
+    (expect_type_error "place_take mutex does not match guard identity"
        "linear view StableGuard7ea[lock: addr];
         linear view StablePermit7ea;
-        variant StableValue7ea { Empty; Full(StablePermit7ea); }
         struct StableSlot7ea {
           private mutex: i32;
-          private value: StableValue7ea;
+          private value: Place(StablePermit7ea);
         }
         private let mut stable_slot7ea: StableSlot7ea;
         private let mut stable_slot7eb: StableSlot7ea;
         fn stable_lock7ea(m: *i32 @ lock) -> StableGuard7ea[lock] {
           return view StableGuard7ea[lock];
         }
-        fn stable_wrong_lock7ea() -> StableValue7ea {
+        fn stable_wrong_lock7ea() -> Place(StablePermit7ea) {
           let guard = stable_lock7ea(&stable_slot7ea.mutex);
-          return stable_replace(guard, &stable_slot7eb.mutex,
-            stable_slot7eb.value, StableValue7ea::Empty);
+          return place_take(guard, &stable_slot7eb.mutex,
+            stable_slot7eb.value);
         }");
 
-  Alcotest.test_case "stable_replace mutex and owner must share a container" `Quick
+  Alcotest.test_case "place_take mutex and owner must share a container" `Quick
     (expect_type_error
-       "stable_replace mutex and owner field must belong to the same syntactic container"
+       "place_take mutex and owner field must belong to the same syntactic container"
        "linear view StableGuard7ec[lock: addr];
         linear view StablePermit7ec;
-        variant StableValue7ec { Empty; Full(StablePermit7ec); }
         struct StableSlot7ec {
           private mutex: i32;
-          private value: StableValue7ec;
+          private value: Place(StablePermit7ec);
         }
         private let mut stable_slot7ec: StableSlot7ec;
         private let mut stable_slot7ed: StableSlot7ec;
         fn stable_lock7ec(m: *i32 @ lock) -> StableGuard7ec[lock] {
           return view StableGuard7ec[lock];
         }
-        fn stable_wrong_container7ec() -> StableValue7ec {
+        fn stable_wrong_container7ec() -> Place(StablePermit7ec) {
           let guard = stable_lock7ec(&stable_slot7ec.mutex);
-          return stable_replace(guard, &stable_slot7ec.mutex,
-            stable_slot7ed.value, StableValue7ec::Empty);
+          return place_take(guard, &stable_slot7ec.mutex,
+            stable_slot7ed.value);
         }");
 
-  Alcotest.test_case "stable_replace guard requires one addr identity" `Quick
-    (expect_type_error "stable_replace guard must carry exactly one addr index"
+  Alcotest.test_case "place_take guard requires one addr identity" `Quick
+    (expect_type_error "place_take guard must carry exactly one addr index"
        "linear view StableGuard7ee;
         linear view StablePermit7ee;
-        variant StableValue7ee { Empty; Full(StablePermit7ee); }
         struct StableSlot7ee {
           private mutex: i32;
-          private value: StableValue7ee;
+          private value: Place(StablePermit7ee);
         }
         private let mut stable_slot7ee: StableSlot7ee;
         fn stable_unindexed7ee(guard: borrow StableGuard7ee)
-             -> StableValue7ee {
-          return stable_replace(guard, &stable_slot7ee.mutex,
-            stable_slot7ee.value, StableValue7ee::Empty);
+             -> Place(StablePermit7ee) {
+          return place_take(guard, &stable_slot7ee.mutex,
+            stable_slot7ee.value);
         }");
 
   Alcotest.test_case "stable owner field must be private" `Quick
-    (expect_type_error "stable owner storage requires a private linear variant field"
+    (expect_type_error "stored linear state lives in a private Place(T) field"
        "linear view StablePermit7f;
         variant StableValue7f { Empty; Full(StablePermit7f); }
         struct StableSlot7f { value: StableValue7f; }");
 
-  Alcotest.test_case "stable owner field requires an empty zero case first" `Quick
-    (expect_type_error "must declare a payload-free empty case first"
+  (* GitHub issue #131: a place is the one stored linear slot, so a
+     linear variant held directly -- even one shaped like a place -- is
+     rejected and the diagnostic names Place. *)
+  (* GitHub issue #131: a place whose payload nests existentials
+     (exists p. exists k. ...) opens fully in a match arm, so the payload
+     can be put straight back. Found migrating kernel/net/tcp.tkb's links. *)
+  Alcotest.test_case "a Place payload with nested existentials can be put back" `Quick
+    (expect_ok
+       "linear view PlaceGuard131[lock: addr];
+        linear struct PlaceOwner131[p: addr, k: usize] { private id: usize; }
+        struct PlaceSlot131 {
+          private mutex: i32;
+          private value: Place(exists p: addr. exists k: usize. PlaceOwner131[p, k]);
+        }
+        private let mut place_slot131: PlaceSlot131;
+        fn place_lock131(m: *i32 @ lock) -> PlaceGuard131[lock] {
+          return view PlaceGuard131[lock];
+        }
+        fn place_unlock131(g: sink PlaceGuard131[lock], m: *i32 @ lock) {}
+        fn place_drop131(o: sink PlaceOwner131[p, k]) {}
+        fn place_cycle131() {
+          let guard = place_lock131(&place_slot131.mutex);
+          let taken: Place(exists p: addr. exists k: usize. PlaceOwner131[p, k]) =
+            place_take(guard, &place_slot131.mutex, place_slot131.value);
+          match taken {
+            Place::Empty => {}
+            Place::Full(owner) => {
+              let displaced: Place(exists p: addr. exists k: usize. PlaceOwner131[p, k]) =
+                place_put(guard, &place_slot131.mutex, place_slot131.value, owner);
+              match displaced {
+                Place::Empty => {}
+                Place::Full(stale) => { place_drop131(stale); }
+              }
+            }
+          }
+          place_unlock131(guard, &place_slot131.mutex);
+        }");
+
+  Alcotest.test_case "stored linear state must be a Place" `Quick
+    (expect_type_error "holds linear state directly; declare it as a Place"
        "linear view StablePermit7g;
-        variant StableValue7g { Full(StablePermit7g); Empty; }
+        variant StableValue7g { Empty; Full(StablePermit7g); }
         struct StableSlot7g { private value: StableValue7g; }");
+
+  Alcotest.test_case "stable_replace is not a source operation" `Quick
+    (expect_type_error "stable_replace was removed"
+       "linear view StableGuard7r[lock: addr];
+        linear view StablePermit7r;
+        struct StableSlot7r { private mutex: i32; private value: Place(StablePermit7r); }
+        private let mut stable_slot7r: StableSlot7r;
+        fn stable_lock7r(m: *i32 @ lock) -> StableGuard7r[lock] {
+          return view StableGuard7r[lock];
+        }
+        fn stable_exchange7r() -> Place(StablePermit7r) {
+          let guard = stable_lock7r(&stable_slot7r.mutex);
+          return stable_replace(guard, &stable_slot7r.mutex,
+            stable_slot7r.value, Place::Empty);
+        }");
 
   Alcotest.test_case "stable owner container must be a private global" `Quick
     (expect_type_error "must be private"
        "linear view StablePermit7h;
-        variant StableValue7h { Empty; Full(StablePermit7h); }
-        struct StableSlot7h { private value: StableValue7h; }
+        struct StableSlot7h { private value: Place(StablePermit7h); }
         let mut stable_slot7h: StableSlot7h;");
 
   Alcotest.test_case "stable owner field rejects direct reads" `Quick
     (expect_type_error "cannot be read directly"
        "linear view StablePermit7i;
-        variant StableValue7i { Empty; Full(StablePermit7i); }
-        struct StableSlot7i { private value: StableValue7i; }
+        struct StableSlot7i { private value: Place(StablePermit7i); }
         private let mut stable_slot7i: StableSlot7i;
-        fn stable_read7i() -> StableValue7i { return stable_slot7i.value; }");
+        fn stable_read7i() -> Place(StablePermit7i) { return stable_slot7i.value; }");
 
-  Alcotest.test_case "stable_replace requires a linear guard" `Quick
+  Alcotest.test_case "place_take requires a linear guard" `Quick
     (expect_type_error "requires a linear erased-view guard or an indexed"
        "linear view StablePermit7j;
-        variant StableValue7j { Empty; Full(StablePermit7j); }
-        struct StableSlot7j { private mutex: i32; private value: StableValue7j; }
+        struct StableSlot7j { private mutex: i32; private value: Place(StablePermit7j); }
         private let mut stable_slot7j: StableSlot7j;
-        fn stable_bad_guard7j(x: i32) -> StableValue7j {
-          return stable_replace(x, &stable_slot7j.mutex,
-            stable_slot7j.value, StableValue7j::Empty);
+        fn stable_bad_guard7j(x: i32) -> Place(StablePermit7j) {
+          return place_take(x, &stable_slot7j.mutex,
+            stable_slot7j.value);
         }");
 
   (* GitHub issue #451: a guard may be a linear STRUCT, not only an erased
      view. A view has no runtime payload, so it cannot carry the interrupt
      mask a real lock must restore -- which is what these guards became
-     once the lock stopped emitting nothing. What stable_replace wants from
+     once the lock stopped emitting nothing. What a place operation wants from
      a guard is its identity, and that is erased either way. *)
   Alcotest.test_case
-    "issue #451: an indexed linear STRUCT is a stable_replace guard too"
+    "issue #451: an indexed linear STRUCT is a place guard too"
     `Quick
     (fun () ->
        expect_ok
          "linear struct StableGuard7z[lock: addr] { private flags: usize; }
           linear view StablePermit7z;
-          variant StableValue7z { Empty; Full(StablePermit7z); }
-          struct StableSlot7z { private mutex: i32; private value: StableValue7z; }
+          struct StableSlot7z { private mutex: i32; private value: Place(StablePermit7z); }
           private let mut stable_slot7z: StableSlot7z;
           private let mut stable_other7z: StableSlot7z;
           fn stable_lock7z(m: *i32 @ lock) -> StableGuard7z[lock] {
@@ -9639,10 +9722,10 @@ fn f() -> *usize { return &temp_address_outer().r.a; }");
           fn stable_take7z(p: sink StablePermit7z) {}
           fn stable_use7z() {
             let guard = stable_lock7z(&stable_slot7z.mutex);
-            match stable_replace(guard, &stable_slot7z.mutex,
-                                 stable_slot7z.value, StableValue7z::Empty) {
-              StableValue7z::Empty => {}
-              StableValue7z::Full(p) => { stable_take7z(p); }
+            match place_take(guard, &stable_slot7z.mutex,
+                                 stable_slot7z.value) {
+              Place::Empty => {}
+              Place::Full(p) => { stable_take7z(p); }
             }
             stable_unlock7z(guard, &stable_slot7z.mutex);
           }" ();
@@ -9651,8 +9734,7 @@ fn f() -> *usize { return &temp_address_outer().r.a; }");
        expect_type_error "static value mismatch"
          "linear struct StableGuard7y[lock: addr] { private flags: usize; }
           linear view StablePermit7y;
-          variant StableValue7y { Empty; Full(StablePermit7y); }
-          struct StableSlot7y { private mutex: i32; private value: StableValue7y; }
+          struct StableSlot7y { private mutex: i32; private value: Place(StablePermit7y); }
           private let mut stable_slot7y: StableSlot7y;
           private let mut stable_other7y: StableSlot7y;
           fn stable_lock7y(m: *i32 @ lock) -> StableGuard7y[lock] {
@@ -9663,10 +9745,10 @@ fn f() -> *usize { return &temp_address_outer().r.a; }");
           fn stable_take7y(p: sink StablePermit7y) {}
           fn stable_use7y() {
             let guard = stable_lock7y(&stable_slot7y.mutex);
-            match stable_replace(guard, &stable_other7y.mutex,
-                                 stable_other7y.value, StableValue7y::Empty) {
-              StableValue7y::Empty => {}
-              StableValue7y::Full(p) => { stable_take7y(p); }
+            match place_take(guard, &stable_other7y.mutex,
+                                 stable_other7y.value) {
+              Place::Empty => {}
+              Place::Full(p) => { stable_take7y(p); }
             }
             stable_unlock7y(guard, &stable_slot7y.mutex);
           }" ());
@@ -9733,41 +9815,37 @@ fn f() -> *usize { return &temp_address_outer().r.a; }");
           return s.count;
         }");
 
-  Alcotest.test_case "stable_replace result cannot be discarded" `Quick
-    (expect_type_error "linear result of 'stable_replace' must be moved"
+  Alcotest.test_case "place_take result cannot be discarded" `Quick
+    (expect_type_error "linear result of 'place_take' must be moved"
        "linear view StableGuard7k[lock: addr];
         linear view StablePermit7k;
-        variant StableValue7k { Empty; Full(StablePermit7k); }
-        struct StableSlot7k { private mutex: i32; private value: StableValue7k; }
+        struct StableSlot7k { private mutex: i32; private value: Place(StablePermit7k); }
         private let mut stable_slot7k: StableSlot7k;
         fn stable_lock7k(m: *i32 @ lock) -> StableGuard7k[lock] {
           return view StableGuard7k[lock];
         }
         fn stable_drop_result7k() {
           let guard = stable_lock7k(&stable_slot7k.mutex);
-          stable_replace(guard, &stable_slot7k.mutex,
-            stable_slot7k.value, StableValue7k::Empty);
+          place_take(guard, &stable_slot7k.mutex,
+            stable_slot7k.value);
         }");
 
   Alcotest.test_case "stable owner containers cannot be local copies" `Quick
     (expect_type_error "not a local value"
        "linear view StablePermit7l;
-        variant StableValue7l { Empty; Full(StablePermit7l); }
-        struct StableSlot7l { private value: StableValue7l; }
+        struct StableSlot7l { private value: Place(StablePermit7l); }
         fn stable_local7l() { let mut slot: StableSlot7l; }");
 
   Alcotest.test_case "stable owner containers cannot hide inside local arrays" `Quick
     (expect_type_error "not a local value"
        "linear view StablePermit7m;
-        variant StableValue7m { Empty; Full(StablePermit7m); }
-        struct StableSlot7m { private value: StableValue7m; }
+        struct StableSlot7m { private value: Place(StablePermit7m); }
         fn stable_array7m() { let mut slots: [StableSlot7m; 2]; }");
 
   Alcotest.test_case "stable owner containers cannot be copied through dereference" `Quick
     (expect_type_error "cannot be dereferenced or copied as a whole"
        "linear view StablePermit7n;
-        variant StableValue7n { Empty; Full(StablePermit7n); }
-        struct StableSlot7n { private value: StableValue7n; }
+        struct StableSlot7n { private value: Place(StablePermit7n); }
         private let mut stable_slot7n: StableSlot7n;
         fn stable_copy7n(slot: *StableSlot7n) {
           if (*slot == *slot) {}
@@ -9777,25 +9855,21 @@ fn f() -> *usize { return &temp_address_outer().r.a; }");
      stored in arbitrary fields, arrays, globals, or other stable
      places"): a fixed-size array of a stable owner struct, as a
      top-level private mutable global, each array element its own
-     independent stable_replace-able slot addressed by a runtime index.
+     independent exchangeable slot addressed by a runtime index.
      Full LLVM codegen (expect_codegen_ok, not just expect_ok) since a
      real bug was found this same session where array-indexed
-     stable_replace type-checked fine but crashed LLVM's own IR
+     stable_replace (now place_take/place_put) type-checked fine but crashed LLVM's own IR
      verifier. *)
-  Alcotest.test_case "stable owner slot array: each element is independently stable_replace-able by runtime index" `Quick
+  Alcotest.test_case "stable owner slot array: each element is independently exchangeable by runtime index" `Quick
     (expect_codegen_ok
        "linear view StableArrGuard158[lock: addr];
         linear struct StableArrOwner158[n: usize] {
           id: usize @ n;
           value: i32;
         }
-        variant StableArrValue158 {
-          Empty;
-          Full(exists n: usize. StableArrOwner158[n]);
-        }
         struct StableArrSlot158 {
           private mutex: i32;
-          private value: StableArrValue158;
+          private value: Place(exists n: usize. StableArrOwner158[n]);
         }
         private let mut stable_arr158: [StableArrSlot158; 4];
         fn stable_arr_lock158(m: *i32 @ lock) -> StableArrGuard158[lock] {
@@ -9809,31 +9883,28 @@ fn f() -> *usize { return &temp_address_outer().r.a; }");
         fn stable_arr_drop158(owner: sink StableArrOwner158[n]) {}
         fn stable_arr_use158(slot: {0..<4 as usize}) {
           let guard = stable_arr_lock158(&stable_arr158[slot].mutex);
-          let previous: StableArrValue158 = stable_replace(
-            guard, &stable_arr158[slot].mutex, stable_arr158[slot].value,
-            StableArrValue158::Full(stable_arr_new158(7)));
+          let previous: Place(exists n: usize. StableArrOwner158[n]) = place_put(
+            guard, &stable_arr158[slot].mutex, stable_arr158[slot].value, stable_arr_new158(7));
           match previous {
-            StableArrValue158::Empty => {}
-            StableArrValue158::Full(stale) => { stable_arr_drop158(stale); }
+            Place::Empty => {}
+            Place::Full(stale) => { stable_arr_drop158(stale); }
           }
-          let current: StableArrValue158 = stable_replace(
-            guard, &stable_arr158[slot].mutex, stable_arr158[slot].value,
-            StableArrValue158::Empty);
+          let current: Place(exists n: usize. StableArrOwner158[n]) = place_take(
+            guard, &stable_arr158[slot].mutex, stable_arr158[slot].value);
           match current {
-            StableArrValue158::Empty => {}
-            StableArrValue158::Full(owner) => { stable_arr_drop158(owner); }
+            Place::Empty => {}
+            Place::Full(owner) => { stable_arr_drop158(owner); }
           }
           stable_arr_unlock158(guard, &stable_arr158[slot].mutex);
         }");
 
   Alcotest.test_case "stable owner slot array: mismatched runtime indices are not the same container" `Quick
     (expect_type_error
-       "stable_replace mutex and owner field must belong to the same syntactic container"
+       "place_take mutex and owner field must belong to the same syntactic container"
        "linear view StableArrGuard158b[lock: addr];
-        variant StableArrValue158b { Empty; Full(exists lock: addr. StableArrGuard158b[lock]); }
         struct StableArrSlot158b {
           private mutex: i32;
-          private value: StableArrValue158b;
+          private value: Place(exists lock: addr. StableArrGuard158b[lock]);
         }
         private let mut stable_arr158b: [StableArrSlot158b; 4];
         fn stable_arr_lock158b(m: *i32 @ lock) -> StableArrGuard158b[lock] {
@@ -9841,19 +9912,17 @@ fn f() -> *usize { return &temp_address_outer().r.a; }");
         }
         fn stable_arr_wrong158b(a: {0..<4 as usize}, b: {0..<4 as usize}) {
           let guard = stable_arr_lock158b(&stable_arr158b[a].mutex);
-          let previous: StableArrValue158b = stable_replace(
-            guard, &stable_arr158b[a].mutex, stable_arr158b[b].value,
-            StableArrValue158b::Empty);
+          let previous: Place(exists lock: addr. StableArrGuard158b[lock]) = place_take(
+            guard, &stable_arr158b[a].mutex, stable_arr158b[b].value);
         }");
 
   Alcotest.test_case "stable owner slot array: reassigning the index invalidates the cached place identity" `Quick
     (expect_type_error
-       "stable_replace mutex does not match guard identity"
+       "place_take mutex does not match guard identity"
        "linear view StableArrGuard158c[lock: addr];
-        variant StableArrValue158c { Empty; Full(exists lock: addr. StableArrGuard158c[lock]); }
         struct StableArrSlot158c {
           private mutex: i32;
-          private value: StableArrValue158c;
+          private value: Place(exists lock: addr. StableArrGuard158c[lock]);
         }
         private let mut stable_arr158c: [StableArrSlot158c; 4];
         fn stable_arr_lock158c(m: *i32 @ lock) -> StableArrGuard158c[lock] {
@@ -9863,18 +9932,16 @@ fn f() -> *usize { return &temp_address_outer().r.a; }");
           let mut slot: {0..<4 as usize} = 1;
           let guard = stable_arr_lock158c(&stable_arr158c[slot].mutex);
           slot = 0;
-          let previous: StableArrValue158c = stable_replace(
-            guard, &stable_arr158c[slot].mutex, stable_arr158c[slot].value,
-            StableArrValue158c::Empty);
+          let previous: Place(exists lock: addr. StableArrGuard158c[lock]) = place_take(
+            guard, &stable_arr158c[slot].mutex, stable_arr158c[slot].value);
         }");
 
   Alcotest.test_case "stable owner slot array cannot be a local (not just a global)" `Quick
     (expect_type_error "not a local value"
        "linear view StableArrGuard158d[lock: addr];
-        variant StableArrValue158d { Empty; Full(exists lock: addr. StableArrGuard158d[lock]); }
         struct StableArrSlot158d {
           private mutex: i32;
-          private value: StableArrValue158d;
+          private value: Place(exists lock: addr. StableArrGuard158d[lock]);
         }
         fn stable_arr_local158d() {
           let mut slots: [StableArrSlot158d; 4];
@@ -9883,10 +9950,9 @@ fn f() -> *usize { return &temp_address_outer().r.a; }");
   Alcotest.test_case "stable owner slot array cannot be nested in a struct field" `Quick
     (expect_type_error "cannot contain stable owner storage"
        "linear view StableArrGuard158e[lock: addr];
-        variant StableArrValue158e { Empty; Full(exists lock: addr. StableArrGuard158e[lock]); }
         struct StableArrSlot158e {
           private mutex: i32;
-          private value: StableArrValue158e;
+          private value: Place(exists lock: addr. StableArrGuard158e[lock]);
         }
         struct StableArrWrapper158e {
           slots: [StableArrSlot158e; 4];
@@ -11558,14 +11624,32 @@ let codegen_tests = [
         }
         fn dma_unlock596(guard: sink DmaGuard596[lock], m: *Mutex @ lock) {}
         fn dma_exchange596(replacement: DmaSlot596Authority)
-            -> DmaSlot596Authority {
+            -> Place(DmaSlot596Authority) {
           let guard = dma_lock596(&dma_owner_DmaSlot596.mutex);
-          let previous: DmaSlot596Authority = stable_replace(
+          let previous: Place(DmaSlot596Authority) = place_put(
               guard, &dma_owner_DmaSlot596.mutex,
               dma_owner_DmaSlot596.value, replacement);
           dma_unlock596(guard, &dma_owner_DmaSlot596.mutex);
           return previous;
         }");
+
+  (* GitHub issue #131: a fixed DMA record's owner slot is created full --
+     its global's place tag is Full (1) with the CPU token inside, rather
+     than relying on the authority's case order for a zeroed start. *)
+  Alcotest.test_case "fixed DMA owner slot is created holding the CPU token" `Quick
+    (fun () ->
+      ignore (gen_codegen
+        "struct no_copy Mutex { private word: usize; }
+         struct dma_fixed DmaFull131 { private bytes: [u8; 64]; }
+         private let mut dma_full131: DmaFull131 align(64);");
+      let ir = Llvm.string_of_llmodule !Llvm_gen.the_module in
+      let line = List.find_opt (fun l -> contains_substring l "@dma_owner_DmaFull131 =")
+          (String.split_on_char '\n' ir) in
+      match line with
+      | None -> Alcotest.fail "dma_owner_DmaFull131 not emitted"
+      | Some l ->
+          Alcotest.(check bool) "slot global has the Full tag" true
+            (contains_substring l "i32 1"));
 
   Alcotest.test_case "fixed DMA CPU pointer and ownership transitions codegen" `Quick
     (expect_codegen_ok
@@ -12430,13 +12514,9 @@ let codegen_tests = [
            id: usize @ n;
            value: i32;
          }
-         variant CgStableValue3c {
-           Empty;
-           Full(exists n: usize. CgStableOwner3c[n]);
-         }
          struct CgStableSlot3c {
            private mutex: i32;
-           private value: CgStableValue3c;
+           private value: Place(exists n: usize. CgStableOwner3c[n]);
          }
          private let mut cg_stable_slot3c: CgStableSlot3c;
          fn cg_stable_lock3c(m: *i32 @ lock) -> CgStableGuard3c[lock] {
@@ -12444,10 +12524,10 @@ let codegen_tests = [
          }
          fn cg_stable_unlock3c(g: sink CgStableGuard3c[lock],
                                m: *i32 @ lock) {}
-         fn cg_stable_exchange3c(replacement: CgStableValue3c)
-             -> CgStableValue3c {
+         fn cg_stable_exchange3c(replacement: sink CgStableOwner3c[n])
+             -> Place(exists n: usize. CgStableOwner3c[n]) {
            let guard = cg_stable_lock3c(&cg_stable_slot3c.mutex);
-           let previous: CgStableValue3c = stable_replace(
+           let previous: Place(exists n: usize. CgStableOwner3c[n]) = place_put(
              guard, &cg_stable_slot3c.mutex, cg_stable_slot3c.value,
              replacement);
            cg_stable_unlock3c(guard, &cg_stable_slot3c.mutex);
@@ -12567,13 +12647,11 @@ let codegen_tests = [
     (expect_trap_sites 0 (issue370_cell_fixture ^ {|
       fn concrete_cell() -> u8 {
         let g = brand_lock(&brand_cell.mutex);
-        let old = stable_replace(g, &brand_cell.mutex, brand_cell.slot,
-                                CellLink::Held(brand_owner(&brand_pool)));
+        let old = place_put(g, &brand_cell.mutex, brand_cell.slot, brand_owner(&brand_pool));
         brand_unlock(g);
         brand_discharge(old);
         let g = brand_lock(&brand_cell.mutex);
-        let recovered = stable_replace(g, &brand_cell.mutex, brand_cell.slot,
-                                      CellLink::Empty);
+        let recovered = place_take(g, &brand_cell.mutex, brand_cell.slot);
         brand_unlock(g);
         brand_discharge(recovered);
         brand_cell.bytes[0] = 11;
@@ -12584,8 +12662,7 @@ let codegen_tests = [
     (expect_type_error "static value mismatch" (issue370_cell_fixture ^ {|
       fn wrong_cell() {
         let g = brand_lock(&brand_cell.mutex);
-        let old = stable_replace(g, &brand_cell.mutex, brand_cell.slot,
-                                CellLink::Held(brand_owner(&other_pool)));
+        let old = place_put(g, &brand_cell.mutex, brand_cell.slot, brand_owner(&other_pool));
         brand_unlock(g);
         brand_discharge(old);
       }
@@ -12595,8 +12672,7 @@ let codegen_tests = [
       fn fixed_other() -> CellOwner[&other_pool] { return brand_owner(&other_pool); }
       fn wrong_fixed() {
         let g = brand_lock(&brand_cell.mutex);
-        let old = stable_replace(g, &brand_cell.mutex, brand_cell.slot,
-                                CellLink::Held(fixed_other()));
+        let old = place_put(g, &brand_cell.mutex, brand_cell.slot, fixed_other());
         brand_unlock(g);
         brand_discharge(old);
       }
@@ -12606,8 +12682,7 @@ let codegen_tests = [
       fn shadowed() {
         let mut brand_pool: usize = 0;
         let g = brand_lock(&brand_cell.mutex);
-        let old = stable_replace(g, &brand_cell.mutex, brand_cell.slot,
-                                CellLink::Held(brand_owner(&brand_pool)));
+        let old = place_put(g, &brand_cell.mutex, brand_cell.slot, brand_owner(&brand_pool));
         brand_unlock(g);
         brand_discharge(old);
       }
@@ -12752,8 +12827,7 @@ let codegen_tests = [
        in
        ignore (gen_codegen
          "linear struct SoHandle[a: usize] { private s: usize; private g: usize @ a; }
-          variant SoLink { End; More(exists a: usize. SoHandle[a]); }
-          struct SoHolder { private mutex: i32; private link: SoLink; }
+          struct SoHolder { private mutex: i32; private link: Place(exists a: usize. SoHandle[a]); }
           struct SoPlain { a: usize; }
           fn holds() usize { return contains_stable_owner(SoHolder); }
           fn plain() usize { return contains_stable_owner(SoPlain); }
@@ -18299,13 +18373,9 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
           id: usize @ n;
           value: i32;
         }
-        variant DwarfStableValue {
-          Empty;
-          Full(exists n: usize. DwarfStableOwner[n]);
-        }
         struct DwarfStableSlot {
           private mutex: i32;
-          private value: DwarfStableValue;
+          private value: Place(exists n: usize. DwarfStableOwner[n]);
         }
         private let mut dwarf_stable_slot: DwarfStableSlot;
         fn dwarf_stable_lock(m: *i32 @ lock) -> DwarfStableGuard[lock] {
@@ -18315,12 +18385,11 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
         fn dwarf_stable_drop(owner: sink DwarfStableOwner[n]) {}
         fn dwarf_stable_use() {
           let guard = dwarf_stable_lock(&dwarf_stable_slot.mutex);
-          let dwarf_stable_previous: DwarfStableValue = stable_replace(
-            guard, &dwarf_stable_slot.mutex, dwarf_stable_slot.value,
-            DwarfStableValue::Empty);
+          let dwarf_stable_previous: Place(exists n: usize. DwarfStableOwner[n]) = place_take(
+            guard, &dwarf_stable_slot.mutex, dwarf_stable_slot.value);
           match dwarf_stable_previous {
-            DwarfStableValue::Empty => {}
-            DwarfStableValue::Full(owner) => { dwarf_stable_drop(owner); }
+            Place::Empty => {}
+            Place::Full(owner) => { dwarf_stable_drop(owner); }
           }
           dwarf_stable_unlock(guard, &dwarf_stable_slot.mutex);
         }" ();

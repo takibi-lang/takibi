@@ -24,15 +24,10 @@ private linear struct BufferOwner[id: usize] {
     private id: usize @ id;
 }
 
-variant OwnerSlot {
-    Empty;
-    Full(exists id: usize. BufferOwner[id]);
-}
-
 struct HandoffMailbox align(64) {
     private mutex: i32;
     private state: io i32;
-    private owner: OwnerSlot;
+    private owner: Place(exists id: usize. BufferOwner[id]);
 }
 
 private let mut mailbox: HandoffMailbox;
@@ -62,11 +57,11 @@ fn mailbox_init() {
 
 fn mailbox_put(owner: BufferOwner[id], state: i32) {
     let g = mutex_lock(&mailbox.mutex);
-    let previous: OwnerSlot = stable_replace(
-        g, &mailbox.mutex, mailbox.owner, OwnerSlot::Full(owner));
+    let previous: Place(exists id: usize. BufferOwner[id]) = place_put(
+        g, &mailbox.mutex, mailbox.owner, owner);
     match previous {
-        OwnerSlot::Empty => {}
-        OwnerSlot::Full(stale) => {
+        Place::Empty => {}
+        Place::Full(stale) => {
             // The private state protocol makes this unreachable.  Preserve
             // linearity even if that runtime invariant is violated.
             mailbox_put_discard(stale);
@@ -80,24 +75,24 @@ fn mailbox_put(owner: BufferOwner[id], state: i32) {
 
 fn mailbox_put_discard(owner: sink BufferOwner[id]) {}
 
-fn mailbox_take(expected: i32) -> OwnerSlot {
+fn mailbox_take(expected: i32) -> Place(exists id: usize. BufferOwner[id]) {
     while (mailbox.state != expected) {
         interrupt_wait();
     }
     dma_consume();
     let g = mutex_lock(&mailbox.mutex);
-    let result: OwnerSlot = stable_replace(
-        g, &mailbox.mutex, mailbox.owner, OwnerSlot::Empty);
+    let result: Place(exists id: usize. BufferOwner[id]) = place_take(
+        g, &mailbox.mutex, mailbox.owner);
     mailbox.state = 0;
     mutex_unlock(g, &mailbox.mutex);
     return result;
 }
 
 fn core1_main() {
-    let received: OwnerSlot = mailbox_take(1);
+    let received: Place(exists id: usize. BufferOwner[id]) = mailbox_take(1);
     match received {
-        OwnerSlot::Empty => {}
-        OwnerSlot::Full(owner) => {
+        Place::Empty => {}
+        Place::Full(owner) => {
             for i: usize in 0..<BUFFER_LEN {
                 buffer_write(owner, i, buffer_read(owner, i) + 1);
             }
@@ -125,12 +120,12 @@ fn core0_main() {
     uart_puts("\n");
     mailbox_put(owner, 1);
 
-    let returned: OwnerSlot = mailbox_take(2);
+    let returned: Place(exists id: usize. BufferOwner[id]) = mailbox_take(2);
     match returned {
-        OwnerSlot::Empty => {
+        Place::Empty => {
             uart_puts("handoff: missing\n");
         }
-        OwnerSlot::Full(owner2) => {
+        Place::Full(owner2) => {
             let mut ok: bool = true;
             for i: usize in 0..<BUFFER_LEN {
                 if (buffer_read(owner2, i) != ((i + 1) as u8)) {

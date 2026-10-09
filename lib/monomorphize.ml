@@ -869,6 +869,7 @@ let rec unify_arg ?(trace = fun _ -> ())
       occurrences (call names were already fixed in step 3). *)
 
 let run ?(explain_inference = false) (prog : toplevel list) : toplevel list =
+  let prog = Generic_variant.with_builtins prog in
   Hashtbl.reset generic_variant_names;
   List.iter (function
     | GenericVariantDef (name, _, _, _, _, _) ->

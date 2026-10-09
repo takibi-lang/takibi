@@ -1538,11 +1538,18 @@ fn swap_cpu(frame: sink Frame[desc], next: sink *GemRxCpu) -> *GemRxCpu {
 - The fields are filled at construction; the function forms are
   provisional and may get lighter syntax later.
 
-## Stable Owner Slots and `stable_replace`
+## Places: `Place(T)`, `place_take`, `place_put`
 
-A stable owner slot is the implemented narrow exception to the general ban on
-linear values in durable storage. It is declared as a private ordinary-struct
-field whose direct type is a linear variant:
+A place is the implemented narrow exception to the general ban on linear
+values in durable storage (GitHub issue #131). It is a private
+ordinary-struct field of the built-in generic variant `Place(T)`:
+
+```takibi
+generic variant Place(T: type) { Empty; Full(T); }   // built in
+```
+
+A struct field holding linear state any other way is rejected, and the
+diagnostic names `Place`:
 
 ```takibi
 linear struct OwnerMessage[id: usize] {
@@ -1550,23 +1557,18 @@ linear struct OwnerMessage[id: usize] {
     private value: i32;
 }
 
-variant OwnerSlotValue {
-    Empty;
-    Full(exists id: usize. OwnerMessage[id]);
-}
-
 struct OwnerChan {
     private mutex: i32;
     private full: i32;
-    private value: OwnerSlotValue;
+    private value: Place(exists id: usize. OwnerMessage[id]);
 }
 
 private let mut owner_chan: OwnerChan;
 ```
 
-The first variant case must have no payload. Stable containers are
-zero-initialized globals without an explicit initializer, so declaration-order
-tag zero is the empty state.
+`Empty` is the first case. Stable containers are zero-initialized globals
+without an explicit initializer, so a place starts empty. (The one place
+created full is a fixed DMA record's owner slot; see "Fixed DMA records".)
 
 **That premise is a caller obligation where it cannot be checked.** The
 container rules below are enforced where the storage is syntactically
@@ -1575,7 +1577,7 @@ visible -- a local is rejected, and so is passing one by value -- but
 nothing distinguishes such a pointer from one into any other storage.
 A container reached through a pointer into memory that is neither
 zero-initialized nor fresh therefore compiles, and its first
-`stable_replace` reads whatever was there as the previous value: for a
+`place_take` reads whatever was there as the previous value: for a
 recycled slot that means a linear payload nobody created. Proving the
 pointer names a stable global is place tracking, which is outlook (see
 `OWNERSHIP_KERNEL.md`). Until then, an allocator handing out such storage
@@ -1584,7 +1586,7 @@ rejects the unzeroed path with `contains_stable_owner(T)` (GitHub issue
 #369). The container itself must be a `private let mut`
 global, OR a fixed-size array of one (`private let mut slots: [OwnerChan; N];`
 -- GitHub issue #158): each array element is then its own independently
-stable_replace-able slot, addressed by a runtime index (`&slots[i].mutex`,
+exchangeable place, addressed by a runtime index (`&slots[i].mutex`,
 `slots[i].value`), with the same-container check below verified structurally
 (both operands must index the SAME variable, e.g. `i`, not merely the same
 array). A stable owner container -- bare or arrayed -- cannot be local,
@@ -1592,14 +1594,22 @@ passed or returned by value, assigned as a whole, or contained in a slice,
 tuple, variant, or another struct (including as a struct field of array
 type). Passing a pointer to its stable global location is supported.
 
-The owner field cannot be read, assigned, or addressed directly. Its only
-operation is the reserved compiler builtin:
+The place cannot be read, assigned, or addressed directly. Its two
+operations are reserved compiler builtins, each an exchange under the
+container's lock that answers the place's previous content:
 
 ```takibi
-stable_replace(guard, &container.mutex, container.value, replacement)
+place_take(guard, &container.mutex, container.value)          // leaves Empty
+place_put(guard, &container.mutex, container.value, value)    // leaves Full(value)
 ```
 
-It requires exactly four operands. `guard` is a bare variable whose type is a
+Both return `Place(T)`: `place_take` returns `Full(v)` with the content it
+removed, or `Empty`; `place_put` returns `Empty` when it stored into an
+empty place and `Full(old)` with the content it displaced otherwise. There
+is no general exchange: `stable_replace`, the earlier four-operand form,
+was removed from the source language when every slot became a place.
+
+The operands are checked the same way for both. `guard` is a bare variable whose type is a
 linear erased view carrying exactly one `addr` index. The second operand must
 be the address of an ordinary field, and its static place identity must equal
 that guard index. The mutex field and registered stable owner field must have
@@ -1612,12 +1622,11 @@ variable, or a field/index chain rooted in one, e.g. `slots[i].mutex` and
 this proves the two occurrences observe the same call-site value, not that
 any particular runtime index is involved, and it is re-checked (not cached
 past a reassignment) if the index variable is written between the guard's
-own construction and the `stable_replace` call. `replacement` has the owner
-field's linear variant
-type. It is moved into the slot and the previous value is returned. The
-returned linear variant cannot be discarded: it must be placed in an owning
-binding, returned, or matched, after which the usual all-path rules apply to
-every payload. `stable_replace` borrows rather than consumes the guard.
+own construction and the place operation. `place_put`'s `value` has the
+place's payload type `T`; it is moved into the place. The returned place
+cannot be discarded: it must be placed in an owning binding, returned, or
+matched, after which the usual all-path rules apply to every payload. Both
+operations borrow rather than consume the guard.
 
 The LLVM operation is one typed load of the old aggregate followed by one
 typed store of the replacement. The guard, static indices, and existential
@@ -1878,8 +1887,8 @@ exception symbol; it adds no dynamic handler table.
 Its stable COW resource cell is CPU-indexed at the access boundary.  The
 erased `CowSlotGuard[core, lock]` carries both the CPU identity delivered by
 the exception-entry ABI and the stable cell's address identity.  Every take
-and put operation requires the same `core` singleton; `stable_replace` still
-uses the guard's one `addr` index to authorize the concrete slot exchange.
+and put operation requires the same `core` singleton; the place operation
+still uses the guard's one `addr` index to authorize the concrete exchange.
 This keeps the current one-cell/core-0 implementation honest without putting
 linear owner variants in an array or pretending a multicore cell allocator is
 already needed.
@@ -2871,17 +2880,17 @@ This is a static placement property. It does not prove the runtime physical
 mapping, device cache coherence, or the ordering of cache maintenance.
 
 For each record, the compiler creates linear opaque `NameCpu` and
-`NameDevice` token types, a linear `NameAuthority` variant with `Cpu`,
-`Empty`, and `Device` cases, and a private stable owner global
-`dma_owner_Name` with `mutex` and `value` fields. Zero initialization puts
-the only initial CPU token in the first `Cpu` case; its runtime pointer
-payload is zero and must never be dereferenced. No claim function can mint a
+`NameDevice` token types, a linear `NameAuthority` variant with `Cpu` and
+`Device` cases, and a private global `dma_owner_Name` with a `mutex` field
+and a `value` field of type `Place(NameAuthority)`. The global is created
+full: its place holds `Full(Cpu(token))`, the only initial CPU token. The
+token's runtime pointer payload is zero and must never be dereferenced. No claim function can mint a
 second token. Casts to either token, extern functions carrying a token, and
 additional zero-initialized authority globals are rejected. The declaring
 program must provide a zero-initializable `Mutex` type for the slot's lock
-field. An exchange of this
-slot through `stable_replace` must spell the compiler-created global
-directly for both the mutex and owner field. The guard still represents a
+field. A `place_take` or
+`place_put` on this slot must spell the compiler-created global directly
+for both the mutex and the place field. The guard still represents a
 real lock acquisition supplied by the caller, as for other stable slots.
 
 Ordinary reads, writes, address-taking, field access, and casts of the

@@ -55,7 +55,7 @@
 //   discussion) needs the SAME kind of hand-off this codebase already
 //   uses for cross-context shared state elsewhere: put the pool (or the
 //   specific field a concurrent caller touches) behind a lock/guard pair
-//   and stable_replace, the pattern kernel/kernel/process.tkb's
+//   and a Place field, the pattern kernel/kernel/process.tkb's
 //   ScheduledProcessStore, kernel/net/tcp.tkb's TcpConnectionStore, and
 //   kernel/mm/process_image.tkb's ProcessCloneVmStore already establish
 //   -- not a change to this file itself.

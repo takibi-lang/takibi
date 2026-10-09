@@ -4828,7 +4828,11 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
         "svc5.result" builder in
       (TypeUsize, result)
 
-  | Call ("stable_replace",
+  | Call (("place_take" | "place_put"), _)
+    when Generic_variant.place_exchange e <> None ->
+      gen_expr ?expected_ty locals (Option.get (Generic_variant.place_exchange e))
+
+  | Call (("%place_take" | "%place_put"),
           [guard_e; lock_e; { desc = FieldGet (base_e, fname); _ };
            replacement_e]) ->
       (* The erased guard has no ABI value. The lock address is evaluated for
@@ -4840,7 +4844,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
         match gen_field_access locals base_e fname with
         | FieldPlace (ty, place, is_volatile) -> (ty, place, is_volatile)
         | FieldValue _ ->
-            raise (Error "BUG: stable_replace field has no stable address")
+            raise (Error "BUG: a place has no stable address")
       in
       let field_ptr = place_ptr field_place in
       let value_ty = resolve_special_type field_ty in
@@ -6887,6 +6891,28 @@ let attach_global_debug name ast_ty decl_loc gvar =
     in
     ignore gve
 
+(* GitHub issue #131: a fixed DMA record's owner slot is created full. Its
+   value is Place::Full(Cpu(token)); a token is a zero pointer and Cpu is
+   the authority's first case, so the place's tag is the only nonzero
+   member. *)
+let dma_slot_initializer record llty =
+  let slot = Dma_fixed_registry.slot_type record in
+  let fields = match Hashtbl.find_opt struct_fields slot with
+    | Some fs -> fs
+    | None -> raise (Error (Printf.sprintf "unknown struct '%s'" slot)) in
+  let value_index = match List.find_index (fun (f, _) -> f = "value") fields with
+    | Some i -> i
+    | None -> raise (Error "BUG: DMA owner slot has no value field") in
+  let member = match Hashtbl.find_opt struct_llvm_field_index slot with
+    | Some map when value_index < Array.length map -> map.(value_index)
+    | _ -> value_index in
+  let members = Array.map const_null (struct_element_types llty) in
+  let place_ty = members.(member) |> type_of in
+  let place = Array.map const_null (struct_element_types place_ty) in
+  place.(0) <- const_int (i32_type context) 1;
+  members.(member) <- const_struct context place;
+  const_named_struct llty members
+
 let gen_global ?prog_types name ty_opt expr_opt align_opt is_mutable decl_loc =
   let ast_ty = match prog_types with
     | None -> (match ty_opt with Some t -> t | None -> TypeI32)
@@ -7024,7 +7050,10 @@ let gen_global ?prog_types name ty_opt expr_opt align_opt is_mutable decl_loc =
   in
   let init = match expr_opt with
     | Some e -> eval_const ast_ty e
-    | None   -> undef llty  (* no initializer -> LLVM undef; startup.S zeroes BSS *)
+    | None ->
+        (match Dma_fixed_registry.record_of_slot_global name with
+         | Some record -> dma_slot_initializer record llty
+         | None -> undef llty)  (* no initializer -> LLVM undef; startup.S zeroes BSS *)
   in
   (match is_mutable, ast_ty, expr_opt with
    | false, TypeArray (_, _), Some { desc = StructLit elements; _ }
@@ -7537,6 +7566,10 @@ let gen_program ?prog_types prog =
   (* The declared-type phase is a required boundary: silently repairing an
      unresolved AST here would hide a caller that bypassed it. *)
   Declared_type_resolver.validate prog;
+  (* GitHub issue #732: one ordinary variant per generic variant instance
+     the checker saw, for layout. *)
+  let prog = prog @ Generic_variant.instance_defs prog
+                      (Type_inf.generic_variant_site_instances ()) in
   (* GitHub issue #326: dispose and recreate the_module itself before
      anything else, rather than trying to reset the per-program Hashtables
      in place. bin/main.exe only ever reaches this function once per

@@ -1,17 +1,12 @@
 linear view StableDropGuard[lock: addr];
 linear view StableDropPermit;
 
-// stable_replace moves the old linear package out of durable storage. The
+// place_take moves the old linear package out of durable storage. The
 // caller must bind, return, or match that result rather than discard it.
-
-variant StableDropValue {
-    Empty;
-    Full(StableDropPermit);
-}
 
 struct StableDropSlot {
     private mutex: i32;
-    private value: StableDropValue;
+    private value: Place(StableDropPermit);
 }
 
 private let mut stable_drop_slot: StableDropSlot;
@@ -22,10 +17,9 @@ fn stable_drop_lock(m: *i32 @ lock) -> StableDropGuard[lock] {
 
 fn drop_replaced_owner() {
     let guard = stable_drop_lock(&stable_drop_slot.mutex);
-    stable_replace(
+    place_take(
         guard,
         &stable_drop_slot.mutex,
-        stable_drop_slot.value,
-        StableDropValue::Empty
+        stable_drop_slot.value
     );
 }

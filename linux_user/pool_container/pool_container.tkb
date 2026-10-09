@@ -12,8 +12,8 @@
 //
 // The node below is that container living in pool memory instead:
 //
-//   variant NodeLink[p: addr] { End; More(exists a: usize. ...); }
-//   struct Node[p: addr] { private mutex: i32; private link: NodeLink[p]; }
+//   variant Place(exists a: usize. IntrusiveOwner[p: addr, a]) { End; More(exists a: usize. ...); }
+//   struct Node[p: addr] { private mutex: i32; private link: Place(exists a: usize. IntrusiveOwner[p, a]); }
 //
 // Two things had to be true for it to work, and one of them was not.
 //
@@ -33,14 +33,9 @@
 // premise true, and the reuse case below is the regression test for it.
 use "kernel/lib/intrusive_pool.tkb";
 
-variant NodeLink[p: addr] {
-    End;
-    More(exists a: usize. IntrusiveOwner[p, a]);
-}
-
 struct Node[p: addr] {
     private mutex: i32;
-    private link: NodeLink[p];
+    private link: Place(exists a: usize. IntrusiveOwner[p, a]);
     value: usize;
 }
 
@@ -53,10 +48,10 @@ fn node_lock(m: *i32 @ address) -> NodeGuard[address] {
 fn node_unlock(g: sink NodeGuard[address], m: *i32 @ address) {}
 
 // Discharges a link, reporting whether it held anything.
-fn link_was_occupied(l: NodeLink[p]) -> bool {
+fn link_was_occupied(l: Place(exists a: usize. IntrusiveOwner[p, a])) -> bool {
     match l {
-        NodeLink::End => { return false; }
-        NodeLink::More(o) => { intrusive_owner_drop(o); return true; }
+        Place::Empty => { return false; }
+        Place::Full(o) => { intrusive_owner_drop(o); return true; }
     }
 }
 
@@ -66,7 +61,7 @@ fn app_main() !{unsafe} {
     uart_puts("pool_container\n");
 
     // -- Build a chain. Each new node parks the old head inside itself.
-    let mut head: NodeLink[&nodes] = NodeLink::End;
+    let mut head: Place(exists a: usize. IntrusiveOwner[&nodes, a]) = Place::Empty;
     let mut built: usize = 0;
     let mut sum: usize = 0;
     let mut going: bool = true;
@@ -80,14 +75,17 @@ fn app_main() !{unsafe} {
                 node.mutex = 0;
                 node.value = built + 1;
                 let ng = node_lock(&node.mutex);
-                let displaced: NodeLink[&nodes] =
-                    stable_replace(ng, &node.mutex, node.link, head);
+                let displaced: Place(exists a: usize. IntrusiveOwner[&nodes, a]) =
+                    match head {
+                        Place::Empty => { place_take(ng, &node.mutex, node.link) }
+                        Place::Full(o) => { place_put(ng, &node.mutex, node.link, o) }
+                    };
                 node_unlock(ng, &node.mutex);
                 // A freshly zeroed node's slot must have been empty. If
                 // this ever reports true, the premise broke.
                 if (link_was_occupied(displaced)) { sum = sum + 1000000; }
                 sum = sum + built + 1;
-                head = NodeLink::More(o);
+                head = Place::Full(o);
                 built = built + 1;
             }
             IntrusivePoolInsertResult::OutOfMemory => { going = false; }

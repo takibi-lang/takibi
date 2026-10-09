@@ -1434,7 +1434,7 @@ fn intrusive_pool_grow_one_chunk(T: type, pool: &mut IntrusivePool(T) @ pool_id)
 // reason is that the language's empty state for such a field is
 // "declaration-order tag zero", inherited from a zero-initialized global
 // rather than written by anyone. A pool slot is neither zero-initialized
-// nor fresh: reuse it and the next stable_replace reads the previous
+// nor fresh: reuse it and the next place_take reads the previous
 // occupant's tag and hands back a linear value no allocation ever
 // produced. Demonstrated, not theorised -- see issue #369.
 //
@@ -1479,7 +1479,7 @@ fn intrusive_pool_insert(T: type, pool: &mut IntrusivePool(T) @ pool_id,
     // through here, because its empty state is "declaration-order tag
     // zero" inherited from a zero-initialized global -- and a recycled
     // slot is neither zero nor fresh. Reuse one and the next
-    // stable_replace reads the previous occupant's tag and hands back a
+    // place_take reads the previous occupant's tag and hands back a
     // linear value no allocation ever produced.
     //
     // This used to be a sentence in the limitations header. It is a

@@ -1,1 +1,1 @@
-stable_replace mutex does not match guard identity
+place_take mutex does not match guard identity

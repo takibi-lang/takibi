@@ -246,9 +246,9 @@ struct TcpConnection {
     // never the reverse.
     private lock: TaskMutex;
     private frames_mutex: Mutex;
-    private tx: FrameLink;
-    private rx: FrameLink;
-    private inetd: FrameLink;
+    private tx: Place(exists p: addr. exists k: usize. RegionSlot(NetFrame)[p, k]);
+    private rx: Place(exists p: addr. exists k: usize. RegionSlot(NetFrame)[p, k]);
+    private inetd: Place(exists p: addr. exists k: usize. RegionSlot(NetFrame)[p, k]);
 }
 
 // Issue #189: TCP connections have dynamic lifetimes. Callers receive a
@@ -450,11 +450,6 @@ let mut tcp_injected_syn_accepted: bool = false;
 // transmit frame to be pooled first, which is the step after this one.
 // Copying here keeps this commit's behaviour identical to what it
 // replaces, and an entry's slot is 2 to a page either way.
-variant RetxLink {
-    End;
-    More(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]);
-}
-
 // pending_tcp_kind/_frame/_frame_length/_expected_ack/_remote_ip/
 // _remote_port/_local_port/_sent_at/_retries, one entry instead of nine
 // arrays -- plus `connection`, the pool address of the connection this
@@ -463,7 +458,7 @@ variant RetxLink {
 // the ceiling.
 struct RetxEntry {
     private mutex: Mutex;
-    private next: RetxLink;
+    private next: Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]);
     // GitHub issue #452: reachable only through guarded retry copy operations, which
     // needs the guard. These are the two fields the scan writes while
     // other contexts can read the entry.
@@ -486,10 +481,10 @@ struct RetxEntry {
 
 // A bare global cannot hold a variant, so the chain head is wrapped the
 // same way tcp_connection_store wraps its own: a struct carrying the
-// mutex its stable_replace needs.
+// mutex its place operations need.
 struct RetxChain {
     private mutex: Mutex;
-    private head: RetxLink;
+    private head: Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]);
 }
 
 // GitHub issue #452: the fields the retransmit scan MUTATES after an entry
@@ -497,7 +492,7 @@ struct RetxChain {
 // rather than one designated field.
 //
 // Grouped rather than five `private` markers on flat fields, deliberately:
-// stable_replace gates exactly one field, so a flat struct would need one
+// a place operation gates exactly one field, so a flat struct would need one
 // special case per field and the NEXT field added would silently get
 // neither. And making a field private and moving it into a nested struct
 // are both call-site-wide edits, so doing them in one pass touches each
@@ -593,11 +588,6 @@ struct NetFrame {
 // cross-pool mixup falls to intrusive_pool_slot_is_valid at runtime
 // rather than to `static value mismatch` at compile time. Stated here
 // because it is the price of the container, not a surprise.
-variant FrameLink {
-    None;
-    Some(exists p: addr. exists k: usize. RegionSlot(NetFrame)[p, k]);
-}
-
 // GitHub issue #451: a linear STRUCT, not an erased view any more.
 // A view emits nothing, so it could not carry the interrupt state a
 // release must restore -- and it did not need to while the lock itself
@@ -611,7 +601,7 @@ private linear struct FrameGuard[lock: addr] {
     private flags: usize;
 }
 // GitHub issue #672 layer 3: the built-in region_pool. A frame is a slot
-// whose permission the connection parks in its FrameLink fields; the pool
+// whose permission the connection parks in its frame places; the pool
 // grows by a chunk of pages when it is full and gives a chunk whose frames
 // are all free straight back to the page allocator. Its lock masks
 // interrupts (tcp_frame_pool_lock), as intrusive_pool's did.
@@ -675,10 +665,10 @@ fn tcp_frame_unlock(guard: sink FrameGuard[address],
 // generation off the handle, discharge it, and rebuild -- which is
 // exactly the one way to produce a handle the pool did not mint, and
 // exactly why remove validates before it trusts one.
-fn tcp_frame_release_link(link: FrameLink) !{unsafe} {
+fn tcp_frame_release_link(link: Place(exists p: addr. exists k: usize. RegionSlot(NetFrame)[p, k])) !{unsafe} {
     match link {
-        FrameLink::None => {}
-        FrameLink::Some(parked) => {
+        Place::Empty => {}
+        Place::Full(parked) => {
             // The parked slot lost its pool identity in the struct field
             // (#370); adopting it back checks that it is an Out slot of
             // this pool before it is freed.
@@ -708,7 +698,7 @@ fn tcp_frame_release_link(link: FrameLink) !{unsafe} {
 // recycled slot would otherwise put a previous connection's bytes on the
 // wire past the length the caller meant to send -- and the same argument
 // covers a receive buffer read back past its recorded length.
-fn tcp_frame_take() -> (FrameLink, bool) !{unsafe} {
+fn tcp_frame_take() -> (Place(exists p: addr. exists k: usize. RegionSlot(NetFrame)[p, k]), bool) !{unsafe} {
     let guard = tcp_frame_pool_lock(&tcp_frame_pool);
     let mut attempts: usize = 0;
     while (attempts < 2) {
@@ -717,7 +707,7 @@ fn tcp_frame_take() -> (FrameLink, bool) !{unsafe} {
             RegionPoolAlloc(NetFrame)::Allocated(frame) => {
                 region_slot_zero(frame);
                 tcp_frame_pool_unlock(guard);
-                return (FrameLink::Some(frame), true);
+                return (Place::Full(frame), true);
             }
             RegionPoolAlloc(NetFrame)::Exhausted => { attempts = 2; }
             RegionPoolAlloc(NetFrame)::Full => {
@@ -747,7 +737,7 @@ fn tcp_frame_take() -> (FrameLink, bool) !{unsafe} {
     tcp_frame_pool_unlock(guard);
     kernel_boot_log_resource_exhausted(
         "TCP frame pool (out of pages)" as *u8, 0);
-    return (FrameLink::None, false);
+    return (Place::Empty, false);
 }
 
 // Hands this connection its three frames, or returns false having released
@@ -776,20 +766,26 @@ fn tcp_connection_frames_acquire(conn: borrow &mut TcpConnection) -> bool !{unsa
     }
 
     let tx_guard = tcp_frame_lock(&conn.frames_mutex);
-    let displaced_tx: FrameLink = stable_replace(
-        tx_guard, &conn.frames_mutex, conn.tx, tx);
+    let displaced_tx: Place(exists p: addr. exists k: usize. RegionSlot(NetFrame)[p, k]) = match tx {
+        Place::Empty => { place_take(tx_guard, &conn.frames_mutex, conn.tx) }
+        Place::Full(value) => { place_put(tx_guard, &conn.frames_mutex, conn.tx, value) }
+    };
     tcp_frame_unlock(tx_guard, &conn.frames_mutex);
     tcp_frame_release_displaced(displaced_tx);
 
     let rx_guard = tcp_frame_lock(&conn.frames_mutex);
-    let displaced_rx: FrameLink = stable_replace(
-        rx_guard, &conn.frames_mutex, conn.rx, rx);
+    let displaced_rx: Place(exists p: addr. exists k: usize. RegionSlot(NetFrame)[p, k]) = match rx {
+        Place::Empty => { place_take(rx_guard, &conn.frames_mutex, conn.rx) }
+        Place::Full(value) => { place_put(rx_guard, &conn.frames_mutex, conn.rx, value) }
+    };
     tcp_frame_unlock(rx_guard, &conn.frames_mutex);
     tcp_frame_release_displaced(displaced_rx);
 
     let inetd_guard = tcp_frame_lock(&conn.frames_mutex);
-    let displaced_inetd: FrameLink = stable_replace(
-        inetd_guard, &conn.frames_mutex, conn.inetd, inetd);
+    let displaced_inetd: Place(exists p: addr. exists k: usize. RegionSlot(NetFrame)[p, k]) = match inetd {
+        Place::Empty => { place_take(inetd_guard, &conn.frames_mutex, conn.inetd) }
+        Place::Full(value) => { place_put(inetd_guard, &conn.frames_mutex, conn.inetd, value) }
+    };
     tcp_frame_unlock(inetd_guard, &conn.frames_mutex);
     tcp_frame_release_displaced(displaced_inetd);
 
@@ -799,32 +795,32 @@ fn tcp_connection_frames_acquire(conn: borrow &mut TcpConnection) -> bool !{unsa
 // Acquiring over a frame this connection already had. Release rather than
 // leak it, and say so: the acquire/release pairing is supposed to make
 // this unreachable.
-fn tcp_frame_release_displaced(link: FrameLink) !{unsafe} {
+fn tcp_frame_release_displaced(link: Place(exists p: addr. exists k: usize. RegionSlot(NetFrame)[p, k])) !{unsafe} {
     match link {
-        FrameLink::None => {}
-        FrameLink::Some(stale) => {
+        Place::Empty => {}
+        Place::Full(stale) => {
             kernel_boot_log("tcp frames: acquire displaced a live frame\n");
-            tcp_frame_release_link(FrameLink::Some(stale));
+            tcp_frame_release_link(Place::Full(stale));
         }
     }
 }
 
 fn tcp_connection_frames_release(conn: borrow &mut TcpConnection) !{unsafe} {
     let tx_guard = tcp_frame_lock(&conn.frames_mutex);
-    let held_tx: FrameLink = stable_replace(
-        tx_guard, &conn.frames_mutex, conn.tx, FrameLink::None);
+    let held_tx: Place(exists p: addr. exists k: usize. RegionSlot(NetFrame)[p, k]) = place_take(
+        tx_guard, &conn.frames_mutex, conn.tx);
     tcp_frame_unlock(tx_guard, &conn.frames_mutex);
     tcp_frame_release_link(held_tx);
 
     let rx_guard = tcp_frame_lock(&conn.frames_mutex);
-    let held_rx: FrameLink = stable_replace(
-        rx_guard, &conn.frames_mutex, conn.rx, FrameLink::None);
+    let held_rx: Place(exists p: addr. exists k: usize. RegionSlot(NetFrame)[p, k]) = place_take(
+        rx_guard, &conn.frames_mutex, conn.rx);
     tcp_frame_unlock(rx_guard, &conn.frames_mutex);
     tcp_frame_release_link(held_rx);
 
     let inetd_guard = tcp_frame_lock(&conn.frames_mutex);
-    let held_inetd: FrameLink = stable_replace(
-        inetd_guard, &conn.frames_mutex, conn.inetd, FrameLink::None);
+    let held_inetd: Place(exists p: addr. exists k: usize. RegionSlot(NetFrame)[p, k]) = place_take(
+        inetd_guard, &conn.frames_mutex, conn.inetd);
     tcp_frame_unlock(inetd_guard, &conn.frames_mutex);
     tcp_frame_release_link(held_inetd);
 }
@@ -843,18 +839,18 @@ enum TcpFrameRole: u8 { Tx; Rx; Inetd; }
 // nothing else reaches this field meanwhile, except a nested hold of the
 // SAME role on this path, which finds None and is told so.
 fn tcp_connection_frame_hold(owner: borrow TcpConnectionOwner[connection_pool, connection],
-                             role: TcpFrameRole) -> FrameLink !{unsafe} {
+                             role: TcpFrameRole) -> Place(exists p: addr. exists k: usize. RegionSlot(NetFrame)[p, k]) !{unsafe} {
     let conn: &mut TcpConnection = tcp_connection_of(owner);
     let guard = tcp_frame_lock(&conn.frames_mutex);
-    let held: FrameLink = match role {
+    let held: Place(exists p: addr. exists k: usize. RegionSlot(NetFrame)[p, k]) = match role {
         TcpFrameRole::Tx => {
-            stable_replace(guard, &conn.frames_mutex, conn.tx, FrameLink::None)
+            place_take(guard, &conn.frames_mutex, conn.tx)
         }
         TcpFrameRole::Rx => {
-            stable_replace(guard, &conn.frames_mutex, conn.rx, FrameLink::None)
+            place_take(guard, &conn.frames_mutex, conn.rx)
         }
         TcpFrameRole::Inetd => {
-            stable_replace(guard, &conn.frames_mutex, conn.inetd, FrameLink::None)
+            place_take(guard, &conn.frames_mutex, conn.inetd)
         }
     };
     tcp_frame_unlock(guard, &conn.frames_mutex);
@@ -863,18 +859,18 @@ fn tcp_connection_frame_hold(owner: borrow TcpConnectionOwner[connection_pool, c
 
 fn tcp_connection_frame_unhold(owner: borrow TcpConnectionOwner[connection_pool, connection],
                                role: TcpFrameRole,
-                               link: sink FrameLink) !{unsafe} {
+                               frame: sink RegionSlot(NetFrame)[p, k]) !{unsafe} {
     let conn: &mut TcpConnection = tcp_connection_of(owner);
     let guard = tcp_frame_lock(&conn.frames_mutex);
-    let displaced: FrameLink = match role {
+    let displaced: Place(exists p: addr. exists k: usize. RegionSlot(NetFrame)[p, k]) = match role {
         TcpFrameRole::Tx => {
-            stable_replace(guard, &conn.frames_mutex, conn.tx, link)
+            place_put(guard, &conn.frames_mutex, conn.tx, frame)
         }
         TcpFrameRole::Rx => {
-            stable_replace(guard, &conn.frames_mutex, conn.rx, link)
+            place_put(guard, &conn.frames_mutex, conn.rx, frame)
         }
         TcpFrameRole::Inetd => {
-            stable_replace(guard, &conn.frames_mutex, conn.inetd, link)
+            place_put(guard, &conn.frames_mutex, conn.inetd, frame)
         }
     };
     tcp_frame_unlock(guard, &conn.frames_mutex);
@@ -896,12 +892,12 @@ fn tcp_connection_frame_fill(owner: borrow TcpConnectionOwner[connection_pool, c
         -> bool !{unsafe} {
     let length: usize = source.len;
     if (length > 1514) { return false; }
-    let FrameLink::Some(slot) = tcp_connection_frame_hold(owner, role) else {
-        FrameLink::None => { tcp_frame_missing(); return false; }
+    let Place::Full(slot) = tcp_connection_frame_hold(owner, role) else {
+        Place::Empty => { tcp_frame_missing(); return false; }
     };
     let frame = tcp_frame_bytes(slot);
     slice_copy(frame[0..<length], source);
-    tcp_connection_frame_unhold(owner, role, FrameLink::Some(slot));
+    tcp_connection_frame_unhold(owner, role, slot);
     return true;
 }
 
@@ -1701,10 +1697,10 @@ private fn retx_retry_write(guard: borrow RetxGuard[address],
 // where it stands: unlinking needs the PREVIOUS entry's link held open
 // across the step that replaces it, and a link is stable owner storage,
 // which can only be swapped, never held.
-fn retx_chain_take() -> RetxLink {
+fn retx_chain_take() -> Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]) {
     let guard = retx_lock(&tcp_retx_chain.mutex);
-    let head: RetxLink = stable_replace(
-        guard, &tcp_retx_chain.mutex, tcp_retx_chain.head, RetxLink::End);
+    let head: Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]) = place_take(
+        guard, &tcp_retx_chain.mutex, tcp_retx_chain.head);
     retx_unlock(guard, &tcp_retx_chain.mutex);
     return head;
 }
@@ -1715,33 +1711,37 @@ fn retx_chain_take() -> RetxLink {
 // false if that was violated anyway, having CONSUMED the stray rather
 // than leaking it; the callers below treat that as the corruption it
 // would be.
-fn retx_chain_put(link: RetxLink) -> bool {
+fn retx_chain_put(link: Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k])) -> bool {
     let guard = retx_lock(&tcp_retx_chain.mutex);
-    let displaced: RetxLink = stable_replace(
-        guard, &tcp_retx_chain.mutex, tcp_retx_chain.head, link);
+    let displaced: Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]) = match link {
+        Place::Empty => { place_take(guard, &tcp_retx_chain.mutex, tcp_retx_chain.head) }
+        Place::Full(value) => { place_put(guard, &tcp_retx_chain.mutex, tcp_retx_chain.head, value) }
+    };
     retx_unlock(guard, &tcp_retx_chain.mutex);
     match displaced {
-        RetxLink::End => { return true; }
-        RetxLink::More(stray) => { retx_entry_release(stray); return false; }
+        Place::Empty => { return true; }
+        Place::Full(stray) => { retx_entry_release(stray); return false; }
     }
 }
 
-fn retx_entry_take_next(entry: borrow &mut RetxEntry) -> RetxLink {
+fn retx_entry_take_next(entry: borrow &mut RetxEntry) -> Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]) {
     let guard = retx_lock(&entry.mutex);
-    let next: RetxLink = stable_replace(
-        guard, &entry.mutex, entry.next, RetxLink::End);
+    let next: Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]) = place_take(
+        guard, &entry.mutex, entry.next);
     retx_unlock(guard, &entry.mutex);
     return next;
 }
 
-fn retx_entry_put_next(entry: borrow &mut RetxEntry, link: RetxLink) -> bool {
+fn retx_entry_put_next(entry: borrow &mut RetxEntry, link: Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k])) -> bool {
     let guard = retx_lock(&entry.mutex);
-    let displaced: RetxLink = stable_replace(
-        guard, &entry.mutex, entry.next, link);
+    let displaced: Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]) = match link {
+        Place::Empty => { place_take(guard, &entry.mutex, entry.next) }
+        Place::Full(value) => { place_put(guard, &entry.mutex, entry.next, value) }
+    };
     retx_unlock(guard, &entry.mutex);
     match displaced {
-        RetxLink::End => { return true; }
-        RetxLink::More(stray) => { retx_entry_release(stray); return false; }
+        Place::Empty => { return true; }
+        Place::Full(stray) => { retx_entry_release(stray); return false; }
     }
 }
 
@@ -1753,8 +1753,8 @@ fn retx_entry_put_next(entry: borrow &mut RetxEntry, link: RetxLink) -> bool {
 fn retx_entry_release(parked: sink RegionSlot(RetxEntry)[p, k]) !{unsafe} {
     let entry: &mut RetxEntry = region_slot_record(parked);
     match retx_entry_take_next(entry) {
-        RetxLink::End => {}
-        RetxLink::More(stray) => {
+        Place::Empty => {}
+        Place::Full(stray) => {
             kernel_boot_log("tcp retx: a freed entry still had a link\n");
             region_slot_abandon(stray);
         }
@@ -1811,7 +1811,7 @@ private fn tcp_retx_pool_return_empty(
 // One zeroed entry, or End when the page allocator is empty. Zeroed for
 // the reason intrusive_pool_insert_zeroed was required: `next` is stable
 // owner storage, whose empty state is a zero tag (#369).
-fn tcp_retx_take() -> RetxLink !{unsafe} {
+fn tcp_retx_take() -> Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]) !{unsafe} {
     let guard = tcp_retx_pool_lock(&tcp_retx_pool);
     let mut attempts: usize = 0;
     while (attempts < 2) {
@@ -1820,7 +1820,7 @@ fn tcp_retx_take() -> RetxLink !{unsafe} {
             RegionPoolAlloc(RetxEntry)::Allocated(entry) => {
                 region_slot_zero(entry);
                 tcp_retx_pool_unlock(guard);
-                return RetxLink::More(entry);
+                return Place::Full(entry);
             }
             RegionPoolAlloc(RetxEntry)::Exhausted => { attempts = 2; }
             RegionPoolAlloc(RetxEntry)::Full => {
@@ -1848,7 +1848,7 @@ fn tcp_retx_take() -> RetxLink !{unsafe} {
         }
     }
     tcp_retx_pool_unlock(guard);
-    return RetxLink::End;
+    return Place::Empty;
 }
 
 // Reverses a detached chain. Every walk below rebuilds by pushing, which
@@ -1858,27 +1858,27 @@ fn tcp_retx_take() -> RetxLink !{unsafe} {
 // the order the nine arrays gave (pending_tcp_record took the lowest free
 // slot and pending_tcp_service_once scanned 0 upward) -- and the order
 // that retransmits the gap-filling segment first.
-fn retx_chain_reverse(link_in: RetxLink) -> RetxLink !{unsafe} {
-    let mut link: RetxLink = link_in;
-    let mut reversed: RetxLink = RetxLink::End;
+fn retx_chain_reverse(link_in: Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k])) -> Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]) !{unsafe} {
+    let mut link: Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]) = link_in;
+    let mut reversed: Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]) = Place::Empty;
     let mut walking: bool = true;
     while (walking) {
         match link {
-            RetxLink::End => { walking = false; link = RetxLink::End; }
-            RetxLink::More(parked) => {
+            Place::Empty => { walking = false; link = Place::Empty; }
+            Place::Full(parked) => {
                 let entry: &mut RetxEntry = region_slot_record(parked);
-                let following: RetxLink = retx_entry_take_next(entry);
+                let following: Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]) = retx_entry_take_next(entry);
                 if (retx_entry_put_next(entry, reversed) == false) {
                     kernel_boot_log("tcp retx: chain link was not empty\n");
                 }
-                reversed = RetxLink::More(parked);
+                reversed = Place::Full(parked);
                 link = following;
             }
         }
     }
     match link {
-        RetxLink::End => {}
-        RetxLink::More(leftover) => { retx_entry_release(leftover); }
+        Place::Empty => {}
+        Place::Full(leftover) => { retx_entry_release(leftover); }
     }
     return reversed;
 }
@@ -1889,15 +1889,15 @@ fn retx_chain_reverse(link_in: RetxLink) -> RetxLink !{unsafe} {
 // inherits a previous one's outstanding segments.
 fn pending_tcp_reset_all(conn: borrow &mut TcpConnection) !{unsafe} {
     let connection_address: usize = conn.self_address;
-    let mut link: RetxLink = retx_chain_take();
-    let mut kept: RetxLink = RetxLink::End;
+    let mut link: Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]) = retx_chain_take();
+    let mut kept: Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]) = Place::Empty;
     let mut walking: bool = true;
     while (walking) {
         match link {
-            RetxLink::End => { walking = false; link = RetxLink::End; }
-            RetxLink::More(parked) => {
+            Place::Empty => { walking = false; link = Place::Empty; }
+            Place::Full(parked) => {
                 let entry: &mut RetxEntry = region_slot_record(parked);
-                let following: RetxLink = retx_entry_take_next(entry);
+                let following: Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]) = retx_entry_take_next(entry);
                 let mine: bool = entry.connection == connection_address;
                 if (mine) {
                     retx_entry_release(parked);
@@ -1905,15 +1905,15 @@ fn pending_tcp_reset_all(conn: borrow &mut TcpConnection) !{unsafe} {
                     if (retx_entry_put_next(entry, kept) == false) {
                         kernel_boot_log("tcp retx: chain link was not empty\n");
                     }
-                    kept = RetxLink::More(parked);
+                    kept = Place::Full(parked);
                 }
                 link = following;
             }
         }
     }
     match link {
-        RetxLink::End => {}
-        RetxLink::More(leftover) => { retx_entry_release(leftover); }
+        Place::Empty => {}
+        Place::Full(leftover) => { retx_entry_release(leftover); }
     }
     if (retx_chain_put(retx_chain_reverse(kept)) == false) {
         kernel_boot_log("tcp retx: queue was not empty on reinstall\n");
@@ -1943,7 +1943,7 @@ fn pending_tcp_record(connection_owner: borrow TcpConnectionOwner[connection_poo
         -> usize !{unsafe} {
     let conn: &mut TcpConnection = tcp_connection_of(connection_owner);
     match tcp_retx_take() {
-        RetxLink::End => {
+        Place::Empty => {
             // capacity=0: there is no capacity to report any more, which
             // is the point of the change. The line still names the
             // resource, which is what an operator reading a boot log
@@ -1952,7 +1952,7 @@ fn pending_tcp_record(connection_owner: borrow TcpConnectionOwner[connection_poo
                 "TCP retransmit queue (out of pages)" as *u8, 0);
             return 0;
         }
-        RetxLink::More(owner) => {
+        Place::Full(owner) => {
             let entry_address: usize = region_slot_address(owner);
             let entry: &mut RetxEntry = region_slot_record(owner);
             // GitHub issue #460: this was `entry.mutex = 0` and it
@@ -1984,12 +1984,12 @@ fn pending_tcp_record(connection_owner: borrow TcpConnectionOwner[connection_poo
             // push, reverse back. Two extra walks of a chain that holds
             // one segment per unacknowledged write, against a retransmit
             // order that then matches what the fixed slots gave.
-            let reversed: RetxLink = retx_chain_reverse(retx_chain_take());
+            let reversed: Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]) = retx_chain_reverse(retx_chain_take());
             if (retx_entry_put_next(entry, reversed) == false) {
                 kernel_boot_log("tcp retx: fresh entry had a link\n");
             }
             if (retx_chain_put(
-                    retx_chain_reverse(RetxLink::More(owner))) == false) {
+                    retx_chain_reverse(Place::Full(owner))) == false) {
                 kernel_boot_log("tcp retx: queue was not empty on reinstall\n");
             }
             conn.retx_count =
@@ -2080,15 +2080,15 @@ fn pending_tcp_chain_probe_body(owner_a: borrow TcpConnectionOwner[first_pool, f
     // in the order they were queued.
     let mut walked: usize = 0;
     let mut lengths_ok: bool = true;
-    let mut link: RetxLink = retx_chain_take();
-    let mut kept: RetxLink = RetxLink::End;
+    let mut link: Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]) = retx_chain_take();
+    let mut kept: Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]) = Place::Empty;
     let mut walking: bool = true;
     while (walking) {
         match link {
-            RetxLink::End => { walking = false; link = RetxLink::End; }
-            RetxLink::More(parked) => {
+            Place::Empty => { walking = false; link = Place::Empty; }
+            Place::Full(parked) => {
                 let entry: &mut RetxEntry = region_slot_record(parked);
-                let following: RetxLink = retx_entry_take_next(entry);
+                let following: Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]) = retx_entry_take_next(entry);
                 if (entry.connection == conn.self_address) {
                     if (entry.frame_length != 1000 + walked) {
                         lengths_ok = false;
@@ -2098,14 +2098,14 @@ fn pending_tcp_chain_probe_body(owner_a: borrow TcpConnectionOwner[first_pool, f
                 if (retx_entry_put_next(entry, kept) == false) {
                     lengths_ok = false;
                 }
-                kept = RetxLink::More(parked);
+                kept = Place::Full(parked);
                 link = following;
             }
         }
     }
     match link {
-        RetxLink::End => {}
-        RetxLink::More(leftover) => { retx_entry_release(leftover); }
+        Place::Empty => {}
+        Place::Full(leftover) => { retx_entry_release(leftover); }
     }
     if (retx_chain_put(retx_chain_reverse(kept)) == false) { return false; }
     if (lengths_ok == false || walked != 5) { return false; }
@@ -2198,15 +2198,15 @@ fn pending_tcp_service_once(conn: borrow &mut TcpConnection,
         NetRxAcquire::Acquired(acquired) => {
             let len: i32 = net_rx_len(acquired);
             let frame = net_rx_frame(acquired);
-            let mut link: RetxLink = retx_chain_take();
-            let mut kept: RetxLink = RetxLink::End;
+            let mut link: Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]) = retx_chain_take();
+            let mut kept: Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]) = Place::Empty;
             let mut walking: bool = true;
             while (walking) {
                 match link {
-                    RetxLink::End => { walking = false; link = RetxLink::End; }
-                    RetxLink::More(parked) => {
+                    Place::Empty => { walking = false; link = Place::Empty; }
+                    Place::Full(parked) => {
                         let entry: &mut RetxEntry = region_slot_record(parked);
-                        let following: RetxLink =
+                        let following: Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]) =
                             retx_entry_take_next(entry);
                         let mut acked: bool = false;
                         if (entry.connection == conn.self_address &&
@@ -2237,15 +2237,15 @@ fn pending_tcp_service_once(conn: borrow &mut TcpConnection,
                             if (retx_entry_put_next(entry, kept) == false) {
                                 kernel_boot_log("tcp retx: chain link was not empty\n");
                             }
-                            kept = RetxLink::More(parked);
+                            kept = Place::Full(parked);
                         }
                         link = following;
                     }
                 }
             }
             match link {
-                RetxLink::End => {}
-                RetxLink::More(leftover) => { retx_entry_release(leftover); }
+                Place::Empty => {}
+                Place::Full(leftover) => { retx_entry_release(leftover); }
             }
             if (retx_chain_put(retx_chain_reverse(kept)) == false) {
                 kernel_boot_log("tcp retx: queue was not empty on reinstall\n");
@@ -2273,15 +2273,15 @@ fn pending_tcp_service_once(conn: borrow &mut TcpConnection,
         }
     }
     let now: i64 = read_cntpct();
-    let mut link: RetxLink = retx_chain_take();
-    let mut kept: RetxLink = RetxLink::End;
+    let mut link: Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]) = retx_chain_take();
+    let mut kept: Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]) = Place::Empty;
     let mut walking: bool = true;
     while (walking) {
         match link {
-            RetxLink::End => { walking = false; link = RetxLink::End; }
-            RetxLink::More(parked) => {
+            Place::Empty => { walking = false; link = Place::Empty; }
+            Place::Full(parked) => {
                 let entry: &mut RetxEntry = region_slot_record(parked);
-                let following: RetxLink = retx_entry_take_next(entry);
+                let following: Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]) = retx_entry_take_next(entry);
                 let mut expired: bool = false;
                 // GitHub issue #452: decide and mutate under the guard,
                 // TRANSMIT OUTSIDE IT. mutex_acquire masks interrupts,
@@ -2335,15 +2335,15 @@ fn pending_tcp_service_once(conn: borrow &mut TcpConnection,
                     if (retx_entry_put_next(entry, kept) == false) {
                         kernel_boot_log("tcp retx: chain link was not empty\n");
                     }
-                    kept = RetxLink::More(parked);
+                    kept = Place::Full(parked);
                 }
                 link = following;
             }
         }
     }
     match link {
-        RetxLink::End => {}
-        RetxLink::More(leftover) => { retx_entry_release(leftover); }
+        Place::Empty => {}
+        Place::Full(leftover) => { retx_entry_release(leftover); }
     }
     if (retx_chain_put(retx_chain_reverse(kept)) == false) {
         kernel_boot_log("tcp retx: queue was not empty on reinstall\n");
@@ -2867,9 +2867,9 @@ fn kernel_tcp_accept_step(owner: borrow TcpConnectionOwner[connection_pool, conn
         conn.remote_ip as []u8;
     let remote_mac_bytes =
         conn.remote_mac as []u8;
-    let FrameLink::Some(tx) =
+    let Place::Full(tx) =
             tcp_connection_frame_hold(owner, TcpFrameRole::Tx) else {
-        FrameLink::None => {
+        Place::Empty => {
             tcp_frame_missing();
             return KernelTcpAcceptStep::GaveUp(ready);
         }
@@ -3008,12 +3008,12 @@ fn kernel_tcp_accept_step(owner: borrow TcpConnectionOwner[connection_pool, conn
                 }
                 if (accepted) {
                     tcp_connection_frame_unhold(owner, TcpFrameRole::Tx,
-                                                FrameLink::Some(tx));
+                                                tx);
                     return KernelTcpAcceptStep::Accepted(ready);
                 }
                 if (routed) {
                     tcp_connection_frame_unhold(owner, TcpFrameRole::Tx,
-                                                FrameLink::Some(tx));
+                                                tx);
                     return KernelTcpAcceptStep::Pending(ready);
                 }
             }
@@ -3056,7 +3056,7 @@ fn kernel_tcp_accept_step(owner: borrow TcpConnectionOwner[connection_pool, conn
             conn.state = ConnState::Listen;
             tcp_injected_syn_pending = false;
         }
-    tcp_connection_frame_unhold(owner, TcpFrameRole::Tx, FrameLink::Some(tx));
+    tcp_connection_frame_unhold(owner, TcpFrameRole::Tx, tx);
     conn.accept_syn_ack_sent_at = syn_ack_sent_at;
     conn.accept_syn_ack_retries = syn_ack_retries;
     if ((read_cntpct() - conn.accept_start_at) >= conn.accept_deadline_ticks) {
@@ -3361,9 +3361,9 @@ fn kernel_tcp_send_received(owner: borrow TcpConnectionOwner[connection_pool, co
     if (payload_length >= 1 && payload_length <= 1460 &&
         received_length >= 1 && received_length <= 1460) {
         let length: usize = payload_length;
-        let FrameLink::Some(tx) =
+        let Place::Full(tx) =
                 tcp_connection_frame_hold(owner, TcpFrameRole::Tx) else {
-            FrameLink::None => {
+            Place::Empty => {
                 tcp_frame_missing();
                 return KernelTcpSendResult::Invalid(ready);
             }
@@ -3434,11 +3434,11 @@ fn kernel_tcp_send_received(owner: borrow TcpConnectionOwner[connection_pool, co
             tcp_drop_data_segment_index = -1;
             conn.injected_data_entry = this_entry;
             tcp_connection_frame_unhold(owner, TcpFrameRole::Tx,
-                                        FrameLink::Some(tx));
+                                        tx);
             return KernelTcpSendResult::Sent(serviced);
         }
         let sent = net_transmit_ready(serviced, frame_bytes, frame_length as i32);
-        tcp_connection_frame_unhold(owner, TcpFrameRole::Tx, FrameLink::Some(tx));
+        tcp_connection_frame_unhold(owner, TcpFrameRole::Tx, tx);
         return KernelTcpSendResult::Sent(sent);
     }
     return KernelTcpSendResult::Invalid(ready);
@@ -3464,9 +3464,9 @@ fn kernel_tcp_close_stream(owner: borrow TcpConnectionOwner[connection_pool, con
         conn.remote_ip as []u8;
     let remote_mac_bytes =
         conn.remote_mac as []u8;
-    let FrameLink::Some(tx) =
+    let Place::Full(tx) =
             tcp_connection_frame_hold(owner, TcpFrameRole::Tx) else {
-        FrameLink::None => {
+        Place::Empty => {
             tcp_frame_missing();
             return KernelTcpCloseResult::Closed(ready);
         }
@@ -3516,7 +3516,7 @@ fn kernel_tcp_close_stream(owner: borrow TcpConnectionOwner[connection_pool, con
     } else {
         ready = net_transmit_ready(ready, frame, 54);
     }
-    tcp_connection_frame_unhold(owner, TcpFrameRole::Tx, FrameLink::Some(tx));
+    tcp_connection_frame_unhold(owner, TcpFrameRole::Tx, tx);
     let start: i64 = read_cntpct();
     let counter_frequency: i64 = read_cntfrq();
     let deadline_ticks: i64 = counter_frequency * 5;

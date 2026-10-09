@@ -1,1 +1,1 @@
-linear result of 'stable_replace' must be moved into an owning binding, returned, or matched
+linear result of 'place_take' must be moved into an owning binding, returned, or matched

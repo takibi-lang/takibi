@@ -27,10 +27,11 @@ are implemented: `net_rx_frame`'s slice is now unusable after release.
 Finite-enum static states and existential indexed-view payloads now support
 closed `TcpConn[conn, state]` runtime dispatch. Plain variants can now carry
 unrestricted ordinary structs by value and live in ordinary struct fields; the RTOS SD
-server uses that subset for one typed copy-rendezvous request slot. Private
-stable owner slots can now hold one linear ownership-bearing variant and
-exchange it through `stable_replace` while the address-indexed guard for a
-same-container mutex is held; the RTOS demo uses this for one
+server uses that subset for one typed copy-rendezvous request slot. A private
+place (`Place(T)`, GitHub issue #131) can now hold one linear
+ownership-bearing value, taken with `place_take` and stored with
+`place_put` while the address-indexed guard for a same-container mutex is
+held; the RTOS demo uses this for one
 ownership-bearing rendezvous direction. Static
 `addr` indices now bind `MutexGuard[lock]` and `KGuard[lock]` to supported
 syntactic lock places and reject a mismatched explicit unlock pointer.
@@ -40,7 +41,7 @@ parameters now form a checked non-retaining call boundary, with the network
 and RTOS helper APIs migrated to state that contract. A fixed-size array of
 a stable owner struct, declared as a top-level `private let mut [T; N]`, is
 now permitted where a bare stable owner struct already was -- each array
-element is its own independent `stable_replace`-able slot, addressed by a
+element is its own independent place, addressed by a
 runtime index (`OWNERSHIP_KERNEL.md` 6.7.18); GitHub issue #158's `fork()`
 copy-on-write page table is the first real consumer of this slice, in
 place of hand-naming one global per slot. General linear-owner
@@ -981,11 +982,13 @@ ordinary field borrowing or make every global a resource-tracked place:
   uninitialized global. It cannot be copied, returned, passed by value,
   nested in another value, or allocated as a local. A pointer to that one
   stable location is the supported API surface;
-- direct read, assignment, and address-of on the owner field are rejected.
-  `stable_replace(guard, &container.mutex, container.field, replacement)` is
-  the only operation: it moves the replacement into invariant-owned storage
-  and returns the old linear variant, which existing Delta flow requires the
-  caller to bind, return, or match and discharge;
+- direct read, assignment, and address-of on the place field are rejected.
+  `place_take(guard, &container.mutex, container.field)` and
+  `place_put(guard, &container.mutex, container.field, value)` are the only
+  operations: each exchanges the place's content (Empty, or Full(value))
+  and returns the previous `Place(T)`, which existing Delta flow requires
+  the caller to bind, return, or match and discharge. (These replaced the
+  general `stable_replace` exchange on 2026-10-09, GitHub issue #131.);
 - `guard` must be a bare binding of a linear erased view with exactly one
   `addr` index. The explicit mutex field must carry that same static identity
   and share the owner field's syntactic container base. The operation keeps
@@ -1135,6 +1138,10 @@ assigning a fresh guard to the same local name cannot revive a pointer derived
 from the consumed guard.
 
 ### Lock-coupled stable owner exchange (implemented 2026-07-17)
+
+(Historical: `stable_replace` was later replaced by `place_take` and
+`place_put` on a `Place(T)` field, GitHub issue #131; the lock and
+container checks below carry over unchanged.)
 
 The stable owner operation now names its lock place explicitly:
 

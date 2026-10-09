@@ -640,8 +640,15 @@ let rec unify t1 t2 =
       List.iter2 (fun a b -> unify a b; unify b a) targs1 targs2
   | TExists (_, sort1, binder1, body1),
     TExists (_, sort2, binder2, body2) ->
-      if sort1 <> sort2 then
-        raise (Unify_error "existential static sort mismatch");
+      if sort1 <> sort2 then begin
+        let sort_name = function
+          | Ast.TypeNamed s -> s
+          | Ast.TypeUsize -> "usize"
+          | t -> Ast.show_type_expr t in
+        raise (Unify_error (Printf.sprintf
+          "existential static sort mismatch: %s vs %s"
+          (sort_name sort1) (sort_name sort2)))
+      end;
       unify body1 (subst_in_ty binder2 binder1 body2)
   | TVar rv, t | t, TVar rv ->
       (match !rv with

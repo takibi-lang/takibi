@@ -17,9 +17,18 @@ fn cow_cell_vacant_done(vacant: sink CowCellVacant[core]) {}
 
 struct CowStateStore {
     private lock: i32;
-    private state: CowFaultState;
+    private state: Place(CowFaultState);
 }
 private let mut cow_store: CowStateStore;
+
+// The store is a place (GitHub issue #131); an empty place reads as
+// CowFaultState::Empty.
+fn cow_fault_state_from_place(place: Place(CowFaultState)) -> CowFaultState {
+    match place {
+        Place::Empty => { return CowFaultState::Empty; }
+        Place::Full(state) => { return state; }
+    }
+}
 
 fn cow_cell_open(installed: borrow ExceptionHandlerInstalled[core],
                  core_tag: usize @ core) -> CowCellVacant[core] {
@@ -32,8 +41,8 @@ fn cow_cell_open(installed: borrow ExceptionHandlerInstalled[core],
 fn cow_state_put(vacant: sink CowCellVacant[core],
                  next: CowFaultState) {
     let guard = cow_slot_guard(vacant.core_tag, &cow_store.lock);
-    let previous: CowFaultState = stable_replace(
-        guard, &cow_store.lock, cow_store.state, next);
+    let previous: CowFaultState = cow_fault_state_from_place(place_put(
+        guard, &cow_store.lock, cow_store.state, next));
     cow_slot_guard_done(guard);
     match previous {
         CowFaultState::Empty => { cow_cell_vacant_done(vacant); }
@@ -50,8 +59,8 @@ fn cow_state_put(vacant: sink CowCellVacant[core],
 fn cow_state_take(core_tag: usize @ core)
         -> (CowFaultState, CowCellVacant[core]) {
     let guard = cow_slot_guard(core_tag, &cow_store.lock);
-    let state: CowFaultState = stable_replace(
-        guard, &cow_store.lock, cow_store.state, CowFaultState::Empty);
+    let state: CowFaultState = cow_fault_state_from_place(place_take(
+        guard, &cow_store.lock, cow_store.state));
     cow_slot_guard_done(guard);
     let mut vacant: CowCellVacant[core] = { core_tag };
     return (state, vacant);

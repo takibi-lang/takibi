@@ -44,11 +44,6 @@ linear struct OwnerMessage[id: usize] {
     private value: i32;
 }
 
-variant OwnerSlotValue {
-    Empty;
-    Full(exists id: usize. OwnerMessage[id]);
-}
-
 // Same shape as rtos.tkb's Chan with the value field replaced by the
 // stable owner slot -- the duplication of the rendezvous handshake in
 // owner_chan_send/owner_chan_recv below is the accepted cost of NOT
@@ -60,10 +55,10 @@ struct OwnerChan {
     private slot_full:  io i32;
     private slot_taken: io i32;
     private full:       i32;
-    private value:      OwnerSlotValue;
+    private value:      Place(exists id: usize. OwnerMessage[id]);
 }
 
-// The stable owner field starts as OwnerSlotValue::Empty because private
+// The stable owner field starts as Place::Empty because private
 // uninitialized globals are BSS-zeroed and Empty is the required first case.
 private let mut owner_chan: OwnerChan;
 let mut chan_ba: Chan;
@@ -100,13 +95,13 @@ fn owner_chan_send(ch: *OwnerChan,
         g = cond_wait(&ch.slot_taken, g, &ch.mutex);
     }
 
-    let previous: OwnerSlotValue = stable_replace(
-        g, &ch.mutex, ch.value, OwnerSlotValue::Full(message));
+    let previous: Place(exists id: usize. OwnerMessage[id]) = place_put(
+        g, &ch.mutex, ch.value, message);
     match previous {
-        OwnerSlotValue::Empty => {}
+        Place::Empty => {}
         // Unreachable when the private full/slot invariant is intact. Still
         // discharge the owner so an invariant failure cannot leak it.
-        OwnerSlotValue::Full(stale) => { owner_message_drop(stale); }
+        Place::Full(stale) => { owner_message_drop(stale); }
     }
 
     ch.full = 1;
@@ -117,13 +112,13 @@ fn owner_chan_send(ch: *OwnerChan,
     mutex_unlock(g, &ch.mutex);
 }
 
-fn owner_chan_recv(ch: *OwnerChan) -> OwnerSlotValue !{may_block} {
+fn owner_chan_recv(ch: *OwnerChan) -> Place(exists id: usize. OwnerMessage[id]) !{may_block} {
     let mut g = mutex_lock(&ch.mutex);
     while (ch.full == 0) {
         g = cond_wait(&ch.slot_full, g, &ch.mutex);
     }
-    let received: OwnerSlotValue = stable_replace(
-        g, &ch.mutex, ch.value, OwnerSlotValue::Empty);
+    let received: Place(exists id: usize. OwnerMessage[id]) = place_take(
+        g, &ch.mutex, ch.value);
     ch.full = 0;
     cond_signal(&ch.slot_taken);
     mutex_unlock(g, &ch.mutex);
@@ -150,11 +145,11 @@ fn task_ping() {
 
 fn task_pong() {
     for i: i32 in 0..<5 {
-        let received: OwnerSlotValue = owner_chan_recv(&owner_chan);
+        let received: Place(exists id: usize. OwnerMessage[id]) = owner_chan_recv(&owner_chan);
         let mut v: i32 = -1;
         match received {
-            OwnerSlotValue::Empty => {}
-            OwnerSlotValue::Full(message) => {
+            Place::Empty => {}
+            Place::Full(message) => {
                 v = owner_message_value(message);
                 owner_message_drop(message);
             }

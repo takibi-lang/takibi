@@ -1,7 +1,10 @@
-(* Compiler-owned authority storage for a fixed DMA record. The first
-   variant case has a zero pointer payload, so the zero-initialized global
-   starts with exactly one CPU token. Source cannot spell a second slot or
-   token declaration without a duplicate top-level name error. *)
+(* Compiler-owned authority storage for a fixed DMA record. The slot is a
+   Place of the record's authority (GitHub issue #131), and its global is
+   created full: code generation initializes it to Full(Cpu(token)), so it
+   starts with exactly one CPU token. A token's runtime value is a zero
+   pointer, so only the place's tag differs from zero. Source cannot spell
+   a second slot or token declaration without a duplicate top-level name
+   error. *)
 
 open Ast
 
@@ -22,11 +25,12 @@ let run (prog : toplevel list) : toplevel list =
           OpaqueStructDef (device, KindLinear, true, loc) ::
           VariantDef (authority, [],
             ["Cpu", Some (TypePtr (TypeNamed cpu));
-             "Empty", None;
              "Device", Some (TypePtr (TypeNamed device))],
             false, loc) ::
           StructDef (slot,
-            ["mutex", TypeNamed "Mutex"; "value", TypeNamed authority],
+            ["mutex", TypeNamed "Mutex";
+             "value", TypeGenericInst (Generic_variant.place_name,
+                                       [TypeNamed authority])],
             false, None, ["value"], loc) ::
           LetDef (global, Some (TypeNamed slot), None, None,
             true, true, loc) :: !additions

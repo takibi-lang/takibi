@@ -17,15 +17,33 @@ fn migration_guard_done(guard: sink MigrationGuard[place]) {
 
 struct TaskOwnerStore {
     private mutex: i32;
-    private task: MigrationTaskSlot;
+    private task: Place(MigrationTaskSlot);
 }
 
 struct TransferOwnerStore {
     private mutex: i32;
-    private transfer: MigrationTransfer;
+    private transfer: Place(MigrationTransfer);
 }
 
 private let mut task_store: TaskOwnerStore;
+
+// The store is a place (GitHub issue #131); an empty place reads as
+// MigrationTransfer::Empty.
+fn migration_transfer_from_place(place: Place(MigrationTransfer)) -> MigrationTransfer {
+    match place {
+        Place::Empty => { return MigrationTransfer::Empty; }
+        Place::Full(state) => { return state; }
+    }
+}
+
+// The store is a place (GitHub issue #131); an empty place reads as
+// MigrationTaskSlot::Empty.
+fn migration_task_slot_from_place(place: Place(MigrationTaskSlot)) -> MigrationTaskSlot {
+    match place {
+        Place::Empty => { return MigrationTaskSlot::Empty; }
+        Place::Full(state) => { return state; }
+    }
+}
 private let mut transfer_store: TransferOwnerStore;
 private let mut migrate_stage: io i32 = 0;
 private let mut task_saved: io i32 = 0;
@@ -44,8 +62,8 @@ private let mut seen_core1_after: io u8 = 0;
 
 fn task_put(next: MigrationTaskSlot) {
     let guard = migration_guard(&task_store.mutex);
-    let previous: MigrationTaskSlot = stable_replace(
-        guard, &task_store.mutex, task_store.task, next);
+    let previous: MigrationTaskSlot = migration_task_slot_from_place(place_put(
+        guard, &task_store.mutex, task_store.task, next));
     match previous {
         MigrationTaskSlot::Empty => {}
         MigrationTaskSlot::RunningOn0(stale) => { migration_running_discard(stale); }
@@ -60,17 +78,16 @@ fn task_put(next: MigrationTaskSlot) {
 
 fn task_take() -> MigrationTaskSlot {
     let guard = migration_guard(&task_store.mutex);
-    let result: MigrationTaskSlot = stable_replace(
-        guard, &task_store.mutex, task_store.task,
-        MigrationTaskSlot::Empty);
+    let result: MigrationTaskSlot = migration_task_slot_from_place(place_take(
+        guard, &task_store.mutex, task_store.task));
     migration_guard_done(guard);
     return result;
 }
 
 fn transfer_put(next: MigrationTransfer) {
     let guard = migration_guard(&transfer_store.mutex);
-    let previous: MigrationTransfer = stable_replace(
-        guard, &transfer_store.mutex, transfer_store.transfer, next);
+    let previous: MigrationTransfer = migration_transfer_from_place(place_put(
+        guard, &transfer_store.mutex, transfer_store.transfer, next));
     match previous {
         MigrationTransfer::Empty => {}
         MigrationTransfer::Outbound(stale) => {
@@ -85,9 +102,8 @@ fn transfer_put(next: MigrationTransfer) {
 
 fn transfer_take() -> MigrationTransfer {
     let guard = migration_guard(&transfer_store.mutex);
-    let result: MigrationTransfer = stable_replace(
-        guard, &transfer_store.mutex, transfer_store.transfer,
-        MigrationTransfer::Empty);
+    let result: MigrationTransfer = migration_transfer_from_place(place_take(
+        guard, &transfer_store.mutex, transfer_store.transfer));
     migration_guard_done(guard);
     return result;
 }

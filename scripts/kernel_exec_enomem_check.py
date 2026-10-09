@@ -125,7 +125,7 @@ def run():
     metadata = json.loads(METADATA.read_text())
     owner = next(item for item in metadata["enums"] if item["name"] == "PageOwnerTag")
     owner_tag = next(case["value"] for case in owner["cases"] if case["name"] == "ExecArgs")
-    slot = next(item for item in metadata["variants"] if item["name"] == "ExecArgsValue")
+    slot = next(item for item in metadata["variants"] if item["name"] == "Place$PageOwner")
     empty = next(case["tag"] for case in slot["cases"] if case["name"] == "Empty")
     gdb.execute("set pagination off")
     gdb.execute("set confirm off")

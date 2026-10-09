@@ -41,24 +41,14 @@ struct NetFrame {
 // one's, so a cross-pool mixup falls to intrusive_pool_slot_is_valid at
 // runtime rather than to `static value mismatch` at compile time. Stated
 // here because it is the price of the container, not a surprise.
-variant FrameLink {
-    None;
-    Some(exists p: addr. exists a: usize. IntrusiveOwner[p, a]);
-}
-
-variant RetxLink {
-    End;
-    More(exists p: addr. exists a: usize. IntrusiveOwner[p, a]);
-}
-
 // pending_tcp_kind/_frame/_frame_length/_expected_ack/_remote_ip/
 // _remote_port/_local_port/_sent_at/_retries, one entry instead of nine
 // arrays indexed by PENDING_TCP_MAX * TCP_CONNECTION_MAX -- and the chain
 // is what removes PENDING_TCP_MAX itself.
 struct RetxEntry {
     private mutex: i32;
-    private frame: FrameLink;
-    private next: RetxLink;
+    private frame: Place(exists p: addr. exists a: usize. IntrusiveOwner[p, a]);
+    private next: Place(exists p: addr. exists a: usize. IntrusiveOwner[p, a]);
     kind: usize;
     expected_ack: u32;
     sent_at: i64;
@@ -72,9 +62,9 @@ struct RetxEntry {
 // no array sizes.
 struct TcpConnection {
     private mutex: i32;
-    private rx: FrameLink;
-    private inetd: FrameLink;
-    private retx: RetxLink;
+    private rx: Place(exists p: addr. exists a: usize. IntrusiveOwner[p, a]);
+    private inetd: Place(exists p: addr. exists a: usize. IntrusiveOwner[p, a]);
+    private retx: Place(exists p: addr. exists a: usize. IntrusiveOwner[p, a]);
     state: usize;
     remote_port: u16;
     local_port: u16;
@@ -99,17 +89,17 @@ fn slot_unlock(g: sink SlotGuard[address], m: *i32 @ address) {}
 // Discharges a link, reporting whether it held anything. The fixture
 // leaks the underlying slots on purpose (as pool_container does): what is
 // being shown is that the STORAGE has no ceiling.
-fn frame_link_occupied(l: FrameLink) -> bool {
+fn frame_link_occupied(l: Place(exists p: addr. exists a: usize. IntrusiveOwner[p, a])) -> bool {
     match l {
-        FrameLink::None => { return false; }
-        FrameLink::Some(o) => { intrusive_owner_drop(o); return true; }
+        Place::Empty => { return false; }
+        Place::Full(o) => { intrusive_owner_drop(o); return true; }
     }
 }
 
-fn retx_link_occupied(l: RetxLink) -> bool {
+fn retx_link_occupied(l: Place(exists p: addr. exists a: usize. IntrusiveOwner[p, a])) -> bool {
     match l {
-        RetxLink::End => { return false; }
-        RetxLink::More(o) => { intrusive_owner_drop(o); return true; }
+        Place::Empty => { return false; }
+        Place::Full(o) => { intrusive_owner_drop(o); return true; }
     }
 }
 
@@ -123,10 +113,10 @@ fn retx_link_occupied(l: RetxLink) -> bool {
 // before it trusts one. The compile-time check is gone; the runtime
 // check that replaces it is intrusive_pool_slot_is_valid, and
 // foreign_handle_count is where a mistake surfaces.
-fn free_frame(link: FrameLink) -> usize !{unsafe} {
+fn free_frame(link: Place(exists p: addr. exists a: usize. IntrusiveOwner[p, a])) -> usize !{unsafe} {
     match link {
-        FrameLink::None => { return 0; }
-        FrameLink::Some(parked) => {
+        Place::Empty => { return 0; }
+        Place::Full(parked) => {
             let mut slot: IntrusiveSlotAddress = intrusive_owner_slot(parked);
             let generation: usize = intrusive_owner_generation(parked);
             intrusive_owner_drop(parked);
@@ -167,29 +157,29 @@ fn removal_was_stale(result: IntrusivePoolRemoveResult) -> bool {
 // Walk one connection's retransmit chain, returning each entry's frame
 // and then the entry. tcp.tkb's pending_tcp_reset_all() over
 // PENDING_TCP_MAX fixed slots, with the ceiling taken out.
-fn free_retx_chain(head: RetxLink) -> (usize, usize) !{unsafe} {
-    let mut link: RetxLink = head;
+fn free_retx_chain(head: Place(exists p: addr. exists a: usize. IntrusiveOwner[p, a])) -> (usize, usize) !{unsafe} {
+    let mut link: Place(exists p: addr. exists a: usize. IntrusiveOwner[p, a]) = head;
     let mut entries: usize = 0;
     let mut freed_frames: usize = 0;
     let mut walking: bool = true;
     while (walking) {
         match link {
-            RetxLink::End => { walking = false; link = RetxLink::End; }
-            RetxLink::More(parked) => {
+            Place::Empty => { walking = false; link = Place::Empty; }
+            Place::Full(parked) => {
                 let mut slot: IntrusiveSlotAddress = intrusive_owner_slot(parked);
                 let generation: usize = intrusive_owner_generation(parked);
                 intrusive_owner_drop(parked);
                 let branded = intrusive_owner_new(&retxs, slot, generation);
                 let e: *RetxEntry = intrusive_pool_ref(&retxs, branded);
                 let g1 = slot_lock(&e.mutex);
-                let carried: FrameLink =
-                    stable_replace(g1, &e.mutex, e.frame, FrameLink::None);
+                let carried: Place(exists p: addr. exists a: usize. IntrusiveOwner[p, a]) =
+                    place_take(g1, &e.mutex, e.frame);
                 slot_unlock(g1, &e.mutex);
                 freed_frames = freed_frames + free_frame(carried);
                 let e2: *RetxEntry = intrusive_pool_ref(&retxs, branded);
                 let g2 = slot_lock(&e2.mutex);
-                let following: RetxLink =
-                    stable_replace(g2, &e2.mutex, e2.next, RetxLink::End);
+                let following: Place(exists p: addr. exists a: usize. IntrusiveOwner[p, a]) =
+                    place_take(g2, &e2.mutex, e2.next);
                 slot_unlock(g2, &e2.mutex);
                 let g3 = intrusive_pool_lock(&retxs);
                 let removed1: bool =
@@ -202,8 +192,8 @@ fn free_retx_chain(head: RetxLink) -> (usize, usize) !{unsafe} {
         }
     }
     match link {
-        RetxLink::End => {}
-        RetxLink::More(leftover) => { intrusive_owner_drop(leftover); }
+        Place::Empty => {}
+        Place::Full(leftover) => { intrusive_owner_drop(leftover); }
     }
     return (entries, freed_frames);
 }
@@ -235,8 +225,8 @@ fn push_retx(conn: borrow *TcpConnection) -> bool !{unsafe} {
                     e.sent_at = 0;
                     e.retries = 0;
                     let g1 = slot_lock(&e.mutex);
-                    let d1: FrameLink = stable_replace(
-                        g1, &e.mutex, e.frame, FrameLink::Some(frame_owner));
+                    let d1: Place(exists p: addr. exists a: usize. IntrusiveOwner[p, a]) = place_put(
+                        g1, &e.mutex, e.frame, frame_owner);
                     slot_unlock(g1, &e.mutex);
                     if (frame_link_occupied(d1)) {
                         intrusive_owner_drop(entry_owner);
@@ -245,21 +235,24 @@ fn push_retx(conn: borrow *TcpConnection) -> bool !{unsafe} {
                     // Splice: entry.next takes the old head, then the
                     // connection points at the entry.
                     let g2 = slot_lock(&conn.mutex);
-                    let old_head: RetxLink = stable_replace(
-                        g2, &conn.mutex, conn.retx, RetxLink::End);
+                    let old_head: Place(exists p: addr. exists a: usize. IntrusiveOwner[p, a]) = place_take(
+                        g2, &conn.mutex, conn.retx);
                     slot_unlock(g2, &conn.mutex);
                     let e2: *RetxEntry = intrusive_pool_ref(&retxs, entry_owner);
                     let g3 = slot_lock(&e2.mutex);
-                    let d3: RetxLink =
-                        stable_replace(g3, &e2.mutex, e2.next, old_head);
+                    let d3: Place(exists p: addr. exists a: usize. IntrusiveOwner[p, a]) =
+                        match old_head {
+                            Place::Empty => { place_take(g3, &e2.mutex, e2.next) }
+                            Place::Full(o) => { place_put(g3, &e2.mutex, e2.next, o) }
+                        };
                     slot_unlock(g3, &e2.mutex);
                     if (retx_link_occupied(d3)) {
                         intrusive_owner_drop(entry_owner);
                         return false;
                     }
                     let g4 = slot_lock(&conn.mutex);
-                    let d4: RetxLink = stable_replace(
-                        g4, &conn.mutex, conn.retx, RetxLink::More(entry_owner));
+                    let d4: Place(exists p: addr. exists a: usize. IntrusiveOwner[p, a]) = place_put(
+                        g4, &conn.mutex, conn.retx, entry_owner);
                     slot_unlock(g4, &conn.mutex);
                     if (retx_link_occupied(d4)) { return false; }
                     return true;
@@ -328,9 +321,8 @@ fn app_main() !{unsafe} {
                         let rx: *NetFrame = intrusive_pool_ref(&frames, rx_owner);
                         rx.len = 0;
                         let g1 = slot_lock(&conn.mutex);
-                        let d1: FrameLink = stable_replace(
-                            g1, &conn.mutex, conn.rx,
-                            FrameLink::Some(rx_owner));
+                        let d1: Place(exists p: addr. exists a: usize. IntrusiveOwner[p, a]) = place_put(
+                            g1, &conn.mutex, conn.rx, rx_owner);
                         slot_unlock(g1, &conn.mutex);
                         if (frame_link_occupied(d1)) { stale_slots = stale_slots + 1; }
 
@@ -367,9 +359,8 @@ fn app_main() !{unsafe} {
                                         e.sent_at = 0;
                                         e.retries = 0;
                                         let g2 = slot_lock(&e.mutex);
-                                        let d2: FrameLink = stable_replace(
-                                            g2, &e.mutex, e.frame,
-                                            FrameLink::Some(tx_owner));
+                                        let d2: Place(exists p: addr. exists a: usize. IntrusiveOwner[p, a]) = place_put(
+                                            g2, &e.mutex, e.frame, tx_owner);
                                         slot_unlock(g2, &e.mutex);
                                         if (frame_link_occupied(d2)) {
                                             stale_slots = stale_slots + 1;
@@ -380,20 +371,19 @@ fn app_main() !{unsafe} {
                                         let e2: *RetxEntry =
                                             intrusive_pool_ref(&retxs, retx_owner);
                                         let g3 = slot_lock(&e2.mutex);
-                                        let held: FrameLink = stable_replace(
-                                            g3, &e2.mutex, e2.frame, FrameLink::None);
+                                        let held: Place(exists p: addr. exists a: usize. IntrusiveOwner[p, a]) = place_take(
+                                            g3, &e2.mutex, e2.frame);
                                         slot_unlock(g3, &e2.mutex);
                                         match held {
-                                            FrameLink::None => {}
-                                            FrameLink::Some(back) => {
+                                            Place::Empty => {}
+                                            Place::Full(back) => {
                                                 if (intrusive_slot_address_equal(
                                                         intrusive_owner_slot(back), tx_slot)) {
                                                     moved_frames = moved_frames + 1;
                                                 }
                                                 let g4 = slot_lock(&e2.mutex);
-                                                let d4: FrameLink = stable_replace(
-                                                    g4, &e2.mutex, e2.frame,
-                                                    FrameLink::Some(back));
+                                                let d4: Place(exists p: addr. exists a: usize. IntrusiveOwner[p, a]) = place_put(
+                                                    g4, &e2.mutex, e2.frame, back);
                                                 slot_unlock(g4, &e2.mutex);
                                                 if (frame_link_occupied(d4)) {
                                                     stale_slots = stale_slots + 1;
@@ -402,9 +392,8 @@ fn app_main() !{unsafe} {
                                         }
 
                                         let g5 = slot_lock(&conn.mutex);
-                                        let d5: RetxLink = stable_replace(
-                                            g5, &conn.mutex, conn.retx,
-                                            RetxLink::More(retx_owner));
+                                        let d5: Place(exists p: addr. exists a: usize. IntrusiveOwner[p, a]) = place_put(
+                                            g5, &conn.mutex, conn.retx, retx_owner);
                                         slot_unlock(g5, &conn.mutex);
                                         if (retx_link_occupied(d5)) {
                                             stale_slots = stale_slots + 1;
@@ -490,20 +479,20 @@ fn app_main() !{unsafe} {
                     intrusive_pool_payload_of(&conns, slot_view);
 
                 let g1 = slot_lock(&conn.mutex);
-                let parked_rx: FrameLink =
-                    stable_replace(g1, &conn.mutex, conn.rx, FrameLink::None);
+                let parked_rx: Place(exists p: addr. exists a: usize. IntrusiveOwner[p, a]) =
+                    place_take(g1, &conn.mutex, conn.rx);
                 slot_unlock(g1, &conn.mutex);
                 frames_freed = frames_freed + free_frame(parked_rx);
 
                 let g2 = slot_lock(&conn.mutex);
-                let parked_inetd: FrameLink =
-                    stable_replace(g2, &conn.mutex, conn.inetd, FrameLink::None);
+                let parked_inetd: Place(exists p: addr. exists a: usize. IntrusiveOwner[p, a]) =
+                    place_take(g2, &conn.mutex, conn.inetd);
                 slot_unlock(g2, &conn.mutex);
                 frames_freed = frames_freed + free_frame(parked_inetd);
 
                 let g3 = slot_lock(&conn.mutex);
-                let chain: RetxLink =
-                    stable_replace(g3, &conn.mutex, conn.retx, RetxLink::End);
+                let chain: Place(exists p: addr. exists a: usize. IntrusiveOwner[p, a]) =
+                    place_take(g3, &conn.mutex, conn.retx);
                 slot_unlock(g3, &conn.mutex);
                 let (entries, chain_frames) = free_retx_chain(chain);
                 retxs_freed = retxs_freed + entries;

@@ -4,23 +4,17 @@ linear view StableWrongPermit;
 // it requires a held linear erased guard; an ordinary integer cannot open the
 // invariant boundary.
 
-variant StableWrongValue {
-    Empty;
-    Full(StableWrongPermit);
-}
-
 struct StableWrongSlot {
     private mutex: i32;
-    private value: StableWrongValue;
+    private value: Place(StableWrongPermit);
 }
 
 private let mut stable_wrong_slot: StableWrongSlot;
 
-fn replace_without_guard(not_a_guard: i32) -> StableWrongValue {
-    return stable_replace(
+fn replace_without_guard(not_a_guard: i32) -> Place(StableWrongPermit) {
+    return place_take(
         not_a_guard,
         &stable_wrong_slot.mutex,
-        stable_wrong_slot.value,
-        StableWrongValue::Empty
+        stable_wrong_slot.value
     );
 }

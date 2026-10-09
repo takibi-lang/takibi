@@ -797,7 +797,7 @@ let rec static_place_key (e : Ast.expr) =
   | Ast.Var name -> Some name
   | Ast.FieldGet (base, field) ->
       Option.map (fun key -> key ^ "." ^ field) (static_place_key base)
-  (* GitHub issue #158: `arr[idx]` is a valid stable_replace container base
+  (* GitHub issue #158: `arr[idx]` is a valid place container base
      when `idx` is itself a valid place (a bare variable, or a field/index
      chain rooted in one) -- e.g. `fat_fd_table[slot].lock` and
      `fat_fd_table[slot].state` are "the same syntactic container" exactly
@@ -807,7 +807,7 @@ let rec static_place_key (e : Ast.expr) =
      `idx`'s actual runtime value, which this function never attempts).
      An `idx` that is NOT itself a place (e.g. a computed expression like
      `i + 1`) returns None here, same as any other unsupported place
-     shape -- stable_replace's own caller must bind it to a variable
+     shape -- the place operation's own caller must bind it to a variable
      first, matching how every other place in this function already
      requires a syntactically simple base. *)
   | Ast.Index (base, idx) ->
@@ -1888,9 +1888,10 @@ let private_opaque_types : (string, string) Hashtbl.t = Hashtbl.create 8
 (* (struct name, private field name) -> declaring file. *)
 let private_struct_fields : (string * string, string) Hashtbl.t = Hashtbl.create 8
 
-(* A private field whose type is a linear variant is a stable owner
-   slot. It is never read, written, or addressed directly; stable_replace is
-   the only operation that exchanges its invariant-owned value. *)
+(* A private Place(T) field holding linear state is a stable owner slot.
+   It is never read, written, or addressed directly; place_take and
+   place_put are the only operations that exchange its invariant-owned
+   value. *)
 let stable_owner_fields : (string * string, unit) Hashtbl.t = Hashtbl.create 8
 let stable_owner_structs : (string, unit) Hashtbl.t = Hashtbl.create 8
 
@@ -4014,7 +4015,23 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
           "a stable owner container cannot be nested in a runtime tuple"));
       TTuple ts
 
-  | Call ("stable_replace", args) ->
+  | Call (("place_take" | "place_put") as fname, _) ->
+      (* GitHub issue #131: a place's two operations, both the locked
+         exchange that answers the place's previous content. *)
+      (match Generic_variant.place_exchange e with
+       | Some exchange -> infer_expr senv eenv tyenv fenv exchange
+       | None -> raise (TypeError (e.loc, Printf.sprintf
+           "%s expects %s" fname
+           (if fname = "place_take"
+            then "3 arguments: place_take(guard, &container.mutex, container.slot)"
+            else "4 arguments: place_put(guard, &container.mutex, container.slot, value)"))))
+  | Call ("stable_replace", _) ->
+      raise (TypeError (e.loc,
+        "stable_replace was removed: a stored linear value lives in a \
+         Place(T) field; use place_take(guard, &c.mutex, c.slot) or \
+         place_put(guard, &c.mutex, c.slot, value) (GitHub issue #131)"))
+  | Call (("%place_take" | "%place_put") as exchange, args) ->
+      let op = Generic_variant.surface_name exchange in
       (match args with
        | [guard;
           ({ desc = AddrOf
@@ -4025,7 +4042,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            (match guard.desc with
             | Var _ -> ()
             | _ -> raise (TypeError (guard.loc,
-                "stable_replace guard must be a bare linear guard binding")));
+                (op ^ " guard must be a bare linear guard binding"))));
            let gt = infer_expr senv eenv tyenv fenv guard in
            (* The single `addr` index the guard carries, whichever shape it
               is. GitHub issue #451: a guard was an erased `linear view`
@@ -4034,7 +4051,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
               payload. So a linear STRUCT with the same static parameters
               is equally a guard here, and the check is the same question
               asked of `indexed_struct_params` instead of `view_params`.
-              What stable_replace needs from a guard is its identity, and
+              What a place operation needs from a guard is its identity, and
               that is erased in both. *)
            let single_addr_arg formals args =
              let addr_args = List.fold_left2 (fun found (_, sort) arg ->
@@ -4044,7 +4061,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
              match addr_args with
              | [lock] -> lock
              | _ -> raise (TypeError (guard.loc,
-                 "stable_replace guard must carry exactly one addr index"))
+                 (op ^ " guard must carry exactly one addr index")))
            in
            let guard_lock = match repr gt with
             | TView (name, args)
@@ -4065,28 +4082,28 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                compiler change does not license editing examples/. The
                message has to grow rather than be rewritten. *)
             | _ -> raise (TypeError (guard.loc,
-                "stable_replace requires a linear erased-view guard or an \
-                 indexed linear struct guard carrying one addr"))
+                (op ^ " requires a linear erased-view guard or an \
+                 indexed linear struct guard carrying one addr")))
            in
            let lock_ty = infer_expr senv eenv tyenv fenv lock_addr in
            (match repr lock_ty with
             | TPtr _ | TAlignedPtr _ -> ()
             | _ -> raise (TypeError (lock_addr.loc,
-                "stable_replace mutex argument must be a field address")));
+                (op ^ " mutex argument must be a field address"))));
            (try unify_static guard_lock (static_identity_for_place lock_place)
             with Unify_error msg ->
               raise (TypeError (lock_addr.loc,
-                "stable_replace mutex does not match guard identity: " ^ msg)));
+                (op ^ " mutex does not match guard identity: ") ^ msg)));
            (match static_place_key lock_base, static_place_key base_expr with
             | Some lock_key, Some owner_key when lock_key = owner_key -> ()
             | _ -> raise (TypeError (field_expr.loc,
-                "stable_replace mutex and owner field must belong to the same \
-                 syntactic container")));
+                (op ^ " mutex and owner field must belong to the same \
+                 syntactic container"))));
            let bt = infer_expr senv eenv tyenv fenv base_expr in
            let (sname, static_args) = match struct_instance (repr bt) with
              | Some x -> x
              | None -> raise (TypeError (base_expr.loc,
-                 "stable_replace target must be a struct field"))
+                 (op ^ " target must be a struct field")))
            in
            (match Dma_fixed_registry.record_of_slot_type sname with
             | Some record ->
@@ -4102,8 +4119,8 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            check_private_field_access field_expr.loc sname fname;
            if not (is_stable_owner_field sname fname) then
              raise (TypeError (field_expr.loc, Printf.sprintf
-               "field '%s.%s' is not stable owner storage; stable_replace requires a private linear variant field"
-               sname fname));
+               "field '%s.%s' is not a place; %s requires a private Place field"
+               sname fname op));
            let fields = match StringMap.find_opt sname senv with
              | Some (fs, _, _) -> fs
              | None -> raise (TypeError (base_expr.loc,
@@ -4118,19 +4135,18 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            let rt = adapt_actual_to_expected tyenv replacement rt field_ty in
            unify_at replacement.loc rt field_ty;
            (match repr field_ty with
-            | TVariant (name, _, _)
-              when Hashtbl.find_opt variant_kinds name = Some Ast.KindLinear ->
+            | TVariant _ when is_linear_payload_ty field_ty ->
                 field_ty
             | _ -> raise (TypeError (field_expr.loc,
-                "stable_replace target must hold a linear variant")))
+                (op ^ " target must hold a linear variant"))))
        | [_; lock; { desc = FieldGet _; _ }; _] ->
            raise (TypeError (lock.loc,
-             "stable_replace second argument must be the address of a mutex field"))
+             (op ^ " second argument must be the address of a mutex field")))
        | [_; _; field; _] ->
            raise (TypeError (field.loc,
-             "stable_replace third argument must be a stable struct field"))
+             (op ^ " third argument must be a stable struct field")))
        | _ -> raise (TypeError (e.loc,
-           "stable_replace expects 4 arguments: stable_replace(guard, &container.mutex, container.owner, replacement)")))
+           ("BUG: " ^ op ^ " reached the checker without its replacement"))))
 
   | Call (("dma_publish" | "dma_consume" | "device_fence" | "signal_fence"
           | "interrupt_wait" | "interrupt_notify") as fname, args) ->
@@ -5298,7 +5314,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            check_private_field_access e.loc sname fname;
            if is_stable_owner_field sname fname then
              raise (TypeError (e.loc, Printf.sprintf
-               "stable owner field '%s.%s' cannot be assigned directly; use stable_replace while holding its guard"
+               "stable owner field '%s.%s' cannot be assigned directly; use place_take or place_put while holding its guard"
                sname fname));
            let field_ty = match List.assoc_opt fname fields with
              | Some ft -> field_type_for_instance sname static_args ft
@@ -5504,7 +5520,7 @@ and infer_addrof_wrapped senv eenv tyenv fenv (e : Ast.expr) (inner : Ast.expr)
        check_private_field_access e.loc sname fname;
        if is_stable_owner_field sname fname then
          raise (TypeError (e.loc, Printf.sprintf
-           "stable owner field '%s.%s' cannot be addressed; use stable_replace while holding its guard"
+           "stable owner field '%s.%s' cannot be addressed; use place_take or place_put while holding its guard"
            sname fname));
        (match List.assoc_opt fname fields with
         | Some ft ->
@@ -5580,7 +5596,7 @@ and infer_field_access ?(slice_source = false) ~decay senv eenv tyenv fenv
       check_private_field_access loc sname fname;
       if is_stable_owner_field sname fname then
         raise (TypeError (loc, Printf.sprintf
-          "stable owner field '%s.%s' cannot be read directly; use stable_replace while holding its guard"
+          "stable owner field '%s.%s' cannot be read directly; use place_take or place_put while holding its guard"
           sname fname));
       (match List.assoc_opt fname fields with
        | Some ft ->
@@ -6606,11 +6622,22 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
                       vtype (List.length params) (List.length variant_args)));
                   List.iter2 (fun (name, _sort) arg -> bind_static scope name arg)
                     params variant_args);
+             (* A type argument standing for the payload carries its
+                existentials as resolved types, not schema syntax; they
+                open the same way, so `Place(exists p. ...)`'s Full(x)
+                binds x as an ordinary variant's payload would. *)
+             let rec open_resolved t =
+               match repr t with
+               | TExists (name, _, binder, body) ->
+                   open_resolved
+                     (Types.subst_in_ty binder (rigid_static name) body)
+               | t -> t
+             in
              let rec open_exists = function
                | Ast.TypeExists (name, _, body) ->
                    bind_static scope name (rigid_static name);
                    open_exists body
-               | ty -> of_ast_in_decl_scope scope ty
+               | ty -> open_resolved (of_ast_in_decl_scope scope ty)
              in
              with_variant_type_args vtype variant_targs
                (fun () -> open_exists schema)
@@ -7526,14 +7553,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
      stable owner storage. *)
   let register_stable_owner sname fields private_fields =
         List.iter (fun (fname, ty) ->
-          let variant_name = match ty with
-            | Ast.TypeVariant (name, _, _) -> Some name
-            | _ -> None
+          let variant_linear = match ty with
+            | Ast.TypeVariant (name, _, targs) ->
+                Hashtbl.find_opt variant_kinds name = Some Ast.KindLinear
+                || List.exists (fun t -> is_linear_payload_ty (Types.of_ast t)) targs
+            | _ -> false
           in
-          match variant_name with
-          | Some name
-            when Hashtbl.find_opt variant_kinds name = Some Ast.KindLinear
-                           && List.mem fname private_fields ->
+          match ty with
+          | Ast.TypeVariant _ when variant_linear && List.mem fname private_fields ->
               Hashtbl.replace stable_owner_fields (sname, fname) ();
               Hashtbl.replace stable_owner_structs sname ()
           | _ -> ()
@@ -7557,7 +7584,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
      top-level global, is the one array shape allowed to "contain"
      stable owner storage -- every array ELEMENT is its own independent
      stable location (its own lock + its own linear slot), addressed by
-     a runtime index exactly the way stable_replace's own "same
+     a runtime index exactly the way the place operations' own "same
      syntactic container" check (static_place_key's new Index case
      below) already requires: `&arr[i].lock` and `arr[i].state` must be
      the SAME `i`, proven by structural identity within one call, not
@@ -8526,21 +8553,16 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           if type_mentions_kinded_variant ty then begin
             if not (is_stable_owner_field sname fname) then
               raise (TypeError (sloc, Printf.sprintf
-                "struct field '%s.%s' cannot hold an affine/linear variant; stable owner storage requires a private linear variant field"
+                "struct field '%s.%s' cannot hold an affine/linear variant; stored linear state lives in a private Place(T) field"
                 sname fname));
-            let variant_name = match ty with
-              | Ast.TypeVariant (name, _, _) -> name
-              | _ -> raise (TypeError (sloc,
-                  "stable owner storage must directly hold a linear variant"))
-            in
-            (match Hashtbl.find_opt variant_defs variant_name with
-             | Some ((_, None) :: _) -> ()
-             | Some (("Cpu", Some (Ast.TypePtr (Ast.TypeNamed token))) :: _)
-               when Dma_fixed_registry.is_initial_authority_variant variant_name
-                    && Option.is_some (Dma_fixed_registry.record_of_token token) -> ()
+            (* GitHub issue #131: a place is the one stored linear slot.
+               Its first case is the payload-free Empty, so a zeroed field
+               starts empty. *)
+            (match ty with
+             | Ast.TypeVariant (name, _, [_]) when name = Generic_variant.place_name -> ()
              | _ -> raise (TypeError (sloc, Printf.sprintf
-                 "stable owner variant '%s' must declare a payload-free empty case first for zero initialization"
-                 variant_name)))
+                 "struct field '%s.%s' holds linear state directly; declare it as a Place of that type"
+                 sname fname)))
           end;
           if ast_contains_stable_owner_value ty then
             raise (TypeError (sloc, Printf.sprintf
@@ -10925,7 +10947,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
          tracks obligations. publish_begin mints a linear value and the two
          terminators consume it, but neither is a declared function, so the
          call_params/call_returns tables below know nothing about them --
-         the same reason stable_replace is special-cased right here.
+         the same reason the place exchange is special-cased right here.
 
          What this buys is the half of the protocol a type alone cannot
          state: a record whose payload has been written but whose commit
@@ -10983,10 +11005,16 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                dropping it leaves a record that is never published and \
                never abandoned"));
           List.fold_left (fun m a -> check_expr taints m false a) moved args
-      | Ast.Call ("stable_replace", [guard; lock; field; replacement]) ->
+      | Ast.Call (("place_take" | "place_put"), _)
+        when Generic_variant.place_exchange e <> None ->
+          check_expr taints moved consume
+            (Option.get (Generic_variant.place_exchange e))
+      | Ast.Call (("%place_take" | "%place_put") as exchange,
+                  [guard; lock; field; replacement]) ->
           if not consume then
             raise (TypeError (e.loc,
-              "linear result of 'stable_replace' must be moved into an owning binding, returned, or matched"));
+              (Printf.sprintf "linear result of '%s' must be moved into an owning binding, returned, or matched"
+                (Generic_variant.surface_name exchange))));
           let moved = check_expr taints moved false guard in
           let moved = check_expr taints moved false lock in
           let moved = match field.desc with

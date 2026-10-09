@@ -19,7 +19,7 @@ fn vm_irq_owner_guard_done(guard: sink VmIrqOwnerGuard[place]) {
 
 struct VmTaskOwnerStore {
     private mutex: i32;
-    private state: VmTaskSwitchState;
+    private state: Place(VmTaskSwitchState);
 }
 
 struct VmSchedState {
@@ -36,11 +36,20 @@ private let mut task_a_seen: io u8 = 0;
 private let mut task_b_seen: io u8 = 0;
 private let mut vm_owner_store: VmTaskOwnerStore;
 
+// The store is a place (GitHub issue #131); an empty place reads as
+// VmTaskSwitchState::Empty.
+fn vm_task_switch_state_from_place(place: Place(VmTaskSwitchState)) -> VmTaskSwitchState {
+    match place {
+        Place::Empty => { return VmTaskSwitchState::Empty; }
+        Place::Full(state) => { return state; }
+    }
+}
+
 fn vm_owner_put(state: VmTaskSwitchState) {
     let guard = vm_irq_owner_guard(&vm_owner_store.mutex);
-    let previous: VmTaskSwitchState = stable_replace(
+    let previous: VmTaskSwitchState = vm_task_switch_state_from_place(place_put(
         guard, &vm_owner_store.mutex, vm_owner_store.state,
-        state);
+        state));
     match previous {
         VmTaskSwitchState::Empty => {}
         VmTaskSwitchState::Space0(stale) => {
@@ -55,9 +64,8 @@ fn vm_owner_put(state: VmTaskSwitchState) {
 
 fn vm_owner_take() -> VmTaskSwitchState {
     let guard = vm_irq_owner_guard(&vm_owner_store.mutex);
-    let state: VmTaskSwitchState = stable_replace(
-        guard, &vm_owner_store.mutex, vm_owner_store.state,
-        VmTaskSwitchState::Empty);
+    let state: VmTaskSwitchState = vm_task_switch_state_from_place(place_take(
+        guard, &vm_owner_store.mutex, vm_owner_store.state));
     vm_irq_owner_guard_done(guard);
     return state;
 }

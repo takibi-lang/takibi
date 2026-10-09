@@ -240,22 +240,31 @@ variant ProcessVmState {
 
 struct ProcessVmStateStore {
     private lock: i32;
-    private state: ProcessVmState;
+    private state: Place(ProcessVmState);
 }
 private let mut process_vm_store: ProcessVmStateStore;
 
+// The store is a place (GitHub issue #131); an empty place reads as
+// ProcessVmState::Empty.
+fn process_vm_state_from_place(place: Place(ProcessVmState)) -> ProcessVmState {
+    match place {
+        Place::Empty => { return ProcessVmState::Empty; }
+        Place::Full(state) => { return state; }
+    }
+}
+
 fn process_vm_put(next: ProcessVmState) {
     let guard = process_vm_guard(&process_vm_store.lock);
-    let previous: ProcessVmState = stable_replace(
-        guard, &process_vm_store.lock, process_vm_store.state, next);
+    let previous: ProcessVmState = process_vm_state_from_place(place_put(
+        guard, &process_vm_store.lock, process_vm_store.state, next));
     process_vm_guard_done(guard);
     process_vm_state_discard(previous);
 }
 
 fn process_vm_take() -> ProcessVmState {
     let guard = process_vm_guard(&process_vm_store.lock);
-    let state: ProcessVmState = stable_replace(
-        guard, &process_vm_store.lock, process_vm_store.state, ProcessVmState::Empty);
+    let state: ProcessVmState = process_vm_state_from_place(place_take(
+        guard, &process_vm_store.lock, process_vm_store.state));
     process_vm_guard_done(guard);
     return state;
 }
@@ -271,16 +280,16 @@ private let mut child_vm_store: ProcessVmStateStore;
 
 fn child_vm_put(next: ProcessVmState) {
     let guard = process_vm_guard(&child_vm_store.lock);
-    let previous: ProcessVmState = stable_replace(
-        guard, &child_vm_store.lock, child_vm_store.state, next);
+    let previous: ProcessVmState = process_vm_state_from_place(place_put(
+        guard, &child_vm_store.lock, child_vm_store.state, next));
     process_vm_guard_done(guard);
     process_vm_state_discard(previous);
 }
 
 fn child_vm_take() -> ProcessVmState {
     let guard = process_vm_guard(&child_vm_store.lock);
-    let state: ProcessVmState = stable_replace(
-        guard, &child_vm_store.lock, child_vm_store.state, ProcessVmState::Empty);
+    let state: ProcessVmState = process_vm_state_from_place(place_take(
+        guard, &child_vm_store.lock, child_vm_store.state));
     process_vm_guard_done(guard);
     return state;
 }
@@ -408,7 +417,7 @@ variant CowPageState {
 }
 struct CowPageSlot {
     private lock: i32;
-    private state: CowPageState;
+    private state: Place(CowPageState);
 }
 private let mut cow_page_table: [CowPageSlot; MAX_PROCESS_PAGES];
 
@@ -421,16 +430,16 @@ fn cow_page_state_discard(state: sink CowPageState) {}
 
 fn cow_page_put(i: {0..<MAX_PROCESS_PAGES as usize}, next: CowPageState) {
     let guard = cow_page_guard(&cow_page_table[i].lock);
-    let previous: CowPageState = stable_replace(
-        guard, &cow_page_table[i].lock, cow_page_table[i].state, next);
+    let previous: CowPageState = cow_page_state_from_place(place_put(
+        guard, &cow_page_table[i].lock, cow_page_table[i].state, next));
     cow_page_guard_done(guard);
     cow_page_state_discard(previous);
 }
 
 fn cow_page_take(i: {0..<MAX_PROCESS_PAGES as usize}) -> CowPageState {
     let guard = cow_page_guard(&cow_page_table[i].lock);
-    let state: CowPageState = stable_replace(
-        guard, &cow_page_table[i].lock, cow_page_table[i].state, CowPageState::Private);
+    let state: CowPageState = cow_page_state_from_place(place_take(
+        guard, &cow_page_table[i].lock, cow_page_table[i].state));
     cow_page_guard_done(guard);
     return state;
 }
@@ -843,7 +852,7 @@ variant FatFdState {
 
 struct FatFdSlot {
     private lock: i32;
-    private state: FatFdState;
+    private state: Place(FatFdState);
 }
 // A REAL array of stable owner slots (OWNERSHIP_KERNEL.md #131/#132,
 // implemented against this exact need): each element is its own
@@ -870,16 +879,16 @@ fn fat_fd_state_discard(state: sink FatFdState) {}
 
 fn fat_fd_put(slot: {0..<MAX_OPEN_FILES as usize}, next: FatFdState) {
     let guard = fat_fd_guard(&fat_fd_table[slot].lock);
-    let previous: FatFdState = stable_replace(
-        guard, &fat_fd_table[slot].lock, fat_fd_table[slot].state, next);
+    let previous: FatFdState = fat_fd_state_from_place(place_put(
+        guard, &fat_fd_table[slot].lock, fat_fd_table[slot].state, next));
     fat_fd_guard_done(guard);
     fat_fd_state_discard(previous);
 }
 
 fn fat_fd_take(slot: {0..<MAX_OPEN_FILES as usize}) -> FatFdState {
     let guard = fat_fd_guard(&fat_fd_table[slot].lock);
-    let state: FatFdState = stable_replace(
-        guard, &fat_fd_table[slot].lock, fat_fd_table[slot].state, FatFdState::Empty);
+    let state: FatFdState = fat_fd_state_from_place(place_take(
+        guard, &fat_fd_table[slot].lock, fat_fd_table[slot].state));
     fat_fd_guard_done(guard);
     return state;
 }
@@ -912,18 +921,36 @@ fn fat_io_result_ok(r: FatIoResult) -> bool {
 // is what gets redirected, not a new fd number.
 private let mut fat_fd_slot_stdin: FatFdSlot;
 
+// The store is a place (GitHub issue #131); an empty place reads as
+// FatFdState::Empty.
+fn fat_fd_state_from_place(place: Place(FatFdState)) -> FatFdState {
+    match place {
+        Place::Empty => { return FatFdState::Empty; }
+        Place::Full(state) => { return state; }
+    }
+}
+
+// The store is a place (GitHub issue #131); an empty place reads as
+// CowPageState::Private.
+fn cow_page_state_from_place(place: Place(CowPageState)) -> CowPageState {
+    match place {
+        Place::Empty => { return CowPageState::Private; }
+        Place::Full(state) => { return state; }
+    }
+}
+
 fn fat_stdin_put(next: FatFdState) {
     let guard = fat_fd_guard(&fat_fd_slot_stdin.lock);
-    let previous: FatFdState = stable_replace(
-        guard, &fat_fd_slot_stdin.lock, fat_fd_slot_stdin.state, next);
+    let previous: FatFdState = fat_fd_state_from_place(place_put(
+        guard, &fat_fd_slot_stdin.lock, fat_fd_slot_stdin.state, next));
     fat_fd_guard_done(guard);
     fat_fd_state_discard(previous);
 }
 
 fn fat_stdin_take() -> FatFdState {
     let guard = fat_fd_guard(&fat_fd_slot_stdin.lock);
-    let state: FatFdState = stable_replace(
-        guard, &fat_fd_slot_stdin.lock, fat_fd_slot_stdin.state, FatFdState::Empty);
+    let state: FatFdState = fat_fd_state_from_place(place_take(
+        guard, &fat_fd_slot_stdin.lock, fat_fd_slot_stdin.state));
     fat_fd_guard_done(guard);
     return state;
 }

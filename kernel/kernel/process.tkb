@@ -510,14 +510,9 @@ private let mut scheduled_process_stale_first_generation: usize = 0;
 // `resources: pages=0` still means what it says because that is a constant
 // eight pages on both sides of its comparison, not because nothing is
 // held; its own comment says so where the baseline is taken.
-variant SpareStackRunValue {
-    Empty;
-    Held(exists run: usize. PageRunOwner[run]);
-}
-
 struct SpareStackRunCell {
     private mutex: Mutex;
-    private value: SpareStackRunValue;
+    private value: Place(exists run: usize. PageRunOwner[run]);
 }
 
 private let mut scheduled_process_spare: SpareStackRunCell;
@@ -2843,38 +2838,36 @@ private fn scheduled_process_park_stack_run(base: usize) !{unsafe} {
     if (base == 0) { return; }
     let guard = scheduled_process_spare_lock(
         &scheduled_process_spare.mutex);
-    let previous: SpareStackRunValue = stable_replace(
+    let previous: Place(exists run: usize. PageRunOwner[run]) = place_take(
         guard, &scheduled_process_spare.mutex,
-        scheduled_process_spare.value, SpareStackRunValue::Empty);
+        scheduled_process_spare.value);
     match previous {
-        SpareStackRunValue::Empty => {
+        Place::Empty => {
             match page_run_reclaim_transferred_physical(
                     base, KERNEL_STACK_RUN_PAGES) {
                 PageRunReclaimResult::Invalid => {}
                 PageRunReclaimResult::Reclaimed(incoming) => {
-                    let displaced: SpareStackRunValue = stable_replace(
+                    let displaced: Place(exists run: usize. PageRunOwner[run]) = place_put(
                         guard, &scheduled_process_spare.mutex,
-                        scheduled_process_spare.value,
-                        SpareStackRunValue::Held(incoming));
+                        scheduled_process_spare.value, incoming);
                     match displaced {
-                        SpareStackRunValue::Empty => {}
-                        SpareStackRunValue::Held(impossible) => {
+                        Place::Empty => {}
+                        Place::Full(impossible) => {
                             page_run_free(impossible);
                         }
                     }
                 }
             }
         }
-        SpareStackRunValue::Held(old) => {
+        Place::Full(old) => {
             let old_base: usize = page_run_physical_address(old);
             if (old_base == base) {
-                let displaced: SpareStackRunValue = stable_replace(
+                let displaced: Place(exists run: usize. PageRunOwner[run]) = place_put(
                     guard, &scheduled_process_spare.mutex,
-                    scheduled_process_spare.value,
-                    SpareStackRunValue::Held(old));
+                    scheduled_process_spare.value, old);
                 match displaced {
-                    SpareStackRunValue::Empty => {}
-                    SpareStackRunValue::Held(impossible) => {
+                    Place::Empty => {}
+                    Place::Full(impossible) => {
                         page_run_free(impossible);
                     }
                 }
@@ -2882,13 +2875,12 @@ private fn scheduled_process_park_stack_run(base: usize) !{unsafe} {
                 let sp: usize = kernel_stack_read_sp_el1();
                 if (sp >= old_base &&
                     sp < old_base + KERNEL_STACK_RUN_BYTES) {
-                    let displaced: SpareStackRunValue = stable_replace(
+                    let displaced: Place(exists run: usize. PageRunOwner[run]) = place_put(
                         guard, &scheduled_process_spare.mutex,
-                        scheduled_process_spare.value,
-                        SpareStackRunValue::Held(old));
+                        scheduled_process_spare.value, old);
                     match displaced {
-                        SpareStackRunValue::Empty => {}
-                        SpareStackRunValue::Held(impossible) => {
+                        Place::Empty => {}
+                        Place::Full(impossible) => {
                             page_run_free(impossible);
                         }
                     }
@@ -2901,13 +2893,12 @@ private fn scheduled_process_park_stack_run(base: usize) !{unsafe} {
                             page_run_free(old);
                         }
                         PageRunReclaimResult::Reclaimed(incoming) => {
-                            let displaced: SpareStackRunValue = stable_replace(
+                            let displaced: Place(exists run: usize. PageRunOwner[run]) = place_put(
                                 guard, &scheduled_process_spare.mutex,
-                                scheduled_process_spare.value,
-                                SpareStackRunValue::Held(incoming));
+                                scheduled_process_spare.value, incoming);
                             match displaced {
-                                SpareStackRunValue::Empty => {}
-                                SpareStackRunValue::Held(impossible) => {
+                                Place::Empty => {}
+                                Place::Full(impossible) => {
                                     page_run_free(impossible);
                                 }
                             }
@@ -2925,26 +2916,25 @@ private fn scheduled_process_park_stack_run(base: usize) !{unsafe} {
 private fn scheduled_process_take_spare_stack_run() -> usize !{unsafe} {
     let guard = scheduled_process_spare_lock(
         &scheduled_process_spare.mutex);
-    let previous: SpareStackRunValue = stable_replace(
+    let previous: Place(exists run: usize. PageRunOwner[run]) = place_take(
         guard, &scheduled_process_spare.mutex,
-        scheduled_process_spare.value, SpareStackRunValue::Empty);
+        scheduled_process_spare.value);
     match previous {
-        SpareStackRunValue::Empty => {
+        Place::Empty => {
             scheduled_process_spare_unlock(
                 guard, &scheduled_process_spare.mutex);
             return 0;
         }
-        SpareStackRunValue::Held(owner) => {
+        Place::Full(owner) => {
             let base: usize = page_run_physical_address(owner);
             let sp: usize = kernel_stack_read_sp_el1();
             if (sp >= base && sp < base + KERNEL_STACK_RUN_BYTES) {
-                let displaced: SpareStackRunValue = stable_replace(
+                let displaced: Place(exists run: usize. PageRunOwner[run]) = place_put(
                     guard, &scheduled_process_spare.mutex,
-                    scheduled_process_spare.value,
-                    SpareStackRunValue::Held(owner));
+                    scheduled_process_spare.value, owner);
                 match displaced {
-                    SpareStackRunValue::Empty => {}
-                    SpareStackRunValue::Held(impossible) => {
+                    Place::Empty => {}
+                    Place::Full(impossible) => {
                         page_run_free(impossible);
                     }
                 }
@@ -6457,20 +6447,19 @@ private fn kernel_stack_owner_name(sp: usize) -> *u8 {
     // an SP inside one is still worth naming rather than calling unknown.
     let spare_guard = scheduled_process_spare_lock(
         &scheduled_process_spare.mutex);
-    let spare_value: SpareStackRunValue = stable_replace(
+    let spare_value: Place(exists run: usize. PageRunOwner[run]) = place_take(
         spare_guard, &scheduled_process_spare.mutex,
-        scheduled_process_spare.value, SpareStackRunValue::Empty);
+        scheduled_process_spare.value);
     match spare_value {
-        SpareStackRunValue::Empty => {}
-        SpareStackRunValue::Held(spare_owner) => {
+        Place::Empty => {}
+        Place::Full(spare_owner) => {
             let spare: usize = page_run_physical_address(spare_owner);
-            let displaced: SpareStackRunValue = stable_replace(
+            let displaced: Place(exists run: usize. PageRunOwner[run]) = place_put(
                 spare_guard, &scheduled_process_spare.mutex,
-                scheduled_process_spare.value,
-                SpareStackRunValue::Held(spare_owner));
+                scheduled_process_spare.value, spare_owner);
             match displaced {
-                SpareStackRunValue::Empty => {}
-                SpareStackRunValue::Held(impossible) => {
+                Place::Empty => {}
+                Place::Full(impossible) => {
                     page_run_free(impossible);
                 }
             }

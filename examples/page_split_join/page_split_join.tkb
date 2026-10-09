@@ -23,11 +23,20 @@ fn range_guard_done(guard: sink RangeGuard[place]) {}
 
 struct RangeMailbox align(64) {
     private mutex: i32;
-    private owner: RangeSlot;
+    private owner: Place(RangeSlot);
 }
 
 private let mut range_bytes: [u8; RANGE_BYTE_COUNT] align(4096);
 private let mut range_mailbox: RangeMailbox;
+
+// The store is a place (GitHub issue #131); an empty place reads as
+// RangeSlot::Empty.
+fn range_slot_from_place(place: Place(RangeSlot)) -> RangeSlot {
+    match place {
+        Place::Empty => { return RangeSlot::Empty; }
+        Place::Full(state) => { return state; }
+    }
+}
 private let mut range_stage: io i32 = 0;
 
 fn range_fill_left(range: borrow PageRangeOwner[0, 8], value: u8) {
@@ -48,9 +57,9 @@ fn range_fill_right(range: borrow PageRangeOwner[8, 8], value: u8) {
 
 fn range_send(right: PageRangeOwner[8, 8], stage: i32) {
     let guard = range_guard(&range_mailbox.mutex);
-    let previous: RangeSlot = stable_replace(
+    let previous: RangeSlot = range_slot_from_place(place_put(
         guard, &range_mailbox.mutex, range_mailbox.owner,
-        RangeSlot::Right(right));
+        RangeSlot::Right(right)));
     match previous {
         RangeSlot::Empty => {}
         RangeSlot::Right(stale) => { page_range_release_right(stale); }
@@ -65,9 +74,8 @@ fn range_receive(stage: i32) -> RangeSlot {
     while (range_stage != stage) { interrupt_wait(); }
     dma_consume();
     let guard = range_guard(&range_mailbox.mutex);
-    let result: RangeSlot = stable_replace(
-        guard, &range_mailbox.mutex, range_mailbox.owner,
-        RangeSlot::Empty);
+    let result: RangeSlot = range_slot_from_place(place_take(
+        guard, &range_mailbox.mutex, range_mailbox.owner));
     range_guard_done(guard);
     return result;
 }

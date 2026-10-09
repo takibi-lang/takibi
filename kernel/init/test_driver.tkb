@@ -778,10 +778,10 @@ fn kernel_process_child_exec_prepare(current_authority: borrow ProcessCurrent[cu
     // ChildExec and returned ENOMEM if it could not; finding none is an
     // invariant break.
     match kernel_syscall_exec_args_take() {
-        ExecArgsValue::Empty => {
+        Place::Empty => {
             return KernelChildExecPrepareResult::ArgvPageMissing;
         }
-        ExecArgsValue::Held(args_page) => {
+        Place::Full(args_page) => {
             let args: [u8; PAGE_SIZE..] = page_bytes(args_page);
             let argv: [u8; 512..] = args[0..<512];
             kernel_syscall_exec_argv_copy(argv);

@@ -40,12 +40,16 @@ private fn virtio_blk_receive_unlock(
 
 fn virtio_blk_receive_take() -> VirtioBlkReceiveAuthority {
     let guard = virtio_blk_receive_lock(&dma_owner_VirtioBlkReceive.mutex);
-    let previous: VirtioBlkReceiveAuthority = stable_replace(
-        guard, &dma_owner_VirtioBlkReceive.mutex,
-        dma_owner_VirtioBlkReceive.value,
-        VirtioBlkReceiveAuthority::Empty);
+    let previous: Place(VirtioBlkReceiveAuthority) = place_take(
+        guard, &dma_owner_VirtioBlkReceive.mutex, dma_owner_VirtioBlkReceive.value);
     virtio_blk_receive_unlock(guard, &dma_owner_VirtioBlkReceive.mutex);
-    return previous;
+    let Place::Full(authority) = previous else {
+        Place::Empty => {
+            kernel_syscall_fail_stop(0);
+            return virtio_blk_receive_take();
+        }
+    };
+    return authority;
 }
 
 private fn virtio_blk_receive_fail_cpu(stale: sink *VirtioBlkReceiveCpu) {
@@ -58,12 +62,13 @@ fn virtio_blk_receive_fail_device(stale: sink *VirtioBlkReceiveDevice) {
 
 fn virtio_blk_receive_put(value: sink VirtioBlkReceiveAuthority) {
     let guard = virtio_blk_receive_lock(&dma_owner_VirtioBlkReceive.mutex);
-    let previous: VirtioBlkReceiveAuthority = stable_replace(
-        guard, &dma_owner_VirtioBlkReceive.mutex,
-        dma_owner_VirtioBlkReceive.value, value);
+    let previous: Place(VirtioBlkReceiveAuthority) = place_put(
+        guard, &dma_owner_VirtioBlkReceive.mutex, dma_owner_VirtioBlkReceive.value, value);
     virtio_blk_receive_unlock(guard, &dma_owner_VirtioBlkReceive.mutex);
-    match previous {
-        VirtioBlkReceiveAuthority::Empty => { return; }
+    let Place::Full(held) = previous else {
+        Place::Empty => { return; }
+    };
+    match held {
         VirtioBlkReceiveAuthority::Cpu(stale) => {
             virtio_blk_receive_fail_cpu(stale);
         }
@@ -83,11 +88,16 @@ private let mut virtio_blk_data_transmit: VirtioBlkDataTransmit align(64);
 
 fn virtio_blk_request_take() -> VirtioBlkRequestTransmitAuthority {
     let guard = virtio_blk_receive_lock(&dma_owner_VirtioBlkRequestTransmit.mutex);
-    let previous: VirtioBlkRequestTransmitAuthority = stable_replace(
-        guard, &dma_owner_VirtioBlkRequestTransmit.mutex,
-        dma_owner_VirtioBlkRequestTransmit.value, VirtioBlkRequestTransmitAuthority::Empty);
+    let previous: Place(VirtioBlkRequestTransmitAuthority) = place_take(
+        guard, &dma_owner_VirtioBlkRequestTransmit.mutex, dma_owner_VirtioBlkRequestTransmit.value);
     virtio_blk_receive_unlock(guard, &dma_owner_VirtioBlkRequestTransmit.mutex);
-    return previous;
+    let Place::Full(authority) = previous else {
+        Place::Empty => {
+            kernel_syscall_fail_stop(0);
+            return virtio_blk_request_take();
+        }
+    };
+    return authority;
 }
 
 private fn virtio_blk_request_fail_cpu(stale: sink *VirtioBlkRequestTransmitCpu) {
@@ -100,12 +110,13 @@ fn virtio_blk_request_fail_device(stale: sink *VirtioBlkRequestTransmitDevice) {
 
 fn virtio_blk_request_put(value: sink VirtioBlkRequestTransmitAuthority) {
     let guard = virtio_blk_receive_lock(&dma_owner_VirtioBlkRequestTransmit.mutex);
-    let previous: VirtioBlkRequestTransmitAuthority = stable_replace(
-        guard, &dma_owner_VirtioBlkRequestTransmit.mutex,
-        dma_owner_VirtioBlkRequestTransmit.value, value);
+    let previous: Place(VirtioBlkRequestTransmitAuthority) = place_put(
+        guard, &dma_owner_VirtioBlkRequestTransmit.mutex, dma_owner_VirtioBlkRequestTransmit.value, value);
     virtio_blk_receive_unlock(guard, &dma_owner_VirtioBlkRequestTransmit.mutex);
-    match previous {
-        VirtioBlkRequestTransmitAuthority::Empty => { return; }
+    let Place::Full(held) = previous else {
+        Place::Empty => { return; }
+    };
+    match held {
         VirtioBlkRequestTransmitAuthority::Cpu(stale) => { virtio_blk_request_fail_cpu(stale); }
         VirtioBlkRequestTransmitAuthority::Device(stale) => { virtio_blk_request_fail_device(stale); }
     }
@@ -122,17 +133,21 @@ private fn virtio_blk_request_settle() {
             let restored = dma_finish_owned_tx(device, VirtioBlkRequestTransmit);
             virtio_blk_request_put(VirtioBlkRequestTransmitAuthority::Cpu(restored));
         }
-        VirtioBlkRequestTransmitAuthority::Empty => { kernel_syscall_fail_stop(0); }
     }
 }
 
 fn virtio_blk_data_take() -> VirtioBlkDataTransmitAuthority {
     let guard = virtio_blk_receive_lock(&dma_owner_VirtioBlkDataTransmit.mutex);
-    let previous: VirtioBlkDataTransmitAuthority = stable_replace(
-        guard, &dma_owner_VirtioBlkDataTransmit.mutex,
-        dma_owner_VirtioBlkDataTransmit.value, VirtioBlkDataTransmitAuthority::Empty);
+    let previous: Place(VirtioBlkDataTransmitAuthority) = place_take(
+        guard, &dma_owner_VirtioBlkDataTransmit.mutex, dma_owner_VirtioBlkDataTransmit.value);
     virtio_blk_receive_unlock(guard, &dma_owner_VirtioBlkDataTransmit.mutex);
-    return previous;
+    let Place::Full(authority) = previous else {
+        Place::Empty => {
+            kernel_syscall_fail_stop(0);
+            return virtio_blk_data_take();
+        }
+    };
+    return authority;
 }
 
 private fn virtio_blk_data_fail_cpu(stale: sink *VirtioBlkDataTransmitCpu) {
@@ -145,12 +160,13 @@ fn virtio_blk_data_fail_device(stale: sink *VirtioBlkDataTransmitDevice) {
 
 fn virtio_blk_data_put(value: sink VirtioBlkDataTransmitAuthority) {
     let guard = virtio_blk_receive_lock(&dma_owner_VirtioBlkDataTransmit.mutex);
-    let previous: VirtioBlkDataTransmitAuthority = stable_replace(
-        guard, &dma_owner_VirtioBlkDataTransmit.mutex,
-        dma_owner_VirtioBlkDataTransmit.value, value);
+    let previous: Place(VirtioBlkDataTransmitAuthority) = place_put(
+        guard, &dma_owner_VirtioBlkDataTransmit.mutex, dma_owner_VirtioBlkDataTransmit.value, value);
     virtio_blk_receive_unlock(guard, &dma_owner_VirtioBlkDataTransmit.mutex);
-    match previous {
-        VirtioBlkDataTransmitAuthority::Empty => { return; }
+    let Place::Full(held) = previous else {
+        Place::Empty => { return; }
+    };
+    match held {
         VirtioBlkDataTransmitAuthority::Cpu(stale) => { virtio_blk_data_fail_cpu(stale); }
         VirtioBlkDataTransmitAuthority::Device(stale) => { virtio_blk_data_fail_device(stale); }
     }
@@ -167,7 +183,6 @@ private fn virtio_blk_data_settle() {
             let restored = dma_finish_owned_tx(device, VirtioBlkDataTransmit);
             virtio_blk_data_put(VirtioBlkDataTransmitAuthority::Cpu(restored));
         }
-        VirtioBlkDataTransmitAuthority::Empty => { kernel_syscall_fail_stop(0); }
     }
 }
 

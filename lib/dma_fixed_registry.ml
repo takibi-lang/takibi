@@ -58,6 +58,10 @@ let record_of_slot_type name =
   Hashtbl.fold (fun record _ found ->
     if name = slot_type record then Some record else found) records None
 
+let record_of_slot_global name =
+  Hashtbl.fold (fun record _ found ->
+    if name = slot_global record then Some record else found) records None
+
 let is_initial_authority_variant name =
   Hashtbl.fold (fun record _ found ->
     found || name = authority_variant record) records false

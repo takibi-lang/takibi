@@ -1,1 +1,1 @@
-stable_replace requires a linear erased-view guard
+place_take requires a linear erased-view guard

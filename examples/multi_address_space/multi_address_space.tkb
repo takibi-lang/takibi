@@ -11,15 +11,10 @@
 use "examples/common/sync.tkb";
 extern fn rpi3_core_id() -> usize;
 
-variant AddressSpacePageSlot {
-    Empty;
-    Full(exists p: usize. PageOwner[p]);
-}
-
 struct AddressSpaceMailbox align(64) {
     private mutex: i32;
     private state: io i32;
-    private page: AddressSpacePageSlot;
+    private page: Place(exists p: usize. PageOwner[p]);
 }
 
 private let mut as_mailbox: AddressSpaceMailbox;
@@ -37,12 +32,11 @@ fn as_discard(page: sink PageOwner[p]) {
 
 fn as_send(page: PageOwner[p], state: i32) {
     let g = mutex_lock(&as_mailbox.mutex);
-    let previous: AddressSpacePageSlot = stable_replace(
-        g, &as_mailbox.mutex, as_mailbox.page,
-        AddressSpacePageSlot::Full(page));
+    let previous: Place(exists p: usize. PageOwner[p]) = place_put(
+        g, &as_mailbox.mutex, as_mailbox.page, page);
     match previous {
-        AddressSpacePageSlot::Empty => {}
-        AddressSpacePageSlot::Full(stale) => {
+        Place::Empty => {}
+        Place::Full(stale) => {
             as_discard(stale);
         }
     }
@@ -52,15 +46,14 @@ fn as_send(page: PageOwner[p], state: i32) {
     interrupt_notify();
 }
 
-fn as_receive(expected: i32) -> AddressSpacePageSlot {
+fn as_receive(expected: i32) -> Place(exists p: usize. PageOwner[p]) {
     while (as_mailbox.state != expected) {
         interrupt_wait();
     }
     dma_consume();
     let g = mutex_lock(&as_mailbox.mutex);
-    let result: AddressSpacePageSlot = stable_replace(
-        g, &as_mailbox.mutex, as_mailbox.page,
-        AddressSpacePageSlot::Empty);
+    let result: Place(exists p: usize. PageOwner[p]) = place_take(
+        g, &as_mailbox.mutex, as_mailbox.page);
     as_mailbox.state = 0;
     mutex_unlock(g, &as_mailbox.mutex);
     return result;
@@ -84,8 +77,8 @@ fn as_wait(expected: i32) {
 fn core1_main() {
     let received = as_receive(1);
     match received {
-        AddressSpacePageSlot::Empty => {}
-        AddressSpacePageSlot::Full(page) => {
+        Place::Empty => {}
+        Place::Full(page) => {
             let asid1: {0..<2 as usize} = 1;
             let inactive1 = address_space_new(asid1);
             let core1: usize = 1;
@@ -149,10 +142,10 @@ fn core0_main() {
 
                     let returned = as_receive(4);
                     match returned {
-                        AddressSpacePageSlot::Empty => {
+                        Place::Empty => {
                             uart_puts("missing page\n");
                         }
-                        AddressSpacePageSlot::Full(page1_back) => {
+                        Place::Full(page1_back) => {
                             uart_puts("same VA: core0=");
                             uart_print(core0_seen);
                             uart_puts(" core1=");

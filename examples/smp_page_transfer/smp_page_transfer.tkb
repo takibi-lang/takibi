@@ -16,15 +16,10 @@
 use "examples/common/sync.tkb";
 extern fn rpi3_core_id() -> usize;
 
-variant TransferSlot {
-    Empty;
-    Full(exists p: usize. PageOwner[p]);
-}
-
 struct TransferMailbox align(64) {
     private mutex: i32;
     private state: io i32;
-    private page: TransferSlot;
+    private page: Place(exists p: usize. PageOwner[p]);
 }
 
 private let mut transfer_mailbox: TransferMailbox;
@@ -40,12 +35,11 @@ fn transfer_discard(page: sink PageOwner[p]) {
 
 fn transfer_send(page: PageOwner[p], state: i32) {
     let g = mutex_lock(&transfer_mailbox.mutex);
-    let previous: TransferSlot = stable_replace(
-        g, &transfer_mailbox.mutex, transfer_mailbox.page,
-        TransferSlot::Full(page));
+    let previous: Place(exists p: usize. PageOwner[p]) = place_put(
+        g, &transfer_mailbox.mutex, transfer_mailbox.page, page);
     match previous {
-        TransferSlot::Empty => {}
-        TransferSlot::Full(stale) => {
+        Place::Empty => {}
+        Place::Full(stale) => {
             // Unreachable under the private state protocol; preserve the
             // cleanup obligation if the runtime protocol is ever broken.
             transfer_discard(stale);
@@ -57,15 +51,14 @@ fn transfer_send(page: PageOwner[p], state: i32) {
     interrupt_notify();
 }
 
-fn transfer_receive(expected: i32) -> TransferSlot {
+fn transfer_receive(expected: i32) -> Place(exists p: usize. PageOwner[p]) {
     while (transfer_mailbox.state != expected) {
         interrupt_wait();
     }
     dma_consume();
     let g = mutex_lock(&transfer_mailbox.mutex);
-    let result: TransferSlot = stable_replace(
-        g, &transfer_mailbox.mutex, transfer_mailbox.page,
-        TransferSlot::Empty);
+    let result: Place(exists p: usize. PageOwner[p]) = place_take(
+        g, &transfer_mailbox.mutex, transfer_mailbox.page);
     transfer_mailbox.state = 0;
     mutex_unlock(g, &transfer_mailbox.mutex);
     return result;
@@ -74,8 +67,8 @@ fn transfer_receive(expected: i32) -> TransferSlot {
 fn core1_main() {
     let received = transfer_receive(1);
     match received {
-        TransferSlot::Empty => {}
-        TransferSlot::Full(page) => {
+        Place::Empty => {}
+        Place::Full(page) => {
             let core1_seed: {0..<2 as usize} = 1;
             let core1_inactive = address_space_new(core1_seed);
             let core1: usize = 1;
@@ -136,12 +129,12 @@ fn core0_main() {
 
             let returned = transfer_receive(2);
             match returned {
-                TransferSlot::Empty => {
+                Place::Empty => {
                     uart_puts("missing page\n");
                     let inactive_empty = address_space_deactivate(core0_active2, empty);
                     address_space_free(inactive_empty);
                 }
-                TransferSlot::Full(page2) => {
+                Place::Full(page2) => {
                     let (occupied2, pending2) = map_page(empty, page2, va);
                     let mapping2 = tlb_invalidate(occupied2, pending2);
                     let view2 = mapping_va_acquire(core0_active2, occupied2, mapping2);
