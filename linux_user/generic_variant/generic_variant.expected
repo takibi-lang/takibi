@@ -1,0 +1,5 @@
+instances of one variant (usize, nothing): 42 0
+a nested instance (just just, just nothing, nothing): 7 200 100
+a snapshot before publication is refused: true
+snapshots of two record types (code, left + right): 9 7
+done

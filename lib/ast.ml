@@ -101,7 +101,7 @@ type type_expr =
        Source annotations use the declared bare/indexed name; type inference
        resolves it to this distinct constructor so runtime structs and
        Delta-only views cannot be confused. *)
-  | TypeVariant of string * static_arg list
+  | TypeVariant of string * static_arg list * type_expr list
     (* Elaborated tagged runtime variant type. Source annotations use the
        declared bare name; payload kind is tracked separately in Delta. *)
   | TypeExists of ident * type_expr * type_expr
@@ -757,6 +757,14 @@ type toplevel =
      true for `must_use variant`: a checker-only obligation requiring every
      produced value to be handled or transferred on every path, without
      pretending the status value owns a linear runtime resource. *)
+  | GenericVariantDef of string * string list * static_param list
+      * (string * type_expr option) list * bool * loc
+  (* GitHub issue #732: `[must_use] generic variant Name(T: type, ...)
+     [p: sort, ...] { Case; Case(T); }` -- a variant with uniform TYPE
+     parameters. Unlike a generic struct (#207), it is not monomorphized
+     before type checking: the checker keeps TVariant(name, statics, type
+     args) structurally, and Generic_variant_lower produces one ordinary
+     VariantDef per instance afterwards, for code generation only. *)
   | UseDef of string
   (* use "path/to/file.tkb"; -- GitHub issue #55. Path is resolved relative
      to the compiler's own working directory (the same convention already

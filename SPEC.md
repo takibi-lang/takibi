@@ -1428,6 +1428,39 @@ the response remains the existing `i32` rendezvous channel. Focused failures liv
 `variant_nonexhaustive_wrong`, plus the two `tcp_conn_*_wrong` fixtures; each
 source explains the rejected rule in English.
 
+## Generic Variants (GitHub issue #732)
+
+A variant may take uniform type parameters:
+
+```
+generic variant Maybe(T: type) { Nothing; Just(T); }
+must_use generic variant Snapshot(T: type) { Unpublished; Copied(*T); }
+
+fn just(x: usize) -> Maybe(usize) { return Maybe::Just(x); }
+fn or_zero(m: Maybe(usize)) -> usize {
+    match m { Maybe::Nothing => { return 0; } Maybe::Just(v) => { return v; } }
+}
+```
+
+- `Name(T, ...)` names an instance. A type argument is any type --
+  integers, structs, pointers, tokens, views, other instances, and
+  existentials such as `exists p: usize. PageOwner[p]`.
+- Instances are distinct types compared structurally, and invariant in
+  their arguments: a `Maybe(usize)` is not a `Maybe(u8)`.
+- Constructors and match arms use the bare name (`Maybe::Just(x)`,
+  `Maybe::Nothing =>`); the type arguments come from the payload, the
+  expected type, or the scrutinee.
+- An instance is linear (or affine) if any type argument is, as well as
+  when the declaration's own payloads make it so; `must_use` comes from the
+  declaration.
+- Static parameters (`[k: sort]`) are not yet accepted on a generic
+  variant, and type arguments cannot be written in a match arm.
+
+Unlike a generic struct, a generic variant is not instantiated before type
+checking. After checking, each instance becomes one ordinary variant for
+code generation, laid out by its arguments' runtime representation (statics
+are erased, so instances differing only in statics share a layout).
+
 ## Stored Owner Fields (GitHub issue #131, first slice)
 
 A LINEAR struct may hold one linear indexed owner whose static indices are
@@ -3084,7 +3117,7 @@ match region_split(rest, wanted) {                   // run-time split point
   `&mut T`, so access through it is not raw access (GitHub issue #731); for
   a primitive element, which `&T` cannot name, it stays a derived `*T`.
 - `region(T)`, `RegionSplit(T)` and `RegionOf(T)` name the instance for one
-  element type; the language has no type-generic variants. Names beginning
+  element type (these predate generic variants, below). Names beginning
   `__region_` are reserved.
 
 **region_table** stores permissions: a pool over a claimed array.
@@ -3410,10 +3443,11 @@ omits, and its absence is invisible in review because the code looks
 finished without it.
 
 **Stated limit.** Nothing forces the caller to branch on the returned
-sequence. `must_use` exists only on variants, and the variant that would
-carry the snapshot has to be generic in the record type, which this
-language does not have (generic structs and generic functions do; generic
-variants do not).
+sequence: `publish_copy` itself still answers a `usize`. A caller that
+wants the branch forced can wrap it in a generic function returning a
+`must_use generic variant` such as `Snapshot(T) { Unpublished; Copied(*T); }`
+(see "Generic Variants"; linux_user/generic_variant does this for two
+record types).
 
 **These do not require `unsafe`**, unlike the atomics they are built from.
 That is the point of having them: the ordering argument is made once, in

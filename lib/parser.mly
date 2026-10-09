@@ -476,6 +476,13 @@ item:
   | MUST_USE VARIANT name = IDENT ps = view_static_params LBRACE cases = variant_cases RBRACE
     { Type_layout.register_variant name cases;
       VariantDef (name, ps, cases, true, $symbolstartpos) }
+  (* GitHub issue #732: a variant with uniform type parameters. *)
+  | GENERIC VARIANT name = IDENT LPAREN tps = generic_type_params RPAREN
+    ps = view_static_params LBRACE cases = variant_cases RBRACE
+    { GenericVariantDef (name, tps, ps, cases, false, $symbolstartpos) }
+  | MUST_USE GENERIC VARIANT name = IDENT LPAREN tps = generic_type_params RPAREN
+    ps = view_static_params LBRACE cases = variant_cases RBRACE
+    { GenericVariantDef (name, tps, ps, cases, true, $symbolstartpos) }
   | USE STRING SEMI
     { UseDef $2 }
 
@@ -582,6 +589,12 @@ static_params:
    concrete value -- exactly like a type parameter is per concrete type. *)
 generic_params:
   | ps = separated_nonempty_list(COMMA, generic_param) { ps }
+
+generic_type_params:
+  | ps = separated_nonempty_list(COMMA, generic_type_param) { ps }
+
+generic_type_param:
+  | name = IDENT COLON TYPE { name }
 
 generic_param:
   | name = IDENT COLON TYPE { (name, GPType) }

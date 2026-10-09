@@ -20,6 +20,7 @@ module StringSet = Set.Make (String)
 type declared_names = {
   views : StringSet.t;
   variants : StringSet.t;
+  generic_variants : StringSet.t;  (* GitHub issue #732 *)
 }
 
 exception Noncanonical_type of string
@@ -35,17 +36,27 @@ let collect_names prog =
         { names with views = StringSet.add name names.views }
     | VariantDef (name, _, _, _, _) ->
         { names with variants = StringSet.add name names.variants }
+    | GenericVariantDef (name, _, _, _, _, _) ->
+        { names with generic_variants = StringSet.add name names.generic_variants }
     | _ -> names
-  ) { views = StringSet.empty; variants = StringSet.empty } prog
+  ) { views = StringSet.empty; variants = StringSet.empty;
+      generic_variants = StringSet.empty } prog
 
 let rec resolve_type names = function
   | TypeNamed name when StringSet.mem name names.views -> TypeView (name, [])
   | TypeIndexed (name, args) when StringSet.mem name names.views ->
       TypeView (name, args)
   | TypeNamed name when StringSet.mem name names.variants ->
-      TypeVariant (name, [])
+      TypeVariant (name, [], [])
   | TypeIndexed (name, args) when StringSet.mem name names.variants ->
-      TypeVariant (name, args)
+      TypeVariant (name, args, [])
+  (* GitHub issue #732: `Name(T, ...)` of a generic variant. A bare `Name`
+     resolves too, with no arguments, so the checker can name the
+     arity mismatch. *)
+  | TypeGenericInst (name, args) when StringSet.mem name names.generic_variants ->
+      TypeVariant (name, [], List.map (resolve_type names) args)
+  | TypeNamed name when StringSet.mem name names.generic_variants ->
+      TypeVariant (name, [], [])
   | TypePtr t -> TypePtr (resolve_type names t)
   | TypeIo t -> TypeIo (resolve_type names t)
   | TypeArray (t, n) -> TypeArray (resolve_type names t, n)
@@ -223,6 +234,12 @@ let resolve_toplevel names = function
          List.map (fun (case, payload) ->
            (case, Option.map (resolve_type names) payload)) cases,
          must_use, loc)
+  | GenericVariantDef (name, tparams, params, cases, must_use, loc) ->
+      GenericVariantDef
+        (name, tparams, resolve_static_params names params,
+         List.map (fun (case, payload) ->
+           (case, Option.map (resolve_type names) payload)) cases,
+         must_use, loc)
   | (ExternSymbolDef _ | VectorTableDef _ | ExceptionEntryDef _
     | ExceptionRestoreDef _ | OpaqueStructDef _ | UseDef _) as item -> item
 
@@ -329,7 +346,8 @@ let validate prog =
         List.iter (fun (_, ty) -> check_type ty) fields
     | ViewDef (_, _, params, _, _) -> check_static_params params
     | EnumDef (_, base, _, _) -> Option.iter check_type base
-    | VariantDef (_, params, cases, _, _) ->
+    | VariantDef (_, params, cases, _, _)
+    | GenericVariantDef (_, _, params, cases, _, _) ->
         check_static_params params;
         List.iter (fun (_, payload) -> Option.iter check_type payload) cases
     | ExternSymbolDef _ | VectorTableDef _ | ExceptionEntryDef _

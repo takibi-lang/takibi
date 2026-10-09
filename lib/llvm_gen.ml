@@ -87,6 +87,14 @@ let variant_cases_tbl :
     (string, (string * variant_case_layout) list) Hashtbl.t =
   Hashtbl.create 8
 
+(* GitHub issue #732: the instance a generic variant's constructor or
+   case name was checked at, or the name itself for an ordinary variant. *)
+let generic_variant_instance_at loc name =
+  match Type_inf.generic_variant_site_instance loc with
+  | Some (generic, targs) when generic = name ->
+      Generic_variant.instance_name generic targs
+  | _ -> name
+
 let assert_codegen_table_empty name table =
   let size = Hashtbl.length table in
   if size <> 0 then
@@ -696,7 +704,7 @@ let rec ty_str = function
       let arg = static_arg_str in
       Printf.sprintf "view %s[%s]" s
         (String.concat ", " (List.map arg args))
-  | TypeVariant (s, _) -> s
+  | TypeVariant (s, _, targs) -> Generic_variant.instance_name s targs
   | TypeExists (name, sort, body) ->
       Printf.sprintf "exists %s: %s. %s" name (ty_str sort) (ty_str body)
   | TypeIndexed (s, args) ->
@@ -1691,7 +1699,8 @@ let rec ltype_of_ast = function
   | TypeVoid        -> void_type context
   | TypeView (name, _) -> raise (Error (Printf.sprintf
       "internal error: erased view '%s' reached runtime layout" name))
-  | TypeVariant (name, _) ->
+  | TypeVariant (name, _, targs) ->
+      let name = Generic_variant.instance_name name targs in
       (match Hashtbl.find_opt variant_lltypes name with
        | Some llty -> llty
        | None -> raise (Error (Printf.sprintf "Unknown variant type: %s" name)))
@@ -2594,7 +2603,7 @@ let function_key (pt : Types.program_types option) (fdef : Ast.func) =
       let declared = List.map snd fdef.params in
       let rec abi_type = function
         | TypeView (name, _) -> TypeView (name, [])
-        | TypeVariant (name, args) -> TypeVariant (name, args)
+        | TypeVariant (name, args, targs) -> TypeVariant (name, args, targs)
         | TypeExists (_, _, body) -> abi_type body
         | TypeBorrow t | TypeBorrowMut t | TypeSink t
         | TypeAlignedPtr (_, t) -> abi_type t
@@ -3455,19 +3464,21 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            in
            (TypeNamed ename, const_int (ltype_of_ast ut) value)
        | None ->
+           let ename = generic_variant_instance_at e.loc ename in
            let layout = variant_case ename vname in
            (match layout.variant_payload with
             | Some _ -> raise (Error (Printf.sprintf
                 "BUG: payload variant %s::%s reached nullary constructor codegen"
                 ename vname))
             | None -> ());
-           let llty = ltype_of_ast (TypeVariant (ename, [])) in
+           let llty = ltype_of_ast (TypeVariant (ename, [], [])) in
            let value = build_insertvalue (undef llty)
              (const_int (i32_type context) layout.variant_tag) 0
              "variant.tag" builder in
-           (TypeVariant (ename, []), value))
+           (TypeVariant (ename, [], []), value))
 
   | VariantCtor (vtype, vname, payload) ->
+      let vtype = generic_variant_instance_at e.loc vtype in
       let layout = variant_case vtype vname in
       let schema = match layout.variant_payload with
         | Some schema -> schema
@@ -3477,7 +3488,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       in
       let payload_ty = runtime_payload_type schema in
       let (_, payload_v) = gen_expr ~expected_ty:payload_ty locals payload in
-      let llty = ltype_of_ast (TypeVariant (vtype, [])) in
+      let llty = ltype_of_ast (TypeVariant (vtype, [], [])) in
       let value = build_insertvalue (undef llty)
         (const_int (i32_type context) layout.variant_tag) 0
         "variant.tag" builder in
@@ -3487,7 +3498,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
             build_insertvalue value (coerce payload_v payload_ty) field
               "variant.payload" builder
       in
-      (TypeVariant (vtype, []), value)
+      (TypeVariant (vtype, [], []), value)
 
   | SizeOf ty ->
       let elem_llty = ltype_of_ast ty in
@@ -4875,7 +4886,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       let overflow = build_extractvalue pair 1 "checked.overflow" builder in
       let value_case = variant_case "CheckedUsize" "Value" in
       let overflow_case = variant_case "CheckedUsize" "Overflow" in
-      let result_ty = TypeVariant ("CheckedUsize", []) in
+      let result_ty = TypeVariant ("CheckedUsize", [], []) in
       let llty = ltype_of_ast result_ty in
       let value_result = build_insertvalue (undef llty)
         (const_int (i32_type context) value_case.variant_tag) 0
@@ -6264,6 +6275,16 @@ let gen_func ?prog_types fdef =
         position_at_end exit_bb builder
 
     | Match (disc, arms) ->
+        (* GitHub issue #732: arms name a generic variant by its bare name;
+           the checker recorded which instance this match opened. *)
+        let arms = match Type_inf.generic_variant_site_instance s.loc with
+          | None -> arms
+          | Some (generic, targs) ->
+              let instance = Generic_variant.instance_name generic targs in
+              List.map (function
+                | ArmVariant (name, c, b, body) when name = generic ->
+                    ArmVariant (instance, c, b, body)
+                | arm -> arm) arms in
         let (disc_ty, disc_v) = gen_expr locals disc in
         if List.exists (function ArmByteSliceLit _ -> true | _ -> false) arms
         then begin
@@ -6316,7 +6337,8 @@ let gen_func ?prog_types fdef =
           | _ -> None
         ) arms in
         let variant_name = match disc_ty with
-          | TypeVariant (name, _) -> Some name
+          | TypeVariant (name, _, targs) ->
+              Some (Generic_variant.instance_name name targs)
           (* An existential binder can make the codegen-local expression type
              less precise than the already-checked match arms.  Recover the
              closed variant from those arms instead of misclassifying it as a
@@ -7852,7 +7874,7 @@ let gen_program ?prog_types prog =
     | OpaqueStructDef _ -> ()
     | ViewDef _ -> ()
     | EnumDef _   -> ()
-    | VariantDef _ -> ()
+    | VariantDef _ | GenericVariantDef _ -> ()
     | UseDef _    -> ()
     | VectorTableDef _ -> ()
     | ExceptionEntryDef _ -> ()
@@ -7900,7 +7922,7 @@ let gen_program ?prog_types prog =
     | OpaqueStructDef _ -> ()
     | ViewDef _ -> ()
     | EnumDef _       -> ()
-    | VariantDef _    -> ()
+    | VariantDef _ | GenericVariantDef _ -> ()
     | UseDef _        -> ()
     | VectorTableDef (entries, _) -> gen_vector_table entries
     | ExceptionEntryDef (name, fields, _) ->

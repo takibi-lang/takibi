@@ -20,7 +20,9 @@ type ty =
   | TStruct of string     (* named struct type *)
   | TView of string * static_term list
     (* Erased affine/linear permission value with checker-only indices. *)
-  | TVariant of string * static_term list
+  | TVariant of string * static_term list * ty list
+    (* GitHub issue #732: the type arguments of a generic variant's
+       instance, compared structurally; [] for every other variant. *)
     (* tagged runtime sum; kind is derived from payloads. The static
        argument list (GitHub issue #345) is erased, exactly like TView's
        and TIndexedStruct's -- it exists so a case payload can name the
@@ -249,10 +251,14 @@ let rec to_string t =
   | TView (s, args) ->
       Printf.sprintf "view %s[%s]" s
         (String.concat ", " (List.map static_to_string args))
-  | TVariant (s, []) -> Printf.sprintf "variant %s" s
-  | TVariant (s, args) ->
-      Printf.sprintf "variant %s[%s]" s
-        (String.concat ", " (List.map static_to_string args))
+  | TVariant (s, args, targs) ->
+      let targs_text = match targs with
+        | [] -> ""
+        | ts -> Printf.sprintf "(%s)" (String.concat ", " (List.map to_string ts)) in
+      let args_text = match args with
+        | [] -> ""
+        | args -> Printf.sprintf "[%s]" (String.concat ", " (List.map static_to_string args)) in
+      Printf.sprintf "variant %s%s%s" s targs_text args_text
   | TExists (name, sort, _, body) ->
       Printf.sprintf "exists %s: %s. %s" name
         (Ast.show_type_expr sort) (to_string body)
@@ -288,7 +294,8 @@ let rec occurs rv = function
   | TIndexedStruct _           -> false
   | TSingleton (t, _)          -> occurs rv t
   | TMultiple (_, t)           -> occurs rv t
-  | TStruct _ | TView _ | TVariant _ -> false
+  | TVariant (_, _, ts)        -> List.exists (occurs rv) ts
+  | TStruct _ | TView _ -> false
   | _                          -> false
 
 let rec function_effect_rows t =
@@ -352,8 +359,9 @@ and subst_in_ty old replacement t =
       TIndexedStruct (name, List.map (subst_static_term old replacement) args)
   | TView (name, args) ->
       TView (name, List.map (subst_static_term old replacement) args)
-  | TVariant (name, args) ->
-      TVariant (name, List.map (subst_static_term old replacement) args)
+  | TVariant (name, args, targs) ->
+      TVariant (name, List.map (subst_static_term old replacement) args,
+                List.map (subst_in_ty old replacement) targs)
   | TSingleton (base, n) ->
       TSingleton (subst_in_ty old replacement base,
                   subst_static_term old replacement n)
@@ -615,14 +623,21 @@ let rec unify t1 t2 =
           "static argument count mismatch for view %s: %d vs %d"
           s1 (List.length args1) (List.length args2)));
       List.iter2 unify_static args1 args2
-  | TVariant (s1, args1), TVariant (s2, args2) ->
+  | TVariant (s1, args1, targs1), TVariant (s2, args2, targs2) ->
       if s1 <> s2 then
         raise (Unify_error (Printf.sprintf "variant type mismatch: %s vs %s" s1 s2));
       if List.length args1 <> List.length args2 then
         raise (Unify_error (Printf.sprintf
           "static argument count mismatch for variant %s: %d vs %d"
           s1 (List.length args1) (List.length args2)));
-      List.iter2 unify_static args1 args2
+      if List.length targs1 <> List.length targs2 then
+        raise (Unify_error (Printf.sprintf
+          "type argument count mismatch for variant %s: %d vs %d"
+          s1 (List.length targs1) (List.length targs2)));
+      List.iter2 unify_static args1 args2;
+      (* GitHub issue #732: a generic variant is invariant in its type
+         arguments -- no refinement or minimum-length widening through it. *)
+      List.iter2 (fun a b -> unify a b; unify b a) targs1 targs2
   | TExists (_, sort1, binder1, body1),
     TExists (_, sort2, binder2, body2) ->
       if sort1 <> sort2 then
@@ -809,6 +824,15 @@ let reject_nested_pointer t =
        Takibi has no ownership/lifetime model for multi-level pointers \
        (GitHub issue #239)"))
 
+(* GitHub issue #732: the type parameters of the generic variant whose
+   payload schema is being instantiated, bound to that instance's type
+   arguments. Empty outside such an instantiation. *)
+let type_param_bindings : (string * ty) list ref = ref []
+
+(* Every generic variant instance a written type names, as converted;
+   Type_inf turns them into codegen definitions after checking. *)
+let generic_variant_instances_seen : (string * ty list) list ref = ref []
+
 let rec of_ast_in_scope scope = function
   | Ast.TypeBool     -> TBool
   | Ast.TypeI8       -> TI8  | Ast.TypeI16 -> TI16 | Ast.TypeI32 -> TI32 | Ast.TypeI64 -> TI64
@@ -824,11 +848,18 @@ let rec of_ast_in_scope scope = function
   | Ast.TypeFn (ps, r, effects) ->
       TFun (List.map (of_ast_in_scope scope) ps,
             of_ast_in_scope scope r, effects)
-  | Ast.TypeNamed s      -> TStruct s
+  | Ast.TypeNamed s      ->
+      (match List.assoc_opt s !type_param_bindings with
+       | Some t -> t
+       | None -> TStruct s)
   | Ast.TypeView (s, args) ->
       TView (s, List.map (static_of_ast scope) args)
-  | Ast.TypeVariant (s, args) ->
-      TVariant (s, List.map (static_of_ast scope) args)
+  | Ast.TypeVariant (s, args, targs) ->
+      let converted = List.map (of_ast_in_scope scope) targs in
+      if converted <> [] then
+        generic_variant_instances_seen :=
+          (s, converted) :: !generic_variant_instances_seen;
+      TVariant (s, List.map (static_of_ast scope) args, converted)
   | Ast.TypeExists (name, sort, body) ->
       let inner_scope = Hashtbl.copy scope in
       let binder = rigid_static name in
@@ -922,7 +953,8 @@ let instantiate_static_params ty =
     | TIndexedStruct (name, args) ->
         TIndexedStruct (name, List.map inst_static args)
     | TView (name, args) -> TView (name, List.map inst_static args)
-    | TVariant (name, args) -> TVariant (name, List.map inst_static args)
+    | TVariant (name, args, targs) ->
+        TVariant (name, List.map inst_static args, List.map inst targs)
     | TSingleton (base, n) -> TSingleton (inst base, inst_static n)
     | TExists _ as t -> t
     | t -> t
@@ -947,7 +979,8 @@ let rec to_ast t =
   | TFun (ps, r, effects) -> Ast.TypeFn (List.map to_ast ps, to_ast r, effects)
   | TStruct s     -> Ast.TypeNamed s
   | TView (s, args) -> Ast.TypeView (s, List.map static_to_ast args)
-  | TVariant (s, args) -> Ast.TypeVariant (s, List.map static_to_ast args)
+  | TVariant (s, args, targs) ->
+      Ast.TypeVariant (s, List.map static_to_ast args, List.map to_ast targs)
   | TExists (name, sort, _, body) ->
       Ast.TypeExists (name, sort, to_ast body)
   | TIndexedStruct (s, args) ->

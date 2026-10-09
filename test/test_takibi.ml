@@ -284,8 +284,8 @@ let rec show_type = function
       in
       Printf.sprintf "view %s[%s]" s
         (String.concat ", " (List.map arg args))
-  | Ast.TypeVariant (s, []) -> s
-  | Ast.TypeVariant (s, args) ->
+  | Ast.TypeVariant (s, [], _) -> s
+  | Ast.TypeVariant (s, args, _) ->
       let arg = function
         | Ast.StaticName n -> n
         | Ast.StaticGlobal (n, _) -> "&" ^ n
@@ -3247,7 +3247,7 @@ let infer_tests = [
             Some (params, ret, local)
         | _ -> None) prog) in
       Alcotest.(check type_t) "variant struct field"
-        (Ast.TypeVariant ("Issue358Variant", [arg])) holder_field;
+        (Ast.TypeVariant ("Issue358Variant", [arg], [])) holder_field;
       Alcotest.(check type_t) "view parameter"
         (Ast.TypeBorrow (Ast.TypeView ("Issue358View", [arg])))
         (Option.get (List.assoc "v" params));
@@ -3255,9 +3255,9 @@ let infer_tests = [
         (Ast.TypeBorrow (Ast.TypeIndexed ("Issue358Owner", [arg])))
         (Option.get (List.assoc "o" params));
       Alcotest.(check type_t) "variant return"
-        (Ast.TypeVariant ("Issue358Variant", [arg])) ret;
+        (Ast.TypeVariant ("Issue358Variant", [arg], [])) ret;
       Alcotest.(check type_t) "variant local"
-        (Ast.TypeVariant ("Issue358Variant", [arg])) local;
+        (Ast.TypeVariant ("Issue358Variant", [arg], [])) local;
       Alcotest.(check bool) "resolver is idempotent" true
         (Declared_type_resolver.run prog = prog));
 
@@ -3802,6 +3802,52 @@ let infer_tests = [
          }
        }")));
 
+  (* GitHub issue #732: generic variants. *)
+  Alcotest.test_case "generic variant: instances of one variant, nested instances and inference" `Quick
+    (fun () -> ignore (infer {|
+      generic variant Maybe(T: type) { Nothing; Just(T); }
+      fn a(x: usize) -> Maybe(usize) { return Maybe::Just(x); }
+      fn b() -> Maybe(Maybe(u8)) { return Maybe::Just(Maybe::Nothing); }
+      fn c(m: Maybe(usize)) -> usize { match m { Maybe::Nothing => { return 0; } Maybe::Just(v) => { return v; } } }|}));
+  Alcotest.test_case "generic variant: an existential type argument" `Quick
+    (fun () -> ignore (infer {|
+      generic variant Maybe(T: type) { Nothing; Just(T); }
+      private linear struct Own[k: usize] { private id: usize @ k; }
+      fn free(o: sink Own[n]) {}
+      fn hold(o: sink Own[n]) -> Maybe(exists k: usize. Own[k]) { return Maybe::Just(o); }
+      fn drain(m: Maybe(exists k: usize. Own[k])) { match m { Maybe::Nothing => {} Maybe::Just(o) => { free(o); } } }|}));
+  Alcotest.test_case "generic variant: a payload of the wrong type argument" `Quick
+    (expect_type_error "cannot unify" {|
+      generic variant Maybe(T: type) { Nothing; Just(T); }
+      fn a() -> Maybe(u8) { let x: usize = 1; return Maybe::Just(x); }|});
+  Alcotest.test_case "generic variant: two instances are distinct types" `Quick
+    (expect_type_error "cannot unify" {|
+      generic variant Maybe(T: type) { Nothing; Just(T); }
+      fn a(m: Maybe(usize)) -> Maybe(u8) { return m; }|});
+  Alcotest.test_case "generic variant: an instance with a linear argument is linear" `Quick
+    (expect_type_error "never consumed" {|
+      generic variant Maybe(T: type) { Nothing; Just(T); }
+      linear opaque struct Token;
+      extern fn token_drop(t: sink *Token);
+      extern fn token_make() -> *Token;
+      fn f() { let m = Maybe::Just(token_make()); }|});
+  Alcotest.test_case "generic variant: a linear payload bound in an arm must be consumed" `Quick
+    (expect_type_error "never consumed" {|
+      generic variant Maybe(T: type) { Nothing; Just(T); }
+      linear opaque struct Token;
+      extern fn token_drop(t: sink *Token);
+      extern fn token_make() -> *Token;
+      fn f() { match Maybe::Just(token_make()) { Maybe::Nothing => {} Maybe::Just(t) => {} } }|});
+  Alcotest.test_case "generic variant: a must_use generic variant must be handled" `Quick
+    (expect_type_error "must-use" {|
+      generic variant Maybe(T: type) { Nothing; Just(T); }
+      must_use generic variant Answer(T: type) { No; Yes(T); }
+      fn ask() -> Answer(usize) { return Answer::Yes(1); }
+      fn f() { ask(); }|});
+  Alcotest.test_case "generic variant: static parameters are not yet allowed on a generic variant" `Quick
+    (expect_type_error "cannot also declare static parameters" {|
+      generic variant Maybe(T: type) { Nothing; Just(T); }
+      generic variant Indexed(T: type)[k: usize] { None; Some(T); }|});
   (* GitHub issue #131 place rule (2026-10-09): stored linear fields are
      places, emptied by field_take and refilled by field_put. *)
   Alcotest.test_case "place: take, put back, use whole, drop" `Quick

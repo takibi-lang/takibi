@@ -1,0 +1,87 @@
+// GitHub issue #732: generic variants, executed. Each section prints what
+// it checked; the compile-time halves (linearity, must_use, mismatched
+// arguments) are in test/test_takibi.ml.
+
+generic variant Maybe(T: type) { Nothing; Just(T); }
+
+// The second consumer the design was to be proven against: a must_use
+// snapshot generic in the publish record type, produced by a generic
+// function. Two record types give two instances of one variant.
+must_use generic variant Snapshot(T: type) { Unpublished; Copied(*T); }
+
+struct publish Event { seq: usize; code: usize; }
+struct publish Pair { seq: usize; left: u8; right: u8; }
+
+let mut event_slot: Event;
+let mut event_copy: Event;
+let mut pair_slot: Pair;
+let mut pair_copy: Pair;
+
+fn copy_of(T: type, src: *T, dst: *T) -> Snapshot(T) {
+    if (publish_copy(src, dst) == 0) { return Snapshot::Unpublished; }
+    return Snapshot::Copied(dst);
+}
+
+fn just(x: usize) -> Maybe(usize) { return Maybe::Just(x); }
+
+fn or_zero(m: Maybe(usize)) -> usize {
+    match m {
+        Maybe::Nothing => { return 0; }
+        Maybe::Just(v) => { return v; }
+    }
+}
+
+fn nested(m: Maybe(Maybe(u8))) -> usize {
+    match m {
+        Maybe::Nothing => { return 100; }
+        Maybe::Just(inner) => {
+            match inner {
+                Maybe::Nothing => { return 200; }
+                Maybe::Just(b) => { return b as usize; }
+            }
+        }
+    }
+}
+
+fn app_main() {
+    uart_puts("instances of one variant (usize, nothing): ");
+    uart_print(or_zero(just(41)) + 1);
+    uart_puts(" ");
+    uart_print(or_zero(Maybe::Nothing));
+    uart_puts("\n");
+
+    uart_puts("a nested instance (just just, just nothing, nothing): ");
+    uart_print(nested(Maybe::Just(Maybe::Just(7 as u8))));
+    uart_puts(" ");
+    uart_print(nested(Maybe::Just(Maybe::Nothing)));
+    uart_puts(" ");
+    uart_print(nested(Maybe::Nothing));
+    uart_puts("\n");
+
+    uart_puts("a snapshot before publication is refused: ");
+    match copy_of(&event_slot, &event_copy) {
+        Snapshot::Unpublished => { uart_print(true); }
+        Snapshot::Copied(_) => { uart_print(false); }
+    }
+    uart_puts("\n");
+
+    let w = publish_begin(&event_slot);
+    w.code = 9;
+    publish_commit(w, 1);
+    let p = publish_begin(&pair_slot);
+    p.left = 3;
+    p.right = 4;
+    publish_commit(p, 1);
+    uart_puts("snapshots of two record types (code, left + right): ");
+    match copy_of(&event_slot, &event_copy) {
+        Snapshot::Unpublished => { uart_print(0 as usize); }
+        Snapshot::Copied(e) => { uart_print(e.code); }
+    }
+    uart_puts(" ");
+    match copy_of(&pair_slot, &pair_copy) {
+        Snapshot::Unpublished => { uart_print(0 as usize); }
+        Snapshot::Copied(q) => { uart_print((q.left + q.right) as usize); }
+    }
+    uart_puts("\n");
+    uart_puts("done\n");
+}

@@ -67,6 +67,11 @@ type generic_arg = GType of type_expr | GValue of int
    and returns the node unchanged; during the final rewrite pass it returns
    TypeNamed of the generated struct's mangled name. *)
 
+(* GitHub issue #732: generic variants are not monomorphized here -- the
+   checker keeps their instances structurally -- so an instantiation of one
+   keeps its name, with only its arguments substituted. *)
+let generic_variant_names : (string, unit) Hashtbl.t = Hashtbl.create 8
+
 let rec transform ~(subst : string -> type_expr option)
                   ~(vsubst : string -> int option)
                   ~(resolve_inst : string -> type_expr list -> type_expr)
@@ -87,6 +92,8 @@ let rec transform ~(subst : string -> type_expr option)
            (match vsubst name with
             | Some v -> TypeIntLit v
             | None -> t))
+  | TypeGenericInst (name, args) when Hashtbl.mem generic_variant_names name ->
+      TypeGenericInst (name, List.map go args)
   | TypeGenericInst (name, args) -> resolve_inst name (List.map go args)
   | TypeIntLit _ -> t
     (* Meaningful only as a TypeGenericInst value-argument; a lone
@@ -441,6 +448,8 @@ let walk_toplevel ~subst ~vsubst ~resolve_inst (t : toplevel) : toplevel =
   | EnumDef (n, base, vs, ne) -> EnumDef (n, Option.map ty base, vs, ne)
   | VariantDef (n, ps, cases, mu, l) ->
       VariantDef (n, ps, List.map (fun (cn, pt) -> (cn, Option.map ty pt)) cases, mu, l)
+  | GenericVariantDef (n, tps, ps, cases, mu, l) ->
+      GenericVariantDef (n, tps, ps, List.map (fun (cn, pt) -> (cn, Option.map ty pt)) cases, mu, l)
   | GenericStructDef _ -> t
   | ExternSymbolDef _ -> t
   | VectorTableDef _ -> t
@@ -860,6 +869,11 @@ let rec unify_arg ?(trace = fun _ -> ())
       occurrences (call names were already fixed in step 3). *)
 
 let run ?(explain_inference = false) (prog : toplevel list) : toplevel list =
+  Hashtbl.reset generic_variant_names;
+  List.iter (function
+    | GenericVariantDef (name, _, _, _, _, _) ->
+        Hashtbl.replace generic_variant_names name ()
+    | _ -> ()) prog;
   concrete_global_files := List.fold_left (fun globals -> function
     | LetDef (name, _, _, _, _, private_, loc) ->
         GlobalMap.add name
@@ -1242,6 +1256,8 @@ let run ?(explain_inference = false) (prog : toplevel list) : toplevel list =
       | EnumDef (n, base, vs, ne) -> EnumDef (n, Option.map ty base, vs, ne)
       | VariantDef (n, ps, cases, mu, l) ->
           VariantDef (n, ps, List.map (fun (cn, pt) -> (cn, Option.map ty pt)) cases, mu, l)
+      | GenericVariantDef (n, tps, ps, cases, mu, l) ->
+          GenericVariantDef (n, tps, ps, List.map (fun (cn, pt) -> (cn, Option.map ty pt)) cases, mu, l)
       | GenericStructDef _ -> t
       | ExternSymbolDef _ -> t
       | VectorTableDef _ -> t

@@ -418,6 +418,49 @@ let variant_kinds : (string, Ast.opaque_kind) Hashtbl.t = Hashtbl.create 8
    pool. *)
 let variant_params : (string, Ast.static_param list) Hashtbl.t = Hashtbl.create 8
 let must_use_variants : (string, unit) Hashtbl.t = Hashtbl.create 8
+(* GitHub issue #732: generic variant name -> its type parameter names. *)
+let generic_variant_params : (string, string list) Hashtbl.t = Hashtbl.create 8
+
+(* GitHub issue #732: the instance each constructor, case name or match
+   of a generic variant used, keyed by the node's location, resolved to
+   AST types once checking ends (Generic_variant names the layout). *)
+let generic_variant_sites : (string, string * ty list) Hashtbl.t = Hashtbl.create 8
+
+let record_generic_variant_site loc vtype targs =
+  if targs <> [] then
+    Hashtbl.replace generic_variant_sites (loc_key loc) (vtype, targs)
+
+let generic_variant_site_instance (loc : Ast.loc)
+    : (string * Ast.type_expr list) option =
+  Option.map (fun (vtype, targs) ->
+    (vtype, List.map (fun t -> Types.to_ast (repr t)) targs))
+    (Hashtbl.find_opt generic_variant_sites (loc_key loc))
+
+let generic_variant_site_instances () : (string * Ast.type_expr list) list =
+  let resolve (vtype, targs) =
+    (vtype, List.map (fun t -> Types.to_ast (repr t)) targs) in
+  Hashtbl.fold (fun _ site acc -> resolve site :: acc) generic_variant_sites []
+  @ List.map resolve !Types.generic_variant_instances_seen
+
+(* Fresh type arguments for a generic variant's instance, [] otherwise. *)
+let fresh_variant_type_args vtype =
+  match Hashtbl.find_opt generic_variant_params vtype with
+  | None -> []
+  | Some params -> List.map (fun _ -> fresh ()) params
+
+(* Resolve a payload schema with the variant's type parameters bound to
+   [targs]. *)
+let with_variant_type_args vtype targs f =
+  match Hashtbl.find_opt generic_variant_params vtype with
+  | None -> f ()
+  | Some params ->
+      if List.length params <> List.length targs then
+        raise (TypeError (Lexing.dummy_pos, Printf.sprintf
+          "variant '%s' expects %d type argument(s), got %d"
+          vtype (List.length params) (List.length targs)));
+      let saved = !Types.type_param_bindings in
+      Types.type_param_bindings := List.combine params targs @ saved;
+      Fun.protect ~finally:(fun () -> Types.type_param_bindings := saved) f
 
 (* GitHub issue #345: bind an indexed variant's own declared static
    parameters to fresh metavariables in `scope`, and return them in
@@ -1646,8 +1689,11 @@ let is_linear_ptr_ty t = match repr t with
 let rec is_linear_payload_ty t = match repr t with
   | TPtr (TStruct n) | TRefMut (TStruct n) -> StringSet.mem n !linear_opaque_names
   | TView (n, _) -> Hashtbl.find_opt view_kinds n = Some Ast.KindLinear
-  | TVariant (n, _) ->
+  | TVariant (n, _, targs) ->
+      (* GitHub issue #732 (Austral's rule): an instance is linear if any
+         type argument is. *)
       Hashtbl.find_opt variant_kinds n = Some Ast.KindLinear
+      || List.exists is_linear_payload_ty targs
   | TIndexedStruct (n, _) ->
       Hashtbl.find_opt indexed_struct_kinds n = Some Ast.KindLinear
   | TExists (_, _, _, body) | TSingleton (body, _) ->
@@ -1694,7 +1740,9 @@ let rec contains_variant_ty t = match repr t with
   | _ -> false
 
 let rec contains_kinded_variant_ty t = match repr t with
-  | TVariant (name, _) -> Hashtbl.mem variant_kinds name
+  | TVariant (name, _, targs) ->
+      Hashtbl.mem variant_kinds name
+      || List.exists (fun t -> contains_kinded_variant_ty t || is_linear_payload_ty t) targs
   | TPtr t | TIo t | TArray (t, _) | TSlice (t, _, _)
   | TAlignedPtr (_, t) | TSingleton (t, _) -> contains_kinded_variant_ty t
   | TTuple ts -> List.exists contains_kinded_variant_ty ts
@@ -1944,7 +1992,7 @@ let rec no_copy_in_ast_type (senv : senv) (t : Ast.type_expr) = match t with
             | Some cases -> List.find_map (fun (_, payload) ->
                 Option.bind payload (no_copy_in_ast_type senv)) cases
             | None -> None))
-  | Ast.TypeVariant (name, _) -> no_copy_in_ast_type senv (Ast.TypeNamed name)
+  | Ast.TypeVariant (name, _, _) -> no_copy_in_ast_type senv (Ast.TypeNamed name)
   | Ast.TypeArray (t, _) | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t) | Ast.TypeIo t
   | Ast.TypeSingleton (t, _) | Ast.TypeExists (_, _, t) ->
       no_copy_in_ast_type senv t
@@ -1954,7 +2002,7 @@ let rec no_copy_in_ast_type (senv : senv) (t : Ast.type_expr) = match t with
 let rec no_copy_in_value_ty (senv : senv) t = match repr t with
   | TStruct name -> no_copy_in_ast_type senv (Ast.TypeNamed name)
   | TIndexedStruct (name, _) -> no_copy_in_ast_type senv (Ast.TypeNamed name)
-  | TVariant (name, _) -> no_copy_in_ast_type senv (Ast.TypeNamed name)
+  | TVariant (name, _, _) -> no_copy_in_ast_type senv (Ast.TypeNamed name)
   | TIo t | TArray (t, _) | TSingleton (t, _) | TExists (_, _, _, t) ->
       no_copy_in_value_ty senv t
   | TTuple ts -> List.find_map (no_copy_in_value_ty senv) ts
@@ -2325,7 +2373,7 @@ let check_resource_cast_away loc (src_ty : ty) =
       raise (TypeError (loc, Printf.sprintf
         "cannot cast indexed owner '%s': use its declaring module's constructor/accessor functions"
         sname))
-  | TVariant (name, _) ->
+  | TVariant (name, _, _) ->
       raise (TypeError (loc, Printf.sprintf
         "cannot cast variant '%s': inspect it with match" name))
   | TPtr (TStruct sname) when StringSet.mem sname !linear_opaque_names
@@ -3796,7 +3844,10 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                         fresh metavariables let the destination type
                         settle them. *)
                      let scope = create_static_scope () in
-                     TVariant (ename, bind_variant_static_params scope ename))))
+                     let targs = fresh_variant_type_args ename in
+                     record_generic_variant_site e.loc ename targs;
+                     TVariant (ename, bind_variant_static_params scope ename,
+                               targs))))
 
   | VariantCtor (vtype, vname, payload) ->
       let schema = match Hashtbl.find_opt variant_defs vtype with
@@ -3812,20 +3863,23 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       in
       let scope = create_static_scope () in
       let variant_args = bind_variant_static_params scope vtype in
+      let variant_targs = fresh_variant_type_args vtype in
+      record_generic_variant_site e.loc vtype variant_targs;
       let rec instantiate_exists = function
         | Ast.TypeExists (name, _, body) ->
             bind_static scope name (fresh_static ());
             instantiate_exists body
         | ty -> of_ast_in_decl_scope scope ty
       in
-      let expected = instantiate_exists schema in
+      let expected = with_variant_type_args vtype variant_targs
+          (fun () -> instantiate_exists schema) in
       let _actual = check_expr senv eenv tyenv fenv payload expected in
       (* variant_args were bound into `scope` BEFORE the payload schema
          was resolved through it, so unifying the payload above has
          already resolved them to whatever the argument's own type
          carries -- e.g. `Got(o)` where `o: Owner[p, a]` makes this
          `TakeResult[p]`. *)
-      TVariant (vtype, variant_args)
+      TVariant (vtype, variant_args, variant_targs)
 
   | SizeOf ty ->
       (* sizeof(T) is a compile-time constant of type usize. Validate named
@@ -4064,7 +4118,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            let rt = adapt_actual_to_expected tyenv replacement rt field_ty in
            unify_at replacement.loc rt field_ty;
            (match repr field_ty with
-            | TVariant (name, _)
+            | TVariant (name, _, _)
               when Hashtbl.find_opt variant_kinds name = Some Ast.KindLinear ->
                 field_ty
             | _ -> raise (TypeError (field_expr.loc,
@@ -4694,7 +4748,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            let rt = infer_expr senv eenv tyenv fenv right in
            unify_at left.loc lt TUsize;
            unify_at right.loc rt TUsize;
-           TVariant ("CheckedUsize", [])
+           TVariant ("CheckedUsize", [], [])
        | _ -> raise (TypeError (e.loc, Printf.sprintf
            "%s expects two usize arguments: %s(left, right)" fname fname)))
 
@@ -4840,7 +4894,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
               match strip_singleton actual, strip_singleton expected with
               | TIndexedStruct (a, _), TIndexedStruct (b, _) -> a = b
               | TView (a, _), TView (b, _) -> a = b
-              | TVariant (a, _), TVariant (b, _) -> a = b
+              | TVariant (a, _, _), TVariant (b, _, _) -> a = b
               | TPtr a, TPtr b -> same_shape a b
               | a, b -> a = b
             in
@@ -6523,7 +6577,8 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
                    "non-exhaustive match: '%s::%s' not covered" ename vname))
              ) enum_variants;
            (tyenv, raw_locals')
-       | TVariant (vtype, variant_args) ->
+       | TVariant (vtype, variant_args, variant_targs) ->
+           record_generic_variant_site s.loc vtype variant_targs;
            let cases = match Hashtbl.find_opt variant_defs vtype with
              | Some cases -> cases
              | None -> raise (TypeError (disc.loc, Printf.sprintf
@@ -6557,7 +6612,8 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
                    open_exists body
                | ty -> of_ast_in_decl_scope scope ty
              in
-             open_exists schema
+             with_variant_type_args vtype variant_targs
+               (fun () -> open_exists schema)
            in
            let raw_locals' = List.fold_left (fun rl arm ->
              match arm with
@@ -7027,6 +7083,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   reset_table view_kinds;
   reset_table view_params;
   reset_table variant_defs;
+  reset_table generic_variant_sites;
+  Types.generic_variant_instances_seen := [];
   reset_table variant_kinds;
   reset_table variant_params;
   reset_table must_use_variants;
@@ -7177,6 +7235,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.ViewDef (n, _, _, _, _)       -> claim_toplevel_name n "view"
     | Ast.EnumDef (n, _, _, _)    -> claim_toplevel_name n "enum"
     | Ast.VariantDef (n, _, _, _, _)  -> claim_toplevel_name n "variant"
+    | Ast.GenericVariantDef (n, _, _, _, _, _) -> claim_toplevel_name n "generic variant"
     | Ast.GenericStructDef (n, _, _, _, _, _, _) ->
         claim_toplevel_name n "generic struct"
     | Ast.UseDef _              -> ()
@@ -7216,14 +7275,24 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | _ -> ()) prog;
   Hashtbl.reset variant_defs;
   Hashtbl.reset variant_params;
+  Hashtbl.reset generic_variant_params;
   List.iter (function
     | Ast.VariantDef (name, params, cases, _, _) ->
         Hashtbl.replace variant_defs name cases;
         Hashtbl.replace variant_params name params
+    | Ast.GenericVariantDef (name, tparams, params, cases, _, loc) ->
+        if params <> [] then
+          raise (TypeError (loc, Printf.sprintf
+            "generic variant '%s' cannot also declare static parameters yet"
+            name));
+        Hashtbl.replace variant_defs name cases;
+        Hashtbl.replace variant_params name params;
+        Hashtbl.replace generic_variant_params name tparams
     | _ -> ()) prog;
   Hashtbl.reset must_use_variants;
   List.iter (function
-    | Ast.VariantDef (name, _, _, true, _) ->
+    | Ast.VariantDef (name, _, _, true, _)
+    | Ast.GenericVariantDef (name, _, _, _, true, _) ->
         Hashtbl.replace must_use_variants name ()
     | _ -> ()) prog;
   Hashtbl.reset indexed_struct_params;
@@ -7265,7 +7334,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               | None -> false)) in
     match ty with
     | Ast.TypeNamed name | Ast.TypeIndexed (name, _)
-    | Ast.TypeVariant (name, _) ->
+    | Ast.TypeVariant (name, _, _) ->
         Dma_fixed_registry.type_mentions_token ty || nested name
     | Ast.TypePtr t | Ast.TypeAlignedPtr (_, t) | Ast.TypeIo t
     | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _, _)
@@ -7320,7 +7389,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeView (name, _) ->
         Option.value (Hashtbl.find_opt view_kinds name)
           ~default:Ast.KindPlain
-    | Ast.TypeVariant (name, _) ->
+    | Ast.TypeVariant (name, _, _) ->
         Option.value (Hashtbl.find_opt variant_kinds name)
           ~default:Ast.KindPlain
     | Ast.TypeIndexed (name, _) ->
@@ -7458,7 +7527,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   let register_stable_owner sname fields private_fields =
         List.iter (fun (fname, ty) ->
           let variant_name = match ty with
-            | Ast.TypeVariant (name, _) -> Some name
+            | Ast.TypeVariant (name, _, _) -> Some name
             | _ -> None
           in
           match variant_name with
@@ -7710,7 +7779,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                name (List.length formals) name))
          | Some formals ->
              validate_static_application loc "view" name formals args)
-    | Ast.TypeVariant (name, args) ->
+    | Ast.TypeVariant (name, args, _) ->
         (match Hashtbl.find_opt variant_params name with
          | None -> raise (TypeError (loc, Printf.sprintf
              "unknown variant '%s'" name))
@@ -7858,7 +7927,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | _ -> false
   in
   let rec type_mentions_kinded_variant ty = match Ast.strip_singleton ty with
-    | Ast.TypeVariant (name, _) -> Hashtbl.mem variant_kinds name
+    | Ast.TypeVariant (name, _, targs) ->
+        Hashtbl.mem variant_kinds name
+        || List.exists type_mentions_kinded_variant targs
     | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeBorrowMut t
     | Ast.TypeSink t
     | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t)
@@ -8057,7 +8128,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       when Hashtbl.mem view_kinds name -> validate_complete_type loc false inner
     | Ast.TypeBorrow (Ast.TypeIndexed (name, _) as inner)
       when is_kinded name -> validate_complete_type loc false inner
-    | Ast.TypeBorrow (Ast.TypeVariant (name, _) as inner)
+    | Ast.TypeBorrow (Ast.TypeVariant (name, _, _) as inner)
       when Hashtbl.mem variant_kinds name -> validate_complete_type loc false inner
     (* GitHub issue #623: a device span is tied to its device token, so a
        descriptor writer receives it as a nonretaining parameter. *)
@@ -8078,7 +8149,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       when is_kinded name -> validate_complete_type loc false inner
     | Ast.TypeSink (Ast.TypeIndexed (name, _) as inner)
       when is_kinded name -> validate_complete_type loc false inner
-    | Ast.TypeSink (Ast.TypeVariant (name, _) as inner)
+    | Ast.TypeSink (Ast.TypeVariant (name, _, _) as inner)
       when Hashtbl.mem variant_kinds name -> validate_complete_type loc false inner
     | Ast.TypeSink _ ->
         raise (TypeError (loc,
@@ -8285,7 +8356,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
      | Ast.StaticAssert _
      | Ast.Break | Ast.Continue -> ())
   in
-  List.iter (function
+  let rec validate_toplevel_def = function
     | Ast.FuncDef f ->
         Option.iter
           (validate_effects ~allow_declaration_only:true ~allow_noreturn:false f.def_loc "function" f.name)
@@ -8458,7 +8529,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                 "struct field '%s.%s' cannot hold an affine/linear variant; stable owner storage requires a private linear variant field"
                 sname fname));
             let variant_name = match ty with
-              | Ast.TypeVariant (name, _) -> name
+              | Ast.TypeVariant (name, _, _) -> name
               | _ -> raise (TypeError (sloc,
                   "stable owner storage must directly hold a linear variant"))
             in
@@ -8828,7 +8899,27 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               name target))) !after_switch;
         validate_exception_frame "exception_restore" name loc frame
     | Ast.OpaqueStructDef _ | Ast.EnumDef _ | Ast.UseDef _
-    | Ast.GenericStructDef _ | Ast.ExternSymbolDef _ -> ()) prog;
+    | Ast.GenericStructDef _ | Ast.ExternSymbolDef _ -> ()
+    (* GitHub issue #732: a generic variant is checked as the variant it
+       would be with every type parameter replaced by a plain stand-in;
+       what a type argument may be is checked at each instance. *)
+    | Ast.GenericVariantDef (vname, tparams, params, cases, must_use, vloc) ->
+        let seen = Hashtbl.create 4 in
+        List.iter (fun name ->
+          if Hashtbl.mem seen name then
+            raise (TypeError (vloc, Printf.sprintf
+              "duplicate type parameter '%s' on variant '%s'" name vname));
+          Hashtbl.add seen name ()) tparams;
+        let rec stand_in = function
+          | Ast.TypeNamed name when Hashtbl.mem seen name -> Ast.TypeUsize
+          | Ast.TypePtr t -> Ast.TypePtr (stand_in t)
+          | Ast.TypeExists (n, sort, body) -> Ast.TypeExists (n, sort, stand_in body)
+          | t -> t in
+        validate_toplevel_def (Ast.VariantDef (vname, params,
+          List.map (fun (c, payload) -> (c, Option.map stand_in payload)) cases,
+          must_use, vloc))
+  in
+  List.iter validate_toplevel_def prog;
     (* GenericStructDef (GitHub issue #207): nothing to validate here yet
        -- its fields reference an unresolved type parameter, not a real
        type. Monomorphize.run (once it exists) is the only pass that ever
@@ -9033,7 +9124,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.OpaqueStructDef _ -> m
     | Ast.ViewDef _ -> m
     | Ast.EnumDef _   -> m
-    | Ast.VariantDef _ -> m
+    | Ast.VariantDef _ | Ast.GenericVariantDef _ -> m
     | Ast.UseDef _    -> m
     | Ast.VectorTableDef _ -> m
     | Ast.ExceptionEntryDef _ -> m
@@ -9129,7 +9220,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.OpaqueStructDef _        -> m
     | Ast.ViewDef _                -> m
     | Ast.EnumDef _                -> m
-    | Ast.VariantDef _             -> m
+    | Ast.VariantDef _ | Ast.GenericVariantDef _ -> m
     | Ast.UseDef _                 -> m
     | Ast.VectorTableDef _         -> m
     | Ast.ExceptionEntryDef _      -> m
@@ -9364,8 +9455,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         StringSet.mem name affine_names
     | Ast.TypeView (name, _) ->
         Hashtbl.find_opt view_kinds name = Some Ast.KindAffine
-    | Ast.TypeVariant (name, _) ->
+    | Ast.TypeVariant (name, _, targs) ->
         Hashtbl.find_opt variant_kinds name = Some Ast.KindAffine
+        || List.exists is_affine_type targs
     | Ast.TypeTuple ts -> List.exists is_affine_type ts
     (* An existential (GitHub issue #183's follow-up) hides its index, not
        its ownership kind: `exists page. PageOwner[page]` still owns the
@@ -9383,14 +9475,15 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         StringSet.mem name linear_names
     | Ast.TypeView (name, _) ->
         Hashtbl.find_opt view_kinds name = Some Ast.KindLinear
-    | Ast.TypeVariant (name, _) ->
+    | Ast.TypeVariant (name, _, targs) ->
         Hashtbl.find_opt variant_kinds name = Some Ast.KindLinear
+        || List.exists is_linear_type targs
     | Ast.TypeTuple ts -> List.exists is_linear_type ts
     | Ast.TypeExists (_, _, body) -> is_linear_type body
     | _ -> false
   in
   let rec is_must_use_type ty = match strip_borrow ty with
-    | Ast.TypeVariant (name, _) ->
+    | Ast.TypeVariant (name, _, _) ->
         Hashtbl.mem must_use_variants name
     | Ast.TypeTuple ts -> List.exists is_must_use_type ts
     | Ast.TypeExists (_, _, body) -> is_must_use_type body
@@ -9525,7 +9618,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
            | Some cases -> List.fold_left (fun acc (_, payload) ->
                Option.fold ~none:acc ~some:(visit seen acc) payload) guards cases
            | None -> guards)
-      | Ast.TypeVariant (name, _) -> visit seen guards (Ast.TypeNamed name)
+      | Ast.TypeVariant (name, _, _) -> visit seen guards (Ast.TypeNamed name)
       | Ast.TypeTuple parts -> List.fold_left (visit seen) guards parts
       | Ast.TypeExists (_, _, body) -> visit seen guards body
       | _ -> guards
@@ -9973,7 +10066,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     match ty with
     | Ast.TypeView (name, _) -> name = kind
     | Ast.TypeNamed name | Ast.TypeIndexed (name, _)
-    | Ast.TypeVariant (name, _) -> name = kind || nested name
+    | Ast.TypeVariant (name, _, _) -> name = kind || nested name
     | Ast.TypeBorrow ty | Ast.TypeBorrowMut ty | Ast.TypeSink ty
     | Ast.TypeExists (_, _, ty) | Ast.TypeArray (ty, _)
     | Ast.TypeArraySym (ty, _) -> contains_witness kind seen ty
@@ -10419,7 +10512,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                           Option.fold ~none:false ~some:(visit seen) payload)
                           cases
                     | None -> false))
-        | Ast.TypeVariant (name, _) ->
+        | Ast.TypeVariant (name, _, _) ->
             if StringSet.mem name seen then false
             else
               let seen = StringSet.add name seen in
@@ -11074,7 +11167,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                     !resolved_call_targets) ~default:callee in
                   StringMap.find_opt callee call_returns
               | Ast.ViewLit (kind, indices) -> Some (Ast.TypeView (kind, indices))
-              | Ast.VariantCtor (kind, _, _) -> Some (Ast.TypeVariant (kind, []))
+              | Ast.VariantCtor (kind, _, _) -> Some (Ast.TypeVariant (kind, [], []))
               | _ -> expr_ast_type arg in
             Option.iter (fun ty ->
               pending_witness_arguments :=
@@ -11699,6 +11792,19 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                         let schema = match Hashtbl.find_opt variant_defs vtype with
                           | Some cases -> Option.join (List.assoc_opt cname cases)
                           | None -> None
+                        in
+                        (* GitHub issue #732: a generic variant's payload is
+                           the instance this match opened, so its kind is
+                           the type argument's. *)
+                        let schema = match
+                            Hashtbl.find_opt generic_variant_params vtype,
+                            generic_variant_site_instance s.loc with
+                          | Some params, Some (generic, targs)
+                            when generic = vtype
+                                 && List.length params = List.length targs ->
+                              Option.map (Generic_variant.substitute
+                                (List.combine params targs)) schema
+                          | _ -> schema
                         in
                         let rec strip_exists = function
                           | Ast.TypeExists (_, _, inner) -> strip_exists inner

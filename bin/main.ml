@@ -465,6 +465,14 @@ let () =
       end
     end;
 
+    (* GitHub issue #732: one ordinary variant per generic instance. *)
+    let instances = Generic_variant.instance_defs prog
+                      (Type_inf.generic_variant_site_instances ()) in
+    List.iter (function
+      | Ast.VariantDef (name, _, cases, _, _) ->
+          Type_layout.register_variant name cases
+      | _ -> ()) instances;
+    let prog = prog @ instances in
     Llvm_gen.gen_program ~prog_types prog;
 
     (* GitHub issue #362: the three layout implementations must still
