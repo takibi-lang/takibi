@@ -1,10 +1,11 @@
 {
-  "date": "2026-10-08",
+  "date": "2026-10-09",
   "event": "incremental",
   "decision": "reuse",
-  "source_sha256": "902e26151be2874f288ff8051493ec07721d4e5e8a82eb5730319e6a4896ebef",
-  "workload": "Incremental correction of the existing two-core freelist boot probe: phase-wide round admission and secondary exit before resetting the locked phase. No new global, allocation, storage layout or allocation lifetime. The generated QEMU regression overlay is separate from production builds. Reuse existing production pool/allocation evidence; a supplementary linked QEMU section comparison uses the failing CI artifact and the corrected local ordinary kernel.",
+  "source_sha256": "69fb423c418f303268553141f715f7da030937409875d052a26940cb6e78a6f8",
+  "workload": "Incremental correction of existing CPU 0/1 boot-probe rendezvous: peer-tick arrival/completion/exit windows, missing-participant phase abort, and a post-stop resume baseline. A four-word private window is local stack state; no production global, resource payload, pool metadata, allocation policy or normal allocation lifetime changes. Generated delay/refusal/old-code overlays remain outside production images.",
   "evidence": [
+    "docs/PEER_TICK_RENDEZVOUS_2026-10-09.md",
     "docs/FREELIST_PHASE_REENTRY_2026-10-08.md",
     "docs/RAW_AUTHORITY_AUDIT_SPACE_2026-10-08.md",
     "docs/SIGNAL_ACTIONS_SPACE_2026-10-08.md",
@@ -21,6 +22,6 @@
     "docs/DMA_MINT_FILES_2026-10-08.md",
     "docs/DMA_TRANSMIT_2026-10-08.md"
   ],
-  "assessment": "Reuse existing workload evidence for the #678 fixture protocol correction. Supplementary llvm-size-19 cross-build observation against CI run 37771243822 at edd90a04: QEMU text 719396 to 719524 (+128 bytes), data 5078 unchanged, BSS 1658608 unchanged. This is linked QEMU section accounting, not payload occupancy or a fresh RPi5 size comparison. No allocator/pool representation or allocation behavior changes; earlier RPi5 and cross-OS reports retain their separately stated strength.",
+  "assessment": "Reuse existing production allocation and pool observations because this correction preserves their workload and accounting boundaries. The maintained QEMU boot and delayed-entry overlay pass 70 views; seventeen actual consumers refuse a missing participant, and old resume/signal bodies fail their own controls. This does not claim unchanged linked text, optimized stack frames or fresh physical timing. The exact rebased full allcheck including real RPi5 remains the publication gate.",
   "next_trigger": "Measure at the typed atomic/probe or bounded-copy milestone, process trust-boundary separation, final raw-authority confinement, or a changed allocation/lifetime workload."
 }
