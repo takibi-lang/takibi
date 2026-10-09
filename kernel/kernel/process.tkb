@@ -1307,6 +1307,38 @@ fn kernel_process_current_stopped_record(
         scheduled_process_record_stopped(stopped, slot));
 }
 
+// Diagnostic context is readable only in the current live allocation's
+// stack. FrameRef's address/generation mint remains trusted; this check
+// refuses stale current handles and out-of-stack addresses without locks.
+fn kernel_process_crash_frame_usable(
+        stopped: borrow MachineStopped[&kernel_world_stop], frame_sp: usize) -> bool {
+    if (execution_state[execution_cpu_index()].current_live == false) { return false; }
+    let mut handle: ProcessHandle = execution_state[execution_cpu_index()].current_handle;
+    let mut generation_matches: bool = false;
+    if (handle.pool_index == 0) {
+        generation_matches = scheduled_process_boot_live &&
+            handle.generation == scheduled_process_boot_generation;
+    } else {
+        if (scheduled_process_pool_ready == false) { return false; }
+        match machine_pool_probe(&scheduled_process_pool, stopped, handle.pool_index) {
+            MachineSlotProbe::Busy => { return false; }
+            MachineSlotProbe::Missing => { return false; }
+            MachineSlotProbe::Live(scoped) => {
+                generation_matches = machine_pool_view_generation(scoped) == handle.generation;
+                machine_pool_view_drop(scoped);
+            }
+        }
+    }
+    if (generation_matches == false || (frame_sp & 15) != 0) { return false; }
+    let mut record = kernel_process_current_stopped_record(stopped);
+    let bottom: usize = record.stack_bottom;
+    let top: usize = record.stack_top;
+    if (bottom == 0 || top <= bottom || frame_sp < bottom || frame_sp >= top) {
+        return false;
+    }
+    return top - frame_sp >= EXC_CONTEXT_SIZE;
+}
+
 // Extra fatal fields are copied without enlarging every DDB process row.
 fn kernel_process_current_stopped_crash_detail(
         stopped: borrow MachineStopped[&kernel_world_stop]) -> (usize, usize) {
@@ -3463,7 +3495,7 @@ fn scheduled_process_exited_take(guard: borrow ProcessRunGuard[lock],
     if (scheduled_process_record_of_locked(guard, handle).stack_owner_cpu !=
             PROCESS_STACK_UNOWNED) {
         kernel_activity_set(KernelActivity::ReapOnOwnedStack);
-        kernel_syscall_fail_stop(0);
+        kernel_invariant_stop();
     }
     let owner = scheduled_process_owner_new(handle.pool_index,
                                             handle.generation);
@@ -3552,7 +3584,7 @@ fn scheduled_process_start(
         scheduled_process_record_owned(owner).stack_owner_cpu;
     if (stack_owner != PROCESS_STACK_UNOWNED && stack_owner != cpu_id()) {
         kernel_activity_set(KernelActivity::StartOnOwnedStack);
-        kernel_syscall_fail_stop(0);
+        kernel_invariant_stop();
     }
     // GitHub issue #579: this is the one place a CPU takes a Ready process
     // for itself -- every scheduling path reaches Running through here, and
@@ -3597,7 +3629,7 @@ fn scheduled_process_block(
         ProcessWaitPublish::Published => {}
         // Set just above, so this is the record changing under a caller that
         // does not hold the run lock.
-        ProcessWaitPublish::Refused => { kernel_syscall_fail_stop(0); }
+        ProcessWaitPublish::Refused => { kernel_invariant_stop(); }
     }
     workload_profile_note_block(
         scheduled_process_pid_of_slot(owner.pool_index));
@@ -4151,7 +4183,7 @@ private fn kernel_process_root_authorities_check(incoming: ProcessHandle,
             scheduled_process_address_space_root_lookup(target)));
         kernel_boot_log("\n");
     }
-    kernel_syscall_fail_stop(frame_ref_address(frame));
+    kernel_invariant_stop_with_frame(frame);
 }
 
 fn kernel_process_stack_interrupt_depart() {
@@ -4180,7 +4212,7 @@ fn kernel_process_stack_switch_complete(frame_sp: usize) {
         frame_ref_from_entry(frame_sp, kernel_process_entry_generation());
     let core: usize = cpu_id();
     if (core >= KERNEL_MAX_CORES) {
-        kernel_syscall_fail_stop(frame_sp);
+        kernel_invariant_stop_with_frame(frame);
     }
     let guard = process_run_lock();
     if (execution_state[execution_cpu_index()].stack_live) {
@@ -4188,7 +4220,7 @@ fn kernel_process_stack_switch_complete(frame_sp: usize) {
         if (scheduled_process_handle_matches(outgoing) == false ||
             scheduled_process_record_of_locked(guard, outgoing).stack_owner_cpu != core) {
             process_run_unlock(guard);
-            kernel_syscall_fail_stop(frame_sp);
+            kernel_invariant_stop_with_frame(frame);
         }
         scheduled_process_record_of_locked(guard, outgoing).stack_owner_cpu =
             PROCESS_STACK_UNOWNED;
@@ -4201,7 +4233,7 @@ fn kernel_process_stack_switch_complete(frame_sp: usize) {
     }
     if (execution_state[execution_cpu_index()].current_live == false) {
         process_run_unlock(guard);
-        kernel_syscall_fail_stop(frame_sp);
+        kernel_invariant_stop_with_frame(frame);
     }
     let mut incoming: ProcessHandle = execution_state[execution_cpu_index()].current_handle;
     if (scheduled_process_handle_matches(incoming) == false ||
@@ -4210,7 +4242,7 @@ fn kernel_process_stack_switch_complete(frame_sp: usize) {
             PROCESS_STACK_UNOWNED ||
         kernel_process_frame_belongs_to(incoming, frame) == false) {
         process_run_unlock(guard);
-        kernel_syscall_fail_stop(frame_sp);
+        kernel_invariant_stop_with_frame(frame);
     }
     scheduled_process_record_of_locked(guard, incoming).stack_owner_cpu = core;
     execution_state[execution_cpu_index()].stack_handle = incoming;
@@ -4245,7 +4277,7 @@ fn kernel_process_stack_idle_complete() {
     // kernel_core0_idle_enter.
     if (core >= KERNEL_MAX_CORES ||
         execution_state[execution_cpu_index()].current_live || execution_state[execution_cpu_index()].stack_live == false) {
-        kernel_syscall_fail_stop(0);
+        kernel_invariant_stop();
     }
     let guard = process_run_lock();
     let mut outgoing: ProcessHandle = execution_state[execution_cpu_index()].stack_handle;
@@ -4253,7 +4285,7 @@ fn kernel_process_stack_idle_complete() {
         scheduled_process_state_of_locked(guard, outgoing) != ProcessSlotState::Exited ||
         scheduled_process_record_of_locked(guard, outgoing).stack_owner_cpu != core) {
         process_run_unlock(guard);
-        kernel_syscall_fail_stop(0);
+        kernel_invariant_stop();
     }
     // Leave the exiting process's root before core 0 may reap it. The
     // release there switches only ITS OWN core off a root it frees, and
@@ -4290,7 +4322,7 @@ fn kernel_process_stack_idle_yield() {
     // kernel_core0_idle_yield_enter.
     if (core >= KERNEL_MAX_CORES ||
         execution_state[execution_cpu_index()].current_live || execution_state[execution_cpu_index()].stack_live == false) {
-        kernel_syscall_fail_stop(0);
+        kernel_invariant_stop();
     }
     let guard = process_run_lock();
     let mut outgoing: ProcessHandle = execution_state[execution_cpu_index()].stack_handle;
@@ -4298,7 +4330,7 @@ fn kernel_process_stack_idle_yield() {
         scheduled_process_state_of_locked(guard, outgoing) != ProcessSlotState::Running ||
         scheduled_process_record_of_locked(guard, outgoing).stack_owner_cpu != core) {
         process_run_unlock(guard);
-        kernel_syscall_fail_stop(0);
+        kernel_invariant_stop();
     }
     // Leave its root before it can run elsewhere, as an exit does.
     address_space_activate_root(address_space_boot_root());
@@ -4307,7 +4339,7 @@ fn kernel_process_stack_idle_yield() {
     execution_state[execution_cpu_index()].stack_live = false;
     if (kernel_process_yield_handle(guard, outgoing) == false) {
         process_run_unlock(guard);
-        kernel_syscall_fail_stop(0);
+        kernel_invariant_stop();
     }
     process_run_unlock(guard);
     workload_profile_idle_enter();
@@ -4321,7 +4353,7 @@ fn kernel_process_stack_idle_blocked() {
     let core: usize = cpu_id();
     if (core >= KERNEL_MAX_CORES ||
         execution_state[execution_cpu_index()].current_live || execution_state[execution_cpu_index()].stack_live == false) {
-        kernel_syscall_fail_stop(0);
+        kernel_invariant_stop();
     }
     let guard = process_run_lock();
     let mut outgoing: ProcessHandle = execution_state[execution_cpu_index()].stack_handle;
@@ -4330,7 +4362,7 @@ fn kernel_process_stack_idle_blocked() {
          scheduled_process_state_of_locked(guard, outgoing) != ProcessSlotState::Ready) ||
         scheduled_process_record_of_locked(guard, outgoing).stack_owner_cpu != core) {
         process_run_unlock(guard);
-        kernel_syscall_fail_stop(0);
+        kernel_invariant_stop();
     }
     address_space_activate_root(address_space_boot_root());
     scheduled_process_record_of_locked(guard, outgoing).stack_owner_cpu =
@@ -5991,8 +6023,7 @@ fn kernel_process_activate_stable_root(root: AddressSpaceRoot) {
     while (activating) {
         match process_image_prepare_activation(root) {
             AddressSpaceActivationPrepareResult::Invalid => {
-                let failing: usize = execution_state[execution_cpu_index()].current_handle.pool_index;
-                kernel_syscall_fail_stop(scheduled_process_scalar_snapshot(failing).saved_sp);
+                kernel_invariant_stop();
             }
             AddressSpaceActivationPrepareResult::RolloverNeeded => {
                 if (kernel_process_rollover_busy_injections != 0) {
@@ -6022,8 +6053,7 @@ fn kernel_process_activate_stable_root(root: AddressSpaceRoot) {
             }
             AddressSpaceActivationPrepareResult::Prepared(prepared) => {
                 if (process_image_commit_activation(prepared) == false) {
-                    let failing: usize = execution_state[execution_cpu_index()].current_handle.pool_index;
-                    kernel_syscall_fail_stop(scheduled_process_scalar_snapshot(failing).saved_sp);
+                    kernel_invariant_stop();
                 }
                 activating = false;
                 if (injected_busy != 0) {
@@ -6810,7 +6840,7 @@ private fn kernel_process_tick_leave_excluded(
     execution_state[execution_cpu_index()].reschedule_pending = false;
     if (kernel_process_yield_handle(guard, outgoing) == false) {
         process_run_unlock(guard);
-        kernel_syscall_fail_stop(frame_ref_address(frame));
+        kernel_invariant_stop_with_frame(frame);
     }
     kernel_process_spread_timer_left(guard, outgoing);
     process_run_unlock(guard);
@@ -7155,7 +7185,7 @@ private fn kernel_process_block_reserved(
                                 scheduled_process_release(from_owner, standing);
                                 kernel_activity_set(
                                     KernelActivity::StartOnOwnedStack);
-                                kernel_syscall_fail_stop(0);
+                                kernel_invariant_stop();
                             }
                         }
                     }
@@ -9659,7 +9689,7 @@ private fn kernel_process_exit_reserved(
             if (deliver_wait4 || auto_reap) {
                 if (execution_state[execution_cpu_index()].deferred_reap_live) {
                     process_run_unlock(guard);
-                    kernel_syscall_fail_stop(frame_ref_address(successor_frame));
+                    kernel_invariant_stop_with_frame(successor_frame);
                 }
                 execution_state[execution_cpu_index()].deferred_reap_handle = child;
                 execution_state[execution_cpu_index()].deferred_reap_parent = parent;
@@ -9915,7 +9945,7 @@ fn kernel_process_child_exit(current_authority: sink ProcessCurrent[process, Pro
     if (auto_reap) {
         if (execution_state[execution_cpu_index()].deferred_reap_live) {
             process_run_unlock(exit_guard);
-            kernel_syscall_fail_stop(0);
+            kernel_invariant_stop();
         }
         execution_state[execution_cpu_index()].deferred_reap_handle = child;
         execution_state[execution_cpu_index()].deferred_reap_parent = parent;

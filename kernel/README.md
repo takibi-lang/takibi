@@ -1173,6 +1173,42 @@ and elapsed/timeout; this timing observation does not change the verdict or
 extend the deadline. An unavailable timing artifact is reported without
 replacing the console verdict.
 
+Explicit invariant stops use `kernel_invariant_stop()` or
+`kernel_invariant_stop_with_frame(borrow FrameRef[p])`. Neither claims to be
+an exception. Their assembly entries mask interrupts and retain incoming LR
+before any call, then tail-transfer to the private evidence boundary.
+`CrashSnapshot.origin` is 0 for trusted exception entry and 1 for explicit
+stops; `caller_return_pc` is meaningful only for the latter. Architectural
+ESR/FAR/ELR/SPSR remain raw evidence. The legacy vector-slot value of an
+explicit stop is 8 and does not identify an exception vector. UART, DDB
+`oops` and the generated-layout GDB reader print the origin separately.
+
+An explicit frame is optional context, never the invariant's origin. It is
+read only after complete world stop, a non-busy live pool-generation check,
+and an aligned full-frame bound inside the current process's kernel stack.
+Missing, stale, out-of-stack and partial-stop context prints unavailable.
+The FrameRef address/index mint is still trusted: its erased index does not
+prove runtime address freshness. A context for a different process or a
+transition with no live current process can therefore be unavailable.
+The two activation-failure paths that formerly passed an untyped saved-SP
+snapshot now stop without claiming frame evidence.
+
+`scripts/symbolize_invariant_stop.py --capture capture.json --elf kernel.elf
+--out archive` reads a `takibi.kernel-stop/v1` manifest with `origin`,
+`caller_return_pc`, and independently retained `elf_sha256`. It verifies the
+exact AArch64 executable and the BL at LR-4 targeting one of the two stop
+entries before resolving that instruction. Wrong ELF, missing PC and
+unsupported assembly boundaries remain unresolved; raw ELR is never a
+fallback. The manifest is archived verbatim, preserving any per-CPU register
+rows. Optional `ram` records carry `file`, `base`, `extent`, and `sha256`;
+truncated or inconsistent archives are refused without reading guest memory.
+No frame-chain unwind, active translation or MMIO read is performed.
+
+`make kernelcheck-invariant-qemu` retains the ELF, UART, register manifest and
+resolved actual call from an ordinary no-frame fixture. The oops lane also
+checks genuine exceptions, valid explicit context, and debugger-injected
+invalid address/current generation at the real exec-failure entry.
+
 The kernelcheck-oops-qemu target is a focused QEMU regression for the terminal
 exception path. It checks an injected EL0 BRK, an injected EL0 data abort, and
 a fail-stop immediately after a real child exec commit. GDB only arms the

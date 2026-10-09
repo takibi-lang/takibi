@@ -611,6 +611,27 @@ def check_process_stack_handoff_hook(insns):
     return failures
 
 
+STOP_ENTRIES = ("kernel_invariant_stop", "kernel_invariant_stop_with_frame")
+
+
+def check_invariant_stop_capture(insns):
+    """Pin the trusted LR capture and the supported direct-call ABI."""
+    failures = []
+    for entry in STOP_ENTRIES:
+        body = [re.sub(r"\s+", " ", text.split("//", 1)[0]).strip().lower()
+                for _, text, function in insns if function == entry]
+        context = "mov x1, xzr" if entry == STOP_ENTRIES[0] else "mov x1, x0"
+        if (len(body) != 5 or body[:4] != ["msr daifset, #0xf", "mov x2, x30",
+                                         context, "mov x0, #0x1"] or
+                not re.fullmatch(r"b 0x[0-9a-f]+ <kernel_invariant_evidence>", body[-1])):
+            failures.append(f"explicit stop {entry}: incoming LR/origin capture unverified")
+    for address, text, _ in insns:
+        if any(re.search(r"<" + entry + r"(?:[+>])", text) for entry in STOP_ENTRIES):
+            if not re.fullmatch(r"bl\s+0x[0-9a-f]+ <kernel_invariant_stop(?:_with_frame)?>", text):
+                failures.append(f"explicit stop at 0x{address:x}: unsupported call instruction")
+    return failures
+
+
 def main():
     if len(sys.argv) != 3:
         print(
@@ -623,7 +644,8 @@ def main():
     expected_uxn_and_pxn_count = int(sys.argv[2])
     insns = parse_instructions(objdump_lines(elf_path))
     failures = (
-        check_uxn(insns, expected_uxn_and_pxn_count)
+        check_invariant_stop_capture(insns)
+        + check_uxn(insns, expected_uxn_and_pxn_count)
         + check_eret_daif_mask(insns)
         + check_spinlock_is_atomic(insns, elf_path)
         + check_sctlr_allows_normal_memory_unaligned_access(insns)

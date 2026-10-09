@@ -112,6 +112,24 @@ def main():
         print("FAIL kernel-asm-alignment control: intervening unmask passed")
         return 1
 
+    capture = []
+    for entry, context in zip(checker.STOP_ENTRIES, ("xzr", "x0")):
+        for index, instruction in enumerate(("msr DAIFSet, #0xf", "mov x2, x30",
+                f"mov x1, {context}", "mov x0, #0x1",
+                "b 0x5000 <kernel_invariant_evidence>")):
+            capture.append((0x4000 + len(capture) * 4, instruction, entry))
+    capture.append((0x6000, "bl 0x4000 <kernel_invariant_stop>", "caller"))
+    CASES.note()
+    assert not checker.check_invariant_stop_capture(capture)
+    for offset, replacement in ((1, "mov x2, xzr"),
+                                (0, "bl 0x5000 <kernel_invariant_evidence>"),
+                                (10, "b 0x4000 <kernel_invariant_stop>")):
+        mutated = list(capture)
+        address, _, function = mutated[offset]
+        mutated[offset] = (address, replacement, function)
+        CASES.note()
+        assert checker.check_invariant_stop_capture(mutated), replacement
+
     report_pass(
         "kernel-asm-alignment controls",
         "A-bit clear accepted and set rejected; both physical stack-handoff "

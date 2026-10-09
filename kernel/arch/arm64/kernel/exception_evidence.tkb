@@ -94,6 +94,9 @@ struct CrashSnapshot {
     // GitHub issue #573: what the faulting CPU was doing, as a
     // KernelActivity code (kernel/kernel/process.tkb).
     activity: usize;
+    // 0: trusted exception entry; 1: explicit invariant stop.
+    origin: usize;
+    caller_return_pc: usize;
 }
 
 let mut crash_snapshot: CrashSnapshot;
@@ -2823,7 +2826,14 @@ private fn crash_snapshot_render_from(record: *CrashSnapshot,
     kernel_boot_log(" far="); uart_put_hex(record.far_el1);
     kernel_boot_log(" elr="); uart_put_hex(record.elr_el1);
     kernel_boot_log("\n");
-    crash_snapshot_put_data_abort(record.esr_el1);
+    if (record.origin == 1) {
+        kernel_boot_log("oops: origin=explicit caller_return_pc=");
+        uart_put_hex(record.caller_return_pc);
+        kernel_boot_log(" architectural-registers=raw\n");
+    } else {
+        kernel_boot_log("oops: origin=exception\n");
+    }
+    if (record.origin == 0) { crash_snapshot_put_data_abort(record.esr_el1); }
     // GitHub issue #384: WHO owns the pages this fault names. Both
     // addresses are user VAs when the fault came from EL0, so each is
     // translated through the faulting process's own page table first and
@@ -3296,7 +3306,7 @@ private fn crash_snapshot_park() {
     while (true) { interrupt_wait(); }
 }
 
-fn crash_snapshot_capture(slot: usize, frame_sp: usize) !{unsafe} {
+private fn crash_snapshot_capture(slot: usize, frame_sp: usize, origin: usize, caller_return_pc: usize) !{unsafe} {
     kernel_log_enter_emergency();
     let snapshot: *CrashSnapshot = crash_snapshot_here();
     if (*crash_snapshot_capturing_here()) {
@@ -3313,6 +3323,8 @@ fn crash_snapshot_capture(slot: usize, frame_sp: usize) !{unsafe} {
         unsafe { atomic_fetch_add_relaxed(crash_fault_order_address(), 1) } + 1;
     crash_snapshot_here().cpu = crash_snapshot_read_mpidr_el1();
     crash_snapshot_here().vector_slot = slot;
+    crash_snapshot_here().origin = origin;
+    crash_snapshot_here().caller_return_pc = caller_return_pc;
     crash_snapshot_here().esr_el1 = mrs_esr_el1();
     crash_snapshot_here().far_el1 = mrs_far_el1();
     crash_snapshot_here().elr_el1 = mrs_elr_el1();
@@ -3323,7 +3335,7 @@ fn crash_snapshot_capture(slot: usize, frame_sp: usize) !{unsafe} {
     crash_snapshot_here().root_slot = kernel_process_current_slot();
     crash_snapshot_here().activity = kernel_activity_code_here();
     crash_snapshot_here().saved_frame_available = 0;
-    if (frame_sp != 0) {
+    if (origin == 0 && frame_sp != 0) {
         crash_snapshot_copy_saved_frame(
             frame_ref_from_entry(frame_sp, kernel_process_entry_generation()),
             &snapshot.saved_sp_el0);
@@ -3338,6 +3350,13 @@ fn crash_snapshot_capture(slot: usize, frame_sp: usize) !{unsafe} {
             if (crash_console_claim()) { crash_console_run(); }
         }
         CrashStopResult::Stopped(stopped) => {
+            if (origin == 1 && frame_sp != 0 &&
+                kernel_process_crash_frame_usable(stopped, frame_sp)) {
+                crash_snapshot_copy_saved_frame(
+                    frame_ref_from_entry(frame_sp, kernel_process_entry_generation()),
+                    &snapshot.saved_sp_el0);
+                crash_snapshot_here().saved_frame_available = 1;
+            }
             crash_snapshot_shared_stopped(stopped);
             crash_snapshot_publish();
             if (crash_console_claim()) { crash_console_run_stopped(stopped); }
@@ -3350,11 +3369,17 @@ fn crash_snapshot_capture(slot: usize, frame_sp: usize) !{unsafe} {
 }
 
 // Vector-table targets have no universally valid saved ExceptionFrame.
-fn el1_exception_evidence(slot: usize) !{unsafe} { crash_snapshot_capture(slot, 0); }
+private fn el1_exception_evidence(slot: usize) !{unsafe} { crash_snapshot_capture(slot, 0, 0, 0); }
 
 // EL0 synchronous exceptions have EXC_CONTEXT_SAVE's frame at this SP.
-fn el1_exception_evidence_from_frame(slot: usize, frame_sp: usize) !{unsafe} {
-    crash_snapshot_capture(slot, frame_sp);
+private fn el1_exception_evidence_from_frame(slot: usize, frame_sp: usize) !{unsafe} {
+    crash_snapshot_capture(slot, frame_sp, 0, 0);
+}
+
+// Assembly-only explicit entry: x2 is the incoming caller LR, captured
+// before a call can overwrite it. Slot 8 is not an exception-origin claim.
+private fn kernel_invariant_evidence(origin: usize, frame_sp: usize, caller_return_pc: usize) !{unsafe} {
+    crash_snapshot_capture(8, frame_sp, origin, caller_return_pc);
 }
 
 // Fail-stop snapshots and recursion flags are per-core, so simultaneous

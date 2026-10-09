@@ -39,6 +39,8 @@ affine struct FrameRef[process: usize] { private sp: usize; }
 // that of the process this CPU is running.
 fn frame_ref_from_entry(sp: usize, generation: usize @ process)
         -> FrameRef[process] {
+    static_assert(sizeof(FrameRef[process]) == sizeof(usize),
+                  "FrameRef assembly ABI requires one machine word");
     let mut frame: FrameRef[process] = { sp };
     return frame;
 }
@@ -48,6 +50,8 @@ fn frame_ref_from_entry(sp: usize, generation: usize @ process)
 // Trusts that record's saved_sp.
 fn frame_ref_from_saved(saved_sp: usize, generation: usize @ process)
         -> FrameRef[process] {
+    static_assert(sizeof(FrameRef[process]) == sizeof(usize),
+                  "FrameRef assembly ABI requires one machine word");
     let mut frame: FrameRef[process] = { saved_sp };
     return frame;
 }

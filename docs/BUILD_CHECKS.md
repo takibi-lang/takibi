@@ -152,6 +152,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_pool_zero_before_stamp_controls.py` | Controls for the pool clear-before-stamp check, in both directions |
 | `check_probe_entry_gates.py` | a two-core probe's arrival gate waits on a count that only grows, never on a level the other core clears |
 | `check_profile_kernel_samples_controls.py` | Controls for bounded flat-PC sample validation and symbolization |
+| `check_invariant_stop_controls.py` | Explicit kernel stop call-site resolution against exact ELF; wrong identity, origin, unsupported instruction and truncated RAM refusal |
 | `check_symbolize_ddb_controls.py` | Exact-capture PID/ELF registration, PIE and fixed executable PCs, verified entry/bias consistency, archived identities, segment and malformed-user-boundary refusal |
 | `check_profile_kernel_workload_controls.py` | Positive and negative controls for workload-profile host artifacts |
 | `check_qemu_lane_ports.py` | QEMU lanes do not claim conflicting protocol ports, and every lane fits the per-session port block |

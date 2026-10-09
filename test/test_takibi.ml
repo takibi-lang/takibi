@@ -10333,6 +10333,26 @@ fn f() -> *usize { return &temp_address_outer().r.a; }");
           fail_stop29k();
         }");
 
+  Alcotest.test_case "Explicit stop: borrowed indexed context generates code" `Quick
+    (expect_ok
+       "affine struct StopFrame706[p: usize] { private sp: usize; }
+        extern fn stop706() !{noreturn};
+        extern fn stop_frame706(frame: borrow StopFrame706[p]) !{noreturn};
+        fn no_frame706() { stop706(); }
+        fn with_frame706(frame: borrow StopFrame706[p]) { stop_frame706(frame); }");
+
+  Alcotest.test_case "Explicit stop: integer zero is not frame evidence" `Quick
+    (expect_type_error "cannot use integer literal 0"
+       "affine struct StopFrame706[p: usize] { private sp: usize; }
+        extern fn stop_frame706(frame: borrow StopFrame706[p]) !{noreturn};
+        fn bad706() { stop_frame706(0); }");
+
+  Alcotest.test_case "Explicit stop: indexed frame identity cannot be relabelled" `Quick
+    (expect_type_error "static value mismatch"
+       "affine struct StopFrame706[p: usize] { private sp: usize; }
+        extern fn stop_frame706(frame: borrow StopFrame706[0]) !{noreturn};
+        fn bad706(frame: borrow StopFrame706[1]) { stop_frame706(frame); }");
+
   Alcotest.test_case "Exception: Takibi body cannot claim noreturn" `Quick
     (expect_type_error "restricted to trusted extern function declarations"
        "fn false_noreturn29l() !{noreturn} {}");

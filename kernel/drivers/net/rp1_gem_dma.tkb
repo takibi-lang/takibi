@@ -45,7 +45,7 @@ private fn gem_rx_take() -> GemRxAuthority {
     gem_rx_unlock(guard, &dma_owner_GemRx.mutex);
     let Place::Full(authority) = previous else {
         Place::Empty => {
-            kernel_syscall_fail_stop(0);
+            kernel_invariant_stop();
             return gem_rx_take();
         }
     };
@@ -53,11 +53,11 @@ private fn gem_rx_take() -> GemRxAuthority {
 }
 
 private fn gem_rx_fail_cpu(stale: sink *GemRxCpu) {
-    kernel_syscall_fail_stop(0);
+    kernel_invariant_stop();
 }
 
 private fn gem_rx_fail_device(stale: sink *GemRxDevice) {
-    kernel_syscall_fail_stop(0);
+    kernel_invariant_stop();
 }
 
 private fn gem_rx_put(value: sink GemRxAuthority) {

@@ -45,7 +45,7 @@ fn virtio_blk_receive_take() -> VirtioBlkReceiveAuthority {
     virtio_blk_receive_unlock(guard, &dma_owner_VirtioBlkReceive.mutex);
     let Place::Full(authority) = previous else {
         Place::Empty => {
-            kernel_syscall_fail_stop(0);
+            kernel_invariant_stop();
             return virtio_blk_receive_take();
         }
     };
@@ -53,11 +53,11 @@ fn virtio_blk_receive_take() -> VirtioBlkReceiveAuthority {
 }
 
 private fn virtio_blk_receive_fail_cpu(stale: sink *VirtioBlkReceiveCpu) {
-    kernel_syscall_fail_stop(0);
+    kernel_invariant_stop();
 }
 
 fn virtio_blk_receive_fail_device(stale: sink *VirtioBlkReceiveDevice) {
-    kernel_syscall_fail_stop(0);
+    kernel_invariant_stop();
 }
 
 fn virtio_blk_receive_put(value: sink VirtioBlkReceiveAuthority) {
@@ -93,7 +93,7 @@ fn virtio_blk_request_take() -> VirtioBlkRequestTransmitAuthority {
     virtio_blk_receive_unlock(guard, &dma_owner_VirtioBlkRequestTransmit.mutex);
     let Place::Full(authority) = previous else {
         Place::Empty => {
-            kernel_syscall_fail_stop(0);
+            kernel_invariant_stop();
             return virtio_blk_request_take();
         }
     };
@@ -101,11 +101,11 @@ fn virtio_blk_request_take() -> VirtioBlkRequestTransmitAuthority {
 }
 
 private fn virtio_blk_request_fail_cpu(stale: sink *VirtioBlkRequestTransmitCpu) {
-    kernel_syscall_fail_stop(0);
+    kernel_invariant_stop();
 }
 
 fn virtio_blk_request_fail_device(stale: sink *VirtioBlkRequestTransmitDevice) {
-    kernel_syscall_fail_stop(0);
+    kernel_invariant_stop();
 }
 
 fn virtio_blk_request_put(value: sink VirtioBlkRequestTransmitAuthority) {
@@ -143,7 +143,7 @@ fn virtio_blk_data_take() -> VirtioBlkDataTransmitAuthority {
     virtio_blk_receive_unlock(guard, &dma_owner_VirtioBlkDataTransmit.mutex);
     let Place::Full(authority) = previous else {
         Place::Empty => {
-            kernel_syscall_fail_stop(0);
+            kernel_invariant_stop();
             return virtio_blk_data_take();
         }
     };
@@ -151,11 +151,11 @@ fn virtio_blk_data_take() -> VirtioBlkDataTransmitAuthority {
 }
 
 private fn virtio_blk_data_fail_cpu(stale: sink *VirtioBlkDataTransmitCpu) {
-    kernel_syscall_fail_stop(0);
+    kernel_invariant_stop();
 }
 
 fn virtio_blk_data_fail_device(stale: sink *VirtioBlkDataTransmitDevice) {
-    kernel_syscall_fail_stop(0);
+    kernel_invariant_stop();
 }
 
 fn virtio_blk_data_put(value: sink VirtioBlkDataTransmitAuthority) {

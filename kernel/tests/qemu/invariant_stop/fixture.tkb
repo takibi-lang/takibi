@@ -1,0 +1,7 @@
+// An ordinary no-frame invariant stop; the linked BL is its sole origin.
+fn invariant_stop_fixture_run() {
+    disable_irq();
+    uart_init();
+    kernel_log_init();
+    kernel_invariant_stop();
+}

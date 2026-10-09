@@ -450,6 +450,11 @@ fn machine_pool_payload(T: type, pool: &mut IntrusivePool(T) @ pool_id,
     return intrusive_pool_payload_of(pool, scoped.live);
 }
 
+// Read the occupant stamp without taking a lock on the stopped machine.
+fn machine_pool_view_generation(scoped: borrow MachineSlotView[stop, pool_id]) -> usize {
+    return intrusive_view_generation(scoped.live);
+}
+
 fn machine_pool_view_drop(source: sink MachineSlotView[stop, pool_id]) {
     intrusive_view_drop(source.live);
 }

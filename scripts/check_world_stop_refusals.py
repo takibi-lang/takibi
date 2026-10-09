@@ -31,7 +31,7 @@ from pass_line import report_pass
 REPO = pathlib.Path(__file__).resolve().parent.parent
 ARM = re.compile(r"(?:WorldStopResult|MachineStopResult)::(Busy|Partial)\b[^=]*=>")
 NEXT_ARM = re.compile(r"(?:WorldStopResult|MachineStopResult)::\w+")
-FAIL_STOP = re.compile(r"\b\w*fail_stop\s*\(")
+FAIL_STOP = re.compile(r"\b(?:\w*fail_stop|kernel_invariant_stop(?:_with_frame)?)\s*\(")
 
 
 def arms_in(text: str):
@@ -85,6 +85,11 @@ def control() -> bool:
         safe = sample.replace("kernel_syscall_fail_stop(sp);", "return;")
         arms, found = problems_in(safe, "control")
         if arms != 2 or found:
+            return False
+    for stop in ("kernel_invariant_stop()", "kernel_invariant_stop_with_frame(frame)"):
+        sample = planted.replace("kernel_syscall_fail_stop(sp)", stop)
+        arms, found = problems_in(sample, "control")
+        if arms != 2 or len(found) != 2:
             return False
     return True
 

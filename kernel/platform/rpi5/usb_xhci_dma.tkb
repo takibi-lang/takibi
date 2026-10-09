@@ -56,7 +56,7 @@ fn msc_csw_take() -> MscCswReceiveAuthority {
     msc_dma_unlock(guard, &dma_owner_MscCswReceive.mutex);
     let Place::Full(authority) = previous else {
         Place::Empty => {
-            kernel_syscall_fail_stop(0);
+            kernel_invariant_stop();
             return msc_csw_take();
         }
     };
@@ -64,11 +64,11 @@ fn msc_csw_take() -> MscCswReceiveAuthority {
 }
 
 private fn msc_csw_fail_cpu(stale: sink *MscCswReceiveCpu) {
-    kernel_syscall_fail_stop(0);
+    kernel_invariant_stop();
 }
 
 fn msc_csw_fail_device(stale: sink *MscCswReceiveDevice) {
-    kernel_syscall_fail_stop(0);
+    kernel_invariant_stop();
 }
 
 fn msc_csw_put(value: sink MscCswReceiveAuthority) {
@@ -94,7 +94,7 @@ fn xhci_control_take() -> XhciControlReceiveAuthority {
     msc_dma_unlock(guard, &dma_owner_XhciControlReceive.mutex);
     let Place::Full(authority) = previous else {
         Place::Empty => {
-            kernel_syscall_fail_stop(0);
+            kernel_invariant_stop();
             return xhci_control_take();
         }
     };
@@ -102,11 +102,11 @@ fn xhci_control_take() -> XhciControlReceiveAuthority {
 }
 
 private fn xhci_control_fail_cpu(stale: sink *XhciControlReceiveCpu) {
-    kernel_syscall_fail_stop(0);
+    kernel_invariant_stop();
 }
 
 fn xhci_control_fail_device(stale: sink *XhciControlReceiveDevice) {
-    kernel_syscall_fail_stop(0);
+    kernel_invariant_stop();
 }
 
 fn xhci_control_put(value: sink XhciControlReceiveAuthority) {
@@ -134,7 +134,7 @@ fn msc_data_take() -> MscDataReceiveAuthority {
     msc_dma_unlock(guard, &dma_owner_MscDataReceive.mutex);
     let Place::Full(authority) = previous else {
         Place::Empty => {
-            kernel_syscall_fail_stop(0);
+            kernel_invariant_stop();
             return msc_data_take();
         }
     };
@@ -142,11 +142,11 @@ fn msc_data_take() -> MscDataReceiveAuthority {
 }
 
 private fn msc_data_fail_cpu(stale: sink *MscDataReceiveCpu) {
-    kernel_syscall_fail_stop(0);
+    kernel_invariant_stop();
 }
 
 fn msc_data_fail_device(stale: sink *MscDataReceiveDevice) {
-    kernel_syscall_fail_stop(0);
+    kernel_invariant_stop();
 }
 
 fn msc_data_put(value: sink MscDataReceiveAuthority) {
@@ -277,7 +277,7 @@ fn msc_cbw_take() -> MscCbwTransmitAuthority {
     msc_dma_unlock(guard, &dma_owner_MscCbwTransmit.mutex);
     let Place::Full(authority) = previous else {
         Place::Empty => {
-            kernel_syscall_fail_stop(0);
+            kernel_invariant_stop();
             return msc_cbw_take();
         }
     };
@@ -285,11 +285,11 @@ fn msc_cbw_take() -> MscCbwTransmitAuthority {
 }
 
 private fn msc_cbw_fail_cpu(stale: sink *MscCbwTransmitCpu) {
-    kernel_syscall_fail_stop(0);
+    kernel_invariant_stop();
 }
 
 fn msc_cbw_fail_device(stale: sink *MscCbwTransmitDevice) {
-    kernel_syscall_fail_stop(0);
+    kernel_invariant_stop();
 }
 
 fn msc_cbw_put(value: sink MscCbwTransmitAuthority) {
@@ -313,7 +313,7 @@ fn msc_data_out_take() -> MscDataTransmitAuthority {
     msc_dma_unlock(guard, &dma_owner_MscDataTransmit.mutex);
     let Place::Full(authority) = previous else {
         Place::Empty => {
-            kernel_syscall_fail_stop(0);
+            kernel_invariant_stop();
             return msc_data_out_take();
         }
     };
@@ -321,11 +321,11 @@ fn msc_data_out_take() -> MscDataTransmitAuthority {
 }
 
 private fn msc_data_out_fail_cpu(stale: sink *MscDataTransmitCpu) {
-    kernel_syscall_fail_stop(0);
+    kernel_invariant_stop();
 }
 
 fn msc_data_out_fail_device(stale: sink *MscDataTransmitDevice) {
-    kernel_syscall_fail_stop(0);
+    kernel_invariant_stop();
 }
 
 fn msc_data_out_put(value: sink MscDataTransmitAuthority) {

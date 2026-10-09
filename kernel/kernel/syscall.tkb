@@ -435,7 +435,7 @@ private fn exec_args_put(core: {0..<KERNEL_MAX_CORES as usize},
             // A second ChildExec before the first prepare took its page.
             page_free(stale);
             kernel_boot_log("exec argv: occupied CPU handoff slot\n");
-            kernel_syscall_fail_stop(0);
+            kernel_invariant_stop();
         }
     }
 }
@@ -456,7 +456,7 @@ private fn kernel_syscall_exec_args_reserve(allocated: sink PageAllocResult)
         PageAllocResult::OutOfMemory => {}
         PageAllocResult::Allocated(page) => { page_free(page); }
     }
-    kernel_syscall_fail_stop(0);
+    kernel_invariant_stop();
     return ExecArgsReserve::OutOfMemory;
 }
 
@@ -477,7 +477,7 @@ fn kernel_syscall_exec_args_take() -> Place(exists page: usize. PageOwner[page])
     if (core < KERNEL_MAX_CORES) {
         return kernel_syscall_exec_args_take_for(core);
     }
-    kernel_syscall_fail_stop(0);
+    kernel_invariant_stop();
     return Place::Empty;
 }
 
@@ -3246,7 +3246,7 @@ fn kernel_syscall_exit_current_process(current_authority: ProcessCurrent[current
 // GitHub issue #221: the functions below are user_entry.S's action-tail
 // branches, migrated one at a time (each independently hardware-verified)
 // from hand-written EXC_CONTEXT_RESTORE/eret assembly into .tkb, ending in
-// the single shared el0_context_resume/kernel_syscall_fail_stop primitives
+// the single shared el0_context_resume/kernel_invariant_stop primitives
 // (kernel/arch/arm64/kernel/user_entry.S) instead of a per-branch copy of
 // that sequence.
 
@@ -3614,7 +3614,7 @@ fn kernel_syscall_clone_child_return(parent_frame_sp: usize, child_pid: usize)
     el0_context_set_x0(parent_frame, child_pid);
     let child_stack_top: usize = kernel_process_clone_child_stack_top();
     if (child_stack_top == 0) {
-        kernel_syscall_fail_stop(parent_frame_sp);
+        kernel_invariant_stop_with_frame(parent_frame);
     }
     // The exception entry assembly supplies `parent_frame`; the process
     // stack allocator supplies where the child's frame goes. The copy is
@@ -3625,12 +3625,12 @@ fn kernel_syscall_clone_child_return(parent_frame_sp: usize, child_pid: usize)
     frame_copy(child_frame, parent_frame);
     let ProcessConstructingHere::Constructing(child_authority) = process_constructing_here() else {};
     match kernel_process_clone_context_install(child_authority, parent_frame, child_frame) {
-        CloneInstall::Failed(retained) => { process_current_end(retained); kernel_syscall_fail_stop(parent_frame_sp); }
+        CloneInstall::Failed(retained) => { process_current_end(retained); kernel_invariant_stop_with_frame(parent_frame); }
         CloneInstall::Installed(current_authority) => {
             match kernel_process_activate_current_root(current_authority) {
                 CurrentRootActivationResult::Invalid => {
                     process_current_end(current_authority);
-                    kernel_syscall_fail_stop(parent_frame_sp);
+                    kernel_invariant_stop_with_frame(parent_frame);
                 }
                 CurrentRootActivationResult::Activated => {}
             }
@@ -3664,27 +3664,27 @@ fn kernel_syscall_child_exec_return(frame_sp: usize) !{unsafe} {
         KernelChildExecPrepareResult::NotChildOrPending => {
             kernel_process_exec_failure_set(KernelChildExecPrepareResult::NotChildOrPending);
             process_current_end(current_authority);
-            kernel_syscall_fail_stop(frame_sp);
+            kernel_invariant_stop_with_frame(frame);
         }
         KernelChildExecPrepareResult::CloneVmMissing => {
             kernel_process_exec_failure_set(KernelChildExecPrepareResult::CloneVmMissing);
             process_current_end(current_authority);
-            kernel_syscall_fail_stop(frame_sp);
+            kernel_invariant_stop_with_frame(frame);
         }
         KernelChildExecPrepareResult::DynamicResolveInvalid => {
             kernel_process_exec_failure_set(KernelChildExecPrepareResult::DynamicResolveInvalid);
             process_current_end(current_authority);
-            kernel_syscall_fail_stop(frame_sp);
+            kernel_invariant_stop_with_frame(frame);
         }
         KernelChildExecPrepareResult::DynamicPairInvalid => {
             kernel_process_exec_failure_set(KernelChildExecPrepareResult::DynamicPairInvalid);
             process_current_end(current_authority);
-            kernel_syscall_fail_stop(frame_sp);
+            kernel_invariant_stop_with_frame(frame);
         }
         KernelChildExecPrepareResult::ImageAlreadyInstalled => {
             kernel_process_exec_failure_set(KernelChildExecPrepareResult::ImageAlreadyInstalled);
             process_current_end(current_authority);
-            kernel_syscall_fail_stop(frame_sp);
+            kernel_invariant_stop_with_frame(frame);
         }
         // GitHub issue #516: an exec that reached the install with no target
         // root chosen. Fail-stops beside its neighbours rather than being
@@ -3692,32 +3692,32 @@ fn kernel_syscall_child_exec_return(frame_sp: usize) !{unsafe} {
         KernelChildExecPrepareResult::ImageNoTargetRoot => {
             kernel_process_exec_failure_set(KernelChildExecPrepareResult::ImageNoTargetRoot);
             process_current_end(current_authority);
-            kernel_syscall_fail_stop(frame_sp);
+            kernel_invariant_stop_with_frame(frame);
         }
         KernelChildExecPrepareResult::NoImageResolved => {
             kernel_process_exec_failure_set(KernelChildExecPrepareResult::NoImageResolved);
             process_current_end(current_authority);
-            kernel_syscall_fail_stop(frame_sp);
+            kernel_invariant_stop_with_frame(frame);
         }
         KernelChildExecPrepareResult::StaticImageInvalid => {
             kernel_process_exec_failure_set(KernelChildExecPrepareResult::StaticImageInvalid);
             process_current_end(current_authority);
-            kernel_syscall_fail_stop(frame_sp);
+            kernel_invariant_stop_with_frame(frame);
         }
         KernelChildExecPrepareResult::StaticMapOutOfMemory => {
             kernel_process_exec_failure_set(KernelChildExecPrepareResult::StaticMapOutOfMemory);
             process_current_end(current_authority);
-            kernel_syscall_fail_stop(frame_sp);
+            kernel_invariant_stop_with_frame(frame);
         }
         KernelChildExecPrepareResult::ImageRecordOutOfMemory => {
             kernel_process_exec_failure_set(KernelChildExecPrepareResult::ImageRecordOutOfMemory);
             process_current_end(current_authority);
-            kernel_syscall_fail_stop(frame_sp);
+            kernel_invariant_stop_with_frame(frame);
         }
         KernelChildExecPrepareResult::ArgvPageMissing => {
             kernel_process_exec_failure_set(KernelChildExecPrepareResult::ArgvPageMissing);
             process_current_end(current_authority);
-            kernel_syscall_fail_stop(frame_sp);
+            kernel_invariant_stop_with_frame(frame);
         }
     }
     // The new image is committed, so this is execve's point of no return,
@@ -3732,7 +3732,7 @@ fn kernel_syscall_child_exec_return(frame_sp: usize) !{unsafe} {
     if (kernel_process_trace_fail_after_exec_requested()) {
         kernel_process_exec_failure_debugger_after_commit();
         process_current_end(current_authority);
-            kernel_syscall_fail_stop(frame_sp);
+            kernel_invariant_stop_with_frame(frame);
     }
     let entry: usize = kernel_process_child_exec_entry();
     let stack: usize = kernel_process_child_exec_stack();
@@ -4727,7 +4727,7 @@ fn kernel_syscall_migrate_return(frame_sp: usize) {
         frame_ref_from_entry(frame_sp, kernel_process_entry_generation());
     el0_context_retry_syscall(frame);
     if (kernel_process_migrate_current(frame) == false) {
-        kernel_syscall_fail_stop(frame_sp);
+        kernel_invariant_stop_with_frame(frame);
     }
     kernel_secondary_idle_yield_enter();
 }

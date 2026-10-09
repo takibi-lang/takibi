@@ -26,6 +26,11 @@ define takibi-oops
     printf "takibi-oops: no valid crash snapshot\n"
   else
     printf "takibi-oops: seq=%lu cpu=%lu slot=%lu esr=0x%016lx far=0x%016lx elr=0x%016lx spsr=0x%016lx\n", $snapshot[$takibi_crashsnapshot_sequence / 8], $snapshot[$takibi_crashsnapshot_cpu / 8], $snapshot[$takibi_crashsnapshot_vector_slot / 8], $snapshot[$takibi_crashsnapshot_esr_el1 / 8], $snapshot[$takibi_crashsnapshot_far_el1 / 8], $snapshot[$takibi_crashsnapshot_elr_el1 / 8], $snapshot[$takibi_crashsnapshot_spsr_el1 / 8]
+    if $snapshot[$takibi_crashsnapshot_origin / 8] == 1
+      printf "takibi-oops: origin=explicit caller_return_pc=0x%016lx architectural-registers=raw\n", $snapshot[$takibi_crashsnapshot_caller_return_pc / 8]
+    else
+      printf "takibi-oops: origin=exception\n"
+    end
     printf "takibi-oops: live sp_el0=0x%016lx tpidr_el0=0x%016lx ttbr0=0x%016lx\n", $snapshot[$takibi_crashsnapshot_sp_el0 / 8], $snapshot[$takibi_crashsnapshot_tpidr_el0 / 8], $snapshot[$takibi_crashsnapshot_ttbr0_el1 / 8]
     printf "takibi-oops: process pid=%lu parent=%lu state=%lu wait=%lu root=%lu asid=%lu image=%lu\n", $snapshot[$takibi_crashsnapshot_process_pid / 8], $snapshot[$takibi_crashsnapshot_parent_pid / 8], $snapshot[$takibi_crashsnapshot_process_state / 8], $snapshot[$takibi_crashsnapshot_wait_reason / 8], $snapshot[$takibi_crashsnapshot_root_slot / 8], $snapshot[$takibi_crashsnapshot_root_asid / 8], $snapshot[$takibi_crashsnapshot_image_kind / 8]
     printf "takibi-oops: wait4_status_ptr=0x%016lx\n", $snapshot[$takibi_crashsnapshot_wait4_status_ptr / 8]

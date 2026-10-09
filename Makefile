@@ -300,10 +300,11 @@ LINUX_UNUSED_CHECK       := --reject-unused-functions --external-entry main
 #   the kernel's static instances never need;
 # - platform/rpi5/usb_xhci.tkb: keeps the FatFs-shaped disk_* API its
 #   comments describe.
+# The invariant-stop fixture has its own --check-unused-file invocation.
 # KERNEL_UNUSED_NO_FUNCTIONS holds files the flag rejects outright, because
 # they define no Takibi function (_extern.tkb files are skipped by name).
 KERNEL_ASM_ENTRIES := main kernel_secondary_main \
-	el1_exception_evidence_from_frame kernel_mmu_init \
+	el1_exception_evidence_from_frame kernel_invariant_evidence kernel_mmu_init \
 	kernel_mmu_init_secondary kernel_secondary_idle_reenter \
 	kernel_secondary_idle_yield_reenter kernel_core0_idle_yield_reenter \
 	kernel_core0_idle_reenter kernel_core0_idle_block_reenter \
@@ -318,6 +319,7 @@ KERNEL_DEBUGGER_ENTRIES := kernel_process_trace_report page_owner_description
 # The DMA fixture has its own --check-unused-file invocation below and is
 # absent from both production closures.
 KERNEL_UNUSED_EXEMPT := \
+	kernel/tests/qemu/invariant_stop/fixture.tkb \
 	kernel/tests/qemu/dma/virtio_blk_fixture.tkb \
 	kernel/boot/fdt.tkb \
 	kernel/drivers/block/memory.tkb \
@@ -1698,7 +1700,7 @@ kernel-memory-map-check: _kernelbuild-rpi5 _kernelbuild-qemu
 	python3 scripts/buildcheck_kernel_memory_map.py
 
 .PHONY: _kernelbuild
-_kernelbuild: _kernelbuild-rpi5 _kernelbuild-qemu _kernelbuild-dma-qemu kernel-memory-map-check
+_kernelbuild: _kernelbuild-rpi5 _kernelbuild-qemu _kernelbuild-dma-qemu _kernelbuild-invariant-qemu kernel-memory-map-check
 
 kernelbuild: build
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) _kernelbuild
@@ -1806,7 +1808,7 @@ kernelcheck-repeat:
 	    $(if $(PORT_BASE),--port-base "$(PORT_BASE)",) \
 	    "$(N)" $(MAKE) $(LANE)
 
-kernelcheck-qemu: kernelcheck-qemu-main kernelcheck-qemu-fdt-multibank kernelcheck-dma-qemu
+kernelcheck-qemu: kernelcheck-qemu-main kernelcheck-qemu-fdt-multibank kernelcheck-dma-qemu kernelcheck-invariant-qemu
 
 # A separate performance run, outside allcheck/cicheck's concurrent fan-out.
 # Other host activity can still affect QEMU; run this on a quiet host.
@@ -1900,6 +1902,8 @@ _kernelcheck-oops-qemu:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_OOPS_MODE=data_abort_write KERNEL_QEMU_OOPS_GDB_PORT=18693 KERNEL_QEMU_OOPS_SERIAL_PORT=18694 KERNEL_QEMU_OOPS_ARTIFACT_DIR="$(TAKIBI_LANE_ARTIFACT_ROOT)/kernel-oops-qemu-data-abort" bash scripts/run_kernel_oops_qemutest.sh
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_OOPS_MODE=child_exec KERNEL_QEMU_OOPS_GDB_PORT=18695 KERNEL_QEMU_OOPS_SERIAL_PORT=18696 KERNEL_QEMU_OOPS_ARTIFACT_DIR="$(TAKIBI_LANE_ARTIFACT_ROOT)/kernel-oops-qemu-child-exec" bash scripts/run_kernel_oops_qemutest.sh
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_OOPS_MODE=child_exec_prepare_failure KERNEL_QEMU_OOPS_GDB_PORT=18691 KERNEL_QEMU_OOPS_SERIAL_PORT=18692 KERNEL_QEMU_OOPS_ARTIFACT_DIR="$(TAKIBI_LANE_ARTIFACT_ROOT)/kernel-oops-qemu-child-exec-prepare-failure" bash scripts/run_kernel_oops_qemutest.sh
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_OOPS_MODE=child_exec_prepare_failure KERNEL_QEMU_OOPS_CONTEXT_CONTROL=invalid_address KERNEL_QEMU_OOPS_GDB_PORT=18607 KERNEL_QEMU_OOPS_SERIAL_PORT=18608 KERNEL_QEMU_OOPS_ARTIFACT_DIR="$(TAKIBI_LANE_ARTIFACT_ROOT)/kernel-oops-qemu-invalid-frame" bash scripts/run_kernel_oops_qemutest.sh
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_OOPS_MODE=child_exec_prepare_failure KERNEL_QEMU_OOPS_CONTEXT_CONTROL=invalid_generation KERNEL_QEMU_OOPS_GDB_PORT=18614 KERNEL_QEMU_OOPS_SERIAL_PORT=18615 KERNEL_QEMU_OOPS_ARTIFACT_DIR="$(TAKIBI_LANE_ARTIFACT_ROOT)/kernel-oops-qemu-invalid-generation" bash scripts/run_kernel_oops_qemutest.sh
 	@# GitHub issue #619: the peer's entry is replaced before anything
 	@# executes, so core 1 fail-stops during bring-up and its report stops
 	@# core 0 for good.
@@ -2359,3 +2363,20 @@ kernelbuild-dma-qemu: build
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) _kernelbuild-dma-qemu
 kernelcheck-dma-qemu: kernelbuild-dma-qemu
 	@bash scripts/run_lane.sh $@ python3 scripts/run_kernel_dma_qemutest.py $(KERNEL_DMA_ELF)
+
+# An isolated ordinary call validates explicit provenance without a frame.
+KERNEL_INVARIANT_ELF := $(KERNEL_QEMU_BUILD_DIR)/kernel-invariant-fixture.elf
+.PHONY: kernelbuild-invariant-qemu _kernelbuild-invariant-qemu kernelcheck-invariant-qemu
+$(KERNEL_QEMU_BUILD_DIR)/invariant-fixture.o: $(KERNEL_QEMU_MAIN_O) scripts/build_qemu_invariant_fixture.py scripts/build_qemu_dma_fixture.py kernel/tests/qemu/invariant_stop/fixture.tkb Makefile
+	python3 scripts/build_qemu_invariant_fixture.py . _build/qemu-invariant-fixture
+	cd _build/qemu-invariant-fixture && $(abspath $(TAKIBI)) $(KERNEL_DMA_SRCS) --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --frame-pointers --forbid-trap --regions --reject-unused-functions --external-entry main --check-unused-file kernel/tests/qemu/invariant_stop/fixture.tkb --emit-depfile $(abspath $@).d --emit-raw-deref-audit $(abspath $@).rawderef.tsv -o $(abspath $@)
+	python3 scripts/buildcheck_kernel_unused_coverage.py qemu $@.d
+	python3 scripts/measure_trusted_base.py --check-raw-deref qemu $@.rawderef.tsv $@.d
+$(KERNEL_INVARIANT_ELF): $(KERNEL_QEMU_BUILD_DIR)/invariant-fixture.o $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_LINK_LD)
+	$(LLD) -T $(KERNEL_QEMU_LINK_LD) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $< -o $@
+	python3 scripts/buildcheck_kernel_asm_invariants.py $@ 1
+_kernelbuild-invariant-qemu: $(KERNEL_INVARIANT_ELF)
+kernelbuild-invariant-qemu: build
+	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) _kernelbuild-invariant-qemu
+kernelcheck-invariant-qemu: kernelbuild-invariant-qemu
+	@bash scripts/run_lane.sh $@ python3 scripts/run_kernel_invariant_qemutest.py $(KERNEL_INVARIANT_ELF)

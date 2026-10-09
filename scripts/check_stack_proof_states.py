@@ -102,7 +102,8 @@ FRAME_USIZE_SEAMS = {
     # The debugger and crash reporter read frames as integers by design.
     "kernel_ddb_enter", "kernel_ddb_sync_dispatch",
     "kernel_ddb_stopped_root_publish", "el1_exception_evidence_from_frame",
-    "crash_snapshot_capture", "ddb_stopped_root_check",
+    "crash_snapshot_capture", "kernel_invariant_evidence",
+    "kernel_process_crash_frame_usable", "ddb_stopped_root_check",
     "ddb_bt_test_stopped_check", "kernel_ddb_enter_stopped",
 }
 

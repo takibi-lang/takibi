@@ -1,5 +1,23 @@
 # takibi Engineering History
 
+## 2026-10-09: explicit invariant stops retain their own origin
+
+An explicit fail-stop formerly reused lower-EL slot 8 and raw ELR, which could
+name an earlier exception instead of its caller (#706). Separate no-frame and
+borrowed-FrameRef extern entries now capture incoming LR before any BL and
+mark explicit provenance. True exception entry remains private and keeps its
+frame-derived origin; an explicit frame is only optional context. Complete
+stopped inspection checks the current pool generation and full aligned stack
+range before copying that context, without taking a reporter lock.
+
+The type boundary rejects zero as frame evidence, but the frame address/index
+mint remains trusted. Linked instruction checks pin the supported direct BL
+and immediate capture; offline resolution requires the exact ELF and refuses
+unsupported boundaries. Deterministic QEMU controls expose stale-ELR capture
+and unchecked context reads. The diagnostic payload grows by 80 fixed bytes
+across five retained records, with no additional reserved allocator page.
+
+
 ## 2026-10-09: Typed peer clocks and owned resume observations
 
 The maintainer selected existing types and API ownership after comparing clock

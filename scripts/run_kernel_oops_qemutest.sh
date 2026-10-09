@@ -23,6 +23,21 @@ ARTIFACT_DIR="${KERNEL_QEMU_OOPS_ARTIFACT_DIR:-${TAKIBI_LANE_ARTIFACT_ROOT:-$REP
 GDB_PORT="${KERNEL_QEMU_OOPS_GDB_PORT:-18697}"
 SERIAL_PORT="${KERNEL_QEMU_OOPS_SERIAL_PORT:-18698}"
 MODE="${KERNEL_QEMU_OOPS_MODE:-brk}"
+CONTEXT_CONTROL="${KERNEL_QEMU_OOPS_CONTEXT_CONTROL:-none}"
+case "$CONTEXT_CONTROL" in
+    none|invalid_address|invalid_generation) ;;
+    *) echo "error: unknown context control: $CONTEXT_CONTROL" >&2; exit 1 ;;
+esac
+if [ "$CONTEXT_CONTROL" != none ] && [ "$MODE" != child_exec_prepare_failure ]; then
+    echo "error: context controls require child_exec_prepare_failure" >&2
+    exit 1
+fi
+saved_uart='^oops: saved sp_el0='
+saved_gdb='^takibi-oops: saved sp_el0='
+if [ "$CONTEXT_CONTROL" != none ]; then
+    saved_uart='^oops: saved-frame=unavailable$'
+    saved_gdb='^takibi-oops: saved-frame=unavailable$'
+fi
 UART_LOG="$ARTIFACT_DIR/uart.log"
 SNAPSHOT_LAYOUT="$REPO_ROOT/_build/kernel-crash-snapshot-layout.gdb"
 mkdir -p "$ARTIFACT_DIR"
@@ -31,6 +46,9 @@ mkdir -p "$ARTIFACT_DIR"
 QEMU_EXT2_IMAGE="$ARTIFACT_DIR/ext2.img"
 cp "$REPO_ROOT/kernel/build/user/ext2.img" "$QEMU_EXT2_IMAGE"
 : >"$UART_LOG"
+# Bind the capture to the immutable image this guest actually loads.
+cp "$ELF" "$ARTIFACT_DIR/kernel.elf"
+ELF="$ARTIFACT_DIR/kernel.elf"
 
 # GitHub issue #407: see scripts/qemu_port_guard.py. Refuse to start if
 # somebody already owns this lane's ports, and say that rather than
@@ -209,8 +227,17 @@ for _ in $(seq 1 50); do
             -ex "break kernel_process_child_exec_prepare"
             -ex "continue"
             -ex "takibi-force-variant-return KernelChildExecPrepareResult CloneVmMissing"
-            -ex "detach"
         )
+        if [ "$CONTEXT_CONTROL" != none ]; then
+            gdb_commands+=(-ex "break *kernel_invariant_stop_with_frame" -ex "continue")
+            if [ "$CONTEXT_CONTROL" = invalid_address ]; then
+                gdb_commands+=(-ex "set \$x0 = 1")
+            else
+                # QEMU thread 1 is CPU 0. DWARF carries the nested layout.
+                gdb_commands+=(-ex "set execution_state[\$_thread - 1].current_handle.generation = 0")
+            fi
+        fi
+        gdb_commands+=(-ex "detach")
     elif [ "$MODE" = peer_fault_start_window ]; then
         # Thread 1 is core 0, thread 2 core 1 (QEMU numbers vCPUs from 1).
         # 1. At the -S stop, replace the peer's entry, as peer_fault does.
@@ -367,6 +394,16 @@ console_driver_pid=""
 # (slot 0, before any process exists, so no trace), its report must have
 # stopped core 0 (#619, possible since #632), and it must be the only one:
 # core 0, stopped, cannot fault after it.
+if [ "$MODE" = child_exec ] || [ "$MODE" = child_exec_prepare_failure ]; then
+    expected_origin='^oops: origin=explicit caller_return_pc=0x[0-9a-f]+ architectural-registers=raw$'
+else
+    expected_origin='^oops: origin=exception$'
+fi
+if ! grep -Eq "$expected_origin" "$UART_LOG"; then
+    echo "FAIL kernel/qemu oops: incorrect exception/invariant provenance" >&2
+    exit 1
+fi
+
 if [ "$MODE" = peer_fault ] || [ "$MODE" = peer_fault_start_window ]; then
     if ! grep -Eq "^oops: fail-stop seq=1 cpu=1 slot=0 ec=0x00000000000000$expected_ec " "$UART_LOG" ||
             ! grep -Eq '^oops: world-stop complete mask=0x0*1$' "$UART_LOG" ||
@@ -430,7 +467,7 @@ if [ "$MODE" = concurrent_fault ]; then
 fi
 
 if ! grep -Eq "^oops: fail-stop seq=[1-9][0-9]* cpu=[0-9]+ slot=8 ec=0x00000000000000$expected_ec " "$UART_LOG" ||
-        ! grep -q '^oops: saved sp_el0=' "$UART_LOG" ||
+        ! grep -Eq "$saved_uart" "$UART_LOG" ||
         ! grep -Eq '^oops: trace count=([1-9]|1[0-6])$' "$UART_LOG"; then
     echo "FAIL kernel/qemu oops: expected fail-stop UART report" >&2
     sed 's/^/  /' "$UART_LOG" >&2 || true
@@ -570,8 +607,13 @@ timeout "${GDB_BATCH_TIMEOUT:-600}" gdb-multiarch -q -batch "$ELF" \
     -ex "takibi-enum ProcessSlotState \$snapshot[\$takibi_crashsnapshot_trace / 8 + 7]" \
     -ex "takibi-enum ProcessWaitReason \$snapshot[\$takibi_crashsnapshot_trace / 8 + 8]" \
     >"$ARTIFACT_DIR/snapshot-gdb.log" 2>&1 || true
+expected_gdb_origin="${expected_origin/oops:/takibi-oops:}"
+if ! grep -Eq "$expected_gdb_origin" "$ARTIFACT_DIR/snapshot-gdb.log"; then
+    echo "FAIL kernel/qemu oops: retained provenance disagrees with UART" >&2
+    exit 1
+fi
 if ! grep -Eq '^takibi-oops: seq=1 cpu=[0-9]+ slot=8 ' "$ARTIFACT_DIR/snapshot-gdb.log" ||
-        ! grep -q '^takibi-oops: saved sp_el0=' "$ARTIFACT_DIR/snapshot-gdb.log" ||
+        ! grep -Eq "$saved_gdb" "$ARTIFACT_DIR/snapshot-gdb.log" ||
         ! grep -Eq '^takibi-oops: trace count=([1-9]|1[0-6])$' "$ARTIFACT_DIR/snapshot-gdb.log" ||
         ! grep -Eq '^ProcessTrace[A-Za-z]+ \([0-9]+\)$' "$ARTIFACT_DIR/snapshot-gdb.log" ||
         ! grep -Eq '^ProcessSlotState::[A-Za-z]+ \([0-9]+\)$' "$ARTIFACT_DIR/snapshot-gdb.log" ||
@@ -605,6 +647,37 @@ if [ "$MODE" = child_exec ] &&
     echo "FAIL kernel/qemu oops: retained child exec trace was incomplete" >&2
     sed 's/^/  /' "$ARTIFACT_DIR/snapshot-gdb.log" >&2 || true
     exit 1
+fi
+
+if [ "$MODE" = child_exec ] || [ "$MODE" = child_exec_prepare_failure ]; then
+    python3 - "$ELF" "$UART_LOG" "$ARTIFACT_DIR" <<'PY_CAPTURE'
+import hashlib
+import json
+from pathlib import Path
+import re
+import subprocess
+import sys
+elf, uart, out = map(Path, sys.argv[1:])
+raw = uart.read_bytes()
+text = raw.decode("ascii").replace("\r", "")
+origin = re.search(r"^oops: origin=explicit caller_return_pc=(0x[0-9a-f]+) ", text, re.M)
+header = re.search(r"^oops: fail-stop .* cpu=([0-9]+) ", text, re.M)
+assert origin is not None and header is not None
+raw_lines = "\n".join(line for line in text.splitlines()
+                      if line.startswith(("oops: fail-stop", "oops: live")))
+registers = dict(re.findall(r"\b(esr|far|elr|sp_el0|tpidr_el0|ttbr0)=(0x[0-9a-f]+)", raw_lines))
+capture = {"schema": "takibi.kernel-stop/v1", "origin": "explicit",
+           "caller_return_pc": origin.group(1), "cpu": int(header.group(1)),
+           "elf_sha256": hashlib.sha256(elf.read_bytes()).hexdigest(),
+           "uart_sha256": hashlib.sha256(raw).hexdigest(),
+           "per_cpu_registers": [{"cpu": int(header.group(1)), "registers": registers}]}
+source = out / "capture.json"
+source.write_text(json.dumps(capture, indent=2) + "\n", encoding="ascii")
+subprocess.run([sys.executable, "scripts/symbolize_invariant_stop.py", "--capture", str(source),
+                "--elf", str(elf), "--out", str(out / "symbols")], check=True)
+report = json.loads((out / "symbols/symbols.json").read_text())
+assert report["symbol"]["function"] == "kernel_syscall_child_exec_return", report
+PY_CAPTURE
 fi
 
 echo "PASS kernel/qemu oops: UART report and CrashSnapshot valid"

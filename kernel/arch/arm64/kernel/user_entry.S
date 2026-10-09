@@ -300,18 +300,28 @@ el0_context_retry_syscall:
 // below (kernel/arch/arm64/kernel/user_entry_extern.tkb) is unchanged --
 // that is still what lets ordinary .tkb code call it.
 
-// The single shared fail-stop entry, replacing every hand-written
-// `mov x0, #8; b el1_exception_evidence` pair at each .tkb-reachable action
-// tail.  The .tkb ABI supplies its saved ExceptionFrame in x0; retain it in
-// x1 while x0 becomes the vector slot. x0=8 matches el0_sync_entry's own vector-slot identification
-// (el1_vectors installs the lower-EL AArch64 sync slot at x0=8, GitHub issue
-// #227 item 3), so a fail-stop reached this way is indistinguishable in the
-// recorded evidence from one reached directly out of el0_sync_entry.
-    .global kernel_syscall_fail_stop
-kernel_syscall_fail_stop:
+// Explicit invariant stops capture the incoming return PC before any BL.
+// FrameRef is a one-word ABI: optional context arrives in x0, never an
+// exception-origin claim. Tail transfer preserves the original caller.
+    .global kernel_invariant_stop
+    .type kernel_invariant_stop, %function
+kernel_invariant_stop:
+    msr     daifset, #0xf
+    mov     x2, x30
+    mov     x1, xzr
+    mov     x0, #1
+    b       kernel_invariant_evidence
+    .size kernel_invariant_stop, .-kernel_invariant_stop
+
+    .global kernel_invariant_stop_with_frame
+    .type kernel_invariant_stop_with_frame, %function
+kernel_invariant_stop_with_frame:
+    msr     daifset, #0xf
+    mov     x2, x30
     mov     x1, x0
-    mov     x0, #8
-    b       el1_exception_evidence_from_frame
+    mov     x0, #1
+    b       kernel_invariant_evidence
+    .size kernel_invariant_stop_with_frame, .-kernel_invariant_stop_with_frame
 
     /* Takibi-owned deliberate debugger stop. The generated Current-EL sync
      * entry saves/restores ExceptionFrame; this helper only emits BRK. */
