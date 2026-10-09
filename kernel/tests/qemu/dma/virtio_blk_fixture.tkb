@@ -44,9 +44,6 @@ fn dma_fixture_authority(cpu_expected: bool) {
         VirtioBlkReceiveAuthority::Device(device) => {
             virtio_blk_receive_put(VirtioBlkReceiveAuthority::Device(device));
         }
-        VirtioBlkReceiveAuthority::Empty => {
-            dma_fixture_require(false, "receive authority empty");
-        }
     }
     dma_fixture_require(receive_cpu == cpu_expected, "receive authority");
     let mut request_cpu: bool = false;
@@ -58,9 +55,6 @@ fn dma_fixture_authority(cpu_expected: bool) {
         VirtioBlkRequestTransmitAuthority::Device(device) => {
             virtio_blk_request_put(VirtioBlkRequestTransmitAuthority::Device(device));
         }
-        VirtioBlkRequestTransmitAuthority::Empty => {
-            dma_fixture_require(false, "request authority empty");
-        }
     }
     dma_fixture_require(request_cpu == cpu_expected, "request authority");
     let mut data_cpu: bool = false;
@@ -71,9 +65,6 @@ fn dma_fixture_authority(cpu_expected: bool) {
         }
         VirtioBlkDataTransmitAuthority::Device(device) => {
             virtio_blk_data_put(VirtioBlkDataTransmitAuthority::Device(device));
-        }
-        VirtioBlkDataTransmitAuthority::Empty => {
-            dma_fixture_require(false, "data authority empty");
         }
     }
     dma_fixture_require(data_cpu == cpu_expected, "data authority");
