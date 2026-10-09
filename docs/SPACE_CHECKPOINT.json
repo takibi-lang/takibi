@@ -1,9 +1,9 @@
 {
   "date": "2026-10-09",
-  "event": "milestone",
+  "event": "incremental",
   "decision": "measured",
-  "source_sha256": "93f1b344bfa80140998416a7ee443679745af65166bc621f390545272403cb38",
-  "workload": "Host-only console state decoding and pre-BREAK collection, plus the bounded host-load reproduction loop. Fresh linked production QEMU/RPi5 kernels compared with e3e8639f after the syscall copy-span migration. No new kernel allocation phase; the bounded-boot workload and its prior pool evidence are unchanged.",
+  "source_sha256": "62e3a6959d83b4b8a1551b8bb5ec71c67cd37d94c9948baae6523381348cadc4",
+  "workload": "#731 step 1: publish tokens and region elements from checked places typed as references; diagnostic_ring migrated to checked slot places. Linked production kernels against base d1c075ca with scripts/space_delta.py.",
   "evidence": [
     "docs/CONSOLE_DIAGNOSTICS_SPACE_2026-10-09.md",
     "docs/SYSCALL_COPY_SPAN_SPACE_2026-10-09.md",
@@ -28,6 +28,6 @@
     "docs/DMA_MINT_FILES_2026-10-08.md",
     "docs/DMA_TRANSMIT_2026-10-08.md"
   ],
-  "assessment": "Zero text, data and BSS delta on both production platforms; every data/BSS symbol size and usable_ram_start unchanged. Compiler metadata and two struct-layout sidecars are host files, not linked kernel storage. Adopt the diagnostic tooling at zero kernel image growth. Seeded QEMU states validate decoding and transport, not the cause of a natural stall or hardware ordering.",
+  "assessment": "Text +40 B on both targets (the ring reader's stated output bound); data, BSS and usable_ram_start unchanged, no data/BSS symbol changed size. Reference typing erases at codegen. No storage, pool or lifetime change. Adopted. The preceding console-diagnostics milestone evidence is retained.",
   "next_trigger": "Measure when production diagnostics gain storage, a new resource/lifetime or allocation workload appears, or the next kernel feature/stage completes."
 }
