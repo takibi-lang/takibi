@@ -36,6 +36,7 @@ import time
 from pathlib import Path
 
 from await_timing import AwaitTiming
+from churn_gdb import ChurnGdb
 
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -99,6 +100,17 @@ class Session:
         self.await_log = await_log
         self.label = label
         self.await_sequence = 0
+        self.gdb = None
+        self.gdb_stall_dump = False
+        self.gdb_dumped = False
+
+    def dump_stall(self):
+        if self.gdb_stall_dump and not self.gdb_dumped:
+            self.gdb_dumped = True
+            try:
+                self.gdb.run()
+            except Exception as error:
+                print(f"[churn] GDB stall dump unavailable: {error}", flush=True)
 
     def normalized(self):
         return HOST_NOTICE.sub(
@@ -299,6 +311,7 @@ def ddb_walk_hang(session):
     is itself the evidence -- a stop held for good, or cores trading it -- so
     the break is sent again a few times before giving up.
     """
+    session.dump_stall()
     for _ in range(4):
         start = len(session.normalized())
         session.send(b"\x14b")
@@ -318,13 +331,25 @@ def ddb_walk_hang(session):
                          await_name=f"DDB prompt after {command.decode('ascii')}")
 
 
-def run_phase(session, rounds):
+def run_phase(session, rounds, asid_jump=None):
     """Type one `churn.sh ROUNDS` and judge it. None, or why it failed."""
     if shell_resync(session) is False:
         return "the shell did not answer an empty line before the phase"
     start = len(session.normalized())
     command = f"churn.sh {rounds}".encode("ascii")
     session.send(command + b"\n")
+    if asid_jump is not None:
+        # The command has been sent into the second phase. Never rewind an
+        # assigned number or alter a cell while its stopped owner holds it.
+        for _ in range(8):
+            try:
+                if session.gdb.run(asid_jump):
+                    break
+            except Exception as error:
+                return f"ASID jump failed: {error}"
+            session.wait_for(lambda n: False, 0.25)
+        else:
+            return "ASID jump failed: cell lock remained held"
     deadline = time.monotonic() + rounds * SECONDS_PER_ROUND + 10
     answer = None
     heartbeats = 0
@@ -379,7 +404,17 @@ def main():
         "--long", action="store_true",
         help="the single long boot: two phases of ROUNDS each, DDB readings "
              "before and after, and a verdict on what accumulates")
+    parser.add_argument("--gdb-stall-dump", action="store_true",
+                        help="QEMU only: dump all CPUs before the stall watchdog tries DDB")
+    parser.add_argument("--asid-jump", type=int,
+                        help="QEMU --long only: advance ASID next once at phase two")
     args = parser.parse_args()
+    if args.rounds <= 0 or args.stall_seconds < 0:
+        parser.error("rounds must be positive and stall-seconds nonnegative")
+    if (args.gdb_stall_dump or args.asid_jump is not None) and args.platform != "qemu":
+        parser.error("GDB options require --platform qemu")
+    if args.asid_jump is not None and (not args.long or not 2 <= args.asid_jump <= 65535):
+        parser.error("--asid-jump requires --long and a value from 2 through 65535")
     global STALL_SECONDS
     STALL_SECONDS = (args.stall_seconds or
                      STALL_SECONDS_BY_PLATFORM[args.platform])
@@ -414,6 +449,12 @@ def main():
 
     session = Session(pid, terminal, await_log=transcript_path,
                       label=f"kernel/{args.platform} {kind}")
+    if args.gdb_stall_dump or args.asid_jump is not None:
+        session.gdb = ChurnGdb(artifact_dir, os.environ.get(
+            "KERNEL_QEMU_SHELL_ELF", os.path.join(REPO_ROOT, "kernel/build/qemu/kernel.elf")))
+        session.gdb_stall_dump = args.gdb_stall_dump
+        for stale in ("asid-jump.log", "gdb-stall.log"):
+            Path(artifact_dir, stale).unlink(missing_ok=True)
 
     # A runner stopped from outside (a timeout, a person) still leaves its
     # transcript: SIGTERM becomes an exception, so the `finally` below runs.
@@ -428,6 +469,11 @@ def main():
             BOOT_TIMEOUT_SECONDS[args.platform], await_name="shell readiness")
         if ready is None:
             failure = "the shell never became ready"
+        if failure is None and session.gdb is not None:
+            try:
+                session.gdb.open()
+            except Exception as error:
+                failure = f"cannot prepare GDB diagnostics: {error}"
         phases = 2 if args.long else 1
         for phase in range(phases + 1):
             if failure is not None:
@@ -442,9 +488,15 @@ def main():
                     f"{key}={value}" for key, value in reading.items()))
             if phase == phases:
                 break
-            failure = run_phase(session, args.rounds)
+            failure = run_phase(session, args.rounds,
+                                args.asid_jump if phase == 1 else None)
         if failure is None and args.long:
             failure = judge_long(readings)
+        if session.gdb is not None:
+            try:
+                session.gdb.close()
+            except Exception as error:
+                print(f"[churn] GDB cleanup unavailable: {error}", file=sys.stderr)
         # Leave miniterm the ordinary way so the runner tears QEMU or the
         # board session down itself.
         try:
@@ -465,6 +517,11 @@ def main():
                 pid = 0
                 break
     finally:
+        if session.gdb is not None:
+            try:
+                session.gdb.close()
+            except Exception as error:
+                print(f"[churn] GDB cleanup unavailable: {error}", file=sys.stderr)
         if pid:
             terminate(pid)
         os.close(terminal)

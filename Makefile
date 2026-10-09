@@ -1541,6 +1541,18 @@ $(KERNEL_CONSOLE_LAYOUT): $(KERNEL_QEMU_MAIN_O) $(TAKIBI)
 	mv $@.tmp $@
 	rm $@.core $@.atomic
 
+# Churn debugger layouts are host-only and track the compiled source.
+_build/kernel-churn-layout.gdb: $(KERNEL_QEMU_MAIN_O) $(TAKIBI)
+	@mkdir -p $(dir $@)
+	$(TAKIBI) --regions $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_QEMU_MAIN_TKB) --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --emit-struct-layout AsidState -o $@.0
+	$(TAKIBI) --regions $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_QEMU_MAIN_TKB) --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --emit-struct-layout 'LockedCell$$AsidState' -o $@.1
+	$(TAKIBI) --regions $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_QEMU_MAIN_TKB) --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --emit-struct-layout Mutex -o $@.2
+	$(TAKIBI) --regions $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_QEMU_MAIN_TKB) --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --emit-struct-layout WorldStop -o $@.3
+	$(TAKIBI) --regions $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_QEMU_MAIN_TKB) --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --emit-struct-layout AtomicWord -o $@.4
+	cat $@.0 $@.1 $@.2 $@.3 $@.4 > $@.tmp
+	mv $@.tmp $@
+	rm $@.0 $@.1 $@.2 $@.3 $@.4
+
 $(KERNEL_DEBUG_METADATA): $(KERNEL_QEMU_MAIN_O) $(TAKIBI)
 	$(TAKIBI) --regions $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_QEMU_MAIN_TKB) --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --emit-debug-metadata $@
 
@@ -1847,6 +1859,14 @@ kernelcheck-console-gdb-qemu: kernelbuild-check
 _kernelcheck-console-gdb-qemu:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" python3 scripts/run_kernel_console_qemutest.py
 
+.PHONY: kernelcheck-churn-gdb-qemu _kernelcheck-churn-gdb-qemu churn-asid-qemu
+kernelcheck-churn-gdb-qemu: kernelbuild-check
+	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-churn-gdb-qemu
+
+_kernelcheck-churn-gdb-qemu:
+	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) _build/kernel-churn-layout.gdb
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" python3 scripts/run_kernel_churn_gdb_qemutest.py
+
 ## Focused terminal-path check.  This is deliberately separate from the
 ## ordinary QEMU suite because its expected result is a terminal fail-stop
 ## serving the read-only UART crash console.
@@ -2081,6 +2101,11 @@ CHURN_LONG_ROUNDS ?= 9000
 churn-long-qemu: kernelbuild-qemu $(KERNEL_SHELL_EXT2_IMAGE)
 	@python3 scripts/run_kernel_churn.py --platform qemu --long --rounds $(CHURN_LONG_ROUNDS)
 
+# Four-core shortened rollover finder, deliberately in no aggregate.
+churn-asid-qemu: kernelbuild-qemu $(KERNEL_SHELL_EXT2_IMAGE)
+	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) _build/kernel-churn-layout.gdb
+	@KERNEL_QEMU_SHELL_SMP=4 python3 scripts/run_kernel_churn.py --platform qemu --long --rounds 300 --asid-jump 65000 --gdb-stall-dump --stall-seconds 300
+
 hwcheck-churn-long-rpi5: kernelbuild-rpi5
 	@RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" RPI5_SWD_SPEED="$(RPI5_SWD_SPEED)" python3 scripts/run_kernel_churn.py --platform rpi5 --long --rounds $(CHURN_LONG_ROUNDS)
 
@@ -2100,7 +2125,7 @@ KERNELCHECK_QEMU_LANES := kernelcheck-qemu kernelcheck-qemu-debug \
 	kernelcheck-affinity-gdb-qemu kernelcheck-race-window-609-qemu \
 	kernelcheck-race-window-603-qemu kernelcheck-race-window-633-qemu \
 	kernelcheck-race-window-635-qemu kernelcheck-race-window-705-qemu kernelcheck-race-window-678-qemu \
-	kernelcheck-debug-return-abi-qemu kernelcheck-probe-ticks-qemu kernelcheck-console-gdb-qemu
+	kernelcheck-debug-return-abi-qemu kernelcheck-probe-ticks-qemu kernelcheck-console-gdb-qemu kernelcheck-churn-gdb-qemu
 
 KERNELCHECK_LANES := $(KERNELCHECK_QEMU_LANES) kernelcheck-rpi5
 

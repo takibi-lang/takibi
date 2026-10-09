@@ -257,6 +257,8 @@ make kernelsh-qemu     # boot QEMU and use the current terminal as the ash UART 
 make kernelsh-rpi5     # load RPi5 over SWD and use the Debug Probe UART as the ash console
 make churn-qemu        # one sample of the process-churn workload (CHURN_ROUNDS=100)
 make hwcheck-churn-rpi5  # the same on the board
+make churn-asid-qemu    # four cores, 2 x 300 rounds, advance ASID next to 65000
+make kernelcheck-churn-gdb-qemu  # seeded diagnostic decoding and injection refusals
 ```
 
 The two churn targets are a finder for multicore defects, not a check, and
@@ -267,6 +269,29 @@ status it must, with no oops, starved-CPU report or DDB prompt. One clean
 sample says little; take a rate with
 `scripts/repeat_kernel_lane.sh N make churn-qemu` (or the RPi5 target), and
 give anything it finds a deterministic lane before its issue closes.
+
+`churn-asid-qemu` is also outside every aggregate. It takes three DDB `vm`
+readings around two phases and requires an ASID rollover and no page growth
+in phase two. After sending the second phase's command, GDB advances only the
+next unassigned ASID, with all CPUs stopped and the cell lock unheld; it refuses
+a rewind, an out-of-width number, or a lock that remains held. This injection
+shortens the path to wrap but is not evidence for an unperturbed long run.
+
+For a custom QEMU run, build `_build/kernel-churn-layout.gdb`, then pass
+`--gdb-stall-dump` and optionally `--long --asid-jump N` to
+`scripts/run_kernel_churn.py`. These options refuse RPi5. The watchdog writes
+`gdb-stall.log` before trying DDB, including each CPU's stack, PC, SP, CPSR,
+world-stop owner, generation and acknowledgements. `asid-jump.log` records the
+old and new counter. GDB runs under a host timeout; QMP connections close
+before GDB or serial BREAK, and the prior guest run state is restored. A failed
+diagnostic remains in the artifact and does not replace the original stall.
+Offsets come from the compiler's layout sidecar, not handwritten padding.
+No interrupt-controller MMIO is read.
+
+The aggregate's `kernelcheck-churn-gdb-qemu` seeds stopped globals and verifies
+the actual reader, forward-only write, held-lock refusal and stub cleanup.
+It tests the diagnostic transport, not the world-stop protocol or natural
+failure rate; the shortened churn finder is the separate workload evidence.
 
 The two `kernelsh-*` targets are deliberately interactive and do not run the
 automated view suite. RPi5 starts the physical-Ethernet peer needed to keep
