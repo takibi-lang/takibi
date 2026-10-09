@@ -84,13 +84,31 @@ def masked_sources(sources: str) -> str:
                   lambda match: re.sub(r'[^\n]', ' ', match[0]), sources)
 
 
-def function_body(name: str, sources: str) -> str | None:
+@lru_cache(maxsize=8)
+def function_starts(sources: str) -> dict[str, tuple[int, int]]:
+    """Index the source once, retaining the first definition as search did.
+
+    The mapping asks for a function when checking existence, guards and hashes,
+    often in several rows. Searching the entire kernel for each request made
+    a tracked-file check exceed the fast lane's bound on CI.
+    """
     code = masked_sources(sources)
-    match = re.search(rf"^(?:private )?(?:inline |noinline )?fn {name}\(",
-                      code, re.M)
-    if match is None:
+    starts = {}
+    for match in re.finditer(
+            r"^(?:private )?(?:inline |noinline )?fn ([a-z][a-z0-9_]*)\(",
+            code, re.M):
+        starts.setdefault(match[1], (match.start(), match.end()))
+    return starts
+
+
+@lru_cache(maxsize=1024)
+def function_body(name: str, sources: str) -> str | None:
+    found = function_starts(sources).get(name)
+    if found is None:
         return None
-    depth, position = 1, match.end()
+    start, position = found
+    code = masked_sources(sources)
+    depth = 1
     while depth:
         depth += (code[position] == '(') - (code[position] == ')')
         position += 1
@@ -101,7 +119,7 @@ def function_body(name: str, sources: str) -> str | None:
     while depth:
         depth += (code[end] == '{') - (code[end] == '}')
         end += 1
-    return sources[match.start():end]
+    return sources[start:end]
 
 
 def normalised(body: str) -> str:

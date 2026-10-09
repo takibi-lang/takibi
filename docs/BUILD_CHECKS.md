@@ -65,6 +65,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_execution_model_coverage.py` | mutable kernel state declares its execution model |
 | `check_ext2_image_free_blocks.py` | the fixture ext2 image keeps at least 128 free blocks, so a program added to it cannot silently push a boot into the exhaustion stall of #658 |
 | `check_ext2_mutation_guard.py` | every ext2 mutation is reached under the filesystem lock's guard, or its file is named with the reason it cannot race a peer |
+| `check_model_function_map_controls.py` | Function extraction preserves qualifiers, effects, nested blocks and first-definition semantics while total full-source scan work stays constant across distinct and repeated lookups |
 | `check_model_function_map.py` | every kernel function a TLA+ model under kernel/models/ claims to abstract still has a definition, every path a model drops says why that is safe, and no mapped function changed since its row was reviewed |
 | `check_expected_line_endings.py` | stdout fixtures use one newline convention |
 | `check_expected_line_endings_controls.py` | Positive and failure-specific controls for expected-line-ending checks |
