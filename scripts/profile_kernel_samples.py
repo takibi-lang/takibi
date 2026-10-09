@@ -6,6 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import os
 import subprocess
 
 
@@ -53,9 +54,16 @@ def symbolize(tool, elf, addresses, timeout):
         return []
     command = [tool, "-f", "-C", "-e", elf,
                *[f"0x{pc:x}" for pc in addresses]]
+    # The ELF named here is the whole input. A DEBUGINFOD_URLS inherited from
+    # the host makes llvm-addr2line query a network server for missing debug
+    # info instead, which turns an offline lookup into a timeout on hosts
+    # that set it (2026-10-09).
+    environment = {key: value for key, value in os.environ.items()
+                   if key != "DEBUGINFOD_URLS"}
     try:
         result = subprocess.run(command, text=True, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, timeout=timeout)
+                                stderr=subprocess.PIPE, timeout=timeout,
+                                env=environment)
     except subprocess.TimeoutExpired as error:
         raise ValueError(f"symbolizer timed out for {elf}") from error
     if result.returncode != 0:
