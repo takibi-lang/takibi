@@ -29,7 +29,7 @@ parameter named for a frame address (`frame_sp`, `current_sp`, ...) is a bare
 comparison needs an integer.
 
 Direct default FrameRef declarations are refused as well: private affine
-fields otherwise allow a zero-initialized local to bypass these explicit
+fields otherwise allow an uninitialized local to bypass these explicit
 mints. This lexical rule does not cover arbitrary aggregate initialization.
 
 What a PASS says is that the explicit trusted set is still the named one. It does not
