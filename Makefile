@@ -1845,6 +1845,10 @@ _kernelcheck-oops-qemu:
 	@# executes, so core 1 fail-stops during bring-up and its report stops
 	@# core 0 for good.
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_OOPS_MODE=peer_fault KERNEL_QEMU_OOPS_GDB_PORT=18707 KERNEL_QEMU_OOPS_SERIAL_PORT=18708 KERNEL_QEMU_OOPS_ARTIFACT_DIR="$(TAKIBI_LANE_ARTIFACT_ROOT)/kernel-oops-qemu-peer-fault" bash scripts/run_kernel_oops_qemutest.sh
+	@# GitHub issue #556: the same fault while core 0 still holds its CPU
+	@# start reservation; GDB holds core 0 there until the peer has been
+	@# refused once, so the crash stop must wait for the reservation.
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_OOPS_MODE=peer_fault_start_window KERNEL_QEMU_OOPS_GDB_PORT=18605 KERNEL_QEMU_OOPS_SERIAL_PORT=18606 KERNEL_QEMU_OOPS_ARTIFACT_DIR="$(TAKIBI_LANE_ARTIFACT_ROOT)/kernel-oops-qemu-peer-fault-start-window" bash scripts/run_kernel_oops_qemutest.sh
 	@# GitHub issues #486 and #634: two online cores fault before either
 	@# can stop the other, and both reports survive in fault order.
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_OOPS_MODE=concurrent_fault KERNEL_QEMU_OOPS_GDB_PORT=18679 KERNEL_QEMU_OOPS_SERIAL_PORT=18680 KERNEL_QEMU_OOPS_ARTIFACT_DIR="$(TAKIBI_LANE_ARTIFACT_ROOT)/kernel-oops-qemu-concurrent-fault" bash scripts/run_kernel_oops_qemutest.sh

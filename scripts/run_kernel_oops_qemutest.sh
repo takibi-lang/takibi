@@ -84,6 +84,17 @@ case "$MODE" in
         expected_ec=3c
         expected_detail=''
         ;;
+    peer_fault_start_window)
+        # GitHub issue #556: peer_fault with core 0 held inside its CPU start
+        # reservation -- after PSCI CPU_ON, before cpu_start_finish gives the
+        # world-stop claim back. A loaded host leaves core 0 there by chance;
+        # GDB leaves it there on purpose, so the peer's crash stop meets the
+        # start reservation every time. The verdict is peer_fault's: the
+        # peer's report must still stop core 0.
+        fault_instruction=0xd4200000
+        expected_ec=3c
+        expected_detail=''
+        ;;
     concurrent_fault)
         # GitHub issue #634: two online cores fault before either can stop
         # the other -- the case the fault-order ticket, the report claim and
@@ -143,7 +154,7 @@ trap 'cleanup; exit 130' INT TERM HUP
 # for the same reason earlier (1 in 3 failures); the other modes only
 # differed in being a few seconds shorter.
 console_await=(--timeout 90)
-if [ "$MODE" = peer_fault ]; then
+if [ "$MODE" = peer_fault ] || [ "$MODE" = peer_fault_start_window ]; then
     # The peer fail-stops during bring-up and core 0 only reaches its own
     # fault after userspace starts.
     console_await+=(--await-line "oops: fail-stop seq=1 cpu=1")
@@ -198,6 +209,39 @@ for _ in $(seq 1 50); do
             -ex "break kernel_process_child_exec_prepare"
             -ex "continue"
             -ex "takibi-force-variant-return KernelChildExecPrepareResult CloneVmMissing"
+            -ex "detach"
+        )
+    elif [ "$MODE" = peer_fault_start_window ]; then
+        # Thread 1 is core 0, thread 2 core 1 (QEMU numbers vCPUs from 1).
+        # 1. At the -S stop, replace the peer's entry, as peer_fault does.
+        # 2. Core 0 runs to cpu_start_finish: CPU_ON has been issued and the
+        #    start reservation still holds kernel_world_stop's claim.
+        # 3. With scheduler-locking on, core 1 alone runs into its BRK and
+        #    its crash stop until it has been refused the claim once: it is
+        #    at its second world_stop_claim (waiting on the reservation), or,
+        #    if it does not wait, at the report claim its Busy answer leads
+        #    to. Core 0 has not moved, so the refusal is certain.
+        # 4. Core 0 alone finishes cpu_start_finish, giving the claim back
+        #    while core 1 is still inside its crash stop.
+        # 5. Detach releases both.
+        gdb_commands=(
+            -ex "target remote :$GDB_PORT"
+            -ex "set {int}kernel_secondary_main = $fault_instruction"
+            -ex "break *cpu_start_finish thread 1"
+            -ex "continue"
+            -ex "delete"
+            -ex "set scheduler-locking on"
+            -ex "break *world_stop_claim thread 2"
+            -ex "ignore \$bpnum 1"
+            -ex "break *crash_report_claim thread 2"
+            -ex "thread 2"
+            -ex "continue"
+            -ex "delete"
+            -ex "thread 1"
+            -ex "finish"
+            -ex "print kernel_world_stop.claimed"
+            -ex "info threads"
+            -ex "set scheduler-locking off"
             -ex "detach"
         )
     elif [ "$MODE" = concurrent_fault ]; then
@@ -323,7 +367,7 @@ console_driver_pid=""
 # (slot 0, before any process exists, so no trace), its report must have
 # stopped core 0 (#619, possible since #632), and it must be the only one:
 # core 0, stopped, cannot fault after it.
-if [ "$MODE" = peer_fault ]; then
+if [ "$MODE" = peer_fault ] || [ "$MODE" = peer_fault_start_window ]; then
     if ! grep -Eq "^oops: fail-stop seq=1 cpu=1 slot=0 ec=0x00000000000000$expected_ec " "$UART_LOG" ||
             ! grep -Eq '^oops: world-stop complete mask=0x0*1$' "$UART_LOG" ||
             ! grep -Eq '^oops: cores reported=1 faults=1 contended=[0-9]+ abandoned=0$' "$UART_LOG" ||

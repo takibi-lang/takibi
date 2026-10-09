@@ -88,6 +88,7 @@
 //   exhaustion refuses further requests rather than accepting an old ack.
 //   These guarantees were revised on 2026-09-08 for repeated interval stops.
 use "kernel/lib/atomic_word.tkb";
+use "kernel/arch/arm64/kernel/timer.tkb";
 use "kernel/lib/execution_model.tkb";
 use "kernel/lib/intrusive_pool.tkb";
 
@@ -238,8 +239,28 @@ private fn world_stop_hold(stop: *WorldStop @ id) !{interrupt, unsafe} {
 // Stop every other core in [0, cores). The platform sends one SGI to the
 // computed target set. A bounded wait returns Partial rather than claiming a
 // proof when any target did not acknowledge.
+//
+// The claim gate holds 0 when free, WORLD_STOP_CLAIM_STOP while a stop owns
+// it, and WORLD_STOP_CLAIM_START while cpu_start_reserve holds it across
+// PSCI CPU_ON. Taking it is a compare-exchange from 0, so a refused claim
+// never overwrites which of the two holds it. Answers 0 when taken, or the
+// holder's value.
+const WORLD_STOP_CLAIM_STOP: usize = 1;
+const WORLD_STOP_CLAIM_START: usize = 2;
+
+private fn world_stop_claim_as(stop: *WorldStop @ id, holder: usize) -> usize
+        !{unsafe} {
+    if (atomic_word_compare_exchange(&(*stop).claimed, 0, holder)) {
+        return 0;
+    }
+    let current: usize = atomic_word_load(&(*stop).claimed);
+    // Released between the two reads: still refused, as a stop.
+    if (current == 0) { return WORLD_STOP_CLAIM_STOP; }
+    return current;
+}
+
 private fn world_stop_claim(stop: *WorldStop @ id) -> usize !{unsafe} {
-    return atomic_word_swap(&(*stop).claimed, 1);
+    return world_stop_claim_as(stop, WORLD_STOP_CLAIM_STOP);
 }
 
 private fn world_stop_begin_config(stop: *WorldStop @ id, cores: usize,
@@ -322,7 +343,24 @@ fn world_stop_machine_begin(spins: usize)
         -> MachineStopResult[&kernel_world_stop]
         !{unsafe, irq_masking_guard, lock_guard_40_world_stop} {
     let irq_flags: usize = mutex_irq_save();
-    if (world_stop_claim(&kernel_world_stop) != 0) {
+    // GitHub issue #556: a CPU start reservation is held only across PSCI
+    // CPU_ON, and the core it starts may fault before core 0 gives it back.
+    // Wait for that one holder, bounded, rather than answer Busy and leave
+    // the faulting core's console running on an unstopped machine. A stop
+    // held by another initiator is still Busy at once.
+    // The bound is time on the generic counter, one second, not a spin count:
+    // the holder is another vCPU or core whose progress a local loop count
+    // does not measure.
+    let mut held: usize = world_stop_claim(&kernel_world_stop);
+    if (held == WORLD_STOP_CLAIM_START) {
+        let start: i64 = read_cntpct();
+        let budget: i64 = read_cntfrq();
+        while (held == WORLD_STOP_CLAIM_START &&
+               read_cntpct() - start < budget) {
+            held = world_stop_claim(&kernel_world_stop);
+        }
+    }
+    if (held != 0) {
         mutex_irq_restore(irq_flags);
         return MachineStopResult::Busy;
     }
@@ -427,7 +465,7 @@ fn cpu_start_reserve(core: {0..<KERNEL_MAX_CORES as usize})
           changes_witness_RegionInspection__ProcessImageRecord} {
     if (core == 0 || cpu_id() != 0) { return CpuStartResult::Busy; }
     let irq_flags: usize = mutex_irq_save();
-    if (world_stop_claim(&kernel_world_stop) != 0) {
+    if (world_stop_claim_as(&kernel_world_stop, WORLD_STOP_CLAIM_START) != 0) {
         mutex_irq_restore(irq_flags); return CpuStartResult::Busy;
     }
     let mask: usize = atomic_word_load(&kernel_world_stop.participants) | 1;
