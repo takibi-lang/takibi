@@ -1,10 +1,11 @@
 {
   "date": "2026-10-09",
-  "event": "incremental",
+  "event": "milestone",
   "decision": "measured",
-  "source_sha256": "9bf1f9155e054c1dbecc3b159fc07a2067e51252dc57524e025cef86ec6a928e",
-  "workload": "#637 item 1: syscall kernel-buffer copies through checked slices (copy_from_user_span/copy_to_user_span) instead of raw pointers. Linked production kernels against base 3b805323 with scripts/space_delta.py.",
+  "source_sha256": "93f1b344bfa80140998416a7ee443679745af65166bc621f390545272403cb38",
+  "workload": "Host-only console state decoding and pre-BREAK collection, plus the bounded host-load reproduction loop. Fresh linked production QEMU/RPi5 kernels compared with e3e8639f after the syscall copy-span migration. No new kernel allocation phase; the bounded-boot workload and its prior pool evidence are unchanged.",
   "evidence": [
+    "docs/CONSOLE_DIAGNOSTICS_SPACE_2026-10-09.md",
     "docs/SYSCALL_COPY_SPAN_SPACE_2026-10-09.md",
     "docs/TYPED_PEER_CLOCKS_2026-10-09.md",
     "docs/TYPED_PEER_CLOCK_POOL_ENDPOINT_2026-10-09.tsv",
@@ -27,6 +28,6 @@
     "docs/DMA_MINT_FILES_2026-10-08.md",
     "docs/DMA_TRANSMIT_2026-10-08.md"
   ],
-  "assessment": "Text +152 B (QEMU) and +120 B (RPi5) for span checks and copy-in failure arms; data, BSS and usable_ram_start unchanged, no data/BSS symbol changed size. No buffer, payload, pool or lifetime change. Adopted.",
-  "next_trigger": "Measure at the typed-atomic probe milestone, another new resource/lifetime, or a changed allocation workload."
+  "assessment": "Zero text, data and BSS delta on both production platforms; every data/BSS symbol size and usable_ram_start unchanged. Compiler metadata and two struct-layout sidecars are host files, not linked kernel storage. Adopt the diagnostic tooling at zero kernel image growth. Seeded QEMU states validate decoding and transport, not the cause of a natural stall or hardware ordering.",
+  "next_trigger": "Measure when production diagnostics gain storage, a new resource/lifetime or allocation workload appears, or the next kernel feature/stage completes."
 }
