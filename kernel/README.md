@@ -633,7 +633,7 @@ probe/board setup. A successful run includes:
 [kernel/rpi5] BusyBox httpd curl passed
 [kernel/rpi5] second BusyBox httpd curl passed
 [kernel/rpi5] userspace connected I/O passed
-PASS kernel/rpi5 (70 views, one boot)
+PASS kernel/rpi5 (71 views, one boot)
 ```
 
 It tests negative and positive ARP/ICMP behavior, TCP lifecycle, USB ext2
@@ -641,6 +641,14 @@ provisioning and mutation, static BusyBox file access, dynamic musl plus
 BusyBox HTTPd, exact `curl` content, Linux socket I/O, VM layout, and complete
 resource teardown. After teardown, the host sends `irqtest` over RP1 UART0 and
 the final view verifies that EL1 received the line through the interrupt path.
+
+The shared `signal_boundary` view runs a standalone EL0 fixture after the
+existing process lifecycle checks. Children exercise corrupted signal frames,
+stack overflow during delivery, and PSTATE sanitization; a normal handler
+checks siginfo and the restored signal mask while clobbering all vector
+registers, FPCR and FPSR. The parent also verifies zero-filled mmap reuse and
+brk refusal at a live mapping. These checks use the real syscall boundary on
+both platforms.
 
 ### Device overrides and artifacts
 

@@ -229,6 +229,14 @@ echo "ash trap: cont refused status=$?"
 ( kill -34 $$ ) 2>/dev/null
 echo "ash trap: real-time refused status=$?"
 
+# Signal and anonymous-memory boundaries run after the cumulative lifecycle
+# fixtures. Destructive signal cases are isolated in children of this ELF.
+/bin/signal-boundary
+if [ "$?" -ne 0 ]; then
+    echo "boundary: FAIL fixture"
+    exit 1
+fi
+
 for phase in fd uart telnet; do
     echo "init: phase $phase"
 done

@@ -80,6 +80,7 @@ script-interpreter-argument.sh
 session
 session-check
 sh
+signal-boundary
 sleep
 spread
 taskset

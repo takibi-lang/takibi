@@ -1,0 +1,100 @@
+/* EL0 signal-frame and anonymous-memory boundary fixture. Each destructive
+ * signal case runs in a child; the parent checks the exact wait4 status.
+ * No writable globals: all state belongs to the calling process's stack.
+ */
+extern fn signal_boundary_run(mode: usize) -> usize;
+extern symbol signal_boundary_handler;
+extern symbol signal_boundary_restorer;
+
+private fn boundary_fail(line: borrow []u8) {
+    svc5(64, 1, line as *u8 as usize, line.len, 0, 0);
+    svc5(93, 1, 0, 0, 0, 0);
+}
+
+private fn boundary_line(line: borrow []u8) {
+    svc5(64, 1, line as *u8 as usize, line.len, 0, 0);
+}
+
+private fn boundary_memory() !{unsafe} {
+    let old_break: usize = svc5(214, 0, 0, 0, 0, 0);
+    let first: usize = svc5(222, 0, 4096, 3, 0x22, 0xFFFFFFFFFFFFFFFF);
+    if (first >= 0xFFFFFFFFFFFFF000 || first == 0) {
+        boundary_fail(bs"boundary: FAIL first mmap\n");
+        return;
+    }
+    // Mint exactly the extent granted by mmap. All later byte accesses are
+    // checked against this bounded view; no raw-pointer indexing is used.
+    let first_pointer: *u8 = unsafe { first as *u8 };
+    let first_bytes: [u8; 4096..] = unsafe { first_pointer[0..<4096] };
+    for index: usize in 0..<4096 { first_bytes[index] = 0xA5; }
+    if (svc5(215, first, 4096, 0, 0, 0) != 0) {
+        boundary_fail(bs"boundary: FAIL munmap\n");
+        return;
+    }
+    let second: usize = svc5(222, 0, 4096, 3, 0x22, 0xFFFFFFFFFFFFFFFF);
+    if (second != first) {
+        boundary_fail(bs"boundary: FAIL mmap did not reuse address\n");
+        return;
+    }
+    let second_pointer: *u8 = unsafe { second as *u8 };
+    let second_bytes: [u8; 4096..] = unsafe { second_pointer[0..<4096] };
+    for index: usize in 0..<4096 {
+        if (second_bytes[index] != 0) {
+            boundary_fail(bs"boundary: FAIL reused mmap not zero\n");
+            return;
+        }
+    }
+    boundary_line(bs"boundary: mmap reuse zero-filled\n");
+    if (svc5(214, second + 1, 0, 0, 0, 0) != old_break ||
+        svc5(214, 0, 0, 0, 0, 0) != old_break) {
+        boundary_fail(bs"boundary: FAIL brk crossed mapping\n");
+        return;
+    }
+    boundary_line(bs"boundary: brk mapping collision refused\n");
+    if (svc5(215, second, 4096, 0, 0, 0) != 0) {
+        boundary_fail(bs"boundary: FAIL final munmap\n");
+    }
+}
+
+fn signal_boundary_probe() !{unsafe} {
+    let mut action: [usize; 4];
+    action[0] = signal_boundary_handler as usize;
+    action[1] = 0x04000004;
+    action[2] = signal_boundary_restorer as usize;
+    action[3] = 0;
+    if (svc5(134, 10, action as *usize as usize, 0, 8, 0) != 0) {
+        boundary_fail(bs"boundary: FAIL sigaction\n");
+        return;
+    }
+    for mode: usize in 0..<6 {
+        let child: usize = svc5(220, 17, 0, 0, 0, 0);
+        if (child == 0) {
+            let result: usize = signal_boundary_run(mode);
+            svc5(93, result, 0, 0, 0, 0);
+            return;
+        }
+        if (child >= 0xFFFFFFFFFFFFF000) {
+            boundary_fail(bs"boundary: FAIL fork\n");
+            return;
+        }
+        let mut status: [u8; 4];
+        for index: usize in 0..<4 { status[index] = 0xFF; }
+        let mut expected: u8 = 139;
+        if (mode == 0 || mode == 4) { expected = 0; }
+        if (svc5(260, child, status as *u8 as usize, 0, 0, 0) != child ||
+            status[0] != 0 || status[1] != expected) {
+            boundary_fail(bs"boundary: FAIL signal child status\n");
+            return;
+        }
+        match mode {
+            0 => { boundary_line(bs"boundary: siginfo, restored mask and FPSIMD exact\n"); }
+            1 => { boundary_line(bs"boundary: bad FPSIMD magic refused\n"); }
+            2 => { boundary_line(bs"boundary: bad FPSIMD size refused\n"); }
+            3 => { boundary_line(bs"boundary: misaligned signal PC refused\n"); }
+            4 => { boundary_line(bs"boundary: signal PSTATE limited to NZCV\n"); }
+            _ => { boundary_line(bs"boundary: signal frame overflow refused\n"); }
+        }
+    }
+    boundary_memory();
+    svc5(93, 0, 0, 0, 0, 0);
+}

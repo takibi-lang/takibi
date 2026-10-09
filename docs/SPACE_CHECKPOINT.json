@@ -1,10 +1,11 @@
 {
   "date": "2026-10-09",
-  "event": "incremental",
+  "event": "milestone",
   "decision": "measured",
-  "source_sha256": "386fbdb41c6d6746e64050a8e3e106d79061dc59c2f55515d1a58ab36cdd2811",
-  "workload": "#732 generic variants (compiler only; no kernel source uses them yet). Linked production kernels against base fc096879 with scripts/space_delta.py.",
+  "source_sha256": "387a2c61a2491eaa73c5b1015dcda2bc5e3d402512f15aa4f02300b65b74fbb4",
+  "workload": "Signal-frame refusal and restoration plus mmap reuse and brk collision through a standalone EL0 fixture. Both linked production kernels and fixed-size ext2 image occupancy measured against fc096879.",
   "evidence": [
+    "docs/SIGNAL_BOUNDARY_SPACE_2026-10-09.md",
     "docs/GEM_RX_FIXED_SPACE_2026-10-09.md",
     "docs/CHURN_DIAGNOSTICS_SPACE_2026-10-09.md",
     "docs/CONSOLE_DIAGNOSTICS_SPACE_2026-10-09.md",
@@ -30,6 +31,6 @@
     "docs/DMA_MINT_FILES_2026-10-08.md",
     "docs/DMA_TRANSMIT_2026-10-08.md"
   ],
-  "assessment": "Linked QEMU and RPi5 kernels are the same size in every section (text, data, BSS, usable_ram_start). Instances lower to ordinary variants, so a later kernel user pays only its own variant layouts. Place(T) and the stable_replace migration are the next measurement.",
-  "next_trigger": "Measure when production diagnostics gain storage, a new resource/lifetime or allocation workload appears, or the next kernel feature/stage completes."
+  "assessment": "Linked QEMU/RPi5 text, data, BSS, symbol sizes and usable_ram_start unchanged. The existing ext2 image consumes six additional 1024-byte blocks and one inode; the standalone ELF is 5512 bytes. Adopted; no pool or reservation growth.",
+  "next_trigger": "Measure when production diagnostics gain storage, a new allocation workload appears, or the next kernel feature or roadmap stage completes."
 }

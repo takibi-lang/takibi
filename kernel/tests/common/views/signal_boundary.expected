@@ -1,0 +1,8 @@
+boundary: siginfo, restored mask and FPSIMD exact
+boundary: bad FPSIMD magic refused
+boundary: bad FPSIMD size refused
+boundary: misaligned signal PC refused
+boundary: signal PSTATE limited to NZCV
+boundary: signal frame overflow refused
+boundary: mmap reuse zero-filled
+boundary: brk mapping collision refused
