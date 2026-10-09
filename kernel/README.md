@@ -418,6 +418,29 @@ explicit `interactive shell: uart blocked` readiness marker. This is the
 point at which ash is waiting for input, rather than merely the point at which
 the QEMU process or UART socket exists.
 
+### BusyBox reference under Linux
+
+For an ash behavior question, run the pinned static BusyBox under QEMU
+userspace emulation against the host Linux kernel before changing a boot
+fixture:
+
+```bash
+make kernel/build/user/busybox-static
+scripts/busybox_reference.sh /path/to/probe.sh
+```
+
+The devcontainer installs `qemu-user`; an existing container can install it
+with `sudo apt-get install -y qemu-user`. The runner also accepts an installed
+`qemu-aarch64-static`. It leaves the script's output on stdout, reports its
+exit status on stderr, and returns that same status. Relative script paths
+and file accesses use the caller's working directory.
+
+This is an on-demand debugging reference, outside all check lanes. It uses
+the host filesystem and Linux's behavior through QEMU user emulation, not the
+kernel's ext2 image. Explicit paths such as `/bin/sleep` name host programs.
+Read `SYSCALLS.md` when comparing results: the maintained kernel implements a
+deliberate subset, so a difference is not automatically a defect.
+
 ### Publish a page from interactive ash
 
 Both shell targets boot an init-managed BusyBox HTTPd automatically.
