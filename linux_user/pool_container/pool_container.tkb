@@ -48,7 +48,7 @@ fn node_lock(m: *i32 @ address) -> NodeGuard[address] {
 fn node_unlock(g: sink NodeGuard[address], m: *i32 @ address) {}
 
 // Discharges a link, reporting whether it held anything.
-fn link_was_occupied(l: Place(exists a: usize. IntrusiveOwner[p, a])) -> bool {
+fn link_was_occupied(l: Place(exists a: usize. IntrusiveOwner[&nodes, a])) -> bool {
     match l {
         Place::Empty => { return false; }
         Place::Full(o) => { intrusive_owner_drop(o); return true; }
@@ -78,7 +78,7 @@ fn app_main() !{unsafe} {
                 let displaced: Place(exists a: usize. IntrusiveOwner[&nodes, a]) =
                     match head {
                         Place::Empty => { place_take(ng, &node.mutex, node.link) }
-                        Place::Full(o) => { place_put(ng, &node.mutex, node.link, o) }
+                        Place::Full(next) => { place_put(ng, &node.mutex, node.link, next) }
                     };
                 node_unlock(ng, &node.mutex);
                 // A freshly zeroed node's slot must have been empty. If

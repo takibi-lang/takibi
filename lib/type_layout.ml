@@ -108,6 +108,16 @@ let rec size_align_of_type pos seen ty =
         (offset + tsz, max max_align talign)
       ) (0, 1) ts in
       (align_up off max_align, max_align)
+  (* GitHub issue #131: the built-in Place(T) is { i32 tag; T }, the same
+     layout its lowered instance gets. A struct holding a place can be a
+     generic struct's argument, so its size is asked for during
+     monomorphization, before the instance is resolved or lowered. *)
+  | TypeGenericInst ("Place", [arg]) | TypeVariant ("Place", _, [arg]) ->
+      size_align_of_type pos seen (TypeTuple [TypeI32; (match arg with
+        | TypeExists (_, _, _) as t ->
+            let rec body = function TypeExists (_, _, b) -> body b | b -> b in
+            body t
+        | t -> t)])
   | TypeVariant (name, _, _) ->
       (match Hashtbl.find_opt variants name with
        | None -> fail pos (Printf.sprintf "unknown variant '%s' in sizeof" name)
@@ -199,7 +209,14 @@ let sizeof_type pos ty =
    padding run. *)
 let expected_llvm_member_count name info dl =
   let field_lltys =
-    List.map (fun (_, ty) -> Llvm_gen.ltype_of_ast ty) info.fields
+    (* Fields are recorded at parse time; the built-in Place(T) is still
+       written as a generic instantiation there (GitHub issue #131). *)
+    let rec resolved = function
+      | Ast.TypeGenericInst ("Place", [arg]) ->
+          Ast.TypeVariant ("Place", [], [resolved arg])
+      | Ast.TypeArray (t, n) -> Ast.TypeArray (resolved t, n)
+      | t -> t in
+    List.map (fun (_, ty) -> Llvm_gen.ltype_of_ast (resolved ty)) info.fields
     |> Array.of_list
   in
   let mk_struct members =
