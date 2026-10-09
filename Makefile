@@ -315,7 +315,10 @@ KERNEL_ASM_ENTRIES := main kernel_secondary_main \
 	kernel_syscall_dispatch kernel_syscall_resume_return \
 	process_image_handle_data_abort
 KERNEL_DEBUGGER_ENTRIES := kernel_process_trace_report page_owner_description
+# The DMA fixture has its own --check-unused-file invocation below and is
+# absent from both production closures.
 KERNEL_UNUSED_EXEMPT := \
+	kernel/tests/qemu/dma/virtio_blk_fixture.tkb \
 	kernel/boot/fdt.tkb \
 	kernel/drivers/block/memory.tkb \
 	kernel/lib/freelist.tkb \
@@ -1695,7 +1698,7 @@ kernel-memory-map-check: _kernelbuild-rpi5 _kernelbuild-qemu
 	python3 scripts/buildcheck_kernel_memory_map.py
 
 .PHONY: _kernelbuild
-_kernelbuild: _kernelbuild-rpi5 _kernelbuild-qemu kernel-memory-map-check
+_kernelbuild: _kernelbuild-rpi5 _kernelbuild-qemu _kernelbuild-dma-qemu kernel-memory-map-check
 
 kernelbuild: build
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) _kernelbuild
@@ -1803,7 +1806,7 @@ kernelcheck-repeat:
 	    $(if $(PORT_BASE),--port-base "$(PORT_BASE)",) \
 	    "$(N)" $(MAKE) $(LANE)
 
-kernelcheck-qemu: kernelcheck-qemu-main kernelcheck-qemu-fdt-multibank
+kernelcheck-qemu: kernelcheck-qemu-main kernelcheck-qemu-fdt-multibank kernelcheck-dma-qemu
 
 # A separate performance run, outside allcheck/cicheck's concurrent fan-out.
 # Other host activity can still affect QEMU; run this on a quiet host.
@@ -2336,3 +2339,23 @@ clean:
 	rm -f kernel/arch/arm64/kernel/exception_context_offsets.inc kernel/arch/arm64/kernel/exception_context_offsets.inc.d
 	rm -rf $(LINUX_USER_BUILD_DIR)
 	find $(LINUX_USER_DIR) -type f \( -name '*.o' -o -name '*.exe' \) -delete 2>/dev/null || true
+
+# Test-only transport overlay: production token transitions remain unchanged.
+KERNEL_DMA_SRCS := kernel/platform/qemu/uart.tkb kernel/platform/rpi5/pcie.tkb kernel/platform/rpi5/usb_xhci.tkb kernel/platform/qemu/mmu_layout.tkb kernel/boot/fdt.tkb kernel/platform/qemu/memory.tkb kernel/drivers/net/virtio_net.tkb kernel/drivers/block/virtio_blk.tkb kernel/platform/qemu/init.tkb
+KERNEL_DMA_FLAGS := --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --frame-pointers --forbid-trap --regions --reject-unused-functions --external-entry main --check-unused-file kernel/tests/qemu/dma/virtio_blk_fixture.tkb
+KERNEL_DMA_ELF := $(KERNEL_QEMU_BUILD_DIR)/kernel-dma-fixture-positive.elf
+.PHONY: _kernelbuild-dma-qemu kernelbuild-dma-qemu kernelcheck-dma-qemu
+# Positive has no planted mutation; the four named controls change one real
+# ownership/state branch each. They are available on demand, outside allbuild.
+$(KERNEL_QEMU_BUILD_DIR)/dma-fixture-%.o: $(KERNEL_QEMU_MAIN_O) scripts/build_qemu_dma_fixture.py kernel/tests/qemu/dma/virtio_blk_fixture.tkb Makefile
+	python3 scripts/build_qemu_dma_fixture.py . _build/qemu-dma-fixture-$* $(if $(filter positive,$*),,$*)
+	cd _build/qemu-dma-fixture-$* && $(abspath $(TAKIBI)) $(KERNEL_DMA_SRCS) $(KERNEL_DMA_FLAGS) --emit-depfile $(abspath $@).d --emit-raw-deref-audit $(abspath $@).rawderef.tsv -o $(abspath $@)
+	python3 scripts/buildcheck_kernel_unused_coverage.py qemu $@.d
+	python3 scripts/measure_trusted_base.py --check-raw-deref qemu $@.rawderef.tsv $@.d
+$(KERNEL_QEMU_BUILD_DIR)/kernel-dma-fixture-%.elf: $(KERNEL_QEMU_BUILD_DIR)/dma-fixture-%.o $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_LINK_LD)
+	$(LLD) -T $(KERNEL_QEMU_LINK_LD) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $< -o $@
+_kernelbuild-dma-qemu: $(KERNEL_DMA_ELF)
+kernelbuild-dma-qemu: build
+	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) _kernelbuild-dma-qemu
+kernelcheck-dma-qemu: kernelbuild-dma-qemu
+	@bash scripts/run_lane.sh $@ python3 scripts/run_kernel_dma_qemutest.py $(KERNEL_DMA_ELF)

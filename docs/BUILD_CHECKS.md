@@ -33,6 +33,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_agents_paths.py` | paths named by root guidance resolve and this table names every check |
 | `check_ash_bin_inventory.py` | ash's expected /bin listing matches every image-recipe entry in order |
 | `check_ash_bin_inventory_controls.py` | Controls for additions, omissions, and unrecognized /bin image commands |
+| `check_dma_qemu_transcript_controls.py` | The DMA QEMU runner waits for the complete diagnostic under every serial byte split; partial success/failure markers never terminate capture |
 | `check_preflight_kernel_file_controls.py` | `scripts/preflight_kernel_file.py`, the on-demand list of every registry a new, moved or renamed kernel file, assembly file or lane runner must join, names each missing or stale row for planted files and reports an unchanged file clean |
 | `check_found_by_policy_controls.py` | Controls for the `Found-by:` and `Protocol:` trailers an issue-closing commit must carry |
 | `check_capture_kernel_console_controls.py` | A GDB error with exit zero, nonzero exit, timeout and absent sidecars remain unavailable; success needs reader completion and every attempt restores the prior run state |

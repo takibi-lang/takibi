@@ -1,0 +1,122 @@
+// Single-core test-only MMIO and completion source for the maintained driver.
+// Compiled only by build_qemu_dma_fixture.py; IRQs remain masked and no peer
+// is booted. The driver owns all token transitions and timeout/reset logic.
+let mut dma_fixture_registers: [i32; 128];
+let mut dma_fixture_mode: usize;
+let mut dma_fixture_submissions: usize;
+let mut dma_fixture_buffer: [u8; 1024];
+
+fn dma_fixture_print(text: *u8) {
+    uart_puts(text);
+}
+fn dma_fixture_require(ok: bool, reason: *u8) {
+    if (ok == false) {
+        dma_fixture_print("FAIL dma: ");
+        dma_fixture_print(reason);
+        dma_fixture_print("\n");
+        while (true) {}
+    }
+}
+
+// This simulates the device side only, including status publication before
+// used.idx. It never mints, finishes, or exchanges DMA authority.
+fn dma_fixture_notify() !{unsafe} {
+    dma_fixture_submissions = dma_fixture_submissions + 1;
+    if (dma_fixture_mode == 0 || dma_fixture_mode == 3) {
+        let queue: *u8 = virtio_blk_queue as *u8;
+        let descs: *VirtioBlkDesc = queue as *VirtioBlkDesc;
+        let status: *io u8 = unsafe { descs[2].addr as *io u8 };
+        if (dma_fixture_mode == 0) { *status = 1; }
+        else { *status = 0; }
+        let used: *io VirtioBlkUsed = unsafe {
+            (queue + (VIRTIO_BLK_PAGE_SIZE as isize)) as *io VirtioBlkUsed };
+        used.idx = virtio_ring_index_next(used.idx);
+    }
+}
+
+fn dma_fixture_authority(cpu_expected: bool) {
+    let mut receive_cpu: bool = false;
+    match virtio_blk_receive_take() {
+        VirtioBlkReceiveAuthority::Cpu(cpu) => {
+            receive_cpu = true;
+            virtio_blk_receive_put(VirtioBlkReceiveAuthority::Cpu(cpu));
+        }
+        VirtioBlkReceiveAuthority::Device(device) => {
+            virtio_blk_receive_put(VirtioBlkReceiveAuthority::Device(device));
+        }
+        VirtioBlkReceiveAuthority::Empty => {
+            dma_fixture_require(false, "receive authority empty");
+        }
+    }
+    dma_fixture_require(receive_cpu == cpu_expected, "receive authority");
+    let mut request_cpu: bool = false;
+    match virtio_blk_request_take() {
+        VirtioBlkRequestTransmitAuthority::Cpu(cpu) => {
+            request_cpu = true;
+            virtio_blk_request_put(VirtioBlkRequestTransmitAuthority::Cpu(cpu));
+        }
+        VirtioBlkRequestTransmitAuthority::Device(device) => {
+            virtio_blk_request_put(VirtioBlkRequestTransmitAuthority::Device(device));
+        }
+        VirtioBlkRequestTransmitAuthority::Empty => {
+            dma_fixture_require(false, "request authority empty");
+        }
+    }
+    dma_fixture_require(request_cpu == cpu_expected, "request authority");
+    let mut data_cpu: bool = false;
+    match virtio_blk_data_take() {
+        VirtioBlkDataTransmitAuthority::Cpu(cpu) => {
+            data_cpu = true;
+            virtio_blk_data_put(VirtioBlkDataTransmitAuthority::Cpu(cpu));
+        }
+        VirtioBlkDataTransmitAuthority::Device(device) => {
+            virtio_blk_data_put(VirtioBlkDataTransmitAuthority::Device(device));
+        }
+        VirtioBlkDataTransmitAuthority::Empty => {
+            dma_fixture_require(false, "data authority empty");
+        }
+    }
+    dma_fixture_require(data_cpu == cpu_expected, "data authority");
+}
+
+fn dma_fixture_run() !{unsafe} {
+    disable_irq();
+    uart_init();
+    kernel_log_init();
+    virtio_blk_base = 1;
+    dma_fixture_mode = 0;
+    dma_fixture_require(virtio_blk_write_block(0, dma_fixture_buffer[0..<1024]) == false,
+                        "completed error accepted");
+    dma_fixture_authority(true);
+    dma_fixture_require(virtio_blk_completion_count() == 1 &&
+                        virtio_blk_timeout_count() == 0, "error completion evidence");
+    dma_fixture_print("PASS dma: completed error returns all CPU authority\n");
+
+    dma_fixture_mode = 1;
+    dma_fixture_require(virtio_blk_write_block(0, dma_fixture_buffer[0..<1024]) == false,
+                        "timeout accepted");
+    dma_fixture_authority(true);
+    dma_fixture_require(virtio_blk_ready == false && virtio_blk_disabled == false &&
+                        virtio_blk_timeout_count() == 1, "confirmed reset state");
+    dma_fixture_mode = 3;
+    dma_fixture_require(virtio_blk_write_block(0, dma_fixture_buffer[0..<1024]), "reset reuse");
+    dma_fixture_authority(true);
+    dma_fixture_require(virtio_blk_completion_count() == 2, "reuse completion");
+    dma_fixture_print("PASS dma: timeout and confirmed reset permit reuse\n");
+
+    dma_fixture_mode = 2;
+    dma_fixture_require(virtio_blk_write_block(0, dma_fixture_buffer[0..<1024]) == false,
+                        "failed reset accepted");
+    dma_fixture_authority(false);
+    dma_fixture_require(virtio_blk_disabled && virtio_blk_ready == false &&
+                        virtio_blk_timeout_count() == 2, "failed reset state");
+    let submitted: usize = dma_fixture_submissions;
+    dma_fixture_require(virtio_blk_write_block(0, dma_fixture_buffer[0..<1024]) == false,
+                        "disabled driver reused");
+    dma_fixture_require(dma_fixture_submissions == submitted,
+                        "disabled driver submitted");
+    dma_fixture_authority(false);
+    dma_fixture_print("PASS dma: failed reset retains all Device authority and refuses reuse\n");
+    dma_fixture_print("PASS dma: fixture complete\n");
+    while (true) {}
+}

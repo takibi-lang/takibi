@@ -2,9 +2,10 @@
   "date": "2026-10-09",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "cb7fedc3e44ec6445e88d8b863f2be7b65434472d9f8b64295777395d59ea7b6",
-  "workload": "Signal-frame refusal and restoration plus mmap reuse and brk collision through a standalone EL0 fixture, integrated with the generic-variant compiler. Both linked production kernels and fixed-size ext2 occupancy measured against b462faa1 (and initially fc096879).",
+  "source_sha256": "24206d687882ad559afc847f66988aded094589d0f2010a13348b812f823945f",
+  "workload": "Dedicated QEMU virtio-blk branch fixture: completed error, timeout with confirmed reset and reuse, timeout with failed reset and refusal; all three authority slots checked. Both production kernels measured against 784d5709; the production storage/allocation workload is unchanged.",
   "evidence": [
+    "docs/DMA_BRANCH_FIXTURE_2026-10-09.md",
     "docs/SIGNAL_BOUNDARY_SPACE_2026-10-09.md",
     "docs/GEM_RX_FIXED_SPACE_2026-10-09.md",
     "docs/CHURN_DIAGNOSTICS_SPACE_2026-10-09.md",
@@ -31,6 +32,6 @@
     "docs/DMA_MINT_FILES_2026-10-08.md",
     "docs/DMA_TRANSMIT_2026-10-08.md"
   ],
-  "assessment": "Linked QEMU/RPi5 text, data, BSS, symbol sizes and usable_ram_start unchanged. The existing ext2 image consumes six additional 1024-byte blocks and one inode; the standalone ELF is 5512 bytes. Adopted; no pool or reservation growth.",
-  "next_trigger": "Measure when production diagnostics gain storage, a new allocation workload appears, or the next kernel feature or roadmap stage completes."
+  "assessment": "Zero production text/data/BSS/reservation delta and no changed data/BSS symbol sizes on either platform. The isolated test image adds 2080 text, 32 data and 1568 BSS bytes only. Simulated device observations are deterministic branch evidence, not physical cache or real reset evidence.",
+  "next_trigger": "A production DMA allocation/layout change or completion of the next driver lifecycle milestone."
 }

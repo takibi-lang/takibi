@@ -1953,3 +1953,21 @@ A separate overlay suppresses secondary probe entries while leaving real
 timer interrupts enabled; seventeen public probes must refuse the missing
 participant (including the existing world-stop non-ACK control), retaining their existing entry diagnoses. These controls are
 forced schedules, not physical cache-coherence or natural host-load evidence.
+
+The isolated DMA branch fixture runs with `make kernelcheck-dma-qemu` and is
+also part of the QEMU aggregate. Its dedicated one-core kernel keeps IRQs
+masked, starts no peers, and substitutes device-side virtio-blk MMIO and
+completion responses. It calls the maintained driver, checks receive,
+request-header and write-data authority after completed error and both reset
+outcomes, successfully reuses a confirmed-reset queue, and refuses another
+submission after failed reset. Production boot sources contain no test hook.
+This is branch evidence against simulated device observations, not evidence
+for physical cache coherence or the real device's reset guarantee.
+
+The build-only aggregate links this fixture too. On-demand negative controls
+are `kernel/build/qemu/kernel-dma-fixture-{error,reset,failed,disabled}.elf`;
+run each through `python3 scripts/run_kernel_dma_qemutest.py ELF`. They must
+exit nonzero and report, respectively, `request authority`, `data authority`,
+`receive authority`, and `disabled driver reused`. Each changes an actual
+maintained branch in the generated overlay. Captures go to
+`$TAKIBI_LANE_ARTIFACT_ROOT/dma-qemu/uart.log` (default `_build/dma-qemu/`).

@@ -90,6 +90,9 @@ EXEMPT = {
     "drivers/net/rp1_gem_dma.tkb":
         "the RX allocation's owner slot, exchanged under its own Mutex, and "
         "its mint function, reached only from rp1_gem.tkb (GitHub issue #622)",
+    "tests/qemu/dma/virtio_blk_fixture.tkb":
+        "test-only entry boots no peers and keeps IRQs masked; independent of "
+        "the production scheduler execution model",
     "drivers/block/virtio_blk.tkb":
         "device state; every command is issued under memory.tkb's "
         "block_device_lock (GitHub issue #533)",
