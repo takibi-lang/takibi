@@ -2,8 +2,8 @@
   "date": "2026-10-09",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "387a2c61a2491eaa73c5b1015dcda2bc5e3d402512f15aa4f02300b65b74fbb4",
-  "workload": "Signal-frame refusal and restoration plus mmap reuse and brk collision through a standalone EL0 fixture. Both linked production kernels and fixed-size ext2 image occupancy measured against fc096879.",
+  "source_sha256": "cb7fedc3e44ec6445e88d8b863f2be7b65434472d9f8b64295777395d59ea7b6",
+  "workload": "Signal-frame refusal and restoration plus mmap reuse and brk collision through a standalone EL0 fixture, integrated with the generic-variant compiler. Both linked production kernels and fixed-size ext2 occupancy measured against b462faa1 (and initially fc096879).",
   "evidence": [
     "docs/SIGNAL_BOUNDARY_SPACE_2026-10-09.md",
     "docs/GEM_RX_FIXED_SPACE_2026-10-09.md",

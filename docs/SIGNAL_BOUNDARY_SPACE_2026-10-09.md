@@ -30,3 +30,8 @@ kernel page boundary grew, and no storage optimization is warranted. Measure
 again when a production allocation workload changes, diagnostics gain storage,
 or the next kernel feature or roadmap stage completes. This measurement does
 not substitute for a physical-board integration verdict.
+
+The measurement was repeated after rebasing onto b462faa1, including the
+new generic-variant compiler support. The integrated working tree and that
+fresh baseline have the same linked-size table and symbol-size verdict above.
+The fixture ELF and ext2 occupancy are unchanged.
