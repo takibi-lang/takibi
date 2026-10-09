@@ -120,7 +120,15 @@ let rec resolve_expr names expr =
     | FieldGet (e, field) -> FieldGet (ex e, field)
     | StructLit fields -> StructLit (List.map ex fields)
     | TupleLit fields -> TupleLit (List.map ex fields)
-    | Index (name, index) -> Index (name, ex index)
+    | Index (({ desc = Var global; _ } as base), ({ desc = Var _; _ } as index))
+      when Hashtbl.mem Per_cpu_registry.globals global
+           && Per_cpu_registry.authority_field () <> None ->
+        (* GitHub issue #704: `g[a]` on a per-CPU store reads the
+           authority's private index; the checker verifies `a`. *)
+        let field = Option.get (Per_cpu_registry.authority_field ()) in
+        Per_cpu_registry.mark_rewritten index.loc global;
+        Index (base, { index with desc = FieldGet (index, field) })
+    | Index (base, index) -> Index (ex base, ex index)
     | SliceOf (name, lo, hi) -> SliceOf (name, ex lo, ex hi)
     | Unsafe e -> Unsafe (ex e)
     | SizeOf t -> SizeOf (ty t)
@@ -245,6 +253,12 @@ let resolve_toplevel names = function
 
 let run prog =
   let names = collect_names prog in
+  Hashtbl.reset Per_cpu_registry.globals;
+  List.iter (function
+    | LetDef (name, Some (TypeArray (TypeNamed store, _)), _, _, _, _, _)
+      when Per_cpu_registry.is_store store ->
+        Hashtbl.replace Per_cpu_registry.globals name store
+    | _ -> ()) prog;
   List.map (resolve_toplevel names) prog
 
 let validate prog =

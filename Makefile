@@ -360,6 +360,7 @@ KERNEL_UNUSED_CHECKED := \
 	kernel/init/test_driver.tkb \
 	kernel/kernel/asid_contention_evidence.tkb \
 	kernel/kernel/ext2_mutation_contention_evidence.tkb \
+	kernel/kernel/cpu_authority.tkb \
 	kernel/kernel/fd_table.tkb \
 	kernel/kernel/irq_counts.tkb \
 	kernel/kernel/freelist_contention_evidence.tkb \

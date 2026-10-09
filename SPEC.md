@@ -1651,6 +1651,56 @@ stale-index-after-reassignment, local-array, and struct-nested-array
 negatives) -- `examples/el0_shell/el0_shell.tkb`'s own per-page
 copy-on-write fd/page table is the first real consumer.
 
+## Per-CPU Storage (GitHub issue #704)
+
+A handoff that belongs to one CPU is stored per CPU, and the compiler checks
+that each CPU reaches only its own element. Two struct modifiers declare it:
+
+```takibi
+struct cpu_authority CpuHere {
+    private id: {0..<KERNEL_MAX_CORES as usize};
+}
+
+struct per_cpu ExecArgsStore {
+    private mutex: Mutex;
+    private value: Place(exists page: usize. PageOwner[page]);
+}
+
+private let mut exec_args_store: [ExecArgsStore; KERNEL_MAX_CORES];
+
+fn exec_args_take(cpu: CpuHere) -> Place(exists page: usize. PageOwner[page]) {
+    let guard = exec_args_lock(&exec_args_store[cpu].mutex);
+    ...
+}
+```
+
+- A program has at most one `cpu_authority` struct. It has exactly one field,
+  private, of type `{0..<N as usize}`; N is the number of CPUs. Because the
+  field is private, only the declaring file constructs one: that file is the
+  mint, and it is trusted to hand out the CPU it is running on.
+- A `per_cpu` struct type appears in exactly one form, a global
+  `private let mut g: [S; N];` with the authority's N and no initializer. A
+  singleton global, a different length, a struct field, a variant payload,
+  or a function parameter or return of that type (including a pointer to it)
+  is rejected, so no shared slot can stand in for the per-CPU one and no
+  element can be carried away from its index.
+- An element is reached only as `g[a]`, where `a` is a bare variable holding
+  the authority. A constant, an integer of the right range, or any other
+  expression is rejected. `g[a]` reads the authority's private index; the
+  place rules then apply to `g[a].field` as to any container.
+- The authority is never stored: a global, a struct field, a variant payload
+  or a place cannot hold one. It lives in locals, parameters and returns
+  only, so it ends with the kernel action that minted it.
+
+Staying on one CPU for that action is the kernel's non-preemption
+assumption (`KERNEL_PREEMPTIBLE == 0`), which the mint file asserts; it is
+not itself checked. Processes switch only after an action returns to
+assembly, so no Takibi call can migrate while an authority is live. A
+preemptible kernel would have to end an authority at every preemption
+point. Reading another CPU's element (a debugger walking every CPU's
+diagnostics) is not expressible; such diagnostic arrays stay ordinary
+arrays.
+
 ## Scoped Mutable Owner Borrows (Takibi Core Slice 4)
 
 `borrow mut` exposes the caller's indexed runtime-owner place for one direct

@@ -15,6 +15,7 @@ use "kernel/kernel/syscall_test_lifecycle.tkb";
 use "kernel/kernel/syscall_unimplemented.tkb";
 use "kernel/kernel/workload_evidence.tkb";
 use "kernel/lib/execution_model.tkb";
+use "kernel/kernel/cpu_authority.tkb";
 use "kernel/lib/occupancy.tkb";
 
 // Current limitations (2026-08-26). Keep this list current as
@@ -398,10 +399,11 @@ fn kernel_syscall_exec_argc() -> usize {
 // the return to user_entry.S's child-exec branch in this stable owner slot:
 // execve puts it, kernel_process_child_exec_prepare takes it, and a slot
 // found full or empty is an invariant break, not a shortage. Execve runs on
-// every active CPU, so each CPU owns a separate slot. Reserve and prepare
-// stay on that CPU in one non-preemptible EL1 action; the page is taken
-// before returning to EL0. This depends on KERNEL_PREEMPTIBLE == 0.
-struct ExecArgsStore {
+// every active CPU, so each CPU owns a separate slot: a per-CPU store
+// (#704), reached only as exec_args_store[cpu] with the CPU authority that
+// cpu_authority.tkb mints. Reserve and prepare stay on that CPU in one
+// non-preemptible EL1 action; the page is taken before returning to EL0.
+struct per_cpu ExecArgsStore {
     private mutex: Mutex;
     private value: Place(exists page: usize. PageOwner[page]);
 }
@@ -423,12 +425,11 @@ private fn exec_args_unlock(guard: sink ExecArgsGuard[address],
     mutex_release(lock, guard.flags);
 }
 
-private fn exec_args_put(core: {0..<KERNEL_MAX_CORES as usize},
-                         page: sink PageOwner[p]) {
-    let guard = exec_args_lock(&exec_args_store[core].mutex);
+private fn exec_args_put(cpu: CpuHere, page: sink PageOwner[p]) {
+    let guard = exec_args_lock(&exec_args_store[cpu].mutex);
     let previous: Place(exists page: usize. PageOwner[page]) = place_put(
-        guard, &exec_args_store[core].mutex, exec_args_store[core].value, page);
-    exec_args_unlock(guard, &exec_args_store[core].mutex);
+        guard, &exec_args_store[cpu].mutex, exec_args_store[cpu].value, page);
+    exec_args_unlock(guard, &exec_args_store[cpu].mutex);
     match previous {
         Place::Empty => {}
         Place::Full(stale) => {
@@ -446,47 +447,25 @@ must_use variant ExecArgsReserve { OutOfMemory; Reserved; }
 
 private fn kernel_syscall_exec_args_reserve(allocated: sink PageAllocResult)
         -> ExecArgsReserve {
-    let core: usize = cpu_id();
-    if (core < KERNEL_MAX_CORES) {
-        return kernel_syscall_exec_args_reserve_for(core, allocated);
-    }
-    // An inactive CPU must not dispatch a syscall. Keep ownership explicit
-    // even on that invariant failure path.
-    match allocated {
-        PageAllocResult::OutOfMemory => {}
-        PageAllocResult::Allocated(page) => { page_free(page); }
-    }
-    kernel_invariant_stop();
-    return ExecArgsReserve::OutOfMemory;
-}
-
-private fn kernel_syscall_exec_args_reserve_for(
-        core: {0..<KERNEL_MAX_CORES as usize}, allocated: sink PageAllocResult)
-        -> ExecArgsReserve {
     match allocated {
         PageAllocResult::OutOfMemory => { return ExecArgsReserve::OutOfMemory; }
         PageAllocResult::Allocated(args_page) => {
-            exec_args_put(core, args_page);
+            exec_args_put(cpu_here(), args_page);
             return ExecArgsReserve::Reserved;
         }
     }
 }
 
 fn kernel_syscall_exec_args_take() -> Place(exists page: usize. PageOwner[page]) {
-    let core: usize = cpu_id();
-    if (core < KERNEL_MAX_CORES) {
-        return kernel_syscall_exec_args_take_for(core);
-    }
-    kernel_invariant_stop();
-    return Place::Empty;
+    return kernel_syscall_exec_args_take_for(cpu_here());
 }
 
-private fn kernel_syscall_exec_args_take_for(
-        core: {0..<KERNEL_MAX_CORES as usize}) -> Place(exists page: usize. PageOwner[page]) {
-    let guard = exec_args_lock(&exec_args_store[core].mutex);
+private fn kernel_syscall_exec_args_take_for(cpu: CpuHere)
+        -> Place(exists page: usize. PageOwner[page]) {
+    let guard = exec_args_lock(&exec_args_store[cpu].mutex);
     let taken: Place(exists page: usize. PageOwner[page]) = place_take(
-        guard, &exec_args_store[core].mutex, exec_args_store[core].value);
-    exec_args_unlock(guard, &exec_args_store[core].mutex);
+        guard, &exec_args_store[cpu].mutex, exec_args_store[cpu].value);
+    exec_args_unlock(guard, &exec_args_store[cpu].mutex);
     return taken;
 }
 
@@ -504,12 +483,12 @@ private fn kernel_syscall_exec_args_overlap_probe() -> bool !{unsafe} {
                 expected[core] = page_physical_address(page);
                 let bytes: [u8; PAGE_SIZE..] = page_bytes(page);
                 bytes[0] = core as u8;
-                exec_args_put(core, page);
+                exec_args_put(cpu_here_for_boot_probe(core), page);
             }
         }
     }
     for core: usize in 0..<KERNEL_MAX_CORES {
-        match kernel_syscall_exec_args_take_for(core) {
+        match kernel_syscall_exec_args_take_for(cpu_here_for_boot_probe(core)) {
             Place::Empty => { ok = false; }
             Place::Full(page) => {
                 let bytes: [u8; PAGE_SIZE..] = page_bytes(page);
@@ -518,7 +497,7 @@ private fn kernel_syscall_exec_args_overlap_probe() -> bool !{unsafe} {
                 page_free(page);
             }
         }
-        match kernel_syscall_exec_args_take_for(core) {
+        match kernel_syscall_exec_args_take_for(cpu_here_for_boot_probe(core)) {
             Place::Empty => {}
             Place::Full(stray) => { page_free(stray); ok = false; }
         }

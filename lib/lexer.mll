@@ -42,6 +42,8 @@ let hard_keyword_token = function
   | "publish" -> PUBLISH
   | "no_copy" -> NO_COPY
   | "dma_fixed" -> DMA_FIXED
+  | "per_cpu" -> PER_CPU
+  | "cpu_authority" -> CPU_AUTHORITY
   | "io" -> IO | "enum" -> ENUM | "match" -> MATCH | "align" -> ALIGN
   | "multiple" -> MULTIPLE
   | "sizeof" -> SIZEOF | "alignof" -> ALIGNOF

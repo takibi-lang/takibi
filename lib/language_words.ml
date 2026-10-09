@@ -10,7 +10,7 @@ let hard_keywords = [
   "void"; "extern"; "symbol"; "vector_table"; "exception_entry";
   "exception_restore"; "embed_file"; "struct"; "opaque"; "affine";
   "linear"; "view"; "variant"; "must_use"; "exists"; "borrow";
-  "sink"; "private"; "packed"; "be"; "publish"; "no_copy"; "dma_fixed"; "io"; "enum"; "match";
+  "sink"; "private"; "packed"; "be"; "publish"; "no_copy"; "dma_fixed"; "per_cpu"; "cpu_authority"; "io"; "enum"; "match";
   "align"; "multiple"; "sizeof"; "alignof"; "contains_stable_owner"; "use";
   "offsetof"; "static_assert"; "type"; "generic"; "bool"; "unsafe";
   "true"; "false"; "i8"; "i16"; "i32"; "i64"; "u8"; "u16";

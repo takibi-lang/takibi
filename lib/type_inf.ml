@@ -2086,6 +2086,8 @@ let check_private_type_construction (loc : Ast.loc) (target : Ast.type_expr) =
 
 let check_private_field_access (loc : Ast.loc) (sname : string) (fname : string) =
   match Hashtbl.find_opt private_struct_fields (sname, fname) with
+  | Some _ when Per_cpu_registry.rewritten_global loc <> None
+                && Per_cpu_registry.authority_name () = Some sname -> ()
   | Some file when file <> Ast.source_file_of_loc loc ->
       raise (TypeError (loc, Printf.sprintf
         "field '%s.%s' is private to '%s'; go through that file's accessor \
@@ -3560,8 +3562,28 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                 tgt))))
 
   | FieldGet (base_expr, fname) ->
+      (match Per_cpu_registry.rewritten_global e.loc,
+             Per_cpu_registry.authority_name () with
+       | Some global, Some authority ->
+           (* GitHub issue #704: the index of `global[a]`. *)
+           (match repr (infer_expr senv eenv tyenv fenv base_expr) with
+            | TStruct name when name = authority -> ()
+            | t -> raise (TypeError (e.loc, Printf.sprintf
+                "per-CPU store '%s' is indexed only by a %s value, the \
+                 current CPU's authority; this index is %s"
+                global authority (Types.to_string t))))
+       | _ -> ());
       infer_field_access ~decay:true senv eenv tyenv fenv e.loc base_expr fname
 
+  | Index ({ desc = Var global; _ }, idx)
+    when Hashtbl.mem Per_cpu_registry.globals global
+         && Per_cpu_registry.rewritten_global idx.loc = None ->
+      raise (TypeError (idx.loc, Printf.sprintf
+        "per-CPU store '%s' is indexed only by a %s value, the current \
+         CPU's authority, written as a bare variable: `%s[cpu]`"
+        global
+        (Option.value (Per_cpu_registry.authority_name ()) ~default:"cpu_authority")
+        global))
   | Index (base, idx) ->
       (* GitHub issue #217: base's un-decayed declared type, recovered by
          direct lookup/struct-field-table walk (place_undecayed_type)
@@ -7069,10 +7091,111 @@ let infer_func senv eenv fenv genv (fdef : Ast.func) : func_info =
 
 (* -- Whole-program inference ----------------------------------------------- *)
 
+(* GitHub issue #704: the declarations of per-CPU storage. See
+   Per_cpu_registry. The authority is `struct cpu_authority A { private f:
+   {0..<N as usize}; }`; a per-CPU store type S appears only as `private let
+   mut g: [S; N];` with that N, so no singleton or wider store can stand in
+   for it and no pointer or parameter can carry an element elsewhere; the
+   authority is never stored, so it cannot outlive the action that minted
+   it on its CPU. *)
+let validate_per_cpu (prog : Ast.toplevel list) =
+  let stores = Hashtbl.fold (fun name () acc -> name :: acc)
+      Per_cpu_registry.stores [] in
+  let fail loc msg = raise (TypeError (loc, msg)) in
+  let rec mentions names (t : Ast.type_expr) =
+    match t with
+    | Ast.TypeNamed s | Ast.TypeIndexed (s, _) | Ast.TypeView (s, _) ->
+        List.mem s names
+    | Ast.TypePtr t | Ast.TypeAlignedPtr (_, t) | Ast.TypeIo t | Ast.TypeRef t
+    | Ast.TypeRefMut t | Ast.TypeBorrow t | Ast.TypeBorrowMut t | Ast.TypeSink t
+    | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _, _) | Ast.TypeExists (_, _, t)
+    | Ast.TypeSingleton (t, _) | Ast.TypeRefined (_, _, t)
+    | Ast.TypeMultiple (_, t) | Ast.TypeArraySym (t, _)
+    | Ast.TypeSliceSym (t, _) -> mentions names t
+    | Ast.TypeTuple ts | Ast.TypeGenericInst (_, ts) | Ast.TypeVariant (_, _, ts) ->
+        List.exists (mentions names) ts
+    | Ast.TypeFn (args, ret, _) ->
+        List.exists (mentions names) args || mentions names ret
+    | _ -> false
+  in
+  let authority = Per_cpu_registry.authority_name () in
+  let bound = match !Per_cpu_registry.authority with
+    | None -> None
+    | Some (name, fields) ->
+        let private_fields = List.fold_left (fun acc -> function
+          | Ast.StructDef (n, _, _, _, private_fields, _) when n = name ->
+              private_fields
+          | _ -> acc) [] prog in
+        (match fields with
+         | [(field, Ast.TypeRefined (0, n, Ast.TypeUsize))]
+           when List.mem field private_fields -> Some n
+         | _ -> fail Lexing.dummy_pos (Printf.sprintf
+             "cpu_authority struct '%s' must have exactly one private field \
+              of type {0..<N as usize}, N the number of CPUs" name))
+  in
+  if stores <> [] && bound = None then
+    fail Lexing.dummy_pos (Printf.sprintf
+      "per_cpu struct '%s' needs a cpu_authority struct to index it"
+      (List.hd stores));
+  let authority_names = Option.to_list authority in
+  let n = Option.value bound ~default:0 in
+  List.iter (function
+    | Ast.LetDef (name, Some ty, init, _, is_mutable, is_private, loc) ->
+        if mentions authority_names ty then
+          fail loc (Printf.sprintf
+            "global '%s' cannot hold the CPU authority: it is valid only in \
+             the action that minted it on its CPU" name);
+        if mentions stores ty then
+          (match ty with
+           | Ast.TypeArray (Ast.TypeNamed _, len)
+             when len = n && is_mutable && is_private && init = None -> ()
+           | _ -> fail loc (Printf.sprintf
+               "per-CPU store global '%s' must be declared `private let mut \
+                %s: [Store; %d];`, one element per CPU" name name n))
+    | Ast.StructDef (sname, fields, _, _, _, loc) ->
+        List.iter (fun (fname, ty) ->
+          if mentions authority_names ty then
+            fail loc (Printf.sprintf
+              "struct field '%s.%s' cannot hold the CPU authority" sname fname);
+          if mentions stores ty then
+            fail loc (Printf.sprintf
+              "struct field '%s.%s' cannot hold per-CPU storage" sname fname))
+          (if Some sname = authority then [] else fields)
+    | Ast.OwnedStructDef (sname, _, _, fields, _, _, _, _, loc) ->
+        List.iter (fun (fname, ty) ->
+          if mentions (authority_names @ stores) ty then
+            fail loc (Printf.sprintf
+              "struct field '%s.%s' cannot hold the CPU authority or per-CPU storage"
+              sname fname)) fields
+    | Ast.VariantDef (vname, _, cases, _, loc)
+    | Ast.GenericVariantDef (vname, _, _, cases, _, loc) ->
+        List.iter (fun (_, payload) -> match payload with
+          | Some ty when mentions (authority_names @ stores) ty ->
+              fail loc (Printf.sprintf
+                "variant '%s' cannot carry the CPU authority or per-CPU storage"
+                vname)
+          | _ -> ()) cases
+    | Ast.FuncDef f ->
+        let types = List.filter_map snd f.params @ Option.to_list f.ret_type in
+        List.iter (fun ty ->
+          if mentions stores ty then
+            fail f.def_loc (Printf.sprintf
+              "function '%s' cannot take or return per-CPU storage; reach an \
+               element as `store[cpu]` with the CPU authority" f.name);
+          (match ty with
+           | Ast.TypeGenericInst (_, args) | Ast.TypeVariant (_, _, args)
+             when List.exists (mentions authority_names) args ->
+               fail f.def_loc (Printf.sprintf
+                 "function '%s' cannot pass the CPU authority inside a variant"
+                 f.name)
+           | _ -> ())) types
+    | _ -> ()) prog
+
 let infer_program (prog : Ast.toplevel list) : program_types =
   (* The declared-type phase is a required boundary: silently repairing an
      unresolved AST here would hide a caller that bypassed it. *)
   Declared_type_resolver.validate prog;
+  validate_per_cpu prog;
   unsafe_depth := 0;  (* see its comment: fresh per compilation / per unit test *)
   collected_type_errors := [];  (* fresh per compilation / per unit test *)
   type_checker_unsafe_use_marker := 0;  (* GitHub issue #328, fresh per compilation / per unit test *)

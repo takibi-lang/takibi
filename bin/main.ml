@@ -225,6 +225,7 @@ let () =
     Type_layout.reset ();
     Publish_registry.reset ();
     No_copy_registry.reset ();
+    Per_cpu_registry.reset ();
     Dma_fixed_registry.reset ();
     Generic_scope.reset ();
     Ast.reset_precedence_errors ();
@@ -266,6 +267,7 @@ let () =
         Type_layout.reset ();
         Publish_registry.reset ();
         No_copy_registry.reset ();
+        Per_cpu_registry.reset ();
         Dma_fixed_registry.reset ();
         Generic_scope.reset ();
         Ast.reset_precedence_errors ();

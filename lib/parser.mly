@@ -256,7 +256,7 @@ let promote_be_field_type = function
 %token <string> IDENT
 %token <string> STRING
 %token <string> BS_STRING
-%token FN INLINE NOINLINE WHERE RETURN CONST LET MUT EXTERN SYMBOL STRUCT OPAQUE AFFINE LINEAR VIEW VARIANT MUST_USE EXISTS BORROW SINK PACKED BE PUBLISH NO_COPY DMA_FIXED IO ENUM MATCH ALIGN MULTIPLE SIZEOF ALIGNOF CONTAINS_STABLE_OWNER OFFSETOF UNSAFE USE PRIVATE VECTOR_TABLE EXCEPTION_ENTRY EXCEPTION_RESTORE EMBED_FILE
+%token FN INLINE NOINLINE WHERE RETURN CONST LET MUT EXTERN SYMBOL STRUCT OPAQUE AFFINE LINEAR VIEW VARIANT MUST_USE EXISTS BORROW SINK PACKED BE PUBLISH NO_COPY DMA_FIXED PER_CPU CPU_AUTHORITY IO ENUM MATCH ALIGN MULTIPLE SIZEOF ALIGNOF CONTAINS_STABLE_OWNER OFFSETOF UNSAFE USE PRIVATE VECTOR_TABLE EXCEPTION_ENTRY EXCEPTION_RESTORE EMBED_FILE
 %token TYPE GENERIC
 %token DARROW COLONCOLON UNDERSCORE BANG
 %token LBRACE RBRACE LPAREN RPAREN LBRACKET RBRACKET COMMA SEMI DOTDOTLT DOTDOT AT
@@ -425,6 +425,7 @@ item:
       Type_layout.finish_struct name fields is_packed align_opt;
       Publish_registry.finish name fields;
       Dma_fixed_registry.finish name fields;
+      Per_cpu_registry.finish name fields;
       StructDef (name, fields, is_packed, align_opt, private_fields, $symbolstartpos) }
   | owned_struct_intro LBRACE struct_fields RBRACE
     { let (name, kind, static_params, is_private) = $1 in
@@ -503,6 +504,14 @@ struct_intro:
   | STRUCT NO_COPY IDENT
     { Type_layout.begin_struct $3;
       No_copy_registry.mark $3;
+      ($3, false, None, false) }
+  | STRUCT PER_CPU IDENT
+    { Type_layout.begin_struct $3;
+      Per_cpu_registry.mark_store $3;
+      ($3, false, None, false) }
+  | STRUCT CPU_AUTHORITY IDENT
+    { Type_layout.begin_struct $3;
+      Per_cpu_registry.mark_authority $3;
       ($3, false, None, false) }
   | STRUCT DMA_FIXED IDENT
     { Type_layout.begin_struct $3;

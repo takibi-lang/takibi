@@ -1,0 +1,47 @@
+// GitHub issue #704: the current CPU's authority, and the one file that
+// mints it. CpuHere's index is private, so a CpuHere exists only as this
+// file hands it out, and the compiler lets a per-CPU store
+// (`struct per_cpu`) be indexed only by one: `store[cpu]`. It is never
+// stored -- not in a global, a field or a place -- so it lives only in the
+// EL1 action that minted it, which runs on one CPU because the kernel is
+// not preemptible (KERNEL_PREEMPTIBLE == 0, static_assert below) and
+// switches processes only after the action returns to assembly.
+//
+// Trusted here, and only here:
+// - cpu_here reads cpu_id() (MPIDR) and is the CPU it says;
+// - cpu_here_for_boot_probe names another CPU's slot, for the boot probe
+//   that holds every CPU's handoff at once; nothing else calls it.
+//
+// Current limitations (2026-10-09):
+// - Staying on one CPU is the non-preemption assumption, not a checked
+//   property: a future preemptible kernel must end a CpuHere's life at
+//   every preemption point (#638).
+// - Nothing checks that cpu_here_for_boot_probe has no other caller; it is
+//   named for review.
+
+use "kernel/lib/execution_model.tkb";
+use "kernel/arch/arm64/kernel/user_entry_extern.tkb";
+
+struct cpu_authority CpuHere {
+    private id: {0..<KERNEL_MAX_CORES as usize};
+}
+
+fn cpu_here() -> CpuHere {
+    static_assert(KERNEL_PREEMPTIBLE == 0,
+                  "a CPU authority is valid for one non-preemptible action");
+    let core: usize = cpu_id();
+    if (core < KERNEL_MAX_CORES) {
+        let id: {0..<KERNEL_MAX_CORES as usize} = core;
+        let mut cpu: CpuHere = { id };
+        return cpu;
+    }
+    // An inactive CPU must not run a kernel action.
+    kernel_invariant_stop();
+    let mut unreachable: CpuHere = { 0 };
+    return unreachable;
+}
+
+fn cpu_here_for_boot_probe(core: {0..<KERNEL_MAX_CORES as usize}) -> CpuHere {
+    let mut cpu: CpuHere = { core };
+    return cpu;
+}

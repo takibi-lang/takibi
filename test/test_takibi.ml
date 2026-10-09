@@ -33,6 +33,7 @@ let parse src =
   Type_layout.reset ();
   Publish_registry.reset ();
   No_copy_registry.reset ();
+  Per_cpu_registry.reset ();
   Dma_fixed_registry.reset ();
   Generic_scope.reset ();
   Ast.reset_precedence_errors ();
@@ -66,6 +67,7 @@ let infer_files files =
   Type_layout.reset ();
   Publish_registry.reset ();
   No_copy_registry.reset ();
+  Per_cpu_registry.reset ();
   Dma_fixed_registry.reset ();
   Generic_scope.reset ();
   Ast.reset_precedence_errors ();
@@ -2397,6 +2399,7 @@ let infer_regions src =
   Type_layout.reset ();
   Publish_registry.reset ();
   No_copy_registry.reset ();
+  Per_cpu_registry.reset ();
   Dma_fixed_registry.reset ();
   Generic_scope.reset ();
   Ast.reset_precedence_errors ();
@@ -2653,6 +2656,35 @@ let async_tx_fixture =
    "
 
 (* Issue #370: a durable cell preserves one concrete global pool brand. *)
+let per_cpu_base = "
+  struct cpu_authority CpuIndex704 { private id: {0..<4 as usize}; }
+  fn cpu_here704(raw: {0..<4 as usize}) -> CpuIndex704 {
+    let mut c: CpuIndex704 = { raw };
+    return c;
+  }
+  linear view SlotGuard704[lock: addr];
+  linear struct Token704[n: usize] { private id: usize @ n; }
+  struct per_cpu Slot704 {
+    private mutex: i32;
+    private value: Place(exists n: usize. Token704[n]);
+  }
+  private let mut slots704: [Slot704; 4];
+  fn slot_lock704(m: *i32 @ lock) -> SlotGuard704[lock] {
+    return view SlotGuard704[lock];
+  }
+  fn slot_unlock704(g: sink SlotGuard704[lock], m: *i32 @ lock) {}
+  fn token_drop704(t: sink Token704[n]) {}
+"
+
+let per_cpu_take index = "
+  fn take704(cpu: CpuIndex704, other: {0..<4 as usize}) {
+    let g = slot_lock704(&slots704[" ^ index ^ "].mutex);
+    let held: Place(exists n: usize. Token704[n]) =
+      place_take(g, &slots704[" ^ index ^ "].mutex, slots704[" ^ index ^ "].value);
+    slot_unlock704(g, &slots704[" ^ index ^ "].mutex);
+    match held { Place::Empty => {} Place::Full(t) => { token_drop704(t); } }
+  }"
+
 let issue370_cell_fixture = {|
   linear struct CellOwner[p: addr] { private value: usize; }
   struct BrandCell[p: addr] {
@@ -9620,6 +9652,39 @@ fn f() -> *usize { return &temp_address_outer().r.a; }");
   (* GitHub issue #131: a place is the one stored linear slot, so a
      linear variant held directly -- even one shaped like a place -- is
      rejected and the diagnostic names Place. *)
+  (* GitHub issue #704: per-CPU storage. Each case is one way a per-CPU
+     handoff could share or cross storage; the positive case is the shape
+     the kernel's exec args slot uses. *)
+  Alcotest.test_case "per-CPU store indexed by the CPU authority" `Quick
+    (expect_ok (per_cpu_base ^ per_cpu_take "cpu"));
+  Alcotest.test_case "per-CPU store rejects a constant index" `Quick
+    (expect_type_error "is indexed only by a CpuIndex704 value"
+       (per_cpu_base ^ per_cpu_take "0"));
+  Alcotest.test_case "per-CPU store rejects an integer index" `Quick
+    (expect_type_error "is indexed only by a CpuIndex704 value"
+       (per_cpu_base ^ per_cpu_take "other"));
+  Alcotest.test_case "per-CPU store type cannot be a singleton global" `Quick
+    (expect_type_error "must be declared `private let mut shared704: [Store; 4];`"
+       (per_cpu_base ^ "private let mut shared704: Slot704;"));
+  Alcotest.test_case "per-CPU store array must have one element per CPU" `Quick
+    (expect_type_error "one element per CPU"
+       (per_cpu_base ^ "private let mut wide704: [Slot704; 8];"));
+  Alcotest.test_case "per-CPU store cannot be reached through a parameter" `Quick
+    (expect_type_error "cannot take or return per-CPU storage"
+       (per_cpu_base ^ "fn alias704(s: *Slot704) {}"));
+  Alcotest.test_case "CPU authority cannot be kept in a global" `Quick
+    (expect_type_error "cannot hold the CPU authority"
+       (per_cpu_base ^ "private let mut saved704: CpuIndex704;"));
+  Alcotest.test_case "CPU authority cannot be kept in a struct field" `Quick
+    (expect_type_error "cannot hold the CPU authority"
+       (per_cpu_base ^ "struct Keep704 { cpu: CpuIndex704; }"));
+  Alcotest.test_case "CPU authority cannot be parked in a place" `Quick
+    (expect_type_error "cannot pass the CPU authority inside a variant"
+       (per_cpu_base ^ "fn park704(p: Place(CpuIndex704)) {}"));
+  Alcotest.test_case "CPU authority needs one private bounded index field" `Quick
+    (expect_type_error "must have exactly one private field"
+       "struct cpu_authority Loose704 { id: usize; }");
+
   (* GitHub issue #131: a place whose payload nests existentials
      (exists p. exists k. ...) opens fully in a match arm, so the payload
      can be put straight back. Found migrating kernel/net/tcp.tkb's links. *)
