@@ -2353,8 +2353,17 @@ fn syscall_read_segment(current_authority: borrow ProcessCurrent[current_process
                            return SyscallIoResult::Errno(LINUX_EFAULT);
                        }
                        UserWriteRangeResult::Ok(range) => {
-                           let copied: bool =
-                               copy_to_user_raw(range, buffered_base, buffered);
+                           match copy_to_user_raw(range, buffered_base, buffered) {
+                               UserWriteResult::Fault => {
+                                   // Nothing was delivered: keep the bytes
+                                   // readable and the offset where it was.
+                                   tcp_connection_frame_unhold(owner, TcpFrameRole::Rx,
+                                                               FrameLink::Some(rx));
+                                   tcp_connection_put(owner);
+                                   return SyscallIoResult::Errno(LINUX_EFAULT);
+                               }
+                               UserWriteResult::Written => {}
+                           }
                        }
                    }
                    tcp_connection_frame_unhold(owner, TcpFrameRole::Rx,
@@ -2456,8 +2465,27 @@ fn syscall_read_segment(current_authority: borrow ProcessCurrent[current_process
                             return SyscallIoResult::Errno(LINUX_EFAULT);
                         }
                         UserWriteRangeResult::Ok(range) => {
-                            let copied: bool =
-                                copy_to_user_raw(range, source_base, amount);
+                            match copy_to_user_raw(range, source_base, amount) {
+                                UserWriteResult::Fault => {
+                                    // Nothing was delivered: the received
+                                    // bytes stay buffered from offset 0 for
+                                    // the next read.
+                                    tcp_connection_frame_unhold(owner, TcpFrameRole::Rx,
+                                                                FrameLink::Some(received_rx));
+                                    tcp_connection_of(owner).socket_buffer_offset = 0;
+                                    match network_capability_put(next) {
+                                        NetworkCapabilityPutResult::Stored => {
+                                            tcp_connection_put(owner);
+                                            return SyscallIoResult::Errno(LINUX_EFAULT);
+                                        }
+                                        NetworkCapabilityPutResult::Conflict => {
+                                            tcp_connection_free(owner);
+                                            return SyscallIoResult::Errno(LINUX_EINVAL);
+                                        }
+                                    }
+                                }
+                                UserWriteResult::Written => {}
+                            }
                         }
                     }
                     tcp_connection_frame_unhold(owner, TcpFrameRole::Rx,
@@ -2506,7 +2534,12 @@ fn syscall_read_segment(current_authority: borrow ProcessCurrent[current_process
                 UserWriteRangeResult::Ok(range) => {
                     let source: *u8 = (syscall_scratch[syscall_scratch_cpu_index()].file_buffer as *u8) +
                         (offset as isize);
-                    copy_to_user_raw(range, source, amount);
+                    match copy_to_user_raw(range, source, amount) {
+                        UserWriteResult::Fault => {
+                            return SyscallIoResult::Errno(LINUX_EFAULT);
+                        }
+                        UserWriteResult::Written => {}
+                    }
                 }
             }
             if (kernel_syscall_file_set_offset(fd, offset + amount) == false) {
@@ -2562,8 +2595,18 @@ fn syscall_read_segment(current_authority: borrow ProcessCurrent[current_process
                             return SyscallIoResult::Errno(LINUX_EFAULT);
                         }
                         UserWriteRangeResult::Ok(range) => {
-                            let copied_chunk: bool = copy_to_user_raw(
-                                range, syscall_scratch[syscall_scratch_cpu_index()].file_buffer as *u8, chunk);
+                            match copy_to_user_raw(
+                                    range, syscall_scratch[syscall_scratch_cpu_index()].file_buffer as *u8, chunk) {
+                                UserWriteResult::Fault => {
+                                    // The file offset has not advanced past
+                                    // this chunk; report the delivered prefix.
+                                    if (copied != 0) {
+                                        return SyscallIoResult::Transferred(copied);
+                                    }
+                                    return SyscallIoResult::Errno(LINUX_EFAULT);
+                                }
+                                UserWriteResult::Written => {}
+                            }
                         }
                     }
                     if (kernel_syscall_file_set_offset(
@@ -2843,11 +2886,14 @@ fn syscall_ppoll_dispatch(current_authority: borrow ProcessCurrent[current_proce
                 let (valid, revents) = syscall_poll_fd_ready(fd);
                 let mut final_revents: usize = revents;
                 if (valid == false) { final_revents = POLLNVAL; }
-                if (user_write_u16(
+                match user_write_u16(
                         array_range,
                         index * sizeof(Pollfd) + offsetof(Pollfd, revents),
-                        final_revents) == false) {
-                    return SyscallAction::Resume(LINUX_EFAULT);
+                        final_revents) {
+                    UserWriteResult::Fault => {
+                        return SyscallAction::Resume(LINUX_EFAULT);
+                    }
+                    UserWriteResult::Written => {}
                 }
                 if (final_revents != 0) { ready_count = ready_count + 1; }
                 if (nfds == 1 && fd == 0 &&
@@ -2935,12 +2981,13 @@ fn syscall_terminal_ioctl(current_authority: borrow ProcessCurrent[current_proce
         match user_range_check_write(kernel_process_current_root(current_authority), address, 8) {
             UserWriteRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
             UserWriteRangeResult::Ok(range) => {
-                if (user_zero_fill(range) == false ||
-                    user_write_u16(range, 0, 24) == false ||
-                    user_write_u16(range, 2, 80) == false) {
-                    return SyscallAction::Resume(LINUX_EFAULT);
+                let mut written = user_zero_fill(range);
+                written = user_write_join(written, user_write_u16(range, 0, 24));
+                written = user_write_join(written, user_write_u16(range, 2, 80));
+                match written {
+                    UserWriteResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
+                    UserWriteResult::Written => { return SyscallAction::Resume(0); }
                 }
-                return SyscallAction::Resume(0);
             }
         }
     }
@@ -2951,9 +2998,12 @@ fn syscall_terminal_ioctl(current_authority: borrow ProcessCurrent[current_proce
             UserWriteRangeResult::Ok(range) => {
                 let guard = process_run_lock();
                 for index: usize in 0..<TERMINAL_TERMIOS_BYTES {
-                    if (user_write_byte(range, index, terminal_settings_byte(index)) == false) {
-                        process_run_unlock(guard);
-                        return SyscallAction::Resume(LINUX_EFAULT);
+                    match user_write_byte(range, index, terminal_settings_byte(index)) {
+                        UserWriteResult::Fault => {
+                            process_run_unlock(guard);
+                            return SyscallAction::Resume(LINUX_EFAULT);
+                        }
+                        UserWriteResult::Written => {}
                     }
                 }
                 process_run_unlock(guard);
@@ -3076,9 +3126,12 @@ fn syscall_read_uart(current_authority: borrow ProcessCurrent[current_process, P
                         UartRxReadResult::EndFile => { reading = false; }
                         UartRxReadResult::Byte(pair) => {
                             let (value, end) = pair;
-                            if (user_write_byte(range, index, value) == false) {
-                                process_run_unlock(guard);
-                                return SyscallIoResult::Errno(LINUX_EFAULT);
+                            match user_write_byte(range, index, value) {
+                                UserWriteResult::Fault => {
+                                    process_run_unlock(guard);
+                                    return SyscallIoResult::Errno(LINUX_EFAULT);
+                                }
+                                UserWriteResult::Written => {}
                             }
                             transferred = transferred + 1;
                             if (end || canonical == false) { reading = false; }
@@ -3233,10 +3286,13 @@ fn kernel_syscall_wait4_deliver(
                 let status: usize =
                     kernel_process_child_exit_status_for(parent_slot,
                                                          reaped_pid);
-                if (user_write_u32(range, 0,
-                        ((status & 0xFF) << 8) as u32) == false) {
-                    el0_context_set_x0(frame, LINUX_EFAULT);
-                    return;
+                match user_write_u32(range, 0,
+                        ((status & 0xFF) << 8) as u32) {
+                    UserWriteResult::Fault => {
+                        el0_context_set_x0(frame, LINUX_EFAULT);
+                        return;
+                    }
+                    UserWriteResult::Written => {}
                 }
             }
         }
@@ -3286,10 +3342,13 @@ private fn syscall_syslog(current_authority: borrow ProcessCurrent[current_proce
                 return SyscallAction::Resume(LINUX_EFAULT);
             }
             UserWriteRangeResult::Ok(range) => {
-                let sent: bool = copy_to_user_raw(
-                    range, syscall_scratch[syscall_scratch_cpu_index()].file_buffer as *u8, chunk);
-                if (sent == false) {
-                    return SyscallAction::Resume(LINUX_EFAULT);
+                match copy_to_user_raw(
+                        range, syscall_scratch[syscall_scratch_cpu_index()].file_buffer as *u8, chunk) {
+                    UserWriteResult::Fault => {
+                        if (copied != 0) { return SyscallAction::Resume(copied); }
+                        return SyscallAction::Resume(LINUX_EFAULT);
+                    }
+                    UserWriteResult::Written => {}
                 }
             }
         }
@@ -4716,44 +4775,46 @@ fn syscall_signal_frame_write(current_authority: borrow ProcessCurrent[current_p
                                  SIGFRAME_SIZE) {
         UserWriteRangeResult::Fault => { return (false, 0); }
         UserWriteRangeResult::Ok(range) => {
-            if (user_zero_fill(range) == false) { return (false, 0); }
-            let mut ok: bool = true;
+            let mut written = user_zero_fill(range);
             // siginfo: si_signo, si_errno, si_code. SIGCHLD says CLD_EXITED
             // without naming the child (wait4 names it); any other signal
             // came from kill, SI_USER, without the sender's pid and uid
             // (GitHub issue #629).
-            ok = ok && user_write_u32(range, 0, signum as u32);
+            written = user_write_join(written, user_write_u32(range, 0, signum as u32));
             match signum {
-                17 => { ok = ok && user_write_u32(range, 8, 1); }
+                17 => { written = user_write_join(written, user_write_u32(range, 8, 1)); }
                 _ => {}
             }
-            ok = ok && user_write_u64(range, SIGFRAME_UC_SIGMASK,
-                                      restore_mask as u64);
+            written = user_write_join(written, user_write_u64(range, SIGFRAME_UC_SIGMASK,
+                                      restore_mask as u64));
             for index: usize in 0..<31 {
                 let register: usize = frame_general(frame, index);
                 let mut saved: usize = register;
                 if (index == 0) { saved = value; }
-                ok = ok && user_write_u64(range, SIGFRAME_REGS + index * 8,
-                                          saved as u64);
+                written = user_write_join(written, user_write_u64(range, SIGFRAME_REGS + index * 8,
+                                          saved as u64));
             }
-            ok = ok && user_write_u64(range, SIGFRAME_SP, user_sp as u64);
-            ok = ok && user_write_u64(range, SIGFRAME_PC,
-                frame_elr_el1(frame) as u64);
-            ok = ok && user_write_u64(range, SIGFRAME_PSTATE,
-                frame_spsr_el1(frame) as u64);
-            ok = ok && user_write_u32(range, SIGFRAME_FPSIMD,
-                                      SIGFRAME_FPSIMD_MAGIC as u32);
-            ok = ok && user_write_u32(range, SIGFRAME_FPSIMD + 4,
-                                      SIGFRAME_FPSIMD_SIZE as u32);
-            ok = ok && user_write_u32(range, SIGFRAME_FPSIMD + 8,
-                frame_fpsr(frame) as u32);
-            ok = ok && user_write_u32(range, SIGFRAME_FPSIMD + 12,
-                frame_fpcr(frame) as u32);
+            written = user_write_join(written, user_write_u64(range, SIGFRAME_SP, user_sp as u64));
+            written = user_write_join(written, user_write_u64(range, SIGFRAME_PC,
+                frame_elr_el1(frame) as u64));
+            written = user_write_join(written, user_write_u64(range, SIGFRAME_PSTATE,
+                frame_spsr_el1(frame) as u64));
+            written = user_write_join(written, user_write_u32(range, SIGFRAME_FPSIMD,
+                                      SIGFRAME_FPSIMD_MAGIC as u32));
+            written = user_write_join(written, user_write_u32(range, SIGFRAME_FPSIMD + 4,
+                                      SIGFRAME_FPSIMD_SIZE as u32));
+            written = user_write_join(written, user_write_u32(range, SIGFRAME_FPSIMD + 8,
+                frame_fpsr(frame) as u32));
+            written = user_write_join(written, user_write_u32(range, SIGFRAME_FPSIMD + 12,
+                frame_fpcr(frame) as u32));
             for word: usize in 0..<64 {
-                ok = ok && user_write_u64(range, SIGFRAME_FPSIMD + 16 + word * 8,
-                    frame_vector_word(frame, word) as u64);
+                written = user_write_join(written, user_write_u64(range, SIGFRAME_FPSIMD + 16 + word * 8,
+                    frame_vector_word(frame, word) as u64));
             }
-            return (ok, base);
+            match written {
+                UserWriteResult::Fault => { return (false, 0); }
+                UserWriteResult::Written => { return (true, base); }
+            }
         }
     }
 }
@@ -5513,16 +5574,19 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                         return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
                     }
                     UserWriteRangeResult::Ok(range) => {
-                        user_zero_fill(range);
-                        user_write_u64(range, 8, node.inode as u64);
+                        let mut written = user_zero_fill(range);
+                        written = user_write_join(written, user_write_u64(range, 8, node.inode as u64));
                         if (procfs_node_is_directory(node)) {
-                            user_write_u32(range, 16, 0x416D as u32);
-                            user_write_u32(range, 20, 2);
+                            written = user_write_join(written, user_write_u32(range, 16, 0x416D as u32));
+                            written = user_write_join(written, user_write_u32(range, 20, 2));
                         } else {
-                            user_write_u32(range, 16, 0x8124 as u32);
-                            user_write_u32(range, 20, 1);
+                            written = user_write_join(written, user_write_u32(range, 16, 0x8124 as u32));
+                            written = user_write_join(written, user_write_u32(range, 20, 1));
                         }
-                        return syscall_finish_current(frame, SyscallAction::Resume(0), current_authority);
+                        match written {
+                            UserWriteResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
+                            UserWriteResult::Written => { return syscall_finish_current(frame, SyscallAction::Resume(0), current_authority); }
+                        }
                     }
                 }
             }
@@ -5558,17 +5622,20 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                             return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
                         }
                         UserWriteRangeResult::Ok(range) => {
-                            user_zero_fill(range);
-                            user_write_u64(range, 8, inode_number as u64);
-                            user_write_u32(range, 16, inode_mode as u32);
-                            user_write_u32(range, 20, 2);
-                            user_write_u64(
+                            let mut written = user_zero_fill(range);
+                            written = user_write_join(written, user_write_u64(range, 8, inode_number as u64));
+                            written = user_write_join(written, user_write_u32(range, 16, inode_mode as u32));
+                            written = user_write_join(written, user_write_u32(range, 20, 2));
+                            written = user_write_join(written, user_write_u64(
                                 range,
                                 48,
                                 ext2_inode_size(
                                     mount,
-                                    inode_number) as u64);
-                            return syscall_finish_current(frame, SyscallAction::Resume(0), current_authority);
+                                    inode_number) as u64));
+                            match written {
+                                UserWriteResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
+                                UserWriteResult::Written => { return syscall_finish_current(frame, SyscallAction::Resume(0), current_authority); }
+                            }
                         }
                     }
                 }
@@ -5579,13 +5646,16 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                             return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
                         }
                         UserWriteRangeResult::Ok(range) => {
-                            user_zero_fill(range);
-                            user_write_u64(range, 8, inode_number as u64);
+                            let mut written = user_zero_fill(range);
+                            written = user_write_join(written, user_write_u64(range, 8, inode_number as u64));
                             // Present the ext2-resident BusyBox target as an
                             // executable regular file to ash's command probe.
-                            user_write_u32(range, 16, 0x81ED as u32);
-                            user_write_u32(range, 20, 1);
-                            return syscall_finish_current(frame, SyscallAction::Resume(0), current_authority);
+                            written = user_write_join(written, user_write_u32(range, 16, 0x81ED as u32));
+                            written = user_write_join(written, user_write_u32(range, 20, 1));
+                            match written {
+                                UserWriteResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
+                                UserWriteResult::Written => { return syscall_finish_current(frame, SyscallAction::Resume(0), current_authority); }
+                            }
                         }
                     }
                 }
@@ -5594,17 +5664,20 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                         return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
                     }
                     UserWriteRangeResult::Ok(range) => {
-                        user_zero_fill(range);
-                        user_write_u64(range, 8, inode_number as u64);
-                        user_write_u32(range, 16, 0x81A4 as u32);
-                        user_write_u32(range, 20, 1);
-                        user_write_u64(range, 48,
+                        let mut written = user_zero_fill(range);
+                        written = user_write_join(written, user_write_u64(range, 8, inode_number as u64));
+                        written = user_write_join(written, user_write_u32(range, 16, 0x81A4 as u32));
+                        written = user_write_join(written, user_write_u32(range, 20, 1));
+                        written = user_write_join(written, user_write_u64(range, 48,
                                        ext2_inode_size(
                                            mount,
-                                           inode_number) as u64);
-                        user_write_u32(range, 56, 1024);
-                        user_write_u64(range, 64, 2);
-                        return syscall_finish_current(frame, SyscallAction::Resume(0), current_authority);
+                                           inode_number) as u64));
+                        written = user_write_join(written, user_write_u32(range, 56, 1024));
+                        written = user_write_join(written, user_write_u64(range, 64, 2));
+                        match written {
+                            UserWriteResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
+                            UserWriteResult::Written => { return syscall_finish_current(frame, SyscallAction::Resume(0), current_authority); }
+                        }
                     }
                 }
             }
@@ -6114,9 +6187,12 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                             return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
                         }
                         UserWriteRangeResult::Ok(range) => {
-                            if (user_write_u32(range, 0,
-                                    ((status & 0xFF) << 8) as u32) == false) {
-                                return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
+                            match user_write_u32(range, 0,
+                                    ((status & 0xFF) << 8) as u32) {
+                                UserWriteResult::Fault => {
+                                    return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
+                                }
+                                UserWriteResult::Written => {}
                             }
                         }
                     }
@@ -6148,8 +6224,11 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         match user_range_check_write(kernel_process_current_root(current_authority), x0, 2) {
             UserWriteRangeResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
             UserWriteRangeResult::Ok(range) => {
-                let wrote_slash: bool = user_write_byte(range, 0, 0x2F);
-                let wrote_nul: bool = user_write_byte(range, 1, 0);
+                match user_write_join(user_write_byte(range, 0, 0x2F),
+                                      user_write_byte(range, 1, 0)) {
+                    UserWriteResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
+                    UserWriteResult::Written => {}
+                }
             }
         }
         return syscall_finish_current(frame, SyscallAction::Resume(2), current_authority);
@@ -6175,7 +6254,10 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             match user_range_check_write(kernel_process_current_root(current_authority), x2, 32) {
                 UserWriteRangeResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
                 UserWriteRangeResult::Ok(range) => {
-                    let zeroed: bool = user_zero_fill(range);
+                    match user_zero_fill(range) {
+                        UserWriteResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
+                        UserWriteResult::Written => {}
+                    }
                 }
             }
         }
@@ -6188,24 +6270,24 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         match user_range_check_write(kernel_process_current_root(current_authority), x1, 16) {
             UserWriteRangeResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
             UserWriteRangeResult::Ok(range) => {
+                let mut seconds: u64 = 1700000000;
+                let mut nanos: u64 = 0;
                 if (x0 == 1) {
                     let frequency: usize = read_cntfrq() as usize;
                     if (frequency == 0) {
                         return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINVAL), current_authority);
                     }
                     let ticks: usize = read_cntpct() as usize;
-                    let wrote_seconds: bool = user_write_u64(
-                        range, 0, (ticks / frequency) as u64);
+                    seconds = (ticks / frequency) as u64;
                     let remainder: usize = ticks % frequency;
-                    let nanos: usize = (remainder * 1000000000) / frequency;
-                    let wrote_nanoseconds: bool =
-                        user_write_u64(range, 8, nanos as u64);
-                } else if (x0 == 0) {
-                    let wrote_seconds: bool =
-                        user_write_u64(range, 0, 1700000000 as u64);
-                    let wrote_nanoseconds: bool = user_write_u64(range, 8, 0);
-                } else {
+                    nanos = ((remainder * 1000000000) / frequency) as u64;
+                } else if (x0 != 0) {
                     return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINVAL), current_authority);
+                }
+                match user_write_join(user_write_u64(range, 0, seconds),
+                                      user_write_u64(range, 8, nanos)) {
+                    UserWriteResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
+                    UserWriteResult::Written => {}
                 }
             }
         }
@@ -6219,13 +6301,16 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
             }
             UserWriteRangeResult::Ok(range) => {
-                user_zero_fill(range);
                 let frequency: i64 = read_cntfrq();
                 let mut uptime: usize = 0;
                 if (frequency > 0) {
                     uptime = (read_cntpct() / frequency) as usize;
                 }
-                user_write_u64(range, 0, uptime as u64);
+                match user_write_join(user_zero_fill(range),
+                                      user_write_u64(range, 0, uptime as u64)) {
+                    UserWriteResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
+                    UserWriteResult::Written => {}
+                }
             }
         }
         return syscall_finish_current(frame, SyscallAction::Resume(0), current_authority);
@@ -6247,21 +6332,25 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             match user_range_check_write(kernel_process_current_root(current_authority), oldact, 32) {
                 UserWriteRangeResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
                 UserWriteRangeResult::Ok(range) => {
-                    let zeroed: bool = user_zero_fill(range);
                     let mut old: SignalAction =
                         kernel_process_current_signal_action(current_authority, signum);
                     if (signum == LINUX_SIGCHLD &&
                         kernel_process_current_sigchld_ignored(current_authority)) {
                         old.handler = 1;
                     }
-                    let wrote_handler: bool =
-                        user_write_u64(range, 0, old.handler as u64);
-                    let wrote_flags: bool =
-                        user_write_u64(range, 8, old.flags as u64);
-                    let wrote_restorer: bool =
-                        user_write_u64(range, 16, old.restorer as u64);
-                    let wrote_mask: bool =
-                        user_write_u64(range, 24, old.mask as u64);
+                    let mut written = user_zero_fill(range);
+                    written = user_write_join(written,
+                        user_write_u64(range, 0, old.handler as u64));
+                    written = user_write_join(written,
+                        user_write_u64(range, 8, old.flags as u64));
+                    written = user_write_join(written,
+                        user_write_u64(range, 16, old.restorer as u64));
+                    written = user_write_join(written,
+                        user_write_u64(range, 24, old.mask as u64));
+                    match written {
+                        UserWriteResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
+                        UserWriteResult::Written => {}
+                    }
                 }
             }
         }
@@ -6330,8 +6419,12 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             match user_range_check_write(kernel_process_current_root(current_authority), x2, 8) {
                 UserWriteRangeResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
                 UserWriteRangeResult::Ok(range) => {
-                    let wrote_mask: bool =
-                        user_write_u64(range, 0, old_mask as u64);
+                    // The old mask is reported before the new one applies,
+                    // so a fault leaves the mask unchanged.
+                    match user_write_u64(range, 0, old_mask as u64) {
+                        UserWriteResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
+                        UserWriteResult::Written => {}
+                    }
                 }
             }
         }
@@ -6388,15 +6481,20 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         match user_range_check_write(kernel_process_current_root(current_authority), x1, 16) {
             UserWriteRangeResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
             UserWriteRangeResult::Ok(peer_range) => {
-                let zeroed: bool = user_zero_fill(peer_range);
-                let wrote_family: bool = user_write_byte(peer_range, 0, 2);
+                match user_write_join(user_zero_fill(peer_range),
+                                      user_write_byte(peer_range, 0, 2)) {
+                    UserWriteResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
+                    UserWriteResult::Written => {}
+                }
             }
         }
         match user_range_check_write(kernel_process_current_root(current_authority), x2, 4) {
             UserWriteRangeResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
             UserWriteRangeResult::Ok(length_range) => {
-                let wrote_length: bool =
-                    user_write_u32(length_range, 0, 16);
+                match user_write_u32(length_range, 0, 16) {
+                    UserWriteResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
+                    UserWriteResult::Written => {}
+                }
             }
         }
         return syscall_finish_current(frame, SyscallAction::Resume(0), current_authority);
@@ -6429,8 +6527,11 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                     return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
                 }
                 UserWriteRangeResult::Ok(cpu_range) => {
-                    if (user_write_u32(cpu_range, 0, cpu_id() as u32) == false) {
-                        return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
+                    match user_write_u32(cpu_range, 0, cpu_id() as u32) {
+                        UserWriteResult::Fault => {
+                            return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
+                        }
+                        UserWriteResult::Written => {}
                     }
                 }
             }
@@ -6442,8 +6543,11 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                     return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
                 }
                 UserWriteRangeResult::Ok(node_range) => {
-                    if (user_write_u32(node_range, 0, 0) == false) {
-                        return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
+                    match user_write_u32(node_range, 0, 0) {
+                        UserWriteResult::Fault => {
+                            return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
+                        }
+                        UserWriteResult::Written => {}
                     }
                 }
             }
@@ -6472,9 +6576,11 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                         return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
                     }
                     UserWriteRangeResult::Ok(mask_range) => {
-                        if (user_write_u64(mask_range, 0, mask as u64) ==
-                                false) {
-                            return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
+                        match user_write_u64(mask_range, 0, mask as u64) {
+                            UserWriteResult::Fault => {
+                                return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
+                            }
+                            UserWriteResult::Written => {}
                         }
                     }
                 }
@@ -6618,9 +6724,12 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                         return syscall_finish_current(frame, SyscallAction::Resume(LINUX_ENOMEM), current_authority);
                     }
                     UserWriteRangeResult::Ok(range) => {
-                        if (user_zero_fill(range) == false) {
-                            syscall_munmap_pages(current_authority, address, rounded);
-                            return syscall_finish_current(frame, SyscallAction::Resume(LINUX_ENOMEM), current_authority);
+                        match user_zero_fill(range) {
+                            UserWriteResult::Fault => {
+                                syscall_munmap_pages(current_authority, address, rounded);
+                                return syscall_finish_current(frame, SyscallAction::Resume(LINUX_ENOMEM), current_authority);
+                            }
+                            UserWriteResult::Written => {}
                         }
                     }
                 }
@@ -6729,7 +6838,10 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                     syscall_rlimit_store(old_bytes[0..<8], soft);
                     syscall_rlimit_store(old_bytes[8..<16], hard);
                     let reported: []u8 = old_bytes[0..<16];
-                    let sent: bool = copy_to_user(range, reported);
+                    match copy_to_user(range, reported) {
+                        UserWriteResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
+                        UserWriteResult::Written => {}
+                    }
                 }
             }
         }
@@ -6801,8 +6913,12 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                                           UTSNAME_FIELD_SIZE],
                                   bs"(none)");
                 let source: []u8 = uname_bytes[0..<sizeof(Utsname)];
-                let ok: bool = copy_to_user(range, source);
-                return syscall_finish_current(frame, SyscallAction::Resume(0), current_authority);
+                match copy_to_user(range, source) {
+                    UserWriteResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
+                    UserWriteResult::Written => {
+                        return syscall_finish_current(frame, SyscallAction::Resume(0), current_authority);
+                    }
+                }
             }
         }
     }
@@ -6844,11 +6960,13 @@ fn syscall_vectored_prefix_wait_probe(address: usize, slot: usize,
     match user_range_check_write(scheduled_process_address_space_root_lookup(kernel_process_current_slot()), address, 32) {
         UserWriteRangeResult::Fault => { return false; }
         UserWriteRangeResult::Ok(range) => {
-            let first: bool = user_write_u64(range, 8, 1);
-            let next_base: bool = user_write_u64(range, 16, (address + 65) as u64);
-            let next_len: bool = user_write_u64(range, 24, 1);
-            if (first == false || next_base == false || next_len == false) {
-                return false;
+            let mut written = user_write_u64(range, 8, 1);
+            written = user_write_join(written,
+                user_write_u64(range, 16, (address + 65) as u64));
+            written = user_write_join(written, user_write_u64(range, 24, 1));
+            match written {
+                UserWriteResult::Fault => { return false; }
+                UserWriteResult::Written => {}
             }
         }
     }
@@ -6926,13 +7044,18 @@ fn syscall_vectored_inetd_probe(address: usize) -> bool !{unsafe} {
             match user_range_check_write(scheduled_process_address_space_root_lookup(kernel_process_current_slot()), address, 80) {
                 UserWriteRangeResult::Fault => { ok = false; }
                 UserWriteRangeResult::Ok(range) => {
-                    let a: bool = user_write_byte(range, 64, 0x61);
-                    let b: bool = user_write_byte(range, 65, 0x62);
-                    let base0: bool = user_write_u64(range, 0, (address + 64) as u64);
-                    let len0: bool = user_write_u64(range, 8, 1);
-                    let base1: bool = user_write_u64(range, 16, (address + 65) as u64);
-                    let len1: bool = user_write_u64(range, 24, 1);
-                    ok = a && b && base0 && len0 && base1 && len1;
+                    let mut written = user_write_byte(range, 64, 0x61);
+                    written = user_write_join(written, user_write_byte(range, 65, 0x62));
+                    written = user_write_join(written,
+                        user_write_u64(range, 0, (address + 64) as u64));
+                    written = user_write_join(written, user_write_u64(range, 8, 1));
+                    written = user_write_join(written,
+                        user_write_u64(range, 16, (address + 65) as u64));
+                    written = user_write_join(written, user_write_u64(range, 24, 1));
+                    match written {
+                        UserWriteResult::Fault => { ok = false; }
+                        UserWriteResult::Written => {}
+                    }
                 }
             }
             let (write_action, write_count) = kernel_syscall_dispatch(
@@ -6942,8 +7065,10 @@ fn syscall_vectored_inetd_probe(address: usize) -> bool !{unsafe} {
             match user_range_check_write(scheduled_process_address_space_root_lookup(kernel_process_current_slot()), address, 32) {
                 UserWriteRangeResult::Fault => { ok = false; }
                 UserWriteRangeResult::Ok(range) => {
-                    let changed: bool = user_write_u64(range, 16, 0);
-                    if (changed == false) { ok = false; }
+                    match user_write_u64(range, 16, 0) {
+                        UserWriteResult::Fault => { ok = false; }
+                        UserWriteResult::Written => {}
+                    }
                 }
             }
             let (partial_action, partial_count) = kernel_syscall_dispatch(
@@ -6954,8 +7079,10 @@ fn syscall_vectored_inetd_probe(address: usize) -> bool !{unsafe} {
             match user_range_check_write(scheduled_process_address_space_root_lookup(kernel_process_current_slot()), address, 32) {
                 UserWriteRangeResult::Fault => { ok = false; }
                 UserWriteRangeResult::Ok(range) => {
-                    let changed: bool = user_write_u64(range, 8, 4);
-                    if (changed == false) { ok = false; }
+                    match user_write_u64(range, 8, 4) {
+                        UserWriteResult::Fault => { ok = false; }
+                        UserWriteResult::Written => {}
+                    }
                 }
             }
             let (read_action, read_count) = kernel_syscall_dispatch(
@@ -7032,6 +7159,164 @@ fn syscall_vectored_inetd_probe(address: usize) -> bool !{unsafe} {
 // comment here saying it was "outside ... L3 indices 500-502" -- both
 // sat inside process_image.tkb's stack-growth region (448..510) in the
 // same root-0 L3 table.
+variant SyscallCowReadReport { Failed; Delivered; RefusedThenDelivered; }
+
+// GitHub issue #725: read(2) into a page that is still copy-on-write.
+// Validation accepts the page without allocating its private copy, so the
+// copy happens inside the store, and may be refused. A refused copy must
+// leave the file offset where it was and the shared page intact, and a
+// retry must deliver the same bytes. A second mapping reference makes the
+// page genuinely shared, so address_space_resolve_cow takes its
+// allocating path; the QEMU cow-read lane forces that allocation to fail
+// once from the debugger, and every other boot sees it succeed.
+fn kernel_syscall_cow_read_probe() -> SyscallCowReadReport !{unsafe} {
+    let probe_index: usize = match user_va_find_free_run(1) {
+        UserVaRunResult::None => { return SyscallCowReadReport::Failed; }
+        UserVaRunResult::Found(index) => { index }
+    };
+    let mut root: AddressSpaceRoot = address_space_boot_root();
+    let shared_physical: usize = match page_alloc(PageOwnerTag::UserPage) {
+        PageAllocResult::OutOfMemory => { return SyscallCowReadReport::Failed; }
+        PageAllocResult::Allocated(page) => {
+            let physical: usize = page_physical_address(page);
+            match address_space_map_page(root, probe_index, page,
+                                         USER_RW_XN_FLAGS) {
+                AddressSpacePteWriteResult::Invalid => {
+                    return SyscallCowReadReport::Failed;
+                }
+                AddressSpacePteWriteResult::OutOfMemory => {
+                    return SyscallCowReadReport::Failed;
+                }
+                AddressSpacePteWriteResult::Written => {}
+            }
+            physical
+        }
+    };
+    let address: usize = USER_TEXT_VA + probe_index * PAGE_SIZE;
+    // A sibling address space maps the same page, as a fork leaves it.
+    let sibling: usize = scheduled_process_probe_slot_acquire();
+    if (sibling == 0) {
+        user_pte_clear(probe_index);
+        return SyscallCowReadReport::Failed;
+    }
+    let mut sibling_root: AddressSpaceRoot =
+        scheduled_process_address_space_root_lookup(sibling);
+    let mut shared: bool = false;
+    match address_space_ensure_root(sibling) {
+        AddressSpaceEnsureResult::SlotOutOfRange => {}
+        AddressSpaceEnsureResult::OutOfMemory => {}
+        AddressSpaceEnsureResult::Ok => {
+            match page_mapping_retain_physical(shared_physical,
+                                               address_space_live_count()) {
+                PageMappingRetainResult::NotMapped => {}
+                PageMappingRetainResult::RefCeilingReached => {}
+                PageMappingRetainResult::Retained => {
+                    let cow_pte: usize = address_space_pte_cow_value(
+                        shared_physical | USER_RW_XN_FLAGS);
+                    match address_space_pte_write(sibling_root, probe_index,
+                                                  cow_pte) {
+                        AddressSpacePteWriteResult::Invalid => {
+                            page_mapping_release_physical(shared_physical);
+                        }
+                        AddressSpacePteWriteResult::OutOfMemory => {
+                            page_mapping_release_physical(shared_physical);
+                        }
+                        AddressSpacePteWriteResult::Written => {
+                            match address_space_pte_write(root, probe_index,
+                                                          cow_pte) {
+                                AddressSpacePteWriteResult::Invalid => {}
+                                AddressSpacePteWriteResult::OutOfMemory => {}
+                                AddressSpacePteWriteResult::Written => {
+                                    shared = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let process: usize = kernel_syscall_process_slot();
+    let mut ok: bool = shared;
+    let mut fd: usize = 0;
+    match unified_fd_context_ensure(process) {
+        ProcessFdContextReady::Missing => { ok = false; }
+        ProcessFdContextReady::Ready(evidence) => {
+            match unified_fd_alloc(process, 3) {
+                UnifiedFdAllocResult::Full => { ok = false; }
+                UnifiedFdAllocResult::Allocated(found) => { fd = found; }
+            }
+        }
+    }
+    // Any live process's stat file: boot probes run before a current
+    // process has a diagnostic record of its own.
+    let inode: usize = procfs_inode(procfs_next_pid(0), 1);
+    if (ok) {
+        match unified_file_open(process, fd, inode, true, false) {
+            UnifiedOpenResult::Invalid => { ok = false; }
+            UnifiedOpenResult::Full => { ok = false; }
+            UnifiedOpenResult::Ok => {}
+        }
+    }
+    let mut expected: [u8; 1024];
+    let total: usize = procfs_render_file(inode, expected as [u8; 1024..]);
+    if (total < 8) { ok = false; }
+
+    let mut report: SyscallCowReadReport = SyscallCowReadReport::Failed;
+    if (ok) {
+        // read(fd, address, 8)
+        let (first_action, first_value) = kernel_syscall_dispatch(
+            SYSCALL_TRAP_ESR, 63, fd, address, 8, 0, 0, 0);
+        let after_first: usize = address_space_pte_read(root, probe_index);
+        if (first_action == 1 && first_value == 8) {
+            if (kernel_syscall_file_offset(fd) == 8 &&
+                address_space_pte_is_cow(after_first) == false &&
+                (after_first & USER_PAGE_PHYS_MASK) != shared_physical &&
+                syscall_cow_read_matches(address, expected as []const u8)) {
+                report = SyscallCowReadReport::Delivered;
+            }
+        } else if (first_action == 1 && first_value == LINUX_EFAULT &&
+                   kernel_syscall_file_offset(fd) == 0 &&
+                   after_first == address_space_pte_cow_value(
+                       shared_physical | USER_RW_XN_FLAGS) &&
+                   page_mapping_refcount_physical(shared_physical) == 2) {
+            let (retry_action, retry_value) = kernel_syscall_dispatch(
+                SYSCALL_TRAP_ESR, 63, fd, address, 8, 0, 0, 0);
+            if (retry_action == 1 && retry_value == 8 &&
+                kernel_syscall_file_offset(fd) == 8 &&
+                syscall_cow_read_matches(address, expected as []const u8)) {
+                report = SyscallCowReadReport::RefusedThenDelivered;
+            }
+        }
+    }
+    match unified_fd_close(process, fd) {
+        UnifiedFdResult::Invalid => {}
+        UnifiedFdResult::Ok => {}
+    }
+    // Releasing the sibling drops its reference; the clear then gives back
+    // the page this root maps, whether that is the shared page or its copy.
+    address_space_release_root(sibling_root);
+    scheduled_process_probe_slot_release(sibling);
+    user_pte_clear(probe_index);
+    return report;
+}
+
+private fn syscall_cow_read_matches(address: usize, expected: borrow [const u8; 8..])
+        -> bool !{unsafe} {
+    match user_range_check_read(address_space_boot_root(), address, 8) {
+        UserReadRangeResult::Fault => { return false; }
+        UserReadRangeResult::Ok(range) => {
+            for index: usize in 0..<8 {
+                if (user_read_byte(range, index) != expected[index]) {
+                    return false;
+                }
+            }
+            return true;
+        }
+    }
+}
+
 fn kernel_syscall_subset_probe() -> bool !{unsafe} {
     let probe_index: usize = match user_va_find_free_run(1) {
         UserVaRunResult::None => { return false; }
@@ -7114,7 +7399,10 @@ fn kernel_syscall_subset_probe() -> bool !{unsafe} {
             match user_range_check_write(scheduled_process_address_space_root_lookup(kernel_process_current_slot()), oldact_va, 32) {
                 UserWriteRangeResult::Fault => { ok = false; }
                 UserWriteRangeResult::Ok(range) => {
-                    let poisoned: bool = user_write_byte(range, 0, 0xAA);
+                    match user_write_byte(range, 0, 0xAA) {
+                        UserWriteResult::Fault => { ok = false; }
+                        UserWriteResult::Written => {}
+                    }
                 }
             }
             let (action4, value4) = kernel_syscall_dispatch(
@@ -7284,24 +7572,39 @@ private inline fn syscall_getdents64_current(
                             }
                             scanning = false;
                         } else {
-                            user_write_u64(range, written,
+                            let mut record = user_write_u64(range, written,
                                 procfs_inode(pid, 0) as u64);
-                            user_write_u64(range, written + 8,
-                                pid as u64);
-                            user_write_u16(range, written + 16,
-                                record_length);
-                            user_write_byte(range, written + 18, 4);
+                            record = user_write_join(record,
+                                user_write_u64(range, written + 8, pid as u64));
+                            record = user_write_join(record,
+                                user_write_u16(range, written + 16, record_length));
+                            record = user_write_join(record,
+                                user_write_byte(range, written + 18, 4));
                             for index: usize in 0..<20 {
                                 if (index < name_length) {
-                                    user_write_byte(
-                                        range, written + 19 + index,
-                                        name_storage[index]);
+                                    record = user_write_join(record,
+                                        user_write_byte(
+                                            range, written + 19 + index,
+                                            name_storage[index]));
                                 }
                             }
-                            user_write_byte(
-                                range, written + 19 + name_length, 0);
-                            written = written + record_length;
-                            directory_offset = pid;
+                            record = user_write_join(record,
+                                user_write_byte(
+                                    range, written + 19 + name_length, 0));
+                            match record {
+                                UserWriteResult::Fault => {
+                                    // Stop before this pid: the stream
+                                    // offset names the last delivered one.
+                                    if (written == 0) {
+                                        return SyscallAction::Resume(LINUX_EFAULT);
+                                    }
+                                    scanning = false;
+                                }
+                                UserWriteResult::Written => {
+                                    written = written + record_length;
+                                    directory_offset = pid;
+                                }
+                            }
                         }
                     }
                 }
@@ -7395,21 +7698,41 @@ private inline fn syscall_getdents64_current(
                                 return SyscallAction::Resume(LINUX_EINVAL);
                             }
                             let entry_name = name_tail[0..<name_length];
-                            user_write_u64(range, written,
+                            let mut record = user_write_u64(range, written,
                                 entry_inode as u64);
-                            user_write_u64(range, written + 8,
-                                directory_offset as u64);
-                            user_write_u16(range, written + 16,
-                                output_length);
-                            user_write_byte(range, written + 18,
-                                entry[7]);
+                            record = user_write_join(record,
+                                user_write_u64(range, written + 8,
+                                               directory_offset as u64));
+                            record = user_write_join(record,
+                                user_write_u16(range, written + 16, output_length));
+                            record = user_write_join(record,
+                                user_write_byte(range, written + 18, entry[7]));
                             let mut name_output: usize = written + 19;
                             for name_byte in entry_name {
-                                user_write_byte(range, name_output, name_byte);
+                                record = user_write_join(record,
+                                    user_write_byte(range, name_output, name_byte));
                                 name_output = name_output + 1;
                             }
-                            user_write_byte(range,
-                                written + 19 + name_length, 0);
+                            record = user_write_join(record,
+                                user_write_byte(range,
+                                    written + 19 + name_length, 0));
+                            match record {
+                                UserWriteResult::Fault => {
+                                    // Not delivered: the stream resumes at
+                                    // this entry, as when it does not fit.
+                                    if (written == 0) {
+                                        return SyscallAction::Resume(LINUX_EFAULT);
+                                    }
+                                    if (kernel_syscall_file_set_offset(
+                                        x0, directory_offset -
+                                        record_length) == false) {
+                                        return SyscallAction::Resume(
+                                            LINUX_EBADF);
+                                    }
+                                    return SyscallAction::Resume(written);
+                                }
+                                UserWriteResult::Written => {}
+                            }
                             written = written + output_length;
                         }
                         if (cursor == 0) {

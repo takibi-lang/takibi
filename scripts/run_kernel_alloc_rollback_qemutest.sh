@@ -70,9 +70,15 @@ case "$ALLOC_ROLLBACK_POINT" in
         ALLOC_ROLLBACK_POINT_ID=6
         ALLOC_ROLLBACK_VARIANT='AddressSpaceBackingReady::Missing'
         ;;
+    cow-read)
+        # #725: not part of the process chain. A read(2) into a shared
+        # copy-on-write page whose private copy is refused.
+        ALLOC_ROLLBACK_POINT_ID=7
+        ALLOC_ROLLBACK_VARIANT='PageAllocResult::OutOfMemory'
+        ;;
     *)
         echo "error: unknown allocation rollback point '$ALLOC_ROLLBACK_POINT'" >&2
-        echo 'expected process-record, stack-run, address-space-root, image-record, fd-context, or address-space-backing' >&2
+        echo 'expected process-record, stack-run, address-space-root, image-record, fd-context, address-space-backing, or cow-read' >&2
         exit 2
         ;;
 esac
@@ -273,12 +279,21 @@ trap - EXIT INT TERM HUP
 
 sed 's/^/  /' "$UART_DRIVER_LOG"
 
-if ! grep -q '^resource exhausted: physical page allocator capacity=[0-9][0-9]*' "$UART_LOG"; then
+if [ "$ALLOC_ROLLBACK_POINT" = cow-read ]; then
+    # The refused copy is reported by the probe itself; nothing in the
+    # process chain failed, so the process-table lines below do not apply.
+    if ! grep -qF 'syscall subset: cow read: the private copy was refused, so EFAULT with the offset kept and the shared page intact; the retry delivered the same bytes' "$UART_LOG"; then
+        echo "FAIL kernel/qemu alloc-rollback: read(2) did not handle the refused copy-on-write copy" >&2
+        grep -F 'syscall subset: cow read:' "$UART_LOG" >&2 || true
+        echo "artifacts: $ARTIFACT_POINT_DIR" >&2
+        exit 1
+    fi
+elif ! grep -q '^resource exhausted: physical page allocator capacity=[0-9][0-9]*' "$UART_LOG"; then
     echo "FAIL kernel/qemu alloc-rollback: the kernel never reported the injected exhaustion" >&2
     echo "artifacts: $ARTIFACT_POINT_DIR" >&2
     exit 1
 fi
-if ! grep -q '^process table: failed$' "$UART_LOG"; then
+if [ "$ALLOC_ROLLBACK_POINT" != cow-read ] && ! grep -q '^process table: failed$' "$UART_LOG"; then
     echo "FAIL kernel/qemu alloc-rollback: process-table caller did not report the refused allocation at $ALLOC_ROLLBACK_POINT" >&2
     echo "artifacts: $ARTIFACT_POINT_DIR" >&2
     exit 1

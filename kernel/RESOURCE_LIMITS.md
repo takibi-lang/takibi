@@ -215,7 +215,7 @@ The rollback chain inside `scheduled_process_alloc` has five acquisitions,
 and each can fail after the preceding ones succeeded. The arrays they
 replaced could not fail, so pooling introduced these failure paths; reaching
 them honestly would require exhausting the page allocator's 800 MiB.
-`make kernelcheck-alloc-rollback-qemu` instead runs five QEMU boots and uses
+`make kernelcheck-alloc-rollback-qemu` instead runs one QEMU boot per acquisition and uses
 GDB to return the compiler-described `OutOfMemory` variant at one acquisition
 per boot, without changing allocator state:
 
@@ -241,6 +241,14 @@ process, address-space backing, image, and fd records came back;
 `resources: no double free`. The syscall subset probe also checks that clone
 allocation exhaustion maps to `-EAGAIN` while invalid clone arguments remain
 `-EINVAL`.
+
+One further boot of the same lane, `cow-read`, is not part of that chain.
+It fails the `page_alloc` inside `address_space_resolve_cow` while read(2)
+stores into a copy-on-write page that the syscall subset's CoW read probe
+shares with a sibling address space. The lane requires the probe's report
+that the read returned `-EFAULT` with the file offset unchanged and the
+shared page intact, and that a retry delivered the same bytes, together with
+the same page and double-free accounting.
 
 The pooled-record baseline is taken BEFORE the probes (the page baseline is
 taken after them for the parked-run reason its own comment gives), because

@@ -86,6 +86,29 @@ struct UserWriteRange {
 must_use variant UserReadRangeResult { Fault; Ok(UserReadRange); }
 must_use variant UserWriteRangeResult { Fault; Ok(UserWriteRange); }
 
+// Outcome of a store into a validated write range. Validation does not
+// allocate a CoW page's private copy, so the store itself can still fail
+// (an out-of-range offset, or no page for the copy); a caller must match
+// the failure before it consumes input or reports bytes delivered.
+must_use variant UserWriteResult { Fault; Written; }
+
+// Combine two stores' outcomes so a sequence of stores into one structure
+// is handled by a single match. Both stores have already run; the result
+// is Written only when both were.
+fn user_write_join(first: UserWriteResult, second: UserWriteResult)
+        -> UserWriteResult {
+    match first {
+        UserWriteResult::Fault => {
+            match second {
+                UserWriteResult::Fault => {}
+                UserWriteResult::Written => {}
+            }
+            return UserWriteResult::Fault;
+        }
+        UserWriteResult::Written => { return second; }
+    }
+}
+
 fn user_page_writable(pte: usize) -> bool {
     return address_space_pte_is_writable(pte);
 }
@@ -222,14 +245,15 @@ fn copy_from_user(range: UserReadRange, destination: []u8) -> bool !{unsafe} {
     return copied == destination.len;
 }
 
-fn copy_to_user(range: UserWriteRange, source: []u8) -> bool !{unsafe} {
-    if (source.len > range.length) { return false; }
-    if (user_range_resolve_cow(range) == false) { return false; }
+fn copy_to_user(range: UserWriteRange, source: []u8) -> UserWriteResult !{unsafe} {
+    if (source.len > range.length) { return UserWriteResult::Fault; }
+    if (user_range_resolve_cow(range) == false) { return UserWriteResult::Fault; }
     let destination_base: *u8 = unsafe { range.address as *u8 };
     let destination_view =
         unsafe { destination_base[0..<range.length as isize] };
     let copied: usize = slice_copy(destination_view, source);
-    return copied == source.len;
+    if (copied != source.len) { return UserWriteResult::Fault; }
+    return UserWriteResult::Written;
 }
 
 // Raw-pointer-count variants of copy_from_user/copy_to_user for kernel-side
@@ -252,9 +276,9 @@ fn copy_from_user_raw(range: UserReadRange, destination: borrow *u8, length: usi
 }
 
 fn copy_to_user_raw(range: UserWriteRange, source: borrow *u8, length: usize)
-        -> bool !{unsafe} {
-    if (length > range.length) { return false; }
-    if (user_range_resolve_cow(range) == false) { return false; }
+        -> UserWriteResult !{unsafe} {
+    if (length > range.length) { return UserWriteResult::Fault; }
+    if (user_range_resolve_cow(range) == false) { return UserWriteResult::Fault; }
     let destination_base: *u8 = unsafe { range.address as *u8 };
     let mut index: usize = 0;
     while (index < length) {
@@ -263,7 +287,7 @@ fn copy_to_user_raw(range: UserWriteRange, source: borrow *u8, length: usize)
         *destination_byte = *source_byte;
         index = index + 1;
     }
-    return true;
+    return UserWriteResult::Written;
 }
 
 fn user_read_byte(range: UserReadRange, offset: usize) -> u8 !{unsafe} {
@@ -271,30 +295,30 @@ fn user_read_byte(range: UserReadRange, offset: usize) -> u8 !{unsafe} {
     return *source_byte;
 }
 
-fn user_write_byte(range: UserWriteRange, offset: usize, value: u8) -> bool !{unsafe} {
-    if (offset >= range.length) { return false; }
-    if (user_range_resolve_cow(range) == false) { return false; }
+fn user_write_byte(range: UserWriteRange, offset: usize, value: u8) -> UserWriteResult !{unsafe} {
+    if (offset >= range.length) { return UserWriteResult::Fault; }
+    if (user_range_resolve_cow(range) == false) { return UserWriteResult::Fault; }
     let field: *u8 = unsafe { (range.address + offset) as *u8 };
     *field = value;
-    return true;
+    return UserWriteResult::Written;
 }
 
 fn user_write_u32(range: UserWriteRange, offset: usize, value: u32)
-        -> bool !{unsafe} {
-    if (offset + 4 > range.length || offset + 4 < offset) { return false; }
-    if (user_range_resolve_cow(range) == false) { return false; }
+        -> UserWriteResult !{unsafe} {
+    if (offset + 4 > range.length || offset + 4 < offset) { return UserWriteResult::Fault; }
+    if (user_range_resolve_cow(range) == false) { return UserWriteResult::Fault; }
     let field: *u32 = unsafe { (range.address + offset) as *u32 };
     *field = value;
-    return true;
+    return UserWriteResult::Written;
 }
 
 fn user_write_u64(range: UserWriteRange, offset: usize, value: u64)
-        -> bool !{unsafe} {
-    if (offset + 8 > range.length || offset + 8 < offset) { return false; }
-    if (user_range_resolve_cow(range) == false) { return false; }
+        -> UserWriteResult !{unsafe} {
+    if (offset + 8 > range.length || offset + 8 < offset) { return UserWriteResult::Fault; }
+    if (user_range_resolve_cow(range) == false) { return UserWriteResult::Fault; }
     let field: *u64 = unsafe { (range.address + offset) as *u64 };
     *field = value;
-    return true;
+    return UserWriteResult::Written;
 }
 
 // Issue #196: read counterparts of user_write_u32/user_write_u64, needed
@@ -319,15 +343,17 @@ fn user_read_u64(range: UserReadRange, offset: usize) -> (bool, u64) !{unsafe} {
 // only current caller and only ever needs small (<256) bit-flag values,
 // so this avoids introducing a signed/u16 read-write pair for one use.
 fn user_write_u16(range: UserWriteRange, offset: usize, value: usize)
-        -> bool !{unsafe} {
-    if (offset + 2 > range.length || offset + 2 < offset) { return false; }
-    let low: bool = user_write_byte(range, offset, (value & 0xFF) as u8);
-    let high: bool = user_write_byte(range, offset + 1, ((value >> 8) & 0xFF) as u8);
-    return low && high;
+        -> UserWriteResult !{unsafe} {
+    if (offset + 2 > range.length || offset + 2 < offset) {
+        return UserWriteResult::Fault;
+    }
+    return user_write_join(
+        user_write_byte(range, offset, (value & 0xFF) as u8),
+        user_write_byte(range, offset + 1, ((value >> 8) & 0xFF) as u8));
 }
 
-fn user_zero_fill(range: UserWriteRange) -> bool !{unsafe} {
-    if (user_range_resolve_cow(range) == false) { return false; }
+fn user_zero_fill(range: UserWriteRange) -> UserWriteResult !{unsafe} {
+    if (user_range_resolve_cow(range) == false) { return UserWriteResult::Fault; }
     let base: *u8 = unsafe { range.address as *u8 };
     let mut index: usize = 0;
     while (index < range.length) {
@@ -335,7 +361,7 @@ fn user_zero_fill(range: UserWriteRange) -> bool !{unsafe} {
         *byte = 0;
         index = index + 1;
     }
-    return true;
+    return UserWriteResult::Written;
 }
 
 // Rewrites [first_l3, last_l3] in place, preserving each page's physical

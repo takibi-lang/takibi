@@ -199,6 +199,7 @@ run them, and why they sit outside both globs above.
 | --- | --- |
 | `buildcheck_elf_symbol_alignment.py` | Reject a linked ELF when a required symbol is under-aligned |
 | `buildcheck_backing_exists.py` | Real kernel overlays accept borrowed backing/image/FD evidence and reject unensured writers, wrong-record evidence and foreign minting |
+| `buildcheck_user_write_result.py` | Real kernel overlays accept a matched user-memory store and reject an ignored, unmatched or bool-read `UserWriteResult` (#725) |
 | `buildcheck_process_current_phase.py` | Real Running/Constructing transition APIs reject retained current authority; consuming it permits transition |
 | `buildcheck_kernel_asm_invariants.py` | TODO |
 | `buildcheck_kernel_memory_map.py` | Check kernel/MEMORY_MAP.md and allocator fixtures; render QEMU boot capacity from the loaded ELF |

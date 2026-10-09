@@ -1670,6 +1670,7 @@ _kernelbuild-check: _kernelbuild _kernelbuild-qemu-debug _kernelbuild-rpi5-debug
 	$(KERNEL_CRASH_SNAPSHOT_LAYOUT)
 	python3 scripts/buildcheck_backing_exists.py $(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_QEMU_MAIN_TKB)
 	python3 scripts/buildcheck_process_current_phase.py $(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_QEMU_MAIN_TKB)
+	python3 scripts/buildcheck_user_write_result.py $(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_QEMU_MAIN_TKB)
 
 kernelbuild-check: build
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) _kernelbuild-check
@@ -1970,7 +1971,7 @@ kernelcheck-alloc-rollback-qemu: kernelbuild-check
 ## every other lane had finished. Under TAKIBI_JOBS=1 (CI) they still run one
 ## at a time. process-record keeps the runner's default ports.
 ALLOC_ROLLBACK_POINTS := process-record stack-run address-space-root \
-	image-record fd-context address-space-backing
+	image-record fd-context address-space-backing cow-read
 _kernelcheck-alloc-rollback-qemu: \
 	$(addprefix _kernelcheck-alloc-rollback-,$(ALLOC_ROLLBACK_POINTS))
 
@@ -1987,6 +1988,8 @@ _kernelcheck-alloc-rollback-fd-context:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_ALLOC_ROLLBACK_POINT=fd-context KERNEL_QEMU_ALLOC_ROLLBACK_SERIAL_PORT=18655 KERNEL_QEMU_ALLOC_ROLLBACK_GDB_PORT=18656 KERNEL_QEMU_ALLOC_ROLLBACK_QMP_PORT=18657 KERNEL_QEMU_ALLOC_ROLLBACK_NETDEV_LOCAL_PORT=18658 KERNEL_QEMU_ALLOC_ROLLBACK_NETDEV_REMOTE_PORT=18659 bash scripts/run_kernel_alloc_rollback_qemutest.sh
 _kernelcheck-alloc-rollback-address-space-backing:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_ALLOC_ROLLBACK_POINT=address-space-backing KERNEL_QEMU_ALLOC_ROLLBACK_SERIAL_PORT=18631 KERNEL_QEMU_ALLOC_ROLLBACK_GDB_PORT=18632 KERNEL_QEMU_ALLOC_ROLLBACK_QMP_PORT=18633 KERNEL_QEMU_ALLOC_ROLLBACK_NETDEV_LOCAL_PORT=18634 KERNEL_QEMU_ALLOC_ROLLBACK_NETDEV_REMOTE_PORT=18635 bash scripts/run_kernel_alloc_rollback_qemutest.sh
+_kernelcheck-alloc-rollback-cow-read:
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_ALLOC_ROLLBACK_POINT=cow-read KERNEL_QEMU_ALLOC_ROLLBACK_SERIAL_PORT=18600 KERNEL_QEMU_ALLOC_ROLLBACK_GDB_PORT=18601 KERNEL_QEMU_ALLOC_ROLLBACK_QMP_PORT=18602 KERNEL_QEMU_ALLOC_ROLLBACK_NETDEV_LOCAL_PORT=18603 KERNEL_QEMU_ALLOC_ROLLBACK_NETDEV_REMOTE_PORT=18604 bash scripts/run_kernel_alloc_rollback_qemutest.sh
 
 ## Issue #713: the debug sidecar's variant return ABI, executed. A small
 ## bare-metal fixture returns variants of four leaves (32 bytes), eight and

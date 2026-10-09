@@ -1123,6 +1123,17 @@ fn kernel_test_common_probes() !{unsafe} {
     } else {
         kernel_boot_log("syscall subset: failed\n");
     }
+    match kernel_syscall_cow_read_probe() {
+        SyscallCowReadReport::Failed => {
+            kernel_boot_log("syscall subset: cow read: failed\n");
+        }
+        SyscallCowReadReport::Delivered => {
+            kernel_boot_log("syscall subset: cow read: a shared page took its private copy, and the read delivered and advanced the offset\n");
+        }
+        SyscallCowReadReport::RefusedThenDelivered => {
+            kernel_boot_log("syscall subset: cow read: the private copy was refused, so EFAULT with the offset kept and the shared page intact; the retry delivered the same bytes\n");
+        }
+    }
     if (unified_fd_table_probe()) {
         // GitHub issue #393: "fds=16" said the table's CAPACITY, which no
         // longer exists. What this probe proves is what it says now: two

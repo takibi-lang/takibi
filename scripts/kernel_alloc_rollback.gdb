@@ -8,7 +8,8 @@
 #
 # $alloc_rollback_point is selected by the runner:
 #   1 process record, 2 kernel stack run, 3 address-space root,
-#   4 image record, 5 fd context, 6 address-space backing record.
+#   4 image record, 5 fd context, 6 address-space backing record,
+#   7 the copy-on-write copy behind a read(2) store.
 #
 # Every point arms after the process-pool baseline and inside the first
 # process-table probe. That probe reports a failed allocation and continues,
@@ -110,7 +111,26 @@ else
             takibi-force-variant-return AddressSpaceBackingReady Missing
             printf "alloc-rollback: forced point=address-space-backing\n"
           else
-            error "unknown alloc-rollback point; expected 1 through 6"
+            if $alloc_rollback_point == 7
+              # #725: the private copy of a shared copy-on-write page that
+              # read(2) is about to store into. The probe shares the page
+              # with a sibling address space, so the resolve takes its
+              # allocating path; fail that allocation once.
+              break kernel_syscall_cow_read_probe
+              continue
+              delete
+              set $alloc_thread = $_thread
+              break address_space_resolve_cow thread $alloc_thread
+              continue
+              delete
+              break page_alloc thread $alloc_thread
+              continue
+              delete
+              takibi-force-variant-return PageAllocResult OutOfMemory
+              printf "alloc-rollback: forced point=cow-read\n"
+            else
+              error "unknown alloc-rollback point; expected 1 through 7"
+            end
           end
         end
       end
