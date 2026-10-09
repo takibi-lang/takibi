@@ -1089,11 +1089,18 @@ base_type_expr:
          struct value-parameter somewhere in the file (Generic_scope.mem);
          everywhere else array_size's IDENT case already rejects an
          unresolved name at parse time. *)
-  | LBRACKET RBRACKET t = type_expr { TypeSlice (t, 0) }
+  | LBRACKET RBRACKET t = type_expr { TypeSlice (t, 0, Ast.SliceWritable) }
     (* []T -- slice with no compile-time minimum length *)
+  | LBRACKET RBRACKET CONST t = type_expr { TypeSlice (t, 0, Ast.SliceReadonly) }
+    (* []const T -- readonly slice (GitHub issue #724) *)
+  | LBRACKET CONST t = type_expr SEMI n = array_size DOTDOT RBRACKET
+    { match n with
+      | Ast.ASLit k -> TypeSlice (t, k, Ast.SliceReadonly)
+      | _ -> raise (Types.TypeError ($startpos,
+          "a readonly slice minimum must be a literal")) }
   | LBRACKET t = type_expr SEMI n = array_size DOTDOT RBRACKET
     { match n with
-      | Ast.ASLit k -> TypeSlice (t, k)
+      | Ast.ASLit k -> TypeSlice (t, k, Ast.SliceWritable)
       | sym -> TypeSliceSym (t, sym) }
       (* sym is only reachable when the name is a registered generic
          struct value-parameter somewhere in the file, mirroring

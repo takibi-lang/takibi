@@ -174,6 +174,9 @@ parameter value, or top-level declaration name.
   carrying a compile-time-known *minimum* length. `[]T` means "minimum 0,
   length unknown at compile time"; `[T; N..]` means "at least N elements,
   guaranteed". See "Slices" below.
+- **`[]const T` / `[const T; N..]`** is a readonly slice (GitHub issue
+  #724): the same fat value, admitting reads only. A writable slice widens
+  into it implicitly; the reverse direction is a compile error.
 - **`fn(T...) -> R`** is a function pointer with unknown call effects.
   **`fn !{}(T...) -> R`** is explicitly operational-effect-free; rows such
   as **`fn !{may_block}(T...) -> R`** state the permitted call effects. LLVM
@@ -2150,6 +2153,14 @@ contents can be matched.
 type's own `N` is a compile-time-proven *lower bound* on that runtime
 length, not the exact length.
 
+`[]const T` and `[const T; N..]` are the readonly forms (GitHub issue
+#724). They admit indexing reads, iteration, subslices (which stay
+readonly), `.len`, `slice_eq` and `slice_copy`'s source side; they reject
+element stores and every conversion to a writable slice or raw pointer
+outside `unsafe`. `[]T` flows into a `[]const T` position; the minimum
+length rule applies unchanged. A slice made from an array place reached
+through a shared `&T` is readonly whatever slice type the cast spells.
+
 **Creation**:
 - `bs"literal"` -- a bounded byte-slice literal with compile-time minimum
   length equal to its decoded byte count. This is the concise/default form
@@ -2630,9 +2641,17 @@ fn f() {
   explicit `(*r).field` places. Their addresses may produce a shared
   reference, but cannot produce a mutable reference or a writable raw alias
   through a shared reference.
-  Slice values do not carry shared-reference readonly provenance: an inline
-  array converted to a slice can expose a writable alias. The direct-place
-  restriction above does not establish readonly behavior for those aliases.
+  An inline array reached through a shared reference becomes a readonly
+  slice (`[]const T`) when converted with `as []T` or subsliced, at any
+  field, index, or `(*r)` depth (GitHub issue #724). The readonly type
+  travels with the value through copies, subslices, struct fields and call
+  arguments: element stores, `&s[i]` as a writable alias, a cast to a raw
+  pointer outside `unsafe`, a cast back to `[]T`, and passing it where `[]T`
+  is required (including `slice_copy`'s destination) are compile errors.
+  Such a field cannot decay to a bare `*T` either. This is a permission
+  guarantee for the slice derived from `&T`, not alias exclusivity: a
+  `&mut T` or a writable slice of the same storage held elsewhere can still
+  write it.
 - **No arithmetic, no indexing, no other casts -- bit-opaque, no `unsafe`
   escape.** `r + 1`, `r[i]`, and any cast into `&T`/`&mut T` other than
   the two forms below are compile errors, unconditionally (forgery

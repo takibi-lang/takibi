@@ -67,7 +67,7 @@ let rec mentions_type_param (t : Ast.type_expr) : bool =
   | Ast.TypeGenericInst (n, args) ->
       mem_type n || List.exists mentions_type_param args
   | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeArray (t, _)
-  | Ast.TypeSlice (t, _) | Ast.TypeBorrow t | Ast.TypeBorrowMut t
+  | Ast.TypeSlice (t, _, _) | Ast.TypeBorrow t | Ast.TypeBorrowMut t
   | Ast.TypeSink t | Ast.TypeRef t | Ast.TypeRefMut t
   | Ast.TypeAlignedPtr (_, t) | Ast.TypeSingleton (t, _)
   | Ast.TypeExists (_, _, t) | Ast.TypeRefined (_, _, t)

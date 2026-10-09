@@ -102,13 +102,13 @@ let rec transform ~(subst : string -> type_expr option)
   | TypeSliceSym (t, sz) ->
       let elem = go t in
       (match eval_size ~resolve_ty:go vsubst sz with
-       | Some n -> TypeSlice (elem, n)
+       | Some n -> TypeSlice (elem, n, SliceWritable)
        | None -> raise (Types.TypeError (Lexing.dummy_pos,
            "BUG: an unresolved symbolic slice minimum escaped monomorphization")))
   | TypePtr t -> TypePtr (go t)
   | TypeIo t -> TypeIo (go t)
   | TypeArray (t, n) -> TypeArray (go t, n)
-  | TypeSlice (t, n) -> TypeSlice (go t, n)
+  | TypeSlice (t, n, a) -> TypeSlice (go t, n, a)
   | TypeFn (ps, r, eff) -> TypeFn (List.map go ps, go r, eff)
   | TypeTuple ts -> TypeTuple (List.map go ts)
   | TypeBorrow t -> TypeBorrow (go t)
@@ -656,7 +656,7 @@ let discover_value_generic_params
     | TypePtr t | TypeIo t | TypeBorrow t | TypeBorrowMut t | TypeSink t
     | TypeRef t | TypeRefMut t
     | TypeAlignedPtr (_, t) -> scan_ty t
-    | TypeArray (t, _) | TypeSlice (t, _)
+    | TypeArray (t, _) | TypeSlice (t, _, _)
     | TypeArraySym (t, _) | TypeSliceSym (t, _) -> scan_ty t
     | TypeFn (ps, r, _) -> List.iter scan_ty ps; scan_ty r
     | TypeTuple ts -> List.iter scan_ty ts
@@ -812,8 +812,8 @@ let rec unify_arg ?(trace = fun _ -> ())
   | TypeArray (a, _) ->
       (match concrete_ty with TypeArray (b, _) -> u a b
        | _ -> mismatch template_ty concrete_ty)
-  | TypeSlice (a, _) ->
-      (match concrete_ty with TypeSlice (b, _) -> u a b
+  | TypeSlice (a, _, _) ->
+      (match concrete_ty with TypeSlice (b, _, _) -> u a b
        | _ -> mismatch template_ty concrete_ty)
   | TypeAlignedPtr (_, a) ->
       (match concrete_ty with TypeAlignedPtr (_, b) -> u a b
@@ -1381,7 +1381,7 @@ let run ?(explain_inference = false) (prog : toplevel list) : toplevel list =
     let rec type_needs_layout = function
       | TypeArraySym (t, sz) | TypeSliceSym (t, sz) ->
           type_needs_layout t || size_expr_needs_layout sz
-      | TypePtr t | TypeIo t | TypeArray (t, _) | TypeSlice (t, _)
+      | TypePtr t | TypeIo t | TypeArray (t, _) | TypeSlice (t, _, _)
       | TypeBorrow t | TypeBorrowMut t | TypeSink t | TypeRef t | TypeRefMut t
       | TypeAlignedPtr (_, t) | TypeSingleton (t, _)
       | TypeRefined (_, _, t) | TypeMultiple (_, t) ->

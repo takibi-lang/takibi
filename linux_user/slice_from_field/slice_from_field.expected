@@ -7,4 +7,6 @@ slice_eq over two element fields separates them: true
 a field of a field is a place too (len, [0], [3]): 64 1 4
 a sibling field is undisturbed by the nested write: true
 the slice's minimum is the field's own declared length: true
+a shared-reference field slice reads back (sum, [1..<3] sum, eq, copied): 6 3 1 7
+a writable field slice widens into the readonly reader: true
 done

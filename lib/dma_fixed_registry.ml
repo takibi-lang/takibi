@@ -77,7 +77,7 @@ let rec type_mentions_token = function
       || is_initial_authority_variant name
       || Option.is_some (record_of_slot_type name)
   | Ast.TypePtr ty | Ast.TypeAlignedPtr (_, ty) | Ast.TypeIo ty
-  | Ast.TypeArray (ty, _) | Ast.TypeSlice (ty, _)
+  | Ast.TypeArray (ty, _) | Ast.TypeSlice (ty, _, _)
   | Ast.TypeBorrow ty | Ast.TypeBorrowMut ty | Ast.TypeSink ty
   | Ast.TypeSingleton (ty, _) | Ast.TypeRefined (_, _, ty)
   | Ast.TypeMultiple (_, ty) | Ast.TypeExists (_, _, ty)

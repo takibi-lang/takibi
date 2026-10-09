@@ -1666,7 +1666,7 @@ let rec is_indexed_owner_ty t = match repr t with
 
 let rec contains_singleton_ty t = match repr t with
   | TSingleton _ -> true
-  | TPtr t | TIo t | TArray (t, _) | TSlice (t, _)
+  | TPtr t | TIo t | TArray (t, _) | TSlice (t, _, _)
   | TAlignedPtr (_, t) -> contains_singleton_ty t
   | TTuple ts -> List.exists contains_singleton_ty ts
   | TFun (args, ret, _) ->
@@ -1675,7 +1675,7 @@ let rec contains_singleton_ty t = match repr t with
 
 let rec contains_view_ty t = match repr t with
   | TView _ -> true
-  | TPtr t | TIo t | TArray (t, _) | TSlice (t, _)
+  | TPtr t | TIo t | TArray (t, _) | TSlice (t, _, _)
   | TAlignedPtr (_, t) | TSingleton (t, _) -> contains_view_ty t
   | TTuple ts -> List.exists contains_view_ty ts
   | TFun (args, ret, _) ->
@@ -1685,7 +1685,7 @@ let rec contains_view_ty t = match repr t with
 
 let rec contains_variant_ty t = match repr t with
   | TVariant _ -> true
-  | TPtr t | TIo t | TArray (t, _) | TSlice (t, _)
+  | TPtr t | TIo t | TArray (t, _) | TSlice (t, _, _)
   | TAlignedPtr (_, t) | TSingleton (t, _) -> contains_variant_ty t
   | TTuple ts -> List.exists contains_variant_ty ts
   | TFun (args, ret, _) ->
@@ -1695,7 +1695,7 @@ let rec contains_variant_ty t = match repr t with
 
 let rec contains_kinded_variant_ty t = match repr t with
   | TVariant (name, _) -> Hashtbl.mem variant_kinds name
-  | TPtr t | TIo t | TArray (t, _) | TSlice (t, _)
+  | TPtr t | TIo t | TArray (t, _) | TSlice (t, _, _)
   | TAlignedPtr (_, t) | TSingleton (t, _) -> contains_kinded_variant_ty t
   | TTuple ts -> List.exists contains_kinded_variant_ty ts
   | TFun (args, ret, _) ->
@@ -1712,7 +1712,7 @@ let type_has_explicit_function_effect senv ty =
     | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeBorrowMut t
     | Ast.TypeSink t | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t) | Ast.TypeSingleton (t, _)
     | Ast.TypeAlignedPtr (_, t) | Ast.TypeArray (t, _)
-    | Ast.TypeSlice (t, _) -> visit seen t
+    | Ast.TypeSlice (t, _, _) -> visit seen t
     | Ast.TypeTuple ts -> List.exists (visit seen) ts
     | Ast.TypeExists (_, sort, body) -> visit seen sort || visit seen body
     | Ast.TypeNamed name | Ast.TypeIndexed (name, _) ->
@@ -1851,7 +1851,7 @@ let is_stable_owner_field sname fname =
 
 let rec contains_fixed_dma_record_ty t = match repr t with
   | TStruct name -> Dma_fixed_registry.is_fixed name
-  | TPtr t | TAlignedPtr (_, t) | TArray (t, _) | TSlice (t, _)
+  | TPtr t | TAlignedPtr (_, t) | TArray (t, _) | TSlice (t, _, _)
   | TIo t | TRef t | TRefMut t | TSingleton (t, _)
   | TExists (_, _, _, t) -> contains_fixed_dma_record_ty t
   | _ -> false
@@ -1874,7 +1874,7 @@ let rec type_contains_stable_owner (ty : Ast.type_expr) : bool =
   match ty with
   | Ast.TypeNamed name | Ast.TypeIndexed (name, _) ->
       Hashtbl.mem stable_owner_structs name
-  | Ast.TypeIo t | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _)
+  | Ast.TypeIo t | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _, _)
   | Ast.TypeBorrow t | Ast.TypeBorrowMut t | Ast.TypeSink t
   | Ast.TypeSingleton (t, _) | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t)
   | Ast.TypeExists (_, _, t) | Ast.TypeArraySym (t, _)
@@ -1890,7 +1890,7 @@ let rec type_contains_stable_owner (ty : Ast.type_expr) : bool =
    aggregate must not turn whole-container copies back on. *)
 let rec contains_stable_owner_value_ty t = match repr t with
   | TStruct name | TIndexedStruct (name, _) -> Hashtbl.mem stable_owner_structs name
-  | TIo t | TArray (t, _) | TSlice (t, _) | TSingleton (t, _)
+  | TIo t | TArray (t, _) | TSlice (t, _, _) | TSingleton (t, _)
   | TExists (_, _, _, t) -> contains_stable_owner_value_ty t
   | TTuple ts -> List.exists contains_stable_owner_value_ty ts
   | TFun (args, ret, _) ->
@@ -2021,7 +2021,7 @@ let check_private_type_construction (loc : Ast.loc) (target : Ast.type_expr) =
     | Ast.TypeSink t
     | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t) | Ast.TypeAlignedPtr (_, t)
     | Ast.TypeSingleton (t, _)
-    | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> walk t
+    | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _, _) -> walk t
     | Ast.TypeIndexed (n, _) when
         Hashtbl.find_opt indexed_struct_kinds n <> Some Ast.KindPlain ->
         (match Hashtbl.find_opt private_struct_lit n with
@@ -2592,8 +2592,8 @@ let narrow_from_cond senv tyenv (cond : Ast.expr) (then_body : Ast.stmt list) =
     else match StringMap.find_opt name env with
       | Some (t, is_mut) ->
           (match repr t with
-           | TSlice (el, m) when k > m ->
-               StringMap.add name (TSlice (el, k), is_mut) env
+           | TSlice (el, m, access) when k > m ->
+               StringMap.add name (TSlice (el, k, access), is_mut) env
            | _ -> env)
       | None -> env
   ) env (Ast.slice_len_mins ~resolve_const:Const_env.find
@@ -2633,7 +2633,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
   | IntLit _    -> fresh ()  (* polymorphic: unifies with any integer type via context *)
   | BoolLit _   -> TBool
   | StringLit _ -> TPtr TU8
-  | ByteSliceLit bytes -> TSlice (TU8, String.length bytes)
+  | ByteSliceLit bytes -> TSlice (TU8, String.length bytes, Ast.SliceWritable)
   | ViewLit (name, args) ->
       if not (Hashtbl.mem view_kinds name) then
         raise (TypeError (e.loc, Printf.sprintf "unknown erased view '%s'" name));
@@ -3024,7 +3024,11 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       inner
   | AddrOf inner -> infer_addrof_wrapped senv eenv tyenv fenv e inner `Ptr
   | Cast (target_ty, e) ->
-      let src_ty = infer_expr senv eenv tyenv fenv e in
+      let src_ty = match target_ty, e.desc with
+        | Ast.TypeSlice _, FieldGet (base_expr, fname) ->
+            infer_field_access ~slice_source:true ~decay:true
+              senv eenv tyenv fenv e.loc base_expr fname
+        | _ -> infer_expr senv eenv tyenv fenv e in
       if contains_fixed_dma_record_ty src_ty
          || contains_fixed_dma_record_ty (of_ast target_ty) then
         raise (TypeError (e.loc,
@@ -3177,7 +3181,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                        (to_string src_ty) (to_string tgt))))
             | _ ->
            (match target_ty with
-            | Ast.TypeSlice (el_ast, want_min) ->
+            | Ast.TypeSlice (el_ast, want_min, want_access) ->
                 (* Slice creation cast. Sources:
                    - an array-typed NO_COPY: a variable, or (issue #372) a
                      struct field, through a pointer or a value struct. Its
@@ -3190,13 +3194,18 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                    - another slice (min-length may only be relaxed) *)
                 let el_want = of_ast el_ast in
                 (match repr src_ty with
-                 | TSlice (el_s, m) ->
+                 | TSlice (el_s, m, src_access) ->
                      unify_at e.loc el_s el_want;
                      if m < want_min then
                        raise (TypeError (e.loc, Printf.sprintf
                          "cannot cast %s to %s: minimum length %d is not proven"
                          (to_string src_ty) (to_string tgt) want_min));
-                     TSlice (el_want, m)
+                     if src_access = Ast.SliceReadonly
+                        && want_access = Ast.SliceWritable then
+                       raise (TypeError (e.loc, Printf.sprintf
+                         "cannot cast readonly %s to writable %s"
+                         (to_string src_ty) (to_string tgt)));
+                     TSlice (el_want, m, want_access)
                  | _ ->
                      (match e.desc with
                       | Ast.Var _ | Ast.FieldGet _ ->
@@ -3222,7 +3231,12 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                                    "cannot cast [_; %d] to %s: array is shorter \
                                     than the required minimum %d" n (to_string tgt) want_min));
                                Hashtbl.replace slice_cast_len e.loc n;
-                               TSlice (el_want, n)
+                               let access =
+                                 if place_reads_through_shared_ref
+                                      senv eenv tyenv fenv e
+                                 then Ast.SliceReadonly
+                                 else want_access in
+                               TSlice (el_want, n, access)
                            | t' -> raise (TypeError (e.loc, Printf.sprintf
                                "cannot cast '%s' to a slice: it carries no length \
                                 evidence -- only an array variable, an array-typed \
@@ -3242,7 +3256,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                             raise (TypeError (e.loc, Printf.sprintf
                               "cannot cast a %d-byte string literal to %s"
                               n (to_string tgt)));
-                          TSlice (el_want, n)
+                          TSlice (el_want, n, want_access)
                       | _ -> raise (TypeError (e.loc,
                           "slice cast requires an array variable, an \
                            array-typed struct field, a string literal, or a \
@@ -3345,7 +3359,15 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                          "cannot cast pointer to %s; \
                           use `(ptr as usize) as %s` to make the truncation explicit"
                          (to_string tgt) (to_string tgt))))
-            | TSlice (elem, n) ->
+            | TSlice (elem, n, access) ->
+                if access = Ast.SliceReadonly then begin
+                  if !unsafe_depth = 0 then
+                    raise (TypeError (e.loc, Printf.sprintf
+                      "cannot cast readonly %s to a raw pointer: the pointer \
+                       would be a writable alias (GitHub issue #724)"
+                      (to_string src_ty)));
+                  note_type_checker_unsafe_use ()
+                end;
                 (match tgt with
                  | TPtr TU8 ->
                      (* Explicit bridge from the slice world back into the
@@ -3522,7 +3544,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                        Printf.sprintf "index %Ld is out of bounds for array of size %d" k64 n)))
             | _ -> ());
            elem
-       | TSlice (elem, _) ->
+       | TSlice (elem, _, _) ->
            require_usize_index idx.loc it;
            elem  (* runtime length; codegen elides the check
                     only when idx's range fits the MINIMUM *)
@@ -3632,7 +3654,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
         | _ -> None
       in
       (match repr vt with
-       | TSlice (elem, m) ->
+       | TSlice (elem, m, access) ->
            (* Proven subslice: 0 <= lo, lo <= hi, hi <= m must all follow
               from the bounds' STATIC ranges (m is a lower bound of the
               runtime length, so hi <= m implies hi <= len), except that
@@ -3646,8 +3668,8 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
               when la >= 0 && (lb - 1 <= ha || same_base_len <> None)
                    && hb - 1 <= m ->
                 (match same_base_len with
-                 | Some l -> TSlice (elem, l)
-                 | None   -> TSlice (elem, ha - (lb - 1)))
+                 | Some l -> TSlice (elem, l, access)
+                 | None   -> TSlice (elem, ha - (lb - 1), access))
             | lo_r, hi_r ->
                 (match const_bounds with
                  | Some a, Some b when a < 0 || a > b ->
@@ -3674,8 +3696,11 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                                 ha - (lb - 1)
                             | _ -> 0)
                      in
-                     TSlice (elem, min_after)))
+                     TSlice (elem, min_after, access)))
        | TArray (elem, n) ->
+           let array_access =
+             if place_reads_through_shared_ref senv eenv tyenv fenv base
+             then Ast.SliceReadonly else Ast.SliceWritable in
            (* Arrays have an EXACT static length, so bounds must be provable
               outright; out-of-range constants are definite errors, and
               runtime bounds have no checked form here (cast to a slice
@@ -3685,8 +3710,8 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
               when la >= 0 && (lb - 1 <= ha || same_base_len <> None)
                    && hb - 1 <= n ->
                 (match same_base_len with
-                 | Some l -> TSlice (elem, l)
-                 | None   -> TSlice (elem, ha - (lb - 1)))
+                 | Some l -> TSlice (elem, l, array_access)
+                 | None   -> TSlice (elem, ha - (lb - 1), array_access))
             | _ ->
                 (match const_bounds with
                  | Some a, Some b ->
@@ -3722,8 +3747,8 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                    rule: same formula as llvm_gen's sub_of_ptr). *)
                 (match bound_range lo_e lo_t, bound_range hi_e hi_t with
                  | Some (la, lb), Some (ha, _) when la >= 0 && lb - 1 <= ha ->
-                     TSlice (elem, ha - (lb - 1))
-                 | _ -> TSlice (elem, 0)))
+                     TSlice (elem, ha - (lb - 1), Ast.SliceWritable)
+                 | _ -> TSlice (elem, 0, Ast.SliceWritable)))
        | t -> raise (TypeError (e.loc,
            Printf.sprintf "subslice on non-slice/array/pointer type '%s'" (to_string t))))
 
@@ -4318,7 +4343,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
             | TPtr (TStruct token)
               when token = Dma_fixed_registry.cpu_token record ->
                 if operation = "dma_cpu_ptr" then TPtr (of_ast elem)
-                else TSlice (of_ast elem, count)
+                else TSlice (of_ast elem, count, Ast.SliceWritable)
             | _ -> raise (TypeError (owner.loc, Printf.sprintf
                 "%s for '%s' requires its CPU authority token"
                 operation record)))
@@ -4639,8 +4664,8 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            let dt = infer_expr senv eenv tyenv fenv d in
            let st = infer_expr senv eenv tyenv fenv s in
            let ev = fresh () in
-           unify_at d.loc dt (TSlice (ev, 0));
-           unify_at s.loc st (TSlice (ev, 0));
+           unify_at d.loc dt (TSlice (ev, 0, Ast.SliceWritable));
+           unify_at s.loc st (TSlice (ev, 0, Ast.SliceReadonly));
            TUsize
        | _ -> raise (TypeError (e.loc,
            "slice_copy expects 2 arguments: slice_copy(dst, src)")))
@@ -4653,8 +4678,8 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            let at = infer_expr senv eenv tyenv fenv a in
            let bt = infer_expr senv eenv tyenv fenv b in
            let ev = fresh () in
-           unify_at a.loc at (TSlice (ev, 0));
-           unify_at b.loc bt (TSlice (ev, 0));
+           unify_at a.loc at (TSlice (ev, 0, Ast.SliceReadonly));
+           unify_at b.loc bt (TSlice (ev, 0, Ast.SliceReadonly));
            TBool
        | _ -> raise (TypeError (e.loc,
            "slice_eq expects 2 arguments: slice_eq(a, b)")))
@@ -5012,7 +5037,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                "cannot store an indexed owner through a pointer: it would escape obligation tracking"));
            TVoid
        | Index (base, idx) ->
-           check_no_write_through_shared_ref senv eenv tyenv fenv base;
+           check_no_write_through_shared_ref senv eenv tyenv fenv lhs;
            let vt = place_undecayed_type senv eenv tyenv fenv base in
            record_raw_deref e.loc "store-index" vt;
            (* GitHub issue #534: `w.f[i] = v` is `w.f = v` for one element,
@@ -5044,7 +5069,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                              Printf.sprintf "index %Ld is out of bounds for array of size %d" k64 n)))
                   | _ -> ());
                  elem
-             | TSlice (elem, _) -> require_usize_index idx.loc it; elem
+             | TSlice (elem, _, _) -> require_usize_index idx.loc it; elem
              | TPtr   elem      ->
                  check_ptr_arith_complete e.loc (repr vt);
                  require_isize_offset idx.loc it; strip_io elem
@@ -5234,6 +5259,25 @@ and check_no_temporary_field_place ~operation senv eenv tyenv fenv
    intermediate field (not itself &-typed) never matches TRef, so this
    never rejects legitimate code, only the previously-unchecked shared
    -reference-write case. *)
+(* GitHub issue #724: true when the place [e] is reached through a shared
+   &T, at any FieldGet/Index/Deref depth. A slice made from such a place is
+   readonly; the same chain check_no_write_through_shared_ref walks. *)
+and place_reads_through_shared_ref senv eenv tyenv fenv (e : Ast.expr) : bool =
+  match e.desc with
+  | FieldGet (inner_expr, _) ->
+      (match repr (infer_expr senv eenv tyenv fenv inner_expr) with
+       | TRef _ -> true
+       | _ -> place_reads_through_shared_ref senv eenv tyenv fenv inner_expr)
+  | Deref pointer ->
+      (match strip_singleton (infer_expr senv eenv tyenv fenv pointer) with
+       | TRef _ -> true
+       | _ -> false)
+  | Index (base, _) ->
+      (match repr (place_undecayed_type senv eenv tyenv fenv base) with
+       | TSlice (_, _, Ast.SliceReadonly) -> true
+       | _ -> place_reads_through_shared_ref senv eenv tyenv fenv base)
+  | _ -> false
+
 and check_no_write_through_shared_ref senv eenv tyenv fenv (e : Ast.expr) : unit =
   match e.desc with
   | FieldGet (inner_expr, _) ->
@@ -5253,7 +5297,14 @@ and check_no_write_through_shared_ref senv eenv tyenv fenv (e : Ast.expr) : unit
              "cannot write through a shared reference '%s'; declare it '&mut ...' instead"
              (to_string pointer_ty)))
        | _ -> ())
-  | Index (base, _) -> check_no_write_through_shared_ref senv eenv tyenv fenv base
+  | Index (base, _) ->
+      (match repr (place_undecayed_type senv eenv tyenv fenv base) with
+       | TSlice (_, _, Ast.SliceReadonly) as slice_ty ->
+           raise (TypeError (base.loc, Printf.sprintf
+             "cannot write through readonly slice '%s'; a slice made from \
+              a shared reference stays readonly (GitHub issue #724)"
+             (to_string slice_ty)))
+       | _ -> check_no_write_through_shared_ref senv eenv tyenv fenv base)
   | _ -> ()
 
 (* GitHub issue #314/#319: shared &expr (AddrOf) validation/typing, shared
@@ -5389,7 +5440,8 @@ and infer_addrof_wrapped senv eenv tyenv fenv (e : Ast.expr) (inner : Ast.expr)
    messages can never drift between the two call sites -- the only actual
    difference between them is the one `match ... with TArray -> TPtr ...`
    step at the very end. *)
-and infer_field_access ~decay senv eenv tyenv fenv (loc : Ast.loc)
+and infer_field_access ?(slice_source = false) ~decay senv eenv tyenv fenv
+    (loc : Ast.loc)
     (base_expr : Ast.expr) (fname : string) : ty =
   let bt = infer_expr senv eenv tyenv fenv base_expr in
   record_raw_deref loc "field" bt;
@@ -5445,6 +5497,19 @@ and infer_field_access ~decay senv eenv tyenv fenv (loc : Ast.loc)
                       orders the store"
                      sname fname fname));
                  check_no_nested_ptr_mint loc inner;
+                 (* GitHub issue #724: a bare *elem is a writable alias, so
+                    shared storage decays only as a slice cast's source,
+                    which then makes the slice readonly. *)
+                 let through_shared = match repr bt with
+                   | TRef _ -> true
+                   | _ -> place_reads_through_shared_ref
+                            senv eenv tyenv fenv base_expr in
+                 if not slice_source && through_shared then
+                   raise (TypeError (loc, Printf.sprintf
+                     "array field '%s.%s' is reached through a shared \
+                      reference; read it element by element or as \
+                      `... as []const T`, not as a writable pointer"
+                     sname fname));
                  TPtr inner  (* array field decays to *elem *)
              | TIo    inner      -> inner        (* io field returns value type T (volatile handled in codegen) *)
              | t                 -> t)
@@ -5945,7 +6010,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
           | None -> ty
           | Some et ->
               (match repr ty, repr et with
-               | TSlice (el, m1), TSlice (_, m2) when m2 > m1 -> TSlice (el, m2)
+               | TSlice (el, m1, a), TSlice (_, m2, _) when m2 > m1 -> TSlice (el, m2, a)
                (* `base` is a NESTED field inside the already-repr'd `et`,
                   so it is not itself guaranteed dereferenced (repr only
                   resolves the top-level TVar chain, not fields nested
@@ -6337,7 +6402,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
   | ForEach (name, se, body) ->
       let st = infer_expr senv eenv tyenv fenv se in
       (match repr st with
-       | TSlice (el, _) ->
+       | TSlice (el, _, _) ->
            (* Element is an immutable per-iteration value of the element type. *)
            locally_bound_names := StringSet.add name !locally_bound_names;  (* issue #214 *)
            record_stmt_binding_type s 0 TUsize;
@@ -6558,7 +6623,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
                "match on a primitive integer type requires a '_' wildcard arm \
                 (an integer's value space cannot be exhaustively listed)"));
            (tyenv, raw_locals')
-       | TSlice (TU8, minimum) ->
+       | TSlice (TU8, minimum, _) ->
            let has_wild = ref false in
            let seen = Hashtbl.create 4 in
            let raw_locals' = List.fold_left (fun rl arm ->
@@ -7153,7 +7218,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeVariant (name, _) ->
         Dma_fixed_registry.type_mentions_token ty || nested name
     | Ast.TypePtr t | Ast.TypeAlignedPtr (_, t) | Ast.TypeIo t
-    | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _)
+    | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _, _)
     | Ast.TypeBorrow t | Ast.TypeBorrowMut t | Ast.TypeSink t
     | Ast.TypeSingleton (t, _) | Ast.TypeRefined (_, _, t)
     | Ast.TypeMultiple (_, t) | Ast.TypeExists (_, _, t)
@@ -7218,7 +7283,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeBorrow t | Ast.TypeBorrowMut t | Ast.TypeSink t | Ast.TypeIo t
     | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t) | Ast.TypeSingleton (t, _)
     | Ast.TypeAlignedPtr (_, t) | Ast.TypePtr t
-    | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> payload_kind t
+    | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _, _) -> payload_kind t
     | Ast.TypeTuple ts ->
         List.fold_left (fun kind t -> join_kind kind (payload_kind t))
           Ast.KindPlain ts
@@ -7394,7 +7459,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     match ty with
     | Ast.TypeNamed name | Ast.TypeIndexed (name, _) ->
         Hashtbl.mem stable_owner_structs name
-    | Ast.TypeIo t | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _)
+    | Ast.TypeIo t | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _, _)
     | Ast.TypeBorrow t | Ast.TypeBorrowMut t | Ast.TypeSink t
     | Ast.TypeSingleton (t, _) | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t)
     | Ast.TypeExists (_, _, t) -> ast_contains_stable_owner_value t
@@ -7618,7 +7683,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeBorrowMut t
     | Ast.TypeSink t
     | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t) | Ast.TypeAlignedPtr (_, t)
-    | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> validate_static_type loc t
+    | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _, _) -> validate_static_type loc t
     | Ast.TypeFn (args, ret, effects) ->
         Option.iter
           (validate_effects ~allow_declaration_only:false ~allow_noreturn:false loc "function pointer type" "fn")
@@ -7637,7 +7702,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           "opaque struct '%s' is incomplete and may only be used behind a pointer" name))
     | Ast.TypePtr inner -> validate_complete_type loc true inner
     | Ast.TypeIo inner -> validate_complete_type loc behind_ptr inner
-    | Ast.TypeArray (inner, _) | Ast.TypeSlice (inner, _) ->
+    | Ast.TypeArray (inner, _) | Ast.TypeSlice (inner, _, _) ->
         validate_complete_type loc false inner
     | Ast.TypeFn (args, ret, _) ->
         List.iter (validate_complete_type loc false) args;
@@ -7654,7 +7719,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeBorrow _ | Ast.TypeBorrowMut _ | Ast.TypeSink _ -> true
     | Ast.TypePtr t | Ast.TypeIo t -> contains_borrow t
     | Ast.TypeTuple ts -> List.exists contains_borrow ts
-    | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> contains_borrow t
+    | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _, _) -> contains_borrow t
     | Ast.TypeFn (args, ret, _) ->
         List.exists contains_borrow args || contains_borrow ret
     | Ast.TypeRefined (_, _, base) | Ast.TypeMultiple (_, base) | Ast.TypeSingleton (base, _) -> contains_borrow base
@@ -7671,7 +7736,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeRef _ | Ast.TypeRefMut _ -> true
     | Ast.TypePtr t | Ast.TypeIo t -> contains_ref t
     | Ast.TypeTuple ts -> List.exists contains_ref ts
-    | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> contains_ref t
+    | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _, _) -> contains_ref t
     | Ast.TypeFn (args, ret, _) ->
         List.exists contains_ref args || contains_ref ret
     | Ast.TypeRefined (_, _, base) | Ast.TypeMultiple (_, base) | Ast.TypeSingleton (base, _) -> contains_ref base
@@ -7703,7 +7768,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeSink t
     | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t) | Ast.TypeSingleton (t, _)
     | Ast.TypeAlignedPtr (_, t)
-    | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> type_mentions_linear t
+    | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _, _) -> type_mentions_linear t
     | Ast.TypeTuple ts -> List.exists type_mentions_linear ts
     (* Variants have their own storage rules through
        type_mentions_variant/type_mentions_kinded_variant below. Do not
@@ -7718,7 +7783,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeSink t
     | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t) | Ast.TypeSingleton (t, _)
     | Ast.TypeAlignedPtr (_, t) | Ast.TypeArray (t, _)
-    | Ast.TypeSlice (t, _) -> type_mentions_view t
+    | Ast.TypeSlice (t, _, _) -> type_mentions_view t
     | Ast.TypeTuple ts -> List.exists type_mentions_view ts
     | Ast.TypeFn (args, ret, _) ->
         List.exists type_mentions_view args || type_mentions_view ret
@@ -7735,7 +7800,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeSink t
     | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t)
     | Ast.TypeAlignedPtr (_, t) | Ast.TypeArray (t, _)
-    | Ast.TypeSlice (t, _) -> type_mentions_variant t
+    | Ast.TypeSlice (t, _, _) -> type_mentions_variant t
     | Ast.TypeTuple ts -> List.exists type_mentions_variant ts
     | Ast.TypeFn (args, ret, _) ->
         List.exists type_mentions_variant args || type_mentions_variant ret
@@ -7748,7 +7813,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeSink t
     | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t)
     | Ast.TypeAlignedPtr (_, t) | Ast.TypeArray (t, _)
-    | Ast.TypeSlice (t, _) -> type_mentions_kinded_variant t
+    | Ast.TypeSlice (t, _, _) -> type_mentions_kinded_variant t
     | Ast.TypeTuple ts -> List.exists type_mentions_kinded_variant ts
     | Ast.TypeFn (args, ret, _) ->
         List.exists type_mentions_kinded_variant args
@@ -7774,7 +7839,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeSink t
     | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t) | Ast.TypeSingleton (t, _)
     | Ast.TypeAlignedPtr (_, t) | Ast.TypeArray (t, _)
-    | Ast.TypeSlice (t, _) -> type_mentions_exists t
+    | Ast.TypeSlice (t, _, _) -> type_mentions_exists t
     | Ast.TypeTuple ts -> List.exists type_mentions_exists ts
     | Ast.TypeFn (args, ret, _) ->
         List.exists type_mentions_exists args || type_mentions_exists ret
@@ -7789,7 +7854,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeSink t
     | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t) | Ast.TypeSingleton (t, _)
     | Ast.TypeAlignedPtr (_, t) | Ast.TypeArray (t, _)
-    | Ast.TypeSlice (t, _) -> type_mentions_indexed_owner t
+    | Ast.TypeSlice (t, _, _) -> type_mentions_indexed_owner t
     | Ast.TypeTuple ts -> List.exists type_mentions_indexed_owner ts
     | Ast.TypeFn (args, ret, _) ->
         List.exists type_mentions_indexed_owner args || type_mentions_indexed_owner ret
@@ -7801,7 +7866,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeBorrowMut t
     | Ast.TypeSink t
     | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t) | Ast.TypeAlignedPtr (_, t)
-    | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> type_mentions_singleton t
+    | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _, _) -> type_mentions_singleton t
     | Ast.TypeTuple ts -> List.exists type_mentions_singleton ts
     | Ast.TypeFn (args, ret, _) ->
         List.exists type_mentions_singleton args || type_mentions_singleton ret
@@ -7811,7 +7876,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   let rec singleton_under_storage inside = function
     | Ast.TypeSingleton _ -> inside
     | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeAlignedPtr (_, t)
-    | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) ->
+    | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _, _) ->
         singleton_under_storage true t
     | Ast.TypeBorrow t | Ast.TypeBorrowMut t | Ast.TypeSink t
     | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t) ->
@@ -7828,7 +7893,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
          | Some (Ast.KindAffine | Ast.KindLinear) -> true
          | _ -> false)
     | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeAlignedPtr (_, t)
-    | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) ->
+    | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _, _) ->
         indexed_owner_under_indirection true t
     | Ast.TypeFn (args, ret, _) ->
         List.exists (indexed_owner_under_indirection true) args
@@ -7847,7 +7912,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeTuple ts ->
         inside || List.exists (tuple_under_indirection inside) ts
     | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeAlignedPtr (_, t)
-    | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) ->
+    | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _, _) ->
         tuple_under_indirection true t
     | Ast.TypeBorrow t | Ast.TypeBorrowMut t | Ast.TypeSink t
     | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t) ->
@@ -7861,7 +7926,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeSink t
     | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t) | Ast.TypeAlignedPtr (_, t)
     | Ast.TypeSingleton (t, _)
-    | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> type_mentions_tuple t
+    | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _, _) -> type_mentions_tuple t
     | Ast.TypeExists (_, _, body) -> type_mentions_tuple body
     | _ -> false
   in
@@ -7919,7 +7984,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | _ -> ()
   in
   let rec linear_inside_container = function
-    | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> type_mentions_linear t
+    | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _, _) -> type_mentions_linear t
     | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeBorrowMut t
     | Ast.TypeSink t
     | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t) | Ast.TypeAlignedPtr (_, t) ->
@@ -8781,7 +8846,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypePtr t -> Ast.TypePtr (erase_static_for_abi t)
     | Ast.TypeIo t -> Ast.TypeIo (erase_static_for_abi t)
     | Ast.TypeArray (t, n) -> Ast.TypeArray (erase_static_for_abi t, n)
-    | Ast.TypeSlice (t, n) -> Ast.TypeSlice (erase_static_for_abi t, n)
+    | Ast.TypeSlice (t, n, a) -> Ast.TypeSlice (erase_static_for_abi t, n, a)
     | Ast.TypeBorrow t -> Ast.TypeBorrow (erase_static_for_abi t)
     | Ast.TypeBorrowMut t -> Ast.TypeBorrowMut (erase_static_for_abi t)
     | Ast.TypeSink t -> Ast.TypeSink (erase_static_for_abi t)
@@ -10248,7 +10313,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           (match Option.map strip_borrow (expr_ast_type base) with
            | Some (Ast.TypePtr inner) | Some (Ast.TypeAlignedPtr (_, inner))
            | Some (Ast.TypeRef inner) | Some (Ast.TypeRefMut inner)
-           | Some (Ast.TypeArray (inner, _)) | Some (Ast.TypeSlice (inner, _)) ->
+           | Some (Ast.TypeArray (inner, _)) | Some (Ast.TypeSlice (inner, _, _)) ->
                Some inner
            | _ -> None)
       | Ast.FieldGet (base, field) ->

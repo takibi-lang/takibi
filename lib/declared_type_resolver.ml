@@ -49,7 +49,7 @@ let rec resolve_type names = function
   | TypePtr t -> TypePtr (resolve_type names t)
   | TypeIo t -> TypeIo (resolve_type names t)
   | TypeArray (t, n) -> TypeArray (resolve_type names t, n)
-  | TypeSlice (t, n) -> TypeSlice (resolve_type names t, n)
+  | TypeSlice (t, n, a) -> TypeSlice (resolve_type names t, n, a)
   | TypeFn (args, ret, effects) ->
       TypeFn
         (List.map (resolve_type names) args, resolve_type names ret, effects)
@@ -241,7 +241,7 @@ let validate prog =
         noncanonical "variant" name "TypeNamed"
     | TypeIndexed (name, _) when StringSet.mem name names.variants ->
         noncanonical "variant" name "TypeIndexed"
-    | TypePtr t | TypeIo t | TypeArray (t, _) | TypeSlice (t, _)
+    | TypePtr t | TypeIo t | TypeArray (t, _) | TypeSlice (t, _, _)
     | TypeBorrow t | TypeBorrowMut t | TypeSink t | TypeRef t | TypeRefMut t
     | TypeRefined (_, _, t) | TypeMultiple (_, t)
     | TypeAlignedPtr (_, t) | TypeSingleton (t, _) ->

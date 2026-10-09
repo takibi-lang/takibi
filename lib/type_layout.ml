@@ -88,7 +88,7 @@ let rec size_align_of_type pos seen ty =
   | TypeArray (elem, n) ->
       let (esz, ealign) = size_align_of_type pos seen elem in
       (esz * n, ealign)
-  | TypeSlice (_, _) ->
+  | TypeSlice (_, _, _) ->
       let (psz, palign) = ptr_size_align () in
       let (lsz, lalign) = size_align_of_type pos seen TypeUsize in
       let off = align_up 0 palign + psz in

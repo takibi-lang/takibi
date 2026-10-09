@@ -150,10 +150,12 @@ type type_expr =
   | TypeMultiple of int * type_expr
     (* multiple(N) usize -- a value divisible by N, with the ordinary
        usize runtime representation. Distinct from align(N) storage. *)
-  | TypeSlice of type_expr * int   (* []T / [T; N..] -- fat pointer (ptr + usize len);
-                                     int = compile-time MINIMUM length (0 = unknown).
-                                      The runtime length is always >= the minimum; index
-                                      proofs and constant subslices check against it. *)
+  | TypeSlice of type_expr * int * slice_access
+    (* []T / [T; N..] / []const T / [const T; N..] -- fat pointer (ptr +
+       usize len); int = compile-time MINIMUM length (0 = unknown). The
+       runtime length is always >= the minimum; index proofs and constant
+       subslices check against it. A readonly slice (GitHub issue #724)
+       admits reads only; a writable slice widens into it, never back. *)
   | TypeBorrow of type_expr        (* parameter-only, shared non-consuming borrow *)
   | TypeBorrowMut of type_expr
     (* parameter-only scoped mutable borrow. The callee receives exclusive
@@ -219,6 +221,9 @@ type type_expr =
        issue #207: lets a size-mismatched backing slice become a real
        compile-time TSlice-subtyping error instead of silently accepting
        any size (an unconstrained `[]T` field enforces nothing). *)
+[@@deriving show]
+
+and slice_access = SliceWritable | SliceReadonly
 [@@deriving show]
 
 and array_size_expr =

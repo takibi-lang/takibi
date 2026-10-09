@@ -61,7 +61,8 @@ type ty =
                              exists in returns/params/locals/literals only,
                              never in storage (fields/arrays/globals). Kind
                              = join of component kinds -- see type_inf. *)
-  | TSlice of ty * int    (* []T / [T; N..] -- fat pointer (ptr + usize len);
+  | TSlice of ty * int * Ast.slice_access
+                          (* []T / [T; N..] -- fat pointer (ptr + usize len);
                              int = compile-time minimum length (0 = unknown) *)
   | TAlignedPtr of int * ty
     (* *align(N) T -- a pointer PROVABLY a multiple of N bytes (GitHub issue
@@ -228,8 +229,11 @@ let rec to_string t =
   | TPtr t -> Printf.sprintf "*%s" (to_string t)   (* *io T prints as "*io T" via TPtr(TIo T) *)
   | TIo  t -> Printf.sprintf "io %s" (to_string t)
   | TArray (t, n) -> Printf.sprintf "[%s; %d]" (to_string t) n
-  | TSlice (t, 0) -> Printf.sprintf "[]%s" (to_string t)
-  | TSlice (t, n) -> Printf.sprintf "[%s; %d..]" (to_string t) n
+  | TSlice (t, 0, Ast.SliceWritable) -> Printf.sprintf "[]%s" (to_string t)
+  | TSlice (t, n, Ast.SliceWritable) -> Printf.sprintf "[%s; %d..]" (to_string t) n
+  | TSlice (t, 0, Ast.SliceReadonly) -> Printf.sprintf "[]const %s" (to_string t)
+  | TSlice (t, n, Ast.SliceReadonly) ->
+      Printf.sprintf "[const %s; %d..]" (to_string t) n
   | TAlignedPtr (n, t) -> Printf.sprintf "*align(%d) %s" n (to_string t)
   | TRef t -> Printf.sprintf "&%s" (to_string t)
   | TRefMut t -> Printf.sprintf "&mut %s" (to_string t)
@@ -276,7 +280,7 @@ let rec occurs rv = function
   | TPtr   t                   -> occurs rv t
   | TIo    t                   -> occurs rv t
   | TArray (t, _)              -> occurs rv t
-  | TSlice (t, _)              -> occurs rv t
+  | TSlice (t, _, _)           -> occurs rv t
   | TAlignedPtr (_, t)         -> occurs rv t
   | TRef t | TRefMut t         -> occurs rv t
   | TTuple ts                  -> List.exists (occurs rv) ts
@@ -293,7 +297,7 @@ let rec function_effect_rows t =
       effects
       :: (List.concat_map function_effect_rows params
           @ function_effect_rows ret)
-  | TPtr t | TIo t | TArray (t, _) | TSlice (t, _)
+  | TPtr t | TIo t | TArray (t, _) | TSlice (t, _, _)
   | TAlignedPtr (_, t) | TSingleton (t, _)
   | TRef t | TRefMut t -> function_effect_rows t
   | TTuple ts -> List.concat_map function_effect_rows ts
@@ -339,7 +343,7 @@ and subst_in_ty old replacement t =
   | TRefinedInt (lo, hi, base) ->
       TRefinedInt (lo, hi, subst_in_ty old replacement base)
   | TTuple ts -> TTuple (List.map (subst_in_ty old replacement) ts)
-  | TSlice (t, n) -> TSlice (subst_in_ty old replacement t, n)
+  | TSlice (t, n, a) -> TSlice (subst_in_ty old replacement t, n, a)
   | TAlignedPtr (n, t) -> TAlignedPtr (n, subst_in_ty old replacement t)
   | TMultiple (n, t) -> TMultiple (n, subst_in_ty old replacement t)
   | TRef t -> TRef (subst_in_ty old replacement t)
@@ -386,7 +390,7 @@ let open_exists_ty t = instantiate_exists_ty ~witness:(rigid_static "_") t
 let rec contains_multiple t =
   match repr t with
   | TMultiple _ -> true
-  | TPtr t | TIo t | TArray (t, _) | TSlice (t, _)
+  | TPtr t | TIo t | TArray (t, _) | TSlice (t, _, _)
   | TAlignedPtr (_, t) | TRef t | TRefMut t | TSingleton (t, _)
   | TRefinedInt (_, _, t) -> contains_multiple t
   | TTuple ts -> List.exists contains_multiple ts
@@ -457,12 +461,19 @@ let rec unify t1 t2 =
      expected) -- Call args, Assign, Return all follow that order. The
      reverse direction is the anti-subtyping guard: an unproven/shorter
      slice cannot flow into a position demanding a longer minimum. *)
-  | TSlice (e1, m1), TSlice (e2, m2) ->
+  | TSlice (e1, m1, a1), TSlice (e2, m2, a2) ->
       if m1 < m2 then
         raise (Unify_error (Printf.sprintf
           "cannot pass %s where %s is required; \
            narrow with if (s.len >= %d) { ... } or a constant subslice"
-          (to_string (TSlice (e1, m1))) (to_string (TSlice (e2, m2))) m2));
+          (to_string (TSlice (e1, m1, a1))) (to_string (TSlice (e2, m2, a2))) m2));
+      (* GitHub issue #724: a writable slice widens into a readonly one;
+         readonly storage never becomes writable again. *)
+      if a1 = Ast.SliceReadonly && a2 = Ast.SliceWritable then
+        raise (Unify_error (Printf.sprintf
+          "cannot pass readonly %s where writable %s is required; \
+           declare the receiver '[]const ...' if it only reads"
+          (to_string (TSlice (e1, m1, a1))) (to_string (TSlice (e2, m2, a2)))));
       unify_mutable_pointee e1 e2
   (* GitHub issue #186: TU16Be is deliberately NOT one of the ordinary
      integer bases the generic range-fit rules just below apply to. Those
@@ -831,7 +842,7 @@ let rec of_ast_in_scope scope = function
       TRefinedInt (lo, hi, of_ast_in_scope scope base)
   | Ast.TypeMultiple (n, base) ->
       TMultiple (n, of_ast_in_scope scope base)
-  | Ast.TypeSlice (t, n) -> TSlice (of_ast_in_scope scope t, n)
+  | Ast.TypeSlice (t, n, a) -> TSlice (of_ast_in_scope scope t, n, a)
   | Ast.TypeTuple ts -> TTuple (List.map (of_ast_in_scope scope) ts)
   | Ast.TypeBorrow t | Ast.TypeBorrowMut t | Ast.TypeSink t ->
       of_ast_in_scope scope t
@@ -904,7 +915,7 @@ let instantiate_static_params ty =
     | TRefinedInt (lo, hi, base) -> TRefinedInt (lo, hi, inst base)
     | TMultiple (n, base) -> TMultiple (n, inst base)
     | TTuple ts -> TTuple (List.map inst ts)
-    | TSlice (t, n) -> TSlice (inst t, n)
+    | TSlice (t, n, a) -> TSlice (inst t, n, a)
     | TAlignedPtr (n, t) -> TAlignedPtr (n, inst t)
     | TRef t -> TRef (inst t)
     | TRefMut t -> TRefMut (inst t)
@@ -944,7 +955,7 @@ let rec to_ast t =
   | TSingleton (base, n) -> Ast.TypeSingleton (to_ast base, static_to_ast n)
   | TRefinedInt (lo, hi, base) -> Ast.TypeRefined (lo, hi, to_ast base)
   | TMultiple (n, base) -> Ast.TypeMultiple (n, to_ast base)
-  | TSlice (t, n) -> Ast.TypeSlice (to_ast t, n)
+  | TSlice (t, n, a) -> Ast.TypeSlice (to_ast t, n, a)
   | TAlignedPtr (n, t) -> Ast.TypeAlignedPtr (n, to_ast t)
   | TRef t -> Ast.TypeRef (to_ast t)
   | TRefMut t -> Ast.TypeRefMut (to_ast t)

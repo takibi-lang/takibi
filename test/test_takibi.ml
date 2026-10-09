@@ -318,8 +318,9 @@ let rec show_type = function
   | Ast.TypeRefined (lo, hi, _) -> Printf.sprintf "{%d..<%d}" lo hi
   | Ast.TypeMultiple (n, base) ->
       Printf.sprintf "multiple(%d) %s" n (show_type base)
-  | Ast.TypeSlice (t, 0) -> Printf.sprintf "[]%s" (show_type t)
-  | Ast.TypeSlice (t, n) -> Printf.sprintf "[%s; %d..]" (show_type t) n
+  | Ast.TypeSlice (t, 0, Ast.SliceWritable) -> Printf.sprintf "[]%s" (show_type t)
+  | Ast.TypeSlice (t, 0, Ast.SliceReadonly) -> Printf.sprintf "[]const %s" (show_type t)
+  | Ast.TypeSlice (t, n, _) -> Printf.sprintf "[%s; %d..]" (show_type t) n
   | Ast.TypeBorrow t -> "borrow " ^ show_type t
   | Ast.TypeBorrowMut t -> "borrow mut " ^ show_type t
   | Ast.TypeSink t -> "sink " ^ show_type t
@@ -21424,6 +21425,63 @@ let indexed_reference_tests = [
       ) ["shared.inner.value"; "(*shared).inner.value";
          "(*shared).words[0]"; "shared.items[0].value";
          "(*shared).items[0].value"]);
+  Alcotest.test_case "issue #724 counterexample: a shared array field slice is readonly" `Quick
+    (fun () ->
+      let src = {|
+        struct SliceOuter { bytes: [u8; 1]; }
+        fn write_shared(shared: &SliceOuter) {
+            let bytes = shared.bytes as []u8;
+            bytes[0] = 7;
+        }|} in
+      (* A type error, so it does not depend on --confine-raw-authority
+         or a mint declaration. *)
+      expect_type_error "readonly slice" src ());
+  Alcotest.test_case "readonly provenance survives nesting, aliases, subslices and calls" `Quick
+    (fun () ->
+      let declarations = {|
+        struct RoInner { bytes: [u8; 4]; }
+        struct RoOuter { inner: RoInner; bytes: [u8; 4]; }
+        struct RoHolder { s: []u8; }
+        fn ro_mutate(s: []u8) { if (s.len > 0) { s[0] = 1; } }
+        |} in
+      List.iter (fun (fragment, body) ->
+        expect_type_error fragment (declarations ^
+          "fn bad(o: &RoOuter, w: []u8, h: &mut RoHolder) { " ^ body ^ " }") ()
+      ) ["readonly slice", "let s = o.inner.bytes as []u8; s[0] = 1;";
+         "readonly slice", "let s = (*o).bytes as []u8; s[0] = 1;";
+         "readonly slice", "let s = o.bytes[0..<2]; s[0] = 1;";
+         "readonly slice", "let s = o.bytes as []u8; let t = s; t[1] = 1;";
+         "readonly slice", "let s = o.bytes as []u8; let t = s[1..<3]; t[0] = 1;";
+         "readonly slice", "let s = o.bytes as []u8; let p: *u8 = &s[0];";
+         "readonly", "ro_mutate(o.bytes as []u8);";
+         "readonly", "let n = slice_copy(o.bytes as []u8, w);";
+         "readonly", "h.s = o.bytes as []u8;";
+         "readonly", "let s = o.bytes as []u8; let p = s as *u8;";
+         "readonly", "let s = o.bytes as []u8; let t = s as []u8;";
+         "shared reference", "let p = o.bytes; p[0] = 1;";
+         "shared reference", "let p = o.inner.bytes; p[0] = 1;"]);
+  Alcotest.test_case "readonly slice elements cannot be written" `Quick
+    (expect_type_error "readonly slice" {|
+      struct RoElement { value: u8; bytes: [u8; 2]; }
+      fn bad(items: []const RoElement) { items[0].value = 1; }|});
+  Alcotest.test_case "readonly slices accept reads and writable slices widen into them" `Quick
+    (expect_codegen_ok {|
+      struct RoOuter { bytes: [u8; 4]; }
+      fn sum(s: []const u8) -> usize {
+        let mut total: usize = 0;
+        for x in s { total = total + (x as usize); }
+        return total;
+      }
+      fn read(o: &RoOuter, d: []u8) -> usize {
+        let copied = slice_copy(d, o.bytes as []u8);
+        if (slice_eq(d, o.bytes as []const u8)) { return copied; }
+        return sum(o.bytes as []u8) + (o.bytes[1] as usize);
+      }
+      fn write(o: &mut RoOuter) -> usize {
+        let s = o.bytes as []u8;
+        s[0] = 3;
+        return sum(s);
+      }|});
   Alcotest.test_case "mutable field references and shared reads still codegen" `Quick
     (expect_codegen_ok {|
       struct PlaceInner { value: usize; }
