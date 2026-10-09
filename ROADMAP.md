@@ -23,13 +23,15 @@ taken and put back without loss or duplication, and borrowed in place.
 Static place identity where the place is known; a runtime option tag only
 where it is not (#637 option (b)).
 
-1. Wait for #637 stage 1 to land; both edit the ownership checker.
-2. #731's memo first: one rule for place-derived access, converging on
-   #672. Then #131's design, together with #672 stage 2 (array elements);
-   #637 stage 2 adopts the result rather than a parallel mechanism.
+1. #637 stage 1's type-checker work has landed (2026-10-09), and #731
+   step 1 supplied the place-derived access rule converging on #672.
+2. #131's design, together with #672 stage 2 (array elements); #637 stage 2
+   adopts the result rather than a parallel mechanism. Next for A.
 3. First concrete driver: #622 (a DMA token held in the RX frame owner).
-4. Then #707, the process-record typestate group (#653, #590, #308), #686,
-   #687, #704 and #343, each as a consumer of the same rule.
+4. Then #704 with #637's per-CPU consumers (A's next after #622), #707,
+   the process-record typestate group (#653, #590, #308), #686, #687 and
+   #343, each as a consumer of the same rule; then #637's mint list and
+   confinement flag.
 
 **Fixed DMA lifecycle.** Every stage of one transfer in types, so that the
 only trusted parts left are one device-semantics declaration per driver
@@ -143,14 +145,16 @@ before its issue closes. The steps keep their numbers, which issues cite.
    VM, FD, image and syscall consumers. The compiler file-confinement policy
    exists but is not enabled for maintained kernel builds. Done on
    2026-10-09: #724's readonly slices, #725's fallible syscall copy outcomes,
-   bounded syscall copy forwarding and typed probe atomics. Next in this
-   stage: #731, the design memo that groups place-derived access (publish
-   write tokens, the AtomicWord boundary, per-CPU accessors, #518, #216) and
-   converges on #672's built-in region, the maintainer's preferred direction
-   (2026-10-09). The remaining per-CPU consumers and the AtomicWord reference
-   boundary wait for its answer rather than taking a local rule; log.tkb's
-   raw sites go with #613's rebuild. Then the reviewed finite mint list and
-   kernel flag activation.
+   bounded syscall copy forwarding and typed probe atomics; #731 step 1
+   (publish tokens and region elements from checked places are references,
+   diagnostic_ring at zero raw sites). **Stage 1's type-checker work ends
+   here (maintainer, 2026-10-09)**, so #131 is no longer held for it. The
+   remaining per-CPU consumers (exception_evidence's crash caches) need a
+   CPU authority that #704 can only design on #131's stored-authority rule,
+   so they move after the stored-authority route's step 2; log.tkb's raw
+   sites go with #613's rebuild; the AtomicWord reference boundary is
+   deferred (no confinement finding at any caller, on #731). The reviewed
+   finite mint list and kernel flag activation come last, after those.
 
    - **B, raw atomics:** the probes use the typed atomic cell (done
      2026-10-09); only atomic_word.tkb, the spinlock and the DDB snapshot
