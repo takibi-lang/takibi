@@ -216,7 +216,11 @@ let expected_llvm_member_count name info dl =
           Ast.TypeVariant ("Place", [], [resolved arg])
       | Ast.TypeArray (t, n) -> Ast.TypeArray (resolved t, n)
       | t -> t in
-    List.map (fun (_, ty) -> Llvm_gen.ltype_of_ast (resolved ty)) info.fields
+    List.map (fun (field, ty) ->
+      try Llvm_gen.ltype_of_ast (resolved ty)
+      with Llvm_gen.Error msg ->
+        raise (Llvm_gen.Error (Printf.sprintf "%s (field '%s.%s', checking \
+          its layout against codegen)" msg name field))) info.fields
     |> Array.of_list
   in
   let mk_struct members =

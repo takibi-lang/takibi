@@ -6893,8 +6893,8 @@ let attach_global_debug name ast_ty decl_loc gvar =
 
 (* GitHub issue #131: a fixed DMA record's owner slot is created full. Its
    value is Place::Full(Cpu(token)); a token is a zero pointer and Cpu is
-   the authority's first case, so the place's tag is the only nonzero
-   member. *)
+   the authority's first case, so the place's tag -- Full's index, read from
+   Place's definition -- is the only nonzero member. *)
 let dma_slot_initializer record llty =
   let slot = Dma_fixed_registry.slot_type record in
   let fields = match Hashtbl.find_opt struct_fields slot with
@@ -6909,7 +6909,13 @@ let dma_slot_initializer record llty =
   let members = Array.map const_null (struct_element_types llty) in
   let place_ty = members.(member) |> type_of in
   let place = Array.map const_null (struct_element_types place_ty) in
-  place.(0) <- const_int (i32_type context) 1;
+  let full_tag = match Generic_variant.place_def with
+    | GenericVariantDef (_, _, _, cases, _, _) ->
+        (match List.find_index (fun (c, _) -> c = "Full") cases with
+         | Some i -> i
+         | None -> raise (Error "BUG: Place has no Full case"))
+    | _ -> raise (Error "BUG: Place is not a generic variant") in
+  place.(0) <- const_int (i32_type context) full_tag;
   members.(member) <- const_struct context place;
   const_named_struct llty members
 

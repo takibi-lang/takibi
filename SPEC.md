@@ -1682,7 +1682,8 @@ fn exec_args_take(cpu: CpuHere) -> Place(exists page: usize. PageOwner[page]) {
   `private let mut g: [S; N];` with the authority's N and no initializer. A
   singleton global, a different length, a struct field, a variant payload,
   or a function parameter or return of that type (including a pointer to it)
-  is rejected, so no shared slot can stand in for the per-CPU one and no
+  is rejected, and so is a cast whose target type names it (even inside
+  `unsafe`), so no shared slot can stand in for the per-CPU one and no
   element can be carried away from its index.
 - An element is reached only as `g[a]`, where `a` is a bare variable holding
   the authority. A constant, an integer of the right range, or any other

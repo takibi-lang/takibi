@@ -46,6 +46,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_rpi5_ddb_await_controls.py` | RPi5 DDB first-arrival observations; software BRK boot and post-snapshot budgets, delayed release, echoed-only output, missing milestones and unavailable UART |
 | `check_fixed_wait_await_controls.py` | The FDT multi-bank boots and the stack-overflow runner (through `await_timing.py`'s command line) record arrival against their fixed budgets, print the margin past half without changing the verdict, and record a missing line as not arrived |
 | `check_dma_mint_files.py` | Every `dma_fixed` record is declared in a listed mint file, and only the listed functions there call `dma_finish_owned_rx`/`_tx`; a record in a driver file, an unlisted finisher and a stale entry are each refused (#716, #717) |
+| `check_cpu_authority_mints.py` | `cpu_here_for_boot_probe`, the CPU-authority mint that names any CPU, is called only by its reviewed boot probe (#704) |
 | `check_uart_await_timing_controls.py` | Common UART connection budget, capture ceiling, progress-renewed arrivals and unfinished markers remain distinct |
 | `check_ddb_await_timing_controls.py` | QEMU DDB normal/postmortem await observations retain separate deadlines and preserve split prompts, failures and margin reporting |
 | `check_ddb_command_inventory.py` | DDB dispatch, help, documentation, classification, and coverage agree |
@@ -157,6 +158,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_profile_kernel_workload_controls.py` | Positive and negative controls for workload-profile host artifacts |
 | `check_qemu_lane_ports.py` | QEMU lanes do not claim conflicting protocol ports, and every lane fits the per-session port block |
 | `check_raw_pos_fname.py` | source identity uses the canonical path helpers |
+| `check_keyword_tables.py` | the lexer's keyword table and `Language_words.hard_keywords` name the same words, so a new keyword cannot silently lex as an identifier (#704) |
 | `check_repeat_kernel_lane_controls.sh` | Regression controls for the repeat runner's two modes |
 | `check_roadmap_size.py` | ROADMAP.md stays the current work split rather than regrowing into a knowledge base |
 | `check_rpi5_set_kernel_byte_controls.py` | Controls for the live RPi5 kernel-byte writer without using the board |

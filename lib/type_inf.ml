@@ -3577,7 +3577,16 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
 
   | Index ({ desc = Var global; _ }, idx)
     when Hashtbl.mem Per_cpu_registry.globals global
-         && Per_cpu_registry.rewritten_global idx.loc = None ->
+         && Per_cpu_registry.rewritten_global idx.loc = None
+         && (match StringMap.find_opt global tyenv with
+             | Some (t, _) ->
+                 (match repr t with
+                  | TArray (elem, _) ->
+                      (match repr elem with
+                       | TStruct name -> Per_cpu_registry.is_store name
+                       | _ -> false)
+                  | _ -> false)
+             | None -> true) ->
       raise (TypeError (idx.loc, Printf.sprintf
         "per-CPU store '%s' is indexed only by a %s value, the current \
          CPU's authority, written as a bare variable: `%s[cpu]`"

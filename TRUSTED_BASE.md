@@ -159,6 +159,20 @@ rules globally.
   Buffer ownership, descriptor validity, device completion, cache topology,
   and the chosen protocol remain trusted unless represented by separate
   checked types and state transitions.
+- Fixed DMA records (`struct dma_fixed`) carry buffer ownership in CPU and
+  Device tokens, so the checker rejects CPU access while the device may
+  use the buffer. What stays trusted is the observation that returns
+  ownership: `dma_finish_owned_rx`/`_tx` compile only in the record's
+  declaring file, and `scripts/check_dma_mint_files.py` fixes which functions
+  there may call them and which device observation each trusts (descriptor
+  ownership bits, a used-ring advance, a reset read back, GEM's halt report).
+  The compiler-created owner slot starts with the one CPU token.
+- Per-CPU storage (`struct per_cpu`, indexed only by the `cpu_authority`
+  value) is checked by the compiler. Trusted: `kernel/kernel/cpu_authority.tkb`
+  reports the CPU it runs on (`cpu_id()`), the kernel action stays on that CPU
+  because it is not preemptible (`KERNEL_PREEMPTIBLE == 0`, asserted there),
+  and `cpu_here_for_boot_probe` names other CPUs only for the boot probe that
+  `scripts/check_cpu_authority_mints.py` fixes as its caller.
 - `extern fn` and `extern symbol` declarations trust the linked symbol's ABI,
   effects, lifetime behavior, and implementation. Checker-only borrow and
   effect contracts cannot be verified against an unavailable body.

@@ -116,7 +116,20 @@ let rec resolve_expr names expr =
     | Bnot e -> Bnot (ex e)
     | Deref e -> Deref (ex e)
     | AddrOf e -> AddrOf (ex e)
-    | Cast (t, e) -> Cast (ty t, ex e)
+    | Cast (t, e) ->
+        (* GitHub issue #704: a per-CPU store element is reached only as
+           `g[cpu]`; a cast to its type, even an unsafe one, would name
+           any element -- or none -- without the CPU authority. *)
+        let rec mentions = function
+          | TypeNamed n | TypeIndexed (n, _) -> Per_cpu_registry.is_store n
+          | TypePtr t | TypeAlignedPtr (_, t) | TypeIo t | TypeRef t
+          | TypeRefMut t | TypeArray (t, _) | TypeSlice (t, _, _) -> mentions t
+          | _ -> false in
+        if mentions t then
+          raise (Types.TypeError (expr.loc,
+            "a cast cannot produce per-CPU storage; reach an element as \
+             `store[cpu]` with the CPU authority"));
+        Cast (ty t, ex e)
     | FieldGet (e, field) -> FieldGet (ex e, field)
     | StructLit fields -> StructLit (List.map ex fields)
     | TupleLit fields -> TupleLit (List.map ex fields)

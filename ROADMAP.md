@@ -57,8 +57,8 @@ type-checker work and #731 step 1; #131's first slices -- field places
 (`field_take`/`field_put`, borrow in place) and `Place(T)` with
 `place_take`/`place_put` for every stored slot, `stable_replace` removed
 from the language -- on #732's generic variants; #704's per-CPU storage
-(exec args migrated); #622 and #707's core (GEM RX and TX buffers as fixed
-DMA records). exception_evidence's per-core arrays stay ordinary arrays:
+(exec args migrated); GEM's RX and TX buffers as fixed DMA records (#707's
+core). exception_evidence's per-core arrays stay ordinary arrays:
 DDB reads other CPUs' entries on purpose, which is settled with #637's mint
 list (maintainer, 2026-10-09).
 
@@ -118,26 +118,30 @@ allchecks, faster diagnosis -- and what finishes on its own.
      It starts with a study of the Raspberry Pi OS kernel's macb/RP1
      interrupt handling (maintainer, 2026-10-09), recorded on the issue,
      before any change.
-   - #720 (session-long xHCI rings and contexts, on `Place`), #625 (cache
-     visibility across DMA ownership handoffs, bounded model).
-3. **Compiler and language, with a maintainer-approved design:** #734
+   - #736 (virtio-net's TX completion wait has no bound; follow #707's
+     shape), #720 (session-long xHCI rings and contexts, on `Place`), #625
+     (cache visibility across DMA ownership handoffs, bounded model).
+3. **Landing faster:** #737 (land.sh stops on the quick gates before the
+   long allcheck lanes).
+4. **Compiler and language, with a maintainer-approved design:** #734
    (shared runtime bounds contracts for Region and slice APIs; with #252
    and #200), #608 (checked integer-to-enum conversion), #709 and #710
    (generation exhaustion of region tables and the intrusive pool), #203
-   (no uninitialized kernel bytes copied to userspace; builds on #725),
+   (no uninitialized kernel bytes copied to userspace; builds on the
+   bounded syscall copy outcomes),
    #732's later slices (static parameters on generic variants, implicit
    statics inside a type argument).
-4. **Time measurement, then the optimizations waiting on it** (maintainer,
+5. **Time measurement, then the optimizations waiting on it** (maintainer,
    2026-10-08: space and time are both kept): #497, then #502; then #520
    (TCP throughput), #680, #681, #682 (region_pool lock-free validation,
    false sharing, pinless single-user pools), #711, #718, #386; #719 (every
    QEMU lane on four vCPUs).
-5. **Evaluations awaiting a maintainer decision:** #687 (typed terminal
+6. **Evaluations awaiting a maintainer decision:** #687 (typed terminal
    mode leases), #648.
-6. **Compiler and language research, independent of the ownership
+7. **Compiler and language research, independent of the ownership
    checker:** #201, #282, #129, #417, #155, #28, #8.
-7. **Toolchain and portability:** #123, #124, #122, #95, #51, #50, #85.
-8. **Deferred or not a scheduled work item:** #220 (telnet; waits on PTY
+8. **Toolchain and portability:** #123, #124, #122, #95, #51, #50, #85.
+9. **Deferred or not a scheduled work item:** #220 (telnet; waits on PTY
    and `pselect6` scoping), #555, #250, #444, #429, #149, #567, #539, #536,
    #698 (ext2 metadata exhaustion as ENOSPC), #374 (physically contiguous
    memory; waits for a dynamic DMA allocation); #13 for `Phi`, with #216

@@ -16,8 +16,8 @@
 // - Staying on one CPU is the non-preemption assumption, not a checked
 //   property: a future preemptible kernel must end a CpuHere's life at
 //   every preemption point (#638).
-// - Nothing checks that cpu_here_for_boot_probe has no other caller; it is
-//   named for review.
+// - The compiler cannot tell cpu_here_for_boot_probe from cpu_here at a
+//   call; scripts/check_cpu_authority_mints.py fixes its one caller.
 
 use "kernel/lib/execution_model.tkb";
 use "kernel/arch/arm64/kernel/user_entry_extern.tkb";

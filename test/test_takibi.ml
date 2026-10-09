@@ -9672,6 +9672,11 @@ fn f() -> *usize { return &temp_address_outer().r.a; }");
   Alcotest.test_case "per-CPU store cannot be reached through a parameter" `Quick
     (expect_type_error "cannot take or return per-CPU storage"
        (per_cpu_base ^ "fn alias704(s: *Slot704) {}"));
+  Alcotest.test_case "per-CPU store cannot be forged by an unsafe cast" `Quick
+    (expect_type_error "a cast cannot produce per-CPU storage"
+       (per_cpu_base ^ "fn forge704(raw: usize) !{unsafe} {
+          let s = unsafe { raw as *Slot704 };
+        }"));
   Alcotest.test_case "CPU authority cannot be kept in a global" `Quick
     (expect_type_error "cannot hold the CPU authority"
        (per_cpu_base ^ "private let mut saved704: CpuIndex704;"));
