@@ -24,8 +24,9 @@ Static place identity where the place is known; a runtime option tag only
 where it is not (#637 option (b)).
 
 1. Wait for #637 stage 1 to land; both edit the ownership checker.
-2. #131's design, together with #672 stage 2 (array elements); #637 stage 2
-   adopts the result rather than a parallel mechanism.
+2. #731's memo first: one rule for place-derived access, converging on
+   #672. Then #131's design, together with #672 stage 2 (array elements);
+   #637 stage 2 adopts the result rather than a parallel mechanism.
 3. First concrete driver: #622 (a DMA token held in the RX frame owner).
 4. Then #707, the process-record typestate group (#653, #590, #308), #686,
    #687, #704 and #343, each as a consumer of the same rule.
@@ -140,14 +141,21 @@ before its issue closes. The steps keep their numbers, which issues cite.
    The eleven declared liveness escapes are gone. Authority-indexed record
    references, guarded value copies and checked per-CPU places cover process,
    VM, FD, image and syscall consumers. The compiler file-confinement policy
-   exists but is not enabled for maintained kernel builds. Next in this stage:
-   #724's readonly array-slice permission gap, #725's fallible syscall copy
-   outcomes, bounded syscall copy forwarding, typed probe atomics, remaining
-   per-CPU consumers, then the reviewed finite mint list and kernel flag
-   activation.
+   exists but is not enabled for maintained kernel builds. Done on
+   2026-10-09: #724's readonly slices, #725's fallible syscall copy outcomes,
+   bounded syscall copy forwarding and typed probe atomics. Next in this
+   stage: #731, the design memo that groups place-derived access (publish
+   write tokens, the AtomicWord boundary, per-CPU accessors, #518, #216) and
+   converges on #672's built-in region, the maintainer's preferred direction
+   (2026-10-09). The remaining per-CPU consumers and the AtomicWord reference
+   boundary wait for its answer rather than taking a local rule; log.tkb's
+   raw sites go with #613's rebuild. Then the reviewed finite mint list and
+   kernel flag activation.
 
-   - **B, raw atomics:** use the existing typed atomic cell at probe and
-     consumer boundaries; remaining raw-address operations must be confined.
+   - **B, raw atomics:** the probes use the typed atomic cell (done
+     2026-10-09); only atomic_word.tkb, the spinlock and the DDB snapshot
+     word call an intrinsic. Whether the cell is reached by `*AtomicWord` or
+     by a place-derived reference is #731's question.
      The ordering argument stays with #613.
    - **D, F, H:** retain genuine physical-memory, pool-carving and overlay
      mints with their external evidence. The raw-dereference budget is a
