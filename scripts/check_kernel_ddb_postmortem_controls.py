@@ -185,7 +185,7 @@ class Outcome:
 
 def drive(driver, uart, workdir, *, timeout, qmp_port=None,
           break_reaches_guest=True, break_failure="", peer_settings=False,
-          break_delay=0.0, ash_only=True):
+          break_delay=0.0, ash_only=True, console_snapshots=None, console_failure=False):
     """Run the driver's own main() against a scripted endpoint.
 
     Returns what the lane would have reported, plus how far the clock moved,
@@ -196,6 +196,8 @@ def drive(driver, uart, workdir, *, timeout, qmp_port=None,
     breaks = []
 
     def send_serial_break(port, chardev, budget):
+        if console_snapshots is not None:
+            assert console_snapshots == ["before-break"], console_snapshots
         breaks.append((port, chardev))
         clock.sleep(break_delay)
         if break_failure:
@@ -224,6 +226,15 @@ def drive(driver, uart, workdir, *, timeout, qmp_port=None,
     if qmp_port is not None:
         argv += ["--qmp-port", str(qmp_port)]
 
+    import capture_kernel_console
+    saved_capture = capture_kernel_console.capture
+    if console_snapshots is not None:
+        argv += ["--console-elf", "fixture.elf", "--console-log", str(workdir / "console-state.log")]
+        def capture(port, elf, log, phase):
+            console_snapshots.append(phase)
+            if console_failure:
+                raise OSError("fixture: artifact directory is unwritable")
+        capture_kernel_console.capture = capture
     saved = (driver.serial, driver.time, driver.send_serial_break, sys.argv)
     driver.serial = FakeSerial(uart)
     driver.time = clock
@@ -237,6 +248,7 @@ def drive(driver, uart, workdir, *, timeout, qmp_port=None,
         verdict = f"FAIL kernel UART driver: {error}"
     finally:
         driver.serial, driver.time, driver.send_serial_break, sys.argv = saved
+        capture_kernel_console.capture = saved_capture
     return Outcome(verdict, clock.monotonic() - started, uart, walk_log, breaks)
 
 
@@ -670,6 +682,22 @@ CHECKS = (
 
 
 # GitHub issue #526: a control asserts the number of scenarios it ran.
+def console_before_break(driver):
+    for fails in (False, True):
+        with tempfile.TemporaryDirectory() as temporary:
+            snapshots = []
+            uart = FakeUart(BOOT_LAST, prompt=b"ddb> ", at_prompt=False)
+            result = drive(driver, uart, pathlib.Path(temporary), timeout=90,
+                           qmp_port=1, console_snapshots=snapshots, console_failure=fails)
+            if snapshots != ["before-break"]:
+                return ["console snapshot missing, repeated, or after DDB changed the queues"]
+            if not result.verdict or not result.breaks or "artifact directory" in result.verdict:
+                return ["console capture hid the original stall or prevented BREAK"]
+    return []
+
+
+CHECKS += (("console-before-break", console_before_break),)
+
 CASES = CaseCount()
 
 

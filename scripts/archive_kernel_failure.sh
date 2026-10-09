@@ -63,6 +63,10 @@ cp -pr "$artifact_dir"/. "$archive/" 2>/dev/null || true
     echo "load: $(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null || echo unknown)"
     echo "lane: ${KERNEL_QEMU_LABEL:-unknown}"
     echo "kernel: $(basename "${KERNEL_QEMU_ELF:-unknown}")"
+    if [ -f "$archive/console-state.log" ]; then
+        echo "console snapshot: console-state.log"
+        cat "$archive/console-state.log"
+    fi
 } >"$archive/MANIFEST"
 
 echo "archived full capture to: $archive" >&2

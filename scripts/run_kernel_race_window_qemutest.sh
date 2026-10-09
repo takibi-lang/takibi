@@ -95,6 +95,10 @@ elif ! run_variant armed; then
             echo "commit: $(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null)"
             echo "load: $(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)"
             echo "lane: race-window $WINDOW armed"
+            if [ -f "$keep/armed/console-state.log" ]; then
+                echo "console snapshot: armed/console-state.log"
+                cat "$keep/armed/console-state.log"
+            fi
         } > "$keep/MANIFEST"
         echo "archived the armed run to: $keep"
     else
@@ -111,6 +115,10 @@ elif ! run_variant armed; then
         echo "commit: $(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null)"
         echo "load: $(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)"
         echo "lane: race-window $WINDOW armed"
+        if [ -f "$keep/armed/console-state.log" ]; then
+            echo "console snapshot: armed/console-state.log"
+            cat "$keep/armed/console-state.log"
+        fi
     } > "$keep/MANIFEST"
     echo "archived the armed run to: $keep" >&2
     exit 1

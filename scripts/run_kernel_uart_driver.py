@@ -379,6 +379,8 @@ def main() -> int:
     # QMP monitor to ask through, which is why it is optional rather than
     # required.
     parser.add_argument("--qmp-port", type=int)
+    parser.add_argument("--console-elf")
+    parser.add_argument("--console-log")
     parser.add_argument("--interactive-httpd-listener-file")
     parser.add_argument("--foreground-httpd-listener-file")
     parser.add_argument("--init-listener-file")
@@ -400,6 +402,21 @@ def main() -> int:
     # whether the terminal settings change woke that reader.
     parser.add_argument("--peer-settings", action="store_true")
     args = parser.parse_args()
+
+    console_captured = False
+
+    def capture_console(phase):
+        nonlocal console_captured
+        if console_captured or not (args.console_elf and args.console_log and args.qmp_port):
+            return
+        console_captured = True
+        from capture_kernel_console import capture
+        try:
+            capture(args.qmp_port, args.console_elf, args.console_log, phase)
+        except Exception as error:
+            # Even an unwritable artifact directory must not hide the stall
+            # or prevent the existing bounded serial BREAK/DDB walk.
+            print(f"[kernel/uart] console snapshot unavailable: {error}", flush=True)
 
     interactive_httpd = args.interactive_httpd_ready_file is not None
     if interactive_httpd != (args.interactive_httpd_done_file is not None):
@@ -583,6 +600,10 @@ def main() -> int:
                             break_asked = True
                             print("[kernel/uart] fixture failed; asking QEMU for a "
                                   "serial BREAK: " + fixture_failure, flush=True)
+                            capture_console("before-break")
+                            # Collection has its own outside bound. Preserve
+                            # the DDB walk's budget after that stopped snapshot.
+                            deadline = time.monotonic() + budget
                             break_failure = send_serial_break(
                                 args.qmp_port, QMP_CHARDEV, min(5.0, budget))
 
@@ -595,6 +616,7 @@ def main() -> int:
                           + Path(args.postmortem_request_file).read_text(
                               encoding="ascii", errors="replace").strip()
                           + "); asking QEMU for a serial BREAK", flush=True)
+                    capture_console("before-break")
                     break_failure = send_serial_break(
                         args.qmp_port, QMP_CHARDEV, 5.0)
                     deadline = (time.monotonic()
@@ -609,6 +631,7 @@ def main() -> int:
                           f"{time.monotonic() - last_chunk_at:.0f}s with its "
                           "budget nearly gone; asking QEMU for a serial BREAK",
                           flush=True)
+                    capture_console("before-break")
                     break_failure = send_serial_break(
                         args.qmp_port, QMP_CHARDEV, 5.0)
                     deadline = (time.monotonic()
@@ -621,6 +644,7 @@ def main() -> int:
                 prompts = output.count(DDB_PROMPT)
                 if prompts:
                     if postmortem_at is None:
+                        capture_console("already-ddb")
                         postmortem_at = output.index(DDB_PROMPT)
                         if fixture_failure is None:
                             deadline = max(

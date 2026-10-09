@@ -91,7 +91,7 @@ mkdir -p "$ARTIFACT_DIR"
 rm -f "$INTERACTIVE_HTTPD_LISTENER" "$INTERACTIVE_HTTPD_READY" \
     "$INTERACTIVE_HTTPD_DONE" "$HTTPD_GUARD_FILE" "$POSTMORTEM_REQUEST" \
     "$FOREGROUND_HTTPD_LISTENER" "$INIT_LISTENER" \
-    "$NETWORK_READY"
+    "$NETWORK_READY" "$ARTIFACT_DIR/console-state.log"
 cp "$EXT2_IMAGE" "$QEMU_EXT2_IMAGE"
 exec 9>"$ARTIFACT_DIR/runner.lock"
 if ! flock -n 9; then
@@ -176,6 +176,7 @@ python3 "$REPO_ROOT/scripts/run_kernel_uart_driver.py" \
     --timing-log "$UART_TIMING_LOG" \
     --postmortem-log "$ARTIFACT_DIR/ddb-postmortem.log" \
     --qmp-port "$QMP_PORT" \
+    --console-elf "$ELF" --console-log "$ARTIFACT_DIR/console-state.log" \
     --stdin "$ASH_DIR/ash.stdin" --expected "$ASH_DIR/ash.expected" \
     --timeout "$TIMEOUT_SECS" --ceiling "$CEILING_SECS" \
     --stop-marker 'peer user console: record=17/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' \

@@ -26,6 +26,7 @@ mkdir -p "$src/nested"
 printf 'uart bytes\n' >"$src/uart.log"
 printf 'view\n' >"$src/boot.actual"
 printf 'deep\n' >"$src/nested/extra.log"
+printf 'console snapshot phase: before-break\n' >"$src/console-state.log"
 
 root="$tmp_dir/failures"
 bash "$archiver" "$src" "$root" "control reason" >/dev/null 2>&1 && claim ||
@@ -50,6 +51,11 @@ grep -q "^lane: qemu-race-603-reverted$" "$named/MANIFEST" && claim ||
 grep -q "^load: " "$named/MANIFEST" && claim || fail "MANIFEST lost the host load"
 grep -q "^kernel: kernel-race-603-reverted.elf$" "$named/MANIFEST" && claim ||
     fail "MANIFEST lost the kernel"
+
+grep -q '^console snapshot: console-state.log$' "$one/MANIFEST" && claim ||
+    fail "MANIFEST lost the console evidence path"
+grep -q '^console snapshot phase: before-break$' "$one/MANIFEST" && claim ||
+    fail "MANIFEST lost the console snapshot"
 
 # A second archive in the same second must not merge into the first.
 bash "$archiver" "$src" "$root" "second" >/dev/null 2>&1 && claim || fail "second archive failed"
