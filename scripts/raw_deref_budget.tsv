@@ -24,7 +24,7 @@ kernel/lib/diagnostic_ring.tkb	6	0	per-CPU log rings published by atomics (#637 
 kernel/lib/intrusive_pool.tkb	93	0	the pool's own chunk carving, the mint of every payload pointer (#637 F)
 kernel/mm/address_space.tkb	6	0	Backing records use indexed references and active roots use bounded per-CPU array places; remaining raw sites are the deliberate user-VA CoW probe byte mints
 kernel/mm/page.tkb	157	0	physical pages and page metadata (#637 D)
-kernel/mm/user_memory.tkb	11	0	the user-range mint site: user addresses become slices here (#637 D)
+kernel/mm/user_memory.tkb	7	0	the user-range mint site: user addresses become slices here (#637 D)
 kernel/net/arp.tkb	7	0	frames and the ARP table (#637 F)
 kernel/net/icmp.tkb	13	0	frames (#637 F)
 kernel/net/tcp.tkb	112	0	Connection and retransmit records use indexed references; retry state uses guarded value copies. Remaining raw sites access wire headers and segment buffers

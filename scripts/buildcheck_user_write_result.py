@@ -46,8 +46,8 @@ private fn user_write_control(range: UserWriteRange) !{unsafe} {
 }
 """, ("must-use result of 'user_zero_fill'",)),
         ("store bound and never matched", """
-private fn user_write_control(range: UserWriteRange, source: borrow *u8) !{unsafe} {
-    let copied = copy_to_user_raw(range, source, 1);
+private fn user_write_control(range: UserWriteRange, source: borrow []u8) !{unsafe} {
+    let copied = copy_to_user_span(range, source, 0, 1);
 }
 """, ("must-use value 'copied' is never handled",)),
         ("store read as a bool", """

@@ -237,7 +237,7 @@ fn user_range_resolve_cow(range: UserWriteRange) -> bool !{unsafe} {
     return true;
 }
 
-fn copy_from_user(range: UserReadRange, destination: []u8) -> bool !{unsafe} {
+fn copy_from_user(range: UserReadRange, destination: borrow []u8) -> bool !{unsafe} {
     if (destination.len > range.length) { return false; }
     let source_base: *u8 = unsafe { range.address as *u8 };
     let source_view = unsafe { source_base[0..<range.length as isize] };
@@ -245,7 +245,7 @@ fn copy_from_user(range: UserReadRange, destination: []u8) -> bool !{unsafe} {
     return copied == destination.len;
 }
 
-fn copy_to_user(range: UserWriteRange, source: []u8) -> UserWriteResult !{unsafe} {
+fn copy_to_user(range: UserWriteRange, source: borrow []const u8) -> UserWriteResult !{unsafe} {
     if (source.len > range.length) { return UserWriteResult::Fault; }
     if (user_range_resolve_cow(range) == false) { return UserWriteResult::Fault; }
     let destination_base: *u8 = unsafe { range.address as *u8 };
@@ -256,38 +256,26 @@ fn copy_to_user(range: UserWriteRange, source: []u8) -> UserWriteResult !{unsafe
     return UserWriteResult::Written;
 }
 
-// Raw-pointer-count variants of copy_from_user/copy_to_user for kernel-side
-// destinations/sources whose own offset isn't a compile-time-provable slice
-// bound (e.g. a per-connection cursor into a shared buffer) -- the pattern
-// this codebase already uses raw pointer arithmetic for on the kernel side.
-// The user-facing half is still only ever reached through UserReadRange/UserWriteRange.
-fn copy_from_user_raw(range: UserReadRange, destination: borrow *u8, length: usize)
-        -> bool !{unsafe} {
-    if (length > range.length) { return false; }
-    let source_base: *u8 = unsafe { range.address as *u8 };
-    let mut index: usize = 0;
-    while (index < length) {
-        let source_byte: *u8 = source_base + (index as isize);
-        let destination_byte: *u8 = destination + (index as isize);
-        *destination_byte = *source_byte;
-        index = index + 1;
-    }
-    return true;
+// Slice-and-offset variants of copy_from_user/copy_to_user for kernel-side
+// buffers whose offset or length is a runtime value (a per-connection cursor
+// into a frame, a chunk of a staging block). The offset and length are
+// checked against the slice here, as a checked tail, so a caller never forms
+// a raw pointer into its buffer; a span outside the slice is refused like a
+// fault.
+fn copy_from_user_span(range: UserReadRange, destination: borrow []u8,
+                       offset: usize, length: usize) -> bool !{unsafe} {
+    if (offset > destination.len) { return false; }
+    let tail = destination[offset..<destination.len];
+    if (length > tail.len) { return false; }
+    return copy_from_user(range, tail[0..<length]);
 }
 
-fn copy_to_user_raw(range: UserWriteRange, source: borrow *u8, length: usize)
-        -> UserWriteResult !{unsafe} {
-    if (length > range.length) { return UserWriteResult::Fault; }
-    if (user_range_resolve_cow(range) == false) { return UserWriteResult::Fault; }
-    let destination_base: *u8 = unsafe { range.address as *u8 };
-    let mut index: usize = 0;
-    while (index < length) {
-        let source_byte: *u8 = source + (index as isize);
-        let destination_byte: *u8 = destination_base + (index as isize);
-        *destination_byte = *source_byte;
-        index = index + 1;
-    }
-    return UserWriteResult::Written;
+fn copy_to_user_span(range: UserWriteRange, source: borrow []const u8,
+                     offset: usize, length: usize) -> UserWriteResult !{unsafe} {
+    if (offset > source.len) { return UserWriteResult::Fault; }
+    let tail = source[offset..<source.len];
+    if (length > tail.len) { return UserWriteResult::Fault; }
+    return copy_to_user(range, tail[0..<length]);
 }
 
 fn user_read_byte(range: UserReadRange, offset: usize) -> u8 !{unsafe} {

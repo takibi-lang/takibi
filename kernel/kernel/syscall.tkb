@@ -2140,7 +2140,6 @@ fn syscall_write_segment(current_authority: borrow ProcessCurrent[current_proces
                         }
                     };
                     let socket_buffers = tcp_frame_bytes(rx);
-                    let destination_base: *u8 = socket_buffers as *u8;
                     match user_range_check_read(kernel_process_current_root(current_authority), address, amount) {
                         UserReadRangeResult::Fault => {
                             tcp_connection_frame_unhold(owner, TcpFrameRole::Rx,
@@ -2153,8 +2152,17 @@ fn syscall_write_segment(current_authority: borrow ProcessCurrent[current_proces
                             return SyscallIoResult::Errno(LINUX_EFAULT);
                         }
                         UserReadRangeResult::Ok(range) => {
-                            let copied: bool = copy_from_user_raw(
-                                range, destination_base, amount);
+                            if (copy_from_user_span(range, socket_buffers, 0,
+                                                    amount) == false) {
+                                tcp_connection_frame_unhold(owner, TcpFrameRole::Rx,
+                                                            FrameLink::Some(rx));
+                                tcp_connection_put(owner);
+                                match network_capability_put(ready) {
+                                    NetworkCapabilityPutResult::Stored => {}
+                                    NetworkCapabilityPutResult::Conflict => {}
+                                }
+                                return SyscallIoResult::Errno(LINUX_EFAULT);
+                            }
                         }
                     }
                     let sent = kernel_tcp_send_received(
@@ -2225,9 +2233,6 @@ fn syscall_write_segment(current_authority: borrow ProcessCurrent[current_proces
                             return SyscallIoResult::Errno(LINUX_EINVAL);
                         }
                     };
-                    let response_base: *u8 =
-                        (tcp_frame_bytes(inetd) as *u8) +
-                        (conn.inetd_response_length as isize);
                     match user_range_check_read(kernel_process_current_root(current_authority), address, length) {
                         UserReadRangeResult::Fault => {
                             tcp_connection_frame_unhold(owner, TcpFrameRole::Inetd,
@@ -2236,8 +2241,14 @@ fn syscall_write_segment(current_authority: borrow ProcessCurrent[current_proces
                             return SyscallIoResult::Errno(LINUX_EFAULT);
                         }
                         UserReadRangeResult::Ok(range) => {
-                            let copied: bool =
-                                copy_from_user_raw(range, response_base, length);
+                            if (copy_from_user_span(range, tcp_frame_bytes(inetd),
+                                                    conn.inetd_response_length,
+                                                    length) == false) {
+                                tcp_connection_frame_unhold(owner, TcpFrameRole::Inetd,
+                                                            FrameLink::Some(inetd));
+                                tcp_connection_put(owner);
+                                return SyscallIoResult::Errno(LINUX_EFAULT);
+                            }
                         }
                     }
                     tcp_connection_frame_unhold(owner, TcpFrameRole::Inetd,
@@ -2255,12 +2266,15 @@ fn syscall_write_segment(current_authority: borrow ProcessCurrent[current_proces
             if (length == 0 || length > KERNEL_BLOCK_SIZE) {
                 return SyscallIoResult::Errno(LINUX_EINVAL);
             }
-            let destination_base: *u8 = syscall_scratch[syscall_scratch_cpu_index()].file_buffer as *u8;
             match user_range_check_read(kernel_process_current_root(current_authority), address, length) {
                 UserReadRangeResult::Fault => { return SyscallIoResult::Errno(LINUX_EFAULT); }
                 UserReadRangeResult::Ok(range) => {
-                    let copied: bool =
-                        copy_from_user_raw(range, destination_base, length);
+                    if (copy_from_user_span(
+                            range,
+                            syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8,
+                            0, length) == false) {
+                        return SyscallIoResult::Errno(LINUX_EFAULT);
+                    }
                 }
             }
             let content_buffer = syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8;
@@ -2342,9 +2356,6 @@ fn syscall_read_segment(current_authority: borrow ProcessCurrent[current_process
                            return SyscallIoResult::Errno(LINUX_EINVAL);
                        }
                    };
-                   let buffered_base: *u8 =
-                       (tcp_frame_bytes(rx) as *u8) +
-                       (conn.socket_buffer_offset as isize);
                    match user_range_check_write(kernel_process_current_root(current_authority), address, buffered) {
                        UserWriteRangeResult::Fault => {
                            tcp_connection_frame_unhold(owner, TcpFrameRole::Rx,
@@ -2353,7 +2364,9 @@ fn syscall_read_segment(current_authority: borrow ProcessCurrent[current_process
                            return SyscallIoResult::Errno(LINUX_EFAULT);
                        }
                        UserWriteRangeResult::Ok(range) => {
-                           match copy_to_user_raw(range, buffered_base, buffered) {
+                           match copy_to_user_span(range, tcp_frame_bytes(rx),
+                                                   conn.socket_buffer_offset,
+                                                   buffered) {
                                UserWriteResult::Fault => {
                                    // Nothing was delivered: keep the bytes
                                    // readable and the offset where it was.
@@ -2452,7 +2465,6 @@ fn syscall_read_segment(current_authority: borrow ProcessCurrent[current_process
                             return SyscallIoResult::Errno(LINUX_EINVAL);
                         }
                     };
-                    let source_base: *u8 = tcp_frame_bytes(received_rx) as *u8;
                     match user_range_check_write(kernel_process_current_root(current_authority), address, amount) {
                         UserWriteRangeResult::Fault => {
                             tcp_connection_frame_unhold(owner, TcpFrameRole::Rx,
@@ -2465,7 +2477,9 @@ fn syscall_read_segment(current_authority: borrow ProcessCurrent[current_process
                             return SyscallIoResult::Errno(LINUX_EFAULT);
                         }
                         UserWriteRangeResult::Ok(range) => {
-                            match copy_to_user_raw(range, source_base, amount) {
+                            match copy_to_user_span(range,
+                                                    tcp_frame_bytes(received_rx),
+                                                    0, amount) {
                                 UserWriteResult::Fault => {
                                     // Nothing was delivered: the received
                                     // bytes stay buffered from offset 0 for
@@ -2532,9 +2546,10 @@ fn syscall_read_segment(current_authority: borrow ProcessCurrent[current_process
                     return SyscallIoResult::Errno(LINUX_EFAULT);
                 }
                 UserWriteRangeResult::Ok(range) => {
-                    let source: *u8 = (syscall_scratch[syscall_scratch_cpu_index()].file_buffer as *u8) +
-                        (offset as isize);
-                    match copy_to_user_raw(range, source, amount) {
+                    match copy_to_user_span(
+                            range,
+                            syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8,
+                            offset, amount) {
                         UserWriteResult::Fault => {
                             return SyscallIoResult::Errno(LINUX_EFAULT);
                         }
@@ -2595,8 +2610,10 @@ fn syscall_read_segment(current_authority: borrow ProcessCurrent[current_process
                             return SyscallIoResult::Errno(LINUX_EFAULT);
                         }
                         UserWriteRangeResult::Ok(range) => {
-                            match copy_to_user_raw(
-                                    range, syscall_scratch[syscall_scratch_cpu_index()].file_buffer as *u8, chunk) {
+                            match copy_to_user_span(
+                                    range,
+                                    syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8,
+                                    0, chunk) {
                                 UserWriteResult::Fault => {
                                     // The file offset has not advanced past
                                     // this chunk; report the delivered prefix.
@@ -3342,8 +3359,10 @@ private fn syscall_syslog(current_authority: borrow ProcessCurrent[current_proce
                 return SyscallAction::Resume(LINUX_EFAULT);
             }
             UserWriteRangeResult::Ok(range) => {
-                match copy_to_user_raw(
-                        range, syscall_scratch[syscall_scratch_cpu_index()].file_buffer as *u8, chunk) {
+                match copy_to_user_span(
+                        range,
+                        syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8,
+                        0, chunk) {
                     UserWriteResult::Fault => {
                         if (copied != 0) { return SyscallAction::Resume(copied); }
                         return SyscallAction::Resume(LINUX_EFAULT);
@@ -4111,8 +4130,12 @@ private fn syscall_bind_claimed(current_authority: borrow ProcessCurrent[current
     match user_range_check_read(kernel_process_current_root(current_authority), x1, sockaddr_len) {
         UserReadRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
         UserReadRangeResult::Ok(range) => {
-            let copied: bool = copy_from_user_raw(
-                range, syscall_scratch[syscall_scratch_cpu_index()].sockaddr_buffer as *u8, sockaddr_len);
+            if (copy_from_user_span(
+                    range,
+                    syscall_scratch[syscall_scratch_cpu_index()].sockaddr_buffer as []u8,
+                    0, sockaddr_len) == false) {
+                return SyscallAction::Resume(LINUX_EFAULT);
+            }
         }
     }
     let address: []u8 = syscall_scratch[syscall_scratch_cpu_index()].sockaddr_buffer as []u8;
@@ -6852,8 +6875,12 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
             }
             UserReadRangeResult::Ok(range) => {
-                let copied: bool = copy_from_user_raw(
-                    range, syscall_scratch[syscall_scratch_cpu_index()].rlimit_buffer as *u8, sizeof(usize) * 2);
+                if (copy_from_user_span(
+                        range,
+                        syscall_scratch[syscall_scratch_cpu_index()].rlimit_buffer as []u8,
+                        0, sizeof(usize) * 2) == false) {
+                    return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
+                }
             }
         }
         let new_bytes = syscall_scratch[syscall_scratch_cpu_index()].rlimit_buffer as []u8;
