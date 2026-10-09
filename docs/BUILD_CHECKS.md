@@ -84,8 +84,8 @@ suffix is description; dispatch reads only the prefix.
 | `check_gdb_no_guest_memory_read_controls.py` | Controls for the gdb guest-memory-read check, in both directions |
 | `check_invariant_lines_unviewed.py` | invariant reports are either diagnostic-only or enforced by absence, never asserted as correct |
 | `check_gic_iar_intid.py` | the platform interrupt dispatchers decide on `GICC_IAR & 0x3FF` and hand only the raw word back to GICC_EOIR, so an SGI's sender bits cannot hide it (#632) |
-| `check_stack_proof_states.py` | a process start takes only a `Startable` token and a reap only a `Reapable` one, only the named mint functions build them, and each reads `stack_owner_cpu` (StackOwnership.tla's StartsOnFreeStack) |
-| `check_stack_proof_states_controls.py` | Negative controls for the stack-free proof: a start taking Ready, a reap taking Exited, a token minted elsewhere or written as a literal, and a mint that stopped reading the owner are refused |
+| `check_stack_proof_states.py` | a process start takes only `Startable` and a reap only `Reapable`, named token mints read `stack_owner_cpu`; frame mint callers and bare-address seams are declared, and direct default `FrameRef` declarations are refused (not arbitrary aggregate initialization) |
+| `check_stack_proof_states_controls.py` | Negative controls for weakened stack tokens/mints, undeclared frame mints/address seams, and direct default frame declarations; comments and strings remain permitted |
 | `check_stopped_pool_inspection.py` | the finite RegionPool diagnostic mint set borrows full-stop authority, retains IRQ exclusion, and has complete resume/start invalidation annotations |
 | `check_stopped_pool_inspection_controls.py` | missing context markers, weakened mint contracts and an unreviewed inspection mint are refused |
 | `check_world_stop_refusals.py` | no `WorldStopResult::Busy` or `Partial` arm fail-stops the kernel; a refused world stop is waited out or handed back (#632) |

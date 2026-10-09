@@ -4,8 +4,8 @@
 // A frame used to be a bare `usize` everywhere, and the signal-frame code read
 // and wrote `frame_sp + offset` for an offset it computed itself, so nothing
 // bounded the offset by the frame's 0x330 bytes. A `FrameRef` holds the
-// address in a private field: a value of that type can only be made by
-// frame_ref_from_entry, and its words are reached only through the accessors
+// address in a private field: explicit construction uses the two mints
+// below, and its words are reached only through the accessors
 // below, each named for what it reads and bounded by a refined index. The
 // generic word access is private to this file, so a caller cannot ask for an
 // arbitrary offset.
@@ -26,6 +26,9 @@
 //   takes the owner of the record whose saved_sp it reads.
 // - The accessors do not check the address: a FrameRef that names memory that
 //   is not a live frame reads and writes that memory.
+// - Private affine fields do not prohibit default initialization. The source
+//   gate refuses direct default FrameRef declarations in kernel code; it does
+//   not prove arbitrary aggregate initialization or validate a mint's address.
 
 affine struct FrameRef[process: usize] { private sp: usize; }
 

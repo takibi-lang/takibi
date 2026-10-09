@@ -1,5 +1,18 @@
 # takibi Engineering History
 
+## 2026-10-09: Frame default construction found in the session audit
+
+A two-file compiler probe accepted a default-initialized affine `FrameRef`
+despite its private representation. The stack-proof source gate watched
+explicit mint calls but missed that zero-mint path; privacy and wrong-process
+tests also did not exercise default construction. The gate now refuses direct
+default frame declarations, with local/global, multiline and comment/string
+controls. Removing that rule makes the new controls fail. This is lexical
+build-time prevention of the observed shape, not a compiler guarantee for
+aggregate construction; the broader construction rule is issue #735. Frame
+address validity remains trusted, and explicit-stop context validation remains
+a separate runtime boundary. No executable kernel behavior or storage changed.
+
 ## 2026-10-09: explicit invariant stops retain their own origin
 
 An explicit fail-stop formerly reused lower-EL slot 8 and raw ELR, which could

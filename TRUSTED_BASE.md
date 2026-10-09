@@ -258,6 +258,10 @@ functions make one, and each trusts something the compiler cannot see:
 it just saved, `frame_ref_from_saved` believes a process record's `saved_sp`
 is the frame that process last left the CPU with, and `maybe_frame_from_entry`
 is the first for the syscall dispatcher, which boot probes call with no frame.
+Private affine fields do not themselves prevent zero initialization. The
+stack-proof source gate rejects direct default `FrameRef` declarations in the
+kernel; it is a lexical build check, not a general compiler guarantee for
+default-initialized aggregates. The explicit mints still trust the address.
 A frame is also indexed by a process (`FrameRef[process]`, affine): each mint
 takes a generation, which supplies the index. The saved-frame mint has one
 caller, `scheduled_process_saved_frame`, which takes the process's

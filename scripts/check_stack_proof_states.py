@@ -28,7 +28,11 @@ parameter named for a frame address (`frame_sp`, `current_sp`, ...) is a bare
 `usize` only in the declared seams, where an assembly ABI or a stack-bound
 comparison needs an integer.
 
-What a PASS says is that the trusted set is still the named one. It does not
+Direct default FrameRef declarations are refused as well: private affine
+fields otherwise allow a zero-initialized local to bypass these explicit
+mints. This lexical rule does not cover arbitrary aggregate initialization.
+
+What a PASS says is that the explicit trusted set is still the named one. It does not
 say the read is right; the runtime check in start and exited_take, and the
 protocol-trace replay's StartsOnFreeStack, are what watch that.
 """
@@ -38,6 +42,7 @@ import re
 import sys
 
 from pass_line import report_pass
+from check_model_function_map import masked_sources
 
 SOURCE = Path("kernel/kernel/process.tkb")
 
@@ -90,6 +95,10 @@ FRAME_MINT_CALLERS = {
 # stack's bounds.
 FRAME_PARAM_RE = re.compile(
     r"\b(?:frame_sp|current_sp|parent_sp|child_sp|next_sp|successor_sp)\s*:\s*usize")
+# Affine private fields do not prohibit default initialization. Refuse the
+# direct zero-mint shape; aggregate construction needs a compiler rule.
+FRAME_DEFAULT_RE = re.compile(
+    r"\blet\s+(?:mut\s+)?\w+\s*:\s*FrameRef(?:\s*\[[^\]]+\])?\s*;")
 FRAME_USIZE_SEAMS = {
     "kernel_syscall_block_return", "kernel_syscall_resume_return",
     "kernel_syscall_clone_child_return", "kernel_syscall_child_exec_return",
@@ -201,6 +210,10 @@ def check_frames(files: dict[str, str]) -> tuple[list[str], int]:
     failures = []
     examined = 0
     for path, text in sorted(files.items()):
+        for match in FRAME_DEFAULT_RE.finditer(masked_sources(text)):
+            line = text.count("\n", 0, match.start()) + 1
+            failures.append(f"{path}:{line}: default FrameRef initialization "
+                            "bypasses the declared frame mints")
         for name, (signature, body) in functions(text).items():
             examined += 1
             for mint, callers in FRAME_MINT_CALLERS.items():
@@ -236,8 +249,8 @@ def main() -> int:
     report_pass(
         "stack-proof-states",
         f"start takes only Startable and reap only Reapable; frame handles "
-        f"are made only by the declared callers of {len(FRAME_MINT_CALLERS)} "
-        f"mints; "
+        f"use declared callers of {len(FRAME_MINT_CALLERS)} mints and no "
+        f"direct default initialization; "
         f"{len(STARTABLE_MINTS) + len(REAPABLE_MINTS)} mint functions read "
         f"stack_owner_cpu and nothing else builds the tokens "
         f"({examined} functions read)",

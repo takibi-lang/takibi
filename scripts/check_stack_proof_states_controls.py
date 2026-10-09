@@ -105,6 +105,23 @@ def main() -> int:
                        "}\n"})
     if clean:
         failures.append(f"a declared entry was refused: {clean}")
+    for declaration in (
+        "let mut frame: FrameRef[p];",
+        "let frame: FrameRef[p];",
+        "let\n mut renamed : FrameRef [p] ;",
+    ):
+        failures += frames(
+            "default frame initialization", "fn forge(p: usize @ p) { " +
+            declaration + " }", "default FrameRef initialization")
+    failures += frames(
+        "global default frame initialization", "let mut frame: FrameRef[p];",
+        "default FrameRef initialization")
+    CASES.note()
+    clean, _ = check.check_frames({"control.tkb":
+        '// let mut frame: FrameRef[p];\n'
+        'fn harmless() { uart_puts("let mut frame: FrameRef[p];"); }\n'})
+    if clean:
+        failures.append(f"comments or strings counted as frame mints: {clean}")
     failures += frames(
         "a function that is not a declared entry mints a frame",
         "fn sneaky() {\n    let mut f: FrameRef = frame_ref_from_entry(4096);\n}\n",
@@ -131,7 +148,7 @@ def main() -> int:
         "the tree passes, and a start that takes Ready, a reap that takes "
         "Exited, a token minted outside the named functions, a token "
         "written as a literal, a check that no longer reads the stack owner, "
-        "and a frame minted or taken as a bare usize outside its declared "
+        "default frame initialization, and a frame minted or taken as a bare usize outside its declared "
         "set are each refused for their own reason",
         cases=CASES.ran)
     return 0
