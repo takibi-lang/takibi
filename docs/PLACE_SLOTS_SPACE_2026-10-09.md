@@ -4,7 +4,7 @@ Change: #131 slice 2. Every stored linear slot is a `Place(T)` field and
 `stable_replace` left the source language; a fixed DMA record's owner slot
 is a `Place` of its two-case authority, created full.
 
-Measured with `python3 scripts/space_delta.py` (base origin/main 784d5709,
+Measured with `python3 scripts/space_delta.py` (base origin/main 145c5297,
 change c2ba37e8), linked production kernels:
 
 | | qemu base | qemu change | rpi5 base | rpi5 change |

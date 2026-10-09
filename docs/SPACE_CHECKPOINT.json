@@ -2,9 +2,10 @@
   "date": "2026-10-09",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "24206d687882ad559afc847f66988aded094589d0f2010a13348b812f823945f",
-  "workload": "Dedicated QEMU virtio-blk branch fixture: completed error, timeout with confirmed reset and reuse, timeout with failed reset and refusal; all three authority slots checked. Both production kernels measured against 784d5709; the production storage/allocation workload is unchanged.",
+  "source_sha256": "8df21417bae27a884efba5e7e1d111630d44edeaef9915cc712b469c42d11fe8",
+  "workload": "#131 slice 2: Place(T) with place_take/place_put, every stored slot migrated (exec args, spare stack run, network capability, TCP links, all DMA owner slots), stable_replace removed from the source language. Linked production kernels against base 145c5297 with scripts/space_delta.py.",
   "evidence": [
+    "docs/PLACE_SLOTS_SPACE_2026-10-09.md",
     "docs/DMA_BRANCH_FIXTURE_2026-10-09.md",
     "docs/SIGNAL_BOUNDARY_SPACE_2026-10-09.md",
     "docs/GEM_RX_FIXED_SPACE_2026-10-09.md",
@@ -32,6 +33,6 @@
     "docs/DMA_MINT_FILES_2026-10-08.md",
     "docs/DMA_TRANSMIT_2026-10-08.md"
   ],
-  "assessment": "Zero production text/data/BSS/reservation delta and no changed data/BSS symbol sizes on either platform. The isolated test image adds 2080 text, 32 data and 1568 BSS bytes only. Simulated device observations are deterministic branch evidence, not physical cache or real reset evidence.",
+  "assessment": "Each fixed-DMA owner slot grows 32 -> 40 B (the place tag wraps the authority tag) and moves from BSS to data because it is created full: QEMU data +322/BSS -256 B, RPi5 data +360/BSS -288 B; text QEMU -112 B, RPi5 +96 B. Other places keep their layout; usable_ram_start unchanged on both targets. Adopted.",
   "next_trigger": "A production DMA allocation/layout change or completion of the next driver lifecycle milestone."
 }
