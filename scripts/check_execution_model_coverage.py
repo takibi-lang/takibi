@@ -87,6 +87,9 @@ EXEMPT = {
     # syscall from a second core would reach.
     "drivers/net/virtio_net.tkb": "device state; SPIs are routed to CPU0",
     "drivers/net/rp1_gem.tkb": "device state; MSI-X is routed to CPU0",
+    "drivers/net/rp1_gem_dma.tkb":
+        "the RX allocation's owner slot, exchanged under its own Mutex, and "
+        "its mint function, reached only from rp1_gem.tkb (GitHub issue #622)",
     "drivers/block/virtio_blk.tkb":
         "device state; every command is issued under memory.tkb's "
         "block_device_lock (GitHub issue #533)",

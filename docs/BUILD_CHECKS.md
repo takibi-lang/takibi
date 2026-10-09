@@ -108,8 +108,8 @@ suffix is description; dispatch reads only the prefix.
 | `check_known_intermittents_controls.py` | Controls for the known-intermittent table's rules, in both directions |
 | `check_lane_artifact_root.py` | every kernel lane hangs its capture off one artifact root, so a repeated lane keeps each sample's evidence instead of overwriting it |
 | `check_lane_artifact_root_controls.py` | Controls for the lane artifact-root check, in both directions |
-| `check_legacy_dma_rx_scope.py` | legacy receive cache calls in maintained code remain only the audited GEM data-buffer calls |
-| `check_legacy_dma_rx_scope_controls.py` | Controls for new, changed, and removed legacy RX calls |
+| `check_legacy_dma_rx_scope.py` | no legacy receive cache call remains in maintained code; GEM's buffer became a fixed allocation (#622) |
+| `check_legacy_dma_rx_scope_controls.py` | Controls: a planted legacy RX call in any file, GEM included, is refused |
 | `check_function_qualifier_controls.py` | Eight source-check function matchers recognize every supported inline/noinline qualifier; the actual liveness gate rejects an undeclared qualified escape by name |
 | `check_liveness_proof_escapes.py` | every place that drops a pool's liveness proof is declared with a reason |
 | `check_wall_clock_bounds.py` | every kernel wait bounded by host wall-clock time (`read_cntfrq() * N`) is declared in `scripts/wall_clock_bounds.tsv` with a class; `pending` rows, whose QEMU verdict a starved host can flip, are removed one at a time |

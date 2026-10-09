@@ -32,6 +32,9 @@ MINT_SITES = {
         "virtio_blk_request_settle": "called only after one of the above",
         "virtio_blk_data_settle": "called only after one of the above",
     },
+    "kernel/drivers/net/rp1_gem_dma.tkb": {
+        "gem_rx_settle_completed": "RX descriptor ownership bit set, read by net_rx_acquire",
+    },
     "kernel/platform/rpi5/usb_xhci_dma.tkb": {
         "xhci_receive_configuration": "final Transfer Event or HCHalted",
         "msc_data_receive_once": "final Transfer Event or HCHalted",

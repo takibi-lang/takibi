@@ -22,41 +22,37 @@ def main() -> int:
     sources = {path: path.read_text(encoding="ascii")
                for path in sorted(Path("kernel").rglob("*.tkb"))}
     actual, calls = audit(sources)
-    if actual or calls != 3:
+    if actual or calls != 0:
         print(f"FAIL legacy-dma-rx controls: real tree: {actual!r}, calls={calls}",
               file=sys.stderr)
         return 1
-    gem = sources[GEM]
     failures = []
     foreign = dict(sources)
     foreign[Path("kernel/drivers/block/virtio_blk.tkb")] += (
         "\nfn planted() { dma_finish_rx(buffer, 64); }\n")
-    failures += check_case("foreign call", foreign, "outside the audited GEM buffer")
+    failures += check_case("foreign call", foreign, "use a dma_fixed allocation")
     after_string = dict(sources)
     after_string[Path("kernel/drivers/block/virtio_blk.tkb")] += (
         '\nfn planted() { log("http://device"); dma_finish_rx(buffer, 64); }\n')
     failures += check_case("call after quoted URL", after_string,
-                           "outside the audited GEM buffer")
-    changed = dict(sources)
-    changed[GEM] = gem.replace("dma_prepare_rx(gem_rx_buf, RX_BUF_SIZE)",
-                               "dma_prepare_rx(other_buf, RX_BUF_SIZE)", 1)
-    failures += check_case("wrong GEM buffer", changed, "outside the audited GEM buffer")
-    removed = dict(sources)
-    removed[GEM] = gem.replace("dma_finish_rx(gem_rx_buf, RX_BUF_SIZE);", "", 1)
-    failures += check_case("scan stopped looking", removed, "expected 1 call(s)")
+                           "use a dma_fixed allocation")
+    regressed = dict(sources)
+    regressed[GEM] += "\nfn planted() { dma_prepare_rx(other_buf, 2048); }\n"
+    failures += check_case("GEM back on a legacy call", regressed,
+                           "use a dma_fixed allocation")
     quoted = dict(sources)
     quoted[Path("kernel/drivers/block/virtio_blk.tkb")] += (
         '\nfn harmless() { log("dma_finish_rx(buffer, 64)"); }\n')
     CASES.note()
     quoted_failures, quoted_calls = audit(quoted)
-    if quoted_failures or quoted_calls != 3:
+    if quoted_failures or quoted_calls != 0:
         failures.append("quoted call: text inside a string was counted")
     if failures:
         for failure in failures:
             print("FAIL legacy-dma-rx controls: " + failure, file=sys.stderr)
         return 1
     report_pass("legacy-dma-rx controls",
-                "real tree passes; foreign, changed, and missing calls are refused",
+                "real tree has none; a call in any file, GEM included, is refused",
                 cases=CASES.ran)
     return 0
 

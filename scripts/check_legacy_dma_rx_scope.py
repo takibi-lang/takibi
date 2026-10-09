@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Keep legacy receive cache operations within the audited GEM data path.
+"""Refuse every legacy receive cache operation in the maintained kernel.
 
 The fixed-allocation compiler rule protects only allocations declared with
-`dma_fixed`. A new legacy RX call in another maintained driver would silently
-restore the unpaired prepare/finish class that prompted issue #596. This check
-does not prove GEM's own ownership protocol; issue #622 owns that migration.
+`dma_fixed`. A legacy dma_prepare_rx/dma_finish_rx call would silently
+restore the unpaired prepare/finish class that prompted issue #596. GEM's
+receive buffer, the last user, became a fixed allocation in issue #622, so
+no such call is allowed anywhere now.
 """
 
 from pathlib import Path
@@ -15,10 +16,9 @@ from pass_line import report_pass
 
 CALL = re.compile(r"\bdma_(?:prepare_rx|finish_rx)\s*\(")
 GEM = Path("kernel/drivers/net/rp1_gem.tkb")
-ALLOWED = {
-    "dma_prepare_rx(gem_rx_buf, RX_BUF_SIZE)": 2,
-    "dma_finish_rx(gem_rx_buf, RX_BUF_SIZE)": 1,
-}
+# Empty since issue #622; a future audited exception would be listed here
+# with its expected count.
+ALLOWED: dict[str, int] = {}
 
 
 def code_only(source: str) -> str:
@@ -85,7 +85,7 @@ def audit(sources: dict[Path, str]) -> tuple[list[str], int]:
             spelling = re.sub(r"\s+", "", code[match.start():end + 1])
             allowed = {re.sub(r"\s+", "", key): key for key in ALLOWED}
             if path != GEM or spelling not in allowed:
-                failures.append(f"{path}: legacy RX call {spelling} is outside the audited GEM buffer")
+                failures.append(f"{path}: legacy RX call {spelling}: use a dma_fixed allocation")
             else:
                 key = allowed[spelling]
                 found[key] = found.get(key, 0) + 1
@@ -106,8 +106,10 @@ def main() -> int:
             print("FAIL legacy-dma-rx: " + failure, file=sys.stderr)
         return 1
     report_pass("legacy-dma-rx",
-                f"{calls} audited legacy GEM RX call(s); no other maintained RX cache calls",
-                files=len(paths), calls=calls)
+                f"no legacy RX cache call in {len(paths)} maintained kernel files",
+                # The call count is legitimately zero; the files scanned are
+                # what must not be.
+                files=len(paths))
     return 0
 
 

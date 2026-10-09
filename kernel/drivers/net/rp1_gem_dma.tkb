@@ -1,0 +1,107 @@
+// GitHub issue #622: the mint file of the GEM receive allocation.
+// dma_finish_owned_rx is accepted only in the file that declares the
+// record, so this file is the whole trusted claim that device ownership of
+// the RX buffer returns to the CPU. It returns it in one function:
+//   - gem_rx_settle_completed: called only by rp1_gem.tkb's net_rx_acquire
+//     right after a live refresh shows the RX descriptor's ownership bit
+//     (word 0, bit 0) set, so GEM has written the frame and handed the
+//     buffer back (Cadence GEM receive descriptor protocol; RP1 uses one
+//     descriptor with WRAP).
+// Every other function here only moves the tokens between the owner slot
+// and its callers. Keep anything else out of this file.
+//
+// Current limitations (2026-10-09):
+// - The observation itself is read in rp1_gem.tkb, because the descriptor
+//   must stay a private global there for dma_refresh_live. The claim that
+//   it was read is this file's comment and check_dma_mint_files.py's entry,
+//   not something the compiler checks.
+// - No reset settle: GEM is not stopped while the kernel runs, so a device
+//   token is reclaimed only by an observed completion.
+
+use "kernel/lib/mutex.tkb";
+
+struct dma_fixed GemRx { private bytes: [u8; 2048]; }
+private let mut gem_rx: GemRx align(64);
+
+private linear struct GemRxGuard[lock: addr] {
+    private flags: usize;
+}
+
+private fn gem_rx_lock(lock: *Mutex @ address) -> GemRxGuard[address]
+        !{acquires_lock_40_gem_rx, lock_guard_40_gem_rx} {
+    let mut guard: GemRxGuard[address] = { mutex_acquire(lock) };
+    return guard;
+}
+
+private fn gem_rx_unlock(guard: sink GemRxGuard[address],
+                         lock: *Mutex @ address) {
+    mutex_release(lock, guard.flags);
+}
+
+private fn gem_rx_take() -> GemRxAuthority {
+    let guard = gem_rx_lock(&dma_owner_GemRx.mutex);
+    let previous: GemRxAuthority = stable_replace(
+        guard, &dma_owner_GemRx.mutex, dma_owner_GemRx.value,
+        GemRxAuthority::Empty);
+    gem_rx_unlock(guard, &dma_owner_GemRx.mutex);
+    return previous;
+}
+
+private fn gem_rx_fail_cpu(stale: sink *GemRxCpu) {
+    kernel_syscall_fail_stop(0);
+}
+
+private fn gem_rx_fail_device(stale: sink *GemRxDevice) {
+    kernel_syscall_fail_stop(0);
+}
+
+private fn gem_rx_put(value: sink GemRxAuthority) {
+    let guard = gem_rx_lock(&dma_owner_GemRx.mutex);
+    let previous: GemRxAuthority = stable_replace(
+        guard, &dma_owner_GemRx.mutex, dma_owner_GemRx.value, value);
+    gem_rx_unlock(guard, &dma_owner_GemRx.mutex);
+    match previous {
+        GemRxAuthority::Empty => { return; }
+        GemRxAuthority::Cpu(stale) => { gem_rx_fail_cpu(stale); }
+        GemRxAuthority::Device(stale) => { gem_rx_fail_device(stale); }
+    }
+}
+
+// Hand the buffer to GEM: the slot's CPU token (its initial state at boot)
+// becomes the device token, which the slot keeps until a completion is
+// observed. Returns the buffer's address for the descriptor.
+fn gem_rx_arm_initial() -> usize !{unsafe} {
+    let GemRxAuthority::Cpu(cpu) = gem_rx_take() else {
+        GemRxAuthority::Device(device) => { gem_rx_fail_device(device); return 0; }
+        GemRxAuthority::Empty => { kernel_syscall_fail_stop(0); return 0; }
+    };
+    return gem_rx_arm(cpu);
+}
+
+// Hand the buffer back to GEM with the CPU token a frame owner held.
+fn gem_rx_arm(cpu: sink *GemRxCpu) -> usize !{unsafe} {
+    let device = dma_begin_rx(cpu, GemRx);
+    let mut span = dma_device_span(device, GemRx, 0, 2048);
+    let address: usize = unsafe { dma_span_address(span) };
+    gem_rx_put(GemRxAuthority::Device(device));
+    return address;
+}
+
+// Called only after the caller observed the RX descriptor's ownership bit
+// set (see the header): device ownership returns to the CPU here and only
+// here.
+fn gem_rx_settle_completed() -> *GemRxCpu {
+    // The failure arms fail-stop; the returns after them are never reached
+    // and only satisfy let-else's rule that a failure arm leaves.
+    let GemRxAuthority::Device(device) = gem_rx_take() else {
+        GemRxAuthority::Cpu(cpu) => {
+            gem_rx_fail_cpu(cpu);
+            return gem_rx_settle_completed();
+        }
+        GemRxAuthority::Empty => {
+            kernel_syscall_fail_stop(0);
+            return gem_rx_settle_completed();
+        }
+    };
+    return dma_finish_owned_rx(device, GemRx);
+}

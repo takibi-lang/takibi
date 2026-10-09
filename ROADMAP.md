@@ -27,7 +27,9 @@ where it is not (#637 option (b)).
    step 1 supplied the place-derived access rule converging on #672.
 2. #131's design, together with #672 stage 2 (array elements); #637 stage 2
    adopts the result rather than a parallel mechanism. Next for A.
-3. First concrete driver: #622 (a DMA token held in the RX frame owner).
+3. First concrete driver: #622 (a DMA token held in the RX frame owner),
+   done 2026-10-09 on the place rule's first slice (field places,
+   field_take/field_put, borrow in place).
 4. Then #704 with #637's per-CPU consumers (A's next after #622), #707,
    the process-record typestate group (#653, #590, #308), #686, #687 and
    #343, each as a consumer of the same rule; then #637's mint list and
