@@ -293,6 +293,53 @@ the actual reader, forward-only write, held-lock refusal and stub cleanup.
 It tests the diagnostic transport, not the world-stop protocol or natural
 failure rate; the shortened churn finder is the separate workload evidence.
 
+A captured EL0 top PC can be interpreted without another guest run:
+
+```bash
+python3 scripts/symbolize_ddb.py --postmortem ddb-postmortem.log \
+  --elf-map elf-map.json --output postmortem-symbols
+```
+
+The map is an explicit registration for one capture, not a guess from a PID,
+filename or PC. Its format is:
+
+```json
+{
+  "schema": "takibi.ddb.elf-map/v1",
+  "capture_sha256": "<SHA256 of the exact raw DDB capture>",
+  "processes": [{
+    "pid": 76,
+    "elf": "captured-user_payload.elf",
+    "sha256": "<expected SHA256 from the matching image>",
+    "load_bias": "0x80000000",
+    "runtime_entry": "0x80010540",
+    "load_evidence": "<independent loader observation or exact loader/source evidence>"
+  }]
+}
+```
+
+ELF paths are relative to the map. The caller supplies the PID/image association,
+expected identity and independent load evidence. The tool checks ELF bytes,
+program-header bounds, executable file-backed segments, and that the registered
+runtime entry equals the ELF entry plus the declared bias. Fixed executables
+require bias zero; PIE bias must be page aligned. These checks establish
+consistency with the registration; they cannot prove a fabricated registration
+matches a live process. Do not derive both load anchors from the captured PC.
+
+Only `bt frame=0 ... boundary=user` records with an unambiguous `bt source`
+context are candidates. CPU, stopped-peer and saved-process contexts work;
+kernel frames are ignored. Unknown PID mappings remain unresolved. Missing,
+replaced, truncated or inconsistent artifacts and PCs outside executable
+segments are refused explicitly; no nearest ELF or alternate bias is tried.
+Symbol names and source locations use the existing flat-PC symbolizer.
+
+The output keeps `postmortem.raw.log`, `symbols.json` and the exact selected
+`elfs/<SHA256>.elf` bytes, so `make clean` cannot replace their interpretation.
+Save the output outside `_build` when it must survive cleaning. Status 1 means
+at least one registered mapping or interpreted PC was refused; unresolved
+unregistered PIDs are recorded without assigning symbols. No user-stack unwind
+or per-boot symbol table is involved.
+
 The two `kernelsh-*` targets are deliberately interactive and do not run the
 automated view suite. RPi5 starts the physical-Ethernet peer needed to keep
 the kernel's normal network initialization path from timing out. Both use a
