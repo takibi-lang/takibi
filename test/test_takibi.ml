@@ -11585,6 +11585,26 @@ fn f() -> *usize { return &temp_address_outer().r.a; }");
           return device;
         }");
 
+  (* GitHub issue #707: GEM's bad program -- submit, an unconfirmed wait,
+     then overwrite the buffer. The write needs the CPU token the submit
+     consumed, whatever the wait reported. *)
+  Alcotest.test_case "fixed DMA transmit refuses an overwrite after an unconfirmed wait" `Quick
+    (expect_type_error
+       "derived from linear value 'cpu' and cannot be used after 'cpu' is consumed"
+       "struct no_copy Mutex { private word: usize; }
+        struct dma_fixed GemTx707 { private bytes: [u8; 64]; }
+        private let mut gem_tx707: GemTx707 align(64);
+        fn wait707() -> bool { return false; }
+        fn keep707(device: sink *GemTx707Device) {}
+        fn resend707(cpu: sink *GemTx707Cpu) {
+          let bytes = dma_cpu_slice(cpu, GemTx707);
+          bytes[0] = 1;
+          let device = dma_begin_tx(cpu, GemTx707);
+          let done: bool = wait707();
+          keep707(device);
+          bytes[0] = 2;
+        }");
+
   Alcotest.test_case "fixed DMA transmit cannot reuse a buffer without its mint file" `Quick
     (fun () ->
        match infer_files [

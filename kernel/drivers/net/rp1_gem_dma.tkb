@@ -1,12 +1,20 @@
-// GitHub issue #622: the mint file of the GEM receive allocation.
-// dma_finish_owned_rx is accepted only in the file that declares the
-// record, so this file is the whole trusted claim that device ownership of
-// the RX buffer returns to the CPU. It returns it in one function:
+// GitHub issues #622 and #707: the mint file of the GEM receive and
+// transmit allocations. dma_finish_owned_rx/_tx are accepted only in the
+// file that declares the record, so this file is the whole trusted claim
+// that device ownership of either buffer returns to the CPU. It returns it
+// in three functions:
 //   - gem_rx_settle_completed: called only by rp1_gem.tkb's net_rx_acquire
 //     right after a live refresh shows the RX descriptor's ownership bit
 //     (word 0, bit 0) set, so GEM has written the frame and handed the
 //     buffer back (Cadence GEM receive descriptor protocol; RP1 uses one
 //     descriptor with WRAP).
+//   - gem_tx_settle_completed: called only by rp1_gem.tkb's
+//     net_tx_complete after gem_tx_wait reported the TX descriptor's used
+//     bit (word 1, bit 31) set, so GEM has read the frame (Cadence GEM
+//     transmit descriptor protocol);
+//   - gem_tx_settle_halted: called only after gem_halt() saw TSR.TGO clear
+//     with NCR.THalt set, so transmission has stopped and GEM no longer
+//     reads the buffer.
 // Every other function here only moves the tokens between the owner slot
 // and its callers. Keep anything else out of this file.
 //
@@ -15,13 +23,21 @@
 //   must stay a private global there for dma_refresh_live. The claim that
 //   it was read is this file's comment and check_dma_mint_files.py's entry,
 //   not something the compiler checks.
-// - No reset settle: GEM is not stopped while the kernel runs, so a device
-//   token is reclaimed only by an observed completion.
+// - No RX reset settle: GEM is not stopped while the kernel runs, so an RX
+//   device token is reclaimed only by an observed completion.
+// - The TX halt is GEM's own halt-and-drain report; whether RP1's DMA can
+//   still read after TSR.TGO clears is the device contract, verified on the
+//   board rather than here.
 
 use "kernel/lib/mutex.tkb";
 
 struct dma_fixed GemRx { private bytes: [u8; 2048]; }
 private let mut gem_rx: GemRx align(64);
+
+// One TX buffer shared by both TX descriptors; its single token serializes
+// them.
+struct dma_fixed GemTx { private bytes: [u8; 1536]; }
+private let mut gem_tx: GemTx align(64);
 
 private linear struct GemRxGuard[lock: addr] {
     private flags: usize;
@@ -106,4 +122,50 @@ fn gem_rx_settle_completed() -> *GemRxCpu {
         }
     };
     return dma_finish_owned_rx(device, GemRx);
+}
+
+fn gem_tx_take() -> GemTxAuthority {
+    let guard = gem_rx_lock(&dma_owner_GemTx.mutex);
+    let previous: Place(GemTxAuthority) = place_take(
+        guard, &dma_owner_GemTx.mutex, dma_owner_GemTx.value);
+    gem_rx_unlock(guard, &dma_owner_GemTx.mutex);
+    let Place::Full(authority) = previous else {
+        Place::Empty => {
+            kernel_invariant_stop();
+            return gem_tx_take();
+        }
+    };
+    return authority;
+}
+
+private fn gem_tx_fail_cpu(stale: sink *GemTxCpu) {
+    kernel_invariant_stop();
+}
+
+private fn gem_tx_fail_device(stale: sink *GemTxDevice) {
+    kernel_invariant_stop();
+}
+
+fn gem_tx_put(value: sink GemTxAuthority) {
+    let guard = gem_rx_lock(&dma_owner_GemTx.mutex);
+    let previous: Place(GemTxAuthority) = place_put(
+        guard, &dma_owner_GemTx.mutex, dma_owner_GemTx.value, value);
+    gem_rx_unlock(guard, &dma_owner_GemTx.mutex);
+    let Place::Full(held) = previous else {
+        Place::Empty => { return; }
+    };
+    match held {
+        GemTxAuthority::Cpu(cpu) => { gem_tx_fail_cpu(cpu); }
+        GemTxAuthority::Device(device) => { gem_tx_fail_device(device); }
+    }
+}
+
+// See the header: the TX descriptor's used bit was observed set.
+fn gem_tx_settle_completed(device: sink *GemTxDevice) -> *GemTxCpu {
+    return dma_finish_owned_tx(device, GemTx);
+}
+
+// See the header: gem_halt() confirmed transmission stopped.
+fn gem_tx_settle_halted(device: sink *GemTxDevice) -> *GemTxCpu {
+    return dma_finish_owned_tx(device, GemTx);
 }

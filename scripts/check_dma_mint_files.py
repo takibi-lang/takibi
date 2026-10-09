@@ -34,6 +34,8 @@ MINT_SITES = {
     },
     "kernel/drivers/net/rp1_gem_dma.tkb": {
         "gem_rx_settle_completed": "RX descriptor ownership bit set, read by net_rx_acquire",
+        "gem_tx_settle_completed": "TX descriptor used bit set, read by gem_tx_wait",
+        "gem_tx_settle_halted": "gem_halt saw TSR.TGO clear with NCR.THalt set",
     },
     "kernel/platform/rpi5/usb_xhci_dma.tkb": {
         "xhci_receive_configuration": "final Transfer Event or HCHalted",

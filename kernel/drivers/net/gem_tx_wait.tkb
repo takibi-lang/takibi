@@ -5,14 +5,18 @@
 // pinning the listener to CPU0 did not remove that delay.
 // After 200 us it retains the existing 1000-wakeup defensive fallback.
 // This is wake-and-recheck: an interrupt need not mean TX has completed.
-fn gem_tx_wait(slot: {0..<2 as usize}) !{may_block} {
+// Returns whether completion was observed. False means the cap ran out with
+// the descriptor still owned by GEM: the frame may still be read by DMA, so
+// the caller must not treat the buffer as free (GitHub issue #707).
+fn gem_tx_wait(slot: {0..<2 as usize}) -> bool !{may_block} {
     let started: i64 = read_cntpct();
     let poll_ticks: i64 = read_cntfrq() * 200 / 1000000;
     while (read_cntpct() - started < poll_ticks) {
-        if (gem_tx_slot_done(slot)) { return; }
+        if (gem_tx_slot_done(slot)) { return true; }
     }
     for wake: usize in 0..<1000 {
-        if (gem_tx_slot_done(slot)) { return; }
+        if (gem_tx_slot_done(slot)) { return true; }
         workload_profile_interrupt_wait();
     }
+    return gem_tx_slot_done(slot);
 }

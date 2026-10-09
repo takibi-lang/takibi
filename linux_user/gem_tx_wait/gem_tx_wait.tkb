@@ -41,39 +41,40 @@ fn check(ok: bool, label: *u8) {
 
 fn app_main() !{may_block} {
     reset(0, 15000);
-    gem_tx_wait(0);
-    check(waits == 0 && checked_slot == 0, "already complete");
+    let done_1: bool = gem_tx_wait(0);
+    check(done_1 && waits == 0 && checked_slot == 0, "already complete");
 
     reset(100, 15000);
-    gem_tx_wait(1);
-    check(waits == 0 && fake_now < 200 && checked_slot == 1,
+    let done_2: bool = gem_tx_wait(1);
+    check(done_2 && waits == 0 && fake_now < 200 && checked_slot == 1,
           "wire latency must not become a timer wait");
 
     // Pin both sides of the exact 200-tick poll boundary. Completion at
     // the first fallback check still needs no interrupt; one tick later
     // does need a wake and a fresh descriptor check.
     reset(200, 50);
-    gem_tx_wait(0);
-    check(waits == 0 && fake_now == 200, "last poll completion");
+    let done_3: bool = gem_tx_wait(0);
+    check(done_3 && waits == 0 && fake_now == 200, "last poll completion");
 
     reset(201, 50);
-    gem_tx_wait(1);
-    check(waits == 0 && fake_now == 201, "first fallback completion");
+    let done_4: bool = gem_tx_wait(1);
+    check(done_4 && waits == 0 && fake_now == 201, "first fallback completion");
 
     reset(202, 50);
-    gem_tx_wait(0);
-    check(waits == 1 && fake_now == 251, "just beyond first fallback check");
+    let done_5: bool = gem_tx_wait(0);
+    check(done_5 && waits == 1 && fake_now == 251, "just beyond first fallback check");
 
     reset(500, 15000);
-    gem_tx_wait(0);
-    check(waits == 1 && fake_now >= 500, "slow completion fallback");
+    let done_6: bool = gem_tx_wait(0);
+    check(done_6 && waits == 1 && fake_now >= 500, "slow completion fallback");
 
     reset(500, 50);
-    gem_tx_wait(1);
-    check(waits > 1 && fake_now >= 500, "unrelated wake must recheck");
+    let done_7: bool = gem_tx_wait(1);
+    check(done_7 && waits > 1 && fake_now >= 500, "unrelated wake must recheck");
 
     reset(-1, 15000);
-    gem_tx_wait(0);
+    let absent: bool = gem_tx_wait(0);
     check(waits == 1000, "absent completion keeps the defensive cap");
+    check(absent == false, "absent completion is reported, not treated as done");
     uart_puts("gem-tx-wait: immediate, short poll, slow fallback, unrelated wake, absent completion ok\r\n");
 }
