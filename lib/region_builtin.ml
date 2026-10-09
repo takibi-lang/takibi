@@ -93,12 +93,6 @@ fn region_merge(head: sink @R@[b, o, k], tail: sink @R@[b, o + k, m])
     return whole;
 }
 
-// Element i, proved below the count where the call is made. The pointer is
-// derived from the borrow of r and dies with it.
-fn region_at(r: borrow @R@[b, o, n], i: usize @ k) -> *@T@ @ b !{unsafe}
-        where k < n {
-    return unsafe { (r.address + i * sizeof(@T@)) as *@T@ };
-}
 
 fn region_count(r: borrow @R@[b, o, n]) -> usize {
     return r.length;
@@ -925,8 +919,27 @@ fn region_inspection_record(p: borrow @IV@[b, scope]) -> &mut @T@ @ scope !{unsa
 }
 |}
 
+(* Element i, proved below the count where the call is made, derived from
+   the borrow of r and dead with it. A record element is handed out as a
+   reference, so access through it is not raw access (#731); a primitive
+   element keeps a derived pointer, since `&T` names records only. *)
+let region_at_record_source = {|
+fn region_at(r: borrow @R@[b, o, n], i: usize @ k) -> &mut @T@ @ b !{unsafe}
+        where k < n {
+    return unsafe { ((r.address + i * sizeof(@T@)) as *@T@) as &mut @T@ };
+}
+|}
+
+let region_at_primitive_source = {|
+fn region_at(r: borrow @R@[b, o, n], i: usize @ k) -> *@T@ @ b !{unsafe}
+        where k < n {
+    return unsafe { (r.address + i * sizeof(@T@)) as *@T@ };
+}
+|}
+
 let instance ?(record = false) elem =
-  (if record then template ^ record_access_source else template)
+  (if record then template ^ region_at_record_source ^ record_access_source
+   else template ^ region_at_primitive_source)
   |> replace_all ~sub:"@R@" ~by:("region__" ^ elem)
   |> replace_all ~sub:"@S@" ~by:("RegionSplit__" ^ elem)
   |> replace_all ~sub:"@O@" ~by:("RegionOf__" ^ elem)

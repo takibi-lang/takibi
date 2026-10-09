@@ -67,7 +67,8 @@ let mut diagnostic_trace_test_enabled: bool;
 // only piece of address arithmetic has one home -- the writer and the
 // reader used to compute it separately from the same two constants.
 private fn diagnostic_trace_slot(cpu: {0..<DIAGNOSTIC_TRACE_CPUS as usize},
-                                 sequence: usize) -> *DiagnosticEvent {
+                                 sequence: usize)
+        -> {0..<DIAGNOSTIC_TRACE_SLOTS as usize} {
     // The storage array's size and this arithmetic have to agree, and an
     // array size cannot be a product expression, so the product is a
     // separate constant -- which is exactly the shape that goes stale when
@@ -75,11 +76,10 @@ private fn diagnostic_trace_slot(cpu: {0..<DIAGNOSTIC_TRACE_CPUS as usize},
     static_assert(DIAGNOSTIC_TRACE_SLOTS ==
                   DIAGNOSTIC_TRACE_CPUS * DIAGNOSTIC_TRACE_EVENTS,
                   "DIAGNOSTIC_TRACE_SLOTS must be CPUS * EVENTS: this function indexes past the array otherwise");
-    let records: *DiagnosticEvent = diagnostic_trace_records;
-    let slot: usize =
+    let slot: {0..<DIAGNOSTIC_TRACE_SLOTS as usize} =
         cpu * DIAGNOSTIC_TRACE_EVENTS +
         ((sequence - 1) % DIAGNOSTIC_TRACE_EVENTS);
-    return records + (slot as isize);
+    return slot;
 }
 
 fn diagnostic_trace_record(event: usize, a: usize, b: usize,
@@ -93,7 +93,9 @@ fn diagnostic_trace_record(event: usize, a: usize, b: usize,
     // publish_begin clears the commit word with a release before anything
     // below runs, so an interrupt that reads this slot mid-write sees an
     // empty record rather than the previous one still looking plausible.
-    let w = publish_begin(diagnostic_trace_slot(cpu, sequence));
+    let slot: {0..<DIAGNOSTIC_TRACE_SLOTS as usize} =
+        diagnostic_trace_slot(ring_cpu, sequence);
+    let w = publish_begin(&diagnostic_trace_records[slot]);
     w.cpu = cpu;
     w.id = event;
     w.a = a;
@@ -125,17 +127,16 @@ fn diagnostic_trace_copy_cpu(cpu: usize,
             overwritten = latest - DIAGNOSTIC_TRACE_EVENTS;
             first = overwritten + 1;
         }
-        // Slice-to-pointer decay to the slice's OWN element type, which
-        // needs no length proof (SPEC.md, "Slices"). The bound is kept by
-        // the loop below never writing past DIAGNOSTIC_TRACE_EVENTS, which
-        // is the slice's declared minimum.
-        let target: *DiagnosticEvent = output as *DiagnosticEvent;
         for item: usize in 0..<DIAGNOSTIC_TRACE_EVENTS {
             let sequence: usize = first + item;
-            if (sequence <= latest) {
+            // count never passes item, so it stays inside the output's
+            // declared minimum; the check states that instead of a comment.
+            let at: usize = count;
+            if (sequence <= latest && at < output.len) {
+                let slot: {0..<DIAGNOSTIC_TRACE_SLOTS as usize} =
+                    diagnostic_trace_slot(ring_cpu, sequence);
                 let taken: usize = publish_copy(
-                    diagnostic_trace_slot(cpu, sequence),
-                    target + (count as isize));
+                    &diagnostic_trace_records[slot], &output[at]);
                 // The slot holds what the WRITER committed. This reader
                 // knows which sequence chronologically belongs here, so a
                 // consistent copy of a DIFFERENT record is still damage --

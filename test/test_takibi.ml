@@ -2958,6 +2958,57 @@ let infer_tests = [
       Alcotest.(check int) "none of these is a raw pointer" 0
         (List.length (Type_inf.raw_deref_sites ())));
 
+  Alcotest.test_case "#731: publish tokens and region elements from checked places are not raw" `Quick
+    (fun () ->
+      ignore (infer_regions {|
+        struct publish Ev { seq: usize; a: usize; b: usize; }
+        struct Node { key: usize; }
+        private let mut evs: [Ev; 4];
+        private let mut copies: [Ev; 4];
+        private let mut nodes: [Node; 4];
+        fn write(i: {0..<4 as usize}) !{unsafe} {
+          let w = publish_begin(&evs[i]);
+          w.a = 1;
+          w.b = 2;
+          publish_commit(w, 1);
+        }
+        fn read(i: {0..<4 as usize}) -> usize !{unsafe} {
+          return publish_copy(&evs[i], &copies[i]);
+        }
+        fn region() -> usize !{unsafe} {
+          let RegionOf(Node)::Taken(r) = region_of(nodes) else {
+            RegionOf(Node)::Gone => { return 0; }
+          };
+          region_at(r, 1).key = 7;
+          let k: usize = region_at(r, 1).key;
+          region_release(r);
+          return k;
+        }|});
+      (* The built-in region's own definitions are the compiler's trust and
+         are listed under <builtin region>; only the program's sites count. *)
+      Alcotest.(check int) "no raw site" 0
+        (List.length (List.filter
+          (fun site -> site.Type_inf.raw_file <> Region_builtin.builtin_file)
+          (Type_inf.raw_deref_sites ()))));
+  Alcotest.test_case "#731: a publish token from a raw pointer stays raw" `Quick
+    (fun () ->
+      ignore (infer {|
+        struct publish Ev { seq: usize; a: usize; }
+        fn write(p: *Ev) !{unsafe} {
+          let w = publish_begin(p);
+          w.a = 1;
+          publish_commit(w, 1);
+        }|});
+      Alcotest.(check int) "the token's store is raw" 1
+        (List.length (Type_inf.raw_deref_sites ())));
+  Alcotest.test_case "#731: a reference publish token is still linear" `Quick
+    (expect_type_error "never consumed" {|
+      struct publish Ev { seq: usize; a: usize; }
+      private let mut evs: [Ev; 4];
+      fn write(i: {0..<4 as usize}) !{unsafe} {
+        let w = publish_begin(&evs[i]);
+        w.a = 1;
+      }|});
   Alcotest.test_case "raw deref audit counts a generic function's site once" `Quick
     (fun () ->
       ignore (infer_files ["generic.tkb",

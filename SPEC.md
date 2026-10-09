@@ -3038,8 +3038,10 @@ match region_split(rest, wanted) {                   // run-time split point
   `region_split(r, k)` is the run-time checked split.
 - `region_merge(head, tail)` is accepted only when tail starts where head
   ends (static arithmetic, above).
-- An element pointer from `region_at` is derived from the borrow of the
-  region and refused after the region is consumed.
+- An element from `region_at` is derived from the borrow of the region and
+  refused after the region is consumed. For a struct element it is a
+  `&mut T`, so access through it is not raw access (GitHub issue #731); for
+  a primitive element, which `&T` cannot name, it stays a derived `*T`.
 - `region(T)`, `RegionSplit(T)` and `RegionOf(T)` name the instance for one
   element type; the language has no type-generic variants. Names beginning
   `__region_` are reserved.
@@ -3306,6 +3308,13 @@ publish_commit(w, sequence);             // consumes w, release-stores it
   orders after the payload. A record is written through the token and read
   out with `publish_copy`. Taking `&slot` for those two, and reading a
   copied record's fields, are unaffected.
+- **A record named by `&place` is taken as a reference** (GitHub issue
+  #731). `publish_begin(&records[i])` (a refined index or another checked
+  place) returns a `&mut` token, and the payload stores through it are not
+  raw access; `publish_copy(&src, &dst)` takes its source as `&T` and its
+  destination as `&mut T` the same way. A record reached through a raw
+  `*T` value keeps a raw token: the raw origin is the trust, and it is
+  counted where the token is used.
 - **`publish_begin` returns a LINEAR token.** A record left in flight is
   a compile error on every path that could leave it that way, not a slot
   that stays torn until something wraps over it.

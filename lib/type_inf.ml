@@ -1638,13 +1638,13 @@ let check_publish_definite_assignment (body : Ast.stmt list) =
   ignore (walk StringMap.empty body)
 
 let is_linear_ptr_ty t = match repr t with
-  | TPtr (TStruct n) -> StringSet.mem n !linear_opaque_names
+  | TPtr (TStruct n) | TRefMut (TStruct n) -> StringSet.mem n !linear_opaque_names
   | TIndexedStruct (n, _) ->
       Hashtbl.find_opt indexed_struct_kinds n = Some Ast.KindLinear
   | _ -> false
 
 let rec is_linear_payload_ty t = match repr t with
-  | TPtr (TStruct n) -> StringSet.mem n !linear_opaque_names
+  | TPtr (TStruct n) | TRefMut (TStruct n) -> StringSet.mem n !linear_opaque_names
   | TView (n, _) -> Hashtbl.find_opt view_kinds n = Some Ast.KindLinear
   | TVariant (n, _) ->
       Hashtbl.find_opt variant_kinds n = Some Ast.KindLinear
@@ -4205,10 +4205,18 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
          These do NOT require `unsafe`, unlike the atomics they are made
          of. That is the point of having them: the ordering argument is
          made once, here, instead of at every call site. *)
-      let record_of_ptr arg what =
-        let t = infer_expr senv eenv tyenv fenv arg in
-        match repr t with
-        | TPtr inner ->
+      (* GitHub issue #731: a record named by `&place` is taken as a
+         reference, not a raw pointer, so the token made from it and the
+         stores through that token are not raw access. A raw `*T` argument
+         keeps its raw meaning. *)
+      let infer_record_arg arg wrap =
+        match arg.Ast.desc with
+        | Ast.AddrOf inner -> infer_addrof_wrapped senv eenv tyenv fenv arg inner wrap
+        | _ -> infer_expr senv eenv tyenv fenv arg
+      in
+      let record_of_ty t (arg : Ast.expr) what =
+        match strip_singleton (repr t) with
+        | TPtr inner | TRef inner | TRefMut inner ->
             (match strip_singleton (repr inner) with
              | TStruct name when Publish_registry.is_publish name -> name
              | _ ->
@@ -4220,10 +4228,13 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
               "%s expects %s, a pointer to a `struct publish` record; '%s' \
                is not a pointer" fname what (to_string t)))
       in
+      let record_of_ptr ?(wrap = `RefMut) arg what =
+        record_of_ty (infer_record_arg arg wrap) arg what
+      in
       let token_record arg =
         let t = infer_expr senv eenv tyenv fenv arg in
-        match repr t with
-        | TPtr inner ->
+        match strip_singleton (repr t) with
+        | TPtr inner | TRefMut inner ->
             (match strip_singleton (repr inner) with
              | TStruct name ->
                  (match Publish_registry.record_of_token name with
@@ -4243,9 +4254,13 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       in
       (match fname, args with
        | "publish_begin", [record] ->
-           let name = record_of_ptr record "one argument" in
+           let record_ty = infer_record_arg record `RefMut in
+           let name = record_of_ty record_ty record "one argument" in
            Hashtbl.replace publish_begin_record e.loc name;
-           TPtr (TStruct (Publish_registry.token_name name))
+           let token = TStruct (Publish_registry.token_name name) in
+           (match strip_singleton (repr record_ty) with
+            | TRef _ | TRefMut _ -> TRefMut token
+            | _ -> TPtr token)
        | "publish_begin", _ ->
            raise (TypeError (e.loc,
              "publish_begin expects one argument: publish_begin(&record)"))
@@ -4270,7 +4285,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
           nonzero, so ignoring the result reads whatever `out` already held
           rather than half a record. *)
        | "publish_copy", [src; dst] ->
-           let src_name = record_of_ptr src "a source" in
+           let src_name = record_of_ptr ~wrap:`Ref src "a source" in
            let dst_name = record_of_ptr dst "a destination" in
            if src_name <> dst_name then
              raise (TypeError (e.loc, Printf.sprintf
@@ -9327,7 +9342,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | _ -> false
   in
   let rec is_linear_type ty = match strip_borrow ty with
-    | Ast.TypePtr (Ast.TypeNamed name) -> StringSet.mem name linear_names
+    | Ast.TypePtr (Ast.TypeNamed name) | Ast.TypeRefMut (Ast.TypeNamed name) ->
+        StringSet.mem name linear_names
     | Ast.TypeIndexed (name, _) | Ast.TypeNamed name ->
         StringSet.mem name linear_names
     | Ast.TypeView (name, _) ->
