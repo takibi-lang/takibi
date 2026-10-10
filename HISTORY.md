@@ -1,5 +1,21 @@
 # takibi Engineering History
 
+## 2026-10-10: virtio-net completion expiry retains both queues
+
+The two virtio-net TX paths nested an IRQ-flag wait inside their used-index
+loop. Timer wakes could never escape that inner loop when a device stopped
+completing, so networking hung indefinitely. A shared must-use completion
+outcome now distinguishes an observed used entry from elapsed expiry. The
+1 s backstop follows virtio-blk's current policy (564b0f1a); it is
+not derived from virtio hardware latency. Unconfirmed completion disables
+this boot's queues without resetting, advancing the TX used shadow, rewriting
+TX storage or reposting the RX slot an in-place reply may still reference.
+Submission is private and later public sends/acquires are guarded. Native
+tests compile the real driver with deterministic device/clock responses;
+only the unused AArch64 IRQ notification is replaced. The old driver fails
+the absent-completion control. Fixed DMA token migration remains separate
+from this bounded-wait correction.
+
 ## 2026-10-10: GEM completion uses an interrupt wait and a 14 ms budget
 
 After correcting the queue-zero interrupt bank, the maintainer selected a

@@ -2045,3 +2045,29 @@ The 14 ms completion budget is an elapsed-time failure policy informed by
 Linux's 16 KiB / 10 Mbps stop budget, not a proven DMA latency ceiling.
 Completion is rechecked before declaring timeout, and timeout processing
 can lag the budget by one periodic wake plus interrupt/scheduling delay.
+
+### virtio-net unconfirmed TX completion
+
+Both QEMU virtio-net TX paths wait on the device's used index with a 1 s
+elapsed-counter dead-device backstop, following the current virtio-blk
+policy. This is a failure policy, not a virtio-specified completion
+bound. Timer and unrelated interrupt wakes only trigger a recheck. A final
+observed used entry wins at the deadline; expiry processing can lag until a
+later wake.
+
+Without observed completion the driver logs once and disables this boot's
+network queues. It leaves the descriptor, scratch payload and in-place RX
+buffer intact: no used shadow advance, RX repost, new payload copy or new
+notification. A late used entry or RX interrupt cannot revive the queues.
+The current raw virtio ring/buffer implementation enforces this with private
+submission and guarded entry points; it does not yet carry fixed DMA owner
+tokens. Timeout alone grants no reuse, and no device reset is attempted.
+
+`linux_user/virtio_net_tx` and `linux_user/virtio_net_reply` compile the real
+driver with a deterministic clock and device-written RAM oracle. The only
+source substitution is the unused IRQ handler's AArch64 notification builtin,
+which has no AMD64 lowering. These tests check normal completion, elapsed
+expiry, frequent unrelated wakes, boundary completion, both retained-buffer
+paths, blocked later sends and late RX refusal. They do not prove hardware
+DMA/cache or interrupt behavior; ordinary QEMU integration exercises the
+actual MMIO and interrupt path.

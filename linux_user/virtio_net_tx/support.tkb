@@ -1,0 +1,168 @@
+// Execute the actual virtio-net driver with deterministic clock and used-ring
+// responses. RAM stands in for MMIO and device-written queue memory; these
+// tests do not claim interrupt delivery, DMA ordering or cache evidence.
+let mut fake_regs: [i32; 128];
+let mut fake_now: i64;
+let mut done_at: i64;
+let mut wake_ticks: i64;
+let mut waits: usize;
+let mut timeout_logs: usize;
+let mut packet: [u8; 1514];
+
+fn virtio_fixture_notify() {}
+fn mutex_irq_save() -> usize { return 0; }
+fn mutex_irq_restore(flags: usize) {}
+fn gic_intid_clear_pending(intid: u32) {}
+fn gic_intid_enable(intid: u32) {}
+fn gic_intid_target(intid: u32, cpu: u32) {}
+fn workload_profile_note_network_rx(len: usize) {}
+fn workload_profile_note_network_tx(len: usize) {}
+fn kernel_boot_log(message: *u8) { timeout_logs = timeout_logs + 1; }
+fn read_cntpct() -> i64 { fake_now = fake_now + 1; return fake_now; }
+fn read_cntfrq() -> i64 { return 1000000; }
+
+fn check(ok: bool, label: *u8) {
+    if (ok == false) {
+        uart_puts("FAIL virtio-net-tx: "); uart_puts(label); uart_puts("\r\n");
+        linux_exit(1);
+    }
+}
+
+fn tx_used() -> *VirtqUsed {
+    return (tx_queue_mem + VIRTIO_PAGE_SIZE) as *VirtqUsed;
+}
+
+fn workload_profile_interrupt_wait() !{may_block} {
+    waits = waits + 1;
+    // An old unbounded wait fails quickly rather than hanging the host suite.
+    check(waits < 40000, "wait did not return after the elapsed deadline");
+    fake_now = fake_now + wake_ticks;
+    if (done_at >= 0 && fake_now >= done_at) {
+        (*tx_used()).idx = virtio_ring_index_next(tx_used_seen);
+        virtio_tx_irq_flag = 1;
+    }
+}
+
+fn reset_clock(completion: i64, step: i64) {
+    fake_now = 0; done_at = completion; wake_ticks = step; waits = 0;
+    (*tx_used()).idx = tx_used_seen;
+}
+
+fn expect_completed() !{may_block} {
+    match virtio_net_tx_wait() {
+        VirtioNetTxCompletion::Completed => {}
+        VirtioNetTxCompletion::Unconfirmed => { check(false, "completion not observed"); }
+    }
+}
+
+fn expect_unconfirmed() !{may_block} {
+    match virtio_net_tx_wait() {
+        VirtioNetTxCompletion::Completed => { check(false, "wake falsely proves completion"); }
+        VirtioNetTxCompletion::Unconfirmed => {}
+    }
+}
+
+fn receive(ready: sink NetRxCanAcquire) -> NetRxAcquire {
+    let used: *VirtqUsed = (rx_queue_mem + VIRTIO_PAGE_SIZE) as *VirtqUsed;
+    let slot: {0..<8 as usize} = (((rx_used_seen as u16) as usize) % 8) as {0..<8 as usize};
+    used.ring[slot].id = 0;
+    used.ring[slot].len = 74;
+    used.idx = virtio_ring_index_next(rx_used_seen);
+    virtio_rx_irq_flag = 1;
+    return net_rx_acquire(ready);
+}
+
+fn send_reply(ready: sink NetRxCanAcquire) -> NetRxCanAcquire !{may_block} {
+    match receive(ready) {
+        NetRxAcquire::Acquired(frame) => {
+            return net_rx_send_reply(net_rx_reply_ready(frame, 64));
+        }
+        NetRxAcquire::None(again) => {
+            check(false, "oracle RX frame was refused");
+            return again;
+        }
+    }
+}
+
+fn send_timeout_case(ready: sink NetRxCanAcquire, reply_timeout: bool)
+        -> NetRxCanAcquire !{may_block} {
+    if (reply_timeout) {
+        return send_reply(ready);
+    }
+    return net_transmit_ready(ready, packet as []u8, 64);
+}
+
+fn run_driver_case(reply_timeout: bool) !{may_block} {
+    let address: usize = (fake_regs as *u8) as usize;
+    check(address > 0 && address < 0x80000000, "native fake MMIO must fit the legacy i32 base");
+    virtio_base = address as i32;
+    virtio_net_gic_intid = 48;
+    match net_init() {
+        NetInitResult::Ready(cap) => { run_initialized_case(cap, reply_timeout); }
+        NetInitResult::Failed => { check(false, "fake transport initialization failed"); }
+    }
+}
+
+fn run_initialized_case(ready: sink NetRxCanAcquire, reply_timeout: bool) !{may_block} {
+
+    reset_clock(-1, 100000);
+    (*tx_used()).idx = virtio_ring_index_next(tx_used_seen);
+    expect_completed();
+    check(waits == 0, "already-complete needs no wake");
+    reset_clock(12000, 1);
+    expect_completed();
+    check(waits > 1000 && fake_now < 1000001, "frequent wakes cannot exhaust the time budget");
+    reset_clock(-1, 100000);
+    expect_unconfirmed();
+    check(waits == 10 && fake_now >= 1000001 && fake_now < 1100000, "absent completion expires at 1 second");
+    reset_clock(1000001, 1000000);
+    expect_completed();
+    check(waits == 1, "completion at the boundary wins");
+    reset_clock(-1, 1100000);
+    expect_unconfirmed();
+    check(waits == 1, "late unrelated wake reports expiry");
+
+    packet[0] = 42;
+    reset_clock(500, 100);
+    let ready = net_transmit_ready(ready, packet as []u8, 64);
+    check(waits > 1 && timeout_logs == 0, "normal standalone send completes after unrelated wakes");
+    reset_clock(500, 100);
+    let ready = send_reply(ready);
+    check(waits > 1 && timeout_logs == 0, "normal reply completes and reposts RX");
+
+    reset_clock(-1, 100000);
+    let used_before: VirtioRingIndex = tx_used_seen;
+    let rx_avail_before: VirtioRingIndex = rx_avail_idx;
+    let ready = send_timeout_case(ready, reply_timeout);
+    check(waits == 10 && timeout_logs == 1, "driver returns and logs once on expiry");
+    check(tx_used_seen == used_before && rx_avail_idx == rx_avail_before,
+          "unconfirmed completion neither consumes TX nor reposts RX");
+    let tx_avail_before: VirtioRingIndex = tx_avail_idx;
+    let notify_before: i32 = fake_regs[20];
+    let stored_before: u8 = tx_ready_buf[VIRTIO_NET_HDR_LEN];
+    packet[0] = 99;
+    let ready = net_transmit_ready(ready, packet as []u8, 64);
+    check(tx_avail_idx == tx_avail_before && tx_ready_buf[VIRTIO_NET_HDR_LEN] == stored_before &&
+          fake_regs[20] == notify_before && timeout_logs == 1,
+          "later standalone sends leave descriptor, payload and notification unchanged");
+    // Even a late used entry and IRQ cannot revive the disabled queues.
+    (*tx_used()).idx = virtio_ring_index_next(tx_used_seen);
+    let late_rx: *VirtqUsed = (rx_queue_mem + VIRTIO_PAGE_SIZE) as *VirtqUsed;
+    let late_slot: {0..<8 as usize} = (((rx_used_seen as u16) as usize) % 8) as {0..<8 as usize};
+    late_rx.ring[late_slot].id = 0;
+    late_rx.ring[late_slot].len = 74;
+    late_rx.idx = virtio_ring_index_next(rx_used_seen);
+    virtio_rx_irq_flag = 1;
+    let ready = match net_rx_acquire(ready) {
+        NetRxAcquire::None(cap) => { cap }
+        NetRxAcquire::Acquired(frame) => {
+            check(false, "late interrupt revived RX after timeout");
+            net_rx_release(frame)
+        }
+    };
+    let wakes_before: usize = waits;
+    net_rx_wait();
+    check(waits == wakes_before + 1 && timeout_logs == 1,
+          "disabled RX wait still yields to periodic deadline checks");
+    net_shutdown(ready);
+}

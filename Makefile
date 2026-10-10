@@ -416,6 +416,7 @@ KERNEL_UNUSED_CHECKED_QEMU := \
 	kernel/drivers/block/virtio_blk.tkb \
 	kernel/drivers/block/virtio_blk_dma.tkb \
 	kernel/drivers/net/virtio_net.tkb \
+	kernel/drivers/net/virtio_net_tx_wait.tkb \
 	kernel/mm/page.tkb \
 	kernel/platform/qemu/init.tkb \
 	kernel/platform/qemu/intc.tkb \
@@ -499,7 +500,7 @@ LINUX_USER_EXAMPLES      := linux_hello start checked_usize elf64_validate bump 
                              affine_escape_via_index align_ptr_proof linear_obligation tuple_pair region_proto region_inspection pool_space_replay \
                              field_lease match_int_lit record_loans \
                              callstack ringbuf crc8 djb2 slice slice_from_field logical_eval foreach for loop fizzbuzz fibonacci \
-                             bubblesort inet_checksum ip_parse tcp_parse wire_endian ref_type byte_slice atomic spinlock locked_cell diagnostic_ring publish fdt number usb_config usb_init_report uart_rx_ring block_cache gem_tx_wait generic_variant runtime_bounds pin_placement
+                             bubblesort inet_checksum ip_parse tcp_parse wire_endian ref_type byte_slice atomic spinlock locked_cell diagnostic_ring publish fdt number usb_config usb_init_report uart_rx_ring block_cache gem_tx_wait virtio_net_tx virtio_net_reply generic_variant runtime_bounds pin_placement
 LINUX_USER_BINS          := $(foreach e,$(LINUX_USER_EXAMPLES),$(LINUX_USER_DIR)/$(e)/$(e).exe)
 LINUX_USER_OBJS          := $(foreach e,$(LINUX_USER_EXAMPLES),$(LINUX_USER_DIR)/$(e)/$(e)_exe.o)
 
@@ -523,6 +524,10 @@ $(LINUX_USER_DIR)/page_pool/page_pool_exe.o: $(LINUX_USER_DIR)/page_pool/page_po
 $(LINUX_USER_DIR)/inet_checksum/inet_checksum_exe.o: $(LINUX_USER_DIR)/common/inet_checksum.tkb
 $(LINUX_USER_DIR)/gem_tx_wait/gem_tx_wait_exe.o: kernel/drivers/net/gem_tx_wait.tkb
 $(LINUX_USER_DIR)/gem_tx_wait/gem_tx_wait_exe.o: LINUX_USER_EXTRA_SRCS := kernel/drivers/net/gem_tx_wait.tkb
+_build/virtio-net-native/driver.tkb: kernel/drivers/net/virtio_net.tkb scripts/build_virtio_net_native_fixture.py
+	python3 scripts/build_virtio_net_native_fixture.py $< $@
+$(LINUX_USER_DIR)/virtio_net_tx/virtio_net_tx_exe.o $(LINUX_USER_DIR)/virtio_net_reply/virtio_net_reply_exe.o: _build/virtio-net-native/driver.tkb kernel/drivers/net/virtio_net.tkb kernel/drivers/net/virtio_net_tx_wait.tkb kernel/drivers/virtio_ring.tkb kernel/lib/init_once.tkb kernel/lib/mutex.tkb kernel/lib/spinlock.tkb $(LINUX_USER_DIR)/virtio_net_tx/support.tkb
+$(LINUX_USER_DIR)/virtio_net_tx/virtio_net_tx_exe.o $(LINUX_USER_DIR)/virtio_net_reply/virtio_net_reply_exe.o: LINUX_USER_EXTRA_SRCS := _build/virtio-net-native/driver.tkb $(LINUX_USER_DIR)/virtio_net_tx/support.tkb
 $(LINUX_USER_DIR)/tcp_parse/tcp_parse_exe.o: $(LINUX_USER_DIR)/common/inet_checksum.tkb $(LINUX_USER_DIR)/common/netutil.tkb
 $(LINUX_USER_DIR)/byte_slice/byte_slice_exe.o: kernel/lib/byte_slice.tkb
 # GitHub issue #470: the kernel's device-tree reader, run against a blob

@@ -8,7 +8,7 @@
 // slot 0), the same descriptor/avail/used
 // ring layout and dma_publish/dma_consume barrier placement.
 //
-// What differs from that file, deliberately: the PUBLIC function/type
+// What differs from that file, deliberately: the function/type
 // names below match kernel/drivers/net/rp1_gem.tkb's contract exactly
 // (net_rx_validated/NetRxValidated/NetRxReplyReady/NetTxInFlight/
 // net_rx_reply_ready/net_transmit(reply)/net_transmit_ready/net_shutdown),
@@ -37,6 +37,7 @@
 use "kernel/net/netconfig.tkb";
 use "kernel/lib/init_once.tkb";
 use "kernel/drivers/virtio_ring.tkb";
+use "kernel/drivers/net/virtio_net_tx_wait.tkb";
 
 const VIRTIO_GUEST_FEATURES:   i32 = 0x20;
 const VIRTIO_GUEST_PAGE_SIZE:  i32 = 0x28;
@@ -127,6 +128,9 @@ private let mut net_init_once: InitOnce;
 let mut virtio_rx_irq_flag: io u32;
 let mut virtio_tx_irq_flag: io u32;
 private let mut virtio_net_ready: bool = false;
+// Completion expiry permanently disables this boot's queues. In-place RX
+// bytes can still be read by TX, so neither TX nor RX is republished.
+private let mut virtio_net_tx_down: bool = false;
 
 const RX_BUF_SIZE: isize = 1536; // 10-byte virtio_net_hdr + max 1514-byte Ethernet frame, rounded up
 const RX_BUF_SIZE_USIZE: usize = 1536;
@@ -318,12 +322,12 @@ fn kernel_net_rx_frame_pending() -> NetPendingState !{unsafe} {
 // QEMU boot hanging well past kernel_arp_reply_once's own 15s deadline
 // with no host-side peer attached.
 fn net_rx_wait() !{may_block} {
-    if (virtio_rx_irq_flag != 0) { return; }
+    if (virtio_net_tx_down == false && virtio_rx_irq_flag != 0) { return; }
     workload_profile_interrupt_wait();
 }
 
 fn net_rx_acquire(ready: sink NetRxCanAcquire) -> NetRxAcquire {
-    if (virtio_rx_irq_flag == 0) {
+    if (virtio_net_tx_down || virtio_rx_irq_flag == 0) {
         return NetRxAcquire::None(view NetRxCanAcquire);
     }
     virtio_rx_irq_flag = 0;
@@ -352,6 +356,7 @@ fn net_rx_frame(frame: borrow NetRxValidated[desc]) -> [u8; 1514..] @ desc {
 }
 
 fn net_rx_repost(index: {0..<8 as usize} @ desc) -> NetRxCanAcquire {
+    if (virtio_net_tx_down) { return view NetRxCanAcquire; }
     let rx_slot: isize = ((rx_avail_idx as u16) as isize) % QNUM;
     avail_ring_set(rx_queue_mem as *u8, rx_slot, index as isize);
     rx_avail_idx = virtio_ring_index_next(rx_avail_idx);
@@ -377,7 +382,7 @@ fn net_rx_reply_ready(frame: sink NetRxValidated[desc], len: i32)
 // virtio_mmio.tkb's own net_transmit -- correct because those bytes were
 // written by the device on RX with no offload fields set, i.e. already
 // effectively zero, and no offload features are negotiated on TX either).
-fn net_transmit(reply: sink NetRxReplyReady[desc]) -> NetTxInFlight[desc] {
+private fn net_transmit(reply: sink NetRxReplyReady[desc]) -> NetTxInFlight[desc] {
     workload_profile_note_network_tx(max(reply.len, 0) as usize);
     let offset: isize = (reply.index as isize) * (RX_BUF_SIZE_USIZE as isize);
     let buf: *u8 = rx_bufs + offset;
@@ -392,21 +397,34 @@ fn net_transmit(reply: sink NetRxReplyReady[desc]) -> NetTxInFlight[desc] {
     return in_flight;
 }
 
-fn net_tx_complete(in_flight: sink NetTxInFlight[desc]) -> NetRxCanAcquire !{may_block} {
-    while (tx_used_seen == used_idx_get(tx_queue_mem as *u8)) {
-        virtio_tx_irq_flag = 0;
-        if (tx_used_seen == used_idx_get(tx_queue_mem as *u8)) {
-            while (virtio_tx_irq_flag == 0) {
-                workload_profile_interrupt_wait();
-            }
+// A used-index observation returns the bytes to the CPU. Timeout alone does
+// not: leave the descriptor, scratch buffer and any borrowed RX slot intact.
+private fn virtio_net_tx_finish() !{may_block} {
+    match virtio_net_tx_wait() {
+        VirtioNetTxCompletion::Completed => {
+            dma_consume();
+            tx_used_seen = virtio_ring_index_next(tx_used_seen);
+        }
+        VirtioNetTxCompletion::Unconfirmed => {
+            virtio_net_tx_down = true;
+            virtio_net_ready = false;
+            kernel_boot_log("virtio net: tx completion unconfirmed; queues disabled\n");
         }
     }
-    dma_consume();
-    tx_used_seen = virtio_ring_index_next(tx_used_seen);
+}
+
+fn virtio_net_tx_used_pending() -> bool {
+    return tx_used_seen == used_idx_get(tx_queue_mem as *u8);
+}
+
+private fn net_tx_complete(in_flight: sink NetTxInFlight[desc])
+        -> NetRxCanAcquire !{may_block} {
+    virtio_net_tx_finish();
     return net_rx_repost(in_flight.index);
 }
 
 fn net_rx_send_reply(reply: sink NetRxReplyReady[desc]) -> NetRxCanAcquire !{may_block} {
+    if (virtio_net_tx_down) { return view NetRxCanAcquire; }
     return net_tx_complete(net_transmit(reply));
 }
 
@@ -418,6 +436,7 @@ fn net_rx_send_reply(reply: sink NetRxReplyReady[desc]) -> NetRxCanAcquire !{may
 fn net_transmit_ready(ready: sink NetRxCanAcquire,
                       bytes: borrow [u8; 1514..], len: i32)
         -> NetRxCanAcquire !{may_block} {
+    if (virtio_net_tx_down) { return view NetRxCanAcquire; }
     let safe_len: i32 = max(min(len, 1514), 0);
     workload_profile_note_network_tx(safe_len as usize);
     let tx_ready_slice: []u8 = tx_ready_buf as []u8;
@@ -432,16 +451,7 @@ fn net_transmit_ready(ready: sink NetRxCanAcquire,
     avail_publish(tx_queue_mem as *u8, tx_avail_idx);
     virtio_tx_irq_flag = 0;
     virtio_notify(1);
-    while (tx_used_seen == used_idx_get(tx_queue_mem as *u8)) {
-        virtio_tx_irq_flag = 0;
-        if (tx_used_seen == used_idx_get(tx_queue_mem as *u8)) {
-            while (virtio_tx_irq_flag == 0) {
-                workload_profile_interrupt_wait();
-            }
-        }
-    }
-    dma_consume();
-    tx_used_seen = virtio_ring_index_next(tx_used_seen);
+    virtio_net_tx_finish();
     return view NetRxCanAcquire;
 }
 

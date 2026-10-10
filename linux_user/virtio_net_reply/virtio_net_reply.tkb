@@ -1,0 +1,5 @@
+// In-place reply timeout through the actual maintained virtio-net driver.
+fn app_main() !{may_block} {
+    run_driver_case(true);
+    uart_puts("virtio-net-reply: time deadline, completion boundary, retained queues and payload ok\r\n");
+}

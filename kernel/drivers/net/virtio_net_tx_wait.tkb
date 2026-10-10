@@ -1,0 +1,21 @@
+// Wake-and-recheck completion policy for the QEMU virtio-net driver.
+// A timer or unrelated interrupt is not completion. The 1 s dead-device
+// backstop follows the current virtio-blk policy, not a virtio timing
+// guarantee. Expiry is observed on a later wake and never grants CPU access
+// to a descriptor or packet buffer. A final real used-index observation wins.
+must_use variant VirtioNetTxCompletion { Completed; Unconfirmed; }
+
+fn virtio_net_tx_wait() -> VirtioNetTxCompletion !{may_block} {
+    let started: i64 = read_cntpct();
+    let deadline_ticks: i64 = read_cntfrq() * 1;
+    while (read_cntpct() - started < deadline_ticks) {
+        if (virtio_net_tx_used_pending() == false) {
+            return VirtioNetTxCompletion::Completed;
+        }
+        workload_profile_interrupt_wait();
+    }
+    if (virtio_net_tx_used_pending() == false) {
+        return VirtioNetTxCompletion::Completed;
+    }
+    return VirtioNetTxCompletion::Unconfirmed;
+}

@@ -113,7 +113,8 @@ Initialization does not prove CPU freshness across preemption.
 1. **Fixed DMA lifecycle, finishing the drivers.** Every stage of one
    transfer in types, leaving one device-semantics declaration per driver
    and the platform bus translation as the only trusted parts.
-   - #736 (virtio-net TX completion wait bound; follow #707's shape).
+   - Done: #736, virtio-net elapsed completion deadline and retained
+     queues on expiry, with native absent-completion and reuse controls.
    - #720 (session-long xHCI rings and contexts, on `Place`), #625 (cache
      visibility across DMA ownership handoffs, bounded model).
 2. **Landing faster:** #737 (stop on quick gates before long allcheck
