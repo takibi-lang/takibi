@@ -1,9 +1,9 @@
 {
   "date": "2026-10-10",
-  "event": "milestone",
-  "decision": "measured",
-  "source_sha256": "289057d7c07c3e737a86d10965280e785174115bb6680bc6fe53141b41dd8fa3",
-  "workload": "Completed shared bounded order-contract compiler prototype, normal QEMU and RPi5 linked kernels against 0157d2ec, and native dynamic metadata/slice/RegionSlot-Place round trip.",
+  "event": "incremental",
+  "decision": "reuse",
+  "source_sha256": "151be5ecff7cbe70d313d3a340e5b1fc253116e80e762ddc6cf31ef2e4fa3d2b",
+  "workload": "Narrow CPU-authority construction correction: reject initializer-free locals after inference and casts producing authority by value. Compiler-only rejection rules and regression tests; maintained kernel/native callers, generated valid-program code, storage and allocation workloads are unchanged.",
   "evidence": [
     "docs/BOUNDS_CONTRACT_SPACE_2026-10-10.md",
     "docs/PROCESS_STATE_PAYLOAD_SPACE_2026-10-10.md",
@@ -38,6 +38,6 @@
     "docs/DMA_MINT_FILES_2026-10-08.md",
     "docs/DMA_TRANSMIT_2026-10-08.md"
   ],
-  "assessment": "Measured zero text/data/BSS, data/BSS symbol-size and usable_ram_start delta on both production targets. Native layouts: metadata 24 B, Region 16 B, RegionSlot 8 B, Place(slot) 16 B. Arithmetic relation storage is erased. Production allocator, lifetimes and occupancy workloads are unchanged; existing occupancy evidence remains at its original strength.",
-  "next_trigger": "Production runtime metadata extent migration or stored allocator authority through array/place rules; measure bootstrap replacement and live allocation occupancy then. A compiler change altering production image size also triggers measurement."
+  "assessment": "Reuses the measured shared-bounds milestone against 0157d2ec. This is a small rejection-rule correction, not a kernel feature or allocator stage. No LLVM lowering, executable kernel source, representation, allocation or occupancy change; make allbuild confirms maintained callers still compile. Existing image, payload and live occupancy evidence remains at its original boundary.",
+  "next_trigger": "Production runtime metadata extent migration, a stored allocator authority through array/place rules, or another completed kernel feature/stage requires fresh workload measurement. Any change to generated production code, storage or allocation invalidates this reuse."
 }
