@@ -11,11 +11,11 @@ after; `pin` at offset 1768, in existing padding after `affinity_mask`.
 
 ## Linked kernels
 
-`python3 scripts/space_delta.py 9a9788c6` (base 9a9788c6):
+`python3 scripts/space_delta.py 39994e0e` (base 39994e0e):
 
 | | qemu base | qemu change | rpi5 base | rpi5 change |
 | --- | --- | --- | --- | --- |
-| text | 727520 | 727936 | 740272 | 740720 |
+| text | 727520 | 728128 | 740272 | 740912 |
 | data | 5400 | 5400 | 2889208 | 2889208 |
 | bss | 1658432 | 1658432 | 1697344 | 1697344 |
 | usable_ram_start | 0x40248000 | 0x40250000 | 0x718000 | 0x718000 |
@@ -24,8 +24,8 @@ No data or BSS symbol changed size.
 
 ## Assessment
 
-Code grows 416 B (QEMU) / 448 B (RPi5): the pin and release functions,
-the place_is_full check in the affinity writer, and the callers' new
-match. On QEMU that growth crosses a 32 KiB boundary, so the allocator
+Code grows 608 B (QEMU) / 640 B (RPi5): the pin and release functions,
+the place_is_full check in the affinity writer, the callers' new match,
+and 192 B for the ext2 probe's peer-tick wait. On QEMU that growth crosses a 32 KiB boundary, so the allocator
 starts 8 pages later (the FDT lane expectations moved by -8 pages). No
 allocation workload changes. Accepted.
