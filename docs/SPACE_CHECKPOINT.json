@@ -2,7 +2,7 @@
   "date": "2026-10-10",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "be9d72b88c76aadfb35a7ab01797883fc20c25ce649121498a0b08ae2f720882",
+  "source_sha256": "6816bad27aecf2cecb0ce46635f5e35ec76b6c32c4564eccb9215ba26df3bcbc",
   "workload": "Virtio-net synchronous TX completion, both scratch sends and in-place RX replies: elapsed expiry, retained queues, blocked later writes and late RX refusal through native real-driver fixtures; ordinary QEMU networking integration.",
   "evidence": [
     "docs/PROCESS_PIN_SPACE_2026-10-10.md",
@@ -46,6 +46,6 @@
     "docs/VIRTIO_NET_TX_2026-10-10.md",
     "docs/VIRTIO_NET_TX_SPACE_2026-10-10.json"
   ],
-  "assessment": "Fresh rebased baseline at e6fcf3bf and rebuilt final 1 s candidate: QEMU text +264 B, initialized data/BSS and usable RAM unchanged; RPi5 linked sizes unchanged. A measured intermediate separate flag cost 8 B of data and was removed by reusing the existing one-shot ready latch. Existing queue and payload capacities do not change; timeout retains already reserved storage with no new allocation, pool, stored flag or reserved page. Native mutation controls check the actual retention paths, not physical DMA/cache semantics. The publication-shell change adds host gates without changing production kernel layout.",
+  "assessment": "Fresh rebased baseline at ffc89a85 and rebuilt final 1 s candidate: QEMU text +264 B, initialized data/BSS and usable RAM unchanged; RPi5 linked sizes unchanged. A measured intermediate separate flag cost 8 B of data and was removed by reusing the existing one-shot ready latch. Existing queue and payload capacities do not change; timeout retains already reserved storage with no new allocation, pool, stored flag or reserved page. Native mutation controls check the actual retention paths, not physical DMA/cache semantics. The publication-shell change adds host gates without changing production kernel layout.",
   "next_trigger": "Fixed virtio-net DMA owners, queue/buffer capacity changes, device reset/recovery or another completed kernel feature/stage requires fresh workload measurement."
 }

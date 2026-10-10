@@ -47,6 +47,54 @@
     }
   },
   "final_rebased_measurement": {
+    "baseline_revision": "ffc89a85896b1f091a0fe8fbbc5052687cb94678",
+    "measurement": "Fresh baseline and candidate builds after the compile-time region-bytes mint-confinement rebase. All intermediate measurements are retained.",
+    "targets": {
+      "qemu": {
+        "baseline": {
+          "text": 728176,
+          "data": 5424,
+          "bss": 1658432,
+          "usable_ram_start": 1076166656
+        },
+        "candidate": {
+          "text": 728440,
+          "data": 5424,
+          "bss": 1658432,
+          "usable_ram_start": 1076166656
+        },
+        "delta": {
+          "text": 264,
+          "data": 0,
+          "bss": 0,
+          "usable_ram_start": 0
+        },
+        "candidate_elf_sha256": "432a5c7965e9f7633a12ba2c1e47656e7f7c3bd29dbbb4b448677e12f41bac2a"
+      },
+      "rpi5": {
+        "baseline": {
+          "text": 740760,
+          "data": 2889264,
+          "bss": 1697344,
+          "usable_ram_start": 7438336
+        },
+        "candidate": {
+          "text": 740760,
+          "data": 2889264,
+          "bss": 1697344,
+          "usable_ram_start": 7438336
+        },
+        "delta": {
+          "text": 0,
+          "data": 0,
+          "bss": 0,
+          "usable_ram_start": 0
+        },
+        "candidate_elf_sha256": "e52c4a1820adf3c06f396d31bc015f3640d569d7c3198ecee3071b7d9aa75451"
+      }
+    }
+  },
+  "interrupt_rebase_measurement": {
     "baseline_revision": "e6fcf3bf75978c3adf3db22382219b13b82faaba",
     "measurement": "Fresh rebased baseline build; final candidate rebuilt after reusing the existing ready latch. Prior measurements above are retained as intermediate evidence.",
     "targets": {

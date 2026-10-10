@@ -78,7 +78,8 @@ QEMU hang or scheduler prints.
 ## Space measurement
 
 Fresh baseline linked kernels were built at 4e88fd5f, then measured again
-against the rebased upstream e6fcf3bf. The initial candidate added 312 B of
+against the rebased upstream e6fcf3bf and ffc89a85. The latter adds only
+compile-time mint confinement; fresh builds confirm the same footprint. The initial candidate added 312 B of
 QEMU text and 8 B of initialized data for a separate disabled flag. That
 measurement exposed a cheap improvement: initialization and expiry already
 set/clear the existing ready latch, InitOnce refuses a second initialization,
@@ -88,7 +89,7 @@ no extra stored state. Both final production kernels were rebuilt after this
 change. Initial and final raw sizes and candidate image identities are kept
 in VIRTIO_NET_TX_SPACE_2026-10-10.json.
 
-| Boundary against e6fcf3bf | QEMU delta | RPi5 delta |
+| Boundary against ffc89a85 | QEMU delta | RPi5 delta |
 | --- | ---: | ---: |
 | text | +264 B | 0 B |
 | initialized data | 0 B | 0 B |
