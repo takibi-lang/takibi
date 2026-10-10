@@ -49,9 +49,9 @@
 //   IntrusivePoolGuard, and the guards issue #451 converts.
 use "kernel/lib/spinlock.tkb";
 
-// One field, at offset 0, which is what makes `m as usize` the address of
-// the word the atomic operates on. `--emit-struct-layout Mutex` says so.
-struct no_copy Mutex { private word: usize; }
+// One field, at offset 0: the lock word, an AtomicWord cell the spinlock
+// operates on. The layout is unchanged; `--emit-struct-layout Mutex` says so.
+struct no_copy Mutex { private word: AtomicWord; }
 
 // mutex_irq_save/mutex_irq_restore are supplied by the FILE LIST, the same
 // way pool_lock_acquire is (GitHub issue #364). The kernel gives them
@@ -89,8 +89,8 @@ fn mutex_init(m: *Mutex @ id) {
     // rather than assumed (GitHub issue #396's shape, and the sort of thing
     // a later field added at the top would silently break).
     static_assert(offsetof(Mutex, word) == 0,
-                  "Mutex.word must be first: `m as usize` is the atomic's address");
-    m.word = 0;
+                  "Mutex.word must be first: a lock address names its word");
+    atomic_word_store(&m.word, 0);
 }
 
 // Takes it, and returns the interrupt state a matching release must
@@ -104,7 +104,7 @@ fn mutex_init(m: *Mutex @ id) {
 fn mutex_acquire(m: *Mutex @ id) -> usize
         !{locks, unsafe, acquires_lock_40_mutex} {
     let flags: usize = mutex_irq_save();
-    spin_lock(m as usize);
+    spin_lock(&m.word);
     return flags;
 }
 
@@ -113,12 +113,12 @@ fn mutex_acquire(m: *Mutex @ id) -> usize
 // pair correct inside an interrupt handler (DAIF.I is already set on
 // entry, so the release leaves it set) and correct when two are nested.
 fn mutex_release(m: *Mutex @ id, flags: usize) !{locks, unsafe} {
-    spin_unlock(m as usize);
+    spin_unlock(&m.word);
     mutex_irq_restore(flags);
 }
 
 fn mutex_is_held(m: *Mutex @ id) -> bool !{unsafe} {
-    return spin_lock_is_held(m as usize);
+    return spin_lock_is_held(&m.word);
 }
 
 // The console's measurement records an actual failed first acquisition, not
@@ -129,8 +129,8 @@ struct MutexAcquisition { flags: usize; contended: bool; }
 fn mutex_acquire_measured(m: *Mutex @ id) -> MutexAcquisition
         !{locks, unsafe, acquires_lock_40_mutex} {
     let flags: usize = mutex_irq_save();
-    let contended: bool = spin_trylock(m as usize) == false;
-    if (contended) { spin_lock(m as usize); }
+    let contended: bool = spin_trylock(&m.word) == false;
+    if (contended) { spin_lock(&m.word); }
     let mut result: MutexAcquisition = { flags, contended };
     return result;
 }

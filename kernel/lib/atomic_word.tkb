@@ -7,13 +7,17 @@
 // word meant to be accessed atomically, or that an index was in range. An
 // `AtomicWord` is one `usize` of storage (the same layout, so zero-initialised
 // storage and an external debugger's view of it are unchanged), and the
-// operations below take a pointer to one. A per-CPU word is an array of them
+// compiler's built-in operations atomic_word_load / _store / _swap /
+// _fetch_add / _compare_exchange take a pointer to one (GitHub issue #637
+// stage 3, step C). They need no `unsafe`: the field is private to this
+// file, so the cell is reached only through them, and each is one atomic
+// instruction. A per-CPU word is an array of them
 // indexed by a refined core number, which removes the address arithmetic along
 // with its `unsafe` block. The ordering stays in each operation's name, as it
 // is in the intrinsics (SPEC.md, "Atomic Operations").
 //
-// This file is the only place a cell becomes the intrinsics' address. The
-// allowlist in scripts/check_lock_discipline.py lists every other file that
+// The compiler, not this file, turns a cell into the intrinsics' address.
+// The allowlist in scripts/check_lock_discipline.py lists every file that
 // still calls an intrinsic directly, with its reason.
 //
 // Current limitations (2026-10-01). Keep this list current as call sites
@@ -26,36 +30,7 @@
 // - A CELL CAN STILL BE READ WITH A PLAIN LOAD. `value` is private to this
 //   file, so a user cannot name it, but the storage is an ordinary global and
 //   a raw pointer cast from its address reads it unsynchronised.
-// - NOT FOR THE LOCK WORD. kernel/lib/spinlock.tkb takes a Mutex address from
-//   kernel/lib/pool_lock.tkb and keeps its own intrinsic calls.
+// - The lock word is a cell too: Mutex and TaskMutex hold an AtomicWord and
+//   kernel/lib/spinlock.tkb works on it through the same operations.
 
 struct no_copy AtomicWord { private value: usize; }
-
-fn atomic_word_load(cell: *AtomicWord) -> usize !{requires_mmu, unsafe} {
-    return unsafe { atomic_load_acquire(cell as usize) };
-}
-
-fn atomic_word_store(cell: *AtomicWord, value: usize)
-        !{requires_mmu, unsafe} {
-    unsafe { atomic_store_release(cell as usize, value); }
-}
-
-fn atomic_word_swap(cell: *AtomicWord, value: usize) -> usize
-        !{requires_mmu, unsafe} {
-    return unsafe { atomic_swap_acquire(cell as usize, value) };
-}
-
-// Returns the value before the add.
-fn atomic_word_fetch_add(cell: *AtomicWord, value: usize) -> usize
-        !{requires_mmu, unsafe} {
-    return unsafe { atomic_fetch_add_relaxed(cell as usize, value) };
-}
-
-// True when the word held `expected` and now holds `desired`.
-fn atomic_word_compare_exchange(cell: *AtomicWord, expected: usize,
-                                desired: usize) -> bool
-        !{requires_mmu, unsafe} {
-    return unsafe {
-        atomic_compare_exchange_acquire(cell as usize, expected, desired)
-    };
-}

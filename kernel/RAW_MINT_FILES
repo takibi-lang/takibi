@@ -14,11 +14,9 @@ kernel/drivers/block/virtio_blk.tkb
 kernel/drivers/net/rp1_gem_dma.tkb
 kernel/drivers/net/rp1_gem.tkb
 kernel/drivers/net/virtio_net.tkb
-kernel/lib/atomic_word.tkb
 kernel/lib/freelist.tkb
 kernel/lib/intrusive_pool.tkb
 kernel/lib/pool_lock.tkb
-kernel/lib/spinlock.tkb
 kernel/mm/page.tkb
 kernel/mm/user_memory.tkb
 kernel/platform/qemu/intc.tkb

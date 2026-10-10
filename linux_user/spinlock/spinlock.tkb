@@ -22,14 +22,14 @@
 //   0x00000001   blocking spin_lock takes an uncontended lock
 //   0x00000000   and unlock releases it
 
-let mut demo_lock: usize = 0;
+let mut demo_lock: AtomicWord;
 
 fn report(flag: bool) {
     if (flag) { uart_println_hex(1); } else { uart_println_hex(0); }
 }
 
 fn spinlock_roundtrip() -> i32 !{unsafe} {
-    let lock: usize = (&demo_lock) as usize;
+    let lock: *AtomicWord = &demo_lock;
 
     report(spin_lock_is_held(lock));
 

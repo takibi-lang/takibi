@@ -58,11 +58,6 @@ ATOMIC_RE = re.compile(
 
 # Files permitted to use the raw atomic intrinsics, and why.
 ATOMIC_ALLOWED = {
-    "lib/atomic_word.tkb":
-        "GitHub issue #669: the typed cell; the one file that turns a cell "
-        "into the intrinsics' address, so a user of a cell calls none",
-    "lib/spinlock.tkb":
-        "the lock itself; every other user is supposed to go through it",
     "arch/arm64/kernel/exception_evidence.tkb":
         "GitHub issue #496: DdbSnapshot's one valid-last word. The snapshot "
         "is captured with interrupts masked and has no competing writer; "

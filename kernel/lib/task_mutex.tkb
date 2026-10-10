@@ -43,15 +43,15 @@
 //   guard type of its own.
 use "kernel/lib/spinlock.tkb";
 
-// One field, at offset 0, for the same reason Mutex has one: `m as usize`
-// is the address the atomic operates on only because the word is first.
-struct no_copy TaskMutex { private word: usize; }
+// One field, at offset 0, for the same reason Mutex has one: a lock address
+// names its AtomicWord lock word.
+struct no_copy TaskMutex { private word: AtomicWord; }
 
 // Free. Call once, before it is reachable by anything else.
 fn task_mutex_init(m: *TaskMutex @ id) {
     static_assert(offsetof(TaskMutex, word) == 0,
-                  "TaskMutex.word must be first: `m as usize` is the atomic's address");
-    m.word = 0;
+                  "TaskMutex.word must be first: a lock address names its word");
+    atomic_word_store(&m.word, 0);
 }
 
 // Takes it. No mask, so nothing to hand back -- which is why the caller's
@@ -69,20 +69,20 @@ fn task_mutex_init(m: *TaskMutex @ id) {
 // safe from a handler. This is the case it declined it FOR.
 fn task_mutex_acquire(m: *TaskMutex @ id)
         !{locks, may_block, unsafe, acquires_lock_30_connection} {
-    spin_lock(m as usize);
+    spin_lock(&m.word);
 }
 
 fn task_mutex_release(m: *TaskMutex @ id) !{locks, unsafe} {
-    spin_unlock(m as usize);
+    spin_unlock(&m.word);
 }
 
 // One attempt. For a caller with something else to do rather than wait,
 // and the only way to observe the exclusion with one thread.
 fn task_mutex_trylock(m: *TaskMutex @ id) -> bool
         !{locks, unsafe, acquires_lock_30_connection} {
-    return spin_trylock(m as usize);
+    return spin_trylock(&m.word);
 }
 
 fn task_mutex_is_held(m: *TaskMutex @ id) -> bool !{unsafe} {
-    return spin_lock_is_held(m as usize);
+    return spin_lock_is_held(&m.word);
 }

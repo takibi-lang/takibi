@@ -327,6 +327,7 @@ KERNEL_UNUSED_EXEMPT := \
 	kernel/lib/task_mutex.tkb \
 	kernel/platform/rpi5/usb_xhci.tkb
 KERNEL_UNUSED_NO_FUNCTIONS := \
+	kernel/lib/atomic_word.tkb \
 	kernel/arch/arm64/kernel/exception_frame.tkb \
 	kernel/arch/arm64/kernel/vector_table.tkb \
 	kernel/lib/execution_model.tkb \
@@ -386,7 +387,6 @@ KERNEL_UNUSED_CHECKED := \
 	kernel/kernel/tag_contention_evidence.tkb \
 	kernel/kernel/tcp_connection_contention_evidence.tkb \
 	kernel/kernel/workload_evidence.tkb \
-	kernel/lib/atomic_word.tkb \
 	kernel/lib/peer_tick_window.tkb \
 	kernel/lib/byte_slice.tkb \
 	kernel/lib/diagnostic_ring.tkb \
