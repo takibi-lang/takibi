@@ -4510,6 +4510,26 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | _ -> raise (TypeError (e.loc,
            Printf.sprintf "%s expects one argument: %s(v)" fname fname)))
 
+  | Call (fname, cell :: rest) when Atomic_spec.is_cell_op fname ->
+      let ct = infer_expr senv eenv tyenv fenv cell in
+      (match struct_instance (repr ct) with
+       | Some (s, _) when s = Atomic_spec.cell_type -> ()
+       | _ -> raise (TypeError (cell.loc, Printf.sprintf
+           "%s takes a pointer to an %s cell" fname Atomic_spec.cell_type)));
+      let spec = Option.get
+        (Atomic_spec.find (Option.get (Atomic_spec.cell_intrinsic fname))) in
+      let usize_args n =
+        if List.length rest <> n then
+          raise (TypeError (e.loc, Printf.sprintf
+            "%s expects %d argument(s) after the cell" fname n));
+        List.iter (fun (v : Ast.expr) ->
+          unify_at v.loc (infer_expr senv eenv tyenv fenv v) TUsize) rest
+      in
+      (match spec.operation with
+       | Atomic_spec.Load -> usize_args 0; TUsize
+       | Atomic_spec.Store -> usize_args 1; TVoid
+       | Atomic_spec.Exchange | Atomic_spec.Fetch_add -> usize_args 1; TUsize
+       | Atomic_spec.Compare_exchange -> usize_args 2; TBool)
   | Call (fname, args) when Atomic_spec.is_intrinsic fname ->
       (* GitHub issue #17: the closed atomic set. Same "closed set of
          instructions" shape as the mrs/msr/tlbi intrinsics above, with the
@@ -12879,7 +12899,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             direct_effects := StringSet.add "may_block" !direct_effects;
             direct_effect_origins :=
               StringMap.add "may_block" name !direct_effect_origins
-          end else if Atomic_spec.is_intrinsic name then begin
+          end else if Atomic_spec.is_intrinsic name
+                      || Atomic_spec.is_cell_op name then begin
             (* Raw atomics cannot execute while the AArch64 MMU is off:
                before the page tables establish Normal memory, the target
                address is Device-typed and exclusives fault. Intrinsics have

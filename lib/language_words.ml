@@ -49,7 +49,7 @@ let compiler_builtins = [
      It is reserved for the same reason as every builtin above -- infer_expr
      dispatches on the name before it consults fenv, so a user function of
      the same name would be silently unreachable. *)
-] @ Atomic_spec.names @ [
+] @ Atomic_spec.names @ List.map fst Atomic_spec.cell_ops @ [
   (* GitHub issue #299: the publication record's four operations. Reserved
      for the same reason -- and additionally because a user function named
      publish_commit that did NOT commit would be the most misleading name

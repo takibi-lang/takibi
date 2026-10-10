@@ -2540,9 +2540,6 @@ let owner_derived_fixture =
 
 let atomic_word_fixture =
   "struct no_copy AtomicWord { private value: usize; }
-   fn atomic_word_fetch_add(cell: *AtomicWord, value: usize) -> usize {
-     return value;
-   }
    "
 
 let expect_type_error_files fragment files () =
@@ -4286,7 +4283,7 @@ fn stored_release(holder: sink StoredHolder[k]) { stored_drop(holder.token); }
            fn bump(core: {0..<4 as usize}) -> usize {\n\
            \  return atomic_word_fetch_add(&ticks[core], 1);\n\
            }\n" ]);
-      expect_type_error_files "cannot unify"
+      expect_type_error_files "takes a pointer to an AtomicWord cell"
         [ "cell.tkb", atomic_word_fixture;
           "user.tkb",
           "fn bump(address: usize) -> usize {\n\
@@ -23250,7 +23247,6 @@ let infer_production_stop_boundary ?(clock = false)
     linear struct RegionInspection__ProcessImageRecord[p: addr, s: addr] { private address: usize; }
     struct no_copy AtomicWord { private value: usize; }
     linear struct IntrusiveSlotView[p: addr] { private slot: usize; }
-    fn atomic_word_store(cell: *AtomicWord, value: usize) !{unsafe} {}
   |} ^ (if clock then {|
     fn kernel_tick_count_of(core: {0..<KERNEL_MAX_CORES as usize}) -> usize { return 0; }
     fn cpu_id() -> usize { return 0; }
@@ -23441,11 +23437,6 @@ let infer_production_machine_boundary ?(platform = "qemu") code =
     linear struct RegionInspection__ProcessImageRecord[p: addr, s: addr] { private address: usize; }
     struct no_copy AtomicWord { private value: usize; }
     linear struct IntrusiveSlotView[p: addr] { private slot: usize; }
-    fn atomic_word_store(cell: *AtomicWord, value: usize) !{unsafe} {}
-    fn atomic_word_load(cell: *AtomicWord) -> usize !{unsafe} { return 0; }
-    fn atomic_word_swap(cell: *AtomicWord, value: usize) -> usize !{unsafe} { return 0; }
-    fn atomic_word_compare_exchange(cell: *AtomicWord, expected: usize,
-                                    desired: usize) -> bool !{unsafe} { return true; }
     generic struct IntrusivePool(T: type) { value: T; }
     must_use variant IntrusiveSlotProbe[p: addr] {
       NoPayload; Live(IntrusiveSlotView[p]);

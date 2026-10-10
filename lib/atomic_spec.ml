@@ -41,3 +41,18 @@ let ordering_name = function
   | Acquire -> "acquire"
   | Release -> "release"
   | Acq_rel -> "acq_rel"
+
+(* GitHub issue #637 stage 3, step C: the AtomicWord cell operations. Each
+   takes a pointer to an `AtomicWord` (one private usize) instead of a bare
+   address, so it needs no `unsafe`: the cell is reached only through these,
+   and every access to it is atomic. Each maps onto one intrinsic above. *)
+let cell_ops = [
+  ("atomic_word_load", "atomic_load_acquire");
+  ("atomic_word_store", "atomic_store_release");
+  ("atomic_word_swap", "atomic_swap_acquire");
+  ("atomic_word_fetch_add", "atomic_fetch_add_relaxed");
+  ("atomic_word_compare_exchange", "atomic_compare_exchange_acquire");
+]
+let cell_intrinsic name = List.assoc_opt name cell_ops
+let is_cell_op name = Option.is_some (cell_intrinsic name)
+let cell_type = "AtomicWord"

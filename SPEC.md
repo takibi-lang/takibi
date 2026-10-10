@@ -3197,6 +3197,28 @@ The address is a plain `usize`, not a typed pointer, for the same reason:
 this is the raw instruction, below the level where a type would mean
 anything.
 
+**Atomic cells (GitHub issue #637 stage 3).** A word shared without a lock
+is declared as an `AtomicWord` (`struct no_copy AtomicWord { private value:
+usize; }`, kernel/lib/atomic_word.tkb) and reached only through five
+built-in operations that take a pointer to one:
+
+```
+atomic_word_load(cell: *AtomicWord) -> usize                  // acquire
+atomic_word_store(cell: *AtomicWord, value: usize)            // release
+atomic_word_swap(cell: *AtomicWord, value: usize) -> usize    // acquire
+atomic_word_fetch_add(cell: *AtomicWord, value: usize) -> usize   // relaxed
+atomic_word_compare_exchange(cell: *AtomicWord, expected: usize,
+                             desired: usize) -> bool          // acquire
+```
+
+They need no `unsafe`: the field is private to its file, so every access to
+the cell is one of these atomic instructions, and the cell's address comes
+from a checked place rather than an integer. They contribute
+`requires_mmu`, as the intrinsics do, and each lowers to the intrinsic named
+in its comment. The ordering argument between accesses is still the
+user's; what the type removes is the raw address. The spinlock word inside
+`Mutex` and `TaskMutex` is such a cell.
+
 **Which instruction each one becomes is a backend decision, not a spelling
 here.** The read-modify-write operations lower through LLVM, so the
 selected `--cpu` picks the encoding. Measured on real objdump output:

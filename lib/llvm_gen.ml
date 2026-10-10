@@ -4200,6 +4200,12 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       ignore (build_call fty inline [| v |] "" builder);
       (TypeVoid, const_null (i1_type context))
 
+  | Call (name, cell :: rest) when Atomic_spec.is_cell_op name ->
+      (* The cell's address is the intrinsic's: AtomicWord is one usize. *)
+      gen_expr ?expected_ty locals
+        { e with desc = Call (Option.get (Atomic_spec.cell_intrinsic name),
+            { cell with desc = Cast (TypeUsize, cell) } :: rest) }
+
   | Call (name, args) when Atomic_spec.is_intrinsic name ->
       (* GitHub issue #17. Two lowerings, and which one a given operation
          gets is decided by what LLVM's OCaml bindings actually expose
