@@ -787,6 +787,19 @@ stmt:
     { { desc = LetMatch (false, id, None, disc,
           let_else_arms $symbolstartpos variant case failures);
         loc = $symbolstartpos } }
+  | LET variant = variant_ref COLONCOLON case = IDENT ASSIGN disc = expr SEMI
+    (* GitHub issue #131 slice 3: a pattern without `else` must be one the
+       checker proves cannot fail. The only such form is a put into a place
+       it knows is empty; anything else needs its `else`. *)
+    { match variant, case, disc.desc with
+      | "Place", "Empty", Call ("place_put", [_; _; _; _]) ->
+          Hashtbl.replace Generic_variant.proven_empty_puts disc.loc ();
+          { desc = Expr disc; loc = $symbolstartpos }
+      | _ ->
+          raise (Types.TypeError ($symbolstartpos, Printf.sprintf
+            "`let %s::%s = ...;` without else is only accepted as \
+             `let Place::Empty = place_put(...);`; add `else { ... }` \
+             with the other cases" variant case)) }
   | LET MUT variant = variant_ref COLONCOLON case = IDENT LPAREN id = IDENT RPAREN
     ASSIGN disc = expr ELSE LBRACE failures = match_arms RBRACE SEMI
     { { desc = LetMatch (true, id, None, disc,

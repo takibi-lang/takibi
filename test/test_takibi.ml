@@ -9637,6 +9637,198 @@ fn f() -> *usize { return &temp_address_outer().r.a; }");
           spare_run_unlock7el(guard, &spare_run_cell7el.mutex);
         }");
 
+  Alcotest.test_case "place_put after a take under the same guard needs no Full arm" `Quick
+    (expect_codegen_ok
+       "linear view SpareGuard7k[lock: addr];
+        linear struct RunOwner7k[run: usize] { id: usize @ run; }
+        struct SpareCell7k {
+          private mutex: i32;
+          private value: Place(exists run: usize. RunOwner7k[run]);
+        }
+        private let mut spare_cell7k: SpareCell7k;
+        fn spare_lock7k(m: *i32 @ lock) -> SpareGuard7k[lock] {
+          return view SpareGuard7k[lock];
+        }
+        fn spare_unlock7k(g: sink SpareGuard7k[lock], m: *i32 @ lock) {}
+        fn spare_peek7k(g: borrow SpareGuard7k[lock]) {}
+        fn run_drop7k(owner: sink RunOwner7k[run]) {}
+        fn main() -> i32 { return 0; }
+        fn put_back7k() {
+          let guard = spare_lock7k(&spare_cell7k.mutex);
+          let previous: Place(exists run: usize. RunOwner7k[run]) = place_take(
+            guard, &spare_cell7k.mutex, spare_cell7k.value);
+          match previous {
+            Place::Empty => {}
+            Place::Full(old) => {
+              let Place::Empty = place_put(guard, &spare_cell7k.mutex,
+                spare_cell7k.value, old);
+            }
+          }
+          spare_unlock7k(guard, &spare_cell7k.mutex);
+        }
+");
+
+  Alcotest.test_case "proven-empty place_put without a take is rejected" `Quick
+    (expect_type_error "needs the place known empty"
+       "linear view SpareGuard7k[lock: addr];
+        linear struct RunOwner7k[run: usize] { id: usize @ run; }
+        struct SpareCell7k {
+          private mutex: i32;
+          private value: Place(exists run: usize. RunOwner7k[run]);
+        }
+        private let mut spare_cell7k: SpareCell7k;
+        fn spare_lock7k(m: *i32 @ lock) -> SpareGuard7k[lock] {
+          return view SpareGuard7k[lock];
+        }
+        fn spare_unlock7k(g: sink SpareGuard7k[lock], m: *i32 @ lock) {}
+        fn spare_peek7k(g: borrow SpareGuard7k[lock]) {}
+        fn run_drop7k(owner: sink RunOwner7k[run]) {}
+        fn main() -> i32 { return 0; }
+        fn put_blind7k(owner: sink RunOwner7k[run]) {
+          let guard = spare_lock7k(&spare_cell7k.mutex);
+          let Place::Empty = place_put(guard, &spare_cell7k.mutex,
+            spare_cell7k.value, owner);
+          spare_unlock7k(guard, &spare_cell7k.mutex);
+        }
+");
+
+  Alcotest.test_case "proven-empty place_put after the guard was handed on is rejected" `Quick
+    (expect_type_error "needs the place known empty"
+       "linear view SpareGuard7k[lock: addr];
+        linear struct RunOwner7k[run: usize] { id: usize @ run; }
+        struct SpareCell7k {
+          private mutex: i32;
+          private value: Place(exists run: usize. RunOwner7k[run]);
+        }
+        private let mut spare_cell7k: SpareCell7k;
+        fn spare_lock7k(m: *i32 @ lock) -> SpareGuard7k[lock] {
+          return view SpareGuard7k[lock];
+        }
+        fn spare_unlock7k(g: sink SpareGuard7k[lock], m: *i32 @ lock) {}
+        fn spare_peek7k(g: borrow SpareGuard7k[lock]) {}
+        fn run_drop7k(owner: sink RunOwner7k[run]) {}
+        fn main() -> i32 { return 0; }
+        fn put_after_call7k() {
+          let guard = spare_lock7k(&spare_cell7k.mutex);
+          let previous: Place(exists run: usize. RunOwner7k[run]) = place_take(
+            guard, &spare_cell7k.mutex, spare_cell7k.value);
+          spare_peek7k(guard);
+          match previous {
+            Place::Empty => {}
+            Place::Full(old) => {
+              let Place::Empty = place_put(guard, &spare_cell7k.mutex,
+                spare_cell7k.value, old);
+            }
+          }
+          spare_unlock7k(guard, &spare_cell7k.mutex);
+        }
+");
+
+  Alcotest.test_case "proven-empty place_put after a second put is rejected" `Quick
+    (expect_type_error "needs the place known empty"
+       "linear view SpareGuard7k[lock: addr];
+        linear struct RunOwner7k[run: usize] { id: usize @ run; }
+        struct SpareCell7k {
+          private mutex: i32;
+          private value: Place(exists run: usize. RunOwner7k[run]);
+        }
+        private let mut spare_cell7k: SpareCell7k;
+        fn spare_lock7k(m: *i32 @ lock) -> SpareGuard7k[lock] {
+          return view SpareGuard7k[lock];
+        }
+        fn spare_unlock7k(g: sink SpareGuard7k[lock], m: *i32 @ lock) {}
+        fn spare_peek7k(g: borrow SpareGuard7k[lock]) {}
+        fn run_drop7k(owner: sink RunOwner7k[run]) {}
+        fn main() -> i32 { return 0; }
+        fn put_twice7k(extra: sink RunOwner7k[run]) {
+          let guard = spare_lock7k(&spare_cell7k.mutex);
+          let previous: Place(exists run: usize. RunOwner7k[run]) = place_take(
+            guard, &spare_cell7k.mutex, spare_cell7k.value);
+          match previous {
+            Place::Empty => {}
+            Place::Full(old) => {
+              let Place::Empty = place_put(guard, &spare_cell7k.mutex,
+                spare_cell7k.value, old);
+            }
+          }
+          let Place::Empty = place_put(guard, &spare_cell7k.mutex,
+            spare_cell7k.value, extra);
+          spare_unlock7k(guard, &spare_cell7k.mutex);
+        }
+");
+
+  Alcotest.test_case "proven-empty place_put inside a loop is rejected" `Quick
+    (expect_type_error "needs the place known empty"
+       "linear view SpareGuard7k[lock: addr];
+        linear struct RunOwner7k[run: usize] { id: usize @ run; }
+        struct SpareCell7k {
+          private mutex: i32;
+          private value: Place(exists run: usize. RunOwner7k[run]);
+        }
+        private let mut spare_cell7k: SpareCell7k;
+        fn spare_lock7k(m: *i32 @ lock) -> SpareGuard7k[lock] {
+          return view SpareGuard7k[lock];
+        }
+        fn spare_unlock7k(g: sink SpareGuard7k[lock], m: *i32 @ lock) {}
+        fn spare_peek7k(g: borrow SpareGuard7k[lock]) {}
+        fn run_drop7k(owner: sink RunOwner7k[run]) {}
+        fn main() -> i32 { return 0; }
+        fn put_in_loop7k(n: usize) {
+          let guard = spare_lock7k(&spare_cell7k.mutex);
+          let previous: Place(exists run: usize. RunOwner7k[run]) = place_take(
+            guard, &spare_cell7k.mutex, spare_cell7k.value);
+          match previous {
+            Place::Empty => {}
+            Place::Full(old) => { run_drop7k(old); }
+          }
+          let mut i: usize = 0;
+          while (i < n) {
+            i = i + 1;
+            let mut fresh: RunOwner7k[0] = { 0 };
+            let Place::Empty = place_put(guard, &spare_cell7k.mutex,
+              spare_cell7k.value, fresh);
+          }
+          spare_unlock7k(guard, &spare_cell7k.mutex);
+        }
+");
+
+  Alcotest.test_case "proven-empty place_put after a take on one branch only is rejected" `Quick
+    (expect_type_error "needs the place known empty"
+       "linear view SpareGuard7k[lock: addr];
+        linear struct RunOwner7k[run: usize] { id: usize @ run; }
+        struct SpareCell7k {
+          private mutex: i32;
+          private value: Place(exists run: usize. RunOwner7k[run]);
+        }
+        private let mut spare_cell7k: SpareCell7k;
+        fn spare_lock7k(m: *i32 @ lock) -> SpareGuard7k[lock] {
+          return view SpareGuard7k[lock];
+        }
+        fn spare_unlock7k(g: sink SpareGuard7k[lock], m: *i32 @ lock) {}
+        fn spare_peek7k(g: borrow SpareGuard7k[lock]) {}
+        fn run_drop7k(owner: sink RunOwner7k[run]) {}
+        fn main() -> i32 { return 0; }
+        fn put_one_branch7k(c: bool, owner: sink RunOwner7k[run]) {
+          let guard = spare_lock7k(&spare_cell7k.mutex);
+          if (c) {
+            let previous: Place(exists run: usize. RunOwner7k[run]) = place_take(
+              guard, &spare_cell7k.mutex, spare_cell7k.value);
+            match previous {
+              Place::Empty => {}
+              Place::Full(old) => { run_drop7k(old); }
+            }
+          }
+          let Place::Empty = place_put(guard, &spare_cell7k.mutex,
+            spare_cell7k.value, owner);
+          spare_unlock7k(guard, &spare_cell7k.mutex);
+        }
+");
+
+  Alcotest.test_case "let without else is only accepted for a proven-empty put" `Quick
+    (expect_type_error "without else is only accepted"
+       "variant Choice7k { A; B(usize); }
+        fn choose7k(c: Choice7k) { let Choice7k::A = c; }");
+
   Alcotest.test_case "place_take rejects a guard for another mutex" `Quick
     (expect_type_error "place_take mutex does not match guard identity"
        "linear view StableGuard7ea[lock: addr];

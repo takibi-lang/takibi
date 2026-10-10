@@ -124,6 +124,14 @@ let place_def =
   GenericVariantDef (place_name, ["T"], [],
     [("Empty", None); ("Full", Some (TypeNamed "T"))], false, Lexing.dummy_pos)
 
+(* `let Place::Empty = place_put(...);` (GitHub issue #131, slice 3): a
+   put the checker must prove lands in an empty place, so the displaced
+   content needs no arm. The statement stays an ordinary place_put call in
+   the tree; its location, recorded here by the parser, is what asks for
+   the proof. Keyed by position, which is unique per source file. *)
+let proven_empty_puts : (Lexing.position, unit) Hashtbl.t = Hashtbl.create 8
+let is_proven_empty_put (e : expr) = Hashtbl.mem proven_empty_puts e.loc
+
 (* Always added, so a program's own `Place` is a duplicate definition. *)
 let with_builtins (prog : toplevel list) : toplevel list =
   if List.memq place_def prog then prog else place_def :: prog

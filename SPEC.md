@@ -1609,6 +1609,28 @@ empty place and `Full(old)` with the content it displaced otherwise. There
 is no general exchange: `stable_replace`, the earlier four-operand form,
 was removed from the source language when every slot became a place.
 
+A put the checker can prove lands in an empty place is written without the
+displaced arm:
+
+```takibi
+let previous = place_take(guard, &c.mutex, c.value);
+match previous {
+    Place::Empty => {}
+    Place::Full(old) => {
+        let Place::Empty = place_put(guard, &c.mutex, c.value, old);
+    }
+}
+```
+
+`let Place::Empty = place_put(...);` is accepted only when the place was
+taken under the same guard on every path since, with no other call given
+the guard and no loop in between, and the container is a global named
+directly (`c.value`, not `slots[i].value`). Otherwise it is a type error,
+and the result has to be bound and matched as above. A `let` with a
+variant pattern and no `else` is accepted in no other form. The proof
+erases: the statement is the same exchange, and the displaced value, Empty
+by the proof, is discarded (GitHub issue #131, slice 3).
+
 The operands are checked the same way for both. `guard` is a bare variable whose type is a
 linear erased view carrying exactly one `addr` index. The second operand must
 be the address of an ordinary field, and its static place identity must equal

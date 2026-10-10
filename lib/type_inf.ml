@@ -10442,6 +10442,51 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     let mv_consume = ResourceFlow.consume in
     let mv_clear = ResourceFlow.produce in
     let mv_merge = ResourceFlow.join_branches in
+    (* GitHub issue #131 slice 3: which places are known empty under which
+       guard. A place_take under guard g makes the place empty; a put fills
+       it. The fact is a pseudo path keyed by the guard's binding, so it
+       ends when the guard is rebound, and is dropped when the guard is
+       handed to any other call (which could put, or release the lock) and
+       around loops (whose body is walked once). Only places of a global
+       container are tracked: their identity is the name, with no index to
+       be reassigned between the take and the put. *)
+    let place_fact_label = "%place" in
+    let place_fact (guard : Ast.expr) (field : Ast.expr) =
+      match guard.desc, field.desc with
+      | Ast.Var g, Ast.FieldGet (({ desc = Ast.Var c; _ } as container), f)
+        when Local_bindings.id_for_expr binding_resolution container = None
+             && not (Hashtbl.mem visible_bindings c) ->
+          (match pvar_expr guard g with
+           | PVar (id, _) -> Some (PField (id, place_fact_label, c ^ "." ^ f))
+           | PField _ -> None)
+      | _ -> None
+    in
+    let is_place_fact = function
+      | PField (_, label, _) -> label = place_fact_label
+      | PVar _ -> false
+    in
+    let forget_place_facts ?(only = fun _ -> true) moved =
+      PathSet.fold (fun p acc ->
+          if is_place_fact p && only p then mv_clear p acc else acc)
+        (ResourceFlow.maybe_consumed moved) moved
+    in
+    let forget_guard_facts args moved =
+      List.fold_left (fun moved (arg : Ast.expr) ->
+          let rec named (a : Ast.expr) = match a.desc with
+            | Ast.Var n -> Some (a, n)
+            | Ast.AddrOf inner -> named inner
+            | _ -> None
+          in
+          match named arg with
+          | Some (a, n) ->
+              (match pvar_expr a n with
+               | PVar (id, _) ->
+                   forget_place_facts
+                     ~only:(function PField (i, _, _) -> i = id | PVar _ -> false)
+                     moved
+               | PField _ -> moved)
+          | None -> moved) moved args
+    in
     let require_available loc moved p =
       if is_tracked_path p && ResourceFlow.may_be_consumed p moved then
         raise (TypeError (loc, Printf.sprintf
@@ -11153,8 +11198,13 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             | Ast.FieldGet (base, _) -> check_expr taints moved false base
             | _ -> moved
           in
-          check_expr taints moved true replacement
+          let moved = check_expr taints moved true replacement in
+          (match place_fact guard field with
+           | Some fact when exchange = "%place_take" -> mv_consume fact moved
+           | Some fact -> mv_clear fact moved
+           | None -> moved)
       | Ast.Call (name, args) ->
+          let moved = forget_guard_facts args moved in
           let target = Option.value
             (StringMap.find_opt (loc_key e.loc) !resolved_call_targets) ~default:name in
           let return_authority_indices =
@@ -11677,6 +11727,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         (out, declared, out_taints))
     and check_stmt moved declared taints (s : Ast.stmt) =
       active_declared := declared;
+      let moved = match s.desc with
+        | Ast.While _ | Ast.For _ | Ast.ForEach _ -> forget_place_facts moved
+        | _ -> moved
+      in
       match s.desc with
       | Ast.StaticAssert _ ->
           (* Compile-time only: names nothing at runtime, so it can move,
@@ -11783,6 +11837,17 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                   branch is unreachable in a program that passed type
                   checking, kept only so this match stays exhaustive. *)
                (moved, declared, taints))
+      | Ast.Expr ({ desc = Ast.Call ("place_put", [guard; _; field; _]); _ } as e)
+        when Generic_variant.is_proven_empty_put e ->
+          (match place_fact guard field with
+           | Some fact when ResourceFlow.is_consumed_on_all_paths fact moved ->
+               (check_expr taints moved true e, declared, taints)
+           | _ ->
+               raise (TypeError (e.loc,
+                 "`let Place::Empty = place_put(...)` needs the place known \
+                  empty: taken under this same guard on every path since, \
+                  with no other call given the guard and no loop between. \
+                  Otherwise bind the result and match Place::Full")))
       | Ast.Expr e -> (check_expr taints moved false e, declared, taints)
       | Ast.Let (_, name, ty_opt, init, _) ->
           Option.iter (fun ty ->
