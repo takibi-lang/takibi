@@ -21,6 +21,7 @@ suffix is description; dispatch reads only the prefix.
 
 | Check | Enforced invariant |
 | --- | --- |
+| `check_land_precheck_controls.py` | The real land shell stops at the first failed host gate, names its lane and preserves diagnostics; green gates retain the full clean aggregate and exact-HEAD push, and failed clean/allcheck cannot publish |
 | `check_space_checkpoint_controls.py` | milestone measurement, justified incremental reuse, source fingerprint freshness, tracked evidence, and the mandatory pre-allcheck publication hook |
 | `check_service_space_controls.py` | actual FD/fork phase and actor coverage, open-description sharing, retained capacities, Takibi pool resource identities, repeats, and incomplete/error capture rejection |
 | `check_pool_retention_controls.py` | real-kernel retention accounting, workload completion, repeated counts, platform clock separation, and malformed capture rejection |

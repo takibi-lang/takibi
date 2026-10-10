@@ -29,8 +29,9 @@ the rule above in code. It:
 
 1. refuses a dirty tree, a detached HEAD, or a branch other than `main`;
 2. runs `git pull --rebase=merges --no-autostash`;
-3. records `HEAD` as the tested commit and runs
-   `make clean && make allcheck`, logging to
+3. records `HEAD` as the tested commit, runs `make langcheck`, `make test`
+   and `make linuxcheck` separately, and stops at the first failing lane;
+   after they pass, runs `make clean && make allcheck`, logging to
    `.git/takibi-land/allcheck-<commit>.log`;
    before that clean it moves every failing lane's archived capture
    (`_build/*-failures`) to `.git/takibi-land/failures/`, and keeps only the
@@ -44,7 +45,7 @@ Act on its exit status:
 | Status | Meaning | What to do |
 | --- | --- | --- |
 | 0 | pushed, or nothing to push | report |
-| 1 | allcheck red | see below |
+| 1 | a quick gate, clean or allcheck red | fix the named quick lane/clean failure, or see below for allcheck |
 | 2 | precondition failed, or a tracked file changed while allcheck ran | fix the tree/branch or current space checkpoint, then rerun; never edit the tree during a land |
 | 3 | `origin/main` moved | rerun; the whole allcheck runs again. After two such rounds, stop and report |
 | 4 | rebase stopped | usually a conflict: resolve it if you understand it, otherwise stop and ask; then rerun. The script supplies a committer identity for the rebase itself, so a missing git identity is not a cause |

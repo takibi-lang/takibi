@@ -117,8 +117,8 @@ Initialization does not prove CPU freshness across preemption.
      queues on expiry, with native absent-completion and reuse controls.
    - #720 (session-long xHCI rings and contexts, on `Place`), #625 (cache
      visibility across DMA ownership handoffs, bounded model).
-2. **Landing faster:** #737 (stop on quick gates before long allcheck
-   lanes).
+2. **Landing faster:** Done: #737, separate host quick gates before the
+   complete clean allcheck, with publication-shell negative controls.
 3. **Other compiler and language work, respecting design gates:** #608
    (checked integer-to-enum conversion), #709 and #710
    (generation exhaustion of region tables and the intrusive pool), #203

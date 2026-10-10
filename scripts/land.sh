@@ -9,7 +9,7 @@
 #
 # Exit status:
 #   0  pushed (or nothing to push)
-#   1  allcheck failed; the log path is printed
+#   1  a quick gate or allcheck failed; the lane and log path are printed
 #   2  precondition failed: dirty tree, wrong branch, or missing space review
 #   3  origin/main moved during the check; run again from the start
 #   4  the rebase stopped on a conflict; resolve it, then run again
@@ -94,8 +94,26 @@ if [ -d "$failure_root" ]; then
 fi
 prune_newest "$keep_allcheck_logs" "$log_dir"/allcheck-*.log
 
+# Fail on the cheap host gates before a clean destroys build products or
+# starts any long aggregate/hardware lane. Each lane runs separately so the
+# refusal names the first failing gate. The full clean allcheck below still
+# tests exactly this rebased commit before publication.
+: > "$log"
+for lane in langcheck test linuxcheck; do
+    echo "land: precheck $lane on $tested (log: $log)"
+    make "$lane" 2>&1 | tee -a "$log"
+    status=${PIPESTATUS[0]}
+    if [ "$status" -ne 0 ]; then
+        echo "land: FAIL precheck $lane on $tested; log: $log" >&2
+        exit 1
+    fi
+done
+
 echo "land: make clean && make allcheck on $tested (log: $log)"
-make clean > "$log" 2>&1
+if ! make clean >> "$log" 2>&1; then
+    echo "land: FAIL clean on $tested; log: $log" >&2
+    exit 1
+fi
 make allcheck 2>&1 | tee -a "$log"
 status=${PIPESTATUS[0]}
 if [ "$status" -ne 0 ]; then

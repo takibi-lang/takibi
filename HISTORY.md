@@ -1,5 +1,18 @@
 # takibi Engineering History
 
+## 2026-10-10: publication checks host gates before the clean aggregate
+
+A failed language/model binding check or native fixture used to be reported
+only after the long clean allcheck had started. The publication script now
+runs langcheck, compiler unit tests and linuxcheck as separate gates after
+rebase and space review. It names the first failing gate and stops before
+clean or hardware time. A passing precheck still runs the complete clean
+allcheck and publishes only that tested HEAD. The same log holds both stages.
+A clean failure also stops publication; its exit status had previously been
+ignored because the script deliberately does not use set -e. Local command
+providers exercise the actual shell and reject missing gates and swallowed
+statuses without a Git remote or hardware.
+
 ## 2026-10-10: virtio-net completion expiry retains both queues
 
 The two virtio-net TX paths nested an IRQ-flag wait inside their used-index
