@@ -2,8 +2,11 @@
 
 The workload is one fixed 1536-byte TX allocation shared by two descriptors,
 ordinary ready-frame and RX-reply transmissions, and refusal of both entry
-points after completion cannot be confirmed. The maintained driver preserves
-its 200 us completion poll and 1000-wakeup fallback. Only observed completion
+points after completion cannot be confirmed. At this measurement stage,
+the driver preserved
+its 200 us completion poll and 1000-wakeup fallback. The later interrupt-bank
+repair and 14 ms policy are measured in
+[GEM_TX_IRQ_2026-10-10.md](GEM_TX_IRQ_2026-10-10.md). Only observed completion
 or confirmed halt returns CPU authority. Unconfirmed halt retains Device
 in the owner slot; either halt outcome stops later sends for that boot.
 

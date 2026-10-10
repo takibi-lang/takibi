@@ -73,8 +73,8 @@ list (maintainer, 2026-10-09).
    (`kernel/RAW_MINT_FILES`); calls of `region_bytes_assume` count as mints.
    Next: step A (remaining MMIO through IoHandles: RPi5 PCIe, virtio-net,
    virtio-blk, the system timer DTB reader, xHCI registers), then step B
-   (page and pool chunks over regions, using #734's prototype); #739
-   (stale list entries, per-file counts). log.tkb's
+   (page and pool chunks over regions, using the shared bounds-contract
+   prototype); #739 (stale list entries, per-file counts). log.tkb's
    raw sites go with #613: a lockless multi-writer log ring with its
    protocol in the type system, its orderings checked by #645's herd7
    litmus tests.
@@ -113,30 +113,30 @@ Initialization does not prove CPU freshness across preemption.
 1. **Fixed DMA lifecycle, finishing the drivers.** Every stage of one
    transfer in types, leaving one device-semantics declaration per driver
    and the platform bus translation as the only trusted parts.
-   - Done: #736, virtio-net elapsed completion deadline and retained
-     queues on expiry, with native absent-completion and reuse controls.
    - #720 (session-long xHCI rings and contexts, on `Place`), #625 (cache
-     visibility across DMA ownership handoffs, bounded model).
-2. **Landing faster:** Done: #737, separate host quick gates before the
-   complete clean allcheck, with publication-shell negative controls.
-3. **Other compiler and language work, respecting design gates:** #608
+     visibility across DMA ownership handoffs, bounded model). #740
+     (virtio-net fixed TX/RX-reply authority) awaits the stored-array
+     boundary and an in-place reply design decision.
+2. **Other compiler and language work, respecting design gates:** #608
    (checked integer-to-enum conversion), #709 and #710
    (generation exhaustion of region tables and the intrusive pool), #203
    (no uninitialized kernel bytes copied to userspace; builds on bounded
    syscall copy outcomes),
    #732's later slices (static parameters on generic variants, implicit
    statics inside a type argument).
-4. **Time measurement, then the optimizations waiting on it** (maintainer,
+3. **Time measurement, then the optimizations waiting on it** (maintainer,
    2026-10-08: space and time are both kept): #497, then #502; then #520
-   (TCP throughput), #680, #681, #682 (region_pool lock-free validation,
+   (TCP throughput), with #741 (locate the measured RPi5 HTTP SYN
+   retransmission tails), then #680, #681, #682 (region_pool lock-free
+   validation,
    false sharing, pinless single-user pools), #711, #718, #386; #719 (every
    QEMU lane on four vCPUs).
-5. **Evaluations awaiting a maintainer decision:** #687 (typed terminal
+4. **Evaluations awaiting a maintainer decision:** #687 (typed terminal
    mode leases), #648.
-6. **Compiler and language research, independent of the ownership
+5. **Compiler and language research, independent of the ownership
    checker:** #201, #282, #129, #417, #155, #28, #8.
-7. **Toolchain and portability:** #123, #124, #122, #95, #51, #50, #85.
-8. **Deferred or not a scheduled work item:** #220 (telnet; waits on PTY
+6. **Toolchain and portability:** #123, #124, #122, #95, #51, #50, #85.
+7. **Deferred or not a scheduled work item:** #220 (telnet; waits on PTY
    and `pselect6` scoping), #555, #250, #444, #429, #149, #567, #539, #536,
    #698 (ext2 metadata exhaustion as ENOSPC), #374 (physically contiguous
    memory; waits for a dynamic DMA allocation); #13 for `Phi`, with #216

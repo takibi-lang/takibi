@@ -9,7 +9,7 @@
 #
 # Exit status:
 #   0  pushed (or nothing to push)
-#   1  a quick gate or allcheck failed; the lane and log path are printed
+#   1  a quick gate, clean or allcheck failed; the lane and log path are printed
 #   2  precondition failed: dirty tree, wrong branch, or missing space review
 #   3  origin/main moved during the check; run again from the start
 #   4  the rebase stopped on a conflict; resolve it, then run again
