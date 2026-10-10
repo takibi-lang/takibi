@@ -1,0 +1,73 @@
+// Executable evidence for shared order contracts, dynamic PageMeta extents,
+// correlated slices and an existing stored slot authority across calls.
+private let mut bounds_metadata: [BoundsPageMeta; 8];
+private let mut bounds_values: [usize; 8];
+private let mut bounds_slots: [BoundsPageMeta; 2];
+private let mut bounds_split_point: usize = 3;
+
+fn bounds_test_metadata() -> usize {
+    let RegionOf(BoundsPageMeta)::Taken(meta) = region_of(bounds_metadata) else {
+        RegionOf(BoundsPageMeta)::Gone => { uart_puts("metadata unavailable\n"); return 0; }
+    };
+    match region_split(meta, bounds_split_point) {
+        RegionSplit(BoundsPageMeta)::TooShort(unsplit) => {
+            region_release(unsplit);
+            uart_puts("split too large\n"); return 0;
+        }
+        RegionSplit(BoundsPageMeta)::Split(parts) => {
+            let (head, tail) = parts;
+            uart_puts("metadata: ");
+            uart_print(bounds_meta_probe(head, 2));
+            uart_puts(" endpoint: ");
+            uart_print(bounds_meta_probe(head, region_count(head)));
+            uart_puts(" tail: ");
+            // The tail count is the normalized static expression 8-k.
+            let index: usize = 1;
+            if (index < region_count(tail)) {
+                bounds_meta_write(tail, index, 29);
+                uart_print(bounds_meta_read(tail, index));
+            } else { uart_print(0 as usize); }
+            uart_puts("\n");
+            let extent_size: usize = bounds_extent_size(head);
+            region_release(region_merge(head, tail));
+            return extent_size;
+        }
+    }
+}
+
+fn bounds_test_stored(extent_size: usize) {
+    let RegionTableOf(BoundsPageMeta)::Taken(table) = region_table_of(bounds_slots) else {
+        RegionTableOf(BoundsPageMeta)::Gone => { uart_puts("table unavailable\n"); return; }
+    };
+    match region_alloc(table) {
+        RegionAlloc(BoundsPageMeta)::Full => { uart_puts("table full\n"); }
+        RegionAlloc(BoundsPageMeta)::Allocated(slot) => {
+            region_slot_record(slot).state = 31;
+            bounds_layout(table, slot, extent_size);
+            let held = bounds_park(slot);
+            uart_puts("stored slot: ");
+            uart_print(bounds_finish(table, held));
+            uart_puts("\n");
+        }
+    }
+    region_table_keep(table);
+}
+
+fn app_main() {
+    let limit: usize = 8;
+    let index: usize = 3;
+    if (index < limit) {
+        uart_puts("scalar: ");
+        uart_print(bounds_forward(limit, index));
+        uart_puts("\n");
+    }
+    uart_puts("slices: ");
+    uart_print(bounds_correlated(bounds_values as []usize,
+                                 bounds_values[0..<4], 3));
+    uart_puts(" endpoint: ");
+    uart_print(bounds_correlated(bounds_values as []usize,
+                                 bounds_values[0..<4], 4));
+    uart_puts("\n");
+    let extent_size: usize = bounds_test_metadata();
+    bounds_test_stored(extent_size);
+}

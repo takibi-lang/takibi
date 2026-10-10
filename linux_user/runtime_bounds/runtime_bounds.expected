@@ -1,0 +1,5 @@
+scalar: 3
+slices: 17 endpoint: 0
+metadata: 23 endpoint: 0 tail: 29
+layout: meta=24 extent=16 slot=8 stored=16
+stored slot: 31

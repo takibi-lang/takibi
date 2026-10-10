@@ -2380,9 +2380,13 @@ slice-to-pointer cast preserve this tie. Global-array and string-literal
 storage are not stack-tied. General stack-derived raw-pointer lifetime
 tracking is not yet part of this rule.
 
-**Indexing**: `s[i]` needs no runtime check iff `i`'s proven range
-satisfies `lo >= 0 && hi <= minimum`. Otherwise a runtime check against
-the slice's actual (runtime) `.len` is generated.
+**Indexing**: `s[i]` needs no runtime check when `i`'s proven range
+satisfies `lo >= 0 && hi <= minimum`, or the bounded order-contract checker
+proves `i < s.len` for the current bindings. The latter also covers
+`prefix.len <= s.len && i < prefix.len` and immutable aliases of numeric
+values/lengths. Index loads, stores and element addresses consume the same
+proof. Otherwise a runtime check against the actual `.len` is generated.
+See "where constraints" for the supported relations and invalidation rules.
 
 **Length narrowing**: `if (s.len >= K) { ... }` upgrades the binding's
 proven minimum to `K` for the branch, the same way integer narrowing
@@ -2401,7 +2405,9 @@ a second bounds check. Thus `if (end <= s.len) { s[0..<end] }` and
 `if (start <= s.len) { s[start..<s.len] }` are trap-free. The mirrored
 comparisons and the fallthrough after an early-return guard are equivalent.
 The evidence is tied to the exact endpoint and slice bindings and is killed
-if either is reassigned or aliased; it cannot justify a subslice of another
+if either is reassigned or aliased. Taking either binding's address anywhere
+in the function conservatively disables this evidence, including an alias
+created before the guard; it cannot justify a subslice of another
 slice. Equality with `.len` is valid for an endpoint, but does not make the
 same value a valid single-element index. A constant suffix
 `s[K..<s.len]` is likewise trap-free when the slice's proven minimum length
@@ -3405,13 +3411,53 @@ The surface is provisional.
 
 A function may state constraints on its static indices before its body:
 `fn region_at(r: borrow region(T)[b, n], i: usize @ k) -> ... where k < n`.
-`<` and `<=` are supported, separated by commas. Every call is checked with
-built-in fast paths only: constants, and the refinement interval of an
-argument passed to a `usize @ k` parameter. A constraint that is false is an
-error ("requires 3 < 3, which is false here"), and so is one that cannot be
-shown that way ("requires 'i' < 3, which cannot be shown here"); there is no
-solver (GitHub issue #13 records the need) and no run-time fallback.
-`where` is a keyword.
+`<` and `<=` are supported, separated by commas. Every call must discharge
+the constraints; a false or unprovable constraint is a compile error, with
+no runtime fallback. `where` is a keyword.
+
+Constants, normalized static expressions and constant refinement intervals
+keep their existing fast paths. A bounded order graph additionally uses:
+
+- The enclosing function's declared `where` clauses as body assumptions.
+- Direct `<`, `<=`, `>` and `>=` comparisons, including conjunctions, in
+  `if` branches. A recognized negated comparison applies to the false
+  branch and to the continuation after an always-returning true branch.
+- Stable local value identities, bare slice bindings' `.len`, and the
+  built-in `region_count(r)` for a bare Region binding. Immutable numeric
+  aliases preserve equality with their initializer.
+- Call substitution from singleton parameters (`usize @ k`) and built-in
+  Region counts to the actual values/extents. A `<` path must contain at
+  least one strict edge; a path of only `<=` edges does not prove `<`.
+
+For example, `if (index < limit) { bounded(limit, index); }` discharges
+`bounded(limit: usize @ n, index: usize @ k) where k < n`. A forwarding
+function with the same precondition can call `bounded` directly. The same
+graph proves correlated slice indices without requiring a Region.
+
+Facts use resolved local binding identities; shadowed names are distinct.
+A `for` counter is related to its upper-bound expression in this same graph,
+including immutable local slice-length aliases. Mutable global descriptors
+are excluded from runtime order evidence.
+Reassignment, shadowing and a descriptor's address escape invalidate runtime
+links. Writes to slice elements preserve the descriptor's length. Taking a
+tracked binding's address anywhere in the function conservatively prevents
+runtime order evidence for it, even before the address-taking statement.
+Slice endpoint evidence has the same address-escape restriction. Facts introduced in a branch or loop do not
+escape it, except the explicit early-return continuation above. Sequential
+reassignment ends that continuation's facts before checking the assignment.
+
+The graph does not evaluate runtime addition, subtraction or multiplication,
+or treat machine arithmetic as unbounded arithmetic. Existing normalized
+static terms such as a Region tail count `n-k` are opaque identities in the
+graph; the existing checked Region split establishes what that count means.
+Ordinary integer overflow behavior is unchanged. There is no external solver.
+
+Bounds do not establish storage identity, lifetime, initialized contents or
+protocol progress. Region/Place ownership and borrow rules still apply.
+A nominal stored integer wrapper does not carry an inequality merely by
+naming a capacity; general returned or stored predicate packages are not
+implemented. Neither runtime refinement-bound syntax nor runtime physical
+span minting is added by this rule.
 
 ### Publication Records (GitHub issue #299)
 
@@ -4208,11 +4254,10 @@ investigations behind any of these, see `HISTORY.md`.
   for exactly what *is* supported.
 - **No heap allocation.** Everything is static (BSS/data) or stack
   -allocated.
-- Relational/correlated-bounds reasoning (two variables whose sum or
-  relationship is invariant, but which the type system tracks as
-  independent ranges) is not supported -- see HISTORY.md's P4c section.
-  `unsafe` is the current escape hatch for the rare case this actually
-  blocks a proof. This also covers comparing a loop counter against a
+- General relational arithmetic, including invariant sums and products,
+  is not supported. The bounded order-contract graph supports the direct
+  comparisons described under "where constraints", without a solver or
+  runtime refinement bounds. Comparing a loop counter against a
   slice's own runtime `.len` (`while (u < s.len) { s[u] }` still gets a
   runtime bounds check on `s[u]`, since `collect_bounds`/`range_of` only
   understands a comparison operand that is a literal, a `const`, or a

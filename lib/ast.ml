@@ -559,8 +559,8 @@ and variant_payload_pattern =
 
 (* GitHub issue #672: a static `where` constraint on a function's static
    indices, e.g. `where k < n`. Checked at every call by
-   Type_inf.check_where_clauses with built-in fast paths only (constants and
-   refinement intervals); what it cannot show is an error. *)
+   Type_inf.check_where_clause with constant/interval fast paths and the
+   bounded runtime order graph; what it cannot show is an error. *)
 type where_cmp = WhereLt | WhereLe
 [@@deriving show]
 

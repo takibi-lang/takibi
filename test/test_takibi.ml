@@ -14562,11 +14562,8 @@ let codegen_tests = [
         }");
 
   Alcotest.test_case
-    "negative regression guard: a SEPARATE variable merely equal in value \
-     to s.len (not textually s.len) is NOT recognized -- proves the fix \
-     does not over-reach into alias/equality reasoning (this is \
-     freelist_core_init's shape before its own rewrite)" `Quick
-    (expect_trap_sites 1
+    "an immutable slice-length alias feeds the shared for-loop order graph" `Quick
+    (expect_trap_sites 0
        "fn f215_alias_not_proven(s: []usize) -> usize {
           let n: usize = s.len;
           let mut total: usize = 0;
@@ -23379,7 +23376,226 @@ let production_machine_boundary_tests =
     |};
   ]
 
+let runtime_bounds_tests =
+  let bounded = {|fn bounded(limit: usize @ n, index: usize @ k) -> usize
+                   where k < n { return index; }
+  |} in
+  let ok name src = Alcotest.test_case name `Quick (fun () -> ignore (infer src)) in
+  let bad name src = Alcotest.test_case name `Quick
+      (expect_type_error "requires" src) in
+  let traps name expected body = Alcotest.test_case name `Quick (fun () ->
+    expect_trap_sites expected
+      ("fn correlated(data: []usize, prefix: borrow []usize, index: usize) -> usize {" ^ body ^ "}") ();
+    let ir = Llvm.string_of_llmodule !Llvm_gen.the_module in
+    Alcotest.(check int) "actual LLVM trap calls" expected
+      (count_substring ir "call void @llvm.trap(")) in
+  [
+    ok "guarded scalar contract" (bounded ^ {|fn guarded(limit: usize, index: usize) -> usize {
+      if (index < limit) { return bounded(limit, index); } return 0;
+    }|});
+    ok "precondition forwarding" (bounded ^ {|fn forward(limit: usize @ n, index: usize @ k)
+      -> usize where k < n { return bounded(limit, index); }|});
+    ok "transitive scalar contract" (bounded ^ {|fn forward(limit: usize, middle: usize, index: usize)
+      -> usize { if (index < middle && middle <= limit) {
+        return bounded(limit, index); } return 0; }|});
+    bad "equal index is rejected" (bounded ^ "fn bad() -> usize { return bounded(8, 8); }");
+    bad "missing guard is rejected" (bounded ^ {|fn bad(n: usize, k: usize) -> usize {
+      return bounded(n, k); }|});
+    bad "non-strict guard is rejected" (bounded ^ {|fn bad(n: usize, k: usize) -> usize {
+      if (k <= n) { return bounded(n, k); } return 0; }|});
+    bad "changed scalar is rejected" (bounded ^ {|fn bad(n: usize, k: usize) -> usize {
+      if (k < n) { k = n; return bounded(n, k); } return 0; }|});
+    bad "shadowed scalar is rejected" (bounded ^ {|fn bad(n: usize, k: usize) -> usize {
+      if (k < n) { let k: usize = n; return bounded(n, k); } return 0; }|});
+    bad "escaped scalar alias invalidates proof" (bounded ^ {|fn change(p: *usize) { *p = 100; }
+      fn bad(n: usize, k: usize) -> usize {
+        let p: *usize = &k;
+        if (k < n) { change(p); return bounded(n, k); } return 0; }|});
+    traps "correlated slices remove load and store checks" 0 {|
+      if (prefix.len <= data.len && index < prefix.len) {
+        data[index] = 7; return data[index]; } return 0;
+    |};
+    traps "nested correlated slices" 0 {|
+      if (prefix.len <= data.len) {
+        if (index < prefix.len) { return data[index]; } } return 0;
+    |};
+    traps "equal endpoint retains load check" 1 {|
+      if (prefix.len <= data.len && index <= prefix.len) {
+        return data[index]; } return 0;
+    |};
+    traps "changed slice retains load check" 1 {|
+      if (prefix.len <= data.len && index < prefix.len) {
+        let data: []usize = data[0..<0]; return data[index]; } return 0;
+    |};
+    traps "branch proof does not escape" 1 {|
+      if (prefix.len <= data.len && index < prefix.len) { data[index] = 7; }
+      return data[index];
+    |};
+    ok "early return carries relation until the scalar changes" (bounded ^ {|
+      fn guarded(limit: usize, index: usize) -> usize {
+        if (index >= limit) { return 0; }
+        let result: usize = bounded(limit, index);
+        index = limit; return result;
+      }|});
+    bad "early return proof expires at reassignment" (bounded ^ {|
+      fn bad(limit: usize, index: usize) -> usize {
+        if (index >= limit) { return 0; }
+        index = limit; return bounded(limit, index);
+      }|});
+    bad "loop guard proof does not escape a zero-iteration loop" (bounded ^ {|
+      fn bad(limit: usize, index: usize, run: bool) -> usize {
+        while (run) { if (index >= limit) { return 0; } run = false; }
+        return bounded(limit, index);
+      }|});
+    ok "false branch guard proves relation" (bounded ^ {|
+      fn guarded(limit: usize, index: usize) -> usize {
+        if (index >= limit) { return 0; } else { return bounded(limit, index); }
+      }|});
+    Alcotest.test_case "previously escaped slice alias retains bounds check" `Quick
+      (expect_trap_sites 1 {|
+        fn replace(p: *[]usize, shorter: []usize) { *p = shorter; }
+        fn bad(data: []usize, index: usize) -> usize {
+          let alias: *[]usize = &data;
+          if (index < data.len) {
+            replace(alias, data[0..<0]); return data[index];
+          } return 0;
+        }|});
+    Alcotest.test_case "escaped slice alias also invalidates loop evidence" `Quick
+      (expect_trap_sites 1 {|
+        fn replace(p: *[]usize, shorter: []usize) { *p = shorter; }
+        fn bad(data: []usize) -> usize {
+          let alias: *[]usize = &data;
+          for index: usize in 0..<data.len {
+            replace(alias, data[0..<0]); return data[index];
+          } return 0;
+        }|});
+    Alcotest.test_case "escaped slice alias invalidates early-return endpoint" `Quick
+      (expect_trap_sites 1 {|
+        fn replace(p: *[]usize, shorter: []usize) { *p = shorter; }
+        fn bad(data: []usize, endpoint: usize) -> usize {
+          let alias: *[]usize = &data;
+          if (endpoint > data.len) { return 0; }
+          replace(alias, data[0..<0]); return data[0..<endpoint].len;
+        }|});
+    traps "reversed correlated comparisons" 0 {|
+      if (data.len >= prefix.len && prefix.len > index) { return data[index]; }
+      return 0;
+    |};
+    traps "disjunction does not provide conjunction evidence" 1 {|
+      if (prefix.len <= data.len || index < prefix.len) { return data[index]; }
+      return 0;
+    |};
+    bad "nominal stored index alone does not prove a bound" (bounded ^ {|
+      struct StoredIndex[generation: usize] { index: usize; generation: usize @ generation; }
+      fn bad(limit: usize, held: *StoredIndex[g]) -> usize {
+        return bounded(limit, held.index);
+      }|});
+    Alcotest.test_case "Region arithmetic does not extend a released loan" `Quick
+      (expect_region_error "already consumed" {|
+        struct Meta { state: usize; }
+        fn bad(meta: sink region(Meta)[b, n], index: usize) {
+          let count: usize = region_count(meta);
+          region_release(meta);
+          if (index < count) { region_at(meta, index).state = 1; }
+        }|});
+    Alcotest.test_case "same-capacity pool cannot accept a stored foreign slot" `Quick
+      (expect_region_error "static value mismatch" {|
+        struct Meta { state: usize; }
+        let mut first_pool: [Meta; 2]; let mut second_pool: [Meta; 2];
+        fn park(slot: sink RegionSlot(Meta)[b, k]) -> Place(RegionSlot(Meta)[b, k]) {
+          return Place::Full(slot);
+        }
+        fn finish(pool: borrow RegionTable(Meta)[b, n], held: Place(RegionSlot(Meta)[b, k])) {
+          match held { Place::Empty => {} Place::Full(slot) => { region_free(pool, slot); } }
+        }
+        fn bad() {
+          let RegionTableOf(Meta)::Taken(first) = region_table_of(first_pool) else {
+            RegionTableOf(Meta)::Gone => { return; }
+          };
+          let RegionTableOf(Meta)::Taken(second) = region_table_of(second_pool) else {
+            RegionTableOf(Meta)::Gone => { region_table_keep(first); return; }
+          };
+          match region_alloc(first) {
+            RegionAlloc(Meta)::Full => {}
+            RegionAlloc(Meta)::Allocated(slot) => { finish(second, park(slot)); }
+          }
+          region_table_keep(first); region_table_keep(second);
+        }|});
+    bad "a mutable record field is not a slice extent" (bounded ^ {|
+      struct Counter { len: usize; }
+      fn bad(counter: *Counter, index: usize) -> usize {
+        if (index < counter.len) { return bounded(counter.len, index); } return 0;
+      }|});
+    bad "a user-defined lookalike is not a built-in Region count" {|
+      linear struct region__Lookalike[b: addr, o: usize, n: usize] { length: usize; }
+      fn region_count(r: borrow region__Lookalike[b, o, n]) -> usize { return r.length; }
+      fn at(r: borrow region__Lookalike[b, o, n], index: usize @ k)
+        -> usize where k < n { return index; }
+      fn bad(r: borrow region__Lookalike[b, o, n], index: usize) -> usize {
+        if (index < region_count(r)) { return at(r, index); } return 0;
+      }|};
+    Alcotest.test_case "a local callable cannot impersonate the count accessor" `Quick
+      (fun () ->
+        let prog = parse {|
+          fn probe(region_count: fn(usize) -> usize, meta: usize) -> usize {
+            return region_count(meta);
+          }
+        |} in
+        match prog with
+        | [Ast.FuncDef f] ->
+            let bindings = Local_bindings.resolve_func f in
+            (match f.body with
+             | [{ desc = Ast.Return (Some call); _ }] ->
+                 Alcotest.(check bool) "no trusted count identity" true
+                   (Runtime_bounds.expr ~is_region:(fun _ -> true) bindings call = None)
+             | _ -> Alcotest.fail "unexpected classifier fixture body")
+        | _ -> Alcotest.fail "unexpected classifier fixture program");
+    Alcotest.test_case "shadowed loop counter retains the bounds check" `Quick
+      (expect_trap_sites 1 {|
+        fn bad(data: []usize, outside: usize) -> usize {
+          for index: usize in 0..<data.len {
+            let index: usize = outside; return data[index];
+          } return 0;
+        }|});
+    Alcotest.test_case "mutable global descriptor is not a stable loop extent" `Quick
+      (expect_trap_sites 1 {|
+        let mut values: [usize; 8];
+        let mut shared: []usize;
+        fn shrink() { shared = values[0..<0]; }
+        fn bad() -> usize {
+          for index: usize in 0..<shared.len { shrink(); return shared[index]; }
+          return 0;
+        }|});
+    ok "immutable count alias carries scalar contract" (bounded ^ {|fn guarded(limit: usize, index: usize) -> usize {
+      let count: usize = limit;
+      if (index < count) { return bounded(limit, index); } return 0;
+    }|});
+    Alcotest.test_case "dynamic Region count proves borrowed access" `Quick (fun () ->
+      ignore (infer_regions {|struct PageMeta { state: usize; }
+        let mut metadata: [PageMeta; 8];
+        fn read(r: borrow region(PageMeta)[b, n], index: usize) -> usize {
+          if (index < region_count(r)) { return region_at(r, index).state; }
+          return 0;
+        }
+        fn probe(point: usize) -> usize {
+          match region_of(metadata) {
+            RegionOf(PageMeta)::Gone => { return 0; }
+            RegionOf(PageMeta)::Taken(whole) => {
+              match region_split(whole, point) {
+                RegionSplit(PageMeta)::TooShort(unsplit) => { region_release(unsplit); return 0; }
+                RegionSplit(PageMeta)::Split(pair) => {
+                  let (head, tail) = pair;
+                  let result = read(head, 0);
+                  region_release(region_merge(head, tail)); return result;
+                }
+              }
+            }
+          }
+        }|}));
+  ]
+
 let named_groups_unisolated = [
+  "runtime-bounds", runtime_bounds_tests;
   "core",     core_tests;
   "parser",   parser_tests;
   "type_inf", infer_tests;

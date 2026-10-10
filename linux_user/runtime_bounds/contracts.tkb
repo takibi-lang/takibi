@@ -1,0 +1,77 @@
+// Shared scalar, slice and Region order contracts. Runtime span minting is
+// deliberately absent: the fixture starts with declared, initialized arrays.
+struct BoundsPageMeta {
+    state: usize;
+    generation: usize;
+    physical: usize;
+}
+
+fn bounds_value(limit: usize @ n, index: usize @ k) -> usize where k < n {
+    return index;
+}
+
+fn bounds_forward(limit: usize @ n, index: usize @ k) -> usize where k < n {
+    return bounds_value(limit, index);
+}
+
+fn bounds_correlated(data: []usize, prefix: borrow []usize,
+                     index: usize) -> usize {
+    if (prefix.len <= data.len && index < prefix.len) {
+        data[index] = 17;
+        return data[index];
+    }
+    return 0;
+}
+
+fn bounds_meta_read(meta: borrow region(BoundsPageMeta)[b, n],
+                    index: usize @ k) -> usize where k < n {
+    return region_at(meta, index).state;
+}
+
+fn bounds_meta_write(meta: borrow region(BoundsPageMeta)[b, n],
+                     index: usize @ k, state: usize) where k < n {
+    region_at(meta, index).state = state;
+}
+
+fn bounds_meta_probe(meta: borrow region(BoundsPageMeta)[b, n],
+                     index: usize) -> usize {
+    let count: usize = region_count(meta);
+    if (index >= count) { return 0; }
+    bounds_meta_write(meta, index, 23);
+    return bounds_meta_read(meta, index);
+}
+
+// A stored index is represented by the existing slot authority. Its pool
+// identity survives a Place payload and a function boundary independently
+// of numeric capacity; no naked integer is promoted to an authority here.
+fn bounds_park(slot: sink RegionSlot(BoundsPageMeta)[b, k])
+        -> Place(RegionSlot(BoundsPageMeta)[b, k]) {
+    return Place::Full(slot);
+}
+
+fn bounds_finish(table: borrow RegionTable(BoundsPageMeta)[b, n],
+                 held: Place(RegionSlot(BoundsPageMeta)[b, k])) -> usize {
+    match held {
+        Place::Empty => { return 0; }
+        Place::Full(slot) => {
+            let result: usize = region_slot_record(slot).state;
+            region_free(table, slot);
+            return result;
+        }
+    }
+}
+
+// Layout is measured through the compiler's checked target layout, rather
+// than treating erased parameters as evidence of a future allocator ABI.
+fn bounds_extent_size(meta: borrow region(BoundsPageMeta)[b, n]) -> usize {
+    return sizeof(region(BoundsPageMeta)[b, n]);
+}
+
+fn bounds_layout(table: borrow RegionTable(BoundsPageMeta)[b, n],
+                 slot: borrow RegionSlot(BoundsPageMeta)[b, k], extent_size: usize) {
+    uart_puts("layout: meta="); uart_print(sizeof(BoundsPageMeta));
+    uart_puts(" extent="); uart_print(extent_size);
+    uart_puts(" slot="); uart_print(sizeof(RegionSlot(BoundsPageMeta)[b, k]));
+    uart_puts(" stored="); uart_print(sizeof(Place(RegionSlot(BoundsPageMeta)[b, k])));
+    uart_puts("\n");
+}

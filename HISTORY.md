@@ -1,5 +1,36 @@
 # takibi Engineering History
 
+## 2026-10-10: Shared bounded runtime order contracts
+
+Issue #734's approved prototype added one finite order graph for singleton
+where contracts, slice lengths and built-in Region counts. Branch guards,
+precondition forwarding and call substitution now discharge the same < / <=
+relations, with resolved binding IDs, scope restoration and conservative
+address-escape invalidation. LLVM consumes the source checker's index proof
+for loads, stores and element addresses. No runtime refinement syntax,
+physical-span mint, solver or production allocator migration was added.
+
+Twelve AArch64 probes against 132a74ec preserved constant/refined acceptance
+and false/missing/replaced-view rejection, while guarded calls, forwarding,
+correlated slices and dynamic Region accesses became trap-free. The old
+backend incorrectly accepted a descriptor alias retained before a guard,
+even after a helper shortened the slice. A new LLVM regression observed zero
+necessary traps before repair and one afterward; loop and early-return
+endpoint companions exercise the same scan. A second baseline reproduction
+found a shadowed loop counter inheriting the name-based backend proof. For
+loops now use the same resolved-binding graph; counter-shadowing and mutable
+global-descriptor regressions retain their checks. This is static rejection under
+forbid-trap, not a transfer of trust into unsafe or a multicore protocol fix.
+
+The native fixture stores an existing RegionSlot in Place across calls and
+rejects a foreign table of equal capacity. A nominal stored integer alone
+still carries no inequality. The recommendation is to compose the arithmetic
+contract with existing storage authority, rather than assert that a pool
+capacity implies its identity. The metadata migration sketch keeps physical
+backing, overflow, disjointness, initialization and replacement at their own
+reviewed boundaries. Details and representation evidence are in
+`docs/BOUNDS_CONTRACT_PROTOTYPE.md`.
+
 ## 2026-10-09: Frame default construction found in the session audit
 
 A two-file compiler probe accepted a default-initialized affine `FrameRef`

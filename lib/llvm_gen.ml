@@ -1241,150 +1241,18 @@ let restore_narrowing_mut saved =
     | Some old -> Hashtbl.replace narrowing_ctx name old
   ) saved
 
-(* condition -> [(idx_var, slice_var)] for `v < s.len` / `s.len > v` shapes,
-   joined by &&. GitHub issue #213: neither collect_bounds_cond (literal/
-   const/refined-Var bounds only) nor slice_len_mins (narrows a slice's OWN
-   length against a literal, the opposite direction) covers "variable v is
-   bounded by ANOTHER slice s's runtime .len" -- a relational fact between
-   two runtime values. Deliberately Lt/Gt only, never Le/Ge/Eq: `v <=
-   s.len` does NOT prove v is a valid index (v = s.len is out of bounds).
-   Non-negativity needs no separate check -- every slice index is already
-   usize-typed (require_usize_index), trivially >= 0. Dedupes by idx_var
-   (last match wins) via Hashtbl, mirroring slice_len_mins's own
-   update/Hashtbl.replace merge, so each name is saved/restored exactly
-   once regardless of how many (redundant or conflicting) facts the
-   condition spells out for it. *)
-let slice_index_facts (cond : Ast.expr) : (string * string) list =
-  let acc = Hashtbl.create 4 in
-  let rec go (e : Ast.expr) = match e.desc with
-    | BinOp (And, e1, e2) -> go e1; go e2
-    | BinOp (Lt, { desc = Var v; _ }, { desc = FieldGet ({ desc = Var s; _ }, "len"); _ })
-    | BinOp (Gt, { desc = FieldGet ({ desc = Var s; _ }, "len"); _ }, { desc = Var v; _ }) ->
-        Hashtbl.replace acc v s
-    | _ -> ()
-  in
-  go cond;
-  Hashtbl.fold (fun v s l -> (v, s) :: l) acc []
+(* Source proofs are keyed by the instantiated/overloaded function as well
+   as location, so a proof from one generic instance cannot justify another. *)
+let current_runtime_bounds_key = ref ""
+let runtime_index_proven loc =
+  Hashtbl.mem Type_inf.runtime_slice_index_proven_at (!current_runtime_bounds_key, loc)
 
-(* Module-level table recording "v is currently a proven-safe index into
-   slice s" for the active if-branch (GitHub issue #213). Unlike
-   narrowing_ctx, this holds regardless of whether v/s are Imm or Mut
-   bindings: the fact never changes either variable's own type, it is a
-   pure side-channel consulted only when the SPECIFICALLY NAMED slice s is
-   later indexed (see load_from_slice/store_to_slice's proven check). One
-   boolean fact per name, so a nested if that overwrites an entry needs no
-   intersect logic (unlike narrowing_ctx's numeric ranges) -- save/restore
-   around each branch is sufficient. Compilation is single-threaded, so a
-   module-level Hashtbl is safe (same precedent as narrowing_ctx above). *)
-let slice_index_ctx : (string, string) Hashtbl.t = Hashtbl.create 4
-
-(* Kill-name scan for slice_index_ctx facts specifically: names whose OWN
-   {ptr,len} VALUE may be reassigned or aliased in this statement list --
-   deliberately NARROWER than Ast.written_names. Refinement found while
-   implementing #215's write-form test: written_names' Assign/Index case
-   (`Index (n, idx) -> add n; ...`) treats writing an ELEMENT reached
-   through n (`n[i] = e;`) as a write to n itself -- correct conservatism
-   for numeric range narrowing (apply_narrowing/_mut, still using
-   Ast.written_names unchanged), but wrong here: writing n[i] does not
-   change n's own pointer or length, so it must not kill a slice_index_ctx
-   fact ABOUT n's identity. Confirmed this was already a latent gap in
-   #213's own shipped kill rule too (not just #215's new one): `if (v <
-   s.len) { s[v] = 1; }` traps today because the write being proven safe
-   poisons its own guard's kill set. Mirrors Ast.written_names' structure
-   exactly except the Assign/Index case does not add the base name (still
-   walks the index sub-expression, which may itself read other names).
-   Sync note: this is a llvm_gen.ml-only helper -- type_inf.ml never
-   consults slice_index_ctx (see #213's own confirmed finding that the
-   whole mechanism is codegen-only), so there is no cross-file copy to
-   keep in sync, unlike Ast.written_names' own sync rule with
-   type_inf.ml's narrow_from_cond. *)
-let slice_rebind_names (stmts : Ast.stmt list) : string list =
-  let acc = Hashtbl.create 8 in
-  let add n = Hashtbl.replace acc n () in
-  let rec go_expr (e : Ast.expr) = match e.desc with
-    | AddrOf { desc = Var n; _ } -> add n
-    | AddrOf e1 | Bnot e1 | Deref e1 | Cast (_, e1) | FieldGet (e1, _)
-    | Unsafe e1 ->
-        go_expr e1
-    | BinOp (_, a, b) -> go_expr a; go_expr b
-    | Call (_, args) | StructLit args | TupleLit args -> List.iter go_expr args
-    | VariantCtor (_, _, payload) -> go_expr payload
-    | Index (_, idx) -> go_expr idx
-    | SliceOf (_, lo, hi) -> go_expr lo; go_expr hi
-    | Assign (lhs, rhs) ->
-        (match lhs.desc with
-         | Var n -> add n
-         | Index (_, idx) -> go_expr idx   (* writing n[i] does not rebind n *)
-         | Deref p -> go_expr p
-         | FieldGet (b, _) -> go_expr b
-         | _ -> go_expr lhs);
-        go_expr rhs
-    | IntLit _ | BoolLit _ | StringLit _ | ByteSliceLit _ | Var _ | ViewLit _
-    | EnumVariant _ | SizeOf _ | AlignOf _ | ContainsStableOwner _
-    | OffsetOf _ | EmbedFile _ ->
-        ()
-  in
-  let rec go_stmt (s : Ast.stmt) = match s.desc with
-    | Let (_, n, _, init, _) -> add n; (match init with
-                                        | Some e -> go_expr e | None -> ())
-    | LetTuple (ns, e)       -> List.iter add ns; go_expr e
-    | Expr e | Return (Some e) | Yield e -> go_expr e
-    | Return None            -> ()
-    | Block ss | UnsafeBlock ss -> List.iter go_stmt ss
-    | If (c, t, el)          -> go_expr c;
-                                List.iter go_stmt t; List.iter go_stmt el
-    | While (c, b)           -> go_expr c; List.iter go_stmt b
-    | For (n, _, lo, hi, b)  -> add n; go_expr lo; go_expr hi;
-                                List.iter go_stmt b
-    | ForEach (n, se, b)     -> add n; go_expr se; List.iter go_stmt b
-    | Break | Continue       -> ()
-    | StaticAssert (e, _)    -> go_expr e
-    | Match (d, arms)        ->
-        go_expr d;
-        List.iter (function
-          | Ast.ArmVariant (_, _, binding, b) ->
-              Option.iter (function Ast.PayloadBind (name, _) -> add name
-                                    | Ast.PayloadIgnore -> ()) binding;
-              List.iter go_stmt b
-          | ArmWild b -> List.iter go_stmt b
-          | ArmIntLit (_, b) | ArmByteSliceLit (_, b) -> List.iter go_stmt b
-        ) arms
-    | LetMatch (_, n, _, d, arms) ->
-        add n; go_expr d;
-        List.iter (function
-          | Ast.ArmVariant (_, _, binding, b) ->
-              Option.iter (function Ast.PayloadBind (name, _) -> add name
-                                    | Ast.PayloadIgnore -> ()) binding;
-              List.iter go_stmt b
-          | ArmWild b -> List.iter go_stmt b
-          | ArmIntLit (_, b) | ArmByteSliceLit (_, b) -> List.iter go_stmt b
-        ) arms
-  in
-  List.iter go_stmt stmts;
-  Hashtbl.fold (fun n () l -> n :: l) acc []
-
-(* Kill rule: invalidate a (v, s) fact if the branch body may REBIND
-   either v or s to a different value (see slice_rebind_names above for
-   why this is narrower than Ast.written_names -- a mere element write
-   through v or s must not kill the fact). *)
-let apply_slice_index_narrowing (cond : Ast.expr) (killed : string list) =
-  List.fold_left (fun saved (v, s) ->
-    if List.mem v killed || List.mem s killed then saved
-    else
-      let old = Hashtbl.find_opt slice_index_ctx v in
-      Hashtbl.replace slice_index_ctx v s;
-      (v, old) :: saved
-  ) [] (slice_index_facts cond)
-
-let restore_slice_index_narrowing saved =
-  List.iter (fun (v, old_opt) ->
-    match old_opt with
-    | None     -> Hashtbl.remove slice_index_ctx v
-    | Some old -> Hashtbl.replace slice_index_ctx v old
-  ) saved
+(* Descriptor/scalar rebinding and address escapes use the same scanner as
+   the source contract checker. Element writes leave the descriptor intact. *)
+let slice_rebind_names = Runtime_bounds.rebind_names
 
 (* condition -> [(endpoint_var, slice_var)] for an endpoint already checked
-   against a slice's runtime length. Unlike slice_index_ctx, <= is valid:
+   against a slice's runtime length. Unlike element-index evidence, <= is valid:
    an endpoint may equal len even though a single-element index may not. *)
 let slice_endpoint_facts (cond : Ast.expr) : (string * string) list =
   let acc = Hashtbl.create 4 in
@@ -1406,9 +1274,10 @@ let slice_endpoint_facts (cond : Ast.expr) : (string * string) list =
 
 let slice_endpoint_ctx : (string, string) Hashtbl.t = Hashtbl.create 4
 
-let apply_slice_endpoint_narrowing (cond : Ast.expr) (killed : string list) =
+let apply_slice_endpoint_narrowing locals (cond : Ast.expr) (killed : string list) =
   List.fold_left (fun saved (v, s) ->
-    if List.mem v killed || List.mem s killed then saved
+    if List.mem v killed || List.mem s killed
+       || local_find_opt locals v = None || local_find_opt locals s = None then saved
     else
       let old = Hashtbl.find_opt slice_endpoint_ctx v in
       Hashtbl.replace slice_endpoint_ctx v s;
@@ -1421,30 +1290,6 @@ let restore_slice_endpoint_narrowing saved =
     | None -> Hashtbl.remove slice_endpoint_ctx v
     | Some old -> Hashtbl.replace slice_endpoint_ctx v old
   ) saved
-
-(* GitHub issue #215: a for-loop's own counter is structurally proven safe
-   as an index into s when hi_expr is syntactically `s.len` -- the loop's
-   own cond_bb comparison (i < hi, built every iteration) already IS the
-   bounds check; this just lets load_from_slice/store_to_slice's existing
-   proven-check (unchanged since #213) see that fact via the same
-   slice_index_ctx side-channel. No kill-check on `name` itself: the
-   counter is an Imm binding, and type_inf.ml rejects `&<immutable>`
-   outright, so it can never be written or aliased within its own body --
-   only `s` needs the slice_rebind_names kill guard (a REBIND of s can
-   repoint it at different memory/length; a mere s[i] element write, as
-   in the write-form test below, must not kill this -- same reasoning as
-   #213's own fix, see slice_rebind_names' comment). Deliberately
-   NOT SMT: hi_expr must be textually `s.len` for a bare variable s --
-   a separate variable merely equal in value to s.len (e.g. `let n =
-   s.len; for i in 0..<n`) is not recognized. *)
-let apply_for_slice_index_narrowing (name : string) (hi_expr : Ast.expr)
-    (killed : string list) =
-  match hi_expr.desc with
-  | FieldGet ({ desc = Var s; _ }, "len") when not (List.mem s killed) ->
-      let old = Hashtbl.find_opt slice_index_ctx name in
-      Hashtbl.replace slice_index_ctx name s;
-      [(name, old)]
-  | _ -> []
 
 type device_barrier_kind = DmaPublish | DmaConsume | DeviceFence
 
@@ -3947,23 +3792,13 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
          so hi <= min implies hi <= len). Otherwise check against the
          runtime length, unless (P4c-1, same as sub_of_slice below) the
          access is wrapped in unsafe. *)
-      (* GitHub issue #217: same_base_key generalizes the old bare-ident
-         `s = id` comparison to a base that may now be a struct field path
-         -- only a bare Var base can ever match a prior `slice_index_ctx`
-         fact (which is itself only ever recorded against a bare name), so
-         a FieldGet base simply never hits this optimization (falls back
-         to a runtime check, never unsound). *)
-      let same_base_key = match base.desc with Ast.Var n -> Some n | _ -> None in
       let load_from_slice elem_ty min_len fat =
         let proven =
           (match refinement_range idx_ty with
            | Some (lo, hi) -> lo >= 0 && hi <= min_len
            | _ -> false)
-          || (match idx.desc with
-              | Var v -> (match Hashtbl.find_opt slice_index_ctx v with
-                          | Some s -> Some s = same_base_key
-                          | None -> false)
-              | _ -> false)
+          || runtime_index_proven idx.loc
+
         in
         if not proven && !unsafe_depth = 0 then
           emit_bounds_check_dyn e.loc idx_ty idx_v min_len (slice_len fat)
@@ -5261,7 +5096,6 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
               (after rhs) actually issues the load/GEP instructions. *)
            let elem_ty_hint = peek_index_elem_ty locals base in
            let (_, rhs_v) = gen_expr ?expected_ty:elem_ty_hint locals rhs in
-           let same_base_key = match base.desc with Ast.Var n -> Some n | _ -> None in
            let store_to_array elem_ty n arr_ptr =
              let checker_proven =
                Hashtbl.mem Type_inf.array_index_proven_in_bounds_at idx.loc in
@@ -5284,11 +5118,8 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                (match refinement_range idx_ty with
                 | Some (lo, hi) -> lo >= 0 && hi <= min_len
                 | _ -> false)
-               || (match idx.desc with
-                   | Var v -> (match Hashtbl.find_opt slice_index_ctx v with
-                               | Some s -> Some s = same_base_key
-                               | None -> false)
-                   | _ -> false)
+               || runtime_index_proven idx.loc
+
              in
              if not proven && !unsafe_depth = 0 then
                emit_bounds_check_dyn idx.loc idx_ty idx_v min_len (slice_len fat)
@@ -5424,7 +5255,6 @@ and gen_index_place locals (base : Ast.expr) (idx : Ast.expr) loc
                   (Hashtbl.find_opt narrowing_ctx n) ~default:idx_ty_raw
               | _ -> idx_ty_raw))
   in
-  let same_base_key = match base.desc with Ast.Var n -> Some n | _ -> None in
   match resolve_index_storage ~op:"Index" locals base with
   | IdxArray (elem_ty, n, array_place) ->
       let checker_proven =
@@ -5444,12 +5274,8 @@ and gen_index_place locals (base : Ast.expr) (idx : Ast.expr) loc
         (match refinement_range idx_ty with
          | Some (lo, hi) -> lo >= 0 && hi <= min_len
          | None -> false)
-        || (match idx.desc with
-            | Var v ->
-                (match Hashtbl.find_opt slice_index_ctx v with
-                 | Some s -> Some s = same_base_key
-                 | None -> false)
-            | _ -> false)
+        || runtime_index_proven idx.loc
+
       in
       if not proven && !unsafe_depth = 0 then
         emit_bounds_check_dyn loc idx_ty idx_v min_len (slice_len fat)
@@ -5579,6 +5405,7 @@ let gen_func ?prog_types fdef =
   (* This table carries facts only within one function body. *)
   Hashtbl.reset narrowing_ctx;
   let key = function_key prog_types fdef in
+  current_runtime_bounds_key := key;
   let res name ty_opt = resolve_local_ast prog_types key name ty_opt in
   let binding_resolution = match prog_types with
     | Some pt ->
@@ -6014,15 +5841,14 @@ let gen_func ?prog_types fdef =
 
         position_at_end then_bb builder;
         let killed     = Ast.written_names then_stmts in
-        let killed_idx = slice_rebind_names then_stmts in
+        let killed_idx = slice_rebind_names then_stmts @
+          Runtime_bounds.address_taken_names fdef.body in
         let saved      = apply_narrowing     locals cond killed in
         let saved_mut  = apply_narrowing_mut locals cond killed in
-        let saved_idx  = apply_slice_index_narrowing cond killed_idx in
-        let saved_end  = apply_slice_endpoint_narrowing cond killed_idx in
+        let saved_end  = apply_slice_endpoint_narrowing locals cond killed_idx in
         run_scoped_stmts then_stmts;
         restore_narrowing     locals saved;
         restore_narrowing_mut saved_mut;
-        restore_slice_index_narrowing saved_idx;
         restore_slice_endpoint_narrowing saved_end;
         if block_terminator (insertion_block builder) = None then begin
           merge_reachable := true;
@@ -6068,8 +5894,9 @@ let gen_func ?prog_types fdef =
                 Ast.written_names else_stmts @ future_writes_here in
               let f_saved     = apply_narrowing     locals neg fallthrough_killed in
               let f_saved_mut = apply_narrowing_mut locals neg fallthrough_killed in
-              let f_saved_end = apply_slice_endpoint_narrowing neg
-                  (slice_rebind_names else_stmts @ future_rebinds_here) in
+              let f_saved_end = apply_slice_endpoint_narrowing locals neg
+                  (slice_rebind_names else_stmts @ future_rebinds_here @
+                   Runtime_bounds.address_taken_names fdef.body) in
               pending_fallthrough_locals := f_saved @ !pending_fallthrough_locals;
               pending_fallthrough_narrowing_ctx :=
                 f_saved_mut @ !pending_fallthrough_narrowing_ctx;
@@ -6107,7 +5934,7 @@ let gen_func ?prog_types fdef =
            written anywhere in the body"), same two mechanisms narrow_from_
            cond itself wraps (apply_narrowing for Imm/slice-min-length,
            apply_narrowing_mut for Mut via narrowing_ctx). Deliberately NOT
-           mirroring apply_slice_index_narrowing here -- that is a
+           mirroring the branch order checker -- that is a
            SEPARATE #213 mechanism with no type_inf.ml-side counterpart in
            narrow_from_cond, so adding it here would elide a check
            type_inf.ml never proved for this construct. *)
@@ -6201,10 +6028,7 @@ let gen_func ?prog_types fdef =
         let old_loop_id = Hashtbl.find_opt locals.visible name in
         local_bind locals name (stmt_binding_id s 1) (Imm (loop_ty, i_val));
         Stack.push (exit_bb, incr_bb) loop_stack;
-        let killed_idx = slice_rebind_names body in
-        let saved_idx  = apply_for_slice_index_narrowing name hi_expr killed_idx in
         run_scoped_stmts body;
-        restore_slice_index_narrowing saved_idx;
         ignore (Stack.pop loop_stack);
         (match old_loop_id with
          | Some prior -> Hashtbl.replace locals.visible name prior
@@ -7569,6 +7393,7 @@ let gen_exception_restore name frame after_switch =
   emit_exception_restore off total
 
 let gen_program ?prog_types prog =
+  current_runtime_bounds_key := "";
   (* The declared-type phase is a required boundary: silently repairing an
      unresolved AST here would hide a caller that bypassed it. *)
   Declared_type_resolver.validate prog;

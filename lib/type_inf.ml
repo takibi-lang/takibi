@@ -215,6 +215,9 @@ let signed_division_overflow_proven_safe_at :
     (Lexing.position, unit) Hashtbl.t = Hashtbl.create 32
 let array_index_proven_in_bounds_at : (Lexing.position, unit) Hashtbl.t =
   Hashtbl.create 64
+let runtime_slice_index_proven_at : (string * Lexing.position, unit) Hashtbl.t =
+  Hashtbl.create 64
+let active_runtime_bounds_key = ref ""
 let refined_cast_proven_in_bounds_at : (Lexing.position, unit) Hashtbl.t =
   Hashtbl.create 64
 let active_binding_exclusions : Value_facts.integer list IntMap.t ref =
@@ -254,12 +257,27 @@ let function_where : (string, Ast.where_cmp list * ty) Hashtbl.t =
 
 let where_cmp_text = function Ast.WhereLt -> "<" | Ast.WhereLe -> "<="
 
-(* Decide `a cmp b` from what the call shows: constants, and for a static
-   bound by a `usize @ k` parameter, the refinement interval of the argument
-   passed there. Built-in fast paths only (no solver, GitHub issue #13): the
-   difference b - a (minus one for `<`) must have a non-negative lower bound
-   over those intervals. Anything else cannot be shown and is an error. *)
-let check_where_clause loc fname bounds names cmp a b =
+let runtime_bounds_regions = ref StringSet.empty
+let is_bounds_region name = StringSet.mem name !runtime_bounds_regions
+let runtime_bounds = ref Runtime_bounds.empty
+let runtime_bounds_address_taken = ref []
+
+(* Normalized static expressions are opaque graph nodes: normalization
+   identifies the existing Region tail count n-k, but the graph neither
+   evaluates runtime arithmetic nor infers an inequality from it. *)
+let bounds_static_node term =
+  try
+    let poly, _ = static_poly term in
+    Some (Runtime_bounds.Static poly)
+  with Unify_error _ -> None
+
+(* Constant/interval fast paths complement the order graph. The existing
+   normalized difference must have a non-negative lower bound, or a stable
+   relational path must discharge the obligation. No runtime fallback. *)
+let check_where_clause loc fname bounds names relations cmp a b =
+  let relational = match bounds_static_node a, bounds_static_node b with
+    | Some a, Some b -> Runtime_bounds.proves relations a cmp b
+    | _ -> false in
   let describe s = match static_atom_key s with
     | Some k -> (match Hashtbl.find_opt names k with Some n -> n | None -> static_to_string s)
     | None -> static_to_string s in
@@ -276,6 +294,7 @@ let check_where_clause loc fname bounds names cmp a b =
          | None -> None)
     | Some _, _ -> None) (Some 0) poly in
   match lower with
+  | _ when relational -> ()
   | Some l when l >= 0 -> ()
   | Some _ when List.for_all (fun (m, _) -> m = []) poly ->
       raise (TypeError (loc, Printf.sprintf
@@ -379,10 +398,13 @@ let type_checker_consumed_unsafe_at : (Lexing.position, unit) Hashtbl.t =
 let fold_stmts_with_future_writes
     (f : 'a -> Ast.stmt -> 'a) (init : 'a) (stmts : Ast.stmt list) : 'a =
   let saved_exclusions = !active_binding_exclusions in
+  let saved_bounds = !runtime_bounds in
   let rec go acc = function
     | [] -> acc
     | s :: rest ->
         enclosing_future_writes := StringSet.of_list (Ast.written_names rest);
+        runtime_bounds := Runtime_bounds.without
+          (Runtime_bounds.rebind_names [s]) !runtime_bounds;
         (* GitHub issue #328: this is the single choke point every
            statement list in this file passes through (Block, UnsafeBlock,
            If's branches, While, For, ...), mirroring exactly why
@@ -404,7 +426,9 @@ let fold_stmts_with_future_writes
         go acc' rest
   in
   Fun.protect
-    ~finally:(fun () -> active_binding_exclusions := saved_exclusions)
+    ~finally:(fun () ->
+      active_binding_exclusions := saved_exclusions;
+      runtime_bounds := saved_bounds)
     (fun () -> go init stmts)
 
 let view_kinds : (string, Ast.opaque_kind) Hashtbl.t = Hashtbl.create 8
@@ -917,6 +941,53 @@ let adapt_actual_to_expected (tyenv : tyenv) (e : Ast.expr)
   | _ -> actual
 
 (* -- Expression inference -------------------------------------------------- *)
+
+let bounds_expr_node tyenv (e : Ast.expr) =
+  match !active_local_bindings with
+  | None -> None
+  | Some bindings ->
+      let is_region (base : Ast.expr) = match base.desc with
+        | Var name ->
+            (match StringMap.find_opt name tyenv with
+             | Some (ty, _) ->
+                 (match strip_singleton ty with
+                  | TIndexedStruct (name, [_; _; _]) ->
+                      is_bounds_region name
+                  | _ -> false)
+             | None -> false)
+        | _ -> false in
+      let node = match e.Ast.desc with
+        | FieldGet ({ desc = Var name; _ }, "len") ->
+            (match StringMap.find_opt name tyenv with
+             | Some (ty, _) when (match strip_singleton ty with TSlice _ -> true | _ -> false) ->
+                 Runtime_bounds.expr ~is_region bindings e
+             | _ -> None)
+        | FieldGet _ -> None
+        | _ -> Runtime_bounds.expr ~is_region bindings e in
+      match node with
+      | Some (Runtime_bounds.Local (_, name, _))
+        when List.mem name !runtime_bounds_address_taken -> None
+      | _ -> node
+
+let bounds_link graph static node = match bounds_static_node static, node with
+  | Some static, Some node -> Runtime_bounds.equate static node graph
+  | _ -> graph
+
+let record_runtime_slice_index tyenv base idx =
+  match bounds_expr_node tyenv idx, !active_local_bindings with
+  | Some index, Some bindings ->
+      (match Runtime_bounds.local bindings base Runtime_bounds.Length with
+       | Some length when Runtime_bounds.proves !runtime_bounds index Ast.WhereLt length ->
+           Hashtbl.replace runtime_slice_index_proven_at (!active_runtime_bounds_key, idx.Ast.loc) ()
+       | _ -> ())
+  | _ -> ()
+
+let with_runtime_bounds_branch tyenv cond body f =
+  let saved = !runtime_bounds in
+  let killed = !runtime_bounds_address_taken @ Runtime_bounds.rebind_names body in
+  runtime_bounds := Runtime_bounds.condition ~node:(bounds_expr_node tyenv)
+    saved cond |> Runtime_bounds.without killed;
+  Fun.protect ~finally:(fun () -> runtime_bounds := saved) f
 
 (* True for all unsigned integer types (including usize) *)
 let is_unsigned_ty = function
@@ -3626,6 +3697,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            elem
        | TSlice (elem, _, _) ->
            require_usize_index idx.loc it;
+           record_runtime_slice_index tyenv base idx;
            elem  (* runtime length; codegen elides the check
                     only when idx's range fits the MINIMUM *)
        | TPtr   elem      ->
@@ -5094,11 +5166,22 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                                  | None -> ())
                             | _ -> ())
                        | _ -> ()) param_tys arg_tys;
+                     let relations = List.fold_left2 (fun graph pt arg ->
+                       match repr pt with
+                       | TSingleton (_, term) ->
+                           bounds_link graph term (bounds_expr_node tyenv arg)
+                       | TIndexedStruct (name, [_; _; count])
+                         when is_bounds_region name ->
+                           let count_node = match !active_local_bindings with
+                             | Some bindings -> Runtime_bounds.local bindings arg Runtime_bounds.Count
+                             | None -> None in
+                           bounds_link graph count count_node
+                       | _ -> graph) !runtime_bounds param_tys args in
                      (match repr phantom with
                       | TView (_, terms) ->
                           let rec pairs cs ts = match cs, ts with
                             | c :: cs, a :: b :: ts ->
-                                check_where_clause e.loc fname bounds names c a b;
+                                check_where_clause e.loc fname bounds names relations c a b;
                                 pairs cs ts
                             | _ -> () in
                           pairs cmps terms
@@ -5220,7 +5303,9 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                              Printf.sprintf "index %Ld is out of bounds for array of size %d" k64 n)))
                   | _ -> ());
                  elem
-             | TSlice (elem, _, _) -> require_usize_index idx.loc it; elem
+             | TSlice (elem, _, _) ->
+                 require_usize_index idx.loc it;
+                 record_runtime_slice_index tyenv base idx; elem
              | TPtr   elem      ->
                  check_ptr_arith_complete e.loc (repr vt);
                  require_isize_offset idx.loc it; strip_io elem
@@ -6194,6 +6279,20 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
       (match is_mut, expr_opt, !active_local_bindings with
        | false, Some init, Some bindings ->
            (match Local_bindings.ids_for_stmt bindings s with
+            | id :: _ ->
+                let node = Runtime_bounds.Local (id, name, Runtime_bounds.Value) in
+                (match bounds_expr_node tyenv init with
+                 | Some source -> runtime_bounds := Runtime_bounds.equate node source !runtime_bounds
+                 | None -> ());
+                (match repr bind_ty with
+                 | TSingleton (_, term) ->
+                     runtime_bounds := bounds_link !runtime_bounds term (Some node)
+                 | _ -> ())
+            | [] -> ())
+       | _ -> ());
+      (match is_mut, expr_opt, !active_local_bindings with
+       | false, Some init, Some bindings ->
+           (match Local_bindings.ids_for_stmt bindings s with
             | id :: _ -> Hashtbl.replace binding_fact_sources id (init, bind_ty)
             | [] -> ())
        | _ -> ());
@@ -6283,16 +6382,28 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
          instead of this If's own position in ITS enclosing list. *)
       let future_writes_here = !enclosing_future_writes in
       let then_tyenv = narrow_from_cond senv tyenv cond then_s in
-      let (_, rl1) = with_exclusion_narrowing tyenv cond
+      let (_, rl1) = with_runtime_bounds_branch tyenv cond then_s (fun () ->
+        with_exclusion_narrowing tyenv cond
         (Ast.written_names then_s) (fun () ->
           fold_stmts_with_future_writes
             (fun (env, locs) s -> infer_stmt senv eenv env fenv ret_ty locs in_loop s)
-            (then_tyenv, raw_locals) then_s)
+            (then_tyenv, raw_locals) then_s))
       in
-      let (_, rl2) = fold_stmts_with_future_writes
-        (fun (env, locs) s -> infer_stmt senv eenv env fenv ret_ty locs in_loop s)
-        (tyenv, rl1) else_s
+      let (_, rl2) = match negate_cond cond with
+        | Some neg -> with_runtime_bounds_branch tyenv neg else_s (fun () ->
+            fold_stmts_with_future_writes
+              (fun (env, locs) s -> infer_stmt senv eenv env fenv ret_ty locs in_loop s)
+              (tyenv, rl1) else_s)
+        | None -> fold_stmts_with_future_writes
+            (fun (env, locs) s -> infer_stmt senv eenv env fenv ret_ty locs in_loop s)
+            (tyenv, rl1) else_s
       in
+      if stmt_list_always_returns then_s then
+        (match negate_cond cond with
+         | Some neg -> runtime_bounds := Runtime_bounds.condition
+             ~node:(bounds_expr_node tyenv) !runtime_bounds neg
+             |> Runtime_bounds.without (!runtime_bounds_address_taken @ Runtime_bounds.rebind_names else_s)
+         | None -> ());
       (* Early-return-guard narrowing: when the then-branch always
          returns, the code after this WHOLE if/else is reached only on
          the path where `cond` was false -- i.e. exactly the else
@@ -6517,9 +6628,25 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
       locally_bound_names := StringSet.add name !locally_bound_names;  (* issue #214 *)
       let body_env = StringMap.add name (idx_ty, false) tyenv in
       let raw_locals = StringMap.add ("__for_" ^ name) idx_ty raw_locals in
-      let (_, raw_locals') = fold_stmts_with_future_writes
-        (fun (env, locs) s -> infer_stmt senv eenv env fenv ret_ty locs true s)
-        (body_env, raw_locals) body
+      (* The generated loop comparison proves counter < its captured upper
+         value. Use the same graph and binding IDs as branch contracts;
+         immutable counters can still be shadowed by another declaration. *)
+      let saved_bounds = !runtime_bounds in
+      (match !active_local_bindings, bounds_expr_node tyenv hi_expr with
+       | Some bindings, Some upper ->
+           (match List.nth_opt (Local_bindings.ids_for_stmt bindings s) 1 with
+            | Some id ->
+                let counter = Runtime_bounds.Local (id, name, Runtime_bounds.Value) in
+                runtime_bounds := Runtime_bounds.add counter Ast.WhereLt upper !runtime_bounds
+            | None -> ())
+       | _ -> ());
+      runtime_bounds := Runtime_bounds.without
+        (!runtime_bounds_address_taken @ Runtime_bounds.rebind_names body) !runtime_bounds;
+      let (_, raw_locals') = Fun.protect
+        ~finally:(fun () -> runtime_bounds := saved_bounds) (fun () ->
+          fold_stmts_with_future_writes
+            (fun (env, locs) s -> infer_stmt senv eenv env fenv ret_ty locs true s)
+            (body_env, raw_locals) body)
       in
       (* NOW validate base_raw: the body has had its full chance to pin it
          (via a shared TVar reference nested inside idx_ty/raw_locals' --
@@ -7002,12 +7129,15 @@ let infer_top_level_stmt_resilient senv eenv fenv ret_ty
         (tyenv, raw_locals)
     | _ -> state
 
-let infer_func senv eenv fenv genv (fdef : Ast.func) : func_info =
+let infer_func ~key senv eenv fenv genv (fdef : Ast.func) : func_info =
   (* An unsafe grant is lexical and must never cross a function boundary.
      The scope-local Fun.protect calls enforce this; these assertions make
      any future unprotected grant fail closed at the boundary. *)
   assert (!unsafe_depth = 0);
   assert (not !type_checker_lint_active);
+  let previous_bounds_key = !active_runtime_bounds_key in
+  let previous_bounds = !runtime_bounds in
+  let previous_bounds_address_taken = !runtime_bounds_address_taken in
   let previous_scope = !active_static_scope in
   let previous_readonly = !active_readonly_borrows in
   let scope = create_static_scope () in
@@ -7018,9 +7148,20 @@ let infer_func senv eenv fenv genv (fdef : Ast.func) : func_info =
     | _ -> names) StringSet.empty fdef.params;
   Fun.protect ~finally:(fun () ->
     active_audit_function := "<global>";
+    active_runtime_bounds_key := previous_bounds_key;
+    runtime_bounds := previous_bounds;
+    runtime_bounds_address_taken := previous_bounds_address_taken;
     active_static_scope := previous_scope;
     active_readonly_borrows := previous_readonly) (fun () ->
     check_const_shadowing fdef;
+    active_runtime_bounds_key := key;
+    runtime_bounds := Runtime_bounds.empty;
+    runtime_bounds_address_taken := Runtime_bounds.address_taken_names fdef.body;
+    List.iter (fun (a, cmp, b) ->
+      match bounds_static_node (static_of_ast scope a),
+            bounds_static_node (static_of_ast scope b) with
+      | Some a, Some b -> runtime_bounds := Runtime_bounds.add a cmp b !runtime_bounds
+      | _ -> ()) fdef.where_clauses;
     value_static_identities := StringMap.empty;
     place_static_identities := StringMap.empty;
     Hashtbl.reset guard_narrow_hints;  (* GitHub issue #310, fresh per function *)
@@ -7040,6 +7181,16 @@ let infer_func senv eenv fenv genv (fdef : Ast.func) : func_info =
     let bindings = Local_bindings.resolve_func fdef in
     active_local_bindings := Some bindings;
     active_parameter_bindings := IntSet.of_list bindings.param_ids;
+    List.iter2 (fun ((name, _), ty) id ->
+      let node facet = Some (Runtime_bounds.Local (id, name, facet)) in
+      runtime_bounds := (match repr ty with
+        | TSingleton (_, term) -> bounds_link !runtime_bounds term (node Runtime_bounds.Value)
+        | TIndexedStruct (name, [_; _; count])
+          when is_bounds_region name ->
+            bounds_link !runtime_bounds count (node Runtime_bounds.Count)
+        | _ -> !runtime_bounds)
+    ) (List.combine fdef.params param_tys) bindings.param_ids;
+    runtime_bounds := Runtime_bounds.without !runtime_bounds_address_taken !runtime_bounds;
     Hashtbl.reset active_binding_types;
     Hashtbl.reset binding_fact_sources;
     Hashtbl.reset intrinsic_nonzero_at;
@@ -7201,6 +7352,14 @@ let validate_per_cpu (prog : Ast.toplevel list) =
     | _ -> ()) prog
 
 let infer_program (prog : Ast.toplevel list) : program_types =
+  active_runtime_bounds_key := "";
+  runtime_bounds := Runtime_bounds.empty;
+  runtime_bounds_address_taken := [];
+  runtime_bounds_regions := List.fold_left (fun names -> function
+    | Ast.OwnedStructDef (name, _, _, _, _, _, _, _, loc)
+      when Ast.source_file_of_loc loc = Ast.builtin_region_file
+           && String.starts_with ~prefix:"region__" name -> StringSet.add name names
+    | _ -> names) StringSet.empty prog;
   (* The declared-type phase is a required boundary: silently repairing an
      unresolved AST here would hide a caller that bypassed it. *)
   Declared_type_resolver.validate prog;
@@ -7223,6 +7382,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   Hashtbl.reset divisor_proven_nonzero_at;
   Hashtbl.reset signed_division_overflow_proven_safe_at;
   Hashtbl.reset array_index_proven_in_bounds_at;
+  Hashtbl.reset runtime_slice_index_proven_at;
   Hashtbl.reset refined_cast_proven_in_bounds_at;
   Hashtbl.reset binding_fact_sources;
   Hashtbl.reset intrinsic_nonzero_at;
@@ -9551,7 +9711,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   let functions = List.fold_left (fun m -> function
     | Ast.FuncDef fdef ->
         let key = overload_key fdef.name fdef.params in
-        (try StringMap.add key (infer_func senv eenv fenv genv fdef) m
+        (try StringMap.add key (infer_func ~key senv eenv fenv genv fdef) m
          with Types.TypeError (loc, msg) ->
            collected_type_errors := (loc, msg) :: !collected_type_errors;
            m)

@@ -494,7 +494,7 @@ LINUX_USER_EXAMPLES      := linux_hello start checked_usize elf64_validate bump 
                              affine_escape_via_index align_ptr_proof linear_obligation tuple_pair region_proto region_inspection pool_space_replay \
                              field_lease match_int_lit record_loans \
                              callstack ringbuf crc8 djb2 slice slice_from_field logical_eval foreach for loop fizzbuzz fibonacci \
-                             bubblesort inet_checksum ip_parse tcp_parse wire_endian ref_type byte_slice atomic spinlock locked_cell diagnostic_ring publish fdt number usb_config usb_init_report uart_rx_ring block_cache gem_tx_wait generic_variant
+                             bubblesort inet_checksum ip_parse tcp_parse wire_endian ref_type byte_slice atomic spinlock locked_cell diagnostic_ring publish fdt number usb_config usb_init_report uart_rx_ring block_cache gem_tx_wait generic_variant runtime_bounds
 LINUX_USER_BINS          := $(foreach e,$(LINUX_USER_EXAMPLES),$(LINUX_USER_DIR)/$(e)/$(e).exe)
 LINUX_USER_OBJS          := $(foreach e,$(LINUX_USER_EXAMPLES),$(LINUX_USER_DIR)/$(e)/$(e)_exe.o)
 
@@ -702,6 +702,9 @@ $(LINUX_USER_DIR)/record_loans/record_loans_exe.o: LINUX_USER_EXTRA_SRCS := $(LI
 $(LINUX_USER_DIR)/record_loans/record_loans_exe.o: $(LINUX_USER_DIR)/record_loans/authority.tkb $(LINUX_USER_DIR)/record_loans/current_phase.tkb
 # A per-test compiler flag, such as the built-in region's --regions (#672).
 LINUX_USER_EXTRA_FLAGS :=
+$(LINUX_USER_DIR)/runtime_bounds/runtime_bounds_exe.o: LINUX_USER_EXTRA_FLAGS := --regions --check-unused-file $(LINUX_USER_DIR)/runtime_bounds/contracts.tkb
+$(LINUX_USER_DIR)/runtime_bounds/runtime_bounds_exe.o: $(LINUX_USER_DIR)/runtime_bounds/contracts.tkb
+$(LINUX_USER_DIR)/runtime_bounds/runtime_bounds_exe.o: LINUX_USER_EXTRA_SRCS := $(LINUX_USER_DIR)/runtime_bounds/contracts.tkb
 $(LINUX_USER_DIR)/region_proto/region_proto_exe.o: LINUX_USER_EXTRA_FLAGS := --regions
 $(LINUX_USER_DIR)/region_inspection/region_inspection_exe.o: LINUX_USER_EXTRA_FLAGS := --regions
 _build/pool_space_replay_regions.tkb: scripts/generate_pool_space_replay.py kernel/benchmarks/pool_space/workload.tsv $(LINUX_USER_DIR)/pool_space_replay/region_replay.tkb.in

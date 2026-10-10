@@ -1,7 +1,7 @@
 (library
  (name takibi)
  (public_name takibi)
- (modules ast atomic_spec llvm_ext language_words trap_diagnostics target_info const_env generic_scope type_layout publish_registry no_copy_registry dma_fixed_registry per_cpu_registry dma_fixed_record publish_record local_bindings value_facts types monomorphize declared_type_resolver takibi_core effect_rules generic_variant type_inf typechecker raw_authority_policy unused_functions llvm_gen lexer parser use_resolver region_builtin)
+ (modules ast atomic_spec llvm_ext language_words trap_diagnostics target_info const_env generic_scope type_layout publish_registry no_copy_registry dma_fixed_registry per_cpu_registry dma_fixed_record publish_record local_bindings runtime_bounds value_facts types monomorphize declared_type_resolver takibi_core effect_rules generic_variant type_inf typechecker raw_authority_policy unused_functions llvm_gen lexer parser use_resolver region_builtin)
  (libraries menhirLib llvm llvm.analysis llvm.target llvm.all_backends llvm.passbuilder llvm.debuginfo)
  (foreign_stubs
   (language c)
