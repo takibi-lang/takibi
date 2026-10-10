@@ -1,0 +1,177 @@
+// GitHub issue #686: a placement pin that outlives the kernel action that
+// took it. The pin is a linear token stored in its process's record, in a
+// Place serialized by the global run lock (guarded_by) and indexed by the
+// record's own identity (self). The verdict is the lifecycle -- pin, return
+// to user space and re-enter, refused migration, release after the stack is
+// gone -- which does not depend on timing, so it runs natively.
+//
+// What the types hold: only pin_take mints a Pin; a Pin goes back only into
+// its own process's record; it is consumed only by pin_release, which also
+// consumes the StackReleased evidence for the same process; a migration or
+// exit that finds the record pinned must put the token back or release it,
+// since a taken Place cannot be dropped. What stays trusted: the accessor's
+// `@ p` (that record really is process p's), the run-lock guard mint, and
+// the runtime check that a migration sees Full.
+
+private let mut run_lock: i32;
+linear view RunGuard[lock: addr];
+
+fn run_lock_take() -> RunGuard[&run_lock] {
+    return view RunGuard[&run_lock];
+}
+
+fn run_lock_give(guard: sink RunGuard[lock]) {}
+
+// Process p's identity for one kernel action; minted again on re-entry.
+linear struct Owner[p: usize] { private generation: usize @ p; }
+// A pin on process p: the process may not leave its CPU while it exists.
+linear struct Pin[p: usize] { private generation: usize @ p; }
+// Process p's kernel stack has been released by the CPU that ran it.
+// Affine: an exit with no pin has nothing to spend it on.
+affine struct StackReleased[p: usize] { private generation: usize @ p; }
+
+struct ProcessRecord {
+    generation: usize;
+    cpu: usize;
+    private pin: Place(Pin[self]) guarded_by(run_lock);
+}
+
+private let mut records: [ProcessRecord; 4];
+
+// The prototype has one process, in slot 1, whose generation names it.
+fn owner_enter(generation: usize @ p) -> Owner[p] {
+    let mut owner: Owner[p] = { generation };
+    return owner;
+}
+
+fn owner_leave(owner: sink Owner[p]) {}
+
+fn record_of(owner: borrow Owner[p]) -> &mut ProcessRecord @ p !{unsafe} {
+    return &records[1];
+}
+
+// The one mint of a Pin, and the one place it ends.
+private fn pin_new(owner: borrow Owner[p]) -> Pin[p] {
+    let mut pin: Pin[p] = { owner.generation };
+    return pin;
+}
+
+fn stack_release(owner: borrow Owner[p]) -> StackReleased[p] {
+    let mut released: StackReleased[p] = { owner.generation };
+    return released;
+}
+
+fn pin_release(pin: sink Pin[p], released: sink StackReleased[p]) {}
+
+must_use variant PinResult {
+    Pinned;
+    AlreadyPinned;
+}
+
+fn pin_take(owner: borrow Owner[p], cpu: usize) -> PinResult !{unsafe} {
+    let guard = run_lock_take();
+    let previous = place_put(guard, record_of(owner).pin, pin_new(owner));
+    match previous {
+        Place::Empty => {
+            record_of(owner).cpu = cpu;
+            run_lock_give(guard);
+            return PinResult::Pinned;
+        }
+        Place::Full(earlier) => {
+            // The earlier pin goes back; the new one is the duplicate.
+            match place_put(guard, record_of(owner).pin, earlier) {
+                Place::Empty => {}
+                Place::Full(duplicate) => {
+                    let released = stack_release(owner);
+                    pin_release(duplicate, released);
+                }
+            }
+            run_lock_give(guard);
+            return PinResult::AlreadyPinned;
+        }
+    }
+}
+
+must_use variant MigrateResult {
+    Moved;
+    Refused;
+}
+
+// Every migration -- scheduler, timer, affinity change -- passes here.
+fn migrate(owner: borrow Owner[p], cpu: usize) -> MigrateResult !{unsafe} {
+    let guard = run_lock_take();
+    let current = place_take(guard, record_of(owner).pin);
+    match current {
+        Place::Empty => {
+            record_of(owner).cpu = cpu;
+            run_lock_give(guard);
+            return MigrateResult::Moved;
+        }
+        Place::Full(pin) => {
+            let Place::Empty = place_put(guard, record_of(owner).pin, pin);
+            run_lock_give(guard);
+            return MigrateResult::Refused;
+        }
+    }
+}
+
+// Exit: the pin ends only with the evidence that the stack is gone.
+fn exit_release(owner: sink Owner[p]) -> bool !{unsafe} {
+    let guard = run_lock_take();
+    let current = place_take(guard, record_of(owner).pin);
+    run_lock_give(guard);
+    let released = stack_release(owner);
+    owner_leave(owner);
+    match current {
+        Place::Empty => { return false; }
+        Place::Full(pin) => {
+            pin_release(pin, released);
+            return true;
+        }
+    }
+}
+
+fn report(name: *u8, ok: bool) {
+    uart_puts(name);
+    if (ok) { uart_puts(": ok\n"); } else { uart_puts(": WRONG\n"); }
+}
+
+fn app_main() !{unsafe} {
+    records[1].generation = 1;
+    records[1].cpu = 0;
+    // Action 1: the worker pins itself to CPU 2 and returns to user space.
+    let first = owner_enter(records[1].generation);
+    let pinned = match pin_take(first, 2) {
+        PinResult::Pinned => { true }
+        PinResult::AlreadyPinned => { false }
+    };
+    owner_leave(first);
+    report("pin", pinned);
+    // Action 2: a timer tick on another CPU tries to move it.
+    let ticked = owner_enter(records[1].generation);
+    let refused = match migrate(ticked, 0) {
+        MigrateResult::Moved => { false }
+        MigrateResult::Refused => { true }
+    };
+    owner_leave(ticked);
+    report("migration while pinned refused", refused && records[1].cpu == 2);
+    // Action 3: re-entry, a second pin request finds the first.
+    let again = owner_enter(records[1].generation);
+    let duplicate = match pin_take(again, 3) {
+        PinResult::Pinned => { false }
+        PinResult::AlreadyPinned => { true }
+    };
+    owner_leave(again);
+    report("second pin refused", duplicate && records[1].cpu == 2);
+    // Action 4: exit; the pin ends after the stack release.
+    let exiting = owner_enter(records[1].generation);
+    report("pin released at exit", exit_release(exiting));
+    // The slot is unpinned again.
+    let reused = owner_enter(records[1].generation);
+    let moved = match migrate(reused, 0) {
+        MigrateResult::Moved => { true }
+        MigrateResult::Refused => { false }
+    };
+    owner_leave(reused);
+    report("unpinned record moves", moved && records[1].cpu == 0);
+}

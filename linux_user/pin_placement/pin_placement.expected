@@ -1,0 +1,5 @@
+pin: ok
+migration while pinned refused: ok
+second pin refused: ok
+pin released at exit: ok
+unpinned record moves: ok
