@@ -74,7 +74,10 @@ list (maintainer, 2026-10-09).
    Next: step A (remaining MMIO through IoHandles: RPi5 PCIe, virtio-net,
    virtio-blk, the system timer DTB reader, xHCI registers), then step B
    (page and pool chunks over regions, using the shared bounds-contract
-   prototype); #739 (stale list entries, per-file counts). log.tkb's
+   prototype). xHCI MMIO step A coordinates with B's #720 partial-DMA
+   design: preserve matching-completion, publication and stop/reset hooks;
+   use IoHandles there without adding a DMA-specific storage rule. #739
+   (stale list entries, per-file counts). log.tkb's
    raw sites go with #613: a lockless multi-writer log ring with its
    protocol in the type system, its orderings checked by #645's herd7
    litmus tests.
@@ -113,7 +116,11 @@ Initialization does not prove CPU freshness across preemption.
 1. **Fixed DMA lifecycle, finishing the drivers.** Every stage of one
    transfer in types, leaving one device-semantics declaration per driver
    and the platform bus translation as the only trusted parts.
-   - #720 (session-long xHCI rings and contexts, on `Place`), #625 (cache
+   - #720 (session-long xHCI rings and contexts, on `Place`): proposed
+     partial range authority with the current synchronous driver; API surface
+     awaits a decision. Existing Place storage passed a shape probe; no
+     stored-array prerequisite is demonstrated. Coordinate observation hooks
+     with A's #637 MMIO step; see docs/XHCI_SHARED_DMA_DESIGN.md. #625 (cache
      visibility across DMA ownership handoffs, bounded model). #740
      (virtio-net fixed TX/RX-reply authority) awaits the stored-array
      boundary and an in-place reply design decision.
