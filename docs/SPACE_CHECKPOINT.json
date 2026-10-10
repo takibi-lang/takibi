@@ -2,8 +2,8 @@
   "date": "2026-10-10",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "7e8a0eeb4fae94ed8aa2db4743d45ca2cc496d8c228b687cc1fcc3fd2c460b0c",
-  "workload": "#637 step A: RPi5 UART through an IoHandle (rpi5/device_map.tkb). Linked kernels compared against origin/main.",
+  "source_sha256": "991149209e224af87c809000df9d62ad5e76383d7f96a7f7da95210dde67ef33",
+  "workload": "#637 step A: RPi5 UART through an IoHandle (rpi5/device_map.tkb). Linked kernels compared against origin/main. The shared register operations then move into pl011.tkb (no code-size effect beyond inlining differences).",
   "evidence": [
     "docs/PROCESS_PIN_SPACE_2026-10-10.md",
     "docs/BOUNDS_CONTRACT_SPACE_2026-10-10.md",
@@ -38,8 +38,10 @@
     "docs/PAGE_META_24_2026-10-08.md",
     "docs/DMA_MINT_FILES_2026-10-08.md",
     "docs/DMA_TRANSMIT_2026-10-08.md",
-    "docs/LITERAL_SLICE_SPACE_2026-10-10.md"
+    "docs/LITERAL_SLICE_SPACE_2026-10-10.md",
+    "docs/GEM_TX_LIFECYCLE_2026-10-10.md",
+    "docs/GEM_TX_BULK_2026-10-10.json"
   ],
-  "assessment": "RPi5: text +408 B, data +8 B (the `uart` handle), BSS and usable_ram_start unchanged. QEMU unchanged.",
+  "assessment": "RPi5: text +408 B, data +8 B (the `uart` handle), BSS and usable_ram_start unchanged; QEMU unchanged. Measured on top of 82e7db65.",
   "next_trigger": "Production runtime metadata extent migration, a stored allocator authority through array/place rules, or another completed kernel feature/stage requires fresh workload measurement. Any change to generated production code, storage or allocation invalidates this reuse."
 }
