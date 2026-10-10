@@ -22,3 +22,4 @@ kernel/net/icmp.tkb	kernel_icmp_reply_once	1	protocol	waits for the host peer's 
 kernel/net/tcp.tkb	kernel_tcp_echo_check	1	protocol	waits for the host peer's connection (30 s)
 kernel/net/tcp.tkb	kernel_tcp_receive_once	1	protocol	receive timeout (30 s)
 kernel/lib/peer_tick_window.tkb	wall_emergency_budget	1	backstop	10 s emergency bound for a peer that cannot take ticks; ordinary arrival uses the peer tick budget
+kernel/tests/rpi5/gem_tx/fixture.tkb	gem_fixture_reply	1	protocol	physical-only fixture waits for the host Ethernet peer (10 s); not run under QEMU

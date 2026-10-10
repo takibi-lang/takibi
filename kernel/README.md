@@ -2007,3 +2007,20 @@ exit nonzero and report, respectively, `request authority`, `data authority`,
 `receive authority`, and `disabled driver reused`. Each changes an actual
 maintained branch in the generated overlay. Captures go to
 `$TAKIBI_LANE_ARTIFACT_ROOT/dma-qemu/uart.log` (default `_build/dma-qemu/`).
+
+The on-demand physical GEM branch fixture runs with
+`make kernelcheck-gem-tx-rpi5`. Four isolated images exercise both ready-frame
+and RX-reply entry points with confirmed and unconfirmed halt observations.
+The overlay hides real USED and, for the unconfirmed cases, real TGO
+observations; it preserves the maintained ownership exchanges, wait bound
+and halt body. It never fabricates completion or quiescence. The runner
+checks exactly three physical Ethernet transfers with matching payloads,
+then checks retained Cpu or Device authority and refusal of later sends.
+UART, Ethernet bodies, ELF digests and verdicts are kept under
+`$TAKIBI_LANE_ARTIFACT_ROOT/gem-tx-rpi5/` (default `_build/gem-tx-rpi5/`).
+These controls exercise the actual MAC stop and failure branches on hardware;
+hiding an observation is not a naturally hung MAC or proof of its quiescence
+contract. Ordinary checksum-verified bulk transfers can be measured with
+`KERNEL_RPI5_SHELL_BULK_TCP=1 make kernelcheck-shell-rpi5`.
+`make kernelcheck-gem-tx-api` also requires the real generated Device token to
+reject CPU-buffer access with the expected diagnostic and a nonzero status.

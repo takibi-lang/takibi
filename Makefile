@@ -316,9 +316,10 @@ KERNEL_ASM_ENTRIES := main kernel_secondary_main \
 	kernel_syscall_dispatch kernel_syscall_resume_return \
 	process_image_handle_data_abort
 KERNEL_DEBUGGER_ENTRIES := kernel_process_trace_report page_owner_description
-# The DMA fixture has its own --check-unused-file invocation below and is
+# The DMA and GEM fixtures have their own --check-unused-file invocations and are
 # absent from both production closures.
 KERNEL_UNUSED_EXEMPT := \
+	kernel/tests/rpi5/gem_tx/fixture.tkb \
 	kernel/tests/qemu/invariant_stop/fixture.tkb \
 	kernel/tests/qemu/dma/virtio_blk_fixture.tkb \
 	kernel/boot/fdt.tkb \
@@ -2390,3 +2391,33 @@ kernelbuild-invariant-qemu: build
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) _kernelbuild-invariant-qemu
 kernelcheck-invariant-qemu: kernelbuild-invariant-qemu
 	@bash scripts/run_lane.sh $@ python3 scripts/run_kernel_invariant_qemutest.py $(KERNEL_INVARIANT_ELF)
+
+# Physical GEM failure-branch fixtures preserve the production ownership and
+# halt bodies, hiding only completion/quiescence observations. These images
+# are built with the maintained kernels; their board execution is on demand.
+KERNEL_GEM_TX_MODES := confirmed-ready confirmed-reply unconfirmed-ready unconfirmed-reply
+KERNEL_GEM_TX_SRCS := $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_FDT_TKB) $(KERNEL_RPI5_MAIN_TKB)
+KERNEL_GEM_TX_FLAGS := --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --frame-pointers --forbid-trap --regions $(KERNEL_RAW_CONFINE) --reject-unused-functions --external-entry main --check-unused-file kernel/tests/rpi5/gem_tx/fixture.tkb
+KERNEL_GEM_TX_ELFS := $(foreach mode,$(KERNEL_GEM_TX_MODES),$(KERNEL_BUILD_DIR)/kernel-gem-tx-fixture-$(mode).elf)
+.PHONY: _kernelbuild-gem-tx-rpi5 kernelbuild-gem-tx-rpi5
+$(KERNEL_BUILD_DIR)/gem-tx-fixture-%.o: $(KERNEL_RPI5_MAIN_O) scripts/build_rpi5_gem_tx_fixture.py kernel/tests/rpi5/gem_tx/fixture.tkb Makefile
+	python3 scripts/build_rpi5_gem_tx_fixture.py . _build/rpi5-gem-tx-$* $*
+	cd _build/rpi5-gem-tx-$* && $(abspath $(TAKIBI)) $(KERNEL_GEM_TX_SRCS) $(KERNEL_GEM_TX_FLAGS) --emit-depfile $(abspath $@).d --emit-raw-deref-audit $(abspath $@).rawderef.tsv -o $(abspath $@)
+	python3 scripts/buildcheck_kernel_unused_coverage.py rpi5 $@.d
+	python3 scripts/measure_trusted_base.py --check-raw-deref rpi5 $@.rawderef.tsv $@.d
+$(KERNEL_BUILD_DIR)/kernel-gem-tx-fixture-%.elf: $(KERNEL_BUILD_DIR)/gem-tx-fixture-%.o $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_LINK_LD)
+	$(LLD) -T $(KERNEL_RPI5_LINK_LD) $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $< -o $@
+_kernelbuild-gem-tx-rpi5: $(KERNEL_GEM_TX_ELFS)
+kernelbuild-gem-tx-rpi5: build
+	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) _kernelbuild-gem-tx-rpi5
+_kernelbuild: _kernelbuild-gem-tx-rpi5
+
+.PHONY: kernelcheck-gem-tx-rpi5
+kernelcheck-gem-tx-rpi5: kernelbuild-gem-tx-rpi5
+	@bash scripts/run_lane.sh $@ bash scripts/run_kernel_gem_tx_rpi5.sh
+
+.PHONY: _kernelcheck-gem-tx-api kernelcheck-gem-tx-api
+_kernelcheck-gem-tx-api: _kernelbuild-gem-tx-rpi5
+	python3 scripts/run_gem_tx_api_control.py . _build/rpi5-gem-tx-negative -- $(abspath $(TAKIBI)) $(KERNEL_GEM_TX_SRCS) $(KERNEL_GEM_TX_FLAGS)
+kernelcheck-gem-tx-api: build
+	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) _kernelcheck-gem-tx-api

@@ -1,0 +1,126 @@
+// Physical GEM branch fixture, included only by the test-only source overlay.
+// The maintained driver performs every submission, observation and authority
+// exchange. Masks hide evidence; they never fabricate a completion or halt.
+// This runs in the boot network step before another network client exists.
+use "kernel/lib/execution_model.tkb";
+
+let mut gem_fixture_failed: bool;
+let mut gem_fixture_hide_completion: bool;
+let mut gem_fixture_hide_halt: bool;
+let mut gem_fixture_reply_path: bool;
+let mut gem_fixture_submissions: usize;
+let mut gem_fixture_observed_used: bool;
+let mut gem_fixture_last_tsr: u32;
+
+fn gem_fixture_require(ok: bool, reason: *u8) {
+    if (ok == false) {
+        gem_fixture_failed = true;
+        kernel_boot_log("FAIL gem-tx: ");
+        uart_puts(reason);
+        kernel_boot_log("\n");
+    }
+}
+
+// Inspect and return the real slot token; never recover Device as Cpu here.
+fn gem_fixture_authority(cpu_expected: bool) {
+    let mut is_cpu: bool = false;
+    match gem_tx_take() {
+        GemTxAuthority::Cpu(cpu) => {
+            is_cpu = true;
+            gem_tx_put(GemTxAuthority::Cpu(cpu));
+            kernel_boot_log("gem-tx fixture: authority cpu\n");
+        }
+        GemTxAuthority::Device(device) => {
+            gem_tx_put(GemTxAuthority::Device(device));
+            kernel_boot_log("gem-tx fixture: authority device\n");
+        }
+    }
+    gem_fixture_require(is_cpu == cpu_expected, "stored authority");
+}
+
+// The runner supplies actual Ethernet frames while RX is armed. An RX owner
+// comes only from the maintained descriptor observation and settle path.
+fn gem_fixture_reply(ready_in: sink NetRxCanAcquire, after_halt: bool)
+        -> NetRxCanAcquire !{may_block} {
+    let mut ready = ready_in;
+    let start: i64 = read_cntpct();
+    let deadline: i64 = read_cntfrq() * 10;
+    while (read_cntpct() - start < deadline) {
+        match net_rx_acquire(ready) {
+            NetRxAcquire::None(next) => { ready = next; net_rx_wait(); }
+            NetRxAcquire::Acquired(frame) => {
+                // Halt stops new arrivals. The first retained frame may be
+                // ordinary host traffic; any real RX owner exercises Down.
+                if (after_halt) {
+                    let length = net_rx_len(frame);
+                    return net_rx_send_reply(net_rx_reply_ready(frame, length));
+                }
+                let bytes = net_rx_frame(frame);
+                if (net_rx_len(frame) == 64 && bytes[12] == 0x88 &&
+                        bytes[13] == 0xB5) {
+                    slice_copy(bytes[0..<6], bytes[6..<12]);
+                    slice_copy(bytes[6..<12], OUR_MAC as []const u8);
+                    return net_rx_send_reply(net_rx_reply_ready(frame, 64));
+                }
+                ready = net_rx_release(frame);
+            }
+        }
+    }
+    gem_fixture_require(false, "physical receive deadline");
+    return ready;
+}
+
+fn gem_fixture_run(ready_in: sink NetRxCanAcquire) !{may_block} {
+    static_assert(KERNEL_PREEMPTIBLE == 0);
+    let mut ready = ready_in;
+    let mut packet: [u8; 1514];
+    for index: usize in 0..<1514 { packet[index] = 0; }
+    for index: usize in 0..<6 { packet[index] = 0xFF; }
+    slice_copy(packet[6..<12], OUR_MAC as []const u8);
+    packet[12] = 0x88; packet[13] = 0xB5;
+    for index: usize in 14..<64 { packet[index] = index as u8; }
+
+    kernel_boot_log("gem-tx fixture: physical transfers begin\n");
+    // Both descriptors share one allocation. Complete each before the next
+    // claim; the ready and reply entry points both use this same authority.
+    // A real request establishes that the host link is ready before counting
+    // outbound frames; local GEM link-up alone does not establish that.
+    ready = gem_fixture_reply(ready, false);
+    gem_fixture_authority(true);
+    ready = net_transmit_ready(ready, packet as [u8; 1514..], 64);
+    gem_fixture_authority(true);
+    gem_fixture_require(gem_fixture_submissions == 2 && gem_tx_next == 0,
+                        "both descriptors completed");
+
+    gem_fixture_observed_used = false;
+    gem_fixture_hide_completion = true;
+    kernel_boot_log("gem-tx fixture: absent completion begins\n");
+    if (gem_fixture_reply_path) { ready = gem_fixture_reply(ready, false); }
+    else { ready = net_transmit_ready(ready, packet as [u8; 1514..], 64); }
+    gem_fixture_require(gem_fixture_observed_used,
+                        "a real USED observation was hidden");
+    gem_fixture_require(gem_fixture_submissions == 3 && gem_tx_next == 1,
+                        "one unconfirmed submission");
+    gem_fixture_authority(gem_fixture_hide_halt == false);
+    kernel_boot_log("gem-tx fixture: halt tsr=");
+    uart_put_udec(gem_fixture_last_tsr as usize);
+    kernel_boot_log(" ncr=");
+    let ncr: u32 = gem_read(0x00);
+    uart_put_udec(ncr as usize);
+    kernel_boot_log("\n");
+    gem_fixture_require((ncr & ((1 << 2) | (1 << 3))) == 0,
+                        "physical RX and TX disabled");
+
+    // A host frame received during the unconfirmed wait stays in the armed
+    // RX descriptor. It lets the real reply entry exercise its Down branch
+    // after halt, without minting an RX owner or re-enabling the MAC.
+    ready = net_transmit_ready(ready, packet as [u8; 1514..], 64);
+    ready = gem_fixture_reply(ready, true);
+    gem_fixture_require(gem_fixture_submissions == 3 && gem_tx_next == 1,
+                        "later ready and reply sends were dropped");
+    gem_fixture_authority(gem_fixture_hide_halt == false);
+    net_shutdown(ready);
+    if (gem_fixture_failed == false) {
+        kernel_boot_log("PASS gem-tx: completion, halt ownership, later sends dropped\n");
+    }
+}
