@@ -55,6 +55,35 @@ matched its eight-case expected output. Host verifier controls reject absent
 fresh mode/completion markers, explicit failures, too few or extra frames,
 corrupt payloads and incorrect authority sequences.
 
+## Ordinary checksum-verified bulk transfers
+
+The existing interactive RPi5 shell workload ran with
+`KERNEL_RPI5_SHELL_BULK_TCP=1 make kernelcheck-shell-rpi5` on implementation
+commit 0df4fe69. Both HTTP checks, process snapshots, bulk bodies and the final
+shell prompt passed. Each file had one separately retained warm-up and three
+measured samples. Host wall time includes the request and HTTP headers.
+
+| Body | Bytes | Warm-up seconds | Measured seconds | Median seconds |
+| --- | --- | --- | --- | --- |
+| busybox-extras | 132840 | 0.305331 | 0.171249, 1.111936, 0.113518 | 0.171249 |
+| busybox.static | 1116408 | 0.336541 | 0.380279, 0.260328, 0.349483 | 0.349483 |
+
+Every body matched the local built file by length and SHA-256. Raw timings,
+body identities and the serving ELF digest are recorded in
+[GEM_TX_BULK_2026-10-10.json](GEM_TX_BULK_2026-10-10.json); exact bodies, the
+serving ELF and UART/terminal results are preserved locally under
+`.git/takibi-diagnostics/707/bulk-final/`.
+
+The 2026-10-04 comparison on f8b30c3b used the same shell workload and body
+sizes: disabling the short poll gave large-file samples 13.918919, 13.888157,
+13.767390 seconds; the 200 us poll gave 0.299055, 0.266876, 0.230180 seconds.
+The current large-file median is about 39.7 times faster than that historical
+no-poll median. It retains the observed improvement, while its 0.349483-second
+median is above the earlier 0.266876-second poll median. The small-file
+1.111936-second outlier remains visible, like the earlier 1.106332-second
+outlier. This is a small measured sample across different revisions, not an
+isolated cost estimate for ownership checks or a performance guarantee.
+
 ## Guarantee boundaries
 
 The FixedDmaOwnership model abstracts guarded slot exchanges and the actual

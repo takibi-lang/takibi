@@ -1,9 +1,9 @@
 {
   "date": "2026-10-10",
-  "event": "incremental",
+  "event": "milestone",
   "decision": "measured",
-  "source_sha256": "a7d5125c0cbd8acdbbb7ef9d32dcfccd4fba8a87df7564fb9af91df3b2a7a3d6",
-  "workload": "#637 step A: register blocks and IoHandle (compiler); the QEMU UART through an IoHandle with device_map.tkb as the window mint. Linked kernels compared against origin/main with scripts/space_delta.py.",
+  "source_sha256": "52c1e687286991b375accf90584701ace57a450b980067175d55018dcad88a40",
+  "workload": "GEM TX lifecycle acceptance: both send paths through completed and masked confirmed/unconfirmed halt cases on RPi5; ordinary checksum-verified shell bulk transfers; standard production kernels compared with b1477eab.",
   "evidence": [
     "docs/PROCESS_PIN_SPACE_2026-10-10.md",
     "docs/BOUNDS_CONTRACT_SPACE_2026-10-10.md",
@@ -38,8 +38,10 @@
     "docs/PAGE_META_24_2026-10-08.md",
     "docs/DMA_MINT_FILES_2026-10-08.md",
     "docs/DMA_TRANSMIT_2026-10-08.md",
-    "docs/LITERAL_SLICE_SPACE_2026-10-10.md"
+    "docs/LITERAL_SLICE_SPACE_2026-10-10.md",
+    "docs/GEM_TX_LIFECYCLE_2026-10-10.md",
+    "docs/GEM_TX_BULK_2026-10-10.json"
   ],
-  "assessment": "QEMU: text +360 B, data +8 B (the `uart` handle), BSS and usable_ram_start unchanged. RPi5: unchanged (its UART is not migrated yet).",
-  "next_trigger": "Production runtime metadata extent migration, a stored allocator authority through array/place rules, or another completed kernel feature/stage requires fresh workload measurement. Any change to generated production code, storage or allocation invalidates this reuse."
+  "assessment": "Measured production text/data/BSS and usable_ram_start deltas are zero on both targets. Existing GemTx payload is 1536 B, owner slot 40 B and down flag 1 B; no new pool, retained page or allocation workload. All four physical branch controls retain the correct authority and refuse later sends. Large-file median 0.349483 s retains the historical no-poll improvement, with the spread and cross-revision limits recorded.",
+  "next_trigger": "A fixed DMA payload/owner layout change, a transfer lifetime or completion-wait mechanism change, or the next completed kernel feature/stage requires fresh measurement. Changed allocation workloads also require live occupancy evidence."
 }

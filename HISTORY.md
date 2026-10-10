@@ -1,5 +1,43 @@
 # takibi Engineering History
 
+## 2026-10-10: GEM TX failure paths preserve DMA authority
+
+The old 1000-wakeup cap returned normally without establishing completion,
+so two descriptors could reuse one TX buffer while a device read remained
+unconfirmed. Ordinary successful traffic and bounded native wait tests did
+not exercise that ownership failure. The fixed GemTx allocation and Place
+slot carry Cpu through submission as Device; only observed completion or
+confirmed halt returns Cpu. After either halt outcome the driver drops later
+ready-frame and RX-reply sends for that boot. A failed halt retains Device.
+The failure behavior was settled before implementation; no new language rule
+or public network outcome was introduced for this follow-up.
+
+The existing FixedDmaOwnership model now maps the GEM transitions as well as
+fixed RX. TLC and Apalache checks reject premature CPU authority and reuse
+after halt in faithful negative variants; this is finite abstract evidence.
+The actual generated Device token also fails a CPU-slice API rejection test.
+Four physical overlays preserve the maintained ownership, wait and halt
+bodies, hiding actual completion/quiescence observations rather than
+fabricating success. Both send entry points retain the expected authority
+and refuse later sends; each case has three checked physical Ethernet bodies.
+Actual TSR.TGO and disabled NCR observations corroborate the trusted stop
+contract, not a proof of a faulty device or physical cache coherence.
+
+The fixture starts with a real RX request: local GEM link-up alone did not
+make the initial broadcast a reliable host observation. After halt it uses
+any pending genuine RX owner, because the stopped MAC cannot receive another
+custom test frame. The host verifier keeps raw packet evidence and binds
+it to SWD load, independently of buffered UART delivery time.
+
+Ordinary SHA-256-verified shell bulk transfers retain the short-poll speed
+improvement: 1,116,408-byte samples were 0.380279, 0.260328 and 0.349483 seconds,
+versus the historical no-poll median of 13.888157 seconds. Small-file spread
+remains recorded. Standard linked QEMU/RPi5 text, data, BSS and allocator
+reservation deltas are zero; the controls add no production allocation or
+retained page. A naturally stalled MAC remains a separate soak situation.
+Virtio-net currently waits for TX completion without a bound. Introducing a
+completion bound there requires this authority contract before any early return.
+
 ## 2026-10-10: Literal slices inherit readonly storage
 
 Issue #729 exposed two literal creation paths that still inferred writable

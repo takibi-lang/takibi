@@ -108,7 +108,8 @@ allchecks, faster diagnosis -- and what finishes on its own.
 Done on 2026-10-10: #734's bounded shared order-contract prototype and
 #738's initializer-free CPU authority construction fix; #735's private
 ownership-bearing default construction visibility (option A); #729's readonly
-byte-slice and string-literal slice creation.
+byte-slice and string-literal slice creation; #707's bounded DMA lifecycle
+model, physical halt controls and checksum-verified bulk re-measurement.
 Production #252 allocator migration remains a separate design gate; the
 prototype adds no physical-span mint or stored-authority rule.
 
@@ -117,9 +118,6 @@ Initialization does not prove CPU freshness across preemption.
 1. **Fixed DMA lifecycle, finishing the drivers.** Every stage of one
    transfer in types, leaving one device-semantics declaration per driver
    and the platform bus translation as the only trusted parts.
-   - #707's remaining acceptance: drive the confirmed and unconfirmed halt
-     branches on the board, a bounded submit/complete/halt model, and the
-     throughput re-measurement.
    - #733: wait on GEM's TX completion interrupt without the 200 us poll.
      It starts with a study of the Raspberry Pi OS kernel's macb/RP1
      interrupt handling (maintainer, 2026-10-09), recorded on the issue,
