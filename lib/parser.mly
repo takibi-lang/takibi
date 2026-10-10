@@ -416,6 +416,15 @@ item:
     { ExceptionEntryDef (name, fields, $symbolstartpos) }
   | EXCEPTION_RESTORE name = IDENT LBRACE fields = exc_entry_fields RBRACE
     { ExceptionRestoreDef (name, fields, $symbolstartpos) }
+  | IO STRUCT name = IDENT LBRACE fields = io_fields RBRACE
+    (* GitHub issue #637 stage 3 step A: a register block. *)
+    { match Io_struct_registry.layout fields with
+      | Error msg -> raise (Types.TypeError ($symbolstartpos, msg))
+      | Ok laid_out ->
+          Type_layout.begin_struct name;
+          Type_layout.finish_struct name laid_out false None;
+          Io_struct_registry.mark name;
+          StructDef (name, laid_out, false, None, [], $symbolstartpos) }
   | struct_intro LBRACE struct_fields RBRACE
     { let (name, is_packed, align_opt, is_be) = $1 in
       let fields = List.map (fun (fname, ty, _) ->
@@ -623,6 +632,16 @@ view_static_params:
 
 static_param:
   | name = IDENT COLON sort = static_sort_expr { (name, sort) }
+
+(* `name: type at OFFSET;` -- `at` is spelled as an identifier so that it
+   stays usable as a name everywhere else. *)
+io_fields:
+  | /* empty */ { [] }
+  | f = IDENT COLON t = type_expr at_word = IDENT off = INT SEMI rest = io_fields
+    { if at_word <> "at" then
+        raise (Types.TypeError ($symbolstartpos,
+          "an io struct field is written `name: type at OFFSET;`"));
+      (f, t, narrow_int64 $symbolstartpos "io struct field offset" off) :: rest }
 
 struct_fields:
   | /* empty */ { [] }
@@ -1183,7 +1202,7 @@ base_type_expr:
   | name = IDENT LPAREN args = separated_nonempty_list(COMMA, type_expr) RPAREN
     %prec BRACKET_ELSEWHERE
     { match name, args with
-      | ("RegionHandle" | "RegionPool"), [ t ] ->
+      | ("RegionHandle" | "RegionPool" | "IoHandle"), [ t ] ->
           (* A built-in instance with no static indices (#672). *)
           TypeNamed (mangle_builtin_instance $symbolstartpos name t)
       | _ -> TypeGenericInst (name, args) }

@@ -885,10 +885,38 @@ private fn pool_slots_base(chunk: usize) -> usize !{unsafe} {
 }
 
 
+// GitHub issue #637 stage 3, step A: attaching a device's registers.
+must_use variant IoAttach {
+    Attached;
+    TooSmall;
+}
+
 private fn region_bytes_mint(address: usize, bytes: usize @ n)
         -> region__u8[c, 0, n] {
     let mut r: region__u8[c, 0, n] = { address, bytes };
     return r;
+}
+|}
+
+(* GitHub issue #637 stage 3, step A: one per io struct a program names in
+   IoHandle(T). A window is a byte region minted by the code that read an
+   external description (the DTB, PCI enumeration); attaching it stores a
+   copyable handle on the register block. The handle's address is private
+   to this file; a field access through a handle is a volatile access the
+   compiler lowers. *)
+let io_source = {|
+struct IoHandle__@T@ { private address: usize; }
+
+fn io_handle_attach(handle: *IoHandle__@T@, window: sink region__u8[c, 0, n])
+        -> IoAttach {
+    let address: usize = window.address;
+    let length: usize = window.length;
+    region_discharge(window);
+    if (length < sizeof(@T@) || (address & (alignof(@T@) - 1)) != 0) {
+        return IoAttach::TooSmall;
+    }
+    handle.address = address;
+    return IoAttach::Attached;
 }
 |}
 
@@ -1041,7 +1069,29 @@ let region_bytes_used (prog : Ast.toplevel list) =
       let n = String.length text and m = String.length sub in
       let rec go i = i + m <= n && (String.sub text i m = sub || go (i + 1)) in
       go 0 in
-    contains "region_bytes_assume" || contains "RegionBytes") prog
+    contains "region_bytes_assume" || contains "RegionBytes"
+    || contains "IoHandle__") prog
+
+(* The io structs a program names in IoHandle(T): one io_source each. *)
+let io_types (prog : Ast.toplevel list) =
+  let found = Hashtbl.create 4 in
+  let prefix = "IoHandle__" in
+  List.iter (fun item ->
+    let text = Ast.show_toplevel item in
+    let lp = String.length prefix and n = String.length text in
+    let i = ref 0 in
+    while !i + lp <= n do
+      if String.sub text !i lp = prefix then begin
+        let j = ref (!i + lp) in
+        while !j < n && (match text.[!j] with
+            | 'A'..'Z' | 'a'..'z' | '0'..'9' | '_' -> true | _ -> false) do
+          incr j done;
+        if !j > !i + lp then
+          Hashtbl.replace found (String.sub text (!i + lp) (!j - !i - lp)) ();
+        i := !j
+      end else incr i
+    done) prog;
+  Hashtbl.fold (fun k () acc -> k :: acc) found [] |> List.sort compare
 
 let flag_name array = "__region_claimed__" ^ array
 let lock_name array = "__region_lock__" ^ array
@@ -1127,7 +1177,8 @@ let plan prog : string list =
         | Ast.StructDef (name, _, _, _, _, _) -> Some name
         | _ -> None) prog in
       List.map (fun elem -> instance ~record:(List.mem elem records) elem) elems
-      @ [ common_source ] in
+      @ [ common_source ]
+      @ List.map (fun t -> replace_all ~sub:"@T@" ~by:t io_source) (io_types prog) in
   let flags = String.concat "" (List.map (fun (name, (_, n)) ->
     Printf.sprintf "let mut %s: bool = false;\nlet mut %s: [usize; %d];\n"
       (flag_name name) (meta_name name) (2 * n)) claimed) in

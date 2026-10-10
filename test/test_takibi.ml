@@ -35,6 +35,7 @@ let parse src =
   No_copy_registry.reset ();
   Per_cpu_registry.reset ();
   Guarded_registry.reset ();
+  Io_struct_registry.reset ();
   Hashtbl.reset Generic_variant.proven_empty_puts;
   Dma_fixed_registry.reset ();
   Generic_scope.reset ();
@@ -71,6 +72,7 @@ let infer_files files =
   No_copy_registry.reset ();
   Per_cpu_registry.reset ();
   Guarded_registry.reset ();
+  Io_struct_registry.reset ();
   Hashtbl.reset Generic_variant.proven_empty_puts;
   Dma_fixed_registry.reset ();
   Generic_scope.reset ();
@@ -2405,6 +2407,7 @@ let infer_regions src =
   No_copy_registry.reset ();
   Per_cpu_registry.reset ();
   Guarded_registry.reset ();
+  Io_struct_registry.reset ();
   Hashtbl.reset Generic_variant.proven_empty_puts;
   Dma_fixed_registry.reset ();
   Generic_scope.reset ();
@@ -10221,6 +10224,90 @@ fn f() -> *usize { return &temp_address_outer().r.a; }");
           let g = lk7l(&r7l.mutex);
           return place_take(g, r7l.pin);
         }");
+
+  Alcotest.test_case "io handle: registers are read and written without unsafe" `Quick
+    (fun () -> ignore (infer_regions
+       "io struct Uart7p {
+          dr: u32 at 0x00;
+          fr: u32 at 0x18;
+          icr: u32 at 0x44;
+        }
+        private let mut uart7p: IoHandle(Uart7p);
+        fn attach7p(address: usize, bytes: usize) -> bool !{unsafe} {
+          let RegionBytes::Assumed(window) = region_bytes_assume(address, bytes) else {};
+          match io_handle_attach(&uart7p, window) {
+            IoAttach::TooSmall => { return false; }
+            IoAttach::Attached => { return true; }
+          }
+        }
+        fn tx_full7p() -> bool { return (uart7p.fr & 0x20) != 0; }
+        fn clear7p() { uart7p.icr = 0x7ff; }
+"));
+
+  Alcotest.test_case "io handle: its address is private" `Quick
+    (expect_region_error "private"
+       "io struct Uart7p {
+          dr: u32 at 0x00;
+          fr: u32 at 0x18;
+          icr: u32 at 0x44;
+        }
+        private let mut uart7p: IoHandle(Uart7p);
+        fn attach7p(address: usize, bytes: usize) -> bool !{unsafe} {
+          let RegionBytes::Assumed(window) = region_bytes_assume(address, bytes) else {};
+          match io_handle_attach(&uart7p, window) {
+            IoAttach::TooSmall => { return false; }
+            IoAttach::Attached => { return true; }
+          }
+        }
+        fn peek7p() -> usize { return uart7p.address; }
+");
+
+  Alcotest.test_case "io struct: a register block is not a value" `Quick
+    (expect_region_error "is a register block"
+       "io struct Uart7p {
+          dr: u32 at 0x00;
+          fr: u32 at 0x18;
+          icr: u32 at 0x44;
+        }
+        private let mut uart7p: IoHandle(Uart7p);
+        fn attach7p(address: usize, bytes: usize) -> bool !{unsafe} {
+          let RegionBytes::Assumed(window) = region_bytes_assume(address, bytes) else {};
+          match io_handle_attach(&uart7p, window) {
+            IoAttach::TooSmall => { return false; }
+            IoAttach::Attached => { return true; }
+          }
+        }
+        fn copy7p(r: Uart7p) {}
+");
+
+  Alcotest.test_case "io struct: a misaligned register is refused" `Quick
+    (expect_region_error "is not 4-byte aligned"
+       "io struct Bad7q { a: u32 at 0x0; b: u32 at 0x2; }
+");
+
+  Alcotest.test_case "io struct: overlapping registers are refused" `Quick
+    (expect_region_error "overlaps the field before it"
+       "io struct Bad7r { a: u32 at 0x0; b: u32 at 0x10; c: u32 at 0x10; }
+");
+
+  Alcotest.test_case "io handle: boot code before the device map cannot reach a register" `Quick
+    (expect_region_error "runs before the device map is built"
+       "io struct Uart7p {
+          dr: u32 at 0x00;
+          fr: u32 at 0x18;
+          icr: u32 at 0x44;
+        }
+        private let mut uart7p: IoHandle(Uart7p);
+        fn attach7p(address: usize, bytes: usize) -> bool !{unsafe} {
+          let RegionBytes::Assumed(window) = region_bytes_assume(address, bytes) else {};
+          match io_handle_attach(&uart7p, window) {
+            IoAttach::TooSmall => { return false; }
+            IoAttach::Attached => { return true; }
+          }
+        }
+        fn tx7p(c: u32) { uart7p.dr = c; }
+        fn early7p() !{devices_unmapped} { tx7p(65); }
+");
 
   Alcotest.test_case "place_take rejects a guard for another mutex" `Quick
     (expect_type_error "place_take mutex does not match guard identity"

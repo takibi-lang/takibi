@@ -4439,6 +4439,52 @@ This rule checks local ownership at declared boundaries; it does not infer
 context replacement from arbitrary writes or prove cross-core exclusion.
 It inserts no runtime operand, pin, branch, lock, or counter.
 
+## Register Blocks and Device Handles (GitHub issue #637 stage 3, step A)
+
+A device's registers are declared as an `io struct`, with each register's
+offset written out, and reached only through an `IoHandle`:
+
+```takibi
+io struct Pl011Regs {
+    dr: u32 at 0x00;
+    fr: u32 at 0x18;
+    imsc: u32 at 0x38;
+}
+
+let mut uart: IoHandle(Pl011Regs);
+
+// The one mint, in a device-map file that read the address from an
+// external description (the DTB, PCI enumeration, a platform constant):
+let RegionBytes::Assumed(window) = region_bytes_assume(base, bytes) else {};
+match io_handle_attach(&uart, window) {
+    IoAttach::Attached => {}
+    IoAttach::TooSmall => { ... }       // smaller than the block, or misaligned
+}
+
+// Everywhere else, interrupt handlers included -- no `unsafe`:
+let full: bool = (uart.fr & (1 << 5)) != 0;
+uart.imsc = 0;
+```
+
+- `name: type at OFFSET;` places a register; `at` is a word only in this
+  position. Types are fixed-width integers and arrays of them. A register
+  that is not naturally aligned, or that overlaps the one before it, is
+  refused; gaps are reserved bytes.
+- An `io struct` is never a value: a global, local, parameter or return of
+  that type is refused (a pointer, a reference, `sizeof` and `offsetof`
+  are allowed). Every access to its fields is volatile.
+- `IoHandle(T)` is a copyable handle whose address is private to the
+  built-in. `io_handle_attach(&h, window)` consumes a byte region and
+  stores its address when the region holds `sizeof(T)` bytes at `T`'s
+  alignment. `h.reg` reads and `h.reg = v` writes a register with a
+  volatile access; neither is a raw dereference.
+- Using a register through a handle infers the effect `requires_devices`.
+  A function declared `!{devices_unmapped}` (boot code that runs before the
+  device map is built) cannot reach one, and neither can `!{mmu_off}` code.
+  A handle that is still zero faults at address 0 at run time.
+- Trusted: the code that turns an external description into a window
+  (`region_bytes_assume`) and the description itself.
+
 ## Record-only RegionPool access
 
 For a plain named struct element, `region_slot_record`, `region_pin_record`

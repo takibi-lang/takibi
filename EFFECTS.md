@@ -12,7 +12,9 @@
 | `unsafe` | local explicit + inferred | no | yes | yes | - | - | allowed | allowed |
 | `interrupt` | explicit | yes | no | no | may_block, allocates, logs, exception, mmu_off | may_block, allocates, logs | rejected | allowed |
 | `exception` | explicit | yes | no | no | may_block, allocates, logs, interrupt, mmu_off | may_block, allocates, logs | rejected | forbidden |
-| `mmu_off` | explicit | yes | no | no | interrupt, exception, requires_mmu | requires_mmu | rejected | allowed |
+| `mmu_off` | explicit | yes | no | no | interrupt, exception, requires_mmu | requires_mmu, requires_devices | rejected | allowed |
+| `requires_devices` | inferred | no | yes | yes | - | - | allowed | allowed |
+| `devices_unmapped` | explicit | yes | no | no | requires_devices | requires_devices | rejected | allowed |
 | `noreturn` | trusted extern only | no | no | no | - | - | allowed | allowed |
 
 A bare `!{}` contract forbids the transitive effects: `may_block`, `allocates`, `locks`, `logs`. `locks` propagates and is forbidden by `!{}`, but is intentionally allowed from `interrupt` and `exception` roots.

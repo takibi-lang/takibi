@@ -5240,6 +5240,36 @@ and gen_field_access locals (base_expr : Ast.expr) (fname : string)
              | None -> raise (Error (Printf.sprintf
                  "field access '.%s' on non-struct type" fname)))
       in
+      let io_prefix = "IoHandle__" in
+      let lp = String.length io_prefix in
+      if fname <> "address" && String.length sname > lp
+         && String.sub sname 0 lp = io_prefix
+         && Io_struct_registry.is_io (String.sub sname lp (String.length sname - lp))
+      then begin
+        (* GitHub issue #637 step A: a register reached through an
+           IoHandle -- the handle's private address, then the block's
+           field, volatile. *)
+        let block = String.sub sname lp (String.length sname - lp) in
+        let (hidx, _) = field_info sname "address" in
+        let hllty = Hashtbl.find struct_lltypes sname in
+        let address =
+          if type_of base_v = hllty then
+            build_extractvalue base_v hidx "io.address" builder
+          else
+            build_load (usize_lltype ())
+              (build_in_bounds_gep hllty base_v
+                 [| const_int (i32_type context) 0; const_int (i32_type context) hidx |]
+                 "io.address.ptr" builder)
+              "io.address" builder
+        in
+        let block_ptr = build_inttoptr address (pointer_type context) "io.block" builder in
+        let (idx, field_ty) = field_info block fname in
+        let block_llty = Hashtbl.find struct_lltypes block in
+        let field_ptr = build_in_bounds_gep block_llty block_ptr
+          [| const_int (i32_type context) 0; const_int (i32_type context) idx |]
+          (fname ^ "_reg") builder in
+        FieldPlace (field_ty, Place field_ptr, true)
+      end else
       let (idx, field_ty) = field_info sname fname in
       let llty = Hashtbl.find struct_lltypes sname in
       if type_of base_v = llty then begin
@@ -5251,7 +5281,10 @@ and gen_field_access locals (base_expr : Ast.expr) (fname : string)
           [| const_int (i32_type context) 0; const_int (i32_type context) idx |]
           (fname ^ "_ptr") builder
         in
-        FieldPlace (field_ty, Place field_ptr, through_io)
+        (* An io struct is a register block: every field access is
+           volatile, however the struct was reached (#637 step A). *)
+        FieldPlace (field_ty, Place field_ptr,
+                    through_io || Io_struct_registry.is_io sname)
       end
 
 and field_access_value ~decay access name : Ast.type_expr * llvalue =

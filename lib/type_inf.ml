@@ -2864,6 +2864,20 @@ let place_guard_lock op (guard : Ast.expr) gt =
       (op ^ " requires a linear erased-view guard or an \
        indexed linear struct guard carrying one addr")))
 
+(* GitHub issue #637 step A: an IoHandle__T's fields other than its private
+   address are T's registers. *)
+let io_handle_prefix = "IoHandle__"
+let io_block_behind sname fname =
+  let lp = String.length io_handle_prefix in
+  if fname <> "address" && String.length sname > lp
+     && String.sub sname 0 lp = io_handle_prefix then
+    let block = String.sub sname lp (String.length sname - lp) in
+    if Io_struct_registry.is_io block then Some block else None
+  else None
+
+(* Where a register is reached through a handle: requires_devices. *)
+let io_handle_accesses : (string, unit) Hashtbl.t = Hashtbl.create 16
+
 let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
   match e.desc with
   | IntLit _    -> fresh ()  (* polymorphic: unifies with any integer type via context *)
@@ -5654,6 +5668,12 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
              raise (TypeError (e.loc, Printf.sprintf
                "fixed DMA record '%s' cannot be assigned through a field without CPU authority"
                sname));
+           let (sname, static_args) = match io_block_behind sname fname with
+             | Some block ->
+                 Hashtbl.replace io_handle_accesses (loc_key e.loc) ();
+                 (block, [])
+             | None -> (sname, static_args)
+           in
            let fields = match StringMap.find_opt sname senv with
              | Some (fs, _, _) -> fs
              | None ->
@@ -5929,6 +5949,12 @@ and infer_field_access ?(slice_source = false) ~decay senv eenv tyenv fenv
          gates is stores, which is what the protocol is about. *)
       let via_token = Publish_registry.is_token sname in
       let sname = publish_record_behind sname in
+      (* GitHub issue #637 step A: `h.reg` through an IoHandle is the
+         register of the block behind it, a volatile device access. *)
+      let sname = match io_block_behind sname fname with
+        | Some block -> Hashtbl.replace io_handle_accesses (loc_key loc) (); block
+        | None -> sname
+      in
       if Dma_fixed_registry.is_fixed sname then
         raise (TypeError (loc, Printf.sprintf
           "fixed DMA record '%s' cannot be read through a field without CPU authority"
@@ -7884,6 +7910,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   Hashtbl.reset indexed_struct_params;
   Hashtbl.reset indexed_struct_kinds;
   Hashtbl.reset function_where;
+  Hashtbl.reset io_handle_accesses;
   Hashtbl.reset function_holder;
   List.iter (function
     | Ast.OwnedStructDef (name, kind, params, _, _, _, _, _, _) ->
@@ -8701,7 +8728,21 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeTuple ts -> List.exists linear_inside_container ts
     | _ -> false
   in
+  (* GitHub issue #637 step A: a register block is reached through a
+     handle, a reference or a pointer, never held or passed as a value. *)
+  let rec reject_io_value loc (ty : Ast.type_expr) =
+    match ty with
+    | Ast.TypeNamed s when Io_struct_registry.is_io s ->
+        raise (TypeError (loc, Printf.sprintf
+          "io struct '%s' is a register block: reach it through an \
+           IoHandle(%s), a reference or a pointer, not as a value" s s))
+    | Ast.TypeArray (t, _) | Ast.TypeBorrow t | Ast.TypeBorrowMut t
+    | Ast.TypeSink t -> reject_io_value loc t
+    | Ast.TypeTuple ts -> List.iter (reject_io_value loc) ts
+    | _ -> ()
+  in
   let validate_param_type loc ty =
+    reject_io_value loc ty;
     validate_static_type loc ty;
     match ty with
     | Ast.TypeBorrow (Ast.TypeSingleton ((Ast.TypeRef inner | Ast.TypeRefMut inner), _))
@@ -8786,7 +8827,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             "a singleton value cannot live behind a pointer or inside array/slice storage"));
         validate_complete_type loc false ty
   in
-  let validate_nonparam_type ?(allow_ref=false) loc ty =
+  let validate_nonparam_type ?(allow_ref=false) ?(names_only=false) loc ty =
+    if not names_only then reject_io_value loc ty;
     validate_static_type loc ty;
     if contains_borrow ty then
       raise (TypeError (loc, "borrow/sink is only valid in function parameter types"));
@@ -8880,7 +8922,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
          if type_mentions_view ty then
            raise (TypeError (e.loc,
              "an erased view has no runtime size or layout"));
-         validate_nonparam_type e.loc ty
+         (* Naming a register block's size or layout makes no value. *)
+         validate_nonparam_type ~names_only:true e.loc ty
      | Ast.BinOp (_, a, b) -> validate_expr_types a; validate_expr_types b
      | Ast.Bnot x | Ast.Deref x | Ast.AddrOf x | Ast.FieldGet (x, _)
      | Ast.Unsafe x -> validate_expr_types x
@@ -12892,6 +12935,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     let contains_unsafe = ref false in
     let has_unknown_indirect_call = ref false in
     let rec visit_expr (e : Ast.expr) =
+      if Hashtbl.mem io_handle_accesses (loc_key e.loc) then begin
+        direct_effects := StringSet.add "requires_devices" !direct_effects;
+        direct_effect_origins :=
+          StringMap.add "requires_devices" "an IoHandle register" !direct_effect_origins
+      end;
       match e.desc with
       | Ast.Call (name, args) ->
           List.iter visit_expr args;
@@ -13150,6 +13198,23 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                "exception function '%s' may re-enter an exception root via %s"
                (display_effect_key key) (String.concat " -> " path)))
          | None -> ())
+    end else if List.mem "devices_unmapped" effects then begin
+      let rule = Option.get (Effect_rules.find "devices_unmapped") in
+      List.iter (fun eff -> if StringSet.mem key (closed_effect eff) then begin
+        let path = Option.value
+          (find_effect_path eff StringSet.empty key)
+          ~default:[display_effect_key key] in
+        raise (TypeError (StringMap.find key effect_locs, Printf.sprintf
+          "function '%s' runs before the device map is built but reaches an IoHandle register via %s"
+          (display_effect_key key) (String.concat " -> " path)))
+      end) rule.excludes_reachable;
+      if rule.rejects_unknown_indirect && StringSet.mem key may_reach_unknown then begin
+        let path = Option.value (find_unknown_path StringSet.empty key)
+          ~default:[display_effect_key key; "<indirect call>"] in
+        raise (TypeError (StringMap.find key effect_locs, Printf.sprintf
+          "function '%s' runs before the device map is built but reaches a call with unknown effects via %s"
+          (display_effect_key key) (String.concat " -> " path)))
+      end
     end else if List.mem "mmu_off" effects then begin
       let mmu_off_rule = Option.get (Effect_rules.find "mmu_off") in
       List.iter (fun eff -> if StringSet.mem key (closed_effect eff) then begin

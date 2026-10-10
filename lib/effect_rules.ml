@@ -148,7 +148,19 @@ let rules = [
   { name = "mmu_off"; declaration = Required; declaration_role = true;
     function_pointer = false; propagates = false; effect_free_forbidden = false;
     excludes_declared = ["interrupt"; "exception"; "requires_mmu"];
-    excludes_reachable = ["requires_mmu"];
+    excludes_reachable = ["requires_mmu"; "requires_devices"];
+    rejects_unknown_indirect = true; forbids_reentry = false };
+  (* GitHub issue #637 step A: a register reached through an IoHandle needs
+     the device map built; boot code that runs before it says so and
+     cannot reach one. *)
+  { name = "requires_devices"; declaration = Inferred; declaration_role = false;
+    function_pointer = true; propagates = true; effect_free_forbidden = false;
+    excludes_declared = []; excludes_reachable = [];
+    rejects_unknown_indirect = false; forbids_reentry = false };
+  { name = "devices_unmapped"; declaration = Required; declaration_role = true;
+    function_pointer = false; propagates = false; effect_free_forbidden = false;
+    excludes_declared = ["requires_devices"];
+    excludes_reachable = ["requires_devices"];
     rejects_unknown_indirect = true; forbids_reentry = false };
   { name = "noreturn"; declaration = Trusted_extern; declaration_role = false;
     function_pointer = false; propagates = false; effect_free_forbidden = false;
