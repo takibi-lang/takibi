@@ -24,7 +24,13 @@ fn rpi5_rp1_uart_apply_boot_dtb() -> Rpi5Rp1UartDtbResult !{unsafe} {
                 rpi5_uart_dtb_status = 1;
                 return Rpi5Rp1UartDtbResult::Invalid;
             }
-            rpi5_uart_base = region.base;
+            match rpi5_uart_attach_window(region.base, region.size) {
+                Rpi5Attach::Attached => {}
+                Rpi5Attach::Refused => {
+                    rpi5_uart_dtb_status = 1;
+                    return Rpi5Rp1UartDtbResult::Invalid;
+                }
+            }
             rpi5_uart_dtb_status = 3;
             return Rpi5Rp1UartDtbResult::Verified(region.base);
         }

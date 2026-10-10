@@ -1,0 +1,38 @@
+// The RPi5 device map: the one file that turns an address into a device
+// window (GitHub issue #637 stage 3, step A). The RP1 UART0 window is the
+// address this kernel's own PCIe setup places RP1's BAR at, confirmed
+// against the boot DTB by kernel/platform/rpi5/rp1_dtb.tkb. Drivers receive
+// IoHandles and reach their registers through them.
+
+use "kernel/drivers/serial/pl011.tkb";
+
+// RP1's UART0 behind the outbound window pcie2_rp1_endpoint_setup programs.
+// Reachable only after that setup; nothing uses it earlier.
+const RPI5_RP1_UART0_BASE: usize = 0x1F00030000;
+const RPI5_RP1_UART0_WINDOW_BYTES: usize = 0x1000;
+
+must_use variant Rpi5Attach {
+    Attached;
+    Refused;
+}
+
+// The console's window before the DTB has been checked.
+fn rpi5_uart_attach_bootstrap() !{unsafe} {
+    match rpi5_uart_attach_window(RPI5_RP1_UART0_BASE, RPI5_RP1_UART0_WINDOW_BYTES) {
+        Rpi5Attach::Attached => {}
+        Rpi5Attach::Refused => { kernel_invariant_stop(); }
+    }
+}
+
+// The one mint of the UART's registers: the constant above or a DTB reg
+// entry its reader has already compared with it.
+fn rpi5_uart_attach_window(base: usize, bytes: usize) -> Rpi5Attach !{unsafe} {
+    let RegionBytes::Assumed(window) = region_bytes_assume(base, bytes) else {};
+    match io_handle_attach(&uart, window) {
+        IoAttach::TooSmall => { return Rpi5Attach::Refused; }
+        IoAttach::Attached => {
+            rpi5_uart_base = base;
+            return Rpi5Attach::Attached;
+        }
+    }
+}

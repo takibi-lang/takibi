@@ -444,6 +444,7 @@ KERNEL_UNUSED_CHECKED_RPI5 := \
 	kernel/platform/rpi5/rp1_gem_dtb.tkb \
 	kernel/platform/rpi5/system_timer_dtb.tkb \
 	kernel/platform/rpi5/timer_irq.tkb \
+	kernel/platform/rpi5/device_map.tkb \
 	kernel/platform/rpi5/uart.tkb \
 	kernel/platform/rpi5/usb_provision.tkb \
 	kernel/platform/rpi5/usb_xhci_dtb.tkb \
