@@ -1,9 +1,9 @@
 {
   "date": "2026-10-10",
-  "event": "incremental",
+  "event": "milestone",
   "decision": "measured",
-  "source_sha256": "e7e91084dcd800a7cde6d836e8e191f43ce35859bb97a53512693af56057984d",
-  "workload": "#637 stage 3: confinement counts region_bytes_assume calls; fd_table and process_image join the mint list. Linked kernels compared against origin/main.",
+  "source_sha256": "b5c66aa185282e04d94c02def0ad85fc2b8bb30da2a039b0ffd4c429e1feeb69",
+  "workload": "Virtio-net synchronous TX completion, both scratch sends and in-place RX replies: elapsed expiry, retained queues, blocked later writes and late RX refusal through native real-driver fixtures; ordinary QEMU networking integration.",
   "evidence": [
     "docs/PROCESS_PIN_SPACE_2026-10-10.md",
     "docs/BOUNDS_CONTRACT_SPACE_2026-10-10.md",
@@ -42,8 +42,10 @@
     "docs/GEM_TX_LIFECYCLE_2026-10-10.md",
     "docs/GEM_TX_BULK_2026-10-10.json",
     "docs/GEM_TX_IRQ_2026-10-10.md",
-    "docs/GEM_TX_IRQ_BULK_2026-10-10.json"
+    "docs/GEM_TX_IRQ_BULK_2026-10-10.json",
+    "docs/VIRTIO_NET_TX_2026-10-10.md",
+    "docs/VIRTIO_NET_TX_SPACE_2026-10-10.json"
   ],
-  "assessment": "QEMU and RPi5 text, data, BSS and usable_ram_start unchanged; no data/BSS symbol changed size. The change adds a compile-time diagnostic only.",
-  "next_trigger": "Production runtime metadata extent migration, a stored allocator authority through array/place rules, or another completed kernel feature/stage requires fresh workload measurement. Any change to generated production code, storage or allocation invalidates this reuse."
+  "assessment": "Fresh baseline at 4e88fd5f and rebuilt final 1 s candidate: QEMU text +312 B, initialized data +8 B (one disabled flag plus section padding), BSS and usable RAM unchanged. RPi5 linked sizes unchanged. Existing queue and payload capacities do not change; timeout retains already reserved storage, with no new allocation, pool or reserved page. Native mutation controls check the driver retention paths, not physical DMA/cache semantics.",
+  "next_trigger": "Fixed virtio-net DMA owners, queue/buffer capacity changes, device reset/recovery or another completed kernel feature/stage requires fresh workload measurement."
 }
