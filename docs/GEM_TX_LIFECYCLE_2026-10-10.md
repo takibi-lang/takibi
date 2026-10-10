@@ -9,17 +9,22 @@ in the owner slot; either halt outcome stops later sends for that boot.
 
 ## Linked production space
 
-Measured on 2026-10-10 with `python3 scripts/space_delta.py b1477eab`.
+Re-measured after integration on 2026-10-10 with
+`python3 scripts/space_delta.py 31e28e2e`.
 The baseline and candidate are the standard production kernels, not the
 isolated test images. The model, test-only overlays and runner add no
 production storage or allocation workload.
 
 | Bytes or address | QEMU baseline | QEMU candidate | RPi5 baseline | RPi5 candidate |
 | --- | --- | --- | --- | --- |
-| text | 727152 | 727152 | 739392 | 739392 |
-| data | 5400 | 5400 | 2889208 | 2889208 |
+| text | 727512 | 727512 | 739392 | 739392 |
+| data | 5408 | 5408 | 2889208 | 2889208 |
 | BSS | 1658432 | 1658432 | 1697344 | 1697344 |
 | usable_ram_start | 0x40248000 | 0x40248000 | 0x718000 | 0x718000 |
+
+The earlier b1477eab comparison also had zero deltas. The integrated QEMU
+UART uses upstream IoHandle code (text +360 bytes, data +8 bytes against
+that earlier baseline); the paired comparison includes it on both sides.
 
 No data/BSS symbol changes size. Production image and allocator reservation
 boundaries do not move. `llvm-nm-19 -S` confirms the existing RPi5 GemTx payload
@@ -83,6 +88,21 @@ median is above the earlier 0.266876-second poll median. The small-file
 1.111936-second outlier remains visible, like the earlier 1.106332-second
 outlier. This is a small measured sample across different revisions, not an
 isolated cost estimate for ownership checks or a performance guarantee.
+
+## Integration check after rebase
+
+After integration with 31e28e2e, allbuild passed again. All four physical
+fixture images and the bulk shell image have byte-identical `.text` and
+`.rodata` to the archived tested images. The only changed initialized-data
+symbol is `usb_provision_image`, rebuilt with the embedded filesystem;
+all other initialized bytes, including GEM authority storage, are identical.
+The two measured BusyBox files retain their recorded SHA-256 values.
+This justifies retaining the earlier branch and throughput observations;
+it does not claim identical whole ELFs or a new branch hardware run.
+The publication gate still requires clean allcheck, including ordinary
+RPi5 integration, on the rebased source tree. Section comparisons and
+rebuilt image identities are preserved locally in
+`.git/takibi-diagnostics/707/rebase-image-identity.json`.
 
 ## Guarantee boundaries
 

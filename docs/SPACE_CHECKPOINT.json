@@ -2,8 +2,8 @@
   "date": "2026-10-10",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "52c1e687286991b375accf90584701ace57a450b980067175d55018dcad88a40",
-  "workload": "GEM TX lifecycle acceptance: both send paths through completed and masked confirmed/unconfirmed halt cases on RPi5; ordinary checksum-verified shell bulk transfers; standard production kernels compared with b1477eab.",
+  "source_sha256": "d49c9d86e90d389b0d87cefedc6a7425b10a78496a02e370d15a95ea213b220d",
+  "workload": "GEM TX lifecycle acceptance: both send paths through completed and masked confirmed/unconfirmed halt cases on RPi5; ordinary checksum-verified shell bulk transfers; standard production kernels compared with integrated origin/main 31e28e2e.",
   "evidence": [
     "docs/PROCESS_PIN_SPACE_2026-10-10.md",
     "docs/BOUNDS_CONTRACT_SPACE_2026-10-10.md",
