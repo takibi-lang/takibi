@@ -2,27 +2,27 @@
 
 Workload: the completed compiler prototype, both normal linked production
 kernels, and `linux_user/runtime_bounds`'s dynamic split/borrow/access and
-stored-slot round trip. Baseline is main `132a74ec`; candidate is the shared
+stored-slot round trip. Baseline is main `e8a9989d`; candidate is the shared
 order graph, proof consumption and conservative alias repair. Kernel source,
 production storage, allocation workloads and image contents are unchanged.
 This is a measured milestone, not an incremental reuse of image evidence.
 
 ## Production linked images
 
-Command: `python3 scripts/space_delta.py 132a74ec`. The script builds both
+Command: `python3 scripts/space_delta.py e8a9989d`. The script builds both
 candidate kernels and the baseline in an isolated worktree, then compares
 `llvm-size-19`, every data/BSS symbol size and `usable_ram_start`.
 
 | Boundary | QEMU baseline | QEMU candidate | RPi5 baseline | RPi5 candidate |
 | --- | ---: | ---: | ---: | ---: |
-| text bytes | 726920 | 726920 | 739608 | 739608 |
+| text bytes | 727664 | 727664 | 740368 | 740368 |
 | data bytes | 5400 | 5400 | 2889208 | 2889208 |
 | BSS bytes | 1658432 | 1658432 | 1697344 | 1697344 |
 | usable_ram_start | 0x40248000 | 0x40248000 | 0x718000 | 0x718000 |
 
 No data/BSS symbol changed size. Text/data/BSS and the image reservation
 boundary each have zero delta on both targets. The local complete comparison
-is `.git/takibi-diagnostics/734/space-delta.log`; the table above is the
+is `.git/takibi-diagnostics/734/space-delta-rebased.log`; the table above is the
 tracked evidence. There is no hardware timing or cache-coherence claim.
 
 This compiler change alters which programs can prove a bound, not the

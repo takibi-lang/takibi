@@ -105,21 +105,17 @@ where acceptance is settled; leave design investigations and unmet
 implementation gates parked. Prefer what A consumes at once -- fewer red
 allchecks, faster diagnosis -- and what finishes on its own.
 
-1. **Approved joint bounds-contract prototype:** #734, before #252's
-   allocator migration. Use one arithmetic contract mechanism for runtime
-   metadata extents and #200's Region-independent slice-length relations;
-   test #216's cross-call index and wrong-pool boundary. Compose with A's
-   Region/Place/mint route, without a parallel ownership model. General
-   runtime-refinement syntax, external solvers and production allocator
-   migration are outside this unit. The maintainer selected this as B's
-   next bounded design and prototype on 2026-10-09.
-2. **Soundness holes in existing contracts:** #738 (uninitialized locals
+Done on 2026-10-10: #734's bounded shared order-contract prototype.
+Production #252 allocator migration remains a separate design gate; the
+prototype adds no physical-span mint or stored-authority rule.
+
+1. **Soundness holes in existing contracts:** #738 (uninitialized locals
    forge CPU authority, including by-value aggregate construction), #735
    (uninitialized locals forge opaque affine frame handles; evaluate the
    general construction rule with A's mint route), then #729 (readonly
    byte-slice and string-literal slices). Coordinate #738 with A's #704
    and preemption preparation; initialization does not prove CPU freshness.
-3. **Fixed DMA lifecycle, finishing the drivers.** Every stage of one
+2. **Fixed DMA lifecycle, finishing the drivers.** Every stage of one
    transfer in types, leaving one device-semantics declaration per driver
    and the platform bus translation as the only trusted parts.
    - #707's remaining acceptance: drive the confirmed and unconfirmed halt
@@ -132,26 +128,26 @@ allchecks, faster diagnosis -- and what finishes on its own.
    - #736 (virtio-net TX completion wait bound; follow #707's shape).
    - #720 (session-long xHCI rings and contexts, on `Place`), #625 (cache
      visibility across DMA ownership handoffs, bounded model).
-4. **Landing faster:** #737 (stop on quick gates before long allcheck
+3. **Landing faster:** #737 (stop on quick gates before long allcheck
    lanes).
-5. **Other compiler and language work, respecting design gates:** #608
+4. **Other compiler and language work, respecting design gates:** #608
    (checked integer-to-enum conversion), #709 and #710
    (generation exhaustion of region tables and the intrusive pool), #203
    (no uninitialized kernel bytes copied to userspace; builds on bounded
    syscall copy outcomes),
    #732's later slices (static parameters on generic variants, implicit
    statics inside a type argument).
-6. **Time measurement, then the optimizations waiting on it** (maintainer,
+5. **Time measurement, then the optimizations waiting on it** (maintainer,
    2026-10-08: space and time are both kept): #497, then #502; then #520
    (TCP throughput), #680, #681, #682 (region_pool lock-free validation,
    false sharing, pinless single-user pools), #711, #718, #386; #719 (every
    QEMU lane on four vCPUs).
-7. **Evaluations awaiting a maintainer decision:** #687 (typed terminal
+6. **Evaluations awaiting a maintainer decision:** #687 (typed terminal
    mode leases), #648.
-8. **Compiler and language research, independent of the ownership
+7. **Compiler and language research, independent of the ownership
    checker:** #201, #282, #129, #417, #155, #28, #8.
-9. **Toolchain and portability:** #123, #124, #122, #95, #51, #50, #85.
-10. **Deferred or not a scheduled work item:** #220 (telnet; waits on PTY
+8. **Toolchain and portability:** #123, #124, #122, #95, #51, #50, #85.
+9. **Deferred or not a scheduled work item:** #220 (telnet; waits on PTY
    and `pselect6` scoping), #555, #250, #444, #429, #149, #567, #539, #536,
    #698 (ext2 metadata exhaustion as ENOSPC), #374 (physically contiguous
    memory; waits for a dynamic DMA allocation); #13 for `Phi`, with #216

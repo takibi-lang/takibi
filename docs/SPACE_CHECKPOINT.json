@@ -1,10 +1,11 @@
 {
   "date": "2026-10-10",
-  "event": "incremental",
+  "event": "milestone",
   "decision": "measured",
-  "source_sha256": "16bdbcb8d202e3c2868fb4510e120999e90cdf8c6ca8e60e113cf32bb0e8f06f",
-  "workload": "#131 slice 3, kind I: proven-empty place_put (compiler) and the six spare-stack-run puts in process.tkb lose their impossible arms. Linked kernels compared against e8a9989d with scripts/space_delta.py.",
+  "source_sha256": "cd181ac47e8e8beb8bb7adc56949ead6b1ac7e109285474e0da3624f5c2bfdd6",
+  "workload": "Completed shared bounded order-contract compiler prototype, normal QEMU and RPi5 linked kernels against e8a9989d, and native dynamic metadata/slice/RegionSlot-Place round trip.",
   "evidence": [
+    "docs/BOUNDS_CONTRACT_SPACE_2026-10-10.md",
     "docs/PROCESS_STATE_PAYLOAD_SPACE_2026-10-10.md",
     "docs/GEM_TX_FIXED_SPACE_2026-10-09.md",
     "docs/PER_CPU_STORAGE_SPACE_2026-10-09.md",
@@ -37,6 +38,6 @@
     "docs/DMA_MINT_FILES_2026-10-08.md",
     "docs/DMA_TRANSMIT_2026-10-08.md"
   ],
-  "assessment": "Linked text -144 B (QEMU) / -96 B (RPi5): the removed arms freed a run on a path the proof excludes. Data, BSS and usable_ram_start unchanged; no allocation change.",
-  "next_trigger": "A retained crash-layout or production allocation change, or completion of another kernel feature/stage (next: #131 slice 3's static fullness within one guard)."
+  "assessment": "Measured zero text/data/BSS, data/BSS symbol-size and usable_ram_start delta on both production targets. Native layouts: metadata 24 B, Region 16 B, RegionSlot 8 B, Place(slot) 16 B. Arithmetic relation storage is erased. Production allocator, lifetimes and occupancy workloads are unchanged; existing occupancy evidence remains at its original strength.",
+  "next_trigger": "Production runtime metadata extent migration or stored allocator authority through array/place rules; measure bootstrap replacement and live allocation occupancy then. A compiler change altering production image size also triggers measurement."
 }
