@@ -23208,8 +23208,8 @@ let infer_production_stop_boundary ?(clock = false)
 (* Use production declarations/bodies and a separate consumer filename: private
    construction and ownership rejection must not depend on duplicated fixtures. *)
 let production_peer_clock_tests =
-  let bad name fragment code = Alcotest.test_case name `Quick (fun () ->
-    match infer_production_stop_boundary ~clock:true ~consumer_file:"clock_consumer.tkb" code with
+  let bad ?(consumer_file = "clock_consumer.tkb") name fragment code = Alcotest.test_case name `Quick (fun () ->
+    match infer_production_stop_boundary ~clock:true ~consumer_file code with
     | _ -> Alcotest.fail "production clock/resume API accepted an invalid consumer"
     | exception Types.TypeError (_, message) ->
         Alcotest.(check bool) "specific clock rejection" true
@@ -23267,10 +23267,14 @@ let production_peer_clock_tests =
       fn peer_zero(ticket: sink WorldResumeTick[&machine, 0]) { world_resume_tick_cancel(ticket); }
       fn probe() { let stopped = mint(&machine);
         let ticket = world_stop_release_for_tick(stopped, &machine, 1); peer_zero(ticket); }|};
-    bad "window cannot be default minted" "initialized" {|
+    (* Check the stronger linear initialization rule inside each mint file;
+       external defaults are also rejected by construction visibility. *)
+    bad ~consumer_file:"kernel/lib/peer_tick_window.tkb"
+      "window cannot be default minted" "initialized" {|
       fn probe() -> bool { let mut window: PeerTickWindow[1];
         return peer_tick_window_open(window); }|};
-    bad "resume ticket cannot be default minted" "initialized" {|
+    bad ~consumer_file:"kernel/lib/occupancy.tkb"
+      "resume ticket cannot be default minted" "initialized" {|
       fn probe() { let mut ticket: WorldResumeTick[&machine, 1];
         world_resume_tick_cancel(ticket); }|};
   ]
@@ -23962,7 +23966,85 @@ let cpu_authority_initialization_tests =
       }"));
   ]
 
+(* Default construction must obey the existing private ownership boundary. *)
+let private_default_construction_tests =
+  let api = "affine struct Frame735[p: usize] { private sp: usize; }
+    fn use735(frame: borrow Frame735[p]) {}
+    fn mint735(sp: usize, generation: usize @ p) -> Frame735[p] {
+      let mut frame: Frame735[p] = { sp }; return frame;
+    }
+    struct Ordinary735 { private value: usize; }
+    private affine opaque struct Handle735;
+    fn handle_use735(h: borrow *Handle735) {}
+    struct Holder735 { private handle: *Handle735; }
+    private affine view Evidence735;
+    variant Maybe735 { Empty; Full(exists p: usize. Frame735[p]); }" in
+  let bad title body = Alcotest.test_case title `Quick
+      (expect_type_error_files "cannot default-construct private ownership-bearing type"
+        ["mint735.tkb", api; "consumer735.tkb", body]) in
+  let ok title body = Alcotest.test_case title `Quick (fun () ->
+    ignore (infer_files ["mint735.tkb", api; "consumer735.tkb", body])) in
+  [
+    bad "external frame declaration" "fn bad735(g: usize @ p) {
+      let mut frame: Frame735[p]; use735(frame);
+    }";
+    bad "tuple laundering" "fn bad735(g: usize @ p) {
+      let mut pair: (usize, Frame735[p]);
+    }";
+    bad "inferred frame" "fn bad735() { let mut frame; use735(frame); }";
+    bad "generic producer laundering" "fn default735(T: type, value: borrow T) -> T {
+      let mut forged: T; return forged;
+    }
+    fn bad735() {
+      let mut frame: Frame735[3] = mint735(1, 3);
+      let forged = default735(frame); use735(forged);
+    }";
+    bad "nested unsafe declaration" "fn bad735(g: usize @ p) !{unsafe} {
+      unsafe { { let mut frame: Frame735[p]; } }
+    }";
+    bad "shadowing keeps declaration identity" "fn bad735(g: usize @ p) {
+      { let mut frame: Frame735[p]; } let mut frame: usize;
+    }";
+    bad "variant laundering" "fn bad735() { let mut saved: Maybe735; }";
+    bad "private opaque owning handle" "fn bad735() {
+      let mut handle: *Handle735; handle_use735(handle);
+    }";
+    bad "array of private owning handles" "fn bad735() { let mut handles: [*Handle735; 2]; }";
+    bad "enclosing ordinary aggregate" "fn bad735() { let mut holder: Holder735; }";
+    bad "global private owning handle" "private let mut saved735: *Handle735;";
+    bad "global enclosing aggregate" "private let mut saved735: Holder735;";
+    bad "private erased evidence" "fn bad735() { let mut evidence: Evidence735; }";
+    ok "ordinary private storage stays legal" "private let mut storage735: Ordinary735;
+      fn good735() { let mut local: Ordinary735; let mut pointer: *Ordinary735; }
+    ";
+    ok "initialized foreign frame may be borrowed or dropped" "fn good735() {
+      let frame = mint735(1, 3); use735(frame);
+    }";
+    ok "empty variant is explicit construction" "fn good735() { let saved = Maybe735::Empty; }";
+    Alcotest.test_case "same-file defaults remain trusted" `Quick
+      (expect_ok (api ^ "fn local735(g: usize @ p) { let mut frame: Frame735[p]; }
+        private let mut holder735: Holder735;"));
+    Alcotest.test_case "initialized frame keeps one-word codegen and weakening" `Quick
+      (expect_trap_sites 0 (api ^ "fn good735() -> usize {
+        static_assert(sizeof(Frame735[3]) == sizeof(usize));
+        let frame = mint735(7, 3); use735(frame); return 7;
+      }"));
+    Alcotest.test_case "existing array storage prohibition stays intact" `Quick
+      (expect_type_error_files "an indexed owner cannot live"
+        ["mint735.tkb", api;
+         "consumer735.tkb", "fn bad735(g: usize @ p) { let mut frames: [Frame735[p]; 2]; }"]);
+    Alcotest.test_case "existing enclosing owner prohibition stays intact" `Quick
+      (expect_type_error_files "cannot hold a nested indexed owner"
+        ["mint735.tkb", api;
+         "consumer735.tkb", "affine struct Outer735[p: usize] { frame: Frame735[p]; }"]);
+    Alcotest.test_case "existing private literal prohibition stays intact" `Quick
+      (expect_type_error_files "outside 'mint735.tkb'"
+        ["mint735.tkb", api;
+         "consumer735.tkb", "fn bad735() { let mut frame: Frame735[3] = { 1 }; }"]);
+  ]
+
 let named_groups_unisolated = [
+  "private-default-construction", private_default_construction_tests;
   "cpu-authority-initialization", cpu_authority_initialization_tests;
   "runtime-bounds", runtime_bounds_tests;
   "core",     core_tests;

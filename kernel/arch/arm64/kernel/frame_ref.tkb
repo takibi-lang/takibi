@@ -26,9 +26,10 @@
 //   takes the owner of the record whose saved_sp it reads.
 // - The accessors do not check the address: a FrameRef that names memory that
 //   is not a live frame reads and writes that memory.
-// - Private affine fields do not prohibit default initialization. The source
-//   gate refuses direct default FrameRef declarations in kernel code; it does
-//   not prove arbitrary aggregate initialization or validate a mint's address.
+// - Construction in this mint file remains trusted. The compiler rejects
+//   external default construction, including tuple/generic laundering; the
+//   source gate additionally refuses direct default FrameRef declarations here.
+//   Neither boundary validates the address supplied to a mint.
 
 affine struct FrameRef[process: usize] { private sp: usize; }
 

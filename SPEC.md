@@ -845,7 +845,19 @@ allowing deliberate abandonment.
   an explicit API marker for terminal intent; for linear values it also
   exempts the callee from forwarding the received obligation.
 - **Weakening**: affine locals and plain affine parameters may leave scope
-  unused. An uninitialized affine local is legal. Assigning over a live
+  unused. An initializer-free affine declaration obeys construction visibility:
+  outside its defining file it cannot construct a private ownership-bearing
+  representation. This includes indexed owners with private fields, private
+  affine/linear opaque handles and private erased views, and values containing
+  them by value (including tuples and variant payloads). The checker uses final
+  inferred binding types after generic substitution, with distinct identities
+  for shadowed declarations. Unsafe does not bypass this boundary.
+  Zero-initialized globals construct only a variant's first case; an empty
+  Place field therefore does not construct its absent payload. Ordinary private
+  structs, ordinary indirection and permitted same-file defaults remain legal.
+  Affine values obtained from constructors may still be dropped. This checks
+  construction visibility, not initialized contents or the validity/liveness of
+  an address supplied by a mint. Assigning over a live
   affine value drops it; assigning to a binding whose prior value was moved
   reinitializes that binding. None of these permissions allow a moved value
   to be read or moved again.

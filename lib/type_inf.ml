@@ -2147,6 +2147,54 @@ let contains_cpu_authority_value_ty (senv : senv) ty =
   in
   contains StringSet.empty ty
 
+(* Default construction observes the existing private ownership boundary.
+   Locals have undefined bytes; zeroed globals select variant case zero.
+   Ordinary indirection constructs no pointee, but an opaque owning handle
+   is itself a permission value. No initialization/liveness claim is made. *)
+let check_private_default_construction ~zeroed (senv : senv) loc ty =
+  let check table name = match Hashtbl.find_opt table name with
+    | Some file when file <> Ast.source_file_of_loc loc ->
+        raise (TypeError (loc, Printf.sprintf
+          "cannot default-construct private ownership-bearing type '%s' \
+           outside its declaring file '%s'; use that file's constructor" name file))
+    | _ -> () in
+  let owned_opaque name = StringSet.mem name !affine_opaque_names
+                         || StringSet.mem name !linear_opaque_names in
+  let rec walk seen ty =
+    let ty = repr ty in
+    if not (List.mem ty seen) then begin
+      let seen = ty :: seen in
+      match ty with
+      | TIndexedStruct (name, _) | TStruct name ->
+          (match Hashtbl.find_opt indexed_struct_kinds name with
+           | Some (Ast.KindAffine | Ast.KindLinear) -> check private_struct_lit name
+           | _ -> ());
+          (match StringMap.find_opt name senv with
+           | Some (fields, _, _) -> List.iter (fun (_, ty) -> walk seen (of_ast ty)) fields
+           | None -> ())
+      | TPtr inner | TAlignedPtr (_, inner) | TRefMut inner ->
+          (match strip_singleton inner with
+           | TStruct name when owned_opaque name -> check private_opaque_types name
+           | _ -> ())
+      | TView (name, _) ->
+          (match Hashtbl.find_opt view_kinds name with
+           | Some (Ast.KindAffine | Ast.KindLinear) -> check private_views name
+           | _ -> ())
+      | TVariant (name, _, targs) ->
+          (match Hashtbl.find_opt variant_defs name with
+           | Some cases ->
+               let cases = if zeroed then List.filteri (fun i _ -> i = 0) cases else cases in
+               with_variant_type_args name targs (fun () ->
+                 List.iter (fun (_, payload) -> Option.iter
+                   (fun ty -> walk seen (of_ast ty)) payload) cases)
+           | None -> ())
+      | TArray (ty, _) | TIo ty | TSingleton (ty, _) | TExists (_, _, _, ty) -> walk seen ty
+      | TTuple ts -> List.iter (walk seen) ts
+      | _ -> ()
+    end
+  in
+  walk [] ty
+
 let check_private_type_construction (loc : Ast.loc) (target : Ast.type_expr) =
   let rec walk = function
     | Ast.TypeNamed n ->
@@ -7225,11 +7273,12 @@ let check_undetermined_lets (fdef : Ast.func) (raw_locals : ty StringMap.t) =
   in
   List.iter go_stmt fdef.body
 
-(* An initializer-free local allocates bytes; it cannot establish the
-   existing CPU authority's mint contract. Inspect final binding types so
-   later inference, generic substitution and shadowing cannot hide it.
-   Pointer/slice/function values do not construct their pointees/results. *)
-let check_cpu_authority_initialization (senv : senv) (fdef : Ast.func) =
+(* An initializer-free local allocates bytes; it cannot establish a CPU
+   authority's mint contract or bypass private ownership construction.
+   Inspect final binding types so later inference, generic substitution and
+   shadowing cannot hide it. Ordinary pointers/slices/functions construct no
+   pointees/results; an opaque owning handle itself carries authority. *)
+let check_default_initialization (senv : senv) (fdef : Ast.func) =
   let rec arms xs = List.iter (function
     | Ast.ArmVariant (_, _, _, body) | Ast.ArmWild body
     | Ast.ArmIntLit (_, body) | Ast.ArmByteSliceLit (_, body) ->
@@ -7241,11 +7290,13 @@ let check_cpu_authority_initialization (senv : senv) (fdef : Ast.func) =
              (match Local_bindings.ids_for_stmt bindings s with
               | id :: _ ->
                   (match Hashtbl.find_opt active_binding_types id with
-                   | Some ty when contains_cpu_authority_value_ty senv ty ->
-                       raise (TypeError (s.loc,
-                         "a local containing CPU authority requires an initializer; \
-                          uninitialized storage cannot mint CPU authority"))
-                   | _ -> ())
+                   | Some ty ->
+                       if contains_cpu_authority_value_ty senv ty then
+                         raise (TypeError (s.loc,
+                           "a local containing CPU authority requires an initializer; \
+                            uninitialized storage cannot mint CPU authority"));
+                       check_private_default_construction ~zeroed:false senv s.loc ty
+                   | None -> ())
               | [] -> ())
          | None -> ())
     | Ast.Block body | Ast.UnsafeBlock body | Ast.While (_, body)
@@ -7366,7 +7417,7 @@ let infer_func ~key senv eenv fenv genv (fdef : Ast.func) : func_info =
       (infer_top_level_stmt_resilient senv eenv fenv ret_ty)
       (init_env, StringMap.empty) fdef.body
     in
-    check_cpu_authority_initialization senv fdef;
+    check_default_initialization senv fdef;
     check_undetermined_lets fdef raw_locals;
     List.iter (fun site ->
       if site.overflow_lhs_facts = None then
@@ -9752,13 +9803,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         let (ty, _) = StringMap.find name genv in
         let _et = check_expr senv eenv genv fenv expr (strip_io ty) in
         genv
-    | Ast.LetDef (name, _, expr_opt, _, is_mutable, _, _) ->
+    | Ast.LetDef (name, _, expr_opt, _, is_mutable, _, loc) ->
         let (ty, _) = StringMap.find name genv in
         (match expr_opt with
          | None ->
              if not is_mutable then
                raise (TypeError (Lexing.dummy_pos,
                  Printf.sprintf "immutable global '%s' must have an initializer; use 'let mut' for uninitialized globals" name));
+             check_private_default_construction ~zeroed:true senv loc ty;
              genv
          | Some { desc = Ast.StructLit exprs; loc } ->
              (match repr ty with

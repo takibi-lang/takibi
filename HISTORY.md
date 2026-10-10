@@ -1,5 +1,35 @@
 # takibi Engineering History
 
+## 2026-10-10: Default construction respects private ownership
+
+Issue #735 reproduced an external initializer-free FrameRef declaration,
+including tuple and concrete generic-return laundering. Private literal and
+cast checks never examined this declaration path. Local bytes are undefined,
+not an initialized handle; a direct source gate covered only the observed
+spelling and deliberately could not cover inferred or aggregate types.
+
+The maintainer selected option A: reuse private construction visibility for
+ownership-bearing defaults, preserving same-file trust and affine weakening.
+No explicit no-default annotation or separate ownership model was added.
+The checker examines final local binding types by identity, and zeroed globals
+by the value actually constructed. Products, variant payloads, private erased
+views and opaque owning handles are covered; ordinary indirection constructs
+no pointee. A zeroed variant constructs only its first case, so an empty Place
+does not mint its absent payload. Ordinary private storage stays legal.
+
+Thirteen multi-file negative controls accepted by the old compiler now fail;
+positive controls preserve initialized mints, dropping affine values, same-file
+defaults and the one-word FrameRef representation. Existing array/nested-owner
+storage and private literal rejections remain intact. Production linear clock
+defaults are also tested inside their mint files, independently of privacy.
+Independent CLI controls require both a nonzero exit and the new diagnostic
+for direct, tuple and generic-return construction. This is a static exclusion,
+including unsafe, with no new trusted escape or runtime witness. Existing
+multi-file tests and CLI diagnostics supplied sufficient debugging evidence.
+Mint-file defaults and the validity/liveness of minted addresses remain trusted;
+an explicit construction contract can be added later if a concrete mint-file
+defect needs it. The direct FrameRef source gate still guards that mint file.
+
 ## 2026-10-10: CPU authority cannot be minted by uninitialized locals
 
 Issue #738 reproduced a two-file consumer declaring an uninitialized CpuHere

@@ -106,13 +106,12 @@ implementation gates parked. Prefer what A consumes at once -- fewer red
 allchecks, faster diagnosis -- and what finishes on its own.
 
 Done on 2026-10-10: #734's bounded shared order-contract prototype and
-#738's initializer-free CPU authority construction fix.
+#738's initializer-free CPU authority construction fix; #735's private
+ownership-bearing default construction visibility (option A).
 Production #252 allocator migration remains a separate design gate; the
 prototype adds no physical-span mint or stored-authority rule.
 
-1. **Soundness holes in existing contracts:** #735
-   (uninitialized locals forge opaque affine frame handles; evaluate the
-   general construction rule with A's mint route), then #729 (readonly
+1. **Soundness holes in existing contracts:** #729 (readonly
    byte-slice and string-literal slices). Initialization does not prove
    CPU freshness across preemption.
 2. **Fixed DMA lifecycle, finishing the drivers.** Every stage of one
