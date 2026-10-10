@@ -174,21 +174,12 @@ fn virtio_net_find() -> bool !{unsafe} {
 // Every register below is indexed by the architectural INTID directly:
 // GICD_ISENABLER/ICPENDR are one bit per INTID (32 per 4-byte register),
 // GICD_ITARGETSR is one byte per INTID.
-fn virtio_net_gic_enable() !{unsafe} {
-    let isenabler_n: i32 = virtio_net_gic_intid / 32;
-    let bit: i32 = virtio_net_gic_intid - isenabler_n * 32;
-    let icpendr: *io u32 = unsafe {
-        (qemu_gicd_base + 0x280 + (isenabler_n as usize) * 4) as *io u32
-    };
-    *icpendr = 1 << (bit as u32);
-    let isenabler: *io u32 = unsafe {
-        (qemu_gicd_base + 0x100 + (isenabler_n as usize) * 4) as *io u32
-    };
-    *isenabler = *isenabler | (1 << (bit as u32));
-    let itargetsr: *io u8 = unsafe {
-        (qemu_gicd_base + 0x800 + (virtio_net_gic_intid as usize)) as *io u8
-    };
-    *itargetsr = 1 as u8;
+fn virtio_net_gic_enable() {
+    if (virtio_net_gic_intid < 0) { return; }
+    let intid: u32 = virtio_net_gic_intid as u32;
+    gic_intid_clear_pending(intid);
+    gic_intid_enable(intid);
+    gic_intid_target(intid, 1);
 }
 
 // Called from kernel/platform/qemu/intc.tkb's dispatch when the GIC IAR

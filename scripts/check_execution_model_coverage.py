@@ -110,6 +110,8 @@ EXEMPT = {
         "the process-run lock serializes CPU 0's RX interrupt, termios "
         "line editing and terminal reads on any CPU",
     "platform/qemu/uart.tkb": "device state; SPIs are routed to CPU0",
+    "arch/arm64/kernel/gicv2.tkb":
+        "the GIC's IoHandles, attached on CPU0 during boot before secondaries start",
     "drivers/serial/pl011.tkb":
         "the console's IoHandle, attached on CPU0 during boot before secondaries start",
     "platform/qemu/device_map.tkb":

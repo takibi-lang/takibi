@@ -91,9 +91,6 @@ MIN_SIGNIFICANT_RUN = 8
 # with. Unlike ALLOWED, every entry here is also a piece of work -- these are
 # extractable, and the reason says so.
 ALLOWED_RUNS = {
-    ("intc.tkb", "timer_irq_handler();"):
-        "the dispatch tail: timer, then the EL0/EL1 preemption branch that "
-        "nine files assert against",
 }
 
 

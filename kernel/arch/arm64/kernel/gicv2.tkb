@@ -1,0 +1,52 @@
+// The GICv2 register blocks (ARM IHI 0048B), shared by QEMU's `virt` GIC
+// and the RPi5's GIC-400 (GitHub issue #637 stage 3, step A). Each
+// platform's device_map.tkb attaches `gicd` and `gicc` from the windows the
+// boot DTB names; everything here reaches the GIC through those handles,
+// with no raw address.
+
+io struct GicV2Distributor {
+    ctlr: u32 at 0x000;
+    isenabler: [u32; 32] at 0x100;
+    icpendr: [u32; 32] at 0x280;
+    itargetsr: [u8; 1024] at 0x800;
+    icfgr: [u32; 64] at 0xC00;
+    sgir: u32 at 0xF00;
+}
+
+io struct GicV2CpuInterface {
+    ctlr: u32 at 0x00;
+    pmr: u32 at 0x04;
+    iar: u32 at 0x0C;
+    eoir: u32 at 0x10;
+}
+
+let mut gicd: IoHandle(GicV2Distributor);
+let mut gicc: IoHandle(GicV2CpuInterface);
+
+// The INTIDs a GICv2 can name: 0..1019, with the register arrays indexed by
+// INTID / 32 (one bit per INTID) or INTID itself (one byte per INTID). An
+// out-of-range INTID changes nothing.
+fn gic_intid_enable(intid: u32) {
+    let index: usize = (intid / 32) as usize;
+    if (index < 32) {
+        gicd.isenabler[index] = gicd.isenabler[index] | (1 << (intid % 32));
+    }
+}
+
+fn gic_intid_clear_pending(intid: u32) {
+    let index: usize = (intid / 32) as usize;
+    if (index < 32) {
+        gicd.icpendr[index] = 1 << (intid % 32);
+    }
+}
+
+fn gic_intid_target(intid: u32, cpus: u8) {
+    let index: usize = intid as usize;
+    if (index < 1024) {
+        gicd.itargetsr[index] = cpus;
+    }
+}
+
+fn gic_enable_words() -> usize {
+    return (gicd.isenabler[0] as usize) | ((gicd.isenabler[1] as usize) << 32);
+}

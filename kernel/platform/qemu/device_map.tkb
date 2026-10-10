@@ -5,6 +5,7 @@
 // registers through them; nothing else here is meant to grow.
 
 use "kernel/drivers/serial/pl011.tkb";
+use "kernel/arch/arm64/kernel/gicv2.tkb";
 
 // QEMU `virt` puts its PL011 here; the bootstrap console uses it until the
 // DTB has been read. 0x1000 is the PL011's 4 KiB register window.
@@ -14,6 +15,24 @@ const QEMU_UART_WINDOW_BYTES: usize = 0x1000;
 must_use variant QemuAttach {
     Attached;
     Refused;
+}
+
+// The GIC's two windows, from the DTB's cortex-a15-gic reg entries.
+fn qemu_gic_attach(dist_base: usize, dist_bytes: usize,
+                   cpu_base: usize, cpu_bytes: usize) -> QemuAttach !{unsafe} {
+    let RegionBytes::Assumed(dist) = region_bytes_assume(dist_base, dist_bytes) else {};
+    match io_handle_attach(&gicd, dist) {
+        IoAttach::TooSmall => { return QemuAttach::Refused; }
+        IoAttach::Attached => {}
+    }
+    let RegionBytes::Assumed(cpu) = region_bytes_assume(cpu_base, cpu_bytes) else {};
+    match io_handle_attach(&gicc, cpu) {
+        IoAttach::TooSmall => { return QemuAttach::Refused; }
+        IoAttach::Attached => {}
+    }
+    qemu_gicd_base = dist_base;
+    qemu_gicc_base = cpu_base;
+    return QemuAttach::Attached;
 }
 
 // The console before the DTB: the platform's fixed address.
@@ -191,8 +210,13 @@ fn qemu_boot_devices_apply_dtb() -> QemuBootDevicesResult !{unsafe} {
                                         interrupt.intid as u32;
                                     qemu_timer_gic_intid =
                                         timer.intid as u32;
-                                    qemu_gicd_base = gic.distributor.base;
-                                    qemu_gicc_base = gic.cpu_interface.base;
+                                    match qemu_gic_attach(gic.distributor.base, gic.distributor.size,
+                                                          gic.cpu_interface.base, gic.cpu_interface.size) {
+                                        QemuAttach::Attached => {}
+                                        QemuAttach::Refused => {
+                                            return QemuBootDevicesResult::Invalid;
+                                        }
+                                    }
                                     uart_init();
                                     return QemuBootDevicesResult::Applied;
                                 }

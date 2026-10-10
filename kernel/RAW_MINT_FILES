@@ -19,8 +19,6 @@ kernel/lib/intrusive_pool.tkb
 kernel/lib/pool_lock.tkb
 kernel/mm/page.tkb
 kernel/mm/user_memory.tkb
-kernel/platform/qemu/intc.tkb
-kernel/platform/qemu/timer_irq.tkb
 kernel/platform/qemu/device_map.tkb
 kernel/platform/rpi5/intc.tkb
 kernel/platform/rpi5/pcie.tkb

@@ -411,6 +411,7 @@ KERNEL_UNUSED_CHECKED := \
 	kernel/printk/log.tkb \
 	kernel/printk/number.tkb
 KERNEL_UNUSED_CHECKED_QEMU := \
+	kernel/arch/arm64/kernel/gicv2.tkb \
 	kernel/drivers/block/virtio_blk.tkb \
 	kernel/drivers/block/virtio_blk_dma.tkb \
 	kernel/drivers/net/virtio_net.tkb \
