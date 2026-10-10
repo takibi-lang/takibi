@@ -104,7 +104,11 @@ check_model ConsoleTx Safety 10 \
 
 check_model FixedDmaOwnership Safety 5 \
     fixed:CInitFixed:pass:ok \
-    unfixed:CInitUnfixed:Safety:violated
+    unfixed:CInitUnfixed:Safety:violated \
+    gemfixed:CInitGemFixed:pass:ok \
+    gemtimeout:CInitGemTimeout:Safety:violated \
+    gemfailedhalt:CInitGemFailedHalt:Safety:violated \
+    gemreuse:CInitGemReuse:Safety:violated:8
 
 check_model WorldStop NoUnstoppedRead 8 \
     fixed:CInitFixed:pass:ok \

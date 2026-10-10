@@ -311,7 +311,7 @@ action named in these tables no longer exists, or when a dropped entry has
 none of the three forms or names something that does not exist. A rename or
 removal forces the table, and a look at the model, to be updated.
 
-## FixedDmaOwnership.tla -- a fixed receive allocation across DMA (#596)
+## FixedDmaOwnership.tla -- a fixed allocation across RX and TX DMA (#596, #707)
 
 One allocation and one explicit linear authority. A guarded stable-slot
 exchange gives the CPU token to a synchronous request. Submission turns it
@@ -319,23 +319,38 @@ into a DMA token. An observed completion, including a completed error, or a
 confirmed reset allows recovery; an unobserved timeout does not. A failed
 reset leaves Device authority in the slot and no CPU access can follow. The
 unfixed variant permits recovery on timeout and reaches a CPU access while
-the device may still write.
+the device may still read or write.
 
 | Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
 | --- | --- | --- | --- | --- |
-| `TakeCpu`, `PutCpu`, `PutDma` | the guarded exchanges in `virtio_blk_receive_take`, `virtio_blk_receive_put`, `msc_csw_take`, `msc_csw_put`, `msc_data_take`, `msc_data_put`, `xhci_control_take`, and `xhci_control_put` | one serialized slot exchange and unique token storage, including a Device token stored after failed reset | lock instructions -- irrelevant to `UniqueAuthority`: the action assumes the exchange is serialized, which the driver lock must establish; buffer bytes -- irrelevant to `UniqueAuthority`: they hold no authority | `28c5c7126983` |
-| `Submit` | `virtio_blk_submit_owned`, `virtio_blk_submit_header`, `virtio_blk_submit_write_data`, `msc_cbw_send_once`, `msc_data_send_once`, `usb_bulk_out`, `msc_csw_receive_once`, `msc_data_receive_once`, `xhci_receive_configuration`, `usb_bulk_xfer`, `usb_bulk_in`, `usb_ctrl_in` | preparation and submission transfer authority to the device | descriptor layout and cache instructions -- irrelevant to `UniqueAuthority`: neither can create another token; the device span -- irrelevant to `UniqueAuthority`: it only bounds which bytes the device may write | `31892409496d` |
-| `ObserveCompletion` | `virtio_blk_receive_settle_used`, `virtio_blk_used_pending`, `msc_cbw_send_once`, `msc_data_send_once`, `msc_csw_receive_once`, `msc_data_receive_once`, `xhci_receive_configuration`, `usb_bulk_xfer` | an observed final completion, including a completed error, ends writes to the request buffer | completion code values -- irrelevant to `NoCpuAccessWhileDeviceMayWrite`: every final completion ends device writes to this request buffer | `aa365dcd5afd` |
-| `Timeout` | `virtio_blk_submit_owned`, `virtio_blk_receive_settle_used`, `msc_csw_receive_once`, `msc_data_receive_once`, `xhci_receive_configuration`, `usb_bulk_xfer` | a missing completion leaves device activity possible | timer arithmetic -- irrelevant to `NoCpuAccessWhileDeviceMayWrite`: elapsed time alone does not end device writes | `69f5f17f56c5` |
-| `ConfirmReset` | `virtio_blk_receive_settle_reset`, `virtio_blk_reset`, `msc_abort_unobserved_transfer`, `xhci_halt_and_reset` | confirmed reset ends device writes | register polling details -- irrelevant to `NoCpuAccessWhileDeviceMayWrite`: this action is enabled only after quiescence is confirmed | `9f4426ac1cd7` |
-| `ResetFailed` | `virtio_blk_receive_settle_reset`, `virtio_blk_reset`, `msc_abort_unobserved_transfer`, `xhci_halt_and_reset` | failure preserves possible device writes and forbids recovery | controller-specific failure codes -- irrelevant to `NoCpuAccessWhileDeviceMayWrite`: every failed reset leaves authority with the device | `9f4426ac1cd7` |
-| `Disabled` | `virtio_blk_submit`, `disk_status` | later requests are refused while Device authority remains stored | error reporting -- irrelevant to `NoCpuAccessWhileDeviceMayWrite`: it does not touch the allocation | `745e89a365c6` |
-| `Finish` | `virtio_blk_receive_settle_used`, `virtio_blk_receive_settle_reset`, `virtio_blk_request_settle`, `virtio_blk_data_settle`, `msc_cbw_send_once`, `msc_data_send_once`, `msc_csw_receive_once`, `msc_data_receive_once`, `xhci_receive_configuration` (the compiler accepts the RX and TX finish builtins only in the record's declaring file, issues 716 and 717; a TX finish has no cache work) | RX finish returns CPU authority after completion or reset; the unfixed variant also permits timeout | cache instructions -- irrelevant to `UniqueAuthority`: they do not create a token | `2f4cff2288e5` |
-| `CpuAccess` | `virtio_blk_submit_owned`, `virtio_blk_submit_header`, `virtio_blk_submit_write_data`, `msc_cbw_header`, `msc_cbw_set`, `disk_write_sectors`, `msc_csw_receive_attempt`, `disk_read_sectors`, `usb_disk_initialize_stages`, `xhci_configure` | one CPU read or write through the protected allocation, permitted only with CPU authority | alias syntax and provenance -- irrelevant to `UniqueAuthority`: they cannot create another token, while their access safety requires the separate compiler checks | `cf91a0ddba04` |
+| `TakeCpu`, `PutCpu`, `PutDma` | `gem_tx_take`, `gem_tx_put`, and the guarded exchanges in `virtio_blk_receive_take`, `virtio_blk_receive_put`, `msc_csw_take`, `msc_csw_put`, `msc_data_take`, `msc_data_put`, `xhci_control_take`, and `xhci_control_put` | one serialized slot exchange and unique token storage, including a Device token stored after failed reset | lock instructions -- irrelevant to `UniqueAuthority`: the action assumes the exchange is serialized, which the driver lock must establish; buffer bytes -- irrelevant to `UniqueAuthority`: they hold no authority | `106e736427de` |
+| `Submit` | `gem_tx_submit`, `gem_tx_start`, `net_transmit`, `net_transmit_ready`, `virtio_blk_submit_owned`, `virtio_blk_submit_header`, `virtio_blk_submit_write_data`, `msc_cbw_send_once`, `msc_data_send_once`, `usb_bulk_out`, `msc_csw_receive_once`, `msc_data_receive_once`, `xhci_receive_configuration`, `usb_bulk_xfer`, `usb_bulk_in`, `usb_ctrl_in` | preparation and submission transfer authority to the device | descriptor layout and cache instructions -- irrelevant to `UniqueAuthority`: neither can create another token; the device span -- irrelevant to `UniqueAuthority`: it only bounds which bytes the device may write | `fa00bca6009d` |
+| `ObserveCompletion` | `gem_tx_wait`, `gem_tx_slot_done`, `gem_tx_finish`, `virtio_blk_receive_settle_used`, `virtio_blk_used_pending`, `msc_cbw_send_once`, `msc_data_send_once`, `msc_csw_receive_once`, `msc_data_receive_once`, `xhci_receive_configuration`, `usb_bulk_xfer` | an observed final completion, including a completed error, ends writes to the request buffer | completion code values -- irrelevant to `NoCpuAccessWhileDeviceMayWrite`: every final completion ends device writes to this request buffer | `3ad6ce6435ad` |
+| `Timeout` | `gem_tx_wait`, `gem_tx_finish`, `gem_tx_unconfirmed`, `virtio_blk_submit_owned`, `virtio_blk_receive_settle_used`, `msc_csw_receive_once`, `msc_data_receive_once`, `xhci_receive_configuration`, `usb_bulk_xfer` | a missing completion leaves device activity possible | timer arithmetic -- irrelevant to `NoCpuAccessWhileDeviceMayWrite`: elapsed time alone does not end device writes | `909b69ff41ec` |
+| `ConfirmReset` | `gem_halt`, `gem_tx_unconfirmed`, `virtio_blk_receive_settle_reset`, `virtio_blk_reset`, `msc_abort_unobserved_transfer`, `xhci_halt_and_reset` | confirmed reset ends device writes | register polling details -- irrelevant to `NoCpuAccessWhileDeviceMayWrite`: this action is enabled only after quiescence is confirmed | `6d3e0a66eb86` |
+| `ResetFailed` | `gem_halt`, `gem_tx_unconfirmed`, `virtio_blk_receive_settle_reset`, `virtio_blk_reset`, `msc_abort_unobserved_transfer`, `xhci_halt_and_reset` | failure preserves possible device writes and forbids recovery | controller-specific failure codes -- irrelevant to `NoCpuAccessWhileDeviceMayWrite`: every failed reset leaves authority with the device | `6d3e0a66eb86` |
+| `Disabled` | `gem_tx_claim`, `net_rx_send_reply`, `net_transmit_ready`, `virtio_blk_submit`, `disk_status` | later requests are refused while Device authority remains stored; GEM also refuses after a confirmed halt, with CPU authority stored | error reporting -- irrelevant to `NoCpuAccessWhileDeviceMayWrite`: it does not touch the allocation | `74b5a964d093` |
+| `Finish` | `gem_tx_settle_completed`, `gem_tx_settle_halted`, `virtio_blk_receive_settle_used`, `virtio_blk_receive_settle_reset`, `virtio_blk_request_settle`, `virtio_blk_data_settle`, `msc_cbw_send_once`, `msc_data_send_once`, `msc_csw_receive_once`, `msc_data_receive_once`, `xhci_receive_configuration` (the compiler accepts the RX and TX finish builtins only in the record's declaring file, issues 716 and 717; a TX finish has no cache work) | RX/TX finish returns CPU authority after completion or confirmed reset/halt; the unfixed variant also permits timeout | cache instructions -- irrelevant to `UniqueAuthority`: they do not create a token | `34b703dd1f8b` |
+| `CpuAccess` | `gem_tx_submit`, `virtio_blk_submit_owned`, `virtio_blk_submit_header`, `virtio_blk_submit_write_data`, `msc_cbw_header`, `msc_cbw_set`, `disk_write_sectors`, `msc_csw_receive_attempt`, `disk_read_sectors`, `usb_disk_initialize_stages`, `xhci_configure` | one CPU read or write through the protected allocation, permitted only with CPU authority | alias syntax and provenance -- irrelevant to `UniqueAuthority`: they cannot create another token, while their access safety requires the separate compiler checks | `a22cda405d5d` |
 
 `UniqueAuthority` checks that the only token is either in the slot or held by
 the request, including a retained Device token after reset failure.
-`NoCpuAccessWhileDeviceMayWrite` checks the DMA safety property.
+`NoCpuAccessWhileDeviceMayWrite` retains its original name but covers device
+reads as well as writes. `NoPrematureCpuAuthority` excludes CPU authority
+while device access remains possible. These are bounded model evidence.
+
+The GEM policy variant sets `txDown` on absent completion before halt.
+Confirmed halt allows a CPU token to be put back, failed halt retains Device,
+and neither permits another buffer write or submission (`NoReuseAfterHalt`).
+Three negative variants recover on timeout, recover on failed halt, or ignore
+the down flag. Both descriptors share the same allocation and token; their
+identities and ring alternation are irrelevant to `UniqueAuthority`: neither
+provides independent buffer authority. A failed claim may take and replace the
+CPU token under two guard holds, but permits no `CpuAccess` or `Submit`.
+The finish-to-put step is separate from a new claim, as in the driver.
+`ObserveCompletion` cannot replace GEM's halt outcome after its wait expired.
+The caller serializes network capability access as described in
+`kernel/CONCURRENCY.md`; interrupt observations do not mint another token.
 This model does not prove the compiler's direct/alias access rule, cache
 maintenance, or the hardware reset contract; those require separate evidence.
 
