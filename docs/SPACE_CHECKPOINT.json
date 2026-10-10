@@ -1,9 +1,9 @@
 {
   "date": "2026-10-10",
   "event": "incremental",
-  "decision": "measured",
-  "source_sha256": "2d380948b420b819b2f9b1fdb8d4acb4e29b3904c361ce94cad837a23134093d",
-  "workload": "Compiler: guarded_by places with self (#131 slice 3 / #686); kernel sources unchanged. Linked kernels compared against origin/main with scripts/space_delta.py.",
+  "decision": "reuse",
+  "source_sha256": "f87ff3b3943d0a38af590ded15c85cfe1b2a91265a89985fba0e021b76364fb2",
+  "workload": "Narrow private ownership construction correction, integrated with guarded places from 2ef2842c: apply existing visibility to initializer-free locals after inference and zeroed global values. The only kernel change is a mint-boundary comment. Valid-program lowering, representations, storage and allocation workloads are unchanged.",
   "evidence": [
     "docs/BOUNDS_CONTRACT_SPACE_2026-10-10.md",
     "docs/PROCESS_STATE_PAYLOAD_SPACE_2026-10-10.md",
@@ -38,6 +38,6 @@
     "docs/DMA_MINT_FILES_2026-10-08.md",
     "docs/DMA_TRANSMIT_2026-10-08.md"
   ],
-  "assessment": "Linked kernels identical in text, data, BSS and usable_ram_start: no kernel code uses the new form yet.",
+  "assessment": "Reuses the shared-bounds and process-payload evidence and the guarded-places review at 2ef2842c, which measured identical kernel text, data, BSS and usable_ram_start. This additional change is a small soundness correction, not a kernel feature or allocator stage: no LLVM lowering, executable kernel source, representation, allocation or occupancy change. The integrated allbuild checks both kernels, native guarded-place callers and historical callers; independent AArch64 controls preserve the one-word mint ABI without traps. Existing image, payload and live occupancy evidence remains at its original boundary.",
   "next_trigger": "Production runtime metadata extent migration, a stored allocator authority through array/place rules, or another completed kernel feature/stage requires fresh workload measurement. Any change to generated production code, storage or allocation invalidates this reuse."
 }
