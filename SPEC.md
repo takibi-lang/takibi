@@ -4273,7 +4273,8 @@ justification for it.
 
 `--confine-raw-authority` rejects every type-checked raw pointer dereference,
 implicit raw-field reference mint, and local explicit `unsafe` assertion,
-including dormant generic templates' explicit assertions,
+including dormant generic templates' explicit assertions, and every call
+of `region_bytes_assume` (an address becoming a region),
 outside a file declared with repeatable
 `--raw-mint-file <path>`. The accessing or asserting file must be declared;
 calling an accessor in a mint file does not grant its caller permission to

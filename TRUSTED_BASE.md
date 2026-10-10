@@ -83,8 +83,9 @@ The maintained kernel deliberately does not use this flag: low-level boot,
 MMIO, DMA, and context-switching code still require reviewed unsafe sites.
 
 `--confine-raw-authority` confines type-checked raw dereferences, implicit
-raw-field reference mints and local unsafe assertions to explicitly declared
-mint files (`--raw-mint-file`).
+raw-field reference mints, local unsafe assertions and calls of
+`region_bytes_assume` to explicitly declared mint files (`--raw-mint-file`).
+Both maintained kernels build with it; their list is `kernel/RAW_MINT_FILES`.
 Calling a mint does not grant the caller raw access. Authority-indexed reference
 returns carry the existing local loan checks into ordinary field consumers;
 raw-to-reference conversion is an unsafe assertion within the mint boundary.

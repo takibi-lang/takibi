@@ -22521,6 +22521,22 @@ let raw_authority_policy_tests = [
       Alcotest.(check int) "declared template accepted" 0
         (List.length (Raw_authority_policy.check ~source_program ~mint_files:[file] ())));
 
+  Alcotest.test_case "address-to-region call requires a declared mint file" `Quick
+    (fun () ->
+      let source = "fn attach() !{unsafe} { let mapped = region_bytes_assume(4096, 64); } fn quiet() -> usize { return 0; } fn main() -> usize { return 42; }" in
+      let source_program = parse source in
+      let errors = List.filter (fun (_, message) ->
+          contains_substring message "an address becomes a region")
+        (Raw_authority_policy.check ~source_program ~mint_files:[] ()) in
+      Alcotest.(check int) "undeclared call rejected" 1 (List.length errors);
+      Alcotest.(check bool) "names the calling function" true
+        (contains_substring (snd (List.hd errors)) "'attach'");
+      let file = Ast.source_file_of_loc (fst (List.hd errors)) in
+      Alcotest.(check int) "declared file accepted" 0
+        (List.length (List.filter (fun (_, message) ->
+            contains_substring message "an address becomes a region")
+          (Raw_authority_policy.check ~source_program ~mint_files:[file] ()))));
+
   Alcotest.test_case "generic access retains its original mint file" `Quick
     (fun () ->
       ignore (infer_files [("mint.tkb", "fn load(T: type, pointer: *T) -> T { return *pointer; }");

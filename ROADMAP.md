@@ -57,8 +57,7 @@ type-checker work and #731 step 1; #131's first slices -- field places
 (borrow in place) and `Place(T)` with
 `place_take`/`place_put` for every stored slot, `stable_replace` removed
 from the language -- on #732's generic variants; #704's per-CPU storage
-(exec args migrated); GEM's RX and TX buffers as fixed DMA records (#707's
-core). exception_evidence's per-core arrays stay ordinary arrays:
+(exec args migrated); GEM's RX and TX buffers as fixed DMA records. exception_evidence's per-core arrays stay ordinary arrays:
 DDB reads other CPUs' entries on purpose, which is settled with #637's mint
 list (maintainer, 2026-10-09).
 
@@ -67,17 +66,18 @@ list (maintainer, 2026-10-09).
    borrowing an element in place. #518 (typed slot addresses past the pool)
    and #343 (use-after-free now that a heap exists) are its first
    consumers.
-2. **The process record.** The typestate group on the stored-authority
-   rule, in order: #653 (the wait reason in the Blocked state), #590 (the
-   process state machine's typed transitions), #308 (lifting the
-   ProcessRecord invariants). Then #686 (placement authority across
-   syscalls) and #202 (UserRange epoch).
-3. **#637's remaining stages.** The stage 2 decision recorded against what
-   1 and 2 needed; then stage 3: the reviewed finite mint list (including
-   the DMA mint files and exception_evidence's per-core arrays) and the
-   file-confinement flag enabled for the maintained kernels. log.tkb's raw
-   sites go with #613: a lockless multi-writer log ring with its protocol
-   in the type system, its orderings checked by #645's herd7 litmus tests.
+2. **The process record.** #202 (UserRange epoch); the rest of the
+   typestate group is done.
+3. **#637 stage 3: shrinking the mint list.** The file-confinement flag is
+   enabled for both maintained kernels with a reviewed list
+   (`kernel/RAW_MINT_FILES`); calls of `region_bytes_assume` count as mints.
+   Next: step A (remaining MMIO through IoHandles: RPi5 PCIe, virtio-net,
+   virtio-blk, the system timer DTB reader, xHCI registers), then step B
+   (page and pool chunks over regions, using #734's prototype); #739
+   (stale list entries, per-file counts). log.tkb's
+   raw sites go with #613: a lockless multi-writer log ring with its
+   protocol in the type system, its orderings checked by #645's herd7
+   litmus tests.
 4. **Preemption.** #638's typed preparation -- a preemption-disabled
    authority, with per-CPU access (`cpu_authority`) derived from it in place
    of the `KERNEL_PREEMPTIBLE == 0` asserts -- with #606 stage 2 (a TLC trace
@@ -105,22 +105,14 @@ where acceptance is settled; leave design investigations and unmet
 implementation gates parked. Prefer what A consumes at once -- fewer red
 allchecks, faster diagnosis -- and what finishes on its own.
 
-Done on 2026-10-10: #734's bounded shared order-contract prototype and
-#738's initializer-free CPU authority construction fix; #735's private
-ownership-bearing default construction visibility (option A); #729's readonly
-byte-slice and string-literal slice creation; #707's bounded DMA lifecycle
-model, physical halt controls and checksum-verified bulk re-measurement.
-Production #252 allocator migration remains a separate design gate; the
-prototype adds no physical-span mint or stored-authority rule.
+Done on 2026-10-10: see HISTORY.md and the closed issues. Production #252
+allocator migration remains a separate design gate.
 
 Initialization does not prove CPU freshness across preemption.
 
 1. **Fixed DMA lifecycle, finishing the drivers.** Every stage of one
    transfer in types, leaving one device-semantics declaration per driver
    and the platform bus translation as the only trusted parts.
-   - Done: #733, primary queue-zero interrupts through named IoHandle
-     registers, no TX busy poll, a 14 ms elapsed-time budget, physical
-     IRQ/halt controls and checksum-verified paired bulk measurements.
    - #736 (virtio-net TX completion wait bound; follow #707's shape).
    - #720 (session-long xHCI rings and contexts, on `Place`), #625 (cache
      visibility across DMA ownership handoffs, bounded model).
