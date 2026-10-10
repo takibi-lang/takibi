@@ -7685,18 +7685,6 @@ let gen_program ?prog_types prog =
         Hashtbl.add enum_nonexhaustive name is_ne
     | _ -> ()
   ) prog;
-  let rec ast_mentions_variant = function
-    | TypeVariant _ -> true
-    | TypePtr t | TypeIo t | TypeArray (t, _) | TypeSlice (t, _, _)
-    | TypeBorrow t | TypeBorrowMut t | TypeSink t
-    | TypeRefined (_, _, t) | TypeAlignedPtr (_, t)
-    | TypeSingleton (t, _) -> ast_mentions_variant t
-    | TypeFn (args, ret, _) ->
-        List.exists ast_mentions_variant args || ast_mentions_variant ret
-    | TypeTuple ts -> List.exists ast_mentions_variant ts
-    | TypeExists (_, _, body) -> ast_mentions_variant body
-    | _ -> false
-  in
   let register_struct name fields is_packed align_opt =
     let field_lltys = List.map (fun (_, ty) -> ltype_of_ast ty) fields
                       |> Array.of_list in
@@ -7825,51 +7813,92 @@ let gen_program ?prog_types prog =
     Hashtbl.add struct_llvm_field_index name llvm_index_of_field;
     if effective_align > 1 then Hashtbl.replace struct_alignments name effective_align
   in
-  let register_struct_if has_variant = function
-    | StructDef (name, fields, is_packed, align_opt, _, _)
-    | OwnedStructDef (name, _, _, fields, is_packed, align_opt, _, _, _)
-      when List.exists (fun (_, ty) -> ast_mentions_variant ty) fields
-           = has_variant ->
-        register_struct name fields is_packed align_opt
-    | _ -> ()
-  in
-  (* Variants may carry ordinary structs by value, so those layouts come first. *)
-  List.iter (register_struct_if false) prog;
   (* A Slice 3 variant is a compact tagged aggregate in the semantic sense,
      but deliberately uses one LLVM field per runtime-bearing case for now:
      `{ i32 tag, payload0, payload1, ... }`.  This is target-independent,
      keeps every payload strongly typed, and avoids inventing an untyped byte
      union before Takibi has a settled ABI.  Erased view payloads and
      existential binders add no field; the existential body still does. *)
+  let register_variant name cases =
+    let next_field = ref 1 in
+    let runtime_fields = ref [] in
+    let layouts = List.mapi (fun tag (cname, payload) ->
+      let payload_field = match payload with
+        | None -> None
+        | Some schema ->
+            let runtime_ty = runtime_payload_type schema in
+            if is_erased_view_type runtime_ty then None
+            else begin
+              let field = !next_field in
+              incr next_field;
+              runtime_fields := !runtime_fields @ [ltype_of_ast runtime_ty];
+              Some field
+            end
+      in
+      (cname, {
+        variant_tag = tag;
+        variant_payload = payload;
+        variant_payload_field = payload_field;
+      })
+    ) cases in
+    let fields = i32_type context :: !runtime_fields |> Array.of_list in
+    Hashtbl.replace variant_lltypes name (struct_type context fields);
+    Hashtbl.replace variant_cases_tbl name layouts
+  in
+  (* Struct and variant layouts are registered in dependency order: a type
+     is laid out after every type it holds by value, whatever order the
+     program declares them in. A struct may hold a variant, a variant a
+     struct, either one nested through the other at any depth. Pointers and
+     function types hold no layout. A by-value cycle has no finite layout. *)
+  let layout_defs = Hashtbl.create 64 in
   List.iter (function
+    | StructDef (name, fields, is_packed, align_opt, _, _)
+    | OwnedStructDef (name, _, _, fields, is_packed, align_opt, _, _, _) ->
+        Hashtbl.replace layout_defs name
+          (`Struct (fields, is_packed, align_opt))
     | VariantDef (name, _, cases, _, _) ->
-        let next_field = ref 1 in
-        let runtime_fields = ref [] in
-        let layouts = List.mapi (fun tag (cname, payload) ->
-          let payload_field = match payload with
-            | None -> None
-            | Some schema ->
-                let runtime_ty = runtime_payload_type schema in
-                if is_erased_view_type runtime_ty then None
-                else begin
-                  let field = !next_field in
-                  incr next_field;
-                  runtime_fields := !runtime_fields @ [ltype_of_ast runtime_ty];
-                  Some field
-                end
-          in
-          (cname, {
-            variant_tag = tag;
-            variant_payload = payload;
-            variant_payload_field = payload_field;
-          })
-        ) cases in
-        let fields = i32_type context :: !runtime_fields |> Array.of_list in
-        Hashtbl.replace variant_lltypes name (struct_type context fields);
-        Hashtbl.replace variant_cases_tbl name layouts
+        Hashtbl.replace layout_defs name (`Variant cases)
     | _ -> ()) prog;
-  (* Plain variants may in turn be held in ordinary struct storage. *)
-  List.iter (register_struct_if true) prog;
+  let rec held_by_value acc = function
+    | TypeNamed n | TypeIndexed (n, _) -> n :: acc
+    | TypeVariant (n, _, targs) -> Generic_variant.instance_name n targs :: acc
+    | TypePtr _ | TypeFn _ | TypeSlice _ | TypeAlignedPtr _ -> acc
+    | TypeIo t | TypeArray (t, _) | TypeRefined (_, _, t)
+    | TypeMultiple (_, t) | TypeSingleton (t, _) | TypeExists (_, _, t) ->
+        held_by_value acc t
+    | TypeTuple ts -> List.fold_left held_by_value acc ts
+    | _ -> acc
+  in
+  let layout_deps = function
+    | `Struct (fields, _, _) ->
+        List.fold_left (fun acc (_, ty) -> held_by_value acc ty) [] fields
+    | `Variant cases ->
+        List.fold_left (fun acc (_, payload) -> match payload with
+          | None -> acc
+          | Some schema -> held_by_value acc (runtime_payload_type schema))
+          [] cases
+  in
+  let layout_state = Hashtbl.create 64 in
+  let rec register_layout name =
+    match Hashtbl.find_opt layout_state name, Hashtbl.find_opt layout_defs name with
+    | Some `Done, _ | _, None -> ()
+    | Some `Visiting, _ ->
+        raise (Error (Printf.sprintf
+          "type '%s' holds itself by value; a by-value cycle has no layout" name))
+    | None, Some def ->
+        Hashtbl.replace layout_state name `Visiting;
+        List.iter register_layout (List.rev (layout_deps def));
+        (match def with
+         | `Struct (fields, is_packed, align_opt) ->
+             register_struct name fields is_packed align_opt
+         | `Variant cases -> register_variant name cases);
+        Hashtbl.replace layout_state name `Done
+  in
+  List.iter (function
+    | StructDef (name, _, _, _, _, _)
+    | OwnedStructDef (name, _, _, _, _, _, _, _, _)
+    | VariantDef (name, _, _, _, _) -> register_layout name
+    | _ -> ()) prog;
   (* Pass 1: register all globals and function signatures *)
   List.iter (function
     | FuncDef fdef                    -> declare_func ?prog_types fdef

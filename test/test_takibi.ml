@@ -9509,6 +9509,54 @@ fn f() -> *usize { return &temp_address_outer().r.a; }");
           }
         }");
 
+  (* A struct holding a variant only through another struct waits for the
+     variant layouts too; it used to be laid out first and fail with
+     "Unknown named type" (GitHub issue #653's ProcessStateCell). *)
+  Alcotest.test_case "plain variant storage nests through a struct field" `Quick
+    (expect_codegen_ok
+       "variant VariantNest7c { Idle; Waiting(usize); }
+        struct VariantNestCell7c { private value: VariantNest7c; }
+        struct VariantNestRecord7c { pid: usize; state: VariantNestCell7c; }
+        private let mut variant_nest_records7c: [VariantNestRecord7c; 4];
+        fn variant_nest_wait7c(cell: &mut VariantNestCell7c, child: usize) {
+          (*cell).value = VariantNest7c::Waiting(child);
+        }
+        fn main() -> i32 {
+          variant_nest_wait7c(&variant_nest_records7c[1].state, 7);
+          return 0;
+        }");
+
+  Alcotest.test_case "struct layout does not depend on declaration order" `Quick
+    (expect_codegen_ok
+       "struct LayoutOrderOuter7d { inner: LayoutOrderInner7d; tag: u8; }
+        struct LayoutOrderInner7d { x: usize; }
+        private let mut layout_order7d: [LayoutOrderOuter7d; 2];
+        fn main() -> i32 {
+          layout_order7d[1].inner.x = 3;
+          return 0;
+        }");
+
+  Alcotest.test_case "variant storage nests before its declaration" `Quick
+    (expect_codegen_ok
+       "struct VariantNestRecord7e { pid: usize; state: VariantNestCell7e; }
+        struct VariantNestCell7e { value: VariantNest7e; }
+        variant VariantNest7e { Idle; Waiting(usize); }
+        private let mut variant_nest_records7e: [VariantNestRecord7e; 2];
+        fn main() -> i32 {
+          variant_nest_records7e[0].state.value = VariantNest7e::Waiting(4);
+          return 0;
+        }");
+
+  Alcotest.test_case "variant payload struct may hold a variant" `Quick
+    (expect_codegen_ok
+       "variant VariantInner7f { Idle; Waiting(usize); }
+        struct VariantCell7f { value: VariantInner7f; }
+        variant VariantOuter7f { Empty; Held(VariantCell7f); }
+        fn variant_outer7f(cell: VariantCell7f) -> VariantOuter7f {
+          return VariantOuter7f::Held(cell);
+        }
+        fn main() -> i32 { return 0; }");
+
   Alcotest.test_case "linear variant storage remains forbidden" `Quick
     (expect_type_error "cannot hold an affine/linear variant"
        "linear view VariantPermit7c;
