@@ -7,4 +7,4 @@ export KERNEL_GEM_TX_ARTIFACT_DIR="$ARTIFACT_DIR"
 . "$REPO_ROOT/scripts/resource_lease.sh"
 resource_lease_acquire rpi5 "kernelcheck-gem-tx-rpi5" || exit 1
 export RPI5_SWD_SPEED="${RPI5_SWD_SPEED:-30000}"
-python3 "$REPO_ROOT/scripts/run_kernel_gem_tx_rpi5.py"
+python3 "$REPO_ROOT/scripts/run_kernel_gem_tx_rpi5.py" "$@"

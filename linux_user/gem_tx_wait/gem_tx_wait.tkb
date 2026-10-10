@@ -1,5 +1,5 @@
 // Execute the driver's actual wait policy against a deterministic clock and
-// descriptor oracle. This tests the bounded poll and wake-and-recheck rule;
+// descriptor oracle. This tests the time budget and wake-and-recheck rule;
 // it does not model DMA, cache coherence, or hardware interrupt delivery.
 let mut fake_now: i64;
 let mut complete_at: i64;
@@ -41,40 +41,41 @@ fn check(ok: bool, label: *u8) {
 
 fn app_main() !{may_block} {
     reset(0, 15000);
-    let done_1: bool = gem_tx_wait(0);
-    check(done_1 && waits == 0 && checked_slot == 0, "already complete");
+    let immediate: bool = gem_tx_wait(0);
+    check(immediate && waits == 0 && checked_slot == 0, "already complete");
 
-    reset(100, 15000);
-    let done_2: bool = gem_tx_wait(1);
-    check(done_2 && waits == 0 && fake_now < 200 && checked_slot == 1,
-          "wire latency must not become a timer wait");
-
-    // Pin both sides of the exact 200-tick poll boundary. Completion at
-    // the first fallback check still needs no interrupt; one tick later
-    // does need a wake and a fresh descriptor check.
-    reset(200, 50);
-    let done_3: bool = gem_tx_wait(0);
-    check(done_3 && waits == 0 && fake_now == 200, "last poll completion");
-
-    reset(201, 50);
-    let done_4: bool = gem_tx_wait(1);
-    check(done_4 && waits == 0 && fake_now == 201, "first fallback completion");
-
-    reset(202, 50);
-    let done_5: bool = gem_tx_wait(0);
-    check(done_5 && waits == 1 && fake_now == 251, "just beyond first fallback check");
-
-    reset(500, 15000);
-    let done_6: bool = gem_tx_wait(0);
-    check(done_6 && waits == 1 && fake_now >= 500, "slow completion fallback");
+    reset(100, 100);
+    let irq: bool = gem_tx_wait(1);
+    check(irq && waits == 1 && checked_slot == 1, "wire latency needs an IRQ, no busy poll");
 
     reset(500, 50);
-    let done_7: bool = gem_tx_wait(1);
-    check(done_7 && waits > 1 && fake_now >= 500, "unrelated wake must recheck");
+    let unrelated: bool = gem_tx_wait(0);
+    check(unrelated && waits > 1 && fake_now >= 500, "unrelated wakes recheck completion");
+
+    // More than the old 1000-wake cap must not exhaust a time budget.
+    reset(12000, 1);
+    let many_wakes: bool = gem_tx_wait(1);
+    check(many_wakes && waits > 1000 && fake_now < 14001,
+          "frequent wakes cannot shorten the deadline");
+
+    reset(-1, 1000);
+    let absent: bool = gem_tx_wait(0);
+    check(absent == false && waits == 14 && fake_now >= 14001 && fake_now < 15000,
+          "missing completion expires after 14 ms, not 1000 wakes");
+
+    // The periodic wake may follow the deadline: check real completion
+    // before declaring failure, without treating the wake itself as proof.
+    reset(14001, 14000);
+    let boundary: bool = gem_tx_wait(1);
+    check(boundary && waits == 1, "completion observed at the deadline wins");
+
+    reset(-1, 14000);
+    let boundary_absent: bool = gem_tx_wait(1);
+    check(boundary_absent == false && waits == 1, "absent completion at the deadline fails");
 
     reset(-1, 15000);
-    let absent: bool = gem_tx_wait(0);
-    check(waits == 1000, "absent completion keeps the defensive cap");
-    check(absent == false, "absent completion is reported, not treated as done");
-    uart_puts("gem-tx-wait: immediate, short poll, slow fallback, unrelated wake, absent completion ok\r\n");
+    let delayed_wake: bool = gem_tx_wait(0);
+    check(delayed_wake == false && waits == 1 && fake_now >= 15001,
+          "late periodic wake still reports unconfirmed completion");
+    uart_puts("gem-tx-wait: IRQ-only, unrelated wakes, elapsed 14 ms deadline, final completion ok\r\n");
 }

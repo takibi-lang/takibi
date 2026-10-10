@@ -4,6 +4,8 @@ import argparse
 import hashlib
 import json
 import os
+import re
+import statistics
 from pathlib import Path
 import select
 import socket
@@ -17,6 +19,8 @@ MODES = ('confirmed-ready', 'confirmed-reply', 'unconfirmed-ready', 'unconfirmed
 BOARD = bytes.fromhex('020020000002')
 PAYLOAD = bytes(range(14, 64))
 PASS = b'PASS gem-tx: completion, halt ownership, later sends dropped'
+IRQ_PASS = b'PASS gem-probe: complete and masked'
+IRQ_MODES = ('irq-primary', 'irq-wrong-enable')
 
 
 def peer(interface):
@@ -65,6 +69,50 @@ def validate(text, frames, mode):
         raise RuntimeError('stored authority sequence differs from halt evidence')
 
 
+def validate_irq(text, frames, mode):
+    text = text.replace(b'\r', b'').decode('ascii', errors='replace')
+    marker = f'gem-probe: mode {mode}\n'
+    if marker not in text:
+        raise RuntimeError('fresh IRQ fixture marker absent')
+    text = text[text.index(marker):]
+    if 'FAIL gem-probe:' in text or IRQ_PASS.decode() not in text:
+        raise RuntimeError('IRQ fixture did not complete successfully')
+    if len(frames) != 33:
+        raise RuntimeError('IRQ fixture requires 33 genuine checked transfers')
+    for frame in frames:
+        body = bytes.fromhex(frame['bytes'])
+        if len(body) != 64 or body[6:14] != BOARD + bytes.fromhex('88b5') or body[14:] != PAYLOAD:
+            raise RuntimeError('IRQ fixture frame length or payload mismatch')
+    frequencies = re.findall(r'frequency=(\d+)', text)
+    if len(frequencies) != 1 or int(frequencies[0]) <= 0:
+        raise RuntimeError('IRQ fixture clock frequency absent or ambiguous')
+    frequency = int(frequencies[0])
+    rows = [{key: int(value) for key, value in re.findall(r'(\w+)=(\d+)', line)}
+            for line in text.splitlines() if line.startswith('gem-probe: sample=')]
+    keys = {'sample', 'start', 'done', 'wake', 'wakes', 'irq_delta', 'irq_tick'}
+    if len(rows) != 32 or any(set(row) != keys for row in rows) or [row['sample'] for row in rows] != list(range(32)):
+        raise RuntimeError('IRQ fixture timestamp rows incomplete or reordered')
+    for row in rows:
+        if row['start'] <= 0 or row['done'] < row['start']:
+            raise RuntimeError('IRQ fixture completion timestamp invalid')
+        row['elapsed_us'] = (row['done'] - row['start']) * 1000000 / frequency
+        if row['irq_delta'] and not row['start'] <= row['irq_tick'] <= row['done']:
+            raise RuntimeError('IRQ timestamp lies outside its measured send')
+        if row['wakes'] and not row['start'] <= row['wake'] <= row['done']:
+            raise RuntimeError('wake timestamp lies outside its measured send')
+    median = statistics.median(row['elapsed_us'] for row in rows)
+    count = sum(row['irq_delta'] for row in rows)
+    if mode == 'irq-primary':
+        if count != 32 or median > 200 or max(row['elapsed_us'] for row in rows) > 1000:
+            raise RuntimeError('primary bank did not deliver prompt genuine TCOMP interrupts')
+    elif mode == 'irq-wrong-enable':
+        if count != 0 or median <= 200:
+            raise RuntimeError('wrong-bank control did not reproduce missing TCOMP and slow waits')
+    else:
+        raise RuntimeError('unknown IRQ fixture mode')
+    return {'frequency': frequency, 'median_us': median, 'tcomp_irqs': count, 'rows': rows}
+
+
 def run_case(mode, device, directory, interface):
     import serial
     directory.mkdir(parents=True, exist_ok=True)
@@ -78,7 +126,11 @@ def run_case(mode, device, directory, interface):
     mode_time = []
     load_started = None
     capture_lock = threading.Lock()
-    marker = f'gem-tx fixture: mode {mode}\n'.encode()
+    irq = mode in IRQ_MODES
+    marker = f'{"gem-probe" if irq else "gem-tx fixture"}: mode {mode}\n'.encode()
+    pass_marker = IRQ_PASS if irq else PASS
+    fail_marker = b'FAIL gem-probe:' if irq else b'FAIL gem-tx:'
+    result['control'] = ('primary bank vs wrong additional-queue enable; real completions' if irq else result['control'])
     network = None
     reader = None
     started = time.monotonic()
@@ -125,9 +177,9 @@ def run_case(mode, device, directory, interface):
                 text = bytes(transcript).replace(b'\r', b'')
                 if mode_time:
                     current = text[text.index(marker):]
-                    if b'FAIL gem-tx:' in current:
+                    if fail_marker in current:
                         raise RuntimeError('physical fixture reported failure')
-                    if PASS in current:
+                    if pass_marker in current:
                         break
                 if network.poll() is not None:
                     raise RuntimeError('Ethernet peer exited during fixture')
@@ -143,9 +195,13 @@ def run_case(mode, device, directory, interface):
         result['mode_observed'] = mode_time[0]
         frames = [frame for frame in frames if frame['time'] >= load_started]
         (directory / 'ethernet.json').write_text(json.dumps(frames, indent=2) + '\n')
-        validate(bytes(transcript), frames, mode)
+        if irq:
+            result['irq'] = validate_irq(bytes(transcript), frames, mode)
+        else:
+            validate(bytes(transcript), frames, mode)
         result['status'] = 'PASS'
-        print(f'PASS kernel/rpi5 gem-tx: {mode}; three checked transfers, later sends dropped', flush=True)
+        detail = '32 timestamped sends, genuine IRQ bank control' if irq else 'three checked transfers, later sends dropped'
+        print(f'PASS kernel/rpi5 gem-tx: {mode}; {detail}', flush=True)
     except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as error:
         result['error'] = str(error)
         raise
@@ -170,6 +226,7 @@ def run_case(mode, device, directory, interface):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--peer')
+    parser.add_argument('--irq', action='store_true')
     args = parser.parse_args()
     if args.peer:
         peer(args.peer)
@@ -178,7 +235,7 @@ def main():
         ['bash', str(ROOT / 'scripts/rpi5_uart_dev.sh')], text=True).strip()
     default = Path(os.environ.get('TAKIBI_LANE_ARTIFACT_ROOT', ROOT / '_build')) / 'gem-tx-rpi5'
     directory = Path(os.environ.get('KERNEL_GEM_TX_ARTIFACT_DIR', default))
-    for mode in MODES:
+    for mode in IRQ_MODES if args.irq else MODES:
         run_case(mode, device, directory / mode, os.environ.get('ETH_TEST_IFACE', 'enp5s0'))
 
 

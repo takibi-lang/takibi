@@ -118,10 +118,9 @@ Initialization does not prove CPU freshness across preemption.
 1. **Fixed DMA lifecycle, finishing the drivers.** Every stage of one
    transfer in types, leaving one device-semantics declaration per driver
    and the platform bus translation as the only trusted parts.
-   - #733: wait on GEM's TX completion interrupt without the 200 us poll.
-     It starts with a study of the Raspberry Pi OS kernel's macb/RP1
-     interrupt handling (maintainer, 2026-10-09), recorded on the issue,
-     before any change.
+   - Done: #733, primary queue-zero interrupts through named IoHandle
+     registers, no TX busy poll, a 14 ms elapsed-time budget, physical
+     IRQ/halt controls and checksum-verified paired bulk measurements.
    - #736 (virtio-net TX completion wait bound; follow #707's shape).
    - #720 (session-long xHCI rings and contexts, on `Place`), #625 (cache
      visibility across DMA ownership handoffs, bounded model).

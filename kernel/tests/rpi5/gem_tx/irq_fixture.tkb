@@ -1,0 +1,113 @@
+// Test-only boot probe: bounded records, no UART in the measured TX path.
+use "kernel/lib/atomic_word.tkb";
+use "kernel/lib/execution_model.tkb";
+
+let mut gem_probe_tx_irqs: AtomicWord;
+let mut gem_probe_last_tx_irq: AtomicWord;
+let mut gem_probe_index: usize = 32;
+let mut gem_probe_start: [usize; 32];
+let mut gem_probe_irq_before: [usize; 32];
+let mut gem_probe_done: [usize; 32];
+let mut gem_probe_wake: [usize; 32];
+let mut gem_probe_wakes: [usize; 32];
+let mut gem_probe_irq_delta: [usize; 32];
+let mut gem_probe_irq_tick: [usize; 32];
+
+fn gem_probe_note_submit() {
+    let index: usize = gem_probe_index;
+    if (index < 32) {
+        gem_probe_irq_before[index] = atomic_word_load(&gem_probe_tx_irqs);
+        gem_probe_start[index] = read_cntpct() as usize;
+    }
+}
+
+fn gem_probe_note_wake() {
+    let index: usize = gem_probe_index;
+    if (index < 32) {
+        gem_probe_wake[index] = read_cntpct() as usize;
+        gem_probe_wakes[index] = gem_probe_wakes[index] + 1;
+    }
+}
+
+fn gem_probe_note_done() {
+    let index: usize = gem_probe_index;
+    if (index < 32) {
+        gem_probe_done[index] = read_cntpct() as usize;
+        let count = atomic_word_load(&gem_probe_tx_irqs);
+        gem_probe_irq_delta[index] = count - gem_probe_irq_before[index];
+        gem_probe_irq_tick[index] = atomic_word_load(&gem_probe_last_tx_irq);
+    }
+}
+
+fn gem_probe_note_irq(status: u32) {
+    if ((status & (1 << 7)) != 0) {
+        atomic_word_store(&gem_probe_last_tx_irq, read_cntpct() as usize);
+        let count = atomic_word_load(&gem_probe_tx_irqs);
+        atomic_word_store(&gem_probe_tx_irqs, count + 1);
+    }
+}
+
+fn gem_probe_peer(ready_in: sink NetRxCanAcquire)
+        -> NetRxCanAcquire !{may_block} {
+    let mut ready = ready_in;
+    let started: i64 = read_cntpct();
+    while (read_cntpct() - started < read_cntfrq() * 10) {
+        match net_rx_acquire(ready) {
+            NetRxAcquire::None(next) => { ready = next; net_rx_wait(); }
+            NetRxAcquire::Acquired(frame) => {
+                let bytes = net_rx_frame(frame);
+                if (net_rx_len(frame) == 64 && bytes[12] == 0x88 && bytes[13] == 0xB5) {
+                    slice_copy(bytes[0..<6], bytes[6..<12]);
+                    slice_copy(bytes[6..<12], OUR_MAC as []const u8);
+                    return net_rx_send_reply(net_rx_reply_ready(frame, 64));
+                }
+                ready = net_rx_release(frame);
+            }
+        }
+    }
+    kernel_boot_log("FAIL gem-probe: real host handshake\n");
+    return ready;
+}
+
+fn gem_probe_run(ready_in: sink NetRxCanAcquire) !{may_block} {
+    static_assert(KERNEL_PREEMPTIBLE == 0);
+    let mut ready = ready_in;
+    kernel_boot_log("gem-probe: imr0="); uart_put_udec(gem.imr as usize);
+    kernel_boot_log(" frequency="); uart_put_udec(read_cntfrq() as usize);
+    kernel_boot_log("\n");
+    ready = gem_probe_peer(ready);
+    // Clear pre-sample status, without manufacturing any completion.
+    let pending: u32 = gem.isr;
+    gem.isr = pending;
+    atomic_word_store(&gem_probe_tx_irqs, 0);
+    atomic_word_store(&gem_probe_last_tx_irq, 0);
+    let mut packet: [u8; 1514];
+    for index: usize in 0..<1514 { packet[index] = 0; }
+    for index: usize in 0..<6 { packet[index] = 0xFF; }
+    slice_copy(packet[6..<12], OUR_MAC as []const u8);
+    packet[12] = 0x88; packet[13] = 0xB5;
+    for index: usize in 14..<64 { packet[index] = index as u8; }
+    for sample: usize in 0..<32 {
+        gem_probe_index = sample;
+        ready = net_transmit_ready(ready, packet as [u8; 1514..], 64);
+    }
+    gem_probe_index = 32;
+    kernel_boot_log("gem-probe: final isr0="); uart_put_udec(gem.isr as usize);
+    kernel_boot_log(" tx_irqs="); uart_put_udec(atomic_word_load(&gem_probe_tx_irqs));
+    kernel_boot_log("\n");
+    for sample: usize in 0..<32 {
+        kernel_boot_log("gem-probe: sample="); uart_put_udec(sample);
+        kernel_boot_log(" start="); uart_put_udec(gem_probe_start[sample]);
+        kernel_boot_log(" done="); uart_put_udec(gem_probe_done[sample]);
+        kernel_boot_log(" wake="); uart_put_udec(gem_probe_wake[sample]);
+        kernel_boot_log(" wakes="); uart_put_udec(gem_probe_wakes[sample]);
+        kernel_boot_log(" irq_delta="); uart_put_udec(gem_probe_irq_delta[sample]);
+        kernel_boot_log(" irq_tick="); uart_put_udec(gem_probe_irq_tick[sample]);
+        kernel_boot_log("\n");
+    }
+    net_shutdown(ready);
+    let halted: bool = gem_halt();
+    gem.idr = 0xFFFFFFFF;
+    if (halted) { kernel_boot_log("PASS gem-probe: complete and masked\n"); }
+    else { kernel_boot_log("FAIL gem-probe: final halt\n"); }
+}

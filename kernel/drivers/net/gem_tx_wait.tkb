@@ -1,22 +1,19 @@
-// RP1 GEM completion wait policy. The driver refreshes the live DMA
-// descriptor in gem_tx_slot_done; this policy does not borrow packet bytes.
-// A short bounded poll covers ordinary wire/DMA latency before sleeping.
-// Measured transfers otherwise paid roughly one timer period per frame;
-// pinning the listener to CPU0 did not remove that delay.
-// After 200 us it retains the existing 1000-wakeup defensive fallback.
-// This is wake-and-recheck: an interrupt need not mean TX has completed.
-// Returns whether completion was observed. False means the cap ran out with
-// the descriptor still owned by GEM: the frame may still be read by DMA, so
-// the caller must not treat the buffer as free (GitHub issue #707).
+// RP1 GEM completion wait policy. The driver refreshes the live descriptor;
+// this policy never borrows packet bytes or spins for wire/DMA latency.
+// Wake-and-recheck: unrelated interrupts do not establish completion or use
+// up a wake-count allowance. The 14 ms elapsed-time budget is the chosen
+// failure policy, informed by Linux's 16 KiB / 10 Mbps graceful-stop budget
+// (GitHub issue #733), not a proof of DMA or interrupt latency.
+// A final observed completion wins over timeout. With no GEM interrupt the
+// periodic timer supplies a wake, so timeout handling may lag the deadline
+// by a timer period plus interrupt/scheduling delay. False feeds #707's
+// halt path; it never grants CPU access to an unconfirmed DMA buffer.
 fn gem_tx_wait(slot: {0..<2 as usize}) -> bool !{may_block} {
     let started: i64 = read_cntpct();
-    let poll_ticks: i64 = read_cntfrq() * 200 / 1000000;
-    while (read_cntpct() - started < poll_ticks) {
+    let deadline_ticks: i64 = read_cntfrq() * 14 / 1000;
+    while (true) {
         if (gem_tx_slot_done(slot)) { return true; }
-    }
-    for wake: usize in 0..<1000 {
-        if (gem_tx_slot_done(slot)) { return true; }
+        if (read_cntpct() - started >= deadline_ticks) { return false; }
         workload_profile_interrupt_wait();
     }
-    return gem_tx_slot_done(slot);
 }

@@ -1,0 +1,510 @@
+{
+  "date": "2026-10-10",
+  "baseline_revision": "ae1a0cf8",
+  "timing": "host HTTP wall time including connection setup; each series preserves warmup and all samples",
+  "series": {
+    "initial_three": {
+      "name": "bulk-tcp",
+      "target": "rpi5",
+      "timing": "host HTTP wall time including request and headers",
+      "elf_sha256": "54dfce295586c718b5b3231af1cb2fdf76e66dfb0ea1dff834cb5f61dc4515a1",
+      "status": "PASS",
+      "runs": [
+        {
+          "path": "/bin/busybox-extras",
+          "iteration": 0,
+          "warmup": true,
+          "bytes": 132840,
+          "sha256": "ec3127316a53372ae3052cf3fa34c75108f2e391f2bfe49f49eb1c5cc0a86ce6",
+          "started_ns": 566642662966573,
+          "finished_ns": 566642976118295,
+          "seconds": 0.313151722,
+          "bytes_per_second": 424203.31956533197
+        },
+        {
+          "path": "/bin/busybox-extras",
+          "iteration": 1,
+          "warmup": false,
+          "bytes": 132840,
+          "sha256": "ec3127316a53372ae3052cf3fa34c75108f2e391f2bfe49f49eb1c5cc0a86ce6",
+          "started_ns": 566642980145082,
+          "finished_ns": 566643059560197,
+          "seconds": 0.079415115,
+          "bytes_per_second": 1672729.4294039616
+        },
+        {
+          "path": "/bin/busybox-extras",
+          "iteration": 2,
+          "warmup": false,
+          "bytes": 132840,
+          "sha256": "ec3127316a53372ae3052cf3fa34c75108f2e391f2bfe49f49eb1c5cc0a86ce6",
+          "started_ns": 566643059964720,
+          "finished_ns": 566644175409718,
+          "seconds": 1.115444998,
+          "bytes_per_second": 119091.48388148494
+        },
+        {
+          "path": "/bin/busybox-extras",
+          "iteration": 3,
+          "warmup": false,
+          "bytes": 132840,
+          "sha256": "ec3127316a53372ae3052cf3fa34c75108f2e391f2bfe49f49eb1c5cc0a86ce6",
+          "started_ns": 566644175779374,
+          "finished_ns": 566645251799646,
+          "seconds": 1.076020272,
+          "bytes_per_second": 123454.92316152199
+        },
+        {
+          "path": "/bin/busybox.static",
+          "iteration": 0,
+          "warmup": true,
+          "bytes": 1116408,
+          "sha256": "999cb969d09093a71716cfc747bb53cdada3f332c05eb5046c56e0f66a4d6d22",
+          "started_ns": 566645252990028,
+          "finished_ns": 566645490012839,
+          "seconds": 0.237022811,
+          "bytes_per_second": 4710128.9335396495
+        },
+        {
+          "path": "/bin/busybox.static",
+          "iteration": 1,
+          "warmup": false,
+          "bytes": 1116408,
+          "sha256": "999cb969d09093a71716cfc747bb53cdada3f332c05eb5046c56e0f66a4d6d22",
+          "started_ns": 566645491403779,
+          "finished_ns": 566645732725810,
+          "seconds": 0.241322031,
+          "bytes_per_second": 4626216.65901693
+        },
+        {
+          "path": "/bin/busybox.static",
+          "iteration": 2,
+          "warmup": false,
+          "bytes": 1116408,
+          "sha256": "999cb969d09093a71716cfc747bb53cdada3f332c05eb5046c56e0f66a4d6d22",
+          "started_ns": 566645734142088,
+          "finished_ns": 566646067291600,
+          "seconds": 0.333149512,
+          "bytes_per_second": 3351071.995566963
+        },
+        {
+          "path": "/bin/busybox.static",
+          "iteration": 3,
+          "warmup": false,
+          "bytes": 1116408,
+          "sha256": "999cb969d09093a71716cfc747bb53cdada3f332c05eb5046c56e0f66a4d6d22",
+          "started_ns": 566646068938563,
+          "finished_ns": 566646370695899,
+          "seconds": 0.301757336,
+          "bytes_per_second": 3699688.016863988
+        }
+      ]
+    },
+    "baseline_seven": {
+      "name": "bulk-tcp",
+      "target": "rpi5",
+      "timing": "host HTTP wall time including request and headers",
+      "elf_sha256": "2306cf5ee8baf525de897b99876f1d7a6c17a1d09ae41a3d0f46f89fc3aeab68",
+      "status": "PASS",
+      "runs": [
+        {
+          "path": "/bin/busybox-extras",
+          "iteration": 0,
+          "warmup": true,
+          "bytes": 132840,
+          "sha256": "ec3127316a53372ae3052cf3fa34c75108f2e391f2bfe49f49eb1c5cc0a86ce6",
+          "started_ns": 567554893658878,
+          "finished_ns": 567555208398911,
+          "seconds": 0.314740033,
+          "bytes_per_second": 422062.6106371413
+        },
+        {
+          "path": "/bin/busybox-extras",
+          "iteration": 1,
+          "warmup": false,
+          "bytes": 132840,
+          "sha256": "ec3127316a53372ae3052cf3fa34c75108f2e391f2bfe49f49eb1c5cc0a86ce6",
+          "started_ns": 567555208741226,
+          "finished_ns": 567555333340594,
+          "seconds": 0.124599368,
+          "bytes_per_second": 1066137.028881238
+        },
+        {
+          "path": "/bin/busybox-extras",
+          "iteration": 2,
+          "warmup": false,
+          "bytes": 132840,
+          "sha256": "ec3127316a53372ae3052cf3fa34c75108f2e391f2bfe49f49eb1c5cc0a86ce6",
+          "started_ns": 567555333632374,
+          "finished_ns": 567555452488317,
+          "seconds": 0.118855943,
+          "bytes_per_second": 1117655.5134479057
+        },
+        {
+          "path": "/bin/busybox-extras",
+          "iteration": 3,
+          "warmup": false,
+          "bytes": 132840,
+          "sha256": "ec3127316a53372ae3052cf3fa34c75108f2e391f2bfe49f49eb1c5cc0a86ce6",
+          "started_ns": 567555452803772,
+          "finished_ns": 567555554998490,
+          "seconds": 0.102194718,
+          "bytes_per_second": 1299871.4865087254
+        },
+        {
+          "path": "/bin/busybox-extras",
+          "iteration": 4,
+          "warmup": false,
+          "bytes": 132840,
+          "sha256": "ec3127316a53372ae3052cf3fa34c75108f2e391f2bfe49f49eb1c5cc0a86ce6",
+          "started_ns": 567555555324564,
+          "finished_ns": 567555687812166,
+          "seconds": 0.132487602,
+          "bytes_per_second": 1002659.856429434
+        },
+        {
+          "path": "/bin/busybox-extras",
+          "iteration": 5,
+          "warmup": false,
+          "bytes": 132840,
+          "sha256": "ec3127316a53372ae3052cf3fa34c75108f2e391f2bfe49f49eb1c5cc0a86ce6",
+          "started_ns": 567555688152658,
+          "finished_ns": 567555809254676,
+          "seconds": 0.121102018,
+          "bytes_per_second": 1096926.394736048
+        },
+        {
+          "path": "/bin/busybox-extras",
+          "iteration": 6,
+          "warmup": false,
+          "bytes": 132840,
+          "sha256": "ec3127316a53372ae3052cf3fa34c75108f2e391f2bfe49f49eb1c5cc0a86ce6",
+          "started_ns": 567555809567004,
+          "finished_ns": 567555915537096,
+          "seconds": 0.105970092,
+          "bytes_per_second": 1253561.2406564674
+        },
+        {
+          "path": "/bin/busybox-extras",
+          "iteration": 7,
+          "warmup": false,
+          "bytes": 132840,
+          "sha256": "ec3127316a53372ae3052cf3fa34c75108f2e391f2bfe49f49eb1c5cc0a86ce6",
+          "started_ns": 567555915824718,
+          "finished_ns": 567556048446744,
+          "seconds": 0.132622026,
+          "bytes_per_second": 1001643.573142217
+        },
+        {
+          "path": "/bin/busybox.static",
+          "iteration": 0,
+          "warmup": true,
+          "bytes": 1116408,
+          "sha256": "999cb969d09093a71716cfc747bb53cdada3f332c05eb5046c56e0f66a4d6d22",
+          "started_ns": 567556049538511,
+          "finished_ns": 567556394900448,
+          "seconds": 0.345361937,
+          "bytes_per_second": 3232573.947487444
+        },
+        {
+          "path": "/bin/busybox.static",
+          "iteration": 1,
+          "warmup": false,
+          "bytes": 1116408,
+          "sha256": "999cb969d09093a71716cfc747bb53cdada3f332c05eb5046c56e0f66a4d6d22",
+          "started_ns": 567556396377381,
+          "finished_ns": 567556709488284,
+          "seconds": 0.313110903,
+          "bytes_per_second": 3565535.3719828785
+        },
+        {
+          "path": "/bin/busybox.static",
+          "iteration": 2,
+          "warmup": false,
+          "bytes": 1116408,
+          "sha256": "999cb969d09093a71716cfc747bb53cdada3f332c05eb5046c56e0f66a4d6d22",
+          "started_ns": 567556711094190,
+          "finished_ns": 567556998001283,
+          "seconds": 0.286907093,
+          "bytes_per_second": 3891182.9900280647
+        },
+        {
+          "path": "/bin/busybox.static",
+          "iteration": 3,
+          "warmup": false,
+          "bytes": 1116408,
+          "sha256": "999cb969d09093a71716cfc747bb53cdada3f332c05eb5046c56e0f66a4d6d22",
+          "started_ns": 567556999533350,
+          "finished_ns": 567557353613256,
+          "seconds": 0.354079906,
+          "bytes_per_second": 3152983.213907654
+        },
+        {
+          "path": "/bin/busybox.static",
+          "iteration": 4,
+          "warmup": false,
+          "bytes": 1116408,
+          "sha256": "999cb969d09093a71716cfc747bb53cdada3f332c05eb5046c56e0f66a4d6d22",
+          "started_ns": 567557354995431,
+          "finished_ns": 567557655843375,
+          "seconds": 0.300847944,
+          "bytes_per_second": 3710871.296497875
+        },
+        {
+          "path": "/bin/busybox.static",
+          "iteration": 5,
+          "warmup": false,
+          "bytes": 1116408,
+          "sha256": "999cb969d09093a71716cfc747bb53cdada3f332c05eb5046c56e0f66a4d6d22",
+          "started_ns": 567557657440705,
+          "finished_ns": 567557964677848,
+          "seconds": 0.307237143,
+          "bytes_per_second": 3633701.2807074566
+        },
+        {
+          "path": "/bin/busybox.static",
+          "iteration": 6,
+          "warmup": false,
+          "bytes": 1116408,
+          "sha256": "999cb969d09093a71716cfc747bb53cdada3f332c05eb5046c56e0f66a4d6d22",
+          "started_ns": 567557966038091,
+          "finished_ns": 567558283611013,
+          "seconds": 0.317572922,
+          "bytes_per_second": 3515438.258933172
+        },
+        {
+          "path": "/bin/busybox.static",
+          "iteration": 7,
+          "warmup": false,
+          "bytes": 1116408,
+          "sha256": "999cb969d09093a71716cfc747bb53cdada3f332c05eb5046c56e0f66a4d6d22",
+          "started_ns": 567558285006402,
+          "finished_ns": 567558554569893,
+          "seconds": 0.269563491,
+          "bytes_per_second": 4141540.072279298
+        }
+      ]
+    },
+    "candidate_seven": {
+      "name": "bulk-tcp",
+      "target": "rpi5",
+      "timing": "host HTTP wall time including request and headers",
+      "elf_sha256": "85862c8643033eb270f97e2d26fe146bd0210143741760a581a3ae86177b33c3",
+      "status": "PASS",
+      "runs": [
+        {
+          "path": "/bin/busybox-extras",
+          "iteration": 0,
+          "warmup": true,
+          "bytes": 132840,
+          "sha256": "ec3127316a53372ae3052cf3fa34c75108f2e391f2bfe49f49eb1c5cc0a86ce6",
+          "started_ns": 567285866903849,
+          "finished_ns": 567286154219620,
+          "seconds": 0.287315771,
+          "bytes_per_second": 462348.4451885518
+        },
+        {
+          "path": "/bin/busybox-extras",
+          "iteration": 1,
+          "warmup": false,
+          "bytes": 132840,
+          "sha256": "ec3127316a53372ae3052cf3fa34c75108f2e391f2bfe49f49eb1c5cc0a86ce6",
+          "started_ns": 567286154536637,
+          "finished_ns": 567286229731934,
+          "seconds": 0.075195297,
+          "bytes_per_second": 1766599.844668477
+        },
+        {
+          "path": "/bin/busybox-extras",
+          "iteration": 2,
+          "warmup": false,
+          "bytes": 132840,
+          "sha256": "ec3127316a53372ae3052cf3fa34c75108f2e391f2bfe49f49eb1c5cc0a86ce6",
+          "started_ns": 567286230049703,
+          "finished_ns": 567286292955711,
+          "seconds": 0.062906008,
+          "bytes_per_second": 2111721.983693513
+        },
+        {
+          "path": "/bin/busybox-extras",
+          "iteration": 3,
+          "warmup": false,
+          "bytes": 132840,
+          "sha256": "ec3127316a53372ae3052cf3fa34c75108f2e391f2bfe49f49eb1c5cc0a86ce6",
+          "started_ns": 567286293306592,
+          "finished_ns": 567286357136320,
+          "seconds": 0.063829728,
+          "bytes_per_second": 2081161.9313182724
+        },
+        {
+          "path": "/bin/busybox-extras",
+          "iteration": 4,
+          "warmup": false,
+          "bytes": 132840,
+          "sha256": "ec3127316a53372ae3052cf3fa34c75108f2e391f2bfe49f49eb1c5cc0a86ce6",
+          "started_ns": 567286357447326,
+          "finished_ns": 567287454171493,
+          "seconds": 1.096724167,
+          "bytes_per_second": 121124.34830662394
+        },
+        {
+          "path": "/bin/busybox-extras",
+          "iteration": 5,
+          "warmup": false,
+          "bytes": 132840,
+          "sha256": "ec3127316a53372ae3052cf3fa34c75108f2e391f2bfe49f49eb1c5cc0a86ce6",
+          "started_ns": 567287454521082,
+          "finished_ns": 567288540370647,
+          "seconds": 1.085849565,
+          "bytes_per_second": 122337.38842083525
+        },
+        {
+          "path": "/bin/busybox-extras",
+          "iteration": 6,
+          "warmup": false,
+          "bytes": 132840,
+          "sha256": "ec3127316a53372ae3052cf3fa34c75108f2e391f2bfe49f49eb1c5cc0a86ce6",
+          "started_ns": 567288540703274,
+          "finished_ns": 567288605740249,
+          "seconds": 0.065036975,
+          "bytes_per_second": 2042530.4221175723
+        },
+        {
+          "path": "/bin/busybox-extras",
+          "iteration": 7,
+          "warmup": false,
+          "bytes": 132840,
+          "sha256": "ec3127316a53372ae3052cf3fa34c75108f2e391f2bfe49f49eb1c5cc0a86ce6",
+          "started_ns": 567288606060432,
+          "finished_ns": 567288667707278,
+          "seconds": 0.061646846,
+          "bytes_per_second": 2154854.767428004
+        },
+        {
+          "path": "/bin/busybox.static",
+          "iteration": 0,
+          "warmup": true,
+          "bytes": 1116408,
+          "sha256": "999cb969d09093a71716cfc747bb53cdada3f332c05eb5046c56e0f66a4d6d22",
+          "started_ns": 567288668877272,
+          "finished_ns": 567288963191981,
+          "seconds": 0.294314709,
+          "bytes_per_second": 3793245.6851825234
+        },
+        {
+          "path": "/bin/busybox.static",
+          "iteration": 1,
+          "warmup": false,
+          "bytes": 1116408,
+          "sha256": "999cb969d09093a71716cfc747bb53cdada3f332c05eb5046c56e0f66a4d6d22",
+          "started_ns": 567288964649507,
+          "finished_ns": 567289240440922,
+          "seconds": 0.275791415,
+          "bytes_per_second": 4048015.7803316684
+        },
+        {
+          "path": "/bin/busybox.static",
+          "iteration": 2,
+          "warmup": false,
+          "bytes": 1116408,
+          "sha256": "999cb969d09093a71716cfc747bb53cdada3f332c05eb5046c56e0f66a4d6d22",
+          "started_ns": 567289241901955,
+          "finished_ns": 567289515256135,
+          "seconds": 0.27335418,
+          "bytes_per_second": 4084108.02424898
+        },
+        {
+          "path": "/bin/busybox.static",
+          "iteration": 3,
+          "warmup": false,
+          "bytes": 1116408,
+          "sha256": "999cb969d09093a71716cfc747bb53cdada3f332c05eb5046c56e0f66a4d6d22",
+          "started_ns": 567289516648339,
+          "finished_ns": 567289769804721,
+          "seconds": 0.253156382,
+          "bytes_per_second": 4409954.002265682
+        },
+        {
+          "path": "/bin/busybox.static",
+          "iteration": 4,
+          "warmup": false,
+          "bytes": 1116408,
+          "sha256": "999cb969d09093a71716cfc747bb53cdada3f332c05eb5046c56e0f66a4d6d22",
+          "started_ns": 567289771210400,
+          "finished_ns": 567290048785634,
+          "seconds": 0.277575234,
+          "bytes_per_second": 4022001.4729412063
+        },
+        {
+          "path": "/bin/busybox.static",
+          "iteration": 5,
+          "warmup": false,
+          "bytes": 1116408,
+          "sha256": "999cb969d09093a71716cfc747bb53cdada3f332c05eb5046c56e0f66a4d6d22",
+          "started_ns": 567290050217132,
+          "finished_ns": 567290298297118,
+          "seconds": 0.248079986,
+          "bytes_per_second": 4500193.739933539
+        },
+        {
+          "path": "/bin/busybox.static",
+          "iteration": 6,
+          "warmup": false,
+          "bytes": 1116408,
+          "sha256": "999cb969d09093a71716cfc747bb53cdada3f332c05eb5046c56e0f66a4d6d22",
+          "started_ns": 567290299695554,
+          "finished_ns": 567290518472200,
+          "seconds": 0.218776646,
+          "bytes_per_second": 5102957.8358194595
+        },
+        {
+          "path": "/bin/busybox.static",
+          "iteration": 7,
+          "warmup": false,
+          "bytes": 1116408,
+          "sha256": "999cb969d09093a71716cfc747bb53cdada3f332c05eb5046c56e0f66a4d6d22",
+          "started_ns": 567290520104866,
+          "finished_ns": 567290757011337,
+          "seconds": 0.236906471,
+          "bytes_per_second": 4712441.983064279
+        }
+      ]
+    }
+  },
+  "candidate_syn_retransmissions": [
+    {
+      "flow": [
+        "192.168.20.1",
+        "192.168.20.2",
+        45900,
+        8080,
+        284155345,
+        2
+      ],
+      "times": [
+        1791628454.295205,
+        1791628455.325653
+      ],
+      "gaps_ms": [
+        1030.448
+      ]
+    },
+    {
+      "flow": [
+        "192.168.20.1",
+        "192.168.20.2",
+        45906,
+        8080,
+        4153859333,
+        2
+      ],
+      "times": [
+        1791628455.392282,
+        1791628456.413636
+      ],
+      "gaps_ms": [
+        1021.354
+      ]
+    }
+  ]
+}

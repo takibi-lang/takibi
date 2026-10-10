@@ -1,5 +1,24 @@
 # takibi Engineering History
 
+## 2026-10-10: GEM completion uses an interrupt wait and a 14 ms budget
+
+After correcting the queue-zero interrupt bank, the maintainer selected a
+14 ms elapsed-time TX completion budget. Linux commit ed0578a46c5f traces
+its graceful-stop allowance to draining 16 KiB at 10 Mbps, approximately
+13.1 ms rounded up. This informs the failure policy, not a universal proof
+of normal DMA or IRQ latency. The old 15-second proposal was only a
+conversion of 1000 timer wakes and was withdrawn.
+
+The 200 us spin and wake-count cap were removed. A real completion wins on
+the final wake; otherwise elapsed time enters the existing halt/authority
+settlement path. The timer supplies deadline checks when GEM does not, so
+handling can lag the nominal deadline by a timer period plus dispatch delay.
+A deterministic native oracle rejects the old poll policy and checks more
+than 1000 unrelated wakes before expiry. Physical controls verify real
+TCOMP timing, wrong-bank enable behavior, checked frames and both halt
+outcomes. Paired checksum-verified HTTP measurements improve both median
+transfer times while preserving the small-request SYN retransmission tails.
+
 ## 2026-10-10: RP1 GEM queue-zero interrupts use named primary registers
 
 The GEM descriptor bases selected hardware queue zero, but the driver used

@@ -12,7 +12,7 @@
 # starved host has shown. Removing the two-core probe rows is #651's
 # (rendezvous bounded by peer ticks) and #688's (typed clock domains).
 # Columns: file, function, sites, class, reason (tab separated).
-kernel/drivers/net/gem_tx_wait.tkb	gem_tx_wait	1	protocol	GEM completion active-poll phase (200 us); expiry switches to the existing interrupt wait and never decides a functional verdict
+kernel/drivers/net/gem_tx_wait.tkb	gem_tx_wait	1	protocol	RP1-only GEM TX failure policy (14 ms); an elapsed deadline without observed completion enters halt, never grants CPU authority; deterministic native oracle covers the policy
 kernel/drivers/block/virtio_blk_dma.tkb	virtio_blk_reset	1	backstop	reset completion: a device that never reports reset is disabled
 kernel/drivers/block/virtio_blk.tkb	virtio_blk_submit_owned	1	backstop	30 s completion: a starved host delayed 1 s completions into a stall (2026-10-04)
 kernel/kernel/console_contention_evidence.tkb	console_ddb_peer_hold	1	pending	DDB peer hold budget (5 s)
@@ -23,3 +23,4 @@ kernel/net/tcp.tkb	kernel_tcp_echo_check	1	protocol	waits for the host peer's co
 kernel/net/tcp.tkb	kernel_tcp_receive_once	1	protocol	receive timeout (30 s)
 kernel/lib/peer_tick_window.tkb	wall_emergency_budget	1	backstop	10 s emergency bound for a peer that cannot take ticks; ordinary arrival uses the peer tick budget
 kernel/tests/rpi5/gem_tx/fixture.tkb	gem_fixture_reply	1	protocol	physical-only fixture waits for the host Ethernet peer (10 s); not run under QEMU
+kernel/tests/rpi5/gem_tx/irq_fixture.tkb	gem_probe_peer	1	protocol	physical-only IRQ fixture waits for a real host RX handshake (10 s); not run under QEMU

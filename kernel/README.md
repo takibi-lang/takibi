@@ -20,8 +20,10 @@ and the development container verifies the response with real `curl`.
 - RPi5 UART RX, RP1 Cadence GEM Ethernet, and RP1 xHCI USB are all dispatched
   through GIC-400 and RP1 MIP0/MSI-X interrupts; the ARM generic timer (PPI
   #30) provides a periodic wake source so Ethernet's retry loops keep their
-  bounded retry behavior. GEM TX first polls completion for up to 200 us,
-  then falls back to interrupt wakeups and rechecks the descriptor.
+  bounded retry behavior. GEM TX waits on interrupts and rechecks the
+  descriptor with a 14 ms elapsed-time budget, without busy polling.
+  Timeout handling runs on the next wake; the periodic timer ensures a
+  recheck when no GEM interrupt arrives.
 - Linux-compatible processes run at EL0 with RX text and RW+XN data, heap, and
   stack mappings.
 - Ordinary kernel services do not use EL2 HVC as an internal service layer.
@@ -2029,3 +2031,17 @@ control requires both its expected diagnostic and a nonzero status. The
 driver uses named primary queue-zero registers through an IoHandle attached
 by the platform device map before the GEM interrupt is enabled; register
 offsets and the external window remain trusted.
+
+`make kernelcheck-gem-tx-irq-rpi5` runs the polling-free GEM IRQ regression.
+It records 32 bounded submit/TCOMP/wake/first-observed-USED timestamp rows
+without UART output in the timed path, after a genuine RX/reply handshake.
+The primary-bank image must receive genuine TCOMP interrupts and finish
+promptly; a wrong-additional-queue-enable control must reproduce their
+absence and timer-period waits. Both require exactly 33 checked physical
+frames. Artifacts use the same GEM directory as the ownership fixtures.
+The control keeps primary ISR/IDR correct to avoid a retained level-IRQ
+storm on warm reload; it is an enable-bank regression, not a bus hang.
+The 14 ms completion budget is an elapsed-time failure policy informed by
+Linux's 16 KiB / 10 Mbps stop budget, not a proven DMA latency ceiling.
+Completion is rechecked before declaring timeout, and timeout processing
+can lag the budget by one periodic wake plus interrupt/scheduling delay.

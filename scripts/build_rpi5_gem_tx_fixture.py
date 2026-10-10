@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a source overlay that hides GEM observations, not ownership logic."""
+"""Build real-GEM ownership and IRQ regression source overlays."""
 
 import argparse
 import os
@@ -19,7 +19,8 @@ def main():
     parser.add_argument("root", type=Path)
     parser.add_argument("overlay", type=Path)
     parser.add_argument("mode", choices=("confirmed-ready", "confirmed-reply",
-                                        "unconfirmed-ready", "unconfirmed-reply"))
+                                        "unconfirmed-ready", "unconfirmed-reply",
+                                        "irq-primary", "irq-wrong-enable"))
     parser.add_argument("--control", choices=("device-access", "queue-bank", "raw-irq"))
     args = parser.parse_args()
     root, overlay = args.root.resolve(), args.overlay.resolve()
@@ -45,6 +46,51 @@ def main():
                 (target / name).symlink_to(source)
     # Embedded production images remain inputs, not overlay output paths.
     (kernel / "build").symlink_to(root / "kernel/build", target_is_directory=True)
+
+    if args.mode.startswith("irq-"):
+        init = kernel / "platform/rpi5/init.tkb"
+        text = init.read_text(encoding="ascii")
+        start = text.index("fn kernel_test_platform_network() {")
+        end = text.index("\n}\n", start) + 3
+        body = """fn kernel_test_platform_network() {
+    match net_init() {
+        NetInitResult::Failed => { kernel_boot_log("FAIL gem-probe: init\\n"); }
+        NetInitResult::Ready(ready) => {
+            kernel_boot_log("gem-probe: mode MODE\\n");
+            gem_probe_run(ready);
+        }
+    }
+    while (true) { workload_profile_interrupt_wait(); }
+}
+""".replace("MODE", args.mode)
+        init.write_text('use "kernel/tests/rpi5/gem_tx/irq_fixture.tkb";\n' +
+                        text[:start] + body + text[end:], encoding="ascii")
+        driver = kernel / "drivers/net/rp1_gem.tkb"
+        replace_once(driver, "    workload_profile_note_network_tx(safe_len as usize);",
+                     "    gem_probe_note_submit();\n    workload_profile_note_network_tx(safe_len as usize);")
+        replace_once(driver, "    let isr: u32 = gem.isr;",
+                     "    let isr: u32 = gem.isr;\n    gem_probe_note_irq(isr);")
+        wait = kernel / "drivers/net/gem_tx_wait.tkb"
+        wait.unlink()
+        shutil.copyfile(root / "kernel/drivers/net/gem_tx_wait.tkb", wait)
+        replace_once(wait, "if (gem_tx_slot_done(slot)) { return true; }",
+                     "if (gem_tx_slot_done(slot)) { gem_probe_note_done(); return true; }")
+        replace_once(wait, "        workload_profile_interrupt_wait();",
+                     "        workload_profile_interrupt_wait();\n        gem_probe_note_wake();")
+        if args.mode == "irq-wrong-enable":
+            # Keep the primary bank masked, but enable the wrong additional
+            # queue as the old driver did. Primary ISR/IDR remain correct to
+            # avoid a warm-reload unacknowledged level interrupt storm.
+            import re
+            text = driver.read_text(encoding="ascii")
+            start = text.index("io struct Rp1GemRegs {")
+            end = text.index("\n}", start)
+            fields = re.findall(r"    (\w+): u32 at (0x[0-9A-F]+);", text[start:end])
+            fields = [(name, 0x600 if name == "ier" else int(offset, 16)) for name, offset in fields]
+            block = "io struct Rp1GemRegs {\n" + "\n".join(
+                f"    {name}: u32 at 0x{offset:02X};" for name, offset in sorted(fields, key=lambda field: field[1]))
+            driver.write_text(text[:start] + block + text[end:], encoding="ascii")
+        return
 
     init = kernel / "platform/rpi5/init.tkb"
     text = init.read_text(encoding="ascii")

@@ -1,1 +1,1 @@
-gem-tx-wait: immediate, short poll, slow fallback, unrelated wake, absent completion ok
+gem-tx-wait: IRQ-only, unrelated wakes, elapsed 14 ms deadline, final completion ok

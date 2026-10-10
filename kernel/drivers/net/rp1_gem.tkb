@@ -5,8 +5,8 @@
 // -driven completion came later (GitHub issue #187: net_rx_wait()/
 // net_tx_complete() wait via interrupt_wait(), woken by a real GEM RX/TX
 // interrupt or kernel/platform/rpi5/timer_irq.tkb's periodic tick, not by
-// continuously polling either ring). Short TX completion polling now covers
-// normal DMA latency before falling back to that interrupt-driven wait.
+// continuously polling either ring). TX completion uses the primary queue
+// interrupt bank and a 14 ms elapsed-time failure budget.
 
 use "kernel/net/netconfig.tkb";
 use "kernel/lib/init_once.tkb";
@@ -409,7 +409,7 @@ private fn gem_tx_submit(slot: {0..<2 as usize}, cpu: sink *GemTxCpu,
 
 private fn gem_tx_start() { gem.ncr = gem.ncr | (1 << 9); }
 
-// The cap ran out with the descriptor still GEM's: the frame may still be
+// The deadline expired with the descriptor still GEM's: the frame may still be
 // read. Halt GEM; only a confirmed halt returns the buffer to the CPU, and
 // either way no later frame is sent this boot.
 private fn gem_tx_unconfirmed(device: sink *GemTxDevice) {
