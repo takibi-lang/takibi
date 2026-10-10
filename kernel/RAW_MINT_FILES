@@ -23,6 +23,10 @@ kernel/platform/qemu/device_map.tkb
 kernel/platform/rpi5/pcie.tkb
 kernel/platform/rpi5/system_timer_dtb.tkb
 kernel/platform/rpi5/device_map.tkb
+# Page runs turned into pool chunks by region_bytes_assume; found when the
+# check began counting that call, and leave with #637 step B
+kernel/kernel/fd_table.tkb
+kernel/mm/process_image.tkb
 
 # S: to be split into a small mint file and rewritten code
 kernel/kernel/process.tkb
