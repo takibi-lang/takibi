@@ -134,10 +134,6 @@ fn gic_pmu_ppi_enable() !{unsafe} {
     *gicd_isenabler0 = *gicd_isenabler0 | (1 << qemu_pmu_gic_intid);
 }
 
-fn irq_uart_rx_unmask() !{unsafe} {
-    uart.imsc = (1 << 4) | (1 << 6) | (1 << 9); // RXIM | RTIM | BEIM
-}
-
 fn platform_irq_dispatch_inner(frame: sink FrameRef[process], lower_el: bool)
         -> AnyFrame !{interrupt, unsafe} {
     let gicc_iar: *io u32 = unsafe { (qemu_gicc_base + 0x0C) as *io u32 };

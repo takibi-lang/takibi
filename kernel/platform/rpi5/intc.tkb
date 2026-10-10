@@ -373,10 +373,6 @@ fn gic_pmu_spi_enable() !{unsafe} {
     *gicd_isenabler1 = 1 << 16;
 }
 
-fn irq_uart_rx_unmask() !{unsafe} {
-    uart.imsc = (1 << 4) | (1 << 6) | (1 << 9); // RXIM | RTIM | BEIM
-}
-
 fn rpi5_irq_dispatch_inner(frame: sink FrameRef[process], lower_el: bool)
         -> AnyFrame !{interrupt, unsafe} {
     let gicc_iar: *io u32 = unsafe { (rpi5_gicc_base + 0x0C) as *io u32 };
