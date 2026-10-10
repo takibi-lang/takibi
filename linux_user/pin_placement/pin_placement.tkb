@@ -115,6 +115,19 @@ fn migrate(owner: borrow Owner[p], cpu: usize) -> MigrateResult !{unsafe} {
     }
 }
 
+// The scheduler's gate and an affinity change hold only a slot, not the
+// process's identity: they ask whether a pin is there without touching it.
+fn set_affinity(slot: {0..<4 as usize}, cpu: usize) -> MigrateResult {
+    let guard = run_lock_take();
+    if (place_is_full(guard, records[slot].pin)) {
+        run_lock_give(guard);
+        return MigrateResult::Refused;
+    }
+    records[slot].cpu = cpu;
+    run_lock_give(guard);
+    return MigrateResult::Moved;
+}
+
 // Exit: the pin ends only with the evidence that the stack is gone.
 fn exit_release(owner: sink Owner[p]) -> bool !{unsafe} {
     let guard = run_lock_take();
@@ -155,6 +168,12 @@ fn app_main() !{unsafe} {
     };
     owner_leave(ticked);
     report("migration while pinned refused", refused && records[1].cpu == 2);
+    let affinity_refused = match set_affinity(1, 0) {
+        MigrateResult::Moved => { false }
+        MigrateResult::Refused => { true }
+    };
+    report("affinity change while pinned refused",
+           affinity_refused && records[1].cpu == 2);
     // Action 3: re-entry, a second pin request finds the first.
     let again = owner_enter(records[1].generation);
     let duplicate = match pin_take(again, 3) {
@@ -174,4 +193,9 @@ fn app_main() !{unsafe} {
     };
     owner_leave(reused);
     report("unpinned record moves", moved && records[1].cpu == 0);
+    let affinity_moved = match set_affinity(1, 3) {
+        MigrateResult::Moved => { true }
+        MigrateResult::Refused => { false }
+    };
+    report("unpinned affinity change applies", affinity_moved && records[1].cpu == 3);
 }

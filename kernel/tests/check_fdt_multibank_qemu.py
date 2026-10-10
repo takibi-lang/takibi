@@ -25,7 +25,7 @@ LABEL = "kernel/qemu fdt-multibank"
 
 MULTIBANK_EXPECTED = (
     b"memory: source=dtb base_bytes=1073741824 detected_mib=1024 "
-    b"regions=1 reservations=0 allocator_pages=261560")
+    b"regions=1 reservations=0 allocator_pages=261552")
 # The page count is what is left after every statically laid-out kernel
 # region, so it moves whenever the image or the linker script does -- which
 # is the point of asserting it exactly rather than as a range. It went
@@ -42,11 +42,11 @@ MULTIBANK_EXPECTED = (
 # next 32 KiB alignment granule, moving these QEMU counts down by 8 pages.
 LOW_MEMORY_EXPECTED = (
     b"memory: source=dtb base_bytes=1073741824 detected_mib=128 "
-    b"regions=1 reservations=0 allocator_pages=32184")
+    b"regions=1 reservations=0 allocator_pages=32176")
 MISSING_EXPECTED = b"memory: boot DTB has no usable /memory; halting"
 DISCONTIGUOUS_MEMORY_EXPECTED = (
     b"memory: source=dtb base_bytes=1073741824 detected_mib=768 "
-    b"regions=2 reservations=0 allocator_pages=196024")
+    b"regions=2 reservations=0 allocator_pages=196016")
 DISCONTIGUOUS_PROBE_EXPECTED = (
     b"memory: physical hole excluded and both extent boundaries round-trip")
 

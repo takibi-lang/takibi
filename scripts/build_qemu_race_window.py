@@ -74,8 +74,8 @@ WINDOWS = {
     "705-missed-arrival": {
         "spin": None,
         "check": [("kernel/process.tkb",
-                   "        scheduled_process_set_affinity_mask(guard, slot, 1);\n",
-                   "        scheduled_process_set_affinity_mask(guard, slot, 2);\n")],
+                   "        match scheduled_process_set_affinity_mask(guard, slot, 1) {\n",
+                   "        match scheduled_process_set_affinity_mask(guard, slot, 2) {\n")],
     },
     # The actual timer no-successor leave must be necessary to spread's
     # observation. Ordinary syscall migration after its finite spin cannot

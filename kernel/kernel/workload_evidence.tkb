@@ -100,6 +100,9 @@ must_use variant WorkloadBusyProgressResult {
     Value(usize);
     StartRequested;
     FinishRequested;
+    // Answer with the value once the caller has pinned the process to
+    // this CPU (GitHub issue #686).
+    PinThen(usize);
 }
 
 must_use variant WorkloadPeerNetWakeResult {
@@ -1036,7 +1039,8 @@ private fn workload_busy_absolute_difference(left: usize, right: usize)
 // thing a second core is measured against, which is why 1 is "stop
 // reporting" and not "stop".
 private fn workload_busy_record_progress_locked(
-        guard: borrow ProcessRunGuard[lock], tag: usize, checksum: usize,
+        guard: borrow ProcessRunGuard[lock],
+        tag: usize, checksum: usize,
         input_steps: usize) -> WorkloadBusyProgressResult !{unsafe} {
     if (workload_busy_pair.restart_report_state ==
             WorkloadRestartReportState::Reported) {
@@ -1084,11 +1088,10 @@ private fn workload_busy_record_progress_locked(
                     // may hand this process to CPU 0 between them, where
                     // exit cannot provide the peer stack-release evidence.
                     // Hold its placement through the actual exit, under the
-                    // same run guard that chose this peer.
-                    scheduled_process_set_affinity_mask(guard,
-                        kernel_syscall_process_slot(), 1 << cpu_id());
+                    // same run guard that chose this peer: the caller pins
+                    // the process until it is reaped (GitHub issue #686).
                     workload_busy_pair.peer_exit_cpu = cpu_id();
-                    return WorkloadBusyProgressResult::Value(2);
+                    return WorkloadBusyProgressResult::PinThen(2);
                 }
                 // GitHub issue #604: the armed process was on a peer when
                 // it was armed, and nothing kept it there. Its mask was
@@ -2065,8 +2068,9 @@ private fn workload_move_cost_report() -> usize {
     return 1;
 }
 
-fn workload_busy_record_progress(tag: usize, checksum: usize,
-                                 input_steps: usize) -> usize !{unsafe} {
+fn workload_busy_record_progress(
+        current: borrow ProcessCurrent[process, ProcessState::Running],
+        tag: usize, checksum: usize, input_steps: usize) -> usize !{unsafe} {
     if (tag == WORKLOAD_ORDINARY_PLACEMENT_REPORT_TAG) {
         return workload_ordinary_placement_report();
     }
@@ -2077,6 +2081,17 @@ fn workload_busy_record_progress(tag: usize, checksum: usize,
     match workload_busy_record_progress_locked(
             guard, tag, checksum, input_steps) {
         WorkloadBusyProgressResult::Value(value) => {
+            process_run_unlock(guard);
+            return value;
+        }
+        WorkloadBusyProgressResult::PinThen(value) => {
+            let core: usize = cpu_id();
+            if (core < KERNEL_MAX_CORES) {
+                match kernel_process_pin_current_locked(guard, current, core) {
+                    ProcessPinResult::Pinned => {}
+                    ProcessPinResult::AlreadyPinned => {}
+                }
+            }
             process_run_unlock(guard);
             return value;
         }
@@ -2137,7 +2152,7 @@ fn workload_busy_record_progress(tag: usize, checksum: usize,
 // already had (init did not restart it too) and its counter must have moved
 // while A was away (it kept running rather than waiting on its sibling).
 private fn workload_busy_restart_step(
-        guard: borrow ProcessRunGuard[lock], tag: usize) -> usize !{unsafe} {
+        guard: borrow ProcessRunGuard[scheduled_process_run_lock], tag: usize) -> usize !{unsafe} {
     if (workload_busy_pair.restart_requested == false) {
         if (tag != WORKLOAD_BUSY_TAG_A) { return 0; }
         workload_busy_pair.restart_requested = true;

@@ -5344,7 +5344,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         if (x0 == 12) {
             return syscall_finish_current(frame, SyscallAction::Resume(kernel_process_stack_owner_probe(x1)), current_authority);
         }
-        return syscall_finish_current(frame, SyscallAction::Resume(workload_busy_record_progress(x0, x1, x2)), current_authority);
+        return syscall_finish_current(frame, SyscallAction::Resume(workload_busy_record_progress(current_authority, x0, x1, x2)), current_authority);
     }
 
     if (number == AARCH64_NR_TAKIBI_PARENT_PROGRESS) {

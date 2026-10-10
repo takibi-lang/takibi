@@ -341,6 +341,11 @@ struct ProcessRecord {
     // GitHub issue #9: sched_setaffinity's mask, one bit per CPU. 0 means
     // the process never set one, which is every online CPU.
     affinity_mask: usize;
+    // GitHub issue #686: a placement pin taken by the process itself and
+    // kept across returns to EL0. While it is here affinity_mask cannot
+    // change, so no migration can move the process; it is released only
+    // when the record is reaped, after the physical stack is unowned.
+    private pin: Place(ProcessPin[self]) guarded_by(scheduled_process_run_lock);
     // GitHub issue #9: the migration gate sent this process's current
     // syscall to core 0. It stays off every peer until that call completes.
     core0_for_call: bool;
@@ -1710,10 +1715,72 @@ fn scheduled_process_affinity_mask(guard: borrow ProcessRunGuard[lock],
     return scheduled_process_record_locked(guard, slot).affinity_mask;
 }
 
-fn scheduled_process_set_affinity_mask(guard: borrow ProcessRunGuard[lock],
-        slot: usize,
-        mask: usize) {
+// GitHub issue #686: a pinned process keeps its mask.
+must_use variant ProcessAffinityWrite {
+    Written;
+    Pinned;
+}
+
+fn scheduled_process_set_affinity_mask(
+        guard: borrow ProcessRunGuard[&scheduled_process_run_lock],
+        slot: usize, mask: usize) -> ProcessAffinityWrite {
+    if (place_is_full(guard, scheduled_process_record_locked(guard, slot).pin)) {
+        return ProcessAffinityWrite::Pinned;
+    }
     scheduled_process_record_locked(guard, slot).affinity_mask = mask;
+    return ProcessAffinityWrite::Written;
+}
+
+// GitHub issue #686: the placement pin. Minted only here, by the process
+// itself while it runs, and ended only at reap (scheduled_process_pin_release).
+private linear view ProcessPin[process: usize];
+
+must_use variant ProcessPinResult {
+    Pinned;
+    AlreadyPinned;
+}
+
+// Pin the running process to `cpu` until it is reaped.
+fn kernel_process_pin_current_locked(
+        guard: borrow ProcessRunGuard[&scheduled_process_run_lock],
+        current: borrow ProcessCurrent[process, ProcessState::Running],
+        cpu: {0..<KERNEL_MAX_CORES as usize}) -> ProcessPinResult !{unsafe} {
+    let previous = place_take(guard, scheduled_process_record_current(current).pin);
+    match previous {
+        Place::Empty => {
+            let Place::Empty = place_put(guard,
+                scheduled_process_record_current(current).pin,
+                view ProcessPin[process]);
+            scheduled_process_record_current(current).affinity_mask = 1 << cpu;
+            return ProcessPinResult::Pinned;
+        }
+        Place::Full(earlier) => {
+            let Place::Empty = place_put(guard,
+                scheduled_process_record_current(current).pin, earlier);
+            return ProcessPinResult::AlreadyPinned;
+        }
+    }
+}
+
+private fn process_pin_end(pin: sink ProcessPin[process]) {}
+
+// The pin ends with its record. Reap runs only for a process whose
+// physical stack no CPU owns any more; that is checked here, since the pin
+// exists to keep it on one CPU until then.
+private fn scheduled_process_pin_release(
+        guard: borrow ProcessRunGuard[&scheduled_process_run_lock],
+        owner: borrow ScheduledProcessOwner[process]) !{unsafe} {
+    let held = place_take(guard, scheduled_process_record_owned(owner).pin);
+    match held {
+        Place::Empty => {}
+        Place::Full(pin) => {
+            if (scheduled_process_record_owned(owner).stack_owner_cpu !=
+                    PROCESS_STACK_UNOWNED) {
+                kernel_invariant_stop();
+            }
+            process_pin_end(pin);
+        }
+    }
 }
 
 fn scheduled_process_core0_for_call(guard: borrow ProcessRunGuard[lock],
@@ -3312,11 +3379,11 @@ linear struct ProcessRunGuard[lock: addr] {
 // the acquire in linux_user's finite lock-ORDER table, and this is not a
 // pool lock. See kernel/lib/intrusive_pool.tkb's tag counter for what
 // putting a non-pool in that table cost.
-fn process_run_lock() -> ProcessRunGuard[scheduled_process_run_lock]
+fn process_run_lock() -> ProcessRunGuard[&scheduled_process_run_lock]
         !{acquires_lock_40_process_run, single_instance_lock,
           lock_guard_40_process_run,
           irq_masking_guard} {
-    let mut guard: ProcessRunGuard[scheduled_process_run_lock] =
+    let mut guard: ProcessRunGuard[&scheduled_process_run_lock] =
         { mutex_acquire(&scheduled_process_run_lock) };
     // GitHub issue #606: what changed while nobody held the lock.
     if (protocol_trace_is_active()) {
@@ -3715,12 +3782,13 @@ fn scheduled_process_reap_teardown(
 // costs a few stores and keeps one rule instead of two. The record annotation
 // checks live loans before any reset, even though the guard itself is borrowed.
 fn scheduled_process_reap_remove(
-        guard: borrow ProcessRunGuard[scheduled_process_run_lock],
+        guard: borrow ProcessRunGuard[&scheduled_process_run_lock],
         owner: sink ScheduledProcessOwner[process],
         state: sink ScheduledProcessState[process, ProcessState::Reapable])
         !{unsafe, invalidates_ProcessHandle,
            record_mutates_ScheduledProcessOwner} {
     scheduled_process_state_drop(state);
+    scheduled_process_pin_release(guard, owner);
     scheduled_process_record_reset(guard, owner.pool_index);
     scheduled_process_slot_remove(guard, owner.pool_index);
     scheduled_process_owner_drop(owner);
@@ -5290,7 +5358,11 @@ fn kernel_process_spread_timer_progress(pid: usize, arm: bool)
         spread_timer_phase = SpreadTimerPhase::Armed;
         // Opening CPU 0 and arming are one publication, not two syscalls
         // with a window in which the child could already have left EL0.
-        scheduled_process_set_affinity_mask(guard, slot, 1);
+        match scheduled_process_set_affinity_mask(guard, slot, 1) {
+            ProcessAffinityWrite::Written => {}
+            // A fixture's own process is never pinned.
+            ProcessAffinityWrite::Pinned => { kernel_invariant_stop(); }
+        }
         atomic_word_store(&spread_timer_active, 1);
         process_run_unlock(guard);
         return SpreadTimerResult::Armed;
@@ -5329,8 +5401,12 @@ private fn kernel_process_spread_timer_enter(frame: borrow FrameRef[process]) {
                 scheduled_process_same_generation(execution_state[execution_cpu_index()].current_handle,
                     spread_timer_child) &&
                 kernel_process_frame_belongs_to(spread_timer_child, frame)) {
-                scheduled_process_set_affinity_mask(guard,
-                    spread_timer_child.pool_index, 2);
+                match scheduled_process_set_affinity_mask(guard,
+                        spread_timer_child.pool_index, 2) {
+                    ProcessAffinityWrite::Written => {}
+                    // A fixture's own process is never pinned.
+                    ProcessAffinityWrite::Pinned => { kernel_invariant_stop(); }
+                }
                 spread_timer_phase = SpreadTimerPhase::Changed;
             }
         }
@@ -5473,7 +5549,14 @@ fn kernel_process_affinity_set(pid: usize, requested: usize)
         process_run_unlock(guard);
         return ProcessAffinityResult::Invalid;
     }
-    scheduled_process_set_affinity_mask(guard, slot, mask);
+    // GitHub issue #686: a process pinned until its reap keeps its CPU.
+    match scheduled_process_set_affinity_mask(guard, slot, mask) {
+        ProcessAffinityWrite::Written => {}
+        ProcessAffinityWrite::Pinned => {
+            process_run_unlock(guard);
+            return ProcessAffinityResult::Invalid;
+        }
+    }
     let mut leave_this_cpu: bool = false;
     if (execution_state[execution_cpu_index()].current_live) {
         if (execution_state[execution_cpu_index()].current_handle.pool_index == slot) {
@@ -8666,7 +8749,11 @@ private fn kernel_process_exit_waiter_probe(parent: ProcessHandle) -> bool {
     // there, but its affinity must keep it from becoming a successor on core
     // 1 now that an unset mask means every online CPU.
     let probe_guard = process_run_lock();
-    scheduled_process_set_affinity_mask(probe_guard, parent.pool_index, 1);
+    match scheduled_process_set_affinity_mask(probe_guard, parent.pool_index, 1) {
+        ProcessAffinityWrite::Written => {}
+        // A fixture's own process is never pinned.
+        ProcessAffinityWrite::Pinned => { kernel_invariant_stop(); }
+    }
     let peer_wait_parent_rejected: bool =
         kernel_process_cpu_allows_slot(probe_guard, 1, parent.pool_index) ==
             false;
@@ -8782,8 +8869,12 @@ fn kernel_process_scheduler_probe() -> bool !{changes_witness_ProcessCurrent} {
             // drives the scheduler by direct calls. Keep that test-only
             // Ready frame away from the live peer idle loop.
             let child_guard = process_run_lock();
-            scheduled_process_set_affinity_mask(child_guard,
-                execution_state[execution_cpu_index()].current_handle.pool_index, 1);
+            match scheduled_process_set_affinity_mask(child_guard,
+                    execution_state[execution_cpu_index()].current_handle.pool_index, 1) {
+                ProcessAffinityWrite::Written => {}
+                // A fixture's own process is never pinned.
+                ProcessAffinityWrite::Pinned => { kernel_invariant_stop(); }
+            }
             let mut synthetic_child_peer_refused: bool = true;
             for cpu: usize in 1..<KERNEL_MAX_CORES {
                 if (kernel_process_cpu_allows_slot(child_guard,
