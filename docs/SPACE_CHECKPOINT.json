@@ -2,8 +2,8 @@
   "date": "2026-10-10",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "28b51cd0f896fb753726628db8d58542ce8b28251c1b2340ae205b551f1517fd",
-  "workload": "#637 step A: RPi5 GIC, MIP0 and RP1 MSI-X through IoHandles. Linked kernels compared against origin/main.",
+  "source_sha256": "e7e91084dcd800a7cde6d836e8e191f43ce35859bb97a53512693af56057984d",
+  "workload": "#637 stage 3: confinement counts region_bytes_assume calls; fd_table and process_image join the mint list. Linked kernels compared against origin/main.",
   "evidence": [
     "docs/PROCESS_PIN_SPACE_2026-10-10.md",
     "docs/BOUNDS_CONTRACT_SPACE_2026-10-10.md",
@@ -44,6 +44,6 @@
     "docs/GEM_TX_IRQ_2026-10-10.md",
     "docs/GEM_TX_IRQ_BULK_2026-10-10.json"
   ],
-  "assessment": "RPi5: text +896 B, data +40 B (five 8-byte handles), BSS and usable_ram_start unchanged; measured on top of 4e88fd5f (which already moved GEM to an IoHandle). QEMU unchanged.",
+  "assessment": "QEMU and RPi5 text, data, BSS and usable_ram_start unchanged; no data/BSS symbol changed size. The change adds a compile-time diagnostic only.",
   "next_trigger": "Production runtime metadata extent migration, a stored allocator authority through array/place rules, or another completed kernel feature/stage requires fresh workload measurement. Any change to generated production code, storage or allocation invalidates this reuse."
 }
