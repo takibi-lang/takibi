@@ -255,6 +255,13 @@ let active_static_scope : static_scope option ref = ref None
 let function_where : (string, Ast.where_cmp list * ty) Hashtbl.t =
   Hashtbl.create 16
 
+(* GitHub issue #131 slice 3: for a function returning `-> &mut T @ n`,
+   its parameter types with one more component, a TView whose one static
+   is n, built in the parameters' static scope. Instantiating it and
+   unifying the parameters with a call's arguments names the holder a
+   guarded_by place's `self` refers to. *)
+let function_holder : (string, ty) Hashtbl.t = Hashtbl.create 16
+
 let where_cmp_text = function Ast.WhereLt -> "<" | Ast.WhereLe -> "<="
 
 let runtime_bounds_regions = ref StringSet.empty
@@ -2769,6 +2776,46 @@ let rec negate_cond (e : Ast.expr) : Ast.expr option =
   | BinOp (Ne, a, b) -> Some { e with desc = BinOp (Eq, a, b) }
   | _ -> None
 
+(* The single `addr` index a place operation's guard carries: the lock
+   it holds. Shared by the same-container form and the guarded_by form. *)
+let place_guard_lock op (guard : Ast.expr) gt =
+  (* Whichever shape the guard is. GitHub issue #451: a guard was an erased
+     `linear view` until a real lock needed one to carry the interrupt mask
+     it must restore, which a view cannot do -- it has no runtime payload.
+     So a linear STRUCT with the same static parameters is equally a guard
+     here, and the check is the same question asked of
+     `indexed_struct_params` instead of `view_params`. What a place
+     operation needs from a guard is its identity, and that is erased in
+     both. *)
+  let single_addr_arg formals args =
+    let addr_args = List.fold_left2 (fun found (_, sort) arg ->
+      match sort with
+      | Ast.TypeNamed "addr" -> arg :: found
+      | _ -> found) [] formals args in
+    match addr_args with
+    | [lock] -> lock
+    | _ -> raise (TypeError (guard.loc,
+        (op ^ " guard must carry exactly one addr index")))
+  in
+  match repr gt with
+  | TView (name, args)
+    when Hashtbl.find_opt view_kinds name = Some Ast.KindLinear ->
+      single_addr_arg
+        (Option.value (Hashtbl.find_opt view_params name) ~default:[]) args
+  | TIndexedStruct (name, args)
+    when Hashtbl.find_opt indexed_struct_kinds name = Some Ast.KindLinear ->
+      single_addr_arg
+        (Option.value (Hashtbl.find_opt indexed_struct_params name) ~default:[])
+        args
+  (* Phrased to keep the older half of the sentence intact:
+     examples/stable_owner_without_guard_wrong pins this diagnostic as a
+     substring, and AGENTS.md is explicit that a compiler change does not
+     license editing examples/. The message has to grow rather than be
+     rewritten. *)
+  | _ -> raise (TypeError (guard.loc,
+      (op ^ " requires a linear erased-view guard or an \
+       indexed linear struct guard carrying one addr")))
+
 let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
   match e.desc with
   | IntLit _    -> fresh ()  (* polymorphic: unifies with any integer type via context *)
@@ -4155,6 +4202,99 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
         "stable_replace was removed: a stored linear value lives in a \
          Place(T) field; use place_take(guard, &c.mutex, c.slot) or \
          place_put(guard, &c.mutex, c.slot, value) (GitHub issue #131)"))
+  | Call (("%gplace_take" | "%gplace_put") as exchange, args) ->
+      (* GitHub issue #131 slice 3 / #686: a place whose field declares the
+         global lock that serializes it (guarded_by). The guard must hold
+         that lock, and `self` in the field's type is the static of the
+         reference the field is reached through. *)
+      let op = String.sub exchange 2 (String.length exchange - 2) in
+      let op = "place_" ^ String.sub op 6 (String.length op - 6) in
+      (match args with
+       | [guard; ({ desc = FieldGet (base_expr, fname); _ } as field_expr);
+          replacement] ->
+           (match guard.desc with
+            | Var _ -> ()
+            | _ -> raise (TypeError (guard.loc,
+                (op ^ " guard must be a bare linear guard binding"))));
+           let guard_lock =
+             place_guard_lock op guard (infer_expr senv eenv tyenv fenv guard) in
+           let bt = infer_expr senv eenv tyenv fenv base_expr in
+           let (sname, static_args) = match struct_instance (repr bt) with
+             | Some x -> x
+             | None -> raise (TypeError (base_expr.loc,
+                 (op ^ " target must be a struct field")))
+           in
+           let lock = match Guarded_registry.lock_of sname fname with
+             | Some lock -> lock
+             | None -> raise (TypeError (field_expr.loc, Printf.sprintf
+                 "field '%s.%s' declares no guarded_by lock; name its mutex: \
+                  %s(guard, &c.mutex, c.%s%s)" sname fname op fname
+                 (if op = "place_put" then ", value" else "")))
+           in
+           (try unify_static guard_lock
+                  (static_identity_for_place { field_expr with desc = Var lock })
+            with Unify_error _ ->
+              raise (TypeError (guard.loc, Printf.sprintf
+                "%s guard does not hold '%s', the lock that guards '%s.%s'"
+                op lock sname fname)));
+           check_private_field_access field_expr.loc sname fname;
+           if not (is_stable_owner_field sname fname) then
+             raise (TypeError (field_expr.loc, Printf.sprintf
+               "field '%s.%s' is not a place; %s requires a private Place field"
+               sname fname op));
+           let field_ast = match StringMap.find_opt sname senv with
+             | Some (fs, _, _) ->
+                 (match List.assoc_opt fname fs with
+                  | Some ft -> ft
+                  | None -> raise (TypeError (field_expr.loc,
+                      Printf.sprintf "no field '%s' in struct '%s'" fname sname)))
+             | None -> raise (TypeError (base_expr.loc,
+                 Printf.sprintf "unknown struct type '%s'" sname))
+           in
+           let field_ty =
+             if not (Ast.type_mentions_static "self" field_ast) then
+               field_type_for_instance sname static_args field_ast
+             else
+               let template = match base_expr.desc with
+                 | Call (_, _) ->
+                     Option.bind
+                       (StringMap.find_opt (loc_key base_expr.loc) !resolved_call_targets)
+                       (Hashtbl.find_opt function_holder)
+                 | _ -> None
+               in
+               let holder = match base_expr.desc, template with
+                 | Call (_, call_args), Some template ->
+                     (match instantiate_static_params template with
+                      | TFun (params, TView (_, [ holder ]), _)
+                        when List.length params = List.length call_args ->
+                          List.iter2 (fun param (arg : Ast.expr) ->
+                            unify_at arg.loc
+                              (infer_expr senv eenv tyenv fenv arg) param)
+                            params call_args;
+                          holder
+                      | _ -> raise (TypeError (base_expr.loc,
+                          "BUG: malformed holder template")))
+                 | _ -> raise (TypeError (base_expr.loc, Printf.sprintf
+                     "'%s.%s' holds a value indexed by its holder (self): \
+                      reach it through a reference that names the holder, \
+                      such as `-> &mut %s @ p`" sname fname sname))
+               in
+               let scope = create_static_scope () in
+               bind_static scope "self" holder;
+               of_ast_in_decl_scope scope field_ast
+           in
+           let rt = infer_expr senv eenv tyenv fenv replacement in
+           let rt = adapt_actual_to_expected tyenv replacement rt field_ty in
+           unify_at replacement.loc rt field_ty;
+           (match repr field_ty with
+            | TVariant _ when is_linear_payload_ty field_ty -> field_ty
+            | _ -> raise (TypeError (field_expr.loc,
+                (op ^ " target must hold a linear variant"))))
+       | [_; field; _] ->
+           raise (TypeError (field.loc,
+             (op ^ " second argument must be a guarded_by place field")))
+       | _ -> raise (TypeError (e.loc,
+           ("BUG: " ^ op ^ " reached the checker without its replacement"))))
   | Call (("%place_take" | "%place_put") as exchange, args) ->
       let op = Generic_variant.surface_name exchange in
       (match args with
@@ -4168,48 +4308,8 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
             | Var _ -> ()
             | _ -> raise (TypeError (guard.loc,
                 (op ^ " guard must be a bare linear guard binding"))));
-           let gt = infer_expr senv eenv tyenv fenv guard in
-           (* The single `addr` index the guard carries, whichever shape it
-              is. GitHub issue #451: a guard was an erased `linear view`
-              until a real lock needed one to carry the interrupt mask it
-              must restore, which a view cannot do -- it has no runtime
-              payload. So a linear STRUCT with the same static parameters
-              is equally a guard here, and the check is the same question
-              asked of `indexed_struct_params` instead of `view_params`.
-              What a place operation needs from a guard is its identity, and
-              that is erased in both. *)
-           let single_addr_arg formals args =
-             let addr_args = List.fold_left2 (fun found (_, sort) arg ->
-               match sort with
-               | Ast.TypeNamed "addr" -> arg :: found
-               | _ -> found) [] formals args in
-             match addr_args with
-             | [lock] -> lock
-             | _ -> raise (TypeError (guard.loc,
-                 (op ^ " guard must carry exactly one addr index")))
-           in
-           let guard_lock = match repr gt with
-            | TView (name, args)
-              when Hashtbl.find_opt view_kinds name = Some Ast.KindLinear ->
-                single_addr_arg
-                  (Option.value (Hashtbl.find_opt view_params name) ~default:[])
-                  args
-            | TIndexedStruct (name, args)
-              when Hashtbl.find_opt indexed_struct_kinds name
-                   = Some Ast.KindLinear ->
-                single_addr_arg
-                  (Option.value (Hashtbl.find_opt indexed_struct_params name)
-                     ~default:[])
-                  args
-            (* Phrased to keep the older half of the sentence intact:
-               examples/stable_owner_without_guard_wrong pins this
-               diagnostic as a substring, and AGENTS.md is explicit that a
-               compiler change does not license editing examples/. The
-               message has to grow rather than be rewritten. *)
-            | _ -> raise (TypeError (guard.loc,
-                (op ^ " requires a linear erased-view guard or an \
-                 indexed linear struct guard carrying one addr")))
-           in
+           let guard_lock =
+             place_guard_lock op guard (infer_expr senv eenv tyenv fenv guard) in
            let lock_ty = infer_expr senv eenv tyenv fenv lock_addr in
            (match repr lock_ty with
             | TPtr _ | TAlignedPtr _ -> ()
@@ -4246,6 +4346,12 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
              raise (TypeError (field_expr.loc, Printf.sprintf
                "field '%s.%s' is not a place; %s requires a private Place field"
                sname fname op));
+           (match Guarded_registry.lock_of sname fname with
+            | Some lock -> raise (TypeError (lock_addr.loc, Printf.sprintf
+                "'%s.%s' is guarded_by(%s); name no mutex: %s(guard, c.%s%s)"
+                sname fname lock op fname
+                (if op = "place_put" then ", value" else "")))
+            | None -> ());
            let fields = match StringMap.find_opt sname senv with
              | Some (fs, _, _) -> fs
              | None -> raise (TypeError (base_expr.loc,
@@ -7671,6 +7777,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   Hashtbl.reset indexed_struct_params;
   Hashtbl.reset indexed_struct_kinds;
   Hashtbl.reset function_where;
+  Hashtbl.reset function_holder;
   List.iter (function
     | Ast.OwnedStructDef (name, kind, params, _, _, _, _, _, _) ->
         Hashtbl.replace indexed_struct_params name params;
@@ -8893,6 +9000,22 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         validation_static_scope := None;
         allow_implicit_static := false;
         List.iter (fun (fname, ty) ->
+          (* GitHub issue #131 slice 3: guarded_by and `self`. *)
+          (match Guarded_registry.lock_of sname fname with
+           | Some lock ->
+               if not (is_stable_owner_field sname fname) then
+                 raise (TypeError (sloc, Printf.sprintf
+                   "guarded_by on '%s.%s': only a private Place field holding \
+                    linear content is guarded by a lock" sname fname));
+               if not (StringSet.mem lock !global_address_names) then
+                 raise (TypeError (sloc, Printf.sprintf
+                   "guarded_by on '%s.%s' names '%s', which is not a global"
+                   sname fname lock))
+           | None ->
+               if Ast.type_mentions_static "self" ty then
+                 raise (TypeError (sloc, Printf.sprintf
+                   "'self' in '%s.%s' names the holder of a guarded_by place; \
+                    declare the field guarded_by(lock)" sname fname)));
           if type_mentions_view ty then
             raise (TypeError (sloc, Printf.sprintf
               "struct field '%s.%s' cannot hold an erased view" sname fname));
@@ -9446,10 +9569,23 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.FuncDef fdef ->
         check_reserved_fn fdef.def_loc fdef.name;
         let scope = create_static_scope () in
+        if List.exists (function
+             | (_, Some t) -> Ast.type_mentions_static "self" t
+             | (_, None) -> false) fdef.params
+           || Option.fold ~none:false ~some:(Ast.type_mentions_static "self")
+                fdef.ret_type then
+          raise (TypeError (fdef.def_loc, Printf.sprintf
+            "'self' in the signature of '%s': it names only the holder of a \
+             guarded_by place, inside that field's type" fdef.name));
         let pts = List.map (fun (_, t) -> of_ast_opt_in_decl_scope scope t) fdef.params in
         let rt  = ret_of_ast_opt_in_decl_scope scope fdef.ret_type in
         let key = overload_key fdef.name fdef.params in
         register_definition fdef.def_loc key fdef.name;
+        (match Option.bind fdef.ret_type region_return_annotation with
+         | Some (_, holder, _) ->
+             Hashtbl.replace function_holder key
+               (TFun (pts, TView ("__holder", [ static_of_ast scope holder ]), None))
+         | None -> ());
         if fdef.where_clauses <> [] then begin
           let terms = List.concat_map (fun (a, _, b) ->
             [ static_of_ast scope a; static_of_ast scope b ])
@@ -10665,14 +10801,38 @@ let infer_program (prog : Ast.toplevel list) : program_types =
        container are tracked: their identity is the name, with no index to
        be reassigned between the take and the put. *)
     let place_fact_label = "%place" in
+    (* A guarded_by place is reached through an accessor call whose
+       `@ p` names its holder; with bare-variable arguments the same call
+       names the same record, and a rebound argument is a new binding id,
+       so the key changes with it. *)
+    let accessor_key (base : Ast.expr) =
+      match base.desc with
+      | Ast.Call (fname, args) ->
+          let ids = List.map (fun (a : Ast.expr) -> match a.desc with
+            | Ast.Var n ->
+                (match pvar_expr a n with
+                 | PVar (id, _) -> Some (Printf.sprintf "%s#%d" n id)
+                 | PField _ -> None)
+            | _ -> None) args in
+          if List.for_all Option.is_some ids then
+            Some (fname ^ "(" ^ String.concat "," (List.filter_map Fun.id ids) ^ ")")
+          else None
+      | _ -> None
+    in
     let place_fact (guard : Ast.expr) (field : Ast.expr) =
-      match guard.desc, field.desc with
-      | Ast.Var g, Ast.FieldGet (({ desc = Ast.Var c; _ } as container), f)
+      let guard_id = match guard.desc with
+        | Ast.Var g -> (match pvar_expr guard g with
+            | PVar (id, _) -> Some id | PField _ -> None)
+        | _ -> None
+      in
+      match guard_id, field.desc with
+      | Some id, Ast.FieldGet (({ desc = Ast.Var c; _ } as container), f)
         when Local_bindings.id_for_expr binding_resolution container = None
              && not (Hashtbl.mem visible_bindings c) ->
-          (match pvar_expr guard g with
-           | PVar (id, _) -> Some (PField (id, place_fact_label, c ^ "." ^ f))
-           | PField _ -> None)
+          Some (PField (id, place_fact_label, c ^ "." ^ f))
+      | Some id, Ast.FieldGet (base, f) ->
+          Option.map (fun key -> PField (id, place_fact_label, key ^ "." ^ f))
+            (accessor_key base)
       | _ -> None
     in
     let is_place_fact = function
@@ -11400,6 +11560,22 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         when Generic_variant.place_exchange e <> None ->
           check_expr taints moved consume
             (Option.get (Generic_variant.place_exchange e))
+      | Ast.Call (("%gplace_take" | "%gplace_put") as exchange,
+                  [guard; field; replacement]) ->
+          if not consume then
+            raise (TypeError (e.loc,
+              (Printf.sprintf "linear result of '%s' must be moved into an owning binding, returned, or matched"
+                (if exchange = "%gplace_take" then "place_take" else "place_put"))));
+          let moved = check_expr taints moved false guard in
+          let moved = match field.desc with
+            | Ast.FieldGet (base, _) -> check_expr taints moved false base
+            | _ -> moved
+          in
+          let moved = check_expr taints moved true replacement in
+          (match place_fact guard field with
+           | Some fact when exchange = "%gplace_take" -> mv_consume fact moved
+           | Some fact -> mv_clear fact moved
+           | None -> moved)
       | Ast.Call (("%place_take" | "%place_put") as exchange,
                   [guard; lock; field; replacement]) ->
           if not consume then
@@ -12051,7 +12227,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                   branch is unreachable in a program that passed type
                   checking, kept only so this match stays exhaustive. *)
                (moved, declared, taints))
-      | Ast.Expr ({ desc = Ast.Call ("place_put", [guard; _; field; _]); _ } as e)
+      | Ast.Expr ({ desc = Ast.Call ("place_put",
+                     ([guard; _; field; _] | [guard; field; _])); _ } as e)
         when Generic_variant.is_proven_empty_put e ->
           (match place_fact guard field with
            | Some fact when ResourceFlow.is_consumed_on_all_paths fact moved ->

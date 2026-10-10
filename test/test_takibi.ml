@@ -34,6 +34,8 @@ let parse src =
   Publish_registry.reset ();
   No_copy_registry.reset ();
   Per_cpu_registry.reset ();
+  Guarded_registry.reset ();
+  Hashtbl.reset Generic_variant.proven_empty_puts;
   Dma_fixed_registry.reset ();
   Generic_scope.reset ();
   Ast.reset_precedence_errors ();
@@ -68,6 +70,8 @@ let infer_files files =
   Publish_registry.reset ();
   No_copy_registry.reset ();
   Per_cpu_registry.reset ();
+  Guarded_registry.reset ();
+  Hashtbl.reset Generic_variant.proven_empty_puts;
   Dma_fixed_registry.reset ();
   Generic_scope.reset ();
   Ast.reset_precedence_errors ();
@@ -2400,6 +2404,8 @@ let infer_regions src =
   Publish_registry.reset ();
   No_copy_registry.reset ();
   Per_cpu_registry.reset ();
+  Guarded_registry.reset ();
+  Hashtbl.reset Generic_variant.proven_empty_puts;
   Dma_fixed_registry.reset ();
   Generic_scope.reset ();
   Ast.reset_precedence_errors ();
@@ -9828,6 +9834,294 @@ fn f() -> *usize { return &temp_address_outer().r.a; }");
     (expect_type_error "without else is only accepted"
        "variant Choice7k { A; B(usize); }
         fn choose7k(c: Choice7k) { let Choice7k::A = c; }");
+
+  Alcotest.test_case "guarded_by place: put and take under the declared lock" `Quick
+    (expect_codegen_ok
+       "linear view RunGuard7g[lock: addr];
+        private let mut run_lock7g: i32;
+        private let mut other_lock7g: i32;
+        fn run_lock_take7g() -> RunGuard7g[&run_lock7g] {
+          return view RunGuard7g[&run_lock7g];
+        }
+        fn other_lock_take7g() -> RunGuard7g[&other_lock7g] {
+          return view RunGuard7g[&other_lock7g];
+        }
+        fn run_lock_give7g(g: sink RunGuard7g[lock]) {}
+        linear struct Pin7g[p: usize] { id: usize @ p; }
+        linear struct Owner7g[p: usize] { generation: usize @ p; }
+        struct Rec7g {
+          pid: usize;
+          private pin: Place(Pin7g[self]) guarded_by(run_lock7g);
+        }
+        private let mut recs7g: [Rec7g; 4];
+        fn rec_owned7g(o: borrow Owner7g[p]) -> &mut Rec7g @ p !{unsafe} {
+          return &recs7g[0];
+        }
+        fn pin_drop7g(t: sink Pin7g[p]) {}
+        fn main() -> i32 { return 0; }
+        fn pin_set7g(o: borrow Owner7g[p], t: sink Pin7g[p]) {
+          let g = run_lock_take7g();
+          let prev = place_put(g, rec_owned7g(o).pin, t);
+          run_lock_give7g(g);
+          match prev {
+            Place::Empty => {}
+            Place::Full(old) => { pin_drop7g(old); }
+          }
+        }
+        fn pin_clear7g(o: borrow Owner7g[p]) -> bool {
+          let g = run_lock_take7g();
+          let prev = place_take(g, rec_owned7g(o).pin);
+          run_lock_give7g(g);
+          match prev {
+            Place::Empty => { return false; }
+            Place::Full(t) => { pin_drop7g(t); return true; }
+          }
+        }
+");
+
+  Alcotest.test_case "guarded_by place: put back after a take needs no Full arm" `Quick
+    (expect_codegen_ok
+       "linear view RunGuard7g[lock: addr];
+        private let mut run_lock7g: i32;
+        private let mut other_lock7g: i32;
+        fn run_lock_take7g() -> RunGuard7g[&run_lock7g] {
+          return view RunGuard7g[&run_lock7g];
+        }
+        fn other_lock_take7g() -> RunGuard7g[&other_lock7g] {
+          return view RunGuard7g[&other_lock7g];
+        }
+        fn run_lock_give7g(g: sink RunGuard7g[lock]) {}
+        linear struct Pin7g[p: usize] { id: usize @ p; }
+        linear struct Owner7g[p: usize] { generation: usize @ p; }
+        struct Rec7g {
+          pid: usize;
+          private pin: Place(Pin7g[self]) guarded_by(run_lock7g);
+        }
+        private let mut recs7g: [Rec7g; 4];
+        fn rec_owned7g(o: borrow Owner7g[p]) -> &mut Rec7g @ p !{unsafe} {
+          return &recs7g[0];
+        }
+        fn pin_drop7g(t: sink Pin7g[p]) {}
+        fn main() -> i32 { return 0; }
+        fn pin_bounce7g(o: borrow Owner7g[p]) {
+          let g = run_lock_take7g();
+          let prev = place_take(g, rec_owned7g(o).pin);
+          match prev {
+            Place::Empty => {}
+            Place::Full(t) => {
+              let Place::Empty = place_put(g, rec_owned7g(o).pin, t);
+            }
+          }
+          run_lock_give7g(g);
+        }
+        ");
+
+  Alcotest.test_case "guarded_by proven put rejects another holder's record" `Quick
+    (expect_type_error "needs the place known empty"
+       "linear view RunGuard7g[lock: addr];
+        private let mut run_lock7g: i32;
+        private let mut other_lock7g: i32;
+        fn run_lock_take7g() -> RunGuard7g[&run_lock7g] {
+          return view RunGuard7g[&run_lock7g];
+        }
+        fn other_lock_take7g() -> RunGuard7g[&other_lock7g] {
+          return view RunGuard7g[&other_lock7g];
+        }
+        fn run_lock_give7g(g: sink RunGuard7g[lock]) {}
+        linear struct Pin7g[p: usize] { id: usize @ p; }
+        linear struct Owner7g[p: usize] { generation: usize @ p; }
+        struct Rec7g {
+          pid: usize;
+          private pin: Place(Pin7g[self]) guarded_by(run_lock7g);
+        }
+        private let mut recs7g: [Rec7g; 4];
+        fn rec_owned7g(o: borrow Owner7g[p]) -> &mut Rec7g @ p !{unsafe} {
+          return &recs7g[0];
+        }
+        fn pin_drop7g(t: sink Pin7g[p]) {}
+        fn main() -> i32 { return 0; }
+        fn pin_cross7g(o: borrow Owner7g[p], q: borrow Owner7g[p]) {
+          let g = run_lock_take7g();
+          let prev = place_take(g, rec_owned7g(o).pin);
+          match prev {
+            Place::Empty => {}
+            Place::Full(t) => {
+              let Place::Empty = place_put(g, rec_owned7g(q).pin, t);
+            }
+          }
+          run_lock_give7g(g);
+        }
+        ");
+
+  Alcotest.test_case "guarded_by place rejects another holder's token" `Quick
+    (expect_type_error "static value mismatch"
+       "linear view RunGuard7g[lock: addr];
+        private let mut run_lock7g: i32;
+        private let mut other_lock7g: i32;
+        fn run_lock_take7g() -> RunGuard7g[&run_lock7g] {
+          return view RunGuard7g[&run_lock7g];
+        }
+        fn other_lock_take7g() -> RunGuard7g[&other_lock7g] {
+          return view RunGuard7g[&other_lock7g];
+        }
+        fn run_lock_give7g(g: sink RunGuard7g[lock]) {}
+        linear struct Pin7g[p: usize] { id: usize @ p; }
+        linear struct Owner7g[p: usize] { generation: usize @ p; }
+        struct Rec7g {
+          pid: usize;
+          private pin: Place(Pin7g[self]) guarded_by(run_lock7g);
+        }
+        private let mut recs7g: [Rec7g; 4];
+        fn rec_owned7g(o: borrow Owner7g[p]) -> &mut Rec7g @ p !{unsafe} {
+          return &recs7g[0];
+        }
+        fn pin_drop7g(t: sink Pin7g[p]) {}
+        fn main() -> i32 { return 0; }
+        fn pin_wrong7g(o: borrow Owner7g[p], t: sink Pin7g[q]) {
+          let g = run_lock_take7g();
+          let prev = place_put(g, rec_owned7g(o).pin, t);
+          run_lock_give7g(g);
+          match prev {
+            Place::Empty => {}
+            Place::Full(old) => { pin_drop7g(old); }
+          }
+        }
+");
+
+  Alcotest.test_case "guarded_by place rejects a guard for another lock" `Quick
+    (expect_type_error "guard does not hold 'run_lock7g'"
+       "linear view RunGuard7g[lock: addr];
+        private let mut run_lock7g: i32;
+        private let mut other_lock7g: i32;
+        fn run_lock_take7g() -> RunGuard7g[&run_lock7g] {
+          return view RunGuard7g[&run_lock7g];
+        }
+        fn other_lock_take7g() -> RunGuard7g[&other_lock7g] {
+          return view RunGuard7g[&other_lock7g];
+        }
+        fn run_lock_give7g(g: sink RunGuard7g[lock]) {}
+        linear struct Pin7g[p: usize] { id: usize @ p; }
+        linear struct Owner7g[p: usize] { generation: usize @ p; }
+        struct Rec7g {
+          pid: usize;
+          private pin: Place(Pin7g[self]) guarded_by(run_lock7g);
+        }
+        private let mut recs7g: [Rec7g; 4];
+        fn rec_owned7g(o: borrow Owner7g[p]) -> &mut Rec7g @ p !{unsafe} {
+          return &recs7g[0];
+        }
+        fn pin_drop7g(t: sink Pin7g[p]) {}
+        fn main() -> i32 { return 0; }
+        fn pin_wrong_lock7g(o: borrow Owner7g[p], t: sink Pin7g[p]) {
+          let g = other_lock_take7g();
+          let prev = place_put(g, rec_owned7g(o).pin, t);
+          run_lock_give7g(g);
+          match prev {
+            Place::Empty => {}
+            Place::Full(old) => { pin_drop7g(old); }
+          }
+        }
+");
+
+  Alcotest.test_case "guarded_by place with self needs a holder-naming reference" `Quick
+    (expect_type_error "reach it through a reference that names the holder"
+       "linear view RunGuard7g[lock: addr];
+        private let mut run_lock7g: i32;
+        private let mut other_lock7g: i32;
+        fn run_lock_take7g() -> RunGuard7g[&run_lock7g] {
+          return view RunGuard7g[&run_lock7g];
+        }
+        fn other_lock_take7g() -> RunGuard7g[&other_lock7g] {
+          return view RunGuard7g[&other_lock7g];
+        }
+        fn run_lock_give7g(g: sink RunGuard7g[lock]) {}
+        linear struct Pin7g[p: usize] { id: usize @ p; }
+        linear struct Owner7g[p: usize] { generation: usize @ p; }
+        struct Rec7g {
+          pid: usize;
+          private pin: Place(Pin7g[self]) guarded_by(run_lock7g);
+        }
+        private let mut recs7g: [Rec7g; 4];
+        fn rec_owned7g(o: borrow Owner7g[p]) -> &mut Rec7g @ p !{unsafe} {
+          return &recs7g[0];
+        }
+        fn pin_drop7g(t: sink Pin7g[p]) {}
+        fn main() -> i32 { return 0; }
+        fn pin_anon7g(t: sink Pin7g[p]) !{unsafe} {
+          let g = run_lock_take7g();
+          let prev = place_put(g, recs7g[0].pin, t);
+          run_lock_give7g(g);
+          match prev {
+            Place::Empty => {}
+            Place::Full(old) => { pin_drop7g(old); }
+          }
+        }
+");
+
+  Alcotest.test_case "guarded_by place rejects the mutex form" `Quick
+    (expect_type_error "is guarded_by(run_lock7g); name no mutex"
+       "linear view RunGuard7g[lock: addr];
+        private let mut run_lock7g: i32;
+        private let mut other_lock7g: i32;
+        fn run_lock_take7g() -> RunGuard7g[&run_lock7g] {
+          return view RunGuard7g[&run_lock7g];
+        }
+        fn other_lock_take7g() -> RunGuard7g[&other_lock7g] {
+          return view RunGuard7g[&other_lock7g];
+        }
+        fn run_lock_give7g(g: sink RunGuard7g[lock]) {}
+        linear struct Pin7g[p: usize] { id: usize @ p; }
+        linear struct Owner7g[p: usize] { generation: usize @ p; }
+        struct Rec7g {
+          pid: usize;
+          private pin: Place(Pin7g[self]) guarded_by(run_lock7g);
+        }
+        private let mut recs7g: [Rec7g; 4];
+        fn rec_owned7g(o: borrow Owner7g[p]) -> &mut Rec7g @ p !{unsafe} {
+          return &recs7g[0];
+        }
+        fn pin_drop7g(t: sink Pin7g[p]) {}
+        fn main() -> i32 { return 0; }
+        struct Mixed7g { mutex: i32; private pin: Place(Pin7g[self]) guarded_by(run_lock7g); }
+        private let mut mixed7g: Mixed7g;
+        fn mixed_lock7g(m: *i32 @ lock) -> RunGuard7g[lock] { return view RunGuard7g[lock]; }
+        fn mixed7g_take() -> Place(exists q: usize. Pin7g[q]) {
+          let g = mixed_lock7g(&mixed7g.mutex);
+          return place_take(g, &mixed7g.mutex, mixed7g.pin);
+        }
+");
+
+  Alcotest.test_case "self is rejected outside a guarded_by field" `Quick
+    (expect_type_error "names the holder of a guarded_by place"
+       "linear struct Pin7h[p: usize] { id: usize @ p; }
+        struct R7h { private pin: Place(Pin7h[self]); }");
+
+  Alcotest.test_case "guarded_by is rejected on a non-place field" `Quick
+    (expect_type_error "only a private Place field"
+       "private let mut lock7i: i32;
+        struct R7i { private n: usize guarded_by(lock7i); }");
+
+  Alcotest.test_case "guarded_by must name a global" `Quick
+    (expect_type_error "which is not a global"
+       "linear struct Pin7j[p: usize] { id: usize @ p; }
+        struct R7j { private pin: Place(Pin7j[self]) guarded_by(nowhere7j); }");
+
+  Alcotest.test_case "self is rejected in a function signature" `Quick
+    (expect_type_error "'self' in the signature"
+       "linear struct Pin7k[p: usize] { id: usize @ p; }
+        fn f7k(x: sink Pin7k[self]) {}");
+
+  Alcotest.test_case "place_take without a mutex needs a guarded_by field" `Quick
+    (expect_type_error "declares no guarded_by lock"
+       "linear view G7l[lock: addr];
+        linear struct Pin7l[p: usize] { id: usize @ p; }
+        struct R7l { mutex: i32; private pin: Place(exists q: usize. Pin7l[q]); }
+        private let mut r7l: R7l;
+        fn lk7l(m: *i32 @ lock) -> G7l[lock] { return view G7l[lock]; }
+        fn f7l() -> Place(exists q: usize. Pin7l[q]) {
+          let g = lk7l(&r7l.mutex);
+          return place_take(g, r7l.pin);
+        }");
 
   Alcotest.test_case "place_take rejects a guard for another mutex" `Quick
     (expect_type_error "place_take mutex does not match guard identity"

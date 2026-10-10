@@ -4667,6 +4667,12 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
     when Generic_variant.place_exchange e <> None ->
       gen_expr ?expected_ty locals (Option.get (Generic_variant.place_exchange e))
 
+  | Call (("%gplace_take" | "%gplace_put") as op, [guard_e; field_e; replacement_e]) ->
+      (* The guarded form names no mutex field; the exchange is the same. *)
+      let op = if op = "%gplace_take" then "%place_take" else "%place_put" in
+      gen_expr ?expected_ty locals
+        { e with desc = Call (op, [guard_e; guard_e; field_e; replacement_e]) }
+
   | Call (("%place_take" | "%place_put"),
           [guard_e; lock_e; { desc = FieldGet (base_e, fname); _ };
            replacement_e]) ->

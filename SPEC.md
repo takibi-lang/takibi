@@ -1625,7 +1625,9 @@ match previous {
 `let Place::Empty = place_put(...);` is accepted only when the place was
 taken under the same guard on every path since, with no other call given
 the guard and no loop in between, and the container is a global named
-directly (`c.value`, not `slots[i].value`). Otherwise it is a type error,
+directly (`c.value`, not `slots[i].value`) or a `guarded_by` field reached
+through the same accessor call with the same variable arguments
+(`record_of(owner).pin` both times). Otherwise it is a type error,
 and the result has to be bound and matched as above. A `let` with a
 variant pattern and no `else` is accepted in no other form. The proof
 erases: the statement is the same exchange, and the displaced value, Empty
@@ -1672,6 +1674,51 @@ codegen-through-LLVM-IR-verification positive case, plus mismatched-index,
 stale-index-after-reassignment, local-array, and struct-nested-array
 negatives) -- `examples/el0_shell/el0_shell.tkb`'s own per-page
 copy-on-write fd/page table is the first real consumer.
+
+### Places guarded by a global lock (GitHub issues #131, #686)
+
+A Place field may name the global lock that serializes it, instead of a
+mutex in its own struct, and its content may be indexed by the identity of
+the record that holds it:
+
+```takibi
+private let mut run_lock: i32;
+linear view RunGuard[lock: addr];
+linear struct Pin[p: usize] { private generation: usize @ p; }
+
+struct ProcessRecord {
+    generation: usize;
+    private pin: Place(Pin[self]) guarded_by(run_lock);
+}
+
+fn record_of(owner: borrow Owner[p]) -> &mut ProcessRecord @ p { ... }
+
+let previous = place_take(guard, record_of(owner).pin);
+let displaced = place_put(guard, record_of(owner).pin, pin);
+```
+
+- `guarded_by(L)` is accepted only on a private Place field of a plain
+  struct, and `L` must be a global. The two-operand forms
+  `place_take(guard, r.f)` / `place_put(guard, r.f, v)` require the
+  guard's one `addr` index to be `&L`; a guarded field is not accepted in
+  the mutex form, and an unguarded one not in this form.
+- `self` in the field's type names the holder. It is bound at each
+  operation to the static that the accessor's `-> &mut S @ p` return names,
+  through that call's arguments, so a token indexed by another holder does
+  not fit. A guarded field whose type mentions `self` must be reached
+  through such an accessor call. `self` is accepted nowhere else: not in an
+  unguarded field, not in a function signature.
+- Field level, as Clang's `GUARDED_BY` and Rust for Linux's `LockedBy`: the
+  declaration claims only the field it is written on. The lock identity is
+  checked statically, because the lock is a named global and the guard
+  carries its address.
+- Trusted: the accessor's `@ p` (that the record it returns is holder p's)
+  and the guard's mint, as for every authority-derived reference. The
+  operation lowers to the same load and store as any place.
+
+`linux_user/pin_placement` exercises the lifecycle: a pin taken in one
+action, kept across a return to user space, refusing a migration, and
+released with the evidence that the stack is gone.
 
 ## Per-CPU Storage (GitHub issue #704)
 

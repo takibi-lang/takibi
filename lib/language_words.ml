@@ -10,7 +10,7 @@ let hard_keywords = [
   "void"; "extern"; "symbol"; "vector_table"; "exception_entry";
   "exception_restore"; "embed_file"; "struct"; "opaque"; "affine";
   "linear"; "view"; "variant"; "must_use"; "exists"; "borrow";
-  "sink"; "private"; "packed"; "be"; "publish"; "no_copy"; "dma_fixed"; "per_cpu"; "cpu_authority"; "io"; "enum"; "match";
+  "sink"; "private"; "packed"; "be"; "publish"; "no_copy"; "dma_fixed"; "per_cpu"; "cpu_authority"; "guarded_by"; "io"; "enum"; "match";
   "align"; "multiple"; "sizeof"; "alignof"; "contains_stable_owner"; "use";
   "offsetof"; "static_assert"; "type"; "generic"; "bool"; "unsafe";
   "true"; "false"; "i8"; "i16"; "i32"; "i64"; "u8"; "u16";
@@ -60,7 +60,7 @@ let compiler_builtins = [
 ]
 
 let predeclared_names = ["DMA_CACHE_LINE"]
-let checker_intrinsics = ["addr"]
+let checker_intrinsics = ["addr"; "self"]
 
 let hard_keyword_set = StringSet.of_list hard_keywords
 let contextual_keyword_set = StringSet.of_list contextual_keywords

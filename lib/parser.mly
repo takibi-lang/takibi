@@ -256,6 +256,7 @@ let promote_be_field_type = function
 %token <string> IDENT
 %token <string> STRING
 %token <string> BS_STRING
+%token GUARDED_BY
 %token FN INLINE NOINLINE WHERE RETURN CONST LET MUT EXTERN SYMBOL STRUCT OPAQUE AFFINE LINEAR VIEW VARIANT MUST_USE EXISTS BORROW SINK PACKED BE PUBLISH NO_COPY DMA_FIXED PER_CPU CPU_AUTHORITY IO ENUM MATCH ALIGN MULTIPLE SIZEOF ALIGNOF CONTAINS_STABLE_OWNER OFFSETOF UNSAFE USE PRIVATE VECTOR_TABLE EXCEPTION_ENTRY EXCEPTION_RESTORE EMBED_FILE
 %token TYPE GENERIC
 %token DARROW COLONCOLON UNDERSCORE BANG
@@ -426,6 +427,7 @@ item:
       Publish_registry.finish name fields;
       Dma_fixed_registry.finish name fields;
       Per_cpu_registry.finish name fields;
+      Guarded_registry.finish name;
       StructDef (name, fields, is_packed, align_opt, private_fields, $symbolstartpos) }
   | owned_struct_intro LBRACE struct_fields RBRACE
     { let (name, kind, static_params, is_private) = $1 in
@@ -434,6 +436,9 @@ item:
         List.filter_map (fun (fname, _, is_priv) ->
           if is_priv then Some fname else None) $3 in
       Type_layout.finish_struct name fields false None;
+      if Guarded_registry.take_pending () <> [] then
+        raise (Types.TypeError ($symbolstartpos,
+          "guarded_by is accepted on a Place field of a plain struct only"));
       OwnedStructDef
         (name, kind, static_params, fields, false, None, private_fields,
          is_private, $symbolstartpos) }
@@ -444,6 +449,9 @@ item:
        ordinary TypeNamed placeholder at this point) has no size until
        monomorphization substitutes a concrete type. *)
     { let (name, tps) = intro in
+      if Guarded_registry.take_pending () <> [] then
+        raise (Types.TypeError ($symbolstartpos,
+          "guarded_by is accepted on a Place field of a plain struct only"));
       let field_list = List.map (fun (fname, ty, _) -> (fname, ty)) fields in
       let private_fields =
         List.filter_map (fun (fname, _, is_priv) ->
@@ -620,6 +628,9 @@ struct_fields:
   | /* empty */ { [] }
   | IDENT COLON type_expr SEMI struct_fields { ($1, $3, false) :: $5 }
   | PRIVATE IDENT COLON type_expr SEMI struct_fields { ($2, $4, true) :: $6 }
+  | PRIVATE f = IDENT COLON t = type_expr GUARDED_BY LPAREN lock = IDENT RPAREN SEMI
+    rest = struct_fields
+    { Guarded_registry.note f lock; (f, t, true) :: rest }
 
 vector_table_entries:
   | /* empty */ { [] }
@@ -792,7 +803,7 @@ stmt:
        checker proves cannot fail. The only such form is a put into a place
        it knows is empty; anything else needs its `else`. *)
     { match variant, case, disc.desc with
-      | "Place", "Empty", Call ("place_put", [_; _; _; _]) ->
+      | "Place", "Empty", Call ("place_put", ([_; _; _; _] | [_; _; _])) ->
           Hashtbl.replace Generic_variant.proven_empty_puts disc.loc ();
           { desc = Expr disc; loc = $symbolstartpos }
       | _ ->

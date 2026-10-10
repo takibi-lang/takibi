@@ -967,3 +967,31 @@ let slice_len_mins ?(resolve_const = fun (_ : string) -> None)
   in
   go cond;
   Hashtbl.fold (fun n k l -> (n, k) :: l) acc []
+
+(* Whether a type names the static `name` anywhere (GitHub issue #131
+   slice 3: a guarded_by Place's `self`). *)
+let rec static_arg_mentions name = function
+  | StaticName n -> n = name
+  | StaticAdd (a, b) | StaticSub (a, b) | StaticMul (a, b) ->
+      static_arg_mentions name a || static_arg_mentions name b
+  | _ -> false
+
+let rec type_mentions_static name = function
+  | TypeIndexed (_, args) | TypeView (_, args) ->
+      List.exists (static_arg_mentions name) args
+  | TypeVariant (_, args, ts) ->
+      List.exists (static_arg_mentions name) args
+      || List.exists (type_mentions_static name) ts
+  | TypeSingleton (t, a) ->
+      static_arg_mentions name a || type_mentions_static name t
+  | TypeGenericInst (_, ts) | TypeTuple ts ->
+      List.exists (type_mentions_static name) ts
+  | TypeExists (_, sort, t) ->
+      type_mentions_static name sort || type_mentions_static name t
+  | TypePtr t | TypeIo t | TypeArray (t, _) | TypeRefined (_, _, t)
+  | TypeMultiple (_, t) | TypeSlice (t, _, _) | TypeBorrow t
+  | TypeBorrowMut t | TypeSink t | TypeRef t | TypeRefMut t
+  | TypeAlignedPtr (_, t) -> type_mentions_static name t
+  | TypeFn (ps, r, _) ->
+      List.exists (type_mentions_static name) ps || type_mentions_static name r
+  | _ -> false

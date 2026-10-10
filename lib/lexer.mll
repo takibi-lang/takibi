@@ -43,6 +43,7 @@ let hard_keyword_token = function
   | "no_copy" -> NO_COPY
   | "dma_fixed" -> DMA_FIXED
   | "per_cpu" -> PER_CPU
+  | "guarded_by" -> GUARDED_BY
   | "cpu_authority" -> CPU_AUTHORITY
   | "io" -> IO | "enum" -> ENUM | "match" -> MATCH | "align" -> ALIGN
   | "multiple" -> MULTIPLE

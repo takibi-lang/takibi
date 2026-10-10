@@ -156,4 +156,12 @@ let place_exchange (e : expr) : expr option =
   | Call ("place_put", [guard; lock; slot; value]) ->
       Some { e with desc = Call (exchange_name "place_put",
         [guard; lock; slot; { e with desc = VariantCtor (place_name, "Full", value) }]) }
+  (* A place serialized by a global lock its field declares (guarded_by):
+     the guard alone names the lock. *)
+  | Call ("place_take", [guard; slot]) ->
+      Some { e with desc = Call (exchange_name "gplace_take",
+        [guard; slot; { e with desc = EnumVariant (place_name, "Empty") }]) }
+  | Call ("place_put", [guard; slot; value]) ->
+      Some { e with desc = Call (exchange_name "gplace_put",
+        [guard; slot; { e with desc = VariantCtor (place_name, "Full", value) }]) }
   | _ -> None
