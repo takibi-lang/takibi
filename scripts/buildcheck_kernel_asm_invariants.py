@@ -625,7 +625,14 @@ def check_invariant_stop_capture(insns):
                                          context, "mov x0, #0x1"] or
                 not re.fullmatch(r"b 0x[0-9a-f]+ <kernel_invariant_evidence>", body[-1])):
             failures.append(f"explicit stop {entry}: incoming LR/origin capture unverified")
+    # Only a branch reaches a stop. objdump also labels an adrp page or an
+    # adr/ldr literal with the nearest symbol, so a jump table that happens
+    # to sit in the stop's page reads as `<kernel_invariant_stop+0x4>`
+    # without referring to it.
+    branch = re.compile(r"(?:bl?|b\.\w+|cbn?z|tbn?z)\s")
     for address, text, _ in insns:
+        if not branch.match(text):
+            continue
         if any(re.search(r"<" + entry + r"(?:[+>])", text) for entry in STOP_ENTRIES):
             if not re.fullmatch(r"bl\s+0x[0-9a-f]+ <kernel_invariant_stop(?:_with_frame)?>", text):
                 failures.append(f"explicit stop at 0x{address:x}: unsupported call instruction")
