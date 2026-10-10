@@ -23,7 +23,9 @@ outcome now distinguishes an observed used entry from elapsed expiry. The
 not derived from virtio hardware latency. Unconfirmed completion disables
 this boot's queues without resetting, advancing the TX used shadow, rewriting
 TX storage or reposting the RX slot an in-place reply may still reference.
-Submission is private and later public sends/acquires are guarded. Native
+The existing ready latch records permanent disablement; no extra driver
+flag is stored. Submission is private and later public sends/acquires are
+guarded. Native
 tests compile the real driver with deterministic device/clock responses;
 only the unused AArch64 IRQ notification is replaced. The old driver fails
 the absent-completion control. Fixed DMA token migration remains separate

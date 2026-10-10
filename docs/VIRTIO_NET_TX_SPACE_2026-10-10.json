@@ -45,5 +45,53 @@
       },
       "candidate_elf_sha256": "386c185a2bf467e81b71f7ba3b61f55e9a0d14ce890ce9da46f730c4ab0d398e"
     }
+  },
+  "final_rebased_measurement": {
+    "baseline_revision": "e6fcf3bf75978c3adf3db22382219b13b82faaba",
+    "measurement": "Fresh rebased baseline build; final candidate rebuilt after reusing the existing ready latch. Prior measurements above are retained as intermediate evidence.",
+    "targets": {
+      "qemu": {
+        "baseline": {
+          "text": 728176,
+          "data": 5424,
+          "bss": 1658432,
+          "usable_ram_start": 1076166656
+        },
+        "candidate": {
+          "text": 728440,
+          "data": 5424,
+          "bss": 1658432,
+          "usable_ram_start": 1076166656
+        },
+        "delta": {
+          "text": 264,
+          "data": 0,
+          "bss": 0,
+          "usable_ram_start": 0
+        },
+        "candidate_elf_sha256": "432a5c7965e9f7633a12ba2c1e47656e7f7c3bd29dbbb4b448677e12f41bac2a"
+      },
+      "rpi5": {
+        "baseline": {
+          "text": 740760,
+          "data": 2889264,
+          "bss": 1697344,
+          "usable_ram_start": 7438336
+        },
+        "candidate": {
+          "text": 740760,
+          "data": 2889264,
+          "bss": 1697344,
+          "usable_ram_start": 7438336
+        },
+        "delta": {
+          "text": 0,
+          "data": 0,
+          "bss": 0,
+          "usable_ram_start": 0
+        },
+        "candidate_elf_sha256": "4e3bc232c540e10d66208e0db2644879a82cb9156b93b9782bbb81f828a29942"
+      }
+    }
   }
 }

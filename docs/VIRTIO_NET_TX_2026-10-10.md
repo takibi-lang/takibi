@@ -77,26 +77,31 @@ QEMU hang or scheduler prints.
 
 ## Space measurement
 
-Fresh baseline linked kernels were built at 4e88fd5f. After correcting the
-candidate policy to 1 s, both final production kernels were rebuilt and
-measured. Raw sizes and candidate image identities are preserved in
-VIRTIO_NET_TX_SPACE_2026-10-10.json.
+Fresh baseline linked kernels were built at 4e88fd5f, then measured again
+against the rebased upstream e6fcf3bf. The initial candidate added 312 B of
+QEMU text and 8 B of initialized data for a separate disabled flag. That
+measurement exposed a cheap improvement: initialization and expiry already
+set/clear the existing ready latch, InitOnce refuses a second initialization,
+and IRQs never change readiness. Reusing that latch preserves the guards for
+every valid initialized caller, blocks pre-init submission as well, and needs
+no extra stored state. Both final production kernels were rebuilt after this
+change. Initial and final raw sizes and candidate image identities are kept
+in VIRTIO_NET_TX_SPACE_2026-10-10.json.
 
-| Boundary | QEMU delta | RPi5 delta |
+| Boundary against e6fcf3bf | QEMU delta | RPi5 delta |
 | --- | ---: | ---: |
-| text | +312 B | 0 B |
-| initialized data | +8 B | 0 B |
+| text | +264 B | 0 B |
+| initialized data | 0 B | 0 B |
 | BSS | 0 B | 0 B |
 | usable_ram_start | unchanged (0x40250000) | unchanged (0x718000) |
 
-The added disabled flag is one byte, with linked-section padding accounting
-for the 8 B initialized-data delta. Existing queue memory, RX buffers and TX
-scratch payload have unchanged size. There is no additional production pool
-or dynamic allocation and no extra allocator page reservation. Timeout retains
-already reserved queue/payload storage rather than allocating recovery memory.
-Test-only fake MMIO and oracle state are absent from production kernels. The
-small measured image cost is accepted; no structural optimization or fresh
-cross-OS comparison is needed at this boundary.
+Existing queue memory, RX buffers and TX scratch payload have unchanged size.
+There is no additional production pool, stored flag, dynamic allocation or
+allocator page reservation. Timeout retains already reserved queue/payload
+storage rather than allocating recovery memory. Test-only fake MMIO and
+oracle state are absent from production kernels. The small measured code
+cost is accepted; no structural optimization or fresh cross-OS comparison is
+needed at this boundary.
 
 Next measurement trigger: fixed virtio-net DMA owners, queue/buffer capacity
 changes, device reset/recovery or another completed kernel feature/stage.
