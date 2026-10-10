@@ -3141,7 +3141,7 @@ fn syscall_read_uart(current_authority: borrow ProcessCurrent[current_process, P
 // bytes leaves real zero padding, not leftover scratch-buffer content
 // from a previous uname(2) call.
 fn uname_write_field(
-        field_view: borrow [u8; UTSNAME_FIELD_SIZE..], value: []u8) {
+        field_view: borrow [u8; UTSNAME_FIELD_SIZE..], value: []const u8) {
     let copied: usize = slice_copy(field_view, value);
 }
 

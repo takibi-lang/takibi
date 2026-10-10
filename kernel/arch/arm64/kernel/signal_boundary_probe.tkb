@@ -6,13 +6,15 @@ extern fn signal_boundary_run(mode: usize) -> usize;
 extern symbol signal_boundary_handler;
 extern symbol signal_boundary_restorer;
 
-private fn boundary_fail(line: borrow []u8) {
-    svc5(64, 1, line as *u8 as usize, line.len, 0, 0);
+private fn boundary_fail(line: borrow []const u8) !{unsafe} {
+    // Raw ABI input only: these syscalls read the readonly bytes.
+    // The bridge exposes no writable slice or checked mutation.
+    svc5(64, 1, (unsafe { line as *u8 }) as usize, line.len, 0, 0);
     svc5(93, 1, 0, 0, 0, 0);
 }
 
-private fn boundary_line(line: borrow []u8) {
-    svc5(64, 1, line as *u8 as usize, line.len, 0, 0);
+private fn boundary_line(line: borrow []const u8) !{unsafe} {
+    svc5(64, 1, (unsafe { line as *u8 }) as usize, line.len, 0, 0);
 }
 
 private fn boundary_memory() !{unsafe} {

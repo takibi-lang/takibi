@@ -273,7 +273,7 @@ private fn fdt_align4(value: usize) -> usize {
 }
 
 private fn fdt_string_is(base: usize, total: usize, offset: usize,
-                         expected: []u8) -> bool !{unsafe} {
+                         expected: []const u8) -> bool !{unsafe} {
     if (offset > total || expected.len >= total - offset) { return false; }
     for i: usize in 0..<expected.len {
         if (fdt_read_u8(base, total, offset + i) != expected[i] as usize) {
@@ -284,7 +284,7 @@ private fn fdt_string_is(base: usize, total: usize, offset: usize,
 }
 
 private fn fdt_string_list_contains(base: usize, total: usize, offset: usize,
-                                    length: usize, wanted: []u8)
+                                    length: usize, wanted: []const u8)
         -> bool !{unsafe} {
     if (fdt_range_valid(total, offset, length) == false) { return false; }
     let end: usize = offset + length;
@@ -306,7 +306,7 @@ private fn fdt_string_list_contains(base: usize, total: usize, offset: usize,
 
 private fn fdt_node_is_memory(base: usize, total: usize, offset: usize)
         -> bool !{unsafe} {
-    let name: [u8; 6..] = bs"memory";
+    let name: [const u8; 6..] = bs"memory";
     if (fdt_range_valid(total, offset, 7) == false) { return false; }
     for i: usize in 0..<6 {
         if (fdt_read_u8(base, total, offset + i) != name[i] as usize) {
@@ -319,7 +319,7 @@ private fn fdt_node_is_memory(base: usize, total: usize, offset: usize)
 
 private fn fdt_node_is_reserved_memory(base: usize, total: usize,
                                        offset: usize) -> bool !{unsafe} {
-    let name: [u8; 15..] = bs"reserved-memory";
+    let name: [const u8; 15..] = bs"reserved-memory";
     if (fdt_range_valid(total, offset, 16) == false) { return false; }
     for i: usize in 0..<15 {
         if (fdt_read_u8(base, total, offset + i) != name[i] as usize) {
@@ -718,7 +718,7 @@ private fn fdt_scan_tree_reservations(base: usize, wanted: usize)
 }
 
 private fn fdt_find_compatible_reg_bounded(
-        base: usize, compatible: []u8, pcie_nested_only: bool,
+        base: usize, compatible: []const u8, pcie_nested_only: bool,
         required_candidate_base: usize, required_nested_base: usize,
         allow_root_without_reg: bool, required_candidate_index: usize)
         -> FdtDeviceRegionResult !{unsafe} {
@@ -1278,28 +1278,28 @@ private fn fdt_find_compatible_reg_bounded(
     return FdtDeviceRegionResult::Invalid;
 }
 
-fn fdt_find_compatible_reg(base: usize, compatible: []u8)
+fn fdt_find_compatible_reg(base: usize, compatible: []const u8)
         -> FdtDeviceRegionResult !{unsafe} {
     return fdt_find_compatible_reg_bounded(
         base, compatible, false, 0, 0, false, 0);
 }
 
 fn fdt_find_compatible_reg_index(
-        base: usize, compatible: []u8, index: usize)
+        base: usize, compatible: []const u8, index: usize)
         -> FdtDeviceRegionResult !{unsafe} {
     return fdt_find_compatible_reg_bounded(
         base, compatible, false, 0, 0, false, index);
 }
 
 fn fdt_find_compatible_reg_at(
-        base: usize, compatible: []u8, child_base: usize)
+        base: usize, compatible: []const u8, child_base: usize)
         -> FdtDeviceRegionResult !{unsafe} {
     return fdt_find_compatible_reg_bounded(
         base, compatible, false, child_base, 0, false, 0);
 }
 
 fn fdt_find_compatible_mip_regions(
-        base: usize, compatible: []u8, child_base: usize)
+        base: usize, compatible: []const u8, child_base: usize)
         -> FdtMipRegionsResult !{unsafe} {
     match fdt_find_compatible_reg_at(base, compatible, child_base) {
         FdtDeviceRegionResult::Invalid => {
@@ -1336,7 +1336,7 @@ fn fdt_find_compatible_mip_regions(
 }
 
 fn fdt_find_pcie_address_map(
-        base: usize, compatible: []u8, child_base: usize)
+        base: usize, compatible: []const u8, child_base: usize)
         -> FdtPcieAddressMapResult !{unsafe} {
     match fdt_find_compatible_reg_at(base, compatible, child_base) {
         FdtDeviceRegionResult::Invalid => {
@@ -1407,7 +1407,7 @@ fn fdt_find_pcie_address_map(
 // RP1 GPIO exposes three adjacent register resources: pin control, RIO, and
 // pads. Keep the multi-region reader at this concrete maintained-driver
 // contract rather than generalizing the single-region lookup prematurely.
-fn fdt_find_compatible_rp1_gpio_regions(base: usize, compatible: []u8)
+fn fdt_find_compatible_rp1_gpio_regions(base: usize, compatible: []const u8)
         -> FdtRp1GpioRegionsResult !{unsafe} {
     match fdt_find_compatible_pcie_reg(base, compatible) {
         FdtDeviceRegionResult::Invalid => {
@@ -1466,20 +1466,20 @@ fn fdt_find_compatible_rp1_gpio_regions(base: usize, compatible: []u8)
 // both BCM2712's on-die UART and RP1 UART0 contain "arm,pl011-axi". This
 // entry point selects only the concrete PCIe/RP1 nesting above instead of
 // letting structure order choose between two different devices.
-fn fdt_find_compatible_pcie_reg(base: usize, compatible: []u8)
+fn fdt_find_compatible_pcie_reg(base: usize, compatible: []const u8)
         -> FdtDeviceRegionResult !{unsafe} {
     return fdt_find_compatible_reg_bounded(
         base, compatible, true, 0, 0, false, 0);
 }
 
 fn fdt_find_compatible_pcie_reg_at(
-        base: usize, compatible: []u8, child_base: usize)
+        base: usize, compatible: []const u8, child_base: usize)
         -> FdtDeviceRegionResult !{unsafe} {
     return fdt_find_compatible_reg_bounded(
         base, compatible, true, 0, child_base, false, 0);
 }
 
-fn fdt_find_compatible_gicv2_regions(base: usize, compatible: []u8)
+fn fdt_find_compatible_gicv2_regions(base: usize, compatible: []const u8)
         -> FdtGicV2RegionsResult !{unsafe} {
     match fdt_find_compatible_reg(base, compatible) {
         FdtDeviceRegionResult::Invalid => {
@@ -1698,7 +1698,7 @@ private fn fdt_find_interrupt_controller(base: usize, wanted_phandle: usize)
     return FdtInterruptControllerScanResult::Invalid;
 }
 
-fn fdt_find_compatible_gic_interrupt(base: usize, compatible: []u8)
+fn fdt_find_compatible_gic_interrupt(base: usize, compatible: []const u8)
         -> FdtGicInterruptResult !{unsafe} {
     match fdt_find_compatible_reg(base, compatible) {
         FdtDeviceRegionResult::Invalid => {
@@ -1755,7 +1755,7 @@ fn fdt_find_compatible_gic_interrupt(base: usize, compatible: []u8)
 }
 
 fn fdt_find_compatible_gic_transport_index(
-        base: usize, compatible: []u8, index: usize)
+        base: usize, compatible: []const u8, index: usize)
         -> FdtMmioTransportResult !{unsafe} {
     match fdt_find_compatible_reg_index(base, compatible, index) {
         FdtDeviceRegionResult::Invalid => {

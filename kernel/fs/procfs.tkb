@@ -27,7 +27,7 @@ fn procfs_inode(pid: usize, suffix: usize) -> usize {
     return PROCFS_PID_INODE_BASE + pid * 4 + suffix;
 }
 
-private fn procfs_parse_pid(component: []u8) -> ProcfsPidResult {
+private fn procfs_parse_pid(component: []const u8) -> ProcfsPidResult {
     if (component.len == 0) { return ProcfsPidResult::Invalid; }
     let mut pid: usize = 0;
     for byte in component {
@@ -43,7 +43,7 @@ private fn procfs_parse_pid(component: []u8) -> ProcfsPidResult {
     return ProcfsPidResult::Parsed(pid);
 }
 
-fn procfs_lookup(path: []u8) -> ProcfsLookupResult !{unsafe} {
+fn procfs_lookup(path: []const u8) -> ProcfsLookupResult !{unsafe} {
     match path {
         bs"proc" => {
             let mut root: ProcfsNode = {
@@ -53,7 +53,7 @@ fn procfs_lookup(path: []u8) -> ProcfsLookupResult !{unsafe} {
         }
         _ => {}
     }
-    let process_path: []u8 = match byte_slice_split_first(path, 0x2F) {
+    let process_path: []const u8 = match byte_slice_split_first(path, 0x2F) {
         ByteSliceSplitResult::Absent => {
             return ProcfsLookupResult::Missing;
         }
@@ -65,8 +65,8 @@ fn procfs_lookup(path: []u8) -> ProcfsLookupResult !{unsafe} {
             split.after
         }
     };
-    let mut leaf: []u8 = bs"";
-    let pid_component: []u8 = match byte_slice_split_first(process_path,
+    let mut leaf: []const u8 = bs"";
+    let pid_component: []const u8 = match byte_slice_split_first(process_path,
                                                             0x2F) {
         ByteSliceSplitResult::Absent => { process_path }
         ByteSliceSplitResult::Found(split) => {
@@ -141,7 +141,7 @@ private fn procfs_put_byte(output: borrow [u8; 1024..], offset: usize,
 }
 
 private fn procfs_put_text(output: borrow [u8; 1024..], offset_in: usize,
-                           text: []u8) -> usize {
+                           text: []const u8) -> usize {
     let mut offset: usize = offset_in;
     for byte in text { offset = procfs_put_byte(output, offset, byte); }
     return offset;
@@ -208,7 +208,7 @@ fn procfs_render_file(inode: usize, output: borrow [u8; 1024..])
     if (procfs_inode_kind(inode) == ProcfsNodeKind::Cmdline) {
         let mut length: usize = snapshot.command_line_length;
         if (length > 512) { length = 512; }
-        let source: []u8 = snapshot.command_line as []u8;
+        let source: []const u8 = snapshot.command_line as []const u8;
         let copied: usize = slice_copy(output, source);
         return length;
     }

@@ -521,11 +521,11 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
             for i: usize in 0..<390 {
                 dst[i as isize] = 0;
             }
-            let sysname: []u8 = "Linux" as []u8;
-            let nodename: []u8 = "takibi" as []u8;
-            let release: []u8 = "6.1.0" as []u8;
-            let version: []u8 = "#1" as []u8;
-            let machine: []u8 = "aarch64" as []u8;
+            let sysname: []const u8 = "Linux" as []u8;
+            let nodename: []const u8 = "takibi" as []u8;
+            let release: []const u8 = "6.1.0" as []u8;
+            let version: []const u8 = "#1" as []u8;
+            let machine: []const u8 = "aarch64" as []u8;
             slice_copy(unsafe { dst[0 as isize..<65 as isize] }, sysname);
             slice_copy(unsafe { dst[65 as isize..<130 as isize] }, nodename);
             slice_copy(unsafe { dst[130 as isize..<195 as isize] }, release);

@@ -3,10 +3,12 @@
 // terminal settings before returning to the persistent BusyBox shell.
 const TERMINAL_PROBE_ERROR: usize = 0xFFFFFFFFFFFFF000;
 
-private fn terminal_probe_write(bytes: borrow []u8) {
+private fn terminal_probe_write(bytes: borrow []const u8) !{unsafe} {
     let mut done: usize = 0;
     while (done < bytes.len) {
-        let count: usize = svc5(64, 1, (bytes as *u8 as usize) + done,
+        // Raw ABI input only: these syscalls read the readonly bytes.
+        // The bridge exposes no writable slice or checked mutation.
+        let count: usize = svc5(64, 1, ((unsafe { bytes as *u8 }) as usize) + done,
                                bytes.len - done, 0, 0);
         if (count == 0 || count >= TERMINAL_PROBE_ERROR) { svc5(93, 1, 0, 0, 0, 0); }
         done = done + count;
@@ -46,7 +48,7 @@ private fn terminal_probe_read(bytes: borrow [u8; 64..], cpu: usize) -> usize {
     return count;
 }
 
-private fn terminal_probe_expect(bytes: borrow []u8, cpu: usize) {
+private fn terminal_probe_expect(bytes: borrow []const u8, cpu: usize) {
     let mut received: [u8; 64];
     let mut got: usize = 0;
     while (got < bytes.len) {

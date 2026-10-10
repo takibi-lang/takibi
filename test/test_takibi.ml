@@ -7533,7 +7533,7 @@ fn f() -> *usize { return &temp_address_outer().r.a; }");
 
   Alcotest.test_case "bs expression carries its decoded minimum length" `Quick
     (expect_ok
-      "fn f() { let value: [u8; 4..] = bs\"stat\"; let byte = value[3]; }");
+      "fn f() { let value: [const u8; 4..] = bs\"stat\"; let byte = value[3]; }");
 
   Alcotest.test_case "byte-slice match with wildcard type-checks" `Quick
     (expect_ok
@@ -12339,7 +12339,7 @@ let codegen_tests = [
     (fun () ->
       let src =
         "let mut cg_bs_calls: usize = 0;
-         fn cg_bs_subject() -> []u8 {
+         fn cg_bs_subject() -> []const u8 {
            cg_bs_calls = cg_bs_calls + 1;
            return bs\"stat\";
          }
@@ -24043,7 +24043,58 @@ let private_default_construction_tests =
          "consumer735.tkb", "fn bad735() { let mut frame: Frame735[3] = { 1 }; }"]);
   ]
 
+(* Literal storage must retain readonly access through ordinary slice paths. *)
+let readonly_literal_tests =
+  let bad title body = Alcotest.test_case title `Quick
+      (expect_type_error "readonly" ("fn bad729() { " ^ body ^ " }")) in
+  [
+    bad "byte literal rejects element store" "let s = bs\"abc\"; s[0] = 120;";
+    bad "string slice rejects element store" "let s = \"abc\" as []u8; s[1] = 120;";
+    Alcotest.test_case "unsafe does not permit a literal slice store" `Quick
+      (expect_type_error "readonly" "fn bad729(index: usize) !{unsafe} {
+        let s = bs\"abc\"; unsafe { s[index] = 120; }
+      }");
+    bad "alias retains readonly access" "let s = bs\"abc\"; let alias = s; alias[0] = 120;";
+    bad "subslice retains readonly access"
+      "let s = \"abc\" as []u8; let sub = s[1..<3]; sub[0] = 120;";
+    bad "byte literal cannot narrow to writable slice"
+      "let s = bs\"abc\"; let writable = s as []u8;";
+    bad "string literal cannot satisfy writable annotation"
+      "let s: []u8 = \"abc\" as []u8;";
+    bad "byte literal cannot provide a safe raw pointer"
+      "let s = bs\"abc\"; let pointer = s as *u8;";
+    bad "string slice cannot provide a safe raw pointer"
+      "let s = \"abc\" as []u8; let pointer = s as *u8;";
+    bad "literal cannot be slice-copy destination"
+      "let count = slice_copy(bs\"abc\", bs\"xyz\");";
+    Alcotest.test_case "writable consumer rejects either literal form" `Quick (fun () ->
+      List.iter (fun literal -> expect_type_error "readonly"
+        ("fn mutate729(s: []u8) { if (s.len > 0) { s[0] = 120; } } " ^
+         "fn bad729() { mutate729(" ^ literal ^ "); }") ())
+        ["bs\"abc\""; "\"abc\" as []u8"]);
+    Alcotest.test_case "literals preserve bounds, reads, iteration and copying" `Quick
+      (expect_trap_sites 0 {|
+        fn literal729() -> [const u8; 3..] { return bs"A\0B"; }
+        fn string729() -> [const u8; 3..] { return "abc" as [u8; 3..]; }
+        fn sum729(bytes: borrow []const u8) -> usize {
+          let mut total: usize = 0;
+          for byte in bytes { total = total + (byte as usize); }
+          return total;
+        }
+        fn good729() -> usize {
+          let s = literal729(); let t = string729();
+          let mut destination: [u8; 3];
+          let count = slice_copy(destination as []u8, s);
+          destination[0] = 120;
+          let tail = t[1..<3];
+          let byte = s[1];
+          if (slice_eq(tail, bs"bc")) { return count + sum729(t) + (byte as usize); }
+          return 0;
+        }|});
+  ]
+
 let named_groups_unisolated = [
+  "readonly-literals", readonly_literal_tests;
   "private-default-construction", private_default_construction_tests;
   "cpu-authority-initialization", cpu_authority_initialization_tests;
   "runtime-bounds", runtime_bounds_tests;

@@ -259,7 +259,7 @@ struct TerminalEncodedCounts {
 }
 must_use variant TerminalEncodeResult { NoRoom; Encoded(TerminalEncodedCounts); }
 
-fn terminal_encode_onlcr(bytes: borrow []u8, encoded: borrow [u8; 512..],
+fn terminal_encode_onlcr(bytes: borrow []const u8, encoded: borrow [u8; 512..],
                          room: usize) -> TerminalEncodeResult {
     let mut produced: usize = 0;
     let mut consumed: usize = 0;

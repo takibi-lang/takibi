@@ -849,7 +849,7 @@ fn kernel_log_peer_console_report() !{logs, unsafe} {
 // while the guard still serializes the IRQ mask. Before the queue is live,
 // the caller spins byte by byte through uart_putc, which takes the lock itself.
 private fn uart_user_write_locked(
-        guard: borrow ConsoleGuard[console_tx_lock], bytes: borrow []u8)
+        guard: borrow ConsoleGuard[console_tx_lock], bytes: borrow []const u8)
         -> (usize, bool) !{unsafe} {
     if (terminal_output_paused()) { return (0, false); }
     if (terminal_echo_pending()) { return (0, false); }
@@ -879,7 +879,7 @@ private fn uart_user_write_locked(
 // byte gets the bookkeeping uart_putc gives it, in the same order, and a byte
 // is only counted once it is certain to be queued, so the one a full queue
 // turns away is counted when the retried write takes it.
-fn uart_user_write(bytes: borrow []u8) -> usize !{logs, unsafe} {
+fn uart_user_write(bytes: borrow []const u8) -> usize !{logs, unsafe} {
     if (terminal_output_paused()) { return 0; }
     if (terminal_echo_pending()) { return 0; }
     if (kernel_log_tx_is_live() == false) {
@@ -1634,7 +1634,7 @@ fn kernel_log_execution_model_assumption() {
 // console guard across the room query, encoding, enqueue and FIFO drain.
 // Thus a CR/LF pair is admitted together, and a short write counts whole
 // input bytes.
-fn uart_terminal_write_chunk(bytes: borrow []u8, convert: bool) -> usize {
+fn uart_terminal_write_chunk(bytes: borrow []const u8, convert: bool) -> usize {
     if (convert == false) { return uart_user_write(bytes); }
     let mut encoded: [u8; 512];
     let mut accepted: usize = 0;

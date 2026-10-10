@@ -214,9 +214,11 @@ private fn peer_pin(cpu: usize) -> bool {
 
 // The writer's report was refused: say what the first write returned, then
 // leave. Shared by the early report after that write and the final one.
-private fn peer_console_refused(first: usize) {
+private fn peer_console_refused(first: usize) !{unsafe} {
     let label = bs"peer console: refused first=0x";
-    svc5(WRITE_SYSCALL, 1, label as *u8 as usize, label.len, 0, 0);
+    // Raw ABI input only: these syscalls read the readonly bytes.
+    // The bridge exposes no writable slice or checked mutation.
+    svc5(WRITE_SYSCALL, 1, (unsafe { label as *u8 }) as usize, label.len, 0, 0);
     let digits = bs"0123456789abcdef";
     let mut number: [u8; 8];
     for index: usize in 0..<8 {
@@ -224,7 +226,7 @@ private fn peer_console_refused(first: usize) {
         if (digit < 16) { number[index] = digits[digit]; }
     }
     svc5(WRITE_SYSCALL, 1, number as *u8 as usize, 8, 0, 0);
-    svc5(WRITE_SYSCALL, 1, bs"\n" as *u8 as usize, 1, 0, 0);
+    svc5(WRITE_SYSCALL, 1, (unsafe { bs"\n" as *u8 }) as usize, 1, 0, 0);
     svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
 }
 
@@ -234,17 +236,17 @@ private fn peer_console_refused(first: usize) {
 // short. Retrying from the returned offset proves the byte count names data
 // that has a defined place in the stream rather than data silently dropped.
 // A report is accepted only after a complete real write bracketed by getcpu.
-private fn peer_console_order_write(bytes: borrow []u8, cpu: usize,
-        step: usize, cpu_bytes: borrow [u8; 4..]) -> bool {
+private fn peer_console_order_write(bytes: borrow []const u8, cpu: usize,
+        step: usize, cpu_bytes: borrow [u8; 4..]) -> bool !{unsafe} {
     if (peer_read_cpu(cpu_bytes) != cpu) { return false; }
-    if (svc5(WRITE_SYSCALL, 1, bytes as *u8 as usize, bytes.len, 0, 0) != bytes.len) {
+    if (svc5(WRITE_SYSCALL, 1, (unsafe { bytes as *u8 }) as usize, bytes.len, 0, 0) != bytes.len) {
         return false;
     }
     return peer_read_cpu(cpu_bytes) == cpu &&
         svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_CONSOLE_TAG, 0x663, step, 0, 0) == step;
 }
 
-fn peer_console() {
+fn peer_console() !{unsafe} {
     let mut cpu_bytes: [u8; 4];
     let output = bs"peer user console: record=01/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=02/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=03/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=04/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=05/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=06/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=07/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=08/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=09/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=10/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=11/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=12/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=13/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=14/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=15/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=16/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=17/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n";
     // The kernel answers 0 while it is not this writer's turn: init starts
@@ -310,7 +312,7 @@ fn peer_console() {
                                  cpu_bytes as [u8; 4..]) == false) { peer_console_refused(0); }
 
     let first: usize = svc5(WRITE_SYSCALL, 1,
-                              output as *u8 as usize, output.len, 0, 0);
+                              (unsafe { output as *u8 }) as usize, output.len, 0, 0);
     let mut total: usize = first;
     // The first count is actual shared-queue admission, not ring capacity.
     if (svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_CONSOLE_TAG, first, 0, 0, 0) == 0) {
@@ -318,7 +320,7 @@ fn peer_console() {
     }
     while (total < output.len) {
         let wrote: usize = svc5(
-            WRITE_SYSCALL, 1, output as *u8 as usize + total,
+            WRITE_SYSCALL, 1, (unsafe { output as *u8 }) as usize + total,
             output.len - total, 0, 0);
         total = total + wrote;
     }
@@ -525,14 +527,14 @@ private fn peer_identity(cpu_bytes: borrow [u8; 4..], peer_cpu: usize)
 // byte at a time, and after every read getcpu must still name the peer. The
 // count and a position-weighted sum let the kernel tell a lost, repeated or
 // reordered byte from the line the driver typed.
-fn peer_tty() {
+fn peer_tty() !{unsafe} {
     // This probe measures raw byte order including CR/LF, independently
     // of the persistent shell's now-supported canonical termios settings.
     let mut saved_terminal: [u8; 36];
     let mut raw_terminal: [u8; 36];
     if (svc5(29, 0, 0x5401, saved_terminal as *u8 as usize, 0, 0) != 0) {
         let error = bs"peer tty: terminal settings failed\n";
-        svc5(WRITE_SYSCALL, 1, error as *u8 as usize, error.len, 0, 0);
+        svc5(WRITE_SYSCALL, 1, (unsafe { error as *u8 }) as usize, error.len, 0, 0);
         svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
     }
     for index: usize in 0..<36 { raw_terminal[index] = saved_terminal[index]; }
@@ -541,7 +543,7 @@ fn peer_tty() {
     // immediately; a draining change would wait for the BREAK we must enable.
     if (svc5(29, 0, 0x5402, raw_terminal as *u8 as usize, 0, 0) != 0) {
         let error = bs"peer tty: terminal settings failed\n";
-        svc5(WRITE_SYSCALL, 1, error as *u8 as usize, error.len, 0, 0);
+        svc5(WRITE_SYSCALL, 1, (unsafe { error as *u8 }) as usize, error.len, 0, 0);
         svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
     }
     let mut cpu_bytes: [u8; 4];
@@ -550,7 +552,7 @@ fn peer_tty() {
         WORKLOAD_PROGRESS_SYSCALL, PEER_TTY_TAG, 0, 0, 0, 0);
     if (peer_cpu == 0) {
         let error = bs"peer tty: registration failed\n";
-        svc5(WRITE_SYSCALL, 1, error as *u8 as usize, error.len, 0, 0);
+        svc5(WRITE_SYSCALL, 1, (unsafe { error as *u8 }) as usize, error.len, 0, 0);
         svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
     }
     // The persistent shell starts this one only after the console writer's
@@ -565,7 +567,7 @@ fn peer_tty() {
     let identity: usize = peer_identity(cpu_bytes as []u8, peer_cpu);
     if (identity == 0) {
         let error = bs"peer tty: identity or CPU placement failed\n";
-        svc5(WRITE_SYSCALL, 1, error as *u8 as usize, error.len, 0, 0);
+        svc5(WRITE_SYSCALL, 1, (unsafe { error as *u8 }) as usize, error.len, 0, 0);
     }
     if (svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_TTY_TAG, 9, identity, 0, 0) != 1) {
         svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);

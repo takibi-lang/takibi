@@ -2,7 +2,7 @@ use "kernel/lib/byte_slice.tkb";
 
 let mut subject_calls: usize = 0;
 
-fn print_split(value: borrow []u8, delimiter: u8) {
+fn print_split(value: borrow []const u8, delimiter: u8) {
     match byte_slice_find_first(value, delimiter) {
         ByteSliceFindResult::Absent => { uart_puts("absent"); }
         ByteSliceFindResult::Found(position) => {
@@ -20,7 +20,7 @@ fn print_split(value: borrow []u8, delimiter: u8) {
     }
 }
 
-fn print_retained_split(value: []u8, delimiter: u8) {
+fn print_retained_split(value: []const u8, delimiter: u8) {
     match byte_slice_split_first(value, delimiter) {
         ByteSliceSplitResult::Absent => { uart_puts("absent"); }
         ByteSliceSplitResult::Found(split) => {
@@ -31,7 +31,7 @@ fn print_retained_split(value: []u8, delimiter: u8) {
     }
 }
 
-fn classify(value: []u8) -> i32 {
+fn classify(value: []const u8) -> i32 {
     match value {
         bs"" => { return 0; }
         bs"stat" => { return 1; }
@@ -40,7 +40,7 @@ fn classify(value: []u8) -> i32 {
     }
 }
 
-fn one_subject() -> []u8 {
+fn one_subject() -> []const u8 {
     subject_calls = subject_calls + 1;
     return bs"cmdline";
 }
@@ -64,9 +64,9 @@ fn app_main() {
 
     let mut embedded: [u8; 3] = { 0x41, 0, 0x42 };
     uart_puts(" embedded-nul=");
-    uart_print(slice_eq(embedded as []u8, embedded as []u8));
+    uart_print(slice_eq(embedded as []const u8, embedded as []const u8));
     uart_puts(" nul-split=");
-    print_split(embedded as []u8, 0);
+    print_split(embedded as []const u8, 0);
     uart_puts(" match=");
     uart_print(classify(bs"stat"));
     uart_puts(":");

@@ -2386,7 +2386,7 @@ length rule applies unchanged. A slice made from an array place reached
 through a shared `&T` is readonly whatever slice type the cast spells.
 
 **Creation**:
-- `bs"literal"` -- a bounded byte-slice literal with compile-time minimum
+- `bs"literal"` -- a readonly bounded byte-slice literal with compile-time minimum
   length equal to its decoded byte count. This is the concise/default form
   for new bounded literal uses and is also valid as an exact `match` pattern.
 - `arr as []T` / `arr as [T; N..]` -- from an array-typed **place**; the
@@ -2411,7 +2411,11 @@ through a shared `&T` is readonly whatever slice type the cast spells.
   further access through the slice is bounds-governed normally. Rejected
   on `*io T` (slice access is non-volatile).
 - `"literal" as []u8` -- the older explicit conversion remains valid;
-  compile-time byte length (NUL excluded) becomes the minimum.
+  compile-time byte length (NUL excluded) becomes the minimum. It produces
+  a readonly slice even when the cast spells `[]u8` or `[u8; N..]`.
+  Use `[]const u8` / `[const u8; N..]` for literal-consuming signatures;
+  neither literal form can supply a writable slice. Copy into an array-backed
+  writable slice with `slice_copy` when mutation is required.
 - `s as *T` -- explicit bridge back to the raw-pointer world (the `ptr`
   half only). Casting a slice to anything else is a compile error.
   **When `T` is `u8`, or is exactly the slice's own element type, this

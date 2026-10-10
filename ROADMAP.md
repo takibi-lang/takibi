@@ -107,14 +107,14 @@ allchecks, faster diagnosis -- and what finishes on its own.
 
 Done on 2026-10-10: #734's bounded shared order-contract prototype and
 #738's initializer-free CPU authority construction fix; #735's private
-ownership-bearing default construction visibility (option A).
+ownership-bearing default construction visibility (option A); #729's readonly
+byte-slice and string-literal slice creation.
 Production #252 allocator migration remains a separate design gate; the
 prototype adds no physical-span mint or stored-authority rule.
 
-1. **Soundness holes in existing contracts:** #729 (readonly
-   byte-slice and string-literal slices). Initialization does not prove
-   CPU freshness across preemption.
-2. **Fixed DMA lifecycle, finishing the drivers.** Every stage of one
+Initialization does not prove CPU freshness across preemption.
+
+1. **Fixed DMA lifecycle, finishing the drivers.** Every stage of one
    transfer in types, leaving one device-semantics declaration per driver
    and the platform bus translation as the only trusted parts.
    - #707's remaining acceptance: drive the confirmed and unconfirmed halt
@@ -127,26 +127,26 @@ prototype adds no physical-span mint or stored-authority rule.
    - #736 (virtio-net TX completion wait bound; follow #707's shape).
    - #720 (session-long xHCI rings and contexts, on `Place`), #625 (cache
      visibility across DMA ownership handoffs, bounded model).
-3. **Landing faster:** #737 (stop on quick gates before long allcheck
+2. **Landing faster:** #737 (stop on quick gates before long allcheck
    lanes).
-4. **Other compiler and language work, respecting design gates:** #608
+3. **Other compiler and language work, respecting design gates:** #608
    (checked integer-to-enum conversion), #709 and #710
    (generation exhaustion of region tables and the intrusive pool), #203
    (no uninitialized kernel bytes copied to userspace; builds on bounded
    syscall copy outcomes),
    #732's later slices (static parameters on generic variants, implicit
    statics inside a type argument).
-5. **Time measurement, then the optimizations waiting on it** (maintainer,
+4. **Time measurement, then the optimizations waiting on it** (maintainer,
    2026-10-08: space and time are both kept): #497, then #502; then #520
    (TCP throughput), #680, #681, #682 (region_pool lock-free validation,
    false sharing, pinless single-user pools), #711, #718, #386; #719 (every
    QEMU lane on four vCPUs).
-6. **Evaluations awaiting a maintainer decision:** #687 (typed terminal
+5. **Evaluations awaiting a maintainer decision:** #687 (typed terminal
    mode leases), #648.
-7. **Compiler and language research, independent of the ownership
+6. **Compiler and language research, independent of the ownership
    checker:** #201, #282, #129, #417, #155, #28, #8.
-8. **Toolchain and portability:** #123, #124, #122, #95, #51, #50, #85.
-9. **Deferred or not a scheduled work item:** #220 (telnet; waits on PTY
+7. **Toolchain and portability:** #123, #124, #122, #95, #51, #50, #85.
+8. **Deferred or not a scheduled work item:** #220 (telnet; waits on PTY
    and `pselect6` scoping), #555, #250, #444, #429, #149, #567, #539, #536,
    #698 (ext2 metadata exhaustion as ENOSPC), #374 (physically contiguous
    memory; waits for a dynamic DMA allocation); #13 for `Phi`, with #216

@@ -81,11 +81,13 @@ const AFFINITY_PEER_SPINNER_NAPS: usize = 2000;
 // A millisecond each, so the whole wait is bounded at a quarter second.
 const AFFINITY_PEER_PIN_POLLS: usize = 256;
 
-private fn affinity_say(line: borrow []u8) {
-    svc5(WRITE_SYSCALL, 1, line as *u8 as usize, line.len, 0, 0);
+private fn affinity_say(line: borrow []const u8) !{unsafe} {
+    // Raw ABI input only: these syscalls read the readonly bytes.
+    // The bridge exposes no writable slice or checked mutation.
+    svc5(WRITE_SYSCALL, 1, (unsafe { line as *u8 }) as usize, line.len, 0, 0);
 }
 
-private fn affinity_fail(line: borrow []u8) {
+private fn affinity_fail(line: borrow []const u8) {
     affinity_say(line);
     svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
 }
@@ -157,7 +159,7 @@ private fn affinity_spinner() {
     svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
 }
 
-fn affinity_probe() {
+fn affinity_probe() !{unsafe} {
     let mut mask: [u8; 8];
     let mask_address: usize = mask as *u8 as usize;
 
@@ -288,7 +290,7 @@ fn affinity_probe() {
     // path's mode, from CPU 1. Each answer is one only a working call gives:
     // faccessat of a file the image has is 0, F_DUPFD returns a descriptor
     // at or above the floor it was asked for, and dup3 returns the target.
-    if (svc5(FACCESSAT_SYSCALL, LINUX_AT_FDCWD, bs"/hello.txt\0" as *u8 as usize,
+    if (svc5(FACCESSAT_SYSCALL, LINUX_AT_FDCWD, (unsafe { bs"/hello.txt\0" as *u8 }) as usize,
              LINUX_R_OK, 0, 0) != 0) {
         affinity_fail(bs"affinity: faccessat asked from cpu 1 did not answer\n");
     }

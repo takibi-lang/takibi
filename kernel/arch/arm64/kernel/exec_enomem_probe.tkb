@@ -6,8 +6,10 @@
 const EXEC_ENOMEM_RESULT: usize = 0xFFFFFFFFFFFFFFF4;
 const EXEC_ENOMEM_MARKER: usize = 0x700;
 
-private fn exec_enomem_say(line: borrow []u8) {
-    svc5(64, 1, line as *u8 as usize, line.len, 0, 0);
+private fn exec_enomem_say(line: borrow []const u8) !{unsafe} {
+    // Raw ABI input only: these syscalls read the readonly bytes.
+    // The bridge exposes no writable slice or checked mutation.
+    svc5(64, 1, (unsafe { line as *u8 }) as usize, line.len, 0, 0);
 }
 
 private fn exec_enomem_fail() {

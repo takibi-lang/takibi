@@ -5,13 +5,15 @@ const NESTED_EXEC: usize = 221;
 const NESTED_WRITE: usize = 64;
 const NESTED_EXIT: usize = 93;
 
-private fn nested_fail() {
-    let line: []u8 = bs"nested: FAIL refused exec result\n";
-    svc5(NESTED_WRITE, 1, line as *u8 as usize, line.len, 0, 0);
+private fn nested_fail() !{unsafe} {
+    let line: []const u8 = bs"nested: FAIL refused exec result\n";
+    // Raw ABI input only: these syscalls read the readonly bytes.
+    // The bridge exposes no writable slice or checked mutation.
+    svc5(NESTED_WRITE, 1, (unsafe { line as *u8 }) as usize, line.len, 0, 0);
     svc5(NESTED_EXIT, 1, 0, 0, 0, 0);
 }
 
-fn nested_exec_probe() {
+fn nested_exec_probe() !{unsafe} {
     let mut args: [usize; 10];
     for index: usize in 0..<10 { args[index] = 0; }
     args[0] = "caller-name-is-replaced" as *u8 as usize;
@@ -39,8 +41,8 @@ fn nested_exec_probe() {
     for index: usize in 3..<10 { args[index] = 0; }
     if (svc5(NESTED_EXEC, "/nested/4.sh" as *u8 as usize,
              vector, 0, 0, 0) != 0xFFFFFFFFFFFFFFF9) { nested_fail(); }
-    let line: []u8 = bs"nested: ELOOP, ENOEXEC, ENOENT, EACCES, E2BIG ok\n";
-    svc5(NESTED_WRITE, 1, line as *u8 as usize, line.len, 0, 0);
+    let line: []const u8 = bs"nested: ELOOP, ENOEXEC, ENOENT, EACCES, E2BIG ok\n";
+    svc5(NESTED_WRITE, 1, (unsafe { line as *u8 }) as usize, line.len, 0, 0);
     args[0] = "/bin/echo" as *u8 as usize;
     args[1] = "nested: child reexec survived" as *u8 as usize;
     args[2] = 0;

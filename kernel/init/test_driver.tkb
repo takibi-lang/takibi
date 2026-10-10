@@ -131,7 +131,7 @@ must_use variant DynamicExecResolveResult {
 // process_image_map_ext2_in_root(). Any failure at any step (name not
 // found, read failure, or invalid ELF) returns NotFound and preserves the
 // static-BusyBox fallback.
-fn kernel_exec_resolve_ext2_name_at(mount: Ext2Mount, name: borrow []u8,
+fn kernel_exec_resolve_ext2_name_at(mount: Ext2Mount, name: borrow []const u8,
                                     metadata: [u8; EXEC_METADATA_SIZE..])
         -> ExecResolveResult !{unsafe} {
     match ext2_lookup_path(mount, name) {
@@ -176,7 +176,7 @@ fn kernel_exec_resolve_ext2_inode_at(mount: Ext2Mount, inode: usize,
     }
 }
 
-fn kernel_exec_resolve_ext2_name(mount: Ext2Mount, name: borrow []u8)
+fn kernel_exec_resolve_ext2_name(mount: Ext2Mount, name: borrow []const u8)
         -> ExecResolveResult !{unsafe} {
     return kernel_exec_resolve_ext2_name_at(
         mount, name, exec_scratch_here().resolve_image as []u8);
@@ -196,7 +196,7 @@ fn kernel_exec_interpreter_is_musl(plan: DistroElfLoadPlan) -> bool {
         EXEC_MUSL_INTERPRETER_LENGTH > image.len - offset) {
         return false;
     }
-    let expected: [u8; 26..] = bs"/lib/ld-musl-aarch64.so.1\0" as [u8; 26..];
+    let expected: [const u8; 26..] = bs"/lib/ld-musl-aarch64.so.1\0" as [const u8; 26..];
     let actual: []u8 = image[offset..<image.len];
     for index: usize in 0..<EXEC_MUSL_INTERPRETER_LENGTH {
         if (index < actual.len) {
@@ -1510,7 +1510,7 @@ irq_uart_rx_unmask();
                             // as a kernel thread.
                             let init_name_guard = process_run_lock();
                             scheduled_process_set_command_line(init_name_guard,
-                                0, bs"init\0" as []u8, 5);
+                                0, bs"init\0" as []const u8, 5);
                             process_run_unlock(init_name_guard);
                             let (script_heap_start, script_heap_limit) =
                                 process_image_heap_range(script_pages);

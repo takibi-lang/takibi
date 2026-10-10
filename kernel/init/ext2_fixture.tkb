@@ -74,7 +74,7 @@ private fn ext2_exhaustion_mode(mount: Ext2Mount) -> Ext2ExhaustionMode {
         Ext2ReadResult::Invalid => { return Ext2ExhaustionMode::Invalid; }
         Ext2ReadResult::Read(found) => { length = found; }
     }
-    let marker: []u8 = bs"::sysinit:/etc/init.sh\n";
+    let marker: []const u8 = bs"::sysinit:/etc/init.sh\n";
     for start: usize in 0..<KERNEL_BLOCK_SIZE {
         let mut line_start: bool = start == 0;
         if (start > 0) {
@@ -100,7 +100,7 @@ private fn ext2_exhaustion_mode(mount: Ext2Mount) -> Ext2ExhaustionMode {
 // through the production allocator without a volume-sized source buffer.
 // EL0 shrinks and removes both after observing ENOSPC; no test syscall or
 // unowned bitmap reservation is carried across userspace execution.
-private fn ext2_exhaustion_filler(mount: Ext2Mount, name: []u8,
+private fn ext2_exhaustion_filler(mount: Ext2Mount, name: []const u8,
                                   blocks: usize) -> bool {
     if (blocks == 0 || blocks > EXT2_MAX_SINGLE_FILE_BLOCKS) { return false; }
     match ext2_create_root_file(mount, name, bs"x") {

@@ -347,13 +347,13 @@ fn ext2_read_inode(mount: Ext2Mount, inode_number: usize)
     return Ext2InodeResult::Inode(inode);
 }
 
-fn ext2_name_matches(entry_name: borrow []u8, name: borrow []u8) -> bool {
+fn ext2_name_matches(entry_name: borrow []const u8, name: borrow []const u8) -> bool {
     if (entry_name.len != name.len || entry_name.len > 255) { return false; }
     return slice_eq(entry_name, name);
 }
 
 fn ext2_lookup_directory(mount: Ext2Mount, directory_inode: usize,
-                         name: borrow []u8) -> Ext2LookupResult !{unsafe} {
+                         name: borrow []const u8) -> Ext2LookupResult !{unsafe} {
     if (name.len == 0 || name.len > 255) {
         return Ext2LookupResult::Invalid;
     }
@@ -421,12 +421,12 @@ fn ext2_lookup_directory(mount: Ext2Mount, directory_inode: usize,
     return Ext2LookupResult::NotFound;
 }
 
-fn ext2_lookup_root(mount: Ext2Mount, name: []u8)
+fn ext2_lookup_root(mount: Ext2Mount, name: []const u8)
         -> Ext2LookupResult !{unsafe} {
     return ext2_lookup_directory(mount, 2, name);
 }
 
-fn ext2_lookup_path_from(mount: Ext2Mount, start_inode: usize, name: borrow []u8)
+fn ext2_lookup_path_from(mount: Ext2Mount, start_inode: usize, name: borrow []const u8)
         -> Ext2LookupResult !{unsafe} {
     if (name.len == 0 || name.len > 255) {
         return Ext2LookupResult::Invalid;
@@ -484,7 +484,7 @@ fn ext2_lookup_path_from(mount: Ext2Mount, start_inode: usize, name: borrow []u8
     return Ext2LookupResult::Found(current_inode);
 }
 
-fn ext2_lookup_path(mount: Ext2Mount, name: borrow []u8)
+fn ext2_lookup_path(mount: Ext2Mount, name: borrow []const u8)
         -> Ext2LookupResult !{unsafe} {
     return ext2_lookup_path_from(mount, 2, name);
 }
@@ -773,7 +773,7 @@ fn ext2_regular_file_allocated_sectors(mount: Ext2Mount,
 }
 
 fn ext2_resize_small_file(mount: Ext2Mount, inode_number: usize,
-                          source: []u8)
+                          source: []const u8)
         -> Ext2ResizeResult !{unsafe} {
     return ext2_replace_regular_file(mount, inode_number, source,
                                      EXT2_MAX_WRITE_ALLOCATIONS);
@@ -1513,14 +1513,14 @@ private fn ext2_write_allocations_published(
 // filled before the inode names any of them. A failed claim or data write
 // rolls back the entire new set and leaves the old inode/data untouched.
 fn ext2_replace_regular_file(mount: Ext2Mount, inode_number: usize,
-                             source: []u8, allocation_budget: usize)
+                             source: []const u8, allocation_budget: usize)
         -> Ext2ResizeResult !{unsafe} {
     return ext2_update_regular_file(mount, inode_number, 0, source,
                                     false, allocation_budget);
 }
 
 fn ext2_write_regular_file_range(mount: Ext2Mount, inode_number: usize,
-                                 offset: usize, source: []u8)
+                                 offset: usize, source: []const u8)
         -> Ext2ResizeResult !{unsafe} {
     if (source.len == 0) { return Ext2ResizeResult::Invalid; }
     return ext2_update_regular_file(mount, inode_number, offset, source,
@@ -1528,7 +1528,7 @@ fn ext2_write_regular_file_range(mount: Ext2Mount, inode_number: usize,
 }
 
 private fn ext2_update_regular_file(mount: Ext2Mount, inode_number: usize,
-                                    offset: usize, source: []u8,
+                                    offset: usize, source: []const u8,
                                     preserve_existing: bool,
                                     allocation_budget: usize)
         -> Ext2ResizeResult !{unsafe} {
@@ -2062,7 +2062,7 @@ private fn ext2_block_owner_linked(owner: sink Ext2BlockOwner[block]) {}
 // which is the same order ext2_resize_small_file publishes in.
 private fn ext2_directory_grow_publish(mount: Ext2Mount, directory: Ext2Inode,
                                        blocks: usize, block: usize,
-                                       inode_number: usize, name: borrow []u8)
+                                       inode_number: usize, name: borrow []const u8)
         -> Ext2DirectoryResult !{unsafe} {
     if (blocks >= EXT2_MAX_DIRECT_BLOCKS || name.len == 0 || name.len > 255) {
         return Ext2DirectoryResult::Invalid;
@@ -2125,7 +2125,7 @@ private fn ext2_directory_grow_publish(mount: Ext2Mount, directory: Ext2Inode,
 // that fills a directory or a volume, since nothing exercises either.
 private fn ext2_directory_grow(mount: Ext2Mount, directory: Ext2Inode,
                                blocks: usize, inode_number: usize,
-                               name: borrow []u8) -> Ext2DirectoryResult !{unsafe} {
+                               name: borrow []const u8) -> Ext2DirectoryResult !{unsafe} {
     if (blocks >= EXT2_MAX_DIRECT_BLOCKS) {
         return Ext2DirectoryResult::Invalid;
     }
@@ -2154,7 +2154,7 @@ private fn ext2_directory_grow(mount: Ext2Mount, directory: Ext2Inode,
 
 fn ext2_directory_add(mount: Ext2Mount, directory_inode: usize,
                       inode_number: usize,
-                      name: borrow []u8) -> Ext2DirectoryResult !{unsafe} {
+                      name: borrow []const u8) -> Ext2DirectoryResult !{unsafe} {
     if (name.len == 0 || name.len > 255 || inode_number == 0 ||
         directory_inode == 0) {
         return Ext2DirectoryResult::Invalid;
@@ -2249,7 +2249,7 @@ fn ext2_directory_add(mount: Ext2Mount, directory_inode: usize,
 
 fn ext2_directory_remove(mount: Ext2Mount, directory_inode: usize,
                          inode_number: usize,
-                         name: borrow []u8) -> Ext2DirectoryResult !{unsafe} {
+                         name: borrow []const u8) -> Ext2DirectoryResult !{unsafe} {
     if (name.len == 0 || name.len > 255 || inode_number == 0 ||
         directory_inode == 0) {
         return Ext2DirectoryResult::Invalid;
@@ -2413,7 +2413,7 @@ fn ext2_directory_live_entries(mount: Ext2Mount, directory_inode: usize)
 fn ext2_initialize_regular_inode(mount: Ext2Mount,
                                  inode_owner: borrow Ext2InodeOwner[inode],
                                  block_owner: borrow Ext2BlockOwner[block],
-                                 content: []u8)
+                                 content: []const u8)
         -> Ext2DirectoryResult !{unsafe} {
     if (content.len == 0 || content.len > KERNEL_BLOCK_SIZE) {
         return Ext2DirectoryResult::Invalid;
@@ -2476,19 +2476,19 @@ const EXT2_ROOT_INODE: usize = 2;
 // replacements made after publication, rather than this initial owner.
 fn ext2_linked_file_keep(linked: sink Ext2LinkedFile[inode, block]) {}
 
-fn ext2_create_root_file(mount: Ext2Mount, name: []u8, content: []u8)
+fn ext2_create_root_file(mount: Ext2Mount, name: []const u8, content: []const u8)
         -> Ext2CreateResult {
     return ext2_create_file_in(mount, EXT2_ROOT_INODE, name, content);
 }
 
 fn ext2_unlink_root_file(mount: Ext2Mount,
                          linked: sink Ext2LinkedFile[inode, block],
-                         name: []u8) -> Ext2UnlinkResult {
+                         name: []const u8) -> Ext2UnlinkResult {
     return ext2_unlink_file_in(mount, EXT2_ROOT_INODE, linked, name);
 }
 
 fn ext2_create_file_in(mount: Ext2Mount, directory_inode: usize,
-                       name: []u8, content: []u8) -> Ext2CreateResult {
+                       name: []const u8, content: []const u8) -> Ext2CreateResult {
     match ext2_lookup_directory(mount, directory_inode, name) {
         Ext2LookupResult::Invalid => { return Ext2CreateResult::Invalid; }
         Ext2LookupResult::Found(existing) => { return Ext2CreateResult::Invalid; }
@@ -2549,7 +2549,7 @@ fn ext2_create_file_in(mount: Ext2Mount, directory_inode: usize,
 
 fn ext2_unlink_file_in(mount: Ext2Mount, directory_inode: usize,
                        linked: sink Ext2LinkedFile[inode, block],
-                       name: []u8) -> Ext2UnlinkResult {
+                       name: []const u8) -> Ext2UnlinkResult {
     let inode_number: usize = linked.inode_number;
     let inode_owner = ext2_inode_owner_new(
         linked.inode_bitmap_index, inode_number, linked.inode_number);
@@ -2715,7 +2715,7 @@ private fn ext2_adjust_parent_links(mount: Ext2Mount, parent_inode: usize,
 
 private fn ext2_link_new_directory(mount: Ext2Mount, parent_inode: usize,
                                    inode_number: usize, block: usize,
-                                   name: borrow []u8)
+                                   name: borrow []const u8)
         -> Ext2DirectoryResult !{unsafe} {
     match ext2_initialize_directory(mount, inode_number, block, parent_inode) {
         Ext2DirectoryResult::Invalid => { return Ext2DirectoryResult::Invalid; }
@@ -2754,7 +2754,7 @@ private fn ext2_linked_directory_new(block_owner: sink Ext2BlockOwner[block],
 fn ext2_directory_keep(linked: sink Ext2LinkedDirectory[inode, block]) {}
 
 fn ext2_make_directory_in(mount: Ext2Mount, parent_inode: usize,
-                          name: borrow []u8) -> Ext2MkdirResult {
+                          name: borrow []const u8) -> Ext2MkdirResult {
     match ext2_lookup_directory(mount, parent_inode, name) {
         Ext2LookupResult::Invalid => { return Ext2MkdirResult::Invalid; }
         Ext2LookupResult::Found(existing) => { return Ext2MkdirResult::Invalid; }
@@ -2805,7 +2805,7 @@ fn ext2_make_directory_in(mount: Ext2Mount, parent_inode: usize,
 // those, so Refused and NotEmpty leave the tree exactly as it was.
 private fn ext2_rmdir_unlink_entry(mount: Ext2Mount, parent_inode: usize,
                                    inode_number: usize, block_number: usize,
-                                   name: borrow []u8)
+                                   name: borrow []const u8)
         -> Ext2RmdirStep !{unsafe} {
     match ext2_read_inode(mount, inode_number) {
         Ext2InodeResult::Invalid => { return Ext2RmdirStep::Refused; }
@@ -2887,7 +2887,7 @@ private fn ext2_linked_directory_mint(inode_bitmap_index: usize,
 // removes. A peer READER takes no lock; it asks whether a mutation is in
 // flight and is sent to core 0 if one is.
 fn ext2_claim_directory(mount: Ext2Mount, parent_inode: usize,
-                        name: borrow []u8) -> Ext2ClaimResult !{unsafe} {
+                        name: borrow []const u8) -> Ext2ClaimResult !{unsafe} {
     if (name.len == 0) { return Ext2ClaimResult::Invalid; }
     if (name.len == 1) {
         if (name[0] == 0x2E) { return Ext2ClaimResult::Invalid; }
@@ -2934,7 +2934,7 @@ fn ext2_claim_directory(mount: Ext2Mount, parent_inode: usize,
 // A symlink, or the last link of a file reaching an indirect block, is
 // Unsupported: releasing those is more code than any caller asks for yet.
 fn ext2_unlink_name(mount: Ext2Mount, parent_inode: usize,
-                    name: borrow []u8) -> Ext2UnlinkNameResult !{unsafe} {
+                    name: borrow []const u8) -> Ext2UnlinkNameResult !{unsafe} {
     if (name.len == 0) { return Ext2UnlinkNameResult::Invalid; }
     if (name.len == 1) {
         if (name[0] == 0x2E) { return Ext2UnlinkNameResult::IsDirectory; }
@@ -3032,7 +3032,7 @@ fn ext2_unlink_name(mount: Ext2Mount, parent_inode: usize,
     }
 }
 
-private fn ext2_name_is_dot_entry(name: borrow []u8) -> bool {
+private fn ext2_name_is_dot_entry(name: borrow []const u8) -> bool {
     if (name.len == 1) {
         if (name[0] == 0x2E) { return true; }
     }
@@ -3053,8 +3053,8 @@ private fn ext2_name_is_dot_entry(name: borrow []u8) -> bool {
 // target is replaced, as rename(2) specifies, through ext2_unlink_name; an
 // existing directory target is refused. A target that already names the
 // source is left alone and counts as done, as POSIX says.
-fn ext2_rename_in(mount: Ext2Mount, old_parent: usize, old_name: borrow []u8,
-                  new_parent: usize, new_name: borrow []u8)
+fn ext2_rename_in(mount: Ext2Mount, old_parent: usize, old_name: borrow []const u8,
+                  new_parent: usize, new_name: borrow []const u8)
         -> Ext2RenameResult !{unsafe} {
     if (old_name.len == 0 || new_name.len == 0 ||
         ext2_name_is_dot_entry(old_name) || ext2_name_is_dot_entry(new_name)) {
@@ -3125,7 +3125,7 @@ fn ext2_rename_in(mount: Ext2Mount, old_parent: usize, old_name: borrow []u8,
 
 fn ext2_remove_directory_in(mount: Ext2Mount, parent_inode: usize,
                             linked: sink Ext2LinkedDirectory[inode, block],
-                            name: borrow []u8) -> Ext2RmdirResult {
+                            name: borrow []const u8) -> Ext2RmdirResult {
     match ext2_rmdir_unlink_entry(mount, parent_inode, linked.inode_number,
                                   linked.block_number, name) {
         Ext2RmdirStep::Refused => { return Ext2RmdirResult::Refused(linked); }

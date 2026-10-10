@@ -22,8 +22,10 @@ const PEER_EXEC_ON_PEER: usize = 1;
 const PEER_EXEC_ON_CORE0: usize = 2;
 const PEER_EXEC_ARRIVAL_POLLS: usize = 1000000;
 
-private fn peer_exec_fail(line: borrow []u8) {
-    svc5(WRITE_SYSCALL, 1, line as *u8 as usize, line.len, 0, 0);
+private fn peer_exec_fail(line: borrow []const u8) !{unsafe} {
+    // Raw ABI input only: these syscalls read the readonly bytes.
+    // The bridge exposes no writable slice or checked mutation.
+    svc5(WRITE_SYSCALL, 1, (unsafe { line as *u8 }) as usize, line.len, 0, 0);
     svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
 }
 

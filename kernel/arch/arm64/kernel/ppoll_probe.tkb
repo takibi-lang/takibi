@@ -25,8 +25,10 @@ const POLLIN: u8 = 1;
 const PPOLL_PROBE_ERROR_FLOOR: usize = 0xFFFFFFFFFFFFF000;
 const PPOLL_PROBE_PAUSE: usize = 65536;
 
-private fn ppoll_probe_say(line: borrow []u8) {
-    svc5(WRITE_SYSCALL, 1, line as *u8 as usize, line.len, 0, 0);
+private fn ppoll_probe_say(line: borrow []const u8) !{unsafe} {
+    // Raw ABI input only: these syscalls read the readonly bytes.
+    // The bridge exposes no writable slice or checked mutation.
+    svc5(WRITE_SYSCALL, 1, (unsafe { line as *u8 }) as usize, line.len, 0, 0);
 }
 
 private fn ppoll_probe_child() {

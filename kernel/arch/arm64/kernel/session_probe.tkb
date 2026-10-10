@@ -8,12 +8,14 @@ private fn session_call(pid: usize) -> usize {
     return svc5(156, pid, 0, 0, 0, 0);
 }
 
-private fn session_fail(line: borrow []u8) {
-    svc5(64, 1, line as *u8 as usize, line.len, 0, 0);
+private fn session_fail(line: borrow []const u8) !{unsafe} {
+    // Raw ABI input only: these syscalls read the readonly bytes.
+    // The bridge exposes no writable slice or checked mutation.
+    svc5(64, 1, (unsafe { line as *u8 }) as usize, line.len, 0, 0);
     svc5(93, 1, 0, 0, 0, 0);
 }
 
-fn session_probe() {
+fn session_probe() !{unsafe} {
     let parent: usize = svc5(172, 0, 0, 0, 0, 0);
     let inherited: usize = session_call(0);
     if (inherited == 0 || inherited >= SESSION_ERROR_FLOOR ||
@@ -65,8 +67,8 @@ fn session_probe() {
             session_fail(bs"session: FAIL child result or reaped pid\n");
         }
     }
-    let line: []u8 = bs"session: init, fork, setsid, getsid, exec, EPERM, ESRCH ok\n";
-    svc5(64, 1, line as *u8 as usize, line.len, 0, 0);
+    let line: []const u8 = bs"session: init, fork, setsid, getsid, exec, EPERM, ESRCH ok\n";
+    svc5(64, 1, (unsafe { line as *u8 }) as usize, line.len, 0, 0);
     svc5(93, 0, 0, 0, 0, 0);
 }
 

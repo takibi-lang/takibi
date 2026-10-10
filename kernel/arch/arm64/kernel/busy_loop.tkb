@@ -116,15 +116,17 @@ private fn busy_loop_clock_monotonic_ns(bytes: borrow [u64; 2..]) -> usize {
 }
 
 /* Report the placement recorded while the foreground pipeline ran. */
-fn busy_loop_placement_report() {
+fn busy_loop_placement_report() !{unsafe} {
     if (svc5(WORKLOAD_PROGRESS_SYSCALL,
              ORDINARY_PLACEMENT_REPORT_TAG, 0, 0, 0, 0) != 1) {
         svc5(WORKLOAD_EXIT_SYSCALL, 1, 0, 0, 0, 0);
         return;
     }
-    let line: []u8 =
+    let line: []const u8 =
         bs"smp placement: BusyBox sleep applet ran on a peer without affinity\n";
-    if (svc5(WRITE_SYSCALL, 1, line as *u8 as usize,
+    // Raw ABI input only: these syscalls read the readonly bytes.
+    // The bridge exposes no writable slice or checked mutation.
+    if (svc5(WRITE_SYSCALL, 1, (unsafe { line as *u8 }) as usize,
              line.len, 0, 0) != line.len) {
         svc5(WORKLOAD_EXIT_SYSCALL, 1, 0, 0, 0, 0);
         return;
@@ -135,7 +137,7 @@ fn busy_loop_placement_report() {
 /* The peer UART-wake lane needs a second runnable process on CPU 1 while
  * /bin/peer-tty reads there. Neither a sleeping HTTPd nor an unpinned shell
  * job guarantees that placement. This fixture is started only by that lane. */
-fn busy_loop_peer_spin() {
+fn busy_loop_peer_spin() !{unsafe} {
     let mut mask: [u8; 8];
     for index: usize in 0..<8 { mask[index] = 0; }
     mask[0] = 2;
@@ -144,8 +146,8 @@ fn busy_loop_peer_spin() {
         svc5(WORKLOAD_EXIT_SYSCALL, 1, 0, 0, 0, 0);
         return;
     }
-    let ready: []u8 = bs"peer spin: pinned to cpu 1\n";
-    svc5(WRITE_SYSCALL, 1, ready as *u8 as usize, ready.len, 0, 0);
+    let ready: []const u8 = bs"peer spin: pinned to cpu 1\n";
+    svc5(WRITE_SYSCALL, 1, (unsafe { ready as *u8 }) as usize, ready.len, 0, 0);
     while (true) {
         svc5(GETPID_SYSCALL, 0, 0, 0, 0, 0);
     }
@@ -155,7 +157,7 @@ fn busy_loop_peer_spin() {
  * and timer wake on CPU 1. Tag 6 is a test-only syscall action: its first
  * call names CPU 1, then this process pins itself there before asking to
  * block. */
-fn busy_loop_peer_net_wake() {
+fn busy_loop_peer_net_wake() !{unsafe} {
     let peer_cpu: usize = svc5(
         WORKLOAD_PROGRESS_SYSCALL, PEER_NET_WAKE_TAG, 0, 0, 0, 0);
     if (peer_cpu == 0 || peer_cpu >= 8) {
@@ -178,8 +180,8 @@ fn busy_loop_peer_net_wake() {
             ((cpu_bytes[2] as usize) << 16) |
             ((cpu_bytes[3] as usize) << 24)) != peer_cpu) {}
 
-    let waiting: []u8 = bs"peer NetRx fixture: pinned to cpu 1\n";
-    if (svc5(WRITE_SYSCALL, 1, waiting as *u8 as usize,
+    let waiting: []const u8 = bs"peer NetRx fixture: pinned to cpu 1\n";
+    if (svc5(WRITE_SYSCALL, 1, (unsafe { waiting as *u8 }) as usize,
              waiting.len, 0, 0) != waiting.len) {
         svc5(WORKLOAD_EXIT_SYSCALL, 1, 0, 0, 0, 0);
         return;
@@ -191,8 +193,8 @@ fn busy_loop_peer_net_wake() {
         svc5(WORKLOAD_EXIT_SYSCALL, 1, 0, 0, 0, 0);
         return;
     }
-    let line: []u8 = bs"workload: peer NetRx waiter resumed on cpu 1\n";
-    if (svc5(WRITE_SYSCALL, 1, line as *u8 as usize,
+    let line: []const u8 = bs"workload: peer NetRx waiter resumed on cpu 1\n";
+    if (svc5(WRITE_SYSCALL, 1, (unsafe { line as *u8 }) as usize,
              line.len, 0, 0) != line.len) {
         svc5(WORKLOAD_EXIT_SYSCALL, 1, 0, 0, 0, 0);
         return;

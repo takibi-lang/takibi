@@ -46,7 +46,7 @@ const WNOHANG: usize = 1;
  * old flat-blob mechanism, nothing depends on this being the first
  * function in the file's .text section anymore. Named for `-e
  * initial_user_payload` on the link line regardless. */
-fn initial_user_payload() {
+fn initial_user_payload() !{unsafe} {
     /* GitHub issue #241: this payload used to always be the very first
      * (pid 1) process the kernel created, so its own clone()'d child was
      * always exactly pid 2 -- now launched as an ordinary external command
@@ -112,10 +112,12 @@ fn initial_user_payload() {
      * kernel accepts writes only at offset zero; the first shrinks it, the
      * second grows it, and readback proves no old suffix survived. */
     let mutable_path: *u8 = "/mutable.txt" as *u8;
-    let short_content: []u8 = bs"tiny\n";
+    let short_content: []const u8 = bs"tiny\n";
     let fd3: usize = svc5(56, 0, mutable_path as usize, 1, 0, 0);
     fail_if(fd3 != 3);
-    fail_if(svc5(64, fd3, (short_content as *u8) as usize,
+    // Raw ABI input only: these syscalls read the readonly bytes.
+    // The bridge exposes no writable slice or checked mutation.
+    fail_if(svc5(64, fd3, ((unsafe { short_content as *u8 })) as usize,
                  short_content.len, 0, 0) != short_content.len);
     fail_if(svc5(57, 3, 0, 0, 0, 0) != 0);
     let fd4: usize = svc5(56, 0, mutable_path as usize, 0, 0, 0);
@@ -156,10 +158,10 @@ fn initial_user_payload() {
     fail_if(svc5(48, etc_fd, "not-a-program" as *u8 as usize, 1, 0, 0) != 0);
     fail_if(svc5(57, etc_fd, 0, 0, 0, 0) != 0);
 
-    let long_content: []u8 = bs"extended ext2\n";
+    let long_content: []const u8 = bs"extended ext2\n";
     let fd5: usize = svc5(56, 0, mutable_path as usize, 1, 0, 0);
     fail_if(fd5 != 3);
-    fail_if(svc5(64, fd5, (long_content as *u8) as usize,
+    fail_if(svc5(64, fd5, ((unsafe { long_content as *u8 })) as usize,
                  long_content.len, 0, 0) != long_content.len);
     fail_if(svc5(57, fd5, 0, 0, 0, 0) != 0);
     let fd6: usize = svc5(56, 0, mutable_path as usize, 0, 0, 0);
@@ -172,8 +174,8 @@ fn initial_user_payload() {
     }
     fail_if(svc5(63, fd6, long_readback as *u8 as usize, 1, 0, 0) != 0);
     fail_if(svc5(57, fd6, 0, 0, 0, 0) != 0);
-    let write_success: []u8 = bs"userspace file syscalls: open/write/read/close and truncate+extend ok\n";
-    fail_if(svc5(64, 1, (write_success as *u8) as usize,
+    let write_success: []const u8 = bs"userspace file syscalls: open/write/read/close and truncate+extend ok\n";
+    fail_if(svc5(64, 1, ((unsafe { write_success as *u8 })) as usize,
                  write_success.len, 0, 0) != write_success.len);
 
     /* GitHub issue #393: RLIMIT_NOFILE is a per-process pair this process
@@ -301,8 +303,8 @@ fn initial_user_payload() {
                  0x100000000, 0, 0) != 0);
     fail_if(svc5(142, 0xFFFFFFFFFEE1DEAD, 672274793,
                  0xFFFFFFFF89ABCDEF, 0, 0) != 0);
-    let reboot_abi: []u8 = bs"reboot ABI: magic+command validation, cad no-ops ok\n";
-    fail_if(svc5(64, 1, reboot_abi as *u8 as usize, reboot_abi.len, 0, 0) != reboot_abi.len);
+    let reboot_abi: []const u8 = bs"reboot ABI: magic+command validation, cad no-ops ok\n";
+    fail_if(svc5(64, 1, (unsafe { reboot_abi as *u8 }) as usize, reboot_abi.len, 0, 0) != reboot_abi.len);
 
     /* socket/bind/listen/close one IPv4 stream endpoint. */
     let mut socket_address: [u8; 16] = {
@@ -323,8 +325,8 @@ fn initial_user_payload() {
     let fd6: usize = svc5(242, 4, 0, 0, 0, 0);
     fail_if(fd6 != 6);
 
-    let connection_b_response: []u8 = bs"conn-B\n!";
-    let socket_response: []u8 = bs"HTTP/1.0 200 OK\r\n\r\n";
+    let connection_b_response: []const u8 = bs"conn-B\n!";
+    let socket_response: []const u8 = bs"HTTP/1.0 200 OK\r\n\r\n";
     // GitHub issue #228 (found on real hardware), reconfirmed under the
     // real static-PIE ELF (issue #241): this buffer MUST be a local
     // (stack) variable, not a global. scripts/check_user_payload_no_rw_globals.py
@@ -355,7 +357,7 @@ fn initial_user_payload() {
     // Empty neighbors still exercise writev without changing that wire shape.
     payload_write_u64(vectors_base, 0, 0);
     payload_write_u64(vectors_base, 8, 0);
-    payload_write_u64(vectors_base, 16, connection_b_response as *u8 as usize);
+    payload_write_u64(vectors_base, 16, (unsafe { connection_b_response as *u8 }) as usize);
     payload_write_u64(vectors_base, 24, connection_b_response.len);
     payload_write_u64(vectors_base, 32, 0);
     payload_write_u64(vectors_base, 40, 0);
@@ -363,9 +365,9 @@ fn initial_user_payload() {
     fail_if(svc5(63, 5, ptr_of(rx_base, 0), 8, 0, 0) != 8);
     // Connection A's peer collects a byte stream, so split its header into
     // two real TCP writev segments and retain the exact response content.
-    payload_write_u64(vectors_base, 0, socket_response as *u8 as usize);
+    payload_write_u64(vectors_base, 0, (unsafe { socket_response as *u8 }) as usize);
     payload_write_u64(vectors_base, 8, 9);
-    payload_write_u64(vectors_base, 16, ptr_of(socket_response as *u8, 9));
+    payload_write_u64(vectors_base, 16, ptr_of((unsafe { socket_response as *u8 }), 9));
     payload_write_u64(vectors_base, 24, 10);
     fail_if(svc5(66, 5, ptr_of(vectors_base, 0), 2, 0, 0) != 19);
 
@@ -378,13 +380,13 @@ fn initial_user_payload() {
     // A partial TCP segment ends writev before the following sentinel.
     payload_write_u64(vectors_base, 0, ptr_of(large_base, 0));
     payload_write_u64(vectors_base, 8, LARGE_LEN);
-    payload_write_u64(vectors_base, 16, connection_b_response as *u8 as usize);
+    payload_write_u64(vectors_base, 16, (unsafe { connection_b_response as *u8 }) as usize);
     payload_write_u64(vectors_base, 24, 1);
     fail_if(svc5(66, 5, ptr_of(vectors_base, 0), 2, 0, 0) != 1460);
     fail_if(svc5(64, 5, ptr_of(large_base, 1460), 1, 0, 0) != 1);
-    let socket_write_success: []u8 =
+    let socket_write_success: []const u8 =
         bs"userspace socket partial write: 1460+1 ok\nuserspace socket vectored io: split, empty, short ok\n";
-    fail_if(svc5(64, 1, (socket_write_success as *u8) as usize,
+    fail_if(svc5(64, 1, ((unsafe { socket_write_success as *u8 })) as usize,
                  socket_write_success.len, 0, 0) !=
             socket_write_success.len);
 
@@ -427,7 +429,7 @@ fn initial_user_payload() {
         /* The first byte must take the scheduler-aware Blocked -> Ready
          * path. Later bytes may already be in the bounded RX ring when
          * selected. */
-        let uart_fixture: []u8 = bs"irqtest\n";
+        let uart_fixture: []const u8 = bs"irqtest\n";
         for want_byte in uart_fixture {
             let c: usize = svc5(451, 0, 0, 0, 0, 0);
             fail_if(c != (want_byte as usize));
@@ -556,9 +558,9 @@ fn initial_user_payload() {
         fail_if(read_block[0] != 0x21);
         fail_if(svc5(63, retry_read, read_block as *u8 as usize, 1, 0, 0) != 0);
         fail_if(svc5(57, retry_read, 0, 0, 0, 0) != 0);
-        let exhaustion_message: []u8 =
+        let exhaustion_message: []const u8 =
             bs"userspace ext2 exhaustion: ENOSPC data+offset unchanged, unlink+retry ok\n";
-        fail_if(svc5(64, 1, exhaustion_message as *u8 as usize,
+        fail_if(svc5(64, 1, (unsafe { exhaustion_message as *u8 }) as usize,
                      exhaustion_message.len, 0, 0) != exhaustion_message.len);
         let write_fd: usize = svc5(56, 0, mutable_path as usize, 1, 0, 0);
         fail_if(write_fd >= 64);
@@ -570,8 +572,8 @@ fn initial_user_payload() {
             let answer: usize = svc5(64, write_fd, write_block as *u8 as usize,
                                       1024, 0, 0);
             if (answer == ENOSPC_RC) {
-                let message: []u8 = bs"userspace ext2 write: ENOSPC\n";
-                svc5(64, 2, message as *u8 as usize, message.len, 0, 0);
+                let message: []const u8 = bs"userspace ext2 write: ENOSPC\n";
+                svc5(64, 2, (unsafe { message as *u8 }) as usize, message.len, 0, 0);
             }
             fail_if(answer != 1024);
         }
@@ -591,17 +593,17 @@ fn initial_user_payload() {
         fail_if(svc5(57, read_fd, 0, 0, 0, 0) != 0);
         let restore_fd: usize = svc5(56, 0, mutable_path as usize, 1, 0, 0);
         fail_if(restore_fd >= 64);
-        let restore_content: []u8 = bs"before\n";
-        fail_if(svc5(64, restore_fd, restore_content as *u8 as usize,
+        let restore_content: []const u8 = bs"before\n";
+        fail_if(svc5(64, restore_fd, (unsafe { restore_content as *u8 }) as usize,
                      restore_content.len, 0, 0) != restore_content.len);
         fail_if(svc5(57, restore_fd, 0, 0, 0, 0) != 0);
         svc5(93, 0, 0, 0, 0, 0);
     }
 }
 
-fn fail_halt() {
-    let message: []u8 = bs"userspace syscall fixture: failed\n";
-    svc5(64, 2, message as *u8 as usize, message.len, 0, 0);
+fn fail_halt() !{unsafe} {
+    let message: []const u8 = bs"userspace syscall fixture: failed\n";
+    svc5(64, 2, (unsafe { message as *u8 }) as usize, message.len, 0, 0);
     svc5(93, 1, 0, 0, 0, 0);
     // The exit syscall cannot return; retain a visible fail-stop if it does.
     while (true) {

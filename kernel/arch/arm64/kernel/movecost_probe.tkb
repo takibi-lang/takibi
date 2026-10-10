@@ -34,8 +34,10 @@ const MOVECOST_LINE: usize = 64;
 const MOVECOST_LINES: usize = 4096;
 const MOVECOST_ROUNDS: usize = 8;
 
-private fn movecost_fail(line: borrow []u8) {
-    svc5(WRITE_SYSCALL, 1, line as *u8 as usize, line.len, 0, 0);
+private fn movecost_fail(line: borrow []const u8) !{unsafe} {
+    // Raw ABI input only: these syscalls read the readonly bytes.
+    // The bridge exposes no writable slice or checked mutation.
+    svc5(WRITE_SYSCALL, 1, (unsafe { line as *u8 }) as usize, line.len, 0, 0);
     svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
 }
 

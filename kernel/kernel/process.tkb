@@ -2174,7 +2174,7 @@ fn kernel_process_monitor_proc(stopped: borrow MachineStopped[&kernel_world_stop
 // GitHub issue #693 step 5: the exec staging setters take the run guard
 // their callers hold (#618's one critical section for a procfs reader).
 fn scheduled_process_set_command_line(guard: borrow ProcessRunGuard[lock],
-                                      slot: usize, value: []u8,
+                                      slot: usize, value: []const u8,
                                       requested: usize) !{unsafe} {
     let record = scheduled_process_record_locked(guard, slot);
     let mut length: usize = requested;

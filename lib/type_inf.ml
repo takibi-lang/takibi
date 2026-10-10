@@ -2869,7 +2869,8 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
   | IntLit _    -> fresh ()  (* polymorphic: unifies with any integer type via context *)
   | BoolLit _   -> TBool
   | StringLit _ -> TPtr TU8
-  | ByteSliceLit bytes -> TSlice (TU8, String.length bytes, Ast.SliceWritable)
+  (* Literal storage is shared read-only data, never a writable buffer. *)
+  | ByteSliceLit bytes -> TSlice (TU8, String.length bytes, Ast.SliceReadonly)
   | ViewLit (name, args) ->
       if not (Hashtbl.mem view_kinds name) then
         raise (TypeError (e.loc, Printf.sprintf "unknown erased view '%s'" name));
@@ -3488,14 +3489,15 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                              byte length (NUL excluded) becomes the minimum,
                              so `slice_copy(dst, "..." as []u8)` copies the
                              literal and returns its length -- no NUL scan,
-                             no unbounded write. *)
+                             no unbounded write. Its storage stays readonly
+                             even when the cast spells a writable slice. *)
                           unify_at e.loc TU8 el_want;
                           let n = String.length str in
                           if n < want_min then
                             raise (TypeError (e.loc, Printf.sprintf
                               "cannot cast a %d-byte string literal to %s"
                               n (to_string tgt)));
-                          TSlice (el_want, n, want_access)
+                          TSlice (el_want, n, Ast.SliceReadonly)
                       | _ -> raise (TypeError (e.loc,
                           "slice cast requires an array variable, an \
                            array-typed struct field, a string literal, or a \
@@ -5713,8 +5715,7 @@ and check_no_write_through_shared_ref senv eenv tyenv fenv (e : Ast.expr) : unit
       (match repr (place_undecayed_type senv eenv tyenv fenv base) with
        | TSlice (_, _, Ast.SliceReadonly) as slice_ty ->
            raise (TypeError (base.loc, Printf.sprintf
-             "cannot write through readonly slice '%s'; a slice made from \
-              a shared reference stays readonly (GitHub issue #724)"
+             "cannot write through readonly slice '%s'; use writable storage"
              (to_string slice_ty)))
        | _ -> check_no_write_through_shared_ref senv eenv tyenv fenv base)
   | _ -> ()

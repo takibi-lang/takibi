@@ -1,7 +1,7 @@
 // Allocation-free byte-slice matching and delimiter handling.
 //
 // This deliberately stays below a String abstraction: kernel pathname and
-// protocol parsers already operate on bounded []u8 views, may contain NUL,
+// protocol parsers already operate on bounded []const u8 views, may contain NUL,
 // and need byte-exact semantics. slice_eq remains the exact-equality
 // primitive; this file supplies the two missing compositions that callers
 // otherwise hand-code.
@@ -16,8 +16,8 @@
 //   needed from a borrowed/stack slice.
 
 struct ByteSliceSplit {
-    before: []u8;
-    after: []u8;
+    before: []const u8;
+    after: []const u8;
 }
 
 must_use variant ByteSliceSplitResult {
@@ -30,7 +30,7 @@ must_use variant ByteSliceFindResult {
     Found(usize);
 }
 
-fn byte_slice_find_first(value: borrow []u8, delimiter: u8)
+fn byte_slice_find_first(value: borrow []const u8, delimiter: u8)
         -> ByteSliceFindResult {
     for position: usize in 0..<value.len {
         if (value[position] == delimiter) {
@@ -40,7 +40,7 @@ fn byte_slice_find_first(value: borrow []u8, delimiter: u8)
     return ByteSliceFindResult::Absent;
 }
 
-fn byte_slice_split_first(value: []u8, delimiter: u8)
+fn byte_slice_split_first(value: []const u8, delimiter: u8)
         -> ByteSliceSplitResult {
     match byte_slice_find_first(value, delimiter) {
         ByteSliceFindResult::Absent => {

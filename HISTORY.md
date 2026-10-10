@@ -1,5 +1,29 @@
 # takibi Engineering History
 
+## 2026-10-10: Literal slices inherit readonly storage
+
+Issue #729 exposed two literal creation paths that still inferred writable
+slices despite the readonly slice contract. Byte literals and string-to-slice
+casts point at static read-only storage; testing their length and successful
+reads never exercised the inferred write authority. Both creation paths now
+infer readonly access, preserving decoded minimum lengths and existing ABI.
+The writable spelling of a string creation cast cannot override that access.
+
+The existing slice rules then reject writes, writable consumers, writable
+slice casts and safe raw-pointer bridges, including through aliases and
+subslice expressions. Compiler regressions cover both literal forms and
+array-backed copying; eight independent CLI controls were accepted by the
+old compiler and rejected by the repair. The normal writable-copy control
+retains identical object code under --forbid-trap.
+
+Read-only maintained consumers accept const slices. Raw EL0 syscall inputs
+retain their existing ABI through narrowly scoped unsafe bridges: these
+syscalls read the source bytes, and introduce no checked writable slice.
+This boundary remains trusted, as do existing unsafe raw-pointer operations;
+the repair does not establish readonly raw-pointer semantics. The RecordLifetime
+ExecWrite and ConsoleTx WriterAppend mappings were reviewed: only source
+access types changed, with no change to lock, lifetime or FIFO transitions.
+
 ## 2026-10-10: Default construction respects private ownership
 
 Issue #735 reproduced an external initializer-free FrameRef declaration,
