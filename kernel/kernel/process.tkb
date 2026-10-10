@@ -2878,43 +2878,25 @@ private fn scheduled_process_park_stack_run(base: usize) !{unsafe} {
                     base, KERNEL_STACK_RUN_PAGES) {
                 PageRunReclaimResult::Invalid => {}
                 PageRunReclaimResult::Reclaimed(incoming) => {
-                    let displaced: Place(exists run: usize. PageRunOwner[run]) = place_put(
+                    let Place::Empty = place_put(
                         guard, &scheduled_process_spare.mutex,
                         scheduled_process_spare.value, incoming);
-                    match displaced {
-                        Place::Empty => {}
-                        Place::Full(impossible) => {
-                            page_run_free(impossible);
-                        }
-                    }
                 }
             }
         }
         Place::Full(old) => {
             let old_base: usize = page_run_physical_address(old);
             if (old_base == base) {
-                let displaced: Place(exists run: usize. PageRunOwner[run]) = place_put(
+                let Place::Empty = place_put(
                     guard, &scheduled_process_spare.mutex,
                     scheduled_process_spare.value, old);
-                match displaced {
-                    Place::Empty => {}
-                    Place::Full(impossible) => {
-                        page_run_free(impossible);
-                    }
-                }
             } else {
                 let sp: usize = kernel_stack_read_sp_el1();
                 if (sp >= old_base &&
                     sp < old_base + KERNEL_STACK_RUN_BYTES) {
-                    let displaced: Place(exists run: usize. PageRunOwner[run]) = place_put(
+                    let Place::Empty = place_put(
                         guard, &scheduled_process_spare.mutex,
                         scheduled_process_spare.value, old);
-                    match displaced {
-                        Place::Empty => {}
-                        Place::Full(impossible) => {
-                            page_run_free(impossible);
-                        }
-                    }
                     page_run_transferred_release_physical(
                         base, KERNEL_STACK_RUN_PAGES);
                 } else {
@@ -2924,15 +2906,9 @@ private fn scheduled_process_park_stack_run(base: usize) !{unsafe} {
                             page_run_free(old);
                         }
                         PageRunReclaimResult::Reclaimed(incoming) => {
-                            let displaced: Place(exists run: usize. PageRunOwner[run]) = place_put(
+                            let Place::Empty = place_put(
                                 guard, &scheduled_process_spare.mutex,
                                 scheduled_process_spare.value, incoming);
-                            match displaced {
-                                Place::Empty => {}
-                                Place::Full(impossible) => {
-                                    page_run_free(impossible);
-                                }
-                            }
                             page_run_free(old);
                         }
                     }
@@ -2960,15 +2936,9 @@ private fn scheduled_process_take_spare_stack_run() -> usize !{unsafe} {
             let base: usize = page_run_physical_address(owner);
             let sp: usize = kernel_stack_read_sp_el1();
             if (sp >= base && sp < base + KERNEL_STACK_RUN_BYTES) {
-                let displaced: Place(exists run: usize. PageRunOwner[run]) = place_put(
+                let Place::Empty = place_put(
                     guard, &scheduled_process_spare.mutex,
                     scheduled_process_spare.value, owner);
-                match displaced {
-                    Place::Empty => {}
-                    Place::Full(impossible) => {
-                        page_run_free(impossible);
-                    }
-                }
                 scheduled_process_spare_unlock(
                     guard, &scheduled_process_spare.mutex);
                 return 0;
@@ -6467,15 +6437,9 @@ private fn kernel_stack_owner_name(sp: usize) -> *u8 {
         Place::Empty => {}
         Place::Full(spare_owner) => {
             let spare: usize = page_run_physical_address(spare_owner);
-            let displaced: Place(exists run: usize. PageRunOwner[run]) = place_put(
+            let Place::Empty = place_put(
                 spare_guard, &scheduled_process_spare.mutex,
                 scheduled_process_spare.value, spare_owner);
-            match displaced {
-                Place::Empty => {}
-                Place::Full(impossible) => {
-                    page_run_free(impossible);
-                }
-            }
             scheduled_process_spare_unlock(
                 spare_guard, &scheduled_process_spare.mutex);
             if (sp >= spare && sp < spare + KERNEL_STACK_RUN_BYTES) {
