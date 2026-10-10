@@ -2,8 +2,8 @@
   "date": "2026-10-10",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "991149209e224af87c809000df9d62ad5e76383d7f96a7f7da95210dde67ef33",
-  "workload": "#637 step A: RPi5 UART through an IoHandle (rpi5/device_map.tkb). Linked kernels compared against origin/main. The shared register operations then move into pl011.tkb (no code-size effect beyond inlining differences).",
+  "source_sha256": "424bb5b130dacd331cb2864eb50dca326fa424688d566af36e2e680ccd326761",
+  "workload": "#637 step A: register-array volatility fix (compiler) and the QEMU GIC through IoHandles. Linked kernels compared against origin/main.",
   "evidence": [
     "docs/PROCESS_PIN_SPACE_2026-10-10.md",
     "docs/BOUNDS_CONTRACT_SPACE_2026-10-10.md",
@@ -42,6 +42,6 @@
     "docs/GEM_TX_LIFECYCLE_2026-10-10.md",
     "docs/GEM_TX_BULK_2026-10-10.json"
   ],
-  "assessment": "RPi5: text +408 B, data +8 B (the `uart` handle), BSS and usable_ram_start unchanged; QEMU unchanged. Measured on top of 82e7db65.",
+  "assessment": "QEMU: text +664 B, data +16 B (gicd/gicc handles), BSS unchanged, usable_ram_start +32 KiB (8 allocator pages) from code growth crossing a boundary. RPi5 unchanged.",
   "next_trigger": "Production runtime metadata extent migration, a stored allocator authority through array/place rules, or another completed kernel feature/stage requires fresh workload measurement. Any change to generated production code, storage or allocation invalidates this reuse."
 }
