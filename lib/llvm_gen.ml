@@ -2678,7 +2678,7 @@ let effective_slice_min id m =
    TArray/TSlice/TPtr classification, but at the codegen level (an actual
    address/value, not just a type). *)
 type index_storage =
-  | IdxArray of Ast.type_expr * int * llvm_place
+  | IdxArray of Ast.type_expr * int * llvm_place * bool  (* volatile *)
   | IdxSlice of Ast.type_expr * int * llvm_value
   | IdxPtr   of Ast.type_expr * llvm_value * bool
 
@@ -3739,7 +3739,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       (* Array load [T; N]: type inference records the ValueFacts bounds
          decision for this exact index expression. An unsafe access remains
          an explicit "trust me" when that proof is absent. *)
-      let load_from_array elem_ty n arr_ptr =
+      let load_from_array ?(is_volatile = false) elem_ty n arr_ptr =
         let checker_proven =
           Hashtbl.mem Type_inf.array_index_proven_in_bounds_at idx.loc in
         let needs_check = not checker_proven in
@@ -3767,6 +3767,8 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
             (elem_ty, v)
         | _ ->
             let v = build_load (ltype_of_ast elem_ty) ep "idx_val" builder in
+            (* An io struct's register array (#637 step A). *)
+            if is_volatile then set_volatile true v;
             (elem_ty, to_arith_width elem_ty v)
       in
       let load_through_ptr elem_ty ptr_v is_volatile =
@@ -3808,8 +3810,8 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
         (elem_ty, to_arith_width elem_ty v)
       in
       (match resolve_index_storage ~op:"Index" locals base with
-       | IdxArray (elem_ty, n, arr_place) ->
-           load_from_array elem_ty n (place_ptr arr_place)
+       | IdxArray (elem_ty, n, arr_place, is_volatile) ->
+           load_from_array ~is_volatile elem_ty n (place_ptr arr_place)
        | IdxSlice (elem_ty, min_len, fat) ->
            load_from_slice elem_ty min_len (value_ll fat)
        | IdxPtr (elem_ty, ptr_v, is_volatile) ->
@@ -4017,7 +4019,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       in
       (match resolve_index_storage ~op:"SliceOf" locals base with
        | IdxSlice (el, m, fat) -> sub_of_slice el m (value_ll fat)
-       | IdxArray (el, n, place) -> sub_of_array el n (place_ptr place)
+       | IdxArray (el, n, place, _) -> sub_of_array el n (place_ptr place)
        | IdxPtr (el, ptr_v, _is_volatile) -> sub_of_ptr el (value_ll ptr_v))
 
   | Unsafe e1 ->
@@ -5124,7 +5126,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
               (after rhs) actually issues the load/GEP instructions. *)
            let elem_ty_hint = peek_index_elem_ty locals base in
            let (_, rhs_v) = gen_expr ?expected_ty:elem_ty_hint locals rhs in
-           let store_to_array elem_ty n arr_ptr =
+           let store_to_array ?(is_volatile = false) elem_ty n arr_ptr =
              let checker_proven =
                Hashtbl.mem Type_inf.array_index_proven_in_bounds_at idx.loc in
              let needs_check = not checker_proven in
@@ -5134,7 +5136,8 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
              let arr_ll = array_type (ltype_of_ast elem_ty) n in
              let zero   = const_int (i32_type context) 0 in
              let ep = build_in_bounds_gep arr_ll arr_ptr [|zero; idx_v|] "idx_ptr" builder in
-             ignore (build_store (coerce rhs_v elem_ty) ep builder)
+             let inst = build_store (coerce rhs_v elem_ty) ep builder in
+             if is_volatile then set_volatile true inst
            in
            let store_through_ptr elem_ty ptr_v is_volatile =
              let ep = build_gep (ltype_of_ast elem_ty) ptr_v [|idx_v|] "idx_ptr" builder in
@@ -5156,8 +5159,8 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
              ignore (build_store (coerce rhs_v elem_ty) ep builder)
            in
            (match resolve_index_storage ~op:"AssignIndex" locals base with
-            | IdxArray (elem_ty, n, arr_place) ->
-                store_to_array elem_ty n (place_ptr arr_place)
+            | IdxArray (elem_ty, n, arr_place, is_volatile) ->
+                store_to_array ~is_volatile elem_ty n (place_ptr arr_place)
             | IdxSlice (elem_ty, min_len, fat) ->
                 store_to_slice elem_ty min_len (value_ll fat)
             | IdxPtr (elem_ty, ptr_v, is_volatile) ->
@@ -5317,7 +5320,7 @@ and gen_index_place locals (base : Ast.expr) (idx : Ast.expr) loc
               | _ -> idx_ty_raw))
   in
   match resolve_index_storage ~op:"Index" locals base with
-  | IdxArray (elem_ty, n, array_place) ->
+  | IdxArray (elem_ty, n, array_place, is_volatile) ->
       let checker_proven =
         Hashtbl.mem Type_inf.array_index_proven_in_bounds_at idx.loc in
       let needs_check = not checker_proven in
@@ -5328,7 +5331,7 @@ and gen_index_place locals (base : Ast.expr) (idx : Ast.expr) loc
       let zero = const_int (i32_type context) 0 in
       let ptr = build_in_bounds_gep arr_ty (place_ptr array_place)
         [| zero; idx_v |] "idx_ptr" builder in
-      (elem_ty, Place ptr, false)
+      (elem_ty, Place ptr, is_volatile)
   | IdxSlice (elem_ty, min_len, fat_value) ->
       let fat = value_ll fat_value in
       let proven =
@@ -5362,7 +5365,7 @@ and resolve_index_storage ~op locals (base : Ast.expr) : index_storage =
   | Ast.Var id ->
       (match local_find_opt locals id with
        | Some (Mut (TypeArray (elem_ty, n), ptr)) ->
-           IdxArray (elem_ty, n, Place ptr)
+           IdxArray (elem_ty, n, Place ptr, false)
        | Some (Mut (TypeSlice (elem_ty, m, acc), alloca_ptr)) ->
            let fat = build_load (ltype_of_ast (TypeSlice (elem_ty, m, acc))) alloca_ptr id builder in
            IdxSlice (elem_ty, effective_slice_min id m, Value fat)
@@ -5387,7 +5390,7 @@ and resolve_index_storage ~op locals (base : Ast.expr) : index_storage =
        | None ->
            (match Hashtbl.find_opt global_vars id with
             | Some (TypeArray (elem_ty, n), gptr) ->
-                IdxArray (elem_ty, n, Place gptr)
+                IdxArray (elem_ty, n, Place gptr, false)
             | Some (TypeSlice (elem_ty, m, acc), gptr) ->
                 let fat = build_load (ltype_of_ast (TypeSlice (elem_ty, m, acc))) gptr id builder in
                 IdxSlice (elem_ty, effective_slice_min id m, Value fat)
@@ -5405,8 +5408,9 @@ and resolve_index_storage ~op locals (base : Ast.expr) : index_storage =
                 raise (Error (Printf.sprintf "%s: undefined variable '%s'" op id))))
   | Ast.FieldGet (base_expr, fname) ->
       (match gen_field_access locals base_expr fname with
-       | FieldPlace (TypeArray (elem_ty, n), place, _) ->
-           IdxArray (elem_ty, n, place)
+       | FieldPlace (TypeArray (elem_ty, n), place, is_volatile) ->
+           (* A register array in an io struct stays volatile per element. *)
+           IdxArray (elem_ty, n, place, is_volatile)
        | FieldPlace (TypeSlice (elem_ty, m, _) as ty, place, is_volatile) ->
            IdxSlice (elem_ty, m, load_place ~name:fname ty place is_volatile)
        | FieldPlace ((TypePtr (TypeIo elem_ty)

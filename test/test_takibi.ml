@@ -11935,6 +11935,26 @@ fn f() -> *usize { return &temp_address_outer().r.a; }");
      alignment. An allocation starting and ending on line boundaries cannot
      share a line without overlapping another object, so no separate ELF
      checker is kept; this is the stage a regression could slip through. *)
+  (* GitHub issue #637 step A: a register array element is as volatile as a
+     scalar register. Element reads and writes went through the array
+     load/store helpers without the flag, and repeated reads were folded. *)
+  Alcotest.test_case "io struct register arrays are volatile in LLVM" `Quick
+    (fun () ->
+      ignore (gen_codegen
+        "io struct GicDist7s { ctlr: u32 at 0x0; isenabler: [u32; 32] at 0x100; }
+         fn read7s(r: *GicDist7s, i: {0..<32 as usize}) -> u32 {
+           return r.isenabler[i];
+         }
+         fn write7s(r: *GicDist7s, i: {0..<32 as usize}, v: u32) {
+           r.isenabler[i] = v;
+         }
+         fn main() -> i32 { return 0; }");
+      let ir = Llvm.string_of_llmodule !Llvm_gen.the_module in
+      Alcotest.(check bool) "element load is volatile" true
+        (contains_substring ir "load volatile i32");
+      Alcotest.(check bool) "element store is volatile" true
+        (contains_substring ir "store volatile i32"));
+
   Alcotest.test_case "fixed DMA allocation keeps its line alignment in LLVM" `Quick
     (fun () ->
       ignore (gen_codegen
