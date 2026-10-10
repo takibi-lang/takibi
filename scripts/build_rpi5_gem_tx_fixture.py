@@ -20,7 +20,7 @@ def main():
     parser.add_argument("overlay", type=Path)
     parser.add_argument("mode", choices=("confirmed-ready", "confirmed-reply",
                                         "unconfirmed-ready", "unconfirmed-reply"))
-    parser.add_argument("--control", choices=("device-access",))
+    parser.add_argument("--control", choices=("device-access", "queue-bank", "raw-irq"))
     args = parser.parse_args()
     root, overlay = args.root.resolve(), args.overlay.resolve()
     if not (overlay.is_relative_to(root / ".git") or
@@ -86,8 +86,8 @@ def main():
                   indent + "return observed && gem_fixture_hide_completion == false;" +
                   ("\n    }" if slot == 0 else ""))
         replace_once(driver, before, after)
-    replace_once(driver, "        if ((gem_read(0x14) & (1 << 3)) == 0) {",
-                 "        let observed: u32 = gem_read(0x14);\n"
+    replace_once(driver, "        if ((gem.tsr & (1 << 3)) == 0) {",
+                 "        let observed: u32 = gem.tsr;\n"
                  "        gem_fixture_last_tsr = observed;\n"
                  "        if ((observed & (1 << 3)) == 0 &&\n"
                  "                gem_fixture_hide_halt == false) {")
@@ -100,6 +100,13 @@ fn gem_fixture_invalid_access(device: borrow *GemTxDevice) {
     bytes[0] = 1;
 }
 """, encoding="ascii")
+    if args.control in ("queue-bank", "raw-irq"):
+        fixture = kernel / "tests/rpi5/gem_tx/fixture.tkb"
+        access = "gem.queue1_isr" if args.control == "queue-bank" else "gem_read(0x400)"
+        fixture.write_text(fixture.read_text(encoding="ascii") +
+                           "\n// The real GEM API must exclude the additional queue bank.\n" +
+                           "fn gem_fixture_invalid_irq_bank() -> u32 { return " +
+                           access + "; }\n", encoding="ascii")
 
 
 if __name__ == "__main__":

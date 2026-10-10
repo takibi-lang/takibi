@@ -2022,5 +2022,10 @@ These controls exercise the actual MAC stop and failure branches on hardware;
 hiding an observation is not a naturally hung MAC or proof of its quiescence
 contract. Ordinary checksum-verified bulk transfers can be measured with
 `KERNEL_RPI5_SHELL_BULK_TCP=1 make kernelcheck-shell-rpi5`.
-`make kernelcheck-gem-tx-api` also requires the real generated Device token to
-reject CPU-buffer access with the expected diagnostic and a nonzero status.
+`make kernelcheck-gem-tx-api` requires the real generated Device token to
+reject CPU-buffer access. It also rejects an undeclared queue interrupt
+register and the removed arbitrary-offset GEM read API. Each negative
+control requires both its expected diagnostic and a nonzero status. The
+driver uses named primary queue-zero registers through an IoHandle attached
+by the platform device map before the GEM interrupt is enabled; register
+offsets and the external window remain trusted.

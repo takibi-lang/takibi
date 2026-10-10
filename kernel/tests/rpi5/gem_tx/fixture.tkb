@@ -105,7 +105,7 @@ fn gem_fixture_run(ready_in: sink NetRxCanAcquire) !{may_block} {
     kernel_boot_log("gem-tx fixture: halt tsr=");
     uart_put_udec(gem_fixture_last_tsr as usize);
     kernel_boot_log(" ncr=");
-    let ncr: u32 = gem_read(0x00);
+    let ncr: u32 = gem.ncr;
     uart_put_udec(ncr as usize);
     kernel_boot_log("\n");
     gem_fixture_require((ncr & ((1 << 2) | (1 << 3))) == 0,

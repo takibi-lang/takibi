@@ -20,6 +20,35 @@ const RP1_GPIO_RIO_BASE: usize = 0x1F000E0000;
 const RP1_GPIO_PADS_BASE: usize = 0x1F000F0000;
 const RX_BUF_SIZE: usize = 2048;
 
+// Hardware queue 0 uses the primary MACB bank, not GEM's additional-queue
+// bank (GitHub issue #733). Named registers exclude undeclared queue banks;
+// these hardware offsets and the device-map window remain trusted.
+io struct Rp1GemRegs {
+    ncr: u32 at 0x00;
+    ncfgr: u32 at 0x04;
+    nsr: u32 at 0x08;
+    ur: u32 at 0x0C;
+    dmacfg: u32 at 0x10;
+    tsr: u32 at 0x14;
+    rbqp: u32 at 0x18;
+    tbqp: u32 at 0x1C;
+    rsr: u32 at 0x20;
+    isr: u32 at 0x24;
+    ier: u32 at 0x28;
+    idr: u32 at 0x2C;
+    imr: u32 at 0x30;
+    man: u32 at 0x34;
+    rx_cutthrough: u32 at 0x44;
+    axi_pipe: u32 at 0x54;
+    sa1_bottom: u32 at 0x88;
+    sa1_top: u32 at 0x8C;
+    tbqph: u32 at 0x4C8;
+    rbqph: u32 at 0x4D4;
+}
+
+// Attached by the platform device map before the GEM interrupt is enabled.
+let mut gem: IoHandle(Rp1GemRegs);
+
 // Only net_rx_acquire can validate a hardware-supplied length and mint this
 // owner.  Protocol code can borrow the buffer, then must release it or turn it
 // into a reply-ready owner exactly once.
@@ -75,33 +104,23 @@ let mut rp1_gpio_rio_base: usize = RP1_GPIO_RIO_BASE;
 let mut rp1_gpio_pads_base: usize = RP1_GPIO_PADS_BASE;
 let mut rp1_gem_dtb_status: usize;
 
-fn gem_read(off: usize) -> u32 !{unsafe} {
-    let reg: *io u32 = unsafe { (rp1_gem_base + off) as *io u32 };
-    return *reg;
-}
-
-fn gem_write(off: usize, value: u32) !{unsafe} {
-    let reg: *io u32 = unsafe { (rp1_gem_base + off) as *io u32 };
-    *reg = value;
-}
-
 fn gem_mdio_wait() -> bool {
     for i: i32 in 0..<100000 {
-        if ((gem_read(0x08) & (1 << 2)) != 0) { return true; }
+        if ((gem.nsr & (1 << 2)) != 0) { return true; }
     }
     return false;
 }
 
 fn gem_mdio_read(reg: u32) -> u32 {
-    gem_write(0x34, (1 << 30) | (2 << 28) | (1 << 23)
-                  | ((reg & 31) << 18) | (2 << 16));
-    if (gem_mdio_wait()) { return gem_read(0x34) & 0xFFFF; }
+    gem.man = (1 << 30) | (2 << 28) | (1 << 23)
+                  | ((reg & 31) << 18) | (2 << 16);
+    if (gem_mdio_wait()) { return gem.man & 0xFFFF; }
     return 0xFFFF;
 }
 
 fn gem_mdio_write(reg: u32, value: u32) -> bool {
-    gem_write(0x34, (1 << 30) | (1 << 28) | (1 << 23)
-                  | ((reg & 31) << 18) | (2 << 16) | (value & 0xFFFF));
+    gem.man = (1 << 30) | (1 << 28) | (1 << 23)
+                  | ((reg & 31) << 18) | (2 << 16) | (value & 0xFFFF);
     return gem_mdio_wait();
 }
 
@@ -165,7 +184,7 @@ fn gem_configure_link() {
     if (mode == 2 || mode == 5 || mode == 7) { ncfgr = ncfgr | (1 << 1); }
     if (mode == 3 || mode == 5) { ncfgr = ncfgr | 1; }
     if (mode == 6 || mode == 7) { ncfgr = ncfgr | (1 << 10); }
-    gem_write(0x04, ncfgr);
+    gem.ncfgr = ncfgr;
 }
 
 fn gem_rearm_rx(cpu: sink *GemRxCpu) !{unsafe} {
@@ -179,15 +198,15 @@ fn gem_halt() -> bool {
     // waits for TSR.TGO to report that an in-flight frame has drained.  This
     // matters on an SWD warm reload because RP1 and its DMA engine are not
     // reset along with the CPU cores.
-    let ncr: u32 = gem_read(0x00);
-    gem_write(0x00, ncr | (1 << 10));
+    let ncr: u32 = gem.ncr;
+    gem.ncr = ncr | (1 << 10);
     for i: i32 in 0..<1000000 {
-        if ((gem_read(0x14) & (1 << 3)) == 0) {
-            gem_write(0x00, 1 << 5); // disable RX/TX and clear statistics
+        if ((gem.tsr & (1 << 3)) == 0) {
+            gem.ncr = 1 << 5; // disable RX/TX and clear statistics
             return true;
         }
     }
-    gem_write(0x00, 1 << 5);
+    gem.ncr = 1 << 5;
     return false;
 }
 
@@ -215,10 +234,10 @@ fn net_init() -> NetInitResult !{unsafe} {
     }
     // Enable management port while RX/TX remain stopped, and mask all
     // queue-0 interrupts.
-    gem_write(0x00, 1 << 4);
-    gem_write(0x0620, 0xFFFFFFFF);
-    gem_write(0x0C, 1); // RGMII
-    gem_write(0x04, (3 << 18) | (2 << 21));
+    gem.ncr = 1 << 4;
+    gem.idr = 0xFFFFFFFF;
+    gem.ur = 1; // RGMII
+    gem.ncfgr = (3 << 18) | (2 << 21);
     gem_phy_reset();
     let phy_id1: u32 = gem_mdio_read(2);
     let phy_id2: u32 = gem_mdio_read(3);
@@ -233,9 +252,9 @@ fn net_init() -> NetInitResult !{unsafe} {
     gem_configure_link();
 
     // Program specific address 1.
-    gem_write(0x88, (OUR_MAC[0] as u32) | ((OUR_MAC[1] as u32) << 8)
-                  | ((OUR_MAC[2] as u32) << 16) | ((OUR_MAC[3] as u32) << 24));
-    gem_write(0x8C, (OUR_MAC[4] as u32) | ((OUR_MAC[5] as u32) << 8));
+    gem.sa1_bottom = (OUR_MAC[0] as u32) | ((OUR_MAC[1] as u32) << 8)
+                  | ((OUR_MAC[2] as u32) << 16) | ((OUR_MAC[3] as u32) << 24);
+    gem.sa1_top = (OUR_MAC[4] as u32) | ((OUR_MAC[5] as u32) << 8);
 
     let rx_base: usize = gem_rx_arm_initial();
     let rx_dma: usize = rx_base + rp1_dma_pci_offset;
@@ -259,26 +278,21 @@ fn net_init() -> NetInitResult !{unsafe} {
     dma_prepare_tx(gem_rx_desc as *u8, 64);
     dma_prepare_tx(gem_tx_desc as *u8, 64);
 
-    gem_write(0x18, rxd_dma as u32);
-    gem_write(0x04D4, (rxd_dma >> 32) as u32);
-    gem_write(0x1C, txd_dma as u32);
-    gem_write(0x04C8, (txd_dma >> 32) as u32);
+    gem.rbqp = rxd_dma as u32;
+    gem.rbqph = (rxd_dma >> 32) as u32;
+    gem.tbqp = txd_dma as u32;
+    gem.tbqph = (txd_dma >> 32) as u32;
     // 64-bit addressing, 2048-byte RX buffers, full packet SRAMs.
-    gem_write(0x10, (1 << 30) | (32 << 16) | (3 << 8) | (1 << 10) | 16);
-    gem_write(0x44, 0); // disable RX partial store-and-forward/cut-through
-    gem_write(0x54, 0x10808); // RP1 DT: 8-deep AR/AW pipelines, AW-to-B fill
-    gem_write(0x20, 0x0F);
-    gem_write(0x14, 0xFFFFFFFF);
-    gem_write(0x00, (1 << 4) | (1 << 3) | (1 << 2)); // MPE | TE | RE
+    gem.dmacfg = (1 << 30) | (32 << 16) | (3 << 8) | (1 << 10) | 16;
+    gem.rx_cutthrough = 0; // disable RX partial store-and-forward/cut-through
+    gem.axi_pipe = 0x10808; // RP1 DT: 8-deep AR/AW pipelines, AW-to-B fill
+    gem.rsr = 0x0F;
+    gem.tsr = 0xFFFFFFFF;
+    gem.ncr = (1 << 4) | (1 << 3) | (1 << 2); // MPE | TE | RE
 
-    // GitHub issue #187: enable RX/TX-complete interrupts on the same
-    // per-queue-0 register bank (GEM_ISR/IER/IDR(0) = 0x0400/0x0600/0x0620)
-    // this function already used to mask everything at init above --
-    // raspberrypi/linux's macb.h defines GEM_IER(hw_q) = 0x0600 + (hw_q<<2),
-    // distinct from the legacy single-queue MACB_IER at 0x28 that this
-    // multi-queue-capable GEM_GXL does not appear to route queue 0's real
-    // interrupt status through.
-    gem_write(0x0600, (1 << 1) | (1 << 7)); // GEM_IER(0): RCOMP | TCOMP
+    // Queue 0 uses the primary bank, matching RBQP/TBQP above. The
+    // additional-queue GEM_IER(0) at 0x600 belongs to hardware queue 1.
+    gem.ier = (1 << 1) | (1 << 7); // RCOMP | TCOMP
 
     rp1_gem_net_ready = true;
     init_once_commit(&net_init_once, init_guard);
@@ -295,15 +309,13 @@ fn kernel_net_rx_frame_pending() -> NetPendingState {
     return NetPendingState::No;
 }
 
-// GitHub issue #187: called from kernel/platform/rpi5/intc.tkb's
-// rpi5_irq_dispatch on GIC INTID 166. GEM_ISR(0)'s clear-on-read-vs-write
-// capability is runtime-detected on real hardware (DCFG1.IRQCOR) and not
-// checked here; writing the observed status back unconditionally is a
-// harmless no-op if the read already cleared it, matching the same
-// defensive pattern used for USB xHCI's EHB bit.
+// Queue-0 status can be clear-on-read or W1C (DCFG1.IRQCOR). Read the
+// primary ISR and acknowledge only the observed bits. Writing them after a
+// clear-on-read is harmless; RP1's level-triggered vector is IACKed by the
+// platform dispatcher after this handler returns.
 fn gem_irq_handler() !{interrupt} {
-    let isr: u32 = gem_read(0x0400); // GEM_ISR(0)
-    gem_write(0x0400, isr);
+    let isr: u32 = gem.isr;
+    gem.isr = isr;
     interrupt_notify();
 }
 
@@ -395,7 +407,7 @@ private fn gem_tx_submit(slot: {0..<2 as usize}, cpu: sink *GemTxCpu,
     return device;
 }
 
-private fn gem_tx_start() { gem_write(0x00, gem_read(0x00) | (1 << 9)); }
+private fn gem_tx_start() { gem.ncr = gem.ncr | (1 << 9); }
 
 // The cap ran out with the descriptor still GEM's: the frame may still be
 // read. Halt GEM; only a confirmed halt returns the buffer to the CPU, and

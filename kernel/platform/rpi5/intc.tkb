@@ -239,6 +239,7 @@ fn rp1_usbhost0_msix_setup() !{unsafe} {
 }
 
 fn gic_gem_msi_setup() !{unsafe} {
+    rpi5_gem_attach_bootstrap();
     let gicd_isenabler5: *io u32 = unsafe { (rpi5_gicd_base + 0x114) as *io u32 }; // INTIDs 160..191 (shared with UART0/USB0)
     let gicd_icpendr5: *io u32 = unsafe { (rpi5_gicd_base + 0x294) as *io u32 };
     let gicd_itargetsr41: *io u32 = unsafe { (rpi5_gicd_base + 0x8A4) as *io u32 }; // INTIDs 164..167

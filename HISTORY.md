@@ -1,5 +1,32 @@
 # takibi Engineering History
 
+## 2026-10-10: RP1 GEM queue-zero interrupts use named primary registers
+
+The GEM descriptor bases selected hardware queue zero, but the driver used
+GEM_ISR/IER/IDR(0), which belong to additional hardware queue one. Network
+functional tests still passed through the timer wake, and a 200 us TX poll
+hid the missing interrupt. A pinned Raspberry Pi OS source study established
+the queue mapping before a discriminating RPi5 experiment: without polling,
+32 transmissions using the old bank observed no TCOMP IRQ and a median
+15.625 ms wait; the primary-bank control observed one IRQ per transmission
+and a median 6.333 us wait. Both runs verified all 33 physical frames,
+including a real RX/reply handshake. These are bounded measurements, not a
+proof about every possible interrupt interleaving.
+
+The maintainer selected the existing io struct/IoHandle mechanism. The
+currently used GEM registers became named fields, the arbitrary-offset
+read/write entrypoints were removed, and the platform device map attaches
+the handle before the GIC can dispatch GEM interrupts. Negative controls
+against the actual driver reject an undeclared queue field and the removed
+raw-offset entrypoint, alongside the existing Device-to-CPU rejection.
+Register offsets and the external window remain trusted; the type cannot
+prove that a hardware register declaration matches the controller.
+
+The proposed 15-second completion allowance was a compatibility estimate,
+not a Raspberry Pi OS value. The pinned Linux driver uses a 14 ms THALT/TGO
+graceful-stop bound, which is a different operation, and lacks the
+ndo_tx_timeout callback required for the generic five-second watchdog.
+
 ## 2026-10-10: GEM TX failure paths preserve DMA authority
 
 The old 1000-wakeup cap returned normally without establishing completion,
