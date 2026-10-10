@@ -119,6 +119,16 @@ private fn ext2_mutation_probe_reader() !{unsafe} {
         while (atomic_word_load(&ext2_mutation_probe_trying) == 0 &&
                peer_tick_window_open(window)) { }
         peer_tick_window_end(window);
+        // Wait for the take itself, bounded by peer ticks rather than wall
+        // time: core 0's vCPU can be descheduled between announcing the
+        // take and taking, and a fixed wall-clock linger then missed a
+        // control take that did not wait (seen under a full allcheck). A
+        // take that waits for this reader does not come; the window ends.
+        let mut taking = peer_tick_window_policy(
+            peer_tick_window_peer(), PeerTickPolicy::Entry);
+        while (atomic_word_load(&ext2_mutation_probe_taken) == 0 &&
+               peer_tick_window_open(taking)) { }
+        peer_tick_window_end(taking);
         // Deliberate linger: expose a mutation that failed to wait for readers.
         let linger: i64 = read_cntpct();
         while (read_cntpct() - linger < (read_cntfrq() >> 6)) { }
@@ -174,6 +184,13 @@ private fn ext2_mutation_probe_core0_reader(phase: usize) -> usize
            peer_tick_window_open(window)) { }
     peer_tick_window_end(window);
     let started: usize = atomic_word_load(&ext2_mutation_probe_trying);
+    // As in the peer reader: wait for the take, by peer ticks, before the
+    // linger, so a descheduled peer cannot hide a control take.
+    let mut taking = peer_tick_window_policy(
+        peer_tick_window_peer(), PeerTickPolicy::Arrival);
+    while (atomic_word_load(&ext2_mutation_probe_taken) == 0 &&
+           peer_tick_window_open(taking)) { }
+    peer_tick_window_end(taking);
     // Deliberate linger: measure whether the peer bypassed reader exclusion.
     let linger: i64 = read_cntpct();
     while (read_cntpct() - linger < (read_cntfrq() >> 6)) { }
