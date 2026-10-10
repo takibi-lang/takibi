@@ -72,6 +72,7 @@ fn dma_fixture_authority(cpu_expected: bool) {
 
 fn dma_fixture_run() !{unsafe} {
     disable_irq();
+    qemu_uart_attach_bootstrap();
     uart_init();
     kernel_log_init();
     virtio_blk_base = 1;

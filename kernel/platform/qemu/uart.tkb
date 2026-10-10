@@ -16,288 +16,109 @@
 use "kernel/platform/qemu/intc.tkb";
 use "kernel/arch/arm64/kernel/platform_uart_common.tkb";
 use "kernel/drivers/serial/pl011.tkb";
+use "kernel/platform/qemu/device_map.tkb";
+// The address the console is attached at, for the boot report; the
+// registers themselves are reached only through `uart`.
 let mut uart_base: usize = 0x09000000;
+// Attached by kernel/platform/qemu/device_map.tkb: first the fixed platform
+// window, then the one the DTB names.
+let mut uart: IoHandle(Pl011Regs);
 
 // The FIFO, reached without the logging path's bookkeeping: the drain below
 // and the emergency debug writer both need exactly these two operations and
 // neither may carry the `logs` effect (GitHub issue #454).
-fn uart_tx_fifo_full() -> bool !{unsafe} {
-    let fr: *io u32 = unsafe { (uart_base + 0x18) as *io u32 };
-    return (*fr & (1 << 5)) != 0; // TXFF
+fn uart_tx_fifo_full() -> bool {
+    return (uart.fr & (1 << 5)) != 0; // TXFF
 }
 
-fn uart_tx_store(c: u8) !{unsafe} {
-    let dr: *io u8 = unsafe { uart_base as *io u8 };
-    *dr = c;
+fn uart_tx_store(c: u8) {
+    uart.dr = c as u32;
 }
 
-fn uart_tx_irq_enable() !{unsafe} {
-    let imsc: *io u32 = unsafe { (uart_base + 0x38) as *io u32 };
-    *imsc = *imsc | (1 << 5); // TXIM
+fn uart_tx_irq_enable() {
+    uart.imsc = uart.imsc | (1 << 5); // TXIM
 }
 
-fn uart_tx_irq_disable() !{unsafe} {
-    let imsc: *io u32 = unsafe { (uart_base + 0x38) as *io u32 };
-    *imsc = *imsc & ~(1 << 5);
+fn uart_tx_irq_disable() {
+    uart.imsc = uart.imsc & ~(1 << 5);
 }
 
 // GitHub issue #619: a crash console polls the FIFO itself, and no other
 // core's interrupt handler may take a byte from it. RXIM, RTIM and BEIM.
-fn uart_rx_irq_disable() !{unsafe} {
-    let imsc: *io u32 = unsafe { (uart_base + 0x38) as *io u32 };
-    *imsc = *imsc & ~((1 << 4) | (1 << 6) | (1 << 9));
+fn uart_rx_irq_disable() {
+    uart.imsc = uart.imsc & ~((1 << 4) | (1 << 6) | (1 << 9));
 }
 
 fn uart_rx_discard(discarded: u8) !{unsafe} {
 }
 
-fn uart_isr_getc() -> u8 !{unsafe} {
-    let dr: *io u8 = unsafe { uart_base as *io u8 };
-    return *dr;
+fn uart_isr_getc() -> u8 {
+    return (uart.dr & 0xFF) as u8;
 }
 
 // DDB's emergency TX path is deliberately distinct from uart_putc: it does
 // not carry the ordinary `logs` effect and touches no driver-owned state.
 // The interrupt checker therefore sees the real MMIO-only operation rather
 // than granting the debugger a general logging escape hatch.
-fn uart_debug_putc(c: u8) !{unsafe} {
-    let fr: *io u32 = unsafe { (uart_base + 0x18) as *io u32 };
-    while ((*fr & (1 << 5)) != 0) { }
-    let dr: *io u8 = unsafe { uart_base as *io u8 };
-    *dr = c;
+fn uart_debug_putc(c: u8) {
+    while ((uart.fr & (1 << 5)) != 0) { }
+    uart.dr = c as u32;
 }
 
-fn uart_rx_ready() -> bool !{unsafe} {
-    let fr: *io u32 = unsafe { (uart_base + 0x18) as *io u32 };
-    return (*fr & (1 << 4)) == 0; // RXFE clear = data available
+fn uart_rx_ready() -> bool {
+    return (uart.fr & (1 << 4)) == 0; // RXFE clear = data available
 }
 
-fn uart_tx_busy() -> bool !{unsafe} {
-    let fr: *io u32 = unsafe { (uart_base + 0x18) as *io u32 };
-    return (*fr & (1 << 3)) != 0;
+fn uart_tx_busy() -> bool {
+    return (uart.fr & (1 << 3)) != 0;
 }
 
 // GitHub issue #517: one register access each, and nothing else. The
 // sequence they serve lives in kernel/drivers/serial/pl011.tkb.
-fn uart_tx_irq_flagged() -> bool !{interrupt, unsafe} {
-    let mis: *io u32 = unsafe { (uart_base + 0x40) as *io u32 };
-    return (*mis & (1 << 5)) != 0; // TXMIS
+fn uart_tx_irq_flagged() -> bool !{interrupt} {
+    return (uart.mis & (1 << 5)) != 0; // TXMIS
 }
 
-fn uart_break_flagged() -> bool !{interrupt, unsafe} {
-    let mis: *io u32 = unsafe { (uart_base + 0x40) as *io u32 };
-    return (*mis & (1 << 9)) != 0; // BEMIS
+fn uart_break_flagged() -> bool !{interrupt} {
+    return (uart.mis & (1 << 9)) != 0; // BEMIS
 }
 
-fn uart_break_clear() !{interrupt, unsafe} {
-    let icr: *io u32 = unsafe { (uart_base + 0x44) as *io u32 };
-    *icr = 1 << 9; // BEIC
+fn uart_break_clear() !{interrupt} {
+    uart.icr = 1 << 9; // BEIC
 }
 
-fn uart_rx_timeout_clear() !{interrupt, unsafe} {
-    let icr: *io u32 = unsafe { (uart_base + 0x44) as *io u32 };
-    *icr = 1 << 6; // RTIC
+fn uart_rx_timeout_clear() !{interrupt} {
+    uart.icr = 1 << 6; // RTIC
 }
 
-fn uart_rx_word() -> u32 !{interrupt, unsafe} {
-    let dr: *io u32 = unsafe { uart_base as *io u32 };
-    return *dr;
+fn uart_rx_word() -> u32 !{interrupt} {
+    return uart.dr;
 }
 
-fn uart_init() !{unsafe} {
-    let uart_cr: *io u32 = unsafe { (uart_base + 0x30) as *io u32 };
-    let uart_ibrd: *io u32 = unsafe { (uart_base + 0x24) as *io u32 };
-    let uart_fbrd: *io u32 = unsafe { (uart_base + 0x28) as *io u32 };
-    let uart_lcrh: *io u32 = unsafe { (uart_base + 0x2C) as *io u32 };
-    let uart_imsc: *io u32 = unsafe { (uart_base + 0x38) as *io u32 };
-    let uart_icr: *io u32 = unsafe { (uart_base + 0x44) as *io u32 };
-    let uart_ifls: *io u32 = unsafe { (uart_base + 0x34) as *io u32 };
-
+fn uart_init() {
     uart_rx_handler = uart_rx_discard;
-    *uart_cr = 0; // disable UART before reconfiguring it
+    uart.cr = 0; // disable UART before reconfiguring it
 
     // QEMU's PL011 model is pre-clocked; IBRD/FBRD values are irrelevant to
     // the host-side pipe it's backed by, but set to a plausible 115200-at-
     // 24MHz divisor (matching real PL011 reference clocks) rather than left
     // at whatever reset state, for parity with the real-hardware driver.
-    *uart_ibrd = 13;
-    *uart_fbrd = 1;
+    uart.ibrd = 13;
+    uart.fbrd = 1;
 
-    *uart_lcrh = (3 << 5) | (1 << 4); // 8 bits, no parity, FIFOs enabled, 1 stop bit
-    *uart_ifls = 0; // finest-grained FIFO trigger level
-    *uart_imsc = 0; // keep RX masked until irq_uart_rx_unmask()
-    *uart_icr = 0x7FF; // clear any latched interrupt state
+    uart.lcrh = (3 << 5) | (1 << 4); // 8 bits, no parity, FIFOs enabled, 1 stop bit
+    uart.ifls = 0; // finest-grained FIFO trigger level
+    uart.imsc = 0; // keep RX masked until irq_uart_rx_unmask()
+    uart.icr = 0x7FF; // clear any latched interrupt state
 
-    *uart_cr = (1 << 0) | (1 << 8) | (1 << 9); // UARTEN | TXE | RXE
-}
-
-must_use variant QemuBootDevicesResult {
-    Invalid;
-    Missing;
-    Applied;
-}
-
-must_use variant QemuVirtioDtbResult {
-    Invalid;
-    Applied;
-}
-
-let mut qemu_psci_use_hvc: bool = false;
-
-fn qemu_virtio_apply_boot_dtb(dtb: usize)
-        -> QemuVirtioDtbResult !{unsafe} {
-    let mut index: usize = 0;
-    let mut net_found: bool = false;
-    let mut block_found: bool = false;
-    while (true) {
-        match fdt_find_compatible_gic_transport_index(
-                dtb, bs"virtio,mmio", index) {
-            FdtMmioTransportResult::Invalid => {
-                return QemuVirtioDtbResult::Invalid;
-            }
-            FdtMmioTransportResult::NotFound => {
-                return QemuVirtioDtbResult::Applied;
-            }
-            FdtMmioTransportResult::Found(transport) => {
-                if (transport.base > 0x7FFFFFFF ||
-                    transport.size < 0x108 ||
-                    transport.interrupt.intid > 0x7FFFFFFF) {
-                    return QemuVirtioDtbResult::Invalid;
-                }
-                let magic: *io u32 = unsafe {
-                    transport.base as *io u32
-                };
-                let device: *io u32 = unsafe {
-                    (transport.base + 0x08) as *io u32
-                };
-                if (*magic == 0x74726976) {
-                    if (*device == 1) {
-                        if (net_found) {
-                            return QemuVirtioDtbResult::Invalid;
-                        }
-                        virtio_base = transport.base as i32;
-                        virtio_net_gic_intid =
-                            transport.interrupt.intid as i32;
-                        net_found = true;
-                    } else if (*device == 2) {
-                        if (block_found) {
-                            return QemuVirtioDtbResult::Invalid;
-                        }
-                        virtio_blk_base = transport.base as i32;
-                        block_found = true;
-                    }
-                }
-                if (index == 0xFFFFFFFFFFFFFFFF) {
-                    return QemuVirtioDtbResult::Invalid;
-                }
-                index = index + 1;
-            }
-        }
-    }
-    return QemuVirtioDtbResult::Invalid;
-}
-
-fn qemu_boot_devices_apply_dtb() -> QemuBootDevicesResult !{unsafe} {
-    let dtb: usize = boot_dtb_address_read();
-    match fdt_find_compatible_reg(dtb, bs"arm,pl011") {
-        FdtDeviceRegionResult::Invalid => {
-            return QemuBootDevicesResult::Invalid;
-        }
-        FdtDeviceRegionResult::NotFound => {
-            return QemuBootDevicesResult::Missing;
-        }
-        FdtDeviceRegionResult::Found(region) => {
-            if (region.size < 0x48 ||
-                region.base > 0xFFFFFFFFFFFFFFFF - 0x44) {
-                return QemuBootDevicesResult::Invalid;
-            }
-            match fdt_find_compatible_gic_interrupt(dtb, bs"arm,pl011") {
-                FdtGicInterruptResult::Invalid => {
-                    return QemuBootDevicesResult::Invalid;
-                }
-                FdtGicInterruptResult::NotFound => {
-                    return QemuBootDevicesResult::Missing;
-                }
-                FdtGicInterruptResult::Found(interrupt) => {
-                    // Compare against the route that was already exercised
-                    // by QEMU before replacing its constant. The current
-                    // driver is level-high SPI #1, architectural INTID 33.
-                    if (interrupt.intid != 33 || interrupt.flags != 4) {
-                        return QemuBootDevicesResult::Invalid;
-                    }
-                    match fdt_find_compatible_gicv2_regions(
-                            dtb, bs"arm,cortex-a15-gic") {
-                        FdtGicV2RegionsResult::Invalid => {
-                            return QemuBootDevicesResult::Invalid;
-                        }
-                        FdtGicV2RegionsResult::NotFound => {
-                            return QemuBootDevicesResult::Missing;
-                        }
-                        FdtGicV2RegionsResult::Found(gic) => {
-                            // Preserve an explicit comparison with the
-                            // working route before replacing its constants.
-                            if (gic.distributor.base != 0x08000000 ||
-                                gic.cpu_interface.base != 0x08010000 ||
-                                gic.distributor.size < 0x824 ||
-                                gic.cpu_interface.size < 0x14) {
-                                return QemuBootDevicesResult::Invalid;
-                            }
-                            match fdt_find_armv8_timer_interrupt(dtb) {
-                                FdtGicInterruptResult::Invalid => {
-                                    return QemuBootDevicesResult::Invalid;
-                                }
-                                FdtGicInterruptResult::NotFound => {
-                                    return QemuBootDevicesResult::Missing;
-                                }
-                                FdtGicInterruptResult::Found(timer) => {
-                                    if (timer.intid !=
-                                            QEMU_TIMER_GIC_INTID as usize ||
-                                        (timer.flags & 0xF) != 4) {
-                                        return QemuBootDevicesResult::Invalid;
-                                    }
-                                    match fdt_find_psci_method(dtb) {
-                                        FdtPsciMethodResult::Invalid => {
-                                            return QemuBootDevicesResult::Invalid;
-                                        }
-                                        FdtPsciMethodResult::NotFound => {
-                                            return QemuBootDevicesResult::Missing;
-                                        }
-                                        FdtPsciMethodResult::Smc => {
-                                            return QemuBootDevicesResult::Invalid;
-                                        }
-                                        FdtPsciMethodResult::Hvc => {
-                                            qemu_psci_use_hvc = true;
-                                        }
-                                    }
-                                    match qemu_virtio_apply_boot_dtb(dtb) {
-                                        QemuVirtioDtbResult::Invalid => {
-                                            return QemuBootDevicesResult::Invalid;
-                                        }
-                                        QemuVirtioDtbResult::Applied => { }
-                                    }
-                                    uart_base = region.base;
-                                    qemu_uart_gic_intid =
-                                        interrupt.intid as u32;
-                                    qemu_timer_gic_intid =
-                                        timer.intid as u32;
-                                    qemu_gicd_base = gic.distributor.base;
-                                    qemu_gicc_base = gic.cpu_interface.base;
-                                    uart_init();
-                                    return QemuBootDevicesResult::Applied;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+    uart.cr = (1 << 0) | (1 << 8) | (1 << 9); // UARTEN | TXE | RXE
 }
 
 fn platform_init() {
     // The fixed platform address is the bootstrap console used until the
     // common memory reader has validated the whole boot blob. init.tkb then
     // replaces it with the compatible/reg result before IRQs and workloads.
+    qemu_uart_attach_bootstrap();
     uart_init();
 }
 

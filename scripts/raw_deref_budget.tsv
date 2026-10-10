@@ -27,9 +27,9 @@ kernel/mm/user_memory.tkb	7	0	the user-range mint site: user addresses become sl
 kernel/net/arp.tkb	7	0	frames and the ARP table (#637 F)
 kernel/net/icmp.tkb	13	0	frames (#637 F)
 kernel/net/tcp.tkb	112	0	Connection and retransmit records use indexed references; retry state uses guarded value copies. Remaining raw sites access wire headers and segment buffers
-kernel/platform/qemu/intc.tkb	0	19	GIC registers (#637 A)
+kernel/platform/qemu/intc.tkb	0	18	GIC registers (#637 A); the UART mask moved to the IoHandle
 kernel/platform/qemu/timer_irq.tkb	0	2	GIC registers (#637 A)
-kernel/platform/qemu/uart.tkb	0	29	PL011 registers (#637 A)
+kernel/platform/qemu/device_map.tkb	0	3	virtio-mmio magic and device-id probes during DTB discovery (#637 A); the device-window mint
 kernel/platform/rpi5/intc.tkb	0	76	GIC registers (#637 A)
 kernel/platform/rpi5/pcie.tkb	0	42	PCIe registers and windows (#637 A)
 kernel/platform/rpi5/system_timer_dtb.tkb	0	2	system timer registers (#637 A)

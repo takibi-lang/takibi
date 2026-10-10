@@ -419,6 +419,7 @@ KERNEL_UNUSED_CHECKED_QEMU := \
 	kernel/platform/qemu/memory.tkb \
 	kernel/platform/qemu/mmu_layout.tkb \
 	kernel/platform/qemu/timer_irq.tkb \
+	kernel/platform/qemu/device_map.tkb \
 	kernel/platform/qemu/uart.tkb
 KERNEL_UNUSED_CHECKED_RPI5 := \
 	kernel/drivers/net/gem_tx_wait.tkb \

@@ -18,6 +18,22 @@
 use "kernel/lib/diagnostic_ring.tkb";
 use "kernel/printk/log.tkb";
 
+// The PL011 register block (ARM PrimeCell UART, DDI0183), at the offsets
+// the drivers use. Reached only through an IoHandle(Pl011Regs): every
+// access is volatile and none is a raw pointer (GitHub issue #637).
+io struct Pl011Regs {
+    dr: u32 at 0x00;
+    fr: u32 at 0x18;
+    ibrd: u32 at 0x24;
+    fbrd: u32 at 0x28;
+    lcrh: u32 at 0x2C;
+    cr: u32 at 0x30;
+    ifls: u32 at 0x34;
+    imsc: u32 at 0x38;
+    mis: u32 at 0x40;
+    icr: u32 at 0x44;
+}
+
 // True when the arrival was a BREAK and the caller should enter the debugger.
 //
 // QEMU represents CHR_EVENT_BREAK as a FIFO word carrying DR.BE; a real PL011

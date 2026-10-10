@@ -1,0 +1,207 @@
+// The QEMU `virt` device map: the one file that turns an address into a
+// device window (GitHub issue #637 stage 3, step A). Two sources: the fixed
+// platform address the console starts at, and the boot DTB's reg entries,
+// each checked before it is used. Drivers receive IoHandles and reach their
+// registers through them; nothing else here is meant to grow.
+
+use "kernel/drivers/serial/pl011.tkb";
+
+// QEMU `virt` puts its PL011 here; the bootstrap console uses it until the
+// DTB has been read. 0x1000 is the PL011's 4 KiB register window.
+const QEMU_UART_BOOTSTRAP_BASE: usize = 0x09000000;
+const QEMU_UART_WINDOW_BYTES: usize = 0x1000;
+
+must_use variant QemuAttach {
+    Attached;
+    Refused;
+}
+
+// The console before the DTB: the platform's fixed address.
+fn qemu_uart_attach_bootstrap() !{unsafe} {
+    match qemu_uart_attach_window(QEMU_UART_BOOTSTRAP_BASE, QEMU_UART_WINDOW_BYTES) {
+        QemuAttach::Attached => {}
+        QemuAttach::Refused => { kernel_invariant_stop(); }
+    }
+}
+
+// A console window: the platform constant above or a DTB reg entry already
+// checked by its reader. The one mint of the UART's registers.
+fn qemu_uart_attach_window(base: usize, bytes: usize) -> QemuAttach !{unsafe} {
+    let RegionBytes::Assumed(window) = region_bytes_assume(base, bytes) else {};
+    match io_handle_attach(&uart, window) {
+        IoAttach::TooSmall => { return QemuAttach::Refused; }
+        IoAttach::Attached => {
+            uart_base = base;
+            return QemuAttach::Attached;
+        }
+    }
+}
+
+must_use variant QemuBootDevicesResult {
+    Invalid;
+    Missing;
+    Applied;
+}
+
+must_use variant QemuVirtioDtbResult {
+    Invalid;
+    Applied;
+}
+
+let mut qemu_psci_use_hvc: bool = false;
+
+fn qemu_virtio_apply_boot_dtb(dtb: usize)
+        -> QemuVirtioDtbResult !{unsafe} {
+    let mut index: usize = 0;
+    let mut net_found: bool = false;
+    let mut block_found: bool = false;
+    while (true) {
+        match fdt_find_compatible_gic_transport_index(
+                dtb, bs"virtio,mmio", index) {
+            FdtMmioTransportResult::Invalid => {
+                return QemuVirtioDtbResult::Invalid;
+            }
+            FdtMmioTransportResult::NotFound => {
+                return QemuVirtioDtbResult::Applied;
+            }
+            FdtMmioTransportResult::Found(transport) => {
+                if (transport.base > 0x7FFFFFFF ||
+                    transport.size < 0x108 ||
+                    transport.interrupt.intid > 0x7FFFFFFF) {
+                    return QemuVirtioDtbResult::Invalid;
+                }
+                let magic: *io u32 = unsafe {
+                    transport.base as *io u32
+                };
+                let device: *io u32 = unsafe {
+                    (transport.base + 0x08) as *io u32
+                };
+                if (*magic == 0x74726976) {
+                    if (*device == 1) {
+                        if (net_found) {
+                            return QemuVirtioDtbResult::Invalid;
+                        }
+                        virtio_base = transport.base as i32;
+                        virtio_net_gic_intid =
+                            transport.interrupt.intid as i32;
+                        net_found = true;
+                    } else if (*device == 2) {
+                        if (block_found) {
+                            return QemuVirtioDtbResult::Invalid;
+                        }
+                        virtio_blk_base = transport.base as i32;
+                        block_found = true;
+                    }
+                }
+                if (index == 0xFFFFFFFFFFFFFFFF) {
+                    return QemuVirtioDtbResult::Invalid;
+                }
+                index = index + 1;
+            }
+        }
+    }
+    return QemuVirtioDtbResult::Invalid;
+}
+
+fn qemu_boot_devices_apply_dtb() -> QemuBootDevicesResult !{unsafe} {
+    let dtb: usize = boot_dtb_address_read();
+    match fdt_find_compatible_reg(dtb, bs"arm,pl011") {
+        FdtDeviceRegionResult::Invalid => {
+            return QemuBootDevicesResult::Invalid;
+        }
+        FdtDeviceRegionResult::NotFound => {
+            return QemuBootDevicesResult::Missing;
+        }
+        FdtDeviceRegionResult::Found(region) => {
+            if (region.size < 0x48 ||
+                region.base > 0xFFFFFFFFFFFFFFFF - 0x44) {
+                return QemuBootDevicesResult::Invalid;
+            }
+            match fdt_find_compatible_gic_interrupt(dtb, bs"arm,pl011") {
+                FdtGicInterruptResult::Invalid => {
+                    return QemuBootDevicesResult::Invalid;
+                }
+                FdtGicInterruptResult::NotFound => {
+                    return QemuBootDevicesResult::Missing;
+                }
+                FdtGicInterruptResult::Found(interrupt) => {
+                    // Compare against the route that was already exercised
+                    // by QEMU before replacing its constant. The current
+                    // driver is level-high SPI #1, architectural INTID 33.
+                    if (interrupt.intid != 33 || interrupt.flags != 4) {
+                        return QemuBootDevicesResult::Invalid;
+                    }
+                    match fdt_find_compatible_gicv2_regions(
+                            dtb, bs"arm,cortex-a15-gic") {
+                        FdtGicV2RegionsResult::Invalid => {
+                            return QemuBootDevicesResult::Invalid;
+                        }
+                        FdtGicV2RegionsResult::NotFound => {
+                            return QemuBootDevicesResult::Missing;
+                        }
+                        FdtGicV2RegionsResult::Found(gic) => {
+                            // Preserve an explicit comparison with the
+                            // working route before replacing its constants.
+                            if (gic.distributor.base != 0x08000000 ||
+                                gic.cpu_interface.base != 0x08010000 ||
+                                gic.distributor.size < 0x824 ||
+                                gic.cpu_interface.size < 0x14) {
+                                return QemuBootDevicesResult::Invalid;
+                            }
+                            match fdt_find_armv8_timer_interrupt(dtb) {
+                                FdtGicInterruptResult::Invalid => {
+                                    return QemuBootDevicesResult::Invalid;
+                                }
+                                FdtGicInterruptResult::NotFound => {
+                                    return QemuBootDevicesResult::Missing;
+                                }
+                                FdtGicInterruptResult::Found(timer) => {
+                                    if (timer.intid !=
+                                            QEMU_TIMER_GIC_INTID as usize ||
+                                        (timer.flags & 0xF) != 4) {
+                                        return QemuBootDevicesResult::Invalid;
+                                    }
+                                    match fdt_find_psci_method(dtb) {
+                                        FdtPsciMethodResult::Invalid => {
+                                            return QemuBootDevicesResult::Invalid;
+                                        }
+                                        FdtPsciMethodResult::NotFound => {
+                                            return QemuBootDevicesResult::Missing;
+                                        }
+                                        FdtPsciMethodResult::Smc => {
+                                            return QemuBootDevicesResult::Invalid;
+                                        }
+                                        FdtPsciMethodResult::Hvc => {
+                                            qemu_psci_use_hvc = true;
+                                        }
+                                    }
+                                    match qemu_virtio_apply_boot_dtb(dtb) {
+                                        QemuVirtioDtbResult::Invalid => {
+                                            return QemuBootDevicesResult::Invalid;
+                                        }
+                                        QemuVirtioDtbResult::Applied => { }
+                                    }
+                                    match qemu_uart_attach_window(region.base, region.size) {
+                                        QemuAttach::Attached => {}
+                                        QemuAttach::Refused => {
+                                            return QemuBootDevicesResult::Invalid;
+                                        }
+                                    }
+                                    qemu_uart_gic_intid =
+                                        interrupt.intid as u32;
+                                    qemu_timer_gic_intid =
+                                        timer.intid as u32;
+                                    qemu_gicd_base = gic.distributor.base;
+                                    qemu_gicc_base = gic.cpu_interface.base;
+                                    uart_init();
+                                    return QemuBootDevicesResult::Applied;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
