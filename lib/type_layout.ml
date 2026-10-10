@@ -113,11 +113,13 @@ let rec size_align_of_type pos seen ty =
      generic struct's argument, so its size is asked for during
      monomorphization, before the instance is resolved or lowered. *)
   | TypeGenericInst ("Place", [arg]) | TypeVariant ("Place", _, [arg]) ->
-      size_align_of_type pos seen (TypeTuple [TypeI32; (match arg with
-        | TypeExists (_, _, _) as t ->
-            let rec body = function TypeExists (_, _, b) -> body b | b -> b in
-            body t
-        | t -> t)])
+      let rec body = function TypeExists (_, _, b) -> body b | b -> b in
+      (* An erased view has no runtime field, as in any variant below. *)
+      (match body arg with
+       | TypeView _ -> size_align_of_type pos seen (TypeTuple [TypeI32])
+       | TypeNamed view | TypeIndexed (view, _) when Hashtbl.mem views view ->
+           size_align_of_type pos seen (TypeTuple [TypeI32])
+       | payload -> size_align_of_type pos seen (TypeTuple [TypeI32; payload]))
   | TypeVariant (name, _, _) ->
       (match Hashtbl.find_opt variants name with
        | None -> fail pos (Printf.sprintf "unknown variant '%s' in sizeof" name)

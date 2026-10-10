@@ -1724,6 +1724,10 @@ let displaced = place_put(guard, record_of(owner).pin, pin);
   declaration claims only the field it is written on. The lock identity is
   checked statically, because the lock is a named global and the guard
   carries its address.
+- `place_is_full(guard, r.f) -> bool` reads whether a guarded_by place
+  holds its content, under the guard of its lock. It does not touch the
+  content, so `r` may be any reference to the record (a slot-indexed
+  scheduler gate has no holder identity) and `self` is not bound.
 - Trusted: the accessor's `@ p` (that the record it returns is holder p's)
   and the guard's mint, as for every authority-derived reference. The
   operation lowers to the same load and store as any place.

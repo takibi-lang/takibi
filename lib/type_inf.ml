@@ -4252,6 +4252,41 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
         "stable_replace was removed: a stored linear value lives in a \
          Place(T) field; use place_take(guard, &c.mutex, c.slot) or \
          place_put(guard, &c.mutex, c.slot, value) (GitHub issue #131)"))
+  | Call ("place_is_full", args) ->
+      (* GitHub issue #686: whether a guarded_by place holds its token,
+         read under the guard of its lock. The content is not touched, so
+         the field may be reached through any reference to its holder, with
+         no `self` to bind. *)
+      (match args with
+       | [guard; ({ desc = FieldGet (base_expr, fname); _ } as field_expr)] ->
+           (match guard.desc with
+            | Var _ -> ()
+            | _ -> raise (TypeError (guard.loc,
+                "place_is_full guard must be a bare linear guard binding")));
+           let guard_lock = place_guard_lock "place_is_full" guard
+             (infer_expr senv eenv tyenv fenv guard) in
+           let bt = infer_expr senv eenv tyenv fenv base_expr in
+           let sname = match struct_instance (repr bt) with
+             | Some (s, _) -> s
+             | None -> raise (TypeError (base_expr.loc,
+                 "place_is_full target must be a struct field"))
+           in
+           let lock = match Guarded_registry.lock_of sname fname with
+             | Some lock -> lock
+             | None -> raise (TypeError (field_expr.loc, Printf.sprintf
+                 "place_is_full needs a guarded_by place; '%s.%s' declares no lock"
+                 sname fname))
+           in
+           (try unify_static guard_lock
+                  (static_identity_for_place { field_expr with desc = Var lock })
+            with Unify_error _ ->
+              raise (TypeError (guard.loc, Printf.sprintf
+                "place_is_full guard does not hold '%s', the lock that guards '%s.%s'"
+                lock sname fname)));
+           check_private_field_access field_expr.loc sname fname;
+           TBool
+       | _ -> raise (TypeError (e.loc,
+           "place_is_full expects 2 arguments: place_is_full(guard, r.field)")))
   | Call (("%gplace_take" | "%gplace_put") as exchange, args) ->
       (* GitHub issue #131 slice 3 / #686: a place whose field declares the
          global lock that serializes it (guarded_by). The guard must hold
@@ -11613,6 +11648,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         when Generic_variant.place_exchange e <> None ->
           check_expr taints moved consume
             (Option.get (Generic_variant.place_exchange e))
+      | Ast.Call ("place_is_full", [guard; field]) ->
+          let moved = check_expr taints moved false guard in
+          (match field.desc with
+           | Ast.FieldGet (base, _) -> check_expr taints moved false base
+           | _ -> moved)
       | Ast.Call (("%gplace_take" | "%gplace_put") as exchange,
                   [guard; field; replacement]) ->
           if not consume then

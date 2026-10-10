@@ -16,9 +16,11 @@ open Ast
 
 let rec erased_key (t : type_expr) : string =
   match t with
-  | TypeNamed s | TypeIndexed (s, _) -> s
+  (* A view is spelled as a named or indexed type in source and reaches the
+     checker as a view: both spellings name the same instance. A view and
+     a struct cannot share a name. *)
+  | TypeNamed s | TypeIndexed (s, _) | TypeView (s, _) -> s
   | TypeVariant (s, _, targs) -> instance_name s targs
-  | TypeView (s, _) -> "view_" ^ s
   | TypePtr t -> "ptr_" ^ erased_key t
   | TypeAlignedPtr (n, t) -> Printf.sprintf "ptr%d_%s" n (erased_key t)
   | TypeIo t -> "io_" ^ erased_key t

@@ -4667,6 +4667,22 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
     when Generic_variant.place_exchange e <> None ->
       gen_expr ?expected_ty locals (Option.get (Generic_variant.place_exchange e))
 
+  | Call ("place_is_full", [guard_e; { desc = FieldGet (base_e, fname); _ }]) ->
+      (* The tag of the place: Empty is case 0. *)
+      ignore (gen_expr locals guard_e);
+      let (field_ty, field_place, is_volatile) =
+        match gen_field_access locals base_e fname with
+        | FieldPlace (ty, place, is_volatile) -> (ty, place, is_volatile)
+        | FieldValue _ -> raise (Error "BUG: a place has no stable address")
+      in
+      let value_ty = resolve_special_type field_ty in
+      let tag_ptr = build_struct_gep (ltype_of_ast value_ty)
+        (place_ptr field_place) 0 (fname ^ ".tag.ptr") builder in
+      let tag = build_load (i32_type context) tag_ptr (fname ^ ".tag") builder in
+      if is_volatile then set_volatile true tag;
+      (TypeBool, build_icmp Icmp.Ne tag (const_int (i32_type context) 0)
+         (fname ^ ".full") builder)
+
   | Call (("%gplace_take" | "%gplace_put") as op, [guard_e; field_e; replacement_e]) ->
       (* The guarded form names no mutex field; the exchange is the same. *)
       let op = if op = "%gplace_take" then "%place_take" else "%place_put" in

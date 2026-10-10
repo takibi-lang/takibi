@@ -9953,6 +9953,108 @@ fn f() -> *usize { return &temp_address_outer().r.a; }");
         }
         ");
 
+  Alcotest.test_case "place_is_full reads a guarded place by slot" `Quick
+    (expect_codegen_ok
+       "linear view RunGuard7g[lock: addr];
+        private let mut run_lock7g: i32;
+        private let mut other_lock7g: i32;
+        fn run_lock_take7g() -> RunGuard7g[&run_lock7g] {
+          return view RunGuard7g[&run_lock7g];
+        }
+        fn other_lock_take7g() -> RunGuard7g[&other_lock7g] {
+          return view RunGuard7g[&other_lock7g];
+        }
+        fn run_lock_give7g(g: sink RunGuard7g[lock]) {}
+        linear struct Pin7g[p: usize] { id: usize @ p; }
+        linear struct Owner7g[p: usize] { generation: usize @ p; }
+        struct Rec7g {
+          pid: usize;
+          private pin: Place(Pin7g[self]) guarded_by(run_lock7g);
+        }
+        private let mut recs7g: [Rec7g; 4];
+        fn rec_owned7g(o: borrow Owner7g[p]) -> &mut Rec7g @ p !{unsafe} {
+          return &recs7g[0];
+        }
+        fn pin_drop7g(t: sink Pin7g[p]) {}
+        fn main() -> i32 { return 0; }
+        fn pinned7g(slot: {0..<4 as usize}) -> bool {
+          let g = run_lock_take7g();
+          let full: bool = place_is_full(g, recs7g[slot].pin);
+          run_lock_give7g(g);
+          return full;
+        }
+        ");
+
+  Alcotest.test_case "place_is_full rejects a guard for another lock" `Quick
+    (expect_type_error "place_is_full guard does not hold 'run_lock7g'"
+       "linear view RunGuard7g[lock: addr];
+        private let mut run_lock7g: i32;
+        private let mut other_lock7g: i32;
+        fn run_lock_take7g() -> RunGuard7g[&run_lock7g] {
+          return view RunGuard7g[&run_lock7g];
+        }
+        fn other_lock_take7g() -> RunGuard7g[&other_lock7g] {
+          return view RunGuard7g[&other_lock7g];
+        }
+        fn run_lock_give7g(g: sink RunGuard7g[lock]) {}
+        linear struct Pin7g[p: usize] { id: usize @ p; }
+        linear struct Owner7g[p: usize] { generation: usize @ p; }
+        struct Rec7g {
+          pid: usize;
+          private pin: Place(Pin7g[self]) guarded_by(run_lock7g);
+        }
+        private let mut recs7g: [Rec7g; 4];
+        fn rec_owned7g(o: borrow Owner7g[p]) -> &mut Rec7g @ p !{unsafe} {
+          return &recs7g[0];
+        }
+        fn pin_drop7g(t: sink Pin7g[p]) {}
+        fn main() -> i32 { return 0; }
+        fn pinned_wrong7g() -> bool {
+          let g = other_lock_take7g();
+          let full: bool = place_is_full(g, recs7g[0].pin);
+          run_lock_give7g(g);
+          return full;
+        }
+        ");
+
+  (* An erased indexed view inside Place: laid out as the tag alone, also
+     when monomorphization asks its size, and named the same instance
+     whether spelled V[self] in the field or seen as a view by the checker.
+     The first failed with "erased view has no runtime size", the second
+     with "Unknown variant type: Place$V" before. *)
+  Alcotest.test_case "place of an indexed view has the tag's size" `Quick
+    (expect_codegen_ok
+       "linear view ViewPin7m[p: usize];
+        private let mut lock7m: i32;
+        struct ViewRec7m { n: usize; private pin: Place(ViewPin7m[self]) guarded_by(lock7m); }
+        generic struct ViewSlot7m(T: type) { s: [u8; sizeof(T)]; }
+        private let mut view_slot7m: ViewSlot7m(ViewRec7m);
+        fn main() -> i32 { return 0; }");
+
+  Alcotest.test_case "place of an indexed view names one instance" `Quick
+    (fun () ->
+       match gen_codegen
+         "linear view ViewPin7n[p: usize];
+          private let mut lock7n: i32;
+          linear view Guard7n[lock: addr];
+          fn lock_take7n() -> Guard7n[&lock7n] { return view Guard7n[&lock7n]; }
+          fn lock_give7n(g: sink Guard7n[lock]) {}
+          linear struct Owner7n[p: usize] { private g: usize @ p; }
+          struct ViewRec7n { n: usize; private pin: Place(ViewPin7n[self]) guarded_by(lock7n); }
+          private let mut view_rec7n: ViewRec7n;
+          fn rec7n(o: borrow Owner7n[p]) -> &mut ViewRec7n @ p !{unsafe} { return &view_rec7n; }
+          fn pin_end7n(v: sink ViewPin7n[p]) {}
+          fn drain7n(o: borrow Owner7n[p]) {
+            let g = lock_take7n();
+            let prev = place_take(g, rec7n(o).pin);
+            lock_give7n(g);
+            match prev { Place::Empty => {} Place::Full(v) => { pin_end7n(v); } }
+          }
+          fn main() -> i32 { return 0; }" with
+       | _ -> Type_layout.check_against_codegen ()
+       | exception Llvm_gen.Error msg ->
+           Alcotest.failf "unexpected codegen Error: %s" msg);
+
   Alcotest.test_case "guarded_by place rejects another holder's token" `Quick
     (expect_type_error "static value mismatch"
        "linear view RunGuard7g[lock: addr];
