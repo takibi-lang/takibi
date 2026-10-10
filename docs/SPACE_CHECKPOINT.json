@@ -1,9 +1,9 @@
 {
   "date": "2026-10-10",
   "event": "incremental",
-  "decision": "reuse",
-  "source_sha256": "e6ebd78121bd37281d1d46d8ed14fe7308718483003a3c122b4cadd2ff25ea53",
-  "workload": "#637 stage 3 ratchet: the production kernels compile with --confine-raw-authority and kernel/RAW_MINT_FILES. Build flags only; no source of the kernel image changes, so the #686 measurement (docs/PROCESS_PIN_SPACE_2026-10-10.md) is reused.",
+  "decision": "measured",
+  "source_sha256": "a408d6e81e17be2fd179646fa80a9159d156548dd4d53406af9c5eeb2919dc55",
+  "workload": "#637 stage 3 step C: AtomicWord cell operations as compiler built-ins; Mutex/TaskMutex lock words as cells. Linked kernels compared against origin/main with scripts/space_delta.py.",
   "evidence": [
     "docs/PROCESS_PIN_SPACE_2026-10-10.md",
     "docs/BOUNDS_CONTRACT_SPACE_2026-10-10.md",
@@ -40,6 +40,6 @@
     "docs/DMA_TRANSMIT_2026-10-08.md",
     "docs/LITERAL_SLICE_SPACE_2026-10-10.md"
   ],
-  "assessment": "Confinement is a compile-time check with no codegen effect; linked kernels as recorded for #686.",
+  "assessment": "Linked text -976 B (QEMU) / -1520 B (RPi5); data, BSS unchanged; QEMU usable_ram_start back by 32 KiB (+8 allocator pages); RPi5 span unchanged; Mutex/TaskMutex layout unchanged (one word at offset 0).",
   "next_trigger": "Production runtime metadata extent migration, a stored allocator authority through array/place rules, or another completed kernel feature/stage requires fresh workload measurement. Any change to generated production code, storage or allocation invalidates this reuse."
 }
