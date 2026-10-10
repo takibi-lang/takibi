@@ -47,6 +47,7 @@ use "kernel/platform/rpi5/timer_irq.tkb";
 use "kernel/arch/arm64/kernel/secondary.tkb";
 use "kernel/arch/arm64/boot/cpu.tkb";
 use "kernel/kernel/irq_counts.tkb";
+use "kernel/arch/arm64/kernel/gicv2.tkb";
 
 const RP1_UART0_VECTOR: u32 = 25;
 const RPI5_UART0_GIC_INTID: u32 = 185; // 32 + (MIP0 SPI base 128 + vector 25)
@@ -74,11 +75,27 @@ const RPI5_GEM_GIC_INTID: u32 = 166; // 32 + (MIP0 SPI base 128 + vector 6)
 // replaced did not.
 const RPI5_PMU_GIC_INTID: u32 = 48;
 const RPI5_WORLD_STOP_SGI: u32 = 1;
-// These are not DT device resources. The table base is the BAR0 assignment
-// made by pcie2_rp1_endpoint_setup(); MSIX_CFG_SET is an RP1 internal
-// register protocol offset within the fixed endpoint peripheral aperture.
-const RP1_MSIX_TABLE_BASE: usize = 0x1F00410000;
-const RP1_MSIX_CFG_SET_BASE: usize = 0x1F00108808;
+// BCM2712's MIP0, which turns RP1's MSI writes into GIC SPIs: the three
+// low-bank registers this kernel programs (irq-bcm2712-mip.c).
+io struct Rp1Mip {
+    cfg_low_host: u32 at 0x20;
+    mask_low_host: u32 at 0x40;
+    mask_low_vpu: u32 at 0x60;
+}
+
+// RP1's MSI-X table (61 16-byte entries as words) and its MSIX_CFG SET
+// alias (one word per vector).
+io struct Rp1MsixTable {
+    words: [u32; 244] at 0x0;
+}
+
+io struct Rp1MsixCfgSet {
+    cfg: [u32; 64] at 0x0;
+}
+
+let mut mip0: IoHandle(Rp1Mip);
+let mut rp1_msix: IoHandle(Rp1MsixTable);
+let mut rp1_msix_cfg_set: IoHandle(Rp1MsixCfgSet);
 
 // Send the world-stop SGI to every active CPU except the initiator. GICv2's
 // target-list field uses the same CPU-interface bits as ITARGETSR.
@@ -93,201 +110,75 @@ fn platform_world_stop_notify(mask: usize, owner: usize) !{unsafe} {
     platform_gic_sgi_send(targets, RPI5_WORLD_STOP_SGI);
 }
 
-// One SGI to the cores in `targets` (GICD_SGIR's CPU target list).
-fn platform_gic_sgi_send(targets: u32, sgi: u32) !{unsafe} {
-    dsb_ishst();
-    let gicd_sgir: *io u32 = unsafe {
-        (rpi5_gicd_base + 0xF00) as *io u32
-    };
-    *gicd_sgir = (targets << 16) | (sgi & 0xF);
-}
-
-fn gic_uart0_msi_setup() !{unsafe} {
-    let gicd_ctlr: *io u32 = unsafe { rpi5_gicd_base as *io u32 };
-    let gicd_isenabler5: *io u32 = unsafe { (rpi5_gicd_base + 0x114) as *io u32 }; // INTIDs 160..191
-    let gicd_icpendr5: *io u32 = unsafe { (rpi5_gicd_base + 0x294) as *io u32 };
-    let gicd_itargetsr46: *io u32 = unsafe { (rpi5_gicd_base + 0x8B8) as *io u32 }; // INTIDs 184..187
-    let gicd_icfgr11: *io u32 = unsafe { (rpi5_gicd_base + 0xC2C) as *io u32 }; // INTIDs 176..191
-
-    // INTID 185 occupies byte 1 of ITARGETSR46. Route it to CPU interface
-    // 0 without disturbing the neighboring interrupt targets.
-    let targets: u32 = *gicd_itargetsr46;
-    *gicd_itargetsr46 = (targets & ~(0xFF << 8)) | (1 << 8);
-
-    // MSI is edge-triggered. ICFGR uses two bits per INTID; the upper bit
-    // of INTID 185's pair is bit 19 in ICFGR11.
-    *gicd_icfgr11 = *gicd_icfgr11 | (1 << 19);
-    *gicd_icpendr5 = 1 << 25;
-    *gicd_isenabler5 = 1 << 25;
-
-    *gicd_ctlr = *gicd_ctlr | 1;
-}
-
-// GitHub issue #447: the GICv2 CPU INTERFACE half, split out of
-// gic_uart0_msi_setup above -- it never belonged to UART0's MSI wiring, it
-// was just the first setup function to run. GICC_PMR and GICC_CTLR are
+// GitHub issue #447: the GICv2 CPU INTERFACE. GICC_PMR and GICC_CTLR are
 // BANKED PER CORE, so core 0's write does not reach core 1, and a core that
 // never runs this has interrupts disabled at its own interface however the
 // distributor is configured.
-fn platform_irq_cpu_interface_init() !{unsafe} {
-    let gicc_ctlr: *io u32 = unsafe { rpi5_gicc_base as *io u32 };
-    let gicc_pmr: *io u32 = unsafe { (rpi5_gicc_base + 0x04) as *io u32 };
-    *gicc_pmr = 0xFF;
-    *gicc_ctlr = *gicc_ctlr | 1;
+
+// GICD_ICFGR: two bits per INTID, the upper one selecting edge (1) or
+// level (0) triggering.
+fn gic_intid_edge(intid: u32, edge: bool) {
+    let index: usize = (intid / 16) as usize;
+    let bit: u32 = (intid % 16) * 2 + 1;
+    if (index < 64) {
+        if (edge) {
+            gicd.icfgr[index] = gicd.icfgr[index] | (1 << bit);
+        } else {
+            gicd.icfgr[index] = gicd.icfgr[index] & ~(1 << bit);
+        }
+    }
 }
 
-fn mip0_uart0_setup() !{unsafe} {
-    let mip_cfg_low_host: *io u32 = unsafe { (rpi5_mip0_base + 0x20) as *io u32 };
-    let mip_mask_low_host: *io u32 = unsafe { (rpi5_mip0_base + 0x40) as *io u32 };
-    let mip_mask_low_vpu: *io u32 = unsafe { (rpi5_mip0_base + 0x60) as *io u32 };
+// One RP1 vector, end to end: the GIC SPI it arrives on (edge-triggered,
+// routed to CPU interface 0, pending cleared, enabled), MIP0's input bit
+// (edge at the GIC-facing output, routed to the host and masked away from
+// the VPU, as irq-bcm2712-mip.c initializes it), and RP1's MSI-X table
+// entry and MSIX_CFG. A level-high source also sets IACK_EN, and the
+// dispatch below acknowledges it after service (rp1.c's rp1_irq_set_type).
+fn rp1_vector_route(intid: u32, vector: u32, level_high: bool) {
+    gic_intid_target(intid, 1);
+    gic_intid_edge(intid, true);
+    gic_intid_clear_pending(intid);
+    gic_intid_enable(intid);
+    gicd.ctlr = gicd.ctlr | 1;
 
-    // Match irq-bcm2712-mip.c's host initialization for this one input:
-    // edge-triggered at the GIC-facing MIP output, routed to the host and
-    // masked away from the VPU.
-    *mip_cfg_low_host = *mip_cfg_low_host | (1 << 25);
-    *mip_mask_low_host = *mip_mask_low_host & ~(1 << 25);
-    *mip_mask_low_vpu = *mip_mask_low_vpu | (1 << 25);
-}
+    mip0.cfg_low_host = mip0.cfg_low_host | (1 << vector);
+    mip0.mask_low_host = mip0.mask_low_host & ~(1 << vector);
+    mip0.mask_low_vpu = mip0.mask_low_vpu | (1 << vector);
 
-fn rp1_uart0_msix_setup() !{unsafe} {
     // RP1's MSI-X capability is at config offset 0xb0. Its table is BAR0
-    // offset 0, with 61 16-byte entries; BAR0 is fixed at PCI 0x00410000
-    // by pcie2_rp1_endpoint_setup and CPU-mapped at 0x1F00410000.
-    let msix_cap: u32 = pcie2_config_read32(1, 0, 0xB0);
-    let entry_base: usize = RP1_MSIX_TABLE_BASE +
-        ((RP1_UART0_VECTOR as usize) * 16);
-    let msg_addr_lo: *io u32 = unsafe { entry_base as *io u32 };
-    let msg_addr_hi: *io u32 = unsafe { (entry_base + 4) as *io u32 };
-    let msg_data: *io u32 = unsafe { (entry_base + 8) as *io u32 };
-    let vector_ctrl: *io u32 = unsafe { (entry_base + 12) as *io u32 };
-
-    *vector_ctrl = 1; // mask while rewriting the entry
-    *msg_addr_lo = rpi5_mip0_target as u32;
-    *msg_addr_hi = (rpi5_mip0_target >> 32) as u32;
-    *msg_data = RP1_UART0_VECTOR;
-    *vector_ctrl = 0;
-
+    // offset 0, with 61 16-byte entries: address low/high, data, control.
+    let entry: usize = (vector as usize) * 4;
+    if (entry < 241) {
+        rp1_msix.words[entry + 3] = 1; // mask while rewriting the entry
+        rp1_msix.words[entry] = rpi5_mip0_target as u32;
+        rp1_msix.words[entry + 1] = (rpi5_mip0_target >> 32) as u32;
+        rp1_msix.words[entry + 2] = vector;
+        rp1_msix.words[entry + 3] = 0;
+    }
     // Function-wide MSI-X enable (Message Control bit 15, i.e. bit 31 in
-    // this 32-bit capability word); leave Function Mask clear.
-    pcie2_config_write32(1, 0, 0xB0, (msix_cap | 0x80000000) & ~0x40000000);
-
-    // RP1 PCIE_APBS MSIX_CFG[25]: ENABLE plus IACK_EN because UART0's
-    // source is level-high. The SET alias avoids changing TEST/IACK bits.
-    let rp1_msix_cfg25_set: *io u32 = unsafe {
-        (RP1_MSIX_CFG_SET_BASE + (RP1_UART0_VECTOR as usize) * 4) as *io u32
-    };
-    *rp1_msix_cfg25_set = (1 << 0) | (1 << 3);
-}
-
-fn gic_usb0_msi_setup() !{unsafe} {
-    let gicd_isenabler5: *io u32 = unsafe { (rpi5_gicd_base + 0x114) as *io u32 }; // INTIDs 160..191 (shared with UART0)
-    let gicd_icpendr5: *io u32 = unsafe { (rpi5_gicd_base + 0x294) as *io u32 };
-    let gicd_itargetsr47: *io u32 = unsafe { (rpi5_gicd_base + 0x8BC) as *io u32 }; // INTIDs 188..191
-    let gicd_icfgr11: *io u32 = unsafe { (rpi5_gicd_base + 0xC2C) as *io u32 }; // INTIDs 176..191 (shared with UART0)
-
-    // INTID 191 occupies byte 3 of ITARGETSR47.
-    let targets: u32 = *gicd_itargetsr47;
-    *gicd_itargetsr47 = (targets & ~(0xFF << 24)) | (1 << 24);
-
-    // Upper bit of INTID 191's pair is bit 31 in ICFGR11 -- the same
-    // register UART0 sets bit 19 of, so this only ORs in its own bit.
-    *gicd_icfgr11 = *gicd_icfgr11 | (1 << 31);
-    *gicd_icpendr5 = 1 << 31;
-    *gicd_isenabler5 = 1 << 31;
-
-    // GICD_CTLR/GICC_PMR/GICC_CTLR are already enabled by
-    // gic_uart0_msi_setup(); this vector only needs its own bits set.
-}
-
-fn mip0_usb0_setup() !{unsafe} {
-    let mip_cfg_low_host: *io u32 = unsafe { (rpi5_mip0_base + 0x20) as *io u32 };
-    let mip_mask_low_host: *io u32 = unsafe { (rpi5_mip0_base + 0x40) as *io u32 };
-    let mip_mask_low_vpu: *io u32 = unsafe { (rpi5_mip0_base + 0x60) as *io u32 };
-
-    *mip_cfg_low_host = *mip_cfg_low_host | (1 << 31);
-    *mip_mask_low_host = *mip_mask_low_host & ~(1 << 31);
-    *mip_mask_low_vpu = *mip_mask_low_vpu | (1 << 31);
-}
-
-fn rp1_usbhost0_msix_setup() !{unsafe} {
+    // this 32-bit capability word); leave Function Mask clear. Shared by
+    // every vector, so repeating it is idempotent.
     let msix_cap: u32 = pcie2_config_read32(1, 0, 0xB0);
-    let entry_base: usize = RP1_MSIX_TABLE_BASE +
-        ((RP1_USB0_VECTOR as usize) * 16);
-    let msg_addr_lo: *io u32 = unsafe { entry_base as *io u32 };
-    let msg_addr_hi: *io u32 = unsafe { (entry_base + 4) as *io u32 };
-    let msg_data: *io u32 = unsafe { (entry_base + 8) as *io u32 };
-    let vector_ctrl: *io u32 = unsafe { (entry_base + 12) as *io u32 };
-
-    *vector_ctrl = 1;
-    *msg_addr_lo = rpi5_mip0_target as u32;
-    *msg_addr_hi = (rpi5_mip0_target >> 32) as u32;
-    *msg_data = RP1_USB0_VECTOR;
-    *vector_ctrl = 0;
-
-    // Idempotent with rp1_uart0_msix_setup()'s identical write: function-wide
-    // MSI-X enable is a single capability-word bit shared by every vector.
     pcie2_config_write32(1, 0, 0xB0, (msix_cap | 0x80000000) & ~0x40000000);
-
-    // RP1_INT_USBHOST0_0 is IRQ_TYPE_EDGE_RISING in rp1.dtsi, so
-    // MSIX_CFG_IACK_EN stays clear -- rp1.c's rp1_irq_set_type only sets it
-    // for IRQ_TYPE_LEVEL_HIGH, and rp1_chained_handle_irq only issues the
-    // post-service IACK write when that flag is set. ENABLE only.
-    let rp1_msix_cfg31_set: *io u32 = unsafe {
-        (RP1_MSIX_CFG_SET_BASE + (RP1_USB0_VECTOR as usize) * 4) as *io u32
-    };
-    *rp1_msix_cfg31_set = 1 << 0;
+    // RP1 PCIE_APBS MSIX_CFG: ENABLE, plus IACK_EN for a level-high source.
+    // The SET alias avoids changing TEST/IACK bits.
+    let cfg: usize = vector as usize;
+    if (cfg < 64) {
+        if (level_high) {
+            rp1_msix_cfg_set.cfg[cfg] = (1 << 0) | (1 << 3);
+        } else {
+            rp1_msix_cfg_set.cfg[cfg] = 1 << 0;
+        }
+    }
 }
 
-fn gic_gem_msi_setup() !{unsafe} {
-    rpi5_gem_attach_bootstrap();
-    let gicd_isenabler5: *io u32 = unsafe { (rpi5_gicd_base + 0x114) as *io u32 }; // INTIDs 160..191 (shared with UART0/USB0)
-    let gicd_icpendr5: *io u32 = unsafe { (rpi5_gicd_base + 0x294) as *io u32 };
-    let gicd_itargetsr41: *io u32 = unsafe { (rpi5_gicd_base + 0x8A4) as *io u32 }; // INTIDs 164..167
-    let gicd_icfgr10: *io u32 = unsafe { (rpi5_gicd_base + 0xC28) as *io u32 }; // INTIDs 160..175
-
-    // INTID 166 occupies byte 2 of ITARGETSR41.
-    let targets: u32 = *gicd_itargetsr41;
-    *gicd_itargetsr41 = (targets & ~(0xFF << 16)) | (1 << 16);
-
-    // Upper bit of INTID 166's pair is bit 13 in ICFGR10.
-    *gicd_icfgr10 = *gicd_icfgr10 | (1 << 13);
-    *gicd_icpendr5 = 1 << 6;
-    *gicd_isenabler5 = 1 << 6;
-}
-
-fn mip0_gem_setup() !{unsafe} {
-    let mip_cfg_low_host: *io u32 = unsafe { (rpi5_mip0_base + 0x20) as *io u32 };
-    let mip_mask_low_host: *io u32 = unsafe { (rpi5_mip0_base + 0x40) as *io u32 };
-    let mip_mask_low_vpu: *io u32 = unsafe { (rpi5_mip0_base + 0x60) as *io u32 };
-
-    *mip_cfg_low_host = *mip_cfg_low_host | (1 << 6);
-    *mip_mask_low_host = *mip_mask_low_host & ~(1 << 6);
-    *mip_mask_low_vpu = *mip_mask_low_vpu | (1 << 6);
-}
-
-fn rp1_gem_msix_setup() !{unsafe} {
-    let msix_cap: u32 = pcie2_config_read32(1, 0, 0xB0);
-    let entry_base: usize = RP1_MSIX_TABLE_BASE +
-        ((RP1_GEM_VECTOR as usize) * 16);
-    let msg_addr_lo: *io u32 = unsafe { entry_base as *io u32 };
-    let msg_addr_hi: *io u32 = unsafe { (entry_base + 4) as *io u32 };
-    let msg_data: *io u32 = unsafe { (entry_base + 8) as *io u32 };
-    let vector_ctrl: *io u32 = unsafe { (entry_base + 12) as *io u32 };
-
-    *vector_ctrl = 1;
-    *msg_addr_lo = rpi5_mip0_target as u32;
-    *msg_addr_hi = (rpi5_mip0_target >> 32) as u32;
-    *msg_data = RP1_GEM_VECTOR;
-    *vector_ctrl = 0;
-
-    pcie2_config_write32(1, 0, 0xB0, (msix_cap | 0x80000000) & ~0x40000000);
-
-    // RP1_INT_ETH is IRQ_TYPE_LEVEL_HIGH in rp1.dtsi, matching UART0: ENABLE
-    // plus IACK_EN, and rpi5_irq_dispatch below issues the post-service IACK.
-    let rp1_msix_cfg6_set: *io u32 = unsafe {
-        (RP1_MSIX_CFG_SET_BASE + (RP1_GEM_VECTOR as usize) * 4) as *io u32
-    };
-    *rp1_msix_cfg6_set = (1 << 0) | (1 << 3);
+// After a level-high vector is serviced: MSIX_CFG_IACK.
+fn rp1_vector_iack(vector: u32) {
+    let cfg: usize = vector as usize;
+    if (cfg < 64) {
+        rp1_msix_cfg_set.cfg[cfg] = 1 << 2;
+    }
 }
 
 // GIC/MIP0/MSI-X routing for every source this kernel currently handles,
@@ -302,19 +193,14 @@ fn rp1_gem_msix_setup() !{unsafe} {
 // irq_uart_rx_unmask() call much later -- GIC-level routing being armed
 // early is harmless as long as the peripheral itself never asserts.
 fn platform_irq_init() {
-    gic_uart0_msi_setup();
     platform_irq_cpu_interface_init();
-    mip0_uart0_setup();
     pcie2_mip0_inbound_setup();
-    rp1_uart0_msix_setup();
-
-    gic_usb0_msi_setup();
-    mip0_usb0_setup();
-    rp1_usbhost0_msix_setup();
-
-    gic_gem_msi_setup();
-    mip0_gem_setup();
-    rp1_gem_msix_setup();
+    // UART0 and ETH are level-high in rp1.dtsi; USBHOST0_0 is edge-rising.
+    rp1_vector_route(RPI5_UART0_GIC_INTID, RP1_UART0_VECTOR, true);
+    rp1_vector_route(RPI5_USB0_GIC_INTID, RP1_USB0_VECTOR, false);
+    // The GEM handle is attached before its vector can be dispatched.
+    rpi5_gem_attach_bootstrap();
+    rp1_vector_route(RPI5_GEM_GIC_INTID, RP1_GEM_VECTOR, true);
 
     timer_irq_setup();
 
@@ -339,45 +225,17 @@ fn platform_irq_init() {
 // GIC-400 ignores an enable write to an INTID it does not implement, so a
 // bit that reads back clear beside neighbors that read back set says the
 // interrupt number itself is wrong.
-fn platform_pmu_irq_debug() -> usize !{unsafe} {
-    let gicd_isenabler0: *io u32 = unsafe { (rpi5_gicd_base + 0x100) as *io u32 };
-    let gicd_isenabler1: *io u32 = unsafe { (rpi5_gicd_base + 0x104) as *io u32 };
-    let banked: usize = (*gicd_isenabler0) as usize;
-    let shared: usize = (*gicd_isenabler1) as usize;
-    return banked | (shared << 32);
-}
 
-fn gic_pmu_spi_enable() !{unsafe} {
-    let gicd_isenabler1: *io u32 = unsafe {
-        (rpi5_gicd_base + 0x104) as *io u32 // INTIDs 32..63
-    };
-    let gicd_icpendr1: *io u32 = unsafe {
-        (rpi5_gicd_base + 0x284) as *io u32
-    };
-    let gicd_itargetsr12: *io u32 = unsafe {
-        (rpi5_gicd_base + 0x830) as *io u32 // INTIDs 48..51
-    };
-    let gicd_icfgr3: *io u32 = unsafe {
-        (rpi5_gicd_base + 0xC0C) as *io u32 // INTIDs 48..63
-    };
-
-    // INTID 48 occupies byte 0 of ITARGETSR12; route it to CPU interface 0
-    // without disturbing SPIs 49..51.
-    let targets: u32 = *gicd_itargetsr12;
-    *gicd_itargetsr12 = (targets & ~0xFF) | 1;
-
-    // INTID 48 is the first pair in ICFGR3, and the PMU line is
-    // level-high, so its upper bit must be CLEAR -- the opposite of the
-    // edge-triggered MSI vectors above.
-    *gicd_icfgr3 = *gicd_icfgr3 & ~(0x3 << 0);
-    *gicd_icpendr1 = 1 << 16;
-    *gicd_isenabler1 = 1 << 16;
+// The PMU's SPI is level-sensitive: ICFGR cleared, not set.
+fn gic_pmu_spi_enable() {
+    gic_intid_target(RPI5_PMU_GIC_INTID, 1);
+    gic_intid_edge(RPI5_PMU_GIC_INTID, false);
+    gic_intid_clear_pending(RPI5_PMU_GIC_INTID);
+    gic_intid_enable(RPI5_PMU_GIC_INTID);
 }
 
 fn rpi5_irq_dispatch_inner(frame: sink FrameRef[process], lower_el: bool)
         -> AnyFrame !{interrupt, unsafe} {
-    let gicc_iar: *io u32 = unsafe { (rpi5_gicc_base + 0x0C) as *io u32 };
-    let gicc_eoir: *io u32 = unsafe { (rpi5_gicc_base + 0x10) as *io u32 };
     // GitHub issue #632: GICC_IAR is not the interrupt number alone. For an
     // SGI, bits [12:10] name the CPU that sent it, so the world-stop SGI from
     // core 3 reads 0xC01, not 1, and comparing the raw word recognised only
@@ -385,7 +243,7 @@ fn rpi5_irq_dispatch_inner(frame: sink FrameRef[process], lower_el: bool)
     // rollover under a four-core workload -- was acknowledged by nobody.
     // Decide on the INTID; EOI with the whole word, which is what the GIC
     // requires to deactivate that sender's SGI.
-    let iar: u32 = *gicc_iar;
+    let iar: u32 = gicc.iar;
     let id: u32 = iar & 0x3FF;
     // GitHub issue #715: counted before any branch, so the world stop and
     // every acknowledged INTID are in DDB's `intr` view. Only this CPU's
@@ -399,7 +257,7 @@ fn rpi5_irq_dispatch_inner(frame: sink FrameRef[process], lower_el: bool)
         // the way into it -- one shared body, because the two platforms
         // differ here only in the SGI id and the EOI register.
         kernel_world_stop_serve(frame);
-        *gicc_eoir = iar;
+        gicc.eoir = iar;
         return frame_any(frame);
     }
     workload_profile_irq_enter();
@@ -414,7 +272,7 @@ fn rpi5_irq_dispatch_inner(frame: sink FrameRef[process], lower_el: bool)
     if (cpu_id() != 0) {
         let switch: TimerSwitch = kernel_secondary_tick(
             frame, lower_el, id == rpi5_timer_gic_intid);
-        *gicc_eoir = iar;
+        gicc.eoir = iar;
         workload_profile_irq_exit();
         return kernel_timer_tick_leave(switch);
     }
@@ -426,11 +284,7 @@ fn rpi5_irq_dispatch_inner(frame: sink FrameRef[process], lower_el: bool)
 
         // RP1's level-triggered MSI-X wrapper needs an IACK after the
         // device source has been serviced, matching rp1_chained_handle_irq.
-        let rp1_msix_cfg25_set: *io u32 = unsafe {
-            (RP1_MSIX_CFG_SET_BASE + (RP1_UART0_VECTOR as usize) * 4)
-                as *io u32
-        };
-        *rp1_msix_cfg25_set = 1 << 2; // MSIX_CFG_IACK
+        rp1_vector_iack(RP1_UART0_VECTOR);
     } else if (id == RPI5_USB0_GIC_INTID) {
         xhci_irq_handler();
         // Edge-triggered source (see rp1_usbhost0_msix_setup): no RP1-level
@@ -439,11 +293,7 @@ fn rpi5_irq_dispatch_inner(frame: sink FrameRef[process], lower_el: bool)
     } else if (id == RPI5_GEM_GIC_INTID) {
         gem_irq_handler();
 
-        let rp1_msix_cfg6_set: *io u32 = unsafe {
-            (RP1_MSIX_CFG_SET_BASE + (RP1_GEM_VECTOR as usize) * 4)
-                as *io u32
-        };
-        *rp1_msix_cfg6_set = 1 << 2; // MSIX_CFG_IACK
+        rp1_vector_iack(RP1_GEM_VECTOR);
     } else if (id == RPI5_PMU_GIC_INTID) {
         // GitHub issue #500: the flat PC sample. Takes the interrupted PC
         // out of the frame this entry already saved, and acknowledges the
@@ -463,14 +313,14 @@ fn rpi5_irq_dispatch_inner(frame: sink FrameRef[process], lower_el: bool)
         if (lower_el) {
             kernel_stack_guard_check_interrupt(frame_ref_address(frame));  // issue #375
             let switch: TimerSwitch = kernel_process_timer_schedule(frame);
-            *gicc_eoir = iar;
+            gicc.eoir = iar;
             workload_profile_irq_exit();
             return kernel_timer_tick_leave(switch);
         }
         kernel_process_request_reschedule();
     }
 
-    *gicc_eoir = iar;
+    gicc.eoir = iar;
     workload_profile_irq_exit();
     if (debug_break) {
         kernel_ddb_enter(frame_ref_address(frame), 1, id as usize);

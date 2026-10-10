@@ -50,3 +50,22 @@ fn gic_intid_target(intid: u32, cpus: u8) {
 fn gic_enable_words() -> usize {
     return (gicd.isenabler[0] as usize) | ((gicd.isenabler[1] as usize) << 32);
 }
+
+// One SGI to the cores in `targets` (GICD_SGIR's CPU target list).
+fn platform_gic_sgi_send(targets: u32, sgi: u32) !{unsafe} {
+    dsb_ishst();
+    gicd.sgir = (targets << 16) | (sgi & 0xF);
+}
+
+// GitHub issue #447: the CPU interface is BANKED PER CORE -- GICC_PMR and
+// GICC_CTLR -- so every core runs this for itself.
+fn platform_irq_cpu_interface_init() {
+    gicc.pmr = 0xFF;
+    gicc.ctlr = gicc.ctlr | 1;
+}
+
+// GitHub issue #500: the distributor's first two enable words, for an
+// interval that collected no PMU samples.
+fn platform_pmu_irq_debug() -> usize {
+    return gic_enable_words();
+}

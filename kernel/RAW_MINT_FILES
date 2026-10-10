@@ -20,10 +20,8 @@ kernel/lib/pool_lock.tkb
 kernel/mm/page.tkb
 kernel/mm/user_memory.tkb
 kernel/platform/qemu/device_map.tkb
-kernel/platform/rpi5/intc.tkb
 kernel/platform/rpi5/pcie.tkb
 kernel/platform/rpi5/system_timer_dtb.tkb
-kernel/platform/rpi5/timer_irq.tkb
 kernel/platform/rpi5/device_map.tkb
 
 # S: to be split into a small mint file and rewritten code

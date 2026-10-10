@@ -10,7 +10,7 @@ four-core churn workload that first fail-stopped the kernel and then hung it
 at the ASID rollover, and it hid for as long as every stop happened to start
 on core 0.
 
-The rule, per file that reads `*gicc_iar`:
+The rule, per file that reads GICC_IAR (`gicc.iar`):
   - the read is bound to a name (the raw word), and some name is bound to
     that word `& 0x3FF` (the INTID);
   - the raw name appears in no `==`/`!=` comparison and is not passed on as
@@ -31,7 +31,9 @@ from pass_line import report_pass
 REPO = pathlib.Path(__file__).resolve().parent.parent
 INTC_GLOB = "kernel/platform/*/intc.tkb"
 
-READ = re.compile(r"let\s+(\w+)\s*:\s*u32\s*=\s*\*gicc_iar\s*;")
+# The read is `gicc.iar` through the GIC's IoHandle (#637 step A); the raw
+# `*gicc_iar` spelling it replaced is still recognized, so a revert is seen.
+READ = re.compile(r"let\s+(\w+)\s*:\s*u32\s*=\s*(?:\*gicc_iar|gicc\.iar)\s*;")
 MASKED = r"let\s+\w+\s*:\s*u32\s*=\s*{raw}\s*&\s*0x3[fF][fF]\s*;"
 
 
@@ -61,14 +63,17 @@ def problems_in(text: str, relative: str) -> tuple[int, list[str]]:
 
 def control() -> bool:
     """The pre-#632 dispatcher shape must be refused."""
-    planted = """
-    let id: u32 = *gicc_iar;
-    if (id == QEMU_WORLD_STOP_SGI) {
-        *gicc_eoir = id;
-    }
+    for read in ("*gicc_iar", "gicc.iar"):
+        planted = f"""
+    let id: u32 = {read};
+    if (id == QEMU_WORLD_STOP_SGI) {{
+        gicc.eoir = id;
+    }}
 """
-    reads, found = problems_in(planted, "control")
-    return reads == 1 and len(found) >= 2
+        reads, found = problems_in(planted, "control")
+        if not (reads == 1 and len(found) >= 2):
+            return False
+    return True
 
 
 def main() -> int:

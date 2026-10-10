@@ -6,6 +6,7 @@
 
 use "kernel/drivers/serial/pl011.tkb";
 use "kernel/drivers/net/rp1_gem.tkb";
+use "kernel/arch/arm64/kernel/gicv2.tkb";
 
 // RP1's UART0 behind the outbound window pcie2_rp1_endpoint_setup programs.
 // Reachable only after that setup; nothing uses it earlier.
@@ -46,5 +47,69 @@ fn rpi5_gem_attach_bootstrap() !{unsafe} {
     match io_handle_attach(&gem, window) {
         IoAttach::Attached => {}
         IoAttach::TooSmall => { kernel_invariant_stop(); }
+    }
+}
+
+// The GIC-400's two windows and MIP0: the board's known addresses until the
+// DTB has been compared with them (gic_dtb.tkb, mip_dtb.tkb), then the DTB's.
+fn rpi5_gic_attach(dist_base: usize, dist_bytes: usize,
+                   cpu_base: usize, cpu_bytes: usize) -> Rpi5Attach !{unsafe} {
+    let RegionBytes::Assumed(dist) = region_bytes_assume(dist_base, dist_bytes) else {};
+    match io_handle_attach(&gicd, dist) {
+        IoAttach::TooSmall => { return Rpi5Attach::Refused; }
+        IoAttach::Attached => {}
+    }
+    let RegionBytes::Assumed(cpu) = region_bytes_assume(cpu_base, cpu_bytes) else {};
+    match io_handle_attach(&gicc, cpu) {
+        IoAttach::TooSmall => { return Rpi5Attach::Refused; }
+        IoAttach::Attached => {}
+    }
+    rpi5_gicd_base = dist_base;
+    rpi5_gicc_base = cpu_base;
+    return Rpi5Attach::Attached;
+}
+
+fn rpi5_mip0_attach(base: usize, bytes: usize) -> Rpi5Attach !{unsafe} {
+    let RegionBytes::Assumed(window) = region_bytes_assume(base, bytes) else {};
+    match io_handle_attach(&mip0, window) {
+        IoAttach::TooSmall => { return Rpi5Attach::Refused; }
+        IoAttach::Attached => {
+            rpi5_mip0_base = base;
+            return Rpi5Attach::Attached;
+        }
+    }
+}
+
+// Not DT device resources: the MSI-X table is the BAR0 assignment made by
+// pcie2_rp1_endpoint_setup(), and MSIX_CFG_SET is an RP1 internal register
+// offset within the fixed endpoint peripheral aperture.
+const RP1_MSIX_TABLE_BASE: usize = 0x1F00410000;
+const RP1_MSIX_TABLE_BYTES: usize = 61 * 16;
+const RP1_MSIX_CFG_SET_BASE: usize = 0x1F00108808;
+const RP1_MSIX_CFG_SET_BYTES: usize = 64 * 4;
+
+// Every RPi5 interrupt-path window at the board's known addresses, before
+// any DTB has been read. Halts if one cannot be attached: no interrupt
+// could be routed.
+fn rpi5_irq_windows_attach_bootstrap() !{unsafe} {
+    match rpi5_gic_attach(RPI5_GICD_BASE, 0x1000, RPI5_GICC_BASE, 0x2000) {
+        Rpi5Attach::Attached => {}
+        Rpi5Attach::Refused => { kernel_invariant_stop(); }
+    }
+    match rpi5_mip0_attach(RPI5_MIP0_BASE, 0xC0) {
+        Rpi5Attach::Attached => {}
+        Rpi5Attach::Refused => { kernel_invariant_stop(); }
+    }
+    let RegionBytes::Assumed(table) =
+        region_bytes_assume(RP1_MSIX_TABLE_BASE, RP1_MSIX_TABLE_BYTES) else {};
+    match io_handle_attach(&rp1_msix, table) {
+        IoAttach::TooSmall => { kernel_invariant_stop(); }
+        IoAttach::Attached => {}
+    }
+    let RegionBytes::Assumed(cfg) =
+        region_bytes_assume(RP1_MSIX_CFG_SET_BASE, RP1_MSIX_CFG_SET_BYTES) else {};
+    match io_handle_attach(&rp1_msix_cfg_set, cfg) {
+        IoAttach::TooSmall => { kernel_invariant_stop(); }
+        IoAttach::Attached => {}
     }
 }

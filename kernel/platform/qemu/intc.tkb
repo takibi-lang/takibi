@@ -50,12 +50,6 @@ fn platform_world_stop_notify(mask: usize, owner: usize) !{unsafe} {
     platform_gic_sgi_send(targets, QEMU_WORLD_STOP_SGI);
 }
 
-// One SGI to the cores in `targets` (GICD_SGIR's CPU target list).
-fn platform_gic_sgi_send(targets: u32, sgi: u32) !{unsafe} {
-    dsb_ishst();
-    gicd.sgir = (targets << 16) | (sgi & 0xF);
-}
-
 fn gic_uart_spi_setup() {
     gic_intid_target(qemu_uart_gic_intid, 1); // route the discovered UART SPI to CPU0
     gic_intid_enable(qemu_uart_gic_intid);
@@ -69,10 +63,6 @@ fn gic_uart_spi_setup() {
 // interrupts disabled at its own interface regardless of the distributor.
 // That is why core 1 could take no interrupt before this existed, not
 // anything about the distributor being unconfigured.
-fn platform_irq_cpu_interface_init() {
-    gicc.pmr = 0xFF;
-    gicc.ctlr = gicc.ctlr | 1;
-}
 
 // GIC/timer routing for every source this build currently handles, plus
 // the one global DAIF.I unmask. Matches kernel/platform/rpi5/intc.tkb's
@@ -104,9 +94,6 @@ fn platform_irq_init() {
 // GIC-400 ignores an enable write to an INTID it does not implement, so a
 // bit that reads back clear beside neighbors that read back set says the
 // interrupt number itself is wrong.
-fn platform_pmu_irq_debug() -> usize {
-    return gic_enable_words();
-}
 
 fn gic_pmu_ppi_enable() {
     gic_intid_enable(qemu_pmu_gic_intid);

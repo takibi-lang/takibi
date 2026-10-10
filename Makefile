@@ -339,6 +339,7 @@ KERNEL_UNUSED_CHECKED := \
 	kernel/arch/arm64/boot/cpu.tkb \
 	kernel/arch/arm64/kernel/exception_evidence.tkb \
 	kernel/arch/arm64/kernel/frame_ref.tkb \
+	kernel/arch/arm64/kernel/gicv2.tkb \
 	kernel/arch/arm64/kernel/platform_uart_common.tkb \
 	kernel/arch/arm64/kernel/secondary.tkb \
 	kernel/arch/arm64/kernel/timer.tkb \
@@ -412,7 +413,6 @@ KERNEL_UNUSED_CHECKED := \
 	kernel/printk/log.tkb \
 	kernel/printk/number.tkb
 KERNEL_UNUSED_CHECKED_QEMU := \
-	kernel/arch/arm64/kernel/gicv2.tkb \
 	kernel/drivers/block/virtio_blk.tkb \
 	kernel/drivers/block/virtio_blk_dma.tkb \
 	kernel/drivers/net/virtio_net.tkb \

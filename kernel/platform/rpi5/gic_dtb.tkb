@@ -39,8 +39,14 @@ fn rpi5_gic_apply_boot_dtb() -> Rpi5GicDtbResult !{unsafe} {
                         rpi5_gic_dtb_status = 1;
                         return Rpi5GicDtbResult::Invalid;
                     }
-                    rpi5_gicd_base = gic.distributor.base;
-                    rpi5_gicc_base = gic.cpu_interface.base;
+                    match rpi5_gic_attach(gic.distributor.base, gic.distributor.size,
+                                          gic.cpu_interface.base, gic.cpu_interface.size) {
+                        Rpi5Attach::Attached => {}
+                        Rpi5Attach::Refused => {
+                            rpi5_gic_dtb_status = 1;
+                            return Rpi5GicDtbResult::Invalid;
+                        }
+                    }
                     rpi5_timer_gic_intid = interrupt.intid as u32;
                     rpi5_gic_dtb_status = 3;
                     return Rpi5GicDtbResult::Applied((

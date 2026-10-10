@@ -96,6 +96,7 @@ fn uart_init() {
 
 fn platform_init() {
     rpi5_uart_attach_bootstrap();
+    rpi5_irq_windows_attach_bootstrap();
     match rpi5_gic_apply_boot_dtb() {
         Rpi5GicDtbResult::Invalid => { }
         Rpi5GicDtbResult::Missing => { }
