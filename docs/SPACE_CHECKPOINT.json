@@ -1,9 +1,9 @@
 {
   "date": "2026-10-10",
-  "event": "milestone",
+  "event": "incremental",
   "decision": "measured",
-  "source_sha256": "236e9cd2199f94d71b712208459b846118cdcc67860a5e07f6ccd2bb086bdae6",
-  "workload": "GEM primary-bank interrupt completion with a 14 ms policy deadline. Linked QEMU and RPi5 production kernels measured against ae1a0cf8; fixed TX slot ownership branches and real-board HTTP bulk transfers exercised.",
+  "source_sha256": "28b51cd0f896fb753726628db8d58542ce8b28251c1b2340ae205b551f1517fd",
+  "workload": "#637 step A: RPi5 GIC, MIP0 and RP1 MSI-X through IoHandles. Linked kernels compared against origin/main.",
   "evidence": [
     "docs/PROCESS_PIN_SPACE_2026-10-10.md",
     "docs/BOUNDS_CONTRACT_SPACE_2026-10-10.md",
@@ -44,6 +44,6 @@
     "docs/GEM_TX_IRQ_2026-10-10.md",
     "docs/GEM_TX_IRQ_BULK_2026-10-10.json"
   ],
-  "assessment": "Against ae1a0cf8: QEMU text/data/BSS and usable RAM unchanged. RPi5 text +64 B, initialized data +8 B for the typed GEM handle, BSS and usable RAM unchanged. TX payload remains 1536 B and the owner remains 40 B. No new production pool, retained page or dynamic allocation. IRQ tracing arrays belong only to isolated test images. Paired seven-sample bulk medians improve for both files; two candidate small transfers retain SYN retransmission tails, recorded without exclusion.",
-  "next_trigger": "A change to DMA ownership lifetime, ring capacity, stored device authority, or another completed kernel feature/stage requires fresh workload measurement. Repeat OS comparisons when their accounting boundary changes."
+  "assessment": "RPi5: text +896 B, data +40 B (five 8-byte handles), BSS and usable_ram_start unchanged; measured on top of 4e88fd5f (which already moved GEM to an IoHandle). QEMU unchanged.",
+  "next_trigger": "Production runtime metadata extent migration, a stored allocator authority through array/place rules, or another completed kernel feature/stage requires fresh workload measurement. Any change to generated production code, storage or allocation invalidates this reuse."
 }
