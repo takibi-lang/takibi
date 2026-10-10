@@ -249,11 +249,11 @@ struct ProcessRecord {
     // The run lock serializes every transition. PROCESS_STACK_UNOWNED is the
     // only value from which another CPU may acquire this stack.
     stack_owner_cpu: usize;
-    state: ProcessSlotState;
-    // What this process is blocked on, and the child that woke a wait4 that
-    // is still pending. Private to process_wait.tkb, which is the only
-    // place either changes (GitHub issue #653).
-    wait: ProcessWaitCell;
+    // The scheduling state, with what a Blocked process waits for and a
+    // pending wait4 continuation as its payload. Private to
+    // process_wait.tkb, which is the only place it changes (GitHub issue
+    // #653).
+    state: ProcessStateCell;
     // What the process running a syscall has decided to block on, read back
     // by the block that follows. Separate from `wait` so a decision that is
     // abandoned leaves nothing behind for a scheduler to trust (#603).
@@ -1252,7 +1252,7 @@ private fn scheduled_process_ddb_record(
     if (record.has_parent) {
         result.ppid = scheduled_process_parent_pid_stopped(stopped, record.parent);
     }
-    match record.state {
+    match process_state_kind(&record.state) {
         ProcessSlotState::Free => { result.state = 0; }
         ProcessSlotState::Ready => { result.state = 1; }
         ProcessSlotState::Running => { result.state = 2; }
@@ -1260,7 +1260,7 @@ private fn scheduled_process_ddb_record(
         ProcessSlotState::Exited => { result.state = 4; }
         ProcessSlotState::Constructing => { result.state = 5; }
     }
-    match process_wait_reason(&record.wait) {
+    match process_wait_reason(&record.state) {
         ProcessWaitReason::None => { result.wait_reason = 0; }
         ProcessWaitReason::UartRx => { result.wait_reason = 1; }
         ProcessWaitReason::ChildExit => { result.wait_reason = 2; }
@@ -1410,11 +1410,11 @@ private fn kernel_process_protocol_observe(unlocked: bool) !{unsafe} {
     if (scheduled_process_boot_live) {
         protocol_trace_observe_process(
             scheduled_process_boot_record.pid,
-            kernel_process_protocol_state(scheduled_process_boot_record.state),
+            kernel_process_protocol_state(process_state_kind(&scheduled_process_boot_record.state)),
             kernel_process_protocol_owner(
                 scheduled_process_boot_record.stack_owner_cpu),
             kernel_process_protocol_reason(
-                process_wait_reason(&scheduled_process_boot_record.wait)),
+                process_wait_reason(&scheduled_process_boot_record.state)),
             PROTOCOL_TRACE_NONE);
     }
     let mut slot: usize = 0;
@@ -1430,12 +1430,12 @@ private fn kernel_process_protocol_observe(unlocked: bool) !{unsafe} {
                 let record: &mut ProcessRecord = intrusive_pool_record_of(
                     &scheduled_process_pool, slot_view);
                 // A slot being allocated is not a process yet.
-                if (record.state != ProcessSlotState::Free) {
+                if (process_state_kind(&record.state) != ProcessSlotState::Free) {
                     protocol_trace_observe_process(
                         record.pid,
-                        kernel_process_protocol_state(record.state),
+                        kernel_process_protocol_state(process_state_kind(&record.state)),
                         kernel_process_protocol_owner(record.stack_owner_cpu),
-                        kernel_process_protocol_reason(process_wait_reason(&record.wait)),
+                        kernel_process_protocol_reason(process_wait_reason(&record.state)),
                         kernel_process_protocol_parent(record));
                 }
                 intrusive_view_release(slot_view);
@@ -1627,7 +1627,7 @@ fn scheduled_process_next_slot(slot: usize) -> ProcessSlotCursor !{unsafe} {
 fn scheduled_process_record_state_locked(guard: borrow ProcessRunGuard[lock],
                                          slot: usize) -> ProcessSlotState
         !{unsafe} {
-    return scheduled_process_record_locked(guard, slot).state;
+    return process_state_kind(&scheduled_process_record_locked(guard, slot).state);
 }
 
 // The same two questions asked through a HANDLE, which carries the
@@ -1649,19 +1649,19 @@ fn scheduled_process_record_state_locked(guard: borrow ProcessRunGuard[lock],
 fn scheduled_process_state_of_locked(guard: borrow ProcessRunGuard[lock],
                                      handle: ProcessHandle) -> ProcessSlotState
         !{unsafe} {
-    return scheduled_process_record_of_locked(guard, handle).state;
+    return process_state_kind(&scheduled_process_record_of_locked(guard, handle).state);
 }
 
 fn scheduled_process_record_wait_reason_locked(
         guard: borrow ProcessRunGuard[lock], slot: usize) -> ProcessWaitReason
         !{unsafe} {
-    return process_wait_reason(&scheduled_process_record_locked(guard, slot).wait);
+    return process_wait_reason(&scheduled_process_record_locked(guard, slot).state);
 }
 
 fn scheduled_process_wait_reason_of_locked(
         guard: borrow ProcessRunGuard[lock], handle: ProcessHandle)
         -> ProcessWaitReason !{unsafe} {
-    return process_wait_reason(&scheduled_process_record_of_locked(guard, handle).wait);
+    return process_wait_reason(&scheduled_process_record_of_locked(guard, handle).state);
 }
 
 // GitHub issue #392 and the multicore follow-up: syscall.tkb's per-process
@@ -1856,7 +1856,7 @@ struct ProcessRecordScalarSnapshot {
 private inline fn scheduled_process_scalar_copy(record: borrow &mut ProcessRecord)
         -> ProcessRecordScalarSnapshot {
     let mut snapshot: ProcessRecordScalarSnapshot = {
-        record.pid, record.state, process_wait_reason(&record.wait),
+        record.pid, process_state_kind(&record.state), process_wait_reason(&record.state),
         record.saved_sp, record.stack_run
     };
     return snapshot;
@@ -2024,7 +2024,7 @@ private fn scheduled_process_diagnostic_record_fill(
     snapshot.pid = record.pid;
     snapshot.session_id = record.session_id;
     snapshot.ppid = parent_pid;
-    match record.state {
+    match process_state_kind(&record.state) {
         ProcessSlotState::Free => { snapshot.state = 0x3F; }
         ProcessSlotState::Ready => { snapshot.state = 0x52; }
         ProcessSlotState::Running => { snapshot.state = 0x52; }
@@ -2154,7 +2154,7 @@ fn kernel_process_monitor_proc(stopped: borrow MachineStopped[&kernel_world_stop
     kernel_boot_log(" ppid="); uart_put_udec(snapshot.ppid);
     kernel_boot_log(" state="); uart_putc(snapshot.state);
     kernel_boot_log(" wait=");
-    match process_wait_reason(&scheduled_process_record_stopped(stopped, slot).wait) {
+    match process_wait_reason(&scheduled_process_record_stopped(stopped, slot).state) {
         ProcessWaitReason::None => { uart_put_udec(0); }
         ProcessWaitReason::UartRx => { uart_put_udec(1); }
         ProcessWaitReason::ChildExit => { uart_put_udec(2); }
@@ -2743,8 +2743,7 @@ private fn scheduled_process_record_reset(guard: borrow ProcessRunGuard[lock],
     record.command_line_length = 0;
     record.saved_sp = 0;
     record.stack_owner_cpu = PROCESS_STACK_UNOWNED;
-    record.state = ProcessSlotState::Free;
-    process_wait_clear(&record.wait);
+    process_state_free(&record.state);
     record.pending_block_reason = ProcessWaitReason::None;
     record.deadline_ticks = 0;
     record.signal_mask = 0;
@@ -3271,12 +3270,8 @@ private fn scheduled_process_alloc_finish(slot: usize, generation: usize @ proce
     // through the same branch, and it IS a real process about to run init.
     // The boot then died at the first execve instead. The flag has to name
     // the property rather than the caller.
-    if (runnable_now) {
-        scheduled_process_record_owned(creating).state = ProcessSlotState::Ready;
-    } else {
-        scheduled_process_record_owned(creating).state =
-            ProcessSlotState::Constructing;
-    }
+    process_state_new(&scheduled_process_record_owned(creating).state,
+                      runnable_now);
     let mut handle: ProcessHandle = { slot, generation };
     { let mut __creating_result: ScheduledProcessAllocResult = ScheduledProcessAllocResult::Allocated(handle); scheduled_process_owner_drop(creating); return __creating_result; }
 }
@@ -3465,7 +3460,7 @@ private fn scheduled_process_finish_clone(
     scheduled_process_state_drop(state);
     scheduled_process_record_owned(owner).saved_sp =
         frame_ref_address(frame);
-    scheduled_process_record_owned(owner).state = ProcessSlotState::Running;
+    process_state_run(&scheduled_process_record_owned(owner).state);
     return scheduled_process_running_state(owner);
 }
 
@@ -3474,7 +3469,7 @@ private fn scheduled_process_cancel_clone(
         state: sink ScheduledProcessState[process, ProcessState::Constructing])
         -> ScheduledProcessState[process, ProcessState::Exited] !{changes_witness_ProcessCurrent} {
     scheduled_process_state_drop(state);
-    scheduled_process_record_owned(owner).state = ProcessSlotState::Exited;
+    process_state_exit(&scheduled_process_record_owned(owner).state);
     return scheduled_process_exited_state(owner);
 }
 
@@ -3592,8 +3587,7 @@ fn scheduled_process_start(
     // has run something" is recorded.
     kernel_process_cpus_that_ran =
         kernel_process_cpus_that_ran | (1 << cpu_id());
-    scheduled_process_record_owned(owner).state =
-        ProcessSlotState::Running;
+    process_state_start(&scheduled_process_record_owned(owner).state);
     let mut running:
         ScheduledProcessState[process, ProcessState::Running] =
         { owner.pool_index };
@@ -3605,8 +3599,7 @@ fn scheduled_process_yield(
         state: sink ScheduledProcessState[process, ProcessState::Running])
         -> ScheduledProcessState[process, ProcessState::Ready] !{changes_witness_ProcessCurrent} {
     scheduled_process_state_drop(state);
-    scheduled_process_record_owned(owner).state =
-        ProcessSlotState::Ready;
+    process_state_yield(&scheduled_process_record_owned(owner).state);
     let mut ready: ScheduledProcessState[process, ProcessState::Ready] =
         { owner.pool_index };
     return ready;
@@ -3621,16 +3614,7 @@ fn scheduled_process_block(
         reason: ProcessWaitReason)
         -> ScheduledProcessState[process, ProcessState::Blocked] !{changes_witness_ProcessCurrent} {
     scheduled_process_state_drop(state);
-    scheduled_process_record_owned(owner).state =
-        ProcessSlotState::Blocked;
-    match process_wait_publish(
-            &scheduled_process_record_owned(owner).wait, reason,
-            scheduled_process_record_owned(owner).state) {
-        ProcessWaitPublish::Published => {}
-        // Set just above, so this is the record changing under a caller that
-        // does not hold the run lock.
-        ProcessWaitPublish::Refused => { kernel_invariant_stop(); }
-    }
+    process_state_block(&scheduled_process_record_owned(owner).state, reason);
     workload_profile_note_block(
         scheduled_process_pid_of_slot(owner.pool_index));
     let mut blocked: ScheduledProcessState[process, ProcessState::Blocked] =
@@ -3642,7 +3626,7 @@ fn scheduled_process_block(
 // that led to it, which a rerun of the syscall reads as "first entry" only
 // when nothing is left of the last one.
 private fn scheduled_process_wait_settle(record: borrow &mut ProcessRecord) {
-    process_wait_clear(&record.wait);
+    process_state_settle(&record.state);
     record.pending_block_reason = ProcessWaitReason::None;
 }
 
@@ -3653,6 +3637,7 @@ fn scheduled_process_wake(
         -> ScheduledProcessState[process, ProcessState::Ready] {
     scheduled_process_wait_settle(
         scheduled_process_record_owned(owner));
+    process_state_wake(&scheduled_process_record_owned(owner).state);
     return scheduled_process_wake_ready(owner, state);
 }
 
@@ -3665,8 +3650,8 @@ fn scheduled_process_wake_keeping_wait4(
         state: sink ScheduledProcessState[process, ProcessState::Blocked],
         child_pid: usize)
         -> ScheduledProcessState[process, ProcessState::Ready] {
-    process_wait_keep_continuation(
-        &scheduled_process_record_owned(owner).wait, child_pid);
+    process_state_wake_keeping_wait4(
+        &scheduled_process_record_owned(owner).state, child_pid);
     return scheduled_process_wake_ready(owner, state);
 }
 
@@ -3675,8 +3660,6 @@ private fn scheduled_process_wake_ready(
         state: sink ScheduledProcessState[process, ProcessState::Blocked])
         -> ScheduledProcessState[process, ProcessState::Ready] {
     scheduled_process_state_drop(state);
-    scheduled_process_record_owned(owner).state =
-        ProcessSlotState::Ready;
     workload_profile_note_wakeup(
         scheduled_process_pid_of_slot(owner.pool_index));
     let mut ready: ScheduledProcessState[process, ProcessState::Ready] =
@@ -3689,8 +3672,7 @@ fn scheduled_process_exit(
         state: sink ScheduledProcessState[process, ProcessState::Running])
         -> ScheduledProcessState[process, ProcessState::Exited] !{changes_witness_ProcessCurrent} {
     scheduled_process_state_drop(state);
-    scheduled_process_record_owned(owner).state =
-        ProcessSlotState::Exited;
+    process_state_exit(&scheduled_process_record_owned(owner).state);
     let mut exited: ScheduledProcessState[process, ProcessState::Exited] =
         { owner.pool_index };
     return exited;
@@ -3815,8 +3797,9 @@ private fn scheduled_process_probe_publish_ready(handle: ProcessHandle)
     let guard = process_run_lock();
     scheduled_process_record_locked(guard, handle.pool_index).affinity_mask =
         1 << KERNEL_MAX_CORES;
-    scheduled_process_record_locked(guard, handle.pool_index).state =
-        ProcessSlotState::Ready;
+    process_state_probe_set(
+        &scheduled_process_record_locked(guard, handle.pool_index).state,
+        ProcessSlotState::Ready);
     process_run_unlock(guard);
 }
 
@@ -8987,19 +8970,16 @@ private fn kernel_process_exit_continuation_probe(parent: ProcessHandle) -> bool
             let ready = scheduled_process_yield(owner, running);
             // A Ready parent that a child's exit woke on a CPU that could not
             // run it: the continuation the probe wants to observe.
-            match process_wait_publish(
-                    &scheduled_process_record_of_locked(guard, parent).wait,
-                    ProcessWaitReason::ChildExit,
-                    scheduled_process_record_of_locked(guard, parent).state) {
-                ProcessWaitPublish::Published => {}
-                ProcessWaitPublish::Refused => {
+            match process_state_probe_ready_wait4(
+                    &scheduled_process_record_of_locked(guard, parent).state,
+                    child_pid) {
+                ProcessWaitKeep::Kept => {}
+                ProcessWaitKeep::Refused => {
                     scheduled_process_release(owner, ready);
                     process_run_unlock(guard);
                     return false;
                 }
             }
-            process_wait_keep_continuation(
-                &scheduled_process_record_of_locked(guard, parent).wait, child_pid);
             scheduled_process_release(owner, ready);
         }
     }
@@ -9071,12 +9051,14 @@ private fn kernel_process_clone_unselectable_probe(
     let protected: bool = kernel_process_clone_unselectable_locked(guard, parent);
     // Negative control: reproduce the old early-Ready publication under the
     // guard, so no peer can actually restore the intentionally invalid frame.
-    scheduled_process_record_of_locked(guard, execution_state[execution_cpu_index()].current_handle).state =
-        ProcessSlotState::Ready;
+    process_state_probe_set(
+        &scheduled_process_record_of_locked(guard, execution_state[execution_cpu_index()].current_handle).state,
+        ProcessSlotState::Ready);
     let detected: bool =
         kernel_process_clone_unselectable_locked(guard, parent) == false;
-    scheduled_process_record_of_locked(guard, execution_state[execution_cpu_index()].current_handle).state =
-        ProcessSlotState::Constructing;
+    process_state_probe_set(
+        &scheduled_process_record_of_locked(guard, execution_state[execution_cpu_index()].current_handle).state,
+        ProcessSlotState::Constructing);
     process_run_unlock(guard);
     let restored = view ProcessCurrent[process, ProcessState::Constructing];
     if (protected && detected) { return ProcessCloneUnselectable::Protected(restored); }
@@ -10008,7 +9990,7 @@ private fn kernel_process_pending_wait4_child(guard: borrow ProcessRunGuard[lock
         return ProcessNextReadyResult::Missing;
     }
     let wanted: usize =
-        process_wait_woken_by(&scheduled_process_record_of_locked(guard, parent).wait);
+        process_wait_woken_by(&scheduled_process_record_of_locked(guard, parent).state);
     let mut cursor: ProcessHandle =
         scheduled_process_record_of_locked(guard, parent).first_child;
     let mut remaining: usize = scheduled_process_pool_live_count() + 1;
@@ -10602,7 +10584,8 @@ fn kernel_process_clone_evidence(current_authority: borrow ProcessCurrent[curren
            scheduled_process_record_current(current_authority)
                .has_first_child ==
                false &&
-           scheduled_process_record_current(current_authority).state ==
+           process_state_kind(
+               &scheduled_process_record_current(current_authority).state) ==
                ProcessSlotState::Running &&
            scheduled_process_record_current(current_authority)
                .saved_sp !=

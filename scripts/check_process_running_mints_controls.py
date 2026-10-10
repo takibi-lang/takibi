@@ -32,6 +32,13 @@ fn unreviewed(owner: borrow ScheduledProcessOwner[process],
     scheduled_process_record_owned(owner).state = ProcessSlotState::Exited;
 }
 ''',
+        'new unmarked phase transition': original + '''
+fn unreviewed(owner: borrow ScheduledProcessOwner[process],
+        state: sink ScheduledProcessState[process, ProcessState::Running]) {
+    scheduled_process_state_drop(state);
+    process_state_exit(&scheduled_process_record_owned(owner).state);
+}
+''',
     }
     for name, changed in controls.items():
         assert changed != original, name

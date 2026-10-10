@@ -96,7 +96,10 @@ def source_facts(source):
         leaves_phase = re.search(
             r'\bsink\s+ScheduledProcessState\[\w+,\s*'
             r'ProcessState::(?:Running|Constructing)\]', header)
-        changes_state = re.search(r'\.state\s*=(?!=)', body)
+        # The record's state changes only through process_wait.tkb's
+        # transitions; process_state_kind is the one reader.
+        changes_state = re.search(
+            r'\.state\s*=(?!=)|\bprocess_state_(?!kind\b)\w+\s*\(', body)
         if (writes or name in {"kernel_process_clone_context_install",
                                "kernel_process_clone_unselectable_probe",
                                "scheduled_process_release_every_process"}

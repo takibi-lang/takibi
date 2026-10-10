@@ -123,10 +123,14 @@ WINDOWS = {
                  "fn kernel_process_block_wait4(current_authority: ProcessCurrent[current_process, ProcessState::Running], current: borrow FrameRef[process])\n"
                  "        -> BlockSwitch {\n",
                  False),
-        # wait4's decision lives in pending_block_reason now, and only a
-        # block publishes a wait, so an abandoned block leaves nothing. The
-        # reverted kernel publishes the decision again, as the record's
-        # single wait_reason field did, and drops the clear.
+        # wait4's decision lives in pending_block_reason now, and the wait
+        # is the payload of the state that has it, so an abandoned block
+        # leaves nothing and no transition can leave a Running process
+        # holding ChildExit. The reverted kernel needs a writer inside the
+        # state cell's own file to put the marker back -- the boundary that
+        # now prevents it -- and drops the clear. The marker names no child,
+        # so after the yield the process is Ready with a wait4 continuation
+        # nobody can satisfy, as before.
         "check": [
             ("kernel/syscall.tkb",
              "            if (reason == ProcessWaitReason::ChildExit) {\n"
@@ -134,15 +138,21 @@ WINDOWS = {
              "                    retry_guard, ProcessWaitReason::None, 0);\n"
              "            }\n",
              ""),
+            ("kernel/process_wait.tkb",
+             "// A wake leaves nothing pending.\n",
+             "fn process_state_reverted_mark(cell: &mut ProcessStateCell) {\n"
+             "    (*cell).value = ProcessRecordState::Resuming(0);\n"
+             "}\n"
+             "\n"
+             "// A wake leaves nothing pending.\n"),
             ("kernel/process.tkb",
              "            .pending_block_reason = reason;\n",
              "            .pending_block_reason = reason;\n"
-             "        // The reverted kernel says it is Blocked, which it is not.\n"
-             "        match process_wait_publish(\n"
-             "                &scheduled_process_record_current(current_authority).wait, reason,\n"
-             "                ProcessSlotState::Blocked) {\n"
-             "            ProcessWaitPublish::Published => {}\n"
-             "            ProcessWaitPublish::Refused => {}\n"
+             "        // The reverted kernel marks a wait4 continuation on a\n"
+             "        // process that is still Running.\n"
+             "        if (reason == ProcessWaitReason::ChildExit) {\n"
+             "            process_state_reverted_mark(\n"
+             "                &scheduled_process_record_current(current_authority).state);\n"
              "        }\n"),
         ],
     },

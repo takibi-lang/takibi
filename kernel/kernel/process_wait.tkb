@@ -1,30 +1,28 @@
-// What a process is waiting for, and the one child whose exit woke it
+// A process record's scheduling state and what it waits for, as one value
 // (GitHub issue #653).
 //
-// Both used to be plain fields of ProcessRecord that any path could write.
-// wait_reason was written for a process that was still Running when wait4
-// only meant to block (#603 path 2), and last_child_pid by every child's
-// exit on whichever CPU it ran on, so a sibling's exit retargeted a
-// parent's pending wait4 (#633). The fields are private here, so the
-// compiler refuses a write from anywhere else: a record's wait state changes
-// only through the four functions below, and those are called from
-// scheduled_process_block, scheduled_process_wake and the few places that
-// resume or keep a continuation. What the compiler does NOT check is that
-// those callers hold the right process state; that needs the state token
-// this file cannot see (it is declared in process.tkb, which imports this
-// one), and stays with review of those few call sites.
+// The wait used to be a field beside the state, and any path could leave
+// one without the other: wait4 wrote a wait reason into a Running process
+// when it only meant to block (#603 path 2), and every child's exit wrote
+// the parent's last_child_pid from whichever CPU it ran on, so a sibling
+// retargeted a pending wait4 (#633). Now the wait is the payload of the
+// state that has it, so a Running process carries none by construction:
 //
-// A published wait belongs to a Blocked process. The one exception is a
-// wait4 continuation: a parent woken on a CPU that cannot run it stays
-// Ready with ChildExit and the pid of the child that woke it, until some
-// CPU resumes it.
+//   Blocked(reason)    blocked, waiting for `reason`
+//   ReadyWait4(child)  a wait4 parent woken by `child`'s exit on a CPU that
+//                      could not run it; its wait4 result is still owed
+//   Resuming(child)    the same parent after a CPU started it, until that
+//                      CPU settles the continuation; a refused start yields
+//                      it back to ReadyWait4, so no other CPU reaps the
+//                      child while its exit is still on its kernel stack
 //
-// Current limitations (2026-09-30):
-// - THE CELL KNOWS NO PROCESS STATE BUT WHAT IT IS TOLD. process_wait_publish
-//   refuses a Running, Free, Exited or Constructing caller, and believes the
-//   state it is given; a caller that lies passes. The trace replay
-//   (scripts/validate_protocol_trace.py) checks the recorded result: a
-//   Running process holds no published wait on any lane that runs it.
+// Readers ask through process_state_kind and process_wait_reason, which
+// answer as the two fields did: ReadyWait4 is Ready and Resuming is
+// Running, both with ChildExit. The fields are private, so the transitions
+// below are the only writers; which transition a caller may make is the
+// state token's business in process.tkb.
+//
+// Current limitations (2026-10-10):
 // - THE CALLER SERIALIZES. Every write is made holding the process-run
 //   lock, and a reader that does not hold it sees a value that may be one
 //   step old, which the two readers that do so (the DDB and crash
@@ -37,65 +35,170 @@ enum ProcessWaitReason: u8 {
     None; UartRx; ChildExit; NetRx; Deadline; Signal; UartTx;
 }
 
-// The process record's scheduling state, here because publish is asked which
-// one the caller is in.
+// The kind of state, as readers compare it.
 enum ProcessSlotState: u8 { Free; Ready; Running; Blocked; Exited; Constructing; }
 
-// A wait belongs to a process that is Blocked, or Ready holding a wait4
-// continuation. publish is told the caller's state and refuses any other, so
-// a path that publishes for a Running process stops instead of leaving a
-// marker the scheduler will later trust (#603). The caller supplies the
-// state it read; this is a stop for a stray caller, not a proof.
-must_use variant ProcessWaitPublish {
-    Published;
+// Free is first: a zeroed record is a free one.
+variant ProcessRecordState {
+    Free;
+    Ready;
+    Running;
+    Blocked(ProcessWaitReason);
+    Exited;
+    Constructing;
+    ReadyWait4(usize);
+    Resuming(usize);
+}
+
+struct ProcessStateCell {
+    private value: ProcessRecordState;
+}
+
+must_use variant ProcessWaitKeep {
+    Kept;
     Refused;
 }
 
-struct ProcessWaitCell {
-    private reason: ProcessWaitReason;
-    // The pid of the child whose exit woke a wait4 that could not resume at
-    // once; meaningful only while reason is ChildExit and the process is
-    // Ready. 0 is "none": no process has pid 0.
-    private woken_by: usize;
+fn process_state_kind(cell: &ProcessStateCell) -> ProcessSlotState {
+    match (*cell).value {
+        ProcessRecordState::Free => { return ProcessSlotState::Free; }
+        ProcessRecordState::Ready => { return ProcessSlotState::Ready; }
+        ProcessRecordState::Running => { return ProcessSlotState::Running; }
+        ProcessRecordState::Blocked(_) => { return ProcessSlotState::Blocked; }
+        ProcessRecordState::Exited => { return ProcessSlotState::Exited; }
+        ProcessRecordState::Constructing => {
+            return ProcessSlotState::Constructing;
+        }
+        ProcessRecordState::ReadyWait4(_) => { return ProcessSlotState::Ready; }
+        ProcessRecordState::Resuming(_) => { return ProcessSlotState::Running; }
+    }
 }
 
-// The process has been made Blocked for `reason`; `state` is the state the
-// record is in now.
-fn process_wait_publish(cell: &mut ProcessWaitCell,
-                        reason: ProcessWaitReason,
-                        state: ProcessSlotState) -> ProcessWaitPublish {
-    match state {
-        ProcessSlotState::Blocked => {}
-        ProcessSlotState::Ready => {}
-        ProcessSlotState::Free => { return ProcessWaitPublish::Refused; }
-        ProcessSlotState::Running => { return ProcessWaitPublish::Refused; }
-        ProcessSlotState::Exited => { return ProcessWaitPublish::Refused; }
-        ProcessSlotState::Constructing => {
-            return ProcessWaitPublish::Refused;
+fn process_wait_reason(cell: &ProcessStateCell) -> ProcessWaitReason {
+    match (*cell).value {
+        ProcessRecordState::Blocked(reason) => { return reason; }
+        ProcessRecordState::ReadyWait4(_) => {
+            return ProcessWaitReason::ChildExit;
         }
+        ProcessRecordState::Resuming(_) => {
+            return ProcessWaitReason::ChildExit;
+        }
+        _ => { return ProcessWaitReason::None; }
     }
-    (*cell).reason = reason;
-    (*cell).woken_by = 0;
-    return ProcessWaitPublish::Published;
+}
+
+// The pid of the child whose exit woke a pending wait4; 0 for none (no
+// process has pid 0).
+fn process_wait_woken_by(cell: &ProcessStateCell) -> usize {
+    match (*cell).value {
+        ProcessRecordState::ReadyWait4(child) => { return child; }
+        ProcessRecordState::Resuming(child) => { return child; }
+        _ => { return 0; }
+    }
+}
+
+// The slot is free again.
+fn process_state_free(cell: &mut ProcessStateCell) {
+    (*cell).value = ProcessRecordState::Free;
+}
+
+// A new record: Ready when it may run at once, otherwise Constructing.
+fn process_state_new(cell: &mut ProcessStateCell, runnable_now: bool) {
+    if (runnable_now) {
+        (*cell).value = ProcessRecordState::Ready;
+    } else {
+        (*cell).value = ProcessRecordState::Constructing;
+    }
+}
+
+// A clone's frame is installed and it runs.
+fn process_state_run(cell: &mut ProcessStateCell) {
+    (*cell).value = ProcessRecordState::Running;
+}
+
+fn process_state_exit(cell: &mut ProcessStateCell) {
+    (*cell).value = ProcessRecordState::Exited;
+}
+
+// A CPU takes a Ready process. A pending wait4 continuation goes with it
+// until process_state_settle.
+fn process_state_start(cell: &mut ProcessStateCell) {
+    match (*cell).value {
+        ProcessRecordState::ReadyWait4(child) => {
+            (*cell).value = ProcessRecordState::Resuming(child);
+        }
+        _ => { (*cell).value = ProcessRecordState::Running; }
+    }
+}
+
+// The process gives up the CPU. A continuation not yet settled is owed
+// again.
+fn process_state_yield(cell: &mut ProcessStateCell) {
+    match (*cell).value {
+        ProcessRecordState::Resuming(child) => {
+            (*cell).value = ProcessRecordState::ReadyWait4(child);
+        }
+        _ => { (*cell).value = ProcessRecordState::Ready; }
+    }
+}
+
+// The one place a process becomes Blocked: state and reason change
+// together.
+fn process_state_block(cell: &mut ProcessStateCell, reason: ProcessWaitReason) {
+    (*cell).value = ProcessRecordState::Blocked(reason);
+}
+
+// A wake leaves nothing pending.
+fn process_state_wake(cell: &mut ProcessStateCell) {
+    (*cell).value = ProcessRecordState::Ready;
 }
 
 // A ChildExit waiter woken by `child` that cannot be resumed now: it stays
-// Ready with its wait4 pending, and names the child. The first waker wins.
-fn process_wait_keep_continuation(cell: &mut ProcessWaitCell, child: usize) {
-    if ((*cell).woken_by == 0) { (*cell).woken_by = child; }
+// Ready with its wait4 pending, and names the child.
+fn process_state_wake_keeping_wait4(cell: &mut ProcessStateCell, child: usize) {
+    (*cell).value = ProcessRecordState::ReadyWait4(child);
 }
 
-// The process runs again, or is woken for any other reason: nothing is
-// pending.
-fn process_wait_clear(cell: &mut ProcessWaitCell) {
-    (*cell).reason = ProcessWaitReason::None;
-    (*cell).woken_by = 0;
+// A pending wait4 continuation is consumed: a Ready parent stays Ready and a
+// started one is plainly Running. A Blocked wait loses its reason, as a wake
+// is about to end it.
+fn process_state_settle(cell: &mut ProcessStateCell) {
+    match (*cell).value {
+        ProcessRecordState::ReadyWait4(_) => {
+            (*cell).value = ProcessRecordState::Ready;
+        }
+        ProcessRecordState::Resuming(_) => {
+            (*cell).value = ProcessRecordState::Running;
+        }
+        ProcessRecordState::Blocked(_) => {
+            (*cell).value = ProcessRecordState::Blocked(ProcessWaitReason::None);
+        }
+        _ => {}
+    }
 }
 
-fn process_wait_reason(cell: &ProcessWaitCell) -> ProcessWaitReason {
-    return (*cell).reason;
+// Boot probe only: a Ready process given a wait4 continuation without
+// having blocked, the state a child's exit leaves on a CPU that cannot run
+// its parent. Anything but plain Ready is refused.
+fn process_state_probe_ready_wait4(cell: &mut ProcessStateCell, child: usize)
+        -> ProcessWaitKeep {
+    match (*cell).value {
+        ProcessRecordState::Ready => {
+            (*cell).value = ProcessRecordState::ReadyWait4(child);
+            return ProcessWaitKeep::Kept;
+        }
+        _ => { return ProcessWaitKeep::Refused; }
+    }
 }
 
-fn process_wait_woken_by(cell: &ProcessWaitCell) -> usize {
-    return (*cell).woken_by;
+// Boot probe only: the negative control that republishes a Constructing
+// record as Ready, and puts it back.
+fn process_state_probe_set(cell: &mut ProcessStateCell, kind: ProcessSlotState) {
+    match kind {
+        ProcessSlotState::Ready => { (*cell).value = ProcessRecordState::Ready; }
+        ProcessSlotState::Constructing => {
+            (*cell).value = ProcessRecordState::Constructing;
+        }
+        _ => {}
+    }
 }
