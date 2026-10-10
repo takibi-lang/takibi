@@ -1,0 +1,48 @@
+# Files allowed raw access under --confine-raw-authority (GitHub issue #637
+# stage 3). A ratchet: a file is removed when its raw sites are gone, and
+# a file is added only by a reviewed decision on #637. Categories from the
+# 2026-10-10 review; the goal is region axioms, compiler built-ins and the
+# handwritten assembly as the whole trusted base.
+
+# K: mint to keep for now; shrinks with #637 steps C, A, B
+kernel/arch/arm64/kernel/frame_ref.tkb
+kernel/arch/arm64/mm/mmu.tkb
+kernel/boot/fdt.tkb
+kernel/drivers/block/memory.tkb
+kernel/drivers/block/virtio_blk_dma.tkb
+kernel/drivers/block/virtio_blk.tkb
+kernel/drivers/net/rp1_gem_dma.tkb
+kernel/drivers/net/rp1_gem.tkb
+kernel/drivers/net/virtio_net.tkb
+kernel/lib/atomic_word.tkb
+kernel/lib/freelist.tkb
+kernel/lib/intrusive_pool.tkb
+kernel/lib/pool_lock.tkb
+kernel/lib/spinlock.tkb
+kernel/mm/page.tkb
+kernel/mm/user_memory.tkb
+kernel/platform/qemu/intc.tkb
+kernel/platform/qemu/timer_irq.tkb
+kernel/platform/qemu/uart.tkb
+kernel/platform/rpi5/intc.tkb
+kernel/platform/rpi5/pcie.tkb
+kernel/platform/rpi5/system_timer_dtb.tkb
+kernel/platform/rpi5/timer_irq.tkb
+kernel/platform/rpi5/uart.tkb
+
+# S: to be split into a small mint file and rewritten code
+kernel/kernel/process.tkb
+kernel/platform/rpi5/usb_xhci.tkb
+
+# R: to be rewritten to authority-derived access, then removed
+kernel/fs/elf64.tkb
+kernel/fs/ext2/ext2.tkb
+kernel/init/test_driver.tkb
+kernel/mm/address_space.tkb
+kernel/net/arp.tkb
+kernel/net/icmp.tkb
+kernel/net/tcp.tkb
+
+# D: deferred by decision (#613 for log; stopped-machine reporters for exception_evidence)
+kernel/arch/arm64/kernel/exception_evidence.tkb
+kernel/printk/log.tkb
