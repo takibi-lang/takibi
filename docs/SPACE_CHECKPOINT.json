@@ -2,8 +2,8 @@
   "date": "2026-10-10",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "cd181ac47e8e8beb8bb7adc56949ead6b1ac7e109285474e0da3624f5c2bfdd6",
-  "workload": "Completed shared bounded order-contract compiler prototype, normal QEMU and RPi5 linked kernels against e8a9989d, and native dynamic metadata/slice/RegionSlot-Place round trip.",
+  "source_sha256": "289057d7c07c3e737a86d10965280e785174115bb6680bc6fe53141b41dd8fa3",
+  "workload": "Completed shared bounded order-contract compiler prototype, normal QEMU and RPi5 linked kernels against 0157d2ec, and native dynamic metadata/slice/RegionSlot-Place round trip.",
   "evidence": [
     "docs/BOUNDS_CONTRACT_SPACE_2026-10-10.md",
     "docs/PROCESS_STATE_PAYLOAD_SPACE_2026-10-10.md",
