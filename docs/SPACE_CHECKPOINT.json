@@ -1,9 +1,9 @@
 {
   "date": "2026-10-10",
-  "event": "milestone",
-  "decision": "measured",
-  "source_sha256": "a6f7077303eaa18e140b11b5c022d2eaf91a6f758225c09f8df00e7080a5309b",
-  "workload": "GitHub issue #686: the peer-exit placement becomes a ProcessPin kept in ProcessRecord's guarded_by place until reap; compiler place_is_full and Place-of-view fixes. Linked kernels and the ProcessRecord layout compared against 39994e0e. Also a boot-probe timing fix (ext2 mutation contention waits by peer ticks), which changes no storage.",
+  "event": "incremental",
+  "decision": "reuse",
+  "source_sha256": "e6ebd78121bd37281d1d46d8ed14fe7308718483003a3c122b4cadd2ff25ea53",
+  "workload": "#637 stage 3 ratchet: the production kernels compile with --confine-raw-authority and kernel/RAW_MINT_FILES. Build flags only; no source of the kernel image changes, so the #686 measurement (docs/PROCESS_PIN_SPACE_2026-10-10.md) is reused.",
   "evidence": [
     "docs/PROCESS_PIN_SPACE_2026-10-10.md",
     "docs/BOUNDS_CONTRACT_SPACE_2026-10-10.md",
@@ -40,6 +40,6 @@
     "docs/DMA_TRANSMIT_2026-10-08.md",
     "docs/LITERAL_SLICE_SPACE_2026-10-10.md"
   ],
-  "assessment": "ProcessRecord stays 1832 bytes; linked text +608 B (QEMU) / +640 B (RPi5), including 192 B for the ext2 probe's peer-tick wait; data and BSS unchanged; QEMU usable_ram_start +32 KiB (8 allocator pages) from code growth crossing a boundary; RPi5 span unchanged. Accepted.",
+  "assessment": "Confinement is a compile-time check with no codegen effect; linked kernels as recorded for #686.",
   "next_trigger": "Production runtime metadata extent migration, a stored allocator authority through array/place rules, or another completed kernel feature/stage requires fresh workload measurement. Any change to generated production code, storage or allocation invalidates this reuse."
 }
