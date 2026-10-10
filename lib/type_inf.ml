@@ -2121,6 +2121,25 @@ let check_private_view_construction (loc : Ast.loc) name =
    first) and died only as an invalid-LLVM-IR internal error. *)
 let opaque_struct_names_all = ref StringSet.empty
 
+(* By-value construction of CPU authority includes arrays and tuples,
+   but not indirection or a function's result type. *)
+let contains_cpu_authority_value_ty (senv : senv) ty =
+  let rec contains seen ty = match repr ty with
+    | TStruct name | TIndexedStruct (name, _) ->
+        Some name = Per_cpu_registry.authority_name ()
+        || (not (StringSet.mem name seen)
+            && match StringMap.find_opt name senv with
+               | Some (fields, _, _) ->
+                   let seen = StringSet.add name seen in
+                   List.exists (fun (_, ty) -> contains seen (of_ast ty)) fields
+               | None -> false)
+    | TArray (ty, _) | TIo ty | TSingleton (ty, _) | TExists (_, _, _, ty) ->
+        contains seen ty
+    | TTuple ts -> List.exists (contains seen) ts
+    | _ -> false
+  in
+  contains StringSet.empty ty
+
 let check_private_type_construction (loc : Ast.loc) (target : Ast.type_expr) =
   let rec walk = function
     | Ast.TypeNamed n ->
@@ -3157,6 +3176,9 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
           "fixed DMA record values and pointers cannot be cast; use an authority operation"));
       check_resource_cast_away e.loc src_ty;
       check_private_type_construction e.loc target_ty;
+      if contains_cpu_authority_value_ty senv (of_ast target_ty) then
+        raise (TypeError (e.loc,
+          "a cast cannot construct CPU authority; use an initialized constructor"));
       if contains_stable_owner_value_ty src_ty
          || contains_stable_owner_value_ty (of_ast target_ty) then
         raise (TypeError (e.loc,
@@ -7097,6 +7119,37 @@ let check_undetermined_lets (fdef : Ast.func) (raw_locals : ty StringMap.t) =
   in
   List.iter go_stmt fdef.body
 
+(* An initializer-free local allocates bytes; it cannot establish the
+   existing CPU authority's mint contract. Inspect final binding types so
+   later inference, generic substitution and shadowing cannot hide it.
+   Pointer/slice/function values do not construct their pointees/results. *)
+let check_cpu_authority_initialization (senv : senv) (fdef : Ast.func) =
+  let rec arms xs = List.iter (function
+    | Ast.ArmVariant (_, _, _, body) | Ast.ArmWild body
+    | Ast.ArmIntLit (_, body) | Ast.ArmByteSliceLit (_, body) ->
+        List.iter stmt body) xs
+  and stmt (s : Ast.stmt) = match s.desc with
+    | Ast.Let (_, _, _, None, _) ->
+        (match !active_local_bindings with
+         | Some bindings ->
+             (match Local_bindings.ids_for_stmt bindings s with
+              | id :: _ ->
+                  (match Hashtbl.find_opt active_binding_types id with
+                   | Some ty when contains_cpu_authority_value_ty senv ty ->
+                       raise (TypeError (s.loc,
+                         "a local containing CPU authority requires an initializer; \
+                          uninitialized storage cannot mint CPU authority"))
+                   | _ -> ())
+              | [] -> ())
+         | None -> ())
+    | Ast.Block body | Ast.UnsafeBlock body | Ast.While (_, body)
+    | Ast.For (_, _, _, _, body) | Ast.ForEach (_, _, body) -> List.iter stmt body
+    | Ast.If (_, yes, no) -> List.iter stmt yes; List.iter stmt no
+    | Ast.Match (_, xs) | Ast.LetMatch (_, _, _, _, xs) -> arms xs
+    | _ -> ()
+  in
+  List.iter stmt fdef.body
+
 (* Recover only at the function body's outer statement boundary. A failed
    statement keeps the environment produced by every preceding successful
    statement. A failed let additionally installs a best-effort binding so a
@@ -7207,6 +7260,7 @@ let infer_func ~key senv eenv fenv genv (fdef : Ast.func) : func_info =
       (infer_top_level_stmt_resilient senv eenv fenv ret_ty)
       (init_env, StringMap.empty) fdef.body
     in
+    check_cpu_authority_initialization senv fdef;
     check_undetermined_lets fdef raw_locals;
     List.iter (fun site ->
       if site.overflow_lhs_facts = None then

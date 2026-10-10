@@ -1,5 +1,33 @@
 # takibi Engineering History
 
+## 2026-10-10: CPU authority cannot be minted by uninitialized locals
+
+Issue #738 reproduced a two-file consumer declaring an uninitialized CpuHere
+and reaching a per-CPU store without the reviewed mint. Mutable locals without
+initializers allocate stack bytes, not a guaranteed zero authority. Existing
+privacy and per-CPU indexing tests missed this construction path.
+
+The checker now examines every initializer-free local's final resolved binding
+type after function inference, including arrays, tuples, generic substitutions
+and nested or unsafe scopes. Binding IDs keep shadowed declarations separate;
+later constraints cannot hide an initially undetermined authority. This uses
+the existing cpu_authority contract, adds no generic opaque construction rule,
+and changes neither affine weakening nor CPU freshness across preemption.
+Pointers, references, slices and function pointers do not construct their
+pointees/results; ordinary storage and initialized mints remain legal.
+
+Multi-file rejection tests and LLVM positives cover actual per-CPU access,
+initialized authority arrays and ordinary private storage. Independent CLI
+controls reproduce ordinary and generic acceptance with the old compiler and
+require both nonzero exit and the authority diagnostic after repair. The
+construction hole is excluded statically, including unsafe, without a new
+trusted mint or multicore model. Existing global/field/variant restrictions
+and private/complete literal checks cover aggregate and literal construction.
+The review also reproduced an integer cast forging usable CPU authority,
+because private cast checks applied to owned/opaque types but not this plain
+struct contract. Casts producing authority by value now fail in every file,
+with scalar and array regressions; general opaque affine default construction remains a separate design.
+
 ## 2026-10-10: Shared bounded runtime order contracts
 
 Issue #734's approved prototype added one finite order graph for singleton

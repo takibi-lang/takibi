@@ -23594,7 +23594,82 @@ let runtime_bounds_tests =
         }|}));
   ]
 
+(* Initializer-free locals cannot mint the existing CPU authority contract.
+   Distinct filenames exercise the real private-representation boundary. *)
+let cpu_authority_initialization_tests =
+  let api = "struct cpu_authority Cpu738 { private id: {0..<2 as usize}; }
+    struct per_cpu Store738 { value: usize; }
+    private let mut stores738: [Store738; 2];
+    fn read738(cpu: Cpu738) -> usize { return stores738[cpu].value; }
+    fn mint738(id: {0..<2 as usize}) -> Cpu738 {
+      let mut cpu: Cpu738 = { id }; return cpu;
+    }" in
+  let bad title body = Alcotest.test_case title `Quick
+      (expect_type_error_files "CPU authority requires an initializer"
+        ["api738.tkb", api; "consumer738.tkb", body]) in
+  [
+    bad "external scalar mint" "fn bad738() -> usize {
+      let mut cpu: Cpu738; return read738(cpu);
+    }";
+    bad "array of authorities" "fn bad738() { let mut cpus: [Cpu738; 2]; }";
+    bad "nested arrays" "fn bad738() { let mut cpus: [[Cpu738; 2]; 2]; }";
+    bad "tuple containing authority" "fn bad738() { let mut pair: (usize, Cpu738); }";
+    bad "nested tuple and array" "fn bad738() { let mut pair: (usize, [Cpu738; 2]); }";
+    bad "nested branch" "fn bad738(flag: bool) {
+      if (flag) { let mut cpu: Cpu738; } else { let mut cpu: Cpu738; }
+    }";
+    bad "unsafe does not mint" "fn bad738() !{unsafe} {
+      unsafe { let mut cpu: Cpu738; }
+    }";
+    bad "inferred type is checked after constraints" "fn bad738() -> usize {
+      let mut cpu; return read738(cpu);
+    }";
+    bad "generic substitution cannot mint" "fn blank738(T: type, arg: T) {
+      let mut forged: T;
+    }
+    fn bad738(cpu: Cpu738) { blank738(cpu); }";
+    bad "shadowed bindings retain declaration types" "fn bad738() {
+      { let mut cpu: Cpu738; } let mut cpu: usize;
+    }";
+    Alcotest.test_case "integer cast cannot mint external authority" `Quick
+      (expect_type_error_files "a cast cannot construct CPU authority"
+        ["api738.tkb", api;
+         "consumer738.tkb", "fn bad738(raw: usize) -> usize {
+           let mut cpu: Cpu738 = raw as Cpu738; return read738(cpu);
+         }"]);
+    Alcotest.test_case "defining file cannot cast authority into existence" `Quick
+      (expect_type_error "a cast cannot construct CPU authority"
+        (api ^ "fn bad738(raw: usize) { let mut cpu: Cpu738 = raw as Cpu738; }"));
+    Alcotest.test_case "array cast cannot mint authority" `Quick
+      (expect_type_error_files "a cast cannot construct CPU authority"
+        ["api738.tkb", api;
+         "consumer738.tkb", "fn bad738(raw: usize) {
+           let mut cpus: [Cpu738; 2] = raw as [Cpu738; 2];
+         }"]);
+    Alcotest.test_case "defining file cannot omit initialization" `Quick
+      (expect_type_error "CPU authority requires an initializer"
+        (api ^ "fn bad738() { let mut cpu: Cpu738; }"));
+    Alcotest.test_case "initialized authority reaches real store without traps" `Quick
+      (expect_trap_sites 0 (api ^ "fn good738() -> usize {
+        let mut cpu: Cpu738 = mint738(1); return read738(cpu);
+      }"));
+    Alcotest.test_case "ordinary storage and authority indirection remain legal" `Quick
+      (expect_codegen_ok (api ^ "struct Ordinary738 { private value: usize; }
+        fn good738() {
+          let mut ordinary: Ordinary738;
+          let mut pointer: *Cpu738;
+          let mut pointers: [*Cpu738; 2];
+          let mut slice: []Cpu738;
+        }"));
+    Alcotest.test_case "initialized array retains authority" `Quick
+      (expect_codegen_ok (api ^ "fn good738() -> usize {
+        let mut cpus: [Cpu738; 2] = { mint738(0), mint738(1) };
+        let mut cpu: Cpu738 = cpus[1]; return read738(cpu);
+      }"));
+  ]
+
 let named_groups_unisolated = [
+  "cpu-authority-initialization", cpu_authority_initialization_tests;
   "runtime-bounds", runtime_bounds_tests;
   "core",     core_tests;
   "parser",   parser_tests;

@@ -1700,6 +1700,15 @@ fn exec_args_take(cpu: CpuHere) -> Place(exists page: usize. PageOwner[page]) {
   private, of type `{0..<N as usize}`; N is the number of CPUs. Because the
   field is private, only the declaring file constructs one: that file is the
   mint, and it is trusted to hand out the CPU it is running on.
+- A local containing `cpu_authority` by value requires an initializer,
+  including arrays and tuples, in every scope and in the defining file.
+  The check uses the final inferred type after generic substitution.
+  `unsafe` does not exempt construction. Pointers, references, slices and
+  function pointers do not construct the authority they refer to or return;
+  this rule does not prohibit their initializer-free declarations.
+  A cast cannot construct CPU authority by value, including inside aggregates
+  or in its defining file. Ordinary storage and valid initialized authority
+  constructors are unchanged.
 - A `per_cpu` struct type appears in exactly one form, a global
   `private let mut g: [S; N];` with the authority's N and no initializer. A
   singleton global, a different length, a struct field, a variant payload,

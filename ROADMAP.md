@@ -105,16 +105,16 @@ where acceptance is settled; leave design investigations and unmet
 implementation gates parked. Prefer what A consumes at once -- fewer red
 allchecks, faster diagnosis -- and what finishes on its own.
 
-Done on 2026-10-10: #734's bounded shared order-contract prototype.
+Done on 2026-10-10: #734's bounded shared order-contract prototype and
+#738's initializer-free CPU authority construction fix.
 Production #252 allocator migration remains a separate design gate; the
 prototype adds no physical-span mint or stored-authority rule.
 
-1. **Soundness holes in existing contracts:** #738 (uninitialized locals
-   forge CPU authority, including by-value aggregate construction), #735
+1. **Soundness holes in existing contracts:** #735
    (uninitialized locals forge opaque affine frame handles; evaluate the
    general construction rule with A's mint route), then #729 (readonly
-   byte-slice and string-literal slices). Coordinate #738 with A's #704
-   and preemption preparation; initialization does not prove CPU freshness.
+   byte-slice and string-literal slices). Initialization does not prove
+   CPU freshness across preemption.
 2. **Fixed DMA lifecycle, finishing the drivers.** Every stage of one
    transfer in types, leaving one device-semantics declaration per driver
    and the platform bus translation as the only trusted parts.
