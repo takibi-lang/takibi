@@ -42,6 +42,12 @@ def main():
             os.chdir(directory)
             source = Path('kernel/kernel/process.tkb')
             source.parent.mkdir(parents=True)
+            # The check also reads the pool libraries (GitHub issue #343);
+            # one with only a bound payload accessor keeps that half clean.
+            pool = Path('kernel/lib/intrusive_pool.tkb')
+            pool.parent.mkdir(parents=True)
+            pool.write_text('fn intrusive_pool_ref(T: type, o: borrow O[a]) -> *T @ a {}\n',
+                            encoding='ascii')
             baseline = 'fn scalar_snapshot() {}\n'
             for qualifier in ['', 'inline ', 'noinline ', 'private inline ', 'private noinline ']:
                 source.write_text(baseline +
