@@ -198,6 +198,12 @@ What keeps two concurrent streams from colliding without an exclusion:
 - **An issue that needs both roles is still sequenced, not split.** The role
   whose queue holds it lands the first half, and the other follows.
 
+Both territories can run from one Claude Code session acting as
+coordinator: one background `territory-worker` subagent
+(`.claude/agents/territory-worker.md`) per issue, each in its own git
+worktree, with only the coordinator landing. The `coordinate` skill is the
+procedure, including the audit gate and pause/restart.
+
 Findings belong on the GitHub issue they concern, not only in `ROADMAP.md`.
 `ROADMAP.md` is a dated snapshot that is rewritten when priorities move, and
 what it said last week is gone from it.

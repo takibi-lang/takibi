@@ -137,6 +137,23 @@ qemu_session_name() {
     printf '%s\n' "$base"
 }
 
+# Release a session's block, for the coordinator after it removes a worktree
+# (GitHub issue #753): worktree sessions are short-lived and would otherwise
+# fill the registry. Releasing a name that holds no block is not an error.
+qemu_session_release_block() {
+    local session="$1" dir registry
+    dir="$(qemu_session_registry_dir)"
+    registry="$dir/blocks"
+    [ -e "$registry" ] || return 0
+    (
+        exec 8>"$dir/lock" || exit 1
+        flock 8
+        awk -v name="$session" '{ line = $0; sub(/^[^ ]* /, "", line) } line != name' \
+            "$registry" >"$registry.tmp.$$"
+        mv "$registry.tmp.$$" "$registry"
+    )
+}
+
 # Echo the port offset for this session. Zero when nothing selects one, which
 # is the unchanged single-session behaviour a contributor and CI both get.
 qemu_session_port_offset() {

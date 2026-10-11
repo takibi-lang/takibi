@@ -73,6 +73,10 @@ linked_offset="$(QEMU_SESSION_REPO_ROOT="$tmp_dir/wt-linked" offset_for "$worktr
 [ "$main_offset" != "$linked_offset" ] \
     && grep -qx "[0-9]* box-wt-wt-linked" "$worktrees/blocks" \
     && claim || fail "a linked worktree shared its main checkout's block ($main_offset)"
+env TAKIBI_SESSION_REGISTRY="$worktrees" \
+    bash -c ". '$helper'; qemu_session_release_block box-wt-wt-linked; qemu_session_release_block absent"
+grep -qx "[0-9]* box" "$worktrees/blocks" && ! grep -q "wt-linked" "$worktrees/blocks" \
+    && claim || fail "releasing a worktree's block did not remove exactly its row"
 
 # Concurrent claims are serialised: every session gets a block of its own.
 concurrent="$tmp_dir/concurrent"

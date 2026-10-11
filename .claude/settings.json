@@ -8,10 +8,30 @@
       "Bash(git commit:*)",
       "Bash(scripts/land.sh)",
       "Bash(./scripts/land.sh)",
-      "Bash(bash scripts/land.sh)"
+      "Bash(bash scripts/land.sh)",
+      "Bash(make:*)",
+      "Bash(git status:*)",
+      "Bash(git log:*)",
+      "Bash(git diff:*)",
+      "Bash(git show:*)",
+      "Bash(git fetch:*)",
+      "Bash(git rebase:*)",
+      "Bash(git switch:*)",
+      "Bash(git worktree list:*)",
+      "Bash(gh issue view:*)",
+      "Bash(gh issue list:*)",
+      "Bash(python3 scripts/:*)",
+      "Bash(bash scripts/:*)",
+      "Read(~/.takibi-sessions/**)",
+      "Edit(~/.takibi-sessions/audits/**)",
+      "Write(~/.takibi-sessions/audits/**)"
     ],
     "deny": [
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(git rm -r:*)",
+      "Bash(rm -rf:*)",
+      "Bash(git reset --hard:*)",
+      "Bash(git branch -D:*)"
     ]
   },
   "hooks": {
