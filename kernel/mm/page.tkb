@@ -1271,6 +1271,35 @@ private fn page_discontiguous_extent_probe_locked(pool: borrow &mut BootPagePool
 // contiguous and aligned, its pages are genuinely withheld from
 // page_alloc() while it is live, and giving it back restores the pool
 // exactly.
+// The allocator's single-page cost, recorded rather than judged (a time
+// verdict would belong to the RPi5 and needs a bound nobody has set):
+// PAGE_TIMING_PAIRS page_alloc/page_free pairs, timed with the generic
+// counter. Added with #744 to compare metadata held as regions against the
+// raw-address metadata it replaced.
+const PAGE_TIMING_PAIRS: usize = 1024;
+
+fn page_allocator_timing_probe() !{unsafe} {
+    let start: i64 = read_cntpct();
+    let mut done: usize = 0;
+    for i: usize in 0..<PAGE_TIMING_PAIRS {
+        match page_alloc(PageOwnerTag::UserPage) {
+            PageAllocResult::OutOfMemory => {}
+            PageAllocResult::Allocated(owner) => {
+                page_free(owner);
+                done = done + 1;
+            }
+        }
+    }
+    let elapsed: i64 = read_cntpct() - start;
+    kernel_boot_log("RECORDED page allocator timing: pairs=");
+    uart_put_udec(done);
+    kernel_boot_log(" ticks=");
+    uart_put_udec(elapsed as usize);
+    kernel_boot_log(" freq=");
+    uart_put_udec(read_cntfrq() as usize);
+    kernel_boot_log("\n");
+}
+
 fn page_run_probe() -> bool !{unsafe} {
     let pages_before: usize = page_allocator_live_count();
     let doubles_before: usize = page_allocator_double_free_count();

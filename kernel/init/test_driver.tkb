@@ -1188,6 +1188,7 @@ fn kernel_test_common_probes() !{unsafe} {
     } else {
         kernel_boot_log("page runs: failed\n");
     }
+    page_allocator_timing_probe();
     if (intrusive_pool_boot_probe()) {
         kernel_boot_log("intrusive pool: real page per chunk, payload through a real mapping, recycled-slot handle refused, invariants clean, pages returned ok\n");
     } else {
