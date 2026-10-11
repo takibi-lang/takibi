@@ -74,8 +74,9 @@ list (maintainer, 2026-10-09).
 3. **#637 stage 3: shrinking the mint list.** The file-confinement flag is
    enabled for both maintained kernels with a reviewed list
    (`kernel/RAW_MINT_FILES`); calls of `region_bytes_assume` count as mints.
-   Next: step A (remaining MMIO through IoHandles: RPi5 PCIe, virtio-net,
-   virtio-blk, the system timer DTB reader, xHCI registers), then step B
+   Step A is done (2026-10-11: RPi5 PCIe, virtio-net, virtio-blk, the
+   system timer DTB reader and xHCI registers through IoHandles; the
+   xHCI doorbell and ERDP release are named boundaries). Next: step B
    (page and pool chunks over regions, using the shared bounds-contract
    prototype). xHCI MMIO step A coordinates with B's #720 partial-DMA
    design: preserve matching-completion, publication and stop/reset hooks;

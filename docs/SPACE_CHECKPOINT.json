@@ -1,9 +1,9 @@
 {
   "date": "2026-10-11",
-  "event": "incremental",
+  "event": "milestone",
   "decision": "measured",
-  "source_sha256": "ea92636c786a34da849ab494f723af6bef49e7c25c37af92a6297384e4df3122",
-  "workload": "#202 and #343: user ranges made under ProcessCurrent (affine, process-indexed), freelist_ref bound to its owner. Linked kernels compared against origin/main with scripts/space_delta.py.",
+  "source_sha256": "df83e07e30877216448bbc18852488999e15a6273d3205ea12e0788cf0be8e70",
+  "workload": "#637 stage 3 step A complete: RPi5 PCIe, system timer, xHCI and QEMU virtio-net/virtio-blk registers through IoHandles. Linked kernels compared against origin/main with scripts/space_delta.py.",
   "evidence": [
     "docs/WORLD_STOP_CLAIM_REVIEW_2026-10-11.md",
     "docs/PROCESS_PIN_SPACE_2026-10-10.md",
@@ -47,6 +47,6 @@
     "docs/VIRTIO_NET_TX_2026-10-10.md",
     "docs/VIRTIO_NET_TX_SPACE_2026-10-10.json"
   ],
-  "assessment": "QEMU text -240 B, RPi5 text -176 B (the range check derives the root itself instead of each caller); data, BSS and usable_ram_start unchanged; no data/BSS symbol changed size. The authority and the range index erase.",
+  "assessment": "QEMU text +472 B, data -40 B; RPi5 text +952 B, data -16 B, BSS +16 B. Data/BSS: four derived xHCI base words go, five 8-byte handles come (rp1_xhci, rpi5_system_timer, pcie2, pcie_rescal, bcm_reset; virtio_*_regs on QEMU). usable_ram_start unchanged on both. Text grows with the attach functions and the doorbell bound check; accepted for removing 60+ raw io dereferences and two mint-list entries.",
   "next_trigger": "Fixed virtio-net DMA owners, queue/buffer capacity changes, device reset/recovery or another completed kernel feature/stage requires fresh workload measurement."
 }
