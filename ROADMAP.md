@@ -108,7 +108,10 @@ list (maintainer, 2026-10-09).
 
 **Evidence for the trunk, scheduled by A:** #584's soak at natural
 boundaries, #702 (dedicated soak hardware, the maintainer's decision),
-#652 (lifecycle trace events for signals and wait4).
+#652 (lifecycle trace events for signals and wait4). Every QEMU lane runs
+four vCPUs since #719 (2026-10-11); candidates on top of it: #756 (contention
+probes rendezvous with every online peer, not core 1 alone) and #757
+(uart-wake peer mode intermittently loses byte 1 at four vCPUs).
 
 ### Territory B: everything else, ordered by priority
 
@@ -165,8 +168,7 @@ Initialization does not prove CPU freshness across preemption.
    (TCP throughput), with #741 (locate the measured RPi5 HTTP SYN
    retransmission tails), then #680, #681, #682 (region_pool lock-free
    validation,
-   false sharing, pinless single-user pools), #711, #718, #386; #719 (every
-   QEMU lane on four vCPUs).
+   false sharing, pinless single-user pools), #711, #718, #386.
 4. **Evaluations awaiting a maintainer decision:** #687 (typed terminal
    mode leases), #648.
 5. **Compiler and language research, independent of the ownership
