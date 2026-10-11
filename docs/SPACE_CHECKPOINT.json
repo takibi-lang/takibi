@@ -2,7 +2,7 @@
   "date": "2026-10-11",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "c0f9c7103f749700649fe567162ca0762fa378fc749c5a8136bf41cea4d131d7",
+  "source_sha256": "e64a542cf1b3a0a262a1888f33a0bf940ef67274b404811e2b68c510e034472e",
   "workload": "#744 (#637 step B2): page metadata as regions borrowed with place_borrow, memory_map.tkb as the memory mint, and the unused-region-built-in removal (region_of meta arrays, internal linkage, globaldce). Linked kernels compared against origin/main with scripts/space_delta.py; allocator page counts from scripts/buildcheck_kernel_memory_map.py.",
   "evidence": [
     "docs/WORLD_STOP_CLAIM_REVIEW_2026-10-11.md",
@@ -47,6 +47,6 @@
     "docs/VIRTIO_NET_TX_2026-10-10.md",
     "docs/VIRTIO_NET_TX_SPACE_2026-10-10.json"
   ],
-  "assessment": "QEMU text 729912 -> 693464 B (-36448), RPi5 742752 -> 706440 B (-36312): unused region built-ins no longer reach the image. Data +24 B, BSS +48 B on QEMU, RPi5 BSS unchanged (page_meta_store's two places; bootstrap metadata moved out of the pool, same size). usable_ram_start drops 64 KiB on QEMU and 32 KiB on RPi5, so allocator pages rise by 8 to 16 across the checked layouts. PageMeta stays 24 B per page.",
+  "assessment": "QEMU text 729912 -> 693464 B (-36448), RPi5 742752 -> 706440 B (-36312): unused region built-ins no longer reach the image. Data +24 B, BSS +48 B on QEMU, RPi5 BSS unchanged (page_meta_store's two places; bootstrap metadata moved out of the pool, same size). usable_ram_start drops 64 KiB on QEMU and 32 KiB on RPi5, so allocator pages rise by 8 to 16 across the checked layouts. PageMeta stays 24 B per page. A boot probe recording page_alloc/page_free cost adds a few hundred bytes of text.",
   "next_trigger": "#745 (process records on RegionPool) or #746 (per-page permissions) changes allocator or pool representation; either requires fresh measurement, as does another completed kernel feature or stage."
 }
