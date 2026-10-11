@@ -9835,6 +9835,50 @@ fn f() -> *usize { return &temp_address_outer().r.a; }");
        "variant Choice7k { A; B(usize); }
         fn choose7k(c: Choice7k) { let Choice7k::A = c; }");
 
+  (* GitHub issue #202: kernel/mm/user_memory.tkb's user ranges are affine
+     and indexed by the process whose Running authority checked them, so a
+     range cannot be kept where it would outlive that authority. *)
+  Alcotest.test_case "user range shape: checked, borrowed twice, dropped" `Quick
+    (fun () -> ignore (infer
+       "linear view Current202[p: usize];
+        affine struct Range202[p: usize] { private address: usize; private length: usize; }
+        must_use variant RangeResult202[p: usize] { Fault; Ok(Range202[p]); }
+        fn check202(c: borrow Current202[p], a: usize, n: usize) -> RangeResult202[p] {
+          let mut r: Range202[p] = { a, n };
+          return RangeResult202::Ok(r);
+        }
+        fn len202(r: borrow Range202[p]) -> usize { return r.length; }
+        fn use202(c: borrow Current202[p]) -> usize {
+          match check202(c, 16, 4) {
+            RangeResult202::Fault => { return 0; }
+            RangeResult202::Ok(r) => { return len202(r) + len202(r); }
+          }
+        }"));
+
+  Alcotest.test_case "user range shape: a range cannot be kept in a global" `Quick
+    (expect_type_error "cannot hold an indexed owner"
+       "linear view Current202[p: usize];
+        affine struct Range202[p: usize] { private address: usize; private length: usize; }
+        must_use variant RangeResult202[p: usize] { Fault; Ok(Range202[p]); }
+        fn check202(c: borrow Current202[p], a: usize, n: usize) -> RangeResult202[p] {
+          let mut r: Range202[p] = { a, n };
+          return RangeResult202::Ok(r);
+        }
+        fn len202(r: borrow Range202[p]) -> usize { return r.length; }
+        private let mut kept202: Range202[7];");
+
+  Alcotest.test_case "user range shape: a range cannot be kept in a record" `Quick
+    (expect_type_error "cannot hold an indexed owner"
+       "linear view Current202[p: usize];
+        affine struct Range202[p: usize] { private address: usize; private length: usize; }
+        must_use variant RangeResult202[p: usize] { Fault; Ok(Range202[p]); }
+        fn check202(c: borrow Current202[p], a: usize, n: usize) -> RangeResult202[p] {
+          let mut r: Range202[p] = { a, n };
+          return RangeResult202::Ok(r);
+        }
+        fn len202(r: borrow Range202[p]) -> usize { return r.length; }
+        struct Record202 { pending: Range202[7]; }");
+
   Alcotest.test_case "guarded_by place: put and take under the declared lock" `Quick
     (expect_codegen_ok
        "linear view RunGuard7g[lock: addr];

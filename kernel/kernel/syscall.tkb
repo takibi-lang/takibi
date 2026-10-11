@@ -1815,7 +1815,7 @@ fn kernel_syscall_path_name(current_authority: borrow ProcessCurrent[current_pro
                 CheckedUsize::Overflow => { return SyscallPathResult::Fault; }
                 CheckedUsize::Value(v) => { v }
             };
-            match user_range_check_read(kernel_process_current_root(current_authority), current, 1) {
+            match user_range_check_read(current_authority, current, 1) {
                 UserReadRangeResult::Fault => { return SyscallPathResult::Fault; }
                 UserReadRangeResult::Ok(range) => {
                     if (copy_from_user(range, path_view[offset..<offset + 1]) == false) {
@@ -2011,8 +2011,7 @@ fn syscall_terminal_write(current_authority: borrow ProcessCurrent[current_proce
             return TerminalWriteResult::Errno(LINUX_EINVAL);
         }
         let staging = staging_buffer[0..<chunk];
-        match user_range_check_read(kernel_process_current_root(current_authority),
-                                    chunk_address, chunk) {
+        match user_range_check_read(current_authority, chunk_address, chunk) {
             UserReadRangeResult::Fault => {
                 if (written == 0) { return TerminalWriteResult::Errno(LINUX_EFAULT); }
                 return TerminalWriteResult::Written(written);
@@ -2112,7 +2111,7 @@ fn syscall_write_segment(current_authority: borrow ProcessCurrent[current_proces
                         }
                     };
                     let socket_buffers = tcp_frame_bytes(rx);
-                    match user_range_check_read(kernel_process_current_root(current_authority), address, amount) {
+                    match user_range_check_read(current_authority, address, amount) {
                         UserReadRangeResult::Fault => {
                             tcp_connection_frame_unhold(owner, TcpFrameRole::Rx,
                                                         rx);
@@ -2205,7 +2204,7 @@ fn syscall_write_segment(current_authority: borrow ProcessCurrent[current_proces
                             return SyscallIoResult::Errno(LINUX_EINVAL);
                         }
                     };
-                    match user_range_check_read(kernel_process_current_root(current_authority), address, length) {
+                    match user_range_check_read(current_authority, address, length) {
                         UserReadRangeResult::Fault => {
                             tcp_connection_frame_unhold(owner, TcpFrameRole::Inetd,
                                                         inetd);
@@ -2238,7 +2237,7 @@ fn syscall_write_segment(current_authority: borrow ProcessCurrent[current_proces
             if (length == 0 || length > KERNEL_BLOCK_SIZE) {
                 return SyscallIoResult::Errno(LINUX_EINVAL);
             }
-            match user_range_check_read(kernel_process_current_root(current_authority), address, length) {
+            match user_range_check_read(current_authority, address, length) {
                 UserReadRangeResult::Fault => { return SyscallIoResult::Errno(LINUX_EFAULT); }
                 UserReadRangeResult::Ok(range) => {
                     if (copy_from_user_span(
@@ -2328,7 +2327,7 @@ fn syscall_read_segment(current_authority: borrow ProcessCurrent[current_process
                            return SyscallIoResult::Errno(LINUX_EINVAL);
                        }
                    };
-                   match user_range_check_write(kernel_process_current_root(current_authority), address, buffered) {
+                   match user_range_check_write(current_authority, address, buffered) {
                        UserWriteRangeResult::Fault => {
                            tcp_connection_frame_unhold(owner, TcpFrameRole::Rx,
                                                        rx);
@@ -2437,7 +2436,7 @@ fn syscall_read_segment(current_authority: borrow ProcessCurrent[current_process
                             return SyscallIoResult::Errno(LINUX_EINVAL);
                         }
                     };
-                    match user_range_check_write(kernel_process_current_root(current_authority), address, amount) {
+                    match user_range_check_write(current_authority, address, amount) {
                         UserWriteRangeResult::Fault => {
                             tcp_connection_frame_unhold(owner, TcpFrameRole::Rx,
                                                         received_rx);
@@ -2512,8 +2511,7 @@ fn syscall_read_segment(current_authority: borrow ProcessCurrent[current_process
             }
             let mut amount: usize = total - offset;
             if (amount > requested) { amount = requested; }
-            match user_range_check_write(kernel_process_current_root(current_authority),
-                                         address, amount) {
+            match user_range_check_write(current_authority, address, amount) {
                 UserWriteRangeResult::Fault => {
                     return SyscallIoResult::Errno(LINUX_EFAULT);
                 }
@@ -2573,8 +2571,7 @@ fn syscall_read_segment(current_authority: borrow ProcessCurrent[current_process
                             }
                             CheckedUsize::Value(value) => { value }
                         };
-                    match user_range_check_write(kernel_process_current_root(current_authority),
-                                           target_address, chunk) {
+                    match user_range_check_write(current_authority, target_address, chunk) {
                         UserWriteRangeResult::Fault => {
                             if (copied != 0) {
                                 return SyscallIoResult::Transferred(copied);
@@ -2665,8 +2662,7 @@ fn syscall_deadline_wait(current_authority: borrow ProcessCurrent[current_proces
     if (timespec_address == 0) { return SyscallDeadlineResult::Invalid; }
     let mut seconds: usize = 0;
     let mut nanoseconds: usize = 0;
-    match user_range_check_read(kernel_process_current_root(current_authority),
-                                timespec_address, 16) {
+    match user_range_check_read(current_authority, timespec_address, 16) {
         UserReadRangeResult::Fault => {
             return SyscallDeadlineResult::Fault;
         }
@@ -2757,8 +2753,7 @@ fn syscall_signal_wait(current_authority: borrow ProcessCurrent[current_process,
     if (timeout_address != 0) {
         let mut seconds: usize = 0;
         let mut nanoseconds: usize = 0;
-        match user_range_check_read(kernel_process_current_root(current_authority),
-                                    timeout_address, 16) {
+        match user_range_check_read(current_authority, timeout_address, 16) {
             UserReadRangeResult::Fault => {
                 return SyscallAction::Resume(LINUX_EFAULT);
             }
@@ -2856,7 +2851,7 @@ fn syscall_ppoll_dispatch(current_authority: borrow ProcessCurrent[current_proce
         CheckedUsize::Overflow => { return SyscallAction::Resume(LINUX_EINVAL); }
         CheckedUsize::Value(v) => { v }
     };
-      match user_range_check_write(kernel_process_current_root(current_authority), fds_address, array_bytes) {
+      match user_range_check_write(current_authority, fds_address, array_bytes) {
         UserWriteRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
         UserWriteRangeResult::Ok(array_range) => {
             let mut ready_count: usize = 0;
@@ -2967,7 +2962,7 @@ fn syscall_terminal_ioctl(current_authority: borrow ProcessCurrent[current_proce
     }
     let command: usize = request & 0xFFFFFFFF;
     if (command == 0x5413) {
-        match user_range_check_write(kernel_process_current_root(current_authority), address, 8) {
+        match user_range_check_write(current_authority, address, 8) {
             UserWriteRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
             UserWriteRangeResult::Ok(range) => {
                 let mut written = user_zero_fill(range);
@@ -2981,7 +2976,7 @@ fn syscall_terminal_ioctl(current_authority: borrow ProcessCurrent[current_proce
         }
     }
     if (command == 0x5401) {
-        match user_range_check_write(kernel_process_current_root(current_authority), address,
+        match user_range_check_write(current_authority, address,
                                     TERMINAL_TERMIOS_BYTES) {
             UserWriteRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
             UserWriteRangeResult::Ok(range) => {
@@ -3004,7 +2999,7 @@ fn syscall_terminal_ioctl(current_authority: borrow ProcessCurrent[current_proce
         return SyscallAction::Resume(LINUX_ENOTTY);
     }
     let mut settings: [u8; TERMINAL_TERMIOS_BYTES];
-    match user_range_check_read(kernel_process_current_root(current_authority), address,
+    match user_range_check_read(current_authority, address,
                                TERMINAL_TERMIOS_BYTES) {
         UserReadRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
         UserReadRangeResult::Ok(range) => {
@@ -3071,7 +3066,7 @@ private fn syscall_terminal_ppoll_probe() -> bool {
 
 fn syscall_read_uart(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], address: usize, requested: usize) -> SyscallIoResult {
     if (requested == 0) { return SyscallIoResult::Transferred(0); }
-    match user_range_check_write(kernel_process_current_root(current_authority), address, requested) {
+    match user_range_check_write(current_authority, address, requested) {
         UserWriteRangeResult::Fault => { return SyscallIoResult::Errno(LINUX_EFAULT); }
         UserWriteRangeResult::Ok(range) => {
             // GitHub issue #547: the ring is read under the lock its
@@ -3254,6 +3249,7 @@ fn kernel_syscall_exit_current_process(current_authority: ProcessCurrent[current
 // is keyed by parent_slot the same way reaped_pid/parent_slot already are.
 fn kernel_syscall_wait4_deliver(
         parent: borrow ScheduledProcessOwner[process],
+        resuming: borrow ProcessCurrent[process, ProcessState::Running],
         frame: borrow FrameRef[process], reaped_pid: usize) !{unsafe} {
     let parent_slot: usize = scheduled_process_owner_slot(parent);
     let wait4_status_ptr: usize =
@@ -3261,12 +3257,10 @@ fn kernel_syscall_wait4_deliver(
     if (wait4_status_ptr != 0) {
         // The status buffer belongs to the parent being resumed.
         // user_write_u32 dereferences the user VA directly. The waking exit
-        // handoff commits this parent's prepared root before reaching here;
-        // the synchronous wait4 path is already running in the same parent.
-        // kernel_process_reap_zombie likewise restores that current root
-        // before teardown, so another direct activation here was redundant.
-        match user_range_check_write(
-                scheduled_process_address_space_root_owned(parent), wait4_status_ptr, 4) {
+        // handoff commits this parent's prepared root before reaching here,
+        // and the range is checked under the parent's Running authority that
+        // handoff mints (GitHub issue #202).
+        match user_range_check_write(resuming, wait4_status_ptr, 4) {
             UserWriteRangeResult::Fault => {
                 el0_context_set_x0(frame, LINUX_EFAULT);
                 return;
@@ -3325,8 +3319,7 @@ private fn syscall_syslog(current_authority: borrow ProcessCurrent[current_proce
             }
             CheckedUsize::Value(value) => { value }
         };
-        match user_range_check_write(
-                kernel_process_current_root(current_authority), target, chunk) {
+        match user_range_check_write(current_authority, target, chunk) {
             UserWriteRangeResult::Fault => {
                 return SyscallAction::Resume(LINUX_EFAULT);
             }
@@ -4099,7 +4092,7 @@ private fn syscall_bind_claimed(current_authority: borrow ProcessCurrent[current
         x2 < 16) { return SyscallAction::Resume(LINUX_EINVAL); }
     let mut sockaddr_len: usize = x2;
     if (sockaddr_len > 28) { sockaddr_len = 28; }
-    match user_range_check_read(kernel_process_current_root(current_authority), x1, sockaddr_len) {
+    match user_range_check_read(current_authority, x1, sockaddr_len) {
         UserReadRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
         UserReadRangeResult::Ok(range) => {
             if (copy_from_user_span(
@@ -4766,7 +4759,7 @@ fn syscall_signal_frame_write(current_authority: borrow ProcessCurrent[current_p
     let grown: bool = process_image_handle_data_abort(
         SIGFRAME_STACK_GROWTH_ESR, base);
     mutex_irq_restore(irq_flags);
-    match user_range_check_write(kernel_process_current_root(current_authority), base,
+    match user_range_check_write(current_authority, base,
                                  SIGFRAME_SIZE) {
         UserWriteRangeResult::Fault => { return (false, 0); }
         UserWriteRangeResult::Ok(range) => {
@@ -4903,7 +4896,7 @@ fn syscall_signal_return(current_authority: ProcessCurrent[current_process, Proc
 private fn syscall_signal_return_into(current_authority: ProcessCurrent[current_process, ProcessState::Running], here: borrow FrameRef[process])
         -> SyscallAction !{unsafe} {
     let base: usize = frame_sp_el0(here);
-    match user_range_check_read(kernel_process_current_root(current_authority), base,
+    match user_range_check_read(current_authority, base,
                                 SIGFRAME_SIZE) {
         UserReadRangeResult::Fault => {
             return kernel_syscall_exit_current_process(current_authority, 128 + LINUX_SIGSEGV);
@@ -4960,8 +4953,7 @@ fn syscall_signal_suspend(current_authority: borrow ProcessCurrent[current_proce
     if (set_size != 8) { return SyscallAction::Resume(LINUX_EINVAL); }
     kernel_process_current_clear_signal_suspend();
     let mut mask: usize = 0;
-    match user_range_check_read(kernel_process_current_root(current_authority),
-                                mask_address, 8) {
+    match user_range_check_read(current_authority, mask_address, 8) {
         UserReadRangeResult::Fault => {
             return SyscallAction::Resume(LINUX_EFAULT);
         }
@@ -5563,8 +5555,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         match procfs_lookup(path_name) {
             ProcfsLookupResult::Missing => {}
             ProcfsLookupResult::Found(node) => {
-                match user_range_check_write(
-                        kernel_process_current_root(current_authority), x2, 128) {
+                match user_range_check_write(current_authority, x2, 128) {
                     UserWriteRangeResult::Fault => {
                         return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
                     }
@@ -5594,7 +5585,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             }
             lookup_inode = kernel_syscall_directory_inode(x0);
         }
-        match user_range_check_write(kernel_process_current_root(current_authority), x2, 128) {
+        match user_range_check_write(current_authority, x2, 128) {
             UserWriteRangeResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
             UserWriteRangeResult::Ok(precheck) => {}
         }
@@ -5612,7 +5603,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 let inode_mode: usize = ext2_inode_mode(
                     mount, inode_number);
                 if ((inode_mode & 0xF000) == 0x4000) {
-                    match user_range_check_write(kernel_process_current_root(current_authority), x2, 128) {
+                    match user_range_check_write(current_authority, x2, 128) {
                         UserWriteRangeResult::Fault => {
                             return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
                         }
@@ -5636,7 +5627,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 }
                 if (ext2_inode_is_symlink(
                         mount, inode_number)) {
-                    match user_range_check_write(kernel_process_current_root(current_authority), x2, 128) {
+                    match user_range_check_write(current_authority, x2, 128) {
                         UserWriteRangeResult::Fault => {
                             return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
                         }
@@ -5654,7 +5645,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                         }
                     }
                 }
-                match user_range_check_write(kernel_process_current_root(current_authority), x2, 128) {
+                match user_range_check_write(current_authority, x2, 128) {
                     UserWriteRangeResult::Fault => {
                         return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
                     }
@@ -6176,8 +6167,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             ProcessChildZombieResult::Found(picked) => {
                 let (zombie_pid, status) = picked;
                 if (x1 != 0) {
-                    match user_range_check_write(
-                            kernel_process_current_root(current_authority), x1, 4) {
+                    match user_range_check_write(current_authority, x1, 4) {
                         UserWriteRangeResult::Fault => {
                             return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
                         }
@@ -6216,7 +6206,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // turned into an effectively-unbounded userspace loop with no
         // further syscalls, not a kernel-visible fault.
         if (x1 < 2) { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
-        match user_range_check_write(kernel_process_current_root(current_authority), x0, 2) {
+        match user_range_check_write(current_authority, x0, 2) {
             UserWriteRangeResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
             UserWriteRangeResult::Ok(range) => {
                 match user_write_join(user_write_byte(range, 0, 0x2F),
@@ -6229,7 +6219,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         return syscall_finish_current(frame, SyscallAction::Resume(2), current_authority);
     }
     if (number == AARCH64_NR_CHDIR) {
-        match user_range_check_read(kernel_process_current_root(current_authority), x0, 2) {
+        match user_range_check_read(current_authority, x0, 2) {
             UserReadRangeResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
             UserReadRangeResult::Ok(range) => {
                 let path_view: []u8 = syscall_scratch[syscall_scratch_cpu_index()].path_buffer as []u8;
@@ -6246,7 +6236,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // setitimer(): HTTPd's request timeout is unnecessary for the single
         // bounded integration request. Return an all-zero previous timer.
         if (x2 != 0) {
-            match user_range_check_write(kernel_process_current_root(current_authority), x2, 32) {
+            match user_range_check_write(current_authority, x2, 32) {
                 UserWriteRangeResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
                 UserWriteRangeResult::Ok(range) => {
                     match user_zero_fill(range) {
@@ -6262,7 +6252,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         return syscall_finish_current(frame, syscall_syslog(current_authority, x0, x1, x2), current_authority);
     }
     if (number == 113) {
-        match user_range_check_write(kernel_process_current_root(current_authority), x1, 16) {
+        match user_range_check_write(current_authority, x1, 16) {
             UserWriteRangeResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
             UserWriteRangeResult::Ok(range) => {
                 let mut seconds: u64 = 1700000000;
@@ -6291,7 +6281,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     if (number == AARCH64_NR_SYSINFO) {
         // Linux aarch64 struct sysinfo. BusyBox ps consumes uptime; keep the
         // rest zero until a concrete consumer needs accounted values.
-        match user_range_check_write(kernel_process_current_root(current_authority), x0, 112) {
+        match user_range_check_write(current_authority, x0, 112) {
             UserWriteRangeResult::Fault => {
                 return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
             }
@@ -6324,7 +6314,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINVAL), current_authority);
         }
         if (oldact != 0) {
-            match user_range_check_write(kernel_process_current_root(current_authority), oldact, 32) {
+            match user_range_check_write(current_authority, oldact, 32) {
                 UserWriteRangeResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
                 UserWriteRangeResult::Ok(range) => {
                     let mut old: SignalAction =
@@ -6350,7 +6340,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             }
         }
         if (act != 0) {
-            match user_range_check_read(kernel_process_current_root(current_authority), act, 32) {
+            match user_range_check_read(current_authority, act, 32) {
                 UserReadRangeResult::Fault => {
                     return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
                 }
@@ -6389,7 +6379,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         let old_mask: usize = kernel_process_current_signal_mask();
         let mut new_mask: usize = old_mask;
         if (x1 != 0) {
-            match user_range_check_read(kernel_process_current_root(current_authority), x1, 8) {
+            match user_range_check_read(current_authority, x1, 8) {
                 UserReadRangeResult::Fault => {
                     return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
                 }
@@ -6411,7 +6401,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             }
         }
         if (x2 != 0) {
-            match user_range_check_write(kernel_process_current_root(current_authority), x2, 8) {
+            match user_range_check_write(current_authority, x2, 8) {
                 UserWriteRangeResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
                 UserWriteRangeResult::Ok(range) => {
                     // The old mask is reported before the new one applies,
@@ -6438,7 +6428,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // whose output this kernel cannot yet fill instead of returning a
         // signal number beside untouched userspace memory.
         if (x1 != 0) { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINVAL), current_authority); }
-        match user_range_check_read(kernel_process_current_root(current_authority), x0, 8) {
+        match user_range_check_read(current_authority, x0, 8) {
             UserReadRangeResult::Fault => {
                 return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
             }
@@ -6473,7 +6463,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     }
     if (number == 205) {
         if (x0 != 0) { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
-        match user_range_check_write(kernel_process_current_root(current_authority), x1, 16) {
+        match user_range_check_write(current_authority, x1, 16) {
             UserWriteRangeResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
             UserWriteRangeResult::Ok(peer_range) => {
                 match user_write_join(user_zero_fill(peer_range),
@@ -6483,7 +6473,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 }
             }
         }
-        match user_range_check_write(kernel_process_current_root(current_authority), x2, 4) {
+        match user_range_check_write(current_authority, x2, 4) {
             UserWriteRangeResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
             UserWriteRangeResult::Ok(length_range) => {
                 match user_write_u32(length_range, 0, 16) {
@@ -6502,7 +6492,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         let optval: usize = x2;
         let optlen: usize = x3;
         if (optlen != 0) {
-            match user_range_check_read(kernel_process_current_root(current_authority), optval, optlen) {
+            match user_range_check_read(current_authority, optval, optlen) {
                 UserReadRangeResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
                 UserReadRangeResult::Ok(range) => {}
             }
@@ -6516,8 +6506,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // Linux permits either output pointer to be null. This kernel has no
         // NUMA topology, so every online CPU belongs to node 0.
         if (x0 != 0) {
-            match user_range_check_write(
-                    kernel_process_current_root(current_authority), x0, 4) {
+            match user_range_check_write(current_authority, x0, 4) {
                 UserWriteRangeResult::Fault => {
                     return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
                 }
@@ -6532,8 +6521,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             }
         }
         if (x1 != 0) {
-            match user_range_check_write(
-                    kernel_process_current_root(current_authority), x1, 4) {
+            match user_range_check_write(current_authority, x1, 4) {
                 UserWriteRangeResult::Fault => {
                     return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
                 }
@@ -6565,8 +6553,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINVAL), current_authority);
             }
             ProcessAffinityResult::Mask(mask) => {
-                match user_range_check_write(
-                        kernel_process_current_root(current_authority), x2, 8) {
+                match user_range_check_write(current_authority, x2, 8) {
                     UserWriteRangeResult::Fault => {
                         return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
                     }
@@ -6586,7 +6573,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     if (number == AARCH64_NR_SCHED_SETAFFINITY) {
         if (x1 < 8) { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINVAL), current_authority); }
         let mut requested: usize = 0;
-        match user_range_check_read(kernel_process_current_root(current_authority), x2, 8) {
+        match user_range_check_read(current_authority, x2, 8) {
             UserReadRangeResult::Fault => {
                 return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
             }
@@ -6712,8 +6699,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             UnifiedMmapResult::Mapped(address) => {
                 // Anonymous memory reads as zero; a reused page still holds
                 // what its previous mapping wrote.
-                match user_range_check_write(kernel_process_current_root(current_authority),
-                                             address, rounded) {
+                match user_range_check_write(current_authority, address, rounded) {
                     UserWriteRangeResult::Fault => {
                         syscall_munmap_pages(current_authority, address, rounded);
                         return syscall_finish_current(frame, SyscallAction::Resume(LINUX_ENOMEM), current_authority);
@@ -6823,7 +6809,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // The OLD value is reported before the new one is applied, which
         // is prlimit64's own contract and the reason one call can do both.
         if (x3 != 0) {
-            match user_range_check_write(kernel_process_current_root(current_authority), x3,
+            match user_range_check_write(current_authority, x3,
                                          sizeof(usize) * 2) {
                 UserWriteRangeResult::Fault => {
                     return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
@@ -6841,7 +6827,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             }
         }
         if (x2 == 0) { return syscall_finish_current(frame, SyscallAction::Resume(0), current_authority); }
-        match user_range_check_read(kernel_process_current_root(current_authority), x2,
+        match user_range_check_read(current_authority, x2,
                                     sizeof(usize) * 2) {
             UserReadRangeResult::Fault => {
                 return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
@@ -6874,7 +6860,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         }
     }
     if (number == AARCH64_NR_UNAME) {
-        match user_range_check_write(kernel_process_current_root(current_authority), x0, sizeof(Utsname)) {
+        match user_range_check_write(current_authority, x0, sizeof(Utsname)) {
             UserWriteRangeResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
             UserWriteRangeResult::Ok(range) => {
                 let uname_bytes = syscall_scratch[syscall_scratch_cpu_index()].uname_buffer as []u8;
@@ -6956,19 +6942,21 @@ fn syscall_vectored_prefix_wait_probe(address: usize, slot: usize,
             tcp_connection_put(owner);
         }
     }
-    match user_range_check_write(scheduled_process_address_space_root_lookup(kernel_process_current_slot()), address, 32) {
-        UserWriteRangeResult::Fault => { return false; }
+    let ProcessRunningHere::Running(probe_current) = process_running_here() else {};
+    match user_range_check_write(probe_current, address, 32) {
+        UserWriteRangeResult::Fault => { process_current_end(probe_current); return false; }
         UserWriteRangeResult::Ok(range) => {
             let mut written = user_write_u64(range, 8, 1);
             written = user_write_join(written,
                 user_write_u64(range, 16, (address + 65) as u64));
             written = user_write_join(written, user_write_u64(range, 24, 1));
             match written {
-                UserWriteResult::Fault => { return false; }
+                UserWriteResult::Fault => { process_current_end(probe_current); return false; }
                 UserWriteResult::Written => {}
             }
         }
     }
+    process_current_end(probe_current);
     let prior_wait: ProcessWaitReason = match process_running_here() {
         ProcessRunningHere::Running(current_authority) => {
             let value: ProcessWaitReason = kernel_process_current_pending_block_reason(current_authority);
@@ -7040,7 +7028,8 @@ fn syscall_vectored_inetd_probe(address: usize) -> bool !{unsafe} {
         UnifiedOpenResult::Full => { ok = false; }
         UnifiedOpenResult::Ok => {
             kernel_syscall_set_inetd_mode(true);
-            match user_range_check_write(scheduled_process_address_space_root_lookup(kernel_process_current_slot()), address, 80) {
+            let ProcessRunningHere::Running(probe_current) = process_running_here() else {};
+            match user_range_check_write(probe_current, address, 80) {
                 UserWriteRangeResult::Fault => { ok = false; }
                 UserWriteRangeResult::Ok(range) => {
                     let mut written = user_write_byte(range, 64, 0x61);
@@ -7057,11 +7046,13 @@ fn syscall_vectored_inetd_probe(address: usize) -> bool !{unsafe} {
                     }
                 }
             }
+            process_current_end(probe_current);
             let (write_action, write_count) = kernel_syscall_dispatch(
                 SYSCALL_TRAP_ESR, AARCH64_NR_WRITEV, 1, address, 2, 0, 0, 0);
             if (write_action != 1 || write_count != 2) { ok = false; }
             // The second segment faults after one byte was already appended.
-            match user_range_check_write(scheduled_process_address_space_root_lookup(kernel_process_current_slot()), address, 32) {
+            let ProcessRunningHere::Running(probe_current) = process_running_here() else {};
+            match user_range_check_write(probe_current, address, 32) {
                 UserWriteRangeResult::Fault => { ok = false; }
                 UserWriteRangeResult::Ok(range) => {
                     match user_write_u64(range, 16, 0) {
@@ -7070,12 +7061,14 @@ fn syscall_vectored_inetd_probe(address: usize) -> bool !{unsafe} {
                     }
                 }
             }
+            process_current_end(probe_current);
             let (partial_action, partial_count) = kernel_syscall_dispatch(
                 SYSCALL_TRAP_ESR, AARCH64_NR_WRITEV, 1, address, 2, 0, 0, 0);
             if (partial_action != 1 || partial_count != 1) { ok = false; }
             // inetd reads still consume the connected descriptor's RX data.
             // A short first segment must leave the invalid second untouched.
-            match user_range_check_write(scheduled_process_address_space_root_lookup(kernel_process_current_slot()), address, 32) {
+            let ProcessRunningHere::Running(probe_current) = process_running_here() else {};
+            match user_range_check_write(probe_current, address, 32) {
                 UserWriteRangeResult::Fault => { ok = false; }
                 UserWriteRangeResult::Ok(range) => {
                     match user_write_u64(range, 8, 4) {
@@ -7084,16 +7077,19 @@ fn syscall_vectored_inetd_probe(address: usize) -> bool !{unsafe} {
                     }
                 }
             }
+            process_current_end(probe_current);
             let (read_action, read_count) = kernel_syscall_dispatch(
                 SYSCALL_TRAP_ESR, AARCH64_NR_READV, 1, address, 2, 0, 0, 0);
             if (read_action != 1 || read_count != 2) { ok = false; }
-            match user_range_check_read(scheduled_process_address_space_root_lookup(kernel_process_current_slot()), address + 64, 2) {
+            let ProcessRunningHere::Running(probe_current) = process_running_here() else {};
+            match user_range_check_read(probe_current, address + 64, 2) {
                 UserReadRangeResult::Fault => { ok = false; }
                 UserReadRangeResult::Ok(range) => {
                     if (user_read_byte(range, 0) != 0x61 ||
                         user_read_byte(range, 1) != 0x62) { ok = false; }
                 }
             }
+            process_current_end(probe_current);
             match network_capability_take() {
                 NetworkCapabilityTakeResult::Empty => {
                     if (syscall_vectored_prefix_wait_probe(address, slot, generation) == false) {
@@ -7272,7 +7268,7 @@ fn kernel_syscall_cow_read_probe() -> SyscallCowReadReport !{unsafe} {
             if (kernel_syscall_file_offset(fd) == 8 &&
                 address_space_pte_is_cow(after_first) == false &&
                 (after_first & USER_PAGE_PHYS_MASK) != shared_physical &&
-                syscall_cow_read_matches(address, expected as []const u8)) {
+                user_probe_boot_read_matches(address, expected as []const u8)) {
                 report = SyscallCowReadReport::Delivered;
             }
         } else if (first_action == 1 && first_value == LINUX_EFAULT &&
@@ -7284,7 +7280,7 @@ fn kernel_syscall_cow_read_probe() -> SyscallCowReadReport !{unsafe} {
                 SYSCALL_TRAP_ESR, 63, fd, address, 8, 0, 0, 0);
             if (retry_action == 1 && retry_value == 8 &&
                 kernel_syscall_file_offset(fd) == 8 &&
-                syscall_cow_read_matches(address, expected as []const u8)) {
+                user_probe_boot_read_matches(address, expected as []const u8)) {
                 report = SyscallCowReadReport::RefusedThenDelivered;
             }
         }
@@ -7301,20 +7297,6 @@ fn kernel_syscall_cow_read_probe() -> SyscallCowReadReport !{unsafe} {
     return report;
 }
 
-private fn syscall_cow_read_matches(address: usize, expected: borrow [const u8; 8..])
-        -> bool !{unsafe} {
-    match user_range_check_read(address_space_boot_root(), address, 8) {
-        UserReadRangeResult::Fault => { return false; }
-        UserReadRangeResult::Ok(range) => {
-            for index: usize in 0..<8 {
-                if (user_read_byte(range, index) != expected[index]) {
-                    return false;
-                }
-            }
-            return true;
-        }
-    }
-}
 
 fn kernel_syscall_subset_probe() -> bool !{unsafe} {
     let probe_index: usize = match user_va_find_free_run(1) {
@@ -7395,7 +7377,8 @@ fn kernel_syscall_subset_probe() -> bool !{unsafe} {
 
             // rt_sigaction: a non-null oldact is zero-filled, not left as
             // whatever was already there (poison it first to prove that).
-            match user_range_check_write(scheduled_process_address_space_root_lookup(kernel_process_current_slot()), oldact_va, 32) {
+            let ProcessRunningHere::Running(probe_current) = process_running_here() else {};
+            match user_range_check_write(probe_current, oldact_va, 32) {
                 UserWriteRangeResult::Fault => { ok = false; }
                 UserWriteRangeResult::Ok(range) => {
                     match user_write_byte(range, 0, 0xAA) {
@@ -7404,15 +7387,18 @@ fn kernel_syscall_subset_probe() -> bool !{unsafe} {
                     }
                 }
             }
+            process_current_end(probe_current);
             let (action4, value4) = kernel_syscall_dispatch(
                 SYSCALL_TRAP_ESR, 134, 1, 0, oldact_va, 0, 0, 0);
             if (action4 != 1 || value4 != 0) { ok = false; }
-            match user_range_check_read(scheduled_process_address_space_root_lookup(kernel_process_current_slot()), oldact_va, 1) {
+            let ProcessRunningHere::Running(probe_current) = process_running_here() else {};
+            match user_range_check_read(probe_current, oldact_va, 1) {
                 UserReadRangeResult::Fault => { ok = false; }
                 UserReadRangeResult::Ok(range) => {
                     if (user_read_byte(range, 0) != 0) { ok = false; }
                 }
             }
+            process_current_end(probe_current);
 
             if (syscall_vectored_inetd_probe(oldact_va) == false) { ok = false; }
             user_pte_clear(probe_index);
@@ -7541,7 +7527,7 @@ private inline fn syscall_getdents64_current(
         return SyscallAction::Resume(LINUX_EBADF);
     }
     if (x2 == 0) { return SyscallAction::Resume(0); }
-    match user_range_check_write(kernel_process_current_root(current_authority), x1, x2) {
+    match user_range_check_write(current_authority, x1, x2) {
         UserWriteRangeResult::Fault => {
             return SyscallAction::Resume(LINUX_EFAULT);
         }
@@ -7941,7 +7927,7 @@ private inline fn syscall_execve_current(
             CheckedUsize::Overflow => { return SyscallAction::Resume(LINUX_EFAULT); }
             CheckedUsize::Value(v) => { v }
         };
-        match user_range_check_read(kernel_process_current_root(current_authority), entry_address, 8) {
+        match user_range_check_read(current_authority, entry_address, 8) {
             UserReadRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
             UserReadRangeResult::Ok(range) => {
                 let (ok, string_address) = user_read_u64(range, 0);
@@ -8105,7 +8091,7 @@ private inline fn syscall_readv_current(
             CheckedUsize::Overflow => { return SyscallAction::Resume(LINUX_EINVAL); }
             CheckedUsize::Value(v) => { v }
         };
-        match user_range_check_read(kernel_process_current_root(current_authority), iov_address, array_bytes) {
+        match user_range_check_read(current_authority, iov_address, array_bytes) {
             UserReadRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
             UserReadRangeResult::Ok(array_range) => {
                 let mut total: usize = 0;
@@ -8174,7 +8160,7 @@ private inline fn syscall_writev_current(
             CheckedUsize::Overflow => { return SyscallAction::Resume(LINUX_EINVAL); }
             CheckedUsize::Value(v) => { v }
         };
-        match user_range_check_read(kernel_process_current_root(current_authority), iov_address, array_bytes) {
+        match user_range_check_read(current_authority, iov_address, array_bytes) {
             UserReadRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
             UserReadRangeResult::Ok(array_range) => {
                 let mut total: usize = 0;

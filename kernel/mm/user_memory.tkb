@@ -71,20 +71,36 @@ enum UserAccessMode: u8 { Read; Write; }
 // cannot manufacture a *u8 out of a raw integer without going through
 // validation first, and now cannot use a read-validated range as if it
 // were write-validated either.
-struct UserReadRange {
+//
+// GitHub issue #202: a range is indexed by the process it was checked for,
+// and checking one borrows that process's Running authority, so a range
+// cannot be made in another process's context (an interrupt return, a
+// peer CPU, a deferred delivery). The accesses below dereference the user
+// VA through the active TTBR0, which is that process's root exactly while
+// its Running authority is held. A range is affine, so it cannot be kept
+// in a field or a global, and a blocked syscall leaves Takibi code through
+// its assembly continuation: no range survives a block, and the rerun
+// checks again.
+affine struct UserReadRange[process: usize] {
     private root: AddressSpaceRoot;
     private address: usize;
     private length: usize;
 }
 
-struct UserWriteRange {
+affine struct UserWriteRange[process: usize] {
     private root: AddressSpaceRoot;
     private address: usize;
     private length: usize;
 }
 
-must_use variant UserReadRangeResult { Fault; Ok(UserReadRange); }
-must_use variant UserWriteRangeResult { Fault; Ok(UserWriteRange); }
+must_use variant UserReadRangeResult[process: usize] {
+    Fault;
+    Ok(UserReadRange[process]);
+}
+must_use variant UserWriteRangeResult[process: usize] {
+    Fault;
+    Ok(UserWriteRange[process]);
+}
 
 // Outcome of a store into a validated write range. Validation does not
 // allocate a CoW page's private copy, so the store itself can still fail
@@ -179,22 +195,57 @@ fn user_range_span_ok(root: AddressSpaceRoot, address: usize, length: usize,
 // caller's currently-active root, normally `kernel_process_current_root()`
 // -- GitHub issue #263: this used to always validate against root 0's page
 // table regardless of which process issued the syscall).
-fn user_range_check_read(root: AddressSpaceRoot, address: usize, length: usize)
-        -> UserReadRangeResult {
+fn user_range_check_read(
+        current: borrow ProcessCurrent[process, ProcessState::Running],
+        address: usize, length: usize)
+        -> UserReadRangeResult[process] !{unsafe} {
+    let mut root: AddressSpaceRoot = kernel_process_current_root(current);
     if (user_range_span_ok(root, address, length, UserAccessMode::Read) == false) {
         return UserReadRangeResult::Fault;
     }
-    let mut range: UserReadRange = { root, address, length };
+    let mut range: UserReadRange[process] = { root, address, length };
     return UserReadRangeResult::Ok(range);
 }
 
-fn user_range_check_write(root: AddressSpaceRoot, address: usize, length: usize)
-        -> UserWriteRangeResult {
+fn user_range_check_write(
+        current: borrow ProcessCurrent[process, ProcessState::Running],
+        address: usize, length: usize)
+        -> UserWriteRangeResult[process] !{unsafe} {
+    let mut root: AddressSpaceRoot = kernel_process_current_root(current);
     if (user_range_span_ok(root, address, length, UserAccessMode::Write) == false) {
         return UserWriteRangeResult::Fault;
     }
-    let mut range: UserWriteRange = { root, address, length };
+    let mut range: UserWriteRange[process] = { root, address, length };
     return UserWriteRangeResult::Ok(range);
+}
+
+// Boot probes only: whether `root` would admit the range, without making
+// one. A probe runs on the boot root with no process Running, and a range
+// is the permission to dereference, which a probe of another root must not
+// hold.
+fn user_range_probe_read(root: AddressSpaceRoot, address: usize, length: usize)
+        -> bool {
+    return user_range_span_ok(root, address, length, UserAccessMode::Read);
+}
+
+fn user_range_probe_write(root: AddressSpaceRoot, address: usize, length: usize)
+        -> bool {
+    return user_range_span_ok(root, address, length, UserAccessMode::Write);
+}
+
+// The boot root's bytes at `address`, compared with `expected`. Boot probes
+// only: the boot root is the active TTBR0 while they run.
+fn user_probe_boot_read_matches(address: usize, expected: borrow [const u8; 8..])
+        -> bool !{unsafe} {
+    let mut root: AddressSpaceRoot = address_space_boot_root();
+    if (user_range_span_ok(root, address, 8, UserAccessMode::Read) == false) {
+        return false;
+    }
+    let mut range: UserReadRange[0] = { root, address, 8 };
+    for index: usize in 0..<8 {
+        if (user_read_byte(range, index) != expected[index]) { return false; }
+    }
+    return true;
 }
 
 // GitHub issue #199 follow-up: a write-validated range's underlying page
@@ -211,14 +262,16 @@ fn user_range_check_write(root: AddressSpaceRoot, address: usize, length: usize)
 // system silently accepting either range kind anywhere a read is
 // needed: issue #199's whole point was making a mismatched DIRECTION a
 // compile error, not making the read/write distinction disappear again.
-fn user_write_range_as_read(range: UserWriteRange) -> UserReadRange {
-    let mut read_range: UserReadRange = { range.root, range.address, range.length };
+fn user_write_range_as_read(range: borrow UserWriteRange[process])
+        -> UserReadRange[process] {
+    let mut read_range: UserReadRange[process] =
+        { range.root, range.address, range.length };
     return read_range;
 }
 
 // Only ever needed by the write side: a read never modifies a COW page,
 // so only user_write_*/copy_to_user*/user_zero_fill call this.
-fn user_range_resolve_cow(range: UserWriteRange) -> bool !{unsafe} {
+fn user_range_resolve_cow(range: borrow UserWriteRange[process]) -> bool !{unsafe} {
     if (range.length == 0) { return true; }
     let (span_ok, first, last) =
         user_range_l3_span(range.address, range.length);
@@ -237,7 +290,7 @@ fn user_range_resolve_cow(range: UserWriteRange) -> bool !{unsafe} {
     return true;
 }
 
-fn copy_from_user(range: UserReadRange, destination: borrow []u8) -> bool !{unsafe} {
+fn copy_from_user(range: borrow UserReadRange[process], destination: borrow []u8) -> bool !{unsafe} {
     if (destination.len > range.length) { return false; }
     let source_base: *u8 = unsafe { range.address as *u8 };
     let source_view = unsafe { source_base[0..<range.length as isize] };
@@ -245,7 +298,7 @@ fn copy_from_user(range: UserReadRange, destination: borrow []u8) -> bool !{unsa
     return copied == destination.len;
 }
 
-fn copy_to_user(range: UserWriteRange, source: borrow []const u8) -> UserWriteResult !{unsafe} {
+fn copy_to_user(range: borrow UserWriteRange[process], source: borrow []const u8) -> UserWriteResult !{unsafe} {
     if (source.len > range.length) { return UserWriteResult::Fault; }
     if (user_range_resolve_cow(range) == false) { return UserWriteResult::Fault; }
     let destination_base: *u8 = unsafe { range.address as *u8 };
@@ -262,7 +315,7 @@ fn copy_to_user(range: UserWriteRange, source: borrow []const u8) -> UserWriteRe
 // checked against the slice here, as a checked tail, so a caller never forms
 // a raw pointer into its buffer; a span outside the slice is refused like a
 // fault.
-fn copy_from_user_span(range: UserReadRange, destination: borrow []u8,
+fn copy_from_user_span(range: borrow UserReadRange[process], destination: borrow []u8,
                        offset: usize, length: usize) -> bool !{unsafe} {
     if (offset > destination.len) { return false; }
     let tail = destination[offset..<destination.len];
@@ -270,7 +323,7 @@ fn copy_from_user_span(range: UserReadRange, destination: borrow []u8,
     return copy_from_user(range, tail[0..<length]);
 }
 
-fn copy_to_user_span(range: UserWriteRange, source: borrow []const u8,
+fn copy_to_user_span(range: borrow UserWriteRange[process], source: borrow []const u8,
                      offset: usize, length: usize) -> UserWriteResult !{unsafe} {
     if (offset > source.len) { return UserWriteResult::Fault; }
     let tail = source[offset..<source.len];
@@ -278,12 +331,12 @@ fn copy_to_user_span(range: UserWriteRange, source: borrow []const u8,
     return copy_to_user(range, tail[0..<length]);
 }
 
-fn user_read_byte(range: UserReadRange, offset: usize) -> u8 !{unsafe} {
+fn user_read_byte(range: borrow UserReadRange[process], offset: usize) -> u8 !{unsafe} {
     let source_byte: *u8 = unsafe { (range.address + offset) as *u8 };
     return *source_byte;
 }
 
-fn user_write_byte(range: UserWriteRange, offset: usize, value: u8) -> UserWriteResult !{unsafe} {
+fn user_write_byte(range: borrow UserWriteRange[process], offset: usize, value: u8) -> UserWriteResult !{unsafe} {
     if (offset >= range.length) { return UserWriteResult::Fault; }
     if (user_range_resolve_cow(range) == false) { return UserWriteResult::Fault; }
     let field: *u8 = unsafe { (range.address + offset) as *u8 };
@@ -291,7 +344,7 @@ fn user_write_byte(range: UserWriteRange, offset: usize, value: u8) -> UserWrite
     return UserWriteResult::Written;
 }
 
-fn user_write_u32(range: UserWriteRange, offset: usize, value: u32)
+fn user_write_u32(range: borrow UserWriteRange[process], offset: usize, value: u32)
         -> UserWriteResult !{unsafe} {
     if (offset + 4 > range.length || offset + 4 < offset) { return UserWriteResult::Fault; }
     if (user_range_resolve_cow(range) == false) { return UserWriteResult::Fault; }
@@ -300,7 +353,7 @@ fn user_write_u32(range: UserWriteRange, offset: usize, value: u32)
     return UserWriteResult::Written;
 }
 
-fn user_write_u64(range: UserWriteRange, offset: usize, value: u64)
+fn user_write_u64(range: borrow UserWriteRange[process], offset: usize, value: u64)
         -> UserWriteResult !{unsafe} {
     if (offset + 8 > range.length || offset + 8 < offset) { return UserWriteResult::Fault; }
     if (user_range_resolve_cow(range) == false) { return UserWriteResult::Fault; }
@@ -314,13 +367,13 @@ fn user_write_u64(range: UserWriteRange, offset: usize, value: u64)
 // fd) without ever dereferencing a raw user pointer directly. Bounds
 // checked the same way as the write side; the bool result distinguishes
 // "out of range" from a genuine value of 0.
-fn user_read_u32(range: UserReadRange, offset: usize) -> (bool, u32) !{unsafe} {
+fn user_read_u32(range: borrow UserReadRange[process], offset: usize) -> (bool, u32) !{unsafe} {
     if (offset + 4 > range.length || offset + 4 < offset) { return (false, 0); }
     let field: *u32 = unsafe { (range.address + offset) as *u32 };
     return (true, *field);
 }
 
-fn user_read_u64(range: UserReadRange, offset: usize) -> (bool, u64) !{unsafe} {
+fn user_read_u64(range: borrow UserReadRange[process], offset: usize) -> (bool, u64) !{unsafe} {
     if (offset + 8 > range.length || offset + 8 < offset) { return (false, 0); }
     let field: *u64 = unsafe { (range.address + offset) as *u64 };
     return (true, *field);
@@ -330,7 +383,7 @@ fn user_read_u64(range: UserReadRange, offset: usize) -> (bool, u64) !{unsafe} {
 // rather than a new *u16 helper -- ppoll's pollfd.revents field is the
 // only current caller and only ever needs small (<256) bit-flag values,
 // so this avoids introducing a signed/u16 read-write pair for one use.
-fn user_write_u16(range: UserWriteRange, offset: usize, value: usize)
+fn user_write_u16(range: borrow UserWriteRange[process], offset: usize, value: usize)
         -> UserWriteResult !{unsafe} {
     if (offset + 2 > range.length || offset + 2 < offset) {
         return UserWriteResult::Fault;
@@ -340,7 +393,7 @@ fn user_write_u16(range: UserWriteRange, offset: usize, value: usize)
         user_write_byte(range, offset + 1, ((value >> 8) & 0xFF) as u8));
 }
 
-fn user_zero_fill(range: UserWriteRange) -> UserWriteResult !{unsafe} {
+fn user_zero_fill(range: borrow UserWriteRange[process]) -> UserWriteResult !{unsafe} {
     if (user_range_resolve_cow(range) == false) { return UserWriteResult::Fault; }
     let base: *u8 = unsafe { range.address as *u8 };
     let mut index: usize = 0;
@@ -443,49 +496,25 @@ fn user_memory_boundary_probe_run(base: usize,
 
     // Overflow: address near usize::MAX with a nonzero length must never
     // wrap around into an apparently-valid range.
-    match user_range_check_read(root, 0xFFFFFFFFFFFFFFF0, 32) {
-        UserReadRangeResult::Fault => {}
-        UserReadRangeResult::Ok(bad) => { ok = false; }
-    }
+    if (user_range_probe_read(root, 0xFFFFFFFFFFFFFFF0, 32)) { ok = false; }
 
     // Cross-page: a range spanning the mapped data page and the deliberately
     // unmapped page right after it must fault as a whole.
-    match user_range_check_read(root, data_va, PAGE_SIZE + 1) {
-        UserReadRangeResult::Fault => {}
-        UserReadRangeResult::Ok(bad) => { ok = false; }
-    }
+    if (user_range_probe_read(root, data_va, PAGE_SIZE + 1)) { ok = false; }
 
     // Wrong permission: Text-RX must reject Write while still allowing Read.
-    match user_range_check_read(root, text_va, 8) {
-        UserReadRangeResult::Fault => { ok = false; }
-        UserReadRangeResult::Ok(readable) => {}
-    }
-    match user_range_check_write(root, text_va, 8) {
-        UserWriteRangeResult::Fault => {}
-        UserWriteRangeResult::Ok(bad) => { ok = false; }
-    }
+    if (user_range_probe_read(root, text_va, 8) == false) { ok = false; }
+    if (user_range_probe_write(root, text_va, 8)) { ok = false; }
 
     // mprotect-style downgrade/upgrade on the data page.
-    match user_range_check_write(root, data_va, 8) {
-        UserWriteRangeResult::Fault => { ok = false; }
-        UserWriteRangeResult::Ok(writable) => {}
-    }
+    if (user_range_probe_write(root, data_va, 8) == false) { ok = false; }
     user_range_reprotect(root, base, base,
                          USER_RODATA_R_FLAGS);
-    match user_range_check_write(root, data_va, 8) {
-        UserWriteRangeResult::Fault => {}
-        UserWriteRangeResult::Ok(bad) => { ok = false; }
-    }
-    match user_range_check_read(root, data_va, 8) {
-        UserReadRangeResult::Fault => { ok = false; }
-        UserReadRangeResult::Ok(still_readable) => {}
-    }
+    if (user_range_probe_write(root, data_va, 8)) { ok = false; }
+    if (user_range_probe_read(root, data_va, 8) == false) { ok = false; }
     user_range_reprotect(root, base, base,
                          USER_RW_XN_FLAGS);
-    match user_range_check_write(root, data_va, 8) {
-        UserWriteRangeResult::Fault => { ok = false; }
-        UserWriteRangeResult::Ok(writable_again) => {}
-    }
+    if (user_range_probe_write(root, data_va, 8) == false) { ok = false; }
 
     user_pte_clear(base);
     user_pte_clear(base + 2);
@@ -610,18 +639,9 @@ fn user_memory_root_isolation_probe_run(root_a: AddressSpaceRoot, root_b: Addres
     }
 
     let mut ok: bool = true;
-    match user_range_check_write(checked_root_a, va, 8) {
-        UserWriteRangeResult::Fault => { ok = false; }
-        UserWriteRangeResult::Ok(writable) => {}
-    }
-    match user_range_check_write(checked_root_b, va, 8) {
-        UserWriteRangeResult::Fault => {}
-        UserWriteRangeResult::Ok(bad) => { ok = false; }
-    }
-    match user_range_check_read(checked_root_b, va, 8) {
-        UserReadRangeResult::Fault => { ok = false; }
-        UserReadRangeResult::Ok(readable) => {}
-    }
+    if (user_range_probe_write(checked_root_a, va, 8) == false) { ok = false; }
+    if (user_range_probe_write(checked_root_b, va, 8)) { ok = false; }
+    if (user_range_probe_read(checked_root_b, va, 8) == false) { ok = false; }
     if (user_page_class_at(checked_root_a, index) != 3) { ok = false; }
     if (user_page_class_at(checked_root_b, index) != 2) { ok = false; }
 

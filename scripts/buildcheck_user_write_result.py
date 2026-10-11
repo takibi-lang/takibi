@@ -33,7 +33,7 @@ def main() -> int:
     source = (repo / edited).read_text(encoding="ascii")
     cases = [
         ("handled store", """
-private fn user_write_control(range: UserWriteRange) -> bool !{unsafe} {
+private fn user_write_control(range: borrow UserWriteRange[process]) -> bool !{unsafe} {
     match user_write_join(user_zero_fill(range), user_write_u32(range, 0, 1)) {
         UserWriteResult::Fault => { return false; }
         UserWriteResult::Written => { return true; }
@@ -41,17 +41,17 @@ private fn user_write_control(range: UserWriteRange) -> bool !{unsafe} {
 }
 """, None),
         ("ignored store", """
-private fn user_write_control(range: UserWriteRange) !{unsafe} {
+private fn user_write_control(range: borrow UserWriteRange[process]) !{unsafe} {
     user_zero_fill(range);
 }
 """, ("must-use result of 'user_zero_fill'",)),
         ("store bound and never matched", """
-private fn user_write_control(range: UserWriteRange, source: borrow []u8) !{unsafe} {
+private fn user_write_control(range: borrow UserWriteRange[process], source: borrow []u8) !{unsafe} {
     let copied = copy_to_user_span(range, source, 0, 1);
 }
 """, ("must-use value 'copied' is never handled",)),
         ("store read as a bool", """
-private fn user_write_control(range: UserWriteRange, source: []u8) -> bool !{unsafe} {
+private fn user_write_control(range: borrow UserWriteRange[process], source: []u8) -> bool !{unsafe} {
     let sent: bool = copy_to_user(range, source);
     return sent;
 }

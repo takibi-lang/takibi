@@ -19,7 +19,11 @@ ALLOWED = {
     "process_running_here": Counter({
         "kernel_process_fanout_probe": 3,
         "kernel_process_trace_block_wake_probe": 2,
-        "syscall_vectored_prefix_wait_probe": 2,
+        "syscall_vectored_prefix_wait_probe": 3,
+        # GitHub issue #202: boot probes that check a user range after the
+        # dispatch they exercise take the boot process's authority for it.
+        "syscall_vectored_inetd_probe": 4,
+        "kernel_syscall_subset_probe": 2,
         "process_image_exec_resume_root": 1,
         "kernel_process_timer_schedule": 1,
         "kernel_process_syscall_return_schedule": 1,
@@ -34,7 +38,11 @@ ALLOWED = {
                                     "kernel_process_clone_rollback": 1}),
     "process_constructing_new": Counter({"process_constructing_here": 1,
                                          "kernel_process_clone_begin": 1}),
+    # GitHub issue #202: process_resuming_new is the exit handoff's resume of
+    # its successor, a return boundary, for the wait4 status write.
+    "process_resuming_new": Counter({"kernel_process_exit_reserved": 1}),
     "view ProcessCurrent": Counter({"process_running_new": 1,
+                                     "process_resuming_new": 1,
                                      "process_constructing_new": 1,
                                      "kernel_process_clone_context_install": 2,
                                      "kernel_process_clone_unselectable_probe": 1}),
@@ -106,7 +114,8 @@ def source_facts(source):
                 or (leaves_phase and changes_state)):
             if "changes_witness_ProcessCurrent" not in header:
                 failures.append(f"{name} changes current context without its witness marker")
-        if name in {"process_running_new", "process_constructing_new"}:
+        if name in {"process_running_new", "process_constructing_new",
+                    "process_resuming_new"}:
             if not header.startswith("private inline fn "):
                 failures.append(f"{name} must remain a private inline mint")
     return found, totals, declarations, tuple(failures)

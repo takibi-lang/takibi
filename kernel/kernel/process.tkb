@@ -879,6 +879,17 @@ private inline fn process_running_new(generation: usize @ process)
     return view ProcessCurrent[process, ProcessState::Running];
 }
 
+// The exit handoff's resume of its successor is a return boundary: the
+// successor's root is committed and it is reserved Running under its owner,
+// so the wait4 status write before its frame is resumed runs as that
+// process (GitHub issue #202).
+private inline fn process_resuming_new(
+        owner: borrow ScheduledProcessOwner[process],
+        running: borrow ScheduledProcessState[process, ProcessState::Running])
+        -> ProcessCurrent[process, ProcessState::Running] {
+    return view ProcessCurrent[process, ProcessState::Running];
+}
+
 private inline fn process_constructing_new(generation: usize @ process)
         -> ProcessCurrent[process, ProcessState::Constructing] {
     return view ProcessCurrent[process, ProcessState::Constructing];
@@ -9782,8 +9793,10 @@ private fn kernel_process_exit_reserved(
             // Releasing them is a drop with no run-time effect, so it moved
             // here from before the unlock.
             if (deliver_wait4) {
+                let resuming = process_resuming_new(owner, running);
                 kernel_syscall_wait4_deliver(
-                    owner, successor_frame, reaped_pid);
+                    owner, resuming, successor_frame, reaped_pid);
+                process_current_end(resuming);
             }
             scheduled_process_release(owner, running);
             return ExitSwitch::Resume(successor_frame);

@@ -246,6 +246,22 @@ calls takes that lock again. `kernel/kernel/signal_contention_evidence.tkb`
 shows the lost update with a forged guard and none under the lock.
 Reporters (DDB, the oops) read the words without it, as reporters do.
 
+## User memory ranges
+
+A user access dereferences the user VA through the active TTBR0, which is
+the right root only while the process the range was checked for is the one
+running here. `UserReadRange[process]` and `UserWriteRange[process]` are
+therefore made only under that process's `ProcessCurrent[process, Running]`
+(GitHub issue #202), and they are affine: neither a field nor a global can
+hold one, and a blocked syscall leaves Takibi code through its assembly
+continuation, so no range survives a block and the rerun checks again. Both
+hold under preemption, because the context switch restores the root with
+the process. Boot probes ask `user_range_probe_*` instead, which answer
+whether a root would admit a range without making one. Not covered: a
+second thread sharing the address space and unmapping between the check
+and the access. No address space is shared today; threads would need an
+address-space lock or a fault fixup on top of this.
+
 ## Connected sockets on a peer
 
 `read` and `write` on a connected TCP descriptor are admitted on any CPU
