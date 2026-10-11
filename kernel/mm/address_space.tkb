@@ -379,10 +379,8 @@ private fn address_space_backing_grow(
         PageRunAllocResult::OutOfMemory => { return false; }
         PageRunAllocResult::Allocated(run_owner) => {
             let base: usize = page_run_physical_address(run_owner);
-            let _run_index: usize =
-                page_run_owner_transfer_index(run_owner) as usize;
-            let RegionBytes::Assumed(chunk) = region_bytes_assume(
-                base, ADDRESS_SPACE_BACKING_CHUNK_PAGES * PAGE_SIZE) else {};
+            let RegionBytes::Assumed(chunk) =
+                page_run_into_region(run_owner) else {};
             match region_pool_grow(guard, chunk) {
                 RegionGrow(AddressSpaceBacking)::Grown => { return true; }
                 RegionGrow(AddressSpaceBacking)::TooSmall(back) => {

@@ -480,6 +480,17 @@ fn page_run_owner_transfer_index(owner: sink PageRunOwner[run])
     return owner.first;
 }
 
+// A run's bytes as a byte region, the run's ownership moving into it
+// (#637 step B1). The page allocator is the one place a page run becomes a
+// region; the region's eventual owner gives the pages back with
+// page_run_transferred_release_physical, as with a transferred run.
+fn page_run_into_region(owner: sink PageRunOwner[run]) -> RegionBytes !{unsafe} {
+    let base: usize = owner.physical;
+    let bytes: usize = owner.count * PAGE_SIZE;
+    let _first: usize = page_run_owner_transfer_index(owner);
+    return region_bytes_assume(base, bytes);
+}
+
 // Is every page of an aligned candidate run free? `first` is a multiple
 // of `count`, so `first + k` cannot wrap past the pool while
 // `first + count <= page_capacity()`, which the caller checks.

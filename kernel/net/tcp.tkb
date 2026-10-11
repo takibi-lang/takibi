@@ -716,10 +716,8 @@ fn tcp_frame_take() -> (Place(exists p: addr. exists k: usize. RegionSlot(NetFra
                     PageRunAllocResult::OutOfMemory => { attempts = 2; }
                     PageRunAllocResult::Allocated(run_owner) => {
                         let base: usize = page_run_physical_address(run_owner);
-                        let _run_index: usize =
-                            page_run_owner_transfer_index(run_owner) as usize;
-                        let RegionBytes::Assumed(chunk) = region_bytes_assume(
-                            base, TCP_FRAME_CHUNK_PAGES * PAGE_SIZE) else {};
+                        let RegionBytes::Assumed(chunk) =
+                            page_run_into_region(run_owner) else {};
                         match region_pool_grow(guard, chunk) {
                             RegionGrow(NetFrame)::Grown => {}
                             RegionGrow(NetFrame)::TooSmall(back) => {
@@ -1131,10 +1129,8 @@ private fn tcp_connection_pool_grow(
         PageRunAllocResult::OutOfMemory => { return false; }
         PageRunAllocResult::Allocated(run_owner) => {
             let base: usize = page_run_physical_address(run_owner);
-            let _run_index: usize =
-                page_run_owner_transfer_index(run_owner) as usize;
-            let RegionBytes::Assumed(chunk) = region_bytes_assume(
-                base, TCP_CONNECTION_CHUNK_PAGES * PAGE_SIZE) else {};
+            let RegionBytes::Assumed(chunk) =
+                page_run_into_region(run_owner) else {};
             match region_pool_grow(guard, chunk) {
                 RegionGrow(TcpConnection)::Grown => { return true; }
                 RegionGrow(TcpConnection)::TooSmall(back) => {
@@ -1370,9 +1366,8 @@ fn pin_sharing_setup() -> PinSharingSetupResult !{unsafe} {
         PageRunAllocResult::Allocated(owner) => { owner }
     };
     let base: usize = page_run_physical_address(run);
-    let transferred: usize = page_run_owner_transfer_index(run) as usize;
     pin_sharing_page = base;
-    let RegionBytes::Assumed(chunk) = region_bytes_assume(base, PAGE_SIZE) else {};
+    let RegionBytes::Assumed(chunk) = page_run_into_region(run) else {};
     let guard = pin_sharing_lock();
     match region_pool_grow(guard, chunk) {
         RegionGrow(PinSharingCell)::TooSmall(back) => {
@@ -1829,10 +1824,8 @@ fn tcp_retx_take() -> Place(exists p: addr. exists k: usize. RegionSlot(RetxEntr
                     PageRunAllocResult::OutOfMemory => { attempts = 2; }
                     PageRunAllocResult::Allocated(run_owner) => {
                         let base: usize = page_run_physical_address(run_owner);
-                        let _run_index: usize =
-                            page_run_owner_transfer_index(run_owner) as usize;
-                        let RegionBytes::Assumed(chunk) = region_bytes_assume(
-                            base, TCP_RETX_CHUNK_PAGES * PAGE_SIZE) else {};
+                        let RegionBytes::Assumed(chunk) =
+                            page_run_into_region(run_owner) else {};
                         match region_pool_grow(guard, chunk) {
                             RegionGrow(RetxEntry)::Grown => {}
                             RegionGrow(RetxEntry)::TooSmall(back) => {
