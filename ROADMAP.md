@@ -63,8 +63,9 @@ list (maintainer, 2026-10-09).
 
 1. **Stored authority for arrays and pools.** #131's remaining shapes
    with #672 stage 2: array-element places, an array of indexed owners, and
-   borrowing an element in place, started when a consumer needs it (the
-   trigger on #131).
+   borrowing an element in place: borrowing in place (place_borrow) and
+   runtime-length arrays of places (#749) are done, driven by #744 and
+   #746.
 2. **The process record.** Threads sharing an address space are planned
    separately on #742.
 3. **#637 stage 3: shrinking the mint list.** The file-confinement flag is
@@ -73,10 +74,14 @@ list (maintainer, 2026-10-09).
    Step A is done (2026-10-11: RPi5 PCIe, virtio-net, virtio-blk, the
    system timer DTB reader and xHCI registers through IoHandles; the
    xHCI doorbell and ERDP release are named boundaries). #744 (B2, page.tkb carving regions handed over by a small memory-map
-   mint) is done (2026-10-11). Next:
-   #749 (runtime-length arrays of places, #131's general element rule,
-   chosen over a page-specific built-in), then #746 (page uniqueness by
-   type in the compact per-page form, on #749), then #745 (B3, intrusive_pool absorbed
+   mint) is done (2026-10-11).
+   #749 (runtime-length arrays of places, #131's general element rule) is
+   done (2026-10-11). **Next: #746** (page uniqueness by type on #749),
+   which starts with a **pending maintainer decision** recorded on the
+   issue: how a page's permission returns to its element across lock
+   sections, (B) a runtime-checked put by address or (C) holder-tied
+   identities designed first on #750. Read #746's last comment before
+   writing code. Then #745 (B3, intrusive_pool absorbed
    into RegionPool, process records holding their permission on #746's
    mechanism, decision 2026-10-11). Performance follow-up, not on the
    critical path: #748. Consolidating the kernel-driven built-ins into
