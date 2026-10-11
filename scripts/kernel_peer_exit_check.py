@@ -15,7 +15,7 @@ from gdb_interrupt import interrupt_after  # noqa: E402
 
 def current_record(cpu):
     execution = gdb.parse_and_eval("execution_state")[cpu]
-    slot = int(execution["current_handle"]["pool_index"])
+    slot = int(execution["current_handle"]["pool_index"]["raw"])
     if not bool(execution["current_live"]) or slot == 0:
         return None
     slot_type = gdb.lookup_type("struct IntrusiveSlot$ProcessRecord")

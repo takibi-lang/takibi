@@ -1785,14 +1785,11 @@ fn intrusive_pool_probe_handle(T: type, pool: &mut IntrusivePool(T) @ pool_id,
         pool, slot_address.raw, generation);
 }
 
-// The raw-address form, paired with the typed one above for the same reason
-// intrusive_pool_matches_untrusted is paired with intrusive_pool_matches:
-// some consumers store the slot as a plain numeric identity rather than as
-// an IntrusiveSlotAddress -- an fd block, a UnifiedObjectHandle, a TCP
-// connection's owner -- and cannot hand over a minted address. Validating
-// the integer is what earns it a view, so the split costs no safety; the
-// name is what says which callers still owe issue #396 a conversion.
-fn intrusive_pool_probe_handle_untrusted(
+// The raw-address body of the typed probe above. Private since GitHub issue
+// #518: every consumer that carried a (slot, generation) pair now stores an
+// IntrusiveSlotAddress, so no caller outside this file holds an integer it
+// could hand here.
+private fn intrusive_pool_probe_handle_untrusted(
         T: type, pool: &mut IntrusivePool(T) @ pool_id,
         slot_address: usize, generation: usize)
         -> IntrusiveSlotProbe[pool_id]
@@ -1828,18 +1825,16 @@ must_use variant IntrusiveAllocationProbe[pool_id: addr, allocation: usize] {
     Live(IntrusiveAllocationView[pool_id, allocation]);
 }
 
-fn intrusive_pool_probe_allocation_untrusted(
+fn intrusive_pool_probe_allocation(
         T: type, pool: &mut IntrusivePool(T) @ pool_id,
-        slot_address: usize, generation: usize @ allocation)
+        address: IntrusiveSlotAddress, generation: usize @ allocation)
         -> IntrusiveAllocationProbe[pool_id, allocation]
         !{unsafe, acquires_lock_40_pool, lock_guard_40_pool} {
     let flags: usize = pool_lock_acquire(pool.pool_tag, &(*pool).lock);
-    if (intrusive_pool_matches_untrusted(
-            pool, slot_address, generation) == false) {
+    if (intrusive_pool_matches(pool, address, generation) == false) {
         pool_lock_release(pool.pool_tag, &(*pool).lock, flags);
         return IntrusiveAllocationProbe::NoPayload;
     }
-    let mut address: IntrusiveSlotAddress = { slot_address };
     let mut minted: IntrusiveAllocationView[pool_id, allocation] = {
         address, generation, pool.pool_tag, (&(*pool).lock) as usize, flags
     };

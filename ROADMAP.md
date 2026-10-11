@@ -63,9 +63,9 @@ list (maintainer, 2026-10-09).
 
 1. **Stored authority for arrays and pools.** #131's remaining shapes
    with #672 stage 2: array-element places, an array of indexed owners, and
-   borrowing an element in place. #518 (typed slot addresses past the pool)
-   and #343 (use-after-free now that a heap exists) are its first
-   consumers.
+   borrowing an element in place. #343 (use-after-free now that a heap
+   exists) is its first consumer; #518's typed slot addresses are done
+   (2026-10-10).
 2. **The process record.** #202 (UserRange epoch); the rest of the
    typestate group is done.
 3. **#637 stage 3: shrinking the mint list.** The file-confinement flag is
