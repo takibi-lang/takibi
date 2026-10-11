@@ -1,5 +1,0 @@
-smp_slab
-core0 -> core1
-remote free: ok
-reuse: ok
-done

@@ -25,10 +25,10 @@ kernel features, fixes, fixtures, and target code belong there.
 is independent of real timing, interrupts, caches, MMIO, and concurrency. It is
 appropriate for executable compiler or language tests and pure algorithms.
 
-The `examples/` tree contains historical STM32 and RPi5 code. We occasionally
-test only its STM32 side with `make -f examples/Makefile allcheck`. Do not add
-features or parity updates there unless the user explicitly requests a change
-to a historical artifact; its nested `AGENTS.md` contains the detailed policy.
+The historical `examples/` tree (STM32, RPi3 and early RPi5 bare-metal
+milestones) was retired on 2026-10-11; HISTORY.md records it, and
+`git log --diff-filter=D -- examples/` finds the commit that removed it.
+Do not restore it as a test surface.
 
 Do not silently expand a kernel implementation task into compiler, root
 build-system, or other non-`kernel/` and non-`linux_user/` implementation work
@@ -251,7 +251,6 @@ Read the applicable nested guidance before editing these trees:
   limitations.
 - `kernel/AGENTS.md` for maintained kernel implementation rules.
 - `kernel/arch/arm64/AGENTS.md` for AArch64 exception and return invariants.
-- `examples/AGENTS.md` for historical artifacts.
 - `kernel/models/AGENTS.md` for the TLA+ protocol models.
 
 Use these cross-agent skills when the task matches. Codex reads the canonical
@@ -413,7 +412,6 @@ authoritative for the current target graph.
 - `test/`: Alcotest compiler tests.
 - `kernel/`: maintained standalone kernel. See `kernel/AGENTS.md`.
 - `linux_user/`: maintained native executable tests.
-- `examples/`: historical artifacts. See `examples/AGENTS.md`.
 - `scripts/`: build checks and test or hardware runners.
 - `docs/`: durable current technical knowledge.
 - `img/`: project images.

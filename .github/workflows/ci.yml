@@ -5,7 +5,7 @@ name: CI
 # models, and the seven QEMU lanes. `make cicheck` is that set, derived from the same variable allcheck
 # uses so the two cannot drift apart.
 #
-# The RPi5 and STM32 lanes are absent deliberately, not by oversight. A
+# The RPi5 lane is absent deliberately, not by oversight. A
 # GitHub-hosted runner has no board. A self-hosted runner on the machine that
 # does have them would queue behind a workstation that is switched off
 # overnight and would then take the board at whatever moment it came back --
@@ -107,25 +107,6 @@ jobs:
             # dune-project is the dependency source; Dune generates takibi.opam.
             opam install -y --deps-only --with-test .
           '
-
-      # Runs langcheck, slowcheck and the unit tests a second time, since cicheck below
-      # runs them too. The duplication is known and costs about 27 s locally.
-      # It is kept because the alternative -- naming allbuild's pieces here by
-      # hand -- silently stops covering whatever allbuild gains later, and
-      # silent coverage loss is a worse failure than a wasted half minute.
-      # What it buys is the cross-tree compile proof: every examples/ target,
-      # which nothing else in this job builds.
-      # GH_TOKEN, because slowcheck now asks GitHub one question: does every
-      # row of docs/KNOWN_INTERMITTENTS.md still name an OPEN issue (#565).
-      # It is one `gh issue list` call, skipped entirely when that table is
-      # empty. Scoped to the two steps that run slowcheck rather than set on
-      # the job, so a step that has no business reaching GitHub still cannot.
-      - name: Build every tree
-        run: |
-          eval $(opam env)
-          bash scripts/run_lane.sh ci-allbuild make allbuild
-        env:
-          GH_TOKEN: ${{ github.token }}
 
       # One lane at a time. Every QEMU lane runs `-smp 2`, so N lanes ask for
       # 2N guest vCPUs, and GitHub issue #509 measured what starving them

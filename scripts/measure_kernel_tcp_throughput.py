@@ -9,10 +9,9 @@ failing to transfer -- and the board already absorbs 29.8 MB/s over USB mass
 storage during an ordinary boot. What nothing measured is the kernel's own
 wire.
 
-Nothing in the tree measured it because the tools that look like they do are
-about a different stack: `scripts/profile_tcp_burst_load.py` drives
-`examples/tcp_echo`, and the maintained kernel's own HTTP fixtures serve files
-too small to time.
+Nothing in the tree measured it: the only TCP load tool drove a retired
+bare-metal example's stack, and the maintained kernel's own HTTP fixtures
+serve files too small to time.
 
 This needs no kernel change. The maintained kernel runs BusyBox `httpd -f -p
 8080 -h /`, so the rootfs is already reachable over HTTP, and `/bin/

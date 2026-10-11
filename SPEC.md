@@ -272,8 +272,8 @@ parameter value, or top-level declaration name.
   struct's alignment for this one variable. Typical use: a stack-resident
   DMA buffer that must never share a cache line with unrelated data (a
   cache-line invalidate on an unaligned buffer can silently discard
-  adjacent live stack data -- see `examples/common_stm32/sdmmc.tkb`'s
-  `disk_read` contract and `examples/align/align.tkb` for the local form).
+  adjacent live stack data -- see the retired `examples/common_stm32/sdmmc.tkb`'s
+  `disk_read` contract and `linux_user/align/align.tkb` for the local form).
 - **`*align(N) T`** -- a pointer PROVABLY a multiple of N bytes (GitHub
   issue #102), the pointer analogue of a refined integer's
   `{lo..<hi as base}`. `align(N)` sits between the pointer sigil and the
@@ -319,7 +319,7 @@ parameter value, or top-level declaration name.
     `M` is a multiple of N -- struct `align(M)` tail-pads `sizeof` to `M`
     (see "Structs" above), so GEP's per-element stride is itself always a
     multiple of N regardless of the index. This is what proves
-    `eth_rx_descs + i` in `examples/common_stm32/eth.tkb`'s real DMA
+    `eth_rx_descs + i` in the retired `examples/common_stm32/eth.tkb`'s real DMA
     descriptor ring (`EthDmaDesc` is `align(32)`), distinct from the
     literal/named-constant offset proof above (which reasons about a byte
     OFFSET, not an element TYPE's own size).
@@ -327,12 +327,12 @@ parameter value, or top-level declaration name.
     struct is not automatically proven (only the struct's own instances/
     array elements are); general symbolic congruence beyond literal/
     named-constant multipliers and this element-stride rule remains out
-    of scope. See `examples/align_ptr_proof/align_ptr_proof.tkb` for a
+    of scope. See `linux_user/align_ptr_proof/align_ptr_proof.tkb` for a
     worked example and HISTORY.md's issue #102 entries for the full
     design history, including Stage 2's retrofit of
-    `examples/common_stm32/sdmmc.tkb`'s `disk_read` (no longer needs its
+    the retired `examples/common_stm32/sdmmc.tkb`'s `disk_read` (no longer needs its
     own bounce buffer) and every real caller reaching it through
-    `examples/common/fat12.tkb`.
+    the retired `examples/common/fat12.tkb`.
 - **Undetermined types are a compile error, not a silent `i32` default.**
   If nothing pins a bare `let`/`let mut`'s type (no annotation, and no
   later use that determines it), the compiler rejects it rather than
@@ -497,7 +497,7 @@ parameter value, or top-level declaration name.
   compiler builtins for native-width unsigned arithmetic. Both operands
   must be `usize`, and the program must declare the standard result shape
   `must_use variant CheckedUsize { Value(usize); Overflow; }` (the
-  reusable declaration is in `examples/common/checked_usize.tkb`). The
+  reusable declaration is in `linux_user/common/checked_usize.tkb`). The
   operation returns `Value(result)` when representable and `Overflow`
   otherwise; it never wraps silently and never emits a trap. Matching the
   result is exhaustiveness-checked like any other closed variant.
@@ -687,7 +687,7 @@ skips it; they do not count as effects on every path.
   or an owned array field instead. For individually named hardware
   registers previously grouped into one struct purely for cross-file
   type sharing, use separate module-level `*io`-qualified globals
-  instead (`examples/common_qemu/gic_regs.tkb`'s migration is the
+  instead (the retired `examples/common_qemu/gic_regs.tkb`'s migration is the
   reference example). A single, large, OFFSET-CONSISTENT register block
   is unaffected either way: that is a `*io Struct` POINTER VARIABLE
   (`let regs: *io BigRegBlock = ...;`, see "MMIO / Volatile" below for
@@ -872,7 +872,7 @@ allowing deliberate abandonment.
   loop could otherwise consume the same handle on more than one
   iteration. A handle both declared and consumed inside the same loop
   iteration is fine. A `let mut` handle reassigned to a fresh value on
-  every iteration (e.g. `examples/common/sync.tkb`'s `cond_wait`
+  every iteration (e.g. the retired `examples/common/sync.tkb`'s `cond_wait`
   drop-and-reacquire pattern, `g = cond_wait(seq, g, m);` inside a
   `while`) is also fine: reassignment clears the variable's consumed
   status, so the loop-restriction check never sees it as "consumed
@@ -969,8 +969,8 @@ parameter modes work identically. Everything else is stricter:
 
 Matching a linear variant consumes the outer package and creates a fresh
 obligation for the selected payload. That payload must be discharged in its
-arm. See `examples/linear_obligation` (positive) and
-`examples/linear_never_consumed`, `linear_branch_missed`,
+arm. See `linux_user/linear_obligation` (positive) and
+the retired `examples/linear_never_consumed`, `linear_branch_missed`,
 `linear_cast_discard`, `linear_overwrite`, and
 `variant_linear_payload_missed` (compile-error companions).
 
@@ -1094,7 +1094,7 @@ these stable syntactic forms:
 
 The singleton annotation and `addr` term erase. Both lock and unlock retain
 one ordinary runtime pointer, and the guard contributes no ABI operand or
-result. `examples/mutex_guard_identity_wrong` demonstrates rejection of a
+result. The retired `examples/mutex_guard_identity_wrong` demonstrates rejection of a
 guard acquired from one mutex and passed with another.
 
 An indexed view may be the direct body of an outermost variant-payload
@@ -1116,15 +1116,15 @@ with the case's exact static state. Every arm must preserve, transition, or
 sink that linear view. The variant's tag remains at runtime; the existential
 binder, view payload, connection identity, and enum static state all erase.
 The HTTP server's private `tcp_conn_dispatch` is the exhaustive bridge from
-its runtime `ConnState` byte into this package. `examples/tcp_conn_view` is
+its runtime `ConnState` byte into this package. `linux_user/tcp_conn_view` is
 the focused executable state-dispatch fixture;
 `tcp_conn_state_wrong` and `tcp_conn_dispatch_missed_wrong` fix the state and
 all-path obligation failures.
 
 Explicit `forall`, direct/general existential types outside variant payloads,
 propositions, and solver discharge are not implemented. See
-`examples/common/http_conn_state.tkb` for the non-indexed
-`PendingTcpEvent` use and `examples/indexed_view` for integer-indexed view
+the retired `examples/common/http_conn_state.tkb` for the non-indexed
+`PendingTcpEvent` use and `linux_user/indexed_view` for integer-indexed view
 change.
 
 ## Closed Variants and Existential Owners (Takibi Core Slice 3)
@@ -1430,12 +1430,12 @@ storage restrictions; the stable owner-slot increment adds the one sealed
 linear-variant exception described below. Real positive uses are
 `NetRxAcquire` in the QEMU and
 STM32 Ethernet drivers, `FatOpenResult` in FAT12, and `TcpConnDispatch` in
-`examples/tcp_conn_view`. `http_server_sdcard_rtos` additionally uses a
+`linux_user/tcp_conn_view`. `http_server_sdcard_rtos` additionally uses a
 private `SdRequestChan` whose slot copies the plain
 `Init | ReadChunk(SdReadChunkRequest) | FileSize(*u8)` variant under its mutex.
 This replaces the former multi-channel pointer-to-`usize` request encoding;
 the response remains the existing `i32` rendezvous channel. Focused failures live in
-`examples/variant_linear_payload_missed`,
+the retired `examples/variant_linear_payload_missed`,
 `variant_existential_identity_wrong`, and
 `variant_nonexhaustive_wrong`, plus the two `tcp_conn_*_wrong` fixtures; each
 source explains the rejected rule in English.
@@ -1675,16 +1675,16 @@ field, makes every transfer explicit and linear, and associates the exchange
 with the same-container lock address carried by the guard. It does not prove
 that the guard-producing function actually acquired a runtime lock or that a
 private runtime flag is equivalent to the variant tag. Those remain trusted
-module obligations. `examples/rtos_demo` provides the positive
+module obligations. The retired `examples/rtos_demo` provides the positive
 ownership-bearing rendezvous; the focused failures are
-`examples/stable_owner_without_guard_wrong` and
-`examples/stable_owner_result_dropped_wrong`, plus
-`examples/stable_owner_wrong_lock_wrong` for cross-lock exchange. The arrayed
+the retired `examples/stable_owner_without_guard_wrong` and
+the retired `examples/stable_owner_result_dropped_wrong`, plus
+the retired `examples/stable_owner_wrong_lock_wrong` for cross-lock exchange. The arrayed
 form's own positive/negative coverage (GitHub issue #158) lives inline in
 `test/test_takibi.ml` rather than as separate `examples/` fixtures (a full
 codegen-through-LLVM-IR-verification positive case, plus mismatched-index,
 stale-index-after-reassignment, local-array, and struct-nested-array
-negatives) -- `examples/el0_shell/el0_shell.tkb`'s own per-page
+negatives) -- the retired `examples/el0_shell/el0_shell.tkb`'s own per-page
 copy-on-write fd/page table is the first real consumer.
 
 ### Places guarded by a global lock (GitHub issues #131, #686)
@@ -2254,10 +2254,9 @@ used in real code, which requires the pair to be a value manipulable
 inside function bodies, not one that scatters into separate locals at
 every call site.
 
-See examples/tuple_pair (positive: try-style `(bool, i32)`, a
-`(data, obligation)` pair, and nesting) and examples/
-tuple_linear_leak_wrong, tuple_field_wrong, tuple_cast_wrong
-(compile-error companions).
+See linux_user/tuple_pair (positive: try-style `(bool, i32)`, a
+`(data, obligation)` pair, and nesting); the compile-error companions are
+Alcotest cases in `test/test_takibi.ml`.
 
 ## Enums
 
@@ -2645,7 +2644,7 @@ back to DMA.
   modes and region ties erase; raw pointers and slices retain their ordinary
   LLVM calling convention.
 
-See `examples/net_rx_use_after_release_wrong` for the focused
+See the retired `examples/net_rx_use_after_release_wrong` for the focused
 compile-error fixture; the real positive fixtures are the network
 examples themselves, whose frame access all flows through the annotated
 `net_rx_frame`.
@@ -2682,9 +2681,9 @@ the authority-rebinding and aggregate-storage barriers apply identically to
 guard-derived pointers. Passing one across a direct named call is governed by
 the same verified `borrow` callee boundary as an owner-derived slice.
 
-`examples/rtos_demo` is the real positive use: its private `Shared` value is
+The retired `examples/rtos_demo` is the real positive use: its private `Shared` value is
 reachable only through `shared_access(g)`. The focused
-`examples/guard_pointer_after_unlock_wrong` fixture consumes the guard and
+the retired `examples/guard_pointer_after_unlock_wrong` fixture consumes the guard and
 then attempts a field read through the old pointer.
 
 ## Explicit Loan Transfer
@@ -3899,7 +3898,7 @@ record readable; per-CPU rings stay independently written.
   compile error (annotate it, or use `as T`). Taking a bare function
   pointer to an overloaded name is rejected today (no
   expected-type-based selector yet).
-- `uart_print`/`uart_println` (in `examples/common/print.tkb`) are the
+- `uart_print`/`uart_println` (in `linux_user/common/print.tkb`) are the
   standard example of this: overloaded for `bool` and every
   signed/unsigned integer width including `isize`/`usize`. Narrow types
   share 32-bit conversion cores and wide types share 64-bit cores;
@@ -3994,8 +3993,8 @@ record readable; per-CPU rings stay independently written.
   floor. A signed base (`i8`/`i16`/`i32`/`i64`/`isize`) with no incoming
   range and no explicit lower bound in the condition is NOT narrowed by
   a hi-only condition -- it could still be negative, so both sides must
-  be written out by hand (`examples/refined/refined.tkb` and
-  `examples/narrow/narrow.tkb` demonstrate this signed case
+  be written out by hand (`linux_user/refined/refined.tkb` and
+  `linux_user/narrow/narrow.tkb` demonstrate this signed case
   deliberately, including a negative input that the two-sided check
   correctly rejects).
 - **Early-return-guard narrowing**: `if (cond) { return ...; }` (or any

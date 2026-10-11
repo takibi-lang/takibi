@@ -614,8 +614,7 @@ let () =
        The judgment is what the type system could prove at IR-generation
        time -- deliberately NOT whether LLVM's optimizer would fold a given
        check away later (see Llvm_gen.trap_sites' comment). Every unproven
-       site is reported, not just the first, mirroring run_qemutest.sh's
-       report-all-failures philosophy. *)
+       site is reported, not just the first. *)
     if !forbid_trap && !Llvm_gen.trap_sites <> [] then begin
       let sites = List.rev !Llvm_gen.trap_sites in
       let groups = Trap_diagnostics.group sites in

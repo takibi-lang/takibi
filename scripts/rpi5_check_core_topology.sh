@@ -4,12 +4,12 @@
 # and reports which core is running takibi code vs. still parked in
 # Trusted Firmware-A's own EL3 idle loop. Opt-in diagnostic, not part of
 # make hwcheck-rpi5: it momentarily redirects a HALTED core's own PC into
-# a tiny scratch-RAM probe (examples/common_rpi5/smp_probe.S) and single-
+# a tiny scratch-RAM probe (kernel/platform/rpi5/jtag/smp_probe.S) and single-
 # steps through it, then restores the ORIGINAL PC before resuming --
 # never touches TF-A's own code/state, only reads a read-only ID
 # register (MPIDR_EL1 has no side effects). This is exactly the
-# technique that found examples/common_rpi5/startup.S's real core-
-# selection bug (GitHub issue #163): BCM2712's MPIDR_EL1 sets the MT bit
+# technique that found the historical RPi5 bring-up startup code's real
+# core-selection bug (GitHub issue #163): BCM2712's MPIDR_EL1 sets the MT bit
 # and numbers cores in Aff1 (bits[15:8]), not Aff0 (bits[7:0], always 0
 # on every core here) -- unlike BCM2837, which RPi3's own startup.S
 # correctly reads via plain Aff0.
@@ -17,16 +17,16 @@
 # Usage: scripts/rpi5_check_core_topology.sh
 # Requires: real RPi5 + Debug Probe attached, board already running
 # ANY takibi payload on cpu0 (e.g. after `make hwcheck-rpi5` or a manual
-# `scripts/rpi5_jtag_load.sh`) or sitting in examples/common_rpi5/
-# jtag_stub.S's own spin loop -- either way, cpu0 must already be at a
+# `scripts/rpi5_jtag_load.sh`) or sitting in
+# kernel/platform/rpi5/jtag/jtag_stub.S's own spin loop -- either way, cpu0 must already be at a
 # LOW, EL2H, takibi-controlled PC for this script's own safety
 # reasoning to hold. Does not itself inject a payload onto cpu0.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BCM2712_CFG="$REPO_ROOT/examples/common_rpi5/bcm2712.cfg"
-PROBE_S="$REPO_ROOT/examples/common_rpi5/smp_probe.S"
-PROBE_LD="$REPO_ROOT/examples/common_rpi5/smp_probe.ld"
+BCM2712_CFG="$REPO_ROOT/kernel/platform/rpi5/jtag/bcm2712.cfg"
+PROBE_S="$REPO_ROOT/kernel/platform/rpi5/jtag/smp_probe.S"
+PROBE_LD="$REPO_ROOT/kernel/platform/rpi5/jtag/smp_probe.ld"
 PROBE_ADDR=0x00090000
 
 OPENOCD_ARGS=(
@@ -40,7 +40,7 @@ trap 'rm -rf "$work_dir"' EXIT
 llvm-mc-19 --triple=aarch64-none-elf --filetype=obj "$PROBE_S" -o "$work_dir/smp_probe.o"
 ld.lld-19 -T "$PROBE_LD" "$work_dir/smp_probe.o" -o "$work_dir/smp_probe.elf"
 
-echo "Loading MPIDR_EL1 probe (examples/common_rpi5/smp_probe.S) at $PROBE_ADDR via bcm2712.cpu3..."
+echo "Loading MPIDR_EL1 probe (kernel/platform/rpi5/jtag/smp_probe.S) at $PROBE_ADDR via bcm2712.cpu3..."
 openocd "${OPENOCD_ARGS[@]}" \
     -c 'init' \
     -c 'targets bcm2712.cpu3' \

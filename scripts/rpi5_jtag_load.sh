@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
 # Injects a bare-metal ELF into a Raspberry Pi 5 (BCM2712) over SWD, using
-# the official Raspberry Pi Debug Probe (CMSIS-DAP) -- see
-# examples/common_rpi5/AGENTS.md for the full rationale. Adapted from
-# scripts/rpi3_jtag_load.sh; the two real differences from RPi3 are: (1)
-# transport is SWD via a CMSIS-DAP interface, not JTAG via a generic FTDI
-# adapter, and (2) the target config (examples/common_rpi5/bcm2712.cfg) is
-# vendored in this repo, since upstream OpenOCD 0.12.0 does not ship one.
+# the official Raspberry Pi Debug Probe (CMSIS-DAP) -- see kernel/README.md
+# for the SD-card stub it relies on. Adapted from the historical RPi3 JTAG
+# loader; the two real differences from RPi3 are: (1) transport is SWD via
+# a CMSIS-DAP interface, not JTAG via a generic FTDI adapter, and (2) the
+# target config (kernel/platform/rpi5/jtag/bcm2712.cfg) is vendored in this repo, since upstream OpenOCD 0.12.0 does not ship one.
 #
-# Safety check, REDESIGNED for GitHub issue #165 (adding an RPi5 MMU path,
-# examples/common_rpi5/mmu.S) -- the PREVIOUS "must be at EL2H with the
+# Safety check, REDESIGNED for GitHub issue #165 (adding an RPi5 MMU path) -- the PREVIOUS "must be at EL2H with the
 # MMU disabled" check (see git history) stopped being valid the moment
 # our own payloads started calling mmu_init: every legitimate takibi
 # kernel now runs with the MMU on too, so "MMU disabled" could no longer
@@ -31,7 +29,7 @@
 # NEW discriminator: current mode is EL1H or EL2H AND halted PC is below
 # RPI5_SAFE_PC_MAX
 # (32MB, 0x02000000). Every takibi payload here (jtag_stub.S at 0x80000,
-# every examples/*/kernel_rpi5.elf at 0x200000, see link.ld) executes
+# every kernel image at 0x200000) executes
 # from a fixed LOW physical address with the EL2 stage 1 MMU either off or
 # identity-mapped -- comfortably under 32MB with over 100x headroom for
 # growth. A warm reset may replay the resident Takibi payload at EL1 instead
@@ -71,9 +69,9 @@ set -euo pipefail
 # entirely without needing bignum arithmetic.
 RPI5_SAFE_PC_MAX_HEX="0000000002000000"
 
-ELF="${1:-examples/start/kernel_rpi5.elf}"
+ELF="${1:?usage: $0 <kernel ELF>}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BCM2712_CFG="$REPO_ROOT/examples/common_rpi5/bcm2712.cfg"
+BCM2712_CFG="$REPO_ROOT/kernel/platform/rpi5/jtag/bcm2712.cfg"
 
 if [ ! -f "$ELF" ]; then
     echo "error: $ELF not found -- build it first (make $ELF)" >&2
@@ -162,7 +160,7 @@ if [ -n "${RPI5_SWD_SPEED:-}" ]; then
 fi
 
 # Pass 1: halt, read PC + current exception level, resume immediately --
-# read-only, same reasoning as rpi3_jtag_load.sh's own check pass.
+# read-only.
 CHECK_LOG=$(mktemp)
 if ! openocd "${OPENOCD_ARGS[@]}" "${OPENOCD_SPEED_ARGS[@]}" \
     -c 'init' \
@@ -192,7 +190,7 @@ if [ -z "$current_mode" ] || [ -z "$mmu_state" ] || [ -z "$dtb_magic" ]; then
 fi
 if [ "$dtb_magic" != "edfe0dd0" ]; then
     echo "error: SD spin stub did not capture a valid firmware DTB at 0x00100000" >&2
-    echo "       (read 0x${dtb_magic}; rebuild and install examples/common_rpi5/jtag_stub.img," >&2
+    echo "       (read 0x${dtb_magic}; rebuild and install kernel/build/rpi5/jtag_stub.img," >&2
     echo "       then power-cycle the board before injecting Takibi)" >&2
     rm -f "$CHECK_LOG"
     exit 1
@@ -224,7 +222,7 @@ if { [ "$current_mode" != "EL1H" ] &&
          "$RPI5_SAFE_PC_MAX_HEX" >&2
     printf 'comment). Refusing to inject (would corrupt the running OS). If\n' >&2
     printf 'kernel_2712.img on the SD card is already\n' >&2
-    printf 'examples/common_rpi5/jtag_stub.img, run\n' >&2
+    printf 'kernel/build/rpi5/jtag_stub.img, run\n' >&2
     printf 'scripts/rpi5_jtag_reset.sh --resident-image-unchanged; otherwise flash it first and\n' >&2
     printf 'power-cycle the board. (The board was left running exactly as\n' >&2
     printf 'found -- this check only read/resumed, it never wrote anything.)\n' >&2

@@ -1,1 +1,0 @@
-static value mismatch: &wrong_mutex_b vs &wrong_mutex_a

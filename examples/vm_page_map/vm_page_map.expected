@@ -1,6 +1,0 @@
-vm_page_map
-allocated page: 0
-via VA: 42
-via mapping_bytes: 42 99
-unmapped
-done

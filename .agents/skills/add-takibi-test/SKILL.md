@@ -62,8 +62,6 @@ Capture the exit status of the command itself. A grep is never the last stage
 of a verification pipeline: a build failure prints no `FAIL` line, so a
 pattern search over the log matches nothing and the pipeline reports the
 grep's success. Redirect to a file, print the status, then search the file.
-Note also that the root `make allcheck` does not cover `examples/`, which has
-its own aggregate; a compiler change can break that tree alone.
 
 ## A shape fixture must perform the consumer's operations
 
@@ -86,5 +84,3 @@ read every line of new diagnostic output rather than only confirming a zero
 exit. Real code has narrowing chains, guard shapes, and interacting proofs
 that synthetic probes do not reproduce, and the real tree is the population
 the check will actually run against.
-
-Do not add new feature tests to the historical `examples/` tree.

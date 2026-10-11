@@ -1497,9 +1497,9 @@ let parser_tests = [
   (* -- use "path"; (GitHub issue #55) ------------------------- *)
 
   Alcotest.test_case "use \"path\"; parses to UseDef" `Quick (fun () ->
-    match parse "use \"examples/common/netutil.tkb\";
+    match parse "use \"linux_user/common/netutil.tkb\";
                   fn f() {}" with
-    | [Ast.UseDef "examples/common/netutil.tkb"; Ast.FuncDef _] -> ()
+    | [Ast.UseDef "linux_user/common/netutil.tkb"; Ast.FuncDef _] -> ()
     | _ -> Alcotest.fail "expected [UseDef; FuncDef]"
   );
 
@@ -6627,7 +6627,7 @@ fn stored_release(holder: sink StoredHolder[k]) { stored_drop(holder.token); }
        "struct S { x: i32; }
         fn f(p: *i32) { let mut s: S = {p}; }");
 
-  (* Found while building examples/affine_escape_via_index (GitHub issue
+  (* Found while building linux_user/affine_escape_via_index (GitHub issue
      #89's escape idiom): a struct returned BY VALUE from a function used
      to produce invalid LLVM IR (`ret ptr %p` from a function declared to
      return the aggregate `{i32,i32}` itself) -- coerce's TypeNamed case
@@ -7974,7 +7974,7 @@ fn f() -> *usize { return &temp_address_outer().r.a; }");
      before writing this fix, not assumed. Found examples/tcp_echo/
      tcp_echo.tkb and examples/http_server/http_server.tkb had exactly
      this: hand-maintained IP_TOTAL_LEN/TCP_*/ARP_* offset constants that
-     had been silently redundant with examples/common/netutil.tkb's own
+     had been silently redundant with linux_user/common/netutil.tkb's own
      offsetof-based versions of the same names ever since GitHub issue
      #77's refactor added them there -- removed as dead duplication once
      this check caught it. *)
@@ -15070,7 +15070,7 @@ let codegen_tests = [
   Alcotest.test_case
     "for-loop bound naming a global constant refines the counter: \
      `for i in 0..<SIZE` elides the check against [T; SIZE] \
-     (examples/const_global's residual sites under --forbid-trap)" `Quick
+     (linux_user/const_global's residual sites under --forbid-trap)" `Quick
     (expect_trap_sites 0
        "const FTRAP_SIZE: usize = 4;
         let mut ftrap_ring: [i32; FTRAP_SIZE];
@@ -15976,7 +15976,7 @@ let codegen_tests = [
     "min(a, LITERAL) clamps the upper bound to the literal regardless of \
      a's own range, proving a subslice against a smaller buffer than a's \
      own {0..<64 as i32} range would otherwise allow (zero trap sites) -- the \
-     idiom that makes examples/ip_parse's ihl clamp provable" `Quick
+     idiom that makes linux_user/ip_parse's ihl clamp provable" `Quick
     (expect_trap_sites 0
        "let mut ftp4c_buf_c: [u8; 20];
         fn ftp4c_min_clamp(raw: usize) -> u8 {
@@ -20710,7 +20710,7 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
      regression tests for the representation itself; runtime VALUE
      correctness for a local variable and a bare function argument (the
      two forms that go through gen_expr's IntLit case, not eval_const) is
-     additionally verified end-to-end under QEMU by examples/int64. *)
+     additionally verified end-to-end by linux_user/int64. *)
   Alcotest.test_case
     "global u64 initializer with a full 64-bit hex literal embeds the \
      exact bit pattern -- regression for the pre-Int64-IntLit bug where \

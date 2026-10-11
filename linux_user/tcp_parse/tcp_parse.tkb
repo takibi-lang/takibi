@@ -1,5 +1,5 @@
 // TCP header parsing and validation -- parse only, no reply, exactly the
-// same "canned buffer, no virtio-net" scope as examples/ip_parse. Two new
+// same "canned buffer, no virtio-net" scope as linux_user/ip_parse. Two new
 // things TCP needs beyond IPv4/ICMP: the checksum covers a 12-byte
 // "pseudo-header" (src/dst IP + protocol + TCP length) that isn't
 // actually on the wire, and there are more bit-packed header fields
@@ -26,8 +26,7 @@
 // propagation (both operands refined), and `ip[ihl..<ihl+tcp_len]` is
 // then FULLY PROVEN by the same-base rule -- no unsafe, no relational
 // domain, just the validation any parser needs anyway (this file is
-// --forbid-trap clean; see scripts/run_qemutest.sh's
-// forbid_trap_tcp_parse).
+// --forbid-trap clean, as every linux_user test is built with --forbid-trap).
 
 use "linux_user/common/inet_checksum.tkb";
 use "linux_user/common/netutil.tkb";
@@ -126,7 +125,7 @@ fn parse_tcp(ip: borrow [u8; 40..], ihl: {20..<21 as u16}) {
 
         // TCP checksum covers the pseudo-header (src IP, dst IP, zero
         // byte, protocol, TCP length) followed by the TCP segment itself
-        // (header + data) -- see examples/common/inet_checksum.tkb's
+        // (header + data) -- see linux_user/common/inet_checksum.tkb's
         // checksum_add for why this needs two chained calls instead of
         // one.
         let mut pseudo: [u8; 12];

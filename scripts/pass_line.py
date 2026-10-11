@@ -79,7 +79,7 @@ def report_pass(check: str, message: str, *, stream=None,
 
     `stream` moves the line off stdout, which one check needs: the batched
     UART report in `buildcheck_suite_output.py` is read field by field by
-    `scripts/run_qemutest.sh`, and a human sentence in that stream is a row
+    its caller, and a human sentence in that stream is a row
     the reader silently drops.
     """
     if not examined:

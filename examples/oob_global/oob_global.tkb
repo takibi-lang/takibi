@@ -1,6 +1,0 @@
-// This file is expected to produce a compile error.
-// Detects a constant OOB read from a global array.
-let mut buf: [u8; 8];
-fn app_main() {
-    let c = buf[8];
-}

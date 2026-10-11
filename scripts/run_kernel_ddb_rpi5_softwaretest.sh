@@ -119,7 +119,7 @@ fi
 openocd_args=(
     -f interface/cmsis-dap.cfg
     -c 'set USE_SMP 1'
-    -f "$REPO_ROOT/examples/common_rpi5/bcm2712.cfg"
+    -f "$REPO_ROOT/kernel/platform/rpi5/jtag/bcm2712.cfg"
     -c "gdb_port $GDB_PORT"
     -c 'tcl_port disabled'
     -c 'telnet_port disabled'

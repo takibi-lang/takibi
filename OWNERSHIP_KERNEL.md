@@ -52,7 +52,7 @@ restriction: what the type system can track about a VALUE'S KIND today is
   (c) silently exitable via `as` casts,
   (d) guarded by visibility only at file x top-level-global granularity.
 
-Every distortion currently visible in examples/ maps to one of these axes:
+Every distortion then visible in the bare-metal examples maps to one of these axes:
 null-sentinel tokens + out-parameter lengths (no sum types, #20), forgeable
 `N as usize as *Token` mints (c + #108), FatFile's `&file_storage`
 singleton trick and the sanctioned index-escape workaround (b, #89 Hurdle
@@ -256,22 +256,22 @@ currently-compiling program keeps compiling.
     and the borrow/sink validation widen to linear names.
   - llvm_gen.ml: nothing (opaque pointers codegen identically to affine).
   - test/test_takibi.ml: unit tests per rule, positive and negative.
-  - scripts/run_qemutest.sh: `run_compile_error_test` registrations for
-    the negative examples.
+  - the retired examples runner: compile-error registrations for the
+    negative examples.
 
 ### 4.9 PoC examples (acceptance gate for the stage)
 
-  - `examples/linear_obligation/` (positive): create + discharge across
+  - `linux_user/linear_obligation/` (positive): create + discharge across
     if/else, match, early return; runs under QEMU and prints proof of
     execution. Compiles `--forbid-trap` clean.
-  - `examples/linear_never_consumed/` (negative): mirror of
+  - the retired `examples/linear_never_consumed/` (negative): mirror of
     affine_never_consumed; expects `linear value 'x' is never consumed`.
-  - `examples/linear_branch_missed/` (negative): consumed in the `if`
+  - the retired `examples/linear_branch_missed/` (negative): consumed in the `if`
     branch only -- THE case affine cannot catch; expects the
     not-on-every-path error. This example is the stage's reason to exist.
-  - `examples/linear_cast_discard/` (negative): `p as usize` on a linear
+  - the retired `examples/linear_cast_discard/` (negative): `p as usize` on a linear
     value; expects the cast-away error.
-  - `examples/linear_overwrite/` (negative): reassignment over an
+  - the retired `examples/linear_overwrite/` (negative): reassignment over an
     undischarged obligation.
 
 Stage 1 is DONE when: all five PoCs behave as specified, the full existing
@@ -338,7 +338,7 @@ field via a struct literal is likewise declaring-file-only (a positional
 literal writes every field, private ones included -- this is what makes
 smart constructors real: issue #108's original "hand-assembled FatFile"
 gap, applied to non-opaque structs). This turns the accessor idiom
-(KGuard's `borrow`-gated getters, documented since examples/klock_guard
+(KGuard's `borrow`-gated getters, documented since the retired examples/klock_guard
 as "naming convention only") into an enforced boundary.
 
 Implementation note: privacy is per-field, recorded beside the field
@@ -520,7 +520,7 @@ partially-consumed struct discharged by scope end?) -- a materially
 bigger step than affine's weaker union check gets for free by reusing
 the existing machinery. Left for its own increment if a concrete need
 appears (no driver for it today: the one real use of struct-field-shaped
-storage in this codebase, `examples/affine_escape_via_index`, stores a
+storage in this codebase, `linux_user/affine_escape_via_index`, stores a
 plain integer index specifically BECAUSE affine escape wasn't
 trackable -- see 6.1's finding for why that pattern remains correct for
 cross-function escape regardless of this stage).
@@ -566,7 +566,7 @@ more evidence. That sequencing decision has now been satisfied and
 superseded: the E0 experiment plus the review of `FatFile`, both RX
 drivers, and both guard APIs established that the same missing indexed
 identity recurs independently. The existing
-`examples/affine_escape_via_index` index + runtime `in_use` flag remains
+`linux_user/affine_escape_via_index` index + runtime `in_use` flag remains
 the honest behavior of the current compiler, but is now the migration
 driver for 6.7's indexed-resource core rather than the intended endpoint.
 Stage 3b still does not attempt full interprocedural alias analysis.
@@ -1061,7 +1061,7 @@ integer only where the source API actually takes it. The implementation also
 fixed bounds lowering to look through `T @ n`, preserving a refined base such
 as `{0..<2 as usize}` under the singleton equality.
 
-`examples/indexed_view` is the positive cross-target fixture. It interleaves
+`linux_user/indexed_view` is the positive cross-target fixture. It interleaves
 two slot protocols and compiles under `--forbid-trap`;
 `indexed_view_identity_wrong` explains in English why authority for slot 0
 cannot access slot 1. Explicit `forall`, existential packages around views,
@@ -1412,7 +1412,7 @@ syntactic container`), a stale identity after reassigning the index
 between guard construction and use (`stable_replace mutex does not match
 guard identity`), a local (non-global) array of the same struct still
 rejected, and the struct still rejected when nested inside another
-struct's field. `examples/el0_shell/el0_shell.tkb`'s own real fd/COW-page
+struct's field. The retired `examples/el0_shell/el0_shell.tkb`'s own real fd/COW-page
 table (GitHub issue #158) is the first real, non-test consumer.
 
 ## 7. Next outlook

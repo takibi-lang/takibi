@@ -2,9 +2,8 @@
 # Resolves the /dev-host/ttyACM* device that is the Raspberry Pi Debug
 # Probe's UART cable, as opposed to the STM32 board's own ST-Link VCP --
 # both now show up as ttyACM* nodes on this host (confirmed: ttyACM0/
-# ttyACM1 have swapped meaning across at least one reboot already), so,
-# same reasoning as scripts/rpi_uart_dev.sh (RPi3 vs the Olimex JTAG
-# probe's own secondary ttyUSB channel), identify by /dev/serial/by-id
+# ttyACM1 have swapped meaning across at least one reboot already), so
+# identify by /dev/serial/by-id
 # label (built by udev from the USB device's own vendor/product string,
 # stable across replug/enumeration order), never by ttyACM number.
 set -euo pipefail

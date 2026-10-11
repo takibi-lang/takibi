@@ -7,9 +7,9 @@
 // clean under --forbid-trap with ZERO runtime bounds check -- the
 // refined range exactly matches percpu's own declared size (NCPU),
 // so the array access is proven in range at every call site with no
-// annotation burden on the caller. See examples/percpu_unrefined_rejected
-// for the negative contrast: the exact same array access, but with
-// cpu_id() returning plain `usize` instead, is REJECTED under
+// annotation burden on the caller. The negative contrast -- the exact
+// same array access, but with cpu_id() returning plain `usize` instead --
+// is REJECTED under
 // --forbid-trap -- demonstrating this is the refined return type doing
 // real work, not an accident of NCPU currently being 1.
 //

@@ -1,30 +1,28 @@
 #!/usr/bin/env bash
 # Prepares a Raspberry Pi 5 SD card's boot partition for SWD-only bring-up
-# (examples/common_rpi5/AGENTS.md). Overlays exactly two things on top of
+# (kernel/README.md, "One-time SD-card preparation"). Overlays exactly two things on top of
 # an otherwise-untouched stock Raspberry Pi OS boot partition:
 # kernel_2712.img (replaced with the spin stub) and one config.txt line.
 # bootloader.bin/start4.elf/fixup4.dat/cmdline.txt/etc. are generic
 # Raspberry Pi firmware already installed by the OS image and are never
 # touched -- this project has no reason to vendor copies of them.
 #
-# DIFFERENT from scripts/rpi3_prepare_sdcard.sh in two real ways, both
-# found the hard way (see examples/common_rpi5/AGENTS.md's "A real bug
-# this port found" section): (1) RPi5 firmware prefers kernel_2712.img
+# DIFFERENT from the historical RPi3 preparation in two real ways, both
+# found the hard way during RPi5 bring-up (HISTORY.md): (1) RPi5 firmware prefers kernel_2712.img
 # over kernel8.img when both are present -- overwriting only kernel8.img,
-# the way rpi3_prepare_sdcard.sh does, leaves a stock Raspberry Pi OS
+# the way the RPi3 preparation did, leaves a stock Raspberry Pi OS
 # image's own real kernel_2712.img in place and the board just boots the
 # real OS, ignoring the stub entirely (confirmed: this is exactly what
-# happened on a real board whose SD card had only been run through
-# rpi3_prepare_sdcard.sh). (2) RPi5's config.txt needs `os_check=0`, not
+# happened on a real board whose SD card had only been prepared for
+# RPi3). (2) RPi5's config.txt needs `os_check=0`, not
 # RPi3's `enable_jtag_gpio=1`/`dtoverlay=disable-bt` (those are specific
 # to RPi3's repurposed 6-pin GPIO JTAG header and Bluetooth UART conflict;
 # irrelevant to RPi5's dedicated SWD debug connector).
 #
 # Usage: scripts/rpi5_prepare_sdcard.sh /path/to/mounted/boot/partition
 #
-# Run wherever the SD card's boot partition is actually mounted (see
-# scripts/rpi3_prepare_sdcard.sh's own header comment for why that's
-# normally the host, not inside this container).
+# Run wherever the SD card's boot partition is actually mounted: normally
+# the host, since a container rarely has the removable device.
 #
 # Idempotent and safe to re-run: the original kernel_2712.img (if present)
 # is backed up once, on first run, to kernel_2712.img.orig (restore
@@ -34,11 +32,11 @@ set -euo pipefail
 
 BOOT="${1:?usage: $0 /path/to/mounted/boot/partition}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-STUB="$REPO_ROOT/examples/common_rpi5/jtag_stub.img"
+STUB="$REPO_ROOT/kernel/build/rpi5/jtag_stub.img"
 
 if [ ! -f "$STUB" ]; then
     echo "error: $STUB not found -- build it first:" >&2
-    echo "  make examples/common_rpi5/jtag_stub.img" >&2
+    echo "  make rpi5-jtag-stub" >&2
     exit 1
 fi
 

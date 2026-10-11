@@ -1,6 +1,6 @@
 // QEMU/AArch64 `virt` machine UART HAL (PL011 at 0x09000000, GICv2 SPI #1
-// per examples/common_qemu/AGENTS.md, already hardware-proven by that
-// tree's own bare-metal examples). Structured to match kernel/platform/
+// per QEMU's virt machine model, proven by the earlier bare-metal QEMU
+// milestones recorded in HISTORY.md). Structured to match kernel/platform/
 // rpi5/uart.tkb's function set exactly (stored-handler RX interrupt
 // interface, uart_put_udec, platform_init/platform_shutdown) so
 // kernel/platform/qemu/init.tkb needs no different calling convention than
@@ -8,8 +8,7 @@
 // which routes the interrupt here) differs, not any caller.
 //
 // Unlike RPi5's RP1 UART0, QEMU's PL011 needs no PCIe link and no baud-rate
-// programming (QEMU pre-configures the model) -- see examples/common_qemu/
-// AGENTS.md's own "PL011 UART register" note. uart_init() still disables,
+// programming (QEMU pre-configures the model). uart_init() still disables,
 // reconfigures, and re-enables the controller for a known state, matching
 // RPi5's structure, even though every QEMU boot already starts cold.
 

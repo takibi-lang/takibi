@@ -1,7 +1,7 @@
 // for-in element iteration + slice builtins demo (P2 of the slice design).
 //
 // The point of this trio is that variable-length buffer code -- the shape
-// that lives in examples/common/netutil.tkb and inet_checksum.tkb -- can
+// that lives in linux_user/common/netutil.tkb and inet_checksum.tkb -- can
 // now be written with ZERO trap sites and ZERO relational reasoning:
 //
 //   - `for x in s { ... }`: the compiler generates the counter, the length
@@ -21,8 +21,7 @@
 // otherwise demand relational reasoning. Same algorithm, same result,
 // no bounds obligations at all.
 //
-// This whole file compiles under --forbid-trap (registered as
-// forbid_trap_foreach in scripts/run_qemutest.sh).
+// This whole file compiles under --forbid-trap (every linux_user test is built with --forbid-trap).
 //
 // QEMU expected output:
 //   copied=8 eq=yes eq2=no sum=548 ck=61162 part=4

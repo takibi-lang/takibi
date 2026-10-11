@@ -1,5 +1,5 @@
 // Demo of the Internet checksum (RFC 1071) algorithm -- see
-// examples/common/inet_checksum.tkb for the implementation. No networking
+// linux_user/common/inet_checksum.tkb for the implementation. No networking
 // I/O here, just the algorithm, following the same pure-compute demo
 // pattern as crc8.tkb/djb2.tkb.
 //

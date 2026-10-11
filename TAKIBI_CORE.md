@@ -774,7 +774,7 @@ Implemented scope:
   `sink SlotWrite[slot, 0] -> SlotWrite[slot, 1]` is checked for every
   `slot` without exposing a runtime proof argument;
 - static arity, sort, literal range, identity, and phase mismatches are
-  rejected. `examples/indexed_view` ties one such permission to a runtime
+  rejected. `linux_user/indexed_view` ties one such permission to a runtime
   `{0..<2 as usize} @ slot` index and interleaves two independently indexed
   transitions; `indexed_view_identity_wrong` rejects crossing the slots;
 - indexed views obey the existing affine/linear flow, privacy, cast, address,
@@ -853,7 +853,7 @@ The first genuinely new post-consolidation slice ties `net_rx_frame`'s
 returned slice to the borrowed owner, exactly as specified above: the
 positive fixture is ordinary packet processing (all five network examples,
 unchanged), and the negative fixture
-(`examples/net_rx_use_after_release_wrong`) releases the frame and then
+(the retired `examples/net_rx_use_after_release_wrong`) releases the frame and then
 reads the old slice.
 
 Implemented scope:
@@ -904,7 +904,7 @@ the same tripwire discipline as every other slice.
 The next priority increment adds the finite-state vocabulary needed by
 `TcpConn[conn, state]` without adding general quantifiers or a solver. The
 HTTP server now dispatches through this permission, and
-`examples/tcp_conn_view` is its focused executable fixture: the closed
+`linux_user/tcp_conn_view` is its focused executable fixture: the closed
 `TcpConnDispatch` variant retains the runtime state tag, while each case
 packages `exists conn: usize. TcpConn[conn, TcpState::Case]`.
 
@@ -923,7 +923,7 @@ Implemented scope:
   preserve, transition, or sink it;
 - state transitions remain ordinary universal consume-and-produce functions.
   Passing a view in the wrong enum state is a static-value mismatch;
-- `examples/common/http_conn_state.tkb` is the trusted exhaustive bridge from
+- the retired `examples/common/http_conn_state.tkb` is the trusted exhaustive bridge from
   its private runtime `ConnState` byte to `TcpConnDispatch`. Every
   `(state, event)` arm in `http_server_common.tkb` must consume both its
   `PendingTcpEvent` and its state-specific `TcpConn` permission;
@@ -998,7 +998,7 @@ ordinary field borrowing or make every global a resource-tracked place:
 - LLVM lowers the exchange to one typed aggregate load and store. Static
   indices, existential binders, and the erased guard add no runtime operands,
   and ownership is never encoded in pointer or integer bits;
-- `examples/rtos_demo` replaces its ping-to-pong integer channel with
+- the retired `examples/rtos_demo` replaces its ping-to-pong integer channel with
   `OwnerChan`. Ping moves an indexed `OwnerMessage[id]` into the stable slot;
   pong opens the existential package, reads the message under borrow, and
   consumes it. The reverse response remains a plain copied integer channel.

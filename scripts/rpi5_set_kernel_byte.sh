@@ -23,7 +23,7 @@ ELF="$1"
 SYMBOL="$2"
 VALUE="$3"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BCM2712_CFG="$REPO_ROOT/examples/common_rpi5/bcm2712.cfg"
+BCM2712_CFG="$REPO_ROOT/kernel/platform/rpi5/jtag/bcm2712.cfg"
 address="0x$(llvm-nm-19 "$ELF" | awk -v symbol="$SYMBOL" '$3 == symbol { print $1 }')"
 if [ -z "${address#0x}" ]; then
     echo "error: symbol not found in $ELF: $SYMBOL" >&2

@@ -33,8 +33,8 @@
 // uart narration removed. Outbound payloads use the caller-selected TX
 // bounce buffer; inbound payloads use one protected fixed receive buffer.
 //
-// See examples/common_rpi5/AGENTS.md's USB bring-up status updates and
-// the rpi5_usb_bringup memory file for the full derivation of every
+// See HISTORY.md's RPi5 USB bring-up entries and the rpi5_usb_bringup
+// memory file for the full derivation of every
 // hardware values below (the 0xCE00FFE9 PORTSC neutral mask,
 // the Address Device port-reset requirement, U-Boot's endpoint-index/DCI
 // formulas) -- not re-derived here.
@@ -519,7 +519,7 @@ private fn usb_bulk_xfer(dir_in: bool, buf_dma: usize, length: u32) -> u32 !{uns
 
 // Recover a STALLed bulk endpoint. Unlike RPi3's DWC2 driver (which only
 // needs to clear the device-side STALL via CLEAR_FEATURE(ENDPOINT_HALT)
-// -- see examples/common_rpi3/usb_msc.tkb's own msc_recover_transport),
+// -- as the historical RPi3 driver's msc_recover_transport did),
 // xHCI ALSO halts the endpoint's Endpoint Context internally on a
 // Transfer Event with a non-success completion code (STALL Error = 6,
 // among others): no further TRB on that ring is processed until

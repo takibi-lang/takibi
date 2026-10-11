@@ -1,6 +1,0 @@
-copy_on_write
-before write: 11
-after write: 42
-source unchanged: 11
-cleanup: ok
-done

@@ -49,8 +49,7 @@ UNUSED_LISTS = ("KERNEL_UNUSED_CHECKED", "KERNEL_UNUSED_CHECKED_QEMU",
                 "KERNEL_UNUSED_NO_FUNCTIONS")
 
 # Tracked files whose mention of an old path is history, not a registry row.
-HISTORICAL = re.compile(r"^(HISTORY\.md|docs/KERNEL_GLOBAL\w*_\d{4}-\d{2}-\d{2}\.tsv"
-                        r"|examples/)")
+HISTORICAL = re.compile(r"^(HISTORY\.md|docs/KERNEL_GLOBAL\w*_\d{4}-\d{2}-\d{2}\.tsv)")
 
 FN_RE = re.compile(r"^\s*(?:private\s+)?(?:inline\s+|noinline\s+)?fn\s+(\w+)", re.M)
 

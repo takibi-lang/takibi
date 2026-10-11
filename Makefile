@@ -40,16 +40,6 @@ LLVM_OBJCOPY := llvm-objcopy-19
 # All new implementation and maintenance work happens under `kernel/` (see
 # AGENTS.md's "Maintenance Scope: kernel/ Only"), so its targets stay in this
 # top-level Makefile where they are the obvious, hard-to-miss default.
-#
-# `examples/` is historical heritage -- frozen bare-metal milestones that
-# predate the standalone kernel and are no longer an active product surface.
-# Its ~40 build/test/hardware-check targets live entirely in
-# `examples/Makefile` instead, and are reached with an explicit
-# `make -f examples/Makefile <target>` from the repo root (see that file's
-# own header comment). This split exists because "kernel" and "RPi5" targets
-# used to coexist under near-identical names in one Makefile (e.g. the
-# examples-only `hwcheck-rpi5-net` next to the real kernel/ hardware target
-# `kernelcheck`), which made it easy to run the wrong one by accident.
 
 # -- Targets ------------------------------------------------------------------
 .PHONY: _kernelcheck-qemu-main _kernelcheck-qemu-fdt-multibank _kernelcheck-qemu-ash _kernelcheck-shell-qemu _kernelcheck-qemu-debug-main _kernelcheck-qemu-debug-repeat _kernelcheck-qemu-debug-ash _kernelcheck-oops-qemu _kernelcheck-ddb-qemu _kernelcheck-stack-overflow-qemu _kernelcheck-alloc-rollback-qemu _kernelcheck-uart-wake-qemu _kernelcheck-affinity-gdb-qemu _kernelcheck-race-window-qemu _kernelcheck-race-window-635-qemu _kernelcheck-rpi5_kernelcheck-ddb-rpi5-software build test coverage kernelbuild kernelcheck kernelbuild-rpi5 kernelbuild-qemu kernelbuild-qemu-debug kernelcheck-rpi5 kernelcheck-ddb-rpi5-software kernelcheck-qemu kernelcheck-qemu-main kernelcheck-qemu-fdt-multibank kernelcheck-qemu-ash kernelcheck-shell-qemu kernelcheck-qemu-debug kernelcheck-qemu-debug-main kernelcheck-qemu-debug-repeat kernelcheck-qemu-debug-ash kernelcheck-oops-qemu kernelcheck-ddb-qemu kernelcheck-alloc-rollback-qemu kernelcheck-uart-wake-qemu kernelcheck-affinity-gdb-qemu kernelcheck-race-window-qemu kernelcheck-race-window-635-qemu kernelcheck-repeatkernelsh-qemu kernelsh-rpi5 lease-status profile-kernel-workload-chart langcheck slowcheck linuxbuild linuxcheck clean FORCE
@@ -80,11 +70,8 @@ build: $(TAKIBI)
 # kernel object rule below lists $(TAKIBI) as a REAL (not order-only)
 # prerequisite, so a genuine compiler change correctly makes every kernel
 # object look stale and get recompiled, with no separate `make clean` step
-# required (found the hard way, back when this Makefile was one file with
-# examples/ -- see AGENTS.md's "History: order-only `| build`" entry).
-# This must stay the ONLY rule in the repo that invokes `dune build`:
-# examples/Makefile depends on $(TAKIBI) too, but forwards to this target
-# via `$(MAKE) -C .. build` instead of calling `dune build` itself, so a
+# required (see AGENTS.md's "History: order-only `| build`" entry).
+# This must stay the ONLY rule in the repo that invokes `dune build`, so a
 # second, independent invocation racing this one under `make -j` can't
 # reintroduce the "Unexpected contents of build directory global lock
 # file" corruption already hit once before (`test: build` below reaches
@@ -157,9 +144,7 @@ coverage:
 	@echo "HTML report: $(CURDIR)/_build/coverage/html/index.html"
 
 ## langcheck: verify that all source files contain only ASCII characters.
-## Repo-wide (kernel/, examples/, the compiler itself), so this is the one
-## canonical implementation; examples/Makefile's own `langcheck` target
-## just forwards here via `$(MAKE) -C .. langcheck`.
+## Repo-wide (kernel/, linux_user/, the compiler itself).
 .PHONY: unused-function-control
 unused-function-control: build
 	@$(TAKIBI) test/fixtures/unused_function_positive.tkb --target $(LINUX_AMD64_TARGET) \
@@ -259,7 +244,7 @@ langcheck: unused-function-control forbid-unsafe-control effect-matrix-control p
 		       --include="*.tkb" --include="*.S" --include="*.md" \
 		       --include="*.sh" --include="*.ld" --include="*.py" \
 		       --include="*.yml" --include="*.yaml" \
-		       . Makefile examples/Makefile 2>/dev/null; then \
+		       . Makefile 2>/dev/null; then \
 		    echo "ERROR: non-ASCII characters found (see above)"; exit 1; \
 		fi; \
 		echo "OK: all files are ASCII-clean" \
@@ -285,8 +270,6 @@ slowcheck:
 # own x86_64 architecture and run natively, no QEMU or real hardware needed,
 # so these stay part of the always-on `kernel/` + compiler surface (see the
 # section comment above "-- This file covers kernel/ + the compiler only").
-# Deliberately self-contained: nothing here `use`s anything under examples/,
-# so it has no dependency on that frozen tree.
 LINUX_AMD64_TARGET      := x86_64-pc-linux-gnu
 LINUX_USER_DIR           := linux_user
 LINUX_UNUSED_CHECK       := --reject-unused-functions --external-entry main
@@ -484,29 +467,15 @@ COMMON_LINUX_SYSCALL_O   := $(LINUX_USER_BUILD_DIR)/syscall.o
 COMMON_LINUX_UART        := $(COMMON_LINUX_DIR)/uart.tkb
 COMMON_LINUX_PRINT       := $(COMMON_LINUX_DIR)/print.tkb
 COMMON_LINUX_PRINT_BASE  := $(LINUX_USER_DIR)/common/print.tkb $(LINUX_USER_DIR)/common/runtime.tkb kernel/printk/number.tkb
-# One test per directory, name == directory name, matching examples/'s own
-# convention. Add to this list as tests are migrated in from examples/ or
-# written fresh (see AGENTS.md). Each of these six was verified to compile,
-# link, and run under x86_64-pc-linux-gnu with output byte-identical to its
-# original examples/ QEMU .expected before being migrated -- pure logic
-# (type system, algorithms, checked arithmetic, ELF parsing, single-core
-# allocator bookkeeping), no MMIO/interrupt/concurrency dependency.
-# examples/klock_guard was tried and rejected: it links against
-# enable_irq/disable_irq (real interrupt control), so it belongs in
-# kernel/-style hardware testing per the litmus test below, not here,
-# despite compiling cleanly -- compiling is not the bar, the litmus test is.
-# The 41 single-fixture tests below were basic_suite/type_system_suite/
-# algorithm_suite's sub-fixtures in examples/ (see AGENTS.md's "Copy, don't
-# blindly move" note): those suites batch many fixtures into one QEMU/
-# hardware boot and split the UART stream on markers to keep each fixture's
-# own .expected independently checkable, because a QEMU/hardware boot is
-# expensive enough that batching mattered. That reason doesn't apply here --
-# a native process starts in a few milliseconds -- so each fixture below is
-# its own directory/binary/`.expected`, source content unchanged from
-# examples/ except one appended `fn app_main() { test_<name>(); }` wrapper
-# (the suites supplied that wrapper themselves; a standalone binary needs
-# its own). This split-not-batched shape is the template to follow when
-# adding new linux_user/ tests for a new algorithm or data structure.
+# One test per directory, name == directory name. Each is pure logic (type
+# system, algorithms, checked arithmetic, ELF parsing, single-core allocator
+# bookkeeping) with no MMIO/interrupt/concurrency dependency; a test that
+# needs real interrupt control belongs in kernel/ testing per the litmus
+# test below, however cleanly it compiles here. Each fixture is its own
+# directory/binary/`.expected` rather than a batch split on UART markers: a
+# native process starts in a few milliseconds, so batching buys nothing.
+# This split-not-batched shape is the template to follow when adding new
+# linux_user/ tests for a new algorithm or data structure.
 LINUX_USER_EXAMPLES      := linux_hello start checked_usize elf64_validate bump percpu page_pool \
                              freelist_pool freelist_generic slotmap refcount_slotmap growable_pool \
                              intrusive_pool intrusive_pool_portable pool_container branded_cell page_run tcp_pool_shape \
@@ -531,8 +500,7 @@ LINUX_USER_OBJS          := $(foreach e,$(LINUX_USER_EXAMPLES),$(LINUX_USER_DIR)
 .SECONDARY: $(LINUX_USER_OBJS)
 
 # Extra prerequisites (staleness tracking only -- `use` already resolves
-# these transitively at compile time, same reasoning as examples/Makefile's
-# own .tkb -> .o rule comment) for the tests above that `use` a shared file
+# these transitively at compile time) for the tests above that `use` a shared file
 # outside their own directory.
 $(LINUX_USER_DIR)/checked_usize/checked_usize_exe.o: $(LINUX_USER_DIR)/common/checked_usize.tkb
 $(LINUX_USER_DIR)/elf64_validate/elf64_validate_exe.o: $(LINUX_USER_DIR)/common/elf64_validate.tkb $(LINUX_USER_DIR)/common/checked_usize.tkb kernel/fs/elf64.tkb
@@ -709,11 +677,9 @@ $(COMMON_LINUX_STARTUP_O): $(COMMON_LINUX_STARTUP_S) | $(LINUX_USER_BUILD_DIR)
 $(COMMON_LINUX_SYSCALL_O): $(COMMON_LINUX_SYSCALL_S) | $(LINUX_USER_BUILD_DIR)
 	$(LLVM_MC) --triple=$(LINUX_AMD64_TARGET) --filetype=obj $< -o $@
 
-# $(LINUX_USER_DIR)/%_exe.o <- $(LINUX_USER_DIR)/%.tkb (% matches "name/name",
-# same static-pattern-rule idiom as examples/Makefile's own .tkb -> .o rule).
+# $(LINUX_USER_DIR)/%_exe.o <- $(LINUX_USER_DIR)/%.tkb (% matches "name/name").
 # Every linux_user test only ever needs the same minimal uart+print HAL --
-# unlike examples/'s many hardware-HAL groupings, there is no MMIO/interrupt
-# surface here to vary by test.  That HAL is linked into every test
+# there is no MMIO/interrupt surface here to vary by test.  That HAL is linked into every test
 # unconditionally (below), so a test must never define its own copy of a
 # printer: twelve of them had each pasted in the same uart_print_bool body,
 # which is exactly the shape that let GitHub issue #470's decimal formatter
@@ -1454,7 +1420,7 @@ $(KERNEL_RPI5_DEBUG_METADATA): $(KERNEL_RPI5_MAIN_O) $(TAKIBI)
 # Reuses the same aarch64-none-elf triple as RPi5 (no --cpu passed to
 # LLVM_MC for either target's assembly -- see KERNEL_RPI5_ENTRY_O's own
 # rule above), but a lower --cpu for the .tkb compile, matching QEMU
-# `virt`'s own -cpu cortex-a53 (examples/common_qemu/AGENTS.md).
+# `virt`'s own -cpu cortex-a53.
 QEMU_TARGET := aarch64-none-elf
 QEMU_CPU    := cortex-a53
 
@@ -1768,10 +1734,9 @@ trustedbasecheck: kernelbuild
 ## /dev/serial/by-id label). Override only if the auto-detected device is
 ## wrong.
 RPI5_SERIAL_DEV ?=
-# The connected Debug Probe/board has been validated at 30 MHz SWD. Keep this
-# override at the maintained kernel target boundary so historical examples'
-# hardware lanes retain their existing default; use RPI5_SWD_SPEED=1000 when
-# a different probe/cable needs the conservative speed.
+# The connected Debug Probe/board has been validated at 30 MHz SWD; use
+# RPI5_SWD_SPEED=1000 when a different probe/cable needs the conservative
+# speed.
 RPI5_SWD_SPEED ?= 30000
 
 # A compile is not an integration pass. This deliberately fails until the
@@ -2326,15 +2291,15 @@ ifneq (,$(filter allcheck,$(MAKECMDGOALS)))
 $(info [allcheck] includes: langcheck, slowcheck, compiler unit tests, linux_user, QEMU integration, QEMU debug integration, QEMU oops, QEMU DDB (UART BREAK and software BRK), QEMU stack overflow, QEMU allocation rollback, and RPi5 integration -- one board load, ending at the view line; the silicon-only software-BRK pass is make kernelcheck-ddb-rpi5-software)
 endif
 
-## allbuild: a fast, no-execution/no-hardware smoke gate across all three
-## source trees (kernel/, linux_user/, examples/) -- COMPILES everything
+## allbuild: a fast, no-execution/no-hardware smoke gate across both
+## source trees (kernel/, linux_user/) -- COMPILES everything
 ## (type-checks, since this compiler has no separate type-check-only mode;
 ## codegen/link still runs, but nothing is ever executed or flashed) without
 ## the QEMU boot/UART-diff/hardware time allcheck's full lanes spend. Exists
 ## specifically to catch a new lib/type_inf.ml or lib/llvm_gen.ml check that
 ## is too strict (or too loose) somewhere allcheck's own kernel-only build
 ## step would never reach -- kernel/ does not exercise every generic
-## instantiation or code shape the OTHER two trees do (e.g. kernel/ never
+## instantiation or code shape linux_user/ does (e.g. kernel/ never
 ## instantiates kernel/lib/freelist.tkb's Freelist(T) with T=usize; only
 ## linux_user/freelist_generic/freelist_generic.tkb does), so a compiler
 ## change that only ran `make kernelbuild` before landing can still break
@@ -2350,9 +2315,8 @@ allbuild:
 	@# check with no clock cannot be starved by a build.
 	@status=0; $(MAKE) langcheck slowcheck test linuxbuild kernelbuild \
 		|| status=$$?; \
-	$(MAKE) -f examples/Makefile allcheck-build || status=$$?; \
 	if [ $$status -eq 0 ]; then \
-		echo "PASS allbuild: langcheck + slowcheck + compiler unit + linux_user + kernel (RPi5+QEMU) + every examples/ target, all build-only"; \
+		echo "PASS allbuild: langcheck + slowcheck + compiler unit + linux_user + kernel (RPi5+QEMU), all build-only"; \
 	else \
 		echo "FAIL allbuild: one or more lanes failed to build (see the lane output above)" >&2; \
 		exit $$status; \
@@ -2360,8 +2324,7 @@ allbuild:
 
 # -- clean ---------------------------------------------------------------------
 ## clean: remove dune build artifacts, kernel/ link outputs, and linux_user/
-## build outputs. Does not touch examples/ -- use `make -f examples/Makefile
-## clean` for that.
+## build outputs.
 # GitHub issue #601: the TLA+ models under kernel/models/, checked with TLC
 # and Apalache. Fetches the pinned tools on first use. A lane of allcheck
 # and cicheck.
@@ -2384,6 +2347,21 @@ KERNEL_DMA_SRCS := kernel/platform/qemu/uart.tkb kernel/platform/rpi5/pcie.tkb k
 # the files in kernel/RAW_MINT_FILES (a ratchet; see that file).
 KERNEL_RAW_MINT_FILES := $(shell grep -v '^\#' kernel/RAW_MINT_FILES | grep -v '^$$')
 KERNEL_RAW_CONFINE := --confine-raw-authority $(foreach f,$(KERNEL_RAW_MINT_FILES),--raw-mint-file $(f))
+## rpi5-jtag-stub: the SD card's kernel_2712.img, a DTB-capturing spin stub
+## that test kernels are injected over SWD on top of (kernel/README.md,
+## "One-time SD-card preparation"). Raw binary, not ELF: the firmware loads
+## kernel_2712.img as a flat image.
+RPI5_JTAG_DIR := $(KERNEL_DIR)/platform/rpi5/jtag
+.PHONY: rpi5-jtag-stub
+rpi5-jtag-stub: $(KERNEL_BUILD_DIR)/jtag_stub.img
+$(KERNEL_BUILD_DIR)/jtag_stub.o: $(RPI5_JTAG_DIR)/jtag_stub.S
+	@mkdir -p $(dir $@)
+	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
+$(KERNEL_BUILD_DIR)/jtag_stub.elf: $(KERNEL_BUILD_DIR)/jtag_stub.o $(RPI5_JTAG_DIR)/jtag_stub.ld
+	$(LLD) -T $(RPI5_JTAG_DIR)/jtag_stub.ld $< -o $@
+$(KERNEL_BUILD_DIR)/jtag_stub.img: $(KERNEL_BUILD_DIR)/jtag_stub.elf
+	$(LLVM_OBJCOPY) -O binary $< $@
+
 kernel/build/qemu/main.o kernel/build/rpi5/main.o: kernel/RAW_MINT_FILES
 KERNEL_DMA_FLAGS := --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --frame-pointers --forbid-trap --regions --reject-unused-functions --external-entry main --check-unused-file kernel/tests/qemu/dma/virtio_blk_fixture.tkb
 KERNEL_DMA_ELF := $(KERNEL_QEMU_BUILD_DIR)/kernel-dma-fixture-positive.elf

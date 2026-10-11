@@ -204,8 +204,6 @@ def surface(path: str) -> str:
         return "kernel"
     if path.startswith("linux_user/"):
         return "linux_user"
-    if path.startswith("examples/"):
-        return "examples"
     return "other"
 
 

@@ -1918,7 +1918,7 @@ private fn intrusive_pool_payload_at(T: type, pool: &mut IntrusivePool(T) @ pool
 // static index, and opening the existential a variant payload needs mints
 // a FRESH identity -- the compiler rejects using the resulting permission
 // with the address it came from ("static value mismatch: s vs slot").
-// examples/tcp_conn_view never hits that because nothing in it uses the
+// linux_user/tcp_conn_view never hits that because nothing in it uses the
 // concrete connection; an allocator's whole purpose is to touch memory at
 // the address, so it does. Carrying the address as a runtime field
 // sidesteps the comparison entirely. The cost is six machine words per probe

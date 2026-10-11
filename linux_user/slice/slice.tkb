@@ -4,7 +4,7 @@
 //
 // Everything in this file is proven at the type level: zero runtime
 // bounds checks are generated, so it also compiles under --forbid-trap
-// (registered as forbid_trap_slice in scripts/run_qemutest.sh).
+// (every linux_user test is built with --forbid-trap).
 // The proof devices, in order of appearance:
 //   - [u8; 8..] parameter: the caller must prove at least 8 bytes;
 //     inside, `for i in 0..<8` / constant indices are within the minimum

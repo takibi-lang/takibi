@@ -1,7 +1,0 @@
-// This file is expected to produce a compile error.
-// `const` is a compile-time integer constant: reassigning it is rejected.
-// Use `let mut` if the global needs to be written to at runtime.
-const QUEUE_SIZE: i32 = 4;
-fn app_main() {
-    QUEUE_SIZE = 8;
-}

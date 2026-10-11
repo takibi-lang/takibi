@@ -5,8 +5,8 @@
 // descriptor rings (4096B), cache-line buffers (64B), etc. Local-variable
 // alignment (`let mut x: T align(N);` inside a function body) exists
 // specifically for stack-resident DMA buffers that must never share a
-// cache line with unrelated data -- see examples/common_stm32/sdmmc.tkb's
-// disk_read_bounce for the real driver motivating this (a cache-line
+// cache line with unrelated data -- the historical STM32 SD driver's
+// disk_read_bounce was the real driver motivating this (a cache-line
 // INVALIDATE on an unaligned buffer can silently discard adjacent live
 // stack data). Only `let mut` locals can be aligned: an immutable local
 // is an SSA value with no memory location for LLVM's alignment attribute

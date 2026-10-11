@@ -28,7 +28,7 @@ distinction right once beats four scripts that each have to.
 
 This answers the HOST's question. The board's own readiness is a different
 question with a better answer: the kernel says when its link is up, and
-`scripts/run_hwtest_net_ram.sh` and `scripts/run_kernel_hwtest_rpi5.sh` wait
+`scripts/run_kernel_hwtest_rpi5.sh` waits
 for that line before starting any wire test. Use both -- the boot-log gate
 means a board that never came up is reported as such rather than as a
 protocol defect, and this means a host path that is still resolving does not

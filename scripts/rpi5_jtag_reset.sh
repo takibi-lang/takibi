@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 # Reboots the RPi5 board via a PSCI SYSTEM_RESET SMC call issued from a
-# tiny 2-instruction trampoline injected over SWD -- see
-# examples/common_rpi5/AGENTS.md.
+# tiny 2-instruction trampoline injected over SWD.
 #
 # REPLACES an earlier version that used OpenOCD's generic `reset halt`,
 # which failed with "bcm2712.cpu0: how to reset?" when actually tried
 # (2026-07-25): the official Debug Probe's SWD wiring does not carry the
-# SoC's nSRST signal, and examples/common_rpi5/bcm2712.cfg defines no
+# SoC's nSRST signal, and kernel/platform/rpi5/jtag/bcm2712.cfg defines no
 # BCM2712-specific reset handler, so OpenOCD's SRST-based `reset` has
 # nothing to drive. PSCI SYSTEM_RESET sidesteps this entirely: BCM2712's
 # own device tree declares PSCI with method "smc", and TF-A (already
@@ -58,7 +57,7 @@ if [ "$#" -ne 1 ] || [ "$1" != "--resident-image-unchanged" ]; then
 fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BCM2712_CFG="$REPO_ROOT/examples/common_rpi5/bcm2712.cfg"
+BCM2712_CFG="$REPO_ROOT/kernel/platform/rpi5/jtag/bcm2712.cfg"
 OPENOCD_TIMEOUT="${RPI5_OPENOCD_TIMEOUT:-10}"
 RESET_MAX_ATTEMPTS="${RPI5_RESET_MAX_ATTEMPTS:-20}"
 RESET_RETRY_SECONDS="${RPI5_RESET_RETRY_SECONDS:-1}"

@@ -1,5 +1,0 @@
-// AArch64 bare-metal Hello World. Minimal implementation of string output to UART.
-
-fn test_hello() {
-    uart_puts("Hello, World!\n");
-}

@@ -148,7 +148,7 @@ fn timed_out(t0: i64, timeout_us: i64) -> bool {
     return (read_cntpct() - t0) >= target_ticks;
 }
 
-// pcie_rescal (examples/common_rpi5/AGENTS.md's own research: BCM2712's
+// pcie_rescal (from the RPi5 bring-up research in HISTORY.md: BCM2712's
 // shared SERDES calibration reset controller, compatible
 // "brcm,bcm7216-pcie-sata-rescal", base 0x10_00119500). Linux's
 // reset-brcmstb-rescal.c: set bit0 at +0x0 to start calibration, poll

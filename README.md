@@ -226,14 +226,13 @@ lib/         parser, type checking, ownership/refinement analysis, LLVM backend
 test/        in-process compiler acceptance/rejection and LLVM IR tests
 linux_user/  fast native Linux/AMD64 executable tests for hardware-independent code
 kernel/      maintained Linux-compatible monolithic kernel
-examples/    historical language and bare-metal milestones
 scripts/     integration, hardware, debugging, and measurement helpers
 ```
 
 New product and feature work belongs under `kernel/`. Hardware-independent
 runtime tests for compiler/language features and reusable algorithms belong in
-`linux_user/`. The `examples/` tree preserves historical QEMU and real-hardware
-milestones and is kept building, but it is not a target for new features. See
+`linux_user/`. The earlier STM32, RPi3 and bare-metal RPi5 milestones are
+recorded in [`HISTORY.md`](HISTORY.md); their source tree was retired. See
 [`AGENTS.md`](AGENTS.md) for the precise maintenance and test-tier policy.
 
 ## Build and test
@@ -286,8 +285,8 @@ takibi <file1.tkb> [file2.tkb ...] -o output.o
 
 Multiple source files currently form one flat compilation unit. `use
 "path/file.tkb";` resolves source dependencies before compilation. See
-[`SPEC.md`](SPEC.md) for the current language rather than treating examples or
-old history as syntax documentation.
+[`SPEC.md`](SPEC.md) for the current language rather than treating old history
+as syntax documentation.
 
 ## Project direction
 
@@ -334,8 +333,7 @@ and debugging tools all have hardware-independent paths.
   RPi5, and hardware procedures;
 - [`kernel/SYSCALLS.md`](kernel/SYSCALLS.md) -- exact syscall support matrix;
 - [`ROADMAP.md`](ROADMAP.md) -- the current work split between territories;
-- [`HISTORY.md`](HISTORY.md) -- chronological engineering record;
-- [`examples/README.md`](examples/README.md) -- frozen historical milestones.
+- [`HISTORY.md`](HISTORY.md) -- chronological engineering record.
 
 ## Primary dependencies
 

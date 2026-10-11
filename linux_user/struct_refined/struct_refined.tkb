@@ -7,7 +7,7 @@
 // or passed to an exact-match refined parameter, with zero runtime
 // bounds checks. This demo writes and reads an 8-byte buffer entirely
 // through a struct field typed {0..<8 as usize}; the whole program
-// compiles with zero llvm.trap sites (verified by examples/refined's
+// compiles with zero llvm.trap sites (verified by linux_user/refined's
 // same "no brk #0 in the generated machine code" goal).
 //
 // Also fixed alongside this feature: an out-of-range literal assigned to

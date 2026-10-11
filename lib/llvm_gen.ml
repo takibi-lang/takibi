@@ -782,7 +782,7 @@ let di_file_for (dib : Llvm_debuginfo.lldibuilder) (filename : string) : Llvm.ll
       (* Every DIFile's directory must be absolute. DWARF resolves a *relative*
          directory by joining it onto the DICompileUnit's own (single) comp_dir,
          so two files in different relative directories -- e.g. examples/common_qemu/uart.tkb
-         and examples/fizzbuzz/fizzbuzz.tkb -- would otherwise get concatenated into
+         and linux_user/fizzbuzz/fizzbuzz.tkb -- would otherwise get concatenated into
          one bogus path (observed: "examples/common/examples/fizzbuzz/fizzbuzz.tkb")
          by addr2line/llvm-dwarfdump. Making every directory absolute sidesteps
          comp_dir entirely. *)
@@ -3543,7 +3543,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
              (* A refined source whose entire range consists of variant
                 values proves the cast statically -- no switch, no trap.
                 E.g. `i as Color` where i: {0..<3} and Color = {0,1,2}
-                (examples/enum/enum.tkb's for-loop cast). An empty range
+                (linux_user/enum/enum.tkb's for-loop cast). An empty range
                 (lo >= hi) is vacuously proven: the value cannot exist. *)
              let variants = Hashtbl.find enum_variants_tbl ename in
              match src_ty with

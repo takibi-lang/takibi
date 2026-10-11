@@ -65,7 +65,7 @@ def main() -> int:
 
     if failed:
         return 1
-    # stdout here is the tab-delimited report scripts/run_qemutest.sh reads
+    # stdout here is the tab-delimited report its caller reads
     # row by row, and a sentence in it is a row that reader drops.
     report_pass("suite-output",
                 f"{len(requested)} batched case(s) match their fixtures in "

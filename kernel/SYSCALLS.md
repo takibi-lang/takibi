@@ -85,7 +85,7 @@ runs: pinned Alpine `busybox-static`/`busybox-extras` 1.37.0-r31 (ash +
 ## Syscalls confirmed correctly Unsupported-by-design
 
 These were named in the false-success audit's original problem list (written
-against the older `examples/el0_shell` fixture) but are simply not implemented in
+against the older, retired `examples/el0_shell` fixture) but are simply not implemented in
 `kernel/`, so they already return `LINUX_ENOSYS` -- confirmed intentional,
 not an oversight:
 
@@ -100,7 +100,7 @@ not an oversight:
 
 When a new syscall arm is added, add its row here in the same commit, and
 classify it Implemented/Partial/Unsupported-by-design. Do not copy a
-false-success shortcut from `examples/el0_shell` into this file's
+false-success shortcut from the retired `examples/el0_shell` into this file's
 Implemented/Partial rows without a real reason documented alongside it.
 
 **When a Partial row's behavior changes, change the row in the same commit.**

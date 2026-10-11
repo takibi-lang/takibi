@@ -11,7 +11,7 @@ from pass_line import report_pass
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-FIXTURE_ROOTS = ("kernel", "linux_user", "examples")
+FIXTURE_ROOTS = ("kernel", "linux_user")
 
 
 def tracked_fixtures() -> list[pathlib.Path]:

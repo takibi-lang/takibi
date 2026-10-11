@@ -1,1 +1,0 @@
-match on a primitive integer type requires a '_' wildcard arm

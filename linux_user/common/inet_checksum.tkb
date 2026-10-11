@@ -1,6 +1,6 @@
 // Internet checksum (RFC 1071): the one's-complement 16-bit checksum used
-// by IPv4, ICMP, UDP, and TCP. Shared by examples/inet_checksum (algorithm
-// demo), examples/ip_parse (header validation), examples/icmp_echo/
+// by IPv4, ICMP, UDP, and TCP. Shared by linux_user/inet_checksum (algorithm
+// demo), linux_user/ip_parse (header validation), examples/icmp_echo/
 // arp_reply/tcp_parse/tcp_echo/http_server (validation + reply
 // construction). TCP's checksum also covers a 12-byte "pseudo-header" of
 // src/dst IP + protocol + length that isn't actually on the wire, so it
@@ -17,7 +17,7 @@
 // a runtime-checked subslice (one recorded trap site) at the CALL site,
 // not inside this function. `for b in data` replaces the old stride-2
 // index loop (data[i], data[i+1], guarded by i+1<len) with the hi/lo
-// alternation technique from examples/foreach/foreach.tkb: odd-length
+// alternation technique from linux_user/foreach/foreach.tkb: odd-length
 // input naturally leaves the last byte shifted into the high half exactly
 // like the old tail-padding branch did, with zero indexing at all.
 fn checksum_add(data: borrow []u8, sum_in: i32) -> i32 {

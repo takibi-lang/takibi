@@ -13,7 +13,7 @@
 // living past the acquiring function -- which is issue #131. That is the
 // half issue #89's own closing comment split out and left open, so the
 // sentence names the live issue rather than the closed one it came from;
-// see examples/affine_escape_via_index for the pattern, still the right
+// see linux_user/affine_escape_via_index for the pattern, still the right
 // idiom for cross-function escape. What this closes is the SAME-FUNCTION
 // hole: a struct local holding a handle field, read/consumed more than
 // once, or never consumed, purely within the one function that owns it.

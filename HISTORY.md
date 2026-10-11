@@ -1,5 +1,23 @@
 # takibi Engineering History
 
+## 2026-10-11: the historical examples/ tree is retired
+
+`examples/` held the STM32, RPi3 and early bare-metal RPi5 milestones that
+preceded the standalone kernel. It had stopped being run, and the language
+kept changing under it. Before removal, its 88 compile-error fixtures and its
+language-level runtime fixtures were compared with Alcotest, `linux_user/`
+and `docs/wont-compile/`: every diagnostic class was already covered except
+`--forbid-unsafe` (now `forbid-unsafe-control` in langcheck) and the
+`inline fn` attribute (now an Alcotest case). Live GDB stepping through a
+`-g` build, which only `examples/dwarf_debug` exercised, is deferred to a
+host-GDB test for `linux_user/` (#747). The RPi5 JTAG files the kernel's
+hardware lanes still use (`bcm2712.cfg`, the SD-card spin stub, the MPIDR
+probe) moved to `kernel/platform/rpi5/jtag/`, with `make rpi5-jtag-stub`
+building a byte-identical stub image. The examples-only runners in
+`scripts/` and the QEMU PC-sampling profiler skill went with the tree.
+`git log --diff-filter=D -- examples/` finds the removing commit; its parent
+holds the tree.
+
 ## 2026-10-11: region capsules retain the implicit offset
 
 The first #720 B+C probe declared only region identity and count on its

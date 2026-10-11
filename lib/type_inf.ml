@@ -6465,7 +6465,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
                access a pointer into -- codegen would otherwise emit a
                `getelementptr` directly on the raw aggregate SSA value,
                which is not a pointer and produces invalid LLVM IR. Found
-               via examples/affine_escape_via_index/affine_escape_via_index.tkb's
+               via linux_user/affine_escape_via_index/affine_escape_via_index.tkb's
                `let proc: Process = open_two();` during GitHub issue #89's
                escape-idiom work; see HISTORY.md. *)
             (match repr et with

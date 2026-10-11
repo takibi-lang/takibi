@@ -28,7 +28,7 @@ IFACE = os.environ.get("ETH_TEST_IFACE", "enp4s0")
 # destination MAC to reach the board at all. Defaults match STM32's
 # examples/common_stm32/netconfig.tkb; RPi3's own values (a different
 # /24 and a locally-administered MAC, examples/common_rpi3/
-# netconfig.tkb) are passed as overrides by scripts/run_hwtest_rpi3_net.sh.
+# netconfig.tkb) are passed as overrides by the caller.
 SUBNET = os.environ.get("ETH_TEST_SUBNET", "192.168.10")
 _subnet_octets = [int(o) for o in SUBNET.split(".")]
 _default_mac = "00:80:e1:00:00:00"

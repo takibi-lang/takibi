@@ -1,9 +1,6 @@
 # Takibi kernel
 
 `kernel/` is the standalone RPi5-first monolithic kernel written in Takibi.
-It is separate from the executable proofs under `examples/` and does not
-compile or link source files from that tree.
-
 The kernel implements the Linux AArch64 ABI incrementally from real userspace
 callers. It currently runs pinned, existing Alpine Linux binaries at EL0,
 including static BusyBox and the dynamically linked BusyBox HTTPd applet. On a
@@ -607,7 +604,7 @@ its FDT magic before changing RAM or restoring its address in `x0`. Build and
 install the stub:
 
 ```bash
-make examples/common_rpi5/jtag_stub.img
+make rpi5-jtag-stub    # writes kernel/build/rpi5/jtag_stub.img
 scripts/rpi5_prepare_sdcard.sh /path/to/mounted/boot/partition
 ```
 
@@ -1143,7 +1140,7 @@ kernel device configuration under `-S -gdb`: notably
 `scripts/run_kernel_oops_qemutest.sh`,
 `scripts/run_kernel_ddb_qemutest.sh`, and
 the focused QEMU GDB runners. On RPi5, use the repository's
-`examples/common_rpi5/bcm2712.cfg` with a CMSIS-DAP probe; the maintained load
+`kernel/platform/rpi5/jtag/bcm2712.cfg` with a CMSIS-DAP probe; the maintained load
 and target-selection sequence is in `scripts/rpi5_jtag_load.sh`. Stock host
 GDB is not an AArch64 substitute in this environment; use `gdb-multiarch`.
 
