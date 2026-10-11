@@ -200,6 +200,7 @@ fn platform_irq_init() {
     rp1_vector_route(RPI5_USB0_GIC_INTID, RP1_USB0_VECTOR, false);
     // The GEM handle is attached before its vector can be dispatched.
     rpi5_gem_attach_bootstrap();
+    rpi5_xhci_attach_bootstrap();
     rp1_vector_route(RPI5_GEM_GIC_INTID, RP1_GEM_VECTOR, true);
 
     timer_irq_setup();

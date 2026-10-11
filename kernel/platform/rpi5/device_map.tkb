@@ -84,6 +84,18 @@ fn rpi5_system_timer_attach(base: usize, bytes: usize) -> Rpi5Attach !{unsafe} {
     }
 }
 
+// RP1 usbhost0's xHCI registers at the BAR1 address. The boot DTB check
+// accepts only this base, so nothing re-attaches. Attached with the other
+// interrupt-path windows, before its IRQ can be dispatched.
+fn rpi5_xhci_attach_bootstrap() !{unsafe} {
+    let RegionBytes::Assumed(window) =
+        region_bytes_assume(RP1_USBHOST0_BASE, 0x1000) else {};
+    match io_handle_attach(&rp1_xhci, window) {
+        IoAttach::Attached => {}
+        IoAttach::TooSmall => { kernel_invariant_stop(); }
+    }
+}
+
 // The GIC-400's two windows and MIP0: the board's known addresses until the
 // DTB has been compared with them (gic_dtb.tkb, mip_dtb.tkb), then the DTB's.
 fn rpi5_gic_attach(dist_base: usize, dist_bytes: usize,

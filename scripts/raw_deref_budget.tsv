@@ -12,10 +12,10 @@ kernel/arch/arm64/kernel/exception_evidence.tkb	173	0	Private per-CPU crash cach
 kernel/arch/arm64/kernel/frame_ref.tkb	2	0	the exception-frame mint site: a FrameRef's words are read and written here and nowhere else (#637 C)
 kernel/arch/arm64/mm/mmu.tkb	2	0	page-table entries as a raw table (#637 H)
 kernel/boot/fdt.tkb	1	0	the device tree blob as raw memory (#637 H)
-kernel/drivers/block/virtio_blk.tkb	13	16	virtio rings and request buffers, plus device registers (#637 A, E); +1 plain +4 io for the completion-timeout snapshot DDB prints (2026-10-04); 4 io moved to virtio_blk_dma.tkb and 1 io folded into its used-index poll (#716); -7 plain: the request header and TX data are fixed DMA records (#717)
-kernel/drivers/block/virtio_blk_dma.tkb	0	4	the used-ring index read and the reset status register, the two completion observations of the receive mint file (#716; moved from virtio_blk.tkb)
+kernel/drivers/block/virtio_blk.tkb	13	2	virtio rings and request buffers, plus device registers (#637 A, E); +1 plain +4 io for the completion-timeout snapshot DDB prints (2026-10-04); 4 io moved to virtio_blk_dma.tkb and 1 io folded into its used-index poll (#716); -7 plain: the request header and TX data are fixed DMA records (#717); -14 io: registers are an IoHandle (#637 A)
+kernel/drivers/block/virtio_blk_dma.tkb	0	1	the used-ring index read, the receive mint file's completion observation (#716); the reset status register is an IoHandle (#637 A)
 kernel/drivers/net/rp1_gem.tkb	0	9	RP1 clock and GPIO registers (#637 A); GEM registers use an IoHandle (#733)
-kernel/drivers/net/virtio_net.tkb	5	17	virtio rings and frames, plus device registers (#637 A, E)
+kernel/drivers/net/virtio_net.tkb	5	3	virtio rings and frames (#637 E); registers are an IoHandle
 kernel/fs/elf64.tkb	2	0	Two packed ELF header copy mints take complete bounded byte spans and return independent record values; overlay validity and packed layout remain trusted (#637 D)
 kernel/fs/ext2/ext2.tkb	156	0	ext2 on-disk structures and cache blocks reached through pool pointers (#637 F)
 kernel/init/test_driver.tkb	10	0	boot-time fixtures reaching process records directly (#637 F)
@@ -28,7 +28,7 @@ kernel/net/arp.tkb	7	0	frames and the ARP table (#637 F)
 kernel/net/icmp.tkb	13	0	frames (#637 F)
 kernel/net/tcp.tkb	112	0	Connection and retransmit records use indexed references; retry state uses guarded value copies. Remaining raw sites access wire headers and segment buffers
 kernel/platform/qemu/device_map.tkb	0	3	virtio-mmio magic and device-id probes during DTB discovery (#637 A); the device-window mint
-kernel/platform/rpi5/usb_xhci.tkb	46	42	xHCI registers and DMA rings (#637 A, E)
+kernel/platform/rpi5/usb_xhci.tkb	46	0	xHCI DMA rings (#637 E); registers are an IoHandle
 kernel/printk/log.tkb	46	0	the kernel log's ring and staging buffers (#637 B)
 <builtin region>	113	0	the compiler's built-in region definitions (#672): every dereference is a slot, chunk header or byte in memory the built-in hands out, and its trust is the compiler's, not the kernel's
 kernel/tests/qemu/dma/virtio_blk_fixture.tkb	1	4	test-only device-side descriptor status address and used-ring publication; never CPU-side buffer access or an authority mint
