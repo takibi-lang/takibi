@@ -50,6 +50,16 @@ fn rpi5_gem_attach_bootstrap() !{unsafe} {
     }
 }
 
+// The BCM2712 system timer, at a DTB reg entry its reader has already
+// compared with the board's known address.
+fn rpi5_system_timer_attach(base: usize, bytes: usize) -> Rpi5Attach !{unsafe} {
+    let RegionBytes::Assumed(window) = region_bytes_assume(base, bytes) else {};
+    match io_handle_attach(&rpi5_system_timer, window) {
+        IoAttach::TooSmall => { return Rpi5Attach::Refused; }
+        IoAttach::Attached => { return Rpi5Attach::Attached; }
+    }
+}
+
 // The GIC-400's two windows and MIP0: the board's known addresses until the
 // DTB has been compared with them (gic_dtb.tkb, mip_dtb.tkb), then the DTB's.
 fn rpi5_gic_attach(dist_base: usize, dist_bytes: usize,

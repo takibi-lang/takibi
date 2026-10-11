@@ -114,6 +114,8 @@ EXEMPT = {
         "the GIC's IoHandles, attached on CPU0 during boot before secondaries start",
     "drivers/serial/pl011.tkb":
         "the console's IoHandle, attached on CPU0 during boot before secondaries start",
+    "platform/rpi5/system_timer_dtb.tkb":
+        "the system timer's IoHandle, attached and read once by CPU0's boot DTB check",
     "platform/qemu/device_map.tkb":
         "boot-time device discovery, written on CPU0 before secondaries start",
     "platform/qemu/timer_irq.tkb":

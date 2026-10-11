@@ -7,6 +7,13 @@ const RPI5_SYSTEM_TIMER_BASE: usize = 0x107c003000;
 const RPI5_SYSTEM_TIMER_CLO_OFFSET: usize = 0x04;
 const RPI5_SYSTEM_TIMER_SAMPLE_TICKS: usize = 10000;
 
+// Only the free-running low counter word is read.
+io struct Rpi5SystemTimerRegs {
+    clo: u32 at 0x04;
+}
+
+let mut rpi5_system_timer: IoHandle(Rpi5SystemTimerRegs);
+
 must_use variant Rpi5SystemTimerDtbResult {
     Invalid;
     Missing;
@@ -33,10 +40,13 @@ fn rpi5_system_timer_verify_boot_dtb()
                     RPI5_SYSTEM_TIMER_CLO_OFFSET) {
                 return Rpi5SystemTimerDtbResult::Invalid;
             }
-            let counter: *io u32 = unsafe {
-                (region.base + RPI5_SYSTEM_TIMER_CLO_OFFSET) as *io u32
-            };
-            let system_start: u32 = *counter;
+            match rpi5_system_timer_attach(region.base, region.size) {
+                Rpi5Attach::Refused => {
+                    return Rpi5SystemTimerDtbResult::Invalid;
+                }
+                Rpi5Attach::Attached => {}
+            }
+            let system_start: u32 = rpi5_system_timer.clo;
             let arch_start: i64 = read_cntpct();
             let arch_frequency: i64 = read_cntfrq();
             if (arch_frequency <= 0) {
@@ -45,7 +55,7 @@ fn rpi5_system_timer_verify_boot_dtb()
 
             let mut system_elapsed: usize = 0;
             while (system_elapsed < RPI5_SYSTEM_TIMER_SAMPLE_TICKS) {
-                let current: u32 = *counter;
+                let current: u32 = rpi5_system_timer.clo;
                 if (current >= system_start) {
                     system_elapsed = (current - system_start) as usize;
                 } else {
