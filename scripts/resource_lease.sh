@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 # Exclusive use of one shared resource, across every container working on this
 # repository. Sourced by a runner, which then calls resource_lease_acquire with
-# the resource's name. Three exist: `rpi5`, `stm32`, and `suite`.
+# the resource's name. Two exist: `rpi5` and `suite`.
 #
 # The runners' existing locks do not cover this. The maintained kernel lane
-# locks its artifact directory, which lives inside the clone, and the STM32
-# claim locks a path under /tmp, which is per container. Two clones therefore
-# passed both and drove one board at the same time; only a person deciding who
+# locks its artifact directory, which lives inside the clone, so two clones
+# passed it and drove one board at the same time; only a person deciding who
 # went next prevented it.
 #
 # `suite` is the machine, not a device. Measured on a 24-core host: twelve
