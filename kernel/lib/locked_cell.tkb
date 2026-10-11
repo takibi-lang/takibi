@@ -131,6 +131,22 @@ fn locked_cell_value(T: type, g: borrow LockedCellGuard[id],
     return &(*cell).value;
 }
 
+// A guard without the lock, for the windows that cannot take it: the
+// single-core MMU-off boot (no AArch64 exclusives) and a stopped-world
+// reporter (the holder may be the failed CPU). The guard has the real
+// guard's type, so the value is reached the same way, through
+// locked_cell_record; `unsafe`, because the exclusion is the boot order or
+// the stopped world, not the lock. Give it back with
+// locked_cell_give_unlocked, never locked_cell_give.
+fn locked_cell_take_unlocked(T: type, cell: &mut LockedCell(T) @ id)
+        -> LockedCellGuard[id] !{unsafe} {
+    let mut g: LockedCellGuard[id] = { 0 };
+    return g;
+}
+
+fn locked_cell_give_unlocked(T: type, cell: &mut LockedCell(T) @ id,
+                             g: sink LockedCellGuard[id]) !{unsafe} {}
+
 // Value operations do not export an alias. Both the guard and its cell are
 // borrowed for the operation, and their static cell identities must agree.
 fn locked_cell_load(T: type, g: borrow LockedCellGuard[id],

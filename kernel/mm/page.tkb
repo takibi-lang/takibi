@@ -49,6 +49,7 @@
 // detect a double release. Keeping that state as a bool preserves the
 // diagnostic invariant while removing 7 bytes/page of avoidable metadata.
 use "kernel/lib/freelist.tkb";
+use "kernel/mm/memory_map.tkb";
 use "kernel/lib/execution_model.tkb";
 use "kernel/lib/locked_cell.tkb";
 use "kernel/lib/occupancy.tkb";
@@ -72,17 +73,25 @@ extern symbol kernel_image_start;
 fn page_ddb_kernel_address_readable(
         stopped: borrow MachineStopped[&kernel_world_stop], address: usize, count: usize)
         -> bool !{unsafe} {
+    let unlocked = locked_cell_take_unlocked(&boot_page_pool_cell);
+    let pool = memory_map_pool_record(unlocked, &boot_page_pool_cell);
+    let result = page_ddb_kernel_address_readable_with(pool, stopped, address, count);
+    locked_cell_give_unlocked(&boot_page_pool_cell, unlocked);
+    return result;
+}
+
+private fn page_ddb_kernel_address_readable_with(pool: borrow &mut BootPagePool, stopped: borrow MachineStopped[&kernel_world_stop], address: usize, count: usize)
+        -> bool !{unsafe} {
     // The token is the exclusion proof. The generic cell cannot import this
     // kernel-specific type, so keep its unsafe escape inside this function;
     // the pointer and every metadata read stay inside the stopped span.
-    let pool = locked_cell_value_reporter(&boot_page_pool_cell);
     if (count == 0 || address < kernel_image_start ||
             address > 0xFFFFFFFFFFFFFFFF - count) {
         return false;
     }
     let end: usize = address + count;
     if (end <= usable_ram_start) { return true; }
-    if ((*pool).runtime_applied == false) {
+    if (pool.runtime_applied == false) {
         let bootstrap_end: usize =
             usable_ram_start + PAGE_SIZE * BOOTSTRAP_PAGE_COUNT;
         return address < bootstrap_end && count <= bootstrap_end - address;
@@ -276,7 +285,8 @@ struct BootPagePool align(16) {
 // lock word in front of it would shift its arrays to 8-mod-16: LLVM may emit a
 // 128-bit store at an unusable MMU-off address. RPi5 previously demonstrated
 // that failure as zero UART output while QEMU stayed green.
-private let mut boot_page_pool_cell: LockedCell(BootPagePool);
+// boot_page_pool_cell is declared in kernel/mm/memory_map.tkb, beside the
+// one function that reads it as a record.
 must_use variant PageIndexResult {
     NotManaged;
     Found(usize);
@@ -293,26 +303,26 @@ must_use variant PageDiscontiguousProbeResult {
     Verified;
 }
 
-private fn page_capacity(pool: borrow *BootPagePool) -> usize {
-    if ((*pool).runtime_applied) {
-        return (*pool).runtime_page_count;
+private fn page_capacity(pool: borrow &mut BootPagePool) -> usize {
+    if (pool.runtime_applied) {
+        return pool.runtime_page_count;
     }
     return BOOTSTRAP_PAGE_COUNT;
 }
 
-private fn page_meta_at_index(pool: borrow *BootPagePool, index: usize) -> *PageMeta !{unsafe} {
-    if ((*pool).runtime_applied) {
+private fn page_meta_at_index(pool: borrow &mut BootPagePool, index: usize) -> *PageMeta !{unsafe} {
+    if (pool.runtime_applied) {
         return unsafe {
-            ((*pool).runtime_meta_base as *PageMeta) +
+            (pool.runtime_meta_base as *PageMeta) +
                 (index as isize)
         };
     }
-    return ((*pool).meta as *PageMeta) + (index as isize);
+    return (pool.meta as *PageMeta) + (index as isize);
 }
 
-private fn page_extent_at_index(pool: borrow *BootPagePool, index: usize) -> *PageExtent !{unsafe} {
+private fn page_extent_at_index(pool: borrow &mut BootPagePool, index: usize) -> *PageExtent !{unsafe} {
     return unsafe {
-        ((*pool).runtime_extent_base as *PageExtent) +
+        (pool.runtime_extent_base as *PageExtent) +
             (index as isize)
     };
 }
@@ -335,9 +345,9 @@ private fn page_region_aligned_end(region: PhysicalMemoryRegion) -> usize {
            (region.base + region.size) % PAGE_SIZE;
 }
 
-private fn page_index_for_physical(pool: borrow *BootPagePool, physical: usize) -> PageIndexResult
+private fn page_index_for_physical(pool: borrow &mut BootPagePool, physical: usize) -> PageIndexResult
         !{unsafe} {
-    if ((*pool).runtime_applied == false) {
+    if (pool.runtime_applied == false) {
         if (physical < usable_ram_start) {
             return PageIndexResult::NotManaged;
         }
@@ -350,7 +360,7 @@ private fn page_index_for_physical(pool: borrow *BootPagePool, physical: usize) 
     }
     let page_address: usize = physical - physical % PAGE_SIZE;
     let mut extent_index: usize = 0;
-    while (extent_index < (*pool).runtime_extent_count) {
+    while (extent_index < pool.runtime_extent_count) {
         let extent: *PageExtent = page_extent_at_index(pool, extent_index);
         if (page_address >= (*extent).start &&
             page_address < (*extent).end) {
@@ -363,9 +373,9 @@ private fn page_index_for_physical(pool: borrow *BootPagePool, physical: usize) 
     return PageIndexResult::NotManaged;
 }
 
-private fn page_physical_for_index(pool: borrow *BootPagePool, wanted: usize) -> PagePhysicalResult
+private fn page_physical_for_index(pool: borrow &mut BootPagePool, wanted: usize) -> PagePhysicalResult
         !{unsafe} {
-    if ((*pool).runtime_applied == false) {
+    if (pool.runtime_applied == false) {
         if (wanted < BOOTSTRAP_PAGE_COUNT) {
             return PagePhysicalResult::Found(
                 usable_ram_start + wanted * PAGE_SIZE);
@@ -379,31 +389,31 @@ private fn page_physical_for_index(pool: borrow *BootPagePool, wanted: usize) ->
     return PagePhysicalResult::NotManaged;
 }
 
-private fn page_runtime_freelist_rebuild(pool: borrow *BootPagePool) !{unsafe} {
+private fn page_runtime_freelist_rebuild(pool: borrow &mut BootPagePool) !{unsafe} {
     let capacity: usize = page_capacity(pool);
-    (*pool).runtime_free_head = capacity;
+    pool.runtime_free_head = capacity;
     let mut index: usize = capacity;
     while (index > 0) {
         index = index - 1;
         let meta: *PageMeta = page_meta_at_index(pool, index);
         if ((*meta).occupied == false &&
             (*meta).owner == PageOwnerTag::Unowned) {
-            (*meta).next_free = (*pool).runtime_free_head;
-            (*pool).runtime_free_head = index;
+            (*meta).next_free = pool.runtime_free_head;
+            pool.runtime_free_head = index;
         }
     }
 }
 
-private fn page_freelist_push(pool: borrow *BootPagePool, index: usize,
+private fn page_freelist_push(pool: borrow &mut BootPagePool, index: usize,
                               generation: usize) !{unsafe} {
-    if ((*pool).runtime_applied == false) {
-        let core: &mut FreelistCore(BOOTSTRAP_PAGE_COUNT) = &(*pool).core;
+    if (pool.runtime_applied == false) {
+        let core: &mut FreelistCore(BOOTSTRAP_PAGE_COUNT) = &pool.core;
         freelist_core_remove(core, freelist_owner_new(index, generation));
         return;
     }
     let meta: *PageMeta = page_meta_at_index(pool, index);
-    (*meta).next_free = (*pool).runtime_free_head;
-    (*pool).runtime_free_head = index;
+    (*meta).next_free = pool.runtime_free_head;
+    pool.runtime_free_head = index;
 }
 
 linear struct PageOwner[page: usize] {
@@ -494,7 +504,7 @@ fn page_run_into_region(owner: sink PageRunOwner[run]) -> RegionBytes !{unsafe} 
 // Is every page of an aligned candidate run free? `first` is a multiple
 // of `count`, so `first + k` cannot wrap past the pool while
 // `first + count <= page_capacity()`, which the caller checks.
-private fn page_run_is_free(pool: borrow *BootPagePool, first: usize,
+private fn page_run_is_free(pool: borrow &mut BootPagePool, first: usize,
                             count: usize) -> bool {
     let capacity: usize = page_capacity(pool);
     let mut expected_physical: usize = 0;
@@ -530,14 +540,14 @@ private fn page_run_is_free(pool: borrow *BootPagePool, first: usize,
 fn page_alloc_contiguous(count: usize, owner: PageOwnerTag)
         -> PageRunAllocResult !{allocates, requires_mmu, unsafe} {
     let guard = locked_cell_take(&boot_page_pool_cell);
-    let pool = locked_cell_value(guard, &boot_page_pool_cell);
+    let pool = memory_map_pool_record(guard, &boot_page_pool_cell);
     let result: PageRunAllocResult =
         page_alloc_contiguous_locked(pool, count, owner);
     locked_cell_give(&boot_page_pool_cell, guard);
     return result;
 }
 
-private fn page_alloc_contiguous_locked(pool: borrow *BootPagePool, count: usize,
+private fn page_alloc_contiguous_locked(pool: borrow &mut BootPagePool, count: usize,
                                         owner: PageOwnerTag)
         -> PageRunAllocResult !{allocates, requires_mmu, unsafe} {
     if (count < 1) { return PageRunAllocResult::OutOfMemory; }
@@ -587,11 +597,11 @@ private fn page_alloc_contiguous_locked(pool: borrow *BootPagePool, count: usize
                 }
             }
             let mut unlinked: usize = count;
-            if ((*pool).runtime_applied) {
+            if (pool.runtime_applied) {
                 page_runtime_freelist_rebuild(pool);
             } else {
                 let core: &mut FreelistCore(BOOTSTRAP_PAGE_COUNT) =
-                    &(*pool).core;
+                    &pool.core;
                 unlinked = freelist_core_unlink_range(
                     core, candidate, count);
             }
@@ -617,8 +627,8 @@ private fn page_alloc_contiguous_locked(pool: borrow *BootPagePool, count: usize
                     count);
                 return PageRunAllocResult::OutOfMemory;
             }
-            let generation: usize = (*pool).run_generation;
-            (*pool).run_generation = generation + 1;
+            let generation: usize = pool.run_generation;
+            pool.run_generation = generation + 1;
             return PageRunAllocResult::Allocated(
                 page_run_owner_new(candidate, physical, count, generation));
         }
@@ -629,12 +639,12 @@ private fn page_alloc_contiguous_locked(pool: borrow *BootPagePool, count: usize
 
 fn page_run_free(owner: sink PageRunOwner[run]) !{unsafe} {
     let guard = locked_cell_take(&boot_page_pool_cell);
-    let pool = locked_cell_value(guard, &boot_page_pool_cell);
+    let pool = memory_map_pool_record(guard, &boot_page_pool_cell);
     page_run_free_locked(pool, owner);
     locked_cell_give(&boot_page_pool_cell, guard);
 }
 
-private fn page_run_free_locked(pool: borrow *BootPagePool,
+private fn page_run_free_locked(pool: borrow &mut BootPagePool,
                                 owner: sink PageRunOwner[run]) !{unsafe} {
     page_run_release_indices(pool, owner.first, owner.count);
 }
@@ -653,7 +663,7 @@ fn page_run_transferred_release_physical(physical: usize, count: usize)
         return;
     }
     let guard = locked_cell_take(&boot_page_pool_cell);
-    let pool = locked_cell_value(guard, &boot_page_pool_cell);
+    let pool = memory_map_pool_record(guard, &boot_page_pool_cell);
     match page_index_for_physical(pool, physical) {
         PageIndexResult::NotManaged => {}
         PageIndexResult::Found(index) => {
@@ -669,7 +679,7 @@ fn page_run_reclaim_transferred_physical(physical: usize, count: usize)
         return PageRunReclaimResult::Invalid;
     }
     let guard = locked_cell_take(&boot_page_pool_cell);
-    let pool = locked_cell_value(guard, &boot_page_pool_cell);
+    let pool = memory_map_pool_record(guard, &boot_page_pool_cell);
     let mut valid: bool = false;
     let mut index: usize = 0;
     match page_index_for_physical(pool, physical) {
@@ -690,7 +700,7 @@ fn page_run_reclaim_transferred_physical(physical: usize, count: usize)
     return PageRunReclaimResult::Invalid;
 }
 
-private fn page_run_release_indices(pool: borrow *BootPagePool, first: usize,
+private fn page_run_release_indices(pool: borrow &mut BootPagePool, first: usize,
                                     count: usize) !{unsafe} {
     let capacity: usize = page_capacity(pool);
     for k: usize in 0..<count {
@@ -698,8 +708,8 @@ private fn page_run_release_indices(pool: borrow *BootPagePool, first: usize,
         if (index < capacity) {
             let meta: *PageMeta = page_meta_at_index(pool, index);
             if ((*meta).occupied == false) {
-                (*pool).double_remove_count =
-                    (*pool).double_remove_count + 1;
+                pool.double_remove_count =
+                    pool.double_remove_count + 1;
             } else {
                 (*meta).occupied = false;
                 (*meta).owner = PageOwnerTag::Unowned;
@@ -730,29 +740,35 @@ fn page_allocator_execution_model_assumption() {
 }
 
 fn page_allocator_init() !{unsafe} {
+    let unlocked = locked_cell_take_unlocked(&boot_page_pool_cell);
+    let pool = memory_map_pool_record(unlocked, &boot_page_pool_cell);
+    page_allocator_init_with(pool);
+    locked_cell_give_unlocked(&boot_page_pool_cell, unlocked);
+}
+
+private fn page_allocator_init_with(pool: borrow &mut BootPagePool) !{unsafe} {
     // The allocator is initialized before PSCI starts a peer and while the
     // MMU-off caller cannot use AArch64 exclusives. This is the deliberate
     // boot escape; every post-boot entry obtains the pointer from a guard.
-    let pool = locked_cell_value_boot(&boot_page_pool_cell);
-    let core: &mut FreelistCore(BOOTSTRAP_PAGE_COUNT) = &(*pool).core;
+    let core: &mut FreelistCore(BOOTSTRAP_PAGE_COUNT) = &pool.core;
     freelist_core_init(core);
     for i: usize in 0..<BOOTSTRAP_PAGE_COUNT {
-        (*pool).meta[i].occupied = false;
-        (*pool).meta[i].owner = PageOwnerTag::Unowned;
-        (*pool).meta[i].map_refcount = 0;
-        (*pool).meta[i].next_free = i + 1;
-        (*pool).meta[i].physical =
+        pool.meta[i].occupied = false;
+        pool.meta[i].owner = PageOwnerTag::Unowned;
+        pool.meta[i].map_refcount = 0;
+        pool.meta[i].next_free = i + 1;
+        pool.meta[i].physical =
             usable_ram_start + i * PAGE_SIZE;
     }
-    (*pool).runtime_meta_base = 0;
-    (*pool).runtime_page_count = 0;
-    (*pool).runtime_extent_base = 0;
-    (*pool).runtime_extent_count = 0;
-    (*pool).runtime_free_head = 0;
-    (*pool).runtime_next_generation = 1;
-    (*pool).runtime_applied = false;
-    (*pool).double_remove_count = 0;
-    (*pool).run_generation = 1;
+    pool.runtime_meta_base = 0;
+    pool.runtime_page_count = 0;
+    pool.runtime_extent_base = 0;
+    pool.runtime_extent_count = 0;
+    pool.runtime_free_head = 0;
+    pool.runtime_next_generation = 1;
+    pool.runtime_applied = false;
+    pool.double_remove_count = 0;
+    pool.run_generation = 1;
 }
 
 must_use variant PageAllocatorMemoryResult {
@@ -762,9 +778,17 @@ must_use variant PageAllocatorMemoryResult {
 
 fn page_allocator_apply_memory(memory: FdtMemoryMap)
         -> PageAllocatorMemoryResult !{unsafe} {
+    let unlocked = locked_cell_take_unlocked(&boot_page_pool_cell);
+    let pool = memory_map_pool_record(unlocked, &boot_page_pool_cell);
+    let result = page_allocator_apply_memory_with(pool, memory);
+    locked_cell_give_unlocked(&boot_page_pool_cell, unlocked);
+    return result;
+}
+
+private fn page_allocator_apply_memory_with(pool: borrow &mut BootPagePool, memory: FdtMemoryMap)
+        -> PageAllocatorMemoryResult !{unsafe} {
     // Runtime memory discovery is still single-core boot construction.
     // Keeping the pointer local makes the later guarded boundary explicit.
-    let pool = locked_cell_value_boot(&boot_page_pool_cell);
     let region_count: usize = fdt_memory_region_count(memory);
     let mut total_pages: usize = 0;
     let mut region_index: usize = 0;
@@ -842,7 +866,7 @@ fn page_allocator_apply_memory(memory: FdtMemoryMap)
                     let candidate: usize = end - metadata_span;
                     let mut overlaps_bootstrap: bool = false;
                     for i: usize in 0..<BOOTSTRAP_PAGE_COUNT {
-                        if ((*pool).meta[i].occupied) {
+                        if (pool.meta[i].occupied) {
                             let address: usize =
                                 usable_ram_start + i * PAGE_SIZE;
                             if (address >= candidate && address < end) {
@@ -865,13 +889,13 @@ fn page_allocator_apply_memory(memory: FdtMemoryMap)
         return PageAllocatorMemoryResult::Invalid;
     }
 
-    (*pool).runtime_meta_base = metadata_base;
-    (*pool).runtime_page_count = total_pages;
-    (*pool).runtime_extent_base = metadata_base + metadata_bytes;
-    (*pool).runtime_extent_count = 0;
-    (*pool).runtime_free_head = total_pages;
-    (*pool).runtime_next_generation = 1;
-    (*pool).runtime_applied = true;
+    pool.runtime_meta_base = metadata_base;
+    pool.runtime_page_count = total_pages;
+    pool.runtime_extent_base = metadata_base + metadata_bytes;
+    pool.runtime_extent_count = 0;
+    pool.runtime_free_head = total_pages;
+    pool.runtime_next_generation = 1;
+    pool.runtime_applied = true;
 
     let mut index: usize = 0;
     region_index = 0;
@@ -889,12 +913,12 @@ fn page_allocator_apply_memory(memory: FdtMemoryMap)
                 let mut physical: usize = start;
                 if (start < end) {
                     let extent: *PageExtent = page_extent_at_index(
-                        pool, (*pool).runtime_extent_count);
+                        pool, pool.runtime_extent_count);
                     (*extent).start = start;
                     (*extent).end = end;
                     (*extent).first_index = index;
-                    (*pool).runtime_extent_count =
-                        (*pool).runtime_extent_count + 1;
+                    pool.runtime_extent_count =
+                        pool.runtime_extent_count + 1;
                 }
                 while (physical < end) {
                     if (index >= total_pages) {
@@ -926,7 +950,7 @@ fn page_allocator_apply_memory(memory: FdtMemoryMap)
 
     let mut bootstrap_remaining: usize = 0;
     for i: usize in 0..<BOOTSTRAP_PAGE_COUNT {
-        if ((*pool).meta[i].occupied) {
+        if (pool.meta[i].occupied) {
             bootstrap_remaining = bootstrap_remaining + 1;
             let physical: usize = usable_ram_start + i * PAGE_SIZE;
             match page_index_for_physical(pool, physical) {
@@ -939,8 +963,8 @@ fn page_allocator_apply_memory(memory: FdtMemoryMap)
                         return PageAllocatorMemoryResult::Invalid;
                     }
                     (*meta).occupied = true;
-                    (*meta).owner = (*pool).meta[i].owner;
-                    (*meta).map_refcount = (*pool).meta[i].map_refcount;
+                    (*meta).owner = pool.meta[i].owner;
+                    (*meta).map_refcount = pool.meta[i].map_refcount;
                     bootstrap_remaining = bootstrap_remaining - 1;
                 }
             }
@@ -961,23 +985,23 @@ fn page_allocator_apply_memory(memory: FdtMemoryMap)
 fn page_discontiguous_extent_probe() -> PageDiscontiguousProbeResult
         !{unsafe} {
     let guard = locked_cell_take(&boot_page_pool_cell);
-    let pool = locked_cell_value(guard, &boot_page_pool_cell);
+    let pool = memory_map_pool_record(guard, &boot_page_pool_cell);
     let result: PageDiscontiguousProbeResult =
         page_discontiguous_extent_probe_locked(pool);
     locked_cell_give(&boot_page_pool_cell, guard);
     return result;
 }
 
-private fn page_discontiguous_extent_probe_locked(pool: borrow *BootPagePool)
+private fn page_discontiguous_extent_probe_locked(pool: borrow &mut BootPagePool)
         -> PageDiscontiguousProbeResult !{unsafe} {
-    if ((*pool).runtime_applied == false ||
-        (*pool).runtime_extent_count < 2) {
+    if (pool.runtime_applied == false ||
+        pool.runtime_extent_count < 2) {
         return PageDiscontiguousProbeResult::NotDiscontiguous;
     }
     let mut extent_index: usize = 0;
     let mut next_index: usize = 0;
     let mut found_hole: bool = false;
-    while (extent_index < (*pool).runtime_extent_count) {
+    while (extent_index < pool.runtime_extent_count) {
         let extent: *PageExtent = page_extent_at_index(pool, extent_index);
         if ((*extent).start >= (*extent).end ||
             (*extent).start % PAGE_SIZE != 0 ||
@@ -1031,7 +1055,7 @@ private fn page_discontiguous_extent_probe_locked(pool: borrow *BootPagePool)
                 }
             }
         }
-        if (extent_index + 1 < (*pool).runtime_extent_count) {
+        if (extent_index + 1 < pool.runtime_extent_count) {
             let following: *PageExtent =
                 page_extent_at_index(pool, extent_index + 1);
             if ((*extent).end > (*following).start) {
@@ -1050,7 +1074,7 @@ private fn page_discontiguous_extent_probe_locked(pool: borrow *BootPagePool)
         next_index = next_index + pages;
         extent_index = extent_index + 1;
     }
-    if (next_index != (*pool).runtime_page_count ||
+    if (next_index != pool.runtime_page_count ||
         found_hole == false) {
         return PageDiscontiguousProbeResult::Invalid;
     }
@@ -1215,13 +1239,18 @@ fn page_alloc_boot(owner: PageOwnerTag) -> PageAllocResult
         owner == PageOwnerTag::Unavailable) {
         return PageAllocResult::OutOfMemory;
     }
-    let pool = locked_cell_value_boot(&boot_page_pool_cell);
-    return page_alloc_locked(pool, owner);
+    let unlocked = locked_cell_take_unlocked(&boot_page_pool_cell);
+    let pool = memory_map_pool_record(unlocked, &boot_page_pool_cell);
+    let result = page_alloc_locked(pool, owner);
+    locked_cell_give_unlocked(&boot_page_pool_cell, unlocked);
+    return result;
 }
 
 fn page_free_boot(owner: sink PageOwner[page]) !{mmu_off, unsafe} {
-    let pool = locked_cell_value_boot(&boot_page_pool_cell);
+    let unlocked = locked_cell_take_unlocked(&boot_page_pool_cell);
+    let pool = memory_map_pool_record(unlocked, &boot_page_pool_cell);
     page_free_locked(pool, owner);
+    locked_cell_give_unlocked(&boot_page_pool_cell, unlocked);
 }
 
 fn page_alloc(owner: PageOwnerTag) -> PageAllocResult !{allocates} {
@@ -1230,16 +1259,16 @@ fn page_alloc(owner: PageOwnerTag) -> PageAllocResult !{allocates} {
         return PageAllocResult::OutOfMemory;
     }
     let guard = locked_cell_take(&boot_page_pool_cell);
-    let pool = locked_cell_value(guard, &boot_page_pool_cell);
+    let pool = memory_map_pool_record(guard, &boot_page_pool_cell);
     let result: PageAllocResult = page_alloc_locked(pool, owner);
     locked_cell_give(&boot_page_pool_cell, guard);
     return result;
 }
 
-private fn page_alloc_locked(pool: borrow *BootPagePool, owner: PageOwnerTag) -> PageAllocResult
+private fn page_alloc_locked(pool: borrow &mut BootPagePool, owner: PageOwnerTag) -> PageAllocResult
         !{allocates} {
-    if ((*pool).runtime_applied == false) {
-        let core: &mut FreelistCore(BOOTSTRAP_PAGE_COUNT) = &(*pool).core;
+    if (pool.runtime_applied == false) {
+        let core: &mut FreelistCore(BOOTSTRAP_PAGE_COUNT) = &pool.core;
         match freelist_core_insert(core) {
             FreelistPopResult::Empty => {
                 return PageAllocResult::OutOfMemory;
@@ -1247,9 +1276,9 @@ private fn page_alloc_locked(pool: borrow *BootPagePool, owner: PageOwnerTag) ->
             FreelistPopResult::Popped(slot) => {
                 let (index, generation) = freelist_owner_into_parts(slot);
                 if (index < BOOTSTRAP_PAGE_COUNT) {
-                    (*pool).meta[index].occupied = true;
-                    (*pool).meta[index].owner = owner;
-                    (*pool).meta[index].map_refcount = 0;
+                    pool.meta[index].occupied = true;
+                    pool.meta[index].owner = owner;
+                    pool.meta[index].map_refcount = 0;
                     return PageAllocResult::Allocated(page_owner_new(
                         index, usable_ram_start + index * PAGE_SIZE,
                         generation));
@@ -1258,12 +1287,12 @@ private fn page_alloc_locked(pool: borrow *BootPagePool, owner: PageOwnerTag) ->
             }
         }
     }
-    let index: usize = (*pool).runtime_free_head;
+    let index: usize = pool.runtime_free_head;
     if (index >= page_capacity(pool)) { return PageAllocResult::OutOfMemory; }
     let meta: *PageMeta = page_meta_at_index(pool, index);
-    (*pool).runtime_free_head = (*meta).next_free;
-    let generation: usize = (*pool).runtime_next_generation;
-    (*pool).runtime_next_generation = generation + 1;
+    pool.runtime_free_head = (*meta).next_free;
+    let generation: usize = pool.runtime_next_generation;
+    pool.runtime_next_generation = generation + 1;
     (*meta).occupied = true;
     (*meta).owner = owner;
     (*meta).map_refcount = 0;
@@ -1284,17 +1313,17 @@ private fn page_alloc_locked(pool: borrow *BootPagePool, owner: PageOwnerTag) ->
 // its source instead of silently corrupting the chain a second time.
 fn page_free(owner: sink PageOwner[page]) !{unsafe} {
     let guard = locked_cell_take(&boot_page_pool_cell);
-    let pool = locked_cell_value(guard, &boot_page_pool_cell);
+    let pool = memory_map_pool_record(guard, &boot_page_pool_cell);
     page_free_locked(pool, owner);
     locked_cell_give(&boot_page_pool_cell, guard);
 }
 
-private fn page_free_locked(pool: borrow *BootPagePool, owner: sink PageOwner[page]) !{unsafe} {
+private fn page_free_locked(pool: borrow &mut BootPagePool, owner: sink PageOwner[page]) !{unsafe} {
     let index: usize = owner.index;
     if (index >= page_capacity(pool)) { return; }
     let meta: *PageMeta = page_meta_at_index(pool, index);
     if ((*meta).occupied == false) {
-        (*pool).double_remove_count = (*pool).double_remove_count + 1;
+        pool.double_remove_count = pool.double_remove_count + 1;
         return;
     }
     (*meta).occupied = false;
@@ -1329,7 +1358,7 @@ fn page_copy_mapped_physical(source_physical: usize,
         return false;
     }
     let guard = locked_cell_take(&boot_page_pool_cell);
-    let pool = locked_cell_value(guard, &boot_page_pool_cell);
+    let pool = memory_map_pool_record(guard, &boot_page_pool_cell);
     let managed: bool = match page_index_for_physical(pool, source_physical) {
         PageIndexResult::NotManaged => { false }
         PageIndexResult::Found(_source_index) => { true }
@@ -1357,12 +1386,12 @@ fn page_owner_transfer_index(owner: sink PageOwner[page])
 // page from this allocator.
 fn page_mapping_install(owner: sink PageOwner[page]) !{unsafe} {
     let guard = locked_cell_take(&boot_page_pool_cell);
-    let pool = locked_cell_value(guard, &boot_page_pool_cell);
+    let pool = memory_map_pool_record(guard, &boot_page_pool_cell);
     page_mapping_install_locked(pool, owner);
     locked_cell_give(&boot_page_pool_cell, guard);
 }
 
-private fn page_mapping_install_locked(pool: borrow *BootPagePool,
+private fn page_mapping_install_locked(pool: borrow &mut BootPagePool,
                                        owner: sink PageOwner[page]) !{unsafe} {
     let index: usize = owner.index;
     let meta: *PageMeta = page_meta_at_index(pool, index);
@@ -1397,9 +1426,8 @@ private let mut page_mapping_ref_bound_breaks_cell: LockedCell(usize);
 
 fn page_mapping_ref_bound_breaks_count() -> usize {
     let guard = locked_cell_take(&page_mapping_ref_bound_breaks_cell);
-    let value = locked_cell_value(guard,
-                                  &page_mapping_ref_bound_breaks_cell);
-    let result: usize = *value;
+    let result: usize = locked_cell_load(guard,
+                                         &page_mapping_ref_bound_breaks_cell);
     locked_cell_give(&page_mapping_ref_bound_breaks_cell, guard);
     return result;
 }
@@ -1410,9 +1438,9 @@ fn page_mapping_ref_bound_breaks_count() -> usize {
 // and there is exactly one (kernel/mm/process_image.tkb's COW clone).
 fn page_mapping_ref_bound_break() {
     let guard = locked_cell_take(&page_mapping_ref_bound_breaks_cell);
-    let value = locked_cell_value(guard,
-                                  &page_mapping_ref_bound_breaks_cell);
-    *value = *value + 1;
+    let breaks: usize = locked_cell_load(guard,
+                                         &page_mapping_ref_bound_breaks_cell);
+    locked_cell_store(guard, &page_mapping_ref_bound_breaks_cell, breaks + 1);
     locked_cell_give(&page_mapping_ref_bound_breaks_cell, guard);
     kernel_boot_log("page allocator: INVARIANT BREAK -- a physical page is mapped into more address spaces than exist\n");
 }
@@ -1426,14 +1454,14 @@ fn page_mapping_ref_bound_break() {
 fn page_mapping_retain_physical(physical: usize, limit: usize)
         -> PageMappingRetainResult !{unsafe} {
     let guard = locked_cell_take(&boot_page_pool_cell);
-    let pool = locked_cell_value(guard, &boot_page_pool_cell);
+    let pool = memory_map_pool_record(guard, &boot_page_pool_cell);
     let result: PageMappingRetainResult =
         page_mapping_retain_physical_locked(pool, physical, limit);
     locked_cell_give(&boot_page_pool_cell, guard);
     return result;
 }
 
-private fn page_mapping_retain_physical_locked(pool: borrow *BootPagePool,
+private fn page_mapping_retain_physical_locked(pool: borrow &mut BootPagePool,
         physical: usize, limit: usize)
         -> PageMappingRetainResult !{unsafe} {
     if (physical % PAGE_SIZE != 0) {
@@ -1460,7 +1488,7 @@ private fn page_mapping_retain_physical_locked(pool: borrow *BootPagePool,
 
 // GitHub issue #295 boundary test, reworked by issue #406. It used to
 // place a page's refcount at and one below a fixed PAGE_MAP_REF_MAX -- written
-// directly into (*pool).meta, because 4.2 million real retains is
+// directly into pool.meta, because 4.2 million real retains is
 // not a boot-time probe -- and check the comparison fired at exactly the
 // constant. With the bound COMPUTED from how many address spaces exist,
 // the thing worth proving is that it TRACKS.
@@ -1558,7 +1586,7 @@ fn page_mapping_ref_ceiling_probe() -> bool !{unsafe} {
 private fn page_mapping_refcount_set_probe(index: usize, value: usize)
         !{unsafe} {
     let guard = locked_cell_take(&boot_page_pool_cell);
-    let pool = locked_cell_value(guard, &boot_page_pool_cell);
+    let pool = memory_map_pool_record(guard, &boot_page_pool_cell);
     if (index < page_capacity(pool)) {
         let meta: *PageMeta = page_meta_at_index(pool, index);
         if (value <= PAGE_MAP_REF_CEILING) {
@@ -1570,14 +1598,14 @@ private fn page_mapping_refcount_set_probe(index: usize, value: usize)
 
 fn page_mapping_refcount_physical(physical: usize) -> usize !{unsafe} {
     let guard = locked_cell_take(&boot_page_pool_cell);
-    let pool = locked_cell_value(guard, &boot_page_pool_cell);
+    let pool = memory_map_pool_record(guard, &boot_page_pool_cell);
     let result: usize = page_mapping_refcount_physical_locked(pool, physical);
     locked_cell_give(&boot_page_pool_cell, guard);
     return result;
 }
 
 private fn page_mapping_refcount_physical_locked(
-        pool: borrow *BootPagePool, physical: usize) -> usize !{unsafe} {
+        pool: borrow &mut BootPagePool, physical: usize) -> usize !{unsafe} {
     if (physical % PAGE_SIZE != 0) {
         return 0;
     }
@@ -1599,15 +1627,15 @@ fn page_mapping_release_physical(physical: usize) !{unsafe} {
     // release it may trigger. Locking them separately would let another
     // core see map_refcount reach 0 and free the page underneath this one.
     let guard = locked_cell_take(&boot_page_pool_cell);
-    let pool = locked_cell_value(guard, &boot_page_pool_cell);
+    let pool = memory_map_pool_record(guard, &boot_page_pool_cell);
     match page_index_for_physical(pool, physical) {
         PageIndexResult::NotManaged => {}
         PageIndexResult::Found(index) => {
             let meta: *PageMeta = page_meta_at_index(pool, index);
             let current: usize = (*meta).map_refcount as usize;
             if ((*meta).occupied == false || current == 0) {
-                (*pool).double_remove_count =
-                    (*pool).double_remove_count + 1;
+                pool.double_remove_count =
+                    pool.double_remove_count + 1;
             } else {
                 let next: usize = current - 1;
                 (*meta).map_refcount = next as u32;
@@ -1627,12 +1655,12 @@ fn page_mapping_release_physical(physical: usize) !{unsafe} {
 // use this. page_mapping_release_physical and
 // page_transferred_release_physical both call THIS, which is why the split
 // exists.
-private fn page_transferred_release_locked(pool: borrow *BootPagePool,
+private fn page_transferred_release_locked(pool: borrow &mut BootPagePool,
                                            index: usize) !{unsafe} {
     if (index >= page_capacity(pool)) { return; }
     let meta: *PageMeta = page_meta_at_index(pool, index);
     if ((*meta).occupied == false) {
-        (*pool).double_remove_count = (*pool).double_remove_count + 1;
+        pool.double_remove_count = pool.double_remove_count + 1;
         return;
     }
     (*meta).occupied = false;
@@ -1646,7 +1674,7 @@ fn page_transferred_release_physical(physical: usize) !{unsafe} {
         return;
     }
     let guard = locked_cell_take(&boot_page_pool_cell);
-    let pool = locked_cell_value(guard, &boot_page_pool_cell);
+    let pool = memory_map_pool_record(guard, &boot_page_pool_cell);
     match page_index_for_physical(pool, physical) {
         PageIndexResult::NotManaged => {}
         PageIndexResult::Found(index) => {
@@ -1665,13 +1693,13 @@ fn page_transferred_release_physical(physical: usize) !{unsafe} {
 // is a wrong answer rather than a compile error.
 fn page_owner_tag_at(address: usize) -> PageOwnerTag !{unsafe} {
     let guard = locked_cell_take(&boot_page_pool_cell);
-    let pool = locked_cell_value(guard, &boot_page_pool_cell);
+    let pool = memory_map_pool_record(guard, &boot_page_pool_cell);
     let result: PageOwnerTag = page_owner_tag_at_locked(pool, address);
     locked_cell_give(&boot_page_pool_cell, guard);
     return result;
 }
 
-private fn page_owner_tag_at_locked(pool: borrow *BootPagePool,
+private fn page_owner_tag_at_locked(pool: borrow &mut BootPagePool,
                                     address: usize) -> PageOwnerTag !{unsafe} {
     match page_index_for_physical(pool, address) {
         PageIndexResult::NotManaged => { return PageOwnerTag::Unowned; }
@@ -1693,7 +1721,7 @@ private fn page_owner_tag_at_locked(pool: borrow *BootPagePool,
 // same word.
 fn page_owner_description(address: usize) -> *u8 !{unsafe} {
     let guard = locked_cell_take(&boot_page_pool_cell);
-    let pool = locked_cell_value(guard, &boot_page_pool_cell);
+    let pool = memory_map_pool_record(guard, &boot_page_pool_cell);
     let result: *u8 = page_owner_description_locked(pool, address);
     locked_cell_give(&boot_page_pool_cell, guard);
     return result;
@@ -1702,16 +1730,22 @@ fn page_owner_description(address: usize) -> *u8 !{unsafe} {
 // Terminal reports must not wait for a page lock held by the failed CPU.
 // These answers are diagnostic only and may span concurrent mutations.
 fn page_owner_tag_at_reporter(address: usize) -> PageOwnerTag !{unsafe} {
-    let pool = locked_cell_value_reporter(&boot_page_pool_cell);
-    return page_owner_tag_at_locked(pool, address);
+    let unlocked = locked_cell_take_unlocked(&boot_page_pool_cell);
+    let pool = memory_map_pool_record(unlocked, &boot_page_pool_cell);
+    let tag: PageOwnerTag = page_owner_tag_at_locked(pool, address);
+    locked_cell_give_unlocked(&boot_page_pool_cell, unlocked);
+    return tag;
 }
 
 fn page_owner_description_reporter(address: usize) -> *u8 !{unsafe} {
-    let pool = locked_cell_value_reporter(&boot_page_pool_cell);
-    return page_owner_description_locked(pool, address);
+    let unlocked = locked_cell_take_unlocked(&boot_page_pool_cell);
+    let pool = memory_map_pool_record(unlocked, &boot_page_pool_cell);
+    let text: *u8 = page_owner_description_locked(pool, address);
+    locked_cell_give_unlocked(&boot_page_pool_cell, unlocked);
+    return text;
 }
 
-private fn page_owner_description_locked(pool: borrow *BootPagePool,
+private fn page_owner_description_locked(pool: borrow &mut BootPagePool,
                                          address: usize) -> *u8 !{unsafe} {
     let base: usize = usable_ram_start;
     // Zero is worth its own answer rather than falling into "outside":
@@ -1764,13 +1798,13 @@ private fn page_owner_description_locked(pool: borrow *BootPagePool,
 // depending on parse order, which a const in a refined bound would.
 fn page_allocator_total_count() -> usize !{unsafe} {
     let guard = locked_cell_take(&boot_page_pool_cell);
-    let pool = locked_cell_value(guard, &boot_page_pool_cell);
+    let pool = memory_map_pool_record(guard, &boot_page_pool_cell);
     let result: usize = page_allocator_total_count_locked(pool);
     locked_cell_give(&boot_page_pool_cell, guard);
     return result;
 }
 
-private fn page_allocator_total_count_locked(pool: borrow *BootPagePool)
+private fn page_allocator_total_count_locked(pool: borrow &mut BootPagePool)
         -> usize !{unsafe} {
     let mut available: usize = 0;
     let capacity: usize = page_capacity(pool);
@@ -1788,9 +1822,12 @@ private fn page_allocator_total_count_locked(pool: borrow *BootPagePool)
 // DDB's `vm`: pages in use and pages the allocator owns, without the page
 // lock. Two walks, so they may span concurrent mutations.
 fn page_allocator_counts_reporter() -> (usize, usize) !{unsafe} {
-    let pool = locked_cell_value_reporter(&boot_page_pool_cell);
-    return (page_allocator_live_count_locked(pool),
-            page_allocator_total_count_locked(pool));
+    let unlocked = locked_cell_take_unlocked(&boot_page_pool_cell);
+    let pool = memory_map_pool_record(unlocked, &boot_page_pool_cell);
+    let live: usize = page_allocator_live_count_locked(pool);
+    let total: usize = page_allocator_total_count_locked(pool);
+    locked_cell_give_unlocked(&boot_page_pool_cell, unlocked);
+    return (live, total);
 }
 
 fn page_allocator_page_bytes() -> usize {
@@ -1799,13 +1836,13 @@ fn page_allocator_page_bytes() -> usize {
 
 fn page_allocator_live_count() -> usize !{unsafe} {
     let guard = locked_cell_take(&boot_page_pool_cell);
-    let pool = locked_cell_value(guard, &boot_page_pool_cell);
+    let pool = memory_map_pool_record(guard, &boot_page_pool_cell);
     let result: usize = page_allocator_live_count_locked(pool);
     locked_cell_give(&boot_page_pool_cell, guard);
     return result;
 }
 
-private fn page_allocator_live_count_locked(pool: borrow *BootPagePool)
+private fn page_allocator_live_count_locked(pool: borrow &mut BootPagePool)
         -> usize !{unsafe} {
     let mut live: usize = 0;
     let capacity: usize = page_capacity(pool);
@@ -1825,8 +1862,8 @@ private fn page_allocator_live_count_locked(pool: borrow *BootPagePool)
 // not idempotent the way that scan was).
 fn page_allocator_double_free_count() -> usize {
     let guard = locked_cell_take(&boot_page_pool_cell);
-    let pool = locked_cell_value(guard, &boot_page_pool_cell);
-    let result: usize = (*pool).double_remove_count;
+    let pool = memory_map_pool_record(guard, &boot_page_pool_cell);
+    let result: usize = pool.double_remove_count;
     locked_cell_give(&boot_page_pool_cell, guard);
     return result;
 }

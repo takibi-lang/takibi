@@ -22,7 +22,7 @@ kernel/init/test_driver.tkb	10	0	boot-time fixtures reaching process records dir
 kernel/kernel/process.tkb	10	0	ProcessRecord loans derive from run guards, indexed current phases, owners or MachineStopped. Ordinary scalar diagnostics copy before releasing their pool view; no liveness escape remains. Per-CPU state uses bounded array places. PID values use guarded copies; physical stack mints and diagnostic output still await file confinement.
 kernel/lib/intrusive_pool.tkb	93	0	the pool's own chunk carving, the mint of every payload pointer (#637 F)
 kernel/mm/address_space.tkb	6	0	Backing records use indexed references and active roots use bounded per-CPU array places; remaining raw sites are the deliberate user-VA CoW probe byte mints
-kernel/mm/page.tkb	157	0	physical pages and page metadata (#637 D)
+kernel/mm/page.tkb	81	0	physical pages and page metadata (#637 D); -76: the pool is read through a record reference (#744)
 kernel/mm/user_memory.tkb	7	0	the user-range mint site: user addresses become slices here (#637 D)
 kernel/net/arp.tkb	7	0	frames and the ARP table (#637 F)
 kernel/net/icmp.tkb	13	0	frames (#637 F)

@@ -1,0 +1,33 @@
+// The memory mint (GitHub issue #744, #637 step B2): the few places where
+// RAM the kernel discovered becomes something its code may touch. What it
+// trusts is that the page allocator's records are right -- a page it hands
+// out is RAM and belongs to the caller alone. Everything reached through
+// what these functions return is checked by type.
+//
+// Discovery stays elsewhere: the DTB reader today, ACPI or PCI enumeration
+// later. This file knows nothing about where an extent came from.
+//
+// Current limitations: the page allocator's guarantee that it never hands
+// out a page twice rests on its free list and PageMeta's occupied flag
+// (#746 moves it into per-page permissions).
+
+// The page allocator's pool (kernel/mm/page.tkb). It lives here so that
+// memory_map_pool_record can read it as a record by name. The value is still
+// reachable only with a guard of this cell.
+let mut boot_page_pool_cell: LockedCell(BootPagePool);
+
+// The allocator's pool as a record reference, alive while the guard is.
+// A LockedCell hands its value out as a pointer, which any field access
+// would turn into a raw dereference; the allocator's pool is a struct, so
+// it is read through a reference instead. A LockedCell keeps its value as
+// its first field (kernel/lib/locked_cell.tkb, "why the value is the first
+// field"), so the cell's address is the pool's.
+// `cell` only pins the guard to this cell: its identity must be
+// &boot_page_pool_cell, so another cell's guard does not fit.
+fn memory_map_pool_record(g: borrow LockedCellGuard[id],
+                          cell: borrow &mut LockedCell(BootPagePool) @ id)
+        -> &mut BootPagePool @ id !{unsafe} {
+    return unsafe {
+        (((&boot_page_pool_cell) as usize) as *BootPagePool) as &mut BootPagePool
+    };
+}

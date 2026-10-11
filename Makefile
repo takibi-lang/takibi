@@ -417,6 +417,7 @@ KERNEL_UNUSED_CHECKED := \
 	kernel/lib/spinlock.tkb \
 	kernel/mm/address_space.tkb \
 	kernel/mm/process_image.tkb \
+	kernel/mm/memory_map.tkb \
 	kernel/mm/user_memory.tkb \
 	kernel/net/arp.tkb \
 	kernel/net/checksum.tkb \
