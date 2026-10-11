@@ -9,10 +9,10 @@ scripts/slowcheck_lease_wait.py.
 
 import sys
 
-from lease_wait import lease_pending, timed_out_waiting
+from lease_wait import WAITING, lease_pending, timed_out_waiting
 from pass_line import report_pass
 
-WAIT = b"[lease] waiting for 2 more of 4 vCPUs (budget 24): x\n"
+WAIT = WAITING + b" for 2 more of 4 vCPUs (budget 24)\n"
 ALLOC = b"[lease] waiting for the vCPU allocator (another runner is waiting for slots)\n"
 GOT = b"[lease] got 4 vCPUs\n"
 BOOT = b"[kernel/qemu] interactive UART session\n"
