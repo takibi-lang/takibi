@@ -1,10 +1,11 @@
 {
   "date": "2026-10-11",
   "event": "incremental",
-  "decision": "measured",
-  "source_sha256": "e4ffcb765b6b106f8a3fd24d2edf9d87f0586b00d44266af19aae0add3b2b085",
-  "workload": "#518: process identities (owner, state, handle, taken signal) hold IntrusiveSlotAddress; handle_of_slot answers Absent or Live. Linked kernels compared against origin/main (0335d45d) with scripts/space_delta.py.",
+  "decision": "reuse",
+  "source_sha256": "5d7742368a3a026ad1097254dff248a5e04b7bfdd6a3efe1f77457cf8560cfa0",
+  "workload": "#518: process identities (owner, state, handle, taken signal) hold IntrusiveSlotAddress; handle_of_slot answers Absent or Live. Linked kernels compared against origin/main (0335d45d) with scripts/space_delta.py. Incremental crash-stop claim correction: the same maintained boot, pools, persistent gate and participant mask; no allocation or reservation workload change.",
   "evidence": [
+    "docs/WORLD_STOP_CLAIM_REVIEW_2026-10-11.md",
     "docs/PROCESS_PIN_SPACE_2026-10-10.md",
     "docs/BOUNDS_CONTRACT_SPACE_2026-10-10.md",
     "docs/PROCESS_STATE_PAYLOAD_SPACE_2026-10-10.md",
@@ -46,6 +47,6 @@
     "docs/VIRTIO_NET_TX_2026-10-10.md",
     "docs/VIRTIO_NET_TX_SPACE_2026-10-10.json"
   ],
-  "assessment": "QEMU text +1224 B, RPi5 text +1152 B (the Absent/Live variant at 13 slot-walk callers and typed boot compares); data, BSS and usable_ram_start unchanged; no data/BSS symbol changed size. Record layouts unchanged (the typed address is one usize). Accepted: the cost buys a handle that can only name a pool-minted slot.",
+  "assessment": "QEMU text +1224 B, RPi5 text +1152 B (the Absent/Live variant at 13 slot-walk callers and typed boot compares); data, BSS and usable_ram_start unchanged; no data/BSS symbol changed size. Record layouts unchanged (the typed address is one usize). Accepted: the cost buys a handle that can only name a pool-minted slot. The claim result is transient; no persistent field or pool changes. Reuse the prior linked-kernel and pool evidence for this small control-flow correction, with no new space reduction claim.",
   "next_trigger": "Fixed virtio-net DMA owners, queue/buffer capacity changes, device reset/recovery or another completed kernel feature/stage requires fresh workload measurement."
 }
