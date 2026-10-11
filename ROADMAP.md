@@ -72,10 +72,13 @@ list (maintainer, 2026-10-09).
    (`kernel/RAW_MINT_FILES`); calls of `region_bytes_assume` count as mints.
    Step A is done (2026-10-11: RPi5 PCIe, virtio-net, virtio-blk, the
    system timer DTB reader and xHCI registers through IoHandles; the
-   xHCI doorbell and ERDP release are named boundaries). Next: #744 (B2,
-   page.tkb carving regions handed over by a small memory-map mint), then
-   #745 (B3, intrusive_pool absorbed into RegionPool), then #746 (page
-   uniqueness by type in the compact per-page form). The landed MMIO step
+   xHCI doorbell and ERDP release are named boundaries). #744 (B2, page.tkb carving regions handed over by a small memory-map
+   mint) is done (2026-10-11). Next:
+   #746 (page uniqueness by type in the compact per-page form; the
+   array-element place it builds), then #745 (B3, intrusive_pool absorbed
+   into RegionPool, process records holding their permission on #746's
+   mechanism, decision 2026-10-11). Performance follow-up, not on the
+   critical path: #748. The landed MMIO step
    leaves doorbell, ERDP-release and stop/reset observation boundaries for
    #720 to build on. #720 must add exact request/event matching and preserve
    publication and reset behavior. #720 also needs general exclusive backing
