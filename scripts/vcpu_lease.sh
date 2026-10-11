@@ -120,6 +120,7 @@ resource_lease_vcpu_acquire() {
     exec {alloc}>"$dir/alloc.lock"
     if ! flock -n "$alloc"; then
         echo "[lease] waiting for the vCPU allocator (another runner is waiting for slots)" >&2
+        announced=1
         if ! flock -w "$RESOURCE_LEASE_TIMEOUT_SECONDS" "$alloc"; then
             echo "FAIL resource-lease: the vCPU allocator was still held after ${RESOURCE_LEASE_TIMEOUT_SECONDS}s" >&2
             exec {alloc}>&-

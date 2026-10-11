@@ -12,6 +12,7 @@ import sys
 import time
 import urllib.request
 
+from lease_wait import lease_pending
 from progress_timeout import ProgressTimeout
 from await_timing import AwaitTiming
 
@@ -174,6 +175,11 @@ def run_one(command, http_offset):
     try:
         while not startup.expired(time.monotonic()):
             readable, _, _ = select.select([terminal], [], [], 0.25)
+            if lease_pending(transcript):
+                # The runner is still waiting for its vCPUs (#719): QEMU has
+                # not started, so neither has the boot this times.
+                startup = ProgressTimeout(START_TIMEOUT_SECONDS,
+                                          START_CEILING_SECONDS, time.monotonic())
             if readable:
                 try:
                     data = os.read(terminal, 4096)

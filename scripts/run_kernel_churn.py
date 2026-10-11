@@ -25,6 +25,7 @@ The pty transcript lands in <artifact root>/kernel-churn-<platform>/, beside
 the shell runner's own UART transcript.
 """
 
+from lease_wait import lease_pending
 import argparse
 import os
 import pty
@@ -148,6 +149,9 @@ class Session:
                     if not data:
                         return None
                     self.transcript.extend(data)
+                if lease_pending(self.transcript):
+                    # The runner is still waiting for its vCPUs (#719).
+                    deadline = time.monotonic() + seconds
                 normalized = self.normalized()
                 if watch_from is not None:
                     for marker in FAILURE_MARKERS:
