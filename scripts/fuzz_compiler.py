@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import random
 import re
@@ -250,6 +251,9 @@ def seeded_control(compiler: Path, seed: int, output: Path, timeout: float) -> N
                 raise RuntimeError(f"seeded rule no longer unique: {file}")
             path.write_text(text.replace(pattern, pattern.replace("(Some d)", "(Some (d - 1))")))
         result = subprocess.run(["dune", "build", "-j", "1", "bin/main.exe"], cwd=scratch,
+                                # The Makefile exports DUNE_ROOT for worktrees;
+                                # the scratch copy is its own workspace.
+                                env={**os.environ, "DUNE_ROOT": str(scratch)},
                                 capture_output=True, text=True, timeout=120)
         if result.returncode:
             raise RuntimeError("scratch compiler build failed:\n" + result.stderr)
