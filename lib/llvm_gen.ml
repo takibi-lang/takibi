@@ -1402,12 +1402,15 @@ let run_optimizations machine =
       (* Private indexed wrappers retain a real proof through a loan transfer.
          Scalar replacement before and after inlining removes their stack
          copies while preserving the ordinary load/store semantics. Keep the
-         debug pipeline unchanged so its local-variable locations stay stable. *)
+         debug pipeline unchanged so its local-variable locations stay stable.
+         globaldce drops region built-ins no code calls (internal linkage,
+         #744). *)
       "function(sroa,mem2reg,early-cse,simplifycfg,\
                 correlated-propagation,constraint-elimination,simplifycfg),\
        always-inline,\
        function(sroa,mem2reg,early-cse,simplifycfg,\
-                correlated-propagation,constraint-elimination,simplifycfg)"
+                correlated-propagation,constraint-elimination,simplifycfg),\
+       globaldce"
   in
   (match Llvm_passbuilder.run_passes !the_module pipeline machine opts with
    | Ok ()    -> ()
@@ -6990,6 +6993,13 @@ let declare_func ?prog_types fdef =
     let ret_ll    = ltype_of_ret_ast ret_ast in
     let ft        = function_type ret_ll param_lls in
     let f         = declare_function key ft !the_module in
+    (* A region built-in is emitted for every element type a program names,
+       whole: pool, table and pin operations alike. Internal linkage lets
+       LLVM drop the ones the program never calls (#744: two new element
+       types brought about 15 KB of unused code). Nothing outside the
+       module calls a built-in. *)
+    if Ast.source_file_of_loc fdef.def_loc = Ast.builtin_region_file then
+      set_linkage Linkage.Internal f;
     if fdef.is_inline then
       add_function_attr f (create_enum_attr context "alwaysinline" 0L) AttrIndex.Function;
     if fdef.is_noinline then

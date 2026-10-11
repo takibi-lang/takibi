@@ -1205,9 +1205,16 @@ let plan prog : string list =
       List.map (fun elem -> instance ~record:(List.mem elem records) elem) elems
       @ [ common_source ]
       @ List.map (fun t -> replace_all ~sub:"@T@" ~by:t io_source) (io_types prog) in
+  (* A table's per-slot state and generation words; a region_of claim has
+     no slots and needs only its flag (#744: a 2048-entry claim used to
+     carry 32 KiB of unused words). *)
+  let tables = calls_of "region_table_of" @ locks in
   let flags = String.concat "" (List.map (fun (name, (_, n)) ->
-    Printf.sprintf "let mut %s: bool = false;\nlet mut %s: [usize; %d];\n"
-      (flag_name name) (meta_name name) (2 * n)) claimed) in
+    if List.mem name tables then
+      Printf.sprintf "let mut %s: bool = false;\nlet mut %s: [usize; %d];\n"
+        (flag_name name) (meta_name name) (2 * n)
+    else Printf.sprintf "let mut %s: bool = false;\n" (flag_name name))
+    claimed) in
   let lock_defs = String.concat "" (List.filter_map (fun name ->
     Option.map (lock_source name) (List.assoc_opt name !Monomorphize.region_arrays))
     locks) in
