@@ -45,6 +45,8 @@ case "$command" in
                 ;;
             'status --porcelain --untracked-files=no') : ;;
             'log -1 --format=%an'|'log -1 --format=%ae') printf 'Fixture\n' ;;
+            "diff --no-renames --name-only origin/main 1111111111111111111111111111111111111111")
+                printf '%b' "$TAKIBI_LAND_CONTROL_DIFF" ;;
             pull*|fetch*|push*|merge-base*) : ;;
             *) printf 'unexpected git command: %s\n' "$*" >&2; exit 42 ;;
         esac
@@ -54,11 +56,13 @@ esac
 '''
 
 
-def run_case(source, fail='', equal=False, real_model=False):
+def run_case(source, fail='', equal=False, real_model=False, diff='compiler/main.ml\n'):
     with tempfile.TemporaryDirectory(prefix='takibi-land-precheck-') as tmp:
         root = Path(tmp)
         (root / 'scripts').mkdir()
         (root / 'scripts/land.sh').write_text(source)
+        repo_scripts = Path(__file__).resolve().parent
+        (root / 'scripts/land_light_paths').write_text((repo_scripts / 'land_light_paths').read_text())
         bin_dir = root / 'bin'
         bin_dir.mkdir()
         for name in ('git', 'make', 'python3'):
@@ -83,6 +87,7 @@ def run_case(source, fail='', equal=False, real_model=False):
         env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ['PATH'],
                    TAKIBI_LAND_CONTROL_ROOT=str(root), TAKIBI_LAND_CONTROL_FAIL=fail,
                    TAKIBI_LAND_CONTROL_EQUAL='1' if equal else '',
+                   TAKIBI_LAND_CONTROL_DIFF=diff,
                    TAKIBI_LAND_CONTROL_MODEL=model_runner, TAKIBI_LAND_CONTROL_PYTHON=sys.executable)
         result = subprocess.run(['bash', str(root / 'scripts/land.sh')],
                                 env=env, capture_output=True, text=True)
@@ -129,6 +134,23 @@ def verify(source):
     assert [call[1] for call in trace if call[0] == 'make'] == ['langcheck'], trace
     assert not any(call[:2] == ['git', 'push'] for call in trace), trace
     cases += 1
+    # Light route: only listed paths changed, so langcheck alone gates the
+    # push. One unlisted path -- a contract document at the root, or anything
+    # under docs/ -- takes the full route.
+    status, output, trace, log = run_case(source, diff='ROADMAP.md\n.github/workflows/ci.yml\n')
+    assert status == 0, output
+    assert [call[1] for call in trace if call[0] == 'make'] == ['langcheck'], trace
+    assert ['git', 'push', 'origin', '1' * 40 + ':refs/heads/main'] in trace, trace
+    cases += 1
+    status, output, trace, log = run_case(source, diff='ROADMAP.md\n', fail='langcheck')
+    assert status == 1 and 'land: FAIL light langcheck' in output, output
+    assert not any(call[:2] == ['git', 'push'] for call in trace), trace
+    cases += 1
+    for diff in ('ROADMAP.md\nEFFECTS.md\n', 'docs/ROADMAP.md\n', 'README.md.orig\n', ''):
+        status, output, trace, log = run_case(source, diff=diff)
+        assert status == 0, (diff, output)
+        assert [call[1] for call in trace if call[0] == 'make'] == [*lanes, 'clean', 'allcheck'], (diff, trace)
+        cases += 1
     return cases
 
 
@@ -136,10 +158,12 @@ def main():
     source = (Path(__file__).resolve().parents[1] / 'scripts/land.sh').read_text()
     cases = CaseCount()
     total = verify(source)
-    # The checker must itself notice a reverted quick gate or a swallowed
-    # failing make status. Both mutations preserve the rest of the real shell.
+    # The checker must itself notice a reverted quick gate, a swallowed
+    # failing make status, or a light-path match that accepts anything. Each
+    # mutation preserves the rest of the real shell.
     mutants = [source.replace('for lane in langcheck test linuxcheck;', 'for lane in test linuxcheck;', 1),
-               source.replace('status=${PIPESTATUS[0]}', 'status=0', 1)]
+               source.replace('status=${PIPESTATUS[0]}', 'status=0', 1),
+               source.replace('[ "$path" = "$entry" ] && listed=1', 'listed=1', 1)]
     for mutant in mutants:
         cases.note()
         try:

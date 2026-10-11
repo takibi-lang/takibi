@@ -1,0 +1,20 @@
+# Paths a land may publish after `make langcheck` alone, without the clean
+# allcheck (scripts/land.sh). A push takes this route only when EVERY path it
+# changes is listed here; one unlisted path sends it through the full check.
+#
+# The list names what may skip, not what must be checked, so it fails
+# closed: a file or directory added later is fully checked until someone
+# deliberately lists it. Keep it to files no build or kernel lane consumes.
+# docs/ is deliberately absent -- docs/wont-compile/ is compiled, and other
+# documents are read by checks outside langcheck. Root contract documents
+# such as EFFECTS.md and TRUSTED_BASE.md are absent for the same reason.
+#
+# One path per line: an exact repository-relative file, or a directory
+# prefix ending in `/`. Blank lines and `#` comments are ignored.
+README.md
+HISTORY.md
+AGENTS.md
+CLAUDE.md
+ROADMAP.md
+# No checker reads the workflow yet; allcheck never ran it either.
+.github/

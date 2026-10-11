@@ -7,6 +7,10 @@
 # rule "the pushed commit is the tested commit" is enforced by code rather
 # than remembered.
 #
+# A push that changes only paths listed in scripts/land_light_paths runs
+# `make langcheck` instead of the clean allcheck (see that file for why the
+# list names what may skip rather than what must be checked).
+#
 # Exit status:
 #   0  pushed (or nothing to push)
 #   1  a quick gate, clean or allcheck failed; the lane and log path are printed
@@ -94,31 +98,68 @@ if [ -d "$failure_root" ]; then
 fi
 prune_newest "$keep_allcheck_logs" "$log_dir"/allcheck-*.log
 
-# Fail on the cheap host gates before a clean destroys build products or
-# starts any long aggregate/hardware lane. Each lane runs separately so the
-# refusal names the first failing gate. The full clean allcheck below still
-# tests exactly this rebased commit before publication.
+# Light route: every changed path is listed in scripts/land_light_paths.
+# langcheck still runs, since its checks read the listed documents too. An
+# empty diff (a merge that changes no file) or a missing list takes the full
+# route.
+light=0
+light_list=scripts/land_light_paths
+changed=$(git diff --no-renames --name-only origin/main "$tested")
+if [ -n "$changed" ] && [ -f "$light_list" ]; then
+    light=1
+    while IFS= read -r path; do
+        listed=0
+        while IFS= read -r entry; do
+            case "$entry" in ''|'#'*) continue ;; esac
+            case "$entry" in
+                */) case "$path" in "$entry"*) listed=1 ;; esac ;;
+                *) [ "$path" = "$entry" ] && listed=1 ;;
+            esac
+            [ "$listed" -eq 1 ] && break
+        done < "$light_list"
+        if [ "$listed" -eq 0 ]; then
+            echo "land: $path is not in $light_list; full check"
+            light=0
+            break
+        fi
+    done <<< "$changed"
+fi
+
 : > "$log"
-for lane in langcheck test linuxcheck; do
-    echo "land: precheck $lane on $tested (log: $log)"
-    make "$lane" 2>&1 | tee -a "$log"
+if [ "$light" -eq 1 ]; then
+    echo "land: every changed path is in $light_list; make langcheck only on $tested (log: $log)"
+    make langcheck 2>&1 | tee -a "$log"
     status=${PIPESTATUS[0]}
     if [ "$status" -ne 0 ]; then
-        echo "land: FAIL precheck $lane on $tested; log: $log" >&2
+        echo "land: FAIL light langcheck on $tested; log: $log" >&2
         exit 1
     fi
-done
+else
+    # Fail on the cheap host gates before a clean destroys build products or
+    # starts any long aggregate/hardware lane. Each lane runs separately so the
+    # refusal names the first failing gate. The full clean allcheck below still
+    # tests exactly this rebased commit before publication.
+    for lane in langcheck test linuxcheck; do
+        echo "land: precheck $lane on $tested (log: $log)"
+        make "$lane" 2>&1 | tee -a "$log"
+        status=${PIPESTATUS[0]}
+        if [ "$status" -ne 0 ]; then
+            echo "land: FAIL precheck $lane on $tested; log: $log" >&2
+            exit 1
+        fi
+    done
 
-echo "land: make clean && make allcheck on $tested (log: $log)"
-if ! make clean >> "$log" 2>&1; then
-    echo "land: FAIL clean on $tested; log: $log" >&2
-    exit 1
-fi
-make allcheck 2>&1 | tee -a "$log"
-status=${PIPESTATUS[0]}
-if [ "$status" -ne 0 ]; then
-    echo "land: FAIL allcheck on $tested; log: $log" >&2
-    exit 1
+    echo "land: make clean && make allcheck on $tested (log: $log)"
+    if ! make clean >> "$log" 2>&1; then
+        echo "land: FAIL clean on $tested; log: $log" >&2
+        exit 1
+    fi
+    make allcheck 2>&1 | tee -a "$log"
+    status=${PIPESTATUS[0]}
+    if [ "$status" -ne 0 ]; then
+        echo "land: FAIL allcheck on $tested; log: $log" >&2
+        exit 1
+    fi
 fi
 
 # The check built from the working tree, not from the commit: a tracked file
