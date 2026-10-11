@@ -63,13 +63,14 @@ list (maintainer, 2026-10-09).
 
 1. **Stored authority for arrays and pools.** #131's remaining shapes
    with #672 stage 2: array-element places, an array of indexed owners, and
-   borrowing an element in place. #343 (use-after-free now that a heap
-   exists) is its first consumer; #518's typed slot addresses are done
-   (2026-10-10). B's #720 B+C consumer also needs general retention of a region
+   borrowing an element in place, started when a consumer needs it (the
+   trigger on #131). #518 (typed slot addresses) and #343 (decision: bound
+   payload pointers plus generation checks) are done (2026-10-11). B's #720 B+C consumer also needs general retention of a region
    inside a linear protocol owner, with checked field moves and borrow
    expiry; the concrete nested-owner rejection is on #131/#672.
-2. **The process record.** #202 (UserRange epoch); the rest of the
-   typestate group is done.
+2. **The process record.** Done (2026-10-11): #202 settled as user ranges
+   made under the process's Running authority. Threads sharing an address
+   space are planned separately on #742.
 3. **#637 stage 3: shrinking the mint list.** The file-confinement flag is
    enabled for both maintained kernels with a reviewed list
    (`kernel/RAW_MINT_FILES`); calls of `region_bytes_assume` count as mints.
