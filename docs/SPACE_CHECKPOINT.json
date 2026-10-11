@@ -1,9 +1,9 @@
 {
   "date": "2026-10-11",
-  "event": "incremental",
-  "decision": "reuse",
-  "source_sha256": "954f58dc22efc2421de0936e038e1a9c06c9fec84fcdfe9f303cbf50c347ff9d",
-  "workload": "Root Makefile gains the langcheck target forbid-unsafe-control (a host compile of a test fixture) and Alcotest gains one codegen case. No kernel source, compiler source or kernel build recipe changed; the #743 measurement above still describes the linked kernels.",
+  "event": "milestone",
+  "decision": "measured",
+  "source_sha256": "c0f9c7103f749700649fe567162ca0762fa378fc749c5a8136bf41cea4d131d7",
+  "workload": "#744 (#637 step B2): page metadata as regions borrowed with place_borrow, memory_map.tkb as the memory mint, and the unused-region-built-in removal (region_of meta arrays, internal linkage, globaldce). Linked kernels compared against origin/main with scripts/space_delta.py; allocator page counts from scripts/buildcheck_kernel_memory_map.py.",
   "evidence": [
     "docs/WORLD_STOP_CLAIM_REVIEW_2026-10-11.md",
     "docs/PROCESS_PIN_SPACE_2026-10-10.md",
@@ -47,6 +47,6 @@
     "docs/VIRTIO_NET_TX_2026-10-10.md",
     "docs/VIRTIO_NET_TX_SPACE_2026-10-10.json"
   ],
-  "assessment": "Reuse: the change adds a host-side check only, so kernel storage, allocation and image layout are identical to the measured #743 tree (QEMU text -64 B, RPi5 text -32 B; data, BSS and usable_ram_start unchanged).",
-  "next_trigger": "Fixed virtio-net DMA owners, queue/buffer capacity changes, device reset/recovery or another completed kernel feature/stage requires fresh workload measurement."
+  "assessment": "QEMU text 729912 -> 693464 B (-36448), RPi5 742752 -> 706440 B (-36312): unused region built-ins no longer reach the image. Data +24 B, BSS +48 B on QEMU, RPi5 BSS unchanged (page_meta_store's two places; bootstrap metadata moved out of the pool, same size). usable_ram_start drops 64 KiB on QEMU and 32 KiB on RPi5, so allocator pages rise by 8 to 16 across the checked layouts. PageMeta stays 24 B per page.",
+  "next_trigger": "#745 (process records on RegionPool) or #746 (per-page permissions) changes allocator or pool representation; either requires fresh measurement, as does another completed kernel feature or stage."
 }
