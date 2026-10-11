@@ -23608,7 +23608,7 @@ let infer_production_machine_boundary ?(platform = "qemu") code =
   |} in
   let types = ["WorldStop"; "WorldStopped"; "WorldStopPartial";
     "CpuParticipants"; "MachineStopped"; "CpuStart"; "MachineSlotView"; "MachineStopPartial"] in
-  let variants = ["WorldStopResult"; "MachineStopResult"; "CpuStartResult"; "MachineSlotProbe"] in
+  let variants = ["WorldStopClaimResult"; "WorldStopResult"; "MachineStopResult"; "CpuStartResult"; "MachineSlotProbe"] in
   let functions = ["world_stop_claim_as"; "world_stop_claim"; "world_stop_begin_config";
     "world_stop_begin_claimed"; "world_stop_begin"; "world_stop_machine_begin";
     "cpu_participants_end"; "machine_stop_release"; "machine_stop_keep_forever"; "machine_stopped_mask";
@@ -23626,7 +23626,7 @@ let infer_production_machine_boundary ?(platform = "qemu") code =
     | Ast.ConstDef (name, _, _, _) ->
         List.mem name ["WORLD_STOP_CLAIM_STOP"; "WORLD_STOP_CLAIM_START"]
     | _ -> false) (parse_here source) in
-  Alcotest.(check int) "all production machine declarations extracted" 40
+  Alcotest.(check int) "all production machine declarations extracted" 41
     (List.length boundary);
   let platform_path = "kernel/platform/" ^ platform ^ "/init.tkb" in
   let path = List.find Sys.file_exists ["../" ^ platform_path; platform_path] in
