@@ -2,7 +2,7 @@
   "date": "2026-10-11",
   "event": "incremental",
   "decision": "reuse",
-  "source_sha256": "d26de12c025317551efab41d61bd0bac25e3f2d35824c635fedc856324f4d4a5",
+  "source_sha256": "ec044d89fd9ffe6799ecb27b7063e6b14219ba95b193d3143d0f19ff4a0194a5",
   "workload": "#744 (#637 step B2): page metadata as regions borrowed with place_borrow, memory_map.tkb as the memory mint, and the unused-region-built-in removal (region_of meta arrays, internal linkage, globaldce). Linked kernels compared against origin/main with scripts/space_delta.py; allocator page counts from scripts/buildcheck_kernel_memory_map.py.",
   "evidence": [
     "docs/WORLD_STOP_CLAIM_REVIEW_2026-10-11.md",
