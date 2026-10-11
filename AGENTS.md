@@ -25,10 +25,9 @@ kernel features, fixes, fixtures, and target code belong there.
 is independent of real timing, interrupts, caches, MMIO, and concurrency. It is
 appropriate for executable compiler or language tests and pure algorithms.
 
-The historical `examples/` tree (STM32, RPi3 and early RPi5 bare-metal
-milestones) was retired on 2026-10-11; HISTORY.md records it, and
-`git log --diff-filter=D -- examples/` finds the commit that removed it.
-Do not restore it as a test surface.
+The historical examples tree (STM32, RPi3 and early RPi5 bare-metal
+milestones) was retired on 2026-10-11; HISTORY.md records it and how to
+recover it from Git. Do not restore it as a test surface.
 
 Do not silently expand a kernel implementation task into compiler, root
 build-system, or other non-`kernel/` and non-`linux_user/` implementation work
