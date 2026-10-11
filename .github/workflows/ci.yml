@@ -36,11 +36,13 @@ permissions:
   # exit status.
   issues: read
 
-# A batch of pushes should not queue a run per commit; the newest is the one
-# whose answer anybody wants.
+# On main every commit runs to completion, so each one keeps its own verdict
+# and a break can be pinned to the commit that caused it. Elsewhere a batch of
+# pushes should not queue a run per commit; the newest is the one whose answer
+# anybody wants.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   hardware-free:
