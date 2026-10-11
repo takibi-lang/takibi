@@ -219,6 +219,7 @@ run them, and why they sit outside both globs above.
 | `buildcheck_suite_output.py` | Split a batched UART stream and compare each case with its fixture |
 | `buildcheck_user_payload_no_rw_globals.py` | TODO |
 | `buildcheck_wont_compile_samples.py` | every program the defect catalog prints is rejected with the diagnostic beside it, or accepted, by the built compiler |
+| `buildcheck_regions_flag.py` | a program using region built-ins without `--regions` is refused up front with a diagnostic naming the flag, and compiles with it |
 
 ## Reporting
 

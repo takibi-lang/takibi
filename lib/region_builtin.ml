@@ -1175,6 +1175,22 @@ let region_bytes_used (prog : Ast.toplevel list) =
     contains "region_bytes_assume" || contains "RegionBytes"
     || contains "IoHandle__") prog
 
+(* Whether a program names any region built-in at all -- a region,
+   array of places, slots, pool or table type, or a claim -- so a build
+   without --regions can say so up front instead of failing on an
+   undefined name or type. *)
+let mentions_builtins (prog : Ast.toplevel list) =
+  region_bytes_used prog || List.exists (fun item ->
+    let text = Ast.show_toplevel item in
+    let contains sub =
+      let n = String.length text and m = String.length sub in
+      let rec go i = i + m <= n && (String.sub text i m = sub || go (i + 1)) in
+      go 0 in
+    List.exists contains
+      [ "region__"; "places__"; "slots__"; "RegionOf__"; "RegionTable__";
+        "RegionPool__"; "RegionTyped__"; "\"region_of\""; "\"region_table_of\"";
+        "\"region_table_lock\"" ]) prog
+
 (* The io structs a program names in IoHandle(T): one io_source each. *)
 let io_types (prog : Ast.toplevel list) =
   let found = Hashtbl.create 4 in

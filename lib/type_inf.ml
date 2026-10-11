@@ -2878,6 +2878,26 @@ let io_block_behind sname fname =
 (* Where a register is reached through a handle: requires_devices. *)
 let io_handle_accesses : (string, unit) Hashtbl.t = Hashtbl.create 16
 
+
+(* Calls are resolved by source position (Types.loc_key). Two different
+   calls at one key would silently share a resolution -- the shape a
+   compiler-inserted call reusing its source's position produced (#749).
+   A key that already names another function for another surface name is
+   a compiler bug, reported where it happens. *)
+let record_call_target loc fname target =
+  let key = loc_key loc in
+  (match StringMap.find_opt key !resolved_call_targets with
+   | Some previous when previous <> target
+                        && not (String.equal (Generic_variant.surface_name fname)
+                                  (Generic_variant.surface_name previous))
+                        && not (String.starts_with ~prefix:(fname ^ "$") previous)
+                        && not (String.starts_with ~prefix:(fname ^ "$") target) ->
+       raise (TypeError (loc, Printf.sprintf
+         "BUG: two calls share the position key %s ('%s' and '%s'); a \
+          compiler-inserted call needs a position of its own" key previous target))
+   | _ -> ());
+  resolved_call_targets := StringMap.add key target !resolved_call_targets
+
 let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
   match e.desc with
   | IntLit _    -> fresh ()  (* polymorphic: unifies with any integer type via context *)
@@ -5247,7 +5267,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       let direct = StringMap.find_opt fname fenv in
       let ft_opt = match direct with
         | Some [(target, ft)] ->
-            resolved_call_targets := StringMap.add (loc_key e.loc) target !resolved_call_targets;
+            record_call_target e.loc fname target;
             Some (instantiate_static_params ft)
         | Some candidates ->
             let candidates = List.map (fun (target, ft) ->
@@ -5288,7 +5308,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
               | found -> found in
             (match chosen with
              | [(target, ft)] ->
-                 resolved_call_targets := StringMap.add (loc_key e.loc) target !resolved_call_targets;
+                 record_call_target e.loc fname target;
                  Some ft
              | [] ->
                  let unresolved = List.exists (fun t -> match repr t with

@@ -269,10 +269,11 @@ let () =
        program naming IoHandle, RegionBytes or region_bytes_assume used to
        pass type checking and stop in code generation with "Unknown named
        type: IoHandle__T", which names neither the flag nor the source. *)
-    if (not !regions) && Region_builtin.region_bytes_used prog then begin
+    if (not !regions) && Region_builtin.mentions_builtins prog then begin
       Printf.eprintf
-        "Error: IoHandle, RegionBytes and region_bytes_assume are region \
-         built-ins; compile with --regions\n";
+        "Error: this program uses region built-ins (region, places, slots, \
+         RegionPool, IoHandle, RegionBytes, region_of, ...); compile with \
+         --regions\n";
       exit 1
     end;
     let prog =
