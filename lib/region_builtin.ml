@@ -1196,6 +1196,145 @@ let io_types (prog : Ast.toplevel list) =
     done) prog;
   Hashtbl.fold (fun k () acc -> k :: acc) found [] |> List.sort compare
 
+(* GitHub issue #749 phase 2: an array whose elements are places holding a
+   stored value, for a named linear indexed struct P. Element k is a cell
+   holding Place(exists ... P[...]); a take or put is the existing place
+   exchange on that cell, under a guard the built-in mints for it. The
+   element type closes every static of P, so an element's value carries
+   its own identities. *)
+let slots_source = {|
+struct SlotsCell__@P@ {
+    private lock: i32;
+    private value: Place(@EX@);
+}
+
+private linear view SlotsCellGuard__@P@[lock: addr];
+
+linear struct slots__@P@[id: addr, offset: usize, count: usize] {
+    private address: usize;
+    private length: usize;
+}
+
+must_use variant SlotsFrom__@P@ {
+    Misaligned(exists c: addr. exists n: usize. region__u8[c, 0, n]);
+    Made(exists c: addr. exists n: usize. slots__@P@[c, 0, n]);
+}
+
+private fn slots_mint__@P@(address: usize, count: usize @ n) -> slots__@P@[c, 0, n] {
+    let mut a: slots__@P@[c, 0, n] = { address, count };
+    return a;
+}
+
+// Bytes as an array of empty places: as many cells as fit, every one
+// zeroed, which is Empty.
+fn slots_from_bytes__@P@(bytes: sink region__u8[c, o, m]) -> SlotsFrom__@P@ !{unsafe} {
+    let address: usize = bytes.address;
+    let length: usize = bytes.length;
+    region_discharge(bytes);
+    if ((address & (alignof(SlotsCell__@P@) - 1)) != 0) {
+        return SlotsFrom__@P@::Misaligned(region_bytes_mint(address, length));
+    }
+    let mut i: usize = 0;
+    while (i < length) {
+        let byte: *u8 = unsafe { (address + i) as *u8 };
+        *byte = 0;
+        i = i + 1;
+    }
+    return SlotsFrom__@P@::Made(
+        slots_mint__@P@(address, length / sizeof(SlotsCell__@P@)));
+}
+
+fn places_count(a: borrow slots__@P@[b, o, n]) -> usize {
+    return a.length;
+}
+
+fn places_keep(a: sink slots__@P@[b, o, n]) {}
+
+private fn slots_cell__@P@(a: borrow slots__@P@[b, o, n], i: usize) -> *SlotsCell__@P@
+        !{unsafe} {
+    return unsafe { (a.address + i * sizeof(SlotsCell__@P@)) as *SlotsCell__@P@ };
+}
+
+fn __places_take(a: borrow slots__@P@[b, o, n], i: usize @ k) -> Place(@EX@)
+        !{unsafe} where k < n {
+    let cell: *SlotsCell__@P@ = slots_cell__@P@(a, i);
+    let g = slots_guard__@P@(&cell.lock);
+    let previous: Place(@EX@) = place_take(g, &cell.lock, cell.value);
+    slots_guard_end__@P@(g);
+    return previous;
+}
+
+fn __places_put(a: borrow slots__@P@[b, o, n], i: usize @ k, v: sink @EXV@)
+        -> Place(@EX@) !{unsafe} where k < n {
+    let cell: *SlotsCell__@P@ = slots_cell__@P@(a, i);
+    let g = slots_guard__@P@(&cell.lock);
+    let previous: Place(@EX@) = place_put(g, &cell.lock, cell.value, v);
+    slots_guard_end__@P@(g);
+    return previous;
+}
+
+fn __places_restore(a: borrow slots__@P@[b, o, n], i: usize @ k, v: sink @EXV@)
+        !{unsafe} where k < n {
+    match __places_put(a, i, v) {
+        Place::Empty => {}
+        // The arm could not reach the array, so the element was Empty.
+        Place::Full(lost) => { __slots_forget__@P@(lost); }
+    }
+}
+
+private fn slots_guard__@P@(lock: *i32 @ l) -> SlotsCellGuard__@P@[l] {
+    return view SlotsCellGuard__@P@[l];
+}
+private fn slots_guard_end__@P@(g: sink SlotsCellGuard__@P@[l]) {}
+private fn __slots_forget__@P@(v: sink @EXV@) {}
+|}
+
+(* The named linear indexed structs a program puts in slots(P). *)
+let slots_types (prog : Ast.toplevel list) =
+  let found = Hashtbl.create 4 in
+  let prefix = "slots__" in
+  List.iter (fun item ->
+    let text = Ast.show_toplevel item in
+    let lp = String.length prefix and n = String.length text in
+    let i = ref 0 in
+    while !i + lp <= n do
+      if String.sub text !i lp = prefix then begin
+        let j = ref (!i + lp) in
+        while !j < n && (match text.[!j] with
+            | 'A'..'Z' | 'a'..'z' | '0'..'9' | '_' -> true | _ -> false) do
+          incr j done;
+        if !j > !i + lp then
+          Hashtbl.replace found (String.sub text (!i + lp) (!j - !i - lp)) ();
+        i := !j
+      end else incr i
+    done) prog;
+  Hashtbl.fold (fun k () acc -> k :: acc) found [] |> List.sort compare
+
+let slots_instance prog name =
+  let params = List.find_map (function
+    | Ast.OwnedStructDef (n, _, ps, _, _, _, _, _, _) when n = name -> Some ps
+    | _ -> None) prog in
+  match params with
+  | None -> None
+  | Some ps ->
+      let sort = function
+        | Ast.TypeNamed s -> s | Ast.TypeUsize -> "usize" | Ast.TypeU8 -> "u8"
+        | Ast.TypeU32 -> "u32" | Ast.TypeU64 -> "u64" | Ast.TypeIsize -> "isize"
+        | _ -> "usize" in
+      let names = List.map (fun (p, _) -> "__s_" ^ p) ps in
+      let binders = String.concat " " (List.map2 (fun (_, t) v ->
+        Printf.sprintf "exists %s: %s." v (sort t)) ps names) in
+      let applied = if ps = [] then name
+        else Printf.sprintf "%s[%s]" name (String.concat ", " names) in
+      let ex = if ps = [] then name else binders ^ " " ^ applied in
+      let value = if ps = [] then name
+        else Printf.sprintf "%s[%s]" name
+               (String.concat ", " (List.map (fun (p, _) -> "__v_" ^ p) ps)) in
+      Some (slots_source
+            |> replace_all ~sub:"@EXV@" ~by:value
+            |> replace_all ~sub:"@EX@" ~by:ex
+            |> replace_all ~sub:"@P@" ~by:name)
+
 let flag_name array = "__region_claimed__" ^ array
 let lock_name array = "__region_lock__" ^ array
 
@@ -1281,7 +1420,8 @@ let plan prog : string list =
         | _ -> None) prog in
       List.map (fun elem -> instance ~record:(List.mem elem records) elem) elems
       @ [ common_source ]
-      @ List.map (fun t -> replace_all ~sub:"@T@" ~by:t io_source) (io_types prog) in
+      @ List.map (fun t -> replace_all ~sub:"@T@" ~by:t io_source) (io_types prog)
+      @ List.filter_map (slots_instance prog) (slots_types prog) in
   (* A table's per-slot state and generation words; a region_of claim has
      no slots and needs only its flag (#744: a 2048-entry claim used to
      carry 32 KiB of unused words). *)

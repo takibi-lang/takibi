@@ -1,0 +1,130 @@
+// GitHub issue #749: arrays of places, run natively (compiled with
+// --regions). Phase 1: an array over a region, each element's permission
+// taken out and put back on its own, its content derived from the index.
+// Phase 2: an array whose elements store a value -- here the shape #746
+// needs, RAM extents each holding its pages' array.
+// What must not compile is in test/test_takibi.ml, "places" and "slots".
+
+struct Page { word: usize; }
+
+linear struct Extent[c: addr, c__off: usize, n: usize] {
+    private pages: places(Page)[c, n];
+}
+
+private let mut low_pages: [Page; 4];
+private let mut low_tags: [u8; 4];
+private let mut high_pages: [Page; 3];
+private let mut high_tags: [u8; 3];
+private let mut extent_cells: [u8; 512] align(16);
+
+fn extent_new(p: sink places(Page)[c, n]) -> Extent[c, c__off, n] {
+    let mut x: Extent[c, c__off, n] = { p };
+    return x;
+}
+
+fn extent_drop(x: sink Extent[c, o, n]) { places_keep(x.pages); }
+
+// Take page i, write it, put it back; a second take while it is out finds
+// the element Empty. Answers what was written, or 0.
+fn page_cycle(pages: borrow places(Page)[b, n], i: usize @ k, value: usize)
+        -> usize !{unsafe} {
+    if (i < places_count(pages)) {
+        match place_take(pages[i]) {
+            Place::Empty => { return 0; }
+            Place::Full(page) => {
+                region_at(page, 0).word = value;
+                let mut again: usize = 1;
+                match place_take(pages[i]) {
+                    Place::Empty => { again = 0; }
+                    Place::Full(twice) => { region_release(twice); }
+                }
+                let seen: usize = region_at(page, 0).word;
+                match place_put(pages[i], page) {
+                    Place::Empty => {}
+                    Place::Full(back) => { region_release(back); return 0; }
+                }
+                if (again != 0) { return 0; }
+                return seen;
+            }
+        }
+    }
+    return 0;
+}
+
+// Lend extent j and cycle its page i.
+fn extent_page_cycle(extents: borrow slots(Extent)[b, n], j: usize @ m,
+                     i: usize @ k, value: usize) -> usize !{unsafe} {
+    let mut seen: usize = 0;
+    if (j < places_count(extents)) {
+        match place_borrow(extents[j]) {
+            Place::Empty => {}
+            Place::Full(x) => { seen = page_cycle(x.pages, i, value); }
+        }
+    }
+    return seen;
+}
+
+fn store_extent(extents: borrow slots(Extent)[b, n], j: usize @ m,
+                x: sink Extent[c, o, p]) -> bool !{unsafe} {
+    if (j < places_count(extents)) {
+        match place_put(extents[j], x) {
+            Place::Empty => { return true; }
+            Place::Full(back) => { extent_drop(back); return false; }
+        }
+    }
+    extent_drop(x);
+    return false;
+}
+
+fn test_place_array() !{unsafe} {
+    let RegionOf(Page)::Taken(low) = region_of(low_pages) else {
+        RegionOf(Page)::Gone => { return; }
+    };
+    let RegionOf(u8)::Taken(low_t) = region_of(low_tags) else {
+        RegionOf(u8)::Gone => { region_release(low); return; }
+    };
+    let RegionOf(Page)::Taken(high) = region_of(high_pages) else {
+        RegionOf(Page)::Gone => { region_release(low); region_release(low_t); return; }
+    };
+    let RegionOf(u8)::Taken(high_t) = region_of(high_tags) else {
+        RegionOf(u8)::Gone => {
+            region_release(low); region_release(low_t); region_release(high); return;
+        }
+    };
+    let RegionOf(u8)::Taken(cells) = region_of(extent_cells) else {
+        RegionOf(u8)::Gone => {
+            region_release(low); region_release(low_t);
+            region_release(high); region_release(high_t); return;
+        }
+    };
+    let SlotsFrom(Extent)::Made(extents) = slots_from_bytes__Extent(cells) else {
+        SlotsFrom(Extent)::Misaligned(back) => {
+            region_release(back); region_release(low); region_release(low_t);
+            region_release(high); region_release(high_t); return;
+        }
+    };
+    uart_puts("extent slots: ");
+    uart_print(places_count(extents));
+    uart_puts("\n");
+
+    let lowx = extent_new(places_from(low, low_t));
+    let highx = extent_new(places_from(high, high_t));
+    let stored_low: bool = store_extent(extents, 0, lowx);
+    let stored_high: bool = store_extent(extents, 1, highx);
+    if (stored_low && stored_high) { uart_puts("extents stored: 2\n"); }
+
+    uart_puts("low page 3: ");
+    uart_print(extent_page_cycle(extents, 0, 3, 33));
+    uart_puts("\nhigh page 2: ");
+    uart_print(extent_page_cycle(extents, 1, 2, 22));
+    uart_puts("\nhigh page 3 (out of range): ");
+    uart_print(extent_page_cycle(extents, 1, 3, 99));
+    uart_puts("\nempty extent 2: ");
+    uart_print(extent_page_cycle(extents, 2, 0, 11));
+    uart_puts("\n");
+    places_keep(extents);
+}
+
+fn app_main() !{unsafe} {
+    test_place_array();
+}

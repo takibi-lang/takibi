@@ -3379,8 +3379,18 @@ fn touch(arr: borrow places(Node)[b, n], i: usize @ k) {
 - In a place_borrow arm the array cannot be used; the element is restored
   when the arm ends.
 - `places_keep(arr)` keeps an array for the rest of the program.
-- Arrays whose element content is stored rather than derived (an array
-  of arrays) and per-element witnesses (#751) are later phases.
+- `slots(P)[b, n]` (second phase) is an array whose elements are places
+  holding a stored value of a named linear indexed struct `P`: element
+  content `exists ... P[...]`, every static of `P` closed. It is made from
+  bytes with `slots_from_bytes__P(bytes)` (`SlotsFrom(P)::Made(array)`,
+  or `Misaligned(bytes)`), every element Empty, and takes the same
+  `arr[i]` place operations and `places_count`. Each element is a cell
+  holding a `Place`, exchanged with the place rules under a guard the
+  built-in mints for that cell. Because the content's identities are its
+  own, an element does not tie its value to its index; an array of
+  extents, each holding its pages' `places(Page)`, is the intended use.
+- Per-element witnesses (#751) are a later phase.
+- linux_user/place_array runs both phases.
 
 **region_table** stores permissions: a pool over a claimed array.
 

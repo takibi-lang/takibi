@@ -1,0 +1,6 @@
+extent slots: 12
+extents stored: 2
+low page 3: 33
+high page 2: 22
+high page 3 (out of range): 0
+empty extent 2: 0

@@ -7652,7 +7652,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.OwnedStructDef (name, _, _, _, _, _, _, _, loc)
       when Ast.source_file_of_loc loc = Ast.builtin_region_file
            && (String.starts_with ~prefix:"region__" name
-               || String.starts_with ~prefix:"places__" name) -> StringSet.add name names
+               || String.starts_with ~prefix:"places__" name
+               || String.starts_with ~prefix:"slots__" name) -> StringSet.add name names
     | _ -> names) StringSet.empty prog;
   (* The declared-type phase is a required boundary: silently repairing an
      unresolved AST here would hide a caller that bypassed it. *)
@@ -12771,7 +12772,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
        obligation. Affine parameters may be dropped; borrow never owns and
        sink is terminal. *)
     List.iter (fun (name, ty_opt) ->
+      (* The built-in's own forget for an array of places' restore, whose
+         displaced value cannot exist (the borrowed arm could not reach the
+         array). Only the compiler's region file can name it (#749). *)
+      let builtin_forget =
+        Ast.source_file_of_loc fdef.def_loc = Ast.builtin_region_file
+        && String.starts_with ~prefix:"__slots_forget__" fdef.name in
       let owned_kind = match ty_opt with
+        | Some (Ast.TypeSink _) when builtin_forget -> None
         | Some (Ast.TypeSink ty) when holds_stored_owner ty -> Some Ast.KindLinear
         | Some (Ast.TypeBorrow _) | Some (Ast.TypeBorrowMut _)
         | Some (Ast.TypeSink _) -> None

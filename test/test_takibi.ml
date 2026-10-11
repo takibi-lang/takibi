@@ -9939,6 +9939,116 @@ fn f() -> *usize { return &temp_address_outer().r.a; }");
        "variant Choice7k { A; B(usize); }
         fn choose7k(c: Choice7k) { let Choice7k::A = c; }");
 
+  (* GitHub issue #749 phase 2: an array whose elements are places holding
+     stored values, here arrays of places (extents holding their pages). *)
+  Alcotest.test_case "slots: nested arrays of places, borrowed and taken" `Quick
+    (fun () -> ignore (infer_regions "struct Node749s { key: usize; }
+linear struct Ext749[c: addr, c__off: usize, n: usize] {
+    private nodes: places(Node749s)[c, n];
+}
+private let mut arena749s: [Node749s; 8];
+private let mut tag749s: [u8; 8];
+private let mut cell749s: [u8; 256] align(16);
+fn inner(arr: borrow places(Node749s)[b, n], i: usize @ k) -> usize !{unsafe} {
+    if (i < places_count(arr)) {
+        match place_borrow(arr[i]) {
+            Place::Empty => {}
+            Place::Full(e) => { region_at(e, 0).key = 5; }
+        }
+    }
+    return 1;
+}
+fn outer(ext: borrow slots(Ext749)[b, n], j: usize @ m, i: usize @ k) -> usize !{unsafe} {
+    let mut got: usize = 0;
+    if (j < places_count(ext)) {
+        match place_borrow(ext[j]) {
+            Place::Empty => {}
+            Place::Full(x) => { got = inner(x.nodes, i); }
+        }
+        match place_take(ext[j]) {
+            Place::Empty => {}
+            Place::Full(x) => {
+                got = got + inner(x.nodes, i);
+                match place_put(ext[j], x) { Place::Empty => {} Place::Full(back) => { extent_drop(back); } }
+            }
+        }
+    }
+    return got;
+}
+fn extent_new(p: sink places(Node749s)[c, n]) -> Ext749[c, c__off, n] {
+    let mut x: Ext749[c, c__off, n] = { p };
+    return x;
+}
+fn extent_drop(x: sink Ext749[c, o, n]) { places_keep(x.nodes); }
+fn main749s() -> i32 !{unsafe} {
+    let RegionOf(Node749s)::Taken(r) = region_of(arena749s) else { RegionOf(Node749s)::Gone => { return 0; } };
+    let RegionOf(u8)::Taken(t) = region_of(tag749s) else { RegionOf(u8)::Gone => { region_release(r); return 0; } };
+    let RegionOf(u8)::Taken(cm) = region_of(cell749s) else { RegionOf(u8)::Gone => { region_release(r); region_release(t); return 0; } };
+    let x = extent_new(places_from(r, t));
+    let SlotsFrom(Ext749)::Made(ext) = slots_from_bytes__Ext749(cm) else {
+        SlotsFrom(Ext749)::Misaligned(back) => { region_release(back); extent_drop(x); return 0; }
+    };
+    let v: usize = 0;
+    places_keep(ext);
+    extent_drop(x);
+    return v as i32;
+}
+"));
+
+  Alcotest.test_case "slots: a borrowed element's arm cannot use the array" `Quick
+    (expect_region_error "cannot use 'ext' until the element is back" "struct Node749s { key: usize; }
+linear struct Ext749[c: addr, c__off: usize, n: usize] {
+    private nodes: places(Node749s)[c, n];
+}
+private let mut arena749s: [Node749s; 8];
+private let mut tag749s: [u8; 8];
+private let mut cell749s: [u8; 256] align(16);
+fn inner(arr: borrow places(Node749s)[b, n], i: usize @ k) -> usize !{unsafe} {
+    if (i < places_count(arr)) {
+        match place_borrow(arr[i]) {
+            Place::Empty => {}
+            Place::Full(e) => { region_at(e, 0).key = 5; }
+        }
+    }
+    return 1;
+}
+fn outer(ext: borrow slots(Ext749)[b, n], j: usize @ m, i: usize @ k) -> usize !{unsafe} {
+    let mut got: usize = 0;
+    if (j < places_count(ext)) {
+        match place_borrow(ext[j]) {
+            Place::Empty => {}
+            Place::Full(x) => { got = places_count(ext); }
+        }
+        match place_take(ext[j]) {
+            Place::Empty => {}
+            Place::Full(x) => {
+                got = got + inner(x.nodes, i);
+                match place_put(ext[j], x) { Place::Empty => {} Place::Full(back) => { extent_drop(back); } }
+            }
+        }
+    }
+    return got;
+}
+fn extent_new(p: sink places(Node749s)[c, n]) -> Ext749[c, c__off, n] {
+    let mut x: Ext749[c, c__off, n] = { p };
+    return x;
+}
+fn extent_drop(x: sink Ext749[c, o, n]) { places_keep(x.nodes); }
+fn main749s() -> i32 !{unsafe} {
+    let RegionOf(Node749s)::Taken(r) = region_of(arena749s) else { RegionOf(Node749s)::Gone => { return 0; } };
+    let RegionOf(u8)::Taken(t) = region_of(tag749s) else { RegionOf(u8)::Gone => { region_release(r); return 0; } };
+    let RegionOf(u8)::Taken(cm) = region_of(cell749s) else { RegionOf(u8)::Gone => { region_release(r); region_release(t); return 0; } };
+    let x = extent_new(places_from(r, t));
+    let SlotsFrom(Ext749)::Made(ext) = slots_from_bytes__Ext749(cm) else {
+        SlotsFrom(Ext749)::Misaligned(back) => { region_release(back); extent_drop(x); return 0; }
+    };
+    let v: usize = 0;
+    places_keep(ext);
+    extent_drop(x);
+    return v as i32;
+}
+");
+
   (* GitHub issue #749: an array of places over a region; an element is a
      place path and the borrowed array is its witness. *)
   Alcotest.test_case "places: borrow, take and put an element" `Quick
