@@ -96,8 +96,8 @@ Re-derived from maintained sources, rather than the old fixed-RAM premise:
 | Bootstrap capacity | `BOOTSTRAP_PAGE_COUNT = 2048` |
 | Runtime capacity | Sum of aligned normalized FDT regions |
 | Page metadata | `PageMeta`, 24 bytes/page |
-| Metadata accessor | `page_meta_at_index`, raw pointer plus plain index |
-| Accessor call sites | 20 in `kernel/mm/page.tkb` |
+| Metadata accessor | `page_meta_at(metas, i)` over a `region(PageMeta)` lent with `place_borrow` (#744; was `page_meta_at_index`, raw pointer plus plain index) |
+| Accessor call sites | in `kernel/mm/page.tkb`; an index past the table stops |
 | Existing freelist owner | `FreelistOwner[allocation]`, plain `usize` index |
 | Existing freelist return | `freelist_core_remove`, unsafe indexed write |
 
@@ -105,8 +105,9 @@ Use a borrowed live metadata extent whose count is tied to its own storage,
 with an accessor signature like the fixture's Region signature. Keep the
 metadata extent independent from the authority of each allocated payload
 page. Do not invent a second page ownership model or a capacity-only brand.
-A's array/place work decides how the long-lived extent authority is stored;
-this prototype requires no change to that interface.
+A's array/place work decided how the long-lived extent authority is stored
+(#744: a region in a guarded place); this prototype required no change to
+that interface.
 
 Most raw metadata consumers are guarded free-head/owner lookups, capacity
 walks, or bootstrap-to-runtime reconstruction. Arithmetic guards can feed the

@@ -61,40 +61,31 @@ from the language -- on #732's generic variants; #704's per-CPU storage
 DDB reads other CPUs' entries on purpose, which is settled with #637's mint
 list (maintainer, 2026-10-09).
 
-1. **Stored authority for arrays and pools.** #131's remaining shapes
-   with #672 stage 2: array-element places, an array of indexed owners, and
-   borrowing an element in place: borrowing in place (place_borrow) and
-   runtime-length arrays of places (#749) are done, driven by #744 and
-   #746.
+1. **Stored authority for arrays and pools.** Borrowing in place
+   (place_borrow) and runtime-length arrays of places (places, slots) exist
+   (2026-10-11; HISTORY.md). Open: per-element witnesses, deferred until
+   needed (#751); an immutable index keeping one static, filed for B's
+   language work (#755).
 2. **The process record.** Threads sharing an address space are planned
    separately on #742.
-3. **#637 stage 3: shrinking the mint list.** The file-confinement flag is
-   enabled for both maintained kernels with a reviewed list
-   (`kernel/RAW_MINT_FILES`); calls of `region_bytes_assume` count as mints.
-   Step A is done (2026-10-11: RPi5 PCIe, virtio-net, virtio-blk, the
-   system timer DTB reader and xHCI registers through IoHandles; the
-   xHCI doorbell and ERDP release are named boundaries). #744 (B2, page.tkb carving regions handed over by a small memory-map
-   mint) is done (2026-10-11).
-   #749 (runtime-length arrays of places, #131's general element rule) is
-   done (2026-10-11). **Next: #746** (page uniqueness by type on #749),
-   which starts with a **pending maintainer decision** recorded on the
-   issue: how a page's permission returns to its element across lock
-   sections, (B) a runtime-checked put by address or (C) holder-tied
-   identities designed first on #750. Read #746's last comment before
-   writing code. Then #745 (B3, intrusive_pool absorbed
-   into RegionPool, process records holding their permission on #746's
-   mechanism, decision 2026-10-11). Performance follow-up, not on the
-   critical path: #748. Consolidating the kernel-driven built-ins into
-   general features is #750, after #746 and #745. The landed MMIO step
-   leaves doorbell, ERDP-release and stop/reset observation boundaries for
-   #720 to build on. #720 must add exact request/event matching and preserve
-   publication and reset behavior. #720 also needs general exclusive backing
-   storage on #637/#672:
-   region_of currently permits direct access to the source array. #739
-   (stale list entries, per-file counts). log.tkb's
-   raw sites go with #613: a lockless multi-writer log ring with its
-   protocol in the type system, its orderings checked by #645's herd7
-   litmus tests.
+3. **#637 stage 3: shrinking the mint list.** Both maintained kernels build
+   with `kernel/RAW_MINT_FILES`; step A (MMIO through IoHandles), B1 and B2
+   are done (HISTORY.md, 2026-10-11). **Next: #746** (page uniqueness by
+   type on the arrays of places), which starts with a **pending maintainer
+   decision** recorded on the issue: how a page's permission returns to its
+   element across lock sections, (B) a runtime-checked put by address or
+   (C) holder-tied identities designed first on #750. Read #746's last
+   comment before writing code. Then #745 (B3, intrusive_pool absorbed into
+   RegionPool, process records holding their permission on #746's
+   mechanism). Not on the critical path: #748 (allocator time), #739 (stale
+   list entries, per-file counts). Consolidating the kernel-driven
+   built-ins into general features is #750, after #746 and #745. For #720
+   (B): the doorbell, ERDP-release and stop/reset boundaries are in place;
+   #720 must add exact request/event matching and needs general exclusive
+   backing storage on #637/#672 (region_of still permits direct access to
+   the source array); the ERSTSZ write is #754. log.tkb's raw sites go with
+   #613: a lockless multi-writer log ring with its protocol in the type
+   system, its orderings checked by #645's herd7 litmus tests.
 4. **Preemption.** #638's typed preparation -- a preemption-disabled
    authority, with per-CPU access (`cpu_authority`) derived from it in place
    of the `KERNEL_PREEMPTIBLE == 0` asserts -- with #606 stage 2 (a TLC trace

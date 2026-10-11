@@ -1,5 +1,49 @@
 # takibi Engineering History
 
+## 2026-10-11: stored authority reaches the page allocator; the mint list shrinks
+
+Territory A's session from #518 to #749, in order of the maintainer's
+decisions:
+
+- **#518, #202, #343.** Process identities hold IntrusiveSlotAddress, and
+  an empty slot answers Absent rather than a handle that collides with the
+  bootstrap. User ranges are made only under the process's Running
+  authority and are affine, so a range cannot be used in another process's
+  context or kept past a block. Option A was chosen over an epoch tag
+  because an epoch does not close the threaded munmap race (threads: #742).
+  Pool accessors hand out no unbound payload pointer.
+- **#637 step A.** PCIe, the system timer, xHCI and virtio-mmio registers
+  go through IoHandles. The xHCI doorbell and ERDP release are named
+  boundaries for #720. A latent write meant for ERSTSZ that lands on IMAN
+  was kept unchanged and filed (#754).
+- **#743, #744 (step B1, B2).** Page runs become regions only in
+  kernel/mm/memory_map.tkb, the memory mint. page.tkb's metadata and extent
+  tables are typed regions lent with the new place_borrow, and page.tkb
+  left kernel/RAW_MINT_FILES (157 raw sites to 0). D2' was chosen over a
+  DTB-specific declaration: the compiler knows nothing of DTB, ACPI or PCI.
+  P2 (compiler support for borrowing in place) was chosen over a take/put
+  pattern and a trusted accessor; P1 and P2 leave the same mint.
+- **#749.** Runtime-length arrays of places: places(T) with derived element
+  content (a tag byte per element) and slots(P) with stored values through
+  the existing place exchange. Surface S1/W1/B1; per-element witnesses are
+  deferred to #751. The general form (i) was chosen over a page-specific
+  built-in, so #745 and #746 share one rule. #750 collects the built-ins
+  for later consolidation.
+- **Space.** Unused region built-ins left the image (internal linkage plus
+  globaldce) and region_of stopped allocating table meta arrays: linked
+  text about -36 KB on both kernels. The allocator's single-page cost rose
+  about 14 ns on RPi5 with metadata as regions (#748).
+- **Found on the way.** A call place_borrow inserted shared its source's
+  position key; the type checker now reports such a collision as a
+  compiler bug. Region built-ins used without --regions failed late in code
+  generation; they are now refused up front (regions-flag-control).
+  scripts/kernel_page_allocator.gdb had gone stale twice unnoticed; a QEMU
+  lane now runs it and takibi-dtb against a live debug kernel.
+
+Open at the end: #746 waits on how a page's permission returns to its
+element across lock sections, because static identities do not survive
+storage (options on #746, central candidate for #750).
+
 ## 2026-10-11: the historical examples/ tree is retired
 
 `examples/` held the STM32, RPi3 and early bare-metal RPi5 milestones that
