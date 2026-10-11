@@ -1,9 +1,9 @@
 {
   "date": "2026-10-11",
-  "event": "incremental",
-  "decision": "reuse",
-  "source_sha256": "12c652675e54604f95650e8f80d22fda3db63eb14a9c6eb83288edc00e9694d9",
-  "workload": "Retiring examples/ on top of the measured tree below: kernel .tkb/.S/.ld changes are comments only; the RPi5 JTAG stub and MPIDR probe move under kernel/platform/rpi5/jtag/ as standalone images never linked into a kernel; the root Makefile gains rpi5-jtag-stub and loses examples references. Measured tree: #744 (#637 step B2): page metadata as regions borrowed with place_borrow, memory_map.tkb as the memory mint, and the unused-region-built-in removal (region_of meta arrays, internal linkage, globaldce). Linked kernels compared against origin/main with scripts/space_delta.py; allocator page counts from scripts/buildcheck_kernel_memory_map.py.",
+  "event": "milestone",
+  "decision": "measured",
+  "source_sha256": "adb1ad0603d1824df3b8fc63a3e7ee53c581c7000383b71b4d4af00a0930cccb",
+  "workload": "#744 (#637 step B2): page metadata as regions borrowed with place_borrow, memory_map.tkb as the memory mint, and the unused-region-built-in removal (region_of meta arrays, internal linkage, globaldce). Linked kernels compared against origin/main with scripts/space_delta.py; allocator page counts from scripts/buildcheck_kernel_memory_map.py.",
   "evidence": [
     "docs/WORLD_STOP_CLAIM_REVIEW_2026-10-11.md",
     "docs/PROCESS_PIN_SPACE_2026-10-10.md",
@@ -47,6 +47,6 @@
     "docs/VIRTIO_NET_TX_2026-10-10.md",
     "docs/VIRTIO_NET_TX_SPACE_2026-10-10.json"
   ],
-  "assessment": "Reuse: no kernel code, data or link input changed, so the measured result stands. QEMU text 729912 -> 693464 B (-36448), RPi5 742752 -> 706440 B (-36312): unused region built-ins no longer reach the image. Data +24 B, BSS +48 B on QEMU, RPi5 BSS unchanged (page_meta_store's two places; bootstrap metadata moved out of the pool, same size). usable_ram_start drops 64 KiB on QEMU and 32 KiB on RPi5, so allocator pages rise by 8 to 16 across the checked layouts. PageMeta stays 24 B per page. A boot probe recording page_alloc/page_free cost adds a few hundred bytes of text.",
+  "assessment": "QEMU text 729912 -> 693464 B (-36448), RPi5 742752 -> 706440 B (-36312): unused region built-ins no longer reach the image. Data +24 B, BSS +48 B on QEMU, RPi5 BSS unchanged (page_meta_store's two places; bootstrap metadata moved out of the pool, same size). usable_ram_start drops 64 KiB on QEMU and 32 KiB on RPi5, so allocator pages rise by 8 to 16 across the checked layouts. PageMeta stays 24 B per page. A boot probe recording page_alloc/page_free cost adds a few hundred bytes of text. #749 adds compiler built-ins (places, slots) that the kernels do not use yet; with globaldce they add no kernel code.",
   "next_trigger": "#745 (process records on RegionPool) or #746 (per-page permissions) changes allocator or pool representation; either requires fresh measurement, as does another completed kernel feature or stage."
 }
