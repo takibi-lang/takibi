@@ -160,7 +160,7 @@ if ! command -v gdb-multiarch >/dev/null 2>&1; then
 fi
 
 echo "[kernel/qemu alloc-rollback] booting kernel-debug.elf under QEMU+GDB"
-. "$REPO_ROOT/scripts/resource_lease.sh"
+. "$REPO_ROOT/scripts/vcpu_lease.sh"
 resource_lease_vcpu_acquire "$TAKIBI_QEMU_SMP"
 "$REPO_ROOT/scripts/qemu.sh" \
     -machine virt -cpu cortex-a53 -smp "$TAKIBI_QEMU_SMP" -m 1024 -display none -monitor none \

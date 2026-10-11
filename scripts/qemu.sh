@@ -3,7 +3,7 @@
 # directly (scripts/check_qemu_vcpu_lease.py enforces it). It refuses a guest
 # whose `-smp` exceeds the vCPUs leased by its runner, so a runner that forgot
 # to take the lease fails at once instead of oversubscribing the host
-# (scripts/resource_lease.sh, GitHub issue #719). Without `-smp`, QEMU's
+# (scripts/vcpu_lease.sh, GitHub issue #719). Without `-smp`, QEMU's
 # virt machine has one vCPU.
 set -euo pipefail
 
@@ -17,7 +17,7 @@ for arg in "$@"; do
     prev="$arg"
 done
 
-. "$(dirname "$0")/resource_lease.sh"
+. "$(dirname "$0")/vcpu_lease.sh"
 held="$(resource_lease_vcpu_held)"
 if [ "$held" -lt "$smp" ]; then
     echo "error: QEMU with -smp $smp, but its runner leased $held vCPUs." >&2

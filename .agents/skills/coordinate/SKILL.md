@@ -31,7 +31,7 @@ English ASCII.
 Nothing else is needed for isolation. Each worktree claims its own QEMU port
 block automatically (`scripts/qemu_session_ports.sh` names it after the
 worktree), and every QEMU guest leases vCPUs from the host-wide budget
-(`scripts/resource_lease.sh`), so concurrent lanes wait rather than collide.
+(`scripts/vcpu_lease.sh`), so concurrent lanes wait rather than collide.
 
 ## 2. Relay
 

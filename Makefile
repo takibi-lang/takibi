@@ -18,7 +18,7 @@
 ## and is then reported as an interactive-HTTPd lifecycle stall. Keeping
 ## 2 * jobs at or under the core count avoids that condition rather than
 ## discovering it. QEMU lanes are additionally capped by the host-wide vCPU
-## budget in scripts/resource_lease.sh, so TAKIBI_JOBS now sizes builds.
+## budget in scripts/vcpu_lease.sh, so TAKIBI_JOBS now sizes builds.
 TAKIBI_JOBS ?= $(shell nproc)
 ifeq ($(MAKELEVEL),0)
 MAKEFLAGS += -j$(TAKIBI_JOBS)
@@ -2150,7 +2150,7 @@ hwcheck-churn-long-rpi5: kernelbuild-rpi5
 
 ## lease-status: report which session holds each shared resource, and since when
 lease-status:
-	@bash -c '. scripts/resource_lease.sh; resource_lease_status'
+	@bash -c '. scripts/vcpu_lease.sh; resource_lease_status; resource_lease_vcpu_status'
 
 ## The QEMU lanes, named apart from the RPi5 one so `cicheck` below can be
 ## exactly allcheck minus the hardware without repeating the list. Adding a

@@ -185,7 +185,7 @@ vcpu() {
     env -u TAKIBI_RESOURCE_LEASE_HELD TAKIBI_QEMU_VCPU_BUDGET=4 \
         TAKIBI_RESOURCE_LEASE_TIMEOUT="$wait" \
         TAKIBI_SESSION_REGISTRY="$registry" TAKIBI_SESSION="$session" \
-        bash -c ". '$helper'; $*"
+        bash -c ". '$repo_root/scripts/vcpu_lease.sh'; $*"
 }
 vcpu lane-a 5 'resource_lease_vcpu_acquire 3 lane-a; exec sleep 30' 2>/dev/null &
 vcpu_a=$!
@@ -228,6 +228,13 @@ PATH="$tmp_dir/bin:$PATH" vcpu lane-g 1 "resource_lease_vcpu_acquire 2 lane-g; \
     python3 -c 'import subprocess, sys; subprocess.run([sys.argv[1], \"-smp\", \"2\"], check=True)' '$shim'" \
     | grep -qx fake-qemu-started \
     && claim || fail "the QEMU shim refused a guest its Python runner had leased"
+
+# allcheck's recipe sources resource_lease.sh with /bin/sh, so one bash-only
+# construct in it stops allcheck before it starts. That happened when the vCPU
+# budget was first added to this file; it now lives in vcpu_lease.sh.
+if command -v dash >/dev/null; then
+    dash -n "$helper" && claim || fail "resource_lease.sh no longer parses under dash"
+fi
 
 # Status is readable by a person deciding whether to wait.
 status="$(env -u TAKIBI_RESOURCE_LEASE_HELD \

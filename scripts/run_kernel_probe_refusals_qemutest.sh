@@ -34,7 +34,7 @@ fi
 . "$REPO_ROOT/scripts/kernel_elf_freshness.sh"
 kernel_elf_refuse_stale "$ELF" || exit 1
 mkdir -p "$ARTIFACT_DIR"
-. "$REPO_ROOT/scripts/resource_lease.sh"
+. "$REPO_ROOT/scripts/vcpu_lease.sh"
 resource_lease_vcpu_acquire "$TAKIBI_QEMU_SMP"
 python3 - "$REPO_ROOT" "$ARTIFACT_DIR" "$ELF" <<'PY'
 import os

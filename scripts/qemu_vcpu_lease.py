@@ -17,7 +17,7 @@ QEMU = str(SCRIPTS / "qemu.sh")
 
 def _bash(expr: str) -> str:
     return subprocess.run(
-        ["bash", "-c", f'. "{SCRIPTS}/resource_lease.sh"; {expr}'],
+        ["bash", "-c", f'. "{SCRIPTS}/vcpu_lease.sh"; {expr}'],
         check=True, capture_output=True, text=True).stdout.strip()
 
 

@@ -68,7 +68,7 @@ qemu_session_shift_ports GDB_PORT
 python3 "$REPO_ROOT/scripts/qemu_port_guard.py" "$LABEL" "tcp:$GDB_PORT" || exit 1
 
 # The guest exits through semihosting when its report is done.
-. "$REPO_ROOT/scripts/resource_lease.sh"
+. "$REPO_ROOT/scripts/vcpu_lease.sh"
 resource_lease_vcpu_acquire 1
 timeout "$TIMEOUT_SECS" "$REPO_ROOT/scripts/qemu.sh" \
     -machine virt -cpu cortex-a53 -m 128 -display none -monitor none \

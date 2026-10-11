@@ -2,7 +2,7 @@
 """Every maintained QEMU guest starts through scripts/qemu.sh, under a lease.
 
 GitHub issue #719 put QEMU lanes under a host-wide vCPU budget
-(scripts/resource_lease.sh). The shim refuses a guest whose runner holds too
+(scripts/vcpu_lease.sh). The shim refuses a guest whose runner holds too
 few vCPUs, but only a guest started through the shim: a runner that calls
 qemu-system-aarch64 directly bypasses the budget and nothing at run time
 notices. So a direct invocation is refused here, and a file that starts the
