@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import os
 from pathlib import Path
 import socket
 import subprocess
@@ -17,7 +18,9 @@ def qmp(port, command, arguments=None):
         connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         connection.settimeout(2)
         try:
-            connection.connect(str(port))
+            # The artifact path may be a symlink to a short socket path: a
+            # Unix socket address holds 107 bytes (run_kernel_shell_qemu.sh).
+            connection.connect(os.path.realpath(port))
         except OSError:
             connection.close()
             raise

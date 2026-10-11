@@ -44,10 +44,12 @@ if [ -z "$KERNEL_READ_ADDRESS" ]; then
     exit 1
 fi
 
+. "$REPO_ROOT/scripts/vcpu_lease.sh"
 mkdir -p "$ARTIFACT_DIR"
 # Retain address metadata before the guest starts, including failed runs.
 python3 "$REPO_ROOT/scripts/validate_kernel_ddb_qemu.py" \
     --elf "$ELF" --break-source "$BREAK_SOURCE" \
+    --online-cpus "$(qemu_online_core_count)" \
     --save-metadata "$ARTIFACT_DIR/validation.json" --metadata-only
 rm -f "$SNAPSHOT_READY" "$SNAPSHOT_RELEASE" "$NETWORK_READY" \
     "$FOREGROUND_LISTENER" "$INIT_LISTENER"
@@ -59,7 +61,6 @@ python3 "$REPO_ROOT/scripts/qemu_port_guard.py" "kernel/qemu ddb" \
     "tcp:$SERIAL_PORT" "tcp:$QMP_PORT" "tcp:$GDB_PORT" \
     "udp:$NETDEV_LOCAL_PORT" "udp:$NETDEV_REMOTE_PORT" || exit 1
 
-. "$REPO_ROOT/scripts/vcpu_lease.sh"
 resource_lease_vcpu_acquire "$TAKIBI_QEMU_SMP"
 "$REPO_ROOT/scripts/qemu.sh" \
     -machine virt -cpu cortex-a53 -smp "$TAKIBI_QEMU_SMP" -m 1024 -display none \
@@ -224,7 +225,7 @@ fi
 touch "$SNAPSHOT_RELEASE"
 wait "$driver_pid"
 python3 "$REPO_ROOT/scripts/validate_kernel_gdb_state.py" \
-    --uart-log "$UART_LOG" --gdb-log "$GDB_VIEW_LOG" --online-cpus 0,1
+    --uart-log "$UART_LOG" --gdb-log "$GDB_VIEW_LOG" --online-cpus "$(qemu_online_cpus_csv)"
 
 # Live and archived captures use one set of final UART predicates. The live
 # GDB snapshot comparison above remains a separate observation.

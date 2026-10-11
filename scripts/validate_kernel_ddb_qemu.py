@@ -11,7 +11,7 @@ import sys
 from ddb_qemu_checks import REQUIREMENTS, capture_problems
 
 
-def elf_metadata(elf, source):
+def elf_metadata(elf, source, online_cpus):
     symbols = {}
     for line in subprocess.check_output(["llvm-nm-19", str(elf)], text=True).splitlines():
         fields = line.split()
@@ -21,6 +21,7 @@ def elf_metadata(elf, source):
             symbols[fields[2]] = int(fields[0], 16)
     metadata = {"break_source": source,
                 "kernel_address": symbols["kernel_ddb_breakpoint_test_enabled"],
+                "online_cpus": online_cpus,
                 "elf_sha256": hashlib.sha256(elf.read_bytes()).hexdigest()}
     if source == "software":
         metadata.update(generated_start=symbols["kernel_generated_text_start"],
@@ -39,6 +40,8 @@ def checked_metadata(metadata):
     for field in fields:
         if type(metadata.get(field)) is not int or not 0 <= metadata[field] < 2**64:
             raise ValueError(f"metadata requires a 64-bit nonnegative integer {field}")
+    if metadata.get("online_cpus", 2) not in (1, 2, 3, 4):
+        raise ValueError("metadata online_cpus must be 1..4")
     if metadata["break_source"] == "software" and metadata["generated_start"] >= metadata["generated_end"]:
         raise ValueError("metadata generated-text bounds are empty")
     return metadata
@@ -53,6 +56,8 @@ def main(argv=None):
     inputs.add_argument("--elf", type=Path)
     inputs.add_argument("--metadata", type=Path)
     parser.add_argument("--break-source", choices=("uart", "software"))
+    parser.add_argument("--online-cpus", type=int, default=2,
+                        help="cores the guest brings online (TAKIBI_QEMU_SMP, at most 4)")
     parser.add_argument("--save-metadata", type=Path)
     parser.add_argument("--hold-log", type=Path,
                         help="UART injection witness; defaults to LOG.hold-gdb.log")
@@ -66,7 +71,7 @@ def main(argv=None):
     if not args.metadata_only and args.log is None:
         parser.error("capture validation requires --log")
     try:
-        metadata = checked_metadata(elf_metadata(args.elf, args.break_source) if args.elf
+        metadata = checked_metadata(elf_metadata(args.elf, args.break_source, args.online_cpus) if args.elf
                                     else json.loads(args.metadata.read_text(encoding="ascii")))
         if args.save_metadata:
             args.save_metadata.write_text(json.dumps(metadata, indent=2) + "\n", encoding="ascii")

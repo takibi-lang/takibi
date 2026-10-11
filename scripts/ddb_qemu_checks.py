@@ -16,7 +16,7 @@ SIGNALS = (r"(none|sig(hup|int|quit|ill|trap|abrt|bus|fpe|kill|usr1|segv|usr2|pi
 # Entries are kept in the old shell chain's order for reviewability.
 REQUIREMENTS = (
     ('debugger banner', '^ddb: interrupt-safe UART debugger$', 1, None, 'both'),
-    ('world stop acknowledgement', '^ddb: world-stop complete mask=0x0000000000000002$', 1, None, 'both'),
+    ('world stop acknowledgement', '^ddb: world-stop complete mask=0x{stopmask}$', 1, None, 'both'),
     ('BREAK frame', '^ddb: break seq=[1-9][0-9]* cpu=[0-9]+ elr=0x[0-9a-f]+ sp_el0=0x[0-9a-f]+$', 1, None, 'both'),
     ('register x0', '^ddb: x0=0x', 1, None, 'both'),
     ('register sp_el0', '^ddb: sp_el0=0x', 1, None, 'both'),
@@ -36,7 +36,7 @@ REQUIREMENTS = (
     ('fd table fields', '^ddb: fds pid=[0-9]+ slots=[0-9]+$', 1, None, 'both'),
     ('process count', '^ddb: ps count=[1-9][0-9]* truncated=[01]$', 1, None, 'both'),
     ('PID 1 signal fields in ps', '^ddb: ps pid=1 ppid=0 state=[0-9]+ wait=[0-9]+( waker=[a-z-]+( queued=[0-9]+( low-water=[0-9]+)?| frame-pending=(yes|no|unknown) connection-pending=(yes|no|unknown))?)? root=0 sp=0x[0-9a-f]+ pending={sigset} masked={sigset} owner=(none|[0-9]+) mask=0x[0-9a-f]+ core0=[01]$', 1, None, 'both'),
-    ('stack count', '^ddb: stacks cpus=2 processes=', 1, None, 'both'),
+    ('stack count', '^ddb: stacks cpus={cpus} processes=', 1, None, 'both'),
     ('PID 1 signal fields in proc', '^ddb: proc pid=1 ppid=0 state=[0-9]+ wait=[0-9]+( waker=[a-z-]+( queued=[0-9]+( low-water=[0-9]+)?| frame-pending=(yes|no|unknown) connection-pending=(yes|no|unknown))?)? root=0 sp=0x[0-9a-f]+ pending={sigset} masked={sigset} owner=(none|[0-9]+) mask=0x[0-9a-f]+ core0=[01]$', 1, None, 'both'),
     ('backtrace sources', '^ddb: bt source=(cpu cpu=[0-9]+|saved) pid=[0-9]+ stack=0x[0-9a-f]+\\.\\.0x[0-9a-f]+$', 2, None, 'both'),
     ('backtrace roots', '^ddb: bt frame=0 pc=0x[0-9a-f]+ boundary=(exception|user|assembly|assembly-bridge)$', 2, None, 'both'),
@@ -125,22 +125,38 @@ def _count_lines(expression, text, lines):
     return len(re.findall(expression, candidates, re.MULTILINE))
 
 
+def online_cpus(metadata):
+    """How many cores the guest brought online (#719: TAKIBI_QEMU_SMP, at
+    most four). Captures retained before the field existed ran -smp 2."""
+    return metadata.get("online_cpus", 2)
+
+
+def replacements(metadata):
+    """The REQUIREMENTS placeholders for one capture's metadata."""
+    source = metadata["break_source"]
+    cpus = online_cpus(metadata)
+    return {
+        "entry": "irq" if source == "uart" else "brk",
+        "source": "33" if source == "uart" else "21579",
+        "address": f'{metadata["kernel_address"]:x}',
+        "sigset": SIGNALS,
+        "cpus": str(cpus),
+        # Core 0 takes the BREAK and stops every other online core.
+        "stopmask": f"{((1 << cpus) - 1) & ~1:016x}",
+    }
+
+
 def capture_problems(text, metadata, hold_text=""):
     """Return all failed independent requirements; never contact a guest."""
     text = text.replace("\r", "")
     lines = text.split("\n")
     source = metadata["break_source"]
-    replacements = {
-        "entry": "irq" if source == "uart" else "brk",
-        "source": "33" if source == "uart" else "21579",
-        "address": f'{metadata["kernel_address"]:x}',
-        "sigset": SIGNALS,
-    }
+    placeholders = replacements(metadata)
     problems = []
     for name, expression, minimum, maximum, applies in REQUIREMENTS:
         if applies != "both" and applies != source:
             continue
-        for key, value in replacements.items():
+        for key, value in placeholders.items():
             expression = expression.replace("{" + key + "}", value)
         count = _count_lines(expression, text, lines)
         if count < minimum or maximum is not None and count > maximum:
@@ -174,7 +190,7 @@ def capture_problems(text, metadata, hold_text=""):
         continuing = text.find("ddb: continuing\n")
         if continuing < 0 or text.find("workload: peer tty read its 17-byte line", continuing) < 0:
             problems.append("peer terminal delivery: line was not delivered after continue")
-        matched = len(re.findall(r"^ddb: stack cpu=[01] pid=[0-9]+ stack=0x[0-9a-f]+\.\.0x[0-9a-f]+ owner=(none|[01]) record=match$", text, re.MULTILINE))
+        matched = len(re.findall(r"^ddb: stack cpu=[0-3] pid=[0-9]+ stack=0x[0-9a-f]+\.\.0x[0-9a-f]+ owner=(none|[0-3]) record=match$", text, re.MULTILINE))
         two = has(r"^ddb: stacks roots=2 matched=2 missing=0 duplicate-process=0 owner-mismatch=0 range-mismatch=0 duplicate-pid=0 duplicate-stack=0$")
         one = has(r"^ddb: stack cpu=1 status=idle$") and has(r"^ddb: stacks roots=1 matched=1 missing=0 duplicate-process=0 owner-mismatch=0 range-mismatch=0 duplicate-pid=0 duplicate-stack=0$")
         if not (matched == 2 and two or matched == 1 and one):
@@ -186,7 +202,7 @@ def capture_problems(text, metadata, hold_text=""):
             if not has(expression):
                 problems.append(name + ": missing evidence")
         migrated = text.find("workload: busy pair migrated across both cpus with stack handoff intact\n")
-        stacks = text.find("ddb: stacks cpus=2 processes=")
+        stacks = text.find(f"ddb: stacks cpus={online_cpus(metadata)} processes=")
         if not 0 <= migrated < stacks:
             problems.append("snapshot ordering: snapshot did not follow live migration")
     else:

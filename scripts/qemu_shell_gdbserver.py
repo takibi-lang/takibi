@@ -22,6 +22,7 @@ Two traps, each paid for once while chasing GitHub issue #632:
 """
 
 import json
+import os
 import pathlib
 import socket
 import sys
@@ -29,7 +30,8 @@ import sys
 
 def qmp(sock_path: pathlib.Path, command: str) -> str:
     connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    connection.connect(str(sock_path))
+    # May be a symlink to a short path; see run_kernel_shell_qemu.sh.
+    connection.connect(os.path.realpath(sock_path))
     with connection, connection.makefile("rwb", buffering=0) as stream:
         stream.readline()  # greeting
         stream.write(b'{"execute":"qmp_capabilities"}\n')

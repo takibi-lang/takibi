@@ -87,6 +87,12 @@ FORCE:
 DUNE_INVOCATION_LOCK := _build/.takibi-dune-invocation.lock
 export DUNE_INVOCATION_LOCK
 
+# A worker's worktree lives under .claude/worktrees/ of the main checkout, and
+# dune takes the outermost dune-project as its root, so without this a
+# worktree's `make` would build the main checkout instead (issue #753).
+DUNE_ROOT ?= $(CURDIR)
+export DUNE_ROOT
+
 ifeq ($(TAKIBI_KERNEL_BUILD_LOCK_HELD),1)
 # The public locked targets depend on `build` before entering their recursive
 # Make. The inner graph must reuse that completed compiler: invoking Dune from

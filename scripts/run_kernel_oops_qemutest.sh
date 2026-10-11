@@ -174,6 +174,8 @@ trap 'cleanup; exit 130' INT TERM HUP
 # for the same reason earlier (1 in 3 failures); the other modes only
 # differed in being a few seconds shorter.
 console_await=(--timeout 90)
+# Core 1 faults during its own bring-up, before cores 2 and 3 are asked to
+# start, so core 0 is the only core to stop whatever TAKIBI_QEMU_SMP is.
 if [ "$MODE" = peer_fault ] || [ "$MODE" = peer_fault_start_window ] || [ "$MODE" = peer_fault_start_release ]; then
     # The peer fail-stops during bring-up and core 0 only reaches its own
     # fault after userspace starts.
@@ -534,12 +536,11 @@ fi
 # first, so no running core can take the UART RX interrupt and eat the
 # console's input. The console runs on the core that fail-stopped, which is
 # not always core 0: since #610 an exec can run on a peer, so the
-# child_exec modes fail-stop on whichever core ran it. The stopped core is
-# the other one.
-faulted_cpu="$(grep -aoE '^oops: fail-stop seq=[0-9]+ cpu=[01] ' "$UART_LOG" |
-    head -1 | sed 's/.*cpu=\([01]\) /\1/')"
-stopped_mask=2
-if [ "$faulted_cpu" = 1 ]; then stopped_mask=1; fi
+# child_exec modes fail-stop on whichever core ran it. The stopped cores are
+# every other online one (#719: the guest has TAKIBI_QEMU_SMP of them).
+faulted_cpu="$(grep -aoE '^oops: fail-stop seq=[0-9]+ cpu=[0-9]+ ' "$UART_LOG" |
+    head -1 | sed 's/.*cpu=\([0-9]*\) /\1/')"
+stopped_mask="$(qemu_online_mask_without "${faulted_cpu:-0}")"
 if ! grep -Eq "^oops: world-stop complete mask=0x0*$stopped_mask\$" "$UART_LOG"; then
     echo "FAIL kernel/qemu oops: the console ran without stopping the other core first" >&2
     sed 's/^/  /' "$UART_LOG" >&2 || true

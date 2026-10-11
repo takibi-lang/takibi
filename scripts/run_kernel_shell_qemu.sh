@@ -17,14 +17,18 @@ EXT2_IMAGE="$REPO_ROOT/kernel/build/user/ext2-shell.img"
 ARTIFACT_DIR="${KERNEL_QEMU_SHELL_ARTIFACT_DIR:-${TAKIBI_LANE_ARTIFACT_ROOT:-$REPO_ROOT/_build}/kernel-shell-qemu}"
 SHELL_EXT2_IMAGE="$ARTIFACT_DIR/ext2.img"
 QMP_SOCKET="$ARTIFACT_DIR/qmp.sock"
+QMP_SHORT_DIR=""
 # A Unix socket path is limited to 107 bytes. Past it QEMU refuses -qmp and
 # exits before binding the UART, and the console then reports only that the
-# UART never opened: a deep TAKIBI_LANE_ARTIFACT_ROOT cost a repeat run that
-# way. Say so here instead.
+# UART never opened. A worker's worktree (.claude/worktrees/agent-*) makes
+# the race-window churn artifact root that deep on its own (#719), so the
+# socket then lives in a short temporary directory and the artifact path is
+# a symlink to it; the QMP clients connect through its realpath.
 if [ "$(printf '%s' "$QMP_SOCKET" | wc -c)" -gt 107 ]; then
-    echo "error: QMP socket path is over the 107-byte Unix socket limit;" \
-         "use a shorter artifact root: $QMP_SOCKET" >&2
-    exit 1
+    QMP_SHORT_DIR="$(mktemp -d /tmp/tk-qmp.XXXXXX)"
+    mkdir -p "$ARTIFACT_DIR"
+    ln -sfn "$QMP_SHORT_DIR/qmp.sock" "$QMP_SOCKET"
+    QMP_SOCKET="$QMP_SHORT_DIR/qmp.sock"
 fi
 HTTP_BRIDGE_LOG="$ARTIFACT_DIR/http-bridge.log"
 TRANSCRIPT_OVERRIDE="${KERNEL_SHELL_TRANSCRIPT:-}"
@@ -143,6 +147,7 @@ export KERNEL_SHELL_BACKEND_PID="$QEMU_PID"
 cleanup() {
     kill "$QEMU_PID" 2>/dev/null || true
     wait "$QEMU_PID" 2>/dev/null || true
+    if [ -n "$QMP_SHORT_DIR" ]; then rm -rf "$QMP_SHORT_DIR"; fi
     if [ -n "$HTTP_BRIDGE_PID" ]; then
         kill "$HTTP_BRIDGE_PID" 2>/dev/null || true
         wait "$HTTP_BRIDGE_PID" 2>/dev/null || true

@@ -58,10 +58,7 @@ def main():
         hold = (FIXTURES / "ddb_qemu_uart_hold.txt").read_text(encoding="ascii") if source == "uart" else ""
         run(text, metadata, hold, external=True)
         run(text.replace("\n", "\r\n"), metadata, hold.replace("\n", "\r\n"))
-        replacements = {"entry": "irq" if source == "uart" else "brk",
-                        "source": "33" if source == "uart" else "21579",
-                        "address": f'{metadata["kernel_address"]:x}',
-                        "sigset": checks.SIGNALS}
+        replacements = checks.replacements(metadata)
         for name, expression, minimum, maximum, applies in checks.REQUIREMENTS:
             if applies not in (source, "both"):
                 continue

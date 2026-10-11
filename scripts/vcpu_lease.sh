@@ -25,8 +25,33 @@
 # scripts/qemu.sh looks for the lease on its ancestors rather than on itself.
 #
 # TAKIBI_QEMU_SMP is the one setting every runner's `-smp` comes from.
-TAKIBI_QEMU_SMP="${TAKIBI_QEMU_SMP:-2}"
+TAKIBI_QEMU_SMP="${TAKIBI_QEMU_SMP:-4}"
 export TAKIBI_QEMU_SMP
+
+# The cores a guest of TAKIBI_QEMU_SMP vCPUs brings online: the kernel admits
+# at most KERNEL_MAX_CORES (4, kernel/lib/execution_model.tkb). Runners derive
+# their expectations from these instead of spelling out a core count.
+qemu_online_core_count() {
+    local n="$TAKIBI_QEMU_SMP"
+    if [ "$n" -gt 4 ]; then n=4; fi
+    printf '%s\n' "$n"
+}
+
+# "0,1,...,n-1"
+qemu_online_cpus_csv() {
+    local n i out=""
+    n="$(qemu_online_core_count)"
+    for ((i = 0; i < n; i++)); do out="${out:+$out,}$i"; done
+    printf '%s\n' "$out"
+}
+
+# The mask, in hex without 0x, of every online core except core $1: what the
+# kernel's `oops: world-stop complete mask=0x...` line names.
+qemu_online_mask_without() {
+    local n
+    n="$(qemu_online_core_count)"
+    printf '%x\n' $(( ((1 << n) - 1) & ~(1 << $1) ))
+}
 
 resource_lease_vcpu_dir() {
     printf '%s/vcpu\n' "$(resource_lease_dir)"
