@@ -262,6 +262,16 @@ let () =
     (* GitHub issue #672: under --regions, the built-in definitions are
        planned from this first parse, then parsed before the program's own
        files, which are parsed again (Region_builtin.plan). *)
+    (* The region built-ins are expanded only under --regions. Without it a
+       program naming IoHandle, RegionBytes or region_bytes_assume used to
+       pass type checking and stop in code generation with "Unknown named
+       type: IoHandle__T", which names neither the flag nor the source. *)
+    if (not !regions) && Region_builtin.region_bytes_used prog then begin
+      Printf.eprintf
+        "Error: IoHandle, RegionBytes and region_bytes_assume are region \
+         built-ins; compile with --regions\n";
+      exit 1
+    end;
     let prog =
       if not !regions then prog
       else begin

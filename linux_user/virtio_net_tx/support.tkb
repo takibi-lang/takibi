@@ -95,6 +95,11 @@ fn send_timeout_case(ready: sink NetRxCanAcquire, reply_timeout: bool)
 fn run_driver_case(reply_timeout: bool) !{may_block} {
     let address: usize = (fake_regs as *u8) as usize;
     check(address > 0 && address < 0x80000000, "native fake MMIO must fit the legacy i32 base");
+    let RegionBytes::Assumed(registers) = region_bytes_assume(address, 128 * 4) else {};
+    match io_handle_attach(&virtio_net_regs, registers) {
+        IoAttach::Attached => {}
+        IoAttach::TooSmall => { check(false, "native fake MMIO window refused"); }
+    }
     virtio_base = address as i32;
     virtio_net_gic_intid = 48;
     match net_init() {

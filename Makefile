@@ -528,6 +528,7 @@ _build/virtio-net-native/driver.tkb: kernel/drivers/net/virtio_net.tkb scripts/b
 	python3 scripts/build_virtio_net_native_fixture.py $< $@
 $(LINUX_USER_DIR)/virtio_net_tx/virtio_net_tx_exe.o $(LINUX_USER_DIR)/virtio_net_reply/virtio_net_reply_exe.o: _build/virtio-net-native/driver.tkb kernel/drivers/net/virtio_net.tkb kernel/drivers/net/virtio_net_tx_wait.tkb kernel/drivers/virtio_ring.tkb kernel/lib/init_once.tkb kernel/lib/mutex.tkb kernel/lib/spinlock.tkb $(LINUX_USER_DIR)/virtio_net_tx/support.tkb
 $(LINUX_USER_DIR)/virtio_net_tx/virtio_net_tx_exe.o $(LINUX_USER_DIR)/virtio_net_reply/virtio_net_reply_exe.o: LINUX_USER_EXTRA_SRCS := _build/virtio-net-native/driver.tkb $(LINUX_USER_DIR)/virtio_net_tx/support.tkb
+$(LINUX_USER_DIR)/virtio_net_tx/virtio_net_tx_exe.o $(LINUX_USER_DIR)/virtio_net_reply/virtio_net_reply_exe.o: LINUX_USER_EXTRA_FLAGS := --regions
 $(LINUX_USER_DIR)/tcp_parse/tcp_parse_exe.o: $(LINUX_USER_DIR)/common/inet_checksum.tkb $(LINUX_USER_DIR)/common/netutil.tkb
 $(LINUX_USER_DIR)/byte_slice/byte_slice_exe.o: kernel/lib/byte_slice.tkb
 # GitHub issue #470: the kernel's device-tree reader, run against a blob
