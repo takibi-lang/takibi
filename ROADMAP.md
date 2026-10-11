@@ -64,26 +64,21 @@ list (maintainer, 2026-10-09).
 1. **Stored authority for arrays and pools.** #131's remaining shapes
    with #672 stage 2: array-element places, an array of indexed owners, and
    borrowing an element in place, started when a consumer needs it (the
-   trigger on #131). #518 (typed slot addresses) and #343 (decision: bound
-   payload pointers plus generation checks) are done (2026-10-11). B's #720 three-index region capsule now verifies retention, field moves,
-   reference expiry and a Place round trip with existing rules; its earlier
-   two-index rejection omitted the implicit offset (2026-10-11).
-2. **The process record.** Done (2026-10-11): #202 settled as user ranges
-   made under the process's Running authority. Threads sharing an address
-   space are planned separately on #742.
+   trigger on #131).
+2. **The process record.** Threads sharing an address space are planned
+   separately on #742.
 3. **#637 stage 3: shrinking the mint list.** The file-confinement flag is
    enabled for both maintained kernels with a reviewed list
    (`kernel/RAW_MINT_FILES`); calls of `region_bytes_assume` count as mints.
    Step A is done (2026-10-11: RPi5 PCIe, virtio-net, virtio-blk, the
    system timer DTB reader and xHCI registers through IoHandles; the
-   xHCI doorbell and ERDP release are named boundaries). Next: step B,
-   in three tracked steps, all required for the minimal mint list:
-   #743 (B1, page runs handed out as regions; fd_table and process_image
-   leave the list), then #744 (B2, page.tkb as splits of a declared memory
-   region), then #745 (B3, intrusive_pool absorbed into RegionPool). xHCI MMIO step A coordinates with B's #720 partial-DMA
-   design: preserve matching-completion, publication and stop/reset hooks;
-   use IoHandles there without adding a DMA-specific storage rule. B's
-   #720 also needs general exclusive backing storage on #637/#672:
+   xHCI doorbell and ERDP release are named boundaries). Next: #744 (B2,
+   page.tkb as splits of a declared memory region), then #745 (B3,
+   intrusive_pool absorbed into RegionPool). The landed MMIO step leaves
+   doorbell, ERDP-release and stop/reset observation boundaries for #720 to
+   build on. #720 must add exact request/event matching and preserve
+   publication and reset behavior. #720 also needs general exclusive backing
+   storage on #637/#672:
    region_of currently permits direct access to the source array. #739
    (stale list entries, per-file counts). log.tkb's
    raw sites go with #613: a lockless multi-writer log ring with its

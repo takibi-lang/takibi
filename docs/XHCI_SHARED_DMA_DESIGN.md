@@ -2,10 +2,11 @@
 
 The maintainer selected general region ownership plus generated protocol
 permissions on 2026-10-11 (B+C). A common Takibi protocol declaration is the
-selected source for both TLA+ and permission types. This is not implemented language syntax or
-a claim of verified DMA safety. It separates partial memory authority from
-runtime request concurrency. The first consumer remains the current synchronous
-USB mass-storage driver. Multiple outstanding requests are not required.
+selected source for both TLA+ and permission types. This is not implemented
+language syntax or a claim of verified DMA safety. It separates partial
+memory authority from runtime request concurrency. The first consumer remains
+the current synchronous USB mass-storage driver. Multiple outstanding
+requests are not required.
 
 ## Existing-language feasibility
 
@@ -121,11 +122,12 @@ from those extents alone because current alignment already creates padding.
 
 Territory A supplies the general memory substrate on its stored-authority
 and safe-memory routes. Territory B supplies the protocol model and its
-connection to types, then the driver consumer. The corrected three-index capsule
-and Place probes now establish retention, field moves and reference expiry
-under existing rules. Exclusive backing-storage protection remains needed. A's MMIO migration must also
-preserve the observation/notification hooks and use IoHandles there. No
-DMA-specific storage exception is proposed.
+connection to types, then the driver consumer. The corrected three-index
+capsule and Place probes establish retention, field moves and reference
+expiry under existing rules. Exclusive backing-storage protection remains
+needed. Territory A's xHCI MMIO step now uses IoHandles and names the doorbell,
+ERDP-release and halt/reset-observation boundaries; the DMA protocol must
+preserve these hooks. No DMA-specific storage exception is proposed.
 
 Implement the selected common declaration and retained-region API with a
 bounded transition model covering reserve, wrap, publish, matching events,
@@ -289,8 +291,9 @@ integration is unnecessary for this scope.
    negative compiler tests. A generated API that cannot retain its region
    does not finish this step.
 4. B extends the model to wrap, request/session correlation, event snapshots,
-   recovery and context obligations, then migrates the maintained driver.
-   Driver/cache tests and measured space complete the consumer stage.
+   recovery and context obligations, then carries the permissions into the
+   maintained driver. Driver/cache tests and measured space complete the
+   consumer stage.
 
 The corrected capsule/native/compiler probes establish memory retention and
 expiry with existing rules, while raw backing-array mutation still compiles.
