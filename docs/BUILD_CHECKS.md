@@ -24,6 +24,8 @@ suffix is description; dispatch reads only the prefix.
 | `check_land_precheck_controls.py` | The real land shell stops at the first failed host gate, names its lane and preserves diagnostics; green gates retain the full clean aggregate and exact-HEAD push, and failed clean/allcheck cannot publish |
 | `check_space_checkpoint_controls.py` | milestone measurement, justified incremental reuse, source fingerprint freshness, tracked evidence, and the mandatory pre-allcheck publication hook |
 | `check_qemu_vcpu_lease.py` | every maintained QEMU guest starts through `scripts/qemu.sh`, never `qemu-system-aarch64` directly, and every file that starts the shim takes a vCPU lease from the host-wide budget |
+| `check_lease_before_deadline.py` | a driver that spawns a lease-taking QEMU runner (a script calling `resource_lease_vcpu_acquire`, or `make kernelsh-qemu`) takes the vCPU lease itself first, so no deadline is spent in the runner's wait (#719) |
+| `check_lease_wait_controls.py` | `lease_wait.lease_pending` classifies waiting, allocator waits, waits after a grant and transcripts without a wait, and only a pending wait is named in a timeout |
 | `check_service_space_controls.py` | actual FD/fork phase and actor coverage, open-description sharing, retained capacities, Takibi pool resource identities, repeats, and incomplete/error capture rejection |
 | `check_pool_retention_controls.py` | real-kernel retention accounting, workload completion, repeated counts, platform clock separation, and malformed capture rejection |
 | `check_pool_replay_controls.py` | equal-workload Takibi/SLUB/UMA sample coverage, storage arithmetic, recorded comparison freshness, and failed or incomplete capture controls |
@@ -192,6 +194,7 @@ for several rounds it gated `allbuild` so no kernel lane ran at all.
 | --- | --- |
 | `slowcheck_debug_return_entry.py` | Real GDB accepts an indirect forced return at machine entry and rejects a later PC before writing the result buffer |
 | `slowcheck_known_intermittent_issues.py` | every row of the known-intermittent table names an issue that is still open |
+| `slowcheck_lease_wait.py` | a shell driver keeps waiting while its runner prints `[lease] waiting` past the deadline, and still times out a runner silent as long without one |
 | `slowcheck_board_link_gate.sh` | Controls for the shared board-link gate |
 | `slowcheck_kernel_net_readiness.py` | Controls for the host peer's readiness waits, with no QEMU in the room |
 | `slowcheck_qemu_session_ports.sh` | Regression controls for the per-session QEMU port block claim |

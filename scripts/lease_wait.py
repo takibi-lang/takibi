@@ -16,3 +16,11 @@ GOT = b"[lease] got "
 
 def lease_pending(transcript: bytes) -> bool:
     return transcript.rfind(WAITING) > transcript.rfind(GOT)
+
+
+def timed_out_waiting(transcript: bytes) -> str | None:
+    """The failure to report in place of a boot timeout, or None."""
+    if not lease_pending(transcript):
+        return None
+    return ("timed out waiting for the vCPU lease: QEMU never started "
+            "(see the [lease] lines for who held the budget)")

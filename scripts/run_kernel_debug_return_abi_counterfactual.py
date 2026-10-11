@@ -14,6 +14,7 @@ reason would also exit non-zero.
                      eight-leaf result are described as indirect.
 """
 
+from qemu_vcpu_lease import lease
 import json
 import os
 import subprocess
@@ -55,6 +56,9 @@ def main():
         sys.exit("usage: run_kernel_debug_return_abi_counterfactual.py "
                  + "|".join(EXPECTED))
     mode = sys.argv[1]
+    # GitHub issue #719: the lane below takes one vCPU; hold it here, before
+    # its 120 s timeout starts, so a full budget cannot spend that timeout.
+    lease(1)
     artifacts = Path(os.environ.get(
         "TAKIBI_LANE_ARTIFACT_ROOT", ROOT / "_build")) / \
         "kernel-debug-return-abi-qemu" / f"counterfactual-{mode}"

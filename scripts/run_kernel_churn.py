@@ -25,7 +25,8 @@ The pty transcript lands in <artifact root>/kernel-churn-<platform>/, beside
 the shell runner's own UART transcript.
 """
 
-from lease_wait import lease_pending
+from lease_wait import lease_pending, timed_out_waiting
+from qemu_vcpu_lease import lease, shell_vcpus
 import argparse
 import os
 import pty
@@ -419,6 +420,10 @@ def main():
         parser.error("GDB options require --platform qemu")
     if args.asid_jump is not None and (not args.long or not 2 <= args.asid_jump <= 65535):
         parser.error("--asid-jump requires --long and a value from 2 through 65535")
+    # GitHub issue #719: hold the shell runner's vCPUs before any deadline
+    # starts. The runner below finds them on its ancestor and does not wait.
+    if args.platform == "qemu":
+        lease(shell_vcpus())
     global STALL_SECONDS
     STALL_SECONDS = (args.stall_seconds or
                      STALL_SECONDS_BY_PLATFORM[args.platform])
@@ -472,7 +477,8 @@ def main():
             lambda n: any(marker in n for marker in READY_MARKERS),
             BOOT_TIMEOUT_SECONDS[args.platform], await_name="shell readiness")
         if ready is None:
-            failure = "the shell never became ready"
+            failure = (timed_out_waiting(session.transcript) or
+                       "the shell never became ready")
         if failure is None and session.gdb is not None:
             try:
                 session.gdb.open()

@@ -12,7 +12,8 @@ import sys
 import time
 import urllib.request
 
-from lease_wait import lease_pending
+from lease_wait import lease_pending, timed_out_waiting
+from qemu_vcpu_lease import lease, shell_vcpus
 from progress_timeout import ProgressTimeout
 from await_timing import AwaitTiming
 
@@ -249,7 +250,8 @@ def run_one(command, http_offset):
             if exited_pid:
                 fail(pid, transcript, "make kernelsh-qemu exited before ash responded")
         else:
-            fail(pid, transcript, "timed out waiting for ash command response and system stop")
+            fail(pid, transcript, timed_out_waiting(transcript) or
+                 "timed out waiting for ash command response and system stop")
 
         startup_timing.finish(time.monotonic())
         exit_started = time.monotonic()
@@ -285,6 +287,10 @@ def main():
     subprocess.run(["make", "-j1", "kernelbuild-qemu",
                     "kernel/build/user/ext2-shell.img"],
                    cwd=REPO_ROOT, check=True)
+    # GitHub issue #719: hold the runner's vCPUs before the PTY deadline; the
+    # runner finds them on its ancestor. lease() re-executes this script, and
+    # the build above is then a no-op.
+    lease(shell_vcpus())
     for http_offset, command in enumerate(("halt", "poweroff", "reboot")):
         run_one(command, http_offset)
 

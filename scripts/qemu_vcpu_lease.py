@@ -21,6 +21,12 @@ def _bash(expr: str) -> str:
         check=True, capture_output=True, text=True).stdout.strip()
 
 
+def shell_vcpus() -> int:
+    """What scripts/run_kernel_shell_qemu.sh (make kernelsh-qemu) leases."""
+    configured = os.environ.get("KERNEL_QEMU_SHELL_SMP")
+    return int(configured) if configured else int(_bash('echo "$TAKIBI_QEMU_SMP"'))
+
+
 def lease(vcpus: int | None = None) -> int:
     """Hold VCPUS (default: the TAKIBI_QEMU_SMP setting) and return it."""
     if vcpus is None:
