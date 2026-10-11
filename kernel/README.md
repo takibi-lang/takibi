@@ -1223,7 +1223,11 @@ terminal failure. The focused regression drives all four commands over the
 real QEMU UART connection. Two modes fault the peer: one where core 1 faults
 alone during bring-up and its report stops core 0 for good, and one where GDB
 holds both online cores inside the fail-stop path before releasing them
-together. The second requires both records, listed in fault order, a report
+together. The bring-up case also fixes two CPU-start windows: a held reservation,
+and a release between the failed stop CAS and its separate holder load.
+Both must retry acquisition within the existing deadline and stop core 0;
+a released observation grants no claim itself. The simultaneous-fault case
+requires both records, listed in fault order, a report
 claim that was contended and never abandoned, and a Partial console world
 stop, because the other core has interrupts masked and cannot acknowledge.
 The test also sources the compiler-generated

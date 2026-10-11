@@ -102,7 +102,7 @@ case "$MODE" in
         expected_ec=3c
         expected_detail=''
         ;;
-    peer_fault_start_window)
+    peer_fault_start_window|peer_fault_start_release)
         # GitHub issue #556: peer_fault with core 0 held inside its CPU start
         # reservation -- after PSCI CPU_ON, before cpu_start_finish gives the
         # world-stop claim back. A loaded host leaves core 0 there by chance;
@@ -172,7 +172,7 @@ trap 'cleanup; exit 130' INT TERM HUP
 # for the same reason earlier (1 in 3 failures); the other modes only
 # differed in being a few seconds shorter.
 console_await=(--timeout 90)
-if [ "$MODE" = peer_fault ] || [ "$MODE" = peer_fault_start_window ]; then
+if [ "$MODE" = peer_fault ] || [ "$MODE" = peer_fault_start_window ] || [ "$MODE" = peer_fault_start_release ]; then
     # The peer fail-stops during bring-up and core 0 only reaches its own
     # fault after userspace starts.
     console_await+=(--await-line "oops: fail-stop seq=1 cpu=1")
@@ -238,7 +238,7 @@ for _ in $(seq 1 50); do
             fi
         fi
         gdb_commands+=(-ex "detach")
-    elif [ "$MODE" = peer_fault_start_window ]; then
+    elif [ "$MODE" = peer_fault_start_window ] || [ "$MODE" = peer_fault_start_release ]; then
         # Thread 1 is core 0, thread 2 core 1 (QEMU numbers vCPUs from 1).
         # 1. At the -S stop, replace the peer's entry, as peer_fault does.
         # 2. Core 0 runs to cpu_start_finish: CPU_ON has been issued and the
@@ -251,6 +251,24 @@ for _ in $(seq 1 50); do
         # 4. Core 0 alone finishes cpu_start_finish, giving the claim back
         #    while core 1 is still inside its crash stop.
         # 5. Detach releases both.
+        if [ "$MODE" = peer_fault_start_release ]; then
+            # Stop after the failed CAS, before its separate holder load.
+            # Core 0 releases the start reservation between those accesses.
+            claim_release_line=$(python3 - "$REPO_ROOT/kernel/lib/occupancy.tkb" <<'PYLINE'
+import sys
+lines = open(sys.argv[1], encoding="ascii").read().splitlines()
+hits = [i + 1 for i, line in enumerate(lines)
+        if "let current: usize = atomic_word_load(&(*stop).claimed);" in line]
+assert len(hits) == 1, hits
+print(hits[0])
+PYLINE
+)
+            claim_breaks=(-ex "break kernel/lib/occupancy.tkb:$claim_release_line thread 2")
+        else
+            claim_breaks=(-ex "break *world_stop_claim thread 2"
+                          -ex "ignore \$bpnum 1"
+                          -ex "break *crash_report_claim thread 2")
+        fi
         gdb_commands=(
             -ex "target remote :$GDB_PORT"
             -ex "set {int}kernel_secondary_main = $fault_instruction"
@@ -258,14 +276,14 @@ for _ in $(seq 1 50); do
             -ex "continue"
             -ex "delete"
             -ex "set scheduler-locking on"
-            -ex "break *world_stop_claim thread 2"
-            -ex "ignore \$bpnum 1"
-            -ex "break *crash_report_claim thread 2"
+            "${claim_breaks[@]}"
             -ex "thread 2"
             -ex "continue"
+            -ex "python assert int(gdb.parse_and_eval('kernel_world_stop.claimed.value')) == 2"
             -ex "delete"
             -ex "thread 1"
             -ex "finish"
+            -ex "python assert int(gdb.parse_and_eval('kernel_world_stop.claimed.value')) == 0"
             -ex "print kernel_world_stop.claimed"
             -ex "info threads"
             -ex "set scheduler-locking off"
@@ -404,7 +422,7 @@ if ! grep -Eq "$expected_origin" "$UART_LOG"; then
     exit 1
 fi
 
-if [ "$MODE" = peer_fault ] || [ "$MODE" = peer_fault_start_window ]; then
+if [ "$MODE" = peer_fault ] || [ "$MODE" = peer_fault_start_window ] || [ "$MODE" = peer_fault_start_release ]; then
     if ! grep -Eq "^oops: fail-stop seq=1 cpu=1 slot=0 ec=0x00000000000000$expected_ec " "$UART_LOG" ||
             ! grep -Eq '^oops: world-stop complete mask=0x0*1$' "$UART_LOG" ||
             ! grep -Eq '^oops: cores reported=1 faults=1 contended=[0-9]+ abandoned=0$' "$UART_LOG" ||

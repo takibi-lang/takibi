@@ -1,5 +1,19 @@
 # takibi Engineering History
 
+## 2026-10-11: crash-stop retries a reservation released after failed CAS
+
+A peer-fault publication lane answered Busy even after the earlier CPU-start
+wait fix. The claim helper performed a boolean CAS followed by a holder load;
+a reservation released between the accesses made the load return zero, which
+the helper reported as a competing stop. A GDB regression fixes that exact
+window and fails on the old code. An exhaustive must-use claim result now
+separates acquisition, start-held, stop-held and released observations. Only
+acquisition grants entry; the machine-stop caller retries start-held and
+released within the existing one-second deadline. The nonblocking callers
+still refuse, and another stop still refuses immediately. The WorldStop
+model abstracts claim acquisition, so its safety verdict does not cover this
+split-observation progress race; the action map records that omission.
+
 ## 2026-10-10: publication checks host gates before the clean aggregate
 
 A failed language/model binding check or native fixture used to be reported

@@ -244,23 +244,33 @@ private fn world_stop_hold(stop: *WorldStop @ id) !{interrupt, unsafe} {
 // The claim gate holds 0 when free, WORLD_STOP_CLAIM_STOP while a stop owns
 // it, and WORLD_STOP_CLAIM_START while cpu_start_reserve holds it across
 // PSCI CPU_ON. Taking it is a compare-exchange from 0, so a refused claim
-// never overwrites which of the two holds it. Answers 0 when taken, or the
-// holder's value.
+// never overwrites which of the two holds it. Returns an explicit acquired,
+// held or released observation.
 const WORLD_STOP_CLAIM_STOP: usize = 1;
 const WORLD_STOP_CLAIM_START: usize = 2;
 
-private fn world_stop_claim_as(stop: *WorldStop @ id, holder: usize) -> usize
-        !{unsafe} {
-    if (atomic_word_compare_exchange(&(*stop).claimed, 0, holder)) {
-        return 0;
-    }
-    let current: usize = atomic_word_load(&(*stop).claimed);
-    // Released between the two reads: still refused, as a stop.
-    if (current == 0) { return WORLD_STOP_CLAIM_STOP; }
-    return current;
+// A failed CAS and a later load are two observations. Released does not
+// grant the claim and does not assert that a competing stop holds it.
+must_use variant WorldStopClaimResult {
+    Acquired;
+    StartHeld;
+    StopHeld;
+    Released;
 }
 
-private fn world_stop_claim(stop: *WorldStop @ id) -> usize !{unsafe} {
+private fn world_stop_claim_as(stop: *WorldStop @ id, holder: usize)
+        -> WorldStopClaimResult !{unsafe} {
+    if (atomic_word_compare_exchange(&(*stop).claimed, 0, holder)) {
+        return WorldStopClaimResult::Acquired;
+    }
+    let current: usize = atomic_word_load(&(*stop).claimed);
+    if (current == 0) { return WorldStopClaimResult::Released; }
+    if (current == WORLD_STOP_CLAIM_START) { return WorldStopClaimResult::StartHeld; }
+    return WorldStopClaimResult::StopHeld;
+}
+
+private fn world_stop_claim(stop: *WorldStop @ id)
+        -> WorldStopClaimResult !{unsafe} {
     return world_stop_claim_as(stop, WORLD_STOP_CLAIM_STOP);
 }
 
@@ -271,7 +281,12 @@ private fn world_stop_begin_config(stop: *WorldStop @ id, cores: usize,
     let raw_owner: usize = cpu_id();
     if (cores == 0 || cores > KERNEL_MAX_CORES || raw_owner >= cores ||
             raw_owner >= KERNEL_MAX_CORES) { return WorldStopResult::Busy; }
-    if (world_stop_claim(stop) != 0) { return WorldStopResult::Busy; }
+    match world_stop_claim(stop) {
+        WorldStopClaimResult::Acquired => {}
+        WorldStopClaimResult::StartHeld => { return WorldStopResult::Busy; }
+        WorldStopClaimResult::StopHeld => { return WorldStopResult::Busy; }
+        WorldStopClaimResult::Released => { return WorldStopResult::Busy; }
+    }
     let mask: usize = (1 << cores) - 1;
     return world_stop_begin_claimed(stop, mask, spins, notify, stale_ack_probe);
 }
@@ -348,20 +363,29 @@ fn world_stop_machine_begin(spins: usize)
     // CPU_ON, and the core it starts may fault before core 0 gives it back.
     // Wait for that one holder, bounded, rather than answer Busy and leave
     // the faulting core's console running on an unstopped machine. A stop
-    // held by another initiator is still Busy at once.
+    // held by another initiator is still Busy at once. A separate holder
+    // load that finds the reservation already released must also retry.
     // The bound is time on the generic counter, one second, not a spin count:
     // the holder is another vCPU or core whose progress a local loop count
     // does not measure.
-    let mut held: usize = world_stop_claim(&kernel_world_stop);
-    if (held == WORLD_STOP_CLAIM_START) {
-        let start: i64 = read_cntpct();
-        let budget: i64 = read_cntfrq();
-        while (held == WORLD_STOP_CLAIM_START &&
-               read_cntpct() - start < budget) {
-            held = world_stop_claim(&kernel_world_stop);
+    let start: i64 = read_cntpct();
+    let budget: i64 = read_cntfrq();
+    let mut retry: bool = true;
+    let mut acquired: bool = false;
+    while (retry) {
+        retry = false;
+        match world_stop_claim(&kernel_world_stop) {
+            WorldStopClaimResult::Acquired => { acquired = true; }
+            WorldStopClaimResult::StopHeld => {}
+            WorldStopClaimResult::StartHeld => {
+                retry = read_cntpct() - start < budget;
+            }
+            WorldStopClaimResult::Released => {
+                retry = read_cntpct() - start < budget;
+            }
         }
     }
-    if (held != 0) {
+    if (acquired == false) {
         mutex_irq_restore(irq_flags);
         return MachineStopResult::Busy;
     }
@@ -471,8 +495,17 @@ fn cpu_start_reserve(core: {0..<KERNEL_MAX_CORES as usize})
           changes_witness_RegionInspection__ProcessImageRecord} {
     if (core == 0 || cpu_id() != 0) { return CpuStartResult::Busy; }
     let irq_flags: usize = mutex_irq_save();
-    if (world_stop_claim_as(&kernel_world_stop, WORLD_STOP_CLAIM_START) != 0) {
-        mutex_irq_restore(irq_flags); return CpuStartResult::Busy;
+    match world_stop_claim_as(&kernel_world_stop, WORLD_STOP_CLAIM_START) {
+        WorldStopClaimResult::Acquired => {}
+        WorldStopClaimResult::StartHeld => {
+            mutex_irq_restore(irq_flags); return CpuStartResult::Busy;
+        }
+        WorldStopClaimResult::StopHeld => {
+            mutex_irq_restore(irq_flags); return CpuStartResult::Busy;
+        }
+        WorldStopClaimResult::Released => {
+            mutex_irq_restore(irq_flags); return CpuStartResult::Busy;
+        }
     }
     let mask: usize = atomic_word_load(&kernel_world_stop.participants) | 1;
     let bit: usize = 1 << core;
@@ -526,10 +559,12 @@ must_use variant WorldStopClaimProbeResult {
 fn world_stop_busy_claim_probe(stopped: borrow WorldStopped[id],
                                stop: *WorldStop @ id)
         -> WorldStopClaimProbeResult !{unsafe} {
-    if (world_stop_claim(stop) != 0) {
-        return WorldStopClaimProbeResult::Busy;
+    match world_stop_claim(stop) {
+        WorldStopClaimResult::Acquired => { return WorldStopClaimProbeResult::UnexpectedUnclaimed; }
+        WorldStopClaimResult::StartHeld => { return WorldStopClaimProbeResult::Busy; }
+        WorldStopClaimResult::StopHeld => { return WorldStopClaimProbeResult::Busy; }
+        WorldStopClaimResult::Released => { return WorldStopClaimProbeResult::Busy; }
     }
-    return WorldStopClaimProbeResult::UnexpectedUnclaimed;
 }
 
 // Test-only negative control: production callers cannot suppress the SGI.
