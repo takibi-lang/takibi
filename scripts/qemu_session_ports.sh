@@ -116,6 +116,27 @@ qemu_session_claim_block() {
     )
 }
 
+# The session name the port block is claimed under. TAKIBI_SESSION names the
+# container (.devcontainer/devcontainer.json), so every git worktree inside it
+# would share one name and therefore one block, and two worktree agents
+# running lanes at once would bind the same ports (GitHub issue #753). A linked
+# worktree therefore claims under the container's name plus its own directory
+# name. Derived here rather than exported by whoever starts the agent, so a
+# worktree cannot collide because somebody forgot to set it.
+# QEMU_SESSION_REPO_ROOT exists for scripts/slowcheck_qemu_session_ports.sh.
+qemu_session_name() {
+    local base="${TAKIBI_SESSION:-}" root git_dir common_dir
+    [ -n "$base" ] || return 0
+    root="${QEMU_SESSION_REPO_ROOT:-$(dirname "${BASH_SOURCE[0]}")/..}"
+    git_dir="$(git -C "$root" rev-parse --absolute-git-dir 2>/dev/null)" || git_dir=
+    common_dir="$(cd "$root" 2>/dev/null && cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P)" || common_dir=
+    if [ -n "$git_dir" ] && [ -n "$common_dir" ] && [ "$(cd "$git_dir" && pwd -P)" != "$common_dir" ]; then
+        root="$(git -C "$root" rev-parse --show-toplevel)"
+        base="$base-wt-$(basename "$root" | tr -c 'A-Za-z0-9._\n-' '_')"
+    fi
+    printf '%s\n' "$base"
+}
+
 # Echo the port offset for this session. Zero when nothing selects one, which
 # is the unchanged single-session behaviour a contributor and CI both get.
 qemu_session_port_offset() {
@@ -133,14 +154,14 @@ qemu_session_port_offset() {
         return 0
     fi
 
-    session="${TAKIBI_SESSION:-}"
+    session="$(qemu_session_name)"
     if [ -z "$session" ] || [ ! -d "$(qemu_session_registry_dir)" ]; then
         printf '0\n'
         return 0
     fi
     case "$session" in
         *[!A-Za-z0-9._-]*)
-            echo "FAIL qemu-session-ports: TAKIBI_SESSION may contain only" \
+            echo "FAIL qemu-session-ports: the session name may contain only" \
                  "letters, digits, dot, underscore and dash: '$session'" >&2
             return 1
             ;;
@@ -173,6 +194,6 @@ qemu_session_shift_ports() {
     done
 
     if [ "${TAKIBI_QEMU_PORT_VERBOSE:-0}" = 1 ]; then
-        echo "[qemu-session-ports] ${TAKIBI_SESSION:-(none)} offset=+$offset" >&2
+        echo "[qemu-session-ports] $(qemu_session_name) offset=+$offset" >&2
     fi
 }

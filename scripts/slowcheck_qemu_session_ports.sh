@@ -59,6 +59,21 @@ mkdir -p "$registry"
 [ "$(offset_for "$registry" takibi-claude 7000)" = 7000 ] \
     && claim || fail "an explicit offset must win over the registry"
 
+# GitHub issue #753: worktrees of one container share TAKIBI_SESSION, so a
+# linked worktree must claim a block of its own, without anyone exporting a
+# different name for it.
+git -C "$tmp_dir" init -q wt-main
+git -C "$tmp_dir/wt-main" -c user.name=t -c user.email=t@example.invalid \
+    commit -q --allow-empty -m init
+git -C "$tmp_dir/wt-main" worktree add -q "$tmp_dir/wt-linked"
+worktrees="$tmp_dir/worktrees"
+mkdir -p "$worktrees"
+main_offset="$(QEMU_SESSION_REPO_ROOT="$tmp_dir/wt-main" offset_for "$worktrees" box)"
+linked_offset="$(QEMU_SESSION_REPO_ROOT="$tmp_dir/wt-linked" offset_for "$worktrees" box)"
+[ "$main_offset" != "$linked_offset" ] \
+    && grep -qx "[0-9]* box-wt-wt-linked" "$worktrees/blocks" \
+    && claim || fail "a linked worktree shared its main checkout's block ($main_offset)"
+
 # Concurrent claims are serialised: every session gets a block of its own.
 concurrent="$tmp_dir/concurrent"
 mkdir -p "$concurrent"
