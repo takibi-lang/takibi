@@ -50,7 +50,8 @@ let parse src =
 let infer src =
   Type_inf.infer_program
     (Declared_type_resolver.run
-       (Monomorphize.run (Dma_fixed_record.run (Publish_record.run (parse src)))))
+       (Monomorphize.run (Dma_fixed_record.run (Publish_record.run
+          (fst (Protocol_decl.extract (parse src)))))))
 
 let unused_errors ?(external_entries = ["main"]) src =
   let prog = Declared_type_resolver.run
@@ -24866,6 +24867,117 @@ let readonly_literal_tests =
         }|});
   ]
 
+(* GitHub issue #720: protocol declarations -- validation diagnostics and
+   the generated TLA+ model. The model's verdicts are checked by `make
+   modelcheck` over kernel/models/protocols/. *)
+let protocol_src ?(name = "P") body =
+  Printf.sprintf "protocol %s[inst: usize] retains region(u8)[b, n] {\n%s\n}\n\
+                  fn main() -> i32 { return 0; }\n" name body
+
+let protocol_ok_body = {|
+    state Ready access write;
+    state Reserved[req] access write;
+    state InFlight[req] device;
+    state Unconfirmed[req] device;
+    state Halted;
+    init Ready;
+    transition reserve(Ready) split -> Reserved[fresh req] | Refused(Ready);
+    transition submit(Reserved[req]) requires prepared -> InFlight[req];
+    observe completion(InFlight[req]) -> Matching[req] completes | Foreign;
+    transition resume(InFlight[req], Matching[req]) -> Ready;
+    transition expire(InFlight[req]) -> Unconfirmed[req];
+    observe reset(Unconfirmed[req]) -> Confirmed quiesces;
+    transition halt(Unconfirmed[req], Confirmed) -> Halted;
+    transition restart(Halted) -> Ready;
+    property disjoint;
+    property prepared_before_read;
+    model cells 2;|}
+
+let replace_once ~sub ~by s =
+  let n = String.length sub in
+  let rec find i =
+    if i + n > String.length s then
+      Alcotest.failf "test body does not contain %S" sub
+    else if String.sub s i n = sub then i else find (i + 1) in
+  let i = find 0 in
+  String.sub s 0 i ^ by ^ String.sub s (i + n) (String.length s - i - n)
+
+let protocol_mutant ~sub ~by fragment =
+  expect_type_error fragment
+    (protocol_src (replace_once ~sub ~by protocol_ok_body))
+
+let protocol_tests = [
+  Alcotest.test_case "valid declaration validates and emits its model" `Quick
+    (fun () ->
+      let prog = parse (protocol_src protocol_ok_body) in
+      let rest, protos = Protocol_decl.extract prog in
+      Alcotest.(check int) "protocol removed" 1 (List.length rest);
+      ignore (Type_inf.infer_program rest);
+      let tla = Protocol_decl.to_tla (List.hd protos) in
+      List.iter (fun frag ->
+        if not (contains_substring tla frag) then
+          Alcotest.failf "generated TLA+ lacks %S" frag)
+        [ "MODULE P"; "Safety == NoOverlap /\\ ReadyBeforeRead";
+          "reserve_Reserved(span) =="; "reserve_Refused ==";
+          "/\\ prepared = held"; "/\\ event = \"Matching\"";
+          "\\E span \\in SUBSET Cells : reserve_Reserved(span)" ]);
+  Alcotest.test_case "protocol and its body words stay ordinary identifiers"
+    `Quick (fun () ->
+      ignore (infer {|fn main() -> i32 {
+          let protocol: i32 = 1; let state: i32 = 2; let observe: i32 = 3;
+          return protocol + state + observe; }|}));
+  Alcotest.test_case "unknown state" `Quick
+    (protocol_mutant ~sub:"-> Halted;" ~by:"-> Stopped;"
+       "unknown protocol state 'Stopped'");
+  Alcotest.test_case "duplicate state" `Quick
+    (protocol_mutant ~sub:"state Halted;" ~by:"state Halted; state Halted;"
+       "duplicate state 'Halted'");
+  Alcotest.test_case "result identity not bound by the input" `Quick
+    (protocol_mutant ~sub:"Reserved[fresh req]" ~by:"Reserved[req]"
+       "result argument 'req' of transition 'reserve' is not bound");
+  Alcotest.test_case "fresh identity on an input" `Quick
+    (protocol_mutant ~sub:"submit(Reserved[req])" ~by:"submit(Reserved[fresh req])"
+       "cannot be fresh");
+  Alcotest.test_case "state arity" `Quick
+    (protocol_mutant ~sub:"-> Unconfirmed[req];" ~by:"-> Unconfirmed;"
+       "state 'Unconfirmed' takes 1 parameter(s), given 0");
+  Alcotest.test_case "witness no observation produces" `Quick
+    (protocol_mutant ~sub:"InFlight[req], Matching[req]"
+       ~by:"InFlight[req], Done[req]" "which no observation produces");
+  Alcotest.test_case "witness observed on another state" `Quick
+    (protocol_mutant ~sub:"halt(Unconfirmed[req], Confirmed)"
+       ~by:"halt(Unconfirmed[req], Matching[req])"
+       "observed on state 'InFlight', not 'Unconfirmed'");
+  Alcotest.test_case "outcome identity not bound by its subject" `Quick
+    (protocol_mutant ~sub:"Confirmed quiesces" ~by:"Confirmed[other] quiesces"
+       "argument 'other' is not bound by the observed state");
+  Alcotest.test_case "completion on a state the device cannot access" `Quick
+    (protocol_mutant ~sub:"observe completion(InFlight[req])"
+       ~by:"observe early(Reserved[req]) -> Done[req] completes;\n\
+            observe completion(InFlight[req])"
+       "is not a device state");
+  Alcotest.test_case "unreachable state needs an outside constructor" `Quick
+    (protocol_mutant ~sub:"transition restart(Halted) -> Ready;"
+       ~by:"state Orphan; transition restart(Halted) -> Ready;"
+       "protocol state 'Orphan' is unreachable");
+  Alcotest.test_case "split outside the initial state" `Quick
+    (protocol_mutant ~sub:"restart(Halted) -> Ready"
+       ~by:"restart(Halted) split -> Ready" "its input must be the initial state");
+  Alcotest.test_case "preparation guard without write access" `Quick
+    (protocol_mutant ~sub:"restart(Halted) -> Ready"
+       ~by:"restart(Halted) requires prepared -> Ready" "grants no write access");
+  Alcotest.test_case "unsupported property" `Quick
+    (protocol_mutant ~sub:"property disjoint;" ~by:"property liveness;"
+       "unsupported protocol property 'liveness'");
+  Alcotest.test_case "unsupported state attribute" `Quick
+    (protocol_mutant ~sub:"state Halted;" ~by:"state Halted access read;"
+       "unsupported state attribute 'access'");
+  Alcotest.test_case "missing model bound" `Quick
+    (protocol_mutant ~sub:"model cells 2;" ~by:"" "needs a 'model cells N' bound");
+  Alcotest.test_case "missing initial state" `Quick
+    (protocol_mutant ~sub:"init Ready;" ~by:"" "has no 'init' state");
+]
+
 let named_groups_unisolated = [
   "readonly-literals", readonly_literal_tests;
   "private-default-construction", private_default_construction_tests;
@@ -24889,6 +25001,7 @@ let named_groups_unisolated = [
   "production-stop-boundary", production_stop_boundary_tests;
   "production-machine-boundary", production_machine_boundary_tests;
   "region-inspection", region_inspection_tests;
+  "protocol-declarations", protocol_tests;
 ]
 
 (* Each Alcotest case represents a fresh compiler invocation. In particular,

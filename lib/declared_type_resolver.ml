@@ -262,7 +262,7 @@ let resolve_toplevel names = function
            (case, Option.map (resolve_type names) payload)) cases,
          must_use, loc)
   | (ExternSymbolDef _ | VectorTableDef _ | ExceptionEntryDef _
-    | ExceptionRestoreDef _ | OpaqueStructDef _ | UseDef _) as item -> item
+    | ExceptionRestoreDef _ | OpaqueStructDef _ | UseDef _ | ProtocolDef _) as item -> item
 
 let run prog =
   let names = collect_names prog in
@@ -378,4 +378,4 @@ let validate prog =
         check_static_params params;
         List.iter (fun (_, payload) -> Option.iter check_type payload) cases
     | ExternSymbolDef _ | VectorTableDef _ | ExceptionEntryDef _
-    | ExceptionRestoreDef _ | OpaqueStructDef _ | UseDef _ -> ()) prog
+    | ExceptionRestoreDef _ | OpaqueStructDef _ | UseDef _ | ProtocolDef _ -> ()) prog

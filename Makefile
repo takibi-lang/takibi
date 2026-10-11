@@ -2343,7 +2343,7 @@ allbuild:
 # and Apalache. Fetches the pinned tools on first use. A lane of allcheck
 # and cicheck.
 .PHONY: modelcheck
-modelcheck:
+modelcheck: build
 	@bash scripts/lane_timing.sh begin modelcheck
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_model_checks.sh
 	@bash scripts/lane_timing.sh end modelcheck 0

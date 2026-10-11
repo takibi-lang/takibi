@@ -592,6 +592,46 @@ type func = {
 type opaque_kind = KindPlain | KindAffine | KindLinear
 [@@deriving show]
 
+(* GitHub issue #720: one protocol declaration is the single source of both
+   the generated TLA+ model and (in a later slice) the sealed permission
+   types. These records are the raw syntax; Protocol_decl validates them and
+   removes the item before any other pass runs. Every word inside the body is
+   a contextual identifier checked there, not a lexer keyword. *)
+type proto_ref = {
+  pr_name : string;
+  pr_args : (string * bool) list;  (* argument name, written `fresh` *)
+  pr_loc : loc [@printer pp_loc];
+}
+[@@deriving show]
+
+type proto_alt = {
+  pa_label : string option;  (* `Refused(Ready)` labels the alternative *)
+  pa_state : proto_ref;
+}
+[@@deriving show]
+
+type proto_item =
+  | PState of proto_ref * string list
+  (* state Name[params] attributes; -- attributes are contextual words *)
+  | PInit of proto_ref
+  | PTransition of string * proto_ref * proto_ref option * proto_alt list
+      * string list * loc
+  (* transition name(Input[args], Witness[args]) -> alts modifiers; *)
+  | PObserve of string * proto_ref * (proto_ref * string list) list * loc
+  (* observe name(Subject[args]) -> Outcome[args] modifiers | ...; *)
+  | PProperty of string * loc
+  | PModel of string * int * loc
+[@@deriving show]
+
+type protocol_decl = {
+  proto_name : string;
+  proto_params : static_param list;
+  proto_region : string * type_expr * string list;  (* region(T)[idx] *)
+  proto_items : proto_item list;
+  proto_loc : loc [@printer pp_loc];
+}
+[@@deriving show]
+
 type toplevel =
   | FuncDef of func
   | ConstDef of ident * type_expr * expr * loc
@@ -765,6 +805,8 @@ type toplevel =
      before type checking: the checker keeps TVariant(name, statics, type
      args) structurally, and Generic_variant_lower produces one ordinary
      VariantDef per instance afterwards, for code generation only. *)
+  | ProtocolDef of protocol_decl
+  (* GitHub issue #720: see protocol_decl above. *)
   | UseDef of string
   (* use "path/to/file.tkb"; -- GitHub issue #55. Path is resolved relative
      to the compiler's own working directory (the same convention already

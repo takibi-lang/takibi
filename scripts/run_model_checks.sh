@@ -24,6 +24,13 @@ APALACHE="$TOOLS/apalache-0.62.2/bin/apalache-mc"
 OUT="$REPO_ROOT/_build/models"
 MODELS="$REPO_ROOT/kernel/models"
 mkdir -p "$OUT"
+# Models generated from Takibi protocol declarations (GitHub issue #720):
+# `takibi --emit-tla` writes them here, never into the source tree.
+GEN="$OUT/generated"
+mkdir -p "$GEN"
+TAKIBI="${TAKIBI:-$REPO_ROOT/_build/default/bin/main.exe}"
+# The directory the next check_model call's .tla/.cfg files live in.
+MDIR="$MODELS"
 
 # Every TLC run, typecheck and Apalache run is independent, so they run at
 # once, MODELCHECK_JOBS at a time (default: every core), and are judged when
@@ -40,13 +47,13 @@ EXPECT="$OUT/expect.list"
 # Apalache run gets its own --out-dir, since concurrent runs sharing one
 # would write into each other's.
 queue_tlc() {  # model variant
-    echo "$OUT/$1-$2.tlc.log bash $REPO_ROOT/scripts/run_tlc.sh -XX:+UseParallelGC -cp $TLA_JAR tlc2.TLC -workers 1 -config $1_$2.cfg -metadir $OUT/$1-$2.states $1.tla" >>"$QUEUE"
+    echo "$OUT/$1-$2.tlc.log bash $REPO_ROOT/scripts/run_tlc.sh -XX:+UseParallelGC -cp $TLA_JAR tlc2.TLC -workers 1 -config $MDIR/$1_$2.cfg -metadir $OUT/$1-$2.states $MDIR/$1.tla" >>"$QUEUE"
 }
 queue_typecheck() {  # model
-    echo "$OUT/$1.typecheck.log $APALACHE typecheck --out-dir=$OUT/apalache/$1-typecheck $1.tla" >>"$QUEUE"
+    echo "$OUT/$1.typecheck.log $APALACHE typecheck --out-dir=$OUT/apalache/$1-typecheck $MDIR/$1.tla" >>"$QUEUE"
 }
 queue_apalache() {  # model variant cinit invariant length
-    echo "$OUT/$1-$2.apalache.log $APALACHE check --out-dir=$OUT/apalache/$1-$2 --cinit=$3 --init=Init --next=Next --inv=$4 --length=$5 $1.tla" >>"$QUEUE"
+    echo "$OUT/$1-$2.apalache.log $APALACHE check --out-dir=$OUT/apalache/$1-$2 --cinit=$3 --init=Init --next=Next --inv=$4 --length=$5 $MDIR/$1.tla" >>"$QUEUE"
 }
 
 # check_model <model> <apalache invariant> <apalache length> <variant>...
@@ -121,6 +128,27 @@ check_model WorldStop NoUnstoppedRead 8 \
     fixed:CInitFixed:pass:ok \
     subset:CInitSubset:NoUnstoppedRead:violated \
     ungatedstart:CInitUngatedStart:NoUnstoppedRead:violated:10
+
+# GitHub issue #720: RegionTransfer.tkb is the protocol declaration form of
+# SharedRegionTransfer above. Its generated model must reproduce the fixed
+# verdict, and each one-line fault control the matching faulty one.
+for decl in "$MODELS"/protocols/*.tkb; do
+    "$TAKIBI" "$decl" --emit-tla "$GEN" || {
+        echo "FAIL modelcheck: takibi --emit-tla rejected $decl"
+        exit 1
+    }
+done
+for tla in "$GEN"/*.tla; do
+    name="$(basename "$tla" .tla)"
+    cp "$GEN/$name.cfg" "$GEN/${name}_generated.cfg"
+done
+MDIR="$GEN"
+check_model RegionTransfer Safety 6 generated:CInit:pass:ok
+check_model RegionTransferEarly Safety 6 generated:CInit:Safety:violated
+check_model RegionTransferForeign Safety 6 generated:CInit:Safety:violated
+check_model RegionTransferTimeout Safety 6 generated:CInit:Safety:violated
+check_model RegionTransferFailedReset Safety 6 generated:CInit:Safety:violated:8
+MDIR="$MODELS"
 
 # Run. A job's own exit status is not the verdict -- an unfixed variant is
 # SUPPOSED to fail -- so every job is allowed to fail here and judged below.

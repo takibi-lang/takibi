@@ -109,7 +109,9 @@ ordinary identifier.
   failure on one is reported as an unexpected hard keyword rather than as an
   unresolved identifier.
 - **Contextual keywords** are reserved only where their grammar production
-  expects them. There are no contextual keywords today. A modifier is not put
+  expects them. `protocol` is the only one: it introduces a protocol
+  declaration at the start of a top-level item and is an ordinary identifier
+  elsewhere (see "Protocol Declarations"). A modifier is not put
   in this class merely because contextual treatment might be useful later; the
   lexer and parser must actually implement that behavior first.
 - **Compiler builtins** use call syntax but have compiler-defined typing and
@@ -3790,6 +3792,71 @@ That is the point of having them: the ordering argument is made once, in
 the compiler, instead of at every call site. What is NOT here, and
 deliberately: a cross-CPU total order. Publication makes an individual
 record readable; per-CPU rings stay independently written.
+
+## Protocol Declarations (GitHub issue #720, first slice)
+
+A `protocol` item declares a resource-transfer protocol once. The compiler
+validates it into one representation and, with `--emit-tla <dir>`, writes
+`<dir>/<Name>.tla` and `<Name>.cfg` from it and exits. In this slice the
+declaration generates no code and is removed before type checking; sealed
+permission types generated from the same representation come later.
+
+```takibi
+protocol RegionTransfer[inst: usize] retains region(u8)[b, n] {
+    state Ready access write;
+    state Reserved[req] access write;
+    state InFlight[req] device;
+    state Unconfirmed[req] device;
+    state Halted;
+    init Ready;
+    transition reserve(Ready) split -> Reserved[fresh req] | Refused(Ready);
+    transition submit(Reserved[req]) requires prepared -> InFlight[req];
+    observe completion(InFlight[req]) -> Matching[req] completes | Foreign;
+    transition resume(InFlight[req], Matching[req]) -> Ready;
+    transition expire(InFlight[req]) -> Unconfirmed[req];
+    observe reset(Unconfirmed[req]) -> Confirmed quiesces | ResetFailed;
+    transition halt(Unconfirmed[req], Confirmed) -> Halted;
+    transition restart(Halted) -> Ready;
+    property disjoint;
+    property prepared_before_read;
+    model cells 2;
+}
+```
+
+Every word inside the body is an ordinary identifier recognized only in that
+position; `protocol` itself is the one contextual keyword.
+
+- `state Name[params] attrs;` -- `access write` grants the CPU authority over
+  the retained span, `device` makes the span device-accessible once entered
+  from a non-device state (publication). A state may not have both.
+- `init Name;` -- exactly one parameterless initial state, holding the whole
+  region as CPU-available authority.
+- `transition name(Input[args], Witness[args]) mods -> Alt | Label(Alt);` --
+  consumes one input state and produces exactly one of the alternatives; the
+  grammar has no way to drop or duplicate the retained region. A result
+  argument must be bound by the input or written `fresh x`. `split` (only out
+  of the initial state) moves a nonempty span into the owner; returning to the
+  initial state merges it back. `requires prepared` (only from an `access
+  write` state) requires every held cell to have been written.
+- `observe name(Subject[args]) -> Outcome[args] mod | ...;` -- an external
+  observation, the declared trusted boundary. An outcome's arguments must be
+  bound by its subject. `completes` ends device access (only on a `device`
+  subject), `quiesces` ends it for a stop/reset, and an unmarked outcome is
+  not evidence about the span. A transition's witness must be an outcome
+  observed on that transition's own input state, with the same arguments.
+- `property disjoint;` checks that CPU and device authority never overlap,
+  `property prepared_before_read;` that the device never reads an unwritten
+  cell. At least one is required.
+- `model cells N;` (1..3) is the finite bound of the generated model.
+
+Rejected: unknown or duplicate states, outcomes, actions or labels; arity
+mismatches; unbound or shadowing identities; witnesses no observation of the
+input state produces; states unreachable from `init` (they would need an
+outside constructor); unsupported attributes, modifiers, properties or bounds.
+The model's verdict is bounded evidence about the declaration, never a
+compiler assumption. `make modelcheck` generates the models of
+`kernel/models/protocols/*.tkb`; the fixed declaration must pass and each
+one-line fault control must violate `Safety`.
 
 ## Function Pointers, extern fn, and Overloading
 

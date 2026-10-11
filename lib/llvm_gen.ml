@@ -7847,7 +7847,7 @@ let gen_program ?prog_types prog =
     | VectorTableDef _ -> ()
     | ExceptionEntryDef _ -> ()
     | ExceptionRestoreDef _ -> ()
-    | GenericStructDef _ -> ()
+    | GenericStructDef _ | ProtocolDef _ -> ()
     (* GitHub issue #207: an uninstantiated generic template never reaches
        codegen. Monomorphize.run (once it exists) strips these out of prog
        entirely before this pass runs; until then, this is just a no-op so
@@ -7922,7 +7922,7 @@ let gen_program ?prog_types prog =
           | ("after_switch", v) -> after_switch := Some v
           | _ -> ()) fields;
         gen_exception_restore name !frame !after_switch
-    | GenericStructDef _ -> ()
+    | GenericStructDef _ | ProtocolDef _ -> ()
   ) prog;
   if Buffer.length raw_asm_buf > 0 then
     set_module_inline_asm !the_module (Buffer.contents raw_asm_buf);

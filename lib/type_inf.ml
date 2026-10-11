@@ -7872,7 +7872,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.GenericVariantDef (n, _, _, _, _, _) -> claim_toplevel_name n "generic variant"
     | Ast.GenericStructDef (n, _, _, _, _, _, _) ->
         claim_toplevel_name n "generic struct"
-    | Ast.UseDef _              -> ()
+    | Ast.UseDef _ | Ast.ProtocolDef _ -> ()
     | Ast.VectorTableDef _      -> ()
     | Ast.ExceptionEntryDef (n, _, _) -> claim_toplevel_name n "function"
     | Ast.ExceptionRestoreDef (n, _, _) -> claim_toplevel_name n "function"
@@ -9562,7 +9562,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               name target))) !after_switch;
         validate_exception_frame "exception_restore" name loc frame
     | Ast.OpaqueStructDef _ | Ast.EnumDef _ | Ast.UseDef _
-    | Ast.GenericStructDef _ | Ast.ExternSymbolDef _ -> ()
+    | Ast.GenericStructDef _ | Ast.ExternSymbolDef _ | Ast.ProtocolDef _ -> ()
     (* GitHub issue #732: a generic variant is checked as the variant it
        would be with every type parameter replaced by a plain stand-in;
        what a type argument may be is checked at each instance. *)
@@ -9801,7 +9801,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.ViewDef _ -> m
     | Ast.EnumDef _   -> m
     | Ast.VariantDef _ | Ast.GenericVariantDef _ -> m
-    | Ast.UseDef _    -> m
+    | Ast.UseDef _ | Ast.ProtocolDef _ -> m
     | Ast.VectorTableDef _ -> m
     | Ast.ExceptionEntryDef _ -> m
     | Ast.ExceptionRestoreDef _ -> m
@@ -9897,7 +9897,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.ViewDef _                -> m
     | Ast.EnumDef _                -> m
     | Ast.VariantDef _ | Ast.GenericVariantDef _ -> m
-    | Ast.UseDef _                 -> m
+    | Ast.UseDef _ | Ast.ProtocolDef _ -> m
     | Ast.VectorTableDef _         -> m
     | Ast.ExceptionEntryDef _      -> m
     | Ast.ExceptionRestoreDef _     -> m

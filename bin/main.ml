@@ -67,6 +67,7 @@ let () =
   let emit_raw_deref_audit = ref "" in
   let emit_held_guards = ref "" in
   let emit_effect_matrix = ref false in
+  let emit_tla = ref "" in
   let i = ref 1 in
   while !i < Array.length Sys.argv do
     (match Sys.argv.(!i) with
@@ -122,6 +123,13 @@ let () =
            exit 1
          );
          emit_raw_deref_audit := Sys.argv.(!i)
+     | "--emit-tla" ->
+         incr i;
+         if !i >= Array.length Sys.argv then (
+           Printf.eprintf "Error: --emit-tla requires a directory\n";
+           exit 1
+         );
+         emit_tla := Sys.argv.(!i)
      | "--emit-effect-matrix" ->
          emit_effect_matrix := true
      | "--emit-held-guards" ->
@@ -201,7 +209,7 @@ let () =
 
   if input_files = [] then (
     Printf.eprintf
-      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--frame-pointers] [--forbid-trap] [--forbid-unsafe] [--confine-raw-authority] [--raw-mint-file <path>] [--regions] [--reject-unused-functions] [--external-entry <function>] [--check-unused-file <path>] [--explain-inference] [--emit-effect-matrix] [--emit-exception-frame-offsets <StructName>] [--emit-struct-layout <StructName>] [--emit-debug-metadata <path>] [--emit-depfile <path>] [--emit-overflow-audit <path>] [--emit-raw-deref-audit <path>] [--emit-held-guards <path>] [--version]\n"
+      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--frame-pointers] [--forbid-trap] [--forbid-unsafe] [--confine-raw-authority] [--raw-mint-file <path>] [--regions] [--reject-unused-functions] [--external-entry <function>] [--check-unused-file <path>] [--explain-inference] [--emit-effect-matrix] [--emit-exception-frame-offsets <StructName>] [--emit-struct-layout <StructName>] [--emit-debug-metadata <path>] [--emit-depfile <path>] [--emit-overflow-audit <path>] [--emit-raw-deref-audit <path>] [--emit-held-guards <path>] [--emit-tla <dir>] [--version]\n"
       Sys.argv.(0);
     exit 1
   );
@@ -262,6 +270,20 @@ let () =
         (List.map fst resolved);
 
     let prog = List.concat_map snd resolved in
+    (* GitHub issue #720: protocol declarations are validated once here and
+       removed before every later pass; --emit-tla writes each one's model
+       (<dir>/<Name>.tla and .cfg) and stops. *)
+    let prog, protocols = Protocol_decl.extract prog in
+    if !emit_tla <> "" then begin
+      List.iter (fun p ->
+        let write ext text =
+          let out = open_out (Filename.concat !emit_tla
+                                (p.Protocol_decl.name ^ ext)) in
+          output_string out text; close_out out in
+        write ".tla" (Protocol_decl.to_tla p);
+        write ".cfg" (Protocol_decl.to_cfg p)) protocols;
+      exit 0
+    end;
     (* GitHub issue #672: under --regions, the built-in definitions are
        planned from this first parse, then parsed before the program's own
        files, which are parsed again (Region_builtin.plan). *)
@@ -298,7 +320,7 @@ let () =
             Printf.eprintf "Error: %s\n" msg;
             exit 1
         in
-        defs @ List.concat_map snd again
+        defs @ fst (Protocol_decl.extract (List.concat_map snd again))
       end
     in
 

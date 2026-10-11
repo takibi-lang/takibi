@@ -408,6 +408,23 @@ item:
     { LetDef ($4, Some $6, Some $12, Some $9, m, p, $symbolstartpos) }
   | EXTERN FN IDENT LPAREN params RPAREN ret_type_opt effects_opt SEMI
     { ExternFuncDef ($3, $5, $7, $8) }
+  | kw = IDENT name = IDENT ps = loption(static_params) rw = IDENT
+    region = IDENT LPAREN elem = type_expr RPAREN
+    LBRACKET idx = separated_nonempty_list(COMMA, IDENT) RBRACKET
+    LBRACE body = list(proto_item) RBRACE
+    (* GitHub issue #720: `protocol Name[params] retains region(T)[b, n]
+       { ... }`. No item begins with an identifier otherwise, so the
+       contextual words need no lexer keyword; existing programs keep
+       `protocol` and the body words as ordinary identifiers. *)
+    { let loc = $symbolstartpos in
+      let expect got want =
+        if got <> want then
+          raise (Types.TypeError (loc, Printf.sprintf
+            "expected '%s' here, found '%s'" want got)) in
+      expect kw "protocol"; expect rw "retains"; expect region "region";
+      ProtocolDef { proto_name = name; proto_params = ps;
+                    proto_region = (region, elem, idx);
+                    proto_items = body; proto_loc = loc } }
   | EXTERN SYMBOL IDENT SEMI
     { ExternSymbolDef ($3, $symbolstartpos) }
   | VECTOR_TABLE LBRACE entries = vector_table_entries RBRACE
@@ -605,6 +622,63 @@ generic_struct_intro:
 owned_kind:
   | AFFINE { KindAffine }
   | LINEAR { KindLinear }
+
+(* GitHub issue #720: protocol body items. The leading word (state, init,
+   property, transition, observe, model) is checked by Protocol_decl. *)
+proto_item:
+  | k = IDENT r = proto_ref attrs = list(IDENT) SEMI
+    { let loc = $symbolstartpos in
+      match k with
+      | "state" -> PState (r, attrs)
+      | "init" when attrs = [] && r.pr_args = [] -> PInit r
+      | "property" when attrs = [] && r.pr_args = [] -> PProperty (r.pr_name, loc)
+      | _ -> raise (Types.TypeError (loc, Printf.sprintf
+               "unknown protocol item '%s %s'" k r.pr_name)) }
+  | k = IDENT n = IDENT LPAREN i = proto_ref w = option(preceded(COMMA, proto_ref))
+    RPAREN mods = list(IDENT) ARROW alts = separated_nonempty_list(PIPE, proto_alt) SEMI
+    { let loc = $symbolstartpos in
+      match k with
+      | "transition" ->
+          let alts = List.map (fun (label, r, extra) ->
+            if extra <> [] then
+              raise (Types.TypeError (r.pr_loc, Printf.sprintf
+                "transition result '%s' takes no modifier '%s'" r.pr_name
+                (List.hd extra)));
+            { pa_label = label; pa_state = r }) alts in
+          PTransition (n, i, w, alts, mods, loc)
+      | "observe" ->
+          if w <> None || mods <> [] then
+            raise (Types.TypeError (loc, Printf.sprintf
+              "observe '%s' takes exactly one subject state and no modifier" n));
+          PObserve (n, i, List.map (fun (label, r, extra) ->
+            if label <> None then
+              raise (Types.TypeError (r.pr_loc,
+                "an observation outcome cannot be labelled"));
+            (r, extra)) alts, loc)
+      | _ -> raise (Types.TypeError (loc, Printf.sprintf
+               "unknown protocol item '%s %s'" k n)) }
+  | k = IDENT n = IDENT v = INT SEMI
+    { let loc = $symbolstartpos in
+      if k <> "model" then
+        raise (Types.TypeError (loc, Printf.sprintf
+          "unknown protocol item '%s %s'" k n));
+      PModel (n, Int64.to_int v, loc) }
+
+proto_ref:
+  | n = IDENT args = loption(delimited(LBRACKET, separated_nonempty_list(COMMA, proto_arg), RBRACKET))
+    { { pr_name = n; pr_args = args; pr_loc = $symbolstartpos } }
+
+proto_arg:
+  | n = IDENT { (n, false) }
+  | f = IDENT n = IDENT
+    { if f <> "fresh" then
+        raise (Types.TypeError ($symbolstartpos, Printf.sprintf
+          "expected 'fresh' before '%s', found '%s'" n f));
+      (n, true) }
+
+proto_alt:
+  | r = proto_ref extra = list(IDENT) { (None, r, extra) }
+  | label = IDENT LPAREN r = proto_ref RPAREN { (Some label, r, []) }
 
 static_params:
   | LBRACKET ps = separated_nonempty_list(COMMA, static_param) RBRACKET { ps }

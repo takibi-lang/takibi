@@ -513,3 +513,19 @@ The next connection to code needs general protected backing storage and
 retained region ownership, then generated permissions that carry that same
 region. An erased state token over independently accessible memory would
 not establish `NoOverlap` in the implementation.
+
+### protocols/ -- the same protocol as a Takibi declaration
+
+`protocols/RegionTransfer.tkb` states this protocol as a Takibi `protocol`
+declaration (SPEC.md, "Protocol Declarations"). `make modelcheck` runs
+`takibi --emit-tla` on every `protocols/*.tkb` into `_build/models/generated/`
+and checks the output; nothing generated is tracked. The fixed declaration
+passes, and each `*_faulty.tkb` control differs from it in one line and
+violates `Safety`, reproducing the four handwritten fault verdicts above:
+`Early` drops `requires prepared`, `Foreign` resumes on the unbound `Foreign`
+outcome, `Timeout` adds a reclaiming `give_up` transition, `FailedReset` adds
+a `revive` out of `Down`. Generated actions are named after the declaration's
+transitions and observations, so they have no action-table rows: the code
+they will map to is the sealed permission API generated from the same
+declaration, not yet built. Until then the handwritten table above remains
+the reviewed correspondence.

@@ -17,11 +17,14 @@ let hard_keywords = [
   "u32"; "u64"; "u16be"; "u32be"; "isize"; "usize";
 ]
 
-(* No word is contextual today: ocamllex has no parser-position feedback, and
-   changing modifier spellings is not needed by a current program.  New words
-   must be put here only when the parser actually accepts them as identifiers
-   outside their special positions. *)
-let contextual_keywords = []
+(* GitHub issue #720: `protocol` introduces a protocol item only at the
+   start of a top-level item, where no other production accepts an
+   identifier; everywhere else it is an ordinary identifier. The words inside
+   a protocol body (state, init, transition, observe, ...) are deliberately
+   not listed: they are plain identifiers there too, checked by
+   Protocol_decl, and listing them would make an unrelated syntax error next
+   to a variable named `state` report a contextual keyword. *)
+let contextual_keywords = ["protocol"]
 
 let compiler_builtins = [
   "slice_copy"; "slice_eq"; "stable_replace"; "place_take"; "place_put"; "place_borrow"; "place_is_full"; "min"; "max";
