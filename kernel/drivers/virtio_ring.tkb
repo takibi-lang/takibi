@@ -2,6 +2,25 @@
 
 enum VirtioRingIndex: u16 { Zero = 0; _; }
 
+// A legacy (version 1) virtio-mmio transport's registers, shared by the net
+// and block drivers. config_word is the start of the device-specific
+// configuration: the MAC for net, the capacity for block.
+io struct VirtioMmioRegs {
+    magic: u32 at 0x00;
+    device_id: u32 at 0x08;
+    guest_features: i32 at 0x20;
+    guest_page_size: i32 at 0x28;
+    queue_sel: i32 at 0x30;
+    queue_num: i32 at 0x38;
+    queue_align: i32 at 0x3c;
+    queue_pfn: i32 at 0x40;
+    queue_notify: i32 at 0x50;
+    interrupt_status: i32 at 0x60;
+    interrupt_ack: i32 at 0x64;
+    status: i32 at 0x70;
+    config_word: [u32; 2] at 0x100;
+}
+
 fn virtio_ring_index_zero() -> VirtioRingIndex {
     return VirtioRingIndex::Zero;
 }

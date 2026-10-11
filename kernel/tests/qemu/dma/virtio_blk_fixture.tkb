@@ -75,6 +75,12 @@ fn dma_fixture_run() !{unsafe} {
     qemu_uart_attach_bootstrap();
     uart_init();
     kernel_log_init();
+    let RegionBytes::Assumed(registers) = region_bytes_assume(
+        (&dma_fixture_registers) as usize, 128 * 4) else {};
+    match io_handle_attach(&virtio_blk_regs, registers) {
+        IoAttach::Attached => {}
+        IoAttach::TooSmall => { dma_fixture_require(false, "register window"); }
+    }
     virtio_blk_base = 1;
     dma_fixture_mode = 0;
     dma_fixture_require(virtio_blk_write_block(0, dma_fixture_buffer[0..<1024]) == false,

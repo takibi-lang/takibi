@@ -100,6 +100,14 @@ fn qemu_virtio_apply_boot_dtb(dtb: usize)
                         if (net_found) {
                             return QemuVirtioDtbResult::Invalid;
                         }
+                        let RegionBytes::Assumed(window) = region_bytes_assume(
+                            transport.base, transport.size) else {};
+                        match io_handle_attach(&virtio_net_regs, window) {
+                            IoAttach::TooSmall => {
+                                return QemuVirtioDtbResult::Invalid;
+                            }
+                            IoAttach::Attached => {}
+                        }
                         virtio_base = transport.base as i32;
                         virtio_net_gic_intid =
                             transport.interrupt.intid as i32;
@@ -107,6 +115,14 @@ fn qemu_virtio_apply_boot_dtb(dtb: usize)
                     } else if (*device == 2) {
                         if (block_found) {
                             return QemuVirtioDtbResult::Invalid;
+                        }
+                        let RegionBytes::Assumed(window) = region_bytes_assume(
+                            transport.base, transport.size) else {};
+                        match io_handle_attach(&virtio_blk_regs, window) {
+                            IoAttach::TooSmall => {
+                                return QemuVirtioDtbResult::Invalid;
+                            }
+                            IoAttach::Attached => {}
                         }
                         virtio_blk_base = transport.base as i32;
                         block_found = true;

@@ -195,15 +195,15 @@ fn virtio_blk_used_pending() -> bool !{unsafe} {
 
 fn virtio_blk_reset() -> bool !{unsafe} {
     virtio_blk_ready = false;
-    *(virtio_blk_reg(VIRTIO_BLK_STATUS)) = 0;
+    virtio_blk_regs.status = 0;
     // A zero readback is the virtio reset completion point: the device must
     // stop interacting with the queue before it reports that status.
     let reset_start: i64 = read_cntpct();
     let reset_ticks: i64 = read_cntfrq() * VIRTIO_BLK_COMPLETION_SECONDS;
     while (read_cntpct() - reset_start < reset_ticks &&
-           *(virtio_blk_reg(VIRTIO_BLK_STATUS)) != 0) {
+           virtio_blk_regs.status != 0) {
     }
-    if (*(virtio_blk_reg(VIRTIO_BLK_STATUS)) != 0) {
+    if (virtio_blk_regs.status != 0) {
         virtio_blk_disabled = true;
         return false;
     }

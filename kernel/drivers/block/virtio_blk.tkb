@@ -6,15 +6,6 @@ use "kernel/drivers/virtio_ring.tkb";
 use "kernel/lib/mutex.tkb";
 use "kernel/drivers/block/virtio_blk_dma.tkb";
 
-const VIRTIO_BLK_GUEST_FEATURES: i32 = 0x20;
-const VIRTIO_BLK_GUEST_PAGE_SIZE: i32 = 0x28;
-const VIRTIO_BLK_QUEUE_SEL: i32 = 0x30;
-const VIRTIO_BLK_QUEUE_NUM: i32 = 0x38;
-const VIRTIO_BLK_QUEUE_ALIGN: i32 = 0x3c;
-const VIRTIO_BLK_QUEUE_PFN: i32 = 0x40;
-const VIRTIO_BLK_QUEUE_NOTIFY: i32 = 0x50;
-const VIRTIO_BLK_STATUS: i32 = 0x70;
-const VIRTIO_BLK_INTERRUPT_STATUS: i32 = 0x60;
 const VIRTIO_BLK_PAGE_SIZE: usize = 4096;
 const VIRTIO_QNUM: isize = 8;
 const VIRTIO_BLK_DESC_F_NEXT: i32 = 1;
@@ -54,6 +45,9 @@ struct packed VirtioBlkRequest {
 }
 
 let mut virtio_blk_base: i32 = 0;
+// The transport's registers, attached by the platform device map when it
+// finds the block device; virtio_blk_base stays its discovery record.
+let mut virtio_blk_regs: IoHandle(VirtioMmioRegs);
 let mut virtio_blk_ready: bool;
 // A reset that never completes leaves the submitted RX ranges device-owned.
 // Do not reinitialize the queue or reuse those buffers in that case.
@@ -120,16 +114,12 @@ fn virtio_blk_index_wrap_probe() -> bool {
            virtio_ring_index_next(last) == virtio_ring_index_zero();
 }
 
-fn virtio_blk_reg(offset: i32) -> *io i32 !{unsafe} {
-    return unsafe { (virtio_blk_base + offset) as *io i32 };
-}
-
 fn virtio_blk_setup_queue() {
-    *(virtio_blk_reg(VIRTIO_BLK_QUEUE_SEL)) = 0;
-    *(virtio_blk_reg(VIRTIO_BLK_QUEUE_NUM)) = VIRTIO_QNUM as i32;
-    *(virtio_blk_reg(VIRTIO_BLK_QUEUE_ALIGN)) = VIRTIO_BLK_PAGE_SIZE as i32;
+    virtio_blk_regs.queue_sel = 0;
+    virtio_blk_regs.queue_num = VIRTIO_QNUM as i32;
+    virtio_blk_regs.queue_align = VIRTIO_BLK_PAGE_SIZE as i32;
     let address: usize = (virtio_blk_queue as *u8) as usize;
-    *(virtio_blk_reg(VIRTIO_BLK_QUEUE_PFN)) =
+    virtio_blk_regs.queue_pfn =
         (address / VIRTIO_BLK_PAGE_SIZE) as i32;
 }
 
@@ -143,13 +133,13 @@ fn virtio_blk_init() -> bool !{unsafe} {
     for i: usize in 0..<2 * VIRTIO_BLK_PAGE_SIZE {
         virtio_blk_queue[i] = 0;
     }
-    *(virtio_blk_reg(VIRTIO_BLK_STATUS)) = 1;
-    *(virtio_blk_reg(VIRTIO_BLK_STATUS)) = 3;
-    *(virtio_blk_reg(VIRTIO_BLK_GUEST_FEATURES)) = 0;
-    *(virtio_blk_reg(VIRTIO_BLK_GUEST_PAGE_SIZE)) =
+    virtio_blk_regs.status = 1;
+    virtio_blk_regs.status = 3;
+    virtio_blk_regs.guest_features = 0;
+    virtio_blk_regs.guest_page_size =
         VIRTIO_BLK_PAGE_SIZE as i32;
     virtio_blk_setup_queue();
-    *(virtio_blk_reg(VIRTIO_BLK_STATUS)) = 7;
+    virtio_blk_regs.status = 7;
     virtio_blk_used_seen = virtio_ring_index_zero();
     virtio_blk_ready = true;
     return true;
@@ -254,7 +244,7 @@ private fn virtio_blk_submit_owned(request_type: u32, sector: u32,
     ring[slot] = 0;
     avail.idx = virtio_ring_index_next(avail.idx);
     dma_publish();
-    *(virtio_blk_reg(VIRTIO_BLK_QUEUE_NOTIFY)) = 0;
+    virtio_blk_regs.queue_notify = 0;
 
     let completion_start: i64 = read_cntpct();
     let completion_ticks: i64 =
@@ -272,8 +262,8 @@ private fn virtio_blk_submit_owned(request_type: u32, sector: u32,
                 (unsafe { ((queue + (VIRTIO_BLK_PAGE_SIZE as isize))
                            as *io VirtioBlkUsed) }.idx as u16) as usize,
                 (virtio_blk_used_seen as u16) as usize,
-                *(virtio_blk_reg(VIRTIO_BLK_STATUS)) as usize,
-                *(virtio_blk_reg(VIRTIO_BLK_INTERRUPT_STATUS)) as usize,
+                virtio_blk_regs.status as usize,
+                virtio_blk_regs.interrupt_status as usize,
                 0 };
             snapshot.used_at_reset =
                 (unsafe { ((queue + (VIRTIO_BLK_PAGE_SIZE as isize))
@@ -337,7 +327,7 @@ fn virtio_blk_write_block(sector: u32,
 
 fn virtio_blk_capacity_sectors() -> usize !{unsafe} {
     if (virtio_blk_init() == false) { return 0; }
-    let low: *io u32 = unsafe { (virtio_blk_base + 0x100) as *io u32 };
-    let high: *io u32 = unsafe { (virtio_blk_base + 0x104) as *io u32 };
-    return ((*low as u64) | ((*high as u64) << 32)) as usize;
+    let low: u32 = virtio_blk_regs.config_word[0];
+    let high: u32 = virtio_blk_regs.config_word[1];
+    return ((low as u64) | ((high as u64) << 32)) as usize;
 }

@@ -43,17 +43,13 @@ def main():
                     '\nfn main() !{unsafe} { dma_fixture_run(); }\n',
                     encoding="ascii")
     driver = kernel / "drivers/block/virtio_blk.tkb"
-    replace_once(driver,
-                 "return unsafe { (virtio_blk_base + offset) as *io i32 };",
-                 "return unsafe { ((dma_fixture_registers as *i32) + "
-                 "((offset / 4) as isize)) as *io i32 };")
-    replace_once(driver, "    *(virtio_blk_reg(VIRTIO_BLK_QUEUE_NOTIFY)) = 0;",
-                 "    *(virtio_blk_reg(VIRTIO_BLK_QUEUE_NOTIFY)) = 0;\n"
+    replace_once(driver, "    virtio_blk_regs.queue_notify = 0;",
+                 "    virtio_blk_regs.queue_notify = 0;\n"
                  "    dma_fixture_notify();")
     mint = kernel / "drivers/block/virtio_blk_dma.tkb"
-    replace_once(mint, "    *(virtio_blk_reg(VIRTIO_BLK_STATUS)) = 0;",
+    replace_once(mint, "    virtio_blk_regs.status = 0;",
                  "    if (dma_fixture_mode != 2) {\n"
-                 "        *(virtio_blk_reg(VIRTIO_BLK_STATUS)) = 0;\n"
+                 "        virtio_blk_regs.status = 0;\n"
                  "    }")
 
     # Each control changes an actual maintained branch, independently of the

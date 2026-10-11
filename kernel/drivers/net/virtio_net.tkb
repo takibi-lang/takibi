@@ -39,16 +39,6 @@ use "kernel/lib/init_once.tkb";
 use "kernel/drivers/virtio_ring.tkb";
 use "kernel/drivers/net/virtio_net_tx_wait.tkb";
 
-const VIRTIO_GUEST_FEATURES:   i32 = 0x20;
-const VIRTIO_GUEST_PAGE_SIZE:  i32 = 0x28;
-const VIRTIO_QUEUE_SEL:        i32 = 0x30;
-const VIRTIO_QUEUE_NUM:        i32 = 0x38;
-const VIRTIO_QUEUE_ALIGN:      i32 = 0x3c;
-const VIRTIO_QUEUE_PFN:        i32 = 0x40;
-const VIRTIO_QUEUE_NOTIFY:     i32 = 0x50;
-const VIRTIO_INTERRUPT_STATUS: i32 = 0x60;
-const VIRTIO_INTERRUPT_ACK:    i32 = 0x64;
-const VIRTIO_STATUS:           i32 = 0x70;
 
 const STATUS_ACKNOWLEDGE: i32 = 1;
 const STATUS_DRIVER:      i32 = 2;
@@ -115,11 +105,13 @@ struct packed VirtqUsed {
 const VIRTQ_DESC_F_WRITE: i32 = 2; // device writes into this buffer (RX only)
 
 const VIRTIO_NET_F_MAC: i32 = 32; // bit 5: device exposes its MAC in Config space
-const VIRTIO_CONFIG_MAC_OFFSET: i32 = 0x100;
 
 // Discovered from the boot DTB -- see this file's header for why (QEMU does not
 // always attach a lone virtio-net-device to slot 0).
 let mut virtio_base: i32 = 0;
+// The transport's registers, attached by the platform device map when it
+// finds the net device; virtio_base stays its discovery record.
+let mut virtio_net_regs: IoHandle(VirtioMmioRegs);
 // The DTB decoder returns the architectural GIC INTID, including the SPI
 // base conversion. -1 means that no active virtio-net transport was found;
 // interrupt dispatch guards that sentinel before comparing it with GICC_IAR.
@@ -162,10 +154,6 @@ let mut rx_avail_idx: VirtioRingIndex =
 let mut tx_avail_idx: VirtioRingIndex =
     VirtioRingIndex::Zero;
 
-fn vreg(offset: i32) -> *io i32 !{unsafe} {
-    return unsafe { (virtio_base + offset) as *io i32 };
-}
-
 fn virtio_net_find() -> bool !{unsafe} {
     return virtio_base != 0 && virtio_net_gic_intid >= 0;
 }
@@ -190,36 +178,36 @@ fn virtio_net_gic_enable() {
 // value matches virtio_net_gic_intid -- same relationship
 // kernel/platform/rpi5/intc.tkb has with rp1_gem.tkb's gem_irq_handler().
 fn virtio_net_irq_handler() !{interrupt} {
-    let status: i32 = *(vreg(VIRTIO_INTERRUPT_STATUS));
-    *(vreg(VIRTIO_INTERRUPT_ACK)) = status;
+    let status: i32 = virtio_net_regs.interrupt_status;
+    virtio_net_regs.interrupt_ack = status;
     virtio_rx_irq_flag = 1;
     virtio_tx_irq_flag = 1;
     interrupt_notify();
 }
 
 fn virtio_negotiate(features: i32) {
-    *(vreg(VIRTIO_STATUS)) = 0;
-    *(vreg(VIRTIO_STATUS)) = STATUS_ACKNOWLEDGE;
-    *(vreg(VIRTIO_STATUS)) = STATUS_ACKNOWLEDGE | STATUS_DRIVER;
-    *(vreg(VIRTIO_GUEST_FEATURES)) = features;
-    *(vreg(VIRTIO_GUEST_PAGE_SIZE)) = VIRTIO_PAGE_SIZE as i32;
+    virtio_net_regs.status = 0;
+    virtio_net_regs.status = STATUS_ACKNOWLEDGE;
+    virtio_net_regs.status = STATUS_ACKNOWLEDGE | STATUS_DRIVER;
+    virtio_net_regs.guest_features = features;
+    virtio_net_regs.guest_page_size = VIRTIO_PAGE_SIZE as i32;
 }
 
 fn virtio_queue_setup(queue_idx: i32, queue_mem: *u8) {
-    *(vreg(VIRTIO_QUEUE_SEL)) = queue_idx;
-    *(vreg(VIRTIO_QUEUE_NUM)) = QNUM as i32;
-    *(vreg(VIRTIO_QUEUE_ALIGN)) = VIRTIO_PAGE_SIZE as i32;
+    virtio_net_regs.queue_sel = queue_idx;
+    virtio_net_regs.queue_num = QNUM as i32;
+    virtio_net_regs.queue_align = VIRTIO_PAGE_SIZE as i32;
     let addr: usize = queue_mem as usize;
     let pfn: i32 = (addr / (VIRTIO_PAGE_SIZE as usize)) as i32;
-    *(vreg(VIRTIO_QUEUE_PFN)) = pfn;
+    virtio_net_regs.queue_pfn = pfn;
 }
 
 fn virtio_driver_ok() {
-    *(vreg(VIRTIO_STATUS)) = STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_DRIVER_OK;
+    virtio_net_regs.status = STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_DRIVER_OK;
 }
 
 fn virtio_notify(queue_idx: i32) {
-    *(vreg(VIRTIO_QUEUE_NOTIFY)) = queue_idx;
+    virtio_net_regs.queue_notify = queue_idx;
 }
 
 fn desc_set(queue_mem: *u8, i: isize, addr: usize, len: isize, flags: i32) {
@@ -454,12 +442,17 @@ fn net_transmit_ready(ready: sink NetRxCanAcquire,
     return view NetRxCanAcquire;
 }
 
-fn net_read_mac(mac_out: borrow [u8; 6..]) !{unsafe} {
-    for i: usize in 0..<6 {
-        let p: *io u8 = unsafe { (virtio_base + VIRTIO_CONFIG_MAC_OFFSET
-            + (i as i32)) as *io u8 };
-        mac_out[i] = *p;
-    }
+// The MAC is the first six configuration bytes, read as two little-endian
+// words.
+fn net_read_mac(mac_out: borrow [u8; 6..]) {
+    let low: u32 = virtio_net_regs.config_word[0];
+    let high: u32 = virtio_net_regs.config_word[1];
+    mac_out[0] = (low & 0xFF) as u8;
+    mac_out[1] = ((low >> 8) & 0xFF) as u8;
+    mac_out[2] = ((low >> 16) & 0xFF) as u8;
+    mac_out[3] = ((low >> 24) & 0xFF) as u8;
+    mac_out[4] = (high & 0xFF) as u8;
+    mac_out[5] = ((high >> 8) & 0xFF) as u8;
 }
 
 fn net_shutdown(ready: sink NetRxCanAcquire) {}
