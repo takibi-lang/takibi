@@ -152,6 +152,12 @@ let surface_name name =
 
 let place_exchange (e : expr) : expr option =
   match e.desc with
+  (* GitHub issue #749: an element of an array of places is a place path.
+     The borrowed array is the witness, so there is no guard argument. *)
+  | Call ("place_take", [ { desc = Index (arr, i); _ } ]) ->
+      Some { e with desc = Call ("__places_take", [arr; i]) }
+  | Call ("place_put", [ { desc = Index (arr, i); _ }; value ]) ->
+      Some { e with desc = Call ("__places_put", [arr; i; value]) }
   | Call ("place_take", [guard; lock; slot]) ->
       Some { e with desc = Call (exchange_name "place_take",
         [guard; lock; slot; { e with desc = EnumVariant (place_name, "Empty") }]) }
@@ -192,16 +198,30 @@ let place_exchange (e : expr) : expr option =
    token has. A negative character offset is one: the line and column are
    kept, so a diagnostic still points at the place_borrow. *)
 let borrow_put_loc (loc : Lexing.position) =
-  let cnum = - (loc.Lexing.pos_cnum + 1) in
-  { loc with Lexing.pos_cnum = cnum;
-             Lexing.pos_bol = cnum - (loc.Lexing.pos_cnum - loc.Lexing.pos_bol) }
+  (* The column changes too (Types.loc_key is file, line and column), so
+     the inserted call is never confused with the place_borrow's own;
+     place_borrow_source_loc undoes it for diagnostics. *)
+  { loc with Lexing.pos_cnum = - (loc.Lexing.pos_cnum + 1) }
 let is_place_borrow_put (e : expr) = e.loc.Lexing.pos_cnum < 0
 let place_borrow_source_loc (loc : Lexing.position) =
   if loc.Lexing.pos_cnum >= 0 then loc
-  else
-    let cnum = - loc.Lexing.pos_cnum - 1 in
-    { loc with Lexing.pos_cnum = cnum;
-               Lexing.pos_bol = cnum - (loc.Lexing.pos_cnum - loc.Lexing.pos_bol) }
+  else { loc with Lexing.pos_cnum = - loc.Lexing.pos_cnum - 1 }
+
+(* The lent element's array is out of reach for the arm: any mention of its
+   root variable in the arm is refused. *)
+let require_array_unmentioned (arr : expr) (st : stmt) =
+  let root = match arr.desc with Var name -> Some name | _ -> None in
+  match root with
+  | None -> raise (Types.TypeError (arr.loc,
+      "place_borrow of an array element needs the array as a bare variable"))
+  | Some name ->
+      let text = show_stmt st in
+      let key = "(Ast.Var \"" ^ name ^ "\")" in
+      let n = String.length text and m = String.length key in
+      let rec go i = i + m <= n && (String.sub text i m = key || go (i + 1)) in
+      if go 0 then raise (Types.TypeError (st.loc, Printf.sprintf
+        "place_borrow lends one element of '%s' for its Full arm; the arm \
+         cannot use '%s' until the element is back" name name))
 
 let rec desugar_place_borrow_stmts (stmts : stmt list) : stmt list =
   List.map desugar_place_borrow_stmt stmts
@@ -215,6 +235,21 @@ and desugar_place_borrow_arm = function
 and desugar_place_borrow_stmt (s : stmt) : stmt =
   let d = desugar_place_borrow_stmts in
   match s.desc with
+  | Match ({ desc = Call ("place_borrow", [ { desc = Index (arr, i); _ } ]); _ } as scrut, arms) ->
+      (* An element lent for one arm: taken, then restored after the arm.
+         The arm may not mention the array, so the element stays empty
+         until the restore. *)
+      let arms = List.map desugar_place_borrow_arm arms in
+      let arms = List.map (function
+        | ArmVariant (v, "Full", (Some (PayloadBind (x, _)) as p), body)
+          when v = place_name ->
+            List.iter (fun st -> require_array_unmentioned arr st) body;
+            let restore = { s with desc = Expr { loc = borrow_put_loc scrut.loc;
+                desc = Call ("__places_restore",
+                  [arr; i; { loc = borrow_put_loc scrut.loc; desc = Var x }]) } } in
+            ArmVariant (v, "Full", p, body @ [ restore ])
+        | arm -> arm) arms in
+      { s with desc = Match ({ scrut with desc = Call ("__places_take", [arr; i]) }, arms) }
   | Match ({ desc = Call ("place_borrow", args); _ } as scrut, arms) ->
       let arms = List.map desugar_place_borrow_arm arms in
       let put_loc = borrow_put_loc scrut.loc in

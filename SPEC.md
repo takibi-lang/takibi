@@ -3338,6 +3338,50 @@ unchanged. The typed region has a new identity, and the byte region is
 consumed. An element is indexed with `region_at` under a check of
 `region_count`.
 
+**Arrays of places** (GitHub issue #749, first phase) make every element
+of a region a place of its own. `places_from(r, tags)` turns
+`region(T)[b, n]` and an `n`-byte tag region into `places(T)[b, n]`,
+every element Full. The content of element `k` is the one-element
+sub-region `region(T)[b + k, 1]`, derived from the array, so only a
+built-in tag is stored per element:
+
+```takibi
+fn touch(arr: borrow places(Node)[b, n], i: usize @ k) {
+    if (i < places_count(arr)) {
+        match place_borrow(arr[i]) {          // lent for the arm
+            Place::Empty => {}                // already out
+            Place::Full(e) => { region_at(e, 0).key = 7; }
+        }
+        match place_take(arr[i]) {            // out of the array
+            Place::Empty => {}
+            Place::Full(e) => {
+                match place_put(arr[i], e) {  // back; Full(e) if occupied
+                    Place::Empty => {}
+                    Place::Full(back) => { region_release(back); }
+                }
+            }
+        }
+    }
+}
+```
+
+- An element `arr[i]` is a place path; place_take, place_put and
+  place_borrow apply to it. The borrowed array is the witness, so there is
+  no guard argument; keep the array in a guarded place and lend it with
+  place_borrow to serialize element access.
+- A permission fits only the element it came from: its region identity
+  carries the array's `b` and the index's static. Putting it into another
+  element or another array is a static value mismatch.
+- The index must be shown below the array's length, by a loop bound or a
+  check against `places_count`, as for region_at. No trap. The index needs
+  a stable static (`i: usize @ k`) for a take and a put to name the same
+  element.
+- In a place_borrow arm the array cannot be used; the element is restored
+  when the arm ends.
+- `places_keep(arr)` keeps an array for the rest of the program.
+- Arrays whose element content is stored rather than derived (an array
+  of arrays) and per-element witnesses (#751) are later phases.
+
 **region_table** stores permissions: a pool over a claimed array.
 
 ```

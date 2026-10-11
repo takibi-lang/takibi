@@ -98,6 +98,82 @@ fn region_count(r: borrow @R@[b, o, n]) -> usize {
     return r.length;
 }
 
+// -- An array of places over a region (GitHub issue #749, phase 1) --
+//
+// Every element's permission can be taken out and put back on its own: the
+// content of element k is the sub-region [b, o + k, 1], derived from the
+// array, so only a tag is stored per element (1 = Full, 0 = Empty). The tag
+// store belongs to the built-in; only take and put reach it.
+linear struct @PL@[id: addr, offset: usize, count: usize] {
+    private address: usize;
+    private length: usize;
+    private tags: usize;
+}
+
+private fn places_tag(a: borrow @PL@[b, o, n], i: usize) -> *u8 !{unsafe} {
+    return unsafe { (a.tags + i) as *u8 };
+}
+
+private fn places_element(a: borrow @PL@[b, o, n], i: usize @ k)
+        -> @R@[b, o + k, 1] {
+    let mut r: @R@[b, o + k, 1] = { a.address + i * sizeof(@T@), 1 };
+    return r;
+}
+
+// The region's elements as an array of places, every place Full. `tags` is
+// one byte per element; it is consumed into the array.
+fn places_from(r: sink @R@[b, o, n], tags: sink region__u8[c, p, n])
+        -> @PL@[b, o, n] !{unsafe} {
+    let mut a: @PL@[b, o, n] = { r.address, r.length, tags.address };
+    let mut i: usize = 0;
+    while (i < r.length) {
+        let tag: *u8 = unsafe { (tags.address + i) as *u8 };
+        *tag = 1;
+        i = i + 1;
+    }
+    region_discharge(r);
+    region_discharge(tags);
+    return a;
+}
+
+// Keep the array for the rest of the program (a pool that is never torn
+// down), as region_table_keep does.
+fn places_keep(a: sink @PL@[b, o, n]) {}
+
+fn places_count(a: borrow @PL@[b, o, n]) -> usize {
+    return a.length;
+}
+
+// Element k's permission out of the array: Full(region) when it was there,
+// Empty when it is already out.
+fn __places_take(a: borrow @PL@[b, o, n], i: usize @ k)
+        -> Place(@R@[b, o + k, 1]) !{unsafe} where k < n {
+    let tag: *u8 = places_tag(a, i);
+    if (*tag == 0) { return Place::Empty; }
+    *tag = 0;
+    return Place::Full(places_element(a, i));
+}
+
+// place_borrow's restore: the element was taken for the arm and the arm
+// could not reach the array, so it is empty here.
+fn __places_restore(a: borrow @PL@[b, o, n], i: usize @ k, v: sink @R@[b, o + k, 1])
+        !{unsafe} where k < n {
+    let tag: *u8 = places_tag(a, i);
+    *tag = 1;
+    region_discharge(v);
+}
+
+// Element k's permission back into the array. A permission of another
+// element or array does not fit: its region identity differs.
+fn __places_put(a: borrow @PL@[b, o, n], i: usize @ k, v: sink @R@[b, o + k, 1])
+        -> Place(@R@[b, o + k, 1]) !{unsafe} where k < n {
+    let tag: *u8 = places_tag(a, i);
+    if (*tag != 0) { return Place::Full(v); }
+    *tag = 1;
+    region_discharge(v);
+    return Place::Empty;
+}
+
 // A byte region read as elements of this type (GitHub issue #744): the
 // bytes must start at the type's alignment and hold a whole number of
 // elements, or they come back unchanged. The typed region is a new
@@ -996,6 +1072,7 @@ let instance ?(record = false) elem =
   |> replace_all ~sub:"@R@" ~by:("region__" ^ elem)
   |> replace_all ~sub:"@S@" ~by:("RegionSplit__" ^ elem)
   |> replace_all ~sub:"@BT@" ~by:("RegionTyped__" ^ elem)
+  |> replace_all ~sub:"@PL@" ~by:("places__" ^ elem)
   |> replace_all ~sub:"@O@" ~by:("RegionOf__" ^ elem)
   |> replace_all ~sub:"@TBL@" ~by:("RegionTable__" ^ elem)
   |> replace_all ~sub:"@RS@" ~by:("RegionReleaseSlot__" ^ elem)
@@ -1070,7 +1147,7 @@ let element_types (prog : Ast.toplevel list) claimed =
          "RegionSlot__"; "RegionPool__"; "RegionPoolGuard__"; "RegionGrow__";
          "RegionShrink__"; "RegionAdopt__"; "RegionPin__"; "RegionPinned__";
          "RegionUnpin__"; "RegionRetire__"; "RegionNext__";
-         "RegionInspection__"; "RegionInspectionProbe__"; "RegionTyped__" ] in
+         "RegionInspection__"; "RegionInspectionProbe__"; "RegionTyped__"; "places__" ] in
   List.iter (fun item -> scan (Ast.show_toplevel item)) prog;
   Hashtbl.fold (fun k () acc -> k :: acc) found [] |> List.sort compare
 

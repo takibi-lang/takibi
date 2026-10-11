@@ -36,7 +36,7 @@ let expr ?(is_region = fun _ -> false) bindings (e : expr) =
   match e.desc with
   | Var _ -> local bindings e Value
   | FieldGet (base, "len") -> local bindings base Length
-  | Call ("region_count", [base])
+  | Call (("region_count" | "places_count"), [base])
     when is_region base
          && not (Local_bindings.Expr_table.mem bindings.Local_bindings.expr_ids e) ->
       local bindings base Count

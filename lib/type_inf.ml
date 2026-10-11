@@ -7651,7 +7651,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   runtime_bounds_regions := List.fold_left (fun names -> function
     | Ast.OwnedStructDef (name, _, _, _, _, _, _, _, loc)
       when Ast.source_file_of_loc loc = Ast.builtin_region_file
-           && String.starts_with ~prefix:"region__" name -> StringSet.add name names
+           && (String.starts_with ~prefix:"region__" name
+               || String.starts_with ~prefix:"places__" name) -> StringSet.add name names
     | _ -> names) StringSet.empty prog;
   (* The declared-type phase is a required boundary: silently repairing an
      unresolved AST here would hide a caller that bypassed it. *)

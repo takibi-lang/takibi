@@ -9939,6 +9939,115 @@ fn f() -> *usize { return &temp_address_outer().r.a; }");
        "variant Choice7k { A; B(usize); }
         fn choose7k(c: Choice7k) { let Choice7k::A = c; }");
 
+  (* GitHub issue #749: an array of places over a region; an element is a
+     place path and the borrowed array is its witness. *)
+  Alcotest.test_case "places: borrow, take and put an element" `Quick
+    (fun () -> ignore (infer_regions "struct Node749 { key: usize; }
+        private let mut arena749: [Node749; 8];
+        private let mut tags749: [u8; 8];
+        private let mut other749: [Node749; 8];
+        private let mut otags749: [u8; 8];
+        fn use749(arr: borrow places(Node749)[b, n], i: usize @ k, j: usize @ m) -> usize !{unsafe} {
+          let mut got: usize = 0;
+          if (i < places_count(arr)) {
+            match place_borrow(arr[i]) {
+              Place::Empty => {}
+              Place::Full(e) => { region_at(e, 0).key = 7; got = region_at(e, 0).key; }
+            }
+            match place_take(arr[i]) {
+              Place::Empty => {}
+              Place::Full(e) => {
+                match place_put(arr[i], e) {
+                  Place::Empty => {}
+                  Place::Full(back) => { region_release(back); }
+                }
+              }
+            }
+          }
+          return got;
+        }"));
+
+  Alcotest.test_case "places: a permission does not fit another element" `Quick
+    (expect_region_error "static value mismatch" "struct Node749 { key: usize; }
+        private let mut arena749: [Node749; 8];
+        private let mut tags749: [u8; 8];
+        private let mut other749: [Node749; 8];
+        private let mut otags749: [u8; 8];
+        fn use749(arr: borrow places(Node749)[b, n], i: usize @ k, j: usize @ m) -> usize !{unsafe} {
+          let mut got: usize = 0;
+          if (i < places_count(arr) && j < places_count(arr)) {
+            match place_take(arr[i]) {
+              Place::Empty => {}
+              Place::Full(e) => {
+                match place_put(arr[j], e) {
+                  Place::Empty => {}
+                  Place::Full(back) => { region_release(back); }
+                }
+              }
+            }
+          }
+          return got;
+        }");
+
+  Alcotest.test_case "places: a permission does not fit another array" `Quick
+    (expect_region_error "static value mismatch" "struct Node749 { key: usize; }
+        private let mut arena749: [Node749; 8];
+        private let mut tags749: [u8; 8];
+        private let mut other749: [Node749; 8];
+        private let mut otags749: [u8; 8];
+        fn use749(arr: borrow places(Node749)[b, n], arr2: borrow places(Node749)[c, n], i: usize @ k) -> usize !{unsafe} {
+          let mut got: usize = 0;
+          if (i < places_count(arr) && i < places_count(arr2)) {
+            match place_take(arr[i]) {
+              Place::Empty => {}
+              Place::Full(e) => {
+                match place_put(arr2[i], e) {
+                  Place::Empty => {}
+                  Place::Full(back) => { region_release(back); }
+                }
+              }
+            }
+          }
+          return got;
+        }");
+
+  Alcotest.test_case "places: a borrowed element's arm cannot use the array" `Quick
+    (expect_region_error "cannot use 'arr' until the element is back" "struct Node749 { key: usize; }
+        private let mut arena749: [Node749; 8];
+        private let mut tags749: [u8; 8];
+        private let mut other749: [Node749; 8];
+        private let mut otags749: [u8; 8];
+        fn use749(arr: borrow places(Node749)[b, n], i: usize @ k, j: usize @ m) -> usize !{unsafe} {
+          let mut got: usize = 0;
+          if (i < places_count(arr)) {
+            match place_borrow(arr[i]) {
+              Place::Empty => {}
+              Place::Full(e) => { got = places_count(arr); }
+            }
+          }
+          return got;
+        }");
+
+  Alcotest.test_case "places: an element needs its index proved in range" `Quick
+    (expect_region_error "requires" "struct Node749 { key: usize; }
+        private let mut arena749: [Node749; 8];
+        private let mut tags749: [u8; 8];
+        private let mut other749: [Node749; 8];
+        private let mut otags749: [u8; 8];
+        fn use749(arr: borrow places(Node749)[b, n], i: usize @ k, j: usize @ m) -> usize !{unsafe} {
+          let mut got: usize = 0;
+          match place_take(arr[i]) {
+            Place::Empty => {}
+            Place::Full(e) => {
+              match place_put(arr[i], e) {
+                Place::Empty => {}
+                Place::Full(back) => { region_release(back); }
+              }
+            }
+          }
+          return got;
+        }");
+
   (* GitHub issue #744: a byte region read as typed elements. *)
   Alcotest.test_case "region_bytes_typed: typed region indexed under a count check" `Quick
     (fun () -> ignore (infer_regions "struct Meta744 { occupied: bool; next: usize; }

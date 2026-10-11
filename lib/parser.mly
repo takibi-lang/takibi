@@ -1194,7 +1194,7 @@ base_type_expr:
     { match ts with
       | [ t ] ->
           let mangled = mangle_builtin_instance $symbolstartpos name t in
-          if name = "region" then
+          if name = "region" || name = "places" then
             TypeIndexed (mangled, region_indices $symbolstartpos args)
           else TypeIndexed (mangled, args)
       | _ -> raise (Types.TypeError ($symbolstartpos,

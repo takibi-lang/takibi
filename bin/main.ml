@@ -6,6 +6,9 @@ let version =
   | None -> "unknown (not installed via dune)"
 
 let report_error pos msg =
+  (* A call place_borrow inserted carries a negative offset; report it at
+     the place_borrow it came from. *)
+  let pos = Takibi.Generic_variant.place_borrow_source_loc pos in
   let line = pos.Lexing.pos_lnum in
   let col = pos.Lexing.pos_cnum - pos.Lexing.pos_bol + 1 in
   let file = pos.Lexing.pos_fname in
