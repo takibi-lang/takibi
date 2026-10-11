@@ -12389,6 +12389,13 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           (match place_fact guard field with
            | Some fact when ResourceFlow.is_consumed_on_all_paths fact moved ->
                (check_expr taints moved true e, declared, taints)
+           | _ when Generic_variant.is_place_borrow_put e ->
+               raise (TypeError (Generic_variant.place_borrow_source_loc e.loc,
+                 "place_borrow lends the content for its Full arm only: \
+                  inside the arm the guard cannot be given to another call \
+                  or a loop, and the place must be a global named directly \
+                  or a guarded_by field reached through the same accessor \
+                  call"))
            | _ ->
                raise (TypeError (e.loc,
                  "`let Place::Empty = place_put(...)` needs the place known \

@@ -870,6 +870,7 @@ let rec unify_arg ?(trace = fun _ -> ())
 
 let run ?(explain_inference = false) (prog : toplevel list) : toplevel list =
   let prog = Generic_variant.with_builtins prog in
+  let prog = Generic_variant.desugar_place_borrows prog in
   Hashtbl.reset generic_variant_names;
   List.iter (function
     | GenericVariantDef (name, _, _, _, _, _) ->

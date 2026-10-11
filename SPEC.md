@@ -1736,6 +1736,29 @@ let displaced = place_put(guard, record_of(owner).pin, pin);
 action, kept across a return to user space, refusing a migration, and
 released with the evidence that the stack is gone.
 
+### Borrowing a place's content (GitHub issue #744)
+
+`place_borrow` lends a place's content for one match arm without emptying
+the place. It takes the same operands as `place_take`, either form:
+
+```takibi
+match place_borrow(guard, store.meta) {
+    Place::Empty => { ... }
+    Place::Full(meta) => { region_at(meta, i).occupied = true; }
+}
+```
+
+- It is a `place_take` and a proven-empty `place_put` around the Full arm:
+  the put is inserted at the arm's end. The existing rules therefore give
+  it its meaning. The content cannot be consumed, and the arm cannot
+  `return` or `break` past it. The guard cannot be given to another call or
+  a loop inside the arm. Nothing derived from the content (a `region_at`
+  element) outlives the arm.
+- The proven-empty rule applies: the place is a global named directly or a
+  `guarded_by` field reached through the same accessor call.
+- Only a `match` statement takes `place_borrow`. The lowering is the take's
+  load and store and the put's store.
+
 ## Per-CPU Storage (GitHub issue #704)
 
 A handoff that belongs to one CPU is stored per CPU, and the compiler checks

@@ -167,3 +167,79 @@ let place_exchange (e : expr) : expr option =
       Some { e with desc = Call (exchange_name "gplace_put",
         [guard; slot; { e with desc = VariantCtor (place_name, "Full", value) }]) }
   | _ -> None
+
+(* GitHub issue #744 (#131's "borrow in place"): `place_borrow(guard, ...)`
+   lends a place's content for one match arm without emptying the place:
+
+     match place_borrow(g, c.f) {
+         Place::Empty => { A }
+         Place::Full(x) => { B }
+     }
+
+   is the take and the proven-empty put around that arm,
+
+     match place_take(g, c.f) {
+         Place::Empty => { A }
+         Place::Full(x) => { B; let Place::Empty = place_put(g, c.f, x); }
+     }
+
+   so the existing rules give the borrow its meaning: B cannot consume or
+   return past x (the put needs it), cannot hand g to another call (the
+   put's empty proof would be lost), and nothing derived from x outlives
+   the arm (the put consumes it). Only a match statement takes one. *)
+(* The inserted put needs a position of its own (proven_empty_puts and the
+   checker's per-location records are keyed by position) that no source
+   token has. A negative character offset is one: the line and column are
+   kept, so a diagnostic still points at the place_borrow. *)
+let borrow_put_loc (loc : Lexing.position) =
+  let cnum = - (loc.Lexing.pos_cnum + 1) in
+  { loc with Lexing.pos_cnum = cnum;
+             Lexing.pos_bol = cnum - (loc.Lexing.pos_cnum - loc.Lexing.pos_bol) }
+let is_place_borrow_put (e : expr) = e.loc.Lexing.pos_cnum < 0
+let place_borrow_source_loc (loc : Lexing.position) =
+  if loc.Lexing.pos_cnum >= 0 then loc
+  else
+    let cnum = - loc.Lexing.pos_cnum - 1 in
+    { loc with Lexing.pos_cnum = cnum;
+               Lexing.pos_bol = cnum - (loc.Lexing.pos_cnum - loc.Lexing.pos_bol) }
+
+let rec desugar_place_borrow_stmts (stmts : stmt list) : stmt list =
+  List.map desugar_place_borrow_stmt stmts
+
+and desugar_place_borrow_arm = function
+  | ArmVariant (v, c, p, body) -> ArmVariant (v, c, p, desugar_place_borrow_stmts body)
+  | ArmWild body -> ArmWild (desugar_place_borrow_stmts body)
+  | ArmIntLit (ns, body) -> ArmIntLit (ns, desugar_place_borrow_stmts body)
+  | ArmByteSliceLit (s, body) -> ArmByteSliceLit (s, desugar_place_borrow_stmts body)
+
+and desugar_place_borrow_stmt (s : stmt) : stmt =
+  let d = desugar_place_borrow_stmts in
+  match s.desc with
+  | Match ({ desc = Call ("place_borrow", args); _ } as scrut, arms) ->
+      let arms = List.map desugar_place_borrow_arm arms in
+      let put_loc = borrow_put_loc scrut.loc in
+      Hashtbl.replace proven_empty_puts put_loc ();
+      let arms = List.map (function
+        | ArmVariant (v, "Full", (Some (PayloadBind (x, _)) as p), body)
+          when v = place_name ->
+            let put = { loc = put_loc;
+                        desc = Call ("place_put",
+                          args @ [ { scrut with desc = Var x } ]) } in
+            ArmVariant (v, "Full", p, body @ [ { s with desc = Expr put } ])
+        | arm -> arm) arms in
+      { s with desc = Match ({ scrut with desc = Call ("place_take", args) }, arms) }
+  | Match (e, arms) -> { s with desc = Match (e, List.map desugar_place_borrow_arm arms) }
+  | LetMatch (m, id, t, e, arms) ->
+      { s with desc = LetMatch (m, id, t, e, List.map desugar_place_borrow_arm arms) }
+  | Block b -> { s with desc = Block (d b) }
+  | UnsafeBlock b -> { s with desc = UnsafeBlock (d b) }
+  | If (c, a, b) -> { s with desc = If (c, d a, d b) }
+  | While (c, b) -> { s with desc = While (c, d b) }
+  | For (i, t, lo, hi, b) -> { s with desc = For (i, t, lo, hi, d b) }
+  | ForEach (i, e, b) -> { s with desc = ForEach (i, e, d b) }
+  | _ -> s
+
+let desugar_place_borrows (prog : toplevel list) : toplevel list =
+  List.map (function
+    | FuncDef f -> FuncDef { f with body = desugar_place_borrow_stmts f.body }
+    | item -> item) prog

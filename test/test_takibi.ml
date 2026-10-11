@@ -9939,6 +9939,97 @@ fn f() -> *usize { return &temp_address_outer().r.a; }");
        "variant Choice7k { A; B(usize); }
         fn choose7k(c: Choice7k) { let Choice7k::A = c; }");
 
+  (* GitHub issue #744: place_borrow lends a place's content for its Full
+     arm; it is the take and the proven-empty put around that arm. *)
+  Alcotest.test_case "place_borrow: content borrowed twice, place left full" `Quick
+    (fun () -> ignore (infer "linear view Guard744[lock: addr];
+        private let mut lock744: i32;
+        linear struct Tok744[k: usize] { id: usize @ k; }
+        struct Store744 { private tok: Place(exists k: usize. Tok744[k]) guarded_by(lock744); }
+        private let mut store744: Store744;
+        fn take744() -> Guard744[&lock744] { return view Guard744[&lock744]; }
+        fn give744(g: sink Guard744[lock]) {}
+        fn id744(t: borrow Tok744[k]) -> usize { return t.id; }
+        fn drop744(t: sink Tok744[k]) {}
+        fn other744(g: borrow Guard744[lock]) {}
+        fn peek744() -> usize {
+          let g = take744();
+          let mut v: usize = 0;
+          match place_borrow(g, store744.tok) {
+            Place::Empty => {}
+            Place::Full(t) => { v = id744(t) + id744(t); }
+          }
+          give744(g);
+          return v;
+        }"));
+
+  Alcotest.test_case "place_borrow: the content cannot be consumed" `Quick
+    (expect_type_error "already consumed" "linear view Guard744[lock: addr];
+        private let mut lock744: i32;
+        linear struct Tok744[k: usize] { id: usize @ k; }
+        struct Store744 { private tok: Place(exists k: usize. Tok744[k]) guarded_by(lock744); }
+        private let mut store744: Store744;
+        fn take744() -> Guard744[&lock744] { return view Guard744[&lock744]; }
+        fn give744(g: sink Guard744[lock]) {}
+        fn id744(t: borrow Tok744[k]) -> usize { return t.id; }
+        fn drop744(t: sink Tok744[k]) {}
+        fn other744(g: borrow Guard744[lock]) {}
+        fn peek744() -> usize {
+          let g = take744();
+          let mut v: usize = 0;
+          match place_borrow(g, store744.tok) {
+            Place::Empty => {}
+            Place::Full(t) => { drop744(t); }
+          }
+          give744(g);
+          return v;
+        }");
+
+  Alcotest.test_case "place_borrow: the arm cannot return past the content" `Quick
+    (expect_type_error "still pending at this return" "linear view Guard744[lock: addr];
+        private let mut lock744: i32;
+        linear struct Tok744[k: usize] { id: usize @ k; }
+        struct Store744 { private tok: Place(exists k: usize. Tok744[k]) guarded_by(lock744); }
+        private let mut store744: Store744;
+        fn take744() -> Guard744[&lock744] { return view Guard744[&lock744]; }
+        fn give744(g: sink Guard744[lock]) {}
+        fn id744(t: borrow Tok744[k]) -> usize { return t.id; }
+        fn drop744(t: sink Tok744[k]) {}
+        fn other744(g: borrow Guard744[lock]) {}
+        fn peek744() -> usize {
+          let g = take744();
+          let mut v: usize = 0;
+          match place_borrow(g, store744.tok) {
+            Place::Empty => {}
+            Place::Full(t) => { give744(g); return 0; }
+          }
+          give744(g);
+          return v;
+        }");
+
+  Alcotest.test_case "place_borrow: the guard cannot be given to another call" `Quick
+    (expect_type_error "place_borrow lends the content for its Full arm only"
+       "linear view Guard744[lock: addr];
+        private let mut lock744: i32;
+        linear struct Tok744[k: usize] { id: usize @ k; }
+        struct Store744 { private tok: Place(exists k: usize. Tok744[k]) guarded_by(lock744); }
+        private let mut store744: Store744;
+        fn take744() -> Guard744[&lock744] { return view Guard744[&lock744]; }
+        fn give744(g: sink Guard744[lock]) {}
+        fn id744(t: borrow Tok744[k]) -> usize { return t.id; }
+        fn drop744(t: sink Tok744[k]) {}
+        fn other744(g: borrow Guard744[lock]) {}
+        fn peek744() -> usize {
+          let g = take744();
+          let mut v: usize = 0;
+          match place_borrow(g, store744.tok) {
+            Place::Empty => {}
+            Place::Full(t) => { v = id744(t); other744(g); }
+          }
+          give744(g);
+          return v;
+        }");
+
   (* GitHub issue #202: kernel/mm/user_memory.tkb's user ranges are affine
      and indexed by the process whose Running authority checked them, so a
      range cannot be kept where it would outlive that authority. *)
