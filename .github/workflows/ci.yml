@@ -108,8 +108,10 @@ jobs:
             opam install -y --deps-only --with-test .
           '
 
-      # One lane at a time. Every QEMU lane runs `-smp 2`, so N lanes ask for
-      # 2N guest vCPUs, and GitHub issue #509 measured what starving them
+      # One lane at a time. Every QEMU lane runs `-smp $TAKIBI_QEMU_SMP` (4 by
+      # default since #719; set it to 2 here if the debug lane stalls again --
+      # the QEMU runner derives the smp_bringup view from it), so N lanes ask
+      # for 4N guest vCPUs, and GitHub issue #509 measured what starving them
       # does: the guest stops mid-boot, always at `linux socket: listener
       # ready port=8080`, reported as an interactive-HTTPd lifecycle stall,
       # which names the wrong thing.

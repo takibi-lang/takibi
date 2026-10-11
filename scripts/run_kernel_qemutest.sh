@@ -130,6 +130,24 @@ echo "[$RUN_LABEL] booting $(basename "$ELF") under QEMU"
 # capture client owns the UART: with wait=off, a fast boot can emit early
 # self-test evidence before run_kernel_uart_driver.py connects.
 . "$REPO_ROOT/scripts/vcpu_lease.sh"
+# GitHub issue #719: the common smp_bringup view is the four-core one the
+# board shows. A guest given fewer vCPUs (CI may set TAKIBI_QEMU_SMP=2)
+# answers the missing cores as not present, so its expectation is derived
+# from the core count; at four it is byte-identical to the common file.
+qemu_smp_bringup_expected() {
+    local n core cpus
+    n="$(qemu_online_core_count)"
+    for core in 1 2 3; do
+        if [ "$core" -lt "$n" ]; then
+            echo "smp bringup: core$core psci+el1+takibi+own-timer ok"
+        else
+            echo "smp bringup: core$core not present"
+        fi
+    done
+    cpus="$(qemu_online_cpus_csv)"
+    echo "smp bringup: an EL0 process ran on cpus=$cpus"
+}
+qemu_smp_bringup_expected >"$EXPECTED_VIEW_DIR/smp_bringup.expected"
 resource_lease_vcpu_acquire "$TAKIBI_QEMU_SMP"
 "$REPO_ROOT/scripts/qemu.sh" \
     -machine virt -cpu cortex-a53 -smp "$TAKIBI_QEMU_SMP" -m 1024 -display none -monitor none \
