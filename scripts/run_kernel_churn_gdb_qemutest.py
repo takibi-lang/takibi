@@ -12,6 +12,7 @@ import time
 
 from capture_kernel_console import qmp
 from churn_gdb import ChurnGdb
+from qemu_vcpu_lease import QEMU, lease
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -46,7 +47,6 @@ def main():
                     script.write_text('''maintenance packet Qqemu.PhyMemMode:1
 python
 import re
-from qemu_vcpu_lease import QEMU, lease
 with open("''' + str(ROOT / "_build/kernel-churn-layout.gdb") + '''") as stream:
     layout = {key: int(value) for key, value in re.findall(r"^set \\$takibi_(\\S+) = ([0-9]+)$", stream.read(), re.M)}
 def addr(name): return int(gdb.parse_and_eval('&' + name))

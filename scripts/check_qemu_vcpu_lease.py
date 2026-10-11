@@ -10,6 +10,7 @@ shim must also take the lease. A process-matching pattern (pgrep, pkill)
 names the binary without starting it and is allowed.
 """
 
+import ast
 import pathlib
 import re
 import subprocess
@@ -37,6 +38,14 @@ def problems(name, text):
                          " use scripts/qemu.sh under a vCPU lease")
     if SHIM.search(text) and not LEASE.search(text):
         found.append(f"{name}: starts scripts/qemu.sh without taking a vCPU lease")
+    # The import must be the module's own: one pasted into an embedded script
+    # string (a gdb Python block) matches every regex above and then fails
+    # with NameError at run time, which is how the churn-gdb lane first broke.
+    if name.endswith(".py") and "qemu_vcpu_lease" in text:
+        tree = ast.parse(text)
+        if not any(isinstance(node, ast.ImportFrom) and node.module == "qemu_vcpu_lease"
+                   for node in tree.body):
+            found.append(f"{name}: qemu_vcpu_lease is not imported at module level")
     return found
 
 
@@ -44,7 +53,8 @@ def main():
     # The check must still be able to fail: one direct start, one unleased shim.
     if not problems("x.sh", "qemu-system-aarch64 -smp 2\n") \
             or not problems("x.py", 'from qemu_vcpu_lease import QEMU\n') \
-            or problems("x.sh", 'pgrep -f "qemu-system-aarch64.*"\n'):
+            or problems("x.sh", 'pgrep -f "qemu-system-aarch64.*"\n') \
+            or not problems("x.py", 'S = """\nfrom qemu_vcpu_lease import QEMU, lease\n"""\nlease()\n'):
         print("FAIL qemu-vcpu-lease: the check's own controls no longer behave")
         return 1
     files = subprocess.run(["git", "ls-files", "*.sh", "*.py"], cwd=ROOT,
