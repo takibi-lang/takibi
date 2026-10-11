@@ -2400,7 +2400,7 @@ let slot_index_fixture =
    "
 
 (* GitHub issue #672: the built-in region, enabled as --regions does. *)
-let infer_regions src =
+let infer_region_files files =
   Const_env.reset ();
   Type_layout.reset ();
   Publish_registry.reset ();
@@ -2413,11 +2413,54 @@ let infer_regions src =
   Generic_scope.reset ();
   Ast.reset_precedence_errors ();
   ignore (Llvm_gen.setup_target ~triple:"x86_64-pc-linux-gnu" ());
-  let prog = Region_builtin.run ~enabled:true (parse src) in
+  let program = List.concat_map (fun (filename, src) ->
+    let lexbuf = Lexing.from_string src in
+    Lexing.set_filename lexbuf filename;
+    Parser.program Lexer.read lexbuf) files in
+  let prog = Region_builtin.run ~enabled:true program in
   Type_inf.infer_program
     (Declared_type_resolver.run
        (Region_builtin.lower
           (Monomorphize.run (Dma_fixed_record.run (Publish_record.run prog)))))
+
+let infer_regions src = infer_region_files ["", src]
+
+(* A protocol capsule keeps the region's hidden offset as well as its
+   identity and count. These are existing #131 stored-owner rules. *)
+let retained_region_api = {|
+  linear struct Pending720[b: addr, b__off: usize, n: usize] {
+    private memory: region(u8)[b, n];
+  }
+  fn retain720(memory: region(u8)[b, n]) -> Pending720[b, b__off, n] {
+    let mut pending: Pending720[b, b__off, n] = { memory };
+    return pending;
+  }
+  fn restore720(pending: Pending720[b, b__off, n]) -> region(u8)[b, n] {
+    return pending.memory;
+  }
+  fn store720(pending: Pending720[b, o, n]) -> Place(Pending720[b, o, n]) {
+    return Place::Full(pending);
+  }
+|}
+
+let retained_region_consumer body = {|
+  private let mut bytes720: [u8; 8];
+  fn probe720() {
+    let RegionOf(u8)::Taken(memory) = region_of(bytes720) else {
+      RegionOf(u8)::Gone => { return; }
+    };
+|} ^ body ^ "
+}"
+
+let expect_retained_region_error fragment body () =
+  match infer_region_files ["capsule720.tkb", retained_region_api;
+                           "consumer720.tkb", retained_region_consumer body] with
+  | _ -> Alcotest.failf "expected retained-region error containing %S" fragment
+  | exception Types.TypeError (_, msg) ->
+      Alcotest.(check bool) msg true (contains_substring msg fragment)
+  | exception Types.MultiTypeError errors ->
+      Alcotest.(check bool) (String.concat " | " (List.map snd errors)) true
+        (List.exists (fun (_, msg) -> contains_substring msg fragment) errors)
 
 let expect_region_error fragment src () =
   match infer_regions src with
@@ -3516,6 +3559,67 @@ let infer_tests = [
     (fun () -> ignore (infer_regions (region_use
       "region_at(first, 2).key = 7;
        region_release(region_merge(first, rest));")));
+
+  Alcotest.test_case "retained region: nonzero offset and Place round trip" `Quick
+    (fun () -> ignore (infer_region_files ["capsule720.tkb", retained_region_api;
+      "consumer720.tkb", retained_region_consumer {|
+        let (head, tail) = region_split_static(memory, 3);
+        let stored = store720(retain720(tail));
+        *region_at(head, 0) = 7;
+        match stored {
+          Place::Empty => { region_release(head); }
+          Place::Full(pending) => {
+            let back = restore720(pending);
+            *region_at(back, 0) = 9;
+            region_release(region_merge(head, back));
+          }
+        }
+      |} ]));
+  Alcotest.test_case "retained region: moved source is unavailable" `Quick
+    (expect_retained_region_error "already consumed" {|
+      let pending = retain720(memory);
+      *region_at(memory, 0) = 9;
+      region_release(restore720(pending));
+    |});
+  Alcotest.test_case "retained region: old loan expires on move" `Quick
+    (expect_retained_region_error "cannot be used after" {|
+      let pointer = region_at(memory, 0);
+      let pending = retain720(memory);
+      *pointer = 9;
+      region_release(restore720(pending));
+    |});
+  Alcotest.test_case "retained region: cannot restore twice" `Quick
+    (expect_retained_region_error "already consumed" {|
+      let pending = retain720(memory);
+      let back = restore720(pending);
+      region_release(restore720(pending));
+      region_release(back);
+    |});
+  Alcotest.test_case "retained region: allocation identity survives extraction" `Quick
+    (fun () ->
+      let code = retained_region_api ^ {|
+        private let mut a720: [u8; 8];
+        private let mut b720: [u8; 8];
+        fn same720(a: region(u8)[b, n], other: region(u8)[b, n]) {
+          region_release(a); region_release(other);
+        }
+        fn probe720() {
+          let RegionOf(u8)::Taken(a) = region_of(a720) else {
+            RegionOf(u8)::Gone => { return; }
+          };
+          let pending = retain720(a);
+          let RegionOf(u8)::Taken(other) = region_of(b720) else {
+            RegionOf(u8)::Gone => { region_release(restore720(pending)); return; }
+          };
+          same720(restore720(pending), other);
+        }
+      |} in
+      expect_region_error "static value mismatch" code ());
+  Alcotest.test_case "retained region: field is private to the capsule API" `Quick
+    (expect_retained_region_error "is private to" {|
+      let pending = retain720(memory);
+      region_release(pending.memory);
+    |});
 
   Alcotest.test_case "built-in region: a constant split past the count"
     `Quick

@@ -3366,6 +3366,30 @@ accepted another table's slot that way. The same rule holds for any indexed
 type: give an identity its own `addr`-sorted static and keep arithmetic to
 counts and offsets.
 
+A linear wrapper may retain a region under the stored-owner field rule.
+All three internal indices must be its declared parameters, including the
+implicit offset name:
+
+```
+linear struct Pending[b: addr, b__off: usize, n: usize] {
+    private memory: region(u8)[b, n];
+}
+fn retain(memory: region(u8)[b, n]) -> Pending[b, b__off, n] {
+    let mut pending: Pending[b, b__off, n] = { memory };
+    return pending;
+}
+fn restore(pending: Pending[b, b__off, n]) -> region(u8)[b, n] {
+    return pending.memory;
+}
+```
+
+This applies to nonzero-offset subregions too. Moving into the wrapper
+consumes the source and expires its derived references. Extracting the field
+consumes the wrapper, and the original identity, offset and count survive.
+Private fields keep extraction inside the wrapper's file. This is the
+existing linear field rule, not an exclusive backing-array declaration:
+legacy region_of still does not forbid direct access to its source array.
+
 **region_pool** is a table that grows: no fixed capacity. A pool is a
 global (`private let mut connections: RegionPool(Node);`), taken with
 `region_pool_lock(&connections)` and given back with `region_pool_unlock`.

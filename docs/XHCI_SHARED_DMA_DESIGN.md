@@ -121,9 +121,9 @@ from those extents alone because current alignment already creates padding.
 
 Territory A supplies the general memory substrate on its stored-authority
 and safe-memory routes. Territory B supplies the protocol model and its
-connection to types, then the driver consumer. Existing Place storage is
-sufficient for the earlier cursor probe, but not evidence that a protocol
-owner can retain actual region authority. A's MMIO migration must also
+connection to types, then the driver consumer. The corrected three-index capsule
+and Place probes now establish retention, field moves and reference expiry
+under existing rules. Exclusive backing-storage protection remains needed. A's MMIO migration must also
 preserve the observation/notification hooks and use IoHandles there. No
 DMA-specific storage exception is proposed.
 
@@ -154,20 +154,36 @@ https://www.intel.com/content/dam/www/public/us/en/documents/technical-specifica
 
 ## B+C substrate probes and next boundary
 
-Two additional CLI probes on db9c9d5c, with --regions, AArch64 and
---forbid-trap, establish missing prerequisites rather than hardware defects:
+The original two-index Pending probe was incomplete: region(T)[b, n]
+lowers to identity b, offset b__off and count n. A wrapper that declares only
+b and n therefore fails the existing stored-owner rule. This is not evidence
+that general nested region retention is missing. Rechecking after rebase to
+022fd6cc establishes the correct source shape:
 
-- A linear struct Pending[b: addr, n: usize] with private field
-  memory: region(u8)[b, n] is rejected: "struct field 'Pending.memory'
-  cannot hold a nested indexed owner". The general nesting, field move and
-  borrow rules must permit encapsulation while preserving identity and
-  invalidating references made before the move. This is on the shared
-  stored-authority route, not a special DMA capsule.
-- After region_of(bytes) succeeds, bytes[0] = 9 still compiles. An additive
-  general owned-storage declaration must seal every direct access and
-  address/cast escape of its backing array. Legacy region_of's reviewed mint
-  is not that boundary. Its existing callers must not be silently migrated
-  by a blanket ban.
+    linear struct Pending[b: addr, b__off: usize, n: usize] {
+        private memory: region(u8)[b, n];
+    }
+
+The shape compiles for AArch64 with --regions and --forbid-trap. The offset
+parameter carries an arbitrary split subregion, not just an offset-zero
+allocation. No new storage exception or compiler feature is required.
+Maintained compiler tests and linux_user/region_proto exercise:
+
+| Operation | Evidence |
+| --- | --- |
+| split at 3; encapsulate the tail; store in Place; restore and merge | accepted; native result is prefix=7, tail=9, count=8 |
+| use the disjoint prefix while the tail is retained | accepted, with checked region access |
+| use the moved region or a pre-move derived reference | rejected as consumed or expired |
+| extract the capsule twice | rejected as consumed |
+| access the hidden field from another source file | rejected by field privacy |
+| pass a restored region as another allocation's identity | rejected by static identity mismatch |
+
+After region_of(bytes) succeeds, bytes[0] = 9 still compiles at 022fd6cc.
+An additive general owned-storage declaration must seal every direct access
+and address/cast escape of its backing array. Legacy region_of's reviewed
+mint is not that boundary. Its existing callers must not be silently
+migrated by a blanket ban. This is the demonstrated remaining general memory
+gate for Territory A, independent of the working capsule/Place flow.
 
 The intended general contract, in schematic notation, is:
 
@@ -213,7 +229,7 @@ surface spelling:
 
 | Declaration part | Required content |
 | --- | --- |
-| Identity | allocation base/length, protocol instance/session, and request identity where completion can outlive a reservation |
+| Identity | allocation identity/offset/length, protocol instance/session, and request identity where completion can outlive a reservation |
 | Retained resource | the actual region, split by the caller before transfer; every state accounts for it exactly once |
 | States | Ready and Reserved allow bounded CPU access; InFlight and Unconfirmed retain the inaccessible region; Down retains unconfirmed obligations; Halted permits reclamation only after confirmed quiescence |
 | Transitions | consume one state owner and produce the declared successor or an exhaustive failure returning the retained owner |
@@ -264,9 +280,10 @@ integration is unnecessary for this scope.
 
 1. B defines the shared protocol representation and declaration diagnostics,
    coordinating with A's lockless-log consumer so there is one generator.
-2. A supplies general nested region retention, checked field moves and borrow
-   expiry, plus an additive exclusive backing-storage boundary. Existing
-   Place support and legacy region_of are not substitutes for those gates.
+2. B uses the existing three-index region capsule, checked field moves,
+   reference expiry and Place flow. A supplies an additive exclusive
+   backing-storage boundary; legacy region_of is not that boundary. Ask A
+   for more stored shapes only if a real consumer cannot use this one.
 3. B generates the retained-owner permission API and TLA+ from the same
    declaration, then exercises real protected accesses in positive and
    negative compiler tests. A generated API that cannot retain its region
@@ -275,9 +292,10 @@ integration is unnecessary for this scope.
    recovery and context obligations, then migrates the maintained driver.
    Driver/cache tests and measured space complete the consumer stage.
 
-The substrate probes above still reject nested retention and accept raw
-backing-array mutation. Until those general capabilities are available, the
-first bounded model and this declaration contract are completed design work;
-the generated ownership API and xHCI migration remain unfinished. The
-handoff is a dependency on common memory capabilities, not a request for a
-DMA-only exception or permission to count state-only tokens as completion.
+The corrected capsule/native/compiler probes establish memory retention and
+expiry with existing rules, while raw backing-array mutation still compiles.
+The common-declaration generator and xHCI migration remain unfinished; the
+full access guarantee needs A's common owned-storage boundary. This does not
+block work on the shared declaration and type/model connection. The handoff
+requests that general boundary, not a DMA-only exception or permission to
+count state-only tokens as completion.

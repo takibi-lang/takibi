@@ -446,6 +446,58 @@ fn test_generation_exhaustion() !{unsafe} {
     uart_puts("exhaustion: final stamp retires safely and regrow stays exhausted\n");
 }
 
+// #720's memory substrate probe, not a device-completion transition.
+// Retain all three underlying region indices, including a nonzero offset.
+linear struct PendingRegionProbe[b: addr, b__off: usize, n: usize] {
+    private memory: region(u8)[b, n];
+}
+
+private fn retain_region_probe(memory: region(u8)[b, n])
+        -> PendingRegionProbe[b, b__off, n] {
+    let mut pending: PendingRegionProbe[b, b__off, n] = { memory };
+    return pending;
+}
+
+private fn restore_region_probe(pending: PendingRegionProbe[b, b__off, n])
+        -> region(u8)[b, n] {
+    return pending.memory;
+}
+
+private fn store_region_probe(pending: PendingRegionProbe[b, o, n])
+        -> Place(PendingRegionProbe[b, o, n]) {
+    return Place::Full(pending);
+}
+
+private let mut retained_region_arena: [u8; 8];
+
+fn test_retained_region() {
+    let RegionOf(u8)::Taken(memory) = region_of(retained_region_arena) else {
+        RegionOf(u8)::Gone => { uart_puts("retained: already claimed\n"); return; }
+    };
+    let (head, tail) = region_split_static(memory, 3);
+    let stored = store_region_probe(retain_region_probe(tail));
+    *region_at(head, 0) = 7;
+    match stored {
+        Place::Empty => {
+            region_release(head);
+            uart_puts("retained: unexpectedly empty\n");
+        }
+        Place::Full(pending) => {
+            let back = restore_region_probe(pending);
+            *region_at(back, 0) = 9;
+            let whole = region_merge(head, back);
+            uart_puts("retained: prefix=");
+            uart_print(*region_at(whole, 0) as usize);
+            uart_puts(" tail=");
+            uart_print(*region_at(whole, 3) as usize);
+            uart_puts(" count=");
+            uart_print(region_count(whole));
+            uart_puts("\n");
+            region_release(whole);
+        }
+    }
+}
+
 fn app_main() {
     test_region();
     test_table();
@@ -454,4 +506,5 @@ fn app_main() {
     test_pins();
     test_chunk_regrow();
     test_generation_exhaustion();
+    test_retained_region();
 }

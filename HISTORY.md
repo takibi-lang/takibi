@@ -1,5 +1,18 @@
 # takibi Engineering History
 
+## 2026-10-11: region capsules retain the implicit offset
+
+The first #720 B+C probe declared only region identity and count on its
+linear Pending wrapper. A region also has an implicit offset index, so the
+existing stored-owner rule rejected that incomplete wrapper. This had been
+misread as missing general nested-owner support. Declaring all three indices
+admits a nonzero-offset subregion, field extraction and a Place round trip.
+Compiler negatives pin source consumption, old-loan expiry, double restore,
+field privacy and allocation identity; the native fixture splits at 3,
+retains the tail while writing the prefix, restores and merges both. No new
+compiler feature is needed. Direct source-array access after region_of still
+compiles, so exclusive backing storage remains a distinct general boundary.
+
 ## 2026-10-11: crash-stop retries a reservation released after failed CAS
 
 A peer-fault publication lane answered Busy even after the earlier CPU-start

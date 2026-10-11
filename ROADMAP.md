@@ -65,9 +65,9 @@ list (maintainer, 2026-10-09).
    with #672 stage 2: array-element places, an array of indexed owners, and
    borrowing an element in place, started when a consumer needs it (the
    trigger on #131). #518 (typed slot addresses) and #343 (decision: bound
-   payload pointers plus generation checks) are done (2026-10-11). B's #720 B+C consumer also needs general retention of a region
-   inside a linear protocol owner, with checked field moves and borrow
-   expiry; the concrete nested-owner rejection is on #131/#672.
+   payload pointers plus generation checks) are done (2026-10-11). B's #720 three-index region capsule now verifies retention, field moves,
+   reference expiry and a Place round trip with existing rules; its earlier
+   two-index rejection omitted the implicit offset (2026-10-11).
 2. **The process record.** Done (2026-10-11): #202 settled as user ranges
    made under the process's Running authority. Threads sharing an address
    space are planned separately on #742.
@@ -130,8 +130,9 @@ Initialization does not prove CPU freshness across preemption.
      2026-10-11, general region authority plus generated permissions from
      one common Takibi protocol declaration (also generating TLA+).
      B advances the declaration/model/type connection; A supplies
-     the demonstrated general memory prerequisites on #131/#672/#637
-     (region retention in a linear owner and exclusive backing storage).
+     exclusive backing storage on #672/#637. Three-index region retention
+     in a linear owner, reference expiry and Place flow are verified with
+     existing rules; #131 is needed only for a later demonstrated shape.
      No local DMA storage exception. Coordinate MMIO observation hooks;
      see docs/XHCI_SHARED_DMA_DESIGN.md. #625 (cache visibility across DMA
      ownership handoffs, bounded model). #740
