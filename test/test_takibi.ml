@@ -13149,6 +13149,33 @@ let codegen_tests = [
       Alcotest.(check bool) "noreturn attribute" true
         (contains_substring ir "noreturn"));
 
+  (* Moved from the historical examples/inline_check, which checked the
+     object code. The pipeline's always-inline pass acts on this attribute;
+     a plain fn must not receive it. *)
+  Alcotest.test_case "inline fn reaches LLVM as alwaysinline; a plain fn does not" `Quick
+    (fun () ->
+      ignore (gen_codegen
+        "inline fn cg_inline_target7() -> i32 { return 1; }
+         fn cg_plain_target7() -> i32 { return 2; }
+         fn cg_inline_call7() -> i32 {
+           return cg_inline_target7() + cg_plain_target7();
+         }");
+      let has_alwaysinline name =
+        match Llvm.lookup_function name !Llvm_gen.the_module with
+        | Some f ->
+            let kind = Llvm.enum_attr_kind "alwaysinline" in
+            Array.exists (fun attr ->
+                match Llvm.repr_of_attr attr with
+                | Llvm.AttrRepr.Enum (k, _) -> k = kind
+                | _ -> false)
+              (Llvm.function_attrs f Llvm.AttrIndex.Function)
+        | None -> Alcotest.failf "function '%s' not found" name
+      in
+      Alcotest.(check bool) "inline fn is alwaysinline" true
+        (has_alwaysinline "cg_inline_target7");
+      Alcotest.(check bool) "plain fn is not alwaysinline" false
+        (has_alwaysinline "cg_plain_target7"));
+
   Alcotest.test_case "noinline fn reaches LLVM as a real function attribute" `Quick
     (fun () ->
       ignore (gen_codegen

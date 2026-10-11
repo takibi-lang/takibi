@@ -172,6 +172,21 @@ unused-function-control: build
 	*) echo "FAIL unused-function-control: expected diagnostic not found" >&2; echo "$$output" >&2; exit 1;; esac; \
 	echo "PASS unused-function-control: positive build succeeded and negative build failed for stale_helper"
 
+## --forbid-unsafe lives in bin/main.ml, outside what Alcotest's in-process
+## inference reaches, so it is checked here: the fixture builds without the
+## flag and is refused with it, naming the function.
+.PHONY: forbid-unsafe-control
+forbid-unsafe-control: build
+	@$(TAKIBI) test/fixtures/forbid_unsafe_negative.tkb --target $(LINUX_AMD64_TARGET) \
+		-o /tmp/takibi-forbid-unsafe-positive.o
+	@status=0; output=`$(TAKIBI) test/fixtures/forbid_unsafe_negative.tkb \
+		--target $(LINUX_AMD64_TARGET) --forbid-unsafe \
+		-o /tmp/takibi-forbid-unsafe-negative.o 2>&1` || status=$$?; \
+	if [ $$status -eq 0 ]; then echo "FAIL forbid-unsafe-control: negative build succeeded" >&2; exit 1; fi; \
+	case "$$output" in *"--forbid-unsafe: function 'raw_byte' has a reachable unsafe effect"*) ;; \
+	*) echo "FAIL forbid-unsafe-control: expected diagnostic not found" >&2; echo "$$output" >&2; exit 1;; esac; \
+	echo "PASS forbid-unsafe-control: the build without the flag succeeded and --forbid-unsafe refused raw_byte"
+
 ## GitHub issue #488: the pool's payload accessor must keep returning a
 ## pointer TIED to the liveness proof. Untying it removes compile errors
 ## rather than adding them, so the kernel building is not evidence that the
@@ -227,7 +242,7 @@ CHECK_TIMEOUT_SECONDS    := 10
 # CHECK_TIMEOUT_SECONDS, which is what makes "the fast gate is for checks
 # that read tracked files" a mechanism instead of a sentence: a member that
 # waits is killed and this lane goes red.
-langcheck: unused-function-control effect-matrix-control pool-liveness-control wont-compile-control
+langcheck: unused-function-control forbid-unsafe-control effect-matrix-control pool-liveness-control wont-compile-control
 	@bash scripts/lane_timing.sh begin langcheck
 	@bash scripts/run_check_lane.sh check $(CHECK_TIMEOUT_SECONDS)
 # -I skips binary files. Without it a build directory left in the worktree
