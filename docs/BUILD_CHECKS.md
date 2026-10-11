@@ -31,7 +31,8 @@ suffix is description; dispatch reads only the prefix.
 | `check_affinity_probe_migrates_controls.py` | Controls for the affinity-probe premise check |
 | `check_boot_log_snapshot.py` | the boot dmesg snapshot precedes the variable-length protocol report |
 | `check_boot_log_snapshot_controls.py` | Controls reject old snapshot ordering and missing, duplicate or commented commands |
-| `check_agents_paths.py` | paths named by root guidance resolve and this table names every check |
+| `check_agents_paths.py` | paths named by root guidance resolve to Git-tracked files and this table names every check |
+| `check_agents_paths_controls.py` | an untracked directory or an empty glob does not satisfy a path root guidance names |
 | `check_ash_bin_inventory.py` | ash's expected /bin listing matches every image-recipe entry in order |
 | `check_ash_bin_inventory_controls.py` | Controls for additions, omissions, and unrecognized /bin image commands |
 | `check_dma_qemu_transcript_controls.py` | The DMA QEMU runner waits for the complete diagnostic under every serial byte split; partial success/failure markers never terminate capture |

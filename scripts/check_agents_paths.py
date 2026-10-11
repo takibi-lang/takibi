@@ -23,8 +23,10 @@ when what it must cover is narrower than what exists.
 
 from __future__ import annotations
 
+import fnmatch
 import pathlib
 import re
+import subprocess
 import sys
 
 from pass_line import report_pass
@@ -54,18 +56,30 @@ def is_repo_path(token: str) -> bool:
     return True
 
 
-def exists(token: str) -> bool:
+def tracked_files() -> list[str]:
+    """Git's index, not the working tree: an untracked build-artifact
+    directory left on disk once made a path AGENTS.md named for a deleted
+    tree look present, and only the clean allcheck caught it."""
+    result = subprocess.run(["git", "ls-files", "-z"], cwd=ROOT, check=True,
+                            capture_output=True)
+    return [name for name in result.stdout.decode("utf-8").split("\0") if name]
+
+
+def exists(token: str, tracked: list[str]) -> bool:
+    path = token.rstrip("/")
     if "*" in token:
-        # A glob is a claim that the shape has at least one member.
-        return any(ROOT.glob(token))
-    return (ROOT / token.rstrip("/")).exists()
+        # A glob is a claim that the shape has at least one tracked member.
+        return any(fnmatch.fnmatchcase(name, path) or
+                   fnmatch.fnmatchcase(name, path + "/*") for name in tracked)
+    return any(name == path or name.startswith(path + "/") for name in tracked)
 
 
 def main() -> int:
     text = AGENTS.read_text(encoding="utf-8")
 
     repo_paths = sorted({t for t in BACKTICKED.findall(text) if is_repo_path(t)})
-    missing = [token for token in repo_paths if not exists(token)]
+    tracked = tracked_files()
+    missing = [token for token in repo_paths if not exists(token, tracked)]
     checks_text = BUILD_CHECKS.read_text(encoding="utf-8")
     checked = sorted(
         path.name
