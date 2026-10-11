@@ -9996,6 +9996,45 @@ fn f() -> *usize { return &temp_address_outer().r.a; }");
           return v;
         }"));
 
+  Alcotest.test_case "place_borrow: a yielding match lends the content too" `Quick
+    (fun () -> ignore (infer "linear view Guard744y[lock: addr];
+        private let mut lock744y: i32;
+        linear struct Tok744y[k: usize] { id: usize @ k; }
+        struct Store744y { private tok: Place(exists k: usize. Tok744y[k]) guarded_by(lock744y); }
+        private let mut store744y: Store744y;
+        fn take744y() -> Guard744y[&lock744y] { return view Guard744y[&lock744y]; }
+        fn give744y(g: sink Guard744y[lock]) {}
+        fn id744y(t: borrow Tok744y[k]) -> usize { return t.id; }
+        fn peek744y() -> usize {
+          let g = take744y();
+          let v: usize = match place_borrow(g, store744y.tok) {
+            Place::Empty => { 0 }
+            Place::Full(t) => { id744y(t) }
+          };
+          give744y(g);
+          return v;
+        }"));
+
+  Alcotest.test_case "place_borrow: a yielding arm cannot hand off the guard" `Quick
+    (expect_type_error "place_borrow lends the content for its Full arm only"
+       "linear view Guard744y[lock: addr];
+        private let mut lock744y: i32;
+        linear struct Tok744y[k: usize] { id: usize @ k; }
+        struct Store744y { private tok: Place(exists k: usize. Tok744y[k]) guarded_by(lock744y); }
+        private let mut store744y: Store744y;
+        fn take744y() -> Guard744y[&lock744y] { return view Guard744y[&lock744y]; }
+        fn give744y(g: sink Guard744y[lock]) {}
+        fn id744y(t: borrow Tok744y[k]) -> usize { return t.id; }
+        fn peek744y() -> usize {
+          let g = take744y();
+          let v: usize = match place_borrow(g, store744y.tok) {
+            Place::Empty => { 0 }
+            Place::Full(t) => { give744y(g); 0 }
+          };
+          give744y(g);
+          return v;
+        }");
+
   Alcotest.test_case "place_borrow: the content cannot be consumed" `Quick
     (expect_type_error "already consumed" "linear view Guard744[lock: addr];
         private let mut lock744: i32;

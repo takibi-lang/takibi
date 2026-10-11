@@ -1756,8 +1756,10 @@ match place_borrow(guard, store.meta) {
   element) outlives the arm.
 - The proven-empty rule applies: the place is a global named directly or a
   `guarded_by` field reached through the same accessor call.
-- Only a `match` statement takes `place_borrow`. The lowering is the take's
-  load and store and the put's store.
+- A `match` statement or a match that yields a value (`let v = match
+  place_borrow(...) { ... };`) takes `place_borrow`. In the yielding form
+  the Full arm's value is computed before the put. The lowering is the
+  take's load and store and the put's store.
 
 ## Per-CPU Storage (GitHub issue #704)
 

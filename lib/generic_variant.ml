@@ -229,6 +229,30 @@ and desugar_place_borrow_stmt (s : stmt) : stmt =
         | arm -> arm) arms in
       { s with desc = Match ({ scrut with desc = Call ("place_take", args) }, arms) }
   | Match (e, arms) -> { s with desc = Match (e, List.map desugar_place_borrow_arm arms) }
+  | LetMatch (m, id, t, ({ desc = Call ("place_borrow", args); _ } as scrut), arms) ->
+      (* A match that yields a value: the arm's final `yield e` is evaluated
+         into a temporary before the put, then yielded. *)
+      let arms = List.map desugar_place_borrow_arm arms in
+      let put_loc = borrow_put_loc scrut.loc in
+      Hashtbl.replace proven_empty_puts put_loc ();
+      let arms = List.map (function
+        | ArmVariant (v, "Full", (Some (PayloadBind (x, _)) as p), body)
+          when v = place_name ->
+            let put = { s with desc = Expr { loc = put_loc;
+                        desc = Call ("place_put",
+                          args @ [ { scrut with desc = Var x } ]) } } in
+            let temp = "__place_borrow_value_" ^ x in
+            let body = match List.rev body with
+              | ({ desc = Yield value; _ } as y) :: rest ->
+                  List.rev rest
+                  @ [ { y with desc = Let (true, temp, None, Some value, None) };
+                      put;
+                      { y with desc = Yield { value with desc = Var temp } } ]
+              | _ -> body @ [ put ] in
+            ArmVariant (v, "Full", p, body)
+        | arm -> arm) arms in
+      { s with desc = LetMatch (m, id, t,
+          { scrut with desc = Call ("place_take", args) }, arms) }
   | LetMatch (m, id, t, e, arms) ->
       { s with desc = LetMatch (m, id, t, e, List.map desugar_place_borrow_arm arms) }
   | Block b -> { s with desc = Block (d b) }
