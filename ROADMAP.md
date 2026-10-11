@@ -73,10 +73,11 @@ list (maintainer, 2026-10-09).
    Step A is done (2026-10-11: RPi5 PCIe, virtio-net, virtio-blk, the
    system timer DTB reader and xHCI registers through IoHandles; the
    xHCI doorbell and ERDP release are named boundaries). Next: #744 (B2,
-   page.tkb as splits of a declared memory region), then #745 (B3,
-   intrusive_pool absorbed into RegionPool). The landed MMIO step leaves
-   doorbell, ERDP-release and stop/reset observation boundaries for #720 to
-   build on. #720 must add exact request/event matching and preserve
+   page.tkb carving regions handed over by a small memory-map mint), then
+   #745 (B3, intrusive_pool absorbed into RegionPool), then #746 (page
+   uniqueness by type in the compact per-page form). The landed MMIO step
+   leaves doorbell, ERDP-release and stop/reset observation boundaries for
+   #720 to build on. #720 must add exact request/event matching and preserve
    publication and reset behavior. #720 also needs general exclusive backing
    storage on #637/#672:
    region_of currently permits direct access to the source array. #739
