@@ -100,7 +100,9 @@ list (maintainer, 2026-10-09).
 6. **Research applied to a real example** (evaluated 2026-09-29; reasoning
    on #13): indexed views generated from a TLA+ model's actions, prototyped
    on #613; coordinate that generator's authoring surface with B's #720
-   B+C prototype before building separate generators. Iris vocabulary for
+   B+C prototype before building separate generators. The maintainer chose
+   one common Takibi protocol declaration generating both TLA+ and permission
+   types on 2026-10-11; use the same representation for both consumers. Iris vocabulary for
    lock and pool invariants (#132).
 
 **Evidence for the trunk, scheduled by A:** #584's soak at natural
@@ -123,8 +125,9 @@ Initialization does not prove CPU freshness across preemption.
    transfer in types, leaving one device-semantics declaration per driver
    and the platform bus translation as the only trusted parts.
    - #720 (session-long xHCI rings and contexts): B+C selected on
-     2026-10-11, general region authority plus model-derived permissions.
-     B advances the partial-handoff model and type connection; A supplies
+     2026-10-11, general region authority plus generated permissions from
+     one common Takibi protocol declaration (also generating TLA+).
+     B advances the declaration/model/type connection; A supplies
      the demonstrated general memory prerequisites on #131/#672/#637
      (region retention in a linear owner and exclusive backing storage).
      No local DMA storage exception. Coordinate MMIO observation hooks;

@@ -1,7 +1,8 @@
 # Shared fixed DMA for the maintained xHCI driver
 
-The maintainer selected general region ownership plus TLA+-derived protocol
-permissions on 2026-10-11 (B+C). This is not implemented language syntax or
+The maintainer selected general region ownership plus generated protocol
+permissions on 2026-10-11 (B+C). A common Takibi protocol declaration is the
+selected source for both TLA+ and permission types. This is not implemented language syntax or
 a claim of verified DMA safety. It separates partial memory authority from
 runtime request concurrency. The first consumer remains the current synchronous
 USB mass-storage driver. Multiple outstanding requests are not required.
@@ -66,11 +67,11 @@ must remain possible for halted endpoints while payload obligations remain
 outstanding. Initialization commands use the same writer as later commands,
 rather than special direct writes to slots zero through two.
 
-The exact source declaration, generated variant representation, whether
-reservation lends or moves the cursor, and integration with fixed-DMA
-payload obligations remain surface decisions. The contract above is the
-proposed minimal capability, not authorization to add a general ring library
-or a protocol-to-type generator.
+The common-declaration generator is authorized. Its source syntax and
+representation must preserve the general retained-region contract below;
+they must not introduce a dedicated DMA storage mechanism. Reservation moves
+its region into the protocol owner. Payload obligations remain separate
+resources tied to the same request. A general ring library is not required.
 
 ## Other session allocations
 
@@ -126,7 +127,7 @@ owner can retain actual region authority. A's MMIO migration must also
 preserve the observation/notification hooks and use IoHandles there. No
 DMA-specific storage exception is proposed.
 
-Before implementation, approve the shared declaration/API surface and a
+Implement the selected common declaration and retained-region API with a
 bounded transition model covering reserve, wrap, publish, matching events,
 endpoint recovery, timeout and failed reset. Compiler rejection tests must
 exercise real protected accesses and alias expiry, including raw escape,
@@ -198,12 +199,85 @@ observations to the existing driver by reviewed function bodies; it does not
 prove implementation conformance. Memory ownership and generated transition
 permissions must eventually meet in the same retained owner.
 
-Model-to-type source design must distinguish unrestricted TLA+ from a
-translatable fragment. Unsupported conditions must be rejected, never
-omitted. Either annotate a restricted TLA+ transition fragment with general
-region consume/produce contracts, or use a restricted protocol declaration
-that generates both TLA+ and types. The latter changes the authoring source;
-the former needs a checked, deliberately limited TLA+ translator. Both need
-an explicit mapping of model guards to checked type facts, runtime checks,
-and trusted external observations. Neither imports bounded invariants as
-unbounded compiler proofs or requires general Z3 integration.
+## Selected common declaration and generation boundary
+
+The source is one restricted Takibi protocol declaration. The compiler
+validates it once, builds one protocol representation, and emits both the
+TLA+ actions and sealed permission APIs from that representation. TLA+ is an
+output, not a second handwritten input to translate back into types. The
+existing handwritten SharedRegionTransfer model is reference evidence until
+the generated model reproduces its fixed and faulty verdicts.
+
+The first declaration needs the following data, independently of its final
+surface spelling:
+
+| Declaration part | Required content |
+| --- | --- |
+| Identity | allocation base/length, protocol instance/session, and request identity where completion can outlive a reservation |
+| Retained resource | the actual region, split by the caller before transfer; every state accounts for it exactly once |
+| States | Ready and Reserved allow bounded CPU access; InFlight and Unconfirmed retain the inaccessible region; Down retains unconfirmed obligations; Halted permits reclamation only after confirmed quiescence |
+| Transitions | consume one state owner and produce the declared successor or an exhaustive failure returning the retained owner |
+| Observations | matching completion and confirmed reset are declared external contracts, each tied to the retained instance/request |
+| Access | generated scoped access only in CPU-authorized states; consuming or moving the owner expires derived references |
+| Properties and bounds | ownership disjointness, preparation before external read, and explicit finite model configurations; not compiler axioms |
+
+The operation signatures are schematic, not accepted syntax:
+
+    reserve(Ready[instance, base, length], count)
+        -> Reserved[instance, base, length, request] | Refused(Ready[...])
+    publish(Reserved[instance, base, length, request])
+        -> InFlight[instance, base, length, request]
+    observe(borrow InFlight[instance, base, length, request])
+        -> Matching[instance, request] | NotReady | Foreign | Failed
+    resume(InFlight[instance, base, length, request], Matching[instance, request])
+        -> Ready[instance, base, length]
+    expire(InFlight[instance, base, length, request])
+        -> Unconfirmed[instance, base, length, request]
+
+InFlight and Unconfirmed encapsulate the region; they do not destroy it and
+later reconstruct it from an address. The generated API has no unrestricted
+constructor for a state, Matching witness or initial authority. Request and
+session identity must not rely on a reusable TRB address alone. Exhaustion,
+late events and reset failure must retain ownership rather than re-mint it.
+The exact xHCI observation correlates the pending request with the event's
+TRB/TD, endpoint and slot under the reviewed device contract.
+
+Every guard must have an explicit lowering category:
+
+| Guard or obligation | How it is established |
+| --- | --- |
+| owner identity, state, consumption and resource conservation | checked type/ownership flow; generated sealed transitions cannot omit or duplicate the region |
+| bounds and disjoint split/merge | existing refinement and region rules, with general retained-owner support |
+| dynamic event fields, available capacity, reset outcome | generated or bound runtime checks with exhaustive outcomes; no success witness on failure |
+| preparation and hardware publication | checked access through the operation API plus the reviewed encoding/cache/Cycle/notification implementation; an arbitrary state-returning function signature is insufficient |
+| actual device completion/quiescence and platform visibility | explicit trusted observation and target implementation, never inferred from the model verdict |
+| bounded Safety verdict | model evidence only; not an unbounded theorem or a compiler assumption |
+
+Unsupported predicates, unbound observations, resource drops/duplication,
+arbitrary external state constructors and actions with no lowering must be
+rejected. A bare sequence of state labels or erased views is not the selected
+B+C implementation. User-space asynchronous transfer uses the same resource
+and transition mechanism, without xHCI-specific storage rules. General Z3
+integration is unnecessary for this scope.
+
+## Implementation order and Territory A handoff
+
+1. B defines the shared protocol representation and declaration diagnostics,
+   coordinating with A's lockless-log consumer so there is one generator.
+2. A supplies general nested region retention, checked field moves and borrow
+   expiry, plus an additive exclusive backing-storage boundary. Existing
+   Place support and legacy region_of are not substitutes for those gates.
+3. B generates the retained-owner permission API and TLA+ from the same
+   declaration, then exercises real protected accesses in positive and
+   negative compiler tests. A generated API that cannot retain its region
+   does not finish this step.
+4. B extends the model to wrap, request/session correlation, event snapshots,
+   recovery and context obligations, then migrates the maintained driver.
+   Driver/cache tests and measured space complete the consumer stage.
+
+The substrate probes above still reject nested retention and accept raw
+backing-array mutation. Until those general capabilities are available, the
+first bounded model and this declaration contract are completed design work;
+the generated ownership API and xHCI migration remain unfinished. The
+handoff is a dependency on common memory capabilities, not a request for a
+DMA-only exception or permission to count state-only tokens as completion.
