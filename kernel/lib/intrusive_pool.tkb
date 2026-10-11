@@ -1147,7 +1147,7 @@ fn intrusive_chunk_header_at(T: type, pool: &mut IntrusivePool(T) @ pool_id,
 // Same for the slot side. Callers hold either an address they just
 // computed from a chunk they own, or one validated by
 // intrusive_pool_slot_is_valid.
-fn intrusive_slot_at(T: type, pool: &mut IntrusivePool(T) @ pool_id, slot_address: usize)
+private fn intrusive_slot_at(T: type, pool: &mut IntrusivePool(T) @ pool_id, slot_address: usize)
         -> *IntrusiveSlot(T) !{unsafe} {
     return unsafe { slot_address as *IntrusiveSlot(T) };
 }

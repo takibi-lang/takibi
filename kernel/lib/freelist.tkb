@@ -335,7 +335,7 @@ fn freelist_remove(T: type, target: &mut Freelist(T, N),
 // whole function is raw pointer arithmetic (issue #15), same as it has
 // been since the very first #207 worked example.
 fn freelist_ref(T: type, target: &mut Freelist(T, N),
-                owner: borrow FreelistOwner[allocation]) -> *T {
+                owner: borrow FreelistOwner[allocation]) -> *T @ allocation {
     let data = target.data;
     let index: isize = freelist_owner_index(owner) as isize;
     return (data as *T) + index;
