@@ -46,10 +46,13 @@ def runner(lease_lines):
 
 
 def main():
+    ran = 0
+    ran += 1
     if not drive(runner(True)):
         print(f"FAIL lease-wait: the driver gave up after {DEADLINE:g}s while its "
               f"runner was still waiting for the vCPU lease")
         return 1
+    ran += 1
     if drive(runner(False)):
         print(f"FAIL lease-wait: a runner silent for {STALL:g}s without a lease "
               f"line was still waited for; the {DEADLINE:g}s deadline is gone")
@@ -57,7 +60,7 @@ def main():
     report_pass("lease-wait",
                 f"a runner waiting {STALL:g}s for its lease outlived a {DEADLINE:g}s "
                 f"deadline, and one silent as long without a lease line did not",
-                cases=2)
+                cases=ran)
     return 0
 
 

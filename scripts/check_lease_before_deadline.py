@@ -6,7 +6,7 @@ GitHub issue #719: QEMU runners wait for vCPUs from a host-wide budget
 spawns such a runner spends that deadline in the runner's wait, and reports
 the wait as a boot failure -- the first four-vCPU allcheck failed race-window
 633 and the kernelsh PTY smoke that way. The cure is uniform: the driver
-takes the lease itself (qemu_vcpu_lease.lease(), before any timing), and the
+takes the lease itself (the lease() helper, before any timing), and the
 runner then finds it on its ancestor and does not wait.
 
 So: a Python file that spawns a lease-taking runner -- a script calling
@@ -76,7 +76,7 @@ def python_problems(name, text, runner_names):
                         spawned.add(runner)
     if spawned and not leases:
         return [f"{name}: spawns {', '.join(sorted(spawned))}, which waits for vCPUs, "
-                f"without taking the lease first (qemu_vcpu_lease.lease() before "
+                f"without taking the lease first (the lease() helper before "
                 f"any deadline starts)"]
     return []
 
