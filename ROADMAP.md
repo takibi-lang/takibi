@@ -65,7 +65,9 @@ list (maintainer, 2026-10-09).
    with #672 stage 2: array-element places, an array of indexed owners, and
    borrowing an element in place. #343 (use-after-free now that a heap
    exists) is its first consumer; #518's typed slot addresses are done
-   (2026-10-10).
+   (2026-10-10). B's #720 B+C consumer also needs general retention of a region
+   inside a linear protocol owner, with checked field moves and borrow
+   expiry; the concrete nested-owner rejection is on #131/#672.
 2. **The process record.** #202 (UserRange epoch); the rest of the
    typestate group is done.
 3. **#637 stage 3: shrinking the mint list.** The file-confinement flag is
@@ -76,7 +78,9 @@ list (maintainer, 2026-10-09).
    (page and pool chunks over regions, using the shared bounds-contract
    prototype). xHCI MMIO step A coordinates with B's #720 partial-DMA
    design: preserve matching-completion, publication and stop/reset hooks;
-   use IoHandles there without adding a DMA-specific storage rule. #739
+   use IoHandles there without adding a DMA-specific storage rule. B's
+   #720 also needs general exclusive backing storage on #637/#672:
+   region_of currently permits direct access to the source array. #739
    (stale list entries, per-file counts). log.tkb's
    raw sites go with #613: a lockless multi-writer log ring with its
    protocol in the type system, its orderings checked by #645's herd7
@@ -95,7 +99,9 @@ list (maintainer, 2026-10-09).
    blocking) beside it; #9 (SMP process admission).
 6. **Research applied to a real example** (evaluated 2026-09-29; reasoning
    on #13): indexed views generated from a TLA+ model's actions, prototyped
-   on #613; Iris vocabulary for lock and pool invariants (#132).
+   on #613; coordinate that generator's authoring surface with B's #720
+   B+C prototype before building separate generators. Iris vocabulary for
+   lock and pool invariants (#132).
 
 **Evidence for the trunk, scheduled by A:** #584's soak at natural
 boundaries, #702 (dedicated soak hardware, the maintainer's decision),
@@ -116,12 +122,14 @@ Initialization does not prove CPU freshness across preemption.
 1. **Fixed DMA lifecycle, finishing the drivers.** Every stage of one
    transfer in types, leaving one device-semantics declaration per driver
    and the platform bus translation as the only trusted parts.
-   - #720 (session-long xHCI rings and contexts, on `Place`): proposed
-     partial range authority with the current synchronous driver; API surface
-     awaits a decision. Existing Place storage passed a shape probe; no
-     stored-array prerequisite is demonstrated. Coordinate observation hooks
-     with A's #637 MMIO step; see docs/XHCI_SHARED_DMA_DESIGN.md. #625 (cache
-     visibility across DMA ownership handoffs, bounded model). #740
+   - #720 (session-long xHCI rings and contexts): B+C selected on
+     2026-10-11, general region authority plus model-derived permissions.
+     B advances the partial-handoff model and type connection; A supplies
+     the demonstrated general memory prerequisites on #131/#672/#637
+     (region retention in a linear owner and exclusive backing storage).
+     No local DMA storage exception. Coordinate MMIO observation hooks;
+     see docs/XHCI_SHARED_DMA_DESIGN.md. #625 (cache visibility across DMA
+     ownership handoffs, bounded model). #740
      (virtio-net fixed TX/RX-reply authority) awaits the stored-array
      boundary and an in-place reply design decision.
 2. **Other compiler and language work, respecting design gates:** #608

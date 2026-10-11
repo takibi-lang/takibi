@@ -1,8 +1,9 @@
 # Shared fixed DMA for the maintained xHCI driver
 
-This is a design proposal, not implemented language syntax or a claim of
-verified DMA safety. It separates partial memory authority from runtime
-request concurrency. The first consumer remains the current synchronous
+The maintainer selected general region ownership plus TLA+-derived protocol
+permissions on 2026-10-11 (B+C). This is not implemented language syntax or
+a claim of verified DMA safety. It separates partial memory authority from
+runtime request concurrency. The first consumer remains the current synchronous
 USB mass-storage driver. Multiple outstanding requests are not required.
 
 ## Existing-language feasibility
@@ -33,12 +34,12 @@ or a new place witness, it must use the shared stored-authority route.
 
 ## Proposed API contracts
 
-The names below describe contracts for a proposed compiler-generated fixed
-shared DMA declaration; they are not accepted source syntax. Nominal types
-are per allocation, preventing a token from authorizing another ring.
-Generated opaque runtime owners carry dynamic indices; their state and
-identity are checked by the compiler. They must have a unique initial owner,
-like today's dma_fixed, rather than public constructors or repeatable mints.
+The names below describe the earlier operation contracts; their dedicated
+shared fixed-DMA declaration is superseded by the general B+C design. They
+are not accepted source syntax. Region identity prevents a token from
+authorizing another allocation. A protocol owner retains the actual region,
+not just a cursor or erased view. Its state and identity must be checked by
+the compiler, with a unique initial region and no repeatable re-mint.
 
 | Operation | Consumes or borrows | Result and obligation |
 | --- | --- | --- |
@@ -117,11 +118,13 @@ from those extents alone because current alignment already creates padding.
 
 ## Responsibility and evidence
 
-The shared DMA access boundary is compiler/language work in Territory B.
-Existing Place storage is sufficient for the tested shape. Territory A's
-MMIO migration must preserve the observation/notification hooks and use
-IoHandles for their register accesses; it does not mint partial-memory
-owners or need to implement a DMA-specific stored-array exception.
+Territory A supplies the general memory substrate on its stored-authority
+and safe-memory routes. Territory B supplies the protocol model and its
+connection to types, then the driver consumer. Existing Place storage is
+sufficient for the earlier cursor probe, but not evidence that a protocol
+owner can retain actual region authority. A's MMIO migration must also
+preserve the observation/notification hooks and use IoHandles there. No
+DMA-specific storage exception is proposed.
 
 Before implementation, approve the shared declaration/API surface and a
 bounded transition model covering reserve, wrap, publish, matching events,
@@ -147,3 +150,60 @@ https://cdrdv2-public.intel.com/625472/625472_xHCI_Rev1_2b.pdf
 Intel's published xHCI specification, section 4.9.2, describes producer and
 consumer ring ownership and cycle management:
 https://www.intel.com/content/dam/www/public/us/en/documents/technical-specifications/extensible-host-controler-interface-usb-xhci.pdf
+
+## B+C substrate probes and next boundary
+
+Two additional CLI probes on db9c9d5c, with --regions, AArch64 and
+--forbid-trap, establish missing prerequisites rather than hardware defects:
+
+- A linear struct Pending[b: addr, n: usize] with private field
+  memory: region(u8)[b, n] is rejected: "struct field 'Pending.memory'
+  cannot hold a nested indexed owner". The general nesting, field move and
+  borrow rules must permit encapsulation while preserving identity and
+  invalidating references made before the move. This is on the shared
+  stored-authority route, not a special DMA capsule.
+- After region_of(bytes) succeeds, bytes[0] = 9 still compiles. An additive
+  general owned-storage declaration must seal every direct access and
+  address/cast escape of its backing array. Legacy region_of's reviewed mint
+  is not that boundary. Its existing callers must not be silently migrated
+  by a blanket ban.
+
+The intended general contract, in schematic notation, is:
+
+    lend(region[T, base, length], Ready[instance])
+        -> Pending[T, base, length, instance]
+    resume(Pending[T, base, length, instance], Completed[instance])
+        -> (region[T, base, length], Ready[instance])
+
+The pending owner contains the region. Other disjoint regions obtained by
+split remain usable. Neither a stand-alone view nor a matching integer is
+permission to reconstruct the pending region. Runtime observation creates
+completion evidence at a reviewed boundary; generated protocol transitions
+cannot silently turn an unrelated event or timeout into that evidence.
+This contract is useful for user-space asynchronous ownership transfer too.
+
+SharedRegionTransfer.tla is the first bounded evidence layer: two abstract
+cells, nonempty subregion reservations, individual cell preparation,
+publication, device reads, matching/foreign events, timeout, confirmed reset,
+failed reset and restart. It checks disjoint CPU/device authority and
+preparation before a device read. The fixed model passes; early publication,
+foreign-event reclamation, timeout reclamation and restart after failed
+reset each violate Safety in TLC and shallow Apalache checks.
+
+It deliberately does not model TRB layout/wrap, endpoint recovery, session
+marker/cache ordering, silicon, or the general ownership implementation.
+Those are remaining obligations, not established by a passing first model.
+No protocol types are generated yet. The current action-to-code map ties
+observations to the existing driver by reviewed function bodies; it does not
+prove implementation conformance. Memory ownership and generated transition
+permissions must eventually meet in the same retained owner.
+
+Model-to-type source design must distinguish unrestricted TLA+ from a
+translatable fragment. Unsupported conditions must be rejected, never
+omitted. Either annotate a restricted TLA+ transition fragment with general
+region consume/produce contracts, or use a restricted protocol declaration
+that generates both TLA+ and types. The latter changes the authoring source;
+the former needs a checked, deliberately limited TLA+ translator. Both need
+an explicit mapping of model guards to checked type facts, runtime checks,
+and trusted external observations. Neither imports bounded invariants as
+unbounded compiler proofs or requires general Z3 integration.

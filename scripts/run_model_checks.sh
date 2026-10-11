@@ -110,6 +110,13 @@ check_model FixedDmaOwnership Safety 5 \
     gemfailedhalt:CInitGemFailedHalt:Safety:violated \
     gemreuse:CInitGemReuse:Safety:violated:8
 
+check_model SharedRegionTransfer Safety 5 \
+    fixed:CInitFixed:pass:ok \
+    early:CInitEarly:Safety:violated:3 \
+    foreign:CInitForeign:Safety:violated:5 \
+    timeout:CInitTimeout:Safety:violated:4 \
+    failedreset:CInitFailedReset:Safety:violated:6
+
 check_model WorldStop NoUnstoppedRead 8 \
     fixed:CInitFixed:pass:ok \
     subset:CInitSubset:NoUnstoppedRead:violated \

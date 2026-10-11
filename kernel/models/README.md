@@ -469,3 +469,47 @@ together. Three things keep them in step:
    restamps says what was reviewed. A comment-only edit keeps the stamp. The
    stamp says only "look again", not what is wrong, and it fires whether or
    not any test exercises the change.
+
+## SharedRegionTransfer.tla -- general partial authority and protocol handoff
+
+This is a first B+C design layer for the shared DMA consumer, not an
+implemented ownership feature. Two abstract cells represent disjoint
+subregions. A nonempty reservation retains only its span; preparation,
+publication, device access and completion observation are separate actions.
+This distinguishes a resource's existence from the correctness of the
+protocol that transfers it. The model is not a complete xHCI ring model.
+
+The correspondence below identifies the existing consumer functions whose
+contracts the general API must replace. In particular, the matching-event
+predicate and typed reservation are proposed stronger contracts, not claims
+that the current driver implements them. A passing model does not validate
+those bodies or supply memory access authority.
+
+| Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
+| --- | --- | --- | --- | --- |
+| `Reserve` | `usb_ctrl_xfer`, `usb_bulk_xfer`, `xhci_run_command` | proposed exclusive subregion reservation at the producer cursor, before writes; current code has cursor arithmetic without this owner | ring wrap -- irrelevant to `Safety`: this layer treats the reserved span as abstract cells, and makes no wrap or ring-progress claim | `f80ef6b020ff` |
+| `Prepare` | `usb_ctrl_xfer`, `usb_bulk_xfer`, `xhci_run_command` | each descriptor cell is initialized before publication | descriptor encodings -- irrelevant to `ReadyBeforeRead`: this property distinguishes initialized cells from uninitialized cells, not the meaning of their bits | `f80ef6b020ff` |
+| `Publish` | `usb_ctrl_xfer`, `usb_bulk_xfer`, `xhci_run_command` | publication consumes CPU permission before the device may access the span; a doorbell is not the exclusive transfer point | cache visibility -- irrelevant to `ReadyBeforeRead`: this property tracks initialization, not whether backing memory contains the latest writes | `f80ef6b020ff` |
+| `DeviceRead`, `DeviceComplete` | `usb_await_event` | environment actions represent device access and completed access to this span; completion truth is an explicit device assumption | device implementation -- irrelevant to `NoOverlap`: the environment nondeterministically reads or completes, and the invariant tests which authority the host holds | `dc7deb50c371` |
+| `ForeignEvent`, `DiscardForeign`, `Observe` | `usb_await_event` | proposed matching-event observation; current helper matches event type only and must be strengthened before it can mint reclaim evidence | raw event decoding -- irrelevant to `Safety`: Matching and Foreign are abstract truth labels, not a proof that the current decoder distinguishes them | `dc7deb50c371` |
+| `Timeout` | `msc_abort_unobserved_transfer` | missing completion retains the pending authority | iteration bound -- irrelevant to `Safety`: timeout may occur at any point after publication and is never completion evidence | `a692e60fbcb5` |
+| `ConfirmReset`, `ResetFailed` | `xhci_halt_and_reset`, `msc_abort_unobserved_transfer` | confirmed quiescence and failure are distinct; failure retains possible device activity | register polling -- irrelevant to `Safety`: confirmed reset is an explicit environment contract, not the act of requesting reset | `e7441c36f643` |
+| `Restart` | `usb_disk_initialize_stages`, `xhci_setup_rings_and_start` | initialization requires quiescence and reclaims retained authority; failure cannot grant it | reset register ordering -- irrelevant to `Safety`: this layer checks authority reclamation, not whether the hardware accepts a new session | `d76137627b1d` |
+
+Properties: `NoOverlap` excludes simultaneous CPU authority and device
+activity on a cell; `ReadyBeforeRead` excludes reading an unprepared cell.
+`Safety` is their conjunction. TLC checks the complete finite state space;
+Apalache typechecks it and checks shallow traces. No liveness, capacity,
+wrap, endpoint recovery, session-identity or cache-order proof is claimed.
+
+The fixed variant passes. Each independent control violates `Safety`:
+
+- `early`: publication before every reserved cell is prepared;
+- `foreign`: reclaim on an unrelated completion while the device is active;
+- `timeout`: reclaim on a timeout alone;
+- `failedreset`: restart after failed reset while device activity remains.
+
+The next connection to code needs general protected backing storage and
+retained region ownership, then generated permissions that carry that same
+region. An erased state token over independently accessible memory would
+not establish `NoOverlap` in the implementation.
