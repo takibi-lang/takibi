@@ -74,11 +74,13 @@ list (maintainer, 2026-10-09).
    system timer DTB reader and xHCI registers through IoHandles; the
    xHCI doorbell and ERDP release are named boundaries). #744 (B2, page.tkb carving regions handed over by a small memory-map
    mint) is done (2026-10-11). Next:
-   #746 (page uniqueness by type in the compact per-page form; the
-   array-element place it builds), then #745 (B3, intrusive_pool absorbed
+   #749 (runtime-length arrays of places, #131's general element rule,
+   chosen over a page-specific built-in), then #746 (page uniqueness by
+   type in the compact per-page form, on #749), then #745 (B3, intrusive_pool absorbed
    into RegionPool, process records holding their permission on #746's
    mechanism, decision 2026-10-11). Performance follow-up, not on the
-   critical path: #748. The landed MMIO step
+   critical path: #748. Consolidating the kernel-driven built-ins into
+   general features is #750, after #746 and #745. The landed MMIO step
    leaves doorbell, ERDP-release and stop/reset observation boundaries for
    #720 to build on. #720 must add exact request/event matching and preserve
    publication and reset behavior. #720 also needs general exclusive backing
