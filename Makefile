@@ -204,6 +204,10 @@ pool-liveness-control: build
 wont-compile-control: build
 	@python3 scripts/buildcheck_wont_compile_samples.py $(TAKIBI)
 
+.PHONY: regions-flag-control
+regions-flag-control: build
+	@python3 scripts/buildcheck_regions_flag.py $(TAKIBI)
+
 .PHONY: effect-matrix-control
 effect-matrix-control: build
 	@tmp=`mktemp`; trap 'rm -f "$$tmp"' EXIT; \
@@ -227,7 +231,7 @@ CHECK_TIMEOUT_SECONDS    := 10
 # CHECK_TIMEOUT_SECONDS, which is what makes "the fast gate is for checks
 # that read tracked files" a mechanism instead of a sentence: a member that
 # waits is killed and this lane goes red.
-langcheck: unused-function-control forbid-unsafe-control effect-matrix-control pool-liveness-control wont-compile-control
+langcheck: unused-function-control forbid-unsafe-control effect-matrix-control pool-liveness-control wont-compile-control regions-flag-control
 	@bash scripts/lane_timing.sh begin langcheck
 	@bash scripts/run_check_lane.sh check $(CHECK_TIMEOUT_SECONDS)
 # -I skips binary files. Without it a build directory left in the worktree
@@ -1843,7 +1847,15 @@ kernelcheck-shell-qemu: kernelbuild-check
 _kernelcheck-shell-qemu:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" python3 scripts/run_kernel_shell_qemu_smoketest.py
 
-kernelcheck-qemu-debug: kernelcheck-qemu-debug-main
+kernelcheck-qemu-debug: kernelcheck-qemu-debug-main kernelcheck-gdb-helpers-qemu
+
+# The documented gdb helpers, run against a live debug kernel (#744 audit).
+.PHONY: kernelcheck-gdb-helpers-qemu _kernelcheck-gdb-helpers-qemu
+kernelcheck-gdb-helpers-qemu: kernelbuild-check
+	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-gdb-helpers-qemu
+
+_kernelcheck-gdb-helpers-qemu:
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_gdb_helpers_qemu.sh
 
 kernelcheck-qemu-debug-main: kernelbuild-check
 	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-qemu-debug-main
