@@ -50,6 +50,30 @@ fn rpi5_gem_attach_bootstrap() !{unsafe} {
     }
 }
 
+// pcie2, its SERDES calibration reset and bcm_reset, at the bases the
+// boot DTB readers left (the board's addresses, or DTB reg entries already
+// compared with them and checked for these sizes). Before pcie2_init.
+fn rpi5_pcie_windows_attach() !{unsafe} {
+    let RegionBytes::Assumed(bridge) =
+        region_bytes_assume(rpi5_pcie2_base, 0x9310) else {};
+    match io_handle_attach(&pcie2, bridge) {
+        IoAttach::Attached => {}
+        IoAttach::TooSmall => { kernel_invariant_stop(); }
+    }
+    let RegionBytes::Assumed(rescal) =
+        region_bytes_assume(rpi5_pcie_rescal_base, 0x10) else {};
+    match io_handle_attach(&pcie_rescal, rescal) {
+        IoAttach::Attached => {}
+        IoAttach::TooSmall => { kernel_invariant_stop(); }
+    }
+    let RegionBytes::Assumed(reset) =
+        region_bytes_assume(rpi5_bcm_reset_base, 0x30) else {};
+    match io_handle_attach(&bcm_reset, reset) {
+        IoAttach::Attached => {}
+        IoAttach::TooSmall => { kernel_invariant_stop(); }
+    }
+}
+
 // The BCM2712 system timer, at a DTB reg entry its reader has already
 // compared with the board's known address.
 fn rpi5_system_timer_attach(base: usize, bytes: usize) -> Rpi5Attach !{unsafe} {

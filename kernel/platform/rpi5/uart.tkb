@@ -152,6 +152,7 @@ fn platform_init() {
     }
     // GPIO14/15 expose RP1's UART0, so the PCIe link, root bridge, and
     // endpoint BARs must exist before the first UART register access.
+    rpi5_pcie_windows_attach();
     if (pcie2_init()) {
         pcie2_rp1_endpoint_setup();
         uart_init();
