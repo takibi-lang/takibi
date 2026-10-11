@@ -5,9 +5,14 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts"))
+from qemu_vcpu_lease import QEMU, lease  # noqa: E402
 
 
 def main():
+    smp = lease()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--elf', type=Path, required=True)
     parser.add_argument('--image', type=Path, required=True)
@@ -16,7 +21,7 @@ def main():
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=False)
     shutil.copyfile(args.image, args.output/'ext2.img')
-    cmd = ['qemu-system-aarch64', '-machine', 'virt', '-cpu', 'cortex-a53', '-smp', '2', '-m', '1024', '-display', 'none', '-monitor', 'none', '-global', 'virtio-mmio.force-legacy=on', '-chardev', f'socket,id=uart,host=127.0.0.1,port={args.uart},server=on,wait=on', '-serial', 'chardev:uart', '-drive', f'file={args.output}/ext2.img,if=none,format=raw,id=vd0', '-device', 'virtio-blk-device,drive=vd0', '-kernel', str(args.elf)]
+    cmd = [QEMU, '-machine', 'virt', '-cpu', 'cortex-a53', "-smp", str(smp), '-m', '1024', '-display', 'none', '-monitor', 'none', '-global', 'virtio-mmio.force-legacy=on', '-chardev', f'socket,id=uart,host=127.0.0.1,port={args.uart},server=on,wait=on', '-serial', 'chardev:uart', '-drive', f'file={args.output}/ext2.img,if=none,format=raw,id=vd0', '-device', 'virtio-blk-device,drive=vd0', '-kernel', str(args.elf)]
     with (args.output/'qemu.log').open('w') as log:
         process = subprocess.Popen(cmd, stdout=log, stderr=log)
         try:

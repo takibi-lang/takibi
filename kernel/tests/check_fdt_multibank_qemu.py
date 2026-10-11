@@ -15,6 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 from await_timing import AwaitTiming  # noqa: E402
+from qemu_vcpu_lease import QEMU, lease  # noqa: E402
 
 # Each boot's wait for its memory line: a fixed budget from QEMU launch, or
 # from release after the DTB is patched. GitHub issue #666 records how much
@@ -188,6 +189,7 @@ def observe_patched_dtb(command: list[str], dtb: Path, expected: bytes,
 
 
 def main() -> int:
+    smp = lease()
     repo = Path(__file__).resolve().parents[2]
     kernel = repo / "kernel/build/qemu/kernel.elf"
     if not kernel.is_file():
@@ -201,10 +203,10 @@ def main() -> int:
         return str(artifacts / f"await-{boot}.jsonl")
 
     command = [
-        "qemu-system-aarch64",
+        QEMU,
         "-machine", "virt",
         "-cpu", "cortex-a53",
-        "-smp", "2",
+        "-smp", str(smp),
         "-m", "1G",
         "-object", "memory-backend-ram,id=ram0,size=512M",
         "-object", "memory-backend-ram,id=ram1,size=512M",
@@ -227,10 +229,10 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="takibi-fdt-hole-") as directory:
         dtb = Path(directory) / "virt.dtb"
         generated = subprocess.run([
-            "qemu-system-aarch64",
+            QEMU,
             "-machine", f"virt,dumpdtb={dtb}",
             "-cpu", "cortex-a53",
-            "-smp", "2",
+            "-smp", str(smp),
             "-m", "1G",
             "-object", "memory-backend-ram,id=ram0,size=512M",
             "-object", "memory-backend-ram,id=ram1,size=512M",
@@ -252,10 +254,10 @@ def main() -> int:
                   file=sys.stderr)
             return 1
         discontiguous_command = [
-            "qemu-system-aarch64",
+            QEMU,
             "-machine", "virt",
             "-cpu", "cortex-a53",
-            "-smp", "2",
+            "-smp", str(smp),
             "-m", "1G",
             "-object", "memory-backend-ram,id=ram0,size=512M",
             "-object", "memory-backend-ram,id=ram1,size=512M",
@@ -277,10 +279,10 @@ def main() -> int:
     print("PASS kernel/qemu FDT physical hole: two extents, excluded hole, and boundary round-trips")
 
     low_memory_command = [
-        "qemu-system-aarch64",
+        QEMU,
         "-machine", "virt",
         "-cpu", "cortex-a53",
-        "-smp", "2",
+        "-smp", str(smp),
         "-m", "128M",
         "-display", "none",
         "-monitor", "none",
@@ -299,10 +301,10 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="takibi-fdt-") as directory:
         dtb = Path(directory) / "virt.dtb"
         generated = subprocess.run([
-            "qemu-system-aarch64",
+            QEMU,
             "-machine", f"virt,dumpdtb={dtb}",
             "-cpu", "cortex-a53",
-            "-smp", "2",
+            "-smp", str(smp),
             "-m", "1G",
             "-display", "none",
             "-monitor", "none",
@@ -321,10 +323,10 @@ def main() -> int:
 
         dtb.write_bytes(blob.replace(b"memory\0", b"xemory\0"))
         invalid_command = [
-            "qemu-system-aarch64",
+            QEMU,
             "-machine", "virt",
             "-cpu", "cortex-a53",
-            "-smp", "2",
+            "-smp", str(smp),
             "-m", "1G",
             "-display", "none",
             "-monitor", "none",

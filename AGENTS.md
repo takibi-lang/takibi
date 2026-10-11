@@ -98,7 +98,13 @@ person takes a board or the suite back.
 
 `make allcheck` and `make cicheck` take the suite lease, so one clone runs an
 aggregate at a time. Individual lanes and `make kernelcheck` do not, and run in parallel
-freely.
+freely, within one more limit: every QEMU guest leases as many vCPUs as its
+`-smp` from a host-wide budget (host cores by default,
+`TAKIBI_QEMU_VCPU_BUDGET` overrides), and a lane that would exceed it waits.
+Start QEMU only through `scripts/qemu.sh` after taking that lease
+(`resource_lease_vcpu_acquire` in bash, `qemu_vcpu_lease.lease()` in Python);
+`scripts/check_qemu_vcpu_lease.py` refuses a direct `qemu-system-aarch64`.
+`TAKIBI_QEMU_SMP` is the one setting the lanes' `-smp` comes from.
 The aggregate is the unit because that is what saturates the machine: measured
 on a 24-core host, twelve concurrent QEMU lanes all passed, while three
 concurrent aggregates -- each adding a compiler build and the unit suite --

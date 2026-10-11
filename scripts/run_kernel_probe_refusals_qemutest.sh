@@ -34,7 +34,10 @@ fi
 . "$REPO_ROOT/scripts/kernel_elf_freshness.sh"
 kernel_elf_refuse_stale "$ELF" || exit 1
 mkdir -p "$ARTIFACT_DIR"
+. "$REPO_ROOT/scripts/resource_lease.sh"
+resource_lease_vcpu_acquire "$TAKIBI_QEMU_SMP"
 python3 - "$REPO_ROOT" "$ARTIFACT_DIR" "$ELF" <<'PY'
+import os
 import pathlib
 import signal
 import shutil
@@ -48,8 +51,8 @@ shutil.copyfile(root / 'kernel/build/user/ext2.img', disk)
 uart = artifacts / 'uart.log'
 uart.write_bytes(b'')
 marker = 'probe-ticks: missing-peer controls complete'
-command = ['qemu-system-aarch64', '-machine', 'virt', '-cpu', 'cortex-a53',
-           '-smp', '2', '-m', '1024', '-display', 'none', '-monitor', 'none',
+command = [str(root / 'scripts/qemu.sh'), '-machine', 'virt', '-cpu', 'cortex-a53',
+           '-smp', os.environ['TAKIBI_QEMU_SMP'], '-m', '1024', '-display', 'none', '-monitor', 'none',
            '-serial', 'file:' + str(uart), '-global', 'virtio-mmio.force-legacy=on',
            '-drive', f'file={disk},if=none,format=raw,id=vd0',
            '-device', 'virtio-blk-device,drive=vd0',

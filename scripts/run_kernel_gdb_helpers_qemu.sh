@@ -12,8 +12,10 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ARTIFACT_DIR="${KERNEL_GDB_HELPERS_ARTIFACT_DIR:-${TAKIBI_LANE_ARTIFACT_ROOT:-$REPO_ROOT/_build}/kernel-gdb-helpers-qemu}"
 mkdir -p "$ARTIFACT_DIR"
 
-qemu-system-aarch64 \
-    -machine virt -cpu cortex-a53 -smp 2 -m 1024 -display none -monitor none \
+. "$REPO_ROOT/scripts/resource_lease.sh"
+resource_lease_vcpu_acquire "$TAKIBI_QEMU_SMP"
+"$REPO_ROOT/scripts/qemu.sh" \
+    -machine virt -cpu cortex-a53 -smp "$TAKIBI_QEMU_SMP" -m 1024 -display none -monitor none \
     -serial "file:$ARTIFACT_DIR/serial.log" \
     -gdb "tcp:127.0.0.1:$GDB_PORT" -S \
     -global virtio-mmio.force-legacy=on \

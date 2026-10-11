@@ -175,6 +175,60 @@ timeout 2 env TAKIBI_SESSION_REGISTRY="$registry" TAKIBI_SESSION=agent-next \
     }
 kill -KILL "$suite_child" 2>/dev/null || true
 
+# GitHub issue #719: QEMU guests lease vCPUs from a host-wide budget. With a
+# budget of 4 and 3 held, a guest of 2 waits rather than oversubscribing,
+# while a guest of 1 still fits.
+vcpu() {
+    # vcpu SESSION TIMEOUT SCRIPT -- run SCRIPT with a budget of 4 vCPUs.
+    local session="$1" wait="$2"
+    shift 2
+    env -u TAKIBI_RESOURCE_LEASE_HELD TAKIBI_QEMU_VCPU_BUDGET=4 \
+        TAKIBI_RESOURCE_LEASE_TIMEOUT="$wait" \
+        TAKIBI_SESSION_REGISTRY="$registry" TAKIBI_SESSION="$session" \
+        bash -c ". '$helper'; $*"
+}
+vcpu lane-a 5 'resource_lease_vcpu_acquire 3 lane-a; exec sleep 30' 2>/dev/null &
+vcpu_a=$!
+sleep 0.5
+if vcpu lane-b 1 'resource_lease_vcpu_acquire 2 lane-b' >"$tmp_dir/vcpu-wait.log" 2>&1; then
+    pkill -KILL -P "$vcpu_a" 2>/dev/null || true
+    fail "a guest of 2 vCPUs started while 3 of a budget of 4 were held"
+fi
+grep -F "waiting for 1 more of 2 vCPUs (budget 4): lane-a lane-a x3" \
+    "$tmp_dir/vcpu-wait.log" >/dev/null \
+    && claim || fail "the vCPU wait did not say who holds the budget: $(cat "$tmp_dir/vcpu-wait.log")"
+vcpu lane-c 1 'resource_lease_vcpu_acquire 1 lane-c' \
+    && claim || fail "a guest of 1 vCPU did not fit beside 3 of 4"
+
+# Two waiters that each need 3 must not deadlock on partial holds: the
+# allocator lets one gather all of its slots before the other takes any.
+vcpu lane-d 10 'resource_lease_vcpu_acquire 3 lane-d; exec sleep 1' 2>/dev/null &
+vcpu_d=$!
+sleep 0.3
+vcpu lane-e 10 'resource_lease_vcpu_acquire 3 lane-e' 2>/dev/null &
+vcpu_e=$!
+sleep 0.3
+# $! is the subshell running the function; the lease is held by its child.
+pkill -KILL -P "$vcpu_a" 2>/dev/null || true
+wait "$vcpu_a" 2>/dev/null || true
+wait "$vcpu_d" && wait "$vcpu_e" \
+    && claim || fail "two waiters for 3 of 4 vCPUs did not both run in turn"
+
+# The QEMU shim refuses a guest larger than its runner's lease, including a
+# runner whose Python subprocess closed the inherited descriptors.
+mkdir -p "$tmp_dir/bin"
+printf '#!/bin/sh\necho fake-qemu-started\n' >"$tmp_dir/bin/qemu-system-aarch64"
+chmod +x "$tmp_dir/bin/qemu-system-aarch64"
+shim="$repo_root/scripts/qemu.sh"
+if PATH="$tmp_dir/bin:$PATH" vcpu lane-f 1 "'$shim' -smp 2" >/dev/null 2>&1; then
+    fail "the QEMU shim started a guest without a vCPU lease"
+fi
+claim
+PATH="$tmp_dir/bin:$PATH" vcpu lane-g 1 "resource_lease_vcpu_acquire 2 lane-g; \
+    python3 -c 'import subprocess, sys; subprocess.run([sys.argv[1], \"-smp\", \"2\"], check=True)' '$shim'" \
+    | grep -qx fake-qemu-started \
+    && claim || fail "the QEMU shim refused a guest its Python runner had leased"
+
 # Status is readable by a person deciding whether to wait.
 status="$(env -u TAKIBI_RESOURCE_LEASE_HELD \
     TAKIBI_SESSION_REGISTRY="$registry" TAKIBI_SESSION=agent-a bash -c \
@@ -186,4 +240,5 @@ esac
 
 echo "PASS resource-lease: $cases claims -- boards are exclusive across clones, released by a" \
      "dying holder, kept by one that outlives its runner, reused when nested;" \
-     "suite children do not inherit; board failures remain reported"
+     "suite children do not inherit; board failures remain reported;" \
+     "QEMU guests wait for vCPUs within the host budget"

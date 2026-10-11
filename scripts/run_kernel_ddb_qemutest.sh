@@ -59,8 +59,10 @@ python3 "$REPO_ROOT/scripts/qemu_port_guard.py" "kernel/qemu ddb" \
     "tcp:$SERIAL_PORT" "tcp:$QMP_PORT" "tcp:$GDB_PORT" \
     "udp:$NETDEV_LOCAL_PORT" "udp:$NETDEV_REMOTE_PORT" || exit 1
 
-qemu-system-aarch64 \
-    -machine virt -cpu cortex-a53 -smp 2 -m 1024 -display none \
+. "$REPO_ROOT/scripts/resource_lease.sh"
+resource_lease_vcpu_acquire "$TAKIBI_QEMU_SMP"
+"$REPO_ROOT/scripts/qemu.sh" \
+    -machine virt -cpu cortex-a53 -smp "$TAKIBI_QEMU_SMP" -m 1024 -display none \
     -qmp "tcp:127.0.0.1:$QMP_PORT,server=on,wait=off" \
     -gdb "tcp:127.0.0.1:$GDB_PORT" -S \
     -chardev "socket,id=debug_uart,host=127.0.0.1,port=$SERIAL_PORT,server=on,wait=off" \

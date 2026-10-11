@@ -19,6 +19,7 @@ ELF = ROOT / "kernel/build/qemu/kernel.elf"
 
 
 def main():
+    smp = lease(4)
     artifact = Path(os.environ.get("TAKIBI_LANE_ARTIFACT_ROOT", ROOT / "_build")) / "kernel-churn-gdb-qemu"
     artifact.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="tk-churn-test-") as temporary:
@@ -27,8 +28,8 @@ def main():
         helper.qmp_socket = directory / "qmp"
         with (artifact / "qemu.log").open("w") as output:
             guest = subprocess.Popen([
-                "qemu-system-aarch64", "-machine", "virt", "-cpu", "cortex-a53",
-                "-smp", "4", "-m", "1024", "-display", "none", "-monitor", "none",
+                QEMU, "-machine", "virt", "-cpu", "cortex-a53",
+                "-smp", str(smp), "-m", "1024", "-display", "none", "-monitor", "none",
                 "-serial", "none", "-S", "-qmp",
                 f"unix:{helper.qmp_socket},server=on,wait=off", "-kernel", str(ELF)],
                 stdout=output, stderr=output)
@@ -45,6 +46,7 @@ def main():
                     script.write_text('''maintenance packet Qqemu.PhyMemMode:1
 python
 import re
+from qemu_vcpu_lease import QEMU, lease
 with open("''' + str(ROOT / "_build/kernel-churn-layout.gdb") + '''") as stream:
     layout = {key: int(value) for key, value in re.findall(r"^set \\$takibi_(\\S+) = ([0-9]+)$", stream.read(), re.M)}
 def addr(name): return int(gdb.parse_and_eval('&' + name))

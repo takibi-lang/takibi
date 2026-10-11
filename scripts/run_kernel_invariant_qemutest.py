@@ -10,9 +10,11 @@ import select
 import subprocess
 import sys
 import time
+from qemu_vcpu_lease import QEMU, lease
 
 
 def main():
+    smp = lease(1)
     elf = Path(sys.argv[1]).resolve()
     out = Path(os.environ.get("TAKIBI_LANE_ARTIFACT_ROOT", "_build")) / "kernel-invariant-qemu"
     out.mkdir(parents=True, exist_ok=True)
@@ -20,8 +22,8 @@ def main():
     elf = (out / "kernel.elf").resolve()
     elf.write_bytes(loaded)
     data = bytearray()
-    command = ["qemu-system-aarch64", "-machine", "virt", "-cpu", "cortex-a53",
-               "-smp", "1", "-m", "128", "-display", "none", "-monitor", "none",
+    command = [QEMU, "-machine", "virt", "-cpu", "cortex-a53",
+               "-smp", str(smp), "-m", "128", "-display", "none", "-monitor", "none",
                "-serial", "stdio", "-kernel", str(elf)]
     with (out / "qemu.log").open("wb") as errors:
         guest = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=errors)

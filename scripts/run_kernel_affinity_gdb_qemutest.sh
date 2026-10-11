@@ -96,8 +96,10 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM HUP
 
-qemu-system-aarch64 \
-    -machine virt -cpu cortex-a53 -smp 2 -m 1024 -display none -monitor none \
+. "$REPO_ROOT/scripts/resource_lease.sh"
+resource_lease_vcpu_acquire "$TAKIBI_QEMU_SMP"
+"$REPO_ROOT/scripts/qemu.sh" \
+    -machine virt -cpu cortex-a53 -smp "$TAKIBI_QEMU_SMP" -m 1024 -display none -monitor none \
     -serial "tcp:127.0.0.1:$SERIAL_PORT,server=on,wait=on" \
     -gdb "tcp:127.0.0.1:$GDB_PORT" \
     -global virtio-mmio.force-legacy=on \

@@ -102,9 +102,12 @@ QEMU_LAUNCH_NS="$(date +%s%N)"
 # Keep the user-network subnet aligned with the kernel's fixed test address.
 # hostfwd terminates only on loopback, so the demo is local to the developer
 # machine rather than exposed on the LAN.
+. "$REPO_ROOT/scripts/resource_lease.sh"
+QEMU_SMP="${KERNEL_QEMU_SHELL_SMP:-$TAKIBI_QEMU_SMP}"
+resource_lease_vcpu_acquire "$QEMU_SMP"
 QEMU_COMMAND=(
-    qemu-system-aarch64 \
-    -machine virt -cpu cortex-a53 -smp "${KERNEL_QEMU_SHELL_SMP:-2}" -m 1024 -display none -monitor none \
+    "$REPO_ROOT/scripts/qemu.sh" \
+    -machine virt -cpu cortex-a53 -smp "$QEMU_SMP" -m 1024 -display none -monitor none \
     -qmp "unix:$QMP_SOCKET,server=on,wait=off" \
     -chardev "socket,id=debug_uart,host=127.0.0.1,port=$QEMU_SERIAL_PORT,server=on,wait=off" \
     -serial chardev:debug_uart \

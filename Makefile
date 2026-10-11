@@ -17,7 +17,8 @@
 ## guest stops mid-boot, always at `linux socket: listener ready port=8080`,
 ## and is then reported as an interactive-HTTPd lifecycle stall. Keeping
 ## 2 * jobs at or under the core count avoids that condition rather than
-## discovering it.
+## discovering it. QEMU lanes are additionally capped by the host-wide vCPU
+## budget in scripts/resource_lease.sh, so TAKIBI_JOBS now sizes builds.
 TAKIBI_JOBS ?= $(shell nproc)
 ifeq ($(MAKELEVEL),0)
 MAKEFLAGS += -j$(TAKIBI_JOBS)

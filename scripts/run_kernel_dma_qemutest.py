@@ -6,6 +6,7 @@ import select
 import subprocess
 import sys
 import time
+from qemu_vcpu_lease import QEMU, lease
 
 EXPECTED = [
     "PASS dma: completed error returns all CPU authority",
@@ -24,13 +25,14 @@ def transcript_finished(captured):
 
 
 def main():
+    smp = lease(1)
     if len(sys.argv) != 2:
         raise SystemExit("usage: run_kernel_dma_qemutest.py ELF")
     artifacts = Path(os.environ.get("TAKIBI_LANE_ARTIFACT_ROOT", "_build")) / "dma-qemu"
     artifacts.mkdir(parents=True, exist_ok=True)
     process = subprocess.Popen([
-        "qemu-system-aarch64", "-machine", "virt", "-cpu", "cortex-a53",
-        "-smp", "1", "-m", "128M", "-display", "none", "-monitor", "none",
+        QEMU, "-machine", "virt", "-cpu", "cortex-a53",
+        "-smp", str(smp), "-m", "128M", "-display", "none", "-monitor", "none",
         "-serial", "stdio", "-nic", "none", "-kernel", sys.argv[1],
     ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     captured = bytearray()

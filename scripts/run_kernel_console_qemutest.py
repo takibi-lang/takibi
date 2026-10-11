@@ -15,6 +15,7 @@ import tempfile
 import time
 
 from capture_kernel_console import capture, qmp
+from qemu_vcpu_lease import QEMU, lease
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -51,6 +52,7 @@ def seed(endpoint, directory, body):
 
 
 def main():
+    smp = lease()
     artifacts = Path(os.environ.get("TAKIBI_LANE_ARTIFACT_ROOT", ROOT / "_build")) / "kernel-console-qemu"
     artifacts.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="tk-console-test-") as temporary:
@@ -58,8 +60,8 @@ def main():
         endpoint = directory / "qmp"
         with (artifacts / "qemu.log").open("w") as output:
             guest = subprocess.Popen([
-                "qemu-system-aarch64", "-machine", "virt", "-cpu", "cortex-a53",
-                "-smp", "2", "-m", "1024", "-display", "none", "-monitor", "none",
+                QEMU, "-machine", "virt", "-cpu", "cortex-a53",
+                "-smp", str(smp), "-m", "1024", "-display", "none", "-monitor", "none",
                 "-serial", "none", "-S", "-qmp",
                 f"unix:{endpoint},server=on,wait=off", "-kernel", str(ELF)],
                 stdout=output, stderr=output)
