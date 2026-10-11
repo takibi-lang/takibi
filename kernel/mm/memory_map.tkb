@@ -1,3 +1,4 @@
+use "kernel/mm/page.tkb";
 // The memory mint (GitHub issue #744, #637 step B2): the few places where
 // RAM the kernel discovered becomes something its code may touch. What it
 // trusts is that the page allocator's records are right -- a page it hands
@@ -30,4 +31,70 @@ fn memory_map_pool_record(g: borrow LockedCellGuard[id],
     return unsafe {
         (((&boot_page_pool_cell) as usize) as *BootPagePool) as &mut BootPagePool
     };
+}
+
+// The runtime page metadata's bytes: `span` bytes at `base`, which
+// page_allocator_plan_metadata chose inside RAM the DTB reported, clear of
+// the live DTB and of the bootstrap pages in use. Minted once, at boot.
+fn memory_map_metadata_bytes(base: usize, span: usize) -> RegionBytes !{unsafe} {
+    return region_bytes_assume(base, span);
+}
+
+// An empty extent table, the allocator's until memory is applied. It holds
+// no bytes, so nothing can be reached through it.
+fn memory_map_empty_extents() -> RegionTyped(PageExtent) !{unsafe} {
+    let RegionBytes::Assumed(none) =
+        region_bytes_assume((&boot_page_pool_cell) as usize, 0) else {};
+    return region_bytes_typed__PageExtent(none);
+}
+
+// A page the allocator handed out, as its bytes, alive while its owner is.
+fn memory_map_page_bytes(owner: borrow PageOwner[page]) -> [u8; PAGE_SIZE..] @ page
+        !{unsafe} {
+    let base: *u8 = unsafe { page_physical_address(owner) as *u8 };
+    // Bare integer literals, not `PAGE_SIZE as isize`: Const_env.bound_value
+    // only folds a bare IntLit or a bare Var naming a registered const.
+    // Must stay numerically equal to PAGE_SIZE (4096).
+    let bytes: [u8; PAGE_SIZE..] = unsafe { base[0..<4096] };
+    return bytes;
+}
+
+// Copy a page the allocator manages (page_copy_mapped_physical has checked
+// that `source_physical` names one) into a page the caller owns.
+fn memory_map_copy_managed_page(source_physical: usize,
+                                destination: borrow PageOwner[page]) !{unsafe} {
+    let source_base: *u8 = unsafe { source_physical as *u8 };
+    let source = unsafe {
+        source_base[0 as isize..<PAGE_SIZE as isize]
+    };
+    slice_copy(memory_map_page_bytes(destination), source);
+}
+
+// page_run_probe only: every page of a run it was just given is payload to
+// its last bytes. Writes a pattern at the end of each page and reads it back.
+fn memory_map_run_tail_probe(base: usize, count: usize) -> bool !{unsafe} {
+    let mut payload_only: bool = true;
+    for k: usize in 0..<count {
+        let tail: *u8 =
+            unsafe { (base + (k + 1) * PAGE_SIZE - 8) as *u8 };
+        for i: isize in 0..<8 { tail[i] = 0xC3; }
+    }
+    for k: usize in 0..<count {
+        let tail: *u8 =
+            unsafe { (base + (k + 1) * PAGE_SIZE - 8) as *u8 };
+        for i: isize in 0..<8 {
+            if (tail[i] != 0xC3) { payload_only = false; }
+        }
+    }
+    return payload_only;
+}
+
+// A page run the allocator handed out, as a byte region; the run's
+// ownership moves into it (#743). The pages go back to the allocator with
+// page_run_transferred_release_physical.
+fn memory_map_run_region(owner: sink PageRunOwner[run]) -> RegionBytes !{unsafe} {
+    let base: usize = page_run_physical_address(owner);
+    let bytes: usize = page_run_count(owner) * PAGE_SIZE;
+    let _first: usize = page_run_owner_transfer_index(owner);
+    return region_bytes_assume(base, bytes);
 }
