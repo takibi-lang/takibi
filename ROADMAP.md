@@ -76,9 +76,11 @@ list (maintainer, 2026-10-09).
    (`kernel/RAW_MINT_FILES`); calls of `region_bytes_assume` count as mints.
    Step A is done (2026-10-11: RPi5 PCIe, virtio-net, virtio-blk, the
    system timer DTB reader and xHCI registers through IoHandles; the
-   xHCI doorbell and ERDP release are named boundaries). Next: step B
-   (page and pool chunks over regions, using the shared bounds-contract
-   prototype). xHCI MMIO step A coordinates with B's #720 partial-DMA
+   xHCI doorbell and ERDP release are named boundaries). Next: step B,
+   in three tracked steps, all required for the minimal mint list:
+   #743 (B1, page runs handed out as regions; fd_table and process_image
+   leave the list), then #744 (B2, page.tkb as splits of a declared memory
+   region), then #745 (B3, intrusive_pool absorbed into RegionPool). xHCI MMIO step A coordinates with B's #720 partial-DMA
    design: preserve matching-completion, publication and stop/reset hooks;
    use IoHandles there without adding a DMA-specific storage rule. B's
    #720 also needs general exclusive backing storage on #637/#672:
