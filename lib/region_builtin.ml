@@ -98,6 +98,31 @@ fn region_count(r: borrow @R@[b, o, n]) -> usize {
     return r.length;
 }
 
+// A byte region read as elements of this type (GitHub issue #744): the
+// bytes must start at the type's alignment and hold a whole number of
+// elements, or they come back unchanged. The typed region is a new
+// identity; nothing of the byte region survives the conversion.
+must_use variant @BT@ {
+    Misaligned(exists c: addr. exists n: usize. region__u8[c, 0, n]);
+    Typed(exists c: addr. exists n: usize. @R@[c, 0, n]);
+}
+
+private fn region_typed_mint__@T@(address: usize, count: usize @ m)
+        -> @R@[c, 0, m] {
+    let mut r: @R@[c, 0, m] = { address, count };
+    return r;
+}
+
+fn region_bytes_typed__@T@(bytes: sink region__u8[c, o, n]) -> @BT@ {
+    let address: usize = bytes.address;
+    let length: usize = bytes.length;
+    region_discharge(bytes);
+    if ((address & (alignof(@T@) - 1)) != 0 || length % sizeof(@T@) != 0) {
+        return @BT@::Misaligned(region_bytes_mint(address, length));
+    }
+    return @BT@::Typed(region_typed_mint__@T@(address, length / sizeof(@T@)));
+}
+
 fn region_release(r: sink @R@[b, o, n]) { region_discharge(r); }
 
 // -- region_table: the only way to store permissions (#672, second layer) --
@@ -970,6 +995,7 @@ let instance ?(record = false) elem =
    else template ^ region_at_primitive_source)
   |> replace_all ~sub:"@R@" ~by:("region__" ^ elem)
   |> replace_all ~sub:"@S@" ~by:("RegionSplit__" ^ elem)
+  |> replace_all ~sub:"@BT@" ~by:("RegionTyped__" ^ elem)
   |> replace_all ~sub:"@O@" ~by:("RegionOf__" ^ elem)
   |> replace_all ~sub:"@TBL@" ~by:("RegionTable__" ^ elem)
   |> replace_all ~sub:"@RS@" ~by:("RegionReleaseSlot__" ^ elem)
@@ -1044,7 +1070,7 @@ let element_types (prog : Ast.toplevel list) claimed =
          "RegionSlot__"; "RegionPool__"; "RegionPoolGuard__"; "RegionGrow__";
          "RegionShrink__"; "RegionAdopt__"; "RegionPin__"; "RegionPinned__";
          "RegionUnpin__"; "RegionRetire__"; "RegionNext__";
-         "RegionInspection__"; "RegionInspectionProbe__" ] in
+         "RegionInspection__"; "RegionInspectionProbe__"; "RegionTyped__" ] in
   List.iter (fun item -> scan (Ast.show_toplevel item)) prog;
   Hashtbl.fold (fun k () acc -> k :: acc) found [] |> List.sort compare
 

@@ -9939,6 +9939,39 @@ fn f() -> *usize { return &temp_address_outer().r.a; }");
        "variant Choice7k { A; B(usize); }
         fn choose7k(c: Choice7k) { let Choice7k::A = c; }");
 
+  (* GitHub issue #744: a byte region read as typed elements. *)
+  Alcotest.test_case "region_bytes_typed: typed region indexed under a count check" `Quick
+    (fun () -> ignore (infer_regions "struct Meta744 { occupied: bool; next: usize; }
+        private let mut backing744: [u8; 64] align(16);
+        fn use744(i: usize) -> usize !{unsafe} {
+          let RegionBytes::Assumed(bytes) = region_bytes_assume((&backing744) as usize, 64) else {};
+          match region_bytes_typed__Meta744(bytes) {
+            RegionTyped(Meta744)::Misaligned(back) => { region_release(back); return 0; }
+            RegionTyped(Meta744)::Typed(meta) => {
+              let n: usize = region_count(meta);
+              if (i < region_count(meta)) { region_at(meta, i).next = 5; }
+              region_release(meta);
+              return n;
+            }
+          }
+        }"));
+
+  Alcotest.test_case "region_bytes_typed: an index the count does not bound is refused" `Quick
+    (expect_region_error "region_at requires" "struct Meta744 { occupied: bool; next: usize; }
+        private let mut backing744: [u8; 64] align(16);
+        fn use744(i: usize) -> usize !{unsafe} {
+          let RegionBytes::Assumed(bytes) = region_bytes_assume((&backing744) as usize, 64) else {};
+          match region_bytes_typed__Meta744(bytes) {
+            RegionTyped(Meta744)::Misaligned(back) => { region_release(back); return 0; }
+            RegionTyped(Meta744)::Typed(meta) => {
+              let n: usize = region_count(meta);
+              region_at(meta, i).next = 5;
+              region_release(meta);
+              return n;
+            }
+          }
+        }");
+
   (* GitHub issue #744: place_borrow lends a place's content for its Full
      arm; it is the take and the proven-empty put around that arm. *)
   Alcotest.test_case "place_borrow: content borrowed twice, place left full" `Quick

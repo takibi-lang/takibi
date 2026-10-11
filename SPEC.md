@@ -3329,6 +3329,14 @@ match region_split(rest, wanted) {                   // run-time split point
   element type (these predate generic variants, below). Names beginning
   `__region_` are reserved.
 
+`region_bytes_typed__T(bytes)` reads a byte region as elements of `T`
+(GitHub issue #744). It answers `RegionTyped(T)::Typed(region)` when the
+bytes start at `T`'s alignment and hold a whole number of elements;
+otherwise it answers `Misaligned(bytes)` and hands the bytes back
+unchanged. The typed region has a new identity, and the byte region is
+consumed. An element is indexed with `region_at` under a check of
+`region_count`.
+
 **region_table** stores permissions: a pool over a claimed array.
 
 ```
