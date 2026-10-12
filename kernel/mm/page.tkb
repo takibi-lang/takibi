@@ -263,6 +263,11 @@ struct BootPagePool align(16) {
     // own next_generation belongs to popping the head, and a run is not
     // popped -- it is chosen by position and unlinked.
     run_generation: usize;
+    // GitHub issue #746: pages the free list chose whose places were Out
+    // (quarantined), and how many of those have been logged. The MMU-off
+    // boot path cannot take the console lock, so page_alloc logs for it.
+    frames_out_quarantined: usize;
+    frames_out_logged: usize;
 }
 
 // GitHub issue #479. Everything below this line is shared mutable
@@ -1172,6 +1177,8 @@ private fn page_allocator_init_with(pool: borrow &mut BootPagePool,
     pool.runtime_applied = false;
     pool.double_remove_count = 0;
     pool.run_generation = 1;
+    pool.frames_out_quarantined = 0;
+    pool.frames_out_logged = 0;
 }
 
 must_use variant PageAllocatorMemoryResult {
@@ -2021,7 +2028,14 @@ fn page_alloc(owner: PageOwnerTag) -> PageAllocResult !{allocates} {
             inner
         }
     };
+    let unlogged: usize = pool.frames_out_quarantined - pool.frames_out_logged;
+    pool.frames_out_logged = pool.frames_out_quarantined;
     locked_cell_give(&boot_page_pool_cell, guard);
+    if (unlogged != 0) {
+        kernel_boot_log_resource_exhausted(
+            "page (free list chose a page whose place is out; quarantined)" as *u8,
+            unlogged);
+    }
     return result;
 }
 
@@ -2076,9 +2090,10 @@ private fn page_owner_from_places(frames: borrow PageFrameStore[fbc, fbo, fbn, f
         index: usize, physical: usize, generation: usize) -> PageAllocResult {
     match page_frames_take(frames, pool, extents, physical, 1) {
         PageFrameTake::Out => {
-            // No log here: page_alloc_boot reaches this with the MMU off,
-            // where the console lock cannot be taken. The occupied page is
-            // what a page-owner report then finds.
+            // Counted, not logged here: page_alloc_boot reaches this with
+            // the MMU off, where the console lock cannot be taken.
+            // page_alloc logs every count it has not logged yet.
+            pool.frames_out_quarantined = pool.frames_out_quarantined + 1;
             return PageAllocResult::OutOfMemory;
         }
         PageFrameTake::Taken(frame) => {
