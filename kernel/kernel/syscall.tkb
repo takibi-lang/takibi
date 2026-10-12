@@ -7694,9 +7694,9 @@ private inline fn syscall_getdents64_current(
                             }
                             let entry = entry_tail[0..<8];
                             let entry_inode: usize =
-                                ext2_u32(entry as *u8, 0) as usize;
+                                ext2_slice_u32(entry, 0) as usize;
                             let record_length: usize =
-                                ext2_u16(entry as *u8, 4) as usize;
+                                ext2_slice_u16(entry, 4) as usize;
                             let name_length: usize = entry[6] as usize;
                             if (record_length < 8 ||
                                 record_length > chunk - cursor ||
