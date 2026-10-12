@@ -622,6 +622,31 @@ let struct_instance ty = match strip_singleton ty with
    This computation is later re-verified against the real DataLayout in
    lib/llvm_gen.ml (sync rule, like every other type_inf/llvm_gen pair in
    this project) rather than trusted silently. *)
+(* GitHub issue #637 (network slice): a byte slice may be viewed as a
+   packed wire header through a reference (`frame as &mut TcpHdr`) only when
+   every byte pattern is a valid value of the header: a `packed` struct with
+   no declared alignment whose fields are integers (host or wire order),
+   arrays of them, or such headers in turn. Returns the reason it is not. *)
+let rec overlay_invalid_reason (senv : senv) (ty : Ast.type_expr) : string option =
+  match ty with
+  | Ast.TypeI8 | Ast.TypeI16 | Ast.TypeI32 | Ast.TypeI64
+  | Ast.TypeU8 | Ast.TypeU16 | Ast.TypeU32 | Ast.TypeU64
+  | Ast.TypeU16Be | Ast.TypeU32Be -> None
+  | Ast.TypeArray (elem, _) -> overlay_invalid_reason senv elem
+  | Ast.TypeNamed name ->
+      (match StringMap.find_opt name senv with
+       | None -> Some (Printf.sprintf "'%s' is not a struct (an enum or other \
+                                       named type has invalid bit patterns)" name)
+       | Some (_, false, _) -> Some (Printf.sprintf "'%s' is not packed" name)
+       | Some (_, true, Some _) ->
+           Some (Printf.sprintf "'%s' declares an alignment" name)
+       | Some (fields, true, None) ->
+           List.find_map (fun (fname, fty) ->
+             Option.map (fun why -> Printf.sprintf "field '%s.%s': %s" name fname why)
+               (overlay_invalid_reason senv fty)) fields)
+  | _ -> Some (Printf.sprintf "%s has invalid bit patterns or is not \
+                               plain bytes" (Ast.show_type_expr ty))
+
 let rec const_type_size (senv : senv) (ty : Ast.type_expr) : int option =
   match ty with
   | Ast.TypeBool | Ast.TypeU8 | Ast.TypeI8 -> Some 1
@@ -3456,6 +3481,40 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                          (to_string src_ty) (to_string tgt) (to_string tgt)));
                      note_type_checker_unsafe_use ();
                      tgt
+                 | TSlice (_, n, access) ->
+                     let pointee = match tgt with
+                       | TRef t | TRefMut t -> t | _ -> assert false in
+                     (* GitHub issue #637: a checked header overlay. The
+                        reference is derived from the slice, so the region
+                        taint (ast_region_kind treats &T as a pointer) ties
+                        it to the slice's borrow; it is not a raw pointer,
+                        so field access through it is not raw access. *)
+                     let mutable_ref = (match tgt with TRefMut _ -> true | _ -> false) in
+                     if mutable_ref && access = Ast.SliceReadonly then
+                       raise (TypeError (e.loc, Printf.sprintf
+                         "cannot view readonly %s as %s: use `as &T`"
+                         (to_string src_ty) (to_string tgt)));
+                     let ast_pointee = to_ast pointee in
+                     (match overlay_invalid_reason senv ast_pointee with
+                      | Some why ->
+                          raise (TypeError (e.loc, Printf.sprintf
+                            "cannot view %s as %s: a header overlay needs a \
+                             packed struct whose every byte pattern is valid; %s"
+                            (to_string src_ty) (to_string tgt) why))
+                      | None -> ());
+                     (match const_type_size senv ast_pointee with
+                      | Some sz when n > 0 && n >= sz -> ()
+                      | Some sz ->
+                          raise (TypeError (e.loc, Printf.sprintf
+                            "cannot view %s as %s: proven minimum length %d \
+                             is smaller than sizeof(%s) = %d bytes"
+                            (to_string src_ty) (to_string tgt) n
+                            (to_string pointee) sz))
+                      | None ->
+                          raise (TypeError (e.loc, Printf.sprintf
+                            "cannot view %s as %s: sizeof is not provable here"
+                            (to_string src_ty) (to_string tgt))));
+                     tgt
                  | _ ->
                      raise (TypeError (e.loc, Printf.sprintf
                        "cannot cast %s to %s: &/&mut can only be minted with \
@@ -3728,7 +3787,8 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                  | _ ->
                      raise (TypeError (e.loc,
                        Printf.sprintf
-                         "cannot cast a slice to %s (only `as *T` is allowed)"
+                         "cannot cast a slice to %s (only `as *T`, or `as &T` / \
+                          `as &mut T` for a packed header, is allowed)"
                          (to_string tgt))))
             | TRefinedInt (lo, hi, _) ->
                 (* GitHub issue #72: a BARE cast target (`x as usize`, not the

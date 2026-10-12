@@ -3654,6 +3654,11 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                      "slice cast source must be an array variable, an \
                       array-typed struct field, a string literal, or a \
                       slice")))
+       | (TypeRef _ | TypeRefMut _) when (match src_ty with TypeSlice _ -> true | _ -> false) ->
+           (* GitHub issue #637: a checked header overlay (type_inf.ml
+              proved the length and the header's validity); the pointer
+              half of the slice. *)
+           (target_ty, slice_ptr v)
        | TypePtr pointee_ty when (match src_ty with TypeSlice _ -> true | _ -> false) ->
            (* slice -> pointer: the explicit bridge back into the pointer
               world; just the ptr half of the fat value. GitHub issue #218

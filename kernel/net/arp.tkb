@@ -15,8 +15,8 @@ use "kernel/net/wire.tkb";
 // support for a second local address or VLAN/subinterface.
 //
 // GitHub issue #186: ArpHdr's multi-byte NUMERIC fields (htype/ptype/oper)
-// are typed `u16be` via the `packed be` sugar, so field access through a
-// *ArpHdr pointer performs the required byte-swap directly -- no more
+// are typed `u16be` via the `packed be` sugar, so field access through an
+// &mut ArpHdr header overlay (#637) performs the required byte-swap directly -- no more
 // arp_read_u16be/arp_write_u16be calls for those fields. sha/spa/tha/tpa
 // stay `[u8; N]` (MAC/IP addresses, compared/copied byte-wise, never
 // treated as a swapped numeric value) and are still reached via
@@ -47,10 +47,10 @@ must_use variant KernelArpResult {
 // frame owner and chooses whether to transmit or release it, allowing TCP
 // listen loops to service neighbor discovery without a separate wait phase.
 fn arp_prepare_reply(frame: borrow [u8; 42..]) -> bool {
-    let eth: *EthHdr = frame as *EthHdr;
+    let eth: &mut EthHdr = frame as &mut EthHdr;
     if (eth.ethertype == ETHERTYPE_ARP) {
         let arp = frame[14..<42];
-        let hdr: *ArpHdr = arp as *ArpHdr;
+        let hdr: &mut ArpHdr = arp as &mut ArpHdr;
         if (hdr.htype == 1 && hdr.ptype == ETHERTYPE_IPV4 &&
             hdr.hlen == 6 && hdr.plen == 4 &&
             hdr.oper == 1 &&

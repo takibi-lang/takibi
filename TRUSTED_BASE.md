@@ -90,6 +90,12 @@ Calling a mint does not grant the caller raw access. Authority-indexed reference
 returns carry the existing local loan checks into ordinary field consumers;
 raw-to-reference conversion is an unsafe assertion within the mint boundary.
 The compiler's generated region primitives retain their explicit trusted source.
+Header overlays (`bytes as &mut TcpHdr`, SPEC.md "Non-Raw Reference
+Types") replace raw wire-header pointers in the network code. The compiler
+is trusted to decide that every byte pattern is a valid value of the header
+(packed, no declared alignment, unrefined integer and byte-array fields
+only) and that the slice's proven length covers it; the decision is
+`overlay_invalid_reason` and the length check in lib/type_inf.ml.
 Region backing globals (`region let mut g: [T; N];`, SPEC.md built-in
 region) are the only arrays `region_of`, `region_table_of` and
 `region_table_lock` accept, and the compiler rejects every other use of such

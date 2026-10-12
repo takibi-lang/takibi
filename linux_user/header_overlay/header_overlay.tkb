@@ -1,0 +1,41 @@
+// GitHub issue #637 (network slice): a byte slice viewed as a packed wire
+// header through a checked reference, `frame as &mut Hdr`. The slice's
+// proven length covers the header, every byte pattern is a valid header,
+// and the reference is tied to the slice's borrow, so field access through
+// it is not raw access. What must not compile is in test/test_takibi.ml,
+// "header overlay".
+
+struct packed be Hdr {
+    kind: u16;
+    len: u16;
+    tag: [u8; 4];
+}
+
+let mut frame_bytes: [u8; 12];
+
+fn rewrite(frame: borrow [u8; 8..]) -> u16 {
+    let h: &mut Hdr = frame as &mut Hdr;
+    h.len = 0x0102;
+    return h.kind as u16;
+}
+
+fn peek(frame: borrow [u8; 8..]) -> u16 {
+    let h: &Hdr = frame as &Hdr;
+    return h.len as u16;
+}
+
+fn app_main() {
+    for i: usize in 0..<12 { frame_bytes[i] = 0; }
+    frame_bytes[0] = 0x08;
+    frame_bytes[1] = 0x06;
+    let kind: u16 = rewrite(frame_bytes as [u8; 12..]);
+    uart_puts("kind: ");
+    uart_print_hex(kind as i32);
+    uart_puts("\r\nlen bytes: ");
+    uart_print_hex(frame_bytes[2] as i32);
+    uart_puts(" ");
+    uart_print_hex(frame_bytes[3] as i32);
+    uart_puts("\r\nlen: ");
+    uart_print_hex(peek(frame_bytes as [u8; 12..]) as i32);
+    uart_puts("\r\ndone\r\n");
+}

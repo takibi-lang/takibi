@@ -2148,10 +2148,10 @@ fn pending_tcp_ack_matches(frame: borrow [u8; 1514..], len: i32,
         return false;
     }
     let len_n: i32 = len;
-    let eth: *EthHdr = frame as *EthHdr;
+    let eth: &mut EthHdr = frame as &mut EthHdr;
     if (eth.ethertype != ETHERTYPE_IPV4) { return false; }
     let ip = frame[14..<34];
-    let ip_hdr: *Ipv4Hdr = ip as *Ipv4Hdr;
+    let ip_hdr: &mut Ipv4Hdr = ip as &mut Ipv4Hdr;
     let ihl: u16 = (ip_hdr.version_ihl & 0x0F) * 4;
     let len16: u16 = len_n as u16;
     let total_len: u16 = ip_hdr.total_len as u16;
@@ -2164,7 +2164,7 @@ fn pending_tcp_ack_matches(frame: borrow [u8; 1514..], len: i32,
         return false;
     }
     let tcp = frame[34..<54];
-    let tcp_hdr: *TcpHdr = tcp as *TcpHdr;
+    let tcp_hdr: &mut TcpHdr = tcp as &mut TcpHdr;
     let mut pseudo: [u8; 12];
     slice_copy(pseudo[0..<4], ip[IP_SRC..<IP_DST]);
     slice_copy(pseudo[4..<8], ip[IP_DST..<20]);
@@ -2398,7 +2398,7 @@ fn pending_tcp_any_active(conn: borrow &mut TcpConnection) -> bool {
 // this can never disagree with the segment it's actually checksumming).
 // Must be called last, after every other TCP field has its final value.
 fn fix_tcp_checksum(ip: borrow [u8; 20..], tcp_seg: borrow [u8; 20..]) {
-    let tcp_hdr: *TcpHdr = tcp_seg as *TcpHdr;
+    let tcp_hdr: &mut TcpHdr = tcp_seg as &mut TcpHdr;
     tcp_hdr.checksum = 0;
     let mut pseudo: [u8; 12];
     slice_copy(pseudo[0..<4], ip[IP_SRC..<IP_DST]);
@@ -2420,8 +2420,8 @@ fn build_syn_ack(conn: borrow &mut TcpConnection,
 
     let ip  = eth[14..<34];
     let tcp = eth[34..<54];
-    let ip_hdr:  *Ipv4Hdr = ip as *Ipv4Hdr;
-    let tcp_hdr: *TcpHdr  = tcp as *TcpHdr;
+    let ip_hdr:  &mut Ipv4Hdr = ip as &mut Ipv4Hdr;
+    let tcp_hdr: &mut TcpHdr  = tcp as &mut TcpHdr;
 
     slice_copy(ip[IP_DST..<20],     ip[IP_SRC..<IP_DST]);
     slice_copy(ip[IP_SRC..<IP_DST], OUR_IP as []u8);
@@ -2474,8 +2474,8 @@ fn build_data_reply(conn: borrow &mut TcpConnection,
         slice_copy(eth[6..<12], our_mac as []u8);
 
         let ip = eth[14..<34];
-        let ip_hdr:  *Ipv4Hdr = ip as *Ipv4Hdr;
-        let tcp_hdr: *TcpHdr  = tcp_seg as *TcpHdr;
+        let ip_hdr:  &mut Ipv4Hdr = ip as &mut Ipv4Hdr;
+        let tcp_hdr: &mut TcpHdr  = tcp_seg as &mut TcpHdr;
 
         slice_copy(ip[IP_DST..<20],     ip[IP_SRC..<IP_DST]);
         slice_copy(ip[IP_SRC..<IP_DST], OUR_IP as []u8);
@@ -2513,8 +2513,8 @@ fn build_fin_ack(conn: borrow &mut TcpConnection,
 
     let ip  = eth[14..<34];
     let tcp = eth[34..<54];
-    let ip_hdr:  *Ipv4Hdr = ip as *Ipv4Hdr;
-    let tcp_hdr: *TcpHdr  = tcp as *TcpHdr;
+    let ip_hdr:  &mut Ipv4Hdr = ip as &mut Ipv4Hdr;
+    let tcp_hdr: &mut TcpHdr  = tcp as &mut TcpHdr;
 
     slice_copy(ip[IP_DST..<20],     ip[IP_SRC..<IP_DST]);
     slice_copy(ip[IP_SRC..<IP_DST], OUR_IP as []u8);
@@ -2546,8 +2546,8 @@ fn build_receive_ack(conn: borrow &mut TcpConnection,
 
     let ip = eth[14..<34];
     let tcp = eth[34..<54];
-    let ip_hdr:  *Ipv4Hdr = ip as *Ipv4Hdr;
-    let tcp_hdr: *TcpHdr  = tcp as *TcpHdr;
+    let ip_hdr:  &mut Ipv4Hdr = ip as &mut Ipv4Hdr;
+    let tcp_hdr: &mut TcpHdr  = tcp as &mut TcpHdr;
     slice_copy(ip[IP_DST..<20], ip[IP_SRC..<IP_DST]);
     slice_copy(ip[IP_SRC..<IP_DST], OUR_IP as []u8);
     ip_hdr.ttl = 64;
@@ -2595,10 +2595,10 @@ must_use variant TcpSegmentParseResult {
 }
 
 fn tcp_parse_segment(frame: borrow [u8; 1514..], len: i32) -> TcpSegmentParseResult {
-    let eth: *EthHdr = frame as *EthHdr;
+    let eth: &mut EthHdr = frame as &mut EthHdr;
     if (len >= 54 && len <= 1514 && eth.ethertype == ETHERTYPE_IPV4) {
         let ip = frame[14..<34];
-        let ip_hdr: *Ipv4Hdr = ip as *Ipv4Hdr;
+        let ip_hdr: &mut Ipv4Hdr = ip as &mut Ipv4Hdr;
         let version: u8 = ip_hdr.version_ihl >> 4;
         let ihl:     u16 = (ip_hdr.version_ihl & 0x0f) * 4;
 
@@ -2612,7 +2612,7 @@ fn tcp_parse_segment(frame: borrow [u8; 1514..], len: i32) -> TcpSegmentParseRes
                 inet_checksum(ip[0..<ihl as usize]) == 0 &&
                 slice_eq(ip[IP_DST..<20], OUR_IP as []u8)) {
                 let tcp:     [u8; 20..] = frame[34..<54];
-                let tcp_hdr: *TcpHdr = tcp as *TcpHdr;
+                let tcp_hdr: &mut TcpHdr = tcp as &mut TcpHdr;
                 let tcp_len: u16 = total_len - ihl;
                 let doff:    u8  = tcp_hdr.data_offset >> 4;
 
@@ -3384,10 +3384,10 @@ fn kernel_tcp_send_received(owner: borrow TcpConnectionOwner[connection_pool, co
         slice_copy(frame_bytes[0..<6],
                    remote_mac_bytes[0..<6]);
         slice_copy(frame_bytes[6..<12], our_mac as []u8);
-        let eth_hdr: *EthHdr = frame_bytes as *EthHdr;
+        let eth_hdr: &mut EthHdr = frame_bytes as &mut EthHdr;
         eth_hdr.ethertype = ETHERTYPE_IPV4;
         let ip = frame_bytes[14..<34];
-        let ip_hdr: *Ipv4Hdr = ip as *Ipv4Hdr;
+        let ip_hdr: &mut Ipv4Hdr = ip as &mut Ipv4Hdr;
         ip_hdr.version_ihl = 0x45;
         ip_hdr.dscp_ecn = 0;
         ip_hdr.total_len = (40 + length as u16) as u16be;
@@ -3401,7 +3401,7 @@ fn kernel_tcp_send_received(owner: borrow TcpConnectionOwner[connection_pool, co
                    remote_ip_bytes[0..<4]);
         ip_hdr.checksum = (inet_checksum(ip) as u16) as u16be;
         let tcp = frame_bytes[34..<54];
-        let tcp_hdr: *TcpHdr = tcp as *TcpHdr;
+        let tcp_hdr: &mut TcpHdr = tcp as &mut TcpHdr;
         tcp_hdr.src_port = conn.local_port as u16be;
         tcp_hdr.dst_port = conn.remote_port as u16be;
         tcp_hdr.seq = conn.snd_nxt as u32be;
@@ -3487,10 +3487,10 @@ fn kernel_tcp_close_stream(owner: borrow TcpConnectionOwner[connection_pool, con
     slice_copy(frame[0..<6],
                remote_mac_bytes[0..<6]);
     slice_copy(frame[6..<12], our_mac as []u8);
-    let eth_hdr: *EthHdr = frame as *EthHdr;
+    let eth_hdr: &mut EthHdr = frame as &mut EthHdr;
     eth_hdr.ethertype = ETHERTYPE_IPV4;
     let ip = frame[14..<34];
-    let ip_hdr: *Ipv4Hdr = ip as *Ipv4Hdr;
+    let ip_hdr: &mut Ipv4Hdr = ip as &mut Ipv4Hdr;
     ip_hdr.version_ihl = 0x45;
     ip_hdr.dscp_ecn = 0;
     ip_hdr.total_len = 40;
@@ -3504,7 +3504,7 @@ fn kernel_tcp_close_stream(owner: borrow TcpConnectionOwner[connection_pool, con
                remote_ip_bytes[0..<4]);
     ip_hdr.checksum = (inet_checksum(ip) as u16) as u16be;
     let tcp = frame[34..<54];
-    let tcp_hdr: *TcpHdr = tcp as *TcpHdr;
+    let tcp_hdr: &mut TcpHdr = tcp as &mut TcpHdr;
     tcp_hdr.src_port = conn.local_port as u16be;
     tcp_hdr.dst_port = conn.remote_port as u16be;
     tcp_hdr.seq = conn.snd_nxt as u32be;

@@ -21,9 +21,6 @@ kernel/init/test_driver.tkb	10	0	boot-time fixtures reaching process records dir
 kernel/kernel/process.tkb	10	0	ProcessRecord loans derive from run guards, indexed current phases, owners or MachineStopped. Ordinary scalar diagnostics copy before releasing their pool view; no liveness escape remains. Per-CPU state uses bounded array places. PID values use guarded copies; physical stack mints and diagnostic output still await file confinement.
 kernel/mm/address_space.tkb	6	0	Backing records use indexed references and active roots use bounded per-CPU array places; remaining raw sites are the deliberate user-VA CoW probe byte mints
 kernel/mm/user_memory.tkb	7	0	the user-range mint site: user addresses become slices here (#637 D)
-kernel/net/arp.tkb	7	0	frames and the ARP table (#637 F)
-kernel/net/icmp.tkb	13	0	frames (#637 F)
-kernel/net/tcp.tkb	112	0	Connection and retransmit records use indexed references; retry state uses guarded value copies. Remaining raw sites access wire headers and segment buffers
 kernel/platform/qemu/device_map.tkb	0	3	virtio-mmio magic and device-id probes during DTB discovery (#637 A); the device-window mint
 kernel/platform/rpi5/usb_xhci.tkb	46	0	xHCI DMA rings (#637 E); registers are an IoHandle
 kernel/printk/log.tkb	46	0	the kernel log's ring and staging buffers (#637 B)

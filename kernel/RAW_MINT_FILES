@@ -29,9 +29,6 @@ kernel/platform/rpi5/usb_xhci.tkb
 kernel/fs/elf64.tkb
 kernel/init/test_driver.tkb
 kernel/mm/address_space.tkb
-kernel/net/arp.tkb
-kernel/net/icmp.tkb
-kernel/net/tcp.tkb
 
 # D: deferred by decision (#613 for log; stopped-machine reporters for exception_evidence)
 kernel/arch/arm64/kernel/exception_evidence.tkb

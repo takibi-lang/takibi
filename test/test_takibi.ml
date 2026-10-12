@@ -3611,6 +3611,88 @@ let infer_tests = [
       "region_at(first, 2).key = 7;
        region_release(region_merge(first, rest));")));
 
+  Alcotest.test_case "header overlay: accepted" `Quick
+    (fun () -> ignore (infer {|struct packed be Hdr { kind: u16; len: u16; tag: [u8; 4]; }
+private let mut kept: usize = 0;
+fn f(frame: borrow [u8; 8..]) -> u16 {
+    let h: &mut Hdr = frame as &mut Hdr;
+    h.len = 1;
+    return h.kind as u16;
+}
+|}));
+  Alcotest.test_case "header overlay: not packed" `Quick
+    (expect_type_error "is not packed" {|struct Hdr { kind: u16; len: u16; tag: [u8; 4]; }
+private let mut kept: usize = 0;
+fn f(frame: borrow [u8; 8..]) -> u16 {
+    let h: &Hdr = frame as &Hdr;
+    return h.kind;
+}
+|});
+  Alcotest.test_case "header overlay: bool field" `Quick
+    (expect_type_error "has invalid bit patterns" {|struct packed Hdr { kind: u16; ok: bool; }
+private let mut kept: usize = 0;
+fn f(frame: borrow [u8; 8..]) -> u16 {
+    let h: &Hdr = frame as &Hdr;
+    return h.kind;
+}
+|});
+  Alcotest.test_case "header overlay: enum field" `Quick
+    (expect_type_error "is not a struct" {|enum Kind: u8 { A; B; }
+struct packed Hdr { kind: u16; k: Kind; }
+private let mut kept: usize = 0;
+fn f(frame: borrow [u8; 8..]) -> u16 {
+    let h: &Hdr = frame as &Hdr;
+    return h.kind;
+}
+|});
+  Alcotest.test_case "header overlay: pointer field" `Quick
+    (expect_type_error "cannot hold pointer type" {|struct packed Hdr { kind: u16; p: *u8; }
+private let mut kept: usize = 0;
+fn f(frame: borrow [u8; 8..]) -> u16 {
+    let h: &Hdr = frame as &Hdr;
+    return h.kind;
+}
+|});
+  Alcotest.test_case "header overlay: refined field" `Quick
+    (expect_type_error "has invalid bit patterns" {|struct packed Hdr { kind: {20..<1501 as u16}; len: u16; }
+private let mut kept: usize = 0;
+fn f(frame: borrow [u8; 8..]) -> u16 {
+    let h: &Hdr = frame as &Hdr;
+    return h.len;
+}
+|});
+  Alcotest.test_case "header overlay: aligned" `Quick
+    (expect_type_error "declares an alignment" {|struct packed Hdr align(4) { kind: u16; len: u16; }
+private let mut kept: usize = 0;
+fn f(frame: borrow [u8; 8..]) -> u16 {
+    let h: &Hdr = frame as &Hdr;
+    return h.kind;
+}
+|});
+  Alcotest.test_case "header overlay: too short" `Quick
+    (expect_type_error "smaller than sizeof" {|struct packed be Hdr { kind: u16; len: u16; tag: [u8; 4]; }
+private let mut kept: usize = 0;
+fn f(frame: borrow [u8; 8..]) -> u16 {
+    let h: &Hdr = frame[0..<4] as &Hdr;
+    return h.kind as u16;
+}
+|});
+  Alcotest.test_case "header overlay: escapes into a global" `Quick
+    (expect_type_error "cannot be stored into a global" {|struct packed be Hdr { kind: u16; len: u16; tag: [u8; 4]; }
+private let mut kept: usize = 0;
+fn f(frame: borrow [u8; 8..]) -> u16 {
+    let h: &Hdr = frame as &Hdr;
+    kept = (h as *Hdr) as usize;
+    return 0;
+}
+|});
+  Alcotest.test_case "header overlay: readonly slice gives only &T" `Quick
+    (expect_type_error "use `as &T`" {|struct packed be Hdr { kind: u16; len: u16; tag: [u8; 4]; }
+fn f(frame: borrow [const u8; 8..]) -> u16 {
+    let h: &mut Hdr = frame as &mut Hdr;
+    return h.kind as u16;
+}
+|});
   Alcotest.test_case "region backing: the claim alone is accepted" `Quick
     (fun () -> ignore (infer_regions (backing_probe "")));
   Alcotest.test_case "region backing: #720 probe, write after the claim" `Quick

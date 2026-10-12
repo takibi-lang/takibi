@@ -3046,9 +3046,31 @@ fn f() {
   An already-`&`/`&mut`-typed source may also cast to `&T`/`&mut T` of the
   same referent with no `unsafe` (an explicit reborrow); `&mut T` widens to
   `&T` this way (and via ordinary argument passing), never the reverse.
-  No other source type may cast to `&T`/`&mut T` at all, not even under
-  `unsafe` -- fabricating a reference from an arbitrary integer or an
-  unrelated pointer type would defeat the entire point of this type.
+  A byte slice may also be viewed as a wire header (GitHub issue #637):
+  see "Header overlays" below. No other source type may cast to
+  `&T`/`&mut T` at all, not even under `unsafe` -- fabricating a reference
+  from an arbitrary integer or an unrelated pointer type would defeat the
+  entire point of this type.
+- **Header overlays.** `bytes as &T` / `bytes as &mut T`, where `bytes` is
+  a `u8` slice, views the slice's first bytes as a header, without
+  `unsafe`:
+  ```takibi
+  struct packed be TcpHdr { src_port: u16; dst_port: u16; seq: u32; ... }
+  fn ack_of(tcp: borrow [u8; 20..]) -> u32 {
+      let h: &mut TcpHdr = tcp as &mut TcpHdr;
+      return h.ack as u32;
+  }
+  ```
+  Accepted only when every byte pattern is a valid `T` and the bytes are
+  there: `T` is a `packed` struct with no declared `align(N)`, every field
+  is an integer (host or wire order, unrefined), an array of such, or such
+  a header in turn (no `bool`, enum, refined integer or pointer field); and
+  the slice's proven minimum length covers `sizeof(T)`. `&mut T` needs a
+  writable slice; a readonly `[]const u8` gives only `&T`. The reference is
+  derived from the slice, so it carries the slice's borrow like any
+  slice-derived pointer: it cannot be stored in a global, a field or a
+  place, or returned past the slice's lifetime. Field access through it is
+  not raw access.
 - **Legal positions.** Function parameters and local `let` bindings remain
   supported. An authority-indexed return `&T @ g` or `&mut T @ g` is also
   legal when `g` identifies the borrowed or sunk lifetime authority required
