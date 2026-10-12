@@ -23,8 +23,7 @@
       "Bash(python3 scripts/:*)",
       "Bash(bash scripts/:*)",
       "Read(~/.takibi-sessions/**)",
-      "Edit(~/.takibi-sessions/audits/**)",
-      "Write(~/.takibi-sessions/audits/**)"
+      "Edit(~/.takibi-sessions/audits/**)"
     ],
     "deny": [
       "Bash(git push:*)",
