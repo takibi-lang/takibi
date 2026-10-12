@@ -156,8 +156,7 @@ Initialization does not prove CPU freshness across preemption.
      DmaCacheVisibility.tla). #740
      (virtio-net fixed TX/RX-reply authority) awaits the stored-array
      boundary and an in-place reply design decision.
-2. **Other compiler and language work, respecting design gates:** #608
-   (checked integer-to-enum conversion), #709 and #710
+2. **Other compiler and language work, respecting design gates:** #709 and #710
    (generation exhaustion of region tables and the intrusive pool), #203
    (no uninitialized kernel bytes copied to userspace; builds on bounded
    syscall copy outcomes),
