@@ -1,10 +1,11 @@
 {
   "date": "2026-10-12",
-  "event": "incremental",
+  "event": "milestone",
   "decision": "measured",
-  "source_sha256": "8185a3e4ac64dbc98a291d23de4d15d03eb47e3e8a89172aa644e5293440fb4c",
-  "workload": "#608 checked integer-to-enum match (compiler) and its first kernel user, kernel_activity_name_for_code in kernel/kernel/process.tkb. Both production linked kernels compared with scripts/space_delta.py against 97cc2779; no allocation, pool or lifetime behavior changes, so pool samples are not re-measured.",
+  "source_sha256": "b23e51e00ab37e9d6789875f509d74d2fba402758f32dcac811ef6783af20807",
+  "workload": "#746: per-page permissions in places (bootstrap array, then one array per RAM extent in slots), PageOwner/PageRunOwner carrying the permission, give-back by address. Linked QEMU and RPi5 kernels against main 19a4c3f3 (llvm-size); bounded boot on QEMU and RPi5; RPi5 page_allocator_timing_probe.",
   "evidence": [
+    "docs/PAGE_PLACES_SPACE_2026-10-12.md",
     "docs/ENUM_MISS_MATCH_SPACE_2026-10-12.md",
     "docs/PROTOCOL_DECL_SPACE_2026-10-12.md",
     "docs/WORLD_STOP_CLAIM_REVIEW_2026-10-11.md",
@@ -49,6 +50,6 @@
     "docs/VIRTIO_NET_TX_2026-10-10.md",
     "docs/VIRTIO_NET_TX_SPACE_2026-10-10.json"
   ],
-  "assessment": "Measured: text -192 B on both targets (QEMU 693768 -> 693576, RPi5 706728 -> 706536) because one switch replaces a nine-comparison chain; data and BSS unchanged (QEMU 5408 / 1658480 B, RPi5 2889272 / 1697360 B); usable_ram_start unchanged (0x40240000 QEMU, 0x710000 RPi5); no data/BSS symbol changed size. Adopted. Earlier measured results (#720 slices 1-3, #744) stand.",
-  "next_trigger": "The first kernel consumer of a protocol declaration (#720 xHCI after #672/#637), #745 or #746 changing allocator or pool representation, or another completed kernel feature or stage."
+  "assessment": "Against main 19a4c3f3: QEMU text 693576 -> 705112 (+11536), data 5408 -> 5424 (+16), BSS 1658480 -> 1660672 (+2192, the 2048 bootstrap tag bytes and alignment), usable_ram_start 0x40240000 -> 0x40248000 (+8 pages); RPi5 text 706536 -> 717944 (+11408), data +16, BSS 1697360 unchanged, usable_ram_start unchanged. Runtime: PageMeta unchanged at 24 B; +1 tag byte per managed page and 64 B per extent slot; no per-page region payload. RPi5 allocator time 13032 ticks per 1024 pairs (13227 after the MMU-off store fix) (4733 after #744, 3988 before): a 2.75x regression accepted by the maintainer, recovery on #748. Earlier measured results (#608, #720, #744) stand.",
+  "next_trigger": "#745 RegionPool records holding their permission, or a #748 change to the allocator's slot exchange, whichever lands first."
 }

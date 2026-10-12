@@ -70,16 +70,15 @@ list (maintainer, 2026-10-09).
    separately on #742.
 3. **#637 stage 3: shrinking the mint list.** Both maintained kernels build
    with `kernel/RAW_MINT_FILES`; step A (MMIO through IoHandles), B1 and B2
-   are done (HISTORY.md, 2026-10-11). **Next: #746** (page uniqueness by
-   type on the arrays of places), which starts with a **pending maintainer
-   decision** recorded on the issue: how a page's permission returns to its
-   element across lock sections, (B) a runtime-checked put by address or
-   (C) holder-tied identities designed first on #750. Read #746's last
-   comment before writing code. Then #745 (B3, intrusive_pool absorbed into
-   RegionPool, process records holding their permission on #746's
-   mechanism). Not on the critical path: #748 (allocator time), #739 (stale
-   list entries, per-file counts). Consolidating the kernel-driven
-   built-ins into general features is #750, after #746 and #745. For #720
+   are done (HISTORY.md, 2026-10-11), and page uniqueness is by type: every
+   page not handed out keeps its permission in a per-page place, and
+   PageOwner carries it back by address (2026-10-12). **Next: #745** (B3,
+   intrusive_pool absorbed into RegionPool, process records holding their
+   permission with the same exists-field and put-by-address mechanism).
+   Not on the critical path: #748 (allocator time, 2.75x slower since the
+   per-page places), #739 (stale list entries, per-file counts).
+   Consolidating the kernel-driven built-ins into general features is #750
+   (holder-tied identities, option C, is its central item), after #745. For #720
    (B): the doorbell, ERDP-release and stop/reset boundaries are in place;
    #720 must add exact request/event matching and needs general exclusive
    backing storage on #637/#672 (region_of still permits direct access to

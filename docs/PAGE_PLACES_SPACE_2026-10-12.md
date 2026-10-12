@@ -3,7 +3,7 @@
 GitHub issue #746. Every page not handed out keeps its permission in a
 per-page place; PageOwner and PageRunOwner carry it while the page is out.
 
-## Linked images (llvm-size, against main before #746)
+## Linked images (llvm-size, against main before #746; re-measured against 19a4c3f3 in docs/SPACE_CHECKPOINT.json)
 
 | Kernel | text | data | BSS |
 |---|---|---|---|
