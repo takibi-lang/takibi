@@ -126,6 +126,15 @@ check_model SharedRegionTransfer Safety 5 \
     timeout:CInitTimeout:Safety:violated:4 \
     failedreset:CInitFailedReset:Safety:violated:6
 
+check_model DmaCacheVisibility Safety 8 \
+    fixed:CInitFixed:pass:ok \
+    noprepare:CInitNoPrepare:DeviceDataKept:violated:5 \
+    nofinish:CInitNoFinish:ReadsCurrent:violated:9 \
+    earlyinvalidate:CInitEarlyInvalidate:ReadsCurrent:violated:10 \
+    lateread:CInitLateRead:ReadsCurrent:violated:9 \
+    localinvalidate:CInitLocalInvalidate:DeviceDataKept:violated:7 \
+    unpublished:CInitUnpublished:DeviceDataKept:violated:5
+
 check_model WorldStop NoUnstoppedRead 8 \
     fixed:CInitFixed:pass:ok \
     subset:CInitSubset:NoUnstoppedRead:violated \

@@ -353,6 +353,7 @@ The caller serializes network capability access as described in
 `kernel/CONCURRENCY.md`; interrupt observations do not mint another token.
 This model does not prove the compiler's direct/alias access rule, cache
 maintenance, or the hardware reset contract; those require separate evidence.
+Cache visibility of a receive handoff is DmaCacheVisibility.tla's (#625).
 
 ## ConsoleTx.tla -- terminal output from any CPU onto one queue (#663)
 
@@ -531,3 +532,95 @@ transitions and observations, so they have no action-table rows: the code
 they will map to is the sealed permission API generated from the same
 declaration, not yet built. Until then the handwritten table above remains
 the reviewed correspondence.
+
+## DmaCacheVisibility.tla -- what a CPU reads after a receive handoff (#625)
+
+FixedDmaOwnership.tla checks who holds a fixed allocation's authority. This
+model checks what the holder then reads. It keeps the data: two cores'
+cache lines (`lst`, `lval`), backing memory (`mem`), the device's write and
+completion, and the holder's prepare / completion / finish sequence. A
+ghost `truth` holds the latest defined contents; `dma_begin_rx` makes them
+undefined until the device writes. Ownership and visibility are separate
+variables: `phase` and `holder` say who may access, the line states say
+what an access returns.
+
+The receive path checked is the MSC CSW allocation `MscCswReceive` on RPi5
+(`kernel/platform/rpi5/usb_xhci_dma.tkb`), a 64-byte `dma_fixed` record
+aligned to 64; the other fixed receive records use the same builtins and
+the same lowering. One line stands for the allocation: every line is
+maintained by the same loop, and the `dma_fixed` placement rule keeps any
+other object out of them.
+
+**The lowering modelled** (`lib/llvm_gen.ml`, AArch64): `dma_begin_rx` is
+`dma_prepare_rx`, which emits `dc ivac` over the range, `dsb ish; isb`,
+then `dsb sy`. `dma_finish_owned_rx` is `dma_finish_rx`: `dsb sy`, the
+same `dc ivac` loop, `dsb ish; isb`, `dsb sy`. `usb_await_event`'s poll
+calls `dma_refresh_live` on the event ring, whose leading `dsb sy` also
+completes any earlier maintenance before the completion is read.
+
+**Hardware assumptions.** These are enabling conditions of actions, not
+properties, and the model proves nothing about them:
+
+- The kernel maps the allocation Normal write-back, Inner Shareable
+  (`kernel/arch/arm64/mm/mmu.tkb`: MAIR index 1 = `0xff`, descriptor
+  `0x705`). CPU caches are coherent with each other and not with the RP1
+  PCIe master. Any core may speculatively fill a clean copy, or evict a
+  line, at any time whoever holds authority (`SpecFill`, `Evict`).
+- `dc ivac` by VA to the point of coherence reaches every cache of the
+  Inner Shareable domain. On a dirty line it discards the data or may
+  write it back first (as when executed as `dc civac`); the model allows
+  both.
+- `dsb` completes all earlier cache maintenance before any later
+  instruction executes, and orders it after earlier loads (Arm ARM DDI
+  0487, ordering and completion of data cache maintenance instructions).
+- `CTR_EL0.DminLine` and the writeback granule `CTR_EL0.CWG` are at most
+  64 bytes (`DMA_CACHE_LINE`), as on Cortex-A76; otherwise the loop's
+  rounding would reach a neighbouring object's line.
+- The device's data writes reach memory before its Transfer Event can be
+  observed (PCIe posted-write ordering; xHCI 1.2, 4.11.3.1), and a
+  confirmed halt ends its writes (xHCI 1.2, 5.4.1.1). A completion event
+  that overtakes its data is outside the model.
+
+| Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
+| --- | --- | --- | --- | --- |
+| `CpuWrite`, `CpuRead` | `msc_csw_receive_attempt` | a CPU access through `dma_cpu_slice` while the holder has CPU authority; a read returns the holder's line, another core's dirty line, or memory | which bytes are touched -- irrelevant to `ReadsCurrent`: every line of the allocation is maintained identically | `c22abbb28b8c` |
+| `Handoff` | `msc_csw_put`, `msc_csw_take` | the CPU token stored on one core and taken on another, after the finish's barriers completed | the mutex instructions -- irrelevant to `ReadsCurrent`: they move no line, and the finish's `dsb` completed the invalidate before the put | `2e66be68d3e3` |
+| `BeginRx`, `PrepareInvalidate`, `Submit` | `msc_csw_receive_once`, `usb_bulk_in` | `dma_begin_rx`'s invalidate completed before the doorbell; the contents become undefined | the TRB and doorbell encoding -- irrelevant to `DeviceDataKept`: only the order of the doorbell after the invalidate matters to the line | `a433cdca0acb` |
+| `DeviceWrite`, `DeviceComplete` | `usb_bulk_in` | the device writes memory directly, then makes its completion observable | the 13-byte span inside the 64-byte line -- irrelevant to `ReadsCurrent`: the CPU reads only bytes the whole-line invalidate covered | `7815bba3f105` |
+| `ObserveCompletion` | `usb_await_event` | the final Transfer Event observed after the poll's barrier | event decoding -- modelled elsewhere: `SharedRegionTransfer.Observe` | `daff3c116183` |
+| `Timeout`, `ConfirmReset`, `ResetFailed` | `msc_abort_unobserved_transfer`, `xhci_halt_and_reset` | a confirmed halt ends device writes; a failed one keeps Device authority and no CPU access follows | the retained token's storage -- modelled elsewhere: `FixedDmaOwnership.PutDma` | `d568e5ec86d1` |
+| `FinishInvalidate`, `Finish` | `msc_csw_receive_once` | `dma_finish_owned_rx`'s invalidate ordered after the completion and completed before CPU authority returns | `dsb sy` versus `dsb ish` scope -- irrelevant to `ReadsCurrent`: either completes the maintenance for every Inner Shareable core | `348132f31c50` |
+
+Properties: `ReadsCurrent` -- a permitted read returns the latest defined
+contents, so a read after a completed receive sees the device's data;
+`DeviceDataKept` -- no CPU-dirty line is written over device data before
+the finish; `NoReadWhileDeviceActive` -- the composition with
+FixedDmaOwnership, reads only with authority; `CoherentCaches` -- a dirty
+line is the only copy. `Safety` is their conjunction with `TypeOK`. TLC
+covers the whole state space with two cores and one transfer; Apalache
+typechecks and runs shallow traces.
+
+The fixed variant passes. Each control removes one step of the lowering:
+
+- `noprepare`: no prepare invalidate. A dirty line from an earlier CPU
+  write is evicted over the device's data (`DeviceDataKept`).
+- `unpublished`: the prepare's trailing barrier dropped, so the doorbell
+  may precede the invalidate (`DeviceDataKept`).
+- `nofinish`: no finish invalidate. A clean line speculatively filled
+  while the device owned the buffer is read (`ReadsCurrent`).
+- `earlyinvalidate`: the finish's leading `dsb sy` dropped, so the
+  invalidate may be performed before the completion or reset is observed
+  and a later speculative fill brings stale data back (`ReadsCurrent`).
+- `lateread`: the finish's trailing barriers dropped, so the read may be
+  performed before the invalidate (`ReadsCurrent`).
+- `localinvalidate`: the invalidate reaches only the issuing core. A line
+  dirty on the other core survives the prepare (`DeviceDataKept`); this is
+  why the model has two cores.
+
+What this does not prove: the Arm memory model itself. The barrier
+semantics above are assumed, not derived; an abstract interleaving model
+can show that each barrier the lowering emits is needed under them, but
+not that they describe the silicon. An architecture-level check (for
+example an axiomatic Arm model extended with cache maintenance) would be
+the evidence for that part. Live metadata refresh (`dma_refresh_live`) and
+transmit cleaning are not modelled.
