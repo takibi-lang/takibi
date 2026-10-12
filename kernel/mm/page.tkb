@@ -320,12 +320,72 @@ private fn page_capacity(pool: borrow &mut BootPagePool, metas: borrow region(Pa
 // place_borrow for one locked operation. Before page_allocator_apply_memory
 // the metadata is the bootstrap array, claimed with region_of; after it, the
 // runtime array carved from RAM. The extent table is empty until then.
+// GitHub issue #746 adds the pages themselves: every page that has not
+// been handed out has its permission (its PageFrame region) in a per-page
+// place, and page_alloc takes it out into the PageOwner. Before
+// page_allocator_apply_memory the places are one array over the bootstrap
+// pages; after it, one array per RAM extent, held in slots in extent order
+// (the extent table's index is the slot index). The tag store behind each
+// array is one byte per page, carved with the metadata.
 struct PageMetaStore {
     private metas: Place(exists c: addr. exists c__off: usize. exists n: usize.
                          region(PageMeta)[c, n]) guarded_by(boot_page_pool_cell);
     private extents: Place(exists c: addr. exists c__off: usize. exists n: usize.
                            region(PageExtent)[c, n]) guarded_by(boot_page_pool_cell);
+    private frames: Place(exists bc: addr. exists bc__off: usize. exists bn: usize.
+                          exists sc: addr. exists sc__off: usize. exists sn: usize.
+                          PageFrameStore[bc, bc__off, bn, sc, sc__off, sn])
+                    guarded_by(boot_page_pool_cell);
 }
+
+// One page, the element of the per-page permission arrays (GitHub issue
+// #746). Its permission is region(PageFrame)[c, 1]; a run's is [c, n].
+struct PageFrame {
+    bytes: [u8; PAGE_SIZE];
+}
+
+// The per-page places: the bootstrap pages' array until
+// page_allocator_apply_memory, then the extents' slots. The other one is
+// empty (no elements), so a page is reachable through exactly one.
+linear struct PageFrameStore[bc: addr, bc__off: usize, bn: usize,
+                             sc: addr, sc__off: usize, sn: usize] {
+    private boot: places(PageFrame)[bc, bn];
+    private extents: slots(PageExtentFrames)[sc, sn];
+}
+
+private fn page_frame_store_new(boot: sink places(PageFrame)[bc, bn],
+        extents: sink slots(PageExtentFrames)[sc, sn])
+        -> PageFrameStore[bc, bc__off, bn, sc, sc__off, sn] {
+    let mut store: PageFrameStore[bc, bc__off, bn, sc, sc__off, sn] = { boot, extents };
+    return store;
+}
+
+// A retired store is kept, never reachable again: the bootstrap array it
+// held still names free bootstrap pages that are in an extent's places now.
+private fn page_frame_store_keep(store: sink PageFrameStore[bc, bo, bn, sc, so, sn]) {
+    places_keep(field_take(store.boot));
+    places_keep(field_take(store.extents));
+}
+
+// One RAM extent's pages as places, an element of the extent slots.
+linear struct PageExtentFrames[c: addr, c__off: usize, n: usize] {
+    private frames: places(PageFrame)[c, n];
+}
+
+// Bytes reserved per extent slot: a slot cell holds a lock word and the
+// extent's places (three words) behind a tag, which fits with room to spare;
+// page_allocator_apply_memory checks the slot count it got.
+const PAGE_EXTENT_SLOT_BYTES: usize = 64;
+
+// `count` pages' permission out of their place, or Out when any of them is
+// not there (or the address is not one of the allocator's pages).
+must_use variant PageFrameTake[m: usize] {
+    Out;
+    Taken(exists c: addr. exists c__off: usize. region(PageFrame)[c, m]);
+}
+
+// The bootstrap pages' tag bytes, claimed once by page_allocator_init.
+private let mut page_bootstrap_frame_tags: [u8; BOOTSTRAP_PAGE_COUNT];
 
 private let mut page_meta_store: PageMetaStore;
 
@@ -345,6 +405,130 @@ private fn page_extent_at(extents: borrow region(PageExtent)[eb, en], index: usi
         -> &mut PageExtent @ eb {
     if (index < region_count(extents)) { return region_at(extents, index); }
     kernel_invariant_stop();
+}
+
+// The extent slot holding `physical`'s page, by the extent table.
+private fn page_extent_of(pool: borrow &mut BootPagePool,
+        extents: borrow region(PageExtent)[eb, en], physical: usize) -> PageIndexResult {
+    let mut extent_index: usize = 0;
+    while (extent_index < pool.runtime_extent_count) {
+        let extent: &mut PageExtent = page_extent_at(extents, extent_index);
+        if (physical >= extent.start && physical < extent.end) {
+            return PageIndexResult::Found(extent_index);
+        }
+        extent_index = extent_index + 1;
+    }
+    return PageIndexResult::NotManaged;
+}
+
+private fn page_frames_take_from(frames: borrow places(PageFrame)[b, n], first: usize,
+        count: usize @ m) -> PageFrameTake[m] {
+    match places_take_run(frames, first, count) {
+        PlaceRun(PageFrame)::Out => { return PageFrameTake::Out; }
+        PlaceRun(PageFrame)::Taken(f) => { return PageFrameTake::Taken(f); }
+    }
+}
+
+private fn page_extent_frames_take(slots: borrow slots(PageExtentFrames)[b, n],
+        j: usize @ s, first: usize, count: usize @ m) -> PageFrameTake[m] {
+    if (j < places_count(slots)) {
+        match place_take(slots[j]) {
+            Place::Empty => { return PageFrameTake::Out; }
+            Place::Full(x) => {
+                let taken: PageFrameTake[m] = page_frames_take_from(x.frames, first, count);
+                match place_put(slots[j], x) {
+                    Place::Empty => {}
+                    Place::Full(back) => { page_extent_frames_keep(back); }
+                }
+                return taken;
+            }
+        }
+    }
+    return PageFrameTake::Out;
+}
+
+// The permission of `count` pages from `physical` out of their places.
+// Only the allocator's free-list and run logic call it, for pages its
+// metadata says are free; Out then means the two disagree.
+private fn page_frames_take(frames: borrow PageFrameStore[fbc, fbo, fbn, fsc, fso, fsn],
+        pool: borrow &mut BootPagePool, extents: borrow region(PageExtent)[eb, en],
+        physical: usize, count: usize @ m) -> PageFrameTake[m] {
+    if (pool.runtime_applied == false) {
+        if (physical < usable_ram_start) { return PageFrameTake::Out; }
+        return page_frames_take_from(frames.boot,
+                                     (physical - usable_ram_start) / PAGE_SIZE, count);
+    }
+    match page_extent_of(pool, extents, physical) {
+        PageIndexResult::NotManaged => { return PageFrameTake::Out; }
+        PageIndexResult::Found(j) => {
+            let first: usize = (physical - page_extent_at(extents, j).start) / PAGE_SIZE;
+            return page_extent_frames_take(frames.extents, j, first, count);
+        }
+    }
+}
+
+// 1 when the permission went back into its places, 0 when it was Foreign
+// (not the allocator's pages, or one of them is already back) and was
+// dropped.
+private fn page_frames_give_to(frames: borrow places(PageFrame)[b, n],
+        f: sink region(PageFrame)[c, m]) -> usize {
+    match places_put_back(frames, f) {
+        PlaceBack(PageFrame)::Stored => { return 1; }
+        PlaceBack(PageFrame)::Foreign(back) => { region_release(back); return 0; }
+    }
+}
+
+private fn page_extent_frames_give(slots: borrow slots(PageExtentFrames)[b, n],
+        j: usize @ s, f: sink region(PageFrame)[c, m]) -> usize {
+    if (j < places_count(slots)) {
+        match place_take(slots[j]) {
+            Place::Empty => { region_release(f); return 0; }
+            Place::Full(x) => {
+                let given: usize = page_frames_give_to(x.frames, f);
+                match place_put(slots[j], x) {
+                    Place::Empty => {}
+                    Place::Full(back) => { page_extent_frames_keep(back); }
+                }
+                return given;
+            }
+        }
+    }
+    region_release(f);
+    return 0;
+}
+
+// Give a permission back to the places it was taken from, found by its
+// address (GitHub issue #746, put by address). true when stored.
+private fn page_frames_give(frames: borrow PageFrameStore[fbc, fbo, fbn, fsc, fso, fsn],
+        pool: borrow &mut BootPagePool, extents: borrow region(PageExtent)[eb, en],
+        physical: usize, f: sink region(PageFrame)[c, m]) -> bool {
+    if (pool.runtime_applied == false) {
+        return page_frames_give_to(frames.boot, f) == 1;
+    }
+    match page_extent_of(pool, extents, physical) {
+        PageIndexResult::NotManaged => { region_release(f); return false; }
+        PageIndexResult::Found(j) => {
+            return page_extent_frames_give(frames.extents, j, f) == 1;
+        }
+    }
+}
+
+// A page whose owner was transferred away (page_owner_transfer_index,
+// page_mapping_install) goes back by address: its permission is minted
+// again from the address the holder kept (kernel/mm/memory_map.tkb) and put
+// back, which refuses it when the page is already back.
+private fn page_frames_reclaim(frames: borrow PageFrameStore[fbc, fbo, fbn, fsc, fso, fsn],
+        pool: borrow &mut BootPagePool, extents: borrow region(PageExtent)[eb, en],
+        physical: usize, count: usize) -> bool !{unsafe} {
+    match memory_map_frames(physical, count) {
+        RegionTyped(PageFrame)::Misaligned(bytes) => {
+            region_release(bytes);
+            return false;
+        }
+        RegionTyped(PageFrame)::Typed(f) => {
+            return page_frames_give(frames, pool, extents, physical, f);
+        }
+    }
 }
 
 private fn page_region_aligned_start(region: PhysicalMemoryRegion) -> usize {
@@ -436,7 +620,11 @@ private fn page_freelist_push(pool: borrow &mut BootPagePool, metas: borrow regi
     pool.runtime_free_head = index;
 }
 
+// GitHub issue #746: the owner carries the page's permission, its
+// identity closed so it survives the lock section it was taken in.
+// page_free gives it back to its place by address.
 linear struct PageOwner[page: usize] {
+    private frame: exists c: addr. exists c__off: usize. region(PageFrame)[c, 1];
     private index: usize;
     private physical: usize;
     private generation: usize @ page;
@@ -447,10 +635,17 @@ must_use variant PageAllocResult {
     Allocated(exists page: usize. PageOwner[page]);
 }
 
-fn page_owner_new(index: usize, physical: usize,
+fn page_owner_new(frame: sink region(PageFrame)[c, 1], index: usize, physical: usize,
                   generation: usize @ page) -> PageOwner[page] {
-    let mut owner: PageOwner[page] = { index, physical, generation };
+    let mut owner: PageOwner[page] = { frame, index, physical, generation };
     return owner;
+}
+
+// An owner the allocator cannot take back (its tables are not in place,
+// which an initialized allocator never sees): the permission is dropped
+// and the page stays out, a bounded leak rather than a guess.
+private fn page_owner_abandon(owner: sink PageOwner[page]) {
+    region_release(owner.frame);
 }
 
 // GitHub issue #380: a run of `count` CONTIGUOUS pages, aligned to
@@ -463,6 +658,8 @@ fn page_owner_new(index: usize, physical: usize,
 // one masked compare instead of a range check, which is how Linux's arm64
 // kernel-stack overflow check costs a single bit test.
 linear struct PageRunOwner[run: usize] {
+    private frames: exists c: addr. exists c__off: usize. exists n: usize.
+                    region(PageFrame)[c, n];
     private first: usize;
     private physical: usize;
     private count: usize;
@@ -483,12 +680,17 @@ must_use variant PageRunReclaimResult {
     Reclaimed(exists run: usize. PageRunOwner[run]);
 }
 
-fn page_run_owner_new(first: usize, physical: usize, count: usize,
+fn page_run_owner_new(frames: sink region(PageFrame)[c, n], first: usize,
+                      physical: usize, count: usize,
                       generation: usize @ run) -> PageRunOwner[run] {
     let mut owner: PageRunOwner[run] = {
-        first, physical, count, generation
+        frames, first, physical, count, generation
     };
     return owner;
+}
+
+private fn page_run_owner_abandon(owner: sink PageRunOwner[run]) {
+    region_release(owner.frames);
 }
 
 fn page_run_physical_address(owner: borrow PageRunOwner[run]) -> usize {
@@ -507,15 +709,17 @@ fn page_run_count(owner: borrow PageRunOwner[run]) -> usize {
 // which is exactly what the holder wants.
 fn page_run_owner_transfer_index(owner: sink PageRunOwner[run])
         -> usize {
-    return owner.first;
+    let first: usize = owner.first;
+    region_release(owner.frames);
+    return first;
 }
 
 // A run's bytes as a byte region, the run's ownership moving into it
-// (#637 step B1). The page allocator is the one place a page run becomes a
-// region; the region's eventual owner gives the pages back with
+// (#637 step B1): the run's own permission, as bytes (#746). The region's
+// eventual owner gives the pages back with
 // page_run_transferred_release_physical, as with a transferred run.
 fn page_run_into_region(owner: sink PageRunOwner[run]) -> RegionBytes !{unsafe} {
-    return memory_map_run_region(owner);
+    return region_into_bytes(owner.frames);
 }
 
 // Is every page of an aligned candidate run free? `first` is a multiple
@@ -563,7 +767,13 @@ fn page_alloc_contiguous(count: usize, owner: PageOwnerTag)
         Place::Full(metas) => {
             let inner: PageRunAllocResult = match place_borrow(guard, page_meta_store.extents) {
                 Place::Empty => { PageRunAllocResult::OutOfMemory }
-                Place::Full(extents) => { page_alloc_contiguous_locked(pool, metas, extents, count, owner) }
+                Place::Full(extents) => {
+                    let framed: PageRunAllocResult = match place_borrow(guard, page_meta_store.frames) {
+                        Place::Empty => { PageRunAllocResult::OutOfMemory }
+                        Place::Full(frames) => { page_alloc_contiguous_locked(frames, pool, metas, extents, count, owner) }
+                    };
+                    framed
+                }
             };
             inner
         }
@@ -572,7 +782,7 @@ fn page_alloc_contiguous(count: usize, owner: PageOwnerTag)
     return result;
 }
 
-private fn page_alloc_contiguous_locked(pool: borrow &mut BootPagePool, metas: borrow region(PageMeta)[mb, mn], extents: borrow region(PageExtent)[eb, en], count: usize,
+private fn page_alloc_contiguous_locked(frames: borrow PageFrameStore[fbc, fbo, fbn, fsc, fso, fsn], pool: borrow &mut BootPagePool, metas: borrow region(PageMeta)[mb, mn], extents: borrow region(PageExtent)[eb, en], count: usize,
                                         owner: PageOwnerTag)
         -> PageRunAllocResult !{allocates, requires_mmu, unsafe} {
     if (count < 1) { return PageRunAllocResult::OutOfMemory; }
@@ -610,8 +820,18 @@ private fn page_alloc_contiguous_locked(pool: borrow &mut BootPagePool, metas: b
         if (physical_found && alignment != 0) {
             candidate_aligned = physical % alignment == 0;
         }
-        if (candidate_aligned && count <= capacity - candidate &&
-            page_run_is_free(pool, metas, extents, candidate, count)) {
+        let mut run_free: bool = false;
+        if (candidate_aligned && count <= capacity - candidate) {
+            run_free = page_run_is_free(pool, metas, extents, candidate, count);
+        }
+        if (run_free) {
+          // The run's permission out of its places (#746). Out means the
+          // pages are not all in one array (a run across two extents that
+          // touch) or the places disagree with the metadata; either way
+          // this candidate is not a run to hand out.
+          match page_frames_take(frames, pool, extents, physical, count) {
+            PageFrameTake::Out => {}
+            PageFrameTake::Taken(run_frames) => {
             for k: usize in 0..<count {
                 let index: usize = candidate + k;
                 if (index < capacity) {
@@ -650,12 +870,15 @@ private fn page_alloc_contiguous_locked(pool: borrow &mut BootPagePool, metas: b
                 kernel_boot_log_resource_exhausted(
                     "page run (free list disagreed with occupancy; run quarantined)" as *u8,
                     count);
+                region_release(run_frames);
                 return PageRunAllocResult::OutOfMemory;
             }
             let generation: usize = pool.run_generation;
             pool.run_generation = generation + 1;
             return PageRunAllocResult::Allocated(
-                page_run_owner_new(candidate, physical, count, generation));
+                page_run_owner_new(run_frames, candidate, physical, count, generation));
+            }
+          }
         }
         candidate = candidate + 1;
     }
@@ -666,12 +889,15 @@ fn page_run_free(owner: sink PageRunOwner[run]) !{unsafe} {
     let guard = locked_cell_take(&boot_page_pool_cell);
     let pool = memory_map_pool_record(guard, &boot_page_pool_cell);
     match place_borrow(guard, page_meta_store.metas) {
-        Place::Empty => {}
+        Place::Empty => { page_run_owner_abandon(owner); }
         Place::Full(metas) => {
             match place_borrow(guard, page_meta_store.extents) {
-                Place::Empty => {}
+                Place::Empty => { page_run_owner_abandon(owner); }
                 Place::Full(extents) => {
-                page_run_free_locked(pool, metas, extents, owner);
+                match place_borrow(guard, page_meta_store.frames) {
+                    Place::Empty => { page_run_owner_abandon(owner); }
+                    Place::Full(frames) => { page_run_free_locked(frames, pool, metas, extents, owner); }
+                }
                 }
             }
         }
@@ -679,9 +905,18 @@ fn page_run_free(owner: sink PageRunOwner[run]) !{unsafe} {
     locked_cell_give(&boot_page_pool_cell, guard);
 }
 
-private fn page_run_free_locked(pool: borrow &mut BootPagePool, metas: borrow region(PageMeta)[mb, mn], extents: borrow region(PageExtent)[eb, en],
+private fn page_run_free_locked(frames: borrow PageFrameStore[fbc, fbo, fbn, fsc, fso, fsn], pool: borrow &mut BootPagePool, metas: borrow region(PageMeta)[mb, mn], extents: borrow region(PageExtent)[eb, en],
                                 owner: sink PageRunOwner[run]) !{unsafe} {
-    page_run_release_indices(pool, metas, extents, owner.first, owner.count);
+    let first: usize = owner.first;
+    let count: usize = owner.count;
+    let physical: usize = owner.physical;
+    // The run's permission back first (#746); one that does not fit is a
+    // run that is not out, counted as the per-page double frees it is.
+    if (page_frames_give(frames, pool, extents, physical, owner.frames) == false) {
+        pool.double_remove_count = pool.double_remove_count + count;
+        return;
+    }
+    page_run_release_indices(pool, metas, extents, first, count);
 }
 
 // Give back a run whose linear owner was consumed at allocation, named by
@@ -708,6 +943,11 @@ fn page_run_transferred_release_physical(physical: usize, count: usize)
                 match page_index_for_physical(pool, metas, extents, physical) {
                     PageIndexResult::NotManaged => {}
                     PageIndexResult::Found(index) => {
+                        match place_borrow(guard, page_meta_store.frames) {
+                            Place::Empty => {}
+                            Place::Full(frames) => { page_run_reclaim_frames(frames, pool, metas, extents,
+                                                index, count); }
+                        }
                         page_run_release_indices(pool, metas, extents, index, count);
                     }
                 }
@@ -749,10 +989,44 @@ fn page_run_reclaim_transferred_physical(physical: usize, count: usize)
     }
     locked_cell_give(&boot_page_pool_cell, guard);
     if (valid) {
-        return PageRunReclaimResult::Reclaimed(
-            page_run_owner_new(index, physical, count, 0));
+        // The run's permission, minted again from the address the holder
+        // kept: this function is the trust boundary its caller already
+        // declares (#746 leaves it there).
+        match memory_map_frames(physical, count) {
+            RegionTyped(PageFrame)::Misaligned(bytes) => {
+                region_release(bytes);
+                return PageRunReclaimResult::Invalid;
+            }
+            RegionTyped(PageFrame)::Typed(frames) => {
+                return PageRunReclaimResult::Reclaimed(
+                    page_run_owner_new(frames, index, physical, count, 0));
+            }
+        }
     }
     return PageRunReclaimResult::Invalid;
+}
+
+// A transferred run's pages go back to their places one by one, each
+// permission minted again from the address the holder kept (#746). Page by
+// page, so a page that is already back is refused alone and the rest still
+// return; page_run_release_indices counts the refused one from the
+// metadata.
+private fn page_run_reclaim_frames(frames: borrow PageFrameStore[fbc, fbo, fbn, fsc, fso, fsn],
+        pool: borrow &mut BootPagePool, metas: borrow region(PageMeta)[mb, mn],
+        extents: borrow region(PageExtent)[eb, en], first: usize, count: usize)
+        !{unsafe} {
+    let capacity: usize = page_capacity(pool, metas, extents);
+    for k: usize in 0..<count {
+        let index: usize = first + k;
+        if (index < capacity) {
+            match page_physical_for_index(pool, metas, extents, index) {
+                PagePhysicalResult::NotManaged => {}
+                PagePhysicalResult::Found(physical) => {
+                    let _back: bool = page_frames_reclaim(frames, pool, extents, physical, 1);
+                }
+            }
+        }
+    }
 }
 
 private fn page_run_release_indices(pool: borrow &mut BootPagePool, metas: borrow region(PageMeta)[mb, mn], extents: borrow region(PageExtent)[eb, en], first: usize,
@@ -822,7 +1096,61 @@ fn page_allocator_init() !{unsafe} {
             }
         }
     }
+    page_allocator_init_frames(unlocked);
     locked_cell_give_unlocked(&boot_page_pool_cell, unlocked);
+}
+
+// The bootstrap pages' permissions, every one in its place (#746).
+private fn page_allocator_init_frames(g: borrow LockedCellGuard[&boot_page_pool_cell])
+        !{unsafe} {
+    let RegionOf(u8)::Taken(tags) = region_of(page_bootstrap_frame_tags) else {
+        RegionOf(u8)::Gone => { kernel_invariant_stop(); return; }
+    };
+    match memory_map_frames(usable_ram_start, BOOTSTRAP_PAGE_COUNT) {
+        RegionTyped(PageFrame)::Misaligned(bytes) => {
+            region_release(bytes);
+            region_release(tags);
+            kernel_invariant_stop();
+        }
+        RegionTyped(PageFrame)::Typed(frames) => {
+            match places_from_bytes(frames, tags) {
+                PlacesFrom(PageFrame)::TooFew(back) => {
+                    region_release(back);
+                    kernel_invariant_stop();
+                }
+                PlacesFrom(PageFrame)::Made(boot) => {
+                    // No extents yet: their slots are an empty array.
+                    let RegionBytes::Assumed(none) = memory_map_empty_bytes() else {};
+                    match slots_from_bytes__PageExtentFrames(none) {
+                        SlotsFrom(PageExtentFrames)::Misaligned(back) => {
+                            region_release(back);
+                            places_keep(boot);
+                            kernel_invariant_stop();
+                        }
+                        SlotsFrom(PageExtentFrames)::Made(empty) => {
+                            page_frame_store_install(g, boot, empty);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Put a new store of the per-page places in place, retiring the one it
+// replaces.
+private fn page_frame_store_install(g: borrow LockedCellGuard[&boot_page_pool_cell],
+        boot: sink places(PageFrame)[bc, bn],
+        extents: sink slots(PageExtentFrames)[sc, sn]) {
+    let store = page_frame_store_new(boot, extents);
+    match place_take(g, page_meta_store.frames) {
+        Place::Empty => {}
+        Place::Full(previous) => { page_frame_store_keep(previous); }
+    }
+    match place_put(g, page_meta_store.frames, store) {
+        Place::Empty => {}
+        Place::Full(previous) => { page_frame_store_keep(previous); }
+    }
 }
 
 private fn page_allocator_init_with(pool: borrow &mut BootPagePool,
@@ -883,12 +1211,35 @@ fn page_allocator_apply_memory(memory: FdtMemoryMap)
             return PageAllocatorMemoryResult::Invalid;
         }
     };
-    let (extent_bytes, padding) = extent_split;
+    let (extent_bytes, after_extents) = extent_split;
+    let RegionSplit(u8)::Split(slot_split) = region_split(after_extents, plan.slot_bytes) else {
+        RegionSplit(u8)::TooShort(whole) => {
+            region_release(meta_bytes);
+            region_release(extent_bytes);
+            region_release(whole);
+            locked_cell_give_unlocked(&boot_page_pool_cell, unlocked);
+            return PageAllocatorMemoryResult::Invalid;
+        }
+    };
+    let (slot_bytes, after_slots) = slot_split;
+    let RegionSplit(u8)::Split(tag_split) = region_split(after_slots, plan.tag_bytes) else {
+        RegionSplit(u8)::TooShort(whole) => {
+            region_release(meta_bytes);
+            region_release(extent_bytes);
+            region_release(slot_bytes);
+            region_release(whole);
+            locked_cell_give_unlocked(&boot_page_pool_cell, unlocked);
+            return PageAllocatorMemoryResult::Invalid;
+        }
+    };
+    let (tag_bytes, padding) = tag_split;
     region_release(padding);
     let RegionTyped(PageMeta)::Typed(metas) = region_bytes_typed__PageMeta(meta_bytes) else {
         RegionTyped(PageMeta)::Misaligned(back) => {
             region_release(back);
             region_release(extent_bytes);
+            region_release(slot_bytes);
+            region_release(tag_bytes);
             locked_cell_give_unlocked(&boot_page_pool_cell, unlocked);
             return PageAllocatorMemoryResult::Invalid;
         }
@@ -898,6 +1249,8 @@ fn page_allocator_apply_memory(memory: FdtMemoryMap)
         RegionTyped(PageExtent)::Misaligned(back) => {
             region_release(back);
             region_release(metas);
+            region_release(slot_bytes);
+            region_release(tag_bytes);
             locked_cell_give_unlocked(&boot_page_pool_cell, unlocked);
             return PageAllocatorMemoryResult::Invalid;
         }
@@ -913,8 +1266,51 @@ fn page_allocator_apply_memory(memory: FdtMemoryMap)
     if (filled == false) {
         region_release(metas);
         region_release(extents);
+        region_release(slot_bytes);
+        region_release(tag_bytes);
         locked_cell_give_unlocked(&boot_page_pool_cell, unlocked);
         return PageAllocatorMemoryResult::Invalid;
+    }
+    // The per-page places of every extent (#746). A failure here leaves the
+    // runtime metadata applied without places, so it halts rather than
+    // answers Invalid.
+    let SlotsFrom(PageExtentFrames)::Made(slots) =
+            slots_from_bytes__PageExtentFrames(slot_bytes) else {
+        SlotsFrom(PageExtentFrames)::Misaligned(back) => {
+            region_release(back);
+            region_release(tag_bytes);
+            region_release(metas);
+            region_release(extents);
+            locked_cell_give_unlocked(&boot_page_pool_cell, unlocked);
+            kernel_invariant_stop();
+            return PageAllocatorMemoryResult::Invalid;
+        }
+    };
+    if (page_allocator_build_frames(pool, metas, extents, slots, tag_bytes) == false) {
+        kernel_invariant_stop();
+    }
+    // The bootstrap places are retired: every bootstrap page is in an
+    // extent's places now, or out with an owner that gives it back there
+    // by address. The store's bootstrap array becomes an empty one.
+    match memory_map_frames(usable_ram_start, 0) {
+        RegionTyped(PageFrame)::Misaligned(no_bytes) => {
+            region_release(no_bytes);
+            places_keep(slots);
+            kernel_invariant_stop();
+        }
+        RegionTyped(PageFrame)::Typed(no_frames) => {
+            let RegionBytes::Assumed(no_tags) = memory_map_empty_bytes() else {};
+            match places_from_bytes(no_frames, no_tags) {
+                PlacesFrom(PageFrame)::TooFew(back) => {
+                    region_release(back);
+                    places_keep(slots);
+                    kernel_invariant_stop();
+                }
+                PlacesFrom(PageFrame)::Made(empty) => {
+                    page_frame_store_install(unlocked, empty, slots);
+                }
+            }
+        }
     }
     match place_put(unlocked, page_meta_store.metas, metas) {
         Place::Empty => {}
@@ -938,10 +1334,14 @@ struct PageMetadataPlan {
     metadata_bytes: usize;
     extent_bytes: usize;
     region_count: usize;
+    // GitHub issue #746: the extent slots of the per-page places, and one
+    // tag byte per page.
+    slot_bytes: usize;
+    tag_bytes: usize;
 }
 
 private fn page_metadata_plan_invalid() -> PageMetadataPlan {
-    let mut plan: PageMetadataPlan = { false, 0, 0, 0, 0, 0, 0 };
+    let mut plan: PageMetadataPlan = { false, 0, 0, 0, 0, 0, 0, 0, 0 };
     return plan;
 }
 
@@ -997,7 +1397,20 @@ private fn page_allocator_plan_metadata(boot: borrow region(PageMeta)[mb, mn],
     if (metadata_bytes > 0xFFFFFFFFFFFFFFFF - extent_bytes) {
         return page_metadata_plan_invalid();
     }
-    let metadata_payload_bytes: usize = metadata_bytes + extent_bytes;
+    // The per-page places (#746): a slot per extent and a tag byte per page,
+    // after the metadata and extent tables, whose sizes keep the slots
+    // 8-byte aligned.
+    if (region_count > 0xFFFFFFFFFFFFFFFF / PAGE_EXTENT_SLOT_BYTES) {
+        return page_metadata_plan_invalid();
+    }
+    let slot_bytes: usize = region_count * PAGE_EXTENT_SLOT_BYTES;
+    let tag_bytes: usize = total_pages;
+    if (metadata_bytes + extent_bytes > 0xFFFFFFFFFFFFFFFF - slot_bytes ||
+        metadata_bytes + extent_bytes + slot_bytes > 0xFFFFFFFFFFFFFFFF - tag_bytes) {
+        return page_metadata_plan_invalid();
+    }
+    let metadata_payload_bytes: usize =
+        metadata_bytes + extent_bytes + slot_bytes + tag_bytes;
     if (metadata_payload_bytes >
         0xFFFFFFFFFFFFFFFF - (PAGE_SIZE - 1)) {
         return page_metadata_plan_invalid();
@@ -1054,7 +1467,7 @@ private fn page_allocator_plan_metadata(boot: borrow region(PageMeta)[mb, mn],
     }
     let mut plan: PageMetadataPlan = {
         true, metadata_base, metadata_span, total_pages, metadata_bytes,
-        extent_bytes, region_count
+        extent_bytes, region_count, slot_bytes, tag_bytes
     };
     return plan;
 }
@@ -1153,6 +1566,107 @@ private fn page_allocator_fill_metadata(pool: borrow &mut BootPagePool,
     }
     page_runtime_freelist_rebuild(pool, metas, extents);
     return true;
+}
+
+// Every extent's pages as places, each in its slot (#746). A page that is
+// not free -- outside the usable map, the metadata itself, or a bootstrap
+// page still held -- has its permission taken out and dropped: the first
+// two are never handed out, and a held bootstrap page's owner gives its
+// own permission back here by address.
+private fn page_allocator_build_frames(pool: borrow &mut BootPagePool,
+        metas: borrow region(PageMeta)[mb, mn], extents: borrow region(PageExtent)[eb, en],
+        slots: borrow slots(PageExtentFrames)[sb, sn], tags: sink region(u8)[tb, tn])
+        -> bool !{unsafe} {
+    let mut rest: exists c: addr. exists c__off: usize. exists n: usize.
+                  region(u8)[c, n] = tags;
+    let mut built: bool = places_count(slots) >= pool.runtime_extent_count;
+    let mut j: usize = 0;
+    while (j < pool.runtime_extent_count) {
+        let extent: &mut PageExtent = page_extent_at(extents, j);
+        let start: usize = extent.start;
+        let first_index: usize = extent.first_index;
+        let pages: usize = (extent.end - extent.start) / PAGE_SIZE;
+        match page_tags_split(rest, pages) {
+            RegionSplit(u8)::TooShort(whole) => {
+                rest = whole;
+                built = false;
+            }
+            RegionSplit(u8)::Split(parts) => {
+                let (extent_tags, tail) = parts;
+                rest = tail;
+                if (page_extent_frames_install(metas, slots, j, start, pages,
+                                               first_index, extent_tags) == false) {
+                    built = false;
+                }
+            }
+        }
+        j = j + 1;
+    }
+    page_tags_release(rest);
+    return built;
+}
+
+// Monomorphic wrappers: a value of existential type opens at a call of a
+// function, not at overload resolution among region_split's instances.
+private fn page_tags_split(tags: sink region(u8)[c, n], at: usize @ k)
+        -> RegionSplit(u8)[c, c__off, n, k] {
+    return region_split(tags, at);
+}
+
+private fn page_tags_release(tags: sink region(u8)[c, n]) { region_release(tags); }
+
+private fn page_extent_frames_new(frames: sink places(PageFrame)[c, n])
+        -> PageExtentFrames[c, c__off, n] {
+    let mut x: PageExtentFrames[c, c__off, n] = { frames };
+    return x;
+}
+
+private fn page_extent_frames_keep(x: sink PageExtentFrames[c, o, n]) {
+    places_keep(x.frames);
+}
+
+private fn page_extent_frames_install(metas: borrow region(PageMeta)[mb, mn],
+        slots: borrow slots(PageExtentFrames)[sb, sn], j: usize @ s,
+        start: usize, pages: usize, first_index: usize,
+        tags: sink region(u8)[tb, tn]) -> bool !{unsafe} {
+    match memory_map_frames(start, pages) {
+        RegionTyped(PageFrame)::Misaligned(bytes) => {
+            region_release(bytes);
+            region_release(tags);
+            return false;
+        }
+        RegionTyped(PageFrame)::Typed(frames) => {
+            match places_from_bytes(frames, tags) {
+                PlacesFrom(PageFrame)::TooFew(back) => {
+                    region_release(back);
+                    return false;
+                }
+                PlacesFrom(PageFrame)::Made(arr) => {
+                    for k: usize in 0..<pages {
+                        let meta: &mut PageMeta = page_meta_at(metas, first_index + k);
+                        if (meta.occupied || meta.owner == PageOwnerTag::Unavailable) {
+                            match places_take_run(arr, k, 1) {
+                                PlaceRun(PageFrame)::Out => {}
+                                PlaceRun(PageFrame)::Taken(held) => { region_release(held); }
+                            }
+                        }
+                    }
+                    let x = page_extent_frames_new(arr);
+                    if (j < places_count(slots)) {
+                        match place_put(slots[j], x) {
+                            Place::Empty => { return true; }
+                            Place::Full(back) => {
+                                page_extent_frames_keep(back);
+                                return false;
+                            }
+                        }
+                    }
+                    page_extent_frames_keep(x);
+                    return false;
+                }
+            }
+        }
+    }
 }
 
 // A focused boot probe for a DT memory map with a physical hole. It checks
@@ -1449,7 +1963,13 @@ fn page_alloc_boot(owner: PageOwnerTag) -> PageAllocResult
         Place::Full(metas) => {
             let inner: PageAllocResult = match place_borrow(unlocked, page_meta_store.extents) {
                 Place::Empty => { PageAllocResult::OutOfMemory }
-                Place::Full(extents) => { page_alloc_locked(pool, metas, extents, owner) }
+                Place::Full(extents) => {
+                    let framed: PageAllocResult = match place_borrow(unlocked, page_meta_store.frames) {
+                        Place::Empty => { PageAllocResult::OutOfMemory }
+                        Place::Full(frames) => { page_alloc_locked(frames, pool, metas, extents, owner) }
+                    };
+                    framed
+                }
             };
             inner
         }
@@ -1462,12 +1982,15 @@ fn page_free_boot(owner: sink PageOwner[page]) !{mmu_off, unsafe} {
     let unlocked = locked_cell_take_unlocked(&boot_page_pool_cell);
     let pool = memory_map_pool_record(unlocked, &boot_page_pool_cell);
     match place_borrow(unlocked, page_meta_store.metas) {
-        Place::Empty => {}
+        Place::Empty => { page_owner_abandon(owner); }
         Place::Full(metas) => {
             match place_borrow(unlocked, page_meta_store.extents) {
-                Place::Empty => {}
+                Place::Empty => { page_owner_abandon(owner); }
                 Place::Full(extents) => {
-                page_free_locked(pool, metas, extents, owner);
+                match place_borrow(unlocked, page_meta_store.frames) {
+                    Place::Empty => { page_owner_abandon(owner); }
+                    Place::Full(frames) => { page_free_locked(frames, pool, metas, extents, owner); }
+                }
                 }
             }
         }
@@ -1487,7 +2010,13 @@ fn page_alloc(owner: PageOwnerTag) -> PageAllocResult !{allocates} {
         Place::Full(metas) => {
             let inner: PageAllocResult = match place_borrow(guard, page_meta_store.extents) {
                 Place::Empty => { PageAllocResult::OutOfMemory }
-                Place::Full(extents) => { page_alloc_locked(pool, metas, extents, owner) }
+                Place::Full(extents) => {
+                    let framed: PageAllocResult = match place_borrow(guard, page_meta_store.frames) {
+                        Place::Empty => { PageAllocResult::OutOfMemory }
+                        Place::Full(frames) => { page_alloc_locked(frames, pool, metas, extents, owner) }
+                    };
+                    framed
+                }
             };
             inner
         }
@@ -1496,7 +2025,7 @@ fn page_alloc(owner: PageOwnerTag) -> PageAllocResult !{allocates} {
     return result;
 }
 
-private fn page_alloc_locked(pool: borrow &mut BootPagePool, metas: borrow region(PageMeta)[mb, mn], extents: borrow region(PageExtent)[eb, en], owner: PageOwnerTag) -> PageAllocResult
+private fn page_alloc_locked(frames: borrow PageFrameStore[fbc, fbo, fbn, fsc, fso, fsn], pool: borrow &mut BootPagePool, metas: borrow region(PageMeta)[mb, mn], extents: borrow region(PageExtent)[eb, en], owner: PageOwnerTag) -> PageAllocResult
         !{allocates} {
     if (pool.runtime_applied == false) {
         let core: &mut FreelistCore(BOOTSTRAP_PAGE_COUNT) = &pool.core;
@@ -1510,9 +2039,9 @@ private fn page_alloc_locked(pool: borrow &mut BootPagePool, metas: borrow regio
                     page_meta_at(metas, index).occupied = true;
                     page_meta_at(metas, index).owner = owner;
                     page_meta_at(metas, index).map_refcount = 0;
-                    return PageAllocResult::Allocated(page_owner_new(
-                        index, usable_ram_start + index * PAGE_SIZE,
-                        generation));
+                    let physical: usize = usable_ram_start + index * PAGE_SIZE;
+                    return page_owner_from_places(frames, pool, extents, index,
+                                                  physical, generation);
                 }
                 return PageAllocResult::OutOfMemory;
             }
@@ -1532,8 +2061,29 @@ private fn page_alloc_locked(pool: borrow &mut BootPagePool, metas: borrow regio
             return PageAllocResult::OutOfMemory;
         }
         PagePhysicalResult::Found(physical) => {
+            return page_owner_from_places(frames, pool, extents, index, physical,
+                                          generation);
+        }
+    }
+}
+
+// The page the free list chose, its permission taken out of its place
+// (#746). A place found Empty means the free list handed out a page that
+// is already out: the page stays marked occupied (quarantined, as a run
+// is when its list disagrees) and the allocation fails rather than alias.
+private fn page_owner_from_places(frames: borrow PageFrameStore[fbc, fbo, fbn, fsc, fso, fsn],
+        pool: borrow &mut BootPagePool, extents: borrow region(PageExtent)[eb, en],
+        index: usize, physical: usize, generation: usize) -> PageAllocResult {
+    match page_frames_take(frames, pool, extents, physical, 1) {
+        PageFrameTake::Out => {
+            // No log here: page_alloc_boot reaches this with the MMU off,
+            // where the console lock cannot be taken. The occupied page is
+            // what a page-owner report then finds.
+            return PageAllocResult::OutOfMemory;
+        }
+        PageFrameTake::Taken(frame) => {
             return PageAllocResult::Allocated(
-                page_owner_new(index, physical, generation));
+                page_owner_new(frame, index, physical, generation));
         }
     }
 }
@@ -1546,12 +2096,15 @@ fn page_free(owner: sink PageOwner[page]) !{unsafe} {
     let guard = locked_cell_take(&boot_page_pool_cell);
     let pool = memory_map_pool_record(guard, &boot_page_pool_cell);
     match place_borrow(guard, page_meta_store.metas) {
-        Place::Empty => {}
+        Place::Empty => { page_owner_abandon(owner); }
         Place::Full(metas) => {
             match place_borrow(guard, page_meta_store.extents) {
-                Place::Empty => {}
+                Place::Empty => { page_owner_abandon(owner); }
                 Place::Full(extents) => {
-                page_free_locked(pool, metas, extents, owner);
+                match place_borrow(guard, page_meta_store.frames) {
+                    Place::Empty => { page_owner_abandon(owner); }
+                    Place::Full(frames) => { page_free_locked(frames, pool, metas, extents, owner); }
+                }
                 }
             }
         }
@@ -1559,8 +2112,17 @@ fn page_free(owner: sink PageOwner[page]) !{unsafe} {
     locked_cell_give(&boot_page_pool_cell, guard);
 }
 
-private fn page_free_locked(pool: borrow &mut BootPagePool, metas: borrow region(PageMeta)[mb, mn], extents: borrow region(PageExtent)[eb, en], owner: sink PageOwner[page]) !{unsafe} {
+private fn page_free_locked(frames: borrow PageFrameStore[fbc, fbo, fbn, fsc, fso, fsn], pool: borrow &mut BootPagePool, metas: borrow region(PageMeta)[mb, mn], extents: borrow region(PageExtent)[eb, en], owner: sink PageOwner[page]) !{unsafe} {
     let index: usize = owner.index;
+    let physical: usize = owner.physical;
+    let generation: usize = owner.generation;
+    // The permission goes back to its place first, by its own address
+    // (#746): one that does not fit is a page that is not out, which is a
+    // double free whatever the metadata says.
+    if (page_frames_give(frames, pool, extents, physical, owner.frame) == false) {
+        pool.double_remove_count = pool.double_remove_count + 1;
+        return;
+    }
     if (index >= page_capacity(pool, metas, extents)) { return; }
     let meta: &mut PageMeta = page_meta_at(metas, index);
     if (meta.occupied == false) {
@@ -1570,15 +2132,18 @@ private fn page_free_locked(pool: borrow &mut BootPagePool, metas: borrow region
     meta.occupied = false;
     meta.owner = PageOwnerTag::Unowned;
     meta.map_refcount = 0;
-    page_freelist_push(pool, metas, extents, index, owner.generation);
+    page_freelist_push(pool, metas, extents, index, generation);
 }
 
 fn page_physical_address(owner: borrow PageOwner[page]) -> usize {
     return owner.physical;
 }
 
+// The page's bytes, reached through its permission (#746).
 fn page_bytes(owner: borrow PageOwner[page]) -> [u8; PAGE_SIZE..] @ page !{unsafe} {
-    return memory_map_page_bytes(owner);
+    // Bare integer literal: Const_env.bound_value folds only a bare IntLit
+    // or a const name. Must stay equal to PAGE_SIZE (4096).
+    return region_at(owner.frame, 0).bytes[0..<4096];
 }
 
 private fn page_physical_managed(pool: borrow &mut BootPagePool,
@@ -1623,7 +2188,9 @@ fn page_copy_mapped_physical(source_physical: usize,
 // whole process image. Only such an owner may later call the paired release.
 fn page_owner_transfer_index(owner: sink PageOwner[page])
         -> usize {
-    return owner.index;
+    let index: usize = owner.index;
+    region_release(owner.frame);
+    return index;
 }
 
 // A user PTE owns one mapping reference rather than a PageOwner. The first
@@ -1634,10 +2201,10 @@ fn page_mapping_install(owner: sink PageOwner[page]) !{unsafe} {
     let guard = locked_cell_take(&boot_page_pool_cell);
     let pool = memory_map_pool_record(guard, &boot_page_pool_cell);
     match place_borrow(guard, page_meta_store.metas) {
-        Place::Empty => {}
+        Place::Empty => { page_owner_abandon(owner); }
         Place::Full(metas) => {
             match place_borrow(guard, page_meta_store.extents) {
-                Place::Empty => {}
+                Place::Empty => { page_owner_abandon(owner); }
                 Place::Full(extents) => {
                 page_mapping_install_locked(pool, metas, extents, owner);
                 }
@@ -1652,7 +2219,7 @@ private fn page_mapping_install_locked(pool: borrow &mut BootPagePool, metas: bo
     let index: usize = owner.index;
     let meta: &mut PageMeta = page_meta_at(metas, index);
     meta.map_refcount = 1;
-    page_owner_transfer_index(owner);
+    let _transferred: usize = page_owner_transfer_index(owner);
 }
 
 // GitHub issue #295: `occupied == false`/`current == 0` mean the caller
@@ -1929,7 +2496,10 @@ fn page_mapping_release_physical(physical: usize) !{unsafe} {
                             let next: usize = current - 1;
                             meta.map_refcount = next as u32;
                             if (next == 0) {
-                                page_transferred_release_locked(pool, metas, extents, index);
+                                match place_borrow(guard, page_meta_store.frames) {
+                                    Place::Empty => {}
+                                    Place::Full(frames) => { page_transferred_release_locked(frames, pool, metas, extents, index, physical); }
+                                }
                             }
                         }
                     }
@@ -1948,11 +2518,17 @@ fn page_mapping_release_physical(physical: usize) !{unsafe} {
 // use this. page_mapping_release_physical and
 // page_transferred_release_physical both call THIS, which is why the split
 // exists.
-private fn page_transferred_release_locked(pool: borrow &mut BootPagePool, metas: borrow region(PageMeta)[mb, mn], extents: borrow region(PageExtent)[eb, en],
-                                           index: usize) !{unsafe} {
+private fn page_transferred_release_locked(frames: borrow PageFrameStore[fbc, fbo, fbn, fsc, fso, fsn], pool: borrow &mut BootPagePool, metas: borrow region(PageMeta)[mb, mn], extents: borrow region(PageExtent)[eb, en],
+                                           index: usize, physical: usize) !{unsafe} {
     if (index >= page_capacity(pool, metas, extents)) { return; }
     let meta: &mut PageMeta = page_meta_at(metas, index);
     if (meta.occupied == false) {
+        pool.double_remove_count = pool.double_remove_count + 1;
+        return;
+    }
+    // The page's permission back to its place (#746); refused when the
+    // place already holds it, which is a double release.
+    if (page_frames_reclaim(frames, pool, extents, physical, 1) == false) {
         pool.double_remove_count = pool.double_remove_count + 1;
         return;
     }
@@ -1977,7 +2553,10 @@ fn page_transferred_release_physical(physical: usize) !{unsafe} {
                 match page_index_for_physical(pool, metas, extents, physical) {
                     PageIndexResult::NotManaged => {}
                     PageIndexResult::Found(index) => {
-                        page_transferred_release_locked(pool, metas, extents, index);
+                        match place_borrow(guard, page_meta_store.frames) {
+                            Place::Empty => {}
+                            Place::Full(frames) => { page_transferred_release_locked(frames, pool, metas, extents, index, physical); }
+                        }
                     }
                 }
                 }

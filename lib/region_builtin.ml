@@ -136,6 +136,32 @@ fn places_from(r: sink @R@[b, o, n], tags: sink region__u8[c, p, n])
     return a;
 }
 
+// places_from for a count known only at run time (GitHub issue #746): the
+// tag bytes must number at least the elements; the first of them become
+// the tags and the rest are released. Too few, and the region comes back.
+must_use variant @PF@[b: addr, o: usize, n: usize] {
+    TooFew(@R@[b, o, n]);
+    Made(@PL@[b, o, n]);
+}
+
+fn places_from_bytes(r: sink @R@[b, o, n], tags: sink region__u8[c, p, m])
+        -> @PF@[b, o, n] !{unsafe} {
+    if (tags.length < r.length) {
+        region_discharge(tags);
+        return @PF@::TooFew(r);
+    }
+    let mut a: @PL@[b, o, n] = { r.address, r.length, tags.address };
+    let mut i: usize = 0;
+    while (i < r.length) {
+        let tag: *u8 = unsafe { (tags.address + i) as *u8 };
+        *tag = 1;
+        i = i + 1;
+    }
+    region_discharge(r);
+    region_discharge(tags);
+    return @PF@::Made(a);
+}
+
 // Keep the array for the rest of the program (a pool that is never torn
 // down), as region_table_keep does.
 fn places_keep(a: sink @PL@[b, o, n]) {}
@@ -1176,6 +1202,7 @@ let instance ?(record = false) elem =
   |> replace_all ~sub:"@PL@" ~by:("places__" ^ elem)
   |> replace_all ~sub:"@PB@" ~by:("PlaceBack__" ^ elem)
   |> replace_all ~sub:"@PT@" ~by:("PlaceRun__" ^ elem)
+  |> replace_all ~sub:"@PF@" ~by:("PlacesFrom__" ^ elem)
   |> replace_all ~sub:"@O@" ~by:("RegionOf__" ^ elem)
   |> replace_all ~sub:"@TBL@" ~by:("RegionTable__" ^ elem)
   |> replace_all ~sub:"@RS@" ~by:("RegionReleaseSlot__" ^ elem)
@@ -1251,7 +1278,7 @@ let element_types (prog : Ast.toplevel list) claimed =
          "RegionShrink__"; "RegionAdopt__"; "RegionPin__"; "RegionPinned__";
          "RegionUnpin__"; "RegionRetire__"; "RegionNext__";
          "RegionInspection__"; "RegionInspectionProbe__"; "RegionTyped__"; "places__";
-         "PlaceBack__"; "PlaceRun__" ] in
+         "PlaceBack__"; "PlaceRun__"; "PlacesFrom__" ] in
   List.iter (fun item -> scan (Ast.show_toplevel item)) prog;
   Hashtbl.fold (fun k () acc -> k :: acc) found [] |> List.sort compare
 

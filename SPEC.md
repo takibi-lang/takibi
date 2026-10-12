@@ -3428,7 +3428,10 @@ fn touch(arr: borrow places(Node)[b, n], i: usize @ k) {
 - `places_take_run(arr, i, m)` takes `m` adjacent elements at once as one
   region: `PlaceRun(T)::Taken(region(T)[b + k, m])` (`k` existential) when
   all are Full, else `Out` with nothing taken. `places_holds(arr, address)`
-  and `places_full(arr, i)` only read. `region_into_bytes(r)` gives a
+  and `places_full(arr, i)` only read. `places_from_bytes(r, tags)` is
+  `places_from` for a count known only at run time: the tag bytes must
+  number at least the elements (`PlacesFrom(T)::Made(array)`), or the
+  region comes back (`TooFew(r)`). `region_into_bytes(r)` gives a
   region's elements as a byte region (`RegionBytes::Assumed`), the inverse
   of `region_bytes_typed`.
 - A linear struct may hold such a permission with its identities closed:

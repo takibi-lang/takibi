@@ -1,16 +1,22 @@
 use "kernel/mm/page.tkb";
 // The memory mint (GitHub issue #744, #637 step B2): the few places where
 // RAM the kernel discovered becomes something its code may touch. What it
-// trusts is that the page allocator's records are right -- a page it hands
-// out is RAM and belongs to the caller alone. Everything reached through
-// what these functions return is checked by type.
+// trusts is the RAM hand-over: the bootstrap pages and each RAM extent the
+// page allocator builds its per-page places from are RAM, handed over once
+// (GitHub issue #746). That a page is handed out at most once is the
+// places' business, by type. Everything reached through what these
+// functions return is checked by type.
 //
 // Discovery stays elsewhere: the DTB reader today, ACPI or PCI enumeration
 // later. This file knows nothing about where an extent came from.
 //
-// Current limitations: the page allocator's guarantee that it never hands
-// out a page twice rests on its free list and PageMeta's occupied flag
-// (#746 moves it into per-page permissions).
+// Current limitations (2026-10-12): memory_map_frames also re-mints the
+// permission of a page or run whose owner a holder transferred away and
+// now gives back by address (page_transferred_release_physical and its
+// run twin, page_run_reclaim_transferred_physical). The places refuse such
+// a permission when the page is already back, so a double release is
+// caught at run time, but the holder's address is trusted to name pages
+// it was given.
 
 // The page allocator's pool (kernel/mm/page.tkb). It lives here so that
 // memory_map_pool_record can read it as a record by name. The value is still
@@ -40,6 +46,12 @@ fn memory_map_metadata_bytes(base: usize, span: usize) -> RegionBytes !{unsafe} 
     return region_bytes_assume(base, span);
 }
 
+// No bytes at all, for an empty array (the page allocator's places before
+// and after the bootstrap window). Nothing can be reached through it.
+fn memory_map_empty_bytes() -> RegionBytes !{unsafe} {
+    return region_bytes_assume((&boot_page_pool_cell) as usize, 0);
+}
+
 // An empty extent table, the allocator's until memory is applied. It holds
 // no bytes, so nothing can be reached through it.
 fn memory_map_empty_extents() -> RegionTyped(PageExtent) !{unsafe} {
@@ -48,15 +60,13 @@ fn memory_map_empty_extents() -> RegionTyped(PageExtent) !{unsafe} {
     return region_bytes_typed__PageExtent(none);
 }
 
-// A page the allocator handed out, as its bytes, alive while its owner is.
-fn memory_map_page_bytes(owner: borrow PageOwner[page]) -> [u8; PAGE_SIZE..] @ page
-        !{unsafe} {
-    let base: *u8 = unsafe { page_physical_address(owner) as *u8 };
-    // Bare integer literals, not `PAGE_SIZE as isize`: Const_env.bound_value
-    // only folds a bare IntLit or a bare Var naming a registered const.
-    // Must stay numerically equal to PAGE_SIZE (4096).
-    let bytes: [u8; PAGE_SIZE..] = unsafe { base[0..<4096] };
-    return bytes;
+// `count` pages of RAM from `base` as page permissions: the bootstrap
+// pages and each discovered extent, once, when the allocator builds their
+// places; and a transferred page or run its holder gives back by address
+// (see the limitations above).
+fn memory_map_frames(base: usize, count: usize) -> RegionTyped(PageFrame) !{unsafe} {
+    let RegionBytes::Assumed(bytes) = region_bytes_assume(base, count * PAGE_SIZE) else {};
+    return region_bytes_typed__PageFrame(bytes);
 }
 
 // Copy a page the allocator manages (page_copy_mapped_physical has checked
@@ -67,7 +77,7 @@ fn memory_map_copy_managed_page(source_physical: usize,
     let source = unsafe {
         source_base[0 as isize..<PAGE_SIZE as isize]
     };
-    slice_copy(memory_map_page_bytes(destination), source);
+    slice_copy(page_bytes(destination), source);
 }
 
 // page_run_probe only: every page of a run it was just given is payload to
@@ -87,14 +97,4 @@ fn memory_map_run_tail_probe(base: usize, count: usize) -> bool !{unsafe} {
         }
     }
     return payload_only;
-}
-
-// A page run the allocator handed out, as a byte region; the run's
-// ownership moves into it (#743). The pages go back to the allocator with
-// page_run_transferred_release_physical.
-fn memory_map_run_region(owner: sink PageRunOwner[run]) -> RegionBytes !{unsafe} {
-    let base: usize = page_run_physical_address(owner);
-    let bytes: usize = page_run_count(owner) * PAGE_SIZE;
-    let _first: usize = page_run_owner_transfer_index(owner);
-    return region_bytes_assume(base, bytes);
 }
