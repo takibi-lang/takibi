@@ -129,6 +129,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_process_record_bare_uses_controls.py` | negative controls for changed lookup/mint scopes, constructor visibility and missing destructive annotations |
 | `check_lock_discipline.py` | global mutexes are not force-reset and raw atomics stay allowlisted |
 | `check_measure_kernel_tcp_throughput_controls.py` | Controls for the wire-throughput measurement, with a scripted curl |
+| `check_measure_kernel_fileio_controls.py` | Controls for the file-I/O workload timer (`scripts/measure_kernel_fileio.py`, #765): `real` lines parsed or refused, summary spread, comparison deltas |
 | `check_kernel_shell_tcp_controls.py` | Controls for checksum-verified bulk HTTP measurements and retained failure artifacts |
 | `check_measure_trusted_base_controls.py` | Lexical controls for the trusted-base unsafe-block inventory, and for the raw-pointer dereference ratchet: a file with no row, over, under, gone or zero is refused, another target's files are not checked, and `--lower` lowers, never raises and drops a zero row; a zero-site compiled source passes but an empty depfile is refused |
 | `check_net_link_wait_controls.py` | Controls for the shared host-side reachability wait |
