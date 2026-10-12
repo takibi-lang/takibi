@@ -1,10 +1,11 @@
 {
   "date": "2026-10-12",
-  "event": "milestone",
+  "event": "incremental",
   "decision": "measured",
-  "source_sha256": "372659f695695eb54f4f5ee80ab2e6587dcfd8d8edc87ddbda51189e1c6c1db6",
-  "workload": "#745: process records on the built-in RegionPool, each record's permission Held in its slot for the process's life, walked with no lock; IntrusivePool out of the kernel. Linked kernels against main 0cabdb42 (llvm-size); QEMU and RPi5 bounded boot pool-space views; RPi5 uncontended pool-cycle probe on both trees; four-core churn on QEMU and RPi5.",
+  "source_sha256": "606d9e029a0cfa2d6ffe2162e220607a67de2db0944c12032a5c6d26ad7489e3",
+  "workload": "#637/#720: region backing globals (`region let mut`), a compile-time check only; page.tkb's two bootstrap arrays re-declared. Linked kernels against main 3d12b7ad (llvm-size via scripts/space_delta.py).",
   "evidence": [
+    "docs/REGION_BACKING_SPACE_2026-10-12.md",
     "docs/PROCESS_POOL_REGION_SPACE_2026-10-12.md",
     "docs/INIT_STATE_SPACE_2026-10-12.md",
     "docs/PAGE_PLACES_SPACE_2026-10-12.md",
@@ -52,6 +53,6 @@
     "docs/VIRTIO_NET_TX_2026-10-10.md",
     "docs/VIRTIO_NET_TX_SPACE_2026-10-10.json"
   ],
-  "assessment": "QEMU text -7488 / data -104 / BSS -400 B, RPi5 text -7224 / data -104 / BSS -480 B, usable_ram_start unchanged (IntrusivePool and the tag probe no longer linked). ProcessRecord 1832 -> 1856 B (a handle's slot reference is a RegionHeld beside its own generation). Holding costs nothing per record. The walked process pool is never shrunk, so it keeps its peak: 3 chunks (48 KiB) at the bounded end where IntrusivePool kept 1. RPi5 pool cycle 56452 -> 34405 ticks per 4096 (about 39% cheaper). Adopted. Earlier measured results (#203, #746 and before) stand.",
+  "assessment": "QEMU and RPi5 text/data/BSS and usable_ram_start unchanged; no data/BSS symbol changed size. The check emits no code. Earlier measured results (#745 and before) stand.",
   "next_trigger": "A shrink protocol for walked RegionPools, the #748 allocator change, or the next pool consumer moved onto Held slots, whichever lands first."
 }
