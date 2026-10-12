@@ -12,7 +12,7 @@ def capture():
         lines.append(f'pool space: begin={phase}')
         for name in sorted(POOLS):
             if name == 'process':
-                row = 'object=872 pool=104 slot=880 chunk=8192 chunks=1 capacity=9 nonfree=1 bytes=8192'
+                row = 'object=872 pool=24 slot=872 chunk=8192 chunks=1 capacity=9 nonfree=1 bytes=8192'
             else:
                 row = 'object=40 pool=16 slot=40 chunk=4096 chunks=1 capacity=84 nonfree=1 bytes=4096'
             lines.append(f'pool space: name={name} {row}')
@@ -24,7 +24,7 @@ def main():
     text = capture()
     samples = parse_capture(text)
     assert accounting('backing', samples['boot']['backing']) == (40, 3320, 672, 24, 8, 32, 4112)
-    assert accounting('process', samples['boot']['process']) == (872, 6976, 72, 128, 0, 144, 8296)
+    assert accounting('process', samples['boot']['process']) == (872, 6976, 72, 24, 0, 248, 8216)
     assert len(render_tsv(samples).splitlines()) == 19
     # Retained-log replays must not double-count allocator observations.
     assert parse_capture(text + '[0.123] pool space: begin=boot\n') == samples
@@ -45,7 +45,7 @@ def main():
         text.replace('name=backing', 'name=unknown', 1),
         text.replace('pool space: name=backing', 'missing: name=backing', 1),
         text.replace('slot=40', 'slot=41', 1),
-        text.replace('pool=104', 'pool=80', 1),
+        text.replace('slot=872', 'slot=880', 1),
         text.replace('end=bounded_end\n', '', 1),
         text.replace('begin=boot', 'begin=unknown', 1),
         '',
