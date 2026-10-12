@@ -127,11 +127,14 @@ allocator migration remains a separate design gate.
 
 Initialization does not prove CPU freshness across preemption.
 
-**Next, ahead of the list below (maintainer, 2026-10-12):** #765, measure
-the per-call 4 KiB file-buffer zero fill that #203 stages 1-2 (done
-2026-10-12) added to each staging syscall. Its result decides whether #203
-stage 3 (cross-call contracts and byte ranges, which remove the fill) is
-pulled forward.
+Done 2026-10-12: #765 measured the per-call 1 KiB file-buffer zero fill
+of #203 stages 1-2 on RPi5 and QEMU; it is below 0.5% of a read and within
+the spread of every workload, so #203 stage 3 is not pulled forward.
+
+**Next, ahead of the list below (maintainer, 2026-10-12):** #767, bulk
+HTTP on RPi5 about 42% slower since #745 (process records on RegionPool);
+bisect the #745 commits with scripts/measure_kernel_fileio.py and name the
+code path.
 
 1. **Fixed DMA lifecycle, finishing the drivers.** Every stage of one
    transfer in types, leaving one device-semantics declaration per driver
