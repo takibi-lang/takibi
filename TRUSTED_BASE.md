@@ -90,6 +90,15 @@ Calling a mint does not grant the caller raw access. Authority-indexed reference
 returns carry the existing local loan checks into ordinary field consumers;
 raw-to-reference conversion is an unsafe assertion within the mint boundary.
 The compiler's generated region primitives retain their explicit trusted source.
+Region backing globals (`region let mut g: [T; N];`, SPEC.md built-in
+region) are the only arrays `region_of`, `region_table_of` and
+`region_table_lock` accept, and the compiler rejects every other use of such
+a name in the program, so a claimed region is the only way to that storage.
+What stays trusted: `region_bytes_assume`, which mints a region over any
+address it is given (confined to the mint files above); the built-in region
+definitions the compiler generates; and references the name-based check
+cannot see -- symbol names inside inline assembly strings and linker-script
+symbol references -- which the check does not inspect.
 Shared-reference direct stores and writable field-address aliases are rejected,
 including nested and explicitly dereferenced places. Array-to-slice aliases
 do not carry that readonly permission, so readonly behavior through a derived

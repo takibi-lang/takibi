@@ -83,9 +83,9 @@ list (maintainer, 2026-10-09).
    is #750 (holder-tied identities, option C, is its central item; a
    shrink protocol for RegionPools walked with no lock belongs there). For #720
    (B): the doorbell, ERDP-release and stop/reset boundaries are in place;
-   #720 must add exact request/event matching and needs general exclusive
-   backing storage on #637/#672 (region_of still permits direct access to
-   the source array); the ERSTSZ write is #754. log.tkb's raw sites go with
+   #720 must add exact request/event matching; general exclusive backing
+   storage is done (2026-10-12: `region let mut` backing globals, whose name
+   has no use besides the claim); the ERSTSZ write is #754. log.tkb's raw sites go with
    #613: a lockless multi-writer log ring with its protocol in the type
    system, its orderings checked by #645's herd7 litmus tests.
 4. **Preemption.** #638's typed preparation -- a preemption-disabled
@@ -142,8 +142,9 @@ code path.
    - #720 (session-long xHCI rings and contexts): B+C selected on
      2026-10-11, general region authority plus generated permissions from
      one common Takibi protocol declaration (also generating TLA+).
-     B advances the declaration/model/type connection; A supplies
-     exclusive backing storage on #672/#637. Three-index region retention
+     B advances the declaration/model/type connection; A's exclusive
+     backing storage is done (2026-10-12, `region let mut`, SPEC.md
+     built-in region). Three-index region retention
      in a linear owner, reference expiry and Place flow are verified with
      existing rules; #131 is needed only for a later demonstrated shape.
      No local DMA storage exception. Coordinate MMIO observation hooks;
@@ -156,9 +157,11 @@ code path.
      identity; device exit only on a completes/quiesces witness).
      Done 2026-10-12 (slice 3): generated read/write access for
      `access write` states, indices proved against a constant count.
-     Parked: driver migration waits on A's exclusive backing storage
-     (#672/#637) and then takes option (a), a general reviewed
-     region-publication primitive, with xHCI; option (b), retaining
+     Unblocked on A's side: the backing-array hole is closed
+     (2026-10-12), and no further #637/#672 layer is known to block
+     option (a). What remains is option (a) itself, a general reviewed
+     region-publication primitive, designed and built with xHCI on #720
+     (its surface is not yet proposed); option (b), retaining
      dma_fixed tokens, is not taken. First check on resume: a generated
      owner stored in a Place across functions.
      `requires` may collide with future function preconditions; revisit
