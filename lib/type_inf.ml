@@ -6004,6 +6004,15 @@ and infer_field_access ?(slice_source = false) ~decay senv eenv tyenv fenv
       (match List.assoc_opt fname fields with
        | Some ft ->
            let raw = field_type_for_instance sname static_args ft in
+           (* GitHub issue #746: a stored owner closed by `exists` opens to
+              fresh identities at each access; two accesses are never known
+              to name the same identity. *)
+           let rec open_field t = match repr t with
+             | TExists (name, _, binder, body) ->
+                 open_field (Types.subst_in_ty binder (rigid_static name) body)
+             | t -> t in
+           let raw = if Hashtbl.mem stored_owner_fields (sname, fname)
+             then open_field raw else raw in
            if not decay then raw
            else (match raw with
              | TArray (inner, _) ->
@@ -9365,11 +9374,42 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                     | _ -> false) args
            | Ast.TypePtr (Ast.TypeNamed name) ->
                StringSet.mem name !linear_opaque_names
+           (* GitHub issue #746: an owner whose identities are its own,
+              closed by `exists` (a page's region inside PageOwner). Each
+              index is a binder, a struct parameter, or an integer. *)
+           | Ast.TypeExists _ ->
+               let rec peel bound = function
+                 | Ast.TypeExists (n, _, t) -> peel (n :: bound) t
+                 | t -> (bound, t) in
+               (match peel [] ty with
+                | bound, Ast.TypeIndexed (name, args) ->
+                    Hashtbl.find_opt indexed_struct_kinds name = Some Ast.KindLinear
+                    && args <> []
+                    && List.for_all (function
+                         | Ast.StaticName n -> List.mem n bound || List.mem_assoc n params
+                         | Ast.StaticInt _ -> true
+                         | _ -> false) args
+                | _ -> false)
            | _ -> false) in
         List.iter (fun (fname, ty) ->
           if stored_owner_field ty then begin
             Hashtbl.replace stored_owner_fields (sname, fname) ();
-            validate_nonparam_type sloc ty
+            match ty with
+            | Ast.TypeExists _ ->
+                (* The binders are the field's own: validate the body in a
+                   copy of the struct's scope that also knows them. *)
+                let saved = !validation_static_scope in
+                let inner = Hashtbl.copy scope in
+                let rec bind = function
+                  | Ast.TypeExists (n, sort, body) ->
+                      validate_static_sort sloc sort;
+                      Hashtbl.replace inner n sort; bind body
+                  | body -> body in
+                let body = bind ty in
+                validation_static_scope := Some inner;
+                validate_nonparam_type sloc body;
+                validation_static_scope := saved
+            | _ -> validate_nonparam_type sloc ty
           end else begin
           if owned && ast_contains_stable_owner_value ty then
             raise (TypeError (sloc, Printf.sprintf

@@ -2463,6 +2463,30 @@ let expect_retained_region_error fragment body () =
       Alcotest.(check bool) (String.concat " | " (List.map snd errors)) true
         (List.exists (fun (_, msg) -> contains_substring msg fragment) errors)
 
+(* GitHub issue #746: a page owner holding its permission with the
+   identity closed, given back to its array by address. *)
+let put_back_746 = {|
+struct Frame746 { bytes: [u8; 64]; }
+linear struct Owner746[page: usize] {
+    private frame: exists c: addr. exists c__off: usize. region(Frame746)[c, 1];
+    private generation: usize @ page;
+}
+must_use variant Alloc746 { Out; Got(exists page: usize. Owner746[page]); }
+fn owner746(f: sink region(Frame746)[c, 1], g: usize @ page) -> Owner746[page] {
+    let mut o: Owner746[page] = { f, g };
+    return o;
+}
+fn alloc746(arr: borrow places(Frame746)[b, n], i: usize) -> Alloc746 !{unsafe} {
+    match places_take_run(arr, i, 1) {
+        PlaceRun(Frame746)::Out => { return Alloc746::Out; }
+        PlaceRun(Frame746)::Taken(f) => { return Alloc746::Got(owner746(f, i)); }
+    }
+}
+fn bytes746(o: borrow Owner746[page]) -> [u8; 64..] @ page !{unsafe} {
+    return region_at(o.frame, 0).bytes[0..<64];
+}
+|}
+
 let expect_region_error fragment src () =
   match infer_regions src with
   | _ -> Alcotest.failf "expected an error containing %S" fragment
@@ -10218,6 +10242,78 @@ fn main749s() -> i32 !{unsafe} {
           }
           return got;
         }");
+
+  (* GitHub issue #746: give-back by address. *)
+  Alcotest.test_case "places_put_back: an owner's permission goes back by address" `Quick
+    (fun () -> ignore (infer_regions (put_back_746 ^ {|
+fn free746(arr: borrow places(Frame746)[b, n], o: sink Owner746[page]) -> bool !{unsafe} {
+    match places_put_back(arr, o.frame) {
+        PlaceBack(Frame746)::Stored => { return true; }
+        PlaceBack(Frame746)::Foreign(back) => { region_release(back); return false; }
+    }
+}
+fn use746(arr: borrow places(Frame746)[b, n]) !{unsafe} {
+    match alloc746(arr, 2) {
+        Alloc746::Out => {}
+        Alloc746::Got(o) => {
+            let bytes = bytes746(o);
+            bytes[3] = 9;
+            let stored: bool = free746(arr, o);
+        }
+    }
+}|})));
+
+  Alcotest.test_case "places_put_back: the owner is gone after give-back" `Quick
+    (expect_region_error "was already consumed" (put_back_746 ^ {|
+fn free746(arr: borrow places(Frame746)[b, n], o: sink Owner746[page]) -> usize !{unsafe} {
+    match places_put_back(arr, o.frame) {
+        PlaceBack(Frame746)::Stored => { return o.generation; }
+        PlaceBack(Frame746)::Foreign(back) => { region_release(back); return 0; }
+    }
+}|}));
+
+  Alcotest.test_case "places_put_back: a permission cannot be given back twice" `Quick
+    (expect_region_error "was already consumed" (put_back_746 ^ {|
+fn free746(arr: borrow places(Frame746)[b, n], o: sink Owner746[page]) !{unsafe} {
+    match places_put_back(arr, o.frame) {
+        PlaceBack(Frame746)::Stored => {}
+        PlaceBack(Frame746)::Foreign(back) => { region_release(back); }
+    }
+    match places_put_back(arr, o.frame) {
+        PlaceBack(Frame746)::Stored => {}
+        PlaceBack(Frame746)::Foreign(back) => { region_release(back); }
+    }
+}|}));
+
+  Alcotest.test_case "places_put_back: page bytes are refused after give-back" `Quick
+    (expect_region_error "cannot be used after" (put_back_746 ^ {|
+fn free746(arr: borrow places(Frame746)[b, n], o: sink Owner746[page]) !{unsafe} {
+    match places_put_back(arr, o.frame) {
+        PlaceBack(Frame746)::Stored => {}
+        PlaceBack(Frame746)::Foreign(back) => { region_release(back); }
+    }
+}
+fn use746(arr: borrow places(Frame746)[b, n]) !{unsafe} {
+    match alloc746(arr, 2) {
+        Alloc746::Out => {}
+        Alloc746::Got(o) => {
+            let bytes = bytes746(o);
+            free746(arr, o);
+            bytes[3] = 9;
+        }
+    }
+}|}));
+
+  Alcotest.test_case "places_put_back: an owner holding a permission cannot be dropped" `Quick
+    (expect_region_error "holds a stored owner" (put_back_746 ^ {|
+fn drop746(o: sink Owner746[page]) {}|}));
+
+  Alcotest.test_case "exists field: an index must be bound by the field or the struct" `Quick
+    (expect_region_error "cannot hold a nested indexed owner" {|
+struct Frame746b { word: usize; }
+linear struct Owner746b[page: usize] {
+    private frame: exists c: addr. region(Frame746b)[c + d, 1];
+}|});
 
   (* GitHub issue #744: a byte region read as typed elements. *)
   Alcotest.test_case "region_bytes_typed: typed region indexed under a count check" `Quick

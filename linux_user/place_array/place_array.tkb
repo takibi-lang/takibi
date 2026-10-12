@@ -3,6 +3,8 @@
 // taken out and put back on its own, its content derived from the index.
 // Phase 2: an array whose elements store a value -- here the shape #746
 // needs, RAM extents each holding its pages' array.
+// Phase 3 (GitHub issue #746): a permission kept in an owner across calls
+// goes back by its own address; a wrong or doubled one comes back Foreign.
 // What must not compile is in test/test_takibi.ml, "places" and "slots".
 
 struct Page { word: usize; }
@@ -125,6 +127,139 @@ fn test_place_array() !{unsafe} {
     places_keep(extents);
 }
 
+// -- Phase 3: give back by address (GitHub issue #746) --
+
+struct Frame { bytes: [u8; 64]; }
+
+// A page owner as the kernel's PageOwner holds it: the permission with its
+// identity closed, so it outlives the borrow it was taken under.
+linear struct FrameOwner[page: usize] {
+    private frame: exists c: addr. exists c__off: usize. region(Frame)[c, 1];
+    private generation: usize @ page;
+}
+
+must_use variant FrameAlloc {
+    Out;
+    Got(exists page: usize. FrameOwner[page]);
+}
+
+private let mut frames: [Frame; 4];
+private let mut frame_tags: [u8; 4];
+
+fn frame_owner_new(f: sink region(Frame)[c, 1], g: usize @ page) -> FrameOwner[page] {
+    let mut o: FrameOwner[page] = { f, g };
+    return o;
+}
+
+fn frame_alloc(arr: borrow places(Frame)[b, n], first: usize)
+        -> FrameAlloc !{unsafe} {
+    match places_take_run(arr, first, 1) {
+        PlaceRun(Frame)::Out => { return FrameAlloc::Out; }
+        PlaceRun(Frame)::Taken(f) => { return FrameAlloc::Got(frame_owner_new(f, first)); }
+    }
+}
+
+// 1 when stored, 0 when it came back Foreign.
+fn frame_give(arr: borrow places(Frame)[b, n], f: sink region(Frame)[c, m]) -> usize
+        !{unsafe} {
+    match places_put_back(arr, f) {
+        PlaceBack(Frame)::Stored => { return 1; }
+        PlaceBack(Frame)::Foreign(back) => { region_release(back); return 0; }
+    }
+}
+
+fn frame_free(arr: borrow places(Frame)[b, n], o: sink FrameOwner[page]) -> usize
+        !{unsafe} {
+    return frame_give(arr, o.frame);
+}
+
+fn frame_write(o: borrow FrameOwner[page], value: u8) !{unsafe} {
+    region_at(o.frame, 0).bytes[5] = value;
+}
+
+fn test_put_back() !{unsafe} {
+    let RegionOf(Frame)::Taken(r) = region_of(frames) else {
+        RegionOf(Frame)::Gone => { return; }
+    };
+    let RegionOf(u8)::Taken(t) = region_of(frame_tags) else {
+        RegionOf(u8)::Gone => { region_release(r); return; }
+    };
+    let arr = places_from(r, t);
+    // A run of two out; an overlapping run is Out while it is held.
+    match places_take_run(arr, 1, 2) {
+        PlaceRun(Frame)::Out => { uart_puts("run: out\n"); }
+        PlaceRun(Frame)::Taken(run) => {
+            uart_puts("overlap while held: ");
+            match frame_alloc(arr, 2) {
+                FrameAlloc::Out => { uart_puts("out\n"); }
+                FrameAlloc::Got(twice) => { uart_puts("TAKEN\n"); uart_print(frame_free(arr, twice)); }
+            }
+            uart_puts("run back: ");
+            uart_print(frame_give(arr, run));
+            uart_puts("\n");
+        }
+    }
+    // A page out and back, then a second permission for the same page
+    // (minted from the array's own bytes here) finds it Full: Foreign.
+    match frame_alloc(arr, 3) {
+        FrameAlloc::Out => { uart_puts("page: out\n"); }
+        FrameAlloc::Got(page) => {
+            frame_write(page, 7);
+            uart_puts("page back: ");
+            uart_print(frame_free(arr, page));
+            uart_puts("\n");
+        }
+    }
+    let RegionBytes::Assumed(again) = region_bytes_assume(((&frames) as usize) + 3 * 64, 64) else {};
+    match region_bytes_typed__Frame(again) {
+        RegionTyped(Frame)::Misaligned(back) => { region_release(back); }
+        RegionTyped(Frame)::Typed(f) => {
+            uart_puts("doubled back: ");
+            uart_print(frame_give(arr, f));
+            uart_puts("\n");
+        }
+    }
+    // Off an element boundary, and outside the array: Foreign.
+    let RegionBytes::Assumed(skew) = region_bytes_assume(((&frames) as usize) + 8, 64) else {};
+    match region_bytes_typed__Frame(skew) {
+        RegionTyped(Frame)::Misaligned(back) => { region_release(back); }
+        RegionTyped(Frame)::Typed(f) => {
+            uart_puts("skewed back: ");
+            uart_print(frame_give(arr, f));
+            uart_puts("\n");
+        }
+    }
+    let RegionBytes::Assumed(outside) = region_bytes_assume(((&frames) as usize) + 4 * 64, 64) else {};
+    match region_bytes_typed__Frame(outside) {
+        RegionTyped(Frame)::Misaligned(back) => { region_release(back); }
+        RegionTyped(Frame)::Typed(f) => {
+            uart_puts("outside back: ");
+            uart_print(frame_give(arr, f));
+            uart_puts("\n");
+        }
+    }
+    // A run as bytes, and back by its address.
+    match places_take_run(arr, 0, 4) {
+        PlaceRun(Frame)::Out => { uart_puts("whole: out\n"); }
+        PlaceRun(Frame)::Taken(all) => {
+            let RegionBytes::Assumed(bytes) = region_into_bytes(all) else {};
+            uart_puts("whole as bytes: ");
+            uart_print(region_count(bytes));
+            uart_puts("\n");
+            match region_bytes_typed__Frame(bytes) {
+                RegionTyped(Frame)::Misaligned(back) => { region_release(back); }
+                RegionTyped(Frame)::Typed(f) => {
+                    uart_puts("whole back: ");
+                    uart_print(frame_give(arr, f));
+                    uart_puts("\n");
+                }
+            }
+        }
+    }
+    places_keep(arr);
+}
+
 fn app_main() !{unsafe} {
     test_place_array();
+    test_put_back();
 }

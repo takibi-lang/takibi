@@ -4,3 +4,11 @@ low page 3: 33
 high page 2: 22
 high page 3 (out of range): 0
 empty extent 2: 0
+overlap while held: out
+run back: 1
+page back: 1
+doubled back: 0
+skewed back: 0
+outside back: 0
+whole as bytes: 256
+whole back: 1

@@ -3417,6 +3417,26 @@ fn touch(arr: borrow places(Node)[b, n], i: usize @ k) {
   own, an element does not tie its value to its index; an array of
   extents, each holding its pages' `places(Page)`, is the intended use.
 - Per-element witnesses (#751) are a later phase.
+- A permission kept across lock sections loses the array's identity
+  (storing it closes its statics), so it goes back by its address
+  (GitHub issue #746): `places_put_back(arr, r)` takes any
+  `region(T)[c, m]` and answers `PlaceBack(T)::Stored` when its `m`
+  elements lie inside `arr` on element boundaries and are all Empty; it
+  stores them Full. Otherwise it answers `Foreign(r)` with the region
+  unchanged. A doubled hand-out stays impossible by type (the permission
+  is linear); only "the right element" is checked at run time.
+- `places_take_run(arr, i, m)` takes `m` adjacent elements at once as one
+  region: `PlaceRun(T)::Taken(region(T)[b + k, m])` (`k` existential) when
+  all are Full, else `Out` with nothing taken. `places_holds(arr, address)`
+  and `places_full(arr, i)` only read. `region_into_bytes(r)` gives a
+  region's elements as a byte region (`RegionBytes::Assumed`), the inverse
+  of `region_bytes_typed`.
+- A linear struct may hold such a permission with its identities closed:
+  a field `exists c: addr. exists c__off: usize. region(T)[c, 1]`, each
+  index a binder of the field, a struct parameter, or an integer. Each
+  access opens it to fresh identities, so two accesses are never known to
+  name the same region; the field follows the stored-owner rules (it must
+  be moved out before the struct is gone).
 - linux_user/place_array runs both phases.
 
 **region_table** stores permissions: a pool over a claimed array.

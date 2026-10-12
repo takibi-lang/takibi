@@ -174,6 +174,107 @@ fn __places_put(a: borrow @PL@[b, o, n], i: usize @ k, v: sink @R@[b, o + k, 1])
     return Place::Empty;
 }
 
+// -- Giving a permission back by its address (GitHub issue #746) --
+//
+// A permission kept across lock sections has lost the array's identity
+// (storing it closes its statics), so it cannot be put back by index with
+// a type that names its element. places_put_back finds its elements from
+// the permission's own address instead: they must lie inside the array,
+// on element boundaries, and every one of them must be Empty. Otherwise
+// the permission comes back as Foreign, unchanged, and nothing is stored.
+// Uniqueness stays by type -- the permission is linear and a Full element
+// is never handed out twice; only "the right element" is checked at run
+// time.
+must_use variant @PB@ {
+    Stored;
+    Foreign(exists c: addr. exists p: usize. exists m: usize. @R@[c, p, m]);
+}
+
+private fn places_foreign__@T@(v: sink @R@[c, p, m]) -> @PB@ {
+    return @PB@::Foreign(v);
+}
+
+fn places_put_back(a: borrow @PL@[b, o, n], v: sink @R@[c, p, m]) -> @PB@
+        !{unsafe} {
+    let address: usize = v.address;
+    let count: usize = v.length;
+    if (count == 0 || address < a.address) { return places_foreign__@T@(v); }
+    let offset: usize = address - a.address;
+    if (offset % sizeof(@T@) != 0) { return places_foreign__@T@(v); }
+    let first: usize = offset / sizeof(@T@);
+    if (first >= a.length || count > a.length - first) {
+        return places_foreign__@T@(v);
+    }
+    let mut i: usize = 0;
+    while (i < count) {
+        if (*places_tag(a, first + i) != 0) { return places_foreign__@T@(v); }
+        i = i + 1;
+    }
+    i = 0;
+    while (i < count) {
+        *places_tag(a, first + i) = 1;
+        i = i + 1;
+    }
+    region_discharge(v);
+    return @PB@::Stored;
+}
+
+// Whether `address` is the start of an element of the array. A reader's
+// question (which array holds this page?); it hands nothing out.
+fn places_holds(a: borrow @PL@[b, o, n], address: usize) -> bool {
+    if (address < a.address) { return false; }
+    let offset: usize = address - a.address;
+    return offset % sizeof(@T@) == 0 && offset / sizeof(@T@) < a.length;
+}
+
+// Whether element `i` is Full, without taking it. Reader-only, like
+// places_holds; out of range answers false.
+fn places_full(a: borrow @PL@[b, o, n], i: usize) -> bool !{unsafe} {
+    if (i >= a.length) { return false; }
+    return *places_tag(a, i) != 0;
+}
+
+// `count` adjacent elements out at once, as one region: every one of them
+// must be Full, or none is taken (Out). The run's offset is existential --
+// it is given back with places_put_back, by its address.
+must_use variant @PT@[b: addr, o: usize, m: usize] {
+    Out;
+    Taken(exists k: usize. @R@[b, o + k, m]);
+}
+
+private fn places_run__@T@(a: borrow @PL@[b, o, n], i: usize @ k, count: usize @ m)
+        -> @R@[b, o + k, m] {
+    let mut r: @R@[b, o + k, m] = { a.address + i * sizeof(@T@), count };
+    return r;
+}
+
+fn places_take_run(a: borrow @PL@[b, o, n], first: usize, count: usize @ m)
+        -> @PT@[b, o, m] !{unsafe} {
+    if (count == 0 || first >= a.length || count > a.length - first) {
+        return @PT@::Out;
+    }
+    let mut i: usize = 0;
+    while (i < count) {
+        if (*places_tag(a, first + i) == 0) { return @PT@::Out; }
+        i = i + 1;
+    }
+    i = 0;
+    while (i < count) {
+        *places_tag(a, first + i) = 0;
+        i = i + 1;
+    }
+    return @PT@::Taken(places_run__@T@(a, first, count));
+}
+
+// A region's elements as its bytes (the inverse of region_bytes_typed): a
+// new identity, the typed region consumed.
+fn region_into_bytes(r: sink @R@[c, o, n]) -> RegionBytes {
+    let address: usize = r.address;
+    let bytes: usize = r.length * sizeof(@T@);
+    region_discharge(r);
+    return RegionBytes::Assumed(region_bytes_mint(address, bytes));
+}
+
 // A byte region read as elements of this type (GitHub issue #744): the
 // bytes must start at the type's alignment and hold a whole number of
 // elements, or they come back unchanged. The typed region is a new
@@ -1073,6 +1174,8 @@ let instance ?(record = false) elem =
   |> replace_all ~sub:"@S@" ~by:("RegionSplit__" ^ elem)
   |> replace_all ~sub:"@BT@" ~by:("RegionTyped__" ^ elem)
   |> replace_all ~sub:"@PL@" ~by:("places__" ^ elem)
+  |> replace_all ~sub:"@PB@" ~by:("PlaceBack__" ^ elem)
+  |> replace_all ~sub:"@PT@" ~by:("PlaceRun__" ^ elem)
   |> replace_all ~sub:"@O@" ~by:("RegionOf__" ^ elem)
   |> replace_all ~sub:"@TBL@" ~by:("RegionTable__" ^ elem)
   |> replace_all ~sub:"@RS@" ~by:("RegionReleaseSlot__" ^ elem)
@@ -1147,7 +1250,8 @@ let element_types (prog : Ast.toplevel list) claimed =
          "RegionSlot__"; "RegionPool__"; "RegionPoolGuard__"; "RegionGrow__";
          "RegionShrink__"; "RegionAdopt__"; "RegionPin__"; "RegionPinned__";
          "RegionUnpin__"; "RegionRetire__"; "RegionNext__";
-         "RegionInspection__"; "RegionInspectionProbe__"; "RegionTyped__"; "places__" ] in
+         "RegionInspection__"; "RegionInspectionProbe__"; "RegionTyped__"; "places__";
+         "PlaceBack__"; "PlaceRun__" ] in
   List.iter (fun item -> scan (Ast.show_toplevel item)) prog;
   Hashtbl.fold (fun k () acc -> k :: acc) found [] |> List.sort compare
 
