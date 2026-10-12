@@ -639,6 +639,51 @@ def check_invariant_stop_capture(insns):
     return failures
 
 
+# GitHub issue #746: the page allocator's MMU-off entry points run on
+# Device memory, where an unaligned access faults. LLVM merged two
+# adjacent 8-byte zero stores into one 128-bit `str q0, [x19, x8]` at an
+# 8-mod-16 offset of the 16-aligned pool; the RPi5 then never printed a
+# byte (QEMU does not enforce the alignment). A q-register store in these
+# functions must use an immediate offset that is a multiple of 16.
+MMU_OFF_ALLOCATOR_FUNCTIONS = (
+    "page_allocator_init", "page_allocator_init_with", "page_alloc_boot",
+    "page_alloc_locked", "page_free_boot", "page_free_locked",
+    "page_freelist_push",
+)
+Q_STORE_RE = re.compile(r"^(?:str|stur|stp|stnp)\s+q\d+,(?:\s*q\d+,)?\s*\[(.*?)\]")
+
+
+def check_mmu_off_vector_stores(insns):
+    failures = []
+    seen = set()
+    for address, text, function in insns:
+        if function not in MMU_OFF_ALLOCATOR_FUNCTIONS:
+            continue
+        seen.add(function)
+        m = Q_STORE_RE.match(text)
+        if not m:
+            continue
+        operands = [part.strip() for part in m.group(1).split(",")]
+        offset = 0
+        if len(operands) == 2 and operands[1].startswith("#"):
+            offset = int(operands[1][1:], 0)
+        elif len(operands) != 1:
+            failures.append(
+                "issue #746: %s stores a q register through a register "
+                "offset at 0x%x (%s); with the MMU off that address may be "
+                "8-mod-16 and fault on Device memory" % (function, address, text))
+            continue
+        if offset % 16 != 0:
+            failures.append(
+                "issue #746: %s stores a q register at an offset %d that is "
+                "not a multiple of 16 at 0x%x (%s)" % (function, offset, address, text))
+    for function in ("page_allocator_init_with", "page_alloc_boot"):
+        if function not in seen:
+            failures.append("issue #746: %s is absent; the MMU-off vector store "
+                            "check examined nothing" % function)
+    return failures
+
+
 def main():
     if len(sys.argv) != 3:
         print(
@@ -660,6 +705,7 @@ def main():
         + check_tlb_invalidate_all_is_broadcast(insns)
         + check_exception_stacks_are_per_core(insns)
         + check_process_stack_handoff_hook(insns)
+        + check_mmu_off_vector_stores(insns)
     )
     if failures:
         for f in failures:
@@ -671,7 +717,8 @@ def main():
           "before it takes, the whole-TLB invalidate broadcasting "
           "while MMU activation stays local, and every exception entry "
           "switching to a stack of its own core, with every EL0 process "
-          "return crossing the physical stack-handoff hook, all verified "
+          "return crossing the physical stack-handoff hook, and no misaligned "
+          "q-register store in the MMU-off page allocator, all verified "
           "statically",
                 insns=len(insns))
     return 0

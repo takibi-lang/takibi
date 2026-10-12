@@ -216,7 +216,7 @@ run them, and why they sit outside both globs above.
 | `buildcheck_backing_exists.py` | Real kernel overlays accept borrowed backing/image/FD evidence and reject unensured writers, wrong-record evidence and foreign minting |
 | `buildcheck_user_write_result.py` | Real kernel overlays accept a matched user-memory store and reject an ignored, unmatched or bool-read `UserWriteResult` (#725) |
 | `buildcheck_process_current_phase.py` | Real Running/Constructing transition APIs reject retained current authority; consuming it permits transition |
-| `buildcheck_kernel_asm_invariants.py` | TODO |
+| `buildcheck_kernel_asm_invariants.py` | Linked-kernel instruction invariants: UXN bits, eret masking, the spinlock and mutex sequences, broadcast TLB invalidation, per-core exception stacks, the stack handoff hook, explicit stops, and no misaligned q-register store in the MMU-off page allocator (#746) |
 | `buildcheck_kernel_memory_map.py` | Check kernel/MEMORY_MAP.md and allocator fixtures; render QEMU boot capacity from the loaded ELF |
 | `buildcheck_kernel_unused_coverage.py` | every kernel file a target compiles is checked for unused functions or exempt for a stated reason |
 | `measure_trusted_base.py --check-raw-deref` | the raw-pointer dereference ratchet (#639): run by each kernel object's rule on the compiler's `--emit-raw-deref-audit`, including standalone EL0 payload objects, it holds every file's dereference count to `raw_deref_budget.tsv`, so the count can only go down on purpose. Also the trusted-boundary inventory of `make trustedbasecheck` |

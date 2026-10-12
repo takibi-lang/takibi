@@ -266,8 +266,13 @@ struct BootPagePool align(16) {
     // GitHub issue #746: pages the free list chose whose places were Out
     // (quarantined), and how many of those have been logged. The MMU-off
     // boot path cannot take the console lock, so page_alloc logs for it.
-    frames_out_quarantined: usize;
-    frames_out_logged: usize;
+    // u32, not usize: page_allocator_init_with zeroes both with the MMU
+    // off, and two adjacent 8-byte zero stores at an 8-mod-16 offset were
+    // merged by LLVM into one 128-bit store, which faults on Device memory
+    // (the RPi5 never printed a byte; QEMU does not enforce it). Two u32s
+    // share one 8-byte word.
+    frames_out_quarantined: u32;
+    frames_out_logged: u32;
 }
 
 // GitHub issue #479. Everything below this line is shared mutable
@@ -2028,7 +2033,8 @@ fn page_alloc(owner: PageOwnerTag) -> PageAllocResult !{allocates} {
             inner
         }
     };
-    let unlogged: usize = pool.frames_out_quarantined - pool.frames_out_logged;
+    let unlogged: usize = (pool.frames_out_quarantined as usize) -
+                          (pool.frames_out_logged as usize);
     pool.frames_out_logged = pool.frames_out_quarantined;
     locked_cell_give(&boot_page_pool_cell, guard);
     if (unlogged != 0) {
@@ -2093,7 +2099,9 @@ private fn page_owner_from_places(frames: borrow PageFrameStore[fbc, fbo, fbn, f
             // Counted, not logged here: page_alloc_boot reaches this with
             // the MMU off, where the console lock cannot be taken.
             // page_alloc logs every count it has not logged yet.
-            pool.frames_out_quarantined = pool.frames_out_quarantined + 1;
+            if (pool.frames_out_quarantined < 0xFFFFFFFF) {
+                pool.frames_out_quarantined = pool.frames_out_quarantined + 1;
+            }
             return PageAllocResult::OutOfMemory;
         }
         PageFrameTake::Taken(frame) => {
