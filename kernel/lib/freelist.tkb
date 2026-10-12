@@ -7,7 +7,8 @@
 //
 // Ported from linux_user/freelist_generic/freelist.tkb (issue #207's design
 // prototype -- see that file's own header for the two concrete compiler
-// facts that shaped the FreelistCore(N)/Freelist(T, N) split) with one
+// facts that shaped the FreelistCore(N)/Freelist(T, N) split; the kernel
+// keeps only FreelistCore(N), #637) with one
 // addition needed for kernel/ call sites that expose their OWN owner type
 // (PageOwner[page], ScheduledProcessOwner[process], etc.) rather than this
 // library's FreelistOwner directly: freelist_owner_into_parts() consumes a
@@ -35,8 +36,8 @@
 // Current limitations (2026-08-07). Keep this list current as call sites
 // change; a limitation that goes stale here is worse than none, since it
 // invites relying on a guarantee that quietly stopped holding.
-// - NOT SYNCHRONIZED. FreelistCore(N)/its callers (Freelist(T, N),
-//   kernel/lib/slotmap.tkb's SlotMap(N)) do no locking of their own.
+// - NOT SYNCHRONIZED. FreelistCore(N)/its callers (kernel/lib/slotmap.tkb's
+//   SlotMap(N)) do no locking of their own.
 //   Every current kernel/ instance (kernel/mm/page.tkb, kernel/kernel/
 //   process.tkb, kernel/mm/address_space.tkb, kernel/net/tcp.tkb's
 //   connection pool) is, as of this writing, reachable ONLY from
@@ -248,7 +249,7 @@ fn freelist_core_insert_probe_cancel(
 // arithmetic against the list's answer rather than trusting the scan that
 // chose the range.
 fn freelist_core_unlink_range(core: &mut FreelistCore(N), first: usize,
-                              count: usize) -> usize !{unsafe} {
+                              count: usize) -> usize {
     let mut unlinked: usize = 0;
     // Entries at the HEAD first, so the walk below always has a real
     // predecessor to rewrite.
@@ -275,70 +276,33 @@ fn freelist_core_unlink_range(core: &mut FreelistCore(N), first: usize,
     let mut steps: usize = 0;
     while (prev < N && steps <= N) {
         steps = steps + 1;
-        let next: usize = unsafe { core.next_free[prev] };
-        if (next < N && next >= first && next - first < count) {
-            unsafe { core.next_free[prev] = core.next_free[next] };
-            unlinked = unlinked + 1;
-        } else {
-            prev = next;
+        // The loop condition is not carried into the body as a bound, so
+        // the index is narrowed here; prev < N already holds.
+        let at: usize = prev;
+        if (at < N) {
+            let next: usize = core.next_free[at];
+            if (next < N && next >= first && next - first < count) {
+                core.next_free[at] = core.next_free[next];
+                unlinked = unlinked + 1;
+            } else {
+                prev = next;
+            }
         }
     }
     return unlinked;
 }
 
-fn freelist_core_remove(core: &mut FreelistCore(N), owner: sink FreelistOwner[allocation]) !{unsafe} {
-    // GitHub issue #216: owner.index is only ever produced by
-    // freelist_core_insert from this same core's next_free, so it is
-    // always in range in practice, but that fact crosses a function-call
-    // boundary -- FreelistOwner's own `index` field is a plain usize
-    // with no compile-time-visible bound (see #216 for the "extend it
-    // with a second erased static value parameter tracking the pool's
-    // capacity" idea, deliberately not committed to here; #200/#201's
-    // research track is the eventual real fix). GitHub issue #217 closed
-    // the companion gap that used to hide this call entirely: indexing
-    // core.next_free is now a REAL checked array access, so this one
-    // line needs an explicit `unsafe` marker to skip the bounds check.
-    // That marker is the actual improvement over the old state -- this
-    // site is grep-visible and --forbid-trap-exempt only THROUGH it, not
-    // silently invisible to the checker the way the old *usize-decay
-    // pointer-arithmetic workaround left it.
-    unsafe { core.next_free[freelist_owner_index(owner)] = core.free_head };
-    core.free_head = freelist_owner_index(owner);
-}
-
-generic struct Freelist(T: type, N: usize) {
-    core: FreelistCore(N);
-    data: [T; N..];
-}
-
-fn freelist_init(T: type, target: &mut Freelist(T, N), data_backing: [T; N..]) {
-    freelist_core_init(&target.core);
-    target.data = data_backing;
-}
-
-fn freelist_insert(T: type, target: &mut Freelist(T, N)) -> FreelistPopResult {
-    return freelist_core_insert(&target.core);
-}
-
-fn freelist_remove(T: type, target: &mut Freelist(T, N),
-                    owner: sink FreelistOwner[allocation]) {
-    freelist_core_remove(&target.core, owner);
-}
-
-// Returns a pointer to T tied to owner's slot -- no copy, whatever T's
-// size. Field access through the result needs no explicit deref (e.g.
-// `freelist_ref(&target, owner).x = 1;`); a whole-T read/write does
-// (`*freelist_ref(&target, owner) = v;`), which is the expensive case
-// made to visibly look expensive, exactly as intended when this shape
-// was designed. `data` is a genuine slice field here (no decay), so the
-// `as *T` cast is needed to get a raw pointer for the offset -- this
-// whole function is raw pointer arithmetic (issue #15), same as it has
-// been since the very first #207 worked example.
-fn freelist_ref(T: type, target: &mut Freelist(T, N),
-                owner: borrow FreelistOwner[allocation]) -> *T @ allocation {
-    let data = target.data;
-    let index: isize = freelist_owner_index(owner) as isize;
-    return (data as *T) + index;
+fn freelist_core_remove(core: &mut FreelistCore(N), owner: sink FreelistOwner[allocation]) {
+    // The index is checked here rather than trusted (#637 stage 3: this
+    // was an unsafe unchecked store). An owner rebuilt from parts
+    // (freelist_owner_new) can carry any index; one at or past N was never
+    // popped from this core, so there is no slot to give back and the
+    // list is left as it is.
+    let index: usize = freelist_owner_index(owner);
+    if (index < N) {
+        core.next_free[index] = core.free_head;
+        core.free_head = index;
+    }
 }
 
 // GitHub issue #479: this file's execution-model assertion is GONE, and
