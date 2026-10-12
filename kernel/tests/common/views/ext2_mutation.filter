@@ -1,1 +1,1 @@
-^ext2 (bitmap:|owners:|write rollback:|create:|nested:|write indirect:|io failure:|exhaustion:)
+^ext2 (bytes:|bitmap:|owners:|write rollback:|create:|nested:|write indirect:|io failure:|exhaustion:)

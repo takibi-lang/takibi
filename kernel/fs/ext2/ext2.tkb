@@ -262,6 +262,28 @@ must_use variant Ext2ClaimResult {
             Ext2LinkedDirectory[inode, block]);
 }
 
+// Boundary probe for the boot fixture (#637 ext2 audit item 3). A field
+// ending exactly at the buffer's end is accepted; one byte further is
+// refused; and an interior base whose offset crosses the end is refused.
+// The pre-#637 check bounded only the offset past an interior pointer
+// (`offset > KERNEL_BLOCK_SIZE - width`); with that check this probe fails
+// (verified once by mutation, recorded on #637), so it guards against a
+// regression to that form.
+fn ext2_bytes_boundary_probe() -> bool {
+    let mut cpu: CpuHere = cpu_here();
+    let end: usize = KERNEL_BLOCK_SIZE;
+    let mut whole: Ext2Bytes = ext2_file();
+    let mut interior: Ext2Bytes = ext2_at(ext2_file(), end - 2);
+    let at_end: bool = ext2_fits(whole, end - 4, 4);
+    let one_past: bool = ext2_fits(whole, end - 3, 4);
+    let crossing: bool = ext2_fits(interior, 0, 4);
+    let byte_past: u8 = ext2_byte(cpu, interior, 2);
+    let store_past: bool = ext2_set_byte(cpu, interior, 2, 0x5A);
+    return at_end && one_past == false && crossing == false &&
+           byte_past == 0 &&
+           store_past == false && ext2_u32(cpu, interior, 0) == 0;
+}
+
 fn ext2_u16(cpu: CpuHere, bytes: Ext2Bytes, offset: usize) -> u16 {
     if (ext2_fits(bytes, offset, 2) == false) { return 0; }
     return (ext2_byte(cpu, bytes, offset) as u16) |
