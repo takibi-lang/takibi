@@ -1788,9 +1788,14 @@ fn tcp_retx_live_count() -> usize !{unsafe} {
 // Pages per chunk, as for frames: an entry carries a whole frame.
 const TCP_RETX_CHUNK_PAGES: usize = 2;
 
+// Keeps one empty chunk, as fd_block_return_empty does (#346's anti-thrash
+// reserve). GitHub issue #767: a bulk send empties the queue every time
+// the peer catches up, so returning the last chunk made the next write
+// take a fresh page run from page_alloc_contiguous, a scan of the whole
+// page table (about 3 ms on RPi5), dozens of times per transfer.
 private fn tcp_retx_pool_return_empty(
         guard: borrow RegionPoolGuard(RetxEntry)[entries]) !{unsafe} {
-    let mut more: bool = true;
+    let mut more: bool = region_pool_empty_chunks(guard) > 1;
     while (more) {
         match region_pool_shrink(guard) {
             RegionShrink(RetxEntry)::Nothing => { more = false; }
@@ -1798,6 +1803,7 @@ private fn tcp_retx_pool_return_empty(
                 let address: usize = region_bytes_address(bytes);
                 region_release(bytes);
                 page_run_transferred_release_physical(address, TCP_RETX_CHUNK_PAGES);
+                more = region_pool_empty_chunks(guard) > 1;
             }
         }
     }
@@ -2112,6 +2118,19 @@ fn pending_tcp_chain_probe_body(owner_a: borrow TcpConnectionOwner[first_pool, f
     }
     pending_tcp_reset_all(other);
     if (tcp_retx_live_count() != live_before) {
+        return false;
+    }
+    // GitHub issue #767: the emptied queue keeps one chunk, so the next
+    // segment does not take a fresh page run (a whole-page-table scan).
+    let (chunks_after, _cap_a, _nonfree_a, _bytes_a) = tcp_retx_pool_space_stats();
+    if (live_before == 0 && chunks_after != 1) { return false; }
+    if (pending_tcp_record(owner_a, PendingTcpKind::Data,
+                           pending_tcp_probe_frame as [u8; 1514..], 1) == 0) {
+        return false;
+    }
+    pending_tcp_reset_all(conn);
+    let (chunks_again, _cap_b, _nonfree_b, _bytes_b) = tcp_retx_pool_space_stats();
+    if (chunks_again != chunks_after || tcp_retx_live_count() != live_before) {
         return false;
     }
     return true;

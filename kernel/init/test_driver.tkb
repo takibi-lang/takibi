@@ -1223,7 +1223,7 @@ fn kernel_test_common_probes() !{unsafe} {
         kernel_boot_log("tcp connection pool: failed\n");
     }
     if (pending_tcp_chain_probe()) {
-        kernel_boot_log("tcp retransmit queue: five outstanding segments past the old ceiling of 4, per-segment records intact and in order, one connection's reset leaves another's ok\n");
+        kernel_boot_log("tcp retransmit queue: five outstanding segments past the old ceiling of 4, per-segment records intact and in order, one connection's reset leaves another's, the emptied queue keeps its chunk ok\n");
     } else {
         kernel_boot_log("tcp retransmit queue: failed\n");
     }
