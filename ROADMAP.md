@@ -140,12 +140,13 @@ Initialization does not prove CPU freshness across preemption.
      sealed linear owners generated per state (generated code is the only
      mint site), lowerings checked, and the two static rules (witness
      identity; device exit only on a completes/quiesces witness).
-     Remaining before closing: (5) the eight hand-written models are
-     classified on the issue -- SharedRegionTransfer and FixedDmaOwnership
-     are expressible; moving them to generation needs their kernel
-     consumers on the generated types (xHCI after A's exclusive backing
-     storage; GEM/virtio fixed DMA), plus scoped region access from a
-     writable state.
+     Done 2026-10-12 (slice 3): generated read/write access for
+     `access write` states, indices proved against a constant count.
+     Parked: driver migration waits on A's exclusive backing storage
+     (#672/#637) and then takes option (a), a general reviewed
+     region-publication primitive, with xHCI; option (b), retaining
+     dma_fixed tokens, is not taken. First check on resume: a generated
+     owner stored in a Place across functions.
      `requires` may collide with future function preconditions; revisit
      its spelling then. #625 (cache visibility across DMA
      ownership handoffs, bounded model). #740
