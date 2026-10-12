@@ -124,6 +124,12 @@ allocator migration remains a separate design gate.
 
 Initialization does not prove CPU freshness across preemption.
 
+**Next, ahead of the list below (maintainer, 2026-10-12):** #765, measure
+the per-call 4 KiB file-buffer zero fill that #203 stages 1-2 (done
+2026-10-12) added to each staging syscall. Its result decides whether #203
+stage 3 (cross-call contracts and byte ranges, which remove the fill) is
+pulled forward.
+
 1. **Fixed DMA lifecycle, finishing the drivers.** Every stage of one
    transfer in types, leaving one device-semantics declaration per driver
    and the platform bus translation as the only trusted parts.
@@ -164,8 +170,7 @@ Initialization does not prove CPU freshness across preemption.
    #732's later slices (static parameters on generic variants, implicit
    statics inside a type argument).
 3. **Time measurement, then the optimizations waiting on it** (maintainer,
-   2026-10-08: space and time are both kept): #497, then #502, #765
-   (cost of the per-call 4 KiB file-buffer zero fill); then #520
+   2026-10-08: space and time are both kept): #497, then #502; then #520
    (TCP throughput), with #741 (locate the measured RPi5 HTTP SYN
    retransmission tails), then #680, #681, #682 (region_pool lock-free
    validation,
