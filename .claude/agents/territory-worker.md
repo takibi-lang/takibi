@@ -93,6 +93,13 @@ policy allows) and commit the updated `docs/SPACE_CHECKPOINT.json`. Once the
 maintainer has approved the audit, the ROADMAP.md update and the
 issue-closing commit go on the branch too.
 
+Also run, on the final head after the rebase, `make langcheck linuxcheck test`
+in full -- not only the lanes you think your change touches. They take
+minutes and need no board, and they are the land's own prechecks: on
+2026-10-12 a linux_user test that imported a kernel file, and a host-script
+log expectation, each failed a land that the worker's chosen lanes had
+passed. Name the result in your report's verification line.
+
 Do not close the issue yourself unless your prompt says to; the closing commit
 lands through the coordinator after the maintainer reviews the audit.
 
