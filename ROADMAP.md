@@ -133,7 +133,19 @@ Initialization does not prove CPU freshness across preemption.
      in a linear owner, reference expiry and Place flow are verified with
      existing rules; #131 is needed only for a later demonstrated shape.
      No local DMA storage exception. Coordinate MMIO observation hooks;
-     see docs/XHCI_SHARED_DMA_DESIGN.md. #625 (cache visibility across DMA
+     see docs/XHCI_SHARED_DMA_DESIGN.md. Done 2026-10-11: the `protocol`
+     declaration is parsed, validated and emitted as TLA+ (SPEC.md,
+     "Protocol Declarations"); RegionTransfer.tkb reproduces
+     SharedRegionTransfer's fixed and four faulty verdicts. Remaining
+     acceptance (all before closing): (1) generate the sealed linear owner
+     types, transitions as the only mint sites; (2) check each transition
+     body against the declaration and reject actions with no lowering;
+     (3) reject a device-to-CPU-access transition without a `completes` or
+     `quiesces` witness; (4) reject a witness carrying no request
+     identifier; (5) classify the eight hand-written models as expressible
+     or not (with the reason) and move each expressible one to generation.
+     `requires` may collide with future function preconditions; revisit
+     its spelling then. #625 (cache visibility across DMA
      ownership handoffs, bounded model). #740
      (virtio-net fixed TX/RX-reply authority) awaits the stored-array
      boundary and an in-place reply design decision.
