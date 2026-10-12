@@ -57,28 +57,48 @@ def parse_capture(text):
     return samples
 
 
+def legacy_intrusive(name, pool):
+    return name == 'process' and pool == 104
+
+
 def validate_layout(name, data):
     obj, pool, stride, chunk, chunks, capacity, live, size = (data[k] for k in FIELDS)
     if obj == 0 or chunk == 0 or live > capacity or size != chunks * chunk:
         raise ValueError('invalid object size, occupancy, or allocated chunk bytes')
-    # Every pool is the built-in RegionPool (the process records since
-    # GitHub issue #745): 24-byte header, eight-byte state words, payload
-    # aligned to 16, and the current conservative 48-byte bound.
-    if pool not in (16, 24) or stride != obj or chunk % 4096:
-        raise ValueError('unexpected built-in region pool layout')
-    slots = (chunk - 48) // (obj + 8)
+    if legacy_intrusive(name, pool):
+        # Archived captures before GitHub issue #745: the process records'
+        # IntrusivePool, one generation word per slot, 128-byte header
+        # reservation at the tail, adaptive power-of-two page runs.
+        if stride != obj + 8 or chunk not in (4096, 8192, 16384, 32768):
+            raise ValueError('unexpected intrusive pool layout')
+        slots = (chunk - 128) // stride
+        if slots < 8 and chunk != 32768:
+            raise ValueError('intrusive chunk should fit eight slots or reach the cap')
+    else:
+        # The built-in RegionPool (every pool since #745): 24-byte header,
+        # eight-byte state words, payload aligned to 16, and the current
+        # conservative 48-byte bound.
+        if pool not in (16, 24) or stride != obj or chunk % 4096:
+            raise ValueError('unexpected built-in region pool layout')
+        slots = (chunk - 48) // (obj + 8)
     if slots <= 0 or capacity != chunks * slots:
         raise ValueError('slot capacity disagrees with chunk layout')
 
 
 def accounting(name, data):
     obj, pool, stride, chunk, chunks, capacity, live, size = (data[k] for k in FIELDS)
-    per_chunk = (chunk - 48) // (obj + 8)
     metadata = capacity * 8
-    header = chunks * 24
-    payload_start = (24 + per_chunk * 8 + 15) // 16 * 16
-    padding = chunks * (payload_start - 24 - per_chunk * 8)
-    tail = chunks * (chunk - payload_start - per_chunk * obj)
+    if legacy_intrusive(name, pool):
+        per_chunk = (chunk - 128) // stride
+        header = chunks * 128
+        padding = 0
+        tail = chunks * (chunk - 128 - per_chunk * stride)
+    else:
+        per_chunk = (chunk - 48) // (obj + 8)
+        header = chunks * 24
+        payload_start = (24 + per_chunk * 8 + 15) // 16 * 16
+        padding = chunks * (payload_start - 24 - per_chunk * 8)
+        tail = chunks * (chunk - payload_start - per_chunk * obj)
     occupied = live * obj
     free = (capacity - live) * obj
     if min(header, padding, tail) < 0 or size != occupied + free + metadata + header + padding + tail:

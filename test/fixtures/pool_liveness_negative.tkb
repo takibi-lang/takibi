@@ -1,6 +1,6 @@
 // GitHub issue #488 control: the payload pointer must not outlive the proof.
 //
-// kernel/lib/intrusive_pool.tkb's payload accessor used to take the linear
+// linux_user/intrusive_pool/intrusive_pool_lib.tkb's payload accessor used to take the linear
 // IntrusiveSlotView as `sink` and return a bare `*T`, so every payload
 // pointer in the kernel outlived the only evidence that there was a payload.
 // It takes `borrow` and returns `*T @ pool_id` now.
@@ -8,7 +8,7 @@
 // Untying it again would REMOVE compile errors, not add them, so the kernel
 // building is not evidence that the tie is still there. This fixture is: it
 // must FAIL to compile, and it must fail for the right reason.
-use "kernel/lib/intrusive_pool.tkb";
+use "linux_user/intrusive_pool/intrusive_pool_lib.tkb";
 
 let mut control_pool: IntrusivePool(usize);
 let mut control_absent: usize;

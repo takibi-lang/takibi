@@ -24256,6 +24256,7 @@ let infer_production_stop_boundary ?(clock = false)
     linear struct RegionInspection__ProcessFdContext[p: addr, s: addr] { private address: usize; }
     linear struct RegionInspection__FdBlock[p: addr, s: addr] { private address: usize; }
     linear struct RegionInspection__ProcessImageRecord[p: addr, s: addr] { private address: usize; }
+    linear struct RegionInspection__ProcessRecord[p: addr, s: addr] { private address: usize; }
     struct no_copy AtomicWord { private value: usize; }
     linear struct IntrusiveSlotView[p: addr] { private slot: usize; }
   |} ^ (if clock then {|
@@ -24273,7 +24274,7 @@ let infer_production_stop_boundary ?(clock = false)
     List.filter (function Ast.UseDef _ -> false | _ -> true)
       (Parser.program Lexer.read lexbuf) in
   let types = ["WorldStop"; "WorldStopped"; "WorldStopPartial";
-    "CpuParticipants"; "MachineStopped"; "CpuStart"; "MachineSlotView"; "MachineStopPartial"]
+    "CpuParticipants"; "MachineStopped"; "CpuStart"; "MachineStopPartial"]
     @ (if clock then ["WorldResumeTick"] else []) in
   let functions = ["world_stop_resume"; "world_stopped_end";
     "world_stop_partial_end"; "world_stop_release"; "world_stop_partial_release"]
@@ -24284,7 +24285,7 @@ let infer_production_stop_boundary ?(clock = false)
     | Ast.OwnedStructDef (name, _, _, _, _, _, _, _, _) -> List.mem name types
     | Ast.FuncDef f -> List.mem f.name functions
     | _ -> false) (parse_here source) in
-  Alcotest.(check int) "all production boundary declarations extracted" (if clock then 17 else 13)
+  Alcotest.(check int) "all production boundary declarations extracted" (if clock then 16 else 12)
     (List.length boundary);
   let harness = parse_here ({|
     struct Record { value: usize; }
@@ -24446,6 +24447,7 @@ let infer_production_machine_boundary ?(platform = "qemu") code =
     linear struct RegionInspection__ProcessFdContext[p: addr, s: addr] { private address: usize; }
     linear struct RegionInspection__FdBlock[p: addr, s: addr] { private address: usize; }
     linear struct RegionInspection__ProcessImageRecord[p: addr, s: addr] { private address: usize; }
+    linear struct RegionInspection__ProcessRecord[p: addr, s: addr] { private address: usize; }
     struct no_copy AtomicWord { private value: usize; }
     linear struct IntrusiveSlotView[p: addr] { private slot: usize; }
     generic struct IntrusivePool(T: type) { value: T; }
@@ -24486,6 +24488,12 @@ let infer_production_machine_boundary ?(platform = "qemu") code =
       return inspected;
     }
     fn native_fixture_end_ProcessImageRecord(inspected: sink RegionInspection__ProcessImageRecord[p, s]) {}
+    fn native_fixture_ProcessRecord(stopped: borrow MachineStopped[s])
+        -> RegionInspection__ProcessRecord[&kernel_world_stop, s] !{irq_masking_guard} {
+      let mut inspected: RegionInspection__ProcessRecord[&kernel_world_stop, s] = { 0 };
+      return inspected;
+    }
+    fn native_fixture_end_ProcessRecord(inspected: sink RegionInspection__ProcessRecord[p, s]) {}
 
     fn mutex_irq_save() -> usize { return 0; }
     fn mutex_irq_restore(flags: usize) !{restores_saved_irq} {}
@@ -24495,8 +24503,8 @@ let infer_production_machine_boundary ?(platform = "qemu") code =
     fn platform_world_stop_notify(mask: usize, owner: usize) !{unsafe} {}
   |} in
   let types = ["WorldStop"; "WorldStopped"; "WorldStopPartial";
-    "CpuParticipants"; "MachineStopped"; "CpuStart"; "MachineSlotView"; "MachineStopPartial"] in
-  let variants = ["WorldStopClaimResult"; "WorldStopResult"; "MachineStopResult"; "CpuStartResult"; "MachineSlotProbe"] in
+    "CpuParticipants"; "MachineStopped"; "CpuStart"; "MachineStopPartial"] in
+  let variants = ["WorldStopClaimResult"; "WorldStopResult"; "MachineStopResult"; "CpuStartResult"] in
   let functions = ["world_stop_claim_as"; "world_stop_claim"; "world_stop_begin_config";
     "world_stop_begin_claimed"; "world_stop_begin"; "world_stop_machine_begin";
     "cpu_participants_end"; "machine_stop_release"; "machine_stop_keep_forever"; "machine_stopped_mask";
@@ -24504,7 +24512,6 @@ let infer_production_machine_boundary ?(platform = "qemu") code =
     "cpu_start_end"; "cpu_start_gate_release"; "world_stop_resume";
     "world_stopped_end"; "world_stop_partial_end";
     "world_stop_release"; "world_stop_partial_release";
-    "machine_pool_probe"; "machine_pool_payload"; "machine_pool_view_drop";
     "machine_stop_partial_release"; "machine_stop_partial_mask"; "world_stop_partial_mask"] in
   let boundary = List.filter (function
     | Ast.StructDef (name, _, _, _, _, _)
@@ -24514,7 +24521,7 @@ let infer_production_machine_boundary ?(platform = "qemu") code =
     | Ast.ConstDef (name, _, _, _) ->
         List.mem name ["WORLD_STOP_CLAIM_STOP"; "WORLD_STOP_CLAIM_START"]
     | _ -> false) (parse_here source) in
-  Alcotest.(check int) "all production machine declarations extracted" 41
+  Alcotest.(check int) "all production machine declarations extracted" 36
     (List.length boundary);
   let platform_path = "kernel/platform/" ^ platform ^ "/init.tkb" in
   let path = List.find Sys.file_exists ["../" ^ platform_path; platform_path] in
@@ -24554,11 +24561,6 @@ let infer_production_machine_boundary ?(platform = "qemu") code =
       let mut guard: ProcessRunGuard[g] = { 0 }; return guard;
     }
     fn inspect(stopped: borrow MachineStopped[&kernel_world_stop]) -> usize { return 1; }
-    private fn scope_transfer(source: borrow MachineSlotView[s, &record_pool],
-                               destination: borrow MachineStopped[s])
-        -> *Record @ s !{unsafe, loan_transfer} {
-      return machine_pool_payload(&record_pool, source);
-    }
     private fn machine_loan(stopped: borrow MachineStopped[s]) -> *Record @ s {
       return &record;
     }
@@ -24716,58 +24718,25 @@ let production_machine_boundary_tests =
         machine_stop_keep_forever(stopped);
         msr_daifclr_irq(); native_fixture_end_FdBlock(inspected);
       |});
-    good "production machine pool read ends scope before resume" (full {|
-      match machine_pool_probe(&record_pool, stopped, 1) {
-        MachineSlotProbe::Busy => {}
-        MachineSlotProbe::Missing => {}
-        MachineSlotProbe::Live(scoped) => {
-          let ptr = machine_pool_payload(&record_pool, scoped);
-          let scalar = ptr.value; machine_pool_view_drop(scoped);
-        }
-      }
-    |});
-    bad "production resume rejects retained pool view" "live MachineSlotView witness" (full {|
-      match machine_pool_probe(&record_pool, stopped, 1) {
-        MachineSlotProbe::Busy => {}
-        MachineSlotProbe::Missing => {}
-        MachineSlotProbe::Live(scoped) => {
-          machine_stop_release(stopped, &kernel_world_stop);
-          machine_pool_view_drop(scoped);
-        }
-      }
-    |});
-    bad "production resume rejects pool loan after view drop" "live MachineSlotView witness" (full {|
-      match machine_pool_probe(&record_pool, stopped, 1) {
-        MachineSlotProbe::Busy => {}
-        MachineSlotProbe::Missing => {}
-        MachineSlotProbe::Live(scoped) => {
-          let ptr = machine_pool_payload(&record_pool, scoped);
-          machine_pool_view_drop(scoped);
-          machine_stop_release(stopped, &kernel_world_stop);
-        }
-      }
-    |});
-    bad "production reclamation rejects retained pool view" "live MachineSlotView witness" (full {|
-      match machine_pool_probe(&record_pool, stopped, 1) {
-        MachineSlotProbe::Busy => {}
-        MachineSlotProbe::Missing => {}
-        MachineSlotProbe::Live(scoped) => {
-          let guard = guard_new(&kernel_world_stop);
-          scheduled_process_slot_remove(guard, 1);
-          guard_end(guard); machine_pool_view_drop(scoped);
-        }
-      }
-    |});
-    good "production stop loan transfer keeps only destination" (full {|
-      match machine_pool_probe(&record_pool, stopped, 1) {
-        MachineSlotProbe::Busy => {}
-        MachineSlotProbe::Missing => {}
-        MachineSlotProbe::Live(scoped) => {
-          let ptr = scope_transfer(scoped, stopped);
-          machine_pool_view_drop(scoped); let scalar = ptr.value;
-        }
-      }
-    |});
+    (* GitHub issue #745: process records are inspected like the other
+       RegionPool records on the stopped machine. *)
+    good "production process record inspection ends before resume" (full {|
+        let inspected = native_fixture_ProcessRecord(stopped);
+        native_fixture_end_ProcessRecord(inspected);
+      |});
+    bad "production resume rejects native ProcessRecord inspection"
+      "live RegionInspection__ProcessRecord" (full {|
+        let inspected = native_fixture_ProcessRecord(stopped);
+        machine_stop_release(stopped, &kernel_world_stop);
+        native_fixture_end_ProcessRecord(inspected);
+      |});
+    bad "production reclamation rejects retained ProcessRecord inspection"
+      "live RegionInspection__ProcessRecord" (full {|
+        let inspected = native_fixture_ProcessRecord(stopped);
+        let guard = guard_new(&kernel_world_stop);
+        scheduled_process_slot_remove(guard, 1);
+        guard_end(guard); native_fixture_end_ProcessRecord(inspected);
+      |});
     bad "production raw resume rejects retained start" "live CpuStart witness" {|
       fn probe() { match cpu_start_reserve(1) {
         CpuStartResult::Busy => {}

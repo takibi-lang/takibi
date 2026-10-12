@@ -2,7 +2,7 @@
 // the proof is held, and giving the proof back afterwards, must still
 // compile. Without this the negative fixture could pass because the pool
 // stopped compiling at all rather than because the tie is doing its job.
-use "kernel/lib/intrusive_pool.tkb";
+use "linux_user/intrusive_pool/intrusive_pool_lib.tkb";
 
 let mut control_pool: IntrusivePool(usize);
 
