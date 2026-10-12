@@ -67,7 +67,7 @@ let resolve_func (fdef : Ast.func) : resolution =
             | Some Ast.PayloadIgnore -> env
           in
           scoped arm_env body
-      | Ast.ArmWild body | Ast.ArmIntLit (_, body)
+      | Ast.ArmWild body | Ast.ArmMiss body | Ast.ArmIntLit (_, body)
       | Ast.ArmByteSliceLit (_, body) -> scoped env body
     ) arms
   and stmt env (s : Ast.stmt) =

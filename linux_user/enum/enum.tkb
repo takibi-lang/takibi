@@ -57,6 +57,37 @@ fn direction_name(d: Direction) -> *u8 {
     return "";
 }
 
+// GitHub issue #608: checked integer-to-enum match. Opcode's values are
+// sparse and the probes include a word wider than u8 (456), whose low byte
+// (200) is Store's value: the switch is on the full word, so it misses.
+enum Opcode: u8 {
+    Nop   = 0;
+    Load  = 5;
+    Store = 200;
+}
+
+fn opcode_name_for_code(code: usize) -> *u8 {
+    match code as Opcode {
+        Opcode::Nop   => { return "decode: Nop\r\n"; }
+        Opcode::Load  => { return "decode: Load\r\n"; }
+        Opcode::Store => { return "decode: Store\r\n"; }
+        miss          => { return "decode: miss\r\n"; }
+    }
+    return "";
+}
+
+fn test_enum_decode() {
+    uart_puts(opcode_name_for_code(0));
+    uart_puts(opcode_name_for_code(5));
+    uart_puts(opcode_name_for_code(200));
+    uart_puts(opcode_name_for_code(7));
+    uart_puts(opcode_name_for_code(456));
+    // The outbound direction: an exhaustive enum widens straight to usize.
+    uart_puts(opcode_name_for_code(Opcode::Store as usize));
+    uart_print((Direction::South as usize) as u8);
+    uart_puts("\r\n");
+}
+
 fn test_enum() {
     let c: Color = Color::Green;
     uart_puts(color_name(c));
@@ -112,4 +143,5 @@ fn test_enum() {
 
 fn app_main() {
     test_enum();
+    test_enum_decode();
 }

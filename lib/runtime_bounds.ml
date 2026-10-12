@@ -109,7 +109,7 @@ let scanned_names ~addresses_only (stmts : Ast.stmt list) : string list =
               Option.iter (function Ast.PayloadBind (name, _) -> add name
                                     | Ast.PayloadIgnore -> ()) binding;
               List.iter go_stmt b
-          | ArmWild b -> List.iter go_stmt b
+          | ArmWild b | ArmMiss b -> List.iter go_stmt b
           | ArmIntLit (_, b) | ArmByteSliceLit (_, b) -> List.iter go_stmt b
         ) arms
     | LetMatch (_, n, _, d, arms) ->
@@ -119,7 +119,7 @@ let scanned_names ~addresses_only (stmts : Ast.stmt list) : string list =
               Option.iter (function Ast.PayloadBind (name, _) -> add name
                                     | Ast.PayloadIgnore -> ()) binding;
               List.iter go_stmt b
-          | ArmWild b -> List.iter go_stmt b
+          | ArmWild b | ArmMiss b -> List.iter go_stmt b
           | ArmIntLit (_, b) | ArmByteSliceLit (_, b) -> List.iter go_stmt b
         ) arms
   in

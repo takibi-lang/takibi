@@ -41,7 +41,7 @@ let source_assertions program =
     | Match (x, arms) | LetMatch (_, _, _, x, arms) -> expr name x; List.iter (arm name) arms
     | Break | Continue -> ()
   and arm name = function
-    | Ast.ArmVariant (_, _, _, body) | Ast.ArmWild body
+    | Ast.ArmVariant (_, _, _, body) | Ast.ArmWild body | Ast.ArmMiss body
     | Ast.ArmIntLit (_, body) | Ast.ArmByteSliceLit (_, body) -> List.iter (stmt name) body in
   List.iter (function
     | Ast.FuncDef f -> List.iter (stmt f.name) f.body
@@ -86,7 +86,7 @@ let address_mint_sites program =
     | Match (x, arms) | LetMatch (_, _, _, x, arms) -> expr name x; List.iter (arm name) arms
     | Break | Continue -> ()
   and arm name = function
-    | Ast.ArmVariant (_, _, _, body) | Ast.ArmWild body
+    | Ast.ArmVariant (_, _, _, body) | Ast.ArmWild body | Ast.ArmMiss body
     | Ast.ArmIntLit (_, body) | Ast.ArmByteSliceLit (_, body) -> List.iter (stmt name) body in
   List.iter (function
     | Ast.FuncDef f -> List.iter (stmt f.name) f.body

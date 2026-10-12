@@ -51,7 +51,7 @@ let check ~external_entries ~check_files (prog : toplevel list) (types : program
     | Match (subject, arms) | LetMatch (_, _, _, subject, arms) ->
         expr from subject;
         List.iter (function
-          | ArmVariant (_, _, _, body) | ArmWild body | ArmIntLit (_, body)
+          | ArmVariant (_, _, _, body) | ArmWild body | ArmMiss body | ArmIntLit (_, body)
           | ArmByteSliceLit (_, body) -> List.iter (stmt from) body) arms
   in
   List.iter (fun f -> List.iter (stmt (Some (key_of f))) f.body) definitions;

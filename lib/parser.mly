@@ -149,7 +149,7 @@ let arm_body_ok stmts =
 let validate_arm_bodies pos arms =
   List.iter (fun arm ->
     let stmts = match arm with
-      | Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b | Ast.ArmIntLit (_, b)
+      | Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b | Ast.ArmMiss b | Ast.ArmIntLit (_, b)
       | Ast.ArmByteSliceLit (_, b) -> b
     in
     if not (arm_body_ok stmts) then
@@ -162,7 +162,7 @@ let validate_arm_bodies pos arms =
 let let_else_arms pos variant case failures =
   let diverges arm =
     let body = match arm with
-      | Ast.ArmVariant (_, _, _, body) | Ast.ArmWild body
+      | Ast.ArmVariant (_, _, _, body) | Ast.ArmWild body | Ast.ArmMiss body
       | Ast.ArmIntLit (_, body) | Ast.ArmByteSliceLit (_, body) -> body
     in
     match List.rev body with
@@ -1006,6 +1006,15 @@ match_arm:
     { ArmVariant (v, c, Some PayloadIgnore, b) }
   | UNDERSCORE DARROW LBRACE arm_body RBRACE
     { ArmWild $4 }
+  | word = IDENT DARROW LBRACE body = arm_body RBRACE
+    (* GitHub issue #608: `miss` is the no-variant arm of a checked
+       integer-to-enum match. It is a contextual word, not a keyword, so
+       no existing identifier named `miss` breaks. *)
+    { if word <> "miss" then
+        raise (Types.TypeError ($symbolstartpos, Printf.sprintf
+          "unexpected match arm pattern '%s' (did you mean 'miss', the no-variant arm of `match n as Enum`?)"
+          word));
+      ArmMiss body }
   | ns = match_int_lits DARROW LBRACE body = arm_body RBRACE
     (* N => { ... }, or N1 | N2 | ... => { ... } -- one or more
        pipe-separated literal-integer patterns sharing one body (GitHub

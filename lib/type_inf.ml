@@ -1689,7 +1689,7 @@ let publish_required_fields record =
    being published. *)
 let check_publish_definite_assignment (body : Ast.stmt list) =
   let arm_body = function
-    | Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b | Ast.ArmIntLit (_, b)
+    | Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b | Ast.ArmMiss b | Ast.ArmIntLit (_, b)
     | Ast.ArmByteSliceLit (_, b) -> b
   in
   let merge results =
@@ -3384,10 +3384,19 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | Some ename, _ ->
            (* Enum -> T: T must be exactly the underlying type.
               Use (et as underlying) as T for any other conversion. *)
-           let (underlying, _, _) = StringMap.find ename eenv in
+           let (underlying, _, is_ne) = StringMap.find ename eenv in
            let expected = of_ast underlying in
            let got      = of_ast target_ty in
-           if repr got <> repr expected then
+           (* GitHub issue #608: an exhaustive enum with an unsigned
+              underlying type also widens directly to usize. A
+              non-exhaustive enum (including an empty nominal domain)
+              still crosses its two explicit boundaries. *)
+           let widens_to_usize =
+             (not is_ne) && repr got = TUsize
+             && (match repr expected with
+                 | TU8 | TU16 | TU32 | TU64 -> true | _ -> false)
+           in
+           if repr got <> repr expected && not widens_to_usize then
              raise (TypeError (e.loc,
                Printf.sprintf
                  "cannot cast enum '%s' (underlying %s) to '%s': cast to '%s' first"
@@ -6380,6 +6389,7 @@ let rewrite_letmatch_arm_bodies (name : string) (arms : Ast.match_arm list)
   List.map (function
     | Ast.ArmVariant (v, c, b, stmts) -> Ast.ArmVariant (v, c, b, rewrite_body stmts)
     | Ast.ArmWild stmts -> Ast.ArmWild (rewrite_body stmts)
+    | Ast.ArmMiss stmts -> Ast.ArmMiss (rewrite_body stmts)
     | Ast.ArmIntLit (ns, stmts) -> Ast.ArmIntLit (ns, rewrite_body stmts)
     | Ast.ArmByteSliceLit (bytes, stmts) ->
         Ast.ArmByteSliceLit (bytes, rewrite_body stmts)
@@ -6975,6 +6985,90 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
                "for-in iterates over a slice, got '%s' (write `arr as []T` \
                 to iterate an array)" (to_string t))))
 
+  | Match (disc, arms)
+    when List.exists (function Ast.ArmMiss _ -> true | _ -> false) arms ->
+      (* GitHub issue #608: checked integer-to-enum match,
+         `match n as E { E::V => {...} ... miss => {...} }`. The cast in
+         the discriminant is not evaluated as a cast (no trap): the
+         integer is switched on directly and a value naming no variant
+         takes the `miss` arm. Every variant needs its own arm so that a
+         new variant forces a new decode; `_` would hide that, so it is
+         rejected here. *)
+      let (inner, ename) = match disc.desc with
+        | Cast (Ast.TypeNamed en, inner) when StringMap.mem en eenv -> (inner, en)
+        | _ -> raise (TypeError (disc.loc,
+            "a 'miss' arm needs a checked integer-to-enum discriminant \
+             `match n as Enum { ... }`"))
+      in
+      let (_, enum_variants, is_ne) = StringMap.find ename eenv in
+      if is_ne then
+        raise (TypeError (disc.loc, Printf.sprintf
+          "'miss' needs an exhaustive enum; non-exhaustive enum '%s' accepts \
+           every integer, so match on `n as %s` with a '_' arm instead"
+          ename ename));
+      let it = infer_expr senv eenv tyenv fenv inner in
+      let base = match repr it with
+        | (TI8|TI16|TI32|TI64|TU8|TU16|TU32|TU64|TIsize|TUsize) as b -> b
+        | TRefinedInt (_, _, b) -> b
+        | t -> raise (TypeError (inner.loc, Printf.sprintf
+            "`match n as %s` needs a primitive integer n, got '%s'"
+            ename (to_string t)))
+      in
+      List.iter (fun (vname, value) ->
+        let (blo, bhi_opt) = for_annotation_bound_range base in
+        if value < blo
+           || (match bhi_opt with Some bhi -> value >= bhi | None -> false)
+        then
+          raise (TypeError (inner.loc, Printf.sprintf
+            "'%s::%s' = %d does not fit '%s'; narrow or widen n first"
+            ename vname value (to_string base)))
+      ) enum_variants;
+      let covered = Hashtbl.create 4 in
+      let misses = ref 0 in
+      let raw_locals' = List.fold_left (fun rl arm ->
+        let body = match arm with
+          | Ast.ArmVariant (aname, vname, binding, body) ->
+              if aname <> ename then
+                raise (TypeError (s.loc, Printf.sprintf
+                  "arm type '%s' does not match discriminant '%s'" aname ename));
+              if binding <> None then
+                raise (TypeError (s.loc, Printf.sprintf
+                  "numeric enum case '%s::%s' has no payload" ename vname));
+              if not (List.mem_assoc vname enum_variants) then
+                raise (TypeError (s.loc, Printf.sprintf
+                  "unknown variant '%s::%s'" ename vname));
+              if Hashtbl.mem covered vname then
+                raise (TypeError (s.loc, Printf.sprintf
+                  "duplicate match arm '%s::%s'" ename vname));
+              Hashtbl.replace covered vname ();
+              body
+          | Ast.ArmMiss body ->
+              incr misses;
+              if !misses > 1 then
+                raise (TypeError (s.loc, "duplicate 'miss' match arm"));
+              body
+          | Ast.ArmWild _ ->
+              raise (TypeError (s.loc, Printf.sprintf
+                "`match n as %s` cannot use '_': name every variant and \
+                 put the no-variant case in 'miss'" ename))
+          | Ast.ArmIntLit _ | Ast.ArmByteSliceLit _ ->
+              raise (TypeError (s.loc, Printf.sprintf
+                "`match n as %s` arms must name variants of '%s' or 'miss'"
+                ename ename))
+        in
+        let (_, rl') = fold_stmts_with_future_writes
+          (fun (env, locs) stmt ->
+            infer_stmt senv eenv env fenv ret_ty locs in_loop stmt)
+          (tyenv, rl) body
+        in
+        rl'
+      ) raw_locals arms in
+      List.iter (fun (vname, _) ->
+        if not (Hashtbl.mem covered vname) then
+          raise (TypeError (s.loc, Printf.sprintf
+            "non-exhaustive match: '%s::%s' not covered" ename vname))
+      ) enum_variants;
+      (tyenv, raw_locals')
   | Match (disc, arms) ->
       let dt = infer_expr senv eenv tyenv fenv disc in
       let infer_arm_body env rl body =
@@ -7006,6 +7100,9 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
                   | Some _ -> ());
                  Hashtbl.replace covered vname ();
                  infer_arm_body tyenv rl body
+             | Ast.ArmMiss _ ->
+                 raise (TypeError (s.loc,
+                   "a 'miss' arm is only legal in `match n as Enum`"))
              | Ast.ArmWild body ->
                  has_wild := true;
                  infer_arm_body tyenv rl body
@@ -7123,6 +7220,9 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
                          this arm instead of flattening disjoint binders by
                          name. *)
                       infer_arm_body env rl body)
+             | Ast.ArmMiss _ ->
+                 raise (TypeError (s.loc,
+                   "a 'miss' arm is only legal in `match n as Enum`"))
              | Ast.ArmWild body ->
                  if !has_wild then
                    raise (TypeError (s.loc,
@@ -7173,6 +7273,9 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
                    check_match_int_literal_range s.loc lit base_ty
                  ) lits;
                  infer_arm_body tyenv rl body
+             | Ast.ArmMiss _ ->
+                 raise (TypeError (s.loc,
+                   "a 'miss' arm is only legal in `match n as Enum`"))
              | Ast.ArmWild body ->
                  if !has_wild then
                    raise (TypeError (s.loc,
@@ -7207,6 +7310,9 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
                      "duplicate byte-slice match arm bs%S" bytes));
                  Hashtbl.add seen bytes ();
                  infer_arm_body tyenv rl body
+             | Ast.ArmMiss _ ->
+                 raise (TypeError (s.loc,
+                   "a 'miss' arm is only legal in `match n as Enum`"))
              | Ast.ArmWild body ->
                  if !has_wild then
                    raise (TypeError (s.loc,
@@ -7322,7 +7428,7 @@ let check_const_shadowing (fdef : Ast.func) =
                   if Const_env.find name <> None then reject s.loc name
                 | Ast.PayloadIgnore -> ()) binding;
               List.iter go_stmt b
-          | Ast.ArmWild b            -> List.iter go_stmt b
+          | Ast.ArmWild b | Ast.ArmMiss b            -> List.iter go_stmt b
           | Ast.ArmIntLit (_, b) | Ast.ArmByteSliceLit (_, b) -> List.iter go_stmt b
         ) arms
     | _ -> ()
@@ -7353,7 +7459,7 @@ let check_undetermined_lets (fdef : Ast.func) (raw_locals : ty StringMap.t) =
   in
   let rec go_arms arms = List.iter (function
     | Ast.ArmVariant (_, _, _, b) -> List.iter go_stmt b
-    | Ast.ArmWild b            -> List.iter go_stmt b
+    | Ast.ArmWild b | Ast.ArmMiss b            -> List.iter go_stmt b
     | Ast.ArmIntLit (_, b) | Ast.ArmByteSliceLit (_, b) -> List.iter go_stmt b
   ) arms
   and go_stmt (s : Ast.stmt) = match s.desc with
@@ -7382,7 +7488,7 @@ let check_undetermined_lets (fdef : Ast.func) (raw_locals : ty StringMap.t) =
    pointees/results; an opaque owning handle itself carries authority. *)
 let check_default_initialization (senv : senv) (fdef : Ast.func) =
   let rec arms xs = List.iter (function
-    | Ast.ArmVariant (_, _, _, body) | Ast.ArmWild body
+    | Ast.ArmVariant (_, _, _, body) | Ast.ArmWild body | Ast.ArmMiss body
     | Ast.ArmIntLit (_, body) | Ast.ArmByteSliceLit (_, body) ->
         List.iter stmt body) xs
   and stmt (s : Ast.stmt) = match s.desc with
@@ -8990,7 +9096,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
      | Ast.Match (e, arms) ->
          validate_expr_types e;
          List.iter (function
-           | Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b | Ast.ArmIntLit (_, b)
+           | Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b | Ast.ArmMiss b | Ast.ArmIntLit (_, b)
            | Ast.ArmByteSliceLit (_, b) ->
                List.iter validate_stmt_types b) arms
      | Ast.LetMatch (_, _, ty, disc, arms) ->
@@ -9002,7 +9108,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
          Option.iter (validate_let_type s.loc) ty;
          validate_expr_types disc;
          List.iter (function
-           | Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b | Ast.ArmIntLit (_, b)
+           | Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b | Ast.ArmMiss b | Ast.ArmIntLit (_, b)
            | Ast.ArmByteSliceLit (_, b) ->
                List.iter validate_stmt_types b) arms
      | Ast.StaticAssert _
@@ -10378,7 +10484,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           List.fold_left stmt (expr callees collection) xs
       | Ast.Match (subject, arms) | Ast.LetMatch (_, _, _, subject, arms) ->
           List.fold_left (fun acc arm -> match arm with
-            | Ast.ArmVariant (_, _, _, xs) | Ast.ArmWild xs
+            | Ast.ArmVariant (_, _, _, xs) | Ast.ArmWild xs | Ast.ArmMiss xs
             | Ast.ArmIntLit (_, xs) | Ast.ArmByteSliceLit (_, xs) ->
                 List.fold_left stmt acc xs) (expr callees subject) arms
       | _ -> callees
@@ -11079,7 +11185,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         | Ast.Match (e, arms) | Ast.LetMatch (_, _, _, e, arms) ->
             expr e;
             List.iter (function
-              | Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b
+              | Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b | Ast.ArmMiss b
               | Ast.ArmIntLit (_, b) | Ast.ArmByteSliceLit (_, b) -> stmts b)
               arms
         | _ -> ()
@@ -12224,7 +12330,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           always_terminates ~loop_exit yes && always_terminates ~loop_exit no
       | Ast.Match (_, arms) -> List.for_all (fun arm ->
           let body = match arm with
-            | Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b | Ast.ArmIntLit (_, b)
+            | Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b | Ast.ArmMiss b | Ast.ArmIntLit (_, b)
             | Ast.ArmByteSliceLit (_, b) -> b in
           always_terminates ~loop_exit body) arms
       | Ast.Block body | Ast.UnsafeBlock body -> always_terminates ~loop_exit body
@@ -12614,7 +12720,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                         Option.map strip_exists schema
                   in
                   (binding, payload_ty, b)
-              | Ast.ArmWild b -> (None, None, b)
+              | Ast.ArmWild b | Ast.ArmMiss b -> (None, None, b)
               | Ast.ArmIntLit (_, b) | Ast.ArmByteSliceLit (_, b) -> (None, None, b)
             in
             let previous_binding_ty = match binding with
@@ -12922,7 +13028,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.Match (subject, arms) | Ast.LetMatch (_, _, _, subject, arms) ->
           expr aliases subject;
           List.iter (function
-            | Ast.ArmVariant (_, _, _, body) | Ast.ArmWild body
+            | Ast.ArmVariant (_, _, _, body) | Ast.ArmWild body | Ast.ArmMiss body
             | Ast.ArmIntLit (_, body) | Ast.ArmByteSliceLit (_, body) ->
                 ignore (stmts aliases body)) arms;
           aliases
@@ -13042,13 +13148,13 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.Match (subject, arms) ->
           visit_expr subject;
           List.iter (function
-            | Ast.ArmVariant (_, _, _, stmts) | Ast.ArmWild stmts
+            | Ast.ArmVariant (_, _, _, stmts) | Ast.ArmWild stmts | Ast.ArmMiss stmts
             | Ast.ArmIntLit (_, stmts) | Ast.ArmByteSliceLit (_, stmts) ->
                 List.iter visit_stmt stmts) arms
       | Ast.LetMatch (_, _, _, subject, arms) ->
           visit_expr subject;
           List.iter (function
-            | Ast.ArmVariant (_, _, _, stmts) | Ast.ArmWild stmts
+            | Ast.ArmVariant (_, _, _, stmts) | Ast.ArmWild stmts | Ast.ArmMiss stmts
             | Ast.ArmIntLit (_, stmts) | Ast.ArmByteSliceLit (_, stmts) ->
                 List.iter visit_stmt stmts) arms
       | Ast.StaticAssert _

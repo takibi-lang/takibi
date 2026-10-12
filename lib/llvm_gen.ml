@@ -2242,7 +2242,7 @@ let rec collect_lets stmts =
         List.concat_map (fun arm ->
           match arm with
           | ArmVariant (_, _, _, body) -> collect_lets body
-          | ArmWild body            -> collect_lets body
+          | ArmWild body | ArmMiss body            -> collect_lets body
           | ArmIntLit (_, body) | ArmByteSliceLit (_, body) -> collect_lets body
         ) arms
     | LetMatch (_, name, ty_opt, _, arms) ->
@@ -2263,7 +2263,7 @@ let rec collect_lets stmts =
         List.concat_map (fun arm ->
           match arm with
           | ArmVariant (_, _, _, body) -> collect_lets body
-          | ArmWild body            -> collect_lets body
+          | ArmWild body | ArmMiss body            -> collect_lets body
           | ArmIntLit (_, body) | ArmByteSliceLit (_, body) -> collect_lets body
         ) arms
     | _                           -> []
@@ -2305,7 +2305,7 @@ let rec collect_mutable_pattern_binders resolution stmts =
                 | _ -> []
               in
               here @ collect_mutable_pattern_binders resolution body
-          | ArmWild body -> collect_mutable_pattern_binders resolution body
+          | ArmWild body | ArmMiss body -> collect_mutable_pattern_binders resolution body
           | ArmIntLit (_, body) | ArmByteSliceLit (_, body) ->
               collect_mutable_pattern_binders resolution body
         ) arms |> List.concat
@@ -2337,7 +2337,7 @@ let rec collect_immutable_lets stmts =
         List.concat_map (fun arm ->
           match arm with
           | ArmVariant (_, _, _, body) -> collect_immutable_lets body
-          | ArmWild body            -> collect_immutable_lets body
+          | ArmWild body | ArmMiss body            -> collect_immutable_lets body
           | ArmIntLit (_, body) | ArmByteSliceLit (_, body) -> collect_immutable_lets body
         ) arms
     | _                           -> []
@@ -2369,6 +2369,7 @@ let rewrite_letmatch_arm_bodies (name : string) (arms : Ast.match_arm list)
   List.map (function
     | Ast.ArmVariant (v, c, b, stmts) -> Ast.ArmVariant (v, c, b, rewrite_body stmts)
     | Ast.ArmWild stmts -> Ast.ArmWild (rewrite_body stmts)
+    | Ast.ArmMiss stmts -> Ast.ArmMiss (rewrite_body stmts)
     | Ast.ArmIntLit (ns, stmts) -> Ast.ArmIntLit (ns, rewrite_body stmts)
     | Ast.ArmByteSliceLit (bytes, stmts) ->
         Ast.ArmByteSliceLit (bytes, rewrite_body stmts)
@@ -6181,6 +6182,15 @@ let gen_func ?prog_types fdef =
                 | ArmVariant (name, c, b, body) when name = generic ->
                     ArmVariant (instance, c, b, body)
                 | arm -> arm) arms in
+        (* GitHub issue #608: in `match n as E { ... miss => ... }` the
+           cast is not evaluated (it would trap); n itself is switched on
+           against E's variant values, and `miss` is the default. *)
+        let disc = match disc.desc with
+          | Cast (_, inner)
+            when List.exists (function ArmMiss _ -> true | _ -> false) arms ->
+              inner
+          | _ -> disc
+        in
         let (disc_ty, disc_v) = gen_expr locals disc in
         if List.exists (function ArmByteSliceLit _ -> true | _ -> false) arms
         then begin
@@ -6256,6 +6266,8 @@ let gen_func ?prog_types fdef =
               (arm, append_block context ("match_" ^ vname) f)
           | ArmWild _ ->
               (arm, append_block context "match_wild" f)
+          | ArmMiss _ ->
+              (arm, append_block context "match_miss" f)
           | ArmIntLit (lits, _) ->
               (* Named after the first literal only -- an OR-pattern arm's
                  several literals (GitHub issue #156) all target this
@@ -6269,7 +6281,7 @@ let gen_func ?prog_types fdef =
         ) arms in
         (* Default target: wildcard arm if present, otherwise dead (unreachable) *)
         let default_bb = match List.find_opt (fun (a, _) ->
-          match a with ArmWild _ -> true | _ -> false) arm_bbs with
+          match a with ArmWild _ | ArmMiss _ -> true | _ -> false) arm_bbs with
           | Some (_, bb) -> bb
           | None         -> dead_bb
         in
@@ -6284,7 +6296,7 @@ let gen_func ?prog_types fdef =
           | ArmVariant _ -> n + 1
           | ArmIntLit (lits, _) -> n + List.length lits
           | ArmByteSliceLit _ -> n
-          | ArmWild _ -> n) 0 arm_bbs in
+          | ArmWild _ | ArmMiss _ -> n) 0 arm_bbs in
         let sw = build_switch switch_v default_bb n_variants builder in
         List.iter (fun (arm, bb) ->
           match arm with
@@ -6311,7 +6323,7 @@ let gen_func ?prog_types fdef =
                  alternation) -- gen_stmt for the body itself still runs
                  exactly once for this block below, not once per literal. *)
               List.iter (fun lit -> add_case sw (const_int switch_ll_ty lit) bb) lits
-          | ArmWild _ -> ()
+          | ArmWild _ | ArmMiss _ -> ()
           | ArmByteSliceLit _ -> raise (Error
               "BUG: byte-slice arm escaped byte-slice match codegen")
         ) arm_bbs;
@@ -6361,7 +6373,7 @@ let gen_func ?prog_types fdef =
                 | None, None -> run_scoped_stmts body
                 | None, Some _ -> raise (Error
                     "BUG: numeric enum match arm has a payload binder"))
-           | ArmWild body            -> run_scoped_stmts body
+           | ArmWild body | ArmMiss body            -> run_scoped_stmts body
            | ArmIntLit (_, body)     -> run_scoped_stmts body
            | ArmByteSliceLit _ -> raise (Error
                "BUG: byte-slice arm escaped byte-slice match codegen"));
@@ -6730,7 +6742,7 @@ let rec check_static_asserts_stmts (stmts : Ast.stmt list) : unit =
   List.iter (fun (s : Ast.stmt) ->
     let arms_of arms =
       List.iter (function
-        | Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b | Ast.ArmIntLit (_, b)
+        | Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b | Ast.ArmMiss b | Ast.ArmIntLit (_, b)
         | Ast.ArmByteSliceLit (_, b) ->
             check_static_asserts_stmts b) arms
     in

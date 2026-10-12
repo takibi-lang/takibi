@@ -7463,6 +7463,66 @@ fn f() -> *usize { return &temp_address_outer().r.a; }");
       "enum Color: u8 { Red = 0; }
        fn f(c: Color) u8 { return c as u8; }");
 
+  (* GitHub issue #608: checked integer-to-enum match `match n as E`. *)
+  Alcotest.test_case "integer-to-enum match with every variant and miss type-checks" `Quick
+    (expect_ok
+      "enum Op: u8 { A = 0; B = 5; }
+       fn f(n: usize) -> i32 { match n as Op { Op::A => { return 0; } Op::B => { return 1; } miss => { return 2; } } return 3; }");
+
+  Alcotest.test_case "integer-to-enum match missing a variant is a type error" `Quick
+    (expect_type_error "non-exhaustive match: 'Op::B' not covered"
+      "enum Op: u8 { A = 0; B = 5; }
+       fn f(n: usize) { match n as Op { Op::A => { } miss => { } } }");
+
+  Alcotest.test_case "integer-to-enum match with _ in place of variants is a type error" `Quick
+    (expect_type_error "cannot use '_'"
+      "enum Op: u8 { A = 0; B = 5; }
+       fn f(n: usize) { match n as Op { Op::A => { } _ => { } miss => { } } }");
+
+  Alcotest.test_case "miss on an enum discriminant that is not a cast is a type error" `Quick
+    (expect_type_error "a 'miss' arm needs a checked integer-to-enum discriminant"
+      "enum Op: u8 { A = 0; B = 5; }
+       fn f(o: Op) { match o { Op::A => { } Op::B => { } miss => { } } }");
+
+  Alcotest.test_case "enum value that does not fit the matched integer is a type error" `Quick
+    (expect_type_error "'Wide::B' = 300 does not fit 'u8'"
+      "enum Wide: u16 { A = 0; B = 300; }
+       fn f(n: u8) { match n as Wide { Wide::A => { } Wide::B => { } miss => { } } }");
+
+  Alcotest.test_case "exhaustive unsigned enum widens directly to usize" `Quick
+    (expect_ok
+      "enum Op: u8 { A = 0; B = 5; }
+       fn f(o: Op) -> usize { return o as usize; }");
+
+  Alcotest.test_case "exhaustive enum still refuses a direct cast to a non-usize width" `Quick
+    (expect_type_error "cannot cast enum 'Op' (underlying u8) to 'u32'"
+      "enum Op: u8 { A = 0; B = 5; }
+       fn f(o: Op) -> u32 { return o as u32; }");
+
+  Alcotest.test_case "integer-to-enum miss on a non-exhaustive enum is a type error" `Quick
+    (expect_type_error "'miss' needs an exhaustive enum"
+      "enum Wire: u16 { A = 1; _; }
+       fn f(n: u16) { match n as Wire { Wire::A => { } miss => { } } }");
+
+  Alcotest.test_case "non-exhaustive enum still refuses a direct cast to usize" `Quick
+    (expect_type_error "cannot cast enum 'Wire' (underlying u16) to 'usize'"
+      "enum Wire: u16 { A = 1; _; }
+       fn f(w: Wire) -> usize { return w as usize; }");
+
+  Alcotest.test_case "integer-to-enum match without miss keeps the trapping cast" `Quick
+    (fun () ->
+      ignore (gen_codegen
+        "enum Op: u8 { A = 0; B = 5; }
+         fn f(n: u8) -> i32 { match n as Op { Op::A => { return 0; } Op::B => { return 1; } } return 3; }");
+      Alcotest.(check int) "trap sites" 1 (List.length !Llvm_gen.trap_sites));
+
+  Alcotest.test_case "integer-to-enum match with miss emits no trap" `Quick
+    (fun () ->
+      ignore (gen_codegen
+        "enum Op: u8 { A = 0; B = 5; }
+         fn f(n: usize) -> i32 { match n as Op { Op::A => { return 0; } Op::B => { return 1; } miss => { return 2; } } return 3; }");
+      Alcotest.(check int) "trap sites" 0 (List.length !Llvm_gen.trap_sites));
+
   Alcotest.test_case "enum cast to wrong type is a type error" `Quick
     (expect_type_error "cannot cast enum 'Color' (underlying u8) to 'i32'"
       "enum Color: u8 { Red = 0; }

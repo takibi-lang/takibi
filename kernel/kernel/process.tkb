@@ -1124,44 +1124,27 @@ fn kernel_process_cpu_stack_pid(core: {0..<KERNEL_MAX_CORES as usize})
 
 // The oops record keeps words, not enums, because it is a retained layout
 // read by gdb scripts as well; these two cross that boundary. A code no
-// activity has reads as "unknown" rather than being trusted. The chain below
-// is not checked for exhaustiveness the way kernel_activity_name is; the
-// oops lane refuses `unknown` until GitHub issue #608 gives the language a
-// checked integer-to-enum conversion.
+// activity has reads as "unknown" rather than being trusted. The decode is
+// a checked integer-to-enum match (GitHub issue #608), so a new activity
+// does not compile until it is decoded here as well as named.
 fn kernel_activity_code_here() -> usize {
-    return ((kernel_activity[execution_cpu_index()]) as u8) as usize;
+    return kernel_activity[execution_cpu_index()] as usize;
 }
 
 fn kernel_activity_name_for_code(code: usize) -> *u8 {
-    let mut named: *u8 = "unknown" as *u8;
-    if (code == (KernelActivity::None as u8) as usize) {
-        named = kernel_activity_name(KernelActivity::None);
+    match code as KernelActivity {
+        KernelActivity::None => { return kernel_activity_name(KernelActivity::None); }
+        KernelActivity::SecondaryStart => { return kernel_activity_name(KernelActivity::SecondaryStart); }
+        KernelActivity::NextReady => { return kernel_activity_name(KernelActivity::NextReady); }
+        KernelActivity::ReapOwnZombies => { return kernel_activity_name(KernelActivity::ReapOwnZombies); }
+        KernelActivity::ReleaseEveryProcess => { return kernel_activity_name(KernelActivity::ReleaseEveryProcess); }
+        KernelActivity::Syscall => { return kernel_activity_name(KernelActivity::Syscall); }
+        KernelActivity::IdleLoop => { return kernel_activity_name(KernelActivity::IdleLoop); }
+        KernelActivity::StartOnOwnedStack => { return kernel_activity_name(KernelActivity::StartOnOwnedStack); }
+        KernelActivity::ReapOnOwnedStack => { return kernel_activity_name(KernelActivity::ReapOnOwnedStack); }
+        miss => { return "unknown" as *u8; }
     }
-    if (code == (KernelActivity::SecondaryStart as u8) as usize) {
-        named = kernel_activity_name(KernelActivity::SecondaryStart);
-    }
-    if (code == (KernelActivity::NextReady as u8) as usize) {
-        named = kernel_activity_name(KernelActivity::NextReady);
-    }
-    if (code == (KernelActivity::ReapOwnZombies as u8) as usize) {
-        named = kernel_activity_name(KernelActivity::ReapOwnZombies);
-    }
-    if (code == (KernelActivity::ReleaseEveryProcess as u8) as usize) {
-        named = kernel_activity_name(KernelActivity::ReleaseEveryProcess);
-    }
-    if (code == (KernelActivity::Syscall as u8) as usize) {
-        named = kernel_activity_name(KernelActivity::Syscall);
-    }
-    if (code == (KernelActivity::IdleLoop as u8) as usize) {
-        named = kernel_activity_name(KernelActivity::IdleLoop);
-    }
-    if (code == (KernelActivity::StartOnOwnedStack as u8) as usize) {
-        named = kernel_activity_name(KernelActivity::StartOnOwnedStack);
-    }
-    if (code == (KernelActivity::ReapOnOwnedStack as u8) as usize) {
-        named = kernel_activity_name(KernelActivity::ReapOnOwnedStack);
-    }
-    return named;
+    return "unknown" as *u8;
 }
 
 fn scheduled_process_missing_site_value() -> KernelActivity {

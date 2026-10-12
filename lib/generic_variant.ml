@@ -229,6 +229,7 @@ let rec desugar_place_borrow_stmts (stmts : stmt list) : stmt list =
 and desugar_place_borrow_arm = function
   | ArmVariant (v, c, p, body) -> ArmVariant (v, c, p, desugar_place_borrow_stmts body)
   | ArmWild body -> ArmWild (desugar_place_borrow_stmts body)
+  | ArmMiss body -> ArmMiss (desugar_place_borrow_stmts body)
   | ArmIntLit (ns, body) -> ArmIntLit (ns, desugar_place_borrow_stmts body)
   | ArmByteSliceLit (s, body) -> ArmByteSliceLit (s, desugar_place_borrow_stmts body)
 

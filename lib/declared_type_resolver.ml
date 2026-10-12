@@ -188,6 +188,7 @@ and resolve_arm names = function
       ArmVariant
         (variant, case, binding, List.map (resolve_stmt names) body)
   | ArmWild body -> ArmWild (List.map (resolve_stmt names) body)
+  | ArmMiss body -> ArmMiss (List.map (resolve_stmt names) body)
   | ArmIntLit (values, body) ->
       ArmIntLit (values, List.map (resolve_stmt names) body)
   | ArmByteSliceLit (bytes, body) ->
@@ -343,7 +344,7 @@ let validate prog =
     | LetMatch (_, _, declared, value, arms) ->
         Option.iter check_type declared; check_expr value; List.iter check_arm arms
   and check_arm = function
-    | ArmVariant (_, _, _, body) | ArmWild body | ArmIntLit (_, body)
+    | ArmVariant (_, _, _, body) | ArmWild body | ArmMiss body | ArmIntLit (_, body)
     | ArmByteSliceLit (_, body) ->
         List.iter check_stmt body
   in

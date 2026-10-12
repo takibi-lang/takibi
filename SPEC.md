@@ -2299,7 +2299,32 @@ enum Name: u16 { V1 = n1; ...; _; }             // non-exhaustive (trailing `_;`
 - `Name::Variant` -- enum variant literal, valid as a compile-time
   constant global initializer.
 - `EnumVariant as underlying_type` -- cast to the enum's declared
-  underlying integer type.
+  underlying integer type. An exhaustive enum whose underlying type is
+  unsigned (`u8`..`u64`) also casts directly to `usize` (GitHub issue
+  #608): `KernelActivity::IdleLoop as usize`. Every other width, and every
+  non-exhaustive enum (including an empty nominal domain), still crosses
+  two explicit boundaries.
+- Checked integer-to-enum match (GitHub issue #608), exhaustive enums only:
+
+  ```
+  match code as KernelActivity {
+      KernelActivity::IdleLoop => { ... }
+      KernelActivity::Syscall  => { ... }
+      miss                     => { ... }   // code names no variant
+  }
+  ```
+
+  The discriminant `n as E` is not evaluated as a cast and never traps:
+  the integer `n` itself is switched on against `E`'s variant values, and
+  a value that names no variant takes the `miss` arm. Every variant must
+  have its own arm, so adding a variant breaks every decoder until it is
+  handled; `_` is rejected in this form, because in an ordinary match it
+  means "the rest" and would hide a new variant. `miss` is required -- it
+  is what makes this form a match rather than a trapping cast -- and is a
+  contextual word, legal only as an arm of this form. `n` is a primitive
+  integer or a refinement of one, and every variant value must fit its
+  base type. A non-exhaustive enum is rejected: `n as E` already accepts
+  every integer there, so use an ordinary match with a `_` arm.
 
 ## Match on Primitive Types (GitHub issue #151)
 

@@ -265,6 +265,7 @@ and relocate_arm (mangled : string) (a : match_arm) : match_arm =
   match a with
   | ArmVariant (v, c, b, ss) -> ArmVariant (v, c, b, sts ss)
   | ArmWild ss -> ArmWild (sts ss)
+  | ArmMiss ss -> ArmMiss (sts ss)
   | ArmIntLit (ns, ss) -> ArmIntLit (ns, sts ss)
   | ArmByteSliceLit (bytes, ss) -> ArmByteSliceLit (bytes, sts ss)
 
@@ -419,6 +420,7 @@ and walk_arm ~subst ~vsubst ~resolve_inst (a : match_arm) : match_arm =
   match a with
   | ArmVariant (v, c, b, ss) -> ArmVariant (v, c, b, sts ss)
   | ArmWild ss -> ArmWild (sts ss)
+  | ArmMiss ss -> ArmMiss (sts ss)
   | ArmIntLit (ns, ss) -> ArmIntLit (ns, sts ss)
   | ArmByteSliceLit (bytes, ss) -> ArmByteSliceLit (bytes, sts ss)
 
@@ -1225,6 +1227,7 @@ let run ?(explain_inference = false) (prog : toplevel list) : toplevel list =
       match a with
       | ArmVariant (v, c, b, ss) -> ArmVariant (v, c, b, sts ss)
       | ArmWild ss -> ArmWild (sts ss)
+      | ArmMiss ss -> ArmMiss (sts ss)
       | ArmIntLit (ns, ss) -> ArmIntLit (ns, sts ss)
       | ArmByteSliceLit (bytes, ss) -> ArmByteSliceLit (bytes, sts ss)
     in

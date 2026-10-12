@@ -537,6 +537,11 @@ and match_arm =
   | ArmVariant of string * string * variant_payload_pattern option * stmt list
       (* Name::Case[(pattern)] => { stmts }. *)
   | ArmWild    of stmt list                    (* _ => { stmts } *)
+  | ArmMiss    of stmt list
+      (* miss => { stmts } -- GitHub issue #608: the no-variant arm of a
+         checked integer-to-enum match `match n as E { ... }`. Legal only
+         there; every variant of the exhaustive enum E must also have an
+         arm, and `_` is rejected in that match. *)
   | ArmIntLit  of int list * stmt list
       (* N => { stmts }, or N1 | N2 | ... => { stmts } -- literal-integer
          match arm (GitHub issue #151), extended with pipe-separated
@@ -923,7 +928,7 @@ let written_names (stmts : stmt list) : string list =
               Option.iter (function PayloadBind (name, _) -> add name
                                     | PayloadIgnore -> ()) binding;
               List.iter go_stmt b
-          | ArmWild b -> List.iter go_stmt b
+          | ArmWild b | ArmMiss b -> List.iter go_stmt b
           | ArmIntLit (_, b) | ArmByteSliceLit (_, b) -> List.iter go_stmt b
         ) arms
     | LetMatch (_, n, _, d, arms) ->
@@ -933,7 +938,7 @@ let written_names (stmts : stmt list) : string list =
               Option.iter (function PayloadBind (name, _) -> add name
                                     | PayloadIgnore -> ()) binding;
               List.iter go_stmt b
-          | ArmWild b -> List.iter go_stmt b
+          | ArmWild b | ArmMiss b -> List.iter go_stmt b
           | ArmIntLit (_, b) | ArmByteSliceLit (_, b) -> List.iter go_stmt b
         ) arms
   in

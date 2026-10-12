@@ -11,3 +11,10 @@ r != c
 r is Red
 d is West
 wildcard: not red
+decode: Nop
+decode: Load
+decode: Store
+decode: miss
+decode: miss
+decode: Store
+2
