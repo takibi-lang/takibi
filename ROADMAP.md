@@ -157,12 +157,15 @@ Initialization does not prove CPU freshness across preemption.
      boundary and an in-place reply design decision.
 2. **Other compiler and language work, respecting design gates:** #709 and #710
    (generation exhaustion of region tables and the intrusive pool), #203
-   (no uninitialized kernel bytes copied to userspace; builds on bounded
-   syscall copy outcomes),
+   (no uninitialized kernel bytes copied to userspace: stages 1-2 done;
+   stage 3 (cross-call contracts, byte ranges) remains, with #761's TCP rx
+   bound), #763 (report every definite-init error in a function), #764
+   (check assume_init sites against TRUSTED_BASE.md),
    #732's later slices (static parameters on generic variants, implicit
    statics inside a type argument).
 3. **Time measurement, then the optimizations waiting on it** (maintainer,
-   2026-10-08: space and time are both kept): #497, then #502; then #520
+   2026-10-08: space and time are both kept): #497, then #502, #765
+   (cost of the per-call 4 KiB file-buffer zero fill); then #520
    (TCP throughput), with #741 (locate the measured RPi5 HTTP SYN
    retransmission tails), then #680, #681, #682 (region_pool lock-free
    validation,
