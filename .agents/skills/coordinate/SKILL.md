@@ -62,14 +62,21 @@ refuses any branch but `main`).
    verbatim (no summary), then stop and wait for the maintainer. If the
    agreed prevention is not done yet, continue the worker with SendMessage
    to do it.
-3. In the main checkout, clean and on `main`:
+3. **Land gates on the branch.** The space checkpoint is current
+   (`python3 scripts/space_checkpoint.py --base main --head <branch>` passes),
+   and the ROADMAP.md update and issue-closing commit are on the branch.
+   `scripts/land.sh` refuses a stale checkpoint before allcheck; #720, #719
+   and #608 each cost a failed land round on it (2026-10-12). If a gate is
+   missing, continue the worker with SendMessage to add it.
+4. In the main checkout, clean and on `main`:
    `git -C <worktree> rebase main`, then `git merge --ff-only <branch>`.
    Resolve integration conflicts yourself when they are mechanical (for
    example `docs/SPACE_CHECKPOINT.json` touched by two workers); otherwise
    send the conflict back to the worker.
-4. Follow the `land` skill (`scripts/land.sh`). Never land two branches
+5. Follow the `land` skill (`scripts/land.sh`). Never land two branches
    concurrently; never edit the tree while a land runs.
-5. After a green land: `git worktree remove <worktree>`, delete the branch,
+6. After a green land: `git worktree remove <worktree>` (agent worktrees
+   are locked, so this needs `-f -f`, which the maintainer may have to run), delete the branch,
    and release its port block:
    `bash -c '. scripts/qemu_session_ports.sh; qemu_session_release_block <name>'`
    where `<name>` is `$TAKIBI_SESSION-wt-<worktree directory name>`.

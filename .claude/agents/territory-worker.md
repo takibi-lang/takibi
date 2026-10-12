@@ -71,6 +71,18 @@ branch and final commit. Answer all nine:
 8. Classify every finding as fixed-verified, remaining, or YAGNI.
 9. Whether ROADMAP.md needs updating, and which closed issues it should drop.
 
+## Before reporting done: the land gates
+
+`scripts/land.sh` refuses a stale space checkpoint before it runs allcheck,
+and every branch that skipped this cost a failed land round. So before you
+report `done`, rebase onto `main` and run
+`python3 scripts/space_checkpoint.py --base main --head HEAD`. If it reports
+stale, do the review in [docs/SPACE_REVIEW.md](../../docs/SPACE_REVIEW.md)
+(measure with `scripts/space_delta.py`, or reuse evidence with the reason the
+policy allows) and commit the updated `docs/SPACE_CHECKPOINT.json`. Once the
+maintainer has approved the audit, the ROADMAP.md update and the
+issue-closing commit go on the branch too.
+
 Do not close the issue yourself unless your prompt says to; the closing commit
 lands through the coordinator after the maintainer reviews the audit.
 
