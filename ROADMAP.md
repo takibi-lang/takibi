@@ -148,8 +148,9 @@ Initialization does not prove CPU freshness across preemption.
      dma_fixed tokens, is not taken. First check on resume: a generated
      owner stored in a Place across functions.
      `requires` may collide with future function preconditions; revisit
-     its spelling then. #625 (cache visibility across DMA
-     ownership handoffs, bounded model). #740
+     its spelling then. #759 (boot check of CTR_EL0
+     DminLine/CWG against DMA_CACHE_LINE, an assumption of
+     DmaCacheVisibility.tla). #740
      (virtio-net fixed TX/RX-reply authority) awaits the stored-array
      boundary and an in-place reply design decision.
 2. **Other compiler and language work, respecting design gates:** #608
