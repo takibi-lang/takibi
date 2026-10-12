@@ -18,3 +18,9 @@ CLAUDE.md
 ROADMAP.md
 # No checker reads the workflow yet; allcheck never ran it either.
 .github/
+# Agent skills, agent definitions and Claude Code settings. No build or kernel
+# lane reads them; the one skill file a checker reads
+# (.agents/skills/debug-kernel/references/ddb.md, check_ddb_command_inventory)
+# is checked inside langcheck, which the light route still runs.
+.agents/
+.claude/
