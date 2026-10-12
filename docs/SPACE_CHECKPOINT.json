@@ -2,9 +2,10 @@
   "date": "2026-10-12",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "b23e51e00ab37e9d6789875f509d74d2fba402758f32dcac811ef6783af20807",
-  "workload": "#746: per-page permissions in places (bootstrap array, then one array per RAM extent in slots), PageOwner/PageRunOwner carrying the permission, give-back by address. Linked QEMU and RPi5 kernels against main 19a4c3f3 (llvm-size); bounded boot on QEMU and RPi5; RPi5 page_allocator_timing_probe.",
+  "source_sha256": "097ee658121c38bce910c03319acc033aefdda5988c5c607112b0ebbc8bf6bdf",
+  "workload": "#203 stages 1-2: field-path definite initialization, syscall_scratch as a scratch global with a zero fill before each staged copy, syscall_ext2_reader split out. Linked QEMU and RPi5 kernels against main 00c390d1 (scripts/space_delta.py, llvm-size); QEMU kernel lanes.",
   "evidence": [
+    "docs/INIT_STATE_SPACE_2026-10-12.md",
     "docs/PAGE_PLACES_SPACE_2026-10-12.md",
     "docs/ENUM_MISS_MATCH_SPACE_2026-10-12.md",
     "docs/PROTOCOL_DECL_SPACE_2026-10-12.md",
@@ -50,6 +51,6 @@
     "docs/VIRTIO_NET_TX_2026-10-10.md",
     "docs/VIRTIO_NET_TX_SPACE_2026-10-10.json"
   ],
-  "assessment": "Against main 19a4c3f3: QEMU text 693576 -> 705112 (+11536), data 5408 -> 5424 (+16), BSS 1658480 -> 1660672 (+2192, the 2048 bootstrap tag bytes and alignment), usable_ram_start 0x40240000 -> 0x40248000 (+8 pages); RPi5 text 706536 -> 717944 (+11408), data +16, BSS 1697360 unchanged, usable_ram_start unchanged. Runtime: PageMeta unchanged at 24 B; +1 tag byte per managed page and 64 B per extent slot; no per-page region payload. RPi5 allocator time 13032 ticks per 1024 pairs (13227 after the MMU-off store fix) (4733 after #744, 3988 before): a 2.75x regression accepted by the maintainer, recovery on #748. Earlier measured results (#608, #720, #744) stand.",
-  "next_trigger": "#745 RegionPool records holding their permission, or a #748 change to the allocator's slot exchange, whichever lands first."
+  "assessment": "Against main 00c390d1: QEMU text 705144 -> 706024 (+880), data +8, BSS unchanged, usable_ram_start unchanged; RPi5 text 718008 -> 718864 (+856), data +8, BSS and usable_ram_start unchanged. syscall_scratch 11700 -> 11696 B, syscall_ext2_reader +4 B. Runtime: one 4 KiB file-buffer clear per staging syscall (not per chunk), smaller clears for path/uname/rlimit/sockaddr; accepted until stage 3 byte ranges make them removable; #765 measures the cost. Earlier measured results (#746 and before) stand.",
+  "next_trigger": "#765's measurement of the zero fill, #745 RegionPool records holding their permission, a #748 change to the allocator's slot exchange, or #203 stage 3, whichever lands first."
 }

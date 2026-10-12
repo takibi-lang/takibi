@@ -4,14 +4,14 @@ GitHub issue #203 stages 1 and 2: field-path init tracking in the checker,
 `syscall_scratch` as a scratch global, zero fills before each staged copy,
 and `syscall_ext2_reader` moved out of the scratch struct.
 
-Measured with `python3 scripts/space_delta.py main` (main fa63884f), linked
+Measured with `python3 scripts/space_delta.py main` (main 00c390d1), linked
 production kernels, llvm-size:
 
 | | qemu base | qemu change | rpi5 base | rpi5 change |
 | --- | --- | --- | --- | --- |
-| text | 705112 | 705992 (+880) | 717944 | 718800 (+856) |
+| text | 705144 | 706024 (+880) | 718008 | 718864 (+856) |
 | data | 5424 | 5432 (+8) | 2889288 | 2889296 (+8) |
-| bss | 1660672 | 1660672 | 1697360 | 1697360 |
+| bss | 1660656 | 1660656 | 1697360 | 1697360 |
 | usable_ram_start | 0x40248000 | 0x40248000 | 0x710000 | 0x710000 |
 
 Symbols: `syscall_scratch` 11700 -> 11696 B (the bool left the struct),
