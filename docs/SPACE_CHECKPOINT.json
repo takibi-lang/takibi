@@ -2,9 +2,10 @@
   "date": "2026-10-12",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "097ee658121c38bce910c03319acc033aefdda5988c5c607112b0ebbc8bf6bdf",
-  "workload": "#203 stages 1-2: field-path definite initialization, syscall_scratch as a scratch global with a zero fill before each staged copy, syscall_ext2_reader split out. Linked QEMU and RPi5 kernels against main 00c390d1 (scripts/space_delta.py, llvm-size); QEMU kernel lanes.",
+  "source_sha256": "372659f695695eb54f4f5ee80ab2e6587dcfd8d8edc87ddbda51189e1c6c1db6",
+  "workload": "#745: process records on the built-in RegionPool, each record's permission Held in its slot for the process's life, walked with no lock; IntrusivePool out of the kernel. Linked kernels against main 0cabdb42 (llvm-size); QEMU and RPi5 bounded boot pool-space views; RPi5 uncontended pool-cycle probe on both trees; four-core churn on QEMU and RPi5.",
   "evidence": [
+    "docs/PROCESS_POOL_REGION_SPACE_2026-10-12.md",
     "docs/INIT_STATE_SPACE_2026-10-12.md",
     "docs/PAGE_PLACES_SPACE_2026-10-12.md",
     "docs/ENUM_MISS_MATCH_SPACE_2026-10-12.md",
@@ -51,6 +52,6 @@
     "docs/VIRTIO_NET_TX_2026-10-10.md",
     "docs/VIRTIO_NET_TX_SPACE_2026-10-10.json"
   ],
-  "assessment": "Against main 00c390d1: QEMU text 705144 -> 706024 (+880), data +8, BSS unchanged, usable_ram_start unchanged; RPi5 text 718008 -> 718864 (+856), data +8, BSS and usable_ram_start unchanged. syscall_scratch 11700 -> 11696 B, syscall_ext2_reader +4 B. Runtime: one 4 KiB file-buffer clear per staging syscall (not per chunk), smaller clears for path/uname/rlimit/sockaddr; accepted until stage 3 byte ranges make them removable; #765 measures the cost. Earlier measured results (#746 and before) stand.",
-  "next_trigger": "#765's measurement of the zero fill, #745 RegionPool records holding their permission, a #748 change to the allocator's slot exchange, or #203 stage 3, whichever lands first."
+  "assessment": "QEMU text -7488 / data -104 / BSS -400 B, RPi5 text -7224 / data -104 / BSS -480 B, usable_ram_start unchanged (IntrusivePool and the tag probe no longer linked). ProcessRecord 1832 -> 1856 B (a handle's slot reference is a RegionHeld beside its own generation). Holding costs nothing per record. The walked process pool is never shrunk, so it keeps its peak: 3 chunks (48 KiB) at the bounded end where IntrusivePool kept 1. RPi5 pool cycle 56452 -> 34405 ticks per 4096 (about 39% cheaper). Adopted. Earlier measured results (#203, #746 and before) stand.",
+  "next_trigger": "A shrink protocol for walked RegionPools, the #748 allocator change, or the next pool consumer moved onto Held slots, whichever lands first."
 }
