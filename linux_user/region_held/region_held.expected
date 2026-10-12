@@ -1,0 +1,10 @@
+held slots: 2
+probe: 41
+walk sum: 83
+take: 1
+take again: 0
+probe after free: 0
+other still held: 42
+none: 0
+handle take of held: stale
+release other: 1

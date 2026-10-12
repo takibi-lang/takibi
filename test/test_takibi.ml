@@ -10246,6 +10246,65 @@ fn main749s() -> i32 !{unsafe} {
           return got;
         }");
 
+  (* GitHub issue #745: a slot Held for its owner's life. *)
+  Alcotest.test_case "region_hold: hold, probe, take back once" `Quick
+    (fun () -> ignore (infer_regions ({|struct Rec745 { value: usize; }
+private let mut pool745: RegionPool(Rec745);
+fn use745() -> usize !{unsafe} {
+    let g = region_pool_lock(&pool745);
+    let RegionPoolAlloc(Rec745)::Allocated(slot) = region_alloc(g) else {
+        RegionPoolAlloc(Rec745)::Full => { region_pool_unlock(g); return 0; }
+        RegionPoolAlloc(Rec745)::Exhausted => { region_pool_unlock(g); return 0; }
+    };
+    let mut held: RegionHeld(Rec745) = region_hold(g, slot);
+    let mut v: usize = 0;
+    match region_probe_held(g, held) {
+        RegionHeldProbe(Rec745)::Stale => {}
+        RegionHeldProbe(Rec745)::Held(found) => {
+            v = region_held_record(found).value;
+            region_held_view_drop(found);
+        }
+    }
+    match region_take_held(g, held) {
+        RegionTake(Rec745)::Stale => {}
+        RegionTake(Rec745)::Taken(back) => { region_free(g, back); }
+    }
+    region_pool_unlock(g);
+    return v;
+}|})));
+
+  Alcotest.test_case "region_hold: the slot is gone once held" `Quick
+    (expect_region_error "was already consumed" ({|struct Rec745 { value: usize; }
+private let mut pool745: RegionPool(Rec745);
+fn use745() !{unsafe} {
+    let g = region_pool_lock(&pool745);
+    let RegionPoolAlloc(Rec745)::Allocated(slot) = region_alloc(g) else {
+        RegionPoolAlloc(Rec745)::Full => { region_pool_unlock(g); return; }
+        RegionPoolAlloc(Rec745)::Exhausted => { region_pool_unlock(g); return; }
+    };
+    let mut held: RegionHeld(Rec745) = region_hold(g, slot);
+    region_free(g, slot);
+    region_pool_unlock(g);
+}|}));
+
+  Alcotest.test_case "region_hold: a record read is refused after its view ends" `Quick
+    (expect_region_error "cannot be used after" ({|struct Rec745 { value: usize; }
+private let mut pool745: RegionPool(Rec745);
+fn use745(held: RegionHeld(Rec745)) -> usize !{unsafe} {
+    let g = region_pool_lock(&pool745);
+    let mut v: usize = 0;
+    match region_probe_held(g, held) {
+        RegionHeldProbe(Rec745)::Stale => {}
+        RegionHeldProbe(Rec745)::Held(found) => {
+            let record = region_held_record(found);
+            region_held_view_drop(found);
+            v = record.value;
+        }
+    }
+    region_pool_unlock(g);
+    return v;
+}|}));
+
   (* GitHub issue #746: give-back by address. *)
   Alcotest.test_case "places_put_back: an owner's permission goes back by address" `Quick
     (fun () -> ignore (infer_regions (put_back_746 ^ {|

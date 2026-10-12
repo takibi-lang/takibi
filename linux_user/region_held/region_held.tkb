@@ -1,0 +1,113 @@
+// GitHub issue #745: a RegionPool slot Held for its owner's life, run
+// natively. The permission is parked in the slot (state Held), the owner
+// keeps a RegionHeld reference, a probe answers for it under the pool
+// lock, and region_take_held gives the permission back out once. A walk
+// with no lock visits the slots. What must not compile is in
+// test/test_takibi.ml, "region_hold".
+struct Rec { value: usize; other: usize; }
+private let mut pool: RegionPool(Rec);
+private let mut bytes: [u8; 1024];
+
+fn held_value(r: RegionHeld(Rec)) -> usize !{unsafe} {
+    let guard = region_pool_lock(&pool);
+    let mut value: usize = 0;
+    match region_probe_held(guard, r) {
+        RegionHeldProbe(Rec)::Stale => { value = 0; }
+        RegionHeldProbe(Rec)::Held(found) => {
+            value = region_held_record(found).value;
+            region_held_view_drop(found);
+        }
+    }
+    region_pool_unlock(guard);
+    return value;
+}
+
+// 1 when the permission came out and was freed, 0 when Stale.
+fn release(r: RegionHeld(Rec)) -> usize !{unsafe} {
+    let guard = region_pool_lock(&pool);
+    match region_take_held(guard, r) {
+        RegionTake(Rec)::Stale => { region_pool_unlock(guard); return 0; }
+        RegionTake(Rec)::Taken(slot) => {
+            region_free(guard, slot);
+            region_pool_unlock(guard);
+            return 1;
+        }
+    }
+}
+
+fn app_main() !{unsafe} {
+    let RegionOf(u8)::Taken(chunk) = region_of(bytes) else {
+        RegionOf(u8)::Gone => { uart_puts("FAIL arena\n"); return; }
+    };
+    let guard = region_pool_lock(&pool);
+    match region_pool_grow(guard, chunk) {
+        RegionGrow(Rec)::TooSmall(back) => { region_release(back); region_pool_unlock(guard); uart_puts("FAIL grow\n"); return; }
+        RegionGrow(Rec)::Grown => {}
+    }
+    let RegionPoolAlloc(Rec)::Allocated(slot) = region_alloc(guard) else {
+        RegionPoolAlloc(Rec)::Full => { region_pool_unlock(guard); uart_puts("FAIL full\n"); return; }
+        RegionPoolAlloc(Rec)::Exhausted => { region_pool_unlock(guard); uart_puts("FAIL stamps\n"); return; }
+    };
+    region_slot_record(slot).value = 41;
+    let mut held: RegionHeld(Rec) = region_hold(guard, slot);
+    let RegionPoolAlloc(Rec)::Allocated(second) = region_alloc(guard) else {
+        RegionPoolAlloc(Rec)::Full => { region_pool_unlock(guard); uart_puts("FAIL full\n"); return; }
+        RegionPoolAlloc(Rec)::Exhausted => { region_pool_unlock(guard); uart_puts("FAIL stamps\n"); return; }
+    };
+    region_slot_record(second).value = 42;
+    let mut other: RegionHeld(Rec) = region_hold(guard, second);
+    uart_puts("held slots: ");
+    uart_print(region_pool_held_count(guard));
+    uart_puts("\n");
+    region_pool_unlock(guard);
+
+    uart_puts("probe: ");
+    uart_print(held_value(held));
+    uart_puts("\n");
+    // Walk with no lock; each slot is checked again under the lock.
+    let mut seen: usize = 0;
+    let mut at: usize = region_pool_first_unproven(&pool);
+    while (at != 0) {
+        let g = region_pool_lock(&pool);
+        let mut r: RegionHeld(Rec) = region_held_at(g, at);
+        region_pool_unlock(g);
+        seen = seen + held_value(r);
+        at = region_pool_next_unproven(&pool, at);
+    }
+    uart_puts("walk sum: ");
+    uart_print(seen);
+    uart_puts("\n");
+    uart_puts("take: ");
+    uart_print(release(held));
+    uart_puts("\ntake again: ");
+    uart_print(release(held));
+    uart_puts("\nprobe after free: ");
+    uart_print(held_value(held));
+    uart_puts("\nother still held: ");
+    uart_print(held_value(other));
+    uart_puts("\nnone: ");
+    uart_print(held_value(region_held_none__Rec()));
+    uart_puts("\n");
+    let g2 = region_pool_lock(&pool);
+    // A handle take of a Held slot is refused: Held is not Live.
+    let RegionPoolAlloc(Rec)::Allocated(third) = region_alloc(g2) else {
+        RegionPoolAlloc(Rec)::Full => { region_pool_unlock(g2); uart_puts("FAIL full\n"); return; }
+        RegionPoolAlloc(Rec)::Exhausted => { region_pool_unlock(g2); uart_puts("FAIL stamps\n"); return; }
+    };
+    let mut h: RegionHandle(Rec) = region_give(g2, third);
+    let mut stale: RegionHandle(Rec) = region_handle_from(g2, region_held_address(other),
+                                                      region_held_generation(other));
+    uart_puts("handle take of held: ");
+    match region_take(g2, stale) {
+        RegionTake(Rec)::Stale => { uart_puts("stale\n"); }
+        RegionTake(Rec)::Taken(wrong) => { uart_puts("TAKEN\n"); region_free(g2, wrong); }
+    }
+    match region_take(g2, h) {
+        RegionTake(Rec)::Stale => {}
+        RegionTake(Rec)::Taken(t) => { region_free(g2, t); }
+    }
+    region_pool_unlock(g2);
+    uart_puts("release other: ");
+    uart_print(release(other));
+    uart_puts("\n");
+}

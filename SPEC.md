@@ -3712,6 +3712,28 @@ match region_unpin(p) {                          // no pool lock needed
   state. Samples from different pools do not form one atomic snapshot; this
   is neither a peak count nor a count of user payload bytes.
 
+A record kept for its owner's whole life is Held (GitHub issue #745):
+`region_hold(guard, slot)` parks an Out slot's permission in the slot
+itself and returns a `RegionHeld(T)`, a copyable reference (address and
+generation) only the pool mints; the slot's state word is the place tag,
+so holding costs no storage. A Held slot is not Live: `region_take` and
+`region_pin` refuse it. `region_probe_held(guard, held)` answers
+`RegionHeldProbe(T)::Held(view)` while the slot is Held under that
+generation, else `Stale`; `region_held_record(view)` reads the record for
+the view's life and `region_held_view_drop` ends it.
+`region_take_held(guard, held)` gives the permission back out as an Out
+slot (`RegionTake(T)::Taken`), once: a second take is `Stale`.
+`region_held_none__T()` is a reference no slot answers to;
+`region_held_at(guard, address)` names the Held slot at an address;
+`region_held_address`, `region_held_generation` and `region_held_equal`
+read references; `region_pool_holds_slot(guard, address)` asks whether an
+address is any slot of the pool; `region_pool_held_count(guard)` counts
+Held slots. `region_pool_first_unproven(&pool)` and
+`region_pool_next_unproven(&pool, after)` walk slot addresses with no lock
+(0 at the end); they trust that the pool is never shrunk under a walker
+(TRUSTED_BASE.md), and every slot they yield is validated again by
+`region_probe_held`.
+
 Nonblocking diagnostic inspection is a separate, explicitly unproven mint:
 `region_pool_inspect_unproven__T(&pool, &controller, address, generation)`
 returns `RegionInspectionProbe(T)[pool, scope]`, with `Busy`, `Stale`, and

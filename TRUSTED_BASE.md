@@ -187,6 +187,14 @@ rules globally.
   begins; `syscall_path_view_here` relies on `kernel_syscall_path_name`
   zero-filling `path_buffer` before it writes it. Uninitialized local arrays
   are not tracked yet.
+- A RegionPool walked with no lock (`region_pool_first_unproven` and
+  `region_pool_next_unproven`, GitHub issue #745) trusts that the pool's
+  chunks are never shrunk while a walker may stand in one: the cursor reads
+  the chunk list and slot bounds without the pool lock. Each slot it yields
+  is validated again, under the lock, by `region_probe_held` (state and
+  generation) before any record is read, so the walk can miss or repeat a
+  slot during concurrent allocation but cannot reach a record that is not
+  Held under the generation it names.
 - `extern fn` and `extern symbol` declarations trust the linked symbol's ABI,
   effects, lifetime behavior, and implementation. Checker-only borrow and
   effect contracts cannot be verified against an unavailable body.

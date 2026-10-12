@@ -798,6 +798,175 @@ fn region_inspection_at(inspected: borrow @IV@[b, scope]) -> *@T@ @ scope !{unsa
 
 fn region_inspection_drop(inspected: sink @IV@[b, scope]) {}
 
+// -- Held slots: a record's permission kept for its owner's life --------
+// (GitHub issue #745, option A3). region_hold parks an Out slot's
+// permission in the slot itself, state Held (an Out word whose pin field
+// is all ones, which no Out slot otherwise carries): the pool's own state
+// word is the place tag, so holding costs no storage. A Held slot is not
+// reachable by handle (region_take and region_pin refuse it); it is named
+// by a RegionHeld(T) reference, a copyable address and generation that only
+// the pool mints. region_probe_held answers for it under the pool lock, and
+// region_take_held gives the permission back out by that reference, once:
+// a second take finds the slot no longer Held and answers Stale. Double
+// free and use after free of the permission are therefore refused by
+// type and by the state word; that the reference names the right slot is
+// the run-time generation check.
+const @T@__REGION_HELD: usize = 0x3fffe;
+const @T@__REGION_HELD_MASK: usize = 0x3ffff;
+
+struct @HR@ {
+    private address: usize;
+    private generation: usize;
+}
+
+linear struct @HV@[pool: addr, slot: usize] {
+    private address: usize;
+    private generation: usize;
+}
+
+must_use variant @HP@[b: addr] {
+    Stale;
+    Held(exists k: usize. @HV@[b, k]);
+}
+
+// The slot word of the slot at `address`, or 0 when the pool holds no
+// slot there (a stray, foreign or misaligned address).
+private fn pool_word_of(g: borrow @PG@[b], address: usize) -> usize !{unsafe} {
+    let chunk: usize = pool_chunk_of(g, address);
+    if (chunk == 0) { return 0; }
+    let offset: usize = address - pool_slots_base(chunk);
+    if (offset % sizeof(@T@) != 0) { return 0; }
+    return pool_word(chunk, 3 + offset / sizeof(@T@)) as usize;
+}
+
+fn region_hold(g: borrow @PG@[b], s: sink @SL@[b, k]) -> @HR@ !{unsafe} {
+    let word: *usize = unsafe { pool_word_of(g, s.address) as *usize };
+    let generation: usize = *word >> @T@__POOL_GEN_SHIFT;
+    unsafe { atomic_store_release(word as usize,
+        (generation << @T@__POOL_GEN_SHIFT) | @T@__REGION_HELD); }
+    let mut r: @HR@ = { s.address, generation };
+    region_slot_discharge(s);
+    return r;
+}
+
+private fn pool_held_view__@T@(address: usize @ k, generation: usize) -> @HV@[b, k] {
+    let mut v: @HV@[b, k] = { address, generation };
+    return v;
+}
+
+fn region_probe_held(g: borrow @PG@[b], r: @HR@) -> @HP@[b] !{unsafe} {
+    let word: usize = pool_word_of(g, r.address);
+    if (word == 0) { return @HP@::Stale; }
+    let w: usize = unsafe { atomic_load_acquire(word) };
+    if ((w & @T@__REGION_HELD_MASK) != @T@__REGION_HELD ||
+            (w >> @T@__POOL_GEN_SHIFT) != r.generation) {
+        return @HP@::Stale;
+    }
+    return @HP@::Held(pool_held_view__@T@(r.address, r.generation));
+}
+
+fn region_held_view_drop(v: sink @HV@[b, k]) {}
+
+fn region_held_view_ref(v: borrow @HV@[b, k]) -> @HR@ {
+    let mut r: @HR@ = { v.address, v.generation };
+    return r;
+}
+
+// The permission back out of a Held slot, by its reference, once.
+fn region_take_held(g: borrow @PG@[b], r: @HR@) -> @TK@[b] !{unsafe} {
+    let word: usize = pool_word_of(g, r.address);
+    if (word == 0) { return @TK@::Stale; }
+    let w: usize = unsafe { atomic_load_acquire(word) };
+    if ((w & @T@__REGION_HELD_MASK) != @T@__REGION_HELD ||
+            (w >> @T@__POOL_GEN_SHIFT) != r.generation) {
+        return @TK@::Stale;
+    }
+    unsafe { atomic_store_release(word,
+        (r.generation << @T@__POOL_GEN_SHIFT) | @T@__REGION_OUT); }
+    return @TK@::Taken(pool_slot(g, r.address));
+}
+
+// A reference no slot answers to (address 0, generation 0): the static
+// stand-in for a record that is not in the pool.
+fn region_held_none__@T@() -> @HR@ {
+    let mut r: @HR@ = { 0, 0 };
+    return r;
+}
+
+fn region_held_address(r: @HR@) -> usize { return r.address; }
+fn region_held_generation(r: @HR@) -> usize { return r.generation; }
+fn region_held_equal(a: @HR@, z: @HR@) -> bool {
+    return a.address == z.address && a.generation == z.generation;
+}
+
+// Whether `address` is a slot of this pool at all (any state), for a
+// diagnostic that must tell a freed slot from an invented address.
+fn region_pool_holds_slot(g: borrow @PG@[b], address: usize) -> bool !{unsafe} {
+    return pool_word_of(g, address) != 0;
+}
+
+// The Held slot at `address` as a reference, or none: for a walk that has
+// a slot address from region_pool_first_unproven/next_unproven.
+fn region_held_at(g: borrow @PG@[b], address: usize) -> @HR@ !{unsafe} {
+    let word: usize = pool_word_of(g, address);
+    if (word == 0) { return region_held_none__@T@(); }
+    let w: usize = unsafe { atomic_load_acquire(word) };
+    if ((w & @T@__REGION_HELD_MASK) != @T@__REGION_HELD) {
+        return region_held_none__@T@();
+    }
+    let mut r: @HR@ = { address, w >> @T@__POOL_GEN_SHIFT };
+    return r;
+}
+
+// A cursor over the pool's slots with no lock (GitHub issue #745, W2):
+// the first slot address, or the one after `after`, in the pool's order;
+// 0 at the end. It reads the chunk list and nothing else, and an `after`
+// whose chunk has left the pool ends the walk. TRUSTED: a chunk released
+// by region_pool_shrink while a walker stands in it is read after release;
+// a pool walked this way is never shrunk (TRUSTED_BASE.md). Every slot a
+// walk yields is validated again, under the lock, by region_probe_held.
+fn region_pool_first_unproven(p: *@P@ @ b) -> usize !{unsafe} {
+    let chunk: usize = p.first;
+    if (chunk == 0) { return 0; }
+    return pool_slots_base(chunk);
+}
+
+fn region_pool_next_unproven(p: *@P@ @ b, after: usize) -> usize !{unsafe} {
+    let mut chunk: usize = p.first;
+    while (chunk != 0) {
+        let base: usize = pool_slots_base(chunk);
+        let count: usize = *pool_word(chunk, 1);
+        if (after >= base && after < base + count * sizeof(@T@)) {
+            let next: usize = after - (after - base) % sizeof(@T@) + sizeof(@T@);
+            if (next < base + count * sizeof(@T@)) { return next; }
+            let following: usize = *pool_word(chunk, 0);
+            if (following == 0) { return 0; }
+            return pool_slots_base(following);
+        }
+        chunk = *pool_word(chunk, 0);
+    }
+    return 0;
+}
+
+// Slots Held, chunks, and slots per chunk, under the lock: the pool
+// figures a space report needs.
+fn region_pool_held_count(g: borrow @PG@[b]) -> usize !{unsafe} {
+    let mut held: usize = 0;
+    let mut chunk: usize = *pool_word(g.pool, 1);
+    while (chunk != 0) {
+        let count: usize = *pool_word(chunk, 1);
+        let mut i: usize = 0;
+        while (i < count) {
+            if ((*pool_word(chunk, 3 + i) & @T@__REGION_HELD_MASK) == @T@__REGION_HELD) {
+                held = held + 1;
+            }
+            i = i + 1;
+        }
+        chunk = *pool_word(chunk, 0);
+    }
+    return held;
+}
+
 // Whether the pool's lock is held, for a debugger that has stopped every
 // core and must not wait on a lock an interrupted core holds.
 fn region_pool_lock_is_held(p: *@P@ @ b) -> bool !{unsafe} {
@@ -1173,6 +1342,9 @@ fn region_pin_record(p: borrow @PN@[b, k]) -> &mut @T@ @ b !{unsafe} {
 fn region_inspection_record(p: borrow @IV@[b, scope]) -> &mut @T@ @ scope !{unsafe} {
     return unsafe { (p.address as *@T@) as &mut @T@ };
 }
+fn region_held_record(v: borrow @HV@[b, k]) -> &mut @T@ @ b !{unsafe} {
+    return unsafe { (v.address as *@T@) as &mut @T@ };
+}
 |}
 
 (* Element i, proved below the count where the call is made, derived from
@@ -1203,6 +1375,9 @@ let instance ?(record = false) elem =
   |> replace_all ~sub:"@PB@" ~by:("PlaceBack__" ^ elem)
   |> replace_all ~sub:"@PT@" ~by:("PlaceRun__" ^ elem)
   |> replace_all ~sub:"@PF@" ~by:("PlacesFrom__" ^ elem)
+  |> replace_all ~sub:"@HR@" ~by:("RegionHeld__" ^ elem)
+  |> replace_all ~sub:"@HV@" ~by:("RegionHeldView__" ^ elem)
+  |> replace_all ~sub:"@HP@" ~by:("RegionHeldProbe__" ^ elem)
   |> replace_all ~sub:"@O@" ~by:("RegionOf__" ^ elem)
   |> replace_all ~sub:"@TBL@" ~by:("RegionTable__" ^ elem)
   |> replace_all ~sub:"@RS@" ~by:("RegionReleaseSlot__" ^ elem)
@@ -1278,7 +1453,8 @@ let element_types (prog : Ast.toplevel list) claimed =
          "RegionShrink__"; "RegionAdopt__"; "RegionPin__"; "RegionPinned__";
          "RegionUnpin__"; "RegionRetire__"; "RegionNext__";
          "RegionInspection__"; "RegionInspectionProbe__"; "RegionTyped__"; "places__";
-         "PlaceBack__"; "PlaceRun__"; "PlacesFrom__" ] in
+         "PlaceBack__"; "PlaceRun__"; "PlacesFrom__";
+         "RegionHeld__"; "RegionHeldView__"; "RegionHeldProbe__" ] in
   List.iter (fun item -> scan (Ast.show_toplevel item)) prog;
   Hashtbl.fold (fun k () acc -> k :: acc) found [] |> List.sort compare
 
