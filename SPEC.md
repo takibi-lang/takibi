@@ -3797,9 +3797,10 @@ record readable; per-CPU rings stay independently written.
 
 A `protocol` item declares a resource-transfer protocol once. The compiler
 validates it into one representation and, with `--emit-tla <dir>`, writes
-`<dir>/<Name>.tla` and `<Name>.cfg` from it and exits. In this slice the
-declaration generates no code and is removed before type checking; sealed
-permission types generated from the same representation come later.
+`<dir>/<Name>.tla` and `<Name>.cfg` from it and exits. Otherwise the same
+representation generates sealed permission types (below) in place of the
+item; they use the built-in region, so a program with a protocol compiles
+with `--regions`.
 
 ```takibi
 protocol RegionTransfer[inst: usize] retains region(u8)[b, n] {
@@ -3848,6 +3849,40 @@ position; `protocol` itself is the one contextual keyword.
   `property prepared_before_read;` that the device never reads an unwritten
   cell. At least one is required.
 - `model cells N;` (1..3) is the finite bound of the generated model.
+
+Generated permission types. The generated code belongs to the synthetic
+file `<protocol Name>`, so file privacy makes it the only code that can
+construct a state owner, read its region or mint a witness. For `protocol P
+... retains region(T)[b, n]`:
+
+- each `state S[p]` is `linear struct P_S[b: addr, b__off: usize, n: usize,
+  p: usize] { private memory: region(T)[b, n]; }`. Every state retains the
+  whole region; in a non-`access write` state nothing outside the generated
+  code can reach it;
+- `P_init(memory: region(T)[b, n]) -> P_<init>[b, b__off, n]` and
+  `P_release(P_<init>[...]) -> region(T)[b, n]` move the region in and out;
+- each outcome with arguments `W[a]` is a private linear view `P_W[a]`;
+  `P_W_spend(w: sink P_W[a])` discards one;
+- `observe o(S[a]) -> ...` generates `variant P_o_Raw { W; ... }`, `variant
+  P_o_Outcome[a: usize] { W(P_W[a]); ... }` and `P_o(s: borrow P_S[...]) ->
+  P_o_Outcome[a]`, which calls the user's `fn o(s: borrow P_S[...]) ->
+  P_o_Raw` and brands its answer with the state's own identity;
+- `transition t(I[a], W[a]) -> R[a]` generates `P_t(s: P_I[...], w: P_W[a])
+  -> P_R[...]`, which consumes the witness, calls the user's `fn t(s: borrow
+  P_I[...])` and moves the region into the successor. With several results
+  or a `fresh` identity it returns `variant P_t_Result[b, b__off, n, a]` (a
+  `fresh` result is an existential payload) and the user's function returns
+  `variant P_t_Choice { Label; ... }` to choose.
+
+Every transition and observation needs its user function -- its lowering --
+in the declaring file, taking exactly `borrow P_<input>[...]` with the
+state's static arity and returning the type above; a missing or misshaped
+one is rejected. That function is the reviewed side-effect or trusted
+observation boundary; it receives no access to the region. The region's
+identity `b` is the protocol instance's identity: the declaration's own
+static parameters take no part in the generated types yet, and scoped access
+to the region from a writable state is not generated yet.
+`linux_user/protocol_ring` exercises the accepted shape.
 
 Rejected: unknown or duplicate states, outcomes, actions or labels; arity
 mismatches; unbound or shadowing identities; witnesses no observation of the

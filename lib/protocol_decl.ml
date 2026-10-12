@@ -435,3 +435,227 @@ let to_tla (p : t) : string =
 
 let to_cfg (_ : t) : string =
   "SPECIFICATION Spec\nCHECK_DEADLOCK FALSE\nINVARIANT TypeOK\nINVARIANT Safety\n"
+
+(* ---- Sealed permission types (acceptance items 1 and 2) ----
+
+   Each protocol generates Takibi source, parsed under the synthetic file
+   name "<protocol Name>". File privacy then makes the generated functions
+   the only code that can construct a state owner, read its retained region
+   or mint an outcome witness: no user file is that file.
+
+   For a protocol P retaining region(T)[b, n]:
+   - every state S[p...] is `linear struct P_S[b: addr, b__off: usize,
+     n: usize, p: usize...] { private memory: region(T)[b, n]; }`;
+   - P_init(region) -> P_<init> and P_release(P_<init>) -> region are the
+     region's way in and out;
+   - every outcome W[a...] carrying arguments is a private linear view
+     P_W[a...], minted only by its observation wrapper and consumed only by
+     the transition that names it;
+   - observe o(S[...]) generates P_o(borrow P_S) -> P_o_Outcome[...] that
+     calls the user's `fn o(s: borrow P_S[...]) -> P_o_Raw`, the declared
+     trusted boundary, and brands its answer;
+   - transition t(I[...], W[...]) generates P_t(P_I, P_W) that calls the
+     user's `fn t(s: borrow P_I[...])` (or `-> P_t_Choice` when there is
+     more than one result) and moves the region into the successor.
+   A declared transition or observation without its user function in the
+   declaring file is rejected: an action with no lowering.
+   The region's identity b is the protocol instance's identity; the
+   protocol's own static parameters take no part in the generated types
+   yet. *)
+
+let rec type_source loc = function
+  | TypeBool -> "bool" | TypeI8 -> "i8" | TypeI16 -> "i16" | TypeI32 -> "i32"
+  | TypeI64 -> "i64" | TypeU8 -> "u8" | TypeU16 -> "u16" | TypeU32 -> "u32"
+  | TypeU64 -> "u64" | TypeIsize -> "isize" | TypeUsize -> "usize"
+  | TypeNamed n -> n
+  | TypeArray (t, k) -> Printf.sprintf "[%s; %d]" (type_source loc t) k
+  | _ -> fail loc "unsupported region element type in a protocol declaration"
+
+let generated_file name = Printf.sprintf "<protocol %s>" name
+
+let source_of (d : protocol_decl) (p : t) : string =
+  let _, elem, idx = d.proto_region in
+  let b, n = match idx with [ b; n ] -> (b, n) | _ -> assert false in
+  let elem = type_source d.proto_loc elem in
+  let pn = p.name in
+  let buf = Buffer.create 4096 in
+  let add fmt = Printf.ksprintf (fun s -> Buffer.add_string buf s;
+                                  Buffer.add_char buf '\n') fmt in
+  let region = Printf.sprintf "region(%s)[%s, %s]" elem b n in
+  let base = [ b; b ^ "__off"; n ] in
+  let state s = List.find (fun st -> st.s_name = s) p.states in
+  let ty s args = Printf.sprintf "%s_%s[%s]" pn s (String.concat ", " (base @ args)) in
+  let view w args = Printf.sprintf "%s_%s[%s]" pn w (String.concat ", " args) in
+  List.iter (fun s ->
+    add "linear struct %s_%s[%s] {" pn s.s_name
+      (String.concat ", " ([ b ^ ": addr"; b ^ "__off: usize"; n ^ ": usize" ]
+                          @ List.map (fun x -> x ^ ": usize") s.s_params));
+    add "    private memory: %s;" region;
+    add "}") p.states;
+  add "fn %s_init(memory: %s) -> %s {" pn region (ty p.init []);
+  add "    let mut owner: %s = { memory };" (ty p.init []);
+  add "    return owner;";
+  add "}";
+  add "fn %s_release(owner: %s) -> %s {" pn (ty p.init []) region;
+  add "    return owner.memory;";
+  add "}";
+  List.iter (fun o ->
+    if o.o_args <> [] then begin
+      add "private linear view %s_%s[%s];" pn o.o_name
+        (String.concat ", " (List.map (fun a -> a ^ ": usize") o.o_args));
+      add "fn %s_%s_spend(w: sink %s) {}" pn o.o_name (view o.o_name o.o_args)
+    end) p.outcomes;
+  (* Observations, grouped by declaration order of their outcomes. *)
+  let observes = List.filter_map (function
+    | PObserve (name, subj, _, _) -> Some (name, subj) | _ -> None) d.proto_items in
+  List.iter (fun (name, (subj : proto_ref)) ->
+    let outs = List.filter (fun o -> o.o_subject = subj.pr_name &&
+      List.exists (fun it -> match it with
+        | PObserve (n', _, os, _) when n' = name ->
+            List.exists (fun ((r : proto_ref), _) -> r.pr_name = o.o_name) os
+        | _ -> false) d.proto_items) p.outcomes in
+    let args = List.map fst subj.pr_args in
+    add "variant %s_%s_Raw {" pn name;
+    List.iter (fun o -> add "    %s;" o.o_name) outs;
+    add "}";
+    let params = String.concat ", " (List.map (fun a -> a ^ ": usize") args) in
+    add "variant %s_%s_Outcome%s {" pn name
+      (if args = [] then "" else "[" ^ params ^ "]");
+    List.iter (fun o ->
+      if o.o_args = [] then add "    %s;" o.o_name
+      else add "    %s(%s);" o.o_name (view o.o_name o.o_args)) outs;
+    add "}";
+    let outcome_ty = Printf.sprintf "%s_%s_Outcome%s" pn name
+      (if args = [] then "" else "[" ^ String.concat ", " args ^ "]") in
+    add "fn %s_%s(s: borrow %s) -> %s {" pn name (ty subj.pr_name args) outcome_ty;
+    add "    match %s(s) {" name;
+    List.iter (fun o ->
+      if o.o_args = [] then
+        add "        %s_%s_Raw::%s => { return %s_%s_Outcome::%s; }" pn name
+          o.o_name pn name o.o_name
+      else
+        add "        %s_%s_Raw::%s => { return %s_%s_Outcome::%s(view %s); }"
+          pn name o.o_name pn name o.o_name (view o.o_name o.o_args)) outs;
+    add "    }";
+    add "}") observes;
+  let trans_items = List.filter_map (function
+    | PTransition (name, input, witness, alts, _, _) -> Some (name, input, witness, alts)
+    | _ -> None) d.proto_items in
+  List.iter (fun (name, (input : proto_ref), (witness : proto_ref option), alts) ->
+    let t = List.find (fun t -> t.t_name = name) p.transitions in
+    let in_args = List.map fst input.pr_args in
+    let params = Printf.sprintf "s: %s%s" (ty input.pr_name in_args)
+      (match witness with
+       | None -> ""
+       | Some w -> Printf.sprintf ", w: %s" (view w.pr_name (List.map fst w.pr_args))) in
+    let spend = match witness with
+      | None -> ""
+      | Some w -> Printf.sprintf "%s_%s_spend(w); " pn w.pr_name in
+    let target_ty (a : proto_alt) ~packed =
+      ty a.pa_state.pr_name (List.map (fun (x, fresh) ->
+        if fresh && packed then "0" else x) a.pa_state.pr_args) in
+    let fresh_of (a : proto_alt) =
+      List.filter_map (fun (x, f) -> if f then Some x else None) a.pa_state.pr_args in
+    let simple = match alts with
+      | [ a ] -> fresh_of a = []
+      | _ -> false in
+    ignore (state input.pr_name);
+    if simple then begin
+      let a = List.hd alts in
+      add "fn %s_%s(%s) -> %s {" pn name params (target_ty a ~packed:false);
+      add "    %s%s(s);" spend name;
+      add "    let mut next: %s = { s.memory };" (target_ty a ~packed:false);
+      add "    return next;";
+      add "}"
+    end else begin
+      let label (a : proto_alt) = match a.pa_label with
+        | Some l -> l | None -> a.pa_state.pr_name in
+      let res_params = String.concat ", "
+        ([ b ^ ": addr"; b ^ "__off: usize"; n ^ ": usize" ]
+         @ List.map (fun x -> x ^ ": usize") in_args) in
+      add "variant %s_%s_Choice {" pn name;
+      List.iter (fun a -> add "    %s;" (label a)) alts;
+      add "}";
+      add "variant %s_%s_Result[%s] {" pn name res_params;
+      List.iter (fun a ->
+        let fr = fresh_of a in
+        let body = target_ty a ~packed:false in
+        add "    %s(%s%s);" (label a)
+          (String.concat "" (List.map (fun x -> Printf.sprintf "exists %s: usize. " x) fr))
+          body) alts;
+      add "}";
+      let result_ty = Printf.sprintf "%s_%s_Result[%s]" pn name
+        (String.concat ", " (base @ in_args)) in
+      add "fn %s_%s(%s) -> %s {" pn name params result_ty;
+      if spend <> "" then add "    %s" spend;
+      add "    match %s(s) {" name;
+      List.iter (fun a ->
+        add "        %s_%s_Choice::%s => {" pn name (label a);
+        add "            let mut next: %s = { s.memory };" (target_ty a ~packed:true);
+        add "            return %s_%s_Result::%s(next);" pn name (label a);
+        add "        }") alts;
+      add "    }";
+      add "}"
+    end;
+    ignore t) trans_items;
+  Buffer.contents buf
+
+let parse_generated (name : string) (src : string) : toplevel list =
+  let lexbuf = Lexing.from_string src in
+  Lexing.set_filename lexbuf (generated_file name);
+  try Parser.program Lexer.read lexbuf
+  with Parser.Error ->
+    let pos = Lexing.lexeme_start_p lexbuf in
+    failwith (Printf.sprintf
+      "internal error: generated protocol %s source does not parse at line %d:\n%s"
+      name pos.Lexing.pos_lnum src)
+
+(* Every declared action needs its lowering: a user function of the same
+   name in the declaring file, taking exactly the borrowed state. *)
+let check_lowering (prog : toplevel list) (d : protocol_decl) (p : t) =
+  let file = source_file_of_loc d.proto_loc in
+  let actions = List.filter_map (function
+    | PTransition (n, input, _, alts, _, l) ->
+        let simple = match alts with
+          | [ a ] -> List.for_all (fun (_, f) -> not f) a.pa_state.pr_args
+          | _ -> false in
+        Some (n, input, (if simple then None
+                         else Some (Printf.sprintf "%s_%s_Choice" p.name n)), l)
+    | PObserve (n, subj, _, l) ->
+        Some (n, subj, Some (Printf.sprintf "%s_%s_Raw" p.name n), l)
+    | _ -> None) d.proto_items in
+  List.iter (fun (n, (input : proto_ref), ret, l) ->
+    match List.find_opt (function
+        | FuncDef f -> f.name = n && source_file_of_loc f.def_loc = file
+        | _ -> false) prog with
+    | Some (FuncDef f) ->
+        let owner = Printf.sprintf "%s_%s" p.name input.pr_name in
+        let arity = 3 + List.length input.pr_args in
+        let param_ok = match f.params with
+          | [ (_, Some (TypeBorrow (TypeIndexed (name, args)))) ] ->
+              name = owner && List.length args = arity
+          | _ -> false in
+        if not param_ok then
+          fail f.def_loc "protocol '%s' action '%s' must take exactly \
+            'borrow %s[...]' with %d static argument(s)" p.name n owner arity;
+        let ret_ok = match ret, f.ret_type with
+          | None, (None | Some TypeVoid) -> true
+          | Some want, Some (TypeNamed got) -> want = got
+          | _ -> false in
+        if not ret_ok then
+          fail f.def_loc "protocol '%s' action '%s' must return %s" p.name n
+            (match ret with Some r -> r | None -> "nothing")
+    | _ ->
+        fail l "protocol '%s' action '%s' has no lowering: define fn %s in \
+          the file that declares the protocol" p.name n n) actions
+
+(* The compile path: validate, check every action's lowering, and replace
+   each protocol item with its generated sealed types and wrappers. *)
+let lower (prog : toplevel list) : toplevel list =
+  ignore (extract prog);
+  List.concat_map (function
+    | ProtocolDef d ->
+        let p = validate d in
+        check_lowering prog d p;
+        parse_generated p.name (source_of d p)
+    | item -> [ item ]) prog

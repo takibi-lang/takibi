@@ -1,0 +1,87 @@
+// GitHub issue #720: a protocol declaration compiled to sealed owners
+// (compiled with --regions). The declaration generates one linear owner per
+// state, each retaining the region, and wrappers that are the only code able
+// to build an owner, touch its region or mint a completion witness. This
+// file supplies each action's lowering (the hooks the wrappers call); the
+// program walks a completed request and a timed-out, reset one.
+// What must not compile is in test/test_takibi.ml, "protocol-declarations".
+
+protocol Ring[inst: usize] retains region(u8)[b, n] {
+    state Ready access write;
+    state Reserved[req] access write;
+    state InFlight[req] device;
+    state Unconfirmed[req] device;
+    state Halted;
+    init Ready;
+    transition reserve(Ready) split -> Reserved[fresh req] | Refused(Ready);
+    transition submit(Reserved[req]) requires prepared -> InFlight[req];
+    observe completion(InFlight[req]) -> Matching[req] completes | Foreign;
+    transition resume(InFlight[req], Matching[req]) -> Ready;
+    transition expire(InFlight[req]) -> Unconfirmed[req];
+    observe reset(Unconfirmed[req]) -> Confirmed[req] quiesces;
+    transition halt(Unconfirmed[req], Confirmed[req]) -> Halted;
+    transition restart(Halted) -> Ready;
+    property disjoint;
+    property prepared_before_read;
+    model cells 2;
+}
+
+// Stand-ins for the device: the first request completes, the second does
+// not and is reset.
+private let mut submitted: usize = 0;
+
+fn reserve(s: borrow Ring_Ready[b, o, n]) -> Ring_reserve_Choice {
+    return Ring_reserve_Choice::Reserved;
+}
+fn submit(s: borrow Ring_Reserved[b, o, n, r]) {
+    submitted = submitted + 1;
+    uart_puts("submit\n");
+}
+fn completion(s: borrow Ring_InFlight[b, o, n, r]) -> Ring_completion_Raw {
+    if (submitted == 1) { return Ring_completion_Raw::Matching; }
+    return Ring_completion_Raw::Foreign;
+}
+fn resume(s: borrow Ring_InFlight[b, o, n, r]) { uart_puts("completed\n"); }
+fn expire(s: borrow Ring_InFlight[b, o, n, r]) { uart_puts("timed out\n"); }
+fn reset(s: borrow Ring_Unconfirmed[b, o, n, r]) -> Ring_reset_Raw {
+    return Ring_reset_Raw::Confirmed;
+}
+fn halt(s: borrow Ring_Unconfirmed[b, o, n, r]) { uart_puts("reset confirmed\n"); }
+fn restart(s: borrow Ring_Halted[b, o, n]) { uart_puts("restart\n"); }
+
+// One request from Ready back to Ready, whichever way it ends.
+fn one_request(ready: Ring_Ready[b, o, n]) -> Ring_Ready[b, o, n] {
+    match Ring_reserve(ready) {
+        Ring_reserve_Result::Refused(again) => { return again; }
+        Ring_reserve_Result::Reserved(reserved) => {
+            let flight = Ring_submit(reserved);
+            match Ring_completion(flight) {
+                Ring_completion_Outcome::Matching(done) => {
+                    return Ring_resume(flight, done);
+                }
+                Ring_completion_Outcome::Foreign => {
+                    let pending = Ring_expire(flight);
+                    match Ring_reset(pending) {
+                        Ring_reset_Outcome::Confirmed(quiet) => {
+                            return Ring_restart(Ring_halt(pending, quiet));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private let mut ring_bytes: [u8; 64];
+
+fn app_main() {
+    let RegionOf(u8)::Taken(memory) = region_of(ring_bytes) else {
+        RegionOf(u8)::Gone => { uart_puts("ring: already taken\n"); return; }
+    };
+    let ready = one_request(one_request(Ring_init(memory)));
+    let back = Ring_release(ready);
+    uart_puts("ring: ");
+    uart_print(region_count(back));
+    uart_puts(" bytes back\n");
+    region_release(back);
+}

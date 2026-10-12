@@ -25003,6 +25003,185 @@ let protocol_tests = [
     (protocol_mutant ~sub:"init Ready;" ~by:"" "has no 'init' state");
 ]
 
+(* GitHub issue #720, acceptance items 1 and 2: the generated sealed owners.
+   linux_user/protocol_ring runs the accepted shape. *)
+let sealed_protocol = {|protocol Ring[inst: usize] retains region(u8)[b, n] {
+    state Ready access write;
+    state Reserved[req] access write;
+    state InFlight[req] device;
+    state Unconfirmed[req] device;
+    state Halted;
+    init Ready;
+    transition reserve(Ready) split -> Reserved[fresh req] | Refused(Ready);
+    transition submit(Reserved[req]) requires prepared -> InFlight[req];
+    observe completion(InFlight[req]) -> Matching[req] completes | Foreign;
+    transition resume(InFlight[req], Matching[req]) -> Ready;
+    transition expire(InFlight[req]) -> Unconfirmed[req];
+    observe reset(Unconfirmed[req]) -> Confirmed[req] quiesces;
+    transition halt(Unconfirmed[req], Confirmed[req]) -> Halted;
+    transition restart(Halted) -> Ready;
+    property disjoint;
+    property prepared_before_read;
+    model cells 2;
+}
+private let mut space: usize = 1;
+fn reserve(s: borrow Ring_Ready[b, o, n]) -> Ring_reserve_Choice {
+    if (space > 0) { return Ring_reserve_Choice::Reserved; }
+    return Ring_reserve_Choice::Refused;
+}
+fn submit(s: borrow Ring_Reserved[b, o, n, r]) {}
+fn completion(s: borrow Ring_InFlight[b, o, n, r]) -> Ring_completion_Raw {
+    return Ring_completion_Raw::Matching;
+}
+fn resume(s: borrow Ring_InFlight[b, o, n, r]) {}
+fn expire(s: borrow Ring_InFlight[b, o, n, r]) {}
+fn reset(s: borrow Ring_Unconfirmed[b, o, n, r]) -> Ring_reset_Raw {
+    return Ring_reset_Raw::Confirmed;
+}
+fn halt(s: borrow Ring_Unconfirmed[b, o, n, r]) {}
+fn restart(s: borrow Ring_Halted[b, o, n]) {}
+|}
+
+let sealed_consumer = {|private let mut bytes: [u8; 8];
+fn main() -> i32 {
+    let RegionOf(u8)::Taken(memory) = region_of(bytes) else {
+        RegionOf(u8)::Gone => { return 1; }
+    };
+    let ready = Ring_init(memory);
+    match Ring_reserve(ready) {
+        Ring_reserve_Result::Refused(again) => {
+            region_release(Ring_release(again));
+            return 2;
+        }
+        Ring_reserve_Result::Reserved(r) => {
+            let flight = Ring_submit(r);
+            match Ring_completion(flight) {
+                Ring_completion_Outcome::Matching(w) => {
+                    let back = Ring_resume(flight, w);
+                    region_release(Ring_release(back));
+                    return 0;
+                }
+                Ring_completion_Outcome::Foreign => {
+                    let u = Ring_expire(flight);
+                    match Ring_reset(u) {
+                        Ring_reset_Outcome::Confirmed(c) => {
+                            let h = Ring_halt(u, c);
+                            region_release(Ring_release(Ring_restart(h)));
+                            return 3;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+|}
+
+let infer_sealed ?(proto = sealed_protocol) ?(use = sealed_consumer) () =
+  Const_env.reset ();
+  Type_layout.reset ();
+  Publish_registry.reset ();
+  No_copy_registry.reset ();
+  Per_cpu_registry.reset ();
+  Guarded_registry.reset ();
+  Io_struct_registry.reset ();
+  Hashtbl.reset Generic_variant.proven_empty_puts;
+  Dma_fixed_registry.reset ();
+  Generic_scope.reset ();
+  Ast.reset_precedence_errors ();
+  ignore (Llvm_gen.setup_target ~triple:"x86_64-pc-linux-gnu" ());
+  let program = List.concat_map (fun (filename, src) ->
+    let lexbuf = Lexing.from_string src in
+    Lexing.set_filename lexbuf filename;
+    Parser.program Lexer.read lexbuf) ["ring.tkb", proto; "use.tkb", use] in
+  let prog = Region_builtin.run ~enabled:true (Protocol_decl.lower program) in
+  Type_inf.infer_program
+    (Declared_type_resolver.run
+       (Region_builtin.lower
+          (Monomorphize.run (Dma_fixed_record.run (Publish_record.run prog)))))
+
+let expect_sealed_error ?(in_proto = false) ~sub ~by fragment () =
+  let proto, use =
+    if in_proto then replace_once ~sub ~by sealed_protocol, sealed_consumer
+    else sealed_protocol, replace_once ~sub ~by sealed_consumer in
+  match infer_sealed ~proto ~use () with
+  | _ -> Alcotest.failf "expected an error containing %S" fragment
+  | exception Types.TypeError (_, msg) ->
+      if not (contains_substring msg fragment)
+      then Alcotest.failf "TypeError %S does not contain %S" msg fragment
+  | exception Types.MultiTypeError errors ->
+      if not (List.exists (fun (_, msg) -> contains_substring msg fragment) errors)
+      then Alcotest.failf "no entry contains %S: %s" fragment
+          (String.concat " | " (List.map snd errors))
+
+let sealed_protocol_tests = [
+  Alcotest.test_case "sealed owners: the declared graph is accepted" `Quick
+    (fun () -> ignore (infer_sealed ()));
+  Alcotest.test_case "sealed owners: a witness cannot be minted outside" `Quick
+    (expect_sealed_error ~sub:"let back = Ring_resume(flight, w);"
+       ~by:"let back = Ring_resume(flight, view Ring_Matching[0]); Ring_Matching_spend(w);"
+       "cannot mint private view 'Ring_Matching'");
+  Alcotest.test_case "sealed owners: no state is constructed outside" `Quick
+    (expect_sealed_error ~sub:"fn main() -> i32 {"
+       ~by:"fn forge(m: region(u8)[b, n]) -> Ring_Ready[b, b__off, n] {\n\
+            let mut x: Ring_Ready[b, b__off, n] = { m }; return x; }\n\
+            fn main() -> i32 {"
+       "cannot construct struct 'Ring_Ready' with a literal outside '<protocol Ring>'");
+  Alcotest.test_case "sealed owners: an in-flight region is unreachable" `Quick
+    (expect_sealed_error ~sub:"let back = Ring_resume(flight, w);"
+       ~by:"let m = flight.memory; let back = Ring_resume(flight, w);"
+       "field 'Ring_InFlight.memory' is private to '<protocol Ring>'");
+  Alcotest.test_case "sealed owners: a hook cannot reach the region either" `Quick
+    (expect_sealed_error ~in_proto:true
+       ~sub:"fn submit(s: borrow Ring_Reserved[b, o, n, r]) {}"
+       ~by:"fn submit(s: borrow Ring_Reserved[b, o, n, r]) { let c = region_count(s.memory); }"
+       "field 'Ring_Reserved.memory' is private to '<protocol Ring>'");
+  Alcotest.test_case "sealed owners: a state is consumed by its transition" `Quick
+    (expect_sealed_error ~sub:"let flight = Ring_submit(r);"
+       ~by:"let flight = Ring_submit(r); let again = Ring_submit(r);"
+       "linear value 'r' was already consumed");
+  Alcotest.test_case "sealed owners: a witness is consumed once" `Quick
+    (expect_sealed_error ~sub:"let h = Ring_halt(u, c);"
+       ~by:"let h = Ring_halt(u, c); Ring_Confirmed_spend(c);"
+       "linear value 'c' was already consumed");
+  Alcotest.test_case "sealed owners: another request's witness" `Quick
+    (expect_sealed_error ~sub:"fn main() -> i32 {"
+       ~by:"fn cross(fa: borrow Ring_InFlight[b, o, n, r],\n\
+                     fb: Ring_InFlight[c, p, m, q], wb: Ring_Matching[q])\n\
+                -> Ring_Ready[c, p, m] {\n\
+              match Ring_completion(fa) {\n\
+                Ring_completion_Outcome::Matching(w) => {\n\
+                  Ring_Matching_spend(wb); return Ring_resume(fb, w); }\n\
+                Ring_completion_Outcome::Foreign => { return Ring_resume(fb, wb); }\n\
+              }\n\
+            }\n\
+            fn main() -> i32 {"
+       "static value mismatch: r vs q");
+  Alcotest.test_case "sealed owners: an action with no lowering" `Quick
+    (expect_sealed_error ~in_proto:true
+       ~sub:"fn halt(s: borrow Ring_Unconfirmed[b, o, n, r]) {}" ~by:""
+       "action 'halt' has no lowering");
+  Alcotest.test_case "sealed owners: a lowering in another file" `Quick
+    (fun () ->
+      let proto = replace_once ~sub:"fn halt(s: borrow Ring_Unconfirmed[b, o, n, r]) {}"
+          ~by:"" sealed_protocol in
+      let use = sealed_consumer ^ "\nfn halt(s: borrow Ring_Unconfirmed[b, o, n, r]) {}\n" in
+      match infer_sealed ~proto ~use () with
+      | _ -> Alcotest.fail "expected a missing-lowering error"
+      | exception Types.TypeError (_, msg) ->
+          Alcotest.(check bool) msg true (contains_substring msg "has no lowering"));
+  Alcotest.test_case "sealed owners: a lowering on the wrong state" `Quick
+    (expect_sealed_error ~in_proto:true
+       ~sub:"fn halt(s: borrow Ring_Unconfirmed[b, o, n, r]) {}"
+       ~by:"fn halt(s: borrow Ring_Halted[b, o, n]) {}"
+       "must take exactly 'borrow Ring_Unconfirmed[...]' with 4 static argument(s)");
+  Alcotest.test_case "sealed owners: a choice lowering must choose" `Quick
+    (expect_sealed_error ~in_proto:true
+       ~sub:"fn reserve(s: borrow Ring_Ready[b, o, n]) -> Ring_reserve_Choice {"
+       ~by:"fn reserve(s: borrow Ring_Ready[b, o, n]) -> bool {"
+       "must return Ring_reserve_Choice");
+]
+
 let named_groups_unisolated = [
   "readonly-literals", readonly_literal_tests;
   "private-default-construction", private_default_construction_tests;
@@ -25027,6 +25206,7 @@ let named_groups_unisolated = [
   "production-machine-boundary", production_machine_boundary_tests;
   "region-inspection", region_inspection_tests;
   "protocol-declarations", protocol_tests;
+  "protocol-sealed-owners", sealed_protocol_tests;
 ]
 
 (* Each Alcotest case represents a fresh compiler invocation. In particular,

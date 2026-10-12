@@ -273,8 +273,8 @@ let () =
     (* GitHub issue #720: protocol declarations are validated once here and
        removed before every later pass; --emit-tla writes each one's model
        (<dir>/<Name>.tla and .cfg) and stops. *)
-    let prog, protocols = Protocol_decl.extract prog in
     if !emit_tla <> "" then begin
+      let _, protocols = Protocol_decl.extract prog in
       List.iter (fun p ->
         let write ext text =
           let out = open_out (Filename.concat !emit_tla
@@ -284,6 +284,9 @@ let () =
         write ".cfg" (Protocol_decl.to_cfg p)) protocols;
       exit 0
     end;
+    (* Otherwise each protocol becomes its generated sealed types and
+       wrappers, after its actions' lowerings are checked. *)
+    let prog = Protocol_decl.lower prog in
     (* GitHub issue #672: under --regions, the built-in definitions are
        planned from this first parse, then parsed before the program's own
        files, which are parsed again (Region_builtin.plan). *)
@@ -320,7 +323,7 @@ let () =
             Printf.eprintf "Error: %s\n" msg;
             exit 1
         in
-        defs @ fst (Protocol_decl.extract (List.concat_map snd again))
+        defs @ Protocol_decl.lower (List.concat_map snd again)
       end
     in
 
