@@ -15,12 +15,13 @@ from gdb_interrupt import interrupt_after  # noqa: E402
 
 def current_record(cpu):
     execution = gdb.parse_and_eval("execution_state")[cpu]
-    slot = int(execution["current_handle"]["pool_index"]["raw"])
+    # GitHub issue #745: a process handle's slot reference is a RegionHeld,
+    # and a RegionPool slot is the record itself.
+    slot = int(execution["current_handle"]["pool_index"]["address"])
     if not bool(execution["current_live"]) or slot == 0:
         return None
-    slot_type = gdb.lookup_type("struct IntrusiveSlot$ProcessRecord")
-    storage = gdb.Value(slot).cast(slot_type.pointer()).dereference()["storage"]
-    return storage.address.cast(gdb.lookup_type("struct ProcessRecord").pointer()).dereference()
+    record_type = gdb.lookup_type("struct ProcessRecord")
+    return gdb.Value(slot).cast(record_type.pointer()).dereference()
 
 
 class PeerExitBoundary(gdb.Breakpoint):
