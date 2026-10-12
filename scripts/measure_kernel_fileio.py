@@ -126,6 +126,27 @@ def http_fetch(url, path, timeout=120):
 
 
 def one_boot(args, root, boot, result):
+    """Boot once; retry when the runner's port guard refuses a port.
+
+    The previous boot's sockets linger in TIME_WAIT for about a minute and
+    the runner's guard counts them as in use, so back-to-back boots of the
+    same tree would otherwise fail at launch.
+    """
+    for attempt in range(args.port_retries + 1):
+        try:
+            return boot_and_measure(args, root, boot, result)
+        except PortBusy:
+            if attempt == args.port_retries:
+                raise
+            print("[fileio] a port is still in use; retrying in 70s", flush=True)
+            time.sleep(70)
+
+
+class PortBusy(RuntimeError):
+    pass
+
+
+def boot_and_measure(args, root, boot, result):
     env_dir = Path(args.artifacts) / f"boot-{boot}"
     env_dir.mkdir(parents=True, exist_ok=True)
     if args.target == "qemu":
@@ -146,6 +167,8 @@ def one_boot(args, root, boot, result):
             lambda text: LISTENER in text and has_prompt(text) or None,
             args.boot_seconds)
         if ready is None:
+            if b"is already in use" in bytes(session.transcript):
+                raise PortBusy("runner port guard refused a port")
             raise RuntimeError("shell did not come up: " +
                                bytes(session.transcript[-600:]).decode("ascii", "replace"))
         if args.target == "qemu":
@@ -155,6 +178,14 @@ def one_boot(args, root, boot, result):
             url = f"http://{os.environ.get('ETH_TEST_SUBNET', '192.168.20')}.2:8080/"
         # Warm the page cache-free paths once (ext2 lookups, exec of busybox).
         run_command(session, WORKLOADS[0][1], args.command_seconds)
+        # The first two fetches of a boot run 3-6x slower on RPi5 (0.6 s and
+        # 1.2 s against about 0.2 s, 2026-10-12, every tree alike), so they
+        # are warm-up, not samples.
+        for _ in range(2 if url else 0):
+            try:
+                http_fetch(url, "/bin/busybox.static")
+            except OSError:
+                pass
         for round_number in range(args.rounds):
             for name, command in WORKLOADS:
                 seconds = parse_real(run_command(session, command,
@@ -232,6 +263,7 @@ def main():
     parser.add_argument("--artifacts", default=None)
     parser.add_argument("--boot-seconds", type=int, default=1800)
     parser.add_argument("--command-seconds", type=int, default=600)
+    parser.add_argument("--port-retries", type=int, default=5)
     parser.add_argument("--compare", nargs="+", metavar="JSON")
     args = parser.parse_args()
     if args.compare:
