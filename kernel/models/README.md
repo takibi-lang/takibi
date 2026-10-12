@@ -520,11 +520,13 @@ not establish `NoOverlap` in the implementation.
 declaration (SPEC.md, "Protocol Declarations"). `make modelcheck` runs
 `takibi --emit-tla` on every `protocols/*.tkb` into `_build/models/generated/`
 and checks the output; nothing generated is tracked. The fixed declaration
-passes, and each `*_faulty.tkb` control differs from it in one line and
-violates `Safety`, reproducing the four handwritten fault verdicts above:
-`Early` drops `requires prepared`, `Foreign` resumes on the unbound `Foreign`
-outcome, `Timeout` adds a reclaiming `give_up` transition, `FailedReset` adds
-a `revive` out of `Down`. Generated actions are named after the declaration's
+passes, and `RegionTransferEarly_faulty.tkb`, which drops `requires
+prepared`, violates `Safety` as the handwritten `early` control does. The
+`foreign`, `timeout` and `failedreset` faults cannot be declared at all:
+the compiler rejects a witness without a request identifier and a
+transition out of a `device` state without a `completes` or `quiesces`
+witness, so those three are compiler rejection tests rather than models.
+Generated actions are named after the declaration's
 transitions and observations, so they have no action-table rows: the code
 they will map to is the sealed permission API generated from the same
 declaration, not yet built. Until then the handwritten table above remains

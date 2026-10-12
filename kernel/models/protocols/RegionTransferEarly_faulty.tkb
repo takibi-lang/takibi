@@ -14,9 +14,9 @@ protocol RegionTransferEarly[inst: usize] retains region(u8)[b, n] {
     observe completion(InFlight[req]) -> Matching[req] completes | Foreign;
     transition resume(InFlight[req], Matching[req]) -> Ready;
     transition expire(InFlight[req]) -> Unconfirmed[req];
-    observe reset(Unconfirmed[req]) -> Confirmed quiesces | ResetFailed;
-    transition halt(Unconfirmed[req], Confirmed) -> Halted;
-    transition down(Unconfirmed[req], ResetFailed) -> Down[req];
+    observe reset(Unconfirmed[req]) -> Confirmed[req] quiesces | ResetFailed[req];
+    transition halt(Unconfirmed[req], Confirmed[req]) -> Halted;
+    transition down(Unconfirmed[req], ResetFailed[req]) -> Down[req];
     transition restart(Halted) -> Ready;
 
     property disjoint;

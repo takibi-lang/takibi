@@ -199,6 +199,30 @@ let validate (d : protocol_decl) : t =
           | "requires" :: "prepared" :: rest when not pr -> parse sp true rest
           | m :: _ -> fail tloc "unsupported transition modifier '%s'" m in
         let split, prepared = parse false false mods in
+        (* Static rules (maintainer, 2026-10-11): evidence that ends device
+           access must name the request it is about, and the span leaves
+           device access only on such evidence. Leaving to any non-device
+           state is covered, not just to a CPU-access one: a detour through
+           a neutral state (Halted) would otherwise reach Ready unwitnessed. *)
+        Option.iter (fun w ->
+          let o = List.find (fun o -> o.o_name = w) outcomes in
+          if o.o_args = [] then
+            fail tloc "transition '%s' consumes witness '%s', which carries no \
+              request identifier" n w) witness;
+        if s.s_device then
+          List.iter (fun a ->
+            let target = find_state tloc a.a_target in
+            if not target.s_device then begin
+              let ends_access = match witness with
+                | None -> false
+                | Some w ->
+                    (List.find (fun o -> o.o_name = w) outcomes).o_effect
+                    <> `Plain in
+              if not ends_access then
+                fail tloc "transition '%s' leaves device state '%s' for '%s' \
+                  without a 'completes' or 'quiesces' witness" n s.s_name
+                  target.s_name
+            end) alts;
         if split && s.s_name <> init then
           fail tloc "transition '%s' splits the region, so its input must be \
             the initial state '%s'" n init;

@@ -24886,8 +24886,8 @@ let protocol_ok_body = {|
     observe completion(InFlight[req]) -> Matching[req] completes | Foreign;
     transition resume(InFlight[req], Matching[req]) -> Ready;
     transition expire(InFlight[req]) -> Unconfirmed[req];
-    observe reset(Unconfirmed[req]) -> Confirmed quiesces;
-    transition halt(Unconfirmed[req], Confirmed) -> Halted;
+    observe reset(Unconfirmed[req]) -> Confirmed[req] quiesces;
+    transition halt(Unconfirmed[req], Confirmed[req]) -> Halted;
     transition restart(Halted) -> Ready;
     property disjoint;
     property prepared_before_read;
@@ -24945,11 +24945,11 @@ let protocol_tests = [
     (protocol_mutant ~sub:"InFlight[req], Matching[req]"
        ~by:"InFlight[req], Done[req]" "which no observation produces");
   Alcotest.test_case "witness observed on another state" `Quick
-    (protocol_mutant ~sub:"halt(Unconfirmed[req], Confirmed)"
+    (protocol_mutant ~sub:"halt(Unconfirmed[req], Confirmed[req])"
        ~by:"halt(Unconfirmed[req], Matching[req])"
        "observed on state 'InFlight', not 'Unconfirmed'");
   Alcotest.test_case "outcome identity not bound by its subject" `Quick
-    (protocol_mutant ~sub:"Confirmed quiesces" ~by:"Confirmed[other] quiesces"
+    (protocol_mutant ~sub:"Confirmed[req] quiesces" ~by:"Confirmed[other] quiesces"
        "argument 'other' is not bound by the observed state");
   Alcotest.test_case "completion on a state the device cannot access" `Quick
     (protocol_mutant ~sub:"observe completion(InFlight[req])"
@@ -24974,6 +24974,31 @@ let protocol_tests = [
        "unsupported state attribute 'access'");
   Alcotest.test_case "missing model bound" `Quick
     (protocol_mutant ~sub:"model cells 2;" ~by:"" "needs a 'model cells N' bound");
+  (* The handwritten SharedRegionTransfer faults foreign, timeout and
+     failedreset, as the one-line declaration changes that used to be
+     model controls: each is now a compile error. *)
+  Alcotest.test_case "fault foreign: resume on an unbound outcome" `Quick
+    (protocol_mutant ~sub:"resume(InFlight[req], Matching[req])"
+       ~by:"resume(InFlight[req], Foreign)" "carries no request identifier");
+  Alcotest.test_case "fault timeout: reclaim without completion" `Quick
+    (protocol_mutant ~sub:"transition restart"
+       ~by:"transition give_up(InFlight[req]) -> Ready;\n    transition restart"
+       "leaves device state 'InFlight' for 'Ready' without a 'completes' or \
+        'quiesces' witness");
+  Alcotest.test_case "fault failed reset: restart from a failed state" `Quick
+    (protocol_mutant ~sub:"transition restart"
+       ~by:"state Down[req] device;\n    observe failure(Unconfirmed[req]) -> \
+            ResetFailed[req];\n    transition down(Unconfirmed[req], \
+            ResetFailed[req]) -> Down[req];\n    transition revive(Down[req]) \
+            -> Ready;\n    transition restart"
+       "leaves device state 'Down' for 'Ready'");
+  Alcotest.test_case "leaving device access through a neutral state" `Quick
+    (protocol_mutant ~sub:"transition halt(Unconfirmed[req], Confirmed[req]) -> Halted;"
+       ~by:"transition halt(Unconfirmed[req]) -> Halted;"
+       "leaves device state 'Unconfirmed' for 'Halted'");
+  Alcotest.test_case "plain outcome cannot end device access" `Quick
+    (protocol_mutant ~sub:"Matching[req] completes" ~by:"Matching[req]"
+       "leaves device state 'InFlight' for 'Ready'");
   Alcotest.test_case "missing initial state" `Quick
     (protocol_mutant ~sub:"init Ready;" ~by:"" "has no 'init' state");
 ]

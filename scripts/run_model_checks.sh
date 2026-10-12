@@ -28,6 +28,8 @@ mkdir -p "$OUT"
 # `takibi --emit-tla` writes them here, never into the source tree.
 GEN="$OUT/generated"
 mkdir -p "$GEN"
+# A declaration removed from the tree must not leave its old model behind.
+find "$GEN" -maxdepth 1 -type f -delete
 TAKIBI="${TAKIBI:-$REPO_ROOT/_build/default/bin/main.exe}"
 # The directory the next check_model call's .tla/.cfg files live in.
 MDIR="$MODELS"
@@ -131,7 +133,9 @@ check_model WorldStop NoUnstoppedRead 8 \
 
 # GitHub issue #720: RegionTransfer.tkb is the protocol declaration form of
 # SharedRegionTransfer above. Its generated model must reproduce the fixed
-# verdict, and each one-line fault control the matching faulty one.
+# verdict and the early-publication control the faulty one. The foreign,
+# timeout and failed-reset faults no longer compile (Protocol_decl's static
+# rules; test/test_takibi.ml, "protocol-declarations").
 for decl in "$MODELS"/protocols/*.tkb; do
     "$TAKIBI" "$decl" --emit-tla "$GEN" || {
         echo "FAIL modelcheck: takibi --emit-tla rejected $decl"
@@ -145,9 +149,6 @@ done
 MDIR="$GEN"
 check_model RegionTransfer Safety 6 generated:CInit:pass:ok
 check_model RegionTransferEarly Safety 6 generated:CInit:Safety:violated
-check_model RegionTransferForeign Safety 6 generated:CInit:Safety:violated
-check_model RegionTransferTimeout Safety 6 generated:CInit:Safety:violated
-check_model RegionTransferFailedReset Safety 6 generated:CInit:Safety:violated:8
 MDIR="$MODELS"
 
 # Run. A job's own exit status is not the verdict -- an unfixed variant is

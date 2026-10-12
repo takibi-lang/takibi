@@ -3814,8 +3814,8 @@ protocol RegionTransfer[inst: usize] retains region(u8)[b, n] {
     observe completion(InFlight[req]) -> Matching[req] completes | Foreign;
     transition resume(InFlight[req], Matching[req]) -> Ready;
     transition expire(InFlight[req]) -> Unconfirmed[req];
-    observe reset(Unconfirmed[req]) -> Confirmed quiesces | ResetFailed;
-    transition halt(Unconfirmed[req], Confirmed) -> Halted;
+    observe reset(Unconfirmed[req]) -> Confirmed[req] quiesces;
+    transition halt(Unconfirmed[req], Confirmed[req]) -> Halted;
     transition restart(Halted) -> Ready;
     property disjoint;
     property prepared_before_read;
@@ -3851,12 +3851,15 @@ position; `protocol` itself is the one contextual keyword.
 
 Rejected: unknown or duplicate states, outcomes, actions or labels; arity
 mismatches; unbound or shadowing identities; witnesses no observation of the
-input state produces; states unreachable from `init` (they would need an
+input state produces; a witness with no arguments (it carries no request
+identifier); a transition out of a `device` state to any non-device state
+without a `completes` or `quiesces` witness; states unreachable from `init` (they would need an
 outside constructor); unsupported attributes, modifiers, properties or bounds.
 The model's verdict is bounded evidence about the declaration, never a
 compiler assumption. `make modelcheck` generates the models of
 `kernel/models/protocols/*.tkb`; the fixed declaration must pass and each
-one-line fault control must violate `Safety`.
+one-line fault control must violate `Safety`. Faults the static rules
+above already reject are compiler tests instead of model controls.
 
 ## Function Pointers, extern fn, and Overloading
 

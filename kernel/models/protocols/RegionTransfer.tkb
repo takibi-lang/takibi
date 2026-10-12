@@ -1,8 +1,9 @@
 // GitHub issue #720: the shared region-transfer protocol as one Takibi
 // declaration. `takibi --emit-tla` generates its TLA+ model; `make
 // modelcheck` checks it beside the handwritten SharedRegionTransfer.tla
-// whose fixed verdict it must reproduce. The *_faulty.tkb siblings each
-// change one line and must violate Safety.
+// whose fixed verdict it must reproduce. RegionTransferEarly_faulty.tkb
+// changes one line and must violate Safety; the other handwritten faults are
+// compile errors here.
 protocol RegionTransfer[inst: usize] retains region(u8)[b, n] {
     state Ready access write;
     state Reserved[req] access write;
@@ -17,9 +18,9 @@ protocol RegionTransfer[inst: usize] retains region(u8)[b, n] {
     observe completion(InFlight[req]) -> Matching[req] completes | Foreign;
     transition resume(InFlight[req], Matching[req]) -> Ready;
     transition expire(InFlight[req]) -> Unconfirmed[req];
-    observe reset(Unconfirmed[req]) -> Confirmed quiesces | ResetFailed;
-    transition halt(Unconfirmed[req], Confirmed) -> Halted;
-    transition down(Unconfirmed[req], ResetFailed) -> Down[req];
+    observe reset(Unconfirmed[req]) -> Confirmed[req] quiesces | ResetFailed[req];
+    transition halt(Unconfirmed[req], Confirmed[req]) -> Halted;
+    transition down(Unconfirmed[req], ResetFailed[req]) -> Down[req];
     transition restart(Halted) -> Ready;
 
     property disjoint;
