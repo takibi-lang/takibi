@@ -136,14 +136,16 @@ Initialization does not prove CPU freshness across preemption.
      see docs/XHCI_SHARED_DMA_DESIGN.md. Done 2026-10-11: the `protocol`
      declaration is parsed, validated and emitted as TLA+ (SPEC.md,
      "Protocol Declarations"); RegionTransfer.tkb reproduces
-     SharedRegionTransfer's fixed and four faulty verdicts. Remaining
-     acceptance (all before closing): (1) generate the sealed linear owner
-     types, transitions as the only mint sites; (2) check each transition
-     body against the declaration and reject actions with no lowering;
-     (3) reject a device-to-CPU-access transition without a `completes` or
-     `quiesces` witness; (4) reject a witness carrying no request
-     identifier; (5) classify the eight hand-written models as expressible
-     or not (with the reason) and move each expressible one to generation.
+     SharedRegionTransfer's fixed and faulty verdicts. Done 2026-10-12:
+     sealed linear owners generated per state (generated code is the only
+     mint site), lowerings checked, and the two static rules (witness
+     identity; device exit only on a completes/quiesces witness).
+     Remaining before closing: (5) the eight hand-written models are
+     classified on the issue -- SharedRegionTransfer and FixedDmaOwnership
+     are expressible; moving them to generation needs their kernel
+     consumers on the generated types (xHCI after A's exclusive backing
+     storage; GEM/virtio fixed DMA), plus scoped region access from a
+     writable state.
      `requires` may collide with future function preconditions; revisit
      its spelling then. #625 (cache visibility across DMA
      ownership handoffs, bounded model). #740
