@@ -77,9 +77,11 @@ list (maintainer, 2026-10-09).
    IntrusivePool has left the kernel, and intrusive_pool.tkb and
    pool_lock.tkb have left the mint list (2026-10-12). freelist.tkb has
    left it too: checked indexing only (2026-10-12; #770 would let a while
-   condition bound its body and drop the local re-checks). **Next:** the
-   rest of stage 3's list on #637 (the S and R files: ext2, network, then
-   the splits) and the region layers on #672. Not on the critical path: #748 (allocator time, 2.75x
+   condition bound its body and drop the local re-checks). ext2.tkb has
+   left it as well: its scratch is per-CPU storage and every byte access a
+   checked (buffer, offset) position (2026-10-12; text +4 KiB, checking a
+   field's width once is #770). **Next:** the rest of stage 3's list on
+   #637 (the network files, then the S splits) and the region layers on #672. Not on the critical path: #748 (allocator time, 2.75x
    slower since the per-page places), #739 (stale list entries, per-file
    counts). Consolidating the kernel-driven built-ins into general features
    is #750 (holder-tied identities, option C, is its central item; a
