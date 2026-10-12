@@ -22,3 +22,7 @@ cheaper form (check a field's whole width once, then load without further
 checks) needs the compiler to carry that width check into the index proof;
 not built now. kernelcheck-qemu-main, kernelcheck-qemu-ash and
 kernelcheck-rpi5 passed.
+
+Boot boundary probe (b1472064), against 37a22de8: QEMU text +456 B, RPi5
+text +440 B; data, BSS and usable_ram_start unchanged. Kept: it is the
+regression guard for the interior-pointer bound.
