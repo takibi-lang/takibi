@@ -457,6 +457,9 @@ let to_cfg (_ : t) : string =
    - transition t(I[...], W[...]) generates P_t(P_I, P_W) that calls the
      user's `fn t(s: borrow P_I[...])` (or `-> P_t_Choice` when there is
      more than one result) and moves the region into the successor.
+   - every `access write` state S gets P_S_write(borrow P_S, i, value) and
+     P_S_read(borrow P_S, i), each `where k < n` for the index's identity k;
+     no other state has any access to its region.
    A declared transition or observation without its user function in the
    declaring file is rejected: an action with no lowering.
    The region's identity b is the protocol instance's identity; the
@@ -481,17 +484,45 @@ let source_of (d : protocol_decl) (p : t) : string =
   let buf = Buffer.create 4096 in
   let add fmt = Printf.ksprintf (fun s -> Buffer.add_string buf s;
                                   Buffer.add_char buf '\n') fmt in
-  let region = Printf.sprintf "region(%s)[%s, %s]" elem b n in
-  let base = [ b; b ^ "__off"; n ] in
+  (* A count naming a declared constant fixes the region's length: owners
+     keep their count index (the stored-owner rule needs all three), but
+     every generated signature instantiates it with the literal, so the
+     only owners that exist have that count and lowerings can prove indices
+     against it. Otherwise the count stays a static index throughout. *)
+  let fixed = Option.map string_of_int (Const_env.find n) in
+  let count = Option.value fixed ~default:n in
+  let field_region = Printf.sprintf "region(%s)[%s, %s]" elem b n in
+  let region = Printf.sprintf "region(%s)[%s, %s]" elem b count in
+  let base = [ b; b ^ "__off"; count ] in
+  let base_params = [ b ^ ": addr"; b ^ "__off: usize" ]
+                    @ (if fixed = None then [ n ^ ": usize" ] else []) in
+  let base_args = [ b; b ^ "__off" ] @ (if fixed = None then [ n ] else []) in
+  let struct_params = [ b ^ ": addr"; b ^ "__off: usize"; n ^ ": usize" ] in
   let state s = List.find (fun st -> st.s_name = s) p.states in
   let ty s args = Printf.sprintf "%s_%s[%s]" pn s (String.concat ", " (base @ args)) in
   let view w args = Printf.sprintf "%s_%s[%s]" pn w (String.concat ", " args) in
   List.iter (fun s ->
     add "linear struct %s_%s[%s] {" pn s.s_name
-      (String.concat ", " ([ b ^ ": addr"; b ^ "__off: usize"; n ^ ": usize" ]
+      (String.concat ", " (struct_params
                           @ List.map (fun x -> x ^ ": usize") s.s_params));
-    add "    private memory: %s;" region;
+    add "    private memory: %s;" field_region;
     add "}") p.states;
+  (* CPU access exists only for `access write` states: element reads and
+     writes through the retained region, the index proved below the count
+     at each call (`where`), with no escaping pointer. *)
+  List.iter (fun s ->
+    if s.s_write then begin
+      let owner = ty s.s_name s.s_params in
+      add "fn %s_%s_write(s: borrow %s, i: usize @ k, value: %s) where k < %s {"
+        pn s.s_name owner elem count;
+      add "    let element = region_at(s.memory, i);";
+      add "    *element = value;";
+      add "}";
+      add "fn %s_%s_read(s: borrow %s, i: usize @ k) -> %s where k < %s {"
+        pn s.s_name owner elem count;
+      add "    return *region_at(s.memory, i);";
+      add "}"
+    end) p.states;
   add "fn %s_init(memory: %s) -> %s {" pn region (ty p.init []);
   add "    let mut owner: %s = { memory };" (ty p.init []);
   add "    return owner;";
@@ -571,8 +602,7 @@ let source_of (d : protocol_decl) (p : t) : string =
       let label (a : proto_alt) = match a.pa_label with
         | Some l -> l | None -> a.pa_state.pr_name in
       let res_params = String.concat ", "
-        ([ b ^ ": addr"; b ^ "__off: usize"; n ^ ": usize" ]
-         @ List.map (fun x -> x ^ ": usize") in_args) in
+        (base_params @ List.map (fun x -> x ^ ": usize") in_args) in
       add "variant %s_%s_Choice {" pn name;
       List.iter (fun a -> add "    %s;" (label a)) alts;
       add "}";
@@ -585,7 +615,7 @@ let source_of (d : protocol_decl) (p : t) : string =
           body) alts;
       add "}";
       let result_ty = Printf.sprintf "%s_%s_Result[%s]" pn name
-        (String.concat ", " (base @ in_args)) in
+        (String.concat ", " (base_args @ in_args)) in
       add "fn %s_%s(%s) -> %s {" pn name params result_ty;
       if spend <> "" then add "    %s" spend;
       add "    match %s(s) {" name;
@@ -638,6 +668,10 @@ let check_lowering (prog : toplevel list) (d : protocol_decl) (p : t) =
         if not param_ok then
           fail f.def_loc "protocol '%s' action '%s' must take exactly \
             'borrow %s[...]' with %d static argument(s)" p.name n owner arity;
+        if f.where_clauses <> [] then
+          fail f.def_loc "protocol '%s' action '%s' cannot add 'where' \
+            constraints: the generated wrapper has no facts to discharge them; \
+            fix the region's count with a declared constant instead" p.name n;
         let ret_ok = match ret, f.ret_type with
           | None, (None | Some TypeVoid) -> true
           | Some want, Some (TypeNamed got) -> want = got

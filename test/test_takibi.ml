@@ -25182,6 +25182,53 @@ let sealed_protocol_tests = [
        "must return Ring_reserve_Choice");
 ]
 
+(* The same protocol with its count fixed by a declared constant: access
+   from writable states is generated and indices are proved against 8. *)
+let fixed_protocol =
+  let rec swap ~sub ~by s =
+    if contains_substring s sub then swap ~sub ~by (replace_once ~sub ~by s)
+    else s in
+  "const RING_BYTES: usize = 8;\n"
+  ^ (sealed_protocol
+     |> swap ~sub:"region(u8)[b, n]" ~by:"region(u8)[b, RING_BYTES]"
+     |> swap ~sub:"[b, o, n, r]" ~by:"[b, o, 8, r]"
+     |> swap ~sub:"[b, o, n]" ~by:"[b, o, 8]"
+     |> swap ~sub:"fn submit(s: borrow Ring_Reserved[b, o, 8, r]) {}"
+          ~by:"fn submit(s: borrow Ring_Reserved[b, o, 8, r]) { Ring_Reserved_write(s, 7, 1); }")
+
+let expect_fixed_error ~sub ~by fragment () =
+  match infer_sealed ~proto:(replace_once ~sub ~by fixed_protocol) () with
+  | _ -> Alcotest.failf "expected an error containing %S" fragment
+  | exception Types.TypeError (_, msg) ->
+      if not (contains_substring msg fragment)
+      then Alcotest.failf "TypeError %S does not contain %S" msg fragment
+  | exception Types.MultiTypeError errors ->
+      if not (List.exists (fun (_, msg) -> contains_substring msg fragment) errors)
+      then Alcotest.failf "no entry contains %S: %s" fragment
+          (String.concat " | " (List.map snd errors))
+
+let sealed_access_tests = [
+  Alcotest.test_case "state access: a writable state writes within its count" `Quick
+    (fun () -> ignore (infer_sealed ~proto:fixed_protocol ()));
+  Alcotest.test_case "state access: an index at the count" `Quick
+    (expect_fixed_error ~sub:"Ring_Reserved_write(s, 7, 1)"
+       ~by:"Ring_Reserved_write(s, 8, 1)" "requires 8 < 8, which is false");
+  Alcotest.test_case "state access: a device state has no access" `Quick
+    (expect_fixed_error ~sub:"fn resume(s: borrow Ring_InFlight[b, o, 8, r]) {}"
+       ~by:"fn resume(s: borrow Ring_InFlight[b, o, 8, r]) { let v = Ring_InFlight_read(s, 0); }"
+       "Undefined function: Ring_InFlight_read");
+  Alcotest.test_case "state access: a lowering cannot add where" `Quick
+    (expect_sealed_error ~in_proto:true
+       ~sub:"fn submit(s: borrow Ring_Reserved[b, o, n, r]) {}"
+       ~by:"fn submit(s: borrow Ring_Reserved[b, o, n, r]) where 0 < n { Ring_Reserved_write(s, 0, 1); }"
+       "cannot add 'where' constraints");
+  Alcotest.test_case "state access: an unfixed count proves nothing" `Quick
+    (expect_sealed_error ~in_proto:true
+       ~sub:"fn submit(s: borrow Ring_Reserved[b, o, n, r]) {}"
+       ~by:"fn submit(s: borrow Ring_Reserved[b, o, n, r]) { Ring_Reserved_write(s, 0, 1); }"
+       "requires 0 < n, which cannot be shown");
+]
+
 let named_groups_unisolated = [
   "readonly-literals", readonly_literal_tests;
   "private-default-construction", private_default_construction_tests;
@@ -25207,6 +25254,7 @@ let named_groups_unisolated = [
   "region-inspection", region_inspection_tests;
   "protocol-declarations", protocol_tests;
   "protocol-sealed-owners", sealed_protocol_tests;
+  "protocol-state-access", sealed_access_tests;
 ]
 
 (* Each Alcotest case represents a fresh compiler invocation. In particular,

@@ -4,4 +4,5 @@ submit
 timed out
 reset confirmed
 restart
+ring[0]: 2, ring[63]: 90
 ring: 64 bytes back

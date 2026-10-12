@@ -3861,6 +3861,14 @@ construct a state owner, read its region or mint a witness. For `protocol P
   code can reach it;
 - `P_init(memory: region(T)[b, n]) -> P_<init>[b, b__off, n]` and
   `P_release(P_<init>[...]) -> region(T)[b, n]` move the region in and out;
+- each `access write` state gets `P_S_write(s: borrow P_S[...], i: usize @
+  k, value: T) where k < n` and `P_S_read(s: borrow P_S[...], i: usize @ k)
+  -> T where k < n`; no other state has any function reaching its region,
+  and no pointer escapes. When the declared count names a constant
+  (`retains region(u8)[b, RING_BYTES]`), every generated signature uses
+  that literal count, so only owners of that length exist and indices are
+  proved against it; with a static count `n`, a caller must prove `k < n`
+  itself;
 - each outcome with arguments `W[a]` is a private linear view `P_W[a]`;
   `P_W_spend(w: sink P_W[a])` discards one;
 - `observe o(S[a]) -> ...` generates `variant P_o_Raw { W; ... }`, `variant
@@ -3876,12 +3884,14 @@ construct a state owner, read its region or mint a witness. For `protocol P
 
 Every transition and observation needs its user function -- its lowering --
 in the declaring file, taking exactly `borrow P_<input>[...]` with the
-state's static arity and returning the type above; a missing or misshaped
-one is rejected. That function is the reviewed side-effect or trusted
+state's static arity, returning the type above and adding no `where`
+constraint (the generic wrapper could not discharge it); a missing or
+misshaped one is rejected. That function is the reviewed side-effect or trusted
 observation boundary; it receives no access to the region. The region's
 identity `b` is the protocol instance's identity: the declaration's own
-static parameters take no part in the generated types yet, and scoped access
-to the region from a writable state is not generated yet.
+static parameters take no part in the generated types yet. Access covers
+the whole retained region in every writable state; the model's reserved
+span and `requires prepared` are not tracked by the types.
 `linux_user/protocol_ring` exercises the accepted shape.
 
 Rejected: unknown or duplicate states, outcomes, actions or labels; arity
