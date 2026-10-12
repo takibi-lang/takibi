@@ -1,10 +1,11 @@
 {
-  "date": "2026-10-11",
-  "event": "incremental",
-  "decision": "reuse",
-  "source_sha256": "ec044d89fd9ffe6799ecb27b7063e6b14219ba95b193d3143d0f19ff4a0194a5",
-  "workload": "#744 (#637 step B2): page metadata as regions borrowed with place_borrow, memory_map.tkb as the memory mint, and the unused-region-built-in removal (region_of meta arrays, internal linkage, globaldce). Linked kernels compared against origin/main with scripts/space_delta.py; allocator page counts from scripts/buildcheck_kernel_memory_map.py.",
+  "date": "2026-10-12",
+  "event": "milestone",
+  "decision": "measured",
+  "source_sha256": "8989f09060384760d6a00307752d67f142160ad7b86502b23ea2ba5f71b45a01",
+  "workload": "#720 slices 1-3: protocol declarations (parse, validate, --emit-tla), generated sealed state owners and witnesses, and state access functions, in the compiler only. Linked QEMU and RPi5 kernels compared against cf0bc567 (the commit before #720) with scripts/space_delta.py.",
   "evidence": [
+    "docs/PROTOCOL_DECL_SPACE_2026-10-12.md",
     "docs/WORLD_STOP_CLAIM_REVIEW_2026-10-11.md",
     "docs/PROCESS_PIN_SPACE_2026-10-10.md",
     "docs/BOUNDS_CONTRACT_SPACE_2026-10-10.md",
@@ -47,6 +48,6 @@
     "docs/VIRTIO_NET_TX_2026-10-10.md",
     "docs/VIRTIO_NET_TX_SPACE_2026-10-10.json"
   ],
-  "assessment": "Incremental review (#719 step 1, #753): only two kernel/ test and benchmark runners changed, to start QEMU through scripts/qemu.sh under the host-wide vCPU lease; no production .tkb, linker script or allocator source changed, so the linked images and the storage workload are those of the previous measured review, whose result stands: QEMU text 729912 -> 693464 B (-36448), RPi5 742752 -> 706440 B (-36312): unused region built-ins no longer reach the image. Data +24 B, BSS +48 B on QEMU, RPi5 BSS unchanged (page_meta_store's two places; bootstrap metadata moved out of the pool, same size). usable_ram_start drops 64 KiB on QEMU and 32 KiB on RPi5, so allocator pages rise by 8 to 16 across the checked layouts. PageMeta stays 24 B per page. A boot probe recording page_alloc/page_free cost adds a few hundred bytes of text. #749 adds compiler built-ins (places, slots) that the kernels do not use yet; with globaldce they add no kernel code. The audit's compiler changes (a --regions diagnostic and a call-key collision check) emit no code.",
-  "next_trigger": "#745 (process records on RegionPool) or #746 (per-page permissions) changes allocator or pool representation; either requires fresh measurement, as does another completed kernel feature or stage."
+  "assessment": "Identical linked images: QEMU text 693768 / data 5408 / BSS 1658480 B, RPi5 text 706728 / data 2889272 / BSS 1697360 B, unchanged; usable_ram_start unchanged (0x40240000 QEMU, 0x710000 RPi5); no data/BSS symbol changed size. No maintained kernel declares a protocol yet, so the feature costs no kernel space; its only consumer is the native linux_user/protocol_ring test. A generated owner holds one retained region and its witnesses erase, so a future kernel consumer pays what an existing region capsule pays. Earlier measured results (#744) stand.",
+  "next_trigger": "The first kernel consumer of a protocol declaration (#720 xHCI after #672/#637), #745 or #746 changing allocator or pool representation, or another completed kernel feature or stage."
 }
