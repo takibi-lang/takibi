@@ -404,11 +404,21 @@ item:
   | p = private_flag kw = IDENT LET MUT name = IDENT COLON ty = type_expr SEMI
     (* GitHub issue #203: `scratch let mut g: T;` -- per-call scratch
        storage, uninitialized at the entry of every function. *)
-    { if kw <> "scratch" then
-        raise (Types.TypeError ($startpos(kw), Printf.sprintf
-          "unexpected '%s' before 'let' (only 'scratch' may qualify a global)" kw));
-      Init_state.mark_scratch name;
+    (* GitHub issue #720: `region let mut g: [T; N];` -- a region backing
+       global, reached only through its claim (Region_backing). *)
+    { (match kw with
+       | "scratch" -> Init_state.mark_scratch name
+       | "region" -> Region_backing.mark name $startpos(name)
+       | _ -> raise (Types.TypeError ($startpos(kw), Printf.sprintf
+          "unexpected '%s' before 'let' (only 'scratch' or 'region' may qualify a global)" kw)));
       LetDef (name, Some ty, None, None, true, p, $symbolstartpos) }
+  | p = private_flag kw = IDENT LET MUT name = IDENT COLON ty = type_expr
+    ALIGN LPAREN a = alignment_value RPAREN SEMI
+    { if kw <> "region" then
+        raise (Types.TypeError ($startpos(kw), Printf.sprintf
+          "unexpected '%s' before 'let' (only 'region' may qualify an aligned global)" kw));
+      Region_backing.mark name $startpos(name);
+      LetDef (name, Some ty, None, Some a, true, p, $symbolstartpos) }
   | p = private_flag LET m = mut_flag IDENT let_rhs SEMI
     { LetDef ($4, fst $5, snd $5, None, m, p, $symbolstartpos) }
   | p = private_flag LET m = mut_flag IDENT COLON type_expr ALIGN LPAREN alignment_value RPAREN SEMI

@@ -35,6 +35,7 @@ let parse src =
   No_copy_registry.reset ();
   Per_cpu_registry.reset ();
   Init_state.reset ();
+  Region_backing.reset ();
   Guarded_registry.reset ();
   Io_struct_registry.reset ();
   Hashtbl.reset Generic_variant.proven_empty_puts;
@@ -74,6 +75,7 @@ let infer_files files =
   No_copy_registry.reset ();
   Per_cpu_registry.reset ();
   Init_state.reset ();
+  Region_backing.reset ();
   Guarded_registry.reset ();
   Io_struct_registry.reset ();
   Hashtbl.reset Generic_variant.proven_empty_puts;
@@ -2410,6 +2412,7 @@ let infer_region_files files =
   No_copy_registry.reset ();
   Per_cpu_registry.reset ();
   Init_state.reset ();
+  Region_backing.reset ();
   Guarded_registry.reset ();
   Io_struct_registry.reset ();
   Hashtbl.reset Generic_variant.proven_empty_puts;
@@ -2428,6 +2431,26 @@ let infer_region_files files =
           (Monomorphize.run (Dma_fixed_record.run (Publish_record.run prog)))))
 
 let infer_regions src = infer_region_files ["", src]
+
+(* GitHub issue #720: a region backing global has no use besides its
+   claim. Each case is the #720 probe or one way around it. *)
+let expect_backing_error fragment files () =
+  match infer_region_files files with
+  | _ -> Alcotest.failf "expected TypeError containing %S" fragment
+  | exception Types.TypeError (_, msg) ->
+      if not (contains_substring msg fragment)
+      then Alcotest.failf "TypeError %S does not contain %S" msg fragment
+
+let backing_probe use = Printf.sprintf {|
+private region let mut bytes: [u8; 64];
+fn probe() {
+    let RegionOf(u8)::Taken(memory) = region_of(bytes) else {
+        RegionOf(u8)::Gone => { return; }
+    };
+    %s
+    region_release(memory);
+}
+|} use
 
 (* A protocol capsule keeps the region's hidden offset as well as its
    identity and count. These are existing #131 stored-owner rules. *)
@@ -2448,7 +2471,7 @@ let retained_region_api = {|
 |}
 
 let retained_region_consumer body = {|
-  private let mut bytes720: [u8; 8];
+  private region let mut bytes720: [u8; 8];
   fn probe720() {
     let RegionOf(u8)::Taken(memory) = region_of(bytes720) else {
       RegionOf(u8)::Gone => { return; }
@@ -2561,8 +2584,8 @@ let stored_owner_use rest =
 
 let table_use body =
   "struct Node { key: usize; value: usize; }
-   let mut pool_a: [Node; 4];
-   let mut pool_b: [Node; 4];
+   region let mut pool_a: [Node; 4];
+   region let mut pool_b: [Node; 4];
    fn use_pools() {
      let RegionTableOf(Node)::Taken(a) = region_table_of(pool_a) else {
        RegionTableOf(Node)::Gone => { return; }
@@ -2582,7 +2605,7 @@ let table_use body =
 
 let region_use body =
   "struct Node { key: usize; value: usize; }
-   let mut arena: [Node; 64];
+   region let mut arena: [Node; 64];
    fn use_arena() {
      let RegionOf(Node)::Taken(nodes) = region_of(arena) else {
        RegionOf(Node)::Gone => { return; }
@@ -2891,7 +2914,7 @@ let region_inspection_tests =
       |}));
     Alcotest.test_case "region claim: generic expansion does not lower twice" `Quick
       (fun () -> ignore (infer_regions {|
-        let mut pages: [u8; 1024];
+        region let mut pages: [u8; 1024];
         let mut controller: u8;
         fn identity(T: type, pointer: *T) -> *T { return pointer; }
         fn probe() {
@@ -2904,7 +2927,7 @@ let region_inspection_tests =
       |}));
     Alcotest.test_case "region claim: generic expansion still rejects direct claim" `Quick
       (expect_region_error "reserved for the built-in region" {|
-        let mut pages: [u8; 1024];
+        region let mut pages: [u8; 1024];
         let mut controller: u8;
         fn identity(T: type, pointer: *T) -> *T { return pointer; }
         fn probe() {
@@ -3075,7 +3098,7 @@ let infer_tests = [
         struct Node { key: usize; }
         private let mut evs: [Ev; 4];
         private let mut copies: [Ev; 4];
-        private let mut nodes: [Node; 4];
+        private region let mut nodes: [Node; 4];
         fn write(i: {0..<4 as usize}) !{unsafe} {
           let w = publish_begin(&evs[i]);
           w.a = 1;
@@ -3588,6 +3611,53 @@ let infer_tests = [
       "region_at(first, 2).key = 7;
        region_release(region_merge(first, rest));")));
 
+  Alcotest.test_case "region backing: the claim alone is accepted" `Quick
+    (fun () -> ignore (infer_regions (backing_probe "")));
+  Alcotest.test_case "region backing: #720 probe, write after the claim" `Quick
+    (expect_backing_error "'bytes' is a region backing global"
+       ["", backing_probe "bytes[0] = 9;"]);
+  Alcotest.test_case "region backing: read, address and cast are refused" `Quick
+    (fun () ->
+      List.iter (fun use ->
+        expect_backing_error "'bytes' is a region backing global"
+          ["", backing_probe use] ())
+        [ "let x: u8 = bytes[1];";
+          "let p: *u8 = &bytes[0];";
+          "let q: usize = (bytes as *u8) as usize;";
+          "let bytes: usize = 0;" ]);
+  Alcotest.test_case "region backing: another file cannot touch the array" `Quick
+    (expect_backing_error "'bytes' is a region backing global"
+       [ "owner.tkb", backing_probe "";
+         "other.tkb", "fn poke() { unsafe { bytes[3] = 1; } }\n" ]);
+  Alcotest.test_case "region backing: no extern symbol of the same name" `Quick
+    (expect_backing_error "'bytes' is a region backing global"
+       [ "owner.tkb", backing_probe "";
+         "other.tkb", "extern symbol bytes;\n" ]);
+  Alcotest.test_case "region backing: region_of needs a marked global" `Quick
+    (expect_backing_error "region_of needs a region backing global"
+       ["", {|
+private let mut bytes: [u8; 64];
+fn probe() {
+    let RegionOf(u8)::Taken(memory) = region_of(bytes) else {
+        RegionOf(u8)::Gone => { return; }
+    };
+    region_release(memory);
+}
+|}]);
+  Alcotest.test_case "region backing: only an uninitialized array" `Quick
+    (expect_backing_error "must be `region let mut n: [T; N];`"
+       ["", "region let mut n: usize;\n"]);
+  Alcotest.test_case "region backing: an aligned array is accepted" `Quick
+    (fun () -> ignore (infer_regions {|
+private region let mut cells: [u8; 256] align(16);
+fn probe() {
+    let RegionOf(u8)::Taken(memory) = region_of(cells) else {
+        RegionOf(u8)::Gone => { return; }
+    };
+    region_release(memory);
+}
+|}));
+
   Alcotest.test_case "retained region: nonzero offset and Place round trip" `Quick
     (fun () -> ignore (infer_region_files ["capsule720.tkb", retained_region_api;
       "consumer720.tkb", retained_region_consumer {|
@@ -3626,8 +3696,8 @@ let infer_tests = [
   Alcotest.test_case "retained region: allocation identity survives extraction" `Quick
     (fun () ->
       let code = retained_region_api ^ {|
-        private let mut a720: [u8; 8];
-        private let mut b720: [u8; 8];
+        private region let mut a720: [u8; 8];
+        private region let mut b720: [u8; 8];
         fn same720(a: region(u8)[b, n], other: region(u8)[b, n]) {
           region_release(a); region_release(other);
         }
@@ -3794,8 +3864,8 @@ let infer_tests = [
     `Quick
     (expect_region_error "static value mismatch"
       "struct Node { key: usize; value: usize; }
-       let mut arena_a: [Node; 4];
-       let mut arena_b: [Node; 2];
+       region let mut arena_a: [Node; 4];
+       region let mut arena_b: [Node; 2];
        fn inside(whole: borrow region(Node)[a, n],
                  part: borrow region(Node)[a + k, 1]) {}
        fn mix() {
@@ -3818,13 +3888,13 @@ let infer_tests = [
   Alcotest.test_case "guarded table: a lock not given back" `Quick
     (expect_region_error "is never consumed"
       "struct Node { key: usize; value: usize; }
-       let mut shared: [Node; 4];
+       region let mut shared: [Node; 4];
        fn f() { let t = region_table_lock(shared); }");
 
   Alcotest.test_case "guarded table: used after its unlock" `Quick
     (expect_region_error "already consumed"
       "struct Node { key: usize; value: usize; }
-       let mut shared: [Node; 4];
+       region let mut shared: [Node; 4];
        fn f() {
          let t = region_table_lock(shared);
          region_table_unlock(t);
@@ -3838,8 +3908,8 @@ let infer_tests = [
     `Quick
     (expect_region_error "static value mismatch"
       "struct Node { key: usize; value: usize; }
-       let mut shared: [Node; 4];
-       let mut other: [Node; 4];
+       region let mut shared: [Node; 4];
+       region let mut other: [Node; 4];
        fn f() {
          let t = region_table_lock(shared);
          match region_alloc(t) {
@@ -3856,7 +3926,7 @@ let infer_tests = [
   Alcotest.test_case "guarded table: an array claimed once and locked" `Quick
     (expect_region_error "claimed once and also locked"
       "struct Node { key: usize; value: usize; }
-       let mut shared: [Node; 4];
+       region let mut shared: [Node; 4];
        fn f() {
          let t = region_table_lock(shared);
          region_table_unlock(t);
@@ -3942,7 +4012,7 @@ let infer_tests = [
     (expect_region_error "already consumed"
       "struct Node { key: usize; value: usize; }
        let mut pool: RegionPool(Node);
-       let mut pages: [u8; 1024];
+       region let mut pages: [u8; 1024];
        fn f() {
          let RegionOf(u8)::Taken(chunk) = region_of(pages) else {
            RegionOf(u8)::Gone => { return; }
@@ -10034,9 +10104,9 @@ fn f() -> *usize { return &temp_address_outer().r.a; }");
 linear struct Ext749[c: addr, c__off: usize, n: usize] {
     private nodes: places(Node749s)[c, n];
 }
-private let mut arena749s: [Node749s; 8];
-private let mut tag749s: [u8; 8];
-private let mut cell749s: [u8; 256] align(16);
+private region let mut arena749s: [Node749s; 8];
+private region let mut tag749s: [u8; 8];
+private region let mut cell749s: [u8; 256] align(16);
 fn inner(arr: borrow places(Node749s)[b, n], i: usize @ k) -> usize !{unsafe} {
     if (i < places_count(arr)) {
         match place_borrow(arr[i]) {
@@ -10088,9 +10158,9 @@ fn main749s() -> i32 !{unsafe} {
 linear struct Ext749[c: addr, c__off: usize, n: usize] {
     private nodes: places(Node749s)[c, n];
 }
-private let mut arena749s: [Node749s; 8];
-private let mut tag749s: [u8; 8];
-private let mut cell749s: [u8; 256] align(16);
+private region let mut arena749s: [Node749s; 8];
+private region let mut tag749s: [u8; 8];
+private region let mut cell749s: [u8; 256] align(16);
 fn inner(arr: borrow places(Node749s)[b, n], i: usize @ k) -> usize !{unsafe} {
     if (i < places_count(arr)) {
         match place_borrow(arr[i]) {
@@ -24872,7 +24942,7 @@ let runtime_bounds_tests =
     Alcotest.test_case "same-capacity pool cannot accept a stored foreign slot" `Quick
       (expect_region_error "static value mismatch" {|
         struct Meta { state: usize; }
-        let mut first_pool: [Meta; 2]; let mut second_pool: [Meta; 2];
+        region let mut first_pool: [Meta; 2]; region let mut second_pool: [Meta; 2];
         fn park(slot: sink RegionSlot(Meta)[b, k]) -> Place(RegionSlot(Meta)[b, k]) {
           return Place::Full(slot);
         }
@@ -24943,7 +25013,7 @@ let runtime_bounds_tests =
     }|});
     Alcotest.test_case "dynamic Region count proves borrowed access" `Quick (fun () ->
       ignore (infer_regions {|struct PageMeta { state: usize; }
-        let mut metadata: [PageMeta; 8];
+        region let mut metadata: [PageMeta; 8];
         fn read(r: borrow region(PageMeta)[b, n], index: usize) -> usize {
           if (index < region_count(r)) { return region_at(r, index).state; }
           return 0;
@@ -25341,7 +25411,7 @@ fn halt(s: borrow Ring_Unconfirmed[b, o, n, r]) {}
 fn restart(s: borrow Ring_Halted[b, o, n]) {}
 |}
 
-let sealed_consumer = {|private let mut bytes: [u8; 8];
+let sealed_consumer = {|private region let mut bytes: [u8; 8];
 fn main() -> i32 {
     let RegionOf(u8)::Taken(memory) = region_of(bytes) else {
         RegionOf(u8)::Gone => { return 1; }
@@ -25383,6 +25453,7 @@ let infer_sealed ?(proto = sealed_protocol) ?(use = sealed_consumer) () =
   No_copy_registry.reset ();
   Per_cpu_registry.reset ();
   Init_state.reset ();
+  Region_backing.reset ();
   Guarded_registry.reset ();
   Io_struct_registry.reset ();
   Hashtbl.reset Generic_variant.proven_empty_puts;

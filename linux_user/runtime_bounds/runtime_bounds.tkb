@@ -1,8 +1,8 @@
 // Executable evidence for shared order contracts, dynamic PageMeta extents,
 // correlated slices and an existing stored slot authority across calls.
-private let mut bounds_metadata: [BoundsPageMeta; 8];
+private region let mut bounds_metadata: [BoundsPageMeta; 8];
 private let mut bounds_values: [usize; 8];
-private let mut bounds_slots: [BoundsPageMeta; 2];
+private region let mut bounds_slots: [BoundsPageMeta; 2];
 private let mut bounds_split_point: usize = 3;
 
 fn bounds_test_metadata() -> usize {

@@ -395,13 +395,13 @@ must_use variant PageFrameTake[m: usize] {
 }
 
 // The bootstrap pages' tag bytes, claimed once by page_allocator_init.
-private let mut page_bootstrap_frame_tags: [u8; BOOTSTRAP_PAGE_COUNT];
+private region let mut page_bootstrap_frame_tags: [u8; BOOTSTRAP_PAGE_COUNT];
 
 private let mut page_meta_store: PageMetaStore;
 
 // The bootstrap pages' metadata, outside the pool so it can be claimed as a
 // region. align(16) for the same MMU-off store reason the pool has.
-private let mut page_bootstrap_meta: [PageMeta; BOOTSTRAP_PAGE_COUNT] align(16);
+private region let mut page_bootstrap_meta: [PageMeta; BOOTSTRAP_PAGE_COUNT] align(16);
 
 // Element `index` of the current metadata. An index past it would be an
 // allocator invariant break, so it stops.

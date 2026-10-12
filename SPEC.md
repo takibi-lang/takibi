@@ -3407,7 +3407,7 @@ element type used; their fields are private to them, so a program cannot
 make a region or read its address.
 
 ```
-private let mut arena: [Node; 64];
+private region let mut arena: [Node; 64];
 
 let RegionOf(Node)::Taken(nodes) = region_of(arena) else {   // region(Node)[b, 64]
     RegionOf(Node)::Gone => { return; }                       // claimed already
@@ -3424,7 +3424,16 @@ match region_split(rest, wanted) {                   // run-time split point
 }
 ```
 
-- `region_of(g)` is the one axiom: a global array `g: [T; N]` becomes
+- `region let mut g: [T; N];` (optionally `private`, optionally
+  `align(N)`, never initialized) declares g as a **region backing global**
+  (GitHub issue #720). Only such a global may be passed to `region_of`,
+  `region_table_of` or `region_table_lock`, and its name has no other use
+  in the whole program, in any file: no read, write, index, slice, `&`,
+  cast or global initializer mentions it, and no local or parameter takes
+  its name. The claimed region is then the only way to the storage, so it
+  is exclusive: `bytes[0] = 9` after `region_of(bytes)` is refused.
+  Requires `--regions`.
+- `region_of(g)` is the one axiom: a backing global `g: [T; N]` becomes
   `region(T)[b, N]`, once; a second claim (another call, or the same one run
   again) gets `Gone`.
 - `region_split_static(r, k)` requires `k <= n` and `region_at(r, i)`
@@ -3606,8 +3615,8 @@ This applies to nonzero-offset subregions too. Moving into the wrapper
 consumes the source and expires its derived references. Extracting the field
 consumes the wrapper, and the original identity, offset and count survive.
 Private fields keep extraction inside the wrapper's file. This is the
-existing linear field rule, not an exclusive backing-array declaration:
-legacy region_of still does not forbid direct access to its source array.
+existing linear field rule; what keeps the backing array itself out of
+reach is its `region let mut` declaration (above).
 
 **region_pool** is a table that grows: no fixed capacity. A pool is a
 global (`private let mut connections: RegionPool(Node);`), taken with

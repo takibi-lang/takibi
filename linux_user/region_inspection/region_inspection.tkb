@@ -3,7 +3,7 @@
 // holding or certify hardware IRQ behavior. It exercises the real built-in.
 struct Node { value: usize; words: [usize; 2]; }
 private let mut pool: RegionPool(Node);
-private let mut bytes: [u8; 1024];
+private region let mut bytes: [u8; 1024];
 private let mut controller: u8;
 
 fn expect_live(address: usize, generation: usize) -> bool {

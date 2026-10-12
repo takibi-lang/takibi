@@ -10,7 +10,7 @@ const NODE_COUNT: usize = 64;
 
 // The axiom: a declared array becomes one region of its own element type
 // and length, once.
-private let mut region_arena: [Node; NODE_COUNT];
+private region let mut region_arena: [Node; NODE_COUNT];
 
 // A count known only at run time.
 private let mut region_wanted: usize = 10;
@@ -56,7 +56,7 @@ fn test_region() {
 // slot's region out; giving it back stores it and returns a handle a program
 // may keep anywhere; taking by handle hands it out again, unless the slot was
 // freed since, which no stored handle can outlive.
-private let mut pool_arena: [Node; 4];
+private region let mut pool_arena: [Node; 4];
 
 fn test_table() {
     let RegionTableOf(Node)::Taken(pool) = region_table_of(pool_arena) else {
@@ -93,7 +93,7 @@ fn test_table() {
 // under one lock is the program's until it is given back, under any later
 // lock of the same array: the slot outlives the lock, the lock does not have
 // to be held while the element is used.
-private let mut shared_arena: [Node; 4];
+private region let mut shared_arena: [Node; 4];
 
 fn test_locked_table() {
     let pool = region_table_lock(shared_arena);
@@ -117,7 +117,7 @@ fn test_locked_table() {
 // here from an array standing in for the page allocator -- and gives a chunk
 // whose slots are all free back as a byte region.
 private let mut connections: RegionPool(Node);
-private let mut page_arena: [u8; 2048];
+private region let mut page_arena: [u8; 2048];
 
 // Observe the allocator's real headers under the same guard as its callers.
 fn print_pool_space(pool: borrow RegionPoolGuard(Node)[identity]) {
@@ -188,7 +188,7 @@ fn test_pool() {
 // is never freed while pinned; retiring it stops new pins, and whoever
 // drops the last pin receives the slot to free.
 private let mut shared_objects: RegionPool(Node);
-private let mut shared_pages: [u8; 1024];
+private region let mut shared_pages: [u8; 1024];
 
 fn test_pins() {
     let RegionOf(u8)::Taken(pages) = region_of(shared_pages) else {
@@ -468,7 +468,7 @@ private fn store_region_probe(pending: PendingRegionProbe[b, o, n])
     return Place::Full(pending);
 }
 
-private let mut retained_region_arena: [u8; 8];
+private region let mut retained_region_arena: [u8; 8];
 
 fn test_retained_region() {
     let RegionOf(u8)::Taken(memory) = region_of(retained_region_arena) else {

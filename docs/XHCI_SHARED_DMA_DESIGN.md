@@ -124,8 +124,8 @@ Territory A supplies the general memory substrate on its stored-authority
 and safe-memory routes. Territory B supplies the protocol model and its
 connection to types, then the driver consumer. The corrected three-index
 capsule and Place probes establish retention, field moves and reference
-expiry under existing rules. Exclusive backing-storage protection remains
-needed. Territory A's xHCI MMIO step now uses IoHandles and names the doorbell,
+expiry under existing rules. Exclusive backing storage is the
+`region let mut` declaration (#637). Territory A's xHCI MMIO step now uses IoHandles and names the doorbell,
 ERDP-release and halt/reset-observation boundaries; the DMA protocol must
 preserve these hooks. No DMA-specific storage exception is proposed.
 
@@ -180,12 +180,11 @@ Maintained compiler tests and linux_user/region_proto exercise:
 | access the hidden field from another source file | rejected by field privacy |
 | pass a restored region as another allocation's identity | rejected by static identity mismatch |
 
-After region_of(bytes) succeeds, bytes[0] = 9 still compiles at 022fd6cc.
-An additive general owned-storage declaration must seal every direct access
-and address/cast escape of its backing array. Legacy region_of's reviewed
-mint is not that boundary. Its existing callers must not be silently
-migrated by a blanket ban. This is the demonstrated remaining general memory
-gate for Territory A, independent of the working capsule/Place flow.
+After region_of(bytes) succeeded, bytes[0] = 9 still compiled at 022fd6cc.
+That gate is closed (#637, maintainer option 2): region_of and
+region_table_of accept only a `region let mut` backing global, whose name has
+no other use anywhere in the program (SPEC.md, built-in region). Every
+existing caller was migrated to the declaration.
 
 The intended general contract, in schematic notation, is:
 
@@ -283,8 +282,8 @@ integration is unnecessary for this scope.
 1. B defines the shared protocol representation and declaration diagnostics,
    coordinating with A's lockless-log consumer so there is one generator.
 2. B uses the existing three-index region capsule, checked field moves,
-   reference expiry and Place flow. A supplies an additive exclusive
-   backing-storage boundary; legacy region_of is not that boundary. Ask A
+   reference expiry and Place flow. A's exclusive backing-storage
+   boundary is the `region let mut` declaration. Ask A
    for more stored shapes only if a real consumer cannot use this one.
 3. B generates the retained-owner permission API and TLA+ from the same
    declaration, then exercises real protected accesses in positive and

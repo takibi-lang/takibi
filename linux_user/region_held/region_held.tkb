@@ -6,7 +6,7 @@
 // test/test_takibi.ml, "region_hold".
 struct Rec { value: usize; other: usize; }
 private let mut pool: RegionPool(Rec);
-private let mut bytes: [u8; 1024];
+private region let mut bytes: [u8; 1024];
 
 fn held_value(r: RegionHeld(Rec)) -> usize !{unsafe} {
     let guard = region_pool_lock(&pool);

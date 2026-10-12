@@ -26,7 +26,7 @@ fn read7() -> u32 { return regs7.status; }
 """,
     "region claim": """
 struct N7 { k: usize; }
-private let mut a7: [N7; 4];
+private region let mut a7: [N7; 4];
 fn claim7() {
     let RegionOf(N7)::Taken(r) = region_of(a7) else { RegionOf(N7)::Gone => { return; } };
     region_release(r);

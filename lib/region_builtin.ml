@@ -1512,7 +1512,7 @@ let region_bytes_used (prog : Ast.toplevel list) =
    without --regions can say so up front instead of failing on an
    undefined name or type. *)
 let mentions_builtins (prog : Ast.toplevel list) =
-  region_bytes_used prog || List.exists (fun item ->
+  Region_backing.any () || region_bytes_used prog || List.exists (fun item ->
     let text = Ast.show_toplevel item in
     let contains sub =
       let n = String.length text and m = String.length sub in
@@ -1790,6 +1790,7 @@ let parse_planned sources =
   List.concat_map parse_source sources
 
 let lower prog =
+  Region_backing.check prog;
   Monomorphize.region_arrays := global_arrays prog;
   Monomorphize.region_claims := [];
   Monomorphize.region_locks := [];

@@ -80,7 +80,7 @@ fn one_request(ready: Ring_Ready[b, o, 64]) -> Ring_Ready[b, o, 64] {
     }
 }
 
-private let mut ring_bytes: [u8; 64];
+private region let mut ring_bytes: [u8; 64];
 
 fn app_main() {
     let RegionOf(u8)::Taken(memory) = region_of(ring_bytes) else {

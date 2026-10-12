@@ -13,11 +13,11 @@ linear struct Extent[c: addr, c__off: usize, n: usize] {
     private pages: places(Page)[c, n];
 }
 
-private let mut low_pages: [Page; 4];
-private let mut low_tags: [u8; 4];
-private let mut high_pages: [Page; 3];
-private let mut high_tags: [u8; 3];
-private let mut extent_cells: [u8; 512] align(16);
+private region let mut low_pages: [Page; 4];
+private region let mut low_tags: [u8; 4];
+private region let mut high_pages: [Page; 3];
+private region let mut high_tags: [u8; 3];
+private region let mut extent_cells: [u8; 512] align(16);
 
 fn extent_new(p: sink places(Page)[c, n]) -> Extent[c, c__off, n] {
     let mut x: Extent[c, c__off, n] = { p };
@@ -178,13 +178,18 @@ fn frame_write(o: borrow FrameOwner[page], value: u8) !{unsafe} {
 }
 
 fn test_put_back() !{unsafe} {
-    let RegionOf(Frame)::Taken(r) = region_of(frames) else {
-        RegionOf(Frame)::Gone => { return; }
+    // This phase forges permissions over the array on purpose, so the
+    // array is not a region backing global (whose name has no use besides
+    // its claim, #720): the array and the forgeries both come from the
+    // trusted region_bytes_assume mint, as page runs do in the kernel.
+    let RegionBytes::Assumed(whole) = region_bytes_assume((&frames) as usize, 4 * 64) else {};
+    let RegionTyped(Frame)::Typed(r) = region_bytes_typed__Frame(whole) else {
+        RegionTyped(Frame)::Misaligned(back) => { region_release(back); return; }
     };
-    let RegionOf(u8)::Taken(t) = region_of(frame_tags) else {
-        RegionOf(u8)::Gone => { region_release(r); return; }
+    let RegionBytes::Assumed(t) = region_bytes_assume((&frame_tags) as usize, 4) else {};
+    let PlacesFrom(Frame)::Made(arr) = places_from_bytes(r, t) else {
+        PlacesFrom(Frame)::TooFew(back) => { region_release(back); return; }
     };
-    let arr = places_from(r, t);
     // A run of two out; an overlapping run is Out while it is held.
     match places_take_run(arr, 1, 2) {
         PlaceRun(Frame)::Out => { uart_puts("run: out\n"); }
