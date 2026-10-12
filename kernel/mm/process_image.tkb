@@ -1,6 +1,5 @@
 use "kernel/mm/page.tkb";
 use "kernel/lib/execution_model.tkb";
-use "kernel/lib/intrusive_pool.tkb";
 use "kernel/kernel/process.tkb";
 use "kernel/mm/address_space.tkb";
 use "kernel/fs/elf64.tkb";

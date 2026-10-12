@@ -8,7 +8,7 @@
 // decrement independently) was the motivating, and only, kernel caller.
 //
 // GitHub issue #391 moved that caller: an open file description is a
-// kernel/lib/intrusive_pool.tkb allocation now, carrying its own `refs`
+// linux_user/intrusive_pool/intrusive_pool_lib.tkb allocation now, carrying its own `refs`
 // field the way Linux's struct file carries f_count, so the shared object
 // pool has no capacity constant left to be exhausted at. What this file
 // provides that IntrusivePool does not -- a container that knows about

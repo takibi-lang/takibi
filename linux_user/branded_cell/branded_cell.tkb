@@ -1,6 +1,6 @@
 // A Cell allocated in a different pool preserves the connection pool's brand.
 // The verdict is ownership transfer and payload content, independent of timing.
-use "kernel/lib/intrusive_pool.tkb";
+use "linux_user/intrusive_pool/intrusive_pool_lib.tkb";
 
 struct Connection { value: usize; }
 private let mut connections: IntrusivePool(Connection);

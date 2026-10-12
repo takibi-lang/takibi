@@ -266,7 +266,7 @@ fn freelist_core_unlink_range(core: &mut FreelistCore(N), first: usize,
     }
     // Bounded, not trusting termination: a corrupted `next_free` can make
     // this list cyclic, and an unbounded walk over one hangs the kernel
-    // with no diagnosis. kernel/lib/intrusive_pool.tkb bounds every chain
+    // with no diagnosis. linux_user/intrusive_pool/intrusive_pool_lib.tkb bounds every chain
     // walk it does for the same reason (issue #355's invariant probe says
     // so explicitly); this one was written without that and should not
     // have been. N steps is a full traversal of the longest possible

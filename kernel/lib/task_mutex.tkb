@@ -64,7 +64,7 @@ fn task_mutex_init(m: *TaskMutex @ id) {
 // the call path, so the rule this file's header states is now checked
 // rather than asserted -- which is what GitHub issue #449 owed it.
 //
-// kernel/lib/intrusive_pool.tkb had already worked out that this is what
+// linux_user/intrusive_pool/intrusive_pool_lib.tkb had already worked out that this is what
 // the annotation would do, and declined it there because a pool lock IS
 // safe from a handler. This is the case it declined it FOR.
 fn task_mutex_acquire(m: *TaskMutex @ id)

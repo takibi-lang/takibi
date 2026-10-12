@@ -396,14 +396,12 @@ KERNEL_UNUSED_CHECKED := \
 	kernel/kernel/syscall_test_evidence.tkb \
 	kernel/kernel/syscall_test_lifecycle.tkb \
 	kernel/kernel/syscall_unimplemented.tkb \
-	kernel/kernel/tag_contention_evidence.tkb \
 	kernel/kernel/tcp_connection_contention_evidence.tkb \
 	kernel/kernel/workload_evidence.tkb \
 	kernel/lib/peer_tick_window.tkb \
 	kernel/lib/byte_slice.tkb \
 	kernel/lib/diagnostic_ring.tkb \
 	kernel/lib/init_once.tkb \
-	kernel/lib/intrusive_pool.tkb \
 	kernel/lib/locked_cell.tkb \
 	kernel/lib/mutex.tkb \
 	kernel/lib/occupancy.tkb \
@@ -656,20 +654,20 @@ $(LINUX_USER_DIR)/growable_pool/growable_pool_exe.o: kernel/lib/freelist.tkb ker
 # static-footprint comparison (it `use`s growable_pool_lib.tkb too, purely
 # to take sizeof of a GrowablePool holding the same object count) a
 # like-for-like one.
-# kernel/lib/intrusive_pool.tkb names no provider (issue #364), so the
+# linux_user/intrusive_pool/intrusive_pool_lib.tkb names no provider (issue #364), so the
 # is supplied here and must precede it.
 $(LINUX_USER_DIR)/growable_pool/growable_pool_exe.o: LINUX_USER_EXTRA_SRCS := $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb
 $(LINUX_USER_DIR)/growable_pool/growable_pool_exe.o: $(LINUX_USER_DIR)/growable_pool/growable_pool_lib.tkb kernel/lib/freelist.tkb $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb
 $(LINUX_USER_DIR)/intrusive_pool/intrusive_pool_exe.o: LINUX_USER_EXTRA_SRCS := $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb kernel/lib/spinlock.tkb kernel/lib/mutex.tkb $(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb
 $(LINUX_USER_DIR)/pool_container/pool_container_exe.o: LINUX_USER_EXTRA_SRCS := $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb kernel/lib/spinlock.tkb kernel/lib/mutex.tkb $(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb
-$(LINUX_USER_DIR)/pool_container/pool_container_exe.o: kernel/lib/intrusive_pool.tkb kernel/lib/freelist.tkb kernel/lib/slotmap.tkb $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb kernel/lib/spinlock.tkb kernel/lib/mutex.tkb $(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb
+$(LINUX_USER_DIR)/pool_container/pool_container_exe.o: linux_user/intrusive_pool/intrusive_pool_lib.tkb kernel/lib/freelist.tkb kernel/lib/slotmap.tkb $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb kernel/lib/spinlock.tkb kernel/lib/mutex.tkb $(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb
 $(LINUX_USER_DIR)/branded_cell/branded_cell_exe.o: LINUX_USER_EXTRA_SRCS := $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb kernel/lib/spinlock.tkb kernel/lib/mutex.tkb $(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb
-$(LINUX_USER_DIR)/branded_cell/branded_cell_exe.o: kernel/lib/intrusive_pool.tkb kernel/lib/freelist.tkb kernel/lib/slotmap.tkb $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb kernel/lib/spinlock.tkb kernel/lib/mutex.tkb $(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb
+$(LINUX_USER_DIR)/branded_cell/branded_cell_exe.o: linux_user/intrusive_pool/intrusive_pool_lib.tkb kernel/lib/freelist.tkb kernel/lib/slotmap.tkb $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb kernel/lib/spinlock.tkb kernel/lib/mutex.tkb $(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb
 $(LINUX_USER_DIR)/tcp_pool_shape/tcp_pool_shape_exe.o: LINUX_USER_EXTRA_SRCS := $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb kernel/lib/spinlock.tkb kernel/lib/mutex.tkb $(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb
-$(LINUX_USER_DIR)/tcp_pool_shape/tcp_pool_shape_exe.o: kernel/lib/intrusive_pool.tkb kernel/lib/freelist.tkb kernel/lib/slotmap.tkb $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb kernel/lib/spinlock.tkb kernel/lib/mutex.tkb $(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb
+$(LINUX_USER_DIR)/tcp_pool_shape/tcp_pool_shape_exe.o: linux_user/intrusive_pool/intrusive_pool_lib.tkb kernel/lib/freelist.tkb kernel/lib/slotmap.tkb $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb kernel/lib/spinlock.tkb kernel/lib/mutex.tkb $(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb
 $(LINUX_USER_DIR)/intrusive_pool_portable/intrusive_pool_portable_exe.o: LINUX_USER_EXTRA_SRCS := $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb kernel/lib/spinlock.tkb kernel/lib/mutex.tkb $(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb
-$(LINUX_USER_DIR)/intrusive_pool_portable/intrusive_pool_portable_exe.o: kernel/lib/freelist.tkb kernel/lib/slotmap.tkb kernel/lib/intrusive_pool.tkb $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb
-$(LINUX_USER_DIR)/intrusive_pool/intrusive_pool_exe.o: $(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb kernel/lib/freelist.tkb kernel/lib/slotmap.tkb kernel/lib/intrusive_pool.tkb $(LINUX_USER_DIR)/growable_pool/growable_pool_lib.tkb $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb
+$(LINUX_USER_DIR)/intrusive_pool_portable/intrusive_pool_portable_exe.o: kernel/lib/freelist.tkb kernel/lib/slotmap.tkb linux_user/intrusive_pool/intrusive_pool_lib.tkb $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb
+$(LINUX_USER_DIR)/intrusive_pool/intrusive_pool_exe.o: $(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb kernel/lib/freelist.tkb kernel/lib/slotmap.tkb linux_user/intrusive_pool/intrusive_pool_lib.tkb $(LINUX_USER_DIR)/growable_pool/growable_pool_lib.tkb $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb
 # GitHub issue #363: the contiguous-run allocator lives in the same fake
 # provider both pool prototypes draw from, so this exerciser shares it
 # rather than copying -- and a change there is meant to be seen by all
@@ -719,7 +717,7 @@ _build/pool_space_replay_regions.tkb: scripts/generate_pool_space_replay.py kern
 $(LINUX_USER_DIR)/pool_space_replay/pool_space_replay_exe.o: _build/pool_space_replay_regions.tkb
 $(LINUX_USER_DIR)/pool_space_replay/pool_space_replay_exe.o: LINUX_USER_EXTRA_FLAGS := --regions
 $(LINUX_USER_DIR)/pool_space_replay/pool_space_replay_exe.o: LINUX_USER_EXTRA_SRCS := $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb kernel/lib/spinlock.tkb kernel/lib/mutex.tkb $(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb
-$(LINUX_USER_DIR)/pool_space_replay/pool_space_replay_exe.o: $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb kernel/lib/spinlock.tkb kernel/lib/mutex.tkb $(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb kernel/lib/intrusive_pool.tkb kernel/lib/freelist.tkb kernel/lib/slotmap.tkb
+$(LINUX_USER_DIR)/pool_space_replay/pool_space_replay_exe.o: $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb kernel/lib/spinlock.tkb kernel/lib/mutex.tkb $(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb linux_user/intrusive_pool/intrusive_pool_lib.tkb kernel/lib/freelist.tkb kernel/lib/slotmap.tkb
 
 $(LINUX_USER_DIR)/%_exe.o: $(LINUX_USER_DIR)/%.tkb $(COMMON_LINUX_UART) $(COMMON_LINUX_PRINT) $(COMMON_LINUX_PRINT_BASE) $(TAKIBI)
 	$(TAKIBI) $(COMMON_LINUX_UART) $(COMMON_LINUX_PRINT) $(LINUX_USER_EXTRA_SRCS) $< --target $(LINUX_AMD64_TARGET) -o $@ --forbid-trap $(LINUX_USER_EXTRA_FLAGS) $(LINUX_UNUSED_CHECK) --check-unused-file $<

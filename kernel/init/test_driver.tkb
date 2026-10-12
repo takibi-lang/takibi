@@ -20,7 +20,6 @@ use "kernel/mm/process_image.tkb";
 // rather than a silent fallback.
 use "kernel/mm/page.tkb";
 use "kernel/lib/pool_lock.tkb";
-use "kernel/lib/intrusive_pool.tkb";
 use "kernel/arch/arm64/mm/asid.tkb";
 use "kernel/printk/log.tkb";
 use "kernel/fs/ext2/ext2.tkb";
@@ -604,7 +603,7 @@ fn kernel_init_boot_fixture_poll(current_authority: borrow ProcessCurrent[curren
     //
     // Printed only when it happens, because zero is the whole claim, and
     // counted rather than refused while the number is being learned --
-    // kernel/lib/intrusive_pool.tkb's boot probe is what proves the counter
+    // linux_user/intrusive_pool/intrusive_pool_lib.tkb's boot probe is what proves the counter
     // is not vacuous.
     let recycled_handle_total: usize =
         scheduled_process_recycled_handle_count() +
@@ -1189,11 +1188,6 @@ fn kernel_test_common_probes() !{unsafe} {
         kernel_boot_log("page runs: failed\n");
     }
     page_allocator_timing_probe();
-    if (intrusive_pool_boot_probe()) {
-        kernel_boot_log("intrusive pool: real page per chunk, payload through a real mapping, recycled-slot handle refused, invariants clean, pages returned ok\n");
-    } else {
-        kernel_boot_log("intrusive pool: failed\n");
-    }
     // GitHub issue #270: this probe fabricates a synthetic image in ROOT 0
     // and tears it down again, including root 0's stack-top PTE and its
     // demand-stack metadata. That was harmless while root 0 was PID 1's

@@ -71,7 +71,7 @@ fallback payload records. Checked lookups return their closed failure cases.
 
 ### Process/scheduler core (`kernel/kernel/process.tkb`)
 
-`scheduled_process_pool` (`IntrusivePool(ProcessRecord)`, private) and the
+`scheduled_process_pool` (`RegionPool(ProcessRecord)`, private; records Held for their process's life) and the
 static `scheduled_process_boot_record` beside it, and
 `execution_state: [ExecutionState; KERNEL_MAX_CORES]` -- the four
 former `execution_*` scalars (`current_handle`, `current_live`,

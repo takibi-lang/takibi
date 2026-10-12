@@ -183,20 +183,20 @@ const SCHEDULER_WORLD_STOP_SPINS: usize = 10000000;
 // process from a recycled slot, which was always the generation's job.
 // The name is kept because it is what a hundred call sites spell.
 linear struct ScheduledProcessOwner[process: usize] {
-    private pool_index: IntrusiveSlotAddress;
+    private pool_index: RegionHeld(ProcessRecord);
     private generation: usize @ process;
 }
 
 linear struct ScheduledProcessState[process: usize, state: ProcessState] {
-    private pool_index: IntrusiveSlotAddress;
+    private pool_index: RegionHeld(ProcessRecord);
 }
 
 struct ProcessHandle {
-    private pool_index: IntrusiveSlotAddress;
+    private pool_index: RegionHeld(ProcessRecord);
     private generation: usize;
 }
 
-private fn process_handle_new(slot: IntrusiveSlotAddress, generation: usize)
+private fn process_handle_new(slot: RegionHeld(ProcessRecord), generation: usize)
         -> ProcessHandle {
     let mut handle: ProcessHandle = { slot, generation };
     return handle;
@@ -206,12 +206,12 @@ private fn process_handle_new(slot: IntrusiveSlotAddress, generation: usize)
 // is the pool's none address.
 // The slot's numeric identity, for the scheduler tables keyed by it. There
 // is no way back: a word becomes a handle again only through the pool.
-private inline fn process_slot_word(slot: IntrusiveSlotAddress) -> usize {
-    return intrusive_slot_address_identity(slot);
+private inline fn process_slot_word(slot: RegionHeld(ProcessRecord)) -> usize {
+    return region_held_address(slot);
 }
 
-private inline fn process_slot_is_boot(slot: IntrusiveSlotAddress) -> bool {
-    return intrusive_slot_address_equal(slot, intrusive_slot_address_none());
+private inline fn process_slot_is_boot(slot: RegionHeld(ProcessRecord)) -> bool {
+    return region_held_equal(slot, region_held_none__ProcessRecord());
 }
 
 // GitHub issue #629: the standard Linux signals 1..31 each have an action.
@@ -434,7 +434,134 @@ struct ProcessRecord {
 // (index, generation) against the current occupant. Every owner this file
 // hands out is minted after that check and discharged before the
 // operation returns.
-private let mut scheduled_process_pool: IntrusivePool(ProcessRecord);
+private let mut scheduled_process_pool: RegionPool(ProcessRecord);
+
+// GitHub issue #745: the record pool is the built-in RegionPool. A record's
+// permission is Held for the process's life (region_hold at allocation,
+// region_take_held at reap), so the slot's own state word is its place and
+// holding costs nothing per record. Eight 1840-byte slots to a 16 KiB
+// chunk. The pool is never shrunk: the scheduler and the stopped-machine
+// reporters walk it with no lock (region_pool_first_unproven), which
+// TRUSTED_BASE.md records.
+const PROCESS_POOL_CHUNK_PAGES: usize = 4;
+
+// Lookups that named a slot now Held under a later generation (GitHub
+// issue #492's recycled-handle count, kept by this file since the pool
+// moved to RegionPool). Counted under the pool lock.
+private let mut scheduled_process_recycled_reads: usize = 0;
+
+private fn process_pool_lock()
+        -> RegionPoolGuard(ProcessRecord)[&scheduled_process_pool] !{unsafe} {
+    let flags: usize = mutex_irq_save();
+    return region_pool_lock_saving(&scheduled_process_pool, flags);
+}
+
+private fn process_pool_unlock(
+        guard: sink RegionPoolGuard(ProcessRecord)[&scheduled_process_pool]) {
+    mutex_irq_restore(region_pool_unlock_saved(guard));
+}
+
+// The Held record at a slot address now, or none.
+private fn process_pool_held_at(slot: usize) -> RegionHeld(ProcessRecord) !{unsafe} {
+    let guard = process_pool_lock();
+    let mut held: RegionHeld(ProcessRecord) = region_held_at(guard, slot);
+    process_pool_unlock(guard);
+    return held;
+}
+
+// Whether a reference still names the record it was made for. A slot now
+// Held by a later occupant is counted as a recycled read.
+private fn process_pool_matches(held: RegionHeld(ProcessRecord)) -> bool !{unsafe} {
+    let guard = process_pool_lock();
+    let mut now: RegionHeld(ProcessRecord) = region_held_at(guard, region_held_address(held));
+    let same: bool = region_held_equal(now, held);
+    if (same == false && region_held_address(now) != 0) {
+        scheduled_process_recycled_reads = scheduled_process_recycled_reads + 1;
+    }
+    process_pool_unlock(guard);
+    return same;
+}
+
+// Whether `slot` is any slot of the pool (Held or not): tells a freed slot
+// from an invented address.
+private fn process_pool_holds_slot(slot: usize) -> bool !{unsafe} {
+    let guard = process_pool_lock();
+    let holds: bool = region_pool_holds_slot(guard, slot);
+    process_pool_unlock(guard);
+    return holds;
+}
+
+// One more chunk for the pool, from the page allocator.
+private fn process_pool_grow(
+        guard: borrow RegionPoolGuard(ProcessRecord)[&scheduled_process_pool]) -> bool !{unsafe} {
+    match page_alloc_contiguous(PROCESS_POOL_CHUNK_PAGES, PageOwnerTag::PoolChunk) {
+        PageRunAllocResult::OutOfMemory => { return false; }
+        PageRunAllocResult::Allocated(run_owner) => {
+            let base: usize = page_run_physical_address(run_owner);
+            let RegionBytes::Assumed(chunk) = page_run_into_region(run_owner) else {};
+            match region_pool_grow(guard, chunk) {
+                RegionGrow(ProcessRecord)::Grown => { return true; }
+                RegionGrow(ProcessRecord)::TooSmall(back) => {
+                    region_release(back);
+                    page_run_transferred_release_physical(base, PROCESS_POOL_CHUNK_PAGES);
+                    return false;
+                }
+            }
+        }
+    }
+}
+
+// A zeroed record, Held for the life of the process it will be (#745).
+// Zeroed before it is Held, so a walk that finds it sees ProcessSlotState
+// Free (tag zero) until the caller constructs it.
+must_use variant ProcessPoolAlloc {
+    OutOfMemory;
+    Held(RegionHeld(ProcessRecord));
+}
+
+private fn process_pool_alloc_held() -> ProcessPoolAlloc !{unsafe} {
+    let guard = process_pool_lock();
+    let mut grown: bool = true;
+    if (region_pool_space_full(guard)) { grown = process_pool_grow(guard); }
+    if (grown == false) {
+        process_pool_unlock(guard);
+        return ProcessPoolAlloc::OutOfMemory;
+    }
+    match region_alloc(guard) {
+        RegionPoolAlloc(ProcessRecord)::Allocated(slot) => {
+            region_slot_zero(slot);
+            let mut held: RegionHeld(ProcessRecord) = region_hold(guard, slot);
+            process_pool_unlock(guard);
+            return ProcessPoolAlloc::Held(held);
+        }
+        RegionPoolAlloc(ProcessRecord)::Exhausted => {
+            process_pool_unlock(guard);
+            return ProcessPoolAlloc::OutOfMemory;
+        }
+        RegionPoolAlloc(ProcessRecord)::Full => {
+            process_pool_unlock(guard);
+            return ProcessPoolAlloc::OutOfMemory;
+        }
+    }
+}
+
+// Whether every slot is in use, so an allocation needs another chunk.
+private fn region_pool_space_full(
+        guard: borrow RegionPoolGuard(ProcessRecord)[&scheduled_process_pool]) -> bool !{unsafe} {
+    let (chunks, capacity, nonfree, bytes) = region_pool_space_stats(guard);
+    return nonfree >= capacity;
+}
+
+// The pool walked with no lock (#745, W2): the first slot address, or the
+// one after `slot`; 0 at the end. Every slot is validated again under the
+// lock before a record is read.
+private fn process_pool_first_slot() -> usize !{unsafe} {
+    return region_pool_first_unproven(&scheduled_process_pool);
+}
+
+private fn process_pool_next_slot(slot: usize) -> usize !{unsafe} {
+    return region_pool_next_unproven(&scheduled_process_pool, slot);
+}
 private let mut scheduled_process_pool_ready: bool = false;
 
 // The bootstrap process's record, and the reason slot value 0 still means
@@ -729,7 +856,6 @@ private fn scheduled_process_pool_init() {
     // .bss, and initialising it HERE would have put it behind a `ready`
     // flag that is itself an unlocked read-modify-write. See
     // kernel/lib/mutex.tkb.
-    intrusive_pool_init(&scheduled_process_pool);
 }
 
 // A run guard keeps a record allocated: reap removes it under the same
@@ -749,8 +875,11 @@ fn scheduled_process_record_locked(guard: borrow ProcessRunGuard[lock],
         }
         return &scheduled_process_record_absent;
     }
-    match intrusive_pool_probe_slot(&scheduled_process_pool, slot) {
-        IntrusiveSlotProbe::NoPayload => {
+    let pool_guard = process_pool_lock();
+    let mut held: RegionHeld(ProcessRecord) = region_held_at(pool_guard, slot);
+    match region_probe_held(pool_guard, held) {
+        RegionHeldProbe(ProcessRecord)::Stale => {
+            process_pool_unlock(pool_guard);
             // GitHub issue #569: two different answers wore one counter,
             // and only one of them is a defect.
             //
@@ -775,7 +904,7 @@ fn scheduled_process_record_locked(guard: borrow ProcessRunGuard[lock],
             // REUSED is not either of these -- the lookup succeeds and the
             // generation check catches it, on `process invariant: STALE
             // HANDLE READS` and `RECYCLED HANDLE READS`.
-            if (intrusive_pool_slot_is_valid(&scheduled_process_pool, slot)) {
+            if (process_pool_holds_slot(slot)) {
                 scheduled_process_freed_slot_count =
                     scheduled_process_freed_slot_count + 1;
                 if (scheduled_process_freed_first_slot == 0) {
@@ -804,10 +933,11 @@ fn scheduled_process_record_locked(guard: borrow ProcessRunGuard[lock],
             }
             return &scheduled_process_record_absent;
         }
-        IntrusiveSlotProbe::Live(slot_view) => {
+        RegionHeldProbe(ProcessRecord)::Held(slot_view) => {
             let source = scheduled_process_locked_view_new(slot_view, guard);
             let record = scheduled_process_transfer_locked_loan(source, guard);
             scheduled_process_locked_view_drop(source);
+            process_pool_unlock(pool_guard);
             return record;
         }
     }
@@ -817,11 +947,11 @@ fn scheduled_process_record_locked(guard: borrow ProcessRunGuard[lock],
 // private pool's address in other modules. Its only runtime member is the
 // existing locked pool view; the extra static index adds no storage.
 private linear struct ProcessRecordLockedView[lock: addr, pool: addr] {
-    private live: IntrusiveSlotView[pool];
+    private live: exists k: usize. RegionHeldView(ProcessRecord)[pool, k];
 }
 
 private inline fn scheduled_process_locked_view_new(
-        live: IntrusiveSlotView[&scheduled_process_pool],
+        live: sink RegionHeldView(ProcessRecord)[&scheduled_process_pool, k],
         guard: borrow ProcessRunGuard[lock]) -> ProcessRecordLockedView[lock, &scheduled_process_pool] {
     let mut wrapped: ProcessRecordLockedView[lock, &scheduled_process_pool] = { live };
     return wrapped;
@@ -830,7 +960,7 @@ private inline fn scheduled_process_locked_view_new(
 private inline fn scheduled_process_locked_view_payload(
         source: borrow ProcessRecordLockedView[lock, &scheduled_process_pool])
         -> &mut ProcessRecord @ lock !{unsafe} {
-    return intrusive_pool_record_of(&scheduled_process_pool, source.live);
+    return region_held_record(source.live);
 }
 
 private inline fn scheduled_process_transfer_locked_loan(
@@ -842,7 +972,7 @@ private inline fn scheduled_process_transfer_locked_loan(
 
 private inline fn scheduled_process_locked_view_drop(
         source: sink ProcessRecordLockedView[lock, &scheduled_process_pool]) {
-    intrusive_view_drop(source.live);
+    region_held_view_drop(source.live);
 }
 
 fn scheduled_process_record_of_locked(
@@ -913,11 +1043,11 @@ private fn process_current_handle(running: borrow ProcessCurrent[process, phase]
 inline fn process_current_end(running: sink ProcessCurrent[process, phase]) {}
 
 private linear struct ProcessRecordCurrentView[process: usize, pool: addr] {
-    private live: IntrusiveSlotView[pool];
+    private live: exists k: usize. RegionHeldView(ProcessRecord)[pool, k];
 }
 
 private inline fn scheduled_process_current_view_new(
-        live: IntrusiveSlotView[&scheduled_process_pool],
+        live: sink RegionHeldView(ProcessRecord)[&scheduled_process_pool, k],
         running: borrow ProcessCurrent[process, phase])
         -> ProcessRecordCurrentView[process, &scheduled_process_pool] {
     let mut wrapped: ProcessRecordCurrentView[process, &scheduled_process_pool] = { live };
@@ -927,7 +1057,7 @@ private inline fn scheduled_process_current_view_new(
 private inline fn scheduled_process_current_view_payload(
         source: borrow ProcessRecordCurrentView[process, &scheduled_process_pool])
         -> &mut ProcessRecord @ process !{unsafe} {
-    return intrusive_pool_record_of(&scheduled_process_pool, source.live);
+    return region_held_record(source.live);
 }
 
 private inline fn scheduled_process_transfer_current_loan(
@@ -939,16 +1069,17 @@ private inline fn scheduled_process_transfer_current_loan(
 
 private inline fn scheduled_process_current_view_drop(
         source: sink ProcessRecordCurrentView[process, &scheduled_process_pool]) {
-    intrusive_view_drop(source.live);
+    region_held_view_drop(source.live);
 }
 
 fn scheduled_process_record_current(running: borrow ProcessCurrent[process, phase])
         -> &mut ProcessRecord @ process !{unsafe} {
     let mut handle: ProcessHandle = process_current_handle(running);
     if (process_slot_is_boot(handle.pool_index)) { return &scheduled_process_boot_record; }
-    match intrusive_pool_probe_handle(
-            &scheduled_process_pool, handle.pool_index, handle.generation) {
-        IntrusiveSlotProbe::NoPayload => {
+    let pool_guard = process_pool_lock();
+    match region_probe_held(pool_guard, handle.pool_index) {
+        RegionHeldProbe(ProcessRecord)::Stale => {
+            process_pool_unlock(pool_guard);
             scheduled_process_record_missing_count = scheduled_process_record_missing_count + 1;
             if (scheduled_process_missing_first_slot == 0) {
                 scheduled_process_missing_first_slot = process_slot_word(handle.pool_index);
@@ -956,10 +1087,11 @@ fn scheduled_process_record_current(running: borrow ProcessCurrent[process, phas
             }
             return &scheduled_process_record_absent;
         }
-        IntrusiveSlotProbe::Live(live) => {
+        RegionHeldProbe(ProcessRecord)::Held(live) => {
             let source = scheduled_process_current_view_new(live, running);
             let record = scheduled_process_transfer_current_loan(source, running);
             scheduled_process_current_view_drop(source);
+            process_pool_unlock(pool_guard);
             return record;
         }
     }
@@ -990,7 +1122,7 @@ fn scheduled_process_record_missing_uses() -> usize {
 // boot summary can add the pools up.
 fn scheduled_process_recycled_handle_count() -> usize !{unsafe} {
     if (scheduled_process_pool_ready == false) { return 0; }
-    return intrusive_pool_recycled_handle_count(&scheduled_process_pool);
+    return scheduled_process_recycled_reads;
 }
 
 // Validated on every call, which is strictly more than the old
@@ -1316,7 +1448,7 @@ fn kernel_process_current_stopped_record(
         stopped: borrow MachineStopped[&kernel_world_stop]) -> ProcessDdbRecord {
     let slot: usize = kernel_process_current_slot();
     return scheduled_process_ddb_record(stopped, slot,
-        scheduled_process_record_stopped(stopped, slot));
+        scheduled_process_record_stopped(stopped, stopped, slot));
 }
 
 // Diagnostic context is readable only in the current live allocation's
@@ -1332,14 +1464,10 @@ fn kernel_process_crash_frame_usable(
             handle.generation == scheduled_process_boot_generation;
     } else {
         if (scheduled_process_pool_ready == false) { return false; }
-        match machine_pool_probe(&scheduled_process_pool, stopped, process_slot_word(handle.pool_index)) {
-            MachineSlotProbe::Busy => { return false; }
-            MachineSlotProbe::Missing => { return false; }
-            MachineSlotProbe::Live(scoped) => {
-                generation_matches = machine_pool_view_generation(scoped) == handle.generation;
-                machine_pool_view_drop(scoped);
-            }
-        }
+        if (region_pool_lock_is_held(&scheduled_process_pool)) { return false; }
+        let occupant: usize = region_pool_generation_unproven__ProcessRecord(
+            &scheduled_process_pool, process_slot_word(handle.pool_index));
+        generation_matches = occupant != 0 && occupant == handle.generation;
     }
     if (generation_matches == false || (frame_sp & 15) != 0) { return false; }
     let mut record = kernel_process_current_stopped_record(stopped);
@@ -1355,7 +1483,7 @@ fn kernel_process_crash_frame_usable(
 fn kernel_process_current_stopped_crash_detail(
         stopped: borrow MachineStopped[&kernel_world_stop]) -> (usize, usize) {
     if (execution_state[execution_cpu_index()].current_live == false) { return (0, 0); }
-    let record = scheduled_process_record_stopped(stopped, kernel_process_current_slot());
+    let record = scheduled_process_record_stopped(stopped, stopped, kernel_process_current_slot());
     let mut image: usize = 0;
     if (record.exec_image_live) { image = 1; }
     return (record.wait4_status_ptr, image);
@@ -1363,13 +1491,13 @@ fn kernel_process_current_stopped_crash_detail(
 
 fn kernel_process_stopped_metadata_busy(
         stopped: borrow MachineStopped[&kernel_world_stop]) -> bool !{unsafe} {
-    return scheduled_process_pool_ready && intrusive_pool_inspection_busy(&scheduled_process_pool);
+    return scheduled_process_pool_ready && region_pool_lock_is_held(&scheduled_process_pool);
 }
 
 fn scheduled_process_fd_context_handle_stopped(
         stopped: borrow MachineStopped[&kernel_world_stop], slot: usize)
         -> ProcessPoolHandleWords !{unsafe} {
-    return process_fd_context_words(scheduled_process_record_stopped(stopped, slot));
+    return process_fd_context_words(scheduled_process_record_stopped(stopped, stopped, slot));
 }
 
 // GitHub issue #606: one diff pass of kernel/kernel/protocol_trace.tkb,
@@ -1409,14 +1537,6 @@ private fn kernel_process_protocol_owner(owner: usize) -> usize {
 
 // A record with no parent (the boot process, or an orphan the teardown
 // sweep detached) names nothing.
-private fn kernel_process_protocol_parent(record: borrow &mut ProcessRecord)
-        -> usize !{unsafe} {
-    if (record.has_parent) {
-        return scheduled_process_pid_of_handle(record.parent);
-    }
-    return PROTOCOL_TRACE_NONE;
-}
-
 private fn kernel_process_protocol_observe(unlocked: bool) !{unsafe} {
     protocol_trace_pass_begin(unlocked);
     if (scheduled_process_boot_live) {
@@ -1431,27 +1551,44 @@ private fn kernel_process_protocol_observe(unlocked: bool) !{unsafe} {
     }
     let mut slot: usize = 0;
     if (scheduled_process_pool_ready) {
-        slot = intrusive_pool_first_slot(&scheduled_process_pool);
+        slot = process_pool_first_slot();
     }
     let mut probes: usize = 0;
     while (slot != 0 && probes < PROTOCOL_TRACE_PROBE_BUDGET) {
-        let next: usize = intrusive_pool_next_slot(&scheduled_process_pool, slot);
-        match intrusive_pool_probe_slot_unproven(&scheduled_process_pool, slot) {
-            IntrusiveSlotProbe::NoPayload => {}
-            IntrusiveSlotProbe::Live(slot_view) => {
-                let record: &mut ProcessRecord = intrusive_pool_record_of(
-                    &scheduled_process_pool, slot_view);
-                // A slot being allocated is not a process yet.
+        let next: usize = process_pool_next_slot(slot);
+        // Copied under the pool lock, observed after it: the parent's pid
+        // is another lookup, which takes the pool lock itself.
+        let mut seen: bool = false;
+        let mut pid: usize = 0;
+        let mut state: usize = 0;
+        let mut owner: usize = 0;
+        let mut reason: usize = 0;
+        let mut has_parent: bool = false;
+        let mut parent: ProcessHandle = process_handle_new(region_held_none__ProcessRecord(), 0);
+        let pool_guard = process_pool_lock();
+        let mut held: RegionHeld(ProcessRecord) = region_held_at(pool_guard, slot);
+        match region_probe_held(pool_guard, held) {
+            RegionHeldProbe(ProcessRecord)::Stale => {}
+            RegionHeldProbe(ProcessRecord)::Held(slot_view) => {
+                let record: &mut ProcessRecord = region_held_record(slot_view);
+                // A record still being constructed is not a process yet.
                 if (process_state_kind(&record.state) != ProcessSlotState::Free) {
-                    protocol_trace_observe_process(
-                        record.pid,
-                        kernel_process_protocol_state(process_state_kind(&record.state)),
-                        kernel_process_protocol_owner(record.stack_owner_cpu),
-                        kernel_process_protocol_reason(process_wait_reason(&record.state)),
-                        kernel_process_protocol_parent(record));
+                    seen = true;
+                    pid = record.pid;
+                    state = kernel_process_protocol_state(process_state_kind(&record.state));
+                    owner = kernel_process_protocol_owner(record.stack_owner_cpu);
+                    reason = kernel_process_protocol_reason(process_wait_reason(&record.state));
+                    has_parent = record.has_parent;
+                    parent = record.parent;
                 }
-                intrusive_view_release(slot_view);
+                region_held_view_drop(slot_view);
             }
+        }
+        process_pool_unlock(pool_guard);
+        if (seen) {
+            let mut parent_pid: usize = PROTOCOL_TRACE_NONE;
+            if (has_parent) { parent_pid = scheduled_process_pid_of_handle(parent); }
+            protocol_trace_observe_process(pid, state, owner, reason, parent_pid);
         }
         probes = probes + 1;
         slot = next;
@@ -1503,39 +1640,76 @@ fn kernel_process_protocol_trace_close() -> usize {
 // Lock-free record access tied to the complete machine stop. The private
 // transfer preserves the checked source proof, then leaves only the stopped
 // authority as the pointer's lifetime. No scoped pool view can cross resume.
+// `scope` is the same stop as `stopped`, passed again so the record's
+// lifetime can name it: a return lifetime names a parameter's static, and
+// the inspection mint takes the production stop by its global address.
 private fn scheduled_process_record_stopped(
-        stopped: borrow MachineStopped[stop], slot: usize)
+        stopped: borrow MachineStopped[&kernel_world_stop],
+        scope: borrow MachineStopped[stop], slot: usize)
         -> &mut ProcessRecord @ stop !{unsafe} {
     if (slot == 0) { return &scheduled_process_boot_record; }
     if (scheduled_process_pool_ready == false) { return &scheduled_process_record_absent; }
-    match machine_pool_probe(&scheduled_process_pool, stopped, slot) {
-        MachineSlotProbe::Busy => { return &scheduled_process_record_absent; }
-        MachineSlotProbe::Missing => { return &scheduled_process_record_absent; }
-        MachineSlotProbe::Live(scoped) => {
-            let record = scheduled_process_stopped_transfer(scoped, stopped);
-            machine_pool_view_drop(scoped);
+    let generation: usize = region_pool_generation_unproven__ProcessRecord(
+        &scheduled_process_pool, slot);
+    if (generation == 0) { return &scheduled_process_record_absent; }
+    match process_record_inspect_stopped(stopped, &scheduled_process_pool, slot, generation) {
+        RegionInspectionProbe(ProcessRecord)::Busy => { return &scheduled_process_record_absent; }
+        RegionInspectionProbe(ProcessRecord)::Stale => { return &scheduled_process_record_absent; }
+        RegionInspectionProbe(ProcessRecord)::Inspected(inspected) => {
+            let source = scheduled_process_stopped_view_new(inspected, scope);
+            let record = scheduled_process_stopped_transfer(source, scope);
+            scheduled_process_stopped_view_drop(source);
             return record;
         }
     }
 }
 
-private inline fn scheduled_process_stopped_transfer(
-        source: borrow MachineSlotView[stop, &scheduled_process_pool],
-        destination: borrow MachineStopped[stop])
-        -> &mut ProcessRecord @ stop !{unsafe, loan_transfer} {
-    return machine_pool_record(&scheduled_process_pool, source);
+// The stopped machine's one inspection mint for process records (#745;
+// scripts/check_stopped_pool_inspection.py). Never waits on the pool lock.
+private fn process_record_inspect_stopped(
+        stopped: borrow MachineStopped[&kernel_world_stop],
+        pool: *RegionPool(ProcessRecord) @ records, address: usize, generation: usize)
+        -> RegionInspectionProbe(ProcessRecord)[records, &kernel_world_stop]
+        !{unsafe, irq_masking_guard} {
+    return region_pool_inspect_unproven__ProcessRecord(pool, &kernel_world_stop,
+        address, generation);
 }
 
+private linear struct ProcessRecordStoppedView[stop: addr, pool: addr] {
+    private live: exists s: addr. RegionInspection(ProcessRecord)[pool, s];
+}
+
+private inline fn scheduled_process_stopped_view_new(
+        live: sink RegionInspection(ProcessRecord)[&scheduled_process_pool, s],
+        scope: borrow MachineStopped[stop])
+        -> ProcessRecordStoppedView[stop, &scheduled_process_pool] {
+    let mut wrapped: ProcessRecordStoppedView[stop, &scheduled_process_pool] = { live };
+    return wrapped;
+}
+
+private inline fn scheduled_process_stopped_transfer(
+        source: borrow ProcessRecordStoppedView[stop, &scheduled_process_pool],
+        destination: borrow MachineStopped[stop])
+        -> &mut ProcessRecord @ stop !{unsafe, loan_transfer} {
+    return region_inspection_record(source.live);
+}
+
+private inline fn scheduled_process_stopped_view_drop(
+        source: sink ProcessRecordStoppedView[stop, &scheduled_process_pool]) {
+    region_inspection_drop(source.live);
+}
+
+
 private fn scheduled_process_parent_pid_stopped(
-        stopped: borrow MachineStopped[stop],
+        stopped: borrow MachineStopped[&kernel_world_stop],
         parent: ProcessHandle) -> usize !{unsafe} {
-    return scheduled_process_record_stopped(stopped, process_slot_word(parent.pool_index)).pid;
+    return scheduled_process_record_stopped(stopped, stopped, process_slot_word(parent.pool_index)).pid;
 }
 
 fn scheduled_process_address_space_root_stopped(
-        stopped: borrow MachineStopped[stop], slot: usize)
+        stopped: borrow MachineStopped[&kernel_world_stop], slot: usize)
         -> AddressSpaceRoot !{unsafe} {
-    let record = scheduled_process_record_stopped(stopped, slot);
+    let record = scheduled_process_record_stopped(stopped, stopped, slot);
     return address_space_root_mint(slot, process_backing_words(record));
 }
 
@@ -1546,38 +1720,41 @@ fn kernel_process_ddb_copy(
         stopped: borrow MachineStopped[&kernel_world_stop],
         output: borrow [ProcessDdbRecord; DDB_PROCESS_RECORDS..])
         -> ProcessDdbCopyResult !{unsafe} {
-    if (scheduled_process_pool_ready && intrusive_pool_inspection_busy(&scheduled_process_pool)) {
+    if (scheduled_process_pool_ready && region_pool_lock_is_held(&scheduled_process_pool)) {
         let mut refused: ProcessDdbCopyResult = { 0, true }; return refused;
     }
     let mut count: usize = 0;
     if (scheduled_process_boot_live) {
         scheduled_process_ddb_copy_one(
-            stopped, output, 0, 0, scheduled_process_record_stopped(stopped, 0));
+            stopped, output, 0, 0, scheduled_process_record_stopped(stopped, stopped, 0));
         count = count + 1;
     }
     let mut slot: usize = 0;
     if (scheduled_process_pool_ready) {
-        slot = intrusive_pool_first_slot(&scheduled_process_pool);
+        slot = process_pool_first_slot();
     }
     let mut probes: usize = 0;
     while (slot != 0 && probes < DDB_PROCESS_PROBE_BUDGET &&
             count < DDB_PROCESS_RECORDS) {
-        let next: usize = intrusive_pool_next_slot(&scheduled_process_pool, slot);
-        match machine_pool_probe(&scheduled_process_pool, stopped, slot) {
-        MachineSlotProbe::Busy => { let mut refused: ProcessDdbCopyResult = { count, true }; return refused; }
-            MachineSlotProbe::Missing => {}
-            MachineSlotProbe::Live(slot_view) => {
-                // The view is held across the read and released after,
-                // which is the shape GitHub issue #488 wants everywhere:
-                // the payload pointer cannot outlive the proof that the
-                // slot was occupied. This walk was already doing the right
-                // thing by accident -- it just had no way to say so.
-                let record: &mut ProcessRecord = machine_pool_record(
-                    &scheduled_process_pool, slot_view);
+        let next: usize = process_pool_next_slot(slot);
+        let generation: usize = region_pool_generation_unproven__ProcessRecord(
+            &scheduled_process_pool, slot);
+        if (generation != 0) {
+        match process_record_inspect_stopped(stopped, &scheduled_process_pool, slot, generation) {
+            RegionInspectionProbe(ProcessRecord)::Busy => {
+                let mut refused: ProcessDdbCopyResult = { count, true }; return refused;
+            }
+            RegionInspectionProbe(ProcessRecord)::Stale => {}
+            RegionInspectionProbe(ProcessRecord)::Inspected(slot_view) => {
+                // The inspection is held across the read and released
+                // after (GitHub issue #488): the payload pointer cannot
+                // outlive the proof that the slot was occupied.
+                let record: &mut ProcessRecord = region_inspection_record(slot_view);
                 scheduled_process_ddb_copy_one(stopped, output, count, slot, record);
-                machine_pool_view_drop(slot_view);
+                region_inspection_drop(slot_view);
                 count = count + 1;
             }
+        }
         }
         probes = probes + 1;
         slot = next;
@@ -1595,14 +1772,10 @@ private fn scheduled_process_live_pool_slot_from(cursor: usize)
         -> ProcessSlotCursor !{unsafe} {
     let mut probe: usize = cursor;
     while (probe != 0) {
-        match intrusive_pool_probe_slot(&scheduled_process_pool, probe) {
-            IntrusiveSlotProbe::NoPayload => {}
-            IntrusiveSlotProbe::Live(slot_view) => {
-                intrusive_view_drop(slot_view);
-                return ProcessSlotCursor::At(probe);
-            }
+        if (region_held_address(process_pool_held_at(probe)) != 0) {
+            return ProcessSlotCursor::At(probe);
         }
-        probe = intrusive_pool_next_slot(&scheduled_process_pool, probe);
+        probe = process_pool_next_slot(probe);
     }
     return ProcessSlotCursor::Done;
 }
@@ -1613,7 +1786,7 @@ private fn scheduled_process_first_pool_slot() -> ProcessSlotCursor
         return ProcessSlotCursor::Done;
     }
     return scheduled_process_live_pool_slot_from(
-        intrusive_pool_first_slot(&scheduled_process_pool));
+        process_pool_first_slot());
 }
 
 fn scheduled_process_first_slot() -> ProcessSlotCursor !{unsafe} {
@@ -1627,7 +1800,7 @@ fn scheduled_process_next_slot(slot: usize) -> ProcessSlotCursor !{unsafe} {
         return ProcessSlotCursor::Done;
     }
     return scheduled_process_live_pool_slot_from(
-        intrusive_pool_next_slot(&scheduled_process_pool, slot));
+        process_pool_next_slot(slot));
 }
 
 // Keep enum field reads in their typed result context. Direct enum reads
@@ -1942,14 +2115,18 @@ private fn scheduled_process_scalar_snapshot(slot: usize)
     if (scheduled_process_pool_ready == false) {
         return scheduled_process_scalar_copy(&scheduled_process_record_absent);
     }
-    match intrusive_pool_probe_slot(&scheduled_process_pool, slot) {
-        IntrusiveSlotProbe::NoPayload => {
+    let pool_guard = process_pool_lock();
+    let mut held: RegionHeld(ProcessRecord) = region_held_at(pool_guard, slot);
+    match region_probe_held(pool_guard, held) {
+        RegionHeldProbe(ProcessRecord)::Stale => {
+            process_pool_unlock(pool_guard);
             return scheduled_process_scalar_copy(&scheduled_process_record_absent);
         }
-        IntrusiveSlotProbe::Live(slot_view) => {
+        RegionHeldProbe(ProcessRecord)::Held(slot_view) => {
             let mut snapshot: ProcessRecordScalarSnapshot = scheduled_process_scalar_copy(
-                intrusive_pool_record_of(&scheduled_process_pool, slot_view));
-            intrusive_view_drop(slot_view);
+                region_held_record(slot_view));
+            region_held_view_drop(slot_view);
+            process_pool_unlock(pool_guard);
             return snapshot;
         }
     }
@@ -2020,15 +2197,15 @@ private fn scheduled_process_slot_for_pid_stopped(
         return ProcessSlotForPidResult::Found(0);
     }
     if (scheduled_process_pool_ready == false ||
-            intrusive_pool_inspection_busy(&scheduled_process_pool)) {
+            region_pool_lock_is_held(&scheduled_process_pool)) {
         return ProcessSlotForPidResult::Missing;
     }
-    let mut slot: usize = intrusive_pool_first_slot(&scheduled_process_pool);
+    let mut slot: usize = process_pool_first_slot();
     while (slot != 0) {
-        if (scheduled_process_record_stopped(stopped, slot).pid == pid) {
+        if (scheduled_process_record_stopped(stopped, stopped, slot).pid == pid) {
             return ProcessSlotForPidResult::Found(slot);
         }
-        slot = intrusive_pool_next_slot(&scheduled_process_pool, slot);
+        slot = process_pool_next_slot(slot);
     }
     return ProcessSlotForPidResult::Missing;
 }
@@ -2072,14 +2249,14 @@ must_use variant ProcessStoppedDiagnosticResult {
 private fn scheduled_process_diagnostic_copy(
         stopped: borrow MachineStopped[&kernel_world_stop], pid: usize)
         -> ProcessStoppedDiagnosticResult !{unsafe} {
-    if (scheduled_process_pool_ready && intrusive_pool_inspection_busy(&scheduled_process_pool)) {
+    if (scheduled_process_pool_ready && region_pool_lock_is_held(&scheduled_process_pool)) {
         return ProcessStoppedDiagnosticResult::Busy;
     }
     let slot: usize = match scheduled_process_slot_for_pid_stopped(stopped, pid) {
         ProcessSlotForPidResult::Missing => { return ProcessStoppedDiagnosticResult::Missing; }
         ProcessSlotForPidResult::Found(found) => { found }
     };
-    let record = scheduled_process_record_stopped(stopped, slot);
+    let record = scheduled_process_record_stopped(stopped, stopped, slot);
     let mut words: ProcessPoolHandleWords = process_image_record_words(record);
     let pages: usize = match process_image_active_page_count_stopped(stopped, words) {
         ProcessImageDiagnosticCount::Busy => { return ProcessStoppedDiagnosticResult::Busy; }
@@ -2150,12 +2327,12 @@ private fn scheduled_process_diagnostic_next_pid_stopped(
         next = scheduled_process_boot_record.pid;
     }
     if (scheduled_process_pool_ready == false ||
-            intrusive_pool_inspection_busy(&scheduled_process_pool)) { return next; }
-    let mut slot: usize = intrusive_pool_first_slot(&scheduled_process_pool);
+            region_pool_lock_is_held(&scheduled_process_pool)) { return next; }
+    let mut slot: usize = process_pool_first_slot();
     while (slot != 0) {
-        let pid: usize = scheduled_process_record_stopped(stopped, slot).pid;
+        let pid: usize = scheduled_process_record_stopped(stopped, stopped, slot).pid;
         if (pid > after && (next == 0 || pid < next)) { next = pid; }
-        slot = intrusive_pool_next_slot(&scheduled_process_pool, slot);
+        slot = process_pool_next_slot(slot);
     }
     return next;
 }
@@ -2231,7 +2408,7 @@ fn kernel_process_monitor_proc(stopped: borrow MachineStopped[&kernel_world_stop
     kernel_boot_log(" ppid="); uart_put_udec(snapshot.ppid);
     kernel_boot_log(" state="); uart_putc(snapshot.state);
     kernel_boot_log(" wait=");
-    match process_wait_reason(&scheduled_process_record_stopped(stopped, slot).state) {
+    match process_wait_reason(&scheduled_process_record_stopped(stopped, stopped, slot).state) {
         ProcessWaitReason::None => { uart_put_udec(0); }
         ProcessWaitReason::UartRx => { uart_put_udec(1); }
         ProcessWaitReason::ChildExit => { uart_put_udec(2); }
@@ -2241,7 +2418,7 @@ fn kernel_process_monitor_proc(stopped: borrow MachineStopped[&kernel_world_stop
         ProcessWaitReason::UartTx => { uart_put_udec(6); }
     }
     kernel_boot_log(" saved_sp=");
-    uart_put_hex(scheduled_process_record_stopped(stopped, slot).saved_sp);
+    uart_put_hex(scheduled_process_record_stopped(stopped, stopped, slot).saved_sp);
     kernel_boot_log(" pages="); uart_put_udec(snapshot.resident_pages);
     kernel_boot_log(" command=");
     kernel_process_monitor_put_command(snapshot);
@@ -2404,13 +2581,7 @@ fn scheduled_process_slot_valid(slot: usize) -> bool !{unsafe} {
     // off, before the pool exists.
     if (slot == 0) { return true; }
     if (scheduled_process_pool_ready == false) { return false; }
-    match intrusive_pool_probe_slot(&scheduled_process_pool, slot) {
-        IntrusiveSlotProbe::NoPayload => { return false; }
-        IntrusiveSlotProbe::Live(slot_view) => {
-            intrusive_view_drop(slot_view);
-            return true;
-        }
-    }
+    return region_held_address(process_pool_held_at(slot)) != 0;
 }
 
 // The backing handle's two words, read from a record reached under an
@@ -2639,7 +2810,7 @@ must_use variant ScheduledProcessBlockedTakeResult {
 }
 
 private fn scheduled_process_owner_new(
-        slot: IntrusiveSlotAddress,
+        slot: RegionHeld(ProcessRecord),
         generation: usize @ process) -> ScheduledProcessOwner[process] {
     let mut owner: ScheduledProcessOwner[process] = { slot, generation };
     return owner;
@@ -2700,20 +2871,38 @@ fn scheduled_process_exited_state(
 // owner. Whoever holds the owner of a process is what keeps its record from
 // being reaped under it (the run guard is held for every transition that
 // takes or gives one), so the pointer lives no longer than the owner.
+private linear struct ProcessRecordOwnedView[process: usize, pool: addr] {
+    private live: exists k: usize. RegionHeldView(ProcessRecord)[pool, k];
+}
+
+private inline fn scheduled_process_owned_view_new(
+        live: sink RegionHeldView(ProcessRecord)[&scheduled_process_pool, k],
+        owner: borrow ScheduledProcessOwner[process])
+        -> ProcessRecordOwnedView[process, &scheduled_process_pool] {
+    let mut wrapped: ProcessRecordOwnedView[process, &scheduled_process_pool] = { live };
+    return wrapped;
+}
+
+private inline fn scheduled_process_owned_view_drop(
+        source: sink ProcessRecordOwnedView[process, &scheduled_process_pool]) {
+    region_held_view_drop(source.live);
+}
+
 private inline fn scheduled_process_transfer_owned_loan(
-        source: borrow IntrusiveAllocationView[&scheduled_process_pool, process],
+        source: borrow ProcessRecordOwnedView[process, &scheduled_process_pool],
         destination: borrow ScheduledProcessOwner[process])
         -> &mut ProcessRecord @ process !{unsafe, loan_transfer} {
-    return intrusive_pool_allocation_record_of(&scheduled_process_pool, source);
+    return region_held_record(source.live);
 }
 
 fn scheduled_process_record_owned(owner: borrow ScheduledProcessOwner[process])
         -> &mut ProcessRecord @ process !{unsafe} {
     // The bootstrap and absent diagnostic records have permanent storage.
     if (process_slot_is_boot(owner.pool_index)) { return &scheduled_process_boot_record; }
-    match intrusive_pool_probe_allocation(
-            &scheduled_process_pool, owner.pool_index, owner.generation) {
-        IntrusiveAllocationProbe::NoPayload => {
+    let pool_guard = process_pool_lock();
+    match region_probe_held(pool_guard, owner.pool_index) {
+        RegionHeldProbe(ProcessRecord)::Stale => {
+            process_pool_unlock(pool_guard);
             scheduled_process_record_missing_count =
                 scheduled_process_record_missing_count + 1;
             if (scheduled_process_missing_first_slot == 0) {
@@ -2722,9 +2911,11 @@ fn scheduled_process_record_owned(owner: borrow ScheduledProcessOwner[process])
             }
             return &scheduled_process_record_absent;
         }
-        IntrusiveAllocationProbe::Live(live) => {
-            let record = scheduled_process_transfer_owned_loan(live, owner);
-            intrusive_allocation_view_drop(live);
+        RegionHeldProbe(ProcessRecord)::Held(live) => {
+            let source = scheduled_process_owned_view_new(live, owner);
+            let record = scheduled_process_transfer_owned_loan(source, owner);
+            scheduled_process_owned_view_drop(source);
+            process_pool_unlock(pool_guard);
             return record;
         }
     }
@@ -2757,8 +2948,7 @@ fn scheduled_process_handle_matches(handle: ProcessHandle) -> bool {
                handle.generation == scheduled_process_boot_generation;
     }
     if (scheduled_process_pool_ready == false) { return false; }
-    return intrusive_pool_matches(
-        &scheduled_process_pool, handle.pool_index, handle.generation);
+    return process_pool_matches(handle.pool_index);
 }
 
 // A put is a drop: there is nowhere to put an owner back to.
@@ -2907,33 +3097,28 @@ private fn scheduled_process_release_slot_resources(slot: usize) !{unsafe} {
 private fn scheduled_process_slot_remove(
         guard: borrow ProcessRunGuard[scheduled_process_run_lock],
         slot: usize) !{unsafe, record_mutates_ProcessRunGuard,
-                      changes_witness_MachineSlotView} {
+                      changes_witness_RegionInspection__ProcessRecord} {
     if (slot == 0) {
         scheduled_process_boot_live = false;
         return;
     }
-    let mut generation: usize = 0;
-    let mut address: IntrusiveSlotAddress = intrusive_slot_address_none();
-    match intrusive_pool_probe_slot(&scheduled_process_pool, slot) {
-        IntrusiveSlotProbe::NoPayload => { return; }
-        IntrusiveSlotProbe::Live(slot_view) => {
-            address = intrusive_view_slot(slot_view);
-            generation = intrusive_view_generation(slot_view);
-            intrusive_view_drop(slot_view);
-        }
-    }
+    let mut held: RegionHeld(ProcessRecord) = process_pool_held_at(slot);
+    if (region_held_address(held) == 0) { return; }
     scheduled_process_park_stack_run(
         scheduled_process_record_locked(guard, slot).stack_run);
-    let owner = intrusive_owner_new(&scheduled_process_pool, address,
-                                    generation);
-    let guard = intrusive_pool_lock(&scheduled_process_pool);
-    let (ok, reason) = intrusive_remove_outcome(
-        intrusive_pool_remove(&scheduled_process_pool, guard, owner));
-    intrusive_pool_unlock(&scheduled_process_pool, guard);
-    if (ok == false) {
-        kernel_boot_log("process table: releasing a record -- ");
-        kernel_boot_log(reason);
-        kernel_boot_log("\n");
+    // The record's permission comes back out of its slot, once (#745): a
+    // second removal of the same record finds it no longer Held.
+    let pool_guard = process_pool_lock();
+    match region_take_held(pool_guard, held) {
+        RegionTake(ProcessRecord)::Stale => {
+            process_pool_unlock(pool_guard);
+            kernel_boot_log("process table: releasing a record -- not held\n");
+        }
+        RegionTake(ProcessRecord)::Taken(record_slot) => {
+            region_slot_zero(record_slot);
+            region_free(pool_guard, record_slot);
+            process_pool_unlock(pool_guard);
+        }
     }
 }
 
@@ -3079,21 +3264,15 @@ fn scheduled_process_alloc() -> ScheduledPooledProcessAllocResult !{unsafe} {
 private fn scheduled_process_alloc_pending(runnable_now: bool)
         -> ScheduledPooledProcessAllocResult !{unsafe} {
     scheduled_process_pool_init();
-    let guard = intrusive_pool_lock(&scheduled_process_pool);
-    let inserted =
-        intrusive_pool_insert_zeroed(&scheduled_process_pool, guard);
-    intrusive_pool_unlock(&scheduled_process_pool, guard);
-    match inserted {
-        IntrusivePoolInsertResult::OutOfMemory => {
+    match process_pool_alloc_held() {
+        ProcessPoolAlloc::OutOfMemory => {
             kernel_boot_log_resource_exhausted(
                 "physical page allocator" as *u8,
                 page_allocator_total_count());
             return ScheduledPooledProcessAllocResult::Full;
         }
-        IntrusivePoolInsertResult::Allocated(pool_owner) => {
-            let mut address: IntrusiveSlotAddress = intrusive_owner_slot(pool_owner);
-            let generation = intrusive_owner_generation_indexed(pool_owner);
-            intrusive_owner_drop(pool_owner);
+        ProcessPoolAlloc::Held(address) => {
+            let generation: usize = region_held_generation(address);
             match scheduled_process_alloc_finish(address, generation, runnable_now) {
                 ScheduledProcessAllocResult::Full => {
                     return ScheduledPooledProcessAllocResult::Full;
@@ -3124,7 +3303,7 @@ fn scheduled_process_alloc_bootstrap() -> ScheduledBootstrapProcessAllocResult
     scheduled_process_boot_generation = scheduled_process_boot_generation + 1;
     scheduled_process_boot_live = true;
     match scheduled_process_alloc_finish(
-            intrusive_slot_address_none(), scheduled_process_boot_generation, true) {
+            region_held_none__ProcessRecord(), scheduled_process_boot_generation, true) {
         ScheduledProcessAllocResult::Full => {
             return ScheduledBootstrapProcessAllocResult::Full;
         }
@@ -3138,7 +3317,7 @@ fn scheduled_process_alloc_bootstrap() -> ScheduledBootstrapProcessAllocResult
 // Everything a new process needs once it has a record: the same rollback
 // chain for both entry points above, so a bootstrap and an ordinary
 // process cannot drift apart in what they are given.
-private fn scheduled_process_alloc_finish(address: IntrusiveSlotAddress,
+private fn scheduled_process_alloc_finish(address: RegionHeld(ProcessRecord),
                                          generation: usize @ process,
                                          runnable_now: bool)
         -> ScheduledProcessAllocResult !{unsafe} {
@@ -3388,7 +3567,7 @@ linear struct ProcessRunGuard[lock: addr] {
 
 // mutex_acquire, not pool_lock_acquire: the tag pool_lock takes registers
 // the acquire in linux_user's finite lock-ORDER table, and this is not a
-// pool lock. See kernel/lib/intrusive_pool.tkb's tag counter for what
+// pool lock. See linux_user/intrusive_pool/intrusive_pool_lib.tkb's tag counter for what
 // putting a non-pool in that table cost.
 fn process_run_lock() -> ProcessRunGuard[&scheduled_process_run_lock]
         !{acquires_lock_40_process_run, single_instance_lock,
@@ -3755,7 +3934,7 @@ fn scheduled_process_reap_teardown(
         owner: borrow ScheduledProcessOwner[process]) !{unsafe} {
     // GitHub issue #488: see scheduled_process_reaped_current_count.
     if (execution_state[execution_cpu_index()].current_live) {
-        if (intrusive_slot_address_equal(execution_state[execution_cpu_index()].current_handle.pool_index, owner.pool_index)) {
+        if (region_held_equal(execution_state[execution_cpu_index()].current_handle.pool_index, owner.pool_index)) {
             scheduled_process_reaped_current_count =
                 scheduled_process_reaped_current_count + 1;
         }
@@ -3899,7 +4078,7 @@ fn scheduled_process_stack_top(handle: ProcessHandle) -> usize !{unsafe} {
 }
 
 fn scheduled_process_same_slot(a: ProcessHandle, b: ProcessHandle) -> bool {
-    return intrusive_slot_address_equal(a.pool_index, b.pool_index);
+    return region_held_equal(a.pool_index, b.pool_index);
 }
 
 fn scheduled_process_same_generation(
@@ -4030,7 +4209,7 @@ fn scheduled_process_table_probe() -> bool !{unsafe} {
     // refused either way, and refused on the generation rather than on a
     // range check, since there is no range left to fail.
     let mut first: ProcessHandle = handles[0];
-    let mut first_slot: IntrusiveSlotAddress = first.pool_index;
+    let mut first_slot: RegionHeld(ProcessRecord) = first.pool_index;
     let first_generation: usize = first.generation;
     if (scheduled_process_probe_cycle(first) == false) { return false; }
     first = process_handle_new(first_slot, first_generation);
@@ -4069,7 +4248,7 @@ fn scheduled_process_table_probe() -> bool !{unsafe} {
     if (process_image_record_live_count() != records_before) {
         return false;
     }
-    if (intrusive_pool_live_count(&scheduled_process_pool) != 0) {
+    if (scheduled_process_pool_live_count() != 0) {
         return false;
     }
     return true;
@@ -5027,7 +5206,10 @@ fn kernel_process_ddb_reschedule_pending() -> usize {
 // the page check one line below cannot say that on its own, because a
 // chunk keeps its page whether or not the record inside it was returned.
 fn scheduled_process_pool_live_count() -> usize !{unsafe} {
-    return intrusive_pool_live_count(&scheduled_process_pool);
+    let guard = process_pool_lock();
+    let held: usize = region_pool_held_count(guard);
+    process_pool_unlock(guard);
+    return held;
 }
 
 fn kernel_process_schedulable_count() -> usize !{unsafe} {
@@ -7075,7 +7257,7 @@ private fn kernel_process_block_to_idle(
         scheduled_process_same_slot(execution_state[execution_cpu_index()].current_handle, from)
             == false ||
         execution_state[execution_cpu_index()].stack_live == false ||
-        intrusive_slot_address_equal(execution_state[execution_cpu_index()].stack_handle.pool_index, from.pool_index) == false ||
+        region_held_equal(execution_state[execution_cpu_index()].stack_handle.pool_index, from.pool_index) == false ||
         execution_state[execution_cpu_index()].stack_handle.generation != from.generation) {
         return false;
     }
@@ -7389,7 +7571,7 @@ fn kernel_process_current_set_sigchld_ignored(current_authority: borrow ProcessC
 // carries is the process it was taken from, so the restore reaches that
 // process even if the current one has changed by then.
 linear struct TakenSignal[signal: usize] {
-    private pool_index: IntrusiveSlotAddress;
+    private pool_index: RegionHeld(ProcessRecord);
     private generation: usize;
     private signum: usize @ signal;
 }
@@ -7399,7 +7581,7 @@ must_use variant ProcessSignalPendingResult {
     Pending(exists signal: usize. TakenSignal[signal]);
 }
 
-private fn taken_signal_new(pool_index: IntrusiveSlotAddress, generation: usize,
+private fn taken_signal_new(pool_index: RegionHeld(ProcessRecord), generation: usize,
                             signum: usize @ signal) -> TakenSignal[signal] {
     let mut taken: TakenSignal[signal] = { pool_index, generation, signum };
     return taken;
@@ -10116,7 +10298,7 @@ private fn kernel_process_pending_wait4_child(guard: borrow ProcessRunGuard[lock
 private fn kernel_process_reap_zombie(parent: ProcessHandle,
                                       child: ProcessHandle)
         -> usize !{unsafe} {
-    let mut parent_slot: IntrusiveSlotAddress = parent.pool_index;
+    let mut parent_slot: RegionHeld(ProcessRecord) = parent.pool_index;
     let parent_generation: usize = parent.generation;
     // GitHub issue #437: scheduled_process_reap_teardown ends in
     // process_image_exec_teardown, which used to leave the image target at
@@ -10842,21 +11024,13 @@ private fn scheduled_process_handle_of_slot(guard: borrow ProcessRunGuard[lock],
                                             slot: usize) -> ProcessHandleOfSlot {
     if (slot == 0) {
         let mut boot: ProcessHandle =
-            { intrusive_slot_address_none(), scheduled_process_boot_generation };
+            { region_held_none__ProcessRecord(), scheduled_process_boot_generation };
         return ProcessHandleOfSlot::Live(boot);
     }
-    match intrusive_pool_probe_slot(&scheduled_process_pool, slot) {
-        IntrusiveSlotProbe::NoPayload => {
-            return ProcessHandleOfSlot::Absent;
-        }
-        IntrusiveSlotProbe::Live(slot_view) => {
-            let mut address: IntrusiveSlotAddress = intrusive_view_slot(slot_view);
-            let generation: usize = intrusive_view_generation(slot_view);
-            intrusive_view_drop(slot_view);
-            let mut live: ProcessHandle = { address, generation };
-            return ProcessHandleOfSlot::Live(live);
-        }
-    }
+    let mut address: RegionHeld(ProcessRecord) = process_pool_held_at(slot);
+    if (region_held_address(address) == 0) { return ProcessHandleOfSlot::Absent; }
+    let mut live: ProcessHandle = { address, region_held_generation(address) };
+    return ProcessHandleOfSlot::Live(live);
 }
 
 // The takes a slot walk asks for: a slot that holds no process is Missing,
@@ -10890,14 +11064,13 @@ private fn scheduled_process_blocked_take_slot(guard: borrow ProcessRunGuard[loc
 // Coherent allocator metadata, independent of the process run-lock snapshot.
 fn scheduled_process_pool_space_stats()
         -> (usize, usize, usize, usize, usize, usize) !{unsafe} {
-    let guard = intrusive_pool_lock(&scheduled_process_pool);
-    let chunks: usize = intrusive_pool_chunk_count(&scheduled_process_pool);
-    let capacity: usize = chunks * intrusive_pool_slots_per_chunk(&scheduled_process_pool);
-    let live: usize = intrusive_pool_live_count(&scheduled_process_pool);
-    let chunk_bytes: usize = intrusive_pool_chunk_bytes(&scheduled_process_pool);
-    intrusive_pool_unlock(&scheduled_process_pool, guard);
-    return (chunks, capacity, live, chunks * chunk_bytes,
-            sizeof(IntrusiveSlot(ProcessRecord)), chunk_bytes);
+    let guard = process_pool_lock();
+    let (chunks, capacity, live, bytes) = region_pool_space_stats(guard);
+    process_pool_unlock(guard);
+    // A RegionPool slot is the record itself; its state word is in the
+    // chunk header, eight bytes per slot.
+    return (chunks, capacity, live, bytes, sizeof(ProcessRecord),
+            PROCESS_POOL_CHUNK_PAGES * PAGE_SIZE);
 }
 
 fn kernel_process_parent_is_root_locked(guard: borrow ProcessRunGuard[lock]) -> bool {

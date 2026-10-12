@@ -23,14 +23,13 @@ from pass_line import CaseCount, report_pass
 REPO = pathlib.Path(__file__).resolve().parent.parent
 CHECK = "scripts/check_slot_proof_dropped_to_index.py"
 SOURCE = "kernel/kernel/synthetic.tkb"
-DEFINING = "kernel/lib/intrusive_pool.tkb"
 
 CARRIES = '''private fn synthetic_handle_of_slot(slot: usize) -> ProcessHandle {
     match intrusive_pool_probe_slot(&pool, slot) {
         IntrusiveSlotProbe::NoPayload => { return absent; }
         IntrusiveSlotProbe::Live(slot_view) => {
-            let generation: usize = intrusive_view_generation(slot_view);
-            intrusive_view_drop(slot_view);
+            let generation: usize = region_held_view_ref(slot_view);
+            region_held_view_drop(slot_view);
             return live;
         }
     }
@@ -41,30 +40,30 @@ INDEX_ONLY = '''private fn synthetic_next_live_slot(slot: usize) -> usize {
     match intrusive_pool_probe_slot(&pool, slot) {
         IntrusiveSlotProbe::NoPayload => { return 0; }
         IntrusiveSlotProbe::Live(slot_view) => {
-            intrusive_view_drop(slot_view);
+            region_held_view_drop(slot_view);
             return slot;
         }
     }
 }
 '''
 
-# The two the repository declares, reproduced so a synthetic tree can carry
+# The ones the repository declares, reproduced so a synthetic tree can carry
 # the same declarations the real one does.
-DECLARED = '''private fn scheduled_process_live_pool_slot_from(cursor: usize) -> usize {
+DECLARED = '''private fn kernel_process_protocol_observe(cursor: usize) -> usize {
     match intrusive_pool_probe_slot(&pool, cursor) {
         IntrusiveSlotProbe::NoPayload => { return 0; }
         IntrusiveSlotProbe::Live(slot_view) => {
-            intrusive_view_drop(slot_view);
+            region_held_view_drop(slot_view);
             return cursor;
         }
     }
 }
 
-fn scheduled_process_slot_valid(slot: usize) -> bool {
+fn pool_walk_read(slot: usize) -> bool {
     match intrusive_pool_probe_slot(&pool, slot) {
         IntrusiveSlotProbe::NoPayload => { return false; }
         IntrusiveSlotProbe::Live(slot_view) => {
-            intrusive_view_drop(slot_view);
+            region_held_view_drop(slot_view);
             return true;
         }
     }
@@ -75,31 +74,25 @@ DECLARED += """
 private fn scheduled_process_scalar_snapshot(slot: usize) -> ProcessRecordScalarSnapshot {
     let slot_view = probe(slot);
     let snapshot = copy_fields(payload(slot_view));
-    intrusive_view_drop(slot_view);
+    region_held_view_drop(slot_view);
     return snapshot;
 }
 private inline fn scheduled_process_locked_view_drop(source: sink ProcessRecordLockedView[l, p]) {
-    intrusive_view_drop(source.live);
+    region_held_view_drop(source.live);
 }
 private inline fn scheduled_process_current_view_drop(source: sink ProcessRecordCurrentView[g, p]) {
-    intrusive_view_drop(source.live);
+    region_held_view_drop(source.live);
 }
-fn machine_pool_view_drop(source: sink MachineSlotView[s, p]) {
-    intrusive_view_drop(source.live);
+private inline fn scheduled_process_owned_view_drop(source: sink ProcessRecordOwnedView[g, p]) {
+    region_held_view_drop(source.live);
 }
 """
-
 
 def build(root, body):
     (root / "scripts").mkdir(parents=True)
     for script in ("check_slot_proof_dropped_to_index.py", "pass_line.py"):
         shutil.copy(REPO / "scripts" / script, root / "scripts" / script)
     (root / "kernel" / "kernel").mkdir(parents=True)
-    (root / "kernel" / "lib").mkdir(parents=True)
-    # The defining file is skipped by name, so its content only has to exist.
-    (root / DEFINING).write_text(
-        "fn intrusive_view_drop(slot_view: sink IntrusiveSlotView) {}\n",
-        encoding="ascii")
     (root / SOURCE).write_text(DECLARED + body, encoding="ascii")
 
 
@@ -154,11 +147,11 @@ def main() -> int:
         "synthetic_next_live_slot")
     failures += case(
         "a transferred proof release cannot start returning an index",
-        "private inline fn scheduled_process_current_view_drop(source: sink ProcessRecordCurrentView[g, p]) -> usize { intrusive_view_drop(source.live); return 1; }\n",
+        "private inline fn scheduled_process_current_view_drop(source: sink ProcessRecordCurrentView[g, p]) -> usize { region_held_view_drop(source.live); return 1; }\n",
         "must consume its stored proof")
     failures += case(
         "a stopped proof release cannot start returning an index",
-        "fn machine_pool_view_drop(source: sink MachineSlotView[s, p]) -> usize { intrusive_view_drop(source.live); return 1; }\n",
+        "private inline fn scheduled_process_owned_view_drop(source: sink ProcessRecordOwnedView[g, p]) -> usize { region_held_view_drop(source.live); return 1; }\n",
         "must consume its stored proof")
     # The same function written so its answer stays checkable is accepted,
     # which is what makes this a rule rather than a ban on dropping.
@@ -169,7 +162,7 @@ def main() -> int:
     # A prose mention is not a call, in either direction.
     failures += case(
         "prose naming the drop",
-        "// intrusive_view_drop( is named here in a comment\n",
+        "// region_held_view_drop( is named here in a comment\n",
         "", should_fail=False)
 
     # A declaration is a claim, so it has to keep describing something. Both
@@ -177,18 +170,18 @@ def main() -> int:
     # carrying a generation and no longer needs the exemption.
     for name, replaced, want in (
         ("a declared function that stopped dropping a view",
-         DECLARED.replace("            intrusive_view_drop(slot_view);\n"
+         DECLARED.replace("            region_held_view_drop(slot_view);\n"
                           "            return cursor;",
                           "            return cursor;"),
          "no longer drops one"),
         ("a declared function that now carries a generation",
          DECLARED.replace("        IntrusiveSlotProbe::Live(slot_view) => {\n"
-                          "            intrusive_view_drop(slot_view);\n"
+                          "            region_held_view_drop(slot_view);\n"
                           "            return cursor;",
                           "        IntrusiveSlotProbe::Live(slot_view) => {\n"
                           "            let generation: usize = "
-                          "intrusive_view_generation(slot_view);\n"
-                          "            intrusive_view_drop(slot_view);\n"
+                          "region_held_view_ref(slot_view);\n"
+                          "            region_held_view_drop(slot_view);\n"
                           "            return cursor;"),
          "now keeps one"),
     ):

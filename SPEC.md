@@ -465,7 +465,7 @@ parameter value, or top-level declaration name.
   declaration-order tag zero, inherited from a zero-initialized global
   rather than written by anyone, so a `T` placed in recycled storage
   would read a previous occupant's tag as a live payload. Expression
-  position only. `kernel/lib/intrusive_pool.tkb`'s two allocation entry
+  position only. `linux_user/intrusive_pool/intrusive_pool_lib.tkb`'s two allocation entry
   points are the worked example (GitHub issue #369).
 - `offsetof(StructName, field)` -- compile-time byte offset of `field`
   within `StructName`'s actual layout, type `usize`. Same DataLayout
@@ -1678,7 +1678,7 @@ zero-initialized nor fresh therefore compiles, and its first
 recycled slot that means a linear payload nobody created. Proving the
 pointer names a stable global is place tracking, which is outlook (see
 `OWNERSHIP_KERNEL.md`). Until then, an allocator handing out such storage
-owes the zeroing itself -- `kernel/lib/intrusive_pool.tkb` does, and
+owes the zeroing itself -- `linux_user/intrusive_pool/intrusive_pool_lib.tkb` does, and
 rejects the unzeroed path with `contains_stable_owner(T)` (GitHub issue
 #369). The container itself must be a `private let mut`
 global, OR a fixed-size array of one (`private let mut slots: [OwnerChan; N];`
@@ -3740,9 +3740,11 @@ returns `RegionInspectionProbe(T)[pool, scope]`, with `Busy`, `Stale`, and
 `Inspected(inspection)` cases. The controller pointer's element type is a
 compile-time generic; its static address supplies `scope`. `Busy` is checked
 before traversing any chunk metadata. An unheld pool validates membership,
-element alignment, Live state, and generation before issuing the one-word
+element alignment, Live or Held state, and generation before issuing the one-word
 linear `RegionInspection(T)[pool, scope]`. It never acquires a lock or changes
-the pin count. The mint asserts that every mutator is quiescent for the whole
+the pin count. A stopped walk that has only an address names its occupant with
+`region_pool_generation_unproven__T(&pool, address)` (0 for a slot that is
+neither Live nor Held), read with no lock. The mint asserts that every mutator is quiescent for the whole
 loan, including the calling CPU's interrupt paths; the lock test alone does
 not establish this. It is not a concurrent substitute for `region_pin`.
 
@@ -3752,7 +3754,7 @@ The pointer cannot be used after consumption. Region take, retire, free,
 and chunk shrink invalidate live inspections and their lexical pointer loans.
 An external quiescence controller must additionally declare its own context
 change boundaries for each inspection type it permits. The maintained
-kernel has four private mints borrowing the production full-machine stop;
+kernel has five private mints borrowing the production full-machine stop;
 a source gate holds that set and its resume/start annotations complete.
 Physical CPU holding, IRQ masking and the mint's metadata interpretation
 remain trusted. The ordinary `no_copy` rule still forbids copying an entire

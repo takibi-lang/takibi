@@ -27,7 +27,7 @@
 // What this fixture is not: the migration. No TCP logic, no wire format.
 // It is the shape, so that finding a hole costs an afternoon here rather
 // than a bisect through kernel/net/.
-use "kernel/lib/intrusive_pool.tkb";
+use "linux_user/intrusive_pool/intrusive_pool_lib.tkb";
 
 const MTU: usize = 1514;
 

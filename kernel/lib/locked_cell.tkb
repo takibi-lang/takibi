@@ -52,7 +52,7 @@
 //
 // WHY NOT pool_lock_acquire
 //
-// The same reason kernel/lib/intrusive_pool.tkb's tag counter gives: a
+// The same reason linux_user/intrusive_pool/intrusive_pool_lib.tkb's tag counter gives: a
 // tag registers the acquire in linux_user's lock-ORDER table, that table
 // is finite, and a cell is not a pool. Putting non-pools in it pushed
 // real pool acquires out as "untracked" once already.

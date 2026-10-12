@@ -1,8 +1,6 @@
 schedule contention stage: unlocked
 schedule contention stage: locked
 schedule contention: two cores claiming one Ready process, the race shown without the lock and gone with it ok
-tag contention stage: complete
-tag contention: two cores minting a pool tag, every one advanced the counter once ok
 pid contention stage: unlocked
 pid contention stage: locked
 pid contention: two cores minting, every pid advanced the counter once ok
@@ -31,7 +29,7 @@ tcp pin cost evidence: 7 samples of 4096 operations and checksums consumed ok
 tcp pool cost evidence: all online cores completed every lock and owner sample ok
 pin sharing evidence: same-chunk layouts checked, every online core completed and the page returned ok
 pool walk stage: complete
-pool walk: a Live view holds the read lock through payload use, and a stale released-chunk cursor is refused ok
+pool walk: a walk's reference to a record freed under it is refused, and the floor reads back ok
 ext2 mutation contention reader: control-overlap=1 waited-overlap=0
 ext2 mutation contention core0 reader: control-overlap=1 waited-overlap=0
 ext2 mutation contention stage: complete

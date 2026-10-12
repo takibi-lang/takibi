@@ -1,6 +1,8 @@
 // GitHub issue #445's remaining acceptance criterion: two cores contending
-// on one IntrusivePool, allocating and freeing concurrently, in a test that
-// FAILS when the acquire is removed.
+// on one pool, allocating and freeing concurrently, in a test that FAILS
+// when the acquire is removed. Since GitHub issue #745 the pool is the
+// built-in RegionPool and a cycle is the process records' lifecycle:
+// allocate, hold, take the held permission back, free.
 //
 // It could not be written before #447 -- there was no second core running
 // kernel code to contend with. What it establishes is the one thing the
@@ -24,13 +26,11 @@
 //   a race this misses on one boot it may miss on every boot. What it is
 //   for is the substitution -- remove the acquire and it fails -- which is
 //   deterministic in a way the race itself is not.
-// - THE SECONDARY CORE MUST NOT REACH THE PAGE ALLOCATOR. Freeing a
-//   chunk's last slot releases its page (intrusive_pool_remove ->
-//   intrusive_pool_release_chunk), and the page allocator is kernel state
-//   with its own single-core assertion. CONTENTION_FLOOR is what keeps
-//   that from happening: those slots are allocated before anything is
-//   armed and held until after both cores have stopped, so no chunk ever
-//   empties and no cycle's free releases a page.
+// - THE SECONDARY CORE MUST NOT REACH THE PAGE ALLOCATOR. A RegionPool
+//   grows only when asked and never shrinks on its own, so core 0 grows
+//   the pool's one chunk before anything is armed and a cycle that finds
+//   it Full fails rather than growing. CONTENTION_FLOOR keeps slots Held
+//   for the whole run, as process records are.
 // - The two cores run for different lengths. Core 0 does a fixed number of
 //   rounds and then disarms; core 1 spins on the armed flag and stops when
 //   it clears. So the cycle counts are not comparable and nothing here
@@ -38,10 +38,6 @@
 //   makes it contention rather than one core taking turns with itself.
 
 use "kernel/lib/peer_tick_window.tkb";
-use "kernel/lib/intrusive_pool.tkb";
-
-// Pointer-sized at least, which IntrusivePool requires because the free
-// chain shares the slot's storage.
 struct ContentionItem {
     stamp: usize;
 }
@@ -73,8 +69,10 @@ const CONTENTION_ROUNDS: usize = 4096;
 // is not to depend on it.
 const CONTENTION_OUTSIDE_WORK: usize = 64;
 
-private let mut contention_pool: IntrusivePool(ContentionItem);
+private let mut contention_pool: RegionPool(ContentionItem);
 private let mut contention_pool_ready: bool = false;
+private let mut contention_pool_grown: bool = false;
+const CONTENTION_CHUNK_PAGES: usize = 1;
 
 // The handshake and the results. Atomics, not `io`, because these are read
 // and written by two cores at the same time -- which is the one situation
@@ -116,49 +114,97 @@ private fn contention_overlap_address() -> *AtomicWord {
 }
 
 
-private fn contention_pool_init() {
+private fn contention_pool_lock()
+        -> RegionPoolGuard(ContentionItem)[&contention_pool] !{unsafe} {
+    let flags: usize = mutex_irq_save();
+    return region_pool_lock_saving(&contention_pool, flags);
+}
+
+private fn contention_pool_unlock(
+        guard: sink RegionPoolGuard(ContentionItem)[&contention_pool]) {
+    mutex_irq_restore(region_pool_unlock_saved(guard));
+}
+
+// Core 0 only, before arming: the pool's one chunk.
+private fn contention_pool_init() !{unsafe} {
     if (contention_pool_ready) { return; }
     contention_pool_ready = true;
-    intrusive_pool_init(&contention_pool);
+    match page_alloc_contiguous(CONTENTION_CHUNK_PAGES, PageOwnerTag::PoolChunk) {
+        PageRunAllocResult::OutOfMemory => {}
+        PageRunAllocResult::Allocated(run_owner) => {
+            let base: usize = page_run_physical_address(run_owner);
+            let RegionBytes::Assumed(chunk) = page_run_into_region(run_owner) else {};
+            let guard = contention_pool_lock();
+            match region_pool_grow(guard, chunk) {
+                RegionGrow(ContentionItem)::Grown => { contention_pool_grown = true; }
+                RegionGrow(ContentionItem)::TooSmall(back) => {
+                    region_release(back);
+                    page_run_transferred_release_physical(base, CONTENTION_CHUNK_PAGES);
+                }
+            }
+            contention_pool_unlock(guard);
+        }
+    }
+}
+
+// A slot allocated and Held, or none when the pool is full.
+private fn contention_hold() -> RegionHeld(ContentionItem) !{unsafe} {
+    let guard = contention_pool_lock();
+    let mut held: RegionHeld(ContentionItem) = region_held_none__ContentionItem();
+    match region_alloc(guard) {
+        RegionPoolAlloc(ContentionItem)::Full => {}
+        RegionPoolAlloc(ContentionItem)::Exhausted => {}
+        RegionPoolAlloc(ContentionItem)::Allocated(slot) => {
+            held = region_hold(guard, slot);
+        }
+    }
+    contention_pool_unlock(guard);
+    return held;
+}
+
+// The held permission back out and freed; false when it was not Held.
+private fn contention_release(held: RegionHeld(ContentionItem)) -> bool !{unsafe} {
+    let guard = contention_pool_lock();
+    match region_take_held(guard, held) {
+        RegionTake(ContentionItem)::Stale => {
+            contention_pool_unlock(guard);
+            return false;
+        }
+        RegionTake(ContentionItem)::Taken(slot) => {
+            region_free(guard, slot);
+            contention_pool_unlock(guard);
+            return true;
+        }
+    }
+}
+
+private fn contention_live_count() -> usize !{unsafe} {
+    let guard = contention_pool_lock();
+    let held: usize = region_pool_held_count(guard);
+    contention_pool_unlock(guard);
+    return held;
 }
 
 // One allocate/free cycle. Both cores run THIS function, which is the
 // point: the same code, the same pool, the same lock, at the same time.
 //
-// A failed remove is the direct symptom of a lost race. If two cores are
-// handed the same slot, one of them frees it and the other's remove finds
-// a generation that is no longer its own -- StaleHandle -- rather than
-// corrupting anything. The pool refusing is itself the detector, which is
-// why this counts refusals rather than trying to catch the overlap.
+// A refused take is the direct symptom of a lost race. If two cores are
+// handed the same slot, one of them takes its permission back and frees it
+// and the other's take finds it no longer Held under its generation --
+// Stale -- rather than corrupting anything. The pool refusing is itself
+// the detector, which is why this counts refusals rather than trying to
+// catch the overlap.
 private fn contention_cycle() -> bool !{unsafe} {
-    let guard = intrusive_pool_lock(&contention_pool);
-    let inserted = intrusive_pool_insert_zeroed(&contention_pool, guard);
-    intrusive_pool_unlock(&contention_pool, guard);
-    match inserted {
-        IntrusivePoolInsertResult::OutOfMemory => {
-            return false;
-        }
-        IntrusivePoolInsertResult::Allocated(owner) => {
-            let mut address: IntrusiveSlotAddress = intrusive_owner_slot(owner);
-            let generation: usize = intrusive_owner_generation(owner);
-            intrusive_owner_drop(owner);
-            let handle = intrusive_owner_new(&contention_pool, address,
-                                             generation);
-            let release = intrusive_pool_lock(&contention_pool);
-            let (ok, reason) = intrusive_remove_outcome(
-                intrusive_pool_remove(&contention_pool, release, handle));
-            intrusive_pool_unlock(&contention_pool, release);
-            if (ok == false) {
-                atomic_word_fetch_add(
-                    contention_failed_removes_address(), 1);
-                return false;
-            }
-            // Outside the lock, on both cores, for the reason
-            // CONTENTION_OUTSIDE_WORK states.
-            for spin: usize in 0..<CONTENTION_OUTSIDE_WORK { }
-            return true;
-        }
+    let mut held: RegionHeld(ContentionItem) = contention_hold();
+    if (region_held_address(held) == 0) { return false; }
+    if (contention_release(held) == false) {
+        atomic_word_fetch_add(contention_failed_removes_address(), 1);
+        return false;
     }
+    // Outside the lock, on both cores, for the reason
+    // CONTENTION_OUTSIDE_WORK states.
+    for spin: usize in 0..<CONTENTION_OUTSIDE_WORK { }
+    return true;
 }
 
 // Called by the secondary core from its idle loop. Spins while core 0 keeps
@@ -228,7 +274,7 @@ private fn contention_report(stage: *u8) !{unsafe} {
     kernel_boot_log(" refused=");
     uart_put_udec(atomic_word_load(contention_failed_removes_address()));
     kernel_boot_log(" live=");
-    uart_put_udec(intrusive_pool_live_count(&contention_pool));
+    uart_put_udec(contention_live_count());
     kernel_boot_log(" overlap=");
     uart_put_udec(atomic_word_load(contention_overlap_address()));
     kernel_boot_log("\n");
@@ -242,27 +288,18 @@ fn pool_contention_probe() -> bool !{unsafe} {
     // The floor. Allocated before anything is armed and held for the whole
     // run, so no chunk ever empties and no cycle reaches the page
     // allocator. Their addresses are kept so they can be given back.
-    let mut floor_address: [usize; CONTENTION_FLOOR];
-    let mut floor_generation: [usize; CONTENTION_FLOOR];
+    let mut floor: [RegionHeld(ContentionItem); CONTENTION_FLOOR];
     let mut held: usize = 0;
+    if (contention_pool_grown == false) {
+        contention_report("floor" as *u8);
+        return false;
+    }
     for i: usize in 0..<CONTENTION_FLOOR {
-        let guard = intrusive_pool_lock(&contention_pool);
-        let inserted = intrusive_pool_insert_zeroed(&contention_pool, guard);
-        intrusive_pool_unlock(&contention_pool, guard);
-        match inserted {
-            IntrusivePoolInsertResult::OutOfMemory => { }
-            IntrusivePoolInsertResult::Allocated(owner) => {
-                // Indexed by the loop variable, not by `held`: `i`
-                // carries the proven range and `held` does not, which
-                // --forbid-trap says out loud. They are equal on every
-                // path that reaches the check below.
-                floor_address[i] = intrusive_slot_address_identity(
-                    intrusive_owner_slot(owner));
-                floor_generation[i] = intrusive_owner_generation(owner);
-                intrusive_owner_drop(owner);
-                held = held + 1;
-            }
-        }
+        // Indexed by the loop variable, not by `held`: `i` carries the
+        // proven range and `held` does not, which --forbid-trap says out
+        // loud. They are equal on every path that reaches the check below.
+        floor[i] = contention_hold();
+        if (region_held_address(floor[i]) != 0) { held = held + 1; }
     }
     if (held != CONTENTION_FLOOR) {
         contention_report("floor" as *u8);
@@ -371,15 +408,7 @@ fn pool_contention_probe() -> bool !{unsafe} {
     }
 
     for i: usize in 0..<CONTENTION_FLOOR {
-        let mut address: IntrusiveSlotAddress = intrusive_pool_validated_address(
-            &contention_pool, floor_address[i], floor_generation[i]);
-        let handle = intrusive_owner_new(
-            &contention_pool, address, floor_generation[i]);
-        let guard = intrusive_pool_lock(&contention_pool);
-        let (ok, reason) = intrusive_remove_outcome(
-            intrusive_pool_remove(&contention_pool, guard, handle));
-        intrusive_pool_unlock(&contention_pool, guard);
-        if (ok == false) {
+        if (contention_release(floor[i]) == false) {
             contention_report("floor-not-returned" as *u8);
             return false;
         }
@@ -390,7 +419,7 @@ fn pool_contention_probe() -> bool !{unsafe} {
     let secondary: usize = atomic_word_load(contention_secondary_cycles_address());
     let refused: usize = atomic_word_load(contention_failed_removes_address());
     let overlap: usize = atomic_word_load(contention_overlap_address());
-    let live: usize = intrusive_pool_live_count(&contention_pool);
+    let live: usize = contention_live_count();
     return primary == CONTENTION_ROUNDS && secondary == CONTENTION_ROUNDS &&
            overlap > 0 && refused == 0 && live == 0;
 }

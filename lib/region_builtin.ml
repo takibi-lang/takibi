@@ -780,7 +780,9 @@ fn region_pool_inspect_unproven__@T@(C: type, p: *@P@ @ b,
             if ((address - base) % sizeof(@T@) != 0) { return @IP@::Stale; }
             let slot: usize = (address - base) / sizeof(@T@);
             let w: usize = unsafe { atomic_load_acquire(pool_word(chunk, 3 + slot) as usize) };
-            if ((w & 3) != @T@__REGION_LIVE ||
+            // Live, or Held for its owner's life (#745).
+            if (((w & 3) != @T@__REGION_LIVE &&
+                    (w & @T@__REGION_HELD_MASK) != @T@__REGION_HELD) ||
                     (w >> @T@__POOL_GEN_SHIFT) != generation) {
                 return @IP@::Stale;
             }
@@ -790,6 +792,29 @@ fn region_pool_inspect_unproven__@T@(C: type, p: *@P@ @ b,
         chunk = *pool_word(chunk, 0);
     }
     return @IP@::Stale;
+}
+
+// The generation of the Live or Held slot at `address`, 0 for any other
+// state or address, read with no lock: for a stopped-machine walk that
+// has an address and must name its occupant to inspect it (#745).
+fn region_pool_generation_unproven__@T@(p: *@P@ @ b, address: usize) -> usize !{unsafe} {
+    let mut chunk: usize = p.first;
+    while (chunk != 0) {
+        let base: usize = pool_slots_base(chunk);
+        let count: usize = *pool_word(chunk, 1);
+        if (address >= base && address < base + count * sizeof(@T@)) {
+            if ((address - base) % sizeof(@T@) != 0) { return 0; }
+            let w: usize = unsafe { atomic_load_acquire(
+                pool_word(chunk, 3 + (address - base) / sizeof(@T@)) as usize) };
+            if ((w & 3) != @T@__REGION_LIVE &&
+                    (w & @T@__REGION_HELD_MASK) != @T@__REGION_HELD) {
+                return 0;
+            }
+            return w >> @T@__POOL_GEN_SHIFT;
+        }
+        chunk = *pool_word(chunk, 0);
+    }
+    return 0;
 }
 
 fn region_inspection_at(inspected: borrow @IV@[b, scope]) -> *@T@ @ scope !{unsafe} {

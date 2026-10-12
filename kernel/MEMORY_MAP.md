@@ -258,7 +258,7 @@ parking.
 | IRQ handler | `.stack`, symbols above | same |
 | Per process | a `page_alloc_contiguous(8)` run, anywhere at or above `usable_ram_start` | `scheduled_process_table_probe` |
 
-Pool chunks (`kernel/lib/intrusive_pool.tkb`) are also aligned page runs,
+Pool chunks (`linux_user/intrusive_pool/intrusive_pool_lib.tkb`) are also aligned page runs,
 of 1 to 8 pages depending on the pooled type's size. They are not stacks,
 but they share the property that makes an address answerable: a run is
 aligned to its own size, so masking an address gives its chunk base.

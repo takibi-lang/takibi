@@ -60,8 +60,6 @@ EXEMPT = {
         "the two-core probes; every shared word is an atomic by design",
     "kernel/pid_contention_evidence.tkb":
         "the two-core probes; every shared word is an atomic by design",
-    "kernel/tag_contention_evidence.tkb":
-        "the two-core probes; every shared word is an atomic by design",
     "kernel/schedule_contention_evidence.tkb":
         "the two-core probes; every shared word is an atomic by design",
     "kernel/occupancy_drain_evidence.tkb":
@@ -146,10 +144,6 @@ EXEMPT = {
         "left (asid_bits, asid_last, asid_ready) is written once by "
         "asid_init in the MMU-off window, before PSCI has been asked for a "
         "second core",
-    "lib/intrusive_pool.tkb":
-        "GitHub issue #479: mutable pool metadata is protected by the pool "
-        "Mutex; mutations require its indexed guard and ordinary Live views "
-        "own the same lock through payload use",
     "kernel/irq_counts.tkb":
         "per-CPU rows are indexed below KERNEL_MAX_CORES; each is written "
         "only by its own CPU's IRQ dispatch and read by DDB under a world "

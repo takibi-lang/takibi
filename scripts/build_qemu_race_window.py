@@ -204,7 +204,7 @@ WINDOWS = {
 PROBE_ENTRIES = (
     "pool_contention", "freelist_contention", "page_contention",
     "asid_contention", "fd_refcount_contention", "pid_contention",
-    "tag_contention", "schedule_contention", "occupancy_drain",
+    "schedule_contention", "occupancy_drain",
     "console_contention", "init_once_contention", "tcp_connection_contention",
     "world_stop_peer_probe", "pool_walk_contention", "ext2_mutation_contention",
     "signal_contention",

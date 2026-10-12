@@ -15,7 +15,7 @@ def main() -> int:
         "public view mint": source.replace(
             "private linear view ProcessCurrent[", "linear view ProcessCurrent[", 1),
         "owner lookup restores raw escape": source.replace(
-            "let record = scheduled_process_transfer_owned_loan(live, owner);",
+            "let record = scheduled_process_transfer_owned_loan(source, owner);",
             "let record = scheduled_process_record_at(owner.pool_index);", 1),
         "owned transfer marker": source.replace(
             "unsafe, loan_transfer", "unsafe", 1),

@@ -401,10 +401,12 @@ initializer, and a lazy initializer is what raced before the lock existed.
 
 ## Liveness proofs for pooled objects
 
-`IntrusivePool` hands out a linear `IntrusiveSlotView` on a successful probe,
-and an `IntrusiveOwner` on a successful allocation. Both are proofs that a slot
-is occupied. The payload accessors take them as `borrow` and return `*T @ id`,
-so a payload pointer cannot outlive the proof.
+Every kernel pool is the built-in `RegionPool`. A process record is Held for
+its process's life (GitHub issue #745): `region_probe_held` hands out a linear
+`RegionHeldView` while the slot is Held under the generation the caller
+names, and the record accessor borrows it, so a record reference cannot
+outlive the proof. (`linux_user/intrusive_pool/intrusive_pool_lib.tkb` keeps
+the older `IntrusiveSlotView`/`IntrusiveOwner` shape for its shape tests.)
 
 This is the at-view discipline: the VALUE (a handle) stays copyable and
 storable in a tree, while the PROOF remains linear, including inside a
@@ -416,12 +418,14 @@ reader keeps its owner or view, transfers the loan to a stronger authority,
 or copies values before ending the view. The source gate rejects any renewed
 call to either legacy escape name.
 
-A normal view is also the pool-lock owner, so another core cannot free or
-replace its occupant until the view is consumed. A slot-only probe answers for
-whoever occupies that slot and therefore cannot compare the generation a
-caller expected; handle-based callers use `intrusive_pool_probe_handle` for
-that check. Stopped inspection instead needs MachineStopped, preserves that
-authority in its loan, and refuses busy metadata before traversing it.
+A process record view is taken under the pool lock and either read inside it
+or transferred to the run guard, the running process or its owner -- the
+authorities under which a record is never reaped -- before the lock is let
+go. A slot-only walk (`region_pool_first_unproven`) answers for whoever
+occupies a slot; it names the occupant's generation (`region_held_at`) and
+every read probes again under the lock. Stopped inspection instead needs
+MachineStopped, preserves that authority in its loan, and refuses busy
+metadata before traversing it.
 
 ## Reporters must not take locks
 

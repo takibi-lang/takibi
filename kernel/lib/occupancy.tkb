@@ -91,7 +91,6 @@ use "kernel/lib/atomic_word.tkb";
 use "kernel/arch/arm64/kernel/timer.tkb";
 use "kernel/lib/execution_model.tkb";
 use "kernel/lib/peer_tick_window.tkb";
-use "kernel/lib/intrusive_pool.tkb";
 
 // Shared bounded wait for diagnostics and their held-pool regression.
 const DDB_WORLD_STOP_SPINS: usize = 10000000;
@@ -167,18 +166,6 @@ linear struct MachineStopped[stop: addr] {
     private participants: CpuParticipants[stop];
     private owner: usize;
     private irq_flags: usize;
-}
-
-// A pool view stamped with the stop context. Its own lifetime must end
-// before resume or destruction, even if no payload pointer was yet derived.
-private linear struct MachineSlotView[stop: addr, pool: addr] {
-    private live: IntrusiveSlotView[pool];
-}
-
-must_use variant MachineSlotProbe[stop: addr, pool: addr] {
-    Busy;
-    Missing;
-    Live(MachineSlotView[stop, pool]);
 }
 
 linear struct MachineStopPartial[stop: addr] {
@@ -453,42 +440,12 @@ fn machine_stopped_mask(machine: borrow MachineStopped[id]) -> usize {
     return mask;
 }
 
-// The unlocked proof stays inside this boundary; callers receive a scope
-// whose stop and pool identities the checker retains through every read.
-fn machine_pool_probe(T: type, pool: &mut IntrusivePool(T) @ pool_id,
-                      stopped: borrow MachineStopped[stop], slot: usize)
-        -> MachineSlotProbe[stop, pool_id] !{unsafe, irq_masking_guard} {
-    if (intrusive_pool_inspection_busy(pool)) { return MachineSlotProbe::Busy; }
-    match intrusive_pool_probe_slot_unproven(pool, slot) {
-        IntrusiveSlotProbe::NoPayload => { return MachineSlotProbe::Missing; }
-        IntrusiveSlotProbe::Live(live) => {
-            let mut scoped: MachineSlotView[stop, pool_id] = { live };
-            return MachineSlotProbe::Live(scoped);
-        }
-    }
-}
-
-fn machine_pool_payload(T: type, pool: &mut IntrusivePool(T) @ pool_id,
-                        scoped: borrow MachineSlotView[stop, pool_id])
-        -> *T @ stop !{unsafe} {
-    return intrusive_pool_payload_of(pool, scoped.live);
-}
-
-// Read the occupant stamp without taking a lock on the stopped machine.
-fn machine_pool_view_generation(scoped: borrow MachineSlotView[stop, pool_id]) -> usize {
-    return intrusive_view_generation(scoped.live);
-}
-
-fn machine_pool_view_drop(source: sink MachineSlotView[stop, pool_id]) {
-    intrusive_view_drop(source.live);
-}
-
 // Reserving a CPU changes the logical participant context. These annotations
 // also reject starts in a caller retaining a machine authority or its loans.
 fn cpu_start_reserve(core: {0..<KERNEL_MAX_CORES as usize})
         -> CpuStartResult[&kernel_world_stop]
         !{unsafe, irq_masking_guard, lock_guard_40_world_stop, changes_witness_CpuParticipants, changes_witness_MachineStopped,
-          changes_witness_MachineSlotView,
+          changes_witness_RegionInspection__ProcessRecord,
           changes_witness_RegionInspection__AddressSpaceBacking,
           changes_witness_RegionInspection__ProcessFdContext,
           changes_witness_RegionInspection__FdBlock,
@@ -537,7 +494,7 @@ fn cpu_start_finish(start: sink CpuStart[&kernel_world_stop], status: usize)
 
 private fn cpu_start_gate_release()
         !{unsafe, changes_witness_CpuStart, changes_witness_CpuParticipants,
-          changes_witness_MachineStopped, changes_witness_MachineSlotView,
+          changes_witness_MachineStopped, changes_witness_RegionInspection__ProcessRecord,
           changes_witness_RegionInspection__AddressSpaceBacking,
           changes_witness_RegionInspection__ProcessFdContext,
           changes_witness_RegionInspection__FdBlock,
@@ -588,7 +545,7 @@ private fn world_stop_resume(stop: *WorldStop @ id)
         !{unsafe, changes_witness_WorldStopped, changes_witness_WorldStopPartial,
           changes_witness_MachineStopped, changes_witness_MachineStopPartial,
           changes_witness_CpuParticipants, changes_witness_CpuStart,
-          changes_witness_MachineSlotView,
+          changes_witness_RegionInspection__ProcessRecord,
           changes_witness_RegionInspection__AddressSpaceBacking,
           changes_witness_RegionInspection__ProcessFdContext,
           changes_witness_RegionInspection__FdBlock,
@@ -728,9 +685,3 @@ fn occupancy_drain(region: *Occupancy @ id, spins: usize)
 // that obligation real.
 fn quiesced_release(proof: sink Quiesced[id]) {}
 
-// Preserve whole-machine authority while exposing a validated record.
-fn machine_pool_record(T: type, pool: borrow &mut IntrusivePool(T) @ pool_id,
-                       scoped: borrow MachineSlotView[stop, pool_id])
-        -> &mut T @ stop !{unsafe} {
-    return intrusive_pool_record_of(pool, scoped.live);
-}

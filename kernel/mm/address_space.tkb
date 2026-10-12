@@ -1,7 +1,6 @@
 use "kernel/mm/page.tkb";
 use "kernel/mm/memory_map.tkb";
 use "kernel/lib/execution_model.tkb";
-use "kernel/lib/intrusive_pool.tkb";
 use "kernel/arch/arm64/mm/mmu.tkb";
 use "kernel/arch/arm64/mm/asid.tkb";
 

@@ -44,7 +44,7 @@ def main():
             source.parent.mkdir(parents=True)
             # The check also reads the pool libraries (GitHub issue #343);
             # one with only a bound payload accessor keeps that half clean.
-            pool = Path('kernel/lib/intrusive_pool.tkb')
+            pool = Path('linux_user/intrusive_pool/intrusive_pool_lib.tkb')
             pool.parent.mkdir(parents=True)
             pool.write_text('fn intrusive_pool_ref(T: type, o: borrow O[a]) -> *T @ a {}\n',
                             encoding='ascii')

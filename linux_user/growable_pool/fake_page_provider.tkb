@@ -43,7 +43,7 @@ const PAGE_COUNT: usize = 64;
 //
 // What issue #349 durably bought was never the placement but the
 // ABSTRACTION: where a pool's metadata lives is the provider's policy, and
-// a provider is free to have none. kernel/lib/intrusive_pool.tkb keeps its
+// a provider is free to have none. linux_user/intrusive_pool/intrusive_pool_lib.tkb keeps its
 // chunk header inside the chunk since #350 and asks no provider anything.
 //
 // Aligned to 16 pages rather than 1 (GitHub issue #363). A run's
@@ -87,7 +87,7 @@ private let mut fake_page_run_length: [usize; PAGE_COUNT];
 // GitHub issue #384: who the page was handed to. The real provider keeps
 // this in PageMeta; here it is its own array, because this stand-in has
 // no PageMeta. What matters is that page_owner_tag_at answers the same
-// question with the same values, since kernel/lib/intrusive_pool.tkb
+// question with the same values, since linux_user/intrusive_pool/intrusive_pool_lib.tkb
 // validates a chunk base through it before dereferencing anything.
 private let mut fake_page_owner: [PageOwnerTag; PAGE_COUNT];
 private let mut fake_page_next_generation: usize = 1;
@@ -221,7 +221,7 @@ fn page_allocator_live_count() -> usize {
 // GitHub issue #384: who holds the page an arbitrary address falls in.
 // Same contract as the real provider's: any address, not a page-aligned
 // one, and Unowned for anything that is not a live page of this
-// allocator's. kernel/lib/intrusive_pool.tkb validates a chunk base
+// allocator's. linux_user/intrusive_pool/intrusive_pool_lib.tkb validates a chunk base
 // through this before dereferencing a header inside it, so a stand-in
 // that answered loosely would let the prototype pass a check the kernel
 // fails.

@@ -24,7 +24,6 @@ use "kernel/kernel/freelist_contention_evidence.tkb";
 use "kernel/kernel/page_contention_evidence.tkb";
 use "kernel/kernel/asid_contention_evidence.tkb";
 use "kernel/kernel/pid_contention_evidence.tkb";
-use "kernel/kernel/tag_contention_evidence.tkb";
 use "kernel/kernel/schedule_contention_evidence.tkb";
 use "kernel/kernel/occupancy_drain_evidence.tkb";
 use "kernel/kernel/pool_walk_contention_evidence.tkb";
@@ -59,11 +58,6 @@ fn contention_probes() !{unsafe} {
         kernel_boot_log("schedule contention: two cores claiming one Ready process, the race shown without the lock and gone with it ok\n");
     } else {
         kernel_boot_log("schedule contention: failed\n");
-    }
-    if (tag_contention_probe()) {
-        kernel_boot_log("tag contention: two cores minting a pool tag, every one advanced the counter once ok\n");
-    } else {
-        kernel_boot_log("tag contention: failed\n");
     }
     if (pid_contention_probe()) {
         kernel_boot_log("pid contention: two cores minting, every pid advanced the counter once ok\n");
@@ -149,11 +143,11 @@ fn contention_probes() !{unsafe} {
         }
         TcpPinCostEvidence::Failed => { kernel_boot_log("pin sharing evidence: failed\n"); }
     }
-    // GitHub issues #479 and #482: first hold an ordinary Live view while
-    // core 0 observes its read-side lock, then use the explicit unproven
-    // path to rendezvous a stale cursor against chunk release.
+    // GitHub issues #482 and #745: a walk with no lock holds a record's
+    // reference while core 0 frees it, and the probe under the lock
+    // refuses it.
     if (pool_walk_contention_probe()) {
-        kernel_boot_log("pool walk: a Live view holds the read lock through payload use, and a stale released-chunk cursor is refused ok\n");
+        kernel_boot_log("pool walk: a walk's reference to a record freed under it is refused, and the floor reads back ok\n");
     } else {
         kernel_boot_log("pool walk: failed\n");
     }

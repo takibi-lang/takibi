@@ -30,7 +30,7 @@ fn kernel_pool_space_report(phase: *u8) !{unsafe} {
     let (chunks, capacity, live, bytes, stride, chunk_bytes) =
         scheduled_process_pool_space_stats();
     kernel_pool_space_row("process", sizeof(ProcessRecord),
-        sizeof(IntrusivePool(ProcessRecord)), stride, chunk_bytes,
+        sizeof(RegionPool(ProcessRecord)), stride, chunk_bytes,
         chunks, capacity, live, bytes);
     {
         let (chunks, capacity, live, bytes) = tcp_connection_pool_space_stats();

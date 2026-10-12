@@ -26,10 +26,12 @@ if $alloc_rollback_point == 1
   break scheduled_process_alloc_pending
   continue
   delete
-  break intrusive_pool_insert_zeroed$ProcessRecord
+  # GitHub issue #745: the record pool is a RegionPool; its Held
+  # allocation answers ProcessPoolAlloc.
+  break process_pool_alloc_held
   continue
   delete
-  takibi-force-variant-return IntrusivePoolInsertResult OutOfMemory
+  takibi-force-variant-return ProcessPoolAlloc OutOfMemory
   printf "alloc-rollback: forced point=process-record\n"
 else
   if $alloc_rollback_point == 2

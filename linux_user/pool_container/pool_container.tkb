@@ -31,7 +31,7 @@
 // occupant's tag and handed back a linear owner no allocation ever
 // produced (issue #369). intrusive_pool_insert_zeroed is what makes the
 // premise true, and the reuse case below is the regression test for it.
-use "kernel/lib/intrusive_pool.tkb";
+use "linux_user/intrusive_pool/intrusive_pool_lib.tkb";
 
 struct Node[p: addr] {
     private mutex: i32;

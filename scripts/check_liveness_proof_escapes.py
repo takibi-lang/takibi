@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Every place that drops a pool's liveness proof is declared here.
 
-`kernel/lib/intrusive_pool.tkb` hands out a linear proof that a slot is
+`linux_user/intrusive_pool/intrusive_pool_lib.tkb` hands out a linear proof that a slot is
 occupied -- an `IntrusiveSlotView` from a probe, an `IntrusiveOwner` from an
 allocation -- and its payload accessors return a pointer TIED to that proof,
 so the pointer cannot outlive it (GitHub issue #488).
@@ -29,7 +29,7 @@ import sys
 from pass_line import report_pass
 
 ROOTS = (pathlib.Path("kernel"), pathlib.Path("linux_user"))
-DEFINING_FILE = pathlib.Path("kernel/lib/intrusive_pool.tkb")
+DEFINING_FILE = pathlib.Path("linux_user/intrusive_pool/intrusive_pool_lib.tkb")
 
 # Deliberately matches the NAME alone rather than the name plus its first
 # argument. The first version required `(&` on the same line and silently
@@ -48,9 +48,8 @@ FN_RE = re.compile(r"^(?:private )?(?:inline |noinline )?fn ([A-Za-z_0-9]+)")
 ALLOWED = {}
 
 
-POOL_FILES = tuple(pathlib.Path("kernel/lib") / name for name in (
-    "intrusive_pool.tkb", "freelist.tkb", "slotmap.tkb",
-    "refcount_slotmap.tkb", "occupancy.tkb"))
+POOL_FILES = (DEFINING_FILE,) + tuple(pathlib.Path("kernel/lib") / name for name in (
+    "freelist.tkb", "slotmap.tkb", "refcount_slotmap.tkb", "occupancy.tkb"))
 PUBLIC_FN_RE = re.compile(r"^(?:inline |noinline )?fn ([A-Za-z_0-9]+)\(")
 # The element type reached by a returned pointer or reference: `T` itself
 # or a generic instance carrying it, e.g. `IntrusiveSlot(T)`.

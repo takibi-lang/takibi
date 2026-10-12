@@ -156,7 +156,7 @@ fn page_ddb_physical_address_readable(
 // page is 4096 bytes of payload again -- substantial space that
 // was withheld from every consumer for one that no longer exists.
 //
-// It was reserved for exactly one: kernel/lib/intrusive_pool.tkb kept its
+// It was reserved for exactly one: linux_user/intrusive_pool/intrusive_pool_lib.tkb kept its
 // chunk header there (#349). Issue #350 moved that header INTO the chunk,
 // because a multi-page run has no per-page metadata region by construction
 // (#377 made a run entirely payload precisely so no pool could read a
@@ -874,7 +874,7 @@ private fn page_alloc_contiguous_locked(frames: borrow PageFrameStore[fbc, fbo, 
                 // at most `count` pages per event, and a leak is bounded
                 // and diagnosable where a double hand-out is neither.
                 //
-                // Same trade kernel/lib/intrusive_pool.tkb makes for a
+                // Same trade linux_user/intrusive_pool/intrusive_pool_lib.tkb makes for a
                 // corrupt free chain (issue #352): quarantine the storage,
                 // count the event, never reuse it.
                 kernel_boot_log_resource_exhausted(

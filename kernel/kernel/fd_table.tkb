@@ -1,6 +1,5 @@
 use "kernel/lib/peer_tick_window.tkb";
 
-use "kernel/lib/intrusive_pool.tkb";
 use "kernel/lib/execution_model.tkb";
 use "kernel/lib/pool_lock.tkb";
 use "kernel/lib/locked_cell.tkb";

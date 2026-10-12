@@ -81,7 +81,7 @@ with (artifacts / 'qemu.log').open('wb') as log:
             process.kill()
             process.wait()
 text = uart.read_text(errors='replace').replace('\r', '')
-names = ('console contention', 'schedule contention', 'tag contention',
+names = ('console contention', 'schedule contention',
          'pid contention', 'fd refcount contention', 'asid contention',
          'page contention', 'freelist contention', 'pool contention',
          'occupancy drain', 'network init contention', 'tcp owner contention',
@@ -93,7 +93,6 @@ for name in names:
         raise SystemExit(f'FAIL probe-refusals: expected one actual refusal from {name}')
 for name, reason in (
         ('schedule contention', 'secondary-never-completed-a-round'),
-        ('tag contention', 'secondary-never-completed-a-round'),
         ('asid contention', 'secondary-never-completed-a-round'),
         ('page contention', 'secondary-never-completed-a-round'),
         ('pid contention', 'secondary-never-entered'),

@@ -21,7 +21,7 @@ from pass_line import CaseCount, report_pass
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 CHECK = "scripts/check_pool_zero_before_stamp.py"
-POOL = "kernel/lib/intrusive_pool.tkb"
+POOL = "linux_user/intrusive_pool/intrusive_pool_lib.tkb"
 
 CORRECT = '''private fn intrusive_pool_insert_unchecked(T: type, pool: &mut P,
                                            guard: borrow G,
@@ -81,7 +81,7 @@ def build(root, body):
     (root / "scripts").mkdir(parents=True)
     for script in ("check_pool_zero_before_stamp.py", "pass_line.py"):
         shutil.copy(REPO / "scripts" / script, root / "scripts" / script)
-    (root / "kernel" / "lib").mkdir(parents=True)
+    (root / POOL).parent.mkdir(parents=True)
     (root / POOL).write_text(body, encoding="ascii")
 
 

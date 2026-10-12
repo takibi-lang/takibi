@@ -40,7 +40,7 @@ they are test machinery and do not decide the design.
    raw-pointer types in production code are therefore the reach of unchecked
    access, and they are mostly outside any `unsafe` block.
 2. **The largest unchecked surface is pool payloads, and it costs almost no
-   blocks.** `kernel/lib/intrusive_pool.tkb` ties a payload pointer to a
+   blocks.** `linux_user/intrusive_pool/intrusive_pool_lib.tkb` ties a payload pointer to a
    linear liveness proof (#488). Eleven accessors drop that tie and return a
    bare pointer, each declared with its reason in
    `scripts/check_liveness_proof_escapes.py`. Those accessors contain only 7

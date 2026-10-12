@@ -1,7 +1,7 @@
 // Serial allocation replay of the current kernel object sizes. The actual
 // built-in region pool and maintained intrusive pool run on the native page
 // stand-in; page-provider storage and this fixture's handle array are excluded.
-use "kernel/lib/intrusive_pool.tkb";
+use "linux_user/intrusive_pool/intrusive_pool_lib.tkb";
 
 use "_build/pool_space_replay_regions.tkb";
 private let mut replay_tcp: RegionPool(Replay_tcp);

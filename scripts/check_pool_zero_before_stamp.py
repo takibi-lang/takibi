@@ -33,7 +33,7 @@ import sys
 
 from pass_line import report_pass
 
-POOL = pathlib.Path("kernel/lib/intrusive_pool.tkb")
+POOL = pathlib.Path("linux_user/intrusive_pool/intrusive_pool_lib.tkb")
 FUNCTION = "private fn intrusive_pool_insert_unchecked"
 CLEAR = "if (zero_payload) {"
 STAMP = "slot.generation = generation;"

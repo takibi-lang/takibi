@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Keep unproven RegionPool inspection at four named stopped mint sites.
+"""Keep unproven RegionPool inspection at five named stopped mint sites.
 
 The compiler checks borrowed stop/pool identities and local witness lifetimes.
 This source gate checks the finite mint set and completeness of physical
@@ -17,6 +17,7 @@ MINTS = {
     ('kernel/mm/address_space.tkb', 'address_space_inspect_stopped'): 'AddressSpaceBacking',
     ('kernel/kernel/fd_table.tkb', 'fd_context_inspect_stopped'): 'ProcessFdContext',
     ('kernel/kernel/fd_table.tkb', 'fd_block_inspect_stopped'): 'FdBlock',
+    ('kernel/kernel/process.tkb', 'process_record_inspect_stopped'): 'ProcessRecord',
 }
 FUNCTION = re.compile(r'^(?:private )?(?:inline |noinline )?fn (\w+)\(', re.M)
 MINT = re.compile(r'\bregion_pool_inspect_unproven__(\w+)\b')
@@ -73,7 +74,7 @@ def main():
     if failures:
         return 1
     report_pass('stopped-pool-inspection',
-                'four private mints borrow full machine authority; resume and participant changes invalidate every production inspection type',
+                'five private mints borrow full machine authority; resume and participant changes invalidate every production inspection type',
                 references=sum(len(MINT.findall('\n'.join(line.split('//', 1)[0] for line in path.read_text(encoding='ascii').splitlines())))
                                for path in (ROOT / 'kernel').rglob('*.tkb')))
     return 0

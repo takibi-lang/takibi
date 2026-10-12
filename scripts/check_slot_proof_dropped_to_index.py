@@ -42,8 +42,12 @@ KERNEL = ROOT / "kernel"
 # being a caller in the sense this checks.
 DEFINING = "lib/intrusive_pool.tkb"
 
-DROP = "intrusive_view_drop("
-GENERATION = "intrusive_view_generation("
+# Since GitHub issue #745 the kernel's pool is the built-in RegionPool: a
+# Held record's view is dropped with region_held_view_drop, and a caller
+# that keeps the generation keeps the RegionHeld reference
+# (region_held_view_ref), which a later probe re-checks.
+DROP = "region_held_view_drop("
+GENERATION = "region_held_view_ref("
 
 FUNCTION_RE = re.compile(r"^(?:private )?(?:inline |noinline )?fn ([A-Za-z_0-9]+)")
 
@@ -55,16 +59,12 @@ INDEX_ONLY_ALLOWED = {
         "state, wait reason, saved frame address and stack-run address before "
         "consuming its pool view. Saved addresses do not grant access rights; "
         "the frame/stack mints separately validate them",
-    "scheduled_process_live_pool_slot_from":
-        "a cursor. Its whole job is to answer 'the next occupied slot as of "
-        "now', and a caller that wanted a lasting answer would be asking the "
-        "wrong function. GitHub issue #569's consumers were fixed by not "
-        "calling a raced re-lookup a missing record, not by holding this "
-        "proof longer",
-    "scheduled_process_slot_valid":
-        "a predicate whose answer is a snapshot by construction: 'is this "
-        "slot occupied' cannot be made to stay true, and every caller that "
-        "needs it to is holding a generation of its own",
+    "kernel_process_protocol_observe":
+        "a value snapshot for the protocol trace: it copies pid, state, stack "
+        "owner, wait reason and the parent handle under the pool lock, then "
+        "observes after the lock is gone; it keeps no index",
+    "pool_walk_read":
+        "the walk probe's stamp read: a value, read under the pool lock",
 }
 
 # These consume a stored pool proof after the compiler checked loan_transfer.
@@ -72,7 +72,7 @@ INDEX_ONLY_ALLOWED = {
 TRANSFER_RELEASES = {
     "scheduled_process_locked_view_drop": "ProcessRecordLockedView",
     "scheduled_process_current_view_drop": "ProcessRecordCurrentView",
-    "machine_pool_view_drop": "MachineSlotView",
+    "scheduled_process_owned_view_drop": "ProcessRecordOwnedView",
 }
 
 

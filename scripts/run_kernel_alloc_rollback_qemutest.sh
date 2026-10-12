@@ -46,7 +46,7 @@ ALLOC_ROLLBACK_POINT="${KERNEL_QEMU_ALLOC_ROLLBACK_POINT:-stack-run}"
 case "$ALLOC_ROLLBACK_POINT" in
     process-record)
         ALLOC_ROLLBACK_POINT_ID=1
-        ALLOC_ROLLBACK_VARIANT='IntrusivePoolInsertResult::OutOfMemory'
+        ALLOC_ROLLBACK_VARIANT='ProcessPoolAlloc::OutOfMemory'
         ;;
     stack-run)
         ALLOC_ROLLBACK_POINT_ID=2
