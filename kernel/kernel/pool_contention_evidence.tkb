@@ -306,6 +306,23 @@ fn pool_contention_probe() -> bool !{unsafe} {
         return false;
     }
 
+    // GitHub issue #745: the pool-operation cost, recorded rather than
+    // judged -- CONTENTION_ROUNDS uncontended allocate/hold/take-back/free
+    // cycles on core 0, before the secondary is armed.
+    let cost_start: i64 = read_cntpct();
+    let mut cost_cycles: usize = 0;
+    for round: usize in 0..<CONTENTION_ROUNDS {
+        if (contention_cycle()) { cost_cycles = cost_cycles + 1; }
+    }
+    let cost_ticks: i64 = read_cntpct() - cost_start;
+    kernel_boot_log("RECORDED pool cycle timing: cycles=");
+    uart_put_udec(cost_cycles);
+    kernel_boot_log(" ticks=");
+    uart_put_udec(cost_ticks as usize);
+    kernel_boot_log(" freq=");
+    uart_put_udec(read_cntfrq() as usize);
+    kernel_boot_log("\n");
+
     atomic_word_store(contention_armed_address(), 1);
 
     // Wait for the secondary to be IN, before starting. Arming and
