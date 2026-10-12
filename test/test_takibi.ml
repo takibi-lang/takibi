@@ -23354,6 +23354,113 @@ let array_record_loan_fixture = {|
   }
 |}
 
+(* GitHub issue #203 stages 1 and 2: definite initialization of field
+   paths, padding, scratch globals and borrow init/uninit parameters. *)
+let definite_init_tests =
+  let padded = "struct Pad203 { a: u8; b: u64; }\n" in
+  let flat = "struct Flat203 { a: u64; b: u64; }\n" in
+  let t name f = Alcotest.test_case name `Quick f in
+  [
+    t "issue #203: every field written before a whole read is accepted"
+      (expect_ok (padded ^ "fn f() -> u64 { let mut v: Pad203; v.a = 1; v.b = 2;
+         let mut w: Pad203 = v; return w.b; }"));
+    t "issue #203: reading a field never written is rejected, naming it"
+      (expect_type_error "'v.b' is uninitialized"
+         (padded ^ "fn f() -> u64 { let mut v: Pad203; v.a = 1; return v.b; }"));
+    t "issue #203: a whole-struct read needs every field"
+      (expect_type_error "'v.b' is uninitialized"
+         (padded ^ "fn f() -> u8 { let mut v: Pad203; v.a = 1;
+            let mut w: Pad203 = v; return w.a; }"));
+    t "issue #203: a field written on one branch only is uninit after the merge"
+      (expect_type_error "'v.a' is uninitialized"
+         (padded ^ "fn f(c: bool) -> u8 { let mut v: Pad203;
+            if (c) { v.a = 1; } return v.a; }"));
+    t "issue #203: a field written on both branches is init after the merge"
+      (expect_ok (padded ^ "fn f(c: bool) -> u8 { let mut v: Pad203;
+         if (c) { v.a = 1; } else { v.a = 2; } return v.a; }"));
+    t "issue #203: a branch that returns does not reach the merge"
+      (expect_ok (padded ^ "fn f(c: bool) -> u8 { let mut v: Pad203;
+         if (c) { return 0; } else { v.a = 2; } return v.a; }"));
+    t "issue #203: a write inside a loop does not survive it"
+      (expect_type_error "'x' is uninitialized"
+         "fn f(n: usize) -> usize { let mut x: usize;
+            for i: usize in 0..<n { x = i; } return x; }");
+    t "issue #203: an uninit scalar local is rejected on read"
+      (expect_type_error "'x' is uninitialized"
+         "fn f() -> u32 { let mut x: u32; return x; }");
+    t "issue #203: a field store does not initialize padding for a byte view"
+      (expect_type_error "padding of 'v' is uninitialized"
+         (padded ^ "fn f() -> usize { let mut v: Pad203; v.a = 1; v.b = 2;
+            return &v as usize; }"));
+    t "issue #203: zero_fill initializes padding too"
+      (expect_ok (padded ^ "fn f() -> usize { let mut v: Pad203; zero_fill(&v);
+         v.a = 1; return &v as usize; }"));
+    t "issue #203: a padding-free struct needs only its fields for a byte view"
+      (expect_ok (flat ^ "fn f() -> usize { let mut v: Flat203; v.a = 1; v.b = 2;
+         return &v as usize; }"));
+    t "issue #203: whole-struct assignment copies the source's padding state"
+      (expect_type_error "padding of 'w' is uninitialized"
+         (padded ^ "fn f() -> usize { let mut v: Pad203; v.a = 1; v.b = 2;
+            let mut w: Pad203; zero_fill(&w); w = v; return &w as usize; }"));
+    t "issue #203: whole-struct assignment from a zeroed source carries init padding"
+      (expect_ok (padded ^ "fn f() -> usize { let mut v: Pad203; zero_fill(&v);
+         let mut w: Pad203; w = v; return &w as usize; }"));
+    t "issue #203: a struct literal leaves padding uninit"
+      (expect_type_error "padding of 'w' is uninitialized"
+         (padded ^ "fn f() -> usize { let mut w: Pad203 = {1, 2};
+            return &w as usize; }"));
+    t "issue #203: a scratch global is uninit at function entry"
+      (expect_type_error "'sc[_].a' is uninitialized"
+         (padded ^ "scratch let mut sc: [Pad203; 2];
+            fn f() -> u8 { return sc[1].a; }"));
+    t "issue #203: a scratch global written in the same function is readable"
+      (expect_ok (padded ^ "scratch let mut sc: [Pad203; 2];
+         fn f() -> u8 { sc[0].a = 3; return sc[1].a; }"));
+    t "issue #203: a scratch byte buffer must be filled before a copy-out"
+      (expect_type_error "'sb.buf' is uninitialized"
+         "struct S203 { buf: [u8; 16]; }
+          scratch let mut sb: S203;
+          fn out(src: borrow init []const u8) -> usize { return src.len; }
+          fn f() -> usize { return out(sb.buf as []u8); }");
+    t "issue #203: zero_fill makes a scratch byte buffer copyable"
+      (expect_ok
+         "struct S203 { buf: [u8; 16]; }
+          scratch let mut sb: S203;
+          fn out(src: borrow init []const u8) -> usize { return src.len; }
+          fn f() -> usize { zero_fill(sb.buf as []u8); return out(sb.buf as []u8); }");
+    t "issue #203: an element store does not initialize a scratch array"
+      (expect_type_error "'sb.buf' is uninitialized"
+         "struct S203 { buf: [u8; 2]; }
+          scratch let mut sb: S203;
+          fn out(src: borrow init []const u8) -> usize { return src.len; }
+          fn f() -> usize { sb.buf[0] = 1; sb.buf[1] = 2; return out(sb.buf as []u8); }");
+    t "issue #203: a borrow uninit argument is init after the call"
+      (expect_ok
+         "fn fill(dst: borrow uninit []u8) { zero_fill(dst); }
+          fn f() -> u8 { let mut v: [u8; 4]; fill(v as []u8); return v[0]; }
+          struct S203 { buf: [u8; 4]; }
+          scratch let mut sb: S203;
+          fn g() -> u8 { fill(sb.buf as []u8); return sb.buf[0]; }");
+    t "issue #203: a borrow uninit parameter must be init on every return"
+      (expect_type_error "borrow uninit parameter 'dst' must be initialized"
+         "fn fill(dst: borrow uninit []u8, c: bool) { if (c) { zero_fill(dst); } }");
+    t "issue #203: a borrow uninit parameter cannot be read before it is filled"
+      (expect_type_error "'dst' is uninitialized"
+         "fn fill(dst: borrow uninit []u8) -> u8 { let b: u8 = dst[0]; zero_fill(dst); return b; }");
+    t "issue #203: &v passed to a &mut parameter initializes its fields, not padding"
+      (expect_type_error "padding of 'v' is uninitialized"
+         (padded ^ "fn init(p: &mut Pad203) { p.a = 0; p.b = 0; }
+            fn f() -> usize { let mut v: Pad203; init(&v); let x: u64 = v.b;
+              return &v as usize; }"));
+    t "issue #203: assume_init needs unsafe"
+      (expect_type_error "assume_init asserts"
+         "fn f(dst: borrow uninit []u8) { assume_init(dst); }");
+    t "issue #203: unsafe assume_init discharges a borrow uninit parameter"
+      (expect_ok "fn f(dst: borrow uninit []u8) !{unsafe} { unsafe { assume_init(dst); } }");
+    t "issue #203: init and uninit stay ordinary identifiers elsewhere"
+      (expect_ok "fn f(init: usize, uninit: usize) -> usize { return init + uninit; }");
+  ]
+
 let indexed_reference_tests = [
   Alcotest.test_case "production ELF copy APIs require complete header spans" `Quick
     (fun () ->
@@ -25408,6 +25515,7 @@ let named_groups_unisolated = [
   "record-loans", record_loan_tests;
   "loan-transfer", loan_transfer_tests;
   "indexed-reference", indexed_reference_tests;
+  "definite-init", definite_init_tests;
   "raw-authority-policy", raw_authority_policy_tests;
   "witness-changes", witness_change_tests;
   "record-loan-contracts", record_loan_contract_tests;

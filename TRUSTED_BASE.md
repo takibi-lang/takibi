@@ -174,6 +174,19 @@ rules globally.
   because it is not preemptible (`KERNEL_PREEMPTIBLE == 0`, asserted there),
   and `cpu_here_for_boot_probe` names other CPUs only for the boot probe that
   `scripts/check_cpu_authority_mints.py` fixes as its caller.
+- Definite initialization (SPEC.md, "Definite Initialization") trusts three
+  premises. A `scratch` global's element is reached only by its own CPU, so
+  any index names the same place (`kernel/kernel/syscall.tkb`'s
+  `syscall_scratch`, indexed by the non-preemptible current CPU). A callee
+  handed `&p` through a `&mut T` parameter stores every field of `p`. Each
+  `unsafe { assume_init(...) }` states that bytes were written by means the
+  checker cannot see. The maintained `assume_init` sites are all in
+  `kernel/kernel/syscall.tkb`: `syscall_exec_argv_here`,
+  `syscall_exec_path_here` and `syscall_script_line_here` rely on
+  `syscall_execve_current` zero-filling `file_buffer` before execve's staging
+  begins; `syscall_path_view_here` relies on `kernel_syscall_path_name`
+  zero-filling `path_buffer` before it writes it. Uninitialized local arrays
+  are not tracked yet.
 - `extern fn` and `extern symbol` declarations trust the linked symbol's ABI,
   effects, lifetime behavior, and implementation. Checker-only borrow and
   effect contracts cannot be verified against an unavailable body.

@@ -4877,7 +4877,9 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       (TypeUsize, n)
 
   | Call ("assume_init", [_]) ->
-      (* GitHub issue #203: a checker-only assertion; no code. *)
+      (* GitHub issue #203: a checker-only assertion; no code. It is what
+         its enclosing unsafe exists for. *)
+      note_unsafe_use ();
       (TypeVoid, const_null (i1_type context))
 
   | Call ("zero_fill", [d_e]) ->

@@ -287,12 +287,17 @@ struct SyscallScratch {
     // The ELF plan retains its metadata view. Keep this per-core window
     // separate from argv/path staging while resolving script interpreters.
     elf_buffer: [u8; KERNEL_BLOCK_SIZE];
-    // GitHub issue #559: this CPU's current syscall is a counted ext2
-    // reader and owes ext2_read_leave.
-    ext2_reader: bool;
 }
 
-private let mut syscall_scratch: [SyscallScratch; KERNEL_MAX_CORES];
+// GitHub issue #203: per-call scratch. Every function that touches it sees
+// it uninitialized on entry, whatever an earlier call left there, so a
+// buffer is zero-filled or written whole before it is read or copied out.
+private scratch let mut syscall_scratch: [SyscallScratch; KERNEL_MAX_CORES];
+
+// GitHub issue #559: this CPU's current syscall is a counted ext2 reader
+// and owes ext2_read_leave. Kept out of the scratch above: it is state one
+// function leaves for another, not per-call scratch.
+private let mut syscall_ext2_reader: [bool; KERNEL_MAX_CORES];
 
 // Syscall dispatch retains the non-preemptible, non-migrating per-CPU
 // contract. Check affinity at the array boundary and preserve slot zero
@@ -520,19 +525,34 @@ fn kernel_syscall_exec_clear() {
     process_run_unlock(guard);
 }
 
-private fn syscall_exec_argv_here() -> [u8; 512..] {
+private fn syscall_exec_argv_here() -> [u8; 512..] !{unsafe} {
+    // GitHub issue #203 (TRUSTED_BASE.md, assume_init sites): execve's
+    // staging spans several functions of one call. syscall_execve_current
+    // zero-fills file_buffer before the first of these helpers runs, and
+    // only the execve path calls them.
+    unsafe { assume_init(syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8); }
     let scratch: [u8; KERNEL_BLOCK_SIZE..] =
         syscall_scratch[syscall_scratch_cpu_index()].file_buffer as [u8; KERNEL_BLOCK_SIZE..];
     return scratch[0..<512];
 }
 
-private fn syscall_exec_path_here() -> [u8; 256..] {
+private fn syscall_exec_path_here() -> [u8; 256..] !{unsafe} {
+    // GitHub issue #203 (TRUSTED_BASE.md, assume_init sites): execve's
+    // staging spans several functions of one call. syscall_execve_current
+    // zero-fills file_buffer before the first of these helpers runs, and
+    // only the execve path calls them.
+    unsafe { assume_init(syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8); }
     let scratch: [u8; KERNEL_BLOCK_SIZE..] =
         syscall_scratch[syscall_scratch_cpu_index()].file_buffer as [u8; KERNEL_BLOCK_SIZE..];
     return scratch[512..<768];
 }
 
-private fn syscall_script_line_here() -> [u8; 256..] {
+private fn syscall_script_line_here() -> [u8; 256..] !{unsafe} {
+    // GitHub issue #203 (TRUSTED_BASE.md, assume_init sites): execve's
+    // staging spans several functions of one call. syscall_execve_current
+    // zero-fills file_buffer before the first of these helpers runs, and
+    // only the execve path calls them.
+    unsafe { assume_init(syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8); }
     let scratch: [u8; KERNEL_BLOCK_SIZE..] =
         syscall_scratch[syscall_scratch_cpu_index()].file_buffer as [u8; KERNEL_BLOCK_SIZE..];
     return scratch[768..<1024];
@@ -897,6 +917,7 @@ const SYSCALL_EXEC_INTERPRETER_MAX: usize = 64;
 private fn syscall_exec_elf_interpreter(mount: Ext2Mount, inode: usize)
         -> SyscallExecFormatResult !{unsafe} {
     // ELF probing must not overwrite the collected script argv or path.
+    zero_fill(syscall_scratch[syscall_scratch_cpu_index()].elf_buffer as []u8);
     let window: [u8; KERNEL_BLOCK_SIZE..] =
         syscall_scratch[syscall_scratch_cpu_index()].elf_buffer as [u8; KERNEL_BLOCK_SIZE..];
     let file_length: usize = ext2_regular_file_size(mount, inode);
@@ -932,6 +953,7 @@ private fn syscall_exec_elf_interpreter(mount: Ext2Mount, inode: usize)
         window[offset] != 0x2F) {
         return SyscallExecFormatResult::InterpreterUnsupported;
     }
+    zero_fill(syscall_scratch[syscall_scratch_cpu_index()].interpreter_buffer as []u8);
     let name: [u8; SYSCALL_EXEC_INTERPRETER_MAX..] =
         syscall_scratch[syscall_scratch_cpu_index()].interpreter_buffer as
             [u8; SYSCALL_EXEC_INTERPRETER_MAX..];
@@ -1802,10 +1824,23 @@ fn kernel_syscall_socket_evidence() -> bool !{unsafe} {
     return valid;
 }
 
+// GitHub issue #203 (TRUSTED_BASE.md, assume_init sites): the path buffer as
+// kernel_syscall_path_name left it. Call it only after that function returned
+// Name in the same syscall; it zero-fills the buffer before writing it.
+private fn syscall_path_view_here() -> [u8; 256..] !{unsafe} {
+    unsafe { assume_init(syscall_scratch[syscall_scratch_cpu_index()].path_buffer as []u8); }
+    return syscall_scratch[syscall_scratch_cpu_index()].path_buffer as [u8; 256..];
+}
+
 // Copy one NUL-terminated pathname through the user-memory boundary. Only a
 // single root component is supported by this first generic lookup slice;
 // directory traversal and symlink resolution remain separate work.
+//
+// GitHub issue #203: the path buffer is per-call scratch, zero-filled here
+// because the copy below writes only up to the terminator. A caller reads it
+// afterwards only through syscall_path_view_here.
 fn kernel_syscall_path_name(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], address: usize) -> SyscallPathResult {
+    zero_fill(syscall_scratch[syscall_scratch_cpu_index()].path_buffer as []u8);
     let path_view: []u8 = syscall_scratch[syscall_scratch_cpu_index()].path_buffer as []u8;
     let mut length: usize = 0;
     let mut terminated: bool = false;
@@ -1989,6 +2024,8 @@ must_use variant TerminalWriteResult { Errno(usize); Written(usize); WouldBlock;
 fn syscall_terminal_write(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], address: usize, length: usize)
         -> TerminalWriteResult !{unsafe} {
     if (length == 0) { return TerminalWriteResult::Written(0); }
+    // GitHub issue #203: the staging buffer is per-call scratch.
+    zero_fill(syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8);
     let mut written: usize = 0;
     while (written < length) {
         let room: usize = uart_user_write_room();
@@ -2237,6 +2274,7 @@ fn syscall_write_segment(current_authority: borrow ProcessCurrent[current_proces
             if (length == 0 || length > KERNEL_BLOCK_SIZE) {
                 return SyscallIoResult::Errno(LINUX_EINVAL);
             }
+            zero_fill(syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8);
             match user_range_check_read(current_authority, address, length) {
                 UserReadRangeResult::Fault => { return SyscallIoResult::Errno(LINUX_EFAULT); }
                 UserReadRangeResult::Ok(range) => {
@@ -2500,6 +2538,10 @@ fn syscall_read_segment(current_authority: borrow ProcessCurrent[current_process
             return SyscallIoResult::Errno(LINUX_EBADF);
         }
         let opened_inode: usize = kernel_syscall_file_inode(fd);
+        // GitHub issue #203: both branches stage through per-call scratch
+        // and copy part of it out, so it starts zeroed: stage 2 has no
+        // ranges to prove which bytes a fill wrote.
+        zero_fill(syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8);
         if (procfs_inode_is_ours(opened_inode)) {
             let staging_buffer: []u8 =
                 syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8;
@@ -3302,6 +3344,7 @@ private fn syscall_syslog(current_authority: borrow ProcessCurrent[current_proce
     let mut amount: usize = requested;
     if (amount > available) { amount = available; }
     if (amount == 0) { return SyscallAction::Resume(0); }
+    zero_fill(syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8);
     let mut copied: usize = 0;
     while (copied < amount) {
         let mut chunk: usize = amount - copied;
@@ -3627,8 +3670,8 @@ fn kernel_syscall_child_exec_return(frame_sp: usize) !{unsafe} {
     kernel_process_exec_failure_clear();
     let result: KernelChildExecPrepareResult = kernel_process_child_exec_prepare(current_authority);
     // GitHub issue #597: the prepare was the last ext2 read of this execve.
-    if (syscall_scratch[syscall_scratch_cpu_index()].ext2_reader) {
-        syscall_scratch[syscall_scratch_cpu_index()].ext2_reader = false;
+    if (syscall_ext2_reader[syscall_scratch_cpu_index()]) {
+        syscall_ext2_reader[syscall_scratch_cpu_index()] = false;
         ext2_read_leave();
     }
     match result {
@@ -3938,7 +3981,7 @@ private fn syscall_mkdirat_under(current_authority: borrow ProcessCurrent[curren
         SyscallPathResult::Invalid => { return LINUX_ENOENT; }
         SyscallPathResult::Name(path) => { path }
     };
-    let path_view: []u8 = syscall_scratch[syscall_scratch_cpu_index()].path_buffer as []u8;
+    let path_view: [u8; 256..] = syscall_path_view_here();
     let absolute: bool = path_view[0] == 0x2F;
     let parent: SyscallParent = match kernel_syscall_parent_of(mount,
             x0, absolute, path_name) {
@@ -3978,7 +4021,7 @@ private fn syscall_unlinkat_under(current_authority: borrow ProcessCurrent[curre
         SyscallPathResult::Invalid => { return LINUX_ENOENT; }
         SyscallPathResult::Name(path) => { path }
     };
-    let path_view: []u8 = syscall_scratch[syscall_scratch_cpu_index()].path_buffer as []u8;
+    let path_view: [u8; 256..] = syscall_path_view_here();
     let absolute: bool = path_view[0] == 0x2F;
     let parent: SyscallParent = match kernel_syscall_parent_of(mount,
             x0, absolute, path_name) {
@@ -4024,7 +4067,7 @@ private fn syscall_renameat_under(current_authority: borrow ProcessCurrent[curre
         SyscallPathResult::Invalid => { return LINUX_ENOENT; }
         SyscallPathResult::Name(path) => { path }
     };
-    let old_view: []u8 = syscall_scratch[syscall_scratch_cpu_index()].path_buffer as []u8;
+    let old_view: [u8; 256..] = syscall_path_view_here();
     let old_absolute: bool = old_view[0] == 0x2F;
     let old_parent: SyscallParent = match kernel_syscall_parent_of(mount,
             x0, old_absolute, old_path) {
@@ -4055,7 +4098,7 @@ private fn syscall_renameat_under(current_authority: borrow ProcessCurrent[curre
         SyscallPathResult::Invalid => { return LINUX_ENOENT; }
         SyscallPathResult::Name(path) => { path }
     };
-    let new_view: []u8 = syscall_scratch[syscall_scratch_cpu_index()].path_buffer as []u8;
+    let new_view: [u8; 256..] = syscall_path_view_here();
     let new_absolute: bool = new_view[0] == 0x2F;
     let new_parent: SyscallParent = match kernel_syscall_parent_of(mount,
             x2, new_absolute, new_path) {
@@ -4092,6 +4135,7 @@ private fn syscall_bind_claimed(current_authority: borrow ProcessCurrent[current
         x2 < 16) { return SyscallAction::Resume(LINUX_EINVAL); }
     let mut sockaddr_len: usize = x2;
     if (sockaddr_len > 28) { sockaddr_len = 28; }
+    zero_fill(syscall_scratch[syscall_scratch_cpu_index()].sockaddr_buffer as []u8);
     match user_range_check_read(current_authority, x1, sockaddr_len) {
         UserReadRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
         UserReadRangeResult::Ok(range) => {
@@ -4999,8 +5043,8 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
     // that is -- Block and Migrate included. ChildExec is the exception
     // (#597): its exec prepare reads the image after this returns, and
     // kernel_syscall_child_exec_return releases the registration then.
-    if (syscall_scratch[syscall_scratch_cpu_index()].ext2_reader && action_code != 8) {
-        syscall_scratch[syscall_scratch_cpu_index()].ext2_reader = false;
+    if (syscall_ext2_reader[syscall_scratch_cpu_index()] && action_code != 8) {
+        syscall_ext2_reader[syscall_scratch_cpu_index()] = false;
         ext2_read_leave();
     }
     // A call that completed no longer needs core 0 (GitHub issue #9). A
@@ -5173,7 +5217,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             if (cpu_id() == 0) { return syscall_finish_current(frame, SyscallAction::WaitInterrupt, current_authority); }
             return syscall_finish_current(frame, SyscallAction::Migrate, current_authority);
         }
-        syscall_scratch[syscall_scratch_cpu_index()].ext2_reader = true;
+        syscall_ext2_reader[syscall_scratch_cpu_index()] = true;
     }
     kernel_init_boot_fixture_poll(current_authority);
     kernel_syscall_persistent_shell_checkpoint_selected();
@@ -5397,7 +5441,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 return syscall_finish_current(frame, kernel_syscall_procfs_open(node, fd), current_authority);
             }
         }
-        let path_view: []u8 = syscall_scratch[syscall_scratch_cpu_index()].path_buffer as []u8;
+        let path_view: [u8; 256..] = syscall_path_view_here();
         let mut lookup_inode: usize = 2;
         if (path_view[0] != 0x2F && x0 != LINUX_AT_FDCWD) {
             if (kernel_syscall_directory_is_open(x0) == false) {
@@ -5518,7 +5562,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             SyscallPathResult::Invalid => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_ENOENT), current_authority); }
             SyscallPathResult::Name(path) => { path }
         };
-        let path_view: []u8 = syscall_scratch[syscall_scratch_cpu_index()].path_buffer as []u8;
+        let path_view: [u8; 256..] = syscall_path_view_here();
         let mut lookup_inode: usize = 2;
         if (path_view[0] != 0x2F && dirfd != LINUX_AT_FDCWD) {
             if (kernel_syscall_directory_is_open(dirfd) == false) {
@@ -5577,7 +5621,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 }
             }
         }
-        let path_view: []u8 = syscall_scratch[syscall_scratch_cpu_index()].path_buffer as []u8;
+        let path_view: [u8; 256..] = syscall_path_view_here();
         let mut lookup_inode: usize = 2;
         if (path_view[0] != 0x2F && x0 != LINUX_AT_FDCWD) {
             if (kernel_syscall_directory_is_open(x0) == false) {
@@ -6222,6 +6266,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         match user_range_check_read(current_authority, x0, 2) {
             UserReadRangeResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
             UserReadRangeResult::Ok(range) => {
+                zero_fill(syscall_scratch[syscall_scratch_cpu_index()].path_buffer as []u8);
                 let path_view: []u8 = syscall_scratch[syscall_scratch_cpu_index()].path_buffer as []u8;
                 if (copy_from_user(range, path_view[0..<2]) &&
                         (path_view[0] == 0x2F || path_view[0] == 0x2E) &&
@@ -6792,6 +6837,10 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         if (x1 >= LINUX_RLIM_NLIMITS) {
             return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINVAL), current_authority);
         }
+        // GitHub issue #203: per-call scratch. The two 8-byte stores below
+        // cover the buffer, but stage 2 tracks arrays whole, so it is
+        // zero-filled first; without this fill the copy-out is rejected.
+        zero_fill(syscall_scratch[syscall_scratch_cpu_index()].rlimit_buffer as []u8);
         let mut soft: usize = LINUX_RLIM64_INFINITY;
         let mut hard: usize = LINUX_RLIM64_INFINITY;
         if (x1 == LINUX_RLIMIT_NOFILE) {
@@ -6863,10 +6912,11 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         match user_range_check_write(current_authority, x0, sizeof(Utsname)) {
             UserWriteRangeResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
             UserWriteRangeResult::Ok(range) => {
+                // GitHub issue #203: zero every byte, the unused tail of each
+                // field included, before any view of the buffer exists;
+                // without this fill the copy-out is rejected.
+                zero_fill(syscall_scratch[syscall_scratch_cpu_index()].uname_buffer as []u8);
                 let uname_bytes = syscall_scratch[syscall_scratch_cpu_index()].uname_buffer as []u8;
-                for zero_index: usize in 0..<sizeof(Utsname) {
-                    syscall_scratch[syscall_scratch_cpu_index()].uname_buffer[zero_index] = 0;
-                }
                 uname_write_field(uname_bytes[
                                       offsetof(Utsname, sysname)..<
                                       offsetof(Utsname, sysname) +
@@ -7603,6 +7653,7 @@ private inline fn syscall_getdents64_current(
                 SyscallFilesystemReady::Unconfigured => { return SyscallAction::Resume(LINUX_EBADF); }
                 SyscallFilesystemReady::Configured(found) => { found }
             };
+            zero_fill(syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8);
             while (written < x2) {
                 match ext2_read_directory_chunk(
                     mount, inode_number,
@@ -7756,6 +7807,7 @@ private inline fn syscall_sendfile_current(
         SyscallFilesystemReady::Unconfigured => { return SyscallAction::Resume(LINUX_EBADF); }
         SyscallFilesystemReady::Configured(found) => { found }
     };
+    zero_fill(syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8);
     let mut copied: usize = 0;
     while (copied < requested) {
         let mut chunk_limit: usize = requested - copied;
@@ -7845,11 +7897,14 @@ private inline fn syscall_execve_current(
         SyscallPathResult::Name(path) => { path }
     };
     let mut path_length: usize = exec_lookup_name.len;
-    let path_view: []u8 = syscall_scratch[syscall_scratch_cpu_index()].path_buffer as []u8;
+    let path_view: [u8; 256..] = syscall_path_view_here();
     if (path_view[0] == 0x2F) { path_length = path_length + 1; }
     if (path_length == 0 || argv_address == 0) { return SyscallAction::Resume(LINUX_EINVAL); }
     let exec_path_absolute: bool = path_view[0] == 0x2F;
     if (path_length > 256) { return SyscallAction::Resume(LINUX_EINVAL); }
+    // GitHub issue #203: the staging helpers assume this fill (see
+    // syscall_exec_argv_here).
+    zero_fill(syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8);
     let exec_path: []u8 = syscall_exec_path_here();
     for path_index: usize in 0..<256 { exec_path[path_index] = 0; }
     let saved_path: usize = slice_copy(

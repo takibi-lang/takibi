@@ -22,11 +22,13 @@
 
    Events:
    - reading a place needs every leaf under it initialized, padding
-     excepted (a whole struct value copies fields); viewing it as bytes or
-     memory -- `p as []u8`, `&p`, a sub-slice -- needs padding too;
+     excepted (a whole struct value copies fields), and so does taking its
+     typed address `&p`; reinterpreting it with `as` (`p as []u8`,
+     `&p as *u8`, `&p as usize`) or sub-slicing it needs padding too;
    - assigning a place initializes every field leaf under it; padding
      takes the source's padding state (a tracked place) or stays as it was
-     marked: a struct literal leaves padding uninit, an untracked value
+     marked: a struct literal (only ever a `let` initializer) leaves
+     padding uninit, an untracked value
      (a call result, a parameter) counts as initialized;
    - a store into an element of an array leaf changes nothing (stage 1
      has no ranges) and reads nothing;
@@ -210,8 +212,9 @@ let check
              padding)" whole (path_to_string (root_display p) (List.rev (List.tl (List.rev l)))))
         else
           error loc (Printf.sprintf
-            "'%s' is read here, but '%s' is uninitialized on some path to \
-             this point" whole (path_to_string (root_display p) l))
+            "'%s' is %s here, but '%s' is uninitialized on some path to \
+             this point" whole (if bytes then "viewed as memory" else "read")
+            (path_to_string (root_display p) l))
   in
   (* `.len` of a slice or array place reads metadata, not the elements. *)
   let is_len_of (e : Ast.expr) = match e.desc with
@@ -246,11 +249,21 @@ let check
         st
     | None ->
     match e.desc with
-    | Ast.AddrOf inner | Ast.Cast (_, inner) ->
+    | Ast.Cast (_, { desc = Ast.AddrOf inner; _ }) | Ast.Cast (_, inner) ->
+        (* Reinterpreting a place (or its address) with `as` exposes its
+           bytes, padding included. *)
         (match place inner with
          | Some p ->
              let st = place_subexprs st inner in
              check_read st { p with inside = false } ~bytes:true e.loc; st
+         | None -> expr st inner)
+    | Ast.AddrOf inner ->
+        (* A typed address escapes the fields; reinterpreting it is the
+           byte view above. *)
+        (match place inner with
+         | Some p ->
+             let st = place_subexprs st inner in
+             check_read st { p with inside = false } ~bytes:false e.loc; st
          | None -> expr st inner)
     | Ast.SliceOf (base, lo, hi) ->
         let st = expr st lo in
@@ -413,6 +426,21 @@ let check
                       array_root = false; out_param = false };
                   (List.fold_left (fun s l -> Leaves.add l s) st (all_leaves key), false)
               | _ -> (st, false))
+         | [] -> (st, false))
+    | Ast.Let (_, name, _, Some ({ desc = Ast.StructLit _; _ } as e), _) ->
+        (* A struct literal writes every field and no padding. *)
+        let st = expr st e in
+        (match Local_bindings.ids_for_stmt bindings s with
+         | id :: _ ->
+             (match Types.IntMap.find_opt id finfo.Types.binding_types with
+              | Some ty ->
+                  let key = "L" ^ string_of_int id in
+                  let leaves = leaves_of [] [] ty in
+                  Hashtbl.replace roots key
+                    { display = name; leaves; array_root = false; out_param = false };
+                  (List.fold_left (fun s (p, _) ->
+                     if is_pad p then Leaves.add (key, p) s else s) st leaves, false)
+              | None -> (st, false))
          | [] -> (st, false))
     | Ast.Let (_, _, _, Some e, _) | Ast.LetTuple (_, e) | Ast.Expr e
     | Ast.Yield e -> (expr st e, false)

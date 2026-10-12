@@ -1,5 +1,31 @@
 # takibi Engineering History
 
+## 2026-10-12: definite initialization of field paths and scratch buffers (#203 stages 1-2)
+
+The checker now tracks a static init/uninit state per struct field, per
+struct padding and per scalar, the erased counterpart of Place(T)'s
+Empty/Full, so `let mut v: S; v.a = 9; return v.b;` is a compile error
+naming `v.b`. Maintainer decisions: the words are init/uninit; reading an
+uninit field is rejected everywhere (C#-style), not only at copy-out;
+padded structs are allowed with padding as its own state (a zero fill sets
+it, a whole-struct copy carries the source's, a field store never writes
+it); every per-call scratch global is uninit at function entry. For
+stage 1 the maintainer chose to leave local arrays untracked (option c),
+to bring forward a whole-object out parameter, `borrow uninit`, instead
+of zero-filling every scratch use (option b), and to keep the 16-byte
+rlimit buffer's zero fill until byte ranges exist (option a).
+
+Two existing programs viewed a partly written struct as bytes; in the
+packed example the padding byte had once kept a previous case's stack
+byte. In the kernel, syscall_scratch became `scratch`, its ext2_reader flag
+(state one function leaves for another) moved out, and each syscall stages
+through a zero-filled buffer. execve's multi-function staging and the path
+buffer read after kernel_syscall_path_name use `unsafe { assume_init }` in
+four helpers listed in TRUSTED_BASE.md. An unsafe region holding only
+assume_init is not counted by raw-authority confinement: it forges no
+address. A `&mut T` callee handed `&p` is trusted to store every field
+until stage 3's `ensures init` contracts.
+
 ## 2026-10-11: stored authority reaches the page allocator; the mint list shrinks
 
 Territory A's session from #518 to #749, in order of the maintainer's

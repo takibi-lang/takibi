@@ -298,7 +298,7 @@ fn copy_from_user(range: borrow UserReadRange[process], destination: borrow []u8
     return copied == destination.len;
 }
 
-fn copy_to_user(range: borrow UserWriteRange[process], source: borrow []const u8) -> UserWriteResult !{unsafe} {
+fn copy_to_user(range: borrow UserWriteRange[process], source: borrow init []const u8) -> UserWriteResult !{unsafe} {
     if (source.len > range.length) { return UserWriteResult::Fault; }
     if (user_range_resolve_cow(range) == false) { return UserWriteResult::Fault; }
     let destination_base: *u8 = unsafe { range.address as *u8 };
@@ -323,7 +323,7 @@ fn copy_from_user_span(range: borrow UserReadRange[process], destination: borrow
     return copy_from_user(range, tail[0..<length]);
 }
 
-fn copy_to_user_span(range: borrow UserWriteRange[process], source: borrow []const u8,
+fn copy_to_user_span(range: borrow UserWriteRange[process], source: borrow init []const u8,
                      offset: usize, length: usize) -> UserWriteResult !{unsafe} {
     if (offset > source.len) { return UserWriteResult::Fault; }
     let tail = source[offset..<source.len];

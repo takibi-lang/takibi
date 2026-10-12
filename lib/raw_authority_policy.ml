@@ -19,7 +19,9 @@ let source_assertions program =
   let rec expr name (e : Ast.expr) =
     let open Ast in
     match e.desc with
-    | Unsafe inner -> add name e.loc; expr name inner
+    | Unsafe inner ->
+        if not (Init_state.assume_init_only_expr inner) then add name e.loc;
+        expr name inner
     | Call (_, xs) | StructLit xs | TupleLit xs -> List.iter (expr name) xs
     | VariantCtor (_, _, x) | Bnot x | Deref x | AddrOf x
     | Cast (_, x) | FieldGet (x, _) -> expr name x
@@ -31,7 +33,9 @@ let source_assertions program =
   and stmt name (s : Ast.stmt) =
     let open Ast in
     match s.desc with
-    | UnsafeBlock body -> add name s.loc; List.iter (stmt name) body
+    | UnsafeBlock body ->
+        if not (Init_state.assume_init_only_stmts body) then add name s.loc;
+        List.iter (stmt name) body
     | Block body -> List.iter (stmt name) body
     | Return x | Let (_, _, _, x, _) -> Option.iter (expr name) x
     | Expr x | Yield x | LetTuple (_, x) | StaticAssert (x, _) -> expr name x

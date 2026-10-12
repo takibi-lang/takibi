@@ -259,6 +259,8 @@ parameter value, or top-level declaration name.
   512]` about to be filled by a block-device read, or a struct about to be
   populated field-by-field) where a throwaway initializer would just be
   immediately discarded work.
+  Reading it before it is written is a compile error; see "Definite
+  Initialization" below.
 - `let mut x: T align(N);` -- N-byte-aligned global or (GitHub issue #27)
   **local** variable (N must be a power of two; not enforced by the
   compiler beyond an LLVM assertion at codegen time). Optional initializer
@@ -696,6 +698,87 @@ skips it; they do not count as effects on every path.
   its own already-checked field-offset access), not a struct field, and
   this rule only governs pointer types stored INSIDE another struct's
   fields.
+
+## Definite Initialization (GitHub issue #203, stages 1 and 2)
+
+The checker tracks, per function, which parts of a place may still be
+uninitialized. It is a static, erased init state on storage (`init` or
+`uninit`), the compile-time counterpart of `Place(T)`'s runtime Empty/Full,
+and it changes no representation.
+
+A tracked place splits into leaves. A scalar, pointer, slice, variant or
+array is one leaf. A struct is the leaves of its fields plus one padding leaf
+when its layout has bytes between or after its fields. Tracked places are:
+
+- a local declared without an initializer whose type is not an array: all of
+  its leaves start `uninit`;
+- a local initialized by a struct literal: its fields are `init`, its padding
+  `uninit`;
+- a `borrow uninit` parameter (below): `uninit` on entry;
+- a `scratch` global (below): `uninit` at the entry of every function.
+
+Rules:
+
+- Reading a place requires every field leaf under it to be `init` on every
+  path to the read, as in C#'s definite assignment. Reading a whole struct
+  value copies fields, so padding is not required, and neither does taking
+  a typed address `&p`. Reinterpreting a place with `as` -- `p as []T`,
+  `&p as *u8`, `&p as usize` -- or sub-slicing it `p[lo..<hi]` exposes its
+  bytes and also requires its padding.
+- Assigning a place makes every field leaf under it `init`. Padding takes the
+  source's padding state when the source is a tracked place, and counts as
+  `init` for any other value (a call result, a parameter). A field store never
+  writes padding.
+- Storing to an element of an array leaf, `a[i] = x`, neither reads it nor
+  makes it `init`: arrays are tracked whole.
+- `zero_fill(dst)` stores zero over every byte of a writable slice or of a
+  pointer's pointee, padding included, and makes the place `init`.
+  `assume_init(dst)` emits nothing and asserts the same inside `unsafe`; an
+  `unsafe` region holding only `assume_init` calls is not a raw-authority
+  assertion, and TRUSTED_BASE.md lists every such site.
+- Passing `p`, `p as []T` or `&p` to a `borrow uninit` parameter makes `p`
+  `init` after the call, padding included. Passing `&p` to a `&mut T`
+  parameter makes its fields `init` but not its padding: the callee is
+  trusted to store every field (TRUSTED_BASE.md).
+- At an `if` or `match`, a leaf is `uninit` after the merge if it is `uninit`
+  at the end of any arm that reaches the merge. A loop body may run no times,
+  so the state after a loop is the state before it.
+
+`borrow init T` and `borrow uninit T` qualify a parameter. `init` states that
+the argument is fully initialized; since every read already requires that,
+it documents the contract (for example `copy_to_user`'s source). `uninit`
+is an out parameter, as C#'s `out`: the callee may not read it before it
+writes it, and it must be `init` on every return. A `borrow uninit` slice
+must be filled whole (`zero_fill`, a whole assignment, another `borrow
+uninit` call, or `assume_init`); stage 2 has no byte ranges.
+
+`scratch let mut g: T;` (or `private scratch let mut ...`) declares per-call
+scratch storage. Whatever an earlier call left in it counts as stale, so
+every function that touches it sees it `uninit` on entry and must zero-fill
+or write a buffer whole before reading it or copying it out. Any index of a
+scratch array global names the same place, since each element is reached
+only by its own CPU (a trusted premise).
+
+```takibi
+struct Pair { a: u8; b: u64; }
+fn bad() -> u64 {
+    let mut v: Pair;
+    v.a = 9;
+    return v.b;          // error: 'v.b' is uninitialized
+}
+fn bytes() -> usize {
+    let mut v: Pair;
+    v.a = 9; v.b = 1;
+    return &v as usize;  // error: the padding of 'v' is uninitialized
+}
+fn fill(dst: borrow uninit []u8) { zero_fill(dst); }   // init on return
+```
+
+Known limitations: local arrays declared without an initializer are not
+tracked yet, so reading one before writing it is not rejected. Element writes
+never make an array `init`, and a fill that writes only a range (`copy_from_user`
+into part of a buffer, a device receive) cannot be expressed. Stage 3 adds
+byte-range facts and `ensures init(...)` contracts for those.
 
 ## Indexed Runtime Owners
 

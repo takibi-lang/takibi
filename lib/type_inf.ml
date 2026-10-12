@@ -4067,7 +4067,8 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            Printf.sprintf "subslice on non-slice/array/pointer type '%s'" (to_string t))))
 
   | Unsafe e1 ->
-      record_unsafe_authority e.loc;
+      if not (Init_state.assume_init_only_expr e1) then
+        record_unsafe_authority e.loc;
       (* Transparent to typing except for permitting unchecked-assertion
          constructs inside. Restore unsafe_depth at this scope boundary even
          when checking e1 raises: infer_program deliberately continues with
@@ -6671,7 +6672,8 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
       in
       (tyenv, raw_locals')
   | UnsafeBlock stmts ->
-      record_unsafe_authority s.loc;
+      if not (Init_state.assume_init_only_stmts stmts) then
+        record_unsafe_authority s.loc;
       (* GitHub issue #315: same as Block, except every statement inside
          is checked with unsafe_depth raised -- the block-granularity
          grant. Both module-scoped grants are restored at this scope

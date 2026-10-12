@@ -30,8 +30,7 @@ let mark (ty : Ast.type_expr) (q : qual) =
   ty
 
 let loc_key (loc : Ast.loc) =
-  let loc = Ast.source_loc loc in
-  (loc.Lexing.pos_fname, loc.Lexing.pos_lnum,
+  (Ast.source_file_of_loc loc, loc.Lexing.pos_lnum,
    loc.Lexing.pos_cnum - loc.Lexing.pos_bol)
 
 (* Called by the parser when a function definition is reduced: every
@@ -56,3 +55,19 @@ let param_qual (def_loc : Ast.loc) (name : string) : qual option =
 
 let mark_scratch name = Hashtbl.replace scratch name ()
 let is_scratch name = Hashtbl.mem scratch name
+
+(* An unsafe region whose only content is assume_init calls asserts an init
+   state, not raw authority: it forges no address, reference or handle. Raw
+   authority confinement (Raw_authority_policy) therefore does not count it
+   as a local unsafe assertion; TRUSTED_BASE.md lists the assume_init sites
+   instead. *)
+let assume_init_only_expr (e : Ast.expr) =
+  match e.desc with
+  | Ast.Call ("assume_init", [_]) -> true
+  | _ -> false
+
+let assume_init_only_stmts (ss : Ast.stmt list) =
+  ss <> [] && List.for_all (fun (s : Ast.stmt) ->
+    match s.desc with
+    | Ast.Expr e -> assume_init_only_expr e
+    | _ -> false) ss
