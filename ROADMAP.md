@@ -72,13 +72,16 @@ list (maintainer, 2026-10-09).
    with `kernel/RAW_MINT_FILES`; step A (MMIO through IoHandles), B1 and B2
    are done (HISTORY.md, 2026-10-11), and page uniqueness is by type: every
    page not handed out keeps its permission in a per-page place, and
-   PageOwner carries it back by address (2026-10-12). **Next: #745** (B3,
-   intrusive_pool absorbed into RegionPool, process records holding their
-   permission with the same exists-field and put-by-address mechanism).
-   Not on the critical path: #748 (allocator time, 2.75x slower since the
-   per-page places), #739 (stale list entries, per-file counts).
-   Consolidating the kernel-driven built-ins into general features is #750
-   (holder-tied identities, option C, is its central item), after #745. For #720
+   PageOwner carries it back by address (2026-10-12). B3 is done too:
+   process records are RegionPool records Held for their process's life,
+   IntrusivePool has left the kernel, and intrusive_pool.tkb and
+   pool_lock.tkb have left the mint list (2026-10-12). **Next:** the rest of
+   stage 3's list on #637 (freelist.tkb, the S and R files) and the region
+   layers on #672. Not on the critical path: #748 (allocator time, 2.75x
+   slower since the per-page places), #739 (stale list entries, per-file
+   counts). Consolidating the kernel-driven built-ins into general features
+   is #750 (holder-tied identities, option C, is its central item; a
+   shrink protocol for RegionPools walked with no lock belongs there). For #720
    (B): the doorbell, ERDP-release and stop/reset boundaries are in place;
    #720 must add exact request/event matching and needs general exclusive
    backing storage on #637/#672 (region_of still permits direct access to
@@ -108,7 +111,7 @@ list (maintainer, 2026-10-09).
 **Evidence for the trunk, scheduled by A:** #584's soak at natural
 boundaries, #702 (dedicated soak hardware, the maintainer's decision),
 #652 (lifecycle trace events for signals and wait4). Every QEMU lane runs
-four vCPUs since #719 (2026-10-11); candidates on top of it: #756 (contention
+four vCPUs since 2026-10-11; candidates on top of it: #756 (contention
 probes rendezvous with every online peer, not core 1 alone) and #757
 (uart-wake peer mode intermittently loses byte 1 at four vCPUs).
 

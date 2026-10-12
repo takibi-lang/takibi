@@ -195,6 +195,16 @@ rules globally.
   generation) before any record is read, so the walk can miss or repeat a
   slot during concurrent allocation but cannot reach a record that is not
   Held under the generation it names.
+- A process record reference outlives the pool lock it was probed under
+  (GitHub issue #745): `scheduled_process_record_locked`, `_current`,
+  `_owned` and `_stopped` validate the Held slot under the pool lock, then
+  transfer the loan to the run guard, the running process, the owner or the
+  machine stop (`loan_transfer`) and let the pool lock go. That the record
+  stays allocated while the reference lives rests on one fact the checker
+  does not see: a process record is reaped (`scheduled_process_slot_remove`,
+  which takes its Held permission back) only under the process-run guard,
+  never while its process runs, and never while the machine is stopped.
+  `RecordLifetime.tla` models that ordering (`ReadsOnlyLiveRecords`).
 - `extern fn` and `extern symbol` declarations trust the linked symbol's ABI,
   effects, lifetime behavior, and implementation. Checker-only borrow and
   effect contracts cannot be verified against an unavailable body.
