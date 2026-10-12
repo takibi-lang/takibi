@@ -75,9 +75,11 @@ list (maintainer, 2026-10-09).
    PageOwner carries it back by address (2026-10-12). B3 is done too:
    process records are RegionPool records Held for their process's life,
    IntrusivePool has left the kernel, and intrusive_pool.tkb and
-   pool_lock.tkb have left the mint list (2026-10-12). **Next:** the rest of
-   stage 3's list on #637 (freelist.tkb, the S and R files) and the region
-   layers on #672. Not on the critical path: #748 (allocator time, 2.75x
+   pool_lock.tkb have left the mint list (2026-10-12). freelist.tkb has
+   left it too: checked indexing only (2026-10-12; #770 would let a while
+   condition bound its body and drop the local re-checks). **Next:** the
+   rest of stage 3's list on #637 (the S and R files: ext2, network, then
+   the splits) and the region layers on #672. Not on the critical path: #748 (allocator time, 2.75x
    slower since the per-page places), #739 (stale list entries, per-file
    counts). Consolidating the kernel-driven built-ins into general features
    is #750 (holder-tied identities, option C, is its central item; a
