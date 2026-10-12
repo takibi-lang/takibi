@@ -183,11 +183,11 @@ def boot_and_measure(args, root, boot, result):
         # are warm-up, not samples.
         for _ in range(2 if url else 0):
             try:
-                http_fetch(url, "/bin/busybox.static")
+                http_fetch(url, args.http_path)
             except OSError:
                 pass
         for round_number in range(args.rounds):
-            for name, command in WORKLOADS:
+            for name, command in ([] if args.no_guest else WORKLOADS):
                 seconds = parse_real(run_command(session, command,
                                                  args.command_seconds))
                 result["samples"].append({"boot": boot, "round": round_number,
@@ -197,7 +197,7 @@ def boot_and_measure(args, root, boot, result):
             if url:
                 for _ in range(args.http):
                     try:
-                        size, seconds = http_fetch(url, "/bin/busybox.static")
+                        size, seconds = http_fetch(url, args.http_path)
                     except OSError as error:
                         # A failed fetch is recorded, not timed: the guest
                         # workloads of the same boot stay usable.
@@ -205,13 +205,13 @@ def boot_and_measure(args, root, boot, result):
                             {"boot": boot, "round": round_number,
                              "error": str(error)})
                         print(f"[fileio] boot={boot} round={round_number} "
-                              f"http-busybox error {error}", flush=True)
+                              f"http error {error}", flush=True)
                         continue
                     result["samples"].append({"boot": boot, "round": round_number,
-                                              "workload": "http-busybox",
+                                              "workload": "http-" + Path(args.http_path).name,
                                               "seconds": seconds, "bytes": size})
                     print(f"[fileio] boot={boot} round={round_number} "
-                          f"http-busybox {seconds:.3f}s {size}B", flush=True)
+                          f"http {seconds:.3f}s {size}B", flush=True)
     finally:
         (env_dir / "terminal.log").write_bytes(bytes(session.transcript))
         session.send(b"\x1d")
@@ -263,6 +263,11 @@ def main():
     parser.add_argument("--artifacts", default=None)
     parser.add_argument("--boot-seconds", type=int, default=1800)
     parser.add_argument("--command-seconds", type=int, default=600)
+    parser.add_argument("--http-path", default="/bin/busybox.static",
+                        help="file the HTTP lane fetches (a small one times "
+                             "the per-request cost)")
+    parser.add_argument("--no-guest", action="store_true",
+                        help="skip the guest workloads; HTTP only")
     parser.add_argument("--port-retries", type=int, default=5)
     parser.add_argument("--compare", nargs="+", metavar="JSON")
     args = parser.parse_args()
