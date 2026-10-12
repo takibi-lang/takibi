@@ -151,6 +151,10 @@ EXEMPT = {
     "kernel/profile_samples.tkb":
         "per-CPU samples are indexed below KERNEL_MAX_CORES and opened or "
         "read only for kernel_online_core_count() under a world stop",
+    "kernel/profile_session.tkb":
+        "per-CPU buffers and counts are indexed below KERNEL_MAX_CORES; each "
+        "is written by its own CPU's PMU interrupt or by DDB under a world "
+        "stop, and the session mode is written only by DDB under a world stop",
     "kernel/profile_timeline.tkb":
         "per-CPU intervals are indexed below KERNEL_MAX_CORES and opened or "
         "read only for kernel_online_core_count() under a world stop",

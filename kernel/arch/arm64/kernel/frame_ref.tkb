@@ -103,6 +103,32 @@ private fn frame_word(frame: borrow FrameRef[process], offset: usize) -> usize !
     return *word;
 }
 
+// GitHub issue #497: one word of the kernel stack an EL1 frame interrupted,
+// for the sampling profiler's frame-pointer walk. The frame lands on the
+// interrupted stack (exception_frame.tkb, #378), and every kernel stack is
+// the upper half of a 2^(KERNEL_STACK_SHIFT+1)-aligned run (#377), so the
+// interrupted stack is [frame + EXC_CONTEXT_SIZE, top of that run). A word
+// is read only inside that span, 8-aligned; anything else is Outside. That
+// the span is mapped RAM is what the stack guard at entry establishes.
+must_use variant FrameStackWord {
+    Outside;
+    Word(usize);
+}
+
+fn frame_interrupted_stack_word(frame: borrow FrameRef[process], address: usize)
+        -> FrameStackWord !{unsafe} {
+    let run_bytes: usize = 1 << (KERNEL_STACK_SHIFT + 1);
+    if (((frame.sp >> KERNEL_STACK_SHIFT) & 1) == 0) { return FrameStackWord::Outside; }
+    let low: usize = frame.sp + EXC_CONTEXT_SIZE;
+    let top: usize = (frame.sp | (run_bytes - 1)) + 1;
+    if (address % 8 != 0 || address < low || address > top - 8) {
+        return FrameStackWord::Outside;
+    }
+    // The frame's own word reader, at an offset above the frame: the stack
+    // the frame sits on continues there.
+    return FrameStackWord::Word(frame_word(frame, address - frame.sp));
+}
+
 private fn frame_word_set(frame: borrow FrameRef[process], offset: usize, value: usize)
         !{unsafe} {
     let word: *usize = unsafe { (frame.sp + offset) as *usize };

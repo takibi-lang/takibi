@@ -218,7 +218,7 @@ kernel/arch/arm64/       EL2 entry, EL0 transition, exceptions, MMU, timer
 kernel/drivers/block/    block-device interfaces and memory adapter
 kernel/drivers/net/      RP1 Cadence GEM driver
 kernel/fs/ext2/          ext2 implementation
-kernel/fs/procfs.tkb     bounded read-only BusyBox ps compatibility view
+kernel/fs/procfs.tkb     bounded BusyBox ps compatibility view, plus /proc/takibi
 kernel/init/             top-level kernel initialization and integration flow
 kernel/kernel/           process and Linux syscall policy
 kernel/mm/               pages, address spaces, mappings, and ELF images
@@ -227,6 +227,26 @@ kernel/platform/rpi5/    RPi5 PCIe, GIC, UART, xHCI, and platform setup
 kernel/tests/            ext2 fixtures and RPi5 expected-file views
 kernel/build/            generated images and linked artifacts
 ```
+
+
+## procfs and /proc/takibi
+
+`kernel/fs/procfs.tkb` serves a small, Linux-shaped `/proc`: the root,
+`/proc/<pid>`, `/proc/<pid>/stat` and `/proc/<pid>/cmdline`, enough for the
+pinned BusyBox `ps`. Nodes are rebuilt from their path on every lookup.
+
+**Policy (maintainer, 2026-10-12, GitHub issue #497): every Takibi-specific
+interface that Linux does not have lives under `/proc/takibi/`.** The rest
+of `/proc` stays Linux-shaped, so a Linux tool reading it is never surprised
+by a Takibi name, and a Takibi interface is never mistaken for a Linux one.
+
+- `/proc/takibi/profile`: the sampling profiler's control file
+  (`kernel/kernel/profile_session.tkb`). Write `start [PERIOD] [SAMPLES]
+  [DEPTH]` (decimal; defaults 240000 cycles, 2048 samples per core, 16
+  frames) to start a session on every core, `stop` to stop it; read it for
+  the session's mode and each core's stored and lost counts. The samples are
+  printed by DDB `profile dump`, which also frees the buffers;
+  `scripts/profile_kernel_session.py` captures and folds them.
 
 ## Make targets
 
@@ -388,7 +408,7 @@ The existing TCP UART/miniterm data path is unchanged. The kernel prints
 <!-- DDB-COMMAND-INVENTORY-START -->
 `oops`; `regs`; `intr`; `sched`; `current`; `vm`; `fds`; `ps`; `stacks`; `wait`;
 `proc PID`; `bt [PID|cpu N]`; `trace`; `events`; `unimpl`; `xk ADDRESS [COUNT]`;
-`xp PHYSICAL [COUNT]`; `xu PID ADDRESS [COUNT]`; `help`; `continue`.
+`xp PHYSICAL [COUNT]`; `xu PID ADDRESS [COUNT]`; `profile stop|dump`; `help`; `continue`.
 <!-- DDB-COMMAND-INVENTORY-END -->
 `wait` derives who is waiting for what from that same snapshot: a blocked
 parent names the child it can collect, and a UART, network, deadline or signal
@@ -1254,7 +1274,7 @@ public command inventory follows.
 <!-- DDB-COMMAND-INVENTORY-START -->
 `oops`; `regs`; `intr`; `sched`; `current`; `vm`; `fds`; `ps`; `stacks`; `wait`;
 `proc PID`; `bt [PID|cpu N]`; `trace`; `events`; `unimpl`; `xk ADDRESS [COUNT]`;
-`xp PHYSICAL [COUNT]`; `xu PID ADDRESS [COUNT]`; `help`; `continue`.
+`xp PHYSICAL [COUNT]`; `xu PID ADDRESS [COUNT]`; `profile stop|dump`; `help`; `continue`.
 <!-- DDB-COMMAND-INVENTORY-END -->
 `help` lists the same inventory.
 

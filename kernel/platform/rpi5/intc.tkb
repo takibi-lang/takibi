@@ -235,6 +235,19 @@ fn gic_pmu_spi_enable() {
     gic_intid_enable(RPI5_PMU_GIC_INTID);
 }
 
+// GitHub issue #497: this core's own PMU overflow line, for the sampling
+// profiler on every core. Core N's is SPI 16 + N (see the constant's
+// note); it is routed to core N alone. Core 0's is set up above.
+fn gic_pmu_core_enable() {
+    let core: usize = cpu_id();
+    if (core == 0 || core >= KERNEL_MAX_CORES) { return; }
+    let intid: u32 = RPI5_PMU_GIC_INTID + (core as u32);
+    gic_intid_target(intid, (1 << core) as u8);
+    gic_intid_edge(intid, false);
+    gic_intid_clear_pending(intid);
+    gic_intid_enable(intid);
+}
+
 fn rpi5_irq_dispatch_inner(frame: sink FrameRef[process], lower_el: bool)
         -> AnyFrame !{interrupt, unsafe} {
     // GitHub issue #632: GICC_IAR is not the interrupt number alone. For an
@@ -295,7 +308,8 @@ fn rpi5_irq_dispatch_inner(frame: sink FrameRef[process], lower_el: bool)
         gem_irq_handler();
 
         rp1_vector_iack(RP1_GEM_VECTOR);
-    } else if (id == RPI5_PMU_GIC_INTID) {
+    } else if (id >= RPI5_PMU_GIC_INTID &&
+               id < RPI5_PMU_GIC_INTID + (KERNEL_MAX_CORES as u32)) {
         // GitHub issue #500: the flat PC sample. Takes the interrupted PC
         // out of the frame this entry already saved, and acknowledges the
         // PMU overflow before the EOI below -- the overflow status is what

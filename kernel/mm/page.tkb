@@ -220,6 +220,9 @@ enum PageOwnerTag: u8 {
     // An execve's own copy of its argv, held for the exec's duration
     // (kernel_process_child_exec_prepare, GitHub issue #693).
     ExecArgs;
+    // A sampling profile's per-core buffer, held from DDB `profile start`
+    // to `profile dump` (kernel/kernel/profile_session.tkb, #497).
+    ProfileBuffer;
 }
 
 struct PageMeta {
@@ -2728,6 +2731,9 @@ private fn page_owner_description_locked(pool: borrow &mut BootPagePool, metas: 
     }
     if (owner == PageOwnerTag::ExecArgs) {
         return "an exec's argv copy" as *u8;
+    }
+    if (owner == PageOwnerTag::ProfileBuffer) {
+        return "a sampling profile buffer" as *u8;
     }
     return "occupied but UNTAGGED (invariant break)" as *u8;
 }

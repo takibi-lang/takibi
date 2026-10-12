@@ -5,8 +5,14 @@ use "kernel/lib/byte_slice.tkb";
 // applet. This is intentionally not a general virtual-filesystem registry.
 // A node is reconstructed from its path and PID; no procfs object retains a
 // ProcessRecord pointer across syscalls.
+//
+// Policy (maintainer, 2026-10-12, GitHub issue #497): every Takibi-specific
+// interface that Linux does not have lives under /proc/takibi/, so the rest
+// of /proc stays Linux-shaped. /proc/takibi/profile is the first: the
+// sampling profiler's control file (kernel/kernel/profile_session.tkb), the
+// one writable node.
 
-enum ProcfsNodeKind: u8 { Root; ProcessDirectory; Stat; Cmdline; }
+enum ProcfsNodeKind: u8 { Root; ProcessDirectory; Stat; Cmdline; TakibiDirectory; TakibiProfile; }
 
 struct ProcfsNode {
     kind: ProcfsNodeKind;
@@ -18,6 +24,11 @@ must_use variant ProcfsLookupResult { Missing; Found(ProcfsNode); }
 must_use variant ProcfsPidResult { Invalid; Parsed(usize); }
 
 const PROCFS_ROOT_INODE: usize = 0xF0000000;
+const PROCFS_TAKIBI_INODE: usize = 0xF0000001;
+const PROCFS_TAKIBI_PROFILE_INODE: usize = 0xF0000002;
+// The /proc root's getdents offset after "takibi" and before any pid; a
+// pid offset carries this bit too, so 0 still means "nothing yet".
+const PROCFS_ROOT_AFTER_TAKIBI: usize = 0x100000000;
 const PROCFS_PID_INODE_BASE: usize = 0xF1000000;
 
 fn procfs_inode(pid: usize, suffix: usize) -> usize {
@@ -65,6 +76,21 @@ fn procfs_lookup(path: []const u8) -> ProcfsLookupResult !{unsafe} {
             split.after
         }
     };
+    match process_path {
+        bs"takibi" => {
+            let mut takibi: ProcfsNode = {
+                ProcfsNodeKind::TakibiDirectory, 0, PROCFS_TAKIBI_INODE
+            };
+            return ProcfsLookupResult::Found(takibi);
+        }
+        bs"takibi/profile" => {
+            let mut profile: ProcfsNode = {
+                ProcfsNodeKind::TakibiProfile, 0, PROCFS_TAKIBI_PROFILE_INODE
+            };
+            return ProcfsLookupResult::Found(profile);
+        }
+        _ => {}
+    }
     let mut leaf: []const u8 = bs"";
     let pid_component: []const u8 = match byte_slice_split_first(process_path,
                                                             0x2F) {
@@ -110,11 +136,20 @@ fn procfs_lookup(path: []const u8) -> ProcfsLookupResult !{unsafe} {
 }
 
 fn procfs_inode_is_ours(inode: usize) -> bool {
-    return inode == PROCFS_ROOT_INODE || inode >= PROCFS_PID_INODE_BASE;
+    return inode == PROCFS_ROOT_INODE || inode == PROCFS_TAKIBI_INODE ||
+           inode == PROCFS_TAKIBI_PROFILE_INODE ||
+           inode >= PROCFS_PID_INODE_BASE;
+}
+
+// The one node a process may open for writing.
+fn procfs_node_is_writable(node: ProcfsNode) -> bool {
+    return node.kind == ProcfsNodeKind::TakibiProfile;
 }
 
 fn procfs_inode_kind(inode: usize) -> ProcfsNodeKind {
     if (inode == PROCFS_ROOT_INODE) { return ProcfsNodeKind::Root; }
+    if (inode == PROCFS_TAKIBI_INODE) { return ProcfsNodeKind::TakibiDirectory; }
+    if (inode == PROCFS_TAKIBI_PROFILE_INODE) { return ProcfsNodeKind::TakibiProfile; }
     let suffix: usize = (inode - PROCFS_PID_INODE_BASE) % 4;
     if (suffix == 0) { return ProcfsNodeKind::ProcessDirectory; }
     if (suffix == 1) { return ProcfsNodeKind::Stat; }
@@ -128,7 +163,8 @@ fn procfs_inode_pid(inode: usize) -> usize {
 
 fn procfs_node_is_directory(node: ProcfsNode) -> bool {
     return node.kind == ProcfsNodeKind::Root ||
-           node.kind == ProcfsNodeKind::ProcessDirectory;
+           node.kind == ProcfsNodeKind::ProcessDirectory ||
+           node.kind == ProcfsNodeKind::TakibiDirectory;
 }
 
 private fn procfs_put_byte(output: borrow [u8; 1024..], offset: usize,
@@ -197,8 +233,39 @@ private fn procfs_put_comm(output: borrow [u8; 1024..], offset_in: usize,
     return offset;
 }
 
+// /proc/takibi/profile read back: the session and each core's counts.
+private fn procfs_render_profile(output: borrow [u8; 1024..]) -> usize {
+    let mut offset: usize = 0;
+    let mode: usize = profile_session_mode_now();
+    offset = procfs_put_text(output, offset, bs"mode ");
+    if (mode == 0) { offset = procfs_put_text(output, offset, bs"idle"); }
+    else if (mode == 1) { offset = procfs_put_text(output, offset, bs"sampling"); }
+    else { offset = procfs_put_text(output, offset, bs"stopped"); }
+    offset = procfs_put_text(output, offset, bs"\nperiod ");
+    offset = procfs_put_usize(output, offset, profile_session_period_now());
+    offset = procfs_put_text(output, offset, bs"\ndepth ");
+    offset = procfs_put_usize(output, offset, profile_session_depth_now());
+    offset = procfs_put_byte(output, offset, 0x0A);
+    let online: usize = kernel_online_core_count();
+    for cpu: usize in 0..<KERNEL_MAX_CORES {
+        if (cpu < online) {
+            offset = procfs_put_text(output, offset, bs"cpu");
+            offset = procfs_put_usize(output, offset, cpu);
+            offset = procfs_put_text(output, offset, bs" stored ");
+            offset = procfs_put_usize(output, offset, profile_session_core_stored(cpu));
+            offset = procfs_put_text(output, offset, bs" lost ");
+            offset = procfs_put_usize(output, offset, profile_session_core_lost(cpu));
+            offset = procfs_put_byte(output, offset, 0x0A);
+        }
+    }
+    return offset;
+}
+
 fn procfs_render_file(inode: usize, output: borrow [u8; 1024..])
         -> usize !{unsafe} {
+    if (inode == PROCFS_TAKIBI_PROFILE_INODE) {
+        return procfs_render_profile(output);
+    }
     let pid: usize = procfs_inode_pid(inode);
     let snapshot: ProcessDiagnosticSnapshot =
         match scheduled_process_diagnostic_snapshot(pid) {
@@ -273,3 +340,23 @@ fn procfs_pid_name(pid: usize, output: borrow [u8; 20..]) -> usize {
     }
     return length;
 }
+
+// A write to a procfs node: only /proc/takibi/profile accepts one. Answers
+// 0 for an accepted command, or the Linux errno to return.
+fn procfs_write(inode: usize, bytes: []const u8) -> usize
+        !{allocates, requires_mmu, unsafe} {
+    if (inode != PROCFS_TAKIBI_PROFILE_INODE) { return LINUX_EBADF; }
+    match profile_session_control(bytes) {
+        ProfileControlResult::Started => { return 0; }
+        ProfileControlResult::Stopped => { return 0; }
+        ProfileControlResult::NotSampling => { return 0; }
+        ProfileControlResult::Busy => { return LINUX_EBUSY; }
+        ProfileControlResult::NoPmu => { return LINUX_ENODEV; }
+        ProfileControlResult::OutOfMemory => { return LINUX_ENOMEM; }
+        ProfileControlResult::Invalid => { return LINUX_EINVAL; }
+    }
+}
+
+// The fixed names a Takibi-owned procfs directory lists, by getdents
+// offset: /proc's own "takibi" entry, and /proc/takibi's "profile".
+fn procfs_root_takibi_offset() -> usize { return PROCFS_ROOT_AFTER_TAKIBI; }

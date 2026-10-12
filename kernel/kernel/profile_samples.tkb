@@ -127,6 +127,8 @@ private fn profile_sample_store(cpu: {0..<KERNEL_MAX_CORES as usize},
 // critical section that opens the measured interval, so the first sample
 // and the interval's own start timestamp cannot straddle a tick.
 fn profile_sample_start() {
+    // GitHub issue #497: a DDB profile session owns the PMU while it exists.
+    if (profile_session_exists()) { return; }
     for cpu: usize in 0..<KERNEL_MAX_CORES {
         profile_sample_core_reset(cpu);
     }
@@ -137,6 +139,12 @@ fn profile_sample_start() {
     if (profile_sample_available == false) { return; }
     profile_sample_active = true;
     pmu_sample_start(PROFILE_SAMPLE_PERIOD_CYCLES);
+}
+
+// Whether the busy-pair interval holds the PMU (profile_session.tkb refuses
+// to start, and leaves the counter alone, while it does).
+fn profile_sample_interval_active() -> bool {
+    return profile_sample_active;
 }
 
 // End sampling. Runs on the interval's own end boundary, before anything is
@@ -156,6 +164,10 @@ fn profile_sample_finish() {
 // saved exception frame, so the interrupted PC and its execution level are
 // read from architectural state rather than guessed.
 fn profile_sample_irq(frame: borrow FrameRef[process]) !{interrupt, unsafe} {
+    if (profile_session_sampling()) {
+        profile_session_irq(frame);
+        return;
+    }
     if (pmu_sample_pending() != 1) { return; }
     if (profile_sample_active == false) {
         // An overflow armed before the interval ended, delivered after.

@@ -55,6 +55,7 @@ use "kernel/lib/execution_model.tkb";
 use "kernel/lib/occupancy.tkb";
 use "kernel/kernel/console_contention_evidence.tkb";
 use "kernel/kernel/profile_samples.tkb";
+use "kernel/kernel/profile_session.tkb";
 use "kernel/arch/arm64/kernel/pmu_extern.tkb";
 use "kernel/kernel/profile_timeline.tkb";
 use "kernel/kernel/syscall_unimplemented.tkb";

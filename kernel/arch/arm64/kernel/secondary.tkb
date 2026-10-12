@@ -182,6 +182,7 @@ fn kernel_secondary_main(context: usize) !{unsafe} {
         // this was first written as a per-platform helper).
             platform_irq_cpu_interface_init();
             timer_irq_setup();
+            gic_pmu_core_enable();
             enable_irq();
         } else if (context != 0x290 + core_id) {
             return;
@@ -388,6 +389,8 @@ fn kernel_core0_idle_tick_reenter() {
 fn kernel_secondary_timer_schedule(frame: sink FrameRef[process], lower_el: bool)
         -> TimerSwitch !{interrupt} {
     secondary_timer_tick();
+    // GitHub issue #497: arm or disarm this core's profile counter.
+    profile_session_sync();
     // GitHub issue #572: a tick on a CPU where a busy worker waits.
     workload_busy_note_tick();
     if (lower_el) {

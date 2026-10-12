@@ -64,5 +64,7 @@ fn timer_irq_handler() !{interrupt, unsafe} {
     // only: a secondary's tick takes kernel_secondary_timer_schedule.
     workload_busy_note_tick_locked(guard);
     process_run_unlock(guard);
+    // GitHub issue #497: arm or disarm this core's profile counter.
+    profile_session_sync();
     interrupt_notify();
 }

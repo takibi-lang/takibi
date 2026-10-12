@@ -17,7 +17,7 @@ inspection, and resume.
 <!-- DDB-COMMAND-INVENTORY-START -->
 `oops`; `regs`; `intr`; `sched`; `current`; `vm`; `fds`; `ps`; `stacks`; `wait`;
 `proc PID`; `bt [PID|cpu N]`; `trace`; `events`; `unimpl`; `xk ADDRESS [COUNT]`;
-`xp PHYSICAL [COUNT]`; `xu PID ADDRESS [COUNT]`; `help`; `continue`.
+`xp PHYSICAL [COUNT]`; `xu PID ADDRESS [COUNT]`; `profile stop|dump`; `help`; `continue`.
 <!-- DDB-COMMAND-INVENTORY-END -->
 
 - `regs`, `intr`, `sched`, `current`: saved CPU, interrupt-entry, scheduler,

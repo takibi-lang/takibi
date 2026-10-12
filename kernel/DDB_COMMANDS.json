@@ -1,25 +1,110 @@
 {
   "public": [
-    {"name": "oops", "usage": "oops", "coverage": "qemu"},
-    {"name": "regs", "usage": "regs", "coverage": "qemu"},
-    {"name": "intr", "usage": "intr", "coverage": "qemu"},
-    {"name": "sched", "usage": "sched", "coverage": "qemu"},
-    {"name": "current", "usage": "current", "coverage": "qemu"},
-    {"name": "vm", "usage": "vm", "coverage": "qemu"},
-    {"name": "fds", "usage": "fds", "coverage": "qemu"},
-    {"name": "ps", "usage": "ps", "coverage": "qemu"},
-    {"name": "stacks", "usage": "stacks", "coverage": "qemu"},
-    {"name": "wait", "usage": "wait", "coverage": "qemu"},
-    {"name": "proc", "usage": "proc PID", "coverage": "qemu"},
-    {"name": "bt", "usage": "bt [PID|cpu N]", "coverage": "qemu"},
-    {"name": "trace", "usage": "trace", "coverage": "qemu"},
-    {"name": "events", "usage": "events", "coverage": "qemu"},
-    {"name": "unimpl", "usage": "unimpl", "coverage": "qemu"},
-    {"name": "xk", "usage": "xk ADDRESS [COUNT]", "coverage": "qemu"},
-    {"name": "xp", "usage": "xp PHYSICAL [COUNT]", "coverage": "qemu"},
-    {"name": "xu", "usage": "xu PID ADDRESS [COUNT]", "coverage": "qemu"},
-    {"name": "help", "usage": "help", "coverage": "qemu"},
-    {"name": "continue", "usage": "continue", "coverage": "qemu"}
+    {
+      "name": "oops",
+      "usage": "oops",
+      "coverage": "qemu"
+    },
+    {
+      "name": "regs",
+      "usage": "regs",
+      "coverage": "qemu"
+    },
+    {
+      "name": "intr",
+      "usage": "intr",
+      "coverage": "qemu"
+    },
+    {
+      "name": "sched",
+      "usage": "sched",
+      "coverage": "qemu"
+    },
+    {
+      "name": "current",
+      "usage": "current",
+      "coverage": "qemu"
+    },
+    {
+      "name": "vm",
+      "usage": "vm",
+      "coverage": "qemu"
+    },
+    {
+      "name": "fds",
+      "usage": "fds",
+      "coverage": "qemu"
+    },
+    {
+      "name": "ps",
+      "usage": "ps",
+      "coverage": "qemu"
+    },
+    {
+      "name": "stacks",
+      "usage": "stacks",
+      "coverage": "qemu"
+    },
+    {
+      "name": "wait",
+      "usage": "wait",
+      "coverage": "qemu"
+    },
+    {
+      "name": "proc",
+      "usage": "proc PID",
+      "coverage": "qemu"
+    },
+    {
+      "name": "bt",
+      "usage": "bt [PID|cpu N]",
+      "coverage": "qemu"
+    },
+    {
+      "name": "trace",
+      "usage": "trace",
+      "coverage": "qemu"
+    },
+    {
+      "name": "events",
+      "usage": "events",
+      "coverage": "qemu"
+    },
+    {
+      "name": "unimpl",
+      "usage": "unimpl",
+      "coverage": "qemu"
+    },
+    {
+      "name": "xk",
+      "usage": "xk ADDRESS [COUNT]",
+      "coverage": "qemu"
+    },
+    {
+      "name": "xp",
+      "usage": "xp PHYSICAL [COUNT]",
+      "coverage": "qemu"
+    },
+    {
+      "name": "xu",
+      "usage": "xu PID ADDRESS [COUNT]",
+      "coverage": "qemu"
+    },
+    {
+      "name": "profile",
+      "usage": "profile stop|dump",
+      "coverage": "qemu"
+    },
+    {
+      "name": "help",
+      "usage": "help",
+      "coverage": "qemu"
+    },
+    {
+      "name": "continue",
+      "usage": "continue",
+      "coverage": "qemu"
+    }
   ],
   "hidden": [
     {

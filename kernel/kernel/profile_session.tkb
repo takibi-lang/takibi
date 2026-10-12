@@ -1,0 +1,672 @@
+// An on-demand sampling profile of the running kernel (GitHub issue #497).
+//
+// Writing `start [PERIOD] [SAMPLES] [DEPTH]` to /proc/takibi/profile starts
+// it, the machine runs whatever workload the operator drives -- an HTTP
+// transfer from the host, a shell command -- writing `stop` (or DDB
+// `profile stop`) stops it, and DDB `profile dump` prints and frees it. scripts/profile_kernel_session.py symbolizes the dump
+// against the kernel ELF and writes folded stacks for a flame graph.
+//
+// What one sample is. Every active core arms its own PMUv3 cycle counter
+// to overflow every PERIOD cycles. The overflow interrupt records, on that
+// core: the time, the pid running there, whether the interrupted context
+// was EL0 or EL1, the interrupted PC and, for EL1, the frame-pointer chain
+// of the interrupted kernel stack (the frame itself lands on that stack,
+// see exception_frame.tkb), and the SKID -- the cycles the counter had
+// already run past its overflow when the interrupt was taken.
+//
+// Why the skid matters (the maintainer's D1 decision on #497). The
+// interrupt is an ordinary IRQ, so a span that runs with IRQs masked -- a
+// mutex section, which masks them -- takes ONE interrupt when it unmasks,
+// however many periods it lasted. Unweighted, page_alloc_contiguous's 3 ms
+// under its lock would count as one sample instead of about thirty. The
+// counter keeps counting after it overflows, so the skid says how long the
+// interrupt waited: the sample's weight is 1 + skid / PERIOD, and the
+// host reports how much of the profile's weight arrived late (masked).
+// The leaf of a late sample is where IRQs came back on, not the
+// instruction that was running; its parent frames are the masked code.
+//
+// EL0 and EL1 are kept apart (the #649 lesson: counts not filtered by EL
+// let kernel work leak into user brackets). A sample is EL0 only when the
+// interrupt was taken from EL0; its frame chain is not walked, because the
+// user stack is not this kernel's to read in an interrupt.
+//
+// Storage costs nothing while idle (the D4 decision): `start`
+// allocates each core's buffer from the page allocator, sized from its
+// arguments, and `profile dump` (or a new start) gives it back. Drop-tail:
+// a full buffer counts `lost`.
+//
+// Concurrency. Start and stop run in a syscall while every core runs;
+// dump runs in DDB with every other core stopped. Start builds the buffers
+// before it publishes the mode (release), and a sample interrupt reads the
+// mode (acquire) before it takes its buffer. Each core arms or disarms its
+// own counter on its timer tick, on leaving the world-stop pen, or when DDB
+// continues (profile_session_sync); a counter cannot be armed from another
+// core. A core's buffer is a Place under that core's buffer lock: its own
+// interrupt takes it there, and start's release and DDB's dump take the
+// same lock, so a buffer is never freed under a sample being written.
+//
+// Current limitations (2026-10-12). Keep this list current.
+// - DUMP IS DDB ONLY: it spins the whole buffer out of the UART with every
+//   other core stopped. The control file only starts, stops and reports.
+// - ARMING LAGS: a core arms on its next timer tick, so the first 16 ms
+//   of a session may be unsampled on some cores.
+// - EL0 SAMPLES HAVE NO STACK. Only the PC; user stacks are not walked.
+// - A LATE SAMPLE'S LEAF IS THE UNMASK POINT. See the skid paragraph.
+// - QEMU IS NOT PERFORMANCE EVIDENCE: its cycle counter follows virtual
+//   time. QEMU proves collection and symbolization; RPi5 gives profiles.
+// - A core that was not online at start has no buffer and never arms.
+
+use "kernel/arch/arm64/kernel/pmu_extern.tkb";
+use "kernel/arch/arm64/kernel/timer.tkb";
+use "kernel/lib/execution_model.tkb";
+use "kernel/lib/atomic_word.tkb";
+
+// Frames kept per sample: the interrupted PC plus up to this many - 1
+// return addresses.
+const PROFILE_DEPTH_MAX: usize = 16;
+
+// One sample. 8 * (5 + 16) = 168 bytes.
+struct ProfileRecord {
+    timestamp: usize;
+    pid: usize;
+    skid: usize;
+    // bit 0: EL0. bits 15:8: frames stored in pcs.
+    meta: usize;
+    // The frame walk's stop reason, for the host to report.
+    stop: usize;
+    pcs: [usize; PROFILE_DEPTH_MAX];
+}
+
+struct ProfileCoreStore {
+    private mutex: Mutex;
+    private buffer: Place(exists c: addr. exists c__off: usize. exists n: usize.
+                          region(ProfileRecord)[c, n]);
+}
+
+private let mut profile_core_store: [ProfileCoreStore; KERNEL_MAX_CORES];
+
+// Per-core bookkeeping, written by that core's interrupt or by DDB while the
+// core is stopped (see the header).
+struct ProfileCoreState {
+    stored: usize;
+    lost: usize;
+    // Pages of this core's buffer run, 0 when it has none.
+    pages: usize;
+    // The physical base of the run, for giving it back.
+    base: usize;
+    // The session epoch this core last armed or disarmed its counter for.
+    synced_epoch: usize;
+}
+
+private let mut profile_core_state: [ProfileCoreState; KERNEL_MAX_CORES];
+
+// 0 idle, 1 sampling, 2 stopped with samples to dump. Written by the
+// control file's writer (or DDB) and read by every core's interrupts.
+private let mut profile_session_mode: AtomicWord;
+// Bumped at every start and stop; a core whose synced_epoch differs arms
+// or disarms on its next timer tick (or on leaving the world-stop pen).
+private let mut profile_session_epoch: AtomicWord;
+private let mut profile_session_period: usize = 0;
+private let mut profile_session_depth: usize = 0;
+private let mut profile_session_started: usize = 0;
+private let mut profile_session_stopped: usize = 0;
+
+private linear struct ProfileBufferGuard[lock: addr] {
+    private flags: usize;
+}
+
+private fn profile_buffer_lock(lock: *Mutex @ address) -> ProfileBufferGuard[address]
+        !{acquires_lock_90_profile_buffer, lock_guard_90_profile_buffer} {
+    let mut guard: ProfileBufferGuard[address] = { mutex_acquire(lock) };
+    return guard;
+}
+
+private fn profile_buffer_unlock(guard: sink ProfileBufferGuard[address],
+                                 lock: *Mutex @ address) {
+    mutex_release(lock, guard.flags);
+}
+
+// Whether a session (sampling or holding samples) exists. The busy-pair
+// interval of profile_samples.tkb shares the PMU and refuses to arm while
+// one does, and the PMU interrupt goes here while one is sampling.
+fn profile_session_sampling() -> bool {
+    return atomic_word_load(&profile_session_mode) == 1;
+}
+
+fn profile_session_exists() -> bool {
+    return atomic_word_load(&profile_session_mode) != 0;
+}
+
+// Give one core's buffer back to the page allocator.
+private fn profile_core_release(cpu: {0..<KERNEL_MAX_CORES as usize}) !{unsafe} {
+    let guard = profile_buffer_lock(&profile_core_store[cpu].mutex);
+    let taken = place_take(guard, &profile_core_store[cpu].mutex,
+                           profile_core_store[cpu].buffer);
+    profile_buffer_unlock(guard, &profile_core_store[cpu].mutex);
+    match taken {
+        Place::Empty => {}
+        Place::Full(records) => {
+            let RegionBytes::Assumed(bytes) = region_into_bytes(records) else {};
+            region_release(bytes);
+            page_run_transferred_release_physical(
+                profile_core_state[cpu].base, profile_core_state[cpu].pages);
+        }
+    }
+    profile_core_state[cpu].pages = 0;
+    profile_core_state[cpu].base = 0;
+    profile_core_state[cpu].stored = 0;
+    profile_core_state[cpu].lost = 0;
+}
+
+// The smallest power-of-two page count holding `samples` records:
+// page_alloc_contiguous aligns a run to its own size.
+private fn profile_pages_for(samples: usize) -> usize {
+    let bytes: usize = samples * sizeof(ProfileRecord);
+    let mut pages: usize = 1;
+    while (pages * PAGE_SIZE < bytes && pages < 4096) {
+        pages = pages * 2;
+    }
+    return pages;
+}
+
+must_use variant ProfileStartResult {
+    Started;
+    Busy;
+    NoPmu;
+    OutOfMemory(usize);
+}
+
+// One core's buffer: a run from the page allocator, typed as records.
+private fn profile_core_allocate(cpu: {0..<KERNEL_MAX_CORES as usize}, samples: usize)
+        -> bool !{allocates, requires_mmu, unsafe} {
+    let pages: usize = profile_pages_for(samples);
+    match page_alloc_contiguous(pages, PageOwnerTag::ProfileBuffer) {
+        PageRunAllocResult::OutOfMemory => { return false; }
+        PageRunAllocResult::Allocated(run_owner) => {
+            let base: usize = page_run_physical_address(run_owner);
+            let RegionBytes::Assumed(run_bytes) = page_run_into_region(run_owner) else {};
+            // Whole records only: a run is rarely a multiple of a record.
+            let usable: usize = ((pages * PAGE_SIZE) / sizeof(ProfileRecord)) *
+                                sizeof(ProfileRecord);
+            let RegionSplit(u8)::Split(split) = region_split(run_bytes, usable) else {
+                RegionSplit(u8)::TooShort(whole) => {
+                    region_release(whole);
+                    page_run_transferred_release_physical(base, pages);
+                    return false;
+                }
+            };
+            let (bytes, slack) = split;
+            region_release(slack);
+            let RegionTyped(ProfileRecord)::Typed(records) =
+                    region_bytes_typed__ProfileRecord(bytes) else {
+                RegionTyped(ProfileRecord)::Misaligned(back) => {
+                    region_release(back);
+                    page_run_transferred_release_physical(base, pages);
+                    return false;
+                }
+            };
+            let guard = profile_buffer_lock(&profile_core_store[cpu].mutex);
+            let previous = place_put(guard, &profile_core_store[cpu].mutex,
+                                     profile_core_store[cpu].buffer, records);
+            profile_buffer_unlock(guard, &profile_core_store[cpu].mutex);
+            match previous {
+                Place::Empty => {}
+                Place::Full(stale) => {
+                    // Released before every allocation, so never here.
+                    let RegionBytes::Assumed(old) = region_into_bytes(stale) else {};
+                    region_release(old);
+                }
+            }
+            profile_core_state[cpu].pages = pages;
+            profile_core_state[cpu].base = base;
+            profile_core_state[cpu].stored = 0;
+            profile_core_state[cpu].lost = 0;
+            return true;
+        }
+    }
+}
+
+// `start` written to /proc/takibi/profile, in a syscall. A session still
+// sampling refuses; a stopped one that was never dumped is discarded.
+// Nothing samples while the buffers are made: the mode is published last.
+fn profile_session_start(period: usize, samples: usize, depth: usize)
+        -> ProfileStartResult !{allocates, requires_mmu, unsafe} {
+    if (profile_sample_interval_active() ||
+            atomic_word_load(&profile_session_mode) == 1) {
+        return ProfileStartResult::Busy;
+    }
+    if (pmu_sample_supported() != 1) { return ProfileStartResult::NoPmu; }
+    for cpu: usize in 0..<KERNEL_MAX_CORES {
+        profile_core_release(cpu);
+    }
+    let online: usize = kernel_online_core_count();
+    for cpu: usize in 0..<KERNEL_MAX_CORES {
+        if (cpu < online) {
+            if (profile_core_allocate(cpu, samples) == false) {
+                for undo: usize in 0..<KERNEL_MAX_CORES {
+                    profile_core_release(undo);
+                }
+                atomic_word_store(&profile_session_mode, 0);
+                return ProfileStartResult::OutOfMemory(cpu);
+            }
+        }
+    }
+    profile_session_period = period;
+    profile_session_depth = depth;
+    if (profile_session_depth > PROFILE_DEPTH_MAX) {
+        profile_session_depth = PROFILE_DEPTH_MAX;
+    }
+    if (profile_session_depth < 1) { profile_session_depth = 1; }
+    profile_session_started = read_cntpct() as usize;
+    profile_session_stopped = 0;
+    atomic_word_store(&profile_session_epoch,
+                      atomic_word_load(&profile_session_epoch) + 1);
+    atomic_word_store(&profile_session_mode, 1);
+    return ProfileStartResult::Started;
+}
+
+// `stop` written to /proc/takibi/profile, or DDB `profile stop`. A sample
+// already inside its interrupt on another core may still land; none starts
+// after. Counters are disarmed on each core's next tick.
+fn profile_session_stop() -> bool {
+    if (atomic_word_load(&profile_session_mode) != 1) { return false; }
+    profile_session_stopped = read_cntpct() as usize;
+    atomic_word_store(&profile_session_mode, 2);
+    atomic_word_store(&profile_session_epoch,
+                      atomic_word_load(&profile_session_epoch) + 1);
+    return true;
+}
+
+// Arm or disarm this core's counter for the current session. Called from
+// every core's timer tick, on the way out of the world-stop pen and when
+// DDB continues, with IRQs masked. One load and compare when nothing
+// changed: the whole idle cost.
+fn profile_session_sync() !{unsafe} {
+    let raw_cpu: usize = cpu_id();
+    if (raw_cpu >= KERNEL_MAX_CORES) { return; }
+    let cpu: {0..<KERNEL_MAX_CORES as usize} = raw_cpu;
+    let epoch: usize = atomic_word_load(&profile_session_epoch);
+    if (profile_core_state[cpu].synced_epoch == epoch) { return; }
+    profile_core_state[cpu].synced_epoch = epoch;
+    if (atomic_word_load(&profile_session_mode) == 1 &&
+            profile_core_state[cpu].pages != 0) {
+        pmu_sample_start(profile_session_period);
+    } else if (profile_sample_interval_active() == false) {
+        pmu_sample_stop();
+    }
+}
+
+// The PMU overflow interrupt while a session samples. `frame` is the
+// interrupted context.
+fn profile_session_irq(frame: borrow FrameRef[process]) !{interrupt, unsafe} {
+    if (pmu_sample_pending() != 1) { return; }
+    let raw_cpu: usize = cpu_id();
+    if (atomic_word_load(&profile_session_mode) != 1 ||
+            raw_cpu >= KERNEL_MAX_CORES) {
+        pmu_sample_stop();
+        return;
+    }
+    let cpu: {0..<KERNEL_MAX_CORES as usize} = raw_cpu;
+    // Read before the rearm resets it: how far past the overflow the
+    // counter already is.
+    let skid: usize = pmu_sample_counter();
+    pmu_sample_rearm(profile_session_period);
+    let guard = profile_buffer_lock(&profile_core_store[cpu].mutex);
+    let stored: usize = profile_core_state[cpu].stored;
+    let taken = place_take(guard, &profile_core_store[cpu].mutex,
+                           profile_core_store[cpu].buffer);
+    match taken {
+        Place::Empty => {
+            profile_buffer_unlock(guard, &profile_core_store[cpu].mutex);
+            return;
+        }
+        Place::Full(records) => {
+            if (stored < region_count(records)) {
+                let record: &mut ProfileRecord = region_at(records, stored);
+                profile_record_fill(record, frame, skid);
+                profile_core_state[cpu].stored = stored + 1;
+            } else {
+                profile_core_state[cpu].lost = profile_core_state[cpu].lost + 1;
+            }
+            let back = place_put(guard, &profile_core_store[cpu].mutex,
+                                 profile_core_store[cpu].buffer, records);
+            profile_buffer_unlock(guard, &profile_core_store[cpu].mutex);
+            match back {
+                Place::Empty => {}
+                Place::Full(other) => {
+                    let RegionBytes::Assumed(lost_bytes) = region_into_bytes(other) else {};
+                    region_release(lost_bytes);
+                }
+            }
+        }
+    }
+}
+
+// -- The control file, /proc/takibi/profile ----------------------------
+//
+// Writing `start [PERIOD] [SAMPLES] [DEPTH]` (decimal; defaults below)
+// starts a session, `stop` stops it. Reading it reports the session.
+// `profile dump` in DDB prints the samples and frees the buffers.
+const PROFILE_PERIOD_DEFAULT: usize = 240000;
+const PROFILE_SAMPLES_DEFAULT: usize = 2048;
+const PROFILE_DEPTH_DEFAULT: usize = PROFILE_DEPTH_MAX;
+
+must_use variant ProfileControlResult {
+    Started;
+    Stopped;
+    NotSampling;
+    Busy;
+    NoPmu;
+    OutOfMemory;
+    Invalid;
+}
+
+private fn profile_is_space(byte: u8) -> bool {
+    return byte == 0x20 || byte == 0x0A || byte == 0x09 || byte == 0x0D;
+}
+
+// Parse and act on one write. `text` is the bytes written: a command word
+// and up to three decimal numbers, separated by blanks.
+fn profile_session_control(text: []const u8)
+        -> ProfileControlResult !{allocates, requires_mmu, unsafe} {
+    let mut command: [u8; 8];
+    for c: usize in 0..<8 { command[c] = 0; }
+    let mut command_length: usize = 0;
+    let mut numbers: [usize; 3];
+    for n: usize in 0..<3 { numbers[n] = 0; }
+    let mut count: usize = 0;
+    let mut in_word: bool = false;
+    for byte in text {
+        if (profile_is_space(byte)) {
+            in_word = false;
+        } else {
+            if (in_word == false) {
+                if (count >= 4) { return ProfileControlResult::Invalid; }
+                in_word = true;
+                count = count + 1;
+            }
+            if (count == 1) {
+                let current: usize = command_length;
+                if (current >= 8) { return ProfileControlResult::Invalid; }
+                let at: {0..<8 as usize} = current;
+                command[at] = byte;
+                command_length = command_length + 1;
+            } else {
+                let slot: usize = count - 2;
+                if (slot >= 3) { return ProfileControlResult::Invalid; }
+                if (byte < 0x30 || byte > 0x39 ||
+                        numbers[slot] > 100000000000) {
+                    return ProfileControlResult::Invalid;
+                }
+                numbers[slot] = numbers[slot] * 10 + ((byte - 0x30) as usize);
+            }
+        }
+    }
+    if (command_length == 4 && command[0] == 0x73 && command[1] == 0x74 &&
+            command[2] == 0x6F && command[3] == 0x70) {
+        if (count != 1) { return ProfileControlResult::Invalid; }
+        if (profile_session_stop()) { return ProfileControlResult::Stopped; }
+        return ProfileControlResult::NotSampling;
+    }
+    if (command_length != 5 || command[0] != 0x73 || command[1] != 0x74 ||
+            command[2] != 0x61 || command[3] != 0x72 || command[4] != 0x74) {
+        return ProfileControlResult::Invalid;
+    }
+    let mut period: usize = PROFILE_PERIOD_DEFAULT;
+    let mut samples: usize = PROFILE_SAMPLES_DEFAULT;
+    let mut depth: usize = PROFILE_DEPTH_DEFAULT;
+    if (count >= 2) { period = numbers[0]; }
+    if (count >= 3) { samples = numbers[1]; }
+    if (count >= 4) { depth = numbers[2]; }
+    if (period < 1000 || samples < 1 || samples > 1000000 || depth < 1) {
+        return ProfileControlResult::Invalid;
+    }
+    match profile_session_start(period, samples, depth) {
+        ProfileStartResult::Started => { return ProfileControlResult::Started; }
+        ProfileStartResult::Busy => { return ProfileControlResult::Busy; }
+        ProfileStartResult::NoPmu => { return ProfileControlResult::NoPmu; }
+        ProfileStartResult::OutOfMemory(cpu) => {
+            return ProfileControlResult::OutOfMemory;
+        }
+    }
+}
+
+// What the control file reads back.
+fn profile_session_mode_now() -> usize {
+    return atomic_word_load(&profile_session_mode);
+}
+
+fn profile_session_period_now() -> usize { return profile_session_period; }
+fn profile_session_depth_now() -> usize { return profile_session_depth; }
+
+fn profile_session_core_stored(cpu: {0..<KERNEL_MAX_CORES as usize}) -> usize {
+    return profile_core_state[cpu].stored;
+}
+
+fn profile_session_core_lost(cpu: {0..<KERNEL_MAX_CORES as usize}) -> usize {
+    return profile_core_state[cpu].lost;
+}
+
+// Walk stop reasons, as the host prints them.
+const PROFILE_STOP_COMPLETE: usize = 0;
+const PROFILE_STOP_DEPTH: usize = 1;
+const PROFILE_STOP_RANGE: usize = 2;
+const PROFILE_STOP_USER: usize = 3;
+const PROFILE_STOP_RETURN: usize = 4;
+
+// Store one return address at `index`, if it fits.
+private fn profile_frame_store(record: borrow &mut ProfileRecord, index: usize, pc: usize) -> bool {
+    if (index >= PROFILE_DEPTH_MAX) { return false; }
+    let slot: {0..<PROFILE_DEPTH_MAX as usize} = index;
+    record.pcs[slot] = pc;
+    return true;
+}
+
+private fn profile_record_fill(record: borrow &mut ProfileRecord,
+                               frame: borrow FrameRef[process], skid: usize)
+        !{interrupt, unsafe} {
+    record.timestamp = read_cntpct() as usize;
+    record.pid = kernel_process_current_pid();
+    record.skid = skid;
+    let el0: bool = (frame_spsr_el1(frame) & 0xF) == 0;
+    record.pcs[0] = frame_elr_el1(frame);
+    let mut frames: usize = 1;
+    record.stop = PROFILE_STOP_USER;
+    if (el0 == false) {
+        record.stop = PROFILE_STOP_COMPLETE;
+        let mut fp: usize = frame_general(frame, 29);
+        let mut walking: bool = fp != 0;
+        while (walking) {
+            if (frames >= profile_session_depth || frames >= PROFILE_DEPTH_MAX) {
+                record.stop = PROFILE_STOP_DEPTH;
+                walking = false;
+            } else {
+                match frame_interrupted_stack_word(frame, fp) {
+                    FrameStackWord::Outside => {
+                        record.stop = PROFILE_STOP_RANGE;
+                        walking = false;
+                    }
+                    FrameStackWord::Word(previous) => {
+                        match frame_interrupted_stack_word(frame, fp + 8) {
+                            FrameStackWord::Outside => {
+                                record.stop = PROFILE_STOP_RANGE;
+                                walking = false;
+                            }
+                            FrameStackWord::Word(return_pc) => {
+                                if (return_pc == 0 || return_pc % 4 != 0) {
+                                    record.stop = PROFILE_STOP_RETURN;
+                                    walking = false;
+                                } else if (profile_frame_store(record, frames, return_pc)) {
+                                    frames = frames + 1;
+                                    if (previous == 0) {
+                                        walking = false;
+                                    } else if (previous <= fp) {
+                                        record.stop = PROFILE_STOP_RANGE;
+                                        walking = false;
+                                    } else {
+                                        fp = previous;
+                                    }
+                                } else {
+                                    record.stop = PROFILE_STOP_DEPTH;
+                                    walking = false;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut meta: usize = frames << 8;
+    if (el0) { meta = meta | 1; }
+    record.meta = meta;
+}
+
+// DDB output: spun straight to the UART, as ddb_puts does, because a
+// stopped peer may hold the console lock.
+private fn profile_puts(text: []const u8) {
+    for index: usize in 0..<text.len {
+        uart_debug_putc(text[index]);
+    }
+}
+
+private fn profile_put_hex(value: usize) {
+    let mut started: bool = false;
+    let mut shift: usize = 60;
+    let mut going: bool = true;
+    while (going) {
+        let digit: usize = (value >> shift) & 0xF;
+        if (digit != 0 || started || shift == 0) {
+            started = true;
+            if (digit < 10) { uart_debug_putc((digit as u8) + 48); }
+            else { uart_debug_putc((digit as u8) + 87); }
+        }
+        if (shift == 0) { going = false; } else { shift = shift - 4; }
+    }
+}
+
+private fn profile_put_udec(value_in: usize) {
+    let mut digits: [u8; 20];
+    let mut count: usize = 0;
+    let mut value: usize = value_in;
+    if (value == 0) { uart_debug_putc(0x30); return; }
+    for index: usize in 0..<20 {
+        if (value != 0) {
+            digits[index] = 0x30 + ((value % 10) as u8);
+            count = count + 1;
+            value = value / 10;
+        }
+    }
+    while (count != 0) {
+        count = count - 1;
+        if (count < 20) { uart_debug_putc(digits[count]); }
+    }
+}
+
+// DDB `profile dump`. Every core is stopped. Prints the session and every
+// stored sample, then gives every buffer back. Line grammar (one per
+// sample), parsed by scripts/profile_kernel_session.py:
+//
+//   profile-session: sample cpu=C t=HEX pid=P el=0|1 skid=N stop=S pcs=HEX,HEX,...
+fn profile_session_dump() !{unsafe} {
+    profile_puts(bs"profile-session: begin period=");
+    profile_put_udec(profile_session_period);
+    profile_puts(bs" depth=");
+    profile_put_udec(profile_session_depth);
+    profile_puts(bs" mode=");
+    profile_put_udec(atomic_word_load(&profile_session_mode));
+    profile_puts(bs" started=");
+    profile_put_udec(profile_session_started);
+    profile_puts(bs" stopped=");
+    profile_put_udec(profile_session_stopped);
+    profile_puts(bs" cntfrq=");
+    profile_put_udec(read_cntfrq() as usize);
+    profile_puts(bs"\n");
+    let mut total: usize = 0;
+    let mut lost: usize = 0;
+    for cpu: usize in 0..<KERNEL_MAX_CORES {
+        let guard = profile_buffer_lock(&profile_core_store[cpu].mutex);
+        let taken = place_take(guard, &profile_core_store[cpu].mutex,
+                               profile_core_store[cpu].buffer);
+        match taken {
+            Place::Empty => {
+                profile_buffer_unlock(guard, &profile_core_store[cpu].mutex);
+            }
+            Place::Full(records) => {
+                let stored: usize = profile_core_state[cpu].stored;
+                let count: usize = region_count(records);
+                let mut index: usize = 0;
+                for slot: usize in 0..<count {
+                    if (slot < stored) {
+                        profile_record_print(cpu, region_at(records, slot));
+                        index = index + 1;
+                    }
+                }
+                total = total + index;
+                lost = lost + profile_core_state[cpu].lost;
+                profile_puts(bs"profile-session: core cpu=");
+                profile_put_udec(cpu);
+                profile_puts(bs" stored=");
+                profile_put_udec(index);
+                profile_puts(bs" lost=");
+                profile_put_udec(profile_core_state[cpu].lost);
+                profile_puts(bs" capacity=");
+                profile_put_udec(count);
+                profile_puts(bs"\n");
+                let back = place_put(guard, &profile_core_store[cpu].mutex,
+                                     profile_core_store[cpu].buffer, records);
+                profile_buffer_unlock(guard, &profile_core_store[cpu].mutex);
+                match back {
+                    Place::Empty => {}
+                    Place::Full(other) => {
+                        let RegionBytes::Assumed(other_bytes) = region_into_bytes(other) else {};
+                        region_release(other_bytes);
+                    }
+                }
+            }
+        }
+    }
+    profile_puts(bs"profile-session: end samples=");
+    profile_put_udec(total);
+    profile_puts(bs" lost=");
+    profile_put_udec(lost);
+    profile_puts(bs"\n");
+    for cpu: usize in 0..<KERNEL_MAX_CORES {
+        profile_core_release(cpu);
+    }
+    atomic_word_store(&profile_session_epoch,
+                      atomic_word_load(&profile_session_epoch) + 1);
+    atomic_word_store(&profile_session_mode, 0);
+}
+
+private fn profile_record_print(cpu: usize, record: borrow &mut ProfileRecord) {
+    profile_puts(bs"profile-session: sample cpu=");
+    profile_put_udec(cpu);
+    profile_puts(bs" t=");
+    profile_put_hex(record.timestamp);
+    profile_puts(bs" pid=");
+    profile_put_udec(record.pid);
+    profile_puts(bs" el=");
+    if ((record.meta & 1) != 0) { profile_puts(bs"0"); } else { profile_puts(bs"1"); }
+    profile_puts(bs" skid=");
+    profile_put_udec(record.skid);
+    profile_puts(bs" stop=");
+    profile_put_udec(record.stop);
+    profile_puts(bs" pcs=");
+    let frames: usize = (record.meta >> 8) & 0xFF;
+    for slot: usize in 0..<PROFILE_DEPTH_MAX {
+        if (slot < frames) {
+            if (slot != 0) { profile_puts(bs","); }
+            profile_put_hex(record.pcs[slot]);
+        }
+    }
+    profile_puts(bs"\n");
+}
+
+// GitHub issue #479's coverage rule: what makes this file's mutable globals
+// safe. The mode, epoch, period, depth and timestamps are written only by
+// DDB with every other core stopped, and read by the sample interrupt with
+// its own IRQs masked; a core cannot be in its interrupt while it is in the
+// pen. The per-core state is PARTITIONED: an element is written by its own
+// core's interrupt, or by DDB while that core is stopped. The buffers are
+// places under their core's lock (see the header).

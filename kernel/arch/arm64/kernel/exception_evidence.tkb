@@ -438,6 +438,55 @@ private fn ddb_append(line: borrow [u8; CRASH_CONSOLE_LINE_BYTES..],
     return length;
 }
 
+// GitHub issue #497: `profile stop` and `profile dump`. A session is
+// started by writing to /proc/takibi/profile (profile_session.tkb).
+must_use variant DdbProfileCommand {
+    NotProfile;
+    Invalid;
+    Stop;
+    Dump;
+}
+
+private fn ddb_parse_profile(line: borrow [u8; CRASH_CONSOLE_LINE_BYTES..],
+                             length: usize) -> DdbProfileCommand {
+    if (ddb_command_is(line, length, bs"profile stop")) {
+        return DdbProfileCommand::Stop;
+    }
+    if (ddb_command_is(line, length, bs"profile dump")) {
+        return DdbProfileCommand::Dump;
+    }
+    if (ddb_command_is(line, length, bs"profile") ||
+            ddb_command_starts_with(line, length, bs"profile ")) {
+        return DdbProfileCommand::Invalid;
+    }
+    return DdbProfileCommand::NotProfile;
+}
+
+private fn ddb_command_profile(command: DdbProfileCommand) !{unsafe} {
+    match command {
+        DdbProfileCommand::NotProfile => {
+            ddb_puts("ddb: unknown command; try help\n");
+        }
+        DdbProfileCommand::Invalid => {
+            ddb_puts("ddb: usage: profile stop | profile dump (start: write to /proc/takibi/profile)\n");
+        }
+        DdbProfileCommand::Stop => {
+            if (profile_session_stop()) {
+                ddb_puts("ddb: profile stopped\n");
+            } else {
+                ddb_puts("ddb: profile not sampling\n");
+            }
+        }
+        DdbProfileCommand::Dump => {
+            if (profile_session_exists()) {
+                profile_session_dump();
+            } else {
+                ddb_puts("ddb: profile nothing to dump\n");
+            }
+        }
+    }
+}
+
 must_use variant DdbMemoryCommand {
     NotMemory;
     Invalid;
@@ -1108,6 +1157,9 @@ fn kernel_world_stop_serve(frame: borrow FrameRef[process]) !{interrupt, unsafe}
         frame_ref_address(frame), kernel_process_frame_pid_or_zero(frame));
     world_stop_interrupt_hold();
     kernel_ddb_stopped_root_retire();
+    // GitHub issue #497: a profile session DDB started or stopped while
+    // this core was held arms or disarms this core's own counter.
+    profile_session_sync();
 }
 
 // Called after the pen releases. The root is retired rather than left
@@ -2631,8 +2683,10 @@ private fn kernel_ddb_enter_stopped(
                         // lane instead of waiting for the stall to recur.
                         ddb_render_wait_test();
                     } else if (ddb_command_is(line as []u8, length, bs"help")) {
-                        ddb_puts("commands: oops regs intr sched current vm fds ps stacks wait proc PID bt [PID|cpu N] trace events unimpl xk ADDRESS [COUNT] xp PHYSICAL [COUNT] xu PID ADDRESS [COUNT] help continue\n");
-                    } else { ddb_puts("ddb: unknown command; try help\n"); }
+                        ddb_puts("commands: oops regs intr sched current vm fds ps stacks wait proc PID bt [PID|cpu N] trace events unimpl xk ADDRESS [COUNT] xp PHYSICAL [COUNT] xu PID ADDRESS [COUNT] profile stop|dump help continue\n");
+                    } else {
+                        ddb_command_profile(ddb_parse_profile(line as []u8, length));
+                    }
                     }
                         }
                     }
@@ -2644,6 +2698,10 @@ private fn kernel_ddb_enter_stopped(
         }
         length = 0;
     }
+    // GitHub issue #497: arm or disarm this core's sampling counter for a
+    // profile session started or stopped above; peers do it on leaving
+    // the pen.
+    profile_session_sync();
     kernel_log_tx_resume(console);
     // Said at all because nothing else could see this: both DDB lanes resume
     // into the interactive shell and end there, so neither reaches the

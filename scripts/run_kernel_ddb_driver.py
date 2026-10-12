@@ -148,6 +148,7 @@ def drive(args, started, deadline):
         b"xu 1 80000000 2\n", b"xu 1 80000fff 2\n",
         b"xu 1 ffffffffffffffff 2\n", b"xu 1 80000000 65\n",
         b"xu 999999 80000000 1\n", b"xu 1 70000000 1\n",
+        b"profile dump\n", b"profile\n",
         b"help\n",
         b"continue\n",
     ]

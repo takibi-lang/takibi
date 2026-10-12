@@ -153,6 +153,7 @@ const LINUX_ENOTEMPTY: usize = 0xFFFFFFFFFFFFFFD9;
 const LINUX_EISDIR: usize = 0xFFFFFFFFFFFFFFEB;
 const LINUX_EPERM: usize = 0xFFFFFFFFFFFFFFFF;
 const LINUX_EBUSY: usize = 0xFFFFFFFFFFFFFFF0;
+const LINUX_ENODEV: usize = 0xFFFFFFFFFFFFFFED;
 const LINUX_AT_REMOVEDIR: usize = 0x200;
 // RLIMIT_NOFILE, and Linux's RLIM64_INFINITY.
 const LINUX_RLIMIT_NOFILE: usize = 7;
@@ -1208,6 +1209,35 @@ fn kernel_syscall_file_set_offset(fd: usize, value: usize) -> bool {
     }
 }
 
+// GitHub issue #497: one getdents64 record for a fixed procfs name at the
+// start of the user buffer: d_ino, d_off, d_reclen, d_type, name, NUL.
+must_use variant ProcfsDirentWrite {
+    TooSmall;
+    Fault;
+    Written(usize);
+}
+
+private fn syscall_procfs_fixed_dirent(range: borrow UserWriteRange[process],
+                                       capacity: usize, name: []const u8,
+                                       inode: usize, kind: u8,
+                                       next_offset: usize)
+        -> ProcfsDirentWrite !{unsafe} {
+    let record_length: usize = (19 + name.len + 1 + 7) & 0xFFFFFFFFFFFFFFF8;
+    if (record_length > capacity) { return ProcfsDirentWrite::TooSmall; }
+    let mut record = user_write_u64(range, 0, inode as u64);
+    record = user_write_join(record, user_write_u64(range, 8, next_offset as u64));
+    record = user_write_join(record, user_write_u16(range, 16, record_length));
+    record = user_write_join(record, user_write_byte(range, 18, kind));
+    for index: usize in 0..<name.len {
+        record = user_write_join(record, user_write_byte(range, 19 + index, name[index]));
+    }
+    record = user_write_join(record, user_write_byte(range, 19 + name.len, 0));
+    match record {
+        UserWriteResult::Fault => { return ProcfsDirentWrite::Fault; }
+        UserWriteResult::Written => { return ProcfsDirentWrite::Written(record_length); }
+    }
+}
+
 fn kernel_syscall_procfs_open(node: ProcfsNode, fd: usize)
         -> SyscallAction {
     if (procfs_node_is_directory(node)) {
@@ -1223,7 +1253,7 @@ fn kernel_syscall_procfs_open(node: ProcfsNode, fd: usize)
         }
     }
     match unified_file_open(kernel_syscall_process_slot(), fd, node.inode,
-                            true, false) {
+                            true, procfs_node_is_writable(node)) {
         UnifiedOpenResult::Invalid => {
             return SyscallAction::Resume(LINUX_EBADF);
         }
@@ -2291,6 +2321,16 @@ fn syscall_write_segment(current_authority: borrow ProcessCurrent[current_proces
                 return SyscallIoResult::Errno(LINUX_EINVAL);
             }
             let content = content_buffer[0..<length];
+            // GitHub issue #497: /proc/takibi/profile, the one writable
+            // procfs node, takes a command rather than file data.
+            let written_inode: usize = kernel_syscall_file_inode(fd);
+            if (procfs_inode_is_ours(written_inode)) {
+                let control_answer: usize = procfs_write(written_inode, content);
+                if (control_answer != 0) {
+                    return SyscallIoResult::Errno(control_answer);
+                }
+                return SyscallIoResult::Transferred(length);
+            }
             let answer: usize = syscall_ext2_write_locked(fd, content);
             if (answer != 0) { return SyscallIoResult::Errno(answer); }
             workload_peer_mutation_note(8);
@@ -5428,7 +5468,8 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             ProcfsLookupResult::Missing => {}
             ProcfsLookupResult::Found(node) => {
                 let access_mode: usize = x2 & 3;
-                if (access_mode != 0) {
+                if (access_mode != 0 && (access_mode == 3 ||
+                        procfs_node_is_writable(node) == false)) {
                     return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EACCES), current_authority);
                 }
                 let fd: usize = match unified_fd_alloc(
@@ -7586,12 +7627,41 @@ private inline fn syscall_getdents64_current(
             let mut directory_offset: usize =
                 kernel_syscall_file_offset(x0);
             let mut written: usize = 0;
+            if (inode_number == PROCFS_TAKIBI_INODE) {
+                // GitHub issue #497: /proc/takibi lists its one entry.
+                if (directory_offset != 0) { return SyscallAction::Resume(0); }
+                match syscall_procfs_fixed_dirent(range, x2, bs"profile",
+                                                  PROCFS_TAKIBI_PROFILE_INODE, 8, 1) {
+                    ProcfsDirentWrite::TooSmall => { return SyscallAction::Resume(LINUX_EINVAL); }
+                    ProcfsDirentWrite::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
+                    ProcfsDirentWrite::Written(size) => {
+                        if (kernel_syscall_file_set_offset(x0, 1) == false) {
+                            return SyscallAction::Resume(LINUX_EBADF);
+                        }
+                        return SyscallAction::Resume(size);
+                    }
+                }
+            }
             if (inode_number == PROCFS_ROOT_INODE) {
+                if (directory_offset == 0) {
+                    // GitHub issue #497: /proc/takibi, before the pids.
+                    match syscall_procfs_fixed_dirent(range, x2, bs"takibi",
+                                                      PROCFS_TAKIBI_INODE, 4,
+                                                      procfs_root_takibi_offset()) {
+                        ProcfsDirentWrite::TooSmall => { return SyscallAction::Resume(LINUX_EINVAL); }
+                        ProcfsDirentWrite::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
+                        ProcfsDirentWrite::Written(size) => {
+                            written = size;
+                            directory_offset = procfs_root_takibi_offset();
+                        }
+                    }
+                }
                 let mut name_storage: [u8; 20];
                 let name_view: []u8 = name_storage as []u8;
                 let mut scanning: bool = true;
                 while (scanning) {
-                    let pid: usize = procfs_next_pid(directory_offset);
+                    let pid: usize = procfs_next_pid(
+                        directory_offset & (procfs_root_takibi_offset() - 1));
                     if (pid == 0) {
                         scanning = false;
                     } else {
@@ -7610,7 +7680,8 @@ private inline fn syscall_getdents64_current(
                             let mut record = user_write_u64(range, written,
                                 procfs_inode(pid, 0) as u64);
                             record = user_write_join(record,
-                                user_write_u64(range, written + 8, pid as u64));
+                                user_write_u64(range, written + 8,
+                                    (pid | procfs_root_takibi_offset()) as u64));
                             record = user_write_join(record,
                                 user_write_u16(range, written + 16, record_length));
                             record = user_write_join(record,
@@ -7637,7 +7708,7 @@ private inline fn syscall_getdents64_current(
                                 }
                                 UserWriteResult::Written => {
                                     written = written + record_length;
-                                    directory_offset = pid;
+                                    directory_offset = pid | procfs_root_takibi_offset();
                                 }
                             }
                         }

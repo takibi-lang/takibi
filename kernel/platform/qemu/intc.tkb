@@ -99,6 +99,12 @@ fn gic_pmu_ppi_enable() {
     gic_intid_enable(qemu_pmu_gic_intid);
 }
 
+// GitHub issue #497: the PMU PPI is banked per core, so a secondary
+// enables its own for the sampling profiler on every core.
+fn gic_pmu_core_enable() {
+    gic_intid_enable(qemu_pmu_gic_intid);
+}
+
 fn platform_irq_dispatch_inner(frame: sink FrameRef[process], lower_el: bool)
         -> AnyFrame !{interrupt, unsafe} {
     // GitHub issue #632: GICC_IAR is not the interrupt number alone. For an
