@@ -2,9 +2,10 @@
   "date": "2026-10-12",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "f03805199245f17c22d4567f7b0e678187991591558c37b6df8b1738ff0a3a21",
-  "workload": "#637: ext2.tkb per-CPU scratch and checked byte positions; linux_user freelist_generic keeps its own wrapper. Linked kernels against ca699bab (scripts/space_delta.py).",
+  "source_sha256": "3a39b077584f95687678418d1e3f3a730022fd70670141815cd021f6c0488d3f",
+  "workload": "#767: the TCP retransmit pool keeps one empty chunk. Linked kernels against main 2f8cf115 (scripts/space_delta.py); RPi5 HTTP bulk transfer with scripts/measure_kernel_fileio.py.",
   "evidence": [
+    "docs/TCP_RETX_RETENTION_SPACE_2026-10-12.md",
     "docs/EXT2_CHECKED_SPACE_2026-10-12.md",
     "docs/FREELIST_CHECKED_SPACE_2026-10-12.md",
     "docs/REGION_BACKING_SPACE_2026-10-12.md",
@@ -55,6 +56,6 @@
     "docs/VIRTIO_NET_TX_2026-10-10.md",
     "docs/VIRTIO_NET_TX_SPACE_2026-10-10.json"
   ],
-  "assessment": "QEMU text +4040 B, RPi5 text +4248 B (checked byte accesses replace raw *u8 loads); data/BSS and usable_ram_start unchanged. Adopted for the bounds it buys; a width-once check is a later compiler improvement. Earlier measured results stand. The Ext2Bytes boot boundary probe adds text +456 B (QEMU) / +440 B (RPi5).",
+  "assessment": "Text +392 B (QEMU) / +368 B (RPi5); data/BSS and usable_ram_start unchanged. One 2-page retransmit chunk (8 KiB) stays allocated after the first TCP send. Adopted: RPi5 bulk HTTP 0.126 s against 0.192 s before #745 and 0.280 s at #745. Earlier measured results stand.",
   "next_trigger": "A shrink protocol for walked RegionPools, the #748 allocator change, or the next pool consumer moved onto Held slots, whichever lands first."
 }
