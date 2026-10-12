@@ -35,8 +35,10 @@ from pass_line import report_pass
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 
-# HTTP protocol text a driver sends or matches on the wire. Not kernel output.
-NOT_KERNEL_OUTPUT = ("HTTP/", "Content-Length:", "Host:")
+# HTTP protocol text a driver sends or matches on the wire, and lines host
+# runners print themselves. Not kernel output. "httpd bridge:" is printed by
+# run_kernel_shell_qemu.sh on the host.
+NOT_KERNEL_OUTPUT = ("HTTP/", "Content-Length:", "Host:", "httpd bridge:")
 
 # A kernel literal shorter than this cannot establish that an expectation
 # names a real line; see this file's header.
