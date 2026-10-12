@@ -135,10 +135,14 @@ Done 2026-10-12: #765 measured the per-call 1 KiB file-buffer zero fill
 of #203 stages 1-2 on RPi5 and QEMU; it is below 0.5% of a read and within
 the spread of every workload, so #203 stage 3 is not pulled forward.
 
-**Next, ahead of the list below (maintainer, 2026-10-12):** #767, bulk
-HTTP on RPi5 about 42% slower since #745 (process records on RegionPool);
-bisect the #745 commits with scripts/measure_kernel_fileio.py and name the
-code path.
+Done 2026-10-12: #767, bulk HTTP on RPi5 slower since #745. The TCP
+retransmit pool returned its last empty chunk, so writes kept re-running
+page_alloc_contiguous; it now keeps one chunk (0.126 s against 0.192 s
+before #745).
+
+Candidate: #771, page_alloc_contiguous scans the page table and rebuilds
+the free list on every call (about 3 ms on RPi5), plus permanent call and
+time counters for it; tcp_frame_pool has the same return-every-chunk shape.
 
 1. **Fixed DMA lifecycle, finishing the drivers.** Every stage of one
    transfer in types, leaving one device-semantics declaration per driver
