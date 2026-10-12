@@ -70,6 +70,16 @@ branch and final commit. Answer all nine:
    other compiler stages.
 8. Classify every finding as fixed-verified, remaining, or YAGNI.
 9. Whether ROADMAP.md needs updating, and which closed issues it should drop.
+   GitHub issues themselves are never deleted.
+
+After the nine answers, add one row per defect found (product defects, test
+defects, and failures met during the work), so the maintainer can check at a
+glance that every defect got every question:
+
+| Defect | Root cause | Debugging aid that would have helped | Cheap prevention (done / issue #) | Model check (yes, how / no, why) | Compile-time check (yes, how / no, why) |
+|---|---|---|---|---|---|
+
+Write "none" when no defect was found; do not drop the table.
 
 ## Before reporting done: the land gates
 
