@@ -34,6 +34,7 @@ let parse src =
   Publish_registry.reset ();
   No_copy_registry.reset ();
   Per_cpu_registry.reset ();
+  Init_state.reset ();
   Guarded_registry.reset ();
   Io_struct_registry.reset ();
   Hashtbl.reset Generic_variant.proven_empty_puts;
@@ -72,6 +73,7 @@ let infer_files files =
   Publish_registry.reset ();
   No_copy_registry.reset ();
   Per_cpu_registry.reset ();
+  Init_state.reset ();
   Guarded_registry.reset ();
   Io_struct_registry.reset ();
   Hashtbl.reset Generic_variant.proven_empty_puts;
@@ -2407,6 +2409,7 @@ let infer_region_files files =
   Publish_registry.reset ();
   No_copy_registry.reset ();
   Per_cpu_registry.reset ();
+  Init_state.reset ();
   Guarded_registry.reset ();
   Io_struct_registry.reset ();
   Hashtbl.reset Generic_variant.proven_empty_puts;
@@ -6561,7 +6564,7 @@ fn stored_release(holder: sink StoredHolder[k]) { stored_drop(holder.token); }
                 fn f() { let p: *align(32) u8 = &buf; }");
 
   Alcotest.test_case "&x on an align(N) local proves *align(N) T" `Quick
-    (expect_ok "fn f() { let mut x: u8 align(16); let p: *align(16) u8 = &x; }");
+    (expect_ok "fn f() { let mut x: u8 align(16); x = 0; let p: *align(16) u8 = &x; }");
 
   Alcotest.test_case "an align(N) array's own name decays to *align(N) T" `Quick
     (expect_ok "let mut bufs: [u8; 64] align(32);
@@ -6758,7 +6761,7 @@ fn f() -> *usize { return &temp_address_outer().r.a; }");
 
   Alcotest.test_case "&s.field yields pointer-to-field-type" `Quick (fun () ->
     let pt = infer "struct P { x: i32; }
-                    fn f() { let mut s: P; let q = &s.x; }" in
+                    fn f() { let mut s: P; s.x = 0; let q = &s.x; }" in
     let fi = Types.StringMap.find "f" pt.Types.functions in
     Alcotest.check type_t "q has type *i32" (Ast.TypePtr Ast.TypeI32)
       (Types.StringMap.find "q" fi.Types.local_types)
@@ -18576,6 +18579,7 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
         fn init_lock(lock: *Lock557) { lock.word = 0; }
         fn fresh_lock() {
           let mut local_lock: Lock557;
+          zero_fill(&local_lock);
           init_lock(&local_lock);
           let mut literal_lock: Lock557 = {0};
           init_lock(&literal_lock);
@@ -19148,6 +19152,7 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
                          o: sink Issue344Owner[pool, allocation]) {}
         fn codegen_issue344_brand_ok() {
           let mut pool_a: Issue344Pool(usize);
+          zero_fill(&pool_a);
           let oa = issue344_take(&pool_a);
           issue344_give(&pool_a, oa);
         }");
@@ -19296,6 +19301,7 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
         }
         fn codegen_issue344_generic_ok() -> usize {
           let mut small: Issue344Slot(u32);
+          zero_fill(&small);
           return issue344_fits(&small);
         }");
 
@@ -19311,6 +19317,7 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
         }
         fn codegen_issue344_generic_too_big() -> usize {
           let mut big: Issue344Slot(Issue344Big);
+          zero_fill(&big);
           return issue344_fits(&big);
         }");
 
@@ -22187,6 +22194,7 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
           }
           fn fixedbufcg10_use() {
             let mut a: FixedBufCg10(4);
+            zero_fill(&a);
             fixedbufcg10_init(&a);
           }"
        in
@@ -23595,12 +23603,12 @@ let indexed_reference_tests = [
   Alcotest.test_case "indexed reference cannot return stack address" `Quick
     (expect_type_error "cannot be returned" (indexed_reference_fixture ^ {|
       private fn wrong(owner: borrow RefOwner[g]) -> &mut RefRecord @ g {
-        let mut local: RefRecord; return &local;
+        let mut local: RefRecord; zero_fill(&local); return &local;
       }|}));
   Alcotest.test_case "indexed reference cannot return stack address alias" `Quick
     (expect_type_error "cannot be returned" (indexed_reference_fixture ^ {|
       private fn wrong(owner: borrow RefOwner[g]) -> &mut RefRecord @ g {
-        let mut local: RefRecord; let alias: &mut RefRecord = &local; return alias;
+        let mut local: RefRecord; zero_fill(&local); let alias: &mut RefRecord = &local; return alias;
       }|}));
   Alcotest.test_case "indexed reference cannot relabel unindexed parameter" `Quick
     (expect_type_error "cannot be returned" (indexed_reference_fixture ^ {|
@@ -25239,6 +25247,7 @@ let infer_sealed ?(proto = sealed_protocol) ?(use = sealed_consumer) () =
   Publish_registry.reset ();
   No_copy_registry.reset ();
   Per_cpu_registry.reset ();
+  Init_state.reset ();
   Guarded_registry.reset ();
   Io_struct_registry.reset ();
   Hashtbl.reset Generic_variant.proven_empty_puts;

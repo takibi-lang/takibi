@@ -2037,7 +2037,10 @@ private fn scheduled_process_slot_for_pid_stopped(
 // the final command byte. The returned snapshot contains values only.
 fn scheduled_process_diagnostic_snapshot(pid: usize)
         -> ProcessDiagnosticResult !{unsafe} {
+    // Zeroed so the Missing path, on which the fill never runs, still
+    // leaves a definitely initialized value (GitHub issue #203).
     let mut snapshot: ProcessDiagnosticSnapshot;
+    zero_fill(&snapshot);
     let guard = process_run_lock();
     let found: bool = match scheduled_process_slot_for_pid_locked(guard, pid) {
         ProcessSlotForPidResult::Missing => { false }

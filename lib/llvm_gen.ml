@@ -4876,6 +4876,49 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       position_at_end exit_bb builder;
       (TypeUsize, n)
 
+  | Call ("assume_init", [_]) ->
+      (* GitHub issue #203: a checker-only assertion; no code. *)
+      (TypeVoid, const_null (i1_type context))
+
+  | Call ("zero_fill", [d_e]) ->
+      (* GitHub issue #203 (sync rule with type_inf.ml's Call case): store
+         zero over every byte of the destination, padding included. A
+         slice is cleared element by element in a phi loop, as slice_copy
+         is, so a dynamic length never becomes a memset libcall on bare
+         metal; a pointee is one store of its LLVM zero value, whose
+         explicit padding members are zero too. *)
+      let (dt, dv) = gen_expr locals d_e in
+      let rec strip = function
+        | TypeSingleton (t, _) | TypeRefined (_, _, t) -> strip t
+        | t -> t in
+      (match strip dt with
+       | TypeSlice (elem_ty, _, _) ->
+           let usz = usize_lltype () in
+           let el = ltype_of_ast elem_ty in
+           let dptr = slice_ptr dv and n = slice_len dv in
+           let cur_f   = block_parent (insertion_block builder) in
+           let pre_bb  = insertion_block builder in
+           let cond_bb = append_block context "zf_cond" cur_f in
+           let body_bb = append_block context "zf_body" cur_f in
+           let exit_bb = append_block context "zf_exit" cur_f in
+           ignore (build_br cond_bb builder);
+           position_at_end cond_bb builder;
+           let i_phi = build_phi [ (const_int usz 0, pre_bb) ] "zf_i" builder in
+           let cmp = build_icmp Icmp.Ult i_phi n "zf_cmp" builder in
+           ignore (build_cond_br cmp body_bb exit_bb builder);
+           position_at_end body_bb builder;
+           let dp = build_gep el dptr [| i_phi |] "zf_dp" builder in
+           ignore (build_store (const_null el) dp builder);
+           let i_next = build_add i_phi (const_int usz 1) "zf_next" builder in
+           add_incoming (i_next, insertion_block builder) i_phi;
+           ignore (build_br cond_bb builder);
+           position_at_end exit_bb builder
+       | TypePtr t | TypeRefMut t ->
+           ignore (build_store (const_null (ltype_of_ast t)) dv builder)
+       | _ -> raise (Error "BUG: zero_fill on a non-slice, non-pointer \
+                            (type_inf should reject)"));
+      (TypeVoid, const_null (i1_type context))
+
   | Call ("slice_eq", [a_e; b_e]) ->
       (* Builtin: lengths equal AND elements equal; length mismatch is
          false, never an error. Same phi-loop construction as slice_copy. *)

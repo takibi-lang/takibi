@@ -66,6 +66,7 @@ fn test_struct_align() {
 
     // Local struct variable
     let mut v: Vec4;
+    zero_fill(&v);
     v.x = 1;
     let vaddr: usize = (&v) as usize;
     print_aligned("local  Vec4:     ", vaddr, 15);

@@ -204,6 +204,12 @@ let sizeof_type pos ty =
   let (sz, _) = size_align_of_type pos [] ty in
   sz
 
+(* GitHub issue #203: Init_flow needs struct sizes to know which structs
+   have padding, and cannot call this module itself. *)
+let () =
+  Init_flow.layout_size := (fun ty ->
+    try Some (sizeof_type Lexing.dummy_pos ty) with _ -> None)
+
 (* The LLVM member list is part of the by-value ABI even when every declared
    field offset and sizeof stay unchanged. Compute the member count implied by
    this module's semantic alignment rules independently of register_struct's

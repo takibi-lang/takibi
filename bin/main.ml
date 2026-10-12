@@ -237,6 +237,7 @@ let () =
     Publish_registry.reset ();
     No_copy_registry.reset ();
     Per_cpu_registry.reset ();
+    Init_state.reset ();
     Guarded_registry.reset ();
     Io_struct_registry.reset ();
     Hashtbl.reset Generic_variant.proven_empty_puts;
@@ -310,6 +311,7 @@ let () =
         Publish_registry.reset ();
         No_copy_registry.reset ();
         Per_cpu_registry.reset ();
+        Init_state.reset ();
         Guarded_registry.reset ();
         Io_struct_registry.reset ();
         Hashtbl.reset Generic_variant.proven_empty_puts;

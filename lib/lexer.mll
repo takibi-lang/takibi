@@ -60,6 +60,12 @@ let hard_keyword_token = function
 }
 
 rule read = parse
+  (* GitHub issue #203: `borrow init T` / `borrow uninit T`. The qualifier
+     words stay ordinary identifiers everywhere else (a protocol body uses
+     `init`), so the pair is one token, recognised only with blanks after
+     `borrow` and after the word. *)
+  | "borrow" [' ' '\t']+ "init" [' ' '\t'] { BORROW_INIT }
+  | "borrow" [' ' '\t']+ "uninit" [' ' '\t'] { BORROW_UNINIT }
   | [' ' '\t'] { read lexbuf }
   | '\n'       { Lexing.new_line lexbuf; read lexbuf }
   | "//" [^ '\n']* { read lexbuf }   (* Line comment: newline is processed in the next iteration *)

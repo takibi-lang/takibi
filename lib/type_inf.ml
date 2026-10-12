@@ -5169,6 +5169,32 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | _ -> raise (TypeError (e.loc,
            "slice_copy expects 2 arguments: slice_copy(dst, src)")))
 
+  | Call (("zero_fill" | "assume_init") as fname, args) ->
+      (* GitHub issue #203: `zero_fill(dst)` stores zero over every byte of
+         a writable slice or of a pointer's pointee, padding included;
+         `assume_init(dst)` emits nothing and only asserts, inside unsafe,
+         that the bytes were written by means the checker cannot see. Both
+         make the place initialized for check_init_flow. *)
+      (match args with
+       | [d] ->
+           if fname = "assume_init" && !unsafe_depth = 0 then
+             raise (TypeError (e.loc,
+               "assume_init asserts that bytes are initialized with no \
+                evidence the checker can see; write it inside `unsafe { ... }`"));
+           let dt = infer_expr senv eenv tyenv fenv d in
+           (match repr dt with
+            | TSlice (_, _, Ast.SliceWritable) | TPtr _ | TRefMut _ -> ()
+            | TSlice _ -> raise (TypeError (d.loc, Printf.sprintf
+                "%s needs a writable slice, not a read-only one" fname))
+            | TVar _ ->
+                unify_at d.loc dt (TSlice (fresh (), 0, Ast.SliceWritable))
+            | _ -> raise (TypeError (d.loc, Printf.sprintf
+                "%s expects a writable slice or a pointer (e.g. `%s(&v)` or \
+                 `%s(buf as []u8)`)" fname fname fname)));
+           TVoid
+       | _ -> raise (TypeError (e.loc, Printf.sprintf
+           "%s expects 1 argument" fname)))
+
   | Call ("slice_eq", args) ->
       (* Builtin: true iff the lengths are equal AND all elements match.
          Total function -- length mismatch is false, not an error. *)
@@ -10232,6 +10258,37 @@ let infer_program (prog : Ast.toplevel list) : program_types =
      broken function) keeps working unchanged. MultiTypeError is only used
      when there is genuinely more than one to report, which is the only
      case where anything needs to change. *)
+  (match List.rev !collected_type_errors with
+   | [] -> ()
+   | [(loc, msg)] -> raise (Types.TypeError (loc, msg))
+   | errors -> raise (Types.MultiTypeError errors));
+  (* GitHub issue #203: definite initialization of field paths and of
+     scratch globals (see Init_flow). One error per function, every
+     function reported. *)
+  let init_callees = Hashtbl.create 64 in
+  List.iter (function
+    | Ast.FuncDef f ->
+        Hashtbl.replace init_callees f.name (f.params, f.def_loc)
+    | _ -> ()) prog;
+  let init_scratch = List.filter_map (function
+    | Ast.LetDef (name, Some ty, _, _, _, _, _) when Init_state.is_scratch name ->
+        Some (name, ty)
+    | _ -> None) prog in
+  List.iter (function
+    | Ast.FuncDef fdef ->
+        (match StringMap.find_opt (overload_key fdef.name fdef.params) functions with
+         | Some finfo ->
+             (try
+                Init_flow.check
+                  ~struct_fields:(fun n -> match StringMap.find_opt n senv with
+                    | Some (fields, _, _) -> Some fields
+                    | None -> None)
+                  ~callee:(Hashtbl.find_opt init_callees)
+                  ~scratch:init_scratch finfo fdef
+              with Types.TypeError (loc, msg) ->
+                collected_type_errors := (loc, msg) :: !collected_type_errors)
+         | None -> ())
+    | _ -> ()) prog;
   (match List.rev !collected_type_errors with
    | [] -> ()
    | [(loc, msg)] -> raise (Types.TypeError (loc, msg))

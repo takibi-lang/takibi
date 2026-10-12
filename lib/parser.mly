@@ -257,6 +257,7 @@ let promote_be_field_type = function
 %token <string> STRING
 %token <string> BS_STRING
 %token GUARDED_BY
+%token BORROW_INIT BORROW_UNINIT
 %token FN INLINE NOINLINE WHERE RETURN CONST LET MUT EXTERN SYMBOL STRUCT OPAQUE AFFINE LINEAR VIEW VARIANT MUST_USE EXISTS BORROW SINK PACKED BE PUBLISH NO_COPY DMA_FIXED PER_CPU CPU_AUTHORITY IO ENUM MATCH ALIGN MULTIPLE SIZEOF ALIGNOF CONTAINS_STABLE_OWNER OFFSETOF UNSAFE USE PRIVATE VECTOR_TABLE EXCEPTION_ENTRY EXCEPTION_RESTORE EMBED_FILE
 %token TYPE GENERIC
 %token DARROW COLONCOLON UNDERSCORE BANG
@@ -400,6 +401,14 @@ item:
       let e = { desc = IntLit (Int64.of_int literal); loc } in
       Const_env.define_if_literal name (Some e);
       ConstDef (name, ty, e, loc) }
+  | p = private_flag kw = IDENT LET MUT name = IDENT COLON ty = type_expr SEMI
+    (* GitHub issue #203: `scratch let mut g: T;` -- per-call scratch
+       storage, uninitialized at the entry of every function. *)
+    { if kw <> "scratch" then
+        raise (Types.TypeError ($startpos(kw), Printf.sprintf
+          "unexpected '%s' before 'let' (only 'scratch' may qualify a global)" kw));
+      Init_state.mark_scratch name;
+      LetDef (name, Some ty, None, None, true, p, $symbolstartpos) }
   | p = private_flag LET m = mut_flag IDENT let_rhs SEMI
     { LetDef ($4, fst $5, snd $5, None, m, p, $symbolstartpos) }
   | p = private_flag LET m = mut_flag IDENT COLON type_expr ALIGN LPAREN alignment_value RPAREN SEMI
@@ -753,18 +762,21 @@ variant_cases:
 func_def:
   | p = private_flag FN IDENT LPAREN params RPAREN ret_type_opt effects_opt w = where_opt LBRACE body_stmts = stmts RBRACE
     {
+      Init_state.finish_func $symbolstartpos $5;
       Ast.{ name = $3; params = $5; ret_type = $7; effects = $8;
             body = body_stmts; is_inline = false; is_noinline = false; is_private = p;
             where_clauses = w; def_loc = $symbolstartpos }
     }
   | p = private_flag INLINE FN IDENT LPAREN params RPAREN ret_type_opt effects_opt w = where_opt LBRACE body_stmts = stmts RBRACE
     {
+      Init_state.finish_func $symbolstartpos $6;
       Ast.{ name = $4; params = $6; ret_type = $8; effects = $9;
             body = body_stmts; is_inline = true; is_noinline = false; is_private = p;
             where_clauses = w; def_loc = $symbolstartpos }
     }
   | p = private_flag NOINLINE FN IDENT LPAREN params RPAREN ret_type_opt effects_opt w = where_opt LBRACE body_stmts = stmts RBRACE
     {
+      Init_state.finish_func $symbolstartpos $6;
       Ast.{ name = $4; params = $6; ret_type = $8; effects = $9;
             body = body_stmts; is_inline = false; is_noinline = true; is_private = p;
             where_clauses = w; def_loc = $symbolstartpos }
@@ -1418,6 +1430,8 @@ type_expr:
   | t = base_type_expr AT n = static_arg { TypeSingleton (t, n) }
   | BORROW MUT t = type_expr { TypeBorrowMut t }
   | BORROW t = type_expr { TypeBorrow t }
+  | BORROW_INIT t = type_expr { Init_state.mark (TypeBorrow t) Init_state.Init }
+  | BORROW_UNINIT t = type_expr { Init_state.mark (TypeBorrow t) Init_state.Uninit }
   | SINK t = type_expr { TypeSink t }
   | AMP MUT t = type_expr { lift_singleton (fun t -> TypeRefMut t) t }
   | AMP t = type_expr { lift_singleton (fun t -> TypeRef t) t }
