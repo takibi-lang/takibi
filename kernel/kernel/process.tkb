@@ -2687,7 +2687,20 @@ private fn kernel_stack_run_usable(base: usize) -> bool {
 // pool's lock. 0 for a slot that is gone or has no run.
 private fn kernel_stack_run_depth(slot: usize, offset: usize, count: usize)
         -> usize !{unsafe} {
-    if (slot == 0 || scheduled_process_pool_ready == false) { return 0; }
+    if (slot == 0) {
+        // The bootstrap's record is a static, reached by name.
+        let boot_guard = process_pool_lock();
+        let boot_depth: usize = match place_borrow(boot_guard,
+                scheduled_process_boot_record.stack) {
+            Place::Empty => { 0 }
+            Place::Full(run) => {
+                stack_run_poison_depth(run, offset, count, KERNEL_STACK_POISON)
+            }
+        };
+        process_pool_unlock(boot_guard);
+        return boot_depth;
+    }
+    if (scheduled_process_pool_ready == false) { return 0; }
     let pool_guard = process_pool_lock();
     let mut held: RegionHeld(ProcessRecord) = region_held_at(pool_guard, slot);
     match region_probe_held(pool_guard, held) {
@@ -3105,9 +3118,11 @@ private fn scheduled_process_slot_remove(
     let mut held: RegionHeld(ProcessRecord) = process_pool_held_at(slot);
     if (region_held_address(held) == 0) { return; }
     // The run's permission leaves the record before the record goes (#672).
+    // The record accessor takes the pool lock itself: called before the hold.
+    let record: &mut ProcessRecord = scheduled_process_record_locked(guard, slot);
     let run_guard = process_pool_lock();
     let run: Place(exists run: usize. PageRunOwner[run]) = place_take(
-        run_guard, scheduled_process_record_locked(guard, slot).stack);
+        run_guard, record.stack);
     process_pool_unlock(run_guard);
     scheduled_process_park_stack_run(run);
     // The record's permission comes back out of its slot, once (#745): a
@@ -3204,6 +3219,17 @@ private fn scheduled_process_take_spare_stack_run()
     }
 }
 
+// Whether the record already holds its stack run's permission.
+private fn scheduled_process_stack_backed(
+        creating: borrow ScheduledProcessOwner[process]) -> bool !{unsafe} {
+    // The record accessor takes the pool lock itself: called before the hold.
+    let record: &mut ProcessRecord = scheduled_process_record_owned(creating);
+    let pool_guard = process_pool_lock();
+    let backed: bool = place_is_full(pool_guard, record.stack);
+    process_pool_unlock(pool_guard);
+    return backed;
+}
+
 // A new record's run: poisoned whole (the guard, the high-water mark and
 // the overflow depth then answer about this process, GitHub issues
 // #375/#376), its base copied for address comparisons, and its permission
@@ -3214,8 +3240,11 @@ private fn scheduled_process_adopt_stack_run(
     stack_run_poison_fill(run, 0, KERNEL_STACK_RUN_BYTES, KERNEL_STACK_POISON);
     scheduled_process_record_owned(creating).stack_run =
         page_run_physical_address(run);
+    // The record accessor takes the pool lock itself, so it is called
+    // before this hold, not inside it.
+    let record: &mut ProcessRecord = scheduled_process_record_owned(creating);
     let pool_guard = process_pool_lock();
-    match place_put(pool_guard, scheduled_process_record_owned(creating).stack, run) {
+    match place_put(pool_guard, record.stack, run) {
         Place::Empty => {}
         Place::Full(earlier) => {
             // A record already holding a run would be a second adoption.
@@ -3344,7 +3373,12 @@ private fn scheduled_process_alloc_finish(address: RegionHeld(ProcessRecord),
     // slots to reuse: a new process reuses a dead one's run.
     // A run the last reaped process left behind, else a fresh one. The
     // run's permission moves into the record (#672) and stays there until
-    // the reap parks it again.
+    // the reap parks it again. The bootstrap's static record keeps its run
+    // across reuse (its removal parks nothing), so a record already holding
+    // one keeps it.
+    if (scheduled_process_stack_backed(creating)) {
+        // Nothing to adopt.
+    } else {
     match scheduled_process_take_spare_stack_run() {
         Place::Full(spare) => {
             scheduled_process_adopt_stack_run(creating, spare);
@@ -3383,6 +3417,7 @@ private fn scheduled_process_alloc_finish(address: RegionHeld(ProcessRecord),
                 }
             }
         }
+    }
     }
     match address_space_ensure_root(slot) {
         AddressSpaceEnsureResult::Ok => {}
@@ -6889,11 +6924,84 @@ fn kernel_stack_deepest_bytes() -> usize !{unsafe} {
     return deepest;
 }
 
+// GitHub issue #672: the guard's per-tick cost, recorded rather than
+// judged. The guard reads a process stack's two witnesses once per tick per
+// core; since #672 it borrows the run's permission under the process pool
+// lock for each. This times 4096 rounds of both witness reads on the first
+// slot with a run, through the permission (as the guard does) and, for
+// comparison, as plain integer ranges from the copied base (the pre-#672
+// guard body). 54 MHz counter on RPi5.
+const STACK_GUARD_TIMING_ROUNDS: usize = 4096;
+
+private fn kernel_stack_guard_timing_report() !{unsafe} {
+    let mut cursor = scheduled_process_first_slot();
+    let mut chosen: usize = 0;
+    let mut found: bool = kernel_stack_bottom(0) != 0;
+    let mut walking: bool = found == false;
+    while (walking) {
+        match cursor {
+            ProcessSlotCursor::Done => { walking = false; }
+            ProcessSlotCursor::At(slot) => {
+                if (kernel_stack_bottom(slot) != 0) {
+                    chosen = slot;
+                    found = true;
+                    walking = false;
+                } else {
+                    cursor = scheduled_process_next_slot(slot);
+                }
+            }
+        }
+    }
+    if (found == false) {
+        kernel_boot_log("RECORDED stack guard timing: no process stack\n");
+        return;
+    }
+    let mut disturbed: usize = 0;
+    let held_start: i64 = read_cntpct();
+    for round: usize in 0..<STACK_GUARD_TIMING_ROUNDS {
+        if (kernel_stack_bottom(chosen) != 0) {
+            disturbed = disturbed + kernel_stack_run_depth(chosen,
+                KERNEL_PROCESS_STACK_SIZE - KERNEL_STACK_WITNESS_BYTES,
+                KERNEL_STACK_WITNESS_BYTES);
+            disturbed = disturbed + kernel_stack_run_depth(chosen,
+                KERNEL_PROCESS_STACK_SIZE, KERNEL_STACK_WITNESS_BYTES);
+        }
+    }
+    let held_ticks: i64 = read_cntpct() - held_start;
+    let plain_start: i64 = read_cntpct();
+    for round: usize in 0..<STACK_GUARD_TIMING_ROUNDS {
+        let bottom: usize = kernel_stack_bottom(chosen);
+        if (bottom != 0) {
+            if (stack_poison_disturbed(bottom - KERNEL_STACK_WITNESS_BYTES,
+                    KERNEL_STACK_WITNESS_BYTES, KERNEL_STACK_POISON)) {
+                disturbed = disturbed + 1;
+            }
+            if (stack_poison_disturbed(bottom, KERNEL_STACK_WITNESS_BYTES,
+                    KERNEL_STACK_POISON)) {
+                disturbed = disturbed + 1;
+            }
+        }
+    }
+    let plain_ticks: i64 = read_cntpct() - plain_start;
+    kernel_boot_log("RECORDED stack guard timing: rounds=");
+    uart_put_udec(STACK_GUARD_TIMING_ROUNDS);
+    kernel_boot_log(" permission_ticks=");
+    uart_put_udec(held_ticks as usize);
+    kernel_boot_log(" integer_ticks=");
+    uart_put_udec(plain_ticks as usize);
+    kernel_boot_log(" disturbed=");
+    uart_put_udec(disturbed);
+    kernel_boot_log(" freq=");
+    uart_put_udec(read_cntfrq() as usize);
+    kernel_boot_log("\n");
+}
+
 // Reported once, at the end of the boot fixtures, because that is the
 // point every scenario this kernel exercises has already run. Per slot as
 // well as the maximum: one slot being near the limit while the rest are
 // shallow says something different from all of them being near it.
 fn kernel_stack_watermark_report() !{unsafe} {
+    kernel_stack_guard_timing_report();
     let deepest: usize = kernel_stack_deepest_bytes();
     kernel_boot_log("kernel stack watermark: size=");
     uart_put_udec(KERNEL_PROCESS_STACK_SIZE);
