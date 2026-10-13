@@ -30,6 +30,7 @@ whether a row has gone quiet or has merely stopped being looked for.
 
 | Symptom | Rate | Issue | Last seen |
 | --- | --- | --- | --- |
+| `did not finish within` | 1 local langcheck on 5f31a1df (check_validate_protocol_trace_controls.py, host loaded by three workers and a land); rerun passed | #780 | 2026-10-13 |
 | `workload: busy pair STARVED: a wait passed its bound` | 1 land.sh allcheck on 86bf0439 (race-window 609's armed kernel); 0 of 4 standalone | #690 | 2026-10-03 |
 | `passed, so the window was not crossed` | 1 land.sh allcheck on 660efe01 (race-window 609's reverted run); 0 of 3 standalone | #685 | 2026-10-03 |
 | `the payload never asked for its input` | 1 of 9 cicheck runs after the alloc-rollback split | #607 | 2026-10-04 |
