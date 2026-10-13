@@ -1,9 +1,9 @@
 {
   "date": "2026-10-13",
   "event": "incremental",
-  "decision": "measured",
-  "source_sha256": "af95b9f37e8104b17725d03127878bcacb696c0bf28f112006eece5a7730a20b",
-  "workload": "#720 option a slice 1: device protocols (tx/rx regions, generated cache work, spans, --device-semantics-file). Linked kernels against main e8f52b1b (scripts/space_delta.py).",
+  "decision": "reuse",
+  "source_sha256": "4a758dfa91066da4b4c580b2e11f44ec24e2939c4df7e0a52307a70d4a9136ef",
+  "workload": "#758 --emit-protocol-source on top of #720 option (a) slice 1: a compiler output flag that exits before code generation; no kernel build uses it.",
   "evidence": [
     "docs/DEVICE_PROTOCOL_SPACE_2026-10-13.md",
     "docs/STACK_POISON_SPLIT_SPACE_2026-10-13.md",
@@ -60,6 +60,6 @@
     "docs/VIRTIO_NET_TX_2026-10-10.md",
     "docs/VIRTIO_NET_TX_SPACE_2026-10-10.json"
   ],
-  "assessment": "QEMU and RPi5 text, data, BSS and usable_ram_start unchanged: no kernel declares a device protocol yet. Earlier measured results (#637 split, #497 and before) stand.",
+  "assessment": "Reuse of the #720 slice 1 measurement (docs/DEVICE_PROTOCOL_SPACE_2026-10-13.md, kernels unchanged against main e8f52b1b): the flag adds no code path to a normal compile, so the linked images cannot change. Earlier measured results stand.",
   "next_trigger": "#720 slice 2 (xHCI producer rings on device protocols), a shrink protocol for walked RegionPools, the #748 allocator change, or the next pool consumer moved onto Held slots, whichever lands first."
 }
