@@ -250,6 +250,16 @@ by a Takibi name, and a Takibi interface is never mistaken for a Linux one.
 
 ## Make targets
 
+Every kernel object is compiled with `--function-sections` and every kernel
+link uses `--gc-sections`, so the linker removes what nothing reaches. The
+roots are `_start`, the `KEEP()` sections of the linker scripts
+(`.text.boot`, `.text.vectors`), what they reach through relocations, and
+the debugger entries GDB calls by name (`KERNEL_DEBUGGER_ENTRIES` in the
+Makefile, rooted with `--undefined`). A function that only a debugger or a
+host script names must be added there, or it is not in the image. Each
+production image keeps `kernel/build/<platform>/kernel.elf.gc-sections`,
+the linker's list of removed sections: what was compiled but is unreachable.
+
 Run these from the repository root:
 
 ```bash
