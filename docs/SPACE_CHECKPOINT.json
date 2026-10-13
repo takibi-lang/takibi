@@ -1,10 +1,11 @@
 {
   "date": "2026-10-13",
   "event": "incremental",
-  "decision": "reuse",
-  "source_sha256": "4a758dfa91066da4b4c580b2e11f44ec24e2939c4df7e0a52307a70d4a9136ef",
-  "workload": "#758 --emit-protocol-source on top of #720 option (a) slice 1: a compiler output flag that exits before code generation; no kernel build uses it.",
+  "decision": "measured",
+  "source_sha256": "427941651a3d7f0ac227f2da644186d039546934066b9d1570a5b300f7000f35",
+  "workload": "#720 slice 2: the four xHCI producer rings on the XhciRing tx device protocol (whole-ring owners in Place slots). Linked kernels against main fcacade4 (scripts/space_delta.py).",
   "evidence": [
+    "docs/XHCI_RINGS_SPACE_2026-10-13.md",
     "docs/DEVICE_PROTOCOL_SPACE_2026-10-13.md",
     "docs/STACK_POISON_SPLIT_SPACE_2026-10-13.md",
     "docs/PROFILE_SESSION_SPACE_2026-10-13.md",
@@ -60,6 +61,6 @@
     "docs/VIRTIO_NET_TX_2026-10-10.md",
     "docs/VIRTIO_NET_TX_SPACE_2026-10-10.json"
   ],
-  "assessment": "Reuse of the #720 slice 1 measurement (docs/DEVICE_PROTOCOL_SPACE_2026-10-13.md, kernels unchanged against main e8f52b1b): the flag adds no code path to a normal compile, so the linked images cannot change. Earlier measured results stand.",
-  "next_trigger": "#720 slice 2 (xHCI producer rings on device protocols), a shrink protocol for walked RegionPools, the #748 allocator change, or the next pool consumer moved onto Held slots, whichever lands first."
+  "assessment": "Text +3344 B (QEMU) / +3360 B (RPi5); new state 259 B per kernel (slot array, claim flags, doorbell/await parameters); ring arrays unchanged; usable_ram_start unchanged. RPi5 BSS section total -1024 B, not attributed to any symbol. Earlier measured results stand.",
+  "next_trigger": "#720 slice 3 (xHCI event ring), a shrink protocol for walked RegionPools, the #748 allocator change, or the next pool consumer moved onto Held slots, whichever lands first."
 }
