@@ -159,11 +159,12 @@ flame-graph stacks). Accepted as option (a): a sample delayed by masked
 IRQs is attributed to the unmask point with its masked weight; seeing
 inside masked spans is #773 (Arm SPE) and an irqsoff-style tracer on #771.
 
-**Next, ahead of the list below (maintainer, 2026-10-13):** #720: move
-the xHCI event ring and the output device context onto E1 snapshot
-observations (done 2026-10-13 in the compiler: SPEC.md "Device protocols",
-linux_user/protocol_snapshot). Slice 3a (scratchpad, ERST, input context)
-is done; the DCBAA stays legacy (D3). Candidate: #771, page_alloc_contiguous's whole-table scan under an
+**Next, ahead of the list below (maintainer, 2026-10-13):** #786, then
+#740 (GEM/virtio onto device protocols). Done 2026-10-13: the xHCI work
+under #720 -- producer rings, session tables, input context, event ring and
+output context are device-protocol owners (E1 snapshots for the last two);
+usb_xhci.tkb is off kernel/RAW_MINT_FILES, its bus-address export is
+usb_xhci_bus.tkb. Only the DCBAA stays legacy (D3). Candidate: #771, page_alloc_contiguous's whole-table scan under an
 IRQ-masking lock (about 3 ms on RPi5), its permanent call/time counters,
 the irqsoff-style tracer, and tcp_frame_pool's return-every-chunk shape.
 
