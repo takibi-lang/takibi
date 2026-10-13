@@ -226,6 +226,32 @@ def continue_bounded(threads_locked: bool) -> None:
         timer.cancel()
 
 
+# A step the guest reaches deterministically, but whose host time depends on
+# how much CPU QEMU gets. A fixed STEP_TIMEOUT failed under host load
+# (GitHub issue #784: "CPU0 timer did not acquire the process-run lock",
+# with CPU0 still running). Keep waiting while the selected vCPU's PC moves;
+# stop at STEP_PROGRESS_CAP, or as soon as one STEP_TIMEOUT passes with no
+# progress at all.
+STEP_PROGRESS_CAP = 180.0
+
+
+def continue_until_hit(bp, thread: int, threads_locked: bool) -> None:
+    waited = 0.0
+    last = None
+    while bp.hit_count == 0 and waited < STEP_PROGRESS_CAP:
+        continue_bounded(threads_locked)
+        waited += STEP_TIMEOUT
+        if bp.hit_count:
+            return
+        try:
+            pc = thread_pc(thread)
+        except gdb.error:
+            return
+        if pc == last:
+            return
+        last = pc
+
+
 def thread_pc(thread: int) -> int:
     gdb.execute(f"thread {thread}", to_string=True)
     return int(gdb.parse_and_eval("$pc")) & 0xFFFFFFFFFFFFFFFF
@@ -365,7 +391,7 @@ def run_peer_net_wake(connection: socket.socket) -> None:
         wake = gdb.Breakpoint("kernel_process_net_wake_scan")
         wake.condition = f"$_thread == {CPU0_THREAD}"
         gdb.execute(f"thread {CPU0_THREAD}", to_string=True)
-        continue_bounded(True)
+        continue_until_hit(wake, CPU0_THREAD, True)
         if wake.hit_count != 1:
             verdict(False, "lockless control did not scan NetRx before the "
                     "peer acquired the Blocked-publication lock")
@@ -377,7 +403,7 @@ def run_peer_net_wake(connection: socket.socket) -> None:
         timer_entry = gdb.Breakpoint("timer_irq_handler")
         timer_entry.condition = f"$_thread == {CPU0_THREAD}"
         gdb.execute(f"thread {CPU0_THREAD}", to_string=True)
-        continue_bounded(True)
+        continue_until_hit(timer_entry, CPU0_THREAD, True)
         if timer_entry.hit_count != 1:
             verdict(False, "CPU0 did not reach the timer handler while the "
                     "peer was poised to publish Blocked/NetRx")
@@ -389,7 +415,7 @@ def run_peer_net_wake(connection: socket.socket) -> None:
     block = gdb.Breakpoint("scheduled_process_block")
     block.condition = f"$_thread == {CPU1_THREAD}"
     gdb.execute(f"thread {CPU1_THREAD}", to_string=True)
-    continue_bounded(True)
+    continue_until_hit(block, CPU1_THREAD, True)
     if block.hit_count != 1:
         verdict(False, "the peer NetRx fixture did not reach the locked "
                 "Blocked-publication point")
@@ -401,7 +427,7 @@ def run_peer_net_wake(connection: socket.socket) -> None:
     lock_entry = gdb.Breakpoint("process_run_lock")
     lock_entry.condition = f"$_thread == {CPU0_THREAD}"
     gdb.execute(f"thread {CPU0_THREAD}", to_string=True)
-    continue_bounded(True)
+    continue_until_hit(lock_entry, CPU0_THREAD, True)
     if lock_entry.hit_count != 1:
         verdict(False, "CPU0 timer did not acquire the process-run lock")
         gdb.execute("set scheduler-locking off")
@@ -410,7 +436,7 @@ def run_peer_net_wake(connection: socket.socket) -> None:
     lock_entry.delete()
     lock_spin = gdb.Breakpoint("spin_lock")
     lock_spin.condition = f"$_thread == {CPU0_THREAD}"
-    continue_bounded(True)
+    continue_until_hit(lock_spin, CPU0_THREAD, True)
     if lock_spin.hit_count != 1:
         verdict(False, "CPU0 did not contend on the process-run lock while "
                 "CPU1 held it before Blocked publication")
