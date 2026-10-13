@@ -187,9 +187,16 @@ vcpu() {
         TAKIBI_SESSION_REGISTRY="$registry" TAKIBI_SESSION="$session" \
         bash -c ". '$repo_root/scripts/vcpu_lease.sh'; $*"
 }
-vcpu lane-a 5 'resource_lease_vcpu_acquire 3 lane-a; exec sleep 30' 2>/dev/null &
+# lane-a marks the moment it holds its 3, and lane-b asks only after that:
+# on a loaded host a fixed sleep let lane-b ask first and win (GitHub issue
+# #785). The bound applies to lane-a getting started, not to the control.
+vcpu lane-a 5 "resource_lease_vcpu_acquire 3 lane-a && : > '$tmp_dir/lane-a.held'; exec sleep 30" 2>/dev/null &
 vcpu_a=$!
-sleep 0.5
+for _ in $(seq 1 300); do
+    [ -e "$tmp_dir/lane-a.held" ] && break
+    sleep 0.1
+done
+[ -e "$tmp_dir/lane-a.held" ] || fail "lane-a did not acquire 3 of 4 vCPUs within 30 s"
 if vcpu lane-b 1 'resource_lease_vcpu_acquire 2 lane-b' >"$tmp_dir/vcpu-wait.log" 2>&1; then
     pkill -KILL -P "$vcpu_a" 2>/dev/null || true
     fail "a guest of 2 vCPUs started while 3 of a budget of 4 were held"
