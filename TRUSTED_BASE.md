@@ -323,6 +323,15 @@ rules globally.
   target CPU are trusted to implement the representations and instructions the
   compiler requests.
 
+- Kernel stack bytes (#637, #672) are read and written only in
+  kernel/kernel/stack_poison.tkb. A process stack is reached through its
+  run's own `PageRunOwner`, held in the process record from adoption to the
+  reap: the range is checked against the run and the base comes from the
+  owner, so a process-stack range cannot name other memory. Trusted there:
+  the arithmetic from a run's base to its bytes, and the linker-bounded
+  stacks (boot, secondary, overflow, IRQ), which are still integer ranges
+  until a section region source exists (#777).
+
 Private files and narrow interfaces help contain these assumptions, but
 containment is not proof of their implementation.
 
