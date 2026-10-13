@@ -231,20 +231,36 @@ def capture(args) -> int:
                     "cat /proc/takibi/profile"), flush=True)
         time.sleep(0.1)
         timings = []
-        for _ in range(args.http if url else 0):
-            began = time.monotonic()
-            with opener.open(url + args.http_path.lstrip("/"), timeout=120) as reply:
-                size = len(reply.read())
-            timings.append({"bytes": size, "seconds": time.monotonic() - began})
-        if args.command:
-            print(shell(args.command, args.command_seconds), flush=True)
-        print(shell("echo stop > /proc/takibi/profile; cat /proc/takibi/profile"),
-              flush=True)
+        workload_error = None
+        try:
+            for _ in range(args.http if url else 0):
+                began = time.monotonic()
+                with opener.open(url + args.http_path.lstrip("/"),
+                                 timeout=args.http_seconds) as reply:
+                    size = len(reply.read())
+                timings.append({"bytes": size,
+                                "seconds": time.monotonic() - began})
+            if args.command:
+                print(shell(args.command, args.command_seconds), flush=True)
+            print(shell("echo stop > /proc/takibi/profile; "
+                        "cat /proc/takibi/profile"), flush=True)
+        except (OSError, RuntimeError) as error:
+            # Break in anyway: the stopped machine says why the workload
+            # stalled, and the samples taken so far are still dumped.
+            workload_error = error
+            print(f"[profile] workload failed: {error}; breaking in", flush=True)
         start = len(session.normalized())
         session.send(b"\x14b")
         if session.wait_for(lambda text: b"ddb> " in text[start:] or None,
                             60) is None:
             raise RuntimeError("DDB did not answer the BREAK")
+        if workload_error is not None:
+            for command in (b"intr", b"sched", b"ps", b"wait", b"bt cpu 0",
+                            b"bt cpu 1", b"bt cpu 2", b"bt cpu 3",
+                            b"profile stop"):
+                mark = len(session.normalized())
+                session.send(command + b"\n")
+                session.wait_for(lambda text: b"ddb> " in text[mark:] or None, 30)
         dump_from = len(session.normalized())
         session.send(b"profile dump\n")
         if session.wait_for(lambda text: re.search(
@@ -255,7 +271,7 @@ def capture(args) -> int:
         session.wait_for(lambda text: b"ddb: continuing" in text[dump_from:]
                          or None, 30)
         (out / "http.json").write_text(json.dumps(timings, indent=2) + "\n")
-        status = 0
+        status = 0 if workload_error is None else 2
     except RuntimeError as error:
         print(f"FAIL profile capture: {error}", file=sys.stderr)
     finally:
@@ -279,6 +295,7 @@ def main() -> int:
     cap.add_argument("--http", type=int, default=0)
     cap.add_argument("--warmup", type=int, default=2)
     cap.add_argument("--http-path", default="/bin/busybox.static")
+    cap.add_argument("--http-seconds", type=float, default=60)
     cap.add_argument("--command", default="")
     cap.add_argument("--command-seconds", type=float, default=300)
     cap.add_argument("--boot-seconds", type=float, default=1800)

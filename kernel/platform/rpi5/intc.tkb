@@ -283,6 +283,17 @@ fn rpi5_irq_dispatch_inner(frame: sink FrameRef[process], lower_el: bool)
     // KERNEL_ACTIVE_CORES at 1 while a second core runs kernel code.
     // GICC_IAR is read before the branch, not after: acknowledging is the
     // interrupted core's own job on its own banked interface.
+    // GitHub issue #497: a secondary's own PMU overflow, before the tick
+    // path below, which handles nothing else and would leave this
+    // level-triggered line asserted -- a storm of millions per second, seen
+    // on the first four-core RPi5 session.
+    if (cpu_id() != 0 && id >= RPI5_PMU_GIC_INTID &&
+            id < RPI5_PMU_GIC_INTID + (KERNEL_MAX_CORES as u32)) {
+        profile_sample_irq(frame);
+        gicc.eoir = iar;
+        workload_profile_irq_exit();
+        return frame_any(frame);
+    }
     if (cpu_id() != 0) {
         let switch: TimerSwitch = kernel_secondary_tick(
             frame, lower_el, id == rpi5_timer_gic_intid);

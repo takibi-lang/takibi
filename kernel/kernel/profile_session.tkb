@@ -96,6 +96,12 @@ struct ProfileCoreState {
     base: usize;
     // The session epoch this core last armed or disarmed its counter for.
     synced_epoch: usize;
+    // Interrupts this core took while a session sampled, and the ones it
+    // could not store (no buffer): the dump reports both, so a PMU line
+    // that is delivered but never recorded is visible.
+    interrupts: usize;
+    unbuffered: usize;
+    arms: usize;
 }
 
 private let mut profile_core_state: [ProfileCoreState; KERNEL_MAX_CORES];
@@ -156,6 +162,9 @@ private fn profile_core_release(cpu: {0..<KERNEL_MAX_CORES as usize}) !{unsafe} 
     profile_core_state[cpu].base = 0;
     profile_core_state[cpu].stored = 0;
     profile_core_state[cpu].lost = 0;
+    profile_core_state[cpu].interrupts = 0;
+    profile_core_state[cpu].unbuffered = 0;
+    profile_core_state[cpu].arms = 0;
 }
 
 // The smallest power-of-two page count holding `samples` records:
@@ -290,6 +299,7 @@ fn profile_session_sync() !{unsafe} {
     profile_core_state[cpu].synced_epoch = epoch;
     if (atomic_word_load(&profile_session_mode) == 1 &&
             profile_core_state[cpu].pages != 0) {
+        profile_core_state[cpu].arms = profile_core_state[cpu].arms + 1;
         pmu_sample_start(profile_session_period);
     } else if (profile_sample_interval_active() == false) {
         pmu_sample_stop();
@@ -307,6 +317,7 @@ fn profile_session_irq(frame: borrow FrameRef[process]) !{interrupt, unsafe} {
         return;
     }
     let cpu: {0..<KERNEL_MAX_CORES as usize} = raw_cpu;
+    profile_core_state[cpu].interrupts = profile_core_state[cpu].interrupts + 1;
     // Read before the rearm resets it: how far past the overflow the
     // counter already is.
     let skid: usize = pmu_sample_counter();
@@ -317,6 +328,7 @@ fn profile_session_irq(frame: borrow FrameRef[process]) !{interrupt, unsafe} {
                            profile_core_store[cpu].buffer);
     match taken {
         Place::Empty => {
+            profile_core_state[cpu].unbuffered = profile_core_state[cpu].unbuffered + 1;
             profile_buffer_unlock(guard, &profile_core_store[cpu].mutex);
             return;
         }
@@ -612,6 +624,12 @@ fn profile_session_dump() !{unsafe} {
                 profile_put_udec(profile_core_state[cpu].lost);
                 profile_puts(bs" capacity=");
                 profile_put_udec(count);
+                profile_puts(bs" interrupts=");
+                profile_put_udec(profile_core_state[cpu].interrupts);
+                profile_puts(bs" unbuffered=");
+                profile_put_udec(profile_core_state[cpu].unbuffered);
+                profile_puts(bs" arms=");
+                profile_put_udec(profile_core_state[cpu].arms);
                 profile_puts(bs"\n");
                 let back = place_put(guard, &profile_core_store[cpu].mutex,
                                      profile_core_store[cpu].buffer, records);
