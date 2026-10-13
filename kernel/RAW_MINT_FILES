@@ -29,7 +29,6 @@ kernel/platform/rpi5/device_map.tkb
 kernel/platform/rpi5/usb_xhci.tkb
 
 # R: to be rewritten to authority-derived access, then removed
-kernel/fs/elf64.tkb
 kernel/init/test_driver.tkb
 kernel/mm/address_space.tkb
 

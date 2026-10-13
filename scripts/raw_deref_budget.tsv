@@ -17,7 +17,6 @@ kernel/drivers/block/virtio_blk.tkb	13	2	virtio rings and request buffers, plus 
 kernel/drivers/block/virtio_blk_dma.tkb	0	1	the used-ring index read, the receive mint file's completion observation (#716); the reset status register is an IoHandle (#637 A)
 kernel/drivers/net/rp1_gem.tkb	0	9	RP1 clock and GPIO registers (#637 A); GEM registers use an IoHandle (#733)
 kernel/drivers/net/virtio_net.tkb	5	3	virtio rings and frames (#637 E); registers are an IoHandle
-kernel/fs/elf64.tkb	2	0	Two packed ELF header copy mints take complete bounded byte spans and return independent record values; overlay validity and packed layout remain trusted (#637 D)
 kernel/init/test_driver.tkb	10	0	boot-time fixtures reaching process records directly (#637 F)
 kernel/mm/address_space.tkb	6	0	Backing records use indexed references and active roots use bounded per-CPU array places; remaining raw sites are the deliberate user-VA CoW probe byte mints
 kernel/mm/user_memory.tkb	7	0	the user-range mint site: user addresses become slices here (#637 D)
