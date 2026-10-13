@@ -25914,6 +25914,11 @@ let device_protocol_tests = [
   Alcotest.test_case "device protocol: the backing global owns whole lines" `Quick
     (expect_device_error ~sub:"[u8; 64] align(64)" ~by:"[u8; 64] align(32)"
        "must be declared align(64)");
+  (* LLVM reports an unset global alignment as 0, which divides every line
+     size; it must count as unaligned. *)
+  Alcotest.test_case "device protocol: a backing global with no alignment" `Quick
+    (expect_device_error ~sub:"[u8; 64] align(64)" ~by:"[u8; 64]"
+       "must be declared align(64)");
   Alcotest.test_case "device protocol: the extent is whole lines" `Quick
     (fun () ->
       let swap s =
