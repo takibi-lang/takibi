@@ -835,15 +835,92 @@ let check_device (d : protocol_decl) (p : t) =
             with a declared constant: the cache work and the line-ownership \
             check need its byte extent" d.proto_name
 
+(* GitHub issue #782: the names an item refers to -- every call and every
+   variable -- so that generated functions nothing reaches can be dropped. *)
+module Names = Set.Make (String)
+
+let rec expr_names acc (e : expr) =
+  match e.desc with
+  | Var n -> Names.add n acc
+  | Call (f, args) -> List.fold_left expr_names (Names.add f acc) args
+  | Index (a, i) -> expr_names (expr_names acc a) i
+  | SliceOf (a, lo, hi) -> expr_names (expr_names (expr_names acc a) lo) hi
+  | IntLit _ | BoolLit _ | StringLit _ | ByteSliceLit _ | EnumVariant _
+  | EmbedFile _ | ViewLit _ | SizeOf _ | AlignOf _ | ContainsStableOwner _
+  | OffsetOf _ -> acc
+  | StructLit args | TupleLit args -> List.fold_left expr_names acc args
+  | VariantCtor (_, _, a) | Bnot a | Deref a | AddrOf a | Cast (_, a)
+  | FieldGet (a, _) | Unsafe a -> expr_names acc a
+  | BinOp (_, a, b) | Assign (a, b) -> expr_names (expr_names acc a) b
+
+and stmt_names acc (st : stmt) =
+  match st.desc with
+  | Return None | Break | Continue -> acc
+  | Return (Some e) | Expr e | Yield e -> expr_names acc e
+  | StaticAssert (c, _) -> expr_names acc c
+  | Block ss | UnsafeBlock ss -> List.fold_left stmt_names acc ss
+  | Let (_, _, _, e, _) -> Option.fold ~none:acc ~some:(expr_names acc) e
+  | If (c, t, f) ->
+      List.fold_left stmt_names (List.fold_left stmt_names (expr_names acc c) t) f
+  | While (c, b) -> List.fold_left stmt_names (expr_names acc c) b
+  | For (_, _, lo, hi, b) ->
+      List.fold_left stmt_names (expr_names (expr_names acc lo) hi) b
+  | ForEach (_, e, b) -> List.fold_left stmt_names (expr_names acc e) b
+  | LetTuple (_, e) -> expr_names acc e
+  | Match (e, arms) | LetMatch (_, _, _, e, arms) ->
+      List.fold_left arm_names (expr_names acc e) arms
+
+and arm_names acc = function
+  | ArmVariant (_, _, _, ss) | ArmWild ss | ArmMiss ss
+  | ArmIntLit (_, ss) | ArmByteSliceLit (_, ss) -> List.fold_left stmt_names acc ss
+
+let item_names acc = function
+  | FuncDef f -> List.fold_left stmt_names acc f.body
+  | LetDef (_, _, Some e, _, _, _, _) | ConstDef (_, _, e, _) -> expr_names acc e
+  | VectorTableDef (entries, _) ->
+      List.fold_left (fun acc (_, n) -> Names.add n acc) acc entries
+  | _ -> acc
+
+(* Keep a generated function only when something outside the generated
+   code reaches it, directly or through other kept generated functions.
+   The declaration's validation and lowering checks already ran on the
+   whole generated set, so dropping changes no verdict, only the image. *)
+let drop_unreferenced (program : toplevel list) (generated : toplevel list list) =
+  let all_gen = List.concat generated in
+  let gen_fn = List.filter_map (function
+    | FuncDef f -> Some (f.name, f) | _ -> None) all_gen in
+  let roots = List.fold_left item_names Names.empty program in
+  let rec close kept frontier =
+    let next = Names.fold (fun n acc ->
+      match List.assoc_opt n gen_fn with
+      | Some f when not (Names.mem n kept) -> item_names acc (FuncDef f)
+      | _ -> acc) frontier Names.empty in
+    let kept' = Names.union kept (Names.filter (fun n -> List.mem_assoc n gen_fn) frontier) in
+    let fresh = Names.diff next kept' in
+    if Names.is_empty fresh then kept' else close kept' fresh in
+  let kept = close Names.empty roots in
+  List.map (List.filter (function
+    | FuncDef f -> Names.mem f.name kept
+    | _ -> true)) generated
+
 let lower (prog : toplevel list) : toplevel list =
   ignore (extract prog);
-  List.concat_map (function
+  let expanded = List.map (function
     | ProtocolDef d ->
         let p = validate d in
         check_device d p;
         check_lowering prog d p;
-        parse_generated p.name (source_of d p)
-    | item -> [ item ]) prog
+        `Generated (parse_generated p.name (source_of d p))
+    | item -> `Item item) prog in
+  let program = List.filter_map (function `Item i -> Some i | _ -> None) expanded in
+  let generated = List.filter_map (function `Generated g -> Some g | _ -> None) expanded in
+  let kept = ref (drop_unreferenced program generated) in
+  List.concat_map (function
+    | `Item i -> [ i ]
+    | `Generated _ ->
+        (match !kept with
+         | g :: rest -> kept := rest; g
+         | [] -> [])) expanded
 
 (* GitHub issue #758: each protocol's generated Takibi source, for
    --emit-protocol-source. Only the declaration is validated, so the source

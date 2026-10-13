@@ -4079,6 +4079,10 @@ static parameters take no part in the generated types yet. Access covers
 the whole retained region in every writable state; the model's reserved
 span and `requires prepared` are not tracked by the types.
 `linux_user/protocol_ring` exercises the accepted shape.
+Generated functions that no program function reaches, directly or through
+other generated functions, are dropped after the declaration and its
+lowerings are checked (GitHub issue #782): an unused accessor costs nothing
+in the image and changes no verdict.
 `--emit-protocol-source <dir>` writes each protocol's generated source as
 `<dir>/<Name>.tkb` and exits, so a diagnostic that points into `<protocol
 Name>` can be read against it; only the declaration is validated.

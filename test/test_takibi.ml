@@ -25898,6 +25898,16 @@ let device_protocol_tests = [
     (expect_device_error ~in_proto:true ~sub:"state Posted[req] device;"
        ~by:"state Posted[req] device addressed;"
        "is 'addressed' but not 'access write'");
+  (* GitHub issue #782: generated functions nothing reaches are not emitted. *)
+  Alcotest.test_case "generated functions: only the reached ones are emitted" `Quick
+    (fun () ->
+      let ir = compile_device () in
+      Alcotest.(check bool) "used span kept" true
+        (contains_substring ir "@Rx_Posted_span(");
+      Alcotest.(check bool) "unused span_at dropped" false
+        (contains_substring ir "@Rx_Posted_span_at(");
+      Alcotest.(check bool) "unused write dropped" false
+        (contains_substring ir "@Rx_Ready_write("));
   Alcotest.test_case "device protocol: a writable state has no span" `Quick
     (expect_device_error ~sub:"let ready = Rx_init(memory);"
        ~by:"let ready = Rx_init(memory); let mut sp: DmaDeviceSpan = Rx_Ready_span(ready);"
