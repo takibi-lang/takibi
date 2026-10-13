@@ -3,7 +3,19 @@
 The compiler's `--function-sections` puts every defined function and named
 global in its own section; every kernel link passes `--gc-sections`.
 Protocol code gets internal linkage and its small accessors are `inline fn`.
-Base: main d307f685 (scripts/space_delta.py), plus stage-by-stage images.
+Measured first against main d307f685 (tables below, plus stage-by-stage
+images), then re-measured after rebasing onto main 33cfbc32 (the xHCI event
+ring and output context on E1 snapshots):
+
+```
+| | qemu base | qemu change | rpi5 base | rpi5 change |
+| text | 697376 | 679764 | 739984 | 727828 |
+| data | 4736 | 4632 | 2889496 | 2889496 |
+| bss | 1513248 | 1509152 | 1700800 | 1696704 |
+| usable_ram_start | 0x40220000 | 0x40220000 | 0x718000 | 0x718000 |
+```
+
+On 33cfbc32 RPi5 text falls by 12156 B, QEMU's by the same 17612 B.
 
 ## Linked kernels (llvm-size, scripts/space_delta.py)
 
