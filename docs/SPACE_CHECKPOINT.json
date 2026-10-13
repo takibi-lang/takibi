@@ -1,10 +1,11 @@
 {
-  "date": "2026-10-12",
+  "date": "2026-10-13",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "3a39b077584f95687678418d1e3f3a730022fd70670141815cd021f6c0488d3f",
-  "workload": "#767: the TCP retransmit pool keeps one empty chunk. Linked kernels against main 2f8cf115 (scripts/space_delta.py); RPi5 HTTP bulk transfer with scripts/measure_kernel_fileio.py.",
+  "source_sha256": "22ad04c31cf533b8cda06024138086a3ea89dce99d52fe9a420edef0e255deb2",
+  "workload": "#637: header overlays (`bytes as &mut T`) in arp/icmp/tcp. Linked kernels against main e8b4af06 (scripts/space_delta.py).",
   "evidence": [
+    "docs/HEADER_OVERLAY_SPACE_2026-10-13.md",
     "docs/TCP_RETX_RETENTION_SPACE_2026-10-12.md",
     "docs/EXT2_CHECKED_SPACE_2026-10-12.md",
     "docs/FREELIST_CHECKED_SPACE_2026-10-12.md",
@@ -56,6 +57,6 @@
     "docs/VIRTIO_NET_TX_2026-10-10.md",
     "docs/VIRTIO_NET_TX_SPACE_2026-10-10.json"
   ],
-  "assessment": "Text +392 B (QEMU) / +368 B (RPi5); data/BSS and usable_ram_start unchanged. One 2-page retransmit chunk (8 KiB) stays allocated after the first TCP send. Adopted: RPi5 bulk HTTP 0.126 s against 0.192 s before #745 and 0.280 s at #745. Earlier measured results stand.",
+  "assessment": "QEMU and RPi5 text/data/BSS and usable_ram_start unchanged; no symbol changed size (the overlay is a compile-time check). Earlier measured results stand.",
   "next_trigger": "A shrink protocol for walked RegionPools, the #748 allocator change, or the next pool consumer moved onto Held slots, whichever lands first."
 }
