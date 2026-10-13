@@ -25873,6 +25873,18 @@ let device_protocol_tests = [
        | _ -> Alcotest.failf "Rx_post must clean before its doorbell:\n%s" post);
       Alcotest.(check bool) "tx finish has no cache work" false
         (contains_substring (function_ir ir "Rx_take") "dc "));
+  (* GitHub issue #758: --emit-protocol-source shows the generated file. *)
+  Alcotest.test_case "generated source: one file per protocol, publication in order" `Quick
+    (fun () ->
+      match Protocol_decl.generated_sources (parse device_protocol) with
+      | [ ("Rx", src) ] ->
+          (match index_of src "__protocol_dma_prepare_rx(s.memory);",
+                 index_of src "    post(next);" with
+           | Some cache, Some hook when cache < hook -> ()
+           | _ -> Alcotest.failf "prepare must precede the doorbell:\n%s" src);
+          Alcotest.(check bool) "span generated" true
+            (contains_substring src "fn Rx_Posted_span(")
+      | l -> Alcotest.failf "expected one source, got %d" (List.length l));
   Alcotest.test_case "device protocol: a writable state has no span" `Quick
     (expect_device_error ~sub:"let ready = Rx_init(memory);"
        ~by:"let ready = Rx_init(memory); let mut sp: DmaDeviceSpan = Rx_Ready_span(ready);"

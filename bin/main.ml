@@ -69,6 +69,7 @@ let () =
   let emit_held_guards = ref "" in
   let emit_effect_matrix = ref false in
   let emit_tla = ref "" in
+  let emit_protocol_source = ref "" in
   let i = ref 1 in
   while !i < Array.length Sys.argv do
     (match Sys.argv.(!i) with
@@ -138,6 +139,13 @@ let () =
            exit 1
          );
          emit_tla := Sys.argv.(!i)
+     | "--emit-protocol-source" ->
+         incr i;
+         if !i >= Array.length Sys.argv then (
+           Printf.eprintf "Error: --emit-protocol-source requires a directory\n";
+           exit 1
+         );
+         emit_protocol_source := Sys.argv.(!i)
      | "--emit-effect-matrix" ->
          emit_effect_matrix := true
      | "--emit-held-guards" ->
@@ -217,7 +225,7 @@ let () =
 
   if input_files = [] then (
     Printf.eprintf
-      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--frame-pointers] [--forbid-trap] [--forbid-unsafe] [--confine-raw-authority] [--raw-mint-file <path>] [--device-semantics-file <path>] [--regions] [--reject-unused-functions] [--external-entry <function>] [--check-unused-file <path>] [--explain-inference] [--emit-effect-matrix] [--emit-exception-frame-offsets <StructName>] [--emit-struct-layout <StructName>] [--emit-debug-metadata <path>] [--emit-depfile <path>] [--emit-overflow-audit <path>] [--emit-raw-deref-audit <path>] [--emit-held-guards <path>] [--emit-tla <dir>] [--version]\n"
+      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--frame-pointers] [--forbid-trap] [--forbid-unsafe] [--confine-raw-authority] [--raw-mint-file <path>] [--device-semantics-file <path>] [--regions] [--reject-unused-functions] [--external-entry <function>] [--check-unused-file <path>] [--explain-inference] [--emit-effect-matrix] [--emit-exception-frame-offsets <StructName>] [--emit-struct-layout <StructName>] [--emit-debug-metadata <path>] [--emit-depfile <path>] [--emit-overflow-audit <path>] [--emit-raw-deref-audit <path>] [--emit-held-guards <path>] [--emit-tla <dir>] [--emit-protocol-source <dir>] [--version]\n"
       Sys.argv.(0);
     exit 1
   );
@@ -284,6 +292,14 @@ let () =
     (* GitHub issue #720: protocol declarations are validated once here and
        removed before every later pass; --emit-tla writes each one's model
        (<dir>/<Name>.tla and .cfg) and stops. *)
+    (* GitHub issue #758: --emit-protocol-source writes each protocol's
+       generated source as <dir>/<Name>.tkb and stops. *)
+    if !emit_protocol_source <> "" then begin
+      List.iter (fun (name, src) ->
+        let out = open_out (Filename.concat !emit_protocol_source (name ^ ".tkb")) in
+        output_string out src; close_out out) (Protocol_decl.generated_sources prog);
+      exit 0
+    end;
     if !emit_tla <> "" then begin
       let _, protocols = Protocol_decl.extract prog in
       List.iter (fun p ->

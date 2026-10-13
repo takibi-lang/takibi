@@ -20,7 +20,7 @@ File extension: `.tkb`. Compiler invocation: `takibi <file1.tkb>
 <features>] [-g] [--forbid-trap] [--forbid-unsafe] [--confine-raw-authority] [--raw-mint-file <path>]
 [--device-semantics-file <path>] [--reject-unused-functions]
 [--external-entry <function>] [--check-unused-file <path>] [--explain-inference]
-[--emit-effect-matrix] [--emit-held-guards <path>] [--version]`. Multiple `.tkb` files are
+[--emit-effect-matrix] [--emit-held-guards <path>] [--emit-protocol-source <dir>] [--version]`. Multiple `.tkb` files are
 concatenated (flat global namespace) before compilation -- there is no
 module/import system beyond `use` (see "Known Limitations" below).
 
@@ -4079,6 +4079,9 @@ static parameters take no part in the generated types yet. Access covers
 the whole retained region in every writable state; the model's reserved
 span and `requires prepared` are not tracked by the types.
 `linux_user/protocol_ring` exercises the accepted shape.
+`--emit-protocol-source <dir>` writes each protocol's generated source as
+`<dir>/<Name>.tkb` and exits, so a diagnostic that points into `<protocol
+Name>` can be read against it; only the declaration is validated.
 
 Rejected: unknown or duplicate states, outcomes, actions or labels; arity
 mismatches; unbound or shadowing identities; witnesses no observation of the

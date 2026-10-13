@@ -832,3 +832,11 @@ let lower (prog : toplevel list) : toplevel list =
         check_lowering prog d p;
         parse_generated p.name (source_of d p)
     | item -> [ item ]) prog
+
+(* GitHub issue #758: each protocol's generated Takibi source, for
+   --emit-protocol-source. Only the declaration is validated, so the source
+   can be read when a lowering's error points into `<protocol Name>`. *)
+let generated_sources (prog : toplevel list) : (string * string) list =
+  List.filter_map (function
+    | ProtocolDef d -> let p = validate d in Some (p.name, source_of d p)
+    | _ -> None) prog
