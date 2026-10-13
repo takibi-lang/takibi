@@ -6,3 +6,6 @@
 # that make them are named here and passed to the compiler as
 # --device-semantics-file. A file is added by a reviewed change that says
 # which observations it trusts, in its header.
+
+# The xHCI producer rings: completion events and the confirmed halt/reset.
+kernel/platform/rpi5/usb_xhci_rings.tkb

@@ -131,6 +131,10 @@ EXEMPT = {
     "platform/rpi5/usb_xhci_dma.tkb":
         "the receive allocations' owner slots and their mint functions, "
         "reached only from usb_xhci.tkb's commands (GitHub issue #716)",
+    "platform/rpi5/usb_xhci_rings.tkb":
+        "the producer rings' owner slots (each behind its own mutex) and "
+        "the next doorbell/await parameters, reached only from "
+        "usb_xhci.tkb's commands (GitHub issue #720)",
     "platform/rpi5/usb_xhci.tkb":
         "device state; MSI-X is routed to CPU0, and every mass-storage "
         "command after provisioning is issued under memory.tkb's "
