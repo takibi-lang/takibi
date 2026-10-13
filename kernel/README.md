@@ -255,8 +255,11 @@ link uses `--gc-sections`, so the linker removes what nothing reaches. The
 roots are `_start`, the `KEEP()` sections of the linker scripts
 (`.text.boot`, `.text.vectors`), what they reach through relocations, and
 the debugger entries GDB calls by name (`KERNEL_DEBUGGER_ENTRIES` in the
-Makefile, rooted with `--undefined`). A function that only a debugger or a
-host script names must be added there, or it is not in the image. Each
+Makefile, rooted with `--undefined`). The split: sections tied to assembly
+or placement are kept with `KEEP()` in the linker scripts; functions called
+by name from outside the image (GDB, host tools) are listed in
+`KERNEL_DEBUGGER_ENTRIES` and rooted with `--undefined` -- nothing else
+keeps an unreferenced function. Each
 production image keeps `kernel/build/<platform>/kernel.elf.gc-sections`,
 the linker's list of removed sections: what was compiled but is unreachable.
 

@@ -159,8 +159,11 @@ flame-graph stacks). Accepted as option (a): a sample delayed by masked
 IRQs is attributed to the unmask point with its masked weight; seeing
 inside masked spans is #773 (Arm SPE) and an irqsoff-style tracer on #771.
 
-**Next, ahead of the list below (maintainer, 2026-10-13):** #786, then
-#740 (GEM/virtio onto device protocols). Done 2026-10-13: the xHCI work
+**Next, ahead of the list below (maintainer, 2026-10-13):** #740
+(GEM/virtio onto device protocols). Done 2026-10-13: #786, one section per
+function and data object with --gc-sections on every kernel link (QEMU text
+-17.6 KB, RPi5 -12.2 KB); #782's compiler-side pruning stays, for the
+raw-deref audit rather than for size. Also done: the xHCI work
 under #720 -- producer rings, session tables, input context, event ring and
 output context are device-protocol owners (E1 snapshots for the last two);
 usb_xhci.tkb is off kernel/RAW_MINT_FILES, its bus-address export is
