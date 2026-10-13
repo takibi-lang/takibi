@@ -813,3 +813,274 @@ fn xhci_input_submit(r: XhciInput_Ready[b, o, 528]) -> usize !{unsafe} {
         }
     }
 }
+
+// -- The event ring and the output device context (GitHub issue #720, E1) --
+//
+// Both are written by the controller for a whole session, so neither comes
+// back to the CPU before a confirmed reset. The CPU reads them one element
+// at a time through snapshot observations: the generated read invalidates
+// that element's lines and copies it, and the lowerings below decide from
+// the copy alone.
+//   - xhci_evt_poll trusts the Cycle bit: an event TRB whose Cycle bit
+//     equals the consumer cycle state was completely written by the
+//     controller (xHCI 1.2, 4.9.4). Its release advances the dequeue index
+//     and ERDP past exactly the entry that was copied.
+//   - xhci_out_read trusts nothing about validity: the driver reads the
+//     slot and EP0 contexts after Address Device completes, when the
+//     controller has written them (xHCI 1.2, 4.6.5); the release tells the
+//     controller nothing.
+
+const XHCI_OUTPUT_WORDS: usize = 512;
+
+protocol XhciEvents[inst: usize] retains region(Trb)[b, XHCI_RING_TRBS] rx {
+    state Ready access write addressed;
+    state Live[req] device;
+    init Ready;
+    transition xhci_evt_publish(Ready) -> Live[fresh req];
+    observe xhci_evt_poll(Live[req]) -> Event snapshot | NoEvent;
+    observe xhci_evt_reset(Live[req]) -> EvtQuiet[req] quiesces | EvtLive;
+    transition xhci_evt_reclaim(Live[req], EvtQuiet[req]) -> Ready;
+    property disjoint;
+    model cells 2;
+}
+
+protocol XhciOutput[inst: usize] retains region(CtxWord)[b, XHCI_OUTPUT_WORDS] rx {
+    state Ready access write addressed;
+    state Live[req] device;
+    init Ready;
+    transition xhci_out_publish(Ready) -> Live[fresh req];
+    observe xhci_out_read(Live[req]) -> OutWord snapshot;
+    observe xhci_out_reset(Live[req]) -> OutQuiet[req] quiesces | OutLive;
+    transition xhci_out_reclaim(Live[req], OutQuiet[req]) -> Ready;
+    property disjoint;
+    model cells 2;
+}
+
+private region let mut xhci_evt_ring: [Trb; 16] align(64);
+private region let mut xhci_device_ctx: [CtxWord; 512] align(64);
+
+fn xhci_evt_publish(s: borrow XhciEvents_Live[b, o, 16, r]) {}
+fn xhci_evt_poll(s: borrow XhciEvents_Live[b, o, 16, r], value: Trb)
+        -> XhciEvents_xhci_evt_poll_Raw {
+    if ((value.dw3 & 1) == xhci_evt_cycle) {
+        return XhciEvents_xhci_evt_poll_Raw::Event;
+    }
+    return XhciEvents_xhci_evt_poll_Raw::NoEvent;
+}
+// Past the entry just copied: the next index (with the cycle toggled at the
+// wrap), and ERDP with EHB written 1 to clear it (GitHub issue #187).
+fn xhci_evt_poll_release(s: borrow XhciEvents_Live[b, o, 16, r]) !{unsafe} {
+    xhci_evt_idx = xhci_evt_idx + 1;
+    if (xhci_evt_idx >= XHCI_RING_TRBS) {
+        xhci_evt_idx = 0;
+        xhci_evt_cycle = 1 - xhci_evt_cycle;
+    }
+    let mut span: DmaDeviceSpan = XhciEvents_Live_span(s);
+    xhci_event_dequeue_release(xhci_span_bus_address(span) + xhci_evt_idx * 16);
+}
+fn xhci_evt_reset(s: borrow XhciEvents_Live[b, o, 16, r]) -> XhciEvents_xhci_evt_reset_Raw {
+    if (xhci_rings_quiesced) { return XhciEvents_xhci_evt_reset_Raw::EvtQuiet; }
+    return XhciEvents_xhci_evt_reset_Raw::EvtLive;
+}
+fn xhci_evt_reclaim(s: borrow XhciEvents_Live[b, o, 16, r]) {}
+fn xhci_out_publish(s: borrow XhciOutput_Live[b, o, 512, r]) {}
+fn xhci_out_read(s: borrow XhciOutput_Live[b, o, 512, r], value: CtxWord)
+        -> XhciOutput_xhci_out_read_Raw {
+    return XhciOutput_xhci_out_read_Raw::OutWord;
+}
+fn xhci_out_read_release(s: borrow XhciOutput_Live[b, o, 512, r]) {}
+fn xhci_out_reset(s: borrow XhciOutput_Live[b, o, 512, r]) -> XhciOutput_xhci_out_reset_Raw {
+    if (xhci_rings_quiesced) { return XhciOutput_xhci_out_reset_Raw::OutQuiet; }
+    return XhciOutput_xhci_out_reset_Raw::OutLive;
+}
+fn xhci_out_reclaim(s: borrow XhciOutput_Live[b, o, 512, r]) {}
+
+struct XhciEventsSlot {
+    private mutex: Mutex;
+    private value: Place(exists b: addr. exists o: usize. exists r: usize.
+                         XhciEvents_Live[b, o, 16, r]);
+}
+struct XhciOutputSlot {
+    private mutex: Mutex;
+    private value: Place(exists b: addr. exists o: usize. exists r: usize.
+                         XhciOutput_Live[b, o, 512, r]);
+}
+private let mut xhci_events_slot: XhciEventsSlot;
+private let mut xhci_output_slot: XhciOutputSlot;
+private let mut xhci_events_claimed: bool = false;
+private let mut xhci_output_claimed: bool = false;
+
+variant XhciLostLive {
+    Events(exists b: addr. exists o: usize. exists r: usize. XhciEvents_Live[b, o, 16, r]);
+    Output(exists b: addr. exists o: usize. exists r: usize. XhciOutput_Live[b, o, 512, r]);
+}
+private fn xhci_live_lost(x: sink XhciLostLive) { kernel_invariant_stop(); }
+
+private fn xhci_events_park(live: XhciEvents_Live[b, o, 16, r]) {
+    let guard = xhci_ring_lock(&xhci_events_slot.mutex);
+    let previous = place_put(guard, &xhci_events_slot.mutex, xhci_events_slot.value, live);
+    xhci_ring_unlock(guard, &xhci_events_slot.mutex);
+    match previous {
+        Place::Empty => {}
+        Place::Full(other) => { xhci_live_lost(XhciLostLive::Events(other)); }
+    }
+}
+private fn xhci_output_park(live: XhciOutput_Live[b, o, 512, r]) {
+    let guard = xhci_ring_lock(&xhci_output_slot.mutex);
+    let previous = place_put(guard, &xhci_output_slot.mutex, xhci_output_slot.value, live);
+    xhci_ring_unlock(guard, &xhci_output_slot.mutex);
+    match previous {
+        Place::Empty => {}
+        Place::Full(other) => { xhci_live_lost(XhciLostLive::Output(other)); }
+    }
+}
+
+// Zero every TRB (no stale Cycle bit survives a reset), publish the ring to
+// the controller, keep the Live owner; answers its bus address.
+private fn xhci_events_go(r: XhciEvents_Ready[b, o, 16]) -> usize !{unsafe} {
+    for k: usize in 0..<16 {
+        let mut zero: Trb = { 0, 0, 0, 0 };
+        XhciEvents_Ready_write(r, k, zero);
+    }
+    match XhciEvents_xhci_evt_publish(r) {
+        XhciEvents_xhci_evt_publish_Result::Live(live) => {
+            let mut span: DmaDeviceSpan = XhciEvents_Live_span(live);
+            let dma: usize = xhci_span_bus_address(span);
+            xhci_events_park(live);
+            return dma;
+        }
+    }
+}
+
+// The event ring for a new controller session: claimed at the first one,
+// otherwise reclaimed on the confirmed reset. 0 while the controller may
+// still write it.
+fn xhci_events_start() -> usize !{unsafe} {
+    if (xhci_events_claimed == false) {
+        xhci_events_claimed = true;
+        let RegionOf(Trb)::Taken(memory) = region_of(xhci_evt_ring) else {
+            RegionOf(Trb)::Gone => { return 0; }
+        };
+        return xhci_events_go(XhciEvents_init(memory));
+    }
+    let guard = xhci_ring_lock(&xhci_events_slot.mutex);
+    let taken = place_take(guard, &xhci_events_slot.mutex, xhci_events_slot.value);
+    xhci_ring_unlock(guard, &xhci_events_slot.mutex);
+    match taken {
+        Place::Empty => { return 0; }
+        Place::Full(live) => {
+            match XhciEvents_xhci_evt_reset(live) {
+                XhciEvents_xhci_evt_reset_Outcome::EvtQuiet(q) => {
+                    return xhci_events_go(XhciEvents_xhci_evt_reclaim(live, q));
+                }
+                XhciEvents_xhci_evt_reset_Outcome::EvtLive => {
+                    xhci_events_park(live);
+                    return 0;
+                }
+            }
+        }
+    }
+}
+
+variant XhciEventPoll {
+    Event(Trb);
+    NoEvent;
+}
+
+// The entry at the dequeue index if the controller has written it, copied
+// and consumed (ERDP advanced past it); NoEvent otherwise.
+fn xhci_event_next() -> XhciEventPoll {
+    let guard = xhci_ring_lock(&xhci_events_slot.mutex);
+    let taken = place_take(guard, &xhci_events_slot.mutex, xhci_events_slot.value);
+    xhci_ring_unlock(guard, &xhci_events_slot.mutex);
+    match taken {
+        Place::Empty => { return XhciEventPoll::NoEvent; }
+        Place::Full(live) => {
+            let index: usize = xhci_evt_idx;
+            if (index >= 16) {
+                xhci_events_park(live);
+                return XhciEventPoll::NoEvent;
+            }
+            match XhciEvents_xhci_evt_poll(live, index) {
+                XhciEvents_xhci_evt_poll_Outcome::Event(snap) => {
+                    let mut trb: Trb = XhciEvents_Event_value(snap);
+                    XhciEvents_Event_release(live, snap);
+                    xhci_events_park(live);
+                    return XhciEventPoll::Event(trb);
+                }
+                XhciEvents_xhci_evt_poll_Outcome::NoEvent => {
+                    xhci_events_park(live);
+                    return XhciEventPoll::NoEvent;
+                }
+            }
+        }
+    }
+}
+
+private fn xhci_output_go(r: XhciOutput_Ready[b, o, 512]) -> usize !{unsafe} {
+    match XhciOutput_xhci_out_publish(r) {
+        XhciOutput_xhci_out_publish_Result::Live(live) => {
+            let mut span: DmaDeviceSpan = XhciOutput_Live_span(live);
+            let dma: usize = xhci_span_bus_address(span);
+            xhci_output_park(live);
+            return dma;
+        }
+    }
+}
+
+// The output device context for a new Address Device: published once per
+// controller session; 0 while the controller may still write it.
+fn xhci_output_start() -> usize !{unsafe} {
+    if (xhci_output_claimed == false) {
+        xhci_output_claimed = true;
+        let RegionOf(CtxWord)::Taken(memory) = region_of(xhci_device_ctx) else {
+            RegionOf(CtxWord)::Gone => { return 0; }
+        };
+        return xhci_output_go(XhciOutput_init(memory));
+    }
+    let guard = xhci_ring_lock(&xhci_output_slot.mutex);
+    let taken = place_take(guard, &xhci_output_slot.mutex, xhci_output_slot.value);
+    xhci_ring_unlock(guard, &xhci_output_slot.mutex);
+    match taken {
+        Place::Empty => { return 0; }
+        Place::Full(live) => {
+            match XhciOutput_xhci_out_reset(live) {
+                XhciOutput_xhci_out_reset_Outcome::OutQuiet(q) => {
+                    return xhci_output_go(XhciOutput_xhci_out_reclaim(live, q));
+                }
+                XhciOutput_xhci_out_reset_Outcome::OutLive => {
+                    // Still the controller's: the same context serves the
+                    // same slot again.
+                    let mut span: DmaDeviceSpan = XhciOutput_Live_span(live);
+                    let dma: usize = xhci_span_bus_address(span);
+                    xhci_output_park(live);
+                    return dma;
+                }
+            }
+        }
+    }
+}
+
+// One word of the output device context, read fresh; 0 when there is none.
+fn xhci_output_word(i: usize) -> u32 {
+    let guard = xhci_ring_lock(&xhci_output_slot.mutex);
+    let taken = place_take(guard, &xhci_output_slot.mutex, xhci_output_slot.value);
+    xhci_ring_unlock(guard, &xhci_output_slot.mutex);
+    match taken {
+        Place::Empty => { return 0; }
+        Place::Full(live) => {
+            let mut word: u32 = 0;
+            if (i < 512) {
+                match XhciOutput_xhci_out_read(live, i) {
+                    XhciOutput_xhci_out_read_Outcome::OutWord(snap) => {
+                        let mut copy: CtxWord = XhciOutput_OutWord_value(snap);
+                        word = copy.v;
+                        XhciOutput_OutWord_release(live, snap);
+                    }
+                }
+            }
+            xhci_output_park(live);
+            return word;
+        }
+    }
+}

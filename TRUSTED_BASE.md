@@ -226,11 +226,16 @@ rules globally.
   when the first Command Completion Event after its publication arrives:
   trusted, that this event belongs to the command that read it, which holds
   because each caller publishes the input context immediately before issuing
-  that one command. Still outside these owners, and so still raw code in
-  `usb_xhci.tkb`: the DCBAA (its slot entry is written while the controller
-  holds the table, which needs sub-region authority), the output device
-  context and the event ring (both rewritten by the controller for the
-  whole session; they wait on a snapshot observation).
+  that one command. The event ring and the output device context, which the controller
+  rewrites for the whole session, are rx owners read through snapshot
+  observations: trusted, the event TRB's Cycle bit as the mark of a whole
+  entry, and that the output context's slot and EP0 words are written when
+  Address Device completes. Still outside the owners: the DCBAA (its slot
+  entry is written while the controller holds the table, which needs
+  sub-region authority); it is an ordinary checked array whose bus address
+  is taken by a pointer cast. With that, `usb_xhci.tkb` holds no raw site
+  and is off `kernel/RAW_MINT_FILES`; the one raw step left, the bus-address
+  export of a device span, is `kernel/platform/rpi5/usb_xhci_bus.tkb`.
   A snapshot observation (decision E1) trusts its lowering's validity test:
   that an element whose ownership marker says "written" (for an xHCI event
   ring, a Cycle bit equal to the consumer cycle state) was completely

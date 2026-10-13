@@ -1,0 +1,11 @@
+// The one place an xHCI DMA address leaves its span (GitHub issues #623,
+// #720). A device span -- from a dma_fixed allocation or a device protocol
+// owner -- carries an address the type system proved inside its
+// allocation; exporting it as a bus address is the trusted step, and RP1's
+// inbound window offset (rp1_dma_pci_offset) is applied here, once. This
+// file is a raw mint file (kernel/RAW_MINT_FILES) for exactly this
+// function, so that usb_xhci.tkb itself holds no raw site.
+
+fn xhci_span_bus_address(span: borrow DmaDeviceSpan) -> usize !{unsafe} {
+    return unsafe { dma_span_address(span) } + rp1_dma_pci_offset;
+}

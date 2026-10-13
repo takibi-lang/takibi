@@ -463,7 +463,8 @@ KERNEL_UNUSED_CHECKED_RPI5 := \
 	kernel/platform/rpi5/usb_provision.tkb \
 	kernel/platform/rpi5/usb_xhci_dtb.tkb \
 	kernel/platform/rpi5/usb_xhci_dma.tkb \
-	kernel/platform/rpi5/usb_xhci_rings.tkb
+	kernel/platform/rpi5/usb_xhci_rings.tkb \
+	kernel/platform/rpi5/usb_xhci_bus.tkb
 KERNEL_UNUSED_CHECK      := --reject-unused-functions \
 	$(foreach entry,$(KERNEL_ASM_ENTRIES) $(KERNEL_DEBUGGER_ENTRIES),--external-entry $(entry)) \
 	$(foreach file,$(KERNEL_UNUSED_CHECKED),--check-unused-file $(file))
