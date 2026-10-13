@@ -714,7 +714,9 @@ $(LINUX_USER_DIR)/region_proto/region_proto_exe.o: LINUX_USER_EXTRA_FLAGS := --r
 $(LINUX_USER_DIR)/place_array/place_array_exe.o: LINUX_USER_EXTRA_FLAGS := --regions
 $(LINUX_USER_DIR)/region_inspection/region_inspection_exe.o: LINUX_USER_EXTRA_FLAGS := --regions
 $(LINUX_USER_DIR)/region_held/region_held_exe.o: LINUX_USER_EXTRA_FLAGS := --regions
-$(LINUX_USER_DIR)/protocol_ring/protocol_ring_exe.o: LINUX_USER_EXTRA_FLAGS := --regions
+# --confine-raw-authority: a u8 protocol's generated element access is the
+# compiler's, not a raw site of the declaring program (#720 slice 3a).
+$(LINUX_USER_DIR)/protocol_ring/protocol_ring_exe.o: LINUX_USER_EXTRA_FLAGS := --regions --confine-raw-authority $(foreach f,$(COMMON_LINUX_UART) $(COMMON_LINUX_PRINT) $(COMMON_LINUX_PRINT_BASE),--raw-mint-file $(f))
 # A device protocol is accepted only in a device-semantics file (#720).
 $(LINUX_USER_DIR)/protocol_tx/protocol_tx_exe.o: LINUX_USER_EXTRA_FLAGS := --regions --device-semantics-file $(LINUX_USER_DIR)/protocol_tx/protocol_tx.tkb
 _build/pool_space_replay_regions.tkb: scripts/generate_pool_space_replay.py kernel/benchmarks/pool_space/workload.tsv $(LINUX_USER_DIR)/pool_space_replay/region_replay.tkb.in

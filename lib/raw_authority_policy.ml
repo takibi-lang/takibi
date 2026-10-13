@@ -108,6 +108,10 @@ let check ?(source_program = []) ~mint_files () =
   (* Compiler-generated region operations belong to the compiler's explicit
      trusted boundary; their virtual source is not an application mint. *)
   let declared file = file = Ast.builtin_region_file ||
+      (* GitHub issue #720: a protocol's generated file holds only the
+         compiler's element access through region_at, which for a u8
+         element is a derived *u8 store; no source can write into it. *)
+      String.starts_with ~prefix:"<protocol " file ||
       Paths.mem (normalize file) allowed in
   let raw = Type_inf.raw_deref_sites () |> List.filter_map (fun site ->
     if declared site.Type_inf.raw_file then None else

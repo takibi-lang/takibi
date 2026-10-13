@@ -26,3 +26,4 @@ kernel/printk/log.tkb	46	0	the kernel log's ring and staging buffers (#637 B)
 <builtin region>	113	0	the compiler's built-in region definitions (#672): every dereference is a slot, chunk header or byte in memory the built-in hands out, and its trust is the compiler's, not the kernel's
 kernel/tests/qemu/dma/virtio_blk_fixture.tkb	1	4	test-only device-side descriptor status address and used-ring publication; never CPU-side buffer access or an authority mint
 kernel/mm/memory_map.tkb	2	0	the memory mint: page bytes and a probe of a fresh run's tails (#744)
+<protocol XhciScratchBuf>	2	0	generated u8 element access of a device protocol (#720): Ready_read/Ready_write through region_at, whose u8 element is a derived *u8; the compiler's trust, not the kernel's

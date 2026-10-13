@@ -220,7 +220,20 @@ rules globally.
   request (the driver is synchronous) and `xhci_halt_and_reset`'s confirmed
   halt and HCRST (`xhci_rings_quiesced`). The four rings share one protocol
   and live in four slots chosen by index, so a ring owner parked in another
-  ring's slot is the wrong-ring case above.
+  ring's slot is the wrong-ring case above. The same file holds the
+  scratchpad buffers and array and the ERST, published for a session and
+  returned only on that confirmed reset, and the input context, returned
+  when the first Command Completion Event after its publication arrives:
+  trusted, that this event belongs to the command that read it, which holds
+  because each caller publishes the input context immediately before issuing
+  that one command. Still outside these owners, and so still raw code in
+  `usb_xhci.tkb`: the DCBAA (its slot entry is written while the controller
+  holds the table, which needs sub-region authority), the output device
+  context and the event ring (both rewritten by the controller for the
+  whole session; they wait on a snapshot observation).
+  A protocol's generated element access is exempt from
+  `--confine-raw-authority` like the built-in region's: for a `u8` element
+  it is a derived `*u8` store, the compiler's trust.
 - Per-CPU storage (`struct per_cpu`, indexed only by the `cpu_authority`
   value) is checked by the compiler. Trusted: `kernel/kernel/cpu_authority.tkb`
   reports the CPU it runs on (`cpu_id()`), the kernel action stays on that CPU

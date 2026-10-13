@@ -54,6 +54,8 @@ private let mut xhci_doorbell_value: u32 = 0;
 private let mut xhci_await_type: u32 = 0;
 private let mut xhci_await_timeout: usize = 0;
 private let mut xhci_await_cc: u32 = 0;
+// Command Completion Events observed on the Command ring (xhci_input_used).
+private let mut xhci_cmd_completions: usize = 0;
 private let mut xhci_rings_claimed: bool = false;
 // Set by xhci_halt_and_reset when HCHalted and HCRST are confirmed, and
 // cleared when the controller runs again.
@@ -328,6 +330,9 @@ fn xhci_ring_run(i: usize, target: usize, value: u32,
                         XhciRing_xhci_ring_publish_Result::InFlight(flight) => {
                             match XhciRing_xhci_ring_event(flight) {
                                 XhciRing_xhci_ring_event_Outcome::Completed(done) => {
+                                    if (i == XHCI_RING_CMD) {
+                                        xhci_cmd_completions = xhci_cmd_completions + 1;
+                                    }
                                     let back = XhciRing_xhci_ring_complete(flight, done);
                                     xhci_ring_park(i, XhciRingHeld::Ready(back));
                                     return xhci_await_cc;
@@ -341,6 +346,470 @@ fn xhci_ring_run(i: usize, target: usize, value: u32,
                     }
                 }
             }
+        }
+    }
+}
+
+// -- Session tables and the input context (GitHub issue #720, slice 3a) --
+//
+// The scratchpad buffers and their array, and the Event Ring Segment
+// Table, are given to the controller for a whole session: each is written
+// while Ready, published once at start (generated clean, or prepare for
+// the device-written scratchpad buffers), and comes back only on the
+// confirmed halt and reset (xhci_rings_quiesced), like a producer ring
+// with no event. The input context is published before each Address
+// Device or Configure Endpoint command and comes back on that command's
+// completion: xhci_input_used trusts that the first Command Completion
+// Event after publication (xhci_cmd_completions advanced) belongs to the
+// command that read it, which holds because every caller publishes it
+// immediately before issuing that one command.
+//
+// Not here, and still legacy in usb_xhci.tkb: the DCBAA (its slot entry
+// is written while the controller holds the table, which a whole-region
+// owner cannot express), the output device context and the event ring
+// (both rewritten by the controller throughout a session).
+
+const XHCI_SCRATCH_ENTRIES: usize = 8;
+const XHCI_ERST_ENTRIES: usize = 4;
+const XHCI_SCRATCH_BYTES: usize = 4096;
+const XHCI_INPUT_WORDS: usize = 528;
+
+// A 64-bit bus pointer as the controller reads it (scratchpad array).
+struct XhciPtr { lo: u32; hi: u32; }
+// One Event Ring Segment Table entry.
+struct ErstEntry { base_lo: u32; base_hi: u32; size: u32; reserved: u32; }
+// One 32-bit word of the input context.
+struct CtxWord { v: u32; }
+
+protocol XhciErst[inst: usize] retains region(ErstEntry)[b, XHCI_ERST_ENTRIES] tx {
+    state Ready access write addressed;
+    state Live[req] device;
+    init Ready;
+    transition xhci_erst_publish(Ready) -> Live[fresh req];
+    observe xhci_erst_reset(Live[req]) -> ErstQuiet[req] quiesces | ErstLive;
+    transition xhci_erst_reclaim(Live[req], ErstQuiet[req]) -> Ready;
+    property disjoint;
+    model cells 2;
+}
+
+protocol XhciScratchArray[inst: usize] retains region(XhciPtr)[b, XHCI_SCRATCH_ENTRIES] tx {
+    state Ready access write addressed;
+    state Live[req] device;
+    init Ready;
+    transition xhci_scratch_array_publish(Ready) -> Live[fresh req];
+    observe xhci_scratch_array_reset(Live[req]) -> ArrayQuiet[req] quiesces | ArrayLive;
+    transition xhci_scratch_array_reclaim(Live[req], ArrayQuiet[req]) -> Ready;
+    property disjoint;
+    model cells 2;
+}
+
+protocol XhciScratchBuf[inst: usize] retains region(u8)[b, XHCI_SCRATCH_BYTES] rx {
+    state Ready access write addressed;
+    state Live[req] device;
+    init Ready;
+    transition xhci_scratch_buf_publish(Ready) -> Live[fresh req];
+    observe xhci_scratch_buf_reset(Live[req]) -> BufQuiet[req] quiesces | BufLive;
+    transition xhci_scratch_buf_reclaim(Live[req], BufQuiet[req]) -> Ready;
+    property disjoint;
+    model cells 2;
+}
+
+protocol XhciInput[inst: usize] retains region(CtxWord)[b, XHCI_INPUT_WORDS] tx {
+    state Ready access write addressed;
+    state Read[req] device;
+    init Ready;
+    transition xhci_input_publish(Ready) -> Read[fresh req];
+    observe xhci_input_used(Read[req]) -> InputDone[req] completes | InputPending;
+    transition xhci_input_done(Read[req], InputDone[req]) -> Ready;
+    observe xhci_input_reset(Read[req]) -> InputQuiet[req] quiesces | InputLive;
+    transition xhci_input_reclaim(Read[req], InputQuiet[req]) -> Ready;
+    property disjoint;
+    model cells 2;
+}
+
+private region let mut xhci_erst: [ErstEntry; 4] align(64);
+private region let mut xhci_scratchpad_array: [XhciPtr; 8] align(64);
+private region let mut xhci_scratchpad_buf0: [u8; 4096] align(4096);
+private region let mut xhci_scratchpad_buf1: [u8; 4096] align(4096);
+private region let mut xhci_input_ctx: [CtxWord; 528] align(64);
+
+private let mut xhci_input_published_at: usize = 0;
+
+// Lowerings. Publishing a session table rings nothing: the register
+// writes that follow point the controller at it, before Run.
+fn xhci_erst_publish(s: borrow XhciErst_Live[b, o, 4, r]) {}
+fn xhci_erst_reset(s: borrow XhciErst_Live[b, o, 4, r]) -> XhciErst_xhci_erst_reset_Raw {
+    if (xhci_rings_quiesced) { return XhciErst_xhci_erst_reset_Raw::ErstQuiet; }
+    return XhciErst_xhci_erst_reset_Raw::ErstLive;
+}
+fn xhci_erst_reclaim(s: borrow XhciErst_Live[b, o, 4, r]) {}
+fn xhci_scratch_array_publish(s: borrow XhciScratchArray_Live[b, o, 8, r]) {}
+fn xhci_scratch_array_reset(s: borrow XhciScratchArray_Live[b, o, 8, r])
+        -> XhciScratchArray_xhci_scratch_array_reset_Raw {
+    if (xhci_rings_quiesced) {
+        return XhciScratchArray_xhci_scratch_array_reset_Raw::ArrayQuiet;
+    }
+    return XhciScratchArray_xhci_scratch_array_reset_Raw::ArrayLive;
+}
+fn xhci_scratch_array_reclaim(s: borrow XhciScratchArray_Live[b, o, 8, r]) {}
+fn xhci_scratch_buf_publish(s: borrow XhciScratchBuf_Live[b, o, 4096, r]) {}
+fn xhci_scratch_buf_reset(s: borrow XhciScratchBuf_Live[b, o, 4096, r])
+        -> XhciScratchBuf_xhci_scratch_buf_reset_Raw {
+    if (xhci_rings_quiesced) { return XhciScratchBuf_xhci_scratch_buf_reset_Raw::BufQuiet; }
+    return XhciScratchBuf_xhci_scratch_buf_reset_Raw::BufLive;
+}
+fn xhci_scratch_buf_reclaim(s: borrow XhciScratchBuf_Live[b, o, 4096, r]) {}
+fn xhci_input_publish(s: borrow XhciInput_Read[b, o, 528, r]) {
+    xhci_input_published_at = xhci_cmd_completions;
+}
+fn xhci_input_used(s: borrow XhciInput_Read[b, o, 528, r]) -> XhciInput_xhci_input_used_Raw {
+    if (xhci_cmd_completions != xhci_input_published_at) {
+        return XhciInput_xhci_input_used_Raw::InputDone;
+    }
+    return XhciInput_xhci_input_used_Raw::InputPending;
+}
+fn xhci_input_done(s: borrow XhciInput_Read[b, o, 528, r]) {}
+fn xhci_input_reset(s: borrow XhciInput_Read[b, o, 528, r]) -> XhciInput_xhci_input_reset_Raw {
+    if (xhci_rings_quiesced) { return XhciInput_xhci_input_reset_Raw::InputQuiet; }
+    return XhciInput_xhci_input_reset_Raw::InputLive;
+}
+fn xhci_input_reclaim(s: borrow XhciInput_Read[b, o, 528, r]) {}
+
+// One slot per session table (only its Live owner is ever stored), and one
+// for the input context (Ready or Read).
+struct XhciErstSlot {
+    private mutex: Mutex;
+    private value: Place(exists b: addr. exists o: usize. exists r: usize. XhciErst_Live[b, o, 4, r]);
+}
+struct XhciScratchArraySlot {
+    private mutex: Mutex;
+    private value: Place(exists b: addr. exists o: usize. exists r: usize.
+                         XhciScratchArray_Live[b, o, 8, r]);
+}
+struct XhciScratchBufSlot {
+    private mutex: Mutex;
+    private value: Place(exists b: addr. exists o: usize. exists r: usize.
+                         XhciScratchBuf_Live[b, o, 4096, r]);
+}
+variant XhciInputHeld {
+    Ready(exists b: addr. exists o: usize. XhciInput_Ready[b, o, 528]);
+    Read(exists b: addr. exists o: usize. exists r: usize. XhciInput_Read[b, o, 528, r]);
+}
+struct XhciInputSlot {
+    private mutex: Mutex;
+    private value: Place(XhciInputHeld);
+}
+private let mut xhci_erst_slot: XhciErstSlot;
+private let mut xhci_scratch_array_slot: XhciScratchArraySlot;
+private let mut xhci_scratch_buf_slots: [XhciScratchBufSlot; 2];
+private let mut xhci_input_slot: XhciInputSlot;
+private let mut xhci_tables_claimed: bool = false;
+
+private fn xhci_input_lost(x: sink XhciInputHeld) { kernel_invariant_stop(); }
+// A displaced session-table owner: an invariant breach, as for a ring.
+variant XhciLostTable {
+    Erst(exists b: addr. exists o: usize. exists r: usize. XhciErst_Live[b, o, 4, r]);
+    Array(exists b: addr. exists o: usize. exists r: usize. XhciScratchArray_Live[b, o, 8, r]);
+    Buf(exists b: addr. exists o: usize. exists r: usize. XhciScratchBuf_Live[b, o, 4096, r]);
+}
+private fn xhci_table_lost(x: sink XhciLostTable) { kernel_invariant_stop(); }
+
+private fn xhci_erst_park(live: XhciErst_Live[b, o, 4, r]) {
+    let guard = xhci_ring_lock(&xhci_erst_slot.mutex);
+    let previous = place_put(guard, &xhci_erst_slot.mutex, xhci_erst_slot.value, live);
+    xhci_ring_unlock(guard, &xhci_erst_slot.mutex);
+    match previous {
+        Place::Empty => {}
+        Place::Full(other) => { xhci_table_lost(XhciLostTable::Erst(other)); }
+    }
+}
+private fn xhci_scratch_array_park(live: XhciScratchArray_Live[b, o, 8, r]) {
+    let guard = xhci_ring_lock(&xhci_scratch_array_slot.mutex);
+    let previous = place_put(guard, &xhci_scratch_array_slot.mutex,
+                             xhci_scratch_array_slot.value, live);
+    xhci_ring_unlock(guard, &xhci_scratch_array_slot.mutex);
+    match previous {
+        Place::Empty => {}
+        Place::Full(other) => { xhci_table_lost(XhciLostTable::Array(other)); }
+    }
+}
+private fn xhci_scratch_buf_park(i: usize, live: XhciScratchBuf_Live[b, o, 4096, r]) {
+    if (i >= 2) {
+        xhci_table_lost(XhciLostTable::Buf(live));
+        return;
+    }
+    let guard = xhci_ring_lock(&xhci_scratch_buf_slots[i].mutex);
+    let previous = place_put(guard, &xhci_scratch_buf_slots[i].mutex,
+                             xhci_scratch_buf_slots[i].value, live);
+    xhci_ring_unlock(guard, &xhci_scratch_buf_slots[i].mutex);
+    match previous {
+        Place::Empty => {}
+        Place::Full(other) => { xhci_table_lost(XhciLostTable::Buf(other)); }
+    }
+}
+private fn xhci_input_park(held: XhciInputHeld) {
+    let guard = xhci_ring_lock(&xhci_input_slot.mutex);
+    let previous = place_put(guard, &xhci_input_slot.mutex, xhci_input_slot.value, held);
+    xhci_ring_unlock(guard, &xhci_input_slot.mutex);
+    match previous {
+        Place::Empty => {}
+        Place::Full(other) => { xhci_input_lost(other); }
+    }
+}
+
+// Publish a Ready table and keep its Live owner; answers its bus address.
+private fn xhci_erst_go(r: XhciErst_Ready[b, o, 4]) -> usize !{unsafe} {
+    match XhciErst_xhci_erst_publish(r) {
+        XhciErst_xhci_erst_publish_Result::Live(live) => {
+            let mut span: DmaDeviceSpan = XhciErst_Live_span(live);
+            let dma: usize = xhci_span_bus_address(span);
+            xhci_erst_park(live);
+            return dma;
+        }
+    }
+}
+private fn xhci_scratch_array_go(r: XhciScratchArray_Ready[b, o, 8]) -> usize !{unsafe} {
+    match XhciScratchArray_xhci_scratch_array_publish(r) {
+        XhciScratchArray_xhci_scratch_array_publish_Result::Live(live) => {
+            let mut span: DmaDeviceSpan = XhciScratchArray_Live_span(live);
+            let dma: usize = xhci_span_bus_address(span);
+            xhci_scratch_array_park(live);
+            return dma;
+        }
+    }
+}
+private fn xhci_scratch_buf_go(i: usize, r: XhciScratchBuf_Ready[b, o, 4096]) -> usize !{unsafe} {
+    match XhciScratchBuf_xhci_scratch_buf_publish(r) {
+        XhciScratchBuf_xhci_scratch_buf_publish_Result::Live(live) => {
+            let mut span: DmaDeviceSpan = XhciScratchBuf_Live_span(live);
+            let dma: usize = xhci_span_bus_address(span);
+            xhci_scratch_buf_park(i, live);
+            return dma;
+        }
+    }
+}
+
+private fn xhci_erst_fill(r: XhciErst_Ready[b, o, 4], evt_ring_dma: usize) -> usize !{unsafe} {
+    let mut entry: ErstEntry = {
+        (evt_ring_dma & 0xFFFFFFFF) as u32, ((evt_ring_dma >> 32) & 0xFFFFFFFF) as u32,
+        16, 0
+    };
+    XhciErst_Ready_write(r, 0, entry);
+    return xhci_erst_go(r);
+}
+private fn xhci_scratch_array_fill(r: XhciScratchArray_Ready[b, o, 8], buf0: usize,
+                                   buf1: usize) -> usize !{unsafe} {
+    let mut first: XhciPtr = { (buf0 & 0xFFFFFFFF) as u32, ((buf0 >> 32) & 0xFFFFFFFF) as u32 };
+    let mut second: XhciPtr = { (buf1 & 0xFFFFFFFF) as u32, ((buf1 >> 32) & 0xFFFFFFFF) as u32 };
+    XhciScratchArray_Ready_write(r, 0, first);
+    XhciScratchArray_Ready_write(r, 1, second);
+    return xhci_scratch_array_go(r);
+}
+
+// A Live table back to Ready on a confirmed reset, then filled and
+// republished. Answers 0 when the controller may still use it.
+private fn xhci_erst_restart(evt_ring_dma: usize) -> usize !{unsafe} {
+    let guard = xhci_ring_lock(&xhci_erst_slot.mutex);
+    let taken = place_take(guard, &xhci_erst_slot.mutex, xhci_erst_slot.value);
+    xhci_ring_unlock(guard, &xhci_erst_slot.mutex);
+    match taken {
+        Place::Empty => { return 0; }
+        Place::Full(live) => {
+            match XhciErst_xhci_erst_reset(live) {
+                XhciErst_xhci_erst_reset_Outcome::ErstQuiet(q) => {
+                    let ready = XhciErst_xhci_erst_reclaim(live, q);
+                    return xhci_erst_fill(ready, evt_ring_dma);
+                }
+                XhciErst_xhci_erst_reset_Outcome::ErstLive => {
+                    xhci_erst_park(live);
+                    return 0;
+                }
+            }
+        }
+    }
+}
+private fn xhci_scratch_array_restart(buf0: usize, buf1: usize) -> usize !{unsafe} {
+    let guard = xhci_ring_lock(&xhci_scratch_array_slot.mutex);
+    let taken = place_take(guard, &xhci_scratch_array_slot.mutex,
+                           xhci_scratch_array_slot.value);
+    xhci_ring_unlock(guard, &xhci_scratch_array_slot.mutex);
+    match taken {
+        Place::Empty => { return 0; }
+        Place::Full(live) => {
+            match XhciScratchArray_xhci_scratch_array_reset(live) {
+                XhciScratchArray_xhci_scratch_array_reset_Outcome::ArrayQuiet(q) => {
+                    let ready = XhciScratchArray_xhci_scratch_array_reclaim(live, q);
+                    return xhci_scratch_array_fill(ready, buf0, buf1);
+                }
+                XhciScratchArray_xhci_scratch_array_reset_Outcome::ArrayLive => {
+                    xhci_scratch_array_park(live);
+                    return 0;
+                }
+            }
+        }
+    }
+}
+private fn xhci_scratch_buf_restart(i: usize) -> usize !{unsafe} {
+    if (i >= 2) { return 0; }
+    let guard = xhci_ring_lock(&xhci_scratch_buf_slots[i].mutex);
+    let taken = place_take(guard, &xhci_scratch_buf_slots[i].mutex,
+                           xhci_scratch_buf_slots[i].value);
+    xhci_ring_unlock(guard, &xhci_scratch_buf_slots[i].mutex);
+    match taken {
+        Place::Empty => { return 0; }
+        Place::Full(live) => {
+            match XhciScratchBuf_xhci_scratch_buf_reset(live) {
+                XhciScratchBuf_xhci_scratch_buf_reset_Outcome::BufQuiet(q) => {
+                    let ready = XhciScratchBuf_xhci_scratch_buf_reclaim(live, q);
+                    return xhci_scratch_buf_go(i, ready);
+                }
+                XhciScratchBuf_xhci_scratch_buf_reset_Outcome::BufLive => {
+                    xhci_scratch_buf_park(i, live);
+                    return 0;
+                }
+            }
+        }
+    }
+}
+
+// The input context back to Ready: on its command's completion, or on the
+// confirmed reset. False while the controller may still read it.
+private fn xhci_input_recover() -> bool {
+    let guard = xhci_ring_lock(&xhci_input_slot.mutex);
+    let taken = place_take(guard, &xhci_input_slot.mutex, xhci_input_slot.value);
+    xhci_ring_unlock(guard, &xhci_input_slot.mutex);
+    match taken {
+        Place::Empty => { return false; }
+        Place::Full(held) => {
+            match held {
+                XhciInputHeld::Ready(ready) => {
+                    xhci_input_park(XhciInputHeld::Ready(ready));
+                    return true;
+                }
+                XhciInputHeld::Read(read) => {
+                    match XhciInput_xhci_input_used(read) {
+                        XhciInput_xhci_input_used_Outcome::InputDone(done) => {
+                            let ready = XhciInput_xhci_input_done(read, done);
+                            xhci_input_park(XhciInputHeld::Ready(ready));
+                            return true;
+                        }
+                        XhciInput_xhci_input_used_Outcome::InputPending => {
+                            match XhciInput_xhci_input_reset(read) {
+                                XhciInput_xhci_input_reset_Outcome::InputQuiet(q) => {
+                                    let ready = XhciInput_xhci_input_reclaim(read, q);
+                                    xhci_input_park(XhciInputHeld::Ready(ready));
+                                    return true;
+                                }
+                                XhciInput_xhci_input_reset_Outcome::InputLive => {
+                                    xhci_input_park(XhciInputHeld::Read(read));
+                                    return false;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct XhciTableAddresses {
+    ok: bool;
+    scratch_array: usize;
+    erst: usize;
+}
+
+private fn xhci_tables_fail() -> XhciTableAddresses {
+    let mut failed: XhciTableAddresses = { false, 0, 0 };
+    return failed;
+}
+
+// The session tables for a new controller session: claimed at the first
+// one, otherwise reclaimed on the confirmed reset; written and published.
+fn xhci_tables_start(evt_ring_dma: usize) -> XhciTableAddresses !{unsafe} {
+    if (xhci_tables_claimed == false) {
+        xhci_tables_claimed = true;
+        let RegionOf(u8)::Taken(b0) = region_of(xhci_scratchpad_buf0) else {
+            RegionOf(u8)::Gone => { return xhci_tables_fail(); }
+        };
+        let buf0: usize = xhci_scratch_buf_go(0, XhciScratchBuf_init(b0));
+        let RegionOf(u8)::Taken(b1) = region_of(xhci_scratchpad_buf1) else {
+            RegionOf(u8)::Gone => { return xhci_tables_fail(); }
+        };
+        let buf1: usize = xhci_scratch_buf_go(1, XhciScratchBuf_init(b1));
+        let RegionOf(XhciPtr)::Taken(arr) = region_of(xhci_scratchpad_array) else {
+            RegionOf(XhciPtr)::Gone => { return xhci_tables_fail(); }
+        };
+        let array: usize = xhci_scratch_array_fill(XhciScratchArray_init(arr), buf0, buf1);
+        let RegionOf(ErstEntry)::Taken(er) = region_of(xhci_erst) else {
+            RegionOf(ErstEntry)::Gone => { return xhci_tables_fail(); }
+        };
+        let erst: usize = xhci_erst_fill(XhciErst_init(er), evt_ring_dma);
+        let RegionOf(CtxWord)::Taken(inp) = region_of(xhci_input_ctx) else {
+            RegionOf(CtxWord)::Gone => { return xhci_tables_fail(); }
+        };
+        xhci_input_park(XhciInputHeld::Ready(XhciInput_init(inp)));
+        let mut started: XhciTableAddresses = { true, array, erst };
+        return started;
+    }
+    let buf0: usize = xhci_scratch_buf_restart(0);
+    let buf1: usize = xhci_scratch_buf_restart(1);
+    let array: usize = xhci_scratch_array_restart(buf0, buf1);
+    let erst: usize = xhci_erst_restart(evt_ring_dma);
+    let input_ok: bool = xhci_input_recover();
+    if (buf0 == 0 || buf1 == 0 || array == 0 || erst == 0 || input_ok == false) {
+        return xhci_tables_fail();
+    }
+    let mut restarted: XhciTableAddresses = { true, array, erst };
+    return restarted;
+}
+
+variant XhciInputTake {
+    Ready(exists b: addr. exists o: usize. XhciInput_Ready[b, o, 528]);
+    Unavailable;
+}
+
+// The input context's Ready owner for the next command.
+fn xhci_input_take() -> XhciInputTake {
+    if (xhci_input_recover() == false) { return XhciInputTake::Unavailable; }
+    let guard = xhci_ring_lock(&xhci_input_slot.mutex);
+    let taken = place_take(guard, &xhci_input_slot.mutex, xhci_input_slot.value);
+    xhci_ring_unlock(guard, &xhci_input_slot.mutex);
+    match taken {
+        Place::Empty => { return XhciInputTake::Unavailable; }
+        Place::Full(held) => {
+            match held {
+                XhciInputHeld::Ready(ready) => { return XhciInputTake::Ready(ready); }
+                XhciInputHeld::Read(read) => {
+                    xhci_input_park(XhciInputHeld::Read(read));
+                    return XhciInputTake::Unavailable;
+                }
+            }
+        }
+    }
+}
+
+fn xhci_input_set(r: borrow XhciInput_Ready[b, o, 528], i: usize @ k, value: u32)
+        where k < 528 {
+    let mut word: CtxWord = { value };
+    XhciInput_Ready_write(r, i, word);
+}
+
+fn xhci_input_get(r: borrow XhciInput_Ready[b, o, 528], i: usize @ k) -> u32
+        where k < 528 {
+    let mut word: CtxWord = XhciInput_Ready_read(r, i);
+    return word.v;
+}
+
+// Publish the input context for the command about to be issued and keep
+// it in its slot; answers its bus address.
+fn xhci_input_submit(r: XhciInput_Ready[b, o, 528]) -> usize !{unsafe} {
+    match XhciInput_xhci_input_publish(r) {
+        XhciInput_xhci_input_publish_Result::Read(read) => {
+            let mut span: DmaDeviceSpan = XhciInput_Read_span(read);
+            let dma: usize = xhci_span_bus_address(span);
+            xhci_input_park(XhciInputHeld::Read(read));
+            return dma;
         }
     }
 }

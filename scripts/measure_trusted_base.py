@@ -148,7 +148,9 @@ def check_raw_deref_main(args: list[str]) -> int:
         audit, budget, compiled,
         # The compiler's built-in definitions (#672) are not a file on disk;
         # their row names them by the file name the compiler gives them.
-        lambda name: name.startswith("<builtin ") or (REPO_ROOT / name).exists())
+        # So are a protocol's generated owners (#720).
+        lambda name: name.startswith("<builtin ") or name.startswith("<protocol ")
+        or (REPO_ROOT / name).exists())
     for problem in problems:
         print(f"ERROR raw-deref-ratchet: {problem}")
     if problems:
