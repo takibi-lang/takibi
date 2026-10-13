@@ -18,6 +18,8 @@ Subcommands:
   capture  boot a tree's interactive shell kernel (QEMU or RPi5), start a
            session, run a workload (HTTP fetches from the host and/or a shell
            command), stop, break into DDB, dump, continue; save the console.
+  check    assert what a capture must show: every interrupt accounted,
+           named cores sampled, optionally a function among the top frames.
   fold     parse a saved console, symbolize against the kernel ELF, and
            write folded stacks ("frame;frame;leaf weight" per line, the
            input of flamegraph.pl / speedscope), plus a summary: total and
@@ -31,7 +33,11 @@ Usage:
   profile_kernel_session.py fold --elf kernel/build/rpi5/kernel-shell.elf
       --console DIR/console.log [--out DIR/kernel.folded] [--top 15]
 
-EL0 samples fold as "[el0 pid=P]" with their PC; the user binary is not
+A late sample (skid past one period) folds as its stack with weight 1 plus
+the same stack under a "[masked]" leaf with the rest: the leaf of a late
+sample is where IRQs came back on, so masked time shows up at the end of
+the region that masked them (its unlock), not inside the function that ran
+there. EL0 samples fold as "[el0 pid=P]" with their PC; the user binary is not
 symbolized here. An EL1 sample's frames are symbolized to the function
 containing each address (a return address is looked up at address - 4).
 """
@@ -57,6 +63,9 @@ SAMPLE_RE = re.compile(
     r"skid=(\d+) stop=(\d+) pcs=([0-9a-f,]+)")
 BEGIN_RE = re.compile(r"profile-session: begin period=(\d+) depth=(\d+)")
 END_RE = re.compile(r"profile-session: end samples=(\d+) lost=(\d+)")
+CORE_RE = re.compile(
+    r"profile-session: core cpu=(\d+) stored=(\d+) lost=(\d+) capacity=(\d+) "
+    r"interrupts=(\d+) unbuffered=(\d+) arms=(\d+)")
 STOP_NAMES = {0: "complete", 1: "depth", 2: "range", 3: "user", 4: "return"}
 
 
@@ -138,7 +147,13 @@ def fold(samples, period: int, symbols) -> tuple[dict, dict]:
         stop = STOP_NAMES.get(sample["stop"], str(sample["stop"]))
         summary["stops"][stop] = summary["stops"].get(stop, 0) + 1
         key = ";".join(frames)
-        stacks[key] = stacks.get(key, 0) + weight
+        # A late sample's extra weight is time IRQs were masked; it hangs
+        # under a [masked] leaf at the unmask point, so a flame graph shows
+        # how much of a function's width is masked time.
+        stacks[key] = stacks.get(key, 0) + 1
+        if weight > 1:
+            masked_key = key + ";[masked]"
+            stacks[masked_key] = stacks.get(masked_key, 0) + weight - 1
         for name in set(frames):
             summary["inclusive"][name] = summary["inclusive"].get(name, 0) + weight
         summary["self"][frames[-1]] = summary["self"].get(frames[-1], 0) + weight
@@ -175,6 +190,64 @@ def cmd_fold(args) -> int:
     for name, value in summary["top_self"]:
         print(f"  {100 * value / total:5.1f}%  {value:6d}  {name}")
     print(f"[profile] folded stacks: {out}")
+    return 0
+
+
+def core_records(text: str) -> dict:
+    """Per-core accounting lines of the last dump, by cpu."""
+    start = text.rfind("profile-session: begin")
+    cores = {}
+    for match in CORE_RE.finditer(text[start:]):
+        cpu, stored, lost, capacity, interrupts, unbuffered, arms = map(int, match.groups())
+        cores[cpu] = {"stored": stored, "lost": lost, "capacity": capacity,
+                      "interrupts": interrupts, "unbuffered": unbuffered,
+                      "arms": arms}
+    return cores
+
+
+def check_console(text: str, require_cores, expect_function, symbols) -> list[str]:
+    """What a capture must show; returns the problems, empty when it passes.
+
+    - every core is accounted: each interrupt it took was stored, lost or
+      unbuffered (an interrupt the sampler never saw would not be counted
+      at all, which is what a misrouted line looked like);
+    - each required core armed and stored samples (#497: a secondary whose
+      dispatch skipped the sampler stored none while its line stormed);
+    - optionally, a function is among the top inclusive EL1 frames.
+    """
+    problems = []
+    period, samples, _end = parse_console(text)
+    cores = core_records(text)
+    if not cores:
+        problems.append("no per-core accounting lines")
+    for cpu, core in sorted(cores.items()):
+        if core["interrupts"] != core["stored"] + core["lost"] + core["unbuffered"]:
+            problems.append(f"cpu{cpu}: interrupts {core['interrupts']} != stored+lost+unbuffered")
+    for cpu in require_cores:
+        core = cores.get(cpu)
+        if core is None or core["arms"] == 0 or core["stored"] == 0:
+            problems.append(f"cpu{cpu}: armed and stored nothing ({core})")
+    if expect_function:
+        _stacks, summary = fold(samples, period, symbols)
+        top = sorted(summary["inclusive"].items(), key=lambda kv: -kv[1])
+        names = [name for name, _ in top if not name.startswith("[")][:10]
+        if expect_function not in names:
+            problems.append(f"{expect_function} is not in the top EL1 frames {names}")
+    return problems
+
+
+def cmd_check(args) -> int:
+    text = Path(args.console).read_text(encoding="ascii", errors="replace").replace("\r", "")
+    symbols = Symbols(args.elf, args.nm) if args.elf else None
+    cores = [int(cpu) for cpu in args.require_cores.split(",") if cpu]
+    problems = check_console(text, cores, args.expect_function, symbols)
+    if problems:
+        for problem in problems:
+            print(f"FAIL profile-session: {problem}")
+        return 1
+    print(f"PASS profile-session: dump accounted for every interrupt; cores "
+          f"{cores or 'none'} sampled"
+          + (f"; {args.expect_function} is a top frame" if args.expect_function else ""))
     return 0
 
 
@@ -307,9 +380,17 @@ def main() -> int:
     fol.add_argument("--out")
     fol.add_argument("--nm", default="nm")
     fol.add_argument("--top", type=int, default=15)
+    chk = sub.add_parser("check")
+    chk.add_argument("--console", required=True)
+    chk.add_argument("--elf")
+    chk.add_argument("--nm", default="nm")
+    chk.add_argument("--require-cores", default="")
+    chk.add_argument("--expect-function", default="")
     args = parser.parse_args()
     if args.action == "capture":
         return capture(args)
+    if args.action == "check":
+        return cmd_check(args)
     return cmd_fold(args)
 
 

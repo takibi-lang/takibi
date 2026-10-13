@@ -68,7 +68,9 @@ def main():
     ok &= expect("late sample weight", tool.weight_of(samples[1], period) == 3)
     stacks, summary = tool.fold(samples, period, FakeSymbols())
     ok &= expect("EL1 stack root first, return address at -4",
-                 stacks.get("[el1];root_fn;middle_fn;leaf_fn") == 1 + 3)
+                 stacks.get("[el1];root_fn;middle_fn;leaf_fn") == 2)
+    ok &= expect("late weight under a [masked] leaf",
+                 stacks.get("[el1];root_fn;middle_fn;leaf_fn;[masked]") == 2)
     ok &= expect("EL0 kept apart", stacks.get("[el0 pid=9]") == 1)
     ok &= expect("masked weight", summary["masked_weight"] == 2)
     ok &= expect("weights add up",
@@ -81,7 +83,8 @@ def main():
     report_pass(
         "profile-session controls",
         "a dump parses in time order, a truncated or miscounted dump is "
-        "refused, a late sample weighs 1 + skid // period, EL1 stacks fold "
+        "refused, a late sample weighs 1 + skid // period with the excess "
+        "under a [masked] leaf, EL1 stacks fold "
         "root-first with return addresses at -4, EL0 stays apart, and the "
         "masked weight is what the skids say",
         cases=CASES.ran)

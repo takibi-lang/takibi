@@ -2001,6 +2001,16 @@ kernelcheck-race-window-678-qemu: kernelbuild-check
 _kernelcheck-race-window-678-qemu:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_RACE_WINDOW=678 KERNEL_QEMU_RACE_WINDOW_REQUIRE_FAILURE=1 KERNEL_QEMU_RACE_WINDOW_SIGNATURE='^freelist contention stage: incomplete$$' KERNEL_QEMU_SERIAL_PORT=18509 KERNEL_QEMU_QMP_PORT=18510 KERNEL_QEMU_NETDEV_LOCAL_PORT=18511 KERNEL_QEMU_NETDEV_REMOTE_PORT=18512 bash scripts/run_kernel_race_window_qemutest.sh
 
+## kernelcheck-profile-qemu: a sampling profile session end to end (#497):
+## /proc/takibi/profile start/stop, DDB profile dump, every PMU interrupt
+## accounted, a core-1 workload sampled on core 1.
+.PHONY: kernelcheck-profile-qemu _kernelcheck-profile-qemu
+kernelcheck-profile-qemu: kernelbuild-check
+	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-profile-qemu
+
+_kernelcheck-profile-qemu:
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_profile_qemutest.sh
+
 .PHONY: kernelcheck-probe-ticks-qemu _kernelcheck-probe-ticks-qemu
 kernelcheck-probe-ticks-qemu: kernelbuild-check
 	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-probe-ticks-qemu
@@ -2171,7 +2181,8 @@ KERNELCHECK_QEMU_LANES := kernelcheck-qemu kernelcheck-qemu-debug \
 	kernelcheck-affinity-gdb-qemu kernelcheck-race-window-609-qemu \
 	kernelcheck-race-window-603-qemu kernelcheck-race-window-633-qemu \
 	kernelcheck-race-window-635-qemu kernelcheck-race-window-705-qemu kernelcheck-race-window-678-qemu \
-	kernelcheck-debug-return-abi-qemu kernelcheck-probe-ticks-qemu kernelcheck-console-gdb-qemu kernelcheck-churn-gdb-qemu
+	kernelcheck-debug-return-abi-qemu kernelcheck-probe-ticks-qemu kernelcheck-console-gdb-qemu kernelcheck-churn-gdb-qemu \
+	kernelcheck-profile-qemu
 
 KERNELCHECK_LANES := $(KERNELCHECK_QEMU_LANES) kernelcheck-rpi5
 
