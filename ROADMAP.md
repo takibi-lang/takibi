@@ -159,9 +159,10 @@ flame-graph stacks). Accepted as option (a): a sample delayed by masked
 IRQs is attributed to the unmask point with its masked weight; seeing
 inside masked spans is #773 (Arm SPE) and an irqsoff-style tracer on #771.
 
-**Next, ahead of the list below (maintainer, 2026-10-13):** #758
-(`--emit-protocol-source`), then #720 option (a) slice 2, the four xHCI
-producer rings in usb_xhci.tkb on tx device protocols (kernelcheck-rpi5). Candidate: #771, page_alloc_contiguous's whole-table scan under an
+**Next, ahead of the list below (maintainer, 2026-10-13):** #720 option
+(a) slice 3: the xHCI event ring (rx, polling) and the remaining DCBAA,
+ERST, scratchpad and input/device context sites in usb_xhci.tkb, so that it
+can leave RAW_MINT_FILES. Candidate: #771, page_alloc_contiguous's whole-table scan under an
 IRQ-masking lock (about 3 ms on RPi5), its permanent call/time counters,
 the irqsoff-style tracer, and tcp_frame_pool's return-every-chunk shape.
 
@@ -198,8 +199,11 @@ the irqsoff-style tracer, and tcp_frame_pool's return-every-chunk shape.
      and a line-ownership check; a generated owner kept in a Place across
      functions works (linux_user/protocol_tx). Open: #778 (emitted model
      has no cache variables), #779 (line ownership of split or converted
-     regions), wrong-ring slot identity (#750). Then the event ring, then
-     GEM/virtio (#740).
+     regions), wrong-ring slot identity (#750). Done 2026-10-13 (slice 2,
+     decision B `access write addressed`): the four xHCI producer rings are
+     XhciRing owners in usb_xhci_rings.tkb (the device-semantics file),
+     usb_xhci.tkb raw dereferences 46 -> 2; kernelcheck-rpi5 green. Then
+     the event ring and contexts (slice 3), then GEM/virtio (#740).
      `requires` may collide with future function preconditions; revisit
      its spelling then. #759 (boot check of CTR_EL0
      DminLine/CWG against DMA_CACHE_LINE, an assumption of
