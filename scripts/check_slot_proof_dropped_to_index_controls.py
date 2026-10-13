@@ -77,6 +77,12 @@ private fn scheduled_process_scalar_snapshot(slot: usize) -> ProcessRecordScalar
     region_held_view_drop(slot_view);
     return snapshot;
 }
+private fn kernel_stack_run_depth(slot: usize, offset: usize, count: usize) -> usize {
+    let slot_view = probe(slot);
+    let depth = measure(payload(slot_view));
+    region_held_view_drop(slot_view);
+    return depth;
+}
 private inline fn scheduled_process_locked_view_drop(source: sink ProcessRecordLockedView[l, p]) {
     region_held_view_drop(source.live);
 }
