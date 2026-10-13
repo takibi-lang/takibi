@@ -214,6 +214,13 @@ rules globally.
   its own region). Holder-tied identities (GitHub issue #750) would let the
   slot name its region and reject that statically. The emitted TLA+ model of
   a device protocol has no cache variables.
+  The maintained consumer is the xHCI producer rings
+  (`kernel/platform/rpi5/usb_xhci_rings.tkb`): its trusted observations are
+  a nonzero completion code from `usb_await_event` for the one outstanding
+  request (the driver is synchronous) and `xhci_halt_and_reset`'s confirmed
+  halt and HCRST (`xhci_rings_quiesced`). The four rings share one protocol
+  and live in four slots chosen by index, so a ring owner parked in another
+  ring's slot is the wrong-ring case above.
 - Per-CPU storage (`struct per_cpu`, indexed only by the `cpu_authority`
   value) is checked by the compiler. Trusted: `kernel/kernel/cpu_authority.tkb`
   reports the CPU it runs on (`cpu_id()`), the kernel action stays on that CPU
