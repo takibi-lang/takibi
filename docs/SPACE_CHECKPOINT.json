@@ -2,8 +2,8 @@
   "date": "2026-10-13",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "e88a3f8518727ede7d2a539f91f15c0b98e31f42015f5067c124f256fa6cc552",
-  "workload": "#720 slice 3a (xHCI scratchpad, ERST, input context on device protocols) and the QEMU kernel no longer linking the xHCI driver. Linked kernels against main 186f0c85 (scripts/space_delta.py, llvm-size/llvm-nm per section and symbol).",
+  "source_sha256": "467ce03a87e7a23ada9cc9fa454b1b62c9b4fd06f5616b2815f9ad744f9f4cb8",
+  "workload": "#782: generated protocol functions nothing reaches are no longer emitted. Linked kernels against main 8e6c8022 (scripts/space_delta.py).",
   "evidence": [
     "docs/XHCI_TABLES_SPACE_2026-10-13.md",
     "docs/XHCI_RINGS_SPACE_2026-10-13.md",
@@ -62,6 +62,6 @@
     "docs/VIRTIO_NET_TX_2026-10-10.md",
     "docs/VIRTIO_NET_TX_SPACE_2026-10-10.json"
   ],
-  "assessment": "RPi5: text +8520 B (1.7 KB generated protocol code), about 300 B new state, ERST and scratchpad array rounded to 64 B, usable_ram_start unchanged. QEMU: the xHCI driver was linked only to resolve memory.tkb, so its growth matched RPi5; now replaced by usb_disk_absent.tkb, QEMU text -14464 B, BSS -147456 B against the base. Earlier measured results stand.",
+  "assessment": "RPi5 text -1496 B (unreferenced XhciRing and slice 3a table accessors gone); data, BSS and usable_ram_start unchanged; QEMU unchanged (no protocol code linked). Earlier measured results stand.",
   "next_trigger": "#720 E1 snapshot slice (event ring and output context), a shrink protocol for walked RegionPools, the #748 allocator change, or the next pool consumer moved onto Held slots, whichever lands first."
 }
