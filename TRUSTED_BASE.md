@@ -308,6 +308,14 @@ functions make one, and each trusts something the compiler cannot see:
 it just saved, `frame_ref_from_saved` believes a process record's `saved_sp`
 is the frame that process last left the CPU with, and `maybe_frame_from_entry`
 is the first for the syscall dispatcher, which boot probes call with no frame.
+`frame_interrupted_stack_word` (GitHub issue #497, the sampling profiler's
+frame-pointer walk) reads a word above an EL1 frame, on the kernel stack the
+frame interrupted, only inside [frame + EXC_CONTEXT_SIZE, top of the frame's
+2^(KERNEL_STACK_SHIFT+1) run); it trusts that the frame sits on such a run's
+upper half, which the generated entry's stack guard checks, and that the
+whole run is mapped RAM. The profile dump (`profile_session_dump`) walks every
+core's buffer from DDB with the other cores stopped; it takes each buffer's
+lock, so the trust is the world stop's, as for every DDB reporter.
 Private affine fields do not themselves prevent zero initialization. The
 stack-proof source gate rejects direct default `FrameRef` declarations in the
 kernel; it is a lexical build check, not a general compiler guarantee for

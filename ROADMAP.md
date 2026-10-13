@@ -146,9 +146,17 @@ retransmit pool returned its last empty chunk, so writes kept re-running
 page_alloc_contiguous; it now keeps one chunk (0.126 s against 0.192 s
 before #745).
 
-Candidate: #771, page_alloc_contiguous scans the page table and rebuilds
-the free list on every call (about 3 ms on RPi5), plus permanent call and
-time counters for it; tcp_frame_pool has the same return-every-chunk shape.
+Done 2026-10-13: #497, an on-demand sampling profiler (per-core PMU
+samples with frame-pointer chains and skid weighting; /proc/takibi/profile
+start/stop, DDB `profile dump`, scripts/profile_kernel_session.py folds
+flame-graph stacks). Accepted as option (a): a sample delayed by masked
+IRQs is attributed to the unmask point with its masked weight; seeing
+inside masked spans is #773 (Arm SPE) and an irqsoff-style tracer on #771.
+
+**Next, ahead of the list below (maintainer, 2026-10-13):** #720 option (a)
+design. Candidate: #771, page_alloc_contiguous's whole-table scan under an
+IRQ-masking lock (about 3 ms on RPi5), its permanent call/time counters,
+the irqsoff-style tracer, and tcp_frame_pool's return-every-chunk shape.
 
 1. **Fixed DMA lifecycle, finishing the drivers.** Every stage of one
    transfer in types, leaving one device-semantics declaration per driver
@@ -193,7 +201,8 @@ time counters for it; tcp_frame_pool has the same return-every-chunk shape.
    #732's later slices (static parameters on generic variants, implicit
    statics inside a type argument).
 3. **Time measurement, then the optimizations waiting on it** (maintainer,
-   2026-10-08: space and time are both kept): #497, then #502; then #520
+   2026-10-08: space and time are both kept): #502 (#497 done
+   2026-10-13); then #520
    (TCP throughput), with #741 (locate the measured RPi5 HTTP SYN
    retransmission tails), then #680, #681, #682 (region_pool lock-free
    validation,
