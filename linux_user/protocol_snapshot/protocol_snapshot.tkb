@@ -1,0 +1,103 @@
+// GitHub issue #720 decision E1: a snapshot observation of a device-owned
+// rx region, with both outcomes taken at run time. The owner stays the
+// same across not-ready polls and is reused: the consumer polls the same
+// index until the lowering says the copy is valid (the event ring's Cycle
+// bit), releases that entry, and moves on. A stand-in device: here an
+// entry "becomes written" after two empty polls, since nothing on x86 can
+// write the region while the CPU holds no authority over it. The reset
+// observation also answers Busy once before Quiet, and the owner is kept
+// across that answer too. Compiled with --device-semantics-file naming
+// this file.
+
+const EVENTS: usize = 4;
+
+struct Ev {
+    a: u32;
+    b: u32;
+    c: u32;
+    d: u32;
+}
+
+protocol Evt[inst: usize] retains region(Ev)[b, EVENTS] rx {
+    state Ready access write addressed;
+    state Live[req] device;
+    init Ready;
+    transition evt_publish(Ready) -> Live[fresh req];
+    observe evt_poll(Live[req]) -> Entry snapshot | Empty;
+    observe evt_reset(Live[req]) -> Quiet[req] quiesces | Busy;
+    transition evt_reclaim(Live[req], Quiet[req]) -> Ready;
+    property disjoint;
+    model cells 2;
+}
+
+private let mut polls: usize = 0;
+private let mut resets: usize = 0;
+private let mut released: usize = 0;
+
+fn evt_publish(s: borrow Evt_Live[b, o, 4, r]) { uart_puts("published\n"); }
+// The stand-in device has written an entry on every third poll.
+fn evt_poll(s: borrow Evt_Live[b, o, 4, r], value: Ev) -> Evt_evt_poll_Raw {
+    polls = polls + 1;
+    if (polls % 3 == 0) { return Evt_evt_poll_Raw::Entry; }
+    uart_puts("empty\n");
+    return Evt_evt_poll_Raw::Empty;
+}
+fn evt_poll_release(s: borrow Evt_Live[b, o, 4, r]) {
+    released = released + 1;
+    uart_puts("entry released\n");
+}
+fn evt_reset(s: borrow Evt_Live[b, o, 4, r]) -> Evt_evt_reset_Raw {
+    resets = resets + 1;
+    if (resets < 2) { uart_puts("busy\n"); return Evt_evt_reset_Raw::Busy; }
+    return Evt_evt_reset_Raw::Quiet;
+}
+fn evt_reclaim(s: borrow Evt_Live[b, o, 4, r]) { uart_puts("reclaimed\n"); }
+
+// Poll index i until an entry is there; the owner is only borrowed, so the
+// not-ready branch simply polls again with the same owner.
+fn take_entry(live: borrow Evt_Live[b, o, 4, r], i: usize @ k) -> u32 where k < 4 {
+    while (true) {
+        match Evt_evt_poll(live, i) {
+            Evt_evt_poll_Outcome::Entry(snap) => {
+                let mut copy: Ev = Evt_Entry_value(snap);
+                Evt_Entry_release(live, snap);
+                return copy.d;
+            }
+            Evt_evt_poll_Outcome::Empty => {}
+        }
+    }
+    return 0;
+}
+
+// Ask until the device is quiet; on Busy the same owner is asked again.
+fn drain(live: Evt_Live[b, o, 4, r]) -> Evt_Ready[b, o, 4] {
+    match Evt_evt_reset(live) {
+        Evt_evt_reset_Outcome::Quiet(q) => { return Evt_evt_reclaim(live, q); }
+        Evt_evt_reset_Outcome::Busy => { return drain(live); }
+    }
+}
+
+private region let mut ring: [Ev; 4] align(64);
+
+fn app_main() {
+    let RegionOf(Ev)::Taken(memory) = region_of(ring) else {
+        RegionOf(Ev)::Gone => { uart_puts("ring: already taken\n"); return; }
+    };
+    match Evt_evt_publish(Evt_init(memory)) {
+        Evt_evt_publish_Result::Live(live) => {
+            let first = take_entry(live, 0);
+            let second = take_entry(live, 1);
+            uart_puts("entries: ");
+            uart_print(released);
+            uart_puts(", polls: ");
+            uart_print(polls);
+            uart_puts("\n");
+            let ready = drain(live);
+            let back = Evt_release(ready);
+            uart_puts("ring: ");
+            uart_print(region_count(back));
+            uart_puts(" entries back\n");
+            region_release(back);
+        }
+    }
+}

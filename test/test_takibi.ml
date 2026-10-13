@@ -26002,11 +26002,12 @@ protocol Evt[inst: usize] retains region(Ev)[b, EVENTS] rx {
     init Ready;
     transition evt_publish(Ready) -> Live[fresh req];
     observe evt_poll(Live[req]) -> Entry snapshot | Empty;
-    observe evt_reset(Live[req]) -> Quiet[req] quiesces;
+    observe evt_reset(Live[req]) -> Quiet[req] quiesces | Busy;
     transition evt_reclaim(Live[req], Quiet[req]) -> Ready;
     property disjoint;
     model cells 2;
 }
+private let mut resets: usize = 0;
 fn evt_publish(s: borrow Evt_Live[b, o, 4, r]) {}
 fn evt_poll(s: borrow Evt_Live[b, o, 4, r], value: Ev) -> Evt_evt_poll_Raw {
     if ((value.d & 1) == 1) { return Evt_evt_poll_Raw::Entry; }
@@ -26014,12 +26015,35 @@ fn evt_poll(s: borrow Evt_Live[b, o, 4, r], value: Ev) -> Evt_evt_poll_Raw {
 }
 fn evt_poll_release(s: borrow Evt_Live[b, o, 4, r]) {}
 fn evt_reset(s: borrow Evt_Live[b, o, 4, r]) -> Evt_evt_reset_Raw {
+    resets = resets + 1;
+    if (resets < 2) { return Evt_evt_reset_Raw::Busy; }
     return Evt_evt_reset_Raw::Quiet;
 }
 fn evt_reclaim(s: borrow Evt_Live[b, o, 4, r]) {}
 |}
 
 let snapshot_consumer = {|private region let mut ring: [Ev; 4] align(64);
+// Not ready: the same borrowed owner polls again.
+fn take_entry(live: borrow Evt_Live[b, o, 4, r], i: usize @ k) -> u32 where k < 4 {
+    while (true) {
+        match Evt_evt_poll(live, i) {
+            Evt_evt_poll_Outcome::Entry(snap) => {
+                let mut v: Ev = Evt_Entry_value(snap);
+                Evt_Entry_release(live, snap);
+                return v.a;
+            }
+            Evt_evt_poll_Outcome::Empty => {}
+        }
+    }
+    return 0;
+}
+// Busy: the same owner is asked again.
+fn drain(live: Evt_Live[b, o, 4, r]) -> Evt_Ready[b, o, 4] {
+    match Evt_evt_reset(live) {
+        Evt_evt_reset_Outcome::Quiet(q) => { return Evt_evt_reclaim(live, q); }
+        Evt_evt_reset_Outcome::Busy => { return drain(live); }
+    }
+}
 fn main() -> i32 {
     let RegionOf(Ev)::Taken(memory) = region_of(ring) else {
         RegionOf(Ev)::Gone => { return 1; }
@@ -26035,12 +26059,9 @@ fn main() -> i32 {
                 }
                 Evt_evt_poll_Outcome::Empty => {}
             }
-            match Evt_evt_reset(live) {
-                Evt_evt_reset_Outcome::Quiet(q) => {
-                    region_release(Evt_release(Evt_evt_reclaim(live, q)));
-                    return seen as i32;
-                }
-            }
+            seen = seen + take_entry(live, 3);
+            region_release(Evt_release(drain(live)));
+            return seen as i32;
         }
     }
 }

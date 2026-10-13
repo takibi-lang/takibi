@@ -498,7 +498,7 @@ LINUX_USER_EXAMPLES      := linux_hello start checked_usize elf64_validate bump 
                              affine_escape_via_index align_ptr_proof linear_obligation tuple_pair region_proto region_inspection pool_space_replay \
                              field_lease match_int_lit record_loans \
                              callstack ringbuf crc8 djb2 slice slice_from_field logical_eval foreach for loop fizzbuzz fibonacci \
-                             bubblesort inet_checksum ip_parse tcp_parse wire_endian ref_type byte_slice atomic spinlock locked_cell diagnostic_ring publish fdt number usb_config usb_init_report uart_rx_ring block_cache gem_tx_wait virtio_net_tx virtio_net_reply generic_variant runtime_bounds pin_placement place_array protocol_ring protocol_tx region_held header_overlay
+                             bubblesort inet_checksum ip_parse tcp_parse wire_endian ref_type byte_slice atomic spinlock locked_cell diagnostic_ring publish fdt number usb_config usb_init_report uart_rx_ring block_cache gem_tx_wait virtio_net_tx virtio_net_reply generic_variant runtime_bounds pin_placement place_array protocol_ring protocol_tx protocol_snapshot region_held header_overlay
 LINUX_USER_BINS          := $(foreach e,$(LINUX_USER_EXAMPLES),$(LINUX_USER_DIR)/$(e)/$(e).exe)
 LINUX_USER_OBJS          := $(foreach e,$(LINUX_USER_EXAMPLES),$(LINUX_USER_DIR)/$(e)/$(e)_exe.o)
 
@@ -720,6 +720,7 @@ $(LINUX_USER_DIR)/region_held/region_held_exe.o: LINUX_USER_EXTRA_FLAGS := --reg
 $(LINUX_USER_DIR)/protocol_ring/protocol_ring_exe.o: LINUX_USER_EXTRA_FLAGS := --regions --confine-raw-authority $(foreach f,$(COMMON_LINUX_UART) $(COMMON_LINUX_PRINT) $(COMMON_LINUX_PRINT_BASE),--raw-mint-file $(f))
 # A device protocol is accepted only in a device-semantics file (#720).
 $(LINUX_USER_DIR)/protocol_tx/protocol_tx_exe.o: LINUX_USER_EXTRA_FLAGS := --regions --device-semantics-file $(LINUX_USER_DIR)/protocol_tx/protocol_tx.tkb
+$(LINUX_USER_DIR)/protocol_snapshot/protocol_snapshot_exe.o: LINUX_USER_EXTRA_FLAGS := --regions --device-semantics-file $(LINUX_USER_DIR)/protocol_snapshot/protocol_snapshot.tkb
 _build/pool_space_replay_regions.tkb: scripts/generate_pool_space_replay.py kernel/benchmarks/pool_space/workload.tsv $(LINUX_USER_DIR)/pool_space_replay/region_replay.tkb.in
 	python3 scripts/generate_pool_space_replay.py $@
 $(LINUX_USER_DIR)/pool_space_replay/pool_space_replay_exe.o: _build/pool_space_replay_regions.tkb
