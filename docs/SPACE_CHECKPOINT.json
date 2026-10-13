@@ -2,9 +2,10 @@
   "date": "2026-10-13",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "22ad04c31cf533b8cda06024138086a3ea89dce99d52fe9a420edef0e255deb2",
-  "workload": "#637: header overlays (`bytes as &mut T`) in arp/icmp/tcp. Linked kernels against main e8b4af06 (scripts/space_delta.py).",
+  "source_sha256": "1a0afba32869381943fab8c381c58a8e11f59ce07e4e7a5ae9f3718f4fcb6616",
+  "workload": "#497: sampling profiler (profile_session.tkb, /proc/takibi, per-core PMU routing). Linked kernels against main cf3d2ab1 (scripts/space_delta.py); session buffers sized per start.",
   "evidence": [
+    "docs/PROFILE_SESSION_SPACE_2026-10-13.md",
     "docs/HEADER_OVERLAY_SPACE_2026-10-13.md",
     "docs/TCP_RETX_RETENTION_SPACE_2026-10-12.md",
     "docs/EXT2_CHECKED_SPACE_2026-10-12.md",
@@ -57,6 +58,6 @@
     "docs/VIRTIO_NET_TX_2026-10-10.md",
     "docs/VIRTIO_NET_TX_SPACE_2026-10-10.json"
   ],
-  "assessment": "QEMU and RPi5 text/data/BSS and usable_ram_start unchanged; no symbol changed size (the overlay is a compile-time check). Earlier measured results stand.",
+  "assessment": "Text +9408 B (QEMU) / +9424 B (RPi5); data/BSS +496 B / +4160 B; RPi5 usable_ram_start +32 KB (page boundary). Idle holds no buffer; a session holds one power-of-two run per core until DDB profile dump. Adopted. Earlier measured results stand.",
   "next_trigger": "A shrink protocol for walked RegionPools, the #748 allocator change, or the next pool consumer moved onto Held slots, whichever lands first."
 }
