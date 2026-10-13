@@ -4914,6 +4914,38 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       raise (TypeError (e.loc, Printf.sprintf
         "%s expects a CPU token and a fixed DMA record type" operation))
 
+  (* GitHub issue #720 option a: the builtins a device protocol's generated
+     wrappers call -- the cache work on publishing and finishing edges, the
+     device span, and the line-ownership check in P_init. Only the
+     generated file of a registered device protocol may call them, so the
+     placement of the cache work is the generator's, never a driver's. The
+     span's bounds are the generated signature's `where` clause. Sync rule:
+     llvm_gen.ml computes the byte extent from the protocol's element type
+     and fixed count (it has the target layout this pass lacks for an
+     unpacked struct), checks the line ownership, and the address. *)
+  | Call (name, (r :: rest)) when List.mem name Device_protocol_registry.builtins ->
+      (match Device_protocol_registry.of_loc e.loc with
+        | Some _ -> ()
+        | None -> raise (TypeError (e.loc, Printf.sprintf
+            "%s is called only by a device protocol's generated code" name)));
+      let rt = infer_expr senv eenv tyenv fenv r in
+      (match repr rt with
+       | TIndexedStruct (n, _) | TStruct n
+         when String.length n > 8 && String.sub n 0 8 = "region__" -> ()
+       | _ -> raise (TypeError (r.loc, Printf.sprintf
+           "%s expects the protocol's region" name)));
+      (match rest with
+       | [] when name <> Device_protocol_registry.span -> TVoid
+       | [ first; count ] when name = Device_protocol_registry.span ->
+           List.iter (fun (a : Ast.expr) ->
+             require_usize_index a.loc (infer_expr senv eenv tyenv fenv a))
+             [ first; count ];
+           TStruct Dma_fixed_registry.span_type
+       | _ -> raise (TypeError (e.loc, Printf.sprintf
+           "%s has the wrong number of arguments" name)))
+  | Call (name, []) when List.mem name Device_protocol_registry.builtins ->
+      raise (TypeError (e.loc, Printf.sprintf "%s expects a region" name))
+
   (* GitHub issue #623: a device span binds one submitted range to one
      allocation. Both ends must have a static bound -- a constant k is
      [k, k+1), a refined value its own range -- and the largest offset plus
@@ -11606,6 +11638,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.Call ("dma_device_span",
                   ({ Ast.desc = Ast.Var owner; _ } :: _)) ->
           PathSet.singleton (pvar owner)
+      (* GitHub issue #720 option a: a device protocol's span is tied to
+         the borrowed device-state owner it came from. *)
+      | Ast.Call (name, (owner :: _))
+        when Device_protocol_registry.is_span_function name ->
+          (match authority_argument_path owner with
+           | Some path -> PathSet.singleton path
+           | None -> raise (TypeError (owner.loc, Printf.sprintf
+               "%s needs its device-state owner as a tracked binding" name)))
       | Ast.Call (name, args) ->
           let target = Option.value
             (StringMap.find_opt (loc_key e.loc) !resolved_call_targets)

@@ -64,7 +64,19 @@ type t = {
   disjoint : bool;
   prepared_before_read : bool;
   cells : int;
+  direction : Device_protocol_registry.direction option;
 }
+
+(* A publishing edge enters a device state from a non-device one; a
+   finishing edge leaves a device state for a non-device one (validate
+   requires a `completes` or `quiesces` witness on it). *)
+let is_device_state p n = (List.find (fun s -> s.s_name = n) p.states).s_device
+let publishes p input target =
+  (not (is_device_state p input)) && is_device_state p target
+let finishes p input target =
+  is_device_state p input && not (is_device_state p target)
+let is_publishing p t =
+  List.exists (fun a -> publishes p t.t_input a.a_target) t.t_alts
 
 let supported_properties = [ "disjoint"; "prepared_before_read" ]
 
@@ -264,9 +276,35 @@ let validate (d : protocol_decl) : t =
     | [ (k, _, mloc) ] -> fail mloc "unsupported model bound '%s'" k
     | [] -> fail loc "protocol '%s' needs a 'model cells N' bound" d.proto_name
     | _ -> fail loc "protocol '%s' has more than one model bound" d.proto_name in
-  { name = d.proto_name; states; init; transitions; outcomes;
+  let direction = match d.proto_direction with
+    | None -> None
+    | Some "tx" -> Some Device_protocol_registry.Tx
+    | Some "rx" -> Some Device_protocol_registry.Rx
+    | Some w -> fail loc "unsupported region direction '%s' on protocol '%s' \
+        (supported: tx, rx)" w d.proto_name in
+  let p = { name = d.proto_name; states; init; transitions; outcomes;
     disjoint = List.mem "disjoint" props;
-    prepared_before_read = List.mem "prepared_before_read" props; cells }
+    prepared_before_read = List.mem "prepared_before_read" props; cells;
+    direction } in
+  (* GitHub issue #720 option a: a device protocol's publishing edge does the
+     cache work and the state change in one generated step, then runs its
+     lowering on the device-state owner (the doorbell). The lowering cannot
+     choose a result after publication, so such an edge has exactly one. *)
+  if direction <> None then begin
+    if not (List.exists (fun s -> s.s_device) states) then
+      fail loc "device protocol '%s' has no 'device' state to publish to"
+        d.proto_name;
+    List.iter (fun t ->
+      if is_publishing p t then begin
+        if List.length t.t_alts <> 1 then
+          fail loc "transition '%s' publishes the region to the device, so it \
+            must have exactly one result" t.t_name;
+        if t.t_split then
+          fail loc "transition '%s' publishes the region to the device, so it \
+            cannot split it: a device protocol owns its whole region" t.t_name
+      end) transitions
+  end;
+  p
 
 (* Split protocol items from the program, validating each. *)
 let extract (prog : toplevel list) : toplevel list * t list =
@@ -523,7 +561,33 @@ let source_of (d : protocol_decl) (p : t) : string =
       add "    return *region_at(s.memory, i);";
       add "}"
     end) p.states;
+  (* GitHub issue #720 option a: a device state's owner yields the span the
+     device is given -- the whole region or one element -- as the existing
+     DmaDeviceSpan, tied to the borrow of the owner. No CPU-access state has
+     one, so an address exists only while the CPU holds no write authority. *)
+  let device = p.direction <> None in
+  let r = Device_protocol_registry.(match p.direction with
+    | Some Tx -> Some (clean, None)
+    | Some Rx -> Some (prepare_rx, Some finish_rx)
+    | None -> None) in
+  if device then
+    List.iter (fun s ->
+      if s.s_device then begin
+        let owner = ty s.s_name s.s_params in
+        let whole = Printf.sprintf "%s_%s_span" pn s.s_name in
+        let one = whole ^ "_at" in
+        Device_protocol_registry.register_span_function whole;
+        Device_protocol_registry.register_span_function one;
+        add "fn %s(s: borrow %s) -> DmaDeviceSpan {" whole owner;
+        add "    return %s(s.memory, 0, %s);" Device_protocol_registry.span count;
+        add "}";
+        add "fn %s(s: borrow %s, i: usize @ k) -> DmaDeviceSpan where k < %s {"
+          one owner count;
+        add "    return %s(s.memory, i, 1);" Device_protocol_registry.span;
+        add "}"
+      end) p.states;
   add "fn %s_init(memory: %s) -> %s {" pn region (ty p.init []);
+  if device then add "    %s(memory);" Device_protocol_registry.own_lines;
   add "    let mut owner: %s = { memory };" (ty p.init []);
   add "    return owner;";
   add "}";
@@ -591,21 +655,15 @@ let source_of (d : protocol_decl) (p : t) : string =
       | [ a ] -> fresh_of a = []
       | _ -> false in
     ignore (state input.pr_name);
-    if simple then begin
-      let a = List.hd alts in
-      add "fn %s_%s(%s) -> %s {" pn name params (target_ty a ~packed:false);
-      add "    %s%s(s);" spend name;
-      add "    let mut next: %s = { s.memory };" (target_ty a ~packed:false);
-      add "    return next;";
-      add "}"
-    end else begin
-      let label (a : proto_alt) = match a.pa_label with
-        | Some l -> l | None -> a.pa_state.pr_name in
-      let res_params = String.concat ", "
-        (base_params @ List.map (fun x -> x ^ ": usize") in_args) in
-      add "variant %s_%s_Choice {" pn name;
-      List.iter (fun a -> add "    %s;" (label a)) alts;
-      add "}";
+    let finish (a : proto_alt) indent = match r with
+      | Some (_, Some fin) when finishes p t.t_input a.pa_state.pr_name ->
+          add "%s%s(s.memory);" indent fin
+      | _ -> () in
+    let label (a : proto_alt) = match a.pa_label with
+      | Some l -> l | None -> a.pa_state.pr_name in
+    let res_params = String.concat ", "
+      (base_params @ List.map (fun x -> x ^ ": usize") in_args) in
+    let result_variant () =
       add "variant %s_%s_Result[%s] {" pn name res_params;
       List.iter (fun a ->
         let fr = fresh_of a in
@@ -614,20 +672,54 @@ let source_of (d : protocol_decl) (p : t) : string =
           (String.concat "" (List.map (fun x -> Printf.sprintf "exists %s: usize. " x) fr))
           body) alts;
       add "}";
-      let result_ty = Printf.sprintf "%s_%s_Result[%s]" pn name
+      Printf.sprintf "%s_%s_Result[%s]" pn name
         (String.concat ", " (base_args @ in_args)) in
+    let publishing = match r, alts with
+      | Some (prepare, _), [ a ] when publishes p t.t_input a.pa_state.pr_name ->
+          Some (prepare, a)
+      | _ -> None in
+    match publishing with
+    | Some (prepare, a) ->
+        (* Publication: the cache work and the state change are one step,
+           and the lowering (the doorbell) runs after both, on the
+           device-state owner. A fresh request identity is packed into a
+           one-case result, as for any transition with a fresh result. *)
+        let fresh = fresh_of a <> [] in
+        let ret = if fresh then result_variant () else target_ty a ~packed:false in
+        add "fn %s_%s(%s) -> %s {" pn name params ret;
+        if spend <> "" then add "    %s" spend;
+        add "    %s(s.memory);" prepare;
+        add "    let mut next: %s = { s.memory };" (target_ty a ~packed:true);
+        add "    %s(next);" name;
+        if fresh then add "    return %s_%s_Result::%s(next);" pn name (label a)
+        else add "    return next;";
+        add "}"
+    | None ->
+    if simple then begin
+      let a = List.hd alts in
+      add "fn %s_%s(%s) -> %s {" pn name params (target_ty a ~packed:false);
+      add "    %s%s(s);" spend name;
+      finish a "    ";
+      add "    let mut next: %s = { s.memory };" (target_ty a ~packed:false);
+      add "    return next;";
+      add "}"
+    end else begin
+      add "variant %s_%s_Choice {" pn name;
+      List.iter (fun a -> add "    %s;" (label a)) alts;
+      add "}";
+      let result_ty = result_variant () in
       add "fn %s_%s(%s) -> %s {" pn name params result_ty;
       if spend <> "" then add "    %s" spend;
       add "    match %s(s) {" name;
       List.iter (fun a ->
         add "        %s_%s_Choice::%s => {" pn name (label a);
+        finish a "            ";
         add "            let mut next: %s = { s.memory };" (target_ty a ~packed:true);
         add "            return %s_%s_Result::%s(next);" pn name (label a);
         add "        }") alts;
       add "    }";
       add "}"
-    end;
-    ignore t) trans_items;
+    end) trans_items;
   Buffer.contents buf
 
 let parse_generated (name : string) (src : string) : toplevel list =
@@ -649,8 +741,16 @@ let check_lowering (prog : toplevel list) (d : protocol_decl) (p : t) =
         let simple = match alts with
           | [ a ] -> List.for_all (fun (_, f) -> not f) a.pa_state.pr_args
           | _ -> false in
-        Some (n, input, (if simple then None
-                         else Some (Printf.sprintf "%s_%s_Choice" p.name n)), l)
+        (* A device protocol's publishing edge runs its lowering after the
+           state change, on the device-state owner, and chooses nothing
+           (validate gave it one result). *)
+        let subject = match alts with
+          | [ a ] when p.direction <> None
+                       && publishes p input.pr_name a.pa_state.pr_name ->
+              a.pa_state
+          | _ -> input in
+        Some (n, subject, (if simple || subject != input then None
+                           else Some (Printf.sprintf "%s_%s_Choice" p.name n)), l)
     | PObserve (n, subj, _, l) ->
         Some (n, subj, Some (Printf.sprintf "%s_%s_Raw" p.name n), l)
     | _ -> None) d.proto_items in
@@ -685,11 +785,50 @@ let check_lowering (prog : toplevel list) (d : protocol_decl) (p : t) =
 
 (* The compile path: validate, check every action's lowering, and replace
    each protocol item with its generated sealed types and wrappers. *)
+(* GitHub issue #720 option a (decision D2 = Q1): a device protocol's
+   `observe` lowerings assert device facts -- completion, quiescence -- that
+   end device access and, for rx, make the CPU read what the device wrote.
+   Only a file named by --device-semantics-file may declare one; the kernel's
+   list is kernel/DEVICE_SEMANTICS_FILES. *)
+let device_semantics_files : string list ref = ref []
+
+let normalize file =
+  if Filename.is_relative file then Filename.concat (Sys.getcwd ()) file
+  else file
+
+let check_device (d : protocol_decl) (p : t) =
+  match p.direction with
+  | None -> ()
+  | Some direction ->
+      let file = source_file_of_loc d.proto_loc in
+      if not (List.exists (fun f -> normalize f = normalize file)
+                !device_semantics_files) then
+        fail d.proto_loc "device protocol '%s' (a region with a direction) may \
+          only be declared in a device-semantics file, named by \
+          --device-semantics-file; its observations assert device completion \
+          and quiescence" d.proto_name;
+      let _, elem, idx = d.proto_region in
+      let n = match idx with [ _; n ] -> n | _ -> assert false in
+      (match elem with
+       | TypeU8 | TypeNamed _ -> ()
+       | _ -> fail d.proto_loc "device protocol '%s' must retain a region of \
+                u8 or of a named type" d.proto_name);
+      match Const_env.find n with
+      | Some count ->
+          Device_protocol_registry.register d.proto_name
+            { Device_protocol_registry.elem; count; direction;
+              loc = d.proto_loc }
+      | None ->
+          fail d.proto_loc "device protocol '%s' must fix its region's count \
+            with a declared constant: the cache work and the line-ownership \
+            check need its byte extent" d.proto_name
+
 let lower (prog : toplevel list) : toplevel list =
   ignore (extract prog);
   List.concat_map (function
     | ProtocolDef d ->
         let p = validate d in
+        check_device d p;
         check_lowering prog d p;
         parse_generated p.name (source_of d p)
     | item -> [ item ]) prog

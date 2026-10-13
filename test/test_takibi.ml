@@ -40,6 +40,7 @@ let parse src =
   Io_struct_registry.reset ();
   Hashtbl.reset Generic_variant.proven_empty_puts;
   Dma_fixed_registry.reset ();
+  Device_protocol_registry.reset ();
   Generic_scope.reset ();
   Ast.reset_precedence_errors ();
   let lexbuf = Lexing.from_string src in
@@ -80,6 +81,7 @@ let infer_files files =
   Io_struct_registry.reset ();
   Hashtbl.reset Generic_variant.proven_empty_puts;
   Dma_fixed_registry.reset ();
+  Device_protocol_registry.reset ();
   Generic_scope.reset ();
   Ast.reset_precedence_errors ();
   let prog = List.concat_map (fun (filename, src) ->
@@ -2417,6 +2419,7 @@ let infer_region_files files =
   Io_struct_registry.reset ();
   Hashtbl.reset Generic_variant.proven_empty_puts;
   Dma_fixed_registry.reset ();
+  Device_protocol_registry.reset ();
   Generic_scope.reset ();
   Ast.reset_precedence_errors ();
   ignore (Llvm_gen.setup_target ~triple:"x86_64-pc-linux-gnu" ());
@@ -25571,6 +25574,7 @@ let infer_sealed ?(proto = sealed_protocol) ?(use = sealed_consumer) () =
   Io_struct_registry.reset ();
   Hashtbl.reset Generic_variant.proven_empty_puts;
   Dma_fixed_registry.reset ();
+  Device_protocol_registry.reset ();
   Generic_scope.reset ();
   Ast.reset_precedence_errors ();
   ignore (Llvm_gen.setup_target ~triple:"x86_64-pc-linux-gnu" ());
@@ -25713,6 +25717,241 @@ let sealed_access_tests = [
        "requires 0 < n, which cannot be shown");
 ]
 
+(* GitHub issue #720 option a: device protocols. A direction on the
+   retained region makes the generated wrappers do the cache work on the
+   publishing and finishing edges; a device state's owner yields the span.
+   linux_user/protocol_tx runs a tx protocol and a Place-kept owner. *)
+let device_protocol = {|const BUF: usize = 64;
+protocol Rx[inst: usize] retains region(u8)[b, BUF] rx {
+    state Ready access write;
+    state Posted[req] device;
+    init Ready;
+    transition post(Ready) -> Posted[fresh req];
+    observe arrival(Posted[req]) -> Filled[req] completes;
+    transition take(Posted[req], Filled[req]) -> Ready;
+    property disjoint;
+    model cells 2;
+}
+private let mut doorbell: usize = 0;
+fn post(s: borrow Rx_Posted[b, o, 64, r]) !{unsafe} {
+    let mut span: DmaDeviceSpan = Rx_Posted_span(s);
+    doorbell = unsafe { dma_span_address(span) };
+}
+fn arrival(s: borrow Rx_Posted[b, o, 64, r]) -> Rx_arrival_Raw {
+    return Rx_arrival_Raw::Filled;
+}
+fn take(s: borrow Rx_Posted[b, o, 64, r]) {}
+|}
+
+let device_consumer = {|private region let mut buf: [u8; 64] align(64);
+fn main() -> i32 {
+    let RegionOf(u8)::Taken(memory) = region_of(buf) else {
+        RegionOf(u8)::Gone => { return 1; }
+    };
+    let ready = Rx_init(memory);
+    match Rx_post(ready) {
+        Rx_post_Result::Posted(posted) => {
+            match Rx_arrival(posted) {
+                Rx_arrival_Outcome::Filled(w) => {
+                    let back = Rx_take(posted, w);
+                    let v = Rx_Ready_read(back, 0);
+                    region_release(Rx_release(back));
+                    return v as i32;
+                }
+            }
+        }
+    }
+}
+|}
+
+(* The whole pipeline through LLVM code generation, on AArch64 (64-byte
+   lines) unless told otherwise; answers the module's IR text. *)
+let compile_device ?(triple = "aarch64-none-elf") ?(device_files = [ "dev.tkb" ])
+    ?(proto = device_protocol) ?(use = device_consumer) () =
+  Const_env.reset ();
+  Type_layout.reset ();
+  Publish_registry.reset ();
+  No_copy_registry.reset ();
+  Per_cpu_registry.reset ();
+  Init_state.reset ();
+  Region_backing.reset ();
+  Guarded_registry.reset ();
+  Io_struct_registry.reset ();
+  Hashtbl.reset Generic_variant.proven_empty_puts;
+  Dma_fixed_registry.reset ();
+  Device_protocol_registry.reset ();
+  Generic_scope.reset ();
+  Ast.reset_precedence_errors ();
+  Fun.protect ~finally:(fun () ->
+      Protocol_decl.device_semantics_files := [];
+      Llvm_gen.reset_target ())
+    (fun () ->
+      ignore (Llvm_gen.setup_target ~triple ());
+      Protocol_decl.device_semantics_files := device_files;
+      let program = List.concat_map (fun (filename, src) ->
+        let lexbuf = Lexing.from_string src in
+        Lexing.set_filename lexbuf filename;
+        Parser.program Lexer.read lexbuf) [ "dev.tkb", proto; "use.tkb", use ] in
+      let prog = Region_builtin.run ~enabled:true (Protocol_decl.lower program) in
+      let prog = Declared_type_resolver.run
+          (Region_builtin.lower
+             (Monomorphize.run (Dma_fixed_record.run (Publish_record.run prog)))) in
+      let prog_types = Type_inf.infer_program prog in
+      ignore (Llvm_gen.gen_program ~prog_types prog);
+      Llvm.string_of_llmodule !Llvm_gen.the_module)
+
+let expect_device_error ?triple ?device_files ?(in_proto = false) ~sub ~by
+    fragment () =
+  let proto, use =
+    if in_proto then replace_once ~sub ~by device_protocol, device_consumer
+    else device_protocol, replace_once ~sub ~by device_consumer in
+  let check msg =
+    if not (contains_substring msg fragment)
+    then Alcotest.failf "error %S does not contain %S" msg fragment in
+  match compile_device ?triple ?device_files ~proto ~use () with
+  | _ -> Alcotest.failf "expected an error containing %S" fragment
+  | exception Types.TypeError (_, msg) -> check msg
+  | exception Llvm_gen.Error msg -> check msg
+  | exception Types.MultiTypeError errors ->
+      if not (List.exists (fun (_, msg) -> contains_substring msg fragment) errors)
+      then Alcotest.failf "no entry contains %S: %s" fragment
+          (String.concat " | " (List.map snd errors))
+
+(* The IR text of one function's body. *)
+let function_ir ir name =
+  let head = Printf.sprintf "@%s(" name in
+  let rec find i =
+    if i + String.length head > String.length ir then
+      Alcotest.failf "no function %s in the IR" name
+    else if String.sub ir i (String.length head) = head then i else find (i + 1) in
+  let start = find 0 in
+  let rec close i = if String.sub ir i 2 = "\n}" then i else close (i + 1) in
+  String.sub ir start (close start - start)
+
+let index_of hay needle =
+  let n = String.length needle in
+  let rec go i =
+    if i + n > String.length hay then None
+    else if String.sub hay i n = needle then Some i else go (i + 1) in
+  go 0
+
+let device_protocol_tests = [
+  Alcotest.test_case "device protocol: rx publishes then rings, finishes on completion" `Quick
+    (fun () ->
+      let ir = compile_device () in
+      let post = function_ir ir "Rx_post" in
+      (match index_of post "dc ivac", index_of post "@post(" with
+       | Some cache, Some hook when cache < hook -> ()
+       | _ -> Alcotest.failf "Rx_post must invalidate before its doorbell:\n%s" post);
+      let take = function_ir ir "Rx_take" in
+      Alcotest.(check bool) "finish invalidates" true
+        (contains_substring take "dc ivac");
+      let init = function_ir ir "Rx_init" in
+      Alcotest.(check bool) "init does no cache work" false
+        (contains_substring init "dc "));
+  Alcotest.test_case "device protocol: tx cleans, struct elements, span at" `Quick
+    (fun () ->
+      let swap ~sub ~by s =
+        let rec go s = if contains_substring s sub then go (replace_once ~sub ~by s) else s in
+        go s in
+      let proto = device_protocol
+        |> swap ~sub:"const BUF: usize = 64;"
+             ~by:"const BUF: usize = 4;\nstruct Desc { address: u64; length: u32; flags: u32; }"
+        |> swap ~sub:"region(u8)[b, BUF] rx" ~by:"region(Desc)[b, BUF] tx"
+        |> swap ~sub:"[b, o, 64, r]" ~by:"[b, o, 4, r]"
+        |> swap ~sub:"Rx_Posted_span(s)" ~by:"Rx_Posted_span_at(s, 3)" in
+      let use = device_consumer
+        |> swap ~sub:"[u8; 64]" ~by:"[Desc; 4]"
+        |> swap ~sub:"RegionOf(u8)" ~by:"RegionOf(Desc)"
+        |> swap ~sub:"let v = Rx_Ready_read(back, 0);"
+             ~by:"let mut v: Desc = Rx_Ready_read(back, 3);"
+        |> swap ~sub:"return v as i32;" ~by:"return v.length as i32;" in
+      let ir = compile_device ~proto ~use () in
+      let post = function_ir ir "Rx_post" in
+      (match index_of post "dc cvac", index_of post "@post(" with
+       | Some cache, Some hook when cache < hook -> ()
+       | _ -> Alcotest.failf "Rx_post must clean before its doorbell:\n%s" post);
+      Alcotest.(check bool) "tx finish has no cache work" false
+        (contains_substring (function_ir ir "Rx_take") "dc "));
+  Alcotest.test_case "device protocol: a writable state has no span" `Quick
+    (expect_device_error ~sub:"let ready = Rx_init(memory);"
+       ~by:"let ready = Rx_init(memory); let mut sp: DmaDeviceSpan = Rx_Ready_span(ready);"
+       "Undefined function: Rx_Ready_span");
+  Alcotest.test_case "device protocol: a span dies with its owner" `Quick
+    (expect_device_error ~sub:"let back = Rx_take(posted, w);"
+       ~by:"let mut sp: DmaDeviceSpan = Rx_Posted_span(posted);\n\
+            let back = Rx_take(posted, w); let n = dma_span_length(sp);"
+       "value 'sp' is derived from linear value 'posted' and cannot be used after");
+  Alcotest.test_case "device protocol: a span is not stored" `Quick
+    (fun () ->
+      let proto = device_protocol
+        |> replace_once ~sub:"doorbell = unsafe { dma_span_address(span) };"
+             ~by:"kept = Rx_Posted_span(s);"
+        |> replace_once ~sub:"private let mut doorbell: usize = 0;"
+             ~by:"private let mut doorbell: usize = 0;\nprivate let mut kept: DmaDeviceSpan;" in
+      match compile_device ~proto () with
+      | _ -> Alcotest.fail "expected a stored span to be rejected"
+      | exception Types.TypeError (_, msg) ->
+          Alcotest.(check bool) msg true (contains_substring msg "cannot be stored")
+      | exception Types.MultiTypeError errors ->
+          Alcotest.(check bool) (String.concat " | " (List.map snd errors)) true
+            (List.exists (fun (_, m) -> contains_substring m "cannot be stored") errors));
+  Alcotest.test_case "device protocol: the doorbell cannot write the region" `Quick
+    (expect_device_error ~in_proto:true
+       ~sub:"doorbell = unsafe { dma_span_address(span) };"
+       ~by:"Rx_Ready_write(s, 0, 1);"
+       "struct type mismatch: Rx_Posted vs Rx_Ready");
+  Alcotest.test_case "device protocol: a publishing lowering takes the device state" `Quick
+    (expect_device_error ~in_proto:true
+       ~sub:"fn post(s: borrow Rx_Posted[b, o, 64, r]) !{unsafe} {\n\
+             \    let mut span: DmaDeviceSpan = Rx_Posted_span(s);\n\
+             \    doorbell = unsafe { dma_span_address(span) };\n}"
+       ~by:"fn post(s: borrow Rx_Ready[b, o, 64]) {}"
+       "must take exactly 'borrow Rx_Posted[...]' with 4 static argument(s)");
+  Alcotest.test_case "device protocol: only a device-semantics file declares one" `Quick
+    (expect_device_error ~device_files:[] ~sub:"fn main" ~by:"fn main"
+       "may only be declared in a device-semantics file");
+  Alcotest.test_case "device protocol: the backing global owns whole lines" `Quick
+    (expect_device_error ~sub:"[u8; 64] align(64)" ~by:"[u8; 64] align(32)"
+       "must be declared align(64)");
+  Alcotest.test_case "device protocol: the extent is whole lines" `Quick
+    (fun () ->
+      let swap s =
+        let rec go s = if contains_substring s "64" then go (replace_once ~sub:"64" ~by:"48" s) else s in
+        go s in
+      let use = replace_once ~sub:"[u8; 48] align(48)" ~by:"[u8; 48] align(64)"
+          (swap device_consumer) in
+      match compile_device ~proto:(swap device_protocol) ~use () with
+      | _ -> Alcotest.fail "expected a partial-line extent to be rejected"
+      | exception Types.TypeError (_, msg) ->
+          Alcotest.(check bool) msg true
+            (contains_substring msg "not a whole number of 64-byte cache lines"));
+  Alcotest.test_case "device protocol: the count is a declared constant" `Quick
+    (expect_device_error ~in_proto:true ~sub:"region(u8)[b, BUF]"
+       ~by:"region(u8)[b, n]" "must fix its region's count");
+  Alcotest.test_case "device protocol: an unknown direction" `Quick
+    (expect_device_error ~in_proto:true ~sub:"[b, BUF] rx" ~by:"[b, BUF] both"
+       "unsupported region direction 'both'");
+  Alcotest.test_case "device protocol: a publishing edge has one result" `Quick
+    (expect_device_error ~in_proto:true
+       ~sub:"transition post(Ready) -> Posted[fresh req];"
+       ~by:"transition post(Ready) -> Posted[fresh req] | Busy(Ready);"
+       "must have exactly one result");
+  Alcotest.test_case "device protocol: no device state" `Quick
+    (fun () ->
+      let proto = device_protocol
+        |> replace_once ~sub:"state Posted[req] device;" ~by:"state Posted[req];"
+        |> replace_once ~sub:"Filled[req] completes;" ~by:"Filled[req];" in
+      match compile_device ~proto () with
+      | _ -> Alcotest.fail "expected a device protocol with no device state to be rejected"
+      | exception Types.TypeError (_, msg) ->
+          Alcotest.(check bool) msg true (contains_substring msg "has no 'device' state"));
+  Alcotest.test_case "device protocol: the cache builtins are the generator's" `Quick
+    (expect_device_error ~sub:"let ready = Rx_init(memory);"
+       ~by:"__protocol_dma_clean(memory); let ready = Rx_init(memory);"
+       "is called only by a device protocol's generated code");
+]
+
 let named_groups_unisolated = [
   "readonly-literals", readonly_literal_tests;
   "private-default-construction", private_default_construction_tests;
@@ -25738,6 +25977,7 @@ let named_groups_unisolated = [
   "production-machine-boundary", production_machine_boundary_tests;
   "region-inspection", region_inspection_tests;
   "protocol-declarations", protocol_tests;
+  "device-protocols", device_protocol_tests;
   "protocol-sealed-owners", sealed_protocol_tests;
   "protocol-state-access", sealed_access_tests;
 ]

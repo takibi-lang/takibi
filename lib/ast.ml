@@ -632,6 +632,9 @@ type protocol_decl = {
   proto_name : string;
   proto_params : static_param list;
   proto_region : string * type_expr * string list;  (* region(T)[idx] *)
+  proto_direction : string option;
+  (* `retains region(T)[b, n] tx` or `rx`: a device protocol whose
+     generated wrappers do the cache work (GitHub issue #720 option a). *)
   proto_items : proto_item list;
   proto_loc : loc [@printer pp_loc];
 }

@@ -430,7 +430,7 @@ item:
   | kw = IDENT name = IDENT ps = loption(static_params) rw = IDENT
     region = IDENT LPAREN elem = type_expr RPAREN
     LBRACKET idx = separated_nonempty_list(COMMA, IDENT) RBRACKET
-    LBRACE body = list(proto_item) RBRACE
+    dir = option(IDENT) LBRACE body = list(proto_item) RBRACE
     (* GitHub issue #720: `protocol Name[params] retains region(T)[b, n]
        { ... }`. No item begins with an identifier otherwise, so the
        contextual words need no lexer keyword; existing programs keep
@@ -443,6 +443,7 @@ item:
       expect kw "protocol"; expect rw "retains"; expect region "region";
       ProtocolDef { proto_name = name; proto_params = ps;
                     proto_region = (region, elem, idx);
+                    proto_direction = dir;
                     proto_items = body; proto_loc = loc } }
   | EXTERN SYMBOL IDENT SEMI
     { ExternSymbolDef ($3, $symbolstartpos) }

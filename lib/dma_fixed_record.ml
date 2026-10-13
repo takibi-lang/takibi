@@ -40,7 +40,7 @@ let run (prog : toplevel list) : toplevel list =
      dma_device_span constructs one and only the dma_span_* builtins read
      it; a descriptor writer therefore cannot pair an address with a length
      the extent check did not see. *)
-  if !additions <> [] then
+  if !additions <> [] || Device_protocol_registry.any () then
     additions := StructDef (Dma_fixed_registry.span_type,
       ["address", TypeUsize; "length", TypeUsize],
       false, None, ["address"; "length"],

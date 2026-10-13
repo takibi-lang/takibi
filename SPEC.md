@@ -18,7 +18,7 @@ describes behavior in prose instead.
 File extension: `.tkb`. Compiler invocation: `takibi <file1.tkb>
 [file2.tkb ...] [-o out.o] [--target <triple>] [--cpu <cpu>] [--features
 <features>] [-g] [--forbid-trap] [--forbid-unsafe] [--confine-raw-authority] [--raw-mint-file <path>]
-[--reject-unused-functions]
+[--device-semantics-file <path>] [--reject-unused-functions]
 [--external-entry <function>] [--check-unused-file <path>] [--explain-inference]
 [--emit-effect-matrix] [--emit-held-guards <path>] [--version]`. Multiple `.tkb` files are
 concatenated (flat global namespace) before compilation -- there is no
@@ -4091,6 +4091,59 @@ compiler assumption. `make modelcheck` generates the models of
 `kernel/models/protocols/*.tkb`; the fixed declaration must pass and each
 one-line fault control must violate `Safety`. Faults the static rules
 above already reject are compiler tests instead of model controls.
+
+### Device protocols (GitHub issue #720 option a)
+
+A direction after the retained region makes a protocol a device protocol:
+`retains region(T)[b, N] tx` (the CPU writes, the device reads) or `rx`
+(the device writes, the CPU reads). The generated wrappers then do the
+cache work, so that the cache operation and the state change are one step
+that no other code can split:
+
+- A publishing edge -- a transition from a non-`device` state into a
+  `device` state -- cleans the whole region (`tx`), or cleans and
+  invalidates it (`rx`, the existing `dma_prepare_rx` lowering), moves the
+  region into the device state, and only then calls the transition's
+  lowering. That lowering takes `borrow P_<target>[...]`, the device-state
+  owner, instead of the input state; it is where the address reaches a
+  descriptor or a doorbell. A publishing edge has exactly one result (it may
+  take a `fresh` identity, packed into a one-case `P_t_Result` as for any
+  fresh result) and is not a `split`.
+- For `rx`, a finishing edge -- a transition from a `device` state to a
+  non-`device` state, which already needs a `completes` or `quiesces`
+  witness -- invalidates the whole region after its lowering and before the
+  region moves into the CPU-access state. A `tx` finishing edge has no cache
+  work.
+- Each `device` state S gets `P_S_span(s: borrow P_S[...]) -> DmaDeviceSpan`
+  (the whole region) and `P_S_span_at(s: borrow P_S[...], i: usize @ k) ->
+  DmaDeviceSpan where k < N` (element i). The span is the existing
+  `DmaDeviceSpan` of protected fixed DMA allocations: tied to the borrowed
+  owner, it cannot be stored, passed to a retaining parameter, or used after
+  the owner moves, and `unsafe { dma_span_address(span) }` remains the only
+  address export. No CPU-access state has a span, and no device state has
+  a read or write function.
+
+A device protocol must fix its count with a declared constant, retain a
+region of `u8` or a named type, and declare at least one `device` state. It
+is accepted only in a file named by `--device-semantics-file <path>`: its
+`observe` lowerings assert completion and quiescence. The kernel's list is
+`kernel/DEVICE_SEMANTICS_FILES`. On a cache-maintained target the region's
+byte extent must be whole cache lines, and every region backing global of
+the same element type and count (`region let mut g: [T; N]`) must be
+declared `align(L)` for the line size L; both are checked when `P_init` is
+compiled. On a coherent target (x86-64) the cache work lowers to the
+publish/consume barriers. A target with neither rejects device protocols.
+The generated cache work calls `__protocol_dma_*` builtins, which only a
+device protocol's generated code may call.
+
+Not covered yet: the emitted TLA+ model has no cache variables, so it says
+nothing about the cache work (`kernel/models/DmaCacheVisibility.tla` is the
+model of that order); and a region of the right type and count made by
+splitting a larger region or by converting bytes (`region_bytes_typed`) is
+not tied to a checked backing global, so its line ownership is trusted.
+`linux_user/protocol_tx` runs a `tx` protocol whose owner is kept in a
+global `Place(exists b: addr. exists o: usize. TxRing_Ready[b, o, 4])` and
+moved across functions.
 
 ## Function Pointers, extern fn, and Overloading
 

@@ -51,6 +51,7 @@ let () =
   let forbid_unsafe = ref false in
   let confine_raw_authority = ref false in
   let raw_mint_files = ref [] in
+  let device_semantics_files = ref [] in
   let regions = ref false in
   let reject_unused_functions = ref false in
   let external_entries = ref [] in
@@ -79,6 +80,13 @@ let () =
            exit 1
          end;
          raw_mint_files := Sys.argv.(!i) :: !raw_mint_files
+     | "--device-semantics-file" ->
+         incr i;
+         if !i >= Array.length Sys.argv then begin
+           Printf.eprintf "Error: --device-semantics-file requires a path\n";
+           exit 1
+         end;
+         device_semantics_files := Sys.argv.(!i) :: !device_semantics_files
      | "--version" ->
          show_version := true
      | "--emit-exception-frame-offsets" ->
@@ -209,7 +217,7 @@ let () =
 
   if input_files = [] then (
     Printf.eprintf
-      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--frame-pointers] [--forbid-trap] [--forbid-unsafe] [--confine-raw-authority] [--raw-mint-file <path>] [--regions] [--reject-unused-functions] [--external-entry <function>] [--check-unused-file <path>] [--explain-inference] [--emit-effect-matrix] [--emit-exception-frame-offsets <StructName>] [--emit-struct-layout <StructName>] [--emit-debug-metadata <path>] [--emit-depfile <path>] [--emit-overflow-audit <path>] [--emit-raw-deref-audit <path>] [--emit-held-guards <path>] [--emit-tla <dir>] [--version]\n"
+      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--frame-pointers] [--forbid-trap] [--forbid-unsafe] [--confine-raw-authority] [--raw-mint-file <path>] [--device-semantics-file <path>] [--regions] [--reject-unused-functions] [--external-entry <function>] [--check-unused-file <path>] [--explain-inference] [--emit-effect-matrix] [--emit-exception-frame-offsets <StructName>] [--emit-struct-layout <StructName>] [--emit-debug-metadata <path>] [--emit-depfile <path>] [--emit-overflow-audit <path>] [--emit-raw-deref-audit <path>] [--emit-held-guards <path>] [--emit-tla <dir>] [--version]\n"
       Sys.argv.(0);
     exit 1
   );
@@ -243,6 +251,7 @@ let () =
     Io_struct_registry.reset ();
     Hashtbl.reset Generic_variant.proven_empty_puts;
     Dma_fixed_registry.reset ();
+    Device_protocol_registry.reset ();
     Generic_scope.reset ();
     Ast.reset_precedence_errors ();
     (* GitHub issue #55: every file named on the command line is an entry
@@ -288,6 +297,7 @@ let () =
     end;
     (* Otherwise each protocol becomes its generated sealed types and
        wrappers, after its actions' lowerings are checked. *)
+    Protocol_decl.device_semantics_files := !device_semantics_files;
     let prog = Protocol_decl.lower prog in
     (* GitHub issue #672: under --regions, the built-in definitions are
        planned from this first parse, then parsed before the program's own
@@ -318,6 +328,7 @@ let () =
         Io_struct_registry.reset ();
         Hashtbl.reset Generic_variant.proven_empty_puts;
         Dma_fixed_registry.reset ();
+        Device_protocol_registry.reset ();
         Generic_scope.reset ();
         Ast.reset_precedence_errors ();
         let defs = Region_builtin.parse_planned sources in

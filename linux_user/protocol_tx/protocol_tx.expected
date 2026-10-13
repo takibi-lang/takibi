@@ -1,0 +1,9 @@
+doorbell
+pending
+reclaimed
+span bytes: 64, element 2 at +32, line aligned: 0
+doorbell
+pending
+reclaimed
+ring[2].address: 9
+ring: 4 descriptors back

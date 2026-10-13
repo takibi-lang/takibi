@@ -37,6 +37,11 @@ let compiler_builtins = [
   "dma_cpu_ptr"; "dma_cpu_slice"; "dma_begin_rx"; "dma_finish_owned_rx";
   "dma_begin_tx"; "dma_finish_owned_tx";
   "dma_device_span"; "dma_span_address"; "dma_span_length";
+  (* GitHub issue #720 option a: called only by a device protocol's
+     generated code (Device_protocol_registry.builtins). *)
+  "__protocol_dma_clean"; "__protocol_dma_prepare_rx";
+  "__protocol_dma_finish_rx"; "__protocol_dma_span";
+  "__protocol_dma_own_lines";
   "checked_add_usize"; "checked_mul_usize";
   "mrs_cntfrq_el0"; "mrs_cntpct_el0"; "mrs_sctlr_el1";
   "mrs_esr_el1"; "mrs_far_el1"; "mrs_elr_el1"; "mrs_spsr_el1";

@@ -1,0 +1,146 @@
+// GitHub issue #720 option a: a device protocol. `retains ... tx` makes the
+// generated wrappers do the cache work: the publishing edge (Ready ->
+// InFlight) cleans the whole region and changes state in one step, then
+// runs this file's lowering on the device-state owner -- the doorbell,
+// which is the only place an address leaves, through the owner's span and
+// `unsafe dma_span_address`. On x86-64 DMA is coherent, so the cache work
+// is a barrier; the verdict here is the shape, the span arithmetic and an
+// owner kept in a global Place across functions. This file is a
+// device-semantics file (--device-semantics-file): its observation asserts
+// completion. What must not compile is in test/test_takibi.ml,
+// "protocol-declarations".
+
+const RING: usize = 4;
+
+struct Desc {
+    address: u64;
+    length: u32;
+    flags: u32;
+}
+
+protocol TxRing[inst: usize] retains region(Desc)[b, RING] tx {
+    state Ready access write;
+    state InFlight[req] device;
+    init Ready;
+    transition submit(Ready) -> InFlight[fresh req];
+    observe completion(InFlight[req]) -> Done[req] completes | Pending;
+    transition reclaim(InFlight[req], Done[req]) -> Ready;
+    property disjoint;
+    model cells 2;
+}
+
+// Stand-in for the controller: what the doorbell handed it.
+private let mut rung_base: usize = 0;
+private let mut rung_length: usize = 0;
+private let mut rung_third: usize = 0;
+private let mut polls: usize = 0;
+
+// The doorbell: runs after the clean and the state change, on InFlight.
+fn submit(s: borrow TxRing_InFlight[b, o, 4, r]) !{unsafe} {
+    let mut whole: DmaDeviceSpan = TxRing_InFlight_span(s);
+    let mut third: DmaDeviceSpan = TxRing_InFlight_span_at(s, 2);
+    rung_base = unsafe { dma_span_address(whole) };
+    rung_length = dma_span_length(whole);
+    rung_third = unsafe { dma_span_address(third) } - rung_base;
+    uart_puts("doorbell\n");
+}
+fn completion(s: borrow TxRing_InFlight[b, o, 4, r]) -> TxRing_completion_Raw {
+    polls = polls + 1;
+    if (polls % 2 == 0) { return TxRing_completion_Raw::Done; }
+    return TxRing_completion_Raw::Pending;
+}
+fn reclaim(s: borrow TxRing_InFlight[b, o, 4, r]) { uart_puts("reclaimed\n"); }
+
+// The ring's owner between requests lives in a global place; its region
+// identity is existential (region_of's identity is anonymous).
+struct RingSlot {
+    private mutex: i32;
+    private value: Place(exists b: addr. exists o: usize. TxRing_Ready[b, o, 4]);
+}
+private let mut slot: RingSlot;
+
+linear struct SlotGuard[lock: addr] { private flags: usize; }
+fn slot_lock(mutex: *i32 @ lock) -> SlotGuard[lock] {
+    let mut guard: SlotGuard[lock] = { 0 };
+    return guard;
+}
+fn slot_unlock(mutex: *i32 @ lock, guard: sink SlotGuard[lock]) {}
+
+fn park(ready: TxRing_Ready[b, o, 4]) {
+    let guard = slot_lock(&slot.mutex);
+    let old = place_put(guard, &slot.mutex, slot.value, ready);
+    slot_unlock(&slot.mutex, guard);
+    match old {
+        Place::Empty => {}
+        Place::Full(other) => {
+            uart_puts("slot: displaced an owner\n");
+            region_release(TxRing_release(other));
+        }
+    }
+}
+
+// One request from the parked owner and back into the slot.
+fn step(value: u64) !{unsafe} {
+    let guard = slot_lock(&slot.mutex);
+    let taken = place_take(guard, &slot.mutex, slot.value);
+    slot_unlock(&slot.mutex, guard);
+    match taken {
+        Place::Empty => { uart_puts("slot: empty\n"); }
+        Place::Full(ready) => {
+            let mut desc: Desc = { value, 64, 1 };
+            TxRing_Ready_write(ready, 2, desc);
+            match TxRing_submit(ready) {
+                TxRing_submit_Result::InFlight(flight) => {
+                    park(wait(flight));
+                }
+            }
+        }
+    }
+}
+
+fn wait(flight: TxRing_InFlight[b, o, 4, r]) -> TxRing_Ready[b, o, 4] {
+    match TxRing_completion(flight) {
+        TxRing_completion_Outcome::Done(done) => {
+            return TxRing_reclaim(flight, done);
+        }
+        TxRing_completion_Outcome::Pending => {
+            uart_puts("pending\n");
+            return wait(flight);
+        }
+    }
+}
+
+private region let mut ring: [Desc; 4] align(64);
+
+fn app_main() !{unsafe} {
+    let RegionOf(Desc)::Taken(memory) = region_of(ring) else {
+        RegionOf(Desc)::Gone => { uart_puts("ring: already taken\n"); return; }
+    };
+    park(TxRing_init(memory));
+    step(7);
+    uart_puts("span bytes: ");
+    uart_print(rung_length);
+    uart_puts(", element 2 at +");
+    uart_print(rung_third);
+    uart_puts(", line aligned: ");
+    uart_print(rung_base % 64);
+    uart_puts("\n");
+    step(9);
+    let guard = slot_lock(&slot.mutex);
+    let taken = place_take(guard, &slot.mutex, slot.value);
+    slot_unlock(&slot.mutex, guard);
+    match taken {
+        Place::Empty => { uart_puts("slot: empty at the end\n"); }
+        Place::Full(ready) => {
+            let mut last: Desc = TxRing_Ready_read(ready, 2);
+            uart_puts("ring[2].address: ");
+            uart_print(last.address as usize);
+            uart_puts("\n");
+            let back = TxRing_release(ready);
+            uart_puts("ring: ");
+            uart_print(region_count(back));
+            uart_puts(" descriptors back\n");
+            region_release(back);
+        }
+    }
+}

@@ -1,0 +1,8 @@
+# Files allowed to declare a device protocol (GitHub issue #720 option a):
+# a `protocol` whose retained region carries a direction, `tx` or `rx`.
+# Such a file's `observe` lowerings assert device facts -- completion and
+# quiescence -- that end device access and, for rx, let the CPU read what
+# the device wrote. Those claims are trusted (TRUSTED_BASE.md), so the files
+# that make them are named here and passed to the compiler as
+# --device-semantics-file. A file is added by a reviewed change that says
+# which observations it trusts, in its header.

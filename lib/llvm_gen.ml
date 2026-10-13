@@ -4378,6 +4378,86 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            (TypeNamed span, value)
        | _ -> raise (Error (Printf.sprintf
            "dma_device_span has no fixed allocation for '%s'" record)))
+  (* GitHub issue #720 option a: a device protocol's generated cache work,
+     span and line-ownership check. Sync rule: type_inf.ml restricted these
+     to the generated file, and the generated `where` clause bounds the
+     span. The byte extent comes from the target layout, so an unpacked
+     struct element is measured as the hardware sees it. *)
+  | Call (name, (r :: rest)) when List.mem name Device_protocol_registry.builtins ->
+      let entry = match Device_protocol_registry.of_loc e.loc with
+        | Some entry -> entry
+        | None -> raise (Error (Printf.sprintf
+            "%s outside a device protocol's generated code" name)) in
+      let size k =
+        let dl = match !target_data with
+          | Some dl -> dl
+          | None -> raise (Error "device protocol: target data layout not initialized") in
+        Int64.to_int (Llvm_target.DataLayout.abi_size
+                        (ltype_of_ast (TypeArray (entry.elem, k))) dl) in
+      let field f = { desc = FieldGet (r, f); loc = e.loc } in
+      let int n = { desc = IntLit (Int64.of_int n); loc = e.loc } in
+      let cache op =
+        let ptr = { desc = Cast (TypePtr TypeU8, field "address"); loc = e.loc } in
+        ignore (gen_expr locals { desc = Call (op, [ptr; int (size entry.count)]);
+                                  loc = e.loc });
+        (TypeVoid, const_null (i1_type context)) in
+      if name = Device_protocol_registry.clean then cache "dma_prepare_tx"
+      else if name = Device_protocol_registry.prepare_rx then cache "dma_prepare_rx"
+      else if name = Device_protocol_registry.finish_rx then cache "dma_finish_rx"
+      else if name = Device_protocol_registry.own_lines then begin
+        (* The region's lines are its own: its extent is whole lines, and
+           every backing global that can supply a region of this element
+           type and count starts on a line. *)
+        (match Target_info.dma_cache_contract () with
+         | Target_info.Cache_line line ->
+             let extent = size entry.count in
+             if extent mod line <> 0 then
+               raise (Types.TypeError (entry.loc, Printf.sprintf
+                 "device protocol region is %d bytes, which is not a whole \
+                  number of %d-byte cache lines; cache work on it would reach \
+                  a neighbour's lines" extent line));
+             Hashtbl.iter (fun g (ty, gvar) ->
+               match ty with
+               | TypeArray (el, k)
+                 when Region_backing.is_marked g && el = entry.elem
+                      && k = entry.count ->
+                   let a = Llvm.alignment gvar in
+                   if a = 0 || a mod line <> 0 then
+                     raise (Types.TypeError (entry.loc, Printf.sprintf
+                       "region backing global '%s' can back this device \
+                        protocol's region, so it must be declared align(%d) \
+                        to own whole cache lines" g line))
+               | _ -> ()) global_vars
+         | Target_info.Coherent -> ()
+         | Target_info.Unsupported -> raise (Types.TypeError (entry.loc,
+             "device protocols are unavailable on this target: it has no DMA \
+              cache-maintenance contract")));
+        (TypeVoid, const_null (i1_type context))
+      end
+      else begin
+        match rest with
+        | [ first_e; count_e ] ->
+            let (_, base) = gen_expr locals (field "address") in
+            let base = coerce base TypeUsize in
+            let (_, first) = gen_expr locals first_e in
+            let (_, count) = gen_expr locals count_e in
+            let elem = const_int (usize_lltype ()) (size 1) in
+            let first = coerce first TypeUsize in
+            let count = coerce count TypeUsize in
+            let address = build_add base (build_mul first elem "proto.span.off" builder)
+              "proto.span.addr" builder in
+            let length = build_mul count elem "proto.span.len" builder in
+            let span = Dma_fixed_registry.span_type in
+            let span_llty = Hashtbl.find struct_lltypes span in
+            let (address_index, _) = field_info span "address" in
+            let (length_index, _) = field_info span "length" in
+            let value = build_insertvalue (undef span_llty) address
+              address_index "proto.span" builder in
+            let value = build_insertvalue value length
+              length_index "proto.span" builder in
+            (TypeNamed span, value)
+        | _ -> raise (Error (Printf.sprintf "%s: wrong arguments" name))
+      end
   | Call (("dma_span_address" | "dma_span_length") as operation, [span]) ->
       let field = if operation = "dma_span_address" then "address" else "length" in
       gen_expr locals { desc = FieldGet (span, field); loc = e.loc }
