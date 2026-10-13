@@ -17,3 +17,8 @@ Text shrinks by 304 B (QEMU) and 288 B (RPi5), because the scan loops are
 now shared. Data, BSS and usable_ram_start are unchanged. The poisoned
 regions are the same. kernelcheck-qemu-main, kernelcheck-stack-overflow-qemu
 and kernelcheck-rpi5 passed.
+
+Re-measured after rebasing onto main 22f4e38c, together with elf64.tkb's
+header overlays (0323d8fe): QEMU text 712792 -> 712488 (-304 B), RPi5 text
+726080 -> 725792 (-288 B); data, BSS and usable_ram_start unchanged; no
+data/BSS symbol changed size. The elf64 change adds nothing measurable.
