@@ -46,7 +46,7 @@ type outcome = {
   o_name : string;
   o_args : string list;
   o_subject : string;
-  o_effect : [ `Plain | `Completes | `Quiesces ];
+  o_effect : [ `Plain | `Completes | `Quiesces | `Snapshot ];
 }
 
 type alt = { a_label : string option; a_target : string }
@@ -166,6 +166,18 @@ let validate (d : protocol_decl) : t =
                     state '%s' is not a device state" r.pr_name s.s_name;
                 `Completes
             | [ "quiesces" ] -> `Quiesces
+            (* GitHub issue #720 decision E1: a snapshot copies one element
+               of a region the device still owns; it ends nothing. *)
+            | [ "snapshot" ] ->
+                if not s.s_device then
+                  fail r.pr_loc "outcome '%s' is a snapshot, but state '%s' is \
+                    not a device state" r.pr_name s.s_name;
+                if d.proto_direction <> Some "rx" then
+                  fail r.pr_loc "outcome '%s' is a snapshot, which only an rx \
+                    device protocol has" r.pr_name;
+                if r.pr_args <> [] then
+                  fail r.pr_loc "snapshot outcome '%s' takes no arguments" r.pr_name;
+                `Snapshot
             | m :: _ -> fail r.pr_loc "unsupported outcome modifier '%s'" m in
           if List.exists (fun st -> st.s_name = r.pr_name) states then
             fail r.pr_loc "outcome '%s' has the name of a state" r.pr_name;
@@ -202,6 +214,10 @@ let validate (d : protocol_decl) : t =
                 if f || not (List.mem a bound) then
                   fail w.pr_loc "witness argument '%s' is not bound by the \
                     input state" a) w.pr_args;
+              if o.o_effect = `Snapshot then
+                fail w.pr_loc "transition '%s' consumes snapshot '%s': a snapshot \
+                  is released through its own generated function, not a \
+                  transition" n w.pr_name;
               o.o_name) witness in
         let alts = List.map (fun a ->
           let r = a.pa_state in
@@ -240,8 +256,9 @@ let validate (d : protocol_decl) : t =
               let ends_access = match witness with
                 | None -> false
                 | Some w ->
-                    (List.find (fun o -> o.o_name = w) outcomes).o_effect
-                    <> `Plain in
+                    (match (List.find (fun o -> o.o_name = w) outcomes).o_effect with
+                     | `Completes | `Quiesces -> true
+                     | `Plain | `Snapshot -> false) in
               if not ends_access then
                 fail tloc "transition '%s' leaves device state '%s' for '%s' \
                   without a 'completes' or 'quiesces' witness" n s.s_name
@@ -440,10 +457,12 @@ let to_tla (p : t) : string =
          line "    /\\ deviceActive # {}";
          line "    /\\ deviceActive' = {}"
      | `Quiesces -> line "    /\\ deviceActive' = {}"
-     | `Plain -> ());
+     | `Plain | `Snapshot -> ());
     line "    /\\ event' = %s" (quote o.o_name);
     unchanged all_vars
-      ("event" :: (if o.o_effect = `Plain then [] else [ "deviceActive" ]));
+      ("event" :: (match o.o_effect with
+                   | `Completes | `Quiesces -> [ "deviceActive" ]
+                   | `Plain | `Snapshot -> []));
     line "";
     next := name :: !next) p.outcomes;
   (* A pending event no transition out of the current state consumes is
@@ -622,22 +641,58 @@ let source_of (d : protocol_decl) (p : t) : string =
             List.exists (fun ((r : proto_ref), _) -> r.pr_name = o.o_name) os
         | _ -> false) d.proto_items) p.outcomes in
     let args = List.map fst subj.pr_args in
+    let snap = List.find_opt (fun o -> o.o_effect = `Snapshot) outs in
     add "variant %s_%s_Raw {" pn name;
     List.iter (fun o -> add "    %s;" o.o_name) outs;
     add "}";
-    let params = String.concat ", " (List.map (fun a -> a ^ ": usize") args) in
+    (* GitHub issue #720 decision E1: a snapshot is a copy of element i of
+       the device-owned region, taken after invalidating that element's
+       lines, carried with the region's identity so that its release -- the
+       consumer's acknowledgement to the device -- names the same region. *)
+    let snap_idx = [ b; b ^ "__off" ] in
+    Option.iter (fun o ->
+      let sty = Printf.sprintf "%s_%s[%s]" pn o.o_name (String.concat ", " snap_idx) in
+      add "linear struct %s_%s[%s: addr, %s__off: usize] {" pn o.o_name b b;
+      add "    private value: %s;" elem;
+      add "    private unit: usize;";
+      add "}";
+      add "fn %s_%s_value(snap: borrow %s) -> %s {" pn o.o_name sty elem;
+      add "    return snap.value;";
+      add "}";
+      add "fn %s_%s_release(s: borrow %s, snap: sink %s) {" pn o.o_name
+        (ty subj.pr_name args) sty;
+      add "    %s_release(s);" name;
+      add "}") snap;
+    let all_params = (match snap with
+      | Some _ -> [ b ^ ": addr"; b ^ "__off: usize" ] | None -> [])
+      @ List.map (fun a -> a ^ ": usize") args in
+    let all_args = (match snap with Some _ -> snap_idx | None -> []) @ args in
     add "variant %s_%s_Outcome%s {" pn name
-      (if args = [] then "" else "[" ^ params ^ "]");
+      (if all_params = [] then "" else "[" ^ String.concat ", " all_params ^ "]");
     List.iter (fun o ->
-      if o.o_args = [] then add "    %s;" o.o_name
+      if o.o_effect = `Snapshot then
+        add "    %s(%s_%s[%s]);" o.o_name pn o.o_name (String.concat ", " snap_idx)
+      else if o.o_args = [] then add "    %s;" o.o_name
       else add "    %s(%s);" o.o_name (view o.o_name o.o_args)) outs;
     add "}";
     let outcome_ty = Printf.sprintf "%s_%s_Outcome%s" pn name
-      (if args = [] then "" else "[" ^ String.concat ", " args ^ "]") in
-    add "fn %s_%s(s: borrow %s) -> %s {" pn name (ty subj.pr_name args) outcome_ty;
-    add "    match %s(s) {" name;
+      (if all_args = [] then "" else "[" ^ String.concat ", " all_args ^ "]") in
+    (match snap with
+     | None ->
+         add "fn %s_%s(s: borrow %s) -> %s {" pn name (ty subj.pr_name args) outcome_ty;
+         add "    match %s(s) {" name
+     | Some _ ->
+         add "fn %s_%s(s: borrow %s, i: usize @ k) -> %s where k < %s {" pn name
+           (ty subj.pr_name args) outcome_ty count;
+         add "    %s(s.memory, i);" Device_protocol_registry.refresh_at;
+         add "    let mut value: %s = *region_at(s.memory, i);" elem;
+         add "    match %s(s, value) {" name);
     List.iter (fun o ->
-      if o.o_args = [] then
+      if o.o_effect = `Snapshot then
+        add "        %s_%s_Raw::%s => { let mut snap: %s_%s[%s] = { value, 0 }; \
+             return %s_%s_Outcome::%s(snap); }" pn name o.o_name pn o.o_name
+          (String.concat ", " snap_idx) pn name o.o_name
+      else if o.o_args = [] then
         add "        %s_%s_Raw::%s => { return %s_%s_Outcome::%s; }" pn name
           o.o_name pn name o.o_name
       else
@@ -766,6 +821,16 @@ let check_lowering (prog : toplevel list) (d : protocol_decl) (p : t) =
     | PObserve (n, subj, _, l) ->
         Some (n, subj, Some (Printf.sprintf "%s_%s_Raw" p.name n), l)
     | _ -> None) d.proto_items in
+  let snapshot_observe n = List.exists (function
+    | PObserve (n', _, outs, _) when n' = n ->
+        List.exists (fun (_, mods) -> mods = [ "snapshot" ]) outs
+    | _ -> false) d.proto_items in
+  let _, elem, _ = d.proto_region in
+  (* A snapshot observation also needs its release lowering: what the
+     consumer tells the device once it has read the entry. *)
+  let actions = actions @ List.concat_map (fun (n, subj, _, l) ->
+    if snapshot_observe n then [ (n ^ "_release", subj, None, l) ] else [])
+    actions in
   List.iter (fun (n, (input : proto_ref), ret, l) ->
     match List.find_opt (function
         | FuncDef f -> f.name = n && source_file_of_loc f.def_loc = file
@@ -776,10 +841,15 @@ let check_lowering (prog : toplevel list) (d : protocol_decl) (p : t) =
         let param_ok = match f.params with
           | [ (_, Some (TypeBorrow (TypeIndexed (name, args)))) ] ->
               name = owner && List.length args = arity
+                && not (snapshot_observe n)
+          | [ (_, Some (TypeBorrow (TypeIndexed (name, args)))); (_, Some t) ] ->
+              name = owner && List.length args = arity
+                && snapshot_observe n && t = elem
           | _ -> false in
         if not param_ok then
           fail f.def_loc "protocol '%s' action '%s' must take exactly \
-            'borrow %s[...]' with %d static argument(s)" p.name n owner arity;
+            'borrow %s[...]' with %d static argument(s)%s" p.name n owner arity
+            (if snapshot_observe n then ", then the element value" else "");
         if f.where_clauses <> [] then
           fail f.def_loc "protocol '%s' action '%s' cannot add 'where' \
             constraints: the generated wrapper has no facts to discharge them; \

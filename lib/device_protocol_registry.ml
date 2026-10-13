@@ -50,4 +50,7 @@ let prepare_rx = "__protocol_dma_prepare_rx"
 let finish_rx = "__protocol_dma_finish_rx"
 let span = "__protocol_dma_span"
 let own_lines = "__protocol_dma_own_lines"
-let builtins = [ clean; prepare_rx; finish_rx; span; own_lines ]
+(* GitHub issue #720 decision E1: invalidate one element's lines before a
+   snapshot copies it. *)
+let refresh_at = "__protocol_dma_refresh_at"
+let builtins = [ clean; prepare_rx; finish_rx; span; own_lines; refresh_at ]

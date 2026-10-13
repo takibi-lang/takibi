@@ -4401,7 +4401,20 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
         ignore (gen_expr locals { desc = Call (op, [ptr; int (size entry.count)]);
                                   loc = e.loc });
         (TypeVoid, const_null (i1_type context)) in
-      if name = Device_protocol_registry.clean then cache "dma_prepare_tx"
+      if name = Device_protocol_registry.refresh_at then begin
+        (* One element's lines; the cache-range lowering rounds them out to
+           whole lines, all inside the line-owned region. *)
+        match rest with
+        | [ index_e ] ->
+            let at = { desc = BinOp (Add, field "address",
+              { desc = BinOp (Mul, index_e, int (size 1)); loc = e.loc }); loc = e.loc } in
+            let ptr = { desc = Cast (TypePtr TypeU8, at); loc = e.loc } in
+            ignore (gen_expr locals { desc = Call ("dma_finish_rx", [ptr; int (size 1)]);
+                                      loc = e.loc });
+            (TypeVoid, const_null (i1_type context))
+        | _ -> raise (Error "refresh_at: wrong arguments")
+      end
+      else if name = Device_protocol_registry.clean then cache "dma_prepare_tx"
       else if name = Device_protocol_registry.prepare_rx then cache "dma_prepare_rx"
       else if name = Device_protocol_registry.finish_rx then cache "dma_finish_rx"
       else if name = Device_protocol_registry.own_lines then begin

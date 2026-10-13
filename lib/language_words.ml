@@ -41,7 +41,7 @@ let compiler_builtins = [
      generated code (Device_protocol_registry.builtins). *)
   "__protocol_dma_clean"; "__protocol_dma_prepare_rx";
   "__protocol_dma_finish_rx"; "__protocol_dma_span";
-  "__protocol_dma_own_lines";
+  "__protocol_dma_own_lines"; "__protocol_dma_refresh_at";
   "checked_add_usize"; "checked_mul_usize";
   "mrs_cntfrq_el0"; "mrs_cntpct_el0"; "mrs_sctlr_el1";
   "mrs_esr_el1"; "mrs_far_el1"; "mrs_elr_el1"; "mrs_spsr_el1";

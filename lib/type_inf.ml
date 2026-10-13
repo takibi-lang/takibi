@@ -4935,7 +4935,11 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | _ -> raise (TypeError (r.loc, Printf.sprintf
            "%s expects the protocol's region" name)));
       (match rest with
-       | [] when name <> Device_protocol_registry.span -> TVoid
+       | [] when name <> Device_protocol_registry.span
+                 && name <> Device_protocol_registry.refresh_at -> TVoid
+       | [ index ] when name = Device_protocol_registry.refresh_at ->
+           require_usize_index index.loc (infer_expr senv eenv tyenv fenv index);
+           TVoid
        | [ first; count ] when name = Device_protocol_registry.span ->
            List.iter (fun (a : Ast.expr) ->
              require_usize_index a.loc (infer_expr senv eenv tyenv fenv a))

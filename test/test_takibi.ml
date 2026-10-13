@@ -25992,6 +25992,116 @@ let device_protocol_tests = [
        "is called only by a device protocol's generated code");
 ]
 
+(* GitHub issue #720 decision E1: snapshot observation of a device-owned
+   rx region (the xHCI event ring's shape). *)
+let snapshot_protocol = {|const EVENTS: usize = 4;
+struct Ev { a: u32; b: u32; c: u32; d: u32; }
+protocol Evt[inst: usize] retains region(Ev)[b, EVENTS] rx {
+    state Ready access write addressed;
+    state Live[req] device;
+    init Ready;
+    transition evt_publish(Ready) -> Live[fresh req];
+    observe evt_poll(Live[req]) -> Entry snapshot | Empty;
+    observe evt_reset(Live[req]) -> Quiet[req] quiesces;
+    transition evt_reclaim(Live[req], Quiet[req]) -> Ready;
+    property disjoint;
+    model cells 2;
+}
+fn evt_publish(s: borrow Evt_Live[b, o, 4, r]) {}
+fn evt_poll(s: borrow Evt_Live[b, o, 4, r], value: Ev) -> Evt_evt_poll_Raw {
+    if ((value.d & 1) == 1) { return Evt_evt_poll_Raw::Entry; }
+    return Evt_evt_poll_Raw::Empty;
+}
+fn evt_poll_release(s: borrow Evt_Live[b, o, 4, r]) {}
+fn evt_reset(s: borrow Evt_Live[b, o, 4, r]) -> Evt_evt_reset_Raw {
+    return Evt_evt_reset_Raw::Quiet;
+}
+fn evt_reclaim(s: borrow Evt_Live[b, o, 4, r]) {}
+|}
+
+let snapshot_consumer = {|private region let mut ring: [Ev; 4] align(64);
+fn main() -> i32 {
+    let RegionOf(Ev)::Taken(memory) = region_of(ring) else {
+        RegionOf(Ev)::Gone => { return 1; }
+    };
+    match Evt_evt_publish(Evt_init(memory)) {
+        Evt_evt_publish_Result::Live(live) => {
+            let mut seen: u32 = 0;
+            match Evt_evt_poll(live, 2) {
+                Evt_evt_poll_Outcome::Entry(snap) => {
+                    let mut v: Ev = Evt_Entry_value(snap);
+                    seen = v.a;
+                    Evt_Entry_release(live, snap);
+                }
+                Evt_evt_poll_Outcome::Empty => {}
+            }
+            match Evt_evt_reset(live) {
+                Evt_evt_reset_Outcome::Quiet(q) => {
+                    region_release(Evt_release(Evt_evt_reclaim(live, q)));
+                    return seen as i32;
+                }
+            }
+        }
+    }
+}
+|}
+
+let expect_snapshot_error ?(in_proto = false) ~sub ~by fragment () =
+  let proto, use =
+    if in_proto then replace_once ~sub ~by snapshot_protocol, snapshot_consumer
+    else snapshot_protocol, replace_once ~sub ~by snapshot_consumer in
+  let check msg =
+    if not (contains_substring msg fragment)
+    then Alcotest.failf "error %S does not contain %S" msg fragment in
+  match compile_device ~proto ~use () with
+  | _ -> Alcotest.failf "expected an error containing %S" fragment
+  | exception Types.TypeError (_, msg) -> check msg
+  | exception Llvm_gen.Error msg -> check msg
+  | exception Types.MultiTypeError errors ->
+      if not (List.exists (fun (_, msg) -> contains_substring msg fragment) errors)
+      then Alcotest.failf "no entry contains %S: %s" fragment
+          (String.concat " | " (List.map snd errors))
+
+let snapshot_tests = [
+  Alcotest.test_case "snapshot: one element invalidated, copied, released" `Quick
+    (fun () ->
+      let ir = compile_device ~proto:snapshot_protocol ~use:snapshot_consumer () in
+      let poll = function_ir ir "Evt_evt_poll" in
+      (match index_of poll "dc ivac", index_of poll "@evt_poll(" with
+       | Some cache, Some hook when cache < hook -> ()
+       | _ -> Alcotest.failf "the snapshot must invalidate before the lowering reads:\n%s" poll);
+      Alcotest.(check bool) "release calls its lowering" true
+        (contains_substring (function_ir ir "Evt_Entry_release") "@evt_poll_release("));
+  Alcotest.test_case "snapshot: an unreleased entry is rejected" `Quick
+    (expect_snapshot_error ~sub:"                    Evt_Entry_release(live, snap);\n" ~by:""
+       "linear variant payload 'snap' is never consumed");
+  Alcotest.test_case "snapshot: released against another region" `Quick
+    (expect_snapshot_error
+       ~sub:"fn main() -> i32 {"
+       ~by:"fn cross(a: borrow Evt_Live[b, o, 4, r], s: Evt_Entry[c, p]) { Evt_Entry_release(a, s); }\nfn main() -> i32 {"
+       "static value mismatch: c vs b");
+  Alcotest.test_case "snapshot: only on an rx protocol" `Quick
+    (expect_snapshot_error ~in_proto:true ~sub:"region(Ev)[b, EVENTS] rx"
+       ~by:"region(Ev)[b, EVENTS] tx" "only an rx device protocol has");
+  Alcotest.test_case "snapshot: only of a device state" `Quick
+    (expect_snapshot_error ~in_proto:true
+       ~sub:"observe evt_poll(Live[req]) -> Entry snapshot | Empty;"
+       ~by:"observe evt_poll(Ready) -> Entry snapshot | Empty;" "is not a device state");
+  Alcotest.test_case "snapshot: not a transition witness" `Quick
+    (expect_snapshot_error ~in_proto:true
+       ~sub:"transition evt_reclaim(Live[req], Quiet[req]) -> Ready;"
+       ~by:"transition evt_reclaim(Live[req], Quiet[req]) -> Ready;\n    transition evt_take(Live[req], Entry) -> Live[req];"
+       "consumes snapshot 'Entry'");
+  Alcotest.test_case "snapshot: the release needs its lowering" `Quick
+    (expect_snapshot_error ~in_proto:true
+       ~sub:"fn evt_poll_release(s: borrow Evt_Live[b, o, 4, r]) {}\n" ~by:""
+       "action 'evt_poll_release' has no lowering");
+  Alcotest.test_case "snapshot: the lowering sees the value" `Quick
+    (expect_snapshot_error ~in_proto:true
+       ~sub:"fn evt_poll(s: borrow Evt_Live[b, o, 4, r], value: Ev)"
+       ~by:"fn evt_poll(s: borrow Evt_Live[b, o, 4, r])"
+       "then the element value");
+]
 let named_groups_unisolated = [
   "readonly-literals", readonly_literal_tests;
   "private-default-construction", private_default_construction_tests;
@@ -26018,6 +26128,7 @@ let named_groups_unisolated = [
   "region-inspection", region_inspection_tests;
   "protocol-declarations", protocol_tests;
   "device-protocols", device_protocol_tests;
+  "protocol-snapshots", snapshot_tests;
   "protocol-sealed-owners", sealed_protocol_tests;
   "protocol-state-access", sealed_access_tests;
 ]

@@ -4134,6 +4134,23 @@ that no other code can split:
   (a dequeue pointer). `addressed` is accepted only on an `access write`
   state of a device protocol.
 
+- An `rx` protocol may read a region the device still owns, one element
+  at a time, through a snapshot observation (GitHub issue #720, decision
+  E1): `observe poll(Live[req]) -> Entry snapshot | Empty;` on a `device`
+  state. The generated `P_poll(s: borrow P_Live[...], i: usize @ k) where k
+  < N` invalidates element i's cache lines, copies the element, and calls
+  the lowering `fn poll(s: borrow P_Live[...], value: T) -> P_poll_Raw`,
+  which decides from the copy whether the entry is valid (for xHCI, its
+  Cycle bit). On `Entry` it returns a linear `P_Entry[b, b__off]` holding
+  the copy: `P_Entry_value(e)` reads it, and `P_Entry_release(s, e)`, which
+  must name an owner of the same region, consumes it and calls the lowering
+  `fn poll_release(s: borrow P_Live[...])` -- the consumer's acknowledgement
+  to the device, for xHCI the dequeue pointer. Dropping an entry is a type
+  error. A snapshot ends no device access, has no arguments, and is never a
+  transition's witness. Invalidating the lines around one element is sound
+  because the region owns whole lines and the CPU holds no write authority
+  over it while it is in a device state, so no line holds CPU data to lose.
+
 A device protocol must fix its count with a declared constant, retain a
 region of `u8` or a named type, and declare at least one `device` state. It
 is accepted only in a file named by `--device-semantics-file <path>`: its
