@@ -3686,6 +3686,37 @@ fn f(frame: borrow [u8; 8..]) -> u16 {
     return 0;
 }
 |});
+  Alcotest.test_case "header overlay: not returned past the borrow" `Quick
+    (expect_type_error "&/&mut is only valid in a function parameter type" {|struct packed be Hdr { kind: u16; len: u16; tag: [u8; 4]; }
+fn look(frame: borrow [u8; 8..]) -> &Hdr {
+    return frame as &Hdr;
+}
+|});
+  Alcotest.test_case "header overlay: not used after its slice's owner ends" `Quick
+    (expect_type_error "cannot be used after"
+      ("struct packed be Hdr { kind: u16; len: u16; tag: [u8; 4]; }\n" ^
+       region_fixture ^
+        "fn reg_overlay_after_release_bad() -> u16 {
+           let idx: {0..<4 as usize} = 0;
+           let o = reg_make(idx);
+           let f = reg_frame(o);
+           let h: &Hdr = f as &Hdr;
+           reg_release(o);
+           return h.kind as u16;
+         }"));
+  Alcotest.test_case "header overlay: used while its slice's owner lives" `Quick
+    (fun () -> ignore (infer
+      ("struct packed be Hdr { kind: u16; len: u16; tag: [u8; 4]; }\n" ^
+       region_fixture ^
+        "fn reg_overlay_ok() -> u16 {
+           let idx: {0..<4 as usize} = 0;
+           let o = reg_make(idx);
+           let f = reg_frame(o);
+           let h: &Hdr = f as &Hdr;
+           let k: u16 = h.kind as u16;
+           reg_release(o);
+           return k;
+         }")));
   Alcotest.test_case "header overlay: readonly slice gives only &T" `Quick
     (expect_type_error "use `as &T`" {|struct packed be Hdr { kind: u16; len: u16; tag: [u8; 4]; }
 fn f(frame: borrow [const u8; 8..]) -> u16 {

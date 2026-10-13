@@ -95,7 +95,10 @@ Types") replace raw wire-header pointers in the network code. The compiler
 is trusted to decide that every byte pattern is a valid value of the header
 (packed, no declared alignment, unrefined integer and byte-array fields
 only) and that the slice's proven length covers it; the decision is
-`overlay_invalid_reason` and the length check in lib/type_inf.ml.
+`overlay_invalid_reason` and the length check in lib/type_inf.ml. The
+older raw overlay, `bytes as *T`, checks only the length: it still lets a
+header with a refined field sit over arbitrary bytes, so the refinement is
+not guaranteed there (#772).
 Region backing globals (`region let mut g: [T; N];`, SPEC.md built-in
 region) are the only arrays `region_of`, `region_table_of` and
 `region_table_lock` accept, and the compiler rejects every other use of such

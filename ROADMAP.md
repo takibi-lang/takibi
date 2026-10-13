@@ -80,8 +80,14 @@ list (maintainer, 2026-10-09).
    condition bound its body and drop the local re-checks). ext2.tkb has
    left it as well: its scratch is per-CPU storage and every byte access a
    checked (buffer, offset) position (2026-10-12; text +4 KiB, checking a
-   field's width once is #770). **Next:** the rest of stage 3's list on
-   #637 (the network files, then the S splits) and the region layers on #672. Not on the critical path: #748 (allocator time, 2.75x
+   field's width once is #770). The network files (arp, icmp, tcp) have
+   left it too, through header overlays: `bytes as &mut TcpHdr` is checked
+   when every byte pattern is a valid packed header and the slice covers it
+   (2026-10-13; the raw `slice as *T` path still lets a refined field sit
+   over arbitrary bytes, #772). The overlay also fits the K/R files still
+   on kernel/RAW_MINT_FILES that parse external bytes (fdt, virtio, elf64).
+   **Next:** the S splits (process.tkb, usb_xhci.tkb), then those parsers,
+   and the region layers on #672. Not on the critical path: #748 (allocator time, 2.75x
    slower since the per-page places), #739 (stale list entries, per-file
    counts). Consolidating the kernel-driven built-ins into general features
    is #750 (holder-tied identities, option C, is its central item; a
