@@ -2,8 +2,8 @@
   "date": "2026-10-13",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "94a2a23e5d8a29c8ec6df92ea1eda8ab44e109071ce2ff0b5bb3ed21ac18b333",
-  "workload": "#720 E1: snapshot observation in the protocol generator (compiler only; no kernel uses it yet). Linked kernels against main 586b5fa9 (scripts/space_delta.py).",
+  "source_sha256": "95e5131fb0c62f7e5b18c285346cff5ad435dafc3ecd323ae425b431cbeace6a",
+  "workload": "#720 E1: snapshot observation in the protocol generator (compiler only; no kernel uses it yet), plus the linux_user/protocol_snapshot test. Linked kernels against main 586b5fa9 (scripts/space_delta.py).",
   "evidence": [
     "docs/XHCI_TABLES_SPACE_2026-10-13.md",
     "docs/XHCI_RINGS_SPACE_2026-10-13.md",
@@ -62,6 +62,6 @@
     "docs/VIRTIO_NET_TX_2026-10-10.md",
     "docs/VIRTIO_NET_TX_SPACE_2026-10-10.json"
   ],
-  "assessment": "QEMU and RPi5 text, data, BSS and usable_ram_start unchanged; no data/BSS symbol changed size. Earlier measured results stand.",
+  "assessment": "QEMU and RPi5 text, data, BSS and usable_ram_start unchanged; no data/BSS symbol changed size. Earlier measured results stand. The added Makefile lines build a linux_user test only (reuse: no kernel source or build flag changed).",
   "next_trigger": "#720 E1 snapshot slice (event ring and output context), a shrink protocol for walked RegionPools, the #748 allocator change, or the next pool consumer moved onto Held slots, whichever lands first."
 }
