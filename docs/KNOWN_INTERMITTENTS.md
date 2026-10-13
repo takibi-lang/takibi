@@ -30,7 +30,6 @@ whether a row has gone quiet or has merely stopped being looked for.
 
 | Symptom | Rate | Issue | Last seen |
 | --- | --- | --- | --- |
-| `a guest of 2 vCPUs started while 3 of a budget of 4 were held` | 1 land.sh allcheck on 8e6c8022 (slowcheck, host loaded by three workers); control races its own holder | #785 | 2026-10-13 |
 | `CPU0 timer did not acquire the process-run lock` | 1 land.sh allcheck on 186f0c85 (uart-wake peer-uart-and-net-wake-control, host loaded); 0 of 1 standalone | #784 | 2026-10-13 |
 | `did not finish within` | 1 local langcheck on 5f31a1df (check_validate_protocol_trace_controls.py, host loaded by three workers and a land); rerun passed | #780 | 2026-10-13 |
 | `workload: busy pair STARVED: a wait passed its bound` | 1 land.sh allcheck on 86bf0439 (race-window 609's armed kernel); 0 of 4 standalone | #690 | 2026-10-03 |
