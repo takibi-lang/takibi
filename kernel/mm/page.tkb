@@ -684,15 +684,6 @@ must_use variant PageRunAllocResult {
     Allocated(exists run: usize. PageRunOwner[run]);
 }
 
-// Reconstituting an owner after a deliberate transfer-to-address boundary is
-// unsafe: the caller, not the type system, proves that the address still names
-// one live run of this size and that no other owner exists.  Keep the address
-// validation fallible even at that trust boundary.
-must_use variant PageRunReclaimResult {
-    Invalid;
-    Reclaimed(exists run: usize. PageRunOwner[run]);
-}
-
 fn page_run_owner_new(frames: sink region(PageFrame)[c, n], first: usize,
                       physical: usize, count: usize,
                       generation: usize @ run) -> PageRunOwner[run] {
@@ -712,19 +703,6 @@ fn page_run_physical_address(owner: borrow PageRunOwner[run]) -> usize {
 
 fn page_run_count(owner: borrow PageRunOwner[run]) -> usize {
     return owner.count;
-}
-
-// The run's first page index, after its linear owner has been consumed.
-// The run-sized twin of page_owner_transfer_index, and for the same
-// reason: a holder that keeps a run for the lifetime of the kernel has
-// nothing to do with a linear value it can never give back, and a linear
-// value cannot be stored in an array anyway. The pages stay occupied,
-// which is exactly what the holder wants.
-fn page_run_owner_transfer_index(owner: sink PageRunOwner[run])
-        -> usize {
-    let first: usize = owner.first;
-    region_release(owner.frames);
-    return first;
 }
 
 // A run's bytes as a byte region, the run's ownership moving into it
@@ -969,54 +947,6 @@ fn page_run_transferred_release_physical(physical: usize, count: usize)
         }
     }
     locked_cell_give(&boot_page_pool_cell, guard);
-}
-
-fn page_run_reclaim_transferred_physical(physical: usize, count: usize)
-        -> PageRunReclaimResult !{unsafe} {
-    if (physical % PAGE_SIZE != 0) {
-        return PageRunReclaimResult::Invalid;
-    }
-    let guard = locked_cell_take(&boot_page_pool_cell);
-    let pool = memory_map_pool_record(guard, &boot_page_pool_cell);
-    let mut valid: bool = false;
-    let mut index: usize = 0;
-    match place_borrow(guard, page_meta_store.metas) {
-        Place::Empty => {}
-        Place::Full(metas) => {
-            match place_borrow(guard, page_meta_store.extents) {
-                Place::Empty => {}
-                Place::Full(extents) => {
-                match page_index_for_physical(pool, metas, extents, physical) {
-                    PageIndexResult::NotManaged => {}
-                    PageIndexResult::Found(found) => {
-                        if (count != 0 && found < page_capacity(pool, metas, extents) &&
-                            count <= page_capacity(pool, metas, extents) - found) {
-                            valid = true;
-                            index = found;
-                        }
-                    }
-                }
-                }
-            }
-        }
-    }
-    locked_cell_give(&boot_page_pool_cell, guard);
-    if (valid) {
-        // The run's permission, minted again from the address the holder
-        // kept: this function is the trust boundary its caller already
-        // declares (#746 leaves it there).
-        match memory_map_frames(physical, count) {
-            RegionTyped(PageFrame)::Misaligned(bytes) => {
-                region_release(bytes);
-                return PageRunReclaimResult::Invalid;
-            }
-            RegionTyped(PageFrame)::Typed(frames) => {
-                return PageRunReclaimResult::Reclaimed(
-                    page_run_owner_new(frames, index, physical, count, 0));
-            }
-        }
-    }
-    return PageRunReclaimResult::Invalid;
 }
 
 // A transferred run's pages go back to their places one by one, each

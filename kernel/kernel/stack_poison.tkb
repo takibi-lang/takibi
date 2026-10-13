@@ -2,18 +2,47 @@
 // and written as raw bytes, split out of kernel/kernel/process.tkb so the
 // rest of that file is checked code.
 //
-// Trusted here, and only here: every caller passes a byte range that is a
-// kernel stack or the reserved region below one -- a process stack run that
-// kernel/mm/page.tkb handed to process.tkb and withheld from every other
-// consumer, or the boot and IRQ stacks bounded by linker symbols. These
-// functions cannot check that; they only poison and measure the range.
+// A process stack is reached through its run's own permission (#672): the
+// stack_run_* functions take a borrowed PageRunOwner and a range inside
+// that run, refuse a range that leaves it, and read the run's base from the
+// owner, so a process stack range cannot name other memory.
+//
+// Trusted here, and only here: the linker-bounded stacks (boot, secondary,
+// overflow, IRQ) are still plain integer ranges -- the stack_poison_*
+// functions -- because they have no region source yet (#777); and the
+// address arithmetic from a run's base to its bytes.
 //
 // Current limitations (2026-10-13):
-// - The ranges are plain integers: nothing ties a range to the stack run
-//   it came from, so a wrong range from a caller is not caught here.
+// - The linker-bounded ranges are plain integers: a wrong range from a
+//   caller is not caught here.
 // - Not synchronized: a range is measured while its stack may be in use;
 //   callers read their own stack or a stopped one, as they did before the
 //   split.
+
+use "kernel/mm/page.tkb";
+
+// Whether [offset, offset + count) lies inside the run.
+private fn stack_run_range_inside(run: borrow PageRunOwner[r], offset: usize,
+                                  count: usize) -> bool {
+    let total: usize = page_run_count(run) * PAGE_SIZE;
+    return offset <= total && count <= total - offset;
+}
+
+// Fill [offset, offset + count) of the run with `poison`; nothing outside.
+fn stack_run_poison_fill(run: borrow PageRunOwner[r], offset: usize,
+                         count: usize, poison: u8) !{unsafe} {
+    if (stack_run_range_inside(run, offset, count) == false) { return; }
+    let from: usize = page_run_physical_address(run) + offset;
+    stack_poison_fill(from, from + count, poison);
+}
+
+// stack_poison_depth over [offset, offset + count) of the run; 0 outside.
+fn stack_run_poison_depth(run: borrow PageRunOwner[r], offset: usize,
+                          count: usize, poison: u8) -> usize !{unsafe} {
+    if (stack_run_range_inside(run, offset, count) == false) { return 0; }
+    return stack_poison_depth(page_run_physical_address(run) + offset,
+                              count, poison);
+}
 
 // Fill [from, to) with `poison`.
 fn stack_poison_fill(from: usize, to: usize, poison: u8) !{unsafe} {

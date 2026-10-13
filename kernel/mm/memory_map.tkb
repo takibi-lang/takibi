@@ -12,8 +12,8 @@ use "kernel/mm/page.tkb";
 //
 // Current limitations (2026-10-12): memory_map_frames also re-mints the
 // permission of a page or run whose owner a holder transferred away and
-// now gives back by address (page_transferred_release_physical and its
-// run twin, page_run_reclaim_transferred_physical). The places refuse such
+// now gives back by address (page_transferred_release_physical and
+// page_run_transferred_release_physical). The places refuse such
 // a permission when the page is already back, so a double release is
 // caught at run time, but the holder's address is trusted to name pages
 // it was given.

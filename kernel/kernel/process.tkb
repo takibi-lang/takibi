@@ -376,6 +376,13 @@ struct ProcessRecord {
     // outlive the slot, and the slot is the ceiling this is on the way to
     // removing.
     stack_run: usize;
+    // GitHub issue #672 (stack runs): the run's own page-run permission,
+    // kept for the process's life and read under the process pool's lock.
+    // Every byte of the stack is reached through it (stack_poison.tkb);
+    // stack_run above is the same base, kept as a plain copy for the
+    // stack-pointer comparisons and diagnostics that only compare addresses.
+    private stack: Place(exists run: usize. PageRunOwner[run])
+        guarded_by(scheduled_process_pool);
     // GitHub issue #392: this process's fd context, as the pooled slot
     // address and the occupant generation that says the slot is still
     // ours. 0 means none yet.
@@ -2649,21 +2656,11 @@ fn scheduled_process_record_wait4_status_ptr_owned(
 // Both halves of a run (the stack and the region below it) are read and
 // written only through kernel/kernel/stack_poison.tkb (#637).
 
-// GitHub issue #377: one KERNEL_STACK_RUN_BYTES page run per slot, kept
-// as its base physical address in ProcessRecord.stack_run. 0 means this
-// slot has never been backed.
-//
-// The linear PageRunOwner is consumed at allocation
-// (page_run_owner_transfer_index) rather than stored. A linear value
-// cannot live in a record like this, and there is nothing for an owner to
-// do here in any case: a slot's run is never given back, so there is no
-// release path for it to guard.
-//
-// Never reset by scheduled_process_table_clear() (called several times
-// per boot). Keeping the base is what makes a reused slot reuse the SAME
-// run instead of allocating a fresh one and leaking the old, which is
-// exactly the property growable_pool_ensure's idempotence used to
-// provide.
+// GitHub issue #377: one KERNEL_STACK_RUN_BYTES page run per process.
+// Its PageRunOwner lives in the record's `stack` place for the process's
+// life (#672), read under the process pool's lock; ProcessRecord.stack_run
+// is a plain copy of its base (0 = none) for address comparisons. The reap
+// parks the owner in scheduled_process_spare for the next process.
 
 // A run base this file is willing to read through.
 //
@@ -2685,6 +2682,34 @@ private fn kernel_stack_run_usable(base: usize) -> bool {
 // readers are stack checks on exception and diagnostic paths that cannot
 // take the run lock. Copy under the pool view and release it before returning;
 // a slot that is gone yields 0, meaning no usable run.
+// stack_run_poison_depth over [offset, offset + count) of this slot's run,
+// read through the run's permission in the record (#672) under the process
+// pool's lock. 0 for a slot that is gone or has no run.
+private fn kernel_stack_run_depth(slot: usize, offset: usize, count: usize)
+        -> usize !{unsafe} {
+    if (slot == 0 || scheduled_process_pool_ready == false) { return 0; }
+    let pool_guard = process_pool_lock();
+    let mut held: RegionHeld(ProcessRecord) = region_held_at(pool_guard, slot);
+    match region_probe_held(pool_guard, held) {
+        RegionHeldProbe(ProcessRecord)::Stale => {
+            process_pool_unlock(pool_guard);
+            return 0;
+        }
+        RegionHeldProbe(ProcessRecord)::Held(slot_view) => {
+            let depth: usize = match place_borrow(pool_guard,
+                    region_held_record(slot_view).stack) {
+                Place::Empty => { 0 }
+                Place::Full(run) => {
+                    stack_run_poison_depth(run, offset, count, KERNEL_STACK_POISON)
+                }
+            };
+            region_held_view_drop(slot_view);
+            process_pool_unlock(pool_guard);
+            return depth;
+        }
+    }
+}
+
 private fn kernel_stack_bottom(slot: usize)
         -> usize !{unsafe} {
     let base: usize = scheduled_process_scalar_snapshot(slot).stack_run;
@@ -3079,8 +3104,12 @@ private fn scheduled_process_slot_remove(
     }
     let mut held: RegionHeld(ProcessRecord) = process_pool_held_at(slot);
     if (region_held_address(held) == 0) { return; }
-    scheduled_process_park_stack_run(
-        scheduled_process_record_locked(guard, slot).stack_run);
+    // The run's permission leaves the record before the record goes (#672).
+    let run_guard = process_pool_lock();
+    let run: Place(exists run: usize. PageRunOwner[run]) = place_take(
+        run_guard, scheduled_process_record_locked(guard, slot).stack);
+    process_pool_unlock(run_guard);
+    scheduled_process_park_stack_run(run);
     // The record's permission comes back out of its slot, once (#745): a
     // second removal of the same record finds it no longer Held.
     let pool_guard = process_pool_lock();
@@ -3102,62 +3131,50 @@ private fn scheduled_process_slot_remove(
 // one back, which is safe because it belonged to a process reaped before
 // this one -- checked anyway, since the cost of being wrong is the
 // allocator handing out memory a live stack is standing on.
-private fn scheduled_process_park_stack_run(base: usize) !{unsafe} {
-    if (base == 0) { return; }
-    let guard = scheduled_process_spare_lock(
-        &scheduled_process_spare.mutex);
-    let previous: Place(exists run: usize. PageRunOwner[run]) = place_take(
-        guard, &scheduled_process_spare.mutex,
-        scheduled_process_spare.value);
-    match previous {
-        Place::Empty => {
-            match page_run_reclaim_transferred_physical(
-                    base, KERNEL_STACK_RUN_PAGES) {
-                PageRunReclaimResult::Invalid => {}
-                PageRunReclaimResult::Reclaimed(incoming) => {
+private fn scheduled_process_park_stack_run(
+        incoming_place: Place(exists run: usize. PageRunOwner[run])) !{unsafe} {
+    match incoming_place {
+        Place::Empty => { return; }
+        Place::Full(incoming) => {
+            let guard = scheduled_process_spare_lock(
+                &scheduled_process_spare.mutex);
+            let previous: Place(exists run: usize. PageRunOwner[run]) = place_take(
+                guard, &scheduled_process_spare.mutex,
+                scheduled_process_spare.value);
+            match previous {
+                Place::Empty => {
                     let Place::Empty = place_put(
                         guard, &scheduled_process_spare.mutex,
                         scheduled_process_spare.value, incoming);
                 }
-            }
-        }
-        Place::Full(old) => {
-            let old_base: usize = page_run_physical_address(old);
-            if (old_base == base) {
-                let Place::Empty = place_put(
-                    guard, &scheduled_process_spare.mutex,
-                    scheduled_process_spare.value, old);
-            } else {
-                let sp: usize = kernel_stack_read_sp_el1();
-                if (sp >= old_base &&
-                    sp < old_base + KERNEL_STACK_RUN_BYTES) {
-                    let Place::Empty = place_put(
-                        guard, &scheduled_process_spare.mutex,
-                        scheduled_process_spare.value, old);
-                    page_run_transferred_release_physical(
-                        base, KERNEL_STACK_RUN_PAGES);
-                } else {
-                    match page_run_reclaim_transferred_physical(
-                            base, KERNEL_STACK_RUN_PAGES) {
-                        PageRunReclaimResult::Invalid => {
-                            page_run_free(old);
-                        }
-                        PageRunReclaimResult::Reclaimed(incoming) => {
-                            let Place::Empty = place_put(
-                                guard, &scheduled_process_spare.mutex,
-                                scheduled_process_spare.value, incoming);
-                            page_run_free(old);
-                        }
+                Place::Full(old) => {
+                    let old_base: usize = page_run_physical_address(old);
+                    let sp: usize = kernel_stack_read_sp_el1();
+                    if (sp >= old_base &&
+                        sp < old_base + KERNEL_STACK_RUN_BYTES) {
+                        // The calling CPU still stands on the parked run:
+                        // keep it, and give the incoming one back.
+                        let Place::Empty = place_put(
+                            guard, &scheduled_process_spare.mutex,
+                            scheduled_process_spare.value, old);
+                        page_run_free(incoming);
+                    } else {
+                        let Place::Empty = place_put(
+                            guard, &scheduled_process_spare.mutex,
+                            scheduled_process_spare.value, incoming);
+                        page_run_free(old);
                     }
                 }
             }
+            scheduled_process_spare_unlock(
+                guard, &scheduled_process_spare.mutex);
         }
     }
-    scheduled_process_spare_unlock(
-        guard, &scheduled_process_spare.mutex);
 }
 
-private fn scheduled_process_take_spare_stack_run() -> usize !{unsafe} {
+// The parked run, unless the calling CPU is still standing on it.
+private fn scheduled_process_take_spare_stack_run()
+        -> Place(exists run: usize. PageRunOwner[run]) !{unsafe} {
     let guard = scheduled_process_spare_lock(
         &scheduled_process_spare.mutex);
     let previous: Place(exists run: usize. PageRunOwner[run]) = place_take(
@@ -3167,7 +3184,7 @@ private fn scheduled_process_take_spare_stack_run() -> usize !{unsafe} {
         Place::Empty => {
             scheduled_process_spare_unlock(
                 guard, &scheduled_process_spare.mutex);
-            return 0;
+            return Place::Empty;
         }
         Place::Full(owner) => {
             let base: usize = page_run_physical_address(owner);
@@ -3178,14 +3195,34 @@ private fn scheduled_process_take_spare_stack_run() -> usize !{unsafe} {
                     scheduled_process_spare.value, owner);
                 scheduled_process_spare_unlock(
                     guard, &scheduled_process_spare.mutex);
-                return 0;
+                return Place::Empty;
             }
-            let index = page_run_owner_transfer_index(owner);
             scheduled_process_spare_unlock(
                 guard, &scheduled_process_spare.mutex);
-            return usable_ram_start + index * PAGE_SIZE;
+            return Place::Full(owner);
         }
     }
+}
+
+// A new record's run: poisoned whole (the guard, the high-water mark and
+// the overflow depth then answer about this process, GitHub issues
+// #375/#376), its base copied for address comparisons, and its permission
+// moved into the record.
+private fn scheduled_process_adopt_stack_run(
+        creating: borrow ScheduledProcessOwner[process],
+        run: sink PageRunOwner[r]) !{unsafe} {
+    stack_run_poison_fill(run, 0, KERNEL_STACK_RUN_BYTES, KERNEL_STACK_POISON);
+    scheduled_process_record_owned(creating).stack_run =
+        page_run_physical_address(run);
+    let pool_guard = process_pool_lock();
+    match place_put(pool_guard, scheduled_process_record_owned(creating).stack, run) {
+        Place::Empty => {}
+        Place::Full(earlier) => {
+            // A record already holding a run would be a second adoption.
+            page_run_free(earlier);
+        }
+    }
+    process_pool_unlock(pool_guard);
 }
 
 fn scheduled_process_table_clear() !{unsafe} {
@@ -3305,44 +3342,44 @@ private fn scheduled_process_alloc_finish(address: RegionHeld(ProcessRecord),
     // allocator for another one. This is also what preserves the old
     // "a reused slot reuses its run" behaviour now that there are no
     // slots to reuse: a new process reuses a dead one's run.
-    if (scheduled_process_record_owned(creating).stack_run == 0) {
-        let spare: usize = scheduled_process_take_spare_stack_run();
-        if (spare != 0) {
-            scheduled_process_record_owned(creating).stack_run = spare;
+    // A run the last reaped process left behind, else a fresh one. The
+    // run's permission moves into the record (#672) and stays there until
+    // the reap parks it again.
+    match scheduled_process_take_spare_stack_run() {
+        Place::Full(spare) => {
+            scheduled_process_adopt_stack_run(creating, spare);
         }
-    }
-    if (scheduled_process_record_owned(creating).stack_run == 0) {
-        match page_alloc_contiguous(KERNEL_STACK_RUN_PAGES,
-                                  PageOwnerTag::KernelStack) {
-            PageRunAllocResult::OutOfMemory => {
-                kernel_boot_log_resource_exhausted(
-                    "physical page allocator" as *u8,
-                    page_allocator_total_count());
-                let rollback_guard = process_run_lock();
-                scheduled_process_slot_remove(rollback_guard, slot);
-                process_run_unlock(rollback_guard);
-                { let mut __creating_result: ScheduledProcessAllocResult = ScheduledProcessAllocResult::Full; scheduled_process_owner_drop(creating); return __creating_result; }
-            }
-            PageRunAllocResult::Allocated(run) => {
-                let base: usize = page_run_physical_address(run);
-                if (kernel_stack_run_usable(base)) {
-                    page_run_owner_transfer_index(run);
-                    scheduled_process_record_owned(creating).stack_run = base;
-                } else {
-                    // An unaligned run from an allocator that promises
-                    // alignment is an invariant break, not a resource
-                    // limit. Give it back and refuse the slot: a stack
-                    // built on it would answer the one-bit membership
-                    // test with a lie, which is worse than not having
-                    // the slot.
-                    page_run_free(run);
+        Place::Empty => {
+            match page_alloc_contiguous(KERNEL_STACK_RUN_PAGES,
+                                      PageOwnerTag::KernelStack) {
+                PageRunAllocResult::OutOfMemory => {
                     kernel_boot_log_resource_exhausted(
-                        "kernel stack run (unaligned; refused)" as *u8,
-                        KERNEL_STACK_RUN_PAGES);
+                        "physical page allocator" as *u8,
+                        page_allocator_total_count());
                     let rollback_guard = process_run_lock();
                     scheduled_process_slot_remove(rollback_guard, slot);
                     process_run_unlock(rollback_guard);
                     { let mut __creating_result: ScheduledProcessAllocResult = ScheduledProcessAllocResult::Full; scheduled_process_owner_drop(creating); return __creating_result; }
+                }
+                PageRunAllocResult::Allocated(run) => {
+                    if (kernel_stack_run_usable(page_run_physical_address(run))) {
+                        scheduled_process_adopt_stack_run(creating, run);
+                    } else {
+                        // An unaligned run from an allocator that promises
+                        // alignment is an invariant break, not a resource
+                        // limit. Give it back and refuse the slot: a stack
+                        // built on it would answer the one-bit membership
+                        // test with a lie, which is worse than not having
+                        // the slot.
+                        page_run_free(run);
+                        kernel_boot_log_resource_exhausted(
+                            "kernel stack run (unaligned; refused)" as *u8,
+                            KERNEL_STACK_RUN_PAGES);
+                        let rollback_guard = process_run_lock();
+                        scheduled_process_slot_remove(rollback_guard, slot);
+                        process_run_unlock(rollback_guard);
+                        { let mut __creating_result: ScheduledProcessAllocResult = ScheduledProcessAllocResult::Full; scheduled_process_owner_drop(creating); return __creating_result; }
+                    }
                 }
             }
         }
@@ -3443,12 +3480,6 @@ private fn scheduled_process_alloc_finish(address: RegionHeld(ProcessRecord),
     }
     scheduled_process_record_reset_syscall_state(
         scheduled_process_record_owned(creating));
-    // GitHub issues #375/#376: a reused run would otherwise inherit the
-    // previous occupant's marks. Re-poison BOTH halves here so the guard,
-    // the high-water measurement and the overflow depth all answer about
-    // THIS process.
-    stack_poison_fill(bottom - KERNEL_PROCESS_STACK_SIZE,
-                      bottom + KERNEL_PROCESS_STACK_SIZE, KERNEL_STACK_POISON);
     // GitHub issue #580: Constructing unless the caller says this record is
     // runnable now, which only the bootstrap does. The invariant above was
     // already written down and the clone path was the only one keeping it.
@@ -6521,14 +6552,15 @@ private fn kernel_stack_guard_inspect(current_sp: usize)
     // behaving, so a disturbed byte there is an overflow that has ALREADY
     // happened; the stack's own lowest bytes being disturbed means the
     // next push would be that overflow.
-    if (stack_poison_disturbed(bottom - KERNEL_STACK_WITNESS_BYTES,
-                               KERNEL_STACK_WITNESS_BYTES, KERNEL_STACK_POISON)) {
+    if (kernel_stack_run_depth(slot,
+            KERNEL_PROCESS_STACK_SIZE - KERNEL_STACK_WITNESS_BYTES,
+            KERNEL_STACK_WITNESS_BYTES) != 0) {
         return KernelStackGuardResult::Failed(
             ("stack wrote past its end, into the run below it" as *u8,
              slot, true, bottom));
     }
-    if (stack_poison_disturbed(bottom, KERNEL_STACK_WITNESS_BYTES,
-                               KERNEL_STACK_POISON)) {
+    if (kernel_stack_run_depth(slot, KERNEL_PROCESS_STACK_SIZE,
+                               KERNEL_STACK_WITNESS_BYTES) != 0) {
         return KernelStackGuardResult::Failed(
             ("stack reached its own bottom" as *u8, slot, true, bottom));
     }
@@ -6818,8 +6850,8 @@ fn kernel_stack_used_bytes(slot: usize)
         -> usize !{unsafe} {
     let bottom: usize = kernel_stack_bottom(slot);
     if (bottom == 0) { return 0; }
-    return stack_poison_depth(bottom, KERNEL_PROCESS_STACK_SIZE,
-                              KERNEL_STACK_POISON);
+    return kernel_stack_run_depth(slot, KERNEL_PROCESS_STACK_SIZE,
+                                  KERNEL_PROCESS_STACK_SIZE);
 }
 
 // GitHub issue #377: how far past its end this slot's stack has ever
@@ -6835,8 +6867,7 @@ fn kernel_stack_overflow_bytes(slot: usize)
         -> usize !{unsafe} {
     let bottom: usize = kernel_stack_bottom(slot);
     if (bottom == 0) { return 0; }
-    return stack_poison_depth(bottom - KERNEL_PROCESS_STACK_SIZE,
-                              KERNEL_PROCESS_STACK_SIZE, KERNEL_STACK_POISON);
+    return kernel_stack_run_depth(slot, 0, KERNEL_PROCESS_STACK_SIZE);
 }
 
 // The deepest any slot has been, which is the number that decides how big
