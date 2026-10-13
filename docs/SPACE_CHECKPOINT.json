@@ -2,9 +2,10 @@
   "date": "2026-10-13",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "427941651a3d7f0ac227f2da644186d039546934066b9d1570a5b300f7000f35",
-  "workload": "#720 slice 2: the four xHCI producer rings on the XhciRing tx device protocol (whole-ring owners in Place slots). Linked kernels against main fcacade4 (scripts/space_delta.py).",
+  "source_sha256": "6a7fd52dfe89158ade9fe10a35ab11f3c48db8834b1ff4efeb775a8d6febf3a7",
+  "workload": "#720 slice 3a: xHCI scratchpad buffers/array, ERST and input context on device protocols. Linked kernels against main 186f0c85 (scripts/space_delta.py).",
   "evidence": [
+    "docs/XHCI_TABLES_SPACE_2026-10-13.md",
     "docs/XHCI_RINGS_SPACE_2026-10-13.md",
     "docs/DEVICE_PROTOCOL_SPACE_2026-10-13.md",
     "docs/STACK_POISON_SPLIT_SPACE_2026-10-13.md",
@@ -61,6 +62,6 @@
     "docs/VIRTIO_NET_TX_2026-10-10.md",
     "docs/VIRTIO_NET_TX_SPACE_2026-10-10.json"
   ],
-  "assessment": "Text +3344 B (QEMU) / +3360 B (RPi5); new state 259 B per kernel (slot array, claim flags, doorbell/await parameters); ring arrays unchanged; usable_ram_start unchanged. RPi5 BSS section total -1024 B, not attributed to any symbol. Earlier measured results stand.",
-  "next_trigger": "#720 slice 3 (xHCI event ring), a shrink protocol for walked RegionPools, the #748 allocator change, or the next pool consumer moved onto Held slots, whichever lands first."
+  "assessment": "Text +8456 B (QEMU) / +8520 B (RPi5); about 300 B new state; ERST and scratchpad array rounded to 64 B; QEMU usable_ram_start +32 KiB (image end crossed its rounding), RPi5 unchanged. Earlier measured results stand.",
+  "next_trigger": "#720 E1 snapshot slice (event ring and output context), a shrink protocol for walked RegionPools, the #748 allocator change, or the next pool consumer moved onto Held slots, whichever lands first."
 }
