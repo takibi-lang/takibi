@@ -125,7 +125,9 @@ ddb: usage: xu PID HEX_ADDRESS [COUNT_1_TO_64]
 ddb: xu pid not captured
 ddb: xu pid=1 root=0 address=0x0000000070000000 count=1
 ddb: xu unmapped address=0x0000000070000000
-commands: oops regs intr sched current vm fds ps stacks wait proc PID bt [PID|cpu N] trace events unimpl xk ADDRESS [COUNT] xp PHYSICAL [COUNT] xu PID ADDRESS [COUNT] help continue
+ddb: profile nothing to dump
+ddb: usage: profile stop | profile dump (start: write to /proc/takibi/profile)
+commands: oops regs intr sched current vm fds ps stacks wait proc PID bt [PID|cpu N] trace events unimpl xk ADDRESS [COUNT] xp PHYSICAL [COUNT] xu PID ADDRESS [COUNT] profile stop|dump help continue
 ddb: continuing
 ddb: console tx=queued
 init: ash bootstrap
