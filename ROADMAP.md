@@ -86,8 +86,11 @@ list (maintainer, 2026-10-09).
    (2026-10-13; the raw `slice as *T` path still lets a refined field sit
    over arbitrary bytes, #772). The overlay also fits the K/R files still
    on kernel/RAW_MINT_FILES that parse external bytes (fdt, virtio, elf64).
-   **Next:** the S splits (process.tkb, usb_xhci.tkb), then those parsers,
-   and the region layers on #672. Not on the critical path: #748 (allocator time, 2.75x
+   process.tkb is split too: its kernel-stack bytes live in the small mint
+   file stack_poison.tkb (2026-10-13). usb_xhci.tkb's DMA-ring raw sites
+   stay as #720's work (Territory B). **Next:** the parsers the overlay now
+   reaches (fdt.tkb, elf64.tkb, the virtio descriptors), and the region
+   layers on #672. Not on the critical path: #748 (allocator time, 2.75x
    slower since the per-page places), #739 (stale list entries, per-file
    counts). Consolidating the kernel-driven built-ins into general features
    is #750 (holder-tied identities, option C, is its central item; a

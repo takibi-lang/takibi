@@ -25,6 +25,7 @@ kernel/platform/rpi5/device_map.tkb
 # S: to be split into a small mint file and rewritten code
 # kernel/kernel/process.tkb was split (2026-10-13): its raw stack bytes
 # are kernel/kernel/stack_poison.tkb, listed under K.
+# usb_xhci.tkb: its DMA-ring raw sites are split under #720 (Territory B).
 kernel/platform/rpi5/usb_xhci.tkb
 
 # R: to be rewritten to authority-derived access, then removed

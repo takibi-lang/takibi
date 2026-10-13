@@ -116,6 +116,21 @@ reserved and unused. A per-object word multiplies; a per-pool word usually does
 not; a header with reserved slack may cost nothing at all. Check also whether
 one word can do two jobs.
 
+## Adding a kernel .tkb file
+
+A new file under kernel/ is checked by build gates that a clean compile does
+not reveal. Before the first kernel build:
+
+- Give it a `Current limitations` header in its first 150 lines: what its
+  callers guarantee that the file does not enforce (kernel-limitations-header).
+- Add it to the Makefile's kernel source list, or say there why not
+  (kernel-unused-coverage).
+- If it holds raw sites, list it in kernel/RAW_MINT_FILES with a reason and
+  give it a row in scripts/raw_deref_budget.tsv; a file that leaves either
+  loses its row in both.
+- If it prints boot output, add or update the kernel/tests view fixture
+  (.expected and .filter) that checks those lines.
+
 ## Diagnostics and verification
 
 Treat compiler-detected invalid or dangerously ambiguous code as an error, not
