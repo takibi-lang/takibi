@@ -59,6 +59,7 @@ let () =
   let explain_inference = ref false in
   let profile_functions = ref false in
   let frame_pointers = ref false in
+  let function_sections = ref false in
   let show_version = ref false in
   let emit_exception_frame_offsets = ref "" in
   let emit_struct_layout = ref "" in
@@ -207,6 +208,8 @@ let () =
          profile_functions := true
      | "--frame-pointers" ->
          frame_pointers := true
+     | "--function-sections" ->
+         function_sections := true
      | arg ->
          input_files := arg :: !input_files);
     incr i
@@ -225,7 +228,7 @@ let () =
 
   if input_files = [] then (
     Printf.eprintf
-      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--frame-pointers] [--forbid-trap] [--forbid-unsafe] [--confine-raw-authority] [--raw-mint-file <path>] [--device-semantics-file <path>] [--regions] [--reject-unused-functions] [--external-entry <function>] [--check-unused-file <path>] [--explain-inference] [--emit-effect-matrix] [--emit-exception-frame-offsets <StructName>] [--emit-struct-layout <StructName>] [--emit-debug-metadata <path>] [--emit-depfile <path>] [--emit-overflow-audit <path>] [--emit-raw-deref-audit <path>] [--emit-held-guards <path>] [--emit-tla <dir>] [--emit-protocol-source <dir>] [--version]\n"
+      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--frame-pointers] [--function-sections] [--forbid-trap] [--forbid-unsafe] [--confine-raw-authority] [--raw-mint-file <path>] [--device-semantics-file <path>] [--regions] [--reject-unused-functions] [--external-entry <function>] [--check-unused-file <path>] [--explain-inference] [--emit-effect-matrix] [--emit-exception-frame-offsets <StructName>] [--emit-struct-layout <StructName>] [--emit-debug-metadata <path>] [--emit-depfile <path>] [--emit-overflow-audit <path>] [--emit-raw-deref-audit <path>] [--emit-held-guards <path>] [--emit-tla <dir>] [--emit-protocol-source <dir>] [--version]\n"
       Sys.argv.(0);
     exit 1
   );
@@ -237,6 +240,7 @@ let () =
   if !debug_info then Llvm_gen.enable_debug_info (List.hd input_files);
   Llvm_gen.set_function_profiling !profile_functions;
   Llvm_gen.set_frame_pointers !frame_pointers;
+  Llvm_gen.set_function_sections !function_sections;
 
   let prescan_file filename =
     let chan = open_in filename in

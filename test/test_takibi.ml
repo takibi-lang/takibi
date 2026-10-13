@@ -13995,6 +13995,31 @@ let codegen_tests = [
             (contains_substring ir "section \".text.takibi\"")));
 
   Alcotest.test_case
+    "--function-sections puts each function and data object in its own section"
+    `Quick
+    (fun () ->
+      Fun.protect
+        ~finally:(fun () ->
+          Llvm_gen.set_frame_pointers false;
+          Llvm_gen.set_function_sections false)
+        (fun () ->
+          Llvm_gen.set_frame_pointers true;
+          Llvm_gen.set_function_sections true;
+          ignore (gen_codegen
+            "let mut cg_fs_zero786: usize = 0;
+             let mut cg_fs_word786: usize = 7;
+             let cg_fs_const786: usize = 3;
+             fn cg_fs_leaf786() -> usize { return cg_fs_zero786 + cg_fs_word786; }
+             fn cg_fs_caller786() -> usize { return cg_fs_leaf786() + cg_fs_const786; }");
+          let ir = Llvm.string_of_llmodule !Llvm_gen.the_module in
+          List.iter (fun s ->
+            Alcotest.(check bool) s true
+              (contains_substring ir (Printf.sprintf "section \"%s\"" s)))
+            [ ".text.takibi.cg_fs_leaf786"; ".text.takibi.cg_fs_caller786";
+              ".bss.cg_fs_zero786"; ".data.cg_fs_word786";
+              ".rodata.cg_fs_const786" ]));
+
+  Alcotest.test_case
     "Slice 4 ABI: checker effects add no runtime parameters" `Quick
     (fun () ->
       ignore (gen_codegen "fn cgeffect4() !{may_block} {}");

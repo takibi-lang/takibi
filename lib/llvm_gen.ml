@@ -215,6 +215,7 @@ let target_data : Llvm_target.DataLayout.t option ref = ref None
 let configured_target_triple = ref ""
 let configured_datalayout_str = ref ""
 let frame_pointers_enabled = ref false
+let function_sections_enabled = ref false
 
 (* Test processes compile many independent programs. Return the target-facing
    global state to the same unconfigured defaults a fresh compiler process has;
@@ -225,6 +226,7 @@ let reset_target () =
   configured_target_triple := "";
   configured_datalayout_str := "";
   frame_pointers_enabled := false;
+  function_sections_enabled := false;
   Target_info.reset ()
 (* Enum underlying type registry: enum name -> underlying Ast type (u8/u16/u32/u64) *)
 let enum_underlying  : (string, Ast.type_expr) Hashtbl.t = Hashtbl.create 8
@@ -275,6 +277,18 @@ let set_function_profiling enabled = function_profiling_enabled := enabled
    AArch64's canonical [previous x29, saved x30] records without decoding
    LLVM prologues. Other targets keep LLVM's normal frame-pointer policy. *)
 let set_frame_pointers enabled = frame_pointers_enabled := enabled
+
+(* -- One section per object (--function-sections) ------------------------ *)
+(* GitHub issue #786: every defined function and global gets a section of its
+   own, the -ffunction-sections / -fdata-sections equivalent, so the linker's
+   --gc-sections removes whatever nothing reaches. Removing dead code is the
+   linker's job; the compiler's whole-program analysis is for correctness
+   checks. A function goes to .text.takibi.<name> under --frame-pointers (the
+   kernel's generated-text range) and to .text.<name> otherwise; a global goes
+   to .rodata./.bss./.data.<name> by its kind. An object that already names a
+   section keeps it. Data objects use the same naming LLVM uses, so the name
+   prefix gives the right section kind. *)
+let set_function_sections enabled = function_sections_enabled := enabled
 
 let prof_entry_ty : lltype option ref = ref None
 let prof_table : llvalue option ref = ref None
@@ -7155,6 +7169,10 @@ let declare_func ?prog_types fdef =
        module calls a built-in. *)
     if Ast.source_file_of_loc fdef.def_loc = Ast.builtin_region_file then
       set_linkage Linkage.Internal f;
+    (* GitHub issue #786, the generated-code rule (SPEC.md): protocol code is
+       derived, so nothing outside the module names it either. *)
+    if Ast.is_protocol_file (Ast.source_file_of_loc fdef.def_loc) then
+      set_linkage Linkage.Internal f;
     if fdef.is_inline then
       add_function_attr f (create_enum_attr context "alwaysinline" 0L) AttrIndex.Function;
     if fdef.is_noinline then
@@ -8088,6 +8106,28 @@ let gen_program ?prog_types prog =
         AttrIndex.Function;
       if not (is_declaration fn) then set_section ".text.takibi" fn
     ) !the_module;
+  if !function_sections_enabled then begin
+    let text = if !frame_pointers_enabled then ".text.takibi" else ".text" in
+    (* Llvm.section crashes on an object with no section (a NULL string),
+       so the objects that carry their own section are named here: only the
+       profiling table and count do. *)
+    let own_section g = String.starts_with ~prefix:"__takibi_prof_" (value_name g) in
+    iter_functions (fun fn ->
+      if not (is_declaration fn) then
+        set_section (text ^ "." ^ value_name fn) fn
+    ) !the_module;
+    iter_globals (fun g ->
+      if not (is_declaration g) && not (own_section g) && value_name g <> "" then begin
+        let init = global_initializer g in
+        let kind =
+          if is_global_constant g then ".rodata"
+          else match init with
+            | Some c when is_null c || is_undef c -> ".bss"
+            | _ -> ".data" in
+        set_section (kind ^ "." ^ value_name g) g
+      end
+    ) !the_module
+  end;
   assert_trap_accounting_consistent ();
   (* Resolve any deferred/forward-referenced DI metadata. Must run after every
      gen_func call above, before the module is optimized or emitted to an object. *)

@@ -4083,6 +4083,21 @@ Generated functions that no program function reaches, directly or through
 other generated functions, are dropped after the declaration and its
 lowerings are checked (GitHub issue #782): an unused accessor costs nothing
 in the image and changes no verdict.
+
+Generated code rule (GitHub issue #786). Every function the compiler derives
+-- protocol code, region built-ins, and any future generator -- must be:
+1. on demand: emitted only when referenced;
+2. internal linkage, and `inline` (LLVM `alwaysinline`) when it is small
+   (address arithmetic, an index check), so it does not survive as a
+   function of its own in the image;
+3. removable by the linker when still unreferenced: under
+   `--function-sections` every defined function and data object is in a
+   section of its own (`.text.takibi.<name>` with `--frame-pointers`,
+   `.text.<name>` without; `.rodata.`/`.data.`/`.bss.<name>` by kind), and
+   the kernel links with `--gc-sections`.
+A generator that cannot meet all three is not accepted. Protocol code is
+internal; its element accessors (`_read`, `_write`), device spans (`_span`,
+`_span_at`), `_release`, witness `_spend` and snapshot `_value` are `inline`.
 `--emit-protocol-source <dir>` writes each protocol's generated source as
 `<dir>/<Name>.tkb` and exits, so a diagnostic that points into `<protocol
 Name>` can be read against it; only the declaration is validated.

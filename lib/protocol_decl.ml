@@ -543,7 +543,7 @@ let rec type_source loc = function
   | TypeArray (t, k) -> Printf.sprintf "[%s; %d]" (type_source loc t) k
   | _ -> fail loc "unsupported region element type in a protocol declaration"
 
-let generated_file name = Printf.sprintf "<protocol %s>" name
+let generated_file = Ast.protocol_file
 
 let source_of (d : protocol_decl) (p : t) : string =
   let _, elem, idx = d.proto_region in
@@ -582,12 +582,12 @@ let source_of (d : protocol_decl) (p : t) : string =
   List.iter (fun s ->
     if s.s_write then begin
       let owner = ty s.s_name s.s_params in
-      add "fn %s_%s_write(s: borrow %s, i: usize @ k, value: %s) where k < %s {"
+      add "inline fn %s_%s_write(s: borrow %s, i: usize @ k, value: %s) where k < %s {"
         pn s.s_name owner elem count;
       add "    let element = region_at(s.memory, i);";
       add "    *element = value;";
       add "}";
-      add "fn %s_%s_read(s: borrow %s, i: usize @ k) -> %s where k < %s {"
+      add "inline fn %s_%s_read(s: borrow %s, i: usize @ k) -> %s where k < %s {"
         pn s.s_name owner elem count;
       add "    return *region_at(s.memory, i);";
       add "}"
@@ -609,10 +609,10 @@ let source_of (d : protocol_decl) (p : t) : string =
         let one = whole ^ "_at" in
         Device_protocol_registry.register_span_function whole;
         Device_protocol_registry.register_span_function one;
-        add "fn %s(s: borrow %s) -> DmaDeviceSpan {" whole owner;
+        add "inline fn %s(s: borrow %s) -> DmaDeviceSpan {" whole owner;
         add "    return %s(s.memory, 0, %s);" Device_protocol_registry.span count;
         add "}";
-        add "fn %s(s: borrow %s, i: usize @ k) -> DmaDeviceSpan where k < %s {"
+        add "inline fn %s(s: borrow %s, i: usize @ k) -> DmaDeviceSpan where k < %s {"
           one owner count;
         add "    return %s(s.memory, i, 1);" Device_protocol_registry.span;
         add "}"
@@ -622,14 +622,14 @@ let source_of (d : protocol_decl) (p : t) : string =
   add "    let mut owner: %s = { memory };" (ty p.init []);
   add "    return owner;";
   add "}";
-  add "fn %s_release(owner: %s) -> %s {" pn (ty p.init []) region;
+  add "inline fn %s_release(owner: %s) -> %s {" pn (ty p.init []) region;
   add "    return owner.memory;";
   add "}";
   List.iter (fun o ->
     if o.o_args <> [] then begin
       add "private linear view %s_%s[%s];" pn o.o_name
         (String.concat ", " (List.map (fun a -> a ^ ": usize") o.o_args));
-      add "fn %s_%s_spend(w: sink %s) {}" pn o.o_name (view o.o_name o.o_args)
+      add "inline fn %s_%s_spend(w: sink %s) {}" pn o.o_name (view o.o_name o.o_args)
     end) p.outcomes;
   (* Observations, grouped by declaration order of their outcomes. *)
   let observes = List.filter_map (function
@@ -656,7 +656,7 @@ let source_of (d : protocol_decl) (p : t) : string =
       add "    private value: %s;" elem;
       add "    private unit: usize;";
       add "}";
-      add "fn %s_%s_value(snap: borrow %s) -> %s {" pn o.o_name sty elem;
+      add "inline fn %s_%s_value(snap: borrow %s) -> %s {" pn o.o_name sty elem;
       add "    return snap.value;";
       add "}";
       add "fn %s_%s_release(s: borrow %s, snap: sink %s) {" pn o.o_name

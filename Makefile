@@ -325,6 +325,18 @@ KERNEL_ASM_ENTRIES := main kernel_secondary_main \
 	kernel_syscall_dispatch kernel_syscall_resume_return \
 	process_image_handle_data_abort
 KERNEL_DEBUGGER_ENTRIES := kernel_process_trace_report page_owner_description
+# GitHub issue #786: every kernel link removes the sections nothing reaches
+# (the compiler emits one section per function and data object under
+# --function-sections). The roots are the entry symbol, the KEEP() sections
+# of the linker scripts (.text.boot, .text.vectors), and what those reach
+# through relocations -- which covers KERNEL_ASM_ENTRIES, since assembly
+# names them in relocated instructions. The debugger entries are called by
+# name from GDB and nothing in the image refers to them, so they are rooted
+# here. The production images also keep the list of removed sections next
+# to the ELF (<elf>.gc-sections), the reviewable inventory of what was
+# compiled but is unreachable.
+KERNEL_LDFLAGS := --gc-sections $(addprefix --undefined=,$(KERNEL_DEBUGGER_ENTRIES))
+KERNEL_GC_LIST = --print-gc-sections > $@.gc-sections
 # The DMA and GEM fixtures have their own --check-unused-file invocations and are
 # absent from both production closures.
 KERNEL_UNUSED_EXEMPT := \
@@ -1403,7 +1415,7 @@ $(KERNEL_PEER_FORK_ELF): $(KERNEL_PEER_FORK_O)
 
 $(KERNEL_RPI5_MAIN_O): $(KERNEL_RPI5_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(KERNEL_FREELIST_TKB) $(KERNEL_SLOTMAP_TKB) $(KERNEL_REFCOUNT_SLOTMAP_TKB) $(KERNEL_PAGE_TKB) $(KERNEL_ADDRESS_SPACE_TKB) $(KERNEL_USER_MEMORY_TKB) $(KERNEL_PROCESS_IMAGE_TKB) $(KERNEL_PROCESS_TKB) $(KERNEL_SYSCALL_TKB) $(KERNEL_ELF64_TKB) $(KERNEL_MEMORY_BLOCK_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_EXT2_TKB) $(KERNEL_EXT2_MUTATION_LOCK_TKB) $(KERNEL_EXT2_MUTATION_PROBE_TKB) $(KERNEL_LOG_TKB) $(KERNEL_RPI5_MMU_TKB) $(KERNEL_RPI5_ASID_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_USER_EXTERN) $(KERNEL_RPI5_BOOT_EXTERN) $(KERNEL_RPI5_FPSIMD_EXTERN) $(KERNEL_PMU_EXTERN) $(KERNEL_EXT2_IMAGE) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_NETCONFIG_TKB) $(KERNEL_ARP_TKB) $(KERNEL_CHECKSUM_TKB) $(KERNEL_ICMP_TKB) $(KERNEL_WIRE_TKB) $(KERNEL_TCP_TKB) $(KERNEL_SOCKET_CAP_TKB) $(KERNEL_RPI5_MEMORY_TKB) $(KERNEL_FDT_TKB) \
     $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_INTC_TKB) $(KERNEL_RPI5_TIMER_IRQ_TKB) $(KERNEL_RPI5_TIMER_TKB) $(KERNEL_RPI5_EXC_EVIDENCE_TKB) $(KERNEL_RPI5_VECTOR_TABLE_TKB) $(KERNEL_RPI5_EXC_FRAME_TKB) $(TAKIBI) Makefile | $(KERNEL_BUILD_DIR)
-	$(TAKIBI) $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_FDT_TKB) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --frame-pointers --forbid-trap --regions $(KERNEL_RAW_CONFINE) $(KERNEL_DEVICE_SEMANTICS) $(KERNEL_UNUSED_CHECK_RPI5) --emit-depfile $@.d --emit-raw-deref-audit $@.rawderef.tsv -o $@
+	$(TAKIBI) $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_FDT_TKB) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --frame-pointers --function-sections --forbid-trap --regions $(KERNEL_RAW_CONFINE) $(KERNEL_DEVICE_SEMANTICS) $(KERNEL_UNUSED_CHECK_RPI5) --emit-depfile $@.d --emit-raw-deref-audit $@.rawderef.tsv -o $@
 	python3 scripts/buildcheck_kernel_unused_coverage.py rpi5 $@.d
 	python3 scripts/measure_trusted_base.py --check-raw-deref rpi5 $@.rawderef.tsv $@.d
 
@@ -1412,7 +1424,7 @@ $(KERNEL_RPI5_MAIN_O): $(KERNEL_RPI5_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(
 -include $(KERNEL_RPI5_MAIN_O).d
 
 $(KERNEL_RPI5_ELF): $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_MAIN_O) $(KERNEL_RPI5_LINK_LD) $(KERNEL_DIR)/arch/arm64/boot/link_qemu.ld
-	$(LLD) -T $(KERNEL_RPI5_LINK_LD) $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_MAIN_O) -o $@
+	$(LLD) $(KERNEL_LDFLAGS) -T $(KERNEL_RPI5_LINK_LD) $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_MAIN_O) -o $@ $(KERNEL_GC_LIST)
 	python3 scripts/buildcheck_kernel_asm_invariants.py $@ 2
 	python3 scripts/buildcheck_elf_symbol_alignment.py $@ boot_page_pool_cell 16
 
@@ -1427,13 +1439,13 @@ $(KERNEL_RPI5_SHELL_ELF): $(KERNEL_RPI5_ELF) $(KERNEL_EXT2_IMAGE) \
 # ordinary image, with DWARF added only to the host ELF. Depending on main.o
 # gives this second compile its complete depfile-backed source boundary.
 $(KERNEL_RPI5_MAIN_DEBUG_O): $(KERNEL_RPI5_MAIN_O)
-	$(TAKIBI) $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_FDT_TKB) $(KERNEL_RPI5_MAIN_TKB) --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --frame-pointers --forbid-trap --regions $(KERNEL_DEVICE_SEMANTICS) $(KERNEL_UNUSED_CHECK_RPI5) -g --emit-depfile $@.d -o $@
+	$(TAKIBI) $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_FDT_TKB) $(KERNEL_RPI5_MAIN_TKB) --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --frame-pointers --function-sections --forbid-trap --regions $(KERNEL_DEVICE_SEMANTICS) $(KERNEL_UNUSED_CHECK_RPI5) -g --emit-depfile $@.d -o $@
 	python3 scripts/buildcheck_kernel_unused_coverage.py rpi5 $@.d
 
 -include $(KERNEL_RPI5_MAIN_DEBUG_O).d
 
 $(KERNEL_RPI5_DEBUG_ELF): $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_MAIN_DEBUG_O) $(KERNEL_RPI5_LINK_LD) $(KERNEL_DIR)/arch/arm64/boot/link_qemu.ld
-	$(LLD) -T $(KERNEL_RPI5_LINK_LD) $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_MAIN_DEBUG_O) -o $@
+	$(LLD) $(KERNEL_LDFLAGS) -T $(KERNEL_RPI5_LINK_LD) $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_MAIN_DEBUG_O) -o $@
 	python3 scripts/buildcheck_kernel_asm_invariants.py $@ 2
 	python3 scripts/buildcheck_elf_symbol_alignment.py $@ boot_page_pool_cell 16
 
@@ -1525,7 +1537,7 @@ $(KERNEL_QEMU_PMU_O): $(KERNEL_PMU_S) | $(KERNEL_QEMU_BUILD_DIR)
 # duplicate top-level definition is a compile error by design.
 $(KERNEL_QEMU_MAIN_O): $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(KERNEL_FREELIST_TKB) $(KERNEL_SLOTMAP_TKB) $(KERNEL_REFCOUNT_SLOTMAP_TKB) $(KERNEL_PAGE_TKB) $(KERNEL_ADDRESS_SPACE_TKB) $(KERNEL_USER_MEMORY_TKB) $(KERNEL_PROCESS_IMAGE_TKB) $(KERNEL_PROCESS_TKB) $(KERNEL_SYSCALL_TKB) $(KERNEL_ELF64_TKB) $(KERNEL_MEMORY_BLOCK_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_EXT2_TKB) $(KERNEL_EXT2_MUTATION_LOCK_TKB) $(KERNEL_EXT2_MUTATION_PROBE_TKB) $(KERNEL_LOG_TKB) $(KERNEL_RPI5_MMU_TKB) $(KERNEL_RPI5_ASID_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_RPI5_USER_EXTERN) $(KERNEL_RPI5_BOOT_EXTERN) $(KERNEL_RPI5_FPSIMD_EXTERN) $(KERNEL_PMU_EXTERN) $(KERNEL_EXT2_IMAGE) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_QEMU_USB_ABSENT_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_NETCONFIG_TKB) $(KERNEL_ARP_TKB) $(KERNEL_CHECKSUM_TKB) $(KERNEL_ICMP_TKB) $(KERNEL_WIRE_TKB) $(KERNEL_TCP_TKB) $(KERNEL_SOCKET_CAP_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_FDT_TKB) \
     $(KERNEL_QEMU_UART_TKB) $(KERNEL_QEMU_INTC_TKB) $(KERNEL_QEMU_TIMER_IRQ_TKB) $(KERNEL_RPI5_TIMER_TKB) $(KERNEL_RPI5_EXC_EVIDENCE_TKB) $(KERNEL_RPI5_VECTOR_TABLE_TKB) $(KERNEL_RPI5_EXC_FRAME_TKB) $(TAKIBI) Makefile | $(KERNEL_QEMU_BUILD_DIR)
-	$(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_QEMU_USB_ABSENT_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $< --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --frame-pointers --forbid-trap --regions $(KERNEL_RAW_CONFINE) $(KERNEL_DEVICE_SEMANTICS) $(KERNEL_UNUSED_CHECK_QEMU) --emit-depfile $@.d --emit-raw-deref-audit $@.rawderef.tsv -o $@
+	$(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_QEMU_USB_ABSENT_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $< --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --frame-pointers --function-sections --forbid-trap --regions $(KERNEL_RAW_CONFINE) $(KERNEL_DEVICE_SEMANTICS) $(KERNEL_UNUSED_CHECK_QEMU) --emit-depfile $@.d --emit-raw-deref-audit $@.rawderef.tsv -o $@
 	python3 scripts/buildcheck_kernel_unused_coverage.py qemu $@.d
 	python3 scripts/measure_trusted_base.py --check-raw-deref qemu $@.rawderef.tsv $@.d
 
@@ -1533,21 +1545,21 @@ $(KERNEL_QEMU_MAIN_O): $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(
 # NetRx scan moved before its process-run lock in the generated overlay.
 $(KERNEL_QEMU_NET_WAKE_CONTROL_O): $(KERNEL_QEMU_MAIN_O) $(KERNEL_PROCESS_TKB) $(KERNEL_QEMU_TIMER_IRQ_TKB) scripts/build_qemu_net_wake_control.py | $(KERNEL_QEMU_BUILD_DIR)
 	python3 scripts/build_qemu_net_wake_control.py . $(KERNEL_QEMU_NET_WAKE_CONTROL_DIR)
-	cd $(KERNEL_QEMU_NET_WAKE_CONTROL_DIR) && $(abspath $(TAKIBI)) kernel/platform/qemu/uart.tkb kernel/platform/rpi5/pcie.tkb kernel/platform/qemu/usb_disk_absent.tkb kernel/platform/qemu/mmu_layout.tkb kernel/boot/fdt.tkb kernel/platform/qemu/memory.tkb kernel/drivers/net/virtio_net.tkb kernel/drivers/block/virtio_blk.tkb kernel/platform/qemu/init.tkb --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --frame-pointers --forbid-trap --regions $(KERNEL_DEVICE_SEMANTICS) $(KERNEL_UNUSED_CHECK_QEMU) --emit-depfile $(abspath $@).d -o $(abspath $@)
+	cd $(KERNEL_QEMU_NET_WAKE_CONTROL_DIR) && $(abspath $(TAKIBI)) kernel/platform/qemu/uart.tkb kernel/platform/rpi5/pcie.tkb kernel/platform/qemu/usb_disk_absent.tkb kernel/platform/qemu/mmu_layout.tkb kernel/boot/fdt.tkb kernel/platform/qemu/memory.tkb kernel/drivers/net/virtio_net.tkb kernel/drivers/block/virtio_blk.tkb kernel/platform/qemu/init.tkb --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --frame-pointers --function-sections --forbid-trap --regions $(KERNEL_DEVICE_SEMANTICS) $(KERNEL_UNUSED_CHECK_QEMU) --emit-depfile $(abspath $@).d -o $(abspath $@)
 
 $(KERNEL_QEMU_BUILD_DIR)/race-%-armed-main.o: $(KERNEL_QEMU_MAIN_O) scripts/build_qemu_race_window.py | $(KERNEL_QEMU_BUILD_DIR)
 	python3 scripts/build_qemu_race_window.py . _build/qemu-race-window-$*-armed $*
-	cd _build/qemu-race-window-$*-armed && $(abspath $(TAKIBI)) kernel/platform/qemu/uart.tkb kernel/platform/rpi5/pcie.tkb kernel/platform/qemu/usb_disk_absent.tkb kernel/platform/qemu/mmu_layout.tkb kernel/boot/fdt.tkb kernel/platform/qemu/memory.tkb kernel/drivers/net/virtio_net.tkb kernel/drivers/block/virtio_blk.tkb kernel/platform/qemu/init.tkb --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --frame-pointers --forbid-trap --regions $(KERNEL_DEVICE_SEMANTICS) -o $(abspath $@)
+	cd _build/qemu-race-window-$*-armed && $(abspath $(TAKIBI)) kernel/platform/qemu/uart.tkb kernel/platform/rpi5/pcie.tkb kernel/platform/qemu/usb_disk_absent.tkb kernel/platform/qemu/mmu_layout.tkb kernel/boot/fdt.tkb kernel/platform/qemu/memory.tkb kernel/drivers/net/virtio_net.tkb kernel/drivers/block/virtio_blk.tkb kernel/platform/qemu/init.tkb --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --frame-pointers --function-sections --forbid-trap --regions $(KERNEL_DEVICE_SEMANTICS) -o $(abspath $@)
 
 $(KERNEL_QEMU_BUILD_DIR)/race-%-reverted-main.o: $(KERNEL_QEMU_MAIN_O) scripts/build_qemu_race_window.py | $(KERNEL_QEMU_BUILD_DIR)
 	python3 scripts/build_qemu_race_window.py . _build/qemu-race-window-$*-reverted $* --revert
-	cd _build/qemu-race-window-$*-reverted && $(abspath $(TAKIBI)) kernel/platform/qemu/uart.tkb kernel/platform/rpi5/pcie.tkb kernel/platform/qemu/usb_disk_absent.tkb kernel/platform/qemu/mmu_layout.tkb kernel/boot/fdt.tkb kernel/platform/qemu/memory.tkb kernel/drivers/net/virtio_net.tkb kernel/drivers/block/virtio_blk.tkb kernel/platform/qemu/init.tkb --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --frame-pointers --forbid-trap --regions $(KERNEL_DEVICE_SEMANTICS) -o $(abspath $@)
+	cd _build/qemu-race-window-$*-reverted && $(abspath $(TAKIBI)) kernel/platform/qemu/uart.tkb kernel/platform/rpi5/pcie.tkb kernel/platform/qemu/usb_disk_absent.tkb kernel/platform/qemu/mmu_layout.tkb kernel/boot/fdt.tkb kernel/platform/qemu/memory.tkb kernel/drivers/net/virtio_net.tkb kernel/drivers/block/virtio_blk.tkb kernel/platform/qemu/init.tkb --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --frame-pointers --function-sections --forbid-trap --regions $(KERNEL_DEVICE_SEMANTICS) -o $(abspath $@)
 
 $(KERNEL_QEMU_BUILD_DIR)/kernel-race-%.elf: $(KERNEL_QEMU_BUILD_DIR)/race-%-main.o $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_LINK_LD)
-	$(LLD) -T $(KERNEL_QEMU_LINK_LD) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $< -o $@
+	$(LLD) $(KERNEL_LDFLAGS) -T $(KERNEL_QEMU_LINK_LD) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $< -o $@
 
 $(KERNEL_QEMU_NET_WAKE_CONTROL_ELF): $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_NET_WAKE_CONTROL_O) $(KERNEL_QEMU_LINK_LD) $(KERNEL_RPI5_LINK_LD)
-	$(LLD) -T $(KERNEL_QEMU_LINK_LD) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_NET_WAKE_CONTROL_O) -o $@
+	$(LLD) $(KERNEL_LDFLAGS) -T $(KERNEL_QEMU_LINK_LD) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_NET_WAKE_CONTROL_O) -o $@
 
 # GitHub issue #306: the hand-written prerequisite list on $(KERNEL_QEMU_MAIN_O)
 # above is a second, independently-maintained copy of exactly what the
@@ -1564,7 +1576,7 @@ $(KERNEL_QEMU_NET_WAKE_CONTROL_ELF): $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_E
 -include $(KERNEL_QEMU_MAIN_O).d
 
 $(KERNEL_QEMU_ELF): $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_MAIN_O) $(KERNEL_QEMU_LINK_LD) $(KERNEL_RPI5_LINK_LD)
-	$(LLD) -T $(KERNEL_QEMU_LINK_LD) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_MAIN_O) -o $@
+	$(LLD) $(KERNEL_LDFLAGS) -T $(KERNEL_QEMU_LINK_LD) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_MAIN_O) -o $@ $(KERNEL_GC_LIST)
 	python3 scripts/buildcheck_kernel_asm_invariants.py $@ 1
 	python3 scripts/buildcheck_elf_symbol_alignment.py $@ boot_page_pool_cell 16
 
@@ -1617,7 +1629,7 @@ KERNEL_QEMU_DEBUG_ELF    := $(KERNEL_QEMU_BUILD_DIR)/kernel-debug.elf
 
 $(KERNEL_QEMU_MAIN_DEBUG_O): $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(KERNEL_FREELIST_TKB) $(KERNEL_SLOTMAP_TKB) $(KERNEL_REFCOUNT_SLOTMAP_TKB) $(KERNEL_PAGE_TKB) $(KERNEL_ADDRESS_SPACE_TKB) $(KERNEL_USER_MEMORY_TKB) $(KERNEL_PROCESS_IMAGE_TKB) $(KERNEL_PROCESS_TKB) $(KERNEL_SYSCALL_TKB) $(KERNEL_ELF64_TKB) $(KERNEL_MEMORY_BLOCK_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_EXT2_TKB) $(KERNEL_EXT2_MUTATION_LOCK_TKB) $(KERNEL_EXT2_MUTATION_PROBE_TKB) $(KERNEL_LOG_TKB) $(KERNEL_RPI5_MMU_TKB) $(KERNEL_RPI5_ASID_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_RPI5_USER_EXTERN) $(KERNEL_RPI5_BOOT_EXTERN) $(KERNEL_RPI5_FPSIMD_EXTERN) $(KERNEL_PMU_EXTERN) $(KERNEL_EXT2_IMAGE) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_QEMU_USB_ABSENT_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_NETCONFIG_TKB) $(KERNEL_ARP_TKB) $(KERNEL_CHECKSUM_TKB) $(KERNEL_ICMP_TKB) $(KERNEL_WIRE_TKB) $(KERNEL_TCP_TKB) $(KERNEL_SOCKET_CAP_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_FDT_TKB) \
     $(KERNEL_QEMU_UART_TKB) $(KERNEL_QEMU_INTC_TKB) $(KERNEL_QEMU_TIMER_IRQ_TKB) $(KERNEL_RPI5_TIMER_TKB) $(KERNEL_RPI5_EXC_EVIDENCE_TKB) $(KERNEL_RPI5_VECTOR_TABLE_TKB) $(KERNEL_RPI5_EXC_FRAME_TKB) $(TAKIBI) Makefile | $(KERNEL_QEMU_BUILD_DIR)
-	$(TAKIBI) $(KERNEL_DEVICE_SEMANTICS) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_QEMU_USB_ABSENT_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $< --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --frame-pointers --forbid-trap --regions $(KERNEL_UNUSED_CHECK_QEMU) -g --emit-depfile $@.d -o $@
+	$(TAKIBI) $(KERNEL_DEVICE_SEMANTICS) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_QEMU_USB_ABSENT_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $< --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --frame-pointers --function-sections --forbid-trap --regions $(KERNEL_UNUSED_CHECK_QEMU) -g --emit-depfile $@.d -o $@
 	python3 scripts/buildcheck_kernel_unused_coverage.py qemu $@.d
 
 # GitHub issue #306: same depfile fix as $(KERNEL_QEMU_MAIN_O)'s own, for
@@ -1625,7 +1637,7 @@ $(KERNEL_QEMU_MAIN_DEBUG_O): $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_T
 -include $(KERNEL_QEMU_MAIN_DEBUG_O).d
 
 $(KERNEL_QEMU_DEBUG_ELF): $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_MAIN_DEBUG_O) $(KERNEL_QEMU_LINK_LD) $(KERNEL_RPI5_LINK_LD)
-	$(LLD) -T $(KERNEL_QEMU_LINK_LD) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_MAIN_DEBUG_O) -o $@
+	$(LLD) $(KERNEL_LDFLAGS) -T $(KERNEL_QEMU_LINK_LD) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_MAIN_DEBUG_O) -o $@
 	python3 scripts/buildcheck_kernel_asm_invariants.py $@ 1
 	python3 scripts/buildcheck_elf_symbol_alignment.py $@ boot_page_pool_cell 16
 
@@ -2413,7 +2425,7 @@ $(KERNEL_BUILD_DIR)/jtag_stub.img: $(KERNEL_BUILD_DIR)/jtag_stub.elf
 	$(LLVM_OBJCOPY) -O binary $< $@
 
 kernel/build/qemu/main.o kernel/build/rpi5/main.o: kernel/RAW_MINT_FILES kernel/DEVICE_SEMANTICS_FILES
-KERNEL_DMA_FLAGS := --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --frame-pointers --forbid-trap --regions --reject-unused-functions --external-entry main --check-unused-file kernel/tests/qemu/dma/virtio_blk_fixture.tkb $(KERNEL_DEVICE_SEMANTICS)
+KERNEL_DMA_FLAGS := --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --frame-pointers --function-sections --forbid-trap --regions --reject-unused-functions --external-entry main --check-unused-file kernel/tests/qemu/dma/virtio_blk_fixture.tkb $(KERNEL_DEVICE_SEMANTICS)
 KERNEL_DMA_ELF := $(KERNEL_QEMU_BUILD_DIR)/kernel-dma-fixture-positive.elf
 .PHONY: _kernelbuild-dma-qemu kernelbuild-dma-qemu kernelcheck-dma-qemu
 # Positive has no planted mutation; the four named controls change one real
@@ -2424,7 +2436,7 @@ $(KERNEL_QEMU_BUILD_DIR)/dma-fixture-%.o: $(KERNEL_QEMU_MAIN_O) scripts/build_qe
 	python3 scripts/buildcheck_kernel_unused_coverage.py qemu $@.d
 	python3 scripts/measure_trusted_base.py --check-raw-deref qemu $@.rawderef.tsv $@.d
 $(KERNEL_QEMU_BUILD_DIR)/kernel-dma-fixture-%.elf: $(KERNEL_QEMU_BUILD_DIR)/dma-fixture-%.o $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_LINK_LD)
-	$(LLD) -T $(KERNEL_QEMU_LINK_LD) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $< -o $@
+	$(LLD) $(KERNEL_LDFLAGS) -T $(KERNEL_QEMU_LINK_LD) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $< -o $@
 _kernelbuild-dma-qemu: $(KERNEL_DMA_ELF)
 kernelbuild-dma-qemu: build
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) _kernelbuild-dma-qemu
@@ -2436,11 +2448,11 @@ KERNEL_INVARIANT_ELF := $(KERNEL_QEMU_BUILD_DIR)/kernel-invariant-fixture.elf
 .PHONY: kernelbuild-invariant-qemu _kernelbuild-invariant-qemu kernelcheck-invariant-qemu
 $(KERNEL_QEMU_BUILD_DIR)/invariant-fixture.o: $(KERNEL_QEMU_MAIN_O) scripts/build_qemu_invariant_fixture.py scripts/build_qemu_dma_fixture.py kernel/tests/qemu/invariant_stop/fixture.tkb Makefile
 	python3 scripts/build_qemu_invariant_fixture.py . _build/qemu-invariant-fixture
-	cd _build/qemu-invariant-fixture && $(abspath $(TAKIBI)) $(KERNEL_DMA_SRCS) --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --frame-pointers --forbid-trap --regions $(KERNEL_DEVICE_SEMANTICS) --reject-unused-functions --external-entry main --check-unused-file kernel/tests/qemu/invariant_stop/fixture.tkb --emit-depfile $(abspath $@).d --emit-raw-deref-audit $(abspath $@).rawderef.tsv -o $(abspath $@)
+	cd _build/qemu-invariant-fixture && $(abspath $(TAKIBI)) $(KERNEL_DMA_SRCS) --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --frame-pointers --function-sections --forbid-trap --regions $(KERNEL_DEVICE_SEMANTICS) --reject-unused-functions --external-entry main --check-unused-file kernel/tests/qemu/invariant_stop/fixture.tkb --emit-depfile $(abspath $@).d --emit-raw-deref-audit $(abspath $@).rawderef.tsv -o $(abspath $@)
 	python3 scripts/buildcheck_kernel_unused_coverage.py qemu $@.d
 	python3 scripts/measure_trusted_base.py --check-raw-deref qemu $@.rawderef.tsv $@.d
 $(KERNEL_INVARIANT_ELF): $(KERNEL_QEMU_BUILD_DIR)/invariant-fixture.o $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_LINK_LD)
-	$(LLD) -T $(KERNEL_QEMU_LINK_LD) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $< -o $@
+	$(LLD) $(KERNEL_LDFLAGS) -T $(KERNEL_QEMU_LINK_LD) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $< -o $@
 	python3 scripts/buildcheck_kernel_asm_invariants.py $@ 1
 _kernelbuild-invariant-qemu: $(KERNEL_INVARIANT_ELF)
 kernelbuild-invariant-qemu: build
@@ -2453,7 +2465,7 @@ kernelcheck-invariant-qemu: kernelbuild-invariant-qemu
 # are built with the maintained kernels; their board execution is on demand.
 KERNEL_GEM_TX_MODES := confirmed-ready confirmed-reply unconfirmed-ready unconfirmed-reply irq-primary irq-wrong-enable
 KERNEL_GEM_TX_SRCS := $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_FDT_TKB) $(KERNEL_RPI5_MAIN_TKB)
-KERNEL_GEM_TX_FLAGS := --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --frame-pointers --forbid-trap --regions $(KERNEL_RAW_CONFINE) $(KERNEL_DEVICE_SEMANTICS) --reject-unused-functions --external-entry main
+KERNEL_GEM_TX_FLAGS := --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --frame-pointers --function-sections --forbid-trap --regions $(KERNEL_RAW_CONFINE) $(KERNEL_DEVICE_SEMANTICS) --reject-unused-functions --external-entry main
 KERNEL_GEM_TX_ELFS := $(foreach mode,$(KERNEL_GEM_TX_MODES),$(KERNEL_BUILD_DIR)/kernel-gem-tx-fixture-$(mode).elf)
 .PHONY: _kernelbuild-gem-tx-rpi5 kernelbuild-gem-tx-rpi5
 $(KERNEL_BUILD_DIR)/gem-tx-fixture-%.o: $(KERNEL_RPI5_MAIN_O) scripts/build_rpi5_gem_tx_fixture.py kernel/tests/rpi5/gem_tx/fixture.tkb kernel/tests/rpi5/gem_tx/irq_fixture.tkb Makefile
@@ -2462,7 +2474,7 @@ $(KERNEL_BUILD_DIR)/gem-tx-fixture-%.o: $(KERNEL_RPI5_MAIN_O) scripts/build_rpi5
 	python3 scripts/buildcheck_kernel_unused_coverage.py rpi5 $@.d
 	python3 scripts/measure_trusted_base.py --check-raw-deref rpi5 $@.rawderef.tsv $@.d
 $(KERNEL_BUILD_DIR)/kernel-gem-tx-fixture-%.elf: $(KERNEL_BUILD_DIR)/gem-tx-fixture-%.o $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_LINK_LD)
-	$(LLD) -T $(KERNEL_RPI5_LINK_LD) $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $< -o $@
+	$(LLD) $(KERNEL_LDFLAGS) -T $(KERNEL_RPI5_LINK_LD) $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $< -o $@
 _kernelbuild-gem-tx-rpi5: $(KERNEL_GEM_TX_ELFS)
 kernelbuild-gem-tx-rpi5: build
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) _kernelbuild-gem-tx-rpi5

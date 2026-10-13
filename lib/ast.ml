@@ -3,6 +3,11 @@ type loc = Lexing.position
 (* Reserved provenance of compiler-generated region authority definitions. *)
 let builtin_region_file = "<builtin region>"
 
+(* Reserved provenance of a protocol declaration's generated source
+   (lib/protocol_decl.ml). *)
+let protocol_file name = Printf.sprintf "<protocol %s>" name
+let is_protocol_file file = String.starts_with ~prefix:"<protocol " file
+
 let pp_loc fmt _ = Format.fprintf fmt "<loc>"
 
 (* The real source file a loc came from, with any per-instantiation suffix
