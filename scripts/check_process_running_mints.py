@@ -55,21 +55,68 @@ def mask(source):
                   lambda m: re.sub(r'[^\n]', ' ', m[0]), source)
 
 
+def closers(code):
+    """Position just past the bracket closing each ( and { in `code`.
+
+    One regex pass with a stack instead of a character loop per function:
+    the controls re-analyse process.tkb once per mutation, and the loop made
+    them slow enough to overrun the fast gate on a loaded host (GitHub
+    issue #780)."""
+    close, stack = {}, []
+    for m in re.finditer(r'[(){}]', code):
+        if m[0] in '({':
+            stack.append(m.start())
+        elif stack:
+            close[stack.pop()] = m.end()
+    return close
+
+
 def functions(source):
     code = mask(source)
+    close = closers(code)
     for match in re.finditer(r'^(?:private )?(?:inline |noinline )?fn (\w+)\(', code, re.M):
-        depth, pos = 1, match.end()
-        while depth:
-            depth += (code[pos] == '(') - (code[pos] == ')')
-            pos += 1
+        pos = close[match.end() - 1]
         brace = code.index('{', pos)
         if code[brace - 1] == '!':
             brace = code.index('{', code.index('}', brace) + 1)
-        depth, end = 1, brace + 1
-        while depth:
-            depth += (code[end] == '{') - (code[end] == '}')
-            end += 1
+        end = close[brace]
         yield match[1], code[match.start():brace], code[brace:end]
+
+
+@lru_cache(maxsize=None)
+def function_facts(name, header, body):
+    """One function's mint counts and failures, cached by its text: a
+    mutation control changes one function of process.tkb, so the others are
+    not re-scanned (GitHub issue #780)."""
+    counts = []
+    failures = []
+    for mint in ALLOWED:
+        pattern = (r'\bview\s+ProcessCurrent\s*\[' if mint.startswith('view ')
+                   else rf'\b{mint}\s*\(')
+        # Most functions contain none of these five mint names. Avoid
+        # scanning their whole bodies once for every absent name.
+        needle = "ProcessCurrent" if mint.startswith('view ') else mint
+        if needle in body:
+            counts.append((mint, len(re.findall(pattern, body))))
+    writes = re.search(r'\.current_(?:handle|live)\s*=(?!=)', body)
+    leaves_phase = re.search(
+        r'\bsink\s+ScheduledProcessState\[\w+,\s*'
+        r'ProcessState::(?:Running|Constructing)\]', header)
+    # The record's state changes only through process_wait.tkb's
+    # transitions; process_state_kind is the one reader.
+    changes_state = re.search(
+        r'\.state\s*=(?!=)|\bprocess_state_(?!kind\b)\w+\s*\(', body)
+    if (writes or name in {"kernel_process_clone_context_install",
+                           "kernel_process_clone_unselectable_probe",
+                           "scheduled_process_release_every_process"}
+            or (leaves_phase and changes_state)):
+        if "changes_witness_ProcessCurrent" not in header:
+            failures.append(f"{name} changes current context without its witness marker")
+    if name in {"process_running_new", "process_constructing_new",
+                "process_resuming_new"}:
+        if not header.startswith("private inline fn "):
+            failures.append(f"{name} must remain a private inline mint")
+    return tuple(counts), tuple(failures)
 
 
 @lru_cache(maxsize=64)
@@ -86,39 +133,36 @@ def source_facts(source):
     code = mask(source)
     declarations["view ProcessCurrent"] += len(re.findall(
         r"^private linear view ProcessCurrent\[", code, re.M))
-    for mint in ALLOWED:
-        pattern = (r'\bview\s+ProcessCurrent\s*\[' if mint.startswith('view ')
-                   else rf'\b{mint}\s*\(')
-        totals[mint] += len(re.findall(pattern, code))
+    # A leading \b makes the regex engine try every position; matching the
+    # name first and checking the boundary by hand is ~25x faster (#780).
+    for mint, pattern in TOTALS_PATTERNS:
+        totals[mint] += sum(1 for m in pattern.finditer(code)
+                            if m.start() == 0 or not (code[m.start() - 1].isalnum()
+                                                      or code[m.start() - 1] == '_'))
     for name, header, body in functions(source):
         declarations[name] += 1
-        for mint in ALLOWED:
-            pattern = (r'\bview\s+ProcessCurrent\s*\[' if mint.startswith('view ')
-                       else rf'\b{mint}\s*\(')
-            # Most functions contain none of these five mint names. Avoid
-            # scanning their whole bodies once for every absent name.
-            needle = "ProcessCurrent" if mint.startswith('view ') else mint
-            if needle in body:
-                found[mint][name] += len(re.findall(pattern, body))
-        writes = re.search(r'\.current_(?:handle|live)\s*=(?!=)', body)
-        leaves_phase = re.search(
-            r'\bsink\s+ScheduledProcessState\[\w+,\s*'
-            r'ProcessState::(?:Running|Constructing)\]', header)
-        # The record's state changes only through process_wait.tkb's
-        # transitions; process_state_kind is the one reader.
-        changes_state = re.search(
-            r'\.state\s*=(?!=)|\bprocess_state_(?!kind\b)\w+\s*\(', body)
-        if (writes or name in {"kernel_process_clone_context_install",
-                               "kernel_process_clone_unselectable_probe",
-                               "scheduled_process_release_every_process"}
-                or (leaves_phase and changes_state)):
-            if "changes_witness_ProcessCurrent" not in header:
-                failures.append(f"{name} changes current context without its witness marker")
-        if name in {"process_running_new", "process_constructing_new",
-                    "process_resuming_new"}:
-            if not header.startswith("private inline fn "):
-                failures.append(f"{name} must remain a private inline mint")
+        counts, function_failures = function_facts(name, header, body)
+        for mint, count in counts:
+            found[mint][name] += count
+        failures.extend(function_failures)
     return found, totals, declarations, tuple(failures)
+
+
+TOTALS_PATTERNS = [
+    (mint, re.compile(r'view\s+ProcessCurrent\s*\[' if mint.startswith('view ')
+                      else rf'{mint}\s*\('))
+    for mint in ALLOWED]
+RELEVANT = re.compile(
+    r"\b(?:ProcessCurrent|process_running_here|process_constructing_here|"
+    r"process_running_new|process_constructing_new|ScheduledProcessState)\b|"
+    r"\.current_(?:handle|live)\s*=")
+
+
+@lru_cache(maxsize=None)
+def relevant(source):
+    """Whether a file can hold a mint or a context writer; cached by content,
+    so a mutation control rescans only the file it changed (#780)."""
+    return RELEVANT.search(source) is not None
 
 
 def problems(sources):
@@ -130,9 +174,7 @@ def problems(sources):
     if not re.search(r'^private linear view ProcessCurrent\[', mask(process_source), re.M):
         failures.append("ProcessCurrent must remain private and linear")
     for path, source in sources.items():
-        if not re.search(r"\b(?:ProcessCurrent|process_running_here|process_constructing_here|"
-                         r"process_running_new|process_constructing_new|ScheduledProcessState)\b|"
-                         r"\.current_(?:handle|live)\s*=", source):
+        if not relevant(source):
             continue
         local_found, local_totals, local_declarations, local_failures = source_facts(source)
         for mint in ALLOWED:

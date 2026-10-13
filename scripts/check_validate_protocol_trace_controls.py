@@ -19,6 +19,9 @@ Two of them are the reason the replay exists:
   "ChildExitStart not enabled: owner[parent] = c1".
 """
 
+import contextlib
+import importlib.util
+import io
 import subprocess
 import sys
 import tempfile
@@ -28,6 +31,9 @@ from pass_line import CaseCount, report_pass
 
 ROOT = Path(__file__).resolve().parent.parent
 VALIDATOR = ROOT / "scripts" / "validate_protocol_trace.py"
+_spec = importlib.util.spec_from_file_location("validate_protocol_trace", VALIDATOR)
+VALIDATOR_MODULE = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(VALIDATOR_MODULE)
 WINDOW = ROOT / "kernel" / "tests" / "qemu" / "protocol_trace.window"
 # The debug lane's window that first took an interrupt from EL0 inside it,
 # which the model did not have until it failed an allcheck.
@@ -138,13 +144,36 @@ STALE_CHILD_EXIT = FAMILY + ["1 1 l p 10 2 1 2 -"]
 STALE_SIGNAL = FAMILY + ["1 1 l p 10 2 1 5 -"]
 
 
-def run(text, *extra):
+def run_cli(text, *extra):
+    """The validator as the lanes run it: a separate process."""
     with tempfile.NamedTemporaryFile("w", suffix=".log") as log:
         log.write(text)
         log.flush()
         return subprocess.run(
             [sys.executable, str(VALIDATOR), log.name, *extra],
             capture_output=True, text=True, check=False)
+
+
+def run(text, *extra):
+    """The validator's main() in this process, with the same arguments and
+    output. Starting ~30 interpreters made this control the slowest member
+    of the fast gate, and it overran the gate's bound on a loaded host
+    (GitHub issue #780); the first case still goes through run_cli."""
+    with tempfile.NamedTemporaryFile("w", suffix=".log") as log:
+        log.write(text)
+        log.flush()
+        out, err = io.StringIO(), io.StringIO()
+        saved = sys.argv
+        sys.argv = [str(VALIDATOR), log.name, *extra]
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                try:
+                    code = VALIDATOR_MODULE.main()
+                except SystemExit as exit_:
+                    code = exit_.code if isinstance(exit_.code, int) else 1
+        finally:
+            sys.argv = saved
+        return subprocess.CompletedProcess(sys.argv, code, out.getvalue(), err.getvalue())
 
 
 def expect(name, result, passes, needle, absent=None):
@@ -165,7 +194,7 @@ def main() -> int:
     napped = NAP_WINDOW.read_text(encoding="utf-8")
     cloned = CLONE_WINDOW.read_text(encoding="utf-8")
     checks = [
-        expect("the recorded RPi5 clone-return reschedule", run(cloned),
+        expect("the recorded RPi5 clone-return reschedule", run_cli(cloned),
                True, "CloneReschedule=1"),
         expect("that window without CloneReschedule",
                run(cloned, "--without", "CloneReschedule"), False,
