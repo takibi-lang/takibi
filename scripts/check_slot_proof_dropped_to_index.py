@@ -65,6 +65,10 @@ INDEX_ONLY_ALLOWED = {
         "observes after the lock is gone; it keeps no index",
     "pool_walk_read":
         "the walk probe's stamp read: a value, read under the pool lock",
+    "kernel_stack_run_depth":
+        "a value snapshot (#672): it borrows the record's stack-run "
+        "permission under the pool lock, measures the stack's poison depth "
+        "and returns that count; it hands on no index or pointer",
 }
 
 # These consume a stored pool proof after the compiler checked loan_transfer.
