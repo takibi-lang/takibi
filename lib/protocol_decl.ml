@@ -35,6 +35,11 @@ type state = {
   s_params : string list;
   s_write : bool;
   s_device : bool;
+  s_addressed : bool;
+  (* `access write addressed` (GitHub issue #720, decision of 2026-10-13):
+     a writable state of a device protocol that also yields the span, for
+     structures that hold their own address (an xHCI Link TRB) or whose
+     address programs the controller while the CPU writes them. *)
 }
 
 type outcome = {
@@ -98,18 +103,25 @@ let validate (d : protocol_decl) : t =
             r.pr_name a) r.pr_args;
         let params = List.map fst r.pr_args in
         check_distinct r.pr_loc "state parameter" params;
-        let rec parse w dev = function
-          | [] -> (w, dev)
-          | "access" :: "write" :: rest when not w -> parse true dev rest
-          | "device" :: rest when not dev -> parse w true rest
+        let rec parse w dev ad = function
+          | [] -> (w, dev, ad)
+          | "access" :: "write" :: rest when not w -> parse true dev ad rest
+          | "device" :: rest when not dev -> parse w true ad rest
+          | "addressed" :: rest when not ad -> parse w dev true rest
           | a :: _ -> fail r.pr_loc "unsupported state attribute '%s' on '%s'"
                         a r.pr_name in
-        let w, dev = parse false false attrs in
+        let w, dev, ad = parse false false false attrs in
+        if ad && not w then
+          fail r.pr_loc "state '%s' is 'addressed' but not 'access write': \
+            a device state already yields its span" r.pr_name;
+        if ad && d.proto_direction = None then
+          fail r.pr_loc "state '%s' is 'addressed', which only a device \
+            protocol (a region with tx or rx) has" r.pr_name;
         if w && dev then
           fail r.pr_loc "state '%s' cannot be both 'access write' and 'device'"
             r.pr_name;
         Some ({ s_name = r.pr_name; s_params = params; s_write = w;
-                s_device = dev }, r.pr_loc)
+                s_device = dev; s_addressed = ad }, r.pr_loc)
     | _ -> None) d.proto_items in
   check_distinct loc "state" (List.map (fun (s, _) -> s.s_name) states);
   let states = List.map fst states in
@@ -572,7 +584,7 @@ let source_of (d : protocol_decl) (p : t) : string =
     | None -> None) in
   if device then
     List.iter (fun s ->
-      if s.s_device then begin
+      if s.s_device || s.s_addressed then begin
         let owner = ty s.s_name s.s_params in
         let whole = Printf.sprintf "%s_%s_span" pn s.s_name in
         let one = whole ^ "_at" in

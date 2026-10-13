@@ -25885,6 +25885,19 @@ let device_protocol_tests = [
           Alcotest.(check bool) "span generated" true
             (contains_substring src "fn Rx_Posted_span(")
       | l -> Alcotest.failf "expected one source, got %d" (List.length l));
+  Alcotest.test_case "device protocol: an addressed writable state has a span" `Quick
+    (fun () ->
+      let proto = replace_once ~sub:"state Ready access write;"
+          ~by:"state Ready access write addressed;" device_protocol in
+      let use = replace_once ~sub:"let ready = Rx_init(memory);"
+          ~by:"let ready = Rx_init(memory);\n\
+               let mut sp: DmaDeviceSpan = Rx_Ready_span_at(ready, 3);\n\
+               let n = dma_span_length(sp);" device_consumer in
+      ignore (compile_device ~proto ~use ()));
+  Alcotest.test_case "device protocol: addressed needs access write" `Quick
+    (expect_device_error ~in_proto:true ~sub:"state Posted[req] device;"
+       ~by:"state Posted[req] device addressed;"
+       "is 'addressed' but not 'access write'");
   Alcotest.test_case "device protocol: a writable state has no span" `Quick
     (expect_device_error ~sub:"let ready = Rx_init(memory);"
        ~by:"let ready = Rx_init(memory); let mut sp: DmaDeviceSpan = Rx_Ready_span(ready);"

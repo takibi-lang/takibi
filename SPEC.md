@@ -4123,8 +4123,12 @@ that no other code can split:
   `DmaDeviceSpan` of protected fixed DMA allocations: tied to the borrowed
   owner, it cannot be stored, passed to a retaining parameter, or used after
   the owner moves, and `unsafe { dma_span_address(span) }` remains the only
-  address export. No CPU-access state has a span, and no device state has
-  a read or write function.
+  address export. No device state has a read or write function. A
+  CPU-access state has a span only when it is declared `access write
+  addressed`: for a structure that holds its own address (an xHCI Link TRB)
+  or whose address programs the controller while the CPU still writes it
+  (a dequeue pointer). `addressed` is accepted only on an `access write`
+  state of a device protocol.
 
 A device protocol must fix its count with a declared constant, retain a
 region of `u8` or a named type, and declare at least one `device` state. It

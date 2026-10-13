@@ -189,14 +189,18 @@ rules globally.
 - Device protocols (a `protocol` whose region is `tx` or `rx`, SPEC.md
   "Device protocols") put the cache work in generated wrappers on the
   publishing and finishing edges, and give an address only as a span of a
-  device-state owner. Checked: no CPU-access state yields a span and no
-  device state reaches the region; a span dies with its owner; the region's
+  device-state owner, or of a writable state declared `addressed`.
+  Checked: no other CPU-access state yields a span and no device state
+  reaches the region; a span dies with its owner; the region's
   extent is whole cache lines; every backing global of the protocol's element
   type and count is line-aligned. Trusted: the generator's placement of the
   cache operations (Protocol_decl.source_of) and the reuse of the
   `dma_prepare_tx`/`_rx`/`dma_finish_rx` lowerings; that the declared
   direction is what the device does (a device that writes a `tx` region is
-  outside the proof); the `observe` lowerings of the files in
+  outside the proof); for an `addressed` state, that the device does not
+  read the region while the CPU holds it -- for xHCI, that the controller
+  fetches TRBs only after a doorbell and that a doorbell is rung only from
+  a publishing lowering, after the generated clean; the `observe` lowerings of the files in
   `kernel/DEVICE_SEMANTICS_FILES`, which assert completion and quiescence
   like a dma_fixed mint file; `unsafe dma_span_address` and the bus
   translation applied at that site; and the line ownership of a region of the
