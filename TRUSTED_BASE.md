@@ -231,9 +231,19 @@ rules globally.
   holds the table, which needs sub-region authority), the output device
   context and the event ring (both rewritten by the controller for the
   whole session; they wait on a snapshot observation).
-  A protocol's generated element access is exempt from
-  `--confine-raw-authority` like the built-in region's: for a `u8` element
-  it is a derived `*u8` store, the compiler's trust.
+  Generated protocol files (`<protocol Name>`) are exempt from
+  `--confine-raw-authority`, as the built-in region file is
+  (`lib/raw_authority_policy.ml`). The reason: a `u8` element read or write
+  through `region_at` is a derived `*u8` dereference, so the generated
+  `P_S_read`/`P_S_write` of a `u8` protocol count as raw sites, and no
+  source file can be named as their mint file. What this trusts: that the
+  generator (`Protocol_decl.source_of`) emits raw reads and writes only
+  through `region_at` on the owner's own retained region, with the index
+  proved against the count. It is the same trust as the built-in region
+  definitions. The raw-dereference ratchet still counts these sites per
+  generated file (`scripts/raw_deref_budget.tsv`, `<protocol ...>` rows),
+  so a generator change that adds raw sites fails the build until it is
+  reviewed.
 - Per-CPU storage (`struct per_cpu`, indexed only by the `cpu_authority`
   value) is checked by the compiler. Trusted: `kernel/kernel/cpu_authority.tkb`
   reports the CPU it runs on (`cpu_id()`), the kernel action stays on that CPU

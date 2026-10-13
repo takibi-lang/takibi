@@ -1,0 +1,24 @@
+// The QEMU kernel has no USB mass-storage disk. kernel/drivers/block/
+// memory.tkb is shared by both platforms and names the disk_* API of RPi5's
+// xHCI driver for its USB backend; on QEMU that backend is never selected
+// (virtio-blk is), and these three answers keep it so: the disk is never
+// ready. Linking this instead of kernel/platform/rpi5/usb_xhci.tkb keeps the
+// whole xHCI driver, its DMA and ring owners, out of the QEMU image, where
+// it was unreachable code (measured with #720 slice 3a).
+
+must_use variant DiskIoResult {
+    Ok;
+    Err(i32);
+}
+
+fn disk_status() -> DiskIoResult {
+    return DiskIoResult::Err(-1);
+}
+
+fn disk_read_sectors(sector: u32, buf: []u8) -> DiskIoResult {
+    return disk_status();
+}
+
+fn disk_write_sectors(sector: u32, buf: []u8) -> DiskIoResult {
+    return disk_status();
+}
