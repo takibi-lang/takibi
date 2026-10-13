@@ -7,6 +7,7 @@
 # compiled); raising one, or adding a row, is a decision about a new
 # dereference and is made by hand with the reason written here.
 # Measured 2026-09-30. Columns: file, plain, io, reason (tab separated).
+kernel/kernel/stack_poison.tkb	2	0	kernel stack bytes: poison fill and depth scans over ranges process.tkb names (#637 S split)
 kernel/arch/arm64/kernel/user_payload.tkb	2	0	EL0 syscall-ABI fixture: byte loads and stores for little-endian rlimit64 fields in syscall buffers
 kernel/arch/arm64/kernel/exception_evidence.tkb	173	0	Private per-CPU crash caches and entry-frame mints; +6 provenance fields and stopped optional-frame capture sites (2026-10-09); +26 scalar cache sites for stopped-only capture, explicit unavailable state and captured VA translations (2026-10-07). Shared ProcessRecord and RegionPool reads require MachineStopped and return values.
 kernel/arch/arm64/kernel/frame_ref.tkb	2	0	the exception-frame mint site: a FrameRef's words are read and written here and nowhere else (#637 C)
@@ -18,7 +19,6 @@ kernel/drivers/net/rp1_gem.tkb	0	9	RP1 clock and GPIO registers (#637 A); GEM re
 kernel/drivers/net/virtio_net.tkb	5	3	virtio rings and frames (#637 E); registers are an IoHandle
 kernel/fs/elf64.tkb	2	0	Two packed ELF header copy mints take complete bounded byte spans and return independent record values; overlay validity and packed layout remain trusted (#637 D)
 kernel/init/test_driver.tkb	10	0	boot-time fixtures reaching process records directly (#637 F)
-kernel/kernel/process.tkb	10	0	ProcessRecord loans derive from run guards, indexed current phases, owners or MachineStopped. Ordinary scalar diagnostics copy before releasing their pool view; no liveness escape remains. Per-CPU state uses bounded array places. PID values use guarded copies; physical stack mints and diagnostic output still await file confinement.
 kernel/mm/address_space.tkb	6	0	Backing records use indexed references and active roots use bounded per-CPU array places; remaining raw sites are the deliberate user-VA CoW probe byte mints
 kernel/mm/user_memory.tkb	7	0	the user-range mint site: user addresses become slices here (#637 D)
 kernel/platform/qemu/device_map.tkb	0	3	virtio-mmio magic and device-id probes during DTB discovery (#637 A); the device-window mint

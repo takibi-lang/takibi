@@ -14,6 +14,7 @@ kernel/drivers/block/virtio_blk.tkb
 kernel/drivers/net/rp1_gem_dma.tkb
 kernel/drivers/net/rp1_gem.tkb
 kernel/drivers/net/virtio_net.tkb
+kernel/kernel/stack_poison.tkb
 kernel/mm/memory_map.tkb
 kernel/mm/user_memory.tkb
 kernel/platform/qemu/device_map.tkb
@@ -22,7 +23,8 @@ kernel/platform/rpi5/device_map.tkb
 # (page_run_into_region, #743); it leaves with #744.
 
 # S: to be split into a small mint file and rewritten code
-kernel/kernel/process.tkb
+# kernel/kernel/process.tkb was split (2026-10-13): its raw stack bytes
+# are kernel/kernel/stack_poison.tkb, listed under K.
 kernel/platform/rpi5/usb_xhci.tkb
 
 # R: to be rewritten to authority-derived access, then removed

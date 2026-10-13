@@ -1,0 +1,43 @@
+// GitHub issue #637 stage 3 (S list): the one place kernel stacks are read
+// and written as raw bytes, split out of kernel/kernel/process.tkb so the
+// rest of that file is checked code.
+//
+// Trusted here, and only here: every caller passes a byte range that is a
+// kernel stack or the reserved region below one -- a process stack run that
+// kernel/mm/page.tkb handed to process.tkb and withheld from every other
+// consumer, or the boot and IRQ stacks bounded by linker symbols. These
+// functions cannot check that; they only poison and measure the range.
+//
+// Current limitations (2026-10-13):
+// - The ranges are plain integers: nothing ties a range to the stack run
+//   it came from, so a wrong range from a caller is not caught here.
+// - Not synchronized: a range is measured while its stack may be in use;
+//   callers read their own stack or a stopped one, as they did before the
+//   split.
+
+// Fill [from, to) with `poison`.
+fn stack_poison_fill(from: usize, to: usize, poison: u8) !{unsafe} {
+    if (from >= to) { return; }
+    let bytes: *u8 = unsafe { from as *u8 };
+    let count: isize = (to - from) as isize;
+    for i: isize in 0..<count {
+        bytes[i] = poison;
+    }
+}
+
+// Scanning [base, base + size) upward, the distance from the first byte that
+// is no longer `poison` to the end of the range; 0 when all of it is poison.
+// For a stack growing down from base + size this is its deepest use.
+fn stack_poison_depth(base: usize, size: usize, poison: u8) -> usize !{unsafe} {
+    let bytes: *u8 = unsafe { base as *u8 };
+    let count: isize = size as isize;
+    for i: isize in 0..<count {
+        if (bytes[i] != poison) { return size - (i as usize); }
+    }
+    return 0;
+}
+
+// Whether any byte of [base, base + count) is no longer `poison`.
+fn stack_poison_disturbed(base: usize, count: usize, poison: u8) -> bool !{unsafe} {
+    return stack_poison_depth(base, count, poison) != 0;
+}

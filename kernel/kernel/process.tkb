@@ -1,4 +1,5 @@
 use "kernel/lib/atomic_word.tkb";
+use "kernel/kernel/stack_poison.tkb";
 use "kernel/mm/page.tkb";
 use "kernel/lib/diagnostic_ring.tkb";
 use "kernel/lib/slotmap.tkb";
@@ -2644,19 +2645,8 @@ fn scheduled_process_record_wait4_status_ptr_owned(
         owner: borrow ScheduledProcessOwner[process]) -> usize !{unsafe} {
     return scheduled_process_record_owned(owner).wait4_status_ptr;
 }
-// One half of a run, named as a struct purely so that the poison fill,
-// the guard and the watermark scan keep ordinary checked indexing over a
-// region whose address is computed. Nothing reads `bytes` as a whole;
-// the struct exists to give `[u8; KERNEL_PROCESS_STACK_SIZE]` a name a
-// cast can produce.
-//
-// Both halves are exactly this size by construction, so one struct
-// serves the stack and the region below it. Which one a given cast means
-// is stated by the accessor that produces it -- kernel_stack_span versus
-// kernel_stack_quarantine_span -- not by the type.
-struct KernelStackHalf {
-    bytes: [u8; KERNEL_PROCESS_STACK_SIZE];
-}
+// Both halves of a run (the stack and the region below it) are read and
+// written only through kernel/kernel/stack_poison.tkb (#637).
 
 // GitHub issue #377: one KERNEL_STACK_RUN_BYTES page run per slot, kept
 // as its base physical address in ProcessRecord.stack_run. 0 means this
@@ -2701,22 +2691,6 @@ private fn kernel_stack_bottom(slot: usize)
     return base + KERNEL_PROCESS_STACK_SIZE;
 }
 
-// The stack region itself, [bottom, bottom + KERNEL_PROCESS_STACK_SIZE).
-// Callers establish `bottom != 0` first; this file's own accessor is the
-// only producer, so the cast is over storage page.tkb has already
-// confirmed it owns and has withheld from every other consumer.
-private fn kernel_stack_span(bottom: usize) -> *KernelStackHalf !{unsafe} {
-    return unsafe { bottom as *KernelStackHalf };
-}
-
-// The region BELOW the stack, which belongs to the same run and to
-// nothing else. Poisoned with the stack and never written by anything
-// that is behaving: a disturbed byte here is an overflow that already
-// happened, as opposed to a stack merely standing at its own bottom.
-private fn kernel_stack_quarantine_span(bottom: usize)
-        -> *KernelStackHalf !{unsafe} {
-    return unsafe { (bottom - KERNEL_PROCESS_STACK_SIZE) as *KernelStackHalf };
-}
 
 // The shared rollback implementation produces a plain handle internally.
 // Its two public entry points wrap that value in distinct nominal types, so
@@ -3472,12 +3446,8 @@ private fn scheduled_process_alloc_finish(address: RegionHeld(ProcessRecord),
     // previous occupant's marks. Re-poison BOTH halves here so the guard,
     // the high-water measurement and the overflow depth all answer about
     // THIS process.
-    let stack: *KernelStackHalf = kernel_stack_span(bottom);
-    let below: *KernelStackHalf = kernel_stack_quarantine_span(bottom);
-    for i: usize in 0..<KERNEL_PROCESS_STACK_SIZE {
-        stack.bytes[i] = KERNEL_STACK_POISON;
-        below.bytes[i] = KERNEL_STACK_POISON;
-    }
+    stack_poison_fill(bottom - KERNEL_PROCESS_STACK_SIZE,
+                      bottom + KERNEL_PROCESS_STACK_SIZE, KERNEL_STACK_POISON);
     // GitHub issue #580: Constructing unless the caller says this record is
     // runnable now, which only the bootstrap does. The invariant above was
     // already written down and the clone path was the only one keeping it.
@@ -6431,19 +6401,8 @@ const KERNEL_STACK_POISON: u8 = 0xA5;
 const KERNEL_STACK_WITNESS_BYTES: usize = 64;
 
 // The overflow witness sits immediately BELOW the stack, at the top of
-// the quarantine half, and gets its own overlay so the scan indexes from
-// zero. Expressing it as an offset into KernelStackHalf instead would
-// put arithmetic inside an array index for no gain -- and this is code
-// that runs on every timer interrupt, so it reads 64 bytes rather than
-// the whole 16384-byte region.
-struct KernelStackWitness {
-    bytes: [u8; KERNEL_STACK_WITNESS_BYTES];
-}
-
-private fn kernel_stack_below_witness(bottom: usize)
-        -> *KernelStackWitness !{unsafe} {
-    return unsafe { (bottom - KERNEL_STACK_WITNESS_BYTES) as *KernelStackWitness };
-}
+// the quarantine half. This runs on every timer interrupt, so it reads 64
+// bytes rather than the whole 16384-byte region.
 
 // FAIL-STOPS.
 //
@@ -6543,25 +6502,14 @@ private fn kernel_stack_guard_inspect(current_sp: usize)
     // behaving, so a disturbed byte there is an overflow that has ALREADY
     // happened; the stack's own lowest bytes being disturbed means the
     // next push would be that overflow.
-    let below: *KernelStackWitness = kernel_stack_below_witness(bottom);
-    let mut overflowed: bool = false;
-    for i: usize in 0..<KERNEL_STACK_WITNESS_BYTES {
-        if (below.bytes[i] != KERNEL_STACK_POISON) { overflowed = true; }
-    }
-    if (overflowed) {
+    if (stack_poison_disturbed(bottom - KERNEL_STACK_WITNESS_BYTES,
+                               KERNEL_STACK_WITNESS_BYTES, KERNEL_STACK_POISON)) {
         return KernelStackGuardResult::Failed(
             ("stack wrote past its end, into the run below it" as *u8,
              slot, true, bottom));
     }
-    let stack: *KernelStackHalf = kernel_stack_span(bottom);
-    let mut disturbed: bool = false;
-    for i: usize in 0..<KERNEL_STACK_WITNESS_BYTES {
-        if (i < KERNEL_PROCESS_STACK_SIZE) {
-            let byte: {0..<KERNEL_PROCESS_STACK_SIZE as usize} = i;
-            if (stack.bytes[byte] != KERNEL_STACK_POISON) { disturbed = true; }
-        }
-    }
-    if (disturbed) {
+    if (stack_poison_disturbed(bottom, KERNEL_STACK_WITNESS_BYTES,
+                               KERNEL_STACK_POISON)) {
         return KernelStackGuardResult::Failed(
             ("stack reached its own bottom" as *u8, slot, true, bottom));
     }
@@ -6748,17 +6696,10 @@ private fn kernel_stack_owner_name(sp: usize) -> *u8 {
 // SP without adjusting it.
 const KERNEL_BOOT_STACK_MARGIN_BYTES: usize = 512;
 
-// A byte range of the boot stack, filled with poison. A raw pointer
-// because both ends are linker symbols -- there is no array to index,
-// and the length is not a compile-time constant. Same boundary as
-// kernel/mm/page.tkb's own page_meta_clear.
+// A byte range of the boot stack, filled with poison. Both ends are linker
+// symbols, so the bytes are written by kernel/kernel/stack_poison.tkb.
 private fn kernel_boot_stack_fill(from: usize, to: usize) !{unsafe} {
-    if (from >= to) { return; }
-    let bytes: *u8 = unsafe { from as *u8 };
-    let count: isize = (to - from) as isize;
-    for i: isize in 0..<count {
-        bytes[i] = KERNEL_STACK_POISON;
-    }
+    stack_poison_fill(from, to, KERNEL_STACK_POISON);
 }
 
 // Poison everything below the caller's frame. Meant to be main()'s first
@@ -6791,13 +6732,8 @@ fn kernel_boot_stack_overflow_bytes() -> usize !{unsafe} {
     let run_bottom: usize = boot_stack_run_bottom;
     let bottom: usize = boot_stack_bottom;
     if (bottom <= run_bottom) { return 0; }
-    let size: usize = bottom - run_bottom;
-    let bytes: *u8 = unsafe { run_bottom as *u8 };
-    let count: isize = size as isize;
-    for i: isize in 0..<count {
-        if (bytes[i] != KERNEL_STACK_POISON) { return size - (i as usize); }
-    }
-    return 0;
+    return stack_poison_depth(run_bottom, bottom - run_bottom,
+                              KERNEL_STACK_POISON);
 }
 
 // Has the boot stack written below its own bottom? Read on the same
@@ -6808,12 +6744,8 @@ fn kernel_boot_stack_overflow_bytes() -> usize !{unsafe} {
 private fn kernel_boot_stack_witness_disturbed() -> bool !{unsafe} {
     let bottom: usize = boot_stack_bottom;
     if (bottom <= boot_stack_run_bottom) { return false; }
-    let witness: *KernelStackWitness =
-        unsafe { (bottom - KERNEL_STACK_WITNESS_BYTES) as *KernelStackWitness };
-    for i: usize in 0..<KERNEL_STACK_WITNESS_BYTES {
-        if (witness.bytes[i] != KERNEL_STACK_POISON) { return true; }
-    }
-    return false;
+    return stack_poison_disturbed(bottom - KERNEL_STACK_WITNESS_BYTES,
+                                  KERNEL_STACK_WITNESS_BYTES, KERNEL_STACK_POISON);
 }
 
 // How deep a poisoned stack has ever been: the lowest byte that is no
@@ -6823,13 +6755,7 @@ private fn kernel_boot_stack_witness_disturbed() -> bool !{unsafe} {
 private fn kernel_linker_stack_used_bytes(bottom: usize, top: usize)
         -> usize !{unsafe} {
     if (top <= bottom) { return 0; }
-    let size: usize = top - bottom;
-    let bytes: *u8 = unsafe { bottom as *u8 };
-    let count: isize = size as isize;
-    for i: isize in 0..<count {
-        if (bytes[i] != KERNEL_STACK_POISON) { return size - (i as usize); }
-    }
-    return 0;
+    return stack_poison_depth(bottom, top - bottom, KERNEL_STACK_POISON);
 }
 
 fn kernel_boot_stack_used_bytes() -> usize !{unsafe} {
@@ -6873,13 +6799,8 @@ fn kernel_stack_used_bytes(slot: usize)
         -> usize !{unsafe} {
     let bottom: usize = kernel_stack_bottom(slot);
     if (bottom == 0) { return 0; }
-    let stack: *KernelStackHalf = kernel_stack_span(bottom);
-    for i: usize in 0..<KERNEL_PROCESS_STACK_SIZE {
-        if (stack.bytes[i] != KERNEL_STACK_POISON) {
-            return KERNEL_PROCESS_STACK_SIZE - i;
-        }
-    }
-    return 0;
+    return stack_poison_depth(bottom, KERNEL_PROCESS_STACK_SIZE,
+                              KERNEL_STACK_POISON);
 }
 
 // GitHub issue #377: how far past its end this slot's stack has ever
@@ -6895,13 +6816,8 @@ fn kernel_stack_overflow_bytes(slot: usize)
         -> usize !{unsafe} {
     let bottom: usize = kernel_stack_bottom(slot);
     if (bottom == 0) { return 0; }
-    let below: *KernelStackHalf = kernel_stack_quarantine_span(bottom);
-    for i: usize in 0..<KERNEL_PROCESS_STACK_SIZE {
-        if (below.bytes[i] != KERNEL_STACK_POISON) {
-            return KERNEL_PROCESS_STACK_SIZE - i;
-        }
-    }
-    return 0;
+    return stack_poison_depth(bottom - KERNEL_PROCESS_STACK_SIZE,
+                              KERNEL_PROCESS_STACK_SIZE, KERNEL_STACK_POISON);
 }
 
 // The deepest any slot has been, which is the number that decides how big
