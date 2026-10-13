@@ -159,8 +159,9 @@ flame-graph stacks). Accepted as option (a): a sample delayed by masked
 IRQs is attributed to the unmask point with its masked weight; seeing
 inside masked spans is #773 (Arm SPE) and an irqsoff-style tracer on #771.
 
-**Next, ahead of the list below (maintainer, 2026-10-13):** #720 option (a)
-design. Candidate: #771, page_alloc_contiguous's whole-table scan under an
+**Next, ahead of the list below (maintainer, 2026-10-13):** #758
+(`--emit-protocol-source`), then #720 option (a) slice 2, the four xHCI
+producer rings in usb_xhci.tkb on tx device protocols (kernelcheck-rpi5). Candidate: #771, page_alloc_contiguous's whole-table scan under an
 IRQ-masking lock (about 3 ms on RPi5), its permanent call/time counters,
 the irqsoff-style tracer, and tcp_frame_pool's return-every-chunk shape.
 
@@ -188,10 +189,17 @@ the irqsoff-style tracer, and tcp_frame_pool's return-every-chunk shape.
      Unblocked on A's side: the backing-array hole is closed
      (2026-10-12), and no further #637/#672 layer is known to block
      option (a). What remains is option (a) itself, a general reviewed
-     region-publication primitive, designed and built with xHCI on #720
-     (its surface is not yet proposed); option (b), retaining
-     dma_fixed tokens, is not taken. First check on resume: a generated
-     owner stored in a Place across functions.
+     region-publication primitive, designed and built with xHCI on #720;
+     option (b), retaining dma_fixed tokens, is not taken. Done
+     2026-10-13 (option (a) slice 1, decisions D1 P1, D2 Q1, D3 S1, D4
+     exists-b slots): device protocols (`retains region(T)[b, N] tx|rx`,
+     SPEC.md "Device protocols") with generated cache work on publishing
+     and finishing edges, device-state spans, kernel/DEVICE_SEMANTICS_FILES
+     and a line-ownership check; a generated owner kept in a Place across
+     functions works (linux_user/protocol_tx). Open: #778 (emitted model
+     has no cache variables), #779 (line ownership of split or converted
+     regions), wrong-ring slot identity (#750). Then the event ring, then
+     GEM/virtio (#740).
      `requires` may collide with future function preconditions; revisit
      its spelling then. #759 (boot check of CTR_EL0
      DminLine/CWG against DMA_CACHE_LINE, an assumption of
