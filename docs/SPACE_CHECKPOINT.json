@@ -2,9 +2,10 @@
   "date": "2026-10-13",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "c5e369856cb34ca88331d1b32f3af51f3df1d233f3904c8a0e5d56af9ed14ea5",
-  "workload": "#637: process.tkb split (stack_poison.tkb) and elf64.tkb header overlays. Linked kernels against main 22f4e38c (scripts/space_delta.py).",
+  "source_sha256": "af95b9f37e8104b17725d03127878bcacb696c0bf28f112006eece5a7730a20b",
+  "workload": "#720 option a slice 1: device protocols (tx/rx regions, generated cache work, spans, --device-semantics-file). Linked kernels against main e8f52b1b (scripts/space_delta.py).",
   "evidence": [
+    "docs/DEVICE_PROTOCOL_SPACE_2026-10-13.md",
     "docs/STACK_POISON_SPLIT_SPACE_2026-10-13.md",
     "docs/PROFILE_SESSION_SPACE_2026-10-13.md",
     "docs/HEADER_OVERLAY_SPACE_2026-10-13.md",
@@ -59,6 +60,6 @@
     "docs/VIRTIO_NET_TX_2026-10-10.md",
     "docs/VIRTIO_NET_TX_SPACE_2026-10-10.json"
   ],
-  "assessment": "QEMU text -304 B, RPi5 text -288 B (shared stack scan loops); data/BSS and usable_ram_start unchanged. Earlier measured results (#497 and before) stand.",
-  "next_trigger": "A shrink protocol for walked RegionPools, the #748 allocator change, or the next pool consumer moved onto Held slots, whichever lands first."
+  "assessment": "QEMU and RPi5 text, data, BSS and usable_ram_start unchanged: no kernel declares a device protocol yet. Earlier measured results (#637 split, #497 and before) stand.",
+  "next_trigger": "#720 slice 2 (xHCI producer rings on device protocols), a shrink protocol for walked RegionPools, the #748 allocator change, or the next pool consumer moved onto Held slots, whichever lands first."
 }
