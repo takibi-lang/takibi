@@ -37,7 +37,8 @@ worktree), and every QEMU guest leases vCPUs from the host-wide budget
 
 - A worker returns `needs decision`: show the options to the maintainer,
   translated faithfully, with the worker's recommendation. After the
-  decision, record it on the issue (`github-workflow`) and continue the same
+  decision, record it on the issue (`github-workflow`) and as one line in
+  `DECISIONS.md` (mark a replaced line superseded), and continue the same
   worker with SendMessage, so its context is kept.
 - Maintainer advice for a running worker ("read the application-side
   source", ...): send it verbatim with SendMessage.

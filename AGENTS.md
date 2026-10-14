@@ -167,7 +167,8 @@ Two agents work at a time, each on its own line of work, called Territory A
 and Territory B. **A territory is a role and a queue, not a set of
 directories, and not a particular agent. Either agent may edit any file its
 work needs.** `ROADMAP.md` says what each territory currently covers and in
-what order.
+what order. `DECISIONS.md` lists the maintainer's decisions that still hold;
+read it before proposing an option or recording a decision.
 
 The maintainer decided this on 2026-09-13. Directory ownership had been the
 rule since 2026-09-05, and the split was re-cut three times. In practice most

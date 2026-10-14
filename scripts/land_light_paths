@@ -16,6 +16,7 @@ HISTORY.md
 AGENTS.md
 CLAUDE.md
 ROADMAP.md
+DECISIONS.md
 # No checker reads the workflow yet; allcheck never ran it either.
 .github/
 # Agent skills, agent definitions and Claude Code settings. No build or kernel
