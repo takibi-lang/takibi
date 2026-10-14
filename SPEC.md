@@ -4142,7 +4142,8 @@ that no other code can split:
   `DmaDeviceSpan` of protected fixed DMA allocations: tied to the borrowed
   owner, it cannot be stored, passed to a retaining parameter, or used after
   the owner moves, and `unsafe { dma_span_address(span) }` remains the only
-  address export. No device state has a read or write function. A
+  address export. No device state has a write function, and only an `access
+  read` tx state (below) has a read function. A
   CPU-access state has a span only when it is declared `access write
   addressed`: for a structure that holds its own address (an xHCI Link TRB)
   or whose address programs the controller while the CPU still writes it
@@ -4178,6 +4179,14 @@ that no other code can split:
   a direction, a direction on any other edge or in any other protocol, and
   a device state published both `tx` and `rx`.
   `linux_user/protocol_txrx` runs the packet shape.
+- `access read` grants element reads only (`P_S_read`, no `P_S_write`).
+  It is never combined with `access write`, so a read-only state stays
+  distinct from writable ones. On a `device` state it is accepted only when
+  the device reads the region (a `tx` state): the CPU may then read what it
+  posted, for example a retransmit queue holding a sent packet, because the
+  publishing clean left every line equal to memory and nothing writes the
+  region while it is posted (`kernel/models/DmaTxReadBorrow.tla`). An `rx`
+  state with `access read` is rejected; a snapshot is the only read there.
 
 A device protocol must fix its count with a declared constant, retain a
 region of `u8` or a named type, and declare at least one `device` state. It

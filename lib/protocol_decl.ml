@@ -34,6 +34,12 @@ type state = {
   s_name : string;
   s_params : string list;
   s_write : bool;
+  s_read : bool;
+  (* `access read` (GitHub issue #740): element reads only. Kept apart from
+     `access write` so that a read-only state can later be held by several
+     owners at once (a counted share) without touching writable states. On
+     a device state it is accepted only when the device reads the region
+     (a tx state): kernel/models/DmaTxReadBorrow.tla. *)
   s_device : bool;
   s_addressed : bool;
   (* `access write addressed` (GitHub issue #720, decision of 2026-10-13):
@@ -153,14 +159,15 @@ let validate (d : protocol_decl) : t =
             r.pr_name a) r.pr_args;
         let params = List.map fst r.pr_args in
         check_distinct r.pr_loc "state parameter" params;
-        let rec parse w dev ad = function
-          | [] -> (w, dev, ad)
-          | "access" :: "write" :: rest when not w -> parse true dev ad rest
-          | "device" :: rest when not dev -> parse w true ad rest
-          | "addressed" :: rest when not ad -> parse w dev true rest
+        let rec parse w rd dev ad = function
+          | [] -> (w, rd, dev, ad)
+          | "access" :: "write" :: rest when not w && not rd -> parse true rd dev ad rest
+          | "access" :: "read" :: rest when not rd && not w -> parse w true dev ad rest
+          | "device" :: rest when not dev -> parse w rd true ad rest
+          | "addressed" :: rest when not ad -> parse w rd dev true rest
           | a :: _ -> fail r.pr_loc "unsupported state attribute '%s' on '%s'"
                         a r.pr_name in
-        let w, dev, ad = parse false false false attrs in
+        let w, rd, dev, ad = parse false false false false attrs in
         if ad && not w then
           fail r.pr_loc "state '%s' is 'addressed' but not 'access write': \
             a device state already yields its span" r.pr_name;
@@ -171,7 +178,7 @@ let validate (d : protocol_decl) : t =
           fail r.pr_loc "state '%s' cannot be both 'access write' and 'device'"
             r.pr_name;
         Some ({ s_name = r.pr_name; s_params = params; s_write = w;
-                s_device = dev; s_addressed = ad }, r.pr_loc)
+                s_read = rd; s_device = dev; s_addressed = ad }, r.pr_loc)
     | _ -> None) d.proto_items in
   check_distinct loc "state" (List.map (fun (s, _) -> s.s_name) states);
   let states = List.map fst states in
@@ -376,6 +383,12 @@ let validate (d : protocol_decl) : t =
     prepared_before_read = List.mem "prepared_before_read" props; cells;
     direction; state_dirs = [] } in
   let p = { p with state_dirs = state_directions loc p } in
+  List.iter (fun s ->
+    if s.s_read && s.s_device
+       && List.assoc_opt s.s_name p.state_dirs <> Some Device_protocol_registry.Tx then
+      fail loc "device state '%s' is 'access read', but the device writes it: \
+        only a state the device reads (tx) may be read while it is posted"
+        s.s_name) states;
   List.iter (fun o ->
     if o.o_effect = `Snapshot
        && List.assoc_opt o.o_subject p.state_dirs <> Some Device_protocol_registry.Rx then
@@ -646,13 +659,15 @@ let source_of (d : protocol_decl) (p : t) : string =
      writes through the retained region, the index proved below the count
      at each call (`where`), with no escaping pointer. *)
   List.iter (fun s ->
-    if s.s_write then begin
+    if s.s_write || s.s_read then begin
       let owner = ty s.s_name s.s_params in
-      add "inline fn %s_%s_write(s: borrow %s, i: usize @ k, value: %s) where k < %s {"
-        pn s.s_name owner elem count;
-      add "    let element = region_at(s.memory, i);";
-      add "    *element = value;";
-      add "}";
+      if s.s_write then begin
+        add "inline fn %s_%s_write(s: borrow %s, i: usize @ k, value: %s) where k < %s {"
+          pn s.s_name owner elem count;
+        add "    let element = region_at(s.memory, i);";
+        add "    *element = value;";
+        add "}"
+      end;
       add "inline fn %s_%s_read(s: borrow %s, i: usize @ k) -> %s where k < %s {"
         pn s.s_name owner elem count;
       add "    return *region_at(s.memory, i);";

@@ -624,5 +624,44 @@ semantics above are assumed, not derived; an abstract interleaving model
 can show that each barrier the lowering emits is needed under them, but
 not that they describe the silicon. An architecture-level check (for
 example an axiomatic Arm model extended with cache maintenance) would be
-the evidence for that part. Live metadata refresh (`dma_refresh_live`) and
-transmit cleaning are not modelled.
+the evidence for that part. Live metadata refresh (`dma_refresh_live`) is
+not modelled; transmit cleaning is DmaTxReadBorrow.tla's.
+
+## DmaTxReadBorrow.tla -- reading a buffer the device is transmitting (#740)
+
+The transmit direction of DmaCacheVisibility.tla, with the question #740's
+packet pool needs answered first: may the CPU READ a buffer while the
+device owns it for reading (a TCP retransmit queue holding a `TxPosted`
+owner)? Same two-core cache environment and assumptions; `sent` is a ghost
+of the contents at the doorbell, and the device reads memory only.
+
+The lowering modelled is a `tx` publishing edge (`__protocol_dma_clean`:
+`dc cvac` over the region, then `dsb`), the state change and the doorbell.
+The maintained consumer is the virtio-net scratch TX buffer.
+
+| Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
+| --- | --- | --- | --- | --- |
+| `CpuWrite` | `virtio_net_tx_fill` | a write through the Ready owner on any core | which bytes -- irrelevant to `DeviceReadsPosted`: every line of the region is cleaned identically | `cdf72ee0c00a` |
+| `Clean`, `Post` | `virtio_net_tx_send` | the generated clean completed before the state change and the doorbell | the descriptor encoding -- irrelevant to `DeviceReadsPosted`: only the doorbell's order after the clean matters to the line | `3ec53e87cb75` |
+| `DeviceRead`, `Complete` | `virtio_net_tx_settle` | the device reads memory while posted; an observed used entry returns the owner to the CPU | the bounded wait and expiry -- modelled elsewhere: `FixedDmaOwnership.Timeout` | `25a3fd71f155` |
+
+`CpuRead` in the posted phase is the read-only borrow; no kernel function
+takes it yet (the pool's retransmit queue will).
+
+Properties: `DeviceReadsPosted` -- the device transmits what the CPU had
+written at the doorbell; `ReadsCurrent` -- a CPU read, the borrow while
+posted included, returns the latest write; `CoherentCaches`.
+
+The fixed variant passes: a read while posted is safe, because the device
+writes nothing, the clean left every line equal to memory, and no write
+can happen while posted. Controls:
+
+- `writewhileposted`: a write while posted, then an eviction, changes what
+  the device reads (`DeviceReadsPosted`). This is why a device state has
+  no write accessor and the borrow is read-only.
+- `noclean`: the doorbell without the clean; the device reads stale memory
+  (`DeviceReadsPosted`).
+
+The result holds for a `tx` device state only. In an `rx` state the device
+writes, and a read there is DmaCacheVisibility's `NoReadWhileDeviceActive`
+violation; a snapshot is the only read of an `rx` state.

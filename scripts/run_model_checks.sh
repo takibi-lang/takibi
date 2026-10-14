@@ -135,6 +135,11 @@ check_model DmaCacheVisibility Safety 8 \
     localinvalidate:CInitLocalInvalidate:DeviceDataKept:violated:7 \
     unpublished:CInitUnpublished:DeviceDataKept:violated:5
 
+check_model DmaTxReadBorrow Safety 7 \
+    fixed:CInitFixed:pass:ok \
+    writewhileposted:CInitWriteWhilePosted:DeviceReadsPosted:violated \
+    noclean:CInitNoClean:DeviceReadsPosted:violated:4
+
 check_model WorldStop NoUnstoppedRead 8 \
     fixed:CInitFixed:pass:ok \
     subset:CInitSubset:NoUnstoppedRead:violated \

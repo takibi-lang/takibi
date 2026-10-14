@@ -13,7 +13,7 @@ protocol Pkt[inst: usize] retains region(u8)[b, PKT] txrx {
     state Free access write;
     state RxPosted[req] device;
     state Filled access write;
-    state TxPosted[req] device;
+    state TxPosted[req] device access read;
     state Unconfirmed[req] device;
     init Free;
     transition post_rx(Free) rx -> RxPosted[fresh req];
@@ -77,6 +77,11 @@ fn app_main() !{unsafe} {
                     Pkt_Filled_write(filled, 1, first);
                     match Pkt_post_tx(filled) {
                         Pkt_post_tx_Result::TxPosted(out) => {
+                            // A retransmit queue may read what it sent while
+                            // the device still reads it (access read).
+                            uart_puts("posted byte 0: ");
+                            uart_print(Pkt_TxPosted_read(out, 0) as usize);
+                            uart_puts("\n");
                             match Pkt_tx_done(out) {
                                 Pkt_tx_done_Outcome::Pending => { stuck(Pkt_expire(out)); }
                                 Pkt_tx_done_Outcome::Sent(done) => {

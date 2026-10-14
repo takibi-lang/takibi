@@ -25888,7 +25888,7 @@ protocol Pkt[inst: usize] retains region(u8)[b, PKT] txrx {
     state Free access write;
     state RxPosted[req] device;
     state Filled access write;
-    state TxPosted[req] device;
+    state TxPosted[req] device access read;
     state Unconfirmed[req] device;
     init Free;
     transition post_rx(Free) rx -> RxPosted[fresh req];
@@ -26217,6 +26217,20 @@ let device_protocol_tests = [
     (expect_packet_error ~sub:"match Pkt_tx_done(out) {"
        ~by:"Pkt_TxPosted_write(out, 0, 2); match Pkt_tx_done(out) {"
        "Pkt_TxPosted_write");
+  Alcotest.test_case "access read: the CPU may read a packet the device is sending" `Quick
+    (fun () ->
+      let use = replace_once ~sub:"match Pkt_tx_done(out) {"
+          ~by:"let peek: u8 = Pkt_TxPosted_read(out, 0); match Pkt_tx_done(out) {"
+          packet_consumer in
+      ignore (compile_device ~proto:packet_protocol ~use ()));
+  Alcotest.test_case "access read: not of a state the device writes" `Quick
+    (expect_packet_error ~in_proto:true
+       ~sub:"    state RxPosted[req] device;" ~by:"    state RxPosted[req] device access read;"
+       "but the device writes it");
+  Alcotest.test_case "access read: never with access write" `Quick
+    (expect_packet_error ~in_proto:true
+       ~sub:"    state Filled access write;" ~by:"    state Filled access write access read;"
+       "unsupported state attribute");
   Alcotest.test_case "txrx: an unconfirmed packet is never recycled" `Quick
     (expect_packet_error ~sub:"return lose(gone);"
        ~by:"let f = Pkt_recycle(gone); return 0;"
