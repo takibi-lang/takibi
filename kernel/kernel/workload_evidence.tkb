@@ -1602,7 +1602,7 @@ fn workload_settings_wake_progress(operation: usize, count: usize,
         if (workload_settings_wake.parent_pid == 0) {
             workload_settings_wake.parent_pid = pid;
             // GitHub issue #665: watched in the race-window kernels.
-            stall_probe_watch_pid(0, pid);
+            if (KERNEL_STALL_PROBES != 0) { stall_probe_watch_pid(0, pid); }
             answer = SECONDARY_CORE_ID;
         }
     } else if (operation == 1) {
@@ -1611,7 +1611,7 @@ fn workload_settings_wake_progress(operation: usize, count: usize,
             pid != workload_settings_wake.parent_pid &&
             cpu_id() == SECONDARY_CORE_ID) {
             workload_settings_wake.reader_pid = pid;
-            stall_probe_watch_pid(1, pid);
+            if (KERNEL_STALL_PROBES != 0) { stall_probe_watch_pid(1, pid); }
             kernel_boot_log(
                 "workload: settings wake reader waiting in a canonical read on the secondary cpu\n");
             answer = 1;

@@ -3767,7 +3767,7 @@ fn scheduled_process_start(
         state: sink ScheduledProcessState[process, ProcessState::Startable])
         -> ScheduledProcessState[process, ProcessState::Running] {
     scheduled_process_state_drop(state);
-    if (stall_probe_watching()) {
+    if (KERNEL_STALL_PROBES != 0 && stall_probe_watching()) {
         stall_probe_event(scheduled_process_pid_of_slot(
             process_slot_word(owner.pool_index)), STALL_PROBE_START);
     }
@@ -3801,7 +3801,7 @@ fn scheduled_process_yield(
         state: sink ScheduledProcessState[process, ProcessState::Running])
         -> ScheduledProcessState[process, ProcessState::Ready] !{changes_witness_ProcessCurrent} {
     scheduled_process_state_drop(state);
-    if (stall_probe_watching()) {
+    if (KERNEL_STALL_PROBES != 0 && stall_probe_watching()) {
         stall_probe_event(scheduled_process_pid_of_slot(
             process_slot_word(owner.pool_index)), STALL_PROBE_YIELD);
     }
@@ -3820,7 +3820,7 @@ fn scheduled_process_block(
         reason: ProcessWaitReason)
         -> ScheduledProcessState[process, ProcessState::Blocked] !{changes_witness_ProcessCurrent} {
     scheduled_process_state_drop(state);
-    if (stall_probe_watching()) {
+    if (KERNEL_STALL_PROBES != 0 && stall_probe_watching()) {
         stall_probe_event(scheduled_process_pid_of_slot(
             process_slot_word(owner.pool_index)), STALL_PROBE_BLOCK);
     }
@@ -3870,7 +3870,7 @@ private fn scheduled_process_wake_ready(
         state: sink ScheduledProcessState[process, ProcessState::Blocked])
         -> ScheduledProcessState[process, ProcessState::Ready] {
     scheduled_process_state_drop(state);
-    if (stall_probe_watching()) {
+    if (KERNEL_STALL_PROBES != 0 && stall_probe_watching()) {
         stall_probe_event(scheduled_process_pid_of_slot(
             process_slot_word(owner.pool_index)), STALL_PROBE_WAKE);
     }
@@ -6023,7 +6023,7 @@ fn kernel_process_secondary_start() -> ProcessSecondaryStart {
                         scheduled_process_record_locked(guard, slot).pid) == false) {
                     match scheduled_process_ready_take_slot(guard, slot) {
                         ScheduledProcessReadyTakeResult::Missing => {
-                            stall_probe_refused(scheduled_process_record_locked(guard, slot).pid);
+                            if (KERNEL_STALL_PROBES != 0) { stall_probe_refused(scheduled_process_record_locked(guard, slot).pid); }
                         }
                         ScheduledProcessReadyTakeResult::Ready(resources) => {
                             let (owner, ready) = resources;

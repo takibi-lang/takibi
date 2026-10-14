@@ -126,7 +126,7 @@ fn kernel_tick_count_of(core: {0..<KERNEL_MAX_CORES as usize}) -> usize
 
 // Core 0's tick, which does not come through secondary_timer_tick.
 fn kernel_core0_tick_note() !{unsafe} {
-    stall_probe_note(STALL_PROBE_TICK);
+    if (KERNEL_STALL_PROBES != 0) { stall_probe_note(STALL_PROBE_TICK); }
     let previous: usize = atomic_word_fetch_add(&secondary_tick_count[0], 1);
 }
 
@@ -137,7 +137,7 @@ fn kernel_core0_tick_note() !{unsafe} {
 // per-core timer accounting.
 fn secondary_timer_tick() !{interrupt, unsafe} {
     timer_tick_rearm();
-    stall_probe_note(STALL_PROBE_TICK);
+    if (KERNEL_STALL_PROBES != 0) { stall_probe_note(STALL_PROBE_TICK); }
     let raw_core: usize = cpu_id();
     if (raw_core >= KERNEL_MAX_CORES) { return; }
     let core: {0..<KERNEL_MAX_CORES as usize} = raw_core;
@@ -278,16 +278,16 @@ fn kernel_secondary_main(context: usize) !{unsafe} {
                     signal_contention_secondary_run();
                 }
             }
-            stall_probe_note(STALL_PROBE_IDLE_PASS);
+            if (KERNEL_STALL_PROBES != 0) { stall_probe_note(STALL_PROBE_IDLE_PASS); }
             match kernel_process_secondary_start() {
                 ProcessSecondaryStart::Idle => {}
                 ProcessSecondaryStart::Frame(next) => {
-                    stall_probe_note(STALL_PROBE_RESUME);
+                    if (KERNEL_STALL_PROBES != 0) { stall_probe_note(STALL_PROBE_RESUME); }
                     el0_context_resume(next);
                 }
             }
             kernel_activity_set(KernelActivity::IdleLoop);
-            stall_probe_note(STALL_PROBE_WFI);
+            if (KERNEL_STALL_PROBES != 0) { stall_probe_note(STALL_PROBE_WFI); }
             wfi();
         }
     }
@@ -352,16 +352,16 @@ fn kernel_core0_idle_loop() {
         // lane stalled once #583's refusal list stopped sending ash's ioctl
         // to core 0. Drain on every wake; the tick bounds the latency.
         kernel_log_peer_drain();
-        stall_probe_note(STALL_PROBE_IDLE_PASS);
+        if (KERNEL_STALL_PROBES != 0) { stall_probe_note(STALL_PROBE_IDLE_PASS); }
         match kernel_process_secondary_start() {
             ProcessSecondaryStart::Idle => {}
             ProcessSecondaryStart::Frame(next) => {
-                stall_probe_note(STALL_PROBE_RESUME);
+                if (KERNEL_STALL_PROBES != 0) { stall_probe_note(STALL_PROBE_RESUME); }
                 el0_context_resume(next);
             }
         }
         kernel_activity_set(KernelActivity::IdleLoop);
-        stall_probe_note(STALL_PROBE_WFI);
+        if (KERNEL_STALL_PROBES != 0) { stall_probe_note(STALL_PROBE_WFI); }
         wfi();
     }
 }

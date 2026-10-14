@@ -9,15 +9,21 @@ start and yield events. It is on only in the race-window overlays
 
 | | qemu base | qemu change | rpi5 base | rpi5 change |
 |---|---|---|---|---|
-| text | 679764 | 680228 | 727828 | 728324 |
+| text | 679764 | 679768 | 727828 | 727832 |
 | data | 4632 | 4632 | 2889496 | 2889496 |
 | bss | 1509152 | 1509152 | 1696704 | 1696704 |
 | usable_ram_start | 0x40220000 | 0x40220000 | 0x718000 | 0x718000 |
 
-- Text grows by 464 B (QEMU) and 496 B (RPi5). These are the call sites and
-  the disabled early returns, which the compiler keeps even though the
-  constant gates them.
+- Text grows by 4 B on both, one instruction's worth of layout. No stall_probe
+  symbol is left in either production kernel.
+- A first version grew text by 464 B (QEMU) and 496 B (RPi5). The probe
+  functions tested the constant inside themselves, so each call site was
+  still a real call to a 16-20 B stub. The event hooks were also gated by
+  a call (stall_probe_watching), so the pid lookup they guard stayed too.
+  Every call site is now inside `if (KERNEL_STALL_PROBES != 0)`. That folds
+  at compile time, so the calls and the stubs go and --gc-sections drops
+  the probe storage.
 - Data, BSS and usable_ram_start are unchanged, and no data or BSS symbol
-  changed size: gc-sections drops the probe storage in production.
-- Production behaviour is unchanged: every probe function returns at once.
+  changed size.
+- Production behaviour is unchanged.
 - Adopted.
