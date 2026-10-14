@@ -121,17 +121,10 @@ def main():
                  "    gem_fixture_submissions = gem_fixture_submissions + 1;\n"
                  "    workload_profile_note_network_tx(safe_len as usize);")
     # Observe the real USED bit before hiding it from the maintained wait.
-    for slot, word in ((0, 1), (1, 5)):
-        result = f"(gem_tx_desc[{word}] & (1 << 31)) != 0"
-        before = (f"    if (slot == 0) {{ return {result}; }}" if slot == 0
-                  else f"    return {result};")
-        after = ("    if (slot == 0) {\n" if slot == 0 else "")
-        indent = "        " if slot == 0 else "    "
-        after += (indent + f"let observed: bool = {result};\n" +
-                  indent + "if (observed) { gem_fixture_observed_used = true; }\n" +
-                  indent + "return observed && gem_fixture_hide_completion == false;" +
-                  ("\n    }" if slot == 0 else ""))
-        replace_once(driver, before, after)
+    replace_once(driver, "    return gem_tx_ring_poll(slot);",
+                 "    let observed: bool = gem_tx_ring_poll(slot);\n"
+                 "    if (observed) { gem_fixture_observed_used = true; }\n"
+                 "    return observed && gem_fixture_hide_completion == false;")
     replace_once(driver, "        if ((gem.tsr & (1 << 3)) == 0) {",
                  "        let observed: u32 = gem.tsr;\n"
                  "        gem_fixture_last_tsr = observed;\n"

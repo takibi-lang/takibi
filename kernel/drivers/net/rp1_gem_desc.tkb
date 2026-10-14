@@ -1,0 +1,261 @@
+// GitHub issue #740 slice 3: the RP1 GEM descriptor rings as owners of two
+// rx device protocols (#720 option a). Both rings are `rx` because GEM
+// writes back into the descriptors it owns: the RX descriptor's ownership
+// bit and length, the TX descriptor's USED bit. This file is a
+// device-semantics file (kernel/DEVICE_SEMANTICS_FILES); what it trusts:
+//   - gem_rx_ring_peek / gem_rx_ring_filled: the RX descriptor's ownership
+//     bit (word 0, bit 0) set in a snapshot taken after invalidating its
+//     line means GEM has written the frame and length and will not touch
+//     the descriptor until the CPU clears the bit (Cadence GEM receive
+//     descriptor protocol; RP1 uses one descriptor with WRAP);
+//   - gem_tx_ring_peek / gem_tx_ring_used: the submitted TX descriptor's
+//     USED bit (word 1, bit 31) set in such a snapshot means GEM has read
+//     the frame and stopped at the next descriptor, whose USED bit is set;
+//   - gem_tx_ring_halted: gem_halt() confirmed TSR.TGO clear with
+//     NCR.THalt set, so GEM reads no TX descriptor;
+//   - both Ready states are `addressed`: RBQP and TBQP are programmed from
+//     the Ready spans at init. GEM fetches a TX descriptor only after
+//     TSTART, which gem_tx_ring_start rings after the generated clean, and
+//     never writes an RX descriptor whose ownership bit is set, which holds
+//     for the RX ring in Ready (the bit is cleared only just before arming).
+// A peek's snapshot only records what it saw; the completes observations
+// read that record, so a ring leaves its device state only after a
+// snapshot that showed the bit.
+//
+// Current limitations (2026-10-14):
+// - The RX and TX packet buffers stay dma_fixed allocations
+//   (rp1_gem_dma.tkb); they move with the packet-buffer pool design (#740).
+// - One owner per ring, whole-ring device states: the driver is
+//   synchronous (one TX in flight, one RX descriptor).
+
+use "kernel/lib/mutex.tkb";
+
+const GEM_DESC_COUNT: usize = 4;
+
+// One 64-bit-addressing GEM descriptor: address low (with RX ownership and
+// WRAP bits), control/status, address high, reserved.
+struct GemDesc {
+    addr_lo: u32;
+    ctrl: u32;
+    addr_hi: u32;
+    reserved: u32;
+}
+
+protocol GemRxRing[inst: usize] retains region(GemDesc)[b, GEM_DESC_COUNT] rx {
+    state Ready access write addressed;
+    state Armed[req] device;
+    init Ready;
+    transition gem_rx_ring_arm(Ready) -> Armed[fresh req];
+    observe gem_rx_ring_peek(Armed[req]) -> RxDesc snapshot | RxEmpty;
+    observe gem_rx_ring_filled(Armed[req]) -> RxFilled[req] completes | RxPending;
+    transition gem_rx_ring_take(Armed[req], RxFilled[req]) -> Ready;
+    property disjoint;
+    model cells 2;
+}
+
+protocol GemTxRing[inst: usize] retains region(GemDesc)[b, GEM_DESC_COUNT] rx {
+    state Ready access write addressed;
+    state Sending[req] device;
+    init Ready;
+    transition gem_tx_ring_start(Ready) -> Sending[fresh req];
+    observe gem_tx_ring_peek(Sending[req]) -> TxDesc snapshot | TxBusy;
+    observe gem_tx_ring_used(Sending[req]) -> TxUsed[req] completes | TxNotUsed;
+    transition gem_tx_ring_done(Sending[req], TxUsed[req]) -> Ready;
+    observe gem_tx_ring_halted(Sending[req]) -> TxHalted[req] quiesces | TxRunning;
+    transition gem_tx_ring_reclaim(Sending[req], TxHalted[req]) -> Ready;
+    property disjoint;
+    model cells 2;
+}
+
+private region let mut gem_rx_ring: [GemDesc; 4] align(64);
+private region let mut gem_tx_ring: [GemDesc; 4] align(64);
+
+// What the latest snapshots showed, read by the completes observations.
+private let mut gem_rx_seen_filled: bool = false;
+private let mut gem_tx_seen_used: bool = false;
+// Set by gem_tx_ring_mark_halted after gem_halt() confirmed the halt.
+private let mut gem_tx_halt_confirmed: bool = false;
+
+fn gem_rx_ring_arm(s: borrow GemRxRing_Armed[b, o, 4, r]) {}
+fn gem_rx_ring_peek(s: borrow GemRxRing_Armed[b, o, 4, r], value: GemDesc)
+        -> GemRxRing_gem_rx_ring_peek_Raw {
+    if ((value.addr_lo & 1) != 0) {
+        gem_rx_seen_filled = true;
+        return GemRxRing_gem_rx_ring_peek_Raw::RxDesc;
+    }
+    return GemRxRing_gem_rx_ring_peek_Raw::RxEmpty;
+}
+fn gem_rx_ring_peek_release(s: borrow GemRxRing_Armed[b, o, 4, r]) {}
+fn gem_rx_ring_filled(s: borrow GemRxRing_Armed[b, o, 4, r])
+        -> GemRxRing_gem_rx_ring_filled_Raw {
+    if (gem_rx_seen_filled) {
+        gem_rx_seen_filled = false;
+        return GemRxRing_gem_rx_ring_filled_Raw::RxFilled;
+    }
+    return GemRxRing_gem_rx_ring_filled_Raw::RxPending;
+}
+fn gem_rx_ring_take(s: borrow GemRxRing_Armed[b, o, 4, r]) {}
+
+// TSTART: runs after the generated clean and the state change.
+fn gem_tx_ring_start(s: borrow GemTxRing_Sending[b, o, 4, r]) {
+    gem_tx_seen_used = false;
+    gem.ncr = gem.ncr | (1 << 9);
+}
+fn gem_tx_ring_peek(s: borrow GemTxRing_Sending[b, o, 4, r], value: GemDesc)
+        -> GemTxRing_gem_tx_ring_peek_Raw {
+    if ((value.ctrl & (1 << 31)) != 0) {
+        gem_tx_seen_used = true;
+        return GemTxRing_gem_tx_ring_peek_Raw::TxDesc;
+    }
+    return GemTxRing_gem_tx_ring_peek_Raw::TxBusy;
+}
+fn gem_tx_ring_peek_release(s: borrow GemTxRing_Sending[b, o, 4, r]) {}
+fn gem_tx_ring_used(s: borrow GemTxRing_Sending[b, o, 4, r])
+        -> GemTxRing_gem_tx_ring_used_Raw {
+    if (gem_tx_seen_used) { return GemTxRing_gem_tx_ring_used_Raw::TxUsed; }
+    return GemTxRing_gem_tx_ring_used_Raw::TxNotUsed;
+}
+fn gem_tx_ring_done(s: borrow GemTxRing_Sending[b, o, 4, r]) {}
+fn gem_tx_ring_halted(s: borrow GemTxRing_Sending[b, o, 4, r])
+        -> GemTxRing_gem_tx_ring_halted_Raw {
+    if (gem_tx_halt_confirmed) { return GemTxRing_gem_tx_ring_halted_Raw::TxHalted; }
+    return GemTxRing_gem_tx_ring_halted_Raw::TxRunning;
+}
+fn gem_tx_ring_reclaim(s: borrow GemTxRing_Sending[b, o, 4, r]) {}
+
+// Called by rp1_gem.tkb only when gem_halt() returned true.
+fn gem_tx_ring_mark_halted() { gem_tx_halt_confirmed = true; }
+
+variant GemRxRingHeld {
+    Ready(exists b: addr. exists o: usize. GemRxRing_Ready[b, o, 4]);
+    Armed(exists b: addr. exists o: usize. exists r: usize. GemRxRing_Armed[b, o, 4, r]);
+}
+variant GemTxRingHeld {
+    Ready(exists b: addr. exists o: usize. GemTxRing_Ready[b, o, 4]);
+    Sending(exists b: addr. exists o: usize. exists r: usize. GemTxRing_Sending[b, o, 4, r]);
+}
+
+struct GemRxRingSlot {
+    private mutex: Mutex;
+    private value: Place(GemRxRingHeld);
+}
+struct GemTxRingSlot {
+    private mutex: Mutex;
+    private value: Place(GemTxRingHeld);
+}
+private let mut gem_rx_ring_slot: GemRxRingSlot;
+private let mut gem_tx_ring_slot: GemTxRingSlot;
+
+private linear struct GemRingGuard[lock: addr] { private flags: usize; }
+
+private fn gem_ring_lock(lock: *Mutex @ address) -> GemRingGuard[address]
+        !{acquires_lock_40_gem_ring, lock_guard_40_gem_ring} {
+    let mut guard: GemRingGuard[address] = { mutex_acquire(lock) };
+    return guard;
+}
+
+private fn gem_ring_unlock(guard: sink GemRingGuard[address], lock: *Mutex @ address) {
+    mutex_release(lock, guard.flags);
+}
+
+// A slot never holds two owners, and every taker parks one back.
+private fn gem_rx_ring_lost(held: sink GemRxRingHeld) { kernel_invariant_stop(); }
+private fn gem_tx_ring_lost(held: sink GemTxRingHeld) { kernel_invariant_stop(); }
+
+fn gem_rx_ring_take_held() -> Place(GemRxRingHeld) {
+    let guard = gem_ring_lock(&gem_rx_ring_slot.mutex);
+    let taken: Place(GemRxRingHeld) = place_take(
+        guard, &gem_rx_ring_slot.mutex, gem_rx_ring_slot.value);
+    gem_ring_unlock(guard, &gem_rx_ring_slot.mutex);
+    return taken;
+}
+
+fn gem_rx_ring_park(held: GemRxRingHeld) {
+    let guard = gem_ring_lock(&gem_rx_ring_slot.mutex);
+    let previous: Place(GemRxRingHeld) = place_put(
+        guard, &gem_rx_ring_slot.mutex, gem_rx_ring_slot.value, held);
+    gem_ring_unlock(guard, &gem_rx_ring_slot.mutex);
+    match previous {
+        Place::Empty => {}
+        Place::Full(other) => { gem_rx_ring_lost(other); }
+    }
+}
+
+fn gem_tx_ring_take_held() -> Place(GemTxRingHeld) {
+    let guard = gem_ring_lock(&gem_tx_ring_slot.mutex);
+    let taken: Place(GemTxRingHeld) = place_take(
+        guard, &gem_tx_ring_slot.mutex, gem_tx_ring_slot.value);
+    gem_ring_unlock(guard, &gem_tx_ring_slot.mutex);
+    return taken;
+}
+
+fn gem_tx_ring_park(held: GemTxRingHeld) {
+    let guard = gem_ring_lock(&gem_tx_ring_slot.mutex);
+    let previous: Place(GemTxRingHeld) = place_put(
+        guard, &gem_tx_ring_slot.mutex, gem_tx_ring_slot.value, held);
+    gem_ring_unlock(guard, &gem_tx_ring_slot.mutex);
+    match previous {
+        Place::Empty => {}
+        Place::Full(other) => { gem_tx_ring_lost(other); }
+    }
+}
+
+// Both rings, claimed once by net_init, parked Ready.
+fn gem_rings_claim() -> bool {
+    let RegionOf(GemDesc)::Taken(rx) = region_of(gem_rx_ring) else {
+        RegionOf(GemDesc)::Gone => { return false; }
+    };
+    gem_rx_ring_park(GemRxRingHeld::Ready(GemRxRing_init(rx)));
+    let RegionOf(GemDesc)::Taken(tx) = region_of(gem_tx_ring) else {
+        RegionOf(GemDesc)::Gone => { return false; }
+    };
+    gem_tx_ring_park(GemTxRingHeld::Ready(GemTxRing_init(tx)));
+    return true;
+}
+
+// Whether the armed RX descriptor holds a frame, from one snapshot. The
+// owner stays Armed; the record lets gem_rx_ring_filled confirm it.
+fn gem_rx_ring_poll() -> bool {
+    let Place::Full(held) = gem_rx_ring_take_held() else {
+        Place::Empty => { return false; }
+    };
+    let GemRxRingHeld::Armed(armed) = held else {
+        GemRxRingHeld::Ready(ready) => {
+            gem_rx_ring_park(GemRxRingHeld::Ready(ready));
+            return false;
+        }
+    };
+    let mut filled: bool = false;
+    match GemRxRing_gem_rx_ring_peek(armed, 0) {
+        GemRxRing_gem_rx_ring_peek_Outcome::RxDesc(entry) => {
+            filled = true;
+            GemRxRing_RxDesc_release(armed, entry);
+        }
+        GemRxRing_gem_rx_ring_peek_Outcome::RxEmpty => {}
+    }
+    gem_rx_ring_park(GemRxRingHeld::Armed(armed));
+    return filled;
+}
+
+// Whether TX descriptor `slot` was read, from one snapshot.
+fn gem_tx_ring_poll(slot: {0..<2 as usize}) -> bool {
+    let Place::Full(held) = gem_tx_ring_take_held() else {
+        Place::Empty => { return false; }
+    };
+    let GemTxRingHeld::Sending(sending) = held else {
+        GemTxRingHeld::Ready(ready) => {
+            gem_tx_ring_park(GemTxRingHeld::Ready(ready));
+            return false;
+        }
+    };
+    let mut used: bool = false;
+    match GemTxRing_gem_tx_ring_peek(sending, slot) {
+        GemTxRing_gem_tx_ring_peek_Outcome::TxDesc(entry) => {
+            used = true;
+            GemTxRing_TxDesc_release(sending, entry);
+        }
+        GemTxRing_gem_tx_ring_peek_Outcome::TxBusy => {}
+    }
+    gem_tx_ring_park(GemTxRingHeld::Sending(sending));
+    return used;
+}

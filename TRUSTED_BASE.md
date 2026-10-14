@@ -247,6 +247,15 @@ rules globally.
   shadow means the device has read the one outstanding descriptor's buffer.
   A send the bounded wait cannot confirm parks the owner in a terminal
   device state, so no later write to the payload type-checks.
+  The RP1 GEM descriptor rings (`kernel/drivers/net/rp1_gem_desc.tkb`) are
+  rx owners, since GEM writes back into the descriptors it owns: trusted,
+  that the RX ownership bit or the TX USED bit seen in a snapshot taken
+  after invalidating the descriptor's line ends GEM's access to that ring
+  (one RX descriptor, one TX frame in flight), that a confirmed halt ends
+  TX descriptor reads, and, for both `addressed` Ready states, that GEM
+  fetches a TX descriptor only after TSTART and never writes an RX
+  descriptor whose ownership bit is set. The packet buffers stay dma_fixed
+  allocations (`rp1_gem_dma.tkb`).
   Generated protocol files (`<protocol Name>`) are exempt from
   `--confine-raw-authority`, as the built-in region file is
   (`lib/raw_authority_policy.ml`). The reason: a `u8` element read or write

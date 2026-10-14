@@ -91,6 +91,10 @@ EXEMPT = {
         "the scratch TX owner slot, exchanged under its own Mutex, and the "
         "descriptor length of the next publication (GitHub issue #740)",
     "drivers/net/rp1_gem.tkb": "device state; MSI-X is routed to CPU0",
+    "drivers/net/rp1_gem_desc.tkb":
+        "the GEM descriptor rings' owner slots, exchanged under their own "
+        "Mutexes, and the snapshot records read by their observations "
+        "(GitHub issue #740)",
     "drivers/net/rp1_gem_dma.tkb":
         "the RX allocation's owner slot, exchanged under its own Mutex, and "
         "its mint function, reached only from rp1_gem.tkb (GitHub issue #622)",

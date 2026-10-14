@@ -12,6 +12,7 @@ use "kernel/net/netconfig.tkb";
 use "kernel/lib/init_once.tkb";
 use "kernel/drivers/net/gem_tx_wait.tkb";
 use "kernel/drivers/net/rp1_gem_dma.tkb";
+use "kernel/drivers/net/rp1_gem_desc.tkb";
 
 const RP1_GEM_BASE: usize = 0x1F00100000;
 const RP1_CLOCKS_BASE: usize = 0x1F00018000;
@@ -89,8 +90,7 @@ fn net_rx_validated(slot: {0..<1 as usize} @ desc,
     return frame;
 }
 
-private let mut gem_rx_desc: [u32; 16] align(64);
-private let mut gem_tx_desc: [u32; 16] align(64);
+// The descriptor rings are protocol owners in rp1_gem_desc.tkb (#740).
 private let mut net_init_once: InitOnce;
 private let mut rp1_gem_net_ready: bool = false;
 let mut gem_tx_next: i32 = 0;
@@ -187,10 +187,89 @@ fn gem_configure_link() {
     gem.ncfgr = ncfgr;
 }
 
+// The RX ring's owner, which must be Ready: an Armed one here means two
+// frames were taken from one descriptor.
+private fn gem_rx_ring_ready() -> GemRxRingHeld {
+    let Place::Full(held) = gem_rx_ring_take_held() else {
+        Place::Empty => {
+            kernel_invariant_stop();
+            return gem_rx_ring_ready();
+        }
+    };
+    return held;
+}
+
+// Hand the RX buffer and its descriptor back to GEM: clear the ownership
+// bit through the Ready owner, then arm (the generated clean+invalidate).
 fn gem_rearm_rx(cpu: sink *GemRxCpu) !{unsafe} {
     let address: usize = gem_rx_arm(cpu);
-    gem_rx_desc[0] = gem_rx_desc[0] & 0xFFFFFFFE;
-    dma_prepare_tx(gem_rx_desc as *u8, 64);
+    let GemRxRingHeld::Ready(ready) = gem_rx_ring_ready() else {
+        GemRxRingHeld::Armed(armed) => {
+            gem_rx_ring_park(GemRxRingHeld::Armed(armed));
+            kernel_invariant_stop();
+            return;
+        }
+    };
+    let mut desc: GemDesc = GemRxRing_Ready_read(ready, 0);
+    desc.addr_lo = desc.addr_lo & 0xFFFFFFFE;
+    GemRxRing_Ready_write(ready, 0, desc);
+    match GemRxRing_gem_rx_ring_arm(ready) {
+        GemRxRing_gem_rx_ring_arm_Result::Armed(armed) => {
+            gem_rx_ring_park(GemRxRingHeld::Armed(armed));
+        }
+    }
+}
+
+// A ring's bus address, from its Ready owner's span (`addressed`).
+private fn gem_rx_ring_bus(r: borrow GemRxRing_Ready[b, o, 4]) -> usize !{unsafe} {
+    let mut span: DmaDeviceSpan = GemRxRing_Ready_span(r);
+    return unsafe { dma_span_address(span) } + rp1_dma_pci_offset;
+}
+private fn gem_tx_ring_bus(r: borrow GemTxRing_Ready[b, o, 4]) -> usize !{unsafe} {
+    let mut span: DmaDeviceSpan = GemTxRing_Ready_span(r);
+    return unsafe { dma_span_address(span) } + rp1_dma_pci_offset;
+}
+
+// Program both descriptor rings: the RX descriptor around the RX buffer,
+// owned by GEM, and both TX descriptors USED (CPU-owned). RBQP/TBQP take
+// the rings' addresses; the RX ring is armed, the TX ring stays Ready until
+// the first TSTART.
+private fn gem_rings_program(rx_dma: usize) -> bool !{unsafe} {
+    if (gem_rings_claim() == false) { return false; }
+    let GemRxRingHeld::Ready(rx) = gem_rx_ring_ready() else {
+        GemRxRingHeld::Armed(armed) => {
+            gem_rx_ring_park(GemRxRingHeld::Armed(armed));
+            return false;
+        }
+    };
+    let mut rx_desc: GemDesc = { (rx_dma as u32) | 2, 0, (rx_dma >> 32) as u32, 0 };
+    GemRxRing_Ready_write(rx, 0, rx_desc); // one-descriptor ring: WRAP
+    let rxd_dma: usize = gem_rx_ring_bus(rx);
+    gem.rbqp = rxd_dma as u32;
+    gem.rbqph = (rxd_dma >> 32) as u32;
+    match GemRxRing_gem_rx_ring_arm(rx) {
+        GemRxRing_gem_rx_ring_arm_Result::Armed(armed) => {
+            gem_rx_ring_park(GemRxRingHeld::Armed(armed));
+        }
+    }
+    let Place::Full(tx_held) = gem_tx_ring_take_held() else {
+        Place::Empty => { return false; }
+    };
+    let GemTxRingHeld::Ready(tx) = tx_held else {
+        GemTxRingHeld::Sending(sending) => {
+            gem_tx_ring_park(GemTxRingHeld::Sending(sending));
+            return false;
+        }
+    };
+    let mut first: GemDesc = { 0, 1 << 31, 0, 0 };               // USED
+    let mut second: GemDesc = { 0, (1 << 31) | (1 << 30), 0, 0 }; // USED | WRAP
+    GemTxRing_Ready_write(tx, 0, first);
+    GemTxRing_Ready_write(tx, 1, second);
+    let txd_dma: usize = gem_tx_ring_bus(tx);
+    gem.tbqp = txd_dma as u32;
+    gem.tbqph = (txd_dma >> 32) as u32;
+    gem_tx_ring_park(GemTxRingHeld::Ready(tx));
+    return true;
 }
 
 fn gem_halt() -> bool {
@@ -258,30 +337,10 @@ fn net_init() -> NetInitResult !{unsafe} {
 
     let rx_base: usize = gem_rx_arm_initial();
     let rx_dma: usize = rx_base + rp1_dma_pci_offset;
-    let rxd_base: usize = (gem_rx_desc as *u32) as usize;
-    let rxd_dma: usize = rxd_base + rp1_dma_pci_offset;
-    let txd_base: usize = (gem_tx_desc as *u32) as usize;
-    let txd_dma: usize = txd_base + rp1_dma_pci_offset;
-
-    gem_rx_desc[2] = (rx_dma >> 32) as u32;
-    gem_rx_desc[3] = 0;
-    gem_rx_desc[1] = 0;
-    gem_rx_desc[0] = (rx_dma as u32) | 2; // one-descriptor ring: WRAP
-    gem_tx_desc[0] = 0;
-    gem_tx_desc[1] = 1 << 31; // USED
-    gem_tx_desc[2] = 0;
-    gem_tx_desc[3] = 0;
-    gem_tx_desc[4] = 0;
-    gem_tx_desc[5] = (1 << 31) | (1 << 30); // USED | WRAP
-    gem_tx_desc[6] = 0;
-    gem_tx_desc[7] = 0;
-    dma_prepare_tx(gem_rx_desc as *u8, 64);
-    dma_prepare_tx(gem_tx_desc as *u8, 64);
-
-    gem.rbqp = rxd_dma as u32;
-    gem.rbqph = (rxd_dma >> 32) as u32;
-    gem.tbqp = txd_dma as u32;
-    gem.tbqph = (txd_dma >> 32) as u32;
+    if (gem_rings_program(rx_dma) == false) {
+        init_once_cancel(&net_init_once, init_guard);
+        return NetInitResult::Failed;
+    }
     // 64-bit addressing, 2048-byte RX buffers, full packet SRAMs.
     gem.dmacfg = (1 << 30) | (32 << 16) | (3 << 8) | (1 << 10) | 16;
     gem.rx_cutthrough = 0; // disable RX partial store-and-forward/cut-through
@@ -304,8 +363,7 @@ fn net_init() -> NetInitResult !{unsafe} {
 // completion check without acquiring the separate RX data buffer.
 fn kernel_net_rx_frame_pending() -> NetPendingState {
     if (rp1_gem_net_ready == false) { return NetPendingState::No; }
-    dma_refresh_live(gem_rx_desc);
-    if ((gem_rx_desc[0] & 1) != 0) { return NetPendingState::Yes; }
+    if (gem_rx_ring_poll()) { return NetPendingState::Yes; }
     return NetPendingState::No;
 }
 
@@ -320,8 +378,7 @@ fn gem_irq_handler() !{interrupt} {
 }
 
 fn net_rx_wait() !{may_block} {
-    dma_refresh_live(gem_rx_desc);
-    if ((gem_rx_desc[0] & 1) != 0) { return; }
+    if (gem_rx_ring_poll()) { return; }
     // GitHub issue #187: wakes on a real GEM RX interrupt, or on
     // kernel/platform/rpi5/timer_irq.tkb's periodic ~15ms tick if nothing
     // arrives -- callers (kernel/net/{arp,icmp,tcp}.tkb) keep their own
@@ -331,14 +388,14 @@ fn net_rx_wait() !{may_block} {
 }
 
 fn net_rx_acquire(ready: sink NetRxCanAcquire) -> NetRxAcquire !{unsafe} {
-    dma_refresh_live(gem_rx_desc);
-    if ((gem_rx_desc[0] & 1) == 0) {
+    if (gem_rx_ring_poll() == false) {
         return NetRxAcquire::None(view NetRxCanAcquire);
     }
+    let len: i32 = gem_rx_ring_finish();
+    if (len < 0) { return NetRxAcquire::None(view NetRxCanAcquire); }
     // GEM has handed the buffer back: the observation rp1_gem_dma.tkb's
     // settle trusts.
     let cpu = gem_rx_settle_completed();
-    let len: i32 = (gem_rx_desc[1] & 0x3FFF) as i32;
     let slot: {0..<1 as usize} = 0;
     if (len >= 0 && len <= 1514) {
         let valid_len: {0..<1515 as i32} = len;
@@ -346,6 +403,32 @@ fn net_rx_acquire(ready: sink NetRxCanAcquire) -> NetRxAcquire !{unsafe} {
     }
     gem_rearm_rx(cpu);
     return NetRxAcquire::None(view NetRxCanAcquire);
+}
+
+// The RX descriptor back to the CPU after a snapshot showed it written: its
+// frame length, or -1 when the ring was not Armed with a filled descriptor.
+private fn gem_rx_ring_finish() -> i32 {
+    let Place::Full(held) = gem_rx_ring_take_held() else {
+        Place::Empty => { return -1; }
+    };
+    let GemRxRingHeld::Armed(armed) = held else {
+        GemRxRingHeld::Ready(ready) => {
+            gem_rx_ring_park(GemRxRingHeld::Ready(ready));
+            return -1;
+        }
+    };
+    match GemRxRing_gem_rx_ring_filled(armed) {
+        GemRxRing_gem_rx_ring_filled_Outcome::RxFilled(filled) => {
+            let ready = GemRxRing_gem_rx_ring_take(armed, filled);
+            let mut desc: GemDesc = GemRxRing_Ready_read(ready, 0);
+            gem_rx_ring_park(GemRxRingHeld::Ready(ready));
+            return (desc.ctrl & 0x3FFF) as i32;
+        }
+        GemRxRing_gem_rx_ring_filled_Outcome::RxPending => {
+            gem_rx_ring_park(GemRxRingHeld::Armed(armed));
+            return -1;
+        }
+    }
 }
 
 fn net_rx_len(frame: borrow NetRxValidated[desc]) -> {0..<1515 as i32} {
@@ -390,24 +473,91 @@ private fn gem_tx_submit(slot: {0..<2 as usize}, cpu: sink *GemTxCpu,
     let device = dma_begin_tx(cpu, GemTx);
     let mut span = dma_device_span(device, GemTx, 0, 1536);
     let tx_dma: usize = unsafe { dma_span_address(span) } + rp1_dma_pci_offset;
+    let mut ctrl: u32 = (safe_len as u32) | (1 << 15); // LAST
     if (slot == 0) {
-        gem_tx_desc[2] = (tx_dma >> 32) as u32;
-        gem_tx_desc[3] = 0;
-        gem_tx_desc[0] = tx_dma as u32;
-        gem_tx_desc[1] = (safe_len as u32) | (1 << 15);
         gem_tx_next = 1;
     } else {
-        gem_tx_desc[6] = (tx_dma >> 32) as u32;
-        gem_tx_desc[7] = 0;
-        gem_tx_desc[4] = tx_dma as u32;
-        gem_tx_desc[5] = (safe_len as u32) | (1 << 15) | (1 << 30);
+        ctrl = ctrl | (1 << 30); // WRAP
         gem_tx_next = 0;
     }
-    dma_prepare_tx(gem_tx_desc as *u8, 64);
+    let mut desc: GemDesc = { tx_dma as u32, ctrl, (tx_dma >> 32) as u32, 0 };
+    gem_tx_ring_write(slot, desc);
     return device;
 }
 
-private fn gem_tx_start() { gem.ncr = gem.ncr | (1 << 9); }
+// Write one TX descriptor through the Ready ring owner.
+private fn gem_tx_ring_write(slot: {0..<2 as usize}, desc: GemDesc) {
+    let Place::Full(held) = gem_tx_ring_take_held() else {
+        Place::Empty => { kernel_invariant_stop(); return; }
+    };
+    let GemTxRingHeld::Ready(ready) = held else {
+        GemTxRingHeld::Sending(sending) => {
+            gem_tx_ring_park(GemTxRingHeld::Sending(sending));
+            kernel_invariant_stop();
+            return;
+        }
+    };
+    GemTxRing_Ready_write(ready, slot, desc);
+    gem_tx_ring_park(GemTxRingHeld::Ready(ready));
+}
+
+// Publish the TX ring (the generated clean, then TSTART in its lowering).
+private fn gem_tx_start() {
+    let Place::Full(held) = gem_tx_ring_take_held() else {
+        Place::Empty => { kernel_invariant_stop(); return; }
+    };
+    let GemTxRingHeld::Ready(ready) = held else {
+        GemTxRingHeld::Sending(sending) => {
+            gem_tx_ring_park(GemTxRingHeld::Sending(sending));
+            kernel_invariant_stop();
+            return;
+        }
+    };
+    match GemTxRing_gem_tx_ring_start(ready) {
+        GemTxRing_gem_tx_ring_start_Result::Sending(sending) => {
+            gem_tx_ring_park(GemTxRingHeld::Sending(sending));
+        }
+    }
+}
+
+// The TX ring back to Ready after a snapshot showed the descriptor USED
+// (used == true), or after a confirmed halt (used == false). False when
+// neither observation holds; the ring then stays with the device.
+private fn gem_tx_ring_settle(used: bool) -> bool {
+    let Place::Full(held) = gem_tx_ring_take_held() else {
+        Place::Empty => { return false; }
+    };
+    let GemTxRingHeld::Sending(sending) = held else {
+        GemTxRingHeld::Ready(ready) => {
+            gem_tx_ring_park(GemTxRingHeld::Ready(ready));
+            return false;
+        }
+    };
+    if (used) {
+        match GemTxRing_gem_tx_ring_used(sending) {
+            GemTxRing_gem_tx_ring_used_Outcome::TxUsed(witness) => {
+                gem_tx_ring_park(GemTxRingHeld::Ready(
+                    GemTxRing_gem_tx_ring_done(sending, witness)));
+                return true;
+            }
+            GemTxRing_gem_tx_ring_used_Outcome::TxNotUsed => {
+                gem_tx_ring_park(GemTxRingHeld::Sending(sending));
+                return false;
+            }
+        }
+    }
+    match GemTxRing_gem_tx_ring_halted(sending) {
+        GemTxRing_gem_tx_ring_halted_Outcome::TxHalted(witness) => {
+            gem_tx_ring_park(GemTxRingHeld::Ready(
+                GemTxRing_gem_tx_ring_reclaim(sending, witness)));
+            return true;
+        }
+        GemTxRing_gem_tx_ring_halted_Outcome::TxRunning => {
+            gem_tx_ring_park(GemTxRingHeld::Sending(sending));
+            return false;
+        }
+    }
+}
 
 // The deadline expired with the descriptor still GEM's: the frame may still be
 // read. Halt GEM; only a confirmed halt returns the buffer to the CPU, and
@@ -416,6 +566,8 @@ private fn gem_tx_unconfirmed(device: sink *GemTxDevice) {
     kernel_boot_log("rp1 gem: tx completion unconfirmed; halting tx\n");
     gem_tx_down = true;
     if (gem_halt()) {
+        gem_tx_ring_mark_halted();
+        if (gem_tx_ring_settle(false) == false) { kernel_invariant_stop(); }
         gem_tx_put(GemTxAuthority::Cpu(gem_tx_settle_halted(device)));
     } else {
         kernel_boot_log("rp1 gem: halt unconfirmed; tx buffer stays with the device\n");
@@ -425,7 +577,7 @@ private fn gem_tx_unconfirmed(device: sink *GemTxDevice) {
 
 private fn gem_tx_finish(slot: {0..<2 as usize}, device: sink *GemTxDevice)
         !{may_block} {
-    if (gem_tx_wait(slot)) {
+    if (gem_tx_wait(slot) && gem_tx_ring_settle(true)) {
         gem_tx_put(GemTxAuthority::Cpu(gem_tx_settle_completed(device)));
     } else {
         gem_tx_unconfirmed(device);
@@ -465,9 +617,7 @@ fn net_transmit(reply: sink NetRxReplyReady[desc], cpu: sink *GemTxCpu)
 }
 
 fn gem_tx_slot_done(slot: {0..<2 as usize}) -> bool {
-    dma_refresh_live(gem_tx_desc);
-    if (slot == 0) { return (gem_tx_desc[1] & (1 << 31)) != 0; }
-    return (gem_tx_desc[5] & (1 << 31)) != 0;
+    return gem_tx_ring_poll(slot);
 }
 
 fn net_tx_complete(in_flight: sink NetTxInFlight[desc]) -> NetRxCanAcquire !{may_block} {
