@@ -4533,6 +4533,68 @@ fn stored_release(holder: sink StoredHolder[k]) { stored_drop(holder.token); }
          return region_pool_unlock_saved(g);
        }"));
 
+  (* GitHub issue #789: tcp_connection_pin_cost's shape. A ranked,
+     single-instance RegionPool wrapper is held while the loop unpins, and
+     the unpin's Last branch frees the slot through a helper that takes the
+     same pool lock again. The fix unpins inline and frees after the unlock. *)
+  (let issue789_prelude =
+     "struct Node { key: usize; value: usize; }
+      let mut pool: RegionPool(Node);
+      fn node_pool_lock() -> RegionPoolGuard(Node)[&pool]
+          !{acquires_lock_40_node_pool, single_instance_lock,
+            lock_guard_40_node_pool} {
+        return region_pool_lock_saving(&pool, 0);
+      }
+      fn node_pool_unlock(g: sink RegionPoolGuard(Node)[&pool]) {
+        let saved: usize = region_pool_unlock_saved(g);
+      }
+      fn node_slot_free(slot: sink RegionReleaseSlot(Node)[p, k]) {
+        let g = node_pool_lock();
+        match region_slot_adopt(g, slot) {
+          RegionReleaseAdopt(Node)::Foreign(stray) => { region_slot_abandon(stray); }
+          RegionReleaseAdopt(Node)::Adopted(mine) => { region_free(g, mine); }
+        }
+        node_pool_unlock(g);
+      }
+      fn node_unpin(pin: sink RegionPin(Node)[p, k]) {
+        match region_unpin(pin) {
+          RegionUnpin(Node)::Unpinned => {}
+          RegionUnpin(Node)::Last(slot) => { node_slot_free(slot); }
+        }
+      }\n" in
+   Alcotest.test_case
+     "issue #789: unpinning under a held single-instance pool guard is refused"
+     `Quick
+     (fun () ->
+        expect_region_error
+          "'node_unpin' re-acquires single-instance lock 'node_pool' while 'guard' holds it"
+          (issue789_prelude ^
+           "fn pin_cost(handle: RegionHandle(Node)) {
+              let guard = node_pool_lock();
+              match region_pin(guard, handle) {
+                RegionPinned(Node)::Stale => {}
+                RegionPinned(Node)::Pinned(pin) => { node_unpin(pin); }
+              }
+              node_pool_unlock(guard);
+            }") ();
+        (* The fixed shape: the Last branch frees after the unlock. *)
+        ignore (infer_regions (issue789_prelude ^
+          "fn pin_cost(handle: RegionHandle(Node)) {
+             let guard = node_pool_lock();
+             match region_pin(guard, handle) {
+               RegionPinned(Node)::Stale => { node_pool_unlock(guard); }
+               RegionPinned(Node)::Pinned(pin) => {
+                 match region_unpin(pin) {
+                   RegionUnpin(Node)::Unpinned => { node_pool_unlock(guard); }
+                   RegionUnpin(Node)::Last(slot) => {
+                     node_pool_unlock(guard);
+                     node_slot_free(slot);
+                   }
+                 }
+               }
+             }
+           }"))));
+
   Alcotest.test_case "region pool: a byte region from the page allocator boundary"
     `Quick
     (fun () -> ignore (infer_regions
