@@ -26283,6 +26283,20 @@ let device_protocol_tests = [
     (expect_packet_error ~in_proto:true
        ~sub:"    state Filled access write;" ~by:"    state Filled access write access read;"
        "unsupported state attribute");
+  Alcotest.test_case "bytes: a stored owner with a literal count index" `Quick
+    (fun () ->
+      let use = bytes_consumer ^ {|
+private linear struct Frame[pb: addr, po: usize] { private len: usize; private pkt: Pk_Free[pb, po, 1]; }
+fn frame_new(pkt: Pk_Free[pb, po, 1]) -> Frame[pb, po] {
+    let mut f: Frame[pb, po] = { 60, pkt };
+    return f;
+}
+fn frame_bytes(f: borrow Frame[pb, po]) -> [u8; 64..] @ pb {
+    return Pk_Free_bytes(f.pkt, 0);
+}
+fn frame_back(f: sink Frame[pb, po]) -> Pk_Free[pb, po, 1] { return f.pkt; }
+|} in
+      ignore (compile_device ~proto:bytes_protocol ~use ()));
   Alcotest.test_case "bytes: a packet is read and written in place" `Quick
     (fun () -> ignore (compile_device ~proto:bytes_protocol ~use:bytes_consumer ()));
   Alcotest.test_case "bytes: the slice dies with the owner's state" `Quick

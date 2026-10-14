@@ -9495,6 +9495,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                && args <> []
                && List.for_all (function
                     | Ast.StaticName n -> List.mem_assoc n params
+                    (* An integer index is fixed, so it names nothing the
+                       struct must carry (a device protocol owner's
+                       literal count, GitHub issue #740), as in the
+                       `exists` form below. *)
+                    | Ast.StaticInt _ -> true
                     | _ -> false) args
            | Ast.TypePtr (Ast.TypeNamed name) ->
                StringSet.mem name !linear_opaque_names

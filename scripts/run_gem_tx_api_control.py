@@ -20,14 +20,14 @@ def main():
     if not command:
         parser.error('a compiler command is required')
     controls = (
-        ('device-access', "dma_cpu_slice for 'GemTx' requires its CPU authority token"),
+        ('device-access', "cannot write through readonly slice"),
         ('queue-bank', "no field 'queue1_isr' in struct 'Rp1GemRegs'"),
         ('raw-irq', "Undefined function: gem_read"),
     )
     for control, expected in controls:
         subprocess.run([sys.executable, str(root / 'scripts/build_rpi5_gem_tx_fixture.py'),
                         str(root), str(overlay), 'unconfirmed-ready', '--control', control], check=True)
-        result = subprocess.run(command + ['--emit-struct-layout', 'GemTx'], cwd=overlay,
+        result = subprocess.run(command + ['--emit-struct-layout', 'GemPacket'], cwd=overlay,
                                 capture_output=True, text=True)
         output = result.stdout + result.stderr
         (overlay / (control + '.log')).write_text(output)

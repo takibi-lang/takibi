@@ -11,7 +11,6 @@ kernel/boot/fdt.tkb
 kernel/drivers/block/memory.tkb
 kernel/drivers/block/virtio_blk_dma.tkb
 kernel/drivers/block/virtio_blk.tkb
-kernel/drivers/net/rp1_gem_dma.tkb
 kernel/drivers/net/rp1_gem.tkb
 kernel/drivers/net/virtio_net.tkb
 kernel/kernel/stack_poison.tkb

@@ -254,8 +254,11 @@ rules globally.
   (one RX descriptor, one TX frame in flight), that a confirmed halt ends
   TX descriptor reads, and, for both `addressed` Ready states, that GEM
   fetches a TX descriptor only after TSTART and never writes an RX
-  descriptor whose ownership bit is set. The packet buffers stay dma_fixed
-  allocations (`rp1_gem_dma.tkb`).
+  descriptor whose ownership bit is set. GEM's packet buffers are the #740
+  pool in the same file, `txrx` owners: trusted, that the ring observation
+  above ends GEM's access to the one buffer its descriptor held, and that
+  a buffer's address reaches a descriptor only from its device state's
+  span.
   Generated protocol files (`<protocol Name>`) are exempt from
   `--confine-raw-authority`, as the built-in region file is
   (`lib/raw_authority_policy.ml`). The reason: a `u8` element read or write

@@ -1590,6 +1590,9 @@ fn owner_release(o: sink Owner[b, k]) -> RegionPin(Conn)[b, k] {
   struct is not used afterwards.
 - A struct holding one is never dropped with it, not even as a `sink`
   parameter: the field must be moved out on every path.
+- An integer index is fixed and names nothing, so it may appear among the
+  field's indices (`private pkt: GemPkt_Filled[pb, po, 1];`, a device
+  protocol owner's literal count; GitHub issue #740).
 - A field indexed by a static the struct does not carry, or any other
   nested owner, is still refused.
 

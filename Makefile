@@ -454,7 +454,6 @@ KERNEL_UNUSED_CHECKED_RPI5 := \
 	kernel/drivers/net/gem_tx_wait.tkb \
 	kernel/drivers/block/block_cache.tkb \
 	kernel/drivers/net/rp1_gem.tkb \
-	kernel/drivers/net/rp1_gem_dma.tkb \
 	kernel/drivers/net/rp1_gem_desc.tkb \
 	kernel/drivers/usb/config_descriptor.tkb \
 	kernel/drivers/usb/init_report.tkb \

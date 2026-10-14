@@ -133,9 +133,9 @@ def main():
     if args.control == "device-access":
         fixture = kernel / "tests/rpi5/gem_tx/fixture.tkb"
         fixture.write_text(fixture.read_text(encoding="ascii") + """
-// Real generated GEM authority must reject a Device-to-CPU access bridge.
-fn gem_fixture_invalid_access(device: borrow *GemTxDevice) {
-    let bytes = dma_cpu_slice(device, GemTx);
+// The real GEM packet owner must reject a write while GEM reads it.
+fn gem_fixture_invalid_access(posted: borrow GemPkt_TxPosted[b, o, 1, r]) {
+    let bytes = GemPkt_TxPosted_bytes(posted, 0);
     bytes[0] = 1;
 }
 """, encoding="ascii")

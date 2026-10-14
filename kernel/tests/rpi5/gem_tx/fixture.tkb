@@ -21,19 +21,13 @@ fn gem_fixture_require(ok: bool, reason: *u8) {
     }
 }
 
-// Inspect and return the real slot token; never recover Device as Cpu here.
+// Inspect the real pool owners (#740); never recover a device state here.
 fn gem_fixture_authority(cpu_expected: bool) {
-    let mut is_cpu: bool = false;
-    match gem_tx_take() {
-        GemTxAuthority::Cpu(cpu) => {
-            is_cpu = true;
-            gem_tx_put(GemTxAuthority::Cpu(cpu));
-            kernel_boot_log("gem-tx fixture: authority cpu\n");
-        }
-        GemTxAuthority::Device(device) => {
-            gem_tx_put(GemTxAuthority::Device(device));
-            kernel_boot_log("gem-tx fixture: authority device\n");
-        }
+    let is_cpu: bool = gem_pkt_tx_with_device() == false;
+    if (is_cpu) {
+        kernel_boot_log("gem-tx fixture: authority cpu\n");
+    } else {
+        kernel_boot_log("gem-tx fixture: authority device\n");
     }
     gem_fixture_require(is_cpu == cpu_expected, "stored authority");
 }
@@ -123,4 +117,30 @@ fn gem_fixture_run(ready_in: sink NetRxCanAcquire) !{may_block} {
     if (gem_fixture_failed == false) {
         kernel_boot_log("PASS gem-tx: completion, halt ownership, later sends dropped\n");
     }
+}
+
+// Whether any buffer is with the device for transmit (posted or
+// unconfirmed), from the driver's pool slots (#740).
+fn gem_pkt_tx_with_device() -> bool {
+    let mut found: bool = false;
+    for i: usize in 0..<4 {
+        match gem_pkt_take(i) {
+            Place::Empty => {}
+            Place::Full(held) => {
+                match held {
+                    GemPktHeld::Free(p) => { gem_pkt_park(i, GemPktHeld::Free(p)); }
+                    GemPktHeld::RxPosted(p) => { gem_pkt_park(i, GemPktHeld::RxPosted(p)); }
+                    GemPktHeld::TxPosted(p) => {
+                        found = true;
+                        gem_pkt_park(i, GemPktHeld::TxPosted(p));
+                    }
+                    GemPktHeld::Unconfirmed(p) => {
+                        found = true;
+                        gem_pkt_park(i, GemPktHeld::Unconfirmed(p));
+                    }
+                }
+            }
+        }
+    }
+    return found;
 }

@@ -22,11 +22,25 @@
 // read that record, so a ring leaves its device state only after a
 // snapshot that showed the bit.
 //
+// The packet buffers are the #740 pool: GEM_PKTS buffers, each the owner
+// of a `txrx` protocol (GemPkt). A buffer is posted for receive (rx edge)
+// or for transmit (tx edge: an in-place reply from Filled, or a
+// kernel-built frame from Free). What this file trusts for them:
+//   - gem_pkt_received: the RX ring's own completes observation
+//     (gem_rx_ring_filled) returned RxFilled for the descriptor that held
+//     this buffer, so GEM has written it;
+//   - gem_pkt_sent: the TX ring's gem_tx_ring_used returned TxUsed for the
+//     descriptor that held this buffer, so GEM has read it;
+//   - gem_pkt_halted: gem_halt() confirmed the TX halt;
+//   - a buffer's address reaches a descriptor only from its device state's
+//     span (the lowerings below), and GEM reads a TX buffer only after
+//     TSTART of a descriptor pointing at it.
+//
 // Current limitations (2026-10-14):
-// - The RX and TX packet buffers stay dma_fixed allocations
-//   (rp1_gem_dma.tkb); they move with the packet-buffer pool design (#740).
-// - One owner per ring, whole-ring device states: the driver is
-//   synchronous (one TX in flight, one RX descriptor).
+// - One owner per ring, whole-ring device states, and at most one buffer
+//   posted for receive and one for transmit: the driver is synchronous.
+// - A buffer whose transmit stays unconfirmed after a failed halt is parked
+//   Unconfirmed for the rest of the boot.
 
 use "kernel/lib/mutex.tkb";
 
@@ -90,6 +104,7 @@ fn gem_rx_ring_filled(s: borrow GemRxRing_Armed[b, o, 4, r])
         -> GemRxRing_gem_rx_ring_filled_Raw {
     if (gem_rx_seen_filled) {
         gem_rx_seen_filled = false;
+        gem_pkt_rx_seen = true;
         return GemRxRing_gem_rx_ring_filled_Raw::RxFilled;
     }
     return GemRxRing_gem_rx_ring_filled_Raw::RxPending;
@@ -112,7 +127,10 @@ fn gem_tx_ring_peek(s: borrow GemTxRing_Sending[b, o, 4, r], value: GemDesc)
 fn gem_tx_ring_peek_release(s: borrow GemTxRing_Sending[b, o, 4, r]) {}
 fn gem_tx_ring_used(s: borrow GemTxRing_Sending[b, o, 4, r])
         -> GemTxRing_gem_tx_ring_used_Raw {
-    if (gem_tx_seen_used) { return GemTxRing_gem_tx_ring_used_Raw::TxUsed; }
+    if (gem_tx_seen_used) {
+        gem_pkt_tx_seen = true;
+        return GemTxRing_gem_tx_ring_used_Raw::TxUsed;
+    }
     return GemTxRing_gem_tx_ring_used_Raw::TxNotUsed;
 }
 fn gem_tx_ring_done(s: borrow GemTxRing_Sending[b, o, 4, r]) {}
@@ -258,4 +276,160 @@ fn gem_tx_ring_poll(slot: {0..<2 as usize}) -> bool {
     }
     gem_tx_ring_park(GemTxRingHeld::Sending(sending));
     return used;
+}
+
+// ---- The packet-buffer pool (#740) ----
+
+const GEM_PKT_ONE: usize = 1;
+const GEM_PKTS: usize = 4;
+
+// One GEM RX buffer's worth (DMACFG's 2048-byte receive buffers).
+struct GemPacket {
+    bytes: [u8; 2048];
+}
+
+protocol GemPkt[inst: usize] retains region(GemPacket)[b, GEM_PKT_ONE] txrx {
+    state Free access write;
+    state RxPosted[req] device;
+    state Filled access write;
+    state TxPosted[req] device access read;
+    state Unconfirmed[req] device;
+    init Free;
+    transition gem_pkt_post_rx(Free) rx -> RxPosted[fresh req];
+    observe gem_pkt_received(RxPosted[req]) -> PktReceived[req] completes | PktEmpty;
+    transition gem_pkt_fill(RxPosted[req], PktReceived[req]) -> Filled;
+    transition gem_pkt_post_tx(Filled) tx -> TxPosted[fresh req];
+    transition gem_pkt_send(Free) tx -> TxPosted[fresh req];
+    observe gem_pkt_sent(TxPosted[req]) -> PktSent[req] completes | PktPending;
+    transition gem_pkt_done(TxPosted[req], PktSent[req]) -> Free;
+    observe gem_pkt_halted(TxPosted[req]) -> PktHalted[req] quiesces | PktRunning;
+    transition gem_pkt_reclaim(TxPosted[req], PktHalted[req]) -> Free;
+    transition gem_pkt_expire(TxPosted[req]) -> Unconfirmed[req];
+    transition gem_pkt_recycle(Filled) -> Free;
+    property disjoint;
+    model cells 2;
+}
+
+private region let mut gem_pkt_pool: [GemPacket; 4] align(64);
+
+// The bus address the latest publication handed out, for the descriptor.
+private let mut gem_pkt_addr: usize = 0;
+// Set by the rings' completes observations above, read once here.
+private let mut gem_pkt_rx_seen: bool = false;
+private let mut gem_pkt_tx_seen: bool = false;
+
+fn gem_pkt_post_rx(s: borrow GemPkt_RxPosted[b, o, 1, r]) !{unsafe} {
+    let mut span: DmaDeviceSpan = GemPkt_RxPosted_span(s);
+    gem_pkt_addr = gem_span_bus_address(span);
+    gem_pkt_rx_seen = false;
+}
+fn gem_pkt_received(s: borrow GemPkt_RxPosted[b, o, 1, r]) -> GemPkt_gem_pkt_received_Raw {
+    if (gem_pkt_rx_seen) {
+        gem_pkt_rx_seen = false;
+        return GemPkt_gem_pkt_received_Raw::PktReceived;
+    }
+    return GemPkt_gem_pkt_received_Raw::PktEmpty;
+}
+fn gem_pkt_fill(s: borrow GemPkt_RxPosted[b, o, 1, r]) {}
+fn gem_pkt_post_tx(s: borrow GemPkt_TxPosted[b, o, 1, r]) !{unsafe} { gem_pkt_tx_posted(s); }
+fn gem_pkt_send(s: borrow GemPkt_TxPosted[b, o, 1, r]) !{unsafe} { gem_pkt_tx_posted(s); }
+private fn gem_pkt_tx_posted(s: borrow GemPkt_TxPosted[b, o, 1, r]) !{unsafe} {
+    let mut span: DmaDeviceSpan = GemPkt_TxPosted_span(s);
+    gem_pkt_addr = gem_span_bus_address(span);
+    gem_pkt_tx_seen = false;
+}
+fn gem_pkt_sent(s: borrow GemPkt_TxPosted[b, o, 1, r]) -> GemPkt_gem_pkt_sent_Raw {
+    if (gem_pkt_tx_seen) {
+        gem_pkt_tx_seen = false;
+        return GemPkt_gem_pkt_sent_Raw::PktSent;
+    }
+    return GemPkt_gem_pkt_sent_Raw::PktPending;
+}
+fn gem_pkt_done(s: borrow GemPkt_TxPosted[b, o, 1, r]) {}
+fn gem_pkt_halted(s: borrow GemPkt_TxPosted[b, o, 1, r]) -> GemPkt_gem_pkt_halted_Raw {
+    if (gem_tx_halt_confirmed) { return GemPkt_gem_pkt_halted_Raw::PktHalted; }
+    return GemPkt_gem_pkt_halted_Raw::PktRunning;
+}
+fn gem_pkt_reclaim(s: borrow GemPkt_TxPosted[b, o, 1, r]) {}
+fn gem_pkt_expire(s: borrow GemPkt_TxPosted[b, o, 1, r]) {}
+fn gem_pkt_recycle(s: borrow GemPkt_Filled[b, o, 1]) {}
+
+// The address of the latest publication.
+fn gem_pkt_published_address() -> usize { return gem_pkt_addr; }
+
+// A buffer between operations: Free, or with the device. A Filled buffer
+// is never parked here; the stack holds it.
+variant GemPktHeld {
+    Free(exists b: addr. exists o: usize. GemPkt_Free[b, o, 1]);
+    RxPosted(exists b: addr. exists o: usize. exists r: usize. GemPkt_RxPosted[b, o, 1, r]);
+    TxPosted(exists b: addr. exists o: usize. exists r: usize. GemPkt_TxPosted[b, o, 1, r]);
+    Unconfirmed(exists b: addr. exists o: usize. exists r: usize. GemPkt_Unconfirmed[b, o, 1, r]);
+}
+
+struct GemPktSlot {
+    private mutex: Mutex;
+    private value: Place(GemPktHeld);
+}
+private let mut gem_pkt_slots: [GemPktSlot; 4];
+
+fn gem_pkt_lost(held: sink GemPktHeld) { kernel_invariant_stop(); }
+
+fn gem_pkt_take(i: usize) -> Place(GemPktHeld) {
+    if (i >= GEM_PKTS) { return Place::Empty; }
+    let guard = gem_ring_lock(&gem_pkt_slots[i].mutex);
+    let taken: Place(GemPktHeld) = place_take(
+        guard, &gem_pkt_slots[i].mutex, gem_pkt_slots[i].value);
+    gem_ring_unlock(guard, &gem_pkt_slots[i].mutex);
+    return taken;
+}
+
+fn gem_pkt_park(i: usize, held: GemPktHeld) {
+    if (i >= GEM_PKTS) {
+        gem_pkt_lost(held);
+        return;
+    }
+    let guard = gem_ring_lock(&gem_pkt_slots[i].mutex);
+    let previous: Place(GemPktHeld) = place_put(
+        guard, &gem_pkt_slots[i].mutex, gem_pkt_slots[i].value, held);
+    gem_ring_unlock(guard, &gem_pkt_slots[i].mutex);
+    match previous {
+        Place::Empty => {}
+        Place::Full(other) => { gem_pkt_lost(other); }
+    }
+}
+
+// The pool, claimed once by net_init: four buffers, all Free.
+fn gem_pkts_claim() -> bool {
+    let RegionOf(GemPacket)::Taken(pool) = region_of(gem_pkt_pool) else {
+        RegionOf(GemPacket)::Gone => { return false; }
+    };
+    let (p0, rest0) = region_split_static(pool, 1);
+    let (p1, rest1) = region_split_static(rest0, 1);
+    let (p2, p3) = region_split_static(rest1, 1);
+    gem_pkt_park(0, GemPktHeld::Free(GemPkt_init(p0)));
+    gem_pkt_park(1, GemPktHeld::Free(GemPkt_init(p1)));
+    gem_pkt_park(2, GemPktHeld::Free(GemPkt_init(p2)));
+    gem_pkt_park(3, GemPktHeld::Free(GemPkt_init(p3)));
+    return true;
+}
+
+// A slot holding a Free buffer, or GEM_PKTS when none is free.
+fn gem_pkt_free_index() -> usize {
+    for i: usize in 0..<4 {
+        match gem_pkt_take(i) {
+            Place::Empty => {}
+            Place::Full(held) => {
+                match held {
+                    GemPktHeld::Free(free) => {
+                        gem_pkt_park(i, GemPktHeld::Free(free));
+                        return i;
+                    }
+                    GemPktHeld::RxPosted(p) => { gem_pkt_park(i, GemPktHeld::RxPosted(p)); }
+                    GemPktHeld::TxPosted(p) => { gem_pkt_park(i, GemPktHeld::TxPosted(p)); }
+                    GemPktHeld::Unconfirmed(p) => { gem_pkt_park(i, GemPktHeld::Unconfirmed(p)); }
+                }
+            }
+        }
+    }
+    return GEM_PKTS;
 }

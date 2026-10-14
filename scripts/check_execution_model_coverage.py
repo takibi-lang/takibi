@@ -92,12 +92,9 @@ EXEMPT = {
         "descriptor length of the next publication (GitHub issue #740)",
     "drivers/net/rp1_gem.tkb": "device state; MSI-X is routed to CPU0",
     "drivers/net/rp1_gem_desc.tkb":
-        "the GEM descriptor rings' owner slots, exchanged under their own "
-        "Mutexes, and the snapshot records read by their observations "
-        "(GitHub issue #740)",
-    "drivers/net/rp1_gem_dma.tkb":
-        "the RX allocation's owner slot, exchanged under its own Mutex, and "
-        "its mint function, reached only from rp1_gem.tkb (GitHub issue #622)",
+        "the GEM descriptor rings' and packet buffers' owner slots, "
+        "exchanged under their own Mutexes, and the observation records "
+        "their lowerings read (GitHub issue #740)",
     "tests/qemu/dma/virtio_blk_fixture.tkb":
         "test-only entry boots no peers and keeps IRQs masked; independent of "
         "the production scheduler execution model",
