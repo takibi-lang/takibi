@@ -163,8 +163,11 @@ IRQs is attributed to the unmask point with its masked weight; seeing
 inside masked spans is #773 (Arm SPE) and an irqsoff-style tracer on #771.
 
 **Next, ahead of the list below (maintainer, 2026-10-14):** #740: the
-stack (arp/icmp/tcp) takes Packet_Filled by move, and the TCP retransmit
-queue keeps its TxPosted owner. Done 2026-10-14 under #740: U2-full --
+TCP retransmit queue keeps its TxPosted owner (and a socket's receive
+queue may keep the Filled packet instead of copying it). Done 2026-10-14
+under #740: the stack takes the Filled packet by move as NetPacket, which
+names no RX descriptor (virtio-net refills the descriptor and GEM rearms
+RX inside net_rx_acquire); U2-full --
 virtio-blk and virtio-net on the modern virtio-mmio transport
 (scripts/qemu.sh sets force-legacy=false for every guest), the used rings
 as VirtioUsed rx owners read through E1 snapshots (QEMU BSS -27 KB); the
