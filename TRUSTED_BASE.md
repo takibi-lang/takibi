@@ -242,6 +242,11 @@ rules globally.
   written by the device before the marker, so that the one copy taken after
   invalidating its lines is a whole entry; and that the release lowering
   tells the device only about entries the consumer has copied.
+  The virtio-net scratch TX buffer (`kernel/drivers/net/virtio_net_tx_dma.tkb`)
+  is a tx owner: trusted, that a TX used-index advance past the driver's
+  shadow means the device has read the one outstanding descriptor's buffer.
+  A send the bounded wait cannot confirm parks the owner in a terminal
+  device state, so no later write to the payload type-checks.
   Generated protocol files (`<protocol Name>`) are exempt from
   `--confine-raw-authority`, as the built-in region file is
   (`lib/raw_authority_policy.ml`). The reason: a `u8` element read or write

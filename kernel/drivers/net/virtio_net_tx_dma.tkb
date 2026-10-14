@@ -1,0 +1,180 @@
+// GitHub issue #740 slice 1: the virtio-net scratch TX buffer as the owner
+// of a tx device protocol (#720 option a). This file is a device-semantics
+// file (kernel/DEVICE_SEMANTICS_FILES): its one observation is the trusted
+// claim that ends the device's access to the buffer --
+//   - virtio_net_tx_used: the TX used index has moved past the driver's
+//     shadow (virtio_net_tx_used_pending() is false). The driver keeps one
+//     TX descriptor outstanding, so a used entry for it means the device
+//     has read the whole buffer (virtio 1.x, 2.7.8 "The Virtqueue Used
+//     Ring"; the legacy layout this driver uses has the same rule).
+// The publishing lowering is the only place the buffer's address leaves:
+// it writes descriptor 0 from the InFlight owner's span and notifies.
+//
+// A send that the bounded wait (virtio_net_tx_wait) cannot confirm moves
+// the owner to Unconfirmed, a device state with no edge out: the payload
+// can never be written again, which is what #740 asks the compiler to
+// enforce. The owner stays parked here as Unconfirmed for the rest of the
+// boot; the driver also disables both queues.
+//
+// Current limitations (2026-10-14):
+// - The in-place RX reply (net_transmit in virtio_net.tkb) still lends an
+//   rx_bufs slot to TX through a raw pointer; it moves to the packet-buffer
+//   pool design on #740, not to this protocol.
+// - The owner's region identity is existential in the slot (the #720 D4
+//   decision); this file holds exactly one TX buffer, so no other region of
+//   the same type can be confused with it.
+
+use "kernel/lib/mutex.tkb";
+
+const VIRTIO_NET_TX_BYTES: usize = 1536;
+
+protocol VirtioNetTx[inst: usize] retains region(u8)[b, VIRTIO_NET_TX_BYTES] tx {
+    state Ready access write;
+    state InFlight[req] device;
+    state Unconfirmed[req] device;
+    init Ready;
+    transition virtio_net_tx_publish(Ready) -> InFlight[fresh req];
+    observe virtio_net_tx_used(InFlight[req]) -> TxUsed[req] completes | TxNotUsed;
+    transition virtio_net_tx_reclaim(InFlight[req], TxUsed[req]) -> Ready;
+    transition virtio_net_tx_expire(InFlight[req]) -> Unconfirmed[req];
+    property disjoint;
+    model cells 2;
+}
+
+private region let mut virtio_net_tx_buf: [u8; 1536] align(64);
+
+// The descriptor length of the next publication (header plus payload),
+// set by virtio_net_tx_send just before it publishes.
+private let mut virtio_net_tx_length: usize = 0;
+
+// The doorbell: runs after the generated clean and the state change.
+fn virtio_net_tx_publish(s: borrow VirtioNetTx_InFlight[b, o, 1536, r]) !{unsafe} {
+    let mut span: DmaDeviceSpan = VirtioNetTx_InFlight_span(s);
+    virtio_net_tx_ring(span, virtio_net_tx_length);
+}
+fn virtio_net_tx_used(s: borrow VirtioNetTx_InFlight[b, o, 1536, r])
+        -> VirtioNetTx_virtio_net_tx_used_Raw {
+    if (virtio_net_tx_used_pending()) {
+        return VirtioNetTx_virtio_net_tx_used_Raw::TxNotUsed;
+    }
+    return VirtioNetTx_virtio_net_tx_used_Raw::TxUsed;
+}
+fn virtio_net_tx_reclaim(s: borrow VirtioNetTx_InFlight[b, o, 1536, r]) {}
+fn virtio_net_tx_expire(s: borrow VirtioNetTx_InFlight[b, o, 1536, r]) {}
+
+variant VirtioNetTxHeld {
+    Ready(exists b: addr. exists o: usize. VirtioNetTx_Ready[b, o, 1536]);
+    Unconfirmed(exists b: addr. exists o: usize. exists r: usize.
+                VirtioNetTx_Unconfirmed[b, o, 1536, r]);
+}
+
+struct VirtioNetTxSlot {
+    private mutex: Mutex;
+    private value: Place(VirtioNetTxHeld);
+}
+private let mut virtio_net_tx_slot: VirtioNetTxSlot;
+
+private linear struct VirtioNetTxGuard[lock: addr] { private flags: usize; }
+
+private fn virtio_net_tx_lock(lock: *Mutex @ address) -> VirtioNetTxGuard[address]
+        !{acquires_lock_40_virtio_net_tx, lock_guard_40_virtio_net_tx} {
+    let mut guard: VirtioNetTxGuard[address] = { mutex_acquire(lock) };
+    return guard;
+}
+
+private fn virtio_net_tx_unlock(guard: sink VirtioNetTxGuard[address],
+                                lock: *Mutex @ address) {
+    mutex_release(lock, guard.flags);
+}
+
+// The slot never holds two owners; a displaced one is an invariant breach.
+private fn virtio_net_tx_lost(held: sink VirtioNetTxHeld) {
+    kernel_invariant_stop();
+}
+
+private fn virtio_net_tx_take() -> Place(VirtioNetTxHeld) {
+    let guard = virtio_net_tx_lock(&virtio_net_tx_slot.mutex);
+    let taken: Place(VirtioNetTxHeld) = place_take(
+        guard, &virtio_net_tx_slot.mutex, virtio_net_tx_slot.value);
+    virtio_net_tx_unlock(guard, &virtio_net_tx_slot.mutex);
+    return taken;
+}
+
+private fn virtio_net_tx_park(held: VirtioNetTxHeld) {
+    let guard = virtio_net_tx_lock(&virtio_net_tx_slot.mutex);
+    let previous: Place(VirtioNetTxHeld) = place_put(
+        guard, &virtio_net_tx_slot.mutex, virtio_net_tx_slot.value, held);
+    virtio_net_tx_unlock(guard, &virtio_net_tx_slot.mutex);
+    match previous {
+        Place::Empty => {}
+        Place::Full(other) => { virtio_net_tx_lost(other); }
+    }
+}
+
+// Claimed once, by net_init.
+fn virtio_net_tx_claim() -> bool {
+    let RegionOf(u8)::Taken(memory) = region_of(virtio_net_tx_buf) else {
+        RegionOf(u8)::Gone => { return false; }
+    };
+    virtio_net_tx_park(VirtioNetTxHeld::Ready(VirtioNetTx_init(memory)));
+    return true;
+}
+
+// The virtio_net_hdr (all zero: no offloads are negotiated) and the payload,
+// written through the Ready owner.
+private fn virtio_net_tx_fill(ready: borrow VirtioNetTx_Ready[b, o, 1536],
+                              bytes: borrow [u8; 1514..], len: usize) {
+    for i: usize in 0..<10 {
+        VirtioNetTx_Ready_write(ready, i, 0);
+    }
+    for i: usize in 0..<1514 {
+        if (i < len) {
+            VirtioNetTx_Ready_write(ready, 10 + i, bytes[i]);
+        }
+    }
+}
+
+// One kernel-built frame: fill, publish, wait. A used entry returns the
+// buffer to Ready; expiry leaves it Unconfirmed and returns false.
+fn virtio_net_tx_send(bytes: borrow [u8; 1514..], len: usize) -> bool !{may_block} {
+    let Place::Full(held) = virtio_net_tx_take() else {
+        Place::Empty => { return false; }
+    };
+    let VirtioNetTxHeld::Ready(ready) = held else {
+        VirtioNetTxHeld::Unconfirmed(stuck) => {
+            virtio_net_tx_park(VirtioNetTxHeld::Unconfirmed(stuck));
+            return false;
+        }
+    };
+    virtio_net_tx_fill(ready, bytes, len);
+    virtio_net_tx_length = 10 + len;
+    match VirtioNetTx_virtio_net_tx_publish(ready) {
+        VirtioNetTx_virtio_net_tx_publish_Result::InFlight(flight) => {
+            return virtio_net_tx_settle(flight);
+        }
+    }
+}
+
+private fn virtio_net_tx_settle(flight: VirtioNetTx_InFlight[b, o, 1536, r]) -> bool
+        !{may_block} {
+    match virtio_net_tx_wait() {
+        VirtioNetTxCompletion::Completed => {}
+        VirtioNetTxCompletion::Unconfirmed => {
+            virtio_net_tx_park(VirtioNetTxHeld::Unconfirmed(
+                VirtioNetTx_virtio_net_tx_expire(flight)));
+            return false;
+        }
+    }
+    match VirtioNetTx_virtio_net_tx_used(flight) {
+        VirtioNetTx_virtio_net_tx_used_Outcome::TxUsed(used) => {
+            virtio_net_tx_park(VirtioNetTxHeld::Ready(
+                VirtioNetTx_virtio_net_tx_reclaim(flight, used)));
+            return true;
+        }
+        VirtioNetTx_virtio_net_tx_used_Outcome::TxNotUsed => {
+            virtio_net_tx_park(VirtioNetTxHeld::Unconfirmed(
+                VirtioNetTx_virtio_net_tx_expire(flight)));
+            return false;
+        }
+    }
+}

@@ -38,6 +38,7 @@ use "kernel/net/netconfig.tkb";
 use "kernel/lib/init_once.tkb";
 use "kernel/drivers/virtio_ring.tkb";
 use "kernel/drivers/net/virtio_net_tx_wait.tkb";
+use "kernel/drivers/net/virtio_net_tx_dma.tkb";
 
 
 const STATUS_ACKNOWLEDGE: i32 = 1;
@@ -132,15 +133,8 @@ let mut rx_queue_mem: [u8; 2 * VIRTIO_PAGE_SIZE] align(4096);
 let mut tx_queue_mem: [u8; 2 * VIRTIO_PAGE_SIZE] align(4096);
 let mut rx_bufs: [u8; QNUM * RX_BUF_SIZE];
 
-// GitHub issue #237 M4: rp1_gem.tkb's net_transmit_ready() sends a
-// kernel-BUILT frame (no RX buffer to piggyback the virtio_net_hdr
-// prefix on, unlike net_transmit()'s in-place reply path) -- this
-// driver's own dedicated scratch buffer for exactly that path. The
-// leading VIRTIO_NET_HDR_LEN bytes stay zero (BSS-initialized, never
-// written), matching the all-default virtio_net_hdr neither
-// examples/common_qemu/virtio_mmio.tkb's own reply path nor this one
-// ever populates (no offload features are negotiated).
-let mut tx_ready_buf: [u8; VIRTIO_NET_HDR_LEN + 1514] align(4096);
+// net_transmit_ready()'s kernel-built frames go out of the scratch TX
+// buffer owned by virtio_net_tx_dma.tkb's VirtioNetTx protocol (#740).
 
 // Virtio queue indices are free-running u16 counters. Their nominal domain
 // keeps every guest shadow at that width and rejects comparison with a widened
@@ -268,6 +262,10 @@ fn net_init() -> NetInitResult {
     virtio_queue_setup(0, rx_queue_mem as *u8); // RX
     virtio_queue_setup(1, tx_queue_mem as *u8); // TX
     virtio_driver_ok();
+    if (virtio_net_tx_claim() == false) {
+        init_once_cancel(&net_init_once, init_guard);
+        return NetInitResult::Failed;
+    }
 
     for i in 0..<QNUM {
         let buf_off: isize = i * RX_BUF_SIZE;
@@ -415,31 +413,37 @@ fn net_rx_send_reply(reply: sink NetRxReplyReady[desc]) -> NetRxCanAcquire !{may
     return net_tx_complete(net_transmit(reply));
 }
 
-// Kernel-built frame, no RX buffer to reuse -- copies into this driver's
-// own tx_ready_buf (leading VIRTIO_NET_HDR_LEN bytes stay zero) instead
-// of an RX slot. Matches rp1_gem.tkb's net_transmit_ready() signature and
-// blocking-completion behavior exactly (kernel/net/tcp.tkb calls this for
-// SYN-ACK/data segments/retransmissions it builds itself, not an RX echo).
+// Kernel-built frame, no RX buffer to reuse: written into the scratch TX
+// buffer through its protocol owner (virtio_net_tx_dma.tkb). Matches
+// rp1_gem.tkb's net_transmit_ready() signature and blocking-completion
+// behavior (kernel/net/tcp.tkb calls this for segments it builds itself).
 fn net_transmit_ready(ready: sink NetRxCanAcquire,
                       bytes: borrow [u8; 1514..], len: i32)
         -> NetRxCanAcquire !{may_block} {
     if (virtio_net_ready == false) { return view NetRxCanAcquire; }
     let safe_len: i32 = max(min(len, 1514), 0);
     workload_profile_note_network_tx(safe_len as usize);
-    let tx_ready_slice: []u8 = tx_ready_buf as []u8;
-    let payload: []u8 = tx_ready_slice[VIRTIO_NET_HDR_LEN..<VIRTIO_NET_HDR_LEN + 1514];
-    slice_copy(payload[0..<safe_len as usize], bytes[0..<safe_len as usize]);
-    dma_prepare_tx(tx_ready_buf as *u8, VIRTIO_NET_HDR_LEN + (safe_len as usize));
-    let buf: *u8 = tx_ready_buf as *u8;
-    desc_set(tx_queue_mem as *u8, 0, buf as usize,
-        (safe_len + (VIRTIO_NET_HDR_LEN as i32)) as isize, 0);
+    if (virtio_net_tx_send(bytes, safe_len as usize)) {
+        dma_consume();
+        tx_used_seen = virtio_ring_index_next(tx_used_seen);
+    } else {
+        virtio_net_ready = false;
+        kernel_boot_log("virtio net: tx completion unconfirmed; queues disabled\n");
+    }
+    return view NetRxCanAcquire;
+}
+
+// The doorbell for one scratch-buffer send: descriptor 0 at the address the
+// VirtioNetTx publishing lowering took from its InFlight owner's span.
+// QEMU virt's DMA addresses are physical: no bus offset.
+fn virtio_net_tx_ring(span: borrow DmaDeviceSpan, length: usize) !{unsafe} {
+    let address: usize = unsafe { dma_span_address(span) };
+    desc_set(tx_queue_mem as *u8, 0, address, length as isize, 0);
     avail_ring_set(tx_queue_mem as *u8, 0, 0);
     tx_avail_idx = virtio_ring_index_next(tx_avail_idx);
     avail_publish(tx_queue_mem as *u8, tx_avail_idx);
     virtio_tx_irq_flag = 0;
     virtio_notify(1);
-    virtio_net_tx_finish();
-    return view NetRxCanAcquire;
 }
 
 // The MAC is the first six configuration bytes, read as two little-endian

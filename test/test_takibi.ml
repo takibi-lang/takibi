@@ -25825,6 +25825,69 @@ let compile_device ?(triple = "aarch64-none-elf") ?(device_files = [ "dev.tkb" ]
       ignore (Llvm_gen.gen_program ~prog_types prog);
       Llvm.string_of_llmodule !Llvm_gen.the_module)
 
+let scratch_tx_protocol = {|const BUF: usize = 64;
+protocol Tx[inst: usize] retains region(u8)[b, BUF] tx {
+    state Ready access write;
+    state InFlight[req] device;
+    state Unconfirmed[req] device;
+    init Ready;
+    transition send(Ready) -> InFlight[fresh req];
+    observe used(InFlight[req]) -> Used[req] completes | NotUsed;
+    transition reclaim(InFlight[req], Used[req]) -> Ready;
+    transition expire(InFlight[req]) -> Unconfirmed[req];
+    property disjoint;
+    model cells 2;
+}
+fn send(s: borrow Tx_InFlight[b, o, 64, r]) {}
+fn used(s: borrow Tx_InFlight[b, o, 64, r]) -> Tx_used_Raw { return Tx_used_Raw::NotUsed; }
+fn reclaim(s: borrow Tx_InFlight[b, o, 64, r]) {}
+fn expire(s: borrow Tx_InFlight[b, o, 64, r]) {}
+|}
+
+let scratch_tx_consumer = {|private region let mut buf: [u8; 64] align(64);
+struct Slot {
+    private mutex: i32;
+    private value: Place(exists b: addr. exists o: usize. exists r: usize. Tx_Unconfirmed[b, o, 64, r]);
+}
+private let mut slot: Slot;
+linear struct SlotGuard[lock: addr] { private flags: usize; }
+fn slot_lock(mutex: *i32 @ lock) -> SlotGuard[lock] {
+    let mut guard: SlotGuard[lock] = { 0 };
+    return guard;
+}
+fn slot_unlock(mutex: *i32 @ lock, guard: sink SlotGuard[lock]) {}
+fn park(gone: Tx_Unconfirmed[b, o, 64, r]) {
+    let guard = slot_lock(&slot.mutex);
+    let old = place_put(guard, &slot.mutex, slot.value, gone);
+    slot_unlock(&slot.mutex, guard);
+    match old {
+        Place::Empty => {}
+        Place::Full(other) => { park(other); }
+    }
+}
+fn main() -> i32 {
+    let RegionOf(u8)::Taken(memory) = region_of(buf) else {
+        RegionOf(u8)::Gone => { return 1; }
+    };
+    let ready = Tx_init(memory);
+    Tx_Ready_write(ready, 0, 7);
+    match Tx_send(ready) {
+        Tx_send_Result::InFlight(flight) => {
+            let gone = Tx_expire(flight);
+            park(gone);
+            return 0;
+        }
+    }
+}
+|}
+
+let expect_scratch_tx_error ~sub ~by fragment () =
+  match compile_device ~proto:scratch_tx_protocol
+          ~use:(replace_once ~sub ~by scratch_tx_consumer) () with
+  | _ -> Alcotest.failf "expected a rejection naming %s" fragment
+  | exception Types.TypeError (_, msg) ->
+      Alcotest.(check bool) msg true (contains_substring msg fragment)
+
 let expect_device_error ?triple ?device_files ?(in_proto = false) ~sub ~by
     fragment () =
   let proto, use =
@@ -26015,7 +26078,21 @@ let device_protocol_tests = [
     (expect_device_error ~sub:"let ready = Rx_init(memory);"
        ~by:"__protocol_dma_clean(memory); let ready = Rx_init(memory);"
        "is called only by a device protocol's generated code");
+  (* GitHub issue #740: virtio-net's scratch TX shape. An unconfirmed send
+     parks the owner in a terminal device state, so the CPU can never write
+     the payload again; nor can it while the device owns the buffer. *)
+  Alcotest.test_case "scratch tx: the accepted shape compiles" `Quick
+    (fun () -> ignore (compile_device ~proto:scratch_tx_protocol ~use:scratch_tx_consumer ()));
+  Alcotest.test_case "scratch tx: no write while the device owns the payload" `Quick
+    (expect_scratch_tx_error ~sub:"let gone = Tx_expire(flight);"
+       ~by:"Tx_InFlight_write(flight, 0, 1); let gone = Tx_expire(flight);"
+       "Tx_InFlight_write");
+  Alcotest.test_case "scratch tx: no write after an unconfirmed send" `Quick
+    (expect_scratch_tx_error ~sub:"park(gone);"
+       ~by:"Tx_Ready_write(gone, 0, 1); park(gone);"
+       "Tx_Unconfirmed vs Tx_Ready");
 ]
+
 
 (* GitHub issue #720 decision E1: snapshot observation of a device-owned
    rx region (the xHCI event ring's shape). *)
