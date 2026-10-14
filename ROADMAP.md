@@ -159,8 +159,15 @@ flame-graph stacks). Accepted as option (a): a sample delayed by masked
 IRQs is attributed to the unmask point with its masked weight; seeing
 inside masked spans is #773 (Arm SPE) and an irqsoff-style tracer on #771.
 
-**Next, ahead of the list below (maintainer, 2026-10-13):** #740
-(GEM/virtio onto device protocols). Done 2026-10-13: #786, one section per
+**Next, ahead of the list below (maintainer, 2026-10-14):** #740 U2-full:
+virtio-blk, then virtio-net, onto the modern virtio-mmio transport (every
+runner drops force-legacy=on), with the used rings as E1 snapshots on their
+own backing globals; then the stack takes Packet_Filled by move. Done
+2026-10-14 under #740: the packet-buffer pool (txrx regions with a
+direction per publishing edge, `access read` checked by DmaTxReadBorrow.tla,
+P_S_bytes), GEM and virtio-net packet buffers moved onto it with the
+in-place reply, GEM descriptor rings on rx protocols; the size growth is
+reviewed separately. Done 2026-10-13: #786, one section per
 function and data object with --gc-sections on every kernel link (QEMU text
 -17.6 KB, RPi5 -12.2 KB); #782's compiler-side pruning stays, for the
 raw-deref audit rather than for size. Also done: the xHCI work
