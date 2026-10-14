@@ -323,6 +323,11 @@ WINDOWS["651-resume-old"] = {
 }
 
 
+STALL_PROBE_FILE = "kernel/stall_probe.tkb"
+STALL_PROBE_OFF = "const KERNEL_STALL_PROBES: usize = 0;\n"
+STALL_PROBE_ON = "const KERNEL_STALL_PROBES: usize = 1;\n"
+
+
 def replace_once(path: Path, before: str, after: str) -> None:
     source = path.read_text(encoding="ascii")
     count = source.count(before)
@@ -347,6 +352,9 @@ def main() -> None:
         checks = [checks]
     preparation = window.get("prepare", [])
     edited_files = {check_file for check_file, _, _ in checks + preparation}
+    # GitHub issue #665: every race-window kernel carries the stall probes,
+    # which every other build compiles out.
+    edited_files.add(STALL_PROBE_FILE)
     if window["spin"] is not None:
         spin_file, anchor, peer_only = window["spin"]
         edited_files.add(spin_file)
@@ -380,6 +388,8 @@ def main() -> None:
     if window["spin"] is not None:
         replace_once(overlay_kernel / spin_file, anchor,
                      anchor + spin(args[2], peer_only))
+    replace_once(overlay_kernel / STALL_PROBE_FILE, STALL_PROBE_OFF,
+                 STALL_PROBE_ON)
     for file, before, after in preparation:
         replace_once(overlay_kernel / file, before, after)
     if revert:

@@ -1,0 +1,98 @@
+// GitHub issue #665: stall probes for the race-window kernels. Off in every
+// production and debug kernel: KERNEL_STALL_PROBES is 0 here, and only
+// scripts/build_qemu_race_window.py's overlay turns it on, so a natural
+// failure in a race-window lane leaves this evidence for the failure
+// capture's GDB (scripts/stall_probe.gdb) to print before the serial BREAK.
+//
+// What it records, all plain words in BSS:
+// - per CPU: the counter at its last timer tick, its idle-loop passes and
+//   the last one, its last wfi entry and its last resume of a process from
+//   idle, and how often a Ready process it may run was refused, with the
+//   last refused pid;
+// - for up to two watched pids (peer-settings' parent and reader, named by
+//   workload_settings_wake_progress), every block, wake, start and yield, in
+//   a ring of STALL_PROBE_EVENTS records (pid, kind, cpu, counter).
+//
+// Current limitations (2026-10-14):
+// - Plain stores without synchronization: a record a GDB stop interrupts
+//   may be torn. These are diagnostics read at a stall, not state.
+// - Two watched pids, one ring of 32: an older event is overwritten.
+
+use "kernel/lib/execution_model.tkb";
+
+const KERNEL_STALL_PROBES: usize = 0;
+const STALL_PROBE_EVENTS: usize = 32;
+
+// Event kinds.
+const STALL_PROBE_BLOCK: usize = 1;
+const STALL_PROBE_WAKE: usize = 2;
+const STALL_PROBE_START: usize = 3;
+const STALL_PROBE_YIELD: usize = 4;
+
+// Per-CPU notes.
+const STALL_PROBE_TICK: usize = 0;
+const STALL_PROBE_IDLE_PASS: usize = 1;
+const STALL_PROBE_WFI: usize = 2;
+const STALL_PROBE_RESUME: usize = 3;
+
+let mut stall_probe_last_tick: [usize; KERNEL_MAX_CORES];
+let mut stall_probe_idle_passes: [usize; KERNEL_MAX_CORES];
+let mut stall_probe_last_idle_pass: [usize; KERNEL_MAX_CORES];
+let mut stall_probe_last_wfi: [usize; KERNEL_MAX_CORES];
+let mut stall_probe_last_resume: [usize; KERNEL_MAX_CORES];
+let mut stall_probe_refusals: [usize; KERNEL_MAX_CORES];
+let mut stall_probe_last_refused_pid: [usize; KERNEL_MAX_CORES];
+
+let mut stall_probe_watch: [usize; 2];
+let mut stall_probe_next: usize;
+let mut stall_probe_event_pid: [usize; STALL_PROBE_EVENTS];
+let mut stall_probe_event_kind: [usize; STALL_PROBE_EVENTS];
+let mut stall_probe_event_cpu: [usize; STALL_PROBE_EVENTS];
+let mut stall_probe_event_time: [usize; STALL_PROBE_EVENTS];
+
+fn stall_probe_note(which: usize) !{interrupt} {
+    if (KERNEL_STALL_PROBES == 0) { return; }
+    let raw: usize = cpu_id();
+    if (raw >= KERNEL_MAX_CORES) { return; }
+    let core: {0..<KERNEL_MAX_CORES as usize} = raw;
+    let now: usize = read_cntpct() as usize;
+    if (which == STALL_PROBE_TICK) { stall_probe_last_tick[core] = now; }
+    else if (which == STALL_PROBE_IDLE_PASS) {
+        stall_probe_idle_passes[core] = stall_probe_idle_passes[core] + 1;
+        stall_probe_last_idle_pass[core] = now;
+    } else if (which == STALL_PROBE_WFI) { stall_probe_last_wfi[core] = now; }
+    else { stall_probe_last_resume[core] = now; }
+}
+
+fn stall_probe_refused(pid: usize) {
+    if (KERNEL_STALL_PROBES == 0) { return; }
+    let raw: usize = cpu_id();
+    if (raw >= KERNEL_MAX_CORES) { return; }
+    let core: {0..<KERNEL_MAX_CORES as usize} = raw;
+    stall_probe_refusals[core] = stall_probe_refusals[core] + 1;
+    stall_probe_last_refused_pid[core] = pid;
+}
+
+// Watch a pid: index 0 is peer-settings' parent, 1 its reader.
+fn stall_probe_watch_pid(index: usize, pid: usize) {
+    if (KERNEL_STALL_PROBES == 0) { return; }
+    if (index < 2) { stall_probe_watch[index] = pid; }
+}
+
+fn stall_probe_watching() -> bool {
+    return KERNEL_STALL_PROBES != 0 &&
+           (stall_probe_watch[0] != 0 || stall_probe_watch[1] != 0);
+}
+
+fn stall_probe_event(pid: usize, kind: usize) {
+    if (KERNEL_STALL_PROBES == 0 || pid == 0) { return; }
+    if (pid != stall_probe_watch[0] && pid != stall_probe_watch[1]) { return; }
+    let slot: usize = stall_probe_next % STALL_PROBE_EVENTS;
+    stall_probe_next = stall_probe_next + 1;
+    if (slot < STALL_PROBE_EVENTS) {
+        stall_probe_event_pid[slot] = pid;
+        stall_probe_event_kind[slot] = kind;
+        stall_probe_event_cpu[slot] = cpu_id();
+        stall_probe_event_time[slot] = read_cntpct() as usize;
+    }
+}

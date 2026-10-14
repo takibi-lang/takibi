@@ -80,8 +80,14 @@ def capture(port, elf, output, phase, gdb_endpoint=None):
                     f"takibi-debug-metadata {repo}/_build/kernel-debug-metadata.json",
                     f"source {repo}/_build/kernel-console-layout.gdb",
                     f"source {repo}/scripts/kernel_console.gdb",
-                    "takibi-console", "disconnect",
+                    "takibi-console",
                 ]
+                # GitHub issue #665: a lane may add a GDB script (the race-window
+                # lanes add scripts/stall_probe.gdb).
+                extra = os.environ.get("TAKIBI_CONSOLE_EXTRA_GDB")
+                if extra:
+                    commands.append(f"source {extra}")
+                commands.append("disconnect")
                 argv = ["gdb-multiarch", "-nx", "-q", "-batch", str(elf)]
                 for command in commands:
                     argv.extend(["-ex", command])

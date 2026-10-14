@@ -38,6 +38,7 @@ run_variant() {
     local elf="$REPO_ROOT/kernel/build/qemu/kernel-race-$WINDOW-$variant.elf"
     if [ "$WORKLOAD" = churn ]; then
         env KERNEL_QEMU_SHELL_ELF="$elf" \
+            TAKIBI_CONSOLE_EXTRA_GDB="$REPO_ROOT/scripts/stall_probe.gdb" \
             KERNEL_QEMU_SHELL_SERIAL_PORT="${KERNEL_QEMU_SERIAL_PORT:-18668}" \
             TAKIBI_LANE_ARTIFACT_ROOT="$ROOT/$variant" \
             python3 "$REPO_ROOT/scripts/run_kernel_churn.py" --platform qemu \
@@ -45,7 +46,10 @@ run_variant() {
             >"$ROOT/$variant.log" 2>&1
         return
     fi
+    # GitHub issue #665: the race-window kernels carry stall probes
+    # (kernel/kernel/stall_probe.tkb); a failure capture prints them.
     env KERNEL_QEMU_ELF="$elf" \
+        TAKIBI_CONSOLE_EXTRA_GDB="$REPO_ROOT/scripts/stall_probe.gdb" \
         KERNEL_QEMU_LABEL="qemu-race-$WINDOW-$variant" \
         KERNEL_QEMU_HWTEST_ARTIFACT_DIR="$ROOT/$variant" \
         bash "$REPO_ROOT/scripts/run_kernel_qemutest.sh" \

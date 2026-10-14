@@ -1,4 +1,5 @@
 use "kernel/lib/atomic_word.tkb";
+use "kernel/kernel/stall_probe.tkb";
 use "kernel/kernel/stack_poison.tkb";
 use "kernel/mm/page.tkb";
 use "kernel/lib/diagnostic_ring.tkb";
@@ -3766,6 +3767,10 @@ fn scheduled_process_start(
         state: sink ScheduledProcessState[process, ProcessState::Startable])
         -> ScheduledProcessState[process, ProcessState::Running] {
     scheduled_process_state_drop(state);
+    if (stall_probe_watching()) {
+        stall_probe_event(scheduled_process_pid_of_slot(
+            process_slot_word(owner.pool_index)), STALL_PROBE_START);
+    }
     // GitHub issue #609: StackOwnership.tla's StartsOnFreeStack, checked
     // where every start passes. A process starts on a stack no core owns,
     // or on this core's own (a block that would miss restarts in place).
@@ -3796,6 +3801,10 @@ fn scheduled_process_yield(
         state: sink ScheduledProcessState[process, ProcessState::Running])
         -> ScheduledProcessState[process, ProcessState::Ready] !{changes_witness_ProcessCurrent} {
     scheduled_process_state_drop(state);
+    if (stall_probe_watching()) {
+        stall_probe_event(scheduled_process_pid_of_slot(
+            process_slot_word(owner.pool_index)), STALL_PROBE_YIELD);
+    }
     process_state_yield(&scheduled_process_record_owned(owner).state);
     let mut ready: ScheduledProcessState[process, ProcessState::Ready] =
         { owner.pool_index };
@@ -3811,6 +3820,10 @@ fn scheduled_process_block(
         reason: ProcessWaitReason)
         -> ScheduledProcessState[process, ProcessState::Blocked] !{changes_witness_ProcessCurrent} {
     scheduled_process_state_drop(state);
+    if (stall_probe_watching()) {
+        stall_probe_event(scheduled_process_pid_of_slot(
+            process_slot_word(owner.pool_index)), STALL_PROBE_BLOCK);
+    }
     process_state_block(&scheduled_process_record_owned(owner).state, reason);
     workload_profile_note_block(
         scheduled_process_pid_of_slot(process_slot_word(owner.pool_index)));
@@ -3857,6 +3870,10 @@ private fn scheduled_process_wake_ready(
         state: sink ScheduledProcessState[process, ProcessState::Blocked])
         -> ScheduledProcessState[process, ProcessState::Ready] {
     scheduled_process_state_drop(state);
+    if (stall_probe_watching()) {
+        stall_probe_event(scheduled_process_pid_of_slot(
+            process_slot_word(owner.pool_index)), STALL_PROBE_WAKE);
+    }
     workload_profile_note_wakeup(
         scheduled_process_pid_of_slot(process_slot_word(owner.pool_index)));
     let mut ready: ScheduledProcessState[process, ProcessState::Ready] =
@@ -6005,7 +6022,9 @@ fn kernel_process_secondary_start() -> ProcessSecondaryStart {
                     workload_busy_starve_skips(
                         scheduled_process_record_locked(guard, slot).pid) == false) {
                     match scheduled_process_ready_take_slot(guard, slot) {
-                        ScheduledProcessReadyTakeResult::Missing => {}
+                        ScheduledProcessReadyTakeResult::Missing => {
+                            stall_probe_refused(scheduled_process_record_locked(guard, slot).pid);
+                        }
                         ScheduledProcessReadyTakeResult::Ready(resources) => {
                             let (owner, ready) = resources;
                             let running = scheduled_process_start(owner, ready);

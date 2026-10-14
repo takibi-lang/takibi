@@ -47,6 +47,9 @@ GLOBAL_RE = re.compile(r"^(?:private )?let mut ", re.M)
 # Adding a name here is a claim. "Not audited" is a legitimate entry and is
 # better than absence, because it is visible.
 EXEMPT = {
+    "kernel/stall_probe.tkb":
+        "diagnostic words read by GDB at a stall, off in production "
+        "(KERNEL_STALL_PROBES); a torn record is accepted (#665)",
     # --- Deliberately concurrent: these files ARE the two-core evidence,
     # and every shared word in them is an atomic. An assertion on the core
     # count would be backwards.
