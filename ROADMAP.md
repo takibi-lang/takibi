@@ -40,8 +40,8 @@ incidental.
 allcheck` stops every other piece of work, and the lane that meets such a
 failure analyses and fixes it, whatever territory its cause lies in. The
 goal is to drive the probability of an allcheck failure toward zero step by
-step. A holds the analysis of #604, #603, #605, #607, #649, #654, #655, #665
-(its handoff memo), #667, #670, #673, #676, #685 and #690 when they next
+step. A holds the analysis of #604, #603, #605, #607, #649, #654, #655,
+#667, #670, #673, #676, #685 and #690 when they next
 recur.
 
 **QEMU's role (maintainer, 2026-10-03):** QEMU gates functional verdicts
