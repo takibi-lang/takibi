@@ -21,6 +21,11 @@ PAYLOAD = bytes(range(14, 64))
 PASS = b'PASS gem-tx: completion, halt ownership, later sends dropped'
 IRQ_PASS = b'PASS gem-probe: complete and masked'
 IRQ_MODES = ('irq-primary', 'irq-wrong-enable')
+# GitHub issue #787: the after-halt receive needs a frame to land between
+# the last RX arm and gem_halt(), a window of about the 14 ms TX deadline.
+# Sending every 50 ms left that to chance; every 4 ms puts several frames
+# in every such window.
+PEER_INTERVAL = 0.004
 
 
 def peer(interface):
@@ -34,7 +39,7 @@ def peer(interface):
         print('READY', flush=True)
         next_send = 0.0
         while True:
-            readable, _, _ = select.select([link, sys.stdin], [], [], 0.05)
+            readable, _, _ = select.select([link, sys.stdin], [], [], PEER_INTERVAL)
             if sys.stdin in readable:
                 break
             if link in readable:
@@ -44,7 +49,7 @@ def peer(interface):
                                    'sha256': hashlib.sha256(body).hexdigest()})
             if time.monotonic() >= next_send:
                 link.send(packet)
-                next_send = time.monotonic() + 0.05
+                next_send = time.monotonic() + PEER_INTERVAL
     print(json.dumps(frames), flush=True)
 
 
