@@ -3268,6 +3268,23 @@ let infer_tests = [
       Alcotest.(check int) "inferred usize keeps exact initializer fact" 1
         (Hashtbl.length Type_inf.divisor_proven_nonzero_at));
 
+  (* GitHub issue #791: a literal divisor inside an argument checked against
+     a refined parameter reached the divisor proof while its type was still
+     unresolved, so the literal 4 was not proved nonzero and --forbid-trap
+     refused it.  The negative control keeps a zero-admitting divisor refused. *)
+  Alcotest.test_case "literal divisor in a refined argument context is proved nonzero" `Quick
+    (expect_trap_sites 0
+       "fn f(word: {0..<127 as usize}) -> usize { return word; }
+        fn g() -> usize { return f(0x80 / 4); }");
+  Alcotest.test_case "zero-admitting divisor in a refined argument context keeps its check" `Quick
+    (fun () ->
+      ignore (gen_codegen
+        "fn f(word: {0..<127 as usize}) -> usize { return word; }
+         fn g(d: {0..<5 as usize}) -> usize { return f((0x80 / d) as {0..<127 as usize}); }");
+      let ir = Llvm.string_of_llmodule !Llvm_gen.the_module in
+      Alcotest.(check bool) "divisor {0..<5} keeps its zero check" true
+        (contains_substring ir "divzero_cmp"));
+
   Alcotest.test_case "early-return continuation carries nonzero facts to siblings" `Quick
     (fun () ->
       ignore (infer

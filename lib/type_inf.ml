@@ -1410,11 +1410,28 @@ let check_expected_type_value loc (e : Ast.expr) (target : ty) =
        | Some _ | None -> ())
   | _ -> ()
 
+(* GitHub issue #791: a divisor whose type is still an unresolved variable
+   when its division is inferred (a literal inside an argument that is later
+   unified with a refined parameter) has no Value_facts base yet.  Such
+   divisors are retried once at the end of the enclosing function, after
+   unification has resolved the type, like the overflow audit sites. *)
+let pending_divisor_proofs : (ty * Ast.expr) list ref = ref []
+
 let record_divisor_nonzero_proof ty (expr : Ast.expr) =
   match value_facts_of_expr ty expr with
   | Some facts when Value_facts.excludes facts Value_facts.zero ->
       Hashtbl.replace divisor_proven_nonzero_at expr.loc ()
-  | _ -> ()
+  | Some _ -> ()
+  | None -> pending_divisor_proofs := (ty, expr) :: !pending_divisor_proofs
+
+let retry_pending_divisor_proofs () =
+  let pending = !pending_divisor_proofs in
+  pending_divisor_proofs := [];
+  List.iter (fun (ty, (expr : Ast.expr)) ->
+    match value_facts_of_expr ty expr with
+    | Some facts when Value_facts.excludes facts Value_facts.zero ->
+        Hashtbl.replace divisor_proven_nonzero_at expr.loc ()
+    | _ -> ()) pending
 
 let record_signed_division_overflow_proof loc lhs_facts rhs_facts =
   match lhs_facts with
@@ -7746,6 +7763,7 @@ let infer_func ~key senv eenv fenv genv (fdef : Ast.func) : func_info =
     Hashtbl.reset binding_fact_sources;
     Hashtbl.reset intrinsic_nonzero_at;
     active_overflow_audit_sites := [];
+    pending_divisor_proofs := [];
     active_audit_function := fdef.name;
     List.iter2 (fun id ty -> Hashtbl.replace active_binding_types id ty)
       bindings.param_ids param_tys;
@@ -7760,6 +7778,7 @@ let infer_func ~key senv eenv fenv genv (fdef : Ast.func) : func_info =
     in
     check_default_initialization senv fdef;
     check_undetermined_lets fdef raw_locals;
+    retry_pending_divisor_proofs ();
     List.iter (fun site ->
       if site.overflow_lhs_facts = None then
         site.overflow_lhs_facts <-
@@ -7934,6 +7953,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   held_guard_table := HeldGuardSites.empty;
   active_audit_function := "<global>";
   Hashtbl.reset divisor_proven_nonzero_at;
+  pending_divisor_proofs := [];
   Hashtbl.reset signed_division_overflow_proven_safe_at;
   Hashtbl.reset array_index_proven_in_bounds_at;
   Hashtbl.reset runtime_slice_index_proven_at;
