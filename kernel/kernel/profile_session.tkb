@@ -322,6 +322,9 @@ fn profile_session_irq(frame: borrow FrameRef[process]) !{interrupt, unsafe} {
     // counter already is.
     let skid: usize = pmu_sample_counter();
     pmu_sample_rearm(profile_session_period);
+    // Read the pid before the buffer lock: it takes the process pool lock
+    // (rank 40), which must not nest inside profile_buffer (rank 90) (#789).
+    let pid: usize = kernel_process_current_pid();
     let guard = profile_buffer_lock(&profile_core_store[cpu].mutex);
     let stored: usize = profile_core_state[cpu].stored;
     let taken = place_take(guard, &profile_core_store[cpu].mutex,
@@ -335,7 +338,7 @@ fn profile_session_irq(frame: borrow FrameRef[process]) !{interrupt, unsafe} {
         Place::Full(records) => {
             if (stored < region_count(records)) {
                 let record: &mut ProfileRecord = region_at(records, stored);
-                profile_record_fill(record, frame, skid);
+                profile_record_fill(record, frame, skid, pid);
                 profile_core_state[cpu].stored = stored + 1;
             } else {
                 profile_core_state[cpu].lost = profile_core_state[cpu].lost + 1;
@@ -475,10 +478,11 @@ private fn profile_frame_store(record: borrow &mut ProfileRecord, index: usize, 
 }
 
 private fn profile_record_fill(record: borrow &mut ProfileRecord,
-                               frame: borrow FrameRef[process], skid: usize)
+                               frame: borrow FrameRef[process], skid: usize,
+                               pid: usize)
         !{interrupt, unsafe} {
     record.timestamp = read_cntpct() as usize;
-    record.pid = kernel_process_current_pid();
+    record.pid = pid;
     record.skid = skid;
     let el0: bool = (frame_spsr_el1(frame) & 0xF) == 0;
     record.pcs[0] = frame_elr_el1(frame);

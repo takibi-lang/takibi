@@ -197,7 +197,8 @@ fn address_space_backing_pool_init_before_secondary() {}
 
 private fn address_space_backing_pool_lock(
         pool: *RegionPool(AddressSpaceBacking) @ backings)
-        -> RegionPoolGuard(AddressSpaceBacking)[backings] !{unsafe} {
+        -> RegionPoolGuard(AddressSpaceBacking)[backings] !{unsafe, acquires_lock_40_address_space_backing_pool, single_instance_lock,
+          lock_guard_40_address_space_backing_pool} {
     let flags: usize = mutex_irq_save();
     return region_pool_lock_saving(pool, flags);
 }

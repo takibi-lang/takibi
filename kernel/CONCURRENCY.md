@@ -348,8 +348,23 @@ convention (GitHub issue #466): `ext2_mutation` at 20 and `block_device` at
 reverse is a type error. `kernel/fs/ext2/mutation_lock.tkb` is the outer one
 and states why readers do not take it at all.
 
-This order is held by how the functions happen to be written; no checker
-enforces it in the kernel. `linux_user/intrusive_pool/pool_lock_check.tkb`
+Every kernel function that takes a Mutex or RegionPool lock directly carries a
+rank too, and
+`scripts/check_lock_rank_wrappers.py` makes a function that calls
+`region_pool_lock`, `region_pool_lock_saving` or `mutex_acquire` without one
+a build failure (GitHub issue #789). The RegionPool wrappers
+(`process_pool_lock`, `object_pool_lock`, the fd, TCP, address-space and
+process-image pools) are rank 40 and `single_instance_lock`, each its own
+class: each pool type has exactly one global, so taking the same pool while
+its guard is live is a compile error -- the nested process-pool hold of
+#672 would have been one. #745 dropped the process pool's rank silently when
+it moved off IntrusivePool; restoring them found two more nestings, a TCP
+pin-cost loop whose last-pin free re-took the pool it held and the PMU
+interrupt reading the pid (process pool, 40) under the profile buffer (90).
+
+Ranks catch a nesting only through resolved direct calls; the order between
+unranked convention layers above is still held by how the functions happen to
+be written. `linux_user/intrusive_pool/pool_lock_check.tkb`
 checks order between POOL locks only, in the tier that can afford to look, and
 its table is finite -- which is why a lock that is not a pool's must use
 `mutex_acquire` directly rather than `pool_lock_acquire`, whose tag registers

@@ -146,7 +146,8 @@ private let mut fd_block_pool: RegionPool(FdBlock);
 const FD_BLOCK_CHUNK_PAGES: usize = 1;
 
 private fn fd_block_pool_lock(pool: *RegionPool(FdBlock) @ blocks)
-        -> RegionPoolGuard(FdBlock)[blocks] !{unsafe} {
+        -> RegionPoolGuard(FdBlock)[blocks] !{unsafe, acquires_lock_40_fd_block_pool, single_instance_lock,
+          lock_guard_40_fd_block_pool} {
     let flags: usize = mutex_irq_save();
     return region_pool_lock_saving(pool, flags);
 }
@@ -277,7 +278,8 @@ private let mut fd_context_pool: RegionPool(ProcessFdContext);
 const FD_CONTEXT_CHUNK_PAGES: usize = 1;
 
 private fn fd_context_pool_lock(pool: *RegionPool(ProcessFdContext) @ contexts)
-        -> RegionPoolGuard(ProcessFdContext)[contexts] !{unsafe} {
+        -> RegionPoolGuard(ProcessFdContext)[contexts] !{unsafe, acquires_lock_40_fd_context_pool, single_instance_lock,
+          lock_guard_40_fd_context_pool} {
     let flags: usize = mutex_irq_save();
     return region_pool_lock_saving(pool, flags);
 }
@@ -824,7 +826,8 @@ private let mut object_pool: RegionPool(SharedObject);
 const OBJECT_CHUNK_PAGES: usize = 1;
 
 private fn object_pool_lock(pool: *RegionPool(SharedObject) @ objects)
-        -> RegionPoolGuard(SharedObject)[objects] !{unsafe} {
+        -> RegionPoolGuard(SharedObject)[objects] !{unsafe, acquires_lock_40_object_pool, single_instance_lock,
+          lock_guard_40_object_pool} {
     let flags: usize = mutex_irq_save();
     return region_pool_lock_saving(pool, flags);
 }

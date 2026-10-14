@@ -321,7 +321,8 @@ const TCP_CONNECTION_CHUNK_PAGES: usize = 1;
 
 private fn tcp_connection_pool_lock(
         pool: *RegionPool(TcpConnection) @ conns)
-        -> RegionPoolGuard(TcpConnection)[conns] !{unsafe} {
+        -> RegionPoolGuard(TcpConnection)[conns] !{unsafe, acquires_lock_40_tcp_connection_pool, single_instance_lock,
+          lock_guard_40_tcp_connection_pool} {
     let flags: usize = mutex_irq_save();
     return region_pool_lock_saving(pool, flags);
 }
@@ -614,7 +615,8 @@ const TCP_FRAME_CHUNK_PAGES: usize = 2;
 // name (#370), so it comes in through the pointer: callers pass
 // &tcp_frame_pool.
 private fn tcp_frame_pool_lock(pool: *RegionPool(NetFrame) @ frames)
-        -> RegionPoolGuard(NetFrame)[frames] !{unsafe} {
+        -> RegionPoolGuard(NetFrame)[frames] !{unsafe, acquires_lock_40_tcp_frame_pool, single_instance_lock,
+          lock_guard_40_tcp_frame_pool} {
     let flags: usize = mutex_irq_save();
     return region_pool_lock_saving(pool, flags);
 }
@@ -1328,7 +1330,17 @@ fn tcp_connection_pin_cost(owner: borrow TcpConnectionOwner[p, connection])
                 return TcpPinCostResult::Stale;
             }
             RegionPinned(TcpConnection)::Pinned(pin) => {
-                tcp_connection_unpin(pin);
+                // Not tcp_connection_unpin: freeing a last pin re-takes the
+                // pool lock this loop holds (#789). The owner makes Last
+                // unreachable; if it ever happens, free after the unlock.
+                match region_unpin(pin) {
+                    RegionUnpin(TcpConnection)::Unpinned => {}
+                    RegionUnpin(TcpConnection)::Last(slot) => {
+                        tcp_connection_pool_unlock(guard);
+                        tcp_connection_slot_free(slot);
+                        return TcpPinCostResult::Stale;
+                    }
+                }
             }
         }
     }
@@ -1350,7 +1362,8 @@ must_use variant PinSharingSetupResult { NoMemory; InvalidLayout; Ready; }
 must_use variant PinSharingCleanupResult { Busy; InvalidChunk; Released; }
 
 private fn pin_sharing_lock() -> RegionPoolGuard(PinSharingCell)[&pin_sharing_pool]
-        !{unsafe} {
+        !{unsafe, acquires_lock_40_pin_sharing_pool, single_instance_lock,
+          lock_guard_40_pin_sharing_pool} {
     return region_pool_lock_saving(&pin_sharing_pool, mutex_irq_save());
 }
 
@@ -1769,7 +1782,8 @@ fn retx_entry_release(parked: sink RegionSlot(RetxEntry)[p, k]) !{unsafe} {
 }
 
 private fn tcp_retx_pool_lock(pool: *RegionPool(RetxEntry) @ entries)
-        -> RegionPoolGuard(RetxEntry)[entries] !{unsafe} {
+        -> RegionPoolGuard(RetxEntry)[entries] !{unsafe, acquires_lock_40_tcp_retx_pool, single_instance_lock,
+          lock_guard_40_tcp_retx_pool} {
     let flags: usize = mutex_irq_save();
     return region_pool_lock_saving(pool, flags);
 }

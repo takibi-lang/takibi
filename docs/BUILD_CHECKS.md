@@ -128,6 +128,8 @@ suffix is description; dispatch reads only the prefix.
 | `check_process_record_bare_uses.py` | no bare ProcessRecord lookup bodies; reviewed authority mints, private constructors, loan transfers and destructive record contracts |
 | `check_process_record_bare_uses_controls.py` | negative controls for changed lookup/mint scopes, constructor visibility and missing destructive annotations |
 | `check_lock_discipline.py` | global mutexes are not force-reset and raw atomics stay allowlisted |
+| `check_lock_rank_wrappers.py` | every kernel function that calls `region_pool_lock`, `region_pool_lock_saving` or `mutex_acquire` declares `acquires_lock_<rank>_<name>` or has a reviewed exemption (#789: #745 silently dropped the process pool's rank) |
+| `check_lock_rank_wrappers_controls.py` | the process pool losing its rank, a commented rank, new unranked region, mutex and one-line wrappers, a neighbour's rank, and a stale exemption are each refused |
 | `check_measure_kernel_tcp_throughput_controls.py` | Controls for the wire-throughput measurement, with a scripted curl |
 | `check_profile_kernel_session_controls.py` | Controls for the kernel profile folder (`scripts/profile_kernel_session.py`, #497): dump parsing and refusal, skid weighting, root-first EL1 stacks, EL0 kept apart |
 | `check_measure_kernel_fileio_controls.py` | Controls for the file-I/O workload timer (`scripts/measure_kernel_fileio.py`, #765): `real` lines parsed or refused, summary spread, comparison deltas |

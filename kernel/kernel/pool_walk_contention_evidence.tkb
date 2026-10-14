@@ -94,7 +94,8 @@ private fn pool_walk_admitted_address() -> *AtomicWord { return &pool_walk_admit
 private fn pool_walk_floor_bad_address() -> *AtomicWord { return &pool_walk_floor_bad; }
 private fn pool_walk_steps_address() -> *AtomicWord { return &pool_walk_steps; }
 
-private fn pool_walk_lock() -> RegionPoolGuard(PoolWalkItem)[&pool_walk_pool] !{unsafe} {
+private fn pool_walk_lock() -> RegionPoolGuard(PoolWalkItem)[&pool_walk_pool] !{unsafe, acquires_lock_40_pool_walk_pool, single_instance_lock,
+          lock_guard_40_pool_walk_pool} {
     let flags: usize = mutex_irq_save();
     return region_pool_lock_saving(&pool_walk_pool, flags);
 }

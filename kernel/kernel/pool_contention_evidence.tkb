@@ -115,7 +115,8 @@ private fn contention_overlap_address() -> *AtomicWord {
 
 
 private fn contention_pool_lock()
-        -> RegionPoolGuard(ContentionItem)[&contention_pool] !{unsafe} {
+        -> RegionPoolGuard(ContentionItem)[&contention_pool] !{unsafe, acquires_lock_40_contention_pool, single_instance_lock,
+          lock_guard_40_contention_pool} {
     let flags: usize = mutex_irq_save();
     return region_pool_lock_saving(&contention_pool, flags);
 }
