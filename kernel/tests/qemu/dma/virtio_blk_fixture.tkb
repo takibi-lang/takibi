@@ -37,8 +37,8 @@ fn dma_fixture_notify() !{unsafe} {
         let status: *io u8 = unsafe { descs[2].addr as *io u8 };
         if (dma_fixture_mode == 0) { *status = 1; }
         else { *status = 0; }
-        let used: *io VirtqUsedRing = unsafe {
-            dma_fixture_register_address(40) as *io VirtqUsedRing };
+        let used_address: usize = dma_fixture_register_address(40);
+        let used: *io VirtqUsedRing = unsafe { used_address as *io VirtqUsedRing };
         used.idx = virtio_ring_index_next(used.idx);
     }
 }
