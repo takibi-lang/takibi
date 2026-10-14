@@ -25960,6 +25960,58 @@ let expect_packet_error ?(in_proto = false) ~sub ~by fragment () =
   | exception Failure msg ->
       Alcotest.(check bool) msg true (contains_substring msg fragment)
 
+(* GitHub issue #740: a packet buffer element with a `bytes` field gets a
+   borrowed slice accessor, P_S_bytes, for in-place parsing. *)
+let bytes_protocol = {|const ONE: usize = 1;
+struct PacketBuf { bytes: [u8; 64]; }
+protocol Pk[inst: usize] retains region(PacketBuf)[b, ONE] txrx {
+    state Free access write;
+    state Posted[req] device access read;
+    init Free;
+    transition post(Free) tx -> Posted[fresh req];
+    observe done(Posted[req]) -> Sent[req] completes | Pending;
+    transition back(Posted[req], Sent[req]) -> Free;
+    property disjoint;
+    model cells 2;
+}
+fn post(s: borrow Pk_Posted[b, o, 1, r]) {}
+fn done(s: borrow Pk_Posted[b, o, 1, r]) -> Pk_done_Raw { return Pk_done_Raw::Sent; }
+fn back(s: borrow Pk_Posted[b, o, 1, r]) {}
+|}
+
+let bytes_consumer = {|private region let mut pool: [PacketBuf; 1] align(64);
+fn main() -> i32 {
+    let RegionOf(PacketBuf)::Taken(m) = region_of(pool) else {
+        RegionOf(PacketBuf)::Gone => { return 1; }
+    };
+    let f = Pk_init(m);
+    let v = Pk_Free_bytes(f, 0);
+    v[3] = 9;
+    match Pk_post(f) {
+        Pk_post_Result::Posted(out) => {
+            let seen = Pk_Posted_bytes(out, 0);
+            let x: u8 = seen[3];
+            match Pk_done(out) {
+                Pk_done_Outcome::Sent(w) => {
+                    let back = Pk_back(out, w);
+                    region_release(Pk_release(back));
+                    return x as i32;
+                }
+                Pk_done_Outcome::Pending => { return hold(out); }
+            }
+        }
+    }
+}
+fn hold(p: sink Pk_Posted[b, o, 1, r]) -> i32 { return hold(p); }
+|}
+
+let expect_bytes_error ~sub ~by fragment () =
+  match compile_device ~proto:bytes_protocol
+          ~use:(replace_once ~sub ~by bytes_consumer) () with
+  | _ -> Alcotest.failf "expected a rejection naming %s" fragment
+  | exception Types.TypeError (_, msg) ->
+      Alcotest.(check bool) msg true (contains_substring msg fragment)
+
 let expect_scratch_tx_error ~sub ~by fragment () =
   match compile_device ~proto:scratch_tx_protocol
           ~use:(replace_once ~sub ~by scratch_tx_consumer) () with
@@ -26231,6 +26283,16 @@ let device_protocol_tests = [
     (expect_packet_error ~in_proto:true
        ~sub:"    state Filled access write;" ~by:"    state Filled access write access read;"
        "unsupported state attribute");
+  Alcotest.test_case "bytes: a packet is read and written in place" `Quick
+    (fun () -> ignore (compile_device ~proto:bytes_protocol ~use:bytes_consumer ()));
+  Alcotest.test_case "bytes: the slice dies with the owner's state" `Quick
+    (expect_bytes_error ~sub:"let x: u8 = seen[3];"
+       ~by:"let x: u8 = seen[3]; v[4] = 1;"
+       "cannot be used after 'f' is consumed");
+  Alcotest.test_case "bytes: a read-only state's slice is const" `Quick
+    (expect_bytes_error ~sub:"let x: u8 = seen[3];"
+       ~by:"seen[2] = 1; let x: u8 = seen[3];"
+       "const");
   Alcotest.test_case "txrx: an unconfirmed packet is never recycled" `Quick
     (expect_packet_error ~sub:"return lose(gone);"
        ~by:"let f = Pkt_recycle(gone); return 0;"

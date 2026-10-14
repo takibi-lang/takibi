@@ -624,7 +624,21 @@ let rec type_source loc = function
 
 let generated_file = Ast.protocol_file
 
-let source_of (d : protocol_decl) (p : t) : string =
+(* The length M of the element struct's `bytes: [u8; M]` field, if it has
+   one (GitHub issue #740, packet buffers). *)
+let element_bytes (prog : toplevel list) (d : protocol_decl) : int option =
+  let _, elem, _ = d.proto_region in
+  match elem with
+  | TypeNamed n ->
+      List.find_map (function
+        | StructDef (n', fields, _, _, _, _) when n' = n ->
+            (match List.assoc_opt "bytes" fields with
+             | Some (TypeArray (TypeU8, m)) -> Some m
+             | _ -> None)
+        | _ -> None) prog
+  | _ -> None
+
+let source_of ?bytes_field (d : protocol_decl) (p : t) : string =
   let _, elem, idx = d.proto_region in
   let b, n = match idx with [ b; n ] -> (b, n) | _ -> assert false in
   let elem = type_source d.proto_loc elem in
@@ -668,6 +682,16 @@ let source_of (d : protocol_decl) (p : t) : string =
         add "    *element = value;";
         add "}"
       end;
+      (* GitHub issue #740: an element struct with a `bytes: [u8; M]` field
+         (a packet buffer) is read and written in place through a slice
+         derived from the owner's borrow, so header overlays can view it;
+         the slice dies with the borrow. A read-only state gets a const one. *)
+      Option.iter (fun m ->
+        add "inline fn %s_%s_bytes(s: borrow %s, i: usize @ k) -> [%su8; %d..] @ %s where k < %s {"
+          pn s.s_name owner (if s.s_write then "" else "const ") m b count;
+        add "    let element = region_at(s.memory, i);";
+        add "    return element.bytes[0..<%d];" m;
+        add "}") bytes_field;
       add "inline fn %s_%s_read(s: borrow %s, i: usize @ k) -> %s where k < %s {"
         pn s.s_name owner elem count;
       add "    return *region_at(s.memory, i);";
@@ -1066,7 +1090,8 @@ let lower (prog : toplevel list) : toplevel list =
         let p = validate d in
         check_device d p;
         check_lowering prog d p;
-        `Generated (parse_generated p.name (source_of d p))
+        `Generated (parse_generated p.name
+                      (source_of ?bytes_field:(element_bytes prog d) d p))
     | item -> `Item item) prog in
   let program = List.filter_map (function `Item i -> Some i | _ -> None) expanded in
   let generated = List.filter_map (function `Generated g -> Some g | _ -> None) expanded in
@@ -1083,5 +1108,7 @@ let lower (prog : toplevel list) : toplevel list =
    can be read when a lowering's error points into `<protocol Name>`. *)
 let generated_sources (prog : toplevel list) : (string * string) list =
   List.filter_map (function
-    | ProtocolDef d -> let p = validate d in Some (p.name, source_of d p)
+    | ProtocolDef d ->
+        let p = validate d in
+        Some (p.name, source_of ?bytes_field:(element_bytes prog d) d p)
     | _ -> None) prog

@@ -4187,6 +4187,12 @@ that no other code can split:
   publishing clean left every line equal to memory and nothing writes the
   region while it is posted (`kernel/models/DmaTxReadBorrow.tla`). An `rx`
   state with `access read` is rejected; a snapshot is the only read there.
+- When the region's element is a struct with a `bytes: [u8; M]` field (a
+  packet buffer), every `access write` or `access read` state also gets
+  `P_S_bytes(s: borrow P_S[...], i: usize @ k) -> [u8; M..] @ b where k <
+  N` (`[const u8; M..]` for `access read`): element i's bytes in place, for
+  header overlays and parsing without a copy. The slice is derived from the
+  owner's borrow and cannot be used once the owner moves to another state.
 
 A device protocol must fix its count with a declared constant, retain a
 region of `u8` or a named type, and declare at least one `device` state. It
