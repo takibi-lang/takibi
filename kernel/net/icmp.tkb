@@ -8,7 +8,7 @@ use "kernel/net/wire.tkb";
 // handled; no fragmentation reassembly, no other ICMP type (Destination
 // Unreachable, Time Exceeded, etc.) is generated or interpreted. Reply
 // construction is safe across cores without an ICMP-local lock:
-// NetRxValidated exclusively owns the acquired descriptor whose frame is
+// the NetPacket owner moved to the stack exclusively owns the buffer whose frame is
 // rewritten in place, and the one linear NetRxCanAcquire keeps a second
 // request from being acquired concurrently. Its initial mint remains checked
 // by the network driver's execution-model assertion.

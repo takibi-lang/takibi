@@ -12,7 +12,7 @@
 //
 // What differs from that file, deliberately: the function/type
 // names below match kernel/drivers/net/rp1_gem.tkb's contract exactly
-// (net_rx_validated/NetRxValidated/NetRxReplyReady/NetTxInFlight/
+// (net_rx_packet/NetPacket/NetRxReplyReady/NetTxInFlight/
 // net_rx_reply_ready/net_transmit(reply)/net_transmit_ready/net_shutdown),
 // not examples/common_qemu/virtio_mmio.tkb's own (NetRxCpuOwned, a single
 // combined net_transmit(frame, len), no net_transmit_ready at all) --
@@ -52,23 +52,23 @@ const QNUM: isize = 8; // virtqueue depth for both the RX and TX queues
 // (field names differ internally -- "index" here vs. rp1_gem's "slot" --
 // but nothing outside this file ever names a field, only the type and
 // the function API around it).
-// The frame owners hold the received packet buffer itself, Filled (GitHub
-// issue #740): the frame's bytes are borrowed from it in place; releasing
-// recycles it, replying sends that buffer back out.
-private linear struct NetRxValidated[desc: usize, pb: addr, po: usize] {
-    private index: {0..<8 as usize} @ desc;
-    private len: i32;
+// The stack receives the packet buffer itself, Filled, by move (GitHub
+// issue #740): NetPacket is that owner with its length and pool slot, and
+// names no RX descriptor -- net_rx_acquire refills the descriptor from
+// another Free buffer before it returns, so holding a packet does not
+// hold the ring. The frame's bytes are borrowed from it in place;
+// releasing recycles it, replying sends that buffer back out.
+private linear struct NetPacket[pb: addr, po: usize] {
+    private len: {0..<1515 as i32};
     private slot: usize;
     private pkt: VirtioPkt_Filled[pb, po, 1];
 }
-private linear struct NetRxReplyReady[desc: usize, pb: addr, po: usize] {
-    private index: {0..<8 as usize} @ desc;
-    private len: i32;
+private linear struct NetRxReplyReady[pb: addr, po: usize] {
+    private len: {0..<1515 as i32};
     private slot: usize;
     private pkt: VirtioPkt_Filled[pb, po, 1];
 }
-private linear struct NetTxInFlight[desc: usize] {
-    private index: {0..<8 as usize} @ desc;
+private linear struct NetTxInFlight[pb: addr, po: usize] {
     private slot: usize;
 }
 private linear view NetRxCanAcquire;
@@ -76,15 +76,14 @@ private linear view NetRxCanAcquire;
 must_use variant NetInitResult { Failed; Ready(NetRxCanAcquire); }
 variant NetRxAcquire {
     None(NetRxCanAcquire);
-    Acquired(exists desc: usize. exists pb: addr. exists po: usize.
-             NetRxValidated[desc, pb, po]);
+    Acquired(exists pb: addr. exists po: usize. NetPacket[pb, po]);
 }
 
-fn net_rx_validated(index: {0..<8 as usize} @ desc, len: i32, slot: usize,
-                    pkt: VirtioPkt_Filled[pb, po, 1]) -> NetRxValidated[desc, pb, po] {
-    workload_profile_note_network_rx(max(len, 0) as usize);
-    let mut frame: NetRxValidated[desc, pb, po] = { index, len, slot, pkt };
-    return frame;
+fn net_rx_packet(len: {0..<1515 as i32}, slot: usize,
+                 pkt: VirtioPkt_Filled[pb, po, 1]) -> NetPacket[pb, po] {
+    workload_profile_note_network_rx(len as usize);
+    let mut packet: NetPacket[pb, po] = { len, slot, pkt };
+    return packet;
 }
 
 struct packed VirtqDesc {
@@ -353,7 +352,7 @@ fn net_rx_acquire(ready: sink NetRxCanAcquire) -> NetRxAcquire {
     let index: {0..<8 as usize} = min(ring.ring[slot].id, 7) as usize;
     let frame_total_len: i32 = min(ring.ring[slot].len, 0x7FFFFFFF) as i32;
     let raw_len: i32 = frame_total_len - (VIRTIO_NET_HDR_LEN as i32);
-    let safe_len: i32 = max(min(raw_len, 1514), 0);
+    let safe_len: {0..<1515 as i32} = max(min(raw_len, 1514), 0);
     // The used entry names descriptor `index`: its buffer comes back Filled.
     let pool_slot: usize = rx_desc_pkt[index];
     rx_desc_pkt[index] = VIRTIO_PKT_NONE;
@@ -377,8 +376,35 @@ fn net_rx_acquire(ready: sink NetRxCanAcquire) -> NetRxAcquire {
         }
         VirtioPkt_virtio_pkt_received_Outcome::PktReceived(witness) => {
             let filled = VirtioPkt_virtio_pkt_fill(posted, witness);
-            return NetRxAcquire::Acquired(net_rx_validated(index, safe_len, pool_slot, filled));
+            // The used entry is consumed and its descriptor goes back to
+            // the device with another Free buffer now, not when the stack
+            // lets go of this one.
+            rx_used_seen = virtio_ring_index_next(rx_used_seen);
+            virtio_net_rx_refill();
+            return NetRxAcquire::Acquired(net_rx_packet(safe_len, pool_slot, filled));
         }
+    }
+}
+
+// Every RX descriptor without a buffer gets a Free one and goes back on
+// the avail ring. A descriptor stays empty while the pool has no Free
+// buffer (every one is with the device or held by the stack); the next
+// release or transmit completion refills it.
+private fn virtio_net_rx_refill() {
+    if (virtio_net_ready == false) { return; }
+    let mut posted: bool = false;
+    for i: usize in 0..<8 {
+        let index: {0..<8 as usize} = i % 8;
+        if (rx_desc_pkt[index] == VIRTIO_PKT_NONE && virtio_net_rx_post(index)) {
+            let rx_slot: isize = ((rx_avail_idx as u16) as isize) % QNUM;
+            avail_ring_set(rx_queue_mem as *u8, rx_slot, index as isize);
+            rx_avail_idx = virtio_ring_index_next(rx_avail_idx);
+            posted = true;
+        }
+    }
+    if (posted) {
+        avail_publish(rx_queue_mem as *u8, rx_avail_idx);
+        virtio_notify(0);
     }
 }
 
@@ -412,46 +438,28 @@ fn virtio_net_span_address(span: borrow DmaDeviceSpan) -> usize !{unsafe} {
     return unsafe { dma_span_address(span) };
 }
 
-fn net_rx_len(frame: borrow NetRxValidated[desc, pb, po]) -> i32 {
-    return frame.len;
+fn net_rx_len(packet: borrow NetPacket[pb, po]) -> {0..<1515 as i32} {
+    return packet.len;
 }
 
-fn net_rx_frame(frame: borrow NetRxValidated[desc, pb, po]) -> [u8; 1514..] @ desc {
-    let bytes = VirtioPkt_Filled_bytes(frame.pkt, 0);
+fn net_rx_frame(packet: borrow NetPacket[pb, po]) -> [u8; 1514..] @ pb {
+    let bytes = VirtioPkt_Filled_bytes(packet.pkt, 0);
     return bytes[VIRTIO_NET_HDR_LEN..<VIRTIO_NET_HDR_LEN + 1514];
 }
 
-// Descriptor `index` back to the device with a Free pool buffer, and its
-// used entry consumed.
-fn net_rx_repost(index: {0..<8 as usize} @ desc) -> NetRxCanAcquire {
-    if (virtio_net_ready == false) { return view NetRxCanAcquire; }
-    if (virtio_net_rx_post(index) == false) {
-        kernel_invariant_stop();
-        return view NetRxCanAcquire;
-    }
-    let rx_slot: isize = ((rx_avail_idx as u16) as isize) % QNUM;
-    avail_ring_set(rx_queue_mem as *u8, rx_slot, index as isize);
-    rx_avail_idx = virtio_ring_index_next(rx_avail_idx);
-    avail_publish(rx_queue_mem as *u8, rx_avail_idx);
-    virtio_notify(0);
-    rx_used_seen = virtio_ring_index_next(rx_used_seen);
+fn net_rx_release(packet: sink NetPacket[pb, po]) -> NetRxCanAcquire {
+    let slot: usize = packet.slot;
+    virtio_pkt_park(slot, VirtioPktHeld::Free(VirtioPkt_virtio_pkt_recycle(packet.pkt)));
+    virtio_net_rx_refill();
     return view NetRxCanAcquire;
 }
 
-fn net_rx_release(frame: sink NetRxValidated[desc, pb, po]) -> NetRxCanAcquire {
-    let index: {0..<8 as usize} @ desc = frame.index;
-    let slot: usize = frame.slot;
-    virtio_pkt_park(slot, VirtioPktHeld::Free(VirtioPkt_virtio_pkt_recycle(frame.pkt)));
-    return net_rx_repost(index);
-}
-
-fn net_rx_reply_ready(frame: sink NetRxValidated[desc, pb, po], len: i32)
-        -> NetRxReplyReady[desc, pb, po] {
-    let safe_len: i32 = max(min(len, 1514), 0);
-    let index: {0..<8 as usize} @ desc = frame.index;
-    let slot: usize = frame.slot;
-    let pkt = frame.pkt;
-    let mut reply: NetRxReplyReady[desc, pb, po] = { index, safe_len, slot, pkt };
+fn net_rx_reply_ready(packet: sink NetPacket[pb, po], len: i32)
+        -> NetRxReplyReady[pb, po] {
+    let safe_len: {0..<1515 as i32} = max(min(len, 1514), 0);
+    let slot: usize = packet.slot;
+    let pkt = packet.pkt;
+    let mut reply: NetRxReplyReady[pb, po] = { safe_len, slot, pkt };
     return reply;
 }
 
@@ -460,11 +468,10 @@ fn net_rx_reply_ready(frame: sink NetRxValidated[desc, pb, po], len: i32)
 // virtio_mmio.tkb's own net_transmit -- correct because those bytes were
 // written by the device on RX with no offload fields set, i.e. already
 // effectively zero, and no offload features are negotiated on TX either).
-private fn net_transmit(reply: sink NetRxReplyReady[desc, pb, po]) -> NetTxInFlight[desc] {
-    workload_profile_note_network_tx(max(reply.len, 0) as usize);
-    let index: {0..<8 as usize} @ desc = reply.index;
+private fn net_transmit(reply: sink NetRxReplyReady[pb, po]) -> NetTxInFlight[pb, po] {
+    workload_profile_note_network_tx(reply.len as usize);
     let slot: usize = reply.slot;
-    let len: i32 = reply.len;
+    let len: {0..<1515 as i32} = reply.len;
     // The RX header the device wrote carries num_buffers; a transmitted
     // header is all zero (no offloads are negotiated).
     let header = VirtioPkt_Filled_bytes(reply.pkt, 0);
@@ -475,7 +482,7 @@ private fn net_transmit(reply: sink NetRxReplyReady[desc, pb, po]) -> NetTxInFli
         }
     }
     virtio_net_tx_ring((len + (VIRTIO_NET_HDR_LEN as i32)) as usize);
-    let mut in_flight: NetTxInFlight[desc] = { index, slot };
+    let mut in_flight: NetTxInFlight[pb, po] = { slot };
     return in_flight;
 }
 
@@ -522,13 +529,14 @@ fn virtio_net_tx_used_pending() -> bool {
     return tx_used_seen == ring.idx;
 }
 
-private fn net_tx_complete(in_flight: sink NetTxInFlight[desc])
+private fn net_tx_complete(in_flight: sink NetTxInFlight[pb, po])
         -> NetRxCanAcquire !{may_block} {
     virtio_net_tx_finish(in_flight.slot);
-    return net_rx_repost(in_flight.index);
+    virtio_net_rx_refill();
+    return view NetRxCanAcquire;
 }
 
-fn net_rx_send_reply(reply: sink NetRxReplyReady[desc, pb, po]) -> NetRxCanAcquire !{may_block} {
+fn net_rx_send_reply(reply: sink NetRxReplyReady[pb, po]) -> NetRxCanAcquire !{may_block} {
     if (virtio_net_ready == false) {
         let slot: usize = reply.slot;
         virtio_pkt_park(slot, VirtioPktHeld::Free(VirtioPkt_virtio_pkt_recycle(reply.pkt)));
@@ -568,6 +576,7 @@ fn net_transmit_ready(ready: sink NetRxCanAcquire,
     }
     virtio_net_tx_ring(VIRTIO_NET_HDR_LEN + (safe_len as usize));
     virtio_net_tx_finish(slot);
+    virtio_net_rx_refill();
     return view NetRxCanAcquire;
 }
 

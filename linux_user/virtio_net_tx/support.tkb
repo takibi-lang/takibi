@@ -135,16 +135,33 @@ fn run_initialized_case(ready: sink NetRxCanAcquire, reply_timeout: bool) !{may_
     reset_clock(500, 100);
     let ready = net_transmit_ready(ready, packet as []u8, 64);
     check(waits > 1 && timeout_logs == 0, "normal standalone send completes after unrelated wakes");
+    // #740: the packet the stack holds names no descriptor; acquire has
+    // already given descriptor 0 a fresh buffer, so release posts nothing.
+    let rx_avail_held: VirtioRingIndex = rx_avail_idx;
+    let ready = match receive(ready) {
+        NetRxAcquire::None(cap) => { check(false, "oracle RX frame was refused"); cap }
+        NetRxAcquire::Acquired(frame) => {
+            check(rx_avail_idx == virtio_ring_index_next(rx_avail_held),
+                  "acquire refills the RX descriptor while the stack holds the packet");
+            net_rx_release(frame)
+        }
+    };
+    check(rx_avail_idx == virtio_ring_index_next(rx_avail_held),
+          "release of a held packet reposts no descriptor twice");
     reset_clock(500, 100);
     let ready = send_reply(ready);
     check(waits > 1 && timeout_logs == 0, "normal reply completes and reposts RX");
 
     reset_clock(-1, 100000);
     let used_before: VirtioRingIndex = tx_used_seen;
-    let rx_avail_before: VirtioRingIndex = rx_avail_idx;
+    // A reply's acquire refills its RX descriptor before the transmit
+    // (#740: the stack's packet names no descriptor); the unconfirmed
+    // completion itself reposts nothing more.
+    let mut rx_avail_expected: VirtioRingIndex = rx_avail_idx;
+    if (reply_timeout) { rx_avail_expected = virtio_ring_index_next(rx_avail_idx); }
     let ready = send_timeout_case(ready, reply_timeout);
     check(waits == 10 && timeout_logs == 1, "driver returns and logs once on expiry");
-    check(tx_used_seen == used_before && rx_avail_idx == rx_avail_before,
+    check(tx_used_seen == used_before && rx_avail_idx == rx_avail_expected,
           "unconfirmed completion neither consumes TX nor reposts RX");
     let tx_avail_before: VirtioRingIndex = tx_avail_idx;
     let notify_before: i32 = fake_regs[20];
