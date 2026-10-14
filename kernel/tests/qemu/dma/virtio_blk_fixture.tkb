@@ -33,11 +33,11 @@ fn dma_fixture_notify() !{unsafe} {
     if (dma_fixture_mode == 0 || dma_fixture_mode == 3) {
         // Like a device, find the rings from the queue address registers.
         let descs: *VirtioBlkDesc = unsafe {
-            dma_fixture_register_address(32) as *VirtioBlkDesc };
+            dma_fixture_register_address(0x80 / 4) as *VirtioBlkDesc };
         let status: *io u8 = unsafe { descs[2].addr as *io u8 };
         if (dma_fixture_mode == 0) { *status = 1; }
         else { *status = 0; }
-        let used_address: usize = dma_fixture_register_address(40);
+        let used_address: usize = dma_fixture_register_address(0xa0 / 4);
         let used: *io VirtqUsedRing = unsafe { used_address as *io VirtqUsedRing };
         used.idx = virtio_ring_index_next(used.idx);
     }
