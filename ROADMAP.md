@@ -91,9 +91,12 @@ list (maintainer, 2026-10-09).
    stay as #720's work (Territory B). elf64.tkb has left the list through
    header overlays (2026-10-13). fdt.tkb stays trusted under step A: it is
    the DTB reader that mints DeviceWindows. The virtio rings wait for
-   #720's option (a) in Territory B. **Next:** the region layers on #672,
-   first tying stack_poison.tkb's integer ranges to the stack and page runs
-   they come from. Not on the critical path: #748 (allocator time, 2.75x
+   #720's option (a) in Territory B. Process stack runs now keep their
+   PageRunOwner in the process record, and every process-stack byte is
+   reached through it (#672, 2026-10-14; guard about +80 ns per tick on
+   RPi5). **Next:** the next #672 layer, section regions (#777, awaiting its
+   decision): the linker-bounded stacks and the DTB blob as regions, which
+   would take stack_poison.tkb's last integer ranges away. Not on the critical path: #748 (allocator time, 2.75x
    slower since the per-page places), #739 (stale list entries, per-file
    counts). Consolidating the kernel-driven built-ins into general features
    is #750 (holder-tied identities, option C, is its central item; a
