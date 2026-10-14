@@ -69,6 +69,13 @@ private fn protocol_trace_lifecycle(child_cpus: u8) {
 
 fn protocol_trace_probe() {
     let mut opened: bool = false;
+    // GitHub issue #665: yield once whether or not the window is deferred.
+    // The deferred retry below yields only under load, and an unimplemented
+    // sched_yield then hid the peer fixtures behind the harness's gate; this
+    // makes every run's unimplemented_syscalls view check that it exists.
+    if (svc5(YIELD_SYSCALL, 0, 0, 0, 0, 0) != 0) {
+        protocol_trace_fail(bs"protocol-trace: sched_yield did not return 0\n");
+    }
     for attempt: usize in 0..<64 {
         if (opened == false) {
             let result: usize = svc5(WORKLOAD_PROGRESS_SYSCALL, PROTOCOL_TRACE_OPEN_TAG,

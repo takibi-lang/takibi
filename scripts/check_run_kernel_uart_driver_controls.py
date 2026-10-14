@@ -104,6 +104,22 @@ def main() -> int:
         if driver.peer_command_ready(output, last_record.decode()) != expected:
             failures.append("peer command gate ignored a split final report or its stop marker")
 
+    # GitHub issue #665: an unimplemented-syscall report means the gate above
+    # never opens; the driver must fail at once, naming the line, not wait
+    # for silence. A split line or a lane without peer fixtures must not.
+    unimplemented = b"syscall: unimplemented nr=124 first-pid=86\n"
+    for output, settings, tty, expected in (
+            (last_record + report + unimplemented, True, True, True),
+            (last_record + report + unimplemented, False, True, True),
+            (last_record + report + unimplemented[:-1], True, True, False),
+            (last_record + report + unimplemented, False, False, False),
+            (last_record + report + final_report, True, True, False)):
+        CASES.note()
+        failure = driver.peer_fixture_failure(output, settings, tty)
+        if (failure is not None) != expected or (
+                failure is not None and "nr=124" not in failure):
+            failures.append("an unimplemented-syscall report did not fail the peer gate at once")
+
     # Interactive capture has three independent gates: host-side HTTP work,
     # the workload marker that starts it, and the caller's final stop marker.
     # The last one used to be ignored in this mode, so a new recurrence view

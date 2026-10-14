@@ -111,3 +111,5 @@ maintainer's judgment changed the course, kept so the pattern can be seen.
 - 2026-10-13 Workers run `make langcheck linuxcheck test` in full and pass
   space_checkpoint before reporting done. [active] #753
 - 2026-10-12 Landing .agents/ and .claude/ changes takes the light route. [active] #753
+- 2026-10-14 sched_yield is implemented as a plain reschedule; harnesses fail
+  fast on an unimplemented-syscall line. [active] #665

@@ -248,6 +248,32 @@ def settings_fixture_failure(output: bytes) -> str | None:
     return None
 
 
+def unimplemented_syscall_failure(output: bytes) -> str | None:
+    """GitHub issue #665: the peer command gate waits for the kernel's
+    'no unimplemented number reached' report. Its opposite never arrives
+    later, so a complete 'unimplemented nr=' line ends the wait now instead
+    of after a silent guest and a BREAK."""
+    prefix = b"syscall: unimplemented nr="
+    for line in output.replace(b"\r", b"").split(b"\n")[:-1]:
+        if line.startswith(prefix):
+            return ("peer command gate can never open: " +
+                    line.decode("ascii", errors="replace") +
+                    " (the kernel reached an unimplemented syscall)")
+    return None
+
+
+def peer_fixture_failure(output: bytes, peer_settings: bool,
+                         peer_tty: bool) -> str | None:
+    """A complete failure line that makes waiting for the peer fixtures futile."""
+    if peer_settings:
+        failure = settings_fixture_failure(output)
+        if failure is not None:
+            return failure
+    if peer_settings or peer_tty:
+        return unimplemented_syscall_failure(output)
+    return None
+
+
 def postmortem_break_due(now: float, deadline: float, last_chunk_at: float,
                          timeout: float, peer_guard_until: float) -> bool:
     return (now >= deadline - postmortem_budget(timeout) and
@@ -585,8 +611,10 @@ def main() -> int:
                             float(httpd_guard_file.read_text(encoding="ascii")))
                     except (OSError, ValueError):
                         pass
-                if args.peer_settings and fixture_failure is None:
-                    fixture_failure = settings_fixture_failure(bytes(output))
+                if ((args.peer_settings or args.peer_tty) and
+                        fixture_failure is None):
+                    fixture_failure = peer_fixture_failure(
+                        bytes(output), args.peer_settings, args.peer_tty)
                     if fixture_failure is not None and not break_asked:
                         # This fixture has definitively failed. Unlike a quiet
                         # boot or planned HTTP idle, no passing run is left to
