@@ -25480,7 +25480,7 @@ let protocol_tests = [
     (protocol_mutant ~sub:"property disjoint;" ~by:"property liveness;"
        "unsupported protocol property 'liveness'");
   Alcotest.test_case "unsupported state attribute" `Quick
-    (protocol_mutant ~sub:"state Halted;" ~by:"state Halted access read;"
+    (protocol_mutant ~sub:"state Halted;" ~by:"state Halted access execute;"
        "unsupported state attribute 'access'");
   Alcotest.test_case "missing model bound" `Quick
     (protocol_mutant ~sub:"model cells 2;" ~by:"" "needs a 'model cells N' bound");
