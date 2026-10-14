@@ -1,10 +1,11 @@
 {
-  "date": "2026-10-13",
+  "date": "2026-10-14",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "6a03093f381a2db2fefb279d5efa4eefce765bc97c2e29c09b876adc4740c25e",
-  "workload": "#786: --function-sections in the compiler, --gc-sections on every kernel link, protocol code internal with inline accessors. Linked kernels against main 33cfbc32 (scripts/space_delta.py) and stage by stage against d307f685.",
+  "source_sha256": "dfaf02634ebd253bd9b78c5b68b613cd3da360badac7d614165cd170fdb603b9",
+  "workload": "#665: stall probes compiled out of production kernels (KERNEL_STALL_PROBES = 0), on in race-window overlays. Linked kernels against main 00c3026d (scripts/space_delta.py).",
   "evidence": [
+    "docs/STALL_PROBE_SPACE_2026-10-14.md",
     "docs/GC_SECTIONS_SPACE_2026-10-13.md",
     "docs/XHCI_EVENTS_SPACE_2026-10-13.md",
     "docs/XHCI_TABLES_SPACE_2026-10-13.md",
@@ -64,6 +65,6 @@
     "docs/VIRTIO_NET_TX_2026-10-10.md",
     "docs/VIRTIO_NET_TX_SPACE_2026-10-10.json"
   ],
-  "assessment": "Text: QEMU -17612 B, RPi5 -12156 B (out-of-line inline fn copies, the other platform's code in shared files, folded named constants, their unwind entries, unused protocol accessors). .bss -4096 B of alignment padding; usable_ram_start unchanged on both, so page reservations do not move. No pool, payload or allocation workload changed. #782's pruning no longer changes size but stays for the raw-deref audit.",
+  "assessment": "QEMU text +464 B, RPi5 text +496 B (gated call sites); data/BSS and usable_ram_start unchanged. Adopted. Earlier measured results stand.",
   "next_trigger": "#740, a shrink protocol for walked RegionPools, the #748 allocator change, or the next pool consumer moved onto Held slots, whichever lands first."
 }
