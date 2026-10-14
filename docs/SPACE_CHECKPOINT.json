@@ -2,9 +2,10 @@
   "date": "2026-10-14",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "d9a3741a50df68d2dbc3cd01dd55fdbe5394dc3f432b1ff809cb4462ec48636a",
-  "workload": "#740 U2: virtio-blk and virtio-net on the modern virtio-mmio transport with the used rings as VirtioUsed rx owners read through E1 snapshots. Linked kernels against main 216cf772 (scripts/space_delta.py).",
+  "source_sha256": "e9c2b0c9fffb4522ead98a1f131b741b24fa353117c14beb1f9b3d87f7dde79b",
+  "workload": "#665: sched_yield (124) as a plain reschedule request. Linked kernels against main 34dc6be5 (scripts/space_delta.py). Earlier: #740 U2: virtio-blk and virtio-net on the modern virtio-mmio transport with the used rings as VirtioUsed rx owners read through E1 snapshots. Linked kernels against main 216cf772 (scripts/space_delta.py).",
   "evidence": [
+    "docs/SCHED_YIELD_SPACE_2026-10-14.md",
     "docs/VIRTIO_MODERN_SPACE_2026-10-14.md",
     "docs/LOCK_RANK_WRAPPERS_SPACE_2026-10-14.md",
     "docs/STACK_RUN_PERMISSION_SPACE_2026-10-13.md",
@@ -70,6 +71,6 @@
     "docs/VIRTIO_NET_TX_2026-10-10.md",
     "docs/VIRTIO_NET_TX_SPACE_2026-10-10.json"
   ],
-  "assessment": "BSS -27264 B QEMU / -12288 B RPi5 (two-page legacy queue allocations become 256 B desc/avail plus a 128 B used ring); QEMU frees 8 allocator pages. Text +7744 / +6472 B for the generated VirtioUsed protocol, owner slots and the FEATURES_OK handshake. Adopted. Earlier measured results stand. The later DMA-fixture edit (test-only) reuses this measurement.",
+  "assessment": "#665: text +16 B QEMU / 0 B RPi5, data/BSS unchanged; adopted. Earlier: BSS -27264 B QEMU / -12288 B RPi5 (two-page legacy queue allocations become 256 B desc/avail plus a 128 B used ring); QEMU frees 8 allocator pages. Text +7744 / +6472 B for the generated VirtioUsed protocol, owner slots and the FEATURES_OK handshake. Adopted. Earlier measured results stand. The later DMA-fixture edit (test-only) reuses this measurement.",
   "next_trigger": "The stack taking Packet_Filled by move, a shrink protocol for walked RegionPools, or the #748 allocator change, whichever lands first."
 }
