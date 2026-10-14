@@ -35,3 +35,17 @@ each preceded by the base snapshot the guard takes. 54 MHz counter.
 
 The guard runs once per tick per core. The increase is about 75 to 90 ns
 per tick against a 15.6 ms tick, or about 0.0006% of a core. Adopted.
+
+## Re-measured on main 3059d528 (2026-10-14)
+
+| | qemu base | qemu change | rpi5 base | rpi5 change |
+|---|---|---|---|---|
+| text | 679768 | 681392 | 727832 | 729392 |
+| data | 4632 | 4632 | 2889496 | 2889496 |
+| bss | 1509152 | 1509328 | 1696704 | 1696768 |
+| usable_ram_start | 0x40220000 | 0x40220000 | 0x718000 | 0x718000 |
+
+- Text grows by 1624 B (QEMU) and 1560 B (RPi5).
+- BSS grows by 176 B and 64 B: the three static records at 56 B each, less
+  alignment.
+- usable_ram_start is unchanged.
