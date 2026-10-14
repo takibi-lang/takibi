@@ -1,0 +1,104 @@
+// GitHub issue #740: a `txrx` device protocol -- the packet-buffer owner.
+// One buffer is posted for receive (an `rx` edge: clean and invalidate),
+// filled by the "device" (this file's stand-in writes the bytes before the
+// observation reports them), changed in place by the CPU, and posted back
+// as a transmit (a `tx` edge: clean) without a copy. On x86-64 DMA is
+// coherent, so the cache work is a barrier; the verdict here is the state
+// machine and the in-place reply. What must not compile is in
+// test/test_takibi.ml, "device-protocols" (txrx cases).
+
+const PKT: usize = 64;
+
+protocol Pkt[inst: usize] retains region(u8)[b, PKT] txrx {
+    state Free access write;
+    state RxPosted[req] device;
+    state Filled access write;
+    state TxPosted[req] device;
+    state Unconfirmed[req] device;
+    init Free;
+    transition post_rx(Free) rx -> RxPosted[fresh req];
+    observe rx_done(RxPosted[req]) -> Received[req] completes | NotYet;
+    transition fill(RxPosted[req], Received[req]) -> Filled;
+    transition post_tx(Filled) tx -> TxPosted[fresh req];
+    observe tx_done(TxPosted[req]) -> Sent[req] completes | Pending;
+    transition sent(TxPosted[req], Sent[req]) -> Free;
+    transition expire(TxPosted[req]) -> Unconfirmed[req];
+    property disjoint;
+    model cells 2;
+}
+
+// Stand-in for the device: the address it was given, and the bytes it
+// "received" there.
+private let mut posted_at: usize = 0;
+private let mut sent_at: usize = 0;
+
+fn post_rx(s: borrow Pkt_RxPosted[b, o, 64, r]) !{unsafe} {
+    let mut span: DmaDeviceSpan = Pkt_RxPosted_span(s);
+    posted_at = unsafe { dma_span_address(span) };
+    let frame: *u8 = unsafe { posted_at as *u8 };
+    for i: usize in 0..<8 { frame[i as isize] = (i + 1) as u8; }
+    uart_puts("rx posted\n");
+}
+fn rx_done(s: borrow Pkt_RxPosted[b, o, 64, r]) -> Pkt_rx_done_Raw {
+    return Pkt_rx_done_Raw::Received;
+}
+fn fill(s: borrow Pkt_RxPosted[b, o, 64, r]) { uart_puts("filled\n"); }
+fn post_tx(s: borrow Pkt_TxPosted[b, o, 64, r]) !{unsafe} {
+    let mut span: DmaDeviceSpan = Pkt_TxPosted_span(s);
+    sent_at = unsafe { dma_span_address(span) };
+    uart_puts("tx posted\n");
+}
+fn tx_done(s: borrow Pkt_TxPosted[b, o, 64, r]) -> Pkt_tx_done_Raw {
+    return Pkt_tx_done_Raw::Sent;
+}
+fn sent(s: borrow Pkt_TxPosted[b, o, 64, r]) { uart_puts("sent\n"); }
+fn expire(s: borrow Pkt_TxPosted[b, o, 64, r]) {}
+
+private region let mut packet: [u8; 64] align(64);
+
+fn stuck(gone: sink Pkt_Unconfirmed[b, o, 64, r]) { stuck(gone); }
+fn waiting(p: sink Pkt_RxPosted[b, o, 64, r]) { waiting(p); }
+
+fn app_main() !{unsafe} {
+    let RegionOf(u8)::Taken(memory) = region_of(packet) else {
+        RegionOf(u8)::Gone => { uart_puts("packet: already taken\n"); return; }
+    };
+    let free = Pkt_init(memory);
+    match Pkt_post_rx(free) {
+        Pkt_post_rx_Result::RxPosted(posted) => {
+            match Pkt_rx_done(posted) {
+                Pkt_rx_done_Outcome::NotYet => { waiting(posted); }
+                Pkt_rx_done_Outcome::Received(w) => {
+                    let filled = Pkt_fill(posted, w);
+                    // The reply: swap the first two bytes in place.
+                    let first: u8 = Pkt_Filled_read(filled, 0);
+                    let second: u8 = Pkt_Filled_read(filled, 1);
+                    Pkt_Filled_write(filled, 0, second);
+                    Pkt_Filled_write(filled, 1, first);
+                    match Pkt_post_tx(filled) {
+                        Pkt_post_tx_Result::TxPosted(out) => {
+                            match Pkt_tx_done(out) {
+                                Pkt_tx_done_Outcome::Pending => { stuck(Pkt_expire(out)); }
+                                Pkt_tx_done_Outcome::Sent(done) => {
+                                    let back = Pkt_sent(out, done);
+                                    uart_puts("same buffer: ");
+                                    uart_print((sent_at == posted_at) as usize);
+                                    uart_puts(", reply bytes: ");
+                                    uart_print(Pkt_Free_read_or_zero(back, 0));
+                                    uart_puts(" ");
+                                    uart_print(Pkt_Free_read_or_zero(back, 1));
+                                    uart_puts("\n");
+                                    region_release(Pkt_release(back));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn Pkt_Free_read_or_zero(s: borrow Pkt_Free[b, o, 64], i: usize @ k) -> usize where k < 64 {
+    return Pkt_Free_read(s, i) as usize;
+}

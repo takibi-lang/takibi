@@ -9,7 +9,10 @@
    here by that file name to learn the element type and the fixed count,
    which together give the region's byte extent. *)
 
-type direction = Tx | Rx
+(* TxRx (GitHub issue #740): a region the device both reads and writes in
+   turn, such as a packet buffer used for receive and then for an in-place
+   reply; each publishing edge names the direction of that publication. *)
+type direction = Tx | Rx | TxRx
 
 type entry = {
   elem : Ast.type_expr;

@@ -25881,6 +25881,85 @@ fn main() -> i32 {
 }
 |}
 
+(* GitHub issue #740: the packet-buffer shape, a `txrx` region whose
+   publishing edges name their direction. *)
+let packet_protocol = {|const PKT: usize = 64;
+protocol Pkt[inst: usize] retains region(u8)[b, PKT] txrx {
+    state Free access write;
+    state RxPosted[req] device;
+    state Filled access write;
+    state TxPosted[req] device;
+    state Unconfirmed[req] device;
+    init Free;
+    transition post_rx(Free) rx -> RxPosted[fresh req];
+    observe rx_done(RxPosted[req]) -> Received[req] completes | NotYet;
+    transition fill(RxPosted[req], Received[req]) -> Filled;
+    transition post_tx(Filled) tx -> TxPosted[fresh req];
+    observe tx_done(TxPosted[req]) -> Sent[req] completes | Pending;
+    transition sent(TxPosted[req], Sent[req]) -> Free;
+    transition expire(TxPosted[req]) -> Unconfirmed[req];
+    transition recycle(Filled) -> Free;
+    property disjoint;
+    model cells 2;
+}
+fn post_rx(s: borrow Pkt_RxPosted[b, o, 64, r]) {}
+fn rx_done(s: borrow Pkt_RxPosted[b, o, 64, r]) -> Pkt_rx_done_Raw { return Pkt_rx_done_Raw::Received; }
+fn fill(s: borrow Pkt_RxPosted[b, o, 64, r]) {}
+fn post_tx(s: borrow Pkt_TxPosted[b, o, 64, r]) {}
+fn tx_done(s: borrow Pkt_TxPosted[b, o, 64, r]) -> Pkt_tx_done_Raw { return Pkt_tx_done_Raw::Sent; }
+fn sent(s: borrow Pkt_TxPosted[b, o, 64, r]) {}
+fn expire(s: borrow Pkt_TxPosted[b, o, 64, r]) {}
+fn recycle(s: borrow Pkt_Filled[b, o, 64]) {}
+|}
+
+let packet_consumer = {|private region let mut buf: [u8; 64] align(64);
+fn main() -> i32 {
+    let RegionOf(u8)::Taken(memory) = region_of(buf) else {
+        RegionOf(u8)::Gone => { return 1; }
+    };
+    let free = Pkt_init(memory);
+    match Pkt_post_rx(free) {
+        Pkt_post_rx_Result::RxPosted(posted) => {
+            match Pkt_rx_done(posted) {
+                Pkt_rx_done_Outcome::Received(w) => {
+                    let filled = Pkt_fill(posted, w);
+                    Pkt_Filled_write(filled, 0, 1);
+                    match Pkt_post_tx(filled) {
+                        Pkt_post_tx_Result::TxPosted(out) => {
+                            match Pkt_tx_done(out) {
+                                Pkt_tx_done_Outcome::Sent(done) => {
+                                    let back = Pkt_sent(out, done);
+                                    region_release(Pkt_release(back));
+                                    return 0;
+                                }
+                                Pkt_tx_done_Outcome::Pending => {
+                                    let gone = Pkt_expire(out);
+                                    return lose(gone);
+                                }
+                            }
+                        }
+                    }
+                }
+                Pkt_rx_done_Outcome::NotYet => { return lose_rx(posted); }
+            }
+        }
+    }
+}
+fn lose(gone: sink Pkt_Unconfirmed[b, o, 64, r]) -> i32 { return lose(gone); }
+fn lose_rx(p: sink Pkt_RxPosted[b, o, 64, r]) -> i32 { return lose_rx(p); }
+|}
+
+let expect_packet_error ?(in_proto = false) ~sub ~by fragment () =
+  let proto, use =
+    if in_proto then (replace_once ~sub ~by packet_protocol, packet_consumer)
+    else (packet_protocol, replace_once ~sub ~by packet_consumer) in
+  match compile_device ~proto ~use () with
+  | _ -> Alcotest.failf "expected a rejection naming %s" fragment
+  | exception Types.TypeError (_, msg) ->
+      Alcotest.(check bool) msg true (contains_substring msg fragment)
+  | exception Failure msg ->
+      Alcotest.(check bool) msg true (contains_substring msg fragment)
+
 let expect_scratch_tx_error ~sub ~by fragment () =
   match compile_device ~proto:scratch_tx_protocol
           ~use:(replace_once ~sub ~by scratch_tx_consumer) () with
@@ -26091,6 +26170,62 @@ let device_protocol_tests = [
     (expect_scratch_tx_error ~sub:"park(gone);"
        ~by:"Tx_Ready_write(gone, 0, 1); park(gone);"
        "Tx_Unconfirmed vs Tx_Ready");
+  Alcotest.test_case "txrx: the packet shape compiles, each edge with its own cache work" `Quick
+    (fun () ->
+      ignore (compile_device ~proto:packet_protocol ~use:packet_consumer ());
+      let lexbuf = Lexing.from_string packet_protocol in
+      Lexing.set_filename lexbuf "dev.tkb";
+      let src = List.assoc "Pkt" (Protocol_decl.generated_sources
+                                   (Parser.program Lexer.read lexbuf)) in
+      (* The generated function's text, up to the next top-level item. *)
+      let find needle from =
+        let n = String.length needle and m = String.length src in
+        let rec go i = if i + n > m then m
+          else if String.sub src i n = needle then i else go (i + 1) in
+        go from in
+      let body name =
+        let start = find ("fn Pkt_" ^ name ^ "(") 0 in
+        let stop = find "\n}" start in
+        String.sub src start (stop - start) in
+      let has name call = contains_substring (body name) call in
+      Alcotest.(check bool) "post_rx cleans and invalidates" true
+        (has "post_rx" "__protocol_dma_prepare_rx(s.memory)");
+      Alcotest.(check bool) "post_tx cleans" true
+        (has "post_tx" "__protocol_dma_clean(s.memory)");
+      Alcotest.(check bool) "fill invalidates after receive" true
+        (has "fill" "__protocol_dma_finish_rx(s.memory)");
+      Alcotest.(check bool) "sent does no cache work" false
+        (has "sent" "__protocol_dma_"));
+  Alcotest.test_case "txrx: a publishing edge must name its direction" `Quick
+    (expect_packet_error ~in_proto:true
+       ~sub:"transition post_tx(Filled) tx ->" ~by:"transition post_tx(Filled) ->"
+       "must name its direction");
+  Alcotest.test_case "txrx: only a txrx region names an edge direction" `Quick
+    (expect_packet_error ~in_proto:true
+       ~sub:"region(u8)[b, PKT] txrx" ~by:"region(u8)[b, PKT] rx"
+       "only a publishing edge of a 'txrx' region");
+  Alcotest.test_case "txrx: a direction on an edge that publishes nothing" `Quick
+    (expect_packet_error ~in_proto:true
+       ~sub:"transition recycle(Filled) -> Free;" ~by:"transition recycle(Filled) tx -> Free;"
+       "publishes nothing");
+  Alcotest.test_case "txrx: one device state published both ways" `Quick
+    (expect_packet_error ~in_proto:true
+       ~sub:"transition recycle(Filled) -> Free;"
+       ~by:"transition recycle(Filled) -> Free;\n    transition repost(Filled) tx -> RxPosted[fresh req];"
+       "published both tx and rx");
+  Alcotest.test_case "txrx: no write while the device reads the packet" `Quick
+    (expect_packet_error ~sub:"match Pkt_tx_done(out) {"
+       ~by:"Pkt_TxPosted_write(out, 0, 2); match Pkt_tx_done(out) {"
+       "Pkt_TxPosted_write");
+  Alcotest.test_case "txrx: an unconfirmed packet is never recycled" `Quick
+    (expect_packet_error ~sub:"return lose(gone);"
+       ~by:"let f = Pkt_recycle(gone); return 0;"
+       "Pkt_Unconfirmed vs Pkt_Filled");
+  Alcotest.test_case "txrx: no snapshot of a state the device only reads" `Quick
+    (expect_packet_error ~in_proto:true
+       ~sub:"observe tx_done(TxPosted[req]) -> Sent[req] completes | Pending;"
+       ~by:"observe tx_done(TxPosted[req]) -> Sent[req] completes | Pending;\n    observe peek(TxPosted[req]) -> Seen snapshot | Unseen;"
+       "which the device does not write");
 ]
 
 

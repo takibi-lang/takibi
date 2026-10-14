@@ -4117,7 +4117,7 @@ above already reject are compiler tests instead of model controls.
 ### Device protocols (GitHub issue #720 option a)
 
 A direction after the retained region makes a protocol a device protocol:
-`retains region(T)[b, N] tx` (the CPU writes, the device reads) or `rx`
+`retains region(T)[b, N] tx` (the CPU writes, the device reads), `txrx` (below) or `rx`
 (the device writes, the CPU reads). The generated wrappers then do the
 cache work, so that the cache operation and the state change are one step
 that no other code can split:
@@ -4165,6 +4165,19 @@ that no other code can split:
   transition's witness. Invalidating the lines around one element is sound
   because the region owns whole lines and the CPU holds no write authority
   over it while it is in a device state, so no line holds CPU data to lose.
+
+- A `txrx` region (GitHub issue #740) is one the device reads and writes
+  in turn, such as a packet buffer received into and then sent back in
+  place. Every publishing edge of a `txrx` protocol names its direction
+  before `->`: `transition post_rx(Free) rx -> RxPosted[fresh req];` gets
+  the `rx` cache work, `transition post_tx(Filled) tx -> TxPosted[fresh
+  req];` the `tx` one. A device state takes the direction of the edges that
+  publish into it, carried along device-to-device edges; its finishing
+  edges and snapshot observations follow that direction (a snapshot only
+  of an `rx` state). Rejected: a publishing edge of a `txrx` region without
+  a direction, a direction on any other edge or in any other protocol, and
+  a device state published both `tx` and `rx`.
+  `linux_user/protocol_txrx` runs the packet shape.
 
 A device protocol must fix its count with a declared constant, retain a
 region of `u8` or a named type, and declare at least one `device` state. It

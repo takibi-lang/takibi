@@ -58,6 +58,8 @@ type transition = {
   t_alts : alt list;
   t_split : bool;
   t_prepared : bool;
+  t_edge : Device_protocol_registry.direction option;
+  (* `tx` or `rx` after a publishing edge of a `txrx` region (#740). *)
 }
 
 type t = {
@@ -70,6 +72,9 @@ type t = {
   prepared_before_read : bool;
   cells : int;
   direction : Device_protocol_registry.direction option;
+  state_dirs : (string * Device_protocol_registry.direction) list;
+  (* For a device protocol, the direction of each device state: the
+     region's own, or for `txrx` the one its publishing edges name. *)
 }
 
 (* A publishing edge enters a device state from a non-device one; a
@@ -89,6 +94,51 @@ let check_distinct loc what names =
   ignore (List.fold_left (fun seen n ->
     if List.mem n seen then fail loc "duplicate %s '%s'" what n;
     n :: seen) [] names)
+
+(* GitHub issue #740: the direction of each device state. A `tx` or `rx`
+   region gives every device state its own direction. A `txrx` region needs
+   one on every publishing edge, and a device state takes the direction of
+   the edges that publish into it, carried along device-to-device edges
+   (InFlight -> Unconfirmed); a state reached in both directions is
+   rejected, because its finishing edge's cache work would be ambiguous. *)
+let state_directions loc (p : t) =
+  match p.direction with
+  | None -> []
+  | Some (Device_protocol_registry.Tx | Device_protocol_registry.Rx as d) ->
+      List.filter_map (fun s -> if s.s_device then Some (s.s_name, d) else None)
+        p.states
+  | Some Device_protocol_registry.TxRx ->
+      let device n = (List.find (fun s -> s.s_name = n) p.states).s_device in
+      let seeds = List.concat_map (fun t ->
+        List.filter_map (fun a ->
+          if (not (device t.t_input)) && device a.a_target then
+            match t.t_edge with
+            | Some e -> Some (a.a_target, e)
+            | None -> fail loc "transition '%s' publishes a 'txrx' region, so \
+                it must name its direction: write 'tx' or 'rx' before '->'"
+                t.t_name
+          else begin
+            if t.t_edge <> None then
+              fail loc "transition '%s' names a direction but publishes \
+                nothing: only an edge into a device state from a CPU state does"
+                t.t_name;
+            None
+          end) t.t_alts) p.transitions in
+      let rec close known =
+        let next = List.concat_map (fun t ->
+          match List.assoc_opt t.t_input known with
+          | Some e when device t.t_input ->
+              List.filter_map (fun a ->
+                if device a.a_target then Some (a.a_target, e) else None) t.t_alts
+          | _ -> []) p.transitions in
+        let fresh = List.filter (fun x -> not (List.mem x known)) next in
+        if fresh = [] then known else close (fresh @ known) in
+      let all = close (List.sort_uniq compare seeds) in
+      List.iter (fun (n, e) ->
+        if List.exists (fun (n', e') -> n' = n && e' <> e) all then
+          fail loc "device state '%s' of a 'txrx' region is published both tx \
+            and rx; give each direction its own state" n) all;
+      List.sort_uniq compare all
 
 (* Validate one declaration into the checked representation. *)
 let validate (d : protocol_decl) : t =
@@ -172,7 +222,8 @@ let validate (d : protocol_decl) : t =
                 if not s.s_device then
                   fail r.pr_loc "outcome '%s' is a snapshot, but state '%s' is \
                     not a device state" r.pr_name s.s_name;
-                if d.proto_direction <> Some "rx" then
+                if d.proto_direction <> Some "rx"
+                   && d.proto_direction <> Some "txrx" then
                   fail r.pr_loc "outcome '%s' is a snapshot, which only an rx \
                     device protocol has" r.pr_name;
                 if r.pr_args <> [] then
@@ -233,12 +284,19 @@ let validate (d : protocol_decl) : t =
           { a_label = a.pa_label; a_target = target.s_name }) alts in
         check_distinct tloc "result label"
           (List.filter_map (fun a -> a.a_label) alts);
-        let rec parse sp pr = function
-          | [] -> (sp, pr)
-          | "split" :: rest when not sp -> parse true pr rest
-          | "requires" :: "prepared" :: rest when not pr -> parse sp true rest
+        let rec parse sp pr ed = function
+          | [] -> (sp, pr, ed)
+          | "split" :: rest when not sp -> parse true pr ed rest
+          | "requires" :: "prepared" :: rest when not pr -> parse sp true ed rest
+          | "tx" :: rest when ed = None ->
+              parse sp pr (Some Device_protocol_registry.Tx) rest
+          | "rx" :: rest when ed = None ->
+              parse sp pr (Some Device_protocol_registry.Rx) rest
           | m :: _ -> fail tloc "unsupported transition modifier '%s'" m in
-        let split, prepared = parse false false mods in
+        let split, prepared, edge = parse false false None mods in
+        if edge <> None && d.proto_direction <> Some "txrx" then
+          fail tloc "transition '%s' names a direction, which only a \
+            publishing edge of a 'txrx' region does" n;
         (* Static rules (maintainer, 2026-10-11): evidence that ends device
            access must name the request it is about, and the span leaves
            device access only on such evidence. Leaving to any non-device
@@ -271,7 +329,8 @@ let validate (d : protocol_decl) : t =
           fail tloc "transition '%s' requires prepared cells, but '%s' grants \
             no write access" n s.s_name;
         Some { t_name = n; t_input = s.s_name; t_witness = witness;
-               t_alts = alts; t_split = split; t_prepared = prepared }
+               t_alts = alts; t_split = split; t_prepared = prepared;
+               t_edge = edge }
     | _ -> None) d.proto_items in
   (* Only transitions produce states: an unreachable state would need an
      outside constructor, which the declaration does not have. *)
@@ -309,12 +368,19 @@ let validate (d : protocol_decl) : t =
     | None -> None
     | Some "tx" -> Some Device_protocol_registry.Tx
     | Some "rx" -> Some Device_protocol_registry.Rx
+    | Some "txrx" -> Some Device_protocol_registry.TxRx
     | Some w -> fail loc "unsupported region direction '%s' on protocol '%s' \
-        (supported: tx, rx)" w d.proto_name in
+        (supported: tx, rx, txrx)" w d.proto_name in
   let p = { name = d.proto_name; states; init; transitions; outcomes;
     disjoint = List.mem "disjoint" props;
     prepared_before_read = List.mem "prepared_before_read" props; cells;
-    direction } in
+    direction; state_dirs = [] } in
+  let p = { p with state_dirs = state_directions loc p } in
+  List.iter (fun o ->
+    if o.o_effect = `Snapshot
+       && List.assoc_opt o.o_subject p.state_dirs <> Some Device_protocol_registry.Rx then
+      fail loc "outcome '%s' is a snapshot of state '%s', which the device \
+        does not write (it is published tx)" o.o_name o.o_subject) outcomes;
   (* GitHub issue #720 option a: a device protocol's publishing edge does the
      cache work and the state change in one generated step, then runs its
      lowering on the device-state owner (the doorbell). The lowering cannot
@@ -597,10 +663,13 @@ let source_of (d : protocol_decl) (p : t) : string =
      DmaDeviceSpan, tied to the borrow of the owner. No CPU-access state has
      one, so an address exists only while the CPU holds no write authority. *)
   let device = p.direction <> None in
-  let r = Device_protocol_registry.(match p.direction with
+  (* The cache work of a publishing edge into device state n, and of a
+     finishing edge out of it, by n's direction. *)
+  let ops n = Device_protocol_registry.(
+    match List.assoc_opt n p.state_dirs with
     | Some Tx -> Some (clean, None)
     | Some Rx -> Some (prepare_rx, Some finish_rx)
-    | None -> None) in
+    | Some TxRx | None -> None) in
   if device then
     List.iter (fun s ->
       if s.s_device || s.s_addressed then begin
@@ -722,7 +791,7 @@ let source_of (d : protocol_decl) (p : t) : string =
       | [ a ] -> fresh_of a = []
       | _ -> false in
     ignore (state input.pr_name);
-    let finish (a : proto_alt) indent = match r with
+    let finish (a : proto_alt) indent = match ops t.t_input with
       | Some (_, Some fin) when finishes p t.t_input a.pa_state.pr_name ->
           add "%s%s(s.memory);" indent fin
       | _ -> () in
@@ -741,9 +810,11 @@ let source_of (d : protocol_decl) (p : t) : string =
       add "}";
       Printf.sprintf "%s_%s_Result[%s]" pn name
         (String.concat ", " (base_args @ in_args)) in
-    let publishing = match r, alts with
-      | Some (prepare, _), [ a ] when publishes p t.t_input a.pa_state.pr_name ->
-          Some (prepare, a)
+    let publishing = match alts with
+      | [ a ] when p.direction <> None && publishes p t.t_input a.pa_state.pr_name ->
+          (match ops a.pa_state.pr_name with
+           | Some (prepare, _) -> Some (prepare, a)
+           | None -> None)
       | _ -> None in
     match publishing with
     | Some (prepare, a) ->
