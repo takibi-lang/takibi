@@ -10,7 +10,7 @@
 # The xHCI producer rings: completion events and the confirmed halt/reset.
 kernel/platform/rpi5/usb_xhci_rings.tkb
 
-# The virtio-net scratch TX buffer: a used-index advance ends device access.
+# The virtio-net packet pool: a used RX entry or TX used-index advance ends device access.
 kernel/drivers/net/virtio_net_tx_dma.tkb
 
 # The RP1 GEM descriptor rings: ownership and USED bits, confirmed TX halt.

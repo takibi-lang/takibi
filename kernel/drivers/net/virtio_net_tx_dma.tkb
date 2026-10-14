@@ -1,180 +1,213 @@
-// GitHub issue #740 slice 1: the virtio-net scratch TX buffer as the owner
-// of a tx device protocol (#720 option a). This file is a device-semantics
-// file (kernel/DEVICE_SEMANTICS_FILES): its one observation is the trusted
-// claim that ends the device's access to the buffer --
-//   - virtio_net_tx_used: the TX used index has moved past the driver's
-//     shadow (virtio_net_tx_used_pending() is false). The driver keeps one
-//     TX descriptor outstanding, so a used entry for it means the device
-//     has read the whole buffer (virtio 1.x, 2.7.8 "The Virtqueue Used
-//     Ring"; the legacy layout this driver uses has the same rule).
-// The publishing lowering is the only place the buffer's address leaves:
-// it writes descriptor 0 from the InFlight owner's span and notifies.
-//
-// A send that the bounded wait (virtio_net_tx_wait) cannot confirm moves
-// the owner to Unconfirmed, a device state with no edge out: the payload
-// can never be written again, which is what #740 asks the compiler to
-// enforce. The owner stays parked here as Unconfirmed for the rest of the
-// boot; the driver also disables both queues.
+// GitHub issue #740: virtio-net's packet buffers as the #740 pool, each the
+// owner of a `txrx` device protocol (VirtioPkt). This file is a
+// device-semantics file (kernel/DEVICE_SEMANTICS_FILES). A buffer is posted
+// to an RX descriptor (rx edge), comes back Filled when the device reports
+// it used, and is then recycled, or sent back out in place as the reply (tx
+// edge, its leading virtio_net_hdr reused). A kernel-built frame is written
+// into a Free buffer and sent from Free. What it trusts:
+//   - virtio_pkt_received: virtio_net.tkb read a used RX entry whose id is
+//     the descriptor this buffer was posted to (virtio_pkt_note_rx_used),
+//     so the device has written it (virtio 1.x, 2.7.8; the legacy layout
+//     has the same rule). The used ring itself is still read raw; it moves
+//     to E1 snapshots with the modern transport (#740 U2);
+//   - virtio_pkt_sent: the TX used index moved past the driver's shadow
+//     (virtio_net_tx_used_pending() false) with this one buffer posted, so
+//     the device has read it;
+//   - a buffer's address reaches a descriptor only from its device state's
+//     span (the lowerings below).
+// A transmit the bounded wait cannot confirm leaves its buffer Unconfirmed,
+// a device state with no edge out, for the rest of the boot; the driver
+// also disables both queues.
 //
 // Current limitations (2026-10-14):
-// - The in-place RX reply (net_transmit in virtio_net.tkb) still lends an
-//   rx_bufs slot to TX through a raw pointer; it moves to the packet-buffer
-//   pool design on #740, not to this protocol.
-// - The owner's region identity is existential in the slot (the #720 D4
-//   decision); this file holds exactly one TX buffer, so no other region of
-//   the same type can be confused with it.
+// - One frame acquired and one transmit in flight at a time (the driver's
+//   API tokens), so 8 RX buffers plus 2 cover every state the driver
+//   reaches; a buffer left Unconfirmed is lost to the pool.
+// - The owners' region identity is existential in their slots (the #720 D4
+//   decision).
 
 use "kernel/lib/mutex.tkb";
 
-const VIRTIO_NET_TX_BYTES: usize = 1536;
+const VIRTIO_PKT_ONE: usize = 1;
+const VIRTIO_PKTS: usize = 10;
+const VIRTIO_PKT_NONE: usize = 10;
 
-protocol VirtioNetTx[inst: usize] retains region(u8)[b, VIRTIO_NET_TX_BYTES] tx {
-    state Ready access write;
-    state InFlight[req] device;
+// virtio_net_hdr (10 bytes) and the largest Ethernet frame, rounded up to
+// whole cache lines.
+struct VirtioPacket {
+    bytes: [u8; 1536];
+}
+
+protocol VirtioPkt[inst: usize] retains region(VirtioPacket)[b, VIRTIO_PKT_ONE] txrx {
+    state Free access write;
+    state RxPosted[req] device;
+    state Filled access write;
+    state TxPosted[req] device access read;
     state Unconfirmed[req] device;
-    init Ready;
-    transition virtio_net_tx_publish(Ready) -> InFlight[fresh req];
-    observe virtio_net_tx_used(InFlight[req]) -> TxUsed[req] completes | TxNotUsed;
-    transition virtio_net_tx_reclaim(InFlight[req], TxUsed[req]) -> Ready;
-    transition virtio_net_tx_expire(InFlight[req]) -> Unconfirmed[req];
+    init Free;
+    transition virtio_pkt_post_rx(Free) rx -> RxPosted[fresh req];
+    observe virtio_pkt_received(RxPosted[req]) -> PktReceived[req] completes | PktEmpty;
+    transition virtio_pkt_fill(RxPosted[req], PktReceived[req]) -> Filled;
+    transition virtio_pkt_post_tx(Filled) tx -> TxPosted[fresh req];
+    transition virtio_pkt_send(Free) tx -> TxPosted[fresh req];
+    observe virtio_pkt_sent(TxPosted[req]) -> PktSent[req] completes | PktPending;
+    transition virtio_pkt_done(TxPosted[req], PktSent[req]) -> Free;
+    transition virtio_pkt_expire(TxPosted[req]) -> Unconfirmed[req];
+    transition virtio_pkt_recycle(Filled) -> Free;
     property disjoint;
     model cells 2;
 }
 
-private region let mut virtio_net_tx_buf: [u8; 1536] align(64);
+private region let mut virtio_pkt_pool: [VirtioPacket; 10] align(64);
 
-// The descriptor length of the next publication (header plus payload),
-// set by virtio_net_tx_send just before it publishes.
-private let mut virtio_net_tx_length: usize = 0;
+// The address the latest publication handed out, for the descriptor.
+private let mut virtio_pkt_addr: usize = 0;
+// Set by virtio_net.tkb's used-ring reads, consumed once here.
+private let mut virtio_pkt_rx_seen: bool = false;
 
-// The doorbell: runs after the generated clean and the state change.
-fn virtio_net_tx_publish(s: borrow VirtioNetTx_InFlight[b, o, 1536, r]) !{unsafe} {
-    let mut span: DmaDeviceSpan = VirtioNetTx_InFlight_span(s);
-    virtio_net_tx_ring(span, virtio_net_tx_length);
+fn virtio_pkt_post_rx(s: borrow VirtioPkt_RxPosted[b, o, 1, r]) !{unsafe} {
+    let mut span: DmaDeviceSpan = VirtioPkt_RxPosted_span(s);
+    virtio_pkt_addr = virtio_net_span_address(span);
+    virtio_pkt_rx_seen = false;
 }
-fn virtio_net_tx_used(s: borrow VirtioNetTx_InFlight[b, o, 1536, r])
-        -> VirtioNetTx_virtio_net_tx_used_Raw {
-    if (virtio_net_tx_used_pending()) {
-        return VirtioNetTx_virtio_net_tx_used_Raw::TxNotUsed;
+fn virtio_pkt_received(s: borrow VirtioPkt_RxPosted[b, o, 1, r])
+        -> VirtioPkt_virtio_pkt_received_Raw {
+    if (virtio_pkt_rx_seen) {
+        virtio_pkt_rx_seen = false;
+        return VirtioPkt_virtio_pkt_received_Raw::PktReceived;
     }
-    return VirtioNetTx_virtio_net_tx_used_Raw::TxUsed;
+    return VirtioPkt_virtio_pkt_received_Raw::PktEmpty;
 }
-fn virtio_net_tx_reclaim(s: borrow VirtioNetTx_InFlight[b, o, 1536, r]) {}
-fn virtio_net_tx_expire(s: borrow VirtioNetTx_InFlight[b, o, 1536, r]) {}
+fn virtio_pkt_fill(s: borrow VirtioPkt_RxPosted[b, o, 1, r]) {}
+fn virtio_pkt_post_tx(s: borrow VirtioPkt_TxPosted[b, o, 1, r]) !{unsafe} {
+    virtio_pkt_tx_posted(s);
+}
+fn virtio_pkt_send(s: borrow VirtioPkt_TxPosted[b, o, 1, r]) !{unsafe} {
+    virtio_pkt_tx_posted(s);
+}
+private fn virtio_pkt_tx_posted(s: borrow VirtioPkt_TxPosted[b, o, 1, r]) !{unsafe} {
+    let mut span: DmaDeviceSpan = VirtioPkt_TxPosted_span(s);
+    virtio_pkt_addr = virtio_net_span_address(span);
+}
+fn virtio_pkt_sent(s: borrow VirtioPkt_TxPosted[b, o, 1, r]) -> VirtioPkt_virtio_pkt_sent_Raw {
+    if (virtio_net_tx_used_pending()) {
+        return VirtioPkt_virtio_pkt_sent_Raw::PktPending;
+    }
+    return VirtioPkt_virtio_pkt_sent_Raw::PktSent;
+}
+fn virtio_pkt_done(s: borrow VirtioPkt_TxPosted[b, o, 1, r]) {}
+fn virtio_pkt_expire(s: borrow VirtioPkt_TxPosted[b, o, 1, r]) {}
+fn virtio_pkt_recycle(s: borrow VirtioPkt_Filled[b, o, 1]) {}
 
-variant VirtioNetTxHeld {
-    Ready(exists b: addr. exists o: usize. VirtioNetTx_Ready[b, o, 1536]);
-    Unconfirmed(exists b: addr. exists o: usize. exists r: usize.
-                VirtioNetTx_Unconfirmed[b, o, 1536, r]);
+// virtio_net.tkb read a used RX entry naming the descriptor of the buffer
+// it is about to take (see the header).
+fn virtio_pkt_note_rx_used() { virtio_pkt_rx_seen = true; }
+
+fn virtio_pkt_published_address() -> usize { return virtio_pkt_addr; }
+
+// A buffer between operations: Free, or with the device. A Filled buffer
+// is never parked here; the stack holds it.
+variant VirtioPktHeld {
+    Free(exists b: addr. exists o: usize. VirtioPkt_Free[b, o, 1]);
+    RxPosted(exists b: addr. exists o: usize. exists r: usize. VirtioPkt_RxPosted[b, o, 1, r]);
+    TxPosted(exists b: addr. exists o: usize. exists r: usize. VirtioPkt_TxPosted[b, o, 1, r]);
+    Unconfirmed(exists b: addr. exists o: usize. exists r: usize. VirtioPkt_Unconfirmed[b, o, 1, r]);
 }
 
-struct VirtioNetTxSlot {
+struct VirtioPktSlot {
     private mutex: Mutex;
-    private value: Place(VirtioNetTxHeld);
+    private value: Place(VirtioPktHeld);
 }
-private let mut virtio_net_tx_slot: VirtioNetTxSlot;
+private let mut virtio_pkt_slots: [VirtioPktSlot; 10];
 
-private linear struct VirtioNetTxGuard[lock: addr] { private flags: usize; }
+private linear struct VirtioPktGuard[lock: addr] { private flags: usize; }
 
-private fn virtio_net_tx_lock(lock: *Mutex @ address) -> VirtioNetTxGuard[address]
-        !{acquires_lock_40_virtio_net_tx, lock_guard_40_virtio_net_tx} {
-    let mut guard: VirtioNetTxGuard[address] = { mutex_acquire(lock) };
+private fn virtio_pkt_lock(lock: *Mutex @ address) -> VirtioPktGuard[address]
+        !{acquires_lock_40_virtio_pkt, lock_guard_40_virtio_pkt} {
+    let mut guard: VirtioPktGuard[address] = { mutex_acquire(lock) };
     return guard;
 }
 
-private fn virtio_net_tx_unlock(guard: sink VirtioNetTxGuard[address],
-                                lock: *Mutex @ address) {
+private fn virtio_pkt_unlock(guard: sink VirtioPktGuard[address], lock: *Mutex @ address) {
     mutex_release(lock, guard.flags);
 }
 
-// The slot never holds two owners; a displaced one is an invariant breach.
-private fn virtio_net_tx_lost(held: sink VirtioNetTxHeld) {
-    kernel_invariant_stop();
-}
+// A slot never holds two owners; a displaced or misplaced one is an
+// invariant breach.
+fn virtio_pkt_lost(held: sink VirtioPktHeld) { kernel_invariant_stop(); }
 
-private fn virtio_net_tx_take() -> Place(VirtioNetTxHeld) {
-    let guard = virtio_net_tx_lock(&virtio_net_tx_slot.mutex);
-    let taken: Place(VirtioNetTxHeld) = place_take(
-        guard, &virtio_net_tx_slot.mutex, virtio_net_tx_slot.value);
-    virtio_net_tx_unlock(guard, &virtio_net_tx_slot.mutex);
+fn virtio_pkt_take(i: usize) -> Place(VirtioPktHeld) {
+    if (i >= VIRTIO_PKTS) { return Place::Empty; }
+    let guard = virtio_pkt_lock(&virtio_pkt_slots[i].mutex);
+    let taken: Place(VirtioPktHeld) = place_take(
+        guard, &virtio_pkt_slots[i].mutex, virtio_pkt_slots[i].value);
+    virtio_pkt_unlock(guard, &virtio_pkt_slots[i].mutex);
     return taken;
 }
 
-private fn virtio_net_tx_park(held: VirtioNetTxHeld) {
-    let guard = virtio_net_tx_lock(&virtio_net_tx_slot.mutex);
-    let previous: Place(VirtioNetTxHeld) = place_put(
-        guard, &virtio_net_tx_slot.mutex, virtio_net_tx_slot.value, held);
-    virtio_net_tx_unlock(guard, &virtio_net_tx_slot.mutex);
+fn virtio_pkt_park(i: usize, held: VirtioPktHeld) {
+    if (i >= VIRTIO_PKTS) {
+        virtio_pkt_lost(held);
+        return;
+    }
+    let guard = virtio_pkt_lock(&virtio_pkt_slots[i].mutex);
+    let previous: Place(VirtioPktHeld) = place_put(
+        guard, &virtio_pkt_slots[i].mutex, virtio_pkt_slots[i].value, held);
+    virtio_pkt_unlock(guard, &virtio_pkt_slots[i].mutex);
     match previous {
         Place::Empty => {}
-        Place::Full(other) => { virtio_net_tx_lost(other); }
+        Place::Full(other) => { virtio_pkt_lost(other); }
     }
 }
 
-// Claimed once, by net_init.
-fn virtio_net_tx_claim() -> bool {
-    let RegionOf(u8)::Taken(memory) = region_of(virtio_net_tx_buf) else {
-        RegionOf(u8)::Gone => { return false; }
+private fn virtio_pkt_claim_one(i: usize, memory: region(VirtioPacket)[b, 1]) {
+    virtio_pkt_park(i, VirtioPktHeld::Free(VirtioPkt_init(memory)));
+}
+
+// The pool, claimed once by net_init: every buffer Free.
+fn virtio_pkts_claim() -> bool {
+    let RegionOf(VirtioPacket)::Taken(pool) = region_of(virtio_pkt_pool) else {
+        RegionOf(VirtioPacket)::Gone => { return false; }
     };
-    virtio_net_tx_park(VirtioNetTxHeld::Ready(VirtioNetTx_init(memory)));
+    let (p0, r0) = region_split_static(pool, 1);
+    let (p1, r1) = region_split_static(r0, 1);
+    let (p2, r2) = region_split_static(r1, 1);
+    let (p3, r3) = region_split_static(r2, 1);
+    let (p4, r4) = region_split_static(r3, 1);
+    let (p5, r5) = region_split_static(r4, 1);
+    let (p6, r6) = region_split_static(r5, 1);
+    let (p7, r7) = region_split_static(r6, 1);
+    let (p8, p9) = region_split_static(r7, 1);
+    virtio_pkt_claim_one(0, p0);
+    virtio_pkt_claim_one(1, p1);
+    virtio_pkt_claim_one(2, p2);
+    virtio_pkt_claim_one(3, p3);
+    virtio_pkt_claim_one(4, p4);
+    virtio_pkt_claim_one(5, p5);
+    virtio_pkt_claim_one(6, p6);
+    virtio_pkt_claim_one(7, p7);
+    virtio_pkt_claim_one(8, p8);
+    virtio_pkt_claim_one(9, p9);
     return true;
 }
 
-// The virtio_net_hdr (all zero: no offloads are negotiated) and the payload,
-// written through the Ready owner.
-private fn virtio_net_tx_fill(ready: borrow VirtioNetTx_Ready[b, o, 1536],
-                              bytes: borrow [u8; 1514..], len: usize) {
+// A slot holding a Free buffer, or VIRTIO_PKT_NONE when none is free.
+fn virtio_pkt_free_index() -> usize {
     for i: usize in 0..<10 {
-        VirtioNetTx_Ready_write(ready, i, 0);
-    }
-    for i: usize in 0..<1514 {
-        if (i < len) {
-            VirtioNetTx_Ready_write(ready, 10 + i, bytes[i]);
+        match virtio_pkt_take(i) {
+            Place::Empty => {}
+            Place::Full(held) => {
+                match held {
+                    VirtioPktHeld::Free(free) => {
+                        virtio_pkt_park(i, VirtioPktHeld::Free(free));
+                        return i;
+                    }
+                    VirtioPktHeld::RxPosted(p) => { virtio_pkt_park(i, VirtioPktHeld::RxPosted(p)); }
+                    VirtioPktHeld::TxPosted(p) => { virtio_pkt_park(i, VirtioPktHeld::TxPosted(p)); }
+                    VirtioPktHeld::Unconfirmed(p) => { virtio_pkt_park(i, VirtioPktHeld::Unconfirmed(p)); }
+                }
+            }
         }
     }
-}
-
-// One kernel-built frame: fill, publish, wait. A used entry returns the
-// buffer to Ready; expiry leaves it Unconfirmed and returns false.
-fn virtio_net_tx_send(bytes: borrow [u8; 1514..], len: usize) -> bool !{may_block} {
-    let Place::Full(held) = virtio_net_tx_take() else {
-        Place::Empty => { return false; }
-    };
-    let VirtioNetTxHeld::Ready(ready) = held else {
-        VirtioNetTxHeld::Unconfirmed(stuck) => {
-            virtio_net_tx_park(VirtioNetTxHeld::Unconfirmed(stuck));
-            return false;
-        }
-    };
-    virtio_net_tx_fill(ready, bytes, len);
-    virtio_net_tx_length = 10 + len;
-    match VirtioNetTx_virtio_net_tx_publish(ready) {
-        VirtioNetTx_virtio_net_tx_publish_Result::InFlight(flight) => {
-            return virtio_net_tx_settle(flight);
-        }
-    }
-}
-
-private fn virtio_net_tx_settle(flight: VirtioNetTx_InFlight[b, o, 1536, r]) -> bool
-        !{may_block} {
-    match virtio_net_tx_wait() {
-        VirtioNetTxCompletion::Completed => {}
-        VirtioNetTxCompletion::Unconfirmed => {
-            virtio_net_tx_park(VirtioNetTxHeld::Unconfirmed(
-                VirtioNetTx_virtio_net_tx_expire(flight)));
-            return false;
-        }
-    }
-    match VirtioNetTx_virtio_net_tx_used(flight) {
-        VirtioNetTx_virtio_net_tx_used_Outcome::TxUsed(used) => {
-            virtio_net_tx_park(VirtioNetTxHeld::Ready(
-                VirtioNetTx_virtio_net_tx_reclaim(flight, used)));
-            return true;
-        }
-        VirtioNetTx_virtio_net_tx_used_Outcome::TxNotUsed => {
-            virtio_net_tx_park(VirtioNetTxHeld::Unconfirmed(
-                VirtioNetTx_virtio_net_tx_expire(flight)));
-            return false;
-        }
-    }
+    return VIRTIO_PKT_NONE;
 }

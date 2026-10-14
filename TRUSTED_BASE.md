@@ -242,11 +242,13 @@ rules globally.
   written by the device before the marker, so that the one copy taken after
   invalidating its lines is a whole entry; and that the release lowering
   tells the device only about entries the consumer has copied.
-  The virtio-net scratch TX buffer (`kernel/drivers/net/virtio_net_tx_dma.tkb`)
-  is a tx owner: trusted, that a TX used-index advance past the driver's
-  shadow means the device has read the one outstanding descriptor's buffer.
-  A send the bounded wait cannot confirm parks the owner in a terminal
-  device state, so no later write to the payload type-checks.
+  The virtio-net packet buffers (`kernel/drivers/net/virtio_net_tx_dma.tkb`)
+  are the #740 pool, `txrx` owners: trusted, that a used RX entry naming a
+  descriptor means the device has written that descriptor's buffer, and
+  that a TX used-index advance past the driver's shadow means it has read
+  the one buffer posted. The used ring is still read raw (legacy
+  transport). A transmit the bounded wait cannot confirm parks its buffer
+  in a terminal device state, so no later write to it type-checks.
   The RP1 GEM descriptor rings (`kernel/drivers/net/rp1_gem_desc.tkb`) are
   rx owners, since GEM writes back into the descriptors it owns: trusted,
   that the RX ownership bit or the TX USED bit seen in a snapshot taken

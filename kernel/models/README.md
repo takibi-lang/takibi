@@ -637,13 +637,13 @@ of the contents at the doorbell, and the device reads memory only.
 
 The lowering modelled is a `tx` publishing edge (`__protocol_dma_clean`:
 `dc cvac` over the region, then `dsb`), the state change and the doorbell.
-The maintained consumer is the virtio-net scratch TX buffer.
+The maintained consumers are the virtio-net and GEM packet pools (#740).
 
 | Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
 | --- | --- | --- | --- | --- |
-| `CpuWrite` | `virtio_net_tx_fill` | a write through the Ready owner on any core | which bytes -- irrelevant to `DeviceReadsPosted`: every line of the region is cleaned identically | `cdf72ee0c00a` |
-| `Clean`, `Post` | `virtio_net_tx_send` | the generated clean completed before the state change and the doorbell | the descriptor encoding -- irrelevant to `DeviceReadsPosted`: only the doorbell's order after the clean matters to the line | `3ec53e87cb75` |
-| `DeviceRead`, `Complete` | `virtio_net_tx_settle` | the device reads memory while posted; an observed used entry returns the owner to the CPU | the bounded wait and expiry -- modelled elsewhere: `FixedDmaOwnership.Timeout` | `25a3fd71f155` |
+| `CpuWrite` | `net_transmit_ready` | a write through the Free owner's bytes on any core | which bytes -- irrelevant to `DeviceReadsPosted`: every line of the region is cleaned identically | `a18fdedb2ec9` |
+| `Clean`, `Post` | `net_transmit_ready`, `net_transmit` | the generated clean completed before the state change and the doorbell | the descriptor encoding -- irrelevant to `DeviceReadsPosted`: only the doorbell's order after the clean matters to the line | `95e6df1a3bb4` |
+| `DeviceRead`, `Complete` | `virtio_net_tx_finish` | the device reads memory while posted; an observed used entry returns the owner to the CPU | the bounded wait and expiry -- modelled elsewhere: `FixedDmaOwnership.Timeout` | `b54d130710ab` |
 
 `CpuRead` in the posted phase is the read-only borrow; no kernel function
 takes it yet (the pool's retransmit queue will).

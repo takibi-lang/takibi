@@ -88,8 +88,8 @@ EXEMPT = {
     # syscall from a second core would reach.
     "drivers/net/virtio_net.tkb": "device state; SPIs are routed to CPU0",
     "drivers/net/virtio_net_tx_dma.tkb":
-        "the scratch TX owner slot, exchanged under its own Mutex, and the "
-        "descriptor length of the next publication (GitHub issue #740)",
+        "the packet pool's owner slots, exchanged under their own Mutexes, and "
+        "the observation record and published address (GitHub issue #740)",
     "drivers/net/rp1_gem.tkb": "device state; MSI-X is routed to CPU0",
     "drivers/net/rp1_gem_desc.tkb":
         "the GEM descriptor rings' and packet buffers' owner slots, "

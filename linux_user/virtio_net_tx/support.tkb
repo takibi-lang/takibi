@@ -145,14 +145,8 @@ fn run_initialized_case(ready: sink NetRxCanAcquire, reply_timeout: bool) !{may_
           "unconfirmed completion neither consumes TX nor reposts RX");
     let tx_avail_before: VirtioRingIndex = tx_avail_idx;
     let notify_before: i32 = fake_regs[20];
-    // The payload is unchanged by construction: an unconfirmed scratch send
-    // leaves its owner Unconfirmed, which has no write access (#740).
-    if (reply_timeout == false) {
-        let waits_before: usize = waits;
-        check(virtio_net_tx_send(packet as []u8, 64) == false && waits == waits_before &&
-              fake_regs[20] == notify_before,
-              "an unconfirmed scratch send parks its owner as Unconfirmed");
-    }
+    // The unconfirmed buffer is parked Unconfirmed, which has no write
+    // access, so its payload is unchanged by construction (#740).
     packet[0] = 99;
     let ready = net_transmit_ready(ready, packet as []u8, 64);
     check(tx_avail_idx == tx_avail_before &&
