@@ -54,3 +54,7 @@ With the boot-process guard probe added (2026-10-14), against main 3059d528:
 QEMU text 679768 -> 682096 (+2328 B), RPi5 727832 -> 730080 (+2248 B).
 The probe accounts for about 700 B of that. Data, BSS and usable_ram_start
 are as above.
+
+Re-measured on main c2c38f11 (2026-10-14): QEMU text 685080 -> 687408
+(+2328 B), RPi5 736512 -> 738760 (+2248 B); BSS +176 / +64 B; usable_ram_start
+unchanged.

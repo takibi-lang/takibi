@@ -2,9 +2,10 @@
   "date": "2026-10-14",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "99ed7752cfb81fe744944e88c1b9dcfd85e2cc9d6661e768a4a1f417618569a7",
-  "workload": "#740: device protocols for the network drivers -- virtio-net and RP1 GEM packet buffers as the txrx packet pool, GEM descriptor rings on rx protocols -- plus the txrx / access read / P_S_bytes compiler work. Linked kernels against main 3059d528 (scripts/space_delta.py).",
+  "source_sha256": "a8870f295bc3bf056b3570a9293e1434c884a648c131466692fada9c79c00d57",
+  "workload": "#672 option A: stack runs keep their PageRunOwner in ProcessRecord, with the boot-guard probe. Linked kernels against main c2c38f11 (scripts/space_delta.py); RPi5 boot-end guard timing probe.",
   "evidence": [
+    "docs/STACK_RUN_PERMISSION_SPACE_2026-10-13.md",
     "docs/PACKET_POOL_SPACE_2026-10-14.md",
     "docs/NET_DEVICE_PROTOCOL_SPACE_2026-10-14.md",
     "docs/STALL_PROBE_SPACE_2026-10-14.md",
@@ -67,6 +68,6 @@
     "docs/VIRTIO_NET_TX_2026-10-10.md",
     "docs/VIRTIO_NET_TX_SPACE_2026-10-10.json"
   ],
-  "assessment": "Text +5312 B (QEMU) and +8680 B (RPi5): generated protocol edges, per-slot owner Mutexes and the owner hand-offs. BSS +4096 B (QEMU) and +8192 B (RPi5): the pools replace rx_bufs/tx_ready_buf (+2492 B) and gem_rx/gem_tx (+5120 B) because buffers now change role instead of being copied. usable_ram_start unchanged on both, so page reservations do not move. Candidate reductions (one pool Mutex, a smaller virtio pool) wait for the #497 profile and #520 throughput.",
+  "assessment": "ProcessRecord 1856 -> 1912 B; QEMU text +2328 B, RPi5 +2248 B (including the guard timing and boot-guard probes); BSS +176 / +64 B; usable_ram_start unchanged. Guard per tick about 265-282 ns through the permission vs 191-193 ns as integer ranges. Adopted. Earlier measured results stand.",
   "next_trigger": "#740 U2 (modern virtio-mmio transport and E1 used rings), the stack taking Packet_Filled by move, a shrink protocol for walked RegionPools, or the #748 allocator change, whichever lands first."
 }
