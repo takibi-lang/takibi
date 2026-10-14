@@ -2,7 +2,7 @@
   "date": "2026-10-14",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "dfaf02634ebd253bd9b78c5b68b613cd3da360badac7d614165cd170fdb603b9",
+  "source_sha256": "7c524567af398b172cc90ecddd30866530122e611ed91005179f49aeb7f14e95",
   "workload": "#665: stall probes compiled out of production kernels (KERNEL_STALL_PROBES = 0), on in race-window overlays. Linked kernels against main 00c3026d (scripts/space_delta.py).",
   "evidence": [
     "docs/STALL_PROBE_SPACE_2026-10-14.md",
@@ -65,6 +65,6 @@
     "docs/VIRTIO_NET_TX_2026-10-10.md",
     "docs/VIRTIO_NET_TX_SPACE_2026-10-10.json"
   ],
-  "assessment": "QEMU text +464 B, RPi5 text +496 B (gated call sites); data/BSS and usable_ram_start unchanged. Adopted. Earlier measured results stand.",
+  "assessment": "QEMU and RPi5 text +4 B; no stall_probe symbol in production kernels (call sites folded on the constant); data/BSS and usable_ram_start unchanged. Adopted. Earlier measured results stand.",
   "next_trigger": "#740, a shrink protocol for walked RegionPools, the #748 allocator change, or the next pool consumer moved onto Held slots, whichever lands first."
 }
