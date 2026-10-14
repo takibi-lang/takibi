@@ -49,3 +49,8 @@ per tick against a 15.6 ms tick, or about 0.0006% of a core. Adopted.
 - BSS grows by 176 B and 64 B: the three static records at 56 B each, less
   alignment.
 - usable_ram_start is unchanged.
+
+With the boot-process guard probe added (2026-10-14), against main 3059d528:
+QEMU text 679768 -> 682096 (+2328 B), RPi5 727832 -> 730080 (+2248 B).
+The probe accounts for about 700 B of that. Data, BSS and usable_ram_start
+are as above.
