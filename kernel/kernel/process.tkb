@@ -6996,12 +6996,54 @@ private fn kernel_stack_guard_timing_report() !{unsafe} {
     kernel_boot_log("\n");
 }
 
+// GitHub issue #672: the guard's reader for slot 0 (the bootstrap's static
+// record) answers through that record's own place. The pass: the boot
+// process's lowest stack bytes read clean. The negative control: one byte
+// of that witness is overwritten through the run's permission, the reader
+// must report it, and the poison is restored. Runs where the boot suite
+// ends, when the boot process is not standing on its run's lowest bytes.
+private fn kernel_stack_boot_guard_probe() !{unsafe} {
+    if (kernel_stack_bottom(0) == 0) {
+        kernel_boot_log("kernel stack guard: no boot process stack\n");
+        return;
+    }
+    let clean: bool = kernel_stack_run_depth(0, KERNEL_PROCESS_STACK_SIZE,
+                                             KERNEL_STACK_WITNESS_BYTES) == 0;
+    let guard_hold = process_pool_lock();
+    match place_borrow(guard_hold, scheduled_process_boot_record.stack) {
+        Place::Empty => {}
+        Place::Full(run) => {
+            stack_run_poison_fill(run, KERNEL_PROCESS_STACK_SIZE, 1, 0);
+        }
+    }
+    process_pool_unlock(guard_hold);
+    let reported: bool = kernel_stack_run_depth(0, KERNEL_PROCESS_STACK_SIZE,
+                                                KERNEL_STACK_WITNESS_BYTES) != 0;
+    let restore_hold = process_pool_lock();
+    match place_borrow(restore_hold, scheduled_process_boot_record.stack) {
+        Place::Empty => {}
+        Place::Full(run) => {
+            stack_run_poison_fill(run, KERNEL_PROCESS_STACK_SIZE, 1,
+                                  KERNEL_STACK_POISON);
+        }
+    }
+    process_pool_unlock(restore_hold);
+    let restored: bool = kernel_stack_run_depth(0, KERNEL_PROCESS_STACK_SIZE,
+                                                KERNEL_STACK_WITNESS_BYTES) == 0;
+    if (clean && reported && restored) {
+        kernel_boot_log("kernel stack guard: boot process witness clean, a disturbed byte reported, poison restored\n");
+    } else {
+        kernel_boot_log("kernel stack guard: boot process check FAILED\n");
+    }
+}
+
 // Reported once, at the end of the boot fixtures, because that is the
 // point every scenario this kernel exercises has already run. Per slot as
 // well as the maximum: one slot being near the limit while the rest are
 // shallow says something different from all of them being near it.
 fn kernel_stack_watermark_report() !{unsafe} {
     kernel_stack_guard_timing_report();
+    kernel_stack_boot_guard_probe();
     let deepest: usize = kernel_stack_deepest_bytes();
     kernel_boot_log("kernel stack watermark: size=");
     uart_put_udec(KERNEL_PROCESS_STACK_SIZE);
