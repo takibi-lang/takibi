@@ -18,18 +18,27 @@ fn dma_fixture_require(ok: bool, reason: *u8) {
     }
 }
 
+// The 64-bit address a driver wrote to the low/high register pair at
+// word index `word` (byte offset / 4).
+fn dma_fixture_register_address(word: {0..<127 as usize}) -> usize {
+    let low: usize = (dma_fixture_registers[word] as u32) as usize;
+    let high: usize = (dma_fixture_registers[word + 1] as u32) as usize;
+    return low | (high << 32);
+}
+
 // This simulates the device side only, including status publication before
 // used.idx. It never mints, finishes, or exchanges DMA authority.
 fn dma_fixture_notify() !{unsafe} {
     dma_fixture_submissions = dma_fixture_submissions + 1;
     if (dma_fixture_mode == 0 || dma_fixture_mode == 3) {
-        let queue: *u8 = virtio_blk_queue as *u8;
-        let descs: *VirtioBlkDesc = queue as *VirtioBlkDesc;
+        // Like a device, find the rings from the queue address registers.
+        let descs: *VirtioBlkDesc = unsafe {
+            dma_fixture_register_address(32) as *VirtioBlkDesc };
         let status: *io u8 = unsafe { descs[2].addr as *io u8 };
         if (dma_fixture_mode == 0) { *status = 1; }
         else { *status = 0; }
-        let used: *io VirtioBlkUsed = unsafe {
-            (queue + (VIRTIO_BLK_PAGE_SIZE as isize)) as *io VirtioBlkUsed };
+        let used: *io VirtqUsedRing = unsafe {
+            dma_fixture_register_address(40) as *io VirtqUsedRing };
         used.idx = virtio_ring_index_next(used.idx);
     }
 }
@@ -82,6 +91,9 @@ fn dma_fixture_run() !{unsafe} {
         IoAttach::TooSmall => { dma_fixture_require(false, "register window"); }
     }
     virtio_blk_base = 1;
+    // A modern transport offering a queue of eight.
+    dma_fixture_registers[1] = 2;
+    dma_fixture_registers[13] = 8;
     dma_fixture_mode = 0;
     dma_fixture_require(virtio_blk_write_block(0, dma_fixture_buffer[0..<1024]) == false,
                         "completed error accepted");

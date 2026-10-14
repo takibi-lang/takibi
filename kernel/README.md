@@ -1575,7 +1575,7 @@ are deliberate, not gaps to silently close:
   requires `hvc`, while the RPi5 contract requires `smc`, and either platform
   halts before SMP bring-up if the enabled node is missing or disagrees.
 - **Storage uses virtio-blk, not RPi5's USB Mass Storage path.** The harness
-  attaches `kernel/build/user/ext2.img` as a legacy virtio-mmio block device,
+  attaches `kernel/build/user/ext2.img` as a modern (Version 2) virtio-mmio block device,
   and the kernel mounts it through `kernel/drivers/block/virtio_blk.tkb`.
   There is no RP1, PCIe, or xHCI/USB Mass Storage under QEMU, so the real USB
   provisioning and hardware-specific storage checks remain RPi5-only.

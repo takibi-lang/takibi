@@ -29,8 +29,8 @@ fn check(ok: bool, label: *u8) {
     }
 }
 
-fn tx_used() -> *VirtqUsed {
-    return (tx_queue_mem + VIRTIO_PAGE_SIZE) as *VirtqUsed;
+fn tx_used() -> *VirtqUsedRing !{unsafe} {
+    return unsafe { virtio_net_used_addr[1] as *VirtqUsedRing };
 }
 
 fn workload_profile_interrupt_wait() !{may_block} {
@@ -63,8 +63,8 @@ fn expect_unconfirmed() !{may_block} {
     }
 }
 
-fn receive(ready: sink NetRxCanAcquire) -> NetRxAcquire {
-    let used: *VirtqUsed = (rx_queue_mem + VIRTIO_PAGE_SIZE) as *VirtqUsed;
+fn receive(ready: sink NetRxCanAcquire) -> NetRxAcquire !{unsafe} {
+    let used: *VirtqUsedRing = unsafe { virtio_net_used_addr[0] as *VirtqUsedRing };
     let slot: {0..<8 as usize} = (((rx_used_seen as u16) as usize) % 8) as {0..<8 as usize};
     used.ring[slot].id = 0;
     used.ring[slot].len = 74;
@@ -103,13 +103,16 @@ fn run_driver_case(reply_timeout: bool) !{may_block} {
     }
     virtio_base = address as i32;
     virtio_net_gic_intid = 48;
+    // A modern transport offering queues of eight.
+    fake_regs[1] = 2;
+    fake_regs[13] = 8;
     match net_init() {
         NetInitResult::Ready(cap) => { run_initialized_case(cap, reply_timeout); }
         NetInitResult::Failed => { check(false, "fake transport initialization failed"); }
     }
 }
 
-fn run_initialized_case(ready: sink NetRxCanAcquire, reply_timeout: bool) !{may_block} {
+fn run_initialized_case(ready: sink NetRxCanAcquire, reply_timeout: bool) !{may_block, unsafe} {
 
     reset_clock(-1, 100000);
     (*tx_used()).idx = virtio_ring_index_next(tx_used_seen);
@@ -154,7 +157,7 @@ fn run_initialized_case(ready: sink NetRxCanAcquire, reply_timeout: bool) !{may_
           "later standalone sends leave descriptor, payload and notification unchanged");
     // Even a late used entry and IRQ cannot revive the disabled queues.
     (*tx_used()).idx = virtio_ring_index_next(tx_used_seen);
-    let late_rx: *VirtqUsed = (rx_queue_mem + VIRTIO_PAGE_SIZE) as *VirtqUsed;
+    let late_rx: *VirtqUsedRing = unsafe { virtio_net_used_addr[0] as *VirtqUsedRing };
     let late_slot: {0..<8 as usize} = (((rx_used_seen as u16) as usize) % 8) as {0..<8 as usize};
     late_rx.ring[late_slot].id = 0;
     late_rx.ring[late_slot].len = 74;
@@ -172,4 +175,10 @@ fn run_initialized_case(ready: sink NetRxCanAcquire, reply_timeout: bool) !{may_
     check(waits == wakes_before + 1 && timeout_logs == 1,
           "disabled RX wait still yields to periodic deadline checks");
     net_shutdown(ready);
+}
+
+// The kernel defines this in virtio_blk.tkb, which this fixture does not
+// compile; the same one-line address export.
+fn virtio_span_address(span: borrow DmaDeviceSpan) -> usize !{unsafe} {
+    return unsafe { dma_span_address(span) };
 }

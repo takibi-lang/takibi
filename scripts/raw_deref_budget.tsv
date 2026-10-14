@@ -13,10 +13,9 @@ kernel/arch/arm64/kernel/exception_evidence.tkb	173	0	Private per-CPU crash cach
 kernel/arch/arm64/kernel/frame_ref.tkb	2	0	the exception-frame mint site: a FrameRef's words are read and written here and nowhere else (#637 C)
 kernel/arch/arm64/mm/mmu.tkb	2	0	page-table entries as a raw table (#637 H)
 kernel/boot/fdt.tkb	1	0	the device tree blob as raw memory (#637 H)
-kernel/drivers/block/virtio_blk.tkb	13	2	virtio rings and request buffers, plus device registers (#637 A, E); +1 plain +4 io for the completion-timeout snapshot DDB prints (2026-10-04); 4 io moved to virtio_blk_dma.tkb and 1 io folded into its used-index poll (#716); -7 plain: the request header and TX data are fixed DMA records (#717); -14 io: registers are an IoHandle (#637 A)
-kernel/drivers/block/virtio_blk_dma.tkb	0	1	the used-ring index read, the receive mint file's completion observation (#716); the reset status register is an IoHandle (#637 A)
+kernel/drivers/block/virtio_blk.tkb	13	0	virtio rings and request buffers, plus device registers (#637 A, E); +1 plain +4 io for the completion-timeout snapshot DDB prints (2026-10-04); 4 io moved to virtio_blk_dma.tkb and 1 io folded into its used-index poll (#716); -7 plain: the request header and TX data are fixed DMA records (#717); -14 io: registers are an IoHandle (#637 A)
 kernel/drivers/net/rp1_gem.tkb	0	9	RP1 clock and GPIO registers (#637 A); GEM registers use an IoHandle (#733)
-kernel/drivers/net/virtio_net.tkb	5	3	virtio rings and frames (#637 E); registers are an IoHandle
+kernel/drivers/net/virtio_net.tkb	5	0	virtio rings and frames (#637 E); registers are an IoHandle
 kernel/init/test_driver.tkb	10	0	boot-time fixtures reaching process records directly (#637 F)
 kernel/mm/address_space.tkb	6	0	Backing records use indexed references and active roots use bounded per-CPU array places; remaining raw sites are the deliberate user-VA CoW probe byte mints
 kernel/mm/user_memory.tkb	7	0	the user-range mint site: user addresses become slices here (#637 D)

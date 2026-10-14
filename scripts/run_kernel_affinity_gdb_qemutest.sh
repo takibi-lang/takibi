@@ -102,7 +102,6 @@ resource_lease_vcpu_acquire "$TAKIBI_QEMU_SMP"
     -machine virt -cpu cortex-a53 -smp "$TAKIBI_QEMU_SMP" -m 1024 -display none -monitor none \
     -serial "tcp:127.0.0.1:$SERIAL_PORT,server=on,wait=on" \
     -gdb "tcp:127.0.0.1:$GDB_PORT" \
-    -global virtio-mmio.force-legacy=on \
     -drive "file=$QEMU_EXT2_IMAGE,if=none,format=raw,id=vd0" \
     -device virtio-blk-device,drive=vd0 \
     -netdev "dgram,id=net0,local.type=inet,local.host=127.0.0.1,local.port=$NETDEV_LOCAL_PORT,remote.type=inet,remote.host=127.0.0.1,remote.port=$NETDEV_REMOTE_PORT" \

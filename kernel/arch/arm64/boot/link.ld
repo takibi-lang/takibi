@@ -25,7 +25,9 @@ SECTIONS {
     }
     kernel_file_end = .;
 
-    .bss (NOLOAD) : ALIGN(16) {
+    /* Page-aligned on purpose (kernel/MEMORY_MAP.md), not by whichever
+       page-aligned global the compiler happens to place first. */
+    .bss (NOLOAD) : ALIGN(4096) {
         __bss_start = .;
         *(.bss .bss.*) *(COMMON)
         . = ALIGN(16);

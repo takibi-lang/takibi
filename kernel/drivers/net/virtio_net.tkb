@@ -2,11 +2,13 @@
 // vring/MMIO/IRQ engine below is a close port of examples/common_qemu/
 // virtio_mmio.tkb (hardware-proven -- net_echo/arp_reply/icmp_echo/
 // tcp_echo/http_server/kvs_server all run against it in that tree's own
-// QEMU test suite), NOT a fresh design: legacy virtio-mmio transport
-// (Version register reads 1, no FEATURES_OK handshake), boot-DTB transport
-// discovery (a lone virtio-net-device is not guaranteed to land on MMIO
-// slot 0), the same descriptor/avail/used
-// ring layout and dma_publish/dma_consume barrier placement.
+// QEMU test suite), with boot-DTB transport discovery (a lone
+// virtio-net-device is not guaranteed to land on MMIO slot 0) and the same
+// dma_publish/dma_consume barrier placement. Since GitHub issue #740 (U2)
+// it drives the modern transport (Version 2, VIRTIO_F_VERSION_1 and the
+// FEATURES_OK handshake): each queue's descriptor table and avail ring
+// share one small array, and its used ring is a region of its own, read
+// only through snapshots (kernel/drivers/virtio_used.tkb).
 //
 // What differs from that file, deliberately: the function/type
 // names below match kernel/drivers/net/rp1_gem.tkb's contract exactly
@@ -41,11 +43,8 @@ use "kernel/drivers/net/virtio_net_tx_wait.tkb";
 use "kernel/drivers/net/virtio_net_tx_dma.tkb";
 
 
-const STATUS_ACKNOWLEDGE: i32 = 1;
-const STATUS_DRIVER:      i32 = 2;
-const STATUS_DRIVER_OK:   i32 = 4;
-
-const VIRTIO_PAGE_SIZE: isize = 4096;
+// The descriptor table (8 x 16 bytes) and the avail ring (22 bytes).
+const VIRTIO_QUEUE_BYTES: usize = 256;
 
 const QNUM: isize = 8; // virtqueue depth for both the RX and TX queues
 
@@ -101,20 +100,9 @@ struct packed VirtqAvail {
     ring: [u16; QNUM];
 }
 
-struct packed VirtqUsedElem {
-    id: u32;
-    len: u32;
-}
-
-struct packed VirtqUsed {
-    flags: u16;
-    idx: VirtioRingIndex;
-    ring: [VirtqUsedElem; QNUM];
-}
-
 const VIRTQ_DESC_F_WRITE: i32 = 2; // device writes into this buffer (RX only)
 
-const VIRTIO_NET_F_MAC: i32 = 32; // bit 5: device exposes its MAC in Config space
+const VIRTIO_NET_F_MAC: u32 = 32; // bit 5: device exposes its MAC in Config space
 
 // Discovered from the boot DTB -- see this file's header for why (QEMU does not
 // always attach a lone virtio-net-device to slot 0).
@@ -134,12 +122,17 @@ let mut virtio_tx_irq_flag: io u32;
 // In-place RX bytes may still belong to TX, so neither queue is republished.
 private let mut virtio_net_ready: bool = false;
 
-const RX_BUF_SIZE: isize = 1536; // 10-byte virtio_net_hdr + max 1514-byte Ethernet frame, rounded up
+const RX_BUF_SIZE: isize = 1536; // 12-byte virtio_net_hdr + max 1514-byte Ethernet frame, rounded up
 const RX_BUF_SIZE_USIZE: usize = 1536;
-const VIRTIO_NET_HDR_LEN: usize = 10;
+// With VIRTIO_F_VERSION_1 the header always carries num_buffers (virtio
+// 1.x, 5.1.6): 12 bytes, not the legacy 10.
+const VIRTIO_NET_HDR_LEN: usize = 12;
 
-let mut rx_queue_mem: [u8; 2 * VIRTIO_PAGE_SIZE] align(4096);
-let mut tx_queue_mem: [u8; 2 * VIRTIO_PAGE_SIZE] align(4096);
+let mut rx_queue_mem: [u8; VIRTIO_QUEUE_BYTES] align(64);
+let mut tx_queue_mem: [u8; VIRTIO_QUEUE_BYTES] align(64);
+// The used rings' addresses as programmed (RX, TX), for DDB and the native
+// fixture's stand-in device.
+let mut virtio_net_used_addr: [usize; 2];
 // The pool slot whose buffer each RX descriptor holds (VIRTIO_PKT_NONE
 // while a descriptor has none).
 private let mut rx_desc_pkt: [usize; 8];
@@ -189,25 +182,48 @@ fn virtio_net_irq_handler() !{interrupt} {
     interrupt_notify();
 }
 
-fn virtio_negotiate(features: i32) {
+// Reset, acknowledge, and accept `features_low` (as far as offered) plus
+// VIRTIO_F_VERSION_1; false when the device does not keep FEATURES_OK.
+fn virtio_negotiate(features_low: u32) -> bool {
     virtio_net_regs.status = 0;
-    virtio_net_regs.status = STATUS_ACKNOWLEDGE;
-    virtio_net_regs.status = STATUS_ACKNOWLEDGE | STATUS_DRIVER;
-    virtio_net_regs.guest_features = features;
-    virtio_net_regs.guest_page_size = VIRTIO_PAGE_SIZE as i32;
+    virtio_net_regs.status = VIRTIO_STATUS_ACKNOWLEDGE;
+    virtio_net_regs.status = VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER;
+    virtio_net_regs.device_features_sel = 0;
+    let offered: u32 = virtio_net_regs.device_features;
+    virtio_net_regs.driver_features_sel = 0;
+    virtio_net_regs.driver_features = features_low & offered;
+    virtio_net_regs.driver_features_sel = 1;
+    virtio_net_regs.driver_features = VIRTIO_F_VERSION_1_HIGH;
+    virtio_net_regs.status = VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER |
+                             VIRTIO_STATUS_FEATURES_OK;
+    return (virtio_net_regs.status & VIRTIO_STATUS_FEATURES_OK) != 0;
 }
 
-fn virtio_queue_setup(queue_idx: i32, queue_mem: *u8) {
+// Queue `queue_idx` at its descriptor/avail array and its used ring; false
+// when the device offers fewer than QNUM entries or the ring is not Ready.
+fn virtio_queue_setup(queue_idx: i32, queue_mem: *u8, used_queue: usize) -> bool !{unsafe} {
     virtio_net_regs.queue_sel = queue_idx;
+    if (virtio_net_regs.queue_num_max < QNUM as u32) { return false; }
     virtio_net_regs.queue_num = QNUM as i32;
-    virtio_net_regs.queue_align = VIRTIO_PAGE_SIZE as i32;
-    let addr: usize = queue_mem as usize;
-    let pfn: i32 = (addr / (VIRTIO_PAGE_SIZE as usize)) as i32;
-    virtio_net_regs.queue_pfn = pfn;
+    let used: usize = virtio_used_go(used_queue);
+    if (used == 0) { return false; }
+    let desc: usize = queue_mem as usize;
+    let avail: usize = desc + (QNUM as usize) * sizeof(VirtqDesc);
+    virtio_net_regs.queue_desc_low = (desc & 0xFFFFFFFF) as u32;
+    virtio_net_regs.queue_desc_high = (desc >> 32) as u32;
+    virtio_net_regs.queue_driver_low = (avail & 0xFFFFFFFF) as u32;
+    virtio_net_regs.queue_driver_high = (avail >> 32) as u32;
+    virtio_net_regs.queue_device_low = (used & 0xFFFFFFFF) as u32;
+    virtio_net_regs.queue_device_high = (used >> 32) as u32;
+    virtio_net_regs.queue_ready = 1;
+    if (queue_idx == 0) { virtio_net_used_addr[0] = used; }
+    else { virtio_net_used_addr[1] = used; }
+    return true;
 }
 
 fn virtio_driver_ok() {
-    virtio_net_regs.status = STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_DRIVER_OK;
+    virtio_net_regs.status = VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER |
+                             VIRTIO_STATUS_FEATURES_OK | VIRTIO_STATUS_DRIVER_OK;
 }
 
 fn virtio_notify(queue_idx: i32) {
@@ -235,21 +251,15 @@ fn avail_publish(queue_mem: *u8, new_idx: VirtioRingIndex) {
     dma_publish();
 }
 
-fn used_idx_get(queue_mem: *u8) -> VirtioRingIndex !{unsafe} {
-    let used: *io VirtqUsed = unsafe { (queue_mem + VIRTIO_PAGE_SIZE) as *io VirtqUsed };
-    return used.idx;
-}
+// The used ring of queue `used_queue` (VIRTIO_USED_NET_RX or _TX) from
+// one snapshot; None while it is not live.
+variant VirtioNetUsed { None; Seen(VirtqUsedRing); }
 
-fn used_ring_get_id(queue_mem: *u8, slot: isize) -> isize !{unsafe} {
-    let ring: *io VirtqUsedElem = unsafe { (queue_mem + VIRTIO_PAGE_SIZE
-        + (offsetof(VirtqUsed, ring) as isize)) as *io VirtqUsedElem };
-    return ring[slot].id as isize;
-}
-
-fn used_ring_get_len(queue_mem: *u8, slot: isize) -> i32 !{unsafe} {
-    let ring: *io VirtqUsedElem = unsafe { (queue_mem + VIRTIO_PAGE_SIZE
-        + (offsetof(VirtqUsed, ring) as isize)) as *io VirtqUsedElem };
-    return ring[slot].len as i32;
+fn virtio_net_used(used_queue: usize) -> VirtioNetUsed {
+    match virtio_used_snapshot(used_queue) {
+        VirtioUsedSeen::Unavailable => { return VirtioNetUsed::None; }
+        VirtioUsedSeen::Seen(ring) => { return VirtioNetUsed::Seen(ring); }
+    }
 }
 
 // -- Shared driver API (matches kernel/drivers/net/rp1_gem.tkb) -------------
@@ -268,15 +278,16 @@ fn net_init() -> NetInitResult {
     virtio_tx_irq_flag = 0;
     virtio_net_gic_enable();
 
-    virtio_negotiate(VIRTIO_NET_F_MAC);
-    virtio_queue_setup(0, rx_queue_mem as *u8); // RX
-    virtio_queue_setup(1, tx_queue_mem as *u8); // TX
-    virtio_driver_ok();
-
-    if (virtio_pkts_claim() == false) {
+    if (virtio_net_regs.version != VIRTIO_MMIO_VERSION_MODERN ||
+        virtio_pkts_claim() == false ||
+        virtio_negotiate(VIRTIO_NET_F_MAC) == false ||
+        virtio_queue_setup(0, rx_queue_mem as *u8, VIRTIO_USED_NET_RX) == false ||
+        virtio_queue_setup(1, tx_queue_mem as *u8, VIRTIO_USED_NET_TX) == false) {
+        virtio_net_regs.status = VIRTIO_STATUS_FAILED;
         init_once_cancel(&net_init_once, init_guard);
         return NetInitResult::Failed;
     }
+    virtio_driver_ok();
     for i: usize in 0..<8 {
         rx_desc_pkt[i] = VIRTIO_PKT_NONE;
         if (virtio_net_rx_post(i) == false) {
@@ -297,10 +308,12 @@ fn net_init() -> NetInitResult {
 // DDB reads the device completion index only after the driver has published
 // its RX ring. The acquire barrier pairs with the device's DMA writes; no
 // receive token is taken or consumed by this observation.
-fn kernel_net_rx_frame_pending() -> NetPendingState !{unsafe} {
+fn kernel_net_rx_frame_pending() -> NetPendingState {
     if (virtio_net_ready == false) { return NetPendingState::No; }
-    dma_consume();
-    if (rx_used_seen == used_idx_get(rx_queue_mem as *u8)) {
+    let VirtioNetUsed::Seen(ring) = virtio_net_used(VIRTIO_USED_NET_RX) else {
+        VirtioNetUsed::None => { return NetPendingState::No; }
+    };
+    if (rx_used_seen == ring.idx) {
         return NetPendingState::No;
     }
     return NetPendingState::Yes;
@@ -329,15 +342,16 @@ fn net_rx_acquire(ready: sink NetRxCanAcquire) -> NetRxAcquire {
         return NetRxAcquire::None(view NetRxCanAcquire);
     }
     virtio_rx_irq_flag = 0;
-    if (rx_used_seen == used_idx_get(rx_queue_mem as *u8)) {
+    let VirtioNetUsed::Seen(ring) = virtio_net_used(VIRTIO_USED_NET_RX) else {
+        VirtioNetUsed::None => { return NetRxAcquire::None(view NetRxCanAcquire); }
+    };
+    if (rx_used_seen == ring.idx) {
         return NetRxAcquire::None(view NetRxCanAcquire);
     }
     virtio_rx_irq_flag = 1; // drain coalesced used-ring entries
-    dma_consume();
-    let slot: isize = ((rx_used_seen as u16) as isize) % QNUM;
-    let index: {0..<8 as usize} =
-        max(min(used_ring_get_id(rx_queue_mem as *u8, slot), 7), 0) as usize;
-    let frame_total_len: i32 = used_ring_get_len(rx_queue_mem as *u8, slot);
+    let slot: {0..<8 as usize} = ((rx_used_seen as u16) as usize) % 8;
+    let index: {0..<8 as usize} = min(ring.ring[slot].id, 7) as usize;
+    let frame_total_len: i32 = min(ring.ring[slot].len, 0x7FFFFFFF) as i32;
     let raw_len: i32 = frame_total_len - (VIRTIO_NET_HDR_LEN as i32);
     let safe_len: i32 = max(min(raw_len, 1514), 0);
     // The used entry names descriptor `index`: its buffer comes back Filled.
@@ -354,7 +368,7 @@ fn net_rx_acquire(ready: sink NetRxCanAcquire) -> NetRxAcquire {
         VirtioPktHeld::TxPosted(p) => { virtio_pkt_lost(VirtioPktHeld::TxPosted(p)); return NetRxAcquire::None(view NetRxCanAcquire); }
         VirtioPktHeld::Unconfirmed(p) => { virtio_pkt_lost(VirtioPktHeld::Unconfirmed(p)); return NetRxAcquire::None(view NetRxCanAcquire); }
     };
-    virtio_pkt_note_rx_used();
+    virtio_pkt_note_rx_used(ring.idx, rx_used_seen);
     match VirtioPkt_virtio_pkt_received(posted) {
         VirtioPkt_virtio_pkt_received_Outcome::PktEmpty => {
             virtio_pkt_park(pool_slot, VirtioPktHeld::RxPosted(posted));
@@ -451,6 +465,10 @@ private fn net_transmit(reply: sink NetRxReplyReady[desc, pb, po]) -> NetTxInFli
     let index: {0..<8 as usize} @ desc = reply.index;
     let slot: usize = reply.slot;
     let len: i32 = reply.len;
+    // The RX header the device wrote carries num_buffers; a transmitted
+    // header is all zero (no offloads are negotiated).
+    let header = VirtioPkt_Filled_bytes(reply.pkt, 0);
+    for i: usize in 0..<VIRTIO_NET_HDR_LEN { header[i] = 0; }
     match VirtioPkt_virtio_pkt_post_tx(reply.pkt) {
         VirtioPkt_virtio_pkt_post_tx_Result::TxPosted(posted) => {
             virtio_pkt_park(slot, VirtioPktHeld::TxPosted(posted));
@@ -496,8 +514,12 @@ private fn virtio_net_tx_finish(slot: usize) -> bool !{may_block} {
     return false;
 }
 
+// No snapshot (the ring is not live) counts as pending.
 fn virtio_net_tx_used_pending() -> bool {
-    return tx_used_seen == used_idx_get(tx_queue_mem as *u8);
+    let VirtioNetUsed::Seen(ring) = virtio_net_used(VIRTIO_USED_NET_TX) else {
+        VirtioNetUsed::None => { return true; }
+    };
+    return tx_used_seen == ring.idx;
 }
 
 private fn net_tx_complete(in_flight: sink NetTxInFlight[desc])
@@ -536,14 +558,15 @@ fn net_transmit_ready(ready: sink NetRxCanAcquire,
     };
     // The virtio_net_hdr is all zero (no offloads are negotiated).
     let out = VirtioPkt_Free_bytes(free, 0);
-    for i: usize in 0..<10 { out[i] = 0; }
-    slice_copy(out[10..<10 + (safe_len as usize)], bytes[0..<safe_len as usize]);
+    for i: usize in 0..<VIRTIO_NET_HDR_LEN { out[i] = 0; }
+    slice_copy(out[VIRTIO_NET_HDR_LEN..<VIRTIO_NET_HDR_LEN + (safe_len as usize)],
+               bytes[0..<safe_len as usize]);
     match VirtioPkt_virtio_pkt_send(free) {
         VirtioPkt_virtio_pkt_send_Result::TxPosted(posted) => {
             virtio_pkt_park(slot, VirtioPktHeld::TxPosted(posted));
         }
     }
-    virtio_net_tx_ring(10 + (safe_len as usize));
+    virtio_net_tx_ring(VIRTIO_NET_HDR_LEN + (safe_len as usize));
     virtio_net_tx_finish(slot);
     return view NetRxCanAcquire;
 }

@@ -5,9 +5,10 @@
 // whole trusted claim that device ownership may return to the CPU. It
 // returns ownership of every allocation a request submitted after one of
 // two observations, and nowhere else:
-//   - virtio_blk_receive_settle_used: the device advanced the used ring
-//     past the driver's shadow, so it has written the request's data and
-//     status (virtio 1.x, 2.7.8);
+//   - virtio_blk_receive_settle_used: a snapshot of the used ring
+//     (kernel/drivers/virtio_used.tkb) showed its idx past the driver's
+//     shadow, so the device has written the request's data and status
+//     (virtio 1.x, 2.7.8);
 //   - virtio_blk_receive_settle_reset: the status register read back zero
 //     after a reset, so the device no longer touches the queue (virtio
 //     1.x, 2.1).
@@ -15,6 +16,22 @@
 // and their callers. Keep anything else out of this file.
 
 use "kernel/lib/mutex.tkb";
+use "kernel/drivers/virtio_used.tkb";
+
+// The used ring's own backing global (modern transport, GitHub issue #740).
+private region let mut virtio_blk_used_ring: [VirtqUsedRing; 1] align(64);
+private let mut virtio_blk_used_claimed: bool = false;
+
+// The used ring parked Ready in its slot, once per boot.
+fn virtio_blk_used_claim() -> bool {
+    if (virtio_blk_used_claimed) { return true; }
+    let RegionOf(VirtqUsedRing)::Taken(memory) = region_of(virtio_blk_used_ring) else {
+        RegionOf(VirtqUsedRing)::Gone => { return false; }
+    };
+    virtio_used_claim(VIRTIO_USED_BLK, memory);
+    virtio_blk_used_claimed = true;
+    return true;
+}
 
 // The descriptor still exposes one status byte at offset 1024.
 struct dma_fixed VirtioBlkReceive { private bytes: [u8; 1088]; }
@@ -187,10 +204,20 @@ private fn virtio_blk_data_settle() {
 }
 
 // The device has not yet published a used entry beyond the driver's shadow.
-fn virtio_blk_used_pending() -> bool !{unsafe} {
-    let queue: *u8 = virtio_blk_queue as *u8;
-    return virtio_blk_used_seen == unsafe { ((queue + (VIRTIO_BLK_PAGE_SIZE as isize))
-                                    as *io VirtioBlkUsed) }.idx;
+// No snapshot (the ring is not live) counts as pending.
+fn virtio_blk_used_pending() -> bool {
+    match virtio_used_snapshot(VIRTIO_USED_BLK) {
+        VirtioUsedSeen::Unavailable => { return true; }
+        VirtioUsedSeen::Seen(ring) => { return virtio_blk_used_seen == ring.idx; }
+    }
+}
+
+// The used ring's idx from one snapshot, for the timeout record.
+fn virtio_blk_used_index() -> usize {
+    match virtio_used_snapshot(VIRTIO_USED_BLK) {
+        VirtioUsedSeen::Unavailable => { return 0; }
+        VirtioUsedSeen::Seen(ring) => { return (ring.idx as u16) as usize; }
+    }
 }
 
 fn virtio_blk_reset() -> bool !{unsafe} {
@@ -207,6 +234,7 @@ fn virtio_blk_reset() -> bool !{unsafe} {
         virtio_blk_disabled = true;
         return false;
     }
+    virtio_used_reclaim_after_reset(VIRTIO_USED_BLK);
     return true;
 }
 

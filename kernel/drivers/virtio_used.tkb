@@ -1,0 +1,221 @@
+// GitHub issue #740 (U2): the used ring of a modern (Version 2) virtio-mmio
+// virtqueue as the owner of an `rx` device protocol (#720 option a). The
+// modern transport takes the used ring's address on its own
+// (QueueDeviceLow/High), so each used ring is a region backing global of
+// its own, declared by the driver that owns the queue, and nothing reads it
+// except through a snapshot observation (decision E1): the generated peek
+// invalidates the ring's lines and copies it whole. The driver compares the
+// copy's idx with its shadow and reads the entries from the copy.
+//
+// This is a device-semantics file (kernel/DEVICE_SEMANTICS_FILES); what it
+// trusts:
+//   - virtio_used_peek: any copy is a coherent view of the ring; it ends no
+//     device access and grants nothing, so it always answers UsedCopy. The
+//     drivers' own completes observations (virtio_net_tx_dma.tkb,
+//     virtio_blk_dma.tkb) decide from the copy's idx.
+//   - virtio_used_quiet: virtio_used_reclaim is called only after the
+//     device's status register read back zero following a reset (virtio
+//     1.x, 2.1): the device no longer writes the used ring.
+//   - Ready is `addressed`: the queue registers are programmed from the
+//     Ready span, and the device writes the ring only after QueueReady and
+//     DRIVER_OK, which the drivers set after the publishing edge's clean and
+//     invalidate.
+//
+// Current limitations (2026-10-14):
+// - Three owners: the block queue and the net RX and TX queues
+//   (VIRTIO_USED_*). Their region identity is existential in the slots
+//   (the #720 D4 decision).
+// - QNUM is 8 for every queue; the ring layout below fixes it.
+
+use "kernel/lib/mutex.tkb";
+use "kernel/drivers/virtio_ring.tkb";
+
+const VIRTIO_USED_ONE: usize = 1;
+const VIRTIO_USED_BLK: usize = 0;
+const VIRTIO_USED_NET_RX: usize = 1;
+const VIRTIO_USED_NET_TX: usize = 2;
+const VIRTIO_USED_QUEUES: usize = 3;
+
+struct VirtqUsedElem {
+    id: u32;
+    len: u32;
+}
+
+// The used ring of an 8-entry queue (virtio 1.x, 2.7.8), padded to two
+// whole cache lines so the region owns every line it touches.
+struct VirtqUsedRing {
+    flags: u16;
+    idx: VirtioRingIndex;
+    ring: [VirtqUsedElem; 8];
+    avail_event: u16;
+    reserved: [u8; 58];
+}
+
+protocol VirtioUsed[inst: usize] retains region(VirtqUsedRing)[b, VIRTIO_USED_ONE] rx {
+    state Ready access write addressed;
+    state Live[req] device;
+    init Ready;
+    transition virtio_used_publish(Ready) -> Live[fresh req];
+    observe virtio_used_peek(Live[req]) -> UsedCopy snapshot | UsedUnread;
+    observe virtio_used_quiet(Live[req]) -> UsedQuiet[req] quiesces | UsedBusy;
+    transition virtio_used_reclaim(Live[req], UsedQuiet[req]) -> Ready;
+    property disjoint;
+    model cells 2;
+}
+
+// Set by virtio_used_reclaim just before its quiesces observation (see the
+// header for the caller's obligation).
+private let mut virtio_used_reset_confirmed: bool = false;
+
+fn virtio_used_publish(s: borrow VirtioUsed_Live[b, o, 1, r]) {}
+fn virtio_used_peek(s: borrow VirtioUsed_Live[b, o, 1, r], value: VirtqUsedRing)
+        -> VirtioUsed_virtio_used_peek_Raw {
+    return VirtioUsed_virtio_used_peek_Raw::UsedCopy;
+}
+fn virtio_used_peek_release(s: borrow VirtioUsed_Live[b, o, 1, r]) {}
+fn virtio_used_quiet(s: borrow VirtioUsed_Live[b, o, 1, r])
+        -> VirtioUsed_virtio_used_quiet_Raw {
+    if (virtio_used_reset_confirmed) {
+        virtio_used_reset_confirmed = false;
+        return VirtioUsed_virtio_used_quiet_Raw::UsedQuiet;
+    }
+    return VirtioUsed_virtio_used_quiet_Raw::UsedBusy;
+}
+fn virtio_used_reclaim(s: borrow VirtioUsed_Live[b, o, 1, r]) {}
+
+variant VirtioUsedHeld {
+    Ready(exists b: addr. exists o: usize. VirtioUsed_Ready[b, o, 1]);
+    Live(exists b: addr. exists o: usize. exists r: usize. VirtioUsed_Live[b, o, 1, r]);
+}
+
+struct VirtioUsedSlot {
+    private mutex: Mutex;
+    private value: Place(VirtioUsedHeld);
+}
+private let mut virtio_used_slots: [VirtioUsedSlot; 3];
+
+private linear struct VirtioUsedGuard[lock: addr] { private flags: usize; }
+
+private fn virtio_used_lock(lock: *Mutex @ address) -> VirtioUsedGuard[address]
+        !{acquires_lock_40_virtio_used, lock_guard_40_virtio_used} {
+    let mut guard: VirtioUsedGuard[address] = { mutex_acquire(lock) };
+    return guard;
+}
+
+private fn virtio_used_unlock(guard: sink VirtioUsedGuard[address], lock: *Mutex @ address) {
+    mutex_release(lock, guard.flags);
+}
+
+// A slot never holds two owners.
+private fn virtio_used_lost(held: sink VirtioUsedHeld) { kernel_invariant_stop(); }
+
+private fn virtio_used_take(i: usize) -> Place(VirtioUsedHeld) {
+    if (i >= VIRTIO_USED_QUEUES) { return Place::Empty; }
+    let guard = virtio_used_lock(&virtio_used_slots[i].mutex);
+    let taken: Place(VirtioUsedHeld) = place_take(
+        guard, &virtio_used_slots[i].mutex, virtio_used_slots[i].value);
+    virtio_used_unlock(guard, &virtio_used_slots[i].mutex);
+    return taken;
+}
+
+private fn virtio_used_park(i: usize, held: VirtioUsedHeld) {
+    if (i >= VIRTIO_USED_QUEUES) {
+        virtio_used_lost(held);
+        return;
+    }
+    let guard = virtio_used_lock(&virtio_used_slots[i].mutex);
+    let previous: Place(VirtioUsedHeld) = place_put(
+        guard, &virtio_used_slots[i].mutex, virtio_used_slots[i].value, held);
+    virtio_used_unlock(guard, &virtio_used_slots[i].mutex);
+    match previous {
+        Place::Empty => {}
+        Place::Full(other) => { virtio_used_lost(other); }
+    }
+}
+
+// Queue `i`'s used ring, from the driver's backing global, parked Ready.
+fn virtio_used_claim(i: usize, memory: region(VirtqUsedRing)[b, 1]) {
+    virtio_used_park(i, VirtioUsedHeld::Ready(VirtioUsed_init(memory)));
+}
+
+// The ring zeroed and handed to the device; the address to program into
+// QueueDeviceLow/High, or 0 when queue `i` holds no Ready ring.
+fn virtio_used_go(i: usize) -> usize !{unsafe} {
+    let Place::Full(held) = virtio_used_take(i) else {
+        Place::Empty => { return 0; }
+    };
+    let VirtioUsedHeld::Ready(ready) = held else {
+        VirtioUsedHeld::Live(live) => {
+            virtio_used_park(i, VirtioUsedHeld::Live(live));
+            return 0;
+        }
+    };
+    // A reclaimed ring still holds the device's last idx; the driver's
+    // shadow restarts at zero. Stale entries past idx are never read.
+    let mut fresh: VirtqUsedRing = VirtioUsed_Ready_read(ready, 0);
+    fresh.flags = 0;
+    fresh.idx = virtio_ring_index_zero();
+    VirtioUsed_Ready_write(ready, 0, fresh);
+    let mut span: DmaDeviceSpan = VirtioUsed_Ready_span(ready);
+    let address: usize = virtio_span_address(span);
+    match VirtioUsed_virtio_used_publish(ready) {
+        VirtioUsed_virtio_used_publish_Result::Live(live) => {
+            virtio_used_park(i, VirtioUsedHeld::Live(live));
+        }
+    }
+    return address;
+}
+
+must_use variant VirtioUsedSeen {
+    Unavailable;
+    Seen(VirtqUsedRing);
+}
+
+// One snapshot of queue `i`'s live used ring.
+fn virtio_used_snapshot(i: usize) -> VirtioUsedSeen {
+    let Place::Full(held) = virtio_used_take(i) else {
+        Place::Empty => { return VirtioUsedSeen::Unavailable; }
+    };
+    let VirtioUsedHeld::Live(live) = held else {
+        VirtioUsedHeld::Ready(ready) => {
+            virtio_used_park(i, VirtioUsedHeld::Ready(ready));
+            return VirtioUsedSeen::Unavailable;
+        }
+    };
+    match VirtioUsed_virtio_used_peek(live, 0) {
+        VirtioUsed_virtio_used_peek_Outcome::UsedCopy(entry) => {
+            let mut copy: VirtqUsedRing = VirtioUsed_UsedCopy_value(entry);
+            VirtioUsed_UsedCopy_release(live, entry);
+            virtio_used_park(i, VirtioUsedHeld::Live(live));
+            return VirtioUsedSeen::Seen(copy);
+        }
+        VirtioUsed_virtio_used_peek_Outcome::UsedUnread => {
+            virtio_used_park(i, VirtioUsedHeld::Live(live));
+            return VirtioUsedSeen::Unavailable;
+        }
+    }
+}
+
+// Called only after the device's status read back zero after a reset (see
+// the header): a live ring returns to Ready. An unclaimed or Ready ring is
+// left as it is.
+fn virtio_used_reclaim_after_reset(i: usize) {
+    let Place::Full(held) = virtio_used_take(i) else {
+        Place::Empty => { return; }
+    };
+    let VirtioUsedHeld::Live(live) = held else {
+        VirtioUsedHeld::Ready(ready) => {
+            virtio_used_park(i, VirtioUsedHeld::Ready(ready));
+            return;
+        }
+    };
+    virtio_used_reset_confirmed = true;
+    match VirtioUsed_virtio_used_quiet(live) {
+        VirtioUsed_virtio_used_quiet_Outcome::UsedQuiet(quiet) => {
+            virtio_used_park(i, VirtioUsedHeld::Ready(VirtioUsed_virtio_used_reclaim(live, quiet)));
+        }
+        VirtioUsed_virtio_used_quiet_Outcome::UsedBusy => {
+            virtio_used_park(i, VirtioUsedHeld::Live(live));
+        }
+    }
+}

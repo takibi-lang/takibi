@@ -104,6 +104,10 @@ EXEMPT = {
     "drivers/block/virtio_blk_dma.tkb":
         "the receive allocation's owner slot and its mint functions, reached "
         "only from virtio_blk.tkb under block_device_lock (GitHub issue #716)",
+    "drivers/virtio_used.tkb":
+        "the virtio used rings' owner slots, exchanged under their own "
+        "Mutexes, and the reset record its quiesces lowering reads (GitHub "
+        "issue #740)",
     "drivers/block/memory.tkb":
         "per-core counters and read-ahead run indexed by cpu_id(), and the "
         "device reached only under block_device_lock (GitHub issue #533)",

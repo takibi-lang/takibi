@@ -246,8 +246,11 @@ rules globally.
   are the #740 pool, `txrx` owners: trusted, that a used RX entry naming a
   descriptor means the device has written that descriptor's buffer, and
   that a TX used-index advance past the driver's shadow means it has read
-  the one buffer posted. The used ring is still read raw (legacy
-  transport). A transmit the bounded wait cannot confirm parks its buffer
+  the one buffer posted, both read from a snapshot of the used ring. The
+  virtio used rings (`kernel/drivers/virtio_used.tkb`, block and net, on
+  the modern transport) are rx owners on backing globals of their own and
+  are read only through snapshots: trusted, that a confirmed reset (status
+  read back zero) ends the device's writes to a used ring. A transmit the bounded wait cannot confirm parks its buffer
   in a terminal device state, so no later write to it type-checks.
   The RP1 GEM descriptor rings (`kernel/drivers/net/rp1_gem_desc.tkb`) are
   rx owners, since GEM writes back into the descriptors it owns: trusted,

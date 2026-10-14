@@ -5,14 +5,14 @@
 // it used, and is then recycled, or sent back out in place as the reply (tx
 // edge, its leading virtio_net_hdr reused). A kernel-built frame is written
 // into a Free buffer and sent from Free. What it trusts:
-//   - virtio_pkt_received: virtio_net.tkb read a used RX entry whose id is
+//   - virtio_pkt_received: a snapshot of the RX used ring
+//     (kernel/drivers/virtio_used.tkb) showed its idx past the driver's
+//     shadow, and virtio_net.tkb took the entry's id from that snapshot as
 //     the descriptor this buffer was posted to (virtio_pkt_note_rx_used),
-//     so the device has written it (virtio 1.x, 2.7.8; the legacy layout
-//     has the same rule). The used ring itself is still read raw; it moves
-//     to E1 snapshots with the modern transport (#740 U2);
-//   - virtio_pkt_sent: the TX used index moved past the driver's shadow
-//     (virtio_net_tx_used_pending() false) with this one buffer posted, so
-//     the device has read it;
+//     so the device has written it (virtio 1.x, 2.7.8);
+//   - virtio_pkt_sent: a snapshot of the TX used ring showed its idx past
+//     the driver's shadow (virtio_net_tx_used_pending() false) with this
+//     one buffer posted, so the device has read it;
 //   - a buffer's address reaches a descriptor only from its device state's
 //     span (the lowerings below).
 // A transmit the bounded wait cannot confirm leaves its buffer Unconfirmed,
@@ -27,6 +27,7 @@
 //   decision).
 
 use "kernel/lib/mutex.tkb";
+use "kernel/drivers/virtio_used.tkb";
 
 const VIRTIO_PKT_ONE: usize = 1;
 const VIRTIO_PKTS: usize = 10;
@@ -59,6 +60,9 @@ protocol VirtioPkt[inst: usize] retains region(VirtioPacket)[b, VIRTIO_PKT_ONE] 
 }
 
 private region let mut virtio_pkt_pool: [VirtioPacket; 10] align(64);
+// The RX and TX used rings' own backing globals (modern transport).
+private region let mut virtio_net_rx_used_ring: [VirtqUsedRing; 1] align(64);
+private region let mut virtio_net_tx_used_ring: [VirtqUsedRing; 1] align(64);
 
 // The address the latest publication handed out, for the descriptor.
 private let mut virtio_pkt_addr: usize = 0;
@@ -99,9 +103,12 @@ fn virtio_pkt_done(s: borrow VirtioPkt_TxPosted[b, o, 1, r]) {}
 fn virtio_pkt_expire(s: borrow VirtioPkt_TxPosted[b, o, 1, r]) {}
 fn virtio_pkt_recycle(s: borrow VirtioPkt_Filled[b, o, 1]) {}
 
-// virtio_net.tkb read a used RX entry naming the descriptor of the buffer
-// it is about to take (see the header).
-fn virtio_pkt_note_rx_used() { virtio_pkt_rx_seen = true; }
+// virtio_net.tkb read, from a snapshot whose idx is `used`, the used RX
+// entry at its shadow `seen`, naming the descriptor of the buffer it is
+// about to take (see the header).
+fn virtio_pkt_note_rx_used(used: VirtioRingIndex, seen: VirtioRingIndex) {
+    if (used != seen) { virtio_pkt_rx_seen = true; }
+}
 
 fn virtio_pkt_published_address() -> usize { return virtio_pkt_addr; }
 
@@ -164,8 +171,17 @@ private fn virtio_pkt_claim_one(i: usize, memory: region(VirtioPacket)[b, 1]) {
     virtio_pkt_park(i, VirtioPktHeld::Free(VirtioPkt_init(memory)));
 }
 
-// The pool, claimed once by net_init: every buffer Free.
+// The pool, claimed once by net_init: every buffer Free, and both used
+// rings Ready.
 fn virtio_pkts_claim() -> bool {
+    let RegionOf(VirtqUsedRing)::Taken(rx_used) = region_of(virtio_net_rx_used_ring) else {
+        RegionOf(VirtqUsedRing)::Gone => { return false; }
+    };
+    virtio_used_claim(VIRTIO_USED_NET_RX, rx_used);
+    let RegionOf(VirtqUsedRing)::Taken(tx_used) = region_of(virtio_net_tx_used_ring) else {
+        RegionOf(VirtqUsedRing)::Gone => { return false; }
+    };
+    virtio_used_claim(VIRTIO_USED_NET_TX, tx_used);
     let RegionOf(VirtioPacket)::Taken(pool) = region_of(virtio_pkt_pool) else {
         RegionOf(VirtioPacket)::Gone => { return false; }
     };

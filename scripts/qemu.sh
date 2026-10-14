@@ -25,4 +25,8 @@ if [ "$held" -lt "$smp" ]; then
          "resource_lease_vcpu_acquire in bash, scripts/vcpu_lease_run.sh otherwise." >&2
     exit 1
 fi
-exec qemu-system-aarch64 "$@"
+# The kernel's virtio drivers speak only the modern virtio-mmio transport
+# (Version 2), and QEMU's virt machine defaults to the legacy one, so every
+# guest gets the modern one here rather than from each runner (GitHub issue
+# #740).
+exec qemu-system-aarch64 -global virtio-mmio.force-legacy=false "$@"

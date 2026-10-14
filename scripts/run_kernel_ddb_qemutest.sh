@@ -68,7 +68,6 @@ resource_lease_vcpu_acquire "$TAKIBI_QEMU_SMP"
     -gdb "tcp:127.0.0.1:$GDB_PORT" -S \
     -chardev "socket,id=debug_uart,host=127.0.0.1,port=$SERIAL_PORT,server=on,wait=off" \
     -serial chardev:debug_uart \
-    -global virtio-mmio.force-legacy=on \
     -drive "file=$QEMU_EXT2_IMAGE,if=none,format=raw,id=vd0" \
     -device virtio-blk-device,drive=vd0 \
     -netdev "dgram,id=net0,local.type=inet,local.host=127.0.0.1,local.port=$NETDEV_LOCAL_PORT,remote.type=inet,remote.host=127.0.0.1,remote.port=$NETDEV_REMOTE_PORT" \

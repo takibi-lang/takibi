@@ -115,7 +115,6 @@ QEMU_COMMAND=(
     -qmp "unix:$QMP_SOCKET,server=on,wait=off" \
     -chardev "socket,id=debug_uart,host=127.0.0.1,port=$QEMU_SERIAL_PORT,server=on,wait=off" \
     -serial chardev:debug_uart \
-    -global virtio-mmio.force-legacy=on \
     -drive "file=$SHELL_EXT2_IMAGE,if=none,format=raw,id=vd0" \
     -device virtio-blk-device,drive=vd0 \
     -kernel "$ELF"

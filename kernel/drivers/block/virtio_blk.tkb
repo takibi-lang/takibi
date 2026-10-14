@@ -1,12 +1,15 @@
-// QEMU virtio-blk legacy MMIO backend. The transport base is selected from
-// the boot DTB before this driver runs. The queue deliberately follows the
-// descriptor/avail/used layout used by kernel/drivers/net/virtio_net.tkb.
+// QEMU virtio-blk on the modern (Version 2) virtio-mmio transport. The
+// transport base is selected from the boot DTB before this driver runs. The
+// descriptor table and avail ring share virtio_blk_queue; the used ring is
+// its own region, read only through snapshots (kernel/drivers/virtio_used.tkb,
+// GitHub issue #740).
 
 use "kernel/drivers/virtio_ring.tkb";
 use "kernel/lib/mutex.tkb";
 use "kernel/drivers/block/virtio_blk_dma.tkb";
 
-const VIRTIO_BLK_PAGE_SIZE: usize = 4096;
+// The descriptor table (8 x 16 bytes) and the avail ring (22 bytes).
+const VIRTIO_BLK_QUEUE_BYTES: usize = 256;
 const VIRTIO_QNUM: isize = 8;
 const VIRTIO_BLK_DESC_F_NEXT: i32 = 1;
 const VIRTIO_BLK_DESC_F_WRITE: i32 = 2;
@@ -29,15 +32,6 @@ struct packed VirtioBlkAvail {
     idx: VirtioRingIndex;
     ring: [u16; VIRTIO_QNUM];
 }
-struct packed VirtioBlkUsedElem {
-    id: u32;
-    len: u32;
-}
-struct packed VirtioBlkUsed {
-    flags: u16;
-    idx: VirtioRingIndex;
-    ring: [VirtioBlkUsedElem; VIRTIO_QNUM];
-}
 struct packed VirtioBlkRequest {
     request_type: u32;
     reserved: u32;
@@ -52,7 +46,7 @@ let mut virtio_blk_ready: bool;
 // A reset that never completes leaves the submitted RX ranges device-owned.
 // Do not reinitialize the queue or reuse those buffers in that case.
 let mut virtio_blk_disabled: bool;
-let mut virtio_blk_queue: [u8; 2 * VIRTIO_BLK_PAGE_SIZE] align(4096);
+let mut virtio_blk_queue: [u8; VIRTIO_BLK_QUEUE_BYTES] align(64);
 // The request header, TX data, and RX data with its one-byte status are
 // protected allocations in virtio_blk_dma.tkb (#716, #717). The block-device TaskMutex
 // serializes whole commands; the slot's Mutex protects only token exchange.
@@ -114,32 +108,53 @@ fn virtio_blk_index_wrap_probe() -> bool {
            virtio_ring_index_next(last) == virtio_ring_index_zero();
 }
 
-fn virtio_blk_setup_queue() {
+// Queue 0 at its three addresses; false when the device offers fewer than
+// VIRTIO_QNUM entries or the used ring is not Ready.
+fn virtio_blk_setup_queue() -> bool !{unsafe} {
     virtio_blk_regs.queue_sel = 0;
+    if (virtio_blk_regs.queue_num_max < VIRTIO_QNUM as u32) { return false; }
     virtio_blk_regs.queue_num = VIRTIO_QNUM as i32;
-    virtio_blk_regs.queue_align = VIRTIO_BLK_PAGE_SIZE as i32;
-    let address: usize = (virtio_blk_queue as *u8) as usize;
-    virtio_blk_regs.queue_pfn =
-        (address / VIRTIO_BLK_PAGE_SIZE) as i32;
+    let used: usize = virtio_used_go(VIRTIO_USED_BLK);
+    if (used == 0) { return false; }
+    let desc: usize = (virtio_blk_queue as *u8) as usize;
+    let avail: usize = desc + (VIRTIO_QNUM as usize) * sizeof(VirtioBlkDesc);
+    virtio_blk_regs.queue_desc_low = (desc & 0xFFFFFFFF) as u32;
+    virtio_blk_regs.queue_desc_high = (desc >> 32) as u32;
+    virtio_blk_regs.queue_driver_low = (avail & 0xFFFFFFFF) as u32;
+    virtio_blk_regs.queue_driver_high = (avail >> 32) as u32;
+    virtio_blk_regs.queue_device_low = (used & 0xFFFFFFFF) as u32;
+    virtio_blk_regs.queue_device_high = (used >> 32) as u32;
+    virtio_blk_regs.queue_ready = 1;
+    return true;
 }
 
 fn virtio_blk_init() -> bool !{unsafe} {
     if (virtio_blk_disabled) { return false; }
     if (virtio_blk_ready) { return true; }
     if (virtio_blk_base == 0) { return false; }
+    if (virtio_blk_regs.version != VIRTIO_MMIO_VERSION_MODERN) { return false; }
     if (virtio_blk_reset() == false) { return false; }
+    if (virtio_blk_used_claim() == false) { return false; }
     // A previous timed-out request may have left ring indices and descriptors
     // behind. Reset returns queue ownership before the next initialization.
-    for i: usize in 0..<2 * VIRTIO_BLK_PAGE_SIZE {
+    for i: usize in 0..<VIRTIO_BLK_QUEUE_BYTES {
         virtio_blk_queue[i] = 0;
     }
-    virtio_blk_regs.status = 1;
-    virtio_blk_regs.status = 3;
-    virtio_blk_regs.guest_features = 0;
-    virtio_blk_regs.guest_page_size =
-        VIRTIO_BLK_PAGE_SIZE as i32;
-    virtio_blk_setup_queue();
-    virtio_blk_regs.status = 7;
+    let base_status: i32 = VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER;
+    virtio_blk_regs.status = VIRTIO_STATUS_ACKNOWLEDGE;
+    virtio_blk_regs.status = base_status;
+    virtio_blk_regs.driver_features_sel = 0;
+    virtio_blk_regs.driver_features = 0;
+    virtio_blk_regs.driver_features_sel = 1;
+    virtio_blk_regs.driver_features = VIRTIO_F_VERSION_1_HIGH;
+    virtio_blk_regs.status = base_status | VIRTIO_STATUS_FEATURES_OK;
+    if ((virtio_blk_regs.status & VIRTIO_STATUS_FEATURES_OK) == 0 ||
+        virtio_blk_setup_queue() == false) {
+        virtio_blk_regs.status = VIRTIO_STATUS_FAILED;
+        return false;
+    }
+    virtio_blk_regs.status = base_status | VIRTIO_STATUS_FEATURES_OK |
+                             VIRTIO_STATUS_DRIVER_OK;
     virtio_blk_used_seen = virtio_ring_index_zero();
     virtio_blk_ready = true;
     return true;
@@ -148,6 +163,13 @@ fn virtio_blk_init() -> bool !{unsafe} {
 // The only writer of a descriptor's address and length: both
 // come from one span, which dma_device_span proved inside its
 // allocation (GitHub issue #623).
+// A device span's address for a virtio queue register: QEMU virt's DMA
+// addresses are physical, with no bus offset. Shared with
+// kernel/drivers/virtio_used.tkb, which builds on both targets.
+fn virtio_span_address(span: borrow DmaDeviceSpan) -> usize !{unsafe} {
+    return unsafe { dma_span_address(span) };
+}
+
 private fn virtio_blk_desc_span(descs: *VirtioBlkDesc, index: isize,
                                    span: borrow DmaDeviceSpan) !{unsafe} {
     descs[index].addr = unsafe { dma_span_address(span) };
@@ -259,15 +281,12 @@ private fn virtio_blk_submit_owned(request_type: u32, sector: u32,
             // timeout, returns the receive range to the CPU.
             let mut snapshot: VirtioBlkTimeoutSnapshot = {
                 (avail.idx as u16) as usize,
-                (unsafe { ((queue + (VIRTIO_BLK_PAGE_SIZE as isize))
-                           as *io VirtioBlkUsed) }.idx as u16) as usize,
+                virtio_blk_used_index(),
                 (virtio_blk_used_seen as u16) as usize,
                 virtio_blk_regs.status as usize,
                 virtio_blk_regs.interrupt_status as usize,
                 0 };
-            snapshot.used_at_reset =
-                (unsafe { ((queue + (VIRTIO_BLK_PAGE_SIZE as isize))
-                           as *io VirtioBlkUsed) }.idx as u16) as usize;
+            snapshot.used_at_reset = virtio_blk_used_index();
             if (virtio_blk_timeouts == 0) { virtio_blk_timeout_first = snapshot; }
             virtio_blk_timeout_last = snapshot;
             virtio_blk_timeouts = virtio_blk_timeouts + 1;

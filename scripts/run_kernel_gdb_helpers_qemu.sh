@@ -18,7 +18,6 @@ resource_lease_vcpu_acquire "$TAKIBI_QEMU_SMP"
     -machine virt -cpu cortex-a53 -smp "$TAKIBI_QEMU_SMP" -m 1024 -display none -monitor none \
     -serial "file:$ARTIFACT_DIR/serial.log" \
     -gdb "tcp:127.0.0.1:$GDB_PORT" -S \
-    -global virtio-mmio.force-legacy=on \
     -kernel "$ELF" >"$ARTIFACT_DIR/qemu.log" 2>&1 &
 QEMU_PID=$!
 trap 'kill "$QEMU_PID" 2>/dev/null || true; wait "$QEMU_PID" 2>/dev/null || true' EXIT

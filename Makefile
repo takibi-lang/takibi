@@ -367,6 +367,7 @@ KERNEL_UNUSED_CHECKED := \
 	kernel/arch/arm64/mm/asid.tkb \
 	kernel/arch/arm64/mm/mmu.tkb \
 	kernel/drivers/virtio_ring.tkb \
+	kernel/drivers/virtio_used.tkb \
 	kernel/drivers/serial/pl011.tkb \
 	kernel/drivers/serial/uart_rx_ring.tkb \
 	kernel/drivers/serial/terminal.tkb \
@@ -538,9 +539,9 @@ $(LINUX_USER_DIR)/gem_tx_wait/gem_tx_wait_exe.o: kernel/drivers/net/gem_tx_wait.
 $(LINUX_USER_DIR)/gem_tx_wait/gem_tx_wait_exe.o: LINUX_USER_EXTRA_SRCS := kernel/drivers/net/gem_tx_wait.tkb
 _build/virtio-net-native/driver.tkb: kernel/drivers/net/virtio_net.tkb scripts/build_virtio_net_native_fixture.py
 	python3 scripts/build_virtio_net_native_fixture.py $< $@
-$(LINUX_USER_DIR)/virtio_net_tx/virtio_net_tx_exe.o $(LINUX_USER_DIR)/virtio_net_reply/virtio_net_reply_exe.o: _build/virtio-net-native/driver.tkb kernel/drivers/net/virtio_net.tkb kernel/drivers/net/virtio_net_tx_wait.tkb kernel/drivers/net/virtio_net_tx_dma.tkb kernel/drivers/virtio_ring.tkb kernel/lib/init_once.tkb kernel/lib/mutex.tkb kernel/lib/spinlock.tkb $(LINUX_USER_DIR)/virtio_net_tx/support.tkb
+$(LINUX_USER_DIR)/virtio_net_tx/virtio_net_tx_exe.o $(LINUX_USER_DIR)/virtio_net_reply/virtio_net_reply_exe.o: _build/virtio-net-native/driver.tkb kernel/drivers/net/virtio_net.tkb kernel/drivers/net/virtio_net_tx_wait.tkb kernel/drivers/net/virtio_net_tx_dma.tkb kernel/drivers/virtio_ring.tkb kernel/drivers/virtio_used.tkb kernel/lib/init_once.tkb kernel/lib/mutex.tkb kernel/lib/spinlock.tkb $(LINUX_USER_DIR)/virtio_net_tx/support.tkb
 $(LINUX_USER_DIR)/virtio_net_tx/virtio_net_tx_exe.o $(LINUX_USER_DIR)/virtio_net_reply/virtio_net_reply_exe.o: LINUX_USER_EXTRA_SRCS := _build/virtio-net-native/driver.tkb $(LINUX_USER_DIR)/virtio_net_tx/support.tkb
-$(LINUX_USER_DIR)/virtio_net_tx/virtio_net_tx_exe.o $(LINUX_USER_DIR)/virtio_net_reply/virtio_net_reply_exe.o: LINUX_USER_EXTRA_FLAGS := --regions --device-semantics-file kernel/drivers/net/virtio_net_tx_dma.tkb
+$(LINUX_USER_DIR)/virtio_net_tx/virtio_net_tx_exe.o $(LINUX_USER_DIR)/virtio_net_reply/virtio_net_reply_exe.o: LINUX_USER_EXTRA_FLAGS := --regions --device-semantics-file kernel/drivers/net/virtio_net_tx_dma.tkb --device-semantics-file kernel/drivers/virtio_used.tkb
 $(LINUX_USER_DIR)/tcp_parse/tcp_parse_exe.o: $(LINUX_USER_DIR)/common/inet_checksum.tkb $(LINUX_USER_DIR)/common/netutil.tkb
 $(LINUX_USER_DIR)/byte_slice/byte_slice_exe.o: kernel/lib/byte_slice.tkb
 # GitHub issue #470: the kernel's device-tree reader, run against a blob

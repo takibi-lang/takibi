@@ -21,7 +21,7 @@ def main():
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=False)
     shutil.copyfile(args.image, args.output/'ext2.img')
-    cmd = [QEMU, '-machine', 'virt', '-cpu', 'cortex-a53', "-smp", str(smp), '-m', '1024', '-display', 'none', '-monitor', 'none', '-global', 'virtio-mmio.force-legacy=on', '-chardev', f'socket,id=uart,host=127.0.0.1,port={args.uart},server=on,wait=on', '-serial', 'chardev:uart', '-drive', f'file={args.output}/ext2.img,if=none,format=raw,id=vd0', '-device', 'virtio-blk-device,drive=vd0', '-kernel', str(args.elf)]
+    cmd = [QEMU, '-machine', 'virt', '-cpu', 'cortex-a53', "-smp", str(smp), '-m', '1024', '-display', 'none', '-monitor', 'none', '-chardev', f'socket,id=uart,host=127.0.0.1,port={args.uart},server=on,wait=on', '-serial', 'chardev:uart', '-drive', f'file={args.output}/ext2.img,if=none,format=raw,id=vd0', '-device', 'virtio-blk-device,drive=vd0', '-kernel', str(args.elf)]
     with (args.output/'qemu.log').open('w') as log:
         process = subprocess.Popen(cmd, stdout=log, stderr=log)
         try:

@@ -53,7 +53,7 @@ uart.write_bytes(b'')
 marker = 'probe-ticks: missing-peer controls complete'
 command = [str(root / 'scripts/qemu.sh'), '-machine', 'virt', '-cpu', 'cortex-a53',
            '-smp', os.environ['TAKIBI_QEMU_SMP'], '-m', '1024', '-display', 'none', '-monitor', 'none',
-           '-serial', 'file:' + str(uart), '-global', 'virtio-mmio.force-legacy=on',
+           '-serial', 'file:' + str(uart),
            '-drive', f'file={disk},if=none,format=raw,id=vd0',
            '-device', 'virtio-blk-device,drive=vd0',
            '-netdev', 'hubport,id=net0,hubid=0',

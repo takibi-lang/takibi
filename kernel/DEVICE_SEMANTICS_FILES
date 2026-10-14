@@ -15,3 +15,6 @@ kernel/drivers/net/virtio_net_tx_dma.tkb
 
 # The RP1 GEM descriptor rings: ownership and USED bits, confirmed TX halt.
 kernel/drivers/net/rp1_gem_desc.tkb
+
+# The modern virtio-mmio used rings: a copy grants nothing; a confirmed reset quiesces.
+kernel/drivers/virtio_used.tkb
