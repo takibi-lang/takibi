@@ -98,8 +98,8 @@ list (maintainer, 2026-10-09).
    RPi5). **Next:** the next #672 layer, section regions (#777, awaiting its
    decision): the linker-bounded stacks and the DTB blob as regions, which
    would take stack_poison.tkb's last integer ranges away. Not on the critical path: #748 (allocator time, 2.75x
-   slower since the per-page places), #739 (stale list entries, per-file
-   counts). Consolidating the kernel-driven built-ins into general features
+   slower since the per-page places). `make raw-site-counts` prints each
+   listed file's raw sites to choose the next one to migrate (#739). Consolidating the kernel-driven built-ins into general features
    is #750 (holder-tied identities, option C, is its central item; a
    shrink protocol for RegionPools walked with no lock belongs there). For #720
    (B): the doorbell, ERDP-release and stop/reset boundaries are in place;

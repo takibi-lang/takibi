@@ -23659,6 +23659,52 @@ let raw_authority_policy_tests = [
             contains_substring message "an address becomes a region")
           (Raw_authority_policy.check ~source_program ~mint_files:[file] ()))));
 
+  (* GitHub issue #739: the mint list is a ratchet; a stale entry fails. *)
+  Alcotest.test_case "stale mint-list entries are rejected" `Quick
+    (fun () ->
+      let dir = Filename.concat (Filename.get_temp_dir_name ())
+          (Printf.sprintf "takibi-739-%d" (Unix.getpid ())) in
+      (try Unix.mkdir dir 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
+      let write name =
+        let path = Filename.concat dir name in
+        let out = open_out path in output_string out "// fixture\n"; close_out out; path in
+      let mint = write "mint.tkb" and quiet = write "quiet.tkb" and other = write "other.tkb" in
+      ignore (infer_files [(mint, "fn load(pointer: *usize) -> usize { return *pointer; }");
+        (quiet, "fn safe() -> usize { return 42; }")]);
+      let stale mint_files = Raw_authority_policy.stale_entries
+          ~compiled_files:[mint; quiet] ~mint_files () in
+      Alcotest.(check int) "file with a raw site accepted" 0 (List.length (stale [mint]));
+      Alcotest.(check int) "file another target compiles is skipped" 0
+        (List.length (stale [mint; other]));
+      (match stale [mint; quiet] with
+       | [(entry, message)] ->
+           Alcotest.(check string) "names the compiled file without sites" quiet entry;
+           Alcotest.(check bool) "no raw site diagnostic" true
+             (contains_substring message "holds no raw site")
+       | errors -> Alcotest.failf "expected one stale entry, got %d" (List.length errors));
+      let missing = Filename.concat dir "gone.tkb" in
+      (match stale [mint; missing] with
+       | [(entry, message)] ->
+           Alcotest.(check string) "names the missing file" missing entry;
+           Alcotest.(check bool) "missing diagnostic" true
+             (contains_substring message "does not exist")
+       | errors -> Alcotest.failf "expected one missing entry, got %d" (List.length errors));
+      List.iter Sys.remove [mint; quiet; other]; Unix.rmdir dir);
+
+  Alcotest.test_case "raw-site counts cover declared and undeclared files" `Quick
+    (fun () ->
+      let source = "fn attach() !{unsafe} { let mapped = region_bytes_assume(4096, 64); } fn main() -> usize { return 42; }" in
+      let source_program = parse source in
+      ignore (infer_files [("mint.tkb", "fn load(pointer: *usize) -> usize { return *pointer; } fn load2(pointer: *usize) -> usize { return *pointer; }");
+        ("quiet.tkb", "fn safe() -> usize { return 42; }")]);
+      let counts = Raw_authority_policy.site_counts ~source_program () in
+      Alcotest.(check (option int)) "two dereferences counted" (Some 2)
+        (List.assoc_opt (Raw_authority_policy.normalize "mint.tkb") counts);
+      Alcotest.(check (option int)) "file without sites absent" None
+        (List.assoc_opt (Raw_authority_policy.normalize "quiet.tkb") counts);
+      Alcotest.(check int) "address mint counted" 3
+        (List.fold_left (fun total (_, n) -> total + n) 0 counts));
+
   Alcotest.test_case "generic access retains its original mint file" `Quick
     (fun () ->
       ignore (infer_files [("mint.tkb", "fn load(T: type, pointer: *T) -> T { return *pointer; }");

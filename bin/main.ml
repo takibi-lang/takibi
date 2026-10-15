@@ -67,6 +67,7 @@ let () =
   let emit_depfile = ref "" in
   let emit_overflow_audit = ref "" in
   let emit_raw_deref_audit = ref "" in
+  let emit_raw_site_counts = ref "" in
   let emit_held_guards = ref "" in
   let emit_effect_matrix = ref false in
   let emit_tla = ref "" in
@@ -133,6 +134,13 @@ let () =
            exit 1
          );
          emit_raw_deref_audit := Sys.argv.(!i)
+     | "--emit-raw-site-counts" ->
+         incr i;
+         if !i >= Array.length Sys.argv then (
+           Printf.eprintf "Error: --emit-raw-site-counts requires a path\n";
+           exit 1
+         );
+         emit_raw_site_counts := Sys.argv.(!i)
      | "--emit-tla" ->
          incr i;
          if !i >= Array.length Sys.argv then (
@@ -228,7 +236,7 @@ let () =
 
   if input_files = [] then (
     Printf.eprintf
-      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--frame-pointers] [--function-sections] [--forbid-trap] [--forbid-unsafe] [--confine-raw-authority] [--raw-mint-file <path>] [--device-semantics-file <path>] [--regions] [--reject-unused-functions] [--external-entry <function>] [--check-unused-file <path>] [--explain-inference] [--emit-effect-matrix] [--emit-exception-frame-offsets <StructName>] [--emit-struct-layout <StructName>] [--emit-debug-metadata <path>] [--emit-depfile <path>] [--emit-overflow-audit <path>] [--emit-raw-deref-audit <path>] [--emit-held-guards <path>] [--emit-tla <dir>] [--emit-protocol-source <dir>] [--version]\n"
+      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--frame-pointers] [--function-sections] [--forbid-trap] [--forbid-unsafe] [--confine-raw-authority] [--raw-mint-file <path>] [--device-semantics-file <path>] [--regions] [--reject-unused-functions] [--external-entry <function>] [--check-unused-file <path>] [--explain-inference] [--emit-effect-matrix] [--emit-exception-frame-offsets <StructName>] [--emit-struct-layout <StructName>] [--emit-debug-metadata <path>] [--emit-depfile <path>] [--emit-overflow-audit <path>] [--emit-raw-deref-audit <path>] [--emit-raw-site-counts <path>] [--emit-held-guards <path>] [--emit-tla <dir>] [--emit-protocol-source <dir>] [--version]\n"
       Sys.argv.(0);
     exit 1
   );
@@ -292,6 +300,7 @@ let () =
       Use_resolver.write_depfile !emit_depfile !output_file
         (List.map fst resolved);
 
+    let compiled_files = List.map fst resolved in
     let prog = List.concat_map snd resolved in
     (* GitHub issue #720: protocol declarations are validated once here and
        removed before every later pass; --emit-tla writes each one's model
@@ -409,7 +418,20 @@ let () =
     if !confine_raw_authority then begin
       let errors = Raw_authority_policy.check ~source_program:source_prog ~mint_files:!raw_mint_files () in
       List.iter (fun (loc, message) -> report_error loc message) errors;
-      if errors <> [] then exit 1
+      (* GitHub issue #739: the mint list is a ratchet; an entry that no
+         longer exists or holds no raw site is rejected. *)
+      let stale = Raw_authority_policy.stale_entries ~source_program:source_prog
+          ~compiled_files ~mint_files:!raw_mint_files () in
+      List.iter (fun (_, message) -> Printf.eprintf "Error: %s\n" message) stale;
+      if errors <> [] || stale <> [] then exit 1
+    end;
+    (* GitHub issue #739: per-file raw-site counts, declared or not, for
+       choosing the next file to leave the mint list. *)
+    if !emit_raw_site_counts <> "" then begin
+      let out = open_out !emit_raw_site_counts in
+      List.iter (fun (file, n) -> Printf.fprintf out "%d\t%s\n" n file)
+        (Raw_authority_policy.site_counts ~source_program:source_prog ());
+      close_out out
     end;
 
     if !reject_unused_functions then begin

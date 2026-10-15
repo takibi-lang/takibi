@@ -141,3 +141,45 @@ let check ?(source_program = []) ~mint_files () =
     compare (Ast.source_file_of_loc left, left.pos_lnum, left.pos_cnum, a)
       (Ast.source_file_of_loc right, right.pos_lnum, right.pos_cnum, b))
       (raw @ unsafe @ references @ address_mints)
+
+(* GitHub issue #739: every counted raw site, declared or not, keyed by its
+   normalized source file. The compiler's own virtual files are left out:
+   they are never a mint-list entry. *)
+let site_counts ?(source_program = []) () =
+  let files =
+    List.map (fun site -> site.Type_inf.raw_file) (Type_inf.raw_deref_sites ())
+    @ List.map (fun (loc, _) -> Ast.source_file_of_loc loc)
+        (Type_inf.raw_reference_mint_sites ())
+    @ List.map (fun (loc, _) -> Ast.source_file_of_loc loc)
+        (Type_inf.unsafe_authority_sites () @ source_assertions source_program
+         |> List.fold_left (fun sites (loc, name) ->
+              Sites.add (Ast.source_file_of_loc loc, loc.Lexing.pos_lnum, loc.pos_cnum)
+                (loc, name) sites) Sites.empty
+         |> Sites.bindings |> List.map snd)
+    @ List.map (fun (loc, _) -> Ast.source_file_of_loc loc)
+        (address_mint_sites source_program) in
+  let counts = List.fold_left (fun counts file ->
+    if file = Ast.builtin_region_file || String.starts_with ~prefix:"<protocol " file
+    then counts else
+      let key = normalize file in
+      let n = Option.value ~default:0 (List.assoc_opt key counts) in
+      (key, n + 1) :: List.remove_assoc key counts) [] files in
+  List.sort compare counts
+
+(* GitHub issue #739: a mint-list entry is stale when its file no longer
+   exists, or when this compilation reads it and it holds no counted raw
+   site. A file another target compiles (qemu vs rpi5 device_map) is not
+   read here and is skipped. Returns (entry, message) pairs. *)
+let stale_entries ?(source_program = []) ~compiled_files ~mint_files () =
+  let compiled = List.fold_left (fun paths file -> Paths.add (normalize file) paths)
+      Paths.empty compiled_files in
+  let counts = site_counts ~source_program () in
+  List.sort_uniq compare mint_files |> List.filter_map (fun entry ->
+    let key = normalize entry in
+    if not (Sys.file_exists entry) then
+      Some (entry, Printf.sprintf
+        "raw-authority confinement: mint file '%s' does not exist; remove it from the mint list" entry)
+    else if Paths.mem key compiled && not (List.mem_assoc key counts) then
+      Some (entry, Printf.sprintf
+        "raw-authority confinement: mint file '%s' holds no raw site; remove it from the mint list" entry)
+    else None)

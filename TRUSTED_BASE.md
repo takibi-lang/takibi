@@ -86,6 +86,10 @@ MMIO, DMA, and context-switching code still require reviewed unsafe sites.
 raw-field reference mints, local unsafe assertions and calls of
 `region_bytes_assume` to explicitly declared mint files (`--raw-mint-file`).
 Both maintained kernels build with it; their list is `kernel/RAW_MINT_FILES`.
+The list is a ratchet the compiler enforces: an entry that does not exist, or
+that this compilation reads and that holds no counted site, is rejected (a
+file only the other target compiles is skipped). `--emit-raw-site-counts`
+writes per-file site counts, and `make raw-site-counts` prints both kernels'.
 Calling a mint does not grant the caller raw access. Authority-indexed reference
 returns carry the existing local loan checks into ordinary field consumers;
 raw-to-reference conversion is an unsafe assertion within the mint boundary.
