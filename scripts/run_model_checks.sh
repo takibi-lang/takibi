@@ -140,6 +140,12 @@ check_model DmaTxReadBorrow Safety 7 \
     writewhileposted:CInitWriteWhilePosted:DeviceReadsPosted:violated \
     noclean:CInitNoClean:DeviceReadsPosted:violated:4
 
+check_model PacketReserve Safety 8 \
+    fixed:CInitFixed:pass:ok \
+    gem:CInitGem:pass:ok \
+    reserveone:CInitReserveOne:RingNeverDrains:violated:12 \
+    noreserve:CInitNoReserve:RingNeverDrains:violated:12
+
 check_model WorldStop NoUnstoppedRead 8 \
     fixed:CInitFixed:pass:ok \
     subset:CInitSubset:NoUnstoppedRead:violated \

@@ -75,6 +75,16 @@ private linear struct NetTxInFlight[pb: addr, po: usize] {
 }
 
 private linear view NetRxCanAcquire;
+// A packet kept past its RX turn (#740, the RX capability split).
+// net_rx_keep parks the Filled buffer in its pool slot as Kept and returns
+// the capability; the stack names the packet by its slot (net_rx_slot) and
+// takes this owner out with net_packet_kept_claim. Its free only returns
+// the buffer to the slot Free; RX is rearmed by the next capability holder.
+private linear struct NetPacketKept[pb: addr, po: usize] {
+    private len: {0..<1515 as i32};
+    private index: usize;
+    private pkt: GemPkt_Filled[pb, po, 1];
+}
 
 variant GemTxClaim { Down; Ready; }
 must_use variant NetInitResult { Failed; Ready(NetRxCanAcquire); }
@@ -82,6 +92,22 @@ variant NetRxAcquire {
     None(NetRxCanAcquire);
     Acquired(exists pb: addr. exists po: usize. NetPacket[pb, po]);
 }
+// Kept: the packet is parked Kept in its slot and the capability is back.
+// Refused: the pool is at its reserve; the caller copies and releases.
+must_use variant NetRxKeep {
+    Kept(NetRxCanAcquire);
+    Refused(exists pb: addr. exists po: usize. NetPacket[pb, po]);
+}
+variant NetKeptClaim {
+    None;
+    Claimed(exists pb: addr. exists po: usize. NetPacketKept[pb, po]);
+}
+
+// Buffers outside the kept set that keeping must leave, so that RX stays
+// armed (kernel/models/PacketReserve.tla).
+const GEM_PKT_RESERVE: usize = 2;
+// Each Kept slot's frame length, set by net_rx_keep.
+private let mut gem_pkt_kept_len: [{0..<1515 as i32}; 4];
 
 fn net_rx_packet(len: {0..<1515 as i32}, index: usize,
                  pkt: GemPkt_Filled[pb, po, 1]) -> NetPacket[pb, po] {
@@ -221,6 +247,7 @@ fn gem_rearm_rx() -> bool !{unsafe} {
         GemPktHeld::RxPosted(p) => { gem_pkt_park(index, GemPktHeld::RxPosted(p)); return false; }
         GemPktHeld::TxPosted(p) => { gem_pkt_park(index, GemPktHeld::TxPosted(p)); return false; }
         GemPktHeld::Unconfirmed(p) => { gem_pkt_park(index, GemPktHeld::Unconfirmed(p)); return false; }
+        GemPktHeld::Kept(p) => { gem_pkt_park(index, GemPktHeld::Kept(p)); return false; }
     };
     match GemPkt_gem_pkt_post_rx(free) {
         GemPkt_gem_pkt_post_rx_Result::RxPosted(posted) => {
@@ -418,6 +445,8 @@ fn net_rx_wait() !{may_block} {
 
 fn net_rx_acquire(ready: sink NetRxCanAcquire) -> NetRxAcquire !{unsafe} {
     if (gem_rx_ring_poll() == false) {
+        // No frame, but a buffer freed off-turn rearms RX here.
+        gem_rearm_rx();
         return NetRxAcquire::None(view NetRxCanAcquire);
     }
     let len: i32 = gem_rx_ring_finish();
@@ -433,6 +462,7 @@ fn net_rx_acquire(ready: sink NetRxCanAcquire) -> NetRxAcquire !{unsafe} {
         GemPktHeld::Free(p) => { gem_pkt_lost(GemPktHeld::Free(p)); return NetRxAcquire::None(view NetRxCanAcquire); }
         GemPktHeld::TxPosted(p) => { gem_pkt_lost(GemPktHeld::TxPosted(p)); return NetRxAcquire::None(view NetRxCanAcquire); }
         GemPktHeld::Unconfirmed(p) => { gem_pkt_lost(GemPktHeld::Unconfirmed(p)); return NetRxAcquire::None(view NetRxCanAcquire); }
+        GemPktHeld::Kept(p) => { gem_pkt_lost(GemPktHeld::Kept(p)); return NetRxAcquire::None(view NetRxCanAcquire); }
     };
     match GemPkt_gem_pkt_received(posted) {
         GemPkt_gem_pkt_received_Outcome::PktEmpty => {
@@ -492,6 +522,72 @@ fn net_rx_release(packet: sink NetPacket[pb, po]) -> NetRxCanAcquire !{unsafe} {
     let index: usize = packet.index;
     gem_pkt_recycle_at(index, packet.pkt);
     return view NetRxCanAcquire;
+}
+
+// The packet's pool slot: the name a kept packet is claimed by.
+fn net_rx_slot(packet: borrow NetPacket[pb, po]) -> usize {
+    return packet.index;
+}
+
+// Keep the packet past this RX turn, unless that would leave fewer than
+// GEM_PKT_RESERVE buffers outside the kept set.
+fn net_rx_keep(packet: sink NetPacket[pb, po]) -> NetRxKeep {
+    if (gem_pkt_out_count() > GEM_PKTS - GEM_PKT_RESERVE) {
+        return NetRxKeep::Refused(packet);
+    }
+    let index: usize = packet.index;
+    if (index < GEM_PKTS) { gem_pkt_kept_len[index] = packet.len; }
+    gem_pkt_park(index, GemPktHeld::Kept(packet.pkt));
+    return NetRxKeep::Kept(view NetRxCanAcquire);
+}
+
+// Any core, no capability: the Kept packet in `index`, taken out.
+fn net_packet_kept_claim(index: usize) -> NetKeptClaim {
+    if (index >= GEM_PKTS) { return NetKeptClaim::None; }
+    let Place::Full(held) = gem_pkt_take(index) else {
+        Place::Empty => { return NetKeptClaim::None; }
+    };
+    let GemPktHeld::Kept(pkt) = held else {
+        GemPktHeld::Free(p) => { gem_pkt_park(index, GemPktHeld::Free(p)); return NetKeptClaim::None; }
+        GemPktHeld::RxPosted(p) => { gem_pkt_park(index, GemPktHeld::RxPosted(p)); return NetKeptClaim::None; }
+        GemPktHeld::TxPosted(p) => { gem_pkt_park(index, GemPktHeld::TxPosted(p)); return NetKeptClaim::None; }
+        GemPktHeld::Unconfirmed(p) => { gem_pkt_park(index, GemPktHeld::Unconfirmed(p)); return NetKeptClaim::None; }
+    };
+    let len: {0..<1515 as i32} = gem_pkt_kept_len[index];
+    return NetKeptClaim::Claimed(net_packet_kept(len, index, pkt));
+}
+
+private fn net_packet_kept(len: {0..<1515 as i32}, index: usize,
+                           pkt: GemPkt_Filled[pb, po, 1]) -> NetPacketKept[pb, po] {
+    let mut kept: NetPacketKept[pb, po] = { len, index, pkt };
+    return kept;
+}
+
+fn net_packet_kept_len(kept: borrow NetPacketKept[pb, po]) -> {0..<1515 as i32} {
+    return kept.len;
+}
+
+fn net_packet_kept_frame(kept: borrow NetPacketKept[pb, po]) -> [u8; 1514..] @ pb {
+    let bytes = GemPkt_Filled_bytes(kept.pkt, 0);
+    return bytes[0..<1514];
+}
+
+// Any core, no capability: the buffer goes back to its slot Free. RX is
+// not touched.
+fn net_packet_free(kept: sink NetPacketKept[pb, po]) {
+    let index: usize = kept.index;
+    gem_pkt_park(index, GemPktHeld::Free(GemPkt_gem_pkt_recycle(kept.pkt)));
+}
+
+// A kept packet sent back out in place, in a later RX turn.
+fn net_packet_kept_send(ready: sink NetRxCanAcquire, kept: sink NetPacketKept[pb, po],
+                        len: i32) -> NetRxCanAcquire !{may_block, unsafe} {
+    net_shutdown(ready);
+    let safe_len: {0..<1515 as i32} = max(min(len, 1514), 0);
+    let index: usize = kept.index;
+    let pkt = kept.pkt;
+    let mut reply: NetRxReplyReady[pb, po] = { safe_len, index, pkt };
+    return net_rx_send_reply(reply);
 }
 
 fn net_rx_reply_ready(frame: sink NetPacket[pb, po], len: i32)
@@ -620,6 +716,7 @@ private fn gem_tx_unconfirmed(index: usize) !{unsafe} {
         GemPktHeld::Free(p) => { gem_pkt_lost(GemPktHeld::Free(p)); return; }
         GemPktHeld::RxPosted(p) => { gem_pkt_lost(GemPktHeld::RxPosted(p)); return; }
         GemPktHeld::Unconfirmed(p) => { gem_pkt_lost(GemPktHeld::Unconfirmed(p)); return; }
+        GemPktHeld::Kept(p) => { gem_pkt_lost(GemPktHeld::Kept(p)); return; }
     };
     if (gem_halt()) {
         gem_tx_ring_mark_halted();
@@ -645,6 +742,7 @@ private fn gem_tx_finish(slot: {0..<2 as usize}, index: usize) !{may_block, unsa
             GemPktHeld::Free(p) => { gem_pkt_lost(GemPktHeld::Free(p)); return; }
             GemPktHeld::RxPosted(p) => { gem_pkt_lost(GemPktHeld::RxPosted(p)); return; }
             GemPktHeld::Unconfirmed(p) => { gem_pkt_lost(GemPktHeld::Unconfirmed(p)); return; }
+            GemPktHeld::Kept(p) => { gem_pkt_lost(GemPktHeld::Kept(p)); return; }
         };
         match GemPkt_gem_pkt_sent(posted) {
             GemPkt_gem_pkt_sent_Outcome::PktSent(witness) => {
@@ -736,6 +834,7 @@ private fn gem_send_built(bytes: borrow [u8; 1514..], safe_len: {0..<1515 as i32
         GemPktHeld::RxPosted(p) => { gem_pkt_park(index, GemPktHeld::RxPosted(p)); return; }
         GemPktHeld::TxPosted(p) => { gem_pkt_park(index, GemPktHeld::TxPosted(p)); return; }
         GemPktHeld::Unconfirmed(p) => { gem_pkt_park(index, GemPktHeld::Unconfirmed(p)); return; }
+        GemPktHeld::Kept(p) => { gem_pkt_park(index, GemPktHeld::Kept(p)); return; }
     };
     let out = GemPkt_Free_bytes(free, 0);
     slice_copy(out[0..<safe_len as usize], bytes[0..<safe_len as usize]);

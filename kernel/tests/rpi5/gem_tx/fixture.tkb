@@ -129,6 +129,7 @@ fn gem_pkt_tx_with_device() -> bool {
             Place::Full(held) => {
                 match held {
                     GemPktHeld::Free(p) => { gem_pkt_park(i, GemPktHeld::Free(p)); }
+                    GemPktHeld::Kept(p) => { gem_pkt_park(i, GemPktHeld::Kept(p)); }
                     GemPktHeld::RxPosted(p) => { gem_pkt_park(i, GemPktHeld::RxPosted(p)); }
                     GemPktHeld::TxPosted(p) => {
                         found = true;

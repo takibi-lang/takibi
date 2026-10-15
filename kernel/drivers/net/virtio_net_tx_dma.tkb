@@ -112,13 +112,15 @@ fn virtio_pkt_note_rx_used(used: VirtioRingIndex, seen: VirtioRingIndex) {
 
 fn virtio_pkt_published_address() -> usize { return virtio_pkt_addr; }
 
-// A buffer between operations: Free, or with the device. A Filled buffer
-// is never parked here; the stack holds it.
+// A buffer between operations: Free, with the device, or Kept. A Filled
+// buffer is parked here only as Kept; otherwise the stack holds it.
 variant VirtioPktHeld {
     Free(exists b: addr. exists o: usize. VirtioPkt_Free[b, o, 1]);
     RxPosted(exists b: addr. exists o: usize. exists r: usize. VirtioPkt_RxPosted[b, o, 1, r]);
     TxPosted(exists b: addr. exists o: usize. exists r: usize. VirtioPkt_TxPosted[b, o, 1, r]);
     Unconfirmed(exists b: addr. exists o: usize. exists r: usize. VirtioPkt_Unconfirmed[b, o, 1, r]);
+    // A packet the stack kept past its RX turn (#740), until claimed.
+    Kept(exists b: addr. exists o: usize. VirtioPkt_Filled[b, o, 1]);
 }
 
 struct VirtioPktSlot {
@@ -207,6 +209,30 @@ fn virtio_pkts_claim() -> bool {
     return true;
 }
 
+// How many buffers the stack has: empty slots (the packet of the current
+// RX turn, claimed kept packets) and slots parked Kept. Only the RX capability's holder
+// scans; an off-turn free only fills its own empty slot, so a count taken
+// during one can only be high, which refuses a keep, never wrongly allows
+// one.
+fn virtio_pkt_out_count() -> usize {
+    let mut out: usize = 0;
+    for i: usize in 0..<10 {
+        match virtio_pkt_take(i) {
+            Place::Empty => { out = out + 1; }
+            Place::Full(held) => {
+                match held {
+                    VirtioPktHeld::Kept(p) => { out = out + 1; virtio_pkt_park(i, VirtioPktHeld::Kept(p)); }
+                    VirtioPktHeld::Free(p) => { virtio_pkt_park(i, VirtioPktHeld::Free(p)); }
+                    VirtioPktHeld::RxPosted(p) => { virtio_pkt_park(i, VirtioPktHeld::RxPosted(p)); }
+                    VirtioPktHeld::TxPosted(p) => { virtio_pkt_park(i, VirtioPktHeld::TxPosted(p)); }
+                    VirtioPktHeld::Unconfirmed(p) => { virtio_pkt_park(i, VirtioPktHeld::Unconfirmed(p)); }
+                }
+            }
+        }
+    }
+    return out;
+}
+
 // A slot holding a Free buffer, or VIRTIO_PKT_NONE when none is free.
 fn virtio_pkt_free_index() -> usize {
     for i: usize in 0..<10 {
@@ -221,6 +247,7 @@ fn virtio_pkt_free_index() -> usize {
                     VirtioPktHeld::RxPosted(p) => { virtio_pkt_park(i, VirtioPktHeld::RxPosted(p)); }
                     VirtioPktHeld::TxPosted(p) => { virtio_pkt_park(i, VirtioPktHeld::TxPosted(p)); }
                     VirtioPktHeld::Unconfirmed(p) => { virtio_pkt_park(i, VirtioPktHeld::Unconfirmed(p)); }
+                    VirtioPktHeld::Kept(p) => { virtio_pkt_park(i, VirtioPktHeld::Kept(p)); }
                 }
             }
         }

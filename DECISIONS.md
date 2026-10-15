@@ -113,3 +113,6 @@ maintainer's judgment changed the course, kept so the pattern can be seen.
 - 2026-10-12 Landing .agents/ and .claude/ changes takes the light route. [active] #753
 - 2026-10-14 sched_yield is implemented as a plain reschedule; harnesses fail
   fast on an unimplemented-syscall line. [active] #665
+- 2026-10-15 RX capability split is option A (detached kept owner, holder refills,
+  spare reserve with copy fallback; ring never fully drained, TLA+-checked);
+  socket receive zero-copy waits for #497 measurement. [active] #740

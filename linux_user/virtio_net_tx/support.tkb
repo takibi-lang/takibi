@@ -64,9 +64,14 @@ fn expect_unconfirmed() !{may_block} {
 }
 
 fn receive(ready: sink NetRxCanAcquire) -> NetRxAcquire !{unsafe} {
+    return receive_id(ready, 0);
+}
+
+// The device's used entry naming RX descriptor `id`.
+fn receive_id(ready: sink NetRxCanAcquire, id: u32) -> NetRxAcquire !{unsafe} {
     let used: *VirtqUsedRing = unsafe { virtio_net_used_addr[0] as *VirtqUsedRing };
     let slot: {0..<8 as usize} = (((rx_used_seen as u16) as usize) % 8) as {0..<8 as usize};
-    used.ring[slot].id = 0;
+    used.ring[slot].id = id;
     used.ring[slot].len = 74;
     used.idx = virtio_ring_index_next(rx_used_seen);
     virtio_rx_irq_flag = 1;
@@ -133,6 +138,134 @@ fn drain_pool_tx_case(ready: sink NetRxCanAcquire) -> NetRxCanAcquire !{unsafe, 
           "the reply's TX completion refills the empty RX descriptor");
     virtio_pkt_park(a, held_a);
     virtio_pkt_park(b, held_b);
+    return ready;
+}
+
+// #740, the RX capability split: a kept packet's free, off-turn, touches
+// no descriptor; the next capability holder (acquire's None path) refills.
+fn keep_free_case(ready: sink NetRxCanAcquire) -> NetRxCanAcquire !{unsafe} {
+    let a: usize = virtio_pkt_free_index();
+    let Place::Full(held_a) = virtio_pkt_take(a) else {
+        Place::Empty => { check(false, "no first Free buffer"); return ready; }
+    };
+    let b: usize = virtio_pkt_free_index();
+    let Place::Full(held_b) = virtio_pkt_take(b) else {
+        Place::Empty => { check(false, "no second Free buffer"); virtio_pkt_park(a, held_a); return ready; }
+    };
+    let before: VirtioRingIndex = rx_avail_idx;
+    let NetRxAcquire::Acquired(pk) = receive(ready) else {
+        NetRxAcquire::None(cap) => {
+            check(false, "oracle RX frame was refused");
+            virtio_pkt_park(a, held_a); virtio_pkt_park(b, held_b);
+            return cap;
+        }
+    };
+    let slot: usize = net_rx_slot(pk);
+    let after = match net_rx_keep(pk) {
+        NetRxKeep::Kept(cap) => { cap }
+        NetRxKeep::Refused(p) => { check(false, "keep refused below the reserve"); net_rx_release(p) }
+    };
+    check(rx_avail_idx == before, "a kept packet leaves its emptied descriptor empty");
+    match net_packet_kept_claim(slot) {
+        NetKeptClaim::None => { check(false, "kept packet not claimable"); }
+        NetKeptClaim::Claimed(kept) => {
+            check(net_packet_kept_len(kept) == 62, "kept packet keeps its length");
+            net_packet_free(kept);
+        }
+    }
+    check(rx_avail_idx == before, "an off-turn free touches no descriptor");
+    virtio_rx_irq_flag = 0;
+    let ready = match net_rx_acquire(after) {
+        NetRxAcquire::None(cap) => { cap }
+        NetRxAcquire::Acquired(p) => { check(false, "no frame was due"); net_rx_release(p) }
+    };
+    check(rx_avail_idx == virtio_ring_index_next(before),
+          "the next capability holder refills after an off-turn free");
+    virtio_pkt_park(a, held_a);
+    virtio_pkt_park(b, held_b);
+    return ready;
+}
+
+// #740: with a packet kept and the pool empty, a standalone send's TX
+// completion (net_transmit_ready) refills the emptied descriptor.
+fn keep_send_case(ready: sink NetRxCanAcquire) -> NetRxCanAcquire !{unsafe, may_block} {
+    let a: usize = virtio_pkt_free_index();
+    let Place::Full(held_a) = virtio_pkt_take(a) else {
+        Place::Empty => { check(false, "no first Free buffer"); return ready; }
+    };
+    let b: usize = virtio_pkt_free_index();
+    let Place::Full(held_b) = virtio_pkt_take(b) else {
+        Place::Empty => { check(false, "no second Free buffer"); virtio_pkt_park(a, held_a); return ready; }
+    };
+    let before: VirtioRingIndex = rx_avail_idx;
+    let NetRxAcquire::Acquired(pk) = receive(ready) else {
+        NetRxAcquire::None(cap) => {
+            check(false, "oracle RX frame was refused");
+            virtio_pkt_park(a, held_a); virtio_pkt_park(b, held_b);
+            return cap;
+        }
+    };
+    let slot: usize = net_rx_slot(pk);
+    let after = match net_rx_keep(pk) {
+        NetRxKeep::Kept(cap) => { cap }
+        NetRxKeep::Refused(p) => { check(false, "keep refused below the reserve"); net_rx_release(p) }
+    };
+    // One buffer back for the send; parking it refills nothing.
+    virtio_pkt_park(a, held_a);
+    check(rx_avail_idx == before, "returning a buffer by itself refills nothing");
+    reset_clock(500, 100);
+    let ready = net_transmit_ready(after, packet as []u8, 64);
+    check(rx_avail_idx == virtio_ring_index_next(before),
+          "the standalone send's TX completion refills the empty RX descriptor");
+    match net_packet_kept_claim(slot) {
+        NetKeptClaim::None => { check(false, "kept packet not claimable"); }
+        NetKeptClaim::Claimed(kept) => { net_packet_free(kept); }
+    }
+    virtio_pkt_park(b, held_b);
+    return ready;
+}
+
+// #740: keeping stops at the reserve. Ten buffers and VIRTIO_PKT_RESERVE 2:
+// eight packets are kept (the eighth with the stack holding eight); the
+// ninth is refused, released, and every kept one is then freed.
+fn keep_reserve_case(ready_in: sink NetRxCanAcquire) -> NetRxCanAcquire !{unsafe} {
+    let mut ready = ready_in;
+    let mut slots: [usize; 9];
+    let mut kept_count: usize = 0;
+    let mut refused_count: usize = 0;
+    for i: usize in 0..<9 {
+        // Descriptor ids 0, 0, 1, ..., 7: descriptor 0 is refilled twice
+        // from the two Free buffers, then every descriptor once.
+        let mut id: u32 = 0;
+        if (i > 0) { id = (i - 1) as u32; }
+        match receive_id(ready, id) {
+            NetRxAcquire::None(cap) => { check(false, "oracle RX frame was refused"); ready = cap; }
+            NetRxAcquire::Acquired(pk) => {
+                slots[i] = net_rx_slot(pk);
+                match net_rx_keep(pk) {
+                    NetRxKeep::Kept(cap) => { kept_count = kept_count + 1; ready = cap; }
+                    NetRxKeep::Refused(p) => {
+                        refused_count = refused_count + 1;
+                        slots[i] = VIRTIO_PKT_NONE;
+                        ready = net_rx_release(p);
+                    }
+                }
+            }
+        }
+    }
+    check(kept_count == 8 && refused_count == 1, "keeping is refused at the reserve, not before");
+    for i: usize in 0..<9 {
+        match net_packet_kept_claim(slots[i]) {
+            NetKeptClaim::None => {}
+            NetKeptClaim::Claimed(kept) => { net_packet_free(kept); }
+        }
+    }
+    virtio_rx_irq_flag = 0;
+    let ready = match net_rx_acquire(ready) {
+        NetRxAcquire::None(cap) => { cap }
+        NetRxAcquire::Acquired(p) => { check(false, "no frame was due"); net_rx_release(p) }
+    };
+    check(virtio_pkt_out_count() == 0, "every kept buffer is back");
     return ready;
 }
 
@@ -213,6 +346,9 @@ fn run_initialized_case(ready: sink NetRxCanAcquire, reply_timeout: bool) !{may_
           "release of a held packet reposts no descriptor twice");
     let ready = drain_pool_case(ready);
     let ready = drain_pool_tx_case(ready);
+    let ready = keep_free_case(ready);
+    let ready = keep_send_case(ready);
+    let ready = keep_reserve_case(ready);
     reset_clock(500, 100);
     let ready = send_reply(ready);
     check(waits > 1 && timeout_logs == 0, "normal reply completes and reposts RX");

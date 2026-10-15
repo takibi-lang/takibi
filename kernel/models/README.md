@@ -324,14 +324,14 @@ the device may still read or write.
 | Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
 | --- | --- | --- | --- | --- |
 | `TakeCpu`, `PutCpu`, `PutDma` | `gem_pkt_take`, `gem_pkt_park`, and the guarded exchanges in `virtio_blk_receive_take`, `virtio_blk_receive_put`, `msc_csw_take`, `msc_csw_put`, `msc_data_take`, `msc_data_put`, `xhci_control_take`, and `xhci_control_put` | one serialized slot exchange and unique token storage, including a Device token stored after failed reset | lock instructions -- irrelevant to `UniqueAuthority`: the action assumes the exchange is serialized, which the driver lock must establish; buffer bytes -- irrelevant to `UniqueAuthority`: they hold no authority | `1d23caf13aff` |
-| `Submit` | `gem_send_built`, `gem_tx_start`, `net_transmit`, `net_transmit_ready`, `virtio_blk_submit_owned`, `virtio_blk_submit_header`, `virtio_blk_submit_write_data`, `msc_cbw_send_once`, `msc_data_send_once`, `usb_bulk_out`, `msc_csw_receive_once`, `msc_data_receive_once`, `xhci_receive_configuration`, `usb_bulk_xfer`, `usb_bulk_in`, `usb_ctrl_in` | preparation and submission transfer authority to the device | descriptor layout and cache instructions -- irrelevant to `UniqueAuthority`: neither can create another token; the device span -- irrelevant to `UniqueAuthority`: it only bounds which bytes the device may write | `78d6589ce73a` |
-| `ObserveCompletion` | `gem_tx_wait`, `gem_tx_slot_done`, `gem_tx_finish`, `virtio_blk_receive_settle_used`, `virtio_blk_used_pending`, `msc_cbw_send_once`, `msc_data_send_once`, `msc_csw_receive_once`, `msc_data_receive_once`, `xhci_receive_configuration`, `usb_bulk_xfer` | an observed final completion, including a completed error, ends writes to the request buffer | completion code values -- irrelevant to `NoCpuAccessWhileDeviceMayWrite`: every final completion ends device writes to this request buffer | `53322d1fbbcb` |
-| `Timeout` | `gem_tx_wait`, `gem_tx_finish`, `gem_tx_unconfirmed`, `virtio_blk_submit_owned`, `virtio_blk_receive_settle_used`, `msc_csw_receive_once`, `msc_data_receive_once`, `xhci_receive_configuration`, `usb_bulk_xfer` | a missing completion leaves device activity possible | timer arithmetic -- irrelevant to `NoCpuAccessWhileDeviceMayWrite`: elapsed time alone does not end device writes | `a4bd1f7ef3d7` |
-| `ConfirmReset` | `gem_halt`, `gem_tx_unconfirmed`, `virtio_blk_receive_settle_reset`, `virtio_blk_reset`, `msc_abort_unobserved_transfer`, `xhci_halt_and_reset` | confirmed reset ends device writes | register polling details -- irrelevant to `NoCpuAccessWhileDeviceMayWrite`: this action is enabled only after quiescence is confirmed | `a2526fb26342` |
-| `ResetFailed` | `gem_halt`, `gem_tx_unconfirmed`, `virtio_blk_receive_settle_reset`, `virtio_blk_reset`, `msc_abort_unobserved_transfer`, `xhci_halt_and_reset` | failure preserves possible device writes and forbids recovery | controller-specific failure codes -- irrelevant to `NoCpuAccessWhileDeviceMayWrite`: every failed reset leaves authority with the device | `a2526fb26342` |
+| `Submit` | `gem_send_built`, `gem_tx_start`, `net_transmit`, `net_transmit_ready`, `virtio_blk_submit_owned`, `virtio_blk_submit_header`, `virtio_blk_submit_write_data`, `msc_cbw_send_once`, `msc_data_send_once`, `usb_bulk_out`, `msc_csw_receive_once`, `msc_data_receive_once`, `xhci_receive_configuration`, `usb_bulk_xfer`, `usb_bulk_in`, `usb_ctrl_in` | preparation and submission transfer authority to the device | descriptor layout and cache instructions -- irrelevant to `UniqueAuthority`: neither can create another token; the device span -- irrelevant to `UniqueAuthority`: it only bounds which bytes the device may write | `6ed90793a9ff` |
+| `ObserveCompletion` | `gem_tx_wait`, `gem_tx_slot_done`, `gem_tx_finish`, `virtio_blk_receive_settle_used`, `virtio_blk_used_pending`, `msc_cbw_send_once`, `msc_data_send_once`, `msc_csw_receive_once`, `msc_data_receive_once`, `xhci_receive_configuration`, `usb_bulk_xfer` | an observed final completion, including a completed error, ends writes to the request buffer | completion code values -- irrelevant to `NoCpuAccessWhileDeviceMayWrite`: every final completion ends device writes to this request buffer | `bcb6805f2436` |
+| `Timeout` | `gem_tx_wait`, `gem_tx_finish`, `gem_tx_unconfirmed`, `virtio_blk_submit_owned`, `virtio_blk_receive_settle_used`, `msc_csw_receive_once`, `msc_data_receive_once`, `xhci_receive_configuration`, `usb_bulk_xfer` | a missing completion leaves device activity possible | timer arithmetic -- irrelevant to `NoCpuAccessWhileDeviceMayWrite`: elapsed time alone does not end device writes | `7fe88866c038` |
+| `ConfirmReset` | `gem_halt`, `gem_tx_unconfirmed`, `virtio_blk_receive_settle_reset`, `virtio_blk_reset`, `msc_abort_unobserved_transfer`, `xhci_halt_and_reset` | confirmed reset ends device writes | register polling details -- irrelevant to `NoCpuAccessWhileDeviceMayWrite`: this action is enabled only after quiescence is confirmed | `128c795b9cde` |
+| `ResetFailed` | `gem_halt`, `gem_tx_unconfirmed`, `virtio_blk_receive_settle_reset`, `virtio_blk_reset`, `msc_abort_unobserved_transfer`, `xhci_halt_and_reset` | failure preserves possible device writes and forbids recovery | controller-specific failure codes -- irrelevant to `NoCpuAccessWhileDeviceMayWrite`: every failed reset leaves authority with the device | `128c795b9cde` |
 | `Disabled` | `gem_tx_claim`, `net_rx_send_reply`, `net_transmit_ready`, `virtio_blk_submit`, `disk_status` | later requests are refused while Device authority remains stored; GEM also refuses after a confirmed halt, with CPU authority stored | error reporting -- irrelevant to `NoCpuAccessWhileDeviceMayWrite`: it does not touch the allocation | `6a823c8f9b29` |
-| `Finish` | `gem_tx_finish`, `gem_tx_unconfirmed`, `virtio_blk_receive_settle_used`, `virtio_blk_receive_settle_reset`, `virtio_blk_request_settle`, `virtio_blk_data_settle`, `msc_cbw_send_once`, `msc_data_send_once`, `msc_csw_receive_once`, `msc_data_receive_once`, `xhci_receive_configuration` (the compiler accepts the RX and TX finish builtins only in the record's declaring file, issues 716 and 717; a TX finish has no cache work) | RX/TX finish returns CPU authority after completion or confirmed reset/halt; the unfixed variant also permits timeout | cache instructions -- irrelevant to `UniqueAuthority`: they do not create a token | `ed9336ee50e8` |
-| `CpuAccess` | `gem_send_built`, `virtio_blk_submit_owned`, `virtio_blk_submit_header`, `virtio_blk_submit_write_data`, `msc_cbw_header`, `msc_cbw_set`, `disk_write_sectors`, `msc_csw_receive_attempt`, `disk_read_sectors`, `usb_disk_initialize_stages`, `xhci_configure` | one CPU read or write through the protected allocation, permitted only with CPU authority | alias syntax and provenance -- irrelevant to `UniqueAuthority`: they cannot create another token, while their access safety requires the separate compiler checks | `3b9114119f7d` |
+| `Finish` | `gem_tx_finish`, `gem_tx_unconfirmed`, `virtio_blk_receive_settle_used`, `virtio_blk_receive_settle_reset`, `virtio_blk_request_settle`, `virtio_blk_data_settle`, `msc_cbw_send_once`, `msc_data_send_once`, `msc_csw_receive_once`, `msc_data_receive_once`, `xhci_receive_configuration` (the compiler accepts the RX and TX finish builtins only in the record's declaring file, issues 716 and 717; a TX finish has no cache work) | RX/TX finish returns CPU authority after completion or confirmed reset/halt; the unfixed variant also permits timeout | cache instructions -- irrelevant to `UniqueAuthority`: they do not create a token | `b5963ea97322` |
+| `CpuAccess` | `gem_send_built`, `virtio_blk_submit_owned`, `virtio_blk_submit_header`, `virtio_blk_submit_write_data`, `msc_cbw_header`, `msc_cbw_set`, `disk_write_sectors`, `msc_csw_receive_attempt`, `disk_read_sectors`, `usb_disk_initialize_stages`, `xhci_configure` | one CPU read or write through the protected allocation, permitted only with CPU authority | alias syntax and provenance -- irrelevant to `UniqueAuthority`: they cannot create another token, while their access safety requires the separate compiler checks | `05900234aa95` |
 
 `UniqueAuthority` checks that the only token is either in the slot or held by
 the request, including a retained Device token after reset failure.
@@ -643,7 +643,7 @@ The maintained consumers are the virtio-net and GEM packet pools (#740).
 | --- | --- | --- | --- | --- |
 | `CpuWrite` | `net_transmit_ready` | a write through the Free owner's bytes on any core | which bytes -- irrelevant to `DeviceReadsPosted`: every line of the region is cleaned identically | `a18fdedb2ec9` |
 | `Clean`, `Post` | `net_transmit_ready`, `net_transmit` | the generated clean completed before the state change and the doorbell | the descriptor encoding -- irrelevant to `DeviceReadsPosted`: only the doorbell's order after the clean matters to the line | `d2e93e34edbb` |
-| `DeviceRead`, `Complete` | `virtio_net_tx_finish` | the device reads memory while posted; an observed used entry returns the owner to the CPU | the bounded wait and expiry -- modelled elsewhere: `FixedDmaOwnership.Timeout` | `b54d130710ab` |
+| `DeviceRead`, `Complete` | `virtio_net_tx_finish` | the device reads memory while posted; an observed used entry returns the owner to the CPU | the bounded wait and expiry -- modelled elsewhere: `FixedDmaOwnership.Timeout` | `ab613fd3e9ba` |
 
 `CpuRead` in the posted phase is the read-only borrow; no kernel function
 takes it yet (the pool's retransmit queue will).
@@ -665,3 +665,33 @@ can happen while posted. Controls:
 The result holds for a `tx` device state only. In an `rx` state the device
 writes, and a read there is DmaCacheVisibility's `NoReadWhileDeviceActive`
 violation; a snapshot is the only read of an `rx` state.
+
+## PacketReserve.tla -- the RX ring never drains under kept packets (#740)
+
+The RX capability split lets the stack keep a received packet past its RX
+turn (`net_rx_keep`). A kept packet's free (`net_packet_free`) runs on any
+core without the capability and only returns the buffer to its pool slot;
+the ring is refilled only by the capability's holder. If kept packets took
+every buffer, no RX descriptor would be posted, no frame would arrive, no
+acquire would run, and nothing would refill: a stall. The model counts
+buffers by where they are (posted, free, held by the turn, kept, in TX) and
+checks `RingNeverDrains`: at least one RX descriptor is posted in every
+state.
+
+| Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
+| --- | --- | --- | --- | --- |
+| `Acquire`, `Poll` | `net_rx_acquire`, `virtio_net_rx_refill`, `gem_rearm_rx` | a used entry's buffer becomes the turn's packet and the ring is refilled in the same call; with no frame, the call still refills | the used-ring snapshot and descriptor ids -- irrelevant to `RingNeverDrains`: only how many buffers are posted matters | `650fcdc4c601` |
+| `Release` | `net_rx_release` | the buffer returns Free and the ring is refilled | nothing | `cdc927ecdb23` |
+| `Keep` | `net_rx_keep`, `virtio_pkt_out_count`, `gem_pkt_out_count` | keeping is refused when fewer than RESERVE buffers would stay outside the kept set | the Kept slot parking and the length record -- irrelevant to `RingNeverDrains`: a Kept slot counts as kept either way | `a21dd058f79d` |
+| `Reply`, `TxComplete` | `net_rx_send_reply`, `net_packet_kept_send`, `net_tx_complete` | the turn's packet goes out as TX; completion returns it Free and refills | the transmit itself and its bounded wait -- modelled elsewhere: `FixedDmaOwnership.Timeout` | `ab22258b98c3` |
+| `SendBuilt` | `net_transmit_ready` | a kernel-built frame takes a Free buffer; completion refills | the payload copy -- irrelevant to `RingNeverDrains`: it does not move a buffer | `a18fdedb2ec9` |
+| `FreeKept` | `net_packet_free`, `net_packet_kept_claim` | a kept buffer returns Free off-turn, the ring untouched | the claim's slot lookup -- irrelevant to `RingNeverDrains`: it does not move a buffer between sets | `30342ba2da11` |
+
+An unconfirmed transmit is not modelled: it disables both queues
+(`FixedDmaOwnership.Timeout`), after which no RX is expected.
+
+Variants: `fixed` (virtio-net's 10 buffers, 8 descriptors, RESERVE 2) and
+`gem` (4 buffers, 1 descriptor, RESERVE 2) pass. Controls on a 4-buffer
+pool: `reserveone` (RESERVE 1) and `noreserve` (RESERVE 0) drain the ring
+(`RingNeverDrains`). 2 is therefore the least reserve that holds, and the
+drivers' VIRTIO_PKT_RESERVE and GEM_PKT_RESERVE are 2.

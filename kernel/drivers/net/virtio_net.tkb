@@ -72,12 +72,42 @@ private linear struct NetTxInFlight[pb: addr, po: usize] {
     private slot: usize;
 }
 private linear view NetRxCanAcquire;
+// A packet kept past its RX turn (#740, the RX capability split).
+// net_rx_keep parks the Filled buffer in its pool slot as Kept and returns
+// the capability (a view cannot travel beside another value); the stack
+// names the packet by its slot (net_rx_slot, read before keeping) and takes
+// this owner out with net_packet_kept_claim. Its free only returns the
+// buffer to the slot Free; the ring is refilled by the next capability
+// holder.
+private linear struct NetPacketKept[pb: addr, po: usize] {
+    private len: {0..<1515 as i32};
+    private slot: usize;
+    private pkt: VirtioPkt_Filled[pb, po, 1];
+}
 
 must_use variant NetInitResult { Failed; Ready(NetRxCanAcquire); }
 variant NetRxAcquire {
     None(NetRxCanAcquire);
     Acquired(exists pb: addr. exists po: usize. NetPacket[pb, po]);
 }
+// Kept: the packet is parked Kept in its slot and the capability is back.
+// Refused: the pool is at its reserve; the caller copies what it needs and
+// releases the packet.
+must_use variant NetRxKeep {
+    Kept(NetRxCanAcquire);
+    Refused(exists pb: addr. exists po: usize. NetPacket[pb, po]);
+}
+variant NetKeptClaim {
+    None;
+    Claimed(exists pb: addr. exists po: usize. NetPacketKept[pb, po]);
+}
+
+// Buffers outside the kept set that keeping must leave, so that at least
+// one RX descriptor stays posted (kernel/models/PacketReserve.tla: 2 is
+// the least that holds; 1 drains the ring).
+const VIRTIO_PKT_RESERVE: usize = 2;
+// Each Kept slot's frame length, set by net_rx_keep.
+private let mut virtio_pkt_kept_len: [{0..<1515 as i32}; 10];
 
 fn net_rx_packet(len: {0..<1515 as i32}, slot: usize,
                  pkt: VirtioPkt_Filled[pb, po, 1]) -> NetPacket[pb, po] {
@@ -338,6 +368,8 @@ fn net_rx_wait() !{may_block} {
 
 fn net_rx_acquire(ready: sink NetRxCanAcquire) -> NetRxAcquire {
     if (virtio_net_ready == false || virtio_rx_irq_flag == 0) {
+        // No frame, but buffers freed off-turn go back to the ring here.
+        virtio_net_rx_refill();
         return NetRxAcquire::None(view NetRxCanAcquire);
     }
     virtio_rx_irq_flag = 0;
@@ -345,6 +377,7 @@ fn net_rx_acquire(ready: sink NetRxCanAcquire) -> NetRxAcquire {
         VirtioNetUsed::None => { return NetRxAcquire::None(view NetRxCanAcquire); }
     };
     if (rx_used_seen == ring.idx) {
+        virtio_net_rx_refill();
         return NetRxAcquire::None(view NetRxCanAcquire);
     }
     virtio_rx_irq_flag = 1; // drain coalesced used-ring entries
@@ -366,6 +399,7 @@ fn net_rx_acquire(ready: sink NetRxCanAcquire) -> NetRxAcquire {
         VirtioPktHeld::Free(p) => { virtio_pkt_lost(VirtioPktHeld::Free(p)); return NetRxAcquire::None(view NetRxCanAcquire); }
         VirtioPktHeld::TxPosted(p) => { virtio_pkt_lost(VirtioPktHeld::TxPosted(p)); return NetRxAcquire::None(view NetRxCanAcquire); }
         VirtioPktHeld::Unconfirmed(p) => { virtio_pkt_lost(VirtioPktHeld::Unconfirmed(p)); return NetRxAcquire::None(view NetRxCanAcquire); }
+        VirtioPktHeld::Kept(p) => { virtio_pkt_lost(VirtioPktHeld::Kept(p)); return NetRxAcquire::None(view NetRxCanAcquire); }
     };
     virtio_pkt_note_rx_used(ring.idx, rx_used_seen);
     match VirtioPkt_virtio_pkt_received(posted) {
@@ -420,6 +454,7 @@ private fn virtio_net_rx_post(index: {0..<8 as usize}) -> bool {
         VirtioPktHeld::RxPosted(p) => { virtio_pkt_park(pool_slot, VirtioPktHeld::RxPosted(p)); return false; }
         VirtioPktHeld::TxPosted(p) => { virtio_pkt_park(pool_slot, VirtioPktHeld::TxPosted(p)); return false; }
         VirtioPktHeld::Unconfirmed(p) => { virtio_pkt_park(pool_slot, VirtioPktHeld::Unconfirmed(p)); return false; }
+        VirtioPktHeld::Kept(p) => { virtio_pkt_park(pool_slot, VirtioPktHeld::Kept(p)); return false; }
     };
     match VirtioPkt_virtio_pkt_post_rx(free) {
         VirtioPkt_virtio_pkt_post_rx_Result::RxPosted(posted) => {
@@ -452,6 +487,63 @@ fn net_rx_release(packet: sink NetPacket[pb, po]) -> NetRxCanAcquire {
     virtio_pkt_park(slot, VirtioPktHeld::Free(VirtioPkt_virtio_pkt_recycle(packet.pkt)));
     virtio_net_rx_refill();
     return view NetRxCanAcquire;
+}
+
+// The packet's pool slot: the name a kept packet is claimed by.
+fn net_rx_slot(packet: borrow NetPacket[pb, po]) -> usize {
+    return packet.slot;
+}
+
+// Keep the packet past this RX turn, unless that would leave fewer than
+// VIRTIO_PKT_RESERVE buffers outside the kept set. A slot is out exactly
+// while the stack has its buffer: empty (this packet, a claimed one) or
+// parked Kept.
+fn net_rx_keep(packet: sink NetPacket[pb, po]) -> NetRxKeep {
+    if (virtio_pkt_out_count() > VIRTIO_PKTS - VIRTIO_PKT_RESERVE) {
+        return NetRxKeep::Refused(packet);
+    }
+    let slot: usize = packet.slot;
+    if (slot < VIRTIO_PKTS) { virtio_pkt_kept_len[slot] = packet.len; }
+    virtio_pkt_park(slot, VirtioPktHeld::Kept(packet.pkt));
+    return NetRxKeep::Kept(view NetRxCanAcquire);
+}
+
+// Any core, no capability: the Kept packet in `slot`, taken out.
+fn net_packet_kept_claim(slot: usize) -> NetKeptClaim {
+    if (slot >= VIRTIO_PKTS) { return NetKeptClaim::None; }
+    let Place::Full(held) = virtio_pkt_take(slot) else {
+        Place::Empty => { return NetKeptClaim::None; }
+    };
+    let VirtioPktHeld::Kept(pkt) = held else {
+        VirtioPktHeld::Free(p) => { virtio_pkt_park(slot, VirtioPktHeld::Free(p)); return NetKeptClaim::None; }
+        VirtioPktHeld::RxPosted(p) => { virtio_pkt_park(slot, VirtioPktHeld::RxPosted(p)); return NetKeptClaim::None; }
+        VirtioPktHeld::TxPosted(p) => { virtio_pkt_park(slot, VirtioPktHeld::TxPosted(p)); return NetKeptClaim::None; }
+        VirtioPktHeld::Unconfirmed(p) => { virtio_pkt_park(slot, VirtioPktHeld::Unconfirmed(p)); return NetKeptClaim::None; }
+    };
+    let len: {0..<1515 as i32} = virtio_pkt_kept_len[slot];
+    return NetKeptClaim::Claimed(net_packet_kept(len, slot, pkt));
+}
+
+private fn net_packet_kept(len: {0..<1515 as i32}, slot: usize,
+                           pkt: VirtioPkt_Filled[pb, po, 1]) -> NetPacketKept[pb, po] {
+    let mut kept: NetPacketKept[pb, po] = { len, slot, pkt };
+    return kept;
+}
+
+fn net_packet_kept_len(kept: borrow NetPacketKept[pb, po]) -> {0..<1515 as i32} {
+    return kept.len;
+}
+
+fn net_packet_kept_frame(kept: borrow NetPacketKept[pb, po]) -> [u8; 1514..] @ pb {
+    let bytes = VirtioPkt_Filled_bytes(kept.pkt, 0);
+    return bytes[VIRTIO_NET_HDR_LEN..<VIRTIO_NET_HDR_LEN + 1514];
+}
+
+// Any core, no capability: the buffer goes back to its slot Free, under
+// the slot's lock. The ring is not touched.
+fn net_packet_free(kept: sink NetPacketKept[pb, po]) {
+    let slot: usize = kept.slot;
+    virtio_pkt_park(slot, VirtioPktHeld::Free(VirtioPkt_virtio_pkt_recycle(kept.pkt)));
 }
 
 fn net_rx_reply_ready(packet: sink NetPacket[pb, po], len: i32)
@@ -500,6 +592,7 @@ private fn virtio_net_tx_finish(slot: usize) -> bool !{may_block} {
         VirtioPktHeld::Free(p) => { virtio_pkt_lost(VirtioPktHeld::Free(p)); return false; }
         VirtioPktHeld::RxPosted(p) => { virtio_pkt_lost(VirtioPktHeld::RxPosted(p)); return false; }
         VirtioPktHeld::Unconfirmed(p) => { virtio_pkt_lost(VirtioPktHeld::Unconfirmed(p)); return false; }
+        VirtioPktHeld::Kept(p) => { virtio_pkt_lost(VirtioPktHeld::Kept(p)); return false; }
     };
     if (completed) {
         match VirtioPkt_virtio_pkt_sent(posted) {
@@ -545,6 +638,18 @@ fn net_rx_send_reply(reply: sink NetRxReplyReady[pb, po]) -> NetRxCanAcquire !{m
     return net_tx_complete(net_transmit(reply));
 }
 
+// A kept packet sent back out in place, in a later RX turn: the turn's
+// capability stands for the RX side while the buffer is transmitted.
+fn net_packet_kept_send(ready: sink NetRxCanAcquire, kept: sink NetPacketKept[pb, po],
+                        len: i32) -> NetRxCanAcquire !{may_block} {
+    net_shutdown(ready);
+    let safe_len: {0..<1515 as i32} = max(min(len, 1514), 0);
+    let slot: usize = kept.slot;
+    let pkt = kept.pkt;
+    let mut reply: NetRxReplyReady[pb, po] = { safe_len, slot, pkt };
+    return net_rx_send_reply(reply);
+}
+
 // Kernel-built frame, no RX buffer to reuse: written into the scratch TX
 // buffer through its protocol owner (virtio_net_tx_dma.tkb). Matches
 // rp1_gem.tkb's net_transmit_ready() signature and blocking-completion
@@ -563,6 +668,7 @@ fn net_transmit_ready(ready: sink NetRxCanAcquire,
         VirtioPktHeld::RxPosted(p) => { virtio_pkt_park(slot, VirtioPktHeld::RxPosted(p)); return view NetRxCanAcquire; }
         VirtioPktHeld::TxPosted(p) => { virtio_pkt_park(slot, VirtioPktHeld::TxPosted(p)); return view NetRxCanAcquire; }
         VirtioPktHeld::Unconfirmed(p) => { virtio_pkt_park(slot, VirtioPktHeld::Unconfirmed(p)); return view NetRxCanAcquire; }
+        VirtioPktHeld::Kept(p) => { virtio_pkt_park(slot, VirtioPktHeld::Kept(p)); return view NetRxCanAcquire; }
     };
     // The virtio_net_hdr is all zero (no offloads are negotiated).
     let out = VirtioPkt_Free_bytes(free, 0);

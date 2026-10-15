@@ -364,6 +364,8 @@ variant GemPktHeld {
     RxPosted(exists b: addr. exists o: usize. exists r: usize. GemPkt_RxPosted[b, o, 1, r]);
     TxPosted(exists b: addr. exists o: usize. exists r: usize. GemPkt_TxPosted[b, o, 1, r]);
     Unconfirmed(exists b: addr. exists o: usize. exists r: usize. GemPkt_Unconfirmed[b, o, 1, r]);
+    // A packet the stack kept past its RX turn (#740), until claimed.
+    Kept(exists b: addr. exists o: usize. GemPkt_Filled[b, o, 1]);
 }
 
 struct GemPktSlot {
@@ -413,6 +415,29 @@ fn gem_pkts_claim() -> bool {
     return true;
 }
 
+// How many buffers the stack has: empty slots (the packet of the current
+// RX turn, claimed kept packets) and slots parked Kept. Only the RX
+// capability's holder scans; an off-turn free only fills its own empty
+// slot, so a count taken during one can only be high.
+fn gem_pkt_out_count() -> usize {
+    let mut out: usize = 0;
+    for i: usize in 0..<4 {
+        match gem_pkt_take(i) {
+            Place::Empty => { out = out + 1; }
+            Place::Full(held) => {
+                match held {
+                    GemPktHeld::Kept(p) => { out = out + 1; gem_pkt_park(i, GemPktHeld::Kept(p)); }
+                    GemPktHeld::Free(p) => { gem_pkt_park(i, GemPktHeld::Free(p)); }
+                    GemPktHeld::RxPosted(p) => { gem_pkt_park(i, GemPktHeld::RxPosted(p)); }
+                    GemPktHeld::TxPosted(p) => { gem_pkt_park(i, GemPktHeld::TxPosted(p)); }
+                    GemPktHeld::Unconfirmed(p) => { gem_pkt_park(i, GemPktHeld::Unconfirmed(p)); }
+                }
+            }
+        }
+    }
+    return out;
+}
+
 // A slot holding a Free buffer, or GEM_PKTS when none is free.
 fn gem_pkt_free_index() -> usize {
     for i: usize in 0..<4 {
@@ -427,6 +452,7 @@ fn gem_pkt_free_index() -> usize {
                     GemPktHeld::RxPosted(p) => { gem_pkt_park(i, GemPktHeld::RxPosted(p)); }
                     GemPktHeld::TxPosted(p) => { gem_pkt_park(i, GemPktHeld::TxPosted(p)); }
                     GemPktHeld::Unconfirmed(p) => { gem_pkt_park(i, GemPktHeld::Unconfirmed(p)); }
+                    GemPktHeld::Kept(p) => { gem_pkt_park(i, GemPktHeld::Kept(p)); }
                 }
             }
         }

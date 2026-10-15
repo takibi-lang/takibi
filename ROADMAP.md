@@ -163,16 +163,16 @@ flame-graph stacks). Accepted as option (a): a sample delayed by masked
 IRQs is attributed to the unmask point with its masked weight; seeing
 inside masked spans is #773 (Arm SPE) and an irqsoff-style tracer on #771.
 
-**Next, ahead of the list below (maintainer, 2026-10-14):** #740: the
-slices in this order, pending the maintainer's choice on the first (see
-#740's capability-split comment): (1) split the RX capability from the
-packet -- today net_rx_release mints NetRxCanAcquire, so a packet cannot
-outlive the one RX turn; recommended option A, a `net_rx_keep` that
-returns the capability and a detached owner whose free only recycles the
-pool slot, leaving the ring refill to the capability holder; (2) the TCP
-retransmit queue keeps its TxPosted owner; (3) a socket's receive queue
-keeps the Filled packet instead of copying it, with a bound on kept
-packets and the copy as fallback when the pool has no spare. Done 2026-10-14
+**Next, ahead of the list below (maintainer, 2026-10-14):** #740:
+next the TCP retransmit queue keeps its TxPosted owner (step 2); a
+socket's receive queue keeping the packet (step 3) is decided after the
+#497 copy-cost measurement. Done 2026-10-15 under #740: the RX capability
+split (option A) -- net_rx_keep parks the packet Kept in its pool slot and
+returns the capability, net_packet_kept_claim/net_packet_free work off-turn,
+the capability holder refills (also on acquire's no-frame path), and
+keeping stops at a spare reserve of 2, the least that kernel/models/
+PacketReserve.tla shows keeps one RX descriptor posted; the boot ARP reply
+is answered from a kept packet. Done 2026-10-14
 under #740: the stack takes the Filled packet by move as NetPacket, which
 names no RX descriptor (virtio-net refills the descriptor and GEM rearms
 RX inside net_rx_acquire); U2-full --
