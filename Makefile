@@ -732,8 +732,9 @@ $(LINUX_USER_DIR)/place_array/place_array_exe.o: LINUX_USER_EXTRA_FLAGS := --reg
 $(LINUX_USER_DIR)/region_inspection/region_inspection_exe.o: LINUX_USER_EXTRA_FLAGS := --regions
 $(LINUX_USER_DIR)/region_held/region_held_exe.o: LINUX_USER_EXTRA_FLAGS := --regions
 # --confine-raw-authority: a u8 protocol's generated element access is the
-# compiler's, not a raw site of the declaring program (#720 slice 3a).
-$(LINUX_USER_DIR)/protocol_ring/protocol_ring_exe.o: LINUX_USER_EXTRA_FLAGS := --regions --confine-raw-authority $(foreach f,$(COMMON_LINUX_UART) $(COMMON_LINUX_PRINT) $(COMMON_LINUX_PRINT_BASE),--raw-mint-file $(f))
+# compiler's, not a raw site of the declaring program (#720 slice 3a). The
+# uart is the one file with raw sites; listing more is a stale entry (#739).
+$(LINUX_USER_DIR)/protocol_ring/protocol_ring_exe.o: LINUX_USER_EXTRA_FLAGS := --regions --confine-raw-authority --raw-mint-file $(COMMON_LINUX_UART)
 # A device protocol is accepted only in a device-semantics file (#720).
 $(LINUX_USER_DIR)/protocol_tx/protocol_tx_exe.o: LINUX_USER_EXTRA_FLAGS := --regions --device-semantics-file $(LINUX_USER_DIR)/protocol_tx/protocol_tx.tkb
 $(LINUX_USER_DIR)/protocol_txrx/protocol_txrx_exe.o: LINUX_USER_EXTRA_FLAGS := --regions --device-semantics-file $(LINUX_USER_DIR)/protocol_txrx/protocol_txrx.tkb
