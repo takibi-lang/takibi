@@ -210,10 +210,11 @@ fn virtio_pkts_claim() -> bool {
 }
 
 // How many buffers the stack has: empty slots (the packet of the current
-// RX turn, claimed kept packets) and slots parked Kept. Only the RX capability's holder
-// scans; an off-turn free only fills its own empty slot, so a count taken
-// during one can only be high, which refuses a keep, never wrongly allows
-// one.
+// RX turn, claimed kept packets) and slots parked Kept. Only the RX
+// capability's holder scans, one slot lock at a time, while other cores
+// may claim or free kept packets. kernel/models/PacketReserveScan.tla
+// checks that such interleavings can only make the count high, never
+// low, and that the ring keeps a posted descriptor.
 fn virtio_pkt_out_count() -> usize {
     let mut out: usize = 0;
     for i: usize in 0..<10 {

@@ -695,3 +695,27 @@ Variants: `fixed` (virtio-net's 10 buffers, 8 descriptors, RESERVE 2) and
 pool: `reserveone` (RESERVE 1) and `noreserve` (RESERVE 0) drain the ring
 (`RingNeverDrains`). 2 is therefore the least reserve that holds, and the
 drivers' VIRTIO_PKT_RESERVE and GEM_PKT_RESERVE are 2.
+
+## PacketReserveScan.tla -- the reserve scan against off-turn frees (#740)
+
+PacketReserve.tla with per-slot states and the reserve check's scan made
+concurrent. The capability holder walks the slots one lock at a time,
+counting empty and Kept slots, and then decides. Meanwhile any other core
+may claim a Kept packet or free a claimed one. `RingNeverDrains` as
+before, and `ScanNeverLow`: at the decision, the scanned count is at least
+the true number of buffers the stack has. A free can only lower the true
+count after the scan has read the slot.
+
+| Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
+| --- | --- | --- | --- | --- |
+| `ScanStart`, `ScanStep` | `virtio_pkt_out_count`, `gem_pkt_out_count` | one slot read under its lock per step; empty and Kept slots count | the take-and-park of each slot -- irrelevant to `ScanNeverLow`: the slot's state is the same before and after | `4a987a87c8bc` |
+| `KeepDecide` | `net_rx_keep` | keep when the count leaves the reserve, else answer within the turn | the kept length record -- irrelevant to `RingNeverDrains`: it does not move a buffer | `e90ee3815d1d` |
+| `Claim`, `FreeKept` | `net_packet_kept_claim`, `net_packet_free` | off-turn, under the slot's lock only, interleaving with every holder step | nothing | `a759f7f7a22a` |
+| `Acquire`, `Poll`, `Release`, `Reply`, `SendBuilt`, `TxComplete` | `net_rx_acquire`, `net_rx_release`, `net_rx_send_reply`, `net_transmit_ready`, `net_tx_complete` | as in PacketReserve.tla, by slot | the transmit's wait -- modelled elsewhere: `FixedDmaOwnership.Timeout` | `7080dfef5013` |
+
+Variants: `fixed` (5 buffers, 3 descriptors, RESERVE 2) and `gem` (4, 1)
+pass. The state space is per slot, so these pools are smaller than
+virtio-net's 10; PacketReserve.tla covers 10/8 by counts. Control
+(2 buffers, 1 descriptor, for a short trace): `skipempty`, a scan that does not count empty slots (the turn's own
+packet and claimed ones), undercounts (`ScanNeverLow`) and keeps past the
+reserve.
