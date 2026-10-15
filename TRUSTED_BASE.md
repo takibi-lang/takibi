@@ -101,7 +101,8 @@ older raw overlay, `bytes as *T`, and every other raw reinterpreting cast
 field whose type claims more than its bytes -- refined, singleton, bool,
 exhaustive enum, variant, reference (#772; `raw_claim_reason` and
 `check_raw_claim_needs_unsafe` in lib/type_inf.ml). Under that `unsafe`,
-the author vouches for the claim.
+the author vouches for the claim. Writing raw bytes through a pointer can
+still break such a claim (#794).
 Region backing globals (`region let mut g: [T; N];`, SPEC.md built-in
 region) are the only arrays `region_of`, `region_table_of` and
 `region_table_lock` accept, and the compiler rejects every other use of such
