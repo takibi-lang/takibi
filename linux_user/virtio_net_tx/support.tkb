@@ -73,6 +73,37 @@ fn receive(ready: sink NetRxCanAcquire) -> NetRxAcquire !{unsafe} {
     return net_rx_acquire(ready);
 }
 
+// #740: the boundary where the pool is empty at acquire. The fixture takes
+// every Free buffer out of the pool, so the acquire's refill finds none and
+// descriptor 0 stays empty; the release of the packet refills it.
+fn drain_pool_case(ready: sink NetRxCanAcquire) -> NetRxCanAcquire !{unsafe} {
+    let a: usize = virtio_pkt_free_index();
+    let Place::Full(held_a) = virtio_pkt_take(a) else {
+        Place::Empty => { check(false, "no first Free buffer"); return ready; }
+    };
+    let b: usize = virtio_pkt_free_index();
+    let Place::Full(held_b) = virtio_pkt_take(b) else {
+        Place::Empty => { check(false, "no second Free buffer"); virtio_pkt_park(a, held_a); return ready; }
+    };
+    check(virtio_pkt_free_index() == VIRTIO_PKT_NONE, "the fixture emptied the pool");
+    let before: VirtioRingIndex = rx_avail_idx;
+    let NetRxAcquire::Acquired(packet) = receive(ready) else {
+        NetRxAcquire::None(cap) => {
+            check(false, "oracle RX frame was refused");
+            virtio_pkt_park(a, held_a);
+            virtio_pkt_park(b, held_b);
+            return cap;
+        }
+    };
+    check(rx_avail_idx == before, "an empty pool leaves the RX descriptor empty");
+    let again = net_rx_release(packet);
+    check(rx_avail_idx == virtio_ring_index_next(before),
+          "the next release refills the empty RX descriptor");
+    virtio_pkt_park(a, held_a);
+    virtio_pkt_park(b, held_b);
+    return again;
+}
+
 fn send_reply(ready: sink NetRxCanAcquire) -> NetRxCanAcquire !{may_block} {
     match receive(ready) {
         NetRxAcquire::Acquired(frame) => {
@@ -148,6 +179,7 @@ fn run_initialized_case(ready: sink NetRxCanAcquire, reply_timeout: bool) !{may_
     };
     check(rx_avail_idx == virtio_ring_index_next(rx_avail_held),
           "release of a held packet reposts no descriptor twice");
+    let ready = drain_pool_case(ready);
     reset_clock(500, 100);
     let ready = send_reply(ready);
     check(waits > 1 && timeout_logs == 0, "normal reply completes and reposts RX");
