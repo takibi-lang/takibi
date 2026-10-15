@@ -2,8 +2,8 @@
   "date": "2026-10-15",
   "event": "incremental",
   "decision": "reuse",
-  "source_sha256": "623871a527dd43a755c8be2249d3bf53ab63634deafd9947ac52b07ea1680e40",
-  "workload": "#772 on main 9586fd6f: compiler-only type check (raw reinterpreting casts to claim-bearing pointees need unsafe); no kernel source changed. Linked kernels against main (scripts/space_delta.py).",
+  "source_sha256": "78c54ba5630f4758aa17b5600143977b6653086bc2399704a13e87c6974af751",
+  "workload": "#739 on main 82fddd02: compiler-only mint-list stale check and per-file raw-site counts; kernel/RAW_MINT_FILES drops virtio_blk_dma.tkb (a build flag list, no kernel source changed). Linked kernels identical against main (scripts/space_delta.py: text/data/bss unchanged on qemu and rpi5).",
   "evidence": [
     "docs/NETPACKET_MOVE_SPACE_2026-10-14.md",
     "docs/SCHED_YIELD_SPACE_2026-10-14.md",
