@@ -1,6 +1,6 @@
 # #740: the stack takes NetPacket by move (2026-10-14)
 
-Linked kernels, working tree against main 3474d149, scripts/space_delta.py:
+Linked kernels, working tree against main 0ef2747b, scripts/space_delta.py:
 
 ```
 base main -> working tree

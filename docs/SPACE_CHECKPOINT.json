@@ -2,8 +2,8 @@
   "date": "2026-10-14",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "01621d828144ffb72354f45ccdb71961ea1600c49729f63f2a55027fef72f23c",
-  "workload": "#740: the stack takes the Filled packet by move as NetPacket (no RX descriptor identity; virtio refills and GEM rearms RX at acquire). Linked kernels against main 3474d149 (scripts/space_delta.py).",
+  "source_sha256": "ee017eea144659f2d56cda191a88a502d3e83335ab7ee7cd6589557d8909fb85",
+  "workload": "#740: the stack takes the Filled packet by move as NetPacket (no RX descriptor identity; virtio refills and GEM rearms RX at acquire). Linked kernels against main 0ef2747b (scripts/space_delta.py).",
   "evidence": [
     "docs/NETPACKET_MOVE_SPACE_2026-10-14.md",
     "docs/SCHED_YIELD_SPACE_2026-10-14.md",
