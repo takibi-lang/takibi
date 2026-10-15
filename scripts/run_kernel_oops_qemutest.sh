@@ -156,9 +156,14 @@ archive_on_failure() {
             "exit status $status (mode $MODE)" || true
     fi
 }
+# GitHub issue #795: GDB's remote-protocol packets go to their own files
+# (not the transcripts the checks grep), kept only with a failure capture;
+# a passing run removes them.
+GDB_REMOTE_LOGS=("$ARTIFACT_DIR/arm-gdb-remote.log" "$ARTIFACT_DIR/snapshot-gdb-remote.log")
 cleanup_and_archive() {
     local status=$?
     cleanup
+    if [ "$status" -eq 0 ]; then rm -f "${GDB_REMOTE_LOGS[@]}"; fi
     archive_on_failure "$status"
     return "$status"
 }
@@ -378,7 +383,8 @@ PYLINE
     # `continue` for good, and concurrent_fault stages five of them. The
     # bound is well past the console driver's, which has failed by then.
     gdb_status=0
-    timeout 300 gdb-multiarch -q -batch "$ELF" "${gdb_commands[@]}" \
+    timeout 300 gdb-multiarch -q -batch "$ELF" \
+        -ex "set remotelogfile ${GDB_REMOTE_LOGS[0]}" "${gdb_commands[@]}" \
         >"$ARTIFACT_DIR/arm-gdb.log" 2>&1 || gdb_status=$?
     if [ "$gdb_status" -eq 0 ]; then
         armed=true
@@ -614,6 +620,7 @@ fi
 # kernel's one stored object, not a
 # duplicate ExceptionFrame or crash-record ABI in the test harness.
 timeout "${GDB_BATCH_TIMEOUT:-600}" gdb-multiarch -q -batch "$ELF" \
+    -ex "set remotelogfile ${GDB_REMOTE_LOGS[1]}" \
     -ex "target remote :$GDB_PORT" \
     -ex "interrupt" \
     -ex "source $SNAPSHOT_LAYOUT" \
