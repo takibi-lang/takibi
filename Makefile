@@ -2420,7 +2420,10 @@ KERNEL_RAW_CONFINE := --confine-raw-authority $(foreach f,$(KERNEL_RAW_MINT_FILE
 raw-site-counts: $(KERNEL_QEMU_MAIN_O) $(KERNEL_RPI5_MAIN_O)
 	@for o in $^; do echo "== $$o"; sed 's|$(CURDIR)/||' $$o.rawsites.tsv; done
 # GitHub issue #720 option a: only the files in kernel/DEVICE_SEMANTICS_FILES
-# may declare a device protocol (a region with a tx/rx direction).
+# may declare a device protocol (a region with a tx/rx direction). GitHub
+# issue #796: the compiler rejects a stale entry (a missing file, or a
+# compiled file that declares no device protocol), and a missing
+# --check-unused-file entry.
 KERNEL_DEVICE_SEMANTICS_FILES := $(shell grep -v '^\#' kernel/DEVICE_SEMANTICS_FILES | grep -v '^$$')
 KERNEL_DEVICE_SEMANTICS := $(foreach f,$(KERNEL_DEVICE_SEMANTICS_FILES),--device-semantics-file $(f))
 ## rpi5-jtag-stub: the SD card's kernel_2712.img, a DTB-capturing spin stub

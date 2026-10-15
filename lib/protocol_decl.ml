@@ -984,6 +984,11 @@ let check_lowering (prog : toplevel list) (d : protocol_decl) (p : t) =
    list is kernel/DEVICE_SEMANTICS_FILES. *)
 let device_semantics_files : string list ref = ref []
 
+(* GitHub issue #796: the files that declared a device protocol in this
+   compilation, so a --device-semantics-file entry granting nothing is
+   rejected as stale. *)
+let declared_device_files : string list ref = ref []
+
 let normalize file =
   if Filename.is_relative file then Filename.concat (Sys.getcwd ()) file
   else file
@@ -993,6 +998,7 @@ let check_device (d : protocol_decl) (p : t) =
   | None -> ()
   | Some direction ->
       let file = source_file_of_loc d.proto_loc in
+      declared_device_files := file :: !declared_device_files;
       if not (List.exists (fun f -> normalize f = normalize file)
                 !device_semantics_files) then
         fail d.proto_loc "device protocol '%s' (a region with a direction) may \
@@ -1084,6 +1090,7 @@ let drop_unreferenced (program : toplevel list) (generated : toplevel list list)
     | _ -> true)) generated
 
 let lower (prog : toplevel list) : toplevel list =
+  declared_device_files := [];
   ignore (extract prog);
   let expanded = List.map (function
     | ProtocolDef d ->

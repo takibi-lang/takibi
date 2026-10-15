@@ -328,6 +328,13 @@ let () =
        wrappers, after its actions' lowerings are checked. *)
     Protocol_decl.device_semantics_files := !device_semantics_files;
     let prog = Protocol_decl.lower prog in
+    (* GitHub issue #796: the device-semantics list is a ratchet too. *)
+    let stale = Raw_authority_policy.stale_list_entries
+        ~entry_kind:"device semantics: file" ~list_name:"device-semantics list"
+        ~no_grant:"declares no device protocol" ~compiled_files
+        ~granted_files:!Protocol_decl.declared_device_files !device_semantics_files in
+    List.iter (fun (_, message) -> Printf.eprintf "Error: %s\n" message) stale;
+    if stale <> [] then exit 1;
     (* GitHub issue #672: under --regions, the built-in definitions are
        planned from this first parse, then parsed before the program's own
        files, which are parsed again (Region_builtin.plan). *)
@@ -441,6 +448,8 @@ let () =
       List.iter (function
         | Unused_functions.Unknown_entry name ->
             Printf.eprintf "Error: --external-entry names unknown Takibi function '%s'\n" name
+        | Unused_functions.Missing_check_file file ->
+            Printf.eprintf "Error: --check-unused-file names a file that does not exist: '%s'\n" file
         | Unused_functions.Unknown_check_file file ->
             Printf.eprintf "Error: --check-unused-file contains no Takibi functions: '%s'\n" file
         | Unused_functions.Unused f ->

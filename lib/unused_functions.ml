@@ -3,7 +3,8 @@ open Types
 
 module StringSet = Set.Make (String)
 
-type error = Unknown_entry of string | Unknown_check_file of string | Unused of func
+type error = Unknown_entry of string | Missing_check_file of string
+  | Unknown_check_file of string | Unused of func
 
 let check ~external_entries ~check_files (prog : toplevel list) (types : program_types) =
   let definitions = List.filter_map (function FuncDef f -> Some f | _ -> None) prog in
@@ -99,6 +100,7 @@ let check ~external_entries ~check_files (prog : toplevel list) (types : program
     let file = Ast.source_file_of_loc f.def_loc in
     if Filename.is_relative file then normalized_file file else file in
   let check_errors = List.filter_map (fun file ->
+    if not (Sys.file_exists file) then Some (Missing_check_file file) else
     let file = normalized_file file in
     let matches = List.filter (fun f -> def_file f = file) definitions in
     if matches = [] then Some (Unknown_check_file file) else None) check_files in

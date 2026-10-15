@@ -23691,6 +23691,17 @@ let raw_authority_policy_tests = [
        | errors -> Alcotest.failf "expected one missing entry, got %d" (List.length errors));
       List.iter Sys.remove [mint; quiet; other]; Unix.rmdir dir);
 
+  (* GitHub issue #796: the device-semantics and unused-check lists are
+     ratchets too; a stale entry fails. *)
+  Alcotest.test_case "a missing --check-unused-file entry is rejected" `Quick
+    (fun () ->
+      let prog = parse "fn main() -> usize { return 42; }" in
+      let types = Type_inf.infer_program prog in
+      match Unused_functions.check ~external_entries:["main"]
+              ~check_files:["takibi-796-gone.tkb"] prog types with
+      | [Unused_functions.Missing_check_file _] -> ()
+      | errors -> Alcotest.failf "expected one missing entry, got %d" (List.length errors));
+
   Alcotest.test_case "raw-site counts cover declared and undeclared files" `Quick
     (fun () ->
       let source = "fn attach() !{unsafe} { let mapped = region_bytes_assume(4096, 64); } fn main() -> usize { return 42; }" in
@@ -26231,6 +26242,34 @@ let index_of hay needle =
   go 0
 
 let device_protocol_tests = [
+  Alcotest.test_case "stale device-semantics entries are rejected" `Quick
+    (fun () ->
+      let dir = Filename.concat (Filename.get_temp_dir_name ())
+          (Printf.sprintf "takibi-796-%d" (Unix.getpid ())) in
+      (try Unix.mkdir dir 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
+      let cwd = Sys.getcwd () in
+      Fun.protect ~finally:(fun () -> Sys.chdir cwd) (fun () ->
+        Sys.chdir dir;
+        List.iter (fun name -> let out = open_out name in
+          output_string out "// fixture\n"; close_out out) ["dev.tkb"; "use.tkb"; "other.tkb"];
+        ignore (compile_device ());
+        let stale entries = Raw_authority_policy.stale_list_entries
+            ~entry_kind:"device semantics: file" ~list_name:"device-semantics list"
+            ~no_grant:"declares no device protocol" ~compiled_files:["dev.tkb"; "use.tkb"]
+            ~granted_files:!Protocol_decl.declared_device_files entries in
+        Alcotest.(check int) "declaring file accepted" 0 (List.length (stale ["dev.tkb"]));
+        Alcotest.(check int) "file another target compiles is skipped" 0
+          (List.length (stale ["dev.tkb"; "other.tkb"]));
+        (match stale ["dev.tkb"; "use.tkb"; "gone.tkb"] with
+         | [("gone.tkb", missing); ("use.tkb", quiet)] ->
+             Alcotest.(check bool) "missing diagnostic" true
+               (contains_substring missing "does not exist");
+             Alcotest.(check bool) "no-grant diagnostic" true
+               (contains_substring quiet "declares no device protocol")
+         | errors -> Alcotest.failf "expected two stale entries, got %d" (List.length errors));
+        List.iter Sys.remove ["dev.tkb"; "use.tkb"; "other.tkb"]);
+      Unix.rmdir dir);
+
   Alcotest.test_case "device protocol: rx publishes then rings, finishes on completion" `Quick
     (fun () ->
       let ir = compile_device () in

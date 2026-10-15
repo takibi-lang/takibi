@@ -166,20 +166,28 @@ let site_counts ?(source_program = []) () =
       (key, n + 1) :: List.remove_assoc key counts) [] files in
   List.sort compare counts
 
-(* GitHub issue #739: a mint-list entry is stale when its file no longer
-   exists, or when this compilation reads it and it holds no counted raw
-   site. A file another target compiles (qemu vs rpi5 device_map) is not
-   read here and is skipped. Returns (entry, message) pairs. *)
-let stale_entries ?(source_program = []) ~compiled_files ~mint_files () =
-  let compiled = List.fold_left (fun paths file -> Paths.add (normalize file) paths)
-      Paths.empty compiled_files in
-  let counts = site_counts ~source_program () in
-  List.sort_uniq compare mint_files |> List.filter_map (fun entry ->
+(* GitHub issues #739, #796: a file-list entry is stale when its file no
+   longer exists, or when this compilation reads it and the list grants it
+   nothing (granted_files lacks it). A file another target compiles (qemu vs
+   rpi5 device_map) is not read here and is skipped. [entry_kind] names the
+   entry ("raw-authority confinement: mint file"), [list_name] the list and
+   [no_grant] what a stale compiled entry lacks. Returns (entry, message). *)
+let stale_list_entries ~entry_kind ~list_name ~no_grant ~compiled_files
+    ~granted_files entries =
+  let set files = List.fold_left (fun paths file -> Paths.add (normalize file) paths)
+      Paths.empty files in
+  let compiled = set compiled_files and granted = set granted_files in
+  List.sort_uniq compare entries |> List.filter_map (fun entry ->
     let key = normalize entry in
     if not (Sys.file_exists entry) then
-      Some (entry, Printf.sprintf
-        "raw-authority confinement: mint file '%s' does not exist; remove it from the mint list" entry)
-    else if Paths.mem key compiled && not (List.mem_assoc key counts) then
-      Some (entry, Printf.sprintf
-        "raw-authority confinement: mint file '%s' holds no raw site; remove it from the mint list" entry)
+      Some (entry, Printf.sprintf "%s '%s' does not exist; remove it from the %s"
+              entry_kind entry list_name)
+    else if Paths.mem key compiled && not (Paths.mem key granted) then
+      Some (entry, Printf.sprintf "%s '%s' %s; remove it from the %s"
+              entry_kind entry no_grant list_name)
     else None)
+
+let stale_entries ?(source_program = []) ~compiled_files ~mint_files () =
+  stale_list_entries ~entry_kind:"raw-authority confinement: mint file"
+    ~list_name:"mint list" ~no_grant:"holds no raw site" ~compiled_files
+    ~granted_files:(List.map fst (site_counts ~source_program ())) mint_files
