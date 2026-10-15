@@ -1,10 +1,11 @@
 {
   "date": "2026-10-15",
   "event": "incremental",
-  "decision": "reuse",
-  "source_sha256": "3c5d027aa745cfe0d8c2c0392462d0328fcc463283d24f9c6c7587c0738f3092",
-  "workload": "#739 on main 82fddd02: compiler-only mint-list stale check and per-file raw-site counts; kernel/RAW_MINT_FILES drops virtio_blk_dma.tkb (a build flag list, no kernel source changed). Linked kernels identical against main; the linux_user protocol_ring mint list narrows to its uart (scripts/space_delta.py: text/data/bss unchanged on qemu and rpi5).",
+  "decision": "measured",
+  "source_sha256": "c863581f85de4064712a4f35af339ac32cac41c4201d4df9f51b1d65f6e24451",
+  "workload": "#740 RX capability split (net_rx_keep, off-turn free, spare reserve). Linked kernels against main 9586fd6f (scripts/space_delta.py).",
   "evidence": [
+    "docs/RX_KEEP_SPACE_2026-10-15.md",
     "docs/NETPACKET_MOVE_SPACE_2026-10-14.md",
     "docs/SCHED_YIELD_SPACE_2026-10-14.md",
     "docs/VIRTIO_MODERN_SPACE_2026-10-14.md",
@@ -72,6 +73,6 @@
     "docs/VIRTIO_NET_TX_2026-10-10.md",
     "docs/VIRTIO_NET_TX_SPACE_2026-10-10.json"
   ],
-  "assessment": "Reuse: scripts/space_delta.py main shows text, data, BSS and usable_ram_start identical on QEMU and RPi5, no symbol changed size. Earlier measured results stand.",
+  "assessment": "Text +1584 B QEMU / +1680 B RPi5; data +8 B; BSS +192 B QEMU (pool slots +16 B each for the Kept variant case, kept lengths 40 B), RPi5 BSS unchanged at page granularity; usable_ram_start unchanged. Adopted as the mechanism the next #740 steps need. Earlier measured results stand.",
   "next_trigger": "The TCP retransmit queue keeping its TxPosted owner, a shrink protocol for walked RegionPools, or the #748 allocator change, whichever lands first."
 }
