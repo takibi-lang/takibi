@@ -1182,6 +1182,18 @@ one ordinary runtime pointer, and the guard contributes no ABI operand or
 result. The retired `examples/mutex_guard_identity_wrong` demonstrates rejection of a
 guard acquired from one mutex and passed with another.
 
+An erased view travels only on its own: as a parameter, a return value, or
+a variant payload. It cannot be a tuple element ("an erased view cannot be
+stored in a runtime tuple") or a struct field ("cannot hold a nested erased
+view"), so a function cannot return a view together with a linear value.
+The current pattern is to park the linear value where both sides can name
+it and return only the view. `net_rx_keep` (kernel/drivers/net, GitHub
+issue #740) parks the kept packet in its pool slot's place and returns
+`NetRxKeep::Kept(NetRxCanAcquire)`. The caller reads the slot index
+beforehand (`net_rx_slot`) and later takes the owner out with
+`net_packet_kept_claim(slot)`, which returns it, or `None` if the slot
+holds no kept packet.
+
 An indexed view may be the direct body of an outermost variant-payload
 `exists`. A closed variant can therefore retain a runtime state tag while
 each case carries an erased, state-specific permission:

@@ -172,7 +172,10 @@ returns the capability, net_packet_kept_claim/net_packet_free work off-turn,
 the capability holder refills (also on acquire's no-frame path), and
 keeping stops at a spare reserve of 2, the least that kernel/models/
 PacketReserve.tla shows keeps one RX descriptor posted; the boot ARP reply
-is answered from a kept packet. Done 2026-10-14
+is answered from a kept packet. That ARP path is a stand-in caller, so the
+new functions have a user; it goes back to the plain in-turn reply when
+step 2's retransmit queue becomes the real caller. Step 2 also adds the
+test of GEM's refused-keep path. Done 2026-10-14
 under #740: the stack takes the Filled packet by move as NetPacket, which
 names no RX descriptor (virtio-net refills the descriptor and GEM rearms
 RX inside net_rx_acquire); U2-full --

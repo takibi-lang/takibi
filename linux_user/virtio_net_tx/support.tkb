@@ -243,7 +243,14 @@ fn keep_reserve_case(ready_in: sink NetRxCanAcquire) -> NetRxCanAcquire !{unsafe
             NetRxAcquire::Acquired(pk) => {
                 slots[i] = net_rx_slot(pk);
                 match net_rx_keep(pk) {
-                    NetRxKeep::Kept(cap) => { kept_count = kept_count + 1; ready = cap; }
+                    NetRxKeep::Kept(cap) => {
+                        kept_count = kept_count + 1;
+                        ready = cap;
+                        // The reserve's count is derived from the slots, so
+                        // it cannot drift; it must see every Kept slot.
+                        check(virtio_pkt_out_count() == kept_count,
+                              "the out count sees every Kept slot");
+                    }
                     NetRxKeep::Refused(p) => {
                         refused_count = refused_count + 1;
                         slots[i] = VIRTIO_PKT_NONE;
@@ -257,7 +264,15 @@ fn keep_reserve_case(ready_in: sink NetRxCanAcquire) -> NetRxCanAcquire !{unsafe
     for i: usize in 0..<9 {
         match net_packet_kept_claim(slots[i]) {
             NetKeptClaim::None => {}
-            NetKeptClaim::Claimed(kept) => { net_packet_free(kept); }
+            NetKeptClaim::Claimed(kept) => {
+                // Claimed, the slot is empty and still counts as out.
+                check(virtio_pkt_out_count() == kept_count,
+                      "a claimed packet's empty slot still counts as out");
+                net_packet_free(kept);
+                kept_count = kept_count - 1;
+                check(virtio_pkt_out_count() == kept_count,
+                      "a freed packet no longer counts as out");
+            }
         }
     }
     virtio_rx_irq_flag = 0;
