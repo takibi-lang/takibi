@@ -3681,6 +3681,57 @@ fn f(frame: borrow [u8; 8..]) -> u16 {
     return h.len;
 }
 |});
+  (* GitHub issue #772: a raw reinterpreting cast to a pointee whose type
+     claims more than its bytes (refined, singleton, bool, exhaustive enum,
+     reference) needs `unsafe`, from a byte pointer, a slice or a literal
+     address alike. *)
+  Alcotest.test_case "raw overlay: refined field from *u8 refused" `Quick
+    (expect_type_error "claims more than its bytes (field 'Hdr.len': a refined" {|struct packed Hdr { kind: u16; len: {20..<1501 as u16}; }
+fn f(p: *u8) -> u16 {
+    let h: *Hdr = p as *Hdr;
+    return h.len;
+}
+|});
+  Alcotest.test_case "raw overlay: bool field from a slice refused" `Quick
+    (expect_type_error "claims more than its bytes (field 'Hdr.ok': a bool" {|struct packed Hdr { kind: u16; ok: bool; }
+fn f(frame: borrow [u8; 8..]) -> u16 {
+    let h: *Hdr = frame as *Hdr;
+    return h.kind;
+}
+|});
+  Alcotest.test_case "raw overlay: exhaustive enum from a literal address refused" `Quick
+    (expect_type_error "exhaustive enum 'Kind'" {|enum Kind: u8 { A; B; }
+struct Hdr { k: Kind; }
+fn f() -> u8 {
+    let h: *Hdr = 0x4000 as *Hdr;
+    return 0;
+}
+|});
+  Alcotest.test_case "raw overlay: nested refined field refused" `Quick
+    (expect_type_error "field 'Outer.inner': field 'Inner.len'" {|struct packed Inner { len: {1..<9 as u8}; }
+struct packed Outer { tag: u8; inner: [Inner; 2]; }
+fn f(p: *u8) -> u8 {
+    let h: *Outer = p as *Outer;
+    return h.tag;
+}
+|});
+  Alcotest.test_case "raw overlay: plain header and open enum accepted" `Quick
+    (fun () -> ignore (infer {|enum Idx: u16 { Zero = 0; _; }
+struct packed be Hdr { kind: u16; len: u16; tag: [u8; 4]; }
+struct packed Ring { flags: u16; idx: Idx; next: usize; }
+fn f(frame: borrow [u8; 8..], p: *u8) -> u16 {
+    let h: *Hdr = frame as *Hdr;
+    let r: *Ring = p as *Ring;
+    return h.len as u16;
+}
+|}));
+  Alcotest.test_case "raw overlay: refined field under unsafe accepted" `Quick
+    (fun () -> ignore (infer {|struct packed Hdr { kind: u16; len: {20..<1501 as u16}; }
+fn f(p: *u8) -> u16 !{unsafe} {
+    let h: *Hdr = unsafe { p as *Hdr };
+    return h.len;
+}
+|}));
   Alcotest.test_case "header overlay: aligned" `Quick
     (expect_type_error "declares an alignment" {|struct packed Hdr align(4) { kind: u16; len: u16; }
 private let mut kept: usize = 0;

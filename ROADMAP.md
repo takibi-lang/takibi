@@ -83,8 +83,8 @@ list (maintainer, 2026-10-09).
    field's width once is #770). The network files (arp, icmp, tcp) have
    left it too, through header overlays: `bytes as &mut TcpHdr` is checked
    when every byte pattern is a valid packed header and the slice covers it
-   (2026-10-13; the raw `slice as *T` path still lets a refined field sit
-   over arbitrary bytes, #772). The overlay also fits the K/R files still
+   (2026-10-13); a raw reinterpreting cast to a type with a refined, bool,
+   or exhaustive-enum field needs `unsafe` (2026-10-15, #772). The overlay also fits the K/R files still
    on kernel/RAW_MINT_FILES that parse external bytes (fdt, virtio, elf64).
    process.tkb is split too: its kernel-stack bytes live in the small mint
    file stack_poison.tkb (2026-10-13). usb_xhci.tkb's DMA-ring raw sites

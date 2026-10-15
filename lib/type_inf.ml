@@ -647,6 +647,38 @@ let rec overlay_invalid_reason (senv : senv) (ty : Ast.type_expr) : string optio
   | _ -> Some (Printf.sprintf "%s has invalid bit patterns or is not \
                                plain bytes" (Ast.show_type_expr ty))
 
+(* GitHub issue #772: the narrower question for a raw reinterpreting
+   pointer cast (`*u8 as *T`, `addr as *T`, `slice as *T`): does T hold a
+   value whose type claims more than its bytes do -- a refined or singleton
+   integer, a bool, an enum or variant, or a reference? Raw pointers,
+   integers of any width, padding and fn pointers stay raw-world data. *)
+let rec raw_claim_reason (senv : senv) eenv (seen : string list) (ty : Ast.type_expr)
+    : string option =
+  match ty with
+  | Ast.TypeRefined _ -> Some "a refined integer field"
+  | Ast.TypeSingleton _ -> Some "a singleton integer field"
+  | Ast.TypeBool -> Some "a bool field"
+  | Ast.TypeRef _ | Ast.TypeRefMut _ -> Some "a reference field"
+  | Ast.TypeVariant _ -> Some "a variant field"
+  | Ast.TypeArray (elem, _) | Ast.TypeIo elem -> raw_claim_reason senv eenv seen elem
+  | Ast.TypeNamed name | Ast.TypeIndexed (name, _) ->
+      if StringMap.mem name eenv then
+        (* A non-exhaustive enum names every value of its underlying type. *)
+        (match StringMap.find name eenv with
+         | (_, _, true) -> None
+         | _ -> Some (Printf.sprintf "exhaustive enum '%s'" name))
+      else if Hashtbl.mem variant_defs name then
+        Some (Printf.sprintf "variant '%s'" name)
+      else if List.mem name seen then None
+      else
+        (match StringMap.find_opt name senv with
+         | Some (fields, _, _) ->
+             List.find_map (fun (fname, fty) ->
+               Option.map (fun why -> Printf.sprintf "field '%s.%s': %s" name fname why)
+                 (raw_claim_reason senv eenv (name :: seen) fty)) fields
+         | None -> None)
+  | _ -> None
+
 let rec const_type_size (senv : senv) (ty : Ast.type_expr) : int option =
   match ty with
   | Ast.TypeBool | Ast.TypeU8 | Ast.TypeI8 -> Some 1
@@ -2529,6 +2561,35 @@ let check_null_pointer_literal loc (src_expr : Ast.expr) (tgt : ty) =
       "a literal zero cast to %s writes a null raw pointer: %s"
       (to_string tgt) null_pointer_advice))
 
+(* GitHub issue #772: a raw cast that reinterprets memory as a different
+   pointee (`*u8 as *T`, `slice as *T`, a literal address `as *T`) lets
+   arbitrary bytes stand for T. When T holds a value whose type claims more
+   than its bytes (raw_claim_reason), reading it could yield a false claim
+   -- a refined field out of range, a bool that is neither -- so the cast
+   needs `unsafe`. Casting to the source's own pointee makes no new claim. *)
+let check_raw_claim_needs_unsafe senv eenv loc (src_ty : ty) (tgt : ty) =
+  let tgt_pointee = match tgt with
+    | TPtr p | TAlignedPtr (_, p) -> Some p | _ -> None in
+  (* `io` only changes how the bytes are accessed, not what they claim. *)
+  let rec strip_io t = match repr t with TIo t' -> strip_io t' | t' -> t' in
+  let same_pointee p = match repr src_ty with
+    | TPtr i | TAlignedPtr (_, i) | TRef i | TRefMut i -> strip_io i = strip_io p
+    | TSlice (el, _, _) -> strip_io el = strip_io p
+    | _ -> false in
+  match tgt_pointee with
+  | Some p when not (same_pointee p) ->
+      (match raw_claim_reason senv eenv [] (to_ast p) with
+       | None -> ()
+       | Some why ->
+           if !unsafe_depth > 0 then note_type_checker_unsafe_use ()
+           else
+             raise (TypeError (loc, Printf.sprintf
+               "casting %s to %s lets arbitrary bytes stand for a value \
+                whose type claims more than its bytes (%s); write \
+                `unsafe { ... as %s }` to mark it (GitHub issue #772)"
+               (to_string src_ty) (to_string tgt) why (to_string tgt))))
+  | _ -> ()
+
 let check_nonliteral_ptr_cast_needs_unsafe loc (src_expr : Ast.expr) (tgt : ty) =
   if not (is_literal_derived src_expr) then
     match tgt with
@@ -3671,7 +3732,9 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                    *align(N) T` is the one case needing its own check,
                    just below. *)
                 (match tgt with
-                 | TUsize | TPtr _ ->
+                 | TUsize -> tgt
+                 | TPtr _ ->
+                     check_raw_claim_needs_unsafe senv eenv e.loc src_ty tgt;
                      (* GitHub issue #325 (still unstarted as of #318): if a
                         future general raw-pointer unsafe mandate ever adds
                         an unsafe check to this pointer-to-pointer/pointer-
@@ -3703,6 +3766,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                        | TAlignedPtr (n, _) -> Some n
                        | _ -> None
                      in
+                     check_raw_claim_needs_unsafe senv eenv e.loc src_ty tgt;
                      (match src_n with
                       | Some n when n mod n_dst = 0 -> tgt
                       | _ when !unsafe_depth > 0 -> tgt
@@ -3800,6 +3864,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                                `unsafe { ... as %s }` to mark it"
                               (to_string src_ty) (to_string tgt)
                               (to_string pointee) (to_string tgt))));
+                     check_raw_claim_needs_unsafe senv eenv e.loc src_ty tgt;
                      tgt
                  | _ ->
                      raise (TypeError (e.loc,
@@ -3861,6 +3926,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                 check_io_ptr_cast_needs_unsafe e.loc tgt;
                 check_null_pointer_literal e.loc e tgt;
                 check_nonliteral_ptr_cast_needs_unsafe e.loc e tgt;
+                check_raw_claim_needs_unsafe senv eenv e.loc src_ty tgt;
                 (* GitHub issue #100 follow-up: an EXPLICIT `x as {lo..<hi
                    as base}` cast target reaches here for any source that
                    isn't itself a pointer/slice/already-refined value (in

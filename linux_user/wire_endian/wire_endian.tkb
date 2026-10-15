@@ -9,7 +9,10 @@
 // This example overlays WireHdr on a raw byte buffer the same way
 // kernel/net/*.tkb overlays its own wire-format structs on a real captured
 // packet buffer -- via a pointer cast, not a struct literal, since that is
-// how a real wire parser actually obtains one of these.
+// how a real wire parser actually obtains one of these. Because `len` is
+// refined, the cast is `unsafe` (GitHub issue #772): the compiler cannot
+// know these bytes hold a value in 20..<1501, so the cast is where that
+// claim is audited. A real parser checks the range first.
 //
 // Expected QEMU output:
 //   len: 0x00000578
@@ -63,7 +66,7 @@ fn requires_len(n: {20..<1501 as u16}) -> usize {
     return n as usize;
 }
 
-fn test_wire_endian() {
+fn test_wire_endian() !{unsafe} {
     // Wire bytes for magic=0x0806, flags=0x2abc, len=1400 (0x0578), and
     // seq=0x12345678, each stored big-endian (most significant byte first).
     wire_bytes[0] = 0x08; wire_bytes[1] = 0x06;
@@ -72,7 +75,7 @@ fn test_wire_endian() {
     wire_bytes[6] = 0x12; wire_bytes[7] = 0x34;
     wire_bytes[8] = 0x56; wire_bytes[9] = 0x78;
 
-    let hdr: *WireHdr = wire_bytes as *WireHdr;
+    let hdr: *WireHdr = unsafe { wire_bytes as *WireHdr };
 
     // Cast to host order: must byte-swap, not reinterpret the raw bytes,
     // and must keep {20..<1501} afterward with no runtime check.
@@ -110,7 +113,7 @@ fn test_wire_endian() {
 
     // `struct packed be` sugar produces an equivalent struct: same bytes
     // overlay, same fields, same values.
-    let hdr_sugar: *WireHdrSugar = wire_bytes as *WireHdrSugar;
+    let hdr_sugar: *WireHdrSugar = unsafe { wire_bytes as *WireHdrSugar };
     uart_puts("sugar-magic-eq: ");
     uart_print(hdr_sugar.magic == 0x0806);
     uart_puts("\r\nsugar-seq: ");
@@ -131,6 +134,6 @@ fn test_wire_endian() {
     uart_puts("done\r\n");
 }
 
-fn app_main() {
+fn app_main() !{unsafe} {
     test_wire_endian();
 }

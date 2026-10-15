@@ -96,9 +96,12 @@ is trusted to decide that every byte pattern is a valid value of the header
 (packed, no declared alignment, unrefined integer and byte-array fields
 only) and that the slice's proven length covers it; the decision is
 `overlay_invalid_reason` and the length check in lib/type_inf.ml. The
-older raw overlay, `bytes as *T`, checks only the length: it still lets a
-header with a refined field sit over arbitrary bytes, so the refinement is
-not guaranteed there (#772).
+older raw overlay, `bytes as *T`, and every other raw reinterpreting cast
+(`*u8 as *T`, a literal address `as *T`) need `unsafe` when `T` holds a
+field whose type claims more than its bytes -- refined, singleton, bool,
+exhaustive enum, variant, reference (#772; `raw_claim_reason` and
+`check_raw_claim_needs_unsafe` in lib/type_inf.ml). Under that `unsafe`,
+the author vouches for the claim.
 Region backing globals (`region let mut g: [T; N];`, SPEC.md built-in
 region) are the only arrays `region_of`, `region_table_of` and
 `region_table_lock` accept, and the compiler rejects every other use of such

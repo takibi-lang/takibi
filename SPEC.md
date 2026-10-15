@@ -4747,6 +4747,15 @@ Currently gates these six categories:
   extraction, not a reinterpretation); any other target needs the
   slice's proven minimum length to cover `sizeof(U)`, computed via the
   same target-independent rules `sizeof(...)` itself uses, or `unsafe`.
+- A raw cast that reinterprets memory as a pointee `U` whose type claims
+  more than its bytes (GitHub issue #772): `*T as *U`, `bytes as *U`, or a
+  literal address `as *U`, where `U` is, or contains through struct fields
+  and arrays, a refined or singleton integer, a `bool`, an exhaustive enum,
+  a variant or a reference. Arbitrary bytes would make that claim false
+  when read. Plain integers, wire-order integers, raw pointers, and
+  non-exhaustive enums (`_;`) name every byte pattern and stay free;
+  casting to the source's own pointee (with or without `io`) makes no new
+  claim.
 
 `unsafe` is **not** currently extended to general pointer
 arithmetic/dereference, or an exhaustive enum's runtime variant check
