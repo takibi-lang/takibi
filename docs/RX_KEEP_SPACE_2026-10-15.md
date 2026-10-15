@@ -1,6 +1,6 @@
 # #740: the RX capability split (2026-10-15)
 
-Linked kernels, working tree against main 9586fd6f, scripts/space_delta.py:
+Linked kernels, working tree against main 993b5945, scripts/space_delta.py:
 
 ```
 base main -> working tree
