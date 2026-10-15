@@ -1662,6 +1662,7 @@ kernel-lib-check:
 	python3 scripts/check_execution_model_coverage.py
 	python3 scripts/check_lock_discipline.py
 	python3 scripts/check_lock_rank_wrappers.py
+	python3 scripts/check_guest_syscalls_dispatched.py
 	python3 scripts/check_ext2_mutation_guard.py
 	python3 scripts/check_liveness_proof_escapes.py
 	python3 scripts/check_process_running_mints.py
