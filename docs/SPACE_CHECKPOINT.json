@@ -1,9 +1,9 @@
 {
-  "date": "2026-10-14",
+  "date": "2026-10-15",
   "event": "incremental",
-  "decision": "measured",
-  "source_sha256": "818a83d7bef412479674a1b44f6f0a9431298d96c299a9aab7a1188c83f3a7a8",
-  "workload": "#740: the stack takes the Filled packet by move as NetPacket (no RX descriptor identity; virtio refills and GEM rearms RX at acquire). Linked kernels against main 0ef2747b (scripts/space_delta.py).",
+  "decision": "reuse",
+  "source_sha256": "623871a527dd43a755c8be2249d3bf53ab63634deafd9947ac52b07ea1680e40",
+  "workload": "#772 on main 9586fd6f: compiler-only type check (raw reinterpreting casts to claim-bearing pointees need unsafe); no kernel source changed. Linked kernels against main (scripts/space_delta.py).",
   "evidence": [
     "docs/NETPACKET_MOVE_SPACE_2026-10-14.md",
     "docs/SCHED_YIELD_SPACE_2026-10-14.md",
@@ -72,6 +72,6 @@
     "docs/VIRTIO_NET_TX_2026-10-10.md",
     "docs/VIRTIO_NET_TX_SPACE_2026-10-10.json"
   ],
-  "assessment": "Text -152 B QEMU / -232 B RPi5; data, BSS and usable_ram_start unchanged. Adopted. The later #792 kernel-lib-check line (a host build check; no kernel source changed) reuses this measurement. Earlier measured results stand.",
+  "assessment": "Reuse: scripts/space_delta.py main shows text, data, BSS and usable_ram_start identical on QEMU and RPi5, no symbol changed size. Earlier measured results stand.",
   "next_trigger": "The TCP retransmit queue keeping its TxPosted owner, a shrink protocol for walked RegionPools, or the #748 allocator change, whichever lands first."
 }
