@@ -1,0 +1,41 @@
+// GitHub issue #794: a value whose fields claim more than their bytes
+// (a bool, a refined integer, an exhaustive enum) can be read as bytes
+// through a readonly `[]const u8` view without `unsafe`; a writable byte
+// view or `*u8` over it needs `unsafe`, so raw writes cannot break a claim.
+
+enum Kind: u8 { A = 1; B = 2; }
+
+struct packed Hdr {
+    ok: bool;
+    len: {1..<9 as u8};
+    kind: Kind;
+    tag: u8;
+}
+
+fn sum_bytes(b: []const u8) -> u32 {
+    let mut s: u32 = 0;
+    for x in b {
+        s = s + (x as u32);
+    }
+    return s;
+}
+
+fn app_main() {
+    let mut h: Hdr;
+    h.ok = true;
+    h.len = 5;
+    h.kind = Kind::B;
+    h.tag = 0x40;
+    let r: &Hdr = &h;
+    let bytes: []const u8 = r as []const u8;
+    uart_puts("len: ");
+    uart_print_hex(bytes.len as i32);
+    uart_puts("\r\nbytes:");
+    for x in bytes {
+        uart_puts(" ");
+        uart_print_hex(x as i32);
+    }
+    uart_puts("\r\nsum: ");
+    uart_print_hex(sum_bytes(bytes) as i32);
+    uart_puts("\r\ndone\r\n");
+}

@@ -732,7 +732,11 @@ Rules:
 - Storing to an element of an array leaf, `a[i] = x`, neither reads it nor
   makes it `init`: arrays are tracked whole.
 - `zero_fill(dst)` stores zero over every byte of a writable slice or of a
-  pointer's pointee, padding included, and makes the place `init`.
+  pointer's pointee, padding included, and makes the place `init`. The
+  target's type must accept all-zero bytes (GitHub issue #794): a refined
+  range or singleton without 0, an exhaustive enum without a 0 case, a
+  variant or a reference anywhere in it is an error, with no `unsafe`
+  escape -- initialize such a place with a value of its type.
   `assume_init(dst)` emits nothing and asserts the same inside `unsafe`; an
   `unsafe` region holding only `assume_init` calls is not a raw-authority
   assertion, and TRUSTED_BASE.md lists every such site.
@@ -2537,6 +2541,13 @@ element stores and every conversion to a writable slice or raw pointer
 outside `unsafe`. `[]T` flows into a `[]const T` position; the minimum
 length rule applies unchanged. A slice made from an array place reached
 through a shared `&T` is readonly whatever slice type the cast spells.
+
+A pointer to a struct or array (`&T`, `&mut T`, `*T`, `*align(N) T`) can be
+viewed as its bytes with `p as []const u8` (GitHub issue #794): the length
+is `sizeof(T)` on the target, and the static minimum is what `sizeof` can
+prove without the target layout (0 otherwise). The readonly view is always
+safe. `p as []u8` needs a mutable source, and `unsafe` when `T` holds a
+field whose type claims more than its bytes (Unsafe Operations).
 
 **Creation**:
 - `bs"literal"` -- a readonly bounded byte-slice literal with compile-time minimum
@@ -4765,6 +4776,11 @@ Currently gates these six categories:
   non-exhaustive enums (`_;`) name every byte pattern and stay free;
   casting to the source's own pointee (with or without `io`) makes no new
   claim.
+- The reverse direction (GitHub issue #794): a writable view of a source
+  pointee that claims more than its bytes -- `*T as *U` or `slice as *U`
+  for a different `U` (aligned pointers included), or `p as []u8` -- since
+  raw byte writes through it could break the claim. Reading cannot, so the
+  readonly byte view `p as []const u8` stays free (see Slices).
 
 `unsafe` is **not** currently extended to general pointer
 arithmetic/dereference, or an exhaustive enum's runtime variant check

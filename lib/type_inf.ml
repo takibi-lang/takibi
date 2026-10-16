@@ -688,6 +688,39 @@ let rec raw_claim_reason (senv : senv) eenv (seen : string list) (ty : Ast.type_
          | None -> None)
   | _ -> None
 
+(* GitHub issue #794: does an all-zero byte pattern make a false claim in T?
+   `zero_fill` stores exactly that pattern, so it is refused (no `unsafe`
+   escape) when the answer is yes: a refined range or singleton without 0,
+   an exhaustive enum without a 0 case, a variant, or a reference. *)
+let rec zero_invalid_reason (senv : senv) eenv (seen : string list) (ty : Ast.type_expr)
+    : string option =
+  match ty with
+  | Ast.TypeRefined (lo, hi, _) ->
+      if lo <= 0 && 0 < hi then None
+      else Some (Printf.sprintf "a refined integer {%d..<%d} excludes 0" lo hi)
+  | Ast.TypeSingleton (base, Ast.StaticInt 0) -> zero_invalid_reason senv eenv seen base
+  | Ast.TypeSingleton _ -> Some "a singleton integer other than 0"
+  | Ast.TypeRef _ | Ast.TypeRefMut _ -> Some "a reference (zero is null)"
+  | Ast.TypeVariant _ -> Some "a variant"
+  | Ast.TypeArray (elem, _) | Ast.TypeIo elem -> zero_invalid_reason senv eenv seen elem
+  | Ast.TypeNamed name | Ast.TypeIndexed (name, _) ->
+      if StringMap.mem name eenv then
+        (match StringMap.find name eenv with
+         | (_, _, true) -> None
+         | (_, cases, _) when List.exists (fun (_, v) -> v = 0) cases -> None
+         | _ -> Some (Printf.sprintf "exhaustive enum '%s' has no 0 case" name))
+      else if Hashtbl.mem variant_defs name then
+        Some (Printf.sprintf "variant '%s'" name)
+      else if List.mem name seen then None
+      else
+        (match StringMap.find_opt name senv with
+         | Some (fields, _, _) ->
+             List.find_map (fun (fname, fty) ->
+               Option.map (fun why -> Printf.sprintf "field '%s.%s': %s" name fname why)
+                 (zero_invalid_reason senv eenv (name :: seen) fty)) fields
+         | None -> None)
+  | _ -> None
+
 let rec const_type_size (senv : senv) (ty : Ast.type_expr) : int option =
   match ty with
   | Ast.TypeBool | Ast.TypeU8 | Ast.TypeI8 -> Some 1
@@ -2630,7 +2663,29 @@ let check_raw_claim_needs_unsafe senv eenv loc (src_ty : ty) (tgt : ty) =
                "casting %s to %s lets arbitrary bytes stand for a value \
                 whose type claims more than its bytes (%s); write \
                 `unsafe { ... as %s }` to mark it (GitHub issue #772)"
-               (to_string src_ty) (to_string tgt) why (to_string tgt))))
+               (to_string src_ty) (to_string tgt) why (to_string tgt))));
+      (* GitHub issue #794: the reverse direction. A writable pointer of a
+         different pointee over a claim-carrying source lets raw byte writes
+         break the source's claim; `as []const u8` is the safe read-only
+         byte view. *)
+      let src_pointee = match repr src_ty with
+        | TPtr i | TAlignedPtr (_, i) | TRef i | TRefMut i -> Some i
+        | TSlice (el, _, _) -> Some el
+        | _ -> None in
+      (match src_pointee with
+       | None -> ()
+       | Some sp ->
+           (match raw_claim_reason senv eenv [] (to_ast sp) with
+            | None -> ()
+            | Some why ->
+                if !unsafe_depth > 0 then note_type_checker_unsafe_use ()
+                else
+                  raise (TypeError (loc, Printf.sprintf
+                    "casting %s to %s gives a writable view whose raw byte \
+                     writes can break the source's claim (%s); read the \
+                     bytes through `as []const u8`, or write `unsafe { ... \
+                     as %s }` to mark it (GitHub issue #794)"
+                    (to_string src_ty) (to_string tgt) why (to_string tgt)))))
   | _ -> ()
 
 let check_nonliteral_ptr_cast_needs_unsafe loc (src_expr : Ast.expr) (tgt : ty) =
@@ -2788,6 +2843,8 @@ let index_resolved_ty : (Lexing.position, Ast.type_expr) Hashtbl.t = Hashtbl.cre
    index_resolved_ty above: two independent derivations of one static fact
    is what issues #296/#311 found real gaps in. Reset with it below. *)
 let slice_cast_len : (Lexing.position, int) Hashtbl.t = Hashtbl.create 64
+(* GitHub issue #794: source location -> byte length of a pointer's byte view. *)
+let byte_view_len : (Lexing.position, int) Hashtbl.t = Hashtbl.create 16
 
 (* Collect per-variable bounds from a condition: v >= lo / v < hi / && chains.
    Returns name -> (lo_opt, hi_opt). Commutative forms (lo < v) are also handled. *)
@@ -3669,6 +3726,10 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                          "cannot cast readonly %s to writable %s"
                          (to_string src_ty) (to_string tgt)));
                      TSlice (el_want, m, want_access)
+                 | (TRef _ | TRefMut _ | TPtr _ | TAlignedPtr _)
+                   when byte_view_source senv eenv tyenv fenv e src_ty ->
+                     byte_view_cast senv eenv e src_ty tgt el_want want_min
+                       want_access
                  | _ ->
                      (match e.desc with
                       | Ast.Var _ | Ast.FieldGet _ ->
@@ -5405,6 +5466,20 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                "assume_init asserts that bytes are initialized with no \
                 evidence the checker can see; write it inside `unsafe { ... }`"));
            let dt = infer_expr senv eenv tyenv fenv d in
+           (* GitHub issue #794: zeroes must be a valid pattern of the
+              target; there is no `unsafe` escape -- initialize by type. *)
+           (match fname, repr dt with
+            | "zero_fill", (TSlice (p, _, _) | TPtr p | TRefMut p)
+              when (match repr p with TVar _ -> false | _ -> true) ->
+                (match zero_invalid_reason senv eenv [] (to_ast p) with
+                 | Some why ->
+                     raise (TypeError (d.loc, Printf.sprintf
+                       "zero_fill would store all-zero bytes into %s, whose \
+                        type makes a claim zero breaks (%s); initialize it \
+                        with a value of its type instead (GitHub issue #794)"
+                       (to_string dt) why))
+                 | None -> ())
+            | _ -> ());
            (match repr dt with
             | TSlice (_, _, Ast.SliceWritable) | TPtr _ | TRefMut _ -> ()
             | TSlice _ -> raise (TypeError (d.loc, Printf.sprintf
@@ -6318,6 +6393,74 @@ and infer_field_access ?(slice_source = false) ~decay senv eenv tyenv fenv
    codegen (today's Index always LOADS the final element value, discarding
    its address) that does not exist yet -- left for a follow-up rather
    than accepted here and left to crash the compiler at codegen. *)
+(* GitHub issue #794: is `e as []T` a byte view of a pointer's pointee
+   (`h as []const u8` for `h: &Hdr`)? Not when `e` names an array place:
+   that one decays to an element pointer and keeps the #372 array path. *)
+and byte_view_source senv eenv tyenv fenv (e : Ast.expr) (src_ty : ty) : bool =
+  let pointee_known = match repr src_ty with
+    | TRef p | TRefMut p | TPtr p | TAlignedPtr (_, p) ->
+        (* Only an aggregate: `*u8 as []u8` must keep saying that a raw
+           pointer carries no length, rather than become a 1-byte view. *)
+        (match repr p with
+         | TStruct _ | TIndexedStruct _ | TArray _ -> true
+         | _ -> false)
+    | _ -> false in
+  pointee_known
+  && (match e.desc with
+      | Ast.StringLit _ -> false
+      | Ast.Var _ | Ast.FieldGet _ ->
+          (match repr (place_undecayed_type senv eenv tyenv fenv e) with
+           | TArray _ -> false
+           | _ -> true)
+      | _ -> true)
+
+(* GitHub issue #794: the byte view itself. The length is sizeof(pointee).
+   A readonly view (`[]const u8`) is always safe: reads cannot break a
+   claim. A writable one needs a mutable source, and `unsafe` when the
+   pointee claims more than its bytes (raw_claim_reason). *)
+and byte_view_cast senv eenv (e : Ast.expr) src_ty tgt el_want want_min want_access : ty =
+  let pointee, shared = match repr src_ty with
+    | TRef p -> p, true
+    | TRefMut p | TPtr p | TAlignedPtr (_, p) -> p, false
+    | _ -> assert false in
+  (try unify el_want TU8 with _ -> ());
+  if repr el_want <> TU8 then
+    raise (TypeError (e.loc, Printf.sprintf
+      "cannot cast %s to %s: a pointer's pointee can be viewed only as bytes \
+       (`[]const u8`) (GitHub issue #794)" (to_string src_ty) (to_string tgt)));
+  (* The view's runtime length is the real sizeof(pointee), which codegen
+     reads from the target layout; the static minimum is what
+     const_type_size can prove here (0 when the layout is target-specific). *)
+  let n = match const_type_size senv (to_ast pointee) with
+    | Some n -> n
+    | None when want_min = 0 -> 0
+    | None -> raise (TypeError (e.loc, Printf.sprintf
+        "cannot cast %s to %s: sizeof(%s) is not provable at compile time \
+         here" (to_string src_ty) (to_string tgt) (to_string pointee))) in
+  if n < want_min then
+    raise (TypeError (e.loc, Printf.sprintf
+      "cannot cast %s to %s: sizeof(%s) = %d is shorter than the required \
+       minimum %d" (to_string src_ty) (to_string tgt) (to_string pointee) n want_min));
+  if want_access = Ast.SliceWritable then begin
+    if shared then
+      raise (TypeError (e.loc, Printf.sprintf
+        "cannot cast shared %s to writable %s; use `[]const u8`"
+        (to_string src_ty) (to_string tgt)));
+    match raw_claim_reason senv eenv [] (to_ast pointee) with
+    | None -> ()
+    | Some why ->
+        if !unsafe_depth > 0 then note_type_checker_unsafe_use ()
+        else
+          raise (TypeError (e.loc, Printf.sprintf
+            "casting %s to %s gives a writable view whose raw byte writes can \
+             break the source's claim (%s); read the bytes through \
+             `as []const u8`, or write `unsafe { ... as %s }` to mark it \
+             (GitHub issue #794)"
+            (to_string src_ty) (to_string tgt) why (to_string tgt)))
+  end;
+  Hashtbl.replace byte_view_len e.loc n;
+  TSlice (TU8, n, want_access)
+
 and place_undecayed_type senv eenv tyenv fenv (e : Ast.expr) : ty =
   match e.desc with
   | Ast.Var name ->
@@ -8108,7 +8251,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   Hashtbl.reset index_resolved_ty;  (* GitHub issue #311, fresh per compilation / per unit test *)
   Hashtbl.reset publish_field_at;   (* GitHub issue #534, same lifetime *)
   Hashtbl.reset publish_begin_record;  (* GitHub issue #476, same lifetime *)
-  Hashtbl.reset slice_cast_len;     (* GitHub issue #372, same lifetime *)
+  Hashtbl.reset slice_cast_len;
+  Hashtbl.reset byte_view_len;     (* GitHub issue #372, same lifetime *)
   Hashtbl.reset overflow_audit_table;
   Hashtbl.reset raw_deref_table;
   unsafe_site_table := UnsafeSites.empty;

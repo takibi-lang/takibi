@@ -3625,6 +3625,23 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
             | TypeSlice (_, m, _) ->
                 (* slice -> slice: min-length relaxation is a no-op on the value *)
                 (TypeSlice (el, m, SliceWritable), v)
+            | _ when Hashtbl.mem Type_inf.byte_view_len src_e.loc ->
+                (* GitHub issue #794: a pointer's pointee viewed as bytes;
+                   v is the pointer, the length is sizeof(pointee). *)
+                let min_n = Hashtbl.find Type_inf.byte_view_len src_e.loc in
+                let pointee = match src_ty with
+                  | TypeRef p | TypeRefMut p | TypePtr p | TypeAlignedPtr (_, p) -> p
+                  | _ -> raise (Error "BUG: byte view of a non-pointer source") in
+                let dl = match !target_data with
+                  | Some dl -> dl
+                  | None -> raise (Error "byte view: target data layout not initialized") in
+                let n = Int64.to_int
+                    (Llvm_target.DataLayout.abi_size (ltype_of_ast pointee) dl) in
+                if n < min_n then
+                  raise (Error (Printf.sprintf
+                    "BUG: byte view proved %d bytes but the layout has %d" min_n n));
+                (TypeSlice (el, min_n, SliceWritable),
+                 make_slice v (const_int (usize_lltype ()) n))
             | _ ->
                 (* array place -> slice: gen_expr already decayed the value
                    to an elem-0 pointer (exactly the ptr half we need); the

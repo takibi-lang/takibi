@@ -118,6 +118,10 @@ without maintainer approval; these only remove the question, not the gate.
   no other use. [active] #637
 - 2026-10-13 Header overlays: a proven-length byte slice cast `as &T` to a
   packed every-bit-valid struct gives a borrow-tied reference. [active] #637
+- 2026-10-16 `unsafe` marks only writes that can break a type's claim;
+  read-only byte views (`[]const u8`) of any value are safe, and writes
+  with no safe meaning (zero_fill of a zero-invalid type) are errors, not
+  unsafe. [active] #794
 - 2026-10-14 Lock order moves toward ranked capability tokens (Fuchsia
   lock_order style), absorbing acquires_lock_<rank>_<name>, after the syntax
   review. [active] #789

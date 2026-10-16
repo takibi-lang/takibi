@@ -3737,6 +3737,102 @@ fn f(frame: borrow [u8; 8..], p: *u8) -> u16 {
     return h.len as u16;
 }
 |}));
+  (* GitHub issue #794: the reverse direction. A writable view of a
+     claim-carrying pointee (`*u8`, `*U`, `[]u8`) needs `unsafe`, a readonly
+     `[]const u8` view does not, and zero_fill refuses a target whose
+     all-zero pattern breaks a claim, with no `unsafe` escape. *)
+  Alcotest.test_case "byte write: *S as *u8 over a bool field refused" `Quick
+    (expect_type_error "writable view whose raw byte writes can break the source's claim (field 'S.ok': a bool" {|struct S { ok: bool; n: u8; }
+fn f(p: *S) {
+    let b: *u8 = p as *u8;
+    b[0] = 7;
+}
+|});
+  Alcotest.test_case "byte write: &local as *u8 refused" `Quick
+    (expect_type_error "field 'S.len': a refined" {|struct S { len: {1..<9 as u8}; }
+fn f() {
+    let mut s: S;
+    s.len = 3;
+    let b: *u8 = &s as *u8;
+    b[0] = 0;
+}
+|});
+  Alcotest.test_case "byte write: claim slice as *u32 refused" `Quick
+    (expect_type_error "exhaustive enum 'Kind'" {|enum Kind: u8 { A; B; C; D; }
+fn f(ks: borrow [Kind; 4..]) {
+    let w: *u32 = ks as *u32;
+}
+|});
+  Alcotest.test_case "byte write: aligned claim pointer as *align(1) u8 refused" `Quick
+    (expect_type_error "writable view whose raw byte writes" {|struct S { ok: bool; }
+fn f(p: *align(1) S) {
+    let b: *align(1) u8 = p as *align(1) u8;
+}
+|});
+  Alcotest.test_case "byte write: writable []u8 view of a claim pointee refused" `Quick
+    (expect_type_error "writable view whose raw byte writes can break" {|struct packed S { ok: bool; n: u8; }
+fn f(s: &mut S) {
+    let b: []u8 = s as []u8;
+}
+|});
+  Alcotest.test_case "byte write: writable []u8 view of a shared ref refused" `Quick
+    (expect_type_error "cannot cast shared" {|struct packed S { a: u8; n: u8; }
+fn f(s: &S) {
+    let b: []u8 = s as []u8;
+}
+|});
+  Alcotest.test_case "byte write: zero_fill of a range without 0 refused" `Quick
+    (expect_type_error "zero_fill would store all-zero bytes" {|struct S { len: {1..<9 as u8}; }
+fn f(s: &mut S) {
+    zero_fill(s);
+}
+|});
+  Alcotest.test_case "byte write: zero_fill of an enum without 0 refused even in unsafe" `Quick
+    (expect_type_error "exhaustive enum 'Kind' has no 0 case" {|enum Kind: u8 { A = 1; B = 2; }
+struct S { k: Kind; }
+fn f(s: &mut S) !{unsafe} {
+    unsafe { zero_fill(s); }
+}
+|});
+  Alcotest.test_case "byte write: zero_fill of a refined array field refused" `Quick
+    (expect_type_error "field 'S.a': a refined integer {1..<9} excludes 0" {|struct S { a: [{1..<9 as u8}; 2]; }
+fn f(p: *S) {
+    zero_fill(p);
+}
+|});
+  Alcotest.test_case "byte view: readonly view of a claim pointee accepted" `Quick
+    (fun () -> ignore (infer {|enum Kind: u8 { A = 1; B = 2; }
+struct packed S { ok: bool; len: {1..<9 as u8}; k: Kind; }
+fn f(r: &S, m: &mut S, p: *S) -> u8 {
+    let a: []const u8 = r as []const u8;
+    let b: []const u8 = m as []const u8;
+    let c: []const u8 = p as []const u8;
+    let mut s: u8 = 0;
+    for x in a { s = s ^ x; }
+    for x in b { s = s ^ x; }
+    for x in c { s = s ^ x; }
+    return s;
+}
+|}));
+  Alcotest.test_case "byte view: plain targets stay free" `Quick
+    (fun () -> ignore (infer {|enum Kind: u8 { Z = 0; A = 1; }
+struct packed P { a: u8; b: u16; }
+struct Q { ok: bool; n: {0..<4 as u8}; k: Kind; }
+fn f(p: *P, m: &mut P, q: &mut Q) -> u8 {
+    let b: *u8 = p as *u8;
+    let w: []u8 = m as []u8;
+    zero_fill(q);
+    zero_fill(p);
+    return b[0];
+}
+|}));
+  Alcotest.test_case "byte write: writable claim views under unsafe accepted" `Quick
+    (fun () -> ignore (infer {|struct packed S { ok: bool; n: u8; }
+fn f(p: *S, m: &mut S) !{unsafe} {
+    let b: *u8 = unsafe { p as *u8 };
+    let w: []u8 = unsafe { m as []u8 };
+}
+|}));
   Alcotest.test_case "raw overlay: refined field under unsafe accepted" `Quick
     (fun () -> ignore (infer {|struct packed Hdr { kind: u16; len: {20..<1501 as u16}; }
 fn f(p: *u8) -> u16 !{unsafe} {

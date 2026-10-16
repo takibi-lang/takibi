@@ -509,7 +509,7 @@ LINUX_USER_EXAMPLES      := linux_hello start checked_usize elf64_validate bump 
                              freelist_pool freelist_generic slotmap refcount_slotmap growable_pool \
                              intrusive_pool intrusive_pool_portable pool_container branded_cell page_run tcp_pool_shape \
                              hello print_int print_hex print_ptr mem array struct struct_refined \
-                             nonexhaustive refined narrow enum align packed struct_align const_global \
+                             nonexhaustive refined narrow enum align packed byte_view struct_align const_global \
                              sizeof_offsetof int64 bitops indexed_view tcp_conn_view \
                              affine_escape_via_index align_ptr_proof linear_obligation tuple_pair region_proto region_inspection pool_space_replay \
                              field_lease match_int_lit record_loans \

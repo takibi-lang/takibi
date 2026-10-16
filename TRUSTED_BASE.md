@@ -105,8 +105,12 @@ older raw overlay, `bytes as *T`, and every other raw reinterpreting cast
 field whose type claims more than its bytes -- refined, singleton, bool,
 exhaustive enum, variant, reference (#772; `raw_claim_reason` and
 `check_raw_claim_needs_unsafe` in lib/type_inf.ml). Under that `unsafe`,
-the author vouches for the claim. Writing raw bytes through a pointer can
-still break such a claim (#794).
+the author vouches for the claim. The reverse direction is checked too
+(#794): a writable view (`*U`, `[]u8`) of a claim-carrying pointee needs
+`unsafe`, the readonly `[]const u8` view does not, and `zero_fill` refuses a
+target whose all-zero pattern breaks a claim (`zero_invalid_reason`,
+`byte_view_cast`). The compiler is trusted to compute the view's length from
+the target layout (lib/llvm_gen.ml, checked against the proven minimum).
 Region backing globals (`region let mut g: [T; N];`, SPEC.md built-in
 region) are the only arrays `region_of`, `region_table_of` and
 `region_table_lock` accept, and the compiler rejects every other use of such
