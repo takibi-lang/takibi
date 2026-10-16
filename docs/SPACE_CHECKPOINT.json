@@ -1,9 +1,9 @@
 {
   "date": "2026-10-16",
-  "event": "milestone",
-  "decision": "measured",
-  "source_sha256": "17e145da04c83ade636be89f51b0e0464e45e5ada9ae4c8f814baf0e7a16990a",
-  "workload": "#740 step 2 on main 0b73ff5d: the TCP retransmit queue keeps the sent packet in its pool buffer (net_transmit_keep, net_packet_kept_resend); reserve D + 1; RX-side keep and the ARP stand-in removed. scripts/space_delta.py main: text +680 B QEMU / +520 B RPi5, data +8 B, BSS unchanged, usable_ram_start unchanged on both.",
+  "event": "incremental",
+  "decision": "reuse",
+  "source_sha256": "9c66fa3cfb4b9ee3e8fd18ca0a7835cf1d4e6232f90509ceb00aa7aa5a1f3cc5",
+  "workload": "#794 on main 7c9cfba6: compiler type check (writable byte views of claim-carrying pointees need unsafe, []const u8 byte views, zero_fill zero-validity); no kernel source changed. Linked kernels against main (scripts/space_delta.py).",
   "evidence": [
     "docs/RETX_KEEP_SPACE_2026-10-16.md",
     "docs/RX_KEEP_SPACE_2026-10-15.md",
@@ -74,6 +74,6 @@
     "docs/VIRTIO_NET_TX_2026-10-10.md",
     "docs/VIRTIO_NET_TX_SPACE_2026-10-10.json"
   ],
-  "assessment": "Text +680 B QEMU / +520 B RPi5; data +8 B (tcp_kept_segments); BSS and usable_ram_start unchanged; RetxEntry still two per chunk. Adopted. Earlier measured results stand.",
+  "assessment": "Reuse: scripts/space_delta.py main shows text, data, BSS and usable_ram_start identical on QEMU and RPi5, no symbol changed size. Earlier measured results stand.",
   "next_trigger": "The socket receive queue keeping the packet (#740 step 3), a packet-pool size change, a shrink protocol for walked RegionPools, or the #748 allocator change, whichever lands first."
 }
