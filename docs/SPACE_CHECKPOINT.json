@@ -2,8 +2,8 @@
   "date": "2026-10-16",
   "event": "incremental",
   "decision": "reuse",
-  "source_sha256": "8e1b4c9492eb252908c71ae6b867d36ad7463b37864441099b665b9e5136a499",
-  "workload": "#638 slice 1 rebased on main 056de7bf: preempt_off blocks mint CpuHere (compiler check); syscall exec-args handoff in blocks; ext2 takes cpu_here_across_blocking(). No storage or allocation change. Measured on main d4f6f33b with scripts/space_delta.py; #778 changed no kernel source this slice touches.",
+  "source_sha256": "37e694e86a551faa44c2dfeccb3fc78072f5c85fefec9ad4822bc9077421f7ba",
+  "workload": "#802 on main cd16acb9: Protocol_decl.to_tla emits a device step only for a direction the protocol has (TLA+ output only); no kernel source, no generated wrapper and no compiled code path of the kernel images changed. Reuses the #638 slice-1 evidence measured with scripts/space_delta.py.",
   "evidence": [
     "docs/XHCI_EVENT_MATCH_SPACE_2026-10-16.md",
     "docs/RETX_KEEP_SPACE_2026-10-16.md",
@@ -75,6 +75,6 @@
     "docs/VIRTIO_NET_TX_2026-10-10.md",
     "docs/VIRTIO_NET_TX_SPACE_2026-10-10.json"
   ],
-  "assessment": "Reuse: scripts/space_delta.py (base d4f6f33b) showed text +56 B QEMU / +64 B RPi5 (the cpu_here_across_blocking wrapper over the private mint); data, BSS and usable_ram_start identical; no data/BSS symbol changed size. Earlier measured results stand.",
+  "assessment": "Reuse: the change alters only the build-time TLA+ text of tx-only and rx-only device protocol models; the kernel images are unaffected by construction. Earlier measured results stand.",
   "next_trigger": "The next #720 slice that changes xHCI storage (DCBAA, S2 sub-region authority) or #754's ERSTSZ write."
 }
