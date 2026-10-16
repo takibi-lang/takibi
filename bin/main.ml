@@ -441,6 +441,10 @@ let () =
       close_out out
     end;
 
+    (match Unused_functions.flag_error ~reject:!reject_unused_functions
+             ~check_files:!check_unused_files with
+     | Some message -> Printf.eprintf "Error: %s\n" message; exit 1
+     | None -> ());
     if !reject_unused_functions then begin
       let errors = Unused_functions.check
         ~external_entries:(List.rev !external_entries)

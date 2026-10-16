@@ -111,6 +111,9 @@ maintainer's judgment changed the course, kept so the pattern can be seen.
 - 2026-10-13 Workers run `make langcheck linuxcheck test` in full and pass
   space_checkpoint before reporting done. [active] #753
 - 2026-10-12 Landing .agents/ and .claude/ changes takes the light route. [active] #753
+- 2026-10-16 Compiler and tool input either passes or is an error; anything
+  suspicious (a stale list entry, a flag that would be ignored) is never a
+  warning, because warnings go unread. [active] #796
 - 2026-10-14 sched_yield is implemented as a plain reschedule; harnesses fail
   fast on an unimplemented-syscall line. [active] #665
 - 2026-10-15 RX capability split is option A (detached kept owner, holder refills,

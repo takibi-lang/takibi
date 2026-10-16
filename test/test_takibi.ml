@@ -23693,6 +23693,15 @@ let raw_authority_policy_tests = [
 
   (* GitHub issue #796: the device-semantics and unused-check lists are
      ratchets too; a stale entry fails. *)
+  Alcotest.test_case "--check-unused-file requires --reject-unused-functions" `Quick
+    (fun () ->
+      Alcotest.(check bool) "rejected without the flag" true
+        (Option.is_some (Unused_functions.flag_error ~reject:false ~check_files:["a.tkb"]));
+      Alcotest.(check bool) "accepted with the flag" true
+        (Option.is_none (Unused_functions.flag_error ~reject:true ~check_files:["a.tkb"]));
+      Alcotest.(check bool) "no list, no error" true
+        (Option.is_none (Unused_functions.flag_error ~reject:false ~check_files:[])));
+
   Alcotest.test_case "a missing --check-unused-file entry is rejected" `Quick
     (fun () ->
       let prog = parse "fn main() -> usize { return 42; }" in
