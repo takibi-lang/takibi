@@ -1,0 +1,21 @@
+// GitHub issue #778: a `tx` device protocol. Its generated model carries the
+// cache: `make modelcheck` checks that it passes, and that the model with the
+// generated clean left out (--emit-tla-omit-cache publish) violates Safety.
+protocol TxTransfer[inst: usize] retains region(u8)[b, n] tx {
+    state Ready access write;
+    state InFlight[req] device;
+    state Unconfirmed[req] device;
+    state Halted;
+    init Ready;
+
+    transition submit(Ready) -> InFlight[fresh req];
+    observe completion(InFlight[req]) -> Done[req] completes | Pending;
+    transition reclaim(InFlight[req], Done[req]) -> Ready;
+    transition expire(InFlight[req]) -> Unconfirmed[req];
+    observe reset(Unconfirmed[req]) -> Confirmed[req] quiesces | ResetFailed;
+    transition halt(Unconfirmed[req], Confirmed[req]) -> Halted;
+    transition restart(Halted) -> Ready;
+
+    property disjoint;
+    model cells 2;
+}

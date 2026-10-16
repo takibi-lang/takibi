@@ -71,6 +71,7 @@ let () =
   let emit_held_guards = ref "" in
   let emit_effect_matrix = ref false in
   let emit_tla = ref "" in
+  let emit_tla_omit = ref None in
   let emit_protocol_source = ref "" in
   let i = ref 1 in
   while !i < Array.length Sys.argv do
@@ -148,6 +149,15 @@ let () =
            exit 1
          );
          emit_tla := Sys.argv.(!i)
+     | "--emit-tla-omit-cache" ->
+         (* GitHub issue #778: a model-check fault control only. *)
+         incr i;
+         (match if !i < Array.length Sys.argv
+                then Protocol_decl.omit_of_string Sys.argv.(!i) else None with
+          | Some o -> emit_tla_omit := Some o
+          | None ->
+              Printf.eprintf "Error: --emit-tla-omit-cache requires 'publish' or 'finish'\n";
+              exit 1)
      | "--emit-protocol-source" ->
          incr i;
          if !i >= Array.length Sys.argv then (
@@ -236,7 +246,7 @@ let () =
 
   if input_files = [] then (
     Printf.eprintf
-      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--frame-pointers] [--function-sections] [--forbid-trap] [--forbid-unsafe] [--confine-raw-authority] [--raw-mint-file <path>] [--device-semantics-file <path>] [--regions] [--reject-unused-functions] [--external-entry <function>] [--check-unused-file <path>] [--explain-inference] [--emit-effect-matrix] [--emit-exception-frame-offsets <StructName>] [--emit-struct-layout <StructName>] [--emit-debug-metadata <path>] [--emit-depfile <path>] [--emit-overflow-audit <path>] [--emit-raw-deref-audit <path>] [--emit-raw-site-counts <path>] [--emit-held-guards <path>] [--emit-tla <dir>] [--emit-protocol-source <dir>] [--version]\n"
+      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--frame-pointers] [--function-sections] [--forbid-trap] [--forbid-unsafe] [--confine-raw-authority] [--raw-mint-file <path>] [--device-semantics-file <path>] [--regions] [--reject-unused-functions] [--external-entry <function>] [--check-unused-file <path>] [--explain-inference] [--emit-effect-matrix] [--emit-exception-frame-offsets <StructName>] [--emit-struct-layout <StructName>] [--emit-debug-metadata <path>] [--emit-depfile <path>] [--emit-overflow-audit <path>] [--emit-raw-deref-audit <path>] [--emit-raw-site-counts <path>] [--emit-held-guards <path>] [--emit-tla <dir> [--emit-tla-omit-cache publish|finish]] [--emit-protocol-source <dir>] [--version]\n"
       Sys.argv.(0);
     exit 1
   );
@@ -318,9 +328,10 @@ let () =
       List.iter (fun p ->
         let write ext text =
           let out = open_out (Filename.concat !emit_tla
-                                (p.Protocol_decl.name ^ ext)) in
+                                (Protocol_decl.module_name ?omit:!emit_tla_omit p
+                                 ^ ext)) in
           output_string out text; close_out out in
-        write ".tla" (Protocol_decl.to_tla p);
+        write ".tla" (Protocol_decl.to_tla ?omit:!emit_tla_omit p);
         write ".cfg" (Protocol_decl.to_cfg p)) protocols;
       exit 0
     end;

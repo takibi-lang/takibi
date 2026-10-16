@@ -1,0 +1,22 @@
+// GitHub issue #778: an `rx` device protocol. Its generated model carries the
+// cache: `make modelcheck` checks that it passes, and that the model with the
+// publishing clean-and-invalidate left out (--emit-tla-omit-cache publish),
+// or the finishing invalidate (--emit-tla-omit-cache finish), violates Safety.
+protocol RxTransfer[inst: usize] retains region(u8)[b, n] rx {
+    state Ready access write;
+    state InFlight[req] device;
+    state Unconfirmed[req] device;
+    state Halted;
+    init Ready;
+
+    transition submit(Ready) -> InFlight[fresh req];
+    observe completion(InFlight[req]) -> Done[req] completes | Pending;
+    transition reclaim(InFlight[req], Done[req]) -> Ready;
+    transition expire(InFlight[req]) -> Unconfirmed[req];
+    observe reset(Unconfirmed[req]) -> Confirmed[req] quiesces | ResetFailed;
+    transition halt(Unconfirmed[req], Confirmed[req]) -> Halted;
+    transition restart(Halted) -> Ready;
+
+    property disjoint;
+    model cells 2;
+}

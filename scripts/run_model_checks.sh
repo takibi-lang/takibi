@@ -169,6 +169,16 @@ for decl in "$MODELS"/protocols/*.tkb; do
         exit 1
     }
 done
+# GitHub issue #778: a device protocol's model carries the cache. The
+# generator always emits the cache step, so each fault control is the same
+# declaration's model with one kind of step left out by the generator.
+for control in TxTransfer:publish RxTransfer:publish RxTransfer:finish; do
+    "$TAKIBI" "$MODELS/protocols/${control%%:*}.tkb" --emit-tla "$GEN" \
+        --emit-tla-omit-cache "${control##*:}" || {
+        echo "FAIL modelcheck: takibi --emit-tla-omit-cache rejected $control"
+        exit 1
+    }
+done
 for tla in "$GEN"/*.tla; do
     name="$(basename "$tla" .tla)"
     cp "$GEN/$name.cfg" "$GEN/${name}_generated.cfg"
@@ -176,6 +186,12 @@ done
 MDIR="$GEN"
 check_model RegionTransfer Safety 6 generated:CInit:pass:ok
 check_model RegionTransferEarly Safety 6 generated:CInit:Safety:violated
+check_model TxTransfer Safety 8 generated:CInit:pass:ok
+check_model TxTransfer_omitpublish Safety 8 generated:CInit:Safety:violated
+check_model RxTransfer Safety 8 generated:CInit:pass:ok
+check_model RxTransfer_omitpublish Safety 8 generated:CInit:Safety:violated
+check_model RxTransfer_omitfinish Safety 8 generated:CInit:Safety:violated
+check_model PacketBuffer Safety 8 generated:CInit:pass:ok
 MDIR="$MODELS"
 
 # Run. A job's own exit status is not the verdict -- an unfixed variant is

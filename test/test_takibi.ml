@@ -26670,6 +26670,35 @@ let device_protocol_tests = [
         List.iter Sys.remove ["dev.tkb"; "use.tkb"; "other.tkb"]);
       Unix.rmdir dir);
 
+  Alcotest.test_case "device protocol: emitted model carries the generated cache steps" `Quick
+    (fun () ->
+      (* GitHub issue #778: the model takes its cache steps from the same
+         Protocol_decl.cache_step the wrappers do; make modelcheck checks
+         the verdicts (kernel/models/protocols/{Tx,Rx}Transfer.tkb). *)
+      let _, protos = Protocol_decl.extract (parse device_protocol) in
+      let p = List.hd protos in
+      let has tla frag =
+        if not (contains_substring tla frag) then
+          Alcotest.failf "generated TLA+ lacks %S:\n%s" frag tla in
+      let tla = Protocol_decl.to_tla p in
+      List.iter (has tla)
+        [ "Safety == NoOverlap /\\ CacheCoherent"; "RxStates == {\"Posted\"}";
+          "generated __protocol_dma_prepare_rx(s.memory)";
+          "generated __protocol_dma_finish_rx(s.memory)";
+          "/\\ held = Cells"; "DeviceWrite(cell) ==" ];
+      let omitted = Protocol_decl.to_tla ~omit:Protocol_decl.Omit_finish p in
+      has omitted "MODULE Rx_omitfinish";
+      has omitted "FAULT CONTROL: __protocol_dma_finish_rx left out";
+      Alcotest.(check bool) "finish step gone" false
+        (contains_substring omitted "generated __protocol_dma_finish_rx");
+      (* A control with nothing to leave out is refused, not vacuous. *)
+      let _, plain = Protocol_decl.extract (parse (protocol_src protocol_ok_body)) in
+      Alcotest.check_raises "vacuous control"
+        (Failure "--emit-tla-omit-cache: protocol P has no such cache step, \
+                  so the control would be vacuous")
+        (fun () -> ignore (Protocol_decl.to_tla ~omit:Protocol_decl.Omit_publish
+                             (List.hd plain))));
+
   Alcotest.test_case "device protocol: rx publishes then rings, finishes on completion" `Quick
     (fun () ->
       let ir = compile_device () in

@@ -1,0 +1,22 @@
+// GitHub issue #778: a `txrx` device protocol, the shape of
+// linux_user/protocol_txrx. Its generated model carries the cache and must
+// pass; each direction's fault controls are TxTransfer.tkb and RxTransfer.tkb.
+protocol PacketBuffer[inst: usize] retains region(u8)[b, n] txrx {
+    state Free access write;
+    state RxPosted[req] device;
+    state Filled access write;
+    state TxPosted[req] device access read;
+    state Unconfirmed[req] device;
+    init Free;
+
+    transition post_rx(Free) rx -> RxPosted[fresh req];
+    observe rx_done(RxPosted[req]) -> Received[req] completes | NotYet;
+    transition fill(RxPosted[req], Received[req]) -> Filled;
+    transition post_tx(Filled) tx -> TxPosted[fresh req];
+    observe tx_done(TxPosted[req]) -> Sent[req] completes | Pending;
+    transition sent(TxPosted[req], Sent[req]) -> Free;
+    transition expire(TxPosted[req]) -> Unconfirmed[req];
+
+    property disjoint;
+    model cells 2;
+}

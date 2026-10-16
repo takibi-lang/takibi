@@ -225,7 +225,12 @@ rules globally.
   (a driver error, not a memory-safety one: each owner still holds exactly
   its own region). Holder-tied identities (GitHub issue #750) would let the
   slot name its region and reject that statically. The emitted TLA+ model of
-  a device protocol has no cache variables.
+  a device protocol checks the order of the generated cache steps against a
+  cache abstraction (GitHub issue #778; bounded, `make modelcheck`); the
+  steps come from the same `Protocol_decl.cache_step` as the wrappers, so
+  what stays trusted is that abstraction and the lowering of each builtin,
+  not the placement. A snapshot observation's per-element invalidate is
+  not modeled.
   The maintained consumer is the xHCI producer rings
   (`kernel/platform/rpi5/usb_xhci_rings.tkb`): its trusted observations are
   a nonzero completion code from `usb_await_event` for the one outstanding
