@@ -80,7 +80,7 @@ list (maintainer, 2026-10-09).
    condition bounds its body, and the local re-check is gone). ext2.tkb has
    left it as well: its scratch is per-CPU storage and every byte access a
    checked (buffer, offset) position (2026-10-12; text +4 KiB, checking a
-   field's width once is #797). The network files (arp, icmp, tcp) have
+   field's width once is #798). The network files (arp, icmp, tcp) have
    left it too, through header overlays: `bytes as &mut TcpHdr` is checked
    when every byte pattern is a valid packed header and the slice covers it
    (2026-10-13); a raw reinterpreting cast to a type with a refined, bool,
