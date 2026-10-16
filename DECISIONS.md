@@ -175,7 +175,10 @@ without maintainer approval; these only remove the question, not the gate.
   space_checkpoint before reporting done. [active] #753
 - 2026-10-16 Territory A owns the two pillars, multicore support and memory
   safety, and pursues only them; Territory B takes issues slightly off the
-  pillars, supporting A. [active] #753
+  pillars, supporting A. [superseded by 2026-10-16] #753
+- 2026-10-16 Territory A takes pillar work that comes as chains of dependent
+  issues (like the #637 family); pillar issues solvable independently go to
+  B, so both lanes run; B also takes issues slightly off the pillars. [active] #753
 - 2026-10-12 Landing .agents/ and .claude/ changes takes the light route. [active] #753
 - 2026-10-16 Compiler and tool input either passes or is an error; anything
   suspicious (a stale list entry, a flag that would be ignored) is never a

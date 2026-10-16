@@ -21,8 +21,9 @@ English ASCII.
 1. Pick the next issue from `ROADMAP.md` for the territory, skipping issues
    that wait on a maintainer decision. Run at most one worker per territory
    (two in total) until the maintainer says otherwise. Territory A works
-   only the two pillars, multicore support and memory safety; B takes the
-   issues slightly off them, supporting A. An urgent issue met mid-work is
+   the pillar (multicore, memory safety) issues that come as chains of
+   dependent issues, like the #637 family; B takes pillar issues that can
+   be solved independently and those slightly off the pillars. An urgent issue met mid-work is
    yours to schedule: rewrite ROADMAP.md priorities, record one line on the
    issue, and tell the maintainer afterwards in one line.
 2. Choose the audit batch file: `~/.takibi-sessions/audits/<YYYY-MM-DD>_<issues>.md`,

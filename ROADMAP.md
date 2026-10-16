@@ -15,9 +15,11 @@ A territory is a role, not a set of directories and not a particular agent
 (`AGENTS.md`); which agent holds which is the maintainer's per-session
 decision.
 
-**Roles (maintainer, 2026-10-16, #753).** Territory A owns the two pillars,
-multicore support and memory safety, and pursues only them. Territory B
-takes the issues slightly off those pillars so that A can, supporting A.
+**Roles (maintainer, 2026-10-16, #753).** The pillars are multicore
+support and memory safety. Territory A takes pillar work that comes as
+chains of dependent issues (like the #637 family) and still carries the
+heavier load. Territory B takes pillar issues that can be solved
+independently, so both lanes run, and the issues slightly off the pillars.
 An urgent issue that comes up mid-work is scheduled by the coordinator,
 which rewrites the priorities below and says so on the issue.
 
@@ -122,11 +124,6 @@ list (maintainer, 2026-10-09).
    RPi5 and set `KERNEL_PREEMPTIBLE` to 1, with the models passing without
    their no-preemption guards. Never while #584's soak is being run for a
    step's evidence.
-5. **Lock order and core symmetry.** #789 (lock order as ranked
-   capability tokens, absorbing acquires_lock_<rank>_<name>, after the
-   syntax review); #775 (inventory core-role asymmetries; make each
-   symmetric or record why it stays); #776 (runtime test of one process
-   changing a running peer's affinity mask).
 
 **Evidence for the trunk, scheduled by A:** #584's soak at natural
 boundaries, #702 (dedicated soak hardware, the maintainer's decision),
@@ -231,7 +228,12 @@ the irqsoff-style tracer, and tcp_frame_pool's return-every-chunk shape.
      (virtio-net fixed TX/RX-reply authority) awaits the stored-array
      boundary and an in-place reply design decision.
    #783 (xHCI batched TD write path).
-2. **Signals, moved from A (2026-10-16):** #628 (delivery at an
+2. **Independent pillar issues, moved from A (2026-10-16):** #775
+   (inventory core-role asymmetries; make each symmetric or record why it
+   stays); #776 (runtime test of one process changing a running peer's
+   affinity mask); #789 (lock order as ranked capability tokens, absorbing
+   acquires_lock_<rank>_<name>, after the syntax review).
+   **Signals, moved from A (2026-10-16):** #628 (delivery at an
    interrupt return), then #726 (a caught signal interrupts a sleeping
    syscall; EINTR versus restart needs a decision), with #432 (timed
    blocking) beside it.
