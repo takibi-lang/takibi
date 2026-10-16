@@ -61,8 +61,12 @@ def validate(text, frames, mode):
     text = text[text.index(marker):]
     if b'FAIL gem-tx:' in text or PASS not in text:
         raise RuntimeError('physical fixture did not pass')
-    if len(frames) != 3:
-        raise RuntimeError(f'expected three physical transfers, observed {len(frames)}')
+    if b'gem-tx fixture: keep refused at the reserve ok' not in text:
+        raise RuntimeError('kept-frame reserve evidence absent (#740)')
+    # Three ownership transfers plus four from the #740 keep case: two
+    # kept, one refused at the reserve and sent plainly, one resend.
+    if len(frames) != 7:
+        raise RuntimeError(f'expected seven physical transfers, observed {len(frames)}')
     for frame in frames:
         body = bytes.fromhex(frame['bytes'])
         if len(body) != 64 or body[6:14] != BOARD + bytes.fromhex('88b5') or body[14:] != PAYLOAD:
@@ -205,7 +209,7 @@ def run_case(mode, device, directory, interface):
         else:
             validate(bytes(transcript), frames, mode)
         result['status'] = 'PASS'
-        detail = '32 timestamped sends, genuine IRQ bank control' if irq else 'three checked transfers, later sends dropped'
+        detail = '32 timestamped sends, genuine IRQ bank control' if irq else 'seven checked transfers (four kept, refused or resent), later sends dropped'
         print(f'PASS kernel/rpi5 gem-tx: {mode}; {detail}', flush=True)
     except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as error:
         result['error'] = str(error)
