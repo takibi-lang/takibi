@@ -63,8 +63,13 @@ branch and final commit. Answer all nine:
    cheapest faithful regression test; whether a model check could catch the
    class; whether the compiler could reject it.
 4. Debugging aids that would have shortened the work.
-5. Cheap prevention: do it now and commit it; file the rest as issues
-   (`github-workflow`), naming them.
+5. Recurrence prevention, one of the most important answers: every defect
+   met will likely recur. Prevent its class by the strongest feasible rung
+   -- (1) a compile-time static check, (2) else a model check, (3) else a
+   dynamic lint-like build check (for example a Python check), (4) else a
+   unit or integration test -- and name the rung taken and why the higher
+   rungs were not. Do it now and commit it; file only what is out of scope
+   (`github-workflow`), naming the issues.
 6. For each guarantee: statically excluded, or moved into the trusted base?
 7. Similar shapes elsewhere: other call sites, the kernel/linux_user copies,
    other compiler stages.
@@ -76,7 +81,7 @@ After the nine answers, add one row per defect found (product defects, test
 defects, and failures met during the work), so the maintainer can check at a
 glance that every defect got every question:
 
-| Defect | Root cause | Debugging aid that would have helped | Cheap prevention (done / issue #) | Model check (yes, how / no, why) | Compile-time check (yes, how / no, why) |
+| Defect | Root cause | Debugging aid that would have helped | Prevention rung taken, why not higher (done / issue #) | Model check (yes, how / no, why) | Compile-time check (yes, how / no, why) |
 |---|---|---|---|---|---|
 
 Write "none" when no defect was found; do not drop the table.

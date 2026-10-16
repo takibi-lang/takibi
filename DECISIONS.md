@@ -48,8 +48,17 @@ without maintainer approval; these only remove the question, not the gate.
 
 - 2026-10-12 Remaining items an audit names become filed issues by default;
   work too big for the current slice is filed, not stretched. [active] #719 #739 #772 #791
-- 2026-10-16 Cheap prevention an audit finds (a negative test, a check, a
-  failure-only log) is added before land, not filed. [active] #772 #789
+- 2026-10-16 Recurrence prevention: every defect met will likely recur, so
+  prevent its class by the strongest feasible rung: (1) compile-time static
+  check, (2) model check, (3) dynamic lint-like build check, (4) unit or
+  integration test. Not absolute, but the audit names the rung taken and why
+  higher rungs were not; this loop is how Takibi reaches stronger
+  compile-time checking in a practical Unix-like kernel. [active] #753
+- 2026-10-16 Prevention an audit finds at the rung the ladder picks (plus a
+  failure-only log) is added before land, not filed; cheapness alone does
+  not pick the rung. [active] #753 #772 #789
+- 2026-10-16 Urgent issues found mid-work: the coordinator rewrites
+  ROADMAP.md priorities and reschedules. [active] #753
 - 2026-10-16 Debugging aids log only on failure; a passing run leaves
   nothing behind. [active] #772
 - 2026-10-16 Do not add artifacts that go stale cheaply (for example --help
@@ -164,6 +173,9 @@ without maintainer approval; these only remove the question, not the gate.
   cheap prevention, model check, compile-time check). [active] #753
 - 2026-10-13 Workers run `make langcheck linuxcheck test` in full and pass
   space_checkpoint before reporting done. [active] #753
+- 2026-10-16 Territory A owns the two pillars, multicore support and memory
+  safety, and pursues only them; Territory B takes issues slightly off the
+  pillars, supporting A. [active] #753
 - 2026-10-12 Landing .agents/ and .claude/ changes takes the light route. [active] #753
 - 2026-10-16 Compiler and tool input either passes or is an error; anything
   suspicious (a stale list entry, a flag that would be ignored) is never a

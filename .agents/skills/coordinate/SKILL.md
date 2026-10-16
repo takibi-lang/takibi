@@ -20,7 +20,11 @@ English ASCII.
 
 1. Pick the next issue from `ROADMAP.md` for the territory, skipping issues
    that wait on a maintainer decision. Run at most one worker per territory
-   (two in total) until the maintainer says otherwise.
+   (two in total) until the maintainer says otherwise. Territory A works
+   only the two pillars, multicore support and memory safety; B takes the
+   issues slightly off them, supporting A. An urgent issue met mid-work is
+   yours to schedule: rewrite ROADMAP.md priorities, record one line on the
+   issue, and tell the maintainer afterwards in one line.
 2. Choose the audit batch file: `~/.takibi-sessions/audits/<YYYY-MM-DD>_<issues>.md`,
    reusing the open batch until it is presented.
 3. Spawn with the Agent tool: `subagent_type: "territory-worker"`,
@@ -70,6 +74,10 @@ refuses any branch but `main`).
    verbatim from the audit, and (b) one line listing the defaults applied.
    If nothing escalates, say so in one line and ask only for land approval.
    The full audit stays in the batch file; show it verbatim on request.
+   Recurrence prevention is among the most important parts: check that
+   each defect names its prevention rung (compile-time check, then model
+   check, then lint-like build check, then test) and why higher rungs were
+   not taken; send it back if not.
    Nothing lands without the maintainer's approval. Present every few
    issues or at a natural boundary, then stop and wait.
 3. **Land gates on the branch.** The space checkpoint is current
