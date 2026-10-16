@@ -8,8 +8,10 @@ description: Run Takibi's Territory A/B queues from one Claude Code session as c
 Decided on GitHub issue #753 (maintainer, 2026-10-11). The coordinator is one
 interactive Claude Code session. It stays free for the maintainer's own
 questions; the issue work happens in background subagents. The maintainer
-takes part in only two flows: options -> discussion -> decision, and review
-of the end-of-issue audit with its recurrence-prevention proposals.
+takes part in only two flows: options -> discussion -> decision, and
+approval to land after the coordinator has checked the end-of-issue audit.
+The coordinator decides what `DECISIONS.md` "Coordinator defaults" covers
+and escalates the rest (exception-based gate, #753, 2026-10-16).
 
 Talk to the maintainer in Japanese. Everything written to Git or GitHub stays
 English ASCII.
@@ -57,12 +59,19 @@ Only the coordinator lands, from the main checkout (`scripts/land.sh`
 refuses any branch but `main`).
 
 1. The worker reported `done` and its audit is in the batch file.
-2. **Audit gate.** A branch is not landed until the maintainer has reviewed
-   its audit and the agreed cheap prevention is committed. Present audits
-   every few issues or at a natural boundary: show the batch file's text
-   verbatim (no summary), then stop and wait for the maintainer. If the
-   agreed prevention is not done yet, continue the worker with SendMessage
-   to do it.
+2. **Audit gate (exception-based).** Read the full audit and check it
+   against `DECISIONS.md`. Where a coordinator default applies, apply it
+   yourself first: ask the worker (SendMessage) for the fix, test or filed
+   issue, and record each call as one line on the issue. Then show the
+   maintainer, in Japanese, only (a) the audit items that match an escalation
+   condition (always including any language design change beyond surface
+   syntax: semantics, type rules, ownership, capability or protocol model,
+   accepted programs) or no default covers, plus any concern of your own, quoted
+   verbatim from the audit, and (b) one line listing the defaults applied.
+   If nothing escalates, say so in one line and ask only for land approval.
+   The full audit stays in the batch file; show it verbatim on request.
+   Nothing lands without the maintainer's approval. Present every few
+   issues or at a natural boundary, then stop and wait.
 3. **Land gates on the branch.** The space checkpoint is current
    (`python3 scripts/space_checkpoint.py --base main --head <branch>` passes),
    and the ROADMAP.md update and issue-closing commit are on the branch.
@@ -76,6 +85,10 @@ refuses any branch but `main`).
    send the conflict back to the worker.
 5. Follow the `land` skill (`scripts/land.sh`). Never land two branches
    concurrently; never edit the tree while a land runs.
+   On a red land, put main back to `origin/main` before sending the failure
+   to the worker: `git switch -C main origin/main` (main is clean during a
+   land, and the branch keeps its commits). Do not use `git reset --hard`;
+   user and project settings deny it.
 6. After a green land: `git worktree remove <worktree>` (agent worktrees
    are locked, so this needs `-f -f`, which the maintainer may have to run), delete the branch,
    and release its port block:
@@ -118,7 +131,11 @@ too thin -- tell the maintainer.
 
 ## Never
 
-- Push except through `land`; land a branch whose audit is unreviewed.
-- Summarise an audit instead of showing it verbatim.
+- Push except through `land`; land a branch without maintainer approval.
+- Paraphrase an escalated audit item instead of quoting it, or hide a
+  default you applied.
 - Touch `~/.takibi-sessions` beyond the audit directory, the handoff note and
-  releasing a removed worktree's port block.
+  releasing a removed worktree's port block. When revising `DECISIONS.md`
+  defaults or this skill, read past maintainer conversations in
+  `~/.takibi-sessions/transcripts/` as evidence of decision tendencies
+  (read-only; never commit or quote them into the repo; cite issues instead).

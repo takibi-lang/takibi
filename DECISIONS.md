@@ -21,6 +21,8 @@ Format: `- YYYY-MM-DD <decision>. [active|superseded by YYYY-MM-DD] #issue`
 
 These are not a complete statement of principles; they are cases where the
 maintainer's judgment changed the course, kept so the pattern can be seen.
+They are why the matching calls are escalated (see "Escalate to the
+maintainer when" below); routine calls follow the coordinator defaults.
 
 - 2026-10-14 Pursue zero-copy and compile-time safety together, at the edge
   where both still hold; copying everything to stay safe weakens the types,
@@ -37,6 +39,58 @@ maintainer's judgment changed the course, kept so the pattern can be seen.
   syntax rather than replacing them all at once. [active] #789
 - 2026-10-12 Closed issues stay forever as project records; only mentions
   in ROADMAP.md are dropped. [active] #720
+
+## Coordinator defaults (decide without asking)
+
+The coordinator applies these itself, records each call as one line on the
+issue, and reports it to the maintainer afterwards in one line. Nothing lands
+without maintainer approval; these only remove the question, not the gate.
+
+- 2026-10-12 Remaining items an audit names become filed issues by default;
+  work too big for the current slice is filed, not stretched. [active] #719 #739 #772 #791
+- 2026-10-16 Cheap prevention an audit finds (a negative test, a check, a
+  failure-only log) is added before land, not filed. [active] #772 #789
+- 2026-10-16 Debugging aids log only on failure; a passing run leaves
+  nothing behind. [active] #772
+- 2026-10-16 Do not add artifacts that go stale cheaply (for example --help
+  on a fast-changing script). [active] #740
+- 2026-10-13 Intermittent failures: try to reproduce first; if costly, stop
+  and file with a KNOWN_INTERMITTENTS row (open issue) rather than chase. [active] #665 #780 #795
+- 2026-10-16 Concurrency or resource claims: prefer a compile-time check,
+  else a TLA+ model with a failing control, at least a dynamic test, before land. [active] #740
+- 2026-10-16 Models stay at a tractable size; do not push past state
+  explosion; state the bound in the audit. [active] #740
+- 2026-10-16 Small, closely related follow-ups found mid-slice (including a
+  prerequisite fix) are folded into the current slice. [active] #740
+- 2026-10-16 Speculative capacity or scope growth (bigger pools, later
+  zero-copy steps, size reduction) waits for measurement when an issue holds
+  the plan; commit only to near steps. Growth must still be explained. [active] #497 #740
+- 2026-10-16 Related diagnostics fold into the nearest open issue rather
+  than a new one. [active] #771 #797
+- 2026-10-13 Non-fatal, low-impact defects are filed but kept off ROADMAP.md. [active] #768
+- 2026-10-13 A trust-relevant change is at minimum recorded in
+  TRUSTED_BASE.md before land, so it can be reviewed later. [active] #720
+- 2026-10-15 Evidence for a question deferred to a later review is recorded
+  on its issue. [active] #775
+- 2026-10-16 Land order, clean audits and choices the worker recommends that
+  match an active line are not separate questions. [active] #753
+- 2026-10-16 Low-abstraction details (a specific constant such as a reserve
+  count) are not recorded here; record the principle, not the value. [active] #753
+
+### Escalate to the maintainer when
+
+- the call contradicts an active line in this file;
+- it is irreversible or outward-facing (publishing, deleting records, ABI);
+- it grows image size without an explanation;
+- it changes surface syntax or grammar;
+- it brings a large language design change beyond surface syntax: new or
+  changed semantics, type-system rules, the ownership/linearity model, the
+  capability or protocol model, or which programs are accepted;
+- it widens scope beyond the issue;
+- it trades zero-copy against compile-time safety;
+- it is trust-relevant beyond a TRUSTED_BASE.md note, or the coordinator has
+  its own concern about it;
+- or no default covers it.
 
 ## Language and types
 

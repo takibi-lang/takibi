@@ -90,7 +90,7 @@ report `done`, rebase onto `main` and run
 stale, do the review in [docs/SPACE_REVIEW.md](../../docs/SPACE_REVIEW.md)
 (measure with `scripts/space_delta.py`, or reuse evidence with the reason the
 policy allows) and commit the updated `docs/SPACE_CHECKPOINT.json`. Once the
-maintainer has approved the audit, the ROADMAP.md update and the
+maintainer has approved the land, the ROADMAP.md update and the
 issue-closing commit go on the branch too.
 
 Also run, on the final head after the rebase, `make langcheck linuxcheck test`
@@ -101,7 +101,10 @@ log expectation, each failed a land that the worker's chosen lanes had
 passed. Name the result in your report's verification line.
 
 Do not close the issue yourself unless your prompt says to; the closing commit
-lands through the coordinator after the maintainer reviews the audit.
+lands through the coordinator after it checks the audit against DECISIONS.md
+and the maintainer approves the land. The coordinator quotes escalated audit
+items verbatim, so write each item to stand on its own, and expect it to send
+back fixes that a coordinator default calls for.
 
 ## Report
 
