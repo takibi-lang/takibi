@@ -164,18 +164,21 @@ IRQs is attributed to the unmask point with its masked weight; seeing
 inside masked spans is #773 (Arm SPE) and an irqsoff-style tracer on #771.
 
 **Next, ahead of the list below (maintainer, 2026-10-14):** #740:
-next the TCP retransmit queue keeps its TxPosted owner (step 2); a
-socket's receive queue keeping the packet (step 3) is decided after the
-#497 copy-cost measurement. Done 2026-10-15 under #740: the RX capability
-split (option A) -- net_rx_keep parks the packet Kept in its pool slot and
-returns the capability, net_packet_kept_claim/net_packet_free work off-turn,
-the capability holder refills (also on acquire's no-frame path), and
-keeping stops at a spare reserve of 2, the least that kernel/models/
-PacketReserve.tla shows keeps one RX descriptor posted; the boot ARP reply
-is answered from a kept packet. That ARP path is a stand-in caller, so the
-new functions have a user; it goes back to the plain in-turn reply when
-step 2's retransmit queue becomes the real caller. Step 2 also adds the
-test of GEM's refused-keep path. Done 2026-10-14
+a socket's receive queue keeping the packet (step 3) is decided after the
+#497 copy-cost measurement. Done 2026-10-16 under #740 (step 2): the TCP
+retransmit queue keeps the sent packet -- net_transmit_keep parks the
+TxPosted buffer Kept (Filled) at its completion, a retransmission resends
+it in place (net_packet_kept_resend), and the entry's release frees it;
+past the reserve the segment is sent plainly and copied into the entry as
+before. The reserve became D + 1 (every RX descriptor plus one Free buffer
+for a kernel-built frame: virtio-net 9 of 10, so one kept segment; GEM 2 of
+4, two), because PacketReserve.tla's new TxNeverStarves showed that 2 lets
+the refill post the last Free buffer and starve net_transmit_ready. The
+boot ARP stand-in caller and the RX-side net_rx_keep went away (no caller
+until step 3); GEM's refused keep is tested on the board (gem-tx fixture).
+Done 2026-10-15 under #740: the RX capability split (option A) -- the
+kept owner is claimed and freed off-turn by pool slot, and the capability
+holder refills (also on acquire's no-frame path). Done 2026-10-14
 under #740: the stack takes the Filled packet by move as NetPacket, which
 names no RX descriptor (virtio-net refills the descriptor and GEM rearms
 RX inside net_rx_acquire); U2-full --

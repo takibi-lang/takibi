@@ -450,7 +450,10 @@ let mut tcp_injected_syn_accepted: bool = false;
 // instead of by copy -- worth having, and it needs the connection's own
 // transmit frame to be pooled first, which is the step after this one.
 // Copying here keeps this commit's behaviour identical to what it
-// replaces, and an entry's slot is 2 to a page either way.
+// replaces, and an entry's slot is 2 to a page either way. Since #740
+// step 2 the copy is the fallback: a segment the driver kept in its pool
+// buffer (kept_slot below) is resent from there, and the inline frame is
+// written only when the pool's reserve refused the keep.
 // pending_tcp_kind/_frame/_frame_length/_expected_ack/_remote_ip/
 // _remote_port/_local_port/_sent_at/_retries, one entry instead of nine
 // arrays -- plus `connection`, the pool address of the connection this
@@ -477,6 +480,12 @@ struct RetxEntry {
     remote_ip: [u8; 4];
     remote_port: u16;
     local_port: u16;
+    // GitHub issue #740 step 2: the pool slot the driver kept the sent
+    // packet in (its TxPosted owner, back Filled at completion), or
+    // NET_KEPT_NONE when keeping was refused at the pool's reserve and
+    // `frame` holds a copy instead. A kept segment is resent from the
+    // driver's buffer and freed by retx_entry_release.
+    kept_slot: usize;
     frame: [u8; 1514];
 }
 
@@ -522,6 +531,9 @@ private let mut tcp_retx_chain: RetxChain;
 private let mut tcp_retx_pool: RegionPool(RetxEntry);
 
 let mut tcp_drop_data_segment_index: i32 = -1;
+// GitHub issue #740 step 2: segments queued from a kept driver buffer
+// rather than a copy, for the boot evidence that the path ran.
+let mut tcp_kept_segments: usize = 0;
 let mut tcp_injected_data_retransmitted: bool = false;
 let mut tcp_injected_data_recovery_observed: bool = false;
 let mut tcp_drop_next_fin: bool = false;
@@ -1760,6 +1772,7 @@ fn retx_entry_put_next(entry: borrow &mut RetxEntry, link: Place(exists p: addr.
 // lose the rest of a chain.
 fn retx_entry_release(parked: sink RegionSlot(RetxEntry)[p, k]) !{unsafe} {
     let entry: &mut RetxEntry = region_slot_record(parked);
+    retx_kept_free(entry.kept_slot);
     match retx_entry_take_next(entry) {
         Place::Empty => {}
         Place::Full(stray) => {
@@ -1779,6 +1792,16 @@ fn retx_entry_release(parked: sink RegionSlot(RetxEntry)[p, k]) !{unsafe} {
         }
     }
     tcp_retx_pool_unlock(guard);
+}
+
+// The kept packet in `slot` back to its pool, off-turn (#740). None when
+// nothing was kept, or when an unconfirmed transmit took the buffer from
+// the pool for the rest of the boot.
+fn retx_kept_free(slot: usize) {
+    match net_packet_kept_claim(slot) {
+        NetKeptClaim::None => {}
+        NetKeptClaim::Claimed(kept) => { net_packet_free(kept); }
+    }
 }
 
 private fn tcp_retx_pool_lock(pool: *RegionPool(RetxEntry) @ entries)
@@ -1950,9 +1973,13 @@ fn pending_tcp_reset_all(conn: borrow &mut TcpConnection) !{unsafe} {
 // callers still guard their deliberate-drop test injection on getting a
 // real entry, since arming that against "not queued" would mean the
 // frame is never transmitted at all.
+//
+// kept_slot (#740 step 2): the driver slot the transmit kept the packet in,
+// or NET_KEPT_NONE, and then the frame is copied into the entry. A kept
+// packet that cannot be queued is freed here.
 fn pending_tcp_record(connection_owner: borrow TcpConnectionOwner[connection_pool, connection],
                       kind: PendingTcpKind, frame: borrow [u8; 1514..],
-                      frame_length: usize)
+                      frame_length: usize, kept_slot: usize)
         -> usize !{unsafe} {
     let conn: &mut TcpConnection = tcp_connection_of(connection_owner);
     match tcp_retx_take() {
@@ -1963,6 +1990,7 @@ fn pending_tcp_record(connection_owner: borrow TcpConnectionOwner[connection_poo
             // needs.
             kernel_boot_log_resource_exhausted(
                 "TCP retransmit queue (out of pages)" as *u8, 0);
+            retx_kept_free(kept_slot);
             return 0;
         }
         Place::Full(owner) => {
@@ -1991,7 +2019,10 @@ fn pending_tcp_record(connection_owner: borrow TcpConnectionOwner[connection_poo
             let mut init_retry: RetxRetryState = { read_cntpct(), 0 };
             retx_retry_write(init_guard, entry, init_retry);
             retx_unlock(init_guard, &entry.mutex);
-            slice_copy(entry.frame as []u8, frame[0..<1514]);
+            entry.kept_slot = kept_slot;
+            if (kept_slot == NET_KEPT_NONE) {
+                slice_copy(entry.frame as []u8, frame[0..<1514]);
+            }
 
             // Append at the tail, keeping the queue oldest-first: reverse,
             // push, reverse back. Two extra walks of a chain that holds
@@ -2070,12 +2101,12 @@ fn pending_tcp_chain_probe_body(owner_a: borrow TcpConnectionOwner[first_pool, f
     for i: usize in 0..<5 {
         if (pending_tcp_record(owner_a, PendingTcpKind::Data,
                                pending_tcp_probe_frame as [u8; 1514..],
-                               1000 + i) != 0) {
+                               1000 + i, NET_KEPT_NONE) != 0) {
             queued = queued + 1;
         }
         if (i == 2) {
             if (pending_tcp_record(owner_b, PendingTcpKind::Fin,
-                                   pending_tcp_probe_frame as [u8; 1514..], 9999)
+                                   pending_tcp_probe_frame as [u8; 1514..], 9999, NET_KEPT_NONE)
                     == 0) {
                 return false;
             }
@@ -2139,7 +2170,7 @@ fn pending_tcp_chain_probe_body(owner_a: borrow TcpConnectionOwner[first_pool, f
     let (chunks_after, _cap_a, _nonfree_a, _bytes_a) = tcp_retx_pool_space_stats();
     if (live_before == 0 && chunks_after != 1) { return false; }
     if (pending_tcp_record(owner_a, PendingTcpKind::Data,
-                           pending_tcp_probe_frame as [u8; 1514..], 1) == 0) {
+                           pending_tcp_probe_frame as [u8; 1514..], 1, NET_KEPT_NONE) == 0) {
         return false;
     }
     pending_tcp_reset_all(conn);
@@ -2342,10 +2373,21 @@ fn pending_tcp_service_once(conn: borrow &mut TcpConnection,
                     }
                     retx_unlock(scan_guard, &entry.mutex);
                 }
-                if (retransmit) {
+                if (retransmit && entry.kept_slot != NET_KEPT_NONE) {
+                    // #740 step 2: resent from the driver's kept buffer,
+                    // which its completion parks Kept again.
+                    match net_packet_kept_claim(entry.kept_slot) {
+                        NetKeptClaim::None => {}
+                        NetKeptClaim::Claimed(segment) => {
+                            ready = net_packet_kept_resend(ready, segment);
+                        }
+                    }
+                } else if (retransmit) {
                     let frame_bytes = entry.frame as []u8;
                     ready = net_transmit_ready(
                         ready, frame_bytes[0..<1514], length as i32);
+                }
+                if (retransmit) {
                     if (region_slot_address(parked) == conn.injected_data_entry) {
                         tcp_injected_data_retransmitted = true;
                     }
@@ -3440,34 +3482,64 @@ fn kernel_tcp_send_received(owner: borrow TcpConnectionOwner[connection_pool, co
         let this_index: usize = conn.data_segment_counter;
         conn.data_segment_counter =
             conn.data_segment_counter + 1;
-        let this_entry: usize = pending_tcp_record(
-            owner, PendingTcpKind::Data, frame_bytes, frame_length);
-        // GitHub issue #295: this_entry == 0 means the segment could not
-        // be queued (pending_tcp_record's own doc comment) -- there is
-        // nothing to ever retransmit from, so the deliberate-drop test
-        // injection below must not arm in that case, or this segment
-        // would never be transmitted at all (skipped here, and never
-        // retried since nothing tracks it). Fall through to the real send.
-        // The condition was `this_slot >= 0` when the sentinel was -1;
-        // issue #257 made it an entry address, whose sentinel is 0.
-        if (this_entry != 0 &&
-                this_index as i32 == tcp_drop_data_segment_index) {
-            // Skip only this segment's initial transmit -- it stays
-            // queued (pending_tcp_record already ran above), so its
-            // first REAL transmission, and the recovery-observed flag,
-            // both come from pending_tcp_service_once's real timeout+
-            // peer-ack path, the same one every other segment uses.
-            tcp_drop_data_segment_index = -1;
-            conn.injected_data_entry = this_entry;
-            tcp_connection_frame_unhold(owner, TcpFrameRole::Tx,
-                                        tx);
-            return KernelTcpSendResult::Sent(serviced);
+        if (this_index as i32 == tcp_drop_data_segment_index) {
+            let this_entry: usize = pending_tcp_record(
+                owner, PendingTcpKind::Data, frame_bytes, frame_length,
+                NET_KEPT_NONE);
+            // GitHub issue #295: this_entry == 0 means the segment could
+            // not be queued (pending_tcp_record's own doc comment) --
+            // there is nothing to ever retransmit from, so the
+            // deliberate-drop test injection must not arm in that case,
+            // or this segment would never be transmitted at all (skipped
+            // here, and never retried since nothing tracks it). It falls
+            // through to the real send. The condition was
+            // `this_slot >= 0` when the sentinel was -1; issue #257 made
+            // it an entry address, whose sentinel is 0.
+            if (this_entry != 0) {
+                // Skip only this segment's initial transmit -- it stays
+                // queued, so its first REAL transmission, and the
+                // recovery-observed flag, both come from
+                // pending_tcp_service_once's real timeout+peer-ack path,
+                // the same one every other segment uses.
+                tcp_drop_data_segment_index = -1;
+                conn.injected_data_entry = this_entry;
+                tcp_connection_frame_unhold(owner, TcpFrameRole::Tx,
+                                            tx);
+                return KernelTcpSendResult::Sent(serviced);
+            }
+            let sent = net_transmit_ready(serviced, frame_bytes, frame_length as i32);
+            tcp_connection_frame_unhold(owner, TcpFrameRole::Tx, tx);
+            return KernelTcpSendResult::Sent(sent);
         }
-        let sent = net_transmit_ready(serviced, frame_bytes, frame_length as i32);
+        let sent = tcp_send_and_record(owner, serviced, PendingTcpKind::Data,
+                                       frame_bytes, frame_length);
         tcp_connection_frame_unhold(owner, TcpFrameRole::Tx, tx);
         return KernelTcpSendResult::Sent(sent);
     }
     return KernelTcpSendResult::Invalid(ready);
+}
+
+// GitHub issue #740 step 2: transmits a segment and queues it for
+// retransmission. The driver keeps the sent packet (its TxPosted owner,
+// back Filled at completion) in a pool slot when the pool's reserve
+// allows, and the entry names that slot; otherwise the frame is copied
+// into the entry, as before. The segment is sent either way.
+fn tcp_send_and_record(owner: borrow TcpConnectionOwner[connection_pool, connection],
+                       ready: sink NetRxCanAcquire, kind: PendingTcpKind,
+                       frame: borrow [u8; 1514..], frame_length: usize)
+        -> NetRxCanAcquire !{may_block, unsafe} {
+    let slot: usize = net_tx_keep_slot();
+    match net_transmit_keep(ready, slot, frame, frame_length as i32) {
+        NetTxKeep::Kept(after) => {
+            tcp_kept_segments = tcp_kept_segments + 1;
+            pending_tcp_record(owner, kind, frame, frame_length, slot);
+            return after;
+        }
+        NetTxKeep::Sent(after) => {
+            pending_tcp_record(owner, kind, frame, frame_length, NET_KEPT_NONE);
+            return after;
+        }
+    }
 }
 
 // GitHub issue #180: used to defer sending FIN entirely (setting
@@ -3530,17 +3602,23 @@ fn kernel_tcp_close_stream(owner: borrow TcpConnectionOwner[connection_pool, con
     tcp_hdr.urgent = 0;
     fix_tcp_checksum(ip, tcp);
     conn.snd_nxt = conn.snd_nxt + 1;
-    let fin_entry: usize = pending_tcp_record(
-            owner, PendingTcpKind::Fin, frame, 54);
-    // GitHub issue #295: same reasoning as the Data-segment send site --
-    // fin_entry == 0 means nothing tracks this FIN, so the deliberate-drop
-    // injection must not arm (that would skip the only transmission this
-    // FIN would ever get). Falls through to the real send instead.
-    if (tcp_drop_next_fin && fin_entry != 0) {
-        tcp_drop_next_fin = false;
-        conn.injected_fin_entry = fin_entry;
+    if (tcp_drop_next_fin) {
+        let fin_entry: usize = pending_tcp_record(
+                owner, PendingTcpKind::Fin, frame, 54, NET_KEPT_NONE);
+        // GitHub issue #295: same reasoning as the Data-segment send site
+        // -- fin_entry == 0 means nothing tracks this FIN, so the
+        // deliberate-drop injection must not arm (that would skip the
+        // only transmission this FIN would ever get). Falls through to
+        // the real send instead.
+        if (fin_entry != 0) {
+            tcp_drop_next_fin = false;
+            conn.injected_fin_entry = fin_entry;
+        } else {
+            ready = net_transmit_ready(ready, frame, 54);
+        }
     } else {
-        ready = net_transmit_ready(ready, frame, 54);
+        ready = tcp_send_and_record(owner, ready, PendingTcpKind::Fin,
+                                    frame, 54);
     }
     tcp_connection_frame_unhold(owner, TcpFrameRole::Tx, tx);
     let start: i64 = read_cntpct();

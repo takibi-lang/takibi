@@ -302,6 +302,7 @@ protocol GemPkt[inst: usize] retains region(GemPacket)[b, GEM_PKT_ONE] txrx {
     transition gem_pkt_send(Free) tx -> TxPosted[fresh req];
     observe gem_pkt_sent(TxPosted[req]) -> PktSent[req] completes | PktPending;
     transition gem_pkt_done(TxPosted[req], PktSent[req]) -> Free;
+    transition gem_pkt_kept(TxPosted[req], PktSent[req]) -> Filled;
     observe gem_pkt_halted(TxPosted[req]) -> PktHalted[req] quiesces | PktRunning;
     transition gem_pkt_reclaim(TxPosted[req], PktHalted[req]) -> Free;
     transition gem_pkt_expire(TxPosted[req]) -> Unconfirmed[req];
@@ -346,6 +347,7 @@ fn gem_pkt_sent(s: borrow GemPkt_TxPosted[b, o, 1, r]) -> GemPkt_gem_pkt_sent_Ra
     return GemPkt_gem_pkt_sent_Raw::PktPending;
 }
 fn gem_pkt_done(s: borrow GemPkt_TxPosted[b, o, 1, r]) {}
+fn gem_pkt_kept(s: borrow GemPkt_TxPosted[b, o, 1, r]) {}
 fn gem_pkt_halted(s: borrow GemPkt_TxPosted[b, o, 1, r]) -> GemPkt_gem_pkt_halted_Raw {
     if (gem_tx_halt_confirmed) { return GemPkt_gem_pkt_halted_Raw::PktHalted; }
     return GemPkt_gem_pkt_halted_Raw::PktRunning;
@@ -364,7 +366,7 @@ variant GemPktHeld {
     RxPosted(exists b: addr. exists o: usize. exists r: usize. GemPkt_RxPosted[b, o, 1, r]);
     TxPosted(exists b: addr. exists o: usize. exists r: usize. GemPkt_TxPosted[b, o, 1, r]);
     Unconfirmed(exists b: addr. exists o: usize. exists r: usize. GemPkt_Unconfirmed[b, o, 1, r]);
-    // A packet the stack kept past its RX turn (#740), until claimed.
+    // A transmitted packet kept for retransmission (#740), until claimed.
     Kept(exists b: addr. exists o: usize. GemPkt_Filled[b, o, 1]);
 }
 

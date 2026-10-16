@@ -4,7 +4,9 @@
 // to an RX descriptor (rx edge), comes back Filled when the device reports
 // it used, and is then recycled, or sent back out in place as the reply (tx
 // edge, its leading virtio_net_hdr reused). A kernel-built frame is written
-// into a Free buffer and sent from Free. What it trusts:
+// into a Free buffer and sent from Free; a TCP segment kept for
+// retransmission comes back Filled at its confirmed completion
+// (virtio_pkt_kept) and is sent again from Filled. What it trusts:
 //   - virtio_pkt_received: a snapshot of the RX used ring
 //     (kernel/drivers/virtio_used.tkb) showed its idx past the driver's
 //     shadow, and virtio_net.tkb took the entry's id from that snapshot as
@@ -53,6 +55,7 @@ protocol VirtioPkt[inst: usize] retains region(VirtioPacket)[b, VIRTIO_PKT_ONE] 
     transition virtio_pkt_send(Free) tx -> TxPosted[fresh req];
     observe virtio_pkt_sent(TxPosted[req]) -> PktSent[req] completes | PktPending;
     transition virtio_pkt_done(TxPosted[req], PktSent[req]) -> Free;
+    transition virtio_pkt_kept(TxPosted[req], PktSent[req]) -> Filled;
     transition virtio_pkt_expire(TxPosted[req]) -> Unconfirmed[req];
     transition virtio_pkt_recycle(Filled) -> Free;
     property disjoint;
@@ -100,6 +103,7 @@ fn virtio_pkt_sent(s: borrow VirtioPkt_TxPosted[b, o, 1, r]) -> VirtioPkt_virtio
     return VirtioPkt_virtio_pkt_sent_Raw::PktSent;
 }
 fn virtio_pkt_done(s: borrow VirtioPkt_TxPosted[b, o, 1, r]) {}
+fn virtio_pkt_kept(s: borrow VirtioPkt_TxPosted[b, o, 1, r]) {}
 fn virtio_pkt_expire(s: borrow VirtioPkt_TxPosted[b, o, 1, r]) {}
 fn virtio_pkt_recycle(s: borrow VirtioPkt_Filled[b, o, 1]) {}
 
@@ -119,7 +123,7 @@ variant VirtioPktHeld {
     RxPosted(exists b: addr. exists o: usize. exists r: usize. VirtioPkt_RxPosted[b, o, 1, r]);
     TxPosted(exists b: addr. exists o: usize. exists r: usize. VirtioPkt_TxPosted[b, o, 1, r]);
     Unconfirmed(exists b: addr. exists o: usize. exists r: usize. VirtioPkt_Unconfirmed[b, o, 1, r]);
-    // A packet the stack kept past its RX turn (#740), until claimed.
+    // A transmitted packet kept for retransmission (#740), until claimed.
     Kept(exists b: addr. exists o: usize. VirtioPkt_Filled[b, o, 1]);
 }
 

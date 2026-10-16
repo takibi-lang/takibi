@@ -81,45 +81,18 @@ fn kernel_arp_reply_once(ready_in: sink NetRxCanAcquire)
         match net_rx_acquire(ready) {
             NetRxAcquire::None(next) => { ready = next; }
             NetRxAcquire::Acquired(acquired) => {
-                // The request is kept past its RX turn (#740, the RX
-                // capability split) and answered from the kept owner; at
-                // the pool's reserve it is answered within the turn.
-                let slot: usize = net_rx_slot(acquired);
-                match net_rx_keep(acquired) {
-                    NetRxKeep::Refused(packet) => {
-                        let len: i32 = net_rx_len(packet);
-                        let mut reply: bool = false;
-                        if (len >= 42) {
-                            let frame = net_rx_frame(packet);
-                            reply = arp_prepare_reply(frame);
-                        }
-                        if (reply) {
-                            let completed = net_rx_send_reply(
-                                net_rx_reply_ready(packet, len));
-                            return KernelArpResult::Replied(completed);
-                        }
-                        ready = net_rx_release(packet);
-                    }
-                    NetRxKeep::Kept(after) => {
-                        ready = after;
-                        match net_packet_kept_claim(slot) {
-                            NetKeptClaim::None => { kernel_invariant_stop(); }
-                            NetKeptClaim::Claimed(kept) => {
-                                let len: i32 = net_packet_kept_len(kept);
-                                let mut reply: bool = false;
-                                if (len >= 42) {
-                                    let frame = net_packet_kept_frame(kept);
-                                    reply = arp_prepare_reply(frame);
-                                }
-                                if (reply) {
-                                    let completed = net_packet_kept_send(ready, kept, len);
-                                    return KernelArpResult::Replied(completed);
-                                }
-                                net_packet_free(kept);
-                            }
-                        }
-                    }
+                let len: i32 = net_rx_len(acquired);
+                let mut reply: bool = false;
+                if (len >= 42) {
+                    let frame = net_rx_frame(acquired);
+                    reply = arp_prepare_reply(frame);
                 }
+                if (reply) {
+                    let completed = net_rx_send_reply(
+                        net_rx_reply_ready(acquired, len));
+                    return KernelArpResult::Replied(completed);
+                }
+                ready = net_rx_release(acquired);
             }
         }
     }

@@ -64,6 +64,51 @@ fn gem_fixture_reply(ready_in: sink NetRxCanAcquire, after_halt: bool)
     return ready;
 }
 
+// #740 step 2 on the physical pool (4 buffers, 1 RX descriptor,
+// GEM_PKT_RESERVE 2): two transmitted frames are kept, a third keep is
+// refused at the reserve and the frame is sent plainly, a kept frame is
+// resent in place and stays Kept, and both are then freed.
+fn gem_fixture_keep(ready_in: sink NetRxCanAcquire, packet: borrow [u8; 1514..])
+        -> NetRxCanAcquire !{may_block, unsafe} {
+    let mut ready = ready_in;
+    let mut slots: [usize; 2];
+    let mut kept: usize = 0;
+    for i: usize in 0..<2 {
+        let slot: usize = net_tx_keep_slot();
+        gem_fixture_require(slot != NET_KEPT_NONE, "a keep below the reserve");
+        slots[i] = slot;
+        match net_transmit_keep(ready, slot, packet, 64) {
+            NetTxKeep::Kept(next) => { ready = next; kept = kept + 1; }
+            NetTxKeep::Sent(next) => { ready = next; }
+        }
+    }
+    gem_fixture_require(kept == 2 && gem_pkt_out_count() == 2, "two frames kept");
+    gem_fixture_require(net_tx_keep_slot() == NET_KEPT_NONE,
+                        "a third keep is refused at the reserve");
+    match net_transmit_keep(ready, slots[0], packet, 64) {
+        NetTxKeep::Kept(next) => {
+            ready = next;
+            gem_fixture_require(false, "a keep past the reserve was accepted");
+        }
+        NetTxKeep::Sent(next) => { ready = next; }
+    }
+    gem_fixture_require(gem_pkt_out_count() == 2, "a refused keep keeps nothing");
+    match net_packet_kept_claim(slots[0]) {
+        NetKeptClaim::None => { gem_fixture_require(false, "kept frame claimable"); }
+        NetKeptClaim::Claimed(frame) => { ready = net_packet_kept_resend(ready, frame); }
+    }
+    gem_fixture_require(gem_pkt_out_count() == 2, "a resent frame is Kept again");
+    for i: usize in 0..<2 {
+        match net_packet_kept_claim(slots[i]) {
+            NetKeptClaim::None => { gem_fixture_require(false, "kept frame freeable"); }
+            NetKeptClaim::Claimed(frame) => { net_packet_free(frame); }
+        }
+    }
+    gem_fixture_require(gem_pkt_out_count() == 0, "every kept buffer is back");
+    kernel_boot_log("gem-tx fixture: keep refused at the reserve ok\n");
+    return ready;
+}
+
 fn gem_fixture_run(ready_in: sink NetRxCanAcquire) !{may_block} {
     static_assert(KERNEL_PREEMPTIBLE == 0);
     let mut ready = ready_in;
@@ -85,6 +130,11 @@ fn gem_fixture_run(ready_in: sink NetRxCanAcquire) !{may_block} {
     gem_fixture_authority(true);
     gem_fixture_require(gem_fixture_submissions == 2 && gem_tx_next == 0,
                         "both descriptors completed");
+    // #740 step 2: four more physical submissions (two kept, one refused
+    // at the reserve, one resend), so the descriptor parity is unchanged.
+    ready = gem_fixture_keep(ready, packet as [u8; 1514..]);
+    gem_fixture_require(gem_fixture_submissions == 6 && gem_tx_next == 0,
+                        "kept, refused and resent frames completed");
 
     gem_fixture_observed_used = false;
     gem_fixture_hide_completion = true;
@@ -93,7 +143,7 @@ fn gem_fixture_run(ready_in: sink NetRxCanAcquire) !{may_block} {
     else { ready = net_transmit_ready(ready, packet as [u8; 1514..], 64); }
     gem_fixture_require(gem_fixture_observed_used,
                         "a real USED observation was hidden");
-    gem_fixture_require(gem_fixture_submissions == 3 && gem_tx_next == 1,
+    gem_fixture_require(gem_fixture_submissions == 7 && gem_tx_next == 1,
                         "one unconfirmed submission");
     gem_fixture_authority(gem_fixture_hide_halt == false);
     kernel_boot_log("gem-tx fixture: halt tsr=");
@@ -110,7 +160,7 @@ fn gem_fixture_run(ready_in: sink NetRxCanAcquire) !{may_block} {
     // after halt, without minting an RX owner or re-enabling the MAC.
     ready = net_transmit_ready(ready, packet as [u8; 1514..], 64);
     ready = gem_fixture_reply(ready, true);
-    gem_fixture_require(gem_fixture_submissions == 3 && gem_tx_next == 1,
+    gem_fixture_require(gem_fixture_submissions == 7 && gem_tx_next == 1,
                         "later ready and reply sends were dropped");
     gem_fixture_authority(gem_fixture_hide_halt == false);
     net_shutdown(ready);

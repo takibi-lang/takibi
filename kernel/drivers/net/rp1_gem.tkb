@@ -75,11 +75,12 @@ private linear struct NetTxInFlight[pb: addr, po: usize] {
 }
 
 private linear view NetRxCanAcquire;
-// A packet kept past its RX turn (#740, the RX capability split).
-// net_rx_keep parks the Filled buffer in its pool slot as Kept and returns
-// the capability; the stack names the packet by its slot (net_rx_slot) and
-// takes this owner out with net_packet_kept_claim. Its free only returns
-// the buffer to the slot Free; RX is rearmed by the next capability holder.
+// A transmitted packet kept for retransmission (#740, step 2). Its
+// completion parks the buffer Kept in its pool slot instead of Free; the
+// stack names the packet by the slot it chose (net_tx_keep_slot) and takes
+// this owner out with net_packet_kept_claim, to resend it or free it. Its
+// free only returns the buffer to the slot Free; RX is rearmed by the next
+// capability holder.
 private linear struct NetPacketKept[pb: addr, po: usize] {
     private len: {0..<1515 as i32};
     private index: usize;
@@ -92,21 +93,26 @@ variant NetRxAcquire {
     None(NetRxCanAcquire);
     Acquired(exists pb: addr. exists po: usize. NetPacket[pb, po]);
 }
-// Kept: the packet is parked Kept in its slot and the capability is back.
-// Refused: the pool is at its reserve; the caller copies and releases.
-must_use variant NetRxKeep {
+// Kept: the frame was sent from the chosen slot and is parked Kept there.
+// Sent: nothing is kept (the reserve, no Free buffer, TX down, or an
+// unconfirmed completion); the frame went out as net_transmit_ready sends
+// it, and the caller keeps its own copy.
+must_use variant NetTxKeep {
     Kept(NetRxCanAcquire);
-    Refused(exists pb: addr. exists po: usize. NetPacket[pb, po]);
+    Sent(NetRxCanAcquire);
 }
 variant NetKeptClaim {
     None;
     Claimed(exists pb: addr. exists po: usize. NetPacketKept[pb, po]);
 }
 
-// Buffers outside the kept set that keeping must leave, so that RX stays
-// armed (kernel/models/PacketReserve.tla).
+// Buffers outside the kept set that keeping must leave: the one RX
+// descriptor full plus one Free buffer for a kernel-built frame
+// (kernel/models/PacketReserve.tla: D + 1).
 const GEM_PKT_RESERVE: usize = 2;
-// Each Kept slot's frame length, set by net_rx_keep.
+// The slot net_tx_keep_slot names when nothing may be kept.
+const NET_KEPT_NONE: usize = 4;
+// Each Kept slot's frame length, set by the keeping transmit.
 private let mut gem_pkt_kept_len: [{0..<1515 as i32}; 4];
 
 fn net_rx_packet(len: {0..<1515 as i32}, index: usize,
@@ -524,21 +530,15 @@ fn net_rx_release(packet: sink NetPacket[pb, po]) -> NetRxCanAcquire !{unsafe} {
     return view NetRxCanAcquire;
 }
 
-// The packet's pool slot: the name a kept packet is claimed by.
-fn net_rx_slot(packet: borrow NetPacket[pb, po]) -> usize {
-    return packet.index;
-}
-
-// Keep the packet past this RX turn, unless that would leave fewer than
-// GEM_PKT_RESERVE buffers outside the kept set.
-fn net_rx_keep(packet: sink NetPacket[pb, po]) -> NetRxKeep {
-    if (gem_pkt_out_count() > GEM_PKTS - GEM_PKT_RESERVE) {
-        return NetRxKeep::Refused(packet);
+// The Free slot a keeping transmit would use, or NET_KEPT_NONE when
+// keeping one more buffer would leave fewer than GEM_PKT_RESERVE outside
+// the kept set, or TX is down.
+fn net_tx_keep_slot() -> usize {
+    if (gem_tx_down) { return NET_KEPT_NONE; }
+    if (gem_pkt_out_count() + 1 > GEM_PKTS - GEM_PKT_RESERVE) {
+        return NET_KEPT_NONE;
     }
-    let index: usize = packet.index;
-    if (index < GEM_PKTS) { gem_pkt_kept_len[index] = packet.len; }
-    gem_pkt_park(index, GemPktHeld::Kept(packet.pkt));
-    return NetRxKeep::Kept(view NetRxCanAcquire);
+    return gem_pkt_free_index();
 }
 
 // Any core, no capability: the Kept packet in `index`, taken out.
@@ -563,15 +563,6 @@ private fn net_packet_kept(len: {0..<1515 as i32}, index: usize,
     return kept;
 }
 
-fn net_packet_kept_len(kept: borrow NetPacketKept[pb, po]) -> {0..<1515 as i32} {
-    return kept.len;
-}
-
-fn net_packet_kept_frame(kept: borrow NetPacketKept[pb, po]) -> [u8; 1514..] @ pb {
-    let bytes = GemPkt_Filled_bytes(kept.pkt, 0);
-    return bytes[0..<1514];
-}
-
 // Any core, no capability: the buffer goes back to its slot Free. RX is
 // not touched.
 fn net_packet_free(kept: sink NetPacketKept[pb, po]) {
@@ -579,15 +570,30 @@ fn net_packet_free(kept: sink NetPacketKept[pb, po]) {
     gem_pkt_park(index, GemPktHeld::Free(GemPkt_gem_pkt_recycle(kept.pkt)));
 }
 
-// A kept packet sent back out in place, in a later RX turn.
-fn net_packet_kept_send(ready: sink NetRxCanAcquire, kept: sink NetPacketKept[pb, po],
-                        len: i32) -> NetRxCanAcquire !{may_block, unsafe} {
-    net_shutdown(ready);
-    let safe_len: {0..<1515 as i32} = max(min(len, 1514), 0);
+// A kept packet retransmitted in place; its completion parks it Kept
+// again in its slot (#740). Not sent once TX is down; it stays Kept for
+// the caller's eventual free.
+fn net_packet_kept_resend(ready: sink NetRxCanAcquire, kept: sink NetPacketKept[pb, po])
+        -> NetRxCanAcquire !{may_block, unsafe} {
     let index: usize = kept.index;
-    let pkt = kept.pkt;
-    let mut reply: NetRxReplyReady[pb, po] = { safe_len, index, pkt };
-    return net_rx_send_reply(reply);
+    let len: {0..<1515 as i32} = kept.len;
+    match gem_tx_claim() {
+        GemTxClaim::Down => {
+            gem_pkt_park(index, GemPktHeld::Kept(kept.pkt));
+            return ready;
+        }
+        GemTxClaim::Ready => {}
+    }
+    let slot: {0..<2 as usize} = gem_tx_next_slot();
+    match GemPkt_gem_pkt_post_tx(kept.pkt) {
+        GemPkt_gem_pkt_post_tx_Result::TxPosted(posted) => {
+            gem_pkt_park(index, GemPktHeld::TxPosted(posted));
+        }
+    }
+    gem_tx_describe(slot, len);
+    gem_tx_start();
+    gem_tx_finish(slot, index, true, len);
+    return ready;
 }
 
 fn net_rx_reply_ready(frame: sink NetPacket[pb, po], len: i32)
@@ -736,16 +742,25 @@ private fn gem_tx_unconfirmed(index: usize) !{unsafe} {
     }
 }
 
-private fn gem_tx_finish(slot: {0..<2 as usize}, index: usize) !{may_block, unsafe} {
+// keep (#740): a confirmed buffer is parked Kept, Filled again, for a
+// retransmission; true then. A halt's reclaim still returns it Free.
+private fn gem_tx_finish(slot: {0..<2 as usize}, index: usize, keep: bool,
+                         len: {0..<1515 as i32}) -> bool !{may_block, unsafe} {
     if (gem_tx_wait(slot) && gem_tx_ring_settle(true)) {
         let GemPktHeld::TxPosted(posted) = gem_tx_pkt(index) else {
-            GemPktHeld::Free(p) => { gem_pkt_lost(GemPktHeld::Free(p)); return; }
-            GemPktHeld::RxPosted(p) => { gem_pkt_lost(GemPktHeld::RxPosted(p)); return; }
-            GemPktHeld::Unconfirmed(p) => { gem_pkt_lost(GemPktHeld::Unconfirmed(p)); return; }
-            GemPktHeld::Kept(p) => { gem_pkt_lost(GemPktHeld::Kept(p)); return; }
+            GemPktHeld::Free(p) => { gem_pkt_lost(GemPktHeld::Free(p)); return false; }
+            GemPktHeld::RxPosted(p) => { gem_pkt_lost(GemPktHeld::RxPosted(p)); return false; }
+            GemPktHeld::Unconfirmed(p) => { gem_pkt_lost(GemPktHeld::Unconfirmed(p)); return false; }
+            GemPktHeld::Kept(p) => { gem_pkt_lost(GemPktHeld::Kept(p)); return false; }
         };
         match GemPkt_gem_pkt_sent(posted) {
             GemPkt_gem_pkt_sent_Outcome::PktSent(witness) => {
+                if (keep && index < GEM_PKTS) {
+                    gem_pkt_kept_len[index] = len;
+                    gem_pkt_park(index, GemPktHeld::Kept(GemPkt_gem_pkt_kept(posted, witness)));
+                    gem_rearm_rx();
+                    return true;
+                }
                 gem_pkt_park(index, GemPktHeld::Free(GemPkt_gem_pkt_done(posted, witness)));
                 gem_rearm_rx();
             }
@@ -757,6 +772,7 @@ private fn gem_tx_finish(slot: {0..<2 as usize}, index: usize) !{may_block, unsa
     } else {
         gem_tx_unconfirmed(index);
     }
+    return false;
 }
 
 // Whether TX may run: after an unconfirmed completion it never does again.
@@ -792,7 +808,7 @@ fn gem_tx_slot_done(slot: {0..<2 as usize}) -> bool {
 
 fn net_tx_complete(in_flight: sink NetTxInFlight[pb, po]) -> NetRxCanAcquire
         !{may_block, unsafe} {
-    gem_tx_finish(in_flight.slot, in_flight.index);
+    gem_tx_finish(in_flight.slot, in_flight.index, false, 0);
     return view NetRxCanAcquire;
 }
 
@@ -816,25 +832,41 @@ fn net_transmit_ready(ready: sink NetRxCanAcquire,
         -> NetRxCanAcquire !{may_block} {
     let safe_len: {0..<1515 as i32} = max(min(len, 1514), 0);
     match gem_tx_claim() {
-        GemTxClaim::Ready => { gem_send_built(bytes, safe_len); }
+        GemTxClaim::Ready => { gem_send_built(gem_pkt_free_index(), false, bytes, safe_len); }
         GemTxClaim::Down => {}
     }
     return view NetRxCanAcquire;
 }
 
+// A kernel-built frame sent from `index`, which net_tx_keep_slot named,
+// and kept there for retransmission (#740). Sent, from any Free buffer,
+// when the slot no longer passes that check.
+fn net_transmit_keep(ready: sink NetRxCanAcquire, index: usize,
+                     bytes: borrow [u8; 1514..], len: i32)
+        -> NetTxKeep !{may_block, unsafe} {
+    if (index == NET_KEPT_NONE || net_tx_keep_slot() != index) {
+        return NetTxKeep::Sent(net_transmit_ready(ready, bytes, len));
+    }
+    let safe_len: {0..<1515 as i32} = max(min(len, 1514), 0);
+    if (gem_send_built(index, true, bytes, safe_len)) {
+        return NetTxKeep::Kept(ready);
+    }
+    return NetTxKeep::Sent(ready);
+}
+
 // A kernel-built frame: written into a Free pool buffer, which is posted
 // for transmit from Free (its tx edge). Dropped when no buffer is free.
-private fn gem_send_built(bytes: borrow [u8; 1514..], safe_len: {0..<1515 as i32})
-        !{may_block, unsafe} {
-    let index: usize = gem_pkt_free_index();
+// True when keep was asked and the completion parked it Kept.
+private fn gem_send_built(index: usize, keep: bool, bytes: borrow [u8; 1514..],
+                          safe_len: {0..<1515 as i32}) -> bool !{may_block, unsafe} {
     let Place::Full(held) = gem_pkt_take(index) else {
-        Place::Empty => { return; }
+        Place::Empty => { return false; }
     };
     let GemPktHeld::Free(free) = held else {
-        GemPktHeld::RxPosted(p) => { gem_pkt_park(index, GemPktHeld::RxPosted(p)); return; }
-        GemPktHeld::TxPosted(p) => { gem_pkt_park(index, GemPktHeld::TxPosted(p)); return; }
-        GemPktHeld::Unconfirmed(p) => { gem_pkt_park(index, GemPktHeld::Unconfirmed(p)); return; }
-        GemPktHeld::Kept(p) => { gem_pkt_park(index, GemPktHeld::Kept(p)); return; }
+        GemPktHeld::RxPosted(p) => { gem_pkt_park(index, GemPktHeld::RxPosted(p)); return false; }
+        GemPktHeld::TxPosted(p) => { gem_pkt_park(index, GemPktHeld::TxPosted(p)); return false; }
+        GemPktHeld::Unconfirmed(p) => { gem_pkt_park(index, GemPktHeld::Unconfirmed(p)); return false; }
+        GemPktHeld::Kept(p) => { gem_pkt_park(index, GemPktHeld::Kept(p)); return false; }
     };
     let out = GemPkt_Free_bytes(free, 0);
     slice_copy(out[0..<safe_len as usize], bytes[0..<safe_len as usize]);
@@ -846,7 +878,7 @@ private fn gem_send_built(bytes: borrow [u8; 1514..], safe_len: {0..<1515 as i32
     }
     gem_tx_describe(slot, safe_len);
     gem_tx_start();
-    gem_tx_finish(slot, index);
+    return gem_tx_finish(slot, index, keep, safe_len) && keep;
 }
 
 fn net_read_mac(mac_out: borrow [u8; 6..]) { slice_copy(mac_out, OUR_MAC as []u8); }

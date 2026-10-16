@@ -1187,10 +1187,10 @@ a variant payload. It cannot be a tuple element ("an erased view cannot be
 stored in a runtime tuple") or a struct field ("cannot hold a nested erased
 view"), so a function cannot return a view together with a linear value.
 The current pattern is to park the linear value where both sides can name
-it and return only the view. `net_rx_keep` (kernel/drivers/net, GitHub
-issue #740) parks the kept packet in its pool slot's place and returns
-`NetRxKeep::Kept(NetRxCanAcquire)`. The caller reads the slot index
-beforehand (`net_rx_slot`) and later takes the owner out with
+it and return only the view. `net_transmit_keep` (kernel/drivers/net,
+GitHub issue #740) parks the sent packet in its pool slot's place and
+returns `NetTxKeep::Kept(NetRxCanAcquire)`. The caller names the slot
+beforehand (`net_tx_keep_slot`) and later takes the owner out with
 `net_packet_kept_claim(slot)`, which returns it, or `None` if the slot
 holds no kept packet.
 

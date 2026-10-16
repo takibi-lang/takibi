@@ -143,15 +143,15 @@ check_model DmaTxReadBorrow Safety 7 \
 check_model PacketReserve Safety 8 \
     fixed:CInitFixed:pass:ok \
     gem:CInitGem:pass:ok \
-    reserveone:CInitReserveOne:RingNeverDrains:violated:12 \
-    noreserve:CInitNoReserve:RingNeverDrains:violated:12
+    reserved:CInitReserveD:TxNeverStarves:violated \
+    noreserve:CInitNoReserve:RingNeverDrains:violated
 
 # Shallow for Apalache: the per-slot cardinalities make each step costly
 # (length 8 took over an hour); TLC covers the whole state space.
 check_model PacketReserveScan Safety 3 \
     fixed:CInitFixed:pass:ok \
     gem:CInitGem:pass:ok \
-    skipempty:CInitSkipEmpty:ScanNeverLow:violated:4
+    skipempty:CInitSkipEmpty:ScanNeverLow:violated:6
 
 check_model WorldStop NoUnstoppedRead 8 \
     fixed:CInitFixed:pass:ok \
