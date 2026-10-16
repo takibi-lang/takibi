@@ -217,8 +217,9 @@ the irqsoff-style tracer, and tcp_frame_pool's return-every-chunk shape.
      SPEC.md "Device protocols") with generated cache work on publishing
      and finishing edges, device-state spans, kernel/DEVICE_SEMANTICS_FILES
      and a line-ownership check; a generated owner kept in a Place across
-     functions works (linux_user/protocol_tx). Open: #778 (emitted model
-     has no cache variables), #779 (line ownership of split or converted
+     functions works (linux_user/protocol_tx). Done 2026-10-16 (#778): the emitted
+     model carries the cache and generator-side omit controls (#801:
+     snapshot invalidate, per-core lines). Open: #779 (line ownership of split or converted
      regions), wrong-ring slot identity (#750). Done 2026-10-13 (slice 2,
      decision B `access write addressed`): the four xHCI producer rings are
      XhciRing owners in usb_xhci_rings.tkb (the device-semantics file),
