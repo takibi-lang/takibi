@@ -76,11 +76,11 @@ list (maintainer, 2026-10-09).
    process records are RegionPool records Held for their process's life,
    IntrusivePool has left the kernel, and intrusive_pool.tkb and
    pool_lock.tkb have left the mint list (2026-10-12). freelist.tkb has
-   left it too: checked indexing only (2026-10-12; #770 would let a while
-   condition bound its body and drop the local re-checks). ext2.tkb has
+   left it too: checked indexing only (2026-10-12; since #770 a while
+   condition bounds its body, and the local re-check is gone). ext2.tkb has
    left it as well: its scratch is per-CPU storage and every byte access a
    checked (buffer, offset) position (2026-10-12; text +4 KiB, checking a
-   field's width once is #770). The network files (arp, icmp, tcp) have
+   field's width once is #797). The network files (arp, icmp, tcp) have
    left it too, through header overlays: `bytes as &mut TcpHdr` is checked
    when every byte pattern is a valid packed header and the slice covers it
    (2026-10-13); a raw reinterpreting cast to a type with a refined, bool,
