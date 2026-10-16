@@ -11,9 +11,10 @@ for mode in MODES:
     text = f'gem-tx fixture: mode {mode}\n'.encode()
     for authority in ('cpu', 'cpu', last, last):
         text += f'gem-tx fixture: authority {authority}\n'.encode()
+    text += b'gem-tx fixture: keep refused at the reserve ok\n'
     text += PASS + b'\n'
     frame = {'bytes': (bytes.fromhex('ffffffffffff') + BOARD + bytes.fromhex('88b5') + PAYLOAD).hex()}
-    frames = [copy.copy(frame) for _ in range(3)]
+    frames = [copy.copy(frame) for _ in range(7)]
     cases.note()
     validate(text, frames, mode)
     bad = copy.deepcopy(frames)
@@ -21,7 +22,8 @@ for mode in MODES:
     wrong_authority = text.replace(b'authority ' + last.encode(), b'authority wrong')
     for candidate, bodies in ((PASS, frames), (text.replace(PASS, b''), frames),
                               (text + b'FAIL gem-tx: failure\n', frames),
-                              (text, frames[:2]), (text, frames + frames[:1]),
+                              (text.replace(b'keep refused at the reserve ok', b''), frames),
+                              (text, frames[:6]), (text, frames + frames[:1]),
                               (text, bad), (wrong_authority, frames)):
         cases.note()
         try:
