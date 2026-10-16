@@ -1,9 +1,9 @@
 {
   "date": "2026-10-16",
   "event": "incremental",
-  "decision": "measured",
-  "source_sha256": "86197fefcf65b0f202e3928ffc0cfbf83838b566f92acc0d30fe32938e37c9a1",
-  "workload": "#720 exact request/event matching on main 292bc665: usb_await_event correlates TRB Pointer, slot and endpoint. scripts/space_delta.py main: RPi5 text +680 B, data +8 B, BSS unchanged, usable_ram_start unchanged; QEMU unchanged.",
+  "decision": "reuse",
+  "source_sha256": "be55ac341d30bf0bde34851e851bc8e0404ccfc34b6102857733936f8d12aae3",
+  "workload": "#778 emitted TLA+ model of device protocols carries the cache; compiler-only (Protocol_decl.to_tla, cache_step shared with source_of, --emit-tla-omit-cache). scripts/space_delta.py main: QEMU and RPi5 text/data/BSS and usable_ram_start unchanged, no symbol changed size. Reuses the #720 exact-matching evidence.",
   "evidence": [
     "docs/XHCI_EVENT_MATCH_SPACE_2026-10-16.md",
     "docs/RETX_KEEP_SPACE_2026-10-16.md",
@@ -75,6 +75,6 @@
     "docs/VIRTIO_NET_TX_2026-10-10.md",
     "docs/VIRTIO_NET_TX_SPACE_2026-10-10.json"
   ],
-  "assessment": "Accepted: +680 B RPi5 text and +8 B data buy the runtime correlation the XhciRing completes witness relies on; no layout or reservation change.",
+  "assessment": "No storage or allocation change: the generated wrappers are unchanged (the cache-step rule was factored, not altered) and the model is build-time only. Evidence reused.",
   "next_trigger": "The next #720 slice that changes xHCI storage (DCBAA, S2 sub-region authority) or #754's ERSTSZ write."
 }
