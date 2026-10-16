@@ -13,12 +13,22 @@ let pending_authority : string option ref = ref None
 let globals : (string, string) Hashtbl.t = Hashtbl.create 4
 let rewritten : (string * int, string) Hashtbl.t = Hashtbl.create 8
 
+(* GitHub issue #638: `preempt_off (cpu) { body }` is parsed as a block whose
+   first statement is `let cpu = preempt_off_enter();`. The parser records
+   that call's location here, and only a recorded call may reach the private
+   mint across files. The block is the region in which preemption is
+   disabled: the checker forbids may_block in it and keeps the authority
+   from leaving it. *)
+let preempt_off_mint_name = "preempt_off_enter"
+let preempt_off_mints : (string * int, unit) Hashtbl.t = Hashtbl.create 32
+
 let reset () =
   Hashtbl.reset stores;
   authority := None;
   pending_authority := None;
   Hashtbl.reset globals;
-  Hashtbl.reset rewritten
+  Hashtbl.reset rewritten;
+  Hashtbl.reset preempt_off_mints
 
 let mark_store name = Hashtbl.replace stores name ()
 let is_store name = Hashtbl.mem stores name
@@ -42,3 +52,5 @@ let authority_field () =
 let loc_key (loc : Ast.loc) = (Ast.source_file_of_loc loc, loc.Lexing.pos_cnum)
 let mark_rewritten loc global = Hashtbl.replace rewritten (loc_key loc) global
 let rewritten_global loc = Hashtbl.find_opt rewritten (loc_key loc)
+let mark_preempt_off_mint loc = Hashtbl.replace preempt_off_mints (loc_key loc) ()
+let is_preempt_off_mint loc = Hashtbl.mem preempt_off_mints (loc_key loc)

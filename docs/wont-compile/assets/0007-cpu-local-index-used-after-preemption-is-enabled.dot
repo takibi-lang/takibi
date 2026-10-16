@@ -1,0 +1,30 @@
+// Figure for docs/wont-compile/0007-cpu-local-index-used-after-preemption-is-enabled.md
+digraph cpu_local_index_used_after_preemption_is_enabled {
+  graph [bgcolor="#fffaf0", rankdir=TB, pad=0.35, nodesep=0.55, ranksep=0.9,
+         fontname="Helvetica", fontsize=15, fontcolor="#596078"];
+  node  [fontname="Helvetica", fontsize=15, shape=box, style="rounded,filled",
+         fillcolor="#ffffff", color="#17213f", fontcolor="#17213f",
+         penwidth=2, margin="0.26,0.18"];
+  edge  [fontname="Helvetica", fontsize=13, color="#17213f", penwidth=2,
+         fontcolor="#596078", arrowsize=0.9];
+
+  subgraph cluster_rejected {
+    label="Takibi: rejected at compile time";
+    labelloc="t"; fontname="Helvetica"; fontsize=16; fontcolor="#c9360d";
+    color="#f05a24"; penwidth=2.5; style="rounded,dashed"; margin=18;
+
+    region [label="preempt_off (cpu) { return cpu; }\non CPU 1",
+            fillcolor="#fff3df", color="#f05a24"];
+    use    [label="scratch[cpu]\nafter the region", fillcolor="#fff3df",
+            color="#f05a24"];
+
+    { rank=same; region; use; }
+    region -> use [label="  the index leaves the region"];
+  }
+
+  board [label="On the board\l\lThe task migrated to CPU 2 in between.\lIt writes CPU 1's slot while CPU 1's task does too.\l",
+         fillcolor="#f1f2f6", color="#17213f", fontcolor="#17213f"];
+
+  use -> board [label="  C: an int, kept as long as the caller likes", style=dashed,
+                color="#c9360d", fontcolor="#c9360d", penwidth=2.5];
+}

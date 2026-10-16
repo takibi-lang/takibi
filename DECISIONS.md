@@ -122,6 +122,10 @@ without maintainer approval; these only remove the question, not the gate.
   read-only byte views (`[]const u8`) of any value are safe, and writes
   with no safe meaning (zero_fill of a zero-invalid type) are errors, not
   unsafe. [active] #794
+- 2026-10-16 Preemption-disabled regions are checked statically: a lexical
+  `preempt_off` block first, sugar over a linear PreemptOff token that is the
+  end state; may_block is forbidden inside, and CPU authority is derived
+  from the region. [active] #638
 - 2026-10-14 Lock order moves toward ranked capability tokens (Fuchsia
   lock_order style), absorbing acquires_lock_<rank>_<name>, after the syntax
   review. [active] #789

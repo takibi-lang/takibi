@@ -2,11 +2,13 @@
 """Hold the CPU authority's mint functions to reviewed callers (#704).
 
 kernel/kernel/cpu_authority.tkb mints CpuHere, the only index a per-CPU
-store accepts. cpu_here() is the CPU it runs on; cpu_here_for_boot_probe()
-names any CPU and exists for the boot probe that holds every CPU's exec
-handoff at once. The compiler cannot tell the two apart at a call, so this
-check fixes where the second may be called. Adding a caller is a review of
-the trusted claim, made here.
+store accepts. A preempt_off block mints it through the private
+preempt_off_enter(), which the compiler checks (#638). Two public mints
+bypass the block: cpu_here_across_blocking() for ext2's scratch held across
+block I/O, and cpu_here_for_boot_probe(), which names any CPU for the boot
+probe that holds every CPU's exec handoff at once. The compiler cannot tell
+them apart at a call, so this check fixes where each may be called. Adding
+a caller is a review of the trusted claim, made here.
 """
 
 import re
@@ -20,6 +22,11 @@ KERNEL = ROOT / "kernel"
 
 # function -> {(file, enclosing function)} allowed to call it.
 ALLOWED = {
+    # #638: ext2 holds per-CPU scratch across block I/O, so no preempt_off
+    # block can cover it; any other caller belongs in a preempt_off block.
+    "cpu_here_across_blocking": {
+        ("kernel/fs/ext2/ext2.tkb", "*"),
+    },
     "cpu_here_for_boot_probe": {
         ("kernel/kernel/syscall.tkb", "kernel_syscall_exec_args_overlap_probe"),
     },
@@ -51,17 +58,19 @@ def main():
         text = path.read_text()
         for name, allowed in ALLOWED.items():
             for fn in calls(text, name):
-                if (relative, fn) not in allowed:
-                    problems.append(f"{relative}: {fn} calls {name}, which "
-                                    "names another CPU's per-CPU slot; add it "
-                                    "to ALLOWED only after review")
+                if ((relative, fn) not in allowed
+                        and (relative, "*") not in allowed):
+                    problems.append(f"{relative}: {fn} calls {name}, a "
+                                    "CPU-authority mint outside a preempt_off "
+                                    "block; add it to ALLOWED only after "
+                                    "review")
     if problems:
         for problem in problems:
             print(f"ERROR cpu-authority-mints: {problem}")
         sys.exit(1)
     report_pass("cpu-authority-mints",
-                "the any-CPU authority mint is called only by its reviewed "
-                "boot probe", files=scanned)
+                "the CPU-authority mints outside preempt_off blocks are "
+                "called only by their reviewed callers", files=scanned)
 
 
 if __name__ == "__main__":

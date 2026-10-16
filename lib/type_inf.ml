@@ -2095,6 +2095,8 @@ let private_functions : (string, string) Hashtbl.t = Hashtbl.create 8
 
 let check_private_function_access (use_loc : Ast.loc) (name : string) : unit =
   if StringSet.mem name !locally_bound_names then ()
+  else if name = Per_cpu_registry.preempt_off_mint_name
+          && Per_cpu_registry.is_preempt_off_mint use_loc then ()
   else
     match Hashtbl.find_opt private_functions name with
     | Some decl_file when decl_file <> Ast.source_file_of_loc use_loc ->
@@ -8175,6 +8177,10 @@ let validate_per_cpu (prog : Ast.toplevel list) =
       "per_cpu struct '%s' needs a cpu_authority struct to index it"
       (List.hd stores));
   let authority_names = Option.to_list authority in
+  let authority_file = List.fold_left (fun acc -> function
+    | Ast.StructDef (n, _, _, _, _, loc) when Some n = authority ->
+        Some (Ast.source_file_of_loc loc)
+    | _ -> acc) None prog in
   let n = Option.value bound ~default:0 in
   List.iter (function
     | Ast.LetDef (name, Some ty, init, _, is_mutable, is_private, loc) ->
@@ -8213,6 +8219,18 @@ let validate_per_cpu (prog : Ast.toplevel list) =
                 vname)
           | _ -> ()) cases
     | Ast.FuncDef f ->
+        (* GitHub issue #638: a CpuHere is minted only at the start of a
+           `preempt_off` block and lives in locals and parameters inside it.
+           Returning one would carry it past the block's end, so only the
+           mint file, which is trusted, returns one. *)
+        (match f.ret_type with
+         | Some ty when mentions authority_names ty
+                        && Some (Ast.source_file_of_loc f.def_loc)
+                           <> authority_file ->
+             fail f.def_loc (Printf.sprintf
+               "function '%s' cannot return the CPU authority: it is valid \
+                only inside the preempt_off block that minted it" f.name)
+         | _ -> ());
         let types = List.filter_map snd f.params @ Option.to_list f.ret_type in
         List.iter (fun ty ->
           if mentions stores ty then
@@ -13822,6 +13840,82 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     in
     search StringSet.empty root
   in
+  (* GitHub issue #638: a `preempt_off` block is a region in which the
+     kernel must not be switched away from its CPU, so nothing reached from
+     it may block. The block is checked like an `interrupt` root: its own
+     calls are summarized as a body, may_block must not be reachable from
+     them, and a call with unknown effects is rejected rather than guessed
+     safe. Callers of a function that takes the CpuHere are themselves
+     inside a block, so the function's callees are covered through it. *)
+  let check_preempt_off_block owner (loc : Ast.loc) body =
+    let (callees, direct, _, indirect, _, unknown) =
+      summarize_effect_body body in
+    let fail detail = raise (TypeError (loc, Printf.sprintf
+      "preempt_off block in function '%s' %s; preemption stays disabled \
+       for the whole block, so nothing in it may block" owner detail)) in
+    if StringSet.mem "may_block" direct then fail "may block directly"
+    else if StringSet.mem "may_block" indirect then
+      fail "may block through an indirect call with !{may_block}"
+    else begin
+      StringSet.iter (fun callee ->
+        if StringSet.mem callee (closed_effect "may_block") then
+          let path = Option.value
+            (find_effect_path "may_block" StringSet.empty callee)
+            ~default:[display_effect_key callee] in
+          fail ("may block via " ^ String.concat " -> " path)) callees;
+      if unknown then fail "reaches a call with unknown effects"
+      else
+        StringSet.iter (fun callee ->
+          if StringSet.mem callee may_reach_unknown then
+            let path = Option.value (find_unknown_path StringSet.empty callee)
+              ~default:[display_effect_key callee; "<indirect call>"] in
+            fail ("reaches a call with unknown effects via "
+                  ^ String.concat " -> " path)) callees
+    end
+  in
+  let authority_returners = match Per_cpu_registry.authority_name () with
+    | None -> StringSet.empty
+    | Some authority ->
+        let rec mentions (t : Ast.type_expr) = match t with
+          | Ast.TypeNamed n -> n = authority
+          | Ast.TypeArray (t, _) | Ast.TypeSingleton (t, _)
+          | Ast.TypeRefined (_, _, t) | Ast.TypeExists (_, _, t) -> mentions t
+          | Ast.TypeTuple ts -> List.exists mentions ts
+          | _ -> false
+        in
+        List.fold_left (fun acc -> function
+          | Ast.FuncDef { name; ret_type = Some ty; _ } when mentions ty ->
+              StringSet.add name acc
+          | _ -> acc) StringSet.empty prog
+  in
+  let returns_authority owner = StringSet.mem owner authority_returners in
+  let rec preempt_off_stmts owner stmts = List.iter (preempt_off_stmt owner) stmts
+  and preempt_off_stmt owner (st : Ast.stmt) =
+    match st.desc with
+    | Ast.Block ({ desc = Ast.Let (_, _, _, Some { desc = Ast.Call (name, []);
+                                                   loc = call_loc }, _); _ }
+                 :: _ as body)
+      when name = Per_cpu_registry.preempt_off_mint_name
+           && Per_cpu_registry.is_preempt_off_mint call_loc ->
+        check_preempt_off_block owner st.loc body;
+        if returns_authority owner then
+          raise (TypeError (st.loc, Printf.sprintf
+            "function '%s' cannot return the CPU authority: it is valid \
+             only inside the preempt_off block that minted it" owner));
+        preempt_off_stmts owner body
+    | Ast.Block b | Ast.UnsafeBlock b | Ast.While (_, b)
+    | Ast.For (_, _, _, _, b) | Ast.ForEach (_, _, b) -> preempt_off_stmts owner b
+    | Ast.If (_, yes, no) -> preempt_off_stmts owner yes; preempt_off_stmts owner no
+    | Ast.Match (_, arms) | Ast.LetMatch (_, _, _, _, arms) ->
+        List.iter (function
+          | Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b | Ast.ArmMiss b
+          | Ast.ArmIntLit (_, b) | Ast.ArmByteSliceLit (_, b) ->
+              preempt_off_stmts owner b) arms
+    | _ -> ()
+  in
+  List.iter (function
+    | Ast.FuncDef f -> preempt_off_stmts f.name f.body
+    | _ -> ()) prog;
   StringMap.iter (fun key effects_opt ->
     let effects = Option.value effects_opt ~default:[] in
     (match StringMap.find_opt key effect_summaries with

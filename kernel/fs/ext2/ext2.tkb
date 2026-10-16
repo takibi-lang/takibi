@@ -28,7 +28,9 @@ fn ext2_max_regular_file_size() -> usize {
 // core cannot enter a second ext2 operation before its current operation
 // returns; different cores must not parse each other's block-I/O results.
 // The pair is per-CPU storage (#704): reached only as ext2_scratch[cpu]
-// with the CPU authority cpu_here() mints, so no core can name another's.
+// with the CPU authority cpu_here_across_blocking() mints, so no core can
+// name another's. That mint, not a preempt_off block, because an ext2
+// operation holds its scratch across block I/O, which may block (#638).
 struct per_cpu Ext2Scratch {
     metadata: [u8; KERNEL_BLOCK_SIZE];
     file: [u8; KERNEL_BLOCK_SIZE];
@@ -270,7 +272,7 @@ must_use variant Ext2ClaimResult {
 // (verified once by mutation, recorded on #637), so it guards against a
 // regression to that form.
 fn ext2_bytes_boundary_probe() -> bool {
-    let mut cpu: CpuHere = cpu_here();
+    let mut cpu: CpuHere = cpu_here_across_blocking();
     let end: usize = KERNEL_BLOCK_SIZE;
     let mut whole: Ext2Bytes = ext2_file();
     let mut interior: Ext2Bytes = ext2_at(ext2_file(), end - 2);
@@ -335,7 +337,7 @@ fn ext2_slice_u32(bytes: borrow []const u8, offset: usize) -> u32 {
 }
 
 fn ext2_mount(device: KernelBlockDevice) -> Ext2MountResult {
-    let mut cpu: CpuHere = cpu_here();
+    let mut cpu: CpuHere = cpu_here_across_blocking();
     match block_read(device, EXT2_SUPERBLOCK_BLOCK,
                      ext2_scratch[cpu].metadata as []u8) {
         BlockIoResult::Invalid => { return Ext2MountResult::Invalid; }
@@ -393,7 +395,7 @@ fn ext2_fixture_geometry_is_expected(mount: Ext2Mount) -> bool {
 
 fn ext2_read_inode(mount: Ext2Mount, inode_number: usize)
         -> Ext2InodeResult {
-    let mut cpu: CpuHere = cpu_here();
+    let mut cpu: CpuHere = cpu_here_across_blocking();
     if (inode_number == 0 || inode_number > mount.inode_count ||
         inode_number > mount.inodes_per_group) {
         return Ext2InodeResult::Invalid;
@@ -453,7 +455,7 @@ fn ext2_name_matches(entry_name: borrow []const u8, name: borrow []const u8) -> 
 
 fn ext2_lookup_directory(mount: Ext2Mount, directory_inode: usize,
                          name: borrow []const u8) -> Ext2LookupResult !{unsafe} {
-    let mut cpu: CpuHere = cpu_here();
+    let mut cpu: CpuHere = cpu_here_across_blocking();
     if (name.len == 0 || name.len > 255) {
         return Ext2LookupResult::Invalid;
     }
@@ -597,7 +599,7 @@ fn ext2_lookup_path(mount: Ext2Mount, name: borrow []const u8)
 // for an out-of-range index or any failed metadata read.
 fn ext2_inode_block_pointer(mount: Ext2Mount, inode: Ext2Inode,
                             index: usize) -> usize {
-    let mut cpu: CpuHere = cpu_here();
+    let mut cpu: CpuHere = cpu_here_across_blocking();
     let pointers: usize = ext2_pointer_count();
     if (pointers == 0) { return 0; }
     if (index >= EXT2_MAX_DIRECT_BLOCKS + pointers + pointers * pointers) {
@@ -655,7 +657,7 @@ fn ext2_inode_block_pointer(mount: Ext2Mount, inode: Ext2Inode,
 fn ext2_read_small_file(mount: Ext2Mount, inode_number: usize,
                         destination: []u8)
         -> Ext2ReadResult !{unsafe} {
-    let mut cpu: CpuHere = cpu_here();
+    let mut cpu: CpuHere = cpu_here_across_blocking();
     match ext2_read_inode(mount, inode_number) {
         Ext2InodeResult::Invalid => { return Ext2ReadResult::Invalid; }
         Ext2InodeResult::Inode(inode) => {
@@ -720,7 +722,7 @@ fn ext2_read_small_file(mount: Ext2Mount, inode_number: usize,
 fn ext2_read_file_chunk(mount: Ext2Mount, inode_number: usize,
                         offset: usize, destination: []u8)
         -> Ext2ReadResult !{unsafe} {
-    let mut cpu: CpuHere = cpu_here();
+    let mut cpu: CpuHere = cpu_here_across_blocking();
     match ext2_read_inode(mount, inode_number) {
         Ext2InodeResult::Invalid => { return Ext2ReadResult::Invalid; }
         Ext2InodeResult::Inode(inode) => {
@@ -771,7 +773,7 @@ fn ext2_read_file_chunk(mount: Ext2Mount, inode_number: usize,
 fn ext2_read_directory_chunk(mount: Ext2Mount, inode_number: usize,
                              offset: usize, destination: []u8)
         -> Ext2ReadResult !{unsafe} {
-    let mut cpu: CpuHere = cpu_here();
+    let mut cpu: CpuHere = cpu_here_across_blocking();
     match ext2_read_inode(mount, inode_number) {
         Ext2InodeResult::Invalid => { return Ext2ReadResult::Invalid; }
         Ext2InodeResult::Inode(inode) => {
@@ -855,7 +857,7 @@ fn ext2_inode_size(mount: Ext2Mount, inode_number: usize) -> usize {
 fn ext2_regular_file_allocated_sectors(mount: Ext2Mount,
                                        inode_number: usize)
         -> Ext2CountResult {
-    let mut cpu: CpuHere = cpu_here();
+    let mut cpu: CpuHere = cpu_here_across_blocking();
     match ext2_read_inode(mount, inode_number) {
         Ext2InodeResult::Invalid => { return Ext2CountResult::Invalid; }
         Ext2InodeResult::Inode(inode) => {
@@ -885,7 +887,7 @@ fn ext2_resize_small_file(mount: Ext2Mount, inode_number: usize,
 fn ext2_read_fast_symlink(mount: Ext2Mount, inode_number: usize,
                           destination: []u8)
         -> Ext2SymlinkResult !{unsafe} {
-    let mut cpu: CpuHere = cpu_here();
+    let mut cpu: CpuHere = cpu_here_across_blocking();
     match ext2_read_inode(mount, inode_number) {
         Ext2InodeResult::Invalid => { return Ext2SymlinkResult::Invalid; }
         Ext2InodeResult::Inode(inode) => {
@@ -925,7 +927,7 @@ fn ext2_read_fast_symlink(mount: Ext2Mount, inode_number: usize,
 
 fn ext2_update_free_counts(mount: Ext2Mount, inode_counter: bool,
                            allocate: bool) -> Ext2CounterResult {
-    let mut cpu: CpuHere = cpu_here();
+    let mut cpu: CpuHere = cpu_here_across_blocking();
     match block_read(mount.device, EXT2_SUPERBLOCK_BLOCK,
                      ext2_scratch[cpu].metadata as []u8) {
         BlockIoResult::Invalid => { return Ext2CounterResult::Invalid; }
@@ -976,7 +978,7 @@ fn ext2_update_free_counts(mount: Ext2Mount, inode_counter: bool,
 }
 
 fn ext2_free_counts(mount: Ext2Mount) -> Ext2FreeCountsResult {
-    let mut cpu: CpuHere = cpu_here();
+    let mut cpu: CpuHere = cpu_here_across_blocking();
     match block_read(mount.device, EXT2_SUPERBLOCK_BLOCK,
                      ext2_scratch[cpu].metadata as []u8) {
         BlockIoResult::Invalid => { return Ext2FreeCountsResult::Invalid; }
@@ -1059,7 +1061,7 @@ private fn ext2_block_write(mount: Ext2Mount, block: usize,
 // on the device afterwards.
 private fn ext2_bitmap_force_clear(mount: Ext2Mount, inode_bitmap: bool,
                                    index: usize) -> bool !{unsafe} {
-    let mut cpu: CpuHere = cpu_here();
+    let mut cpu: CpuHere = cpu_here_across_blocking();
     let mut bitmap_block: usize = mount.block_bitmap_block;
     let mut item_count: usize = mount.filesystem_blocks - 1;
     if (inode_bitmap) {
@@ -1088,7 +1090,7 @@ private fn ext2_bitmap_force_clear(mount: Ext2Mount, inode_bitmap: bool,
 
 private fn ext2_count_free(mount: Ext2Mount, inode_bitmap: bool)
         -> Ext2CountResult !{unsafe} {
-    let mut cpu: CpuHere = cpu_here();
+    let mut cpu: CpuHere = cpu_here_across_blocking();
     let mut bitmap_block: usize = mount.block_bitmap_block;
     let mut item_count: usize = mount.filesystem_blocks - 1;
     if (inode_bitmap) {
@@ -1118,7 +1120,7 @@ private fn ext2_count_free(mount: Ext2Mount, inode_bitmap: bool)
 // Rewrite the superblock's and the group descriptor's free counts from the
 // bitmaps. True when both writes completed.
 private fn ext2_recount(mount: Ext2Mount) -> bool !{unsafe} {
-    let mut cpu: CpuHere = cpu_here();
+    let mut cpu: CpuHere = cpu_here_across_blocking();
     let free_blocks: usize = match ext2_count_free(mount, false) {
         Ext2CountResult::Invalid => { return false; }
         Ext2CountResult::Counted(count) => { count }
@@ -1215,7 +1217,7 @@ fn ext2_recover(mount: Ext2Mount) -> Ext2RecoverResult !{unsafe} {
 fn ext2_bitmap_claim(mount: Ext2Mount, inode_bitmap: bool,
                      first_index: usize, item_count: usize)
         -> Ext2BitmapClaimResult {
-    let mut cpu: CpuHere = cpu_here();
+    let mut cpu: CpuHere = cpu_here_across_blocking();
     let mut bitmap_block: usize = mount.block_bitmap_block;
     if (inode_bitmap) { bitmap_block = mount.inode_bitmap_block; }
     if (item_count == 0 || item_count > KERNEL_BLOCK_SIZE * 8 ||
@@ -1262,7 +1264,7 @@ fn ext2_bitmap_claim(mount: Ext2Mount, inode_bitmap: bool,
 
 fn ext2_bitmap_release(mount: Ext2Mount, inode_bitmap: bool,
                        index: usize) -> Ext2BitmapReleaseResult {
-    let mut cpu: CpuHere = cpu_here();
+    let mut cpu: CpuHere = cpu_here_across_blocking();
     let mut bitmap_block: usize = mount.block_bitmap_block;
     let mut item_count: usize = mount.filesystem_blocks - 1;
     if (inode_bitmap) {
@@ -1396,7 +1398,7 @@ fn ext2_inode_owner_new(bitmap_index: usize,
 }
 
 fn ext2_allocate_block(mount: Ext2Mount) -> Ext2BlockAllocResult {
-    let mut cpu: CpuHere = cpu_here();
+    let mut cpu: CpuHere = cpu_here_across_blocking();
     let inode_table_bytes: usize = mount.inode_count * mount.inode_size;
     let inode_table_blocks: usize =
         (inode_table_bytes + KERNEL_BLOCK_SIZE - 1) / KERNEL_BLOCK_SIZE;
@@ -1434,7 +1436,7 @@ fn ext2_allocate_block(mount: Ext2Mount) -> Ext2BlockAllocResult {
 }
 
 fn ext2_allocate_inode(mount: Ext2Mount) -> Ext2InodeAllocResult {
-    let mut cpu: CpuHere = cpu_here();
+    let mut cpu: CpuHere = cpu_here_across_blocking();
     // Inodes 1..10 are ext2 reserved in revision 1. Bitmap index 10 is
     // therefore the first allocatable inode (inode number 11).
     match ext2_bitmap_claim(mount, true, 10, mount.inode_count) {
@@ -1493,7 +1495,7 @@ fn ext2_inode_number(owner: borrow Ext2InodeOwner[inode]) -> usize @ inode {
 fn ext2_release_block(mount: Ext2Mount,
                       owner: sink Ext2BlockOwner[block])
         -> Ext2OwnerReleaseResult {
-    let mut cpu: CpuHere = cpu_here();
+    let mut cpu: CpuHere = cpu_here_across_blocking();
     for i: usize in 0..<KERNEL_BLOCK_SIZE { ext2_scratch[cpu].file[i] = 0; }
     match ext2_block_write(mount, owner.block_number,
                       ext2_scratch[cpu].file as []u8) {
@@ -1563,7 +1565,7 @@ private fn ext2_write_allocations_block(
 private fn ext2_write_allocations_rollback(
         mount: Ext2Mount, allocations: sink Ext2WriteAllocations[0])
         -> Ext2WriteFinishResult !{unsafe} {
-    let mut cpu: CpuHere = cpu_here();
+    let mut cpu: CpuHere = cpu_here_across_blocking();
     let mut settled: bool = true;
     for index: usize in 0..<EXT2_MAX_WRITE_ALLOCATIONS {
         if (index < allocations.count) {
@@ -1647,7 +1649,7 @@ private fn ext2_update_regular_file(mount: Ext2Mount, inode_number: usize,
                                     preserve_existing: bool,
                                     allocation_budget: usize)
         -> Ext2ResizeResult !{unsafe} {
-    let mut cpu: CpuHere = cpu_here();
+    let mut cpu: CpuHere = cpu_here_across_blocking();
     if (ext2_fenced) { return Ext2ResizeResult::Fenced; }
     if (source.len > EXT2_MAX_SINGLE_FILE_BLOCKS * KERNEL_BLOCK_SIZE) {
         return Ext2ResizeResult::Invalid;
@@ -2034,7 +2036,7 @@ fn ext2_write_allocations_roundtrip_check(mount: Ext2Mount)
 fn ext2_release_inode(mount: Ext2Mount,
                       owner: sink Ext2InodeOwner[inode])
         -> Ext2OwnerReleaseResult {
-    let mut cpu: CpuHere = cpu_here();
+    let mut cpu: CpuHere = cpu_here_across_blocking();
     let byte_offset: usize = owner.bitmap_index * mount.inode_size;
     let table_block: usize = mount.inode_table_block +
                              byte_offset / KERNEL_BLOCK_SIZE;
@@ -2179,7 +2181,7 @@ private fn ext2_directory_grow_publish(mount: Ext2Mount, directory: Ext2Inode,
                                        blocks: usize, block: usize,
                                        inode_number: usize, name: borrow []const u8)
         -> Ext2DirectoryResult !{unsafe} {
-    let mut cpu: CpuHere = cpu_here();
+    let mut cpu: CpuHere = cpu_here_across_blocking();
     if (blocks >= EXT2_MAX_DIRECT_BLOCKS || name.len == 0 || name.len > 255) {
         return Ext2DirectoryResult::Invalid;
     }
@@ -2271,7 +2273,7 @@ private fn ext2_directory_grow(mount: Ext2Mount, directory: Ext2Inode,
 fn ext2_directory_add(mount: Ext2Mount, directory_inode: usize,
                       inode_number: usize,
                       name: borrow []const u8) -> Ext2DirectoryResult !{unsafe} {
-    let mut cpu: CpuHere = cpu_here();
+    let mut cpu: CpuHere = cpu_here_across_blocking();
     if (name.len == 0 || name.len > 255 || inode_number == 0 ||
         directory_inode == 0) {
         return Ext2DirectoryResult::Invalid;
@@ -2367,7 +2369,7 @@ fn ext2_directory_add(mount: Ext2Mount, directory_inode: usize,
 fn ext2_directory_remove(mount: Ext2Mount, directory_inode: usize,
                          inode_number: usize,
                          name: borrow []const u8) -> Ext2DirectoryResult !{unsafe} {
-    let mut cpu: CpuHere = cpu_here();
+    let mut cpu: CpuHere = cpu_here_across_blocking();
     if (name.len == 0 || name.len > 255 || inode_number == 0 ||
         directory_inode == 0) {
         return Ext2DirectoryResult::Invalid;
@@ -2485,7 +2487,7 @@ fn ext2_directory_remove(mount: Ext2Mount, directory_inode: usize,
 // a walk that stopped at the first block would undercount a grown directory.
 fn ext2_directory_live_entries(mount: Ext2Mount, directory_inode: usize)
         -> Ext2CountResult !{unsafe} {
-    let mut cpu: CpuHere = cpu_here();
+    let mut cpu: CpuHere = cpu_here_across_blocking();
     match ext2_read_inode(mount, directory_inode) {
         Ext2InodeResult::Invalid => { return Ext2CountResult::Invalid; }
         Ext2InodeResult::Inode(directory) => {
@@ -2534,7 +2536,7 @@ fn ext2_initialize_regular_inode(mount: Ext2Mount,
                                  block_owner: borrow Ext2BlockOwner[block],
                                  content: []const u8)
         -> Ext2DirectoryResult !{unsafe} {
-    let mut cpu: CpuHere = cpu_here();
+    let mut cpu: CpuHere = cpu_here_across_blocking();
     if (content.len == 0 || content.len > KERNEL_BLOCK_SIZE) {
         return Ext2DirectoryResult::Invalid;
     }
@@ -2706,7 +2708,7 @@ fn ext2_unlink_file_in(mount: Ext2Mount, directory_inode: usize,
 private fn ext2_initialize_directory(mount: Ext2Mount, inode_number: usize,
                                      block: usize, parent_inode: usize)
         -> Ext2DirectoryResult !{unsafe} {
-    let mut cpu: CpuHere = cpu_here();
+    let mut cpu: CpuHere = cpu_here_across_blocking();
     if (inode_number == 0 || parent_inode == 0 ||
         inode_number > mount.inode_count) {
         return Ext2DirectoryResult::Invalid;
@@ -2763,7 +2765,7 @@ private fn ext2_initialize_directory(mount: Ext2Mount, inode_number: usize,
 
 private fn ext2_write_inode_links(mount: Ext2Mount, parent: Ext2Inode,
                                   links: usize) -> Ext2DirectoryResult {
-    let mut cpu: CpuHere = cpu_here();
+    let mut cpu: CpuHere = cpu_here_across_blocking();
     match block_read(mount.device, parent.table_block,
                      ext2_scratch[cpu].metadata as []u8) {
         BlockIoResult::Invalid => { return Ext2DirectoryResult::Invalid; }
@@ -2786,7 +2788,7 @@ private fn ext2_write_inode_links(mount: Ext2Mount, parent: Ext2Inode,
 // failure leaves neither moved.
 private fn ext2_adjust_parent_links(mount: Ext2Mount, parent_inode: usize,
                                     increment: bool) -> Ext2DirectoryResult {
-    let mut cpu: CpuHere = cpu_here();
+    let mut cpu: CpuHere = cpu_here_across_blocking();
     match ext2_read_inode(mount, parent_inode) {
         Ext2InodeResult::Invalid => { return Ext2DirectoryResult::Invalid; }
         Ext2InodeResult::Inode(parent) => {

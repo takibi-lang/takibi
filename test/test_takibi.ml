@@ -25837,6 +25837,74 @@ let cpu_authority_initialization_tests =
       }"));
   ]
 
+(* GitHub issue #638: `preempt_off (cpu) { ... }` is the only way to mint
+   the CPU authority outside its file. The block may not reach may_block,
+   and the authority cannot leave it by a return. *)
+let preempt_off_tests =
+  let mint = "struct cpu_authority Cpu638 { private id: {0..<2 as usize}; }
+    struct per_cpu Store638 { value: usize; }
+    private let mut stores638: [Store638; 2];
+    private fn preempt_off_enter() -> Cpu638 {
+      let mut cpu: Cpu638 = { 0 }; return cpu;
+    }
+    fn bump638(cpu: Cpu638) { stores638[cpu].value = stores638[cpu].value + 1; }
+    extern fn sleep638() !{may_block};" in
+  let files body = ["mint638.tkb", mint; "user638.tkb", body] in
+  let good title body = Alcotest.test_case title `Quick
+      (fun () -> ignore (infer_files (files body))) in
+  let bad title fragment body = Alcotest.test_case title `Quick
+      (expect_type_error_files fragment (files body)) in
+  [
+    good "block mints the authority for per-CPU access" "fn good638() {
+      preempt_off (cpu) { bump638(cpu); }
+    }";
+    good "blocking outside the block is allowed" "fn good638() {
+      preempt_off (cpu) { bump638(cpu); }
+      sleep638();
+    }";
+    good "early return inside the block" "fn good638(flag: bool) -> usize {
+      preempt_off (cpu) { if (flag) { return 1; } bump638(cpu); }
+      return 0;
+    }";
+    bad "direct blocking call inside the block"
+      "preempt_off block in function 'bad638' may block via sleep638"
+      "fn bad638() { preempt_off (cpu) { bump638(cpu); sleep638(); } }";
+    bad "blocking reached through a callee given the authority"
+      "may block via deep638 -> sleep638"
+      "fn deep638(cpu: Cpu638) { bump638(cpu); sleep638(); }
+       fn bad638() { preempt_off (cpu) { deep638(cpu); } }";
+    bad "blocking in a nested block" "may block via sleep638"
+      "fn bad638(flag: bool) {
+         preempt_off (cpu) { if (flag) { while (flag) { sleep638(); } } }
+       }";
+    bad "indirect call with unknown effects"
+      "reaches a call with unknown effects"
+      "fn bad638(f: fn() -> void) { preempt_off (cpu) { f(); } }";
+    bad "indirect call that may block" "may block through an indirect call"
+      "fn bad638(f: fn !{may_block}() -> void) { preempt_off (cpu) { f(); } }";
+    bad "the authority cannot escape by return"
+      "cannot return the CPU authority"
+      "fn escape638() -> Cpu638 { preempt_off (cpu) { return cpu; } }";
+    Alcotest.test_case "the authority cannot escape a block by return, even in the mint file" `Quick
+      (expect_type_error "function 'escape638' cannot return the CPU authority"
+        (mint ^ "fn escape638() -> Cpu638 { preempt_off (cpu) { return cpu; } }"));
+    Alcotest.test_case "a block lowers through the mint to per-CPU access" `Quick
+      (expect_codegen_ok (mint ^ "fn good638(flag: bool) -> usize {
+        preempt_off (cpu) {
+          if (flag) { return stores638[cpu].value; }
+          bump638(cpu);
+        }
+        sleep638();
+        return 0;
+      }"));
+    bad "the private mint cannot be called directly"
+      "'preempt_off_enter' is a private function"
+      "fn bad638() { let mut cpu: Cpu638 = preempt_off_enter(); bump638(cpu); }";
+    bad "the private mint cannot be taken as a function pointer"
+      "'preempt_off_enter' is a private function"
+      "fn bad638() { let f = preempt_off_enter; }";
+  ]
+
 (* Default construction must obey the existing private ownership boundary. *)
 let private_default_construction_tests =
   let api = "affine struct Frame735[p: usize] { private sp: usize; }
@@ -27098,6 +27166,7 @@ let named_groups_unisolated = [
   "readonly-literals", readonly_literal_tests;
   "private-default-construction", private_default_construction_tests;
   "cpu-authority-initialization", cpu_authority_initialization_tests;
+  "preempt-off", preempt_off_tests;
   "runtime-bounds", runtime_bounds_tests;
   "core",     core_tests;
   "parser",   parser_tests;

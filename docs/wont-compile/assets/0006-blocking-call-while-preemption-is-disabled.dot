@@ -1,0 +1,32 @@
+// Figure for docs/wont-compile/0006-blocking-call-while-preemption-is-disabled.md
+digraph blocking_call_while_preemption_is_disabled {
+  graph [bgcolor="#fffaf0", rankdir=TB, pad=0.35, nodesep=0.55, ranksep=0.9,
+         fontname="Helvetica", fontsize=15, fontcolor="#596078"];
+  node  [fontname="Helvetica", fontsize=15, shape=box, style="rounded,filled",
+         fillcolor="#ffffff", color="#17213f", fontcolor="#17213f",
+         penwidth=2, margin="0.26,0.18"];
+  edge  [fontname="Helvetica", fontsize=13, color="#17213f", penwidth=2,
+         fontcolor="#596078", arrowsize=0.9];
+
+  subgraph cluster_rejected {
+    label="Takibi: rejected at compile time, whole path named";
+    labelloc="t"; fontname="Helvetica"; fontsize=16; fontcolor="#c9360d";
+    color="#f05a24"; penwidth=2.5; style="rounded,dashed"; margin=18;
+
+    region [label="preempt_off (cpu) { ... }\nper-CPU scratch in use",
+            fillcolor="#fff3df", color="#f05a24"];
+    helper [label="disk_read_into(cpu)\ndeclares no effect", color="#7a849c",
+            fontcolor="#596078"];
+    leaf   [label="disk_wait()\n!{may_block}", fillcolor="#fff3df", color="#f05a24"];
+
+    { rank=same; region; helper; leaf; }
+    region -> helper;
+    helper -> leaf;
+  }
+
+  board [label="On the board\l\lThe task sleeps inside the region.\lAnother task on the same CPU reuses the scratch,\lor the CPU waits with preemption off.\l",
+         fillcolor="#f1f2f6", color="#17213f", fontcolor="#17213f"];
+
+  leaf -> board [label="  C: caught only at run time, if the path runs", style=dashed,
+                 color="#c9360d", fontcolor="#c9360d", penwidth=2.5];
+}

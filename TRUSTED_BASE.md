@@ -300,10 +300,14 @@ rules globally.
   reviewed.
 - Per-CPU storage (`struct per_cpu`, indexed only by the `cpu_authority`
   value) is checked by the compiler. Trusted: `kernel/kernel/cpu_authority.tkb`
-  reports the CPU it runs on (`cpu_id()`), the kernel action stays on that CPU
-  because it is not preemptible (`KERNEL_PREEMPTIBLE == 0`, asserted there),
-  and `cpu_here_for_boot_probe` names other CPUs only for the boot probe that
-  `scripts/check_cpu_authority_mints.py` fixes as its caller.
+  reports the CPU it runs on (`cpu_id()`), and a `preempt_off` block, which
+  the compiler keeps free of `may_block` and does not let the authority
+  leave (#638), stays on that CPU because the block lowers to no
+  disable/enable pair while the kernel is not preemptible
+  (`KERNEL_PREEMPTIBLE == 0`, asserted there). `cpu_here_across_blocking`
+  (ext2 only) and `cpu_here_for_boot_probe` (the boot probe only) mint
+  outside a block; `scripts/check_cpu_authority_mints.py` fixes their
+  callers.
 - Definite initialization (SPEC.md, "Definite Initialization") trusts three
   premises. A `scratch` global's element is reached only by its own CPU, so
   any index names the same place (`kernel/kernel/syscall.tkb`'s

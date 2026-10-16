@@ -457,14 +457,14 @@ private fn kernel_syscall_exec_args_reserve(allocated: sink PageAllocResult)
     match allocated {
         PageAllocResult::OutOfMemory => { return ExecArgsReserve::OutOfMemory; }
         PageAllocResult::Allocated(args_page) => {
-            exec_args_put(cpu_here(), args_page);
+            preempt_off (cpu) { exec_args_put(cpu, args_page); }
             return ExecArgsReserve::Reserved;
         }
     }
 }
 
 fn kernel_syscall_exec_args_take() -> Place(exists page: usize. PageOwner[page]) {
-    return kernel_syscall_exec_args_take_for(cpu_here());
+    preempt_off (cpu) { return kernel_syscall_exec_args_take_for(cpu); }
 }
 
 private fn kernel_syscall_exec_args_take_for(cpu: CpuHere)

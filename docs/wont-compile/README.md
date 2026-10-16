@@ -26,6 +26,8 @@ second specification.
 | [0003](0003-exception-frame-missing-a-register.md) | An exception frame that does not match the entry sequence | Enforced |
 | [0004](0004-unproven-index-leaves-a-trap.md) | An unproven index that leaves a trap in the kernel | Enforced |
 | [0005](0005-wire-endian-field-read-as-a-host-integer.md) | A wire-endian field used as a host integer | Enforced |
+| [0006](0006-blocking-call-while-preemption-is-disabled.md) | A blocking call while preemption is disabled | Enforced |
+| [0007](0007-cpu-local-index-used-after-preemption-is-enabled.md) | A CPU-local index used after preemption is enabled again | Enforced |
 
 ## Conventions
 

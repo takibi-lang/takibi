@@ -1916,12 +1916,41 @@ fn exec_args_take(cpu: CpuHere) -> Place(exists page: usize. PageOwner[page]) {
   or a place cannot hold one. It lives in locals, parameters and returns
   only, so it ends with the kernel action that minted it.
 
-Staying on one CPU for that action is the kernel's non-preemption
-assumption (`KERNEL_PREEMPTIBLE == 0`), which the mint file asserts; it is
-not itself checked. Processes switch only after an action returns to
-assembly, so no Takibi call can migrate while an authority is live. A
-preemptible kernel would have to end an authority at every preemption
-point. Reading another CPU's element (a debugger walking every CPU's
+### Preemption-disabled regions (GitHub issue #638)
+
+```takibi
+preempt_off (cpu) {
+    exec_args_put(cpu, page);
+}
+```
+
+`preempt_off (name) { body }` is a statement. It binds `name` to the
+current CPU's authority for `body`: it is sugar for a block whose first
+statement is `let mut name = preempt_off_enter();`, where
+`preempt_off_enter` is a private function of the authority's file. Only a
+call written by a `preempt_off` block may reach that function from another
+file; a direct call or a function-pointer reference is rejected by the
+ordinary private-function rule.
+
+- Nothing reachable from the body may block. The body's calls are
+  summarized as a function body is, and the block is rejected when
+  `may_block` is reachable from a direct call, an indirect call's effect row
+  declares it, or an indirect call has no effect row. A function that takes
+  the authority as a parameter is reached only from inside a block, so its
+  callees are covered through that block.
+- The authority does not leave the block. A function outside the
+  authority's file cannot return a type containing it, and a function
+  containing a `preempt_off` block cannot return one anywhere.
+- Every exit of the body ends the region, including `return`, `break` and
+  `continue`.
+
+The region is the lexical form of a linear `PreemptOff` token minted on
+entry and consumed at every exit; a later step exposes the token for regions
+that are not lexical. While `KERNEL_PREEMPTIBLE == 0` the region lowers to
+the mint's call alone, with no disable or enable instruction, and the mint
+file asserts the constant; that dependency is trusted, not checked. The mint
+file may also publish mints that bypass a block; their callers are fixed by
+`scripts/check_cpu_authority_mints.py`. Reading another CPU's element (a debugger walking every CPU's
 diagnostics) is not expressible; such diagnostic arrays stay ordinary
 arrays.
 

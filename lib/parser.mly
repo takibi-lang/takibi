@@ -258,7 +258,7 @@ let promote_be_field_type = function
 %token <string> BS_STRING
 %token GUARDED_BY
 %token BORROW_INIT BORROW_UNINIT
-%token FN INLINE NOINLINE WHERE RETURN CONST LET MUT EXTERN SYMBOL STRUCT OPAQUE AFFINE LINEAR VIEW VARIANT MUST_USE EXISTS BORROW SINK PACKED BE PUBLISH NO_COPY DMA_FIXED PER_CPU CPU_AUTHORITY IO ENUM MATCH ALIGN MULTIPLE SIZEOF ALIGNOF CONTAINS_STABLE_OWNER OFFSETOF UNSAFE USE PRIVATE VECTOR_TABLE EXCEPTION_ENTRY EXCEPTION_RESTORE EMBED_FILE
+%token FN INLINE NOINLINE WHERE RETURN CONST LET MUT EXTERN SYMBOL STRUCT OPAQUE AFFINE LINEAR VIEW VARIANT MUST_USE EXISTS BORROW SINK PACKED BE PUBLISH NO_COPY DMA_FIXED PER_CPU CPU_AUTHORITY PREEMPT_OFF IO ENUM MATCH ALIGN MULTIPLE SIZEOF ALIGNOF CONTAINS_STABLE_OWNER OFFSETOF UNSAFE USE PRIVATE VECTOR_TABLE EXCEPTION_ENTRY EXCEPTION_RESTORE EMBED_FILE
 %token TYPE GENERIC
 %token DARROW COLONCOLON UNDERSCORE BANG
 %token LBRACE RBRACE LPAREN RPAREN LBRACKET RBRACKET COMMA SEMI DOTDOTLT DOTDOT AT
@@ -954,6 +954,19 @@ stmt:
        from a struct-literal-as-statement -- no reduce/reduce conflict to
        avoid here the way bare `{ }` has. *)
     { { desc = UnsafeBlock b; loc = $symbolstartpos } }
+  | PREEMPT_OFF LPAREN id = IDENT RPAREN LBRACE b = stmts RBRACE
+    (* GitHub issue #638: a preemption-disabled region. Sugar for a block
+       whose first statement binds the CPU authority from the private mint
+       `preempt_off_enter()`; the recorded call location is what lets the
+       mint through its file's privacy, and what the checker uses to find
+       the region (Per_cpu_registry). *)
+    { let call_loc = $startpos($2) in
+      Per_cpu_registry.mark_preempt_off_mint call_loc;
+      let mint = { desc = Call (Per_cpu_registry.preempt_off_mint_name, []);
+                   loc = call_loc } in
+      { desc = Block ({ desc = Let (true, id, None, Some mint, None);
+                        loc = $startpos(id) } :: b);
+        loc = $symbolstartpos } }
   | IF LPAREN c = expr RPAREN LBRACE t = stmts RBRACE p = else_part
     { { desc = If(c, t, p); loc = $symbolstartpos } }
   | WHILE LPAREN c = expr RPAREN LBRACE b = stmts RBRACE

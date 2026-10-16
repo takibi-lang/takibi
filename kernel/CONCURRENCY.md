@@ -41,6 +41,34 @@ state in this kernel is safe *because of* them:
   switch happens at syscall return. That is `CONFIG_PREEMPT_NONE`, and it is
   why many field accesses need no lock.
 
+### Target model: full kernel preemption (#638)
+
+The kernel targets full preemption: a timer interrupt taken at EL1 may
+switch the running process, not only one taken from EL0. Explicit
+preemption points are not an intermediate state. Until the flip, the
+constant stays 0 and the code is prepared in types first.
+
+The authority that disables preemption is a region,
+`preempt_off (cpu) { ... }`. It mints the current CPU's authority
+(`CpuHere`), which is the only index a per-CPU store accepts. The compiler
+rejects a region from which `may_block` is reachable, with the same
+reachability rule that keeps blocking out of interrupt handlers, and keeps
+the `CpuHere` inside the region: no function outside the mint file returns
+one, and none returns one from a region. The region is sugar over a linear
+`PreemptOff` token, which a later step exposes for regions that are not
+lexical, such as a lock guard (#789). Until the flip the region lowers to
+no instruction: the mint's own `static_assert` carries that dependency.
+
+What still depends on the constant is a worklist of three kinds: per-CPU
+scratch (ext2, the kernel log, the memory block cache, process-image and
+syscall scratch, crash capture), lock holders that must not be preempted
+(the page allocator, TaskMutex, the terminal, the ext2 mutation lock), and
+others (fixtures, terminal echo, process lifecycle). The first kind is
+held across calls that may block wherever it spans block I/O, which is why
+ext2 takes its authority from `cpu_here_across_blocking()` and not from a
+region: the region rule rejects it. That scratch must move to per-task
+storage before the flip.
+
 Raising either prints a worklist: files assert the constant they depend on
 with a per-site message. `scripts/check_execution_model_coverage.py` requires
 every file with a mutable global to name a constant or appear in its exempt

@@ -2,21 +2,31 @@
 // mints it. CpuHere's index is private, so a CpuHere exists only as this
 // file hands it out, and the compiler lets a per-CPU store
 // (`struct per_cpu`) be indexed only by one: `store[cpu]`. It is never
-// stored -- not in a global, a field or a place -- so it lives only in the
-// EL1 action that minted it, which runs on one CPU because the kernel is
-// not preemptible (KERNEL_PREEMPTIBLE == 0, static_assert below) and
-// switches processes only after the action returns to assembly.
+// stored -- not in a global, a field or a place.
+//
+// GitHub issue #638: a CpuHere is minted only by a preemption-disabled
+// region, `preempt_off (cpu) { ... }`, which the compiler lowers to a call
+// of the private preempt_off_enter below. The compiler keeps the CpuHere
+// inside the block (no function outside this file returns one) and rejects
+// a block that can reach may_block. The block is sugar over a linear
+// PreemptOff token that a later step will expose (#638 option A).
 //
 // Trusted here, and only here:
-// - cpu_here reads cpu_id() (MPIDR) and is the CPU it says;
+// - preempt_off_enter reads cpu_id() (MPIDR) and is the CPU it says;
+// - cpu_here_across_blocking is the CPU it runs on, for ext2, whose
+//   per-CPU scratch is held across block I/O that may block. No preempt_off
+//   block can cover it, so its validity rests on KERNEL_PREEMPTIBLE == 0
+//   alone (static_assert below); ext2 is the only caller. Moving ext2's
+//   scratch off per-CPU storage retires it (#638).
 // - cpu_here_for_boot_probe names another CPU's slot, for the boot probe
 //   that holds every CPU's handoff at once; nothing else calls it.
 //
-// Current limitations (2026-10-09):
-// - Staying on one CPU is the non-preemption assumption, not a checked
-//   property: a future preemptible kernel must end a CpuHere's life at
-//   every preemption point (#638).
-// - The compiler cannot tell cpu_here_for_boot_probe from cpu_here at a
+// Current limitations (2026-10-16):
+// - The block lowers to no disable/enable pair: while KERNEL_PREEMPTIBLE
+//   is 0 (static_assert below) the kernel is never preempted, so entering
+//   the region needs no instruction. The flip must add the pair, with the
+//   enable on every exit of the block.
+// - The compiler cannot tell cpu_here_for_boot_probe from the mint at a
 //   call; scripts/check_cpu_authority_mints.py fixes its one caller.
 
 use "kernel/lib/execution_model.tkb";
@@ -26,9 +36,9 @@ struct cpu_authority CpuHere {
     private id: {0..<KERNEL_MAX_CORES as usize};
 }
 
-fn cpu_here() -> CpuHere {
+private fn preempt_off_enter() -> CpuHere {
     static_assert(KERNEL_PREEMPTIBLE == 0,
-                  "a CPU authority is valid for one non-preemptible action");
+                  "preempt_off blocks lower no disable/enable pair yet");
     let core: usize = cpu_id();
     if (core < KERNEL_MAX_CORES) {
         let id: {0..<KERNEL_MAX_CORES as usize} = core;
@@ -39,6 +49,12 @@ fn cpu_here() -> CpuHere {
     kernel_invariant_stop();
     let mut unreachable: CpuHere = { 0 };
     return unreachable;
+}
+
+fn cpu_here_across_blocking() -> CpuHere {
+    static_assert(KERNEL_PREEMPTIBLE == 0,
+                  "per-CPU scratch held across blocking calls must move to per-task storage");
+    return preempt_off_enter();
 }
 
 fn cpu_here_for_boot_probe(core: {0..<KERNEL_MAX_CORES as usize}) -> CpuHere {
