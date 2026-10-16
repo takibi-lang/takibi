@@ -1,0 +1,18 @@
+# Actions a fully explored TLC run may leave untaken (GitHub issue #802).
+# scripts/model_coverage.py fails on any other untaken action, and on an
+# entry here that is stale (its action is taken, or its run is not judged).
+# Only an action that is dead BY DESIGN in that variant belongs here; a
+# model that never reaches a path it claims to check is fixed instead. One
+# line each:
+#   <Model> <variant> <Action>: <reason>
+
+# Two processes cannot reach the clone-return reschedule: there is no third
+# Ready process to reserve. The "other" variant adds one and takes it.
+StackOwnership fixed CloneReschedule: needs a third Ready process; variant other takes it
+
+# The second half of an execve write outside the run lock: only the faulty
+# EXEC_WRITES_UNDER_LOCK = FALSE design tears the command line.
+RecordLifetime fixed ExecWriteEnd: only the unlocked execve write of variant execunlocked has a torn half to finish
+
+# The fixed console design writes under the lock and has no ring to drain.
+ConsoleTx fixed Drain: only the ring design (variant ring) has a ring to drain

@@ -52,10 +52,19 @@ CONSTANTS
     \* @type: Bool;
     LEAVE_CHECKS_STACK,
     \* @type: Bool;
-    WAKE_START_CHECKS_STACK
+    WAKE_START_CHECKS_STACK,
+    \* @type: Bool;
+    OTHER_READY
 
 Cores == {"c0", "c1"}
-Procs == {"parent", "child"}
+\* OTHER_READY adds a third process, Ready from the start, so a core can
+\* reserve a successor while a clone child runs on its parent's stack. With
+\* two processes CloneReschedule is never enabled (GitHub issue #802, found
+\* by make modelcheck's coverage check). The "other" variant checks safety
+\* alone: with "other" competing for the cores, ChildReaped would need a
+\* per-process scheduler fairness the model does not assume, so liveness
+\* stays the two-process variants' claim.
+Procs == IF OTHER_READY THEN {"parent", "child", "other"} ELSE {"parent", "child"}
 None == "none"
 Idle == "idle"      \* the core's own idle stack, owned by nobody else
 
@@ -113,7 +122,9 @@ WaitsForChild ==
 (* c1 idles.                                                               *)
 
 Init ==
-    /\ state = [p \in Procs |-> IF p = "parent" THEN "Running" ELSE "Constructing"]
+    /\ state = [p \in Procs |-> IF p = "parent" THEN "Running"
+                               ELSE IF p = "other" THEN "Ready"
+                               ELSE "Constructing"]
     /\ current = [c \in Cores |-> IF c = "c0" THEN "parent" ELSE None]
     /\ reserved = [c \in Cores |-> None]
     /\ stands = [c \in Cores |-> IF c = "c0" THEN "parent" ELSE Idle]
@@ -452,11 +463,18 @@ ChildReaped == <>(state["child"] = "Reaped")
 
 CInitFixed ==
     EXIT_IDLES = TRUE /\ LEAVE_CHECKS_STACK = TRUE /\ WAKE_START_CHECKS_STACK = TRUE
+    /\ OTHER_READY = FALSE
+CInitOther ==
+    EXIT_IDLES = TRUE /\ LEAVE_CHECKS_STACK = TRUE /\ WAKE_START_CHECKS_STACK = TRUE
+    /\ OTHER_READY = TRUE
 CInitExitWaits ==
     EXIT_IDLES = FALSE /\ LEAVE_CHECKS_STACK = TRUE /\ WAKE_START_CHECKS_STACK = TRUE
+    /\ OTHER_READY = FALSE
 CInitLeaveUnchecked ==
     EXIT_IDLES = TRUE /\ LEAVE_CHECKS_STACK = FALSE /\ WAKE_START_CHECKS_STACK = TRUE
+    /\ OTHER_READY = FALSE
 CInitWakeStartUnchecked ==
     EXIT_IDLES = TRUE /\ LEAVE_CHECKS_STACK = TRUE /\ WAKE_START_CHECKS_STACK = FALSE
+    /\ OTHER_READY = FALSE
 
 =============================================================================

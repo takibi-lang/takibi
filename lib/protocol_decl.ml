@@ -669,27 +669,43 @@ let to_tla ?omit (p : t) : string =
     line "    /\\ stale' = stale \\ {cell}";
     unchanged [ "cached"; "dirty"; "stale" ];
     line "";
-    line "\\* The device reads a tx cell: a dirty line holds data it misses.";
-    line "DeviceFetch(cell) ==";
-    line "    /\\ phase \\in TxStates";
-    line "    /\\ cell \\in deviceActive";
-    line "    /\\ ~cacheFault";
-    line "    /\\ cacheFault' = (cell \\in dirty)";
-    unchanged [ "cacheFault" ];
-    line "";
-    line "\\* The device writes an rx cell: a dirty line may be written back over";
-    line "\\* it, and a cached copy is now stale.";
-    line "DeviceWrite(cell) ==";
-    line "    /\\ phase \\in RxStates";
-    line "    /\\ cell \\in deviceActive";
-    line "    /\\ ~cacheFault";
-    line "    /\\ cacheFault' = (cell \\in dirty)";
-    line "    /\\ stale' = stale \\cup (cached \\intersect {cell})";
-    unchanged [ "cacheFault"; "stale" ];
-    line "";
+    (* GitHub issue #802: a device step goes in only when the protocol has
+       a state of its direction. DeviceWrite in a tx-only model was a
+       disjunct no reachable state enabled, which make modelcheck's coverage
+       check (scripts/model_coverage.py) refuses. *)
+    let has_dir d =
+      List.exists (fun s -> s.s_device
+                            && List.assoc_opt s.s_name p.state_dirs = Some d)
+        p.states in
+    let tx = has_dir Device_protocol_registry.Tx
+    and rx = has_dir Device_protocol_registry.Rx in
+    if tx then begin
+      line "\\* The device reads a tx cell: a dirty line holds data it misses.";
+      line "DeviceFetch(cell) ==";
+      line "    /\\ phase \\in TxStates";
+      line "    /\\ cell \\in deviceActive";
+      line "    /\\ ~cacheFault";
+      line "    /\\ cacheFault' = (cell \\in dirty)";
+      unchanged [ "cacheFault" ];
+      line ""
+    end;
+    if rx then begin
+      line "\\* The device writes an rx cell: a dirty line may be written back over";
+      line "\\* it, and a cached copy is now stale.";
+      line "DeviceWrite(cell) ==";
+      line "    /\\ phase \\in RxStates";
+      line "    /\\ cell \\in deviceActive";
+      line "    /\\ ~cacheFault";
+      line "    /\\ cacheFault' = (cell \\in dirty)";
+      line "    /\\ stale' = stale \\cup (cached \\intersect {cell})";
+      unchanged [ "cacheFault"; "stale" ];
+      line ""
+    end;
     next := List.rev_append
         (List.map (fun a -> "\\E cell \\in Cells : " ^ a ^ "(cell)")
-           [ "CpuWrite"; "CpuRead"; "Fetch"; "Evict"; "DeviceFetch"; "DeviceWrite" ])
+           ([ "CpuWrite"; "CpuRead"; "Fetch"; "Evict" ]
+            @ (if tx then [ "DeviceFetch" ] else [])
+            @ (if rx then [ "DeviceWrite" ] else [])))
         !next
   end;
   List.iter (fun o ->

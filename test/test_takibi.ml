@@ -26754,6 +26754,10 @@ let device_protocol_tests = [
           "generated __protocol_dma_prepare_rx(s.memory)";
           "generated __protocol_dma_finish_rx(s.memory)";
           "/\\ held = Cells"; "DeviceWrite(cell) ==" ];
+      (* GitHub issue #802: an rx-only protocol gets no tx device step, a
+         disjunct no reachable state would enable. *)
+      Alcotest.(check bool) "no DeviceFetch in an rx-only model" false
+        (contains_substring tla "DeviceFetch");
       let omitted = Protocol_decl.to_tla ~omit:Protocol_decl.Omit_finish p in
       has omitted "MODULE Rx_omitfinish";
       has omitted "FAULT CONTROL: __protocol_dma_finish_rx left out";

@@ -18,4 +18,7 @@ The rules an edit must keep:
 - A change to a function a row maps fails the same check until the row is
   re-read against the model and restamped with `--restamp`. Say in the
   commit what was reviewed.
+- A passing variant takes every action of its spec; `make modelcheck` fails
+  on one never taken. Allow-list in `coverage_allow.txt`, with the reason,
+  only an action dead by design in that variant (#802).
 - Run `make modelcheck`.

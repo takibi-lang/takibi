@@ -12,6 +12,10 @@
 #   3. A shallow `apalache-mc check` of every variant: Apalache can really run
 #      the spec and agrees about the defect, which a typecheck alone does not
 #      show. Liveness is TLC's alone.
+#   4. Coverage (GitHub issue #802): a variant TLC explored completely must
+#      have taken every action of its spec, or allow-listed the dead one in
+#      kernel/models/coverage_allow.txt with a reason
+#      (scripts/model_coverage.py). Apalache's runs are not judged for it.
 #
 # The tools come from scripts/fetch_model_tools.sh, which downloads them
 # once, outside the repository.
@@ -49,7 +53,7 @@ EXPECT="$OUT/expect.list"
 # Apalache run gets its own --out-dir, since concurrent runs sharing one
 # would write into each other's.
 queue_tlc() {  # model variant
-    echo "$OUT/$1-$2.tlc.log bash $REPO_ROOT/scripts/run_tlc.sh -XX:+UseParallelGC -cp $TLA_JAR tlc2.TLC -workers 1 -config $MDIR/$1_$2.cfg -metadir $OUT/$1-$2.states $MDIR/$1.tla" >>"$QUEUE"
+    echo "$OUT/$1-$2.tlc.log bash $REPO_ROOT/scripts/run_tlc.sh -XX:+UseParallelGC -cp $TLA_JAR tlc2.TLC -workers 1 -coverage 1 -config $MDIR/$1_$2.cfg -metadir $OUT/$1-$2.states $MDIR/$1.tla" >>"$QUEUE"
 }
 queue_typecheck() {  # model
     echo "$OUT/$1.typecheck.log $APALACHE typecheck --out-dir=$OUT/apalache/$1-typecheck $MDIR/$1.tla" >>"$QUEUE"
@@ -91,6 +95,7 @@ check_model Wait4Block NoLostWakeup 4 \
 
 check_model StackOwnership CoreInvariants 6 \
     fixed:CInitFixed:pass:ok \
+    other:CInitOther:pass:ok \
     exitwaits:CInitExitWaits:deadlock:ok \
     leaveunchecked:CInitLeaveUnchecked:RunningMatchesCores:violated \
     wakestartunchecked:CInitWakeStartUnchecked:StartsOnFreeStack:violated:8
@@ -207,6 +212,7 @@ for model in $(cut -d' ' -f1 "$EXPECT" | uniq); do
 done
 
 declare -A variants shortest longest
+coverage_runs=()
 while read -r model cfg tlc_expect apa_expect invariant length; do
     variants[$model]=$(( ${variants[$model]:-0} + 1 ))
     if [ -z "${shortest[$model]:-}" ] || [ "$length" -lt "${shortest[$model]}" ]; then
@@ -217,8 +223,11 @@ while read -r model cfg tlc_expect apa_expect invariant length; do
     fi
     log="$OUT/$model-$cfg.tlc.log"
     case "$tlc_expect" in
-        pass) grep -q "Model checking completed. No error has been found." "$log" ||
-                  fail "$model $cfg: TLC found an error (see $log)" ;;
+        pass) if grep -q "Model checking completed. No error has been found." "$log"; then
+                  coverage_runs+=("$model:$cfg:$log")
+              else
+                  fail "$model $cfg: TLC found an error (see $log)"
+              fi ;;
         deadlock) grep -q "Error: Deadlock reached." "$log" ||
                   fail "$model $cfg: TLC did not report the deadlock (see $log)" ;;
         *) grep -q "Invariant $tlc_expect is violated." "$log" ||
@@ -232,6 +241,21 @@ while read -r model cfg tlc_expect apa_expect invariant length; do
                 fail "$model $cfg: Apalache did not report $invariant (see $log)" ;;
     esac
 done <"$EXPECT"
+
+# GitHub issue #802: a run that explored the whole state space must have
+# taken every action of its spec, or have allow-listed the dead one with a
+# reason; a model that passes because part of it never runs is a failure.
+python3 "$REPO_ROOT/scripts/model_coverage.py" "$MODELS/coverage_allow.txt" \
+    "${coverage_runs[@]}" || fail "an action of a passing TLC run is never taken (above)"
+# The control: StackOwnership's two-process fixed run really leaves
+# CloneReschedule untaken, so without the allow-list the same check must
+# refuse it. A coverage check that stopped seeing dead actions fails here.
+control_log="$OUT/coverage-control.log"
+if python3 "$REPO_ROOT/scripts/model_coverage.py" /dev/null \
+        "StackOwnership:fixed:$OUT/StackOwnership-fixed.tlc.log" >"$control_log" 2>&1 ||
+        ! grep -q "action CloneReschedule (line [0-9]*) is never taken" "$control_log"; then
+    fail "the coverage check accepted StackOwnership fixed's dead CloneReschedule without an allow-list entry (see $control_log)"
+fi
 
 [ "$failures" -eq 0 ] || exit 1
 for model in $(cut -d' ' -f1 "$EXPECT" | uniq); do

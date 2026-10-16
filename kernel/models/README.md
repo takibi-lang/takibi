@@ -38,6 +38,17 @@ Every model has two variants, fixed and unfixed, selected by a constant. The
 unfixed one must violate its property, or the model has stopped modelling the
 defect it was written for, and `make modelcheck` fails.
 
+A passing variant must also have used all of itself. Every TLC run reports
+per-action coverage (`-coverage`), and `scripts/model_coverage.py` fails
+`make modelcheck` when a run that explored the whole state space never took
+an action of its next-state relation: an invariant that holds because the
+step that could break it never runs proves nothing (GitHub issue #802; #778
+found every emitted protocol model holding `held = {}`). An action dead by
+design in one variant -- a step only a faulty design takes -- is listed in
+`coverage_allow.txt` with its reason; a stale entry is an error too. Do not
+allow-list a path the model claims to check: make it reachable, as
+StackOwnership's `other` variant does for `CloneReschedule`.
+
 ## Where one model ends and the next begins
 
 A model is one **protocol**: a piece of shared state together with the
@@ -123,6 +134,16 @@ modelcheck` requires each to fail:
   started it at once, on the same stack. TLC and Apalache both report
   `StartsOnFreeStack`, in eight steps: clone begin and finish, switch, the
   parent reserved and committed on the other core, switch, block, exit.
+
+A fourth constant widens the model rather than breaking it.
+`OTHER_READY = TRUE` (variant `other`) adds a third process, Ready from the
+start. With only the parent and the child no process is ever free to be
+reserved while the child first runs on its parent's stack, so
+`CloneReschedule` was never enabled and the safety invariants held over it
+vacuously; `make modelcheck`'s coverage check found that (#802). The
+variant checks the safety invariants alone: with a third process competing,
+`ChildReaped` would need per-process scheduler fairness the model does not
+assume.
 
 | Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
 | --- | --- | --- | --- | --- |
