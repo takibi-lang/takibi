@@ -4,7 +4,9 @@
 // observations are the trusted claims that end the controller's access to
 // a ring --
 //   - xhci_ring_event: usb_await_event returned a nonzero completion code
-//     for the ring's request. The driver is synchronous: one TD or command
+//     from an event that matches the ring's request exactly -- its TRB
+//     Pointer inside the request's TRBs, and for a transfer its slot and
+//     endpoint (kernel/drivers/usb/xhci_event_match.tkb). The driver is synchronous: one TD or command
 //     is outstanding per ring, and its event (a completed error such as a
 //     STALL included, xHCI 1.2 4.11.3.1) means the controller has stopped
 //     at a TRB whose Cycle bit it does not own;
@@ -51,7 +53,7 @@ private region let mut xhci_bulk_out_ring: [Trb; 16] align(64);
 // What the next publication rings and waits for (set by xhci_ring_run).
 private let mut xhci_doorbell_target: usize = 0;
 private let mut xhci_doorbell_value: u32 = 0;
-private let mut xhci_await_type: u32 = 0;
+private let mut xhci_await_want: XhciEventWant = { 0, 0, 0, 0, 0 };
 private let mut xhci_await_timeout: usize = 0;
 private let mut xhci_await_cc: u32 = 0;
 // Command Completion Events observed on the Command ring (xhci_input_used).
@@ -67,7 +69,7 @@ fn xhci_ring_publish(s: borrow XhciRing_InFlight[b, o, 16, r]) {
 }
 fn xhci_ring_event(s: borrow XhciRing_InFlight[b, o, 16, r])
         -> XhciRing_xhci_ring_event_Raw !{unsafe} {
-    xhci_await_cc = usb_await_event(xhci_await_type, xhci_await_timeout);
+    xhci_await_cc = usb_await_event(xhci_await_want, xhci_await_timeout);
     if (xhci_await_cc == 0) { return XhciRing_xhci_ring_event_Raw::Silent; }
     return XhciRing_xhci_ring_event_Raw::Completed;
 }
@@ -308,11 +310,14 @@ fn xhci_ring_close(i: usize, from: usize, cycle: u32,
     }
 }
 
-// Publish a ring (clean, then the doorbell) and wait for its event of
-// `want_type`. Returns the completion code; 0 means no event, and the
-// ring then stays with the controller until a confirmed reset.
-fn xhci_ring_run(i: usize, target: usize, value: u32,
-                 want_type: u32, timeout: usize) -> u32 !{unsafe} {
+// Publish a ring (clean, then the doorbell) and wait for the event of the
+// request in TRBs first..last of it: a Command Completion Event on the
+// Command ring, else a Transfer Event for slot `target`, endpoint `value`
+// (the doorbell's own target and DCI). Returns the completion code; 0
+// means no matching event, and the ring then stays with the controller
+// until a confirmed reset.
+fn xhci_ring_run(i: usize, target: usize, value: u32, first: usize,
+                 last: usize, timeout: usize) -> u32 !{unsafe} {
     match xhci_ring_take(i) {
         Place::Empty => { return 0; }
         Place::Full(held) => {
@@ -324,7 +329,14 @@ fn xhci_ring_run(i: usize, target: usize, value: u32,
                 XhciRingHeld::Ready(ready) => {
                     xhci_doorbell_target = target;
                     xhci_doorbell_value = value;
-                    xhci_await_type = want_type;
+                    let base: usize = xhci_ring_base_dma(ready);
+                    if (i == XHCI_RING_CMD) {
+                        xhci_await_want = xhci_event_want_command(base + first * 16);
+                    } else {
+                        xhci_await_want = xhci_event_want_transfer(
+                            base + first * 16, base + last * 16,
+                            target as u32, value);
+                    }
                     xhci_await_timeout = timeout;
                     match XhciRing_xhci_ring_publish(ready) {
                         XhciRing_xhci_ring_publish_Result::InFlight(flight) => {

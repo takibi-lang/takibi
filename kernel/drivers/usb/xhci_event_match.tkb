@@ -1,0 +1,64 @@
+// Which xHCI event belongs to the request a ring is waiting for.
+//
+// GitHub issue #720: usb_await_event accepted the first event of the wanted
+// TRB Type, so any Command Completion or Transfer Event -- a late one from
+// an earlier request, or one for another endpoint -- ended the wait and
+// returned the producer ring to the CPU (XhciRing's completes witness).
+// docs/XHCI_SHARED_DMA_DESIGN.md requires the completion observation to
+// correlate the command TRB address, or the transfer TD and slot/endpoint,
+// before it produces reclaim evidence. This file is that correlation.
+//
+// The rule (xHCI 1.2, 6.4.2.1 and 6.4.2.2):
+//   - TRB Type (DWORD3 bits 15:10) is the wanted one;
+//   - the TRB Pointer (DWORD0/1) is the bus address of a TRB of the
+//     request: for a command, the command TRB; for a transfer, any TRB of
+//     the TD, since an error such as a STALL reports the TRB it stopped at
+//     (a control TD's Setup or Data stage), not the IOC one;
+//   - for a transfer, Slot ID (DWORD3 bits 31:24) and Endpoint ID (bits
+//     20:16) are the request's. A command's Slot ID is the controller's
+//     answer (Enable Slot assigns it), so it is not compared: slot = 0.
+//
+// The TRB address alone is reusable after a ring wraps. It identifies the
+// request here because the driver is synchronous (#720 decision D3, S1):
+// one request per ring is outstanding, and a ring whose event never came
+// stays InFlight until a confirmed reset, so no later request reuses the
+// address while an old event can still arrive. Several outstanding
+// requests (S2) need a request identity beyond the address.
+//
+// Byte work, no hardware: linux_user/xhci_event_match runs this file.
+
+struct XhciEventWant {
+    trb_type: u32;
+    first: usize;   // bus address of the request's first TRB
+    last: usize;    // bus address of its last TRB (first for a command)
+    slot: u32;      // 0: do not compare (commands)
+    endpoint: u32;  // DCI; compared only when slot != 0
+}
+
+fn xhci_event_want_command(trb: usize) -> XhciEventWant {
+    let mut want: XhciEventWant = { 33, trb, trb, 0, 0 };
+    return want;
+}
+
+fn xhci_event_want_transfer(first: usize, last: usize, slot: u32,
+                            endpoint: u32) -> XhciEventWant {
+    let mut want: XhciEventWant = { 32, first, last, slot, endpoint };
+    return want;
+}
+
+fn xhci_event_trb_pointer(dw0: u32, dw1: u32) -> usize {
+    return (dw0 as usize) | ((dw1 as usize) << 32);
+}
+
+fn xhci_event_matches(want: XhciEventWant, dw0: u32, dw1: u32,
+                      dw3: u32) -> bool {
+    if (((dw3 >> 10) & 0x3F) != want.trb_type) { return false; }
+    let ptr: usize = xhci_event_trb_pointer(dw0, dw1);
+    if (ptr < want.first || ptr > want.last) { return false; }
+    if (((ptr - want.first) & 0xF) != 0) { return false; }
+    if (want.slot != 0) {
+        if (((dw3 >> 24) & 0xFF) != want.slot) { return false; }
+        if (((dw3 >> 16) & 0x1F) != want.endpoint) { return false; }
+    }
+    return true;
+}

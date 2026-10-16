@@ -98,11 +98,18 @@ resources tied to the same request. A general ring library is not required.
 
 ## Completion, ordering and representation
 
-The existing event helper checks event type, not the TRB pointer. The new
-completion observation must correlate command TRB address, or transfer TD
-and endpoint/slot as appropriate, before producing reclaim evidence. Short
-packet and error events need their actual xHCI semantics. This is an audit
-finding, not evidence of an observed incorrect-completion defect.
+The completion observation correlates the command TRB address, or the
+transfer TD's TRB range plus slot and endpoint, before producing reclaim
+evidence (2026-10-16, kernel/drivers/usb/xhci_event_match.tkb, tested by
+linux_user/xhci_event_match). Before that the event helper checked only
+the event type; this was an audit finding, not an observed
+incorrect-completion defect. A TD range, not only its IOC TRB, is
+accepted because an error event (a STALL on a control Setup or Data
+stage) reports the TRB the controller stopped at. The TRB address is
+reusable after a wrap; it suffices only while one request per ring is
+outstanding (S1) and an unobserved ring stays InFlight until a confirmed
+reset. Several outstanding requests (S2) need a request identity beyond
+the address.
 
 Cycle publication, cache synchronization and doorbell notification are
 separate steps. Writing a matching Cycle bit can expose a descriptor; the

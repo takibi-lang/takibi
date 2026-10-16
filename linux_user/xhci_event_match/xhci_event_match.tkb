@@ -1,0 +1,47 @@
+// The kernel's xHCI event correlation, run natively.
+//
+// GitHub issue #720. usb_await_event used to accept the first event of the
+// wanted TRB Type, so a Transfer Event for another endpoint, or a late
+// Command Completion from an earlier command, ended the wait and handed the
+// producer ring back to the CPU while the controller could still fetch it.
+// This compiles kernel/drivers/usb/xhci_event_match.tkb itself, the file
+// usb_xhci.tkb links, and checks each field the rule compares.
+//
+// Expected output (linux_user/xhci_event_match/xhci_event_match.expected):
+// one line per case, "match" or "foreign".
+
+fn say(name: *u8, ok: bool) {
+    uart_puts(name);
+    if (ok) { uart_puts(" match\n"); } else { uart_puts(" foreign\n"); }
+}
+
+// DWORD3 of an event: TRB Type, Endpoint ID, Slot ID.
+fn ev_dw3(trb_type: u32, endpoint: u32, slot: u32) -> u32 {
+    return (trb_type << 10) | (endpoint << 16) | (slot << 24) | 1;
+}
+
+fn app_main() {
+    // A ring above 4 GiB, so DWORD1 matters.
+    let ring: usize = 0x100002000;
+    let lo: u32 = (ring & 0xFFFFFFFF) as u32;
+    let hi: u32 = ((ring >> 32) & 0xFFFFFFFF) as u32;
+
+    // Command at index 3.
+    let mut cmd: XhciEventWant = xhci_event_want_command(ring + 48);
+    say("cmd-exact     ", xhci_event_matches(cmd, lo + 48, hi, ev_dw3(33, 0, 5)));
+    say("cmd-earlier   ", xhci_event_matches(cmd, lo + 32, hi, ev_dw3(33, 0, 5)));
+    say("cmd-high-dword", xhci_event_matches(cmd, lo + 48, 0, ev_dw3(33, 0, 5)));
+    say("cmd-as-xfer   ", xhci_event_matches(cmd, lo + 48, hi, ev_dw3(32, 0, 5)));
+    say("port-change   ", xhci_event_matches(cmd, lo + 48, hi, ev_dw3(34, 0, 0)));
+
+    // Control TD at indexes 4..6 on slot 2, endpoint 1.
+    let mut ctrl: XhciEventWant = xhci_event_want_transfer(ring + 64, ring + 96, 2, 1);
+    say("ctrl-status   ", xhci_event_matches(ctrl, lo + 96, hi, ev_dw3(32, 1, 2)));
+    say("ctrl-stall-set", xhci_event_matches(ctrl, lo + 64, hi, ev_dw3(32, 1, 2)));
+    say("ctrl-past-td  ", xhci_event_matches(ctrl, lo + 112, hi, ev_dw3(32, 1, 2)));
+    say("ctrl-before-td", xhci_event_matches(ctrl, lo + 48, hi, ev_dw3(32, 1, 2)));
+    say("ctrl-unaligned", xhci_event_matches(ctrl, lo + 72, hi, ev_dw3(32, 1, 2)));
+    say("ctrl-other-ep ", xhci_event_matches(ctrl, lo + 96, hi, ev_dw3(32, 3, 2)));
+    say("ctrl-other-slt", xhci_event_matches(ctrl, lo + 96, hi, ev_dw3(32, 1, 4)));
+    say("ctrl-as-cmd   ", xhci_event_matches(ctrl, lo + 96, hi, ev_dw3(33, 1, 2)));
+}

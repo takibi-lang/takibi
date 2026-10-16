@@ -229,7 +229,11 @@ rules globally.
   The maintained consumer is the xHCI producer rings
   (`kernel/platform/rpi5/usb_xhci_rings.tkb`): its trusted observations are
   a nonzero completion code from `usb_await_event` for the one outstanding
-  request (the driver is synchronous) and `xhci_halt_and_reset`'s confirmed
+  request, taken only from an event whose TRB Pointer lies in the
+  request's TRBs and, for a transfer, whose slot and endpoint are the
+  request's (`kernel/drivers/usb/xhci_event_match.tkb`; trusted: the TRB
+  address identifies the request because the driver is synchronous and an
+  unobserved ring stays InFlight until reset), and `xhci_halt_and_reset`'s confirmed
   halt and HCRST (`xhci_rings_quiesced`). The four rings share one protocol
   and live in four slots chosen by index, so a ring owner parked in another
   ring's slot is the wrong-ring case above. The same file holds the

@@ -458,6 +458,7 @@ KERNEL_UNUSED_CHECKED_RPI5 := \
 	kernel/drivers/net/rp1_gem_desc.tkb \
 	kernel/drivers/usb/config_descriptor.tkb \
 	kernel/drivers/usb/init_report.tkb \
+	kernel/drivers/usb/xhci_event_match.tkb \
 	kernel/platform/rpi5/gic_dtb.tkb \
 	kernel/platform/rpi5/init.tkb \
 	kernel/platform/rpi5/intc.tkb \
@@ -514,7 +515,7 @@ LINUX_USER_EXAMPLES      := linux_hello start checked_usize elf64_validate bump 
                              affine_escape_via_index align_ptr_proof linear_obligation tuple_pair region_proto region_inspection pool_space_replay \
                              field_lease match_int_lit record_loans \
                              callstack ringbuf crc8 djb2 slice slice_from_field logical_eval foreach for loop fizzbuzz fibonacci \
-                             bubblesort inet_checksum ip_parse tcp_parse wire_endian ref_type byte_slice atomic spinlock locked_cell diagnostic_ring publish fdt number usb_config usb_init_report uart_rx_ring block_cache gem_tx_wait virtio_net_tx virtio_net_reply generic_variant runtime_bounds pin_placement place_array protocol_ring protocol_tx protocol_txrx protocol_snapshot region_held header_overlay
+                             bubblesort inet_checksum ip_parse tcp_parse wire_endian ref_type byte_slice atomic spinlock locked_cell diagnostic_ring publish fdt number usb_config usb_init_report xhci_event_match uart_rx_ring block_cache gem_tx_wait virtio_net_tx virtio_net_reply generic_variant runtime_bounds pin_placement place_array protocol_ring protocol_tx protocol_txrx protocol_snapshot region_held header_overlay
 LINUX_USER_BINS          := $(foreach e,$(LINUX_USER_EXAMPLES),$(LINUX_USER_DIR)/$(e)/$(e).exe)
 LINUX_USER_OBJS          := $(foreach e,$(LINUX_USER_EXAMPLES),$(LINUX_USER_DIR)/$(e)/$(e)_exe.o)
 
@@ -606,6 +607,11 @@ $(LINUX_USER_DIR)/usb_config/usb_config_exe.o: LINUX_USER_EXTRA_SRCS := kernel/d
 # board is the wrong place to find out that one of them is wrong.
 $(LINUX_USER_DIR)/usb_init_report/usb_init_report_exe.o: kernel/drivers/usb/init_report.tkb
 $(LINUX_USER_DIR)/usb_init_report/usb_init_report_exe.o: LINUX_USER_EXTRA_SRCS := kernel/drivers/usb/init_report.tkb
+
+# GitHub issue #720: the kernel's xHCI event correlation (TRB Pointer, slot
+# and endpoint), compiled and run natively from the file usb_xhci.tkb links.
+$(LINUX_USER_DIR)/xhci_event_match/xhci_event_match_exe.o: kernel/drivers/usb/xhci_event_match.tkb
+$(LINUX_USER_DIR)/xhci_event_match/xhci_event_match_exe.o: LINUX_USER_EXTRA_SRCS := kernel/drivers/usb/xhci_event_match.tkb
 
 # GitHub issue #543: the kernel's own UART receive ring, driven past full.
 # Filling a 4096-byte ring over a real UART on every boot would cost the

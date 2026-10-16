@@ -1,0 +1,13 @@
+cmd-exact      match
+cmd-earlier    foreign
+cmd-high-dword foreign
+cmd-as-xfer    foreign
+port-change    foreign
+ctrl-status    match
+ctrl-stall-set match
+ctrl-past-td   foreign
+ctrl-before-td foreign
+ctrl-unaligned foreign
+ctrl-other-ep  foreign
+ctrl-other-slt foreign
+ctrl-as-cmd    foreign
