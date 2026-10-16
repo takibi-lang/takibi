@@ -4553,26 +4553,22 @@ moved across functions.
   declared type, since reassignment can genuinely bring an unproven
   value later.
 - **`while (cond) { ... }` narrows from its own condition the same way
-  `if` does (GitHub issue #313), but ONLY for a binding the loop body
-  never reassigns anywhere.** `while (v >= 0 && v < 4) { foo(v); ... }`
-  narrows `v` inside the body when `v` is never written there, reusing
-  the exact same `narrow_from_cond` machinery and kill-set rule `if`'s
-  own then-branch already relies on. A binding the body DOES reassign
-  stays unnarrowed for the whole body, not just after the write -- e.g.
-  `while (fd < PROCESS_FD_MAX) { arr[fd] = ...; fd = fd + 1; }` still
-  gives `fd` no proven upper bound, since `fd` is reassigned inside the
-  loop. Found migrating `kernel/kernel/fd_table.tkb` off raw-pointer
-  array-decay indexing (2026-08-15): converting the `while` to `for fd in
-  first..<PROCESS_FD_MAX` did not help either, since `first` is a runtime
-  value, not a compile-time constant (see "For Loops" below, though issue
-  #312 later taught a `for` loop to reuse an already-refined runtime
-  bound too) -- the fix for THIS reassigning-counter shape remains an
-  explicit `if (fd < PROCESS_FD_MAX) { ... }` wrapping the body, the same
-  idiom already used for signed lower bounds and mutable-binding
-  narrowing elsewhere in this document. Prefer a `for` loop with constant
-  (or, since #312, already-refined-runtime) bounds when the upper bound
-  is known; fall back to an explicit wrapping-`if` for a `while`/`for`
-  body that reassigns its own bound-tracking variable.
+  `if` does (GitHub issues #313, #770), up to the first top-level body
+  statement that may write, alias, or rebind the narrowed name.**
+  `while (i < 4) { total = total + buf[i]; i = i + 1; }` proves `buf[i]`:
+  the write comes after the use, and the back edge re-tests the
+  condition. The fact is dropped for the WHOLE top-level statement that
+  writes the name, including uses inside it before the write, and stays
+  dropped for the rest of that iteration's body: `while (i < 4) { if (c)
+  { i = i + 2; } buf[i]; }` keeps the check. To index inside a statement
+  that later writes the name (an `if`/`else` whose one arm advances a
+  list cursor), copy it into an immutable `let at: usize = i;` first;
+  `kernel/lib/freelist.tkb`'s chain walk does this. The fact never
+  reaches the code after the loop, and a `||` condition proves no bound.
+  Only interval facts on integer bindings and slice minimum lengths are
+  carried; a runtime `i < s.len` fact for a slice whose length is not a
+  compile-time constant is not yet carried by `while` (an explicit `if`
+  still is).
 
 ## Endian-Aware Integer Types
 

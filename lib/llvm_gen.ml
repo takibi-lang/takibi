@@ -6164,11 +6164,25 @@ let gen_func ?prog_types fdef =
            SEPARATE #213 mechanism with no type_inf.ml-side counterpart in
            narrow_from_cond, so adding it here would elide a check
            type_inf.ml never proved for this construct. *)
-        let killed    = Ast.written_names body in
-        let saved     = apply_narrowing     locals cond killed in
-        let saved_mut = apply_narrowing_mut locals cond killed in
+        (* GitHub issue #770: narrowed with an empty kill set and
+           invalidated per statement, mirroring type_inf.ml's While case
+           (sync rule): before each top-level body statement, every
+           still-narrowed name it writes is put back to its pre-loop
+           entry. The final restore below is idempotent for those. *)
+        let saved     = apply_narrowing     locals cond [] in
+        let saved_mut = apply_narrowing_mut locals cond [] in
+        let pending   = ref (saved, saved_mut) in
+        let invalidate_before (s : Ast.stmt) =
+          let w = Ast.written_names [s] in
+          let (imm, mut) = !pending in
+          let (imm_hit, imm_keep) = List.partition (fun (n, _) -> List.mem n w) imm in
+          let (mut_hit, mut_keep) = List.partition (fun (n, _) -> List.mem n w) mut in
+          restore_narrowing     locals imm_hit;
+          restore_narrowing_mut mut_hit;
+          pending := (imm_keep, mut_keep)
+        in
         Stack.push (after_bb, cond_bb) loop_stack;
-        run_scoped_stmts body;
+        run_scoped_stmts ~before_stmt:invalidate_before body;
         ignore (Stack.pop loop_stack);
         restore_narrowing     locals saved;
         restore_narrowing_mut saved_mut;
@@ -6603,15 +6617,17 @@ let gen_func ?prog_types fdef =
      never past the end of it), then restore the accumulator refs
      themselves so a nested list's own accumulation doesn't leak into the
      list that contains it. *)
-  and run_scoped_stmts (stmts : Ast.stmt list) : unit =
+  and run_scoped_stmts ?(before_stmt = fun (_ : Ast.stmt) -> ())
+      (stmts : Ast.stmt list) : unit =
     let saved = Hashtbl.copy locals.visible in
     Fun.protect
       ~finally:(fun () ->
         Hashtbl.reset locals.visible;
         Hashtbl.iter (Hashtbl.add locals.visible) saved)
-      (fun () -> run_stmts_with_future_writes stmts)
+      (fun () -> run_stmts_with_future_writes ~before_stmt stmts)
 
-  and run_stmts_with_future_writes (stmts : Ast.stmt list) : unit =
+  and run_stmts_with_future_writes ?(before_stmt = fun (_ : Ast.stmt) -> ())
+      (stmts : Ast.stmt list) : unit =
     let saved_pending_ctx = !pending_fallthrough_narrowing_ctx in
     let saved_pending_locals = !pending_fallthrough_locals in
     let saved_pending_endpoints = !pending_fallthrough_slice_endpoints in
@@ -6621,6 +6637,7 @@ let gen_func ?prog_types fdef =
     let rec go = function
       | [] -> ()
       | s :: rest ->
+          before_stmt s;
           enclosing_future_writes := Ast.written_names rest;
           enclosing_future_slice_rebinds := slice_rebind_names rest;
           if !unsafe_lint_active then begin

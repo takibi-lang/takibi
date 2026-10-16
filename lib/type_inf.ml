@@ -7013,11 +7013,38 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
          update -- without it this would be a real --forbid-trap
          regression risk (proving more here without codegen eliding the
          matching check). *)
-      let narrowed_tyenv = narrow_from_cond senv tyenv cond body in
+      (* GitHub issue #770: the condition is assumed for the body up to
+         the first statement that may write, alias or rebind a narrowed
+         name, not only when the body never writes it at all. Narrow
+         with an empty kill set, then, before each top-level body
+         statement, put back the unnarrowed entry of every still-narrowed
+         name that statement writes (Ast.written_names [s]). The fact is
+         dropped for the WHOLE writing statement, including uses inside
+         it that precede the write, so it is conservative; a write after
+         the last use is harmless because the back edge re-tests the
+         condition. A name restored once stays restored (a same-name
+         `let` shadow is itself a write, so its fresh binding is never
+         touched). Sync rule: llvm_gen.ml's While case restores the same
+         names before the same statements. *)
+      let narrowed_tyenv = narrow_from_cond senv tyenv cond [] in
+      let still_narrowed = ref (StringMap.fold (fun name entry acc ->
+          match StringMap.find_opt name tyenv with
+          | Some original when original <> entry -> StringSet.add name acc
+          | _ -> acc) narrowed_tyenv StringSet.empty) in
+      let invalidate_before env (s : Ast.stmt) =
+        List.fold_left (fun env name ->
+          if StringSet.mem name !still_narrowed then begin
+            still_narrowed := StringSet.remove name !still_narrowed;
+            match StringMap.find_opt name tyenv with
+            | Some original -> StringMap.add name original env
+            | None -> env
+          end else env) env (Ast.written_names [s])
+      in
       let (_, raw_locals') = with_exclusion_narrowing tyenv cond
         (Ast.written_names body) (fun () ->
           fold_stmts_with_future_writes
-            (fun (env, locs) s -> infer_stmt senv eenv env fenv ret_ty locs true s)
+            (fun (env, locs) s ->
+              infer_stmt senv eenv (invalidate_before env s) fenv ret_ty locs true s)
             (narrowed_tyenv, raw_locals) body)
       in
       (tyenv, raw_locals')

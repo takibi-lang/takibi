@@ -15345,6 +15345,136 @@ let codegen_tests = [
           return 0;
         }");
 
+  (* GitHub issue #770: the while condition holds in the body up to the
+     first statement that writes a name it narrowed, not only when the
+     body never writes that name. Positive: the counter idiom and the
+     kernel/lib/freelist.tkb walk, whose write comes after the index.
+     The fact is dropped for the whole top-level statement that writes
+     the name, so the walk copies `prev` into an immutable `at` first and
+     indexes with that inside the if/else that later writes `prev`. *)
+  Alcotest.test_case
+    "while condition proves an index used before the counter's own \
+     increment (issue #770)" `Quick
+    (expect_trap_sites 0
+       "fn f770_count() -> i32 {
+          let mut buf: [i32; 4];
+          let mut total: i32 = 0;
+          let mut i: usize = 0;
+          while (i < 4) {
+            total = total + buf[i];
+            i = i + 1;
+          }
+          return total;
+        }");
+
+  Alcotest.test_case
+    "while condition proves a list-walk index whose variable is \
+     reassigned later in the body (issue #770, freelist shape)" `Quick
+    (expect_trap_sites 0
+       "struct Core770 { next: [usize; 4]; }
+        fn f770_walk(core: &mut Core770, start: usize) -> usize {
+          let mut prev: usize = start;
+          let mut steps: usize = 0;
+          while (prev < 4 && steps <= 4) {
+            steps = steps + 1;
+            let at: usize = prev;
+            let n: usize = core.next[at];
+            if (n == 0) {
+              core.next[at] = 0;
+            } else {
+              prev = n;
+            }
+          }
+          return prev;
+        }");
+
+  (* Negative controls: each keeps exactly one trap site. Removing the
+     per-statement invalidation (narrowing with an empty kill set and
+     never restoring) makes the first two report 0 and so fail. *)
+  Alcotest.test_case
+    "while condition does not survive an assignment before the index \
+     (issue #770 negative control)" `Quick
+    (expect_trap_sites 1
+       "fn f770_write_first(v: usize) -> i32 {
+          let mut buf: [i32; 4];
+          let mut i: usize = v;
+          let mut total: i32 = 0;
+          while (i < 4) {
+            i = i + 1;
+            total = total + buf[i];
+          }
+          return total;
+        }");
+
+  Alcotest.test_case
+    "while condition does not survive an assignment nested in an \
+     earlier statement (issue #770 negative control)" `Quick
+    (expect_trap_sites 1
+       "fn f770_nested_write(v: usize, c: bool) -> i32 {
+          let mut buf: [i32; 4];
+          let mut i: usize = v;
+          let mut total: i32 = 0;
+          while (i < 4) {
+            if (c) { i = i + 2; }
+            total = total + buf[i];
+            i = i + 1;
+          }
+          return total;
+        }");
+
+  Alcotest.test_case
+    "while condition does not apply after the loop (issue #770 \
+     negative control)" `Quick
+    (expect_trap_sites 1
+       "fn f770_after(v: usize) -> i32 {
+          let mut buf: [i32; 4];
+          let mut i: usize = v;
+          while (i < 4) {
+            break;
+          }
+          return buf[i];
+        }");
+
+  Alcotest.test_case
+    "while condition joined by || proves no bound (issue #770 negative \
+     control)" `Quick
+    (expect_trap_sites 1
+       "fn f770_or(v: usize, c: bool) -> i32 {
+          let mut buf: [i32; 4];
+          let mut i: usize = v;
+          while (i < 4 || c) {
+            return buf[i];
+          }
+          return 0;
+        }");
+
+  Alcotest.test_case
+    "while condition is dropped at the writing statement at the type \
+     level too (issue #770 negative control)" `Quick
+    (expect_type_error "unproven"
+       "fn foo770(i: {0..<4 as usize}) {}
+        fn f770_type(v: usize) {
+          let mut i: usize = v;
+          while (i < 4) {
+            foo770(i);
+            i = i + 1;
+            foo770(i);
+          }
+        }");
+
+  Alcotest.test_case
+    "while condition narrows a call argument before the write at the \
+     type level (issue #770)" `Quick
+    (expect_ok
+       "fn foo770b(i: {0..<4 as usize}) {}
+        fn f770_type_ok(v: usize) {
+          let mut i: usize = v;
+          while (i < 4) {
+            foo770b(i);
+            i = i + 1;
+          }
+        }");
+
   Alcotest.test_case
     "multi-level struct field chain a.b.c[i] indexes the innermost \
      array field directly (issue #217: only the OUTERMOST field needs \

@@ -2350,12 +2350,10 @@ private fn scheduled_process_diagnostic_next_pid_stopped(
 private fn kernel_process_monitor_put_command(snapshot: ProcessDiagnosticSnapshot) {
     let mut index: usize = 0;
     while (index < snapshot.command_line_length && index < 512) {
-        if (index >= 0 && index < 512) {
-            let byte: u8 = snapshot.command_line[index];
-            if (byte == 0) { return; }
-            if (byte >= 0x20 && byte <= 0x7E) { uart_putc(byte); }
-            else { uart_putc(0x3F); }
-        }
+        let byte: u8 = snapshot.command_line[index];
+        if (byte == 0) { return; }
+        if (byte >= 0x20 && byte <= 0x7E) { uart_putc(byte); }
+        else { uart_putc(0x3F); }
         index = index + 1;
     }
 }

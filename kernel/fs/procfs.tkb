@@ -211,21 +211,17 @@ private fn procfs_put_comm(output: borrow [u8; 1024..], offset_in: usize,
     let mut start: usize = 0;
     let mut index: usize = 0;
     while (index < snapshot.command_line_length && index < 512) {
-        if (index >= 0 && index < 512) {
-            let byte: u8 = snapshot.command_line[index];
-            if (byte == 0) { break; }
-            if (byte == 0x2F) { start = index + 1; }
-        }
+        let byte: u8 = snapshot.command_line[index];
+        if (byte == 0) { break; }
+        if (byte == 0x2F) { start = index + 1; }
         index = index + 1;
     }
     let mut offset: usize = offset_in;
     let mut at: usize = start;
     let mut copied: usize = 0;
     while (at < index && copied < 15 && at < 512) {
-        if (at >= 0 && at < 512) {
-            offset = procfs_put_byte(output, offset,
-                                     snapshot.command_line[at]);
-        }
+        offset = procfs_put_byte(output, offset,
+                                 snapshot.command_line[at]);
         at = at + 1;
         copied = copied + 1;
     }

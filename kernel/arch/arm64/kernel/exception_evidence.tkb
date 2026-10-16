@@ -2997,17 +2997,15 @@ private fn crash_console_parse_proc(
     let mut pid: usize = 0;
     let mut index: usize = 5;
     while (index < length && index < CRASH_CONSOLE_LINE_BYTES) {
-        if (index >= 0 && index < CRASH_CONSOLE_LINE_BYTES) {
-            let byte: u8 = line[index];
-            if (byte < 0x30 || byte > 0x39) {
-                return CrashConsolePidResult::Invalid;
-            }
-            let digit: usize = (byte - 0x30) as usize;
-            if (pid > (0xFFFFFFFFFFFFFFFF - digit) / 10) {
-                return CrashConsolePidResult::Invalid;
-            }
-            pid = pid * 10 + digit;
+        let byte: u8 = line[index];
+        if (byte < 0x30 || byte > 0x39) {
+            return CrashConsolePidResult::Invalid;
         }
+        let digit: usize = (byte - 0x30) as usize;
+        if (pid > (0xFFFFFFFFFFFFFFFF - digit) / 10) {
+            return CrashConsolePidResult::Invalid;
+        }
+        pid = pid * 10 + digit;
         index = index + 1;
     }
     if (pid == 0) { return CrashConsolePidResult::Invalid; }

@@ -276,17 +276,16 @@ fn freelist_core_unlink_range(core: &mut FreelistCore(N), first: usize,
     let mut steps: usize = 0;
     while (prev < N && steps <= N) {
         steps = steps + 1;
-        // The loop condition is not carried into the body as a bound, so
-        // the index is narrowed here; prev < N already holds.
+        // The loop condition bounds `prev` up to the statement that
+        // writes it (#770); the if/else below writes it, so the bound is
+        // carried through an immutable copy.
         let at: usize = prev;
-        if (at < N) {
-            let next: usize = core.next_free[at];
-            if (next < N && next >= first && next - first < count) {
-                core.next_free[at] = core.next_free[next];
-                unlinked = unlinked + 1;
-            } else {
-                prev = next;
-            }
+        let next: usize = core.next_free[at];
+        if (next < N && next >= first && next - first < count) {
+            core.next_free[at] = core.next_free[next];
+            unlinked = unlinked + 1;
+        } else {
+            prev = next;
         }
     }
     return unlinked;
