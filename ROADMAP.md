@@ -127,6 +127,11 @@ list (maintainer, 2026-10-09).
    RPi5 and set `KERNEL_PREEMPTIBLE` to 1, with the models passing without
    their no-preemption guards. Never while #584's soak is being run for a
    step's evidence.
+   Slice 1 done (2026-10-16): lexical `preempt_off (cpu) { ... }` blocks
+   mint CpuHere, reject reachable may_block, and keep the authority from
+   escaping; the exec-argument handoff uses them. Next: ext2's per-CPU
+   scratch, held across block I/O that may block, moves to per-task
+   storage, retiring `cpu_here_across_blocking`.
 
 **Evidence for the trunk, scheduled by A:** #584's soak at natural
 boundaries, #702 (dedicated soak hardware, the maintainer's decision),

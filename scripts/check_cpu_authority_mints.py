@@ -34,20 +34,50 @@ ALLOWED = {
 FUNCTION = re.compile(r"^\s*(?:private\s+)?(?:noinline\s+)?fn\s+(\w+)", re.M)
 
 
-def calls(text, name):
-    """(enclosing function) for every call of `name` outside comments."""
+def references(text, name):
+    """(enclosing function) for every reference to `name` outside comments.
+
+    Any reference counts, not only the call shape `name(`: a function
+    pointer taken as `let f = name;` and called later bypasses the review
+    just as a direct call does (#638). Text before the first function
+    (globals) is scanned as "<top level>". The function's own definition is
+    the one reference that is not a use."""
     starts = [(m.start(), m.group(1)) for m in FUNCTION.finditer(text)]
-    found = []
+    spans = [(0, starts[0][0] if starts else len(text), "<top level>")]
     for index, (start, fn) in enumerate(starts):
         end = starts[index + 1][0] if index + 1 < len(starts) else len(text)
+        spans.append((start, end, fn))
+    found = []
+    for start, end, fn in spans:
         body = "\n".join(line.split("//", 1)[0]
                          for line in text[start:end].splitlines())
-        if fn != name and re.search(r"\b" + name + r"\s*\(", body):
+        if fn == name:
+            body = FUNCTION.sub("", body, count=1)
+        if re.search(r"\b" + name + r"\b", body):
             found.append(fn)
     return found
 
 
+def controls():
+    """The check must see the shapes it exists to catch."""
+    name = "cpu_here_for_boot_probe"
+    cases = {
+        "direct call": "fn f() { let c = cpu_here_for_boot_probe(0); }\n",
+        "function pointer": "fn f() { let g = cpu_here_for_boot_probe; g(0); }\n",
+        "global initializer": "let g = cpu_here_for_boot_probe;\nfn f() {}\n",
+    }
+    for label, text in cases.items():
+        if not references(text, name):
+            print(f"ERROR cpu-authority-mints: control '{label}' was not "
+                  "detected")
+            sys.exit(1)
+    if references("fn f() { } // cpu_here_for_boot_probe\n", name):
+        print("ERROR cpu-authority-mints: a comment was reported as a use")
+        sys.exit(1)
+
+
 def main():
+    controls()
     problems = []
     scanned = 0
     for path in sorted(KERNEL.rglob("*.tkb")):
@@ -57,10 +87,10 @@ def main():
         relative = str(path.relative_to(ROOT))
         text = path.read_text()
         for name, allowed in ALLOWED.items():
-            for fn in calls(text, name):
+            for fn in references(text, name):
                 if ((relative, fn) not in allowed
                         and (relative, "*") not in allowed):
-                    problems.append(f"{relative}: {fn} calls {name}, a "
+                    problems.append(f"{relative}: {fn} references {name}, a "
                                     "CPU-authority mint outside a preempt_off "
                                     "block; add it to ALLOWED only after "
                                     "review")
@@ -70,7 +100,8 @@ def main():
         sys.exit(1)
     report_pass("cpu-authority-mints",
                 "the CPU-authority mints outside preempt_off blocks are "
-                "called only by their reviewed callers", files=scanned)
+                "referenced only by their reviewed callers (calls and function "
+                "pointers; three controls)", files=scanned)
 
 
 if __name__ == "__main__":
