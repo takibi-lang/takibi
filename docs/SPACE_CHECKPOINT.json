@@ -2,8 +2,8 @@
   "date": "2026-10-16",
   "event": "incremental",
   "decision": "reuse",
-  "source_sha256": "2f0a4b4c60658a9b2b404918b99bab36b15d16ee64cbb6cbfd82433b69ca4636",
-  "workload": "#770 on main 1f57af2b: while-condition facts carried into the body up to the first write (compiler), and five redundant in-loop re-checks removed from freelist.tkb, exception_evidence.tkb, procfs.tkb and process.tkb; no storage or allocation change. scripts/space_delta.py main: text -16 B QEMU, unchanged RPi5; data/BSS and usable_ram_start unchanged on both.",
+  "source_sha256": "a17b56765c8cfd3de1bae9d863fbd2c67cddfdcc9028537a054e4b4ef5a1884a",
+  "workload": "#797 on main b2ee8abf: while-condition runtime slice-length facts carried into the body and a reason appended to --forbid-trap bounds reports (compiler), and three redundant in-loop re-checks removed from exception_evidence.tkb; no storage or allocation change. scripts/space_delta.py main: text/data/BSS and usable_ram_start unchanged on qemu and rpi5.",
   "evidence": [
     "docs/RX_KEEP_SPACE_2026-10-15.md",
     "docs/NETPACKET_MOVE_SPACE_2026-10-14.md",
