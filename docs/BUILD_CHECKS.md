@@ -184,6 +184,8 @@ suffix is description; dispatch reads only the prefix.
 | `check_validate_protocol_trace_controls.py` | Controls for the protocol-trace replay: three recorded QEMU windows pass (one with `Nap` in `SwitchAway`'s place), a recorded RPi5 clone-return reschedule passes only with `CloneReschedule`, refusing a child-owned stack, an unreserved successor and a relabelled parent; its refused step reports before/observed state for the parent stack, child and successor; two windows fail without `ChildExitStart` and `InterruptDepart`; a tick leave outside an interrupt, #609's shared-stack start, a lost change, a cut report, an unlocked change, an unsafe snapshot and an unexercised window are refused, and so are Wait4Block.tla's block with a zombie child, lost wakeup and wake of a non-parent, RecordLifetime.tla's unlocked or premature removal, and a wait published on a Running process |
 | `check_wont_compile_catalog.py` | every defect-catalog entry names a test case and external comparison set with a valid nonfuture date, shows its figure, and agrees with the index; external truth is not checked |
 | `check_wont_compile_catalog_controls.py` | Controls for catalog structure, missing/malformed/future comparison dates and a valid leap day, and sample runner verdicts |
+| `check_xhci_register_offsets.py` | RP1 xHCI register fields sit at their xHCI-specification offsets, and an ERST programmed via ERSTBA also declares and writes ERSTSZ (#754) |
+| `check_xhci_register_offsets_controls.py` | Controls for the spec layout, the #754 missing ERSTSZ, an unwritten ERSTSZ and misplaced registers |
 
 ## `slowcheck_*` -- the slow lane
 

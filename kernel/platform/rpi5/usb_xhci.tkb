@@ -73,6 +73,7 @@ io struct Rp1XhciRegs {
     portsc3: u32 at 0x440;
     iman: u32 at 0x480;
     imod: u32 at 0x484;
+    erstsz: u32 at 0x488;
     erstba_lo: u32 at 0x490;
     erstba_hi: u32 at 0x494;
     erdp_lo: u32 at 0x498;
@@ -907,11 +908,11 @@ fn xhci_setup_rings_and_start() -> bool !{unsafe} {
     // Linux's own xhci_add_interrupter() exactly -- a different order
     // was tried first and silently never produced a Command Completion
     // Event.
-    // This first write was meant for ERSTSZ (interrupter +0x08) but has
-    // always landed on IMAN (+0x00), so ERSTSZ keeps its reset value. The
-    // MMIO migration keeps the write as it was; correcting it changes what
-    // the controller sees and needs its own RPi5 evidence.
-    rp1_xhci.iman = 1;
+    // GitHub issue #754: ERSTSZ (interrupter +0x08) holds the one segment
+    // xhci_erst_fill writes. This write used to land on IMAN (+0x00), which
+    // left ERSTSZ at its reset value; IMAN.IP is cleared by the IE write
+    // below, which writes IP back as 1 (RW1C).
+    rp1_xhci.erstsz = 1;
     rp1_xhci.erstba_lo = (erst_dma & 0xFFFFFFFF) as u32;
     rp1_xhci.erstba_hi = ((erst_dma >> 32) & 0xFFFFFFFF) as u32;
     rp1_xhci.erdp_lo = (evt_ring_dma & 0xFFFFFFFF) as u32;
