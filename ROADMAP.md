@@ -15,6 +15,12 @@ A territory is a role, not a set of directories and not a particular agent
 (`AGENTS.md`); which agent holds which is the maintainer's per-session
 decision.
 
+**Roles (maintainer, 2026-10-16, #753).** Territory A owns the two pillars,
+multicore support and memory safety, and pursues only them. Territory B
+takes the issues slightly off those pillars so that A can, supporting A.
+An urgent issue that comes up mid-work is scheduled by the coordinator,
+which rewrites the priorities below and says so on the issue.
+
 **The split (maintainer, 2026-10-09).** Territory A holds only the trunk:
 memory safety and multicore -- the stored-authority rule and the kernel-core
 consumers that need it, the safe-memory-access route (#637), preemption,
@@ -76,15 +82,15 @@ list (maintainer, 2026-10-09).
    process records are RegionPool records Held for their process's life,
    IntrusivePool has left the kernel, and intrusive_pool.tkb and
    pool_lock.tkb have left the mint list (2026-10-12). freelist.tkb has
-   left it too: checked indexing only (2026-10-12; since #770 a while
-   condition bounds its body, and the local re-check is gone). ext2.tkb has
+   left it too: checked indexing only (2026-10-12; a while condition now
+   bounds its body, and the local re-check is gone). ext2.tkb has
    left it as well: its scratch is per-CPU storage and every byte access a
    checked (buffer, offset) position (2026-10-12; text +4 KiB, checking a
    field's width once is #798). The network files (arp, icmp, tcp) have
    left it too, through header overlays: `bytes as &mut TcpHdr` is checked
    when every byte pattern is a valid packed header and the slice covers it
    (2026-10-13); a raw reinterpreting cast to a type with a refined, bool,
-   or exhaustive-enum field needs `unsafe` (2026-10-15, #772; raw byte
+   or exhaustive-enum field needs `unsafe` (2026-10-15; raw byte
    writes that break such a claim remain, #794). The overlay also fits the K/R files still
    on kernel/RAW_MINT_FILES that parse external bytes (fdt, virtio, elf64).
    process.tkb is split too: its kernel-stack bytes live in the small mint
@@ -97,9 +103,9 @@ list (maintainer, 2026-10-09).
    reached through it (#672, 2026-10-14; guard about +80 ns per tick on
    RPi5). **Next:** the next #672 layer, section regions (#777, awaiting its
    decision): the linker-bounded stacks and the DTB blob as regions, which
-   would take stack_poison.tkb's last integer ranges away. Not on the critical path: #748 (allocator time, 2.75x
-   slower since the per-page places). `make raw-site-counts` prints each
-   listed file's raw sites to choose the next one to migrate (#739). Consolidating the kernel-driven built-ins into general features
+   would take stack_poison.tkb's last integer ranges away. `make
+   raw-site-counts` prints each listed file's raw sites to choose the next
+   one to migrate. Consolidating the kernel-driven built-ins into general features
    is #750 (holder-tied identities, option C, is its central item; a
    shrink protocol for RegionPools walked with no lock belongs there). For #720
    (B): the doorbell, ERDP-release and stop/reset boundaries are in place;
@@ -116,17 +122,11 @@ list (maintainer, 2026-10-09).
    RPi5 and set `KERNEL_PREEMPTIBLE` to 1, with the models passing without
    their no-preemption guards. Never while #584's soak is being run for a
    step's evidence.
-5. **Signals and SMP admission on the settled core.** #628 (delivery at an
-   interrupt return), then #726 (a caught signal interrupts a sleeping
-   syscall; EINTR versus restart needs a decision), with #432 (timed
-   blocking) beside it; #9 (SMP process admission).
-6. **Research applied to a real example** (evaluated 2026-09-29; reasoning
-   on #13): indexed views generated from a TLA+ model's actions, prototyped
-   on #613; coordinate that generator's authoring surface with B's #720
-   B+C prototype before building separate generators. The maintainer chose
-   one common Takibi protocol declaration generating both TLA+ and permission
-   types on 2026-10-11; use the same representation for both consumers. Iris vocabulary for
-   lock and pool invariants (#132).
+5. **Lock order and core symmetry.** #789 (lock order as ranked
+   capability tokens, absorbing acquires_lock_<rank>_<name>, after the
+   syntax review); #775 (inventory core-role asymmetries; make each
+   symmetric or record why it stays); #776 (runtime test of one process
+   changing a running peer's affinity mask).
 
 **Evidence for the trunk, scheduled by A:** #584's soak at natural
 boundaries, #702 (dedicated soak hardware, the maintainer's decision),
@@ -135,37 +135,24 @@ four vCPUs since 2026-10-11; candidates on top of it: #756 (contention
 probes rendezvous with every online peer, not core 1 alone) and #757
 (uart-wake peer mode intermittently loses byte 1 at four vCPUs).
 
-### Territory B: everything else, ordered by priority
+### Territory B: slightly off the pillars, supporting A, by priority
 
 On 2026-10-04 the maintainer authorized autonomous B work in priority order
 where acceptance is settled; leave design investigations and unmet
 implementation gates parked. Prefer what A consumes at once -- fewer red
 allchecks, faster diagnosis -- and what finishes on its own.
 
-Done on 2026-10-10: see HISTORY.md and the closed issues. Production #252
+Done items are in HISTORY.md and the closed issues. Production #252
 allocator migration remains a separate design gate.
 
 Initialization does not prove CPU freshness across preemption.
 
-Done 2026-10-12: #765 measured the per-call 1 KiB file-buffer zero fill
-of #203 stages 1-2 on RPi5 and QEMU; it is below 0.5% of a read and within
-the spread of every workload, so #203 stage 3 is not pulled forward.
-
-Done 2026-10-12: #767, bulk HTTP on RPi5 slower since #745. The TCP
-retransmit pool returned its last empty chunk, so writes kept re-running
-page_alloc_contiguous; it now keeps one chunk (0.126 s against 0.192 s
-before #745).
-
-Done 2026-10-13: #497, an on-demand sampling profiler (per-core PMU
-samples with frame-pointer chains and skid weighting; /proc/takibi/profile
-start/stop, DDB `profile dump`, scripts/profile_kernel_session.py folds
-flame-graph stacks). Accepted as option (a): a sample delayed by masked
-IRQs is attributed to the unmask point with its masked weight; seeing
-inside masked spans is #773 (Arm SPE) and an irqsoff-style tracer on #771.
+Profiler follow-ups: seeing inside IRQ-masked spans is #773 (Arm SPE) and
+an irqsoff-style tracer on #771.
 
 **Next, ahead of the list below (maintainer, 2026-10-14):** #740:
 a socket's receive queue keeping the packet (step 3) is decided after the
-#497 copy-cost measurement. Done 2026-10-16 under #740 (step 2): the TCP
+profiler's copy-cost measurement. Done 2026-10-16 under #740 (step 2): the TCP
 retransmit queue keeps the sent packet -- net_transmit_keep parks the
 TxPosted buffer Kept (Filled) at its completion, a retransmission resends
 it in place (net_packet_kept_resend), and the entry's release frees it;
@@ -189,10 +176,9 @@ packet-buffer pool (txrx regions with a
 direction per publishing edge, `access read` checked by DmaTxReadBorrow.tla,
 P_S_bytes), GEM and virtio-net packet buffers moved onto it with the
 in-place reply, GEM descriptor rings on rx protocols; the size growth is
-reviewed separately. Done 2026-10-13: #786, one section per
+reviewed separately (#790). Done 2026-10-13: one section per
 function and data object with --gc-sections on every kernel link (QEMU text
--17.6 KB, RPi5 -12.2 KB); #782's compiler-side pruning stays, for the
-raw-deref audit rather than for size. Also done: the xHCI work
+-17.6 KB, RPi5 -12.2 KB). Also done: the xHCI work
 under #720 -- producer rings, session tables, input context, event ring and
 output context are device-protocol owners (E1 snapshots for the last two);
 usb_xhci.tkb is off kernel/RAW_MINT_FILES, its bus-address export is
@@ -244,27 +230,43 @@ the irqsoff-style tracer, and tcp_frame_pool's return-every-chunk shape.
      DmaCacheVisibility.tla). #740
      (virtio-net fixed TX/RX-reply authority) awaits the stored-array
      boundary and an in-place reply design decision.
-2. **Other compiler and language work, respecting design gates:** #709 and #710
+   #783 (xHCI batched TD write path).
+2. **Signals, moved from A (2026-10-16):** #628 (delivery at an
+   interrupt return), then #726 (a caught signal interrupts a sleeping
+   syscall; EINTR versus restart needs a decision), with #432 (timed
+   blocking) beside it.
+3. **Other compiler and language work, respecting design gates:** #709 and #710
    (generation exhaustion of region tables and the intrusive pool), #203
    (no uninitialized kernel bytes copied to userspace: stages 1-2 done;
    stage 3 (cross-call contracts, byte ranges) remains, with #761's TCP rx
    bound), #763 (report every definite-init error in a function), #764
    (check assume_init sites against TRUSTED_BASE.md),
    #732's later slices (static parameters on generic variants, implicit
-   statics inside a type argument).
-3. **Time measurement, then the optimizations waiting on it** (maintainer,
-   2026-10-08: space and time are both kept): #502 (#497 done
-   2026-10-13); then #520
+   statics inside a type argument), #793 (index and refined-cast proofs
+   on type variables), #762 (no vector stores in MMU-off code), #774 (every
+   IRQ dispatch arm acknowledges its source), #752 (typestate in more of
+   the kernel).
+4. **Diagnostics and build checks:** #769 (--uses-of NAME), #766 (GDB
+   helper names checked), #747 (host GDB test), #760, #781, #788 (build
+   races and flags).
+5. **Time measurement, then the optimizations waiting on it** (maintainer,
+   2026-10-08: space and time are both kept): #502; then #520
    (TCP throughput), with #741 (locate the measured RPi5 HTTP SYN
-   retransmission tails), then #680, #681, #682 (region_pool lock-free
-   validation,
-   false sharing, pinless single-user pools), #711, #718, #386.
-4. **Evaluations awaiting a maintainer decision:** #687 (typed terminal
+   retransmission tails), #790 (size review of #720/#740), #748 (allocator
+   time, 2.75x slower since the per-page places; moved from A), then #680,
+   #681, #682 (region_pool lock-free validation, false sharing, pinless
+   single-user pools), #711, #718, #386.
+6. **Research applied to a real example, moved from A** (evaluated
+   2026-09-29; reasoning on #13): indexed views generated from a TLA+
+   model's actions, prototyped on #613; one common Takibi protocol
+   declaration generates both TLA+ and permission types (2026-10-11). Iris
+   vocabulary for lock and pool invariants (#132).
+7. **Evaluations awaiting a maintainer decision:** #687 (typed terminal
    mode leases), #648.
-5. **Compiler and language research, independent of the ownership
-   checker:** #201, #282, #129, #417, #155, #28, #8.
-6. **Toolchain and portability:** #123, #124, #122, #95, #51, #50, #85.
-7. **Deferred or not a scheduled work item:** #220 (telnet; waits on PTY
+8. **Compiler and language research, independent of the ownership
+   checker:** #201, #282, #129, #417, #155, #28, #8, #200.
+9. **Toolchain and portability:** #123, #124, #122, #95, #51, #50, #85.
+10. **Deferred or not a scheduled work item:** #220 (telnet; waits on PTY
    and `pselect6` scoping), #555, #250, #444, #429, #149, #567, #539, #536,
    #698 (ext2 metadata exhaustion as ENOSPC), #374 (physically contiguous
    memory; waits for a dynamic DMA allocation); #13 for `Phi`, with #216
