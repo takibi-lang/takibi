@@ -1,9 +1,9 @@
 {
-  "date": "2026-10-15",
+  "date": "2026-10-16",
   "event": "incremental",
-  "decision": "measured",
-  "source_sha256": "44651c8d88ad3a8fa4f54d6ea35e8ec4297c36bd636ff06c2720685159b2b108",
-  "workload": "#740 RX capability split (net_rx_keep, off-turn free, spare reserve). Linked kernels against main 993b5945 (scripts/space_delta.py).",
+  "decision": "reuse",
+  "source_sha256": "ef4fe41598647ca136f872d4f7b1d4b9a6c84d4bcb2ee306711333b02516c638",
+  "workload": "#796 on main 892fe6f2: compiler-only stale-entry check for --device-semantics-file, missing --check-unused-file entries, and --check-unused-file without --reject-unused-functions; no kernel source or list changed. scripts/space_delta.py: text/data/bss unchanged on qemu and rpi5.",
   "evidence": [
     "docs/RX_KEEP_SPACE_2026-10-15.md",
     "docs/NETPACKET_MOVE_SPACE_2026-10-14.md",
