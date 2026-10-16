@@ -1,10 +1,11 @@
 {
   "date": "2026-10-16",
   "event": "incremental",
-  "decision": "reuse",
-  "source_sha256": "9c66fa3cfb4b9ee3e8fd18ca0a7835cf1d4e6232f90509ceb00aa7aa5a1f3cc5",
-  "workload": "#794 on main 7c9cfba6: compiler type check (writable byte views of claim-carrying pointees need unsafe, []const u8 byte views, zero_fill zero-validity); no kernel source changed. Linked kernels against main (scripts/space_delta.py).",
+  "decision": "measured",
+  "source_sha256": "86197fefcf65b0f202e3928ffc0cfbf83838b566f92acc0d30fe32938e37c9a1",
+  "workload": "#720 exact request/event matching on main 292bc665: usb_await_event correlates TRB Pointer, slot and endpoint. scripts/space_delta.py main: RPi5 text +680 B, data +8 B, BSS unchanged, usable_ram_start unchanged; QEMU unchanged.",
   "evidence": [
+    "docs/XHCI_EVENT_MATCH_SPACE_2026-10-16.md",
     "docs/RETX_KEEP_SPACE_2026-10-16.md",
     "docs/RX_KEEP_SPACE_2026-10-15.md",
     "docs/NETPACKET_MOVE_SPACE_2026-10-14.md",
@@ -74,6 +75,6 @@
     "docs/VIRTIO_NET_TX_2026-10-10.md",
     "docs/VIRTIO_NET_TX_SPACE_2026-10-10.json"
   ],
-  "assessment": "Reuse: scripts/space_delta.py main shows text, data, BSS and usable_ram_start identical on QEMU and RPi5, no symbol changed size. Earlier measured results stand.",
-  "next_trigger": "The socket receive queue keeping the packet (#740 step 3), a packet-pool size change, a shrink protocol for walked RegionPools, or the #748 allocator change, whichever lands first."
+  "assessment": "Accepted: +680 B RPi5 text and +8 B data buy the runtime correlation the XhciRing completes witness relies on; no layout or reservation change.",
+  "next_trigger": "The next #720 slice that changes xHCI storage (DCBAA, S2 sub-region authority) or #754's ERSTSZ write."
 }

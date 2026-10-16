@@ -3,7 +3,7 @@
 usb_await_event now accepts only an event whose TRB Pointer lies in the
 request's TRBs and, for a transfer, whose slot and endpoint match
 (kernel/drivers/usb/xhci_event_match.tkb). Measured with
-scripts/space_delta.py against main 7c9cfba6:
+scripts/space_delta.py against main 292bc665 (same numbers as against 7c9cfba6):
 
 ```
 | | qemu base | qemu change | rpi5 base | rpi5 change |
