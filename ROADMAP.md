@@ -111,7 +111,10 @@ list (maintainer, 2026-10-09).
    is #750 (holder-tied identities, option C, is its central item; a
    shrink protocol for RegionPools walked with no lock belongs there). For #720
    (B): the doorbell, ERDP-release and stop/reset boundaries are in place;
-   #720 must add exact request/event matching; general exclusive backing
+   exact request/event matching is done (2026-10-16: TRB Pointer, slot and
+   endpoint, kernel/drivers/usb/xhci_event_match.tkb; several outstanding
+   requests per ring (S2) will need a request identity beyond the TRB
+   address); general exclusive backing
    storage is done (2026-10-12: `region let mut` backing globals, whose name
    has no use besides the claim); the ERSTSZ write is #754. log.tkb's raw sites go with
    #613: a lockless multi-writer log ring with its protocol in the type
