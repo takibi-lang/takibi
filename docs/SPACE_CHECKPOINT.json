@@ -2,8 +2,8 @@
   "date": "2026-10-16",
   "event": "incremental",
   "decision": "reuse",
-  "source_sha256": "ef4fe41598647ca136f872d4f7b1d4b9a6c84d4bcb2ee306711333b02516c638",
-  "workload": "#796 on main 892fe6f2: compiler-only stale-entry check for --device-semantics-file, missing --check-unused-file entries, and --check-unused-file without --reject-unused-functions; no kernel source or list changed. scripts/space_delta.py: text/data/bss unchanged on qemu and rpi5.",
+  "source_sha256": "2f0a4b4c60658a9b2b404918b99bab36b15d16ee64cbb6cbfd82433b69ca4636",
+  "workload": "#770 on main 1f57af2b: while-condition facts carried into the body up to the first write (compiler), and five redundant in-loop re-checks removed from freelist.tkb, exception_evidence.tkb, procfs.tkb and process.tkb; no storage or allocation change. scripts/space_delta.py main: text -16 B QEMU, unchanged RPi5; data/BSS and usable_ram_start unchanged on both.",
   "evidence": [
     "docs/RX_KEEP_SPACE_2026-10-15.md",
     "docs/NETPACKET_MOVE_SPACE_2026-10-14.md",
