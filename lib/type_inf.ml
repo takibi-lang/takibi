@@ -218,6 +218,15 @@ let array_index_proven_in_bounds_at : (Lexing.position, unit) Hashtbl.t =
 let runtime_slice_index_proven_at : (string * Lexing.position, unit) Hashtbl.t =
   Hashtbl.create 64
 let active_runtime_bounds_key = ref ""
+(* GitHub issue #797: why an index's range fact was not available, keyed
+   like the proof tables (bounds key, index location). llvm_gen.ml appends
+   it to the --forbid-trap trap-site report; it is part of that error, not
+   a separate diagnostic. while_fact_drops lists, innermost-first, the
+   names whose enclosing while-condition fact was dropped and the location
+   of the top-level body statement that dropped it. *)
+let range_fact_unavailable_at : (string * Lexing.position, string) Hashtbl.t =
+  Hashtbl.create 16
+let while_fact_drops : (string * Lexing.position) list ref = ref []
 let refined_cast_proven_in_bounds_at : (Lexing.position, unit) Hashtbl.t =
   Hashtbl.create 64
 let active_binding_exclusions : Value_facts.integer list IntMap.t ref =
@@ -1037,14 +1046,47 @@ let bounds_link graph static node = match bounds_static_node static, node with
   | Some static, Some node -> Runtime_bounds.equate static node graph
   | _ -> graph
 
+let var_name (e : Ast.expr) = match e.desc with Ast.Var n -> Some n | _ -> None
+
+(* The while-condition drop that explains a missing fact on idx or base,
+   as report text. *)
+let while_drop_reason names =
+  List.find_map (fun (name, (loc : Lexing.position)) ->
+    if List.mem (Some name) names then Some (Printf.sprintf
+      "the enclosing while condition's fact on `%s` was dropped at the \
+       body statement on line %d, which writes, rebinds or takes the \
+       address of `%s`" name loc.pos_lnum name)
+    else None) !while_fact_drops
+
+let note_range_fact_unavailable (idx : Ast.expr) reason =
+  let key = (!active_runtime_bounds_key, idx.loc) in
+  match reason with
+  | Some r -> Hashtbl.replace range_fact_unavailable_at key r
+  | None -> Hashtbl.remove range_fact_unavailable_at key
+
 let record_runtime_slice_index tyenv base idx =
-  match bounds_expr_node tyenv idx, !active_local_bindings with
-  | Some index, Some bindings ->
-      (match Runtime_bounds.local bindings base Runtime_bounds.Length with
-       | Some length when Runtime_bounds.proves !runtime_bounds index Ast.WhereLt length ->
-           Hashtbl.replace runtime_slice_index_proven_at (!active_runtime_bounds_key, idx.Ast.loc) ()
-       | _ -> ())
-  | _ -> ()
+  let proven = match bounds_expr_node tyenv idx, !active_local_bindings with
+    | Some index, Some bindings ->
+        (match Runtime_bounds.local bindings base Runtime_bounds.Length with
+         | Some length -> Runtime_bounds.proves !runtime_bounds index Ast.WhereLt length
+         | None -> false)
+    | _ -> false in
+  if proven then begin
+    Hashtbl.replace runtime_slice_index_proven_at (!active_runtime_bounds_key, idx.Ast.loc) ();
+    note_range_fact_unavailable idx None
+  end else
+    note_range_fact_unavailable idx (Some (
+      match while_drop_reason [var_name idx; var_name base] with
+      | Some r -> r
+      | None ->
+          match var_name idx, var_name base with
+          | Some i, Some b -> Printf.sprintf
+              "no runtime fact `%s < %s.len` reaches this index; the \
+               runtime_bounds family is carried only from an if or while \
+               condition joined by && (or the fallthrough of an early-return \
+               guard), not from a || condition or past a write" i b
+          | _ -> "the runtime_bounds family covers only a plain local index \
+               into a plain local slice"))
 
 let with_runtime_bounds_branch tyenv cond body f =
   let saved = !runtime_bounds in
@@ -1486,6 +1528,7 @@ let record_array_index_proof size ty (expr : Ast.expr) =
       let upper_ok = compare_integer facts.interval.hi upper < 0 in
       if lower_ok && upper_ok then
         Hashtbl.replace array_index_proven_in_bounds_at expr.loc ()
+      else note_range_fact_unavailable expr (while_drop_reason [var_name expr])
   | None -> ()
 
 let record_refined_cast_proof lo hi source_ty target_base
@@ -7026,26 +7069,53 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
          `let` shadow is itself a write, so its fresh binding is never
          touched). Sync rule: llvm_gen.ml's While case restores the same
          names before the same statements. *)
+      (* GitHub issue #797: the runtime_bounds family (`i < s.len` for a
+         runtime-length slice) follows the same rule. The condition's
+         facts enter with only the address-taken kill set, and
+         fold_stmts_with_future_writes already drops, before each
+         statement, every fact on a name that statement rebinds
+         (Runtime_bounds.rebind_names [s], which includes the slice
+         binding itself). Codegen consumes the per-location proof, so
+         llvm_gen.ml needs no matching change for this family. *)
       let narrowed_tyenv = narrow_from_cond senv tyenv cond [] in
       let still_narrowed = ref (StringMap.fold (fun name entry acc ->
           match StringMap.find_opt name tyenv with
           | Some original when original <> entry -> StringSet.add name acc
           | _ -> acc) narrowed_tyenv StringSet.empty) in
+      let runtime_live = ref (List.fold_left (fun acc (a, _, b) ->
+          List.fold_left (fun acc -> function
+            | Runtime_bounds.Local (_, n, _) -> StringSet.add n acc
+            | Runtime_bounds.Static _ -> acc) acc [a; b])
+        StringSet.empty
+        (Runtime_bounds.condition ~node:(bounds_expr_node tyenv)
+           Runtime_bounds.empty cond)) in
       let invalidate_before env (s : Ast.stmt) =
+        let written = Ast.written_names [s] in
+        List.iter (fun name ->
+          if StringSet.mem name !runtime_live || StringSet.mem name !still_narrowed
+          then begin
+            runtime_live := StringSet.remove name !runtime_live;
+            while_fact_drops := (name, s.loc) :: !while_fact_drops
+          end) (List.sort_uniq compare (written @ Runtime_bounds.rebind_names [s]));
         List.fold_left (fun env name ->
           if StringSet.mem name !still_narrowed then begin
             still_narrowed := StringSet.remove name !still_narrowed;
             match StringMap.find_opt name tyenv with
             | Some original -> StringMap.add name original env
             | None -> env
-          end else env) env (Ast.written_names [s])
+          end else env) env written
       in
-      let (_, raw_locals') = with_exclusion_narrowing tyenv cond
-        (Ast.written_names body) (fun () ->
-          fold_stmts_with_future_writes
-            (fun (env, locs) s ->
-              infer_stmt senv eenv (invalidate_before env s) fenv ret_ty locs true s)
-            (narrowed_tyenv, raw_locals) body)
+      let saved_drops = !while_fact_drops in
+      let (_, raw_locals') =
+        Fun.protect ~finally:(fun () -> while_fact_drops := saved_drops)
+          (fun () ->
+            with_runtime_bounds_branch tyenv cond [] (fun () ->
+              with_exclusion_narrowing tyenv cond
+                (Ast.written_names body) (fun () ->
+                  fold_stmts_with_future_writes
+                    (fun (env, locs) s ->
+                      infer_stmt senv eenv (invalidate_before env s) fenv ret_ty locs true s)
+                    (narrowed_tyenv, raw_locals) body)))
       in
       (tyenv, raw_locals')
   | For (name, ty_opt, lo_expr, hi_expr, body) ->
@@ -8050,6 +8120,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   Hashtbl.reset signed_division_overflow_proven_safe_at;
   Hashtbl.reset array_index_proven_in_bounds_at;
   Hashtbl.reset runtime_slice_index_proven_at;
+  Hashtbl.reset range_fact_unavailable_at;
+  while_fact_drops := [];
   Hashtbl.reset refined_cast_proven_in_bounds_at;
   Hashtbl.reset binding_fact_sources;
   Hashtbl.reset intrinsic_nonzero_at;

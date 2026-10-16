@@ -405,10 +405,7 @@ private fn ddb_command_is(line: borrow [u8; CRASH_CONSOLE_LINE_BYTES..],
     if (length != text.len) { return false; }
     let mut index: usize = 0;
     while (index < length && index < CRASH_CONSOLE_LINE_BYTES) {
-        if (index >= 0 && index < CRASH_CONSOLE_LINE_BYTES &&
-                index < text.len) {
-            if (line[index] != text[index]) { return false; }
-        } else { return false; }
+        if (line[index] != text[index]) { return false; }
         index = index + 1;
     }
     return true;
@@ -420,10 +417,7 @@ private fn ddb_command_starts_with(
     if (length < prefix.len) { return false; }
     let mut index: usize = 0;
     while (index < prefix.len && index < CRASH_CONSOLE_LINE_BYTES) {
-        if (index >= 0 && index < CRASH_CONSOLE_LINE_BYTES &&
-                index < prefix.len) {
-            if (line[index] != prefix[index]) { return false; }
-        } else { return false; }
+        if (line[index] != prefix[index]) { return false; }
         index = index + 1;
     }
     return true;
@@ -2977,10 +2971,7 @@ private fn crash_console_command_is(line: borrow [u8; CRASH_CONSOLE_LINE_BYTES..
     if (length != text.len) { return false; }
     let mut index: usize = 0;
     while (index < length && index < CRASH_CONSOLE_LINE_BYTES) {
-        if (index >= 0 && index < CRASH_CONSOLE_LINE_BYTES &&
-                index < text.len) {
-            if (line[index] != text[index]) { return false; }
-        } else { return false; }
+        if (line[index] != text[index]) { return false; }
         index = index + 1;
     }
     return true;

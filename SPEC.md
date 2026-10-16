@@ -2608,8 +2608,9 @@ tracking is not yet part of this rule.
 **Indexing**: `s[i]` needs no runtime check when `i`'s proven range
 satisfies `lo >= 0 && hi <= minimum`, or the bounded order-contract checker
 proves `i < s.len` for the current bindings. The latter also covers
-`prefix.len <= s.len && i < prefix.len` and immutable aliases of numeric
-values/lengths. Index loads, stores and element addresses consume the same
+`prefix.len <= s.len && i < prefix.len`, an equality such as the
+fallthrough of `if (n != s.len) { return; }` followed by `i < n`, and
+immutable aliases of numeric values/lengths. Index loads, stores and element addresses consume the same
 proof. Otherwise a runtime check against the actual `.len` is generated.
 See "where constraints" for the supported relations and invalidation rules.
 
@@ -4565,10 +4566,10 @@ moved across functions.
   list cursor), copy it into an immutable `let at: usize = i;` first;
   `kernel/lib/freelist.tkb`'s chain walk does this. The fact never
   reaches the code after the loop, and a `||` condition proves no bound.
-  Only interval facts on integer bindings and slice minimum lengths are
-  carried; a runtime `i < s.len` fact for a slice whose length is not a
-  compile-time constant is not yet carried by `while` (an explicit `if`
-  still is).
+  The runtime order facts of "Indexing" (`i < s.len` for a slice whose
+  length is not a compile-time constant, GitHub issue #797) are carried
+  under the same rule; a statement that rebinds the slice itself (`s =
+  other;`) or takes the address of either name also drops them.
 
 ## Endian-Aware Integer Types
 
@@ -4856,7 +4857,12 @@ are an explicit build policy, not inferred from the presence of unsafe code.
 check remains anywhere in the generated code (array bounds checks,
 division/remainder zero checks, signed-division overflow checks, checked
 refined casts, exhaustive-enum casts), listing every unproven site with its
-source location. Without the
+source location. A bounds-check site also says, when it can, why no
+range fact reached it: the top-level `while` body statement that dropped
+the condition's fact on the index or slice (by writing, rebinding or
+taking its address), or that the runtime order family is carried only
+from an `if`/`while` condition joined by `&&` or an early-return guard.
+This is part of the same error, not a separate diagnostic. Without the
 flag, the same code compiles fine and gets a runtime check (`llvm.trap` on
 violation) -- the intended
 permissive mode for early driver bring-up, where a trap firing is a
@@ -4911,14 +4917,11 @@ investigations behind any of these, see `HISTORY.md`.
 - General relational arithmetic, including invariant sums and products,
   is not supported. The bounded order-contract graph supports the direct
   comparisons described under "where constraints", without a solver or
-  runtime refinement bounds. Comparing a loop counter against a
-  slice's own runtime `.len` (`while (u < s.len) { s[u] }` still gets a
-  runtime bounds check on `s[u]`, since `collect_bounds`/`range_of` only
-  understands a comparison operand that is a literal, a `const`, or a
-  refined-int variable -- a field access like `s.len` is not one of
-  those); `for x in s { ... }` sidesteps the whole question by never
-  materializing an index variable to bound in the first place, and is
-  the preferred form for exactly this reason (see "Slices" above).
+  runtime refinement bounds. `while (u < s.len) { s[u]; u = u + 1; }` is
+  proved by that graph (GitHub issue #797), but an offset expression is
+  not: `if (s.len - off >= 2) { s[off + 1] }` keeps its check.
+  `for x in s { ... }` sidesteps the question by never materializing an
+  index variable, and is the preferred form (see "Slices" above).
 - **`match` on a primitive integer type supports only literal and
   `|`-separated OR-pattern literal patterns** (see "Match on Primitive
   Types," GitHub issue #151/#156) -- no range patterns (`0..<10 =>

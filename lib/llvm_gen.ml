@@ -2538,10 +2538,18 @@ let assert_trap_accounting_consistent () =
    n_llv is built at idx_v's OWN width (usize width via to_index_width, not
    hardcoded i32): comparing a usize-width idx_v against a hardcoded i32
    constant would be an LLVM type mismatch on a 64-bit target. *)
-let emit_bounds_check loc idx_ty idx_v n =
+(* GitHub issue #797: type_inf.ml's reason a range fact was missing at
+   this index, appended to the --forbid-trap report (same error). *)
+let range_fact_reason idx_loc =
+  match Hashtbl.find_opt Type_inf.range_fact_unavailable_at
+          (!current_runtime_bounds_key, idx_loc) with
+  | Some r -> "; " ^ r
+  | None -> ""
+
+let emit_bounds_check ~idx_loc loc idx_ty idx_v n =
   let what = Printf.sprintf
-    "array bounds check remains: index type %s cannot prove range {0..<%d}"
-    (ty_str idx_ty) n in
+    "array bounds check remains: index type %s cannot prove range {0..<%d}%s"
+    (ty_str idx_ty) n (range_fact_reason idx_loc) in
   let n_llv = const_int (type_of idx_v) n in
   let cmp   = build_icmp Icmp.Uge idx_v n_llv "oob_cmp" builder in
   emit_recorded_trap_when loc what cmp ~bad_name:"oob" ~ok_name:"idx_ok"
@@ -2629,11 +2637,11 @@ let build_defined_signed_remainder lhs rhs =
    length's width first -- a negative i32 zext-widens to a huge unsigned
    value, so the single unsigned compare catches both directions.
    min_len only feeds the trap-site message. *)
-let emit_bounds_check_dyn loc idx_ty idx_v min_len len_v =
+let emit_bounds_check_dyn ~idx_loc loc idx_ty idx_v min_len len_v =
   let what = Printf.sprintf
     "slice bounds check remains: index type %s cannot prove range {0..<%d} \
-     (the slice's compile-time minimum length)"
-    (ty_str idx_ty) min_len in
+     (the slice's compile-time minimum length)%s"
+    (ty_str idx_ty) min_len (range_fact_reason idx_loc) in
   let lw = type_of len_v in
   let idx_w = if type_of idx_v = lw then idx_v
               else build_zext idx_v lw "zext" builder in
@@ -3766,7 +3774,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
         let checker_proven =
           Hashtbl.mem Type_inf.array_index_proven_in_bounds_at idx.loc in
         let needs_check = not checker_proven in
-        if needs_check && !unsafe_depth = 0 then emit_bounds_check e.loc idx_ty idx_v n
+        if needs_check && !unsafe_depth = 0 then emit_bounds_check ~idx_loc:idx.loc e.loc idx_ty idx_v n
         else if needs_check then note_unsafe_use ();
         let arr_ll = array_type (ltype_of_ast elem_ty) n in
         let zero   = const_int (i32_type context) 0 in
@@ -3826,7 +3834,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
 
         in
         if not proven && !unsafe_depth = 0 then
-          emit_bounds_check_dyn e.loc idx_ty idx_v min_len (slice_len fat)
+          emit_bounds_check_dyn ~idx_loc:idx.loc e.loc idx_ty idx_v min_len (slice_len fat)
         else if not proven then note_unsafe_use ();
         let ep = build_gep (ltype_of_ast elem_ty) (slice_ptr fat) [|idx_v|] "idx_ptr" builder in
         let v  = build_load (ltype_of_ast elem_ty) ep "idx_val" builder in
@@ -5292,7 +5300,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                Hashtbl.mem Type_inf.array_index_proven_in_bounds_at idx.loc in
              let needs_check = not checker_proven in
              if needs_check && !unsafe_depth = 0 then
-               emit_bounds_check idx.loc idx_ty idx_v n
+               emit_bounds_check ~idx_loc:idx.loc idx.loc idx_ty idx_v n
              else if needs_check then note_unsafe_use ();
              let arr_ll = array_type (ltype_of_ast elem_ty) n in
              let zero   = const_int (i32_type context) 0 in
@@ -5314,7 +5322,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
 
              in
              if not proven && !unsafe_depth = 0 then
-               emit_bounds_check_dyn idx.loc idx_ty idx_v min_len (slice_len fat)
+               emit_bounds_check_dyn ~idx_loc:idx.loc idx.loc idx_ty idx_v min_len (slice_len fat)
              else if not proven then note_unsafe_use ();
              let ep = build_gep (ltype_of_ast elem_ty) (slice_ptr fat) [|idx_v|] "idx_ptr" builder in
              ignore (build_store (coerce rhs_v elem_ty) ep builder)
@@ -5486,7 +5494,7 @@ and gen_index_place locals (base : Ast.expr) (idx : Ast.expr) loc
         Hashtbl.mem Type_inf.array_index_proven_in_bounds_at idx.loc in
       let needs_check = not checker_proven in
       if needs_check && !unsafe_depth = 0 then
-        emit_bounds_check loc idx_ty idx_v n
+        emit_bounds_check ~idx_loc:idx.loc loc idx_ty idx_v n
       else if needs_check then note_unsafe_use ();
       let arr_ty = array_type (ltype_of_ast elem_ty) n in
       let zero = const_int (i32_type context) 0 in
@@ -5503,7 +5511,7 @@ and gen_index_place locals (base : Ast.expr) (idx : Ast.expr) loc
 
       in
       if not proven && !unsafe_depth = 0 then
-        emit_bounds_check_dyn loc idx_ty idx_v min_len (slice_len fat)
+        emit_bounds_check_dyn ~idx_loc:idx.loc loc idx_ty idx_v min_len (slice_len fat)
       else if not proven then note_unsafe_use ();
       let ptr = build_gep (ltype_of_ast elem_ty) (slice_ptr fat)
         [| idx_v |] "idx_ptr" builder in

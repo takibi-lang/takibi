@@ -176,6 +176,18 @@ let contains_substring haystack needle =
   let rec scan i = i + n <= m && (String.sub haystack i n = needle || scan (i + 1)) in
   scan 0
 
+(* GitHub issue #797: expect exactly one trap site whose --forbid-trap
+   report contains [needle] (the reason a range fact was unavailable). *)
+let expect_single_trap_reason needle src () =
+  (match gen_codegen src with
+   | _ -> ()
+   | exception Llvm_gen.Error msg -> Alcotest.failf "unexpected codegen Error: %s" msg);
+  match !Llvm_gen.trap_sites with
+  | [ (_, what) ] ->
+      if not (contains_substring what needle) then
+        Alcotest.failf "trap report %S does not contain %S" what needle
+  | sites -> Alcotest.failf "expected one trap site, got %d" (List.length sites)
+
 let substring_position haystack needle =
   let n = String.length needle and m = String.length haystack in
   let rec scan i =
@@ -15473,6 +15485,159 @@ let codegen_tests = [
             foo770b(i);
             i = i + 1;
           }
+        }");
+
+  (* GitHub issue #797: the runtime_bounds family (`i < s.len` for a
+     slice whose length is not a compile-time constant) is carried into a
+     while body under the same per-statement rule as #770. Positive: the
+     kernel's ddb command compare, with no in-body re-check; the
+     `length == text.len` fact comes from the early-return guard. *)
+  Alcotest.test_case
+    "while condition carries a runtime slice-length fact into the body \
+     (issue #797)" `Quick
+    (expect_trap_sites 0
+       "fn f797_eq(line: [u8; 32], length: usize, text: []const u8) -> bool {
+          if (length != text.len) { return false; }
+          let mut index: usize = 0;
+          while (index < length && index < 32) {
+            if (line[index] != text[index]) { return false; }
+            index = index + 1;
+          }
+          return true;
+        }");
+
+  Alcotest.test_case
+    "while condition carries index < prefix.len directly (issue #797)" `Quick
+    (expect_trap_sites 0
+       "fn f797_prefix(line: [u8; 32], prefix: []const u8) -> bool {
+          let mut index: usize = 0;
+          while (index < prefix.len && index < 32) {
+            if (line[index] != prefix[index]) { return false; }
+            index = index + 1;
+          }
+          return true;
+        }");
+
+  (* Negative controls: each keeps exactly one trap site (the slice
+     index). Without the per-statement invalidation (facts kept for the
+     whole body) the write-first and rebind controls report 0 and fail;
+     the shadowing control is held by binding identity instead (the
+     shadow is a different Runtime_bounds node). *)
+  Alcotest.test_case
+    "runtime slice-length fact does not survive a write to the index \
+     (issue #797 negative control)" `Quick
+    (expect_trap_sites 1
+       "fn f797_write(text: []const u8) -> u8 {
+          let mut index: usize = 0;
+          let mut total: u8 = 0;
+          while (index < text.len) {
+            index = index + 1;
+            total = total + text[index];
+          }
+          return total;
+        }");
+
+  Alcotest.test_case
+    "runtime slice-length fact does not survive reassigning the slice \
+     (issue #797 negative control)" `Quick
+    (expect_trap_sites 1
+       "fn f797_rebind(text: []const u8, other: []const u8) -> u8 {
+          let mut s: []const u8 = text;
+          let mut index: usize = 0;
+          let mut total: u8 = 0;
+          while (index < s.len) {
+            s = other;
+            total = total + s[index];
+            index = index + 1;
+          }
+          return total;
+        }");
+
+  Alcotest.test_case
+    "runtime slice-length fact does not survive a shadowing let of the \
+     slice (issue #797 negative control)" `Quick
+    (expect_trap_sites 1
+       "fn f797_shadow(text: []const u8, other: []const u8) -> u8 {
+          let mut index: usize = 0;
+          let mut total: u8 = 0;
+          while (index < text.len) {
+            let text: []const u8 = other;
+            total = total + text[index];
+            index = index + 1;
+          }
+          return total;
+        }");
+
+  Alcotest.test_case
+    "runtime slice-length fact does not apply after the loop (issue #797 \
+     negative control)" `Quick
+    (expect_trap_sites 1
+       "fn f797_after(text: []const u8, v: usize) -> u8 {
+          let mut index: usize = v;
+          while (index < text.len) {
+            break;
+          }
+          return text[index];
+        }");
+
+  Alcotest.test_case
+    "runtime slice-length fact joined by || proves nothing (issue #797 \
+     negative control)" `Quick
+    (expect_trap_sites 1
+       "fn f797_or(text: []const u8, v: usize, c: bool) -> u8 {
+          let mut index: usize = v;
+          while (index < text.len || c) {
+            return text[index];
+          }
+          return 0;
+        }");
+
+  (* The --forbid-trap report says why the fact was missing. *)
+  Alcotest.test_case
+    "trap report names the statement that dropped a while fact (issue #797)"
+    `Quick
+    (expect_single_trap_reason
+       "the enclosing while condition's fact on `index` was dropped at the \
+        body statement on line 5, which writes, rebinds or takes the \
+        address of `index`"
+       "fn f797_why(text: []const u8) -> u8 {
+          let mut index: usize = 0;
+          let mut total: u8 = 0;
+          while (index < text.len) {
+            index = index + 1;
+            total = total + text[index];
+          }
+          return total;
+        }");
+
+  Alcotest.test_case
+    "trap report names the dropped interval fact for an array index \
+     (issue #797)" `Quick
+    (expect_single_trap_reason
+       "fact on `i` was dropped at the body statement on line 5"
+       "fn f797_why_array(v: usize) -> i32 {
+          let mut buf: [i32; 4];
+          let mut i: usize = v;
+          while (i < 4) {
+            i = i + 1;
+            return buf[i];
+          }
+          return 0;
+        }");
+
+  Alcotest.test_case
+    "trap report says the runtime_bounds family is not carried from || \
+     (issue #797)" `Quick
+    (expect_single_trap_reason
+       "no runtime fact `index < text.len` reaches this index; the \
+        runtime_bounds family is carried only from an if or while \
+        condition joined by &&"
+       "fn f797_why_or(text: []const u8, v: usize, c: bool) -> u8 {
+          let mut index: usize = v;
+          while (index < text.len || c) {
+            return text[index];
+          }
+          return 0;
         }");
 
   Alcotest.test_case

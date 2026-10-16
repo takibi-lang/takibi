@@ -53,6 +53,12 @@ let condition ~node facts cond =
               | Gt -> add b WhereLt a facts | Ge -> add b WhereLe a facts
               | _ -> assert false)
          | _ -> facts)
+    (* GitHub issue #797: `a == b` (for example the fallthrough of an
+       early-return `if (length != text.len)`) is a <= edge both ways. *)
+    | BinOp (Eq, a, b) ->
+        (match node a, node b with
+         | Some a, Some b -> equate a b facts
+         | _ -> facts)
     | _ -> facts
   in go facts cond
 
