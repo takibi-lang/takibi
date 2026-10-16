@@ -60,10 +60,8 @@ Cores == {"c0", "c1"}
 \* OTHER_READY adds a third process, Ready from the start, so a core can
 \* reserve a successor while a clone child runs on its parent's stack. With
 \* two processes CloneReschedule is never enabled (GitHub issue #802, found
-\* by make modelcheck's coverage check). The "other" variant checks safety
-\* alone: with "other" competing for the cores, ChildReaped would need a
-\* per-process scheduler fairness the model does not assume, so liveness
-\* stays the two-process variants' claim.
+\* by make modelcheck's coverage check). The "other" variant checks
+\* ChildReaped too, under the per-process fairness below (#803).
 Procs == IF OTHER_READY THEN {"parent", "child", "other"} ELSE {"parent", "child"}
 None == "none"
 Idle == "idle"      \* the core's own idle stack, owned by nobody else
@@ -172,9 +170,20 @@ SwitchComplete(c) ==
 \* successor it will switch to. From a zombie's stack this is the removed
 \* kernel_process_exit_await_successor, which only EXIT_IDLES = FALSE
 \* still does.
+\* A running process asks for a successor only from code it runs: a
+\* syscall or block on its own stack, or a tick inside an interrupt taken
+\* from it. Between a commit or switch and the exception return that
+\* completes it the core selects nothing, so a process always reaches EL0
+\* once it is switched to -- except a clone child's first return, where a
+\* deferred timer request is consumed on the parent's stack
+\* (CloneReschedule). Without this, a process could be preempted on every
+\* turn before it ever ran (GitHub issue #803).
 Reserve(c, p) ==
     /\ reserved[c] = None
     /\ \/ current[c] # None /\ state[current[c]] = "Running"
+          /\ \/ Settled(c, current[c])
+             \/ Departed(c, current[c])
+             \/ current[c] = "child" /\ stands[c] = "parent"
        \/ current[c] = None /\ stands[c] = Idle
        \/ current[c] = None /\ ~EXIT_IDLES
           /\ stands[c] \in Procs /\ state[stands[c]] = "Exited"
@@ -197,6 +206,10 @@ Commit(c) ==
 \* preempted (Ready), napping, or the parent blocking in wait4. The core
 \* still stands on the outgoing process's stack -- or, inside an interrupt
 \* taken from EL0, on its idle (IRQ) stack, the process's already released.
+\* The interrupt then returns to the successor, which it was not taken
+\* from: the core is no longer inside an interrupt of its current process
+\* (#803; a stale flag let the successor be switched away or leave by
+\* TickLeave before it ever ran).
 SwitchAway(c, how) ==
     /\ reserved[c] # None
     /\ current[c] # None
@@ -208,7 +221,8 @@ SwitchAway(c, how) ==
     /\ state' = [state EXCEPT ![current[c]] = how]
     /\ current' = [current EXCEPT ![c] = reserved[c]]
     /\ reserved' = [reserved EXCEPT ![c] = None]
-    /\ UNCHANGED <<stands, owner, interrupted, reapPending>>
+    /\ interrupted' = [interrupted EXCEPT ![c] = FALSE]
+    /\ UNCHANGED <<stands, owner, reapPending>>
 
 \* A deferred timer request may select another process from the child's
 \* clone return before the physical stack switch. The child's installed
@@ -384,6 +398,15 @@ Next ==
 \* Fairness: each core keeps taking every step open to it except the
 \* scheduler's own choices -- a nap, a preemption, a leave -- which may
 \* never happen. Once begun, a two-hold sequence is finished.
+\* No process is starved: one that some core could reserve infinitely often
+\* is eventually reserved. The kernel gives this without affinity, which
+\* the model does not have: a switching core rotates through the process
+\* tree past the outgoing process (kernel_process_next_ready), an idle core
+\* takes the first Ready process it may run and does not stay idle beside
+\* one (kernel_process_secondary_start; its STARVED note watches exactly
+\* that), and a process leaves a core only when it may not run there. With
+\* only per-core fairness a third Ready process could take every turn
+\* (GitHub issue #803).
 Fairness ==
     /\ WF_vars(Wake)
     /\ \A c \in Cores :
@@ -398,6 +421,7 @@ Fairness ==
         /\ SF_vars(Wait4Block(c))
         /\ SF_vars(ChildExit(c) \/ ChildExitStart(c))
         /\ SF_vars(Wait4Reap(c))
+    /\ \A p \in Procs : SF_vars(\E c \in Cores : Reserve(c, p))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 

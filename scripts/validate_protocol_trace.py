@@ -333,7 +333,13 @@ def switch_complete(world, hold, procs, cores):
 def core_condition(world, core):
     current = world.current[core]
     if current is not None and world.state.get(current) == "Running":
-        return None
+        # #803: only once the process runs here, or at a clone child's
+        # first return on its parent's stack (StackOwnership.Reserve).
+        if settled(world, core, current) or departed(world, core, current) \
+                or world.stands[core] == world.parent.get(current):
+            return None
+        return (f"c{core} runs {current} but has not switched to it "
+                f"(stands {world.stands[core]})")
     if current is None and world.stands[core] == IDLE:
         return None
     return (f"c{core} neither runs a process nor stands on its idle stack "
@@ -399,6 +405,8 @@ def switch_away(world, hold, procs, cores):
     after.state[pid] = state
     after.current[core] = current
     after.reserved[core] = None
+    # The interrupt returns to the successor, which it was not taken from.
+    after.interrupted[core] = False
     return after
 
 

@@ -141,9 +141,15 @@ start. With only the parent and the child no process is ever free to be
 reserved while the child first runs on its parent's stack, so
 `CloneReschedule` was never enabled and the safety invariants held over it
 vacuously; `make modelcheck`'s coverage check found that (#802). The
-variant checks the safety invariants alone: with a third process competing,
-`ChildReaped` would need per-process scheduler fairness the model does not
-assume.
+variant checks `ChildReaped` too (#803), which needed the model to say what
+the kernel's scheduler already gives: no process is starved (per-process
+strong fairness on `Reserve`), a running process asks for a successor only
+once it runs on its own stack or inside an interrupt taken from it (or at
+a clone child's first return), and an interrupt that switched returns to
+the successor rather than staying inside the outgoing process's interrupt.
+Without them TLC found a third process taking every turn, and a child
+preempted on each turn before it ever reached EL0 -- behaviours of the
+model, not of the kernel.
 
 | Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
 | --- | --- | --- | --- | --- |

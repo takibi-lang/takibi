@@ -91,6 +91,14 @@ TICK_LEAVE_UNINTERRUPTED = SNAPSHOT[:1] + [
     "0 0 l p 11 2 1 0 10", "0 0 l c 0 10 10", "0 0 l c 1 11 11",
     "1 0 l p 10 1 0 0 -", "1 0 l c 0 - 10"]
 
+# #803: an idle core 1 reserves and commits Ready 12, then reserves Ready
+# 13 before the exception return has put 12 on its own stack. The kernel
+# selects nothing in that window (only a clone child's first return does).
+RESERVE_UNSWITCHED = [
+    "0 0 l p 10 2 0 0 -", "0 0 l p 12 1 - 0 -", "0 0 l p 13 1 - 0 -",
+    "0 0 l c 0 10 10", "0 0 l c 1 - -",
+    "1 1 l p 12 2 - 0 -", "2 1 l c 1 12 -", "3 1 l p 13 2 - 0 -"]
+
 # Wait4Block.tla and RecordLifetime.tla (#647). Parent 10 runs on core 1
 # and its child 11 on core 0.
 FAMILY = [
@@ -232,6 +240,9 @@ def main() -> int:
                "never exercised", absent="ERROR"),
         expect("a tick leave inside an interrupt", run(window(TICK_LEAVE)),
                False, "never exercised", absent="ERROR"),
+        expect("a reserve before the current process was switched to",
+               run(window(RESERVE_UNSWITCHED)), False,
+               "c1 runs 12 but has not switched to it (stands idle)"),
         expect("a tick leave with no interrupt taken",
                run(window(TICK_LEAVE_UNINTERRUPTED)), False,
                "TickLeave not enabled: c0 is not inside an interrupt"),
@@ -294,7 +305,7 @@ def main() -> int:
         "CloneReschedule, and a child-owned stack, an unreserved successor "
         "or a relabelled parent are refused, with before/observed state for the "
         "physical parent stack, unstarted child and reserved successor; an allocation inside another CPU's hold is "
-        "absorbed, a tick leave passes only inside an interrupt, "
+        "absorbed, a tick leave passes only inside an interrupt, a reserve before the switch completes is refused, "
         "and #609's shared-stack start, a lost change, a cut report, an "
         "unlocked change, an unsafe snapshot, an unexercised window and a "
         "missing window are each refused with their diagnostic",
