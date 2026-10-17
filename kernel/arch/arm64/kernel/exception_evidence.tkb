@@ -3440,6 +3440,17 @@ private fn kernel_invariant_evidence(origin: usize, frame_sp: usize, caller_retu
 // protected by its complete world-stop token -- one writer, and the token is
 // what says so. The stopped-peer roots beside it are per-core because each
 // core publishes its own (issue #505).
+//
+// GitHub issue #638 asked whether the capture could take its CPU from a
+// preempt_off block instead of this assert. It cannot without a language
+// change: a CpuHere indexes only a `struct per_cpu` global, and a per_cpu
+// element is reachable only through its own CPU's authority (SPEC.md,
+// "Per-CPU Storage"), while DDB reads every core's crash snapshot from the
+// inspecting core. Ordinary arrays cannot be indexed by a CpuHere at all.
+// So the assert stays. The intended end state -- the writer's !{interrupt}
+// (masked) context as the no-preemption authority, and the cross-CPU read
+// only under DDB's Complete world-stop token -- is recorded on GitHub issue
+// #641 (comment 6231088116).
 fn exception_evidence_execution_model_assumption() {
     static_assert(KERNEL_PREEMPTIBLE == 0,
                   "per-core crash capture cannot survive nested preemption on one core");
