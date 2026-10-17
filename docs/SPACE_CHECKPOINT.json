@@ -1,10 +1,11 @@
 {
-  "date": "2026-10-16",
+  "date": "2026-10-17",
   "event": "incremental",
-  "decision": "reuse",
-  "source_sha256": "37e694e86a551faa44c2dfeccb3fc78072f5c85fefec9ad4822bc9077421f7ba",
-  "workload": "#802 on main cd16acb9: Protocol_decl.to_tla emits a device step only for a direction the protocol has (TLA+ output only); no kernel source, no generated wrapper and no compiled code path of the kernel images changed. Reuses the #638 slice-1 evidence measured with scripts/space_delta.py.",
+  "decision": "measured",
+  "source_sha256": "7bd203a22259c6cf24179b34b182079ff0c3288a6c0c3644e0324960883420a9",
+  "workload": "#754 on main e8644b37: xhci_setup_rings_and_start writes ERSTSZ (+0x488) instead of IMAN; Rp1XhciRegs gains the erstsz field. Measured both production kernels with scripts/space_delta.py.",
   "evidence": [
+    "docs/XHCI_ERSTSZ_SPACE_2026-10-17.md",
     "docs/XHCI_EVENT_MATCH_SPACE_2026-10-16.md",
     "docs/RETX_KEEP_SPACE_2026-10-16.md",
     "docs/RX_KEEP_SPACE_2026-10-15.md",
@@ -75,6 +76,6 @@
     "docs/VIRTIO_NET_TX_2026-10-10.md",
     "docs/VIRTIO_NET_TX_SPACE_2026-10-10.json"
   ],
-  "assessment": "Reuse: the change alters only the build-time TLA+ text of tx-only and rx-only device protocol models; the kernel images are unaffected by construction. Earlier measured results stand.",
-  "next_trigger": "The next #720 slice that changes xHCI storage (DCBAA, S2 sub-region authority) or #754's ERSTSZ write."
+  "assessment": "Measured: text, data, BSS and usable_ram_start identical on QEMU and RPi5; no data/BSS symbol changed size. Earlier measured results stand.",
+  "next_trigger": "The next #720 slice that changes xHCI storage (DCBAA, S2 sub-region authority)."
 }
