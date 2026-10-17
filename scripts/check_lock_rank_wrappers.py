@@ -20,6 +20,7 @@ Lexical: comments are stripped, then each `fn` body is brace-matched.
 Controls: scripts/check_lock_rank_wrappers_controls.py.
 """
 
+import functools
 import pathlib
 import re
 import sys
@@ -54,8 +55,13 @@ def body_start(text: str, index: int):
         elif ch in ")]>" and not (ch == ">" and text[index - 1] == "-"):
             depth -= 1
         elif ch == "{":
-            before = text[:index].rstrip()
-            if depth == 0 and not before.endswith(("!", "->", ":", ",")):
+            # The text before this `{`, without copying it: the last
+            # non-blank character(s) decide whether it opens the body.
+            back = index - 1
+            while back >= 0 and text[back].isspace():
+                back -= 1
+            tail = text[max(0, back - 1):back + 1]
+            if depth == 0 and not tail.endswith(("!", "->", ":", ",")):
                 return index
             close = index
             inner = 0
@@ -93,15 +99,31 @@ def functions(text: str):
         yield match.group(1), header, text[body:index + 1]
 
 
+@functools.lru_cache(maxsize=None)
+def file_scan(text: str):
+    """(lock-taking names, unranked (name, calls) pairs) of one file. Cached
+    by content: the controls change one file at a time, so every other file
+    is scanned once (#804 follow-up: the uncached controls re-parsed the
+    whole kernel per case and overran the fast gate's 10 s bound)."""
+    takers = []
+    unranked = []
+    for name, header, body in functions(text):
+        calls = sorted(set(m.group(1) for m in ACQUIRE_RE.finditer(body)))
+        if calls:
+            takers.append(name)
+            if not RANK_RE.search(header):
+                unranked.append((name, tuple(calls)))
+    return tuple(takers), tuple(unranked)
+
+
 def problems(sources: dict, exempt: dict = EXEMPT) -> list:
     found = []
     takers = set()
     for path, text in sorted(sources.items()):
-        for name, header, body in functions(text):
-            calls = sorted(set(m.group(1) for m in ACQUIRE_RE.finditer(body)))
-            if calls:
-                takers.add(name)
-            if not calls or name in exempt or RANK_RE.search(header):
+        file_takers, unranked = file_scan(text)
+        takers.update(file_takers)
+        for name, calls in unranked:
+            if name in exempt:
                 continue
             found.append(f"{path}: fn {name} calls {', '.join(calls)} but declares no "
                          f"acquires_lock_<rank>_<name> (add one, with single_instance_lock "
