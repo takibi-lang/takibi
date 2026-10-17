@@ -232,54 +232,86 @@ def campaign(compiler: Path, seed: int, cases: int, output: Path,
     return summary
 
 
-def seeded_control(compiler: Path, seed: int, output: Path, timeout: float) -> None:
-    """Build an isolated compiler with the <= upper-bound rule off by one."""
-    with tempfile.TemporaryDirectory(prefix="takibi-fuzz-mutant-") as temp:
-        scratch = Path(temp)
-        commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT,
-                                capture_output=True, text=True, check=True).stdout.strip()
-        archive = subprocess.run(["git", "archive", "HEAD"], cwd=ROOT,
-                                 capture_output=True, check=True)
-        subprocess.run(["tar", "-x", "-C", str(scratch)], input=archive.stdout, check=True)
-        for file, pattern in (
-            ("lib/type_inf.ml", "| Ast.Le -> update n None           (Some d)       acc"),
-            ("lib/llvm_gen.ml", "| Le -> update n None           (Some d)       acc"),
-        ):
-            path = scratch / file
-            text = path.read_text()
-            if text.count(pattern) != 1:
-                raise RuntimeError(f"seeded rule no longer unique: {file}")
-            path.write_text(text.replace(pattern, pattern.replace("(Some d)", "(Some (d - 1))")))
-        result = subprocess.run(["dune", "build", "-j", "1", "bin/main.exe"], cwd=scratch,
-                                # The Makefile exports DUNE_ROOT for worktrees;
-                                # the scratch copy is its own workspace.
-                                env={**os.environ, "DUNE_ROOT": str(scratch)},
-                                capture_output=True, text=True, timeout=120)
-        if result.returncode:
-            raise RuntimeError("scratch compiler build failed:\n" + result.stderr)
-        result = campaign(scratch / "_build/default/bin/main.exe", seed, 14,
-                          output / "mutant", 60, timeout)
-        failure = result.get("failure", {})
-        if (failure.get("status") != "runtime-failure"
-                or "refinement violated:" not in failure.get("detail", "")):
-            raise RuntimeError("seeded control did not find the injected interval defect")
-        minimized = Path(failure["directory"]) / "minimized.tkb"
-        harness = (Path(failure["directory"]) / "oracle.c").read_text()
-        status, detail = evaluate(scratch / "_build/default/bin/main.exe",
-                                  minimized.read_text(), harness,
-                                  output / "mutant-replay", timeout)
-        if status != "runtime-failure" or "refinement violated:" not in detail:
-            raise RuntimeError("minimized counterexample did not reproduce the seeded defect")
-        status, detail = evaluate(compiler, minimized.read_text(), harness,
-                                  output / "original-replay", timeout)
-        if status != "rejected" or "refined int range mismatch" not in detail:
-            raise RuntimeError("original compiler did not reject the minimized seeded defect")
-        (output / "control.json").write_text(json.dumps({
-            "source_commit": commit, "seed": seed, "case_budget": 14,
-            "failure_case": failure["case"], "minimized": str(minimized),
-            "mutant_replay": "refinement violated", "original_replay": "rejected",
-        }, indent=2) + "\n")
-        print(f"PASS compiler-fuzz control: injected <= defect found at case {failure['case']}; minimized source retained")
+MUTANT = ROOT / "_build/compiler-fuzz-mutant"
+MUTANT_COMMIT = "fuzz-mutant-commit"
+
+
+def head_commit() -> str:
+    return subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT,
+                          capture_output=True, text=True, check=True).stdout.strip()
+
+
+def build_mutant(scratch: Path) -> None:
+    """Build an isolated compiler with the <= upper-bound rule off by one.
+
+    Untimed on purpose: a build's duration follows the machine's load, not
+    a hang, and a wall-clock limit here failed a land under a parallel build
+    (#641). `make compiler-fuzz` runs this step before the timed campaign.
+    The scratch workspace keeps its own _build between runs, so dune
+    rebuilds only what HEAD changed since the last mutant."""
+    commit = head_commit()
+    scratch.mkdir(parents=True, exist_ok=True)
+    for entry in scratch.iterdir():
+        if entry.name == "_build":
+            continue
+        if entry.is_dir() and not entry.is_symlink():
+            subprocess.run(["rm", "-rf", str(entry)], check=True)
+        else:
+            entry.unlink()
+    archive = subprocess.run(["git", "archive", "HEAD"], cwd=ROOT,
+                             capture_output=True, check=True)
+    subprocess.run(["tar", "-x", "-C", str(scratch)], input=archive.stdout, check=True)
+    for file, pattern in (
+        ("lib/type_inf.ml", "| Ast.Le -> update n None           (Some d)       acc"),
+        ("lib/llvm_gen.ml", "| Le -> update n None           (Some d)       acc"),
+    ):
+        path = scratch / file
+        text = path.read_text()
+        if text.count(pattern) != 1:
+            raise RuntimeError(f"seeded rule no longer unique: {file}")
+        path.write_text(text.replace(pattern, pattern.replace("(Some d)", "(Some (d - 1))")))
+    result = subprocess.run(["dune", "build", "-j", "1", "bin/main.exe"], cwd=scratch,
+                            # The Makefile exports DUNE_ROOT for worktrees;
+                            # the scratch copy is its own workspace.
+                            env={**os.environ, "DUNE_ROOT": str(scratch)},
+                            capture_output=True, text=True)
+    if result.returncode:
+        raise RuntimeError("scratch compiler build failed:\n" + result.stderr)
+    (scratch / MUTANT_COMMIT).write_text(commit + "\n")
+    print(f"compiler-fuzz: mutant compiler built for {commit} in {scratch}")
+
+
+def seeded_control(compiler: Path, seed: int, output: Path, timeout: float,
+                   scratch: Path = MUTANT) -> None:
+    """Run the campaign against the prebuilt mutant from build_mutant."""
+    commit = head_commit()
+    stamp = scratch / MUTANT_COMMIT
+    if not stamp.exists() or stamp.read_text().strip() != commit:
+        raise RuntimeError(f"no mutant compiler for HEAD {commit} in {scratch}; "
+                           "run scripts/fuzz_compiler.py --build-mutant first")
+    result = campaign(scratch / "_build/default/bin/main.exe", seed, 14,
+                      output / "mutant", 60, timeout)
+    failure = result.get("failure", {})
+    if (failure.get("status") != "runtime-failure"
+            or "refinement violated:" not in failure.get("detail", "")):
+        raise RuntimeError("seeded control did not find the injected interval defect")
+    minimized = Path(failure["directory"]) / "minimized.tkb"
+    harness = (Path(failure["directory"]) / "oracle.c").read_text()
+    status, detail = evaluate(scratch / "_build/default/bin/main.exe",
+                              minimized.read_text(), harness,
+                              output / "mutant-replay", timeout)
+    if status != "runtime-failure" or "refinement violated:" not in detail:
+        raise RuntimeError("minimized counterexample did not reproduce the seeded defect")
+    status, detail = evaluate(compiler, minimized.read_text(), harness,
+                              output / "original-replay", timeout)
+    if status != "rejected" or "refined int range mismatch" not in detail:
+        raise RuntimeError("original compiler did not reject the minimized seeded defect")
+    (output / "control.json").write_text(json.dumps({
+        "source_commit": commit, "seed": seed, "case_budget": 14,
+        "failure_case": failure["case"], "minimized": str(minimized),
+        "mutant_replay": "refinement violated", "original_replay": "rejected",
+    }, indent=2) + "\n")
+    print(f"PASS compiler-fuzz control: injected <= defect found at case {failure['case']}; minimized source retained")
 
 
 def main() -> int:
@@ -291,7 +323,16 @@ def main() -> int:
     parser.add_argument("--command-timeout", type=float, default=5)
     parser.add_argument("--output", type=Path, help="exact artifact directory (default: a fresh run directory)")
     parser.add_argument("--control", action="store_true")
+    parser.add_argument("--build-mutant", action="store_true",
+                        help="only build the seeded-defect compiler the control uses, untimed")
     args = parser.parse_args()
+    if args.build_mutant:
+        try:
+            build_mutant(MUTANT)
+            return 0
+        except (RuntimeError, subprocess.SubprocessError, OSError) as exc:
+            print(f"FAIL compiler-fuzz: {exc}")
+            return 1
     if args.cases < len(FAMILIES) or args.seconds <= 0 or args.command_timeout <= 0:
         parser.error("require at least seven cases and positive time bounds")
     try:

@@ -773,6 +773,7 @@ linuxbuild: $(LINUX_USER_BINS)
 .PHONY: compiler-fuzz compiler-fuzz-long
 compiler-fuzz: $(TAKIBI)
 	@python3 scripts/test_compiler_fuzz.py
+	@python3 scripts/fuzz_compiler.py --build-mutant
 	@timeout 180s python3 scripts/fuzz_compiler.py --cases 42 --seconds 60 --control
 
 ## compiler-fuzz-long: more generated programs, without rebuilding the control.

@@ -32,7 +32,8 @@ that a compiler timeout cannot satisfy it.
 ## Detection control
 
 The short target additionally builds a compiler from the committed HEAD in
-a fresh temporary directory. It changes only the synchronized `<=` upper
+`_build/compiler-fuzz-mutant/` (kept between runs, so dune rebuilds only
+what changed; `--build-mutant`). It changes only the synchronized `<=` upper
 bound rules in the checker and code generator from `d` to `d - 1`. This
 deliberately claims that an inclusive boundary is excluded. The main checkout
 and its compiler remain untouched. A 14-program campaign must find an
@@ -48,8 +49,10 @@ original compiler must independently reject it with a range-mismatch
 diagnostic. Reduction is best effort, not a claim of global minimality.
 
 Each subprocess has a five-second default limit. The normal short campaign
-has a 60-second budget, checked between programs. The scratch build has a
-120-second limit; the whole short Make target has a 180-second outer limit.
+has a 60-second budget, checked between programs. The scratch build is its
+own Make step with no time limit: a build follows the machine's load, and a
+limit on it failed a land under a parallel build. The timed part of the short
+Make target (campaign, control and replays) has a 180-second outer limit.
 Exhausting a budget fails instead of silently dropping required cases.
 
 ## Longer runs and artifacts
