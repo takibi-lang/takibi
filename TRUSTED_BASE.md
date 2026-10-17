@@ -204,6 +204,35 @@ rules globally.
     prints them (`usb xhci: caplength=... rtsoff=... dboff=...
     max_ports=... context_bytes=...`). HCSPARAMS1.MaxPorts decides whether
     the driven port exists and HCCPARAMS1.CSZ sets the context stride.
+- Register layout beyond xHCI (GitHub issue #805). Every other kernel io
+  struct is compared by `scripts/check_register_offsets.py` with a table in
+  that file, and each table entry names its source in `SOURCES`. The tables
+  were copied by hand and are trusted, in three tiers:
+  - **Public specification.** GICv2 (ARM IHI 0048B), PL011 (ARM DDI 0183),
+    virtio-mmio (VIRTIO 1.x, 4.2.2), the BCM2835 system timer (BCM2835 ARM
+    Peripherals, 12), the PCI Type 1 header and MSI-X table (PCI Local Bus
+    3.0), RP1 MSIX_CFG (RP1 Peripherals RP-008370-DS, 6.1), and the RP1 GEM
+    (Cadence GEM_GXL, whose user guide is not public). For the GEM the table
+    follows Microchip's PolarFire SoC register header
+    `mss_ethernet_registers.h` (polarfire-soc-bare-metal-library commit
+    7c18b9ea, MIT), which agrees field for field with Linux `macb.h`. A web
+    summary of the PolarFire register map gave UPPER_TX_Q_BASE_ADDR as
+    0x4C4; the header's struct puts CBS_IDLESLOPE_Q_B at 0x4C4 and
+    UPPER_TX_Q_BASE_ADDR at 0x4C8, and RPi5 TX works with descriptors whose
+    upper address word is 0x10 (RP1's DMA offset), which it could not if
+    TBQPH were elsewhere. So 0x4C8 stands.
+  - **Raspberry Pi Linux source** (raspberrypi/linux commit bba53a11,
+    rpi-6.6.y), the de facto specification for BCM2712 blocks with no
+    public datasheet: `pcie-brcmstb.c` (PCIe misc and RC registers;
+    HARD_DEBUG from `pcie_offsets_bcm2712`), `reset-brcmstb-rescal.c`,
+    `reset-brcmstb.c` and `irq-bcm2712-mip.c`. Only offsets and array sizes
+    were taken.
+  - **Board evidence or a stated stride.** PCIe UBUS_BAR2_CONFIG_REMAP_HI
+    (0x40B8) is not named in Linux; it is BAR2 LO + 4 by the BAR1 LO/HI
+    pair's stride, and the kernel writes it 0.
+  The check passes only when tables and structs agree, and a new io struct
+  fails it until a sourced table is added. The block base addresses and
+  windows are outside it.
 - Raw atomic intrinsics (`atomic_load_acquire`, `atomic_store_release`,
   `atomic_swap_acquire`, `atomic_fetch_add_relaxed`, and
   `atomic_compare_exchange_acquire`) make a cross-core ordering or atomicity

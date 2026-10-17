@@ -179,6 +179,8 @@ suffix is description; dispatch reads only the prefix.
 | `check_wont_compile_catalog.py` | every defect-catalog entry names a test case and external comparison set with a valid nonfuture date, shows its figure, and agrees with the index; external truth is not checked |
 | `check_xhci_register_offsets.py` | RP1 xHCI register fields sit at their xHCI-specification offsets, and an ERST programmed via ERSTBA also declares and writes ERSTSZ (#754) |
 | `check_xhci_register_offsets_controls.py` | Controls for the spec layout, the #754 missing ERSTSZ, an unwritten ERSTSZ and misplaced registers |
+| `check_register_offsets.py` | every kernel io struct beyond xHCI has a sourced offset table (public spec, Raspberry Pi Linux source, or board evidence) and each field sits at its table's offset with its table's array size (#805) |
+| `check_register_offsets_controls.py` | Controls for the kernel layout, a GEM TBQPH at 0x4C4, an unlisted queue-bank field, a resized or scalarized array, a BCM2712 HARD_DEBUG at another chip's offset, an unsourced block, a vanished block and an unreadable field line |
 
 ## `slowcheck_*` -- the slow lane
 
