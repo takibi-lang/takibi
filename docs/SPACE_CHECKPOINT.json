@@ -1,9 +1,9 @@
 {
   "date": "2026-10-17",
   "event": "incremental",
-  "decision": "measured",
-  "source_sha256": "1f7440ce81a5d06f0753f794f52d568c74a29e785ed25d111d7b5f17c9e5dde0",
-  "workload": "#804/#806 on main f6850531: the RPi5 device map discovers the xHCI register blocks (CAPLENGTH, RTSOFF, DBOFF) and attaches one handle per block; CSZ and MaxPorts are read and used. Measured both production kernels with scripts/space_delta.py.",
+  "decision": "reuse",
+  "source_sha256": "c19b2ba0171c42e29a7691957b4da37ffd4b11662afc6ffcea79fa8dc8a269d1",
+  "workload": "#808: the only production-source change since the measured #804/#806 checkpoint is a Makefile comment (the fast gate's slowest member as measured); no kernel source, build flag or link input changed.",
   "evidence": [
     "docs/XHCI_CAPABILITY_SPACE_2026-10-17.md",
     "docs/BLOCK_SLOT_POOL_SPACE_2026-10-17.md",
@@ -79,6 +79,6 @@
     "docs/VIRTIO_NET_TX_2026-10-10.md",
     "docs/VIRTIO_NET_TX_SPACE_2026-10-10.json"
   ],
-  "assessment": "Measured: QEMU identical; RPi5 text +2152, data +32, BSS +64 (three more handles and the 20-byte capability record), usable_ram_start unchanged. Accepted as the fixed cost of discovering the layout instead of assuming it.",
+  "assessment": "Reuse: a comment-only Makefile edit cannot change either production kernel image, so the #804/#806 measurement (docs/XHCI_CAPABILITY_SPACE_2026-10-17.md) still describes both kernels. No size change.",
   "next_trigger": "The next #720 slice that changes xHCI storage (DCBAA, S2 sub-region authority)."
 }
