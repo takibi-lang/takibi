@@ -22,6 +22,7 @@ import sys
 from pathlib import Path
 
 from pass_line import report_pass
+from source_scan import per_file
 
 ROOT = Path(__file__).resolve().parent.parent
 SOURCE = ROOT / "kernel/mm/page.tkb"
@@ -30,6 +31,7 @@ ALLOWED = {"page_allocator_fill_metadata"}
 FN = re.compile(r"^(?:private\s+)?fn\s+(\w+)\s*\(")
 
 
+@per_file
 def callers(text):
     found = []
     current = None
@@ -41,7 +43,7 @@ def callers(text):
         code = line.split("//", 1)[0]
         if re.search(r"\b%s\s*\(" % REBUILD, code):
             found.append((number, current))
-    return found
+    return tuple(found)
 
 
 def main():

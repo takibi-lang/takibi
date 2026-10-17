@@ -2,20 +2,17 @@
 """Controls for check_page_freelist_rebuild_callers.py.
 
 The pre-#771 shape -- page_alloc_contiguous_locked calling the rebuild per
-run -- must be refused naming that caller; the install-only shape passes,
-and a commented-out call does not count. The check runs as a subprocess on
-each mutant file.
+run -- must be named as a failing caller; the install-only shape passes, and
+a commented-out call does not count.
 
 Exit code only (0 = pass, 1 = fail).
 """
-import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
-from pass_line import report_pass
-
-CHECK = Path(__file__).resolve().parent / "check_page_freelist_rebuild_callers.py"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import check_page_freelist_rebuild_callers as check  # noqa: E402
+from pass_line import report_pass  # noqa: E402
 
 BAD = """private fn page_alloc_contiguous_locked(count: usize) {
     if (pool.runtime_applied) {
@@ -36,26 +33,18 @@ fn page_run_free() {
 """
 
 
-def run(text):
-    with tempfile.TemporaryDirectory() as directory:
-        path = Path(directory) / "page.tkb"
-        path.write_text(text, encoding="ascii")
-        return subprocess.run([sys.executable, str(CHECK), str(path)],
-                              capture_output=True, text=True)
-
-
 def main():
-    bad = run(BAD)
-    if bad.returncode == 0 or "called from page_alloc_contiguous_locked" not in bad.stdout:
-        print("FAIL page-freelist-rebuild controls: per-run rebuild not refused:\n" + bad.stdout)
+    bad = [f for _, f in check.callers(BAD) if f not in check.ALLOWED]
+    good = [f for _, f in check.callers(GOOD) if f not in check.ALLOWED]
+    if bad != ["page_alloc_contiguous_locked"]:
+        print("FAIL page-freelist-rebuild controls: per-run rebuild not refused: %r" % bad)
         return 1
-    good = run(GOOD)
-    if good.returncode != 0:
-        print("FAIL page-freelist-rebuild controls: install-only shape refused:\n" + good.stdout)
+    if good:
+        print("FAIL page-freelist-rebuild controls: install-only shape refused: %r" % good)
         return 1
     report_pass("page-freelist-rebuild controls",
                 "per-run rebuild refused, install-only and comments accepted",
-                refused_lines=bad.stdout.count("FAIL"))
+                refused_callers=len(bad))
     return 0
 
 
