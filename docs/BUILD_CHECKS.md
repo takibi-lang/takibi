@@ -118,6 +118,8 @@ suffix is description; dispatch reads only the prefix.
 | `check_liveness_proof_escapes.py` | every place that drops a pool's liveness proof is declared with a reason |
 | `check_wall_clock_bounds.py` | every kernel wait bounded by host wall-clock time (`read_cntfrq() * N`) is declared in `scripts/wall_clock_bounds.tsv` with a class; `pending` rows, whose QEMU verdict a starved host can flip, are removed one at a time |
 | `check_wall_clock_bounds_controls.py` | an undeclared bound, a stale row, a wrong count and an unknown class are each refused |
+| `check_page_freelist_rebuild_callers.py` | the page allocator's whole-table free-list rebuild is called only where the runtime tables are installed, never from an allocation or release path (#771) |
+| `check_page_freelist_rebuild_callers_controls.py` | a per-run rebuild call is refused; the install-only call and commented calls pass |
 | `check_process_running_mints_controls.py` | mutation controls reject missing context/phase markers, additional mints, public constructors, and unmarked writers |
 | `check_process_running_mints.py` | current-process witness entry and transition mint counts, private constructors, and context/phase writer annotations match the reviewed boundary |
 | `check_address_space_root_mints.py` | every maker of an `AddressSpaceRoot` (which carries its backing handle) is declared (#693) |
