@@ -2,8 +2,8 @@
   "date": "2026-10-17",
   "event": "incremental",
   "decision": "reuse",
-  "source_sha256": "cf9086ac468d1c3e7bf1d02bebc47d5dd0cc2891e7ea29643428f0e4feecaa1a",
-  "workload": "#641: world_stop_machine_begin split into a ranked wrapper and its unchanged unranked body (world_stop_machine_begin_holding_probe); four probe call sites renamed; comments only elsewhere. No storage, allocation or data/BSS change.",
+  "source_sha256": "04943599a9c7a3dd7d89d0283e41c9ae47b2a1d6f76c3876afbc8ebcb45f04fa",
+  "workload": "#641: world_stop_machine_begin split into a ranked wrapper and its unchanged unranked body (world_stop_machine_begin_holding_probe); four probe call sites renamed; comments only elsewhere. No storage, allocation or data/BSS change. Also the Makefile compiler-fuzz recipe gains an untimed mutant-build step (host test tooling only).",
   "evidence": [
     "docs/SLOT_POOLS_EXEC_SYSCALL_SPACE_2026-10-17.md",
     "docs/XHCI_CAPABILITY_SPACE_2026-10-17.md",
