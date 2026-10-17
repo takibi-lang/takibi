@@ -80,6 +80,6 @@
     "docs/VIRTIO_NET_TX_2026-10-10.md",
     "docs/VIRTIO_NET_TX_SPACE_2026-10-10.json"
   ],
-  "assessment": "Measured with scripts/space_delta.py: text +3080 B QEMU / +3320 B RPi5, BSS +64 B, usable_ram_start one 32 KiB step later on both; the RPi5 image ceiling is raised to 0x540000 pending maintainer approval.",
+  "assessment": "Measured with scripts/space_delta.py: text +3080 B QEMU / +3320 B RPi5, BSS +64 B, usable_ram_start one 32 KiB step later on both; the RPi5 image ceiling is raised to 0x540000 by the maintainer's decision (2026-10-17).",
   "next_trigger": "The #638 preemption flip (target root into the process record), or the next slot pool."
 }

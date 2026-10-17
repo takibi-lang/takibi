@@ -182,8 +182,8 @@ image is embedded in `.data`, so this growth is file bytes: about 1.4 s more
 SWD transfer on each RPi5 lane run. The image had only 43 free blocks left,
 which is what stalled a boot once a 15-block ELF was added to it.
 
-Raised from `0x520000` to `0x540000` on 2026-10-17 (pending the maintainer's
-approval), when moving the exec staging and the syscall scratch into slot
+Raised from `0x520000` to `0x540000` on 2026-10-17 by the maintainer's
+decision (safety first; space efficiency may be revisited later), when moving the exec staging and the syscall scratch into slot
 pools (#638) added about 3.3 KiB of RPi5 code and the image end crossed its
 next 32 KiB step to `0x520000`. The growth is code (wrappers that acquire and
 release a slot around each scratch-using handler), plus 64 bytes of slot

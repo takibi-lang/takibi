@@ -31,10 +31,10 @@ Assessment:
   Data +24 B is alignment.
 - usable_ram_start moves one 32 KiB step on both images (8 pages fewer for
   the allocator), and the RPi5 image end reaches 0x520000, the recorded
-  ceiling; kernel/MEMORY_MAP.md raises it to 0x540000 pending the
-  maintainer's approval. The growth is code, about 0.02 s of SWD time.
+  ceiling; kernel/MEMORY_MAP.md raises it to 0x540000 by the
+  maintainer's decision (2026-10-17; space efficiency may be revisited). The growth is code, about 0.02 s of SWD time.
 
-Accepted (pending the ceiling approval): removes the per-CPU scratch
+Accepted (ceiling raise approved by the maintainer, 2026-10-17): removes the per-CPU scratch
 dependency on KERNEL_PREEMPTIBLE == 0 for the exec staging and syscall
 buffers, with a compile-time release obligation and a build check that no
 slot is held across a scheduler sleep.
