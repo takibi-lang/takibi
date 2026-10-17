@@ -179,6 +179,25 @@ rules globally.
 - `*io T` supplies volatile access semantics. The register address, width,
   permitted access direction, ordering requirements, and device state still
   come from the platform specification and driver reasoning.
+- `scripts/check_xhci_register_offsets.py` (GitHub issue #754) checks the
+  register offsets in `Rp1XhciRegs` (`kernel/platform/rpi5/usb_xhci.tkb`)
+  against a table typed in by hand, so the table is trusted. It has two
+  parts:
+  - **xHCI 1.2 offsets.** The `SPEC` dictionary and the PORTSC formula
+    (`0x400 + 0x10 * (n - 1)` from the operational base) were copied from
+    the "eXtensible Host Controller Interface for Universal Serial Bus
+    (xHCI)" specification, revision 1.2: section 5.4 (Host Controller
+    Operational Registers) and section 5.5.2 (Interrupter
+    Register Set).
+  - **RP1 base values.** The check uses CAPLENGTH = 0x20 and
+    RTSOFF = 0x460. CAPLENGTH comes from rp1_usb_smoke's read of
+    CAPLENGTH|HCIVERSION on the board (commit 0945a326, noted in the
+    usb_xhci.tkb header). RTSOFF has never been read and logged on its
+    own. The value is inferred from interrupter 0 at +0x480, a layout
+    that RPi5 USB bring-up has shown to work. The RP1 Peripherals
+    datasheet does not document the xHCI capability registers.
+  The check passes only when its table and the struct agree. If either
+  changes, re-check both against these sources.
 - Raw atomic intrinsics (`atomic_load_acquire`, `atomic_store_release`,
   `atomic_swap_acquire`, `atomic_fetch_add_relaxed`, and
   `atomic_compare_exchange_acquire`) make a cross-core ordering or atomicity
