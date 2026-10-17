@@ -357,10 +357,20 @@ rules globally.
   `kernel/mm/process_image.tkb` returns a slot no other live token names
   (its compare-exchange). The one-slot-per-operation rule is the same build
   check.
+- The syscall scratch (`SyscallScratch`: file, path, sockaddr, uname,
+  rlimit, interpreter and ELF buffers) is a pool of `KERNEL_MAX_CORES`
+  slots reached through a linear `SyscallSlot` (#638), acquired narrowly
+  around each handler that uses it. Trusted: `syscall_slot_acquire` in
+  `kernel/kernel/syscall.tkb` returns a slot no other live token names (its
+  compare-exchange). `scripts/check_slot_pool_entries.py`, a build check
+  rather than a type rule, keeps one slot per operation, keeps every slot
+  holder of every pool from reaching a scheduler sleep
+  (`kernel_process_block_*`), and keeps a slot from being returned out of
+  the function that acquired it.
 - Definite initialization (SPEC.md, "Definite Initialization") trusts three
   premises. A `scratch` global's element is reached only by its own CPU, so
   any index names the same place (`kernel/kernel/syscall.tkb`'s
-  `syscall_scratch`, indexed by the non-preemptible current CPU). A callee
+  `syscall_scratch`, indexed by a live `SyscallSlot`). A callee
   handed `&p` through a `&mut T` parameter stores every field of `p`. Each
   `unsafe { assume_init(...) }` states that bytes were written by means the
   checker cannot see. The maintained `assume_init` sites are all in

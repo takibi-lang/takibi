@@ -17,6 +17,7 @@ use "kernel/kernel/workload_evidence.tkb";
 use "kernel/lib/execution_model.tkb";
 use "kernel/kernel/cpu_authority.tkb";
 use "kernel/lib/occupancy.tkb";
+use "kernel/lib/atomic_word.tkb";
 
 // Current limitations (2026-08-26). Keep this list current as
 // call sites change; a limitation that goes stale here is worse than
@@ -267,10 +268,7 @@ private fn syscall_filesystem_lookup() -> SyscallFilesystemReady {
     }
 }
 const SYSCALL_SCRIPT_LINE_MAX: usize = 256;
-// Scratch that lives only for one non-preemptible syscall invocation. Per
-// core rather than global: two cores may dispatch concurrently, but one core
-// cannot enter a second handler until the current one returns while
-// KERNEL_PREEMPTIBLE is zero. The file buffer is a bounded one-block staging
+// Scratch that lives only for one section of one syscall. The file buffer is a bounded one-block staging
 // area, not a whole-file cache; read/readv/sendfile stream each chunk onward,
 // so its size does not limit the file size userspace can consume. execve uses
 // three disjoint regions of that same invocation-local buffer for argv, path,
@@ -294,7 +292,64 @@ struct SyscallScratch {
 // GitHub issue #203: per-call scratch. Every function that touches it sees
 // it uninitialized on entry, whatever an earlier call left there, so a
 // buffer is zero-filled or written whole before it is read or copied out.
+//
+// GitHub issue #638: the scratch is a pool of KERNEL_MAX_CORES slots, one per
+// scratch-using section in flight, not one per CPU. A section is acquired
+// narrowly around the handler that uses the buffers -- one that waits only a
+// bounded time (ext2, block I/O) -- and never across a sleeping wait: a
+// syscall sleeps only after its handler has returned SyscallAction::Block,
+// and the linear SyscallSlot must be released before then. The compiler
+// rejects a handler that forgets to release it, releases it twice, or keeps
+// using it after the release. Static storage rather than kernel-stack
+// buffers (DECISIONS.md 2026-10-17, stack-conservative).
+//
+// Trusted here, and only here (TRUSTED_BASE.md): syscall_slot_acquire
+// returns a slot no other live SyscallSlot names. Its compare-exchange over
+// syscall_slot_words is what makes that so; nothing checks it. Each element
+// of the scratch global is therefore reached only by its slot's holder,
+// which is the premise definite initialization takes for a scratch array.
+//
+// scripts/check_slot_pool_entries.py checks that no slot holder reaches
+// another entry point (one slot per operation, so the pool cannot run dry
+// with every holder waiting for a second), that no holder reaches a
+// scheduler sleep (kernel_process_block_*), and that no function but the
+// acquire returns a slot. A syscall holds its SyscallSlot while ext2, the
+// block layer or the exec loader take their own pools' slots, never the
+// reverse.
+//
+// Current limitations (2026-10-17):
+// - While KERNEL_PREEMPTIBLE is 0 and every in-handler wait spins, at most
+//   one section per CPU is live, so the acquire never waits.
 private scratch let mut syscall_scratch: [SyscallScratch; KERNEL_MAX_CORES];
+private let mut syscall_slot_words: [AtomicWord; KERNEL_MAX_CORES];
+
+// `[unit]` is always 0: an owner needs a static parameter, and the slot's
+// identity is its private index, which only this file reads.
+linear struct SyscallSlot[unit: usize] {
+    private index: {0..<KERNEL_MAX_CORES as usize};
+}
+
+// A free slot, waiting for one if every slot is held. The compare-exchange
+// is an acquire, pairing with the release store in syscall_slot_release.
+private fn syscall_slot_acquire() -> SyscallSlot[0] !{may_block} {
+    let mut index: {0..<KERNEL_MAX_CORES as usize} = 0;
+    let mut held: bool = false;
+    while (held == false) {
+        for i: usize in 0..<KERNEL_MAX_CORES {
+            if (held == false &&
+                atomic_word_compare_exchange(&syscall_slot_words[i], 0, 1)) {
+                index = i;
+                held = true;
+            }
+        }
+    }
+    let mut slot: SyscallSlot[0] = { index };
+    return slot;
+}
+
+private fn syscall_slot_release(slot: sink SyscallSlot[0]) {
+    atomic_word_store(&syscall_slot_words[slot.index], 0);
+}
 
 // GitHub issue #559: this CPU's current syscall is a counted ext2 reader
 // and owes ext2_read_leave. Kept out of the scratch above: it is state one
@@ -527,36 +582,36 @@ fn kernel_syscall_exec_clear() {
     process_run_unlock(guard);
 }
 
-private fn syscall_exec_argv_here() -> [u8; 512..] !{unsafe} {
+private fn syscall_exec_argv_here(slot: borrow SyscallSlot[0]) -> [u8; 512..] !{unsafe} {
     // GitHub issue #203 (TRUSTED_BASE.md, assume_init sites): execve's
     // staging spans several functions of one call. syscall_execve_current
     // zero-fills file_buffer before the first of these helpers runs, and
     // only the execve path calls them.
-    unsafe { assume_init(syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8); }
+    unsafe { assume_init(syscall_scratch[slot.index].file_buffer as []u8); }
     let scratch: [u8; KERNEL_BLOCK_SIZE..] =
-        syscall_scratch[syscall_scratch_cpu_index()].file_buffer as [u8; KERNEL_BLOCK_SIZE..];
+        syscall_scratch[slot.index].file_buffer as [u8; KERNEL_BLOCK_SIZE..];
     return scratch[0..<512];
 }
 
-private fn syscall_exec_path_here() -> [u8; 256..] !{unsafe} {
+private fn syscall_exec_path_here(slot: borrow SyscallSlot[0]) -> [u8; 256..] !{unsafe} {
     // GitHub issue #203 (TRUSTED_BASE.md, assume_init sites): execve's
     // staging spans several functions of one call. syscall_execve_current
     // zero-fills file_buffer before the first of these helpers runs, and
     // only the execve path calls them.
-    unsafe { assume_init(syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8); }
+    unsafe { assume_init(syscall_scratch[slot.index].file_buffer as []u8); }
     let scratch: [u8; KERNEL_BLOCK_SIZE..] =
-        syscall_scratch[syscall_scratch_cpu_index()].file_buffer as [u8; KERNEL_BLOCK_SIZE..];
+        syscall_scratch[slot.index].file_buffer as [u8; KERNEL_BLOCK_SIZE..];
     return scratch[512..<768];
 }
 
-private fn syscall_script_line_here() -> [u8; 256..] !{unsafe} {
+private fn syscall_script_line_here(slot: borrow SyscallSlot[0]) -> [u8; 256..] !{unsafe} {
     // GitHub issue #203 (TRUSTED_BASE.md, assume_init sites): execve's
     // staging spans several functions of one call. syscall_execve_current
     // zero-fills file_buffer before the first of these helpers runs, and
     // only the execve path calls them.
-    unsafe { assume_init(syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8); }
+    unsafe { assume_init(syscall_scratch[slot.index].file_buffer as []u8); }
     let scratch: [u8; KERNEL_BLOCK_SIZE..] =
-        syscall_scratch[syscall_scratch_cpu_index()].file_buffer as [u8; KERNEL_BLOCK_SIZE..];
+        syscall_scratch[slot.index].file_buffer as [u8; KERNEL_BLOCK_SIZE..];
     return scratch[768..<1024];
 }
 
@@ -678,9 +733,9 @@ must_use variant SyscallArgvAppendResult { Full; Appended(usize); }
 
 // Append one NUL-terminated entry to the pending execve argv buffer and
 // return the offset the next entry starts at.
-private fn syscall_exec_argv_append(offset: usize, source: []u8)
+private fn syscall_exec_argv_append(slot: borrow SyscallSlot[0], offset: usize, source: []u8)
         -> SyscallArgvAppendResult {
-    let argv_view: []u8 = syscall_exec_argv_here();
+    let argv_view: []u8 = syscall_exec_argv_here(slot);
     if (offset > argv_view.len) { return SyscallArgvAppendResult::Full; }
     let tail = argv_view[offset..<argv_view.len];
     let length: usize = source.len;
@@ -702,11 +757,11 @@ private fn syscall_exec_argv_append(offset: usize, source: []u8)
 // directive parser produced needs no relational proof between its two ends:
 // every index is bounded by the array, and the range is a filter over that
 // walk instead of a slice construction.
-private fn syscall_exec_argv_append_line(offset: usize, from: usize,
+private fn syscall_exec_argv_append_line(slot: borrow SyscallSlot[0], offset: usize, from: usize,
                                          to: usize)
         -> SyscallArgvAppendResult {
-    let argv_view: []u8 = syscall_exec_argv_here();
-    let line: []u8 = syscall_script_line_here();
+    let argv_view: []u8 = syscall_exec_argv_here(slot);
+    let line: []u8 = syscall_script_line_here(slot);
     let mut cursor: usize = offset;
     for position: usize in 0..<SYSCALL_SCRIPT_LINE_MAX {
         if (position >= from && position < to) {
@@ -731,10 +786,10 @@ private fn syscall_exec_argv_append_line(offset: usize, from: usize,
 // and current script pathname. Each rewrite drops the preceding argv[0],
 // so the deepest interpreter comes first and earlier script names follow.
 // The stored pathname then becomes the next interpreter to resolve.
-private fn syscall_exec_script_prefix(path_length: usize, previous_argc: usize,
+private fn syscall_exec_script_prefix(slot: borrow SyscallSlot[0], path_length: usize, previous_argc: usize,
                                       previous_length: usize)
         -> SyscallExecFormatResult {
-    let line: []u8 = syscall_script_line_here();
+    let line: []u8 = syscall_script_line_here(slot);
     let mut end: usize = 0;
     let mut line_terminated: bool = false;
     // The whole window is scanned, not only the bytes the file supplied: it
@@ -823,7 +878,7 @@ private fn syscall_exec_script_prefix(path_length: usize, previous_argc: usize,
     // remainder before writing its prefix, so deeper levels precede earlier
     // directive arguments and script names without recursive stack growth.
     let mut previous: [u8; 512];
-    let argv: []u8 = syscall_exec_argv_here();
+    let argv: []u8 = syscall_exec_argv_here(slot);
     let mut tail_start: usize = 0;
     let mut first_ended: bool = previous_argc == 0;
     if (previous_length > 512) { return SyscallExecFormatResult::TooBig; }
@@ -837,7 +892,7 @@ private fn syscall_exec_script_prefix(path_length: usize, previous_argc: usize,
     }
     let mut offset: usize = 0;
     let mut argc: usize = 0;
-    match syscall_exec_argv_append_line(offset, interpreter_from,
+    match syscall_exec_argv_append_line(slot, offset, interpreter_from,
                                         interpreter_to) {
         SyscallArgvAppendResult::Full => {
             return SyscallExecFormatResult::TooBig;
@@ -848,7 +903,7 @@ private fn syscall_exec_script_prefix(path_length: usize, previous_argc: usize,
     let argument_from: usize = argument_start;
     let argument_to: usize = argument_end;
     if (argument_from < argument_to) {
-        match syscall_exec_argv_append_line(offset, argument_from,
+        match syscall_exec_argv_append_line(slot, offset, argument_from,
                                             argument_to) {
             SyscallArgvAppendResult::Full => {
                 return SyscallExecFormatResult::TooBig;
@@ -857,12 +912,12 @@ private fn syscall_exec_script_prefix(path_length: usize, previous_argc: usize,
         }
         argc = argc + 1;
     }
-    let stored_path: []u8 = syscall_exec_path_here();
+    let stored_path: []u8 = syscall_exec_path_here(slot);
     if (path_length > stored_path.len) {
         return SyscallExecFormatResult::Invalid;
     }
     let script_path = stored_path[0..<path_length];
-    match syscall_exec_argv_append(offset, script_path) {
+    match syscall_exec_argv_append(slot, offset, script_path) {
         SyscallArgvAppendResult::Full => {
             return SyscallExecFormatResult::TooBig;
         }
@@ -916,12 +971,12 @@ private fn syscall_exec_script_prefix(path_length: usize, previous_argc: usize,
 // judged here.
 const SYSCALL_EXEC_INTERPRETER_MAX: usize = 64;
 
-private fn syscall_exec_elf_interpreter(mount: Ext2Mount, inode: usize)
+private fn syscall_exec_elf_interpreter(slot: borrow SyscallSlot[0], mount: Ext2Mount, inode: usize)
         -> SyscallExecFormatResult !{unsafe} {
     // ELF probing must not overwrite the collected script argv or path.
-    zero_fill(syscall_scratch[syscall_scratch_cpu_index()].elf_buffer as []u8);
+    zero_fill(syscall_scratch[slot.index].elf_buffer as []u8);
     let window: [u8; KERNEL_BLOCK_SIZE..] =
-        syscall_scratch[syscall_scratch_cpu_index()].elf_buffer as [u8; KERNEL_BLOCK_SIZE..];
+        syscall_scratch[slot.index].elf_buffer as [u8; KERNEL_BLOCK_SIZE..];
     let file_length: usize = ext2_regular_file_size(mount, inode);
     let length: usize = match ext2_read_file_chunk(
             mount, inode, 0, window) {
@@ -955,9 +1010,9 @@ private fn syscall_exec_elf_interpreter(mount: Ext2Mount, inode: usize)
         window[offset] != 0x2F) {
         return SyscallExecFormatResult::InterpreterUnsupported;
     }
-    zero_fill(syscall_scratch[syscall_scratch_cpu_index()].interpreter_buffer as []u8);
+    zero_fill(syscall_scratch[slot.index].interpreter_buffer as []u8);
     let name: [u8; SYSCALL_EXEC_INTERPRETER_MAX..] =
-        syscall_scratch[syscall_scratch_cpu_index()].interpreter_buffer as
+        syscall_scratch[slot.index].interpreter_buffer as
             [u8; SYSCALL_EXEC_INTERPRETER_MAX..];
     // The name ends at its first NUL, as Linux reads it, not at the end of
     // the segment.
@@ -999,7 +1054,7 @@ private fn syscall_exec_elf_interpreter(mount: Ext2Mount, inode: usize)
     return SyscallExecFormatResult::InterpreterUnsupported;
 }
 
-private fn syscall_exec_format(path_length: usize)
+private fn syscall_exec_format(slot: borrow SyscallSlot[0], path_length: usize)
         -> SyscallExecFormatResult !{unsafe} {
     let mount: Ext2Mount = match syscall_filesystem_lookup() {
         SyscallFilesystemReady::Unconfigured => { return SyscallExecFormatResult::NotMounted; }
@@ -1009,7 +1064,7 @@ private fn syscall_exec_format(path_length: usize)
     let mut argc: usize = 0;
     let mut prefix_length: usize = 0;
     for depth: usize in 0..<6 {
-        let path: []u8 = syscall_exec_path_here();
+        let path: []u8 = syscall_exec_path_here(slot);
         let pathname_length: usize = current_length;
         if (pathname_length < 2 || pathname_length > path.len) {
             return SyscallExecFormatResult::Absent;
@@ -1024,7 +1079,7 @@ private fn syscall_exec_format(path_length: usize)
                 return SyscallExecFormatResult::NotPermitted;
             }
             SyscallExecTargetResult::Inode(inode) => {
-                let line: []u8 = syscall_script_line_here();
+                let line: []u8 = syscall_script_line_here(slot);
                 for index: usize in 0..<SYSCALL_SCRIPT_LINE_MAX {
                     line[index] = 0;
                 }
@@ -1043,7 +1098,7 @@ private fn syscall_exec_format(path_length: usize)
                         }
                         if (line[0] == 0x7F && line[1] == 0x45 &&
                             line[2] == 0x4C && line[3] == 0x46) {
-                            match syscall_exec_elf_interpreter(mount, inode) {
+                            match syscall_exec_elf_interpreter(slot, mount, inode) {
                                 SyscallExecFormatResult::Executable(executable) => {
                                     if (argc == 0) {
                                         return SyscallExecFormatResult::Executable(executable);
@@ -1070,7 +1125,7 @@ private fn syscall_exec_format(path_length: usize)
                             return SyscallExecFormatResult::NotExecutable;
                         }
                         if (depth == 5) { return SyscallExecFormatResult::TooDeep; }
-                        match syscall_exec_script_prefix(current_length, argc,
+                        match syscall_exec_script_prefix(slot, current_length, argc,
                                                          prefix_length) {
                             SyscallExecFormatResult::Script(prefix) => {
                                 argc = prefix.argc;
@@ -1088,7 +1143,7 @@ private fn syscall_exec_format(path_length: usize)
                             SyscallExecFormatResult::TooDeep => { return SyscallExecFormatResult::TooDeep; }
                             SyscallExecFormatResult::Executable(value) => { return SyscallExecFormatResult::Executable(value); }
                         }
-                        let next_path: []u8 = syscall_exec_path_here();
+                        let next_path: []u8 = syscall_exec_path_here(slot);
                         current_length = 0;
                         let mut ended: bool = false;
                         for index: usize in 0..<256 {
@@ -1797,11 +1852,13 @@ fn kernel_syscall_filesystem_unconfigured_probe() -> bool !{unsafe} {
         SyscallFilesystemReady::Unconfigured => {}
         SyscallFilesystemReady::Configured(mount) => { return false; }
     }
-    match syscall_exec_format(0) {
-        SyscallExecFormatResult::NotMounted => {}
-        _ => { return false; }
-    }
-    return true;
+    let slot: SyscallSlot[0] = syscall_slot_acquire();
+    let refused: bool = match syscall_exec_format(slot, 0) {
+        SyscallExecFormatResult::NotMounted => { true }
+        _ => { false }
+    };
+    syscall_slot_release(slot);
+    return refused;
 }
 
 // Read the published descriptor through its closed result, including a real
@@ -1858,9 +1915,9 @@ fn kernel_syscall_socket_evidence() -> bool !{unsafe} {
 // GitHub issue #203 (TRUSTED_BASE.md, assume_init sites): the path buffer as
 // kernel_syscall_path_name left it. Call it only after that function returned
 // Name in the same syscall; it zero-fills the buffer before writing it.
-private fn syscall_path_view_here() -> [u8; 256..] !{unsafe} {
-    unsafe { assume_init(syscall_scratch[syscall_scratch_cpu_index()].path_buffer as []u8); }
-    return syscall_scratch[syscall_scratch_cpu_index()].path_buffer as [u8; 256..];
+private fn syscall_path_view_here(slot: borrow SyscallSlot[0]) -> [u8; 256..] !{unsafe} {
+    unsafe { assume_init(syscall_scratch[slot.index].path_buffer as []u8); }
+    return syscall_scratch[slot.index].path_buffer as [u8; 256..];
 }
 
 // Copy one NUL-terminated pathname through the user-memory boundary. Only a
@@ -1870,9 +1927,9 @@ private fn syscall_path_view_here() -> [u8; 256..] !{unsafe} {
 // GitHub issue #203: the path buffer is per-call scratch, zero-filled here
 // because the copy below writes only up to the terminator. A caller reads it
 // afterwards only through syscall_path_view_here.
-fn kernel_syscall_path_name(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], address: usize) -> SyscallPathResult {
-    zero_fill(syscall_scratch[syscall_scratch_cpu_index()].path_buffer as []u8);
-    let path_view: []u8 = syscall_scratch[syscall_scratch_cpu_index()].path_buffer as []u8;
+fn kernel_syscall_path_name(slot: borrow SyscallSlot[0], current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], address: usize) -> SyscallPathResult {
+    zero_fill(syscall_scratch[slot.index].path_buffer as []u8);
+    let path_view: []u8 = syscall_scratch[slot.index].path_buffer as []u8;
     let mut length: usize = 0;
     let mut terminated: bool = false;
     for offset: usize in 0..<255 {
@@ -2052,11 +2109,11 @@ fn syscall_io_action(current_authority: borrow ProcessCurrent[current_process, P
 // caller puts the writer to sleep instead of spinning in the kernel.
 must_use variant TerminalWriteResult { Errno(usize); Written(usize); WouldBlock; }
 
-fn syscall_terminal_write(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], address: usize, length: usize)
+fn syscall_terminal_write(slot: borrow SyscallSlot[0], current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], address: usize, length: usize)
         -> TerminalWriteResult !{unsafe} {
     if (length == 0) { return TerminalWriteResult::Written(0); }
     // GitHub issue #203: the staging buffer is per-call scratch.
-    zero_fill(syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8);
+    zero_fill(syscall_scratch[slot.index].file_buffer as []u8);
     let mut written: usize = 0;
     while (written < length) {
         let room: usize = uart_user_write_room();
@@ -2074,7 +2131,7 @@ fn syscall_terminal_write(current_authority: borrow ProcessCurrent[current_proce
             }
             CheckedUsize::Value(v) => { v }
         };
-        let staging_buffer = syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8;
+        let staging_buffer = syscall_scratch[slot.index].file_buffer as []u8;
         if (chunk > staging_buffer.len) {
             return TerminalWriteResult::Errno(LINUX_EINVAL);
         }
@@ -2125,6 +2182,15 @@ fn syscall_terminal_write_wait(current_authority: borrow ProcessCurrent[current_
 
 // Shared scalar and vectored fd operation; byte counts and errors stay distinct.
 fn syscall_write_segment(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], fd: usize, address: usize, length: usize)
+        -> SyscallIoResult !{unsafe} {
+    let slot: SyscallSlot[0] = syscall_slot_acquire();
+    let result: SyscallIoResult = syscall_write_segment_with(slot, current_authority, fd, address, length);
+    syscall_slot_release(slot);
+    return result;
+}
+
+fn syscall_write_segment_with(slot: borrow SyscallSlot[0],
+        current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], fd: usize, address: usize, length: usize)
         -> SyscallIoResult !{unsafe} {
         if (kernel_connected_fd_is_open(fd) &&
             (fd != 1 || kernel_syscall_inetd_mode() == false)) {
@@ -2305,19 +2371,19 @@ fn syscall_write_segment(current_authority: borrow ProcessCurrent[current_proces
             if (length == 0 || length > KERNEL_BLOCK_SIZE) {
                 return SyscallIoResult::Errno(LINUX_EINVAL);
             }
-            zero_fill(syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8);
+            zero_fill(syscall_scratch[slot.index].file_buffer as []u8);
             match user_range_check_read(current_authority, address, length) {
                 UserReadRangeResult::Fault => { return SyscallIoResult::Errno(LINUX_EFAULT); }
                 UserReadRangeResult::Ok(range) => {
                     if (copy_from_user_span(
                             range,
-                            syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8,
+                            syscall_scratch[slot.index].file_buffer as []u8,
                             0, length) == false) {
                         return SyscallIoResult::Errno(LINUX_EFAULT);
                     }
                 }
             }
-            let content_buffer = syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8;
+            let content_buffer = syscall_scratch[slot.index].file_buffer as []u8;
             if (length > content_buffer.len) {
                 return SyscallIoResult::Errno(LINUX_EINVAL);
             }
@@ -2340,7 +2406,7 @@ fn syscall_write_segment(current_authority: borrow ProcessCurrent[current_proces
         if (kernel_syscall_terminal_is_open(fd) == false) {
             return SyscallIoResult::Errno(LINUX_EBADF);
         }
-        match syscall_terminal_write(current_authority, address, length) {
+        match syscall_terminal_write(slot, current_authority, address, length) {
             TerminalWriteResult::Errno(errno) => {
                 return SyscallIoResult::Errno(errno);
             }
@@ -2355,6 +2421,15 @@ fn syscall_write_segment(current_authority: borrow ProcessCurrent[current_proces
 
 // Shared scalar and vectored fd operation; byte counts and errors stay distinct.
 fn syscall_read_segment(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], fd: usize, address: usize, requested: usize)
+        -> SyscallIoResult !{unsafe} {
+    let slot: SyscallSlot[0] = syscall_slot_acquire();
+    let result: SyscallIoResult = syscall_read_segment_with(slot, current_authority, fd, address, requested);
+    syscall_slot_release(slot);
+    return result;
+}
+
+fn syscall_read_segment_with(slot: borrow SyscallSlot[0],
+        current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], fd: usize, address: usize, requested: usize)
         -> SyscallIoResult !{unsafe} {
         if (kernel_connected_fd_is_open(fd)) {
             let read_slot: usize =
@@ -2582,10 +2657,10 @@ fn syscall_read_segment(current_authority: borrow ProcessCurrent[current_process
         // GitHub issue #203: both branches stage through per-call scratch
         // and copy part of it out, so it starts zeroed: stage 2 has no
         // ranges to prove which bytes a fill wrote.
-        zero_fill(syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8);
+        zero_fill(syscall_scratch[slot.index].file_buffer as []u8);
         if (procfs_inode_is_ours(opened_inode)) {
             let staging_buffer: []u8 =
-                syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8;
+                syscall_scratch[slot.index].file_buffer as []u8;
             let total: usize = procfs_render_file(opened_inode,
                                                   staging_buffer);
             let offset: usize = kernel_syscall_file_offset(fd);
@@ -2601,7 +2676,7 @@ fn syscall_read_segment(current_authority: borrow ProcessCurrent[current_process
                 UserWriteRangeResult::Ok(range) => {
                     match copy_to_user_span(
                             range,
-                            syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8,
+                            syscall_scratch[slot.index].file_buffer as []u8,
                             offset, amount) {
                         UserWriteResult::Fault => {
                             return SyscallIoResult::Errno(LINUX_EFAULT);
@@ -2629,7 +2704,7 @@ fn syscall_read_segment(current_authority: borrow ProcessCurrent[current_process
             if (chunk_limit > KERNEL_BLOCK_SIZE) {
                 chunk_limit = KERNEL_BLOCK_SIZE;
             }
-            let staging_buffer = syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8;
+            let staging_buffer = syscall_scratch[slot.index].file_buffer as []u8;
             if (chunk_limit > staging_buffer.len) {
                 return SyscallIoResult::Errno(LINUX_EINVAL);
             }
@@ -2664,7 +2739,7 @@ fn syscall_read_segment(current_authority: borrow ProcessCurrent[current_process
                         UserWriteRangeResult::Ok(range) => {
                             match copy_to_user_span(
                                     range,
-                                    syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8,
+                                    syscall_scratch[slot.index].file_buffer as []u8,
                                     0, chunk) {
                                 UserWriteResult::Fault => {
                                     // The file offset has not advanced past
@@ -3375,6 +3450,15 @@ fn kernel_syscall_wait4_deliver(
 // reads remain EINVAL until a real caller needs them.
 private fn syscall_syslog(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], action: usize, address: usize, requested: usize)
         -> SyscallAction !{unsafe} {
+    let slot: SyscallSlot[0] = syscall_slot_acquire();
+    let result: SyscallAction = syscall_syslog_with(slot, current_authority, action, address, requested);
+    syscall_slot_release(slot);
+    return result;
+}
+
+private fn syscall_syslog_with(slot: borrow SyscallSlot[0],
+        current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], action: usize, address: usize, requested: usize)
+        -> SyscallAction !{unsafe} {
     if (action == LINUX_SYSLOG_ACTION_SIZE_BUFFER) {
         return SyscallAction::Resume(kernel_log_snapshot_capacity());
     }
@@ -3385,12 +3469,12 @@ private fn syscall_syslog(current_authority: borrow ProcessCurrent[current_proce
     let mut amount: usize = requested;
     if (amount > available) { amount = available; }
     if (amount == 0) { return SyscallAction::Resume(0); }
-    zero_fill(syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8);
+    zero_fill(syscall_scratch[slot.index].file_buffer as []u8);
     let mut copied: usize = 0;
     while (copied < amount) {
         let mut chunk: usize = amount - copied;
         if (chunk > KERNEL_BLOCK_SIZE) { chunk = KERNEL_BLOCK_SIZE; }
-        let staging_buffer = syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8;
+        let staging_buffer = syscall_scratch[slot.index].file_buffer as []u8;
         if (chunk > staging_buffer.len) {
             return SyscallAction::Resume(LINUX_EINVAL);
         }
@@ -3410,7 +3494,7 @@ private fn syscall_syslog(current_authority: borrow ProcessCurrent[current_proce
             UserWriteRangeResult::Ok(range) => {
                 match copy_to_user_span(
                         range,
-                        syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8,
+                        syscall_scratch[slot.index].file_buffer as []u8,
                         0, chunk) {
                     UserWriteResult::Fault => {
                         if (copied != 0) { return SyscallAction::Resume(copied); }
@@ -4010,6 +4094,15 @@ private fn syscall_ext2_rename_under(mount: Ext2Mount,
 // non-preemptible dispatch used to give for free.
 private fn syscall_mkdirat_under(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], guard: borrow Ext2MutationGuard[ext2_mutation_lock],
         x0: usize, x1: usize) -> usize !{unsafe} {
+    let slot: SyscallSlot[0] = syscall_slot_acquire();
+    let result: usize = syscall_mkdirat_under_with(slot, current_authority, guard, x0, x1);
+    syscall_slot_release(slot);
+    return result;
+}
+
+private fn syscall_mkdirat_under_with(slot: borrow SyscallSlot[0],
+        current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], guard: borrow Ext2MutationGuard[ext2_mutation_lock],
+        x0: usize, x1: usize) -> usize !{unsafe} {
     // mkdirat(dirfd, pathname, mode), GitHub issue #538. The mode is not
     // applied: every directory is 0755 and every process is root, which
     // is the whole of this kernel's permission model today.
@@ -4017,12 +4110,12 @@ private fn syscall_mkdirat_under(current_authority: borrow ProcessCurrent[curren
         SyscallFilesystemReady::Unconfigured => { return LINUX_EBADF; }
         SyscallFilesystemReady::Configured(found) => { found }
     };
-    let path_name: []u8 = match kernel_syscall_path_name(current_authority, x1) {
+    let path_name: []u8 = match kernel_syscall_path_name(slot, current_authority, x1) {
         SyscallPathResult::Fault => { return LINUX_EFAULT; }
         SyscallPathResult::Invalid => { return LINUX_ENOENT; }
         SyscallPathResult::Name(path) => { path }
     };
-    let path_view: [u8; 256..] = syscall_path_view_here();
+    let path_view: [u8; 256..] = syscall_path_view_here(slot);
     let absolute: bool = path_view[0] == 0x2F;
     let parent: SyscallParent = match kernel_syscall_parent_of(mount,
             x0, absolute, path_name) {
@@ -4048,6 +4141,15 @@ private fn syscall_mkdirat_under(current_authority: borrow ProcessCurrent[curren
 // non-preemptible dispatch used to give for free.
 private fn syscall_unlinkat_under(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], guard: borrow Ext2MutationGuard[ext2_mutation_lock],
         x0: usize, x1: usize, x2: usize) -> usize !{unsafe} {
+    let slot: SyscallSlot[0] = syscall_slot_acquire();
+    let result: usize = syscall_unlinkat_under_with(slot, current_authority, guard, x0, x1, x2);
+    syscall_slot_release(slot);
+    return result;
+}
+
+private fn syscall_unlinkat_under_with(slot: borrow SyscallSlot[0],
+        current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], guard: borrow Ext2MutationGuard[ext2_mutation_lock],
+        x0: usize, x1: usize, x2: usize) -> usize !{unsafe} {
     // unlinkat(dirfd, pathname, flags), GitHub issue #538: unlink with no
     // flag, rmdir with AT_REMOVEDIR, and EINVAL for any other flag.
     if (x2 != 0 && x2 != LINUX_AT_REMOVEDIR) {
@@ -4057,12 +4159,12 @@ private fn syscall_unlinkat_under(current_authority: borrow ProcessCurrent[curre
         SyscallFilesystemReady::Unconfigured => { return LINUX_EBADF; }
         SyscallFilesystemReady::Configured(found) => { found }
     };
-    let path_name: []u8 = match kernel_syscall_path_name(current_authority, x1) {
+    let path_name: []u8 = match kernel_syscall_path_name(slot, current_authority, x1) {
         SyscallPathResult::Fault => { return LINUX_EFAULT; }
         SyscallPathResult::Invalid => { return LINUX_ENOENT; }
         SyscallPathResult::Name(path) => { path }
     };
-    let path_view: [u8; 256..] = syscall_path_view_here();
+    let path_view: [u8; 256..] = syscall_path_view_here(slot);
     let absolute: bool = path_view[0] == 0x2F;
     let parent: SyscallParent = match kernel_syscall_parent_of(mount,
             x0, absolute, path_name) {
@@ -4095,6 +4197,15 @@ private fn syscall_unlinkat_under(current_authority: borrow ProcessCurrent[curre
 // non-preemptible dispatch used to give for free.
 private fn syscall_renameat_under(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], guard: borrow Ext2MutationGuard[ext2_mutation_lock],
         x0: usize, x1: usize, x2: usize, x3: usize) -> usize !{unsafe} {
+    let slot: SyscallSlot[0] = syscall_slot_acquire();
+    let result: usize = syscall_renameat_under_with(slot, current_authority, guard, x0, x1, x2, x3);
+    syscall_slot_release(slot);
+    return result;
+}
+
+private fn syscall_renameat_under_with(slot: borrow SyscallSlot[0],
+        current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], guard: borrow Ext2MutationGuard[ext2_mutation_lock],
+        x0: usize, x1: usize, x2: usize, x3: usize) -> usize !{unsafe} {
     // renameat(olddirfd, oldpath, newdirfd, newpath), GitHub issue #538.
     // Both paths are read through the one per-core path buffer, so the
     // old path's directory is resolved and its last component copied out
@@ -4103,12 +4214,12 @@ private fn syscall_renameat_under(current_authority: borrow ProcessCurrent[curre
         SyscallFilesystemReady::Unconfigured => { return LINUX_EBADF; }
         SyscallFilesystemReady::Configured(found) => { found }
     };
-    let old_path: []u8 = match kernel_syscall_path_name(current_authority, x1) {
+    let old_path: []u8 = match kernel_syscall_path_name(slot, current_authority, x1) {
         SyscallPathResult::Fault => { return LINUX_EFAULT; }
         SyscallPathResult::Invalid => { return LINUX_ENOENT; }
         SyscallPathResult::Name(path) => { path }
     };
-    let old_view: [u8; 256..] = syscall_path_view_here();
+    let old_view: [u8; 256..] = syscall_path_view_here(slot);
     let old_absolute: bool = old_view[0] == 0x2F;
     let old_parent: SyscallParent = match kernel_syscall_parent_of(mount,
             x0, old_absolute, old_path) {
@@ -4134,12 +4245,12 @@ private fn syscall_renameat_under(current_authority: borrow ProcessCurrent[curre
     slice_copy(old_name, old_leaf);
     let old_directory: usize = old_parent.inode;
 
-    let new_path: []u8 = match kernel_syscall_path_name(current_authority, x3) {
+    let new_path: []u8 = match kernel_syscall_path_name(slot, current_authority, x3) {
         SyscallPathResult::Fault => { return LINUX_EFAULT; }
         SyscallPathResult::Invalid => { return LINUX_ENOENT; }
         SyscallPathResult::Name(path) => { path }
     };
-    let new_view: [u8; 256..] = syscall_path_view_here();
+    let new_view: [u8; 256..] = syscall_path_view_here(slot);
     let new_absolute: bool = new_view[0] == 0x2F;
     let new_parent: SyscallParent = match kernel_syscall_parent_of(mount,
             x2, new_absolute, new_path) {
@@ -4164,6 +4275,16 @@ private fn syscall_renameat_under(current_authority: borrow ProcessCurrent[curre
 private fn syscall_bind_claimed(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], number: usize, x0: usize, x1: usize,
                                   x2: usize, x3: usize) -> SyscallAction
         !{unsafe} {
+    let slot: SyscallSlot[0] = syscall_slot_acquire();
+    let result: SyscallAction = syscall_bind_claimed_with(slot, current_authority, number, x0, x1, x2, x3);
+    syscall_slot_release(slot);
+    return result;
+}
+
+private fn syscall_bind_claimed_with(slot: borrow SyscallSlot[0],
+        current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], number: usize, x0: usize, x1: usize,
+                                  x2: usize, x3: usize) -> SyscallAction
+        !{unsafe} {
     syscall_test_evidence_record_bind();
     let bind_fd: usize =
         match kernel_listener_fd_lookup(x0) {
@@ -4176,19 +4297,19 @@ private fn syscall_bind_claimed(current_authority: borrow ProcessCurrent[current
         x2 < 16) { return SyscallAction::Resume(LINUX_EINVAL); }
     let mut sockaddr_len: usize = x2;
     if (sockaddr_len > 28) { sockaddr_len = 28; }
-    zero_fill(syscall_scratch[syscall_scratch_cpu_index()].sockaddr_buffer as []u8);
+    zero_fill(syscall_scratch[slot.index].sockaddr_buffer as []u8);
     match user_range_check_read(current_authority, x1, sockaddr_len) {
         UserReadRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
         UserReadRangeResult::Ok(range) => {
             if (copy_from_user_span(
                     range,
-                    syscall_scratch[syscall_scratch_cpu_index()].sockaddr_buffer as []u8,
+                    syscall_scratch[slot.index].sockaddr_buffer as []u8,
                     0, sockaddr_len) == false) {
                 return SyscallAction::Resume(LINUX_EFAULT);
             }
         }
     }
-    let address: []u8 = syscall_scratch[syscall_scratch_cpu_index()].sockaddr_buffer as []u8;
+    let address: []u8 = syscall_scratch[slot.index].sockaddr_buffer as []u8;
     if (address[0] == 2 && address[1] == 0) {
         if (address[4] != 0 || address[5] != 0 ||
             address[6] != 0 || address[7] != 0) {
@@ -5187,6 +5308,507 @@ fn syscall_reboot(magic1: usize, magic2: usize, command: usize)
     }
 }
 
+private fn syscall_openat_with(slot: borrow SyscallSlot[0],
+        current_authority: borrow ProcessCurrent[process, ProcessState::Running],
+        x0: usize, x1: usize, x2: usize)
+        -> SyscallAction !{unsafe} {
+    // openat(dirfd, pathname, flags): absolute paths start at the ext2
+    // root; relative paths use an open directory fd (or AT_FDCWD, whose
+    // unsigned value lies outside the descriptor namespace).
+    let mount: Ext2Mount = match syscall_filesystem_lookup() {
+        SyscallFilesystemReady::Unconfigured => { return SyscallAction::Resume(LINUX_EBADF); }
+        SyscallFilesystemReady::Configured(found) => { found }
+    };
+    let path_name: []u8 = match kernel_syscall_path_name(slot, current_authority, x1) {
+        SyscallPathResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
+        SyscallPathResult::Invalid => { return SyscallAction::Resume(LINUX_ENOENT); }
+        SyscallPathResult::Name(path) => { path }
+    };
+    match procfs_lookup(path_name) {
+        ProcfsLookupResult::Missing => {}
+        ProcfsLookupResult::Found(node) => {
+            let access_mode: usize = x2 & 3;
+            if (access_mode != 0 && (access_mode == 3 ||
+                    procfs_node_is_writable(node) == false)) {
+                return SyscallAction::Resume(LINUX_EACCES);
+            }
+            let fd: usize = match unified_fd_alloc(
+                    kernel_syscall_process_slot(), 0) {
+                UnifiedFdAllocResult::Full => {
+                    return SyscallAction::Resume(LINUX_EMFILE);
+                }
+                UnifiedFdAllocResult::Allocated(allocated) => { allocated }
+            };
+            return kernel_syscall_procfs_open(node, fd);
+        }
+    }
+    let path_view: [u8; 256..] = syscall_path_view_here(slot);
+    let mut lookup_inode: usize = 2;
+    if (path_view[0] != 0x2F && x0 != LINUX_AT_FDCWD) {
+        if (kernel_syscall_directory_is_open(x0) == false) {
+            return SyscallAction::Resume(LINUX_EBADF);
+        }
+        lookup_inode = kernel_syscall_directory_inode(x0);
+    }
+    match ext2_lookup_path_from(
+        mount,
+        lookup_inode,
+        path_name) {
+        Ext2LookupResult::Invalid => { return SyscallAction::Resume(LINUX_EINVAL); }
+        Ext2LookupResult::NotFound => {
+            return SyscallAction::Resume(LINUX_ENOENT);
+        }
+        Ext2LookupResult::Found(inode_number) => {
+            let access_mode: usize = x2 & 3;
+            match unified_fd_alloc(kernel_syscall_process_slot(), 0) {
+                UnifiedFdAllocResult::Full => {
+                    kernel_boot_log_resource_exhausted(
+                        "process fd table" as *u8,
+                        kernel_syscall_fd_limit_soft());
+                    return SyscallAction::Resume(LINUX_EMFILE);
+                }
+                UnifiedFdAllocResult::Allocated(fd) => {
+                    let inode_mode: usize = ext2_inode_mode(
+                        mount, inode_number);
+                    if ((inode_mode & 0xF000) == 0x4000) {
+                        match unified_directory_open(
+                                kernel_syscall_process_slot(), fd,
+                                inode_number) {
+                            UnifiedOpenResult::Invalid => {
+                                return SyscallAction::Resume(LINUX_EBADF);
+                            }
+                            UnifiedOpenResult::Full => {
+                                kernel_boot_log_resource_exhausted(
+                                    "shared object pool" as *u8,
+                                    unified_object_max_files());
+                                return SyscallAction::Resume(LINUX_ENFILE);
+                            }
+                            UnifiedOpenResult::Ok => {
+                                return SyscallAction::Resume(fd);
+                            }
+                        }
+                    }
+                    match unified_file_open(
+                            kernel_syscall_process_slot(), fd, inode_number,
+                            access_mode != 1, access_mode != 0) {
+                        UnifiedOpenResult::Invalid => {
+                            return SyscallAction::Resume(LINUX_EBADF);
+                        }
+                        UnifiedOpenResult::Full => {
+                            kernel_boot_log_resource_exhausted(
+                                "shared object pool" as *u8,
+                                unified_object_max_files());
+                            return SyscallAction::Resume(LINUX_ENFILE);
+                        }
+                        UnifiedOpenResult::Ok => { return SyscallAction::Resume(fd); }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fn syscall_openat(current_authority: borrow ProcessCurrent[process, ProcessState::Running],
+        x0: usize, x1: usize, x2: usize)
+        -> SyscallAction !{unsafe} {
+    let slot: SyscallSlot[0] = syscall_slot_acquire();
+    let action: SyscallAction = syscall_openat_with(slot, current_authority, x0, x1, x2);
+    syscall_slot_release(slot);
+    return action;
+}
+
+private fn syscall_faccessat_with(slot: borrow SyscallSlot[0],
+        current_authority: borrow ProcessCurrent[process, ProcessState::Running],
+        number: usize, x0: usize, x1: usize, x2: usize, x3: usize)
+        -> SyscallAction !{unsafe} {
+    // access(path, mode), faccessat(dirfd, path, mode), and faccessat2
+    // with its fourth flags argument share the inode-mode verdict.
+    // Real and effective identities are identical in this kernel, so
+    // AT_EACCESS selects the same mode check. Other flags require path
+    // behavior (such as no-follow or empty-path) that is not supported.
+    let mount: Ext2Mount = match syscall_filesystem_lookup() {
+        SyscallFilesystemReady::Unconfigured => { return SyscallAction::Resume(LINUX_EBADF); }
+        SyscallFilesystemReady::Configured(found) => { found }
+    };
+    let mut path_address: usize = x1;
+    let mut requested_mode: usize = x2;
+    let mut dirfd: usize = x0;
+    if (number == 21) {
+        path_address = x0;
+        requested_mode = x1;
+        dirfd = LINUX_AT_FDCWD;
+    }
+    if (requested_mode > 7 ||
+        (number == 439 && x3 != 0 && x3 != LINUX_AT_EACCESS)) {
+        return SyscallAction::Resume(LINUX_EINVAL);
+    }
+    let path_name: []u8 = match kernel_syscall_path_name(slot, current_authority, path_address) {
+        SyscallPathResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
+        SyscallPathResult::Invalid => { return SyscallAction::Resume(LINUX_ENOENT); }
+        SyscallPathResult::Name(path) => { path }
+    };
+    let path_view: [u8; 256..] = syscall_path_view_here(slot);
+    let mut lookup_inode: usize = 2;
+    if (path_view[0] != 0x2F && dirfd != LINUX_AT_FDCWD) {
+        if (kernel_syscall_directory_is_open(dirfd) == false) {
+            return SyscallAction::Resume(LINUX_EBADF);
+        }
+        lookup_inode = kernel_syscall_directory_inode(dirfd);
+    }
+    match ext2_lookup_path_from(
+            mount,
+            lookup_inode,
+            path_name) {
+        Ext2LookupResult::Invalid => { return SyscallAction::Resume(LINUX_EINVAL); }
+        Ext2LookupResult::NotFound => { return SyscallAction::Resume(LINUX_ENOENT); }
+        Ext2LookupResult::Found(inode_number) => {
+            let inode_mode: usize =
+                ext2_inode_mode(mount, inode_number);
+            if (syscall_inode_mode_allows(inode_mode, requested_mode)) {
+                return SyscallAction::Resume(0);
+            }
+            return SyscallAction::Resume(LINUX_EACCES);
+        }
+    }
+}
+
+private fn syscall_faccessat(current_authority: borrow ProcessCurrent[process, ProcessState::Running],
+        number: usize, x0: usize, x1: usize, x2: usize, x3: usize)
+        -> SyscallAction !{unsafe} {
+    let slot: SyscallSlot[0] = syscall_slot_acquire();
+    let action: SyscallAction = syscall_faccessat_with(slot, current_authority, number, x0, x1, x2, x3);
+    syscall_slot_release(slot);
+    return action;
+}
+
+private fn syscall_newfstatat_with(slot: borrow SyscallSlot[0],
+        current_authority: borrow ProcessCurrent[process, ProcessState::Running],
+        x0: usize, x1: usize, x2: usize)
+        -> SyscallAction !{unsafe} {
+    // newfstatat(AT_FDCWD, path, stat, flags): return the bounded ext2
+    // file, directory, or applet-link shape after validating the complete
+    // userspace result.
+    let path_name: []u8 = match kernel_syscall_path_name(slot, current_authority, x1) {
+        SyscallPathResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
+        SyscallPathResult::Invalid => { return SyscallAction::Resume(LINUX_ENOENT); }
+        SyscallPathResult::Name(path) => { path }
+    };
+    match procfs_lookup(path_name) {
+        ProcfsLookupResult::Missing => {}
+        ProcfsLookupResult::Found(node) => {
+            match user_range_check_write(current_authority, x2, 128) {
+                UserWriteRangeResult::Fault => {
+                    return SyscallAction::Resume(LINUX_EFAULT);
+                }
+                UserWriteRangeResult::Ok(range) => {
+                    let mut written = user_zero_fill(range);
+                    written = user_write_join(written, user_write_u64(range, 8, node.inode as u64));
+                    if (procfs_node_is_directory(node)) {
+                        written = user_write_join(written, user_write_u32(range, 16, 0x416D as u32));
+                        written = user_write_join(written, user_write_u32(range, 20, 2));
+                    } else {
+                        written = user_write_join(written, user_write_u32(range, 16, 0x8124 as u32));
+                        written = user_write_join(written, user_write_u32(range, 20, 1));
+                    }
+                    match written {
+                        UserWriteResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
+                        UserWriteResult::Written => { return SyscallAction::Resume(0); }
+                    }
+                }
+            }
+        }
+    }
+    let path_view: [u8; 256..] = syscall_path_view_here(slot);
+    let mut lookup_inode: usize = 2;
+    if (path_view[0] != 0x2F && x0 != LINUX_AT_FDCWD) {
+        if (kernel_syscall_directory_is_open(x0) == false) {
+            return SyscallAction::Resume(LINUX_EBADF);
+        }
+        lookup_inode = kernel_syscall_directory_inode(x0);
+    }
+    match user_range_check_write(current_authority, x2, 128) {
+        UserWriteRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
+        UserWriteRangeResult::Ok(precheck) => {}
+    }
+    let mount: Ext2Mount = match syscall_filesystem_lookup() {
+        SyscallFilesystemReady::Unconfigured => { return SyscallAction::Resume(LINUX_EBADF); }
+        SyscallFilesystemReady::Configured(found) => { found }
+    };
+    match ext2_lookup_path_from(
+            mount,
+            lookup_inode,
+            path_name) {
+        Ext2LookupResult::Invalid => { return SyscallAction::Resume(LINUX_EINVAL); }
+        Ext2LookupResult::NotFound => { return SyscallAction::Resume(LINUX_ENOENT); }
+        Ext2LookupResult::Found(inode_number) => {
+            let inode_mode: usize = ext2_inode_mode(
+                mount, inode_number);
+            if ((inode_mode & 0xF000) == 0x4000) {
+                match user_range_check_write(current_authority, x2, 128) {
+                    UserWriteRangeResult::Fault => {
+                        return SyscallAction::Resume(LINUX_EFAULT);
+                    }
+                    UserWriteRangeResult::Ok(range) => {
+                        let mut written = user_zero_fill(range);
+                        written = user_write_join(written, user_write_u64(range, 8, inode_number as u64));
+                        written = user_write_join(written, user_write_u32(range, 16, inode_mode as u32));
+                        written = user_write_join(written, user_write_u32(range, 20, 2));
+                        written = user_write_join(written, user_write_u64(
+                            range,
+                            48,
+                            ext2_inode_size(
+                                mount,
+                                inode_number) as u64));
+                        match written {
+                            UserWriteResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
+                            UserWriteResult::Written => { return SyscallAction::Resume(0); }
+                        }
+                    }
+                }
+            }
+            if (ext2_inode_is_symlink(
+                    mount, inode_number)) {
+                match user_range_check_write(current_authority, x2, 128) {
+                    UserWriteRangeResult::Fault => {
+                        return SyscallAction::Resume(LINUX_EFAULT);
+                    }
+                    UserWriteRangeResult::Ok(range) => {
+                        let mut written = user_zero_fill(range);
+                        written = user_write_join(written, user_write_u64(range, 8, inode_number as u64));
+                        // Present the ext2-resident BusyBox target as an
+                        // executable regular file to ash's command probe.
+                        written = user_write_join(written, user_write_u32(range, 16, 0x81ED as u32));
+                        written = user_write_join(written, user_write_u32(range, 20, 1));
+                        match written {
+                            UserWriteResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
+                            UserWriteResult::Written => { return SyscallAction::Resume(0); }
+                        }
+                    }
+                }
+            }
+            match user_range_check_write(current_authority, x2, 128) {
+                UserWriteRangeResult::Fault => {
+                    return SyscallAction::Resume(LINUX_EFAULT);
+                }
+                UserWriteRangeResult::Ok(range) => {
+                    let mut written = user_zero_fill(range);
+                    written = user_write_join(written, user_write_u64(range, 8, inode_number as u64));
+                    written = user_write_join(written, user_write_u32(range, 16, 0x81A4 as u32));
+                    written = user_write_join(written, user_write_u32(range, 20, 1));
+                    written = user_write_join(written, user_write_u64(range, 48,
+                                   ext2_inode_size(
+                                       mount,
+                                       inode_number) as u64));
+                    written = user_write_join(written, user_write_u32(range, 56, 1024));
+                    written = user_write_join(written, user_write_u64(range, 64, 2));
+                    match written {
+                        UserWriteResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
+                        UserWriteResult::Written => { return SyscallAction::Resume(0); }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fn syscall_newfstatat(current_authority: borrow ProcessCurrent[process, ProcessState::Running],
+        x0: usize, x1: usize, x2: usize)
+        -> SyscallAction !{unsafe} {
+    let slot: SyscallSlot[0] = syscall_slot_acquire();
+    let action: SyscallAction = syscall_newfstatat_with(slot, current_authority, x0, x1, x2);
+    syscall_slot_release(slot);
+    return action;
+}
+
+private fn syscall_chdir_with(slot: borrow SyscallSlot[0],
+        current_authority: borrow ProcessCurrent[process, ProcessState::Running],
+        x0: usize)
+        -> SyscallAction !{unsafe} {
+    match user_range_check_read(current_authority, x0, 2) {
+        UserReadRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
+        UserReadRangeResult::Ok(range) => {
+            zero_fill(syscall_scratch[slot.index].path_buffer as []u8);
+            let path_view: []u8 = syscall_scratch[slot.index].path_buffer as []u8;
+            if (copy_from_user(range, path_view[0..<2]) &&
+                    (path_view[0] == 0x2F || path_view[0] == 0x2E) &&
+                    path_view[1] == 0) {
+                return SyscallAction::Resume(0);
+            }
+        }
+    }
+    return SyscallAction::Resume(LINUX_ENOENT);
+}
+
+private fn syscall_chdir(current_authority: borrow ProcessCurrent[process, ProcessState::Running],
+        x0: usize)
+        -> SyscallAction !{unsafe} {
+    let slot: SyscallSlot[0] = syscall_slot_acquire();
+    let action: SyscallAction = syscall_chdir_with(slot, current_authority, x0);
+    syscall_slot_release(slot);
+    return action;
+}
+
+private fn syscall_prlimit64_with(slot: borrow SyscallSlot[0],
+        current_authority: borrow ProcessCurrent[process, ProcessState::Running],
+        x0: usize, x1: usize, x2: usize, x3: usize)
+        -> SyscallAction !{unsafe} {
+    // pid 0 is "me". A real pid is accepted only when it is this
+    // process's own: reaching into another process's descriptor
+    // limits mid-syscall is a cross-process write this kernel has no
+    // safe path for, and ESRCH is what Linux reports for a pid it
+    // will not act on.
+    if (x0 != 0 && x0 != kernel_process_current_pid()) {
+        return SyscallAction::Resume(LINUX_ESRCH);
+    }
+    // A resource number Linux does not have is EINVAL there, and was
+    // silently "unlimited" here -- which answered a question about a
+    // resource that does not exist. RLIM_NLIMITS is 16.
+    if (x1 >= LINUX_RLIM_NLIMITS) {
+        return SyscallAction::Resume(LINUX_EINVAL);
+    }
+    // GitHub issue #203: per-call scratch. The two 8-byte stores below
+    // cover the buffer, but stage 2 tracks arrays whole, so it is
+    // zero-filled first; without this fill the copy-out is rejected.
+    zero_fill(syscall_scratch[slot.index].rlimit_buffer as []u8);
+    let mut soft: usize = LINUX_RLIM64_INFINITY;
+    let mut hard: usize = LINUX_RLIM64_INFINITY;
+    if (x1 == LINUX_RLIMIT_NOFILE) {
+        match unified_process_fd_limit(kernel_syscall_process_slot()) {
+            UnifiedFdLimitResult::Missing => {
+                return SyscallAction::Resume(LINUX_EINVAL);
+            }
+            UnifiedFdLimitResult::Found(pair) => {
+                let (live_soft, live_hard) = pair;
+                soft = live_soft;
+                hard = live_hard;
+            }
+        }
+    }
+    // The OLD value is reported before the new one is applied, which
+    // is prlimit64's own contract and the reason one call can do both.
+    if (x3 != 0) {
+        match user_range_check_write(current_authority, x3,
+                                     sizeof(usize) * 2) {
+            UserWriteRangeResult::Fault => {
+                return SyscallAction::Resume(LINUX_EFAULT);
+            }
+            UserWriteRangeResult::Ok(range) => {
+                let old_bytes = syscall_scratch[slot.index].rlimit_buffer as []u8;
+                syscall_rlimit_store(old_bytes[0..<8], soft);
+                syscall_rlimit_store(old_bytes[8..<16], hard);
+                let reported: []u8 = old_bytes[0..<16];
+                match copy_to_user(range, reported) {
+                    UserWriteResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
+                    UserWriteResult::Written => {}
+                }
+            }
+        }
+    }
+    if (x2 == 0) { return SyscallAction::Resume(0); }
+    match user_range_check_read(current_authority, x2,
+                                sizeof(usize) * 2) {
+        UserReadRangeResult::Fault => {
+            return SyscallAction::Resume(LINUX_EFAULT);
+        }
+        UserReadRangeResult::Ok(range) => {
+            if (copy_from_user_span(
+                    range,
+                    syscall_scratch[slot.index].rlimit_buffer as []u8,
+                    0, sizeof(usize) * 2) == false) {
+                return SyscallAction::Resume(LINUX_EFAULT);
+            }
+        }
+    }
+    let new_bytes = syscall_scratch[slot.index].rlimit_buffer as []u8;
+    let new_soft: usize = syscall_rlimit_load(new_bytes[0..<8]);
+    let new_hard: usize = syscall_rlimit_load(new_bytes[8..<16]);
+    if (new_soft > new_hard) { return SyscallAction::Resume(LINUX_EINVAL); }
+    // Every other resource Linux HAS is genuinely unlimited in this
+    // kernel -- there is no storage sized by one and nothing that
+    // checks one -- so a write to it is accepted and there is nothing
+    // to store. That is the true answer; a resource number Linux does
+    // not have at all was refused above.
+    if (x1 != LINUX_RLIMIT_NOFILE) { return SyscallAction::Resume(0); }
+    match unified_process_fd_limit_configure(
+            kernel_syscall_process_slot(), new_soft, new_hard) {
+        UnifiedFdResult::Invalid => {
+            return SyscallAction::Resume(LINUX_EINVAL);
+        }
+        UnifiedFdResult::Ok => { return SyscallAction::Resume(0); }
+    }
+}
+
+private fn syscall_prlimit64(current_authority: borrow ProcessCurrent[process, ProcessState::Running],
+        x0: usize, x1: usize, x2: usize, x3: usize)
+        -> SyscallAction !{unsafe} {
+    let slot: SyscallSlot[0] = syscall_slot_acquire();
+    let action: SyscallAction = syscall_prlimit64_with(slot, current_authority, x0, x1, x2, x3);
+    syscall_slot_release(slot);
+    return action;
+}
+
+private fn syscall_uname_with(slot: borrow SyscallSlot[0],
+        current_authority: borrow ProcessCurrent[process, ProcessState::Running],
+        x0: usize)
+        -> SyscallAction !{unsafe} {
+    match user_range_check_write(current_authority, x0, sizeof(Utsname)) {
+        UserWriteRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
+        UserWriteRangeResult::Ok(range) => {
+            // GitHub issue #203: zero every byte, the unused tail of each
+            // field included, before any view of the buffer exists;
+            // without this fill the copy-out is rejected.
+            zero_fill(syscall_scratch[slot.index].uname_buffer as []u8);
+            let uname_bytes = syscall_scratch[slot.index].uname_buffer as []u8;
+            uname_write_field(uname_bytes[
+                                  offsetof(Utsname, sysname)..<
+                                  offsetof(Utsname, sysname) +
+                                      UTSNAME_FIELD_SIZE],
+                              bs"Linux");
+            uname_write_field(uname_bytes[
+                                  offsetof(Utsname, nodename)..<
+                                  offsetof(Utsname, nodename) +
+                                      UTSNAME_FIELD_SIZE],
+                              bs"takibi");
+            uname_write_field(uname_bytes[
+                                  offsetof(Utsname, release)..<
+                                  offsetof(Utsname, release) +
+                                      UTSNAME_FIELD_SIZE],
+                              bs"6.1.0-takibi");
+            uname_write_field(uname_bytes[
+                                  offsetof(Utsname, version)..<
+                                  offsetof(Utsname, version) +
+                                      UTSNAME_FIELD_SIZE],
+                              bs"#1");
+            uname_write_field(uname_bytes[
+                                  offsetof(Utsname, machine)..<
+                                  offsetof(Utsname, machine) +
+                                      UTSNAME_FIELD_SIZE],
+                              bs"aarch64");
+            uname_write_field(uname_bytes[
+                                  offsetof(Utsname, domainname)..<
+                                  offsetof(Utsname, domainname) +
+                                      UTSNAME_FIELD_SIZE],
+                              bs"(none)");
+            let source: []u8 = uname_bytes[0..<sizeof(Utsname)];
+            match copy_to_user(range, source) {
+                UserWriteResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
+                UserWriteResult::Written => {
+                    return SyscallAction::Resume(0);
+                }
+            }
+        }
+    }
+}
+
+private fn syscall_uname(current_authority: borrow ProcessCurrent[process, ProcessState::Running],
+        x0: usize)
+        -> SyscallAction !{unsafe} {
+    let slot: SyscallSlot[0] = syscall_slot_acquire();
+    let action: SyscallAction = syscall_uname_with(slot, current_authority, x0);
+    syscall_slot_release(slot);
+    return action;
+}
+
 fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usize,
                            x2: usize, x3: usize, x4: usize, frame: MaybeFrame)
         -> SyscallAction !{unsafe} {
@@ -5457,100 +6079,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     }
 
     if (number == 56) {
-        // openat(dirfd, pathname, flags): absolute paths start at the ext2
-        // root; relative paths use an open directory fd (or AT_FDCWD, whose
-        // unsigned value lies outside the descriptor namespace).
-        let mount: Ext2Mount = match syscall_filesystem_lookup() {
-            SyscallFilesystemReady::Unconfigured => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EBADF), current_authority); }
-            SyscallFilesystemReady::Configured(found) => { found }
-        };
-        let path_name: []u8 = match kernel_syscall_path_name(current_authority, x1) {
-            SyscallPathResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
-            SyscallPathResult::Invalid => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_ENOENT), current_authority); }
-            SyscallPathResult::Name(path) => { path }
-        };
-        match procfs_lookup(path_name) {
-            ProcfsLookupResult::Missing => {}
-            ProcfsLookupResult::Found(node) => {
-                let access_mode: usize = x2 & 3;
-                if (access_mode != 0 && (access_mode == 3 ||
-                        procfs_node_is_writable(node) == false)) {
-                    return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EACCES), current_authority);
-                }
-                let fd: usize = match unified_fd_alloc(
-                        kernel_syscall_process_slot(), 0) {
-                    UnifiedFdAllocResult::Full => {
-                        return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EMFILE), current_authority);
-                    }
-                    UnifiedFdAllocResult::Allocated(allocated) => { allocated }
-                };
-                return syscall_finish_current(frame, kernel_syscall_procfs_open(node, fd), current_authority);
-            }
-        }
-        let path_view: [u8; 256..] = syscall_path_view_here();
-        let mut lookup_inode: usize = 2;
-        if (path_view[0] != 0x2F && x0 != LINUX_AT_FDCWD) {
-            if (kernel_syscall_directory_is_open(x0) == false) {
-                return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EBADF), current_authority);
-            }
-            lookup_inode = kernel_syscall_directory_inode(x0);
-        }
-        match ext2_lookup_path_from(
-            mount,
-            lookup_inode,
-            path_name) {
-            Ext2LookupResult::Invalid => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINVAL), current_authority); }
-            Ext2LookupResult::NotFound => {
-                return syscall_finish_current(frame, SyscallAction::Resume(LINUX_ENOENT), current_authority);
-            }
-            Ext2LookupResult::Found(inode_number) => {
-                let access_mode: usize = x2 & 3;
-                match unified_fd_alloc(kernel_syscall_process_slot(), 0) {
-                    UnifiedFdAllocResult::Full => {
-                        kernel_boot_log_resource_exhausted(
-                            "process fd table" as *u8,
-                            kernel_syscall_fd_limit_soft());
-                        return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EMFILE), current_authority);
-                    }
-                    UnifiedFdAllocResult::Allocated(fd) => {
-                        let inode_mode: usize = ext2_inode_mode(
-                            mount, inode_number);
-                        if ((inode_mode & 0xF000) == 0x4000) {
-                            match unified_directory_open(
-                                    kernel_syscall_process_slot(), fd,
-                                    inode_number) {
-                                UnifiedOpenResult::Invalid => {
-                                    return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EBADF), current_authority);
-                                }
-                                UnifiedOpenResult::Full => {
-                                    kernel_boot_log_resource_exhausted(
-                                        "shared object pool" as *u8,
-                                        unified_object_max_files());
-                                    return syscall_finish_current(frame, SyscallAction::Resume(LINUX_ENFILE), current_authority);
-                                }
-                                UnifiedOpenResult::Ok => {
-                                    return syscall_finish_current(frame, SyscallAction::Resume(fd), current_authority);
-                                }
-                            }
-                        }
-                        match unified_file_open(
-                                kernel_syscall_process_slot(), fd, inode_number,
-                                access_mode != 1, access_mode != 0) {
-                            UnifiedOpenResult::Invalid => {
-                                return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EBADF), current_authority);
-                            }
-                            UnifiedOpenResult::Full => {
-                                kernel_boot_log_resource_exhausted(
-                                    "shared object pool" as *u8,
-                                    unified_object_max_files());
-                                return syscall_finish_current(frame, SyscallAction::Resume(LINUX_ENFILE), current_authority);
-                            }
-                            UnifiedOpenResult::Ok => { return syscall_finish_current(frame, SyscallAction::Resume(fd), current_authority); }
-                        }
-                    }
-                }
-            }
-        }
+        return syscall_finish_current(frame, syscall_openat(current_authority, x0, x1, x2), current_authority);
     }
 
     if (number == 34) {
@@ -5582,182 +6111,11 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     }
 
     if (number == 21 || number == 48 || number == 439) {
-        // access(path, mode), faccessat(dirfd, path, mode), and faccessat2
-        // with its fourth flags argument share the inode-mode verdict.
-        // Real and effective identities are identical in this kernel, so
-        // AT_EACCESS selects the same mode check. Other flags require path
-        // behavior (such as no-follow or empty-path) that is not supported.
-        let mount: Ext2Mount = match syscall_filesystem_lookup() {
-            SyscallFilesystemReady::Unconfigured => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EBADF), current_authority); }
-            SyscallFilesystemReady::Configured(found) => { found }
-        };
-        let mut path_address: usize = x1;
-        let mut requested_mode: usize = x2;
-        let mut dirfd: usize = x0;
-        if (number == 21) {
-            path_address = x0;
-            requested_mode = x1;
-            dirfd = LINUX_AT_FDCWD;
-        }
-        if (requested_mode > 7 ||
-            (number == 439 && x3 != 0 && x3 != LINUX_AT_EACCESS)) {
-            return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINVAL), current_authority);
-        }
-        let path_name: []u8 = match kernel_syscall_path_name(current_authority, path_address) {
-            SyscallPathResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
-            SyscallPathResult::Invalid => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_ENOENT), current_authority); }
-            SyscallPathResult::Name(path) => { path }
-        };
-        let path_view: [u8; 256..] = syscall_path_view_here();
-        let mut lookup_inode: usize = 2;
-        if (path_view[0] != 0x2F && dirfd != LINUX_AT_FDCWD) {
-            if (kernel_syscall_directory_is_open(dirfd) == false) {
-                return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EBADF), current_authority);
-            }
-            lookup_inode = kernel_syscall_directory_inode(dirfd);
-        }
-        match ext2_lookup_path_from(
-                mount,
-                lookup_inode,
-                path_name) {
-            Ext2LookupResult::Invalid => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINVAL), current_authority); }
-            Ext2LookupResult::NotFound => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_ENOENT), current_authority); }
-            Ext2LookupResult::Found(inode_number) => {
-                let inode_mode: usize =
-                    ext2_inode_mode(mount, inode_number);
-                if (syscall_inode_mode_allows(inode_mode, requested_mode)) {
-                    return syscall_finish_current(frame, SyscallAction::Resume(0), current_authority);
-                }
-                return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EACCES), current_authority);
-            }
-        }
+        return syscall_finish_current(frame, syscall_faccessat(current_authority, number, x0, x1, x2, x3), current_authority);
     }
 
     if (number == 79) {
-        // newfstatat(AT_FDCWD, path, stat, flags): return the bounded ext2
-        // file, directory, or applet-link shape after validating the complete
-        // userspace result.
-        let path_name: []u8 = match kernel_syscall_path_name(current_authority, x1) {
-            SyscallPathResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
-            SyscallPathResult::Invalid => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_ENOENT), current_authority); }
-            SyscallPathResult::Name(path) => { path }
-        };
-        match procfs_lookup(path_name) {
-            ProcfsLookupResult::Missing => {}
-            ProcfsLookupResult::Found(node) => {
-                match user_range_check_write(current_authority, x2, 128) {
-                    UserWriteRangeResult::Fault => {
-                        return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
-                    }
-                    UserWriteRangeResult::Ok(range) => {
-                        let mut written = user_zero_fill(range);
-                        written = user_write_join(written, user_write_u64(range, 8, node.inode as u64));
-                        if (procfs_node_is_directory(node)) {
-                            written = user_write_join(written, user_write_u32(range, 16, 0x416D as u32));
-                            written = user_write_join(written, user_write_u32(range, 20, 2));
-                        } else {
-                            written = user_write_join(written, user_write_u32(range, 16, 0x8124 as u32));
-                            written = user_write_join(written, user_write_u32(range, 20, 1));
-                        }
-                        match written {
-                            UserWriteResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
-                            UserWriteResult::Written => { return syscall_finish_current(frame, SyscallAction::Resume(0), current_authority); }
-                        }
-                    }
-                }
-            }
-        }
-        let path_view: [u8; 256..] = syscall_path_view_here();
-        let mut lookup_inode: usize = 2;
-        if (path_view[0] != 0x2F && x0 != LINUX_AT_FDCWD) {
-            if (kernel_syscall_directory_is_open(x0) == false) {
-                return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EBADF), current_authority);
-            }
-            lookup_inode = kernel_syscall_directory_inode(x0);
-        }
-        match user_range_check_write(current_authority, x2, 128) {
-            UserWriteRangeResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
-            UserWriteRangeResult::Ok(precheck) => {}
-        }
-        let mount: Ext2Mount = match syscall_filesystem_lookup() {
-            SyscallFilesystemReady::Unconfigured => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EBADF), current_authority); }
-            SyscallFilesystemReady::Configured(found) => { found }
-        };
-        match ext2_lookup_path_from(
-                mount,
-                lookup_inode,
-                path_name) {
-            Ext2LookupResult::Invalid => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINVAL), current_authority); }
-            Ext2LookupResult::NotFound => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_ENOENT), current_authority); }
-            Ext2LookupResult::Found(inode_number) => {
-                let inode_mode: usize = ext2_inode_mode(
-                    mount, inode_number);
-                if ((inode_mode & 0xF000) == 0x4000) {
-                    match user_range_check_write(current_authority, x2, 128) {
-                        UserWriteRangeResult::Fault => {
-                            return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
-                        }
-                        UserWriteRangeResult::Ok(range) => {
-                            let mut written = user_zero_fill(range);
-                            written = user_write_join(written, user_write_u64(range, 8, inode_number as u64));
-                            written = user_write_join(written, user_write_u32(range, 16, inode_mode as u32));
-                            written = user_write_join(written, user_write_u32(range, 20, 2));
-                            written = user_write_join(written, user_write_u64(
-                                range,
-                                48,
-                                ext2_inode_size(
-                                    mount,
-                                    inode_number) as u64));
-                            match written {
-                                UserWriteResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
-                                UserWriteResult::Written => { return syscall_finish_current(frame, SyscallAction::Resume(0), current_authority); }
-                            }
-                        }
-                    }
-                }
-                if (ext2_inode_is_symlink(
-                        mount, inode_number)) {
-                    match user_range_check_write(current_authority, x2, 128) {
-                        UserWriteRangeResult::Fault => {
-                            return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
-                        }
-                        UserWriteRangeResult::Ok(range) => {
-                            let mut written = user_zero_fill(range);
-                            written = user_write_join(written, user_write_u64(range, 8, inode_number as u64));
-                            // Present the ext2-resident BusyBox target as an
-                            // executable regular file to ash's command probe.
-                            written = user_write_join(written, user_write_u32(range, 16, 0x81ED as u32));
-                            written = user_write_join(written, user_write_u32(range, 20, 1));
-                            match written {
-                                UserWriteResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
-                                UserWriteResult::Written => { return syscall_finish_current(frame, SyscallAction::Resume(0), current_authority); }
-                            }
-                        }
-                    }
-                }
-                match user_range_check_write(current_authority, x2, 128) {
-                    UserWriteRangeResult::Fault => {
-                        return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
-                    }
-                    UserWriteRangeResult::Ok(range) => {
-                        let mut written = user_zero_fill(range);
-                        written = user_write_join(written, user_write_u64(range, 8, inode_number as u64));
-                        written = user_write_join(written, user_write_u32(range, 16, 0x81A4 as u32));
-                        written = user_write_join(written, user_write_u32(range, 20, 1));
-                        written = user_write_join(written, user_write_u64(range, 48,
-                                       ext2_inode_size(
-                                           mount,
-                                           inode_number) as u64));
-                        written = user_write_join(written, user_write_u32(range, 56, 1024));
-                        written = user_write_join(written, user_write_u64(range, 64, 2));
-                        match written {
-                            UserWriteResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
-                            UserWriteResult::Written => { return syscall_finish_current(frame, SyscallAction::Resume(0), current_authority); }
-                        }
-                    }
-                }
-            }
-        }
+        return syscall_finish_current(frame, syscall_newfstatat(current_authority, x0, x1, x2), current_authority);
     }
 
     if (number == AARCH64_NR_IOCTL) {
@@ -6309,19 +6667,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         return syscall_finish_current(frame, SyscallAction::Resume(2), current_authority);
     }
     if (number == AARCH64_NR_CHDIR) {
-        match user_range_check_read(current_authority, x0, 2) {
-            UserReadRangeResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
-            UserReadRangeResult::Ok(range) => {
-                zero_fill(syscall_scratch[syscall_scratch_cpu_index()].path_buffer as []u8);
-                let path_view: []u8 = syscall_scratch[syscall_scratch_cpu_index()].path_buffer as []u8;
-                if (copy_from_user(range, path_view[0..<2]) &&
-                        (path_view[0] == 0x2F || path_view[0] == 0x2E) &&
-                        path_view[1] == 0) {
-                    return syscall_finish_current(frame, SyscallAction::Resume(0), current_authority);
-                }
-            }
-        }
-        return syscall_finish_current(frame, SyscallAction::Resume(LINUX_ENOENT), current_authority);
+        return syscall_finish_current(frame, syscall_chdir(current_authority, x0), current_authority);
     }
     if (number == AARCH64_NR_SETITIMER) {
         // setitimer(): HTTPd's request timeout is unnecessary for the single
@@ -6876,139 +7222,10 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         }
     }
     if (number == AARCH64_NR_PRLIMIT64) {
-        // pid 0 is "me". A real pid is accepted only when it is this
-        // process's own: reaching into another process's descriptor
-        // limits mid-syscall is a cross-process write this kernel has no
-        // safe path for, and ESRCH is what Linux reports for a pid it
-        // will not act on.
-        if (x0 != 0 && x0 != kernel_process_current_pid()) {
-            return syscall_finish_current(frame, SyscallAction::Resume(LINUX_ESRCH), current_authority);
-        }
-        // A resource number Linux does not have is EINVAL there, and was
-        // silently "unlimited" here -- which answered a question about a
-        // resource that does not exist. RLIM_NLIMITS is 16.
-        if (x1 >= LINUX_RLIM_NLIMITS) {
-            return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINVAL), current_authority);
-        }
-        // GitHub issue #203: per-call scratch. The two 8-byte stores below
-        // cover the buffer, but stage 2 tracks arrays whole, so it is
-        // zero-filled first; without this fill the copy-out is rejected.
-        zero_fill(syscall_scratch[syscall_scratch_cpu_index()].rlimit_buffer as []u8);
-        let mut soft: usize = LINUX_RLIM64_INFINITY;
-        let mut hard: usize = LINUX_RLIM64_INFINITY;
-        if (x1 == LINUX_RLIMIT_NOFILE) {
-            match unified_process_fd_limit(kernel_syscall_process_slot()) {
-                UnifiedFdLimitResult::Missing => {
-                    return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINVAL), current_authority);
-                }
-                UnifiedFdLimitResult::Found(pair) => {
-                    let (live_soft, live_hard) = pair;
-                    soft = live_soft;
-                    hard = live_hard;
-                }
-            }
-        }
-        // The OLD value is reported before the new one is applied, which
-        // is prlimit64's own contract and the reason one call can do both.
-        if (x3 != 0) {
-            match user_range_check_write(current_authority, x3,
-                                         sizeof(usize) * 2) {
-                UserWriteRangeResult::Fault => {
-                    return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
-                }
-                UserWriteRangeResult::Ok(range) => {
-                    let old_bytes = syscall_scratch[syscall_scratch_cpu_index()].rlimit_buffer as []u8;
-                    syscall_rlimit_store(old_bytes[0..<8], soft);
-                    syscall_rlimit_store(old_bytes[8..<16], hard);
-                    let reported: []u8 = old_bytes[0..<16];
-                    match copy_to_user(range, reported) {
-                        UserWriteResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
-                        UserWriteResult::Written => {}
-                    }
-                }
-            }
-        }
-        if (x2 == 0) { return syscall_finish_current(frame, SyscallAction::Resume(0), current_authority); }
-        match user_range_check_read(current_authority, x2,
-                                    sizeof(usize) * 2) {
-            UserReadRangeResult::Fault => {
-                return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
-            }
-            UserReadRangeResult::Ok(range) => {
-                if (copy_from_user_span(
-                        range,
-                        syscall_scratch[syscall_scratch_cpu_index()].rlimit_buffer as []u8,
-                        0, sizeof(usize) * 2) == false) {
-                    return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
-                }
-            }
-        }
-        let new_bytes = syscall_scratch[syscall_scratch_cpu_index()].rlimit_buffer as []u8;
-        let new_soft: usize = syscall_rlimit_load(new_bytes[0..<8]);
-        let new_hard: usize = syscall_rlimit_load(new_bytes[8..<16]);
-        if (new_soft > new_hard) { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINVAL), current_authority); }
-        // Every other resource Linux HAS is genuinely unlimited in this
-        // kernel -- there is no storage sized by one and nothing that
-        // checks one -- so a write to it is accepted and there is nothing
-        // to store. That is the true answer; a resource number Linux does
-        // not have at all was refused above.
-        if (x1 != LINUX_RLIMIT_NOFILE) { return syscall_finish_current(frame, SyscallAction::Resume(0), current_authority); }
-        match unified_process_fd_limit_configure(
-                kernel_syscall_process_slot(), new_soft, new_hard) {
-            UnifiedFdResult::Invalid => {
-                return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINVAL), current_authority);
-            }
-            UnifiedFdResult::Ok => { return syscall_finish_current(frame, SyscallAction::Resume(0), current_authority); }
-        }
+        return syscall_finish_current(frame, syscall_prlimit64(current_authority, x0, x1, x2, x3), current_authority);
     }
     if (number == AARCH64_NR_UNAME) {
-        match user_range_check_write(current_authority, x0, sizeof(Utsname)) {
-            UserWriteRangeResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
-            UserWriteRangeResult::Ok(range) => {
-                // GitHub issue #203: zero every byte, the unused tail of each
-                // field included, before any view of the buffer exists;
-                // without this fill the copy-out is rejected.
-                zero_fill(syscall_scratch[syscall_scratch_cpu_index()].uname_buffer as []u8);
-                let uname_bytes = syscall_scratch[syscall_scratch_cpu_index()].uname_buffer as []u8;
-                uname_write_field(uname_bytes[
-                                      offsetof(Utsname, sysname)..<
-                                      offsetof(Utsname, sysname) +
-                                          UTSNAME_FIELD_SIZE],
-                                  bs"Linux");
-                uname_write_field(uname_bytes[
-                                      offsetof(Utsname, nodename)..<
-                                      offsetof(Utsname, nodename) +
-                                          UTSNAME_FIELD_SIZE],
-                                  bs"takibi");
-                uname_write_field(uname_bytes[
-                                      offsetof(Utsname, release)..<
-                                      offsetof(Utsname, release) +
-                                          UTSNAME_FIELD_SIZE],
-                                  bs"6.1.0-takibi");
-                uname_write_field(uname_bytes[
-                                      offsetof(Utsname, version)..<
-                                      offsetof(Utsname, version) +
-                                          UTSNAME_FIELD_SIZE],
-                                  bs"#1");
-                uname_write_field(uname_bytes[
-                                      offsetof(Utsname, machine)..<
-                                      offsetof(Utsname, machine) +
-                                          UTSNAME_FIELD_SIZE],
-                                  bs"aarch64");
-                uname_write_field(uname_bytes[
-                                      offsetof(Utsname, domainname)..<
-                                      offsetof(Utsname, domainname) +
-                                          UTSNAME_FIELD_SIZE],
-                                  bs"(none)");
-                let source: []u8 = uname_bytes[0..<sizeof(Utsname)];
-                match copy_to_user(range, source) {
-                    UserWriteResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
-                    UserWriteResult::Written => {
-                        return syscall_finish_current(frame, SyscallAction::Resume(0), current_authority);
-                    }
-                }
-            }
-        }
+        return syscall_finish_current(frame, syscall_uname(current_authority, x0), current_authority);
     }
     // GitHub issue #640: no arm above took this number. Record who reached
     // it, quietly -- a UART line here broke the lanes that compare ash's
@@ -7510,15 +7727,15 @@ fn kernel_syscall_subset_probe() -> bool !{unsafe} {
     }
 }
 
-// GitHub issue #453. Persistent syscall state belongs to ProcessRecord and
-// transient buffers belong to the executing core, so distinct active cores do
-// not share mutable handler state. On one core a timer interrupt already
-// arrives inside a syscall -- interrupts are unmasked on EL0 entry -- but the
-// switch is deferred to kernel_process_syscall_return_schedule. Enabling
-// kernel preemption would let another handler overwrite that core's scratch.
+// GitHub issue #453. Persistent syscall state belongs to ProcessRecord, and
+// the transient buffers are SyscallSlot pool slots (#638), which survive
+// preemption as they are. What still belongs to the executing core is
+// syscall_ext2_reader. On one core a timer interrupt already arrives inside
+// a syscall -- interrupts are unmasked on EL0 entry -- but the switch is
+// deferred to kernel_process_syscall_return_schedule.
 fn syscall_execution_model_assumption() {
     static_assert(KERNEL_PREEMPTIBLE == 0,
-                  "per-core syscall scratch and exec argument handoffs cannot survive preemption by another handler");
+                  "syscall_ext2_reader is per-CPU state one function leaves for another; preemption would let another handler on this CPU take it over");
 }
 
 // Complete a syscall while retaining its current authority through signal delivery.
@@ -7619,7 +7836,17 @@ private fn syscall_clone_current(
 }
 
 // Borrow current through the getdents64 operation; ownership stays at dispatch.
-private inline fn syscall_getdents64_current(
+private fn syscall_getdents64_current(
+        current_authority: borrow ProcessCurrent[process, ProcessState::Running], x0: usize, x1: usize, x2: usize)
+        -> SyscallAction !{unsafe} {
+    let slot: SyscallSlot[0] = syscall_slot_acquire();
+    let result: SyscallAction = syscall_getdents64_current_with(slot, current_authority, x0, x1, x2);
+    syscall_slot_release(slot);
+    return result;
+}
+
+private inline fn syscall_getdents64_current_with(slot: borrow SyscallSlot[0],
+        
         current_authority: borrow ProcessCurrent[process, ProcessState::Running], x0: usize, x1: usize, x2: usize)
         -> SyscallAction !{unsafe} {
     // getdents64(fd, dirent, count): the directory FD owns the stream
@@ -7736,12 +7963,12 @@ private inline fn syscall_getdents64_current(
                 SyscallFilesystemReady::Unconfigured => { return SyscallAction::Resume(LINUX_EBADF); }
                 SyscallFilesystemReady::Configured(found) => { found }
             };
-            zero_fill(syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8);
+            zero_fill(syscall_scratch[slot.index].file_buffer as []u8);
             while (written < x2) {
                 match ext2_read_directory_chunk(
                     mount, inode_number,
                     directory_offset,
-                    syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8) {
+                    syscall_scratch[slot.index].file_buffer as []u8) {
                     Ext2ReadResult::Invalid => {
                         if (written != 0) {
                             return SyscallAction::Resume(written);
@@ -7764,7 +7991,7 @@ private inline fn syscall_getdents64_current(
                                 }
                                 return SyscallAction::Resume(LINUX_EINVAL);
                             }
-                            let file_bytes = syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8;
+                            let file_bytes = syscall_scratch[slot.index].file_buffer as []u8;
                             let entry_start: usize = cursor;
                             if (entry_start > file_bytes.len) {
                                 if (written != 0) { return SyscallAction::Resume(written); }
@@ -7870,7 +8097,17 @@ private inline fn syscall_getdents64_current(
 }
 
 // Borrow current through the sendfile operation; ownership stays at dispatch.
-private inline fn syscall_sendfile_current(
+private fn syscall_sendfile_current(
+        current_authority: borrow ProcessCurrent[process, ProcessState::Running], x0: usize, x1: usize, x2: usize, x3: usize)
+        -> SyscallAction !{unsafe} {
+    let slot: SyscallSlot[0] = syscall_slot_acquire();
+    let result: SyscallAction = syscall_sendfile_current_with(slot, current_authority, x0, x1, x2, x3);
+    syscall_slot_release(slot);
+    return result;
+}
+
+private inline fn syscall_sendfile_current_with(slot: borrow SyscallSlot[0],
+        
         current_authority: borrow ProcessCurrent[process, ProcessState::Running], x0: usize, x1: usize, x2: usize, x3: usize)
         -> SyscallAction !{unsafe} {
     // sendfile(out_fd, in_fd, offset, count). BusyBox cat uses a null
@@ -7890,14 +8127,14 @@ private inline fn syscall_sendfile_current(
         SyscallFilesystemReady::Unconfigured => { return SyscallAction::Resume(LINUX_EBADF); }
         SyscallFilesystemReady::Configured(found) => { found }
     };
-    zero_fill(syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8);
+    zero_fill(syscall_scratch[slot.index].file_buffer as []u8);
     let mut copied: usize = 0;
     while (copied < requested) {
         let mut chunk_limit: usize = requested - copied;
         if (chunk_limit > KERNEL_BLOCK_SIZE) {
             chunk_limit = KERNEL_BLOCK_SIZE;
         }
-        let staging_buffer = syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8;
+        let staging_buffer = syscall_scratch[slot.index].file_buffer as []u8;
         if (chunk_limit > staging_buffer.len) {
             return SyscallAction::Resume(LINUX_EINVAL);
         }
@@ -7948,7 +8185,17 @@ private inline fn syscall_sendfile_current(
 }
 
 // Borrow current through the execve operation; ownership stays at dispatch.
-private inline fn syscall_execve_current(
+private fn syscall_execve_current(
+        current_authority: borrow ProcessCurrent[process, ProcessState::Running], number: usize, x0: usize, x1: usize, x2: usize)
+        -> SyscallAction !{unsafe} {
+    let slot: SyscallSlot[0] = syscall_slot_acquire();
+    let result: SyscallAction = syscall_execve_current_with(slot, current_authority, number, x0, x1, x2);
+    syscall_slot_release(slot);
+    return result;
+}
+
+private inline fn syscall_execve_current_with(slot: borrow SyscallSlot[0],
+        
         current_authority: borrow ProcessCurrent[process, ProcessState::Running], number: usize, x0: usize, x1: usize, x2: usize)
         -> SyscallAction !{unsafe} {
     // First handoff slice: only the current parent image may request an
@@ -7974,21 +8221,21 @@ private inline fn syscall_execve_current(
         path_address = x1;
         argv_address = x2;
     }
-    let exec_lookup_name: []u8 = match kernel_syscall_path_name(current_authority, path_address) {
+    let exec_lookup_name: []u8 = match kernel_syscall_path_name(slot, current_authority, path_address) {
         SyscallPathResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
         SyscallPathResult::Invalid => { return SyscallAction::Resume(LINUX_ENOENT); }
         SyscallPathResult::Name(path) => { path }
     };
     let mut path_length: usize = exec_lookup_name.len;
-    let path_view: [u8; 256..] = syscall_path_view_here();
+    let path_view: [u8; 256..] = syscall_path_view_here(slot);
     if (path_view[0] == 0x2F) { path_length = path_length + 1; }
     if (path_length == 0 || argv_address == 0) { return SyscallAction::Resume(LINUX_EINVAL); }
     let exec_path_absolute: bool = path_view[0] == 0x2F;
     if (path_length > 256) { return SyscallAction::Resume(LINUX_EINVAL); }
     // GitHub issue #203: the staging helpers assume this fill (see
     // syscall_exec_argv_here).
-    zero_fill(syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8);
-    let exec_path: []u8 = syscall_exec_path_here();
+    zero_fill(syscall_scratch[slot.index].file_buffer as []u8);
+    let exec_path: []u8 = syscall_exec_path_here(slot);
     for path_index: usize in 0..<256 { exec_path[path_index] = 0; }
     let saved_path: usize = slice_copy(
         exec_path[0..<path_length],
@@ -8004,7 +8251,7 @@ private inline fn syscall_execve_current(
     let mut script_offset: usize = 0;
     let mut exec_inode: usize = 0;
     if (exec_path_absolute) {
-        match syscall_exec_format(path_length) {
+        match syscall_exec_format(slot, path_length) {
             SyscallExecFormatResult::NotMounted => {}
             SyscallExecFormatResult::Executable(inode) => {
                 exec_inode = inode;
@@ -8073,7 +8320,7 @@ private inline fn syscall_execve_current(
                 if (string_address == 0) {
                     vector_terminated = true;
                 } else {
-                    let argument_name: []u8 = match kernel_syscall_path_name(current_authority,
+                    let argument_name: []u8 = match kernel_syscall_path_name(slot, current_authority,
                         string_address as usize) {
                         SyscallPathResult::Fault => {
                             return SyscallAction::Resume(LINUX_EFAULT);
@@ -8106,7 +8353,7 @@ private inline fn syscall_execve_current(
                                 let copy_length: usize = string_length + 1;
                                 let destination_start: usize = output_offset;
                                 let exec_argv_view: []u8 =
-                                    syscall_exec_argv_here();
+                                    syscall_exec_argv_here(slot);
                                 if (destination_start > exec_argv_view.len) {
                                     return SyscallAction::Resume(LINUX_E2BIG);
                                 }
@@ -8157,7 +8404,7 @@ private inline fn syscall_execve_current(
             ExecArgsReserve::Reserved => {}
         }
     }
-    let diagnostic_argv: []u8 = syscall_exec_argv_here();
+    let diagnostic_argv: []u8 = syscall_exec_argv_here(slot);
     // GitHub issue #618: one critical section, so a procfs snapshot on
     // another CPU copies the old command line or the new one, never
     // half of each.

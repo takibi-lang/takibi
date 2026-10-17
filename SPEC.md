@@ -761,7 +761,8 @@ scratch storage. Whatever an earlier call left in it counts as stale, so
 every function that touches it sees it `uninit` on entry and must zero-fill
 or write a buffer whole before reading it or copying it out. Any index of a
 scratch array global names the same place, since each element is reached
-only by its own CPU (a trusted premise).
+only by one holder at a time -- in the kernel, the holder of the slot that
+indexes it (a trusted premise).
 
 ```takibi
 struct Pair { a: u8; b: u64; }
