@@ -1,4 +1,6 @@
 ok     stage=ok
+failed stage=capability-length code=64
+failed stage=runtime-offset code=1120
 failed stage=reset
 failed stage=ring-setup
 failed stage=enable-slot
@@ -16,3 +18,7 @@ immediate succeeded=true attempts=1 first=0 last=0
 recovered succeeded=true attempts=3 first=5 last=0
 exhausted succeeded=false attempts=50 first=5 last=7
 failed stage=test-unit-ready code=5 attempts=50 last=7
+rp1       matches
+caplength failed stage=capability-length code=64
+rtsoff    failed stage=runtime-offset code=1088
+rtsoff hi failed stage=runtime-offset code=5216

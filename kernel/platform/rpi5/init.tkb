@@ -140,8 +140,22 @@ fn kernel_boot_log_usb_init_failure() {
 // stick is what ext2_fixture checks and every process runs from. A failure on
 // the way leaves the board with no root filesystem, and says so; there is no
 // other copy to fall back to (usb_provision.tkb).
+fn kernel_boot_log_xhci_capability() {
+    let mut words: XhciCapabilityWords = usb_xhci_capability_words();
+    if (words.read == false) {
+        return;
+    }
+    kernel_boot_log("usb xhci: caplength=");
+    uart_put_hex(words.caplength as usize);
+    kernel_boot_log(" rtsoff=");
+    uart_put_hex(words.rtsoff as usize);
+    kernel_boot_log("\n");
+}
+
 fn kernel_test_platform_storage() {
-    match disk_initialize() {
+    let init_result: DiskIoResult = disk_initialize();
+    kernel_boot_log_xhci_capability();
+    match init_result {
         DiskIoResult::Err(error) => {
             kernel_boot_log_usb_init_failure();
             kernel_boot_log("usb ext2: no root filesystem\n");

@@ -59,10 +59,18 @@ const RP1_USBHOST0_BASE: usize = 0x1F00200000;
 let mut rp1_usbhost0_base: usize = RP1_USBHOST0_BASE;
 let mut rp1_usbhost0_dtb_status: usize;
 
-// RP1 usbhost0's xHCI registers, from the controller base: the operational
-// block (+0x20), port 3's PORTSC, interrupter 0 (+0x480) and the doorbell
-// array (+0x500).
+// RP1 usbhost0's xHCI registers, from the controller base: CAPLENGTH and
+// RTSOFF, the operational block (+0x20), port 3's PORTSC, interrupter 0
+// (+0x480) and the doorbell array (+0x500).
+//
+// GitHub issue #804: +0x20 and +0x480 are this struct's claims about where
+// the controller puts its operational and runtime blocks. Bring-up reads
+// CAPLENGTH and RTSOFF first and stops at stage capability-length or
+// runtime-offset when the hardware disagrees with offsetof(usbcmd) or
+// offsetof(iman) - 0x20, so this struct is the single source of both values.
 io struct Rp1XhciRegs {
+    caplength_hciversion: u32 at 0x000;
+    rtsoff: u32 at 0x018;
     usbcmd: u32 at 0x020;
     usbsts: u32 at 0x024;
     crcr_lo: u32 at 0x038;
@@ -795,6 +803,33 @@ fn msc_run_command(data_len: {0..<65537 as u32}, dir_in: bool)
 // own proven Steps 5-10 (see that file's header comment for the full
 // investigation history behind every constant/mask below). ------------
 
+// The capability values the last bring-up read, kept for the boot log
+// (GitHub issue #804): a board whose layout matches says so with numbers,
+// not only by working.
+struct XhciCapabilityWords {
+    read: bool;
+    caplength: u32;
+    rtsoff: u32;
+}
+private let mut xhci_capability_words: XhciCapabilityWords;
+
+fn usb_xhci_capability_words() -> XhciCapabilityWords {
+    return xhci_capability_words;
+}
+
+// Read CAPLENGTH and RTSOFF and compare them with the offsets Rp1XhciRegs
+// declares. Nothing is written to the controller before this answers.
+fn xhci_check_capability_layout() -> XhciCapabilityLayout {
+    let cap_word: u32 = rp1_xhci.caplength_hciversion;
+    let rtsoff_word: u32 = rp1_xhci.rtsoff;
+    let mut words: XhciCapabilityWords = { true, xhci_caplength_of(cap_word),
+                                           xhci_rtsoff_of(rtsoff_word) };
+    xhci_capability_words = words;
+    return xhci_capability_layout(cap_word, rtsoff_word,
+                                  offsetof(Rp1XhciRegs, usbcmd),
+                                  offsetof(Rp1XhciRegs, iman));
+}
+
 fn xhci_halt_and_reset() -> bool !{unsafe} {
     let usbcmd_before: u32 = rp1_xhci.usbcmd;
     rp1_xhci.usbcmd = usbcmd_before & 0xFFFFFFFE;
@@ -1250,6 +1285,15 @@ fn xhci_configure_endpoint(in_num: {1..<16 as usize},
 fn usb_disk_initialize_stages() -> UsbInitOutcome {
     if (xhci_controller_unusable) {
         return UsbInitOutcome::Reset;
+    }
+    match xhci_check_capability_layout() {
+        XhciCapabilityLayout::CapabilityLength(caplength) => {
+            return UsbInitOutcome::CapabilityLength(caplength);
+        }
+        XhciCapabilityLayout::RuntimeOffset(rtsoff) => {
+            return UsbInitOutcome::RuntimeOffset(rtsoff);
+        }
+        XhciCapabilityLayout::Matches => { }
     }
     if (xhci_halt_and_reset() == false) {
         return UsbInitOutcome::Reset;

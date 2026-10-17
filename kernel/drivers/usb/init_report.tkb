@@ -80,6 +80,8 @@ fn usb_retry_record_attempt(record: UsbRetryRecord,
 // carries nothing rather than a zero that could be read as a code.
 must_use variant UsbInitOutcome {
     Ok;
+    CapabilityLength(u32);
+    RuntimeOffset(u32);
     Reset;
     RingSetup;
     EnableSlot;
@@ -105,6 +107,8 @@ must_use variant UsbInitOutcome {
 // none is ever cast in from a byte.
 enum UsbInitStage {
     Ok;
+    CapabilityLength;
+    RuntimeOffset;
     Reset;
     RingSetup;
     EnableSlot;
@@ -125,6 +129,8 @@ enum UsbInitStage {
 fn usb_init_stage_name(stage: UsbInitStage) -> *u8 {
     match stage {
         UsbInitStage::Ok => { return "ok"; }
+        UsbInitStage::CapabilityLength => { return "capability-length"; }
+        UsbInitStage::RuntimeOffset => { return "runtime-offset"; }
         UsbInitStage::Reset => { return "reset"; }
         UsbInitStage::RingSetup => { return "ring-setup"; }
         UsbInitStage::EnableSlot => { return "enable-slot"; }
@@ -175,6 +181,16 @@ fn usb_init_outcome_describe(outcome: UsbInitOutcome) -> UsbInitDescription {
         UsbInitOutcome::Ok => {
             description.failed = false;
             description.stage = UsbInitStage::Ok;
+        }
+        UsbInitOutcome::CapabilityLength(caplength) => {
+            description.stage = UsbInitStage::CapabilityLength;
+            description.has_code = true;
+            description.code = caplength;
+        }
+        UsbInitOutcome::RuntimeOffset(rtsoff) => {
+            description.stage = UsbInitStage::RuntimeOffset;
+            description.has_code = true;
+            description.code = rtsoff;
         }
         UsbInitOutcome::Reset => {
             description.stage = UsbInitStage::Reset;
@@ -228,4 +244,49 @@ fn usb_init_outcome_describe(outcome: UsbInitOutcome) -> UsbInitDescription {
         }
     }
     return description;
+}
+
+// GitHub issue #804: the register layout a driver declares is a claim about
+// the controller, and two of its numbers are the controller's own answer to
+// read rather than to assume. CAPLENGTH (the low byte of the first
+// capability dword) places the operational block, and RTSOFF (capability
+// +0x18, bits 31:5) places the runtime block, whose interrupter 0 starts at
+// RTSOFF + 0x20 (xHCI 1.2 sections 5.3.1, 5.3.8 and 5.5.2).
+//
+// The expected values are passed in as the offsets the driver's io struct
+// already declares (offsetof of its first operational and first interrupter
+// register), so the struct stays the one place the layout is written down
+// and this check cannot disagree with it. Matches means the hardware placed
+// both blocks where the struct does; each other case carries the value the
+// hardware reported, so a log names it.
+must_use variant XhciCapabilityLayout {
+    Matches;
+    CapabilityLength(u32);
+    RuntimeOffset(u32);
+}
+
+const XHCI_RTSOFF_MASK: u32 = 0xFFFFFFE0;
+const XHCI_INTERRUPTER0_FROM_RUNTIME: usize = 0x20;
+
+fn xhci_caplength_of(cap_word: u32) -> u32 {
+    return cap_word & 0xFF;
+}
+
+fn xhci_rtsoff_of(rtsoff_word: u32) -> u32 {
+    return rtsoff_word & XHCI_RTSOFF_MASK;
+}
+
+fn xhci_capability_layout(cap_word: u32, rtsoff_word: u32,
+                          operational_offset: usize,
+                          interrupter0_offset: usize) -> XhciCapabilityLayout {
+    let caplength: u32 = xhci_caplength_of(cap_word);
+    if ((caplength as usize) != operational_offset) {
+        return XhciCapabilityLayout::CapabilityLength(caplength);
+    }
+    let rtsoff: u32 = xhci_rtsoff_of(rtsoff_word);
+    if ((rtsoff as usize) + XHCI_INTERRUPTER0_FROM_RUNTIME
+            != interrupter0_offset) {
+        return XhciCapabilityLayout::RuntimeOffset(rtsoff);
+    }
+    return XhciCapabilityLayout::Matches;
 }

@@ -56,8 +56,29 @@ fn report_retry(label: *u8, record: UsbRetryRecord) {
     uart_puts("\r\n");
 }
 
+// GitHub issue #804: the capability-layout check bring-up runs before it
+// writes anything. The expected offsets are RP1's as Rp1XhciRegs declares
+// them (operational +0x20, interrupter 0 +0x480); the words are what the
+// controller would answer.
+fn report_layout(label: *u8, cap_word: u32, rtsoff_word: u32) {
+    uart_puts(label);
+    match xhci_capability_layout(cap_word, rtsoff_word, 0x20, 0x480) {
+        XhciCapabilityLayout::Matches => {
+            uart_puts("matches\r\n");
+        }
+        XhciCapabilityLayout::CapabilityLength(caplength) => {
+            report(UsbInitOutcome::CapabilityLength(caplength));
+        }
+        XhciCapabilityLayout::RuntimeOffset(rtsoff) => {
+            report(UsbInitOutcome::RuntimeOffset(rtsoff));
+        }
+    }
+}
+
 fn app_main() {
     report(UsbInitOutcome::Ok);
+    report(UsbInitOutcome::CapabilityLength(64));
+    report(UsbInitOutcome::RuntimeOffset(1120));
     report(UsbInitOutcome::Reset);
     report(UsbInitOutcome::RingSetup);
     report(UsbInitOutcome::EnableSlot);
@@ -104,4 +125,13 @@ fn app_main() {
     }
     report_retry("exhausted", exhausted);
     report(UsbInitOutcome::TestUnitReady(exhausted));
+
+    // HCIVERSION 0x0110 in the high half and reserved RTSOFF bits 4:0 set
+    // must not disturb a match.
+    report_layout("rp1       ", 0x01100020, 0x0000047F);
+    // The controls: a mismatch in either value stops bring-up and names the
+    // value the hardware reported.
+    report_layout("caplength ", 0x01100040, 0x00000460);
+    report_layout("rtsoff    ", 0x01100020, 0x00000440);
+    report_layout("rtsoff hi ", 0x01100020, 0x00001460);
 }
