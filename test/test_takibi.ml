@@ -25305,6 +25305,7 @@ let infer_production_machine_boundary ?(platform = "qemu") code =
   let variants = ["WorldStopClaimResult"; "WorldStopResult"; "MachineStopResult"; "CpuStartResult"] in
   let functions = ["world_stop_claim_as"; "world_stop_claim"; "world_stop_begin_config";
     "world_stop_begin_claimed"; "world_stop_begin"; "world_stop_machine_begin";
+    "world_stop_machine_begin_holding_probe";
     "cpu_participants_end"; "machine_stop_release"; "machine_stop_keep_forever"; "machine_stopped_mask";
     "cpu_start_reserve"; "cpu_start_core"; "cpu_start_finish";
     "cpu_start_end"; "cpu_start_gate_release"; "world_stop_resume";
@@ -25319,7 +25320,7 @@ let infer_production_machine_boundary ?(platform = "qemu") code =
     | Ast.ConstDef (name, _, _, _) ->
         List.mem name ["WORLD_STOP_CLAIM_STOP"; "WORLD_STOP_CLAIM_START"]
     | _ -> false) (parse_here source) in
-  Alcotest.(check int) "all production machine declarations extracted" 36
+  Alcotest.(check int) "all production machine declarations extracted" 37
     (List.length boundary);
   let platform_path = "kernel/platform/" ^ platform ^ "/init.tkb" in
   let path = List.find Sys.file_exists ["../" ^ platform_path; platform_path] in
@@ -25458,6 +25459,31 @@ let production_machine_boundary_tests =
           let again = kernel_secondary_boot_cpu_on(start);
         }
       } }
+    |};
+    (* GitHub issue #641: a peer spinning masked on a held lock cannot
+       acknowledge, so a stop begun under any ranked guard livelocks a
+       retrying caller (WorldStopRetry.tla, variant holdlock). *)
+    bad "production full stop rejects a held ranked guard" "lock order violation" {|
+      fn take() -> ProcessRunGuard[&kernel_world_stop]
+          !{acquires_lock_40_process_run, lock_guard_40_process_run} {
+        return guard_new(&kernel_world_stop);
+      }
+      fn probe() { let guard = take(); match world_stop_machine_begin(20) {
+        MachineStopResult::Busy => {}
+        MachineStopResult::Partial(partial) => { machine_stop_partial_release(partial, &kernel_world_stop); }
+        MachineStopResult::Complete(stopped) => { machine_stop_release(stopped, &kernel_world_stop); }
+      } guard_end(guard); }
+    |};
+    good "production holding probe admits a held ranked guard" {|
+      fn take() -> ProcessRunGuard[&kernel_world_stop]
+          !{acquires_lock_40_process_run, lock_guard_40_process_run} {
+        return guard_new(&kernel_world_stop);
+      }
+      fn x_probe() { let guard = take(); match world_stop_machine_begin_holding_probe(20) {
+        MachineStopResult::Busy => {}
+        MachineStopResult::Partial(partial) => { machine_stop_partial_release(partial, &kernel_world_stop); }
+        MachineStopResult::Complete(stopped) => { machine_stop_release(stopped, &kernel_world_stop); }
+      } guard_end(guard); }
     |};
     bad "production full stop rejects owner IRQ enable" "cannot restore IRQs" (full {|
       msr_daifclr_irq();
