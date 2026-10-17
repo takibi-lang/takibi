@@ -1,10 +1,11 @@
 {
   "date": "2026-10-17",
   "event": "incremental",
-  "decision": "reuse",
-  "source_sha256": "02f9ffa7d37b5bd3e1313fc0004034af21ff164b496cff23a8ae54cd582f3ebe",
-  "workload": "#808: the only production-source changes since the measured #804/#806 checkpoint are Makefile comments (the fast gate slowest member as measured) and host check scripts moved between lanes; no kernel source, build flag or link input changed.",
+  "decision": "measured",
+  "source_sha256": "a962cd9b585d808a0bfb10ff9c74685c7870df0c0adf1f2995172008cf3a1222",
+  "workload": "#638 slice 4: process_image exec staging and syscall scratch moved into ProcessImageSlot and SyscallSlot pools; exception_evidence comment only.",
   "evidence": [
+    "docs/SLOT_POOLS_EXEC_SYSCALL_SPACE_2026-10-17.md",
     "docs/XHCI_CAPABILITY_SPACE_2026-10-17.md",
     "docs/BLOCK_SLOT_POOL_SPACE_2026-10-17.md",
     "docs/EXT2_SLOT_POOL_SPACE_2026-10-17.md",
@@ -79,6 +80,6 @@
     "docs/VIRTIO_NET_TX_2026-10-10.md",
     "docs/VIRTIO_NET_TX_SPACE_2026-10-10.json"
   ],
-  "assessment": "Reuse: a comment-only Makefile edit cannot change either production kernel image, so the #804/#806 measurement (docs/XHCI_CAPABILITY_SPACE_2026-10-17.md) still describes both kernels. No size change.",
-  "next_trigger": "The next #720 slice that changes xHCI storage (DCBAA, S2 sub-region authority)."
+  "assessment": "Measured with scripts/space_delta.py: text +3080 B QEMU / +3320 B RPi5, BSS +64 B, usable_ram_start one 32 KiB step later on both; the RPi5 image ceiling is raised to 0x540000 pending maintainer approval.",
+  "next_trigger": "The #638 preemption flip (target root into the process record), or the next slot pool."
 }
