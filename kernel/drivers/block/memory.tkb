@@ -1,5 +1,6 @@
 use "kernel/drivers/block/block_cache.tkb";
 use "kernel/lib/task_mutex.tkb";
+use "kernel/lib/atomic_word.tkb";
 
 const KERNEL_BLOCK_SIZE: usize = 1024;
 // 64 1 KiB filesystem blocks = 128 USB sectors = 64 KiB. This is the
@@ -56,6 +57,78 @@ fn virtio_block_device_ext2() -> KernelBlockDeviceResult {
     return KernelBlockDeviceResult::Ready(device);
 }
 
+// GitHub issue #638: the per-operation state of the block layer -- this
+// file's read-ahead run and counters, and block_cache.tkb's slots and write
+// counts -- lives in a pool of KERNEL_MAX_CORES slots, one per operation in
+// flight, not one per CPU. A read holds its run buffer across the device
+// read, which waits for the device lock and, on USB, for the completion
+// interrupt (may_block); another operation on the same CPU must not find the
+// buffer meanwhile. A slot is reached only through a BlockSlot, a linear
+// token: block_slot_acquire hands out a free slot and block_slot_release
+// consumes the token, so the compiler rejects an operation that forgets to
+// release it, releases it twice, or keeps using it after the release.
+// Static storage, as ext2's slot pool (DECISIONS.md 2026-10-17).
+//
+// Trusted here, and only here (TRUSTED_BASE.md): block_slot_acquire returns
+// a slot no other live BlockSlot names. Its compare-exchange over
+// block_slot_words is what makes that so; nothing checks it.
+//
+// Only the public entry points acquire, and no function in this file calls
+// one of them, so an operation holds one slot at a time
+// (scripts/check_slot_pool_entries.py). ext2 holds an Ext2Slot while it
+// calls in here, never the reverse, so the two pools cannot wait on each
+// other.
+//
+// Current limitations (2026-10-17):
+// - The acquire tries the slot numbered by cpu_id() first, so while
+//   KERNEL_PREEMPTIBLE is 0 a CPU's operations keep using one slot: its cache
+//   stays warm, its read-ahead run stays sequential, and the per-slot counters
+//   that workload_evidence.tkb reads by core number count that core. The hint
+//   is not trusted for exclusivity -- the compare-exchange is -- so a
+//   preemptible kernel only loses the locality, and the counters then count
+//   concurrent operations rather than CPUs.
+// - The cache (block_cache.tkb) takes the slot's index as a plain number and
+//   trusts its caller to hold the slot; only this file calls it
+//   (scripts/check_slot_pool_entries.py).
+private let mut block_slot_words: [AtomicWord; KERNEL_MAX_CORES];
+
+// `[unit]` is always 0: an owner needs a static parameter, and the slot's
+// identity is its private index, which only this file reads.
+linear struct BlockSlot[unit: usize] {
+    private index: {0..<KERNEL_MAX_CORES as usize};
+}
+
+// A free slot, waiting for one if every slot is held. The compare-exchange
+// is an acquire, pairing with the release store in block_slot_release, so
+// the previous holder's last writes happen before this holder's first read.
+private fn block_slot_acquire() -> BlockSlot[0] !{may_block} {
+    let mut index: {0..<KERNEL_MAX_CORES as usize} = 0;
+    let mut held: bool = false;
+    let hint: usize = cpu_id();
+    if (hint < KERNEL_MAX_CORES) {
+        let preferred: {0..<KERNEL_MAX_CORES as usize} = hint;
+        if (atomic_word_compare_exchange(&block_slot_words[preferred], 0, 1)) {
+            index = preferred;
+            held = true;
+        }
+    }
+    while (held == false) {
+        for i: usize in 0..<KERNEL_MAX_CORES {
+            if (held == false &&
+                atomic_word_compare_exchange(&block_slot_words[i], 0, 1)) {
+                index = i;
+                held = true;
+            }
+        }
+    }
+    let mut slot: BlockSlot[0] = { index };
+    return slot;
+}
+
+private fn block_slot_release(slot: sink BlockSlot[0]) {
+    atomic_word_store(&block_slot_words[slot.index], 0);
+}
+
 // GitHub issues #281 and #208: what the block layer was actually asked for
 // over a boot.
 //
@@ -69,13 +142,15 @@ fn virtio_block_device_ext2() -> KernelBlockDeviceResult {
 // So these are boot totals, printed once at the end beside the console spin
 // figure, for the same reason that one is: a number in a diff rather than a
 // number in somebody's memory.
-// Per core, summed when reported. This file's execution-model exemption reads
+// Per slot (one per operation in flight, see BlockSlot), summed when
+// reported. They were per core before #638; the reason not to share one
+// still holds. This file's execution-model exemption reads
 // "device state; SPIs are routed to CPU0", which is about interrupt delivery
 // -- but block_read is reached from a syscall, and a syscall runs on core 1
 // too, so one shared counter would lose increments to a race and understate
 // the very diff #208 is to be judged by.
 //
-// Per-core storage rather than an atomic: scripts/check_lock_discipline.py
+// Per-slot storage rather than an atomic: scripts/check_lock_discipline.py
 // refused the atomic and was right to. A raw intrinsic for a diagnostic
 // counter is a trusted-base entry bought to avoid arithmetic, and the
 // profiler beside it already counts this way.
@@ -95,35 +170,36 @@ private fn block_call_total(counters: borrow [usize; KERNEL_MAX_CORES..])
     return total;
 }
 
-private fn block_note_call(counters: borrow [usize; KERNEL_MAX_CORES..]) {
-    let raw_cpu: usize = cpu_id();
-    if (raw_cpu >= KERNEL_MAX_CORES) { return; }
-    let cpu: {0..<KERNEL_MAX_CORES as usize} = raw_cpu;
-    counters[cpu] = counters[cpu] + 1;
+private fn block_note_call(slot: borrow BlockSlot[0],
+                           counters: borrow [usize; KERNEL_MAX_CORES..]) {
+    counters[slot.index] = counters[slot.index] + 1;
 }
 
 fn block_read_call_total() -> usize {
     return block_call_total(block_read_calls as []usize);
 }
-fn block_read_call_count(core: usize) -> usize {
-    if (core >= KERNEL_MAX_CORES) { return 0; }
-    let index: {0..<KERNEL_MAX_CORES as usize} = core;
+// By slot number, which is the core number while KERNEL_PREEMPTIBLE is 0
+// (see BlockSlot).
+fn block_read_call_count(slot: usize) -> usize {
+    if (slot >= KERNEL_MAX_CORES) { return 0; }
+    let index: {0..<KERNEL_MAX_CORES as usize} = slot;
     return block_read_calls[index];
 }
 fn block_write_call_total() -> usize {
     return block_call_total(block_write_calls as []usize);
 }
 
-fn block_device_wait_count(core: usize) -> usize {
-    if (core >= KERNEL_MAX_CORES) { return 0; }
-    let index: {0..<KERNEL_MAX_CORES as usize} = core;
+fn block_device_wait_count(slot: usize) -> usize {
+    if (slot >= KERNEL_MAX_CORES) { return 0; }
+    let index: {0..<KERNEL_MAX_CORES as usize} = slot;
     return block_device_waits[index];
 }
 
 // GitHub issue #533: one command at a time on the device.
 //
-// Everything above the device is per core -- the cache, the read-ahead run,
-// ext2's scratch -- and the device is not. virtio_blk.tkb has one queue, one
+// Everything above the device is per operation -- the cache and the
+// read-ahead run (BlockSlot), ext2's scratch (Ext2Slot) -- and the device is
+// not. virtio_blk.tkb has one queue, one
 // request, one bounce sector and one used-ring shadow; usb_xhci.tkb has one
 // command block, one bounce buffer and one event-ring cursor. A read reached
 // from a syscall on core 1 while core 0 was mid-command would rewrite the
@@ -146,13 +222,14 @@ linear struct BlockDeviceGuard[lock: addr] {
     private cpu: usize;
 }
 
-private fn block_device_take() -> BlockDeviceGuard[block_device_lock]
+private fn block_device_take(slot: borrow BlockSlot[0])
+        -> BlockDeviceGuard[block_device_lock]
         !{acquires_lock_30_block_device, lock_guard_30_block_device} {
     if (task_mutex_trylock(&block_device_lock) == false) {
-        block_note_call(block_device_waits as []usize);
+        block_note_call(slot, block_device_waits as []usize);
         task_mutex_acquire(&block_device_lock);
     }
-    let mut guard: BlockDeviceGuard[block_device_lock] = { cpu_id() };
+    let mut guard: BlockDeviceGuard[block_device_lock] = { slot.index };
     return guard;
 }
 
@@ -188,22 +265,26 @@ private let mut block_fault_injected: usize;
 // Let `skip` accesses of the chosen kind through, then fail the next one, or
 // every one from then on when `sticky`.
 fn block_fault_arm(on_write: bool, skip: usize, sticky: bool) {
-    let guard = block_device_take();
+    let slot: BlockSlot[0] = block_slot_acquire();
+    let guard = block_device_take(slot);
     block_fault_armed = true;
     block_fault_on_write = on_write;
     block_fault_skip = skip;
     block_fault_sticky = sticky;
     block_fault_injected = 0;
     block_device_give(guard);
+    block_slot_release(slot);
 }
 
 // Stop injecting and answer how many accesses were failed since arming.
 fn block_fault_disarm() -> usize {
-    let guard = block_device_take();
+    let slot: BlockSlot[0] = block_slot_acquire();
+    let guard = block_device_take(slot);
     block_fault_armed = false;
     let injected: usize = block_fault_injected;
     block_fault_injected = 0;
     block_device_give(guard);
+    block_slot_release(slot);
     return injected;
 }
 
@@ -222,7 +303,7 @@ private fn block_fault_hits(
     return true;
 }
 
-// GitHub issue #208: block_read and block_write go through the per-core
+// GitHub issue #208: block_read and block_write go through the per-slot
 // read cache in kernel/drivers/block/block_cache.tkb. `block io: reads=`
 // counts what reached a device, so the figure #208 is judged by moves with
 // the cache; the hits are counted beside it.
@@ -232,35 +313,44 @@ fn block_read(device: KernelBlockDevice, block: usize,
     if (block >= device.length / KERNEL_BLOCK_SIZE) {
         return BlockIoResult::Invalid;
     }
-    let core: usize = cpu_id();
-    match block_cache_read(core, device.backend, block, destination) {
+    let slot: BlockSlot[0] = block_slot_acquire();
+    let result: BlockIoResult = block_read_with(slot, device, block, destination);
+    block_slot_release(slot);
+    return result;
+}
+
+private inline fn block_read_with(slot: borrow BlockSlot[0],
+                                  device: KernelBlockDevice, block: usize,
+                                  destination: [u8; KERNEL_BLOCK_SIZE..])
+        -> BlockIoResult !{unsafe} {
+    match block_cache_read(slot.index, device.backend, block, destination) {
         BlockCacheReadResult::Hit => { return BlockIoResult::Ok; }
         BlockCacheReadResult::Miss => { }
     }
     // Taken before any copy is produced, so a write that lands meanwhile
     // leaves the filled copy stale (GitHub issue #553).
     let mut epoch: BlockCacheEpoch = block_cache_epoch_of(device.backend, block);
-    if (block_run_take(core, device, block, destination)) {
-        block_cache_fill(core, device.backend, block, destination, epoch);
+    if (block_run_take(slot, device, block, destination)) {
+        block_cache_fill(slot.index, device.backend, block, destination, epoch);
         return BlockIoResult::Ok;
     }
     // A run that was read and then cannot answer -- another core wrote in
     // between and moved the epoch -- falls through to the single read.
-    if (block_run_wanted(core, device, block)) {
-        if (block_run_read(core, device, block)) {
-            if (block_run_take(core, device, block, destination)) {
-                block_cache_fill(core, device.backend, block, destination,
-                                 epoch);
+    if (block_run_wanted(slot, device, block)) {
+        if (block_run_read(slot, device, block)) {
+            if (block_run_take(slot, device, block, destination)) {
+                block_cache_fill(slot.index, device.backend, block,
+                                 destination, epoch);
                 return BlockIoResult::Ok;
             }
         }
     }
-    match block_read_device(device, block, destination) {
+    match block_read_device(slot, device, block, destination) {
         BlockIoResult::Invalid => { return BlockIoResult::Invalid; }
         BlockIoResult::Ok => { }
     }
-    block_run_note_single(core, device, block);
-    block_cache_fill(core, device.backend, block, destination, epoch);
+    block_run_note_single(slot, device, block);
+    block_cache_fill(slot.index, device.backend, block, destination, epoch);
     return BlockIoResult::Ok;
 }
 
@@ -274,8 +364,8 @@ fn block_read(device: KernelBlockDevice, block: usize,
 // streaming BusyBox a page at a time, block after physically contiguous
 // block, while ext2's metadata re-reads already came from the cache.
 //
-// So a device read that continues where this core's last one ended reads a
-// run instead: BLOCK_RUN_BLOCKS blocks in one command on USB, kept per core
+// So a device read that continues where this slot's last one ended reads a
+// run instead: BLOCK_RUN_BLOCKS blocks in one command on USB, kept per slot
 // and handed out a block at a time until something else is asked for. A
 // read that does not continue the last one still reads one block, so a
 // scattered read pays nothing for this. The run belongs to the block
@@ -292,18 +382,18 @@ private let mut block_run_backend: [u8; KERNEL_MAX_CORES];
 private let mut block_run_first: [usize; KERNEL_MAX_CORES];
 private let mut block_run_count: [usize; KERNEL_MAX_CORES];
 private let mut block_run_epoch: [usize; KERNEL_MAX_CORES];
-// The block after this core's last device read, and its backend: a miss
+// The block after this slot's last device read, and its backend: a miss
 // on that block is a sequential read.
 private let mut block_run_next: [usize; KERNEL_MAX_CORES];
 private let mut block_run_next_backend: [u8; KERNEL_MAX_CORES];
 private let mut block_run_reads: [usize; KERNEL_MAX_CORES];
 private let mut block_run_hits: [usize; KERNEL_MAX_CORES];
 
-// Whether this core's run holds (device, block) at the current epoch.
-private fn block_run_hit_here(core: usize, device: KernelBlockDevice,
+// Whether this slot's run holds (device, block) at the current epoch.
+private fn block_run_hit_here(slot: borrow BlockSlot[0],
+                              device: KernelBlockDevice,
                               block: usize) -> bool {
-    if (core >= KERNEL_MAX_CORES) { return false; }
-    let here: {0..<KERNEL_MAX_CORES as usize} = core;
+    let here: {0..<KERNEL_MAX_CORES as usize} = slot.index;
     let first: usize = block_run_first[here];
     return block_run_count[here] != 0 &&
            block_run_backend[here] == device.backend &&
@@ -311,47 +401,45 @@ private fn block_run_hit_here(core: usize, device: KernelBlockDevice,
            block >= first && block - first < block_run_count[here];
 }
 
-// Copy (device, block) out of this core's run, if it holds it.
-private fn block_run_take(core: usize, device: KernelBlockDevice,
+// Copy (device, block) out of this slot's run, if it holds it.
+private fn block_run_take(slot: borrow BlockSlot[0], device: KernelBlockDevice,
                           block: usize,
                           destination: [u8; KERNEL_BLOCK_SIZE..]) -> bool {
-    if (block_run_hit_here(core, device, block) == false) { return false; }
-    if (core >= KERNEL_MAX_CORES) { return false; }
-    let here: {0..<KERNEL_MAX_CORES as usize} = core;
+    if (block_run_hit_here(slot, device, block) == false) { return false; }
+    let here: {0..<KERNEL_MAX_CORES as usize} = slot.index;
     let offset: usize = block - block_run_first[here];
     if (offset >= BLOCK_RUN_BLOCKS) { return false; }
     let within: {0..<BLOCK_RUN_BLOCKS as usize} = offset;
-    let slot: {0..<KERNEL_MAX_CORES * BLOCK_RUN_BLOCKS as usize} =
+    let row: {0..<KERNEL_MAX_CORES * BLOCK_RUN_BLOCKS as usize} =
         here * BLOCK_RUN_BLOCKS + within;
-    let base: usize = slot * KERNEL_BLOCK_SIZE;
+    let base: usize = row * KERNEL_BLOCK_SIZE;
     slice_copy(destination[0..<KERNEL_BLOCK_SIZE],
                block_run_data[base..<base + KERNEL_BLOCK_SIZE]);
     block_run_hits[here] = block_run_hits[here] + 1;
     return true;
 }
 
-private fn block_run_wanted(core: usize, device: KernelBlockDevice,
+private fn block_run_wanted(slot: borrow BlockSlot[0],
+                            device: KernelBlockDevice,
                             block: usize) -> bool {
-    if (core >= KERNEL_MAX_CORES) { return false; }
-    let here: {0..<KERNEL_MAX_CORES as usize} = core;
+    let here: {0..<KERNEL_MAX_CORES as usize} = slot.index;
     return block_run_next[here] == block &&
            block_run_next_backend[here] == device.backend;
 }
 
-private fn block_run_note_single(core: usize, device: KernelBlockDevice,
+private fn block_run_note_single(slot: borrow BlockSlot[0],
+                                 device: KernelBlockDevice,
                                  block: usize) {
-    if (core >= KERNEL_MAX_CORES) { return; }
-    let here: {0..<KERNEL_MAX_CORES as usize} = core;
+    let here: {0..<KERNEL_MAX_CORES as usize} = slot.index;
     block_run_next[here] = block + 1;
     block_run_next_backend[here] = device.backend;
 }
 
-// Read the run starting at `first` into this core's buffer. False leaves
+// Read the run starting at `first` into this slot's buffer. False leaves
 // no run behind, and the caller reads the one block it wanted instead.
-private fn block_run_read(core: usize, device: KernelBlockDevice,
+private fn block_run_read(slot: borrow BlockSlot[0], device: KernelBlockDevice,
                           first: usize) -> bool !{unsafe} {
-    if (core >= KERNEL_MAX_CORES) { return false; }
-    let here: {0..<KERNEL_MAX_CORES as usize} = core;
+    let here: {0..<KERNEL_MAX_CORES as usize} = slot.index;
     let available: usize = block_count(device);
     if (first >= available) { return false; }
     let mut count: usize = available - first;
@@ -360,14 +448,14 @@ private fn block_run_read(core: usize, device: KernelBlockDevice,
     // the run is being read retires it.
     block_run_count[here] = 0;
     let epoch: usize = block_cache_epoch_now();
-    let guard = block_device_take();
+    let guard = block_device_take(slot);
     let transferred: bool =
         block_run_transfer_locked(guard, here, device, first, count);
     block_device_give(guard);
     if (transferred == false) { return false; }
     for offset: usize in 0..<BLOCK_RUN_BLOCKS {
         if (offset < count) {
-            block_note_call(block_read_calls as []usize);
+            block_note_call(slot, block_read_calls as []usize);
         }
     }
     workload_profile_note_block_read(count * KERNEL_BLOCK_SIZE);
@@ -391,8 +479,8 @@ private fn block_run_transfer_locked(
         let target: *u8 = (block_run_data as *u8) +
             ((here * BLOCK_RUN_BLOCKS * KERNEL_BLOCK_SIZE) as isize);
         let length: usize = count * KERNEL_BLOCK_SIZE;
-        // This is the one raw storage boundary: the core and count checks
-        // above prove that the asserted slice stays inside this core's run.
+        // This is the one raw storage boundary: the slot and count checks
+        // above prove that the asserted slice stays inside this slot's run.
         let run = unsafe { target[0..<length as isize] };
         match disk_read_sectors((first * 2) as u32, run) {
             DiskIoResult::Err(error) => { return false; }
@@ -402,9 +490,9 @@ private fn block_run_transfer_locked(
         for offset: usize in 0..<BLOCK_RUN_BLOCKS {
             if (offset < count) {
                 // One request per block, its index one the compiler can bound.
-                let slot: {0..<KERNEL_MAX_CORES * BLOCK_RUN_BLOCKS as usize} =
+                let row: {0..<KERNEL_MAX_CORES * BLOCK_RUN_BLOCKS as usize} =
                     here * BLOCK_RUN_BLOCKS + offset;
-                let base: usize = slot * KERNEL_BLOCK_SIZE;
+                let base: usize = row * KERNEL_BLOCK_SIZE;
                 let sector: u32 = ((first + offset) * 2) as u32;
                 if (virtio_blk_read_block(
                         sector,
@@ -435,43 +523,52 @@ fn block_write(device: KernelBlockDevice, block: usize,
     if (block >= device.length / KERNEL_BLOCK_SIZE) {
         return BlockIoResult::Invalid;
     }
-    let core: usize = cpu_id();
+    let slot: BlockSlot[0] = block_slot_acquire();
     let mut epoch: BlockCacheEpoch = block_cache_epoch_of(device.backend, block);
-    match block_write_device(device, block, source) {
-        BlockIoResult::Invalid => {
-            block_cache_note_write(core, device.backend, block, source, false,
-                                   epoch);
-            return BlockIoResult::Invalid;
-        }
-        BlockIoResult::Ok => {
-            block_cache_note_write(core, device.backend, block, source, true,
-                                   epoch);
-            return BlockIoResult::Ok;
-        }
+    let mut written: bool = false;
+    match block_write_device(slot, device, block, source) {
+        BlockIoResult::Invalid => { }
+        BlockIoResult::Ok => { written = true; }
     }
+    block_cache_note_write(slot.index, device.backend, block, source, written,
+                           epoch);
+    block_slot_release(slot);
+    if (written) { return BlockIoResult::Ok; }
+    return BlockIoResult::Invalid;
 }
 
-private fn block_read_device(device: KernelBlockDevice, block: usize,
+// A write that went around block_write -- usb_provision_rootfs's batched
+// USB path -- retires every cached copy, counted as this slot's writes.
+fn block_forget_all() !{unsafe} {
+    let slot: BlockSlot[0] = block_slot_acquire();
+    block_cache_forget_all(slot.index);
+    block_slot_release(slot);
+}
+
+private fn block_read_device(slot: borrow BlockSlot[0],
+                             device: KernelBlockDevice, block: usize,
                              destination: [u8; KERNEL_BLOCK_SIZE..])
         -> BlockIoResult {
-    let guard = block_device_take();
+    let guard = block_device_take(slot);
     let result: BlockIoResult =
-        block_read_device_locked(guard, device, block, destination);
+        block_read_device_locked(slot, guard, device, block, destination);
     block_device_give(guard);
     return result;
 }
 
-private fn block_write_device(device: KernelBlockDevice, block: usize,
+private fn block_write_device(slot: borrow BlockSlot[0],
+                              device: KernelBlockDevice, block: usize,
                               source: [u8; KERNEL_BLOCK_SIZE..])
         -> BlockIoResult {
-    let guard = block_device_take();
+    let guard = block_device_take(slot);
     let result: BlockIoResult =
-        block_write_device_locked(guard, device, block, source);
+        block_write_device_locked(slot, guard, device, block, source);
     block_device_give(guard);
     return result;
 }
 
 private fn block_read_device_locked(
+        slot: borrow BlockSlot[0],
         guard: borrow BlockDeviceGuard[block_device_lock],
         device: KernelBlockDevice, block: usize,
         destination: [u8; KERNEL_BLOCK_SIZE..]) -> BlockIoResult !{unsafe} {
@@ -479,8 +576,8 @@ private fn block_read_device_locked(
         return BlockIoResult::Invalid;
     }
     if (block_fault_hits(guard, false)) { return BlockIoResult::Invalid; }
-    block_note_call(block_read_calls as []usize);
-    block_note_call(block_single_reads as []usize);
+    block_note_call(slot, block_read_calls as []usize);
+    block_note_call(slot, block_single_reads as []usize);
     workload_profile_note_block_read(KERNEL_BLOCK_SIZE);
     if (device.backend == 1) {
         // Both sectors of the block in one READ(10): a command costs the
@@ -501,6 +598,7 @@ private fn block_read_device_locked(
 }
 
 private fn block_write_device_locked(
+        slot: borrow BlockSlot[0],
         guard: borrow BlockDeviceGuard[block_device_lock],
         device: KernelBlockDevice, block: usize,
         source: [u8; KERNEL_BLOCK_SIZE..]) -> BlockIoResult !{unsafe} {
@@ -508,7 +606,7 @@ private fn block_write_device_locked(
         return BlockIoResult::Invalid;
     }
     if (block_fault_hits(guard, true)) { return BlockIoResult::Invalid; }
-    block_note_call(block_write_calls as []usize);
+    block_note_call(slot, block_write_calls as []usize);
     workload_profile_note_block_write(KERNEL_BLOCK_SIZE);
     if (device.backend == 1) {
         // GitHub issue #281, as measured: both sectors of the block in one
@@ -542,14 +640,13 @@ fn block_device_is_usb(device: KernelBlockDevice) -> bool {
     return device.backend == 1;
 }
 
-// GitHub issue #208: the cache keeps one set of slots per core, indexed by
-// the cpu_id() block_read and block_write pass it, and one slot holds one
-// block. Its slots are sized by KERNEL_MAX_CORES itself, so the core count
-// needs no assertion here. And a core must not enter block_read again before
-// its first call returns, which is what a non-preemptible kernel guarantees.
+// GitHub issue #208: the cache keeps one set of entries per BlockSlot,
+// indexed by the slot block_read and block_write hold, and one entry holds
+// one block. It used to be per core and asserted KERNEL_PREEMPTIBLE == 0 so
+// that a core could not enter block_read again before its first call
+// returned; the linear BlockSlot now gives each operation its own set
+// whatever the scheduler does (#638).
 fn block_cache_execution_model_assumption() {
     static_assert(BLOCK_CACHE_BYTES == KERNEL_BLOCK_SIZE,
                   "a block cache slot holds exactly one block");
-    static_assert(KERNEL_PREEMPTIBLE == 0,
-                  "per-core cache slots cannot survive preemption into another block_read on the same core");
 }

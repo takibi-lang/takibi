@@ -1,4 +1,4 @@
-// A small read cache in front of the block devices, one per core.
+// A small read cache in front of the block devices, one per block slot.
 //
 // GitHub issue #208. ext2 re-read the same few metadata blocks for every
 // kilobyte it returned: ext2_read_file_chunk reads the inode table block to
@@ -18,8 +18,11 @@
 //   every chunk and each data block once, so the data blocks are what an LRU
 //   gives up; round-robin would have evicted the metadata instead.
 //
-// One set of slots per core, indexed by the core number the caller passes
-// and sized by execution_model.tkb's KERNEL_MAX_CORES, the way ext2's scratch
+// One set of slots per writer, indexed by the number the caller passes
+// and sized by execution_model.tkb's KERNEL_MAX_CORES. The writer was a core
+// until GitHub issue #638; it is now memory.tkb's BlockSlot, one per block
+// operation in flight, whose index the caller passes. Below, "core" means
+// that writer. Sized the way ext2's scratch
 // buffers and the block counters already are, so raising the build's core
 // maximum resizes this file with no edit here (GitHub issue #9): a
 // syscall that reaches the filesystem may run on either core. What one core
@@ -46,6 +49,12 @@
 // that core's stale copy, so a peer could take a hit on a slot filled before
 // a write it could not yet see. Release/acquire is what makes the count the
 // later half of that pair on the hardware as well.
+//
+// Current limitations (2026-10-17):
+// - The index is a plain number, and this file trusts its caller to hold
+//   the BlockSlot it names, so that one writer at a time uses each set and
+//   each write count. Only memory.tkb calls in (and linux_user/block_cache,
+//   which plays two writers); scripts/check_slot_pool_entries.py keeps it so.
 //
 // Kept free of device access and logging, so linux_user/block_cache can
 // compile this file itself and drive two simulated cores against it.

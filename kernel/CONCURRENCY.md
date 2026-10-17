@@ -70,7 +70,13 @@ case and no longer depends on the constant: its scratch is a pool of
 `KERNEL_MAX_CORES` slots, each reached through a linear `Ext2Slot` that an
 entry point acquires (compare-exchange over one word per slot) and releases
 (#638). Readers still take no lock, so #533's reader concurrency stands.
-The rest of the first kind moves the same way, or into regions where it
+The block layer followed: a read holds its read-ahead run across the device
+lock and the USB completion wait, so the run, the block cache's entries and
+write counts, and the block counters are a pool reached through a linear
+`BlockSlot`, acquired by `block_read`, `block_write` and the two other entry
+points. ext2 calls the block layer while it holds an `Ext2Slot`, never the
+reverse, so the two pools cannot wait on each other. The rest of the first
+kind moves the same way, or into regions where it
 does not span a blocking call, before the flip.
 
 Raising either prints a worklist: files assert the constant they depend on

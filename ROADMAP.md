@@ -132,9 +132,10 @@ list (maintainer, 2026-10-09).
    escaping; the exec-argument handoff uses them. Slice 2 done
    (2026-10-17): ext2's scratch, held across block I/O that may block,
    moved to a pool of slots reached through a linear `Ext2Slot`, retiring
-   `cpu_here_across_blocking`. Next: the other per-CPU scratch, file by
-   file, into `struct per_cpu` plus regions, or a pool where it spans a
-   blocking call.
+   `cpu_here_across_blocking`. Slice 3 (2026-10-17): the block layer's
+   run, cache and counters, held across device I/O, moved to a `BlockSlot`
+   pool. Next: the other per-CPU scratch, file by file, into
+   `struct per_cpu` plus regions, or a pool where it spans a blocking call.
 
 **Evidence for the trunk, scheduled by A:** #584's soak at natural
 boundaries, #702 (dedicated soak hardware, the maintainer's decision),

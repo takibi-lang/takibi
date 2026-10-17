@@ -344,13 +344,21 @@ parameter. It is a `TaskMutex` rather than a `Mutex` because the USB path
 waits for the xHCI interrupt on core 0, which a masking lock would block.
 `usb_provision.tkb` writes around it, once, before any process exists.
 
-The same file's read-ahead run is per core too (GitHub issue #545). It is
-one 64-block buffer per core, with the block range, backend and write
-epoch it was filled at, and the block after that core's last device read.
-It is held to the block cache's epoch through `block_cache_epoch_now()`, so
-any write retires it exactly as it retires a cached block. The run and
-per-block read totals `block io:` prints are per core for the reason the
-other counters are.
+The same file's read-ahead run (GitHub issue #545) is one 64-block buffer
+per block slot, with the block range, backend and write epoch it was filled
+at, and the block after that slot's last device read. It is held to the
+block cache's epoch through `block_cache_epoch_now()`, so any write retires
+it exactly as it retires a cached block. The run and per-block read totals
+`block io:` prints are per slot for the reason the other counters are.
+
+The run, the counters, and `block_cache.tkb`'s entries and write counts were
+per core until GitHub issue #638 and are now a pool of `KERNEL_MAX_CORES`
+slots: `block_read`, `block_write`, `block_forget_all` and the fault
+injector's arm and disarm acquire a linear `BlockSlot` and release it at
+exit, because a read holds its run buffer across the device lock and the
+USB completion wait. The acquire tries the slot numbered by the current CPU
+first, so while the kernel is not preemptible slot and core coincide and
+`workload_evidence.tkb`'s per-core reads of the counters still name cores.
 
 `kernel/platform/rpi5/usb_provision.tkb` holds the embedded ext2 image and
 its two copy buffers. It is used once, by CPU0, while storage is set up and

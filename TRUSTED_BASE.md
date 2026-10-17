@@ -333,7 +333,17 @@ rules globally.
   `kernel/fs/ext2/ext2.tkb` returns a slot no other live token names, which
   its compare-exchange over the slot words provides. That one operation
   holds one slot at a time, so the pool cannot deadlock, is a build check
-  (`scripts/check_ext2_slot_entries.py`), not a type rule.
+  (`scripts/check_slot_pool_entries.py`), not a type rule.
+- The block layer's per-operation state (the read-ahead run, the block
+  cache's entries and write counts, the block counters) is the same shape:
+  a pool of `KERNEL_MAX_CORES` slots reached through a linear `BlockSlot`
+  (#638). Trusted: `block_slot_acquire` in
+  `kernel/drivers/block/memory.tkb` returns a slot no other live token
+  names (its compare-exchange; the `cpu_id()` it tries first is a locality
+  hint, not trusted). `kernel/drivers/block/block_cache.tkb` takes the
+  slot's index as a plain number and trusts its caller to hold the slot;
+  `scripts/check_slot_pool_entries.py` keeps memory.tkb its only kernel
+  caller and checks the one-slot-per-operation rule for both pools.
 - Definite initialization (SPEC.md, "Definite Initialization") trusts three
   premises. A `scratch` global's element is reached only by its own CPU, so
   any index names the same place (`kernel/kernel/syscall.tkb`'s

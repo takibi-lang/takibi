@@ -53,7 +53,7 @@ fn usb_provision_rootfs(destination: KernelBlockDevice) -> UsbProvisionResult {
     }
     // These writes go around block_write, so every cached copy is retired
     // before and after them (GitHub issue #208).
-    block_cache_forget_all(cpu_id());
+    block_forget_all();
     let mut first_block: usize = 0;
     while (first_block < USB_PROVISION_BLOCKS) {
         let mut batch: usize = USB_PROVISION_BLOCKS - first_block;
@@ -152,7 +152,7 @@ fn usb_provision_rootfs(destination: KernelBlockDevice) -> UsbProvisionResult {
         }
         first_block = first_block + batch;
     }
-    block_cache_forget_all(cpu_id());
+    block_forget_all();
     return UsbProvisionResult::Copied;
 }
 

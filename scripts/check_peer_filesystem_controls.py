@@ -35,12 +35,23 @@ def problems(tree: dict[str, str]) -> list[str]:
 
     lock_shape = (
         "if (task_mutex_trylock(&block_device_lock) == false) {\n"
-        "        block_note_call(block_device_waits as []usize);\n"
+        "        block_note_call(slot, block_device_waits as []usize);\n"
         "        task_mutex_acquire(&block_device_lock);\n"
         "    }"
     )
     if lock_shape not in memory:
         result.append("device acquisition does not record a failed first try")
+    # GitHub issue #638: the counters are per BlockSlot. The verdict reads
+    # them by core number, which is right only while a CPU's operations take
+    # the slot its number names first.
+    slot_hint = (
+        "    let hint: usize = cpu_id();\n"
+        "    if (hint < KERNEL_MAX_CORES) {\n"
+        "        let preferred: {0..<KERNEL_MAX_CORES as usize} = hint;\n"
+        "        if (atomic_word_compare_exchange(&block_slot_words[preferred], 0, 1)) {")
+    if slot_hint not in memory:
+        result.append("the block slot acquire no longer tries the current "
+                      "cpu's slot first, so per-slot counters do not name cores")
     for condition in (
         "block_read_call_count(SECONDARY_CORE_ID) == 0",
         "block_device_wait_count(0) == 0",
@@ -140,6 +151,7 @@ def main() -> int:
     controls = []
     mutations = {
         "exclusion": ("kernel/drivers/block/memory.tkb", "task_mutex_trylock", "removed_trylock"),
+        "slot hint": ("kernel/drivers/block/memory.tkb", "let hint: usize = cpu_id();", "let hint: usize = 0;"),
         "cpu0 wait": ("kernel/kernel/workload_evidence.tkb", "block_device_wait_count(0)", "removed_cpu0_wait"),
         "secondary id": ("kernel/kernel/workload_evidence.tkb", "block_read_call_count(SECONDARY_CORE_ID)", "block_read_call_count(1)"),
         "default placement": (

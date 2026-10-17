@@ -109,12 +109,15 @@ EXEMPT = {
         "Mutexes, and the reset record its quiesces lowering reads (GitHub "
         "issue #740)",
     "drivers/block/memory.tkb":
-        "per-core counters and read-ahead run indexed by cpu_id(), and the "
-        "device reached only under block_device_lock (GitHub issue #533)",
+        "GitHub issue #638: counters and read-ahead run are a slot pool handed "
+        "out by compare-exchange under a linear BlockSlot, which holds for any "
+        "core count and with preemption; the device is reached only under "
+        "block_device_lock (GitHub issue #533)",
     "drivers/block/block_cache.tkb":
-        "per-core slots sized by KERNEL_MAX_CORES and indexed by the caller's "
-        "cpu_id(); memory.tkb asserts KERNEL_PREEMPTIBLE == 0 beside its only "
-        "caller, and another core's writes arrive through the write epoch",
+        "per-writer slots sized by KERNEL_MAX_CORES and indexed by the "
+        "BlockSlot its only caller, memory.tkb, holds (GitHub issue #638, "
+        "scripts/check_slot_pool_entries.py); another writer's writes arrive "
+        "through the write epoch",
     "drivers/serial/uart_rx_ring.tkb":
         "the process-run lock serializes CPU 0's RX interrupt, termios "
         "line editing and terminal reads on any CPU",

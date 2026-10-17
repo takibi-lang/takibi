@@ -43,7 +43,7 @@ fn ext2_max_regular_file_size() -> usize {
 // Only the public entry points acquire, and no function in this file calls
 // one of them, so an operation holds one slot at a time and the pool cannot
 // run dry with every holder waiting for a second slot.
-// scripts/check_ext2_slot_entries.py enforces that.
+// scripts/check_slot_pool_entries.py enforces that.
 //
 // Current limitations (2026-10-17):
 // - The pool has KERNEL_MAX_CORES slots. While KERNEL_PREEMPTIBLE is 0 and
