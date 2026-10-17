@@ -329,7 +329,7 @@ fn ext2_bytes_boundary_probe() -> bool {
     return result;
 }
 
-private fn ext2_bytes_boundary_probe_with(slot: borrow Ext2Slot[0]) -> bool {
+private inline fn ext2_bytes_boundary_probe_with(slot: borrow Ext2Slot[0]) -> bool {
     let end: usize = KERNEL_BLOCK_SIZE;
     let mut whole: Ext2Bytes = ext2_file();
     let mut interior: Ext2Bytes = ext2_at(ext2_file(), end - 2);
@@ -404,7 +404,7 @@ fn ext2_mount(device: KernelBlockDevice) -> Ext2MountResult {
     return result;
 }
 
-private fn ext2_mount_with(slot: borrow Ext2Slot[0],
+private inline fn ext2_mount_with(slot: borrow Ext2Slot[0],
         device: KernelBlockDevice) -> Ext2MountResult {
     match block_read(device, EXT2_SUPERBLOCK_BLOCK,
                      ext2_scratch[slot.index].metadata as []u8) {
@@ -607,7 +607,7 @@ fn ext2_lookup_root(mount: Ext2Mount, name: []const u8)
     return result;
 }
 
-private fn ext2_lookup_root_with(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+private inline fn ext2_lookup_root_with(slot: borrow Ext2Slot[0], mount: Ext2Mount,
         name: []const u8)
         -> Ext2LookupResult !{unsafe} {
     return ext2_lookup_directory_with(slot, mount, 2, name);
@@ -690,7 +690,7 @@ fn ext2_lookup_path(mount: Ext2Mount, name: borrow []const u8)
     return result;
 }
 
-private fn ext2_lookup_path_with(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+private inline fn ext2_lookup_path_with(slot: borrow Ext2Slot[0], mount: Ext2Mount,
         name: borrow []const u8)
         -> Ext2LookupResult !{unsafe} {
     return ext2_lookup_path_from_with(slot, mount, 2, name);
@@ -770,7 +770,7 @@ fn ext2_read_small_file(mount: Ext2Mount, inode_number: usize,
     return result;
 }
 
-private fn ext2_read_small_file_with(slot: borrow Ext2Slot[0],
+private inline fn ext2_read_small_file_with(slot: borrow Ext2Slot[0],
         mount: Ext2Mount, inode_number: usize,
                         destination: []u8)
         -> Ext2ReadResult !{unsafe} {
@@ -845,7 +845,7 @@ fn ext2_read_file_chunk(mount: Ext2Mount, inode_number: usize,
     return result;
 }
 
-private fn ext2_read_file_chunk_with(slot: borrow Ext2Slot[0],
+private inline fn ext2_read_file_chunk_with(slot: borrow Ext2Slot[0],
         mount: Ext2Mount, inode_number: usize,
                         offset: usize, destination: []u8)
         -> Ext2ReadResult !{unsafe} {
@@ -906,7 +906,7 @@ fn ext2_read_directory_chunk(mount: Ext2Mount, inode_number: usize,
     return result;
 }
 
-private fn ext2_read_directory_chunk_with(slot: borrow Ext2Slot[0],
+private inline fn ext2_read_directory_chunk_with(slot: borrow Ext2Slot[0],
         mount: Ext2Mount, inode_number: usize,
                              offset: usize, destination: []u8)
         -> Ext2ReadResult !{unsafe} {
@@ -964,7 +964,7 @@ fn ext2_inode_is_symlink(mount: Ext2Mount, inode_number: usize) -> bool {
     return result;
 }
 
-private fn ext2_inode_is_symlink_with(slot: borrow Ext2Slot[0],
+private inline fn ext2_inode_is_symlink_with(slot: borrow Ext2Slot[0],
         mount: Ext2Mount, inode_number: usize) -> bool {
     match ext2_read_inode(slot, mount, inode_number) {
         Ext2InodeResult::Invalid => { return false; }
@@ -981,7 +981,7 @@ fn ext2_regular_file_size(mount: Ext2Mount, inode_number: usize) -> usize {
     return result;
 }
 
-private fn ext2_regular_file_size_with(slot: borrow Ext2Slot[0],
+private inline fn ext2_regular_file_size_with(slot: borrow Ext2Slot[0],
         mount: Ext2Mount, inode_number: usize) -> usize {
     match ext2_read_inode(slot, mount, inode_number) {
         Ext2InodeResult::Invalid => { return 0; }
@@ -1014,7 +1014,7 @@ fn ext2_inode_size(mount: Ext2Mount, inode_number: usize) -> usize {
     return result;
 }
 
-private fn ext2_inode_size_with(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+private inline fn ext2_inode_size_with(slot: borrow Ext2Slot[0], mount: Ext2Mount,
         inode_number: usize) -> usize {
     match ext2_read_inode(slot, mount, inode_number) {
         Ext2InodeResult::Invalid => { return 0; }
@@ -1031,7 +1031,7 @@ fn ext2_regular_file_allocated_sectors(mount: Ext2Mount,
     return result;
 }
 
-private fn ext2_regular_file_allocated_sectors_with(slot: borrow Ext2Slot[0],
+private inline fn ext2_regular_file_allocated_sectors_with(slot: borrow Ext2Slot[0],
         mount: Ext2Mount,
                                        inode_number: usize)
         -> Ext2CountResult {
@@ -1064,7 +1064,7 @@ fn ext2_resize_small_file(mount: Ext2Mount, inode_number: usize,
     return result;
 }
 
-private fn ext2_resize_small_file_with(slot: borrow Ext2Slot[0],
+private inline fn ext2_resize_small_file_with(slot: borrow Ext2Slot[0],
         mount: Ext2Mount, inode_number: usize,
                           source: []const u8)
         -> Ext2ResizeResult !{unsafe} {
@@ -1082,7 +1082,7 @@ fn ext2_read_fast_symlink(mount: Ext2Mount, inode_number: usize,
     return result;
 }
 
-private fn ext2_read_fast_symlink_with(slot: borrow Ext2Slot[0],
+private inline fn ext2_read_fast_symlink_with(slot: borrow Ext2Slot[0],
         mount: Ext2Mount, inode_number: usize,
                           destination: []u8)
         -> Ext2SymlinkResult !{unsafe} {
@@ -1374,7 +1374,7 @@ fn ext2_counters_match_bitmaps(mount: Ext2Mount) -> bool !{unsafe} {
     return result;
 }
 
-private fn ext2_counters_match_bitmaps_with(slot: borrow Ext2Slot[0],
+private inline fn ext2_counters_match_bitmaps_with(slot: borrow Ext2Slot[0],
         mount: Ext2Mount) -> bool !{unsafe} {
     let free_blocks: usize = match ext2_count_free(slot, mount, false) {
         Ext2CountResult::Invalid => { return false; }
@@ -1415,7 +1415,7 @@ fn ext2_recover(mount: Ext2Mount) -> Ext2RecoverResult !{unsafe} {
     return result;
 }
 
-private fn ext2_recover_with(slot: borrow Ext2Slot[0],
+private inline fn ext2_recover_with(slot: borrow Ext2Slot[0],
         mount: Ext2Mount) -> Ext2RecoverResult !{unsafe} {
     for pending: usize in 0..<EXT2_FENCE_PENDING_MAX {
         if (pending < ext2_fence_pending_count) {
@@ -1530,7 +1530,7 @@ fn ext2_bitmap_roundtrip_check(mount: Ext2Mount)
     return result;
 }
 
-private fn ext2_bitmap_roundtrip_check_with(slot: borrow Ext2Slot[0],
+private inline fn ext2_bitmap_roundtrip_check_with(slot: borrow Ext2Slot[0],
         mount: Ext2Mount)
         -> Ext2BitmapProbeResult {
     let mut before_blocks: usize = 0;
@@ -1891,7 +1891,7 @@ fn ext2_write_regular_file_range(mount: Ext2Mount, inode_number: usize,
     return result;
 }
 
-private fn ext2_write_regular_file_range_with(slot: borrow Ext2Slot[0],
+private inline fn ext2_write_regular_file_range_with(slot: borrow Ext2Slot[0],
         mount: Ext2Mount, inode_number: usize,
                                  offset: usize, source: []const u8)
         -> Ext2ResizeResult !{unsafe} {
@@ -2227,7 +2227,7 @@ fn ext2_write_allocations_roundtrip_check(mount: Ext2Mount)
     return result;
 }
 
-private fn ext2_write_allocations_roundtrip_check_with(slot: borrow Ext2Slot[0], mount: Ext2Mount)
+private inline fn ext2_write_allocations_roundtrip_check_with(slot: borrow Ext2Slot[0], mount: Ext2Mount)
         -> Ext2BitmapProbeResult {
     let mut before_blocks: usize = 0;
     let mut before_inodes: usize = 0;
@@ -2353,7 +2353,7 @@ fn ext2_owner_roundtrip_check(mount: Ext2Mount) -> Ext2BitmapProbeResult {
     return result;
 }
 
-private fn ext2_owner_roundtrip_check_with(slot: borrow Ext2Slot[0],
+private inline fn ext2_owner_roundtrip_check_with(slot: borrow Ext2Slot[0],
         mount: Ext2Mount) -> Ext2BitmapProbeResult {
     match ext2_allocate_block(slot, mount) {
         Ext2BlockAllocResult::NoSpace => {
@@ -2901,7 +2901,7 @@ fn ext2_create_root_file(mount: Ext2Mount, name: []const u8, content: []const u8
     return result;
 }
 
-private fn ext2_create_root_file_with(slot: borrow Ext2Slot[0],
+private inline fn ext2_create_root_file_with(slot: borrow Ext2Slot[0],
         mount: Ext2Mount, name: []const u8, content: []const u8)
         -> Ext2CreateResult {
     return ext2_create_file_in_with(slot, mount, EXT2_ROOT_INODE, name,
@@ -2918,7 +2918,7 @@ fn ext2_unlink_root_file(mount: Ext2Mount,
     return result;
 }
 
-private fn ext2_unlink_root_file_with(slot: borrow Ext2Slot[0],
+private inline fn ext2_unlink_root_file_with(slot: borrow Ext2Slot[0],
         mount: Ext2Mount,
                          linked: sink Ext2LinkedFile[inode, block],
                          name: []const u8) -> Ext2UnlinkResult {
@@ -3228,7 +3228,7 @@ fn ext2_make_directory_in(mount: Ext2Mount, parent_inode: usize,
     return result;
 }
 
-private fn ext2_make_directory_in_with(slot: borrow Ext2Slot[0],
+private inline fn ext2_make_directory_in_with(slot: borrow Ext2Slot[0],
         mount: Ext2Mount, parent_inode: usize,
                           name: borrow []const u8) -> Ext2MkdirResult {
     match ext2_lookup_directory_with(slot, mount, parent_inode, name) {
@@ -3373,7 +3373,7 @@ fn ext2_claim_directory(mount: Ext2Mount, parent_inode: usize,
     return result;
 }
 
-private fn ext2_claim_directory_with(slot: borrow Ext2Slot[0],
+private inline fn ext2_claim_directory_with(slot: borrow Ext2Slot[0],
         mount: Ext2Mount, parent_inode: usize,
                         name: borrow []const u8) -> Ext2ClaimResult !{unsafe} {
     if (name.len == 0) { return Ext2ClaimResult::Invalid; }
@@ -3563,7 +3563,7 @@ fn ext2_rename_in(mount: Ext2Mount, old_parent: usize, old_name: borrow []const 
     return result;
 }
 
-private fn ext2_rename_in_with(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+private inline fn ext2_rename_in_with(slot: borrow Ext2Slot[0], mount: Ext2Mount,
         old_parent: usize, old_name: borrow []const u8,
                   new_parent: usize, new_name: borrow []const u8)
         -> Ext2RenameResult !{unsafe} {
@@ -3646,7 +3646,7 @@ fn ext2_remove_directory_in(mount: Ext2Mount, parent_inode: usize,
     return result;
 }
 
-private fn ext2_remove_directory_in_with(slot: borrow Ext2Slot[0],
+private inline fn ext2_remove_directory_in_with(slot: borrow Ext2Slot[0],
         mount: Ext2Mount, parent_inode: usize,
                             linked: sink Ext2LinkedDirectory[inode, block],
                             name: borrow []const u8) -> Ext2RmdirResult {

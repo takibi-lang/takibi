@@ -26,7 +26,7 @@ from pass_line import report_pass
 ROOT = Path(__file__).resolve().parent.parent
 EXT2 = ROOT / "kernel" / "fs" / "ext2" / "ext2.tkb"
 ACQUIRE = "ext2_slot_acquire"
-FUNCTION = re.compile(r"^(?:private\s+)?(?:noinline\s+)?fn\s+(\w+)\s*\(", re.M)
+FUNCTION = re.compile(r"^(?:private\s+)?(?:(?:no)?inline\s+)?fn\s+(\w+)\s*\(", re.M)
 
 
 def functions(text):
