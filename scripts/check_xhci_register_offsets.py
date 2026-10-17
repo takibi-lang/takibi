@@ -86,7 +86,7 @@ def main() -> int:
         return 1
     report_pass("xhci-register-offsets",
                 f"{len(fields)} {STRUCT} fields match the xHCI specification",
-                files=1)
+                fields=len(fields))
     return 0
 
 
