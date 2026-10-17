@@ -1,30 +1,26 @@
 #!/usr/bin/env python3
-"""Controls for the protocol-trace replay (GitHub issue #606).
+"""Controls for the protocol-trace report parser (GitHub issue #606).
 
-scripts/validate_protocol_trace.py passes on every healthy boot, which is
-the shape that rots unnoticed: an action that matches too much, or a parse
-that stops reading, turns it into a check of nothing. So each refusal is
-planted here and required, with its diagnostic checked rather than only the
-exit status.
+scripts/validate_protocol_trace.py parses a protocol-trace window into the
+module TLC checks against kernel/models/StackOwnershipTrace.tla. The
+protocol refusals need TLC and run in `make modelcheck`
+(scripts/protocol_trace_tlc_controls.py). These are the ones that need
+nothing but the parser, in this process, with no child: what the parser
+refuses about the REPORT, and the bookkeeping conventions the generated
+module rests on. A parser that quietly stopped reading would turn the TLC
+check into a check of nothing.
 
-Two of them are the reason the replay exists:
-
-- A path the model lacks fails a PASSING run. The recorded QEMU window
-  kernel/tests/qemu/protocol_trace.window passes; replayed without
-  ChildExitStart, the model action for the direct parent start that #609's
-  defect sat beside, it must fail as a step no action describes. No race is
-  needed for that: the direct start runs on an ordinary wait4 wake.
-- #609 itself: a child's exit starting its parent while another core still
-  owns the parent's stack must fail as
-  "ChildExitStart not enabled: owner[parent] = c1".
+It also holds three lists to one another, since a drift between them makes
+a negative control vacuous: the actions of StackOwnership.tla's Next, the
+actions StackOwnershipTrace.tla's ModelStep offers by name (`Allowed`), and
+the validator's ACTIONS, which `--without` accepts. A `--without` naming an
+action the trace spec does not label would remove nothing and still be
+"refused" by whatever else broke.
 """
 
-import contextlib
 import importlib.util
-import io
-import subprocess
+import re
 import sys
-import tempfile
 from pathlib import Path
 
 from pass_line import CaseCount, report_pass
@@ -32,36 +28,25 @@ from pass_line import CaseCount, report_pass
 ROOT = Path(__file__).resolve().parent.parent
 VALIDATOR = ROOT / "scripts" / "validate_protocol_trace.py"
 _spec = importlib.util.spec_from_file_location("validate_protocol_trace", VALIDATOR)
-VALIDATOR_MODULE = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(VALIDATOR_MODULE)
+V = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(V)
+MODEL = ROOT / "kernel" / "models" / "StackOwnership.tla"
+TRACE_SPEC = ROOT / "kernel" / "models" / "StackOwnershipTrace.tla"
 WINDOW = ROOT / "kernel" / "tests" / "qemu" / "protocol_trace.window"
-# The debug lane's window that first took an interrupt from EL0 inside it,
-# which the model did not have until it failed an allcheck.
-INTERRUPT_WINDOW = (ROOT / "kernel" / "tests" / "qemu-debug" /
-                    "protocol_trace.window")
-# A debug-lane window in which the napping child blocked with no successor
-# (Nap) because another core had taken its parent: SwitchAway never ran.
-NAP_WINDOW = (ROOT / "kernel" / "tests" / "qemu-debug" /
-              "protocol_trace_nap.window")
-
-# RPi5's real clone-return window: an EL1 timer leaves a reschedule pending
-# before the child has made its first physical stack handoff.
-CLONE_WINDOW = (ROOT / "kernel" / "tests" / "rpi5" /
-                "protocol_trace_clone_reschedule.window")
 
 CASES = CaseCount()
 
 
-def window(changes, lost=0, end=True, holds=10):
-    lines = [f"protocol-trace: begin cores=2 stored={len(changes)} "
+def window(changes, lost=0, end=True, holds=10, stored=None):
+    stored = len(changes) if stored is None else stored
+    lines = [f"protocol-trace: begin cores=2 stored={stored} "
              f"lost={lost} holds={holds}"]
     lines += [f"protocol-trace: {change}" for change in changes]
     if end:
         lines.append("protocol-trace: end")
-    return "\n".join(lines) + "\n"
+    return lines
 
 
-# Parent 10 and child 11 on core 0; core 1 idle.
 SNAPSHOT = [
     "0 0 l p 10 2 0 0 -",
     "0 0 l p 11 5 - 0 10",
@@ -69,247 +54,124 @@ SNAPSHOT = [
     "0 0 l c 1 - -",
 ]
 
-# #609: the parent blocked in wait4 on core 1, which still stands on its
-# stack, and the child running on core 0 exits and starts it.
-SHARED_STACK = [
-    "0 0 l p 10 3 1 2 -",
-    "0 0 l p 11 2 0 0 10",
-    "0 0 l c 0 11 11",
-    "0 0 l c 1 - 10",
-    "1 0 l p 11 4 0 0 10",
-    "1 0 l p 10 2 1 2 -",
-]
 
-
-# An interrupt from EL0 releases the running process's stack, and the tick
-# inside it leaves the core; then the same leave with no interrupt taken.
-TICK_LEAVE = SNAPSHOT[:1] + ["0 0 l p 11 2 1 0 10", "0 0 l c 0 10 10",
-                             "0 0 l c 1 11 11",
-                             "1 0 l p 10 2 - 0 -", "1 0 l c 0 10 -",
-                             "2 0 l p 10 1 - 0 -", "2 0 l c 0 - -"]
-TICK_LEAVE_UNINTERRUPTED = SNAPSHOT[:1] + [
-    "0 0 l p 11 2 1 0 10", "0 0 l c 0 10 10", "0 0 l c 1 11 11",
-    "1 0 l p 10 1 0 0 -", "1 0 l c 0 - 10"]
-
-# #803: an idle core 1 reserves and commits Ready 12, then reserves Ready
-# 13 before the exception return has put 12 on its own stack. The kernel
-# selects nothing in that window (only a clone child's first return does).
-RESERVE_UNSWITCHED = [
-    "0 0 l p 10 2 0 0 -", "0 0 l p 12 1 - 0 -", "0 0 l p 13 1 - 0 -",
-    "0 0 l c 0 10 10", "0 0 l c 1 - -",
-    "1 1 l p 12 2 - 0 -", "2 1 l c 1 12 -", "3 1 l p 13 2 - 0 -"]
-
-# Wait4Block.tla and RecordLifetime.tla (#647). Parent 10 runs on core 1
-# and its child 11 on core 0.
-FAMILY = [
-    "0 0 l p 10 2 1 0 -",
-    "0 0 l p 11 2 0 0 10",
-    "0 0 l c 0 11 11",
-    "0 0 l c 1 10 10",
-]
-
-# #550: the child exits first, and the parent then publishes Blocked with a
-# zombie child, which nothing will wake. The fix's re-check refuses it.
-BLOCK_WITH_ZOMBIE = FAMILY + [
-    "1 0 l p 11 4 0 0 10",
-    "1 0 l c 0 - 11",
-    "2 1 l p 10 3 1 2 -",
-    "2 1 l c 1 - 10",
-]
-
-# The parent blocks first, and the child's exit wakes nobody: the lost
-# wakeup itself, reached with each step individually legal.
-EXIT_WAKES_NOBODY = FAMILY + [
-    "1 1 l p 10 3 1 2 -",
-    "1 1 l c 1 - 10",
-    "2 0 l p 11 4 0 0 10",
-    "2 0 l c 0 - 11",
-]
-
-# The child's exit wakes a process that is not its parent.
-EXIT_WAKES_STRANGER = FAMILY[:1] + [
-    "0 0 l p 12 3 - 2 -",
-] + FAMILY[1:] + [
-    "1 0 l p 11 4 0 0 10",
-    "1 0 l p 12 1 - 0 -",
-    "1 0 l c 0 - 11",
-]
-
-# The child's zombie is removed with no lock held, and a live record is
-# removed at all.
-REMOVED_UNLOCKED = FAMILY + [
-    "1 0 l p 11 4 0 0 10",
-    "1 0 l c 0 - 11",
-    "2 0 u g 11 0 0",
-]
-REMOVED_LIVE = FAMILY + ["1 0 l g 11 0 0"]
-
-
-# #603 (#653): wait4's decision published on a process that is still Running
-# and reserved for no core, and any other wait on a Running process. Neither
-# changes the state, so the only thing that shows them is the reason.
-STALE_CHILD_EXIT = FAMILY + ["1 1 l p 10 2 1 2 -"]
-STALE_SIGNAL = FAMILY + ["1 1 l p 10 2 1 5 -"]
-
-
-def run_cli(text, *extra):
-    """The validator as the lanes run it: a separate process."""
-    with tempfile.NamedTemporaryFile("w", suffix=".log") as log:
-        log.write(text)
-        log.flush()
-        return subprocess.run(
-            [sys.executable, str(VALIDATOR), log.name, *extra],
-            capture_output=True, text=True, check=False)
-
-
-def run(text, *extra):
-    """The validator's main() in this process, with the same arguments and
-    output. Starting ~30 interpreters made this control the slowest member
-    of the fast gate, and it overran the gate's bound on a loaded host
-    (GitHub issue #780); the first case still goes through run_cli."""
-    with tempfile.NamedTemporaryFile("w", suffix=".log") as log:
-        log.write(text)
-        log.flush()
-        out, err = io.StringIO(), io.StringIO()
-        saved = sys.argv
-        sys.argv = [str(VALIDATOR), log.name, *extra]
-        try:
-            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                try:
-                    code = VALIDATOR_MODULE.main()
-                except SystemExit as exit_:
-                    code = exit_.code if isinstance(exit_.code, int) else 1
-        finally:
-            sys.argv = saved
-        return subprocess.CompletedProcess(sys.argv, code, out.getvalue(), err.getvalue())
-
-
-def expect(name, result, passes, needle, absent=None):
+def refusal(name, lines, needle):
     CASES.note()
-    output = result.stdout + result.stderr
-    if (result.returncode == 0) != passes or needle not in output or \
-            (absent is not None and absent in output):
-        print(f"FAIL validate-protocol-trace controls: {name}: expected "
-              f"{'PASS' if passes else 'a refusal'} saying {needle!r}, got "
-              f"exit {result.returncode}:\n{output}")
+    try:
+        cores, _, holds = V.parse(lines)
+        V.observations(cores, holds)
+    except V.TraceError as error:
+        if needle in str(error):
+            return True
+        print(f"FAIL validate-protocol-trace controls: {name}: refused with "
+              f"{error!r}, expected {needle!r}")
         return False
-    return True
+    print(f"FAIL validate-protocol-trace controls: {name}: accepted, "
+          f"expected a refusal saying {needle!r}")
+    return False
+
+
+def holds_true(name, condition, detail=""):
+    CASES.note()
+    if not condition:
+        print(f"FAIL validate-protocol-trace controls: {name} {detail}")
+    return bool(condition)
+
+
+def model_next_actions(text):
+    body = text.split("\nNext ==", 1)[1].split("\n\n", 1)[0]
+    return set(re.findall(r"\b([A-Z]\w+)\(", body)) - {"SF_vars", "WF_vars"}
 
 
 def main() -> int:
-    recorded = WINDOW.read_text(encoding="utf-8")
-    interrupted = INTERRUPT_WINDOW.read_text(encoding="utf-8")
-    napped = NAP_WINDOW.read_text(encoding="utf-8")
-    cloned = CLONE_WINDOW.read_text(encoding="utf-8")
+    obs_lines = window(SNAPSHOT + [
+        # 12 appears later as a fresh record: Constructing from the start.
+        "1 1 u p 12 5 - 0 -", "1 1 l p 12 5 - 0 10",
+        # 13 appears later already Running: Absent until then.
+        "2 1 l p 13 2 - 0 10",
+        # An unlocked line's wait reason is not the published one.
+        "3 0 u p 10 2 0 4 -",
+        # The kernel clears 11's link as it removes the record.
+        "4 0 u p 11 4 - 0 -", "4 0 l g 11 0 0",
+    ])
+    cores, _, holds = V.parse(obs_lines)
+    obs = V.observations(cores, holds)
+    module = V.trace_module(cores, obs)
+    model_text = MODEL.read_text(encoding="utf-8")
+    trace_text = TRACE_SPEC.read_text(encoding="utf-8")
+    allowed = set(re.findall(r'Allowed\("(\w+)"\)', trace_text))
+    labelled = set(re.findall(r'act\' = "(\w+)"', trace_text)) - {"none"}
+    in_next = model_next_actions(model_text)
+    real_cores, _, real = V.parse(WINDOW.read_text(encoding="utf-8").splitlines())
     checks = [
-        expect("the recorded RPi5 clone-return reschedule", run_cli(cloned),
-               True, "CloneReschedule=1"),
-        expect("that window without CloneReschedule",
-               run(cloned, "--without", "CloneReschedule"), False,
-               "sequence 339 (cpu 0): SwitchAway not enabled"),
-        expect("a refused clone transition reports the physical parent stack",
-               run(cloned, "--without", "CloneReschedule"), False,
-               "c0(current=87, stands=86, reserved=2, interrupted=False)"),
-        expect("a refused clone transition reports the unstarted child",
-               run(cloned, "--without", "CloneReschedule"), False,
-               "p87(state=Running, owner=None, parent=86, wait=0)"),
-        expect("a refused clone transition reports the observed successor",
-               run(cloned, "--without", "CloneReschedule"), False,
-               "c0(current=2, stands=86, reserved=2, interrupted=False)"),
-        expect("clone reschedule cannot give the child an owned stack",
-               run(cloned.replace("339 0 l p 87 1 - 0 86",
-                                  "339 0 l p 87 1 1 0 86")), False,
-               "CloneReschedule not enabled: the unstarted child already owns a stack"),
-        expect("clone reschedule must use the reserved successor",
-               run(cloned.replace("339 0 l c 0 2 86",
-                                  "339 0 l c 0 1 86")), False,
-               "CloneReschedule not enabled: reserved[c0] = 2, not 1"),
-        expect("clone reschedule cannot relabel the retained parent",
-               run(cloned.replace("339 0 l p 87 1 - 0 86",
-                                  "339 0 l p 87 1 - 0 1")), False,
-               "sequence 339 (cpu 0): SwitchAway not enabled"),
-        expect("the recorded window whose child napped with no successor",
-               run(napped), True, "SwitchAway=0, CloneReschedule=0, Wait4Block=2, Nap=1"),
-        expect("the recorded window with an interrupt from EL0",
-               run(interrupted), True, "InterruptDepart=1"),
-        expect("that window without InterruptDepart",
-               run(interrupted, "--without", "InterruptDepart"), False,
-               "IdleEnter not enabled: current[c0] = 76"),
-        expect("an allocation landing inside another CPU's hold",
-               run(window(SNAPSHOT + ["1 1 l p 12 5 - 0 10"])), False,
-               "never exercised", absent="ERROR"),
-        expect("a tick leave inside an interrupt", run(window(TICK_LEAVE)),
-               False, "never exercised", absent="ERROR"),
-        expect("a reserve before the current process was switched to",
-               run(window(RESERVE_UNSWITCHED)), False,
-               "c1 runs 12 but has not switched to it (stands idle)"),
-        expect("a tick leave with no interrupt taken",
-               run(window(TICK_LEAVE_UNINTERRUPTED)), False,
-               "TickLeave not enabled: c0 is not inside an interrupt"),
-        expect("the recorded QEMU window", run(recorded), True,
-               "PASS protocol-trace:"),
-        expect("the recorded window without ChildExitStart",
-               run(recorded, "--without", "ChildExitStart"), False,
-               "a step no model action describes"),
-        expect("#609's start on a stack another core owns",
-               run(window(SHARED_STACK)), False,
-               "ChildExitStart not enabled: owner[parent] = c1"),
-        expect("#550: blocking in wait4 with a zombie child",
-               run(window(BLOCK_WITH_ZOMBIE)), False,
-               "Wait4Block not enabled: 10 blocks with its child 11 "
-               "already Exited"),
-        expect("#550: an exit that wakes a Blocked parent nobody",
-               run(window(EXIT_WAKES_NOBODY)), False,
-               "NoLostWakeup: 10 sleeps in wait4 while its child 11 is a "
-               "zombie"),
-        expect("an exit that wakes a process that is not the parent",
-               run(window(EXIT_WAKES_STRANGER)), False,
-               "ChildExit not enabled: 11 exits and wakes 12, which is not "
-               "its parent"),
-        expect("a record removed with no lock held",
-               run(window(REMOVED_UNLOCKED)), False,
-               "record 11 was removed with no lock held"),
-        expect("a live record removed",
-               run(window(REMOVED_LIVE)), False,
-               "Wait4Reap not enabled: state[11] = Running"),
-        expect("#603: ChildExit published on a Running process",
-               run(window(STALE_CHILD_EXIT)), False,
-               "WaitMatchesState: 10 is Running and holds the published wait 2"),
-        expect("a Signal wait held by a Running process",
-               run(window(STALE_SIGNAL)), False,
-               "WaitMatchesState: 10 is Running and holds the published wait 5"),
-        expect("a window that lost changes",
-               run(window(SNAPSHOT, lost=3)), False, "lost 3 change(s)"),
-        expect("a report cut before its end",
-               run(window(SNAPSHOT, end=False)), False, "no end line"),
-        expect("a state changed with no lock held",
-               run(window(SNAPSHOT + ["1 0 u p 10 1 - 0 -"])), False,
-               "with no lock held"),
-        expect("a snapshot already unsafe",
-               run(window(["0 0 l p 10 2 1 0 -", "0 0 l c 0 10 10",
-                           "0 0 l c 1 - -"])), False,
-               "StackSafety: c0 stands on 10, owned by 1"),
-        expect("a window that exercised nothing",
-               run(window(SNAPSHOT)), False, "never exercised"),
-        expect("a log with no window", run("takibi kernel: EL1\n"), False,
-               "expected one protocol-trace window, found 0"),
+        refusal("a window that lost changes", window(SNAPSHOT, lost=3),
+                "lost 3 change(s)"),
+        refusal("a report cut before its end", window(SNAPSHOT, end=False),
+                "no end line"),
+        refusal("a log with no window", ["takibi kernel: EL1"],
+                "expected one protocol-trace window, found 0"),
+        refusal("two windows", window(SNAPSHOT) + window(SNAPSHOT),
+                "expected one protocol-trace window, found 2"),
+        refusal("a header that miscounts", window(SNAPSHOT, stored=5),
+                "the header says 5 change(s) and 4 arrived"),
+        refusal("a malformed change", window(SNAPSHOT + ["1 0 l x 1"]),
+                "malformed change: 1 0 l x 1"),
+        refusal("a non-numeric field", window(SNAPSHOT + ["1 0 l p ten 2 0 0 -"]),
+                "malformed change"),
+        refusal("a snapshot missing a core", window(SNAPSHOT[:3]),
+                "the snapshot has no line for core 1"),
+        refusal("a window not opening with its snapshot",
+                window(["1 0 l c 0 10 10"]),
+                "does not start with its snapshot"),
+        refusal("an unknown state code", window(SNAPSHOT + ["1 0 l p 10 9 0 0 -"]),
+                "unknown process state code 9"),
+        refusal("a reparented process",
+                window(SNAPSHOT + ["1 0 l p 11 5 - 0 1"]),
+                "11's parent changes from 10 to 1"),
+        holds_true("a fresh record is Constructing from the window's start",
+                   obs[0].state[12] == "Constructing" and obs[0].parent[12] == 10,
+                   f"(got {obs[0].state[12]}, parent {obs[0].parent[12]})"),
+        holds_true("a pid first seen Running is Absent until then",
+                   obs[0].state[13] == "Absent" and obs[3].state[13] == "Running"),
+        holds_true("an unlocked line's wait reason is not taken in",
+                   obs[4].reason[10] == 0, f"(got {obs[4].reason[10]})"),
+        holds_true("a removed record is Reaped, keeping its parent",
+                   obs[-1].state[11] == "Reaped" and obs[-1].parent[11] == 10),
+        holds_true("one record per hold, unlocked holds apart",
+                   len(obs) == 7 and module.count("[seq |-> ") == 7
+                   and module.count("locked |-> FALSE") == 3,
+                   f"(got {len(obs)} observations)"),
+        holds_true("the module names every core and process",
+                   'TraceCores == {"c0", "c1"}' in module
+                   and 'TraceProcs == {"p10", "p11", "p12", "p13"}' in module
+                   and 'p12 |-> "p10"' in module),
+        holds_true("the recorded QEMU window parses whole",
+                   real_cores == 4 and len(real) == 53,
+                   f"(got {real_cores} cores, {len(real)} holds)"),
+        holds_true("the trace spec labels each action it offers",
+                   allowed == labelled, f"(Allowed {sorted(allowed ^ labelled)})"),
+        holds_true("the trace spec offers every action of StackOwnership's Next",
+                   allowed == in_next,
+                   f"(differ: {sorted(allowed ^ in_next)})"),
+        holds_true("--without accepts exactly those actions",
+                   set(V.ACTIONS) == in_next,
+                   f"(differ: {sorted(set(V.ACTIONS) ^ in_next)})"),
+        holds_true("every REQUIRED action is one of them",
+                   {a for step in V.REQUIRED for a in step} <= in_next),
     ]
     if not all(checks):
         return 1
     report_pass(
         "validate-protocol-trace controls",
-        "Wait4Block.tla's zombie-child block, lost wakeup and wrong-parent "
-        "wake, RecordLifetime.tla's unlocked and premature removal, and a "
-        "wait published on a Running process are each refused; three recorded QEMU windows pass, one with Nap in SwitchAway's place; they fail without ChildExitStart "
-        "and InterruptDepart; the recorded RPi5 clone reschedule passes only with "
-        "CloneReschedule, and a child-owned stack, an unreserved successor "
-        "or a relabelled parent are refused, with before/observed state for the "
-        "physical parent stack, unstarted child and reserved successor; an allocation inside another CPU's hold is "
-        "absorbed, a tick leave passes only inside an interrupt, a reserve before the switch completes is refused, "
-        "and #609's shared-stack start, a lost change, a cut report, an "
-        "unlocked change, an unsafe snapshot, an unexercised window and a "
-        "missing window are each refused with their diagnostic",
-        cases=CASES.ran)
+        "the parser refuses a lost change, a cut report, a missing or second "
+        "window, a miscounted header, malformed and non-numeric lines, a "
+        "snapshot missing a core or not first, an unknown state and a "
+        "reparented process; a fresh record is Constructing from the start, a "
+        "pid first seen otherwise is Absent, unlocked wait reasons are not "
+        "taken in, a removed record is Reaped with its parent, one record per "
+        "hold; and StackOwnership's Next, the trace spec's labelled actions "
+        "and --without's choices are the same list",
+        cases=CASES.ran, actions=len(in_next))
     return 0
 
 

@@ -57,7 +57,6 @@ REVIEWED = {
     "check_patch_embedded_image_controls.py": SHORT_CHILDREN,
     "check_gdb_bounded_controls.py": SHORT_CHILDREN,
     "check_elf_symbol_alignment_controls.py": SHORT_CHILDREN,
-    "check_validate_protocol_trace_controls.py": SHORT_CHILDREN,
     "check_race_window_overlay_only_controls.py": SHORT_CHILDREN,
     "check_found_by_policy_controls.py": SHORT_CHILDREN,
     "check_expected_line_endings_controls.py": SHORT_CHILDREN,

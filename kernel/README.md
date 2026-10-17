@@ -910,12 +910,15 @@ it twice -- once free to run anywhere, once pinned to CPU 1 with the child
 on CPU 0 -- and closes it (tag 17) from CPU 0. Inside the window the kernel
 diffs each process's state and stack owner, and each core's current and
 stood-on process, at every hold of the process-run lock, and prints the
-changes at the close. `scripts/validate_protocol_trace.py` fails the lane
-on a hold no model action describes, a lost change, or a model action the
-window never exercised. A refused transition reports the involved cores and
-processes before the action and after applying the recorded diff, including
-the physical stack owner. Reserved and interrupt state in that context is
-inferred by replay, rather than directly observed in the UART diff.
+changes at the close. `scripts/validate_protocol_trace.py` parses the
+window and has TLC check it against `kernel/models/StackOwnershipTrace.tla`
+(#606, stage 2; the lane needs java and the pinned TLA+ tools that
+`scripts/fetch_model_tools.sh` fetches). It fails the lane on a hold no
+behaviour of StackOwnership.tla takes, a broken invariant, a lost change,
+or a model action the window never exercised. A refused hold is printed with
+the model state some behaviour reached before it, including the reserved,
+interrupt and wake-pending state TLC chose, which the UART diff does not
+carry.
 Opening returns 0 while a Running reservation has
 not yet appeared in a core's current or stood-on slot; the EL0 probe yields
 and retries up to 64 times. It returns 1 only after recording a complete

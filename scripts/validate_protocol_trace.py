@@ -1,78 +1,72 @@
 #!/usr/bin/env python3
-"""Replay a kernel protocol-trace window against the kernel's TLA+ models.
+"""Check a kernel protocol-trace window against StackOwnership.tla with TLC.
 
-GitHub issue #606, stage 1, and #647. /bin/protocol-trace opens a window in which the
-kernel diffs the stack-ownership state at every hold of the process-run
-lock (kernel/kernel/protocol_trace.tkb) and prints the changes when the
-window closes. This replays them, one hold at a time, against the actions of
-kernel/models/StackOwnership.tla, written again here with the same names,
-enabling conditions and effects, generalized from the model's two cores and
-one parent/child pair to every core and process the window saw.
+GitHub issue #606, stage 2. /bin/protocol-trace opens a window in which the
+kernel diffs the stack-ownership state at every hold of the process-run lock
+(kernel/kernel/protocol_trace.tkb) and prints the changes when the window
+closes. This script only PARSES that window: it writes it as the TLA+
+module ProtocolTraceData, one record per hold with every process's state,
+stack owner, parent and wait reason and every core's current process and
+stood-on stack as they stand after the hold, and asks TLC whether
+kernel/models/StackOwnershipTrace.tla accepts it -- whether some behaviour
+of kernel/models/StackOwnership.tla produces exactly that sequence of holds.
+No enabling condition, effect or invariant is written here. Stage 1's
+Python replay wrote every action again and could drift from the .tla;
+this cannot.
 
-It fails when:
-- a hold's changes are the effect of no model action ("a step no model
-  action describes");
-- they have an action's shape but not its enabling condition
-  ("ChildExitStart not enabled: owner[parent] = c1");
-- an invariant fails after a step: StackSafety, RunningMatchesCores,
-  StartsOnFreeStack;
-- the window lost events, or a change the model cares about was made while
-  nobody held the run lock;
-- an action the probe is written to exercise was never observed, which
-  would make a PASS say nothing about it.
+What TLC checks, all in the .tla files:
+- each locked hold that changes the state is one StackOwnership action,
+  with its enabling condition, and an unlocked hold changes nothing the
+  model orders by the run lock (RecordLifetime's REMOVE_UNDER_LOCK);
+- the invariants after every hold: StackSafety, RunningMatchesCores,
+  StartsOnFreeStack, NoLostWakeup (Wait4Block.tla's, over every parent),
+  and WaitMatchesState (#653, the wait cell's rule);
+- Wait4Block.tla's RECHECK and its "an exit wakes exactly its parent", and
+  RecordLifetime.tla's "removed only once Exited", are enabling conditions
+  of StackOwnership's Wait4Block/SwitchAway, ChildExit and Wait4Reap.
 
-The same steps are held to two more models, on the parent link each process
-line carries (#647):
-- Wait4Block.tla: a process only becomes Blocked in wait4 while none of its
-  children is a zombie (the RECHECK the model's fix adds), a child's exit
-  wakes exactly its parent, and NoLostWakeup holds after every step: no
-  process sleeps in ChildExit with an Exited child. The "decided" window
-  between wait4's two critical sections is not a state the trace can see;
-  what it can see is that the publication which closes it re-checks.
-- RecordLifetime.tla: a record is removed only once it is Exited
-  (Wait4Reap's enabling condition), and the removal is a hold's own step,
-  never made with no lock held (REMOVE_UNDER_LOCK). The reader's side, the probe and the
-  read through the pointer, is not a protocol change and is not observed, so
-  a PASS says the reaper keeps its half of the rule and nothing of the
-  reader's.
-A third check is not a model's: a Running process holds no published wait,
-except the wait4 continuation of a process reserved for a core and not yet
-current (#653). The kernel's wait cell (kernel/kernel/process_wait.tkb)
-refuses the write at run time; this is the recorded evidence that no lane
-that ran the window did it.
-The two model checks assume one awaited child at a time, as /bin/protocol-trace runs: a
-parent blocked in wait4 for a specific pid while another child is already a
-zombie would be flagged although the kernel is right.
+What this script still refuses itself, because it is about the report and
+not the protocol: no window, two windows, a malformed line, a window that
+lost changes or was cut short, and a snapshot missing a core. And one
+policy: an action the probe is written to exercise that the matched
+behaviour never took (REQUIRED below), which would make a PASS say nothing
+about it.
 
 What a PASS claims is narrow: every protocol transition the kernel made in
 this window is one the model has. It does not claim the model is right, and
 it says nothing about paths the window did not run.
 
-What the replay leaves out, and why (the model's own "dropped" discipline):
-- which child a wait4 waits for, and who reaps a zombie: StackSafety does
-  not depend on either, since neither moves a stack. The parent link is used
-  only by the Wait4Block checks above.
-- affinity: it only forbids steps, and the replay allows each one.
-- allocation: a record appearing Constructing is taken in wherever the
-  diff sees it, since the pool's lock, not the run lock, orders it.
-  Irrelevant to StackSafety: a Constructing record owns no stack and is
-  nobody's current process until CloneBegin.
-
 The kernel's state codes: 1 Ready, 2 Running, 3 Blocked, 4 Exited,
 5 Constructing; a Blocked process whose wait reason is 2 (ChildExit) is the
-model's "Blocked", any other is "Napping".
+model's "Blocked", any other is "Napping". A removed record is "Reaped"; a
+pid first seen mid-window as a fresh Constructing record (allocation is
+ordered by the pool lock, not the run lock) is Constructing from the start;
+any other pid not in the opening snapshot is "Absent", which no action
+takes, so its appearance is refused by TLC.
 
 Usage: validate_protocol_trace.py UART_LOG [--without ACTION]
---without drops one action from the replay: the negative control that a
-path the model lacked fails a passing run.
+       [--model NAME=BOOL ...]
+--without drops one action from the model's next-state relation: the
+negative control that a path the model lacked fails a passing run.
+--model sets one of StackOwnership's defect constants (EXIT_IDLES,
+LEAVE_CHECKS_STACK, WAKE_START_CHECKS_STACK), so a control can show which
+guard refused a step.
 
 Exit code only (0 = pass, 1 = fail).
 """
 
 import argparse
 import dataclasses
+import os
 import re
+import subprocess
 import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+MODELS = ROOT / "kernel" / "models"
+SPECS = (MODELS / "StackOwnershipTrace.tla", MODELS / "StackOwnership.tla")
 
 LINE_RE = re.compile(r"^protocol-trace: (.*)$")
 BEGIN_RE = re.compile(
@@ -80,6 +74,14 @@ BEGIN_RE = re.compile(
 STATES = {1: "Ready", 2: "Running", 3: "Blocked", 4: "Exited",
           5: "Constructing"}
 WAIT_CHILD_EXIT = 2
+
+# StackOwnership's Next, by the names StackOwnershipTrace.tla labels.
+ACTIONS = ("CloneBegin", "CloneFinish", "SwitchComplete", "Reserve", "Commit",
+           "SwitchAway", "CloneReschedule", "Wait4Block", "Nap", "Wake",
+           "ChildExit", "ChildExitStart", "IdleEnter", "Wait4Reap",
+           "LeaveBegin", "LeaveComplete", "InterruptDepart", "TickLeave")
+MODEL_CONSTANTS = ("EXIT_IDLES", "LEAVE_CHECKS_STACK",
+                   "WAKE_START_CHECKS_STACK")
 
 # What /bin/protocol-trace makes the kernel do on every run, whatever the
 # timing, one entry per step; where timing decides which of two actions the
@@ -92,7 +94,7 @@ WAIT_CHILD_EXIT = 2
 # host that stalled the vCPU, so it never blocks (no Nap, SwitchAway or
 # Wake), and then the parent may reach wait4 after the exit and never block
 # either (no Wait4Block, and ChildExit rather than ChildExitStart). Those
-# are still replayed and counted when they happen; a run without them is
+# are still checked and counted when they happen; a run without them is
 # not a failure. An action in the model and not here may legitimately not
 # happen.
 REQUIRED = (("CloneBegin",), ("CloneFinish",), ("SwitchComplete",),
@@ -100,31 +102,14 @@ REQUIRED = (("CloneBegin",), ("CloneFinish",), ("SwitchComplete",),
             ("IdleEnter",), ("Wait4Reap",), ("LeaveBegin",),
             ("LeaveComplete",))
 
-NONE = None
+NONE = "none"
 IDLE = "idle"
+ABSENT = "Absent"
+REAPED = "Reaped"
 
 
 class TraceError(Exception):
     pass
-
-
-@dataclasses.dataclass
-class World:
-    state: dict       # pid -> model state name
-    owner: dict       # pid -> core or None
-    current: dict     # core -> pid or None
-    stands: dict      # core -> pid or IDLE
-    reserved: dict    # core -> pid or None
-    interrupted: dict  # core -> inside an interrupt taken from EL0
-    reap_pending: dict  # parent pid -> exited child pid
-    parent: dict      # pid -> parent pid or None
-    reason: dict      # pid -> the kernel's wait reason code, 0 for none
-
-    def copy(self):
-        return World(dict(self.state), dict(self.owner), dict(self.current),
-                     dict(self.stands), dict(self.reserved),
-                     dict(self.interrupted), dict(self.reap_pending),
-                     dict(self.parent), dict(self.reason))
 
 
 @dataclasses.dataclass
@@ -137,6 +122,7 @@ class Hold:
     reasons: dict     # pid -> wait reason code, as reported
     gone: set
     cores: dict       # core -> (current, stands)
+    lines: list       # the hold's own report lines, for diagnostics
 
 
 def model_state(code, reason):
@@ -168,7 +154,7 @@ def parse(lines):
         raise TraceError("the window has no end line: the report was cut")
     events = events[:-1]
     if lost:
-        raise TraceError(f"the window lost {lost} change(s); a replay with "
+        raise TraceError(f"the window lost {lost} change(s); a check with "
                          "a gap in it proves nothing")
     if len(events) != stored:
         raise TraceError(f"the header says {stored} change(s) and "
@@ -176,756 +162,322 @@ def parse(lines):
     steps = {}
     for text in events:
         fields = text.split()
-        if len(fields) < 4:
+        if len(fields) < 4 or not fields[0].isdigit() \
+                or not fields[1].isdigit() or fields[2] not in ("l", "u"):
             raise TraceError(f"malformed change: {text}")
         sequence, cpu, lock, kind = int(fields[0]), int(fields[1]), \
             fields[2], fields[3]
         key = (sequence, lock == "u")
         hold = steps.setdefault(
-            key, Hold(sequence, cpu, lock == "u", {}, {}, {}, set(), {}))
-        if kind == "p" and len(fields) == 9:
-            pid = int(fields[4])
-            hold.processes[pid] = (
-                model_state(int(fields[5]), int(fields[7])),
-                value(fields[6]))
-            hold.parents[pid] = value(fields[8])
-            hold.reasons[pid] = value(fields[7]) or 0
-        elif kind == "g" and len(fields) == 7:
-            hold.gone.add(int(fields[4]))
-        elif kind == "c" and len(fields) == 7:
-            core = int(fields[4])
-            stands = value(fields[6])
-            hold.cores[core] = (value(fields[5]),
-                                IDLE if stands is None else stands)
-        else:
-            raise TraceError(f"malformed change: {text}")
+            key, Hold(sequence, cpu, lock == "u", {}, {}, {}, set(), {}, []))
+        hold.lines.append(text)
+        try:
+            if kind == "p" and len(fields) == 9:
+                pid = int(fields[4])
+                hold.processes[pid] = (
+                    model_state(int(fields[5]), int(fields[7])),
+                    value(fields[6]))
+                hold.parents[pid] = value(fields[8])
+                hold.reasons[pid] = value(fields[7]) or 0
+            elif kind == "g" and len(fields) == 7:
+                hold.gone.add(int(fields[4]))
+            elif kind == "c" and len(fields) == 7:
+                hold.cores[int(fields[4])] = (value(fields[5]),
+                                              value(fields[6]))
+            else:
+                raise TraceError(f"malformed change: {text}")
+        except ValueError:
+            raise TraceError(f"malformed change: {text}") from None
     ordered = [steps[key] for key in sorted(steps,
                                             key=lambda k: (k[0], not k[1]))]
-    return cores, holds, ordered
-
-
-def initial_world(hold, cores):
-    if hold.sequence != 0 or hold.unlocked:
+    if not ordered or ordered[0].sequence != 0 or ordered[0].unlocked:
         raise TraceError("the window does not start with its snapshot")
-    world = World({}, {}, {}, {}, {}, {}, {}, {}, {})
-    for pid, (state, owner) in hold.processes.items():
-        world.state[pid] = state
-        world.owner[pid] = owner
-        world.parent[pid] = hold.parents[pid]
-        world.reason[pid] = hold.reasons[pid]
     for core in range(cores):
-        if core not in hold.cores:
+        if core not in ordered[0].cores:
             raise TraceError(f"the snapshot has no line for core {core}")
-        world.current[core], world.stands[core] = hold.cores[core]
-        world.reserved[core] = None
-        # A core the window opens inside an EL0 interrupt: its current
-        # process runs and it stands on its IRQ stack.
-        current = world.current[core]
-        world.interrupted[core] = (
-            current is not None and world.stands[core] == IDLE
-            and world.state.get(current) == "Running")
-    return world
+    # The snapshot has a line for every core slot, online or not; the
+    # header counts the online ones.
+    slots = max(ordered[0].cores) + 1
+    if sorted(ordered[0].cores) != list(range(slots)):
+        raise TraceError("the snapshot's core lines are not 0.."
+                         f"{slots - 1}")
+    return slots, holds, ordered
 
 
 # --------------------------------------------------------------------------
-# The model's actions. Each takes the world before a hold and the hold's
-# changes, and returns None when the changes do not have the action's
-# shape, a string naming the enabling condition that fails, or the world
-# the action produces. The caller compares that with the world the kernel
-# reported.
+# The window as observations: the full observed state after each hold.
 
 
-def changed(world, hold):
-    """Processes and cores whose reported value differs from the world."""
-    procs = {pid: new for pid, new in hold.processes.items()
-             if (world.state.get(pid), world.owner.get(pid)) != new}
-    cores = {core: new for core, new in hold.cores.items()
-             if (world.current.get(core), world.stands.get(core)) != new}
-    return procs, cores
+def pid_name(pid):
+    return NONE if pid is None else f"p{pid}"
 
 
-def settled(world, core, pid):
-    return world.current[core] == pid and world.stands[core] == pid
+def core_name(core):
+    return NONE if core is None else f"c{core}"
 
 
-def departed(world, core, pid):
-    return (world.interrupted[core] and world.current[core] == pid
-            and world.stands[core] == IDLE and world.owner.get(pid) is None)
+@dataclasses.dataclass
+class Observation:
+    sequence: int
+    cpu: int
+    locked: bool
+    state: dict    # pid -> state name
+    owner: dict    # pid -> core or None
+    parent: dict   # pid -> pid or None
+    reason: dict   # pid -> wait reason code
+    current: dict  # core -> pid or None
+    stands: dict   # core -> pid or None (its idle stack)
+    lines: list
 
 
-def takeable(world, pid):
-    if world.state.get(pid) != "Ready":
-        return f"state[{pid}] = {world.state.get(pid)}"
-    if world.owner.get(pid) is not None:
-        return f"owner[{pid}] = c{world.owner[pid]}"
-    child = world.reap_pending.get(pid)
-    if child is not None and world.owner.get(child) is not None:
-        return f"owner[{child}] = c{world.owner[child]} (reap pending)"
-    return None
+def observations(cores, holds):
+    """One Observation per hold, each the whole observed state after it.
 
-
-def only(mapping):
-    return next(iter(mapping.items())) if len(mapping) == 1 else None
-
-
-def clone_begin(world, hold, procs, cores):
-    one = only(cores)
-    if procs or hold.gone or not one:
-        return None
-    core, (current, stands) = one
-    parent = world.current[core]
-    if stands != world.stands[core] or current is None or parent is None \
-            or world.state.get(current) != "Constructing":
-        return None
-    if not settled(world, core, parent):
-        return f"current[c{core}] # stands[c{core}]"
-    if world.reserved[core] is not None:
-        return f"reserved[c{core}] = {world.reserved[core]}"
-    after = world.copy()
-    after.current[core] = current
-    return after
-
-
-def clone_finish(world, hold, procs, cores):
-    if cores or hold.gone or len(procs) != 2:
-        return None
-    child = [p for p, (s, _) in procs.items()
-             if world.state.get(p) == "Constructing" and s == "Running"]
-    parent = [p for p, (s, _) in procs.items()
-              if world.state.get(p) == "Running" and s == "Ready"]
-    if len(child) != 1 or len(parent) != 1:
-        return None
-    child, parent = child[0], parent[0]
-    at = [c for c in world.current if world.current[c] == child]
-    if not at:
-        return "the child is no core's current process"
-    if world.stands[at[0]] != parent:
-        return f"stands[c{at[0]}] = {world.stands[at[0]]}, not the parent"
-    after = world.copy()
-    after.state[child] = "Running"
-    after.state[parent] = "Ready"
-    return after
-
-
-def switch_complete(world, hold, procs, cores):
-    one = only(cores)
-    if hold.gone or not one:
-        return None
-    core, (current, stands) = one
-    incoming = world.current[core]
-    outgoing = world.stands[core]
-    if current != incoming or incoming is None or stands != incoming \
-            or outgoing == incoming:
-        return None
-    if world.state.get(incoming) != "Running":
-        return f"state[{incoming}] = {world.state.get(incoming)}"
-    if world.owner.get(incoming) is not None:
-        return f"owner[{incoming}] = c{world.owner[incoming]}"
-    after = world.copy()
-    after.owner[incoming] = core
-    if outgoing != IDLE:
-        after.owner[outgoing] = None
-    after.stands[core] = incoming
-    after.interrupted[core] = False
-    return after
-
-
-def core_condition(world, core):
-    current = world.current[core]
-    if current is not None and world.state.get(current) == "Running":
-        # #803: only once the process runs here, or at a clone child's
-        # first return on its parent's stack (StackOwnership.Reserve).
-        if settled(world, core, current) or departed(world, core, current) \
-                or world.stands[core] == world.parent.get(current):
-            return None
-        return (f"c{core} runs {current} but has not switched to it "
-                f"(stands {world.stands[core]})")
-    if current is None and world.stands[core] == IDLE:
-        return None
-    return (f"c{core} neither runs a process nor stands on its idle stack "
-            f"(current {current}, stands {world.stands[core]})")
-
-
-def reserve(world, hold, procs, cores):
-    one = only(procs)
-    if cores or hold.gone or not one:
-        return None
-    pid, (state, owner) = one
-    if world.state.get(pid) != "Ready" or state != "Running" \
-            or owner != world.owner.get(pid):
-        return None
-    core = hold.cpu
-    if world.reserved[core] is not None:
-        return f"reserved[c{core}] = {world.reserved[core]}"
-    why = core_condition(world, core) or takeable(world, pid)
-    if why:
-        return why
-    after = world.copy()
-    after.state[pid] = "Running"
-    after.reserved[core] = pid
-    return after
-
-
-def commit(world, hold, procs, cores):
-    one = only(cores)
-    if procs or hold.gone or not one:
-        return None
-    core, (current, stands) = one
-    before = world.current[core]
-    if stands != world.stands[core] or current is None:
-        return None
-    if before is not None and world.state.get(before) != "Exited":
-        return None
-    if world.reserved[core] != current:
-        return f"reserved[c{core}] = {world.reserved[core]}, not {current}"
-    after = world.copy()
-    after.current[core] = current
-    after.reserved[core] = None
-    return after
-
-
-def switch_away(world, hold, procs, cores):
-    one_core, one_proc = only(cores), only(procs)
-    if hold.gone or not one_core or not one_proc:
-        return None
-    core, (current, stands) = one_core
-    pid, (state, owner) = one_proc
-    if pid != world.current[core] or current is None or current == pid \
-            or stands != world.stands[core] or owner != world.owner.get(pid) \
-            or world.state.get(pid) != "Running" \
-            or state not in ("Ready", "Napping", "Blocked"):
-        return None
-    if world.reserved[core] != current:
-        return f"reserved[c{core}] = {world.reserved[core]}, not {current}"
-    if not settled(world, core, pid) and not departed(world, core, pid):
-        return f"c{core} neither settled on {pid} nor inside an interrupt"
-    if state == "Blocked" and pid in world.reap_pending:
-        return f"{pid} has a wake pending"
-    after = world.copy()
-    after.state[pid] = state
-    after.current[core] = current
-    after.reserved[core] = None
-    # The interrupt returns to the successor, which it was not taken from.
-    after.interrupted[core] = False
-    return after
-
-
-def clone_reschedule(world, hold, procs, cores):
-    one_core, one_proc = only(cores), only(procs)
-    if hold.gone or not one_core or not one_proc:
-        return None
-    core, (current, stands) = one_core
-    child, (state, owner) = one_proc
-    parent = world.parent.get(child)
-    if child != world.current[core] or state != "Ready" \
-            or world.state.get(child) != "Running" \
-            or current is None or current == child \
-            or stands != world.stands[core] or stands != parent:
-        return None
-    if owner is not None or world.owner.get(child) is not None:
-        return "the unstarted child already owns a stack"
-    if world.state.get(parent) != "Ready" or world.owner.get(parent) != core:
-        return "the parent is not Ready on this core's retained stack"
-    if world.interrupted[core]:
-        return "the clone return is inside an EL0 interrupt"
-    if world.reserved[core] != current:
-        return f"reserved[c{core}] = {world.reserved[core]}, not {current}"
-    after = world.copy()
-    after.state[child] = "Ready"
-    after.current[core] = current
-    after.reserved[core] = None
-    return after
-
-
-def block_to_idle(name, blocked):
-    def action(world, hold, procs, cores):
-        one_core, one_proc = only(cores), only(procs)
-        if hold.gone or not one_core or not one_proc:
-            return None
-        core, (current, stands) = one_core
-        pid, (state, owner) = one_proc
-        if current is not None or pid != world.current[core] \
-                or stands != world.stands[core] \
-                or owner != world.owner.get(pid) \
-                or world.state.get(pid) != "Running" or state != blocked:
-            return None
-        if not settled(world, core, pid):
-            return f"current[c{core}] # stands[c{core}]"
-        if world.reserved[core] is not None:
-            return f"reserved[c{core}] = {world.reserved[core]}"
-        if blocked == "Blocked" and pid in world.reap_pending:
-            return f"{pid} has a wake pending"
-        after = world.copy()
-        after.state[pid] = blocked
-        after.current[core] = None
-        return after
-    action.__name__ = name
-    return action
-
-
-def wake(world, hold, procs, cores):
-    one = only(procs)
-    if cores or hold.gone or not one:
-        return None
-    pid, (state, owner) = one
-    if world.state.get(pid) != "Napping" or state != "Ready" \
-            or owner != world.owner.get(pid):
-        return None
-    after = world.copy()
-    after.state[pid] = "Ready"
-    return after
-
-
-def exit_parts(world, procs):
-    exited = [p for p, (s, o) in procs.items()
-              if world.state.get(p) == "Running" and s == "Exited"
-              and o == world.owner.get(p)]
-    return exited[0] if len(exited) == 1 else None
-
-
-def child_exit(world, hold, procs, cores):
-    one_core = only(cores)
-    if hold.gone or not one_core or len(procs) not in (1, 2):
-        return None
-    core, (current, stands) = one_core
-    child = exit_parts(world, procs)
-    if child is None or current is not None or child != world.current[core] \
-            or stands != world.stands[core]:
-        return None
-    woken = [p for p in procs if p != child]
-    if woken:
-        parent = woken[0]
-        state, owner = procs[parent]
-        if world.state.get(parent) != "Blocked" or state != "Ready" \
-                or owner != world.owner.get(parent):
-            return None
-    if not settled(world, core, child):
-        return f"current[c{core}] # stands[c{core}]"
-    if world.reserved[core] is not None:
-        return f"reserved[c{core}] = {world.reserved[core]}"
-    after = world.copy()
-    after.state[child] = "Exited"
-    after.current[core] = None
-    if woken:
-        after.state[woken[0]] = "Ready"
-        after.reap_pending[woken[0]] = child
-    return after
-
-
-def child_exit_start(world, hold, procs, cores):
-    if cores or hold.gone or len(procs) != 2:
-        return None
-    child = exit_parts(world, procs)
-    if child is None:
-        return None
-    parent = next(p for p in procs if p != child)
-    state, owner = procs[parent]
-    if world.state.get(parent) != "Blocked" or state != "Running" \
-            or owner != world.owner.get(parent):
-        return None
-    at = [c for c in world.current if world.current[c] == child]
-    if not at:
-        return "the child is no core's current process"
-    core = at[0]
-    if not settled(world, core, child):
-        return f"current[c{core}] # stands[c{core}]"
-    if world.reserved[core] is not None:
-        return f"reserved[c{core}] = {world.reserved[core]}"
-    if world.owner.get(parent) is not None:
-        return f"owner[parent] = c{world.owner[parent]}"
-    after = world.copy()
-    after.state[child] = "Exited"
-    after.state[parent] = "Running"
-    after.reserved[core] = parent
-    after.reap_pending[parent] = child
-    return after
-
-
-def idle_enter(world, hold, procs, cores):
-    one_core, one_proc = only(cores), only(procs)
-    if hold.gone or not one_core or not one_proc:
-        return None
-    core, (current, stands) = one_core
-    pid, (state, owner) = one_proc
-    if stands != IDLE or current != world.current[core] \
-            or pid != world.stands[core] or state != world.state.get(pid) \
-            or owner is not None:
-        return None
-    if world.current[core] is not None:
-        return f"current[c{core}] = {world.current[core]}"
-    if world.reserved[core] is not None:
-        return f"reserved[c{core}] = {world.reserved[core]}"
-    if state == "Running":
-        return f"state[{pid}] = Running"
-    if world.owner.get(pid) != core:
-        return f"owner[{pid}] = {world.owner.get(pid)}, not c{core}"
-    after = world.copy()
-    after.owner[pid] = None
-    after.stands[core] = IDLE
-    return after
-
-
-def wait4_reap(world, hold, procs, cores):
-    if procs or cores or len(hold.gone) != 1:
-        return None
-    pid = next(iter(hold.gone))
-    if world.state.get(pid) != "Exited":
-        return f"state[{pid}] = {world.state.get(pid)}"
-    if world.owner.get(pid) is not None:
-        return f"owner[{pid}] = c{world.owner[pid]}"
-    after = world.copy()
-    del after.state[pid]
-    del after.owner[pid]
-    after.parent.pop(pid, None)
-    for parent, child in world.reap_pending.items():
-        if child == pid:
-            del after.reap_pending[parent]
-    return after
-
-
-def leave_begin(world, hold, procs, cores):
-    one = only(cores)
-    if procs or hold.gone or not one:
-        return None
-    core, (current, stands) = one
-    pid = world.current[core]
-    if current is not None or pid is None or stands != world.stands[core] \
-            or world.state.get(pid) != "Running":
-        return None
-    if world.reserved[core] is not None:
-        return f"reserved[c{core}] = {world.reserved[core]}"
-    if world.stands[core] != pid:
-        return f"stands[c{core}] = {world.stands[core]}, not {pid}"
-    after = world.copy()
-    after.current[core] = None
-    return after
-
-
-def leave_complete(world, hold, procs, cores):
-    one_core, one_proc = only(cores), only(procs)
-    if hold.gone or not one_core or not one_proc:
-        return None
-    core, (current, stands) = one_core
-    pid, (state, owner) = one_proc
-    if stands != IDLE or current is not None or pid != world.stands[core] \
-            or world.state.get(pid) != "Running" or state != "Ready" \
-            or owner is not None:
-        return None
-    if world.current[core] is not None:
-        return f"current[c{core}] = {world.current[core]}"
-    if world.reserved[core] is not None:
-        return f"reserved[c{core}] = {world.reserved[core]}"
-    after = world.copy()
-    after.state[pid] = "Ready"
-    after.owner[pid] = None
-    after.stands[core] = IDLE
-    return after
-
-
-def interrupt_depart(world, hold, procs, cores):
-    one_core, one_proc = only(cores), only(procs)
-    if hold.gone or not one_core or not one_proc:
-        return None
-    core, (current, stands) = one_core
-    pid, (state, owner) = one_proc
-    if stands != IDLE or current != pid or world.current[core] != pid \
-            or state != world.state.get(pid) or owner is not None \
-            or world.stands[core] != pid:
-        return None
-    if state != "Running":
-        return f"state[{pid}] = {state}"
-    if world.reserved[core] is not None:
-        return f"reserved[c{core}] = {world.reserved[core]}"
-    if world.owner.get(pid) != core:
-        return f"owner[{pid}] = {world.owner.get(pid)}, not c{core}"
-    after = world.copy()
-    after.owner[pid] = None
-    after.stands[core] = IDLE
-    after.interrupted[core] = True
-    return after
-
-
-def tick_leave(world, hold, procs, cores):
-    one_core, one_proc = only(cores), only(procs)
-    if hold.gone or not one_core or not one_proc:
-        return None
-    core, (current, stands) = one_core
-    pid, (state, owner) = one_proc
-    if current is not None or stands != world.stands[core] \
-            or world.current[core] != pid or state != "Ready" \
-            or owner != world.owner.get(pid) \
-            or world.state.get(pid) != "Running":
-        return None
-    if not departed(world, core, pid):
-        return f"c{core} is not inside an interrupt, off {pid}'s stack"
-    if world.reserved[core] is not None:
-        return f"reserved[c{core}] = {world.reserved[core]}"
-    after = world.copy()
-    after.state[pid] = "Ready"
-    after.current[core] = None
-    after.interrupted[core] = False
-    return after
-
-
-ACTIONS = {
-    "CloneBegin": clone_begin,
-    "CloneFinish": clone_finish,
-    "SwitchComplete": switch_complete,
-    "Reserve": reserve,
-    "Commit": commit,
-    "SwitchAway": switch_away,
-    "CloneReschedule": clone_reschedule,
-    "Wait4Block": block_to_idle("Wait4Block", "Blocked"),
-    "Nap": block_to_idle("Nap", "Napping"),
-    "Wake": wake,
-    "ChildExit": child_exit,
-    "ChildExitStart": child_exit_start,
-    "IdleEnter": idle_enter,
-    "Wait4Reap": wait4_reap,
-    "LeaveBegin": leave_begin,
-    "LeaveComplete": leave_complete,
-    "InterruptDepart": interrupt_depart,
-    "TickLeave": tick_leave,
-}
-
-
-# --------------------------------------------------------------------------
-# Invariants, as the .tla states them over this world.
-
-
-def invariants(world):
-    cores = sorted(world.current)
-    for core in cores:
-        stood = world.stands[core]
-        if stood != IDLE and world.owner.get(stood) != core:
-            return (f"StackSafety: c{core} stands on {stood}, owned by "
-                    f"{world.owner.get(stood)}")
-    for pid, state in world.state.items():
-        if state == "Running" and not any(
-                pid in (world.current[c], world.reserved[c], world.stands[c])
-                for c in cores):
-            return f"RunningMatchesCores: {pid} is Running and no core holds it"
-    for c in cores:
-        for d in cores:
-            if c == d:
+    Pure bookkeeping: which pids exist, and the latest value reported for
+    each. Conventions, all about the report rather than the protocol: a
+    process's parent is the one link its lines report, for the whole window
+    (a link reported later, at its clone, is the record's from allocation;
+    a link the kernel clears ("-") while removing the record is the same
+    link); and the wait reason is taken from locked lines only, as the wait
+    cell publishes it under the run lock.
+    """
+    snapshot = holds[0]
+    pids = set()
+    for hold in holds:
+        pids |= set(hold.processes) | hold.gone
+        pids |= {p for p in hold.parents.values() if p is not None}
+        pids |= {p for core in hold.cores.values() for p in core
+                 if p is not None}
+    state, owner, parent, reason = {}, {}, {}, {}
+    for pid in pids:
+        state[pid], owner[pid], parent[pid], reason[pid] = ABSENT, None, None, 0
+    for pid in sorted(pids - set(snapshot.processes)):
+        first = next((h.processes[pid] for h in holds[1:]
+                      if pid in h.processes), None)
+        if first == ("Constructing", None):
+            state[pid] = "Constructing"
+    for hold in holds:
+        for pid, link in hold.parents.items():
+            if link is None:
                 continue
-            if world.current[c] is not None and \
-                    world.current[c] in (world.current[d], world.reserved[d]):
-                return (f"RunningMatchesCores: {world.current[c]} is held by "
-                        f"c{c} and c{d}")
-            if world.reserved[c] is not None and \
-                    world.reserved[c] == world.reserved[d]:
-                return (f"RunningMatchesCores: {world.reserved[c]} reserved "
-                        f"by c{c} and c{d}")
-        if world.reserved[c] is not None and \
-                world.state.get(world.reserved[c]) != "Running":
-            return f"RunningMatchesCores: c{c} reserved a non-Running process"
-        if world.current[c] is not None and world.state.get(
-                world.current[c]) not in ("Running", "Constructing", "Exited"):
-            return (f"RunningMatchesCores: c{c}'s current process "
-                    f"{world.current[c]} is {world.state.get(world.current[c])}")
-    held = {p for c in cores for p in (world.reserved[c],) if p is not None}
-    for pid, state in world.state.items():
-        # #653: a published wait belongs to a process that is not running. A
-        # process reserved for a core and not yet current may still carry the
-        # wait4 continuation it was resumed from, which the commit consumes.
-        reason = world.reason.get(pid, 0)
-        if state == "Running" and reason != 0 and not (
-                reason == WAIT_CHILD_EXIT and pid in held):
-            return (f"WaitMatchesState: {pid} is Running and holds the "
-                    f"published wait {reason}")
-    for pid, state in world.state.items():
-        if state != "Blocked":
-            continue
-        for child, parent in world.parent.items():
-            if parent == pid and world.state.get(child) == "Exited":
-                return (f"NoLostWakeup: {pid} sleeps in wait4 while its child "
-                        f"{child} is a zombie")
-    for c in cores:
-        for held in (world.current[c], world.reserved[c]):
-            if held is not None and world.owner.get(held) not in (None, c):
-                return (f"StartsOnFreeStack: c{c} holds {held}, whose stack "
-                        f"c{world.owner[held]} owns")
-    return None
-
-
-def absorb_allocations(world, hold):
-    """Take in the records that appeared Constructing, and drop them.
-
-    Allocation inserts a record under the pool's lock, not the run lock,
-    so the diff sees it at whichever hold comes next -- an acquire, or the
-    release of an unrelated hold on another CPU. It is not a model step:
-    the model's child exists, Constructing, from the start.
-    """
-    for pid, (state, owner) in list(hold.processes.items()):
-        if pid not in world.state and state == "Constructing" \
-                and owner is None:
-            world.state[pid] = state
-            world.owner[pid] = owner
-            world.parent[pid] = hold.parents.pop(pid)
-            world.reason[pid] = hold.reasons.pop(pid)
-            del hold.processes[pid]
-
-
-def unlocked_errors(world, hold):
-    """What changed with no lock held; only allocation may."""
-    procs, cores = changed(world, hold)
-    errors = []
-    for pid, (state, owner) in procs.items():
-        errors.append(f"{pid} changed to {state}/{owner} with no lock held")
-    for pid in sorted(hold.gone):
-        errors.append(f"record {pid} was removed with no lock held "
-                      "(RecordLifetime REMOVE_UNDER_LOCK)")
-    if cores:
-        errors.append("a core changed with no lock held")
-    return errors
-
-
-def lifecycle_refusal(before, after, hold):
-    """Wait4Block.tla's enabling conditions, on a step already matched.
-
-    Returns None, or the refusal. RecordLifetime.tla's order needs no code
-    here: Wait4Reap only removes an Exited record, and unlocked_errors
-    refuses a removal with no lock held.
-    """
-    exited = [pid for pid, state in after.state.items()
-              if state == "Exited" and before.state.get(pid) != "Exited"]
-    for pid, state in after.state.items():
-        was = before.state.get(pid)
-        if state == "Blocked" and was != "Blocked":
-            zombies = [c for c, p in after.parent.items()
-                       if p == pid and after.state.get(c) == "Exited"]
-            if zombies:
-                return (f"Wait4Block not enabled: {pid} blocks with its "
-                        f"child {zombies[0]} already Exited")
-        if was == "Blocked" and state in ("Ready", "Running") and exited \
-                and not any(after.parent.get(x) == pid for x in exited):
-            return (f"ChildExit not enabled: {exited[0]} exits and wakes "
-                    f"{pid}, which is not its parent "
-                    f"({after.parent.get(exited[0])})")
-    return None
-
-
-def transition_context(before, observed, hold):
-    """Show the small state needed to diagnose a refused action, not a trace dump."""
-    cores = sorted(set(hold.cores) | {hold.cpu})
-    processes = set(hold.processes) | hold.gone
-    for world in (before, observed):
-        for core in cores:
-            for pid in (world.current.get(core), world.stands.get(core),
-                        world.reserved.get(core)):
-                if isinstance(pid, int) and pid in world.state:
-                    processes.add(pid)
-    for world in (before, observed):
-        processes.update(world.parent.get(pid) for pid in tuple(processes)
-                         if world.parent.get(pid) in world.state)
-
-    def describe(world):
-        core_rows = [f"c{core}(current={world.current.get(core)}, "
-                     f"stands={world.stands.get(core)}, "
-                     f"reserved={world.reserved.get(core)}, "
-                     f"interrupted={world.interrupted.get(core)})"
-                     for core in cores]
-        process_rows = [f"p{pid}(state={world.state.get(pid, 'absent')}, "
-                        f"owner={world.owner.get(pid)}, "
-                        f"parent={world.parent.get(pid)}, "
-                        f"wait={world.reason.get(pid)})"
-                        for pid in sorted(processes)]
-        return "; ".join(core_rows + process_rows)
-
-    # Reserved/interrupt state is inferred by replay, not present in the UART
-    # diff; the observed copy retains it until a matching action updates it.
-    return (f"\n  replay before action: {describe(before)}"
-            f"\n  observed state/owner/current/stands: {describe(observed)}")
-
-
-def replay(cores, holds, without=None):
-    """(errors, counts): every problem found, and each action's count."""
-    world = initial_world(holds[0], cores)
-    counts = {name: 0 for name in ACTIONS}
-    errors = []
-    why = invariants(world)
-    if why:
-        return [f"sequence 0: the snapshot already violates {why}"], counts
-    for hold in holds[1:]:
-        where = f"sequence {hold.sequence} (cpu {hold.cpu})"
-        absorb_allocations(world, hold)
-        for pid, parent in hold.parents.items():
-            if pid in world.state:
-                world.parent[pid] = parent
-        if not hold.unlocked:
-            for pid, reason in hold.reasons.items():
-                if pid in world.state:
-                    world.reason[pid] = reason
-        if hold.unlocked:
-            errors += [f"{where}: {e}" for e in unlocked_errors(world, hold)]
-            continue
-        procs, cores_changed = changed(world, hold)
-        if not procs and not cores_changed and not hold.gone:
-            why = invariants(world)
-            if why:
-                errors.append(f"{where}: {why}")
-                return errors, counts
-            continue
-        reported = world.copy()
-        for pid, (state, owner) in hold.processes.items():
-            reported.state[pid] = state
-            reported.owner[pid] = owner
+            if parent[pid] not in (None, link):
+                raise TraceError(
+                    f"sequence {hold.sequence}: {pid}'s parent changes from "
+                    f"{parent[pid]} to {link} inside the window; "
+                    "StackOwnership.tla's ParentOf is fixed, so a reparented "
+                    "process cannot be checked")
+            parent[pid] = link
+    current = {core: None for core in range(cores)}
+    stands = {core: None for core in range(cores)}
+    result = []
+    for hold in holds:
+        for pid, (st, own) in hold.processes.items():
+            state[pid], owner[pid] = st, own
+            if not hold.unlocked:
+                reason[pid] = hold.reasons[pid]
         for pid in hold.gone:
-            reported.state.pop(pid, None)
-            reported.owner.pop(pid, None)
-        for core, (current, stands) in hold.cores.items():
-            reported.current[core] = current
-            reported.stands[core] = stands
-        matched = None
-        refusals = []
-        for name, action in ACTIONS.items():
-            if name == without:
-                continue
-            result = action(world, hold, procs, cores_changed)
-            if result is None:
-                continue
-            if isinstance(result, str):
-                refusals.append(f"{name} not enabled: {result}")
-                continue
-            if (result.state, result.owner, result.current, result.stands) \
-                    == (reported.state, reported.owner, reported.current,
-                        reported.stands):
-                matched = (name, result)
-                break
-        if matched is None:
-            detail = "; ".join(refusals) if refusals else \
-                "a step no model action describes: " + \
-                f"processes {procs}, cores {cores_changed}, gone " \
-                f"{sorted(hold.gone)}"
-            errors.append(f"{where}: {detail}" + transition_context(world, reported, hold))
-            return errors, counts
-        name, after = matched
-        why = lifecycle_refusal(world, after, hold)
-        if why:
-            errors.append(f"{where}: {why}" + transition_context(world, after, hold))
-            return errors, counts
-        before = world
-        world = after
-        counts[name] += 1
-        why = invariants(world)
-        if why:
-            errors.append(f"{where}: after {name}, {why}" +
-                          transition_context(before, after, hold))
-            return errors, counts
-    return errors, counts
+            state[pid], owner[pid] = REAPED, None
+        for core, (cur, stood) in hold.cores.items():
+            if core not in current:
+                raise TraceError(f"a line for core {core} of a window with "
+                                 f"{cores} core(s)")
+            current[core], stands[core] = cur, stood
+        result.append(Observation(hold.sequence, hold.cpu, not hold.unlocked,
+                                  dict(state), dict(owner), dict(parent),
+                                  dict(reason), dict(current), dict(stands),
+                                  hold.lines))
+    return result
+
+
+def tla_record(fields):
+    return "[" + ", ".join(f"{k} |-> {v}" for k, v in fields) + "]"
+
+
+def tla_string(text):
+    return f'"{text}"'
+
+
+def trace_module(cores, obs):
+    """The module ProtocolTraceData that StackOwnershipTrace.tla extends."""
+    pids = sorted(obs[0].state)
+    rows = []
+    for o in obs:
+        rows.append(tla_record([
+            ("seq", str(o.sequence)),
+            ("cpu", tla_string(core_name(o.cpu))),
+            ("locked", "TRUE" if o.locked else "FALSE"),
+            ("state", tla_record([(pid_name(p), tla_string(o.state[p]))
+                                  for p in pids])),
+            ("owner", tla_record([(pid_name(p), tla_string(core_name(o.owner[p])))
+                                  for p in pids])),
+            ("reason", tla_record([(pid_name(p), str(o.reason[p]))
+                                   for p in pids])),
+            ("current", tla_record([(core_name(c), tla_string(pid_name(o.current[c])))
+                                    for c in range(cores)])),
+            ("stands", tla_record([(core_name(c), tla_string(
+                IDLE if o.stands[c] is None else pid_name(o.stands[c])))
+                for c in range(cores)])),
+        ]))
+    return ("---- MODULE ProtocolTraceData ----\n"
+            "\\* Generated by scripts/validate_protocol_trace.py.\n"
+            "EXTENDS Sequences\n"
+            "TraceCores == {" + ", ".join(tla_string(core_name(c))
+                                          for c in range(cores)) + "}\n"
+            "TraceProcs == {" + ", ".join(tla_string(pid_name(p))
+                                          for p in pids) + "}\n"
+            "TraceParent == " + tla_record(
+                [(pid_name(p), tla_string(pid_name(obs[0].parent[p])))
+                 for p in pids]) + "\n"
+            "Trace == <<\n  " + ",\n  ".join(rows) + "\n>>\n"
+            "====\n")
+
+
+def trace_config(without, model, stop_at):
+    constants = {"EXIT_IDLES": True, "LEAVE_CHECKS_STACK": True,
+                 "WAKE_START_CHECKS_STACK": True}
+    constants.update(model)
+    lines = ["SPECIFICATION Spec", "CONSTANTS"]
+    lines += [f"  {k} = {'TRUE' if v else 'FALSE'}" for k, v in constants.items()]
+    lines.append(f'  WITHOUT = "{without or NONE}"')
+    lines.append(f"  STOP_AT = {stop_at}")
+    for inv in ("StackSafety", "RunningMatchesCores", "StartsOnFreeStack",
+                "NoLostWakeup", "WaitMatchesState", "NotStopped",
+                "TraceUnfinished"):
+        lines.append(f"INVARIANT {inv}")
+    return "\n".join(lines) + "\n"
+
+
+# --------------------------------------------------------------------------
+# Running TLC, and reading its answer.
+
+
+def tla_jar():
+    tools = os.environ.get("TAKIBI_MODEL_TOOLS_JAR")
+    if tools:
+        return tools
+    root = subprocess.run(["bash", str(ROOT / "scripts" / "fetch_model_tools.sh")],
+                          capture_output=True, text=True, check=False)
+    if root.returncode != 0:
+        raise TraceError("the TLA+ tools are not available: "
+                         + root.stderr.strip())
+    return str(Path(root.stdout.strip()) / "tla2tools-1.7.4" / "tla2tools.jar")
+
+
+def run_tlc(cores, obs, without, model, stop_at=0):
+    with tempfile.TemporaryDirectory(prefix="takibi-trace.") as work:
+        work = Path(work)
+        (work / "ProtocolTraceData.tla").write_text(trace_module(cores, obs),
+                                                    encoding="utf-8")
+        (work / "StackOwnershipTrace.cfg").write_text(
+            trace_config(without, model, stop_at), encoding="utf-8")
+        # TLC reads a spec's modules and config from one directory: the
+        # two models are copied beside the generated data, unchanged.
+        for spec in SPECS:
+            (work / spec.name).write_bytes(spec.read_bytes())
+        # Each JVM gets private standard-module files (scripts/run_tlc.sh).
+        result = subprocess.run(
+            ["java", f"-Djava.io.tmpdir={work}", "-XX:+UseSerialGC",
+             "-cp", tla_jar(), "tlc2.TLC", "-workers", "1", "-deadlock",
+             "-nowarning", "-config", "StackOwnershipTrace.cfg",
+             "-metadir", "states", "StackOwnershipTrace.tla"],
+            capture_output=True, text=True, check=False, cwd=work)
+    return result.stdout + result.stderr
+
+
+STATE_RE = re.compile(r"^State (\d+): ")
+VAR_RE = re.compile(r"^/\\ (\w+) = (.*)$")
+
+
+def behaviour(output):
+    """The error trace TLC printed: a list of {variable: text} per state."""
+    states = []
+    for line in output.splitlines():
+        # An initial state that breaks an invariant is printed with no
+        # "State 1:" heading.
+        if STATE_RE.match(line) or "is violated by the initial state" in line:
+            states.append({})
+        elif states:
+            match = VAR_RE.match(line)
+            if match:
+                states[-1][match.group(1)] = match.group(2)
+    return states
+
+
+def describe_hold(o):
+    return "\n".join(f"    {line}" for line in o.lines)
+
+
+def stuck_report(cores, obs, without, model, depth):
+    """Where every behaviour stopped, with the hidden state there."""
+    if depth >= len(obs):
+        return "TLC reached the end of the trace without a verdict"
+    stuck = obs[depth]
+    detail = run_tlc(cores, obs, without, model, stop_at=depth)
+    states = behaviour(detail)
+    before = ""
+    if states and "Invariant NotStopped is violated" in detail:
+        last = states[-1]
+        before = "\n  the model's state before it (hidden variables " \
+                 "chosen by TLC):\n" + "\n".join(
+                     f"    {k} = {v}" for k, v in last.items()
+                     if k not in ("l",))
+    return (f"sequence {stuck.sequence} (cpu {stuck.cpu}): no behaviour of "
+            f"StackOwnership.tla{' without ' + without if without else ''} "
+            f"takes this {'locked' if stuck.locked else 'unlocked'} hold, "
+            f"from any state matching the trace so far:\n"
+            f"{describe_hold(stuck)}{before}")
+
+
+def check(cores, holds, without=None, model=None):
+    """(errors, counts): the refusal if any, and each action's count."""
+    model = model or {}
+    obs = observations(cores, holds)
+    output = run_tlc(cores, obs, without, model)
+    counts = {name: 0 for name in ACTIONS}
+    violated = re.search(r"Invariant (\w+) is violated", output)
+    if violated and violated.group(1) == "TraceUnfinished":
+        for step in behaviour(output):
+            name = step.get("act", "").strip('"')
+            if name in counts:
+                counts[name] += 1
+        return [], counts
+    if violated:
+        states = behaviour(output)
+        index = int(states[-1].get("l", "1")) - 1 if states else 0
+        where = obs[index]
+        act = states[-1].get("act", "?").strip('"') if states else "?"
+        tail = "\n".join(f"    {k} = {v}" for k, v in states[-1].items()) \
+            if states else ""
+        return [f"sequence {where.sequence} (cpu {where.cpu}): after {act}, "
+                f"{violated.group(1)} is violated:\n{describe_hold(where)}\n"
+                f"  the state TLC reached:\n{tail}"], counts
+    if "Model checking completed. No error has been found." in output:
+        depth = re.search(r"depth of the complete state graph search is (\d+)",
+                          output)
+        return [stuck_report(cores, obs, without, model,
+                             int(depth.group(1)) if depth else 0)], counts
+    raise TraceError("TLC gave no verdict:\n" + output[-4000:])
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("uart_log")
-    parser.add_argument("--without", choices=sorted(ACTIONS))
+    parser.add_argument("--without", choices=ACTIONS)
+    parser.add_argument("--model", action="append", default=[],
+                        metavar="NAME=BOOL")
     args = parser.parse_args()
+    model = {}
+    for item in args.model:
+        name, _, flag = item.partition("=")
+        if name not in MODEL_CONSTANTS or flag not in ("TRUE", "FALSE"):
+            parser.error(f"--model takes one of {', '.join(MODEL_CONSTANTS)}"
+                         f"=TRUE|FALSE, not {item}")
+        model[name] = flag == "TRUE"
     with open(args.uart_log, encoding="utf-8", errors="replace") as log:
         lines = [line.rstrip("\r\n") for line in log]
     try:
         cores, total, holds = parse(lines)
-        errors, counts = replay(cores, holds, args.without)
+        errors, counts = check(cores, holds, args.without, model)
     except TraceError as error:
         print(f"FAIL protocol-trace: {error}")
         return 1
@@ -933,8 +485,8 @@ def main() -> int:
         print(f"ERROR protocol-trace: {error}")
     if errors:
         print("FAIL protocol-trace: the kernel made a step "
-              "kernel/models/StackOwnership.tla, Wait4Block.tla or "
-              "RecordLifetime.tla does not allow")
+              "kernel/models/StackOwnership.tla does not allow (checked by "
+              "TLC through StackOwnershipTrace.tla)")
         return 1
     unseen = [" or ".join(step) for step in REQUIRED
               if args.without not in step
@@ -945,10 +497,10 @@ def main() -> int:
         return 1
     steps = sum(counts.values())
     seen = ", ".join(f"{name}={count}" for name, count in counts.items())
-    print(f"PASS protocol-trace: {steps} step(s) over {len(holds)} changed "
-          f"hold(s) of {total}, on {cores} core(s), each a "
-          f"StackOwnership.tla action with its invariants intact, and the "
-          f"Wait4Block.tla and RecordLifetime.tla checks kept ({seen})")
+    print(f"PASS protocol-trace: TLC matched {steps} step(s) over "
+          f"{len(holds)} changed hold(s) of {total}, on {cores} core(s), to a "
+          f"behaviour of StackOwnership.tla with its invariants and "
+          f"WaitMatchesState intact ({seen})")
     return 0
 
 

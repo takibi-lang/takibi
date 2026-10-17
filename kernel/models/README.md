@@ -101,7 +101,10 @@ Properties:
 Two cores; a parent and the child it clones. A core's logical current
 process and the stack it physically stands on are separate variables, as
 they are in the kernel, and `owner` records each process stack's physical
-owner.
+owner. The cores, the processes and who is whose child (`ParentOf`) are
+constants, and no action names a process: the model's own runs set them to
+two cores and "parent" and "child", and the trace check below sets them to
+the cores and processes of a real run (#606, stage 2).
 
 Each action is one hold of the process-run lock where the kernel really
 takes one, which GitHub issue #606's trace of real runs is what showed.
@@ -135,9 +138,8 @@ modelcheck` requires each to fail:
   `StartsOnFreeStack`, in eight steps: clone begin and finish, switch, the
   parent reserved and committed on the other core, switch, block, exit.
 
-A fourth constant widens the model rather than breaking it.
-`OTHER_READY = TRUE` (variant `other`) adds a third process, Ready from the
-start. With only the parent and the child no process is ever free to be
+A fourth configuration widens the model rather than breaking it. Variant
+`other` adds a third process to `Procs`, Ready from the start. With only the parent and the child no process is ever free to be
 reserved while the child first runs on its parent's stack, so
 `CloneReschedule` was never enabled and the safety invariants held over it
 vacuously; `make modelcheck`'s coverage check found that (#802). The
@@ -192,48 +194,78 @@ Properties:
   reaps without asking does not compile, and
   `scripts/check_stack_proof_states.py` fails if that set is widened. That
   the read is right stays trusted: the run-time checks in start and
-  exited_take, and the trace replay below, watch it.
+  exited_take, and the trace check below, watch it.
 - `ChildReaped` (liveness, TLC only): the parent's wait4 completes.
 - Deadlock freedom: TLC's own check, which the exit variant fails.
 
-### Checked against real runs
+### Checked against real runs: StackOwnershipTrace.tla
 
 `/bin/protocol-trace` opens a window in which the kernel diffs this
 model's state -- each process's state and stack owner, each core's current
 process and the stack it stands on -- at every release of the run lock
 (`kernel/kernel/protocol_trace.tkb`), and prints the changes when the window
-closes. `scripts/validate_protocol_trace.py` replays them against these
-actions, written again there with the same names, generalized to every core
-and process, on every QEMU and RPi5 kernel lane. It fails on a hold no
-action describes, on an action whose enabling condition does not hold, on a
-broken invariant, and on a required action the window never exercised.
+closes. On every QEMU and RPi5 kernel lane,
+`scripts/validate_protocol_trace.py` parses the window into a TLA+ module,
+one record per hold, and TLC checks `StackOwnershipTrace.tla` against it:
+is there a behaviour of this spec, with this run's cores, processes and
+parent links substituted for the constants, that produces exactly that
+sequence of holds? Since #606's stage 2 no enabling condition, effect or
+invariant is written outside the `.tla`, so the check cannot drift from the
+model, as stage 1's Python replay could.
+
+- Observed: `state`, `owner`, `current`, `stands`. Each locked hold that
+  changes them is one action of `Next`; a hold that changes nothing
+  observed is a stutter; an unlocked hold may change nothing at all.
+- Not observed, and chosen by TLC among the values the model allows:
+  `reserved`, `interrupted`, `reapPending`. A refusal prints the state some
+  behaviour reached before the refused hold, these included.
+- Invariants after every hold: `StackSafety`, `RunningMatchesCores`,
+  `StartsOnFreeStack`, `NoLostWakeup`, and `WaitMatchesState` (#653: a
+  Running process holds no published wait except the wait4 continuation of
+  a reserved process), which is the trace spec's own, not the model's.
+- Not checked by TLC, because it is about the report rather than the
+  protocol: a lost change, a cut report, a malformed line, a missing
+  window. And one policy, also the script's: an action the probe is written
+  to exercise that the matched behaviour never took fails the lane, so a
+  PASS cannot be vacuous about it.
+- Conventions of the parse, each stated in the script: a pid first seen
+  mid-window as a fresh Constructing record (allocation is ordered by the
+  pool lock, not the run lock) is Constructing from the start, as the
+  model's child is; any other pid not in the opening snapshot is `Absent`,
+  a state no action takes; a removed record is `Reaped`. `ParentOf` is a
+  constant, so a window in which a parent link changes (a reparented
+  orphan) is refused before TLC runs; the link the kernel clears while it
+  removes a record is the same link.
 
 What a PASS claims is narrow: every transition the kernel made in that
 window is one the model has. It says nothing about paths the window did not
 run, and nothing about whether the model is right. What it catches is a
 path the model lacks that runs routinely: #609's direct start ran on every
-ordinary wait4 wake, and replaying the recorded window without
-`ChildExitStart` fails on the first one.
+ordinary wait4 wake, and the recorded window checked without
+`ChildExitStart` fails on the first one. The controls
+(`scripts/protocol_trace_tlc_controls.py`, part of `make modelcheck`) also
+plant #609's start on an owned stack and 765a27af's leave on the parent's
+stack: the fixed model refuses each at its hold, and the model with the
+variant's guard dropped takes it and breaks `StartsOnFreeStack` or
+`RunningMatchesCores` -- the refusal is the guard's.
 
-### Checked against real runs
-
-The protocol-trace replay of StackOwnership.tla (below) also holds its steps
-to this model, using the parent pid each process line carries (#647). A
-process only becomes Blocked in ChildExit while none of its children is a
-zombie, which is the `RECHECK` the fix adds; a child's exit wakes exactly its
-parent; and `NoLostWakeup` holds after every step. The controls plant #550's
-two shapes, a block with a zombie child and an exit that wakes nobody, and
-a wake of the wrong process.
-
-Narrower than StackOwnership's tie. The "decided" window between wait4's two
-critical sections is not a state the trace can see, so what is checked is
-that the publication closing it re-checks, not that the window is closed.
-Blocking needs the child's nap to have started before the parent reaches
-wait4, which a stalled vCPU can spoil, so a window may never block a parent
-and then says nothing about this model. One awaited child at a time is
-assumed, as `/bin/protocol-trace` runs: a parent that waits for one pid
-while another child is already a zombie would be flagged although the kernel
-is right.
+Wait4Block.tla is checked through the same run, not instantiated: its
+`RECHECK` is an enabling condition of this model's `Wait4Block` and
+`SwitchAway` (`WaitsForChild`: no child of the blocking parent has exited),
+"an exit wakes exactly its parent" is how `ChildExit` uses `ParentOf`, and
+its `NoLostWakeup` is an invariant of this model over every parent. Its own
+coarser actions (`Wait4Decide`, `Dispatch`, `Preempt`) have no hold of
+their own to match. The controls plant #550's two shapes, a block with a
+zombie child and an exit that wakes nobody, and a wake of the wrong
+process. Narrower than this model's tie: the "decided" window between
+wait4's two critical sections is not a state the trace can see, so what is
+checked is that the publication closing it re-checks, not that the window
+is closed. Blocking needs the child's nap to have started before the parent
+reaches wait4, which a stalled vCPU can spoil, so a window may never block
+a parent and then says nothing about this model. One awaited child at a
+time is assumed, as `/bin/protocol-trace` runs: a parent that waits for one
+pid while another child is already a zombie would be refused although the
+kernel is right.
 
 ## RecordLifetime.tla -- a process record read while another CPU reaps it (#482)
 
@@ -271,9 +303,11 @@ Four variants:
 
 ### Checked against real runs
 
-The same replay holds the reaper's half of this model (#647): a record is
-removed only once it is Exited, and the removal is a step of its own hold of
-the run lock, never made with none held (`REMOVE_UNDER_LOCK`). The controls
+StackOwnershipTrace.tla holds the reaper's half of this model (#647): a
+record is removed only once it is Exited (`Wait4Reap`'s enabling
+condition), and the removal is a step of its own hold of the run lock,
+never made with none held (`REMOVE_UNDER_LOCK`: an unlocked hold may change
+nothing). The model itself is not instantiated. The controls
 plant a removal with no lock held and the removal of a live record.
 
 Much narrower than the model. The reader's half, the probe and the read
@@ -574,8 +608,10 @@ Variants (`make modelcheck` requires each verdict):
 What stays outside: `maskedbackoff`'s shape is not rejected statically.
 Every retrying caller runs at EL1 with IRQs open today (`KERNEL_PREEMPTIBLE`
 is 0, and a timer IRQ at EL1 only sets a flag); a caller in an exception
-handler or under an unranked mask would livelock. No real run is replayed
-against this model.
+handler or under an unranked mask would livelock. No real run is checked
+against this model (#810: world-stop events are not recorded, and no lock
+orders them, so StackOwnershipTrace.tla's one-step-per-run-lock-hold
+mechanism does not carry over).
 
 | Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
 | --- | --- | --- | --- | --- |

@@ -41,9 +41,14 @@
 (*   whether another core still stands on the parent's stack. TLC reports *)
 (*   StartsOnFreeStack violated.                                           *)
 (*                                                                         *)
-(* kernel/models/README.md maps each action to the function it abstracts, *)
-(* and scripts/validate_protocol_trace.py replays real runs against these *)
-(* actions.                                                                *)
+(* The actions name no process: who is whose child is ParentOf, so the  *)
+(* same actions describe the model's two (or three) processes and every   *)
+(* process of a real run. StackOwnershipTrace.tla instantiates them with  *)
+(* the cores, processes and parent links of a protocol-trace window, and  *)
+(* TLC checks that the run is a behaviour of this spec (GitHub issue      *)
+(* #606, stage 2).                                                         *)
+(*                                                                         *)
+(* kernel/models/README.md maps each action to the function it abstracts. *)
 (***************************************************************************)
 
 CONSTANTS
@@ -53,18 +58,24 @@ CONSTANTS
     LEAVE_CHECKS_STACK,
     \* @type: Bool;
     WAKE_START_CHECKS_STACK,
-    \* @type: Bool;
-    OTHER_READY
+    \* @type: Set(Str);
+    Cores,
+    \* @type: Set(Str);
+    Procs,
+    \* @type: Str -> Str;
+    ParentOf    \* per process: its parent, or None
 
-Cores == {"c0", "c1"}
-\* OTHER_READY adds a third process, Ready from the start, so a core can
+\* The model's own runs have cores c0 and c1 and the processes "parent" and
+\* "child", the child's parent being "parent" (ModelParentOf). The "other"
+\* variant adds a third process, Ready from the start, so a core can
 \* reserve a successor while a clone child runs on its parent's stack. With
 \* two processes CloneReschedule is never enabled (GitHub issue #802, found
 \* by make modelcheck's coverage check). The "other" variant checks
 \* ChildReaped too, under the per-process fairness below (#803).
-Procs == IF OTHER_READY THEN {"parent", "child", "other"} ELSE {"parent", "child"}
 None == "none"
 Idle == "idle"      \* the core's own idle stack, owned by nobody else
+
+ModelParentOf == [p \in Procs |-> IF p = "child" THEN "parent" ELSE None]
 
 VARIABLES
     \* @type: Str -> Str;
@@ -79,8 +90,8 @@ VARIABLES
     owner,      \* per process: the core owning its stack, or None
     \* @type: Str -> Bool;
     interrupted, \* per core: inside an interrupt taken from EL0
-    \* @type: Bool;
-    reapPending \* the parent was woken in wait4 and still has to reap the child
+    \* @type: Str -> Str;
+    reapPending \* per process: the exited child it was woken in wait4 to reap, or None
 
 vars == <<state, current, reserved, stands, owner, interrupted, reapPending>>
 
@@ -107,13 +118,19 @@ Departed(c, p) ==
 Takeable(p) ==
     /\ state[p] = "Ready"
     /\ owner[p] = None
-    /\ (p = "parent" /\ reapPending) => owner["child"] = None
+    /\ reapPending[p] # None => owner[reapPending[p]] = None
 
-\* The parent's wait4 decides to block: the child has not exited and no
-\* wake is pending.
-WaitsForChild ==
-    /\ state["child"] \in {"Running", "Ready", "Napping"}
-    /\ ~reapPending
+\* @type: (Str) => Set(Str);
+ChildrenOf(p) == {q \in Procs : ParentOf[q] = p}
+
+\* p's wait4 decides to block: it has a live child, none of its children
+\* has exited, and no wake is pending. The second clause is Wait4Block.tla's
+\* RECHECK (#550): a parent never publishes Blocked beside a zombie child.
+\* @type: (Str) => Bool;
+WaitsForChild(p) ==
+    /\ \E q \in ChildrenOf(p) : state[q] \in {"Running", "Ready", "Napping", "Blocked"}
+    /\ \A q \in ChildrenOf(p) : state[q] # "Exited"
+    /\ reapPending[p] = None
 
 ----------------------------------------------------------------------------
 (* Initial state: the parent runs on c0 and its child has been allocated;  *)
@@ -128,25 +145,29 @@ Init ==
     /\ stands = [c \in Cores |-> IF c = "c0" THEN "parent" ELSE Idle]
     /\ owner = [p \in Procs |-> IF p = "parent" THEN "c0" ELSE None]
     /\ interrupted = [c \in Cores |-> FALSE]
-    /\ reapPending = FALSE
+    /\ reapPending = [p \in Procs |-> None]
 
 ----------------------------------------------------------------------------
 (* Actions *)
 
-\* clone publishes the child: it becomes the core's current process while
+\* clone publishes the child q: it becomes the core's current process while
 \* still Constructing, and the core still stands on the parent's stack.
-CloneBegin(c) ==
-    /\ Settled(c, "parent")
-    /\ state["child"] = "Constructing"
+\* @type: (Str, Str) => Bool;
+CloneBegin(c, q) ==
+    /\ ParentOf[q] # None
+    /\ Settled(c, ParentOf[q])
+    /\ state[q] = "Constructing"
     /\ reserved[c] = None
-    /\ current' = [current EXCEPT ![c] = "child"]
+    /\ current' = [current EXCEPT ![c] = q]
     /\ UNCHANGED <<state, reserved, stands, owner, interrupted, reapPending>>
 
 \* The child's frame is installed: it is Running and the parent Ready.
 CloneFinish(c) ==
-    /\ current[c] = "child"
-    /\ state["child"] = "Constructing"
-    /\ state' = [state EXCEPT !["parent"] = "Ready", !["child"] = "Running"]
+    /\ current[c] # None
+    /\ state[current[c]] = "Constructing"
+    /\ ParentOf[current[c]] # None
+    /\ state' = [state EXCEPT ![ParentOf[current[c]]] = "Ready",
+                               ![current[c]] = "Running"]
     /\ UNCHANGED <<current, reserved, stands, owner, interrupted, reapPending>>
 
 \* The exception return completes the physical switch: the core leaves the
@@ -183,7 +204,7 @@ Reserve(c, p) ==
     /\ \/ current[c] # None /\ state[current[c]] = "Running"
           /\ \/ Settled(c, current[c])
              \/ Departed(c, current[c])
-             \/ current[c] = "child" /\ stands[c] = "parent"
+             \/ stands[c] = ParentOf[current[c]]
        \/ current[c] = None /\ stands[c] = Idle
        \/ current[c] = None /\ ~EXIT_IDLES
           /\ stands[c] \in Procs /\ state[stands[c]] = "Exited"
@@ -216,8 +237,8 @@ SwitchAway(c, how) ==
     /\ Settled(c, current[c]) \/ Departed(c, current[c])
     /\ state[current[c]] = "Running"
     /\ \/ how = "Ready"
-       \/ how = "Napping" /\ current[c] = "child"
-       \/ how = "Blocked" /\ current[c] = "parent" /\ WaitsForChild
+       \/ how = "Napping"
+       \/ how = "Blocked" /\ WaitsForChild(current[c])
     /\ state' = [state EXCEPT ![current[c]] = how]
     /\ current' = [current EXCEPT ![c] = reserved[c]]
     /\ reserved' = [reserved EXCEPT ![c] = None]
@@ -229,15 +250,16 @@ SwitchAway(c, how) ==
 \* frame is saved, it becomes Ready, and this core still owns the parent's
 \* Ready stack until SwitchComplete takes the reserved successor's stack.
 CloneReschedule(c) ==
-    /\ current[c] = "child"
-    /\ state["child"] = "Running"
-    /\ owner["child"] = None
-    /\ stands[c] = "parent"
-    /\ owner["parent"] = c
-    /\ state["parent"] = "Ready"
+    /\ current[c] # None
+    /\ ParentOf[current[c]] # None
+    /\ state[current[c]] = "Running"
+    /\ owner[current[c]] = None
+    /\ stands[c] = ParentOf[current[c]]
+    /\ owner[stands[c]] = c
+    /\ state[stands[c]] = "Ready"
     /\ ~interrupted[c]
     /\ reserved[c] # None
-    /\ state' = [state EXCEPT !["child"] = "Ready"]
+    /\ state' = [state EXCEPT ![current[c]] = "Ready"]
     /\ current' = [current EXCEPT ![c] = reserved[c]]
     /\ reserved' = [reserved EXCEPT ![c] = None]
     /\ UNCHANGED <<stands, owner, interrupted, reapPending>>
@@ -246,38 +268,47 @@ CloneReschedule(c) ==
 \* successor. The core has no current process and still stands on the
 \* parent's stack.
 Wait4Block(c) ==
-    /\ Settled(c, "parent")
+    /\ current[c] # None
+    /\ Settled(c, current[c])
     /\ reserved[c] = None
-    /\ WaitsForChild
-    /\ state' = [state EXCEPT !["parent"] = "Blocked"]
+    /\ WaitsForChild(current[c])
+    /\ state' = [state EXCEPT ![current[c]] = "Blocked"]
     /\ current' = [current EXCEPT ![c] = None]
     /\ UNCHANGED <<reserved, stands, owner, interrupted, reapPending>>
 
-\* The child naps with no successor, the same way.
+\* A process naps with no successor, the same way.
 Nap(c) ==
-    /\ Settled(c, "child")
+    /\ current[c] # None
+    /\ Settled(c, current[c])
     /\ reserved[c] = None
-    /\ state' = [state EXCEPT !["child"] = "Napping"]
+    /\ state' = [state EXCEPT ![current[c]] = "Napping"]
     /\ current' = [current EXCEPT ![c] = None]
     /\ UNCHANGED <<reserved, stands, owner, interrupted, reapPending>>
 
-\* The nap's deadline passes: the child is Ready, wherever its stack is.
-Wake ==
-    /\ state["child"] = "Napping"
-    /\ state' = [state EXCEPT !["child"] = "Ready"]
+\* The nap's deadline passes: the process is Ready, wherever its stack is.
+\* @type: (Str) => Bool;
+Wake(p) ==
+    /\ state[p] = "Napping"
+    /\ state' = [state EXCEPT ![p] = "Ready"]
     /\ UNCHANGED <<current, reserved, stands, owner, interrupted, reapPending>>
 
 \* The child exits and becomes a zombie. A parent Blocked in wait4 is woken
-\* and left Ready with its continuation. The core has no current process
-\* and still stands on the zombie's stack.
+\* and left Ready with its continuation -- that parent and no other process.
+\* The core has no current process and still stands on the zombie's stack.
+\* A process with no parent (init) does not exit in this model.
 ChildExit(c) ==
-    /\ Settled(c, "child")
+    /\ current[c] # None
+    /\ Settled(c, current[c])
+    /\ ParentOf[current[c]] # None
     /\ reserved[c] = None
-    /\ LET wakes == state["parent"] = "Blocked"
+    /\ LET child == current[c]
+           parent == ParentOf[current[c]]
+           wakes == state[parent] = "Blocked"
        IN  /\ state' = [state EXCEPT
-                          !["child"] = "Exited",
-                          !["parent"] = IF wakes THEN "Ready" ELSE @]
-           /\ reapPending' = (reapPending \/ wakes)
+                          ![child] = "Exited",
+                          ![parent] = IF wakes THEN "Ready" ELSE @]
+           /\ reapPending' = IF wakes THEN [reapPending EXCEPT ![parent] = child]
+                                      ELSE reapPending
     /\ current' = [current EXCEPT ![c] = None]
     /\ UNCHANGED <<reserved, stands, owner, interrupted>>
 
@@ -287,13 +318,17 @@ ChildExit(c) ==
 \* stack; otherwise ChildExit above leaves it Ready.
 \* WAKE_START_CHECKS_STACK = FALSE drops that check.
 ChildExitStart(c) ==
-    /\ Settled(c, "child")
+    /\ current[c] # None
+    /\ Settled(c, current[c])
+    /\ ParentOf[current[c]] # None
     /\ reserved[c] = None
-    /\ state["parent"] = "Blocked"
-    /\ WAKE_START_CHECKS_STACK => owner["parent"] = None
-    /\ state' = [state EXCEPT !["child"] = "Exited", !["parent"] = "Running"]
-    /\ reserved' = [reserved EXCEPT ![c] = "parent"]
-    /\ reapPending' = TRUE
+    /\ LET child == current[c]
+           parent == ParentOf[current[c]]
+       IN  /\ state[parent] = "Blocked"
+           /\ WAKE_START_CHECKS_STACK => owner[parent] = None
+           /\ state' = [state EXCEPT ![child] = "Exited", ![parent] = "Running"]
+           /\ reserved' = [reserved EXCEPT ![c] = parent]
+           /\ reapPending' = [reapPending EXCEPT ![parent] = child]
     /\ UNCHANGED <<current, stands, owner, interrupted>>
 
 \* A core with no current process moves to its idle stack and releases the
@@ -311,15 +346,17 @@ IdleEnter(c) ==
     /\ stands' = [stands EXCEPT ![c] = Idle]
     /\ UNCHANGED <<state, current, reserved, interrupted, reapPending>>
 
-\* The parent finishes wait4 by reaping the zombie: woken from its wait,
-\* or calling wait4 after the child has already exited.
-Wait4Reap(c) ==
-    /\ Settled(c, "parent")
-    /\ reapPending \/ state["child"] = "Exited"
-    /\ state["child"] = "Exited"
-    /\ owner["child"] = None
-    /\ state' = [state EXCEPT !["child"] = "Reaped"]
-    /\ reapPending' = FALSE
+\* The parent finishes wait4 by reaping the zombie q: woken from its wait
+\* to reap q, or calling wait4 after its child q has already exited.
+\* @type: (Str, Str) => Bool;
+Wait4Reap(c, q) ==
+    /\ current[c] # None
+    /\ Settled(c, current[c])
+    /\ reapPending[current[c]] = q \/ ParentOf[q] = current[c]
+    /\ state[q] = "Exited"
+    /\ owner[q] = None
+    /\ state' = [state EXCEPT ![q] = "Reaped"]
+    /\ reapPending' = [p \in Procs |-> IF reapPending[p] = q THEN None ELSE reapPending[p]]
     /\ UNCHANGED <<current, reserved, stands, owner, interrupted>>
 
 \* A running process stops being this core's current process without
@@ -375,9 +412,9 @@ LeaveComplete(c) ==
     /\ UNCHANGED <<current, reserved, interrupted, reapPending>>
 
 Next ==
-    \/ Wake
+    \/ \E p \in Procs : Wake(p)
     \/ \E c \in Cores :
-        \/ CloneBegin(c)
+        \/ \E q \in Procs : CloneBegin(c, q)
         \/ CloneFinish(c)
         \/ CloneReschedule(c)
         \/ SwitchComplete(c)
@@ -387,7 +424,7 @@ Next ==
         \/ ChildExit(c)
         \/ ChildExitStart(c)
         \/ IdleEnter(c)
-        \/ Wait4Reap(c)
+        \/ \E q \in Procs : Wait4Reap(c, q)
         \/ LeaveBegin(c)
         \/ LeaveComplete(c)
         \/ InterruptDepart(c)
@@ -408,7 +445,7 @@ Next ==
 \* only per-core fairness a third Ready process could take every turn
 \* (GitHub issue #803).
 Fairness ==
-    /\ WF_vars(Wake)
+    /\ \A p \in Procs : WF_vars(Wake(p))
     /\ \A c \in Cores :
         /\ WF_vars(CloneFinish(c))
         /\ WF_vars(SwitchComplete(c))
@@ -417,10 +454,10 @@ Fairness ==
         /\ WF_vars(LeaveComplete(c))
         /\ SF_vars(\E p \in Procs : Reserve(c, p))
         /\ SF_vars(\E how \in {"Ready", "Napping", "Blocked"} : SwitchAway(c, how))
-        /\ SF_vars(CloneBegin(c))
+        /\ SF_vars(\E q \in Procs : CloneBegin(c, q))
         /\ SF_vars(Wait4Block(c))
         /\ SF_vars(ChildExit(c) \/ ChildExitStart(c))
-        /\ SF_vars(Wait4Reap(c))
+        /\ SF_vars(\E q \in Procs : Wait4Reap(c, q))
     /\ \A p \in Procs : SF_vars(\E c \in Cores : Reserve(c, p))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
@@ -437,6 +474,7 @@ TypeOK ==
     /\ \A c \in Cores : stands[c] \in Procs \union {Idle}
     /\ \A p \in Procs : owner[p] \in Cores \union {None}
     /\ \A c \in Cores : interrupted[c] \in BOOLEAN
+    /\ \A p \in Procs : reapPending[p] \in Procs \union {None}
 
 \* #601's safety property. A core stands only on a stack it owns; since
 \* `owner` names one core per stack, no stack is used by two cores at once.
@@ -475,6 +513,13 @@ StartsOnFreeStack ==
         /\ current[c] # None => owner[current[c]] \in {None, c}
         /\ reserved[c] # None => owner[reserved[c]] \in {None, c}
 
+\* Wait4Block.tla's NoLostWakeup (#550), over every parent: no process
+\* sleeps in wait4 while one of its children is a zombie, which nothing
+\* would wake.
+NoLostWakeup ==
+    \A p \in Procs :
+        state[p] = "Blocked" => \A q \in ChildrenOf(p) : state[q] # "Exited"
+
 \* The one invariant Apalache's shallow check is given: both defects that
 \* break a safety property are found through it.
 CoreInvariants == RunningMatchesCores /\ StartsOnFreeStack
@@ -485,20 +530,26 @@ ChildReaped == <>(state["child"] = "Reaped")
 ----------------------------------------------------------------------------
 (* Constant initializers for Apalache. *)
 
+TwoProcs ==
+    /\ Cores = {"c0", "c1"}
+    /\ Procs = {"parent", "child"}
+    /\ ParentOf = [p \in {"parent", "child"} |-> IF p = "child" THEN "parent" ELSE "none"]
 CInitFixed ==
     EXIT_IDLES = TRUE /\ LEAVE_CHECKS_STACK = TRUE /\ WAKE_START_CHECKS_STACK = TRUE
-    /\ OTHER_READY = FALSE
+    /\ TwoProcs
 CInitOther ==
     EXIT_IDLES = TRUE /\ LEAVE_CHECKS_STACK = TRUE /\ WAKE_START_CHECKS_STACK = TRUE
-    /\ OTHER_READY = TRUE
+    /\ Cores = {"c0", "c1"}
+    /\ Procs = {"parent", "child", "other"}
+    /\ ParentOf = [p \in {"parent", "child", "other"} |-> IF p = "child" THEN "parent" ELSE "none"]
 CInitExitWaits ==
     EXIT_IDLES = FALSE /\ LEAVE_CHECKS_STACK = TRUE /\ WAKE_START_CHECKS_STACK = TRUE
-    /\ OTHER_READY = FALSE
+    /\ TwoProcs
 CInitLeaveUnchecked ==
     EXIT_IDLES = TRUE /\ LEAVE_CHECKS_STACK = FALSE /\ WAKE_START_CHECKS_STACK = TRUE
-    /\ OTHER_READY = FALSE
+    /\ TwoProcs
 CInitWakeStartUnchecked ==
     EXIT_IDLES = TRUE /\ LEAVE_CHECKS_STACK = TRUE /\ WAKE_START_CHECKS_STACK = FALSE
-    /\ OTHER_READY = FALSE
+    /\ TwoProcs
 
 =============================================================================

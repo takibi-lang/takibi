@@ -216,12 +216,26 @@ check_model RxTransfer_omitrefresh Safety 8 generated:CInit:Safety:violated
 check_model PacketBuffer Safety 8 generated:CInit:pass:ok
 MDIR="$MODELS"
 
+# GitHub issue #606, stage 2: the protocol-trace check is TLC run on
+# StackOwnershipTrace.tla. Its controls (the recorded windows accepted, each
+# planted defect refused) run beside the model jobs; each is a short TLC.
+TRACE_CONTROLS_LOG="$OUT/protocol-trace-controls.log"
+python3 "$REPO_ROOT/scripts/protocol_trace_tlc_controls.py" >"$TRACE_CONTROLS_LOG" 2>&1 &
+trace_controls_pid=$!
+
 # Run. A job's own exit status is not the verdict -- an unfixed variant is
 # SUPPOSED to fail -- so every job is allowed to fail here and judged below.
 (cd "$MODELS" && xargs -P "$JOBS" -L 1 sh -c 'log="$0"; "$@" >"$log" 2>&1 || true' <"$QUEUE")
 
 failures=0
 fail() { echo "FAIL modelcheck: $*"; failures=$((failures + 1)); }
+
+if wait "$trace_controls_pid"; then
+    grep "^PASS" "$TRACE_CONTROLS_LOG"
+else
+    cat "$TRACE_CONTROLS_LOG"
+    fail "the protocol-trace TLC controls (see $TRACE_CONTROLS_LOG)"
+fi
 
 for model in $(cut -d' ' -f1 "$EXPECT" | uniq); do
     grep -q "Type checker \[OK\]" "$OUT/$model.typecheck.log" ||
