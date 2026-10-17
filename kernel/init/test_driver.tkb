@@ -635,6 +635,7 @@ fn kernel_init_boot_fixture_poll(current_authority: borrow ProcessCurrent[curren
         uart_put_udec(scheduled_process_stale_first_generation_value());
         kernel_boot_log("\n");
     }
+    page_run_stats_log();
     if (page_allocator_double_free_count() == 0) {
         kernel_boot_log("resources: no double free\n");
     } else {

@@ -1302,7 +1302,11 @@ holding CPU plus one, `requested` the generation it is waiting on, and each
 ack the generation that core last acknowledged, 0 when it is not stopped. A
 stop that stays held with no acks names the core to look at. `vm` also prints
 `ddb: vm-global`: the ASID width, generation, next number and rollover count,
-and the pages in use and owned by the allocator.
+and the pages in use and owned by the allocator; and `ddb: page-runs`:
+`page_alloc_contiguous` calls since boot, the generic-counter ticks they
+spent holding the IRQ-masking page lock, the longest single hold, and the
+counter frequency. The bounded suite prints the same counters as a
+`RECORDED page run allocator:` line.
 
 `regs` reads the compiler-defined `ExceptionFrame` directly. DDB does not
 copy registers with handwritten assembly and does not duplicate frame

@@ -1758,6 +1758,14 @@ private fn ddb_render_vm() !{unsafe} {
     ddb_puts(" pages-live="); ddb_put_udec(pages_live);
     ddb_puts(" pages-total="); ddb_put_udec(pages_total);
     ddb_puts("\n");
+    // GitHub issue #771: page_alloc_contiguous's calls, generic-counter
+    // ticks spent under the IRQ-masking page lock, and the longest hold.
+    let (run_calls, run_ticks, run_max) = page_run_stats_reporter();
+    ddb_puts("ddb: page-runs calls="); ddb_put_udec(run_calls);
+    ddb_puts(" ticks="); ddb_put_udec(run_ticks);
+    ddb_puts(" max-ticks="); ddb_put_udec(run_max);
+    ddb_puts(" freq="); ddb_put_udec(read_cntfrq() as usize);
+    ddb_puts("\n");
 }
 
 private fn ddb_render_fds() !{unsafe} {

@@ -276,6 +276,15 @@ struct BootPagePool align(16) {
     // share one 8-byte word.
     frames_out_quarantined: u32;
     frames_out_logged: u32;
+    // GitHub issue #771: permanent cost counters for page_alloc_contiguous
+    // -- calls, generic-counter ticks spent holding the page lock, and the
+    // longest single hold. The lock masks IRQs, so the longest hold is this
+    // allocator's contribution to interrupt latency. Not zeroed by
+    // page_allocator_init_with (the cell is in .bss, so they start at
+    // zero) to keep MMU-off stores out of the picture.
+    run_calls: usize;
+    run_ticks: usize;
+    run_max_ticks: usize;
 }
 
 // GitHub issue #479. Everything below this line is shared mutable
@@ -753,6 +762,7 @@ fn page_alloc_contiguous(count: usize, owner: PageOwnerTag)
         -> PageRunAllocResult !{allocates, requires_mmu, unsafe} {
     let guard = locked_cell_take(&boot_page_pool_cell);
     let pool = memory_map_pool_record(guard, &boot_page_pool_cell);
+    let started: i64 = read_cntpct();
     let result: PageRunAllocResult = match place_borrow(guard, page_meta_store.metas) {
         Place::Empty => { PageRunAllocResult::OutOfMemory }
         Place::Full(metas) => {
@@ -769,6 +779,10 @@ fn page_alloc_contiguous(count: usize, owner: PageOwnerTag)
             inner
         }
     };
+    let spent: usize = (read_cntpct() - started) as usize;
+    pool.run_calls = pool.run_calls + 1;
+    pool.run_ticks = pool.run_ticks + spent;
+    if (spent > pool.run_max_ticks) { pool.run_max_ticks = spent; }
     locked_cell_give(&boot_page_pool_cell, guard);
     return result;
 }
@@ -2726,6 +2740,33 @@ fn page_allocator_counts_reporter() -> (usize, usize) !{unsafe} {
     }
     locked_cell_give_unlocked(&boot_page_pool_cell, unlocked);
     return (live, total);
+}
+
+// GitHub issue #771: page_alloc_contiguous's cost counters (calls, ticks
+// held, longest hold) for DDB's `vm`, without the page lock: three loads
+// that may straddle one call.
+fn page_run_stats_reporter() -> (usize, usize, usize) !{unsafe} {
+    let unlocked = locked_cell_take_unlocked(&boot_page_pool_cell);
+    let pool = memory_map_pool_record(unlocked, &boot_page_pool_cell);
+    let calls: usize = pool.run_calls;
+    let ticks: usize = pool.run_ticks;
+    let longest: usize = pool.run_max_ticks;
+    locked_cell_give_unlocked(&boot_page_pool_cell, unlocked);
+    return (calls, ticks, longest);
+}
+
+// The same counters as one RECORDED boot line: a cost, not a verdict.
+fn page_run_stats_log() !{unsafe} {
+    let (calls, ticks, longest) = page_run_stats_reporter();
+    kernel_boot_log("RECORDED page run allocator: calls=");
+    uart_put_udec(calls);
+    kernel_boot_log(" ticks=");
+    uart_put_udec(ticks);
+    kernel_boot_log(" max_ticks=");
+    uart_put_udec(longest);
+    kernel_boot_log(" freq=");
+    uart_put_udec(read_cntfrq() as usize);
+    kernel_boot_log("\n");
 }
 
 fn page_allocator_page_bytes() -> usize {

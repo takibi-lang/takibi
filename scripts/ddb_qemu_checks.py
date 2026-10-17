@@ -33,6 +33,8 @@ REQUIREMENTS = (
     ('CPU 0 activity', '^ddb: activity cpu=0 [a-z-]+ current=[0-9]+ stack=[0-9]+$', 1, None, 'both'),
     ('CPU 1 activity', '^ddb: activity cpu=1 [a-z-]+ current=[0-9]+ stack=[0-9]+$', 1, None, 'both'),
     ('VM fields', '^ddb: vm pid=[0-9]+ root=[0-9]+ live=[01] asid=[0-9]+ l1=0x[0-9a-f]+$', 1, None, 'both'),
+    # GitHub issue #771: page_alloc_contiguous's permanent cost counters.
+    ('page run counters', '^ddb: page-runs calls=[1-9][0-9]* ticks=[0-9]+ max-ticks=[0-9]+ freq=[1-9][0-9]*$', 1, None, 'both'),
     ('fd table fields', '^ddb: fds pid=[0-9]+ slots=[0-9]+$', 1, None, 'both'),
     ('process count', '^ddb: ps count=[1-9][0-9]* truncated=[01]$', 1, None, 'both'),
     ('PID 1 signal fields in ps', '^ddb: ps pid=1 ppid=0 state=[0-9]+ wait=[0-9]+( waker=[a-z-]+( queued=[0-9]+( low-water=[0-9]+)?| frame-pending=(yes|no|unknown) connection-pending=(yes|no|unknown))?)? root=0 sp=0x[0-9a-f]+ pending={sigset} masked={sigset} owner=(none|[0-9]+) mask=0x[0-9a-f]+ core0=[01]$', 1, None, 'both'),

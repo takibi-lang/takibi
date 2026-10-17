@@ -33,6 +33,7 @@ ddb: activity cpu=0 syscall current=46 stack=46
 ddb: activity cpu=1 syscall current=37 stack=37
 ddb: vm pid=46 root=1076146480 live=1 asid=47 l1=0x00000000406a2000
 ddb: vm-global asid-width=16 asid-generation=2 asid-next=52 asid-rollovers=1 pages-live=3673 pages-total=261560
+ddb: page-runs calls=41 ticks=118000 max-ticks=9100 freq=62500000
 ddb: fds pid=46 slots=16
 ddb: fd=0 kind=2 object=1076151152
 ddb: fd=1 kind=2 object=1076151152

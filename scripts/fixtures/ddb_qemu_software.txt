@@ -27,6 +27,7 @@ ddb: activity cpu=0 syscall current=1 stack=1
 ddb: activity cpu=1 idle-loop current=0 stack=0
 ddb: vm pid=1 root=0 live=1 asid=1 l1=0x0000000040248000
 ddb: vm-global asid-width=16 asid-generation=2 asid-next=3 asid-rollovers=1 pages-live=2472 pages-total=261560
+ddb: page-runs calls=41 ticks=118000 max-ticks=9100 freq=62500000
 ddb: fds pid=1 slots=16
 ddb: ps count=1 truncated=0
 ddb: ps pid=1 ppid=0 state=2 wait=0 root=0 sp=0x0000000040348000 pending=none masked=none owner=0 mask=0x0000000000000000 core0=0
