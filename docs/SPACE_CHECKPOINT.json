@@ -1,10 +1,11 @@
 {
   "date": "2026-10-17",
   "event": "incremental",
-  "decision": "reuse",
-  "source_sha256": "04943599a9c7a3dd7d89d0283e41c9ae47b2a1d6f76c3876afbc8ebcb45f04fa",
-  "workload": "#641: world_stop_machine_begin split into a ranked wrapper and its unchanged unranked body (world_stop_machine_begin_holding_probe); four probe call sites renamed; comments only elsewhere. No storage, allocation or data/BSS change. Also the Makefile compiler-fuzz recipe gains an untimed mutant-build step (host test tooling only).",
+  "decision": "measured",
+  "source_sha256": "4b43c29073198893a68d06932957bf1a263c6928e16b950c374a7a91c4f7b325",
+  "workload": "#771: page_alloc_contiguous no longer rebuilds the runtime free list or tests every page index. Doubly linked free list (two u32 links replace one usize link; PageMeta stays 24 B), head pop for a run of one, aligned-address scan per extent, plus permanent call/visit/tick/longest-hold counters in BootPagePool. Bounded suite on both production kernels; RPi5 timing from kernelcheck-rpi5.",
   "evidence": [
+    "docs/PAGE_RUN_SCAN_SPACE_2026-10-17.md",
     "docs/SLOT_POOLS_EXEC_SYSCALL_SPACE_2026-10-17.md",
     "docs/XHCI_CAPABILITY_SPACE_2026-10-17.md",
     "docs/BLOCK_SLOT_POOL_SPACE_2026-10-17.md",
@@ -80,6 +81,6 @@
     "docs/VIRTIO_NET_TX_2026-10-10.md",
     "docs/VIRTIO_NET_TX_SPACE_2026-10-10.json"
   ],
-  "assessment": "Reused the last measured record: the only code change is one forwarding function, a few instructions of text at most, and no data, BSS or page reservation moves. Reuse: the change is confined to model emission (to_tla, --emit-tla-omit-cache) and usage text, which no kernel build invokes, so both production images are unchanged from the #638 measurement. Previous assessment: Measured with scripts/space_delta.py: text +3080 B QEMU / +3320 B RPi5, BSS +64 B, usable_ram_start one 32 KiB step later on both; the RPi5 image ceiling is raised to 0x540000 by the maintainer's decision (2026-10-17).",
-  "next_trigger": "The #638 preemption flip (target root into the process record), or the next slot pool."
+  "assessment": "Adopted. Text +2912 B (qemu) / +2944 B (rpi5); BSS +32 B (boot_page_pool_cell 16480 -> 16512, four counters); per-page metadata unchanged at 24 B; usable_ram_start unchanged. RPi5 time under the IRQ-masking page lock: mean 3.16 ms -> 1.6 us per call, longest 4.68 ms -> 11.4 us.",
+  "next_trigger": "A change to PageMeta, the free-list representation, or the page-run search; or the RECORDED page run allocator longest hold growing past 100 us on RPi5."
 }
