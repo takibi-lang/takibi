@@ -21,6 +21,8 @@ import re
 import sys
 from pathlib import Path
 
+from pass_line import report_pass
+
 ROOT = Path(__file__).resolve().parent.parent
 SOURCE = ROOT / "kernel/mm/page.tkb"
 REBUILD = "page_runtime_freelist_rebuild"
@@ -54,8 +56,9 @@ def main():
               % (number, REBUILD, function))
     if bad:
         return 1
-    print("PASS page-freelist-rebuild: %s runs only from %s"
-          % (REBUILD, ", ".join(sorted(ALLOWED))))
+    report_pass("page-freelist-rebuild",
+                "%s runs only from %s" % (REBUILD, ", ".join(sorted(ALLOWED))),
+                call_sites=len(sites))
     return 0
 
 
