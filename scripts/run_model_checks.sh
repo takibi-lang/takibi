@@ -69,8 +69,10 @@ queue_apalache() {  # model variant cinit invariant length
 # bound, and giving it to every variant makes Apalache's shallow checks the
 # slowest thing in allcheck -- StackOwnership at 8 took 77 s a variant and
 # slowed every QEMU lane beside it past the network peer's budget.
-# A TLC expectation is "pass", "deadlock", or the name of the
-# invariant that must be reported violated. An Apalache expectation is "ok"
+# A TLC expectation is "pass", "deadlock", "temporal" (a liveness property
+# violated; TLC does not name it, so such a variant's .cfg lists exactly the
+# one PROPERTY it must lose), or the name of the invariant that must be
+# reported violated. An Apalache expectation is "ok"
 # or "violated". Apalache reports a deadlock only when every run of some
 # length is stuck, so a deadlock that one branch reaches is TLC's to find;
 # such a variant expects "ok" from Apalache, which then shows only that it
@@ -163,6 +165,17 @@ check_model WorldStop NoUnstoppedRead 8 \
     subset:CInitSubset:NoUnstoppedRead:violated \
     ungatedstart:CInitUngatedStart:NoUnstoppedRead:violated:10
 
+# GitHub issue #641: the Busy/Partial retry, any initiator. Liveness is
+# TLC's; Apalache's shallow run checks Safety, which only failstop breaks.
+check_model WorldStopRetry Safety 4 \
+    fixed:CInitFixed:pass:ok \
+    failstop:CInitFailStop:Safety:violated \
+    core0ack:CInitCore0Ack:temporal:ok \
+    maskedbackoff:CInitMaskedBackoff:temporal:ok \
+    holdlock:CInitHoldLock:temporal:ok \
+    stuck:CInitStuck:temporal:ok \
+    shortbudget:CInitShortBudget:temporal:ok
+
 # GitHub issue #720: RegionTransfer.tkb is the protocol declaration form of
 # SharedRegionTransfer above. Its generated model must reproduce the fixed
 # verdict and the early-publication control the faulty one. The foreign,
@@ -234,6 +247,9 @@ while read -r model cfg tlc_expect apa_expect invariant length; do
               fi ;;
         deadlock) grep -q "Error: Deadlock reached." "$log" ||
                   fail "$model $cfg: TLC did not report the deadlock (see $log)" ;;
+        temporal) grep -q "Error: Temporal properties were violated." "$log" &&
+                  [ "$(grep -c '^PROPERTY' "$MODELS/${model}_$cfg.cfg")" = 1 ] ||
+                  fail "$model $cfg: TLC did not report its one liveness property violated (see $log)" ;;
         *) grep -q "Invariant $tlc_expect is violated." "$log" ||
                fail "$model $cfg: TLC did not report $tlc_expect (see $log)" ;;
     esac

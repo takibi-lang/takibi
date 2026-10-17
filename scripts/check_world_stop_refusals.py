@@ -20,6 +20,14 @@ Invalid from kernel_process_activate_current_root, and its caller
 fail-stopped. The fix there retries inside the function, so the Invalid arm
 no longer carries a refusal. The file's own control plants the
 pre-#632 shape and requires the check to refuse it.
+
+GitHub issue #641 adds two rules that keep the compiler's lock-order check
+covering the retry's liveness (kernel/models/WorldStopRetry.tla, variant
+holdlock): `world_stop_machine_begin` declares an `acquires_lock_<rank>_`
+effect whose rank is below every other lock class's, so a caller holding any
+ranked guard cannot begin a stop; and its unranked body,
+`world_stop_machine_begin_holding_probe`, is called only from a function
+whose name ends in `_probe`.
 """
 
 import pathlib
@@ -62,6 +70,62 @@ def problems_in(text: str, relative: str) -> tuple[int, list[str]]:
     return arms, problems
 
 
+RANK = re.compile(r"\bacquires_lock_([0-9]+)_([A-Za-z_0-9]+)")
+FN = re.compile(r"\bfn\s+(\w+)\s*\(")
+UNRANKED = "world_stop_machine_begin_holding_probe"
+
+
+def rank_problems(texts: dict) -> list:
+    """The stop's rank is the lowest; its unranked body is probe-only."""
+    problems = []
+    stop_rank = None
+    others = []
+    for relative, text in texts.items():
+        code = "\n".join(line.split("//", 1)[0] for line in text.splitlines())
+        for match in RANK.finditer(code):
+            if match.group(2) == "world_stop":
+                stop_rank = int(match.group(1))
+            else:
+                others.append((int(match.group(1)), match.group(2)))
+        starts = [(m.start(), m.group(1)) for m in FN.finditer(code)]
+        for call in re.finditer(r"\b" + UNRANKED + r"\s*\(", code):
+            enclosing = [name for at, name in starts if at < call.start()]
+            caller = enclosing[-1] if enclosing else "<top level>"
+            if caller == UNRANKED:
+                continue
+            if caller == "world_stop_machine_begin" or caller.endswith("_probe"):
+                continue
+            line = code.count("\n", 0, call.start()) + 1
+            problems.append(
+                f"{relative}:{line}: {caller} calls {UNRANKED}, which "
+                "carries no lock rank; only a single-attempt *_probe may "
+                "hold a guard across a stop (#641)")
+    if stop_rank is None:
+        problems.append("world_stop_machine_begin declares no "
+                        "acquires_lock_<rank>_world_stop (#641)")
+    else:
+        for rank, name in others:
+            if rank <= stop_rank:
+                problems.append(
+                    f"lock class {name} has rank {rank}, not above the world "
+                    f"stop's {stop_rank}: a caller holding it could begin a "
+                    "stop its peers cannot acknowledge (#641)")
+    return problems
+
+
+def rank_control() -> bool:
+    good = {"a": "fn world_stop_machine_begin() !{acquires_lock_10_world_stop} "
+                 "{ world_stop_machine_begin_holding_probe(1); }\n"
+                 "fn p() !{acquires_lock_40_pool} {}\n"
+                 "fn x_probe() { world_stop_machine_begin_holding_probe(1); }\n"}
+    if rank_problems(good):
+        return False
+    bad_caller = {"a": good["a"] + "fn retry() { world_stop_machine_begin_holding_probe(1); }\n"}
+    bad_rank = {"a": good["a"].replace("acquires_lock_40_pool", "acquires_lock_5_pool")}
+    unranked = {"a": good["a"].replace("acquires_lock_10_world_stop", "unsafe")}
+    return all(len(rank_problems(t)) == 1 for t in (bad_caller, bad_rank, unranked))
+
+
 def control() -> bool:
     planted = """
     match world_stop_begin(&kernel_world_stop, cores, SPINS) {
@@ -100,11 +164,18 @@ def main() -> int:
               "fail-stop on Busy and Partial and the check did not refuse it",
               file=sys.stderr)
         return 1
+    if not rank_control():
+        print("FAIL world-stop-refusals: the #641 rank control was not "
+              "refused (a non-probe caller, a lower rank, a missing rank)",
+              file=sys.stderr)
+        return 1
     total = 0
     files = 0
     problems = []
+    texts = {}
     for path in sorted((REPO / "kernel").rglob("*.tkb")):
         text = path.read_text()
+        texts[str(path.relative_to(REPO))] = text
         if not any(name + "::" in text for name in
                    ("WorldStopResult", "MachineStopResult")):
             continue
@@ -112,6 +183,7 @@ def main() -> int:
         arms, found = problems_in(text, str(path.relative_to(REPO)))
         total += arms
         problems.extend(found)
+    problems.extend(rank_problems(texts))
     if problems:
         for problem in problems:
             print(f"  {problem}", file=sys.stderr)

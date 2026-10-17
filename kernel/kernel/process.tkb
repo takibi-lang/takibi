@@ -6302,11 +6302,15 @@ fn kernel_process_activate_current_root(current_authority: borrow ProcessCurrent
 // with no scheduler to hand the work back to, and it has already committed
 // the new image, so it cannot fail either.
 //
-// The wait between attempts leaves this core's interrupt mask as it is. With
-// interrupts open it answers the other core's stop request while it waits;
-// with them masked the other core ends with Partial and releases, and this
-// core's next claim succeeds. The wait differs per core so two cores that
-// both retry do not keep meeting.
+// The wait between attempts leaves this core's interrupt mask as it is, so
+// it must be entered with interrupts open, as the syscall paths are (user_entry.S
+// unmasks IRQs before dispatch):
+// then it answers the other core's stop request while it waits. Two cores
+// retrying with interrupts masked would time each other out forever
+// (GitHub issue #641, WorldStopRetry.tla variant maskedbackoff); nothing
+// rejects that shape statically yet. A caller holding a ranked lock cannot
+// begin the stop at all (world_stop_machine_begin's rank). The wait differs
+// per core so two cores that both retry do not keep meeting.
 fn kernel_process_activate_stable_root(root: AddressSpaceRoot) {
     let mut activating: bool = true;
     let mut injected_busy: usize = 0;

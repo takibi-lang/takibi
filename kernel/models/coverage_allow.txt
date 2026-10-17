@@ -16,3 +16,7 @@ RecordLifetime fixed ExecWriteEnd: only the unlocked execve write of variant exe
 
 # The fixed console design writes under the lock and has no ring to drain.
 ConsoleTx fixed Drain: only the ring design (variant ring) has a ring to drain
+
+# The retrier that holds an IRQ-masking lock across its world stop: only the
+# faulty LOCK_FREE_STOP = FALSE design (variant holdlock) can begin one.
+WorldStopRetry fixed NeedLocked: only variant holdlock begins a stop while holding the lock

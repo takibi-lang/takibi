@@ -623,7 +623,7 @@ fn address_space_diagnostic_snapshot(
 fn address_space_stopped_pool_busy_probe() -> bool !{unsafe} {
     let guard = address_space_backing_pool_lock(&address_space_backing_pool);
     let mut refused: bool = false;
-    match world_stop_machine_begin(DDB_WORLD_STOP_SPINS) {
+    match world_stop_machine_begin_holding_probe(DDB_WORLD_STOP_SPINS) {
         MachineStopResult::Busy => {}
         MachineStopResult::Partial(partial) => { machine_stop_partial_release(partial, &kernel_world_stop); }
         MachineStopResult::Complete(stopped) => {

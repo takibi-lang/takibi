@@ -459,7 +459,9 @@ times out, under weak fairness on those two actions. It does not guarantee
 that retries ever obtain a complete stop. IRQs opening infinitely often and
 weak fairness alone do not guarantee that every CPU acknowledges within one
 bounded wait or that an initiator wins a contested gate. No starvation-freedom
-claim follows from this model. Physical holding, firmware status truthfulness,
+claim follows from this model alone; `WorldStopRetry.tla` checks the retry's
+liveness under the timing and fairness assumptions it states. Physical
+holding, firmware status truthfulness,
 ARM ordering, interrupt decoding and raw mint correctness remain trusted.
 The model treats owner-side reads as indivisible and does not model owner IRQ
 mutation. The implementation now saves and masks owner IRQs before claiming
@@ -472,7 +474,7 @@ views remain live; this is separate evidence from the bounded model.
 | `StartReserve` | `cpu_start_reserve` | claim before adding the possible target, sharing the stop gate | exact bit encoding, and the gate's distinct start-holder value (#556) -- irrelevant to `NoUnstoppedRead`: the set is the mask's membership relation, and the value only names which holder a refused claim met | `5a67e8e003f3` |
 | `StartFirmware`, `CpuArrive` | `qemu_psci_cpu_on`, `rpi5_psci_cpu_on`, `kernel_secondary_main` | reserved target can execute before or after the firmware call returns | entry assembly and PSCI encoding -- irrelevant to `NoUnstoppedRead`: a CPU may arrive at any step after reservation | `431853fff5d2` |
 | `StartFinish`, `StartAbsent` | `cpu_start_finish`, `cpu_start_gate_release` | uncertain targets stay possible; only definitive absence removes a new reservation before releasing the gate | scheduler's contiguous online prefix -- irrelevant to `NoUnstoppedRead`: the full stop uses the independent possible-participant mask | `a474390de9c0` |
-| `Claim`, `Publish` | `world_stop_claim`, `world_stop_begin_claimed`, `world_stop_machine_begin` | one initiator; set capture under the gate; fresh request generation | the whole-machine stop's bounded wait while a start reservation holds the gate, including a release between a failed CAS and the holder load (#556) -- irrelevant to `NoUnstoppedRead`: it changes no state until the gate is free and then takes the same `Claim`, or answers Busy; generation exhaustion -- irrelevant to `NoUnstoppedRead`: two generations are never reused and exhaustion only refuses another request; subset probe API -- irrelevant to `NoUnstoppedRead`: its distinct WorldStopped type cannot enter a whole-machine reader | `d72c93230cef` |
+| `Claim`, `Publish` | `world_stop_claim`, `world_stop_begin_claimed`, `world_stop_machine_begin`, `world_stop_machine_begin_holding_probe` | one initiator; set capture under the gate; fresh request generation | the whole-machine stop's bounded wait while a start reservation holds the gate, including a release between a failed CAS and the holder load (#556) -- irrelevant to `NoUnstoppedRead`: it changes no state until the gate is free and then takes the same `Claim`, or answers Busy; generation exhaustion -- irrelevant to `NoUnstoppedRead`: two generations are never reused and exhaustion only refuses another request; subset probe API -- irrelevant to `NoUnstoppedRead`: its distinct WorldStopped type cannot enter a whole-machine reader | `62382e27511e` |
 | `Ack`, `PenExit`, `ToggleIrq` | `world_stop_hold`, `kernel_world_stop_serve`, `kernel_ddb_stopped_root_publish`, `kernel_ddb_stopped_root_retire` | ack current request only after entering the pen; exit only when request changes; masked IRQs can delay ack | physical instruction timing -- irrelevant to `NoUnstoppedRead`: arbitrary scheduling allows every delay; stopped-root sequence parity -- irrelevant to `NoUnstoppedRead`: an unsettled root is refused, while the repeated real-stop fixture checks usable publication separately | `8b426deb0339` |
 | `Complete`, `Timeout` | `world_stop_begin_claimed` | all captured targets must ack the current generation; timeout yields no complete authority | spin count -- irrelevant to `NoUnstoppedRead`: timeout may happen at any waiting step | `4912d7384d61` |
 | `Release` | `world_stop_resume`, `machine_stop_release`, `machine_stop_partial_release` | end the local authority before clearing request and releasing claim, then restore saved initiator IRQs | terminal keep-forever -- irrelevant to `NoUnstoppedRead`: it never resumes or releases the gate | `367da389422d` |
@@ -497,6 +499,91 @@ together. Three things keep them in step:
    restamps says what was reviewed. A comment-only edit keeps the stamp. The
    stamp says only "look again", not what is wrong, and it fires whether or
    not any test exercises the change.
+
+## WorldStopRetry.tla -- the Busy/Partial retry, any initiator (#641)
+
+The retry slice of the world-stop protocol. Any of three CPUs may need a
+Complete stop (an ASID rollover) and retries on Busy and Partial; any other
+CPU may be interrupted into the hold pen, or be inside an IRQ-masked
+section: a finite one holding the one modelled IRQ-masking lock, a spin on
+that lock, or one longer than the spin budget. CPU startup and partial
+membership are left to `WorldStop.tla`; generations are abstracted to "the
+ack is for the live request" (a set every publication and release empties),
+and `WorldStop.tla` checks the stale-ack window that leaves out. TLC covers
+the whole graph, safety and liveness; Apalache checks `Safety` to length 4.
+
+Properties:
+
+- `Safety`: `StoppedWhileComplete` (a Complete token only while every
+  other CPU is in the pen having acknowledged it), `AckedInPen` (only a CPU
+  held for the live request counts as stopped), `NoFailStop`.
+- `RetrySucceeds` (liveness): every CPU that needs a Complete stop gets one.
+- `PenResumes` (liveness): every CPU in the pen leaves it. Release resumes
+  exactly the CPUs that acknowledged; a CPU that never entered is untouched.
+
+The assumptions the liveness rests on, each stated rather than proved:
+
+1. **Spin budget.** `Timeout` (Partial) fires only while some target cannot
+   acknowledge within the budget (`LongMasked`): it is masked longer than
+   the budget, spins on a lock the initiator or a held CPU owns, retries
+   with IRQs masked, or refuses the request. Every acknowledgement that can
+   arrive is assumed to arrive within `SCHEDULER_WORLD_STOP_SPINS` rounds.
+   Variant `shortbudget` drops this and loses `RetrySucceeds`.
+2. **Finitely many masked sections longer than the budget** (`longLeft`,
+   one). A peer in DDB or the crash console, or a fault loop at EL1, keeps
+   IRQs masked past the budget; each such Partial is retried. Variant
+   `stuck` lets one never end and loses `RetrySucceeds`: a CPU spinning with
+   IRQs masked cannot take the stop SGI, so every attempt ends Partial and
+   the retrier livelocks, never with a Complete token. That is what Partial
+   means here: some target was masked for the whole budget. An FIQ-based
+   stop that could reach such a CPU is not modelled or implemented.
+3. **A pending SGI is taken first.** The GIC keeps the SGI pending; an
+   IRQ-open CPU takes it before its next instruction, so while it is
+   pending an IRQ-open CPU only acknowledges (`Pending` guards its other
+   steps).
+4. **Fairness.** Steps a CPU takes without waiting on another (`Ack`,
+   `PenExit`, `Exit`, `LongExit`, `Claim`, `Busy`, `Complete`, `Timeout`,
+   `Finish`, `Retry`) are weakly fair. `Acquire` is strongly fair: an
+   assumption, since `mutex_acquire`'s spin is not FIFO. Entering a masked
+   section and needing a stop are not fair.
+5. **One rollover serves every waiter.** `Finish` empties `wants`: after
+   the back-off each retrier prepares its activation again and finds the
+   generation current.
+
+Variants (`make modelcheck` requires each verdict):
+
+- `fixed` holds `Safety`, `RetrySucceeds` and `PenResumes`, and reaches
+  `Timeout` through the one long masked section.
+- `failstop`: Busy and Partial fail-stop, #632's activation defect;
+  violates `Safety` (`NoFailStop`).
+- `core0ack`: only CPU 1's stop is acknowledged, #632's sender-decode
+  defect in model form; loses `RetrySucceeds` for every other initiator.
+- `maskedbackoff`: a retrier keeps IRQs masked between attempts (a caller
+  that entered with IRQs masked); two such retriers time each other out
+  forever; loses `RetrySucceeds`.
+- `holdlock`: a retrier holds an IRQ-masking lock across its attempts; a
+  peer spinning on it never acknowledges; loses `RetrySucceeds`. The
+  compiler rejects this shape: `world_stop_machine_begin` declares
+  `acquires_lock_10_world_stop`, below every other lock class, so calling it
+  while any ranked guard is live is a lock-order error.
+  `scripts/check_world_stop_refusals.py` keeps that rank the lowest and
+  allows the unranked `world_stop_machine_begin_holding_probe` only in the
+  single-attempt `*_probe` functions that hold a pool guard on purpose.
+- `stuck`, `shortbudget`: assumptions 2 and 1 dropped, as above.
+
+What stays outside: `maskedbackoff`'s shape is not rejected statically.
+Every retrying caller runs at EL1 with IRQs open today (`KERNEL_PREEMPTIBLE`
+is 0, and a timer IRQ at EL1 only sets a flag); a caller in an exception
+handler or under an unranked mask would livelock. No real run is replayed
+against this model.
+
+| Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
+| --- | --- | --- | --- | --- |
+| `Need`, `Retry` | `kernel_process_activate_stable_root`, `kernel_process_activate_current_root`, `kernel_process_rollover_backoff` | RolloverNeeded begins a stop with IRQs saved and masked; after Busy or Partial the back-off runs with the caller's IRQ state restored, then preparation is retried and begins another stop only while a rollover is still needed | the busy-injection test hooks -- irrelevant to `RetrySucceeds`: they only add back-offs before the first real attempt, finitely many; the secondary-start path, which hands the process back instead of looping -- irrelevant to `RetrySucceeds`: the scheduler retries the same Ready process later, the same back-off and retry | `2050f9dd6e46` |
+| `Claim`, `Busy` | `world_stop_machine_begin`, `world_stop_machine_begin_holding_probe`, `world_stop_claim` | any CPU may claim; a held gate answers Busy at once | the bounded wait for a CPU-start holder (#556) -- modelled elsewhere: `WorldStop.StartReserve`; generation exhaustion -- irrelevant to `RetrySucceeds`: a 64-bit counter is not exhausted by any run | `1e4198b325c7` |
+| `Complete`, `Timeout`, `Finish` | `world_stop_begin_claimed`, `machine_stop_release`, `machine_stop_partial_release`, `world_stop_resume` | Complete only when every other CPU acknowledged the live request; Partial when the budget runs out; release clears the request, then the gate | the spin count itself -- irrelevant to `RetrySucceeds`: assumption 1 states what the budget is assumed to cover; the rollover body -- irrelevant to `RetrySucceeds`: it runs under the Complete token and changes no stop state | `28656455d610` |
+| `Ack`, `PenExit` | `world_stop_hold`, `world_stop_interrupt_hold`, `kernel_world_stop_serve` | a CPU with IRQs open acknowledges the live request and spins until it is released or overtaken; the owner never holds itself | the two-step read-then-store of the hold -- modelled elsewhere: `WorldStop.Ack`; the stopped-root publication -- irrelevant to `RetrySucceeds`: it runs inside the pen and changes no stop state | `91554aa090ba` |
+| `Enter`, `EnterSpin`, `Acquire`, `Exit`, `LongEnter`, `LongExit` | `mutex_irq_save`, `pool_lock_acquire`, `pool_lock_release` | a masked section holding a lock, and a masked spin waiting for it | which lock and what it guards -- irrelevant to `RetrySucceeds`: only whether a masked CPU can be blocked by the stop's owner matters, and one lock shows it | `a5e775f8b533` |
 
 ## SharedRegionTransfer.tla -- general partial authority and protocol handoff
 

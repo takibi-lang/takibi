@@ -340,9 +340,25 @@ fn world_stop_begin(stop: *WorldStop @ id, cores: usize, spins: usize)
     return world_stop_begin_config(stop, cores, spins, true, false);
 }
 
+// GitHub issue #641: rank 10 sits below every other lock class, so a caller
+// holding any ranked guard -- every IRQ-masking lock among them -- cannot
+// begin a stop. A peer spinning masked on that lock could never acknowledge,
+// every attempt would end Partial, and a retrying caller would livelock
+// (WorldStopRetry.tla, variant holdlock).
+fn world_stop_machine_begin(spins: usize)
+        -> MachineStopResult[&kernel_world_stop]
+        !{unsafe, irq_masking_guard, acquires_lock_10_world_stop,
+          lock_guard_40_world_stop} {
+    return world_stop_machine_begin_holding_probe(spins);
+}
+
+// The same stop with no rank, for the single-attempt diagnostic probes that
+// hold a pool guard on purpose to show a stopped inspection refuses it.
+// Only a function named *_probe may call it (scripts/
+// check_world_stop_refusals.py); such a caller never retries.
 // Capture under the claim, never from an unlocked online-count read. The
 // bootstrap CPU is present even before the first secondary reservation.
-fn world_stop_machine_begin(spins: usize)
+fn world_stop_machine_begin_holding_probe(spins: usize)
         -> MachineStopResult[&kernel_world_stop]
         !{unsafe, irq_masking_guard, lock_guard_40_world_stop} {
     let irq_flags: usize = mutex_irq_save();

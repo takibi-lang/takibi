@@ -3899,7 +3899,7 @@ fn kernel_fd_table_stopped_entry(
 private fn fd_context_stopped_pool_busy_probe() -> bool !{unsafe} {
     let guard = fd_context_pool_lock(&fd_context_pool);
     let mut refused: bool = false;
-    match world_stop_machine_begin(DDB_WORLD_STOP_SPINS) {
+    match world_stop_machine_begin_holding_probe(DDB_WORLD_STOP_SPINS) {
         MachineStopResult::Busy => {}
         MachineStopResult::Partial(partial) => { machine_stop_partial_release(partial, &kernel_world_stop); }
         MachineStopResult::Complete(stopped) => {
@@ -3920,7 +3920,7 @@ private fn fd_context_stopped_pool_busy_probe() -> bool !{unsafe} {
 private fn fd_block_stopped_pool_busy_probe() -> bool !{unsafe} {
     let guard = fd_block_pool_lock(&fd_block_pool);
     let mut refused: bool = false;
-    match world_stop_machine_begin(DDB_WORLD_STOP_SPINS) {
+    match world_stop_machine_begin_holding_probe(DDB_WORLD_STOP_SPINS) {
         MachineStopResult::Busy => {}
         MachineStopResult::Partial(partial) => { machine_stop_partial_release(partial, &kernel_world_stop); }
         MachineStopResult::Complete(stopped) => {
