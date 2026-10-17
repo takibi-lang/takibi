@@ -284,7 +284,11 @@ rules globally.
   steps come from the same `Protocol_decl.cache_step` as the wrappers, so
   what stays trusted is that abstraction and the lowering of each builtin,
   not the placement. A snapshot observation's per-element invalidate is
-  not modeled.
+  modeled too (GitHub issue #801), as one step with the copy. The emitted
+  model has one cache; that a builtin's maintenance reaches every core's
+  lines (shareability, migration) is checked once, independent of the
+  declaration, by `kernel/models/DmaCacheVisibility.tla`, and stays
+  trusted in each builtin's lowering.
   The maintained consumer is the xHCI producer rings
   (`kernel/platform/rpi5/usb_xhci_rings.tkb`): its trusted observations are
   a nonzero completion code from `usb_await_event` for the one outstanding

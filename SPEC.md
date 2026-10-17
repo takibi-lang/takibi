@@ -4205,7 +4205,12 @@ that no other code can split:
   `kernel/models/protocols/`, and as fault controls their models emitted
   with `--emit-tla-omit-cache publish` or `finish`, which leave that step
   out of the model only (the generator always emits it); a control that
-  would leave nothing out is an error.
+  would leave nothing out is an error. A `snapshot` observation (GitHub
+  issue #801) is one model step per held cell: the generated per-element
+  invalidate, then the copy, which faults on a stale line; `refresh` is
+  its control. The model has one cache, not one per core: the generated
+  steps are by address and the per-core behaviour of each builtin is
+  `kernel/models/DmaCacheVisibility.tla`'s.
 - Each `device` state S gets `P_S_span(s: borrow P_S[...]) -> DmaDeviceSpan`
   (the whole region) and `P_S_span_at(s: borrow P_S[...], i: usize @ k) ->
   DmaDeviceSpan where k < N` (element i). The span is the existing

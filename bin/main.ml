@@ -156,7 +156,7 @@ let () =
                 then Protocol_decl.omit_of_string Sys.argv.(!i) else None with
           | Some o -> emit_tla_omit := Some o
           | None ->
-              Printf.eprintf "Error: --emit-tla-omit-cache requires 'publish' or 'finish'\n";
+              Printf.eprintf "Error: --emit-tla-omit-cache requires 'publish', 'finish' or 'refresh'\n";
               exit 1)
      | "--emit-protocol-source" ->
          incr i;
@@ -246,7 +246,7 @@ let () =
 
   if input_files = [] then (
     Printf.eprintf
-      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--frame-pointers] [--function-sections] [--forbid-trap] [--forbid-unsafe] [--confine-raw-authority] [--raw-mint-file <path>] [--device-semantics-file <path>] [--regions] [--reject-unused-functions] [--external-entry <function>] [--check-unused-file <path>] [--explain-inference] [--emit-effect-matrix] [--emit-exception-frame-offsets <StructName>] [--emit-struct-layout <StructName>] [--emit-debug-metadata <path>] [--emit-depfile <path>] [--emit-overflow-audit <path>] [--emit-raw-deref-audit <path>] [--emit-raw-site-counts <path>] [--emit-held-guards <path>] [--emit-tla <dir> [--emit-tla-omit-cache publish|finish]] [--emit-protocol-source <dir>] [--version]\n"
+      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--frame-pointers] [--function-sections] [--forbid-trap] [--forbid-unsafe] [--confine-raw-authority] [--raw-mint-file <path>] [--device-semantics-file <path>] [--regions] [--reject-unused-functions] [--external-entry <function>] [--check-unused-file <path>] [--explain-inference] [--emit-effect-matrix] [--emit-exception-frame-offsets <StructName>] [--emit-struct-layout <StructName>] [--emit-debug-metadata <path>] [--emit-depfile <path>] [--emit-overflow-audit <path>] [--emit-raw-deref-audit <path>] [--emit-raw-site-counts <path>] [--emit-held-guards <path>] [--emit-tla <dir> [--emit-tla-omit-cache publish|finish|refresh]] [--emit-protocol-source <dir>] [--version]\n"
       Sys.argv.(0);
     exit 1
   );

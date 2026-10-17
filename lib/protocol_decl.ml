@@ -466,13 +466,15 @@ let action_name t a =
    generator always emits the cache step, so the control that shows the
    model catches a missing one leaves it out of the model instead: every
    publishing step (`Omit_publish`) or every finishing step
-   (`Omit_finish`). The module is renamed so the control and the fixed
-   model can sit side by side. *)
-type omit = Omit_publish | Omit_finish
+   (`Omit_finish`), or (GitHub issue #801) every snapshot observation's
+   per-element invalidate (`Omit_refresh`). The module is renamed so the
+   control and the fixed model can sit side by side. *)
+type omit = Omit_publish | Omit_finish | Omit_refresh
 
 let omit_of_string = function
   | "publish" -> Some Omit_publish
   | "finish" -> Some Omit_finish
+  | "refresh" -> Some Omit_refresh
   | _ -> None
 
 let module_name ?omit (p : t) =
@@ -480,6 +482,7 @@ let module_name ?omit (p : t) =
   | None -> p.name
   | Some Omit_publish -> p.name ^ "_omitpublish"
   | Some Omit_finish -> p.name ^ "_omitfinish"
+  | Some Omit_refresh -> p.name ^ "_omitrefresh"
 
 let to_tla ?omit (p : t) : string =
   let b = Buffer.create 4096 in
@@ -503,7 +506,8 @@ let to_tla ?omit (p : t) : string =
    | None -> ()
    | Some o ->
        line "(* FAULT CONTROL: the %s cache step is left out. *)"
-         (match o with Omit_publish -> "publishing" | Omit_finish -> "finishing"));
+         (match o with Omit_publish -> "publishing" | Omit_finish -> "finishing"
+                     | Omit_refresh -> "snapshot refresh"));
   line "EXTENDS Integers, FiniteSets, TLC";
   line "";
   line "Cells == 0..%d" (p.cells - 1);
@@ -578,7 +582,7 @@ let to_tla ?omit (p : t) : string =
            let skip = match step, omit with
              | (Clean | Prepare_rx), Some Omit_publish
              | Finish_rx, Some Omit_finish -> true
-             | _ -> false in
+             | _, (None | Some (Omit_publish | Omit_finish | Omit_refresh)) -> false in
            if skip then begin
              incr omitted;
              line "    \\* FAULT CONTROL: %s left out" (cache_builtin step)
@@ -622,9 +626,6 @@ let to_tla ?omit (p : t) : string =
       next := (if takes_span then
                  Printf.sprintf "\\E span \\in SUBSET Cells : %s(span)" name
                else name) :: !next) t.t_alts) p.transitions;
-  if omit <> None && !omitted = 0 then
-    failwith (Printf.sprintf "--emit-tla-omit-cache: protocol %s has no such \
-                              cache step, so the control would be vacuous" p.name);
   line "Prepare(cell) ==";
   line "    /\\ phase \\in WriteStates";
   line "    /\\ cell \\in held \\ prepared";
@@ -710,6 +711,38 @@ let to_tla ?omit (p : t) : string =
   end;
   List.iter (fun o ->
     let name = "Observe_" ^ o.o_name in
+    if o.o_effect = `Snapshot && device then begin
+      (* GitHub issue #801: a snapshot copies element i of the held,
+         device-owned region after the generated wrapper invalidates that
+         element's lines (source_of: refresh_at, then region_at). The two
+         are one step here: a device write between them makes the copy old,
+         not incoherent -- the consumer's protocol rereads an old entry. A
+         stale copy read without the invalidate is a fault. *)
+      line "%s(cell) ==" name;
+      line "    /\\ phase = %s" (quote o.o_subject);
+      line "    /\\ event = \"None\"";
+      line "    /\\ cell \\in held";
+      line "    /\\ ~cacheFault";
+      if omit = Some Omit_refresh then begin
+        incr omitted;
+        line "    \\* FAULT CONTROL: %s left out" Device_protocol_registry.refresh_at;
+        line "    /\\ cacheFault' = (cell \\in stale)";
+        line "    /\\ cached' = cached \\cup {cell}";
+        line "    /\\ event' = %s" (quote o.o_name);
+        unchanged [ "cacheFault"; "cached"; "event" ]
+      end else begin
+        line "    \\* generated %s(s.memory, i)" Device_protocol_registry.refresh_at;
+        line "    /\\ dirty' = dirty \\ {cell}";
+        line "    /\\ stale' = stale \\ {cell}";
+        line "    \\* then the copy, which reads the line back in";
+        line "    /\\ cacheFault' = (cell \\in stale')";
+        line "    /\\ cached' = cached \\cup {cell}";
+        line "    /\\ event' = %s" (quote o.o_name);
+        unchanged [ "dirty"; "stale"; "cacheFault"; "cached"; "event" ]
+      end;
+      line "";
+      next := Printf.sprintf "\\E cell \\in Cells : %s(cell)" name :: !next
+    end else begin
     line "%s ==" name;
     line "    /\\ phase = %s" (quote o.o_subject);
     line "    /\\ event = \"None\"";
@@ -725,7 +758,11 @@ let to_tla ?omit (p : t) : string =
                    | `Completes | `Quiesces -> [ "deviceActive" ]
                    | `Plain | `Snapshot -> []));
     line "";
-    next := name :: !next) p.outcomes;
+    next := name :: !next
+    end) p.outcomes;
+  if omit <> None && !omitted = 0 then
+    failwith (Printf.sprintf "--emit-tla-omit-cache: protocol %s has no such \
+                              cache step, so the control would be vacuous" p.name);
   (* A pending event no transition out of the current state consumes is
      dropped; it is not evidence about the retained span. *)
   let consumers = List.filter_map (fun t ->

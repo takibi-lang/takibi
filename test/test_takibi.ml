@@ -26833,7 +26833,14 @@ let device_protocol_tests = [
         (Failure "--emit-tla-omit-cache: protocol P has no such cache step, \
                   so the control would be vacuous")
         (fun () -> ignore (Protocol_decl.to_tla ~omit:Protocol_decl.Omit_publish
-                             (List.hd plain))));
+                             (List.hd plain)));
+      (* GitHub issue #801: a snapshot observation is a read of one held
+         cell after its generated invalidate; the refresh control drops the
+         invalidate and is refused on a protocol with no snapshot. *)
+      Alcotest.check_raises "vacuous refresh control"
+        (Failure "--emit-tla-omit-cache: protocol Rx has no such cache step, \
+                  so the control would be vacuous")
+        (fun () -> ignore (Protocol_decl.to_tla ~omit:Protocol_decl.Omit_refresh p)));
 
   Alcotest.test_case "device protocol: rx publishes then rings, finishes on completion" `Quick
     (fun () ->
@@ -27191,6 +27198,26 @@ let expect_snapshot_error ?(in_proto = false) ~sub ~by fragment () =
           (String.concat " | " (List.map snd errors))
 
 let snapshot_tests = [
+  Alcotest.test_case "snapshot: emitted model reads after the generated refresh" `Quick
+    (fun () ->
+      let has tla frag =
+        if not (contains_substring tla frag) then
+          Alcotest.failf "generated TLA+ lacks %S:\n%s" frag tla in
+      let _, snaps = Protocol_decl.extract (parse snapshot_protocol) in
+      let sp = List.hd snaps in
+      let stla = Protocol_decl.to_tla sp in
+      List.iter (has stla)
+        [ "Observe_Entry(cell) =="; "/\\ cell \\in held";
+          "generated __protocol_dma_refresh_at(s.memory, i)";
+          "/\\ stale' = stale \\ {cell}";
+          "\\E cell \\in Cells : Observe_Entry(cell)" ];
+      let sfault = Protocol_decl.to_tla ~omit:Protocol_decl.Omit_refresh sp in
+      List.iter (has sfault)
+        [ "MODULE Evt_omitrefresh";
+          "FAULT CONTROL: __protocol_dma_refresh_at left out";
+          "/\\ cacheFault' = (cell \\in stale)" ];
+      Alcotest.(check bool) "refresh gone" false
+        (contains_substring sfault "generated __protocol_dma_refresh_at"));
   Alcotest.test_case "snapshot: one element invalidated, copied, released" `Quick
     (fun () ->
       let ir = compile_device ~proto:snapshot_protocol ~use:snapshot_consumer () in

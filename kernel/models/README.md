@@ -562,6 +562,21 @@ the fault controls are generator-side: `--emit-tla-omit-cache publish`
 (tx and rx) and `finish` (rx) leave it out of the model, giving
 `TxTransfer_omitpublish`, `RxTransfer_omitpublish` and
 `RxTransfer_omitfinish`, each of which must violate `Safety`.
+`RxTransfer.tkb`'s `peek` is a `snapshot` observation (GitHub issue #801):
+its model step reads one held cell after the generated per-element
+invalidate, and `--emit-tla-omit-cache refresh` gives
+`RxTransfer_omitrefresh`, which must violate `Safety` as well. The
+invalidate and the copy are one step: a device write between them makes
+the copy old, which the consumer's protocol handles, not incoherent.
+The generated model keeps one cache rather than composing the two cores'
+lines of `DmaCacheVisibility.tla` below. The generated cache steps are
+whole-region or per-element maintenance by address; whether that
+maintenance reaches the other core's lines and survives a holder migration
+depends only on the builtin (`dma_prepare_tx`, `dma_prepare_rx`,
+`dma_finish_rx`), not on the declaration, and `DmaCacheVisibility.tla`
+already checks it, with `localinvalidate` as the control. Per-core lines
+in every generated model would double the three cache sets and add a
+holder variable for no declaration-dependent fault.
 Generated actions are named after the declaration's
 transitions and observations, so they have no action-table rows: the code
 they will map to is the sealed permission API generated from the same
