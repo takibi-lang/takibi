@@ -15,35 +15,41 @@ CHECKER = ROOT / "scripts/check_xhci_register_offsets.py"
 
 CASES = CaseCount()
 
-GOOD = """io struct Rp1XhciRegs {
-    caplength_hciversion: u32 at 0x000;
-    rtsoff: u32 at 0x018;
-    usbcmd: u32 at 0x020;
-    portsc3: u32 at 0x440;
-    iman: u32 at 0x480;
-    erstsz: u32 at 0x488;
-    erstba_lo: u32 at 0x490;
+GOOD = """io struct XhciCapabilityRegs {
+    caplength_hciversion: u32 at 0x00;
+    dboff: u32 at 0x14;
+    rtsoff: u32 at 0x18;
 }
-fn f() { rp1_xhci.erstsz = 1; }
-fn usb_disk_initialize_stages() -> UsbInitOutcome {
-    match xhci_check_capability_layout() { }
-    if (xhci_halt_and_reset() == false) { }
+io struct XhciOperationalRegs {
+    usbcmd: u32 at 0x00;
+    ports: [u32; 1020] at 0x400;
+}
+io struct XhciRuntimeRegs {
+    iman: u32 at 0x20;
+    erstsz: u32 at 0x28;
+    erstba_lo: u32 at 0x30;
+}
+io struct XhciDoorbellRegs {
+    doorbell: [u32; 256] at 0x00;
 }
 """
+DRIVER = "fn f() { rp1_xhci_rt.erstsz = 1; }\n"
 
 
-def run(source: str) -> subprocess.CompletedProcess[str]:
+def run(regs: str, driver: str) -> subprocess.CompletedProcess[str]:
     CASES.note()
     with tempfile.TemporaryDirectory(prefix="takibi-xhci-check-") as directory:
-        fixture = Path(directory) / "fixture.tkb"
-        fixture.write_text(source)
+        regs_path = Path(directory) / "regs.tkb"
+        driver_path = Path(directory) / "driver.tkb"
+        regs_path.write_text(regs)
+        driver_path.write_text(driver)
         return subprocess.run(
-            ["python3", str(CHECKER), str(fixture)], text=True,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            ["python3", str(CHECKER), str(regs_path), str(driver_path)],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
 
-def expect(source: str, ok: bool, needle: str = "") -> bool:
-    result = run(source)
+def expect(regs: str, ok: bool, needle: str = "", driver: str = DRIVER) -> bool:
+    result = run(regs, driver)
     if (result.returncode == 0) != ok or needle not in result.stdout:
         print(f"FAIL xhci-register-offsets-controls: expected ok={ok} "
               f"with {needle!r}:")
@@ -56,42 +62,33 @@ def main() -> int:
     cases = [
         (GOOD, True, "PASS"),
         # The #754 shape: no ERSTSZ field, the write goes to IMAN.
-        (GOOD.replace("    erstsz: u32 at 0x488;\n", "")
-             .replace(".erstsz = 1", ".iman = 1"),
-         False, "ERSTSZ is not"),
-        (GOOD.replace("rp1_xhci.erstsz = 1;", ""), False, "never written"),
-        (GOOD.replace("erstsz: u32 at 0x488", "erstsz: u32 at 0x480"),
-         False, "erstsz at 0x480"),
-        (GOOD.replace("portsc3: u32 at 0x440", "portsc3: u32 at 0x430"),
-         False, "portsc3 at 0x430"),
-        # GitHub issue #804: the block bases come from the struct, and
-        # bring-up must compare them with the controller before writing.
-        (GOOD.replace("    rtsoff: u32 at 0x018;\n", ""),
-         False, "rtsoff is not declared"),
-        (GOOD.replace("rtsoff: u32 at 0x018", "rtsoff: u32 at 0x01C"),
-         False, "rtsoff at 0x1c"),
-        (GOOD.replace("iman: u32 at 0x480", "iman: u32 at 0x470")
-             .replace("0x488", "0x478").replace("0x490", "0x480"),
-         False, "not RTSOFF + 0x20"),
-        (GOOD.replace("    match xhci_check_capability_layout() { }\n", ""),
-         False, "never calls xhci_check_capability_layout"),
-        (GOOD.replace("    match xhci_check_capability_layout() { }\n", "")
-             .replace("    if (xhci_halt_and_reset() == false) { }\n",
-                      "    if (xhci_halt_and_reset() == false) { }\n"
-                      "    match xhci_check_capability_layout() { }\n"),
-         False, "before xhci_check_capability_layout"),
-        # The whole layout moved together (another CAPLENGTH and RTSOFF) is
-        # accepted here; boot is what compares it with the controller.
-        (GOOD.replace("0x020", "0x040").replace("0x440", "0x460")
-             .replace("0x480", "0x4A0").replace("0x488", "0x4A8")
-             .replace("0x490", "0x4B0"),
-         True, "PASS"),
+        (GOOD.replace("    erstsz: u32 at 0x28;\n", ""), False, "ERSTSZ is not",
+         DRIVER.replace(".erstsz", ".iman")),
+        (GOOD, False, "never written", "fn f() { }\n"),
+        (GOOD.replace("erstsz: u32 at 0x28", "erstsz: u32 at 0x20"),
+         False, "XhciRuntimeRegs.erstsz at 0x20"),
+        (GOOD.replace("ports: [u32; 1020] at 0x400", "ports: [u32; 1020] at 0x410"),
+         False, "XhciOperationalRegs.ports at 0x410"),
+        # GitHub issue #804: an offset copied from one controller's absolute
+        # layout (interrupter 0 at +0x480) instead of its block's.
+        (GOOD.replace("iman: u32 at 0x20", "iman: u32 at 0x480"),
+         False, "XhciRuntimeRegs.iman at 0x480"),
+        (GOOD.replace("rtsoff: u32 at 0x18", "rtsoff: u32 at 0x1C"),
+         False, "XhciCapabilityRegs.rtsoff at 0x1c"),
+        # An array field: its `[T; N]` type holds a semicolon.
+        (GOOD.replace("doorbell: [u32; 256] at 0x00", "doorbell: [u32; 256] at 0x500"),
+         False, "XhciDoorbellRegs.doorbell at 0x500"),
+        (GOOD.replace("io struct XhciDoorbellRegs", "io struct XhciDoorbells"),
+         False, "no io struct XhciDoorbellRegs"),
+        (GOOD.replace("    usbcmd: u32 at 0x00;\n",
+                      "    usbcmd: u32 at 0x00;\n    portsc3: u32 at 0x440;\n"),
+         False, "portsc3 is not an xHCI 1.2 register"),
     ]
     if not all([expect(*case) for case in cases]):
         return 1
     report_pass("xhci-register-offsets-controls",
-                "accepts the spec layout and rejects a missing or misplaced "
-                "register or a missing capability check", cases=CASES.ran)
+                "accepts the per-block spec layout and rejects a missing, "
+                "misplaced or unknown register or block", cases=CASES.ran)
     return 0
 
 

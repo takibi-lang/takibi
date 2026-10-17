@@ -17,7 +17,7 @@ fn rpi5_usb_xhci_apply_boot_dtb() -> Rpi5UsbXhciDtbResult !{unsafe} {
             return Rpi5UsbXhciDtbResult::Missing;
         }
         FdtDeviceRegionResult::Found(region) => {
-            if (region.base != RP1_USBHOST0_BASE || region.size < 0x100000) {
+            if (region.base != RP1_USBHOST0_BASE || region.size < RP1_USBHOST0_WINDOW_BYTES) {
                 rp1_usbhost0_dtb_status = 1;
                 return Rpi5UsbXhciDtbResult::Invalid;
             }

@@ -1,0 +1,10 @@
+sizes cap=28 op=5104 rt=64 db=1024
+rp1         placed op=32 rt=1120 db=1280
+moved       placed op=64 rt=4096 db=8192
+overlap     refused caplength=16
+misaligned  refused caplength=34
+rt past end refused rtsoff=1048544
+db past end refused dboff=1048320
+rt huge     refused rtsoff=4294967264
+csz set     max_ports=2 context_words=16
+csz clear   max_ports=4 context_words=8

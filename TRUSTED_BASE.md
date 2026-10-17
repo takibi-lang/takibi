@@ -179,29 +179,31 @@ rules globally.
 - `*io T` supplies volatile access semantics. The register address, width,
   permitted access direction, ordering requirements, and device state still
   come from the platform specification and driver reasoning.
-- `scripts/check_xhci_register_offsets.py` (GitHub issue #754) checks the
-  register offsets in `Rp1XhciRegs` (`kernel/platform/rpi5/usb_xhci.tkb`)
-  against a table typed in by hand, so the table is trusted. It has two
-  parts:
-  - **xHCI 1.2 offsets.** The `spec()` table, the capability offsets
-    (CAPLENGTH +0x00, RTSOFF +0x18) and the PORTSC formula
-    (`0x400 + 0x10 * (n - 1)` from the operational base) were copied from
-    the "eXtensible Host Controller Interface for Universal Serial Bus
-    (xHCI)" specification, revision 1.2: sections 5.3 (Host Controller
-    Capability Registers), 5.4 (Host Controller Operational Registers)
-    and 5.5.2 (Interrupter Register Set).
-  - **RP1 base values: checked at boot** (GitHub issue #804). The table
-    holds no RP1 value. The operational base is the struct's `usbcmd`
-    offset (0x20) and interrupter 0 is its `iman` offset (0x480, so
-    RTSOFF = 0x460). Bring-up reads CAPLENGTH and RTSOFF before it
-    writes the controller and stops at stage `capability-length` or
-    `runtime-offset`, naming the value read, when they disagree with
-    those offsets; the boot log prints `usb xhci: caplength=... rtsoff=...`.
-    The check requires that comparison to run before the controller is
-    halted. What stays trusted is the specification text above and the
-    reading of CAPLENGTH (low byte) and RTSOFF (bits 31:5).
-  The check passes only when its table and the struct agree. If either
-  changes, re-check the table against the specification.
+- xHCI register layout (GitHub issues #754, #804, #806). Each xHCI
+  register block is its own io struct in `kernel/drivers/usb/xhci_regs.tkb`
+  (capability, operational, runtime, doorbell array), with offsets relative
+  to the block's base. Two things are trusted:
+  - **The per-block offset tables.** `scripts/check_xhci_register_offsets.py`
+    compares the io structs with its `SPEC` dictionary, which was copied by
+    hand from the "eXtensible Host Controller Interface for Universal Serial
+    Bus (xHCI)" specification, revision 1.2: sections 5.3 (Capability
+    Registers), 5.4 (Operational Registers, port register sets at
+    `0x400 + 0x10 * (n - 1)`), 5.5.2 (Interrupter Register Set, interrupter 0
+    at runtime base + 0x20) and 5.6 (Doorbell Registers). The check passes
+    only when the table and the structs agree; if either changes, re-check
+    the table against the specification.
+  - **The reader that places the blocks.** `rpi5_xhci_attach_bootstrap`
+    (`kernel/platform/rpi5/device_map.tkb`) reads CAPLENGTH (low byte),
+    RTSOFF (bits 31:5), DBOFF (bits 31:2), HCSPARAMS1 and HCCPARAMS1 from
+    the controller, and `xhci_place_blocks` refuses a block that overlaps
+    the capability block, is not 4-byte aligned, or ends past the device
+    window (`RP1_USBHOST0_WINDOW_BYTES`, the size the boot DTB check
+    requires). It then makes one window per block with
+    `region_bytes_assume`. The controller's values themselves are discovered
+    at boot, like a DTB reg entry, not trusted constants; the boot log
+    prints them (`usb xhci: caplength=... rtsoff=... dboff=...
+    max_ports=... context_bytes=...`). HCSPARAMS1.MaxPorts decides whether
+    the driven port exists and HCCPARAMS1.CSZ sets the context stride.
 - Raw atomic intrinsics (`atomic_load_acquire`, `atomic_store_release`,
   `atomic_swap_acquire`, `atomic_fetch_add_relaxed`, and
   `atomic_compare_exchange_acquire`) make a cross-core ordering or atomicity

@@ -1,21 +1,19 @@
 #!/usr/bin/env python3
-"""Check the xHCI register layout against the xHCI 1.2 specification.
+"""Check the xHCI register blocks against the xHCI 1.2 specification.
 
 GitHub issue #754: interrupter 0's ERST size was programmed through a write
 to IMAN (+0x00) instead of ERSTSZ (+0x08), because the register layout had
-no ERSTSZ field and the write named the wrong one. The io struct already
-makes every access go through a named field, so this check anchors the names
-to the specification: each field named after an xHCI register must sit at
-that register's offset, and a layout that programs an Event Ring Segment
-Table (ERSTBA) must declare ERSTSZ and write it in the same file.
+no ERSTSZ field and the write named the wrong one. The io structs make every
+access go through a named field, so this check anchors the names to the
+specification: each field named after an xHCI register must sit at that
+register's offset inside its block, and a layout that programs an Event Ring
+Segment Table (ERSTBA) must declare ERSTSZ and the driver must write it.
 
-GitHub issue #804: the two block bases (the operational block at CAPLENGTH
-and interrupter 0 at RTSOFF + 0x20) are not fixed here. They are read from
-the struct itself (usbcmd and iman), which is what bring-up compares against
-the controller's CAPLENGTH and RTSOFF before it writes anything. This check
-requires that comparison to exist and to run before the controller is
-halted, so the struct is the single source of the bases and the board is
-their authority.
+GitHub issues #804 and #806: each register block is its own io struct whose
+offsets are relative to the block's base, and the bases come from the
+controller (CAPLENGTH, RTSOFF, DBOFF) at attach time. So this check holds no
+controller-specific value; it compares each block's table with the
+specification and requires every block to be declared.
 """
 
 from __future__ import annotations
@@ -28,104 +26,103 @@ from pass_line import report_pass
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_FILE = ROOT / "kernel/platform/rpi5/usb_xhci.tkb"
-STRUCT = "Rp1XhciRegs"
+DEFAULT_REGS = ROOT / "kernel/drivers/usb/xhci_regs.tkb"
+DEFAULT_DRIVER = ROOT / "kernel/platform/rpi5/usb_xhci.tkb"
 
-# xHCI 1.2 section 5.3 (capability registers, fixed offsets).
-CAPABILITY = {"caplength_hciversion": 0x00, "rtsoff": 0x18}
-STAGES = "usb_disk_initialize_stages"
-CHECK_CALL = "xhci_check_capability_layout()"
-FIRST_WRITE = "xhci_halt_and_reset()"
+# xHCI 1.2 section 5.3 (capability), 5.4 (operational; port register sets
+# at 0x400 + 0x10 * (n - 1)), 5.5.2 (interrupter 0 at runtime + 0x20) and
+# 5.6 (doorbell array at the doorbell base).
+SPEC = {
+    "XhciCapabilityRegs": {
+        "caplength_hciversion": 0x00,
+        "hcsparams1": 0x04,
+        "hcsparams2": 0x08,
+        "hcsparams3": 0x0C,
+        "hccparams1": 0x10,
+        "dboff": 0x14,
+        "rtsoff": 0x18,
+        "hccparams2": 0x1C,
+    },
+    "XhciOperationalRegs": {
+        "usbcmd": 0x00,
+        "usbsts": 0x04,
+        "pagesize": 0x08,
+        "dnctrl": 0x14,
+        "crcr_lo": 0x18,
+        "crcr_hi": 0x1C,
+        "dcbaap_lo": 0x30,
+        "dcbaap_hi": 0x34,
+        "config": 0x38,
+        "ports": 0x400,
+    },
+    "XhciRuntimeRegs": {
+        "mfindex": 0x00,
+        "iman": 0x20,
+        "imod": 0x24,
+        "erstsz": 0x28,
+        "erstba_lo": 0x30,
+        "erstba_hi": 0x34,
+        "erdp_lo": 0x38,
+        "erdp_hi": 0x3C,
+    },
+    "XhciDoorbellRegs": {
+        "doorbell": 0x00,
+    },
+}
+# The type may be an array, whose `[T; N]` holds a semicolon (#804: the
+# doorbell array went unchecked before this allowed it).
+FIELD = re.compile(r"^\s*(\w+)\s*:\s*(?:\[[^\]]*\]|[^;\[])*?\bat\s+"
+                   r"(0x[0-9A-Fa-f]+|\d+)\s*;", re.M)
 
 
-def spec(operational: int, interrupter0: int) -> dict[str, int]:
-    """Section 5.4 (operational) and 5.5.2 (interrupter register set)."""
-    return {
-        "usbcmd": operational + 0x00,
-        "usbsts": operational + 0x04,
-        "pagesize": operational + 0x08,
-        "dnctrl": operational + 0x14,
-        "crcr_lo": operational + 0x18,
-        "crcr_hi": operational + 0x1C,
-        "dcbaap_lo": operational + 0x30,
-        "dcbaap_hi": operational + 0x34,
-        "config": operational + 0x38,
-        "iman": interrupter0 + 0x00,
-        "imod": interrupter0 + 0x04,
-        "erstsz": interrupter0 + 0x08,
-        "erstba_lo": interrupter0 + 0x10,
-        "erstba_hi": interrupter0 + 0x14,
-        "erdp_lo": interrupter0 + 0x18,
-        "erdp_hi": interrupter0 + 0x1C,
-    } | CAPABILITY
-
-
-PORTSC = re.compile(r"portsc(\d+)$")
-FIELD = re.compile(r"^\s*(\w+)\s*:\s*[^;]*?\bat\s+(0x[0-9A-Fa-f]+|\d+)\s*;", re.M)
-
-
-def layout(text: str) -> dict[str, int] | None:
-    match = re.search(r"io\s+struct\s+" + STRUCT + r"\s*\{(.*?)\n\}", text, re.S)
+def layout(text: str, struct: str) -> dict[str, int] | None:
+    match = re.search(r"io\s+struct\s+" + struct + r"\s*\{(.*?)\n\}", text, re.S)
     if match is None:
         return None
     return {name: int(offset, 0) for name, offset in FIELD.findall(match.group(1))}
 
 
-def check(text: str, fields: dict[str, int]) -> list[str]:
-    failures = [f"{name} is not declared; bring-up checks the block bases "
-                "with it" for name in ("usbcmd", "iman", *CAPABILITY)
-                if name not in fields]
-    if failures:
-        return failures
-    operational = fields["usbcmd"]
-    interrupter0 = fields["iman"]
-    if interrupter0 < 0x20 or (interrupter0 - 0x20) % 0x20 != 0:
-        failures.append(f"iman at {interrupter0:#x} is not RTSOFF + 0x20 for "
-                        "a 32-byte aligned RTSOFF")
-    stages = re.search(r"fn\s+" + STAGES + r"\b.*?\n\}", text, re.S)
-    if stages is None:
-        failures.append(f"no {STAGES} to check the capability read in")
-    else:
-        body = stages.group(0)
-        read = body.find(CHECK_CALL)
-        write = body.find(FIRST_WRITE)
-        if read < 0:
-            failures.append(f"{STAGES} never calls {CHECK_CALL}")
-        elif 0 <= write < read:
-            failures.append(f"{STAGES} calls {FIRST_WRITE} before {CHECK_CALL}")
-    expected_offsets = spec(operational, interrupter0)
-    for name, offset in fields.items():
-        expected = expected_offsets.get(name)
-        port = PORTSC.match(name)
-        if port is not None:
-            expected = operational + 0x400 + 0x10 * (int(port.group(1)) - 1)
-        if expected is not None and offset != expected:
-            failures.append(f"{name} at {offset:#x}, the specification puts it "
-                            f"at {expected:#x}")
-    if "erstba_lo" in fields:
-        if "erstsz" not in fields:
+def check(regs: str, driver: str) -> tuple[list[str], int]:
+    failures: list[str] = []
+    count = 0
+    blocks: dict[str, dict[str, int]] = {}
+    for struct, table in SPEC.items():
+        fields = layout(regs, struct)
+        if fields is None:
+            failures.append(f"no io struct {struct}")
+            continue
+        blocks[struct] = fields
+        for name, offset in fields.items():
+            count += 1
+            expected = table.get(name)
+            if expected is None:
+                failures.append(f"{struct}.{name} is not an xHCI 1.2 register "
+                                "this check knows; add it to SPEC from the "
+                                "specification")
+            elif offset != expected:
+                failures.append(f"{struct}.{name} at {offset:#x}, the "
+                                f"specification puts it at {expected:#x}")
+    runtime = blocks.get("XhciRuntimeRegs", {})
+    if "erstba_lo" in runtime:
+        if "erstsz" not in runtime:
             failures.append("ERSTBA is declared but ERSTSZ is not")
-        elif not re.search(r"\.erstsz\s*=[^=]", text):
+        elif not re.search(r"\.erstsz\s*=[^=]", driver):
             failures.append("ERSTBA is programmed but ERSTSZ is never written")
-    return failures
+    return failures, count
 
 
 def main() -> int:
-    path = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_FILE
-    text = path.read_text()
-    fields = layout(text)
-    if fields is None:
-        print(f"FAIL xhci-register-offsets: {path}: no io struct {STRUCT}")
-        return 1
-    failures = check(text, fields)
+    regs_path = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_REGS
+    driver_path = Path(sys.argv[2]) if len(sys.argv) > 2 else DEFAULT_DRIVER
+    failures, count = check(regs_path.read_text(), driver_path.read_text())
     if failures:
-        print(f"FAIL xhci-register-offsets: {path}:")
+        print(f"FAIL xhci-register-offsets: {regs_path}:")
         for failure in failures:
             print(f"  {failure}")
         return 1
     report_pass("xhci-register-offsets",
-                f"{len(fields)} {STRUCT} fields match the xHCI specification",
-                fields=len(fields))
+                f"{count} fields of {len(SPEC)} xHCI register blocks match "
+                "the specification", fields=count)
     return 0
 
 

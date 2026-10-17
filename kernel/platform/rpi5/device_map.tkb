@@ -87,13 +87,72 @@ fn rpi5_system_timer_attach(base: usize, bytes: usize) -> Rpi5Attach !{unsafe} {
 // RP1 usbhost0's xHCI registers at the BAR1 address. The boot DTB check
 // accepts only this base, so nothing re-attaches. Attached with the other
 // interrupt-path windows, before its IRQ can be dispatched.
+//
+// GitHub issues #804 and #806: the trusted reader of the controller's own
+// layout, the xHCI counterpart of a DTB reg entry. It attaches the
+// capability block, reads CAPLENGTH, RTSOFF, DBOFF, HCSPARAMS1 and
+// HCCPARAMS1, checks that each other block lies inside the device window
+// and is aligned (xhci_place_blocks), and only then makes a window for each
+// block at the base the controller reported. A block outside the window is
+// the only refusal; it is named, with the offset read, before the stop.
 fn rpi5_xhci_attach_bootstrap() !{unsafe} {
-    let RegionBytes::Assumed(window) =
-        region_bytes_assume(RP1_USBHOST0_BASE, 0x1000) else {};
-    match io_handle_attach(&rp1_xhci, window) {
+    let RegionBytes::Assumed(cap_window) = region_bytes_assume(
+        RP1_USBHOST0_BASE, sizeof(XhciCapabilityRegs)) else {};
+    match io_handle_attach(&rp1_xhci_cap, cap_window) {
         IoAttach::Attached => {}
         IoAttach::TooSmall => { kernel_invariant_stop(); }
     }
+    let mut caps: XhciCapabilities = xhci_capabilities_of(
+        rp1_xhci_cap.caplength_hciversion, rp1_xhci_cap.hcsparams1,
+        rp1_xhci_cap.hccparams1, rp1_xhci_cap.dboff, rp1_xhci_cap.rtsoff);
+    match xhci_place_blocks(caps, RP1_USBHOST0_WINDOW_BYTES,
+                            sizeof(XhciCapabilityRegs),
+                            sizeof(XhciOperationalRegs),
+                            sizeof(XhciRuntimeRegs),
+                            sizeof(XhciDoorbellRegs)) {
+        XhciBlockPlacement::Operational(offset) => {
+            rpi5_xhci_refuse("caplength", offset);
+        }
+        XhciBlockPlacement::Runtime(offset) => {
+            rpi5_xhci_refuse("rtsoff", offset);
+        }
+        XhciBlockPlacement::Doorbell(offset) => {
+            rpi5_xhci_refuse("dboff", offset);
+        }
+        XhciBlockPlacement::Placed(placed) => {
+            rp1_xhci_caps = placed;
+            let RegionBytes::Assumed(op) = region_bytes_assume(
+                RP1_USBHOST0_BASE + (placed.caplength as usize),
+                sizeof(XhciOperationalRegs)) else {};
+            match io_handle_attach(&rp1_xhci_op, op) {
+                IoAttach::Attached => {}
+                IoAttach::TooSmall => { kernel_invariant_stop(); }
+            }
+            let RegionBytes::Assumed(rt) = region_bytes_assume(
+                RP1_USBHOST0_BASE + (placed.rtsoff as usize),
+                sizeof(XhciRuntimeRegs)) else {};
+            match io_handle_attach(&rp1_xhci_rt, rt) {
+                IoAttach::Attached => {}
+                IoAttach::TooSmall => { kernel_invariant_stop(); }
+            }
+            let RegionBytes::Assumed(db) = region_bytes_assume(
+                RP1_USBHOST0_BASE + (placed.dboff as usize),
+                sizeof(XhciDoorbellRegs)) else {};
+            match io_handle_attach(&rp1_xhci_db, db) {
+                IoAttach::Attached => {}
+                IoAttach::TooSmall => { kernel_invariant_stop(); }
+            }
+        }
+    }
+}
+
+fn rpi5_xhci_refuse(register: *u8, offset: u32) {
+    kernel_boot_log("usb xhci: block outside the device window ");
+    uart_puts(register);
+    kernel_boot_log("=");
+    uart_put_hex(offset as usize);
+    kernel_boot_log("\n");
+    kernel_invariant_stop();
 }
 
 // The GIC-400's two windows and MIP0: the board's known addresses until the

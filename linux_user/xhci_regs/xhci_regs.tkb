@@ -1,0 +1,84 @@
+// The xHCI block placement check, run where it costs milliseconds.
+//
+// GitHub issues #804 and #806. The RPi5 device map reads CAPLENGTH, RTSOFF
+// and DBOFF from the controller and attaches one handle per register block
+// at the offsets they give, after kernel/drivers/usb/xhci_regs.tkb has
+// checked each block inside the device window. This compiles that file, not
+// a copy. The cases are RP1's own layout, a moved but valid layout (a
+// silicon revision must be followed, not refused), and the refusals: a
+// block that overlaps the capability block, is misaligned, or ends past the
+// window. Then the HCSPARAMS1/HCCPARAMS1 fields the driver uses.
+
+const WINDOW: usize = 0x100000;
+
+fn place(label: *u8, cap_word: u32, dboff_word: u32, rtsoff_word: u32) {
+    uart_puts(label);
+    let mut caps: XhciCapabilities =
+        xhci_capabilities_of(cap_word, 0, 0, dboff_word, rtsoff_word);
+    match xhci_place_blocks(caps, WINDOW, sizeof(XhciCapabilityRegs),
+                            sizeof(XhciOperationalRegs),
+                            sizeof(XhciRuntimeRegs),
+                            sizeof(XhciDoorbellRegs)) {
+        XhciBlockPlacement::Placed(placed) => {
+            uart_puts("placed op=");
+            uart_print(placed.caplength);
+            uart_puts(" rt=");
+            uart_print(placed.rtsoff);
+            uart_puts(" db=");
+            uart_print(placed.dboff);
+        }
+        XhciBlockPlacement::Operational(offset) => {
+            uart_puts("refused caplength=");
+            uart_print(offset);
+        }
+        XhciBlockPlacement::Runtime(offset) => {
+            uart_puts("refused rtsoff=");
+            uart_print(offset);
+        }
+        XhciBlockPlacement::Doorbell(offset) => {
+            uart_puts("refused dboff=");
+            uart_print(offset);
+        }
+    }
+    uart_puts("\r\n");
+}
+
+fn params(label: *u8, hcsparams1: u32, hccparams1: u32) {
+    let mut caps: XhciCapabilities =
+        xhci_capabilities_of(0x20, hcsparams1, hccparams1, 0x500, 0x460);
+    uart_puts(label);
+    uart_puts("max_ports=");
+    uart_print(xhci_max_ports(caps));
+    uart_puts(" context_words=");
+    uart_print(xhci_context_words(caps) as u32);
+    uart_puts("\r\n");
+}
+
+fn app_main() {
+    uart_puts("sizes cap=");
+    uart_print(sizeof(XhciCapabilityRegs) as u32);
+    uart_puts(" op=");
+    uart_print(sizeof(XhciOperationalRegs) as u32);
+    uart_puts(" rt=");
+    uart_print(sizeof(XhciRuntimeRegs) as u32);
+    uart_puts(" db=");
+    uart_print(sizeof(XhciDoorbellRegs) as u32);
+    uart_puts("\r\n");
+
+    // RP1 as read on the board; HCIVERSION in the high half and reserved
+    // low bits set must not move a block.
+    place("rp1         ", 0x01100020, 0x00000503, 0x0000047F);
+    // Another revision: every block elsewhere, still inside the window.
+    place("moved       ", 0x01100040, 0x00002000, 0x00001000);
+    // Refusals, each naming the register and the offset it reported.
+    place("overlap     ", 0x01100010, 0x00000500, 0x00000460);
+    place("misaligned  ", 0x01100022, 0x00000500, 0x00000460);
+    place("rt past end ", 0x01100020, 0x00000500, 0x000FFFE0);
+    place("db past end ", 0x01100020, 0x000FFF00, 0x00000460);
+    place("rt huge     ", 0x01100020, 0x00000500, 0xFFFFFFE0);
+
+    // A 2-port part with HCCPARAMS1 0x0240fe6d (RP1 as read, CSZ set) and
+    // a 4-port part with CSZ clear.
+    params("csz set     ", 0x02000140, 0x0240FE6D);
+    params("csz clear   ", 0x04000140, 0x0240FE69);
+}

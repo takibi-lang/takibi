@@ -140,15 +140,20 @@ fn kernel_boot_log_usb_init_failure() {
 // stick is what ext2_fixture checks and every process runs from. A failure on
 // the way leaves the board with no root filesystem, and says so; there is no
 // other copy to fall back to (usb_provision.tkb).
+// GitHub issues #804 and #806: the layout the controller reported at attach
+// time, which every register access since has used.
 fn kernel_boot_log_xhci_capability() {
-    let mut words: XhciCapabilityWords = usb_xhci_capability_words();
-    if (words.read == false) {
-        return;
-    }
+    let mut caps: XhciCapabilities = usb_xhci_capabilities();
     kernel_boot_log("usb xhci: caplength=");
-    uart_put_hex(words.caplength as usize);
+    uart_put_hex(caps.caplength as usize);
     kernel_boot_log(" rtsoff=");
-    uart_put_hex(words.rtsoff as usize);
+    uart_put_hex(caps.rtsoff as usize);
+    kernel_boot_log(" dboff=");
+    uart_put_hex(caps.dboff as usize);
+    kernel_boot_log(" max_ports=");
+    uart_put_udec(xhci_max_ports(caps) as usize);
+    kernel_boot_log(" context_bytes=");
+    uart_put_udec(xhci_context_words(caps) * 4);
     kernel_boot_log("\n");
 }
 

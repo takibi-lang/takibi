@@ -1,0 +1,140 @@
+// The xHCI register blocks, and where a controller says they are.
+//
+// GitHub issues #804 and #806. xHCI 1.2 places the operational block at
+// CAPLENGTH, the runtime block at RTSOFF and the doorbell array at DBOFF,
+// each read from the capability block; only the offsets inside a block are
+// fixed by the specification. These numbers are therefore treated like a
+// DTB reg entry: values discovered from outside the kernel, checked to lie
+// inside the device window, then used. A silicon revision that moves a
+// block moves the handles with it rather than stopping bring-up.
+//
+// Each block is its own io struct, so a register can only be reached
+// through the handle of the block the specification puts it in. The
+// offsets below are copied from xHCI 1.2 sections 5.3 (capability), 5.4
+// (operational, port register sets at +0x400 + 0x10 * (n - 1)), 5.5
+// (runtime, interrupter n at +0x20 + 0x20 * n) and 5.6 (doorbells), and
+// scripts/check_xhci_register_offsets.py checks them against its own copy
+// of those tables.
+//
+// The window check is byte work, so it lives here, where
+// linux_user/xhci_regs runs it; the device-map file that turns the answer
+// into handles is the only place an address is made.
+
+io struct XhciCapabilityRegs {
+    caplength_hciversion: u32 at 0x00;
+    hcsparams1: u32 at 0x04;
+    hccparams1: u32 at 0x10;
+    dboff: u32 at 0x14;
+    rtsoff: u32 at 0x18;
+}
+
+// The port register sets of every port the field MaxPorts can name (1..255),
+// four dwords each; port n's PORTSC is word 4 * (n - 1).
+const XHCI_PORT_WORDS: usize = 1020;
+
+io struct XhciOperationalRegs {
+    usbcmd: u32 at 0x00;
+    usbsts: u32 at 0x04;
+    crcr_lo: u32 at 0x18;
+    crcr_hi: u32 at 0x1C;
+    dcbaap_lo: u32 at 0x30;
+    dcbaap_hi: u32 at 0x34;
+    config: u32 at 0x38;
+    ports: [u32; 1020] at 0x400;
+}
+
+// Interrupter 0 only; this driver uses no other.
+io struct XhciRuntimeRegs {
+    iman: u32 at 0x20;
+    imod: u32 at 0x24;
+    erstsz: u32 at 0x28;
+    erstba_lo: u32 at 0x30;
+    erstba_hi: u32 at 0x34;
+    erdp_lo: u32 at 0x38;
+    erdp_hi: u32 at 0x3C;
+}
+
+io struct XhciDoorbellRegs {
+    doorbell: [u32; 256] at 0x00;
+}
+
+// What the capability block said. HCSPARAMS1 and HCCPARAMS1 are kept whole;
+// the accessors below read the fields this driver uses.
+struct XhciCapabilities {
+    caplength: u32;
+    rtsoff: u32;
+    dboff: u32;
+    hcsparams1: u32;
+    hccparams1: u32;
+}
+
+// The block a refusal names, with the offset the controller reported.
+must_use variant XhciBlockPlacement {
+    Placed(XhciCapabilities);
+    Operational(u32);
+    Runtime(u32);
+    Doorbell(u32);
+}
+
+// CAPLENGTH is the low byte of the first dword (5.3.1); RTSOFF bits 4:0
+// (5.3.8) and DBOFF bits 1:0 (5.3.7) are reserved.
+fn xhci_capabilities_of(cap_word: u32, hcsparams1: u32, hccparams1: u32,
+                        dboff_word: u32, rtsoff_word: u32)
+        -> XhciCapabilities {
+    let mut caps: XhciCapabilities = {
+        cap_word & 0xFF, rtsoff_word & 0xFFFFFFE0, dboff_word & 0xFFFFFFFC,
+        hcsparams1, hccparams1 };
+    return caps;
+}
+
+// A block of `size` bytes at `offset` is usable when it starts past the
+// capability block, is aligned to its 32-bit registers, and ends inside the
+// window.
+fn xhci_block_fits(offset: u32, size: usize, capability_size: usize,
+                   window_bytes: usize) -> bool {
+    let start: usize = offset as usize;
+    if (start < capability_size || (start & 3) != 0) {
+        return false;
+    }
+    if (start > window_bytes) {
+        return false;
+    }
+    return window_bytes - start >= size;
+}
+
+// Check the three discovered blocks against the device window. The sizes
+// are the io structs' (sizeof), passed in so this stays testable apart
+// from them. A block may sit anywhere in the window; the specification
+// orders none of them.
+fn xhci_place_blocks(caps: XhciCapabilities, window_bytes: usize,
+                     capability_size: usize, operational_size: usize,
+                     runtime_size: usize, doorbell_size: usize)
+        -> XhciBlockPlacement {
+    if (xhci_block_fits(caps.caplength, operational_size, capability_size,
+                        window_bytes) == false) {
+        return XhciBlockPlacement::Operational(caps.caplength);
+    }
+    if (xhci_block_fits(caps.rtsoff, runtime_size, capability_size,
+                        window_bytes) == false) {
+        return XhciBlockPlacement::Runtime(caps.rtsoff);
+    }
+    if (xhci_block_fits(caps.dboff, doorbell_size, capability_size,
+                        window_bytes) == false) {
+        return XhciBlockPlacement::Doorbell(caps.dboff);
+    }
+    return XhciBlockPlacement::Placed(caps);
+}
+
+// HCSPARAMS1.MaxPorts, bits 31:24 (5.3.3).
+fn xhci_max_ports(caps: XhciCapabilities) -> u32 {
+    return (caps.hcsparams1 >> 24) & 0xFF;
+}
+
+// HCCPARAMS1.CSZ, bit 2 (5.3.6): 64-byte contexts when set, else 32. In
+// 32-bit words, the unit the input context is written in.
+fn xhci_context_words(caps: XhciCapabilities) -> {8..<17 as usize} {
+    if (((caps.hccparams1 >> 2) & 1) == 1) {
+        return 16;
+    }
+    return 8;
+}
