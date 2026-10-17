@@ -116,7 +116,11 @@ list (maintainer, 2026-10-09).
    requests per ring (S2) will need a request identity beyond the TRB
    address); general exclusive backing
    storage is done (2026-10-12: `region let mut` backing globals, whose name
-   has no use besides the claim); the ERSTSZ write is #754. log.tkb's raw sites go with
+   has no use besides the claim); the ERSTSZ write is #754; the register
+   blocks are placed where the controller reports them (2026-10-17, #804 and
+   #806: CAPLENGTH, RTSOFF and DBOFF read at attach time, CSZ and MaxPorts
+   used), and the one run-time guard left by a context-stride product is
+   #807 (refinement bound for a product of two bounded variables). log.tkb's raw sites go with
    #613: a lockless multi-writer log ring with its protocol in the type
    system, its orderings checked by #645's herd7 litmus tests.
 4. **Preemption.** #638's typed preparation -- a preemption-disabled
