@@ -5,6 +5,7 @@ use "kernel/mm/address_space.tkb";
 use "kernel/fs/elf64.tkb";
 use "kernel/fs/ext2/ext2.tkb";
 use "kernel/lib/mutex.tkb";
+use "kernel/lib/atomic_word.tkb";
 
 
 // User-page ownership is recorded only in the page tables. Address-space
@@ -25,13 +26,11 @@ struct ProcessImageExt2Source {
 variant ProcessImageSourceState { Absent; Ext2(ProcessImageExt2Source); }
 variant ProcessImageTargetState { Unset; Set(AddressSpaceRoot); }
 
-// One synchronous operation per CPU under the non-preemptible execution
-// contract below. Each closed state keeps presence and its value together.
+// The per-CPU part: the target root of the operation running on this CPU.
+// It stays per-CPU only under the non-preemptible execution contract below
+// (process_image_execution_model_assumption).
 struct ProcessImageContext {
     private target: ProcessImageTargetState;
-    private source: ProcessImageSourceState;
-    private pair_source: ProcessImageSourceState;
-    block: [u8; KERNEL_BLOCK_SIZE];
 }
 private let mut process_image_contexts: [ProcessImageContext; KERNEL_MAX_CORES];
 
@@ -41,26 +40,81 @@ private fn process_image_cpu_index() -> {0..<KERNEL_MAX_CORES as usize} {
     return 0;
 }
 
-fn process_image_ext2_source(mount: Ext2Mount, inode: usize,
-                             length: usize) {
-    let context: &mut ProcessImageContext = &process_image_contexts[process_image_cpu_index()];
+// GitHub issue #638: the ext2 exec staging -- the file the PT_LOAD bytes come
+// from, the interpreter's file for a dynamic pair, and the one-block read
+// buffer -- is held across ext2 reads, which wait for the device (may_block).
+// It lives in a pool of KERNEL_MAX_CORES slots, one per exec in flight, not
+// one per CPU, reached only through a ProcessImageSlot, a linear token:
+// process_image_slot_acquire hands out a free slot and
+// process_image_slot_release consumes the token, so the compiler rejects an
+// exec that forgets to release it, releases it twice, or keeps using it
+// after the release. Static storage, as ext2's and the block layer's pools
+// (DECISIONS.md 2026-10-17).
+//
+// Trusted here, and only here (TRUSTED_BASE.md): process_image_slot_acquire
+// returns a slot no other live ProcessImageSlot names. Its compare-exchange
+// over process_image_slot_words is what makes that so; nothing checks it.
+//
+// Only the three ext2 map entry points acquire, and no function in this file
+// calls one of them, so an exec holds one slot at a time
+// (scripts/check_slot_pool_entries.py). An exec holds its ProcessImageSlot
+// while ext2 takes an Ext2Slot and the block layer a BlockSlot, never the
+// reverse, so the pools cannot wait on each other.
+struct ProcessImageStaging {
+    private source: ProcessImageSourceState;
+    private pair_source: ProcessImageSourceState;
+    block: [u8; KERNEL_BLOCK_SIZE];
+}
+private let mut process_image_staging: [ProcessImageStaging; KERNEL_MAX_CORES];
+private let mut process_image_slot_words: [AtomicWord; KERNEL_MAX_CORES];
+
+// `[unit]` is always 0: an owner needs a static parameter, and the slot's
+// identity is its private index, which only this file reads.
+linear struct ProcessImageSlot[unit: usize] {
+    private index: {0..<KERNEL_MAX_CORES as usize};
+}
+
+// A free slot, waiting for one if every slot is held. The compare-exchange
+// is an acquire, pairing with the release store in
+// process_image_slot_release, so the previous holder's last writes happen
+// before this holder's first read. A new holder starts with both sources
+// Absent.
+private fn process_image_slot_acquire() -> ProcessImageSlot[0] !{may_block} {
+    let mut index: {0..<KERNEL_MAX_CORES as usize} = 0;
+    let mut held: bool = false;
+    while (held == false) {
+        for i: usize in 0..<KERNEL_MAX_CORES {
+            if (held == false &&
+                atomic_word_compare_exchange(&process_image_slot_words[i], 0, 1)) {
+                index = i;
+                held = true;
+            }
+        }
+    }
+    process_image_staging[index].source = ProcessImageSourceState::Absent;
+    process_image_staging[index].pair_source = ProcessImageSourceState::Absent;
+    let mut slot: ProcessImageSlot[0] = { index };
+    return slot;
+}
+
+private fn process_image_slot_release(slot: sink ProcessImageSlot[0]) {
+    process_image_staging[slot.index].source = ProcessImageSourceState::Absent;
+    process_image_staging[slot.index].pair_source = ProcessImageSourceState::Absent;
+    atomic_word_store(&process_image_slot_words[slot.index], 0);
+}
+
+private fn process_image_set_source(slot: borrow ProcessImageSlot[0],
+                                    mount: Ext2Mount, inode: usize,
+                                    length: usize) {
     let mut source: ProcessImageExt2Source = { mount, inode, length };
-    context.source = ProcessImageSourceState::Ext2(source);
+    process_image_staging[slot.index].source = ProcessImageSourceState::Ext2(source);
 }
 
-fn process_image_ext2_source_clear() {
-    process_image_contexts[process_image_cpu_index()].source = ProcessImageSourceState::Absent;
-}
-
-fn process_image_pair_ext2_source(mount: Ext2Mount, inode: usize,
-                                  length: usize) {
-    let context: &mut ProcessImageContext = &process_image_contexts[process_image_cpu_index()];
+private fn process_image_set_pair_source(slot: borrow ProcessImageSlot[0],
+                                         mount: Ext2Mount, inode: usize,
+                                         length: usize) {
     let mut source: ProcessImageExt2Source = { mount, inode, length };
-    context.pair_source = ProcessImageSourceState::Ext2(source);
-}
-
-fn process_image_pair_ext2_source_clear() {
-    process_image_contexts[process_image_cpu_index()].pair_source = ProcessImageSourceState::Absent;
+    process_image_staging[slot.index].pair_source = ProcessImageSourceState::Ext2(source);
 }
 // GitHub issue #448: how many pages the LAST reap gave back, which is a
 // report about an event rather than about a process, so it stays here.
@@ -1888,17 +1942,18 @@ fn process_dynamic_prepare_stack(page: borrow PageOwner[page],
     return ProcessImageStackResult::Ready;
 }
 
-fn process_image_load_page(page: borrow PageOwner[page],
+private fn process_image_load_page(slot: borrow ProcessImageSlot[0],
+                           page: borrow PageOwner[page],
                            plan: DistroElfLoadPlan,
                            header: KernelElf64ProgramHeader,
                            load_bias: usize,
                            l3_index: usize)
         -> ProcessImagePageLoadResult !{unsafe} {
-    match process_image_contexts[process_image_cpu_index()].source {
+    match process_image_staging[slot.index].source {
         ProcessImageSourceState::Absent => {}
         ProcessImageSourceState::Ext2(source) => {
             return process_image_load_page_ext2(
-                page, plan, header, load_bias, l3_index);
+                slot, page, plan, header, load_bias, l3_index);
         }
     }
     let bytes = page_bytes(page);
@@ -1971,13 +2026,14 @@ fn process_image_load_page(page: borrow PageOwner[page],
 // Ext2-backed counterpart to process_image_load_page(). It deliberately
 // reads at most one filesystem block per ext2_read_file_chunk() call; the
 // ELF itself never has to fit in a kernel scratch buffer.
-fn process_image_load_page_ext2(page: borrow PageOwner[page],
+private fn process_image_load_page_ext2(slot: borrow ProcessImageSlot[0],
+                                page: borrow PageOwner[page],
                                 plan: DistroElfLoadPlan,
                                 header: KernelElf64ProgramHeader,
                                 load_bias: usize,
                                 l3_index: usize)
         -> ProcessImagePageLoadResult !{unsafe} {
-    let context: &mut ProcessImageContext = &process_image_contexts[process_image_cpu_index()];
+    let context: &mut ProcessImageStaging = &process_image_staging[slot.index];
     let source: ProcessImageExt2Source = match context.source {
         ProcessImageSourceState::Absent => {
             return ProcessImagePageLoadResult::Invalid;
@@ -2203,7 +2259,8 @@ fn process_image_unmap(pages: sink ProcessImagePages[image]) {
     process_image_unmap_pages(count);
 }
 
-fn process_image_map_segments(plan: DistroElfLoadPlan,
+private fn process_image_map_segments(slot: borrow ProcessImageSlot[0],
+                              plan: DistroElfLoadPlan,
                               load_bias: usize,
                               already_mapped: usize)
         -> ProcessImageSegmentsResult {
@@ -2263,7 +2320,7 @@ fn process_image_map_segments(plan: DistroElfLoadPlan,
                     }
                     PageAllocResult::Allocated(page) => {
                         match process_image_load_page(
-                                page, plan, header, load_bias, l3_index) {
+                                slot, page, plan, header, load_bias, l3_index) {
                             ProcessImagePageLoadResult::Invalid => {
                                 page_free(page);
                                 process_image_cleanup();
@@ -2295,7 +2352,8 @@ fn process_image_map_segments(plan: DistroElfLoadPlan,
     return ProcessImageSegmentsResult::Mapped(mapped);
 }
 
-fn process_image_pair_probe(primary: DistroElfLoadPlan,
+private fn process_image_pair_probe(slot: borrow ProcessImageSlot[0],
+                            primary: DistroElfLoadPlan,
                             interpreter: DistroElfLoadPlan,
                             interpreter_bias: usize,
                             argv: borrow []const u8,
@@ -2327,7 +2385,7 @@ fn process_image_pair_probe(primary: DistroElfLoadPlan,
     process_image_set_stack_top_page(root, evidence, process_stack_top_page());
     process_image_set_stack_low_page(root, evidence, PROCESS_STACK_LOW_DYNAMIC);
     process_image_set_heap_page_count(root, evidence, PROCESS_HEAP_PAGES_DEFAULT);
-    match process_image_map_segments(primary, 0, 0) {
+    match process_image_map_segments(slot, primary, 0, 0) {
         ProcessImageSegmentsResult::Invalid => {
             return ProcessImagePairProbeResult::Invalid;
         }
@@ -2335,15 +2393,15 @@ fn process_image_pair_probe(primary: DistroElfLoadPlan,
             return ProcessImagePairProbeResult::Invalid;
         }
         ProcessImageSegmentsResult::Mapped(primary_count) => {
-            match process_image_contexts[process_image_cpu_index()].pair_source {
+            match process_image_staging[slot.index].pair_source {
                 ProcessImageSourceState::Absent => {}
                 ProcessImageSourceState::Ext2(source) => {
-                    process_image_ext2_source(
-                        source.mount, source.inode, source.length);
+                    process_image_set_source(
+                        slot, source.mount, source.inode, source.length);
                 }
             }
             match process_image_map_segments(
-                    interpreter, interpreter_bias, primary_count) {
+                    slot, interpreter, interpreter_bias, primary_count) {
                 ProcessImageSegmentsResult::Invalid => {
                     return ProcessImagePairProbeResult::Invalid;
                 }
@@ -2501,18 +2559,19 @@ fn process_image_pair_map_ext2_in_root(
         return ProcessImagePairProbeResult::Invalid;
     }
     process_image_set_target_root_here(target);
-    process_image_ext2_source(
-        primary_mount, primary_inode, primary_length);
-    process_image_pair_ext2_source(
-        interpreter_mount, interpreter_inode, interpreter_length);
+    let slot: ProcessImageSlot[0] = process_image_slot_acquire();
+    process_image_set_source(
+        slot, primary_mount, primary_inode, primary_length);
+    process_image_set_pair_source(
+        slot, interpreter_mount, interpreter_inode, interpreter_length);
     let result = process_image_pair_probe(
-        primary, interpreter, interpreter_bias, argv, argc);
-    process_image_pair_ext2_source_clear();
-    process_image_ext2_source_clear();
+        slot, primary, interpreter, interpreter_bias, argv, argc);
+    process_image_slot_release(slot);
     return result;
 }
 
-fn process_image_map_current(plan: DistroElfLoadPlan,
+private fn process_image_map_current(slot: borrow ProcessImageSlot[0],
+                             plan: DistroElfLoadPlan,
                              argv: borrow []const u8,
                              argc: usize) -> ProcessImageMapResult {
     // GitHub issue #516: the same refusal, through this function's own
@@ -2539,7 +2598,7 @@ fn process_image_map_current(plan: DistroElfLoadPlan,
         return ProcessImageMapResult::OutOfMemory;
     }
     let mut mapped: usize = 0;
-    match process_image_map_segments(plan, 0, 0) {
+    match process_image_map_segments(slot, plan, 0, 0) {
         ProcessImageSegmentsResult::Invalid => {
             return ProcessImageMapResult::InvalidImage;
         }
@@ -2631,9 +2690,10 @@ fn process_image_map_ext2(plan: DistroElfLoadPlan,
                           argv: borrow []const u8,
                           argc: usize) -> ProcessImageMapResult {
     process_image_set_target_root_here(address_space_boot_root());
-    process_image_ext2_source(mount, inode, file_length);
-    let result = process_image_map_current(plan, argv, argc);
-    process_image_ext2_source_clear();
+    let slot: ProcessImageSlot[0] = process_image_slot_acquire();
+    process_image_set_source(slot, mount, inode, file_length);
+    let result = process_image_map_current(slot, plan, argv, argc);
+    process_image_slot_release(slot);
     return result;
 }
 
@@ -2650,9 +2710,10 @@ fn process_image_map_ext2_in_root(plan: DistroElfLoadPlan,
         return ProcessImageMapResult::InvalidImage;
     }
     process_image_set_target_root_here(target);
-    process_image_ext2_source(mount, inode, file_length);
-    let result = process_image_map_current(plan, argv, argc);
-    process_image_ext2_source_clear();
+    let slot: ProcessImageSlot[0] = process_image_slot_acquire();
+    process_image_set_source(slot, mount, inode, file_length);
+    let result = process_image_map_current(slot, plan, argv, argc);
+    process_image_slot_release(slot);
     return result;
 }
 
@@ -2727,8 +2788,8 @@ fn process_image_gap_is_unmapped() -> bool {
 // aiming the COW handler at PID 1's live image, and that took a hardware
 // bisect to find.
 //
-// The ext2 exec staging is per-core too. Two concurrent execs therefore
-// carry independent source metadata and block buffers.
+// The ext2 exec staging is not per-core: it is a slot of the
+// ProcessImageSlot pool above, so it would survive preemption as it is.
 //
 // The missing-record fallback and its count are per-core, so one core cannot
 // overwrite another core's failure record.
@@ -2744,7 +2805,7 @@ fn process_image_gap_is_unmapped() -> bool {
 // completion before another process can overwrite the same slot.
 fn process_image_execution_model_assumption() {
     static_assert(KERNEL_PREEMPTIBLE == 0,
-                  "process-image operation state is per-core, not per-process; kernel preemption would let two operations share one core's slot");
+                  "process_image's target root is per-CPU, not per-task; before KERNEL_PREEMPTIBLE is 1 it must move into the process record or be saved at context switch (GitHub issue #638, flip item (a))");
 }
 
 // Samples allocator metadata while holding only this pool allocation guard.

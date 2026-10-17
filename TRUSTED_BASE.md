@@ -350,6 +350,13 @@ rules globally.
   slot's index as a plain number and trusts its caller to hold the slot;
   `scripts/check_slot_pool_entries.py` keeps memory.tkb its only kernel
   caller and checks the one-slot-per-operation rule for both pools.
+- The ext2 exec staging (the PT_LOAD source file, a dynamic pair's
+  interpreter file, the one-block read buffer) is the same shape: a pool of
+  `KERNEL_MAX_CORES` slots reached through a linear `ProcessImageSlot`
+  (#638). Trusted: `process_image_slot_acquire` in
+  `kernel/mm/process_image.tkb` returns a slot no other live token names
+  (its compare-exchange). The one-slot-per-operation rule is the same build
+  check.
 - Definite initialization (SPEC.md, "Definite Initialization") trusts three
   premises. A `scratch` global's element is reached only by its own CPU, so
   any index names the same place (`kernel/kernel/syscall.tkb`'s
