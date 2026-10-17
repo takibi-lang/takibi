@@ -2,9 +2,10 @@
   "date": "2026-10-17",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "b57f2ae5b0f257d75f2ddc3fb411faef38df6545737179d685d426659bf72446",
-  "workload": "#638 slice 2 on main e85b1850: ext2 scratch moves from per-CPU storage to a KERNEL_MAX_CORES slot pool behind a linear Ext2Slot; cpu_here_across_blocking deleted. Measured both production kernels with scripts/space_delta.py.",
+  "source_sha256": "1794e6d3ce58995a22c9bab90907eb3d6aef336a7a3fbf22e03e0ce092f72df1",
+  "workload": "#638 slice 3 on main d92a38d4: the block layer's read-ahead run, block cache entries/write counts and counters move from cpu_id()-indexed storage to a KERNEL_MAX_CORES slot pool behind a linear BlockSlot. Measured both production kernels with scripts/space_delta.py.",
   "evidence": [
+    "docs/BLOCK_SLOT_POOL_SPACE_2026-10-17.md",
     "docs/EXT2_SLOT_POOL_SPACE_2026-10-17.md",
     "docs/XHCI_ERSTSZ_SPACE_2026-10-17.md",
     "docs/XHCI_EVENT_MATCH_SPACE_2026-10-16.md",
@@ -77,6 +78,6 @@
     "docs/VIRTIO_NET_TX_2026-10-10.md",
     "docs/VIRTIO_NET_TX_SPACE_2026-10-10.json"
   ],
-  "assessment": "Measured: BSS +32 B (slot words), data +8 B, text +4480 B QEMU / +4048 B RPi5 (entry-point acquire/release and the threaded slot parameter, after inlining single-caller bodies); usable_ram_start unchanged on both. Accepted for the compile-time slot obligation.",
-  "next_trigger": "The next #638 slice that moves other per-CPU scratch (log, block cache, process image, syscall scratch) into regions or a pool, or the next #720 slice that changes xHCI storage."
+  "assessment": "Measured: BSS +32 B QEMU / 0 B RPi5 (slot words), data +8 B, text +364 B QEMU / +416 B RPi5; usable_ram_start unchanged on both. Accepted for the compile-time slot obligation.",
+  "next_trigger": "The next #638 slice that moves other per-CPU scratch (process image, syscall scratch) into regions or a pool, or the next #720 slice that changes xHCI storage."
 }
