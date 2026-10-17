@@ -30,6 +30,7 @@ import sys
 
 from check_lock_rank_wrappers import functions
 from pass_line import report_pass
+from source_scan import per_file
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 KERNEL = ROOT / "kernel"
@@ -72,42 +73,52 @@ def consts(text: str) -> dict:
     return {m.group(1): to_int(m.group(2)) for m in CONST_RE.finditer(text)}
 
 
+@per_file
+def file_guest_numbers(path: str, raw: str):
+    """((number, where), ...) and problems of one guest-issuing file. Cached
+    by content (#808): each control changes one file, so the others are
+    scanned once for the whole control set."""
+    issued = []
+    problems = []
+    if path == SYSCALL_TKB:
+        return (), ()
+    if path.endswith(".tkb"):
+        text = strip_tkb_comments(raw)
+        table = consts(text)
+        for name, value in table.items():
+            if name.endswith("_SYSCALL"):
+                issued.append((value, f"{path}:{name}"))
+        for m in SVC_RE.finditer(text):
+            arg = m.group(1)
+            if re.fullmatch(NUM, arg):
+                issued.append((to_int(arg), f"{path}:svc({arg})"))
+            elif arg in table:
+                issued.append((table[arg], f"{path}:svc({arg})"))
+            else:
+                line = text.count("\n", 0, m.start()) + 1
+                problems.append(f"{path}:{line}: svc number `{arg}` is not a literal "
+                                "or a const of this file; the check cannot read it")
+    else:
+        text = strip_c_comments(raw)
+        if not re.search(r"svc\s+#0", text):
+            return (), ()
+        for m in ASM_RE.finditer(text):
+            issued.append((to_int(m.group(1)), f"{path}:mov x8,#{m.group(1)}"))
+        if path.endswith(".c"):
+            for m in C_CALL_RE.finditer(text):
+                issued.append((to_int(m.group(1)), f"{path}:call({m.group(1)})"))
+    return tuple(issued), tuple(problems)
+
+
 def guest_numbers(sources: dict):
     """(number -> [where], problems) over every guest-issuing source."""
     issued: dict = {}
     problems = []
-
-    def note(number: int, where: str) -> None:
-        issued.setdefault(number, []).append(where)
-
     for path, raw in sources.items():
-        if path == SYSCALL_TKB:
-            continue
-        if path.endswith(".tkb"):
-            text = strip_tkb_comments(raw)
-            table = consts(text)
-            for name, value in table.items():
-                if name.endswith("_SYSCALL"):
-                    note(value, f"{path}:{name}")
-            for m in SVC_RE.finditer(text):
-                arg = m.group(1)
-                if re.fullmatch(NUM, arg):
-                    note(to_int(arg), f"{path}:svc({arg})")
-                elif arg in table:
-                    note(table[arg], f"{path}:svc({arg})")
-                else:
-                    line = text.count("\n", 0, m.start()) + 1
-                    problems.append(f"{path}:{line}: svc number `{arg}` is not a literal "
-                                    "or a const of this file; the check cannot read it")
-        else:
-            text = strip_c_comments(raw)
-            if not re.search(r"svc\s+#0", text):
-                continue
-            for m in ASM_RE.finditer(text):
-                note(to_int(m.group(1)), f"{path}:mov x8,#{m.group(1)}")
-            if path.endswith(".c"):
-                for m in C_CALL_RE.finditer(text):
-                    note(to_int(m.group(1)), f"{path}:call({m.group(1)})")
+        file_issued, file_problems = file_guest_numbers(path, raw)
+        for number, where in file_issued:
+            issued.setdefault(number, []).append(where)
+        problems.extend(file_problems)
     return issued, problems
 
 
@@ -121,7 +132,20 @@ def dispatch_body(text: str) -> str:
 
 
 def dispatched_numbers(sources: dict):
-    text = strip_tkb_comments(sources[SYSCALL_TKB])
+    numbers, problems = dispatched_scan(sources[SYSCALL_TKB])
+    return set(numbers), list(problems)
+
+
+@per_file
+def dispatched_scan(raw: str):
+    """The dispatched numbers and problems of syscall.tkb's text, cached by
+    content (#808): most controls leave syscall.tkb unchanged."""
+    numbers, problems = dispatched_uncached(raw)
+    return frozenset(numbers), tuple(problems)
+
+
+def dispatched_uncached(raw: str):
+    text = strip_tkb_comments(raw)
     table = consts(text)
     body = dispatch_body(text)
     numbers = set()

@@ -38,13 +38,13 @@ not any test exercises the change.
 Exit code only (0 = pass, 1 = fail).
 """
 
-from functools import lru_cache
 import hashlib
 import pathlib
 import re
 import sys
 
 from pass_line import report_pass
+from source_scan import FrozenMap, per_file
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 MODELS = ROOT / "kernel" / "models"
@@ -77,15 +77,17 @@ def defined_names(tla: str) -> set[str]:
     return set(re.findall(r"^(\w+)(?:\([^)]*\))?\s*==", tla, re.M))
 
 
-@lru_cache(maxsize=8)
+# Unbounded (#808): with maxsize=8 a caller looping over ~170 kernel files
+# missed on every one, so each control re-masked the whole tree.
+@per_file
 def masked_sources(sources: str) -> str:
     """Preserve offsets while masking braces in comments and string literals."""
     return re.sub(r'//[^\n]*|/\*[\s\S]*?\*/|"(?:\\.|[^"\\])*"',
                   lambda match: re.sub(r'[^\n]', ' ', match[0]), sources)
 
 
-@lru_cache(maxsize=8)
-def function_starts(sources: str) -> dict[str, tuple[int, int]]:
+@per_file
+def function_starts(sources: str) -> FrozenMap:
     """Index the source once, retaining the first definition as search did.
 
     The mapping asks for a function when checking existence, guards and hashes,
@@ -98,10 +100,10 @@ def function_starts(sources: str) -> dict[str, tuple[int, int]]:
             r"^(?:private )?(?:inline |noinline )?fn ([a-z][a-z0-9_]*)\(",
             code, re.M):
         starts.setdefault(match[1], (match.start(), match.end()))
-    return starts
+    return FrozenMap(starts)
 
 
-@lru_cache(maxsize=1024)
+@per_file
 def function_body(name: str, sources: str) -> str | None:
     found = function_starts(sources).get(name)
     if found is None:

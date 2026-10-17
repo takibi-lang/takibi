@@ -7,12 +7,12 @@ It does not prove physical generation association or remote CPU protocols.
 """
 
 from collections import Counter
-from functools import lru_cache
 import pathlib
 import re
 import sys
 
 from pass_line import report_pass
+from source_scan import per_file
 
 ROOT = pathlib.Path("kernel")
 ALLOWED = {
@@ -49,7 +49,7 @@ ALLOWED = {
 }
 
 
-@lru_cache(maxsize=64)
+@per_file
 def mask(source):
     return re.sub(r'//[^\n]*|"(?:\\.|[^"\\])*"',
                   lambda m: re.sub(r'[^\n]', ' ', m[0]), source)
@@ -83,7 +83,7 @@ def functions(source):
         yield match[1], code[match.start():brace], code[brace:end]
 
 
-@lru_cache(maxsize=None)
+@per_file
 def function_facts(name, header, body):
     """One function's mint counts and failures, cached by its text: a
     mutation control changes one function of process.tkb, so the others are
@@ -119,7 +119,7 @@ def function_facts(name, header, body):
     return tuple(counts), tuple(failures)
 
 
-@lru_cache(maxsize=64)
+@per_file
 def source_facts(source):
     """Cache by complete content, so mutation controls reuse unchanged files.
 
@@ -145,7 +145,9 @@ def source_facts(source):
         for mint, count in counts:
             found[mint][name] += count
         failures.extend(function_failures)
-    return found, totals, declarations, tuple(failures)
+    # Frozen (#808): a cached result is shared by every control.
+    return (tuple((mint, tuple(found[mint].items())) for mint in ALLOWED),
+            tuple(totals.items()), tuple(declarations.items()), tuple(failures))
 
 
 TOTALS_PATTERNS = [
@@ -158,7 +160,7 @@ RELEVANT = re.compile(
     r"\.current_(?:handle|live)\s*=")
 
 
-@lru_cache(maxsize=None)
+@per_file
 def relevant(source):
     """Whether a file can hold a mint or a context writer; cached by content,
     so a mutation control rescans only the file it changed (#780)."""
@@ -177,10 +179,10 @@ def problems(sources):
         if not relevant(source):
             continue
         local_found, local_totals, local_declarations, local_failures = source_facts(source)
-        for mint in ALLOWED:
-            found[mint].update(local_found[mint])
-        totals.update(local_totals)
-        declarations.update(local_declarations)
+        for mint, items in local_found:
+            found[mint].update(dict(items))
+        totals.update(dict(local_totals))
+        declarations.update(dict(local_declarations))
         failures.extend(f"{path}: {failure}" for failure in local_failures)
     for mint, expected in ALLOWED.items():
         actual = +found[mint]

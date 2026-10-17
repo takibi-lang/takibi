@@ -20,12 +20,12 @@ Lexical: comments are stripped, then each `fn` body is brace-matched.
 Controls: scripts/check_lock_rank_wrappers_controls.py.
 """
 
-import functools
 import pathlib
 import re
 import sys
 
 from pass_line import report_pass
+from source_scan import per_file
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 KERNEL = ROOT / "kernel"
@@ -99,7 +99,7 @@ def functions(text: str):
         yield match.group(1), header, text[body:index + 1]
 
 
-@functools.lru_cache(maxsize=None)
+@per_file
 def file_scan(text: str):
     """(lock-taking names, unranked (name, calls) pairs) of one file. Cached
     by content: the controls change one file at a time, so every other file

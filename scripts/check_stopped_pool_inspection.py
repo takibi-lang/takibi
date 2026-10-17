@@ -10,6 +10,7 @@ import re
 import sys
 
 from pass_line import report_pass
+from source_scan import per_file
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MINTS = {
@@ -31,28 +32,42 @@ def functions(source):
             for i, match in enumerate(starts)}
 
 
+@per_file
+def file_scan(relative, source):
+    """(mint references, ((function, failure or None), ...)) of one file,
+    cached by content (#808): a control plants one file in a copied tree, so
+    the others are scanned once for the whole control set."""
+    references = len(MINT.findall('\n'.join(line.split('//', 1)[0] for line in source.splitlines())))
+    minted = []
+    for name, body in functions(source).items():
+        calls = MINT.findall(body)
+        if not calls:
+            continue
+        key = relative, name
+        if key not in MINTS or calls != [MINTS.get(key)]:
+            minted.append((name, f'{relative}:{name}: unreviewed inspection mint {calls}'))
+            continue
+        header = body.split('{', 1)[0]
+        if not header.startswith('private fn ') or \
+                'stopped: borrow MachineStopped[&kernel_world_stop]' not in header or \
+                'irq_masking_guard' not in body.split('}', 1)[0] or \
+                f'&kernel_world_stop' not in body[body.find('return '):]:
+            minted.append((name, f'{name}: private mint must borrow the production stop and retain IRQ exclusion'))
+            continue
+        minted.append((name, None))
+    return references, tuple(minted)
+
+
 def problems(root):
     failures, found, references = [], set(), 0
     for path in sorted((root / 'kernel').rglob('*.tkb')):
         relative = str(path.relative_to(root))
-        source = path.read_text(encoding='ascii')
-        references += len(MINT.findall('\n'.join(line.split('//', 1)[0] for line in source.splitlines())))
-        bodies = functions(source)
-        for name, body in bodies.items():
-            calls = MINT.findall(body)
-            if not calls:
-                continue
-            key = relative, name
-            found.add(key)
-            if key not in MINTS or calls != [MINTS.get(key)]:
-                failures.append(f'{relative}:{name}: unreviewed inspection mint {calls}')
-                continue
-            header = body.split('{', 1)[0]
-            if not header.startswith('private fn ') or \
-                    'stopped: borrow MachineStopped[&kernel_world_stop]' not in header or \
-                    'irq_masking_guard' not in body.split('}', 1)[0] or \
-                    f'&kernel_world_stop' not in body[body.find('return '):]:
-                failures.append(f'{name}: private mint must borrow the production stop and retain IRQ exclusion')
+        file_references, minted = file_scan(relative, path.read_text(encoding='ascii'))
+        references += file_references
+        for name, failure in minted:
+            found.add((relative, name))
+            if failure is not None:
+                failures.append(failure)
     if references != len(found):
         failures.append('inspection references must be one call per declared function, with no global or duplicate use')
     for key in sorted(MINTS.keys() - found):

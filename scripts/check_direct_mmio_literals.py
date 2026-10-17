@@ -41,8 +41,14 @@ def code_without_comments_or_strings(text: str) -> str:
             output.append("\n")
             index = end + 1
         else:
-            output.append(text[index])
-            index += 1
+            # Copy up to the next `/` in one slice (#808): a character per
+            # iteration made this the slowest single-scan fast-gate member.
+            # Only a `/` can open a comment, so the result is unchanged.
+            end = text.find("/", index + 1)
+            if end < 0:
+                end = len(text)
+            output.append(text[index:end])
+            index = end
     return STRING.sub(lambda match: " " * len(match.group(0)), "".join(output))
 
 
