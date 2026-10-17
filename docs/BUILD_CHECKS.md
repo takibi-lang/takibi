@@ -21,7 +21,6 @@ suffix is description; dispatch reads only the prefix.
 
 | Check | Enforced invariant |
 | --- | --- |
-| `check_land_precheck_controls.py` | The real land shell stops at the first failed host gate, names its lane and preserves diagnostics; green gates retain the full clean aggregate and exact-HEAD push, and failed clean/allcheck cannot publish |
 | `check_space_checkpoint_controls.py` | milestone measurement, justified incremental reuse, source fingerprint freshness, tracked evidence, and the mandatory pre-allcheck publication hook |
 | `check_qemu_vcpu_lease.py` | every maintained QEMU guest starts through `scripts/qemu.sh`, never `qemu-system-aarch64` directly, and every file that starts the shim takes a vCPU lease from the host-wide budget |
 | `check_lease_before_deadline.py` | a driver that spawns a lease-taking QEMU runner (a script calling `resource_lease_vcpu_acquire`, or `make kernelsh-qemu`) takes the vCPU lease itself first, so no deadline is spent in the runner's wait (#719) |
@@ -39,7 +38,6 @@ suffix is description; dispatch reads only the prefix.
 | `check_ash_bin_inventory.py` | ash's expected /bin listing matches every image-recipe entry in order |
 | `check_ash_bin_inventory_controls.py` | Controls for additions, omissions, and unrecognized /bin image commands |
 | `check_dma_qemu_transcript_controls.py` | The DMA QEMU runner waits for the complete diagnostic under every serial byte split; partial success/failure markers never terminate capture |
-| `check_preflight_kernel_file_controls.py` | `scripts/preflight_kernel_file.py`, the on-demand list of every registry a new, moved or renamed kernel file, assembly file or lane runner must join, names each missing or stale row for planted files and reports an unchanged file clean |
 | `check_found_by_policy_controls.py` | Controls for the `Found-by:` and `Protocol:` trailers an issue-closing commit must carry |
 | `check_capture_kernel_console_controls.py` | A GDB error with exit zero, nonzero exit, timeout and absent sidecars remain unavailable; success needs reader completion and every attempt restores the prior run state |
 | `check_churn_gdb_controls.py` | Bounded churn GDB failures restore the prior guest state; the dump precedes DDB and diagnostic failure preserves the stall verdict |
@@ -57,10 +55,8 @@ suffix is description; dispatch reads only the prefix.
 | `check_ddb_await_timing_controls.py` | QEMU DDB normal/postmortem await observations retain separate deadlines and preserve split prompts, failures and margin reporting |
 | `check_ddb_command_inventory.py` | DDB dispatch, help, documentation, classification, and coverage agree |
 | `check_ddb_command_inventory_controls.py` | Positive and build-faithful negative controls for the DDB inventory check |
-| `check_ddb_qemu_capture_controls.py` | Retained UART/software BREAK captures exercise the shared live/offline predicates; missing evidence, wrong values and ordering violations fail with individual diagnoses |
 | `check_ddb_rpi5_capture_controls.py` | Live and offline DDB verdicts accept LF/CRLF and refuse missing console-hold/release evidence, unheld mutex/phase, echoed commands, and invalid peer-stop evidence |
 | `check_ddb_signal_names.py` | DDB's process view names every signal kill(2) accepts, spelled from the ABI constant, and subtracts the named bits from its hex remainder; both QEMU runner gates accept the rendered sets |
-| `check_ddb_signal_names_controls.py` | Controls for the DDB signal-vocabulary check |
 | `check_ddb_wait_reason_names.py` | DDB's wait view names every process state and wait reason the kernel encodes for the debugger snapshot, spelled from the enum case |
 | `check_ddb_wait_reason_names_controls.py` | Controls for the DDB wait-vocabulary check |
 | `check_diagnostic_event_ids.py` | fixed diagnostic event IDs are unique 16-bit values |
@@ -80,7 +76,6 @@ suffix is description; dispatch reads only the prefix.
 | `check_expected_line_endings.py` | stdout fixtures use one newline convention |
 | `check_expected_line_endings_controls.py` | Positive and failure-specific controls for expected-line-ending checks |
 | `check_fallback_counters.py` | every dead-slot fallback counter is summed into one positively reported line a view expects, so a fallback that fires loses a line rather than adding one |
-| `check_fallback_counters_controls.py` | Controls for the dead-slot fallback report check |
 | `check_fd_clone_transaction.py` | the linear fd-clone transaction begins empty, advances exactly through a successful install, preserves failures, and rolls back its recorded prefix |
 | `check_fd_clone_transaction_controls.py` | Negative controls for the fd-clone transaction implementation boundary |
 | `check_find_stale_issue_workarounds_controls.py` | Controls for the stale-workaround worklist's matching |
@@ -97,7 +92,6 @@ suffix is description; dispatch reads only the prefix.
 | `check_stopped_pool_inspection_controls.py` | missing context markers, weakened mint contracts and an unreviewed inspection mint are refused |
 | `check_world_stop_refusals.py` | no `WorldStopResult::Busy` or `Partial` arm fail-stops the kernel; a refused world stop is waited out or handed back (#632) |
 | `check_irq_restore_sites.py` | no `enable_irq()` restores interrupts without consulting the state it overwrites |
-| `check_irq_restore_sites_controls.py` | Controls for the IRQ-restore site check |
 | `check_kernel_asm_entries.py` | the Makefile declares exactly the Takibi functions kernel assembly calls by name as entry points |
 | `check_kernel_asm_invariants_controls.py` | Controls for the SCTLR alignment-policy disassembly check |
 | `check_kernel_elf_freshness_controls.sh` | Controls for the stale-kernel guard: a lane refuses to run against a kernel older than its own sources |
@@ -133,6 +127,8 @@ suffix is description; dispatch reads only the prefix.
 | `check_lock_rank_wrappers.py` | every kernel function that calls `region_pool_lock`, `region_pool_lock_saving` or `mutex_acquire` declares `acquires_lock_<rank>_<name>` or has a reviewed exemption (#789: #745 silently dropped the process pool's rank) |
 | `check_source_scan_cache.py` | no `functools` cache in scripts/ outside `source_scan.py`, and every check a controls script imports in-process caches its per-file scan with `source_scan.per_file` (unbounded, refuses mutable results) or is reviewed (#808: uncached and size-8-cached scans re-read the tree per control and approached the fast gate's 10 s bound) |
 | `check_source_scan_cache_controls.py` | an uncached in-process check, `lru_cache`/`functools.cache` in either spelling, a new uncached in-process check, stale reviewed entries, an evicting cache and a mutable cached result are each refused; a transitive use passes |
+| `check_fast_gate_no_spawn.py` | no fast-gate Python member spawns a non-git process (subprocess, os.system, os.exec/spawn) unless reviewed with why it stays fast (#808: a member waiting on children overran the 10 s bound under the parallel allcheck; such members are `slowcheck_*`) |
+| `check_fast_gate_no_spawn_controls.py` | a Python child, a compiler child, a computed argv, os.system and os.execv are refused; git and a spawn named in a string pass; stale reviewed entries are refused |
 | `check_lock_rank_wrappers_controls.py` | the process pool losing its rank, a commented rank, new unranked region, mutex and one-line wrappers, a neighbour's rank, and a stale exemption are each refused |
 | `check_guest_syscalls_dispatched.py` | every syscall number an in-tree EL0 guest issues (`svcN(...)` literals and same-file consts and every `const *_SYSCALL` in `kernel/**/*.tkb`, `mov x8, #N` before `svc #0` in `.S`/`.c`, raw-ABI `call(N, ...)` in C) has a `number == N` arm in `kernel_syscall_dispatch_action`, or is on the reviewed `EXPECTED_ENOSYS` list, whose stale entries are refused; an `svc` number it cannot read is refused (#792: #665's probe issued an unimplemented sched_yield on a load-dependent path). Run by `kernel-lib-check` |
 | `check_guest_syscalls_dispatched_controls.py` | the sched_yield dispatch arm removed (its peer-safety mention kept), an unused probe constant, literal, hex-const, asm and C-call issues of an undispatched number, an unreadable `svc` number, and stale expected-ENOSYS entries are each refused |
@@ -154,12 +150,10 @@ suffix is description; dispatch reads only the prefix.
 | `check_no_cursor_reply.py` | no host driver answers BusyBox's cursor query, whose late reply lands in the next command (#644) |
 | `check_no_cursor_reply_controls.py` | Controls for the cursor-reply check, in both directions |
 | `check_pass_line_counts.py` | every check reports PASS through `scripts/pass_line.py`, asserting a count that is zero when it examined nothing |
-| `check_pass_line_counts_controls.py` | Controls for the PASS-line guard, in both directions |
 | `check_patch_embedded_image_controls.py` | Controls for the exact embedded-rootfs replacement used by the interactive RPi5 image |
 | `check_pipefail_early_exit.py` | no `pipefail` script pipes a large producer into a consumer that leaves at the first match |
 | `check_pipefail_early_exit_controls.py` | Controls for the pipefail/SIGPIPE check, in both directions |
 | `check_platform_file_parity.py` | duplicated platform functions do not drift silently, and neither do identical inline runs of eight significant lines |
-| `check_platform_file_parity_controls.py` | Controls for the platform-parity check, both halves of it |
 | `check_platform_view_parity.py` | a view compared on one lane only says why it is not shared |
 | `check_platform_view_parity_controls.py` | Controls for the platform-view parity check |
 | `check_peer_filesystem_controls.py` | the peer filesystem verdict requires CPU-1 reads, failed first lock attempts on both CPUs, and capture completion on both platforms; controls remove each link |
@@ -168,10 +162,8 @@ suffix is description; dispatch reads only the prefix.
 | `check_pool_zero_before_stamp.py` | a pool slot's storage is cleared before the generation that makes it answer Live is stamped, so a lockless walker cannot read the free-chain link as a payload (#514) |
 | `check_pool_zero_before_stamp_controls.py` | Controls for the pool clear-before-stamp check, in both directions |
 | `check_probe_entry_gates.py` | a two-core probe's arrival gate waits on a count that only grows, never on a level the other core clears |
-| `check_profile_kernel_samples_controls.py` | Controls for bounded flat-PC sample validation and symbolization |
 | `check_invariant_stop_controls.py` | Explicit kernel stop call-site resolution against exact ELF; wrong identity, origin, unsupported instruction and truncated RAM refusal |
 | `check_symbolize_ddb_controls.py` | Exact-capture PID/ELF registration, PIE and fixed executable PCs, verified entry/bias consistency, archived identities, segment and malformed-user-boundary refusal |
-| `check_profile_kernel_workload_controls.py` | Positive and negative controls for workload-profile host artifacts |
 | `check_qemu_lane_ports.py` | QEMU lanes do not claim conflicting protocol ports, and every lane fits the per-session port block |
 | `check_raw_pos_fname.py` | source identity uses the canonical path helpers |
 | `check_keyword_tables.py` | the lexer's keyword table and `Language_words.hard_keywords` name the same words, so a new keyword cannot silently lex as an identifier (#704) |
@@ -183,10 +175,8 @@ suffix is description; dispatch reads only the prefix.
 | `check_slot_proof_dropped_to_index.py` | a slot liveness proof dropped to a bare index is declared with a reason, so #569's shape is a decision rather than a line |
 | `check_slot_proof_dropped_to_index_controls.py` | Controls for the slot-proof-to-index check, in both directions |
 | `check_single_dune_invocation.py` | exactly one rule runs `dune build`, so no second make invocation races its lock |
-| `check_validate_kernel_dmesg_timestamps_controls.py` | Controls for dmesg integrity, measurement-only QEMU boot duration, and separately enforced performance bounds |
 | `check_validate_protocol_trace_controls.py` | Controls for the protocol-trace replay: three recorded QEMU windows pass (one with `Nap` in `SwitchAway`'s place), a recorded RPi5 clone-return reschedule passes only with `CloneReschedule`, refusing a child-owned stack, an unreserved successor and a relabelled parent; its refused step reports before/observed state for the parent stack, child and successor; two windows fail without `ChildExitStart` and `InterruptDepart`; a tick leave outside an interrupt, #609's shared-stack start, a lost change, a cut report, an unlocked change, an unsafe snapshot and an unexercised window are refused, and so are Wait4Block.tla's block with a zombie child, lost wakeup and wake of a non-parent, RecordLifetime.tla's unlocked or premature removal, and a wait published on a Running process |
 | `check_wont_compile_catalog.py` | every defect-catalog entry names a test case and external comparison set with a valid nonfuture date, shows its figure, and agrees with the index; external truth is not checked |
-| `check_wont_compile_catalog_controls.py` | Controls for catalog structure, missing/malformed/future comparison dates and a valid leap day, and sample runner verdicts |
 | `check_xhci_register_offsets.py` | RP1 xHCI register fields sit at their xHCI-specification offsets, and an ERST programmed via ERSTBA also declares and writes ERSTSZ (#754) |
 | `check_xhci_register_offsets_controls.py` | Controls for the spec layout, the #754 missing ERSTSZ, an unwritten ERSTSZ and misplaced registers |
 
@@ -204,6 +194,18 @@ for several rounds it gated `allbuild` so no kernel lane ran at all.
 
 | Check | Enforced invariant |
 | --- | --- |
+| `slowcheck_land_precheck_controls.py` | The real land shell stops at the first failed host gate, names its lane and preserves diagnostics; green gates retain the full clean aggregate and exact-HEAD push, and failed clean/allcheck cannot publish |
+| `slowcheck_preflight_kernel_file_controls.py` | `scripts/preflight_kernel_file.py`, the on-demand list of every registry a new, moved or renamed kernel file, assembly file or lane runner must join, names each missing or stale row for planted files and reports an unchanged file clean |
+| `slowcheck_ddb_qemu_capture_controls.py` | Retained UART/software BREAK captures exercise the shared live/offline predicates; missing evidence, wrong values and ordering violations fail with individual diagnoses |
+| `slowcheck_ddb_signal_names_controls.py` | Controls for the DDB signal-vocabulary check |
+| `slowcheck_fallback_counters_controls.py` | Controls for the dead-slot fallback report check |
+| `slowcheck_irq_restore_sites_controls.py` | Controls for the IRQ-restore site check |
+| `slowcheck_pass_line_counts_controls.py` | Controls for the PASS-line guard, in both directions |
+| `slowcheck_platform_file_parity_controls.py` | Controls for the platform-parity check, both halves of it |
+| `slowcheck_profile_kernel_samples_controls.py` | Controls for bounded flat-PC sample validation and symbolization |
+| `slowcheck_profile_kernel_workload_controls.py` | Positive and negative controls for workload-profile host artifacts |
+| `slowcheck_validate_kernel_dmesg_timestamps_controls.py` | Controls for dmesg integrity, measurement-only QEMU boot duration, and separately enforced performance bounds |
+| `slowcheck_wont_compile_catalog_controls.py` | Controls for catalog structure, missing/malformed/future comparison dates and a valid leap day, and sample runner verdicts |
 | `slowcheck_debug_return_entry.py` | Real GDB accepts an indirect forced return at machine entry and rejects a later PC before writing the result buffer |
 | `slowcheck_known_intermittent_issues.py` | every row of the known-intermittent table names an issue that is still open |
 | `slowcheck_lease_wait.py` | a shell driver keeps waiting while its runner prints `[lease] waiting` past the deadline, and still times out a runner silent as long without one |

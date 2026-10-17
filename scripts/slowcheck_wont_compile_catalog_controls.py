@@ -18,7 +18,7 @@ notices a missing one, notices a changed diagnostic, and notices an accepted
 program being refused. That the real compiler behaves as the catalog says is
 the buildcheck's own job, from the rule that builds it.
 
-Usage: check_wont_compile_catalog_controls.py
+Usage: slowcheck_wont_compile_catalog_controls.py
 Exit code only (0 = pass, 1 = fail).
 """
 

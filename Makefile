@@ -226,8 +226,9 @@ effect-matrix-control: build
 	echo "PASS effect-matrix-control: EFFECTS.md matches compiler effect rules"
 
 # GitHub issue #526: the fast gate's membership rule, expressed as a number.
-# The slowest legitimate member measured about 1.6s standalone
-# (check_land_precheck_controls.py, 2026-10-17, #808); this sits far above it
+# The slowest legitimate member measured about 0.8s standalone
+# (check_process_running_mints_controls.py, 2026-10-17, after #808 moved the
+# members that wait on child processes to slowcheck_*); this sits far above it
 # so only a gross violation is caught, which is the deliberate limit. It is
 # not an estimate to be raised when something gets slower -- a member that
 # cannot finish inside it has changed category and belongs in `slowcheck`.
