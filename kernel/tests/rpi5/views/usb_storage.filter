@@ -1,3 +1,4 @@
+^usb xhci:
 ^usb msc:
 ^usb ext2:
 ^rootfs:

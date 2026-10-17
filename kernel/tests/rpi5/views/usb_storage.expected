@@ -1,3 +1,4 @@
+usb xhci: caplength=0x0000000000000020 rtsoff=0x0000000000000460
 usb msc: ready sector=512
 usb ext2: provisioned blocks=2816
 usb ext2: provision verify byte-equal
