@@ -45,15 +45,17 @@ def callers(text):
 
 
 def main():
-    sites = callers(SOURCE.read_text(encoding="ascii"))
+    # An optional path stands in for page.tkb (the controls' mutants).
+    source = Path(sys.argv[1]) if len(sys.argv) > 1 else SOURCE
+    sites = callers(source.read_text(encoding="ascii"))
     if not sites:
         print("FAIL page-freelist-rebuild: no call to %s found; update this check" % REBUILD)
         return 1
     bad = [(n, f) for n, f in sites if f not in ALLOWED]
     for number, function in bad:
-        print("FAIL page-freelist-rebuild: kernel/mm/page.tkb:%d: %s called from %s; "
+        print("FAIL page-freelist-rebuild: %s:%d: %s called from %s; "
               "after install the list changes only by push and unlink (#771)"
-              % (number, REBUILD, function))
+              % (source.name, number, REBUILD, function))
     if bad:
         return 1
     report_pass("page-freelist-rebuild",
