@@ -2,8 +2,8 @@
   "date": "2026-10-17",
   "event": "incremental",
   "decision": "reuse",
-  "source_sha256": "c19b2ba0171c42e29a7691957b4da37ffd4b11662afc6ffcea79fa8dc8a269d1",
-  "workload": "#808: the only production-source change since the measured #804/#806 checkpoint is a Makefile comment (the fast gate's slowest member as measured); no kernel source, build flag or link input changed.",
+  "source_sha256": "02f9ffa7d37b5bd3e1313fc0004034af21ff164b496cff23a8ae54cd582f3ebe",
+  "workload": "#808: the only production-source changes since the measured #804/#806 checkpoint are Makefile comments (the fast gate slowest member as measured) and host check scripts moved between lanes; no kernel source, build flag or link input changed.",
   "evidence": [
     "docs/XHCI_CAPABILITY_SPACE_2026-10-17.md",
     "docs/BLOCK_SLOT_POOL_SPACE_2026-10-17.md",
