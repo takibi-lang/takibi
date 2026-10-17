@@ -161,7 +161,7 @@ allocator migration remains a separate design gate.
 Initialization does not prove CPU freshness across preemption.
 
 Profiler follow-ups: seeing inside IRQ-masked spans is #773 (Arm SPE) and
-an irqsoff-style tracer on #771.
+an irqsoff-style tracer on #811.
 
 **Next, ahead of the list below (maintainer, 2026-10-14):** #740:
 a socket's receive queue keeping the packet (step 3) is decided after the
@@ -195,9 +195,8 @@ function and data object with --gc-sections on every kernel link (QEMU text
 under #720 -- producer rings, session tables, input context, event ring and
 output context are device-protocol owners (E1 snapshots for the last two);
 usb_xhci.tkb is off kernel/RAW_MINT_FILES, its bus-address export is
-usb_xhci_bus.tkb. Only the DCBAA stays legacy (D3). Candidate: #771, page_alloc_contiguous's whole-table scan under an
-IRQ-masking lock (about 3 ms on RPi5), its permanent call/time counters,
-the irqsoff-style tracer, and tcp_frame_pool's return-every-chunk shape.
+usb_xhci_bus.tkb. Only the DCBAA stays legacy (D3).
+Candidate: #811, an irqsoff-style tracer for IRQ-masked spans.
 
 1. **Fixed DMA lifecycle, finishing the drivers.** Every stage of one
    transfer in types, leaving one device-semantics declaration per driver
