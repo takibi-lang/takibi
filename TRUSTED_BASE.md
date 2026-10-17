@@ -323,10 +323,17 @@ rules globally.
   the compiler keeps free of `may_block` and does not let the authority
   leave (#638), stays on that CPU because the block lowers to no
   disable/enable pair while the kernel is not preemptible
-  (`KERNEL_PREEMPTIBLE == 0`, asserted there). `cpu_here_across_blocking`
-  (ext2 only) and `cpu_here_for_boot_probe` (the boot probe only) mint
-  outside a block; `scripts/check_cpu_authority_mints.py` fixes their
-  callers.
+  (`KERNEL_PREEMPTIBLE == 0`, asserted there). `cpu_here_for_boot_probe`
+  (the boot probe only) mints outside a block;
+  `scripts/check_cpu_authority_mints.py` fixes its caller.
+- ext2's operation scratch is a pool of `KERNEL_MAX_CORES` slots, each
+  reached only through a linear `Ext2Slot` (#638). The compiler checks that
+  an operation releases its slot on every path, never twice, and never uses
+  it after the release. Trusted: `ext2_slot_acquire` in
+  `kernel/fs/ext2/ext2.tkb` returns a slot no other live token names, which
+  its compare-exchange over the slot words provides. That one operation
+  holds one slot at a time, so the pool cannot deadlock, is a build check
+  (`scripts/check_ext2_slot_entries.py`), not a type rule.
 - Definite initialization (SPEC.md, "Definite Initialization") trusts three
   premises. A `scratch` global's element is reached only by its own CPU, so
   any index names the same place (`kernel/kernel/syscall.tkb`'s

@@ -25837,6 +25837,70 @@ let cpu_authority_initialization_tests =
       }"));
   ]
 
+(* GitHub issue #638 slice 2: ext2's scratch is a slot pool reached through
+   a linear token (kernel/fs/ext2/ext2.tkb, Ext2Slot). This fixes the shape
+   that file relies on: an entry point acquires, internal work borrows, and
+   the release consumes. Using a slot twice, using it after its release,
+   and forgetting the release on any path are type errors; another file
+   cannot forge a slot or release one. *)
+let ext2_slot_tests =
+  let pool = "linear struct Slot638[unit: usize] {
+      private index: {0..<2 as usize};
+    }
+    private let mut scratch638: [usize; 2];
+    private fn acquire638() -> Slot638[0] {
+      let mut slot: Slot638[0] = { 1 }; return slot;
+    }
+    private fn release638(slot: sink Slot638[0]) { }
+    fn use638(slot: borrow Slot638[0]) { scratch638[slot.index] = 1; }
+    " in
+  let bad title fragment body = Alcotest.test_case title `Quick
+      (expect_type_error fragment (pool ^ body)) in
+  [
+    Alcotest.test_case "entry acquires, borrows and releases" `Quick
+      (expect_codegen_ok (pool ^ "fn entry638() {
+        let slot: Slot638[0] = acquire638();
+        use638(slot); use638(slot);
+        release638(slot);
+      }"));
+    bad "missing release" "linear value 'slot' is never consumed"
+      "fn bad638() { let slot: Slot638[0] = acquire638(); use638(slot); }";
+    bad "missing release on an early return"
+      "linear value 'slot' is still pending at this return"
+      "fn bad638(flag: bool) {
+         let slot: Slot638[0] = acquire638();
+         if (flag) { return; }
+         release638(slot);
+       }";
+    bad "duplicate release" "linear value 'slot' was already consumed"
+      "fn bad638() {
+         let slot: Slot638[0] = acquire638();
+         release638(slot); release638(slot);
+       }";
+    bad "use after release" "linear value 'slot' was already consumed"
+      "fn bad638() {
+         let slot: Slot638[0] = acquire638();
+         release638(slot); use638(slot);
+       }";
+    bad "a copy is a move, not a second slot"
+      "linear value 'slot' was already consumed"
+      "fn bad638() {
+         let slot: Slot638[0] = acquire638();
+         let copy: Slot638[0] = slot;
+         release638(slot); release638(copy);
+       }";
+    Alcotest.test_case "another file cannot forge a slot" `Quick
+      (expect_type_error_files "it has private fields"
+        ["pool638.tkb", pool;
+         "user638.tkb", "fn bad638() {
+           let mut slot: Slot638[0] = { 0 }; use638(slot);
+         }"]);
+    Alcotest.test_case "another file cannot release a slot" `Quick
+      (expect_type_error_files "'release638' is a private function"
+        ["pool638.tkb", pool;
+         "user638.tkb", "fn bad638(slot: sink Slot638[0]) { release638(slot); }"]);
+  ]
+
 (* GitHub issue #638: `preempt_off (cpu) { ... }` is the only way to mint
    the CPU authority outside its file. The block may not reach may_block,
    and the authority cannot leave it by a return. *)
@@ -27171,6 +27235,7 @@ let named_groups_unisolated = [
   "private-default-construction", private_default_construction_tests;
   "cpu-authority-initialization", cpu_authority_initialization_tests;
   "preempt-off", preempt_off_tests;
+  "ext2-slot", ext2_slot_tests;
   "runtime-bounds", runtime_bounds_tests;
   "core",     core_tests;
   "parser",   parser_tests;

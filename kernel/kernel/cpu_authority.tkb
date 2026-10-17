@@ -13,11 +13,6 @@
 //
 // Trusted here, and only here:
 // - preempt_off_enter reads cpu_id() (MPIDR) and is the CPU it says;
-// - cpu_here_across_blocking is the CPU it runs on, for ext2, whose
-//   per-CPU scratch is held across block I/O that may block. No preempt_off
-//   block can cover it, so its validity rests on KERNEL_PREEMPTIBLE == 0
-//   alone (static_assert below); ext2 is the only caller. Moving ext2's
-//   scratch off per-CPU storage retires it (#638).
 // - cpu_here_for_boot_probe names another CPU's slot, for the boot probe
 //   that holds every CPU's handoff at once; nothing else calls it.
 //
@@ -49,12 +44,6 @@ private fn preempt_off_enter() -> CpuHere {
     kernel_invariant_stop();
     let mut unreachable: CpuHere = { 0 };
     return unreachable;
-}
-
-fn cpu_here_across_blocking() -> CpuHere {
-    static_assert(KERNEL_PREEMPTIBLE == 0,
-                  "per-CPU scratch held across blocking calls must move to per-task storage");
-    return preempt_off_enter();
 }
 
 fn cpu_here_for_boot_probe(core: {0..<KERNEL_MAX_CORES as usize}) -> CpuHere {

@@ -60,14 +60,18 @@ lexical, such as a lock guard (#789). Until the flip the region lowers to
 no instruction: the mint's own `static_assert` carries that dependency.
 
 What still depends on the constant is a worklist of three kinds: per-CPU
-scratch (ext2, the kernel log, the memory block cache, process-image and
-syscall scratch, crash capture), lock holders that must not be preempted
-(the page allocator, TaskMutex, the terminal, the ext2 mutation lock), and
-others (fixtures, terminal echo, process lifecycle). The first kind is
-held across calls that may block wherever it spans block I/O, which is why
-ext2 takes its authority from `cpu_here_across_blocking()` and not from a
-region: the region rule rejects it. That scratch must move to per-task
-storage before the flip.
+scratch (the kernel log, the memory block cache, process-image and syscall
+scratch, crash capture), lock holders that must not be preempted (the page
+allocator, TaskMutex, the terminal, the ext2 mutation lock), and others
+(fixtures, terminal echo, process lifecycle). Scratch held across a call
+that may block cannot be per-CPU: the region rule rejects it, and a sleep
+would hand the CPU's buffers to another operation. ext2 was the first such
+case and no longer depends on the constant: its scratch is a pool of
+`KERNEL_MAX_CORES` slots, each reached through a linear `Ext2Slot` that an
+entry point acquires (compare-exchange over one word per slot) and releases
+(#638). Readers still take no lock, so #533's reader concurrency stands.
+The rest of the first kind moves the same way, or into regions where it
+does not span a blocking call, before the flip.
 
 Raising either prints a worklist: files assert the constant they depend on
 with a per-site message. `scripts/check_execution_model_coverage.py` requires

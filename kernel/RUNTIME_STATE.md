@@ -304,10 +304,11 @@ than ported, along with `TcpConnectionValue`, `TcpConnectionGuard` and
 
 ### Filesystem (`kernel/fs/`)
 
-`ext2/ext2.tkb`'s `ext2_scratch` (one-block staging buffers, **per core**
-since the two-core work: `ext2_scratch_here()` selects by `cpu_id()`, because
-a syscall reaching ext2 now runs on either core and one shared staging buffer
-would let two reads overwrite each other's block mid-parse); `elf64.tkb`'s
+`ext2/ext2.tkb`'s `ext2_scratch` and `ext2_write_blocks` (one-block staging
+buffers and a write's staged block numbers, a pool of `KERNEL_MAX_CORES`
+slots since GitHub issue #638: an operation acquires a slot at entry as a
+linear `Ext2Slot` and releases it at exit, so two operations never share one
+even when one blocks on the device); `elf64.tkb`'s
 `ELF_IDENT_MAGIC` (a constant table, not mutable runtime state in practice).
 
 `ext2/ext2.tkb`'s `ext2_fenced`, `ext2_fence_pending` and

@@ -51,6 +51,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_rpi5_ddb_await_controls.py` | RPi5 DDB first-arrival observations; software BRK boot and post-snapshot budgets, delayed release, echoed-only output, missing milestones and unavailable UART |
 | `check_fixed_wait_await_controls.py` | The FDT multi-bank boots and the stack-overflow runner (through `await_timing.py`'s command line) record arrival against their fixed budgets, print the margin past half without changing the verdict, and record a missing line as not arrived |
 | `check_dma_mint_files.py` | Every `dma_fixed` record is declared in a listed mint file, and only the listed functions there call `dma_finish_owned_rx`/`_tx`; a record in a driver file, an unlisted finisher and a stale entry are each refused (#716, #717) |
+| `check_ext2_slot_entries.py` | An ext2 entry point that acquires a scratch slot is never called from inside `ext2.tkb` and is never handed a slot, so one operation holds one slot and the pool cannot deadlock (#638) |
 | `check_cpu_authority_mints.py` | `cpu_here_for_boot_probe`, the CPU-authority mint that names any CPU, is called only by its reviewed boot probe (#704) |
 | `check_uart_await_timing_controls.py` | Common UART connection budget, capture ceiling, progress-renewed arrivals and unfinished markers remain distinct |
 | `check_ddb_await_timing_controls.py` | QEMU DDB normal/postmortem await observations retain separate deadlines and preserve split prompts, failures and margin reporting |

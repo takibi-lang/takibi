@@ -179,6 +179,12 @@ EXEMPT = {
     "fs/elf64.tkb":
         "ELF_IDENT_MAGIC is a lookup table that is never written; `let mut` "
         "is how this language declares an initialised array",
+    "fs/ext2/ext2.tkb":
+        "GitHub issue #638: the operation scratch is a slot pool handed out "
+        "by compare-exchange under a linear Ext2Slot, which holds for any "
+        "core count and with preemption; the fence words are written only by "
+        "mutators, serialized by ext2_mutation_lock (which asserts the "
+        "constant) or by the boot fixture before peers run",
     "fs/ext2/mutation_lock.tkb":
         "GitHub issue #533: the file's only mutable state IS the lock word, "
         "whose whole purpose is to hold whatever the core count becomes; an "

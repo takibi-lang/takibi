@@ -129,9 +129,12 @@ list (maintainer, 2026-10-09).
    step's evidence.
    Slice 1 done (2026-10-16): lexical `preempt_off (cpu) { ... }` blocks
    mint CpuHere, reject reachable may_block, and keep the authority from
-   escaping; the exec-argument handoff uses them. Next: ext2's per-CPU
-   scratch, held across block I/O that may block, moves to per-task
-   storage, retiring `cpu_here_across_blocking`.
+   escaping; the exec-argument handoff uses them. Slice 2 done
+   (2026-10-17): ext2's scratch, held across block I/O that may block,
+   moved to a pool of slots reached through a linear `Ext2Slot`, retiring
+   `cpu_here_across_blocking`. Next: the other per-CPU scratch, file by
+   file, into `struct per_cpu` plus regions, or a pool where it spans a
+   blocking call.
 
 **Evidence for the trunk, scheduled by A:** #584's soak at natural
 boundaries, #702 (dedicated soak hardware, the maintainer's decision),

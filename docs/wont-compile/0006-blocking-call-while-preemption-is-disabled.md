@@ -111,10 +111,10 @@ scratch.
 ## Where this runs
 
 `kernel/kernel/syscall.tkb` reaches the exec-argument handoff through
-`preempt_off` blocks. ext2's per-CPU scratch is held across block I/O, which
-may block, so the region rule rejects it; it takes its authority from
-`cpu_here_across_blocking()` until that scratch moves to per-task storage
-(#638).
+`preempt_off` blocks. ext2's scratch is held across block I/O, which may
+block, so the region rule would reject it; it is therefore not per-CPU but
+a pool of slots reached through a linear token (`Ext2Slot`, #638), and no
+CPU authority is minted outside a block except the boot probe's.
 
 ## Limits of this entry
 

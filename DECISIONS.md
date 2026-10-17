@@ -126,6 +126,9 @@ without maintainer approval; these only remove the question, not the gate.
   `preempt_off` block first, sugar over a linear PreemptOff token that is the
   end state; may_block is forbidden inside, and CPU authority is derived
   from the region. [active] #638
+- 2026-10-17 ext2 scratch held across blocking block I/O is a pool of
+  KERNEL_MAX_CORES slots handed out by a linear slot token (option C), not
+  kernel-stack or per-task storage; readers stay lock-free (#533). [active] #638
 - 2026-10-14 Lock order moves toward ranked capability tokens (Fuchsia
   lock_order style), absorbing acquires_lock_<rank>_<name>, after the syntax
   review. [active] #789
@@ -170,6 +173,9 @@ without maintainer approval; these only remove the question, not the gate.
   KERNEL_DEBUGGER_ENTRIES (--undefined) for functions called by name from
   outside the image. [active] #786
 - 2026-10-13 An in-kernel sampling profiler, not a perf port. [active] #497
+- 2026-10-17 Be conservative with kernel stack use: .data/.bss can be
+  estimated after compile, but stack use is dynamic and harder to bound, so
+  prefer static storage over large stack buffers even at some .bss cost. [active] #638
 
 ## Interfaces
 
