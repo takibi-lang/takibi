@@ -1,9 +1,9 @@
 {
   "date": "2026-10-17",
   "event": "incremental",
-  "decision": "measured",
-  "source_sha256": "a962cd9b585d808a0bfb10ff9c74685c7870df0c0adf1f2995172008cf3a1222",
-  "workload": "#638 slice 4: process_image exec staging and syscall scratch moved into ProcessImageSlot and SyscallSlot pools; exception_evidence comment only.",
+  "decision": "reuse",
+  "source_sha256": "308c6e487ede6032c92a9c4f4e001e74a6410a6867684bb91aa3e9f10b41a1e9",
+  "workload": "#801: lib/protocol_decl.ml to_tla only (the emitted TLA+ model gains the snapshot refresh step and an omit control) and bin/main.ml option text; no generated Takibi source or kernel code changes. Previous: #638 slice 4: process_image exec staging and syscall scratch moved into ProcessImageSlot and SyscallSlot pools; exception_evidence comment only.",
   "evidence": [
     "docs/SLOT_POOLS_EXEC_SYSCALL_SPACE_2026-10-17.md",
     "docs/XHCI_CAPABILITY_SPACE_2026-10-17.md",
@@ -80,6 +80,6 @@
     "docs/VIRTIO_NET_TX_2026-10-10.md",
     "docs/VIRTIO_NET_TX_SPACE_2026-10-10.json"
   ],
-  "assessment": "Measured with scripts/space_delta.py: text +3080 B QEMU / +3320 B RPi5, BSS +64 B, usable_ram_start one 32 KiB step later on both; the RPi5 image ceiling is raised to 0x540000 by the maintainer's decision (2026-10-17).",
+  "assessment": "Reuse: the change is confined to model emission (to_tla, --emit-tla-omit-cache) and usage text, which no kernel build invokes, so both production images are unchanged from the #638 measurement. Previous assessment: Measured with scripts/space_delta.py: text +3080 B QEMU / +3320 B RPi5, BSS +64 B, usable_ram_start one 32 KiB step later on both; the RPi5 image ceiling is raised to 0x540000 by the maintainer's decision (2026-10-17).",
   "next_trigger": "The #638 preemption flip (target root into the process record), or the next slot pool."
 }
