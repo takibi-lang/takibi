@@ -9,5 +9,6 @@ resources: image target root unset uses=2
 resources: page mappings within the address spaces that exist
 resources: shared-object refs within the descriptor slots that exist
 resources: no double free
+resources: page free list linked both ways, matching occupancy
 resources: pooled per-process records back to the baseline
 resources: pages=0

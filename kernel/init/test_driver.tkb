@@ -641,6 +641,13 @@ fn kernel_init_boot_fixture_poll(current_authority: borrow ProcessCurrent[curren
     } else {
         kernel_boot_log("resources: DOUBLE FREE\n");
     }
+    // GitHub issue #771: after every fixture's churn, the doubly linked
+    // free list still matches the metadata both ways.
+    if (page_free_list_consistent()) {
+        kernel_boot_log("resources: page free list linked both ways, matching occupancy\n");
+    } else {
+        kernel_boot_log("resources: PAGE FREE LIST INCONSISTENT\n");
+    }
     // All bounded-suite user images and fixtures have been
     // torn down at this point. The permanent root-0 pages
     // remain live; equality with the boot baseline proves

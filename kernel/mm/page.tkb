@@ -237,7 +237,13 @@ struct PageMeta {
     // the first word, so a page costs 24 bytes of runtime metadata rather
     // than 32. Retains stop at PAGE_MAP_REF_CEILING, so it cannot wrap.
     map_refcount: u32;
-    next_free: usize;
+    // GitHub issue #771: the runtime free list is doubly linked, so a run
+    // leaves it in O(count) instead of a rebuild over every page. Two u32
+    // links fill the word one usize link used, so a page still costs 24
+    // bytes; page_allocator_plan_metadata refuses more pages than a u32
+    // index (with the end-of-list value, the page count) can name.
+    next_free: u32;
+    prev_free: u32;
     physical: usize;
 }
 
@@ -285,6 +291,9 @@ struct BootPagePool align(16) {
     run_calls: usize;
     run_ticks: usize;
     run_max_ticks: usize;
+    // Candidate runs examined: deterministic where ticks are not, so a
+    // probe can hold a run of one to a single look (#771).
+    run_visits: usize;
 }
 
 // GitHub issue #479. Everything below this line is shared mutable
@@ -615,6 +624,9 @@ private fn page_physical_for_index(pool: borrow &mut BootPagePool, metas: borrow
     return PagePhysicalResult::NotManaged;
 }
 
+// Built once, when the runtime tables are installed; afterwards every
+// change is a push or an unlink (#771: rebuilding per run allocation was
+// most of a ~3 ms IRQ-masked span on the RPi5).
 private fn page_runtime_freelist_rebuild(pool: borrow &mut BootPagePool, metas: borrow region(PageMeta)[mb, mn], extents: borrow region(PageExtent)[eb, en]) !{unsafe} {
     let capacity: usize = page_capacity(pool, metas, extents);
     pool.runtime_free_head = capacity;
@@ -624,10 +636,52 @@ private fn page_runtime_freelist_rebuild(pool: borrow &mut BootPagePool, metas: 
         let meta: &mut PageMeta = page_meta_at(metas, index);
         if (meta.occupied == false &&
             meta.owner == PageOwnerTag::Unowned) {
-            meta.next_free = pool.runtime_free_head;
-            pool.runtime_free_head = index;
+            page_runtime_link_head(pool, metas, capacity, index);
         }
     }
+}
+
+// `index` at the head of the runtime list. `capacity` is the end-of-list
+// value, which fits a u32 link (page_allocator_plan_metadata).
+private fn page_runtime_link_head(pool: borrow &mut BootPagePool, metas: borrow region(PageMeta)[mb, mn],
+                                  capacity: usize, index: usize) {
+    let head: usize = pool.runtime_free_head;
+    let meta: &mut PageMeta = page_meta_at(metas, index);
+    meta.next_free = head as u32;
+    meta.prev_free = capacity as u32;
+    if (head < capacity) {
+        page_meta_at(metas, head).prev_free = index as u32;
+    }
+    pool.runtime_free_head = index;
+}
+
+// `index` out of the runtime list in O(1). false, changing nothing, when
+// its neighbours do not point back at it: the list is not what the
+// metadata says, and the caller quarantines rather than guess.
+private fn page_runtime_unlink(pool: borrow &mut BootPagePool, metas: borrow region(PageMeta)[mb, mn],
+                               capacity: usize, index: usize) -> bool {
+    if (index >= capacity) { return false; }
+    let next: usize = page_meta_at(metas, index).next_free as usize;
+    let prev: usize = page_meta_at(metas, index).prev_free as usize;
+    if (prev < capacity) {
+        if (page_meta_at(metas, prev).next_free as usize != index) { return false; }
+    } else if (pool.runtime_free_head != index) {
+        return false;
+    }
+    if (next < capacity) {
+        if (page_meta_at(metas, next).prev_free as usize != index) { return false; }
+    }
+    if (prev < capacity) {
+        page_meta_at(metas, prev).next_free = next as u32;
+    } else {
+        pool.runtime_free_head = next;
+    }
+    if (next < capacity) {
+        page_meta_at(metas, next).prev_free = prev as u32;
+    }
+    page_meta_at(metas, index).next_free = capacity as u32;
+    page_meta_at(metas, index).prev_free = capacity as u32;
+    return true;
 }
 
 private fn page_freelist_push(pool: borrow &mut BootPagePool, metas: borrow region(PageMeta)[mb, mn], extents: borrow region(PageExtent)[eb, en], index: usize,
@@ -637,9 +691,7 @@ private fn page_freelist_push(pool: borrow &mut BootPagePool, metas: borrow regi
         freelist_core_remove(core, freelist_owner_new(index, generation));
         return;
     }
-    let meta: &mut PageMeta = page_meta_at(metas, index);
-    meta.next_free = pool.runtime_free_head;
-    pool.runtime_free_head = index;
+    page_runtime_link_head(pool, metas, page_capacity(pool, metas, extents), index);
 }
 
 // GitHub issue #746: the owner carries the page's permission, its
@@ -748,13 +800,17 @@ private fn page_run_is_free(pool: borrow &mut BootPagePool, metas: borrow region
     return true;
 }
 
-// Scans for the first aligned run of free pages, marks it occupied, and
-// takes those pages off the free list in one pass.
+// Finds an aligned run of free pages, marks it occupied, and unlinks those
+// pages from the free list.
 //
-// A linear scan rather than a buddy allocator, deliberately: #350's own
-// non-goals rule out a general buddy unless it turns out to be the
-// smaller change, and the caller today is process creation -- rare, and
-// already doing far more expensive work.
+// A scan rather than a buddy allocator, deliberately: #350's own non-goals
+// rule out a general buddy unless it turns out to be the smaller change.
+// GitHub issue #771 bounded what the scan costs under the IRQ-masking lock
+// without one: a run of one page (most pool chunks) is the list head, a
+// longer run looks only at aligned addresses, and claiming a run unlinks
+// `count` pages from the doubly linked list instead of rebuilding it.
+// What stays linear is a longer run's search when low memory is full; the
+// counters below show it.
 // GitHub issue #479: one acquire for the whole run search and claim. A run
 // is only contiguous if nothing takes a page out of the middle of it
 // between the scan and the claim.
@@ -803,40 +859,101 @@ private fn page_alloc_contiguous_locked(frames: borrow PageFrameStore[fbc, fbo, 
     // The alignment that matters is the ADDRESS's, and page INDEX zero is
     // not at an aligned address: both linker scripts only promise
     // `ALIGN(4096)` for usable_ram_start, and on QEMU it lands at
-    // 0x40903000 -- page-aligned and not 16K-aligned. Choosing candidates
-    // at multiples of `count` therefore produces runs that are contiguous
-    // and NOT aligned, which is the half of this that consumers actually
-    // need. Skew the choice by where the pool itself starts.
+    // 0x40903000 -- page-aligned and not 16K-aligned. Candidates are
+    // therefore chosen by address: within each extent, only the aligned
+    // addresses, `alignment` apart (#771; the scan used to test every page
+    // index). A run never crosses an extent, which page_frames_take
+    // refused anyway.
     let capacity: usize = page_capacity(pool, metas, extents);
-    let mut candidate: usize = 0;
-    while (candidate < capacity) {
-        let physical_result: PagePhysicalResult =
-            page_physical_for_index(pool, metas, extents, candidate);
-        let mut physical: usize = 0;
-        let mut physical_found: bool = false;
-        match physical_result {
-            PagePhysicalResult::NotManaged => {}
-            PagePhysicalResult::Found(found) => {
-                physical = found;
-                physical_found = true;
+    // A run of one is any free page: the list head, without a scan (#771).
+    // Most pool chunks are one page.
+    if (count == 1 && pool.runtime_applied) {
+        let head: usize = pool.runtime_free_head;
+        if (head < capacity) {
+            match page_physical_for_index(pool, metas, extents, head) {
+                PagePhysicalResult::NotManaged => {}
+                PagePhysicalResult::Found(physical) => {
+                    match page_run_claim(frames, pool, metas, extents, head, physical, count, owner) {
+                        PageRunAllocResult::OutOfMemory => {}
+                        PageRunAllocResult::Allocated(run) => {
+                            return PageRunAllocResult::Allocated(run);
+                        }
+                    }
+                }
             }
         }
-        let mut candidate_aligned: bool = false;
-        if (physical_found && alignment != 0) {
-            candidate_aligned = physical % alignment == 0;
+    }
+    let mut spans: usize = 1;
+    if (pool.runtime_applied) { spans = pool.runtime_extent_count; }
+    for span: usize in 0..<spans {
+        let mut start: usize = usable_ram_start;
+        let mut end: usize = usable_ram_start + BOOTSTRAP_PAGE_COUNT * PAGE_SIZE;
+        let mut first: usize = 0;
+        if (pool.runtime_applied) {
+            let extent: &mut PageExtent = page_extent_at(extents, span);
+            start = extent.start;
+            end = extent.end;
+            first = extent.first_index;
         }
-        let mut run_free: bool = false;
-        if (candidate_aligned && count <= capacity - candidate) {
-            run_free = page_run_is_free(pool, metas, extents, candidate, count);
+        let mut physical: usize = start;
+        let mut scanning: bool = true;
+        let mut skew: usize = 0;
+        if (alignment != 0) { skew = start % alignment; }
+        if (skew != 0) {
+            if (start > 0xFFFFFFFFFFFFFFFF - (alignment - skew)) {
+                scanning = false;
+            } else {
+                physical = start + (alignment - skew);
+            }
         }
-        if (run_free) {
+        while (scanning && physical < end && alignment <= end - physical) {
+            let candidate: usize = first + (physical - start) / PAGE_SIZE;
+            match page_run_claim(frames, pool, metas, extents, candidate, physical, count, owner) {
+                PageRunAllocResult::OutOfMemory => {}
+                PageRunAllocResult::Allocated(run) => {
+                    return PageRunAllocResult::Allocated(run);
+                }
+            }
+            if (physical > 0xFFFFFFFFFFFFFFFF - alignment) {
+                scanning = false;
+            } else {
+                physical = physical + alignment;
+            }
+        }
+    }
+    return PageRunAllocResult::OutOfMemory;
+}
+
+// One candidate run at page `candidate` (address `physical`): claimed when
+// every page is free and its places give the permission, OutOfMemory
+// otherwise, and the caller tries the next candidate.
+private fn page_run_claim(frames: borrow PageFrameStore[fbc, fbo, fbn, fsc, fso, fsn], pool: borrow &mut BootPagePool, metas: borrow region(PageMeta)[mb, mn], extents: borrow region(PageExtent)[eb, en],
+                          candidate: usize, physical: usize, count: usize, owner: PageOwnerTag)
+        -> PageRunAllocResult !{allocates, requires_mmu, unsafe} {
+    pool.run_visits = pool.run_visits + 1;
+    let capacity: usize = page_capacity(pool, metas, extents);
+    if (page_run_is_free(pool, metas, extents, candidate, count) == false) {
+        return PageRunAllocResult::OutOfMemory;
+    }
           // The run's permission out of its places (#746). Out means the
-          // pages are not all in one array (a run across two extents that
-          // touch) or the places disagree with the metadata; either way
-          // this candidate is not a run to hand out.
+          // pages are not all in one array or the places disagree with the
+          // metadata; either way this candidate is not a run to hand out.
           match page_frames_take(frames, pool, extents, physical, count) {
-            PageFrameTake::Out => {}
+            PageFrameTake::Out => { return PageRunAllocResult::OutOfMemory; }
             PageFrameTake::Taken(run_frames) => {
+            let mut unlinked: usize = 0;
+            if (pool.runtime_applied) {
+                for k: usize in 0..<count {
+                    if (page_runtime_unlink(pool, metas, capacity, candidate + k)) {
+                        unlinked = unlinked + 1;
+                    }
+                }
+            } else {
+                let core: &mut FreelistCore(BOOTSTRAP_PAGE_COUNT) =
+                    &pool.core;
+                unlinked = freelist_core_unlink_range(
+                    core, candidate, count);
+            }
             for k: usize in 0..<count {
                 let index: usize = candidate + k;
                 if (index < capacity) {
@@ -845,15 +962,6 @@ private fn page_alloc_contiguous_locked(frames: borrow PageFrameStore[fbc, fbo, 
                     meta.owner = owner;
                     meta.map_refcount = 0;
                 }
-            }
-            let mut unlinked: usize = count;
-            if (pool.runtime_applied) {
-                page_runtime_freelist_rebuild(pool, metas, extents);
-            } else {
-                let core: &mut FreelistCore(BOOTSTRAP_PAGE_COUNT) =
-                    &pool.core;
-                unlinked = freelist_core_unlink_range(
-                    core, candidate, count);
             }
             if (unlinked != count) {
                 // The scan said every page was free and the list says
@@ -884,10 +992,6 @@ private fn page_alloc_contiguous_locked(frames: borrow PageFrameStore[fbc, fbo, 
                 page_run_owner_new(run_frames, candidate, physical, count, generation));
             }
           }
-        }
-        candidate = candidate + 1;
-    }
-    return PageRunAllocResult::OutOfMemory;
 }
 
 fn page_run_free(owner: sink PageRunOwner[run]) !{unsafe} {
@@ -1118,7 +1222,7 @@ private fn page_allocator_init_with(pool: borrow &mut BootPagePool,
         page_meta_at(metas, i).occupied = false;
         page_meta_at(metas, i).owner = PageOwnerTag::Unowned;
         page_meta_at(metas, i).map_refcount = 0;
-        page_meta_at(metas, i).next_free = i + 1;
+        page_meta_at(metas, i).next_free = (i + 1) as u32;
         page_meta_at(metas, i).physical =
             usable_ram_start + i * PAGE_SIZE;
     }
@@ -1337,7 +1441,9 @@ private fn page_allocator_plan_metadata(boot: borrow region(PageMeta)[mb, mn],
         }
         region_index = region_index + 1;
     }
-    if (total_pages == 0 ||
+    // The free list's u32 links name every page and the end-of-list value,
+    // which is the page count itself (#771).
+    if (total_pages == 0 || total_pages > 0xFFFFFFFF ||
         total_pages > 0xFFFFFFFFFFFFFFFF / sizeof(PageMeta)) {
         return page_metadata_plan_invalid();
     }
@@ -1478,7 +1584,8 @@ private fn page_allocator_fill_metadata(pool: borrow &mut BootPagePool,
                     meta.occupied = false;
                     meta.owner = PageOwnerTag::Unowned;
                     meta.map_refcount = 0;
-                    meta.next_free = total_pages;
+                    meta.next_free = total_pages as u32;
+                    meta.prev_free = total_pages as u32;
                     meta.physical = physical;
                     if (fdt_blob_overlaps(memory, physical, PAGE_SIZE)) {
                         meta.owner = PageOwnerTag::Unavailable;
@@ -1876,8 +1983,22 @@ fn page_run_probe() -> bool !{unsafe} {
             page_run_free(again);
         }
     }
+    // GitHub issue #771: a run of one page is the free list's head -- one
+    // candidate examined, not a scan -- and claiming and freeing runs
+    // leaves the doubly linked list consistent with the metadata.
+    let mut single_look: bool = false;
+    let visits_before: usize = page_run_visits();
+    match page_alloc_contiguous(1, PageOwnerTag::PoolChunk) {
+        PageRunAllocResult::OutOfMemory => {}
+        PageRunAllocResult::Allocated(one) => {
+            single_look = page_run_visits() == visits_before + 1;
+            page_run_free(one);
+        }
+    }
+    let linked: bool = page_free_list_consistent();
     return aligned && counted && tagged && payload_only && overlap == false &&
            singles == 2 && restored && meta_restored && reusable &&
+           single_look && linked &&
            page_allocator_live_count() == pages_before;
 }
 
@@ -2016,8 +2137,13 @@ private fn page_alloc_locked(frames: borrow PageFrameStore[fbc, fbo, fbn, fsc, f
     }
     let index: usize = pool.runtime_free_head;
     if (index >= page_capacity(pool, metas, extents)) { return PageAllocResult::OutOfMemory; }
+    let capacity: usize = page_capacity(pool, metas, extents);
     let meta: &mut PageMeta = page_meta_at(metas, index);
-    pool.runtime_free_head = meta.next_free;
+    let next: usize = meta.next_free as usize;
+    pool.runtime_free_head = next;
+    if (next < capacity) {
+        page_meta_at(metas, next).prev_free = capacity as u32;
+    }
     let generation: usize = pool.runtime_next_generation;
     pool.runtime_next_generation = generation + 1;
     meta.occupied = true;
@@ -2745,21 +2871,83 @@ fn page_allocator_counts_reporter() -> (usize, usize) !{unsafe} {
 // GitHub issue #771: page_alloc_contiguous's cost counters (calls, ticks
 // held, longest hold) for DDB's `vm`, without the page lock: three loads
 // that may straddle one call.
-fn page_run_stats_reporter() -> (usize, usize, usize) !{unsafe} {
+fn page_run_stats_reporter() -> (usize, usize, usize, usize) !{unsafe} {
     let unlocked = locked_cell_take_unlocked(&boot_page_pool_cell);
     let pool = memory_map_pool_record(unlocked, &boot_page_pool_cell);
     let calls: usize = pool.run_calls;
+    let visits: usize = pool.run_visits;
     let ticks: usize = pool.run_ticks;
     let longest: usize = pool.run_max_ticks;
     locked_cell_give_unlocked(&boot_page_pool_cell, unlocked);
-    return (calls, ticks, longest);
+    return (calls, visits, ticks, longest);
+}
+
+// Candidate runs examined so far, under the lock (page_run_probe).
+fn page_run_visits() -> usize {
+    let guard = locked_cell_take(&boot_page_pool_cell);
+    let pool = memory_map_pool_record(guard, &boot_page_pool_cell);
+    let visits: usize = pool.run_visits;
+    locked_cell_give(&boot_page_pool_cell, guard);
+    return visits;
+}
+
+// GitHub issue #771: the runtime free list walked both ways against the
+// metadata -- every node free and pointing back at its predecessor, and
+// exactly as many nodes as free pages. Bounded by the page count, so a
+// cycle reads as inconsistent rather than hanging. true before the
+// runtime tables exist (the bootstrap list is FreelistCore's).
+fn page_free_list_consistent() -> bool !{unsafe} {
+    let guard = locked_cell_take(&boot_page_pool_cell);
+    let pool = memory_map_pool_record(guard, &boot_page_pool_cell);
+    let result: bool = match place_borrow(guard, page_meta_store.metas) {
+        Place::Empty => { false }
+        Place::Full(metas) => {
+            let inner: bool = match place_borrow(guard, page_meta_store.extents) {
+                Place::Empty => { false }
+                Place::Full(extents) => { page_free_list_consistent_locked(pool, metas, extents) }
+            };
+            inner
+        }
+    };
+    locked_cell_give(&boot_page_pool_cell, guard);
+    return result;
+}
+
+private fn page_free_list_consistent_locked(pool: borrow &mut BootPagePool, metas: borrow region(PageMeta)[mb, mn], extents: borrow region(PageExtent)[eb, en])
+        -> bool {
+    if (pool.runtime_applied == false) { return true; }
+    let capacity: usize = page_capacity(pool, metas, extents);
+    let mut free_pages: usize = 0;
+    for i: usize in 0..<capacity {
+        let meta: &mut PageMeta = page_meta_at(metas, i);
+        if (meta.occupied == false && meta.owner == PageOwnerTag::Unowned) {
+            free_pages = free_pages + 1;
+        }
+    }
+    let mut linked: usize = 0;
+    let mut previous: usize = capacity;
+    let mut node: usize = pool.runtime_free_head;
+    while (node < capacity) {
+        if (linked >= free_pages) { return false; }
+        let meta: &mut PageMeta = page_meta_at(metas, node);
+        if (meta.occupied || meta.owner != PageOwnerTag::Unowned ||
+            meta.prev_free as usize != previous) {
+            return false;
+        }
+        linked = linked + 1;
+        previous = node;
+        node = meta.next_free as usize;
+    }
+    return linked == free_pages;
 }
 
 // The same counters as one RECORDED boot line: a cost, not a verdict.
 fn page_run_stats_log() !{unsafe} {
-    let (calls, ticks, longest) = page_run_stats_reporter();
+    let (calls, visits, ticks, longest) = page_run_stats_reporter();
     kernel_boot_log("RECORDED page run allocator: calls=");
     uart_put_udec(calls);
+    kernel_boot_log(" visits=");
+    uart_put_udec(visits);
     kernel_boot_log(" ticks=");
     uart_put_udec(ticks);
     kernel_boot_log(" max_ticks=");
