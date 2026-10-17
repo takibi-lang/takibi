@@ -183,21 +183,25 @@ rules globally.
   register offsets in `Rp1XhciRegs` (`kernel/platform/rpi5/usb_xhci.tkb`)
   against a table typed in by hand, so the table is trusted. It has two
   parts:
-  - **xHCI 1.2 offsets.** The `SPEC` dictionary and the PORTSC formula
+  - **xHCI 1.2 offsets.** The `spec()` table, the capability offsets
+    (CAPLENGTH +0x00, RTSOFF +0x18) and the PORTSC formula
     (`0x400 + 0x10 * (n - 1)` from the operational base) were copied from
     the "eXtensible Host Controller Interface for Universal Serial Bus
-    (xHCI)" specification, revision 1.2: section 5.4 (Host Controller
-    Operational Registers) and section 5.5.2 (Interrupter
-    Register Set).
-  - **RP1 base values.** The check uses CAPLENGTH = 0x20 and
-    RTSOFF = 0x460. CAPLENGTH comes from rp1_usb_smoke's read of
-    CAPLENGTH|HCIVERSION on the board (commit 0945a326, noted in the
-    usb_xhci.tkb header). RTSOFF has never been read and logged on its
-    own. The value is inferred from interrupter 0 at +0x480, a layout
-    that RPi5 USB bring-up has shown to work. The RP1 Peripherals
-    datasheet does not document the xHCI capability registers.
+    (xHCI)" specification, revision 1.2: sections 5.3 (Host Controller
+    Capability Registers), 5.4 (Host Controller Operational Registers)
+    and 5.5.2 (Interrupter Register Set).
+  - **RP1 base values: checked at boot** (GitHub issue #804). The table
+    holds no RP1 value. The operational base is the struct's `usbcmd`
+    offset (0x20) and interrupter 0 is its `iman` offset (0x480, so
+    RTSOFF = 0x460). Bring-up reads CAPLENGTH and RTSOFF before it
+    writes the controller and stops at stage `capability-length` or
+    `runtime-offset`, naming the value read, when they disagree with
+    those offsets; the boot log prints `usb xhci: caplength=... rtsoff=...`.
+    The check requires that comparison to run before the controller is
+    halted. What stays trusted is the specification text above and the
+    reading of CAPLENGTH (low byte) and RTSOFF (bits 31:5).
   The check passes only when its table and the struct agree. If either
-  changes, re-check both against these sources.
+  changes, re-check the table against the specification.
 - Raw atomic intrinsics (`atomic_load_acquire`, `atomic_store_release`,
   `atomic_swap_acquire`, `atomic_fetch_add_relaxed`, and
   `atomic_compare_exchange_acquire`) make a cross-core ordering or atomicity
