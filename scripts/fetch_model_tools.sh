@@ -5,6 +5,8 @@
 #   tla2tools.jar  TLC, the explicit-state model checker, and SANY, the parser
 #   apalache       the symbolic model checker; here its type checker and a
 #                  shallow check, so the specs stay Apalache-ready
+#   herdtools7     herd7, which checks litmus tests against the AArch64
+#                  memory model (GitHub issue #645); built from source
 #
 # Where. Outside the repository, so `make clean` (which removes _build/) never
 # deletes them. The default is the directory the devcontainer already binds
@@ -35,6 +37,13 @@ TLA_URL="https://github.com/tlaplus/tlaplus/releases/download/v${TLA_VERSION}/tl
 
 APALACHE_VERSION=0.62.2
 APALACHE_SHA256=765f610537281a0f25b8c30f2554f19523e2859c824e80e62276653ee23c10e2
+HERD_VERSION=7.58
+# GitHub's tag archive; recorded on first download (2026-10-18).
+HERD_SHA256=1b72798457e678dec781ce914c4bd84dc6bae3c3c044cf4257d0974bf7f066ad
+HERD_URL="https://github.com/herd/herdtools7/archive/refs/tags/${HERD_VERSION}.tar.gz"
+# herdtools7's build dependencies, at the versions it was first built with.
+HERD_OPAM_DEPS="dune.3.22.0 menhir.20260209 zarith.1.14"
+
 APALACHE_URL="https://github.com/apalache-mc/apalache/releases/download/v${APALACHE_VERSION}/apalache-${APALACHE_VERSION}.tgz"
 
 if [ -n "${TAKIBI_MODEL_TOOLS_DIR:-}" ]; then
@@ -90,6 +99,71 @@ if [ ! -x "$apalache_dir/bin/apalache-mc" ]; then
     trap - EXIT
     [ -x "$apalache_dir/bin/apalache-mc" ] || {
         echo "fetch_model_tools: apalache $APALACHE_VERSION unpacked without bin/apalache-mc" >&2
+        exit 1
+    }
+fi
+
+# WORK IN PROGRESS (#645), KNOWN FAILING: `opam switch create herd
+# ocaml-system.<v>` in a fresh private root fails, since opam there cannot see
+# sys-ocaml-version. Next candidate: build zarith 1.14 (sha256
+# 5db9dcbd939153942a08581fabd846d0f3f2b8c67fe68b855127e0472d4d1859, from
+# github.com/ocaml/Zarith release-1.14) with `./configure -installdir
+# <private findlib dir>` (WITHOUT it, its `make install` writes into the
+# shared switch) and build herdtools7 with OCAMLPATH pointing there. CI
+# (.github/workflows/ci.yml) caches the model-tools root keyed on this file.
+#
+# herdtools7 (GitHub issue #645). opam has it, but installing into the
+# developer's shared opam switch is not allowed, and that switch lacks zarith.
+# So the build uses a PRIVATE opam root inside a temporary directory, with an
+# `ocaml-system` switch that reuses the ocaml already on PATH (no compiler
+# build), installs the pinned dependencies there, and builds the
+# sha256-checked source tarball. herd7 bakes its library directory in at
+# build time, so it is built and installed with the final prefix, under a
+# lock, rather than renamed into place.
+# Requires opam, ocaml, make, flock and libgmp's headers.
+herd_dir="$root/herdtools7-$HERD_VERSION"
+if [ ! -x "$herd_dir/bin/herd7" ]; then
+    for tool in opam ocaml make flock; do
+        command -v "$tool" >/dev/null 2>&1 || {
+            echo "fetch_model_tools: $tool is required to build herdtools7" >&2
+            exit 1
+        }
+    done
+    exec 9>"$root/.herdtools7.lock"
+    flock 9
+    if [ ! -x "$herd_dir/bin/herd7" ]; then
+        work="$(mktemp -d "$root/.herdtools7.XXXXXX")"
+        trap 'rm -rf "$work"' EXIT
+        curl -fsSL -o "$work/herdtools7.tgz" "$HERD_URL"
+        if ! verify "$work/herdtools7.tgz" "$HERD_SHA256"; then
+            echo "fetch_model_tools: herdtools7 $HERD_VERSION failed its sha256 check" >&2
+            exit 1
+        fi
+        tar -xzf "$work/herdtools7.tgz" -C "$work"
+        log="$work/build.log"
+        if ! (
+            export OPAMROOT="$work/opam" OPAMYES=1 OPAMCOLOR=never
+            unset OPAMSWITCH OPAM_SWITCH_PREFIX
+            opam init --bare --no-setup --disable-sandboxing -q
+            opam switch create herd "ocaml-system.$(ocamlc -vnum)" -q
+            # shellcheck disable=SC2086
+            opam install --switch=herd -q $HERD_OPAM_DEPS
+            cd "$work/herdtools7-$HERD_VERSION"
+            rm -rf "$herd_dir"
+            opam exec --switch=herd -- make build PREFIX="$herd_dir"
+            opam exec --switch=herd -- make install PREFIX="$herd_dir"
+        ) >"$log" 2>&1; then
+            tail -n 40 "$log" >&2
+            rm -rf "$herd_dir"
+            echo "fetch_model_tools: building herdtools7 $HERD_VERSION failed" >&2
+            exit 1
+        fi
+        rm -rf "$work"
+        trap - EXIT
+    fi
+    flock -u 9
+    [ -x "$herd_dir/bin/herd7" ] || {
+        echo "fetch_model_tools: herdtools7 $HERD_VERSION installed without bin/herd7" >&2
         exit 1
     }
 fi

@@ -1,6 +1,26 @@
 # Lockless multi-writer kernel log ring: design proposal (GitHub issue #613)
 
-Status: PROPOSAL, awaiting maintainer decision. Nothing here is implemented.
+Status: option B selected (2026-10-18), with the changes below. Nothing of
+the ring is implemented yet.
+
+## Maintainer decisions (2026-10-18, recorded on #613, #645, #656)
+
+1. Option B, but no fixed per-line limit. A record may span k consecutive
+   slots: one head CAS reserves k slots, and continuation marks in the slot
+   state word tie them to the first. 160 B is the allocation unit. Above a
+   large cap (a fraction of the ring) a line is split into continuation
+   records, never silently truncated. LogRing.tla covers multi-slot records
+   within its stated bound (e.g. k <= 2, N = 3-4 slots).
+2. Hand-written tokens first; the protocol-declaration generator replaces
+   them after #720. Approved.
+3. CAS returns the observed value on failure (`Swapped | Observed(v)`).
+   Approved.
+4. herd7 model checks only; no litmus7 and no RPi5 hardware runs. Instead a
+   check ties each litmus test to the instructions the compiler emits.
+5. #656 retargets to LogRing.tla.
+
+The sections below are the original proposal; where they disagree with the
+decisions above (fixed 160-byte cap, litmus7 on RPi5), the decisions win.
 Related: #645 (herd7 litmus), #656 (LogReader replay), #813 (continuous
 trace), #638 (per-core line state left to this issue), #720 (common protocol
 declaration generator).
