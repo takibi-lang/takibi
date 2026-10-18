@@ -28,6 +28,7 @@ import re
 import sys
 
 from pass_line import report_pass
+from source_scan import per_file
 
 DEVCONTAINER = pathlib.Path(".devcontainer/devcontainer.json")
 BUILD = pathlib.Path("scripts/build_herd7.sh")
@@ -38,6 +39,7 @@ GUARD = "if: steps.herd7-cache.outputs.cache-hit != 'true'"
 KEY = "hashFiles('scripts/build_herd7.sh')"
 
 
+@per_file
 def pinned_versions(text: str) -> tuple:
     return tuple(sorted(set(PIN.findall(text))))
 
