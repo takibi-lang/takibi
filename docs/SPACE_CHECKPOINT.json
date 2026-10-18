@@ -2,8 +2,8 @@
   "date": "2026-10-18",
   "event": "incremental",
   "decision": "reuse",
-  "source_sha256": "b815a35ed89c200b1e95e9a3eee55f7abfbf954443641b409f91122fa1e689a4",
-  "workload": "#775 on top of the previous record: core 0 enables its PMU line through the shared gic_pmu_core_enable and both dispatchers sample PMU overflows in one branch; the deleted core-0 helper and branch held no storage, and the rest is comments. No data, BSS, pool or linker change; the previous measurement stands. Previous: #613 slice 4: the retained kernel log on the option-B ring (slot state words, linear reservation token, multi-slot records, static 640-byte core-0 line stage, syslog and DDB readers). Measured with scripts/space_delta.py against origin/main: text 708212 -> 713844 B qemu, 760848 -> 766576 B rpi5; BSS 1486512 -> 1485104 B qemu, unchanged rpi5; usable_ram_start unchanged.",
+  "source_sha256": "956797f56ea6977c18a155d43eaa987e985024c11d72de2025d47f76ec4125c0",
+  "workload": "#822 on top of #775: core 0's crash record moves from the historical crash_snapshot/crash_snapshot_capturing globals into element 0 of the existing per-core arrays. The change only deletes one CrashSnapshot and one bool of BSS and a branch per accessor; no new storage, no linker change, so the measurement in this record stands as an upper bound. Previous: #775 on top of the previous record: core 0 enables its PMU line through the shared gic_pmu_core_enable and both dispatchers sample PMU overflows in one branch; the deleted core-0 helper and branch held no storage, and the rest is comments. No data, BSS, pool or linker change; the previous measurement stands. Previous: #613 slice 4: the retained kernel log on the option-B ring (slot state words, linear reservation token, multi-slot records, static 640-byte core-0 line stage, syslog and DDB readers). Measured with scripts/space_delta.py against origin/main: text 708212 -> 713844 B qemu, 760848 -> 766576 B rpi5; BSS 1486512 -> 1485104 B qemu, unchanged rpi5; usable_ram_start unchanged.",
   "evidence": [
     "docs/LOG_RING_SPACE_2026-10-18.md",
     "docs/PAGE_RUN_SCAN_SPACE_2026-10-17.md",
