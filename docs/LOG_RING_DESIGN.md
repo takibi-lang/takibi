@@ -252,3 +252,66 @@ Each CPU owns one ring with today's #612 protocol; a global sequence from
 #656: retarget to LogRing.tla (serialization point = the slot word CAS) or
 close as superseded. #813: unblocked after slice 5 (trace records need a
 second payload kind or channel; decide then).
+
+## Route step 3 note: what the types carry (slice 6, 2026-10-18)
+
+The log ring is the CPU-shared-memory prototype for ROADMAP Territory A
+route step 3 (#613). This section records, as of slice 5, which parts of its
+protocol Takibi's types enforce and which live elsewhere, and why. It is the
+input for slice 7 (#720's generator) and is updated when a row moves.
+
+Carried by the types and the compiler today:
+
+- Reservation lifetime. `linear struct LogReservation` (private fields) is
+  minted only by kernel_log_reserve and consumed only by kernel_log_commit
+  or kernel_log_discard; kernel_log_write borrows it. Writing after commit,
+  committing twice and leaving a reservation unfinished are compile errors.
+- Reader validation shape. kernel_log_slot_view returns the must_use variant
+  KernelLogSlotView; only Readable carries a KernelLogUnvalidated (private
+  seq and observed word), so a reader cannot fabricate "this slot was
+  committed for seq" without the acquire load that saw it.
+- Observed-value compare-swap. Every compare-swap builtin returns
+  `Swapped | Observed(v)` (lib/cas_result.ml); the failure value is the one
+  the instruction read, so no second load stands in for it (#556).
+- CAS-then-load rule. A boolean compare-exchange followed by a load of the
+  same word is a compile error (lib/cas_load_rule.ml). It is syntactic and
+  per function: a different spelling of the same address is not caught.
+
+Not expressible in the types, and where it lives instead:
+
+| Property | Lives in | Why not in the types |
+| --- | --- | --- |
+| Claim rule (previous occupant finished and older), no double owner, no needless refusal, multi-slot continuation tied by seq | kernel/models/LogRing.tla (`make modelcheck`, unfixed configs aba, trustreserved, noprev, contnoseq, silentrefuse, exactprev) | Per-slot identity is a run-time seq inside an AtomicWord; the type system has no state indexed by a value another CPU changes |
+| No torn read: copied bytes kept only if kernel_log_still finds the same word | LogRing.tla NoTornRead | kernel_log_still returns bool; nothing ties the copy's use to its result. A linear "unvalidated copy" consumed by the recheck would carry it (slice 7 candidate) |
+| No silent loss (every sequence returned or reported) | LogRing.tla NoSilentLoss; at run time the end-of-boot `discarded=` line and log_storm_evidence (all CPUs, every sequence accounted) | A global counting property over all writers |
+| Memory ordering of claim, commit, text stores, recheck | herd7 litmus tests in kernel/models/litmus (Never for fixed, Sometimes for unfixed controls) | Ordering is a comment on AtomicWord, not part of a type (atomic_word.tkb, first limitation) |
+| The litmus tests describe the emitted code | scripts/run_litmus_checks.py with emitted_map.txt (disassembly lint, CASAL/STLR/LDAR classes per function) | The compiler does not expose per-access ordering to check against; the lint follows addresses only through moves, adds and two call levels |
+| Only log.tkb uses the raw acq_rel intrinsic | scripts/check_lock_discipline.py raw-atomic allowlist (kernel_log_cas) | No AtomicWord acq_rel cell op yet (#819) |
+| Per-CPU line stage not handed to another thread | `static_assert(KERNEL_PREEMPTIBLE == 0)` in kernel_log_execution_model_assumption | The stage lives across the caller's fragments, outside any preempt_off region (#638) |
+
+Slice 7 (#720's protocol declaration generator) would need, to replace the
+hand-written tokens:
+
+1. Protocols over CPU-shared memory, not only device registers: today
+   declarations are allowed only in kernel/DEVICE_SEMANTICS_FILES.
+2. Per-instance identity by a run-time value (the slot's seq), with
+   transitions named by atomic operations (reserve = head CAS, claim and
+   commit = slot-word CAS) and their ordering stated, so one source emits
+   LogRing.tla's actions, the sealed owners (LogReservation,
+   KernelLogUnvalidated) and the emitted_map rows. Litmus tests stay hand
+   written (decision 4 and language item 3).
+3. A consumed recheck token, so NoTornRead moves from TLA+ into the types.
+#789's ranked capability tokens are the analogous route for lock order; the
+console lock that kernel_log_emit_line holds would carry its rank there.
+
+Open items:
+
+- #819: AtomicWord acq_rel compare-swap and plain (relaxed) store cell ops,
+  so log.tkb leaves the raw allowlist and the text stores may become plain
+  (LogRingRecheck+plain-text shows the claim's acquire suffices).
+- Per-CPU line stage under preemption: still relies on no preemption; the
+  options are parked on #613 for the maintainer (#638).
+- #656: retarget LogReader replay to LogRing.tla (serialization point = the
+  slot-word CAS) or close as superseded (decision 5).
+- #813: continuous trace checking of the real kernel against LogRing.tla;
+  trace records need a second payload kind or channel, decided there.
