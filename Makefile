@@ -1767,10 +1767,21 @@ kernelbuild: build
 # before the long QEMU/RPi5 runs. This preserves the ordinary lane fan-out
 # while preventing another Make process from interleaving object writes.
 .PHONY: _kernelbuild-check kernelbuild-check
-_kernelbuild-check: _kernelbuild _kernelbuild-qemu-debug _kernelbuild-rpi5-debug \
+#
+# The images alone are a target of their own so CI can build them on every
+# core before its one-lane-at-a-time QEMU run (kernelbuild-images, #816
+# follow-up): at -j1 they took 17 of a QEMU part's minutes. The buildchecks
+# stay in _kernelbuild-check's recipe, so they still run once per lane run.
+.PHONY: _kernelbuild-images kernelbuild-images
+_kernelbuild-images: _kernelbuild _kernelbuild-qemu-debug _kernelbuild-rpi5-debug \
 	$(KERNEL_QEMU_NET_WAKE_CONTROL_ELF) $(KERNEL_QEMU_RACE_WINDOW_ELFS) \
 	kernel-debug-layout-check \
 	$(KERNEL_CRASH_SNAPSHOT_LAYOUT)
+
+kernelbuild-images: build
+	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) _kernelbuild-images
+
+_kernelbuild-check: _kernelbuild-images
 	python3 scripts/buildcheck_backing_exists.py $(TAKIBI) $(KERNEL_DEVICE_SEMANTICS) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_QEMU_USB_ABSENT_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_QEMU_MAIN_TKB)
 	python3 scripts/buildcheck_process_current_phase.py $(TAKIBI) $(KERNEL_DEVICE_SEMANTICS) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_QEMU_USB_ABSENT_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_QEMU_MAIN_TKB)
 	python3 scripts/buildcheck_user_write_result.py $(TAKIBI) $(KERNEL_DEVICE_SEMANTICS) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_QEMU_USB_ABSENT_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_QEMU_MAIN_TKB)
@@ -2318,14 +2329,26 @@ allcheck:
 ## every part exactly once.
 CICHECK_PART_LANG := langcheck slowcheck test linuxcheck
 CICHECK_PART_MODELS := modelcheck
-CICHECK_PART_QEMU := $(KERNELCHECK_QEMU_LANES)
-CICHECK_LANES := $(CICHECK_PART_LANG) $(CICHECK_PART_MODELS) $(CICHECK_PART_QEMU)
+##
+## The QEMU lanes are two parts, split by measured duration (#816 follow-up):
+## as one part, run 39108650565 spent 29 minutes building kernel images and
+## 46 running lanes, 75 of the 90-minute limit. The race-window lanes took
+## 1346 s there and the rest 1412 s, so the race windows are one part and
+## everything else the other. Both are filters of KERNELCHECK_QEMU_LANES, so
+## a new lane lands in one of them without being named here, and
+## scripts/check_ci_parts.py expands the parts and refuses a lane in none or
+## in two.
+KERNELCHECK_RACE_WINDOW_LANES := $(filter kernelcheck-race-window-%-qemu,$(KERNELCHECK_QEMU_LANES))
+CICHECK_PART_QEMU := $(filter-out $(KERNELCHECK_RACE_WINDOW_LANES),$(KERNELCHECK_QEMU_LANES))
+CICHECK_PART_RACE := $(KERNELCHECK_RACE_WINDOW_LANES)
+CICHECK_LANES := $(CICHECK_PART_LANG) $(CICHECK_PART_MODELS) $(CICHECK_PART_QEMU) $(CICHECK_PART_RACE)
 cicheck_lanes_cicheck := $(CICHECK_LANES)
 cicheck_lanes_cicheck-lang := $(CICHECK_PART_LANG)
 cicheck_lanes_cicheck-models := $(CICHECK_PART_MODELS)
 cicheck_lanes_cicheck-qemu := $(CICHECK_PART_QEMU)
-.PHONY: cicheck cicheck-lang cicheck-models cicheck-qemu
-cicheck cicheck-lang cicheck-models cicheck-qemu:
+cicheck_lanes_cicheck-race := $(CICHECK_PART_RACE)
+.PHONY: cicheck cicheck-lang cicheck-models cicheck-qemu cicheck-race
+cicheck cicheck-lang cicheck-models cicheck-qemu cicheck-race:
 	@status=0; . scripts/resource_lease.sh; \
 	rm -rf "$(LANE_TIMING_DIR)"; mkdir -p "$(LANE_TIMING_DIR)"; \
 	export TAKIBI_LANE_TIMING_DIR="$(LANE_TIMING_DIR)"; \

@@ -91,7 +91,7 @@ def main():
         result = summarize(empty)
         assert result.returncode != 0 and 'unknown arrival status' in result.stdout
     makefile = (ROOT / 'Makefile').read_text()
-    for target in ('allcheck:', 'cicheck cicheck-lang cicheck-models cicheck-qemu:'):
+    for target in ('allcheck:', 'cicheck cicheck-lang cicheck-models cicheck-qemu cicheck-race:'):
         CASES.note()
         recipe = makefile.split('\n' + target + '\n', 1)[1].split('\n\n', 1)[0]
         assert 'rm -rf "$(AWAIT_TIMING_DIR)"' in recipe

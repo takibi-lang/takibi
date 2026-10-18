@@ -5,9 +5,9 @@ name: CI
 # models, and the QEMU lanes. `make cicheck` is that set, derived from the same variable allcheck
 # uses so the two cannot drift apart.
 #
-# It runs as three parallel jobs, one per part of cicheck (GitHub issue
-# #816): `make cicheck-lang`, `cicheck-models` and `cicheck-qemu`, whose union
-# is cicheck. On one runner the serial set reached the 90-minute limit on
+# It runs as parallel jobs, one per part of cicheck (GitHub issue #816):
+# `make cicheck-lang`, `cicheck-models`, `cicheck-qemu` and `cicheck-race`
+# (the race-window QEMU lanes), whose union is cicheck. On one runner the serial set reached the 90-minute limit on
 # 2026-10-17: the QEMU lanes take about 47 minutes on their own, and the TLA+
 # models grew from 5 to roughly 15 minutes of a four-core runner (protocol
 # trace TLC windows #606, WorldStopRetry liveness #641, litmus #645, LogRing
@@ -60,7 +60,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        part: [lang, models, qemu]
+        part: [lang, models, qemu, race]
     # A hosted runner allows 6 hours; this cap only catches a hung lane. It
     # was 45 until 2026-10-02, when a green run already took 38m44s and every
     # longer one on main was cut off at 45m0s with no verdict at all.
@@ -104,12 +104,22 @@ jobs:
       # sha256-checked by scripts/fetch_model_tools.sh; the cache only
       # saves downloading Apalache's ~190 MB on every run, and is keyed on
       # that script so a version bump fetches afresh.
-      - uses: actions/setup-java@v4
+      # Each part sets up only the tools its lanes use (#816 follow-up):
+      # scripts/check_ci_parts.py derives which parts those are from the
+      # Makefile's part lists and refuses a tool step whose `if:` admits
+      # any other part. Java and the model tools serve modelcheck and every
+      # QEMU part (scripts/run_kernel_qemutest.sh replays the boot's
+      # protocol trace under TLC, #606); the lang part uses neither.
+      - name: Java (TLC and Apalache)
+        if: matrix.part != 'lang'
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "21"
 
-      - uses: actions/cache@v4
+      - name: Model tools cache
+        if: matrix.part != 'lang'
+        uses: actions/cache@v4
         with:
           path: /home/runner/model-tools
           key: model-tools-${{ hashFiles('scripts/fetch_model_tools.sh') }}
@@ -136,15 +146,32 @@ jobs:
       # reverse. The key hashes the script, which holds the version pin;
       # scripts/check_herdtools_pin.py checks that pin against the
       # devcontainer's and keeps the build behind the cache-hit guard.
+      # Only the models part runs litmuscheck. Restored and built there
+      # alone: on the first run after this cache landed every part missed
+      # and built it (seven minutes each, run 39108650565).
       - id: herd7-cache
+        name: herd7 cache
+        if: matrix.part == 'models'
         uses: actions/cache@v4
         with:
           path: /home/runner/herd7
           key: herd7-${{ hashFiles('scripts/build_herd7.sh') }}
 
       - name: Build herd7 (cache miss only)
-        if: steps.herd7-cache.outputs.cache-hit != 'true'
+        if: matrix.part == 'models' && steps.herd7-cache.outputs.cache-hit != 'true'
         run: bash scripts/run_lane.sh ci-herd7 bash scripts/build_herd7.sh /home/runner/herd7
+
+      # The QEMU parts' kernel images on every core, before the
+      # one-lane-at-a-time run below (#816 follow-up). Run 39108650565 spent
+      # 17 minutes building them at -j1 ahead of its first lane; nothing
+      # boots a guest here, so the starvation the comment below describes
+      # cannot happen. The checks then find them up to date. The buildchecks
+      # stay in the checks step (make kernelbuild-check's own recipe).
+      - name: Kernel images on every core (QEMU parts)
+        if: matrix.part == 'qemu' || matrix.part == 'race'
+        run: |
+          eval $(opam env)
+          bash scripts/run_lane.sh ci-kernel-images make kernelbuild-images
 
       # One lane at a time. Every QEMU lane runs `-smp $TAKIBI_QEMU_SMP` (4 by
       # default since #719; set it to 2 here if the debug lane stalls again --
