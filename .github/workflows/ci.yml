@@ -106,6 +106,12 @@ jobs:
           bash scripts/run_lane.sh ci-opam bash -euo pipefail -c '
             # dune-project is the dependency source; Dune generates takibi.opam.
             opam install -y --deps-only --with-test .
+            # GitHub issue #645: herd7 for the litmus tests in make
+            # modelcheck (part of cicheck). A model-checking tool, not a
+            # compiler dependency, so it is not in dune-project; the pin must
+            # equal the one in .devcontainer/devcontainer.json
+            # (scripts/check_herdtools_pin.py).
+            opam install -y herdtools7.7.58
           '
 
       # One lane at a time. Every QEMU lane runs `-smp $TAKIBI_QEMU_SMP` (4 by
