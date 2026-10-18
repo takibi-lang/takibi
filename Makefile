@@ -2310,24 +2310,38 @@ allcheck:
 ## aggregate with a compiler build and the unit suite, which is what
 ## saturates this machine. On a CI runner nothing else holds it, so the
 ## acquire returns immediately.
-.PHONY: cicheck
-cicheck:
+## The three parts below are cicheck split for CI's parallel jobs (GitHub
+## issue #816): one serial runner had outgrown the 90-minute job limit, and
+## the parts share nothing but the compiler build. cicheck is their union, so
+## a part cannot drop a lane that allcheck runs without cicheck dropping it
+## too. scripts/check_ci_parts.py checks that the workflow's matrix names
+## every part exactly once.
+CICHECK_PART_LANG := langcheck slowcheck test linuxcheck
+CICHECK_PART_MODELS := modelcheck
+CICHECK_PART_QEMU := $(KERNELCHECK_QEMU_LANES)
+CICHECK_LANES := $(CICHECK_PART_LANG) $(CICHECK_PART_MODELS) $(CICHECK_PART_QEMU)
+cicheck_lanes_cicheck := $(CICHECK_LANES)
+cicheck_lanes_cicheck-lang := $(CICHECK_PART_LANG)
+cicheck_lanes_cicheck-models := $(CICHECK_PART_MODELS)
+cicheck_lanes_cicheck-qemu := $(CICHECK_PART_QEMU)
+.PHONY: cicheck cicheck-lang cicheck-models cicheck-qemu
+cicheck cicheck-lang cicheck-models cicheck-qemu:
 	@status=0; . scripts/resource_lease.sh; \
 	rm -rf "$(LANE_TIMING_DIR)"; mkdir -p "$(LANE_TIMING_DIR)"; \
 	export TAKIBI_LANE_TIMING_DIR="$(LANE_TIMING_DIR)"; \
 	rm -rf "$(AWAIT_TIMING_DIR)"; mkdir -p "$(AWAIT_TIMING_DIR)"; \
 	export TAKIBI_AWAIT_TIMING_DIR="$(AWAIT_TIMING_DIR)"; \
-	resource_lease_run_suite cicheck \
-		$(MAKE) langcheck slowcheck test linuxcheck modelcheck $(KERNELCHECK_QEMU_LANES) \
+	resource_lease_run_suite $@ \
+		$(MAKE) $(cicheck_lanes_$@) \
 		|| status=$$?; \
 	echo; \
 	python3 scripts/summarize_lane_timing.py "$(LANE_TIMING_DIR)" || true; \
 	python3 scripts/summarize_await_timing.py "$(AWAIT_TIMING_DIR)" || true; \
 	echo "lane timing artifact: $(LANE_TIMING_DIR:$(CURDIR)/%=%)"; \
 	if [ $$status -eq 0 ]; then \
-		echo "PASS cicheck: langcheck slowcheck test linuxcheck modelcheck $(KERNELCHECK_QEMU_LANES)"; \
+		echo "PASS $@: $(cicheck_lanes_$@)"; \
 	else \
-		echo "FAIL cicheck: one or more checks failed (see the lane output above)" >&2; \
+		echo "FAIL $@: one or more checks failed (see the lane output above)" >&2; \
 		exit $$status; \
 	fi
 

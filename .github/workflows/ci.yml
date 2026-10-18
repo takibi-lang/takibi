@@ -2,8 +2,18 @@ name: CI
 
 # The hardware-free half of `make allcheck`, which is what a hosted runner can
 # run: langcheck, slowcheck, the compiler unit tests, linux_user, the TLA+
-# models, and the seven QEMU lanes. `make cicheck` is that set, derived from the same variable allcheck
+# models, and the QEMU lanes. `make cicheck` is that set, derived from the same variable allcheck
 # uses so the two cannot drift apart.
+#
+# It runs as three parallel jobs, one per part of cicheck (GitHub issue
+# #816): `make cicheck-lang`, `cicheck-models` and `cicheck-qemu`, whose union
+# is cicheck. On one runner the serial set reached the 90-minute limit on
+# 2026-10-17: the QEMU lanes take about 47 minutes on their own, and the TLA+
+# models grew from 5 to roughly 15 minutes of a four-core runner (protocol
+# trace TLC windows #606, WorldStopRetry liveness #641, litmus #645, LogRing
+# #613). scripts/check_ci_parts.py keeps the matrix and the Makefile parts in
+# step, and scripts/ci_time_budget.py fails a part that used more than
+# three quarters of its limit, so growth is reported while it still passes.
 #
 # The RPi5 lane is absent deliberately, not by oversight. A
 # GitHub-hosted runner has no board. A self-hosted runner on the machine that
@@ -47,6 +57,10 @@ concurrency:
 jobs:
   hardware-free:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [lang, models, qemu]
     # A hosted runner allows 6 hours; this cap only catches a hung lane. It
     # was 45 until 2026-10-02, when a green run already took 38m44s and every
     # longer one on main was cut off at 45m0s with no verdict at all.
@@ -59,6 +73,9 @@ jobs:
       TAKIBI_LANE_TIMING_DIR: ${{ github.workspace }}/_build/ci-timing
 
     steps:
+      - name: Job start
+        run: echo "CI_JOB_START=$(date +%s)" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@v4
 
       - name: Toolchain packages
@@ -157,7 +174,7 @@ jobs:
           # development host 90s is already several times what a boot takes.
           # Boot performance is calibrated separately from the capture budget:
           # hosted 35s, local 25s. The validator documents the measurements.
-          TAKIBI_JOBS=1 KERNEL_QEMU_TIMEOUT=240 KERNEL_QEMU_CEILING=720 KERNEL_QEMU_TIMING_PROFILE=hosted make cicheck
+          TAKIBI_JOBS=1 KERNEL_QEMU_TIMEOUT=240 KERNEL_QEMU_CEILING=720 KERNEL_QEMU_TIMING_PROFILE=hosted make cicheck-${{ matrix.part }}
         env:
           GH_TOKEN: ${{ github.token }}
           TAKIBI_MODEL_TOOLS_DIR: /home/runner/model-tools
@@ -170,6 +187,7 @@ jobs:
       # CI logs are retained, so running it here is what "recording changes
       # over time" costs nothing to mean today.
       - name: Trusted-base inventory
+        if: matrix.part == 'lang'
         run: |
           eval $(opam env)
           make trustedbasecheck
@@ -180,7 +198,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-failure-evidence
+          name: kernel-failure-evidence-${{ matrix.part }}
           retention-days: 14
           path: |
             _build/kernel-*/**/*.log
@@ -189,6 +207,12 @@ jobs:
             _build/ci-timing/
             kernel/build/qemu/*.elf
             kernel/build/rpi5/user_payload.elf
+
+      # GitHub issue #816: a part past three quarters of its limit fails
+      # here, while it still finishes, instead of being cancelled later with
+      # no verdict and no timing.
+      - name: CI time budget
+        run: python3 scripts/ci_time_budget.py "$CI_JOB_START" _build/lane-timing
 
       - name: Where the time went
         if: always()
@@ -207,7 +231,7 @@ jobs:
             echo "## Step durations recorded by GitHub"
             echo '```'
             gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs" \
-              --jq '.jobs[] | select(.name == "hardware-free") | .steps[]
+              --jq '.jobs[] | select(.name == "hardware-free (${{ matrix.part }})") | .steps[]
                     | "\(.conclusion // "running")\t\(.name)"' 2>&1 || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

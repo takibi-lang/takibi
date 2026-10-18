@@ -384,7 +384,11 @@ make clean
 so the two cannot drift, and named without `allcheck`/`hwcheck`/`kernelcheck`
 in it because unlike those it touches no board. It is what
 `.github/workflows/ci.yml` runs on every push and pull request, alongside
-`make allbuild` for the cross-tree compile proof.
+`make allbuild` for the cross-tree compile proof, as three parallel jobs
+`make cicheck-lang`, `cicheck-models` and `cicheck-qemu` whose union is
+cicheck (#816; `scripts/check_ci_parts.py`). Each job fails once it uses 75%
+of its time limit (`scripts/ci_time_budget.py`): split a part or explain the
+growth rather than raising the limit.
 
 `cicheck-as-ci` runs the same target pinned to four cores with one lane at a
 time and CI's wider guest timeout, so a failure that only appears on a runner
