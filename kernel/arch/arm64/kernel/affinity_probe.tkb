@@ -80,6 +80,9 @@ const AFFINITY_SIGTERM_STATUS: u8 = 143;
 const AFFINITY_PEER_SPINNER_NAPS: usize = 2000;
 // A millisecond each, so the whole wait is bounded at a quarter second.
 const AFFINITY_PEER_PIN_POLLS: usize = 256;
+// getcpu calls the remote target makes before it gives up on being handed
+// back (GitHub issue #776).
+const AFFINITY_REMOTE_ROUNDS: usize = 2000000;
 
 private fn affinity_say(line: borrow []const u8) !{unsafe} {
     // Raw ABI input only: these syscalls read the readonly bytes.
@@ -157,6 +160,44 @@ private fn affinity_spinner() {
         svc5(GETAFFINITY_SYSCALL, 0, 8, probe_mask as *u8 as usize, 0, 0);
     }
     svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
+}
+
+// GitHub issue #776: the target of a mask change made by ANOTHER process.
+// It pins itself to CPU 1, waits until getcpu says it is there, then widens
+// its mask to CPUs 0 and 1 -- a mask that still names CPU 1, so it stays --
+// which is how it tells the parent "I am running on the peer now" without a
+// pipe. From then on it calls getcpu until it reads CPU 0: the parent
+// narrows its mask to CPU 0 alone, and SYSCALLS.md's sched_setaffinity row
+// says a process on a peer its mask no longer names is handed back at its
+// next syscall. The exit status says which step failed.
+private fn affinity_remote_target() {
+    let mut mask: [u8; 8];
+    affinity_mask_fill(mask as []u8, 2, 0);
+    if (svc5(SETAFFINITY_SYSCALL, 0, 8, mask as *u8 as usize, 0, 0) != 0) {
+        svc5(EXIT_SYSCALL, 3, 0, 0, 0, 0);
+    }
+    let mut cpu_bytes: [u8; 4];
+    let mut arrived: bool = false;
+    let mut attempts: usize = 0;
+    while (arrived == false && attempts < AFFINITY_PIN_ATTEMPTS) {
+        attempts = attempts + 1;
+        if (affinity_cpu(cpu_bytes as []u8) == 1) { arrived = true; }
+    }
+    if (arrived == false) { svc5(EXIT_SYSCALL, 2, 0, 0, 0, 0); }
+    affinity_mask_fill(mask as []u8, 3, 0);
+    if (svc5(SETAFFINITY_SYSCALL, 0, 8, mask as *u8 as usize, 0, 0) != 0) {
+        svc5(EXIT_SYSCALL, 3, 0, 0, 0, 0);
+    }
+    // Bounded, so a kernel that never hands it back fails the lane by name
+    // rather than hanging it: the parent acts within milliseconds.
+    let mut rounds: usize = 0;
+    while (rounds < AFFINITY_REMOTE_ROUNDS) {
+        rounds = rounds + 1;
+        if (affinity_cpu(cpu_bytes as []u8) == 0) {
+            svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
+        }
+    }
+    svc5(EXIT_SYSCALL, 4, 0, 0, 0, 0);
 }
 
 fn affinity_probe() !{unsafe} {
@@ -524,5 +565,58 @@ fn affinity_probe() !{unsafe} {
     }
     affinity_say(
         bs"affinity: a spinner napping on cpu 1 took a SIGTERM sent from core 0\n");
+
+    // GitHub issue #776: this process, on core 0, narrows the mask of
+    // ANOTHER process while that one runs on CPU 1. The writer and the
+    // peer's syscall gate meet on the mask under the process-run lock; the
+    // target must be handed back at its next syscall.
+    let target: usize = svc5(CLONE_SYSCALL, CLONE_FORK_SIGCHLD, 0, 0, 0, 0);
+    if (target == 0) { affinity_remote_target(); }
+    if (target >= AFFINITY_ERROR_FLOOR) {
+        affinity_fail(bs"affinity: fork failed\n");
+    }
+    // The target widens its mask to CPUs 0 and 1 only once it is running on
+    // CPU 1, so reading that mask back is the target saying so.
+    let mut on_peer_polls: usize = 0;
+    let mut target_on_peer: bool = false;
+    while (target_on_peer == false && on_peer_polls < AFFINITY_PEER_PIN_POLLS) {
+        on_peer_polls = on_peer_polls + 1;
+        affinity_mask_fill(mask as []u8, 0, 0);
+        if (svc5(GETAFFINITY_SYSCALL, target, 8, mask_address, 0, 0) == 8 &&
+            affinity_mask_is(mask as []u8, 3)) {
+            target_on_peer = true;
+        } else {
+            svc5(NANOSLEEP_SYSCALL, pin_nap as *u8 as usize, 0, 0, 0, 0);
+        }
+    }
+    if (target_on_peer == false) {
+        affinity_fail(bs"affinity: the remote target never reported running on cpu 1\n");
+    }
+    affinity_mask_fill(mask as []u8, 1, 0);
+    if (svc5(SETAFFINITY_SYSCALL, target, 8, mask_address, 0, 0) != 0) {
+        affinity_fail(bs"affinity: narrowing another process's mask was refused\n");
+    }
+    for index: usize in 0..<4 { status[index] = 0; }
+    if (svc5(WAIT4_SYSCALL, target, status as *u8 as usize, 0, 0, 0) !=
+            target) {
+        affinity_fail(bs"affinity: the remote target was not reaped\n");
+    }
+    if (status[0] != 0) {
+        affinity_fail(bs"affinity: the remote target died of a signal\n");
+    }
+    if (status[1] == 2) {
+        affinity_fail(bs"affinity: the remote target never ran on cpu 1\n");
+    }
+    if (status[1] == 3) {
+        affinity_fail(bs"affinity: the remote target's own mask was refused\n");
+    }
+    if (status[1] == 4) {
+        affinity_fail(bs"affinity: a process on cpu 1 whose mask another process narrowed to cpu 0 was never handed back\n");
+    }
+    if (status[1] != 0) {
+        affinity_fail(bs"affinity: the remote target exited for a third reason\n");
+    }
+    affinity_say(
+        bs"affinity: a process on cpu 1 whose mask another process narrowed to cpu 0 was handed back at its next syscall\n");
     svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
 }

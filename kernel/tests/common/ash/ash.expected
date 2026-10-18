@@ -212,6 +212,7 @@ affinity: pinned to cpu 1, where parent_progress, outside the peer-safe table, s
 affinity: the napping spinner took the SIGTERM
 affinity: every cpu the kernel reports online ran this process, each confirmed by getcpu
 affinity: a spinner napping on cpu 1 took a SIGTERM sent from core 0
+affinity: a process on cpu 1 whose mask another process narrowed to cpu 0 was handed back at its next syscall
 spread: two unpinned compute-bound processes ended on different cpus
 spread: a Ready process was refused while another cpu owned its stack, and taken once it was released
 spread: a child spinning without a syscall left the cpu its mask stopped naming
