@@ -137,8 +137,8 @@ also be snapshotted and printed without a crash by
 row formatter, and neither prints from a scheduler or interrupt writer.
 
 `exception_evidence.tkb`'s per-core crash snapshots/capture guards and the
-machine-global `ddb_snapshot`. The historical `crash_snapshot` and
-`crash_snapshot_capturing` symbols are core 0's debugger ABI.
+machine-global `ddb_snapshot`. Core 0 records into element 0 like every
+other core; the GDB scripts read `crash_snapshot_per_core` by name (#822).
 
 **Why global:** the terminal crash record must survive the failing context,
 while resumable DDB must retain one bounded trace/FD/VM/process-table copy

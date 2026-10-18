@@ -99,21 +99,14 @@ struct CrashSnapshot {
     caller_return_pc: usize;
 }
 
-let mut crash_snapshot: CrashSnapshot;
-let mut crash_snapshot_capturing: bool;
+// GitHub issue #822: every core, core 0 included, records into its element
+// of these arrays, selected by hardware affinity; the GDB scripts read them
+// by name (scripts/kernel_crash_snapshot.gdb, scripts/kernel_state.gdb).
 private let mut crash_snapshot_per_core: [CrashSnapshot; KERNEL_MAX_CORES];
 private let mut crash_snapshot_capturing_per_core: [bool; KERNEL_MAX_CORES];
 
-// Preserve the historical core-0 symbols consumed by GDB/OpenOCD while each
-// peer records into storage selected by its hardware affinity.
 private fn crash_snapshot_here() -> *CrashSnapshot {
-    // core-role: core 0's snapshot keeps the historical `crash_snapshot`
-    // symbol GDB and OpenOCD read; peers use the per-core array
-    if (cpu_id() == 0) { return &crash_snapshot; }
-    let base: *CrashSnapshot = crash_snapshot_per_core;
-    let core: usize = cpu_id();
-    if (core >= KERNEL_MAX_CORES) { return base; }
-    return base + (core as isize);
+    return crash_snapshot_of(cpu_id());
 }
 
 // GitHub issue #486: the machine-wide fault ticket.
@@ -135,27 +128,16 @@ private fn crash_fault_order_address() -> usize {
 // arrangement kernel/lib/diagnostic_ring.tkb uses, and the same one DDB's own
 // snapshot uses through ddb_snapshot_published_sequence.
 private fn crash_snapshot_valid_address(core: usize) -> usize {
-    // core-role: core 0's record is the historical `crash_snapshot` symbol
-    // (above)
-    if (core == 0) { return (&crash_snapshot.valid) as usize; }
-    let base: *CrashSnapshot = crash_snapshot_per_core;
-    if (core >= KERNEL_MAX_CORES) { return (&crash_snapshot.valid) as usize; }
-    return (&(base + (core as isize)).valid) as usize;
+    return (&crash_snapshot_of(core).valid) as usize;
 }
 
 private fn crash_snapshot_of(core: usize) -> *CrashSnapshot {
-    // core-role: core 0's record is the historical `crash_snapshot` symbol
-    // (above)
-    if (core == 0) { return &crash_snapshot; }
     let base: *CrashSnapshot = crash_snapshot_per_core;
-    if (core >= KERNEL_MAX_CORES) { return &crash_snapshot; }
+    if (core >= KERNEL_MAX_CORES) { return base; }
     return base + (core as isize);
 }
 
 private fn crash_snapshot_capturing_here() -> *bool {
-    // core-role: the same historical core-0 symbol as crash_snapshot_here
-    // above
-    if (cpu_id() == 0) { return &crash_snapshot_capturing; }
     let base: *bool = crash_snapshot_capturing_per_core;
     let core: usize = cpu_id();
     if (core >= KERNEL_MAX_CORES) { return base; }

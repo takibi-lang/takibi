@@ -219,7 +219,6 @@ Special, with the reason it stays so today:
 | Device interrupts | UART, GEM, virtio-net and xHCI SPIs target core 0; a secondary's dispatch handles only its tick and PMU line | their drivers' state is touched only from core 0 | yes, with per-driver locking or an IRQ affinity policy (decision) |
 | DDB entry by UART BREAK | the UART IRQ branch on core 0 | follows the device interrupt row; DDB then stops the others through the world stop | follows the device row |
 | Console drain and UartTx blocking | `kernel/printk/log.tkb` | being removed by GitHub issue #613 slice 5 | in progress there |
-| Crash snapshot symbol | `crash_snapshot_here` (`exception_evidence.tkb`) | core 0 records into the historical `crash_snapshot` symbol GDB and OpenOCD read; peers into the per-core array | yes, by moving the tools to the array; cheap but touches the debug scripts |
 | Two-core probes and fixtures | `kernel_secondary_main`'s core-1 branch, `peer_tick_window`, the spread-timer and busy-pair fixtures | each is an experiment written for core 0 against CPU 1 | no: the fixed pair is the experiment |
 
 ## State transitions and the run guard
