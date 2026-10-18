@@ -30,7 +30,7 @@ set -euo pipefail
 
 trap 'takibi_status=$?; echo "[$(basename "$0")] aborted at line $LINENO with exit $takibi_status: $BASH_COMMAND" >&2' ERR
 
-prefix="${1:?usage: run_check_lane.sh <check|slowcheck> [timeout_seconds]}"
+prefix="${1:?usage: run_check_lane.sh <check|slowcheck> [timeout_seconds] [cpu_budget_ms] [cpu_budget_refs]}"
 timeout_seconds="${2:-0}"
 # GitHub issue #823: the wall-clock bound above trips only at 10 s, and a CPU-
 # bound member that took 2.7 s alone (check_dma_mint_files.py, rescanning every
@@ -41,6 +41,17 @@ timeout_seconds="${2:-0}"
 # bound this is a membership rule, not an estimate to raise: a member over it
 # caches its scans (scripts/source_scan.py per_file) or moves to slowcheck_*.
 cpu_budget_ms="${3:-0}"
+# GitHub issue #823, reopened: CPU time is not load-independent either. SMT
+# sharing, frequency scaling and cache contention took
+# check_source_scan_cache_controls.py from about 750 ms quiet to 2295 ms under
+# allcheck load, so the absolute budget alone was itself an intermittent. The
+# absolute number is now only the fast path: a member under it passes without
+# further cost. A member over it is judged against scripts/cpu_reference.py,
+# a fixed workload of the same kind run three times right after it under the
+# same load, and fails only when it used more than cpu_budget_refs times the
+# slowest of those runs. Load inflates both sides, so the verdict follows the
+# member's work, not the host's state.
+cpu_budget_refs="${4:-0}"
 
 # Children's user+system CPU so far, in milliseconds, from the `times` builtin
 # (its second line, "XmS.SSSs XmS.SSSs"), so no process is spawned to measure.
@@ -105,8 +116,25 @@ for member in "${members[@]}"; do
     fi
     children_cpu_ms; cpu_used=$(( children_cpu - cpu_before ))
     if [ "$cpu_budget_ms" -gt 0 ] && [ "$cpu_used" -gt "$cpu_budget_ms" ]; then
+        ref_ms=0
+        if [ "$cpu_budget_refs" -gt 0 ]; then
+            for _ in 1 2 3; do
+                children_cpu_ms; ref_before=$children_cpu
+                python3 "$repo_root/scripts/cpu_reference.py" > /dev/null
+                children_cpu_ms; ref_run=$(( children_cpu - ref_before ))
+                [ "$ref_run" -gt "$ref_ms" ] && ref_ms=$ref_run
+            done
+            if [ "$cpu_used" -le $(( cpu_budget_refs * ref_ms )) ]; then
+                echo "NOTE $prefix-lane: $(basename "$member") used ${cpu_used} ms" \
+                     "of CPU, over ${cpu_budget_ms} ms but within" \
+                     "${cpu_budget_refs} x ${ref_ms} ms reference runs (host load)" >&2
+                continue
+            fi
+        fi
         echo "FAIL $prefix-lane: $(basename "$member") used ${cpu_used} ms of" \
-             "CPU, over the ${cpu_budget_ms} ms member budget. Under host load" \
+             "CPU, over the ${cpu_budget_ms} ms member budget and over" \
+             "${cpu_budget_refs} x ${ref_ms} ms scripts/cpu_reference.py runs" \
+             "measured right after it. Under host load" \
              "that becomes a wall-clock timeout; cache repeated scans with" \
              "scripts/source_scan.py per_file, or rename it slowcheck_*." >&2
         exit 1

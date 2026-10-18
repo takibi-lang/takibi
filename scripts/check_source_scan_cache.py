@@ -50,32 +50,29 @@ REVIEWED = {
 }
 
 
-def imported_modules(tree: ast.Module) -> set:
+def facts_of(tree: ast.Module) -> tuple:
+    """(functools cache lines, imported module names), in one walk of the
+    tree: the walk is this check's whole cost (#823 reopened)."""
     names = set()
+    lines = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             names.update(alias.name.split(".")[0] for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
-            # source_scan also holds code_only (GitHub issue #815), which
-            # caches nothing: importing only that is not using the cache.
-            if (node.module == HELPER
-                    and not any(alias.name == "per_file" for alias in node.names)):
-                continue
-            names.add(node.module.split(".")[0])
-    return names
-
-
-def cache_uses(tree: ast.Module) -> list:
-    """Line numbers naming functools' lru_cache or cache."""
-    lines = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module == "functools":
-            if any(alias.name in ("lru_cache", "cache") for alias in node.names):
-                lines.append(node.lineno)
+        elif isinstance(node, ast.ImportFrom):
+            if node.module == "functools":
+                if any(alias.name in ("lru_cache", "cache") for alias in node.names):
+                    lines.append(node.lineno)
+            if node.module and node.level == 0:
+                # source_scan also holds code_only (GitHub issue #815), which
+                # caches nothing: importing only that is not using the cache.
+                if (node.module == HELPER
+                        and not any(alias.name == "per_file" for alias in node.names)):
+                    continue
+                names.add(node.module.split(".")[0])
         elif (isinstance(node, ast.Attribute) and node.attr in ("lru_cache", "cache")
               and isinstance(node.value, ast.Name) and node.value.id == "functools"):
             lines.append(node.lineno)
-    return lines
+    return lines, names
 
 
 def problems(modules: dict, reviewed: dict = REVIEWED) -> list:
@@ -123,7 +120,8 @@ def module_facts(name: str, text: str):
     """(functools cache lines, imported module names) of one script, cached
     by content: the controls change one module per case."""
     tree = ast.parse(text, filename=f"scripts/{name}.py")
-    return tuple(cache_uses(tree)), frozenset(imported_modules(tree))
+    lines, names = facts_of(tree)
+    return tuple(lines), frozenset(names)
 
 
 def tracked_modules() -> dict:
