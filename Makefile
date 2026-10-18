@@ -2205,8 +2205,8 @@ churn-long-qemu: kernelbuild-qemu $(KERNEL_SHELL_EXT2_IMAGE)
 	@python3 scripts/run_kernel_churn.py --platform qemu --long --rounds $(CHURN_LONG_ROUNDS)
 
 # Four-core shortened rollover finder, deliberately in no aggregate.
-churn-asid-qemu: kernelbuild-qemu $(KERNEL_SHELL_EXT2_IMAGE)
-	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) _build/kernel-churn-layout.gdb
+churn-asid-qemu: kernelbuild-qemu
+	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) $(KERNEL_SHELL_EXT2_IMAGE) _build/kernel-churn-layout.gdb
 	@KERNEL_QEMU_SHELL_SMP=4 python3 scripts/run_kernel_churn.py --platform qemu --long --rounds 300 --asid-jump 65000 --gdb-stall-dump --stall-seconds 300
 
 hwcheck-churn-long-rpi5: kernelbuild-rpi5
@@ -2418,7 +2418,11 @@ modelcheck: build litmuscheck
 
 HERD7        ?= herd7
 LLVM_OBJDUMP ?= llvm-objdump-19
-litmuscheck: $(KERNEL_RPI5_MAIN_O)
+# The kernel object is built under the kernel build lock, like every lane's
+# kernel output: as a direct prerequisite it raced allcheck's kernel lanes
+# building the same ext2.img (scripts/check_lane_kernel_prereqs.py).
+litmuscheck: build
+	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) $(KERNEL_RPI5_MAIN_O)
 	@command -v $(HERD7) >/dev/null 2>&1 || { \
 		echo "FAIL litmus-herd7: $(HERD7) not on PATH; run eval \$$(opam env) (opam install herdtools7, pinned in .devcontainer/devcontainer.json)" >&2; exit 1; }
 	@python3 scripts/run_litmus_checks.py $(HERD7) $(LLVM_OBJDUMP) $(KERNEL_RPI5_MAIN_O)
@@ -2441,8 +2445,9 @@ KERNEL_RAW_CONFINE := --confine-raw-authority $(foreach f,$(KERNEL_RAW_MINT_FILE
 # per-file raw-site counts (count, file; declared or not) to choose the
 # next file to leave the list.
 .PHONY: raw-site-counts
-raw-site-counts: $(KERNEL_QEMU_MAIN_O) $(KERNEL_RPI5_MAIN_O)
-	@for o in $^; do echo "== $$o"; sed 's|$(CURDIR)/||' $$o.rawsites.tsv; done
+raw-site-counts: build
+	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) $(KERNEL_QEMU_MAIN_O) $(KERNEL_RPI5_MAIN_O)
+	@for o in $(KERNEL_QEMU_MAIN_O) $(KERNEL_RPI5_MAIN_O); do echo "== $$o"; sed 's|$(CURDIR)/||' $$o.rawsites.tsv; done
 # GitHub issue #720 option a: only the files in kernel/DEVICE_SEMANTICS_FILES
 # may declare a device protocol (a region with a tx/rx direction). GitHub
 # issue #796: the compiler rejects a stale entry (a missing file, or a

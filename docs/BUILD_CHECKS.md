@@ -171,6 +171,8 @@ suffix is description; dispatch reads only the prefix.
 | `check_keyword_tables.py` | the lexer's keyword table and `Language_words.hard_keywords` name the same words, so a new keyword cannot silently lex as an identifier (#704) |
 | `check_repeat_kernel_lane_controls.sh` | Regression controls for the repeat runner's two modes |
 | `check_roadmap_size.py` | ROADMAP.md stays the current work split rather than regrowing into a knowledge base |
+| `check_lane_kernel_prereqs.py` | no public phony Make target names a kernel build output as a direct prerequisite; it must build it under the kernel build lock (#645 land: litmuscheck raced allcheck's kernel lanes on ext2.img) |
+| `check_lane_kernel_prereqs_controls.py` | a direct object, a continued-line image and a literal kernel/build path are refused; private inner targets, file rules, order-only directories and reviewed targets pass |
 | `check_herdtools_pin.py` | the herdtools7 opam pin (herd7 for `make litmuscheck`, #645) is one version and the same in .devcontainer/devcontainer.json and .github/workflows/ci.yml |
 | `check_herdtools_pin_controls.py` | a drifted CI pin, an unpinned devcontainer install and two pins in one file are refused |
 | `check_rpi5_set_kernel_byte_controls.py` | Controls for the live RPi5 kernel-byte writer without using the board |
