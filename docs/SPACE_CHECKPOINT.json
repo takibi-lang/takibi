@@ -2,8 +2,8 @@
   "date": "2026-10-18",
   "event": "incremental",
   "decision": "reuse",
-  "source_sha256": "6289b52d719b97208fa1216bfd298dee46475d5d7ad6e82a4b20611333a1c4b7",
-  "workload": "#638 slice: comment and static_assert message text only (ext2 mutation lock, both intc files). No storage, allocation or code change; the previous measured review (#771) stands.",
+  "source_sha256": "1e59e421926522c66b16bc789a640bc416526c6a55348660608b0c071c54f2d4",
+  "workload": "#638 slice: comment and static_assert message text only (ext2 mutation lock, both intc files, three boot-fixture asserts). No storage, allocation or code change; the previous measured review (#771) stands.",
   "evidence": [
     "docs/PAGE_RUN_SCAN_SPACE_2026-10-17.md",
     "docs/SLOT_POOLS_EXEC_SYSCALL_SPACE_2026-10-17.md",
