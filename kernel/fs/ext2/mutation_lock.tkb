@@ -25,11 +25,10 @@
 //   cache hit, read-ahead run -- return before any lock at all.
 //
 // So a reader instead ASKS whether a mutation is in flight, with one
-// acquire-load and no spin. A peer reader that finds one is sent to core 0
-// by the migration gate (SyscallAction::Migrate: rerun this syscall on core
-// 0). A core 0 reader has nowhere to go, so it waits for an interrupt and
-// reruns (GitHub issue #597). Neither is an error returned to userspace,
-// which would fail /bin/peer-read's chunk verdict.
+// acquire-load and no spin. A reader that finds one, on any core, waits for
+// an interrupt and reruns its syscall in place (GitHub issues #597, #775).
+// It is not an error returned to userspace, which would fail
+// /bin/peer-read's chunk verdict.
 //
 // RANK 20, OUTSIDE THE DEVICE LOCK
 //

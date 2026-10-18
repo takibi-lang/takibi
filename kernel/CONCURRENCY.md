@@ -214,6 +214,10 @@ Symmetric now:
   console poll, which only core 0 acts on (the UART input-flow request,
   inside `kernel_log_console_poll`), and core 1 alone runs the two-core
   probes (the probes row).
+- An ext2 read that finds a mutation in flight: the calling core, whichever
+  it is, waits for an interrupt and reruns the syscall in place
+  (`kernel_syscall_dispatch_action`, #775). A peer used to migrate the call
+  to core 0 to wait there.
 
 Special, with the reason it stays so today:
 
@@ -224,7 +228,6 @@ Special, with the reason it stays so today:
 | Slot 0 / PID 1's record | `kernel_process_cpu_allows_slot` | slot 0 is the static bootstrap record, Ready before it has a resumable EL0 frame, and its context is core 0's boot stack | yes, by making it an ordinary pooled record (decision; #672 evidence) |
 | The root process's exec | `syscall_execve_current_with` | it returns through `run_initial_user`, core 0's boot entry into PID 1 | follows the slot 0 row |
 | Syscalls outside the peer-safety table | `syscall_peer_refused`, `syscall_peer_safe`; rerun on core 0 with the process pinned for the call | each names a subsystem whose state only core 0 touches: UART attributes (ioctl), inetd-mode connected descriptors, the BusyBox Extras exec that resets the TCP pool | yes, one subsystem at a time; each entry is its own follow-up |
-| An ext2 read that finds a mutation in flight | `kernel_syscall_dispatch_action` | a peer migrates the call to core 0; core 0, with nowhere to send it, waits for an interrupt and reruns it | yes, every core could wait in place (decision: changes placement) |
 | Deadline and NetRx wakes | `timer_irq_handler` runs `kernel_process_deadline_wake_all` and `kernel_process_net_wake_all`; `kernel_secondary_timer_schedule` runs neither | one walker of every slot per tick; a peer sleeper is woken by core 0's tick, so a long core-0 mask (DDB) delays it | yes (decision: every tick walks, or per-CPU deadline lists) |
 | Device interrupts | UART, GEM, virtio-net and xHCI SPIs target core 0; a secondary's dispatch handles only its tick and PMU line | their drivers' state is touched only from core 0 | yes, with per-driver locking or an IRQ affinity policy (decision) |
 | DDB entry by UART BREAK | the UART IRQ branch on core 0 | follows the device interrupt row; DDB then stops the others through the world stop | follows the device row |

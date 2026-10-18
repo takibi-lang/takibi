@@ -5865,9 +5865,8 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     // GitHub issue #533: a reader must not read a tree that is being
     // rewritten. The mutators hold kernel/fs/ext2/mutation_lock.tkb; this
     // asks, with one acquire-load and no wait, whether one is inside right
-    // now. A peer hands its syscall to core 0 if so. Core 0 asks too since
-    // GitHub issue #597 let a peer mutate: it has nowhere to hand the call,
-    // so it waits for an interrupt and reruns it.
+    // now. If so, the calling core -- any core -- waits for an interrupt
+    // and reruns the syscall (GitHub issues #597, #775).
     //
     // GitHub issue #533: asked of anything that reaches ext2, independently
     // of whether the peer-safe table admits it. A normal process can now run
@@ -5883,10 +5882,10 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     // refuses has been sent to core 0 above already.
     if (syscall_reaches_filesystem(number, x0)) {
         if (ext2_read_enter() == false) {
-            // core-role: core 0 is where refused calls go, so it waits instead
-            // of migrating
-            if (cpu_id() == 0) { return syscall_finish_current(frame, SyscallAction::WaitInterrupt, current_authority); }
-            return syscall_finish_current(frame, SyscallAction::Migrate, current_authority);
+            // GitHub issue #775: every core waits in place. A peer used to
+            // hand the call to core 0 to wait there, which changed the
+            // process's placement for a condition no core owns.
+            return syscall_finish_current(frame, SyscallAction::WaitInterrupt, current_authority);
         }
         syscall_ext2_reader[syscall_scratch_cpu_index()] = true;
     }
