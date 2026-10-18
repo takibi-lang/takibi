@@ -112,11 +112,16 @@ in full -- not only the lanes you think your change touches. They take
 minutes and need no board, and they are the land's own prechecks: on
 2026-10-12 a linux_user test that imported a kernel file, and a host-script
 log expectation, each failed a land that the worker's chosen lanes had
-passed. Name the result in your report's verification line.
+passed. Name the result in your report's verification line. When the branch
+changes anything under `scripts/`, also run `make slowcheck`: its controls copy
+partial trees and import scripts, and on 2026-10-19 a scripts/ change failed a
+land there that langcheck had passed. Do not move HEAD (no checkpoint commit)
+while a full run is in progress; a run that straddles a commit is not
+evidence for either head.
 
 Do not close the issue yourself unless your prompt says to; the closing commit
 lands through the coordinator after it checks the audit against DECISIONS.md
-and the maintainer approves the land. The coordinator quotes escalated audit
+(and, for an escalated item, after the maintainer approves the land). The coordinator quotes escalated audit
 items verbatim, so write each item to stand on its own, and expect it to send
 back fixes that a coordinator default calls for.
 
