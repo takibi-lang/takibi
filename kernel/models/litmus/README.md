@@ -1,9 +1,14 @@
 # Litmus tests for the kernel log's memory ordering (GitHub issue #645)
 
-STATUS: WORK IN PROGRESS. The verdicts in expected.txt have not yet been run
-through herd7 (the pinned herdtools7 build is not yet working), and the
-check that ties each test to the compiler's emitted instructions is not yet
-written.
+`make litmuscheck` (a prerequisite of `make modelcheck`, so in allcheck and
+CI's cicheck) runs herd7 over every test against expected.txt, then ties the
+fixed tests to the RPi5 kernel object through emitted_map.txt
+(scripts/run_litmus_checks.py). herd7 comes from opam: herdtools7, pinned in
+.devcontainer/devcontainer.json and .github/workflows/ci.yml, which
+scripts/check_herdtools_pin.py keeps equal. A pass is bounded evidence: the
+AArch64 model says the two-thread shape is forbidden, and the lint says the
+named functions use those instructions; it does not prove the Takibi code
+has no other ordering dependency.
 
 Each test is the two-thread message-passing shape of one ordering claim in
 kernel/printk/log.tkb (#612), with unfixed controls that weaken one access.

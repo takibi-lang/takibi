@@ -2407,11 +2407,21 @@ allbuild:
 # GitHub issue #601: the TLA+ models under kernel/models/, checked with TLC
 # and Apalache. Fetches the pinned tools on first use. A lane of allcheck
 # and cicheck.
-.PHONY: modelcheck
-modelcheck: build
+# GitHub issue #645: the kernel log's litmus tests under herd7 (from opam,
+# pinned in .devcontainer/devcontainer.json and ci.yml), and their tie to the
+# instructions in the RPi5 kernel object.
+.PHONY: modelcheck litmuscheck
+modelcheck: build litmuscheck
 	@bash scripts/lane_timing.sh begin modelcheck
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_model_checks.sh
 	@bash scripts/lane_timing.sh end modelcheck 0
+
+HERD7        ?= herd7
+LLVM_OBJDUMP ?= llvm-objdump-19
+litmuscheck: $(KERNEL_RPI5_MAIN_O)
+	@command -v $(HERD7) >/dev/null 2>&1 || { \
+		echo "FAIL litmus-herd7: $(HERD7) not on PATH; run eval \$$(opam env) (opam install herdtools7, pinned in .devcontainer/devcontainer.json)" >&2; exit 1; }
+	@python3 scripts/run_litmus_checks.py $(HERD7) $(LLVM_OBJDUMP) $(KERNEL_RPI5_MAIN_O)
 
 clean:
 	dune clean

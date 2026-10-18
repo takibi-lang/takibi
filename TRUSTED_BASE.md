@@ -239,7 +239,13 @@ rules globally.
   claim. The inventory reports these blocks as `raw atomic operation` and
   checks that their source files agree with RULE 2's allowlist in
   `scripts/check_lock_discipline.py`. This identifies the review question; it
-  does not prove the protocol correct.
+  does not prove the protocol correct. Bounded model check (GitHub issue
+  #645): the kernel log's #612 publication (text word before length; record
+  count before slot reuse; reader acquire loads and re-check) is checked by
+  herd7 against the AArch64 model in `kernel/models/litmus/`, with unfixed
+  controls, and `scripts/run_litmus_checks.py` ties each test's STLR/LDAR to
+  the named functions in the RPi5 kernel object. The two-thread shapes are
+  what is checked; other orderings in log.tkb remain reviewed.
 - DMA/cache builtins provide target-specific cache and ordering operations.
   Buffer ownership, descriptor validity, device completion, cache topology,
   and the chosen protocol remain trusted unless represented by separate

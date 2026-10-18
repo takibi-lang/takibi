@@ -1,0 +1,35 @@
+# Each fixed litmus test's accesses, tied to the code the compiler emitted
+# (GitHub issue #645; scripts/run_litmus_checks.py). One row per location a
+# litmus thread accesses:
+#
+#   access <test> <thread> <litmus location> <takibi function> <global>...
+#
+# The litmus instruction that touches the location (STLR, LDAR, ...) must be
+# the instruction class of EVERY access of that direction (store for a
+# writer thread's location, load for a reader's) the function makes to each
+# listed global, directly or through a helper it passes the address to. At
+# least one such access must exist.
+#
+#   order <test> <thread> <takibi function> <global A> <global B>
+#
+# Program order: every access to A (in the thread's direction) comes before
+# every access to B, by address in the function's code. That is program
+# order for code where no loop carries an access to A past one to B; a row
+# is only written where none does.
+
+# LogPublish: core 0 stores a text word, then the length that admits it.
+access LogPublish P0 text kernel_log_capture_retained_byte kernel_log_text
+access LogPublish P0 length kernel_log_capture_retained_byte kernel_log_lengths
+order LogPublish P0 kernel_log_capture_retained_byte kernel_log_text kernel_log_lengths
+access LogPublish P1 length kernel_log_snapshot_record kernel_log_lengths
+access LogPublish P1 text kernel_log_snapshot_record kernel_log_text
+order LogPublish P1 kernel_log_snapshot_record kernel_log_lengths kernel_log_text
+
+# LogReuse: beginning a record publishes the count first, then the slot.
+access LogReuse P0 started kernel_log_start_line kernel_log_started
+access LogReuse P0 data kernel_log_start_line kernel_log_cpu kernel_log_ticks kernel_log_lengths kernel_log_stamps
+access LogReuse P0 data kernel_log_capture_retained_byte kernel_log_text kernel_log_lengths
+order LogReuse P0 kernel_log_start_line kernel_log_started kernel_log_stamps
+access LogReuse P1 data kernel_log_snapshot_record kernel_log_stamps kernel_log_lengths kernel_log_cpu kernel_log_ticks kernel_log_text
+access LogReuse P1 started kernel_log_snapshot_record kernel_log_started
+order LogReuse P1 kernel_log_snapshot_record kernel_log_text kernel_log_started
