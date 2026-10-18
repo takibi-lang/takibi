@@ -387,9 +387,13 @@ and refuses before TLC a record wider than K = 2. The TLC controls
 (`scripts/log_ring_trace_tlc_controls.py`, in `make modelcheck`) refuse a
 torn read, a silent loss and a double owner, the last also with the claim's
 guard removed (`CHECK_PREV = FALSE`), where the model breaks
-`NoDoubleOwner`. The kernel does not record windows yet: where the
-recording hooks go is the open decision on #656. Until then the only input
+`NoDoubleOwner`. The kernel does not record windows yet; the only input
 is `kernel/tests/qemu/log_ring_trace_synthetic.window`, written by hand.
+Measured on simulated windows: writer streams alone check in seconds (4
+CPUs x 8 records, 12 s), but a reader stream beside them multiplies the
+interleavings TLC must try (3 CPUs x 5 records with a 15-record read did
+not finish in 180 s), so a recorded window needs some order between
+streams, or a short read.
 
 Found while writing it: the kernel reader skips a continuation whose first
 slot is gone (`KernelLogSlotView::Continuation` -> `Skipped(1)`) without
