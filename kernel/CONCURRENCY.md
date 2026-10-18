@@ -81,9 +81,10 @@ does not span a blocking call, before the flip.
 
 Raising either prints a worklist: files assert the constant they depend on
 with a per-site message. `scripts/check_execution_model_coverage.py` requires
-every file with a mutable global to name a constant or appear in its exempt
-list with a reason, because two files that depended on the core count without
-saying so were each found by accident.
+every file with a mutable global to carry a `static_assert` on a constant (a
+mention in a comment does not count, GitHub issue #814) or appear in its exempt
+list with a non-empty reason, because two files that depended on the core count
+without saying so were each found by accident.
 
 An assertion message is prose and nothing checks it stays true. Three went
 stale within days of their subject being fixed. Re-read the assertion when you

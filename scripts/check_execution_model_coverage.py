@@ -21,8 +21,11 @@ different file, and two cores on it produce 1618 double frees. Then
 kernel/kernel/workload_evidence.tkb turned out to be the same, found the
 same way.
 
-So: a file that declares a mutable global must either name one of the two
-constants, or appear in EXEMPT below with a reason. An entry there is a
+So: a file that declares a mutable global must either assert one of the two
+constants in code -- a `static_assert(` whose condition names it, outside any
+`//` comment -- or appear in EXEMPT below with a non-empty reason. A mention
+in a comment does not count (GitHub issue #814): eight files once passed by
+a comment that said they did NOT depend on the constant. An entry there is a
 claim a reviewer can disagree with, which is what silence was not.
 
 Deliberately NOT a check that the assertion is CORRECT. Four assertion
@@ -38,10 +41,52 @@ import re
 import sys
 
 from pass_line import report_pass
+from source_scan import per_file
 
 KERNEL = pathlib.Path("kernel")
 CONSTANTS = ("KERNEL_ACTIVE_CORES", "KERNEL_PREEMPTIBLE")
 GLOBAL_RE = re.compile(r"^(?:private )?let mut ", re.M)
+ASSERT_RE = re.compile(
+    r"\bstatic_assert\s*\(\s*[^,;]*?\b(?:%s)\b" % "|".join(CONSTANTS))
+
+
+def strip_comments(text):
+    """Drop every `//` comment, leaving string literals intact."""
+    out = []
+    for line in text.splitlines():
+        in_str = False
+        i = 0
+        while i < len(line):
+            c = line[i]
+            if in_str:
+                if c == "\\":
+                    i += 1
+                elif c == '"':
+                    in_str = False
+            elif c == '"':
+                in_str = True
+            elif line.startswith("//", i):
+                line = line[:i]
+                break
+            i += 1
+        out.append(line)
+    return "\n".join(out)
+
+
+@per_file
+def asserts_model(text):
+    """True when the code (not a comment) holds a static_assert whose
+    condition names an execution-model constant."""
+    return bool(ASSERT_RE.search(strip_comments(text)))
+
+
+def verdict(rel, text, exempt):
+    """'assert', 'exempt', 'silent' or 'no-reason' for one stateful file."""
+    if asserts_model(text):
+        return "assert"
+    if rel in exempt:
+        return "exempt" if exempt[rel].strip() else "no-reason"
+    return "silent"
 
 # path -> why this file's mutable state needs no execution-model assertion.
 # Adding a name here is a claim. "Not audited" is a legitimate entry and is
@@ -78,8 +123,11 @@ EXEMPT = {
         "every write is made holding the process-run lock, and the report "
         "reads the buffer only after a hold has closed the window",
     "arch/arm64/kernel/secondary.tkb":
-        "the secondary core's own entry point, which carries its own "
-        "assertion in kernel_secondary_main",
+        "the secondary cores' entry point: the boot-state and tick words are "
+        "per-core atomics, and the online count is written only by core 0 "
+        "around each CPU_ON (one writer) and read as an io word; the entry "
+        "once carried an assertion, but it no longer does, and the earlier "
+        "reason claiming one was stale (GitHub issue #814)",
 
     # --- Device state, single-core by interrupt routing rather than by a
     # number. Device SPIs are targeted at CPU0 (gicd_itargetsr8 =
@@ -193,6 +241,36 @@ EXEMPT = {
         "whose whole purpose is to hold whatever the core count becomes; an "
         "assertion on that count would be backwards",
 
+    # --- GitHub issue #814: these files mentioned a constant only in a
+    # comment, and each comment says the file does NOT depend on it. The
+    # reasons below restate those comments.
+    "arch/arm64/kernel/platform_uart_common.tkb":
+        "the UART RX callback is installed once on CPU0 before the RX source "
+        "is unmasked and never replaced; UART interrupts are routed to CPU0",
+    "kernel/fd_table.tkb":
+        "pools are guard-required by typing, refcounts and the slot total "
+        "share the refcount Mutex, descriptor chains are owned by their "
+        "process lifecycle, and the probe words are atomics",
+    "lib/occupancy.tkb":
+        "the world-stop controller's words are atomics, its generation is "
+        "written only by the holder of the atomic claim, and "
+        "KERNEL_ACTIVE_CORES is only its storage bound",
+    "mm/address_space.tkb":
+        "the backing pool is guard-required by typing, its ready flag settles "
+        "on core 0 before PSCI starts core 1, fallback storage is per-core, "
+        "and root 0's backing is immutable after MMU-off boot",
+    "net/socket_capability.tkb":
+        "every public operation takes network_capability_store.mutex",
+    "platform/qemu/intc.tkb":
+        "GIC addresses and INTIDs, written by CPU0's boot device discovery "
+        "before secondaries start and read-only afterwards",
+    "platform/rpi5/intc.tkb":
+        "the RP1 MIP/MSI-X IoHandles, attached on CPU0 during boot before "
+        "secondaries start",
+    "platform/rpi5/psci_dtb.tkb":
+        "the PSCI conduit flag, written by the boot core before CPU_ON; "
+        "secondaries never enter the parser",
+
     # --- Test-only state, reached from the boot fixture on core 0.
     "init/test_driver.tkb":
         "boot fixture state, driven from core 0's boot sequence only",
@@ -231,14 +309,12 @@ def main():
     asserting = []
     exempt = []
     silent = []
+    no_reason = []
     for path, text in stateful:
         rel = str(path.relative_to(KERNEL))
-        if any(c in text for c in CONSTANTS):
-            asserting.append(rel)
-        elif rel in EXEMPT:
-            exempt.append(rel)
-        else:
-            silent.append(rel)
+        kind = verdict(rel, text, EXEMPT)
+        {"assert": asserting, "exempt": exempt, "silent": silent,
+         "no-reason": no_reason}[kind].append(rel)
 
     stale = [name for name in EXEMPT
              if not (KERNEL / name).exists()
@@ -247,11 +323,15 @@ def main():
     failures = []
     for rel in silent:
         failures.append(
-            "%s declares mutable state and names neither "
-            "KERNEL_ACTIVE_CORES nor KERNEL_PREEMPTIBLE: state that is "
-            "safe only because of one of those numbers must say so, or be "
-            "listed in this script with the reason it does not need to"
-            % rel)
+            "%s declares mutable state and has no static_assert on "
+            "KERNEL_ACTIVE_CORES or KERNEL_PREEMPTIBLE (a mention in a "
+            "comment does not count): state that is safe only because of "
+            "one of those numbers must assert it, or be listed in this "
+            "script with the reason it does not need to" % rel)
+    for rel in no_reason:
+        failures.append(
+            "%s is exempted with an empty reason: an exemption is a claim "
+            "a reviewer can disagree with only when it says something" % rel)
     for name in stale:
         failures.append(
             "%s is exempted here but no longer has mutable state (or no "
