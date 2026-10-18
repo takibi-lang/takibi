@@ -80,8 +80,8 @@ const AFFINITY_SIGTERM_STATUS: u8 = 143;
 const AFFINITY_PEER_SPINNER_NAPS: usize = 2000;
 // A millisecond each, so the whole wait is bounded at a quarter second.
 const AFFINITY_PEER_PIN_POLLS: usize = 256;
-// getcpu calls the remote target makes before it gives up on being handed
-// back (GitHub issue #776).
+// Mask polls the remote target makes before it gives up on seeing the
+// parent's narrowing (GitHub issue #776).
 const AFFINITY_REMOTE_ROUNDS: usize = 2000000;
 
 private fn affinity_say(line: borrow []const u8) !{unsafe} {
@@ -188,16 +188,27 @@ private fn affinity_remote_target() {
     if (svc5(SETAFFINITY_SYSCALL, 0, 8, mask as *u8 as usize, 0, 0) != 0) {
         svc5(EXIT_SYSCALL, 3, 0, 0, 0, 0);
     }
-    // Bounded, so a kernel that never hands it back fails the lane by name
-    // rather than hanging it: the parent acts within milliseconds.
+    // Poll its OWN mask until the parent's narrowing is visible, then ask
+    // getcpu once. That getcpu is the next syscall after the change, so the
+    // peer gate must already have handed this process to core 0: either
+    // the poll that saw CPU 0 alone was itself rewound there, or getcpu is.
+    // Waiting for getcpu to read 0 instead would also pass on the EL0 tick
+    // handback (#582) with the syscall gate removed -- the negative control
+    // run for #776 showed exactly that -- so the check is one call, not a
+    // loop. Bounded, so a kernel that never changes the mask fails by name.
     let mut rounds: usize = 0;
     while (rounds < AFFINITY_REMOTE_ROUNDS) {
         rounds = rounds + 1;
-        if (affinity_cpu(cpu_bytes as []u8) == 0) {
-            svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
+        affinity_mask_fill(mask as []u8, 0, 0);
+        if (svc5(GETAFFINITY_SYSCALL, 0, 8, mask as *u8 as usize, 0, 0) == 8 &&
+            affinity_mask_is(mask as []u8, 1)) {
+            if (affinity_cpu(cpu_bytes as []u8) == 0) {
+                svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
+            }
+            svc5(EXIT_SYSCALL, 4, 0, 0, 0, 0);
         }
     }
-    svc5(EXIT_SYSCALL, 4, 0, 0, 0, 0);
+    svc5(EXIT_SYSCALL, 5, 0, 0, 0, 0);
 }
 
 fn affinity_probe() !{unsafe} {
@@ -612,6 +623,9 @@ fn affinity_probe() !{unsafe} {
     }
     if (status[1] == 4) {
         affinity_fail(bs"affinity: a process on cpu 1 whose mask another process narrowed to cpu 0 was never handed back\n");
+    }
+    if (status[1] == 5) {
+        affinity_fail(bs"affinity: the remote target never saw its mask narrowed\n");
     }
     if (status[1] != 0) {
         affinity_fail(bs"affinity: the remote target exited for a third reason\n");
