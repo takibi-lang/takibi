@@ -1,9 +1,9 @@
 {
   "date": "2026-10-18",
-  "event": "milestone",
-  "decision": "measured",
-  "source_sha256": "2426dfe6c2dec52cf81b84871062c43d939327c1e256cf85dc8af83035f7af4f",
-  "workload": "#613 slice 4: the retained kernel log on the option-B ring (slot state words, linear reservation token, multi-slot records, static 640-byte core-0 line stage, syslog and DDB readers). Measured with scripts/space_delta.py against origin/main: text 708212 -> 713844 B qemu, 760848 -> 766576 B rpi5; BSS 1486512 -> 1485104 B qemu, unchanged rpi5; usable_ram_start unchanged.",
+  "event": "incremental",
+  "decision": "reuse",
+  "source_sha256": "aa368b67ad4132718963db859bef0ded3f1e8625f1c8d90f042ba7ec7df22300",
+  "workload": "#816 follow-up on top of #613 slice 4: CI splits the QEMU lanes into cicheck-qemu and cicheck-race and prebuilds kernel images (make kernelbuild-images); the only production-source change is the Makefile. No kernel code, storage or linker change; the #613 slice 4 log ring measurement in this record stands. Previous: #613 slice 4: the retained kernel log on the option-B ring (slot state words, linear reservation token, multi-slot records, static 640-byte core-0 line stage, syslog and DDB readers). Measured with scripts/space_delta.py against origin/main: text 708212 -> 713844 B qemu, 760848 -> 766576 B rpi5; BSS 1486512 -> 1485104 B qemu, unchanged rpi5; usable_ram_start unchanged.",
   "evidence": [
     "docs/LOG_RING_SPACE_2026-10-18.md",
     "docs/PAGE_RUN_SCAN_SPACE_2026-10-17.md",
