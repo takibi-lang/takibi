@@ -3,7 +3,7 @@
 
 kernel/lib/execution_model.tkb declares two numbers -- KERNEL_ACTIVE_CORES
 and KERNEL_PREEMPTIBLE -- that most of this kernel's unsynchronized state is
-safe BECAUSE OF, and nine files assert them so that raising either is a
+safe BECAUSE OF, and the files that depend on them assert them so that raising either is a
 build failure at each site rather than a silent change of meaning.
 
 That file's own header names the hole this script fills:

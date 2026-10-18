@@ -183,8 +183,8 @@ fn platform_irq_dispatch_inner(frame: sink FrameRef[process], lower_el: bool)
         // REQUEST a reschedule, so the switch happens on the way out of
         // the syscall and a handler always runs to completion. That is
         // KERNEL_PREEMPTIBLE == 0 in kernel/lib/execution_model.tkb, and
-        // nine files assert it. Changing this line means changing that
-        // constant, which will tell you which nine.
+        // the files that depend on it assert it. Changing this line means
+        // changing that constant, whose assertions then name every site.
         if (lower_el) {
             kernel_stack_guard_check_interrupt(frame_ref_address(frame));  // issue #375
             let switch: TimerSwitch = kernel_process_timer_schedule(frame);

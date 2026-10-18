@@ -115,7 +115,7 @@ fn ext2_mutation_take() -> Ext2MutationGuard[ext2_mutation_lock]
         !{acquires_lock_20_ext2_mutation, lock_guard_20_ext2_mutation,
           unsafe} {
     static_assert(KERNEL_PREEMPTIBLE == 0,
-                  "a mutator waits for every CPU's ext2 readers, so a reader preempted on this CPU would be waited for forever");
+                  "a mutator spins for every CPU's ext2 readers holding a TaskMutex; a reader preempted on this CPU would be waited for forever. Lock-holder group of GitHub issue #638: lifted with the linear PreemptOff token and #789's ranked lock tokens, not by a per-CPU region");
     task_mutex_acquire(&ext2_mutation_lock);
     // The Dekker half: the lock is visibly held before the count is read,
     // and ext2_read_enter publishes its count before it reads the lock, so
