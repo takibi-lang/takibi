@@ -374,6 +374,9 @@ fn kernel_timer_tick_leave(switch: TimerSwitch) -> AnyFrame !{interrupt} {
     match switch {
         TimerSwitch::Resume(frame) => { return frame_any(frame); }
         TimerSwitch::ToIdle => {
+            // core-role: core 0 idles on core0_idle_stack because its boot
+            // stack still holds main()'s frames; peers idle on their PSCI
+            // entry stacks
             if (cpu_id() != 0) { kernel_secondary_idle_tick_enter(); }
             kernel_core0_idle_tick_enter();
         }
@@ -440,6 +443,8 @@ fn kernel_secondary_tick(frame: sink FrameRef[process], lower_el: bool, is_timer
 // window of CNTFRQ >> 4 covers several ticks with margin.
 fn secondary_ticks_independent_for(
         core: {0..<KERNEL_MAX_CORES as usize}) -> bool !{unsafe} {
+    // core-role: the probe asks whether a SECONDARY ticks while core 0 masks;
+    // core 0 is the asker
     if (core == 0) { return false; }
     let window: i64 = read_cntfrq() >> 4;
     disable_irq();

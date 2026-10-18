@@ -107,6 +107,8 @@ private let mut crash_snapshot_capturing_per_core: [bool; KERNEL_MAX_CORES];
 // Preserve the historical core-0 symbols consumed by GDB/OpenOCD while each
 // peer records into storage selected by its hardware affinity.
 private fn crash_snapshot_here() -> *CrashSnapshot {
+    // core-role: core 0's snapshot keeps the historical `crash_snapshot`
+    // symbol GDB and OpenOCD read; peers use the per-core array
     if (cpu_id() == 0) { return &crash_snapshot; }
     let base: *CrashSnapshot = crash_snapshot_per_core;
     let core: usize = cpu_id();
@@ -133,6 +135,8 @@ private fn crash_fault_order_address() -> usize {
 // arrangement kernel/lib/diagnostic_ring.tkb uses, and the same one DDB's own
 // snapshot uses through ddb_snapshot_published_sequence.
 private fn crash_snapshot_valid_address(core: usize) -> usize {
+    // core-role: core 0's record is the historical `crash_snapshot` symbol
+    // (above)
     if (core == 0) { return (&crash_snapshot.valid) as usize; }
     let base: *CrashSnapshot = crash_snapshot_per_core;
     if (core >= KERNEL_MAX_CORES) { return (&crash_snapshot.valid) as usize; }
@@ -140,6 +144,8 @@ private fn crash_snapshot_valid_address(core: usize) -> usize {
 }
 
 private fn crash_snapshot_of(core: usize) -> *CrashSnapshot {
+    // core-role: core 0's record is the historical `crash_snapshot` symbol
+    // (above)
     if (core == 0) { return &crash_snapshot; }
     let base: *CrashSnapshot = crash_snapshot_per_core;
     if (core >= KERNEL_MAX_CORES) { return &crash_snapshot; }
@@ -147,6 +153,8 @@ private fn crash_snapshot_of(core: usize) -> *CrashSnapshot {
 }
 
 private fn crash_snapshot_capturing_here() -> *bool {
+    // core-role: the same historical core-0 symbol as crash_snapshot_here
+    // above
     if (cpu_id() == 0) { return &crash_snapshot_capturing; }
     let base: *bool = crash_snapshot_capturing_per_core;
     let core: usize = cpu_id();
@@ -2823,6 +2831,8 @@ fn ddb_render_world_stop_holder() !{interrupt, unsafe} {
     ddb_put_udec(world_stop_reporter_word(2));
     ddb_puts(" acks=");
     for cpu: usize in 0..<KERNEL_MAX_CORES {
+        // core-role: not a role -- a separator before every CPU after the
+        // first
         if (cpu != 0) { ddb_puts(","); }
         ddb_put_udec(world_stop_reporter_ack(cpu));
     }

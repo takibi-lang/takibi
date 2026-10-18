@@ -3509,6 +3509,8 @@ private fn syscall_syslog_with(slot: borrow SyscallSlot[0],
     // GitHub issue #612: the peer_syslog view's line, once, from the first
     // complete read on a peer. The snapshot it copied is whole records only,
     // with any overwritten while it read counted on a line of its own.
+    // core-role: peer_syslog view evidence: reported once from a read on any
+    // peer
     if (cpu_id() != 0 && syscall_syslog_peer_reported == false) {
         syscall_syslog_peer_reported = true;
         kernel_boot_log(
@@ -3665,6 +3667,9 @@ fn kernel_syscall_block_return(frame_sp: usize) {
         // GitHub issue #583: published Blocked with no successor; leave its
         // stack for this CPU's idle context.
         BlockSwitch::ToIdle => {
+            // core-role: core 0 idles on core0_idle_stack because its boot
+            // stack still holds main()'s frames; peers idle on their PSCI
+            // entry stacks
             if (cpu_id() != 0) { kernel_secondary_idle_block_enter(); }
             kernel_core0_idle_block_enter();
         }
@@ -3915,6 +3920,8 @@ fn kernel_syscall_clone_parent_action(switch: sink ExitSwitch)
 fn kernel_syscall_clone_parent_return(parent_sp: usize) {
     kernel_process_child_exec_reap();
     if (parent_sp == 0) {
+        // core-role: core 0 idles on core0_idle_stack because its boot stack
+        // still holds main()'s frames; peers idle on their PSCI entry stacks
         if (cpu_id() != 0) {
             kernel_secondary_idle_enter();
         }
@@ -4634,7 +4641,9 @@ fn syscall_peer_safe(number: usize, fd: usize, second: usize) -> bool {
     if (number == AARCH64_NR_SCHED_YIELD) {
         return true;
     }
-    // A per-process deadline that any CPU's tick wakes (86fb1cbd).
+    // A per-process deadline, held in the caller's own record (86fb1cbd).
+    // Only core 0's tick runs kernel_process_deadline_wake_all, for a
+    // sleeper on any CPU (see "Core roles" in kernel/CONCURRENCY.md).
     if (number == AARCH64_NR_NANOSLEEP ||
         number == AARCH64_NR_CLOCK_NANOSLEEP) {
         return true;
@@ -5837,6 +5846,8 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     // A peer that hands a process back has somewhere to go: the architectural
     // idle loop it booted into. Core 0 does not rewind the call; it lets it
     // finish and hands the process away at the return (below).
+    // core-role: a peer rewinds a call its mask excludes and idles; core 0
+    // lets the call finish and hands the process away at the return
     if (cpu_id() != 0) {
         // Affinity may have been changed by another CPU. Take the process
         // run lock for this scheduling-boundary snapshot, then release it
@@ -5857,6 +5868,8 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // return parks this one Ready and idles core 0 (#592).
         kernel_process_reschedule_if_excluded_here();
     }
+    // core-role: calls outside the peer-safety table run on core 0 (UART
+    // attributes, inetd descriptors)
     if (cpu_id() != 0 && syscall_peer_safe(number, x0, x1) == false) {
         return syscall_finish_current(frame, SyscallAction::Migrate, current_authority);
     }
@@ -5881,6 +5894,8 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     // refuses has been sent to core 0 above already.
     if (syscall_reaches_filesystem(number, x0)) {
         if (ext2_read_enter() == false) {
+            // core-role: core 0 is where refused calls go, so it waits instead
+            // of migrating
             if (cpu_id() == 0) { return syscall_finish_current(frame, SyscallAction::WaitInterrupt, current_authority); }
             return syscall_finish_current(frame, SyscallAction::Migrate, current_authority);
         }
@@ -8211,6 +8226,8 @@ private inline fn syscall_execve_current_with(slot: borrow SyscallSlot[0],
     // exec in inetd mode: its close-on-exec pass may close a connected
     // descriptor, and in that mode those are core 0's (see
     // syscall_peer_safe).
+    // core-role: the root process's exec returns through run_initial_user,
+    // core 0's boot entry into PID 1
     if (cpu_id() != 0 && (kernel_process_is_child(current_authority) == false ||
         kernel_syscall_inetd_mode())) {
         return SyscallAction::Migrate;
@@ -8295,6 +8312,8 @@ private inline fn syscall_execve_current_with(slot: borrow SyscallSlot[0],
     // connection pool core 0's network path owns. That exec, alone,
     // stays core 0's; nothing has been written yet, so the rerun there
     // starts clean.
+    // core-role: the BusyBox Extras exec resets the TCP pool core 0's network
+    // path owns
     if (cpu_id() != 0 && exec_inode != 0 &&
         kernel_exec_primary_is_busybox_extras(exec_inode)) {
         return SyscallAction::Migrate;

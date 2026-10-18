@@ -29,6 +29,8 @@ linear struct PeerTickWindow[p: usize] {
 }
 
 fn peer_tick_window_peer() -> {0..<KERNEL_MAX_CORES as usize} !{unsafe} {
+    // core-role: two-core probe: the peer is the other member of the core 0 /
+    // CPU 1 pair
     if (cpu_id() == 0) { return 1; }
     return 0;
 }

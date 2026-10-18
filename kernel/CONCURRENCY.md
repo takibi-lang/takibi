@@ -181,6 +181,47 @@ no current process and makes the process Ready under the run lock. It
 acknowledges the interrupt, and only then leaves the IRQ stack for the
 idle loop (`kernel_timer_tick_leave`).
 
+## Core roles
+
+Every core's role should be as equal as possible, and wherever one core
+stays special the reason is written down (GitHub issue #775). This is the
+inventory, checked against the code on 2026-10-18. In `.tkb` code a
+comparison of a core identity with a literal core number carries a
+`// core-role:` comment saying why, which `scripts/check_core_role_sites.py`
+enforces; fixture files whose scripted roles name cores on purpose are
+declared there as whole files. A fixed core reached any other way -- a
+constant such as `SECONDARY_CORE_ID`, an assembly branch, an interrupt
+route -- is listed here by hand.
+
+Symmetric now:
+
+- Taking a timer tick, entering the syscall and scheduler paths, and running
+  any process whose affinity allows the core.
+- Starting a world stop (GitHub issue #632) and serving one.
+- The PMU overflow line: every core enables its own through
+  `gic_pmu_core_enable` and samples in one dispatch branch (#775; core 0
+  had its own enable and its own branch before).
+- Crash capture on a fault, and the per-core rows of DDB's `intr` and tick
+  views.
+
+Special, with the reason it stays so today:
+
+| Role | Where | Why core 0 | Could be symmetric? |
+|---|---|---|---|
+| Boot | `boot/entry.S` parks every MPIDR but 0; core 0 runs `main()`, the GIC distributor, device bring-up and the boot fixtures | the firmware hands off one core, and machine-wide state is initialized once | no: one core has to come first |
+| PSCI start authority | `cpu_start_reserve` (`lib/occupancy.tkb`) | starting cores is a boot phase; no hotplug exists | only with CPU hotplug, which nothing needs |
+| Slot 0 / PID 1's record | `kernel_process_cpu_allows_slot` | slot 0 is the static bootstrap record, Ready before it has a resumable EL0 frame, and its context is core 0's boot stack | yes, by making it an ordinary pooled record (decision; #672 evidence) |
+| The root process's exec | `syscall_execve_current_with` | it returns through `run_initial_user`, core 0's boot entry into PID 1 | follows the slot 0 row |
+| Syscalls outside the peer-safety table | `syscall_peer_refused`, `syscall_peer_safe`; rerun on core 0 with the process pinned for the call | each names a subsystem whose state only core 0 touches: UART attributes (ioctl), inetd-mode connected descriptors, the BusyBox Extras exec that resets the TCP pool | yes, one subsystem at a time; each entry is its own follow-up |
+| An ext2 read that finds a mutation in flight | `kernel_syscall_dispatch_action` | a peer migrates the call to core 0; core 0, with nowhere to send it, waits for an interrupt and reruns it | yes, every core could wait in place (decision: changes placement) |
+| Idle context | `kernel_core0_idle_*` vs `kernel_secondary_idle_*`, four call sites | core 0's boot stack still holds `main()`'s suspended frames, so it idles on `core0_idle_stack`; a peer idles on its PSCI entry stack | yes, once core 0 abandons `main()`'s frames after boot; medium cost |
+| Deadline and NetRx wakes | `timer_irq_handler` runs `kernel_process_deadline_wake_all` and `kernel_process_net_wake_all`; `kernel_secondary_timer_schedule` runs neither | one walker of every slot per tick; a peer sleeper is woken by core 0's tick, so a long core-0 mask (DDB) delays it | yes (decision: every tick walks, or per-CPU deadline lists) |
+| Device interrupts | UART, GEM, virtio-net and xHCI SPIs target core 0; a secondary's dispatch handles only its tick and PMU line | their drivers' state is touched only from core 0 | yes, with per-driver locking or an IRQ affinity policy (decision) |
+| DDB entry by UART BREAK | the UART IRQ branch on core 0 | follows the device interrupt row; DDB then stops the others through the world stop | follows the device row |
+| Console drain and UartTx blocking | `kernel/printk/log.tkb` | being removed by GitHub issue #613 slice 5 | in progress there |
+| Crash snapshot symbol | `crash_snapshot_here` (`exception_evidence.tkb`) | core 0 records into the historical `crash_snapshot` symbol GDB and OpenOCD read; peers into the per-core array | yes, by moving the tools to the array; cheap but touches the debug scripts |
+| Two-core probes and fixtures | `kernel_secondary_main`'s core-1 branch, `peer_tick_window`, the spread-timer and busy-pair fixtures | each is an experiment written for core 0 against CPU 1 | no: the fixed pair is the experiment |
+
 ## State transitions and the run guard
 
 The spread fixture observes the timer's no-successor leave through a

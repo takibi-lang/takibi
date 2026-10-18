@@ -466,6 +466,8 @@ fn cpu_start_reserve(core: {0..<KERNEL_MAX_CORES as usize})
           changes_witness_RegionInspection__ProcessFdContext,
           changes_witness_RegionInspection__FdBlock,
           changes_witness_RegionInspection__ProcessImageRecord} {
+    // core-role: core 0 holds the PSCI start authority and is never itself
+    // started
     if (core == 0 || cpu_id() != 0) { return CpuStartResult::Busy; }
     let irq_flags: usize = mutex_irq_save();
     match world_stop_claim_as(&kernel_world_stop, WORLD_STOP_CLAIM_START) {

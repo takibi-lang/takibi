@@ -205,7 +205,9 @@ fn platform_irq_init() {
 
     timer_irq_setup();
 
-    gic_pmu_spi_enable();
+    // GitHub issue #775: core 0 enables its own PMU line through the same
+    // per-core helper every secondary calls from kernel_secondary_main.
+    gic_pmu_core_enable();
 
     enable_irq();
 }
@@ -227,20 +229,14 @@ fn platform_irq_init() {
 // bit that reads back clear beside neighbors that read back set says the
 // interrupt number itself is wrong.
 
-// The PMU's SPI is level-sensitive: ICFGR cleared, not set.
-fn gic_pmu_spi_enable() {
-    gic_intid_target(RPI5_PMU_GIC_INTID, 1);
-    gic_intid_edge(RPI5_PMU_GIC_INTID, false);
-    gic_intid_clear_pending(RPI5_PMU_GIC_INTID);
-    gic_intid_enable(RPI5_PMU_GIC_INTID);
-}
-
 // GitHub issue #497: this core's own PMU overflow line, for the sampling
 // profiler on every core. Core N's is SPI 16 + N (see the constant's
-// note); it is routed to core N alone. Core 0's is set up above.
+// note); it is routed to core N alone. The SPI is level-sensitive: ICFGR
+// cleared, not set. Core 0 calls this too (GitHub issue #775); it once had
+// a twin that wrote the same four registers for INTID 48 and target 1.
 fn gic_pmu_core_enable() {
     let core: usize = cpu_id();
-    if (core == 0 || core >= KERNEL_MAX_CORES) { return; }
+    if (core >= KERNEL_MAX_CORES) { return; }
     let intid: u32 = RPI5_PMU_GIC_INTID + (core as u32);
     gic_intid_target(intid, (1 << core) as u8);
     gic_intid_edge(intid, false);
@@ -276,24 +272,26 @@ fn rpi5_irq_dispatch_inner(frame: sink FrameRef[process], lower_el: bool)
     }
     workload_profile_irq_enter();
 
-    // GitHub issue #447: the secondary core takes its own timer tick and
-    // goes back to sleep. It must not fall into anything below -- every
-    // branch there reaches kernel state (the net wake list, the scheduler,
-    // DDB), and this core reaching none of it is what keeps
-    // KERNEL_ACTIVE_CORES at 1 while a second core runs kernel code.
-    // GICC_IAR is read before the branch, not after: acknowledging is the
-    // interrupted core's own job on its own banked interface.
-    // GitHub issue #497: a secondary's own PMU overflow, before the tick
-    // path below, which handles nothing else and would leave this
+    // GitHub issue #497: a PMU overflow, on any core, before the tick path
+    // below, which handles nothing else and would leave this
     // level-triggered line asserted -- a storm of millions per second, seen
-    // on the first four-core RPi5 session.
-    if (cpu_id() != 0 && id >= RPI5_PMU_GIC_INTID &&
+    // on the first four-core RPi5 session. Sampling takes the interrupted PC
+    // out of the frame this entry already saved and acknowledges the
+    // overflow before the EOI (GitHub issue #500). Core 0 once had its own
+    // copy of this branch further down (GitHub issue #775).
+    if (id >= RPI5_PMU_GIC_INTID &&
             id < RPI5_PMU_GIC_INTID + (KERNEL_MAX_CORES as u32)) {
         profile_sample_irq(frame);
         gicc.eoir = iar;
         workload_profile_irq_exit();
         return frame_any(frame);
     }
+    // core-role: device interrupts are routed to core 0 alone, so a
+    // secondary takes only its own timer tick here, which runs the shared
+    // scheduling policy (GitHub issues #447 and #775; see "Core roles" in
+    // kernel/CONCURRENCY.md). Everything below -- device drivers, the
+    // UART's DDB break -- is core 0's. GICC_IAR was read above: acknowledging
+    // is the interrupted core's own job on its own banked interface.
     if (cpu_id() != 0) {
         let switch: TimerSwitch = kernel_secondary_tick(
             frame, lower_el, id == rpi5_timer_gic_intid);
@@ -319,13 +317,6 @@ fn rpi5_irq_dispatch_inner(frame: sink FrameRef[process], lower_el: bool)
         gem_irq_handler();
 
         rp1_vector_iack(RP1_GEM_VECTOR);
-    } else if (id >= RPI5_PMU_GIC_INTID &&
-               id < RPI5_PMU_GIC_INTID + (KERNEL_MAX_CORES as u32)) {
-        // GitHub issue #500: the flat PC sample. Takes the interrupted PC
-        // out of the frame this entry already saved, and acknowledges the
-        // PMU overflow before the EOI below -- the overflow status is what
-        // holds the interrupt line asserted.
-        profile_sample_irq(frame);
     } else if (id == rpi5_timer_gic_intid) {
         timer_irq_handler();
         // GitHub issue #453: this branch is why most of kernel/ can share

@@ -92,6 +92,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_stopped_pool_inspection.py` | the finite RegionPool diagnostic mint set borrows full-stop authority, retains IRQ exclusion, and has complete resume/start invalidation annotations |
 | `check_stopped_pool_inspection_controls.py` | missing context markers, weakened mint contracts and an unreviewed inspection mint are refused |
 | `check_world_stop_refusals.py` | no `WorldStopResult::Busy` or `Partial` arm fail-stops the kernel; a refused world stop is waited out or handed back (#632) |
+| `check_core_role_sites.py` | every literal fixed-core comparison in kernel `.tkb` carries a `core-role:` reason (#775) |
 | `check_irq_restore_sites.py` | no `enable_irq()` restores interrupts without consulting the state it overwrites |
 | `check_kernel_asm_entries.py` | the Makefile declares exactly the Takibi functions kernel assembly calls by name as entry points |
 | `check_kernel_asm_invariants_controls.py` | Controls for the SCTLR alignment-policy disassembly check |
@@ -215,6 +216,7 @@ for several rounds it gated `allbuild` so no kernel lane ran at all.
 | `slowcheck_ddb_qemu_capture_controls.py` | Retained UART/software BREAK captures exercise the shared live/offline predicates; missing evidence, wrong values and ordering violations fail with individual diagnoses |
 | `slowcheck_ddb_signal_names_controls.py` | Controls for the DDB signal-vocabulary check |
 | `slowcheck_fallback_counters_controls.py` | Controls for the dead-slot fallback report check |
+| `slowcheck_core_role_sites_controls.py` | Controls for the core-role site check |
 | `slowcheck_irq_restore_sites_controls.py` | Controls for the IRQ-restore site check |
 | `slowcheck_pass_line_counts_controls.py` | Controls for the PASS-line guard, in both directions |
 | `slowcheck_platform_file_parity_controls.py` | Controls for the platform-parity check, both halves of it |

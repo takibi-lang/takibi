@@ -5418,6 +5418,8 @@ fn kernel_process_cpu_allows_slot(guard: borrow ProcessRunGuard[lock], cpu: usiz
     // can be Ready before it has a resumable EL0 frame; keep it on the core
     // that owns the bootstrap execution context. Unset affinity on every
     // pooled process still means every online CPU.
+    // core-role: slot 0 stays on core 0 (above); a call the peer-safety gate
+    // refused runs on core 0 until it completes
     if (slot == 0) { return cpu == 0; }
     if (scheduled_process_core0_for_call(guard, slot)) { return cpu == 0; }
     let mask: usize = scheduled_process_affinity_mask(guard, slot);
@@ -5463,6 +5465,8 @@ fn kernel_process_core0_idle_was_seen(
 // core 0 is off its stack.
 fn kernel_process_core0_leave_excluded(frame: borrow FrameRef[process])
         -> bool !{changes_witness_ProcessCurrent} {
+    // core-role: core 0's half of the leave; peers use
+    // kernel_process_migrate_current
     if (cpu_id() != 0) { return false; }
     let guard = process_run_lock();
     if (execution_state[execution_cpu_index()].current_live == false) {
@@ -5520,6 +5524,8 @@ fn kernel_process_reschedule_if_excluded_here() {
 // already names where it may go; pinning it to core 0 would override the
 // mask the process just set and send it to a CPU it excluded.
 fn kernel_process_migrate_current(frame: borrow FrameRef[process]) -> bool !{changes_witness_ProcessCurrent} {
+    // core-role: a peer hands a refused call to core 0; core 0 has nowhere to
+    // hand it
     if (cpu_id() == 0) { return false; }
     let guard = process_run_lock();
     if (execution_state[execution_cpu_index()].current_live == false) {
@@ -5567,6 +5573,7 @@ must_use variant SpreadTimerResult { Invalid; Armed; Pending; Observed; }
 fn kernel_process_spread_timer_progress(pid: usize, arm: bool)
         -> SpreadTimerResult !{unsafe} {
     let guard = process_run_lock();
+    // core-role: spread-timer fixture: its parent runs on CPU 1 by script
     if (cpu_id() != 1 || execution_state[execution_cpu_index()].current_live == false ||
         kernel_process_current_has_child_pid_locked(guard, pid) == false) {
         process_run_unlock(guard);
@@ -5645,6 +5652,8 @@ private fn kernel_process_spread_timer_enter(frame: borrow FrameRef[process]) {
     let guard = process_run_lock();
     match spread_timer_phase {
         SpreadTimerPhase::Armed => {
+            // core-role: spread-timer fixture: the child starts on core 0 and
+            // is re-pinned away
             if (cpu_id() == 0 && execution_state[execution_cpu_index()].current_live &&
                 scheduled_process_handle_matches(spread_timer_child) &&
                 scheduled_process_same_slot(execution_state[execution_cpu_index()].current_handle,
@@ -5673,6 +5682,7 @@ private fn kernel_process_spread_timer_left(guard: borrow ProcessRunGuard[lock],
                                             outgoing: ProcessHandle) {
     match spread_timer_phase {
         SpreadTimerPhase::Changed => {
+            // core-role: spread-timer fixture: the child leaves core 0
             if (cpu_id() == 0 && scheduled_process_same_slot(outgoing, spread_timer_child) &&
                 scheduled_process_same_generation(outgoing, spread_timer_child)) {
                 spread_timer_phase = SpreadTimerPhase::Left;
@@ -5735,6 +5745,7 @@ fn kernel_process_stack_owner_probe(pid: usize) -> usize !{unsafe} {
         return 0;
     }
     let mut other_cpu: usize = 0;
+    // core-role: two-CPU fixture: the other CPU of the core 0 / CPU 1 pair
     if (cpu_id() == 0) { other_cpu = 1; }
     scheduled_process_record_locked(guard, slot).stack_owner_cpu = other_cpu;
     let mut refused: bool = true;
