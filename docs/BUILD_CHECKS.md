@@ -38,6 +38,8 @@ suffix is description; dispatch reads only the prefix.
 | `check_agents_paths_controls.py` | an untracked directory or an empty glob does not satisfy a path root guidance names |
 | `check_ash_bin_inventory.py` | ash's expected /bin listing matches every image-recipe entry in order |
 | `check_ash_bin_inventory_controls.py` | Controls for additions, omissions, and unrecognized /bin image commands |
+| `check_assume_init_sites.py` | every function in maintained kernel/ and linux_user/ Takibi code that calls `assume_init` (comments blanked) is listed in TRUSTED_BASE.md as `path:function`, and every listed site still calls it (#764) |
+| `check_assume_init_sites_controls.py` | an unlisted `assume_init` site and a stale TRUSTED_BASE.md listing are refused; a comment-only mention is ignored; the listed real sites are accepted |
 | `check_dma_qemu_transcript_controls.py` | The DMA QEMU runner waits for the complete diagnostic under every serial byte split; partial success/failure markers never terminate capture |
 | `check_found_by_policy_controls.py` | Controls for the `Found-by:` and `Protocol:` trailers an issue-closing commit must carry |
 | `check_capture_kernel_console_controls.py` | A GDB error with exit zero, nonzero exit, timeout and absent sidecars remain unavailable; success needs reader completion and every attempt restores the prior run state |
