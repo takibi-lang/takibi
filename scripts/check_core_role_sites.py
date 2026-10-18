@@ -64,9 +64,6 @@ FILE_REASONS = {
         "boot contention fixture: core 0 holds while a peer contends",
     "kernel/kernel/tcp_connection_contention_evidence.tkb":
         "boot contention fixture: a peer contends with core 0",
-    "kernel/printk/log.tkb":
-        "core 0's log drain is being removed by GitHub issue #613 slice 5; "
-        "its remaining sites are marked or removed when that lands",
 }
 
 
