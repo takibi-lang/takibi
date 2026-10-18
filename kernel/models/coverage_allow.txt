@@ -20,3 +20,7 @@ ConsoleTx fixed Drain: only the ring design (variant ring) has a ring to drain
 # The retrier that holds an IRQ-masking lock across its world stop: only the
 # faulty LOCK_FREE_STOP = FALSE design (variant holdlock) can begin one.
 WorldStopRetry fixed NeedLocked: only variant holdlock begins a stop while holding the lock
+# The commit CAS fails only when another writer took a Reserved slot, which
+# only the CHECK_PREV = FALSE design (variant noprev) lets a claim do.
+LogRing fixed CommitLost: only variant noprev lets a claim take a Reserved slot
+LogRing fixed4 CommitLost: only variant noprev lets a claim take a Reserved slot

@@ -348,6 +348,62 @@ reused, the check passed them.
 | `WriterByte` | `kernel_log_capture_retained_byte` | one byte's word, then the length that admits it | the truncated mark -- irrelevant to `NoTornRead`: it travels in the length word itself; console locking -- irrelevant to `NoTornRead`: only the writer takes it and the reader still observes the separate release stores | `7257f536df64` |
 | `ReaderBegin`, `ReaderLength`, `ReaderByte`, `ReaderCopied`, `ReaderCheck`, `ReaderAgain` | `kernel_log_snapshot_build`, `kernel_log_snapshot_record` | the count, the stamp and the length, the byte copies, the second count, and dropping a reused record | the snapshot's headers and timestamp formatting -- irrelevant to `NoTornRead`: they are derived from the fields copied, not further reads of the ring | `0fbed2bd1511` |
 
+LogReader.tla models today's single-writer ring and is replaced by
+LogRing.tla once #613 slice 4 moves the log onto the new ring. The replay of
+the log protocol from the trace window (#656) is retargeted to LogRing.tla,
+whose serialization point is each slot word's CAS; it is not done for
+LogReader.tla.
+
+## LogRing.tla -- the multi-writer kernel log ring, before its code (#613)
+
+The design of docs/LOG_RING_DESIGN.md (option B, records spanning several
+slots), checked before any ring code exists. N slots; sequence s lives in
+slot s % N, and each slot has one state word (seq, state, span). A writer
+reserves k slots with one CAS on `head`, then claims each slot by a CAS
+from its previous occupant (s-N, Committed or Discarded) to (s, Reserved),
+the first slot carrying span k and the others the continuation mark (span
+0). A previous occupant still Reserved -- a stalled writer -- makes the
+claim Refused: the writer reports every sequence of the record lost,
+discards the slots it already claimed, and holds no token. It writes the
+text, then commits each slot by a release CAS, continuations first. The one
+reader acquire-loads a slot word, copies, and re-loads it, for the first
+slot and then the continuation; anything else is reported lost by sequence.
+Overwrite is oldest-first by construction (a claim of s replaces s-N).
+
+Bound: writers 2 or 3, N = 3 or 4 slots, records of k <= 2 slots, sequences
+below 6 (`MAXSEQ`). Variant `fixed` is 3 writers on 3 slots (2.4 million
+states, about a minute in one TLC worker); `fixed4` is 2 writers on 4 slots.
+The model is sequentially consistent; the AArch64 orderings it relies on
+are the LogRing litmus tests (`litmus/README.md`).
+
+Invariants: `NoTornRead` (no returned copy holds text of another record),
+`NoSilentLoss` (every sequence the reader has passed was returned or
+reported lost), `NoDoubleOwner` (no slot held by two writers' tokens).
+
+Unfixed controls, each a constant, each failing in TLC:
+
+- `aba` (`SEQ_IN_WORD = FALSE`): the state word carries no sequence; a slot
+  reused and committed again between the reader's two loads passes the
+  re-check. `NoTornRead`, 13 steps.
+- `trustreserved`: the reader accepts a Reserved slot and copies text not
+  yet written. `NoTornRead`, 7 steps.
+- `noprev` (`CHECK_PREV = FALSE`): a claim ignores the previous occupant
+  and takes a slot a stalled writer still holds. `NoDoubleOwner`, 7 steps.
+- `contnoseq` (`CONT_SEQ = FALSE`): the reader accepts any committed
+  continuation mark; after it re-checked the first slot, the record is
+  overwritten by a later two-slot record, and the reader takes that
+  record's continuation as its own. `NoTornRead`, 20 steps.
+- `silentrefuse` (`REPORT_REFUSAL = FALSE`): a refused writer discards its
+  claimed slots without reporting, and the reader skips Discarded slots as
+  already reported. `NoSilentLoss`, 7 steps.
+
+There is no action table yet: no kernel function implements an action.
+Slice 4 adds the table when the ring code lands (`Reserve`, `Claim`,
+`Refuse` to the reservation function; `Write` to the token's text writes;
+`Commit` to the commit; the reader's actions to the syslog and DDB
+readers), and `CommitLost` stays allow-listed in `coverage_allow.txt` as an
+action only `noprev` takes.
+
 ## The dropped column
 
 #609's shared stack sat in a path StackOwnership.tla's ChildExit listed as

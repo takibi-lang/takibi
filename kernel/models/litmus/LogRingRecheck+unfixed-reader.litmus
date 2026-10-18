@@ -1,0 +1,13 @@
+AArch64 LogRingRecheck+unfixed-reader
+"log ring (#613): reader copies the new record's text, re-check sees the old word"
+{
+state=2;
+0:X1=text; 0:X3=state; 0:X4=2;
+1:X1=text; 1:X3=state;
+}
+ P0               | P1           ;
+ MOV X2,#3        | LDR  X0,[X1] ;
+ CASAL X4,X2,[X3] | LDAR X2,[X3] ;
+ MOV X0,#2        |              ;
+ STLR X0,[X1]     |              ;
+exists (1:X0=2 /\ 1:X2=2)

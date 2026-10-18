@@ -1,0 +1,13 @@
+AArch64 LogRingCommit+unfixed-reader
+"log ring (#613): text then commit CAS; reader sees Committed but old text"
+{
+state=1;
+0:X1=text; 0:X3=state; 0:X4=1;
+1:X1=text; 1:X3=state;
+}
+ P0               | P1           ;
+ MOV X0,#1        | LDR  X2,[X3] ;
+ STLR X0,[X1]     | LDAR X0,[X1] ;
+ MOV X2,#2        |              ;
+ CASAL X4,X2,[X3] |              ;
+exists (1:X2=2 /\ 1:X0=0)

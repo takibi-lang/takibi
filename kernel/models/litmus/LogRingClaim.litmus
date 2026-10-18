@@ -1,0 +1,13 @@
+AArch64 LogRingClaim
+"log ring (#613): claim sees the old record committed, old text lands last"
+{
+state=1;
+0:X1=text; 0:X3=state; 0:X4=1;
+1:X1=text; 1:X3=state; 1:X5=2;
+}
+ P0               | P1               ;
+ MOV X0,#1        | MOV X6,#3        ;
+ STLR X0,[X1]     | CASAL X5,X6,[X3] ;
+ MOV X2,#2        | MOV X0,#2        ;
+ CASAL X4,X2,[X3] | STLR X0,[X1]     ;
+exists (1:X5=2 /\ text=1)

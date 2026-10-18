@@ -33,3 +33,16 @@ order LogReuse P0 kernel_log_start_line kernel_log_started kernel_log_stamps
 access LogReuse P1 data kernel_log_snapshot_record kernel_log_stamps kernel_log_lengths kernel_log_cpu kernel_log_ticks kernel_log_text
 access LogReuse P1 started kernel_log_snapshot_record kernel_log_started
 order LogReuse P1 kernel_log_snapshot_record kernel_log_text kernel_log_started
+
+#   pending <test> <why>
+#
+# A fixed test whose code does not exist yet. Every fixed test needs access
+# rows or a pending row (never both), so a test cannot pass herd7 while
+# silently tying nothing. Slice 4 of #613 replaces each pending row below
+# with access/order rows naming the ring's functions and globals, and first
+# teaches litmus_accesses/accesses the CAS forms (CASAL Xs,Xt,[Xn]: a load
+# and a store, classed by its A/L suffixes), which they do not parse today.
+pending LogRingCommit issue 613 slice 4: kernel_log_commit and the syslog reader do not exist yet
+pending LogRingRecheck issue 613 slice 4: the reservation's claim and the syslog reader do not exist yet
+pending LogRingReserve issue 613 slice 4: the reservation's head CAS does not exist yet
+pending LogRingClaim issue 613 slice 4: the reservation's claim and kernel_log_commit do not exist yet

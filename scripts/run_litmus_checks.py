@@ -231,6 +231,9 @@ def emitted_problems(functions: dict, litmus: dict, rows: list) -> tuple:
     found = []
     checked = 0
     for words in rows:
+        if len(words) < 3:
+            found.append(f"{' '.join(words)}: too few fields (a '#' starts a comment)")
+            continue
         kind, test, thread = words[0], words[1], words[2]
         threads = litmus.get(test)
         if threads is None:
@@ -268,8 +271,21 @@ def emitted_problems(functions: dict, litmus: dict, rows: list) -> tuple:
             if not a_offsets or not b_offsets or max(a_offsets) >= min(b_offsets):
                 found.append(f"{test} {thread}: in {function}, every {direction} of "
                              f"{first} must precede every {direction} of {second}")
+        elif kind == "pending":
+            if threads is None or len(words) < 4:
+                found.append(f"{' '.join(words)}: a pending row names a fixed test and why")
         else:
             found.append(f"unknown row kind {kind}")
+    # GitHub issue #613 slice 2: every fixed test is tied, or says why not
+    # yet. A test with neither would pass herd7 and silently bind nothing.
+    tied = {w[1] for w in rows if w[0] in ("access", "order")}
+    pending = {w[1] for w in rows if w[0] == "pending"}
+    for test in sorted(litmus):
+        if test not in tied and test not in pending:
+            found.append(f"{test}: no access row ties it to the emitted code, "
+                         f"and no pending row says why")
+        elif test in tied and test in pending:
+            found.append(f"{test}: tied by access rows and still marked pending")
     return tuple(found), checked
 
 
@@ -297,6 +313,10 @@ def controls(functions: dict, litmus: dict, rows: list) -> list:
     for name, (funcs, lit) in plants.items():
         if not emitted_problems(funcs, lit, rows)[0]:
             missed.append(name)
+    # A fixed test with its pending row removed and no access rows.
+    untied = [w for w in rows if w[0] != "pending"]
+    if any(w[0] == "pending" for w in rows) and not emitted_problems(functions, litmus, untied)[0]:
+        missed.append("a fixed test with neither access rows nor a pending row")
     return missed
 
 
@@ -328,8 +348,11 @@ def main() -> int:
         return 1
     if failed:
         return 1
+    pending = sorted({w[1] for w in rows if w[0] == "pending"})
     print(f"PASS litmus-emitted: {checked} access(es) and orders in {kernel_object} "
-          f"match {len(litmus)} fixed litmus test(s); 4 planted defects reported")
+          f"match {len(litmus) - len(pending)} fixed litmus test(s); "
+          f"{len(pending)} pending until their code exists ({', '.join(pending) or 'none'}); "
+          f"5 planted defects reported")
     return 0
 
 

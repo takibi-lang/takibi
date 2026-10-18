@@ -1,0 +1,11 @@
+AArch64 LogRingReserve+unfixed-loadstore
+"log ring (#613): two writers both reserve the same head sequence"
+{
+0:X1=head; 0:X4=0;
+1:X1=head; 1:X4=0;
+}
+ P0           | P1           ;
+ LDAR X4,[X1] | LDAR X4,[X1] ;
+ ADD X2,X4,#1 | ADD X2,X4,#1 ;
+ STLR X2,[X1] | STLR X2,[X1] ;
+exists (0:X4=0 /\ 1:X4=0)

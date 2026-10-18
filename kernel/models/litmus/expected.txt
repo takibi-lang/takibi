@@ -7,3 +7,17 @@ LogPublish+unfixed-reader Sometimes
 LogReuse Never
 LogReuse+unfixed-writer Sometimes
 LogReuse+unfixed-reader Sometimes
+# GitHub issue #613 slice 2: the multi-writer log ring (LogRing.tla), before
+# its code exists. +plain-text is not a control: it shows the claim CAS's
+# acquire alone already orders the writer side (README.md).
+LogRingCommit Never
+LogRingCommit+unfixed-writer Sometimes
+LogRingCommit+unfixed-reader Sometimes
+LogRingRecheck Never
+LogRingRecheck+plain-text Never
+LogRingRecheck+unfixed-writer Sometimes
+LogRingRecheck+unfixed-reader Sometimes
+LogRingReserve Never
+LogRingReserve+unfixed-loadstore Sometimes
+LogRingClaim Never
+LogRingClaim+unfixed-writer Sometimes

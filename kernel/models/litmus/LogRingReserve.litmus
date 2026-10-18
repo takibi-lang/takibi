@@ -1,0 +1,10 @@
+AArch64 LogRingReserve
+"log ring (#613): two writers both reserve the same head sequence"
+{
+0:X1=head; 0:X4=0;
+1:X1=head; 1:X4=0;
+}
+ P0               | P1               ;
+ MOV X2,#1        | MOV X2,#1        ;
+ CASAL X4,X2,[X1] | CASAL X4,X2,[X1] ;
+exists (0:X4=0 /\ 1:X4=0)
