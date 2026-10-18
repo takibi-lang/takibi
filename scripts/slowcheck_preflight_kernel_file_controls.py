@@ -43,8 +43,11 @@ def git(root: Path, *args: str) -> None:
 
 
 def copy_tree(dest: Path) -> None:
+    # lib/atomic_spec.ml: scripts/check_lock_discipline.py (imported by
+    # measure_trusted_base, which the preflight imports) reads the raw
+    # atomic intrinsics from the compiler's inventory (GitHub issue #613).
     listed = subprocess.run(["git", "ls-files", "-z", "--", "kernel", "scripts",
-                             "Makefile"], cwd=ROOT, check=True,
+                             "Makefile", "lib/atomic_spec.ml"], cwd=ROOT, check=True,
                             capture_output=True).stdout.split(b"\0")
     for raw in listed:
         if not raw:
