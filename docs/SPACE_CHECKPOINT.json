@@ -2,8 +2,8 @@
   "date": "2026-10-18",
   "event": "incremental",
   "decision": "reuse",
-  "source_sha256": "7fd7a7547cbefdadcd7972d39e7dc9eff18ae3987c55e8597250946087233e85",
-  "workload": "#776: the EL0 /bin/affinity fixture gains a cross-process mask-change step; no kernel source change. space_delta.py main measured both production kernels unchanged (text, data, bss and usable_ram_start identical; no symbol changed size). The previous measured review (#771) stands.",
+  "source_sha256": "a96697d7f0fe5a9eb44f9784aec85eb0157a247fd5ef4865684aab6e77bbc246",
+  "workload": "#814: check_execution_model_coverage.py requires a real static_assert or a reasoned exemption; the only .tkb change is a comment in kernel/lib/execution_model.tkb. No code, storage or linker change; the previous measured review (#771) stands.",
   "evidence": [
     "docs/PAGE_RUN_SCAN_SPACE_2026-10-17.md",
     "docs/SLOT_POOLS_EXEC_SYSCALL_SPACE_2026-10-17.md",
@@ -81,6 +81,6 @@
     "docs/VIRTIO_NET_TX_2026-10-10.md",
     "docs/VIRTIO_NET_TX_SPACE_2026-10-10.json"
   ],
-  "assessment": "Reused. The change is EL0 test-fixture code outside the kernel image; the #771 measurement (text +2912 B qemu / +2944 B rpi5, BSS +32 B) remains the current evidence.",
+  "assessment": "Reused. A comment-only .tkb edit cannot change either kernel image; the #771 measurement (text +2912 B qemu / +2944 B rpi5, BSS +32 B) remains the current evidence.",
   "next_trigger": "A change to PageMeta, the free-list representation, or the page-run search; or the RECORDED page run allocator longest hold growing past 100 us on RPi5."
 }
