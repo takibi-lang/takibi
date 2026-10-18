@@ -60,37 +60,22 @@ class TakibiConsole(gdb.Command):
             raise gdb.GdbError("console snapshot requires QEMU physical-memory mode")
         try:
             cores = capacity("KERNEL_MAX_CORES", 64)
-            records = capacity("KERNEL_LOG_PEER_RECORDS", 256)
-            line_bytes = capacity("KERNEL_LOG_PEER_LINE_BYTES", 4096)
+            line_bytes = capacity("KERNEL_LOG_LINE_BYTES", 4096)
+            # Each CPU's staged kernel line (#613 slice 5): what it has
+            # written of a line that has not reached its newline, so neither
+            # the ring nor the UART has it yet.
             for cpu in range(cores):
                 base = address("kernel_log_core_state") + cpu * layout("KernelLogCoreState", "size")
                 def field(name, width=8):
                     return integer(base + layout("KernelLogCoreState", name), width)
-                latest = atomic("kernel_log_peer_latest", cpu)
-                consumed = integer(address("kernel_log_peer_consumed") + cpu * 8)
-                length = field("peer_length")
-                emit("peer", cpu=cpu, latest=latest, consumed=consumed,
-                     sequence=field("peer_sequence"), suppressed=bool(field("suppressed", 1)),
-                     emergency=bool(field("emergency", 1)), partial_length=length,
-                     partial=(repr(memory(base + layout("KernelLogCoreState", "peer_line"), length))
-                              if length <= line_bytes else "unavailable: invalid length"),
-                     truncated=bool(field("peer_truncated", 1)),
-                     overwritten=max(0, latest - consumed - records))
-                if consumed > latest:
-                    emit("peer-invalid", cpu=cpu, reason="consumed exceeds latest")
-                    continue
-                for sequence in range(max(consumed + 1, latest - records + 1), latest + 1):
-                    slot = cpu * records + (sequence - 1) % records
-                    published = atomic("kernel_log_peer_published", slot)
-                    if published != sequence:
-                        emit("peer-record", cpu=cpu, sequence=sequence, published=published,
-                             text="unavailable: overwritten or publication in progress")
-                        continue
-                    length = integer(address("kernel_log_peer_lengths") + slot * 8)
-                    emit("peer-record", cpu=cpu, sequence=sequence, length=length,
-                         truncated=bool(integer(address("kernel_log_peer_truncated") + slot, 1)),
-                         text=(repr(memory(address("kernel_log_peer_text") + slot * line_bytes, length))
-                               if length <= line_bytes else "unavailable: invalid length"))
+                length = field("length")
+                active = bool(field("active", 1))
+                emit("peer", cpu=cpu, capturing=bool(field("capturing", 1)),
+                     emergency=bool(field("emergency", 1)), active=active,
+                     continued=bool(field("continued", 1)), partial_length=length,
+                     partial=((repr(memory(base + layout("KernelLogCoreState", "line"), length))
+                               if active else "b''")
+                              if length <= line_bytes else "unavailable: invalid length"))
             emit("terminal", output_paused=atomic("terminal_output_stop_word") != 0,
                  echo_count=word("terminal_echo_count"), echo_head=word("terminal_echo_head"),
                  echo_tail=word("terminal_echo_tail"), echo_dropped=word("terminal_echo_dropped"),

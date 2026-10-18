@@ -545,15 +545,14 @@ unlike the diagnostic ring's per-CPU sequences, because on two cores the
 interesting version of "what was the kernel doing when it died" is the
 interleaving.
 
-Ordinary peer log lines use a bounded per-CPU publication ring. A peer builds
-one complete line locally and publishes its sequence with release ordering;
-core 0 copies a stable record with acquire ordering and alone updates the
-retained log. Before admitting that complete record to the shared UART queue,
-core 0 reserves room for its bytes, optional wire boundary and truncation suffix,
-then enqueues them under one console guard. A terminal chunk cannot enter in
-the middle of that record. Core-0 diagnostics assembled across separate calls
-still have separate admission boundaries. Overwrite and truncation are reported. Fatal and DDB paths bypass this channel and never wait for its
-consumer.
+Ordinary kernel log lines from every CPU go straight into the lock-free
+retained log ring (#613 slice 5, kernel/models/LogRing.tla): each CPU stages
+its line in its own static buffer, reserves and commits it at the newline,
+and then admits the whole line to the shared UART queue under one console
+guard, with its optional wire boundary. A terminal chunk cannot enter in the
+middle of that line. A record the ring could not take is counted and reported
+by sequence, and the line still reaches the UART. Fatal and DDB paths bypass
+this channel and never wait for it.
 
 Userspace terminal output on every CPU appends to one queue under the console
 lock, with room measurement, ONLCR encoding, enqueue, FIFO drain and TX interrupt
@@ -590,8 +589,8 @@ its newline wake, waits for the holder's polling UART marker, and requires
 either the holder's physical BREAK observation or DDB's held-at-entry
 observation, as well as release and resume. A deadline-only release does not
 satisfy the board witness. No ordinary terminal ring or DDB ring rendezvous
-remains. The retained peer kernel-log ring stays a separate publication stream;
-its completed records now supply the peer drain count and wait statistics.
+remains. Kernel log lines are a separate stream that writes the retained log
+ring directly from every CPU.
 
 This tests a finite holder. UART BREAK and the stop SGI are IRQ-dependent:
 a permanently IRQ-masked CPU can prevent entry or complete world-stop. DDB

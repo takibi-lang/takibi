@@ -93,6 +93,9 @@ EXEMPT = {
         "the two-core probes; every shared word is an atomic by design",
     "kernel/ext2_mutation_contention_evidence.tkb":
         "the two-core probes; every shared word is an atomic by design",
+    "kernel/log_storm_evidence.tkb":
+        "the all-core log ring probe (#613); every shared word is an atomic "
+        "and log_storm_last_round is indexed by the writing core",
     "lib/diagnostic_ring.tkb":
         "per-CPU rings published through GitHub issue #299's protocol; the "
         "commit word is an atomic and the reader re-checks it",

@@ -155,14 +155,18 @@ def problems(tree: dict[str, str]) -> list[str]:
     init = tree["kernel/init/contention_probes.tkb"]
     if "if (kernel_log_peer_console_probe() == false) {" not in init:
         result.append("init does not wait for the terminal prefix after SMP bringup")
-    drain = log.split("fn kernel_log_peer_drain()", 1)[1].split("// Terminal exception paths", 1)[0]
-    if "kernel_log_peer_record_emit(copy as" not in drain or "uart_putc(copy[index])" in drain:
-        result.append("peer diagnostics still release the lock between bytes")
-    emit = log.split("private fn kernel_log_peer_record_emit(", 1)[1].split("private fn kernel_log_peer_record_byte_locked(", 1)[0]
+    # #613 slice 5: every CPU writes its own kernel line to the UART after
+    # the ring commit, whole, under one console-lock hold.
+    retain = log.split("private fn kernel_log_retain_line(", 1)[1].split("\nfn ", 1)[0]
+    if "kernel_log_commit(token);" not in retain or \
+            "if (wire) { kernel_log_emit_line(core); }" not in retain or \
+            retain.index("kernel_log_commit(token);") > retain.index("kernel_log_emit_line(core)"):
+        result.append("a kernel line does not reach the UART after its ring commit")
+    emit = log.split("private fn kernel_log_emit_line(", 1)[1].split("private fn kernel_log_emit_byte_locked(", 1)[0]
     if "KERNEL_LOG_TX_QUEUE_BYTES - count >= required" not in emit:
-        result.append("peer diagnostic admission does not reserve the whole record")
-    if "kernel_log_peer_record_byte_locked(guard, bytes[index]);" not in emit:
-        result.append("peer diagnostic bytes do not borrow one console guard")
+        result.append("kernel line admission does not reserve the whole line")
+    if "kernel_log_emit_byte_locked(guard, kernel_log_core_state[core].line[index]);" not in emit:
+        result.append("kernel line bytes do not borrow one console guard")
     probe = tree["kernel/kernel/console_contention_evidence.tkb"]
     release = "atomic_word_store(&console_ddb_release_reason, reason);\n" \
               "    atomic_word_store(&console_ddb_phase, 2);\n" \
@@ -264,15 +268,15 @@ def main() -> int:
                                            "// Console is innermost."),
     })
     mutations.update({
-        "peer diagnostic byte holds": ("kernel/printk/log.tkb",
-                                      "kernel_log_peer_record_emit(copy as",
-                                      "uart_putc(copy[index]); kernel_log_peer_record_emit(copy as"),
-        "peer diagnostic reservation": ("kernel/printk/log.tkb",
-                                        "KERNEL_LOG_TX_QUEUE_BYTES - count >= required",
-                                        "KERNEL_LOG_TX_QUEUE_BYTES - count != 0"),
-        "one peer diagnostic guard": ("kernel/printk/log.tkb",
-                                      "kernel_log_peer_record_byte_locked(guard, bytes[index]);",
-                                      "uart_putc(bytes[index]);"),
+        "line before commit": ("kernel/printk/log.tkb",
+                               "    if (wire) { kernel_log_emit_line(core); }\n",
+                               ""),
+        "kernel line reservation": ("kernel/printk/log.tkb",
+                                    "KERNEL_LOG_TX_QUEUE_BYTES - count >= required",
+                                    "KERNEL_LOG_TX_QUEUE_BYTES - count != 0"),
+        "one kernel line guard": ("kernel/printk/log.tkb",
+                                  "kernel_log_emit_byte_locked(guard, kernel_log_core_state[core].line[index]);",
+                                  "uart_wire_byte(kernel_log_core_state[core].line[index]);"),
     })
     mutations.update({
         "early idle terminal probe": ("kernel/printk/log.tkb",

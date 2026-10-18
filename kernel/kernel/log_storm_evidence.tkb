@@ -1,0 +1,146 @@
+// GitHub issue #613 slice 5: every online CPU writes the retained log ring at
+// the same time, through the same reservation token, and core 0 then
+// accounts for every sequence of the round by sequence number.
+//
+// A round: core 0 opens it, every online secondary registers, core 0 lets
+// them go and writes its own share, each writer writes
+// kernel_log_storm_per_writer() lines, and once all have said so core 0 reads
+// the round back from the ring (kernel_log_storm_verify). A round's lines are
+// far fewer than the ring's slots, so a correct ring loses none of them: any
+// sequence that is not committed is a protocol failure, and the report names
+// the first such sequence. Lines are retained but not written to the UART
+// (kernel_log_storm_write), so the console's speed does not set the pace.
+//
+// Current limitations (2026-10-18): this exercises concurrent reservation,
+// claim and commit, not the refusal of a slot whose previous occupant is
+// still held -- the bounds probe in log.tkb covers that one, on core 0. It
+// runs once per boot, from init, for LOG_STORM_ROUNDS rounds.
+use "kernel/lib/peer_tick_window.tkb";
+use "kernel/lib/atomic_word.tkb";
+use "kernel/lib/execution_model.tkb";
+
+const LOG_STORM_ROUNDS: usize = 64;
+
+private let mut log_storm_armed: AtomicWord;
+// The open round, 1-based; secondaries register for it once.
+private let mut log_storm_round: AtomicWord;
+private let mut log_storm_registered: AtomicWord;
+// The round whose writers may go, and how many registered writers it has.
+private let mut log_storm_go: AtomicWord;
+private let mut log_storm_writers: AtomicWord;
+private let mut log_storm_done: AtomicWord;
+private let mut log_storm_last_round: [usize; KERNEL_MAX_CORES];
+
+fn log_storm_is_armed() -> bool {
+    return atomic_word_load(&log_storm_armed) == 1;
+}
+
+private fn log_storm_write_share(round: usize) -> bool !{unsafe} {
+    for index: usize in 0..<64 {
+        if (index < kernel_log_storm_per_writer()) {
+            if (kernel_log_storm_write(round, index) == false) { return false; }
+        }
+    }
+    return true;
+}
+
+private fn log_storm_wait_word(cell: *AtomicWord, value: usize) -> bool {
+    let mut window = peer_tick_window_policy(
+        peer_tick_window_peer(), PeerTickPolicy::Arrival);
+    while (peer_tick_window_open(window)) {
+        if (atomic_word_load(cell) >= value) { peer_tick_window_end(window); return true; }
+    }
+    peer_tick_window_end(window);
+    return false;
+}
+
+// A secondary's part of the open round, at most once per round. A secondary
+// that registers after core 0 counted the writers writes nothing.
+fn log_storm_secondary_run() !{unsafe} {
+    let raw: usize = cpu_id();
+    if (raw == 0 || raw >= KERNEL_MAX_CORES) { return; }
+    let core: {0..<KERNEL_MAX_CORES as usize} = raw;
+    let round: usize = atomic_word_load(&log_storm_round);
+    if (round == 0 || log_storm_last_round[core] == round) { return; }
+    log_storm_last_round[core] = round;
+    let slot: usize = atomic_word_fetch_add(&log_storm_registered, 1);
+    if (log_storm_wait_word(&log_storm_go, round) == false) { return; }
+    if (atomic_word_load(&log_storm_go) != round ||
+        slot >= atomic_word_load(&log_storm_writers)) {
+        return;
+    }
+    if (log_storm_write_share(round)) {
+        let finished: usize = atomic_word_fetch_add(&log_storm_done, 1);
+    }
+}
+
+// Core 0, after SMP bring-up. True when every round's records were all
+// committed, found once each and nothing else in their range was lost.
+fn log_storm_probe() -> bool !{logs, unsafe} {
+    let expected: usize = kernel_online_core_count() - 1;
+    let mut writers_seen: usize = 0;
+    let mut records: usize = 0;
+    let mut foreign: usize = 0;
+    let mut lost: usize = 0;
+    let mut first_lost: usize = 0;
+    let mut malformed: usize = 0;
+    let mut short: usize = 0;
+    let mut ok: bool = true;
+    atomic_word_store(&log_storm_armed, 1);
+    for step: usize in 0..<LOG_STORM_ROUNDS {
+        let round: usize = step + 1;
+        atomic_word_store(&log_storm_registered, 0);
+        atomic_word_store(&log_storm_done, 0);
+        atomic_word_store(&log_storm_round, round);
+        let joined: bool = log_storm_wait_word(&log_storm_registered, expected);
+        let writers: usize = atomic_word_load(&log_storm_registered);
+        atomic_word_store(&log_storm_writers, writers);
+        let start: usize = kernel_log_raw_head();
+        atomic_word_store(&log_storm_go, round);
+        let mine: bool = log_storm_write_share(round);
+        let finished: bool = log_storm_wait_word(&log_storm_done, writers);
+        let end: usize = kernel_log_raw_head();
+        let (kept, others, missing, first, wrong) = kernel_log_storm_verify(start, end, round);
+        if (writers + 1 > writers_seen) { writers_seen = writers + 1; }
+        records = records + kept;
+        foreign = foreign + others;
+        lost = lost + missing;
+        if (first_lost == 0 && first != 0) { first_lost = first; }
+        malformed = malformed + wrong;
+        let mut complete: usize = 0;
+        for cpu: usize in 0..<KERNEL_MAX_CORES {
+            let mask: usize = kernel_log_storm_found_mask(cpu);
+            if (mask == (1 << kernel_log_storm_per_writer()) - 1) {
+                complete = complete + 1;
+            }
+        }
+        if (joined == false || mine == false || finished == false ||
+            complete != writers + 1 || kept != (writers + 1) * kernel_log_storm_per_writer()) {
+            short = short + 1;
+            ok = false;
+        }
+        if (missing != 0 || wrong != 0) { ok = false; }
+    }
+    atomic_word_store(&log_storm_round, 0);
+    atomic_word_store(&log_storm_armed, 0);
+    kernel_boot_log("log storm detail: writers=");
+    uart_put_udec(writers_seen);
+    kernel_boot_log(" rounds=");
+    uart_put_udec(LOG_STORM_ROUNDS);
+    kernel_boot_log(" records=");
+    uart_put_udec(records);
+    kernel_boot_log(" foreign=");
+    uart_put_udec(foreign);
+    kernel_boot_log(" lost=");
+    uart_put_udec(lost);
+    if (first_lost != 0) {
+        kernel_boot_log(" first_lost_seq=");
+        uart_put_udec(first_lost - 1);
+    }
+    kernel_boot_log(" malformed=");
+    uart_put_udec(malformed);
+    kernel_boot_log(" short_rounds=");
+    uart_put_udec(short);
+    kernel_boot_log("\n");
+    return ok && writers_seen == expected + 1;
+}

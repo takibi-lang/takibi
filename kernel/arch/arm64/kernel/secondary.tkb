@@ -194,6 +194,11 @@ fn kernel_secondary_main(context: usize) !{unsafe} {
         }
         while (true) {
             tcp_pool_cost_secondary_poll(core_id);
+            // GitHub issue #613 slice 5: every online secondary, not core 1
+            // alone -- the point is all CPUs writing the log ring at once.
+            if (log_storm_is_armed()) {
+                log_storm_secondary_run();
+            }
             // Core 1 alone. Each probe below, and the peer log and console
             // probes, is written for exactly two participants and its view
             // counts one peer's lines; a third core in the same round would
@@ -207,9 +212,7 @@ fn kernel_secondary_main(context: usize) !{unsafe} {
                 // never reaches the page allocator -- see that file's floor.
                 // GitHub issue #465: the gated producer of retained peer text,
                 // here because the effect checker refuses to let an interrupt
-                // handler log and because this is the only peer context where
-                // kernel_log_peer_publish is reachable. Off on every ordinary
-                // boot; a lane turns it on to make the publication path
+                // handler log. It makes a peer's own writes into the ring
                 // observable at all.
                 kernel_log_peer_probe_step();
                 if (pool_contention_is_armed()) {
@@ -344,14 +347,11 @@ fn kernel_core0_idle_block_reenter() {
 fn kernel_core0_idle_loop() {
     enable_irq();
     while (true) {
-        // Peer output -- a peer's kernel lines and its processes' terminal
-        // writes -- reaches the UART only through core 0's drain, which ran
-        // at the top of every core 0 syscall and nowhere else. An idle core 0
-        // takes no syscalls, so a shell on a peer printed its prompt into a
-        // ring nothing emptied, and the terminal went silent: the QEMU debug
-        // lane stalled once #583's refusal list stopped sending ash's ioctl
-        // to core 0. Drain on every wake; the tick bounds the latency.
-        kernel_log_peer_drain();
+        // Core 0's console housekeeping (the input-flow request) on every
+        // wake, as at syscall entry: an idle core 0 takes no syscalls. Peer
+        // output no longer waits for core 0 here (#613 slice 5); it once
+        // did, and the QEMU debug lane stalled on a peer shell's prompt.
+        kernel_log_console_poll();
         if (KERNEL_STALL_PROBES != 0) { stall_probe_note(STALL_PROBE_IDLE_PASS); }
         match kernel_process_secondary_start() {
             ProcessSecondaryStart::Idle => {}

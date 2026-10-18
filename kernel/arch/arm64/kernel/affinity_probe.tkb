@@ -378,24 +378,19 @@ fn affinity_probe() !{unsafe} {
     if (svc5(PARENT_PROGRESS_SYSCALL, 0, 0, 0, 0, 0) != LINUX_EINVAL) {
         affinity_fail(bs"affinity: parent_progress asked from cpu 1 did not answer\n");
     }
-    // Say it BEFORE the spinner goes. This line is written from CPU 1, so it
-    // is published into this CPU's console ring, and the only thing that
-    // empties that ring is core 0's drain at the top of a syscall
-    // (kernel_log_peer_drain, kernel/kernel/syscall.tkb), and, since core 0
-    // gained an idle loop (#592), each wake of that loop. Written when only
-    // the syscall drain existed: the spinner's naps were what kept it
-    // running, which is why the spinner has to outlive this output.
+    // Say it BEFORE the spinner goes. Written when a line from CPU 1 waited
+    // in a per-CPU console ring for core 0's syscall drain, which the
+    // spinner's naps kept running; every CPU now appends to the one UART
+    // queue itself (#544, #613), and the order is kept as it was.
     affinity_say(bs"affinity: pinned to cpu 1, where parent_progress, outside the peer-safe table, still answered\n");
     // GitHub issue #579: every OTHER online cpu, while the same spinner is
     // still keeping core 0 occupied. Cpu 1 is proved above; this walks the
     // rest of the reported online set, which is empty on two-vCPU QEMU and
     // is cpus 2 and 3 on the four-core board.
     //
-    // Nothing is printed from inside this loop. A line written here would be
-    // published into THAT cpu's console ring, and the only thing that empties
-    // a peer ring is core 0's drain at the top of a syscall -- the reason the
-    // line above had to be written before the spinner was reaped. The verdict
-    // is carried back to core 0 in a variable and said there.
+    // Nothing is printed from inside this loop; the verdict is carried back
+    // to core 0 in a variable and said there, so the view's order does not
+    // depend on which cpu wrote it.
     //
     // Leaving a peer needs no successor the way leaving core 0 does: a
     // secondary has an architectural idle loop to fall back to, which is

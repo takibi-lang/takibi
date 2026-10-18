@@ -1,9 +1,9 @@
 # Lockless multi-writer kernel log ring: design proposal (GitHub issue #613)
 
-Status: option B selected (2026-10-18), with the changes below. Slices 1-4
-are implemented: the ring's storage, the hand-written token and the syslog
-and DDB readers are in kernel/printk/log.tkb, with core 0 still the only
-writer (see "As built, slice 4" below). Peers writing directly is slice 5.
+Status: option B selected (2026-10-18), with the changes below. Slices 1-5
+are implemented: the ring's storage, the hand-written token, the syslog and
+DDB readers, and every CPU writing the ring directly are in
+kernel/printk/log.tkb (see "As built, slice 4" and "As built, slice 5").
 
 ## Maintainer decisions (2026-10-18, recorded on #613, #645, #656)
 
@@ -53,6 +53,47 @@ writer (see "As built, slice 4" below). Peers writing directly is slice 5.
   not exactly seq - N. With the exact rule a refused claim leaves its slot
   holding an older turn and every later turn of that slot is refused for
   ever (LogRing.tla variant exactprev, invariant NoNeedlessRefusal).
+
+## As built, slice 5 (2026-10-18)
+
+- Every CPU writes the ring through the same kernel_log_reserve /
+  kernel_log_write / kernel_log_commit path. The per-core peer slot rings
+  (`kernel_log_peer_*`, 6 KiB of text plus lengths, ticks and sequence
+  words), core 0's drain and its deferred cpu/tick attribution are deleted.
+  kernel_log_peer_drain became kernel_log_console_poll (the input-flow
+  request only).
+- Line state: `KernelLogCoreState` per CPU holds emergency, capturing,
+  active, continued, length, tick and a 640-byte stage, reached by a checked
+  index (no raw pointer; log.tkb's raw-deref budget fell from 46 to 21).
+  Core 0's former global stage is the core-0 entry. Static, not stack.
+- UART: after commit, the writer admits its whole line to the TX queue under
+  one console-lock hold (kernel_log_emit_line), with a boundary newline when
+  the wire is mid-line (#611). It waits with the lock released until the
+  queue has room for the line or is empty; only a line longer than the queue
+  waits out the FIFO inside the hold. Before the queue is live, or while
+  output is paused, the line spins under the hold. Core 0's bytes therefore
+  reach the wire at the line's newline instead of byte by byte: a partial
+  line is visible on neither the ring nor the UART, and DDB `log` and
+  takibi-console show each CPU's staged line instead. One CPU's lines keep
+  their order; two CPUs' lines are in reservation order in the ring and in
+  console-lock order on the wire.
+- Loss by sequence: `kernel_log_last_discarded` keeps the first sequence of
+  the last record given up; dmesg's discarded line and the end-of-boot
+  `kernel log: records=... discarded=... commit_lost=...` print it, and the
+  reader's lost line names the first sequence it lost.
+- All-CPU evidence: kernel/kernel/log_storm_evidence.tkb runs 64 rounds in
+  which every online CPU writes 16 lines at once (ring only, no UART) and
+  core 0 accounts for every sequence of the round; the common view
+  `log_storm` compares the verdict, and `log storm detail:` names the first
+  lost sequence if any.
+- Not done: the #638 dependency. A line is reserved at its newline, so the
+  token never outlives one call, but the staged line lives across the
+  caller's fragments, which is per-CPU state a preemption between fragments
+  would hand to another thread. KERNEL_PREEMPTIBLE == 0 stays asserted in
+  kernel_log_execution_model_assumption; the choice is on #613.
+- Model: no new ordering. Peers use the same reserve/claim/commit actions
+  LogRing.tla already runs with 2-3 writers; the emitted-instruction rows
+  name the same functions.
 
 The sections below are the original proposal; where they disagree with the
 decisions above (fixed 160-byte cap, litmus7 on RPi5), the decisions win.

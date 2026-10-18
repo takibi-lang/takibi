@@ -395,6 +395,7 @@ KERNEL_UNUSED_CHECKED := \
 	kernel/kernel/cpu_authority.tkb \
 	kernel/kernel/fd_table.tkb \
 	kernel/kernel/irq_counts.tkb \
+	kernel/kernel/log_storm_evidence.tkb \
 	kernel/kernel/freelist_contention_evidence.tkb \
 	kernel/kernel/console_contention_evidence.tkb \
 	kernel/kernel/init_once_contention_evidence.tkb \

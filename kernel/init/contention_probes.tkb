@@ -32,10 +32,18 @@ use "kernel/kernel/tcp_connection_contention_evidence.tkb";
 use "kernel/kernel/ext2_mutation_contention_evidence.tkb";
 use "kernel/kernel/signal_contention_evidence.tkb";
 use "kernel/kernel/console_contention_evidence.tkb";
+use "kernel/kernel/log_storm_evidence.tkb";
 
 fn contention_probes() !{unsafe} {
     if (kernel_log_peer_console_probe() == false) {
         kernel_boot_log("peer console probe: failed\n");
+    }
+    // GitHub issue #613 slice 5: every online CPU writes the log ring at
+    // once and every sequence is accounted for.
+    if (log_storm_probe()) {
+        kernel_boot_log("log storm: every online core's records committed and read back by sequence ok\n");
+    } else {
+        kernel_boot_log("log storm: failed\n");
     }
     if (console_contention_probe()) {
         kernel_boot_log("console contention: peer entry observed with bypass, excluded while held and completed after release ok\n");

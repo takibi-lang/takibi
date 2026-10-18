@@ -321,8 +321,8 @@ process state, pool membership or core.
 
 The design of docs/LOG_RING_DESIGN.md (option B, records spanning several
 slots), checked before its code and now implemented by
-`kernel/printk/log.tkb` (slice 4: core 0 is still the only writer, syslog
-on any CPU the reader). N slots; sequence s lives in slot s % N, and each
+`kernel/printk/log.tkb` (slice 5: every CPU writes, syslog on any CPU the
+reader). N slots; sequence s lives in slot s % N, and each
 slot has one state word (seq, state, span). A writer reserves k slots with
 one CAS on `head`, then claims each slot by a CAS from its previous
 occupant -- finished (Committed or Discarded) and older, or Free -- to
@@ -487,7 +487,7 @@ modelcheck` requires each to fail:
 | Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
 | --- | --- | --- | --- | --- |
 | `WriterEnter` | `syscall_write_segment_with` | a terminal write is admitted whole under the run lock | fd lookup and the user-memory copy -- irrelevant to `ProgramOrder`: they run before the chunk is admitted and change no queue or lock | `865b24b051cf` |
-| `WriterAppend` | `uart_user_write`, `uart_terminal_write_chunk`, `uart_user_write_locked`, `uart_user_write_room_locked`, `syscall_write_segment_with`, `kernel_log_peer_record_emit`, `kernel_log_peer_record_byte_locked`, `console_lock`, `console_unlock`, `mutex_acquire_measured` | the append to the queue under the console lock, or the decision that there is no room; on every CPU the same queue, and the run lock let go | short counts and partial chunks -- irrelevant to `ProgramOrder`: a partial chunk is a shorter chunk, and the model already appends each whole; nonterminal fd paths -- irrelevant to `ProgramOrder`: they do not append terminal bytes; peer diagnostic bytes -- irrelevant to `ProgramOrder`: they share the FIFO order without changing a terminal writer's chunk order; measurement counters -- irrelevant to `ProgramOrder`: they are updated under the same lock and never select queue contents, admission or ownership | `f9f3f4118337` |
+| `WriterAppend` | `uart_user_write`, `uart_terminal_write_chunk`, `uart_user_write_locked`, `uart_user_write_room_locked`, `syscall_write_segment_with`, `kernel_log_emit_line`, `kernel_log_emit_byte_locked`, `console_lock`, `console_unlock`, `mutex_acquire_measured` | the append to the queue under the console lock, or the decision that there is no room; on every CPU the same queue, and the run lock let go | short counts and partial chunks -- irrelevant to `ProgramOrder`: a partial chunk is a shorter chunk, and the model already appends each whole; nonterminal fd paths -- irrelevant to `ProgramOrder`: they do not append terminal bytes; kernel log lines -- irrelevant to `ProgramOrder`: they share the FIFO order without changing a terminal writer's chunk order; measurement counters -- irrelevant to `ProgramOrder`: they are updated under the same lock and never select queue contents, admission or ownership | `f9f3f4118337` |
 | `BlockWriter` | `kernel_process_block_uart_tx` | the writer publishes itself asleep under the run lock; `RECHECK` is the room re-check there | successor choice and the switch -- modelled elsewhere: `Wait4Block.Wait4Block` | `626ecddbdacc` |
 | `TxTake` | `uart_tx_service`, `uart_tx_drain_into_fifo` | one chunk leaves the queue onto the wire under the console lock and makes room; `NESTED` keeps the lock | the FIFO's capacity and the byte-by-byte drain -- irrelevant to `ProgramOrder`: bytes leave the queue in order, so a chunk taken whole is the same order | `c682c0a9957c` |
 | `TxWake` | `kernel_process_uart_tx_wake_all` | under the run lock, a writer asleep on room becomes runnable | which other processes wait on UartTx -- irrelevant to `NoLostWakeup`: the model has one writer, and each waiter is woken by the same scan | `3a68b3eed941` |

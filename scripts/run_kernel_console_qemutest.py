@@ -86,14 +86,11 @@ def main():
                     "command-line": f"gdbserver unix:{directory}/seed-gdb,server=on,wait=off"})
                 seed(endpoint, directory, '''
 core = addr('kernel_log_core_state') + off('kernellogcorestate', 'size')
-put(core + off('kernellogcorestate', 'peer_length'), 4)
-gdb.selected_inferior().write_memory(core + off('kernellogcorestate', 'peer_line'), b'half')
-atomic_size = off('atomicword', 'size')
+put(core + off('kernellogcorestate', 'length'), 4)
+put(core + off('kernellogcorestate', 'active'), 1, 1)
+put(core + off('kernellogcorestate', 'capturing'), 1, 1)
+gdb.selected_inferior().write_memory(core + off('kernellogcorestate', 'line'), b'half')
 atomic_value = off('atomicword', 'value')
-put(addr('kernel_log_peer_latest') + atomic_size + atomic_value, 10)
-put(addr('kernel_log_peer_published') + 9 * atomic_size + atomic_value, 10)
-put(addr('kernel_log_peer_lengths') + 9 * 8, 6)
-gdb.selected_inferior().write_memory(addr('kernel_log_peer_text') + 9 * 192, b'prompt')
 put(addr('terminal_output_stop_word') + atomic_value, 1)
 word('terminal_echo_count', 3)
 word('kernel_log_tx_count', 1)
@@ -111,10 +108,9 @@ put(addr('kernel_uart_rx_marks') + 4095, 1, 1)
                 capture(endpoint, ELF, queued, "fixture-before-break", str(directory / "seed-gdb"))
                 state = sections(queued)
                 peer = state["peer"][1]
-                assert peer["latest"] == 10 and peer["consumed"] == 0 and peer["overwritten"] == 2
+                assert peer["active"] and peer["capturing"] and peer["partial_length"] == 4
                 assert peer["partial"] == "b'half'"
-                assert state["peer-record"][-1]["text"] == "b'prompt'"
-                assert "publication in progress" in state["peer-record"][0]["text"]
+                assert state["peer"][0]["partial"] == "b''"
                 assert state["terminal"][0]["output_paused"]
                 assert state["terminal"][0]["echo_count"] == 3
                 assert state["terminal"][0]["tx_pending"]
@@ -124,7 +120,7 @@ put(addr('kernel_uart_rx_marks') + 4095, 1, 1)
                 assert state["rx"][0]["unfinished_length"] == 2
                 assert not qmp(endpoint, "query-status")["running"]
                 seed(endpoint, directory, "word('kernel_uart_rx_head', 4096)\n"
-                     "put(addr('kernel_log_core_state') + off('kernellogcorestate', 'size') + off('kernellogcorestate', 'peer_length'), 193)")
+                     "put(addr('kernel_log_core_state') + off('kernellogcorestate', 'size') + off('kernellogcorestate', 'length'), 641)")
                 damaged = artifacts / "damaged.log"
                 capture(endpoint, ELF, damaged, "fixture-invalid-indices", str(directory / "seed-gdb"))
                 state = sections(damaged)
@@ -146,7 +142,7 @@ put(addr('kernel_uart_rx_marks') + 4095, 1, 1)
         absent = artifacts / "unavailable.log"
         capture(directory / "absent", ELF, absent, "fixture-unavailable")
         assert "console snapshot status: unavailable:" in absent.read_text()
-    print("PASS kernel/console-qemu: empty, wrapped RX/current line, peer overwrite/publication, XOFF, echo, TX IRQ, corrupt bounds/UART base, paused guest and unavailable QMP")
+    print("PASS kernel/console-qemu: empty, wrapped RX/current line, staged per-CPU kernel line, XOFF, echo, TX IRQ, corrupt bounds/UART base, paused guest and unavailable QMP")
 
 
 if __name__ == "__main__":

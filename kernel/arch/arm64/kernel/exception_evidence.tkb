@@ -1631,6 +1631,24 @@ private fn ddb_render_log() !{unsafe} {
     ddb_puts(" oldest="); ddb_put_udec(seq);
     ddb_puts(" discarded="); ddb_put_udec(kernel_log_raw_discarded());
     ddb_puts("\n");
+    // A line a CPU was building when the world stopped is in neither the
+    // ring nor the UART yet (#613 slice 5); show it, by CPU.
+    for cpu: usize in 0..<KERNEL_MAX_CORES {
+        let length: usize = kernel_log_raw_staged_length(cpu);
+        if (length != 0) {
+            ddb_puts("ddb: log staged cpu="); ddb_put_udec(cpu);
+            ddb_puts(" length="); ddb_put_udec(length);
+            ddb_puts(" text=");
+            for index: usize in 0..<640 {
+                if (index < length) {
+                    let byte: u8 = kernel_log_raw_staged_byte(cpu, index);
+                    if (byte >= 32 && byte < 127) { uart_debug_putc(byte); }
+                    else if (byte != 10) { uart_debug_putc(46); }
+                }
+            }
+            ddb_puts("\n");
+        }
+    }
     for step: usize in 0..<256 {
         if (seq < head) {
             seq = seq + ddb_render_log_slot(seq, kernel_log_raw_slot(seq));

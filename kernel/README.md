@@ -1121,7 +1121,7 @@ For a manual QEMU snapshot, build the matching ELF and sidecars first, then
 run `python3 scripts/capture_kernel_console.py --qmp-port PORT --elf ELF
 --output console-state.log`; `--qmp-socket PATH` supports a Unix QMP monitor.
 `make kernelcheck-console-gdb-qemu` verifies the actual compiled storage with
-empty queues, wrapped RX, partial input, overwritten peer records, XOFF,
+empty queues, wrapped RX, partial input, a staged per-CPU kernel line, XOFF,
 TX interrupt enable and corrupt bounds. Those seeded states prove decoding,
 not the cause of a naturally occurring console stall or hardware ordering.
 
@@ -1679,9 +1679,19 @@ orderings are the herd7 tests under `kernel/models/litmus/`, tied to the
 emitted instructions). DDB's `log` command reads the same slots raw under
 the world stop and shows a slot a stopped writer holds as in flight.
 
-Core 0 ordinary main/syscall context is still the only writer: a peer's
-`kernel_boot_log()` line is published to a per-core peer record that core 0
-drains into the ring, attributed to the peer's CPU and tick. Interrupt-context
+Every CPU's ordinary context writes the ring directly (#613 slice 5): a
+`kernel_boot_log()` line is staged in that CPU's static line buffer across
+its fragments, reserved and committed at its newline through the same token,
+attributed to the writing CPU and the tick of its first byte, and then
+written to the UART whole under one console-lock hold, starting on a fresh
+wire line. One CPU's lines keep their order on both the ring and the wire;
+lines of different CPUs are in reservation order in the ring and in
+console-lock order on the wire, which may differ. The end of a boot prints
+`kernel log: records=N discarded=D [last_discarded_seq=S] commit_lost=C`,
+and the boot's log storm (`kernel/kernel/log_storm_evidence.tkb`) has every
+online CPU write the ring at once and accounts for each sequence of each
+round. A partial line is in neither the ring nor the UART until its newline;
+DDB's `log` and `takibi-console` show it per CPU. Interrupt-context
 diagnostics continue to use the fixed-width diagnostic event ring; crash and
 DDB output continue to use their direct polled UART path. A single global
 spinlock around UART plus the ring is not the intended extension: a stalled

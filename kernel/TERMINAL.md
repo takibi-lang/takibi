@@ -94,18 +94,18 @@ Each bounded chunk is admitted in lock order; successive writes by one process
 preserve their order across CPU migration. A large write may admit multiple
 chunks, so concurrent writers may interleave at chunk boundaries. Whole CR/LF
 pairs are admitted together. TX interrupt mask updates remain under the same
-guard, preventing a peer's enable from racing core 0's disable. Complete peer
-diagnostic records reserve queue capacity and append under one guard too,
-including their optional boundary newline and truncation suffix.
+guard, preventing a peer's enable from racing core 0's disable. A complete
+kernel log line from any CPU reserves queue capacity and appends under one
+guard too, including its optional boundary newline.
 The room recheck before blocking and the column, pending-output and writer
 counter queries take that same lock. Calls already inside a section pass its
-guard to the locked helpers. Per-core log publication and emergency capture
-bypass the lock; the retained log's reader protocol remains release/acquire.
+guard to the locked helpers. Per-CPU line staging and emergency output
+bypass the lock; the retained log ring is lock-free (kernel/models/LogRing.tla).
 One operation represents a byte, a caret pair, an entire erasure, or CR/LF.
 This fits a full canonical line and its kill without spinning inside the RX
 interrupt while output is stopped. An operation beyond capacity is rejected
 and counted; the boot reports `terminal echo: operations=4096 dropped=N`.
-Ordinary user output and peer records wait behind pending echo. Signal flushes
+Ordinary user output waits behind pending echo. Signal flushes
 preserve tagged kernel diagnostic bytes while discarding terminal output;
 already-transmitted FIFO bytes cannot be recalled.
 

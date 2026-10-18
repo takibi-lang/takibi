@@ -20,7 +20,7 @@ kernel/init/test_driver.tkb	10	0	boot-time fixtures reaching process records dir
 kernel/mm/address_space.tkb	6	0	Backing records use indexed references and active roots use bounded per-CPU array places; remaining raw sites are the deliberate user-VA CoW probe byte mints
 kernel/mm/user_memory.tkb	7	0	the user-range mint site: user addresses become slices here (#637 D)
 kernel/platform/qemu/device_map.tkb	0	3	virtio-mmio magic and device-id probes during DTB discovery (#637 A); the device-window mint
-kernel/printk/log.tkb	46	0	the kernel log's ring and staging buffers (#637 B)
+kernel/printk/log.tkb	21	0	the syslog snapshot buffers and NUL-terminated string walks; per-CPU line state is indexed since #613 slice 5 (#637 B)
 <builtin region>	113	0	the compiler's built-in region definitions (#672): every dereference is a slot, chunk header or byte in memory the built-in hands out, and its trust is the compiler's, not the kernel's
 kernel/tests/qemu/dma/virtio_blk_fixture.tkb	1	4	test-only device-side descriptor status address and used-ring publication; never CPU-side buffer access or an authority mint
 kernel/mm/memory_map.tkb	2	0	the memory mint: page bytes and a probe of a fresh run's tails (#744)

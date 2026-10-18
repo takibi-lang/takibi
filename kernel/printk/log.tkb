@@ -1,13 +1,9 @@
-// Operator-visible kernel text log. Ordinary kernel_boot_log() output is
-// still written synchronously to UART, while logical lines are retained with
-// the monotonic time at which their first byte was emitted. Userspace writes
-// and the direct crash/DDB UART paths do not enter this ring.
-//
-// Core 0 remains the only retained-log writer. Other cores publish complete
-// bounded kernel lines for core 0 to copy and emit; interrupt-safe classified
-// events remain kernel/diagnostic/event.tkb's job. Userspace terminal output
-// on every CPU appends to one UART queue under the console lock and never
-// enters the retained log.
+// Operator-visible kernel text log. Each CPU stages a kernel_boot_log()
+// logical line in its own static buffer, retains it in the lock-free ring
+// below when the line ends, and then writes it to the UART as one admission
+// under the console lock. Userspace writes and the direct crash/DDB UART
+// paths do not enter this ring; interrupt-safe classified events remain
+// kernel/diagnostic/event.tkb's job.
 use "kernel/lib/atomic_word.tkb";
 use "kernel/lib/execution_model.tkb";
 use "kernel/printk/number.tkb";
@@ -50,11 +46,13 @@ use "kernel/printk/console_lock.tkb";
 // AtomicWord has no plain store, and the text must stay AtomicWord because
 // the reader's loads of it must be acquires (LogRingRecheck+unfixed-reader).
 //
-// Core 0 is still the only writer (#613 slice 4). It stages a line in
-// kernel_log_line and reserves when the line ends, so a partial line is never
-// visible and no stack buffer holds one. A line longer than the stage is
-// split into continuation records, each marked in its metadata, never
-// truncated.
+// Every CPU writes the ring directly (#613 slice 5). A CPU stages its line in
+// its own KernelLogCoreState and reserves when the line ends, so a partial
+// line is never visible and no stack buffer holds one. A line longer than the
+// stage is split into continuation records, each marked in its metadata,
+// never truncated. The ring's order is reservation order; the UART's order is
+// console-lock order, and the two agree for one CPU's lines but may differ
+// between CPUs, because a line is written to the UART after its commit.
 const KERNEL_LOG_SLOT_COUNT: usize = 256;
 const KERNEL_LOG_SLOT_BYTES: usize = 160;
 const KERNEL_LOG_SLOT_WORDS: usize = 20;
@@ -91,30 +89,13 @@ private let mut kernel_log_head: AtomicWord;
 // Sequences a writer gave up (refused or discarded): the writer's report of
 // a loss, which readers print rather than infer.
 private let mut kernel_log_discarded: AtomicWord;
+// The first sequence of the record given up last, plus one (0: none yet), so
+// a loss is reported by sequence as well as counted.
+private let mut kernel_log_last_discarded: AtomicWord;
 // Commits that found their slot taken. Zero unless the protocol is broken
 // (LogRing.tla's CommitLost); counted so it is not silent.
 private let mut kernel_log_commit_lost: AtomicWord;
 
-// Core 0's line being assembled, and when and on which core it began.
-private let mut kernel_log_line: [u8; KERNEL_LOG_LINE_BYTES];
-private let mut kernel_log_line_length: usize;
-private let mut kernel_log_line_tick: i64;
-private let mut kernel_log_line_cpu: usize;
-private let mut kernel_log_line_continued: bool;
-// GitHub issue #465: which core's line this is, and when THAT core emitted it.
-//
-// A peer's line reaches the ring through core 0's drain, so without these two
-// it is recorded as core 0's, timestamped at the moment core 0 got round to
-// it. Both are wrong in the direction that matters: a retained log exists to
-// attribute concurrency failures, and one that cannot say which core wrote a
-// line is least useful exactly when two are interleaving. Until peers write
-// the ring themselves (#613 slice 5), the order is arrival-at-core-0, and a
-// peer record's tick can be EARLIER than the record before it.
-private let mut kernel_log_deferred_cpu: usize;
-private let mut kernel_log_deferred_tick: i64;
-private let mut kernel_log_deferred: bool;
-private let mut kernel_log_capture_enabled: bool;
-private let mut kernel_log_active: bool;
 private let mut kernel_log_boot_tick: i64;
 private let mut kernel_log_frequency: i64;
 // One snapshot per CPU: syslog(2) builds it and copies it out in one
@@ -249,6 +230,12 @@ private fn kernel_log_discard_slots(first: usize, cpu: usize, span: usize,
     }
 }
 
+// A writer's own report of the sequences it gave up.
+private fn kernel_log_note_given_up(first: usize, span: usize) !{unsafe} {
+    atomic_word_fetch_add(&kernel_log_discarded, span);
+    kernel_log_publish(&kernel_log_last_discarded, first + 1);
+}
+
 // LogRing.tla Reserve, then Claim or Refuse for each slot. One compare-swap
 // on the head takes `span` sequences; another writer moving the head first is
 // retried from the value that swap observed.
@@ -280,18 +267,53 @@ private fn kernel_log_reserve(span: usize) -> KernelLogReserve !{unsafe} {
     }
     if (refused) {
         kernel_log_discard_slots(first, cpu, span, claimed);
-        atomic_word_fetch_add(&kernel_log_discarded, span);
+        kernel_log_note_given_up(first, span);
         return KernelLogReserve::Refused;
     }
     let mut token: LogReservation[0] = { first, span, cpu };
     return KernelLogReserve::Reserved(token);
 }
 
-// LogRing.tla Write: core 0's staged line into the reserved slots, then the
-// first slot's tick and metadata. Each store is a release (see the top of
+// Each CPU's line being assembled, and when it began (GitHub issue #465:
+// the tick is the writer's own, taken at its first byte). One per CPU,
+// static rather than on the stack (DECISIONS: static over stack), selected
+// by cpu_id() like the other per-CPU arrays; KERNEL_PREEMPTIBLE == 0 is what
+// keeps one CPU's line from being continued by another thread (see
+// kernel_log_execution_model_assumption).
+//
+// - emergency: this CPU writes straight to the device until the next boot.
+// - capturing: a kernel_boot_log fragment on this CPU is building a line;
+//   it lasts until the line's newline, so uart_put_udec digits between
+//   fragments are part of it, and a fragment that leaves no line open ends
+//   it (kernel_log_end_fragment).
+// - active: the first byte of the line has been staged.
+// - continued: this line already retained a stage-full piece.
+struct KernelLogCoreState {
+    emergency: bool;
+    capturing: bool;
+    active: bool;
+    continued: bool;
+    length: usize;
+    tick: i64;
+    line: [u8; KERNEL_LOG_LINE_BYTES];
+}
+private let mut kernel_log_core_state: [KernelLogCoreState; KERNEL_MAX_CORES];
+
+// This CPU's entry, by index rather than by pointer, so the state is reached
+// through checked indexing and not a raw dereference.
+private fn kernel_log_core_here() -> {0..<KERNEL_MAX_CORES as usize} {
+    let raw: usize = cpu_id();
+    if (raw >= KERNEL_MAX_CORES) { return 0; }
+    let core: {0..<KERNEL_MAX_CORES as usize} = raw;
+    return core;
+}
+
+// LogRing.tla Write: the writer's staged line into the reserved slots, then
+// the first slot's tick and metadata. Each store is a release (see the top of
 // this file); nothing here is visible until kernel_log_commit.
-private fn kernel_log_write(token: borrow LogReservation[0]) !{unsafe} {
-    let length: usize = kernel_log_line_length;
+private fn kernel_log_write(token: borrow LogReservation[0],
+                            core: {0..<KERNEL_MAX_CORES as usize}) !{unsafe} {
+    let length: usize = kernel_log_core_state[core].length;
     for index: usize in 0..<KERNEL_LOG_RECORD_SLOTS {
         if (index < token.span) {
             let slot: {0..<KERNEL_LOG_SLOT_COUNT as usize} =
@@ -302,8 +324,8 @@ private fn kernel_log_write(token: borrow LogReservation[0]) !{unsafe} {
                     let offset: usize = index * KERNEL_LOG_SLOT_BYTES + word * 8 + byte;
                     if (offset < length && offset < KERNEL_LOG_LINE_BYTES) {
                         let safe_offset: {0..<KERNEL_LOG_LINE_BYTES as usize} = offset;
-                        value = value |
-                            ((kernel_log_line[safe_offset] as usize) << (byte * 8));
+                        let byte_value: u8 = kernel_log_core_state[core].line[safe_offset];
+                        value = value | ((byte_value as usize) << (byte * 8));
                     }
                 }
                 let word_index: usize = slot * KERNEL_LOG_SLOT_WORDS + word;
@@ -316,9 +338,9 @@ private fn kernel_log_write(token: borrow LogReservation[0]) !{unsafe} {
     }
     let first: {0..<KERNEL_LOG_SLOT_COUNT as usize} = kernel_log_slot_of(token.seq);
     let mut meta: usize = (length & KERNEL_LOG_META_LENGTH_MASK) |
-        ((kernel_log_line_cpu & KERNEL_LOG_CPU_MASK) << KERNEL_LOG_META_CPU_SHIFT);
-    if (kernel_log_line_continued) { meta = meta | KERNEL_LOG_META_CONTINUED; }
-    kernel_log_publish(&kernel_log_ticks[first], kernel_log_line_tick as usize);
+        ((token.cpu & KERNEL_LOG_CPU_MASK) << KERNEL_LOG_META_CPU_SHIFT);
+    if (kernel_log_core_state[core].continued) { meta = meta | KERNEL_LOG_META_CONTINUED; }
+    kernel_log_publish(&kernel_log_ticks[first], kernel_log_core_state[core].tick as usize);
     kernel_log_publish(&kernel_log_meta[first], meta);
 }
 
@@ -351,162 +373,100 @@ private fn kernel_log_commit(token: sink LogReservation[0]) !{unsafe} {
 // counted with the refused ones, so a reader skips them as reported.
 private fn kernel_log_discard(token: sink LogReservation[0]) !{unsafe} {
     kernel_log_discard_slots(token.seq, token.cpu, token.span, token.span);
-    atomic_word_fetch_add(&kernel_log_discarded, token.span);
+    kernel_log_note_given_up(token.seq, token.span);
 }
 
-// The staged line becomes one record. A refusal is already counted.
-private fn kernel_log_retain_line() !{unsafe} {
-    let length: usize = kernel_log_line_length;
+// The staged line becomes one record, and then, when `wire`, goes to the UART
+// (kernel_log_emit_line). A refusal is already counted, and the UART still
+// gets the text: losing a record never loses console output.
+private fn kernel_log_retain_line(core: {0..<KERNEL_MAX_CORES as usize}, wire: bool) !{unsafe} {
+    let length: usize = kernel_log_core_state[core].length;
     if (length == 0) { return; }
     let span: usize = (length + KERNEL_LOG_SLOT_BYTES - 1) / KERNEL_LOG_SLOT_BYTES;
     match kernel_log_reserve(span) {
         KernelLogReserve::Reserved(token) => {
-            kernel_log_write(token);
+            kernel_log_write(token, core);
             kernel_log_commit(token);
         }
         KernelLogReserve::Refused => { }
     }
-    kernel_log_line_length = 0;
-}
-// Peer capture lasts through every numeric/string fragment until the fragment
-// that completes the line returns (kernel_log_end_fragment);
-// DDB writes directly to the device and terminal crash reporting explicitly
-// enters emergency mode before using the ordinary formatting helpers.
-const KERNEL_LOG_PEER_LINE_BYTES: usize = 192;
-const KERNEL_LOG_PEER_RECORDS: usize = 8;
-// One run of KERNEL_LOG_PEER_RECORDS per core the build reserves, and
-// KERNEL_LOG_PEER_LINE_BYTES of text per slot. Literal, because an array
-// bound cannot be a product expression; kernel_log_peer_publish asserts
-// both products. At sixteen, cores 2 and 3 computed a slot past the end
-// and their lines were dropped with nothing saying so.
-const KERNEL_LOG_PEER_SLOTS: usize = 32;
-const KERNEL_LOG_PEER_TEXT_BYTES: usize = 6144;
-struct KernelLogCoreState {
-    suppressed: bool;
-    emergency: bool;
-    peer_length: usize;
-    peer_truncated: bool;
-    peer_sequence: usize;
-    peer_line: [u8; KERNEL_LOG_PEER_LINE_BYTES];
-}
-private let mut kernel_log_core_state: [KernelLogCoreState; KERNEL_MAX_CORES];
-private let mut kernel_log_peer_published:
-    [AtomicWord; KERNEL_LOG_PEER_SLOTS];
-private let mut kernel_log_peer_latest: [AtomicWord; KERNEL_MAX_CORES];
-private let mut kernel_log_peer_lengths: [usize; KERNEL_LOG_PEER_SLOTS];
-private let mut kernel_log_peer_truncated: [bool; KERNEL_LOG_PEER_SLOTS];
-// GitHub issue #465: when the PEER emitted this line, not when core 0
-// drained it. The two differ by however long core 0 took to come back.
-private let mut kernel_log_peer_ticks: [i64; KERNEL_LOG_PEER_SLOTS];
-private let mut kernel_log_peer_text: [u8; KERNEL_LOG_PEER_TEXT_BYTES];
-private let mut kernel_log_peer_consumed: [usize; KERNEL_MAX_CORES];
-
-private fn kernel_log_core_here() -> *KernelLogCoreState {
-    let base: *KernelLogCoreState = kernel_log_core_state;
-    let core: usize = cpu_id();
-    if (core >= KERNEL_MAX_CORES) { return base; }
-    return base + (core as isize);
+    if (wire) { kernel_log_emit_line(core); }
+    kernel_log_core_state[core].length = 0;
 }
 
 fn kernel_log_init() {
-    kernel_log_core_here().suppressed = false;
-    kernel_log_core_here().emergency = false;
-    kernel_log_core_here().peer_length = 0;
-    kernel_log_core_here().peer_truncated = false;
-    kernel_log_core_here().peer_sequence = 0;
-    kernel_log_capture_enabled = false;
-    kernel_log_active = false;
-    kernel_log_line_length = 0;
-    kernel_log_line_continued = false;
+    for core: usize in 0..<KERNEL_MAX_CORES {
+        kernel_log_core_state[core].emergency = false;
+        kernel_log_core_state[core].capturing = false;
+        kernel_log_core_state[core].active = false;
+        kernel_log_core_state[core].continued = false;
+        kernel_log_core_state[core].length = 0;
+    }
     kernel_log_boot_tick = read_cntpct();
     kernel_log_frequency = read_cntfrq();
     // A reset, not a reuse: every slot goes back to Free and every count to
-    // zero. Core 0 only, before any reader can run (boot, and the bounds
-    // probe that ends by calling this).
+    // zero. Core 0 only, before any other CPU or reader runs (boot, and the
+    // bounds probe that ends by calling this).
     for slot: usize in 0..<KERNEL_LOG_SLOT_COUNT {
         kernel_log_publish(&kernel_log_slots[slot], 0);
     }
     kernel_log_publish(&kernel_log_discarded, 0);
+    kernel_log_publish(&kernel_log_last_discarded, 0);
     kernel_log_publish(&kernel_log_commit_lost, 0);
     kernel_log_publish(&kernel_log_head, 0);
 }
 
-// A line begins: staged on core 0 until its newline. A drained peer line
-// carries its own core and its own tick; anything else is this core now.
-private fn kernel_log_start_line() {
-    let mut line_cpu: usize = cpu_id();
-    let mut line_tick: i64 = read_cntpct() - kernel_log_boot_tick;
-    if (kernel_log_deferred) {
-        line_cpu = kernel_log_deferred_cpu;
-        line_tick = kernel_log_deferred_tick;
-    }
-    kernel_log_line_cpu = line_cpu;
-    kernel_log_line_tick = line_tick;
-    kernel_log_line_length = 0;
-    kernel_log_line_continued = false;
-    kernel_log_active = true;
-}
-
-// Keeping the active flag set across a fragment without '\n' captures
+// Keeping `capturing` set across a fragment without '\n' captures
 // uart_put_udec/uart_put_hex output between fragments in the same line.
 fn kernel_log_begin_fragment() {
     if (kernel_log_core_is_emergency()) { return; }
-    // The current record arrays and UART line assembly have one writer.
-    // Admitting secondary-core ordinary text would create silent retained-log
-    // corruption and split physical UART lines.
-    if (cpu_id() != 0) {
-        kernel_log_core_here().suppressed = true;
-        return;
-    }
-    kernel_log_capture_enabled = true;
+    let core: {0..<KERNEL_MAX_CORES as usize} = kernel_log_core_here();
+    kernel_log_core_state[core].capturing = true;
 }
 
-// A peer's fragment ends here. Suppression lasts until the line is complete,
-// so a line built from several fragments (a label, uart_put_udec digits, then
-// "\n") is still one record. Only a fragment that leaves no partial line
-// behind lets the peer's later direct bytes through again.
+// A fragment ends here. Capture lasts until the line is complete, so a line
+// built from several fragments (a label, uart_put_udec digits, then "\n") is
+// still one record. Only a fragment that leaves no partial line behind lets
+// this CPU's later bare bytes go straight to the UART again.
 fn kernel_log_end_fragment() {
     if (kernel_log_core_is_emergency()) { return; }
-    if (cpu_id() == 0) { return; }
-    if (kernel_log_core_here().peer_length == 0) {
-        kernel_log_core_here().suppressed = false;
+    let core: {0..<KERNEL_MAX_CORES as usize} = kernel_log_core_here();
+    if (kernel_log_core_state[core].active == false) {
+        kernel_log_core_state[core].capturing = false;
     }
 }
 
-private fn kernel_log_peer_publish() !{unsafe} {
-    static_assert(KERNEL_LOG_PEER_SLOTS ==
-                  KERNEL_MAX_CORES * KERNEL_LOG_PEER_RECORDS,
-                  "one run of peer records per core the build reserves");
-    static_assert(KERNEL_LOG_PEER_TEXT_BYTES ==
-                  KERNEL_LOG_PEER_SLOTS * KERNEL_LOG_PEER_LINE_BYTES,
-                  "one line of text per peer record slot");
-    let cpu: usize = cpu_id();
-    if (cpu == 0 || cpu >= KERNEL_MAX_CORES) { return; }
-    let sequence: usize = kernel_log_core_here().peer_sequence + 1;
-    kernel_log_core_here().peer_sequence = sequence;
-    let slot: usize = cpu * KERNEL_LOG_PEER_RECORDS +
-        ((sequence - 1) % KERNEL_LOG_PEER_RECORDS);
-    if (slot >= KERNEL_LOG_PEER_SLOTS) { return; }
-    let safe_slot: {0..<KERNEL_LOG_PEER_SLOTS as usize} = slot;
-    kernel_log_publish(&kernel_log_peer_published[safe_slot], 0);
-    let length: usize = kernel_log_core_here().peer_length;
-    kernel_log_peer_lengths[safe_slot] = length;
-    kernel_log_peer_truncated[safe_slot] = kernel_log_core_here().peer_truncated;
-    kernel_log_peer_ticks[safe_slot] = read_cntpct() - kernel_log_boot_tick;
-    for index: usize in 0..<KERNEL_LOG_PEER_LINE_BYTES {
-        if (index < length) {
-            let offset: usize = slot * KERNEL_LOG_PEER_LINE_BYTES + index;
-            if (offset < KERNEL_LOG_PEER_TEXT_BYTES) {
-                let safe_offset: {0..<KERNEL_LOG_PEER_TEXT_BYTES as usize} = offset;
-                kernel_log_peer_text[safe_offset] = kernel_log_core_here().peer_line[index];
-            }
-        }
+// One byte of this CPU's capturing line; false, because the byte reaches the
+// UART with its line. A newline before the line has begun is not a record:
+// it goes to the UART as it stands (true), and the fragment goes on
+// capturing, so "\nlabel: " still retains "label: ..." (GitHub issue #9).
+// A line that fills the stage is retained as it stands and continues in the
+// next record, marked as a continuation, so nothing is truncated.
+private fn kernel_log_stage_byte(core: {0..<KERNEL_MAX_CORES as usize}, value: u8,
+                                 wire: bool) -> bool !{unsafe} {
+    if (kernel_log_core_state[core].active == false) {
+        if (value == 10) { return true; }
+        kernel_log_core_state[core].tick = read_cntpct() - kernel_log_boot_tick;
+        kernel_log_core_state[core].length = 0;
+        kernel_log_core_state[core].continued = false;
+        kernel_log_core_state[core].active = true;
     }
-    let safe_cpu: {0..<KERNEL_MAX_CORES as usize} = cpu;
-    kernel_log_publish(&kernel_log_peer_published[safe_slot], sequence);
-    kernel_log_publish(&kernel_log_peer_latest[safe_cpu], sequence);
-    kernel_log_core_here().peer_length = 0;
-    kernel_log_core_here().peer_truncated = false;
+    if (kernel_log_core_state[core].length >= KERNEL_LOG_LINE_BYTES) {
+        kernel_log_retain_line(core, wire);
+        kernel_log_core_state[core].continued = true;
+    }
+    let length: usize = kernel_log_core_state[core].length;
+    if (length < KERNEL_LOG_LINE_BYTES) {
+        let safe_length: {0..<KERNEL_LOG_LINE_BYTES as usize} = length;
+        kernel_log_core_state[core].line[safe_length] = value;
+        kernel_log_core_state[core].length = length + 1;
+    }
+    if (value == 10) {
+        kernel_log_retain_line(core, wire);
+        kernel_log_core_state[core].active = false;
+        kernel_log_core_state[core].capturing = false;
+    }
+    return false;
 }
 
 // GitHub issue #454: what the console costs its callers, in the units the
@@ -521,8 +481,8 @@ private fn kernel_log_peer_publish() !{unsafe} {
 // longer is not a measurement that changes what it measures.
 //
 // Counted here rather than in the two platform drivers so both report one
-// number through one path. Secondary-core ordinary lines are suppressed, so
-// these counters retain their original meaning: core 0's console cost.
+// number through one path. Only core 0's bytes are counted, so these
+// counters keep their original meaning: core 0's console cost.
 private let mut kernel_log_tx_spin_ticks: usize = 0;
 private let mut kernel_log_tx_bytes: usize = 0;
 // Bytes that had to WAIT, which is no longer every byte: once the queue is
@@ -585,16 +545,14 @@ private let mut kernel_log_terminal_column: usize;
 private let mut kernel_log_tx_head: usize = 0;
 private let mut kernel_log_tx_tail: usize = 0;
 private let mut kernel_log_tx_count: usize = 0;
-// GitHub issue #611: the last byte core 0 put on the wire, from any stream
-// -- kernel log text, a user write, a drained peer console record -- and
-// whether a kernel log line is about to start after one that did not end.
-// A shell on a peer wrote `... job control turned off` and its newline in
-// two records, core 0 started `profile: begin` between them, and the host
-// parser, which reads lines, never saw the record. So a kernel line always
-// starts at the beginning of a wire line: core 0 sends one newline of its
-// own first when the wire is mid-line. The retained log never sees it.
+// GitHub issue #611: the last byte any CPU put on the wire, from any stream
+// -- kernel log text or a user write. A shell on a peer wrote `... job
+// control turned off` and its newline in two records, core 0 started
+// `profile: begin` between them, and the host parser, which reads lines,
+// never saw the record. So a kernel line always starts at the beginning of a
+// wire line: its writer sends one newline of its own first when the wire is
+// mid-line (kernel_log_emit_line). The retained log never sees it.
 private let mut kernel_log_wire_last: u8 = 10;
-private let mut kernel_log_wire_break_due: bool = false;
 
 // False until the platform has armed its TX interrupt. Early boot runs before
 // platform_irq_init(), so a byte queued then would never be drained; DDB and
@@ -805,11 +763,21 @@ private fn uart_tx_spin_store(c: u8) !{unsafe} {
     while (uart_tx_fifo_full()) { }
     kernel_log_note_tx_spin(read_cntpct() - spin_from);
     uart_tx_store(c);
-    if (cpu_id() == 0) {
-        let guard = console_lock();
-        kernel_log_wire_last = c;
-        console_unlock(guard);
-    }
+    let guard = console_lock();
+    kernel_log_wire_last = c;
+    console_unlock(guard);
+}
+
+// The same under a hold the caller already has, for a whole line.
+private fn uart_tx_spin_store_locked(guard: borrow ConsoleGuard[console_tx_lock],
+                                     c: u8) !{unsafe} {
+    let spin_from: i64 = read_cntpct();
+    while (uart_tx_fifo_full()) { }
+    kernel_log_note_tx_spin(read_cntpct() - spin_from);
+    uart_tx_store(c);
+    kernel_log_note_tx_byte();
+    kernel_log_terminal_column_byte(guard, c);
+    kernel_log_wire_last = c;
 }
 
 // Only CPU 0 sends UART input-flow requests. Readers on other CPUs publish
@@ -928,18 +896,9 @@ fn uart_putc(c: u8) !{logs, unsafe} {
         uart_debug_putc(c);
         return;
     }
+    // A byte of a line this CPU is building waits for the line's end
+    // (kernel_log_emit_line); a bare byte goes out now.
     if (kernel_log_capture_uart_byte(c) == false) { return; }
-    // A bare peer kernel byte is outside ordinary terminal writes. Complete
-    // peer kernel fragments are suppressed and published separately above.
-    if (cpu_id() != 0) {
-        uart_tx_spin_store(c);
-        return;
-    }
-    let guard = console_lock();
-    let break_due: bool = kernel_log_wire_break_due;
-    kernel_log_wire_break_due = false;
-    console_unlock(guard);
-    if (break_due) { uart_wire_byte(10); }
     uart_wire_byte(c);
 }
 
@@ -951,7 +910,7 @@ private fn kernel_log_column_note(value: u8) {
     console_unlock(guard);
 }
 
-// One byte from core 0 onto the wire, queued or spun; uart_putc without
+// One byte from any CPU onto the wire, queued or spun; uart_putc without
 // the retained log's capture.
 private fn uart_wire_byte(c: u8) !{logs, unsafe} {
     kernel_log_note_tx_byte();
@@ -1063,39 +1022,24 @@ fn kernel_log_tx_writer_room() -> bool {
     return room;
 }
 
-// Core 0 accounts for completed peer diagnostic records using their
-// publication ticks. Terminal chunks no longer have a separate drain ring.
-private let mut kernel_log_peer_drained: usize;
-private let mut kernel_log_peer_late: usize;
-private let mut kernel_log_peer_worst_ticks: usize;
-private let mut kernel_log_peer_worst_cpu: usize;
-private let mut kernel_log_peer_worst_length: usize;
-private let mut kernel_log_peer_worst_first: [u8; 8];
-
-// Printed once, near the end of the boot. `worst` names the diagnostic record that
-// waited longest, by its CPU, its length and its first bytes as numbers.
-fn kernel_log_peer_console_report() !{logs, unsafe} {
-    kernel_boot_log("console: peer records drained=");
-    uart_put_udec(kernel_log_peer_drained);
-    kernel_boot_log(" late=");
-    uart_put_udec(kernel_log_peer_late);
-    kernel_boot_log(" worst_ticks=");
-    uart_put_udec(kernel_log_peer_worst_ticks);
-    kernel_boot_log(" tickfreq=");
-    uart_put_udec(read_cntfrq() as usize);
-    kernel_boot_log("\n");
-    if (kernel_log_peer_late != 0) {
-        kernel_boot_log("console: peer worst record cpu=");
-        uart_put_udec(kernel_log_peer_worst_cpu);
-        kernel_boot_log(" length=");
-        uart_put_udec(kernel_log_peer_worst_length);
-        kernel_boot_log(" first bytes=");
-        for i: usize in 0..<8 {
-            uart_put_udec(kernel_log_peer_worst_first[i] as usize);
-            kernel_boot_log(" ");
-        }
-        kernel_boot_log("\n");
+// Printed once, near the end of the boot: how many sequences the ring has
+// handed out, how many its writers gave up and the first sequence of the last
+// one given up, and how many commits found their slot taken (zero unless the
+// protocol is broken). Every CPU writes the ring, so these are the losses of
+// all of them, by sequence.
+fn kernel_log_ring_report() !{logs, unsafe} {
+    kernel_boot_log("kernel log: records=");
+    uart_put_udec(kernel_log_observe(&kernel_log_head));
+    kernel_boot_log(" discarded=");
+    uart_put_udec(kernel_log_observe(&kernel_log_discarded));
+    let last: usize = kernel_log_observe(&kernel_log_last_discarded);
+    if (last != 0) {
+        kernel_boot_log(" last_discarded_seq=");
+        uart_put_udec(last - 1);
     }
+    kernel_boot_log(" commit_lost=");
+    uart_put_udec(kernel_log_observe(&kernel_log_commit_lost));
+    kernel_boot_log("\n");
 }
 
 // Under the console lock. Returns how many bytes were taken and whether the
@@ -1116,10 +1060,8 @@ private fn uart_user_write_locked(
                     room = false;
                 } else {
                     let value: u8 = bytes[index];
-                    if (kernel_log_capture_uart_byte_locked(guard, value)) {
-                        kernel_log_note_tx_byte();
-                        if (kernel_log_tx_push_terminal(guard, value) == false) { room = false; }
-                    }
+                    kernel_log_note_tx_byte();
+                    if (kernel_log_tx_push_terminal(guard, value) == false) { room = false; }
                     if (room) { taken = taken + 1; }
                 }
             }
@@ -1193,102 +1135,90 @@ fn uart_tx_flush() !{unsafe} {
     console_unlock(guard);
 }
 
-fn kernel_log_capture_uart_byte(value: u8) -> bool {
-    // Per-core publication and emergency reporters do not wait for a lock.
-    if (kernel_log_capture_is_unshared()) {
-        return kernel_log_capture_unshared_byte(value);
+// Whether a byte uart_putc was given goes to the UART now (true), or is part
+// of the line this CPU is building and goes with it (false). Each CPU stages
+// into its own state, so no lock is taken here; the line takes the console
+// lock once, when it is written out.
+fn kernel_log_capture_uart_byte(value: u8) -> bool !{unsafe} {
+    let core: {0..<KERNEL_MAX_CORES as usize} = kernel_log_core_here();
+    if (kernel_log_core_state[core].emergency ||
+        kernel_log_core_state[core].capturing == false) {
+        return true;
     }
-    let guard = console_lock();
-    let visible: bool = kernel_log_capture_uart_byte_locked(guard, value);
-    console_unlock(guard);
-    return visible;
+    return kernel_log_stage_byte(core, value, true);
 }
 
-private fn kernel_log_capture_uart_byte_locked(
-        guard: borrow ConsoleGuard[console_tx_lock], value: u8) -> bool {
-    if (kernel_log_capture_is_unshared()) {
-        return kernel_log_capture_unshared_byte(value);
-    }
-    if (kernel_log_capture_enabled == false) { return true; }
-    if (kernel_log_active == false) {
-        if (value == 10) {
-            kernel_log_capture_enabled = false;
-            return true;
-        }
-        kernel_log_start_line();
-        if (kernel_log_wire_last != 10) { kernel_log_wire_break_due = true; }
-    }
-    return kernel_log_capture_retained_byte(value);
-}
-
-// Read-only per-core mode queries share the one checked selection of the
+// Read-only per-core mode query, through the one checked selection of the
 // current core. Writes remain at the explicit fragment and emergency sites.
 private fn kernel_log_core_is_emergency() -> bool {
-    return kernel_log_core_here().emergency;
+    return kernel_log_core_state[kernel_log_core_here()].emergency;
 }
 
-private fn kernel_log_core_is_suppressed() -> bool {
-    return kernel_log_core_here().suppressed;
-}
-
-private fn kernel_log_capture_is_unshared() -> bool {
-    return cpu_id() != 0 || kernel_log_core_is_emergency() ||
-           kernel_log_core_is_suppressed();
-}
-
-private fn kernel_log_capture_unshared_byte(value: u8) -> bool {
-    if (kernel_log_core_is_emergency()) { return true; }
-    if (kernel_log_core_is_suppressed()) {
-        let length: usize = kernel_log_core_here().peer_length;
-        if (length < KERNEL_LOG_PEER_LINE_BYTES) {
-            let safe_length: {0..<KERNEL_LOG_PEER_LINE_BYTES as usize} = length;
-            kernel_log_core_here().peer_line[safe_length] = value;
-            kernel_log_core_here().peer_length = length + 1;
-        } else { kernel_log_core_here().peer_truncated = true; }
-        // A newline ends the record, not the fragment. The rest of the same
-        // kernel_boot_log string stays suppressed until the fragment returns
-        // (kernel_log_end_fragment). Lifting it here sent the tail of
-        // "\nworkload: ..." straight to the UART, while core 0 drained the
-        // lone newline record into the middle of it.
-        if (value == 10) {
-            kernel_log_peer_publish();
+// A retained line onto the wire, whole: one console-lock hold carries the
+// line from its first byte to its newline, so no other CPU's line or user
+// write lands inside it, and the line starts at the beginning of a wire line
+// (GitHub issue #611). Before the queue is live, or while terminal output is
+// paused, the bytes spin, as every kernel byte did before the queue existed.
+// Otherwise the hold waits, with the lock let go, until the queue has room
+// for the whole line or is empty; only a line longer than the queue then
+// waits out the FIFO inside the hold, for the part that does not fit.
+private fn kernel_log_emit_line(core: {0..<KERNEL_MAX_CORES as usize}) !{unsafe} {
+    let length: usize = kernel_log_core_state[core].length;
+    if (kernel_log_tx_is_live() == false || terminal_output_paused()) {
+        let guard = console_lock();
+        if (kernel_log_wire_last != 10) { uart_tx_spin_store_locked(guard, 10); }
+        for index: usize in 0..<KERNEL_LOG_LINE_BYTES {
+            if (index < length) {
+                uart_tx_spin_store_locked(guard, kernel_log_core_state[core].line[index]);
+            }
         }
-        return false;
+        console_unlock(guard);
+        return;
     }
-    // A peer's direct UART byte is not part of core 0's partially assembled
-    // retained line, even if the core-0 capture flag happens to be set.
-    return true;
+    let required: usize = length + 1;
+    let mut done: bool = false;
+    while (done == false) {
+        let guard = console_lock();
+        let count: usize = kernel_log_tx_count;
+        if (count == 0 || (count <= KERNEL_LOG_TX_QUEUE_BYTES &&
+                           KERNEL_LOG_TX_QUEUE_BYTES - count >= required)) {
+            if (kernel_log_wire_last != 10) { kernel_log_emit_byte_locked(guard, 10); }
+            for index: usize in 0..<KERNEL_LOG_LINE_BYTES {
+                if (index < length) {
+                    kernel_log_emit_byte_locked(guard, kernel_log_core_state[core].line[index]);
+                }
+            }
+            uart_tx_drain_into_fifo(guard);
+            if (uart_terminal_output_pending_locked(guard)) { uart_tx_irq_enable(); }
+            console_unlock(guard);
+            done = true;
+        } else {
+            console_unlock(guard);
+            // Do not hold the console lock while waiting for physical room.
+            while (uart_tx_fifo_full()) { }
+            let drain = console_lock();
+            uart_tx_drain_into_fifo(drain);
+            console_unlock(drain);
+        }
+    }
 }
 
-// Core 0's line is staged here and becomes a record at its newline
-// (kernel_log_retain_line). Only the wire boundary decision above needs the
-// console guard; the ring's own protocol is independent of terminal writers.
-// A line that fills the stage is retained as it stands and continues in the
-// next record, marked as a continuation, so nothing is truncated.
-private fn kernel_log_capture_retained_byte(value: u8) -> bool {
-    if (kernel_log_active == false) { return true; }
-    if (kernel_log_line_length >= KERNEL_LOG_LINE_BYTES) {
-        kernel_log_retain_line();
-        kernel_log_line_continued = true;
+// One byte of a line into the queue, making room by waiting out the FIFO
+// when the queue is full -- only reached by a line longer than the queue.
+private fn kernel_log_emit_byte_locked(guard: borrow ConsoleGuard[console_tx_lock],
+                                       value: u8) !{unsafe} {
+    while (kernel_log_tx_full(guard)) {
+        while (uart_tx_fifo_full()) { }
+        uart_tx_drain_into_fifo_force(guard);
     }
-    let length: usize = kernel_log_line_length;
-    if (length < KERNEL_LOG_LINE_BYTES) {
-        let safe_length: {0..<KERNEL_LOG_LINE_BYTES as usize} = length;
-        kernel_log_line[safe_length] = value;
-        kernel_log_line_length = length + 1;
-    }
-    if (value == 10) {
-        kernel_log_retain_line();
-        kernel_log_active = false;
-        kernel_log_capture_enabled = false;
-    }
-    return true;
+    kernel_log_note_tx_byte();
+    let queued: bool = kernel_log_tx_push(guard, value);
 }
 
 // GitHub issue #465: a peer that writes a retained line, on request.
 //
 // No maintained boot path had a secondary core emitting ordinary log text, so
-// the publication Territory A built and the attribution added here were both
+// a peer's path into the ring and the attribution added here were both
 // unobservable -- the whole facility could stop working and every lane would
 // stay green.
 //
@@ -1310,8 +1240,9 @@ private let mut kernel_log_peer_probe_emitted: [usize; KERNEL_MAX_CORES];
 // Not an interrupt function, and the effect checker is what settled that: an
 // !{interrupt} version was rejected for reaching kernel_boot_log, which is
 // the same rule that keeps a handler out of the ordinary console. So this
-// runs in the secondary's ordinary loop, which is also the only context where
-// kernel_log_peer_publish is reachable at all.
+// runs in the secondary's ordinary loop, and its lines go through the same
+// reservation token as core 0's: the probe is what shows a peer writing the
+// ring directly (#613 slice 5).
 fn kernel_log_peer_probe_step() !{logs, unsafe} {
     let raw_cpu: usize = cpu_id();
     if (raw_cpu == 0 || raw_cpu >= KERNEL_MAX_CORES) { return; }
@@ -1374,162 +1305,26 @@ private fn kernel_log_peer_console_probe_step(
     }
 }
 
-// GitHub issue #534: move each peer's published console records into the
-// transmit queue, a whole record at a time. Core 0 only, from two places
-// that cannot be in the middle of one of its own lines: syscall entry,
-// through kernel_log_peer_drain below, and a timer interrupt taken from
-// EL0, through each platform's dispatcher -- the second so that a core 0
-// computing in EL0 without a syscall still drains.
-//
-// A record goes in only when the queue has room for all of it, with
-// interrupts masked, so it reaches the wire unbroken and the TX interrupt
-// cannot run in between. One that does not fit stays published and the
-// next drain takes it. Emergency and DDB paths never wait for any of this:
-// with the queue stood down nothing is moved, and whatever is published
-// stays there until the queue is live again.
-//
-// No `logs`, no `locks`: the interrupt dispatcher calls it.
-// A complete peer diagnostic shares the terminal queue as one admission.
-// Reserve room before retaining or enqueuing any byte, then keep the guard
-// through the whole record and truncation suffix. This is the same ordering
-// boundary as a bounded terminal chunk, not one hold per diagnostic byte.
-private fn kernel_log_peer_record_emit(
-        bytes: borrow [u8; KERNEL_LOG_PEER_LINE_BYTES..],
-        length: {0..<KERNEL_LOG_PEER_LINE_BYTES + 1 as usize}, truncated: bool) {
-    static_assert(KERNEL_LOG_PEER_LINE_BYTES + 28 <= KERNEL_LOG_TX_QUEUE_BYTES,
-                  "a peer diagnostic and suffix must fit in one queue hold");
-    let suffix = bs"... [peer line truncated]\n";
-    let mut required: usize = length + 2;
-    if (truncated) { required = required + suffix.len; }
-    while (kernel_log_tx_is_live() && terminal_output_paused() == false) {
-        let guard = console_lock();
-        let count: usize = kernel_log_tx_count;
-        if (count <= KERNEL_LOG_TX_QUEUE_BYTES &&
-            KERNEL_LOG_TX_QUEUE_BYTES - count >= required) {
-            for index: usize in 0..<KERNEL_LOG_PEER_LINE_BYTES {
-                if (index < length) {
-                    kernel_log_peer_record_byte_locked(guard, bytes[index]);
-                }
-            }
-            if (truncated) {
-                kernel_log_begin_fragment();
-                for index: usize in 0..<26 {
-                    kernel_log_peer_record_byte_locked(guard, suffix[index]);
-                }
-            }
-            uart_tx_drain_into_fifo(guard);
-            if (uart_terminal_output_pending_locked(guard)) { uart_tx_irq_enable(); }
-            console_unlock(guard);
-            return;
-        }
-        console_unlock(guard);
-        // Do not hold the console lock while waiting for physical room.
-        while (uart_tx_fifo_full()) { }
-        let drain = console_lock();
-        uart_tx_drain_into_fifo(drain);
-        console_unlock(drain);
-    }
-    // Polling/emergency reporting remains independent of ordinary queue
-    // admission. Paused terminal writers cannot append in this mode.
-    for index: usize in 0..<KERNEL_LOG_PEER_LINE_BYTES {
-        if (index < length) { uart_putc(bytes[index]); }
-    }
-    if (truncated) { kernel_boot_log("... [peer line truncated]\n"); }
-}
-
-private fn kernel_log_peer_record_byte_locked(
-        guard: borrow ConsoleGuard[console_tx_lock], value: u8) {
-    if (kernel_log_capture_uart_byte_locked(guard, value)) {
-        if (kernel_log_wire_break_due) {
-            kernel_log_wire_break_due = false;
-            kernel_log_note_tx_byte();
-            let prefix: bool = kernel_log_tx_push(guard, 10);
-        }
-        kernel_log_note_tx_byte();
-        let queued: bool = kernel_log_tx_push(guard, value);
-    }
-}
-
-fn kernel_log_peer_drain() !{unsafe} {
+// Core 0's console housekeeping at syscall entry and on each wake of its
+// idle loop: the UART input-flow request. Peer lines no longer pass through
+// core 0 (#613 slice 5), so this is all that is left of the old peer drain.
+fn kernel_log_console_poll() !{unsafe} {
     if (cpu_id() != 0) { return; }
     kernel_log_terminal_flow_poll();
-    for cpu: usize in 1..<KERNEL_MAX_CORES {
-        let mut expected: usize = kernel_log_peer_consumed[cpu] + 1;
-        let latest: usize = kernel_log_observe(&kernel_log_peer_latest[cpu]);
-        if (latest >= expected + KERNEL_LOG_PEER_RECORDS) {
-            expected = latest - KERNEL_LOG_PEER_RECORDS + 1;
-            kernel_boot_log("kernel log: peer records overwritten\n");
-        }
-        let mut remaining: usize = KERNEL_LOG_PEER_RECORDS;
-        while (expected <= latest && remaining != 0) {
-            remaining = remaining - 1;
-            let slot: usize = cpu * KERNEL_LOG_PEER_RECORDS +
-                ((expected - 1) % KERNEL_LOG_PEER_RECORDS);
-            if (slot >= KERNEL_LOG_PEER_SLOTS) { return; }
-            let safe_slot: {0..<KERNEL_LOG_PEER_SLOTS as usize} = slot;
-            let first: usize =
-                kernel_log_observe(&kernel_log_peer_published[safe_slot]);
-            if (first != expected) { return; }
-            let length: usize = kernel_log_peer_lengths[safe_slot];
-            let truncated: bool = kernel_log_peer_truncated[safe_slot];
-            let peer_tick: i64 = kernel_log_peer_ticks[safe_slot];
-            let mut copy: [u8; KERNEL_LOG_PEER_LINE_BYTES];
-            for index: usize in 0..<KERNEL_LOG_PEER_LINE_BYTES {
-                if (index < length) {
-                    let offset: usize = slot * KERNEL_LOG_PEER_LINE_BYTES + index;
-                    if (offset < KERNEL_LOG_PEER_TEXT_BYTES) {
-                        let safe_offset: {0..<KERNEL_LOG_PEER_TEXT_BYTES as usize} = offset;
-                        copy[index] = kernel_log_peer_text[safe_offset];
-                    }
-                }
-            }
-            let second: usize =
-                kernel_log_observe(&kernel_log_peer_published[safe_slot]);
-            if (second != expected) { return; }
-            // Attribute the record to the core that WROTE it, with the tick
-            // that core took. Cleared straight after the line so nothing
-            // afterwards inherits a peer's identity.
-            kernel_log_deferred_cpu = cpu;
-            kernel_log_deferred_tick = peer_tick;
-            kernel_log_deferred = true;
-            kernel_log_begin_fragment();
-            if (length <= KERNEL_LOG_PEER_LINE_BYTES) {
-                kernel_log_peer_record_emit(copy as [u8; KERNEL_LOG_PEER_LINE_BYTES..],
-                                            length, truncated);
-            } else { return; }
-            kernel_log_deferred = false;
-            kernel_log_peer_drained = kernel_log_peer_drained + 1;
-            let now: i64 = read_cntpct();
-            if (now >= peer_tick) {
-                let waited: usize = (now - peer_tick) as usize;
-                if (waited > (read_cntfrq() >> 5) as usize) {
-                    kernel_log_peer_late = kernel_log_peer_late + 1;
-                }
-                if (waited > kernel_log_peer_worst_ticks) {
-                    kernel_log_peer_worst_ticks = waited;
-                    kernel_log_peer_worst_cpu = cpu;
-                    kernel_log_peer_worst_length = length;
-                    for first: usize in 0..<8 {
-                        if (first < length) { kernel_log_peer_worst_first[first] = copy[first]; }
-                        else { kernel_log_peer_worst_first[first] = 0; }
-                    }
-                }
-            }
-            kernel_log_peer_consumed[cpu] = expected;
-            expected = expected + 1;
-        }
-    }
 }
 
 // Terminal exception paths must remain visible on every CPU and must not
 // depend on ordinary line assembly. This bypass lasts until the next boot.
+// A line this CPU had staged stays staged and unretained; DDB's `log` and
+// scripts/kernel_console.gdb show it.
 fn kernel_log_enter_emergency() {
-    kernel_log_core_here().emergency = true;
-    kernel_log_core_here().suppressed = false;
+    let core: {0..<KERNEL_MAX_CORES as usize} = kernel_log_core_here();
+    kernel_log_core_state[core].emergency = true;
+    kernel_log_core_state[core].capturing = false;
     // Terminal stack guards can park without entering crash_console_run.
     // Flush the owner queue here so neither their last line nor its prompt
     // depends on an interrupt after the terminal path masks IRQs. A peer
-    // never touches this core-0 queue and already uses polling UART output.
+    // stands nothing down and already writes with polling UART output.
     //
     // Terminal on purpose, so the token is matched and dropped rather than
     // discarded: GitHub issue #531 made that a decision the compiler asks
@@ -1750,7 +1545,7 @@ private fn kernel_log_snapshot_record(seq: usize, end: usize, second_check: bool
     return KernelLogRecordCopy::Kept(span);
 }
 
-// A partial final line is not included: it is still core 0's staged line.
+// A partial final line is not included: it is still its CPU's staged line.
 // Records the ring had already overwritten, records in flight or overwritten
 // while this copied them, and records their writers gave up are each
 // reported explicitly instead of being presented as complete history.
@@ -1768,12 +1563,14 @@ fn kernel_log_snapshot_build() -> usize !{unsafe} {
         kernel_log_snapshot_push(10);
     }
     let mut lost: usize = 0;
+    let mut first_lost: usize = 0;
     let mut seq: usize = begin;
     for step: usize in 0..<KERNEL_LOG_SLOT_COUNT {
         if (seq < end) {
             match kernel_log_snapshot_record(seq, end, true, false) {
                 KernelLogRecordCopy::Kept(span) => { seq = seq + span; }
                 KernelLogRecordCopy::Lost(count) => {
+                    if (lost == 0) { first_lost = seq; }
                     lost = lost + count;
                     seq = seq + count;
                 }
@@ -1785,12 +1582,19 @@ fn kernel_log_snapshot_build() -> usize !{unsafe} {
     if (discarded != 0) {
         kernel_log_snapshot_text("<4>kernel log: discarded records=" as *u8);
         kernel_log_snapshot_decimal6(discarded % 1000000);
+        let last: usize = kernel_log_observe(&kernel_log_last_discarded);
+        if (last != 0) {
+            kernel_log_snapshot_text(" last seq=" as *u8);
+            kernel_log_snapshot_decimal6((last - 1) % 1000000);
+        }
         kernel_log_snapshot_push(10);
     }
     if (lost != 0) {
         kernel_log_snapshot_text(
             "<4>kernel log: records in flight or overwritten while read=" as *u8);
         kernel_log_snapshot_decimal6(lost % 1000000);
+        kernel_log_snapshot_text(" first seq=" as *u8);
+        kernel_log_snapshot_decimal6(first_lost % 1000000);
         kernel_log_snapshot_push(10);
     }
     return snapshot.length;
@@ -1881,6 +1685,19 @@ fn kernel_log_raw_slot(seq: usize) -> KernelLogRawSlot !{unsafe} {
                                    seq, length);
 }
 
+// How much of a line CPU `core` has staged and not yet retained: 0 unless a
+// line is open there. The debugger reads it under the world stop.
+fn kernel_log_raw_staged_length(core: {0..<KERNEL_MAX_CORES as usize}) -> usize {
+    if (kernel_log_core_state[core].active == false) { return 0; }
+    return kernel_log_core_state[core].length;
+}
+
+fn kernel_log_raw_staged_byte(core: {0..<KERNEL_MAX_CORES as usize}, index: usize) -> u8 {
+    if (index >= KERNEL_LOG_LINE_BYTES) { return 0; }
+    let safe_index: {0..<KERNEL_LOG_LINE_BYTES as usize} = index;
+    return kernel_log_core_state[core].line[safe_index];
+}
+
 // Byte `index` of the record that begins at `seq`; 0 past the slots.
 fn kernel_log_raw_text_byte(seq: usize, index: usize) -> u8 !{unsafe} {
     if (index >= KERNEL_LOG_LINE_BYTES) { return 0; }
@@ -1894,12 +1711,23 @@ fn kernel_log_raw_text_byte(seq: usize, index: usize) -> u8 !{unsafe} {
     return ((word >> ((offset % 8) * 8)) & 0xFF) as u8;
 }
 
-// One retained record "<byte><byte>\n", written the way core 0 writes any.
+// One byte of a probe line: staged and retained like any other, but never
+// written to the UART, so the destructive probe emits no console lines.
+private fn kernel_log_probe_byte(value: u8) -> bool !{unsafe} {
+    let core: {0..<KERNEL_MAX_CORES as usize} = kernel_log_core_here();
+    if (kernel_log_core_state[core].emergency ||
+        kernel_log_core_state[core].capturing == false) {
+        return true;
+    }
+    return kernel_log_stage_byte(core, value, false);
+}
+
+// One retained record "<byte><byte>\n", written the way any CPU writes one.
 private fn kernel_log_probe_record(byte: u8) {
     kernel_log_begin_fragment();
-    let first: bool = kernel_log_capture_uart_byte(byte);
-    let second: bool = kernel_log_capture_uart_byte(byte);
-    let newline: bool = kernel_log_capture_uart_byte(10);
+    let first: bool = kernel_log_probe_byte(byte);
+    let second: bool = kernel_log_probe_byte(byte);
+    let newline: bool = kernel_log_probe_byte(10);
 }
 
 // The negative control's writer: core 0 retains records until `record`'s
@@ -1958,10 +1786,10 @@ private fn kernel_log_probe_line(byte: u8, count: usize) {
     kernel_log_begin_fragment();
     for index: usize in 0..<1024 {
         if (index < count) {
-            let kept: bool = kernel_log_capture_uart_byte(byte);
+            let kept: bool = kernel_log_probe_byte(byte);
         }
     }
-    let newline: bool = kernel_log_capture_uart_byte(10);
+    let newline: bool = kernel_log_probe_byte(10);
 }
 
 // Destructive boot-time probe, followed immediately by kernel_log_init(). It
@@ -2018,16 +1846,16 @@ fn kernel_log_bounds_probe() -> bool !{unsafe} {
         (kernel_log_probe_meta(after - 1) & KERNEL_LOG_META_LENGTH_MASK) != 61) {
         return false;
     }
-    // A fatal report must bypass even an unfinished suppressed line, and
-    // must leave the staged partial line untouched and unretained. init
-    // resets this mode immediately after the destructive boot probe.
+    // A fatal report must bypass even an unfinished line, and must leave the
+    // staged partial line untouched and unretained. init resets this mode
+    // immediately after the destructive boot probe.
     kernel_log_begin_fragment();
     for byte_index: usize in 0..<3 {
-        kernel_log_capture_uart_byte(119);
+        let staged_byte: bool = kernel_log_probe_byte(119);
     }
-    let staged: usize = kernel_log_line_length;
+    let here: {0..<KERNEL_MAX_CORES as usize} = kernel_log_core_here();
+    let staged: usize = kernel_log_core_state[here].length;
     let head: usize = kernel_log_observe(&kernel_log_head);
-    kernel_log_core_here().suppressed = true;
     // Arrange the live-queue case without emitting artificial bytes. A
     // terminal writer must leave polling selected even without the later
     // crash-console entry; stack-guard fail-stop has no such continuation.
@@ -2035,10 +1863,144 @@ fn kernel_log_bounds_probe() -> bool !{unsafe} {
     kernel_log_enter_emergency();
     kernel_log_begin_fragment();
     let visible: bool = kernel_log_capture_uart_byte(122);
-    return visible && kernel_log_core_here().suppressed == false &&
+    return visible && kernel_log_core_state[here].capturing == false &&
         kernel_log_tx_is_live() == false && staged == 3 &&
-        kernel_log_line_length == staged &&
+        kernel_log_core_state[here].length == staged &&
         kernel_log_observe(&kernel_log_head) == head;
+}
+
+// GitHub issue #613 slice 5: the all-CPU writer storm's two halves inside
+// this file, because both reach the ring's private state. The rendezvous is
+// kernel/kernel/log_storm_evidence.tkb.
+//
+// A storm line is "storm c<cpu> r<round, 6 digits> n<index, 2 digits>\n",
+// staged and retained through the same per-CPU stage and reservation token
+// as any kernel line, but not written to the UART: four cores writing to a
+// 115200-baud console would measure the console, not the ring.
+const KERNEL_LOG_STORM_PER_WRITER: usize = 16;
+
+fn kernel_log_storm_per_writer() -> usize {
+    return KERNEL_LOG_STORM_PER_WRITER;
+}
+
+private fn kernel_log_storm_digits(value: usize, width: usize) !{unsafe} {
+    let mut place_values: [usize; 6] = { 100000, 10000, 1000, 100, 10, 1 };
+    for position: usize in 0..<6 {
+        let divisor: usize = place_values[position];
+        if (position >= 6 - width && divisor != 0) {
+            let digit: usize = (value / divisor) % 10;
+            let staged: bool = kernel_log_probe_byte((digit + 48) as u8);
+        }
+    }
+}
+
+// One storm line from this CPU. False when this CPU is in the middle of a
+// line of its own or reporting a fatal error; nothing is staged then.
+fn kernel_log_storm_write(round: usize, index: usize) -> bool !{unsafe} {
+    let core: {0..<KERNEL_MAX_CORES as usize} = kernel_log_core_here();
+    if (kernel_log_core_state[core].emergency || kernel_log_core_state[core].active) {
+        return false;
+    }
+    kernel_log_core_state[core].capturing = true;
+    let prefix = bs"storm c";
+    for byte: usize in 0..<7 { let staged: bool = kernel_log_probe_byte(prefix[byte]); }
+    kernel_log_storm_digits(core, 1);
+    let round_label: bool = kernel_log_probe_byte(32);
+    let round_mark: bool = kernel_log_probe_byte(114);
+    kernel_log_storm_digits(round % 1000000, 6);
+    let index_label: bool = kernel_log_probe_byte(32);
+    let index_mark: bool = kernel_log_probe_byte(110);
+    kernel_log_storm_digits(index, 2);
+    let newline: bool = kernel_log_probe_byte(10);
+    return true;
+}
+
+// Per-CPU bit masks of the storm indices the last verification found. Core 0
+// is the only verifier.
+private let mut kernel_log_storm_found: [usize; KERNEL_MAX_CORES];
+
+fn kernel_log_storm_found_mask(cpu: {0..<KERNEL_MAX_CORES as usize}) -> usize {
+    return kernel_log_storm_found[cpu];
+}
+
+private fn kernel_log_storm_number(seq: usize, from: usize, width: usize) -> usize !{unsafe} {
+    let mut value: usize = 0;
+    for position: usize in 0..<6 {
+        if (position < width) {
+            let byte: u8 = kernel_log_raw_text_byte(seq, from + position);
+            if (byte >= 48 && byte <= 57) {
+                value = value * 10 + ((byte - 48) as usize);
+            } else {
+                return 1000000;
+            }
+        }
+    }
+    return value;
+}
+
+// The storm record that begins at `seq`, read once: every writer of this
+// round has finished, so it is not changing under the read. 0: well formed
+// and new; 1: not a storm record; 2: a storm record that is wrong.
+private fn kernel_log_storm_check(seq: usize, cpu: usize, length: usize,
+                                  round: usize) -> usize !{unsafe} {
+    let prefix = bs"storm c";
+    for byte: usize in 0..<7 {
+        if (kernel_log_raw_text_byte(seq, byte) != prefix[byte]) { return 1; }
+    }
+    if (length != 21 || cpu >= KERNEL_MAX_CORES) { return 2; }
+    let safe_cpu: {0..<KERNEL_MAX_CORES as usize} = cpu;
+    if (kernel_log_storm_number(seq, 7, 1) != cpu ||
+        kernel_log_storm_number(seq, 10, 6) != round % 1000000) {
+        return 2;
+    }
+    let index: usize = kernel_log_storm_number(seq, 18, 2);
+    if (index >= KERNEL_LOG_STORM_PER_WRITER) { return 2; }
+    let bit: usize = 1 << index;
+    if ((kernel_log_storm_found[safe_cpu] & bit) != 0) { return 2; }
+    kernel_log_storm_found[safe_cpu] = kernel_log_storm_found[safe_cpu] | bit;
+    return 0;
+}
+
+// Every sequence in [start, end) accounted for, by sequence: (storm records
+// of this round, each found once; other committed records -- kernel lines
+// written meanwhile; sequences not committed -- in flight, discarded or
+// overwritten; the first of those plus one, 0 when none; storm records with a
+// wrong round, core, index or length, or repeated).
+fn kernel_log_storm_verify(start: usize, end: usize, round: usize)
+        -> (usize, usize, usize, usize, usize) !{unsafe} {
+    let mut records: usize = 0;
+    let mut foreign: usize = 0;
+    let mut lost: usize = 0;
+    let mut first_lost: usize = 0;
+    let mut malformed: usize = 0;
+    for cpu: usize in 0..<KERNEL_MAX_CORES { kernel_log_storm_found[cpu] = 0; }
+    let mut seq: usize = start;
+    for step: usize in 0..<KERNEL_LOG_SLOT_COUNT {
+        if (seq < end) {
+            let mut advance: usize = 1;
+            let mut missing: bool = false;
+            match kernel_log_raw_slot(seq) {
+                KernelLogRawSlot::Committed(fields) => {
+                    let (span, cpu, length) = fields;
+                    let checked: usize = kernel_log_storm_check(seq, cpu, length, round);
+                    if (checked == 0) { records = records + 1; }
+                    else if (checked == 1) { foreign = foreign + 1; }
+                    else { malformed = malformed + 1; }
+                    advance = span;
+                }
+                KernelLogRawSlot::Continuation => { }
+                KernelLogRawSlot::InFlight(_) => { missing = true; }
+                KernelLogRawSlot::Discarded => { missing = true; }
+                KernelLogRawSlot::Absent => { missing = true; }
+            }
+            if (missing) {
+                if (lost == 0) { first_lost = seq + 1; }
+                lost = lost + 1;
+            }
+            seq = seq + advance;
+        }
+    }
+    return (records, foreign, lost, first_lost, malformed);
 }
 
 // Hexadecimal with its `0x`, through the log ring.
@@ -2086,12 +2048,14 @@ fn kernel_boot_log_resource_exhausted(resource: *u8, capacity: usize) {
     kernel_boot_log("\n" as *u8);
 }
 
-// Ordinary retained kernel text remains a core-0 stream. Other cores divert
-// a kernel_boot_log logical line at uart_putc into a peer record until the
-// fragment that completes it returns, so fragments cannot split core 0's
-// view-sensitive text. The suppression bit is per-core;
-// direct userspace UART and the lock-free crash/DDB reporters remain live.
-// Re-entry on one core would still alias that core's line state.
+// Each CPU builds a kernel_boot_log logical line in its own
+// KernelLogCoreState across several fragments, and the line is reserved only
+// at its newline, because one head compare-swap needs the record's slot
+// count first. Between two fragments the caller runs ordinary code, so a
+// thread preempted there would leave its half line for the next thread on
+// that CPU to continue, and would continue on its new CPU without it. The
+// reservation token itself never outlives one call; the staged line does.
+// Re-entry on one core would likewise alias that core's line state.
 fn kernel_log_execution_model_assumption() {
     static_assert(KERNEL_PREEMPTIBLE == 0,
                   "per-core kernel-log line state cannot survive preemption into another writer");
