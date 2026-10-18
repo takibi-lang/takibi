@@ -74,7 +74,7 @@ def expand(names, makefile_path=MAKEFILE):
     out = subprocess.run(
         ["make", "-s", "--no-print-directory", "-f", str(makefile_path),
          "--eval", f"_ci_parts_print: ; @{recipe}", "_ci_parts_print"],
-        capture_output=True, text=True, check=True).stdout
+        capture_output=True, text=True, check=True, timeout=10).stdout
     return {k: v.split() for k, v in (line.split("=", 1) for line in out.splitlines())}
 
 
@@ -179,8 +179,8 @@ def controls(makefile, ci, part_lanes, qemu_lanes):
         "lane in two parts": (makefile, ci, moved),
         "lane in no part": (makefile, ci, dropped),
         "herd7 built for every part": (makefile, swap(
-            ci, "if: matrix.part == 'models' && steps.herd7-cache",
-            "if: steps.herd7-cache"), part_lanes),
+            ci, "cache-hit != 'true' && matrix.part == 'models'",
+            "cache-hit != 'true'"), part_lanes),
         "herd7 restored for qemu": (makefile, swap(
             ci, "        if: matrix.part == 'models'\n        uses: actions/cache@v4",
             "        if: matrix.part != 'lang'\n        uses: actions/cache@v4"), part_lanes),

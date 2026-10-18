@@ -10,7 +10,7 @@ def main() -> int:
     tree = tree_texts()
     assert not problems(tree), problems(tree)
     dev, build, ci = str(DEVCONTAINER), str(BUILD), str(CI)
-    guard = "if: steps.herd7-cache.outputs.cache-hit != 'true'\n"
+    guard = "if: steps.herd7-cache.outputs.cache-hit != 'true' && matrix.part == 'models'\n"
     failing = {
         "drifted CI pin": {**tree, build: tree[build].replace("herdtools7.7.58", "herdtools7.7.57")},
         "unpinned devcontainer": {**tree, dev: tree[dev].replace("herdtools7.7.58", "herdtools7")},

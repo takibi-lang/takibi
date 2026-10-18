@@ -158,7 +158,7 @@ jobs:
           key: herd7-${{ hashFiles('scripts/build_herd7.sh') }}
 
       - name: Build herd7 (cache miss only)
-        if: matrix.part == 'models' && steps.herd7-cache.outputs.cache-hit != 'true'
+        if: steps.herd7-cache.outputs.cache-hit != 'true' && matrix.part == 'models'
         run: bash scripts/run_lane.sh ci-herd7 bash scripts/build_herd7.sh /home/runner/herd7
 
       # The QEMU parts' kernel images on every core, before the

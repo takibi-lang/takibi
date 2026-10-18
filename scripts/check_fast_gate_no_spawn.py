@@ -63,6 +63,8 @@ REVIEWED = {
     "check_direct_mmio_literals_controls.py": SHORT_CHILDREN,
     "check_rpi5_set_kernel_byte_controls.py": "runs the set-kernel-byte script on a fixture ELF with stub tools, 0.2 s",
     "check_symbolize_ddb_controls.py": "compiles one tiny C file twice with cc (timeout 4 s), 0.3 s",
+    "check_ci_parts.py": "one `make -s --eval` that parses the Makefile and echoes the part "
+                         "variables; no recipe runs (timeout 10 s), 0.1 s standalone",
 }
 
 
