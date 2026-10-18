@@ -71,13 +71,20 @@ const LINUX_ECHILD: usize = 0xFFFFFFFFFFFFFFF6;
 const AFFINITY_ERROR_FLOOR: usize = 0xFFFFFFFFFFFFF000;
 const AFFINITY_ABSENT_PID: usize = 999999;
 const AFFINITY_PIN_ATTEMPTS: usize = 200000;
-// Naps of a millisecond each: enough to cover the parent's remaining work
-// many times over, and finite so nothing depends on the child being killed.
-const AFFINITY_SPINNER_NAPS: usize = 20000;
+// The spinners' lifetimes, in CLOCK_MONOTONIC nanoseconds: enough to cover
+// the parent's remaining work many times over, and finite so nothing
+// depends on the child being killed. A TIME, not a syscall count (#825):
+// the count of 20000 calls this replaced was sized when each call was a
+// millisecond nap (a86c7d5c made them getaffinity calls of about a
+// microsecond), so on the board it ran out in milliseconds once #613 slice 5
+// made the parent's console line synchronous, before the SIGTERM was sent.
+const AFFINITY_SPINNER_NS: usize = 20000000000;
+const CLOCK_GETTIME_SYSCALL: usize = 113;
+const CLOCK_MONOTONIC: usize = 1;
 // 128 + SIGTERM, the status kernel_syscall_exit_current_process gives a
 // process the termination signal ends (GitHub issue #563).
 const AFFINITY_SIGTERM_STATUS: u8 = 143;
-const AFFINITY_PEER_SPINNER_NAPS: usize = 2000;
+const AFFINITY_PEER_SPINNER_NS: usize = 2000000000;
 // A millisecond each, so the whole wait is bounded at a quarter second.
 const AFFINITY_PEER_PIN_POLLS: usize = 256;
 // Mask polls the remote target makes before it gives up on seeing the
@@ -137,9 +144,9 @@ private fn affinity_cpu(cpu_bytes: borrow [u8; 4..]) -> usize {
 // remaining work by orders of magnitude, and it ends on its own whatever the
 // kernel does, so this fixture can no longer hang a lane.
 // GitHub issue #563: the same nap loop, on the peer. It pins ITSELF, so the
-// parent can wait on sched_getaffinity rather than on a guess, and its nap
-// count is a tenth of the core-0 spinner's -- a lost signal here costs the
-// lane two seconds rather than twenty, and the count is not what this is
+// parent can wait on sched_getaffinity rather than on a guess, and its
+// lifetime is a tenth of the core-0 spinner's -- a lost signal here costs the
+// lane two seconds rather than twenty, and the lifetime is not what this is
 // measuring.
 private fn affinity_peer_spinner() {
     let mut mask: [u8; 8];
@@ -147,17 +154,35 @@ private fn affinity_peer_spinner() {
     if (svc5(SETAFFINITY_SYSCALL, 0, 8, mask as *u8 as usize, 0, 0) != 0) {
         svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
     }
-    let mut probe_mask: [u8; 8];
-    for round: usize in 0..<AFFINITY_PEER_SPINNER_NAPS {
-        svc5(GETAFFINITY_SYSCALL, 0, 8, probe_mask as *u8 as usize, 0, 0);
-    }
-    svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
+    affinity_spin_for(AFFINITY_PEER_SPINNER_NS);
 }
 
 private fn affinity_spinner() {
+    affinity_spin_for(AFFINITY_SPINNER_NS);
+}
+
+private fn affinity_clock_ns(time: borrow [u64; 2..]) -> usize {
+    if (svc5(CLOCK_GETTIME_SYSCALL, CLOCK_MONOTONIC,
+             time as *u64 as usize, 0, 0, 0) != 0) {
+        return 0xFFFFFFFFFFFFFFFF;
+    }
+    return (time[0] * 1000000000 + time[1]) as usize;
+}
+
+// Syscalls back to back -- a pending signal is taken at each return -- until
+// `limit` nanoseconds have passed, then exit 0. A clock that fails ends the
+// spin at once, which the parent then reports as OUTLIVED, by name.
+private fn affinity_spin_for(limit: usize) {
     let mut probe_mask: [u8; 8];
-    for round: usize in 0..<AFFINITY_SPINNER_NAPS {
+    let mut time: [u64; 2];
+    let start: usize = affinity_clock_ns(time as []u64);
+    let mut spinning: bool = start != 0xFFFFFFFFFFFFFFFF;
+    while (spinning) {
         svc5(GETAFFINITY_SYSCALL, 0, 8, probe_mask as *u8 as usize, 0, 0);
+        let now: usize = affinity_clock_ns(time as []u64);
+        if (now == 0xFFFFFFFFFFFFFFFF || (now >= start && now - start >= limit)) {
+            spinning = false;
+        }
     }
     svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
 }
@@ -423,7 +448,7 @@ fn affinity_probe() !{unsafe} {
         }
     }
     // Ask it to stop, then reap it. The ask is best-effort on purpose: the
-    // child ends on its own nap count, so a SIGTERM that does not reach a
+    // child ends on its own time limit, so a SIGTERM that does not reach a
     // sleeping process costs this fixture nothing but the wait. wait4 blocks
     // until it is gone either way, which is also what keeps core 0 busy
     // until the line above has been drained.
@@ -453,7 +478,7 @@ fn affinity_probe() !{unsafe} {
         affinity_fail(bs"affinity: never came back to cpu 0\n");
     }
     // GitHub issue #563: WHY it was reaped. The spinner exits 0 on its own
-    // nap count and the kernel exits it with 128 + SIGTERM when the signal
+    // time limit and the kernel exits it with 128 + SIGTERM when the signal
     // is taken, so this one byte separates "the SIGTERM reached a napping
     // process" from "it ran out the clock" -- which is the question that
     // issue's stall could not answer. Measured before it is asserted.
