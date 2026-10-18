@@ -45,4 +45,7 @@ let run (prog : toplevel list) : toplevel list =
       ["address", TypeUsize; "length", TypeUsize],
       false, None, ["address"; "length"],
       Dma_fixed_registry.span_loc) :: !additions;
-  prog @ List.rev !additions
+  (* Every pipeline (the driver and the unit-test helpers) runs this pass,
+     so the compiler-declared CasResult (GitHub issue #613) is added here
+     rather than through one more pass each of them must remember. *)
+  Cas_result.run (prog @ List.rev !additions)

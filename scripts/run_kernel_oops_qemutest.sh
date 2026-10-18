@@ -261,13 +261,15 @@ for _ in $(seq 1 50); do
         #    while core 1 is still inside its crash stop.
         # 5. Detach releases both.
         if [ "$MODE" = peer_fault_start_release ]; then
-            # Stop after the failed CAS, before its separate holder load.
-            # Core 0 releases the start reservation between those accesses.
+            # Stop after the failed CAS, before its refusal is classified.
+            # Core 0 releases the start reservation in that window; the
+            # classification must use the value the CAS observed (#613),
+            # never a later load (#556).
             claim_release_line=$(python3 - "$REPO_ROOT/kernel/lib/occupancy.tkb" <<'PYLINE'
 import sys
 lines = open(sys.argv[1], encoding="ascii").read().splitlines()
 hits = [i + 1 for i, line in enumerate(lines)
-        if "let current: usize = atomic_word_load(&(*stop).claimed);" in line]
+        if "if (current == WORLD_STOP_CLAIM_START) {" in line]
 assert len(hits) == 1, hits
 print(hits[0])
 PYLINE

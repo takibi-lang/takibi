@@ -3103,6 +3103,17 @@ let record_call_target loc fname target =
    | _ -> ());
   resolved_call_targets := StringMap.add key target !resolved_call_targets
 
+(* GitHub issue #613: the compiler-declared, unindexed result of a
+   compare-and-swap (Cas_result). *)
+let cas_result_ty () = TVariant (Atomic_spec.cas_result_type, [], [])
+
+let is_compare_swap name =
+  let intrinsic = match Atomic_spec.cell_intrinsic name with
+    | Some i -> i | None -> name in
+  match Atomic_spec.find intrinsic with
+  | Some { Atomic_spec.operation = Atomic_spec.Compare_swap; _ } -> true
+  | _ -> false
+
 let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
   match e.desc with
   | IntLit _    -> fresh ()  (* polymorphic: unifies with any integer type via context *)
@@ -4822,7 +4833,8 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | Atomic_spec.Load -> usize_args 0; TUsize
        | Atomic_spec.Store -> usize_args 1; TVoid
        | Atomic_spec.Exchange | Atomic_spec.Fetch_add -> usize_args 1; TUsize
-       | Atomic_spec.Compare_exchange -> usize_args 2; TBool)
+       | Atomic_spec.Compare_exchange -> usize_args 2; TBool
+       | Atomic_spec.Compare_swap -> usize_args 2; cas_result_ty ())
   | Call (fname, args) when Atomic_spec.is_intrinsic fname ->
       (* GitHub issue #17: the closed atomic set. Same "closed set of
          instructions" shape as the mrs/msr/tlbi intrinsics above, with the
@@ -4877,7 +4889,10 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            check_addr addr; check_value v; TUsize
        | Atomic_spec.Compare_exchange, [addr; expected; desired] ->
            check_addr addr; check_value expected; check_value desired; TBool
-       | Atomic_spec.Compare_exchange, _ ->
+       | Atomic_spec.Compare_swap, [addr; expected; desired] ->
+           check_addr addr; check_value expected; check_value desired;
+           cas_result_ty ()
+       | (Atomic_spec.Compare_exchange | Atomic_spec.Compare_swap), _ ->
            raise (TypeError (e.loc, Printf.sprintf
              "%s expects three arguments: %s(addr, expected, desired)"
              fname fname))
@@ -8247,6 +8262,7 @@ let validate_per_cpu (prog : Ast.toplevel list) =
     | _ -> ()) prog
 
 let infer_program (prog : Ast.toplevel list) : program_types =
+  Cas_load_rule.check prog;
   active_runtime_bounds_key := "";
   runtime_bounds := Runtime_bounds.empty;
   runtime_bounds_address_taken := [];
@@ -12390,6 +12406,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                dropping it leaves a record that is never published and \
                never abandoned"));
           List.fold_left (fun m a -> check_expr taints m false a) moved args
+      | Ast.Call (name, args)
+        when not consume && is_compare_swap name ->
+          (* GitHub issue #613: builtins have no call_returns entry, so the
+             compiler-declared must_use CasResult is enforced here. *)
+          ignore args;
+          raise (TypeError (e.loc, Printf.sprintf
+            "must-use result of '%s' must be handled, returned, or moved into a binding"
+            name))
       | Ast.Call (("place_take" | "place_put"), _)
         when Generic_variant.place_exchange e <> None ->
           check_expr taints moved consume

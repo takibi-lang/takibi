@@ -4353,6 +4353,47 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
              "atomic.cmpxchg" builder in
            let success = build_extractvalue pair 1 "atomic.cmpxchg.success" builder in
            (TypeBool, success)
+       | Atomic_spec.Compare_swap,
+         ((Atomic_spec.Acquire | Atomic_spec.Acq_rel) as ordering),
+         [addr_e; expected_e; desired_e] ->
+           (* GitHub issue #613. The same strong cmpxchg as above, but the
+              result keeps the value the instruction read: Swapped on
+              success, Observed(old) on failure, so no second load stands
+              in for the failed observation. The failure ordering is
+              acquire, not relaxed: Observed(v) replaces the acquire load a
+              caller made after a boolean compare-exchange, and must order
+              what the caller does with v as that load did. On AArch64 this
+              costs nothing (casa/casal and ldaxr already acquire on
+              failure); LLVM allows an acquire failure ordering under both
+              success orderings. *)
+           let (_, a) = gen_expr ~expected_ty:TypeUsize locals addr_e in
+           let p = build_inttoptr a (pointer_type context) "atomic.addr"
+             builder in
+           let (_, expected) = gen_expr ~expected_ty:TypeUsize locals expected_e in
+           let (_, desired) = gen_expr ~expected_ty:TypeUsize locals desired_e in
+           let success_ord = match ordering with
+             | Atomic_spec.Acq_rel -> AtomicOrdering.AcqiureRelease
+             | _ -> AtomicOrdering.Acquire in
+           let pair = Llvm_ext.build_atomic_cmpxchg p expected desired
+             success_ord AtomicOrdering.Acquire false
+             "atomic.cas" builder in
+           let old = build_extractvalue pair 0 "atomic.cas.old" builder in
+           let success = build_extractvalue pair 1 "atomic.cas.success" builder in
+           let vtype = Atomic_spec.cas_result_type in
+           let swapped = variant_case vtype Atomic_spec.cas_swapped in
+           let observed = variant_case vtype Atomic_spec.cas_observed in
+           let i32 = i32_type context in
+           let tag = build_select success
+             (const_int i32 swapped.variant_tag)
+             (const_int i32 observed.variant_tag) "atomic.cas.tag" builder in
+           let llty = ltype_of_ast (TypeVariant (vtype, [], [])) in
+           let value = build_insertvalue (undef llty) tag 0
+             "atomic.cas.result" builder in
+           let value = match observed.variant_payload_field with
+             | Some field ->
+                 build_insertvalue value old field "atomic.cas.result" builder
+             | None -> raise (Error "BUG: CasResult::Observed has no payload field") in
+           (TypeVariant (vtype, [], []), value)
        | _ ->
            (* Type inference has already rejected arity errors. Reaching
               this arm instead means Atomic_spec contains a contract for
@@ -4364,7 +4405,8 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
               | Atomic_spec.Load -> "load" | Atomic_spec.Store -> "store"
               | Atomic_spec.Exchange -> "exchange"
               | Atomic_spec.Fetch_add -> "fetch_add"
-              | Atomic_spec.Compare_exchange -> "compare_exchange")
+              | Atomic_spec.Compare_exchange -> "compare_exchange"
+              | Atomic_spec.Compare_swap -> "compare_swap")
              (Atomic_spec.ordering_name spec.ordering) name)))
 
   | Call (("dma_cpu_ptr" | "dma_cpu_slice") as operation,

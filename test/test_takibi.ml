@@ -18954,6 +18954,7 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
            | Atomic_spec.Exchange -> "exchange"
            | Atomic_spec.Fetch_add -> "fetch_add"
            | Atomic_spec.Compare_exchange -> "compare_exchange"
+           | Atomic_spec.Compare_swap -> "compare_swap"
          in
          Printf.sprintf "%s:%s:%s" spec.name operation
            (Atomic_spec.ordering_name spec.ordering)
@@ -18964,7 +18965,9 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
           "atomic_swap_acquire:exchange:acquire";
           "atomic_fetch_add_relaxed:fetch_add:relaxed";
           "atomic_compare_exchange_acquire:compare_exchange:acquire";
-          "atomic_compare_exchange_acq_rel:compare_exchange:acq_rel"]
+          "atomic_compare_exchange_acq_rel:compare_exchange:acq_rel";
+          "atomic_compare_swap_acquire:compare_swap:acquire";
+          "atomic_compare_swap_acq_rel:compare_swap:acq_rel"]
          (List.map contract Atomic_spec.all));
 
   Alcotest.test_case
@@ -19067,7 +19070,149 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
          ["atomic_load_acquire"; "atomic_store_release";
           "atomic_swap_acquire"; "atomic_fetch_add_relaxed";
           "atomic_compare_exchange_acquire";
-          "atomic_compare_exchange_acq_rel"]);
+          "atomic_compare_exchange_acq_rel";
+          "atomic_compare_swap_acquire"; "atomic_compare_swap_acq_rel";
+          "atomic_word_compare_swap"]);
+
+  (* ---- GitHub issue #613: compare-and-swap returns the value it observed
+     on failure, so no second load stands in for the failed observation. *)
+  Alcotest.test_case
+    "issue #613: compare-swap result is matched as Swapped | Observed(v)"
+    `Quick
+    (fun () ->
+       expect_ok
+         "fn cas_ok(addr: usize, v: usize) -> usize !{unsafe} {
+            match unsafe { atomic_compare_swap_acquire(addr, 0, v) } {
+              CasResult::Swapped => { return 0; }
+              CasResult::Observed(seen) => { return seen; }
+            }
+            return 0;
+          }
+          fn cas_acq_rel(addr: usize, v: usize) -> bool !{unsafe} {
+            match unsafe { atomic_compare_swap_acq_rel(addr, 0, v) } {
+              CasResult::Swapped => { return true; }
+              CasResult::Observed(_) => { return false; }
+            }
+            return false;
+          }" ());
+
+  Alcotest.test_case
+    "issue #613: a compare-swap result must be matched exhaustively and used"
+    `Quick
+    (fun () ->
+       expect_type_error "non-exhaustive"
+         "fn cas_partial(addr: usize, v: usize) -> usize !{unsafe} {
+            match unsafe { atomic_compare_swap_acquire(addr, 0, v) } {
+              CasResult::Swapped => { return 0; }
+            }
+            return 0;
+          }" ();
+       expect_type_error "must-use result"
+         "fn cas_dropped(addr: usize, v: usize) !{unsafe} {
+            unsafe { atomic_compare_swap_acquire(addr, 0, v); }
+          }" ();
+       expect_type_error "must-use"
+         "fn cas_bound_dropped(addr: usize, v: usize) !{unsafe} {
+            let r: CasResult = unsafe { atomic_compare_swap_acquire(addr, 0, v) };
+          }" ();
+       expect_type_error "cannot unify"
+         "fn cas_as_bool(addr: usize, v: usize) -> bool !{unsafe} {
+            return unsafe { atomic_compare_swap_acquire(addr, 0, v) };
+          }" ();
+       expect_type_error "raw atomic operation"
+         "fn cas_unguarded(addr: usize, v: usize) -> usize {
+            match atomic_compare_swap_acquire(addr, 0, v) {
+              CasResult::Swapped => { return 0; }
+              CasResult::Observed(seen) => { return seen; }
+            }
+            return 0;
+          }" ();
+       expect_type_error "expects three arguments"
+         "fn cas_arity(addr: usize) -> usize !{unsafe} {
+            match unsafe { atomic_compare_swap_acquire(addr, 0) } {
+              CasResult::Swapped => { return 0; }
+              CasResult::Observed(seen) => { return seen; }
+            }
+            return 0;
+          }" ();
+       expect_type_error "already defined"
+         "variant CasResult { Swapped; Observed(usize); }" ());
+
+  (* The #556 shape: a refusal explained by a second load. *)
+  Alcotest.test_case
+    "issue #613: a load after a boolean compare-exchange of the same word is rejected"
+    `Quick
+    (fun () ->
+       List.iter (fun body ->
+         expect_type_error "two observations"
+           (Printf.sprintf
+              "fn cas_then_load(addr: usize, v: usize) -> usize !{unsafe} {
+                 %s
+               }" body) ())
+         ["if (unsafe { atomic_compare_exchange_acquire(addr, 0, v) }) { return 0; }
+           return unsafe { atomic_load_acquire(addr) };";
+          "let ok: bool = unsafe { atomic_compare_exchange_acq_rel(addr, 0, v) };
+           let seen: usize = unsafe { atomic_load_acquire(addr) };
+           if (ok) { return 0; }
+           return seen;";
+          "if (unsafe { atomic_compare_exchange_acquire(addr, 0, v) } == false) {
+             return unsafe { atomic_load_acquire(addr) };
+           }
+           return 0;"];
+       expect_type_error "two observations"
+         "struct no_copy AtomicWord { private value: usize; }
+          struct Gate { claimed: AtomicWord; }
+          fn cell_cas_then_load(g: *Gate, v: usize) -> usize {
+            if (atomic_word_compare_exchange(&(*g).claimed, 0, v)) { return 0; }
+            return atomic_word_load(&(*g).claimed);
+          }" ();
+       (* A retry loop re-reads before its next compare, a different word
+          may be loaded, and the compare-swap form needs no load at all. *)
+       expect_ok
+         "fn retry(addr: usize) -> usize !{unsafe} {
+            while (true) {
+              let w: usize = unsafe { atomic_load_acquire(addr) };
+              if (unsafe { atomic_compare_exchange_acq_rel(addr, w, w + 1) }) {
+                return w;
+              }
+            }
+            return 0;
+          }
+          fn other_word(a: usize, b: usize) -> usize !{unsafe} {
+            if (unsafe { atomic_compare_exchange_acquire(a, 0, 1) }) { return 0; }
+            return unsafe { atomic_load_acquire(b) };
+          }" ());
+
+  Alcotest.test_case
+    "issue #613: compare-swap lowers to one cmpxchg with acquire failure"
+    `Quick
+    (fun () ->
+       List.iter (fun triple ->
+         with_codegen_target triple (fun () ->
+           expect_codegen_ok
+             "fn cas_ir(addr: usize, v: usize) -> usize !{unsafe} {
+                match unsafe { atomic_compare_swap_acquire(addr, 0, v) } {
+                  CasResult::Swapped => {}
+                  CasResult::Observed(seen) => { return seen; }
+                }
+                match unsafe { atomic_compare_swap_acq_rel(addr, v, 0) } {
+                  CasResult::Swapped => { return 0; }
+                  CasResult::Observed(seen) => { return seen; }
+                }
+                return 1;
+              }" ();
+           let ir = Llvm.string_of_llmodule !Llvm_gen.the_module in
+           Alcotest.(check bool) "acquire success, acquire failure"
+             true (contains_substring ir "acquire acquire");
+           Alcotest.(check bool) "acq_rel success, acquire failure"
+             true (contains_substring ir "acq_rel acquire");
+           Alcotest.(check bool) "the observed value comes from the cmpxchg"
+             true (contains_substring ir "atomic.cas.old");
+           Alcotest.(check bool) "no separate load stands in for it"
+             false (contains_substring ir "ldar");
+           Alcotest.(check bool) "not single-thread scoped"
+             false (contains_substring ir "syncscope(\"singlethread\")")))
+         ["aarch64-none-elf"; "x86_64-pc-linux-gnu"]);
 
   (* ---- GitHub issue #299: fixed-layout records with atomic commit
      publication. The record whose declaration these reuse is the shape

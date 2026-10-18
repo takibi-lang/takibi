@@ -4,6 +4,11 @@
    taking another backend branch. *)
 
 type operation = Load | Store | Exchange | Fetch_add | Compare_exchange
+  (* GitHub issue #613: compare-and-swap whose failure result is the value
+     that same instruction observed, as a must_use `CasResult` (Swapped |
+     Observed(v)). A boolean compare-exchange followed by a separate load
+     treats two observations as one (the #556 release window). *)
+  | Compare_swap
 type ordering = Relaxed | Acquire | Release | Acq_rel
 
 type t = {
@@ -24,7 +29,18 @@ let all = [
      count whose last decrement hands the object to its freer). *)
   { name = "atomic_compare_exchange_acq_rel"; operation = Compare_exchange;
     ordering = Acq_rel };
+  { name = "atomic_compare_swap_acquire"; operation = Compare_swap;
+    ordering = Acquire };
+  { name = "atomic_compare_swap_acq_rel"; operation = Compare_swap;
+    ordering = Acq_rel };
 ]
+
+(* The result type of a Compare_swap. Declared by the compiler (see
+   Cas_result) so every program spells the same two cases. *)
+let cas_result_type = "CasResult"
+let cas_swapped = "Swapped"
+let cas_observed = "Observed"
+
 
 module StringMap = Map.Make (String)
 
@@ -52,6 +68,7 @@ let cell_ops = [
   ("atomic_word_swap", "atomic_swap_acquire");
   ("atomic_word_fetch_add", "atomic_fetch_add_relaxed");
   ("atomic_word_compare_exchange", "atomic_compare_exchange_acquire");
+  ("atomic_word_compare_swap", "atomic_compare_swap_acquire");
 ]
 let cell_intrinsic name = List.assoc_opt name cell_ops
 let is_cell_op name = Option.is_some (cell_intrinsic name)

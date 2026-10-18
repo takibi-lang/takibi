@@ -236,24 +236,29 @@ private fn world_stop_hold(stop: *WorldStop @ id) !{interrupt, unsafe} {
 const WORLD_STOP_CLAIM_STOP: usize = 1;
 const WORLD_STOP_CLAIM_START: usize = 2;
 
-// A failed CAS and a later load are two observations. Released does not
-// grant the claim and does not assert that a competing stop holds it.
+// A refusal classifies the value the failed compare-and-swap itself read
+// (GitHub issue #613), never a later load: a boolean CAS followed by a
+// separate holder load treated two observations as one (#556). A strong CAS
+// fails only on a value other than 0, so there is no "released" refusal.
+// A refusal grants no claim, and the observed holder is not a proof of the
+// current one.
 must_use variant WorldStopClaimResult {
     Acquired;
     StartHeld;
     StopHeld;
-    Released;
 }
 
 private fn world_stop_claim_as(stop: *WorldStop @ id, holder: usize)
         -> WorldStopClaimResult !{unsafe} {
-    if (atomic_word_compare_exchange(&(*stop).claimed, 0, holder)) {
-        return WorldStopClaimResult::Acquired;
+    match atomic_word_compare_swap(&(*stop).claimed, 0, holder) {
+        CasResult::Swapped => { return WorldStopClaimResult::Acquired; }
+        CasResult::Observed(current) => {
+            if (current == WORLD_STOP_CLAIM_START) {
+                return WorldStopClaimResult::StartHeld;
+            }
+            return WorldStopClaimResult::StopHeld;
+        }
     }
-    let current: usize = atomic_word_load(&(*stop).claimed);
-    if (current == 0) { return WorldStopClaimResult::Released; }
-    if (current == WORLD_STOP_CLAIM_START) { return WorldStopClaimResult::StartHeld; }
-    return WorldStopClaimResult::StopHeld;
 }
 
 private fn world_stop_claim(stop: *WorldStop @ id)
@@ -272,7 +277,6 @@ private fn world_stop_begin_config(stop: *WorldStop @ id, cores: usize,
         WorldStopClaimResult::Acquired => {}
         WorldStopClaimResult::StartHeld => { return WorldStopResult::Busy; }
         WorldStopClaimResult::StopHeld => { return WorldStopResult::Busy; }
-        WorldStopClaimResult::Released => { return WorldStopResult::Busy; }
     }
     let mask: usize = (1 << cores) - 1;
     return world_stop_begin_claimed(stop, mask, spins, notify, stale_ack_probe);
@@ -366,8 +370,7 @@ fn world_stop_machine_begin_holding_probe(spins: usize)
     // CPU_ON, and the core it starts may fault before core 0 gives it back.
     // Wait for that one holder, bounded, rather than answer Busy and leave
     // the faulting core's console running on an unstopped machine. A stop
-    // held by another initiator is still Busy at once. A separate holder
-    // load that finds the reservation already released must also retry.
+    // held by another initiator is still Busy at once.
     // The bound is time on the generic counter, one second, not a spin count:
     // the holder is another vCPU or core whose progress a local loop count
     // does not measure.
@@ -381,9 +384,6 @@ fn world_stop_machine_begin_holding_probe(spins: usize)
             WorldStopClaimResult::Acquired => { acquired = true; }
             WorldStopClaimResult::StopHeld => {}
             WorldStopClaimResult::StartHeld => {
-                retry = read_cntpct() - start < budget;
-            }
-            WorldStopClaimResult::Released => {
                 retry = read_cntpct() - start < budget;
             }
         }
@@ -476,9 +476,6 @@ fn cpu_start_reserve(core: {0..<KERNEL_MAX_CORES as usize})
         WorldStopClaimResult::StopHeld => {
             mutex_irq_restore(irq_flags); return CpuStartResult::Busy;
         }
-        WorldStopClaimResult::Released => {
-            mutex_irq_restore(irq_flags); return CpuStartResult::Busy;
-        }
     }
     let mask: usize = atomic_word_load(&kernel_world_stop.participants) | 1;
     let bit: usize = 1 << core;
@@ -536,7 +533,6 @@ fn world_stop_busy_claim_probe(stopped: borrow WorldStopped[id],
         WorldStopClaimResult::Acquired => { return WorldStopClaimProbeResult::UnexpectedUnclaimed; }
         WorldStopClaimResult::StartHeld => { return WorldStopClaimProbeResult::Busy; }
         WorldStopClaimResult::StopHeld => { return WorldStopClaimProbeResult::Busy; }
-        WorldStopClaimResult::Released => { return WorldStopClaimProbeResult::Busy; }
     }
 }
 

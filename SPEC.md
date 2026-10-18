@@ -3355,7 +3355,7 @@ it is a linear struct rather than an erased view.
 
 ### Atomic Operations (GitHub issues #17 and #450)
 
-Six intrinsics, usable only inside `unsafe { ... }`:
+Eight intrinsics, usable only inside `unsafe { ... }`:
 
 ```
 atomic_load_acquire(addr: usize) -> usize
@@ -3366,6 +3366,10 @@ atomic_compare_exchange_acquire(addr: usize, expected: usize,
                                 desired: usize) -> bool
 atomic_compare_exchange_acq_rel(addr: usize, expected: usize,
                                 desired: usize) -> bool
+atomic_compare_swap_acquire(addr: usize, expected: usize,
+                            desired: usize) -> CasResult
+atomic_compare_swap_acq_rel(addr: usize, expected: usize,
+                            desired: usize) -> CasResult
 ```
 
 Their target-independent contracts are:
@@ -3378,6 +3382,31 @@ Their target-independent contracts are:
 | `atomic_fetch_add_relaxed` | fetch-add | relaxed |
 | `atomic_compare_exchange_acquire` | compare-exchange | acquire on success, relaxed on failure |
 | `atomic_compare_exchange_acq_rel` | compare-exchange | acquire and release on success, relaxed on failure |
+| `atomic_compare_swap_acquire` | compare-swap | acquire on success, acquire on failure |
+| `atomic_compare_swap_acq_rel` | compare-swap | acquire and release on success, acquire on failure |
+
+**A compare-swap reports what it observed (GitHub issue #613).** Its
+result is the compiler-declared
+
+```
+must_use variant CasResult { Swapped; Observed(usize); }
+```
+
+`Swapped` means the word held `expected` and now holds `desired`.
+`Observed(v)` means the swap did not happen and `v` is the value that same
+instruction read; since the compare-swap is strong, `v != expected`. A
+caller that must explain a refusal classifies `v` instead of loading the
+word again: a boolean compare-exchange followed by a load is two
+observations, and a holder can change between them (GitHub issue #556).
+The failure ordering is acquire so that `Observed(v)` orders the caller's
+later accesses as the load it replaces did; on AArch64 this costs nothing,
+since `casa`/`casal` and the `ldaxr` loop already read with acquire. The
+result is `must_use` and a `match` on it must name both cases, so neither a
+discarded result nor a forgotten refusal compiles. `v` is a past
+observation, not a proof of the current value, and a refusal grants no
+authority. The name `CasResult` is reserved: a source declaration of it is
+a duplicate-name error. The spelling of the builtins and of the result is
+provisional, pending the syntax review.
 
 This table is one compiler contract, not a description inferred separately
 from each target's instructions. The type checker, effect inference, builtin
@@ -3412,7 +3441,7 @@ anything.
 
 **Atomic cells (GitHub issue #637 stage 3).** A word shared without a lock
 is declared as an `AtomicWord` (`struct no_copy AtomicWord { private value:
-usize; }`, kernel/lib/atomic_word.tkb) and reached only through five
+usize; }`, kernel/lib/atomic_word.tkb) and reached only through six
 built-in operations that take a pointer to one:
 
 ```
@@ -3422,6 +3451,8 @@ atomic_word_swap(cell: *AtomicWord, value: usize) -> usize    // acquire
 atomic_word_fetch_add(cell: *AtomicWord, value: usize) -> usize   // relaxed
 atomic_word_compare_exchange(cell: *AtomicWord, expected: usize,
                              desired: usize) -> bool          // acquire
+atomic_word_compare_swap(cell: *AtomicWord, expected: usize,
+                         desired: usize) -> CasResult         // acquire
 ```
 
 They need no `unsafe`: the field is private to its file, so every access to
@@ -3444,6 +3475,8 @@ selected `--cpu` picks the encoding. Measured on real objdump output:
 | `atomic_fetch_add_relaxed` | `ldxr`/`add`/`stxr` retry loop | `ldadd` |
 | `atomic_compare_exchange_acquire` | `ldaxr`/`stxr` retry loop | `casa` |
 | `atomic_compare_exchange_acq_rel` | `ldaxr`/`stlxr` retry loop | `casal` |
+| `atomic_compare_swap_acquire` | `ldaxr`/`stxr` retry loop | `casa` |
+| `atomic_compare_swap_acq_rel` | `ldaxr`/`stlxr` retry loop | `casal` |
 
 The load and store are inline asm rather than LLVM atomics because the
 OCaml bindings expose no ordering on `build_load`/`build_store` -- there is
@@ -3464,13 +3497,14 @@ and `lock xaddq`. It is not a target this kernel runs on.
 
 LLVM 19's OCaml bindings omit `build_cmpxchg`, although the installed LLVM C
 API provides `LLVMBuildAtomicCmpXchg`. A narrow project-local C stub exposes
-that existing backend operation without patching or rebuilding LLVM. Its
-Takibi result is the success flag because that is the current caller's
-contract: `spin_trylock` must write HELD only when it observed FREE. The
-backend therefore retains its CPU-specific selection shown above rather than
+that existing backend operation without patching or rebuilding LLVM. A
+compare-exchange returns only the cmpxchg's success flag, which is all
+`spin_trylock` needs (write HELD only when it observed FREE); a
+compare-swap builds `CasResult` from both the flag and the old value of the
+same cmpxchg. The backend therefore retains its CPU-specific selection shown above rather than
 forcing a hand-written exclusives loop onto the RPi5.
 
-Any other target rejects all five at code generation, by name -- unlike
+Any other target rejects all of them at code generation, by name -- unlike
 the intrinsics above, which reach the assembler and fail on the mnemonic.
 
 ### Built-in Region (GitHub issue #672, `--regions`)
