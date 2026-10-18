@@ -15,10 +15,13 @@ anything: when you need them, stop and report (see "Report").
    project skills (`write-takibi`, `add-takibi-test`, `debug-kernel`,
    `defect-followup`, `github-workflow`) exactly as a single session would.
 2. If your prompt names a handoff note or says you resume earlier work, read
-   the branch's commits (`git log main..HEAD`), the note, and the issue's
+   the branch's commits (`git log origin/main..HEAD`), the note, and the issue's
    latest comments first, and do not repeat what they record as dead ends.
-3. Rebase onto the local `main` before starting and after each commit:
-   `git rebase main`. The coordinator advances `main` as other work lands.
+3. Rebase onto `origin/main` before starting and after each commit:
+   `git rebase origin/main`. The coordinator fetches and lands; worktrees
+   share refs, so `origin/main` is current without a fetch of your own. Do
+   not use the local `main`: during a land it holds a branch that may still
+   fail (2026-10-18, a worker rebased onto an unlanded branch).
 
 ## Boundaries
 
@@ -30,6 +33,11 @@ anything: when you need them, stop and report (see "Report").
   block. Hardware lanes (`*rpi5*`, `kernelcheck`, `allcheck`) wait on shared
   leases; run them only at a natural boundary, as AGENTS.md says.
 - Do not touch `~/.takibi-sessions` except to append to the audit file below.
+- Never write to shared toolchains or system directories (`~/.opam`, `/usr`,
+  the model-tools cache): tools are installed by the maintainer or the
+  devcontainer. Before any third-party `make install`, check where it writes
+  with `make -n install` (2026-10-18, a zarith install polluted the shared
+  opam switch).
 - Do not delete files in bulk or rewrite history you did not create.
 
 ## Stop and report instead of guessing
@@ -90,8 +98,9 @@ Write "none" when no defect was found; do not drop the table.
 
 `scripts/land.sh` refuses a stale space checkpoint before it runs allcheck,
 and every branch that skipped this cost a failed land round. So before you
-report `done`, rebase onto `main` and run
-`python3 scripts/space_checkpoint.py --base main --head HEAD`. If it reports
+report `done`, rebase onto `origin/main` and run
+`python3 scripts/space_checkpoint.py --base origin/main --head HEAD`, and
+run it again after any later commit, even a comment-only one. If it reports
 stale, do the review in [docs/SPACE_REVIEW.md](../../docs/SPACE_REVIEW.md)
 (measure with `scripts/space_delta.py`, or reuse evidence with the reason the
 policy allows) and commit the updated `docs/SPACE_CHECKPOINT.json`. Once the

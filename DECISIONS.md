@@ -14,6 +14,9 @@ Rules for keeping it current:
 - Read this file before proposing an option or recording a decision; an
   option that contradicts an active line needs the maintainer.
 - Keep each entry to one or two lines and one issue link. English ASCII.
+- The maintainer's latest statement wins. When a new statement contradicts
+  an active line, the coordinator points this out to the maintainer, then
+  supersedes the old line.
 
 Format: `- YYYY-MM-DD <decision>. [active|superseded by YYYY-MM-DD] #issue`
 
@@ -43,8 +46,9 @@ maintainer when" below); routine calls follow the coordinator defaults.
 ## Coordinator defaults (decide without asking)
 
 The coordinator applies these itself, records each call as one line on the
-issue, and reports it to the maintainer afterwards in one line. Nothing lands
-without maintainer approval; these only remove the question, not the gate.
+issue, and reports it to the maintainer afterwards in one line. Since
+2026-10-18 the coordinator also lands without asking when no escalation
+condition below applies, and reports the land afterwards.
 
 - 2026-10-12 Remaining items an audit names become filed issues by default;
   work too big for the current slice is filed, not stretched. [active] #719 #739 #772 #791
@@ -83,6 +87,11 @@ without maintainer approval; these only remove the question, not the gate.
   on its issue. [active] #775
 - 2026-10-16 Land order, clean audits and choices the worker recommends that
   match an active line are not separate questions. [active] #753
+- 2026-10-18 The coordinator assigns the next territory issue itself when it
+  needs no design decision, and lands work that meets no escalation condition;
+  both are reported afterwards. [active] #753
+- 2026-10-18 Rule and instruction changes (DECISIONS.md, .agents/, .claude/)
+  also land on the coordinator's judgement when nothing escalates. [active] #753
 - 2026-10-16 Low-abstraction details (a specific constant such as a reserve
   count) are not recorded here; record the principle, not the value. [active] #753
 
@@ -129,6 +138,8 @@ without maintainer approval; these only remove the question, not the gate.
 - 2026-10-17 ext2 scratch held across blocking block I/O is a pool of
   KERNEL_MAX_CORES slots handed out by a linear slot token (option C), not
   kernel-stack or per-task storage; readers stay lock-free (#533). [active] #638
+- 2026-10-18 Atomic compare-and-swap returns the observed value on failure
+  (Swapped | Observed(v)), so no second load stands in for it. [active] #613
 - 2026-10-14 Lock order moves toward ranked capability tokens (Fuchsia
   lock_order style), absorbing acquires_lock_<rank>_<name>, after the syntax
   review. [active] #789
@@ -163,6 +174,13 @@ without maintainer approval; these only remove the question, not the gate.
 
 - 2026-10-11 QEMU lanes run on 4 vCPUs; uart-wake pinned to 2 until #757. [active] #719 #757
 - 2026-10-13 #9 closed; affinity follow-ups split into #775 and #776. [active] #9
+
+- 2026-10-18 The kernel log ring is option B: fixed slots with a per-slot
+  seq|state word, records may span several slots (no fixed line limit);
+  hand-written tokens first, replaced by protocol generation after #720. [active] #613
+- 2026-10-18 Memory-ordering checks are herd7 model checks tied to the
+  emitted instructions; no litmus7 hardware runs. herdtools7 comes from opam,
+  pinned in the devcontainer and CI. [active] #645
 
 ## Size and performance
 

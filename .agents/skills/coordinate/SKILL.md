@@ -8,8 +8,9 @@ description: Run Takibi's Territory A/B queues from one Claude Code session as c
 Decided on GitHub issue #753 (maintainer, 2026-10-11). The coordinator is one
 interactive Claude Code session. It stays free for the maintainer's own
 questions; the issue work happens in background subagents. The maintainer
-takes part in only two flows: options -> discussion -> decision, and
-approval to land after the coordinator has checked the end-of-issue audit.
+takes part in options -> discussion -> decision, and in any land that meets
+an escalation condition; since 2026-10-18 the coordinator lands the rest
+itself after checking the end-of-issue audit, and reports afterwards.
 The coordinator decides what `DECISIONS.md` "Coordinator defaults" covers
 and escalates the rest (exception-based gate, #753, 2026-10-16).
 
@@ -73,16 +74,16 @@ refuses any branch but `main`).
    syntax: semantics, type rules, ownership, capability or protocol model,
    accepted programs) or no default covers, plus any concern of your own, quoted
    verbatim from the audit, and (b) one line listing the defaults applied.
-   If nothing escalates, say so in one line and ask only for land approval.
+   If nothing escalates, say so in one line, land, and report the land.
    The full audit stays in the batch file; show it verbatim on request.
    Recurrence prevention is among the most important parts: check that
    each defect names its prevention rung (compile-time check, then model
    check, then lint-like build check, then test) and why higher rungs were
    not taken; send it back if not.
-   Nothing lands without the maintainer's approval. Present every few
-   issues or at a natural boundary, then stop and wait.
+   A branch with an escalated item lands only after the maintainer's
+   approval; present it, then stop and wait for that branch.
 3. **Land gates on the branch.** The space checkpoint is current
-   (`python3 scripts/space_checkpoint.py --base main --head <branch>` passes),
+   (`python3 scripts/space_checkpoint.py --base origin/main --head <branch>` passes),
    and the ROADMAP.md update and issue-closing commit are on the branch.
    `scripts/land.sh` refuses a stale checkpoint before allcheck; #720, #719
    and #608 each cost a failed land round on it (2026-10-12). If a gate is
@@ -140,7 +141,8 @@ too thin -- tell the maintainer.
 
 ## Never
 
-- Push except through `land`; land a branch without maintainer approval.
+- Push except through `land`; land a branch with an escalated item without
+  maintainer approval.
 - Paraphrase an escalated audit item instead of quoting it, or hide a
   default you applied.
 - Touch `~/.takibi-sessions` beyond the audit directory, the handoff note and
