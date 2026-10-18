@@ -1,10 +1,11 @@
 {
   "date": "2026-10-18",
-  "event": "incremental",
-  "decision": "reuse",
-  "source_sha256": "bbeafa718ef09a19b2611cb2d61ea5bdedded671ce72f9ecb0f25529cfcba118",
-  "workload": "#823 on top of #820: host-side only (a fast-gate check script and the check-lane runner with its Makefile CPU budget); no kernel source, data, BSS, pool or linker change, so the measurement stands. Previous: #820 on top of the previous record: only the Makefile recipe that runs the three buildchecks (now concurrently) and the lane-timing origin stamp changed; no kernel source, data, BSS, pool or linker change, so the previous measurement stands. Previous: #822 on top of #775: core 0's crash record moves from the historical crash_snapshot/crash_snapshot_capturing globals into element 0 of the existing per-core arrays. The change only deletes one CrashSnapshot and one bool of BSS and a branch per accessor; no new storage, no linker change, so the measurement in this record stands as an upper bound. Previous: #775 on top of the previous record: core 0 enables its PMU line through the shared gic_pmu_core_enable and both dispatchers sample PMU overflows in one branch; the deleted core-0 helper and branch held no storage, and the rest is comments. No data, BSS, pool or linker change; the previous measurement stands. Previous: #613 slice 4: the retained kernel log on the option-B ring (slot state words, linear reservation token, multi-slot records, static 640-byte core-0 line stage, syslog and DDB readers). Measured with scripts/space_delta.py against origin/main: text 708212 -> 713844 B qemu, 760848 -> 766576 B rpi5; BSS 1486512 -> 1485104 B qemu, unchanged rpi5; usable_ram_start unchanged.",
+  "event": "milestone",
+  "decision": "measured",
+  "source_sha256": "035c22a3109b0cf685f5978404fe361c1490b7eef13f8adcb8c1b0f3ddf8809f",
+  "workload": "#613 slice 5: every CPU writes the option-B log ring directly (per-CPU static 640-byte stages, peer rings and core-0 drain deleted, whole-line UART emission after commit, all-CPU log storm at boot). Measured with scripts/space_delta.py against origin/main 05a3ea7c: text 713764 -> 716028 B qemu, 766488 -> 768728 B rpi5; BSS 1485104 -> 1479232 B qemu, 1692736 -> 1684624 B rpi5; usable_ram_start unchanged. Rebased afterwards onto #775 and #822, which add no storage (#822 deletes one CrashSnapshot of BSS); the measurement stands.",
   "evidence": [
+    "docs/LOG_RING_S5_SPACE_2026-10-18.md",
     "docs/LOG_RING_SPACE_2026-10-18.md",
     "docs/PAGE_RUN_SCAN_SPACE_2026-10-17.md",
     "docs/SLOT_POOLS_EXEC_SYSCALL_SPACE_2026-10-17.md",
@@ -82,6 +83,6 @@
     "docs/VIRTIO_NET_TX_2026-10-10.md",
     "docs/VIRTIO_NET_TX_SPACE_2026-10-10.json"
   ],
-  "assessment": "Accepted. BSS falls slightly (three 2 KiB per-slot arrays replaced by two, plus a 640 B static stage; no stack buffer). Text grows about 5.6 KiB: the transitional cost while peer rings and their drain remain; slice 5 deletes those and is expected to make the net change a decrease.",
-  "next_trigger": "#613 slice 5 (peers write the ring directly, peer rings and drain deleted), or a change to the ring geometry (slot count, slot bytes, record slots)."
+  "assessment": "Accepted. BSS falls 5.9 KiB qemu / 8.1 KiB rpi5 (peer rings and their state gone; four 640-byte static stages replace one stage plus four 192-byte peer lines; no stack buffer). Text grows 2.2 KiB, of which the boot log storm is 2.5 KiB; the slice-5 path itself is -0.3 KiB. Slice 4 called its +5.6 KiB text transitional; it is not: the deleted peer storage was BSS, and that text is the ring protocol itself. Unfavorable and recorded rather than optimized away.",
+  "next_trigger": "A change to the ring geometry (slot count, slot bytes, record slots, stage size), the storm size, or KERNEL_MAX_CORES."
 }
