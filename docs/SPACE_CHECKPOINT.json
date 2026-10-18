@@ -1,9 +1,9 @@
 {
-  "date": "2026-10-17",
+  "date": "2026-10-18",
   "event": "incremental",
-  "decision": "measured",
-  "source_sha256": "4b43c29073198893a68d06932957bf1a263c6928e16b950c374a7a91c4f7b325",
-  "workload": "#771: page_alloc_contiguous no longer rebuilds the runtime free list or tests every page index. Doubly linked free list (two u32 links replace one usize link; PageMeta stays 24 B), head pop for a run of one, aligned-address scan per extent, plus permanent call/visit/tick/longest-hold counters in BootPagePool. Bounded suite on both production kernels; RPi5 timing from kernelcheck-rpi5.",
+  "decision": "reuse",
+  "source_sha256": "6289b52d719b97208fa1216bfd298dee46475d5d7ad6e82a4b20611333a1c4b7",
+  "workload": "#638 slice: comment and static_assert message text only (ext2 mutation lock, both intc files). No storage, allocation or code change; the previous measured review (#771) stands.",
   "evidence": [
     "docs/PAGE_RUN_SCAN_SPACE_2026-10-17.md",
     "docs/SLOT_POOLS_EXEC_SYSCALL_SPACE_2026-10-17.md",
@@ -81,6 +81,6 @@
     "docs/VIRTIO_NET_TX_2026-10-10.md",
     "docs/VIRTIO_NET_TX_SPACE_2026-10-10.json"
   ],
-  "assessment": "Adopted. Text +2912 B (qemu) / +2944 B (rpi5); BSS +32 B (boot_page_pool_cell 16480 -> 16512, four counters); per-page metadata unchanged at 24 B; usable_ram_start unchanged. RPi5 time under the IRQ-masking page lock: mean 3.16 ms -> 1.6 us per call, longest 4.68 ms -> 11.4 us.",
+  "assessment": "Reused. A static_assert message and comments emit no code or data; the #771 measurement (text +2912 B qemu / +2944 B rpi5, BSS +32 B) is the current evidence.",
   "next_trigger": "A change to PageMeta, the free-list representation, or the page-run search; or the RECORDED page run allocator longest hold growing past 100 us on RPi5."
 }
