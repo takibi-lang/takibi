@@ -16,14 +16,10 @@ fn frame_any_resume(any: sink AnyFrame) {
     }
 }
 
-extern fn kernel_secondary_idle_enter() !{noreturn};
-extern fn kernel_secondary_idle_yield_enter() !{noreturn};
-extern fn kernel_core0_idle_yield_enter() !{noreturn};
-extern fn kernel_core0_idle_enter() !{noreturn};
-extern fn kernel_core0_idle_block_enter() !{noreturn};
-extern fn kernel_secondary_idle_block_enter() !{noreturn};
-extern fn kernel_core0_idle_tick_enter() !{noreturn};
-extern fn kernel_secondary_idle_tick_enter() !{noreturn};
+extern fn kernel_idle_exit_enter() !{noreturn};
+extern fn kernel_idle_yield_enter() !{noreturn};
+extern fn kernel_idle_block_enter() !{noreturn};
+extern fn kernel_idle_tick_enter() !{noreturn};
 // Both entries report an explicit invariant stop. A borrowed frame is
 // optional diagnostic context, not proof of a synchronous exception.
 // Assembly captures the incoming LR before making any call.

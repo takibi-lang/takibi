@@ -67,6 +67,19 @@ SECTIONS {
         stack_top = boot_stack_top;
         /* 0x8000-aligned again by construction, the run above being
            exactly 0x8000 long. */
+        /* GitHub issues #592 and #821: core 0's idle stack, entry 0 of
+           the per-core idle stack array whose entries 1 to 3 are the
+           secondary boot stacks below. Core 0's boot stack still holds
+           main()'s suspended frames and slot 0's kernel context, so core
+           0 idles here instead; every core finds its idle stack as
+           core0_idle_stack_top plus its core index times one stride
+           (user_entry.S, .Lidle_stack), so the idle path names no core.
+           Same 0x8000 shape as every stack around it. */
+        core0_idle_stack_run_bottom = .;
+        . += 0x4000;
+        core0_idle_stack_bottom = .;
+        . += 0x4000;
+        core0_idle_stack_top = .;
         secondary_stack_base = .;
         secondary_stack_run_bottom = .;
         . += 0x4000;
@@ -128,16 +141,6 @@ SECTIONS {
         secondary_percpu_stack_base = .;
         . += 3 * (percpu_stack_group_end - percpu_stack_base);
         percpu_stack_end = .;
-        /* GitHub issue #592: core 0's idle stack, the counterpart of a
-           secondary's boot stack. Core 0's own boot stack still holds
-           main()'s suspended frames, so core 0 cannot idle on it the way a
-           secondary idles on its. Same shape as every stack above; the
-           region stays 0x8000-aligned because every run above is. */
-        core0_idle_stack_run_bottom = .;
-        . += 0x4000;
-        core0_idle_stack_bottom = .;
-        . += 0x4000;
-        core0_idle_stack_top = .;
     }
 
     /* Same rationale as link.ld: the first PAGE_SIZE-aligned physical

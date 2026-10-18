@@ -4529,15 +4529,13 @@ fn kernel_process_stack_switch_complete(frame_sp: usize) {
     kernel_activity_set(KernelActivity::None);
 }
 
-// Called after kernel_secondary_idle_enter has moved SP_EL1 onto this CPU's
-// IRQ stack. This is the no-successor exit path; a switch to another process
+// Called after kernel_idle_exit_enter has moved SP_EL1 onto this CPU's
+// idle stack. This is the no-successor exit path; a switch to another process
 // publishes the same physical release in kernel_process_stack_switch_complete.
 // The exiting process remains a zombie for its parent, but its kernel stack
 // is now physically free and may be reaped safely.
 fn kernel_process_stack_idle_complete() {
     let core: usize = cpu_id();
-    // Core 0 arrives here too since GitHub issue #592's exit follow-up, from
-    // kernel_core0_idle_enter.
     if (core >= KERNEL_MAX_CORES ||
         execution_state[execution_cpu_index()].current_live || execution_state[execution_cpu_index()].stack_live == false) {
         kernel_invariant_stop();
@@ -4575,14 +4573,12 @@ fn kernel_process_stack_idle_complete() {
 }
 
 // GitHub issue #9: the migration gate's twin of the function above, called
-// after kernel_secondary_idle_yield_enter has moved SP_EL1 off the process's
+// after kernel_idle_yield_enter has moved SP_EL1 off the process's
 // stack. The process stays live. It becomes Ready, with its stack unowned,
 // in one critical section, so core 0 can take stack and rewound frame
 // together, and never while this core still stands on them.
 fn kernel_process_stack_idle_yield() {
     let core: usize = cpu_id();
-    // Core 0 arrives here too since GitHub issue #592, from
-    // kernel_core0_idle_yield_enter.
     if (core >= KERNEL_MAX_CORES ||
         execution_state[execution_cpu_index()].current_live || execution_state[execution_cpu_index()].stack_live == false) {
         kernel_invariant_stop();

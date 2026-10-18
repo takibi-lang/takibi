@@ -187,12 +187,28 @@ fn kernel_secondary_main(context: usize) !{unsafe} {
             timer_irq_setup();
             gic_pmu_core_enable();
             enable_irq();
-        } else if (context != 0x290 + core_id) {
-            return;
-        } else {
-            enable_irq();
+            kernel_idle_loop();
         }
-        while (true) {
+    }
+    // Falls through to the entry path's own park for any core that is not
+    // the one PSCI was asked to start, or a context that does not match.
+    // That is a "this should not have happened" path, not an idle one.
+}
+
+// Every core's idle loop (GitHub issue #821; core 0 had its own before).
+// A secondary reaches it from its PSCI boot above; any core reaches it from
+// the reenters below once it has left a process's stack for its idle stack
+// (user_entry.S, .Lidle_stack). It leaves as soon as a process this core may
+// run is Ready: every IRQ still arrives here, and each wake re-asks.
+fn kernel_idle_loop() !{unsafe} {
+    let core_id: usize = cpu_id();
+    enable_irq();
+    while (true) {
+            // Console housekeeping (the UART input-flow request) on every
+            // wake, as at syscall entry: an idle core takes no syscalls.
+            // Only core 0 sends it; the callee returns on any other core.
+            // Peer output no longer waits for core 0 here (#613 slice 5).
+            kernel_log_console_poll();
             tcp_pool_cost_secondary_poll(core_id);
             // GitHub issue #613 slice 5: every online secondary, not core 1
             // alone -- the point is all CPUs writing the log ring at once.
@@ -292,78 +308,30 @@ fn kernel_secondary_main(context: usize) !{unsafe} {
             kernel_activity_set(KernelActivity::IdleLoop);
             if (KERNEL_STALL_PROBES != 0) { stall_probe_note(STALL_PROBE_WFI); }
             wfi();
-        }
     }
-    // Falls through to the entry path's own park for any core that is not
-    // the one PSCI was asked to start, or a context that does not match.
-    // That is a "this should not have happened" path, not an idle one.
 }
 
-// Re-enter the established architectural idle loop after an EL0 process
-// exits without another eligible process on this CPU. The assembly boundary
-// has already selected this CPU's IRQ stack before releasing ownership of
-// the exiting process stack.
-fn kernel_secondary_idle_reenter() {
+// Where user_entry.S's idle enters land, on this CPU's idle stack, after SP
+// has left the process's stack. Each releases what its path still owns,
+// then idles. The same four serve every core (GitHub issue #821).
+
+// An EL0 process exited with no other eligible process on this CPU.
+fn kernel_idle_exit_reenter() {
     kernel_process_stack_idle_complete();
-    kernel_secondary_main(0x290 + cpu_id());
+    kernel_idle_loop();
 }
 
-// GitHub issue #583: the same re-entry after a wait was published Blocked
-// with no successor on this CPU.
-fn kernel_secondary_idle_block_reenter() {
+// GitHub issue #583: a wait was published Blocked with no successor.
+fn kernel_idle_block_reenter() {
     kernel_process_stack_idle_blocked();
-    kernel_secondary_main(0x290 + cpu_id());
+    kernel_idle_loop();
 }
 
-// GitHub issue #9: the same re-entry after the migration gate handed a
-// live process to core 0.
-fn kernel_secondary_idle_yield_reenter() {
+// GitHub issues #9 and #592: a live process was handed away -- a peer's
+// migration to core 0, or core 0 leaving a process its affinity excludes.
+fn kernel_idle_yield_reenter() {
     kernel_process_stack_idle_yield();
-    kernel_secondary_main(0x290 + cpu_id());
-}
-
-// GitHub issue #592: core 0's idle loop. Core 0 comes here only after
-// handing away a process its affinity excludes with nothing else Ready that
-// core 0 may run -- before this it kept running such a process. It leaves
-// as soon as a process it may run is Ready: every IRQ still arrives here
-// (core 0's tick, the UART, the network), and each wake re-asks.
-fn kernel_core0_idle_yield_reenter() {
-    kernel_process_stack_idle_yield();
-    kernel_core0_idle_loop();
-}
-
-// The exit twin: core 0 has left an exited process's stack, which is
-// released here before idling, as kernel_secondary_idle_reenter does.
-fn kernel_core0_idle_reenter() {
-    kernel_process_stack_idle_complete();
-    kernel_core0_idle_loop();
-}
-
-fn kernel_core0_idle_block_reenter() {
-    kernel_process_stack_idle_blocked();
-    kernel_core0_idle_loop();
-}
-
-fn kernel_core0_idle_loop() {
-    enable_irq();
-    while (true) {
-        // Core 0's console housekeeping (the input-flow request) on every
-        // wake, as at syscall entry: an idle core 0 takes no syscalls. Peer
-        // output no longer waits for core 0 here (#613 slice 5); it once
-        // did, and the QEMU debug lane stalled on a peer shell's prompt.
-        kernel_log_console_poll();
-        if (KERNEL_STALL_PROBES != 0) { stall_probe_note(STALL_PROBE_IDLE_PASS); }
-        match kernel_process_secondary_start() {
-            ProcessSecondaryStart::Idle => {}
-            ProcessSecondaryStart::Frame(next) => {
-                if (KERNEL_STALL_PROBES != 0) { stall_probe_note(STALL_PROBE_RESUME); }
-                el0_context_resume(next);
-            }
-        }
-        kernel_activity_set(KernelActivity::IdleLoop);
-        if (KERNEL_STALL_PROBES != 0) { stall_probe_note(STALL_PROBE_WFI); }
-        wfi();
-    }
+    kernel_idle_loop();
 }
 
 // Called by each platform's timer branch after it has acknowledged the
@@ -374,26 +342,17 @@ fn kernel_timer_tick_leave(switch: TimerSwitch) -> AnyFrame !{interrupt} {
     match switch {
         TimerSwitch::Resume(frame) => { return frame_any(frame); }
         TimerSwitch::ToIdle => {
-            // core-role: core 0 idles on core0_idle_stack because its boot
-            // stack still holds main()'s frames; peers idle on their PSCI
-            // entry stacks
-            if (cpu_id() != 0) { kernel_secondary_idle_tick_enter(); }
-            kernel_core0_idle_tick_enter();
+            kernel_idle_tick_enter();
         }
     }
 }
 
-// Where the two enters above land, on the CPU's idle stack. The process's
+// Where the enter above lands, on the CPU's idle stack. The process's
 // stack was released at IRQ entry and its state published Ready before the
 // interrupt was acknowledged, so there is nothing left to hand over.
-fn kernel_secondary_idle_tick_reenter() {
+fn kernel_idle_tick_reenter() {
     workload_profile_idle_enter();
-    kernel_secondary_main(0x290 + cpu_id());
-}
-
-fn kernel_core0_idle_tick_reenter() {
-    workload_profile_idle_enter();
-    kernel_core0_idle_loop();
+    kernel_idle_loop();
 }
 
 // Shared timer policy; each platform still acknowledges its own GIC source

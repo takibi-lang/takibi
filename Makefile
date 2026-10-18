@@ -325,11 +325,9 @@ LINUX_UNUSED_CHECK       := --reject-unused-functions --external-entry main
 # they define no Takibi function (_extern.tkb files are skipped by name).
 KERNEL_ASM_ENTRIES := main kernel_secondary_main \
 	el1_exception_evidence_from_frame kernel_invariant_evidence kernel_mmu_init \
-	kernel_mmu_init_secondary kernel_secondary_idle_reenter \
-	kernel_secondary_idle_yield_reenter kernel_core0_idle_yield_reenter \
-	kernel_core0_idle_reenter kernel_core0_idle_block_reenter \
-	kernel_secondary_idle_block_reenter \
-	kernel_core0_idle_tick_reenter kernel_secondary_idle_tick_reenter \
+	kernel_mmu_init_secondary kernel_idle_exit_reenter \
+	kernel_idle_yield_reenter kernel_idle_block_reenter \
+	kernel_idle_tick_reenter \
 	kernel_syscall_migrate_return \
 	kernel_syscall_block_return kernel_syscall_child_exec_return \
 	kernel_syscall_clone_child_return kernel_syscall_clone_parent_return \

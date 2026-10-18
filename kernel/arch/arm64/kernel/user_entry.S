@@ -414,94 +414,51 @@ crash_snapshot_copy_saved_frame:
     str     x2, [x1, #24]
     ret
 
-/* Leave an exiting secondary process's kernel stack before making it
- * reclaimable. Return to the same architectural secondary stack used at
- * boot; Current-EL interrupts still dispatch on the separate per-CPU IRQ
- * stack selected by generated exception entry. */
-/* GitHub issue #9: the same stack switch for a process that stays live. A
- * peer handing a syscall to core 0 leaves the process's kernel stack here;
- * only then may the process become Ready and its stack change hands. */
-    .global kernel_secondary_idle_yield_enter
-    .type kernel_secondary_idle_yield_enter, %function
-kernel_secondary_idle_yield_enter:
+/* Leave a process's kernel stack for this CPU's idle stack, then branch to
+ * the matching reenter in arch/arm64/kernel/secondary.tkb, which releases
+ * the stack (exit, yield, block) or only idles (tick). Every core takes the
+ * same path (GitHub issue #821): its idle stack is entry <core index> of the
+ * array that starts at core0_idle_stack (link.ld), where entries 1 to 3 are
+ * the secondaries' PSCI boot stacks and entry 0 is core 0's own, since core
+ * 0's boot stack still holds main()'s frames. Current-EL interrupts still
+ * dispatch on the separate per-CPU IRQ stack selected by generated exception
+ * entry. The process may change hands only after SP has left its stack. */
+    .global kernel_idle_yield_enter
+    .type kernel_idle_yield_enter, %function
+kernel_idle_yield_enter:
     msr     DAIFSet, #0x2
-    adr     x5, kernel_secondary_idle_yield_reenter
-    b       .Lsecondary_idle_stack
+    adr     x5, kernel_idle_yield_reenter
+    b       .Lidle_stack
 
-/* GitHub issue #592: core 0's version of the yield above. Core 0's boot
- * stack still holds main()'s suspended frames, so it idles on a stack of its
- * own; everything else matches the secondary path. */
-    .global kernel_core0_idle_yield_enter
-    .type kernel_core0_idle_yield_enter, %function
-kernel_core0_idle_yield_enter:
+/* GitHub issue #583: a process just published Blocked with no successor;
+ * the reenter releases its stack without changing its state. */
+    .global kernel_idle_block_enter
+    .type kernel_idle_block_enter, %function
+kernel_idle_block_enter:
     msr     DAIFSet, #0x2
-    adrp    x1, core0_idle_stack_top
-    add     x1, x1, :lo12:core0_idle_stack_top
-    mov     sp, x1
-    mov     x29, xzr
-    b       kernel_core0_idle_yield_reenter
-
-/* The exit twin of the above: leave an exited process's stack for core 0's
- * idle stack, then release it (kernel_process_stack_idle_complete). */
-    .global kernel_core0_idle_enter
-    .type kernel_core0_idle_enter, %function
-kernel_core0_idle_enter:
-    msr     DAIFSet, #0x2
-    adrp    x1, core0_idle_stack_top
-    add     x1, x1, :lo12:core0_idle_stack_top
-    mov     sp, x1
-    mov     x29, xzr
-    b       kernel_core0_idle_reenter
-
-/* GitHub issue #583: the same stack switches for a process just published
- * Blocked with no successor; the reenter releases its stack without
- * changing its state. */
-    .global kernel_core0_idle_block_enter
-    .type kernel_core0_idle_block_enter, %function
-kernel_core0_idle_block_enter:
-    msr     DAIFSet, #0x2
-    adrp    x1, core0_idle_stack_top
-    add     x1, x1, :lo12:core0_idle_stack_top
-    mov     sp, x1
-    mov     x29, xzr
-    b       kernel_core0_idle_block_reenter
-
-    .global kernel_secondary_idle_block_enter
-    .type kernel_secondary_idle_block_enter, %function
-kernel_secondary_idle_block_enter:
-    msr     DAIFSet, #0x2
-    adr     x5, kernel_secondary_idle_block_reenter
-    b       .Lsecondary_idle_stack
+    adr     x5, kernel_idle_block_reenter
+    b       .Lidle_stack
 
 /* GitHub issue #582: the tick's leave. Entered from a lower-EL timer
  * interrupt's handler on this CPU's IRQ stack, after the EOI, once the
  * interrupted process was published Ready. Its stack was released at IRQ
  * entry, so the reenter only idles. */
-    .global kernel_core0_idle_tick_enter
-    .type kernel_core0_idle_tick_enter, %function
-kernel_core0_idle_tick_enter:
+    .global kernel_idle_tick_enter
+    .type kernel_idle_tick_enter, %function
+kernel_idle_tick_enter:
     msr     DAIFSet, #0x2
+    adr     x5, kernel_idle_tick_reenter
+    b       .Lidle_stack
+
+    .global kernel_idle_exit_enter
+    .type kernel_idle_exit_enter, %function
+kernel_idle_exit_enter:
+    msr     DAIFSet, #0x2
+    adr     x5, kernel_idle_exit_reenter
+/* x1 = core0_idle_stack_top + (TPIDR_EL1 / per-core stride) * idle stride */
+.Lidle_stack:
     adrp    x1, core0_idle_stack_top
     add     x1, x1, :lo12:core0_idle_stack_top
-    mov     sp, x1
-    mov     x29, xzr
-    b       kernel_core0_idle_tick_reenter
-
-    .global kernel_secondary_idle_tick_enter
-    .type kernel_secondary_idle_tick_enter, %function
-kernel_secondary_idle_tick_enter:
-    msr     DAIFSet, #0x2
-    adr     x5, kernel_secondary_idle_tick_reenter
-    b       .Lsecondary_idle_stack
-
-    .global kernel_secondary_idle_enter
-    .type kernel_secondary_idle_enter, %function
-kernel_secondary_idle_enter:
-    msr     DAIFSet, #0x2
-    adr     x5, kernel_secondary_idle_reenter
-.Lsecondary_idle_stack:
-    adrp    x1, secondary_stack_top
-    add     x1, x1, :lo12:secondary_stack_top
     mrs     x2, tpidr_el1
     adrp    x3, percpu_stack_group_end
     add     x3, x3, :lo12:percpu_stack_group_end
@@ -514,7 +471,6 @@ kernel_secondary_idle_enter:
     adrp    x4, secondary_stack_base
     add     x4, x4, :lo12:secondary_stack_base
     sub     x3, x3, x4
-    sub     x2, x2, #1
     madd    x1, x2, x3, x1
     mov     sp, x1
     mov     x29, xzr

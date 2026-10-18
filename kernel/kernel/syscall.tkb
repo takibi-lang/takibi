@@ -3667,11 +3667,7 @@ fn kernel_syscall_block_return(frame_sp: usize) {
         // GitHub issue #583: published Blocked with no successor; leave its
         // stack for this CPU's idle context.
         BlockSwitch::ToIdle => {
-            // core-role: core 0 idles on core0_idle_stack because its boot
-            // stack still holds main()'s frames; peers idle on their PSCI
-            // entry stacks
-            if (cpu_id() != 0) { kernel_secondary_idle_block_enter(); }
-            kernel_core0_idle_block_enter();
+            kernel_idle_block_enter();
         }
         BlockSwitch::Retry => {
             // Another CPU may reserve the last Ready successor after dispatch
@@ -3729,7 +3725,7 @@ fn kernel_syscall_resume_return(frame_sp: usize, value: usize) {
             // GitHub issue #592: no successor, and core 0 may not keep this
             // one.
             if (kernel_process_core0_leave_excluded(frame)) {
-                kernel_core0_idle_yield_enter();
+                kernel_idle_yield_enter();
             }
             workload_profile_el0_enter();
             el0_context_resume(frame);
@@ -3920,14 +3916,7 @@ fn kernel_syscall_clone_parent_action(switch: sink ExitSwitch)
 fn kernel_syscall_clone_parent_return(parent_sp: usize) {
     kernel_process_child_exec_reap();
     if (parent_sp == 0) {
-        // core-role: core 0 idles on core0_idle_stack because its boot stack
-        // still holds main()'s frames; peers idle on their PSCI entry stacks
-        if (cpu_id() != 0) {
-            kernel_secondary_idle_enter();
-        }
-        // GitHub issue #592: core 0 idles after an exit with no successor
-        // too, on its own idle stack.
-        kernel_core0_idle_enter();
+        kernel_idle_exit_enter();
     }
     workload_profile_el0_enter();
     el0_context_resume(
@@ -4920,7 +4909,7 @@ fn kernel_syscall_migrate_return(frame_sp: usize) {
     if (kernel_process_migrate_current(frame) == false) {
         kernel_invariant_stop_with_frame(frame);
     }
-    kernel_secondary_idle_yield_enter();
+    kernel_idle_yield_enter();
 }
 
 // GitHub issue #627: asynchronous SIGCHLD handlers, rt_sigsuspend and

@@ -125,7 +125,9 @@ then reaps the cancelled record. Older live children and zombies remain linked.
 ## Core 0's idle context
 
 Core 0 idles on `core0_idle_stack_*` (GitHub issue #592), not on its boot
-stack, which still holds `main()`'s suspended frames. It goes there only
+stack, which still holds `main()`'s suspended frames; since #821 that stack
+is entry 0 of the idle stack array every core indexes, and the loop is the
+peers' one. It goes there only
 from a syscall return that found no other process core 0 may run while the
 returning process's affinity excludes core 0, and only when core 0 stands
 on that process's own kernel stack -- a clone child's first return still
@@ -203,6 +205,15 @@ Symmetric now:
   had its own enable and its own branch before).
 - Crash capture on a fault, and the per-core rows of DDB's `intr` and tick
   views.
+- The idle path: every core leaves a process's stack through the same four
+  `kernel_idle_*_enter` entries for the same `kernel_idle_loop` (#821). Its
+  idle stack is entry `cpu index` of one array starting at
+  `core0_idle_stack`; entries 1 to 3 are the secondaries' PSCI boot stacks,
+  and entry 0 is core 0's own because its boot stack still holds `main()`'s
+  frames and slot 0's context (the slot 0 row). Every core calls the same
+  console poll, which only core 0 acts on (the UART input-flow request,
+  inside `kernel_log_console_poll`), and core 1 alone runs the two-core
+  probes (the probes row).
 
 Special, with the reason it stays so today:
 
@@ -214,7 +225,6 @@ Special, with the reason it stays so today:
 | The root process's exec | `syscall_execve_current_with` | it returns through `run_initial_user`, core 0's boot entry into PID 1 | follows the slot 0 row |
 | Syscalls outside the peer-safety table | `syscall_peer_refused`, `syscall_peer_safe`; rerun on core 0 with the process pinned for the call | each names a subsystem whose state only core 0 touches: UART attributes (ioctl), inetd-mode connected descriptors, the BusyBox Extras exec that resets the TCP pool | yes, one subsystem at a time; each entry is its own follow-up |
 | An ext2 read that finds a mutation in flight | `kernel_syscall_dispatch_action` | a peer migrates the call to core 0; core 0, with nowhere to send it, waits for an interrupt and reruns it | yes, every core could wait in place (decision: changes placement) |
-| Idle context | `kernel_core0_idle_*` vs `kernel_secondary_idle_*`, four call sites | core 0's boot stack still holds `main()`'s suspended frames, so it idles on `core0_idle_stack`; a peer idles on its PSCI entry stack | yes, once core 0 abandons `main()`'s frames after boot; medium cost |
 | Deadline and NetRx wakes | `timer_irq_handler` runs `kernel_process_deadline_wake_all` and `kernel_process_net_wake_all`; `kernel_secondary_timer_schedule` runs neither | one walker of every slot per tick; a peer sleeper is woken by core 0's tick, so a long core-0 mask (DDB) delays it | yes (decision: every tick walks, or per-CPU deadline lists) |
 | Device interrupts | UART, GEM, virtio-net and xHCI SPIs target core 0; a secondary's dispatch handles only its tick and PMU line | their drivers' state is touched only from core 0 | yes, with per-driver locking or an IRQ affinity policy (decision) |
 | DDB entry by UART BREAK | the UART IRQ branch on core 0 | follows the device interrupt row; DDB then stops the others through the world stop | follows the device row |
