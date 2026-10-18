@@ -63,14 +63,27 @@ def kernel_strings():
     return out
 
 
+# A byte-string literal starts at a token boundary: `b"` inside a word (the
+# end of `job"` in `"one serial job": ...`) is a plain string's closing
+# quote, not a bytes prefix (GitHub issue #817). Prefixes like `rb"` or
+# `br"` are not used for log expectations and are deliberately not matched.
+BYTES_RE = re.compile(r'(?<!\w)b"((?:[^"\\]|\\.)*)"')
+
+
+def line_expectations(line):
+    """The byte-string literals on one Python line."""
+    return BYTES_RE.findall(line)
+
+
 def expectations():
     """(file, line, text) for every fixed string a host script waits for."""
     found = []
     for path in sorted((REPO / "scripts").glob("*.py")):
-        if path.name == pathlib.Path(__file__).name:
+        # This check and its controls hold planted literals, not waits.
+        if path.stem.startswith(pathlib.Path(__file__).stem):
             continue
         for number, line in enumerate(path.read_text().splitlines(), 1):
-            for text in re.findall(r'b"((?:[^"\\]|\\.)*)"', line):
+            for text in line_expectations(line):
                 found.append((path, number, text))
     for path in sorted((REPO / "scripts").glob("*.sh")):
         for number, line in enumerate(path.read_text().splitlines(), 1):
