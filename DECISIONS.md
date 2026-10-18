@@ -140,6 +140,9 @@ condition below applies, and reports the land afterwards.
   kernel-stack or per-task storage; readers stay lock-free (#533). [active] #638
 - 2026-10-18 Atomic compare-and-swap returns the observed value on failure
   (Swapped | Observed(v)), so no second load stands in for it. [active] #613
+- 2026-10-18 A boolean compare-exchange followed by a load of the same word
+  is a compile error; the boolean forms stay until this class recurs, then
+  every caller moves to the observed-value form, whose failure is acquire. [active] #613
 - 2026-10-14 Lock order moves toward ranked capability tokens (Fuchsia
   lock_order style), absorbing acquires_lock_<rank>_<name>, after the syntax
   review. [active] #789
