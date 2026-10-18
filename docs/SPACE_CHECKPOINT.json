@@ -2,8 +2,8 @@
   "date": "2026-10-18",
   "event": "incremental",
   "decision": "reuse",
-  "source_sha256": "a96697d7f0fe5a9eb44f9784aec85eb0157a247fd5ef4865684aab6e77bbc246",
-  "workload": "#814: check_execution_model_coverage.py requires a real static_assert or a reasoned exemption; the only .tkb change is a comment in kernel/lib/execution_model.tkb. No code, storage or linker change; the previous measured review (#771) stands.",
+  "source_sha256": "579196b1cd70a6830c9e68931ebb8c3fa8d5bcce933a2cf9a52097c7a0b26982",
+  "workload": "CI herd7 build moved out of the per-run opam install into a cached scripts/build_herd7.sh step (#645 follow-up); the only production-source change is the litmuscheck error message and a comment in the Makefile. No kernel code, storage or linker change; the previous measured review (#771) stands.",
   "evidence": [
     "docs/PAGE_RUN_SCAN_SPACE_2026-10-17.md",
     "docs/SLOT_POOLS_EXEC_SYSCALL_SPACE_2026-10-17.md",
@@ -81,6 +81,6 @@
     "docs/VIRTIO_NET_TX_2026-10-10.md",
     "docs/VIRTIO_NET_TX_SPACE_2026-10-10.json"
   ],
-  "assessment": "Reused. A comment-only .tkb edit cannot change either kernel image; the #771 measurement (text +2912 B qemu / +2944 B rpi5, BSS +32 B) remains the current evidence.",
+  "assessment": "Reused. A Makefile message and comment edit cannot change either kernel image; the #771 measurement (text +2912 B qemu / +2944 B rpi5, BSS +32 B) remains the current evidence.",
   "next_trigger": "A change to PageMeta, the free-list representation, or the page-run search; or the RECORDED page run allocator longest hold growing past 100 us on RPi5."
 }
