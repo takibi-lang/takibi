@@ -2,8 +2,8 @@
   "date": "2026-10-18",
   "event": "incremental",
   "decision": "reuse",
-  "source_sha256": "579196b1cd70a6830c9e68931ebb8c3fa8d5bcce933a2cf9a52097c7a0b26982",
-  "workload": "CI herd7 build moved out of the per-run opam install into a cached scripts/build_herd7.sh step (#645 follow-up); the only production-source change is the litmuscheck error message and a comment in the Makefile. No kernel code, storage or linker change; the previous measured review (#771) stands.",
+  "source_sha256": "4bb0e227cc25cc13f4ca55d41046b3f6dc6d9ea1b0437c75c64f3ba23b344a82",
+  "workload": "#613 slice 3: compare-swap builtins returning CasResult and the compile-time rule against a load after a boolean compare-exchange; the one kernel change is world_stop_claim_as classifying the value its CAS observed instead of a second load. Measured with scripts/space_delta.py against origin/main 2df78a3d: text 708260 -> 708212 B qemu, 760912 -> 760848 B rpi5; data, BSS, data/BSS symbols and usable_ram_start unchanged.",
   "evidence": [
     "docs/PAGE_RUN_SCAN_SPACE_2026-10-17.md",
     "docs/SLOT_POOLS_EXEC_SYSCALL_SPACE_2026-10-17.md",
@@ -81,6 +81,6 @@
     "docs/VIRTIO_NET_TX_2026-10-10.md",
     "docs/VIRTIO_NET_TX_SPACE_2026-10-10.json"
   ],
-  "assessment": "Reused. A Makefile message and comment edit cannot change either kernel image; the #771 measurement (text +2912 B qemu / +2944 B rpi5, BSS +32 B) remains the current evidence.",
+  "assessment": "Reused for storage: no data, BSS or layout change, and text shrinks 48 B (qemu) / 64 B (rpi5) from the removed load and Released arms. The #771 measurement remains the current storage evidence.",
   "next_trigger": "A change to PageMeta, the free-list representation, or the page-run search; or the RECORDED page run allocator longest hold growing past 100 us on RPi5."
 }
