@@ -171,6 +171,8 @@ suffix is description; dispatch reads only the prefix.
 | `check_keyword_tables.py` | the lexer's keyword table and `Language_words.hard_keywords` name the same words, so a new keyword cannot silently lex as an identifier (#704) |
 | `check_repeat_kernel_lane_controls.sh` | Regression controls for the repeat runner's two modes |
 | `check_roadmap_size.py` | ROADMAP.md stays the current work split rather than regrowing into a knowledge base |
+| `check_herdtools_pin.py` | the herdtools7 opam pin (herd7 for `make litmuscheck`, #645) is one version and the same in .devcontainer/devcontainer.json and .github/workflows/ci.yml |
+| `check_herdtools_pin_controls.py` | a drifted CI pin, an unpinned devcontainer install and two pins in one file are refused |
 | `check_rpi5_set_kernel_byte_controls.py` | Controls for the live RPi5 kernel-byte writer without using the board |
 | `check_run_kernel_shell_console_controls.py` | Regression controls for the interactive console's UART marker detection |
 | `check_run_kernel_uart_driver_controls.py` | UART timeout diagnosis, final-report and fresh post-settings prompt gates, and exact ash echo normalization |

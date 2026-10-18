@@ -16,17 +16,23 @@ import re
 import sys
 
 from pass_line import report_pass
+from source_scan import per_file
 
 DEVCONTAINER = pathlib.Path(".devcontainer/devcontainer.json")
 CI = pathlib.Path(".github/workflows/ci.yml")
 PIN = re.compile(r"\bherdtools7\.(\d+(?:\.\d+)+)\b")
 
 
+@per_file
+def pinned_versions(text: str) -> tuple:
+    return tuple(sorted(set(PIN.findall(text))))
+
+
 def problems(texts: dict) -> tuple:
     found = []
     pins = {}
     for name, text in sorted(texts.items()):
-        versions = sorted(set(PIN.findall(text)))
+        versions = list(pinned_versions(text))
         if len(versions) != 1:
             found.append(f"{name} names herdtools7 versions {versions or 'none'}; "
                          "it must pin exactly one (herdtools7.<version>)")
