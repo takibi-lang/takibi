@@ -110,7 +110,8 @@ fn gem_fixture_keep(ready_in: sink NetRxCanAcquire, packet: borrow [u8; 1514..])
 }
 
 fn gem_fixture_run(ready_in: sink NetRxCanAcquire) !{may_block} {
-    static_assert(KERNEL_PREEMPTIBLE == 0);
+    static_assert(KERNEL_PREEMPTIBLE == 0,
+                  "stands in for a boot-phase assumption (core 0, before any process exists); review at the preemption flip (GitHub issue #638)");
     let mut ready = ready_in;
     let mut packet: [u8; 1514];
     for index: usize in 0..<1514 { packet[index] = 0; }

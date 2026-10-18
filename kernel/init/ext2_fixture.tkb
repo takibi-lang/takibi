@@ -31,7 +31,7 @@ private let mut ext2_write_fixture_bitmap: [u8; KERNEL_BLOCK_SIZE];
 
 private fn ext2_write_fixture_execution_model_assumption() {
     static_assert(KERNEL_PREEMPTIBLE == 0,
-                  "the ext2 boot fixture assumes non-preemptible execution");
+                  "stands in for a boot-phase assumption (core 0, before any process exists); review at the preemption flip (GitHub issue #638)");
 }
 
 private fn ext2_write_fixture_counts_match(mount: Ext2Mount,

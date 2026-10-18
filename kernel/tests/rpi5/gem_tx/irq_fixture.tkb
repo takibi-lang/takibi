@@ -70,7 +70,8 @@ fn gem_probe_peer(ready_in: sink NetRxCanAcquire)
 }
 
 fn gem_probe_run(ready_in: sink NetRxCanAcquire) !{may_block} {
-    static_assert(KERNEL_PREEMPTIBLE == 0);
+    static_assert(KERNEL_PREEMPTIBLE == 0,
+                  "stands in for a boot-phase assumption (core 0, before any process exists); review at the preemption flip (GitHub issue #638)");
     let mut ready = ready_in;
     kernel_boot_log("gem-probe: imr0="); uart_put_udec(gem.imr as usize);
     kernel_boot_log(" frequency="); uart_put_udec(read_cntfrq() as usize);
