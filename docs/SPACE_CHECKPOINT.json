@@ -2,7 +2,7 @@
   "date": "2026-10-18",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "035c22a3109b0cf685f5978404fe361c1490b7eef13f8adcb8c1b0f3ddf8809f",
+  "source_sha256": "dc3b11af7e665b9af5083c5c6c9bb1714d64f6331bd7558a3312c9d09f98bef7",
   "workload": "#613 slice 5: every CPU writes the option-B log ring directly (per-CPU static 640-byte stages, peer rings and core-0 drain deleted, whole-line UART emission after commit, all-CPU log storm at boot). Measured with scripts/space_delta.py against origin/main 05a3ea7c: text 713764 -> 716028 B qemu, 766488 -> 768728 B rpi5; BSS 1485104 -> 1479232 B qemu, 1692736 -> 1684624 B rpi5; usable_ram_start unchanged. Rebased afterwards onto #775 and #822, which add no storage (#822 deletes one CrashSnapshot of BSS); the measurement stands.",
   "evidence": [
     "docs/LOG_RING_S5_SPACE_2026-10-18.md",
