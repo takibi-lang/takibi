@@ -61,6 +61,10 @@ def problems(makefile: str, ci: str) -> list:
     return found
 
 
+def swap(text: str, old: str, new: str) -> str:
+    return new.join(text.split(old))
+
+
 def controls(makefile: str, ci: str) -> int:
     cases = CaseCount()
     failing = {
@@ -71,8 +75,8 @@ def controls(makefile: str, ci: str) -> int:
         "target missing": (makefile.replace(
             "cicheck cicheck-lang cicheck-models cicheck-qemu:\n",
             "cicheck cicheck-lang cicheck-qemu:\n"), ci),
-        "back to one serial job": (makefile, ci.replace(RUN, "make cicheck")),
-        "budget step removed": (makefile, ci.replace(BUDGET, "true")),
+        "one serial run": (makefile, swap(ci, RUN, "make cicheck")),
+        "budget step removed": (makefile, swap(ci, BUDGET, "true")),
     }
     for name, (mk, yml) in failing.items():
         assert (mk, yml) != (makefile, ci), f"control {name} changed nothing"
