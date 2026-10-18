@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 
 from pass_line import report_pass
-from source_scan import code_only
+from source_scan import code_only, per_file
 
 ROOT = Path(__file__).resolve().parent.parent
 KERNEL = ROOT / "kernel"
@@ -49,8 +49,15 @@ FUNCTION = re.compile(r"^\s*(?:private\s+)?(?:noinline\s+)?fn\s+(\w+)", re.M)
 FINISH = re.compile(r"\bdma_finish_owned_(?:rx|tx)\s*\(")
 
 
+@per_file
 def finishing_functions(text):
-    """Names of the functions whose bodies call a finish builtin."""
+    """Names of the functions whose bodies call a finish builtin.
+    GitHub issue #823: cached per text, and a file that never names a finish
+    builtin is skipped before the comment strip and the function split
+    (blanking comments only removes matches, never adds one); scanning every
+    kernel file four times went over the fast gate's 10 s under host load."""
+    if not FINISH.search(text):
+        return frozenset()
     found = set()
     text = code_only(text)  # GitHub issue #818: block comments too
     starts = [(m.start(), m.group(1)) for m in FUNCTION.finditer(text)]
@@ -59,7 +66,7 @@ def finishing_functions(text):
         body = text[start:end]
         if FINISH.search(body):
             found.add(name)
-    return found
+    return frozenset(found)
 
 
 def problems_in(files):

@@ -32,6 +32,33 @@ trap 'takibi_status=$?; echo "[$(basename "$0")] aborted at line $LINENO with ex
 
 prefix="${1:?usage: run_check_lane.sh <check|slowcheck> [timeout_seconds]}"
 timeout_seconds="${2:-0}"
+# GitHub issue #823: the wall-clock bound above trips only at 10 s, and a CPU-
+# bound member that took 2.7 s alone (check_dma_mint_files.py, rescanning every
+# kernel file four times) crossed it twice at host load 60. CPU time does not
+# grow with load the way wall time does, so the fast gate also bounds each
+# member's own CPU (user + system, children included), in milliseconds. The
+# slowest legitimate member used about 0.9 s on 2026-10-19; like the wall
+# bound this is a membership rule, not an estimate to raise: a member over it
+# caches its scans (scripts/source_scan.py per_file) or moves to slowcheck_*.
+cpu_budget_ms="${3:-0}"
+
+# Children's user+system CPU so far, in milliseconds, from the `times` builtin
+# (its second line, "XmS.SSSs XmS.SSSs"), so no process is spawned to measure.
+# It sets children_cpu and reads `times` back from a file: any $(...) would run
+# `times` in a fresh subshell, whose children have used nothing.
+times_file="$(mktemp)"
+trap 'rm -f "$times_file"' EXIT
+children_cpu_ms() {
+    local lines line part m s
+    children_cpu=0
+    times > "$times_file"
+    lines="$(<"$times_file")"
+    line="${lines#*$'\n'}"
+    for part in $line; do
+        m="${part%%m*}"; s="${part#*m}"; s="${s%s}"
+        children_cpu=$(( children_cpu + m * 60000 + 10#${s%.*} * 1000 + 10#${s#*.} ))
+    done
+}
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 members=()
@@ -59,6 +86,7 @@ for member in "${members[@]}"; do
         *)    runner=(python3 "$member");;
     esac
     status=0
+    children_cpu_ms; cpu_before=$children_cpu
     if [ "$timeout_seconds" -gt 0 ]; then
         timeout --kill-after=5 "$timeout_seconds" "${runner[@]}" || status=$?
     else
@@ -74,6 +102,14 @@ for member in "${members[@]}"; do
     if [ "$status" -ne 0 ]; then
         echo "FAIL $prefix-lane: $(basename "$member") exited $status" >&2
         exit "$status"
+    fi
+    children_cpu_ms; cpu_used=$(( children_cpu - cpu_before ))
+    if [ "$cpu_budget_ms" -gt 0 ] && [ "$cpu_used" -gt "$cpu_budget_ms" ]; then
+        echo "FAIL $prefix-lane: $(basename "$member") used ${cpu_used} ms of" \
+             "CPU, over the ${cpu_budget_ms} ms member budget. Under host load" \
+             "that becomes a wall-clock timeout; cache repeated scans with" \
+             "scripts/source_scan.py per_file, or rename it slowcheck_*." >&2
+        exit 1
     fi
 done
 

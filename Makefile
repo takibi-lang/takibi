@@ -233,6 +233,10 @@ effect-matrix-control: build
 # not an estimate to be raised when something gets slower -- a member that
 # cannot finish inside it has changed category and belongs in `slowcheck`.
 CHECK_TIMEOUT_SECONDS    := 10
+# GitHub issue #823: each member's own CPU time (user + system), which unlike
+# wall time does not grow with host load. Slowest legitimate member about
+# 0.9 s (2026-10-19); the #823 offender used 2.7 s. Same membership rule.
+CHECK_CPU_BUDGET_MS      := 2000
 
 # GitHub issue #526: the fast gate. Its members are discovered by glob --
 # every scripts/check_* -- so adding one is adding a file, and the seventh
@@ -242,7 +246,7 @@ CHECK_TIMEOUT_SECONDS    := 10
 # waits is killed and this lane goes red.
 langcheck: unused-function-control forbid-unsafe-control effect-matrix-control pool-liveness-control wont-compile-control regions-flag-control
 	@bash scripts/lane_timing.sh begin langcheck
-	@bash scripts/run_check_lane.sh check $(CHECK_TIMEOUT_SECONDS)
+	@bash scripts/run_check_lane.sh check $(CHECK_TIMEOUT_SECONDS) $(CHECK_CPU_BUDGET_MS)
 # -I skips binary files. Without it a build directory left in the worktree
 # under any name but `_build` -- a copy taken for diagnosis, say -- makes grep
 # match dune's preprocessed .pp.ml files, which carry NUL. That reports
