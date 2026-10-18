@@ -17,6 +17,11 @@ Two numbers matter and they are not the same one.
   had finished. That is exactly what allcheck would save if that lane got
   faster, so it is the number to act on, and it names its own lane.
 
+When `lane_timing.sh origin` stamped the run's start, PRE-LANE is the time
+from that stamp to the first lane's start: image builds and anything else a
+run does before its first receipt, which was otherwise invisible (GitHub
+issue #820: 29 minutes of a CI part read off log timestamps by hand).
+
 A lane with a start stamp and no record did not finish -- it is reported as
 incomplete rather than dropped, because a lane that died is the one a reader
 is most likely to be looking for.
@@ -62,7 +67,19 @@ def load(directory: pathlib.Path):
     return records, incomplete
 
 
-def summarize(records, incomplete) -> int:
+def load_origin(directory: pathlib.Path):
+    """The run's start stamp, or None when nothing wrote one."""
+    path = directory / "run.origin"
+    if not path.is_file():
+        return None
+    try:
+        return float(path.read_text().strip())
+    except ValueError:
+        print(f"warning: {path.name} is not a timestamp, ignored", file=sys.stderr)
+        return None
+
+
+def summarize(records, incomplete, origin=None) -> int:
     ordered = sorted(records, key=lambda r: r["elapsed"], reverse=True)
     width = max(len(r["lane"]) for r in ordered)
 
@@ -88,6 +105,10 @@ def summarize(records, incomplete) -> int:
           + (f", {len(incomplete)} unfinished" if incomplete else ""))
     print(f"span:    {span:7.1f}s  from the first lane's start to the last "
           "lane's finish")
+    if origin is not None:
+        first = min(records, key=lambda r: r["start"])
+        print(f"pre-lane:{first_start - origin:7.1f}s  from the run's start to "
+              f"the first lane's start ({first['lane']})")
     print(f"longest: {longest['elapsed']:7.1f}s  {longest['lane']}")
     print(f"tail:    {tail:7.1f}s  {last['lane']} ran alone after every other "
           "lane had finished")
@@ -111,7 +132,7 @@ def main() -> int:
                  + ", ".join(incomplete) + ")" if incomplete else ""),
               file=sys.stderr)
         return 1
-    return summarize(records, incomplete)
+    return summarize(records, incomplete, load_origin(directory))
 
 
 if __name__ == "__main__":

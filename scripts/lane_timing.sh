@@ -20,6 +20,10 @@
 #   lane_timing.sh begin LANE               write a start stamp for a lane
 #                                           whose recipe cannot be wrapped
 #   lane_timing.sh end LANE STATUS          close the stamp begin wrote
+#   lane_timing.sh origin [EPOCH]           stamp when the run began (now by
+#                                           default), so the summary can say
+#                                           how long passed before the first
+#                                           lane started (GitHub issue #820)
 #
 # `begin`/`end` exist for the three aggregate lanes -- langcheck, test,
 # linuxcheck -- whose recipes are many lines and which must NOT be turned into
@@ -76,8 +80,16 @@ case "${1:-}" in
         "$0" record "$2" "$(cat "$stamp")" "$3"
         rm -f "$stamp"
         ;;
+    origin)
+        # Not a `.start` stamp: the summary would report it as an unfinished
+        # lane. Kept by its first writer, so a later `origin` does not move it.
+        [ "$#" -le 2 ] || { echo "usage: lane_timing.sh origin [EPOCH]" >&2; exit 2; }
+        enabled || exit 0
+        mkdir -p "$TIMING_DIR" || exit 0
+        [ -f "$TIMING_DIR/run.origin" ] || printf '%s\n' "${2:-$(now)}" >"$TIMING_DIR/run.origin"
+        ;;
     *)
-        echo "usage: lane_timing.sh now|record|begin|end ..." >&2
+        echo "usage: lane_timing.sh now|record|begin|end|origin ..." >&2
         exit 2
         ;;
 esac

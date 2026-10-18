@@ -114,7 +114,41 @@ grep -q "tail: *4.0s  straggler" <<<"$summary" \
     && claim || fail "tail is not 4.0s of straggler: $summary"
 grep -q "span: *34.0s" <<<"$summary" && claim || fail "span is not 34.0s: $summary"
 
+# --- PRE-LANE: the time before the first receipt (GitHub issue #820) ------
+grep -q "pre-lane" <<<"$summary" \
+    && fail "a run with no origin stamp reported a pre-lane time: $summary"
+claim
+TAKIBI_LANE_TIMING_DIR="$timing" bash "$REPO_ROOT/scripts/lane_timing.sh" origin 990.000
+TAKIBI_LANE_TIMING_DIR="$timing" bash "$REPO_ROOT/scripts/lane_timing.sh" origin 995.000
+summary="$(python3 "$SUMMARIZE" "$timing")" && claim || fail "the origin summary failed"
+grep -q "pre-lane: *10.0s .*(marathon)" <<<"$summary" \
+    && claim || fail "pre-lane is not 10.0s before marathon (or a second origin moved it): $summary"
+grep -q "did not finish" <<<"$summary" \
+    && fail "the origin stamp was reported as an unfinished lane: $summary"
+claim
+
+# --- concurrent checks overlap, keep their output whole, report failures ---
+CONCURRENT="$REPO_ROOT/scripts/run_concurrent_checks.sh"
+timing="$work/concurrent"
+started="$(date +%s.%3N)"
+out="$(TAKIBI_LANE_TIMING_DIR="$timing" bash "$CONCURRENT" \
+    one 'echo one-a; sleep 1; echo one-b' two 'sleep 1; echo two')" \
+    && claim || fail "two passing concurrent checks exited nonzero: $out"
+elapsed="$(awk -v a="$(date +%s.%3N)" -v b="$started" 'BEGIN { print a - b }')"
+awk -v e="$elapsed" 'BEGIN { exit !(e < 1.8) }' \
+    && claim || fail "two 1s concurrent checks took ${elapsed}s, so they ran serially"
+[ "$out" = "$(printf 'one-a\none-b\ntwo')" ] \
+    && claim || fail "concurrent output was not printed whole in argument order: $out"
+[ -f "$timing/one.jsonl" ] && [ -f "$timing/two.jsonl" ] \
+    && claim || fail "a concurrent check left no lane-timing record"
+out="$(bash "$CONCURRENT" good true bad 'exit 3' 2>&1)"
+status=$?
+[ "$status" -eq 3 ] && claim || fail "a failing concurrent check gave exit $status, not 3"
+grep -q "FAIL concurrent checks: bad (exit 3)" <<<"$out" \
+    && claim || fail "the failing concurrent check was not named: $out"
+
 echo "PASS run-lane controls: $cases claims -- a slow passing lane is visible, a failing lane "\
 "keeps its status and record, an unmeasured lane is unchanged, a lane that "\
 "never finished is reported, an empty run is refused, and longest and tail "\
-"name different lanes"
+"name different lanes, pre-lane time is reported from the origin stamp, "\
+"and concurrent checks overlap and report whole"

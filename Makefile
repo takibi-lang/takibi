@@ -1781,10 +1781,17 @@ _kernelbuild-images: _kernelbuild _kernelbuild-qemu-debug _kernelbuild-rpi5-debu
 kernelbuild-images: build
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) _kernelbuild-images
 
+# The three buildchecks run at the same time (GitHub issue #820): serially
+# they were about 12 minutes of every QEMU CI part, and CI's -j1 would not
+# overlap them as Make prerequisites. They compile into their own temporary
+# directories, and running them from this one recipe keeps them under the
+# kernel build lock. Each leaves a lane-timing record of its own.
+KERNELBUILD_CHECK_ARGS = $(TAKIBI) $(KERNEL_DEVICE_SEMANTICS) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_QEMU_USB_ABSENT_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_QEMU_MAIN_TKB)
 _kernelbuild-check: _kernelbuild-images
-	python3 scripts/buildcheck_backing_exists.py $(TAKIBI) $(KERNEL_DEVICE_SEMANTICS) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_QEMU_USB_ABSENT_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_QEMU_MAIN_TKB)
-	python3 scripts/buildcheck_process_current_phase.py $(TAKIBI) $(KERNEL_DEVICE_SEMANTICS) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_QEMU_USB_ABSENT_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_QEMU_MAIN_TKB)
-	python3 scripts/buildcheck_user_write_result.py $(TAKIBI) $(KERNEL_DEVICE_SEMANTICS) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_QEMU_USB_ABSENT_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_QEMU_MAIN_TKB)
+	bash scripts/run_concurrent_checks.sh \
+		buildcheck-backing-exists 'python3 scripts/buildcheck_backing_exists.py $(KERNELBUILD_CHECK_ARGS)' \
+		buildcheck-process-current-phase 'python3 scripts/buildcheck_process_current_phase.py $(KERNELBUILD_CHECK_ARGS)' \
+		buildcheck-user-write-result 'python3 scripts/buildcheck_user_write_result.py $(KERNELBUILD_CHECK_ARGS)'
 
 kernelbuild-check: build
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) _kernelbuild-check
@@ -2284,7 +2291,7 @@ AWAIT_TIMING_DIR := $(CURDIR)/_build/await-timing
 allcheck:
 	@status=0; . scripts/resource_lease.sh; \
 	rm -rf "$(LANE_TIMING_DIR)"; mkdir -p "$(LANE_TIMING_DIR)"; \
-	export TAKIBI_LANE_TIMING_DIR="$(LANE_TIMING_DIR)"; \
+	export TAKIBI_LANE_TIMING_DIR="$(LANE_TIMING_DIR)"; bash scripts/lane_timing.sh origin; \
 	rm -rf "$(AWAIT_TIMING_DIR)"; mkdir -p "$(AWAIT_TIMING_DIR)"; \
 	export TAKIBI_AWAIT_TIMING_DIR="$(AWAIT_TIMING_DIR)"; \
 	resource_lease_run_suite allcheck \
@@ -2351,7 +2358,7 @@ cicheck_lanes_cicheck-race := $(CICHECK_PART_RACE)
 cicheck cicheck-lang cicheck-models cicheck-qemu cicheck-race:
 	@status=0; . scripts/resource_lease.sh; \
 	rm -rf "$(LANE_TIMING_DIR)"; mkdir -p "$(LANE_TIMING_DIR)"; \
-	export TAKIBI_LANE_TIMING_DIR="$(LANE_TIMING_DIR)"; \
+	export TAKIBI_LANE_TIMING_DIR="$(LANE_TIMING_DIR)"; bash scripts/lane_timing.sh origin; \
 	rm -rf "$(AWAIT_TIMING_DIR)"; mkdir -p "$(AWAIT_TIMING_DIR)"; \
 	export TAKIBI_AWAIT_TIMING_DIR="$(AWAIT_TIMING_DIR)"; \
 	resource_lease_run_suite $@ \

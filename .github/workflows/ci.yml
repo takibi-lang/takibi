@@ -78,6 +78,12 @@ jobs:
 
       - uses: actions/checkout@v4
 
+      # The phase summary's pre-lane line counts from the job's start, not
+      # from its first recorded phase (GitHub issue #820). Written after
+      # checkout, which empties the workspace.
+      - name: Phase timing origin
+        run: bash scripts/lane_timing.sh origin "$CI_JOB_START"
+
       - name: Toolchain packages
         run: |
           bash scripts/run_lane.sh ci-apt bash -euo pipefail -c '
