@@ -237,6 +237,10 @@ MDIR="$MODELS"
 TRACE_CONTROLS_LOG="$OUT/protocol-trace-controls.log"
 python3 "$REPO_ROOT/scripts/protocol_trace_tlc_controls.py" >"$TRACE_CONTROLS_LOG" 2>&1 &
 trace_controls_pid=$!
+# GitHub issue #656: the same for the log ring, LogRingTrace.tla.
+RING_TRACE_CONTROLS_LOG="$OUT/log-ring-trace-controls.log"
+python3 "$REPO_ROOT/scripts/log_ring_trace_tlc_controls.py" >"$RING_TRACE_CONTROLS_LOG" 2>&1 &
+ring_trace_controls_pid=$!
 
 # Run. A job's own exit status is not the verdict -- an unfixed variant is
 # SUPPOSED to fail -- so every job is allowed to fail here and judged below.
@@ -250,6 +254,12 @@ if wait "$trace_controls_pid"; then
 else
     cat "$TRACE_CONTROLS_LOG"
     fail "the protocol-trace TLC controls (see $TRACE_CONTROLS_LOG)"
+fi
+if wait "$ring_trace_controls_pid"; then
+    grep "^PASS" "$RING_TRACE_CONTROLS_LOG"
+else
+    cat "$RING_TRACE_CONTROLS_LOG"
+    fail "the log-ring-trace TLC controls (see $RING_TRACE_CONTROLS_LOG)"
 fi
 
 for model in $(cut -d' ' -f1 "$EXPECT" | uniq); do

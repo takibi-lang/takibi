@@ -37,7 +37,7 @@ EXTENDS Integers, FiniteSets
 (* AArch64 orderings that make it so are the litmus tests under           *)
 (* kernel/models/litmus/ (LogRing*.litmus).                                *)
 (*                                                                         *)
-(* Bound: NW writers, N slots, K = 2, sequences below MAXSEQ = 6.          *)
+(* Bound: NW writers, N slots, K = 2, sequences below MAXSEQ (6).         *)
 (***************************************************************************)
 
 CONSTANTS
@@ -56,10 +56,12 @@ CONSTANTS
     \* @type: Bool;
     REPORT_REFUSAL,  \* FALSE: a refused writer discards without reporting
     \* @type: Bool;
-    PREV_EXACT       \* TRUE: a claim requires exactly seq s-N, not any older
+    PREV_EXACT,      \* TRUE: a claim requires exactly seq s-N, not any older
+    \* @type: Int;
+    MAXSEQ           \* sequences below it: 6 in every cfg; larger only in
+                     \* LogRingTrace.tla's replay of a kernel window (#656)
 
 K == 2
-MAXSEQ == 6
 
 Writers == 1 .. NW
 Slots == 0 .. N - 1
@@ -373,7 +375,7 @@ Safety == TypeOK /\ NoTornRead /\ NoSilentLoss /\ NoDoubleOwner /\ NoNeedlessRef
 CInitBase(nw, n, seq, trust, prev, cont, report, exact) ==
     /\ NW = nw /\ N = n /\ SEQ_IN_WORD = seq /\ TRUST_RESERVED = trust
     /\ CHECK_PREV = prev /\ CONT_SEQ = cont /\ REPORT_REFUSAL = report
-    /\ PREV_EXACT = exact
+    /\ PREV_EXACT = exact /\ MAXSEQ = 6
 
 CInitFixed == CInitBase(3, 3, TRUE, FALSE, TRUE, TRUE, TRUE, FALSE)
 CInitFixed4 == CInitBase(2, 4, TRUE, FALSE, TRUE, TRUE, TRUE, FALSE)

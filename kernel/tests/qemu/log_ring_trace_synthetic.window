@@ -1,0 +1,25 @@
+log-ring-trace: begin cpus=2 slots=256 head=1000 stored=23 lost=0
+log-ring-trace: r begin 999 1003
+log-ring-trace: w0 reserve 1000 1
+log-ring-trace: w0 claim 1000 1 0 0x2e80012
+log-ring-trace: w0 write 1000 1 0
+log-ring-trace: w0 commit 1000 1 0
+log-ring-trace: w1 reserve 1001 2
+log-ring-trace: w1 claim 1001 2 0 0x2e90012
+log-ring-trace: w1 claim 1001 2 1 0x2ea0012
+log-ring-trace: w1 write 1001 2 0
+log-ring-trace: w1 write 1001 2 1
+log-ring-trace: w1 commit 1001 2 1
+log-ring-trace: w1 commit 1001 2 0
+log-ring-trace: r head 999 0x3e70012 copy
+log-ring-trace: r copy 999
+log-ring-trace: r check 999 0x3e70012 kept
+log-ring-trace: r head 1000 0x3e80012 copy
+log-ring-trace: r copy 1000
+log-ring-trace: r check 1000 0x3e80012 kept
+log-ring-trace: r head 1001 0x3e90122 copy
+log-ring-trace: r copy 1001
+log-ring-trace: r check 1001 0x3e90122 cont
+log-ring-trace: r ccopy 1002 0x3ea0102 copy
+log-ring-trace: r ccheck 1002 0x3ea0102 kept
+log-ring-trace: end

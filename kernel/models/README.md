@@ -373,6 +373,29 @@ Unfixed controls, each a constant, each failing in TLC:
   steps: one writer reserves 0..1, another 2, and the claim of 2 finds slot
   0 Free.
 
+### Checked against real runs: LogRingTrace.tla (#656, host side only)
+
+`LogRingTrace.tla` INSTANCEs this model with the kernel's slot count and a
+`MAXSEQ` wide enough for a window, in the shape of `StackOwnershipTrace.tla`.
+A window is one stream of events per writing CPU, in program order, and one
+for the reader; each event is one action of `Next` with the record, slot
+index and the slot word it observed. No CPU-global order is recorded: TLC
+looks for an interleaving of the streams that is a behaviour of this model
+with every observed word equal to the model's. `scripts/validate_log_ring_trace.py`
+only parses (wire format and opening-state conventions in its docstring),
+and refuses before TLC a record wider than K = 2. The TLC controls
+(`scripts/log_ring_trace_tlc_controls.py`, in `make modelcheck`) refuse a
+torn read, a silent loss and a double owner, the last also with the claim's
+guard removed (`CHECK_PREV = FALSE`), where the model breaks
+`NoDoubleOwner`. The kernel does not record windows yet: where the
+recording hooks go is the open decision on #656. Until then the only input
+is `kernel/tests/qemu/log_ring_trace_synthetic.window`, written by hand.
+
+Found while writing it: the kernel reader skips a continuation whose first
+slot is gone (`KernelLogSlotView::Continuation` -> `Skipped(1)`) without
+counting it, where `ReadHead` reports it lost; the control "a stray
+continuation skipped uncounted" is that shape.
+
 | Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
 | --- | --- | --- | --- | --- |
 | `Reserve` | `kernel_log_reserve` | one compare-swap on the head takes k sequences, retried from the value a failed swap observed | the head's load before the swap -- irrelevant to `NoDoubleOwner`: only the swap decides, the load seeds its expected value | `a7b960c43251` |
