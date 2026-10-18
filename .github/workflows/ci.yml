@@ -194,8 +194,10 @@ jobs:
 
       # Keep the UART and DDB evidence together with the exact ELFs whose
       # addresses it contains. Runner-local failure archives otherwise vanish.
+      # Also on cancellation (#816): a part cut off at timeout-minutes is
+      # cancelled, not failed, and its lane timing is what says why.
       - name: Preserve failure evidence
-        if: failure()
+        if: failure() || cancelled()
         uses: actions/upload-artifact@v4
         with:
           name: kernel-failure-evidence-${{ matrix.part }}

@@ -10,7 +10,8 @@ every part, would silently drop coverage that allcheck still has. So:
   - every part has a `cicheck-<part>` target sharing cicheck's recipe;
   - .github/workflows/ci.yml's hardware-free matrix lists exactly those
     parts, runs `make cicheck-${{ matrix.part }}`, and runs
-    scripts/ci_time_budget.py with the job start it records.
+    scripts/ci_time_budget.py with the job start it records, and uploads
+    the failure evidence (lane timing) on cancellation as well as failure.
 
 Also runs its own controls. Exit code only (0 = pass, 1 = fail).
 """
@@ -29,6 +30,7 @@ TARGETS = re.compile(r"^(cicheck(?: cicheck-[a-z]+)*):\n", re.M)
 MATRIX = re.compile(r"^\s+part: \[([^\]]*)\]\s*$", re.M)
 RUN = "make cicheck-${{ matrix.part }}"
 BUDGET = 'python3 scripts/ci_time_budget.py "$CI_JOB_START"'
+UPLOAD = "      - name: Preserve failure evidence\n        if: failure() || cancelled()\n"
 START = 'echo "CI_JOB_START=$(date +%s)" >> "$GITHUB_ENV"'
 
 
@@ -55,7 +57,8 @@ def problems(makefile: str, ci: str) -> list:
     elif sorted(x.strip() for x in matrix[0].split(",")) != sorted(parts):
         found.append(f"{CI}'s matrix parts {matrix[0]!r} differ from the Makefile's {parts}")
     for needle, what in ((RUN, "run each part"), (BUDGET, "check the time budget"),
-                         (START, "record the job start")):
+                         (START, "record the job start"),
+                         (UPLOAD, "keep failure evidence on cancellation too")):
         if needle not in ci:
             found.append(f"{CI} does not {what} (`{needle}`)")
     return found
@@ -77,6 +80,7 @@ def controls(makefile: str, ci: str) -> int:
             "cicheck cicheck-lang cicheck-qemu:\n"), ci),
         "one serial run": (makefile, swap(ci, RUN, "make cicheck")),
         "budget step removed": (makefile, swap(ci, BUDGET, "true")),
+        "evidence on failure only": (makefile, swap(ci, "failure() || cancelled()", "failure()")),
     }
     for name, (mk, yml) in failing.items():
         assert (mk, yml) != (makefile, ci), f"control {name} changed nothing"
