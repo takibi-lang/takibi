@@ -1,10 +1,11 @@
 {
   "date": "2026-10-18",
-  "event": "incremental",
-  "decision": "reuse",
-  "source_sha256": "bfbc6d4153294bab6ccb4fe26a243a6851bef7e6113cb3f8bd62d7b6e771c503",
-  "workload": "#816 on top of #613 slice 3: CI runs cicheck as three parallel parts and fails a part at 75% of its time limit; the only production-source change is the Makefile cicheck recipe and comments. No kernel code, storage or linker change; the #613 slice 3 space_delta measurement (text -48 B qemu / -64 B rpi5, data/BSS unchanged) stands.",
+  "event": "milestone",
+  "decision": "measured",
+  "source_sha256": "2426dfe6c2dec52cf81b84871062c43d939327c1e256cf85dc8af83035f7af4f",
+  "workload": "#613 slice 4: the retained kernel log on the option-B ring (slot state words, linear reservation token, multi-slot records, static 640-byte core-0 line stage, syslog and DDB readers). Measured with scripts/space_delta.py against origin/main: text 708212 -> 713844 B qemu, 760848 -> 766576 B rpi5; BSS 1486512 -> 1485104 B qemu, unchanged rpi5; usable_ram_start unchanged.",
   "evidence": [
+    "docs/LOG_RING_SPACE_2026-10-18.md",
     "docs/PAGE_RUN_SCAN_SPACE_2026-10-17.md",
     "docs/SLOT_POOLS_EXEC_SYSCALL_SPACE_2026-10-17.md",
     "docs/XHCI_CAPABILITY_SPACE_2026-10-17.md",
@@ -81,6 +82,6 @@
     "docs/VIRTIO_NET_TX_2026-10-10.md",
     "docs/VIRTIO_NET_TX_SPACE_2026-10-10.json"
   ],
-  "assessment": "Reused. A Makefile aggregate-target edit cannot change either kernel image; the #613 slice 3 measurement and the #771 storage evidence remain current.",
-  "next_trigger": "A change to PageMeta, the free-list representation, or the page-run search; or the RECORDED page run allocator longest hold growing past 100 us on RPi5."
+  "assessment": "Accepted. BSS falls slightly (three 2 KiB per-slot arrays replaced by two, plus a 640 B static stage; no stack buffer). Text grows about 5.6 KiB: the transitional cost while peer rings and their drain remain; slice 5 deletes those and is expected to make the net change a decrease.",
+  "next_trigger": "#613 slice 5 (peers write the ring directly, peer rings and drain deleted), or a change to the ring geometry (slot count, slot bytes, record slots)."
 }
