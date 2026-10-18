@@ -14,12 +14,16 @@
 // Current limitations (2026-10-18): this exercises concurrent reservation,
 // claim and commit, not the refusal of a slot whose previous occupant is
 // still held -- the bounds probe in log.tkb covers that one, on core 0. It
-// runs once per boot, from init, for LOG_STORM_ROUNDS rounds.
+// runs once per boot, from init, for LOG_STORM_ROUNDS rounds, and is kept
+// small on purpose: every storm record takes a slot of the 256-slot ring,
+// and 64 rounds (4096 records) overwrote the boot's own history before the
+// sysinit dmesg snapshot read it (the dmesg lane's first marker was gone).
+// A longer run is a local rebuild with a larger LOG_STORM_ROUNDS.
 use "kernel/lib/peer_tick_window.tkb";
 use "kernel/lib/atomic_word.tkb";
 use "kernel/lib/execution_model.tkb";
 
-const LOG_STORM_ROUNDS: usize = 64;
+const LOG_STORM_ROUNDS: usize = 2;
 
 private let mut log_storm_armed: AtomicWord;
 // The open round, 1-based; secondaries register for it once.
@@ -58,7 +62,7 @@ private fn log_storm_wait_word(cell: *AtomicWord, value: usize) -> bool {
 // that registers after core 0 counted the writers writes nothing.
 fn log_storm_secondary_run() !{unsafe} {
     let raw: usize = cpu_id();
-    if (raw == 0 || raw >= KERNEL_MAX_CORES) { return; }
+    if (raw == 0 || raw >= KERNEL_MAX_CORES) { return; } // core-role: core 0 coordinates the storm; secondaries join
     let core: {0..<KERNEL_MAX_CORES as usize} = raw;
     let round: usize = atomic_word_load(&log_storm_round);
     if (round == 0 || log_storm_last_round[core] == round) { return; }

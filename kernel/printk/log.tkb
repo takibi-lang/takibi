@@ -491,12 +491,12 @@ private let mut kernel_log_tx_bytes: usize = 0;
 private let mut kernel_log_tx_spun: usize = 0;
 
 fn kernel_log_note_tx_byte() {
-    if (cpu_id() != 0) { return; }
+    if (cpu_id() != 0) { return; } // core-role: console cost counters measure core 0, the TX interrupt owner
     kernel_log_tx_bytes = kernel_log_tx_bytes + 1;
 }
 
 fn kernel_log_note_tx_spin(ticks: i64) {
-    if (cpu_id() != 0) { return; }
+    if (cpu_id() != 0) { return; } // core-role: console cost counters measure core 0, the TX interrupt owner
     kernel_log_tx_spun = kernel_log_tx_spun + 1;
     if (ticks > 0) {
         kernel_log_tx_spin_ticks = kernel_log_tx_spin_ticks + (ticks as usize);
@@ -617,7 +617,7 @@ must_use variant KernelLogTxStandDown {
 }
 
 fn kernel_log_tx_stand_down() -> KernelLogTxStandDown !{unsafe} {
-    if (cpu_id() != 0) { return KernelLogTxStandDown::NotConsoleOwner; }
+    if (cpu_id() != 0) { return KernelLogTxStandDown::NotConsoleOwner; } // core-role: core 0 owns the TX queue switch
     let was_live: bool = kernel_log_tx_live;
     uart_tx_flush();
     kernel_log_tx_live = false;
@@ -1245,7 +1245,7 @@ private let mut kernel_log_peer_probe_emitted: [usize; KERNEL_MAX_CORES];
 // ring directly (#613 slice 5).
 fn kernel_log_peer_probe_step() !{logs, unsafe} {
     let raw_cpu: usize = cpu_id();
-    if (raw_cpu == 0 || raw_cpu >= KERNEL_MAX_CORES) { return; }
+    if (raw_cpu == 0 || raw_cpu >= KERNEL_MAX_CORES) { return; } // core-role: the peer probe runs on secondaries only
     let core: {0..<KERNEL_MAX_CORES as usize} = raw_cpu;
     let emitted: usize = kernel_log_peer_probe_emitted[core];
     if (emitted >= KERNEL_LOG_PEER_PROBE_LINES) {
@@ -1309,7 +1309,7 @@ private fn kernel_log_peer_console_probe_step(
 // idle loop: the UART input-flow request. Peer lines no longer pass through
 // core 0 (#613 slice 5), so this is all that is left of the old peer drain.
 fn kernel_log_console_poll() !{unsafe} {
-    if (cpu_id() != 0) { return; }
+    if (cpu_id() != 0) { return; } // core-role: core 0 alone sends UART input-flow requests
     kernel_log_terminal_flow_poll();
 }
 
@@ -1501,7 +1501,7 @@ private fn kernel_log_snapshot_record(seq: usize, end: usize, second_check: bool
         // not the console owner. Every line a single-core boot retains is
         // core 0's, so its dmesg is unchanged -- and a peer's line is the one
         // that could not previously be told from core 0's at all.
-        if (line_cpu != 0) {
+        if (line_cpu != 0) { // core-role: dmesg prints a cpu column only for non-console-owner lines
             kernel_log_snapshot_text("cpu" as *u8);
             kernel_log_snapshot_push(((line_cpu % 10) + 48) as u8);
             kernel_log_snapshot_push(32);
@@ -1877,7 +1877,7 @@ fn kernel_log_bounds_probe() -> bool !{unsafe} {
 // staged and retained through the same per-CPU stage and reservation token
 // as any kernel line, but not written to the UART: four cores writing to a
 // 115200-baud console would measure the console, not the ring.
-const KERNEL_LOG_STORM_PER_WRITER: usize = 16;
+const KERNEL_LOG_STORM_PER_WRITER: usize = 4;
 
 fn kernel_log_storm_per_writer() -> usize {
     return KERNEL_LOG_STORM_PER_WRITER;

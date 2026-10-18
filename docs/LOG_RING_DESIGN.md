@@ -81,8 +81,9 @@ kernel/printk/log.tkb (see "As built, slice 4" and "As built, slice 5").
   the last record given up; dmesg's discarded line and the end-of-boot
   `kernel log: records=... discarded=... commit_lost=...` print it, and the
   reader's lost line names the first sequence it lost.
-- All-CPU evidence: kernel/kernel/log_storm_evidence.tkb runs 64 rounds in
-  which every online CPU writes 16 lines at once (ring only, no UART) and
+- All-CPU evidence: kernel/kernel/log_storm_evidence.tkb runs 2 rounds in
+  which every online CPU writes 4 lines at once (ring only, no UART; few, so
+  the boot's own history survives until the sysinit dmesg snapshot) and
   core 0 accounts for every sequence of the round; the common view
   `log_storm` compares the verdict, and `log storm detail:` names the first
   lost sequence if any.
