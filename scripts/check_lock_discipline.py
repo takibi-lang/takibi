@@ -52,9 +52,22 @@ KERNEL = pathlib.Path("kernel")
 
 GLOBAL_RE = re.compile(r"^(?:private )?let mut ([A-Za-z_0-9]+)\s*:", re.M)
 MUTEX_INIT_RE = re.compile(r"mutex_init\(&([A-Za-z_0-9]+)")
-ATOMIC_RE = re.compile(
-    r"\batomic_(?:load_acquire|store_release|swap_acquire|fetch_add_relaxed|"
-    r"compare_exchange_acquire|compare_exchange_acq_rel)\b")
+# The raw intrinsics, read from the compiler's own inventory rather than
+# listed here. GitHub issue #613 slice 4: the observed-value compare-swaps
+# were added to lib/atomic_spec.ml without joining a hand-written copy of
+# this list, so a raw compare-swap anywhere in the kernel passed unreviewed.
+ATOMIC_SPEC = pathlib.Path(__file__).resolve().parent.parent / "lib/atomic_spec.ml"
+
+
+def atomic_intrinsics() -> list:
+    text = ATOMIC_SPEC.read_text(encoding="ascii")
+    body = text[text.index("let all = ["):]
+    body = body[:body.index("]\n")]
+    return re.findall(r'name = "(atomic_\w+)"', body)
+
+
+ATOMIC_NAMES = atomic_intrinsics()
+ATOMIC_RE = re.compile(r"\b(?:" + "|".join(ATOMIC_NAMES) + r")\b")
 
 # Files permitted to use the raw atomic intrinsics, and why.
 ATOMIC_ALLOWED = {
@@ -64,6 +77,13 @@ ATOMIC_ALLOWED = {
         "release ordering prevents an external debugger from accepting its "
         "fields before the completed sequence is published. A lock cannot "
         "help a halted out-of-band reader",
+    "printk/log.tkb":
+        "GitHub issue #613: the lockless log ring's reserve, claim, commit "
+        "and discard are acq_rel compare-swaps (kernel/models/LogRing.tla, "
+        "litmus/LogRing*.litmus). AtomicWord's own compare-swap is acquire "
+        "only, and a commit without release lets a reader see Committed "
+        "before the text (LogRingCommit+unfixed-writer). One helper, "
+        "kernel_log_cas, makes every such call",
 }
 
 
@@ -73,6 +93,10 @@ def main():
         return 1
 
     failures = []
+    if len(ATOMIC_NAMES) < 8 or "atomic_compare_swap_acq_rel" not in ATOMIC_NAMES:
+        print("FAIL lock-discipline: lib/atomic_spec.ml's intrinsic list was "
+              "not read (found %r)" % ATOMIC_NAMES, file=sys.stderr)
+        return 1
     checked_files = 0
     atomic_users = []
     global_inits = 0

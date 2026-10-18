@@ -166,6 +166,10 @@ DDB_PROMPT = b"ddb> "
 #   sched    enabled/pending/current and the ready/running/blocked counts.
 #   current  the process the snapshot belongs to.
 #   ps       what else existed, so `current` can be placed among them.
+#   log      the retained kernel log, last: the lines the stall followed, and
+#            a record a stopped writer still held shown in flight by sequence
+#            (GitHub issue #613). At most 256 records, about two seconds of a
+#            115200-baud UART, so it goes after everything shorter.
 #
 # Left out on purpose: `vm` and `fds`, which were asked during #509 and
 # answered nothing; `regs`, thirty lines whose two interesting registers
@@ -177,7 +181,7 @@ DDB_PROMPT = b"ddb> "
 # the state the next question would have asked about.
 POSTMORTEM_COMMANDS = (b"oops", b"intr", b"bt", b"bt cpu 0", b"bt cpu 1",
                        b"sched", b"current", b"ps",
-                       b"stacks", b"events")
+                       b"stacks", b"events", b"log")
 
 # What the walk may spend, granted on top of whatever remains of the capture
 # budget rather than taken out of it: a stall found at second 89 of 90 still

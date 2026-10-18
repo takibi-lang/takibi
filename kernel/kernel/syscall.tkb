@@ -4603,7 +4603,7 @@ fn syscall_peer_refused(number: usize) -> bool {
     // and vfork in #611, whose child's first return on its parent's stack
     // StackOwnership.tla already models on either core. syslog, the one
     // entry that was not lifecycle, left in #612: its reader takes no lock
-    // and drops a record overwritten while it copied (LogReader.tla).
+    // and drops a record overwritten while it copied (LogRing.tla, #613).
     if (number == AARCH64_NR_TAKIBI_PARENT_PROGRESS) {
         return true;
     }

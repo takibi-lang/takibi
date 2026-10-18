@@ -28,7 +28,7 @@ fn kernel_boot_prologue() !{logs, unsafe} {
     kernel_log_init();
     kernel_boot_log("takibi kernel: EL1\n");
     if (log_bounds_ok) {
-        kernel_boot_log("kernel log: overwrite+line truncation reported\n");
+        kernel_boot_log("kernel log: overwrite+refusal+line split reported\n");
     } else {
         kernel_boot_log("kernel log: bounds probe failed\n");
     }

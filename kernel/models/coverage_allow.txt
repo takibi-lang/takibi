@@ -24,3 +24,4 @@ WorldStopRetry fixed NeedLocked: only variant holdlock begins a stop while holdi
 # only the CHECK_PREV = FALSE design (variant noprev) lets a claim do.
 LogRing fixed CommitLost: only variant noprev lets a claim take a Reserved slot
 LogRing fixed4 CommitLost: only variant noprev lets a claim take a Reserved slot
+LogRing fixed2 CommitLost: only variant noprev lets a claim take a Reserved slot

@@ -115,6 +115,7 @@ GDB_COMMANDS=(
     -ex "set *(char *)&kernel_ddb_memory_fault_test_enabled = 1"
     -ex "set *(char *)&kernel_ddb_backtrace_test_enabled = 1"
     -ex "set *(char *)&kernel_ddb_wait_test_enabled = 1"
+    -ex "set *(char *)&kernel_ddb_log_test_enabled = 1"
     -ex "set *(char *)&diagnostic_trace_test_enabled = 1"
     -ex "disable 1"
 )

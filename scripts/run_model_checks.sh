@@ -102,25 +102,24 @@ check_model StackOwnership CoreInvariants 6 \
     leaveunchecked:CInitLeaveUnchecked:RunningMatchesCores:violated \
     wakestartunchecked:CInitWakeStartUnchecked:StartsOnFreeStack:violated:8
 
-check_model LogReader NoTornRead 10 \
-    fixed:CInitFixed:pass:ok \
-    unchecked:CInitUnchecked:NoTornRead:violated:13
-
 # GitHub issue #613: the multi-writer log ring, option B with records of up
-# to two slots, checked before any ring code exists. The bound (writers,
-# slots, K = 2, sequences below 6) is stated in LogRing.tla and the README.
-# Shallow for Apalache: the fixed run at length 6 took 8 minutes, and
-# silentrefuse at 9 five; TLC covers the whole state space. The aba (13
-# steps) and contnoseq (20 steps) violations are TLC's to find; Apalache's
-# short run of those two shows only that they run.
+# to two slots; kernel/printk/log.tkb implements it (slice 4). The bound
+# (writers, slots, K = 2, sequences below 6) is stated in LogRing.tla and the
+# README. Shallow for Apalache: the fixed run at length 6 took 8 minutes;
+# TLC covers the whole state space. The aba (13 steps), contnoseq (20) and
+# silentrefuse (10) violations are TLC's to find; Apalache's short run of
+# those shows only that they run. fixed2 is exactprev's own bound with the
+# corrected claim rule.
 check_model LogRing Safety 7 \
     fixed:CInitFixed:pass:ok:3 \
     fixed4:CInitFixed4:pass:ok:3 \
+    fixed2:CInitFixed2:pass:ok:3 \
     aba:CInitAba:NoTornRead:ok:3 \
     trustreserved:CInitTrustReserved:NoTornRead:violated \
     noprev:CInitNoPrev:NoDoubleOwner:violated \
     contnoseq:CInitContNoSeq:NoTornRead:ok:3 \
-    silentrefuse:CInitSilentRefuse:NoSilentLoss:violated
+    silentrefuse:CInitSilentRefuse:NoSilentLoss:ok:3 \
+    exactprev:CInitExactPrev:NoNeedlessRefusal:violated
 
 check_model RecordLifetime RecordInvariants 6 \
     fixed:CInitFixed:pass:ok \

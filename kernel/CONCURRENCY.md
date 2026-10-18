@@ -18,9 +18,10 @@ state in this kernel is safe *because of* them:
   names it (GitHub issue #583; since #612 only the payload fixture's
   parent report, with its reason) or `syscall_peer_safe` narrows it by
   descriptor; those are rerun on core 0. syslog reads the retained log on
-  any CPU with no lock: core 0 publishes each record with release stores,
-  and a reader drops and counts a record reused while it copied
-  (`kernel/models/LogReader.tla`). The busy-pair fixture pins its workers during the
+  any CPU with no lock: a writer commits each record with a release
+  compare-swap of its slot's state word, and a reader re-checks that word
+  after copying and drops and counts a record reused while it copied
+  (`kernel/models/LogRing.tla`, GitHub issue #613). The busy-pair fixture pins its workers during the
   staged boot checks, then widens them for the measured phase and alternates
   explicit CPU 0/1 affinity requests to observe actual migrations. The
   filesystem boundary is now a LOCK rather than an

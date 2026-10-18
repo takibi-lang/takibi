@@ -1,7 +1,9 @@
 # Lockless multi-writer kernel log ring: design proposal (GitHub issue #613)
 
-Status: option B selected (2026-10-18), with the changes below. Nothing of
-the ring is implemented yet.
+Status: option B selected (2026-10-18), with the changes below. Slices 1-4
+are implemented: the ring's storage, the hand-written token and the syslog
+and DDB readers are in kernel/printk/log.tkb, with core 0 still the only
+writer (see "As built, slice 4" below). Peers writing directly is slice 5.
 
 ## Maintainer decisions (2026-10-18, recorded on #613, #645, #656)
 
@@ -18,6 +20,39 @@ the ring is implemented yet.
 4. herd7 model checks only; no litmus7 and no RPi5 hardware runs. Instead a
    check ties each litmus test to the instructions the compiler emits.
 5. #656 retargets to LogRing.tla.
+
+## As built, slice 4 (2026-10-18)
+
+- Storage: 256 slots x 160 bytes of AtomicWord text, one state word per slot
+  `seq << 16 | cpu << 8 | span << 4 | state` (state Free, Reserved,
+  Committed, Discarded; span 0 marks a continuation), a tick and a metadata
+  word (length, cpu, continued flag) per first slot. A record spans at most 4
+  slots (KERNEL_LOG_RECORD_SLOTS, 1/64 of the ring); a longer line is split
+  into continuation records whose metadata says so, printed as one line.
+  The per-slot stamp, length and cpu arrays and the started count are gone.
+- One head compare-swap reserves k slots, so k must be known first: core 0
+  stages its line in a static 640-byte buffer (no stack buffer) and reserves
+  at the newline. A partial line is therefore never visible, as decided.
+- Token: `linear struct LogReservation[unit]` with private fields, built only
+  by kernel_log_reserve and consumed by kernel_log_commit or
+  kernel_log_discard (`sink`); kernel_log_write borrows it. `no_copy` as
+  proposed is not consumable (SPEC: copying it into an argument is an
+  error), so the linear owner of the Ext2Slot precedent is what carries
+  "write after commit" and "reserved, never finished" as compile errors.
+- Reader: kernel_log_slot_view returns a sealed KernelLogUnvalidated (the
+  observed word) only for (seq, Committed, span >= 1); kernel_log_still must
+  find the same word after the copy. DDB `log` reads raw under the world
+  stop and prints a Reserved slot as `in-flight cpu=C`; the stall walk of
+  ordinary lanes sends it too.
+- Every compare-swap is atomic_compare_swap_acq_rel (CASAL), through one
+  helper. The text stores stay STLR: the slice-2 finding that the claim's
+  acquire alone orders them holds (LogRingRecheck+plain-text), but an
+  AtomicWord has no plain store and the text must stay AtomicWord for the
+  reader's acquire loads.
+- Claim rule corrected: the previous occupant must be finished and OLDER,
+  not exactly seq - N. With the exact rule a refused claim leaves its slot
+  holding an older turn and every later turn of that slot is refused for
+  ever (LogRing.tla variant exactprev, invariant NoNeedlessRefusal).
 
 The sections below are the original proposal; where they disagree with the
 decisions above (fixed 160-byte cap, litmus7 on RPi5), the decisions win.

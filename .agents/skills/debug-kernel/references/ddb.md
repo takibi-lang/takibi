@@ -16,7 +16,7 @@ inspection, and resume.
 
 <!-- DDB-COMMAND-INVENTORY-START -->
 `oops`; `regs`; `intr`; `sched`; `current`; `vm`; `fds`; `ps`; `stacks`; `wait`;
-`proc PID`; `bt [PID|cpu N]`; `trace`; `events`; `unimpl`; `xk ADDRESS [COUNT]`;
+`proc PID`; `bt [PID|cpu N]`; `trace`; `events`; `unimpl`; `log`; `xk ADDRESS [COUNT]`;
 `xp PHYSICAL [COUNT]`; `xu PID ADDRESS [COUNT]`; `profile stop|dump`; `help`; `continue`.
 <!-- DDB-COMMAND-INVENTORY-END -->
 
@@ -60,6 +60,10 @@ inspection, and resume.
 - `unimpl`: the syscall numbers processes reached that the dispatcher has no arm
   for, with the first pid to reach each. It is recorded without UART output;
   an empty table prints `count=0`.
+- `log`: the retained kernel log by sequence, read raw (the world is
+  stopped). A record a stopped writer still holds is `in-flight cpu=C`, a
+  given-up one `discarded`, and a sequence whose slot holds another `absent`;
+  the header names the head, the oldest sequence and the discarded count.
 - `xk ADDRESS [COUNT]`, `xp PHYSICAL [COUNT]`, `xu PID ADDRESS [COUNT]`:
   fault-contained reads of managed ordinary RAM. They reject MMIO and non-RAM
   storage rather than performing a potentially state-changing read.

@@ -69,6 +69,8 @@ ANSWERS = {
     b"ps": b"ddb: ps count=3\r\n",
     b"stacks": b"ddb: stacks cpus=2\r\n",
     b"events": b"ddb: events cpu=0 count=0 damaged=0 overwritten=0\r\n",
+    b"log": (b"ddb: log head=1 oldest=0 discarded=0\r\n"
+             b"ddb: log seq=0 cpu=0 span=1 text=init: started\r\n"),
 }
 
 

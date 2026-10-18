@@ -76,6 +76,11 @@
       "coverage": "qemu"
     },
     {
+      "name": "log",
+      "usage": "log",
+      "coverage": "qemu"
+    },
+    {
       "name": "xk",
       "usage": "xk ADDRESS [COUNT]",
       "coverage": "qemu"
@@ -123,6 +128,12 @@
       "name": "waittest",
       "classification": "test-only",
       "reason": "renders issue #524's wait topology from records the debugger wrote, so the causal presentation is compared without reproducing the stall",
+      "coverage": "qemu"
+    },
+    {
+      "name": "logtest",
+      "classification": "test-only",
+      "reason": "renders a kernel log slot a stopped writer still holds Reserved (issue #613) through the live view's classifier, so the in-flight presentation is compared without stopping a writer mid-record",
       "coverage": "qemu"
     }
   ]

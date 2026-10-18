@@ -1,15 +1,9 @@
 # herd7 verdict each litmus test must get (GitHub issue #645).
 # Never: the outcome in `exists` is forbidden by the AArch64 model.
 # Sometimes: allowed -- an unfixed control that must still find the defect.
-LogPublish Never
-LogPublish+unfixed-writer Sometimes
-LogPublish+unfixed-reader Sometimes
-LogReuse Never
-LogReuse+unfixed-writer Sometimes
-LogReuse+unfixed-reader Sometimes
-# GitHub issue #613 slice 2: the multi-writer log ring (LogRing.tla), before
-# its code exists. +plain-text is not a control: it shows the claim CAS's
-# acquire alone already orders the writer side (README.md).
+# GitHub issue #613: the multi-writer log ring (LogRing.tla). +plain-text is
+# not a control: it shows the claim CAS's acquire alone already orders the
+# writer side (README.md).
 LogRingCommit Never
 LogRingCommit+unfixed-writer Sometimes
 LogRingCommit+unfixed-reader Sometimes

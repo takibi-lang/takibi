@@ -99,6 +99,11 @@ ddb: events cpu=1 count=0 damaged=0 overwritten=0
 ddb: events cpu=2 count=0 damaged=0 overwritten=0
 ddb: events cpu=3 count=0 damaged=0 overwritten=0
 ddb: unimpl count=0
+ddb: log head=2 oldest=0 discarded=0
+ddb: log seq=0 cpu=0 span=1 text=takibi kernel: EL1
+ddb: log seq=1 cpu=0 span=1 text=kernel log: overwrite+refusal+line split reported
+ddb: log seq=9 in-flight cpu=1
+ddb: log seq=10 absent
 ddb: xk address=0x00000000401d5078 count=2
 ddb: xk byte address=0x00000000401d5078 value=0x0000000000000001
 ddb: xk byte address=0x00000000401d5079 value=0x0000000000000001
@@ -128,7 +133,7 @@ ddb: xu pid=1 root=0 address=0x0000000070000000 count=1
 ddb: xu unmapped address=0x0000000070000000
 ddb: profile nothing to dump
 ddb: usage: profile stop | profile dump (start: write to /proc/takibi/profile)
-commands: oops regs intr sched current vm fds ps stacks wait proc PID bt [PID|cpu N] trace events unimpl xk ADDRESS [COUNT] xp PHYSICAL [COUNT] xu PID ADDRESS [COUNT] profile stop|dump help continue
+commands: oops regs intr sched current vm fds ps stacks wait proc PID bt [PID|cpu N] trace events unimpl log xk ADDRESS [COUNT] xp PHYSICAL [COUNT] xu PID ADDRESS [COUNT] profile stop|dump help continue
 ddb: continuing
 ddb: console tx=queued
 init: ash bootstrap

@@ -4,45 +4,69 @@
 #
 #   access <test> <thread> <litmus location> <takibi function> <global>...
 #
-# The litmus instruction that touches the location (STLR, LDAR, ...) must be
-# the instruction class of EVERY access of that direction (store for a
-# writer thread's location, load for a reader's) the function makes to each
-# listed global, directly or through a helper it passes the address to. At
-# least one such access must exist.
+# The litmus instruction that touches the location (STLR, LDAR, CASAL, ...)
+# must be the instruction class of EVERY access of that direction (store,
+# load, or rmw for a compare-swap) the function makes to each listed global,
+# directly or through the functions it calls (two levels). At least one such
+# access must exist.
 #
 #   order <test> <thread> <takibi function> <global A> <global B>
+#   order-first <test> <thread> <takibi function> <global A> <global B>
+#   order-last <test> <thread> <takibi function> <global A> <global B>
 #
-# Program order: every access to A (in the thread's direction) comes before
-# every access to B, by address in the function's code. That is program
-# order for code where no loop carries an access to A past one to B; a row
-# is only written where none does.
-
-# LogPublish: core 0 stores a text word, then the length that admits it.
-access LogPublish P0 text kernel_log_capture_retained_byte kernel_log_text
-access LogPublish P0 length kernel_log_capture_retained_byte kernel_log_lengths
-order LogPublish P0 kernel_log_capture_retained_byte kernel_log_text kernel_log_lengths
-access LogPublish P1 length kernel_log_snapshot_record kernel_log_lengths
-access LogPublish P1 text kernel_log_snapshot_record kernel_log_text
-order LogPublish P1 kernel_log_snapshot_record kernel_log_lengths kernel_log_text
-
-# LogReuse: beginning a record publishes the count first, then the slot.
-access LogReuse P0 started kernel_log_start_line kernel_log_started
-access LogReuse P0 data kernel_log_start_line kernel_log_cpu kernel_log_ticks kernel_log_lengths kernel_log_stamps
-access LogReuse P0 data kernel_log_capture_retained_byte kernel_log_text kernel_log_lengths
-order LogReuse P0 kernel_log_start_line kernel_log_started kernel_log_stamps
-access LogReuse P1 data kernel_log_snapshot_record kernel_log_stamps kernel_log_lengths kernel_log_cpu kernel_log_ticks kernel_log_text
-access LogReuse P1 started kernel_log_snapshot_record kernel_log_started
-order LogReuse P1 kernel_log_snapshot_record kernel_log_text kernel_log_started
-
+# Program order by address in the function's code, over the directions the
+# thread's litmus code uses: `order`, every access to A before every access
+# to B; `order-first`, the first access to A before every access to B (the
+# acquire load a copy depends on); `order-last`, every access to A before
+# the last access to B (the re-check after a copy). That is program order
+# for code where no loop carries an access past another; a row is only
+# written where none does.
+#
+#   callorder <test> <thread> <caller> <callee A> <callee B>
+#
+# Program order across functions: every call to A precedes every call to B
+# in the caller, for a thread whose litmus code spans two of them (the text
+# written by kernel_log_write, then committed by kernel_log_commit).
+#
 #   pending <test> <why>
 #
 # A fixed test whose code does not exist yet. Every fixed test needs access
 # rows or a pending row (never both), so a test cannot pass herd7 while
-# silently tying nothing. Slice 4 of #613 replaces each pending row below
-# with access/order rows naming the ring's functions and globals, and first
-# teaches litmus_accesses/accesses the CAS forms (CASAL Xs,Xt,[Xn]: a load
-# and a store, classed by its A/L suffixes), which they do not parse today.
-pending LogRingCommit issue 613 slice 4: kernel_log_commit and the syslog reader do not exist yet
-pending LogRingRecheck issue 613 slice 4: the reservation's claim and the syslog reader do not exist yet
-pending LogRingReserve issue 613 slice 4: the reservation's head CAS does not exist yet
-pending LogRingClaim issue 613 slice 4: the reservation's claim and kernel_log_commit do not exist yet
+# silently tying nothing.
+#
+# GitHub issue #613 slice 4: the multi-writer ring of kernel/printk/log.tkb.
+# Every compare-swap goes through kernel_log_cas (CASAL). Text stores are
+# STLR, although LogRingRecheck+plain-text shows the claim's acquire would
+# allow plain STR: an AtomicWord has no plain store, and the text must stay
+# AtomicWord for the reader's LDAR loads (LogRingRecheck+unfixed-reader).
+
+# LogRingCommit: the writer stores text, then commits; a reader that sees
+# Committed sees the text.
+access LogRingCommit P0 text kernel_log_write kernel_log_text
+access LogRingCommit P0 state kernel_log_commit kernel_log_slots
+callorder LogRingCommit P0 kernel_log_retain_line kernel_log_write kernel_log_commit
+access LogRingCommit P1 state kernel_log_snapshot_record kernel_log_slots
+access LogRingCommit P1 text kernel_log_snapshot_record kernel_log_text
+order-first LogRingCommit P1 kernel_log_snapshot_record kernel_log_slots kernel_log_text
+
+# LogRingRecheck: an overwriting writer claims, then stores text; a reader
+# that copied the new text sees the claim when it re-checks.
+access LogRingRecheck P0 state kernel_log_reserve kernel_log_slots
+access LogRingRecheck P0 text kernel_log_write kernel_log_text
+callorder LogRingRecheck P0 kernel_log_retain_line kernel_log_reserve kernel_log_write
+access LogRingRecheck P1 text kernel_log_snapshot_record kernel_log_text
+access LogRingRecheck P1 state kernel_log_snapshot_record kernel_log_slots
+order-last LogRingRecheck P1 kernel_log_snapshot_record kernel_log_text kernel_log_slots
+
+# LogRingReserve: two writers' head compare-swaps take distinct sequences.
+access LogRingReserve P0 head kernel_log_reserve kernel_log_head
+access LogRingReserve P1 head kernel_log_reserve kernel_log_head
+
+# LogRingClaim: the old writer's text and commit, against the next claimer's
+# claim and text.
+access LogRingClaim P0 text kernel_log_write kernel_log_text
+access LogRingClaim P0 state kernel_log_commit kernel_log_slots
+callorder LogRingClaim P0 kernel_log_retain_line kernel_log_write kernel_log_commit
+access LogRingClaim P1 state kernel_log_reserve kernel_log_slots
+access LogRingClaim P1 text kernel_log_write kernel_log_text
+callorder LogRingClaim P1 kernel_log_retain_line kernel_log_reserve kernel_log_write

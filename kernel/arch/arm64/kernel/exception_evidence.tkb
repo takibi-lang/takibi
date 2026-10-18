@@ -304,6 +304,7 @@ let mut kernel_ddb_breakpoint_test_enabled: bool;
 let mut kernel_ddb_memory_fault_test_enabled: bool;
 let mut kernel_ddb_backtrace_test_enabled: bool;
 let mut kernel_ddb_wait_test_enabled: bool;
+let mut kernel_ddb_log_test_enabled: bool;
 // DDB lanes retain the peer writer after its ordinary ordering verdict.
 // The host arms the finite console hold only after its UART wake and other
 // prerequisites; ordinary boots never take that fixture hold.
@@ -1587,6 +1588,78 @@ private fn ddb_render_unimpl() !{unsafe} {
     }
 }
 
+// GitHub issue #613: the retained kernel log, read raw. The world is stopped,
+// so each slot is read once and trusted; a record a stopped writer still
+// holds Reserved is shown as in flight by sequence instead of being skipped,
+// and a sequence whose slot holds another is shown absent rather than
+// guessed at.
+private fn ddb_render_log_slot(seq: usize, slot: KernelLogRawSlot) -> usize !{unsafe} {
+    match slot {
+        KernelLogRawSlot::Committed(fields) => {
+            let (span, cpu, length) = fields;
+            ddb_puts("ddb: log seq="); ddb_put_udec(seq);
+            ddb_puts(" cpu="); ddb_put_udec(cpu);
+            ddb_puts(" span="); ddb_put_udec(span);
+            ddb_puts(" text=");
+            for index: usize in 0..<640 {
+                if (index < length) {
+                    let byte: u8 = kernel_log_raw_text_byte(seq, index);
+                    if (byte >= 32 && byte < 127) { uart_debug_putc(byte); }
+                    else if (byte != 10) { uart_debug_putc(46); }
+                }
+            }
+            ddb_puts("\n");
+            return span;
+        }
+        KernelLogRawSlot::InFlight(cpu) => {
+            ddb_puts("ddb: log seq="); ddb_put_udec(seq);
+            ddb_puts(" in-flight cpu="); ddb_put_udec(cpu);
+            ddb_puts("\n");
+        }
+        KernelLogRawSlot::Discarded => {
+            ddb_puts("ddb: log seq="); ddb_put_udec(seq);
+            ddb_puts(" discarded\n");
+        }
+        KernelLogRawSlot::Continuation => {
+            ddb_puts("ddb: log seq="); ddb_put_udec(seq);
+            ddb_puts(" continuation\n");
+        }
+        KernelLogRawSlot::Absent => {
+            ddb_puts("ddb: log seq="); ddb_put_udec(seq);
+            ddb_puts(" absent\n");
+        }
+    }
+    return 1;
+}
+
+private fn ddb_render_log() !{unsafe} {
+    let head: usize = kernel_log_raw_head();
+    let slots: usize = kernel_log_raw_slot_count();
+    let mut seq: usize = 0;
+    if (head > slots) { seq = head - slots; }
+    ddb_puts("ddb: log head="); ddb_put_udec(head);
+    ddb_puts(" oldest="); ddb_put_udec(seq);
+    ddb_puts(" discarded="); ddb_put_udec(kernel_log_raw_discarded());
+    ddb_puts("\n");
+    for step: usize in 0..<256 {
+        if (seq < head) {
+            seq = seq + ddb_render_log_slot(seq, kernel_log_raw_slot(seq));
+        }
+    }
+}
+
+// Test-only: a slot a stopped writer holds, classified by the same code the
+// live view uses, so the in-flight presentation is compared without
+// stopping a writer mid-record.
+private fn ddb_render_log_test() !{unsafe} {
+    let seq: usize = kernel_log_raw_head() + 7;
+    let skipped: usize = ddb_render_log_slot(
+        seq, kernel_log_raw_classify(kernel_log_raw_reserved_word(seq, 1), seq, 0));
+    let absent: usize = ddb_render_log_slot(
+        seq + 1, kernel_log_raw_classify(kernel_log_raw_reserved_word(seq, 1),
+                                         seq + 1, 0));
+}
+
 private fn ddb_render_oops() !{unsafe} {
     let frame: *ExceptionFrame = unsafe {
         ddb_snapshot.frame_sp as *ExceptionFrame
@@ -2608,6 +2681,8 @@ private fn kernel_ddb_enter_stopped(
             ddb_render_events();
         } else if (ddb_command_is(line as []u8, length, bs"unimpl")) {
             ddb_render_unimpl();
+        } else if (ddb_command_is(line as []u8, length, bs"log")) {
+            ddb_render_log();
         } else {
             match ddb_parse_backtrace(line as []u8, length) {
                 DdbBacktraceCommand::Current => {
@@ -2679,6 +2754,11 @@ private fn kernel_ddb_enter_stopped(
                         ddb_guarded_fault_verdict("unarmed", false,
                                                   0x800000000, 0x25 << 26,
                                                   0x800000000);
+                    } else if (kernel_ddb_log_test_enabled &&
+                            ddb_command_is(line as []u8, length, bs"logtest")) {
+                        // Test-only: #613's in-flight slot, classified by the
+                        // live view's code without stopping a writer.
+                        ddb_render_log_test();
                     } else if (kernel_ddb_wait_test_enabled &&
                             ddb_command_is(line as []u8, length, bs"waittest")) {
                         // Test-only: issue #524's topology from records this
@@ -2686,7 +2766,7 @@ private fn kernel_ddb_enter_stopped(
                         // lane instead of waiting for the stall to recur.
                         ddb_render_wait_test();
                     } else if (ddb_command_is(line as []u8, length, bs"help")) {
-                        ddb_puts("commands: oops regs intr sched current vm fds ps stacks wait proc PID bt [PID|cpu N] trace events unimpl xk ADDRESS [COUNT] xp PHYSICAL [COUNT] xu PID ADDRESS [COUNT] profile stop|dump help continue\n");
+                        ddb_puts("commands: oops regs intr sched current vm fds ps stacks wait proc PID bt [PID|cpu N] trace events unimpl log xk ADDRESS [COUNT] xp PHYSICAL [COUNT] xu PID ADDRESS [COUNT] profile stop|dump help continue\n");
                     } else {
                         ddb_command_profile(ddb_parse_profile(line as []u8, length));
                     }

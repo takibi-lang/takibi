@@ -11,22 +11,15 @@ AArch64 model says the two-thread shape is forbidden, and the lint says the
 named functions use those instructions; it does not prove the Takibi code
 has no other ordering dependency.
 
-Each test is the two-thread message-passing shape of one ordering claim in
-kernel/printk/log.tkb (#612), with unfixed controls that weaken one access.
+Each test is the two-thread shape of one ordering claim of the kernel log
+ring in kernel/printk/log.tkb, with unfixed controls that weaken one access.
+The single-writer ring's tests (LogPublish, LogReuse, #612) were removed with
+that ring in #613 slice 4.
 
-| Test | P0 (core 0, writer) | P1 (reader, any CPU) |
-|---|---|---|
-| LogPublish | `kernel_log_capture_retained_byte`: STLR text word (`kernel_log_text`), then STLR length (`kernel_log_lengths`), both via `kernel_log_publish` | `kernel_log_snapshot_record`: LDAR length, then LDAR text word, via `kernel_log_observe` |
-| LogReuse | record begin: STLR `kernel_log_started` FIRST, then STLR a slot word | `kernel_log_snapshot_record`: LDAR the slot word, then LDAR `kernel_log_started` for the re-check |
-
-Unfixed controls: `+unfixed-writer` makes P0's second store plain (STR);
-`+unfixed-reader` makes P1's first load plain (LDR). herd7 must then allow
-the outcome the fixed test forbids.
-
-## The multi-writer ring (GitHub issue #613, before its code)
+## The multi-writer ring (GitHub issue #613)
 
 The LogRing tests are the orderings LogRing.tla assumes, written before the
-ring exists against the instructions the compiler emits for the RPi5 today:
+ring existed against the instructions the compiler emits for the RPi5:
 `atomic_word_store_release` is STLR, `atomic_word_load_acquire` LDAR, and an
 acq_rel compare-exchange the LSE `CASAL` (the kernel object holds CASAL and
 CASA, no LDAXR/STLXR loops). Values: state 1 = (s, Reserved), 2 = (s,
@@ -48,11 +41,20 @@ plain text stores after a CASAL claim. `+unfixed-reader` makes P1's first
 load plain (LDR). `LogRingReserve+unfixed-loadstore` replaces the CAS with
 LDAR, ADD, STLR: atomicity, not ordering, is what the head CAS gives.
 
-These tests are not yet tied to emitted code: emitted_map.txt marks each
-`pending`, and the check refuses a fixed test that has neither access rows
-nor a pending row. Slice 4 replaces the pending rows with access and order
-rows once `kernel_log_commit`, the reservation and the reader exist. First
-it extends `litmus_accesses` and `accesses` in scripts/run_litmus_checks.py
-to the CAS forms (`CASAL Xs,Xt,[Xn]` is a load and a store; its A and L
-suffixes give the acquire and release class), which neither parses today,
-and adds a planted control that weakens a CASAL to CAS.
+Each fixed test is tied to the emitted code by emitted_map.txt (slice 4).
+Every compare-swap of the ring is one helper, `kernel_log_cas`, which is
+CASAL; the writer's text stores are `kernel_log_write`'s STLRs and its
+commit `kernel_log_commit`'s CASAL, called in that order by
+`kernel_log_retain_line` (a `callorder` row); the claim is
+`kernel_log_reserve`'s; the reader is `kernel_log_snapshot_record`, whose
+first slot-word load precedes its text loads (`order-first`) and whose
+re-check follows them (`order-last`). run_litmus_checks.py parses the CAS
+forms (a compare-swap is direction "rmw", classed CAS, CASA, CASL or CASAL by
+its suffixes) and plants seven defects it must report, among them the
+helper's CASAL weakened to CAS and the reader cut off before its re-check.
+
+The text stores stay STLR although `LogRingRecheck+plain-text` shows the
+claim's acquire would allow plain STR: an AtomicWord has no plain store, and
+the text must stay AtomicWord because the reader's loads of it must be
+acquires (`LogRingRecheck+unfixed-reader`). Using STR would need a plain
+store on an atomic cell, a compiler surface this slice does not add.

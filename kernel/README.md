@@ -420,7 +420,7 @@ The existing TCP UART/miniterm data path is unchanged. The kernel prints
 `ddb>` and accepts the following commands.
 <!-- DDB-COMMAND-INVENTORY-START -->
 `oops`; `regs`; `intr`; `sched`; `current`; `vm`; `fds`; `ps`; `stacks`; `wait`;
-`proc PID`; `bt [PID|cpu N]`; `trace`; `events`; `unimpl`; `xk ADDRESS [COUNT]`;
+`proc PID`; `bt [PID|cpu N]`; `trace`; `events`; `unimpl`; `log`; `xk ADDRESS [COUNT]`;
 `xp PHYSICAL [COUNT]`; `xu PID ADDRESS [COUNT]`; `profile stop|dump`; `help`; `continue`.
 <!-- DDB-COMMAND-INVENTORY-END -->
 `wait` derives who is waiting for what from that same snapshot: a blocked
@@ -1289,7 +1289,7 @@ scheduler, sleep, filesystem, network, or ordinary logging dependency. Its
 public command inventory follows.
 <!-- DDB-COMMAND-INVENTORY-START -->
 `oops`; `regs`; `intr`; `sched`; `current`; `vm`; `fds`; `ps`; `stacks`; `wait`;
-`proc PID`; `bt [PID|cpu N]`; `trace`; `events`; `unimpl`; `xk ADDRESS [COUNT]`;
+`proc PID`; `bt [PID|cpu N]`; `trace`; `events`; `unimpl`; `log`; `xk ADDRESS [COUNT]`;
 `xp PHYSICAL [COUNT]`; `xu PID ADDRESS [COUNT]`; `profile stop|dump`; `help`; `continue`.
 <!-- DDB-COMMAND-INVENTORY-END -->
 `help` lists the same inventory.
@@ -1654,27 +1654,36 @@ bring-up. Host-side progress output is separate from kernel UART output.
 ## Kernel text log and multicore publication boundary
 
 `kernel_boot_log()` writes its unchanged text to UART and retains the same
-logical line in a fixed 256-record ring. Each record carries the architectural
+logical line in a fixed ring of 256 slots of 160 bytes (GitHub issue #613,
+`docs/LOG_RING_DESIGN.md` option B). Each record carries the architectural
 monotonic-counter time of its first byte; BusyBox `dmesg` retrieves a bounded
 snapshot through Linux `syslog(2)`. The printed form is
-`[ssssss.uuuuuu] text`. A record retains at most 160 text bytes, and both a
-long-line truncation and overwritten oldest records are reported explicitly.
-The ring and its 64-KiB formatting snapshot are static storage: logging does
-not allocate.
+`[ssssss.uuuuuu] text`. A line longer than a slot spans up to four
+consecutive slots, reserved together; a line longer than that is split into
+continuation records, printed as one line, never truncated. A line is
+retained when it ends, so a partial line is never visible. Overwritten
+oldest records, records in flight or overwritten while a snapshot copied
+them, and records a writer gave up are each reported explicitly. The ring
+and its 64-KiB formatting snapshot are static storage: logging does not
+allocate.
 
-The retained text ring deliberately has one writer: core 0 ordinary
-main/syscall context. A `kernel_boot_log()` call from another core remains
-live-UART-only and is not retained. Interrupt-context diagnostics continue to
-use the fixed-width diagnostic event ring; crash and DDB output continue to
-use their direct polled UART path. This is a correctness boundary, not a claim
-that the current arrays are accidentally safe under concurrent writes.
+The ring is lockless and multi-writer by protocol: one compare-swap on the
+head reserves a record's sequences, a compare-swap per slot claims it from
+its finished previous occupant (a stalled one is never waited for: the
+reservation is refused and counted), and a release compare-swap commits it.
+The writer holds a linear `LogReservation` token from reservation to commit
+or discard, so writing a committed record or abandoning a reserved one does
+not compile. Readers on any CPU take no lock: they acquire-load a slot's
+state word, copy, and re-check it (`kernel/models/LogRing.tla`; the AArch64
+orderings are the herd7 tests under `kernel/models/litmus/`, tied to the
+emitted instructions). DDB's `log` command reads the same slots raw under
+the world stop and shows a slot a stopped writer holds as in flight.
 
-A future multicore text writer must reserve a monotonically increasing record
-sequence atomically, write timestamp/CPU/text into the reserved slot, then
-publish that sequence with release ordering. Readers must acquire the
-publication word, reject overwritten or half-published sequences, and order
-records by sequence rather than by arrival at UART. CPU id belongs in record
-metadata even if the default display initially omits it. A single global
+Core 0 ordinary main/syscall context is still the only writer: a peer's
+`kernel_boot_log()` line is published to a per-core peer record that core 0
+drains into the ring, attributed to the peer's CPU and tick. Interrupt-context
+diagnostics continue to use the fixed-width diagnostic event ring; crash and
+DDB output continue to use their direct polled UART path. A single global
 spinlock around UART plus the ring is not the intended extension: a stalled
 polled console must not become the serialization mechanism for retaining
 diagnostics from another core.

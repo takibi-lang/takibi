@@ -33,7 +33,7 @@ VALIDATOR = ROOT / "scripts" / "validate_kernel_dmesg_timestamps.py"
 # timestamps inside every window it enforces.
 HEALTHY = [
     (0.000030, "takibi kernel: EL1"),
-    (0.000350, "kernel log: overwrite+line truncation reported"),
+    (0.000350, "kernel log: overwrite+refusal+line split reported"),
     (0.062737, "memory: source=dtb base_bytes=524288 detected_mib=1019 "
                "regions=1 reservations=2 allocator_pages=259696"),
     (3.100000, "virtio net: link ready mac=02:00:20:00:00:02"),

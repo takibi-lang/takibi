@@ -3,8 +3,9 @@ EXTENDS Integers, FiniteSets
 
 (***************************************************************************)
 (* The lockless multi-writer kernel log ring (GitHub issue #613, option B  *)
-(* with multi-slot records; docs/LOG_RING_DESIGN.md). Written before any  *)
-(* ring code exists, to check the design.                                  *)
+(* with multi-slot records; docs/LOG_RING_DESIGN.md). Written before the  *)
+(* ring code, which is kernel/printk/log.tkb (kernel/models/README.md maps *)
+(* each action to its function).                                           *)
 (*                                                                         *)
 (* N fixed slots. Sequence s lives in slot s % N. Each slot has one state *)
 (* word (seq, state, span): state is Free (never used), Reserved,          *)
@@ -13,9 +14,9 @@ EXTENDS Integers, FiniteSets
 (*                                                                         *)
 (* A writer reserves a record of k <= K slots with ONE CAS on `head`       *)
 (* (h -> h + k), then claims each slot h+i with a CAS from the previous   *)
-(* occupant (h+i-N, Committed or Discarded) -- or Free, the first time    *)
-(* round -- to (h+i, Reserved). If the previous occupant is not finished  *)
-(* (a stalled writer still holds it Reserved) or was already taken, the   *)
+(* occupant (an older sequence, Committed or Discarded) -- or Free, never *)
+(* used -- to (h+i, Reserved). If the previous occupant is not finished   *)
+(* (a stalled writer still holds it Reserved) or is newer, the            *)
 (* writer does not wait: the claim is Refused, every sequence of the      *)
 (* record is reported lost, the slots it already claimed are Discarded,   *)
 (* and it holds no token. Otherwise it writes the text and commits each   *)
@@ -53,7 +54,9 @@ CONSTANTS
     \* @type: Bool;
     CONT_SEQ,        \* FALSE: the reader accepts any continuation mark
     \* @type: Bool;
-    REPORT_REFUSAL   \* FALSE: a refused writer discards without reporting
+    REPORT_REFUSAL,  \* FALSE: a refused writer discards without reporting
+    \* @type: Bool;
+    PREV_EXACT       \* TRUE: a claim requires exactly seq s-N, not any older
 
 K == 2
 MAXSEQ == 6
@@ -98,10 +101,12 @@ VARIABLES
     \* @type: Set(Int);
     reported,      \* sequences reported lost (by a refused writer or the reader)
     \* @type: Bool;
-    tornReturned   \* was a copy mixing records ever returned
+    tornReturned,  \* was a copy mixing records ever returned
+    \* @type: Bool;
+    needless       \* was a claim ever refused over a finished, older occupant
 
 vars == <<head, word, text, wpc, wseq, wk, wi, rpc, rnext, rspan, copyH,
-          copyC, returned, reported, tornReturned>>
+          copyC, returned, reported, tornReturned, needless>>
 wvars == <<wpc, wseq, wk, wi>>
 rvars == <<rpc, rnext, rspan, copyH, copyC, returned>>
 
@@ -121,6 +126,7 @@ Init ==
     /\ returned = {}
     /\ reported = {}
     /\ tornReturned = FALSE
+    /\ needless = FALSE
 
 \* Does word w carry sequence s? Without seq in the word (the ABA control)
 \* every comparison of the sequence passes.
@@ -140,16 +146,25 @@ Reserve(w) ==
           /\ wk' = [wk EXCEPT ![w] = k]
     /\ wi' = [wi EXCEPT ![w] = 0]
     /\ wpc' = [wpc EXCEPT ![w] = "claim"]
-    /\ UNCHANGED <<word, text, rvars, reported, tornReturned>>
+    /\ UNCHANGED <<word, text, rvars, reported, tornReturned, needless>>
 
-\* The previous occupant of the slot for sequence s may be replaced.
+\* The occupant of the slot for sequence s is finished and older: it may be
+\* replaced. Older, not exactly s - N: a refused claim leaves its slot with
+\* an earlier turn's record, and PREV_EXACT (the first design) then refuses
+\* every later turn of that slot for ever.
+\* @type: ({seq: Int, st: Str, span: Int}, Int) => Bool;
+FinishedOlder(cur, s) ==
+    \/ (cur.st \in {"Committed", "Discarded"} /\ (~SEQ_IN_WORD \/ cur.seq < s))
+    \/ cur.st = "Free"
+
 \* @type: ({seq: Int, st: Str, span: Int}, Int) => Bool;
 PrevDone(cur, s) ==
     \/ ~CHECK_PREV
-    \/ (cur.st \in {"Committed", "Discarded"} /\ SeqIs(cur, s - N))
-    \/ (cur.st = "Free" /\ s < N)
+    \/ (~PREV_EXACT /\ FinishedOlder(cur, s))
+    \/ (PREV_EXACT /\ cur.st \in {"Committed", "Discarded"} /\ SeqIs(cur, s - N))
+    \/ (PREV_EXACT /\ cur.st = "Free" /\ s < N)
 
-\* kernel_log_reserve, per slot: CAS (s-N, Committed|Discarded) -> (s, Reserved).
+\* kernel_log_claim: CAS (older, Committed|Discarded) -> (s, Reserved).
 Claim(w) ==
     LET s == wseq[w] + wi[w]
         sl == s % N
@@ -163,7 +178,7 @@ Claim(w) ==
                    /\ wi' = [wi EXCEPT ![w] = 0]
               ELSE /\ wpc' = [wpc EXCEPT ![w] = "claim"]
                    /\ wi' = [wi EXCEPT ![w] = wi[w] + 1]
-        /\ UNCHANGED <<head, text, wseq, wk, rvars, reported, tornReturned>>
+        /\ UNCHANGED <<head, text, wseq, wk, rvars, reported, tornReturned, needless>>
 
 \* The same CAS failing: the record is Refused. Its sequences are reported
 \* lost, the slots already claimed (owned by this writer alone) Discarded,
@@ -180,6 +195,7 @@ Refuse(w) ==
         /\ reported' = IF REPORT_REFUSAL
                          THEN reported \cup Run(wseq[w], wk[w])
                          ELSE reported
+        /\ needless' = (needless \/ FinishedOlder(word[s % N], s))
         /\ wpc' = [wpc EXCEPT ![w] = "idle"]
         /\ UNCHANGED <<head, text, wseq, wk, wi, rvars, tornReturned>>
 
@@ -193,7 +209,7 @@ Write(w) ==
                    /\ wi' = [wi EXCEPT ![w] = wk[w] - 1]
               ELSE /\ wpc' = [wpc EXCEPT ![w] = "write"]
                    /\ wi' = [wi EXCEPT ![w] = wi[w] + 1]
-        /\ UNCHANGED <<head, word, wseq, wk, rvars, reported, tornReturned>>
+        /\ UNCHANGED <<head, word, wseq, wk, rvars, reported, tornReturned, needless>>
 
 \* kernel_log_commit: release CAS (s, Reserved) -> (s, Committed), the
 \* continuation first, the first slot last.
@@ -208,7 +224,7 @@ Commit(w) ==
                    /\ wi' = wi
               ELSE /\ wpc' = [wpc EXCEPT ![w] = "commit"]
                    /\ wi' = [wi EXCEPT ![w] = wi[w] - 1]
-        /\ UNCHANGED <<head, text, wseq, wk, rvars, reported, tornReturned>>
+        /\ UNCHANGED <<head, text, wseq, wk, rvars, reported, tornReturned, needless>>
 
 \* The commit CAS failing: someone took the slot. Only an unfixed variant
 \* gets here; the record is gone, and the reader reports its sequence.
@@ -218,7 +234,7 @@ CommitLost(w) ==
     IN  /\ wpc[w] = "commit"
         /\ ~(word[sl].st = "Reserved" /\ SeqIs(word[sl], s))
         /\ wpc' = [wpc EXCEPT ![w] = "idle"]
-        /\ UNCHANGED <<head, word, text, wseq, wk, wi, rvars, reported, tornReturned>>
+        /\ UNCHANGED <<head, word, text, wseq, wk, wi, rvars, reported, tornReturned, needless>>
 
 ----------------------------------------------------------------------------
 (* The reader *)
@@ -255,13 +271,13 @@ ReadHead ==
                         THEN Skip(rnext, 1, FALSE)   \* the refusing writer reported it
                         ELSE Skip(rnext, 1, TRUE)    \* in flight, overwritten, or a stray continuation
                    /\ UNCHANGED rspan
-        /\ UNCHANGED <<head, word, text, wvars, copyH, copyC, returned, tornReturned>>
+        /\ UNCHANGED <<head, word, text, wvars, copyH, copyC, returned, tornReturned, needless>>
 
 HeadCopy ==
     /\ rpc = "headcopy"
     /\ copyH' = text[rnext % N]
     /\ rpc' = "headcheck"
-    /\ UNCHANGED <<head, word, text, wvars, rnext, rspan, copyC, returned, reported, tornReturned>>
+    /\ UNCHANGED <<head, word, text, wvars, rnext, rspan, copyC, returned, reported, tornReturned, needless>>
 
 \* Re-load the first slot's word.
 HeadCheck ==
@@ -275,7 +291,7 @@ HeadCheck ==
                /\ Skip(rnext, 1, FALSE)
           ELSE /\ rpc' = "contcopy"
                /\ UNCHANGED <<rnext, reported, returned, tornReturned>>
-    /\ UNCHANGED <<head, word, text, wvars, rspan, copyH, copyC>>
+    /\ UNCHANGED <<head, word, text, wvars, rspan, copyH, copyC, needless>>
 
 \* Acquire-load the continuation's word and copy its text.
 ContCopy ==
@@ -286,7 +302,7 @@ ContCopy ==
                /\ UNCHANGED <<rnext, reported>>
           ELSE /\ Skip(rnext, 2, TRUE)
                /\ UNCHANGED copyC
-    /\ UNCHANGED <<head, word, text, wvars, rspan, copyH, returned, tornReturned>>
+    /\ UNCHANGED <<head, word, text, wvars, rspan, copyH, returned, tornReturned, needless>>
 
 \* Re-load the continuation's word.
 ContCheck ==
@@ -297,7 +313,7 @@ ContCheck ==
                /\ Skip(rnext, 2, FALSE)
           ELSE /\ Skip(rnext, 2, TRUE)
                /\ UNCHANGED <<returned, tornReturned>>
-    /\ UNCHANGED <<head, word, text, wvars, rspan, copyH, copyC>>
+    /\ UNCHANGED <<head, word, text, wvars, rspan, copyH, copyC, needless>>
 
 Done ==
     /\ head = MAXSEQ
@@ -325,6 +341,7 @@ TypeOK ==
     /\ rpc \in {"idle", "headcopy", "headcheck", "contcopy", "contcheck"}
     /\ returned \subseteq Seqs
     /\ reported \subseteq 0 .. MAXSEQ
+    /\ needless \in BOOLEAN
 
 \* No copy the reader returns holds text of another record.
 NoTornRead == ~tornReturned
@@ -339,25 +356,33 @@ Held(w) ==
     ELSE IF wpc[w] = "commit" THEN {(wseq[w] + j) % N : j \in Idx(wi[w] + 1)}
     ELSE {}
 
+\* A claim is refused only for a writer still holding the slot or a newer
+\* record in it, never for a finished older one: otherwise one refusal
+\* loses that slot's every later turn, reported but needless.
+NoNeedlessRefusal == ~needless
+
 \* No slot is held by two writers at once.
 NoDoubleOwner ==
     \A v, w \in Writers : v # w => Held(v) \cap Held(w) = {}
 
-Safety == TypeOK /\ NoTornRead /\ NoSilentLoss /\ NoDoubleOwner
+Safety == TypeOK /\ NoTornRead /\ NoSilentLoss /\ NoDoubleOwner /\ NoNeedlessRefusal
 
 ----------------------------------------------------------------------------
 (* Constant initializers for Apalache. *)
 
-CInitBase(nw, n, seq, trust, prev, cont, report) ==
+CInitBase(nw, n, seq, trust, prev, cont, report, exact) ==
     /\ NW = nw /\ N = n /\ SEQ_IN_WORD = seq /\ TRUST_RESERVED = trust
     /\ CHECK_PREV = prev /\ CONT_SEQ = cont /\ REPORT_REFUSAL = report
+    /\ PREV_EXACT = exact
 
-CInitFixed == CInitBase(3, 3, TRUE, FALSE, TRUE, TRUE, TRUE)
-CInitFixed4 == CInitBase(2, 4, TRUE, FALSE, TRUE, TRUE, TRUE)
-CInitAba == CInitBase(2, 3, FALSE, FALSE, TRUE, TRUE, TRUE)
-CInitTrustReserved == CInitBase(2, 3, TRUE, TRUE, TRUE, TRUE, TRUE)
-CInitNoPrev == CInitBase(2, 3, TRUE, FALSE, FALSE, TRUE, TRUE)
-CInitContNoSeq == CInitBase(2, 3, TRUE, FALSE, TRUE, FALSE, TRUE)
-CInitSilentRefuse == CInitBase(2, 3, TRUE, FALSE, TRUE, TRUE, FALSE)
+CInitFixed == CInitBase(3, 3, TRUE, FALSE, TRUE, TRUE, TRUE, FALSE)
+CInitFixed4 == CInitBase(2, 4, TRUE, FALSE, TRUE, TRUE, TRUE, FALSE)
+CInitFixed2 == CInitBase(2, 2, TRUE, FALSE, TRUE, TRUE, TRUE, FALSE)
+CInitAba == CInitBase(2, 3, FALSE, FALSE, TRUE, TRUE, TRUE, FALSE)
+CInitTrustReserved == CInitBase(2, 3, TRUE, TRUE, TRUE, TRUE, TRUE, FALSE)
+CInitNoPrev == CInitBase(2, 3, TRUE, FALSE, FALSE, TRUE, TRUE, FALSE)
+CInitContNoSeq == CInitBase(2, 3, TRUE, FALSE, TRUE, FALSE, TRUE, FALSE)
+CInitSilentRefuse == CInitBase(2, 3, TRUE, FALSE, TRUE, TRUE, FALSE, FALSE)
+CInitExactPrev == CInitBase(2, 2, TRUE, FALSE, TRUE, TRUE, TRUE, TRUE)
 
 =============================================================================

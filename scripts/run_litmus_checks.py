@@ -12,13 +12,16 @@ GitHub issue #645, part of `make modelcheck`. Two checks:
    the Takibi functions and globals it stands for. This disassembles the
    RPi5 kernel object (built with --function-sections, so each function is
    its own section and relocations name the globals), follows each global's
-   address through registers and into helpers it is passed to, and requires
+   address through registers and into the functions it calls, and requires
    every access of the thread's direction to use the litmus instruction's
-   class (STLR, LDAR, STR, LDR), plus the stated program orders.
+   class (STLR, LDAR, STR, LDR, or for a compare-swap CAS, CASA, CASL,
+   CASAL -- a load and a store at once, direction "rmw"), plus the stated
+   program orders.
 
 The tie is a lint over the disassembly, not a proof: it follows addresses
-through register moves and adds and one level of calls, which is the shape
-the compiler emits for the AtomicWord helpers today. An access it cannot
+through register moves and adds and two levels of calls (a function, the
+functions it calls, and the helpers they pass an address to), which is the
+shape the compiler emits for the AtomicWord helpers and the log ring today. An access it cannot
 follow (an address spilled to the stack, say) is not seen, so each row also
 requires at least one access to exist, and the controls below plant the
 defects the tie exists for.
@@ -46,9 +49,16 @@ def reg(name: str) -> str:
     return name
 
 
+CAS = re.compile(r"^cas(a?)(l?)[bh]?$")
+
+
 def mnemonic_class(mnemonic: str) -> str:
-    """STLR/LDAR keep their name; any plain access is STR or LDR."""
+    """STLR/LDAR keep their name; any plain access is STR or LDR; an LSE
+    compare-swap is CAS with its acquire (A) and release (L) suffixes."""
     m = mnemonic.lower()
+    cas = CAS.match(m)
+    if cas:
+        return "CAS" + ("A" if cas.group(1) else "") + ("L" if cas.group(2) else "")
     if m.startswith("stlr"):
         return "STLR"
     if m.startswith("ldar"):
@@ -98,6 +108,12 @@ def verdict_problems(expected: dict, got: dict) -> list:
 
 # -- litmus threads -----------------------------------------------------------
 
+def direction_of(cls: str) -> str:
+    if cls.startswith("CAS"):
+        return "rmw"
+    return "store" if cls in ("STR", "STLR") else "load"
+
+
 def litmus_accesses(text: str) -> dict:
     """{(thread, location): (direction, class)} from a two-column litmus test."""
     lines = text.splitlines()
@@ -123,14 +139,14 @@ def litmus_accesses(text: str) -> dict:
     for row in body[1:]:
         for index, cell in enumerate(row):
             cell = cell.strip()
-            match = re.match(r"(\w+)\s+\w+\s*,\s*\[(\w+)\]", cell)
+            # LDAR X0,[X1] or CASAL X4,X2,[X3]: the address is the last.
+            match = re.match(r"(\w+)\s+\w+\s*,\s*(?:\w+\s*,\s*)?\[(\w+)\]", cell)
             if not match:
                 continue
             thread = header[index]
             location = init.get(f"{thread[1:]}:{match.group(2)}")
             cls = mnemonic_class(match.group(1))
-            direction = "store" if cls in ("STR", "STLR") else "load"
-            accesses[(thread, location)] = (direction, cls)
+            accesses[(thread, location)] = (direction_of(cls), cls)
     return accesses
 
 
@@ -168,9 +184,15 @@ def operands_of(text: str) -> list:
     return [o.strip() for o in re.split(r",(?![^\[]*\])", text) if o.strip()]
 
 
+# How deep calls are followed: a function, what it calls, and what those
+# call (the log ring's retain_line -> commit -> kernel_log_cas).
+CALL_DEPTH = 2
+
+
 def accesses(functions: dict, name: str, arg0=None, depth=0) -> list:
-    """[(offset, direction, class, global)] the function makes to globals.
-    With arg0 set, its incoming x0 is that global's address (a helper)."""
+    """[(offset, direction, class, global)] the function makes to globals,
+    its callees' attributed to the call. With arg0 set, its incoming x0 is
+    that global's address (a helper)."""
     taint = {}
     if arg0:
         taint["x0"] = arg0
@@ -181,17 +203,21 @@ def accesses(functions: dict, name: str, arg0=None, depth=0) -> list:
             taint[reg(ops[0])] = symbol
             continue
         if mnemonic == "bl":
-            if symbol in functions and depth == 0:
-                for helper_access in [taint.get("x0")]:
-                    if helper_access:
-                        for _, d, c, g in accesses(functions, symbol,
-                                                   helper_access, depth + 1):
-                            found.append((offset, d, c, g))
+            if symbol in functions and depth < CALL_DEPTH:
+                for _, d, c, g in accesses(functions, symbol,
+                                           taint.get("x0"), depth + 1):
+                    found.append((offset, d, c, g))
             for r in CALL_CLOBBERED:
                 taint.pop(r, None)
             continue
         cls = mnemonic_class(mnemonic)
         memory = [o for o in ops if o.startswith("[")]
+        if memory and cls.startswith("CAS"):
+            base = reg(memory[0].strip("[]!").split(",")[0])
+            if base in taint:
+                found.append((offset, "rmw", cls, taint[base]))
+            taint.pop(reg(ops[0]), None)
+            continue
         if memory and cls in ("STR", "STLR", "LDR", "LDAR"):
             base = reg(memory[0].strip("[]!").split(",")[0])
             if cls in ("LDR",) and symbol:
@@ -260,17 +286,43 @@ def emitted_problems(functions: dict, litmus: dict, rows: list) -> tuple:
                     if cls != want:
                         found.append(f"{test} {thread} {location}: {function}+{offset:#x} "
                                      f"{direction}s {g} with {cls}, the litmus test says {want}")
-        elif kind == "order":
+        elif kind in ("order", "order-first", "order-last"):
+            # order: every access to A before every access to B.
+            # order-first: the first access to A before every access to B
+            #   (an acquire load that the copy after it depends on).
+            # order-last: every access to A before the last access to B
+            #   (a re-check after the copy).
+            # Accesses of every direction the thread's litmus code makes.
             function, first, second = words[3], words[4], words[5]
-            directions = {loc: d for (t, loc), (d, _) in threads.items() if t == thread}
-            direction = next(iter(directions.values()), "load")
-            seen = [a for a in accesses(functions, function) if a[1] == direction]
+            directions = {d for (t, _), (d, _) in threads.items() if t == thread}
+            seen = [a for a in accesses(functions, function) if a[1] in directions]
             a_offsets = [a[0] for a in seen if a[3] == first]
             b_offsets = [a[0] for a in seen if a[3] == second]
             checked += 1
-            if not a_offsets or not b_offsets or max(a_offsets) >= min(b_offsets):
-                found.append(f"{test} {thread}: in {function}, every {direction} of "
-                             f"{first} must precede every {direction} of {second}")
+            if kind == "order":
+                ok = a_offsets and b_offsets and max(a_offsets) < min(b_offsets)
+                claim = f"every access of {first} must precede every access of {second}"
+            elif kind == "order-first":
+                ok = a_offsets and b_offsets and min(a_offsets) < min(b_offsets)
+                claim = f"an access of {first} must precede every access of {second}"
+            else:
+                ok = a_offsets and b_offsets and max(a_offsets) < max(b_offsets)
+                claim = f"every access of {first} must precede an access of {second}"
+            if not ok:
+                found.append(f"{test} {thread}: in {function}, {claim}")
+        elif kind == "callorder":
+            # Program order across functions: every call to A comes before
+            # every call to B in the caller (text written, then committed).
+            caller, callee_a, callee_b = words[3], words[4], words[5]
+            calls = [(o, s) for o, m, _, s in functions.get(caller, []) if m == "bl"]
+            a_offsets = [o for o, s in calls if s == callee_a]
+            b_offsets = [o for o, s in calls if s == callee_b]
+            checked += 1
+            if caller not in functions:
+                found.append(f"{test} {thread}: {caller} is not in the kernel object")
+            elif not a_offsets or not b_offsets or max(a_offsets) >= min(b_offsets):
+                found.append(f"{test} {thread}: in {caller}, every call to {callee_a} "
+                             f"must precede every call to {callee_b}")
         elif kind == "pending":
             if threads is None or len(words) < 4:
                 found.append(f"{' '.join(words)}: a pending row names a fixed test and why")
@@ -278,7 +330,8 @@ def emitted_problems(functions: dict, litmus: dict, rows: list) -> tuple:
             found.append(f"unknown row kind {kind}")
     # GitHub issue #613 slice 2: every fixed test is tied, or says why not
     # yet. A test with neither would pass herd7 and silently bind nothing.
-    tied = {w[1] for w in rows if w[0] in ("access", "order")}
+    tied = {w[1] for w in rows if w[0] in ("access", "order", "order-first",
+                                          "order-last", "callorder")}
     pending = {w[1] for w in rows if w[0] == "pending"}
     for test in sorted(litmus):
         if test not in tied and test not in pending:
@@ -303,19 +356,36 @@ def controls(functions: dict, litmus: dict, rows: list) -> list:
         "publish helper emits a plain STR": (weaken("kernel_log_publish", "stlr", "str"), litmus),
         "observe helper emits a plain LDR": (weaken("kernel_log_observe", "ldar", "ldr"), litmus),
     }
+    # GitHub issue #613 slice 4: the ring's every compare-swap is one helper.
+    plants["the ring's compare-swap is CAS, not CASAL"] = (
+        weaken("kernel_log_cas", "casal", "cas"), litmus)
     weak = {name: dict(threads) for name, threads in litmus.items()}
-    weak["LogPublish"][("P0", "length")] = ("store", "STR")
+    weak["LogRingCommit"][("P0", "text")] = ("store", "STR")
     plants["litmus test claims a plain store"] = (functions, weak)
-    # Mirror the function's offsets, so its first access becomes its last.
-    plants["record begin publishes the count last"] = (
-        {k: ([(len(v) * 4 - o, m, t, s) for o, m, t, s in v] if k == "kernel_log_start_line" else v)
-         for k, v in functions.items()}, litmus)
+
+    # Mirror a function's offsets, so its first access becomes its last.
+    def mirrored(name: str) -> dict:
+        return {k: ([(len(v) * 4 - o, m, t, s) for o, m, t, s in v] if k == name else v)
+                for k, v in functions.items()}
+
+    plants["the line is committed before its text is written"] = (
+        mirrored("kernel_log_retain_line"), litmus)
+    # Cut the reader off after its last text copy: no re-check follows it.
+    reader = functions.get("kernel_log_snapshot_record", [])
+    copies = [o for o, m, _, sym in reader
+              if m == "bl" and sym == "kernel_log_copy_slot_text"]
+    if copies:
+        plants["the reader keeps a copy without re-checking"] = (
+            {**functions, "kernel_log_snapshot_record":
+             [i for i in reader if i[0] <= max(copies)]}, litmus)
+    else:
+        missed.append("kernel_log_snapshot_record calls no kernel_log_copy_slot_text")
     for name, (funcs, lit) in plants.items():
         if not emitted_problems(funcs, lit, rows)[0]:
             missed.append(name)
-    # A fixed test with its pending row removed and no access rows.
-    untied = [w for w in rows if w[0] != "pending"]
-    if any(w[0] == "pending" for w in rows) and not emitted_problems(functions, litmus, untied)[0]:
+    # A fixed test whose rows are all removed, with no pending row instead.
+    untied = [w for w in rows if w[1] != "LogRingCommit"]
+    if not emitted_problems(functions, litmus, untied)[0]:
         missed.append("a fixed test with neither access rows nor a pending row")
     return missed
 
@@ -352,7 +422,7 @@ def main() -> int:
     print(f"PASS litmus-emitted: {checked} access(es) and orders in {kernel_object} "
           f"match {len(litmus) - len(pending)} fixed litmus test(s); "
           f"{len(pending)} pending until their code exists ({', '.join(pending) or 'none'}); "
-          f"5 planted defects reported")
+          f"7 planted defects reported")
     return 0
 
 

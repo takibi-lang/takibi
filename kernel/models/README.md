@@ -317,68 +317,37 @@ rewrite (`EXEC_WRITES_UNDER_LOCK`) observed: the record carries no image
 generation. The teardown is not observed either, since it is not a change of
 process state, pool membership or core.
 
-## LogReader.tla -- the kernel log read on one CPU while core 0 appends (#612)
-
-One writer, core 0, appends records to a ring of two slots, and publishes
-the count of records it has begun. A reader on another CPU, syslog(2) on a
-peer, takes no lock: it loads the count, then the record's slot length,
-copies that many bytes, and loads the count again. A record whose slot was
-reused in between is dropped and counted lost.
-
-The model is sequentially consistent. That the kernel's stores and loads
-keep this order on ARMv8 is argued at the top of `kernel/printk/log.tkb`:
-the count is published first, every later store to a slot is a release, and
-every reader load is an acquire.
-
-Two variants:
-
-- `SECOND_CHECK = TRUE` is the kernel, and `NoTornRead` holds.
-- `SECOND_CHECK = FALSE` skips the second load of the count. TLC reports
-  `NoTornRead` in thirteen steps: the reader copies a record while the
-  writer wraps round and overwrites it.
-
-The first version had the reader copy whole slots, without the length. TLC
-found the record just begun still holding the bytes of the record it
-replaces. They were copied as the new record, and since nothing had been
-reused, the check passed them.
-
-| Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
-| --- | --- | --- | --- | --- |
-| `WriterStart` | `kernel_log_start_line` | the count is published, then the slot's length reset and its stamp set | the tick and the core column -- irrelevant to `NoTornRead`: they are published the same way as the length and read the same way | `c18fa6bf1368` |
-| `WriterByte` | `kernel_log_capture_retained_byte` | one byte's word, then the length that admits it | the truncated mark -- irrelevant to `NoTornRead`: it travels in the length word itself; console locking -- irrelevant to `NoTornRead`: only the writer takes it and the reader still observes the separate release stores | `7257f536df64` |
-| `ReaderBegin`, `ReaderLength`, `ReaderByte`, `ReaderCopied`, `ReaderCheck`, `ReaderAgain` | `kernel_log_snapshot_build`, `kernel_log_snapshot_record` | the count, the stamp and the length, the byte copies, the second count, and dropping a reused record | the snapshot's headers and timestamp formatting -- irrelevant to `NoTornRead`: they are derived from the fields copied, not further reads of the ring | `0fbed2bd1511` |
-
-LogReader.tla models today's single-writer ring and is replaced by
-LogRing.tla once #613 slice 4 moves the log onto the new ring. The replay of
-the log protocol from the trace window (#656) is retargeted to LogRing.tla,
-whose serialization point is each slot word's CAS; it is not done for
-LogReader.tla.
-
-## LogRing.tla -- the multi-writer kernel log ring, before its code (#613)
+## LogRing.tla -- the multi-writer kernel log ring (#613)
 
 The design of docs/LOG_RING_DESIGN.md (option B, records spanning several
-slots), checked before any ring code exists. N slots; sequence s lives in
-slot s % N, and each slot has one state word (seq, state, span). A writer
-reserves k slots with one CAS on `head`, then claims each slot by a CAS
-from its previous occupant (s-N, Committed or Discarded) to (s, Reserved),
-the first slot carrying span k and the others the continuation mark (span
-0). A previous occupant still Reserved -- a stalled writer -- makes the
-claim Refused: the writer reports every sequence of the record lost,
-discards the slots it already claimed, and holds no token. It writes the
-text, then commits each slot by a release CAS, continuations first. The one
-reader acquire-loads a slot word, copies, and re-loads it, for the first
-slot and then the continuation; anything else is reported lost by sequence.
-Overwrite is oldest-first by construction (a claim of s replaces s-N).
+slots), checked before its code and now implemented by
+`kernel/printk/log.tkb` (slice 4: core 0 is still the only writer, syslog
+on any CPU the reader). N slots; sequence s lives in slot s % N, and each
+slot has one state word (seq, state, span). A writer reserves k slots with
+one CAS on `head`, then claims each slot by a CAS from its previous
+occupant -- finished (Committed or Discarded) and older, or Free -- to
+(s, Reserved), the first slot carrying span k and the others the
+continuation mark (span 0). A previous occupant still Reserved -- a stalled
+writer -- or a newer one makes the claim Refused: the writer reports every
+sequence of the record lost, discards the slots it already claimed, and
+holds no token. It writes the text, then commits each slot by a release
+CAS, continuations first. The one reader acquire-loads a slot word, copies,
+and re-loads it, for the first slot and then the continuation; anything
+else is reported lost by sequence. Overwrite is oldest-first by
+construction (a claim of s replaces an older record).
 
-Bound: writers 2 or 3, N = 3 or 4 slots, records of k <= 2 slots, sequences
-below 6 (`MAXSEQ`). Variant `fixed` is 3 writers on 3 slots (2.4 million
-states, about a minute in one TLC worker); `fixed4` is 2 writers on 4 slots.
-The model is sequentially consistent; the AArch64 orderings it relies on
-are the LogRing litmus tests (`litmus/README.md`).
+Bound: writers 2 or 3, N = 2, 3 or 4 slots, records of k <= 2 slots,
+sequences below 6 (`MAXSEQ`). Variant `fixed` is 3 writers on 3 slots (3.2
+million states, about a minute in one TLC worker); `fixed4` is 2 writers on
+4 slots and `fixed2` 2 writers on 2. The model is sequentially consistent;
+the AArch64 orderings it relies on are the LogRing litmus tests
+(`litmus/README.md`), tied to the emitted instructions.
 
 Invariants: `NoTornRead` (no returned copy holds text of another record),
 `NoSilentLoss` (every sequence the reader has passed was returned or
-reported lost), `NoDoubleOwner` (no slot held by two writers' tokens).
+reported lost), `NoDoubleOwner` (no slot held by two writers' tokens),
+`NoNeedlessRefusal` (a claim is refused only for a writer still holding
+the slot or a newer record in it).
 
 Unfixed controls, each a constant, each failing in TLC:
 
@@ -395,9 +364,22 @@ Unfixed controls, each a constant, each failing in TLC:
   record's continuation as its own. `NoTornRead`, 20 steps.
 - `silentrefuse` (`REPORT_REFUSAL = FALSE`): a refused writer discards its
   claimed slots without reporting, and the reader skips Discarded slots as
-  already reported. `NoSilentLoss`, 7 steps.
+  already reported. `NoSilentLoss`, 10 steps.
+- `exactprev` (`PREV_EXACT = TRUE`): the first design, in which a claim of
+  s required exactly (s - N, finished), or Free only on the first turn. A
+  refused claim leaves its slot holding an older turn, so every later turn
+  of that slot is refused for ever. Found writing the code (slice 4): the
+  boot probe's held reservation poisoned slot 0. `NoNeedlessRefusal`, 4
+  steps: one writer reserves 0..1, another 2, and the claim of 2 finds slot
+  0 Free.
 
-There is no action table yet: no kernel function implements an action.
+| Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
+| --- | --- | --- | --- | --- |
+| `Reserve` | `kernel_log_reserve` | one compare-swap on the head takes k sequences, retried from the value a failed swap observed | the head's load before the swap -- irrelevant to `NoDoubleOwner`: only the swap decides, the load seeds its expected value | `5efa8c071af3` |
+| `Claim`, `Refuse` | `kernel_log_claim`, `kernel_log_previous_done`, `kernel_log_discard_slots` | the occupant's load, the compare-swap from it to (s, Reserved) when it is finished and older or Free, and on refusal the claimed slots Discarded and the record's sequences counted in `kernel_log_discarded` | the reserving core in the state word -- irrelevant to `NoTornRead`: the reader compares whole words, so a further field only narrows what matches | `a2f715f5503c` |
+| `Write` | `kernel_log_write` | each slot's text words, then the first slot's tick and metadata, all before the commit | packing the staged line's bytes into words -- irrelevant to `NoTornRead`: the model's text is one value per slot and each word store lands in its own slot | `0975ae562609` |
+| `Commit`, `CommitLost` | `kernel_log_commit`, `kernel_log_discard` | release compare-swap (s, Reserved) to (s, Committed), continuations first and the first slot last; a failed swap is counted in `kernel_log_commit_lost` | giving a whole token up (`kernel_log_discard`) -- modelled elsewhere: `Refuse` | `19f725975c81` |
+| `ReadHead`, `HeadCopy`, `HeadCheck`, `ContCopy`, `ContCheck` | `kernel_log_snapshot_build`, `kernel_log_snapshot_record`, `kernel_log_slot_view`, `kernel_log_still`, `kernel_log_copy_slot_text` | the first slot's acquire load and classification, the text copy, its re-load; each continuation's load, copy and re-load; Discarded skipped as reported, anything else counted lost | records of more than two slots -- irrelevant to `NoTornRead`: each further continuation is the same `ContCopy`, `ContCheck` pair on its own slot; the snapshot's headers and timestamp formatting -- irrelevant to `NoTornRead`: derived from fields read between the two loads | `a7b6319889f9` |
 Slice 4 adds the table when the ring code lands (`Reserve`, `Claim`,
 `Refuse` to the reservation function; `Write` to the token's text writes;
 `Commit` to the commit; the reader's actions to the syslog and DDB
@@ -568,7 +550,7 @@ views remain live; this is separate evidence from the bounded model.
 | `Ack`, `PenExit`, `ToggleIrq` | `world_stop_hold`, `kernel_world_stop_serve`, `kernel_ddb_stopped_root_publish`, `kernel_ddb_stopped_root_retire` | ack current request only after entering the pen; exit only when request changes; masked IRQs can delay ack | physical instruction timing -- irrelevant to `NoUnstoppedRead`: arbitrary scheduling allows every delay; stopped-root sequence parity -- irrelevant to `NoUnstoppedRead`: an unsettled root is refused, while the repeated real-stop fixture checks usable publication separately | `8b426deb0339` |
 | `Complete`, `Timeout` | `world_stop_begin_claimed` | all captured targets must ack the current generation; timeout yields no complete authority | spin count -- irrelevant to `NoUnstoppedRead`: timeout may happen at any waiting step | `4912d7384d61` |
 | `Release` | `world_stop_resume`, `machine_stop_release`, `machine_stop_partial_release` | end the local authority before clearing request and releasing claim, then restore saved initiator IRQs | terminal keep-forever -- irrelevant to `NoUnstoppedRead`: it never resumes or releases the gate | `367da389422d` |
-| `Read` | `kernel_process_ddb_copy`, `kernel_ddb_enter_stopped`, `process_record_inspect_stopped`, `scheduled_process_record_stopped`, `scheduled_process_slot_remove`, `address_space_inspect_stopped`, `fd_context_inspect_stopped`, `fd_block_inspect_stopped`, `kernel_fd_table_stopped_entry`, `process_image_inspect_stopped`, `scheduled_process_diagnostic_copy`, `crash_snapshot_shared_stopped`, `crash_console_dispatch_stopped` | inspection requires the borrowed machine authority; scoped pool loans cannot cross resume or slot destruction | pool metadata Busy/Stale refusals and which record fields and memory commands are inspected -- irrelevant to `NoUnstoppedRead`: every successful inspection is gated by the same machine authority, while metadata consistency is a separate trusted mint condition checked before inspection | `9f7cfec50753` |
+| `Read` | `kernel_process_ddb_copy`, `kernel_ddb_enter_stopped`, `process_record_inspect_stopped`, `scheduled_process_record_stopped`, `scheduled_process_slot_remove`, `address_space_inspect_stopped`, `fd_context_inspect_stopped`, `fd_block_inspect_stopped`, `kernel_fd_table_stopped_entry`, `process_image_inspect_stopped`, `scheduled_process_diagnostic_copy`, `crash_snapshot_shared_stopped`, `crash_console_dispatch_stopped` | inspection requires the borrowed machine authority; scoped pool loans cannot cross resume or slot destruction | pool metadata Busy/Stale refusals and which record fields and memory commands are inspected -- irrelevant to `NoUnstoppedRead`: every successful inspection is gated by the same machine authority, while metadata consistency is a separate trusted mint condition checked before inspection | `def2ffffab46` |
 
 ## Keeping models and the kernel in step
 
