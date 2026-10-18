@@ -38,6 +38,7 @@ import re
 import sys
 
 from pass_line import report_pass
+from source_scan import code_only, code_skeleton
 
 PLATFORM_ROOT = pathlib.Path("kernel/platform")
 
@@ -98,8 +99,9 @@ ALLOWED_RUNS = {
 
 
 def significant(line):
+    """`line` is one line of code_only text, so a comment line is blank."""
     text = line.strip()
-    if not text or text.startswith("//"):
+    if not text:
         return False
     return re.sub(r"[{}();,]", "", text).strip() != ""
 
@@ -113,24 +115,13 @@ def block_braces(line, parens):
     signature line, so the body compared was the signature alone -- and two
     platforms' `kernel_secondary_boot_cpu_on`, which call different PSCI
     conduits, read as identical. Braces inside parentheses are not blocks,
-    and neither is anything in a comment or a string.
+    and neither is anything in a comment or a string: `line` is one line of
+    source_scan.code_skeleton text, where both are blanked (#818).
     """
     delta = 0
     opened = False
-    quoted = False
-    index = 0
-    while index < len(line):
-        ch = line[index]
-        if quoted:
-            if ch == "\\":
-                index += 1
-            elif ch == '"':
-                quoted = False
-        elif ch == '"':
-            quoted = True
-        elif line.startswith("//", index):
-            break
-        elif ch == "(":
+    for ch in line:
+        if ch == "(":
             parens += 1
         elif ch == ")":
             parens = max(0, parens - 1)
@@ -139,7 +130,6 @@ def block_braces(line, parens):
             opened = True
         elif parens == 0 and ch == "}":
             delta -= 1
-        index += 1
     return delta, opened, parens
 
 
@@ -152,6 +142,7 @@ def allowed_function_spans(path):
     and would teach people to widen the exemption rather than read it.
     """
     lines = path.read_text().split("\n")
+    skeleton = code_skeleton("\n".join(lines)).split("\n")
     spans = []
     index = 0
     while index < len(lines):
@@ -164,7 +155,7 @@ def allowed_function_spans(path):
         opened = False
         parens = 0
         while index < len(lines):
-            delta, opens, parens = block_braces(lines[index], parens)
+            delta, opens, parens = block_braces(skeleton[index], parens)
             depth += delta
             opened = opened or opens
             index += 1
@@ -178,22 +169,22 @@ def duplicated_runs(left, right):
     """Identical inline runs between two same-named platform files."""
     a = left.read_text().split("\n")
     b = right.read_text().split("\n")
+    code = code_only("\n".join(a)).split("\n")
     declared = allowed_function_spans(left)
     found = []
     for i, _, n in difflib.SequenceMatcher(None, a, b, autojunk=False
                                            ).get_matching_blocks():
-        lines = [a[k] for k in range(i, i + n)]
-        count = sum(1 for line in lines if significant(line))
+        count = sum(1 for k in range(i, i + n) if significant(code[k]))
         if count < MIN_SIGNIFICANT_RUN:
             continue
         # Containment is judged on the SIGNIFICANT lines: a run routinely
         # picks up a trailing blank or brace past the closing line of the
         # function it lies in, and that must not make a declared body report
         # itself again.
-        body = [k for k in range(i, i + n) if significant(a[k])]
+        body = [k for k in range(i, i + n) if significant(code[k])]
         if any(all(start <= k < end for k in body) for start, end in declared):
             continue
-        opens = next(line.strip() for line in lines if significant(line))
+        opens = a[body[0]].strip()
         found.append((count, i + 1, opens))
     return found
 
@@ -201,6 +192,7 @@ def duplicated_runs(left, right):
 def functions(path):
     """name -> body text, for every top-level fn in one file."""
     lines = path.read_text().split("\n")
+    skeleton = code_skeleton("\n".join(lines)).split("\n")
     out = {}
     i = 0
     while i < len(lines):
@@ -214,7 +206,7 @@ def functions(path):
         parens = 0
         while i < len(lines):
             body.append(lines[i])
-            delta, opens, parens = block_braces(lines[i], parens)
+            delta, opens, parens = block_braces(skeleton[i], parens)
             depth += delta
             opened = opened or opens
             i += 1

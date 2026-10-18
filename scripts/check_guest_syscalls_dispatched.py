@@ -30,7 +30,7 @@ import sys
 
 from check_lock_rank_wrappers import functions
 from pass_line import report_pass
-from source_scan import per_file
+from source_scan import code_only, per_file
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 KERNEL = ROOT / "kernel"
@@ -53,12 +53,13 @@ def to_int(text: str) -> int:
 
 
 def strip_tkb_comments(text: str) -> str:
-    return re.sub(r"//[^\n]*", "", text)
+    """source_scan's lexer (GitHub issue #818): block comments too."""
+    return code_only(text)
 
 
 def strip_c_comments(text: str) -> str:
-    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
-    return re.sub(r"//[^\n]*", "", text)
+    """C shares Takibi's comment and literal syntax for this purpose."""
+    return code_only(text)
 
 
 def kernel_sources() -> dict:

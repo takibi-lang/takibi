@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 
 from pass_line import report_pass
+from source_scan import code_only
 
 ROOT = Path(__file__).resolve().parent.parent
 KERNEL = ROOT / "kernel"
@@ -51,11 +52,11 @@ FINISH = re.compile(r"\bdma_finish_owned_(?:rx|tx)\s*\(")
 def finishing_functions(text):
     """Names of the functions whose bodies call a finish builtin."""
     found = set()
+    text = code_only(text)  # GitHub issue #818: block comments too
     starts = [(m.start(), m.group(1)) for m in FUNCTION.finditer(text)]
     for index, (start, name) in enumerate(starts):
         end = starts[index + 1][0] if index + 1 < len(starts) else len(text)
-        body = "\n".join(line.split("//", 1)[0]
-                         for line in text[start:end].splitlines())
+        body = text[start:end]
         if FINISH.search(body):
             found.add(name)
     return found

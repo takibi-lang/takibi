@@ -21,6 +21,7 @@ import re
 import sys
 
 from pass_line import report_pass
+from source_scan import code_only
 
 KERNEL = pathlib.Path("kernel")
 TABLE = pathlib.Path("scripts/wall_clock_bounds.tsv")
@@ -35,11 +36,11 @@ def main(kernel: pathlib.Path = KERNEL, table: pathlib.Path = TABLE) -> int:
         if "build" in path.parts:
             continue
         enclosing = None
-        for line in path.read_text().splitlines():
+        for line in code_only(path.read_text()).splitlines():  # #818
             match = FN_RE.match(line)
             if match:
                 enclosing = match.group(1)
-            sites = len(SITE_RE.findall(line.split("//", 1)[0]))
+            sites = len(SITE_RE.findall(line))
             if sites:
                 found[(str(path.relative_to(kernel.parent)), enclosing)] += sites
     declared = {}

@@ -96,7 +96,8 @@ private inline fn scheduled_process_owned_view_drop(source: sink ProcessRecordOw
 
 def build(root, body):
     (root / "scripts").mkdir(parents=True)
-    for script in ("check_slot_proof_dropped_to_index.py", "pass_line.py"):
+    for script in ("check_slot_proof_dropped_to_index.py", "pass_line.py",
+                   "source_scan.py"):
         shutil.copy(REPO / "scripts" / script, root / "scripts" / script)
     (root / "kernel" / "kernel").mkdir(parents=True)
     (root / SOURCE).write_text(DECLARED + body, encoding="ascii")

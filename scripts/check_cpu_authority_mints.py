@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 from pass_line import report_pass
+from source_scan import code_only
 
 ROOT = Path(__file__).resolve().parent.parent
 KERNEL = ROOT / "kernel"
@@ -38,15 +39,15 @@ def references(text, name):
     just as a direct call does (#638). Text before the first function
     (globals) is scanned as "<top level>". The function's own definition is
     the one reference that is not a use."""
-    starts = [(m.start(), m.group(1)) for m in FUNCTION.finditer(text)]
+    code = code_only(text)  # GitHub issue #818: block comments too
+    starts = [(m.start(), m.group(1)) for m in FUNCTION.finditer(code)]
     spans = [(0, starts[0][0] if starts else len(text), "<top level>")]
     for index, (start, fn) in enumerate(starts):
         end = starts[index + 1][0] if index + 1 < len(starts) else len(text)
         spans.append((start, end, fn))
     found = []
     for start, end, fn in spans:
-        body = "\n".join(line.split("//", 1)[0]
-                         for line in text[start:end].splitlines())
+        body = code[start:end]
         if fn == name:
             body = FUNCTION.sub("", body, count=1)
         if re.search(r"\b" + name + r"\b", body):

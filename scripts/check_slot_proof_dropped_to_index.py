@@ -35,6 +35,7 @@ import re
 import sys
 
 from pass_line import report_pass
+from source_scan import code_only
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 KERNEL = ROOT / "kernel"
@@ -80,10 +81,6 @@ TRANSFER_RELEASES = {
 }
 
 
-def strip_comment(line: str) -> str:
-    return line.split("//", 1)[0]
-
-
 def bodies_of(lines):
     starts = [(index, match.group(1))
               for index, line in enumerate(lines)
@@ -95,11 +92,6 @@ def bodies_of(lines):
     return spans
 
 
-def code_of(body: str) -> str:
-    """Comments stripped per LINE, so prose naming a call is not a call."""
-    return "\n".join(strip_comment(line) for line in body.splitlines())
-
-
 def main() -> int:
     problems = []
     droppers = set()
@@ -109,12 +101,14 @@ def main() -> int:
         relative = str(path.relative_to(KERNEL))
         if relative == DEFINING:
             continue
-        lines = path.read_text(encoding="ascii").splitlines()
-        if not any(DROP in strip_comment(line) for line in lines):
+        # Comments blanked (GitHub issue #818), so prose naming a call is
+        # not a call; block comments included.
+        lines = code_only(path.read_text(encoding="ascii")).splitlines()
+        if not any(DROP in line for line in lines):
             continue
         spans = bodies_of(lines)
         for index, line in enumerate(lines):
-            if DROP not in strip_comment(line):
+            if DROP not in line:
                 continue
             holder = None
             for name, (start, end, body) in spans.items():
@@ -128,7 +122,7 @@ def main() -> int:
                 continue
             name, body = holder
             droppers.add(name)
-            code = code_of(body)
+            code = body
             if name in TRANSFER_RELEASES:
                 header = code.split("{", 1)[0]
                 expected = "source: sink " + TRANSFER_RELEASES[name] + "["

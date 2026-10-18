@@ -31,6 +31,7 @@ import re
 import sys
 
 from pass_line import report_pass
+from source_scan import code_only
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 KERNEL = ROOT / "kernel"
@@ -72,11 +73,6 @@ UNGUARDED_ALLOWED = {
 FUNCTION_RE = re.compile(r"^(?:private )?(?:inline |noinline )?fn ([A-Za-z_0-9]+)")
 
 
-def strip_comment(line: str) -> str:
-    """Drop a // comment, so prose naming a mutator is not a call."""
-    return line.split("//", 1)[0]
-
-
 def guard_problems(sources: dict[str, str]) -> tuple[list[str], int]:
     """Problems found, and how many guarded call sites were seen."""
     problems = []
@@ -84,7 +80,9 @@ def guard_problems(sources: dict[str, str]) -> tuple[list[str], int]:
     for rel, text in sorted(sources.items()):
         if rel in DEFINING:
             continue
-        lines = text.splitlines()
+        # Comments blanked first (GitHub issue #818): prose naming a mutator
+        # is not a call, and a guard taken only in a comment takes nothing.
+        lines = code_only(text).splitlines()
         # Function spans, so a call site can name the function it is in.
         starts = [(index, match.group(1))
                   for index, line in enumerate(lines)
@@ -94,8 +92,7 @@ def guard_problems(sources: dict[str, str]) -> tuple[list[str], int]:
             end = starts[position + 1][0] if position + 1 < len(starts) else len(lines)
             bodies[name] = (index, end, "\n".join(lines[index:end]))
 
-        for index, line in enumerate(lines):
-            code = strip_comment(line)
+        for index, code in enumerate(lines):
             for mutator in MUTATORS:
                 if f"{mutator}(" not in code:
                     continue
@@ -158,6 +155,17 @@ def main() -> int:
               "still accepted, so this check proves nothing")
         return 1
 
+    # GitHub issue #818: a guard taken only in a comment takes nothing. The
+    # function bodies were raw text, so this passed before.
+    commented = dict(sources)
+    commented[target] = commented[target].replace(
+        f"let guard = {TAKE};", f"// let guard = {TAKE};", 1)
+    control, _ = guard_problems(commented)
+    if not control:
+        print("FAIL ext2-mutation-guard: a helper whose guard is taken only "
+              "in a comment was still accepted")
+        return 1
+
     # The same for the parameter form: a helper whose borrowed guard is
     # replaced by a plain word must be caught.
     if HELD not in broken.get(target, ""):
@@ -173,11 +181,9 @@ def main() -> int:
         return 1
 
     def calls_a_mutator(text: str) -> bool:
-        # Per LINE, because strip_comment on a whole file truncates it at the
-        # first comment -- which made this read the boot fixture's header and
-        # conclude it no longer mutates.
-        for line in text.splitlines():
-            code = strip_comment(line)
+        # code_only keeps the file whole; an earlier whole-file split at
+        # the first `//` read only the boot fixture's header.
+        for code in code_only(text).splitlines():
             if any(f"{mutator}(" in code for mutator in MUTATORS):
                 return True
         return False

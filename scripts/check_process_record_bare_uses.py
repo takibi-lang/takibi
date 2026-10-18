@@ -13,6 +13,7 @@ import re
 import sys
 
 from pass_line import report_pass
+from source_scan import code_only
 
 PATH = pathlib.Path("kernel/kernel/process.tkb")
 BUDGET = 0
@@ -52,8 +53,8 @@ def problems(text: str) -> list[str]:
     bodies: dict[str, list[str]] = {}
     private = set()
     enclosing = "<file scope>"
-    for line in text.splitlines():
-        code = line.split("//", 1)[0]
+    text = code_only(text)  # GitHub issue #818: block comments too
+    for code in text.splitlines():
         match = FN_RE.match(code)
         if match:
             enclosing = match[2]
@@ -72,8 +73,7 @@ def problems(text: str) -> list[str]:
     if owners != OWNER_MINTS:
         result.append("scheduled ownership mints differ from the seven "
                       "reviewed allocation/state-transfer bodies")
-    if not re.search(r"^private linear view ProcessCurrent\[", "\n".join(
-            line.split("//", 1)[0] for line in text.splitlines()), re.M):
+    if not re.search(r"^private linear view ProcessCurrent\[", text, re.M):
         result.append("ProcessCurrent must remain a private view mint")
     for name in PRIVATE:
         if name not in private:

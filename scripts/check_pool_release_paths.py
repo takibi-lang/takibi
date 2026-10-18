@@ -34,6 +34,7 @@ import re
 import sys
 
 from pass_line import report_pass
+from source_scan import code_only
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 KERNEL = REPO_ROOT / "kernel"
@@ -50,7 +51,7 @@ NAMED = re.compile(r"&([a-z_0-9]+)")
 
 
 def functions(text):
-    code = "\n".join(line.split("//", 1)[0] for line in text.splitlines())
+    code = code_only(text)  # GitHub issue #818: block comments too
     starts = [match.start() for match in FUNCTION.finditer(code)]
     return [code[start:(starts[i + 1] if i + 1 < len(starts) else len(code))]
             for i, start in enumerate(starts)]

@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 
 from pass_line import report_pass
-from source_scan import per_file
+from source_scan import code_only, per_file
 
 ROOT = Path(__file__).resolve().parent.parent
 SOURCE = ROOT / "kernel/mm/page.tkb"
@@ -35,13 +35,12 @@ FN = re.compile(r"^(?:private\s+)?fn\s+(\w+)\s*\(")
 def callers(text):
     found = []
     current = None
-    for number, line in enumerate(text.splitlines(), 1):
+    for number, line in enumerate(code_only(text).splitlines(), 1):  # #818
         match = FN.match(line)
         if match:
             current = match.group(1)
             continue
-        code = line.split("//", 1)[0]
-        if re.search(r"\b%s\s*\(" % REBUILD, code):
+        if re.search(r"\b%s\s*\(" % REBUILD, line):
             found.append((number, current))
     return tuple(found)
 

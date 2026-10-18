@@ -52,7 +52,7 @@ def problems_in(text: str, relative: str) -> tuple[int, list[str]]:
                 f"`{raw} & 0x3FF`. Decide on the INTID: an SGI's IAR carries "
                 "its sender in bits [12:10] (#632)")
         for number, line in enumerate(text.splitlines(), 1):
-            code = line.split("//", 1)[0]
+            code = line
             compared = re.search(
                 rf"\b{re.escape(raw)}\b\s*[!=]=|[!=]=\s*\b{re.escape(raw)}\b",
                 code)

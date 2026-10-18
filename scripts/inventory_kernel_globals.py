@@ -11,16 +11,19 @@ import re
 import subprocess
 import sys
 
+from source_scan import code_only, code_skeleton
+
 ROOT = Path(__file__).resolve().parents[1]
-TOKEN = re.compile(r'//[^\n]*|/\*[\s\S]*?\*/|"(?:\\.|[^"\\])*"|[A-Za-z_][A-Za-z_0-9]*|[^\s]')
+TOKEN = re.compile(r'[A-Za-z_][A-Za-z_0-9]*|[^\s]')
 FIELDS = ['file', 'source_sha256', 'line', 'name', 'binding', 'visibility', 'type',
           'initializer', 'main_targets', 'access_sites', 'direct_store_sites',
           'address_sites', 'external_sites']
 
 
 def tokens(source):
-    return [(m.group(), m.start()) for m in TOKEN.finditer(source)
-            if not m.group().startswith(('//', '/*', '"'))]
+    """Words and punctuation outside comments and literals, with offsets:
+    source_scan blanks those (GitHub issue #818)."""
+    return [(m.group(), m.start()) for m in TOKEN.finditer(code_skeleton(source))]
 
 
 def source_index(path):
@@ -59,8 +62,7 @@ def source_index(path):
             if end == len(ts):
                 raise ValueError(f'{path}:{line}: unterminated declaration')
             boundary = ts[type_end if type_end is not None else end][1]
-            spelling = source[ts[name_i + 2][1]:boundary]
-            spelling = re.sub(r'//[^\n]*|/\*[\s\S]*?\*/', '', spelling)
+            spelling = code_only(source)[ts[name_i + 2][1]:boundary]
             initializer = '-' if type_end is None else ' '.join(
                 source[ts[type_end][1] + 1:ts[end][1]].split())
             declarations.append(dict(file=path, source_sha256=hashlib.sha256(source.encode()).hexdigest(),

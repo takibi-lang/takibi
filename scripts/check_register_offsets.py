@@ -38,7 +38,7 @@ import sys
 from pathlib import Path
 
 from pass_line import report_pass
-from source_scan import per_file
+from source_scan import code_only, per_file
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -164,10 +164,10 @@ ARRAY = re.compile(r"\[\s*\w+\s*;\s*(0x[0-9A-Fa-f]+|\d+)\s*\]")
 def io_structs(text: str) -> tuple:
     """(struct, ((field, offset, count or None), ...)) for each io struct."""
     found = []
-    for name, body in STRUCT.findall(text):
+    for name, body in STRUCT.findall(code_only(text)):  # #818
         fields = []
         for line in body.splitlines():
-            line = line.split("//")[0].strip()
+            line = line.strip()
             if line and not FIELD.match(line):
                 fields.append((line, -1, None))
         for field, ty, offset in FIELD.findall(body):

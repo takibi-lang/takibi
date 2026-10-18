@@ -21,6 +21,7 @@ import re
 import sys
 
 from pass_line import report_pass
+from source_scan import code_only
 
 ROOT = pathlib.Path("kernel")
 MINT = "address_space_root_mint"
@@ -46,12 +47,11 @@ def main() -> int:
             continue
         scanned += 1
         enclosing = None
-        for line in path.read_text().splitlines():
-            match = FN_RE.match(line)
+        for code in code_only(path.read_text()).splitlines():  # #818
+            match = FN_RE.match(code)
             if match:
                 enclosing = match.group(1)
                 continue
-            code = line.split("//", 1)[0]
             if MINT_RE.search(code):
                 found.add(enclosing)
     failures = []

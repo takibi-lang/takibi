@@ -37,6 +37,7 @@ import re
 import sys
 
 from pass_line import report_pass
+from source_scan import code_only
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 KERNEL = REPO / "kernel"
@@ -74,8 +75,11 @@ ALLOWED = {
 
 
 def significant_lines(path: pathlib.Path):
-    for number, raw in enumerate(path.read_text(encoding="ascii").splitlines(), 1):
-        yield number, raw, raw.split("//")[0]
+    text = path.read_text(encoding="ascii")
+    # Comments blanked by source_scan (GitHub issue #818), block ones too.
+    for number, (raw, code) in enumerate(
+            zip(text.splitlines(), code_only(text).splitlines()), 1):
+        yield number, raw, code
 
 
 def main() -> int:

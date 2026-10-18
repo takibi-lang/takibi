@@ -83,7 +83,7 @@ def case(name, plant, want, should_fail=True):
     with tempfile.TemporaryDirectory() as raw:
         root = pathlib.Path(raw) / "tree"
         (root / "scripts").mkdir(parents=True)
-        for script in ("check_platform_file_parity.py", "pass_line.py"):
+        for script in ("check_platform_file_parity.py", "pass_line.py", "source_scan.py"):
             shutil.copy(REPO / "scripts" / script, root / "scripts" / script)
         for platform in PLATFORMS:
             shutil.copytree(REPO / platform, root / platform)
