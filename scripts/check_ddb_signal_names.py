@@ -33,6 +33,7 @@ import re
 import sys
 
 from pass_line import report_pass
+from source_scan import code_only
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SYSCALL = ROOT / "kernel" / "kernel" / "syscall.tkb"
@@ -137,8 +138,10 @@ def runner_problems(text: str, numbers: set[int]) -> list[str]:
 
 def main() -> int:
     try:
-        numbers = accepted(SYSCALL.read_text(encoding="ascii"))
-        debugger = DEBUGGER.read_text(encoding="ascii")
+        # GitHub issue #818: the arms, constants and renderer fragments are
+        # code properties; a comment naming them must not satisfy the check.
+        numbers = accepted(code_only(SYSCALL.read_text(encoding="ascii")))
+        debugger = code_only(DEBUGGER.read_text(encoding="ascii"))
         standard, bits, words, renderer = vocabulary(debugger)
         constants = declared(debugger)
     except (OSError, ValueError) as error:

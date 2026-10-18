@@ -42,6 +42,7 @@ import re
 import sys
 
 from pass_line import report_pass
+from source_scan import code_only
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 KERNEL = REPO / "kernel"
@@ -60,9 +61,15 @@ def kernel_sources():
     return sorted(KERNEL.rglob("*.tkb"))
 
 
+def code(path: pathlib.Path) -> str:
+    """The file with comments blanked (GitHub issue #818): a summed call or
+    a positive report that survives only in a comment fails no lane."""
+    return code_only(path.read_text(encoding="ascii"))
+
+
 def gate_body(sources) -> tuple[str, pathlib.Path]:
     for path in sources:
-        match = GATE_BODY.search(path.read_text(encoding="ascii"))
+        match = GATE_BODY.search(code(path))
         if match:
             return match.group(1), path
     raise SystemExit(
@@ -74,7 +81,7 @@ def gate_body(sources) -> tuple[str, pathlib.Path]:
 def positive_line(sources) -> str | None:
     """The line the gate prints when every counter is zero."""
     for path in sources:
-        text = path.read_text(encoding="ascii")
+        text = code(path)
         match = re.search(
             r"if \(" + GATE + r"\(\) == 0\) \{\s*"
             r'kernel_boot_log\("([^"]*)\\n"\);',
@@ -90,7 +97,7 @@ def main() -> int:
 
     accessors = {}
     for path in sources:
-        for name in ACCESSOR.findall(path.read_text(encoding="ascii")):
+        for name in ACCESSOR.findall(code(path)):
             accessors[name] = path
     if not accessors:
         raise SystemExit(

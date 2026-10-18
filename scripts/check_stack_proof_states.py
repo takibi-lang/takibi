@@ -43,6 +43,7 @@ import sys
 
 from pass_line import report_pass
 from check_model_function_map import masked_sources
+from source_scan import code_only
 
 SOURCE = Path("kernel/kernel/process.tkb")
 
@@ -170,7 +171,9 @@ def functions(text: str) -> dict[str, tuple[str, str]]:
 
 def check(text: str) -> tuple[list[str], int]:
     failures = []
-    table = functions(text)
+    # GitHub issue #818: a signature, a constructor call or a
+    # stack_owner_cpu read that survives only in a comment is not code.
+    table = functions(code_only(text))
     for name, state in CONSUMERS.items():
         if name not in table:
             failures.append(f"{name} is missing")
@@ -214,7 +217,7 @@ def check_frames(files: dict[str, str]) -> tuple[list[str], int]:
             line = text.count("\n", 0, match.start()) + 1
             failures.append(f"{path}:{line}: default FrameRef initialization "
                             "bypasses the declared frame mints")
-        for name, (signature, body) in functions(text).items():
+        for name, (signature, body) in functions(code_only(text)).items():
             examined += 1
             for mint, callers in FRAME_MINT_CALLERS.items():
                 if name != mint and re.search(rf"\b{mint}\(", body) and \

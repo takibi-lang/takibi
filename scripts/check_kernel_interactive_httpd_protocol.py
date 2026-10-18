@@ -16,6 +16,7 @@ import re
 import sys
 
 from pass_line import report_pass
+from source_scan import code_only, py_code_only, sh_code_only
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -26,6 +27,18 @@ RUNNERS = (
 )
 
 
+def read(root: Path, relative: str) -> str:
+    """The file with its comments blanked (GitHub issue #818): every
+    fragment this check requires is a code property, and a comment naming
+    the step performs nothing. The comment rule follows the language."""
+    text = (root / relative).read_text(encoding="utf-8")
+    if relative.endswith(".tkb"):
+        return code_only(text)
+    if relative.endswith(".py"):
+        return py_code_only(text)
+    return sh_code_only(text)  # shell runners and busybox inittab
+
+
 def position(text: str, pattern: str, runner: str) -> int | None:
     match = re.search(pattern, text, re.MULTILINE)
     if match is None:
@@ -34,18 +47,16 @@ def position(text: str, pattern: str, runner: str) -> int | None:
     return match.start()
 
 
-def main() -> int:
+def main(root: Path = ROOT) -> int:
     failed = False
-    inittab = (ROOT / "kernel/tests/ext2/inittab").read_text(encoding="ascii")
+    inittab = read(root, "kernel/tests/ext2/inittab")
     # The integration image pins the service to CPU 1 through util-linux
     # taskset (GitHub issues #581 and #591); the interactive image does not.
     if ("::respawn:/bin/taskset -c 1 /bin/httpd -f -p 8080 -h /\n"
             not in inittab):
         print("ERROR\tinittab does not respawn the persistent HTTPd service")
         failed = True
-    shell_inittab = (ROOT / "kernel/tests/ext2/inittab.shell").read_text(
-        encoding="ascii"
-    )
+    shell_inittab = read(root, "kernel/tests/ext2/inittab.shell")
     if "::sysinit:" in shell_inittab:
         print("ERROR\tinteractive inittab runs the finite integration sysinit")
         failed = True
@@ -56,9 +67,7 @@ def main() -> int:
         if shell_inittab.count(service) != 1:
             print(f"ERROR\tinteractive inittab must respawn one {description}")
             failed = True
-    console = (ROOT / "scripts/run_kernel_shell_console.py").read_text(
-        encoding="ascii"
-    )
+    console = read(root, "scripts/run_kernel_shell_console.py")
     expected_listener = (
         'LISTENER_MARKERS = (b"persistent server: listener ready port=8080",)'
     )
@@ -69,11 +78,11 @@ def main() -> int:
         ("scripts/run_kernel_shell_qemu.sh", 'ext2-shell.img"'),
         ("scripts/run_kernel_shell_rpi5.sh", 'kernel-shell.elf"'),
     ):
-        runner_text = (ROOT / runner).read_text(encoding="ascii")
+        runner_text = read(root, runner)
         if expected not in runner_text:
             print(f"ERROR\t{runner} does not select the interactive rootfs")
             failed = True
-    syscall = (ROOT / "kernel/kernel/syscall.tkb").read_text(encoding="ascii")
+    syscall = read(root, "kernel/kernel/syscall.tkb")
     gave_up = re.search(
         r"KernelTcpAcceptStep::GaveUp\(next\) => \{(?P<body>.*?)"
         r"KernelTcpAcceptStep::Accepted",
@@ -88,19 +97,17 @@ def main() -> int:
         failed = True
     deadline = re.search(
         r"accept_deadline_ticks\s*=\s*counter_frequency\s*\*\s*(\d+)",
-        (ROOT / "kernel/net/tcp.tkb").read_text(encoding="ascii"),
+        read(root, "kernel/net/tcp.tkb"),
     )
-    qemu_runner = (ROOT / "scripts/run_kernel_qemutest.sh").read_text(
-        encoding="ascii")
+    qemu_runner = read(root, "scripts/run_kernel_qemutest.sh")
     idle = re.search(r"KERNEL_HTTPD_IDLE_SECONDS=(\d+)", qemu_runner)
-    peer = (ROOT / "scripts/kernel_net_test.py").read_text(encoding="ascii")
+    peer = read(root, "scripts/kernel_net_test.py")
     if (deadline is None or idle is None or
             int(idle.group(1)) <= int(deadline.group(1)) or
             "time.sleep(HTTPD_IDLE_SECONDS)" not in peer):
         print("ERROR\tQEMU does not request HTTP after the accept deadline")
         failed = True
-    uart_driver = (ROOT / "scripts/run_kernel_uart_driver.py").read_text(
-        encoding="ascii")
+    uart_driver = read(root, "scripts/run_kernel_uart_driver.py")
     guard_arg = '--httpd-peer-guard-file "$HTTPD_GUARD_FILE"'
     if (qemu_runner.count(guard_arg) != 2 or
             'HTTPD_GUARD_FILE="$ARTIFACT_DIR/httpd-peer-guard.until"' not in qemu_runner or
@@ -111,7 +118,7 @@ def main() -> int:
         print("ERROR\tQEMU HTTPd peer deadlines are not shared with the UART watchdog")
         failed = True
     for runner in RUNNERS:
-        text = (ROOT / runner).read_text(encoding="utf-8")
+        text = read(root, runner)
         listener_arg = position(
             text,
             r'--interactive-httpd-listener-file "\$INTERACTIVE_HTTPD_LISTENER"',

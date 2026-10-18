@@ -19,6 +19,9 @@ def main():
         'missing context marker': original.replace('!{changes_witness_ProcessCurrent}', '', 1),
         'commented context marker': original.replace('!{changes_witness_ProcessCurrent}',
                                                      '// !{changes_witness_ProcessCurrent}\n', 1),
+        # GitHub issue #818: a block comment is a comment too.
+        'block-commented context marker': original.replace('!{changes_witness_ProcessCurrent}',
+                                                           '/* !{changes_witness_ProcessCurrent} */', 1),
         'new inline entry mint': original + '\ninline fn unreviewed() { process_running_here(); }\n',
         'additional entry mint': original.replace('process_running_new(execution_state[execution_cpu_index()]',
                                                  'process_running_here(); process_running_new(execution_state[execution_cpu_index()]', 1),
@@ -54,6 +57,8 @@ fn unreviewed(owner: borrow ScheduledProcessOwner[process],
         controls[function] = changed
     assert not problems({**sources, path: original +
                          '\n// process_running_here(); execution_state[execution_cpu_index()].current_live = false;\n'}), 'prose is not code'
+    assert not problems({**sources, path: original +
+                         '\n/* process_running_here(); { */\n'}), 'block prose is not code'
     report_pass('process-running-mints controls',
                 f'production passes and {len(controls)} trusted-boundary regressions fail',
                 controls=len(controls))

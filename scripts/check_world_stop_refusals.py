@@ -35,6 +35,7 @@ import re
 import sys
 
 from pass_line import report_pass
+from source_scan import code_only
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 ARM = re.compile(r"(?:WorldStopResult|MachineStopResult)::(Busy|Partial)\b[^=]*=>")
@@ -58,10 +59,11 @@ def arms_in(text: str):
 def problems_in(text: str, relative: str) -> tuple[int, list[str]]:
     problems = []
     arms = 0
-    for kind, line, body in arms_in(text):
+    # GitHub issue #818: an arm or a fail-stop call inside any comment,
+    # block comments included, is not code.
+    for kind, line, body in arms_in(code_only(text)):
         arms += 1
-        code = "\n".join(part.split("//", 1)[0] for part in body.splitlines())
-        if FAIL_STOP.search(code):
+        if FAIL_STOP.search(body):
             problems.append(
                 f"{relative}:{line}: the world-stop {kind} arm "
                 "fail-stops. A refused stop is ordinary under load -- another "
@@ -81,7 +83,7 @@ def rank_problems(texts: dict) -> list:
     stop_rank = None
     others = []
     for relative, text in texts.items():
-        code = "\n".join(line.split("//", 1)[0] for line in text.splitlines())
+        code = code_only(text)
         for match in RANK.finditer(code):
             if match.group(2) == "world_stop":
                 stop_rank = int(match.group(1))
@@ -123,7 +125,11 @@ def rank_control() -> bool:
     bad_caller = {"a": good["a"] + "fn retry() { world_stop_machine_begin_holding_probe(1); }\n"}
     bad_rank = {"a": good["a"].replace("acquires_lock_40_pool", "acquires_lock_5_pool")}
     unranked = {"a": good["a"].replace("acquires_lock_10_world_stop", "unsafe")}
-    return all(len(rank_problems(t)) == 1 for t in (bad_caller, bad_rank, unranked))
+    # GitHub issue #818: a rank kept only in a block comment declares none.
+    commented = {"a": good["a"].replace("acquires_lock_10_world_stop",
+                                        "unsafe /* acquires_lock_10_world_stop */")}
+    return all(len(rank_problems(t)) == 1
+               for t in (bad_caller, bad_rank, unranked, commented))
 
 
 def control() -> bool:

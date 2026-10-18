@@ -88,6 +88,20 @@ def main() -> int:
         "scheduled_process_start_check mints a token without reading "
         "stack_owner_cpu")
 
+    # GitHub issue #818: the stack_owner_cpu read kept only in a comment.
+    failures += case(
+        "a start check whose stack owner read is only a comment",
+        replace_once(
+            source,
+            "    if (scheduled_process_record_locked(guard, process_slot_word(owner.pool_index)).stack_owner_cpu !=\n"
+            "            PROCESS_STACK_UNOWNED) {\n"
+            "        return ScheduledProcessStartCheck::Standing(state);",
+            "    // reads stack_owner_cpu\n"
+            "    if (false) {\n"
+            "        return ScheduledProcessStartCheck::Standing(state);"),
+        "scheduled_process_start_check mints a token without reading "
+        "stack_owner_cpu")
+
     # GitHub issue #661: the frame handle's mint set and its bare-usize seams.
     def frames(name: str, text: str, wanted: str) -> list[str]:
         CASES.note()

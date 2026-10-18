@@ -23,6 +23,7 @@ import re
 import sys
 
 from pass_line import report_pass
+from source_scan import code_only
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PROCESS = ROOT / "kernel" / "kernel" / "process.tkb"
@@ -62,8 +63,9 @@ def named(text: str, function: str) -> dict[int, str]:
 
 
 def main() -> int:
-    process = PROCESS.read_text(encoding="ascii")
-    debugger = DEBUGGER.read_text(encoding="ascii")
+    # GitHub issue #818: an encoding or a name in a comment is not code.
+    process = code_only(PROCESS.read_text(encoding="ascii"))
+    debugger = code_only(DEBUGGER.read_text(encoding="ascii"))
     problems = []
     checked = 0
     try:

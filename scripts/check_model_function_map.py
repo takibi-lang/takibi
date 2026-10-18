@@ -44,7 +44,7 @@ import re
 import sys
 
 from pass_line import report_pass
-from source_scan import FrozenMap, per_file
+from source_scan import FrozenMap, code_skeleton, compact, per_file
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 MODELS = ROOT / "kernel" / "models"
@@ -81,9 +81,10 @@ def defined_names(tla: str) -> set[str]:
 # missed on every one, so each control re-masked the whole tree.
 @per_file
 def masked_sources(sources: str) -> str:
-    """Preserve offsets while masking braces in comments and string literals."""
-    return re.sub(r'//[^\n]*|/\*[\s\S]*?\*/|"(?:\\.|[^"\\])*"',
-                  lambda match: re.sub(r'[^\n]', ' ', match[0]), sources)
+    """Preserve offsets while masking braces in comments and string literals
+    (source_scan's lexer since GitHub issue #818, so a character literal
+    such as '"' no longer opens a string)."""
+    return code_skeleton(sources)
 
 
 @per_file
@@ -126,24 +127,7 @@ def function_body(name: str, sources: str) -> str | None:
 
 def normalised(body: str) -> str:
     """The body with comments and whitespace outside string literals gone."""
-    out = []
-    i = 0
-    while i < len(body):
-        if body.startswith("//", i):
-            i = body.find("\n", i) % (len(body) + 1)
-        elif body.startswith("/*", i):
-            i = body.find("*/", i + 2) + 2 or len(body)
-        elif body[i] == '"':
-            end = i + 1
-            while end < len(body) and body[end] != '"':
-                end += 2 if body[end] == "\\" else 1
-            out.append(body[i:end + 1])
-            i = end + 1
-        else:
-            if not body[i].isspace():
-                out.append(body[i])
-            i += 1
-    return "".join(out)
+    return compact(body)
 
 
 def stamped_names(cells: list[str]) -> list[str]:

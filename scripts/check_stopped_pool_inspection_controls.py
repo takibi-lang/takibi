@@ -26,6 +26,14 @@ def main():
         ('kernel/mm/address_space.tkb', 'private fn address_space_inspect_stopped',
          'private fn address_space_inspect_stopped',
          'fn address_space_inspect_stopped', 'private mint'),
+        # GitHub issue #818: the borrow and the effect kept only in a block
+        # comment are neither.
+        ('kernel/mm/address_space.tkb', 'private fn address_space_inspect_stopped',
+         'stopped: borrow MachineStopped[&kernel_world_stop]',
+         '/* stopped: borrow MachineStopped[&kernel_world_stop] */ '
+         'stopped: MachineStopped[&kernel_world_stop]', 'must borrow'),
+        ('kernel/mm/address_space.tkb', 'private fn address_space_inspect_stopped',
+         'irq_masking_guard', 'unsafe /* irq_masking_guard */', 'IRQ exclusion'),
     ]
     for file, start, old, new, diagnostic in mutations:
         cases.note()
@@ -55,7 +63,7 @@ def main():
             output.write('\nfn unchecked() { region_pool_inspect_unproven__AddressSpaceBacking(); }\n')
         assert any('unreviewed inspection mint' in item for item in problems(root))
     report_pass('stopped-pool-inspection-controls',
-                'every resume/start marker, missing borrow/IRQ exclusion, public mint and unreviewed mint are refused',
+                'every resume/start marker, missing borrow/IRQ exclusion (also when kept only in a comment), public mint and unreviewed mint are refused',
                 cases=cases.ran)
     return 0
 

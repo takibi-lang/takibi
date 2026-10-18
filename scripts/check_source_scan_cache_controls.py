@@ -4,7 +4,8 @@ and source_scan.code_only (#815)."""
 
 from check_source_scan_cache import REVIEWED, problems, tracked_modules
 from pass_line import CaseCount, report_pass
-from source_scan import FrozenMap, code_only, per_file
+from source_scan import (FrozenMap, code_only, code_skeleton, compact,
+                         per_file, py_code_only, sh_code_only)
 
 
 def main() -> int:
@@ -12,7 +13,8 @@ def main() -> int:
     modules = tracked_modules()
     assert not problems(modules), problems(modules)
     target = "check_stopped_pool_inspection"
-    uncached = modules[target].replace("from source_scan import per_file\n", "") \
+    uncached = modules[target].replace("from source_scan import code_only, per_file\n",
+                                       "from source_scan import code_only\n") \
                               .replace("@per_file\n", "")
     assert uncached != modules[target]
     failing = {
@@ -87,6 +89,24 @@ def main() -> int:
         cases.note()
         got = code_only(source)
         assert got == want and len(got) == len(source), (source, got)
+    # GitHub issue #818: the other comment rules, each length-preserving
+    # but compact, whose output is a hash input.
+    for function, source, want in [
+        (code_skeleton, 'f("{") /* } */ g(\'(\');', 'f(   )         g(   );'),
+        (code_skeleton, "a(); // {\nb();", "a();     \nb();"),
+        (py_code_only, 'x = "#k"  # c\ny = 1\n', 'x = "#k"     \ny = 1\n'),
+        (sh_code_only, 'a "#q" $# ${#v} # c\n', 'a "#q" $# ${#v}    \n'),
+        (sh_code_only, "f() {  # args\n  it's\n}\n", None),
+        (sh_code_only, "cat <<'EOF'\n# kept\ndon't\nEOF\nx # c\n",
+         "cat <<'EOF'\n# kept\ndon't\nEOF\nx    \n"),
+    ]:
+        cases.note()
+        got = function(source)
+        assert len(got) == len(source), (function.__name__, source, got)
+        if want is not None:
+            assert got == want, (function.__name__, source, got)
+    cases.note()
+    assert compact('a ( 1 ) ; // c\n s( " x  y " ) /* d */') == 'a(1);s(" x  y ")'
     report_pass("source-scan-cache controls",
                 f"production passes and {cases.ran} uncached, bounded, stale or "
                 f"mutable shapes and comment blankings behave as specified", controls=cases.ran)

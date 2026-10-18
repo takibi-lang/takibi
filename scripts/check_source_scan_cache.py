@@ -46,6 +46,7 @@ REVIEWED = {
     "check_process_record_bare_uses": "scans one file (process.tkb) per call",
     "check_kernel_log_expectations": "controls call line_expectations on planted lines only",
     "check_liveness_proof_escapes": "function_qualifier controls import only its FN_RE",
+    "check_kernel_interactive_httpd_protocol": "reads thirteen fixed files, no tree walk",
 }
 
 

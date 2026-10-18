@@ -45,7 +45,8 @@ def case(name, plants, want, should_fail=True):
     with tempfile.TemporaryDirectory() as raw:
         root = pathlib.Path(raw) / "tree"
         (root / "scripts").mkdir(parents=True)
-        for script in ("check_ddb_signal_names.py", "pass_line.py"):
+        for script in ("check_ddb_signal_names.py", "pass_line.py",
+                       "source_scan.py"):
             shutil.copy(REPO / "scripts" / script, root / "scripts" / script)
         for relative in (SYSCALL, DEBUGGER, RUNNER):
             target = root / relative
@@ -153,6 +154,20 @@ def main() -> int:
              "private fn ddb_put_signal_set(bits: usize) !{unsafe} {"),
         "is missing or reshaped")
 
+    # GitHub issue #818: the renderer's subtraction only in a comment.
+    failures += case(
+        "the remainder subtraction only in a comment",
+        edit(DEBUGGER, "    let remainder: usize = set & ~DDB_STANDARD_SIGNAL_BITS;",
+             "    // set & ~DDB_STANDARD_SIGNAL_BITS\n"
+             "    let remainder: usize = set;"),
+        "no longer walks DDB_STANDARD_SIGNALS")
+    # And a signal's arm only in a comment is not an arm.
+    failures += case(
+        "a signal arm only in a comment",
+        edit(DEBUGGER, '        10 => { return "sigusr1" as *u8; }\n',
+             '        // 10 => { return "sigusr1" as *u8; }\n'),
+        "has no arm for it")
+
     failures += case(
         "a stale signal alternative in the runner",
         edit(RUNNER, 'SIGNALS = (r"(none|sig(hup|int|',
@@ -174,7 +189,8 @@ def main() -> int:
         "ddb-signal-names controls",
         "the repository passes, and a signal accepted without a word, a "
         "word beside the wrong number, a GDB constant wrong or missing, a word outside the walked signals, "
-        "kill widened past the view, a named bit printed twice, an unnamed "
+        "kill widened past the view, a named bit printed twice, an arm or "
+        "the remainder subtraction present only in a comment, an unnamed "
         "bit dropped, a moved accepted set and a reshaped renderer are each "
         "refused",
         cases=CASES.ran)

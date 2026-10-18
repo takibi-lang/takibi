@@ -10,7 +10,7 @@ import re
 import sys
 
 from pass_line import report_pass
-from source_scan import per_file
+from source_scan import code_only, per_file
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MINTS = {
@@ -25,7 +25,9 @@ MINT = re.compile(r'\bregion_pool_inspect_unproven__(\w+)\b')
 
 
 def functions(source):
-    code = '\n'.join(line.split('//', 1)[0] for line in source.splitlines())
+    # GitHub issue #818: block comments too, so a header fragment kept only
+    # in a comment does not pass for the borrow or the effect it names.
+    code = code_only(source)
     starts = list(FUNCTION.finditer(code))
     return {match.group(1): code[match.start():starts[i + 1].start()
             if i + 1 < len(starts) else len(code)]
@@ -37,7 +39,7 @@ def file_scan(relative, source):
     """(mint references, ((function, failure or None), ...)) of one file,
     cached by content (#808): a control plants one file in a copied tree, so
     the others are scanned once for the whole control set."""
-    references = len(MINT.findall('\n'.join(line.split('//', 1)[0] for line in source.splitlines())))
+    references = len(MINT.findall(code_only(source)))
     minted = []
     for name, body in functions(source).items():
         calls = MINT.findall(body)
@@ -90,7 +92,7 @@ def main():
         return 1
     report_pass('stopped-pool-inspection',
                 'five private mints borrow full machine authority; resume and participant changes invalidate every production inspection type',
-                references=sum(len(MINT.findall('\n'.join(line.split('//', 1)[0] for line in path.read_text(encoding='ascii').splitlines())))
+                references=sum(len(MINT.findall(code_only(path.read_text(encoding='ascii'))))
                                for path in (ROOT / 'kernel').rglob('*.tkb')))
     return 0
 

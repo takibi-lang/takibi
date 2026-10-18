@@ -43,7 +43,8 @@ def case(name, plant, want, should_fail=True):
     with tempfile.TemporaryDirectory() as raw:
         root = pathlib.Path(raw) / "tree"
         (root / "scripts").mkdir(parents=True)
-        for script in ("check_ddb_wait_reason_names.py", "pass_line.py"):
+        for script in ("check_ddb_wait_reason_names.py", "pass_line.py",
+                       "source_scan.py"):
             shutil.copy(REPO / "scripts" / script, root / "scripts" / script)
         for relative in (PROCESS, DEBUGGER):
             target = root / relative
@@ -128,6 +129,14 @@ def main() -> int:
                           "result.wait_code ="),
         "no ProcessWaitReason -> wait_reason encoding found")
 
+    # GitHub issue #818: an encoding left only in a comment encodes nothing.
+    failures += case(
+        "an encoding only in a comment",
+        edit(PROCESS,
+             "        ProcessWaitReason::UartTx => { result.wait_reason = 6; }",
+             "        // ProcessWaitReason::UartTx => { result.wait_reason = 6; }"),
+        "a word for a state that cannot occur")
+
     # And if the namer itself is gone or reshaped.
     failures += case(
         "the namer reshaped",
@@ -145,7 +154,8 @@ def main() -> int:
         "ddb-wait-reason-names controls",
         "the repository passes, and a reason encoded without a name, a "
         "name that no longer spells its case, a name for a code nothing "
-        "encodes, a moved encoding and a reshaped namer are each "
+        "encodes, an encoding only in a comment, a moved encoding and a "
+        "reshaped namer are each "
         "refused",
         cases=CASES.ran)
     return 0

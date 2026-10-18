@@ -12,7 +12,7 @@ import re
 import sys
 
 from pass_line import report_pass
-from source_scan import per_file
+from source_scan import code_skeleton, per_file
 
 ROOT = pathlib.Path("kernel")
 ALLOWED = {
@@ -51,8 +51,9 @@ ALLOWED = {
 
 @per_file
 def mask(source):
-    return re.sub(r'//[^\n]*|"(?:\\.|[^"\\])*"',
-                  lambda m: re.sub(r'[^\n]', ' ', m[0]), source)
+    """Comments (block comments too) and literals blanked, offsets kept:
+    source_scan's lexer since GitHub issue #818."""
+    return code_skeleton(source)
 
 
 def closers(code):

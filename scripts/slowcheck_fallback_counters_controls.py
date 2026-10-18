@@ -98,6 +98,14 @@ def main() -> int:
                              "        + 0;"),
         "tcp_absent_fallback_uses() is a dead-slot fallback counter")
 
+    # GitHub issue #818: a summed call kept only in a comment sums nothing.
+    failures += case(
+        "counter summed only in a comment",
+        lambda root: planted(root, GATE_FILE,
+                             "        + tcp_absent_fallback_uses();",
+                             "        + 0; // + tcp_absent_fallback_uses()"),
+        "tcp_absent_fallback_uses() is a dead-slot fallback counter")
+
     failures += case(
         "advisory report",
         lambda root: planted(root, GATE_FILE,
@@ -130,7 +138,8 @@ def main() -> int:
         return 1
     report_pass(
         "fallback-counters controls",
-        "the repository passes, a counter with no reader, an advisory "
+        "the repository passes, a counter with no reader or summed only "
+        "in a comment, an advisory "
         "report, an unexpected positive line, a missing gate, and a "
         "wholesale rename are each refused",
         cases=CASES.ran)
