@@ -106,13 +106,28 @@ jobs:
           bash scripts/run_lane.sh ci-opam bash -euo pipefail -c '
             # dune-project is the dependency source; Dune generates takibi.opam.
             opam install -y --deps-only --with-test .
-            # GitHub issue #645: herd7 for the litmus tests in make
-            # modelcheck (part of cicheck). A model-checking tool, not a
-            # compiler dependency, so it is not in dune-project; the pin must
-            # equal the one in .devcontainer/devcontainer.json
-            # (scripts/check_herdtools_pin.py).
-            opam install -y herdtools7.7.58
           '
+
+      # GitHub issue #645: herd7 for the litmus tests in make modelcheck
+      # (part of cicheck). Built once by scripts/build_herd7.sh, outside the
+      # repository and the job's opam switch, and cached. `opam install
+      # herdtools7` in this job failed -- opam builds in
+      # _opam/.opam-switch/build/ and herdtools7's dune walked up to takibi's
+      # dune-project -- and would rebuild it and its dependencies every run.
+      # Its own cache rather than a subtree of model-tools: that key hashes
+      # fetch_model_tools.sh, so a herd7 bump would refetch Apalache and the
+      # reverse. The key hashes the script, which holds the version pin;
+      # scripts/check_herdtools_pin.py checks that pin against the
+      # devcontainer's and keeps the build behind the cache-hit guard.
+      - id: herd7-cache
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/herd7
+          key: herd7-${{ hashFiles('scripts/build_herd7.sh') }}
+
+      - name: Build herd7 (cache miss only)
+        if: steps.herd7-cache.outputs.cache-hit != 'true'
+        run: bash scripts/run_lane.sh ci-herd7 bash scripts/build_herd7.sh /home/runner/herd7
 
       # One lane at a time. Every QEMU lane runs `-smp $TAKIBI_QEMU_SMP` (4 by
       # default since #719; set it to 2 here if the debug lane stalls again --
@@ -146,6 +161,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAKIBI_MODEL_TOOLS_DIR: /home/runner/model-tools
+          HERD7: /home/runner/herd7/bin/herd7
 
       # Printed, never gated. The unsafe-block and assembly counts are
       # supposed to be moving right now -- multicore work adds atomics -- so a

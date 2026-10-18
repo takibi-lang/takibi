@@ -2408,7 +2408,7 @@ allbuild:
 # and Apalache. Fetches the pinned tools on first use. A lane of allcheck
 # and cicheck.
 # GitHub issue #645: the kernel log's litmus tests under herd7 (from opam,
-# pinned in .devcontainer/devcontainer.json and ci.yml), and their tie to the
+# pinned in .devcontainer/devcontainer.json; CI's from scripts/build_herd7.sh), and their tie to the
 # instructions in the RPi5 kernel object.
 .PHONY: modelcheck litmuscheck
 modelcheck: build litmuscheck
@@ -2424,7 +2424,7 @@ LLVM_OBJDUMP ?= llvm-objdump-19
 litmuscheck: build
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) $(KERNEL_RPI5_MAIN_O)
 	@command -v $(HERD7) >/dev/null 2>&1 || { \
-		echo "FAIL litmus-herd7: $(HERD7) not on PATH; run eval \$$(opam env) (opam install herdtools7, pinned in .devcontainer/devcontainer.json)" >&2; exit 1; }
+		echo "FAIL litmus-herd7: $(HERD7) not on PATH; run eval \$$(opam env) (opam install herdtools7, pinned in .devcontainer/devcontainer.json) or set HERD7 (CI: scripts/build_herd7.sh)" >&2; exit 1; }
 	@python3 scripts/run_litmus_checks.py $(HERD7) $(LLVM_OBJDUMP) $(KERNEL_RPI5_MAIN_O)
 
 clean:

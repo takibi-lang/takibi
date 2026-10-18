@@ -149,6 +149,12 @@ Each CPU owns one ring with today's #612 protocol; a global sequence from
   (`~/.takibi-sessions/cache/model-tools`, `TAKIBI_MODEL_TOOLS_DIR`
   override), e.g. a local opam switch at that path or `dune build` +
   `make install PREFIX=`. Lanes call the fetch script, as they do for TLC.
+- As built (2026-10-18): the devcontainer installs herdtools7.7.58 with
+  opam into its switch; CI builds it with `scripts/build_herd7.sh` in a
+  throwaway OPAMROOT into `/home/runner/herd7`, cached under a key that
+  hashes the script, and passes `HERD7` to make. `opam install` in CI's
+  in-checkout `_opam` switch failed: herdtools7's dune took takibi's
+  dune-project as its root.
 - litmus7 emits C with pthreads for a Linux host. The RPi5 lane boots the
   Takibi kernel, not Linux, so running litmus7 output needs either the
   Takibi userland to run the generated static binary or a separate Linux

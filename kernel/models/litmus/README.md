@@ -3,9 +3,10 @@
 `make litmuscheck` (a prerequisite of `make modelcheck`, so in allcheck and
 CI's cicheck) runs herd7 over every test against expected.txt, then ties the
 fixed tests to the RPi5 kernel object through emitted_map.txt
-(scripts/run_litmus_checks.py). herd7 comes from opam: herdtools7, pinned in
-.devcontainer/devcontainer.json and .github/workflows/ci.yml, which
-scripts/check_herdtools_pin.py keeps equal. A pass is bounded evidence: the
+(scripts/run_litmus_checks.py). herd7 comes from opam in the devcontainer (herdtools7, pinned in
+.devcontainer/devcontainer.json); CI builds it once with
+scripts/build_herd7.sh, outside the checkout, and caches it.
+scripts/check_herdtools_pin.py keeps the two pins equal. A pass is bounded evidence: the
 AArch64 model says the two-thread shape is forbidden, and the lint says the
 named functions use those instructions; it does not prove the Takibi code
 has no other ordering dependency.
