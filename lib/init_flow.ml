@@ -93,7 +93,12 @@ let check
     ~(scratch : (string * Ast.type_expr) list)
     (finfo : Types.func_info) (fdef : Ast.func) =
   let bindings = finfo.Types.bindings in
-  let error loc msg = raise (Types.TypeError (loc, msg)) in
+  (* GitHub issue #763: every independent error is recorded, in traversal
+     order; a read that reports marks its offending leaves initialized
+     afterwards, so reads derived from it do not cascade. Recording never
+     changes a verdict: any recorded error rejects the function. *)
+  let errors = ref [] in
+  let error loc msg = errors := (loc, msg) :: !errors in
   let size_of t = !layout_size t in
   (* Unknown layout counts as padded: viewing it as bytes then needs a
      zero fill, which is the sound direction. *)
@@ -202,7 +207,7 @@ let check
       r = p.root && (is_prefix p.path l || is_prefix l p.path)
       && (bytes || not (is_pad l))) st in
     match Leaves.min_elt_opt bad with
-    | None -> ()
+    | None -> st
     | Some (_, l) ->
         let whole = path_to_string (root_display p) p.path in
         if is_pad l then
@@ -214,7 +219,8 @@ let check
           error loc (Printf.sprintf
             "'%s' is %s here, but '%s' is uninitialized on some path to \
              this point" whole (if bytes then "viewed as memory" else "read")
-            (path_to_string (root_display p) l))
+            (path_to_string (root_display p) l));
+        Leaves.diff st bad
   in
   (* `.len` of a slice or array place reads metadata, not the elements. *)
   let is_len_of (e : Ast.expr) = match e.desc with
@@ -245,8 +251,7 @@ let check
     match place e with
     | Some p ->
         let st = place_subexprs st e in
-        check_read st { p with inside = false } ~bytes:false e.loc;
-        st
+        check_read st { p with inside = false } ~bytes:false e.loc
     | None ->
     match e.desc with
     | Ast.Cast (_, { desc = Ast.AddrOf inner; _ }) | Ast.Cast (_, inner) ->
@@ -255,7 +260,7 @@ let check
         (match place inner with
          | Some p ->
              let st = place_subexprs st inner in
-             check_read st { p with inside = false } ~bytes:true e.loc; st
+             check_read st { p with inside = false } ~bytes:true e.loc
          | None -> expr st inner)
     | Ast.AddrOf inner ->
         (* A typed address escapes the fields; reinterpreting it is the
@@ -263,7 +268,7 @@ let check
         (match place inner with
          | Some p ->
              let st = place_subexprs st inner in
-             check_read st { p with inside = false } ~bytes:false e.loc; st
+             check_read st { p with inside = false } ~bytes:false e.loc
          | None -> expr st inner)
     | Ast.SliceOf (base, lo, hi) ->
         let st = expr st lo in
@@ -271,7 +276,7 @@ let check
         (match place base with
          | Some p ->
              let st = place_subexprs st base in
-             check_read st { p with inside = false } ~bytes:true e.loc; st
+             check_read st { p with inside = false } ~bytes:true e.loc
          | None -> expr st base)
     | Ast.Call ("zero_fill", [a]) -> fill_arg st a
     | Ast.Call ("assume_init", [a]) -> fill_arg st a
@@ -322,9 +327,8 @@ let check
                   reads the leaf. *)
                (match leaf_type p.root p.path with
                 | Some t when (match strip t with
-                    | Ast.TypeArray _ | Ast.TypeSlice _ -> true | _ -> false) -> ()
-                | _ -> check_read st { p with inside = false } ~bytes:false lhs.loc);
-               st
+                    | Ast.TypeArray _ | Ast.TypeSlice _ -> true | _ -> false) -> st
+                | _ -> check_read st { p with inside = false } ~bytes:false lhs.loc)
              end else assign st p rhs
          | None -> expr st lhs)
     | Ast.VariantCtor (_, _, x) | Ast.Bnot x | Ast.Deref x | Ast.FieldGet (x, _) ->
@@ -471,4 +475,8 @@ let check
     | Ast.StaticAssert _ -> (st, false)
   in
   let (st, dead) = stmts entry fdef.Ast.body in
-  if not dead then check_outs st fdef.Ast.def_loc
+  if not dead then check_outs st fdef.Ast.def_loc;
+  match List.rev !errors with
+  | [] -> ()
+  | [(loc, msg)] -> raise (Types.TypeError (loc, msg))
+  | errs -> raise (Types.MultiTypeError errs)

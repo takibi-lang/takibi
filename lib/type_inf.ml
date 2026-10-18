@@ -10729,8 +10729,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
    | [(loc, msg)] -> raise (Types.TypeError (loc, msg))
    | errors -> raise (Types.MultiTypeError errors));
   (* GitHub issue #203: definite initialization of field paths and of
-     scratch globals (see Init_flow). One error per function, every
-     function reported. *)
+     scratch globals (see Init_flow). Every independent error of every
+     function is reported (#763). *)
   let init_callees = Hashtbl.create 64 in
   List.iter (function
     | Ast.FuncDef f ->
@@ -10751,8 +10751,12 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                     | None -> None)
                   ~callee:(Hashtbl.find_opt init_callees)
                   ~scratch:init_scratch finfo fdef
-              with Types.TypeError (loc, msg) ->
-                collected_type_errors := (loc, msg) :: !collected_type_errors)
+              with
+              | Types.TypeError (loc, msg) ->
+                  collected_type_errors := (loc, msg) :: !collected_type_errors
+              | Types.MultiTypeError errs ->
+                  collected_type_errors :=
+                    List.rev_append errs !collected_type_errors)
          | None -> ())
     | _ -> ()) prog;
   (match List.rev !collected_type_errors with

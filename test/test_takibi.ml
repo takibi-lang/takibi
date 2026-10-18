@@ -24362,7 +24362,34 @@ let definite_init_tests =
   let padded = "struct Pad203 { a: u8; b: u64; }\n" in
   let flat = "struct Flat203 { a: u64; b: u64; }\n" in
   let t name f = Alcotest.test_case name `Quick f in
+  (* GitHub issue #763: the exact list of reported messages, in order;
+     each expected entry is a fragment of the message at that position. *)
+  let expect_errors frags src () =
+    let msgs = match infer src with
+      | _ -> []
+      | exception Types.TypeError (_, m) -> [m]
+      | exception Types.MultiTypeError es -> List.map snd es in
+    if List.length msgs <> List.length frags
+       || not (List.for_all2 contains_substring msgs frags)
+    then Alcotest.failf "expected errors [%s], got [%s]"
+        (String.concat " | " frags) (String.concat " | " msgs) in
   [
+    t "issue #763: two independent uninit reads in one function are both reported"
+      (expect_errors ["'x' is uninitialized"; "'y' is uninitialized"]
+         "fn f() -> u32 { let mut x: u32; let mut y: u32;
+            let a: u32 = x; let b: u32 = y; return a + b; }");
+    t "issue #763: a repeated read of the same bad leaf is reported once"
+      (expect_errors ["'v.b' is uninitialized"]
+         (padded ^ "fn f() -> u64 { let mut v: Pad203; v.a = 1;
+            let a: u64 = v.b; let mut w: Pad203 = v; return a + w.b + v.b; }"));
+    t "issue #763: a single error keeps its plain message"
+      (expect_errors ["'v.b' is read here, but 'v.b' is uninitialized on some path to this point"]
+         (padded ^ "fn f() -> u64 { let mut v: Pad203; v.a = 1; return v.b; }"));
+    t "issue #763: errors in two functions and in one function keep source order"
+      (expect_errors ["'p' is uninitialized"; "'x' is uninitialized"; "'y' is uninitialized"]
+         "fn g() -> u32 { let mut p: u32; return p; }
+          fn f(c: bool) -> u32 { let mut x: u32; let mut y: u32;
+            if (c) { return x; } return y; }");
     t "issue #203: every field written before a whole read is accepted"
       (expect_ok (padded ^ "fn f() -> u64 { let mut v: Pad203; v.a = 1; v.b = 2;
          let mut w: Pad203 = v; return w.b; }"));
