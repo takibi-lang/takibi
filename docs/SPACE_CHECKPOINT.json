@@ -1,9 +1,9 @@
 {
   "date": "2026-10-18",
-  "event": "milestone",
-  "decision": "measured",
-  "source_sha256": "470c0d7c151de6b79b5d50318fa35ab2dd9dde44799393b24edcf65850d2675d",
-  "workload": "#613 slice 5: every CPU writes the option-B log ring directly (per-CPU static 640-byte stages, peer rings and core-0 drain deleted, whole-line UART emission after commit, all-CPU log storm at boot). Measured with scripts/space_delta.py against origin/main 05a3ea7c: text 713764 -> 716028 B qemu, 766488 -> 768728 B rpi5; BSS 1485104 -> 1479232 B qemu, 1692736 -> 1684624 B rpi5; usable_ram_start unchanged. Rebased afterwards onto #775, #822 and #823, which add no storage (#822 deletes one CrashSnapshot of BSS); the measurement stands.",
+  "event": "incremental",
+  "decision": "reuse",
+  "source_sha256": "3b3fb2613a406e4e791c9fc5ef09d3ddefd204865562157d8a615bd8b16ba899",
+  "workload": "#825 on top of the previous record: only the EL0 /bin/affinity fixture changed (its two spinners are bounded by CLOCK_MONOTONIC time instead of a syscall count); no kernel source, data, BSS, pool or linker change, so the measurement stands. Previous: #613 slice 5: every CPU writes the option-B log ring directly (per-CPU static 640-byte stages, peer rings and core-0 drain deleted, whole-line UART emission after commit, all-CPU log storm at boot). Measured with scripts/space_delta.py against origin/main 05a3ea7c: text 713764 -> 716028 B qemu, 766488 -> 768728 B rpi5; BSS 1485104 -> 1479232 B qemu, 1692736 -> 1684624 B rpi5; usable_ram_start unchanged. Rebased afterwards onto #775, #822 and #823, which add no storage (#822 deletes one CrashSnapshot of BSS); the measurement stands.",
   "evidence": [
     "docs/LOG_RING_S5_SPACE_2026-10-18.md",
     "docs/LOG_RING_SPACE_2026-10-18.md",
