@@ -2,8 +2,8 @@
   "date": "2026-10-18",
   "event": "incremental",
   "decision": "reuse",
-  "source_sha256": "1e59e421926522c66b16bc789a640bc416526c6a55348660608b0c071c54f2d4",
-  "workload": "#638 slice: comment and static_assert message text only (ext2 mutation lock, both intc files, three boot-fixture asserts). No storage, allocation or code change; the previous measured review (#771) stands.",
+  "source_sha256": "295cf93560fa59d54b0045fa286d6d2087cf645d0f80aff05ae763b628a27ad8",
+  "workload": "#645 slice: Makefile litmuscheck target, devcontainer/CI herdtools7 install, host scripts and litmus tests. No kernel source, storage or code change; the previous measured review (#771) stands.",
   "evidence": [
     "docs/PAGE_RUN_SCAN_SPACE_2026-10-17.md",
     "docs/SLOT_POOLS_EXEC_SYSCALL_SPACE_2026-10-17.md",
@@ -81,6 +81,6 @@
     "docs/VIRTIO_NET_TX_2026-10-10.md",
     "docs/VIRTIO_NET_TX_SPACE_2026-10-10.json"
   ],
-  "assessment": "Reused. A static_assert message and comments emit no code or data; the #771 measurement (text +2912 B qemu / +2944 B rpi5, BSS +32 B) is the current evidence.",
+  "assessment": "Reused. No .tkb or linker input changed, so neither kernel image changes; the #771 measurement (text +2912 B qemu / +2944 B rpi5, BSS +32 B) is the current evidence.",
   "next_trigger": "A change to PageMeta, the free-list representation, or the page-run search; or the RECORDED page run allocator longest hold growing past 100 us on RPi5."
 }
