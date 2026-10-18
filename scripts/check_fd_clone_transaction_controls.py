@@ -47,6 +47,13 @@ def main() -> int:
                      "{ child_value, fd };"),
         "advance the prefix",
     )
+    # GitHub issue #815: the right fragment surviving only in a comment.
+    failures += case(
+        "success advance only in a comment",
+        replace_once(source, "{ child_value, fd + 1 };",
+                     "{ child_value, fd }; // { child_value, fd + 1 };"),
+        "advance the prefix",
+    )
     failures += case(
         "failure advances prefix",
         replace_once(source,

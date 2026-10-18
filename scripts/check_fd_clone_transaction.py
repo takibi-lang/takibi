@@ -12,6 +12,7 @@ from pathlib import Path
 import sys
 
 from pass_line import report_pass
+from source_scan import code_only
 
 
 SOURCE = Path("kernel/kernel/fd_table.tkb")
@@ -46,6 +47,9 @@ def function(text: str, name: str) -> str:
 
 def check(text: str) -> tuple[list[str], int]:
     failures = []
+    # Comments blanked first: a commented-out arm or a function named only in
+    # a comment must not satisfy a fragment (GitHub issue #815).
+    text = code_only(text)
     begin = compact(function(text, "unified_fd_clone_begin"))
     install = compact(function(text, "unified_fd_clone_install"))
     rollback = compact(function(text, "unified_fd_clone_rollback"))

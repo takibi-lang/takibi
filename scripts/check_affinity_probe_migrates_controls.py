@@ -49,7 +49,8 @@ fn syscall_peer_refused(number: usize) -> bool {
 
 def build(root, probe=None, watcher=None, syscall=None):
     (root / "scripts").mkdir(parents=True)
-    for script in ("check_affinity_probe_migrates.py", "pass_line.py"):
+    for script in ("check_affinity_probe_migrates.py", "pass_line.py",
+                   "source_scan.py"):
         shutil.copy(REPO / "scripts" / script, root / "scripts" / script)
     (root / "kernel" / "arch" / "arm64" / "kernel").mkdir(parents=True)
     (root / "kernel" / "kernel").mkdir(parents=True)
@@ -138,6 +139,14 @@ def main() -> int:
         "the constant is declared and never issued",
         "never passed to svc5",
         probe=PROBE_TEXT.replace("svc5(GETCWD_SYSCALL,", "svc5(WRITE_SYSCALL,"))
+
+    # GitHub issue #815: a commented-out call issues nothing.
+    failures += case(
+        "the svc5 call survives only in a comment",
+        "never passed to svc5",
+        probe=PROBE_TEXT.replace(
+            "    let answer: usize = svc5(GETCWD_SYSCALL, 0, 8, 0, 0, 0);",
+            "    // let answer: usize = svc5(GETCWD_SYSCALL, 0, 8, 0, 0, 0);"))
 
     failures += case(
         "the probe stops saying what it migrated",

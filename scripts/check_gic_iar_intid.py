@@ -27,6 +27,7 @@ import re
 import sys
 
 from pass_line import report_pass
+from source_scan import code_only
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 INTC_GLOB = "kernel/platform/*/intc.tkb"
@@ -40,6 +41,9 @@ MASKED = r"let\s+\w+\s*:\s*u32\s*=\s*{raw}\s*&\s*0x3[fF][fF]\s*;"
 def problems_in(text: str, relative: str) -> tuple[int, list[str]]:
     """Return (reads examined, problems) for one intc file's text."""
     problems = []
+    # A masking line that survives only in a comment masks nothing (GitHub
+    # issue #815); offsets and line numbers are kept.
+    text = code_only(text)
     reads = READ.findall(text)
     for raw in reads:
         if not re.search(MASKED.format(raw=re.escape(raw)), text):
@@ -73,6 +77,15 @@ def control() -> bool:
         reads, found = problems_in(planted, "control")
         if not (reads == 1 and len(found) >= 2):
             return False
+    # GitHub issue #815: the masking line only in a comment masks nothing.
+    commented = """
+    let raw: u32 = gicc.iar;
+    // let id: u32 = raw & 0x3FF;
+    gicc.eoir = raw;
+"""
+    reads, found = problems_in(commented, "control")
+    if not (reads == 1 and len(found) == 1):
+        return False
     return True
 
 
@@ -98,7 +111,8 @@ def main() -> int:
     report_pass("gic-iar-intid",
                 f"{total_reads} GICC_IAR read(s) in {len(files)} platform "
                 "dispatcher(s) decide on the INTID and EOI with the raw word, "
-                "and the pre-#632 raw comparison is refused",
+                "and the pre-#632 raw comparison and a commented-out mask are "
+                "refused",
                 counts=total_reads)
     return 0
 

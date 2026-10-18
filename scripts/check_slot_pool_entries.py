@@ -48,6 +48,7 @@ import sys
 from pathlib import Path
 
 from pass_line import report_pass
+from source_scan import code_only
 
 ROOT = Path(__file__).resolve().parent.parent
 # (file, acquire, token, rule): "leaf" -- no function in the file names an
@@ -73,8 +74,9 @@ SLOT_INDEX_CALLERS = {"kernel/drivers/block/memory.tkb",
 FUNCTION = re.compile(r"^(?:private\s+)?(?:(?:no)?inline\s+)?fn\s+(\w+)\s*\(", re.M)
 
 
-def strip_comments(text):
-    return "\n".join(line.split("//", 1)[0] for line in text.splitlines())
+# Shared with every code-property check: blanks `//` and `/* */` comments,
+# keeps string literals (GitHub issue #815).
+strip_comments = code_only
 
 
 def functions(text):

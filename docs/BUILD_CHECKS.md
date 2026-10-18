@@ -24,14 +24,14 @@ suffix is description; dispatch reads only the prefix.
 | `check_space_checkpoint_controls.py` | milestone measurement, justified incremental reuse, source fingerprint freshness, tracked evidence, and the mandatory pre-allcheck publication hook |
 | `check_qemu_vcpu_lease.py` | every maintained QEMU guest starts through `scripts/qemu.sh`, never `qemu-system-aarch64` directly, and every file that starts the shim takes a vCPU lease from the host-wide budget |
 | `check_lease_before_deadline.py` | a driver that spawns a lease-taking QEMU runner (a script calling `resource_lease_vcpu_acquire`, or `make kernelsh-qemu`) takes the vCPU lease itself first, so no deadline is spent in the runner's wait (#719) |
-| `check_execution_model_coverage_controls.py` | a comment-only mention of an execution-model constant and an empty EXEMPT reason are refused; a code `static_assert` and a reasoned EXEMPT entry are accepted |
+| `check_execution_model_coverage_controls.py` | a comment-only (line or block comment) mention of an execution-model constant and an empty EXEMPT reason are refused; a code `static_assert` and a reasoned EXEMPT entry are accepted |
 | `check_lease_wait_controls.py` | `lease_wait.lease_pending` classifies waiting, allocator waits, waits after a grant and transcripts without a wait, and only a pending wait is named in a timeout |
 | `check_service_space_controls.py` | actual FD/fork phase and actor coverage, open-description sharing, retained capacities, Takibi pool resource identities, repeats, and incomplete/error capture rejection |
 | `check_pool_retention_controls.py` | real-kernel retention accounting, workload completion, repeated counts, platform clock separation, and malformed capture rejection |
 | `check_pool_replay_controls.py` | equal-workload Takibi/SLUB/UMA sample coverage, storage arithmetic, recorded comparison freshness, and failed or incomplete capture controls |
 | `check_pool_space_controls.py` | pool-space capture framing, complete production-pool coverage, allocation accounting, and malformed numeric samples |
 | `check_affinity_probe_migrates.py` | the syscall /bin/affinity uses to make the migration gate fire is the one the gdb watcher waits for, and is still on the refusal list (`syscall_peer_refused`) |
-| `check_affinity_probe_migrates_controls.py` | Controls for the affinity-probe premise check |
+| `check_affinity_probe_migrates_controls.py` | Controls for the affinity-probe premise check, including an svc5 call present only in a comment (#815) |
 | `check_boot_log_snapshot.py` | the boot dmesg snapshot precedes the variable-length protocol report |
 | `check_boot_log_snapshot_controls.py` | Controls reject old snapshot ordering and missing, duplicate or commented commands |
 | `check_agents_paths.py` | paths named by root guidance resolve to Git-tracked files and this table names every check |
@@ -78,7 +78,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_expected_line_endings_controls.py` | Positive and failure-specific controls for expected-line-ending checks |
 | `check_fallback_counters.py` | every dead-slot fallback counter is summed into one positively reported line a view expects, so a fallback that fires loses a line rather than adding one |
 | `check_fd_clone_transaction.py` | the linear fd-clone transaction begins empty, advances exactly through a successful install, preserves failures, and rolls back its recorded prefix |
-| `check_fd_clone_transaction_controls.py` | Negative controls for the fd-clone transaction implementation boundary |
+| `check_fd_clone_transaction_controls.py` | Negative controls for the fd-clone transaction implementation boundary, including the success fragment present only in a comment (#815) |
 | `check_find_stale_issue_workarounds_controls.py` | Controls for the stale-workaround worklist's matching |
 | `check_flag_guarded_fields.py` | optional fields are read only after their presence flags |
 | `check_gdb_bounded.py` | every gdb a lane runner starts runs under `timeout`, so a `continue` that never stops cannot hold an aggregate |
@@ -86,7 +86,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_gdb_no_guest_memory_read.py` | a gdb check script decides from registers, not guest memory read through whatever translation the stopped CPU has active (#585) |
 | `check_gdb_no_guest_memory_read_controls.py` | Controls for the gdb guest-memory-read check, in both directions |
 | `check_invariant_lines_unviewed.py` | invariant reports are either diagnostic-only or enforced by absence, never asserted as correct |
-| `check_gic_iar_intid.py` | the platform interrupt dispatchers decide on `GICC_IAR & 0x3FF` and hand only the raw word back to GICC_EOIR, so an SGI's sender bits cannot hide it (#632) |
+| `check_gic_iar_intid.py` | the platform interrupt dispatchers decide on `GICC_IAR & 0x3FF` and hand only the raw word back to GICC_EOIR, so an SGI's sender bits cannot hide it (#632); a mask present only in a comment is refused (#815) |
 | `check_stack_proof_states.py` | a process start takes only `Startable` and a reap only `Reapable`, named token mints read `stack_owner_cpu`; frame mint callers and bare-address seams are declared, and direct default `FrameRef` declarations are refused (not arbitrary aggregate initialization) |
 | `check_stack_proof_states_controls.py` | Negative controls for weakened stack tokens/mints, undeclared frame mints/address seams, and direct default frame declarations; comments and strings remain permitted |
 | `check_stopped_pool_inspection.py` | the finite RegionPool diagnostic mint set borrows full-stop authority, retains IRQ exclusion, and has complete resume/start invalidation annotations |
@@ -104,7 +104,8 @@ suffix is description; dispatch reads only the prefix.
 | `check_kernel_net_wait_controls.py` | UART progress renews readiness waits; silence and the outer ceiling still fail, with bounded DDB protection |
 | `check_kernel_interactive_httpd_protocol.py` | interactive HTTP runners avoid listener/request deadlock |
 | `check_kernel_lib_limitations_header.py` | core kernel files state their current limitations |
-| `check_kernel_log_expectations.py` | test runners wait only for logs the kernel can emit |
+| `check_kernel_log_expectations.py` | test runners wait only for logs the kernel can emit; a `b"` byte string is read only at a token boundary (#817) |
+| `check_kernel_log_expectations_controls.py` | a `b"` inside a word (a plain string's closing quote) is not read as an expectation; real byte strings after a space, comma or paren are (#817) |
 | `check_kernel_memory_map_controls.py` | Linked-image growth, exact QEMU boot views, invalid rendering inputs, and allocator layout controls |
 | `check_kernel_views_controls.sh` | Controls for the shared view comparison (GitHub issue #530) |
 | `check_oops_await_timing_controls.py` | Deterministic crash-console arrival, common-deadline and half-budget controls, including partial markers, failures and unavailable artifacts |
@@ -129,7 +130,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_lock_discipline.py` | global mutexes are not force-reset and raw atomics stay allowlisted |
 | `check_lock_rank_wrappers.py` | every kernel function that calls `region_pool_lock`, `region_pool_lock_saving` or `mutex_acquire` declares `acquires_lock_<rank>_<name>` or has a reviewed exemption (#789: #745 silently dropped the process pool's rank) |
 | `check_source_scan_cache.py` | no `functools` cache in scripts/ outside `source_scan.py`, and every check a controls script imports in-process caches its per-file scan with `source_scan.per_file` (unbounded, refuses mutable results) or is reviewed (#808: uncached and size-8-cached scans re-read the tree per control and approached the fast gate's 10 s bound) |
-| `check_source_scan_cache_controls.py` | an uncached in-process check, `lru_cache`/`functools.cache` in either spelling, a new uncached in-process check, stale reviewed entries, an evicting cache and a mutable cached result are each refused; a transitive use passes |
+| `check_source_scan_cache_controls.py` | an uncached in-process check, `lru_cache`/`functools.cache` in either spelling, a new uncached in-process check, stale reviewed entries, an evicting cache and a mutable cached result are each refused; a transitive use passes; importing only `code_only` is not cache use, and `code_only` blanks `//` and `/* */` comments in place while keeping string and character literals (#815) |
 | `check_fast_gate_no_spawn.py` | no fast-gate Python member spawns a non-git process (subprocess, os.system, os.exec/spawn) unless reviewed with why it stays fast (#808: a member waiting on children overran the 10 s bound under the parallel allcheck; such members are `slowcheck_*`) |
 | `check_fast_gate_no_spawn_controls.py` | a Python child, a compiler child, a computed argv, os.system and os.execv are refused; git and a spawn named in a string pass; stale reviewed entries are refused |
 | `check_lock_rank_wrappers_controls.py` | the process pool losing its rank, a commented rank, new unranked region, mutex and one-line wrappers, a neighbour's rank, and a stale exemption are each refused |
@@ -188,7 +189,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_validate_protocol_trace_controls.py` | Controls for the protocol-trace report parser that feeds TLC (#606 stage 2), in process: a lost change, a cut report, a missing or second window, a miscounted header, malformed lines, a snapshot missing a core or not first, an unknown state and a reparented process are refused; the generated module's conventions (fresh record Constructing from the start, other late pids Absent, locked-only wait reasons, Reaped with its parent) hold; and StackOwnership.tla's Next, StackOwnershipTrace.tla's labelled actions and the validator's `--without` choices are one list. The protocol refusals run TLC and live in `scripts/protocol_trace_tlc_controls.py`, part of `make modelcheck`: four recorded windows accepted, each refused without the action it needs, and #609, 765a27af, #803, #550, #647 and #653 shapes refused |
 | `check_wont_compile_catalog.py` | every defect-catalog entry names a test case and external comparison set with a valid nonfuture date, shows its figure, and agrees with the index; external truth is not checked |
 | `check_xhci_register_offsets.py` | RP1 xHCI register fields sit at their xHCI-specification offsets, and an ERST programmed via ERSTBA also declares and writes ERSTSZ (#754) |
-| `check_xhci_register_offsets_controls.py` | Controls for the spec layout, the #754 missing ERSTSZ, an unwritten ERSTSZ and misplaced registers |
+| `check_xhci_register_offsets_controls.py` | Controls for the spec layout, the #754 missing ERSTSZ, an unwritten ERSTSZ and misplaced registers, and an ERSTSZ field or write present only in a comment (#815) |
 | `check_register_offsets.py` | every kernel io struct beyond xHCI has a sourced offset table (public spec, Raspberry Pi Linux source, or board evidence) and each field sits at its table's offset with its table's array size (#805) |
 | `check_register_offsets_controls.py` | Controls for the kernel layout, a GEM TBQPH at 0x4C4, an unlisted queue-bank field, a resized or scalarized array, a BCM2712 HARD_DEBUG at another chip's offset, an unsourced block, a vanished block and an unreadable field line |
 

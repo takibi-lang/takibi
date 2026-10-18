@@ -20,6 +20,7 @@ little to need it), and refuses a bounded lru_cache in scripts/.
 """
 
 import functools
+import re
 
 
 class FrozenMap(dict):
@@ -61,3 +62,29 @@ def per_file(function):
     wrapper.cache_info = cached.cache_info
     wrapper.cache_clear = cached.cache_clear
     return wrapper
+
+
+# GitHub issue #815: a check that claims a CODE property must not pass on a
+# comment that names the code. One lexer-shaped pass, mirroring
+# lib/lexer.mll: `//` to end of line and non-nesting `/* ... */` are
+# comments; a "string" or a 'c' character literal is not, even when it
+# holds `//` or `/*`.
+_TKB_TOKEN = re.compile(
+    r'"(?:\\.|[^"\\])*"'          # string literal
+    r"|'(?:\\.|[^'\\\n])'"        # character literal, such as '"'
+    r"|//[^\n]*"                  # line comment
+    r"|/\*.*?(?:\*/|\Z)", re.S)   # block comment (unterminated runs to EOF)
+
+
+def _blank(match):
+    token = match.group(0)
+    if token.startswith("//") or token.startswith("/*"):
+        return re.sub(r"[^\n]", " ", token)
+    return token
+
+
+def code_only(text: str) -> str:
+    """`text` with every Takibi comment blanked to spaces. Newlines and
+    offsets are kept, so line numbers and match positions still point
+    into the original; string and character literals are kept as written."""
+    return _TKB_TOKEN.sub(_blank, text)

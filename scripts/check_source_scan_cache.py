@@ -44,6 +44,7 @@ REVIEWED = {
     "check_wall_clock_bounds": "controls walk small synthetic trees; production runs once",
     "check_legacy_dma_rx_scope": "controls pass small synthetic source maps",
     "check_process_record_bare_uses": "scans one file (process.tkb) per call",
+    "check_kernel_log_expectations": "controls call line_expectations on planted lines only",
     "check_liveness_proof_escapes": "function_qualifier controls import only its FN_RE",
 }
 
@@ -54,6 +55,11 @@ def imported_modules(tree: ast.Module) -> set:
         if isinstance(node, ast.Import):
             names.update(alias.name.split(".")[0] for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            # source_scan also holds code_only (GitHub issue #815), which
+            # caches nothing: importing only that is not using the cache.
+            if (node.module == HELPER
+                    and not any(alias.name == "per_file" for alias in node.names)):
+                continue
             names.add(node.module.split(".")[0])
     return names
 

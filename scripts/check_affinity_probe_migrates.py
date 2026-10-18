@@ -34,6 +34,7 @@ import re
 import sys
 
 from pass_line import report_pass
+from source_scan import code_only
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PROBE = ROOT / "kernel" / "arch" / "arm64" / "kernel" / "affinity_probe.tkb"
@@ -46,8 +47,11 @@ def probe_syscall(text):
 
     Derived from the sentence the probe prints, not from the first constant
     in the file: the printed line is what a person reads out of a capture,
-    so it is the right thing for the rest to be held to.
+    so it is the right thing for the rest to be held to. Comments are
+    blanked first: a commented-out svc5 call issues nothing (GitHub issue
+    #815).
     """
+    text = code_only(text)
     said = re.search(
         r'affinity_say\(bs"affinity: pinned to cpu 1, where (\w+), outside '
         r'the peer-safe table, still answered', text)

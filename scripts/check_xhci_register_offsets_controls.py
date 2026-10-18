@@ -65,6 +65,11 @@ def main() -> int:
         (GOOD.replace("    erstsz: u32 at 0x28;\n", ""), False, "ERSTSZ is not",
          DRIVER.replace(".erstsz", ".iman")),
         (GOOD, False, "never written", "fn f() { }\n"),
+        # GitHub issue #815: the write or the field only in a comment.
+        (GOOD, False, "never written",
+         "fn f() {\n    // rp1_xhci_rt.erstsz = 1;\n}\n"),
+        (GOOD.replace("    erstsz: u32 at 0x28;\n", "    // erstsz: u32 at 0x28;\n"),
+         False, "ERSTSZ is not"),
         (GOOD.replace("erstsz: u32 at 0x28", "erstsz: u32 at 0x20"),
          False, "XhciRuntimeRegs.erstsz at 0x20"),
         (GOOD.replace("ports: [u32; 1020] at 0x400", "ports: [u32; 1020] at 0x410"),
@@ -88,7 +93,8 @@ def main() -> int:
         return 1
     report_pass("xhci-register-offsets-controls",
                 "accepts the per-block spec layout and rejects a missing, "
-                "misplaced or unknown register or block", cases=CASES.ran)
+                "misplaced or unknown register or block, and a field or write "
+                "that survives only in a comment", cases=CASES.ran)
     return 0
 
 

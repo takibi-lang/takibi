@@ -23,7 +23,7 @@ same way.
 
 So: a file that declares a mutable global must either assert one of the two
 constants in code -- a `static_assert(` whose condition names it, outside any
-`//` comment -- or appear in EXEMPT below with a non-empty reason. A mention
+comment -- or appear in EXEMPT below with a non-empty reason. A mention
 in a comment does not count (GitHub issue #814): eight files once passed by
 a comment that said they did NOT depend on the constant. An entry there is a
 claim a reviewer can disagree with, which is what silence was not.
@@ -41,7 +41,7 @@ import re
 import sys
 
 from pass_line import report_pass
-from source_scan import per_file
+from source_scan import code_only, per_file
 
 KERNEL = pathlib.Path("kernel")
 CONSTANTS = ("KERNEL_ACTIVE_CORES", "KERNEL_PREEMPTIBLE")
@@ -50,34 +50,11 @@ ASSERT_RE = re.compile(
     r"\bstatic_assert\s*\(\s*[^,;]*?\b(?:%s)\b" % "|".join(CONSTANTS))
 
 
-def strip_comments(text):
-    """Drop every `//` comment, leaving string literals intact."""
-    out = []
-    for line in text.splitlines():
-        in_str = False
-        i = 0
-        while i < len(line):
-            c = line[i]
-            if in_str:
-                if c == "\\":
-                    i += 1
-                elif c == '"':
-                    in_str = False
-            elif c == '"':
-                in_str = True
-            elif line.startswith("//", i):
-                line = line[:i]
-                break
-            i += 1
-        out.append(line)
-    return "\n".join(out)
-
-
 @per_file
 def asserts_model(text):
     """True when the code (not a comment) holds a static_assert whose
     condition names an execution-model constant."""
-    return bool(ASSERT_RE.search(strip_comments(text)))
+    return bool(ASSERT_RE.search(code_only(text)))
 
 
 def verdict(rel, text, exempt):

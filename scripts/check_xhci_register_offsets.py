@@ -23,6 +23,7 @@ import sys
 from pathlib import Path
 
 from pass_line import report_pass
+from source_scan import code_only
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -85,6 +86,9 @@ def layout(text: str, struct: str) -> dict[str, int] | None:
 def check(regs: str, driver: str) -> tuple[list[str], int]:
     failures: list[str] = []
     count = 0
+    # A field or a write that survives only in a comment is neither declared
+    # nor written (GitHub issue #815).
+    regs, driver = code_only(regs), code_only(driver)
     blocks: dict[str, dict[str, int]] = {}
     for struct, table in SPEC.items():
         fields = layout(regs, struct)

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Controls for check_source_scan_cache.py (#808), and for source_scan.per_file."""
+"""Controls for check_source_scan_cache.py (#808), and for source_scan.per_file
+and source_scan.code_only (#815)."""
 
 from check_source_scan_cache import REVIEWED, problems, tracked_modules
 from pass_line import CaseCount, report_pass
-from source_scan import FrozenMap, per_file
+from source_scan import FrozenMap, code_only, per_file
 
 
 def main() -> int:
@@ -30,6 +31,10 @@ def main() -> int:
         # A new in-process control of an unlisted uncached check.
         "new in-process controls": {"check_zz_controls": "import check_zz\n",
                                     "check_zz": "import pathlib\n"},
+        # GitHub issue #815: code_only caches nothing; importing it alone
+        # is not per_file use.
+        "imports only code_only": {"check_zz_controls": "import check_zz\n",
+                                   "check_zz": "from source_scan import code_only\n"},
     }
     for name, change in failing.items():
         cases.note()
@@ -71,9 +76,20 @@ def main() -> int:
         raise AssertionError("FrozenMap accepted a write")
     except TypeError:
         pass
+    # code_only (#815): comments blanked in place, literals kept.
+    for source, want in [
+        ("a(); // b()\n", "a();       \n"),
+        ("a(); /* b()\nc() */ d();", "a();       \n       d();"),
+        ('s("http://x"); // y', 's("http://x");     '),
+        ("x = '\"'; // \"y", "x = '\"';      "),
+        ('t("/* not */"); u();', 't("/* not */"); u();'),
+    ]:
+        cases.note()
+        got = code_only(source)
+        assert got == want and len(got) == len(source), (source, got)
     report_pass("source-scan-cache controls",
                 f"production passes and {cases.ran} uncached, bounded, stale or "
-                f"mutable shapes behave as specified", controls=cases.ran)
+                f"mutable shapes and comment blankings behave as specified", controls=cases.ran)
     return 0
 
 

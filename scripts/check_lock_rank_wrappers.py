@@ -25,7 +25,7 @@ import re
 import sys
 
 from pass_line import report_pass
-from source_scan import per_file
+from source_scan import code_only, per_file
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 KERNEL = ROOT / "kernel"
@@ -39,8 +39,9 @@ RANK_RE = re.compile(r"\bacquires_lock_[0-9]+_[A-Za-z_0-9]+\b")
 EXEMPT: dict = {}
 
 
-def strip_comments(text: str) -> str:
-    return re.sub(r"//[^\n]*", "", text)
+# Shared with every code-property check: blanks `//` and `/* */` comments,
+# keeps string literals (GitHub issue #815).
+strip_comments = code_only
 
 
 def body_start(text: str, index: int):

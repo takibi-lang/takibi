@@ -21,6 +21,7 @@ ASSERTED = STATE + (
     "}\n")
 ASSERT_URL_MSG = STATE + (
     "fn f() { static_assert(KERNEL_ACTIVE_CORES == 1, \"see https://x\"); }\n")
+BLOCK = STATE + "/* static_assert(KERNEL_PREEMPTIBLE == 0, \"x\"); */\n"
 OTHER_ASSERT = STATE + (
     "fn f() { static_assert(KERNEL_MAX_CORES == 4, \"KERNEL_ACTIVE_CORES\"); }\n")
 
@@ -29,6 +30,7 @@ def main() -> int:
     cases = [
         ("a.tkb", COMMENT_ONLY, {}, "silent", "comment-only mention accepted"),
         ("a.tkb", TRAILING, {}, "silent", "assert inside a trailing comment accepted"),
+        ("a.tkb", BLOCK, {}, "silent", "assert inside a block comment accepted"),
         ("a.tkb", OTHER_ASSERT, {}, "silent",
          "constant named only in an assert message accepted"),
         ("a.tkb", ASSERTED, {}, "assert", "real static_assert refused"),
