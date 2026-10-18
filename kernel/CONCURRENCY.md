@@ -218,7 +218,7 @@ Special, with the reason it stays so today:
 | Deadline and NetRx wakes | `timer_irq_handler` runs `kernel_process_deadline_wake_all` and `kernel_process_net_wake_all`; `kernel_secondary_timer_schedule` runs neither | one walker of every slot per tick; a peer sleeper is woken by core 0's tick, so a long core-0 mask (DDB) delays it | yes (decision: every tick walks, or per-CPU deadline lists) |
 | Device interrupts | UART, GEM, virtio-net and xHCI SPIs target core 0; a secondary's dispatch handles only its tick and PMU line | their drivers' state is touched only from core 0 | yes, with per-driver locking or an IRQ affinity policy (decision) |
 | DDB entry by UART BREAK | the UART IRQ branch on core 0 | follows the device interrupt row; DDB then stops the others through the world stop | follows the device row |
-| Console drain and UartTx blocking | `kernel/printk/log.tkb` | being removed by GitHub issue #613 slice 5 | in progress there |
+| UART input-flow requests | `kernel_log_console_poll` (`kernel/printk/log.tkb`), called at syscall entry and from core 0's idle loop | the UART is core 0's device (see the device interrupt row); since #613 slice 5 every CPU writes the log ring, so peer lines no longer pass through core 0 and the old peer drain and UartTx blocking are gone -- this flow-control poll is all that is left | follows the device interrupt row |
 | Two-core probes and fixtures | `kernel_secondary_main`'s core-1 branch, `peer_tick_window`, the spread-timer and busy-pair fixtures | each is an experiment written for core 0 against CPU 1 | no: the fixed pair is the experiment |
 
 ## State transitions and the run guard

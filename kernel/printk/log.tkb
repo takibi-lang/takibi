@@ -1397,16 +1397,18 @@ struct KernelLogUnvalidated {
     private word: usize;
 }
 
+// Every non-record view is classified here, not at the reader (#824): the
+// only view the reader may skip without counting is WriterReported, which
+// only a Discarded word of this sequence yields. Every other unreadable
+// slot -- in flight (Free or Reserved), overwritten by another sequence, or a
+// committed continuation whose head was overwritten -- is Unreported and so
+// a counted loss; the view has no arm for a skip nobody counted.
 must_use variant KernelLogSlotView {
     Readable(KernelLogUnvalidated);
-    // Reserved, or reserved by the head and not yet claimed.
-    InFlight;
+    // LogRing.tla ReadHead's "Skip(rnext, 1, TRUE)": the reader reports it.
+    Unreported;
     // Given up by its writer, which counted it in kernel_log_discarded.
-    Discarded;
-    // Committed as a continuation: the head of its record was overwritten.
-    Continuation;
-    // The slot holds another sequence: overwritten, or never claimed.
-    Gone;
+    WriterReported;
 }
 
 // LogRing.tla ReadHead's load: the first slot of sequence `seq`.
@@ -1414,11 +1416,19 @@ private fn kernel_log_slot_view(seq: usize) -> KernelLogSlotView !{unsafe} {
     let slot: {0..<KERNEL_LOG_SLOT_COUNT as usize} = kernel_log_slot_of(seq);
     let word: usize = kernel_log_observe(&kernel_log_slots[slot]);
     let state: usize = kernel_log_word_state(word);
-    if (state == KERNEL_LOG_STATE_FREE) { return KernelLogSlotView::InFlight; }
-    if (kernel_log_word_seq(word) != seq) { return KernelLogSlotView::Gone; }
-    if (state == KERNEL_LOG_STATE_RESERVED) { return KernelLogSlotView::InFlight; }
-    if (state == KERNEL_LOG_STATE_DISCARDED) { return KernelLogSlotView::Discarded; }
-    if (kernel_log_word_span(word) == 0) { return KernelLogSlotView::Continuation; }
+    if (state == KERNEL_LOG_STATE_FREE) {
+        return KernelLogSlotView::Unreported;
+    }
+    if (kernel_log_word_seq(word) != seq) {
+        return KernelLogSlotView::Unreported;
+    }
+    if (state == KERNEL_LOG_STATE_RESERVED) {
+        return KernelLogSlotView::Unreported;
+    }
+    if (state == KERNEL_LOG_STATE_DISCARDED) { return KernelLogSlotView::WriterReported; }
+    if (kernel_log_word_span(word) == 0) {
+        return KernelLogSlotView::Unreported;
+    }
     let mut seen: KernelLogUnvalidated = { seq, word };
     return KernelLogSlotView::Readable(seen);
 }
@@ -1437,9 +1447,10 @@ private fn kernel_log_seen_cpu(seen: KernelLogUnvalidated) -> usize {
     return kernel_log_word_cpu(seen.word);
 }
 
-// What copying one record came to: kept, lost (in flight or overwritten
-// while read, counted by the reader), or skipped (already reported: given up
-// by its writer, or a continuation of a record overwritten before it).
+// What copying one record came to: kept, lost (in flight, overwritten, or a
+// continuation whose head was overwritten -- counted by the reader, as
+// LogRing.tla ReadHead reports it), or skipped (given up by its writer,
+// which already counted it).
 must_use variant KernelLogRecordCopy {
     Kept(usize);
     Lost(usize);
@@ -1479,10 +1490,8 @@ private fn kernel_log_snapshot_record(seq: usize, end: usize, second_check: bool
     let mark: usize = snapshot.length;
     let seen: KernelLogUnvalidated = match kernel_log_slot_view(seq) {
         KernelLogSlotView::Readable(observed) => { observed }
-        KernelLogSlotView::InFlight => { return KernelLogRecordCopy::Lost(1); }
-        KernelLogSlotView::Gone => { return KernelLogRecordCopy::Lost(1); }
-        KernelLogSlotView::Discarded => { return KernelLogRecordCopy::Skipped(1); }
-        KernelLogSlotView::Continuation => { return KernelLogRecordCopy::Skipped(1); }
+        KernelLogSlotView::Unreported => { return KernelLogRecordCopy::Lost(1); }
+        KernelLogSlotView::WriterReported => { return KernelLogRecordCopy::Skipped(1); }
     };
     let span: usize = kernel_log_seen_span(seen);
     if (span > KERNEL_LOG_RECORD_SLOTS || seq + span > end) {
@@ -1604,7 +1613,7 @@ fn kernel_log_snapshot_capacity() -> usize {
     return KERNEL_LOG_SNAPSHOT_CAPACITY;
 }
 
-fn kernel_log_snapshot_copy(offset: usize, destination: []u8) -> usize {
+fn kernel_log_snapshot_copy(offset: usize, destination: borrow []u8) -> usize {
     let snapshot: *KernelLogSnapshot = kernel_log_snapshot_here();
     let snapshot_length: usize = snapshot.length;
     if (offset >= snapshot_length) { return 0; }
@@ -1742,6 +1751,40 @@ private fn kernel_log_overwrite_slot_for_probe(record: usize) !{unsafe} {
     }
 }
 
+// GitHub issue #824: a continuation whose head slot was overwritten is a
+// loss the reader counts (LogRing.tla ReadHead, "a stray continuation"),
+// not a silent skip. A two-slot record, then records until its head slot is
+// taken over but its continuation slot is not; the continuation's sequence
+// must come back Lost(1), and the snapshot must name it on its loss line.
+private fn kernel_log_stray_continuation_probe() -> bool !{unsafe} {
+    let wide: usize = kernel_log_observe(&kernel_log_head);
+    kernel_log_probe_line(118, KERNEL_LOG_SLOT_BYTES);
+    if (kernel_log_probe_span(wide) != 2) { return false; }
+    kernel_log_overwrite_slot_for_probe(wide);
+    let end: usize = kernel_log_observe(&kernel_log_head);
+    if (end != wide + KERNEL_LOG_SLOT_COUNT + 1) { return false; }
+    match kernel_log_snapshot_record(wide + 1, end, true, false) {
+        KernelLogRecordCopy::Lost(count) => { if (count != 1) { return false; } }
+        KernelLogRecordCopy::Kept(_) => { return false; }
+        KernelLogRecordCopy::Skipped(_) => { return false; }
+    }
+    // The whole snapshot, as syslog(2) builds it: the window starts at the
+    // continuation, and its loss line ends " first seq=<wide + 1>\n".
+    let length: usize = kernel_log_snapshot_build();
+    if (length < 7) { return false; }
+    let mut tail: [u8; 7] = { 0, 0, 0, 0, 0, 0, 0 };
+    if (kernel_log_snapshot_copy(length - 7, tail as []u8) != 7) { return false; }
+    let first: usize = (wide + 1) % 1000000;
+    let mut place_values: [usize; 6] = { 100000, 10000, 1000, 100, 10, 1 };
+    for digit: usize in 0..<6 {
+        let divisor: usize = place_values[digit];
+        if (divisor != 0 && tail[digit] != (((first / divisor) % 10) + 48) as u8) {
+            return false;
+        }
+    }
+    return tail[6] == 10;
+}
+
 // GitHub issue #612's negative control, on the #613 ring, deterministic
 // because the overwrite is injected between a record's first and second text
 // byte. The checked reader must drop the record and leave nothing of it in
@@ -1832,6 +1875,7 @@ fn kernel_log_bounds_probe() -> bool !{unsafe} {
         return false;
     }
     if (kernel_log_torn_read_probe() == false) { return false; }
+    if (kernel_log_stray_continuation_probe() == false) { return false; }
     let wide: usize = kernel_log_observe(&kernel_log_head);
     kernel_log_probe_line(121, KERNEL_LOG_SLOT_BYTES);
     let long: usize = kernel_log_observe(&kernel_log_head);
