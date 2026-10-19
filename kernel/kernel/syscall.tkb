@@ -1729,6 +1729,29 @@ fn kernel_connected_transport_release(slot: usize, generation: usize)
     }
 }
 
+// GitHub issue #838: free a connection after this caller has already put
+// the network capability back -- a Conflict arm, or a failure found after
+// the put. tcp_connection_free walks the shared retransmit chain, which
+// only the capability holder may do, so this takes the capability back
+// (waiting out a holder on another CPU) for the free. NeverInstalled is
+// unreachable here: every caller had a capability, and the store records
+// the first install for good. #837 makes the free take the capability by
+// type.
+fn kernel_connection_free_capped(owner: sink TcpConnectionOwner[connection_pool, connection]) {
+    match network_capability_take_waiting() {
+        NetworkCapabilityWaitResult::NeverInstalled => {
+            tcp_connection_free(owner);
+        }
+        NetworkCapabilityWaitResult::Ready(ready) => {
+            tcp_connection_free(owner);
+            match network_capability_put(ready) {
+                NetworkCapabilityPutResult::Stored => {}
+                NetworkCapabilityPutResult::Conflict => {}
+            }
+        }
+    }
+}
+
 // The same release for a caller that already holds the owner. Consumes it:
 // freed on Released and on a capability conflict, put back otherwise.
 fn kernel_connected_transport_release_owned(
@@ -1746,13 +1769,14 @@ fn kernel_connected_transport_release_owned(
         NetworkCapabilityTakeResult::Ready(ready) => {
             match kernel_tcp_close_stream(owner, ready) {
                 KernelTcpCloseResult::Closed(after_close) => {
+                    // GitHub issue #838: freed while the capability is
+                    // still held -- the free walks the retransmit chain.
+                    tcp_connection_free(owner);
                     match network_capability_put(after_close) {
                         NetworkCapabilityPutResult::Conflict => {
-                            tcp_connection_free(owner);
                             return KernelTransportReleaseResult::Failed;
                         }
                         NetworkCapabilityPutResult::Stored => {
-                            tcp_connection_free(owner);
                             return KernelTransportReleaseResult::Released;
                         }
                     }
@@ -2305,7 +2329,7 @@ fn syscall_write_segment_with(slot: borrow SyscallSlot[0],
                                     return SyscallIoResult::Errno(LINUX_EINVAL);
                                 }
                                 NetworkCapabilityPutResult::Conflict => {
-                                    tcp_connection_free(owner);
+                                    kernel_connection_free_capped(owner);
                                     return SyscallIoResult::Errno(LINUX_EINVAL);
                                 }
                             }
@@ -2313,7 +2337,7 @@ fn syscall_write_segment_with(slot: borrow SyscallSlot[0],
                         KernelTcpSendResult::Sent(after_send) => {
                             match network_capability_put(after_send) {
                                 NetworkCapabilityPutResult::Conflict => {
-                                    tcp_connection_free(owner);
+                                    kernel_connection_free_capped(owner);
                                     return SyscallIoResult::Errno(LINUX_EINVAL);
                                 }
                                 NetworkCapabilityPutResult::Stored => {
@@ -2564,7 +2588,7 @@ fn syscall_read_segment_with(slot: borrow SyscallSlot[0],
                             return SyscallIoResult::NetWait;
                         }
                         NetworkCapabilityPutResult::Conflict => {
-                            tcp_connection_free(owner);
+                            kernel_connection_free_capped(owner);
                             return SyscallIoResult::Errno(LINUX_EINVAL);
                         }
                     }
@@ -2576,7 +2600,7 @@ fn syscall_read_segment_with(slot: borrow SyscallSlot[0],
                             return SyscallIoResult::NetWait;
                         }
                         NetworkCapabilityPutResult::Conflict => {
-                            tcp_connection_free(owner);
+                            kernel_connection_free_capped(owner);
                             return SyscallIoResult::Errno(LINUX_EINVAL);
                         }
                     }
@@ -2588,7 +2612,7 @@ fn syscall_read_segment_with(slot: borrow SyscallSlot[0],
                             return SyscallIoResult::Errno(LINUX_EAGAIN);
                         }
                         NetworkCapabilityPutResult::Conflict => {
-                            tcp_connection_free(owner);
+                            kernel_connection_free_capped(owner);
                             return SyscallIoResult::Errno(LINUX_EINVAL);
                         }
                     }
@@ -2639,7 +2663,7 @@ fn syscall_read_segment_with(slot: borrow SyscallSlot[0],
                                             return SyscallIoResult::Errno(LINUX_EFAULT);
                                         }
                                         NetworkCapabilityPutResult::Conflict => {
-                                            tcp_connection_free(owner);
+                                            kernel_connection_free_capped(owner);
                                             return SyscallIoResult::Errno(LINUX_EINVAL);
                                         }
                                     }
@@ -2658,7 +2682,7 @@ fn syscall_read_segment_with(slot: borrow SyscallSlot[0],
                             return SyscallIoResult::Transferred(amount);
                         }
                         NetworkCapabilityPutResult::Conflict => {
-                            tcp_connection_free(owner);
+                            kernel_connection_free_capped(owner);
                             return SyscallIoResult::Errno(LINUX_EINVAL);
                         }
                     }
@@ -4499,7 +4523,7 @@ private fn syscall_accept_claimed(current_authority: borrow ProcessCurrent[curre
                     // accept(2) will find it.
                     match network_capability_put(next) {
                         NetworkCapabilityPutResult::Conflict => {
-                            tcp_connection_free(owner);
+                            kernel_connection_free_capped(owner);
                             let cleared: bool = kernel_listener_set_pending(
                                 accept_listener_fd, 0, 0);
                             return SyscallAction::Resume(LINUX_EINVAL);
@@ -4537,16 +4561,16 @@ private fn syscall_accept_claimed(current_authority: borrow ProcessCurrent[curre
                     }
                 }
                 KernelTcpAcceptStep::GaveUp(next) => {
+                    // GitHub issue #838: freed under the capability.
+                    tcp_connection_free(owner);
                     match network_capability_put(next) {
                         NetworkCapabilityPutResult::Conflict => {
-                            tcp_connection_free(owner);
                             let cleared: bool = kernel_listener_set_pending(
                                 accept_listener_fd, 0, 0);
                             return SyscallAction::Resume(LINUX_EINVAL);
                         }
                         NetworkCapabilityPutResult::Stored => {
                             syscall_test_evidence_record_accept_capability_roundtrip();
-                            tcp_connection_free(owner);
                             let cleared: bool = kernel_listener_set_pending(
                                 accept_listener_fd, 0, 0);
                             // The deadline expires one incomplete TCP
@@ -4567,7 +4591,7 @@ private fn syscall_accept_claimed(current_authority: borrow ProcessCurrent[curre
                 KernelTcpAcceptStep::Accepted(next) => {
                     match network_capability_put(next) {
                         NetworkCapabilityPutResult::Conflict => {
-                            tcp_connection_free(owner);
+                            kernel_connection_free_capped(owner);
                             return SyscallAction::Resume(LINUX_EINVAL);
                         }
                         NetworkCapabilityPutResult::Stored => {
@@ -4586,7 +4610,8 @@ private fn syscall_accept_claimed(current_authority: borrow ProcessCurrent[curre
                                         kernel_boot_log_resource_exhausted(
                                             "process fd table" as *u8,
                                             kernel_syscall_fd_limit_soft());
-                                        tcp_connection_free(owner);
+                                        // #838: the capability went back above.
+                                        kernel_connection_free_capped(owner);
                                         return SyscallAction::Resume(LINUX_EAGAIN);
                                     }
                                     KernelSocketFdAllocResult::Allocated(found) => { found }
@@ -6508,7 +6533,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                         match network_capability_put(after_invalid) {
                             NetworkCapabilityPutResult::Stored => { }
                             NetworkCapabilityPutResult::Conflict => {
-                                tcp_connection_free(owner);
+                                kernel_connection_free_capped(owner);
                                 return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINVAL), current_authority);
                             }
                         }
@@ -6518,13 +6543,13 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                     KernelTcpSendResult::Sent(after_send) => {
                         match kernel_tcp_close_stream(owner, after_send) {
                             KernelTcpCloseResult::Closed(after_close) => {
+                                // GitHub issue #838: freed under the capability.
+                                tcp_connection_free(owner);
                                 match network_capability_put(after_close) {
                                     NetworkCapabilityPutResult::Conflict => {
-                                        tcp_connection_free(owner);
                                         return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINVAL), current_authority);
                                     }
                                     NetworkCapabilityPutResult::Stored => {
-                                        tcp_connection_free(owner);
                                         return syscall_finish_current(frame, SyscallAction::Resume(0), current_authority);
                                     }
                                 }
