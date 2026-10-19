@@ -212,12 +212,41 @@ class Counter(gdb.Breakpoint):
         return False
 
 
-# scheduler-locking-waiver: the lane runs at 2 vCPUs
-# (scripts/run_kernel_uart_wake_qemutest.sh), so no third vCPU is frozen.
+# GitHub issue #757: at four vCPUs, a locked step froze CPU2 and CPU3
+# wherever the all-stop caught them, possibly holding a lock CPU0 or CPU1
+# then spun on. Every locked step first parks them where they hold nothing:
+# the idle loop's wfi or EL0 (scripts/kernel_gdb_stage.py, #795). CPU0 and
+# CPU1 are never parked, since the lane holds them on purpose; the vCPU the
+# step runs may run first as a helper, to release a lock a peer waits on.
+STAGE_COMMANDS = []
+
+
+def lock_and_park() -> bool:
+    """Run only the selected vCPU from here on, with CPU2.. parked first.
+    False when the selected vCPU, run as a helper, already stopped at one
+    of the lane's breakpoints, so the step it was parking for is done."""
+    if not STAGE_COMMANDS:
+        stage = Path(__file__).resolve().parent / "kernel_gdb_stage.py"
+        gdb.execute(f"source {stage}")
+        STAGE_COMMANDS.append(stage)
+    selected = gdb.selected_thread().num
+    peers = " ".join(str(thread.num) for thread in gdb.selected_inferior().threads()
+                     if thread.num not in (CPU0_THREAD, CPU1_THREAD))
+    gdb.execute("set scheduler-locking on")
+    if not peers:
+        return True
+    gdb.execute(f"takibi-park-threads kernel_idle_loop {peers} -- {selected}")
+    return int(gdb.parse_and_eval("$_takibi_park_helper_stopped")) == 0
+
+
 def continue_bounded(threads_locked: bool) -> None:
     """Resume the guest, or with the lock only the selected vCPU, for at
     most STEP_TIMEOUT."""
-    gdb.execute("set scheduler-locking " + ("on" if threads_locked else "off"))
+    if threads_locked:
+        if not lock_and_park():
+            return
+    else:
+        gdb.execute("set scheduler-locking off")
     timer = interrupt_after(STEP_TIMEOUT)
     try:
         gdb.execute("continue")
@@ -317,6 +346,10 @@ def run_peer(connection: socket.socket) -> None:
     last = len(PEER_LINE) - 1
     for index in range(1, len(PEER_LINE)):
         value = PEER_LINE[index:index + 1]
+        # Park CPU2.. before the byte is sent: CPU0 may run as a helper
+        # then, and must not take this byte's interrupt unseen (#757).
+        gdb.execute(f"thread {CPU0_THREAD}", to_string=True)
+        lock_and_park()
         connection.sendall(value)
         # The guest is stopped; QEMU's main loop still puts the byte in the
         # PL011 FIFO and raises the interrupt line, which is routed to CPU0.

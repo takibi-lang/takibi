@@ -16,8 +16,16 @@ time, to a point where it holds nothing: the one `wfi` instruction in
 FUNCTION (the idle loop), or already halted in a WFI. A vCPU blocked on a
 lock another listed vCPU holds is cut off after a short bound and retried
 after the others have run, so a holder frozen anywhere gets its turn to
-release. It fails (gdb exits with status 3) only if some vCPU is still not
-parked after every pass.
+release. A vCPU stopped at EL0 also counts as parked: every kernel lock is
+released before the return to user mode, and a core running a busy user
+process may never reach the idle loop. #757: in the uart-wake lane, core 3
+blocked in an exec's block_device_take on the block mutex core 0 held, and
+core 0 is the vCPU the lane runs next, never a listed one. So after the
+listed vCPUs `-- HELPER...` names vCPUs that may run (to no particular
+point) to release what they hold; a helper that stops at a breakpoint of
+its own ends the parking with $_takibi_park_helper_stopped set to 1, so the
+caller does not run that stage a second time. It fails (gdb exits with
+status 3) only if some vCPU is still not parked after every pass.
 
 `takibi-bounded-continue SECONDS` is a `continue` that must end at a
 breakpoint within SECONDS; otherwise it interrupts the target, prints where
@@ -70,7 +78,8 @@ def _continue_until_breakpoint(seconds: float) -> bool:
 
 
 def _thread_states() -> dict:
-    """GDB thread number -> (pc, halted) from QEMU's `info threads` text."""
+    """GDB thread number -> (pc, halted or at EL0) from QEMU's `info threads`
+    text and the thread's CPSR."""
     states = {}
     text = gdb.execute("info threads", to_string=True)
     for thread in gdb.selected_inferior().threads():
@@ -81,13 +90,23 @@ def _thread_states() -> dict:
         current = gdb.selected_thread()
         thread.switch()
         pc = int(gdb.parse_and_eval("$pc"))
+        user = (int(gdb.parse_and_eval("$cpsr")) & 0xF) == 0
         current.switch()
-        states[number] = (pc, halted)
+        states[number] = (pc, halted or user)
     return states
 
 
 def _wfi_address(function: str) -> int:
-    text = gdb.execute(f"disassemble {function}", to_string=True)
+    # Read the code from the ELF, not through the selected vCPU: one
+    # stopped at EL0 runs on a user translation table that does not map
+    # the kernel, and the read fails (#757).
+    trusted = gdb.parameter("trust-readonly-sections")
+    gdb.execute("set trust-readonly-sections on", to_string=True)
+    try:
+        text = gdb.execute(f"disassemble {function}", to_string=True)
+    finally:
+        gdb.execute("set trust-readonly-sections " + ("on" if trusted else "off"),
+                    to_string=True)
     hits = [int(match.group(1), 16) for match in
             re.finditer(r"^\s*(?:=>\s*)?(0x[0-9a-f]+)\s.*\twfi\s*$", text, re.M)]
     if len(hits) != 1:
@@ -118,7 +137,13 @@ class ParkThreads(gdb.Command):
     def invoke(self, argument: str, from_tty: bool) -> None:
         words = argument.split()
         wfi = _wfi_address(words[0])
-        threads = [int(word) for word in words[1:]]
+        rest = words[1:]
+        helpers = []
+        if "--" in rest:
+            helpers = [int(word) for word in rest[rest.index("--") + 1:]]
+            rest = rest[:rest.index("--")]
+        threads = [int(word) for word in rest]
+        gdb.execute("set $_takibi_park_helper_stopped = 0", to_string=True)
         if gdb.parameter("scheduler-locking") != "on":
             raise gdb.GdbError("takibi-park-threads needs scheduler-locking on")
         original = gdb.selected_thread()
@@ -139,6 +164,15 @@ class ParkThreads(gdb.Command):
                     _continue_until_breakpoint(PARK_STEP_SECONDS)
                 finally:
                     breakpoint.delete()
+            for number in helpers:
+                gdb.execute(f"thread {number}", to_string=True)
+                if _continue_until_breakpoint(PARK_STEP_SECONDS):
+                    gdb.execute("set $_takibi_park_helper_stopped = 1",
+                                to_string=True)
+                    original.switch()
+                    print(f"takibi-park-threads: helper {number} stopped "
+                          "at a breakpoint before every vCPU was parked")
+                    return
         original.switch()
         _diagnose_and_quit(
             f"takibi-park-threads: not parked after {PARK_PASSES} passes")

@@ -14,14 +14,6 @@ set -euo pipefail
 trap 'takibi_status=$?; echo "[$(basename "$0")] aborted at line $LINENO with exit $takibi_status: $BASH_COMMAND" >&2' ERR
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# TEMPORARILY 2 vCPUs; this lane SHOULD run the default of 4. Remove this
-# pin when GitHub issue #757 is fixed (closing #757 requires it). Maintainer,
-# 2026-10-11. Why: under gdb all-stop with scheduler-locking only CPU0 runs, and at four
-# vCPUs CPU2/CPU3 are frozen too; both peer modes failed intermittently
-# there. Remove this line, returning the lane to the default of four
-# (scripts/vcpu_lease.sh), once #757 is fixed. Every mode re-enters this
-# script, so the pin covers peer and peer-net-wake alike.
-export TAKIBI_QEMU_SMP=2
 ELF="${KERNEL_QEMU_UART_WAKE_ELF:-$REPO_ROOT/kernel/build/qemu/kernel.elf}"
 . "$REPO_ROOT/scripts/kernel_elf_freshness.sh"
 kernel_elf_refuse_stale "$ELF" "uart-wake kernel" || exit 1
