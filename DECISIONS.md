@@ -218,6 +218,9 @@ condition below applies, and reports the land afterwards.
 - 2026-10-16 Compiler and tool input either passes or is an error; anything
   suspicious (a stale list entry, a flag that would be ignored) is never a
   warning, because warnings go unread. [active] #796
+- 2026-10-19 Kernel work that needs an instruction the compiler has no
+  intrinsic for uses a small .S helper with no logic (precedent pmu.S), not a
+  new compiler intrinsic. [active] #759 #811
 - 2026-10-19 A rebase conflict confined to docs/SPACE_CHECKPOINT.json is
   resolved by code (scripts/checkpoint_rebase.py, used by land.sh and the
   coordinator): main's side, then the branch's own review, current for its

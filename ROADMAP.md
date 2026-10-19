@@ -125,8 +125,8 @@ list (maintainer, 2026-10-09).
    system, its orderings checked by #645's herd7 litmus tests.
 4. **Preemption.** #638's typed preparation -- a preemption-disabled
    authority, with per-CPU access (`cpu_authority`) derived from it in place
-   of the `KERNEL_PREEMPTIBLE == 0` asserts -- with #606 stage 2 (a TLC trace
-   spec replacing the Python replay; #656 extends it to LogReader) and #641
+   of the `KERNEL_PREEMPTIBLE == 0` asserts -- with #813 (stage 3 of the TLC
+   trace spec; #656 extended it to the log ring) and #641
    (the world stop in TLA+). Then the flip: measure candidate designs on
    RPi5 and set `KERNEL_PREEMPTIBLE` to 1, with the models passing without
    their no-preemption guards. Never while #584's soak is being run for a
@@ -160,8 +160,8 @@ allocator migration remains a separate design gate.
 
 Initialization does not prove CPU freshness across preemption.
 
-Profiler follow-ups: seeing inside IRQ-masked spans is #773 (Arm SPE) and
-an irqsoff-style tracer on #811.
+Profiler follow-ups: seeing inside IRQ-masked spans is #773 (Arm SPE); the
+irqsoff-style tracer (#811) landed.
 
 **Next, ahead of the list below (maintainer, 2026-10-14):** #740:
 a socket's receive queue keeping the packet (step 3) is decided after the
@@ -196,7 +196,6 @@ under #720 -- producer rings, session tables, input context, event ring and
 output context are device-protocol owners (E1 snapshots for the last two);
 usb_xhci.tkb is off kernel/RAW_MINT_FILES, its bus-address export is
 usb_xhci_bus.tkb. Only the DCBAA stays legacy (D3).
-Candidate: #811, an irqsoff-style tracer for IRQ-masked spans.
 
 1. **Fixed DMA lifecycle, finishing the drivers.** Every stage of one
    transfer in types, leaving one device-semantics declaration per driver
@@ -238,15 +237,13 @@ Candidate: #811, an irqsoff-style tracer for IRQ-masked spans.
      usb_xhci.tkb raw dereferences 46 -> 2; kernelcheck-rpi5 green. Then
      the event ring and contexts (slice 3), then GEM/virtio (#740).
      `requires` may collide with future function preconditions; revisit
-     its spelling then. #759 (boot check of CTR_EL0
-     DminLine/CWG against DMA_CACHE_LINE, an assumption of
-     DmaCacheVisibility.tla). #740
+     its spelling then. #740
      (virtio-net fixed TX/RX-reply authority) awaits the stored-array
      boundary and an in-place reply design decision.
    #783 (xHCI batched TD write path).
 2. **Independent pillar issues, moved from A (2026-10-16):** #775
-   (inventory core-role asymmetries; make each symmetric or record why it
-   stays); #776 (runtime test of one process changing a running peer's
+   (core-role asymmetries: inventory, 2-1 placement and 2-3 landed; remaining
+   rows are #831, #827, #828, #829, #830); #776 (runtime test of one process changing a running peer's
    affinity mask); #789 (lock order as ranked capability tokens, absorbing
    acquires_lock_<rank>_<name>, after the syntax review).
    **Signals, moved from A (2026-10-16):** #628 (delivery at an
@@ -257,8 +254,7 @@ Candidate: #811, an irqsoff-style tracer for IRQ-masked spans.
    (generation exhaustion of region tables and the intrusive pool), #203
    (no uninitialized kernel bytes copied to userspace: stages 1-2 done;
    stage 3 (cross-call contracts, byte ranges) remains, with #761's TCP rx
-   bound), #763 (report every definite-init error in a function), #764
-   (check assume_init sites against TRUSTED_BASE.md),
+   bound),
    #732's later slices (static parameters on generic variants, implicit
    statics inside a type argument), #793 (index and refined-cast proofs
    on type variables), #762 (no vector stores in MMU-off code), #774 (every
