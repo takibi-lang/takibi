@@ -156,7 +156,8 @@ fn log_storm_probe() -> bool !{logs, unsafe} {
 // its own window, which is after init's dmesg snapshot: the report is a few
 // hundred lines and would otherwise evict boot markers from the ring.
 // Core 0 writes one line first, so the read has a record of the window to
-// read; its other lines follow the read. True when the round ran as asked;
+// read, and starts reading once every writer has reserved one; its other
+// lines follow the read. True when the round ran as asked;
 // the report is the evidence, checked by scripts/validate_log_ring_trace.py.
 private let mut log_storm_trace_rounds: usize;
 
@@ -175,6 +176,13 @@ fn log_storm_trace_probe() -> bool !{logs, unsafe} {
     log_ring_trace_open(from);
     let opening: bool = kernel_log_storm_write(round, 0);
     atomic_word_store(&log_storm_go, round);
+    // Read once every writer has reserved its first line, so the read's end
+    // takes in records that may still be in flight.
+    let mut window = peer_tick_window_policy(
+        peer_tick_window_peer(), PeerTickPolicy::Arrival);
+    while (peer_tick_window_open(window) &&
+           kernel_log_raw_head() < from + 1 + writers) { }
+    peer_tick_window_end(window);
     log_ring_trace_arm_reader();
     let read: usize = kernel_log_snapshot_build_from(from);
     log_ring_trace_disarm_reader();
