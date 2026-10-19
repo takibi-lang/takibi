@@ -16,12 +16,23 @@ binding is to the tree that will be tested; scripts/land.sh then runs
 space_checkpoint and the full check on that new head, so nothing is skipped.
 A branch whose own review was missing or stale is not blessed here: exit 2.
 
+A conflict in kernel/models/README.md is resolved too when it is
+review-stamp-only (GitHub issue #833): the three stages, with every row's
+Reviewed cell blanked, merge cleanly. Merged rows keep upstream's stamp
+(else the branch's); after the rebase finishes,
+scripts/check_model_function_map.py --restamp runs on the rebased tree and
+its result is committed. That happens before the checkpoint re-record, so
+the re-recorded review covers the final tree. Any other README conflict is
+a conflict like any other: exit 4.
+
 Exit status: 0 rebased (and re-recorded if needed); 2 the checkpoint needs a
-review; 4 the rebase stopped on a conflict outside the checkpoint.
+review; 4 the rebase stopped on a conflict other than the checkpoint and a
+stamp-only model map, or the restamped model map does not check.
 """
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -44,6 +55,54 @@ def unmerged():
     return sorted(set(out('diff', '--name-only', '--diff-filter=U').splitlines()))
 
 
+MODEL_MAP = 'kernel/models/README.md'
+STAMP_RE = re.compile(r'^(\| `.*\|) `[0-9a-f]+` \|$')
+BLANK = ' `-` |'
+
+
+def blank_stamps(text):
+    """TEXT with every action row's Reviewed cell blanked, and each blanked row's original."""
+    lines, stamps = [], {}
+    for line in text.splitlines(keepends=True):
+        match = STAMP_RE.match(line.rstrip('\n'))
+        if match:
+            blanked = match.group(1) + BLANK + ('\n' if line.endswith('\n') else '')
+            stamps.setdefault(blanked, line)
+            line = blanked
+        lines.append(line)
+    return ''.join(lines), stamps
+
+
+def resolve_stamp_only(path):
+    """Resolve PATH's conflict when it lies in Reviewed stamps only; False otherwise."""
+    stages = {}
+    for stage in (1, 2, 3):
+        shown = git('show', f':{stage}:{path}', check=False)
+        if shown.returncode != 0:
+            return False
+        stages[stage] = blank_stamps(shown.stdout)
+    git_dir = out('rev-parse', '--git-dir')
+    names = []
+    for stage in (2, 1, 3):
+        name = os.path.join(git_dir, f'checkpoint-rebase-stage{stage}')
+        with open(name, 'w', encoding='utf-8') as handle:
+            handle.write(stages[stage][0])
+        names.append(name)
+    merged = git('merge-file', '-p', *names, check=False)
+    for name in names:
+        os.remove(name)
+    if merged.returncode != 0:
+        return False
+    # During a rebase stage 2 ("ours") is the upstream side being built on.
+    pick = [stages[2][1], stages[3][1], stages[1][1]]
+    lines = [next((s[line] for s in pick if line in s), line)
+             for line in merged.stdout.splitlines(keepends=True)]
+    with open(path, 'w', encoding='utf-8') as handle:
+        handle.write(''.join(lines))
+    git('add', '--', path)
+    return True
+
+
 def review_valid(head, base):
     """True when HEAD's checkpoint passes space_checkpoint against BASE."""
     entries = tree_entries(head)
@@ -61,27 +120,52 @@ def review_valid(head, base):
 
 
 def rebase(onto, env):
-    """Run the rebase; return the number of checkpoint-only stops resolved."""
-    resolved = 0
+    """Run the rebase; return (checkpoint stops resolved, model map stops resolved)."""
+    resolved = stamped = 0
     step = git('rebase', '--rebase-merges', onto, check=False, env=env)
     while step.returncode != 0:
         paths = unmerged()
-        if paths != [REVIEW]:
+        others = [p for p in paths if p not in (REVIEW, MODEL_MAP)]
+        if not paths or others or (MODEL_MAP in paths and not resolve_stamp_only(MODEL_MAP)):
             sys.stderr.write(step.stdout + step.stderr)
-            print('checkpoint_rebase: conflict outside ' + REVIEW + ': ' +
-                  (', '.join(p for p in paths if p != REVIEW) or 'no unmerged path'), file=sys.stderr)
+            print('checkpoint_rebase: conflict outside ' + REVIEW + ' and a stamp-only ' +
+                  MODEL_MAP + ': ' + (', '.join(p for p in paths if p != REVIEW)
+                                      or 'no unmerged path'), file=sys.stderr)
             return None
-        # During a rebase "ours" is the upstream side being built on.
-        git('checkout', '--ours', '--', REVIEW)
-        git('add', '--', REVIEW)
-        resolved += 1
-        print(f'checkpoint_rebase: took upstream {REVIEW} at {out("rev-parse", "--short", "REBASE_HEAD")}')
+        at = out('rev-parse', '--short', 'REBASE_HEAD')
+        if MODEL_MAP in paths:
+            stamped += 1
+            print(f'checkpoint_rebase: merged stamp-only {MODEL_MAP} conflict at {at}')
+        if REVIEW in paths:
+            # During a rebase "ours" is the upstream side being built on.
+            git('checkout', '--ours', '--', REVIEW)
+            git('add', '--', REVIEW)
+            resolved += 1
+            print(f'checkpoint_rebase: took upstream {REVIEW} at {at}')
         if git('diff', '--cached', '--quiet', check=False).returncode == 0:
             step = git('rebase', '--skip', check=False, env=env)
         else:
             step = git('-c', 'core.editor=true', 'rebase', '--continue', check=False,
                        env=dict(env, GIT_EDITOR='true'))
-    return resolved
+    return resolved, stamped
+
+
+def restamp_map(env, upstream):
+    """Restamp the model map on the rebased tree and commit it; False when it does not check."""
+    result = subprocess.run([sys.executable, 'scripts/check_model_function_map.py', '--restamp'],
+                            text=True, capture_output=True, env=env)
+    if result.returncode != 0:
+        sys.stderr.write(result.stdout + result.stderr)
+        print(f'checkpoint_rebase: the restamped {MODEL_MAP} does not check; the rebase is '
+              'finished and the restamp is left uncommitted', file=sys.stderr)
+        return False
+    if git('diff', '--quiet', '--', MODEL_MAP, check=False).returncode != 0:
+        git('add', '--', MODEL_MAP)
+        git('commit', '--quiet', '-m', f'Model map: restamp after rebase onto {upstream[:8]}',
+            '-m', 'Written by scripts/checkpoint_rebase.py (#833): the rebase met a conflict in '
+            'the Reviewed stamps only; the rows were re-hashed on the rebased tree.', env=env)
+        print(f'checkpoint_rebase: restamped {MODEL_MAP} at {out("rev-parse", "--short", "HEAD")}')
+    return True
 
 
 def main():
@@ -98,8 +182,11 @@ def main():
     for key, value in author.items():
         env.setdefault(key, value)
         env.setdefault(key.replace('AUTHOR', 'COMMITTER'), value)
-    resolved = rebase(args.onto, env)
-    if resolved is None:
+    outcome = rebase(args.onto, env)
+    if outcome is None:
+        return 4
+    resolved, stamped = outcome
+    if stamped and not restamp_map(env, upstream):
         return 4
     head = out('rev-parse', 'HEAD')
     if not resolved or review_valid(head, upstream):

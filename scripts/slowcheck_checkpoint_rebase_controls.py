@@ -141,9 +141,75 @@ def main():
         assert result.returncode == 0, result.stdout + result.stderr
         assert repo.git('log', '-1', '--format=%s').stdout.strip() == 'docs only'
         cases += 1
+    with tempfile.TemporaryDirectory(prefix='takibi-ckpt-rebase-') as tmp:
+        repo = map_scenario(tmp)
+        result = repo.run(HELPER, '--onto', 'main')
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert 'merged stamp-only' in result.stdout and 'restamped' in result.stdout, result.stdout
+        subjects = repo.git('log', '-3', '--format=%s').stdout.splitlines()
+        assert subjects[0].startswith('Space checkpoint: re-recorded'), subjects
+        assert subjects[1].startswith('Model map: restamp'), subjects
+        text = (repo.root / MAP).read_text()
+        assert 'topic kept' not in text and 'main kept' not in text
+        assert text.count(f'`{fake_stamp(repo.root)}`') == 2, text
+        assert repo.git('status', '--porcelain').stdout == ''
+        check = repo.run(CHECK, '--base', 'main', '--head', 'HEAD')
+        assert check.returncode == 0, check.stdout + check.stderr
+        cases += 1
+    with tempfile.TemporaryDirectory(prefix='takibi-ckpt-rebase-') as tmp:
+        repo = map_scenario(tmp, kept='topic kept')
+        result = repo.run(HELPER, '--onto', 'main')
+        assert result.returncode == 4, result.stdout + result.stderr
+        assert MAP in result.stderr, result.stderr
+        assert (repo.root / '.git/rebase-merge').exists(), 'non-stamp map conflict must stop'
+        assert MAP in repo.git('diff', '--name-only', '--diff-filter=U').stdout.split()
+        cases += 1
     report_pass('checkpoint-rebase-controls',
                 f'{cases} scripted rebases; checkpoint-only conflict re-records, mixed conflict stops, '
-                'stale branch review refused, clean rebase untouched', cases=cases)
+                'stale branch review refused, clean rebase untouched, stamp-only model map '
+                'conflict restamps, non-stamp model map conflict stops', cases=cases)
+
+
+MAP = 'kernel/models/README.md'
+# Stands in for the real checker: restamps every row with a digest of kernel/.
+FAKE_MAP_CHECK = '''import hashlib, pathlib, re, sys
+root = pathlib.Path(__file__).resolve().parent.parent
+digest = hashlib.sha256(b''.join(p.read_bytes() for p in sorted((root / 'kernel').glob('*.tkb')))).hexdigest()[:12]
+readme = root / 'kernel/models/README.md'
+if sys.argv[1:] == ['--restamp']:
+    readme.write_text(re.sub(r'`[0-9a-f]+` \\|$', '`' + digest + '` |', readme.read_text(), flags=re.M))
+'''
+
+
+def fake_stamp(root):
+    import hashlib
+    return hashlib.sha256(b''.join(p.read_bytes() for p in sorted((root / 'kernel').glob('*.tkb')))).hexdigest()[:12]
+
+
+def map_text(stamp_a, stamp_b='bbbb', kept='kept'):
+    return ('## M.tla\n\n| Action | Function | Kept | Dropped | Reviewed |\n| --- | --- | --- | --- | --- |\n'
+            f'| `A` | `kernel_a` | {kept} | nothing | `{stamp_a}` |\n'
+            f'| `B` | `kernel_b` | kept | nothing | `{stamp_b}` |\n')
+
+
+def map_scenario(tmp, kept=None):
+    """Both sides restamp row A in the commit that also rewrites the checkpoint."""
+    repo = Repo(Path(tmp))
+    repo.write('kernel/a.tkb', 'a0\n')
+    repo.write('docs/evidence.tsv', 'measured\n')
+    repo.write('scripts/check_model_function_map.py', FAKE_MAP_CHECK)
+    repo.write(MAP, map_text('aaaa'))
+    repo.commit('base', review='base review')
+    repo.git('switch', '-q', '-c', 'topic')
+    repo.write('kernel/b.tkb', 'b1\n')
+    repo.write(MAP, map_text('1111', kept=kept or 'kept'))
+    repo.commit('topic work', review='topic review')
+    repo.git('switch', '-q', 'main')
+    repo.write('kernel/a.tkb', 'a1\n')
+    repo.write(MAP, map_text('2222', kept='main kept' if kept else 'kept'))
+    repo.commit('main work', review='main review')
+    repo.git('switch', '-q', 'topic')
+    return repo
 
 
 if __name__ == '__main__':
