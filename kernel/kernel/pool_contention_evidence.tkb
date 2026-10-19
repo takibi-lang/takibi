@@ -38,6 +38,7 @@
 //   makes it contention rather than one core taking turns with itself.
 
 use "kernel/lib/peer_tick_window.tkb";
+use "kernel/lib/peer_round.tkb";
 struct ContentionItem {
     stamp: usize;
 }
@@ -78,35 +79,23 @@ const CONTENTION_CHUNK_PAGES: usize = 1;
 // and written by two cores at the same time -- which is the one situation
 // volatile does not cover.
 private let mut contention_armed: AtomicWord;
-private let mut contention_primary_cycles: AtomicWord;
-private let mut contention_secondary_cycles: AtomicWord;
+// Completed cycles and the inside-the-run level, one word per core
+// (GitHub issue #756: every online peer, index 0 is core 0's). A peer's
+// level is 1 while it is inside its cycle loop. Core 0 waits for every
+// level rather than for a duration, because "a peer is between an
+// allocate and its free" and "every peer has stopped" are different states
+// and only one of them makes live_count meaningful.
+private let mut contention_tally: PeerTally;
 private let mut contention_failed_removes: AtomicWord;
-// 1 while the secondary is inside its cycle loop. Core 0 waits for this
-// rather than for a duration, because "the secondary is between an
-// allocate and its free" and "the secondary has stopped" are different
-// states and only one of them makes live_count meaningful.
-private let mut contention_secondary_active: AtomicWord;
-// The secondary's count at the moment the primary stopped competing.
+// The slowest peer's count at the moment the primary stopped competing.
 private let mut contention_overlap: AtomicWord;
 
 private fn contention_armed_address() -> *AtomicWord {
     return &contention_armed;
 }
 
-private fn contention_primary_cycles_address() -> *AtomicWord {
-    return &contention_primary_cycles;
-}
-
-private fn contention_secondary_cycles_address() -> *AtomicWord {
-    return &contention_secondary_cycles;
-}
-
 private fn contention_failed_removes_address() -> *AtomicWord {
     return &contention_failed_removes;
-}
-
-private fn contention_secondary_active_address() -> *AtomicWord {
-    return &contention_secondary_active;
 }
 
 private fn contention_overlap_address() -> *AtomicWord {
@@ -211,8 +200,9 @@ private fn contention_cycle() -> bool !{unsafe} {
 // Called by the secondary core from its idle loop. Spins while core 0 keeps
 // it armed, so the two are inside the same lock at the same time rather
 // than taking turns a timer tick apart.
-fn pool_contention_secondary_run() !{unsafe} {
-    atomic_word_store(contention_secondary_active_address(), 1);
+fn pool_contention_secondary_run(cpu: usize) !{unsafe} {
+    if (peer_tally_is_peer(&contention_tally, cpu) == false) { return; }
+    peer_tally_enter(&contention_tally, cpu);
     // Complete one cycle, then WAIT for the primary to have started.
     // GitHub issue #510: this is the second half of the start handshake
     // kernel/kernel/fd_table.tkb's probe already had and this one did not.
@@ -226,29 +216,22 @@ fn pool_contention_secondary_run() !{unsafe} {
     // cores never shared. A cycle that comes back false took no slot and
     // is not a round, so this retries rather than publishing one it did
     // not complete.
-    while (atomic_word_load(contention_secondary_cycles_address()) == 0 &&
+    while (peer_tally_count(&contention_tally, cpu) == 0 &&
            atomic_word_load(contention_armed_address()) == 1) {
-        if (contention_cycle()) {
-            atomic_word_fetch_add(
-                contention_secondary_cycles_address(), 1);
-        }
+        if (contention_cycle()) { peer_tally_add(&contention_tally, cpu); }
     }
-    while (atomic_word_load(contention_primary_cycles_address()) == 0 &&
+    while (peer_tally_count(&contention_tally, 0) == 0 &&
            atomic_word_load(contention_armed_address()) == 1) { }
     // The SAME count the primary does, so the verdict is not a comparison
     // between two numbers that depend on how fast each core happened to
     // run. Stops early only if the primary gives up on it.
-    while (atomic_word_load(contention_secondary_cycles_address()) <
-               CONTENTION_ROUNDS &&
+    while (peer_tally_count(&contention_tally, cpu) < CONTENTION_ROUNDS &&
            atomic_word_load(contention_armed_address()) == 1) {
-        if (contention_cycle()) {
-            atomic_word_fetch_add(
-                contention_secondary_cycles_address(), 1);
-        }
+        if (contention_cycle()) { peer_tally_add(&contention_tally, cpu); }
     }
     // Released AFTER the last cycle's free, so a core 0 that sees zero
     // here knows every slot this core took is back.
-    atomic_word_store(contention_secondary_active_address(), 0);
+    peer_tally_leave(&contention_tally, cpu);
 }
 
 fn pool_contention_is_armed() -> bool !{unsafe} {
@@ -268,10 +251,8 @@ private fn contention_report(stage: *u8) !{unsafe} {
     kernel_boot_log("pool contention stage: ");
     kernel_boot_log(stage);
     kernel_boot_log("\n");
-    kernel_boot_log("pool contention counts: primary=");
-    uart_put_udec(atomic_word_load(contention_primary_cycles_address()));
-    kernel_boot_log(" secondary=");
-    uart_put_udec(atomic_word_load(contention_secondary_cycles_address()));
+    kernel_boot_log("pool contention counts:");
+    peer_tally_put_counts(&contention_tally);
     kernel_boot_log(" refused=");
     uart_put_udec(atomic_word_load(contention_failed_removes_address()));
     kernel_boot_log(" live=");
@@ -324,103 +305,66 @@ fn pool_contention_probe() -> bool !{unsafe} {
     uart_put_udec(read_cntfrq() as usize);
     kernel_boot_log("\n");
 
+    peer_tally_reset(&contention_tally, kernel_online_core_count());
+    atomic_word_store(contention_overlap_address(), 0);
     atomic_word_store(contention_armed_address(), 1);
 
-    // Wait for the secondary to be IN, before starting. Arming and
+    // Wait for every peer to be IN, before starting. Arming and
     // immediately running was the first version and it measured nothing:
-    // the secondary sits in `wfi` and wakes only on its own timer, so a
-    // window shorter than one tick period closed before it ever looked.
-    // 4096 rounds take far less than the 15.6 ms tick, so `secondary=0`
-    // was the honest answer to a question that had not been asked.
+    // a peer sits in `wfi` and wakes only on its own timer, so a window
+    // shorter than one tick period closed before it ever looked. 4096
+    // rounds take far less than the 15.6 ms tick, so `secondary=0` was the
+    // honest answer to a question that had not been asked.
     //
-    // Waiting for the flag rather than for a duration is what makes the
-    // overlap real instead of likely. Bounded by the counter so a
-    // secondary that never arrives fails the probe rather than hanging
-    // the boot; the bound is several tick periods, since one is the
-    // minimum wait by construction.
-    let mut entry_window = peer_tick_window_policy(
-        peer_tick_window_peer(), PeerTickPolicy::Entry);
-    let mut entered: bool = false;
-    while (entered == false && peer_tick_window_open(entry_window)) {
-        // A COMPLETED cycle, not the `active` flag. GitHub issue #510:
-        // `active` is a level the secondary clears on its way out, so
-        // polling it asks whether that core is inside the loop at this
-        // instant, and the question this gate needs answered is whether it
-        // was ever there. The cycle count only grows.
-        if (atomic_word_load(contention_secondary_cycles_address()) >= 1) {
-            entered = true;
-        }
-    }
-    peer_tick_window_end(entry_window);
-    if (entered == false) {
+    // A COMPLETED cycle on each peer, not the `active` flag. GitHub issue
+    // #510: `active` is a level a peer clears on its way out, so polling it
+    // asks whether that core is inside the loop at this instant, and the
+    // question this gate needs answered is whether it was ever there. Each
+    // wait is bounded by that peer's own ticks, so one that never arrives
+    // fails the probe rather than hanging the boot.
+    if (peer_tally_peers_reached(&contention_tally, 1,
+                                 PeerTickPolicy::Entry) == false) {
         atomic_word_store(contention_armed_address(), 0);
         contention_report("secondary-never-entered" as *u8);
         return false;
     }
 
     for round: usize in 0..<CONTENTION_ROUNDS {
-        if (contention_cycle()) {
-            atomic_word_fetch_add(
-                contention_primary_cycles_address(), 1);
-        }
+        if (contention_cycle()) { peer_tally_add(&contention_tally, 0); }
     }
 
-    // THE OVERLAP, read the moment the primary stops competing: how many
-    // of the secondary's cycles happened while the primary was also inside
-    // this lock. Reported rather than asserted at a value -- it is 4110 on
-    // QEMU and 44 on RPi5, because the lock excludes without arbitrating
-    // and the emulator supplies a fairness the hardware does not. What is
-    // asserted is only that it is not zero, which is what makes the run
-    // contention rather than two cores taking turns.
+    // THE OVERLAP, read the moment the primary stops competing: the least
+    // number of cycles any peer completed while the primary was also inside
+    // this lock. Reported rather than asserted at a value -- with two cores
+    // it was 4110 on QEMU and 44 on RPi5, because the lock excludes without
+    // arbitrating and the emulator supplies a fairness the hardware does
+    // not. What is asserted is only that it is not zero, which is what
+    // makes the run contention among every online core rather than cores
+    // taking turns.
     atomic_word_store(contention_overlap_address(),
-        atomic_word_load(contention_secondary_cycles_address()));
+                      peer_tally_peers_least(&contention_tally));
 
-    // Now let the secondary reach the same count, unimpeded. Bounded, so a
-    // secondary that cannot get there fails the probe instead of hanging
-    // the boot -- generous, because how long this takes is exactly the
-    // thing that varies between a board and an emulator.
-    let mut finish_window = peer_tick_window_policy(
-        peer_tick_window_peer(), PeerTickPolicy::Finish);
-    let mut finished: bool = false;
-    while (finished == false && peer_tick_window_open(finish_window)) {
-        if (atomic_word_load(contention_secondary_cycles_address()) >=
-                CONTENTION_ROUNDS) {
-            finished = true;
-        }
-    }
-    peer_tick_window_end(finish_window);
+    // Now let every peer reach the same count, unimpeded. Bounded, so a
+    // peer that cannot get there fails the probe instead of hanging the
+    // boot -- generous, because how long this takes is exactly the thing
+    // that varies between a board and an emulator.
+    let finished: bool = peer_tally_peers_reached(
+        &contention_tally, CONTENTION_ROUNDS, PeerTickPolicy::Finish);
     atomic_word_store(contention_armed_address(), 0);
     if (finished == false) {
         contention_report("secondary-never-finished" as *u8);
         return false;
     }
 
-    // Wait for the secondary to actually be out of its loop, rather than
-    // for a duration. It may be holding a slot right now, and freeing the
+    // Wait for every peer to actually be out of its loop, rather than for
+    // a duration. One may be holding a slot right now, and freeing the
     // floor and reading live_count underneath it would report a leak that
-    // is really a core still working.
-    //
-    // Bounded by the COUNTER, not by a spin count. GitHub issue #510: the
-    // bound here was 4096 empty iterations, which this core burns through
-    // in microseconds -- so on a busy host it expired before core 1 had
-    // been scheduled at all, and a healthy kernel failed. Every other wait
-    // now uses peer ticks so host starvation cannot consume the budget.
-    //
-    // And it REPORTS. This was the one exit path in this file that
-    // returned false in silence, which is the defect this file's own
-    // report comment says it had already fixed -- observed as a boot whose
-    // whole record of the probe was the word `failed`, with no stage line
-    // and no counts anywhere above it.
-    let mut settle_window = peer_tick_window_policy(
-        peer_tick_window_peer(), PeerTickPolicy::Entry);
-    let mut settled: bool = false;
-    while (settled == false && peer_tick_window_open(settle_window)) {
-        if (atomic_word_load(contention_secondary_active_address()) == 0) {
-            settled = true;
-        }
-    }
-    peer_tick_window_end(settle_window);
-    if (settled == false) {
+    // is really a core still working. Bounded by each peer's ticks, not by
+    // a spin count (GitHub issue #510: 4096 empty iterations expired on a
+    // busy host before core 1 had been scheduled at all), and it REPORTS:
+    // this was once the one exit path here that returned false in silence.
+    if (peer_tally_peers_left(&contention_tally,
+                              PeerTickPolicy::Entry) == false) {
         contention_report("secondary-never-left" as *u8);
         return false;
     }
@@ -433,11 +377,11 @@ fn pool_contention_probe() -> bool !{unsafe} {
     }
 
     contention_report("complete" as *u8);
-    let primary: usize = atomic_word_load(contention_primary_cycles_address());
-    let secondary: usize = atomic_word_load(contention_secondary_cycles_address());
+    let primary: usize = peer_tally_count(&contention_tally, 0);
+    let peers_least: usize = peer_tally_peers_least(&contention_tally);
     let refused: usize = atomic_word_load(contention_failed_removes_address());
     let overlap: usize = atomic_word_load(contention_overlap_address());
     let live: usize = contention_live_count();
-    return primary == CONTENTION_ROUNDS && secondary == CONTENTION_ROUNDS &&
+    return primary == CONTENTION_ROUNDS && peers_least == CONTENTION_ROUNDS &&
            overlap > 0 && refused == 0 && live == 0;
 }

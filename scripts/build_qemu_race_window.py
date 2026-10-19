@@ -45,26 +45,26 @@ WINDOWS = {
     # Holding the primary here exposes the old restart-from-zero loop.
     "678": {
         "spin": ("kernel/freelist_contention_evidence.tkb",
-                 "    // With per-round rendezvous this is the secondary completion count at\n"
-                 "    // the instant the primary finishes, not a scheduler-granularity metric.\n",
+                 "    // With per-round rendezvous this is the slowest peer's completion count\n"
+                 "    // at the instant the primary finishes, not a scheduler-granularity\n"
+                 "    // metric.\n",
                  False),
         "check": ("kernel/freelist_contention_evidence.tkb",
                   '    // The idle loop may enter again before the primary disarms this phase.\n'
                   "    // Keep the round in the phase's published count, not a fresh local loop:\n"
                   '    // an old rendezvous sequence must never authorize another allocation.\n'
-                  '    while (atomic_word_load(freelist_probe_secondary_address()) <\n'
+                  '    while (peer_tally_count(&freelist_probe_tally, cpu) <\n'
                   '               FREELIST_CONTENTION_ROUNDS &&\n'
                   '           atomic_word_load(freelist_probe_armed_address()) == 1) {\n'
-                  '        let sequence: usize =\n'
-                  '            atomic_word_load(freelist_probe_secondary_address()) + 1;\n'
-                  '        if (freelist_probe_cycle(false, sequence)) {\n'
-                  '            atomic_word_fetch_add(freelist_probe_secondary_address(), 1);\n'
+                  '        let sequence: usize = peer_tally_count(&freelist_probe_tally, cpu) + 1;\n'
+                  '        if (freelist_probe_cycle(cpu, sequence)) {\n'
+                  '            peer_tally_add(&freelist_probe_tally, cpu);\n'
                   '        }\n'
                   '    }\n',
                   '    for round: usize in 0..<FREELIST_CONTENTION_ROUNDS {\n'
                   '        if (atomic_word_load(freelist_probe_armed_address()) == 1) {\n'
-                  '            if (freelist_probe_cycle(false, round + 1)) {\n'
-                  '                atomic_word_fetch_add(freelist_probe_secondary_address(), 1);\n'
+                  '            if (freelist_probe_cycle(cpu, round + 1)) {\n'
+                  '                peer_tally_add(&freelist_probe_tally, cpu);\n'
                   '            }\n'
                   '        }\n'
                   '    }\n'),
@@ -231,6 +231,9 @@ PROBE_ENTRIES = (
     "world_stop_peer_probe", "pool_walk_contention", "ext2_mutation_contention",
     "signal_contention",
 )
+# GitHub issue #756: every probe runs on every online peer and takes the
+# calling core's id.
+PROBE_ARGS = {name: "core_id" for name in PROBE_ENTRIES}
 PROBE_ENTRY_DELAY = (
     "                    let saved_probe_irq: usize = mutex_irq_save();\n"
     "                    let delayed_probe_entry: i64 = read_cntpct();\n"
@@ -242,8 +245,8 @@ WINDOWS["651"] = {
     "spin": None,
     "prepare": [
         ("arch/arm64/kernel/secondary.tkb",
-         f"                    {name}_secondary_run();\n",
-         PROBE_ENTRY_DELAY + f"                    {name}_secondary_run();\n")
+         f"                    {name}_secondary_run({PROBE_ARGS.get(name, '')});\n",
+         PROBE_ENTRY_DELAY + f"                    {name}_secondary_run({PROBE_ARGS.get(name, '')});\n")
         for name in PROBE_ENTRIES
     ],
     "check": ('lib/peer_tick_window.tkb',
@@ -256,8 +259,8 @@ WINDOWS["651-no-peer"] = {
     "spin": None,
     "check": [
         ("arch/arm64/kernel/secondary.tkb",
-         f"                    {name}_secondary_run();\n",
-         f"                    if (cpu_id() == 0) {{ {name}_secondary_run(); }}\n")
+         f"                    {name}_secondary_run({PROBE_ARGS.get(name, '')});\n",
+         f"                    if (cpu_id() == 0) {{ {name}_secondary_run({PROBE_ARGS.get(name, '')}); }}\n")
         for name in PROBE_ENTRIES
     ] + [('kernel/occupancy_drain_evidence.tkb',
   '    match world_stop_begin(\n'

@@ -16,15 +16,15 @@
 //
 // WHAT THIS PROBE MAKES HAPPEN
 //
-// The secondary enters the region and STAYS, holding it until this core
-// says otherwise. So the first drain cannot succeed, whatever its spin
+// Every online peer enters the region and STAYS, holding it until this
+// core says otherwise. So the first drain cannot succeed, whatever its spin
 // bound is -- which is the point, and the reason this probe is not
 // timing-sensitive on either target. A test that made the drain expire by
 // racing it would be a different spin count on RPi5 than on QEMU and would
 // be exactly the kind of load-dependent verdict issue #510 was about.
 //
-// Then this core releases the secondary, waits for it to have provably
-// left, and drains again with the SAME bound. Same call, same number,
+// Then this core releases the peers one at a time, waits for each to have
+// provably left, and drains again with the SAME bound after each. Same call, same number,
 // opposite answer, and only the second one produces a proof -- which is
 // what "the caller refuses to tear down on Busy" means when the refusal is
 // a type rather than a branch.
@@ -53,6 +53,7 @@
 //   every sibling probe owns its own instance.
 
 use "kernel/lib/peer_tick_window.tkb";
+use "kernel/lib/peer_round.tkb";
 use "kernel/lib/occupancy.tkb";
 use "kernel/lib/execution_model.tkb";
 
@@ -65,31 +66,20 @@ const WORLD_STOP_PROBE_SPINS: usize = 10000000;
 
 private let mut occupancy_probe_region: Occupancy;
 private let mut occupancy_probe_armed: AtomicWord;
-// A LATCH, set by the secondary when it is inside and never cleared by it.
-// GitHub issue #510: a level flag that the other core clears on its way
-// out cannot answer "was it ever there", which is the question a report
-// that has to tell a harness fault from a kernel one is asking.
-private let mut occupancy_probe_entered: AtomicWord;
+// Per core, a LATCH: 1 once that peer is inside, 2 once it has left, never
+// cleared by the peer. GitHub issue #510: a level flag that the other core
+// clears on its way out cannot answer "was it ever there", which is the
+// question a report that has to tell a harness fault from a kernel one is
+// asking. GitHub issue #756: one word per online peer.
+private let mut occupancy_probe_tally: PeerTally;
+// Peers 1..release may leave.
 private let mut occupancy_probe_release: AtomicWord;
-private let mut occupancy_probe_left: AtomicWord;
 private let mut occupancy_probe_teardowns: usize;
 private let mut world_stop_probe_inspections: usize;
 private let mut world_stop_stale_probe_controller: WorldStop;
 
 private fn occupancy_probe_armed_address() -> *AtomicWord {
     return &occupancy_probe_armed;
-}
-
-private fn occupancy_probe_entered_address() -> *AtomicWord {
-    return &occupancy_probe_entered;
-}
-
-private fn occupancy_probe_release_address() -> *AtomicWord {
-    return &occupancy_probe_release;
-}
-
-private fn occupancy_probe_left_address() -> *AtomicWord {
-    return &occupancy_probe_left;
 }
 
 fn occupancy_drain_is_armed() -> bool !{unsafe} {
@@ -99,17 +89,22 @@ fn occupancy_drain_is_armed() -> bool !{unsafe} {
 // Enter, announce, and HOLD. Linear, so the leave is checked on every path
 // out of this function including the disarmed one -- which is the half of
 // the protocol a bare flag is worst at, and the half this file exists to
-// exercise.
-fn occupancy_drain_secondary_run() !{unsafe} {
+// exercise. Every online peer runs this; peer `cpu` holds until core 0 has
+// released peers 1..cpu.
+fn occupancy_drain_secondary_run(cpu: usize) !{unsafe} {
+    if (peer_tally_is_peer(&occupancy_probe_tally, cpu) == false) { return; }
+    // Once per probe: the idle loop re-enters while core 0 still drains,
+    // and a second visit would make the final drain Busy.
+    if (peer_tally_count(&occupancy_probe_tally, cpu) != 0) { return; }
     let visit = occupancy_enter(&occupancy_probe_region);
-    atomic_word_store(occupancy_probe_entered_address(), 1);
+    peer_tally_set(&occupancy_probe_tally, cpu, 1);
     // Held until core 0 says otherwise, or until it gives up on this probe
-    // entirely -- a secondary that spun here after an abandoned probe would
-    // hold the region for the rest of the boot.
-    while (atomic_word_load(occupancy_probe_release_address()) == 0 &&
+    // entirely -- a peer that spun here after an abandoned probe would hold
+    // the region for the rest of the boot.
+    while (atomic_word_load(&occupancy_probe_release) < cpu &&
            atomic_word_load(occupancy_probe_armed_address()) == 1) { }
     occupancy_leave(visit, &occupancy_probe_region);
-    atomic_word_store(occupancy_probe_left_address(), 1);
+    peer_tally_set(&occupancy_probe_tally, cpu, 2);
 }
 
 private fn occupancy_drain_report(stage: *u8, busy: usize, empty: usize)
@@ -117,10 +112,11 @@ private fn occupancy_drain_report(stage: *u8, busy: usize, empty: usize)
     kernel_boot_log("occupancy drain stage: ");
     kernel_boot_log(stage);
     kernel_boot_log("\n");
-    kernel_boot_log("occupancy drain counts: entered=");
-    uart_put_udec(atomic_word_load(occupancy_probe_entered_address()));
-    kernel_boot_log(" left=");
-    uart_put_udec(atomic_word_load(occupancy_probe_left_address()));
+    // Per peer, 1 = entered and holding, 2 = left.
+    kernel_boot_log("occupancy drain counts:");
+    peer_tally_put_counts(&occupancy_probe_tally);
+    kernel_boot_log(" released=");
+    uart_put_udec(atomic_word_load(&occupancy_probe_release));
     kernel_boot_log(" busy=");
     uart_put_udec(busy);
     kernel_boot_log(" empty=");
@@ -140,25 +136,34 @@ private fn occupancy_probe_teardown(proof: borrow Quiesced[region]) {
     occupancy_probe_teardowns = occupancy_probe_teardowns + 1;
 }
 
+// One drain with the probe's bound: true when it came back Empty.
+private fn occupancy_probe_drain_once() -> bool !{unsafe} {
+    match occupancy_drain(&occupancy_probe_region,
+                          OCCUPANCY_PROBE_DRAIN_SPINS) {
+        OccupancyDrainResult::Busy => { return false; }
+        OccupancyDrainResult::Empty(proof) => {
+            // Before the last peer is released this is a peer that left
+            // without being asked, which no path in this file does. The
+            // proof is still spent on the teardown so the count tells an
+            // early drain that tore down apart from one that did not.
+            occupancy_probe_teardown(proof);
+            quiesced_release(proof);
+            return true;
+        }
+    }
+}
+
 fn occupancy_drain_probe() -> bool !{unsafe} {
-    atomic_word_store(occupancy_probe_entered_address(), 0);
-    atomic_word_store(occupancy_probe_release_address(), 0);
-    atomic_word_store(occupancy_probe_left_address(), 0);
+    atomic_word_store(&occupancy_probe_release, 0);
     occupancy_probe_teardowns = 0;
+    peer_tally_reset(&occupancy_probe_tally, kernel_online_core_count());
+    let peers: usize = peer_tally_peers(&occupancy_probe_tally);
     atomic_word_store(occupancy_probe_armed_address(), 1);
 
     // Bounded in TIME here, unlike the drain itself: this file has a clock
     // and occupancy.tkb deliberately does not.
-    let mut entry_window = peer_tick_window_policy(
-        peer_tick_window_peer(), PeerTickPolicy::Entry);
-    let mut entered: bool = false;
-    while (entered == false && peer_tick_window_open(entry_window)) {
-        if (atomic_word_load(occupancy_probe_entered_address()) == 1) {
-            entered = true;
-        }
-    }
-    peer_tick_window_end(entry_window);
-    if (entered == false) {
+    if (peer_tally_peers_reached(&occupancy_probe_tally, 1,
+                                 PeerTickPolicy::Entry) == false) {
         atomic_word_store(occupancy_probe_armed_address(), 0);
         // The distinction issue #508 asked for. A drain that comes back
         // Empty because nothing was ever inside is a HARNESS fault and
@@ -168,60 +173,40 @@ fn occupancy_drain_probe() -> bool !{unsafe} {
         return false;
     }
 
-    // Drain one: the region is occupied and stays occupied, so the bound
-    // must expire.
+    // GitHub issue #756: every online peer holds the region, and core 0
+    // lets them go one at a time. Each drain while ANY peer is still
+    // inside must expire; only the drain after the last has left may
+    // succeed. With one peer this is the original two drains.
     let mut busy_seen: usize = 0;
     let mut empty_seen: usize = 0;
-    match occupancy_drain(&occupancy_probe_region,
-                          OCCUPANCY_PROBE_DRAIN_SPINS) {
-        OccupancyDrainResult::Busy => { busy_seen = busy_seen + 1; }
-        OccupancyDrainResult::Empty(proof) => {
-            // The secondary left without being asked, which no path in this
-            // file does. Reported rather than ignored, and the proof is
-            // still spent on the teardown so the count below tells the two
-            // apart: an early drain that tore down is a different failure
-            // from one that did not.
-            empty_seen = empty_seen + 1;
-            occupancy_probe_teardown(proof);
-            quiesced_release(proof);
+    for cpu: usize in 1..<KERNEL_MAX_CORES {
+        if (cpu <= peers) {
+            if (occupancy_probe_drain_once()) { empty_seen = empty_seen + 1; }
+            else { busy_seen = busy_seen + 1; }
+            // Let peer `cpu` go, and wait until it has provably left -- not
+            // for a duration, because "long enough" is the assumption this
+            // whole file is about.
+            atomic_word_store(&occupancy_probe_release, cpu);
+            if (peer_tally_peer_reached(&occupancy_probe_tally, cpu, 2,
+                                        PeerTickPolicy::Entry) == false) {
+                atomic_word_store(occupancy_probe_armed_address(), 0);
+                occupancy_drain_report("secondary-never-left" as *u8,
+                                       busy_seen, empty_seen);
+                return false;
+            }
         }
     }
 
-    // Let it go, and wait until it has provably left -- not for a duration,
-    // because "long enough" is the assumption this whole file is about.
-    atomic_word_store(occupancy_probe_release_address(), 1);
-    let mut leave_window = peer_tick_window_policy(
-        peer_tick_window_peer(), PeerTickPolicy::Entry);
-    let mut left: bool = false;
-    while (left == false && peer_tick_window_open(leave_window)) {
-        if (atomic_word_load(occupancy_probe_left_address()) == 1) {
-            left = true;
-        }
-    }
-    peer_tick_window_end(leave_window);
-    if (left == false) {
-        atomic_word_store(occupancy_probe_armed_address(), 0);
-        occupancy_drain_report("secondary-never-left" as *u8, busy_seen,
-                               empty_seen);
-        return false;
-    }
-
-    // Drain two: same call, same bound, and now it must succeed.
-    match occupancy_drain(&occupancy_probe_region,
-                          OCCUPANCY_PROBE_DRAIN_SPINS) {
-        OccupancyDrainResult::Busy => { busy_seen = busy_seen + 1; }
-        OccupancyDrainResult::Empty(proof) => {
-            empty_seen = empty_seen + 1;
-            occupancy_probe_teardown(proof);
-            quiesced_release(proof);
-        }
-    }
+    // The last drain: same call, same bound, and now it must succeed.
+    if (occupancy_probe_drain_once()) { empty_seen = empty_seen + 1; }
+    else { busy_seen = busy_seen + 1; }
     atomic_word_store(occupancy_probe_armed_address(), 0);
 
     occupancy_drain_report("complete" as *u8, busy_seen, empty_seen);
-    // One of each, in that order, and exactly one teardown -- the Busy arm
-    // had no proof to spend, which is the property the token exists for.
-    return busy_seen == 1 && empty_seen == 1 &&
+    // One Busy per peer still holding, then one Empty, and exactly one
+    // teardown -- the Busy arm had no proof to spend, which is the
+    // property the token exists for.
+    return peers >= 1 && busy_seen == peers && empty_seen == 1 &&
            occupancy_probe_teardowns == 1;
 }
 
@@ -362,19 +347,34 @@ fn world_stop_probe() -> bool !{unsafe} {
 // in bits [12:10] of an SGI, so a dispatcher comparing the raw word saw 1
 // from core 0 and 0x401 from core 1 -- and every stop a peer began went
 // unacknowledged. That hid until a four-core churn run rolled the ASID
-// counter over on a peer. Here core 1 begins a two-core stop and core 0,
-// waiting with interrupts open, must acknowledge it.
+// counter over on a peer. GitHub issue #756: every online peer in turn
+// begins a stop of every online core, and core 0 -- waiting with
+// interrupts open -- and the other peers, idle, must acknowledge it. In
+// turn rather than at once: the stop is one-deep and refuses a second
+// initiator with Busy, which is a different property.
 private let mut world_stop_peer_probe_armed: AtomicWord;
-// 0 not run, 1 Complete, 2 Partial, 3 Busy.
-private let mut world_stop_peer_probe_result: AtomicWord;
+// The peer whose turn it is.
+private let mut world_stop_peer_probe_turn: AtomicWord;
+// Per peer: 1 Complete, 2 Partial, 3 Busy, 0 not run.
+private let mut world_stop_peer_probe_result: PeerTally;
 
 fn world_stop_peer_probe_is_armed() -> bool !{unsafe} {
     return atomic_word_load(&world_stop_peer_probe_armed) == 1;
 }
 
-fn world_stop_peer_probe_secondary_run() !{unsafe} {
+// Every online peer runs this from its idle loop; only the peer whose turn
+// it is begins a stop.
+fn world_stop_peer_probe_secondary_run(cpu: usize) !{unsafe} {
+    if (peer_tally_is_peer(&world_stop_peer_probe_result, cpu) == false) {
+        return;
+    }
+    if (atomic_word_load(&world_stop_peer_probe_turn) != cpu ||
+        peer_tally_count(&world_stop_peer_probe_result, cpu) != 0) {
+        return;
+    }
+    let online: usize = peer_tally_online(&world_stop_peer_probe_result);
     let mut result: usize = 0;
-    match world_stop_begin(&kernel_world_stop, 2, WORLD_STOP_PROBE_SPINS) {
+    match world_stop_begin(&kernel_world_stop, online, WORLD_STOP_PROBE_SPINS) {
         WorldStopResult::Busy => { result = 3; }
         WorldStopResult::Partial(partial) => {
             world_stop_partial_release(partial, &kernel_world_stop);
@@ -385,25 +385,38 @@ fn world_stop_peer_probe_secondary_run() !{unsafe} {
             result = 1;
         }
     }
-    atomic_word_store(&world_stop_peer_probe_result, result);
-    atomic_word_store(&world_stop_peer_probe_armed, 0);
+    peer_tally_set(&world_stop_peer_probe_result, cpu, result);
 }
 
 fn world_stop_peer_probe() -> bool !{unsafe} {
-    atomic_word_store(&world_stop_peer_probe_result, 0);
-    atomic_word_store(&world_stop_peer_probe_armed, 1);
-    let mut window = peer_tick_window_policy(
-        peer_tick_window_peer(), PeerTickPolicy::Complete);
-    while (peer_tick_window_open(window) &&
-           atomic_word_load(&world_stop_peer_probe_armed) == 1) { }
-    peer_tick_window_end(window);
-    atomic_word_store(&world_stop_peer_probe_armed, 0);
-    let result: usize = atomic_word_load(&world_stop_peer_probe_result);
-    kernel_boot_log("world stop from a peer counts: result=" as *u8);
-    uart_put_udec(result);
+    peer_tally_reset(&world_stop_peer_probe_result, kernel_online_core_count());
+    let peers: usize = peer_tally_peers(&world_stop_peer_probe_result);
+    let mut complete: usize = 0;
+    let mut finished: bool = peers >= 1;
+    for cpu: usize in 1..<KERNEL_MAX_CORES {
+        if (cpu <= peers && finished) {
+            atomic_word_store(&world_stop_peer_probe_turn, cpu);
+            atomic_word_store(&world_stop_peer_probe_armed, 1);
+            finished = peer_tally_peer_reached(&world_stop_peer_probe_result,
+                                               cpu, 1, PeerTickPolicy::Complete);
+            atomic_word_store(&world_stop_peer_probe_armed, 0);
+            if (peer_tally_count(&world_stop_peer_probe_result, cpu) == 1) {
+                complete = complete + 1;
+            }
+        }
+    }
+    atomic_word_store(&world_stop_peer_probe_turn, 0);
+    kernel_boot_log("world stop from a peer counts: complete=" as *u8);
+    if (complete == peers) {
+        kernel_boot_log("every-peer" as *u8);
+    } else {
+        uart_put_udec(complete);
+        kernel_boot_log(" of " as *u8);
+        uart_put_udec(peers);
+    }
     kernel_boot_log("\n" as *u8);
-    if (result == 0) {
+    if (finished == false) {
         kernel_boot_log("world stop from a peer stage: secondary-never-finished\n");
     }
-    return result == 1;
+    return finished && complete == peers;
 }

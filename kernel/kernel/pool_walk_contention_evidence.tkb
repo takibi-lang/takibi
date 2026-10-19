@@ -42,6 +42,7 @@
 // - The verdict is a LOWER BOUND on a real machine, like every QEMU
 //   concurrency result -- see kernel/CONCURRENCY.md.
 use "kernel/lib/peer_tick_window.tkb";
+use "kernel/lib/peer_round.tkb";
 use "kernel/lib/execution_model.tkb";
 
 const POOL_WALK_ROUNDS: usize = 64;
@@ -61,16 +62,17 @@ private let mut pool_walk_ready: bool = false;
 private let mut pool_walk_floor: RegionHeld(PoolWalkItem);
 
 private let mut pool_walk_armed: AtomicWord;
-private let mut pool_walk_active: AtomicWord;
 private let mut pool_walk_entries: AtomicWord;
 // The rendezvous, as round numbers (GitHub issue #510): core 0 publishes
 // `seq`, the walker answers `held_seq` holding that round's reference,
 // core 0 answers `released_seq` once it is freed, and the walker answers
 // `probed_seq` once it has asked.
 private let mut pool_walk_seq: AtomicWord;
-private let mut pool_walk_held_seq: AtomicWord;
+// Per peer (GitHub issue #756: every online peer walks): the last round
+// whose record it holds, and the last it probed after the free.
+private let mut pool_walk_held_seq: PeerTally;
 private let mut pool_walk_released_seq: AtomicWord;
-private let mut pool_walk_probed_seq: AtomicWord;
+private let mut pool_walk_probed_seq: PeerTally;
 // The round's record address, published by core 0.
 private let mut pool_walk_target: AtomicWord;
 
@@ -81,12 +83,9 @@ private let mut pool_walk_floor_bad: AtomicWord;
 private let mut pool_walk_steps: AtomicWord;
 
 private fn pool_walk_armed_address() -> *AtomicWord { return &pool_walk_armed; }
-private fn pool_walk_active_address() -> *AtomicWord { return &pool_walk_active; }
 private fn pool_walk_entries_address() -> *AtomicWord { return &pool_walk_entries; }
 private fn pool_walk_seq_address() -> *AtomicWord { return &pool_walk_seq; }
-private fn pool_walk_held_seq_address() -> *AtomicWord { return &pool_walk_held_seq; }
 private fn pool_walk_released_seq_address() -> *AtomicWord { return &pool_walk_released_seq; }
-private fn pool_walk_probed_seq_address() -> *AtomicWord { return &pool_walk_probed_seq; }
 private fn pool_walk_target_address() -> *AtomicWord { return &pool_walk_target; }
 private fn pool_walk_rounds_met_address() -> *AtomicWord { return &pool_walk_rounds_met; }
 private fn pool_walk_refused_address() -> *AtomicWord { return &pool_walk_refused; }
@@ -192,7 +191,7 @@ fn pool_walk_contention_is_armed() -> bool !{unsafe} {
 
 // One enumeration with no lock. Every slot is validated under the lock;
 // the round's record is where this core stops and hands the round over.
-private fn pool_walk_once() !{unsafe} {
+private fn pool_walk_once(cpu: usize) !{unsafe} {
     let round: usize = atomic_word_load(pool_walk_seq_address());
     let target: usize = atomic_word_load(pool_walk_target_address());
     let mut cursor: usize = region_pool_first_unproven(&pool_walk_pool);
@@ -206,13 +205,13 @@ private fn pool_walk_once() !{unsafe} {
                 atomic_word_fetch_add(pool_walk_floor_bad_address(), 1);
             }
         } else if (round != 0 && cursor == target &&
-                   atomic_word_load(pool_walk_held_seq_address()) < round) {
+                   peer_tally_count(&pool_walk_held_seq, cpu) < round) {
             // THE RENDEZVOUS: the reference the walk obtained, held while
             // core 0 frees the record it names.
             let mut held: RegionHeld(PoolWalkItem) = pool_walk_held_at(cursor);
             if (region_held_address(held) != 0) {
                 crossed = true;
-                atomic_word_store(pool_walk_held_seq_address(), round);
+                peer_tally_set(&pool_walk_held_seq, cpu, round);
                 let mut window = peer_tick_window_policy(
                     peer_tick_window_peer(), PeerTickPolicy::Entry);
                 let mut released: bool = false;
@@ -231,20 +230,22 @@ private fn pool_walk_once() !{unsafe} {
                     }
                     atomic_word_fetch_add(pool_walk_rounds_met_address(), 1);
                 }
-                atomic_word_store(pool_walk_probed_seq_address(), round);
+                peer_tally_set(&pool_walk_probed_seq, cpu, round);
             }
         }
         cursor = region_pool_next_unproven(&pool_walk_pool, cursor);
     }
 }
 
-fn pool_walk_contention_secondary_run() !{unsafe} {
+// Every online peer runs this from its idle loop while the probe is armed.
+fn pool_walk_contention_secondary_run(cpu: usize) !{unsafe} {
+    if (peer_tally_is_peer(&pool_walk_held_seq, cpu) == false) { return; }
     atomic_word_fetch_add(pool_walk_entries_address(), 1);
-    atomic_word_store(pool_walk_active_address(), 1);
+    peer_tally_enter(&pool_walk_held_seq, cpu);
     while (atomic_word_load(pool_walk_armed_address()) == 1) {
-        pool_walk_once();
+        pool_walk_once(cpu);
     }
-    atomic_word_store(pool_walk_active_address(), 0);
+    peer_tally_leave(&pool_walk_held_seq, cpu);
 }
 
 // -- The churning core -------------------------------------------------
@@ -269,17 +270,11 @@ private fn pool_walk_report(stage: *u8) !{unsafe} {
 }
 
 // Wait, bounded by the peer's ticks, for the other core to reach `target`.
-private fn pool_walk_await(sequence_address: *AtomicWord, target: usize)
+// Every online peer's word in `tally` at `target`, each wait bounded by that
+// peer's own ticks.
+private fn pool_walk_await(tally: &mut PeerTally, target: usize)
         -> bool !{unsafe} {
-    let mut window = peer_tick_window_policy(
-        peer_tick_window_peer(), PeerTickPolicy::Entry);
-    while (peer_tick_window_open(window)) {
-        if (atomic_word_load(sequence_address) >= target) {
-            peer_tick_window_end(window); return true;
-        }
-    }
-    peer_tick_window_end(window);
-    return atomic_word_load(sequence_address) >= target;
+    return peer_tally_peers_reached(tally, target, PeerTickPolicy::Entry);
 }
 
 must_use variant PoolWalkRound { Met; Failed(*u8); }
@@ -292,12 +287,12 @@ private fn pool_walk_round(round: usize) -> PoolWalkRound !{unsafe} {
     atomic_word_store(pool_walk_target_address(), region_held_address(held));
     atomic_word_store(pool_walk_seq_address(), round);
     // The walker has to hold the reference BEFORE the record goes.
-    let walker_held: bool = pool_walk_await(pool_walk_held_seq_address(), round);
+    let walker_held: bool = pool_walk_await(&pool_walk_held_seq, round);
     let freed: bool = pool_walk_release(held);
     if (freed == false) { return PoolWalkRound::Failed("record-not-freed" as *u8); }
     if (walker_held == false) { return PoolWalkRound::Failed("walk-never-held-it" as *u8); }
     atomic_word_store(pool_walk_released_seq_address(), round);
-    if (pool_walk_await(pool_walk_probed_seq_address(), round) == false) {
+    if (pool_walk_await(&pool_walk_probed_seq, round) == false) {
         return PoolWalkRound::Failed("walk-never-probed-it" as *u8);
     }
     return PoolWalkRound::Met;
@@ -308,17 +303,29 @@ fn pool_walk_contention_probe() -> bool !{allocates, unsafe} {
         pool_walk_report("floor-not-taken" as *u8);
         return false;
     }
+    let online: usize = kernel_online_core_count();
+    peer_tally_reset(&pool_walk_held_seq, online);
+    peer_tally_reset(&pool_walk_probed_seq, online);
+    let peers: usize = peer_tally_peers(&pool_walk_held_seq);
     let entries_before: usize = atomic_word_load(pool_walk_entries_address());
     atomic_word_store(pool_walk_armed_address(), 1);
-    let mut entry_window = peer_tick_window_policy(
-        peer_tick_window_peer(), PeerTickPolicy::Entry);
-    let mut entered: bool = false;
-    while (entered == false && peer_tick_window_open(entry_window)) {
-        if (atomic_word_load(pool_walk_entries_address()) > entries_before) {
-            entered = true;
+    // Entries, a count that only grows: one per peer, each wait bounded by
+    // that peer's own ticks.
+    let mut entered: bool = peers > 0;
+    for cpu: usize in 1..<KERNEL_MAX_CORES {
+        if (cpu <= peers && entered) {
+            let mut entry_window = peer_tick_window_policy(cpu, PeerTickPolicy::Entry);
+            let mut started: bool = false;
+            while (started == false && peer_tick_window_open(entry_window)) {
+                if (atomic_word_load(pool_walk_entries_address()) >=
+                        entries_before + cpu) {
+                    started = true;
+                }
+            }
+            peer_tick_window_end(entry_window);
+            entered = started;
         }
     }
-    peer_tick_window_end(entry_window);
     if (entered == false) {
         atomic_word_store(pool_walk_armed_address(), 0);
         pool_walk_report("secondary-never-entered" as *u8);
@@ -339,15 +346,8 @@ fn pool_walk_contention_probe() -> bool !{allocates, unsafe} {
         }
     }
     atomic_word_store(pool_walk_armed_address(), 0);
-    let mut settle_window = peer_tick_window_policy(
-        peer_tick_window_peer(), PeerTickPolicy::Entry);
-    let mut settled: bool = false;
-    while (settled == false && peer_tick_window_open(settle_window)) {
-        if (atomic_word_load(pool_walk_active_address()) == 0) {
-            settled = true;
-        }
-    }
-    peer_tick_window_end(settle_window);
+    let settled: bool = peer_tally_peers_left(&pool_walk_held_seq,
+                                              PeerTickPolicy::Entry);
     if (rounds_ok == false) {
         pool_walk_report(round_stage);
         return false;
@@ -361,7 +361,8 @@ fn pool_walk_contention_probe() -> bool !{allocates, unsafe} {
     let refused: usize = atomic_word_load(pool_walk_refused_address());
     let admitted: usize = atomic_word_load(pool_walk_admitted_address());
     let floor_bad: usize = atomic_word_load(pool_walk_floor_bad_address());
-    if (met != POOL_WALK_ROUNDS) {
+    // Every round, every peer.
+    if (met != POOL_WALK_ROUNDS * peers) {
         kernel_boot_log("pool walk: a round ended without the walk holding the freed record's reference, so it proved nothing\n");
         return false;
     }
@@ -369,7 +370,7 @@ fn pool_walk_contention_probe() -> bool !{allocates, unsafe} {
         kernel_boot_log("pool walk: a walk's reference to a freed record was answered Held, which is the defect\n");
         return false;
     }
-    if (refused != POOL_WALK_ROUNDS) {
+    if (refused != POOL_WALK_ROUNDS * peers) {
         kernel_boot_log("pool walk: a freed record's reference was neither refused nor admitted\n");
         return false;
     }

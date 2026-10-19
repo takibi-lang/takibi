@@ -1,22 +1,31 @@
-// Two-core evidence for the one-shot gate used by network-driver init.
-// The first phase deterministically reproduces the old check-then-set race;
-// the second starts from the same rendezvous and uses production InitOnce.
+// Every-online-core evidence for the one-shot gate used by network-driver
+// init (two cores until GitHub issue #756; two is now the degenerate case).
+// The first phase deterministically reproduces the old check-then-set race:
+// every online core checks before any sets, so every one of them believes it
+// initialized. The second starts from the same rendezvous and uses
+// production InitOnce, which must admit exactly one.
 //
-// Current limitations (2026-09-12): one primary and one secondary participate.
-// secondary.tkb admits only core 1 to this probe even when more CPUs are
-// online.
+// Current limitations (2026-10-19): the participants are the online prefix
+// (kernel_online_core_count) at the start of the probe.
 use "kernel/lib/peer_tick_window.tkb";
+use "kernel/lib/peer_round.tkb";
 use "kernel/lib/execution_model.tkb";
 use "kernel/lib/init_once.tkb";
 
 private let mut init_once_probe_gate: InitOnce;
 private let mut init_once_probe_armed: AtomicWord;
 private let mut init_once_probe_phase: AtomicWord;
+// Bumped by core 0 for every phase, so a peer runs each phase once however
+// often its idle loop re-enters while the phase is armed.
+private let mut init_once_probe_sequence: AtomicWord;
+// Arrivals at the release point, core 0 included.
 private let mut init_once_probe_arrived: AtomicWord;
 private let mut init_once_probe_release: AtomicWord;
-private let mut init_once_probe_primary_won: AtomicWord;
-private let mut init_once_probe_secondary_won: AtomicWord;
-private let mut init_once_probe_secondary_active: AtomicWord;
+// Per core: whether that core believes it initialized (count), and whether
+// it is inside the run function (active).
+private let mut init_once_probe_won: PeerTally;
+// Per core: the last phase sequence it served.
+private let mut init_once_probe_served: PeerTally;
 private let mut init_once_probe_naive_complete: usize;
 
 fn init_once_contention_is_armed() -> bool !{unsafe} {
@@ -39,106 +48,117 @@ private fn init_once_probe_locked_attempt() -> usize {
     }
 }
 
-fn init_once_contention_secondary_run() !{unsafe} {
-    atomic_word_store(&init_once_probe_secondary_active, 1);
+// Every online peer runs this from its idle loop while the probe is armed.
+fn init_once_contention_secondary_run(cpu: usize) !{unsafe} {
+    if (peer_tally_is_peer(&init_once_probe_won, cpu) == false) { return; }
+    let sequence: usize = atomic_word_load(&init_once_probe_sequence);
+    if (peer_tally_count(&init_once_probe_served, cpu) == sequence) { return; }
+    peer_tally_set(&init_once_probe_served, cpu, sequence);
+    peer_tally_enter(&init_once_probe_won, cpu);
     let phase: usize = atomic_word_load(&init_once_probe_phase);
     if (phase == 1) {
         let saw_free: bool = init_once_probe_naive_complete == 0;
         init_once_probe_wait_release();
         if (saw_free) {
             init_once_probe_naive_complete = 1;
-            atomic_word_store(&init_once_probe_secondary_won, 1);
+            peer_tally_set(&init_once_probe_won, cpu, 1);
         }
     } else if (phase == 2) {
         init_once_probe_wait_release();
         let won: usize = init_once_probe_locked_attempt();
-        atomic_word_store(&init_once_probe_secondary_won, won);
+        peer_tally_set(&init_once_probe_won, cpu, won);
     }
-    atomic_word_store(&init_once_probe_secondary_active, 0);
-    atomic_word_store(&init_once_probe_armed, 0);
+    peer_tally_leave(&init_once_probe_won, cpu);
 }
 
-private fn init_once_probe_wait_arrived() -> bool !{unsafe} {
-    let mut window = peer_tick_window_policy(
-        peer_tick_window_peer(), PeerTickPolicy::Arrival);
-    while (peer_tick_window_open(window)) {
-        if (atomic_word_load(&init_once_probe_arrived) == 2) { peer_tick_window_end(window); return true; }
+// Every online core at the release point, each peer's wait bounded by its
+// own ticks.
+private fn init_once_probe_wait_arrived(online: usize) -> bool !{unsafe} {
+    for cpu: usize in 1..<KERNEL_MAX_CORES {
+        if (cpu < online) {
+            let mut window = peer_tick_window_policy(cpu, PeerTickPolicy::Arrival);
+            while (peer_tick_window_open(window) &&
+                   atomic_word_load(&init_once_probe_arrived) < online) { }
+            peer_tick_window_end(window);
+        }
     }
-    peer_tick_window_end(window);
-    return false;
+    return atomic_word_load(&init_once_probe_arrived) >= online;
 }
 
-private fn init_once_probe_wait_left() -> bool !{unsafe} {
-    let mut window = peer_tick_window_policy(
-        peer_tick_window_peer(), PeerTickPolicy::Arrival);
-    while (peer_tick_window_open(window)) {
-        if (atomic_word_load(&init_once_probe_secondary_active) == 0) { peer_tick_window_end(window); return true; }
-    }
-    peer_tick_window_end(window);
-    return false;
-}
-
-private fn init_once_probe_prepare(phase: usize) !{unsafe} {
+private fn init_once_probe_prepare(phase: usize, online: usize) !{unsafe} {
     atomic_word_store(&init_once_probe_phase, phase);
     atomic_word_store(&init_once_probe_arrived, 0);
     atomic_word_store(&init_once_probe_release, 0);
-    atomic_word_store(&init_once_probe_primary_won, 0);
-    atomic_word_store(&init_once_probe_secondary_won, 0);
-    atomic_word_store(&init_once_probe_secondary_active, 0);
+    peer_tally_reset(&init_once_probe_won, online);
+    atomic_word_fetch_add(&init_once_probe_sequence, 1);
     atomic_word_store(&init_once_probe_armed, 1);
     atomic_word_fetch_add(&init_once_probe_arrived, 1);
+}
+
+private fn init_once_probe_abandon(stage: *u8) !{unsafe} {
+    atomic_word_store(&init_once_probe_armed, 0);
+    atomic_word_store(&init_once_probe_release, 1);
+    kernel_boot_log("network init contention stage: ");
+    kernel_boot_log(stage);
+    kernel_boot_log("\n");
+}
+
+private fn init_once_probe_winners() -> usize !{unsafe} {
+    return peer_tally_count(&init_once_probe_won, 0) +
+           peer_tally_peers_sum(&init_once_probe_won);
 }
 
 fn init_once_contention_probe() -> bool !{unsafe} {
     static_assert(KERNEL_ACTIVE_CORES >= 2,
                   "init-once contention evidence requires one peer");
+    let online: usize = kernel_online_core_count();
+    peer_tally_reset(&init_once_probe_served, online);
     init_once_probe_naive_complete = 0;
-    init_once_probe_prepare(1);
+    init_once_probe_prepare(1, online);
     let primary_saw_free: bool = init_once_probe_naive_complete == 0;
-    if (init_once_probe_wait_arrived() == false) {
-        atomic_word_store(&init_once_probe_armed, 0);
-        atomic_word_store(&init_once_probe_release, 1);
-        kernel_boot_log("network init contention stage: secondary-never-arrived\n");
+    if (online < 2 || init_once_probe_wait_arrived(online) == false) {
+        init_once_probe_abandon("secondary-never-arrived" as *u8);
         return false;
     }
     atomic_word_store(&init_once_probe_release, 1);
     if (primary_saw_free) {
         init_once_probe_naive_complete = 1;
-        atomic_word_store(&init_once_probe_primary_won, 1);
+        peer_tally_set(&init_once_probe_won, 0, 1);
     }
-    if (init_once_probe_wait_left() == false) {
-        atomic_word_store(&init_once_probe_armed, 0);
-        atomic_word_store(&init_once_probe_release, 1);
-        kernel_boot_log("network init contention stage: secondary-never-left\n");
+    if (peer_tally_peers_left(&init_once_probe_won,
+                              PeerTickPolicy::Arrival) == false) {
+        init_once_probe_abandon("secondary-never-left" as *u8);
         return false;
     }
-    let unlocked_winners: usize =
-        atomic_word_load(&init_once_probe_primary_won) +
-        atomic_word_load(&init_once_probe_secondary_won);
+    atomic_word_store(&init_once_probe_armed, 0);
+    let unlocked_winners: usize = init_once_probe_winners();
 
-    init_once_probe_prepare(2);
-    if (init_once_probe_wait_arrived() == false) {
-        atomic_word_store(&init_once_probe_armed, 0);
-        atomic_word_store(&init_once_probe_release, 1);
-        kernel_boot_log("network init contention stage: secondary-never-arrived\n");
+    init_once_probe_prepare(2, online);
+    if (init_once_probe_wait_arrived(online) == false) {
+        init_once_probe_abandon("secondary-never-arrived" as *u8);
         return false;
     }
     atomic_word_store(&init_once_probe_release, 1);
-    let primary_won: usize = init_once_probe_locked_attempt();
-    atomic_word_store(&init_once_probe_primary_won, primary_won);
-    if (init_once_probe_wait_left() == false) {
-        atomic_word_store(&init_once_probe_armed, 0);
-        atomic_word_store(&init_once_probe_release, 1);
-        kernel_boot_log("network init contention stage: secondary-never-left\n");
+    peer_tally_set(&init_once_probe_won, 0, init_once_probe_locked_attempt());
+    if (peer_tally_peers_left(&init_once_probe_won,
+                              PeerTickPolicy::Arrival) == false) {
+        init_once_probe_abandon("secondary-never-left" as *u8);
         return false;
     }
-    let locked_winners: usize =
-        atomic_word_load(&init_once_probe_primary_won) +
-        atomic_word_load(&init_once_probe_secondary_won);
+    atomic_word_store(&init_once_probe_armed, 0);
+    let locked_winners: usize = init_once_probe_winners();
+    // The count line is in a view shared by targets whose core counts may
+    // differ, so the expected unlocked result is named, not numbered.
     kernel_boot_log("network init contention counts: unlocked=");
-    uart_put_udec(unlocked_winners);
+    if (unlocked_winners == online) {
+        kernel_boot_log("every-online-core");
+    } else {
+        uart_put_udec(unlocked_winners);
+        kernel_boot_log(" of ");
+        uart_put_udec(online);
+    }
     kernel_boot_log(" locked=");
     uart_put_udec(locked_winners);
     kernel_boot_log("\n");
-    return unlocked_winners == 2 && locked_winners == 1;
+    return unlocked_winners == online && locked_winners == 1;
 }

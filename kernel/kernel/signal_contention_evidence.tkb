@@ -1,4 +1,4 @@
-// GitHub issue #570: do two cores really lose a signal bit when they
+// GitHub issue #570: do cores really lose a signal bit when they
 // read-modify-write pending_signals together, and does the process-run lock
 // really stop it?
 //
@@ -8,16 +8,16 @@
 // core's store erases that core's bit -- a SIGTERM that never arrives.
 //
 // Two-sided, and deterministic rather than hoped for. Core 0 computes its
-// raise with process_signal_pending_raised, then releases core 1 to raise
-// its own bit with process_signal_pending_raise, waits a bounded window, and
+// raise with process_signal_pending_raised, then releases every online peer
+// to raise its own bit with process_signal_pending_raise, waits a bounded window, and
 // only then stores with process_signal_pending_store. These are the real
 // functions the kernel's signal paths call; the split is theirs, not a copy.
 //
-//   phase 1, FORGED guard: core 1 completes inside the window, core 0's
-//     stale store erases its bit. Every round must lose it.
+//   phase 1, FORGED guard: every peer completes inside the window, core 0's
+//     stale store erases their bits. Every round must lose every one.
 //   phase 2, the process-run lock: core 0 holds the lock across its load and
-//     store, so core 1's raise waits for the lock, runs after the store, and
-//     no round loses it.
+//     store, so each peer's raise waits for the lock, runs after the store,
+//     and no round loses any.
 //
 // The first version of this probe let both cores loop and waited for the
 // windows to meet. QEMU lost 716 updates; four-core RPi5 lost none in eight
@@ -31,51 +31,69 @@
 //   measured is the read-modify-write and its lock, not delivery's wake of a
 //   blocked target (that is scheduled_process_blocked_take's, GitHub issue
 //   #589).
-// - ONE PEER. secondary.tkb runs this from core 1 only.
-// - The window is time, so a core 1 that could not raise inside it in the
+// - EVERY ONLINE PEER (GitHub issue #756), each with its own bit 1 << cpu;
+//   core 0's is bit 0. A round where some peer bits survived and others did
+//   not is neither verdict and invalidates the phase like a missed round.
+// - The window is time, so a peer that could not raise inside it in the
 //   forged phase reads as a missed round rather than a lost update; the
 //   phase then fails, which is the honest verdict for a race not shown.
 
 use "kernel/lib/peer_tick_window.tkb";
+use "kernel/lib/peer_round.tkb";
 use "kernel/kernel/process.tkb";
 use "kernel/lib/execution_model.tkb";
 
 const SIGNAL_CONTENTION_ROUNDS: usize = 16;
 const SIGNAL_PRIMARY_BIT: usize = 1;
-const SIGNAL_SECONDARY_BIT: usize = 2;
 
 private let mut signal_probe_record: ProcessRecord;
 
 // 0 = phase 1, forged guard. 1 = phase 2, locked.
 private let mut signal_probe_phase: AtomicWord;
 private let mut signal_probe_armed: AtomicWord;
-// Round core 1 may raise for, and the last round it finished raising.
+// Round the peers may raise for, and per peer the last round it finished
+// raising.
 private let mut signal_probe_go: AtomicWord;
-private let mut signal_probe_done: AtomicWord;
+private let mut signal_probe_done: PeerTally;
 
 fn signal_contention_is_armed() -> bool !{unsafe} {
     return atomic_word_load(&signal_probe_armed) == 1;
 }
 
-fn signal_contention_secondary_run() !{unsafe} {
+// A peer's own bit: bit `cpu`, so core 0's SIGNAL_PRIMARY_BIT is bit 0.
+private fn signal_probe_peer_bit(cpu: usize) -> usize {
+    if (cpu >= 1 && cpu < KERNEL_MAX_CORES) { return 1 << cpu; }
+    return 0;
+}
+
+// Every online peer's bit, the mask a round must keep or lose entirely.
+private fn signal_probe_peer_mask() -> usize !{unsafe} {
+    let online: usize = peer_tally_online(&signal_probe_done);
+    let mut mask: usize = 0;
+    for cpu: usize in 1..<KERNEL_MAX_CORES {
+        if (cpu < online) { mask = mask | signal_probe_peer_bit(cpu); }
+    }
+    return mask;
+}
+
+// Every online peer runs this from its idle loop while the probe is armed.
+fn signal_contention_secondary_run(cpu: usize) !{unsafe} {
+    if (peer_tally_is_peer(&signal_probe_done, cpu) == false) { return; }
     let record: &mut ProcessRecord = &signal_probe_record;
-    let mut served: usize = 0;
+    let bit: usize = signal_probe_peer_bit(cpu);
     while (atomic_word_load(&signal_probe_armed) == 1) {
         let go: usize = atomic_word_load(&signal_probe_go);
-        if (go != served) {
+        if (go != peer_tally_count(&signal_probe_done, cpu)) {
             if (atomic_word_load(&signal_probe_phase) == 1) {
                 let guard = process_run_lock();
-                process_signal_pending_raise(guard, record,
-                                             SIGNAL_SECONDARY_BIT);
+                process_signal_pending_raise(guard, record, bit);
                 process_run_unlock(guard);
             } else {
                 let forged = process_run_guard_forge_unlocked();
-                process_signal_pending_raise(forged, record,
-                                             SIGNAL_SECONDARY_BIT);
+                process_signal_pending_raise(forged, record, bit);
                 process_run_guard_discard_unlocked(forged);
             }
-            served = go;
-            atomic_word_store(&signal_probe_done, go);
+            peer_tally_set(&signal_probe_done, cpu, go);
         }
     }
 }
@@ -87,7 +105,8 @@ private fn signal_probe_hold_locked(round: usize) -> bool
     let start: i64 = read_cntpct();
     let window: i64 = read_cntfrq() >> 10;
     while (read_cntpct() - start < window) {
-        if (atomic_word_load(&signal_probe_done) == round) {
+        if (peer_tally_peers_sum(&signal_probe_done) != 0 &&
+            peer_tally_peers_least(&signal_probe_done) == round) {
             return true;
         }
     }
@@ -95,17 +114,13 @@ private fn signal_probe_hold_locked(round: usize) -> bool
 }
 
 private fn signal_probe_wait_done(round: usize) -> bool !{unsafe} {
-    let mut window = peer_tick_window_policy(
-        peer_tick_window_peer(), PeerTickPolicy::Complete);
-    while (peer_tick_window_open(window)) {
-        if (atomic_word_load(&signal_probe_done) == round) { peer_tick_window_end(window); return true; }
-    }
-    peer_tick_window_end(window);
-    return false;
+    return peer_tally_peers_reached(&signal_probe_done, round,
+                                    PeerTickPolicy::Complete);
 }
 
-// One round. Returns 1 when core 1's bit was lost, 0 when it survived, and
-// 2 when core 1 never raised at all.
+// One round. Returns 1 when every peer's bit was lost, 0 when every one
+// survived, 2 when some peer never raised at all, and 3 when some bits were
+// lost and others survived.
 private fn signal_probe_round(round: usize, locked: bool) -> usize
         !{unsafe} {
     let record: &mut ProcessRecord = &signal_probe_record;
@@ -132,8 +147,11 @@ private fn signal_probe_round(round: usize, locked: bool) -> usize
         process_run_guard_discard_unlocked(forged);
     }
     if (signal_probe_wait_done(round) == false) { return 2; }
-    if ((record.pending_signals & SIGNAL_SECONDARY_BIT) == 0) { return 1; }
-    return 0;
+    let mask: usize = signal_probe_peer_mask();
+    let kept: usize = record.pending_signals & mask;
+    if (mask != 0 && kept == 0) { return 1; }
+    if (kept == mask) { return 0; }
+    return 3;
 }
 
 // Rounds that lost core 1's bit, or SIGNAL_CONTENTION_ROUNDS + 1 when core 1
@@ -141,7 +159,7 @@ private fn signal_probe_round(round: usize, locked: bool) -> usize
 private fn signal_contention_run_phase(locked: usize) -> usize !{unsafe} {
     atomic_word_store(&signal_probe_phase, locked);
     atomic_word_store(&signal_probe_go, 0);
-    atomic_word_store(&signal_probe_done, 0);
+    peer_tally_reset(&signal_probe_done, kernel_online_core_count());
     atomic_word_store(&signal_probe_armed, 1);
     let mut lost: usize = 0;
     let mut missed: bool = false;

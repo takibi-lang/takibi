@@ -427,6 +427,7 @@ KERNEL_UNUSED_CHECKED := \
 	kernel/kernel/tcp_connection_contention_evidence.tkb \
 	kernel/kernel/workload_evidence.tkb \
 	kernel/lib/peer_tick_window.tkb \
+	kernel/lib/peer_round.tkb \
 	kernel/lib/byte_slice.tkb \
 	kernel/lib/diagnostic_ring.tkb \
 	kernel/lib/init_once.tkb \

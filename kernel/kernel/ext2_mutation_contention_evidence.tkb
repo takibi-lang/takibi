@@ -50,68 +50,68 @@
 //   mutation and a peer lookup in the same instant, which is a rendezvous
 //   inside ext2 rather than around it. The lock is what makes that
 //   unreachable, so there is nothing left to observe once it holds.
-// - ONE peer. secondary.tkb admits only core 1 to the probes, and this one
-//   is written for exactly two participants like its siblings.
+// - EVERY ONLINE PEER (GitHub issue #756) asks, reads and mutates; the
+//   mutation lock serializes the peers' mutations among themselves.
 // - Phases 5 and 6 (GitHub issue #597) put the mutator on the peer and a
 //   reader on core 0, the arrangement admitting mutation on a peer created.
 // - It does not exercise the five mutating syscall arms. Those are covered
 //   by the ext2_mutation view; this covers the lock they share.
 use "kernel/lib/peer_tick_window.tkb";
+use "kernel/lib/peer_round.tkb";
 use "kernel/fs/ext2/mutation_lock.tkb";
 use "kernel/lib/execution_model.tkb";
 
 private let mut ext2_mutation_probe_armed: AtomicWord;
 private let mut ext2_mutation_probe_phase: AtomicWord;
-// LATCHES, set by the peer and never cleared by it (GitHub issue #510): a
-// level the other core clears on its way out cannot answer "was it ever
-// there", which is the question a report telling a harness fault from a
-// kernel one has to ask.
-private let mut ext2_mutation_probe_clear_seen: AtomicWord;
-private let mut ext2_mutation_probe_held_seen: AtomicWord;
+// Bumped by core 0 for every phase; each peer serves each phase once and
+// records it in `done`, which is what core 0 waits on.
+private let mut ext2_mutation_probe_sequence: AtomicWord;
+private let mut ext2_mutation_probe_done: PeerTally;
+// Phases 1 and 2, per peer: 1 when it was told the answer the phase expects.
+private let mut ext2_mutation_probe_seen: PeerTally;
+// Phases 3 and 4, per peer: 1 once inside as a reader, and 1 when a mutation
+// was taken while it was still inside.
+private let mut ext2_mutation_probe_inside: PeerTally;
+private let mut ext2_mutation_probe_overlapped: PeerTally;
+// Asks, across phases 1 and 2 and every peer.
 private let mut ext2_mutation_probe_asked: AtomicWord;
-// GitHub issue #559's phases. The peer registers as a reader (inside), waits
-// for core 0 to say it is taking the lock (trying), holds on a moment
-// longer, and records whether core 0's take had already RETURNED before it
-// left (overlapped) -- which with the reader wait must never happen, and
-// without it (phase 4, the control) must.
-private let mut ext2_mutation_probe_inside: AtomicWord;
+// Shared words: some core is trying to take the mutation, has taken it, and
+// (phases 5 and 6) core 0's reader has left.
 private let mut ext2_mutation_probe_trying: AtomicWord;
 private let mut ext2_mutation_probe_taken: AtomicWord;
-private let mut ext2_mutation_probe_overlapped: AtomicWord;
 private let mut ext2_mutation_probe_left: AtomicWord;
 
 fn ext2_mutation_contention_is_armed() -> bool !{unsafe} {
     return atomic_word_load(&ext2_mutation_probe_armed) == 1;
 }
 
-// The peer's half: ask the same question the migration gate asks, and record
-// what this phase was told. Counted separately from what it saw, so a phase
-// the peer never reached is not a phase that saw the wrong thing.
-fn ext2_mutation_contention_secondary_run() !{unsafe} {
+// Every online peer runs this from its idle loop while the probe is armed.
+fn ext2_mutation_contention_secondary_run(cpu: usize) !{unsafe} {
+    if (peer_tally_is_peer(&ext2_mutation_probe_done, cpu) == false) { return; }
+    let sequence: usize = atomic_word_load(&ext2_mutation_probe_sequence);
+    if (peer_tally_count(&ext2_mutation_probe_done, cpu) == sequence) { return; }
     let phase: usize = atomic_word_load(&ext2_mutation_probe_phase);
     if (phase == 3 || phase == 4) {
-        ext2_mutation_probe_reader();
-        return;
-    }
-    if (phase == 5 || phase == 6) {
+        ext2_mutation_probe_reader(cpu);
+    } else if (phase == 5 || phase == 6) {
         ext2_mutation_probe_mutator(phase);
-        return;
+    } else {
+        let in_flight: bool = ext2_mutation_in_flight();
+        atomic_word_fetch_add(&ext2_mutation_probe_asked, 1);
+        if (phase == 1 && in_flight == false) {
+            peer_tally_set(&ext2_mutation_probe_seen, cpu, 1);
+        }
+        if (phase == 2 && in_flight) {
+            peer_tally_set(&ext2_mutation_probe_seen, cpu, 1);
+        }
     }
-    let in_flight: bool = ext2_mutation_in_flight();
-    atomic_word_fetch_add(&ext2_mutation_probe_asked, 1);
-    if (phase == 1 && in_flight == false) {
-        atomic_word_store(&ext2_mutation_probe_clear_seen, 1);
-    }
-    if (phase == 2 && in_flight) {
-        atomic_word_store(&ext2_mutation_probe_held_seen, 1);
-    }
-    atomic_word_store(&ext2_mutation_probe_armed, 0);
+    peer_tally_set(&ext2_mutation_probe_done, cpu, sequence);
 }
 
-// The peer as a reader: the same registration the migration gate makes.
-private fn ext2_mutation_probe_reader() !{unsafe} {
+// GitHub issue #559: a peer reader that core 0's mutation must wait for.
+private fn ext2_mutation_probe_reader(cpu: usize) !{unsafe} {
     if (ext2_read_enter()) {
-        atomic_word_store(&ext2_mutation_probe_inside, 1);
+        peer_tally_set(&ext2_mutation_probe_inside, cpu, 1);
         // Stay inside until core 0 has started taking the lock, then a
         // little longer, so a take that did not wait has time to return.
         let mut window = peer_tick_window_policy(
@@ -133,20 +133,15 @@ private fn ext2_mutation_probe_reader() !{unsafe} {
         let linger: i64 = read_cntpct();
         while (read_cntpct() - linger < (read_cntfrq() >> 6)) { }
         if (atomic_word_load(&ext2_mutation_probe_taken) == 1) {
-            atomic_word_store(&ext2_mutation_probe_overlapped, 1);
+            peer_tally_set(&ext2_mutation_probe_overlapped, cpu, 1);
         }
-        atomic_word_store(&ext2_mutation_probe_left, 1);
         ext2_read_leave();
+        peer_tally_set(&ext2_mutation_probe_inside, cpu, 2);
     }
-    atomic_word_store(&ext2_mutation_probe_armed, 0);
 }
 
-// GitHub issue #597's mirror of phases 3 and 4: the peer as the MUTATOR,
-// against a core 0 reader already inside. Phase 6 takes the real way and
-// must wait for core 0 to leave; phase 5, the control, takes without the
-// reader wait and returns while core 0 is still inside. Either way the
-// lock is kept until core 0 has left, as a real mutation would still be
-// running.
+// GitHub issue #597: a peer mutator against core 0's reader. Every peer
+// tries; the mutation lock serializes them among themselves.
 private fn ext2_mutation_probe_mutator(phase: usize) !{unsafe} {
     atomic_word_store(&ext2_mutation_probe_trying, 1);
     if (phase == 6) {
@@ -156,6 +151,8 @@ private fn ext2_mutation_probe_mutator(phase: usize) !{unsafe} {
     } else {
         let guard = ext2_mutation_take_without_readers_unchecked();
         atomic_word_store(&ext2_mutation_probe_taken, 1);
+        // Keep the lock until core 0's reader has left, as a real mutation
+        // would still be running.
         let mut hold = peer_tick_window_policy(
             peer_tick_window_peer(), PeerTickPolicy::Arrival);
         while (atomic_word_load(&ext2_mutation_probe_left) == 0 &&
@@ -163,21 +160,35 @@ private fn ext2_mutation_probe_mutator(phase: usize) !{unsafe} {
         peer_tick_window_end(hold);
         ext2_mutation_give(guard);
     }
-    atomic_word_store(&ext2_mutation_probe_armed, 0);
 }
 
-// Core 0's half of phases 5 and 6: enter as a reader, arm the peer, wait
-// for it to start taking, linger, and record whether its take had already
-// returned while this reader was still inside. Returns 2 when the phase
-// could not be set up.
+// Arm one phase for every online peer.
+private fn ext2_mutation_probe_arm(phase: usize) -> usize !{unsafe} {
+    atomic_word_store(&ext2_mutation_probe_phase, phase);
+    let sequence: usize = atomic_word_load(&ext2_mutation_probe_sequence) + 1;
+    atomic_word_store(&ext2_mutation_probe_sequence, sequence);
+    atomic_word_store(&ext2_mutation_probe_armed, 1);
+    return sequence;
+}
+
+// Every peer finished the phase; disarmed either way.
+private fn ext2_mutation_probe_finish(sequence: usize) -> bool !{unsafe} {
+    let finished: bool = peer_tally_peers_reached(
+        &ext2_mutation_probe_done, sequence, PeerTickPolicy::Arrival);
+    atomic_word_store(&ext2_mutation_probe_armed, 0);
+    return finished;
+}
+
+// Phases 5 and 6: core 0 reads while every peer tries to mutate. Returns 1
+// when a mutation was taken while core 0 was inside, 0 when none was, and
+// 2 when no peer tried.
 private fn ext2_mutation_probe_core0_reader(phase: usize) -> usize
         !{unsafe} {
     atomic_word_store(&ext2_mutation_probe_trying, 0);
     atomic_word_store(&ext2_mutation_probe_taken, 0);
     atomic_word_store(&ext2_mutation_probe_left, 0);
     if (ext2_read_enter() == false) { return 2; }
-    atomic_word_store(&ext2_mutation_probe_phase, phase);
-    atomic_word_store(&ext2_mutation_probe_armed, 1);
+    let sequence: usize = ext2_mutation_probe_arm(phase);
     let mut window = peer_tick_window_policy(
         peer_tick_window_peer(), PeerTickPolicy::Arrival);
     while (atomic_word_load(&ext2_mutation_probe_trying) == 0 &&
@@ -191,44 +202,31 @@ private fn ext2_mutation_probe_core0_reader(phase: usize) -> usize
     while (atomic_word_load(&ext2_mutation_probe_taken) == 0 &&
            peer_tick_window_open(taking)) { }
     peer_tick_window_end(taking);
-    // Deliberate linger: measure whether the peer bypassed reader exclusion.
+    // Deliberate linger: measure whether a peer bypassed reader exclusion.
     let linger: i64 = read_cntpct();
     while (read_cntpct() - linger < (read_cntfrq() >> 6)) { }
-    let overlapped: usize = atomic_word_load( &ext2_mutation_probe_taken);
+    let overlapped: usize = atomic_word_load(&ext2_mutation_probe_taken);
     atomic_word_store(&ext2_mutation_probe_left, 1);
     ext2_read_leave();
-    let mut finish = peer_tick_window_policy(
-        peer_tick_window_peer(), PeerTickPolicy::Arrival);
-    while (atomic_word_load(&ext2_mutation_probe_armed) == 1 &&
-           peer_tick_window_open(finish)) { }
-    peer_tick_window_end(finish);
-    if (started == 0) {
-        atomic_word_store(&ext2_mutation_probe_armed, 0);
-        return 2;
-    }
+    let finished: bool = ext2_mutation_probe_finish(sequence);
+    if (started == 0 || finished == false) { return 2; }
     return overlapped;
 }
 
-// Core 0's half of phases 3 and 4: arm the peer, wait for it to be inside,
-// announce the take, take (with or without the reader wait), note that the
-// take returned, and let the peer finish. Returns whether the peer's stay
-// overlapped the mutation.
+// Phases 3 and 4: every peer reads while core 0 mutates. Returns how many
+// peers saw the mutation taken while still inside, or ~0 when some peer
+// never got inside or never finished.
 private fn ext2_mutation_probe_overlap(phase: usize) -> usize !{unsafe} {
-    atomic_word_store(&ext2_mutation_probe_inside, 0);
+    let online: usize = peer_tally_online(&ext2_mutation_probe_done);
+    peer_tally_reset(&ext2_mutation_probe_inside, online);
+    peer_tally_reset(&ext2_mutation_probe_overlapped, online);
     atomic_word_store(&ext2_mutation_probe_trying, 0);
     atomic_word_store(&ext2_mutation_probe_taken, 0);
-    atomic_word_store(&ext2_mutation_probe_overlapped, 0);
-    atomic_word_store(&ext2_mutation_probe_left, 0);
-    atomic_word_store(&ext2_mutation_probe_phase, phase);
-    atomic_word_store(&ext2_mutation_probe_armed, 1);
-    let mut window = peer_tick_window_policy(
-        peer_tick_window_peer(), PeerTickPolicy::Arrival);
-    while (atomic_word_load(&ext2_mutation_probe_inside) == 0 &&
-           peer_tick_window_open(window)) { }
-    peer_tick_window_end(window);
-    if (atomic_word_load(&ext2_mutation_probe_inside) == 0) {
+    let sequence: usize = ext2_mutation_probe_arm(phase);
+    if (peer_tally_peers_reached(&ext2_mutation_probe_inside, 1,
+                                 PeerTickPolicy::Arrival) == false) {
         atomic_word_store(&ext2_mutation_probe_armed, 0);
-        return 2;
+        return ~(0 as usize);
     }
     atomic_word_store(&ext2_mutation_probe_trying, 1);
     if (phase == 3) {
@@ -238,98 +236,106 @@ private fn ext2_mutation_probe_overlap(phase: usize) -> usize !{unsafe} {
     } else {
         let guard = ext2_mutation_take_without_readers_unchecked();
         atomic_word_store(&ext2_mutation_probe_taken, 1);
-        // Keep the lock until the peer has left, as a real mutation would
-        // still be running.
-        let mut hold = peer_tick_window_policy(
-            peer_tick_window_peer(), PeerTickPolicy::Arrival);
-        while (atomic_word_load(&ext2_mutation_probe_left) == 0 &&
-               peer_tick_window_open(hold)) { }
-        peer_tick_window_end(hold);
+        // Keep the lock until every peer reader has left, as a real
+        // mutation would still be running.
+        let left: bool = peer_tally_peers_reached(
+            &ext2_mutation_probe_inside, 2, PeerTickPolicy::Arrival);
         ext2_mutation_give(guard);
     }
-    let mut finish = peer_tick_window_policy(
-        peer_tick_window_peer(), PeerTickPolicy::Arrival);
-    while (atomic_word_load(&ext2_mutation_probe_armed) == 1 &&
-           peer_tick_window_open(finish)) { }
-    peer_tick_window_end(finish);
-    return atomic_word_load(&ext2_mutation_probe_overlapped);
+    if (ext2_mutation_probe_finish(sequence) == false) { return ~(0 as usize); }
+    return peer_tally_peers_sum(&ext2_mutation_probe_overlapped);
 }
 
-// Arm one phase and wait for the peer to have finished it. Bounded by the
-// counter the peer clears, inside a peer-tick window. Host scheduling
-// delay alone cannot consume that budget; the shared backstop still bounds
-// a peer that cannot take timer interrupts.
+// Phases 1 and 2: every peer asks once.
 private fn ext2_mutation_probe_run_phase(phase: usize) -> bool !{unsafe} {
-    atomic_word_store(&ext2_mutation_probe_phase, phase);
-    atomic_word_store(&ext2_mutation_probe_armed, 1);
-    let mut window = peer_tick_window_policy(
-        peer_tick_window_peer(), PeerTickPolicy::Arrival);
-    while (peer_tick_window_open(window)) {
-        if (atomic_word_load(&ext2_mutation_probe_armed) == 0) { peer_tick_window_end(window); return true; }
-    }
-    peer_tick_window_end(window);
-    atomic_word_store(&ext2_mutation_probe_armed, 0);
-    return false;
+    let online: usize = peer_tally_online(&ext2_mutation_probe_done);
+    peer_tally_reset(&ext2_mutation_probe_seen, online);
+    let sequence: usize = ext2_mutation_probe_arm(phase);
+    return ext2_mutation_probe_finish(sequence);
 }
 
-private fn ext2_mutation_probe_report(stage: *u8) !{unsafe} {
+// "every-peer" when `count` is the number of peers, else "<count> of
+// <peers>": these lines are in a view shared by targets whose core counts
+// may differ.
+private fn ext2_mutation_probe_put_peers(count: usize) !{unsafe} {
+    let peers: usize = peer_tally_peers(&ext2_mutation_probe_done);
+    if (count == peers) {
+        kernel_boot_log("every-peer");
+    } else {
+        uart_put_udec(count);
+        kernel_boot_log(" of ");
+        uart_put_udec(peers);
+    }
+}
+
+private fn ext2_mutation_probe_report(stage: *u8, clear: usize, held: usize)
+        !{unsafe} {
     kernel_boot_log("ext2 mutation contention stage: ");
     kernel_boot_log(stage);
     kernel_boot_log("\n");
     kernel_boot_log("ext2 mutation contention counts: asked=");
-    uart_put_udec(atomic_word_load(&ext2_mutation_probe_asked));
+    let asked: usize = atomic_word_load(&ext2_mutation_probe_asked);
+    if (asked == 2 * peer_tally_peers(&ext2_mutation_probe_done)) {
+        kernel_boot_log("every-peer-twice");
+    } else {
+        uart_put_udec(asked);
+    }
     kernel_boot_log(" clear=");
-    uart_put_udec(atomic_word_load(&ext2_mutation_probe_clear_seen));
+    ext2_mutation_probe_put_peers(clear);
     kernel_boot_log(" held=");
-    uart_put_udec(atomic_word_load(&ext2_mutation_probe_held_seen));
+    ext2_mutation_probe_put_peers(held);
     kernel_boot_log("\n");
 }
 
 fn ext2_mutation_contention_probe() -> bool !{unsafe} {
     static_assert(KERNEL_ACTIVE_CORES >= 2,
                   "ext2 mutation contention evidence requires one peer");
-    atomic_word_store(&ext2_mutation_probe_clear_seen, 0);
-    atomic_word_store(&ext2_mutation_probe_held_seen, 0);
+    let online: usize = kernel_online_core_count();
+    peer_tally_reset(&ext2_mutation_probe_done, online);
+    atomic_word_store(&ext2_mutation_probe_sequence, 0);
     atomic_word_store(&ext2_mutation_probe_asked, 0);
+    let peers: usize = peer_tally_peers(&ext2_mutation_probe_done);
 
-    // Phase 1: nothing held here, so the peer must be told no mutation is in
-    // flight. This is the term that goes false if in_flight() ever stops
+    // Phase 1: nothing held here, so every peer must be told no mutation is
+    // in flight. This is the term that goes false if in_flight() ever stops
     // depending on the lock.
     let clear_phase: bool = ext2_mutation_probe_run_phase(1);
+    let clear: usize = peer_tally_peers_sum(&ext2_mutation_probe_seen);
     if (clear_phase == false) {
-        ext2_mutation_probe_report("peer-never-asked-unheld" as *u8);
+        ext2_mutation_probe_report("peer-never-asked-unheld" as *u8, clear, 0);
         return false;
     }
 
     // Phase 2: hold the guard across the whole phase, the way
-    // occupancy_drain's peer holds its region, so the peer cannot miss the
+    // occupancy_drain's peers hold their region, so no peer can miss the
     // window whatever either core's speed is. The guard is linear, so the
     // release below is checked on every path out of this function.
     let guard = ext2_mutation_take();
     let held_phase: bool = ext2_mutation_probe_run_phase(2);
     ext2_mutation_give(guard);
+    let held: usize = peer_tally_peers_sum(&ext2_mutation_probe_seen);
     if (held_phase == false) {
-        ext2_mutation_probe_report("peer-never-asked-held" as *u8);
+        ext2_mutation_probe_report("peer-never-asked-held" as *u8, clear, held);
         return false;
     }
 
     // GitHub issue #559. Phase 4 first, the control: the lock without the
-    // reader wait returns while the peer reader is still inside, which is
-    // the window. Phase 3: the real take waits it out.
+    // reader wait returns while every peer reader is still inside, which is
+    // the window. Phase 3: the real take waits them all out.
     let control: usize = ext2_mutation_probe_overlap(4);
     let waited: usize = ext2_mutation_probe_overlap(3);
     kernel_boot_log("ext2 mutation contention reader: control-overlap=");
-    uart_put_udec(control);
+    ext2_mutation_probe_put_peers(control);
     kernel_boot_log(" waited-overlap=");
     uart_put_udec(waited);
     kernel_boot_log("\n");
-    if (control != 1 || waited != 0) {
-        ext2_mutation_probe_report("reader-wait-not-shown" as *u8);
+    if (control != peers || waited != 0) {
+        ext2_mutation_probe_report("reader-wait-not-shown" as *u8, clear, held);
         return false;
     }
 
-    // GitHub issue #597: the mirror, with core 0 as the reader and the peer
-    // as the mutator. Control first again.
+    // GitHub issue #597: the mirror, with core 0 as the reader and every
+    // peer a mutator. Control first again.
     let core0_control: usize = ext2_mutation_probe_core0_reader(5);
     let core0_waited: usize = ext2_mutation_probe_core0_reader(6);
     kernel_boot_log("ext2 mutation contention core0 reader: control-overlap=");
@@ -338,16 +344,17 @@ fn ext2_mutation_contention_probe() -> bool !{unsafe} {
     uart_put_udec(core0_waited);
     kernel_boot_log("\n");
     if (core0_control != 1 || core0_waited != 0) {
-        ext2_mutation_probe_report("core0-reader-wait-not-shown" as *u8);
+        ext2_mutation_probe_report("core0-reader-wait-not-shown" as *u8, clear,
+                                   held);
         return false;
     }
 
-    ext2_mutation_probe_report("complete" as *u8);
-    // asked == 2 is the term that is FALSE when the probe did no work: one
-    // ask per phase, counted by the peer. The two observations are what it
-    // found, and a probe that never looked must not report what it did not
-    // see.
-    return atomic_word_load(&ext2_mutation_probe_asked) == 2 &&
-           atomic_word_load(&ext2_mutation_probe_clear_seen) == 1 &&
-           atomic_word_load(&ext2_mutation_probe_held_seen) == 1;
+    ext2_mutation_probe_report("complete" as *u8, clear, held);
+    // asked == 2 per peer is the term that is FALSE when the probe did no
+    // work: one ask per phase, counted by each peer. The observations are
+    // what it found, and a probe that never looked must not report what it
+    // did not see.
+    return peers >= 1 &&
+           atomic_word_load(&ext2_mutation_probe_asked) == 2 * peers &&
+           clear == peers && held == peers;
 }

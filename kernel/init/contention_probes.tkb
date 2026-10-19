@@ -46,7 +46,7 @@ fn contention_probes() !{unsafe} {
         kernel_boot_log("log storm: failed\n");
     }
     if (console_contention_probe()) {
-        kernel_boot_log("console contention: peer entry observed with bypass, excluded while held and completed after release ok\n");
+        kernel_boot_log("console contention: every peer's entry observed with bypass, excluded while held and completed after release ok\n");
     } else {
         kernel_boot_log("console contention: failed\n");
     }
@@ -63,37 +63,37 @@ fn contention_probes() !{unsafe} {
     // after removing that lock changed nothing any lane could
     // see -- an audit is not evidence.
     if (schedule_contention_probe()) {
-        kernel_boot_log("schedule contention: two cores claiming one Ready process, the race shown without the lock and gone with it ok\n");
+        kernel_boot_log("schedule contention: every online core claiming one Ready process, the race shown without the lock and gone with it ok\n");
     } else {
         kernel_boot_log("schedule contention: failed\n");
     }
     if (pid_contention_probe()) {
-        kernel_boot_log("pid contention: two cores minting, every pid advanced the counter once ok\n");
+        kernel_boot_log("pid contention: every online core minting, the counter advanced once per round unlocked and once per call locked ok\n");
     } else {
         kernel_boot_log("pid contention: failed\n");
     }
     if (fd_refcount_contention_probe()) {
-        kernel_boot_log("fd refcount contention: two cores retaining and releasing one object, count back to baseline ok\n");
+        kernel_boot_log("fd refcount contention: every online core retaining and releasing one object, count back to baseline ok\n");
     } else {
         kernel_boot_log("fd refcount contention: failed\n");
     }
     if (asid_contention_probe()) {
-        kernel_boot_log("asid contention: two cores assigning, every number advanced the counter once ok\n");
+        kernel_boot_log("asid contention: every online core assigning, every number advanced the counter once ok\n");
     } else {
         kernel_boot_log("asid contention: failed\n");
     }
     if (page_contention_probe()) {
-        kernel_boot_log("page contention: two cores allocating and freeing, every page back, none freed twice ok\n");
+        kernel_boot_log("page contention: every online core allocating and freeing, every page back, none freed twice ok\n");
     } else {
         kernel_boot_log("page contention: failed\n");
     }
     if (freelist_contention_probe()) {
-        kernel_boot_log("freelist contention: unlocked hands one index to both cores, a caller's lock stops it ok\n");
+        kernel_boot_log("freelist contention: unlocked hands one index to every online core, a caller's lock stops it ok\n");
     } else {
         kernel_boot_log("freelist contention: failed\n");
     }
     if (pool_contention_probe()) {
-        kernel_boot_log("pool contention: two cores cycling one pool, every allocation given back, no handle refused ok\n");
+        kernel_boot_log("pool contention: every online core cycling one pool, every allocation given back, no handle refused ok\n");
     } else {
         kernel_boot_log("pool contention: failed\n");
     }
@@ -101,7 +101,7 @@ fn contention_probes() !{unsafe} {
     // above ends with, exercised on purpose rather than only in the
     // emergency it exists for.
     if (occupancy_drain_probe()) {
-        kernel_boot_log("occupancy drain: the second core held the region and the bounded drain gave up, then left and the same drain handed over a proof ok\n");
+        kernel_boot_log("occupancy drain: every online peer held the region and each bounded drain gave up until the last had left, then the same drain handed over a proof ok\n");
     } else {
         kernel_boot_log("occupancy drain: failed\n");
     }
@@ -124,12 +124,12 @@ fn contention_probes() !{unsafe} {
         kernel_boot_log("stopped pool inspection: failed\n");
     }
     if (init_once_contention_probe()) {
-        kernel_boot_log("network init contention: unlocked check-set minted twice, typed one-shot gate admitted one initializer ok\n");
+        kernel_boot_log("network init contention: unlocked check-set minted on every online core, typed one-shot gate admitted one initializer ok\n");
     } else {
         kernel_boot_log("network init contention: failed\n");
     }
     if (tcp_connection_contention_probe()) {
-        kernel_boot_log("tcp owner contention: peer excluded while held and one state transition completed after release ok\n");
+        kernel_boot_log("tcp owner contention: every peer excluded while held and each completed one state transition after release ok\n");
     } else {
         kernel_boot_log("tcp owner contention: failed\n");
     }
@@ -163,21 +163,21 @@ fn contention_probes() !{unsafe} {
     // claim. Its production reader asks rather than waits, so what a peer
     // is TOLD is the property, measured with core 0 holding and not holding.
     if (ext2_mutation_contention_probe()) {
-        kernel_boot_log("ext2 mutation contention: a peer is told no mutation is in flight while core 0 holds nothing, told there is one while it holds the guard, and a mutation on either core waits for a reader already inside on the other ok\n");
+        kernel_boot_log("ext2 mutation contention: every peer is told no mutation is in flight while core 0 holds nothing, told there is one while it holds the guard, and a mutation on any core waits for readers already inside on the others ok\n");
     } else {
         kernel_boot_log("ext2 mutation contention: failed\n");
     }
     // GitHub issue #570: the signal words, which a sender on one CPU and
     // the target on another both read-modify-write.
     if (signal_contention_probe()) {
-        kernel_boot_log("signal contention: two cores setting and clearing pending signal bits lost updates with a forged guard and none under the process-run lock ok\n");
+        kernel_boot_log("signal contention: every online core setting and clearing pending signal bits lost updates with a forged guard and none under the process-run lock ok\n");
     } else {
         kernel_boot_log("signal contention: failed\n");
     }
     // GitHub issue #632: the same stop begun on the peer, which core 0 must
     // recognise although the SGI's IAR word names core 1 as its sender.
     if (world_stop_peer_probe()) {
-        kernel_boot_log("world stop from a peer: core 1 began the stop and core 0 acknowledged it ok\n");
+        kernel_boot_log("world stop from a peer: every peer in turn began a stop of every online core and the others acknowledged it ok\n");
     } else {
         kernel_boot_log("world stop from a peer: failed\n");
     }

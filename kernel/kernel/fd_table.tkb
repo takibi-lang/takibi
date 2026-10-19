@@ -1,4 +1,5 @@
 use "kernel/lib/peer_tick_window.tkb";
+use "kernel/lib/peer_round.tkb";
 
 use "kernel/lib/execution_model.tkb";
 use "kernel/lib/pool_lock.tkb";
@@ -3351,30 +3352,18 @@ const FD_REFCOUNT_CONTENTION_OUTSIDE_WORK: usize = 64;
 private let mut fd_refcount_probe_handle: UnifiedObjectHandle;
 private let mut fd_refcount_probe_ready: bool = false;
 private let mut fd_refcount_probe_armed: AtomicWord;
-private let mut fd_refcount_probe_primary: AtomicWord;
-private let mut fd_refcount_probe_secondary: AtomicWord;
+// Completed cycles and the inside-the-run level, one word per core
+// (GitHub issue #756: every online peer, index 0 is core 0's).
+private let mut fd_refcount_probe_tally: PeerTally;
 private let mut fd_refcount_probe_refused: AtomicWord;
-private let mut fd_refcount_probe_active: AtomicWord;
 private let mut fd_refcount_probe_overlap: AtomicWord;
 
 private fn fd_refcount_probe_armed_address() -> *AtomicWord {
     return &fd_refcount_probe_armed;
 }
 
-private fn fd_refcount_probe_primary_address() -> *AtomicWord {
-    return &fd_refcount_probe_primary;
-}
-
-private fn fd_refcount_probe_secondary_address() -> *AtomicWord {
-    return &fd_refcount_probe_secondary;
-}
-
 private fn fd_refcount_probe_refused_address() -> *AtomicWord {
     return &fd_refcount_probe_refused;
-}
-
-private fn fd_refcount_probe_active_address() -> *AtomicWord {
-    return &fd_refcount_probe_active;
 }
 
 // GitHub issue #510: entries into the secondary's run function, counted and
@@ -3426,9 +3415,16 @@ fn fd_refcount_contention_is_armed() -> bool !{unsafe} {
     return atomic_word_load(fd_refcount_probe_armed_address()) == 1;
 }
 
-fn fd_refcount_contention_secondary_run() !{unsafe} {
+fn fd_refcount_contention_secondary_run(cpu: usize) !{unsafe} {
+    if (peer_tally_is_peer(&fd_refcount_probe_tally, cpu) == false) {
+        return;
+    }
+    if (peer_tally_count(&fd_refcount_probe_tally, cpu) >=
+            FD_REFCOUNT_CONTENTION_ROUNDS) {
+        return;
+    }
     atomic_word_fetch_add(fd_refcount_probe_entries_address(), 1);
-    atomic_word_store(fd_refcount_probe_active_address(), 1);
+    peer_tally_enter(&fd_refcount_probe_tally, cpu);
     // Complete one cycle before waiting for the primary. Together with the
     // primary-side wait below, this is a two-way start handshake: neither
     // core can finish all of its work before the other has begun. Merely
@@ -3436,19 +3432,17 @@ fn fd_refcount_contention_secondary_run() !{unsafe} {
     // interrupted between that store and its first cycle.
     if (atomic_word_load(fd_refcount_probe_armed_address()) == 1) {
         fd_refcount_probe_cycle();
-        atomic_word_fetch_add(
-            fd_refcount_probe_secondary_address(), 1);
+        peer_tally_add(&fd_refcount_probe_tally, cpu);
     }
-    while (atomic_word_load(fd_refcount_probe_primary_address()) == 0 &&
+    while (peer_tally_count(&fd_refcount_probe_tally, 0) == 0 &&
            atomic_word_load(fd_refcount_probe_armed_address()) == 1) { }
-    while (atomic_word_load(fd_refcount_probe_secondary_address()) <
+    while (peer_tally_count(&fd_refcount_probe_tally, cpu) <
                FD_REFCOUNT_CONTENTION_ROUNDS &&
            atomic_word_load(fd_refcount_probe_armed_address()) == 1) {
         fd_refcount_probe_cycle();
-        atomic_word_fetch_add(
-            fd_refcount_probe_secondary_address(), 1);
+        peer_tally_add(&fd_refcount_probe_tally, cpu);
     }
-    atomic_word_store(fd_refcount_probe_active_address(), 0);
+    peer_tally_leave(&fd_refcount_probe_tally, cpu);
 }
 
 private fn fd_refcount_contention_report(stage: *u8, refs: usize,
@@ -3456,10 +3450,8 @@ private fn fd_refcount_contention_report(stage: *u8, refs: usize,
     kernel_boot_log("fd refcount contention stage: ");
     kernel_boot_log(stage);
     kernel_boot_log("\n");
-    kernel_boot_log("fd refcount contention counts: primary=");
-    uart_put_udec(atomic_word_load(fd_refcount_probe_primary_address()));
-    kernel_boot_log(" secondary=");
-    uart_put_udec(atomic_word_load(fd_refcount_probe_secondary_address()));
+    kernel_boot_log("fd refcount contention counts:");
+    peer_tally_put_counts(&fd_refcount_probe_tally);
     kernel_boot_log(" refs=");
     uart_put_udec(refs);
     kernel_boot_log(" baseline=");
@@ -3544,13 +3536,17 @@ fn fd_refcount_contention_probe() -> bool !{unsafe} {
     let baseline: usize = unified_object_refs_of(fd_refcount_probe_handle);
     let doubles_before: usize = unified_object_double_release_count();
     let entries_before: usize = atomic_word_load(fd_refcount_probe_entries_address());
+    peer_tally_reset(&fd_refcount_probe_tally, kernel_online_core_count());
+    atomic_word_store(fd_refcount_probe_overlap_address(), 0);
     atomic_word_store(fd_refcount_probe_armed_address(), 1);
+    let peers: usize = peer_tally_peers(&fd_refcount_probe_tally);
 
     let mut entry_window = peer_tick_window_policy(
         peer_tick_window_peer(), PeerTickPolicy::Entry);
     let mut entered: bool = false;
     while (entered == false && peer_tick_window_open(entry_window)) {
-        if (atomic_word_load(fd_refcount_probe_entries_address()) > entries_before) {
+        if (peers > 0 && atomic_word_load(fd_refcount_probe_entries_address()) >=
+                entries_before + peers) {
             entered = true;
         }
     }
@@ -3567,46 +3563,41 @@ fn fd_refcount_contention_probe() -> bool !{unsafe} {
     // start handshake. Without this wait an interrupt immediately after the
     // active store can let the primary finish every round and report a false
     // overlap=0 failure even though the final reference count is correct.
-    let mut started_window = peer_tick_window_policy(
-        peer_tick_window_peer(), PeerTickPolicy::Entry);
-    let mut started: bool = false;
-    while (started == false &&
-           peer_tick_window_open(started_window)) {
-        if (atomic_word_load(fd_refcount_probe_secondary_address()) > 0) {
-            started = true;
-        }
-    }
-    peer_tick_window_end(started_window);
-    if (started == false) {
+    if (peer_tally_peers_reached(&fd_refcount_probe_tally, 1,
+                                 PeerTickPolicy::Entry) == false) {
         atomic_word_store(fd_refcount_probe_armed_address(), 0);
         fd_refcount_contention_report("secondary-never-started" as *u8,
                                       baseline, baseline);
         return false;
     }
-
     for round: usize in 0..<FD_REFCOUNT_CONTENTION_ROUNDS {
         fd_refcount_probe_cycle();
-        atomic_word_fetch_add(fd_refcount_probe_primary_address(), 1);
+        peer_tally_add(&fd_refcount_probe_tally, 0);
     }
 
+    // The slowest peer's progress when core 0 finished.
     atomic_word_store(fd_refcount_probe_overlap_address(),
-        atomic_word_load(fd_refcount_probe_secondary_address()));
+        peer_tally_peers_least(&fd_refcount_probe_tally));
 
-    let mut finish_window = peer_tick_window_policy(
-        peer_tick_window_peer(), PeerTickPolicy::Finish);
-    let mut finished: bool = false;
-    while (finished == false && peer_tick_window_open(finish_window)) {
-        if (atomic_word_load(fd_refcount_probe_secondary_address()) >=
-                FD_REFCOUNT_CONTENTION_ROUNDS) {
-            finished = true;
-        }
-    }
-    peer_tick_window_end(finish_window);
+    let finished: bool = peer_tally_peers_reached(
+        &fd_refcount_probe_tally, FD_REFCOUNT_CONTENTION_ROUNDS,
+        PeerTickPolicy::Finish);
     atomic_word_store(fd_refcount_probe_armed_address(), 0);
+    // GitHub issue #756: every peer out before the count is read. A peer
+    // that saw `armed` just before the clear may be between its retain and
+    // its release, and the count would then read one high on a kernel that
+    // did nothing wrong.
+    let settled: bool = peer_tally_peers_left(&fd_refcount_probe_tally,
+                                              PeerTickPolicy::Entry);
 
     let refs: usize = unified_object_refs_of(fd_refcount_probe_handle);
     if (finished == false) {
         fd_refcount_contention_report("secondary-never-finished" as *u8,
+                                      refs, baseline);
+        return false;
+    }
+    if (settled == false) {
+        fd_refcount_contention_report("secondary-never-left" as *u8,
                                       refs, baseline);
         return false;
     }

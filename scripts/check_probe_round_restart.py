@@ -18,7 +18,8 @@ from check_model_function_map import function_body, masked_sources
 from pass_line import report_pass
 
 DRIVER = 'kernel/arch/arm64/kernel/secondary.tkb'
-CALL = re.compile(r'\b(\w+_secondary_run)\s*\(\s*\)\s*;')
+# The call passes nothing or the idle loop's core id (GitHub issue #756).
+CALL = re.compile(r'\b(\w+_secondary_run)\s*\(\s*(?:core_id)?\s*\)\s*;')
 DEFINITION = re.compile(
     r'^(?:private\s+)?(?:inline\s+|noinline\s+)?fn\s+(\w+_secondary_run)\s*\(', re.M)
 LOCAL_ROUNDS = re.compile(

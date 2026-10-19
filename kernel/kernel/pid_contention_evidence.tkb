@@ -1,17 +1,19 @@
-// GitHub issue #479 Group B: two cores minting a pid at once.
+// GitHub issue #479 Group B: every online core minting a pid at once (two
+// cores until GitHub issue #756; two is now the degenerate case).
 //
 // The unlocked phase deliberately splits the production counter's read and
-// write and rendezvouses both cores between them. It must lose exactly one
-// update per round. The locked phase runs the ordinary production mint after
-// the same per-round rendezvous and must lose none. What the race costs: two
-// processes carrying one pid, and every accounting this kernel does by pid
-// -- wait4 by pid, the process tree walk, ps -- becomes a question with two
-// answers.
+// write and rendezvouses every online core between them. All of them read
+// the same value, so the counter advances exactly once per round however
+// many cores took part. The locked phase runs the ordinary production mint
+// after the same per-round rendezvous and must lose none. What the race
+// costs: two processes carrying one pid, and every accounting this kernel
+// does by pid -- wait4 by pid, the process tree walk, ps -- becomes a
+// question with two answers.
 //
 // The detector is the counter's own arithmetic: each mint advances it by
-// exactly one, so the controlled unlocked phase advances once for each pair
+// exactly one, so the controlled unlocked phase advances once per round
 // while the locked phase advances once for each call. "Number of mints" is
-// this probe's OWN pair of atomic counters, never the kernel's, for the
+// this probe's OWN per-core atomic counters, never the kernel's, for the
 // reason the asid probe learned -- a counter on the racing path loses
 // increments to the race it is being used to detect.
 //
@@ -29,155 +31,59 @@
 // - Measures exclusion, not ordering.
 
 use "kernel/lib/peer_tick_window.tkb";
+use "kernel/lib/peer_round.tkb";
 use "kernel/kernel/process.tkb";
 use "kernel/lib/execution_model.tkb";
 
 const PID_CONTENTION_ROUNDS: usize = 2048;
 const PID_CONTENTION_OUTSIDE_WORK: usize = 64;
 
-must_use variant PidProbeRendezvousResult {
-    Met;
-    TimedOut;
-}
-
 private let mut pid_probe_armed: AtomicWord;
-private let mut pid_probe_primary: AtomicWord;
-private let mut pid_probe_secondary: AtomicWord;
-private let mut pid_probe_active: AtomicWord;
-private let mut pid_probe_overlap: AtomicWord;
-private let mut pid_probe_primary_arrived: AtomicWord;
-private let mut pid_probe_secondary_arrived: AtomicWord;
-private let mut pid_probe_primary_committed: AtomicWord;
-private let mut pid_probe_secondary_committed: AtomicWord;
 private let mut pid_probe_locked_phase: AtomicWord;
+private let mut pid_probe_online: AtomicWord;
+// Completed rounds, one word per core (index 0 is core 0's).
+private let mut pid_probe_done: [AtomicWord; KERNEL_MAX_CORES];
+// Levels, one per core: inside the run function right now.
+private let mut pid_probe_active: [AtomicWord; KERNEL_MAX_CORES];
+private let mut pid_probe_overlap: AtomicWord;
+private let mut pid_probe_arrived: PeerRound;
+private let mut pid_probe_committed: PeerRound;
 
-private fn pid_probe_armed_address() -> *AtomicWord {
-    return &pid_probe_armed;
-}
-
-private fn pid_probe_primary_address() -> *AtomicWord {
-    return &pid_probe_primary;
-}
-
-private fn pid_probe_secondary_address() -> *AtomicWord {
-    return &pid_probe_secondary;
-}
-
-private fn pid_probe_active_address() -> *AtomicWord {
-    return &pid_probe_active;
-}
-
-// GitHub issue #510: entries into the secondary's run function, counted and
-// never cleared. This is what core 0's entry gate waits on.
-//
-// `active` cannot be that gate. It is a LEVEL the secondary clears on its
-// way out, and this probe's secondary CAN leave while still armed: the
-// rendezvous below sets `armed = 0` when it times out, and the round loop
-// then falls through to clear `active`. A core 0 that was descheduled past
-// the rendezvous deadline -- measured to happen under host saturation --
-// comes back, polls `active`, sees 0, and reports `secondary-never-entered`
-// about a core that entered and waited for it. The verdict is right and the
-// reason is wrong, which is the whole of what #510 was filed about.
-//
-// A COUNT, not a flag, and incremented at the top of the function BEFORE any
-// rendezvous. Gating on the per-round cycle count instead would deadlock:
-// that count only advances after a rendezvous with core 0, and core 0 is the
-// one waiting.
+// GitHub issue #510: entries into a peer's run function, counted and never
+// cleared. This is what core 0's entry gate waits on: a COUNT, not a level,
+// incremented before any rendezvous (gating on the per-round count would
+// deadlock -- it only advances after a rendezvous with core 0).
 private let mut pid_probe_entries: AtomicWord;
 
-private fn pid_probe_entries_address() -> *AtomicWord {
-    return &pid_probe_entries;
-}
-
-private fn pid_probe_overlap_address() -> *AtomicWord {
-    return &pid_probe_overlap;
-}
-
-private fn pid_probe_primary_arrived_address() -> *AtomicWord {
-    return &pid_probe_primary_arrived;
-}
-
-private fn pid_probe_secondary_arrived_address() -> *AtomicWord {
-    return &pid_probe_secondary_arrived;
-}
-
-private fn pid_probe_primary_committed_address() -> *AtomicWord {
-    return &pid_probe_primary_committed;
-}
-
-private fn pid_probe_secondary_committed_address() -> *AtomicWord {
-    return &pid_probe_secondary_committed;
-}
-
-private fn pid_probe_locked_phase_address() -> *AtomicWord {
-    return &pid_probe_locked_phase;
-}
-
-private fn pid_probe_rendezvous(primary: bool, sequence: usize,
-                                primary_address: *AtomicWord,
-                                secondary_address: *AtomicWord)
-        -> PidProbeRendezvousResult !{unsafe} {
-    let mut own_address: *AtomicWord = secondary_address;
-    let mut peer_address: *AtomicWord = primary_address;
-    if (primary) {
-        own_address = primary_address;
-        peer_address = secondary_address;
-    }
-    atomic_word_store(own_address, sequence);
-    let mut deadline = peer_tick_window_policy(
-        peer_tick_window_peer(), PeerTickPolicy::Finish);
-    while (peer_tick_window_open(deadline) &&
-           atomic_word_load(peer_address) < sequence &&
-           atomic_word_load(pid_probe_armed_address()) == 1) {
-    }
-    peer_tick_window_end(deadline);
-    if (atomic_word_load(peer_address) >= sequence &&
-        atomic_word_load(pid_probe_armed_address()) == 1) {
-        return PidProbeRendezvousResult::Met;
-    }
-    atomic_word_store(pid_probe_armed_address(), 0);
-    return PidProbeRendezvousResult::TimedOut;
-}
-
-private fn pid_probe_cycle(primary: bool, sequence: usize) -> bool !{unsafe} {
-    let locked: bool = atomic_word_load(pid_probe_locked_phase_address()) == 1;
+private fn pid_probe_cycle(cpu: usize, online: usize, sequence: usize)
+        -> bool !{unsafe} {
+    let locked: bool = atomic_word_load(&pid_probe_locked_phase) == 1;
     if (locked) {
-        match pid_probe_rendezvous(
-                primary, sequence,
-                pid_probe_primary_arrived_address(),
-                pid_probe_secondary_arrived_address()) {
-            PidProbeRendezvousResult::TimedOut => { return false; }
-            PidProbeRendezvousResult::Met => {}
+        if (peer_round_meet(&pid_probe_arrived, cpu, online, sequence,
+                            &pid_probe_armed) == false) {
+            return false;
         }
         let pid: usize = scheduled_process_mint_pid_for_probe();
     } else {
         match scheduled_process_mint_pid_probe_begin() {
             ScheduledPidProbeBeginResult::Pending(pending) => {
-                match pid_probe_rendezvous(
-                        primary, sequence,
-                        pid_probe_primary_arrived_address(),
-                        pid_probe_secondary_arrived_address()) {
-                    PidProbeRendezvousResult::TimedOut => {
-                        scheduled_process_mint_pid_probe_cancel(pending);
-                        return false;
-                    }
-                    PidProbeRendezvousResult::Met => {
-                        let pid: usize =
-                            scheduled_process_mint_pid_probe_commit(pending);
-                    }
+                if (peer_round_meet(&pid_probe_arrived, cpu, online, sequence,
+                                    &pid_probe_armed) == false) {
+                    scheduled_process_mint_pid_probe_cancel(pending);
+                    return false;
                 }
+                let pid: usize =
+                    scheduled_process_mint_pid_probe_commit(pending);
             }
         }
-        // Keep the two writes for this round ahead of either read for the
-        // next one. Otherwise a fast core could read its own committed value
-        // before the peer overwrote it and weaken the exact lost-update
-        // count even though the first rendezvous did its job.
-        match pid_probe_rendezvous(
-                primary, sequence,
-                pid_probe_primary_committed_address(),
-                pid_probe_secondary_committed_address()) {
-            PidProbeRendezvousResult::TimedOut => { return false; }
-            PidProbeRendezvousResult::Met => {}
+        // Keep every core's write for this round ahead of any core's read
+        // for the next one. Otherwise a fast core could read its own
+        // committed value before the others overwrote it and weaken the
+        // exact lost-update count even though the first rendezvous did its
+        // job.
+        if (peer_round_meet(&pid_probe_committed, cpu, online, sequence,
+                            &pid_probe_armed) == false) {
+            return false;
         }
     }
     for spin: usize in 0..<PID_CONTENTION_OUTSIDE_WORK { }
@@ -185,119 +91,168 @@ private fn pid_probe_cycle(primary: bool, sequence: usize) -> bool !{unsafe} {
 }
 
 fn pid_contention_is_armed() -> bool !{unsafe} {
-    return atomic_word_load(pid_probe_armed_address()) == 1;
+    return atomic_word_load(&pid_probe_armed) == 1;
 }
 
-fn pid_contention_secondary_run() !{unsafe} {
-    atomic_word_fetch_add(pid_probe_entries_address(), 1);
-    atomic_word_store(pid_probe_active_address(), 1);
-    while (atomic_word_load(pid_probe_secondary_address()) < PID_CONTENTION_ROUNDS &&
-           atomic_word_load(pid_probe_armed_address()) == 1) {
-        let sequence: usize = atomic_word_load(pid_probe_secondary_address()) + 1;
-        if (pid_probe_cycle(false, sequence)) {
-            atomic_word_fetch_add(pid_probe_secondary_address(), 1);
+// Every online peer runs this from its idle loop while the probe is armed.
+fn pid_contention_secondary_run(raw_cpu: usize) !{unsafe} {
+    let online: usize = atomic_word_load(&pid_probe_online);
+    // core-role: core 0 is the probe's primary and mints from the boot
+    // sequence; every other online core is a peer.
+    if (raw_cpu == 0 || raw_cpu >= KERNEL_MAX_CORES || raw_cpu >= online) {
+        return;
+    }
+    let cpu: {0..<KERNEL_MAX_CORES as usize} = raw_cpu;
+    if (atomic_word_load(&pid_probe_done[cpu]) >= PID_CONTENTION_ROUNDS) {
+        return;
+    }
+    atomic_word_fetch_add(&pid_probe_entries, 1);
+    atomic_word_store(&pid_probe_active[cpu], 1);
+    while (atomic_word_load(&pid_probe_done[cpu]) < PID_CONTENTION_ROUNDS &&
+           atomic_word_load(&pid_probe_armed) == 1) {
+        let sequence: usize = atomic_word_load(&pid_probe_done[cpu]) + 1;
+        if (pid_probe_cycle(cpu, online, sequence)) {
+            atomic_word_fetch_add(&pid_probe_done[cpu], 1);
         }
     }
-    atomic_word_store(pid_probe_active_address(), 0);
+    atomic_word_store(&pid_probe_active[cpu], 0);
 }
 
-private fn pid_contention_report(stage: *u8, advanced: usize,
+private fn pid_probe_peer_done_min(online: usize) -> usize !{unsafe} {
+    let mut least: usize = PID_CONTENTION_ROUNDS;
+    for cpu: usize in 1..<KERNEL_MAX_CORES {
+        if (cpu < online && atomic_word_load(&pid_probe_done[cpu]) < least) {
+            least = atomic_word_load(&pid_probe_done[cpu]);
+        }
+    }
+    return least;
+}
+
+private fn pid_probe_calls(online: usize) -> usize !{unsafe} {
+    let mut calls: usize = 0;
+    for cpu: usize in 0..<KERNEL_MAX_CORES {
+        if (cpu < online) { calls = calls + atomic_word_load(&pid_probe_done[cpu]); }
+    }
+    return calls;
+}
+
+private fn pid_probe_any_active(online: usize) -> bool !{unsafe} {
+    for cpu: usize in 1..<KERNEL_MAX_CORES {
+        if (cpu < online && atomic_word_load(&pid_probe_active[cpu]) == 1) {
+            return true;
+        }
+    }
+    return false;
+}
+
+private fn pid_contention_report(stage: *u8, online: usize, advanced: usize,
                                   calls: usize) !{unsafe} {
     kernel_boot_log("pid contention stage: ");
     kernel_boot_log(stage);
     kernel_boot_log("\n");
-    kernel_boot_log("pid contention counts: primary=");
-    uart_put_udec(atomic_word_load(pid_probe_primary_address()));
-    kernel_boot_log(" secondary=");
-    uart_put_udec(atomic_word_load(pid_probe_secondary_address()));
+    kernel_boot_log("pid contention counts: cores=");
+    uart_put_udec(online);
+    kernel_boot_log(" primary=");
+    uart_put_udec(atomic_word_load(&pid_probe_done[0]));
+    kernel_boot_log(" peers-least=");
+    uart_put_udec(pid_probe_peer_done_min(online));
     kernel_boot_log(" calls=");
     uart_put_udec(calls);
     kernel_boot_log(" advanced=");
     uart_put_udec(advanced);
     kernel_boot_log(" overlap=");
-    uart_put_udec(atomic_word_load(pid_probe_overlap_address()));
+    uart_put_udec(atomic_word_load(&pid_probe_overlap));
     kernel_boot_log("\n");
 }
 
-// Call only after observing `active == 1`: that observation closes the gap
-// between the secondary's outer armed check and its entry into the probe.
 // A timeout must leave the monotonically advanced counter alone; restoring
-// it while the secondary may still mint would move the counter backwards.
-private fn pid_probe_disarm_and_quiesce() -> bool !{unsafe} {
-    atomic_word_store(pid_probe_armed_address(), 0);
-    let mut deadline = peer_tick_window_policy(
-        peer_tick_window_peer(), PeerTickPolicy::Finish);
-    while (peer_tick_window_open(deadline) &&
-           atomic_word_load(pid_probe_active_address()) == 1) {
+// it while a peer may still mint would move the counter backwards.
+private fn pid_probe_disarm_and_quiesce(online: usize) -> bool !{unsafe} {
+    atomic_word_store(&pid_probe_armed, 0);
+    for cpu: usize in 1..<KERNEL_MAX_CORES {
+        if (cpu < online) {
+            let mut deadline = peer_tick_window_policy(cpu, PeerTickPolicy::Finish);
+            while (peer_tick_window_open(deadline) &&
+                   atomic_word_load(&pid_probe_active[cpu]) == 1) {
+            }
+            peer_tick_window_end(deadline);
+        }
     }
-    peer_tick_window_end(deadline);
-    return atomic_word_load(pid_probe_active_address()) == 0;
+    return pid_probe_any_active(online) == false;
 }
 
 private fn pid_contention_phase(locked: bool) -> bool !{unsafe} {
+    let online: usize = kernel_online_core_count();
     let next_before: usize = scheduled_process_pid_counter();
-    let entries_before: usize = atomic_word_load(pid_probe_entries_address());
-    atomic_word_store(pid_probe_primary_address(), 0);
-    atomic_word_store(pid_probe_secondary_address(), 0);
-    atomic_word_store(pid_probe_active_address(), 0);
-    atomic_word_store(pid_probe_overlap_address(), 0);
-    atomic_word_store(pid_probe_primary_arrived_address(), 0);
-    atomic_word_store(pid_probe_secondary_arrived_address(), 0);
-    atomic_word_store(pid_probe_primary_committed_address(), 0);
-    atomic_word_store(pid_probe_secondary_committed_address(), 0);
-    if (locked) {
-        atomic_word_store(pid_probe_locked_phase_address(), 1);
-    } else {
-        atomic_word_store(pid_probe_locked_phase_address(), 0);
+    let entries_before: usize = atomic_word_load(&pid_probe_entries);
+    for cpu: usize in 0..<KERNEL_MAX_CORES {
+        atomic_word_store(&pid_probe_done[cpu], 0);
+        atomic_word_store(&pid_probe_active[cpu], 0);
     }
-    atomic_word_store(pid_probe_armed_address(), 1);
+    atomic_word_store(&pid_probe_overlap, 0);
+    peer_round_reset(&pid_probe_arrived);
+    peer_round_reset(&pid_probe_committed);
+    atomic_word_store(&pid_probe_online, online);
+    if (locked) {
+        atomic_word_store(&pid_probe_locked_phase, 1);
+    } else {
+        atomic_word_store(&pid_probe_locked_phase, 0);
+    }
+    atomic_word_store(&pid_probe_armed, 1);
 
-    let mut entry_window = peer_tick_window_policy(
-        peer_tick_window_peer(), PeerTickPolicy::Entry);
-    let mut entered: bool = false;
-    while (entered == false && peer_tick_window_open(entry_window)) {
-        if (atomic_word_load(pid_probe_entries_address()) > entries_before) {
-            entered = true;
+    // Every online peer must have entered: the entry count reaches the
+    // number of peers. Each wait is bounded by that peer's own ticks.
+    let mut entered: bool = online >= 2;
+    for cpu: usize in 1..<KERNEL_MAX_CORES {
+        if (cpu < online && entered) {
+            let mut entry_window = peer_tick_window_policy(cpu, PeerTickPolicy::Entry);
+            let mut started: bool = false;
+            while (started == false && peer_tick_window_open(entry_window)) {
+                if (atomic_word_load(&pid_probe_entries) >= entries_before + cpu) {
+                    started = true;
+                }
+            }
+            peer_tick_window_end(entry_window);
+            entered = started;
         }
     }
-    peer_tick_window_end(entry_window);
     if (entered == false) {
-        atomic_word_store(pid_probe_armed_address(), 0);
-        pid_contention_report("secondary-never-entered" as *u8, 0, 0);
+        atomic_word_store(&pid_probe_armed, 0);
+        pid_contention_report("secondary-never-entered" as *u8, online, 0, 0);
         return false;
     }
 
     for round: usize in 0..<PID_CONTENTION_ROUNDS {
-        if (atomic_word_load(pid_probe_armed_address()) == 1 &&
-            pid_probe_cycle(true, round + 1)) {
-            atomic_word_fetch_add(pid_probe_primary_address(), 1);
+        if (atomic_word_load(&pid_probe_armed) == 1 &&
+            pid_probe_cycle(0, online, round + 1)) {
+            atomic_word_fetch_add(&pid_probe_done[0], 1);
         }
     }
-    let rendezvous_failed: bool = atomic_word_load(pid_probe_armed_address()) == 0;
+    let rendezvous_failed: bool = atomic_word_load(&pid_probe_armed) == 0;
 
-    // With per-round rendezvous this is the secondary completion count at
-    // the instant the primary finishes, not a scheduler-granularity metric.
-    atomic_word_store(pid_probe_overlap_address(),
-        atomic_word_load(pid_probe_secondary_address()));
+    // With per-round rendezvous this is the slowest peer's completion count
+    // at the instant core 0 finishes.
+    atomic_word_store(&pid_probe_overlap, pid_probe_peer_done_min(online));
 
-    let mut finish_window = peer_tick_window_policy(
-        peer_tick_window_peer(), PeerTickPolicy::Finish);
-    let mut finished: bool = false;
-    while (finished == false && peer_tick_window_open(finish_window)) {
-        if (atomic_word_load(pid_probe_secondary_address()) >=
-                PID_CONTENTION_ROUNDS) {
-            finished = true;
+    let mut finished: bool = true;
+    for cpu: usize in 1..<KERNEL_MAX_CORES {
+        if (cpu < online) {
+            let mut finish_window = peer_tick_window_policy(cpu, PeerTickPolicy::Finish);
+            while (atomic_word_load(&pid_probe_done[cpu]) < PID_CONTENTION_ROUNDS &&
+                   peer_tick_window_open(finish_window)) {
+            }
+            peer_tick_window_end(finish_window);
+            if (atomic_word_load(&pid_probe_done[cpu]) < PID_CONTENTION_ROUNDS) {
+                finished = false;
+            }
         }
     }
-    peer_tick_window_end(finish_window);
-    let quiesced: bool = pid_probe_disarm_and_quiesce();
+    let quiesced: bool = pid_probe_disarm_and_quiesce(online);
 
     let advanced: usize = scheduled_process_pid_counter() - next_before;
-    let calls: usize =
-        atomic_word_load(pid_probe_primary_address()) +
-        atomic_word_load(pid_probe_secondary_address());
+    let calls: usize = pid_probe_calls(online);
     if (quiesced == false) {
-        pid_contention_report("secondary-never-quiesced" as *u8,
+        pid_contention_report("secondary-never-quiesced" as *u8, online,
                               advanced, calls);
         return false;
     }
@@ -307,18 +262,18 @@ private fn pid_contention_phase(locked: bool) -> bool !{unsafe} {
             stage = "rendezvous-timeout" as *u8;
         }
         scheduled_process_pid_counter_restore(next_before);
-        pid_contention_report(stage, advanced, calls);
+        pid_contention_report(stage, online, advanced, calls);
         return false;
     }
     // Back where it started, before the verdict, so a failed probe does
     // not also leave the counter moved.
     scheduled_process_pid_counter_restore(next_before);
     if (locked) {
-        pid_contention_report("locked" as *u8, advanced, calls);
-        return calls == PID_CONTENTION_ROUNDS * 2 && advanced == calls;
+        pid_contention_report("locked" as *u8, online, advanced, calls);
+        return calls == PID_CONTENTION_ROUNDS * online && advanced == calls;
     }
-    pid_contention_report("unlocked" as *u8, advanced, calls);
-    return calls == PID_CONTENTION_ROUNDS * 2 &&
+    pid_contention_report("unlocked" as *u8, online, advanced, calls);
+    return calls == PID_CONTENTION_ROUNDS * online &&
            advanced == PID_CONTENTION_ROUNDS;
 }
 

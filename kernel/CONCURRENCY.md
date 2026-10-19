@@ -241,8 +241,13 @@ Symmetric now:
   and entry 0 is core 0's own because its boot stack still holds `main()`'s
   frames and slot 0's context (the slot 0 row). Every core calls the same
   console poll, which only core 0 acts on (the UART input-flow request,
-  inside `kernel_log_console_poll`), and core 1 alone runs the two-core
-  probes (the probes row).
+  inside `kernel_log_console_poll`), and core 1 alone runs the peer log
+  probe (the probes row).
+- The boot contention probes (#756): core 0 arms each from the boot
+  sequence and every other online core joins it from the idle loop, each
+  per-core word indexed by its own id (`kernel/lib/peer_round.tkb`: a
+  per-round barrier, PeerRound, and per-core counts, PeerTally). Two
+  cores is the degenerate case.
 - An ext2 read that finds a mutation in flight: the calling core, whichever
   it is, waits for an interrupt and reruns the syscall in place
   (`kernel_syscall_dispatch_action`, #775). A peer used to migrate the call
@@ -267,7 +272,8 @@ Special, with the reason it stays so today:
 | Device interrupts | UART and xHCI SPIs target core 0; a secondary's dispatch handles its tick, its PMU line and the NIC (above), nothing else | their drivers' state is touched only from core 0 | yes: the NIC moved in #830; xHCI, then the UART (with BREAK -> DDB and the input-flow poll), are #830's next slices |
 | DDB entry by UART BREAK | the UART IRQ branch on core 0 | follows the device interrupt row; DDB then stops the others through the world stop | follows the device row |
 | UART input-flow requests | `kernel_log_console_poll` (`kernel/printk/log.tkb`), called at syscall entry and from core 0's idle loop | the UART is core 0's device (see the device interrupt row); since #613 slice 5 every CPU writes the log ring, so peer lines no longer pass through core 0 and the old peer drain and UartTx blocking are gone -- this flow-control poll is all that is left. A termios change sends the request itself from whichever CPU made it (#826), deciding under the console lock as the poll does | follows the device interrupt row |
-| Two-core probes and fixtures | `kernel_secondary_main`'s core-1 branch, `peer_tick_window`, the spread-timer and busy-pair fixtures | each is an experiment written for core 0 against CPU 1 | no: the fixed pair is the experiment |
+| Two-core probes and fixtures | the idle loop's core-1 branch (the peer log probe), the peer console probe, `world_stop_probe`'s two-core stop, the spread-timer and busy-pair fixtures | each is an experiment written for core 0 against CPU 1 | no: the fixed pair is the experiment |
+| Contention probe primary | every `*_contention_probe` and its siblings in `kernel/init/contention_probes.tkb` | the boot sequence runs on core 0, so it arms the probe and counts as participant 0; the peers are symmetric among themselves (#756) | only if probes ran outside the boot sequence |
 
 ## State transitions and the run guard
 
@@ -521,7 +527,7 @@ an entry and pushed real acquires out as untracked once.
    the payload's alignment.
 4. **A lock without a probe is not done.** A lock added correct-by-audit
    changed nothing any lane could see, because the second core never reached
-   the subsystem. See "Two-core probes" below.
+   the subsystem. See "Contention probes" below.
 
 ## Binding a lock to what it protects
 
@@ -715,11 +721,15 @@ It also repeats sixteen immediate stop/release pairs with the online peer,
 checks nested requests are refused, and injects a stale nonzero acknowledgement
 into a private controller to prove it cannot mint a complete token.
 
-## Two-core probes
+## Contention probes
 
 A probe lives in `kernel/kernel/*_contention_evidence.tkb`, is armed by the
-platform init, and is driven from the secondary core's loop in
-`kernel/arch/arm64/kernel/secondary.tkb`. Rules learned by getting each one
+platform init, and is driven from every online peer's idle loop in
+`kernel/arch/arm64/kernel/secondary.tkb` (GitHub issue #756; core 1 alone
+before). Per-core state is one word per core: `PeerRound` for a barrier
+every round, `PeerTally` for counts and inside-the-run levels
+(`kernel/lib/peer_round.tkb`). View lines name "every peer" rather than a
+number, because the lanes may differ in core count. Rules learned by getting each one
 wrong:
 
 - **The detector uses the probe's OWN atomics**, never a counter on the racing

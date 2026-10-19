@@ -42,6 +42,7 @@
 //   and two racy counters losing the same amount report success.
 
 use "kernel/lib/peer_tick_window.tkb";
+use "kernel/lib/peer_round.tkb";
 use "kernel/kernel/process.tkb";
 use "kernel/lib/execution_model.tkb";
 use "kernel/lib/occupancy.tkb";
@@ -89,22 +90,15 @@ private let mut schedule_probe_occupancy: Occupancy;
 const SCHEDULE_CONTENTION_DRAIN_SPINS: usize = 1048576;
 
 private let mut schedule_probe_armed: AtomicWord;
-private let mut schedule_probe_primary: AtomicWord;
-private let mut schedule_probe_secondary: AtomicWord;
+// Completed rounds, one word per core (GitHub issue #756: every online
+// peer, index 0 is core 0's). Presence is the occupancy region above.
+private let mut schedule_probe_tally: PeerTally;
 private let mut schedule_probe_overlap: AtomicWord;
 private let mut schedule_probe_duplicates: AtomicWord;
 private let mut schedule_probe_missing: AtomicWord;
 
 private fn schedule_probe_armed_address() -> *AtomicWord {
     return &schedule_probe_armed;
-}
-
-private fn schedule_probe_primary_address() -> *AtomicWord {
-    return &schedule_probe_primary;
-}
-
-private fn schedule_probe_secondary_address() -> *AtomicWord {
-    return &schedule_probe_secondary;
 }
 
 private fn schedule_probe_overlap_address() -> *AtomicWord {
@@ -214,7 +208,9 @@ const SCHEDULE_CONTENTION_ATTEMPT_SECONDS: i64 = 5;
 // asserted: how hard the machine made this is evidence about the machine.
 private let mut schedule_probe_attempts: usize;
 
-fn schedule_contention_secondary_run() !{unsafe} {
+// Every online peer runs this from its idle loop while the probe is armed.
+fn schedule_contention_secondary_run(cpu: usize) !{unsafe} {
+    if (peer_tally_is_peer(&schedule_probe_tally, cpu) == false) { return; }
     // Linear, so leaving is checked on every path out of this function --
     // which is the half of the protocol a bare flag was worst at, and the
     // half that cost a 1-in-8 flake when it was a bare flag.
@@ -226,18 +222,18 @@ fn schedule_contention_secondary_run() !{unsafe} {
     // and hand core 0 an `overlap` from a phase the two never shared.
     // kernel/kernel/fd_table.tkb's probe has had both halves since it was
     // written; this is the same pair.
-    while (atomic_word_load(schedule_probe_secondary_address()) == 0 &&
+    while (peer_tally_count(&schedule_probe_tally, cpu) == 0 &&
            atomic_word_load(schedule_probe_armed_address()) == 1) {
         schedule_probe_cycle();
-        atomic_word_fetch_add(schedule_probe_secondary_address(), 1);
+        peer_tally_add(&schedule_probe_tally, cpu);
     }
-    while (atomic_word_load(schedule_probe_primary_address()) == 0 &&
+    while (peer_tally_count(&schedule_probe_tally, 0) == 0 &&
            atomic_word_load(schedule_probe_armed_address()) == 1) { }
-    while (atomic_word_load(schedule_probe_secondary_address()) <
+    while (peer_tally_count(&schedule_probe_tally, cpu) <
                SCHEDULE_CONTENTION_ROUNDS &&
            atomic_word_load(schedule_probe_armed_address()) == 1) {
         schedule_probe_cycle();
-        atomic_word_fetch_add(schedule_probe_secondary_address(), 1);
+        peer_tally_add(&schedule_probe_tally, cpu);
     }
     occupancy_leave(visit, &schedule_probe_occupancy);
 }
@@ -246,10 +242,8 @@ private fn schedule_contention_report(stage: *u8) !{unsafe} {
     kernel_boot_log("schedule contention stage: ");
     kernel_boot_log(stage);
     kernel_boot_log("\n");
-    kernel_boot_log("schedule contention counts: primary=");
-    uart_put_udec(atomic_word_load(schedule_probe_primary_address()));
-    kernel_boot_log(" secondary=");
-    uart_put_udec(atomic_word_load(schedule_probe_secondary_address()));
+    kernel_boot_log("schedule contention counts:");
+    peer_tally_put_counts(&schedule_probe_tally);
     kernel_boot_log(" duplicates=");
     uart_put_udec(atomic_word_load(schedule_probe_duplicates_address()));
     kernel_boot_log(" missing=");
@@ -261,16 +255,15 @@ private fn schedule_contention_report(stage: *u8) !{unsafe} {
     kernel_boot_log("\n");
 }
 
-// Run one phase to completion on both cores. Returns the duplicate count,
-// or refuses by reporting when the secondary never joined.
+// Run one phase to completion on every online core. Returns the duplicate count,
+// or refuses by reporting when a peer never joined.
 // Reports only its GIVE-UPS. The caller reports the stage it finished,
 // because phase 1 may be re-run and one `unlocked` line per attempt would
 // put a variable number of lines into a view that compares exactly.
 private fn schedule_contention_run_phase(locked: usize)
         -> bool !{unsafe} {
     atomic_word_store(schedule_probe_phase_address(), locked);
-    atomic_word_store(schedule_probe_primary_address(), 0);
-    atomic_word_store(schedule_probe_secondary_address(), 0);
+    peer_tally_reset(&schedule_probe_tally, kernel_online_core_count());
     atomic_word_store(schedule_probe_duplicates_address(), 0);
     atomic_word_store(schedule_probe_missing_address(), 0);
     atomic_word_store(schedule_probe_overlap_address(), 0);
@@ -283,15 +276,8 @@ private fn schedule_contention_run_phase(locked: usize)
     // phase before the secondary does anything at all -- which is exactly
     // what kernel/kernel/page_contention_evidence.tkb's overlap was
     // failing on when this probe was added ahead of it.
-    let mut entry_window = peer_tick_window_policy(
-        peer_tick_window_peer(), PeerTickPolicy::Entry);
-    let mut entered: bool = false;
-    while (entered == false && peer_tick_window_open(entry_window)) {
-        if (atomic_word_load(schedule_probe_secondary_address()) >= 1) {
-            entered = true;
-        }
-    }
-    peer_tick_window_end(entry_window);
+    let entered: bool = peer_tally_peers_reached(
+        &schedule_probe_tally, 1, PeerTickPolicy::Entry);
     if (entered == false) {
         atomic_word_store(schedule_probe_armed_address(), 0);
         schedule_contention_report("secondary-never-completed-a-round" as *u8);
@@ -300,22 +286,16 @@ private fn schedule_contention_run_phase(locked: usize)
 
     for round: usize in 0..<SCHEDULE_CONTENTION_ROUNDS {
         schedule_probe_cycle();
-        atomic_word_fetch_add(schedule_probe_primary_address(), 1);
+        peer_tally_add(&schedule_probe_tally, 0);
     }
 
+    // The slowest peer's progress when core 0 finished.
     atomic_word_store(schedule_probe_overlap_address(),
-        atomic_word_load(schedule_probe_secondary_address()));
+        peer_tally_peers_least(&schedule_probe_tally));
 
-    let mut finish_window = peer_tick_window_policy(
-        peer_tick_window_peer(), PeerTickPolicy::Finish);
-    let mut finished: bool = false;
-    while (finished == false && peer_tick_window_open(finish_window)) {
-        if (atomic_word_load(schedule_probe_secondary_address()) >=
-                SCHEDULE_CONTENTION_ROUNDS) {
-            finished = true;
-        }
-    }
-    peer_tick_window_end(finish_window);
+    let finished: bool = peer_tally_peers_reached(
+        &schedule_probe_tally, SCHEDULE_CONTENTION_ROUNDS,
+        PeerTickPolicy::Finish);
     atomic_word_store(schedule_probe_armed_address(), 0);
     // Printed on EVERY exit path, including the give-ups. Two probes in
     // this tree shipped with early returns that printed nothing, and a run
@@ -474,11 +454,11 @@ fn schedule_contention_probe() -> bool !{unsafe} {
                 return false;
             }
             if (excluded != 0) {
-                kernel_boot_log("schedule contention: the run lock was held and one Ready process still reached both cores, which is the defect\n");
+                kernel_boot_log("schedule contention: the run lock was held and one Ready process still reached two cores, which is the defect\n");
                 return false;
             }
             if (shared == 0) {
-                kernel_boot_log("schedule contention: the second core completed no round inside the locked phase, so its clean result excluded nothing\n");
+                kernel_boot_log("schedule contention: some peer completed no round inside the locked phase, so its clean result excluded nothing\n");
                 return false;
             }
             if (cleaned == false) {

@@ -1,0 +1,225 @@
+// A per-round barrier across every online core, for the contention probes
+// (GitHub issue #756). Each participant publishes the round it reached in its
+// own word and waits until every online participant has reached it too.
+//
+// The two-core probes each spelled this as a primary word and a secondary
+// word; this is the same protocol with one word per core, so the two-core
+// case is the degenerate one. The wait is bounded the way
+// kernel/lib/peer_tick_window.tkb bounds a two-core wait: by the lagging
+// core's own timer ticks, plus that file's wall-clock backstop.
+//
+// Current limitations (2026-10-19): the participants are the online prefix
+// 0..<online (kernel_online_core_count); a core that is online but never
+// arrives times the round out, and the caller's `armed` word is cleared so
+// every other participant stops too. The barrier orders arrivals, not the
+// work between them.
+
+use "kernel/lib/peer_tick_window.tkb";
+use "kernel/lib/execution_model.tkb";
+use "kernel/lib/atomic_word.tkb";
+
+struct PeerRound {
+    arrived: [AtomicWord; KERNEL_MAX_CORES];
+}
+
+fn peer_round_reset(round: &mut PeerRound) !{unsafe} {
+    for cpu: usize in 0..<KERNEL_MAX_CORES {
+        atomic_word_store(&round.arrived[cpu], 0);
+    }
+}
+
+// Publish `sequence` for `self_cpu` and wait for every core below `online`.
+// False when a peer did not arrive in time or `armed` was cleared; a timeout
+// clears `armed` itself, so the other participants give up as well.
+fn peer_round_meet(round: &mut PeerRound, self_cpu: usize, online: usize,
+                   sequence: usize, armed: *AtomicWord) -> bool !{unsafe} {
+    if (self_cpu < KERNEL_MAX_CORES) {
+        let own: {0..<KERNEL_MAX_CORES as usize} = self_cpu;
+        atomic_word_store(&round.arrived[own], sequence);
+    }
+    for cpu: usize in 0..<KERNEL_MAX_CORES {
+        if (cpu < online && cpu != self_cpu) {
+            let mut window = peer_tick_window_policy(cpu, PeerTickPolicy::Finish);
+            while (peer_tick_window_open(window) &&
+                   atomic_word_load(&round.arrived[cpu]) < sequence &&
+                   atomic_word_load(armed) == 1) {
+            }
+            peer_tick_window_end(window);
+            if (atomic_word_load(&round.arrived[cpu]) < sequence ||
+                atomic_word_load(armed) != 1) {
+                atomic_word_store(armed, 0);
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+// Per-core progress for the probes that do not meet every round (GitHub
+// issue #756): each participant counts its own completed cycles in its own
+// word and says whether it is inside its run function. Core 0 is the
+// primary; every other core below `online` is a peer. The two-core probes
+// spelled this as a primary word, a secondary word and one `active` level.
+//
+// Current limitations (2026-10-19): the same online prefix as PeerRound,
+// fixed by core 0 at reset before it arms the probe. A peer that never
+// reaches the awaited count fails that wait after its own ticks; the caller
+// reports which wait failed.
+struct PeerTally {
+    online: AtomicWord;
+    count: [AtomicWord; KERNEL_MAX_CORES];
+    active: [AtomicWord; KERNEL_MAX_CORES];
+}
+
+// Core 0, before arming: zero every word and fix the participants.
+fn peer_tally_reset(tally: &mut PeerTally, online: usize) !{unsafe} {
+    for cpu: usize in 0..<KERNEL_MAX_CORES {
+        atomic_word_store(&tally.count[cpu], 0);
+        atomic_word_store(&tally.active[cpu], 0);
+    }
+    atomic_word_store(&tally.online, online);
+}
+
+fn peer_tally_online(tally: &mut PeerTally) -> usize !{unsafe} {
+    return atomic_word_load(&tally.online);
+}
+
+// True when `cpu` is a peer of this tally: online, and not the primary.
+fn peer_tally_is_peer(tally: &mut PeerTally, cpu: usize) -> bool !{unsafe} {
+    // core-role: core 0 is the probe's primary, which runs the boot
+    // sequence; the peers are every other online core.
+    return cpu != 0 && cpu < KERNEL_MAX_CORES &&
+           cpu < atomic_word_load(&tally.online);
+}
+
+fn peer_tally_count(tally: &mut PeerTally, cpu: usize) -> usize !{unsafe} {
+    if (cpu < KERNEL_MAX_CORES) {
+        let own: {0..<KERNEL_MAX_CORES as usize} = cpu;
+        return atomic_word_load(&tally.count[own]);
+    }
+    return 0;
+}
+
+fn peer_tally_add(tally: &mut PeerTally, cpu: usize) !{unsafe} {
+    if (cpu < KERNEL_MAX_CORES) {
+        let own: {0..<KERNEL_MAX_CORES as usize} = cpu;
+        atomic_word_fetch_add(&tally.count[own], 1);
+    }
+}
+
+fn peer_tally_set(tally: &mut PeerTally, cpu: usize, value: usize) !{unsafe} {
+    if (cpu < KERNEL_MAX_CORES) {
+        let own: {0..<KERNEL_MAX_CORES as usize} = cpu;
+        atomic_word_store(&tally.count[own], value);
+    }
+}
+
+fn peer_tally_enter(tally: &mut PeerTally, cpu: usize) !{unsafe} {
+    if (cpu < KERNEL_MAX_CORES) {
+        let own: {0..<KERNEL_MAX_CORES as usize} = cpu;
+        atomic_word_store(&tally.active[own], 1);
+    }
+}
+
+fn peer_tally_leave(tally: &mut PeerTally, cpu: usize) !{unsafe} {
+    if (cpu < KERNEL_MAX_CORES) {
+        let own: {0..<KERNEL_MAX_CORES as usize} = cpu;
+        atomic_word_store(&tally.active[own], 0);
+    }
+}
+
+// Core 0: wait until every peer's count reaches `at_least`, each wait
+// bounded by that peer's own ticks. False when some peer did not; the
+// caller's evidence line carries peer_tally_peers_least.
+fn peer_tally_peers_reached(tally: &mut PeerTally, at_least: usize,
+                            policy: PeerTickPolicy) -> bool !{unsafe} {
+    let online: usize = atomic_word_load(&tally.online);
+    let mut all: bool = online >= 2;
+    for cpu: usize in 1..<KERNEL_MAX_CORES {
+        if (cpu < online && all) {
+            let mut window = peer_tick_window_policy(cpu, policy);
+            while (peer_tick_window_open(window) &&
+                   atomic_word_load(&tally.count[cpu]) < at_least) {
+            }
+            peer_tick_window_end(window);
+            all = atomic_word_load(&tally.count[cpu]) >= at_least;
+        }
+    }
+    return all;
+}
+
+// Core 0: the same wait for the one peer `cpu`.
+fn peer_tally_peer_reached(tally: &mut PeerTally, cpu: usize, at_least: usize,
+                           policy: PeerTickPolicy) -> bool !{unsafe} {
+    if (cpu >= KERNEL_MAX_CORES) { return false; }
+    let peer: {0..<KERNEL_MAX_CORES as usize} = cpu;
+    let mut window = peer_tick_window_policy(peer, policy);
+    while (peer_tick_window_open(window) &&
+           atomic_word_load(&tally.count[peer]) < at_least) {
+    }
+    peer_tick_window_end(window);
+    return atomic_word_load(&tally.count[peer]) >= at_least;
+}
+
+// Core 0: wait until no peer is inside its run function.
+fn peer_tally_peers_left(tally: &mut PeerTally, policy: PeerTickPolicy)
+        -> bool !{unsafe} {
+    let online: usize = atomic_word_load(&tally.online);
+    let mut all: bool = true;
+    for cpu: usize in 1..<KERNEL_MAX_CORES {
+        if (cpu < online) {
+            let mut window = peer_tick_window_policy(cpu, policy);
+            while (peer_tick_window_open(window) &&
+                   atomic_word_load(&tally.active[cpu]) != 0) {
+            }
+            peer_tick_window_end(window);
+            if (atomic_word_load(&tally.active[cpu]) != 0) { all = false; }
+        }
+    }
+    return all;
+}
+
+// The least count among the peers (0 when there is none).
+fn peer_tally_peers_least(tally: &mut PeerTally) -> usize !{unsafe} {
+    let online: usize = atomic_word_load(&tally.online);
+    let mut least: usize = 0;
+    let mut seen: bool = false;
+    for cpu: usize in 1..<KERNEL_MAX_CORES {
+        if (cpu < online) {
+            let count: usize = atomic_word_load(&tally.count[cpu]);
+            if (seen == false || count < least) { least = count; }
+            seen = true;
+        }
+    }
+    return least;
+}
+
+// The sum of the peers' counts.
+fn peer_tally_peers_sum(tally: &mut PeerTally) -> usize !{unsafe} {
+    let online: usize = atomic_word_load(&tally.online);
+    let mut sum: usize = 0;
+    for cpu: usize in 1..<KERNEL_MAX_CORES {
+        if (cpu < online) { sum = sum + atomic_word_load(&tally.count[cpu]); }
+    }
+    return sum;
+}
+
+// The number of peers: online cores other than core 0.
+fn peer_tally_peers(tally: &mut PeerTally) -> usize !{unsafe} {
+    let online: usize = atomic_word_load(&tally.online);
+    if (online == 0) { return 0; }
+    return online - 1;
+}
+
+// The evidence fields every converted probe prints after its own name:
+// " cores=<online> primary=<core 0's count> peers-least=<n> peers-sum=<n>".
+fn peer_tally_put_counts(tally: &mut PeerTally) !{unsafe} {
+    kernel_boot_log(" cores=");
+    uart_put_udec(atomic_word_load(&tally.online));
+    kernel_boot_log(" primary=");
+    uart_put_udec(atomic_word_load(&tally.count[0]));
+    kernel_boot_log(" peers-least=");
+    uart_put_udec(peer_tally_peers_least(tally));
+    kernel_boot_log(" peers-sum=");
+    uart_put_udec(peer_tally_peers_sum(tally));
+}

@@ -1,11 +1,14 @@
-// Two-core evidence for the production console lock. The peer first bypasses
-// it to demonstrate that the detector observes entry while core 0 holds it;
-// then the same rendezvous takes the real lock and entry waits for release.
+// Every-online-core evidence for the production console lock (one peer
+// until GitHub issue #756; one is now the degenerate case). Every peer first
+// bypasses it to demonstrate that the detector observes entry while core 0
+// holds it; then the same rendezvous takes the real lock and every peer's
+// entry waits for release, the peers then excluding one another.
 // Detector words are independent atomic cells, not console-path counters.
-// Current limitations (2026-10-03): init runs this once; only core 1
-// participates through the secondary probe dispatcher. This tests exclusion,
-// not physical UART timing or an abandoned lock holder.
+// Current limitations (2026-10-19): init runs this once; the participants are
+// the online prefix at the start of each phase. This tests exclusion, not
+// physical UART timing or an abandoned lock holder.
 use "kernel/lib/peer_tick_window.tkb";
+use "kernel/lib/peer_round.tkb";
 use "kernel/lib/atomic_word.tkb";
 use "kernel/lib/execution_model.tkb";
 use "kernel/printk/console_lock.tkb";
@@ -13,39 +16,47 @@ use "kernel/lib/occupancy.tkb";
 
 private let mut console_probe_armed: AtomicWord;
 private let mut console_probe_phase: AtomicWord;
-private let mut console_probe_ready: AtomicWord;
+// Bumped by core 0 for every phase; a peer serves each phase once.
+private let mut console_probe_sequence: AtomicWord;
 private let mut console_probe_go: AtomicWord;
-private let mut console_probe_arrived: AtomicWord;
-private let mut console_probe_entered: AtomicWord;
-private let mut console_probe_done: AtomicWord;
+// Per peer: the phase sequence it is ready for, then finished.
+private let mut console_probe_ready: PeerTally;
+private let mut console_probe_done: PeerTally;
+// Per peer: 1 = saw the lock held on arrival, 2 = saw it free.
+private let mut console_probe_arrived: PeerTally;
+// Per peer: 1 once it passed the entry the phase tests.
+private let mut console_probe_entered: PeerTally;
 
 fn console_contention_is_armed() -> bool {
     return atomic_word_load(&console_probe_armed) == 1;
 }
 
-fn console_contention_secondary_run() {
+// Every online peer runs this from its idle loop while the probe is armed.
+fn console_contention_secondary_run(cpu: usize) {
+    if (peer_tally_is_peer(&console_probe_done, cpu) == false) { return; }
+    let sequence: usize = atomic_word_load(&console_probe_sequence);
+    if (peer_tally_count(&console_probe_ready, cpu) == sequence) { return; }
     let phase: usize = atomic_word_load(&console_probe_phase);
     // Rendezvous outside the lock first: the idle peer may otherwise be
     // waiting in an unrelated console write before it reaches this probe.
-    atomic_word_store(&console_probe_ready, 1);
+    peer_tally_set(&console_probe_ready, cpu, sequence);
     if (console_probe_wait(&console_probe_go) == false) {
         atomic_word_store(&console_probe_armed, 0);
-        atomic_word_store(&console_probe_done, 1);
+        peer_tally_set(&console_probe_done, cpu, sequence);
         return;
     }
     // This observation belongs to the detector, before the tested acquire.
     let held: bool = console_lock_is_held();
-    if (held) { atomic_word_store(&console_probe_arrived, 1); }
-    else { atomic_word_store(&console_probe_arrived, 2); }
+    if (held) { peer_tally_set(&console_probe_arrived, cpu, 1); }
+    else { peer_tally_set(&console_probe_arrived, cpu, 2); }
     if (phase == 1) {
-        atomic_word_store(&console_probe_entered, 1);
+        peer_tally_set(&console_probe_entered, cpu, 1);
     } else {
         let guard = console_lock();
-        atomic_word_store(&console_probe_entered, 1);
+        peer_tally_set(&console_probe_entered, cpu, 1);
         console_unlock(guard);
     }
-    atomic_word_store(&console_probe_armed, 0);
-    atomic_word_store(&console_probe_done, 1);
+    peer_tally_set(&console_probe_done, cpu, sequence);
 }
 
 private fn console_probe_wait(cell: *AtomicWord) -> bool {
@@ -58,32 +69,49 @@ private fn console_probe_wait(cell: *AtomicWord) -> bool {
     return false;
 }
 
+// True when every peer's word in `tally` equals `value`.
+private fn console_probe_every_peer(tally: &mut PeerTally, value: usize) -> bool {
+    let online: usize = peer_tally_online(tally);
+    let mut every: bool = online >= 2;
+    for cpu: usize in 1..<KERNEL_MAX_CORES {
+        if (cpu < online && peer_tally_count(tally, cpu) != value) {
+            every = false;
+        }
+    }
+    return every;
+}
+
 private fn console_probe_phase_run(phase: usize) -> bool {
+    let online: usize = kernel_online_core_count();
     atomic_word_store(&console_probe_phase, phase);
-    atomic_word_store(&console_probe_ready, 0);
     atomic_word_store(&console_probe_go, 0);
-    atomic_word_store(&console_probe_arrived, 0);
-    atomic_word_store(&console_probe_entered, 0);
-    atomic_word_store(&console_probe_done, 0);
+    peer_tally_reset(&console_probe_arrived, online);
+    peer_tally_reset(&console_probe_entered, online);
+    let sequence: usize = atomic_word_load(&console_probe_sequence) + 1;
+    atomic_word_store(&console_probe_sequence, sequence);
     atomic_word_store(&console_probe_armed, 1);
-    if (console_probe_wait(&console_probe_ready) == false) {
+    if (peer_tally_peers_reached(&console_probe_ready, sequence,
+                                 PeerTickPolicy::Arrival) == false) {
         atomic_word_store(&console_probe_armed, 0);
         kernel_boot_log("console contention stage: secondary-never-ready\n");
         return false;
     }
     let guard = console_lock();
     atomic_word_store(&console_probe_go, 1);
-    let arrived: bool = console_probe_wait(&console_probe_arrived);
+    let arrived: bool = peer_tally_peers_reached(&console_probe_arrived, 1,
+                                                 PeerTickPolicy::Arrival);
     let mut expected: bool = false;
-    if (arrived && atomic_word_load(&console_probe_arrived) == 1) {
+    if (arrived && console_probe_every_peer(&console_probe_arrived, 1)) {
         if (phase == 1) {
-            expected = console_probe_wait(&console_probe_entered);
+            expected = peer_tally_peers_reached(&console_probe_entered, 1,
+                                                PeerTickPolicy::Arrival);
         } else {
-            expected = atomic_word_load(&console_probe_entered) == 0;
+            expected = peer_tally_peers_sum(&console_probe_entered) == 0;
         }
     }
     console_unlock(guard);
-    let done: bool = console_probe_wait(&console_probe_done);
+    let done: bool = peer_tally_peers_reached(&console_probe_done, sequence,
+                                              PeerTickPolicy::Arrival);
     atomic_word_store(&console_probe_armed, 0);
     if (arrived == false) {
         kernel_boot_log("console contention stage: secondary-never-arrived\n");
@@ -91,10 +119,14 @@ private fn console_probe_phase_run(phase: usize) -> bool {
         kernel_boot_log("console contention stage: secondary-never-finished\n");
     }
     return arrived && expected && done &&
-        atomic_word_load(&console_probe_entered) == 1;
+        console_probe_every_peer(&console_probe_entered, 1);
 }
 
 fn console_contention_probe() -> bool {
+    let online: usize = kernel_online_core_count();
+    peer_tally_reset(&console_probe_ready, online);
+    peer_tally_reset(&console_probe_done, online);
+    atomic_word_store(&console_probe_sequence, 0);
     if (console_probe_phase_run(1) == false) { return false; }
     return console_probe_phase_run(2);
 }

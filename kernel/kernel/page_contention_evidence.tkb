@@ -28,6 +28,7 @@
 //   cannot see. That wants its own probe and does not have one.
 
 use "kernel/lib/peer_tick_window.tkb";
+use "kernel/lib/peer_round.tkb";
 use "kernel/mm/page.tkb";
 use "kernel/lib/execution_model.tkb";
 
@@ -35,41 +36,17 @@ const PAGE_CONTENTION_ROUNDS: usize = 2048;
 const PAGE_CONTENTION_OUTSIDE_WORK: usize = 64;
 
 private let mut page_probe_armed: AtomicWord;
-private let mut page_probe_primary: AtomicWord;
-private let mut page_probe_secondary: AtomicWord;
+// Completed cycles and the inside-the-run level, one word per core
+// (GitHub issue #756: every online peer, index 0 is core 0's).
+private let mut page_probe_tally: PeerTally;
 private let mut page_probe_failed: AtomicWord;
-private let mut page_probe_active: AtomicWord;
 private let mut page_probe_overlap: AtomicWord;
 
-private fn page_probe_armed_address() -> *AtomicWord {
-    return &page_probe_armed;
-}
-
-private fn page_probe_primary_address() -> *AtomicWord {
-    return &page_probe_primary;
-}
-
-private fn page_probe_secondary_address() -> *AtomicWord {
-    return &page_probe_secondary;
-}
-
-private fn page_probe_failed_address() -> *AtomicWord {
-    return &page_probe_failed;
-}
-
-private fn page_probe_active_address() -> *AtomicWord {
-    return &page_probe_active;
-}
-
-private fn page_probe_overlap_address() -> *AtomicWord {
-    return &page_probe_overlap;
-}
-
-// Take one page and give it straight back. Both cores run this.
+// Take one page and give it straight back. Every online core runs this.
 private fn page_probe_cycle() -> bool !{allocates, unsafe} {
     match page_alloc(PageOwnerTag::UserPage) {
         PageAllocResult::OutOfMemory => {
-            atomic_word_fetch_add(page_probe_failed_address(), 1);
+            atomic_word_fetch_add(&page_probe_failed, 1);
             return false;
         }
         PageAllocResult::Allocated(owner) => {
@@ -81,37 +58,34 @@ private fn page_probe_cycle() -> bool !{allocates, unsafe} {
 }
 
 fn page_contention_is_armed() -> bool !{unsafe} {
-    return atomic_word_load(page_probe_armed_address()) == 1;
+    return atomic_word_load(&page_probe_armed) == 1;
 }
 
-fn page_contention_secondary_run() !{allocates, unsafe} {
-    atomic_word_store(page_probe_active_address(), 1);
+// Every online peer runs this from its idle loop while the probe is armed.
+fn page_contention_secondary_run(cpu: usize) !{allocates, unsafe} {
+    if (peer_tally_is_peer(&page_probe_tally, cpu) == false) { return; }
+    peer_tally_enter(&page_probe_tally, cpu);
     // Complete one cycle, then WAIT for the primary to have started.
-    // GitHub issue #510: this is the second half of the start handshake
+    // GitHub issue #510: the second half of the start handshake
     // kernel/kernel/fd_table.tkb's probe already had. Without it this core
     // -- driven from the idle loop in
     // kernel/arch/arm64/kernel/secondary.tkb, which re-enters an armed
     // probe after every `wfi` wake -- can run every round and leave before
     // core 0 gets a slice, and the overlap core 0 then asserts is a number
-    // from a phase the two cores never shared. A cycle that comes back
-    // false took no page and is not one, so this retries rather than
-    // publishing a round it did not complete.
-    while (atomic_word_load(page_probe_secondary_address()) == 0 &&
-           atomic_word_load(page_probe_armed_address()) == 1) {
-        if (page_probe_cycle()) {
-            atomic_word_fetch_add(page_probe_secondary_address(), 1);
-        }
+    // from a phase the cores never shared. A cycle that comes back false
+    // took no page and is not one, so this retries rather than publishing
+    // a round it did not complete.
+    while (peer_tally_count(&page_probe_tally, cpu) == 0 &&
+           atomic_word_load(&page_probe_armed) == 1) {
+        if (page_probe_cycle()) { peer_tally_add(&page_probe_tally, cpu); }
     }
-    while (atomic_word_load(page_probe_primary_address()) == 0 &&
-           atomic_word_load(page_probe_armed_address()) == 1) { }
-    while (atomic_word_load(page_probe_secondary_address()) <
-               PAGE_CONTENTION_ROUNDS &&
-           atomic_word_load(page_probe_armed_address()) == 1) {
-        if (page_probe_cycle()) {
-            atomic_word_fetch_add(page_probe_secondary_address(), 1);
-        }
+    while (peer_tally_count(&page_probe_tally, 0) == 0 &&
+           atomic_word_load(&page_probe_armed) == 1) { }
+    while (peer_tally_count(&page_probe_tally, cpu) < PAGE_CONTENTION_ROUNDS &&
+           atomic_word_load(&page_probe_armed) == 1) {
+        if (page_probe_cycle()) { peer_tally_add(&page_probe_tally, cpu); }
     }
-    atomic_word_store(page_probe_active_address(), 0);
+    peer_tally_leave(&page_probe_tally, cpu);
 }
 
 private fn page_contention_report(stage: *u8, baseline: usize,
@@ -119,99 +93,72 @@ private fn page_contention_report(stage: *u8, baseline: usize,
     kernel_boot_log("page contention stage: ");
     kernel_boot_log(stage);
     kernel_boot_log("\n");
-    kernel_boot_log("page contention counts: primary=");
-    uart_put_udec(atomic_word_load(page_probe_primary_address()));
-    kernel_boot_log(" secondary=");
-    uart_put_udec(atomic_word_load(page_probe_secondary_address()));
+    kernel_boot_log("page contention counts:");
+    peer_tally_put_counts(&page_probe_tally);
     kernel_boot_log(" leaked=");
     uart_put_udec(page_allocator_live_count() - baseline);
     kernel_boot_log(" doublefree=");
     uart_put_udec(page_allocator_double_free_count() - doubles_before);
     kernel_boot_log(" overlap=");
-    uart_put_udec(atomic_word_load(page_probe_overlap_address()));
+    uart_put_udec(atomic_word_load(&page_probe_overlap));
     kernel_boot_log("\n");
 }
 
 fn page_contention_probe() -> bool !{allocates, unsafe} {
     let baseline: usize = page_allocator_live_count();
     let doubles_before: usize = page_allocator_double_free_count();
-    atomic_word_store(page_probe_armed_address(), 1);
+    atomic_word_store(&page_probe_overlap, 0);
+    peer_tally_reset(&page_probe_tally, kernel_online_core_count());
+    atomic_word_store(&page_probe_armed, 1);
 
-    // GitHub issue #479 Group B: wait for the secondary to have COMPLETED A
-    // ROUND, not merely to have set `active`. The difference is the whole
-    // verdict here.
-    //
-    // `active` is set before the first cycle, so the old gate let the
-    // primary start while the secondary had done nothing -- and then
-    // GitHub issue #478 decides how much it ever does. This probe holds
-    // the page lock for longer than any other in this tree, so the
-    // starvation bites hardest here: on RPi5 the overlap was 61 rounds out
-    // of 2048, passing `overlap > 0` by luck rather than by construction.
-    // Adding an unrelated probe ahead of this one in the boot sequence
-    // moved the phase of the secondary's wfi wake-ups and took it to 0,
-    // which is how this was found. The number was fragile before that
-    // change and would have broken for the next person instead.
-    //
-    // Waiting for a completed round does not lower the bar. It makes
-    // `overlap > 0` mean what it was written to mean -- the two cores were
-    // really in the loop together -- instead of meaning the secondary got
-    // a slice before the primary finished.
-    //
-    // The other probes here have the same gate and healthy overlaps
-    // (2048, 2031, 2048...), because their cycles are short enough that
-    // the secondary keeps up. They are fragile in the same way and should
-    // follow this when one of them next moves.
-    let mut entry_window = peer_tick_window_policy(
-        peer_tick_window_peer(), PeerTickPolicy::Entry);
-    let mut entered: bool = false;
-    while (entered == false && peer_tick_window_open(entry_window)) {
-        // The completed round is the whole gate. GitHub issue #510: the
-        // `active` conjunct that stood beside it turned a monotonic count
-        // into a level the secondary clears on its way out, so a core that
-        // ran every round before this one got a slice was reported as
-        // never having entered.
-        if (atomic_word_load(page_probe_secondary_address()) >= 1) {
-            entered = true;
-        }
-    }
-    peer_tick_window_end(entry_window);
-    if (entered == false) {
-        atomic_word_store(page_probe_armed_address(), 0);
+    // GitHub issue #479 Group B: wait for every peer to have COMPLETED A
+    // ROUND, not merely to have set `active`. `active` is set before the
+    // first cycle, so the old gate let the primary start while the
+    // secondary had done nothing -- and then GitHub issue #478 decides how
+    // much it ever does. This probe holds the page lock longer than any
+    // other here, so the starvation bit hardest: on RPi5 the overlap was 61
+    // rounds of 2048, passing `overlap > 0` by luck, and an unrelated probe
+    // added ahead of it took it to 0. Waiting for a completed round makes
+    // `overlap > 0` mean every core was really in the loop together.
+    // GitHub issue #510: the gate is the count alone, never the `active`
+    // level a fast peer clears on its way out.
+    if (peer_tally_peers_reached(&page_probe_tally, 1,
+                                 PeerTickPolicy::Entry) == false) {
+        atomic_word_store(&page_probe_armed, 0);
         page_contention_report("secondary-never-completed-a-round" as *u8,
                                baseline, doubles_before);
         return false;
     }
 
     for round: usize in 0..<PAGE_CONTENTION_ROUNDS {
-        if (page_probe_cycle()) {
-            atomic_word_fetch_add(page_probe_primary_address(), 1);
-        }
+        if (page_probe_cycle()) { peer_tally_add(&page_probe_tally, 0); }
     }
 
-    atomic_word_store(page_probe_overlap_address(),
-        atomic_word_load(page_probe_secondary_address()));
+    atomic_word_store(&page_probe_overlap,
+                      peer_tally_peers_least(&page_probe_tally));
 
-    let mut finish_window = peer_tick_window_policy(
-        peer_tick_window_peer(), PeerTickPolicy::Finish);
-    let mut finished: bool = false;
-    while (finished == false && peer_tick_window_open(finish_window)) {
-        if (atomic_word_load(page_probe_secondary_address()) >=
-                PAGE_CONTENTION_ROUNDS) {
-            finished = true;
-        }
-    }
-    peer_tick_window_end(finish_window);
-    atomic_word_store(page_probe_armed_address(), 0);
+    let finished: bool = peer_tally_peers_reached(
+        &page_probe_tally, PAGE_CONTENTION_ROUNDS, PeerTickPolicy::Finish);
+    atomic_word_store(&page_probe_armed, 0);
     if (finished == false) {
         page_contention_report("secondary-never-finished" as *u8, baseline,
                                doubles_before);
         return false;
     }
+    // Every peer out before the allocator's counts are read: a cycle still
+    // inside would show as a leaked page (GitHub issue #756 made this a
+    // wait over every peer rather than none).
+    if (peer_tally_peers_left(&page_probe_tally,
+                              PeerTickPolicy::Entry) == false) {
+        page_contention_report("secondary-never-left" as *u8, baseline,
+                               doubles_before);
+        return false;
+    }
 
     page_contention_report("complete" as *u8, baseline, doubles_before);
-    let overlap: usize = atomic_word_load(page_probe_overlap_address());
-    // Every page back where it started, nothing freed twice, and both cores
-    // were inside the allocator at once.
+    let overlap: usize = atomic_word_load(&page_probe_overlap);
+    // Every page back where it started, nothing freed twice, and every
+    // online core was inside the allocator at once.
     return page_allocator_live_count() == baseline &&
            page_allocator_double_free_count() == doubles_before &&
            overlap > 0;

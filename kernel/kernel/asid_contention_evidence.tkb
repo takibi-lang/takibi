@@ -1,4 +1,5 @@
-// GitHub issue #479, Group A: two cores assigning ASIDs at once.
+// GitHub issue #479, Group A: every online core assigning ASIDs at once
+// (two cores until GitHub issue #756; two is now the degenerate case).
 //
 // Written before the lock, expected to fail, for the reason the free-list
 // probe next door was: "asid_next/asid_generation are unlocked globals" is
@@ -38,6 +39,7 @@
 // - Measures exclusion, not ordering.
 
 use "kernel/lib/peer_tick_window.tkb";
+use "kernel/lib/peer_round.tkb";
 use "kernel/arch/arm64/mm/asid.tkb";
 use "kernel/lib/execution_model.tkb";
 
@@ -45,30 +47,10 @@ const ASID_CONTENTION_ROUNDS: usize = 2048;
 const ASID_CONTENTION_OUTSIDE_WORK: usize = 64;
 
 private let mut asid_probe_armed: AtomicWord;
-private let mut asid_probe_primary: AtomicWord;
-private let mut asid_probe_secondary: AtomicWord;
-private let mut asid_probe_active: AtomicWord;
+// Completed cycles and the inside-the-run level, one word per core
+// (GitHub issue #756: every online peer, index 0 is core 0's).
+private let mut asid_probe_tally: PeerTally;
 private let mut asid_probe_overlap: AtomicWord;
-
-private fn asid_probe_armed_address() -> *AtomicWord {
-    return &asid_probe_armed;
-}
-
-private fn asid_probe_primary_address() -> *AtomicWord {
-    return &asid_probe_primary;
-}
-
-private fn asid_probe_secondary_address() -> *AtomicWord {
-    return &asid_probe_secondary;
-}
-
-private fn asid_probe_active_address() -> *AtomicWord {
-    return &asid_probe_active;
-}
-
-private fn asid_probe_overlap_address() -> *AtomicWord {
-    return &asid_probe_overlap;
-}
 
 private fn asid_probe_cycle() {
     let (value, generation) = asid_assign();
@@ -76,11 +58,13 @@ private fn asid_probe_cycle() {
 }
 
 fn asid_contention_is_armed() -> bool !{unsafe} {
-    return atomic_word_load(asid_probe_armed_address()) == 1;
+    return atomic_word_load(&asid_probe_armed) == 1;
 }
 
-fn asid_contention_secondary_run() !{unsafe} {
-    atomic_word_store(asid_probe_active_address(), 1);
+// Every online peer runs this from its idle loop while the probe is armed.
+fn asid_contention_secondary_run(cpu: usize) !{unsafe} {
+    if (peer_tally_is_peer(&asid_probe_tally, cpu) == false) { return; }
+    peer_tally_enter(&asid_probe_tally, cpu);
     // One cycle, published, and then WAIT for the primary to have started.
     // GitHub issue #510: this is the second half of the start handshake
     // kernel/kernel/fd_table.tkb's probe already had and this one did not.
@@ -88,21 +72,20 @@ fn asid_contention_secondary_run() !{unsafe} {
     // kernel/arch/arm64/kernel/secondary.tkb, which re-enters an armed
     // probe after every `wfi` wake -- can run every round and leave before
     // core 0 gets a slice, and the overlap core 0 then asserts is a number
-    // from a phase the two cores never shared.
-    while (atomic_word_load(asid_probe_secondary_address()) == 0 &&
-           atomic_word_load(asid_probe_armed_address()) == 1) {
+    // from a phase the cores never shared.
+    while (peer_tally_count(&asid_probe_tally, cpu) == 0 &&
+           atomic_word_load(&asid_probe_armed) == 1) {
         asid_probe_cycle();
-        atomic_word_fetch_add(asid_probe_secondary_address(), 1);
+        peer_tally_add(&asid_probe_tally, cpu);
     }
-    while (atomic_word_load(asid_probe_primary_address()) == 0 &&
-           atomic_word_load(asid_probe_armed_address()) == 1) { }
-    while (atomic_word_load(asid_probe_secondary_address()) <
-               ASID_CONTENTION_ROUNDS &&
-           atomic_word_load(asid_probe_armed_address()) == 1) {
+    while (peer_tally_count(&asid_probe_tally, 0) == 0 &&
+           atomic_word_load(&asid_probe_armed) == 1) { }
+    while (peer_tally_count(&asid_probe_tally, cpu) < ASID_CONTENTION_ROUNDS &&
+           atomic_word_load(&asid_probe_armed) == 1) {
         asid_probe_cycle();
-        atomic_word_fetch_add(asid_probe_secondary_address(), 1);
+        peer_tally_add(&asid_probe_tally, cpu);
     }
-    atomic_word_store(asid_probe_active_address(), 0);
+    peer_tally_leave(&asid_probe_tally, cpu);
 }
 
 private fn asid_contention_report(stage: *u8, advanced: usize,
@@ -110,90 +93,64 @@ private fn asid_contention_report(stage: *u8, advanced: usize,
     kernel_boot_log("asid contention stage: ");
     kernel_boot_log(stage);
     kernel_boot_log("\n");
-    kernel_boot_log("asid contention counts: primary=");
-    uart_put_udec(atomic_word_load(asid_probe_primary_address()));
-    kernel_boot_log(" secondary=");
-    uart_put_udec(atomic_word_load(asid_probe_secondary_address()));
+    kernel_boot_log("asid contention counts:");
+    peer_tally_put_counts(&asid_probe_tally);
     kernel_boot_log(" calls=");
     uart_put_udec(calls);
     kernel_boot_log(" advanced=");
     uart_put_udec(advanced);
     kernel_boot_log(" overlap=");
-    uart_put_udec(atomic_word_load(asid_probe_overlap_address()));
+    uart_put_udec(atomic_word_load(&asid_probe_overlap));
     kernel_boot_log("\n");
 }
 
 fn asid_contention_probe() -> bool !{unsafe} {
     let next_before: usize = asid_next_value();
     let rollovers_before: usize = asid_rollover_count_value();
-    atomic_word_store(asid_probe_armed_address(), 1);
+    atomic_word_store(&asid_probe_overlap, 0);
+    peer_tally_reset(&asid_probe_tally, kernel_online_core_count());
+    atomic_word_store(&asid_probe_armed, 1);
 
-    // GitHub issue #479: wait for a COMPLETED ROUND, not merely for
-    // `active`, which the secondary sets BEFORE its first cycle. Under
+    // GitHub issue #479: wait for a COMPLETED ROUND on every peer, not
+    // merely for `active`, which a peer sets BEFORE its first cycle. Under
     // issue #478's starvation the primary can otherwise run its entire
-    // phase before the secondary does anything, and `overlap > 0` then
-    // fails on a healthy kernel.
-    //
-    // Applied to page_contention first, then to schedule_contention, and
-    // recorded at the time as something the remaining probes were fragile
-    // about and should take "when one of them next moves". `tag` moved on
-    // its own: it failed on RPi5 with overlap 18 of 2048 and then with 0.
-    let mut entry_window = peer_tick_window_policy(
-        peer_tick_window_peer(), PeerTickPolicy::Entry);
-    let mut entered: bool = false;
-    while (entered == false && peer_tick_window_open(entry_window)) {
-        if (atomic_word_load(asid_probe_secondary_address()) >= 1) {
-            entered = true;
-        }
-    }
-    peer_tick_window_end(entry_window);
-    if (entered == false) {
-        atomic_word_store(asid_probe_armed_address(), 0);
+    // phase before a peer does anything, and `overlap > 0` then fails on a
+    // healthy kernel. `tag` failed on RPi5 with overlap 18 of 2048 and then
+    // with 0 before this gate.
+    if (peer_tally_peers_reached(&asid_probe_tally, 1,
+                                 PeerTickPolicy::Entry) == false) {
+        atomic_word_store(&asid_probe_armed, 0);
         asid_contention_report("secondary-never-completed-a-round" as *u8, 0, 0);
         return false;
     }
 
     for round: usize in 0..<ASID_CONTENTION_ROUNDS {
         asid_probe_cycle();
-        atomic_word_fetch_add(asid_probe_primary_address(), 1);
+        peer_tally_add(&asid_probe_tally, 0);
     }
 
-    atomic_word_store(asid_probe_overlap_address(),
-        atomic_word_load(asid_probe_secondary_address()));
+    // The slowest peer's progress when core 0 finished: above zero means
+    // every online core was assigning while core 0 was.
+    atomic_word_store(&asid_probe_overlap,
+                      peer_tally_peers_least(&asid_probe_tally));
 
-    let mut finish_window = peer_tick_window_policy(
-        peer_tick_window_peer(), PeerTickPolicy::Finish);
-    let mut finished: bool = false;
-    while (finished == false && peer_tick_window_open(finish_window)) {
-        if (atomic_word_load(asid_probe_secondary_address()) >=
-                ASID_CONTENTION_ROUNDS) {
-            finished = true;
-        }
-    }
-    peer_tick_window_end(finish_window);
-    atomic_word_store(asid_probe_armed_address(), 0);
+    let finished: bool = peer_tally_peers_reached(
+        &asid_probe_tally, ASID_CONTENTION_ROUNDS, PeerTickPolicy::Finish);
+    atomic_word_store(&asid_probe_armed, 0);
 
     // `advanced` and `calls` are read one after the other, and disarming
-    // stops the other core at its next condition check rather than mid
-    // cycle. A mint that lands between the two reads advances the kernel's
-    // counter without advancing this probe's, and `advanced == calls` then
-    // fails on a kernel that did nothing wrong. GitHub issue #510: wait for
-    // the secondary to be provably OUT first, the way the pool probe waits
-    // before reading its live count.
-    let mut settle_window = peer_tick_window_policy(
-        peer_tick_window_peer(), PeerTickPolicy::Entry);
-    let mut settled: bool = false;
-    while (settled == false && peer_tick_window_open(settle_window)) {
-        if (atomic_word_load(asid_probe_active_address()) == 0) {
-            settled = true;
-        }
-    }
-    peer_tick_window_end(settle_window);
+    // stops a peer at its next condition check rather than mid cycle. A
+    // mint that lands between the two reads advances the kernel's counter
+    // without advancing this probe's, and `advanced == calls` then fails on
+    // a kernel that did nothing wrong. GitHub issue #510: wait for every
+    // peer to be provably OUT first, the way the pool probe waits before
+    // reading its live count.
+    let settled: bool = peer_tally_peers_left(&asid_probe_tally,
+                                              PeerTickPolicy::Entry);
 
     let advanced: usize = asid_next_value() - next_before;
-    let calls: usize =
-        atomic_word_load(asid_probe_primary_address()) +
-        atomic_word_load(asid_probe_secondary_address());
+    let calls: usize = peer_tally_count(&asid_probe_tally, 0) +
+                       peer_tally_peers_sum(&asid_probe_tally);
     if (finished == false) {
         asid_contention_report("secondary-never-finished" as *u8, advanced,
                                calls);
@@ -209,6 +166,6 @@ fn asid_contention_probe() -> bool !{unsafe} {
         return false;
     }
     asid_contention_report("complete" as *u8, advanced, calls);
-    let overlap: usize = atomic_word_load(asid_probe_overlap_address());
+    let overlap: usize = atomic_word_load(&asid_probe_overlap);
     return advanced == calls && overlap > 0;
 }

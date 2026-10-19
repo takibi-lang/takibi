@@ -1,10 +1,14 @@
-// Two-core evidence that TcpConnectionOwner is the critical section around
-// one connection's multi-statement protocol-state transitions.
+// Every-online-core evidence that TcpConnectionOwner is the critical section
+// around one connection's multi-statement protocol-state transitions (one
+// peer until GitHub issue #756; one is now the degenerate case).
 //
-// Current limitations (2026-09-12): this uses one private connection and one
-// peer. secondary.tkb admits only core 1 to this probe even when more CPUs are
-// online. It tests exclusion and handoff, not network-device timing.
+// Current limitations (2026-10-19): this uses one private connection. Every
+// online peer steps it at once: while core 0 holds the owner each must be
+// refused, and after the release each must complete exactly one transition,
+// the peers excluding one another. It tests exclusion and handoff, not
+// network-device timing.
 use "kernel/lib/peer_tick_window.tkb";
+use "kernel/lib/peer_round.tkb";
 use "kernel/lib/execution_model.tkb";
 use "kernel/net/tcp.tkb";
 use "kernel/lib/atomic_word.tkb";
@@ -13,51 +17,80 @@ private let mut tcp_owner_probe_armed: AtomicWord;
 private let mut tcp_owner_probe_phase: AtomicWord;
 private let mut tcp_owner_probe_slot: AtomicWord;
 private let mut tcp_owner_probe_generation: AtomicWord;
-private let mut tcp_owner_probe_busy: AtomicWord;
-private let mut tcp_owner_probe_advanced: AtomicWord;
-private let mut tcp_owner_probe_active: AtomicWord;
+// Bumped by core 0 for every phase; a peer serves each phase once.
+private let mut tcp_owner_probe_sequence: AtomicWord;
+// Per peer: 1 when the phase's expected answer was seen (Busy while held,
+// Advanced after release).
+private let mut tcp_owner_probe_seen: PeerTally;
+// Per peer: the last phase sequence it finished.
+private let mut tcp_owner_probe_done: PeerTally;
+// Busy answers peers met from EACH OTHER after the release. Printed, not
+// asserted: how often the peers collided is about the machine.
+private let mut tcp_owner_probe_peer_busy: AtomicWord;
 
 fn tcp_connection_contention_is_armed() -> bool !{unsafe} {
     return atomic_word_load(&tcp_owner_probe_armed) == 1;
 }
 
-fn tcp_connection_contention_secondary_run() !{unsafe} {
-    atomic_word_store(&tcp_owner_probe_active, 1);
+// Every online peer runs this from its idle loop while the probe is armed.
+fn tcp_connection_contention_secondary_run(cpu: usize) !{unsafe} {
+    if (peer_tally_is_peer(&tcp_owner_probe_done, cpu) == false) { return; }
+    let sequence: usize = atomic_word_load(&tcp_owner_probe_sequence);
+    if (peer_tally_count(&tcp_owner_probe_done, cpu) == sequence) { return; }
     let slot: usize = atomic_word_load(&tcp_owner_probe_slot);
     let generation: usize = atomic_word_load(&tcp_owner_probe_generation);
     let phase: usize = atomic_word_load(&tcp_owner_probe_phase);
-    match tcp_connection_probe_step(slot, generation) {
-        TcpConnectionProbeStep::Missing => {}
-        TcpConnectionProbeStep::Busy => {
-            if (phase == 1) { atomic_word_store(
-            &tcp_owner_probe_busy, 1); }
-        }
-        TcpConnectionProbeStep::Advanced => {
-            if (phase == 2) { atomic_word_store(
-            &tcp_owner_probe_advanced, 1); }
+    let mut stepping: bool = true;
+    while (stepping && atomic_word_load(&tcp_owner_probe_armed) == 1) {
+        match tcp_connection_probe_step(slot, generation) {
+            TcpConnectionProbeStep::Missing => { stepping = false; }
+            TcpConnectionProbeStep::Busy => {
+                if (phase == 1) {
+                    peer_tally_set(&tcp_owner_probe_seen, cpu, 1);
+                    stepping = false;
+                } else {
+                    // Another peer holds it; try again until it is free.
+                    atomic_word_fetch_add(&tcp_owner_probe_peer_busy, 1);
+                }
+            }
+            TcpConnectionProbeStep::Advanced => {
+                if (phase == 2) { peer_tally_set(&tcp_owner_probe_seen, cpu, 1); }
+                stepping = false;
+            }
         }
     }
-    atomic_word_store(&tcp_owner_probe_active, 0);
-    atomic_word_store(&tcp_owner_probe_armed, 0);
+    peer_tally_set(&tcp_owner_probe_done, cpu, sequence);
 }
 
-private fn tcp_owner_probe_run_phase(phase: usize) -> bool !{unsafe} {
+private fn tcp_owner_probe_run_phase(phase: usize, online: usize) -> bool !{unsafe} {
     atomic_word_store(&tcp_owner_probe_phase, phase);
-    atomic_word_store(&tcp_owner_probe_active, 0);
+    peer_tally_reset(&tcp_owner_probe_seen, online);
+    let sequence: usize = atomic_word_load(&tcp_owner_probe_sequence) + 1;
+    atomic_word_store(&tcp_owner_probe_sequence, sequence);
     atomic_word_store(&tcp_owner_probe_armed, 1);
-    let mut window = peer_tick_window_policy(
-        peer_tick_window_peer(), PeerTickPolicy::Arrival);
-    while (peer_tick_window_open(window)) {
-        if (atomic_word_load(&tcp_owner_probe_armed) == 0) { peer_tick_window_end(window); return true; }
-    }
-    peer_tick_window_end(window);
+    let finished: bool = peer_tally_peers_reached(
+        &tcp_owner_probe_done, sequence, PeerTickPolicy::Arrival);
     atomic_word_store(&tcp_owner_probe_armed, 0);
-    return false;
+    return finished;
+}
+
+// "every-peer" when each peer saw the phase's expected answer, else the
+// number that did; the line is in a view shared by targets whose core
+// counts may differ.
+private fn tcp_owner_probe_put_seen(seen: usize, peers: usize) !{unsafe} {
+    if (seen == peers) {
+        kernel_boot_log("every-peer");
+    } else {
+        uart_put_udec(seen);
+        kernel_boot_log(" of ");
+        uart_put_udec(peers);
+    }
 }
 
 fn tcp_connection_contention_probe() -> bool !{unsafe} {
     static_assert(KERNEL_ACTIVE_CORES >= 2,
                   "TCP connection contention evidence requires one peer");
+    let online: usize = kernel_online_core_count();
     tcp_connection_pool_init();
     let owner = match tcp_connection_alloc() {
         TcpConnectionAllocResult::Full => { return false; }
@@ -68,13 +101,15 @@ fn tcp_connection_contention_probe() -> bool !{unsafe} {
     let before: u32 = tcp_connection_of(owner).snd_nxt;
     atomic_word_store(&tcp_owner_probe_slot, slot);
     atomic_word_store(&tcp_owner_probe_generation, generation);
-    atomic_word_store(&tcp_owner_probe_busy, 0);
-    atomic_word_store(&tcp_owner_probe_advanced, 0);
-    let held_phase: bool = tcp_owner_probe_run_phase(1);
-    let busy: usize = atomic_word_load(&tcp_owner_probe_busy);
+    atomic_word_store(&tcp_owner_probe_peer_busy, 0);
+    peer_tally_reset(&tcp_owner_probe_done, online);
+    atomic_word_store(&tcp_owner_probe_sequence, 0);
+    let peers: usize = peer_tally_peers(&tcp_owner_probe_done);
+    let held_phase: bool = tcp_owner_probe_run_phase(1, online);
+    let busy: usize = peer_tally_peers_sum(&tcp_owner_probe_seen);
     tcp_connection_put(owner);
-    let released_phase: bool = tcp_owner_probe_run_phase(2);
-    let advanced: usize = atomic_word_load(&tcp_owner_probe_advanced);
+    let released_phase: bool = tcp_owner_probe_run_phase(2, online);
+    let advanced: usize = peer_tally_peers_sum(&tcp_owner_probe_seen);
     let final_owner = match tcp_connection_take(slot, generation) {
         TcpConnectionTakeResult::Missing => { return false; }
         TcpConnectionTakeResult::Ready(value) => { value }
@@ -82,15 +117,15 @@ fn tcp_connection_contention_probe() -> bool !{unsafe} {
     let after: u32 = tcp_connection_of(final_owner).snd_nxt;
     tcp_connection_free(final_owner);
     kernel_boot_log("tcp owner contention counts: busy=");
-    uart_put_udec(busy);
+    tcp_owner_probe_put_seen(busy, peers);
     kernel_boot_log(" advanced=");
-    uart_put_udec(advanced);
+    tcp_owner_probe_put_seen(advanced, peers);
     kernel_boot_log("\n");
     if (held_phase == false || released_phase == false) {
         kernel_boot_log("tcp owner contention stage: secondary-never-finished\n");
     }
-    return held_phase && released_phase && busy == 1 && advanced == 1 &&
-           after == before + 1;
+    return held_phase && released_phase && peers >= 1 && busy == peers &&
+           advanced == peers && after == before + (peers as u32);
 }
 
 // Warm, single-CPU cost samples from real TCP ownership and checksum APIs.

@@ -1,40 +1,40 @@
 schedule contention stage: unlocked
 schedule contention stage: locked
-schedule contention: two cores claiming one Ready process, the race shown without the lock and gone with it ok
+schedule contention: every online core claiming one Ready process, the race shown without the lock and gone with it ok
 pid contention stage: unlocked
 pid contention stage: locked
-pid contention: two cores minting, every pid advanced the counter once ok
+pid contention: every online core minting, the counter advanced once per round unlocked and once per call locked ok
 fd refcount contention stage: complete
-fd refcount contention: two cores retaining and releasing one object, count back to baseline ok
+fd refcount contention: every online core retaining and releasing one object, count back to baseline ok
 asid contention stage: complete
-asid contention: two cores assigning, every number advanced the counter once ok
+asid contention: every online core assigning, every number advanced the counter once ok
 page contention stage: complete
-page contention: two cores allocating and freeing, every page back, none freed twice ok
+page contention: every online core allocating and freeing, every page back, none freed twice ok
 freelist contention stage: unlocked
 freelist contention stage: locked
-freelist contention: unlocked hands one index to both cores, a caller's lock stops it ok
+freelist contention: unlocked hands one index to every online core, a caller's lock stops it ok
 pool contention stage: complete
-pool contention: two cores cycling one pool, every allocation given back, no handle refused ok
+pool contention: every online core cycling one pool, every allocation given back, no handle refused ok
 occupancy drain stage: complete
-occupancy drain: the second core held the region and the bounded drain gave up, then left and the same drain handed over a proof ok
+occupancy drain: every online peer held the region and each bounded drain gave up until the last had left, then the same drain handed over a proof ok
 world stop counts: full=1 partial=1 resumed=1 inspections=1 repeated=16 busy=16 stale-refused=1
 world stop: full token stopped and resumed the online peer, partial token refused a non-acknowledging peer ok
 stopped root publication: consecutive stop captures retain usable roots ok
 stopped pool inspection: VM, image, FD context and descriptor metadata refused while their guards were held ok
-network init contention counts: unlocked=2 locked=1
-network init contention: unlocked check-set minted twice, typed one-shot gate admitted one initializer ok
-tcp owner contention counts: busy=1 advanced=1
-tcp owner contention: peer excluded while held and one state transition completed after release ok
+network init contention counts: unlocked=every-online-core locked=1
+network init contention: unlocked check-set minted on every online core, typed one-shot gate admitted one initializer ok
+tcp owner contention counts: busy=every-peer advanced=every-peer
+tcp owner contention: every peer excluded while held and each completed one state transition after release ok
 tcp pin cost evidence: 7 samples of 4096 operations and checksums consumed ok
 tcp pool cost evidence: all online cores completed every lock and owner sample ok
 pin sharing evidence: same-chunk layouts checked, every online core completed and the page returned ok
 pool walk stage: complete
 pool walk: a walk's reference to a record freed under it is refused, and the floor reads back ok
-ext2 mutation contention reader: control-overlap=1 waited-overlap=0
+ext2 mutation contention reader: control-overlap=every-peer waited-overlap=0
 ext2 mutation contention core0 reader: control-overlap=1 waited-overlap=0
 ext2 mutation contention stage: complete
-ext2 mutation contention counts: asked=2 clear=1 held=1
-ext2 mutation contention: a peer is told no mutation is in flight while core 0 holds nothing, told there is one while it holds the guard, and a mutation on either core waits for a reader already inside on the other ok
-signal contention: two cores setting and clearing pending signal bits lost updates with a forged guard and none under the process-run lock ok
-world stop from a peer counts: result=1
-world stop from a peer: core 1 began the stop and core 0 acknowledged it ok
+ext2 mutation contention counts: asked=every-peer-twice clear=every-peer held=every-peer
+ext2 mutation contention: every peer is told no mutation is in flight while core 0 holds nothing, told there is one while it holds the guard, and a mutation on any core waits for readers already inside on the others ok
+signal contention: every online core setting and clearing pending signal bits lost updates with a forged guard and none under the process-run lock ok
+world stop from a peer counts: complete=every-peer
+world stop from a peer: every peer in turn began a stop of every online core and the others acknowledged it ok
