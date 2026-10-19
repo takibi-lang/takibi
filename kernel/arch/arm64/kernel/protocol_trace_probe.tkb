@@ -10,6 +10,10 @@
  * to CPU 1 and the child to CPU 0 (so it may not, and CPU 1 takes it
  * back). Then it closes the window from CPU 0, and the kernel prints what
  * it saw.
+ *
+ * Between the two it moves itself from CPU 0 to CPU 1 by re-pinning while
+ * it runs on CPU 0, which is the one leave no timing can turn into another
+ * path (GitHub issue #847): see protocol_trace_leave_core0.
  * It prints nothing itself unless it fails.
  */
 
@@ -68,6 +72,45 @@ private fn protocol_trace_lifecycle(child_cpus: u8) {
     }
 }
 
+// Spin on getcpu until this process runs on `cpu`; false if it never does.
+private fn protocol_trace_reach(cpu: u8) -> bool {
+    let mut cpu_bytes: [u8; 4];
+    cpu_bytes[0] = 99;
+    for poll: usize in 0..<PROTOCOL_TRACE_ARRIVAL_POLLS {
+        if (cpu_bytes[0] != cpu) {
+            if (svc5(GETCPU_SYSCALL, cpu_bytes as *u8 as usize,
+                     0, 0, 0, 0) != 0) {
+                cpu_bytes[0] = 99;
+            }
+        }
+    }
+    return cpu_bytes[0] == cpu;
+}
+
+// GitHub issue #847: the window must show a LeaveBegin and a LeaveComplete,
+// and only core 0 makes them deterministic. A peer whose process re-pins
+// itself away keeps it until the NEXT syscall's gate (a Migrate) or the
+// next timer tick, whichever comes first; on a loaded host the tick won
+// (InterruptDepart then TickLeave) and the window had no leave at all. Core
+// 0 instead hands the process away at the return of the very
+// sched_setaffinity that excluded it (kernel_process_core0_leave_excluded),
+// with no EL0 instruction in between for a tick to land on. So: reach CPU 0
+// by any path, then re-pin to CPU 1 from there.
+private fn protocol_trace_leave_core0() {
+    if (protocol_trace_pin(1) != 0) {
+        protocol_trace_fail(bs"protocol-trace: cpu 0 alone was refused\n");
+    }
+    if (protocol_trace_reach(0) == false) {
+        protocol_trace_fail(bs"protocol-trace: never reached cpu 0\n");
+    }
+    if (protocol_trace_pin(2) != 0) {
+        protocol_trace_fail(bs"protocol-trace: cpu 1 alone was refused\n");
+    }
+    if (protocol_trace_reach(1) == false) {
+        protocol_trace_fail(bs"protocol-trace: never reached cpu 1\n");
+    }
+}
+
 fn protocol_trace_probe() {
     let mut opened: bool = false;
     // GitHub issue #665: yield once whether or not the window is deferred.
@@ -90,26 +133,14 @@ fn protocol_trace_probe() {
         protocol_trace_fail(bs"protocol-trace: the window did not open\n");
     }
     protocol_trace_lifecycle(PROTOCOL_TRACE_ANY_CPU);
-    if (protocol_trace_pin(2) != 0) {
-        protocol_trace_fail(bs"protocol-trace: cpu 1 alone was refused\n");
-    }
+    protocol_trace_leave_core0();
     protocol_trace_lifecycle(1);
     // Close from CPU 0: the report is thousands of lines, and a peer's log
     // lines go through a bounded ring that would overwrite them.
     if (protocol_trace_pin(1) != 0) {
         protocol_trace_fail(bs"protocol-trace: cpu 0 alone was refused\n");
     }
-    let mut cpu_bytes: [u8; 4];
-    cpu_bytes[0] = 99;
-    for poll: usize in 0..<PROTOCOL_TRACE_ARRIVAL_POLLS {
-        if (cpu_bytes[0] != 0) {
-            if (svc5(GETCPU_SYSCALL, cpu_bytes as *u8 as usize,
-                     0, 0, 0, 0) != 0) {
-                cpu_bytes[0] = 99;
-            }
-        }
-    }
-    if (cpu_bytes[0] != 0) {
+    if (protocol_trace_reach(0) == false) {
         protocol_trace_fail(bs"protocol-trace: never reached cpu 0\n");
     }
     if (svc5(WORKLOAD_PROGRESS_SYSCALL, PROTOCOL_TRACE_CLOSE_TAG,

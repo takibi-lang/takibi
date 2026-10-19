@@ -97,6 +97,11 @@ MODEL_CONSTANTS = ("EXIT_IDLES", "LEAVE_CHECKS_STACK",
 # are still checked and counted when they happen; a run without them is
 # not a failure. An action in the model and not here may legitimately not
 # happen.
+#
+# LeaveBegin and LeaveComplete stay required because the probe makes them
+# deterministic (#847): it re-pins itself away from CPU 0 while running on
+# CPU 0, which hands it away at that syscall's own return. A leave from a
+# peer could instead be a timer's InterruptDepart and TickLeave.
 REQUIRED = (("CloneBegin",), ("CloneFinish",), ("SwitchComplete",),
             ("Reserve",), ("Commit",), ("ChildExit", "ChildExitStart"),
             ("IdleEnter",), ("Wait4Reap",), ("LeaveBegin",),
