@@ -93,7 +93,7 @@ export DUNE_INVOCATION_LOCK
 DUNE_ROOT ?= $(CURDIR)
 export DUNE_ROOT
 
-ifeq ($(TAKIBI_KERNEL_BUILD_LOCK_HELD),1)
+ifneq ($(TAKIBI_KERNEL_BUILD_LOCK_HELD)$(TAKIBI_LINUX_BUILD_LOCK_HELD),)
 # The public locked targets depend on `build` before entering their recursive
 # Make. The inner graph must reuse that completed compiler: invoking Dune from
 # a second Make process would recreate the cross-invocation Dune lock race the
@@ -779,7 +779,17 @@ $(LINUX_USER_DIR)/%.exe: $(LINUX_USER_DIR)/%_exe.o $(COMMON_LINUX_STARTUP_O) $(C
 	$(LLD) -static -nostdlib -e _start $^ -o $@
 
 ## linuxbuild: build linux_user/'s host-native Linux/AMD64 tests (no libc, _start -> app_main)
-linuxbuild: $(LINUX_USER_BINS)
+# GitHub issue #788: two Make processes (allbuild's sub-make and a top-level
+# linuxcheck) both compiled linux_user/.../*_exe.o, and one linked while the
+# other rewrote the object. The outputs are built only under the linux_user
+# build lock, as kernel/build is under the kernel one; check_lane_linux_prereqs.py
+# keeps every public target going through this one.
+LINUX_BUILD_LOCK          := $(CURDIR)/_build/linux-build.lock
+LINUX_BUILD_LOCK_RUN      := bash scripts/run_linux_build_locked.sh "$(LINUX_BUILD_LOCK)"
+.PHONY: _linuxbuild
+_linuxbuild: $(LINUX_USER_BINS)
+linuxbuild: build
+	@$(LINUX_BUILD_LOCK_RUN) $(MAKE) _linuxbuild
 
 ## compiler-fuzz: bounded generated native programs plus a seeded interval defect.
 ## Each run keeps its sources, rejection diagnostics and minimized failures.

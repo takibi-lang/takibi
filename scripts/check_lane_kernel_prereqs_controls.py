@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Controls for check_lane_kernel_prereqs.py (#645's land failure)."""
+"""Controls for check_lane_kernel_prereqs.py (#645's land failure, #788)."""
 
 from check_lane_kernel_prereqs import MAKEFILE, problems
 from pass_line import CaseCount, report_pass
@@ -14,6 +14,10 @@ def main() -> int:
         "lane on a kernel object": ".PHONY: zzcheck\nzzcheck: $(KERNEL_RPI5_MAIN_O)\n\ttrue\n",
         "continued prerequisite line": ".PHONY: zzcheck\nzzcheck: build \\\n\t$(KERNEL_SHELL_EXT2_IMAGE)\n\ttrue\n",
         "literal build path": ".PHONY: zzcheck\nzzcheck: kernel/build/rpi5/main.o\n\ttrue\n",
+        # The #788 shape: a public lane on linux_user outputs.
+        "lane on linux_user executables": ".PHONY: zzcheck\nzzcheck: $(LINUX_USER_BINS)\n\ttrue\n",
+        "lane on linux_user objects": ".PHONY: zzcheck\nzzcheck: $(LINUX_USER_OBJS)\n\ttrue\n",
+        "literal linux_user executable": ".PHONY: zzcheck\nzzcheck: linux_user/page_run/page_run.exe\n\ttrue\n",
     }
     for name, rule in failing.items():
         cases.note()

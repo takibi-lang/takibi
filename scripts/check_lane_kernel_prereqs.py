@@ -15,6 +15,12 @@ already-locked inner targets) must not list, as a direct prerequisite, a
 kernel build output -- a `$(KERNEL_..._O/_ELF/_IMG/_BIN/...)` variable or a
 `kernel/build/` path. REVIEWED holds the exceptions with their reason.
 
+GitHub issue #788 is the same shape one tree over: allbuild's sub-make and a
+top-level linuxcheck both compiled linux_user/.../*_exe.o, and one linked
+while the other rewrote the object. linux_user outputs are built only by
+`$(LINUX_BUILD_LOCK_RUN) $(MAKE) _linuxbuild`, so the same rule covers
+`$(LINUX_USER_BINS)`, `$(LINUX_USER_OBJS)` and `linux_user/**.exe|.o`.
+
 Exit code only (0 = pass, 1 = fail).
 """
 
@@ -26,7 +32,8 @@ from pass_line import report_pass
 from source_scan import per_file
 
 MAKEFILE = pathlib.Path("Makefile")
-OUTPUT = re.compile(r"\$\(KERNEL_\w*_(O|ELF|IMG|IMAGE|BIN|METADATA)\)|\bkernel/build/")
+OUTPUT = re.compile(r"\$\(KERNEL_\w*_(O|ELF|IMG|IMAGE|BIN|METADATA)\)|\bkernel/build/"
+                    r"|\$\(LINUX_USER_(BINS|OBJS)\)|\blinux_user/\S*\.(exe|o)\b")
 RULE = re.compile(r"^([A-Za-z0-9_.%/$()-][^:=\t#]*?)\s*:(?![=:])\s*(.*)$")
 PHONY = re.compile(r"^\.PHONY\s*:\s*(.*)$")
 
@@ -71,9 +78,10 @@ def problems(text: str, reviewed=None) -> tuple:
         hit = OUTPUT.search(prereqs)
         if hit and target not in reviewed:
             found.append(f"Makefile logical line {number}: public target {target} "
-                         f"depends directly on kernel build output {hit.group(0)}; "
-                         "build it with $(KERNEL_BUILD_LOCK_RUN) $(MAKE) <output> in "
-                         "the recipe so it cannot race a lane holding the build lock")
+                         f"depends directly on a locked build output {hit.group(0)}; "
+                         "build it with $(KERNEL_BUILD_LOCK_RUN) or $(LINUX_BUILD_LOCK_RUN) "
+                         "$(MAKE) <target> in the recipe so it cannot race a lane "
+                         "holding that build lock")
     return tuple(found)
 
 
@@ -85,8 +93,8 @@ def main() -> int:
     if found:
         return 1
     report_pass("lane-kernel-prereqs",
-                "no public phony target names a kernel build output as a "
-                "direct prerequisite", targets=len(phony_rules(text)))
+                "no public phony target names a kernel or linux_user build "
+                "output as a direct prerequisite", targets=len(phony_rules(text)))
     return 0
 
 
