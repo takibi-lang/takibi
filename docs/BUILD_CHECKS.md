@@ -157,6 +157,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_probe_round_restart.py` | Discover re-entered secondary probe entries and reject invocation-local `0..<ROUNDS` batches; not a proof of helper-hidden or arbitrary phase protocols |
 | `check_probe_round_restart_controls.py` | The actual previous freelist loop, iterator renaming and qualifiers reject; comments/strings and local buffer loops pass; new, absent and duplicate entry bodies are covered |
 | `check_race_window_anchors.py` | Every armed/reverted race edit matches the tracked source exactly once before compilation; obsolete, absent and duplicate anchors are refused |
+| `check_race_window_builds.py` | Every race-window kernel a lane or script boots (`KERNEL_QEMU_RACE_WINDOW=`, `kernel-race-*.elf`) is one `kernelbuild-check` builds from `KERNEL_QEMU_RACE_WINDOWS`/`KERNEL_QEMU_RACE_CONTROLS`, and names a window the overlay builder defines; an omitted control, an armed boot of a reverted-only control and an unknown window are refused (#839) |
 | `check_race_window_overlay_only.py` | a widened race window's spin exists only in its overlay, never in kernel/, so no ordinary kernel carries it (#615) |
 | `check_race_window_overlay_only_controls.py` | Controls for the race-window overlay check, in both directions |
 | `check_no_cursor_reply.py` | no host driver answers BusyBox's cursor query, whose late reply lands in the next command (#644) |
