@@ -4764,8 +4764,15 @@ fn syscall_peer_safe(number: usize, fd: usize, second: usize) -> bool {
     // acquire), and the receive and transmit paths hold the sole network
     // capability, which is itself behind a Mutex. So a peer's call and core
     // 0's call on the same connection serialize on the owner, and two
-    // connections serialize on the capability. The inetd response mode is
-    // not admitted: it is a boot fixture that never runs on a peer.
+    // connections serialize on the capability.
+    //
+    // GitHub issue #827: inetd response mode is admitted too. Its write
+    // appends to the connection's response frame and length under the same
+    // owner, its shutdown reads them under the owner and transmits holding
+    // the network capability, and its read is the connected read above. The
+    // mode flag is the caller's own ProcessRecord word, read under the
+    // process-run lock. None of this names a CPU, and neither the owner nor
+    // the capability depends on which core takes the network interrupt.
     //
     // GitHub issue #598 adds close, dup3 and shutdown, which reach the
     // transport release through kernel_connected_descriptor_close or the
@@ -4773,7 +4780,6 @@ fn syscall_peer_safe(number: usize, fd: usize, second: usize) -> bool {
     // setsockopt, which write or check only the caller's memory. A
     // connection duplicated onto a standard descriptor is not the terminal.
     if (kernel_connected_fd_is_open(fd)) {
-        if (kernel_syscall_inetd_mode()) { return false; }
         return number == 63 || number == AARCH64_NR_WRITE ||
             number == AARCH64_NR_READV || number == AARCH64_NR_WRITEV ||
             number == AARCH64_NR_CLOSE || number == 24 || number == 210 ||
@@ -5886,7 +5892,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         kernel_process_reschedule_if_excluded_here();
     }
     // core-role: calls outside the peer-safety table run on core 0 (the
-    // parent-progress report, inetd-mode descriptors)
+    // parent-progress report)
     if (cpu_id() != 0 && syscall_peer_safe(number, x0, x1) == false) {
         return syscall_finish_current(frame, SyscallAction::Migrate, current_authority);
     }
@@ -7386,6 +7392,16 @@ fn syscall_vectored_inetd_probe(address: usize) -> bool !{unsafe} {
         UnifiedOpenResult::Full => { ok = false; }
         UnifiedOpenResult::Ok => {
             kernel_syscall_set_inetd_mode(true);
+            // GitHub issue #827: every call this mode serves on fd 1 runs on
+            // the calling core. A refusal here would rerun it on core 0.
+            if (syscall_peer_safe(AARCH64_NR_WRITE, 1, address) == false ||
+                syscall_peer_safe(AARCH64_NR_WRITEV, 1, address) == false ||
+                syscall_peer_safe(63, 1, address) == false ||
+                syscall_peer_safe(AARCH64_NR_READV, 1, address) == false ||
+                syscall_peer_safe(210, 1, 1) == false) {
+                kernel_boot_log("syscall subset: inetd-mode descriptor refused by the peer-safety table\n");
+                ok = false;
+            }
             let ProcessRunningHere::Running(probe_current) = process_running_here() else {};
             match user_range_check_write(probe_current, address, 80) {
                 UserWriteRangeResult::Fault => { ok = false; }
@@ -8245,14 +8261,10 @@ private inline fn syscall_execve_current_with(slot: borrow SyscallSlot[0],
     // GitHub issue #610: an exec runs where it is called. The root
     // process's own (SyscallAction::Exec) returns through
     // run_initial_user's frame on PID 1's kernel stack, which is the same
-    // stack on whichever core PID 1 runs, so it too stays put (#775). An
-    // exec in inetd mode does not: its close-on-exec pass may close a
-    // connected descriptor, and in that mode those are core 0's (see
-    // syscall_peer_safe).
-    // core-role: inetd-mode connected descriptors are core 0's
-    if (cpu_id() != 0 && kernel_syscall_inetd_mode()) {
-        return SyscallAction::Migrate;
-    }
+    // stack on whichever core PID 1 runs, so it too stays put (#775), and
+    // so does an exec in inetd mode (#827): its close-on-exec pass is the
+    // same unified_fd_close of the caller's own table that every exec runs
+    // from a peer, and the mode adds nothing to it.
     let mut path_address: usize = x0;
     let mut argv_address: usize = x1;
     if (number == AARCH64_NR_EXECVEAT) {

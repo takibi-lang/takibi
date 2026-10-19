@@ -235,7 +235,7 @@ Special, with the reason it stays so today:
 |---|---|---|---|
 | Boot | `boot/entry.S` parks every MPIDR but 0; core 0 runs `main()`, the GIC distributor, device bring-up and the boot fixtures | the firmware hands off one core, and machine-wide state is initialized once | no: one core has to come first |
 | PSCI start authority | `cpu_start_reserve` (`lib/occupancy.tkb`) | starting cores is a boot phase; no hotplug exists | only with CPU hotplug, which nothing needs |
-| Syscalls outside the peer-safety table | `syscall_peer_refused`, `syscall_peer_safe`; rerun on core 0 with the process pinned for the call | each names a subsystem whose state only core 0 touches: inetd-mode connected descriptors, the BusyBox Extras exec that resets the TCP pool | yes, one subsystem at a time; each entry is its own follow-up |
+| Syscalls outside the peer-safety table | `syscall_peer_refused`, `syscall_peer_safe`; rerun on core 0 with the process pinned for the call | each names a subsystem whose state only core 0 touches: the BusyBox Extras exec that resets the TCP pool. Inetd-mode connected descriptors left in #827: their write, read and shutdown take the connection's owner and the network capability exactly as direct mode does | yes, one subsystem at a time; each entry is its own follow-up |
 | Deadline and NetRx wakes | `timer_irq_handler` runs `kernel_process_deadline_wake_all` and `kernel_process_net_wake_all`; `kernel_secondary_timer_schedule` runs neither | one walker of every slot per tick; a peer sleeper is woken by core 0's tick, so a long core-0 mask (DDB) delays it | yes (decision: every tick walks, or per-CPU deadline lists) |
 | Device interrupts | UART, GEM, virtio-net and xHCI SPIs target core 0; a secondary's dispatch handles only its tick and PMU line | their drivers' state is touched only from core 0 | yes, with per-driver locking or an IRQ affinity policy (decision) |
 | DDB entry by UART BREAK | the UART IRQ branch on core 0 | follows the device interrupt row; DDB then stops the others through the world stop | follows the device row |
@@ -368,8 +368,8 @@ address-space lock or a fault fixup on top of this.
 ## Connected sockets on a peer
 
 `read` and `write` on a connected TCP descriptor are admitted on any CPU
-(GitHub issue #581), and so is the rest of the socket group since #598;
-the inetd response mode is not. Every `TcpConnection` field those two calls read or
+(GitHub issue #581), and so is the rest of the socket group since #598,
+and the inetd response mode since #827. Every `TcpConnection` field those two calls read or
 write is accessed under the connection's owner: `tcp_connection_take` takes
 the connection's `TaskMutex` and revalidates the pool generation after the
 acquire, and the open check happens after that, not before. Receive and
@@ -377,6 +377,12 @@ transmit additionally hold the sole network capability, which is behind a
 `Mutex`, so two connections serialize there. Poll's pending-read probe takes
 no connection lock on purpose -- it must not wait behind a receive -- and the
 read that follows re-decides open and available bytes under the owner.
+Inetd mode adds a response frame and its length to the connection; its
+write appends to them and its `shutdown` sends them, both under the owner,
+the send also holding the capability. The mode flag itself is the caller's
+own process record word, read under the process-run lock. Neither lock
+names a CPU, so routing the network interrupt elsewhere changes nothing
+here.
 
 The rest of the group, and what each relies on (GitHub issue #598):
 
