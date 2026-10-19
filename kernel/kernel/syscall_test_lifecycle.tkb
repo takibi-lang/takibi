@@ -67,6 +67,18 @@ fn syscall_test_lifecycle_listener_ready_label() -> ListenerReadyLabel {
     return ListenerReadyLabel::Persistent;
 }
 
+// GitHub issue #836: the connected fixture's listener label ends when a
+// BusyBox Extras image is exec'd, since every listener from then on is the
+// init-managed httpd service. This used to ride on the exec's TCP pool
+// drain (kernel_syscall_daemon_start); the drain is gone and the label
+// rule stays here, beside the flag it retires. An interactive boot runs no
+// fixture, so its first listen is httpd's and must read as persistent.
+fn syscall_test_lifecycle_extras_exec() {
+    let guard = process_run_lock();
+    syscall_connected_fixture_pending = false;
+    process_run_unlock(guard);
+}
+
 fn kernel_syscall_connected_fixture_start() {
     let guard = process_run_lock();
     syscall_connected_fixture_pending = true;
@@ -75,12 +87,6 @@ fn kernel_syscall_connected_fixture_start() {
 
 fn kernel_syscall_persistent_shell_start() {
     syscall_persistent_shell = true;
-    // GitHub issue #836: the bounded suite owns the connected fixture, so
-    // its end retires the fixture's listener label if the fixture never
-    // listened. The BusyBox Extras exec used to clear it as a side effect.
-    let guard = process_run_lock();
-    syscall_connected_fixture_pending = false;
-    process_run_unlock(guard);
     // The "shell blocked on the UART" marker is a one-shot latch, and the
     // bounded phase's own interactive ash already spent it. Re-arming it
     // here is what makes the persistent shell's block announce itself --

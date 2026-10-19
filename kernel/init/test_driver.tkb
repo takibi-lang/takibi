@@ -902,10 +902,12 @@ private fn kernel_process_child_exec_prepare_with(current_authority: borrow Proc
                     // connection pool. On Linux connections belong to
                     // their descriptors and close-on-exec, not to the exec
                     // event, and the boot fixtures close their own. What
-                    // is left is the peer-run evidence line for the pinned
-                    // httpd's exec of BusyBox Extras (#591, #828).
+                    // is left for BusyBox Extras (#591) is the end of the
+                    // connected fixture's listener label and the peer-run
+                    // evidence line for the pinned httpd's exec (#828).
                     if (kernel_exec_primary_is_busybox_extras(
                             images.primary.inode)) {
+                        syscall_test_lifecycle_extras_exec();
                         workload_peer_daemon_handoff();
                     }
                     if (kernel_syscall_persistent_shell_active()) {
