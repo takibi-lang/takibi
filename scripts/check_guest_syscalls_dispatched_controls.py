@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Controls for check_guest_syscalls_dispatched.py (#792)."""
 
+from control_patch import replace_once
 from check_guest_syscalls_dispatched import SYSCALL_TKB, kernel_sources, problems
 from pass_line import report_pass
 
@@ -34,7 +35,7 @@ def main() -> int:
         'asm mov x8 for an undispatched number': {
             ASM: sources[ASM] + '\n    mov x8, #127\n    svc #0\n'},
         'C raw-ABI call for an undispatched number': {
-            C_WORKLOAD: sources[C_WORKLOAD].replace('call(172,', 'call(127,', 1)},
+            C_WORKLOAD: replace_once(sources[C_WORKLOAD], 'call(172,', 'call(127,')},
     }
     for name, change in controls.items():
         for path, text in change.items():

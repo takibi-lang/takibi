@@ -10,6 +10,7 @@ the drift the check exists for, and it is silent in the running kernel -- the
 view prints `unknown` and nothing else notices.
 """
 
+from control_patch import replace_once
 import pathlib
 import shutil
 import subprocess
@@ -78,7 +79,7 @@ def edit(relative, old, new):
         target = root / relative
         text = target.read_text(encoding="ascii")
         assert text.count(old) == 1, f"{old!r} is not a unique anchor"
-        target.write_text(text.replace(old, new, 1), encoding="ascii")
+        target.write_text(replace_once(text, old, new), encoding="ascii")
     return plant
 
 

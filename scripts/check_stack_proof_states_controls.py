@@ -8,6 +8,7 @@ an Exited one, a token minted by a function that is not a named mint, a
 token written as a literal, and a mint that no longer reads the stack owner.
 """
 
+from control_patch import replace_once
 from pathlib import Path
 import sys
 
@@ -18,12 +19,6 @@ ROOT = Path(__file__).resolve().parent.parent
 SOURCE = ROOT / "kernel/kernel/process.tkb"
 CASES = CaseCount()
 
-
-def replace_once(text: str, old: str, new: str) -> str:
-    if text.count(old) != 1:
-        raise RuntimeError(f"control anchor occurs {text.count(old)} times: "
-                           f"{old}")
-    return text.replace(old, new, 1)
 
 
 def case(name: str, text: str, wanted: str) -> list[str]:

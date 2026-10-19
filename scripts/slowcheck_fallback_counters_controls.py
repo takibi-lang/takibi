@@ -13,6 +13,7 @@ plant "the check stopped looking" rather than "the tree is wrong", which is
 the failure mode a green build cannot distinguish from success.
 """
 
+from control_patch import replace_once
 import pathlib
 import shutil
 import subprocess
@@ -40,7 +41,7 @@ def planted(root: pathlib.Path, path: str, old: str, new: str) -> None:
     target = root / path
     text = target.read_text(encoding="ascii")
     assert text.count(old) == 1, f"{path}: {old!r} is not a unique anchor"
-    target.write_text(text.replace(old, new, 1), encoding="ascii")
+    target.write_text(replace_once(text, old, new), encoding="ascii")
 
 
 def rename_all(root: pathlib.Path) -> None:

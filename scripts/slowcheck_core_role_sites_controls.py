@@ -8,6 +8,7 @@ check of this shape stops examining: a declaration outliving its file, and
 the inventory section it points to disappearing.
 """
 
+from control_patch import replace_once
 import pathlib
 import shutil
 import subprocess
@@ -63,7 +64,7 @@ def planted(path, old, new):
         target = root / path
         text = target.read_text(encoding="ascii")
         assert text.count(old) == 1, f"{path}: {old!r} is not a unique anchor"
-        target.write_text(text.replace(old, new, 1), encoding="ascii")
+        target.write_text(replace_once(text, old, new), encoding="ascii")
     return plant
 
 

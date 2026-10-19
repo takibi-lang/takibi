@@ -9,6 +9,7 @@ file's own comment syntax, and requires the check (run in-process, no
 child) to refuse it; a forbidden name mentioned only in a comment passes.
 """
 
+from control_patch import replace_once
 import contextlib
 import io
 import pathlib
@@ -41,7 +42,7 @@ def verdict(plants) -> tuple[int, str]:
             target = root / relative
             text = target.read_text(encoding="utf-8")
             assert text.count(old) == 1, f"{relative}: {old!r} is not unique"
-            target.write_text(text.replace(old, new, 1), encoding="utf-8")
+            target.write_text(replace_once(text, old, new), encoding="utf-8")
         report = io.StringIO()
         with contextlib.redirect_stdout(report):
             status = check.main(root)

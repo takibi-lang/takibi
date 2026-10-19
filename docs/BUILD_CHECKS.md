@@ -128,6 +128,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_wall_clock_bounds_controls.py` | an undeclared bound, a stale row, a wrong count and an unknown class are each refused |
 | `check_page_freelist_rebuild_callers.py` | the page allocator's whole-table free-list rebuild is called only where the runtime tables are installed, never from an allocation or release path (#771) |
 | `check_page_freelist_rebuild_callers_controls.py` | a per-run rebuild call is refused; the install-only call and commented calls pass |
+| `check_control_replace_once.py` | every negative control patches source text through `control_patch.replace_once`, which refuses an anchor that does not occur exactly once (#845); capture-mutating controls are exempt with a reason |
 | `check_process_running_mints_controls.py` | mutation controls reject missing context/phase markers, additional mints, public constructors, and unmarked writers |
 | `check_process_running_mints.py` | current-process witness entry and transition mint counts, private constructors, and context/phase writer annotations match the reviewed boundary |
 | `check_address_space_root_mints.py` | every maker of an `AddressSpaceRoot` (which carries its backing handle) is declared (#693) |

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Controls for check_lock_rank_wrappers.py (#789)."""
 
+from control_patch import replace_once
 from check_lock_rank_wrappers import kernel_sources, problems
 from pass_line import report_pass
 
@@ -31,8 +32,8 @@ def main() -> int:
     assert ranked in original
     controls = {
         # The #745 regression itself: process_pool_lock loses its rank.
-        'process pool rank dropped': original.replace(ranked, 'single_instance_lock,', 1),
-        'commented rank': original.replace(ranked, '// ' + ranked + '\n', 1),
+        'process pool rank dropped': replace_once(original, ranked, 'single_instance_lock,'),
+        'commented rank': replace_once(original, ranked, '// ' + ranked + '\n'),
         'new unranked region wrapper': original + UNRANKED_REGION,
         'new unranked mutex wrapper': original + UNRANKED_MUTEX,
         'one-line body': original + ONE_LINE,

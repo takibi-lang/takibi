@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Reject the real old sysinit ordering and missing or duplicated consumers."""
 
+from control_patch import replace_once
 import pathlib
 import shutil
 import subprocess
@@ -15,18 +16,18 @@ INIT = ROOT / "kernel/tests/ext2/init.sh"
 
 def main():
     text = INIT.read_text(encoding="ascii")
-    old_order = text.replace("\n/bin/dmesg\n", "\n/bin/trace-placeholder\n", 1)
-    old_order = old_order.replace("\n/bin/protocol-trace\n", "\n/bin/dmesg\n", 1)
-    old_order = old_order.replace("\n/bin/trace-placeholder\n", "\n/bin/protocol-trace\n", 1)
+    old_order = replace_once(text, "\n/bin/dmesg\n", "\n/bin/trace-placeholder\n")
+    old_order = replace_once(old_order, "\n/bin/protocol-trace\n", "\n/bin/dmesg\n")
+    old_order = replace_once(old_order, "\n/bin/trace-placeholder\n", "\n/bin/protocol-trace\n")
     cases = [("repository", text, None),
              ("old ordering", old_order, "boot dmesg must precede protocol-trace")]
     for command in ("/bin/dmesg", "/bin/protocol-trace"):
-        cases.append((f"missing {command}", text.replace(f"\n{command}\n", "\n", 1),
+        cases.append((f"missing {command}", replace_once(text, f"\n{command}\n", "\n"),
                       f"expected one bare {command} command, found 0"))
         cases.append((f"duplicate {command}", text + f"\n{command}\n",
                       f"expected one bare {command} command, found 2"))
         cases.append((f"commented {command}",
-                      text.replace(f"\n{command}\n", f"\n# {command}\n", 1),
+                      replace_once(text, f"\n{command}\n", f"\n# {command}\n"),
                       f"expected one bare {command} command, found 0"))
     with tempfile.TemporaryDirectory(prefix="takibi-boot-log-") as directory:
         tree = pathlib.Path(directory)

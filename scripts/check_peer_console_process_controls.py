@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Keep the peer-console view tied to real admitted EL0 shared-queue writes."""
 
+from control_patch import replace_once
 from pathlib import Path
 
 from pass_line import report_pass
@@ -239,11 +240,15 @@ def main() -> int:
             "return (mask & kernel_process_online_mask() & (1 << bit)) != 0;",
             "return cpu == SECONDARY_CORE_ID;"),
         # Either site losing its exit must be caught, and the assertion above
-        # counts both, so mutating the first copy is enough here.
+        # counts every copy, so mutating one is enough here. GitHub issue
+        # #845: the anchor names the filesystem reader's copy by the comment
+        # line above it, since replace_once refuses a repeated anchor.
         "pin failure ignored": (
             "kernel/arch/arm64/kernel/peer_read.tkb",
-            "if (peer_pin(peer_cpu) == false) { svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0); }",
-            "if (peer_pin(peer_cpu) == false) { }"),
+            "own mask rather than a rule that had to know its pid.\n"
+            "    if (peer_pin(peer_cpu) == false) { svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0); }",
+            "own mask rather than a rule that had to know its pid.\n"
+            "    if (peer_pin(peer_cpu) == false) { }"),
         "init entry": ("kernel/tests/ext2/inittab", "::once:/bin/peer-console",
                        "::once:/bin/old-console"),
         "background tty": ("kernel/tests/ext2/inittab",
@@ -307,7 +312,7 @@ def main() -> int:
     })
     for name, (path, old, new) in mutations.items():
         changed = dict(tree)
-        changed[path] = changed[path].replace(old, new, 1)
+        changed[path] = replace_once(changed[path], old, new)
         if not problems(changed):
             print(f"ERROR peer-console-process-control: {name} negative control passed")
             return 1

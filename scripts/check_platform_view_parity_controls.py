@@ -9,6 +9,7 @@ where it was written. It is planted as a mutation probe on QEMU, which is
 what `ext2_mutation` actually was until 2026-09-08.
 """
 
+from control_patch import replace_once
 import pathlib
 import shutil
 import subprocess
@@ -76,11 +77,8 @@ def plant_stale_declaration(root):
     """A declaration outliving the view it describes."""
     target = root / "scripts" / "check_platform_view_parity.py"
     text = target.read_text(encoding="ascii")
-    target.write_text(text.replace(
-        "ALLOWED = {",
-        'ALLOWED = {\n    ("qemu", "planted_retired"):\n'
-        '        "describes a view that is not there",',
-        1), encoding="ascii")
+    target.write_text(replace_once(text, "ALLOWED = {", 'ALLOWED = {\n    ("qemu", "planted_retired"):\n'
+        '        "describes a view that is not there",'), encoding="ascii")
 
 
 def plant_declared_view(root):
@@ -92,11 +90,8 @@ def plant_declared_view(root):
         "planted declared: ok\n", encoding="ascii")
     target = root / "scripts" / "check_platform_view_parity.py"
     text = target.read_text(encoding="ascii")
-    target.write_text(text.replace(
-        "ALLOWED = {",
-        'ALLOWED = {\n    ("rpi5", "planted_declared"):\n'
-        '        "a reason a reviewer can read",',
-        1), encoding="ascii")
+    target.write_text(replace_once(text, "ALLOWED = {", 'ALLOWED = {\n    ("rpi5", "planted_declared"):\n'
+        '        "a reason a reviewer can read",'), encoding="ascii")
 
 
 def main() -> int:

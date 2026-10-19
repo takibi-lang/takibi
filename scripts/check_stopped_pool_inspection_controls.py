@@ -47,8 +47,12 @@ def main():
             source = target.read_text(encoding='ascii')
             position = source.index(start)
             tail = source[position:]
-            assert old in tail
-            target.write_text(source[:position] + tail.replace(old, new, 1), encoding='ascii')
+            # GitHub issue #845: the first copy after `start`, required to
+            # lie inside that function so a copy elsewhere is never patched.
+            at = tail.index(old)
+            assert at < tail.index('\n}\n'), (start, old)
+            target.write_text(source[:position] + tail[:at] + new + tail[at + len(old):],
+                              encoding='ascii')
             found = problems(root)
             assert any(diagnostic in item for item in found), (start, old, found)
     cases.note()

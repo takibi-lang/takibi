@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Mutate real entry and helper waits, retaining intentional timing holds."""
 
+from control_patch import replace_once
 import contextlib
 import io
 
@@ -27,14 +28,17 @@ def main():
         '               window.tick_budget.ticks &&', 'true &&')}, 1,
         'shared window lost its peer-tick bound')
     cases.note()
-    for path, name, binding in (
-            ('kernel/kernel/pool_contention_evidence.tkb', 'pool_contention_probe', 'entry_window'),
-            ('kernel/kernel/init_once_contention_evidence.tkb', 'init_once_probe_wait_arrived', 'window'),
-            ('kernel/kernel/tcp_connection_contention_evidence.tkb', 'tcp_owner_probe_run_phase', 'window'),
-            ('kernel/kernel/fd_table.tkb', 'fd_refcount_contention_probe', 'started_window')):
-        anchor = f'peer_tick_window_open({binding})'
-        assert anchor in tree[path]
-        previous = tree[path].replace(anchor, 'read_cntpct() - begin < read_cntfrq() >> 2', 1)
+    # GitHub issue #845: `tail` makes a site whose binding repeats in its
+    # file unique, since replace_once refuses a repeated anchor.
+    for path, name, binding, tail in (
+            ('kernel/kernel/pool_contention_evidence.tkb', 'pool_contention_probe', 'entry_window', ''),
+            ('kernel/kernel/init_once_contention_evidence.tkb', 'init_once_probe_wait_arrived', 'window',
+             ') {\n        if (atomic_word_load(&init_once_probe_arrived)'),
+            ('kernel/kernel/tcp_connection_contention_evidence.tkb', 'tcp_owner_probe_run_phase', 'window', ''),
+            ('kernel/kernel/fd_table.tkb', 'fd_refcount_contention_probe', 'started_window', '')):
+        anchor = f'peer_tick_window_open({binding})' + tail
+        previous = replace_once(tree[path], anchor,
+                                'read_cntpct() - begin < read_cntfrq() >> 2' + tail)
         check({**tree, path: previous}, 1, f'{name}: wall-clock-only probe wait')
         cases.note()
     path = 'kernel/kernel/new_contention_evidence.tkb'
@@ -47,9 +51,8 @@ def main():
            'fn harmless() { let text: *u8 = "while (read_cntpct())"; }'}, 0)
     cases.note()
     held = 'kernel/kernel/signal_contention_evidence.tkb'
-    check({**tree, held: tree[held].replace('    let start: i64 = read_cntpct();',
-          '    while (read_cntpct() < another_deadline) {}\n'
-          '    let start: i64 = read_cntpct();', 1)}, 1,
+    check({**tree, held: replace_once(tree[held], '    let start: i64 = read_cntpct();', '    while (read_cntpct() < another_deadline) {}\n'
+          '    let start: i64 = read_cntpct();')}, 1,
           'expected one reviewed deliberate wall-clock hold, found 2')
     cases.note()
     check({**tree, held: tree[held].replace('// Deliberate hold:', '// Hold:')},

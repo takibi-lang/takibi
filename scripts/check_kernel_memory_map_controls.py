@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Positive and faithful negative controls for allocator layout fixtures."""
 
+from control_patch import replace_once
 import contextlib
 import importlib.util
 import io
@@ -173,14 +174,12 @@ def layout_controls(checker):
 
     cases.append(("a conflict marker is refused", lambda p: (
         checker.reject_conflict_markers(
-            layout_doc().replace("| `boot_stack_top`",
-                                 "<<<<<<< HEAD\n| `boot_stack_top`", 1)), p),
+            replace_once(layout_doc(), "| `boot_stack_top`", "<<<<<<< HEAD\n| `boot_stack_top`")), p),
         None, "merge conflict marker"))
 
     cases.append(("rows outside the table are refused", lambda p: (
         checker.check_elf_offsets(
-            layout_doc().replace("| `percpu_stack_base`",
-                                 "stray prose\n| `percpu_stack_base`", 1), p)),
+            replace_once(layout_doc(), "| `percpu_stack_base`", "stray prose\n| `percpu_stack_base`"), p)),
         None, "outside it"))
 
     cases.append(("an anchor that is not first is refused", lambda p: (

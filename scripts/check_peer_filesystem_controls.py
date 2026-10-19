@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Keep the peer-filesystem verdict tied to real cross-CPU exclusion."""
 
+from control_patch import replace_once
 from pathlib import Path
 
 from pass_line import report_pass
@@ -152,8 +153,8 @@ def main() -> int:
     mutations = {
         "exclusion": ("kernel/drivers/block/memory.tkb", "task_mutex_trylock", "removed_trylock"),
         "slot hint": ("kernel/drivers/block/memory.tkb", "let hint: usize = cpu_id();", "let hint: usize = 0;"),
-        "cpu0 wait": ("kernel/kernel/workload_evidence.tkb", "block_device_wait_count(0)", "removed_cpu0_wait"),
-        "secondary id": ("kernel/kernel/workload_evidence.tkb", "block_read_call_count(SECONDARY_CORE_ID)", "block_read_call_count(1)"),
+        "cpu0 wait": ("kernel/kernel/workload_evidence.tkb", "block_device_wait_count(0) == 0 ||", "removed_cpu0_wait == 0 ||"),
+        "secondary id": ("kernel/kernel/workload_evidence.tkb", "block_read_call_count(SECONDARY_CORE_ID) == 0 ||", "block_read_call_count(1) == 0 ||"),
         "default placement": (
             "kernel/kernel/process.tkb",
             "return (kernel_process_online_mask() & (1 << bit)) != 0;",
@@ -175,7 +176,7 @@ def main() -> int:
     }
     for name, (path, old, new) in mutations.items():
         changed = dict(tree)
-        changed[path] = changed[path].replace(old, new, 1)
+        changed[path] = replace_once(changed[path], old, new)
         if not problems(changed):
             print(f"ERROR peer-filesystem-control: {name} negative control passed")
             return 1

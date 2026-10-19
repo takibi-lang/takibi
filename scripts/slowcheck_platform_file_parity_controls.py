@@ -19,6 +19,7 @@ drift. So the cases below plant a run that is long in raw lines and short in
 significant ones, and require it NOT to fire.
 """
 
+from control_patch import replace_once
 import pathlib
 import shutil
 import subprocess
@@ -186,24 +187,18 @@ def main() -> int:
     def plant_in_allowed(root):
         target = root / PLATFORMS[0] / "memory.tkb"
         text = target.read_text(encoding="ascii")
-        target.write_text(text.replace(
-            "fn platform_memory_detect() -> PlatformMemoryResult !{unsafe} {",
-            "fn platform_memory_detect() -> PlatformMemoryResult !{unsafe} {\n"
+        target.write_text(replace_once(text, "fn platform_memory_detect() -> PlatformMemoryResult !{unsafe} {", "fn platform_memory_detect() -> PlatformMemoryResult !{unsafe} {\n"
             "    let planted_a: usize = 1;\n    let planted_b: usize = 2;\n"
             "    let planted_c: usize = 3;\n    let planted_d: usize = 4;\n"
             "    let planted_e: usize = 5;\n    let planted_f: usize = 6;\n"
-            "    let planted_g: usize = 7;\n    let planted_h: usize = 8;",
-            1), encoding="ascii")
+            "    let planted_g: usize = 7;\n    let planted_h: usize = 8;"), encoding="ascii")
         other = root / PLATFORMS[1] / "memory.tkb"
         text = other.read_text(encoding="ascii")
-        other.write_text(text.replace(
-            "fn platform_memory_detect() -> PlatformMemoryResult !{unsafe} {",
-            "fn platform_memory_detect() -> PlatformMemoryResult !{unsafe} {\n"
+        other.write_text(replace_once(text, "fn platform_memory_detect() -> PlatformMemoryResult !{unsafe} {", "fn platform_memory_detect() -> PlatformMemoryResult !{unsafe} {\n"
             "    let planted_a: usize = 1;\n    let planted_b: usize = 2;\n"
             "    let planted_c: usize = 3;\n    let planted_d: usize = 4;\n"
             "    let planted_e: usize = 5;\n    let planted_f: usize = 6;\n"
-            "    let planted_g: usize = 7;\n    let planted_h: usize = 8;",
-            1), encoding="ascii")
+            "    let planted_g: usize = 7;\n    let planted_h: usize = 8;"), encoding="ascii")
 
     failures += case("declared function is not reported twice",
                      plant_in_allowed, "", should_fail=False)
@@ -213,11 +208,8 @@ def main() -> int:
     def plant_stale_declaration(root):
         target = root / "scripts" / "check_platform_file_parity.py"
         text = target.read_text(encoding="ascii")
-        target.write_text(text.replace(
-            "ALLOWED_RUNS = {",
-            'ALLOWED_RUNS = {\n    ("init.tkb", "planted stale declaration"):\n'
-            '        "describes duplication that does not exist",',
-            1), encoding="ascii")
+        target.write_text(replace_once(text, "ALLOWED_RUNS = {", 'ALLOWED_RUNS = {\n    ("init.tkb", "planted stale declaration"):\n'
+            '        "describes duplication that does not exist",'), encoding="ascii")
 
     failures += case("stale declaration", plant_stale_declaration,
                      "planted stale declaration")

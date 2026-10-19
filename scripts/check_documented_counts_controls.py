@@ -11,6 +11,7 @@ stops examining without ever failing -- the number would keep being copied by
 hand and nothing would compare it again.
 """
 
+from control_patch import replace_once
 import pathlib
 import re
 import shutil
@@ -90,7 +91,7 @@ def edit_readme(old, new):
         target = root / README
         text = target.read_text(encoding="ascii")
         assert text.count(old) == 1, f"{old!r} is not a unique anchor"
-        target.write_text(text.replace(old, new, 1), encoding="ascii")
+        target.write_text(replace_once(text, old, new), encoding="ascii")
     return plant
 
 

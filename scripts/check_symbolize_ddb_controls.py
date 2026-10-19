@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Controls for exact-identity EL0 top-PC interpretation, including PIE and refusal."""
 
+from control_patch import replace_once
 import hashlib
 import json
 from pathlib import Path
@@ -92,8 +93,7 @@ def main():
             status, report, _ = run("kernel-boundary", text=original.replace("boundary=user", "boundary=kernel"))
             assert report["rows"] == []
             bad_pc = next(end for _, end in segments)
-            status, report, _ = run("outside", text=original.replace(
-                f"pc=0x{address+bias:x}", f"pc=0x{bad_pc+bias:x}", 1))
+            status, report, _ = run("outside", text=replace_once(original, f"pid=7 stack=0x0..0x1000\nddb: bt frame=0 pc=0x{address+bias:x}", f"pid=7 stack=0x0..0x1000\nddb: bt frame=0 pc=0x{bad_pc+bias:x}"))
             assert status == 1 and "outside executable" in report["rows"][0]["reason"]
             status, report, _ = run("no-context", text=f"ddb: bt frame=0 pc=0x{address+bias:x} boundary=user\n")
             assert status == 0 and report["rows"][0]["pid"] is None

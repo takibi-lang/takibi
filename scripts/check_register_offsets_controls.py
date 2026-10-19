@@ -7,6 +7,8 @@ calls problems(), so no child process is spawned (check_fast_gate_no_spawn).
 
 from __future__ import annotations
 
+from control_patch import replace_once
+
 import sys
 
 from pass_line import CaseCount, report_pass
@@ -24,7 +26,7 @@ def planted(base: dict[str, str], path: str, old: str, new: str) -> dict[str, st
         raise SystemExit(f"FAIL register-offsets-controls: {path} no longer "
                          f"holds {old!r}; update the control")
     changed = dict(base)
-    changed[path] = base[path].replace(old, new, 1)
+    changed[path] = replace_once(base[path], old, new)
     return changed
 
 

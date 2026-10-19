@@ -11,6 +11,7 @@ still made a sample directory, and only the person who opened it afterwards
 found the failing sample's capture had been replaced by the next sample's.
 """
 
+from control_patch import replace_once
 import pathlib
 import shutil
 import subprocess
@@ -69,7 +70,7 @@ def edit(relative, old, new):
         target = root / relative
         text = target.read_text(encoding="ascii")
         assert text.count(old) == 1, f"{old!r} is not a unique anchor"
-        target.write_text(text.replace(old, new, 1), encoding="ascii")
+        target.write_text(replace_once(text, old, new), encoding="ascii")
     return plant
 
 

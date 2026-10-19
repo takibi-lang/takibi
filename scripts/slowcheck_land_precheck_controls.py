@@ -4,6 +4,7 @@
 No Git repository, network, board, suite lease or actual build is touched.
 The trace verifies which make/git operations the shell really requests.
 """
+from control_patch import replace_once
 import os
 import re
 from pathlib import Path
@@ -167,9 +168,12 @@ def main():
     # The checker must itself notice a reverted quick gate, a swallowed
     # failing make status, or a light-path match that accepts anything. Each
     # mutation preserves the rest of the real shell.
-    mutants = [source.replace('for lane in langcheck test linuxcheck;', 'for lane in test linuxcheck;', 1),
-               source.replace('status=${PIPESTATUS[0]}', 'status=0', 1),
-               source.replace('[ "$path" = "$entry" ] && listed=1', 'listed=1', 1)]
+    mutants = [replace_once(source, 'for lane in langcheck test linuxcheck;', 'for lane in test linuxcheck;'),
+               # GitHub issue #845: the light path's status, named by the
+               # make line above it, since replace_once refuses a repeat.
+               replace_once(source, 'make langcheck 2>&1 | tee -a "$log"\n    status=${PIPESTATUS[0]}',
+                            'make langcheck 2>&1 | tee -a "$log"\n    status=0'),
+               replace_once(source, '[ "$path" = "$entry" ] && listed=1', 'listed=1')]
     for mutant in mutants:
         cases.note()
         try:

@@ -26,6 +26,7 @@ used to make for the whole kernel.
 Exit code only (0 = pass, 1 = fail).
 """
 
+from control_patch import replace_once
 import pathlib
 import re
 import sys
@@ -148,7 +149,12 @@ def main() -> int:
         print("FAIL ext2-mutation-guard: the negative control's subject "
               f"({target}) no longer takes the guard at all")
         return 1
-    broken[target] = broken[target].replace(f"let guard = {TAKE};", "", 1)
+    # GitHub issue #845: one named site, since replace_once refuses a
+    # repeated anchor.
+    # The site is syscall_ext2_write_locked's take.
+    head = "{ found }\n    };\n\n    "
+    site = f"{head}let guard = {TAKE};"
+    broken[target] = replace_once(broken[target], site, head)
     control, _ = guard_problems(broken)
     if not control:
         print("FAIL ext2-mutation-guard: a helper stripped of its guard was "
@@ -158,8 +164,8 @@ def main() -> int:
     # GitHub issue #818: a guard taken only in a comment takes nothing. The
     # function bodies were raw text, so this passed before.
     commented = dict(sources)
-    commented[target] = commented[target].replace(
-        f"let guard = {TAKE};", f"// let guard = {TAKE};", 1)
+    commented[target] = replace_once(commented[target], site,
+                                     f"{head}// let guard = {TAKE};")
     control, _ = guard_problems(commented)
     if not control:
         print("FAIL ext2-mutation-guard: a helper whose guard is taken only "
@@ -173,7 +179,10 @@ def main() -> int:
               f"({target}) no longer receives the guard as a parameter")
         return 1
     unborrowed = dict(sources)
-    unborrowed[target] = unborrowed[target].replace(HELD, "guard: usize", 1)
+    held_site = f"syscall_ext2_mkdir_under(mount: Ext2Mount,\n        {HELD}"
+    unborrowed[target] = replace_once(
+        unborrowed[target], held_site,
+        "syscall_ext2_mkdir_under(mount: Ext2Mount,\n        guard: usize")
     control, _ = guard_problems(unborrowed)
     if not control:
         print("FAIL ext2-mutation-guard: a helper whose guard parameter was "

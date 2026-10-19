@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Positive and build-faithful negative controls for the DDB inventory check."""
 
+from control_patch import replace_once
 import subprocess
 import tempfile
 from pathlib import Path
@@ -52,14 +53,10 @@ with tempfile.TemporaryDirectory() as temporary:
     changed = Path(temporary) / "exception_evidence.tkb"
     needle = 'if (ddb_command_is(line as []u8, length, bs"continue")) {'
     changed.write_text(
-        source.replace(
-            needle,
-            'if (ddb_command_is(line as []u8, length, bs"staleprobe")) {\n'
+        replace_once(source, needle, 'if (ddb_command_is(line as []u8, length, bs"staleprobe")) {\n'
             '            ddb_puts("stale probe\\n");\n'
             '        } else '
-            + needle,
-            1,
-        ),
+            + needle),
         encoding="ascii",
     )
     negative = run("--source", str(changed))
@@ -68,11 +65,7 @@ with tempfile.TemporaryDirectory() as temporary:
     qemu_source = qemu_checks.read_text(encoding="ascii")
     qemu_changed = Path(temporary) / "ddb_qemu_checks.py"
     qemu_changed.write_text(
-        qemu_source.replace(
-            "^ddb: wait pid=10 state=blocked waits-for event=uart-rx queued=1$",
-            "^ddb: wait pid=10 state=blocked waits-for event=uart-rx$",
-            1,
-        ),
+        replace_once(qemu_source, "^ddb: wait pid=10 state=blocked waits-for event=uart-rx queued=1$", "^ddb: wait pid=10 state=blocked waits-for event=uart-rx$"),
         encoding="ascii",
     )
     qemu_negative = run("--qemu_checks", str(qemu_changed))
