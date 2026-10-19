@@ -285,7 +285,7 @@ signal wake that leaves the record on its list (`nounlink` breaks
 | `SignalWake` | `scheduled_process_wake_ready`, `kernel_process_tick_wake_unlink`, `kernel_process_signal_deliver_to` | a wake that is not the tick makes the record Ready and, with `UNLINK`, takes it off its list | which signal and its pending bits -- irrelevant to `ListsMatchBlocked`: only the state and list change matters | `4ebed6ae0891` |
 | `Run` | `kernel_process_schedule` | a Ready process runs again on the core its mask allows | stack ownership -- modelled elsewhere: `StackOwnership.Reserve` | `7a417ffc219f` |
 | `SetAffinity` | `kernel_process_affinity_set` | the mask changes, and a queued sleeper stays on its list | the pin and the migration of a running process -- irrelevant to `PeerSleeperWakes`: neither touches a list | `02c1331adf94` |
-| `Mask` | `workload_peer_sleep_progress` | core 0 masks its interrupts and takes no tick | how long -- irrelevant to `PeerSleeperWakes`: the model masks for good, the worst case | `f874ddeafd4b` |
+| `Mask` | `workload_peer_sleep_progress` | core 0 masks its interrupts and takes no tick | how long -- irrelevant to `PeerSleeperWakes`: the model masks for good, the worst case | `b53718f427cc` |
 
 Properties:
 
