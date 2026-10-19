@@ -2441,7 +2441,7 @@ fn workload_peer_sleep_progress(step: usize, child: usize) -> usize !{unsafe} {
     }
     workload_peer_sleep_done = true;
     let frequency: usize = read_cntfrq() as usize;
-    disable_irq();
+    let saved_irq: usize = mutex_irq_save();
     let start: usize = read_cntpct() as usize;
     let mut now: usize = start;
     let mut deadline: usize = 0;
@@ -2455,7 +2455,7 @@ fn workload_peer_sleep_progress(step: usize, child: usize) -> usize !{unsafe} {
         now = read_cntpct() as usize;
     }
     if (deadline == 0 || now >= deadline) {
-        enable_irq();
+        mutex_irq_restore(saved_irq);
         workload_peer_sleep_finish();
         kernel_boot_log("workload: peer sleeper never seen asleep before its deadline while core 0 was masked, registered=");
         let report_guard = process_run_lock();
@@ -2471,7 +2471,7 @@ fn workload_peer_sleep_progress(step: usize, child: usize) -> usize !{unsafe} {
         woken = workload_peer_sleep_deadline(child) == 0;
         now = read_cntpct() as usize;
     }
-    enable_irq();
+    mutex_irq_restore(saved_irq);
     workload_peer_sleep_finish();
     let mut late: usize = 0;
     if (now > deadline) { late = now - deadline; }
