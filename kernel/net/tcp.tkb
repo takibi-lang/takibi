@@ -2203,111 +2203,76 @@ fn pending_tcp_ack_matches(frame: borrow [u8; 1514..], len: i32,
                tcp, checksum_add(pseudo as []u8, 0))) == 0;
 }
 
-// One non-blocking net_rx acquire attempt: if a frame is already
-// waiting, checks it against every entry this connection still has
-// outstanding (a real ACK is cumulative -- one frame can clear several
-// older entries at once, exactly what happens here since these are
-// same-direction sequential segments), then separately retransmits any
-// entry still outstanding past its own retry_ticks deadline (bumping its
-// retry count, giving up and freeing it silently at TCP_RETRY_LIMIT --
-// same exhaustion behavior this file always had). A validated payload for
-// another established connection is copied into that connection's receive
-// buffer before the descriptor is released. A payload that cannot be
-// matched to a live connection, or a non-payload frame, is an explicit
-// protocol drop here; the sender's normal TCP retry is responsible for
-// recovery where one applies. ACK frames for another connection do not
-// alter its retransmit queue from this opportunistic path.
-//
-// GitHub issue #257: the queue is one chain for the whole stack now, so
-// both passes below skip entries belonging to another connection. That
-// keeps what a connection sees identical to when the queue was its own
-// four slots -- a deliberate choice, since servicing every connection's
-// deadlines from whichever one happens to be running would be a timing
-// change on a path with a history of them.
-fn pending_tcp_service_once(conn: borrow &mut TcpConnection,
-                            ready_in: sink NetRxCanAcquire,
-                             retry_ticks: i64)
-        -> NetRxCanAcquire !{may_block, unsafe} {
-    let mut ready = ready_in;
-    match net_rx_acquire(ready) {
-        NetRxAcquire::None(next) => { ready = next; }
-        NetRxAcquire::Acquired(acquired) => {
-            let len: i32 = net_rx_len(acquired);
-            let frame = net_rx_frame(acquired);
-            let mut link: Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]) = retx_chain_take();
-            let mut kept: Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]) = Place::Empty;
-            let mut walking: bool = true;
-            while (walking) {
-                match link {
-                    Place::Empty => { walking = false; link = Place::Empty; }
-                    Place::Full(parked) => {
-                        let entry: &mut RetxEntry = region_slot_record(parked);
-                        let following: Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]) =
-                            retx_entry_take_next(entry);
-                        let mut acked: bool = false;
-                        if (entry.connection == conn.self_address &&
-                            pending_tcp_ack_matches(frame, len, entry)) {
-                            // A real peer ACK, not a synthetic flag
-                            // flip: this is what makes
-                            // kernel_tcp_injected_data_recovered() /
-                            // kernel_tcp_injected_fin_recovered()
-                            // genuinely prove recovery, matching the
-                            // same rigor
-                            // kernel_tcp_injected_syn_ack_recovered()
-                            // already had.
-                            if (region_slot_address(parked) == conn.injected_data_entry &&
-                                tcp_injected_data_retransmitted) {
-                                tcp_injected_data_recovery_observed = true;
-                            }
-                            if (region_slot_address(parked) == conn.injected_fin_entry &&
-                                tcp_injected_fin_retransmitted) {
-                                tcp_injected_fin_recovery_observed = true;
-                            }
-                            acked = true;
-                        }
-                        if (acked) {
-                            retx_entry_release(parked);
-                            conn.retx_count =
-                                retx_count_after_release(conn);
-                        } else {
-                            if (retx_entry_put_next(entry, kept) == false) {
-                                kernel_boot_log("tcp retx: chain link was not empty\n");
-                            }
-                            kept = Place::Full(parked);
-                        }
-                        link = following;
+// The first half of pending_tcp_service_once: one received frame checked
+// against every entry this connection still has outstanding, and each one
+// it acknowledges released. The caller holds the network capability, which
+// is what keeps a second walker off the stack-wide chain (#838).
+fn pending_tcp_ack_frame(conn: borrow &mut TcpConnection,
+                         frame: borrow [u8; 1514..], len: i32) !{unsafe} {
+    let mut link: Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]) = retx_chain_take();
+    let mut kept: Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]) = Place::Empty;
+    let mut walking: bool = true;
+    while (walking) {
+        match link {
+            Place::Empty => { walking = false; link = Place::Empty; }
+            Place::Full(parked) => {
+                let entry: &mut RetxEntry = region_slot_record(parked);
+                let following: Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]) =
+                    retx_entry_take_next(entry);
+                let mut acked: bool = false;
+                if (entry.connection == conn.self_address &&
+                    pending_tcp_ack_matches(frame, len, entry)) {
+                    // A real peer ACK, not a synthetic flag
+                    // flip: this is what makes
+                    // kernel_tcp_injected_data_recovered() /
+                    // kernel_tcp_injected_fin_recovered()
+                    // genuinely prove recovery, matching the
+                    // same rigor
+                    // kernel_tcp_injected_syn_ack_recovered()
+                    // already had.
+                    if (region_slot_address(parked) == conn.injected_data_entry &&
+                        tcp_injected_data_retransmitted) {
+                        tcp_injected_data_recovery_observed = true;
                     }
-                }
-            }
-            match link {
-                Place::Empty => {}
-                Place::Full(leftover) => { retx_entry_release(leftover); }
-            }
-            if (retx_chain_put(retx_chain_reverse(kept)) == false) {
-                kernel_boot_log("tcp retx: queue was not empty on reinstall\n");
-            }
-            match tcp_parse_segment(frame, len) {
-                TcpSegmentParseResult::Reject => {
-                    ready = net_rx_release(acquired);
-                }
-                TcpSegmentParseResult::Parsed(header) => {
-                    match tcp_route_received_segment(
-                            conn.self_address, frame, header) {
-                        TcpReceiveRouteResult::NoReceiver => {
-                            ready = net_rx_release(acquired);
-                        }
-                        TcpReceiveRouteResult::Routed => {
-                            ready = net_rx_release(acquired);
-                        }
-                        TcpReceiveRouteResult::Ack => {
-                            ready = net_rx_send_reply(
-                                net_rx_reply_ready(acquired, 54));
-                        }
+                    if (region_slot_address(parked) == conn.injected_fin_entry &&
+                        tcp_injected_fin_retransmitted) {
+                        tcp_injected_fin_recovery_observed = true;
                     }
+                    acked = true;
                 }
+                if (acked) {
+                    retx_entry_release(parked);
+                    conn.retx_count =
+                        retx_count_after_release(conn);
+                } else {
+                    if (retx_entry_put_next(entry, kept) == false) {
+                        kernel_boot_log("tcp retx: chain link was not empty\n");
+                    }
+                    kept = Place::Full(parked);
+                }
+                link = following;
             }
         }
     }
+    match link {
+        Place::Empty => {}
+        Place::Full(leftover) => { retx_entry_release(leftover); }
+    }
+    if (retx_chain_put(retx_chain_reverse(kept)) == false) {
+        kernel_boot_log("tcp retx: queue was not empty on reinstall\n");
+    }
+}
+
+// The second half of pending_tcp_service_once: retransmit each entry of
+// this connection past its retry_ticks deadline, giving up on one at
+// TCP_RETRY_LIMIT. GitHub issue #842: a blocked read runs this too, on
+// every tick its NetRx wait retries, so a peer waiting for the read's own
+// dropped segment gets it without close() or write() having to come first.
+fn pending_tcp_retransmit_due(conn: borrow &mut TcpConnection,
+                              ready_in: sink NetRxCanAcquire,
+                              retry_ticks: i64)
+        -> NetRxCanAcquire !{may_block, unsafe} {
+    let mut ready = ready_in;
     let now: i64 = read_cntpct();
     let mut link: Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]) = retx_chain_take();
     let mut kept: Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]) = Place::Empty;
@@ -2396,6 +2361,63 @@ fn pending_tcp_service_once(conn: borrow &mut TcpConnection,
         kernel_boot_log("tcp retx: queue was not empty on reinstall\n");
     }
     return ready;
+}
+
+// One non-blocking net_rx acquire attempt: if a frame is already
+// waiting, checks it against every entry this connection still has
+// outstanding (a real ACK is cumulative -- one frame can clear several
+// older entries at once, exactly what happens here since these are
+// same-direction sequential segments), then separately retransmits any
+// entry still outstanding past its own retry_ticks deadline (bumping its
+// retry count, giving up and freeing it silently at TCP_RETRY_LIMIT --
+// same exhaustion behavior this file always had). A validated payload for
+// another established connection is copied into that connection's receive
+// buffer before the descriptor is released. A payload that cannot be
+// matched to a live connection, or a non-payload frame, is an explicit
+// protocol drop here; the sender's normal TCP retry is responsible for
+// recovery where one applies. ACK frames for another connection do not
+// alter its retransmit queue from this opportunistic path.
+//
+// GitHub issue #257: the queue is one chain for the whole stack now, so
+// both passes below skip entries belonging to another connection. That
+// keeps what a connection sees identical to when the queue was its own
+// four slots -- a deliberate choice, since servicing every connection's
+// deadlines from whichever one happens to be running would be a timing
+// change on a path with a history of them.
+fn pending_tcp_service_once(conn: borrow &mut TcpConnection,
+                            ready_in: sink NetRxCanAcquire,
+                             retry_ticks: i64)
+        -> NetRxCanAcquire !{may_block, unsafe} {
+    let mut ready = ready_in;
+    match net_rx_acquire(ready) {
+        NetRxAcquire::None(next) => { ready = next; }
+        NetRxAcquire::Acquired(acquired) => {
+            let len: i32 = net_rx_len(acquired);
+            let frame = net_rx_frame(acquired);
+            pending_tcp_ack_frame(conn, frame, len);
+            match tcp_parse_segment(frame, len) {
+                TcpSegmentParseResult::Reject => {
+                    ready = net_rx_release(acquired);
+                }
+                TcpSegmentParseResult::Parsed(header) => {
+                    match tcp_route_received_segment(
+                            conn.self_address, frame, header) {
+                        TcpReceiveRouteResult::NoReceiver => {
+                            ready = net_rx_release(acquired);
+                        }
+                        TcpReceiveRouteResult::Routed => {
+                            ready = net_rx_release(acquired);
+                        }
+                        TcpReceiveRouteResult::Ack => {
+                            ready = net_rx_send_reply(
+                                net_rx_reply_ready(acquired, 54));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return pending_tcp_retransmit_due(conn, ready, retry_ticks);
 }
 
 // One decrement, guarded. The count is bookkeeping beside the chain
@@ -3308,6 +3330,13 @@ fn kernel_tcp_receive_once(owner: borrow TcpConnectionOwner[connection_pool, con
         conn.receive_waiting = false;
         return KernelTcpReceiveResult::TimedOut(ready);
     }
+    // GitHub issue #842: this connection's own unacknowledged segments are
+    // retransmitted while the read waits, as Linux's retransmit timer
+    // would; a peer that answers only once it has them would otherwise
+    // wait for this read forever. The wait retries on every tick.
+    if (conn.retx_count != 0) {
+        ready = pending_tcp_retransmit_due(conn, ready, read_cntfrq() / 5);
+    }
     match net_rx_acquire(ready) {
         NetRxAcquire::None(next) => {
             return KernelTcpReceiveResult::Pending(next);
@@ -3315,6 +3344,9 @@ fn kernel_tcp_receive_once(owner: borrow TcpConnectionOwner[connection_pool, con
         NetRxAcquire::Acquired(acquired) => {
             let len: i32 = net_rx_len(acquired);
             let frame = net_rx_frame(acquired);
+            if (conn.retx_count != 0) {
+                pending_tcp_ack_frame(conn, frame, len);
+            }
             let mut disposition: TcpReceiveDisposition =
                 TcpReceiveDisposition::ProtocolDrop;
             match tcp_parse_segment(frame, len) {

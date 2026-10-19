@@ -518,6 +518,14 @@ def test_connected_large_response(client_mac: bytes) -> bool:
             ack = build_frame(client_mac, HANDSHAKE_CLIENT_PORT,
                                client_seq, server_seq, FLAG_ACK)
             sock.send(ack)
+            if len(collected) >= want:
+                # GitHub issue #842: the fixture is blocked reading A; it
+                # gets this byte only once the whole response, including
+                # its once-dropped first segment, has arrived.
+                sock.send(build_frame(client_mac, HANDSHAKE_CLIENT_PORT,
+                                      client_seq, server_seq,
+                                      FLAG_ACK | FLAG_PSH, data=b"r"))
+                client_seq += 1
             continue
 
         if (flags & FLAG_FIN) != 0 and not fin_acked and rseq == server_seq:

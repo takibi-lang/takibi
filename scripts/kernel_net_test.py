@@ -228,6 +228,9 @@ INIT_LARGE_RESPONSE = b"Z" * 1461
 INIT_RX_STALE_LONG = b"L" * 1000
 INIT_RX_STALE_SHORT = b"s" * 10
 INIT_RX_STALE_READY = b"k"
+# GitHub issue #842: the byte the peer sends on connection A only once it
+# has the whole response, whose first segment the kernel dropped once.
+INIT_BLOCKED_READ_REPLY = b"r"
 
 
 def checksum_add(data: bytes, sum_in: int = 0) -> int:
@@ -559,6 +562,7 @@ def init_script_fixture(sock: socket.socket) -> bool:
     next_a = first[2]
     fin_b = False
     fin_a = False
+    reply_a_sent = False
     deadline = time.monotonic() + 10.0
     while (len(received_b) < len(expected_b) or
            len(received_a) < len(expected_a) or
@@ -605,8 +609,12 @@ def init_script_fixture(sock: socket.socket) -> bool:
             sock.sendto(build_tcp_frame(
                 dst_port, first[1], next_a, FLAG_ACK,
                 server_port=INIT_SERVER_PORT), (QEMU_HOST, QEMU_PORT))
+            first[2] = next_a
+            if not reply_a_sent and bytes(received_a) == expected_a:
+                init_send(sock, first, INIT_BLOCKED_READ_REPLY)
+                reply_a_sent = True
     ok = (bytes(received_b) == expected_b and
-          bytes(received_a) == expected_a)
+          bytes(received_a) == expected_a and reply_a_sent)
     print("  init.sh connected I/O fixture: %s" % ("PASS" if ok else "FAIL"))
     return ok
 

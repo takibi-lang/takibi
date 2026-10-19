@@ -393,10 +393,22 @@ fn initial_user_payload() !{unsafe} {
     fail_if(svc5(64, 1, ((unsafe { socket_write_success as *u8 })) as usize,
                  socket_write_success.len, 0, 0) !=
             socket_write_success.len);
+    // GitHub issue #842: the first segment of that response was dropped
+    // once, and the peer answers only after it has the whole response. A
+    // read blocked on this same connection must retransmit it: before the
+    // fix only close() and write() did, and this read hung until its own
+    // 30-second timeout.
+    user_payload_rx_buf[0] = 0;
+    fail_if(svc5(63, 5, ptr_of(rx_base, 0), 1, 0, 0) != 1);
+    fail_if(user_payload_rx_buf[0] != 0x72);
+    let blocked_read_success: []const u8 =
+        bs"userspace socket read: a blocked read retransmits its own dropped segment ok\n";
+    fail_if(svc5(64, 1, (unsafe { blocked_read_success as *u8 }) as usize,
+                 blocked_read_success.len, 0, 0) != blocked_read_success.len);
 
     // GitHub issue #761: a long segment, then a short one, land in the same
-    // connection's receive frame (connection B, fd 6: A still has a dropped
-    // segment of its own waiting for close to retransmit it). The second read asks for more than the
+    // connection's receive frame (connection B, fd 6). The second read asks
+    // for more than the
     // short segment holds; it must return only that segment's bytes and
     // leave the rest of the buffer untouched, never the long segment's
     // tail. The peer sends the short segment only after this fixture has
