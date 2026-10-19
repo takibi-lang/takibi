@@ -228,11 +228,17 @@ def continue_bounded(threads_locked: bool) -> None:
 
 
 # A step the guest reaches deterministically, but whose host time depends on
-# how much CPU QEMU gets. A fixed STEP_TIMEOUT failed under host load
-# (GitHub issue #784: "CPU0 timer did not acquire the process-run lock",
-# with CPU0 still running). Keep waiting while the selected vCPU's PC moves;
-# stop at STEP_PROGRESS_CAP, or as soon as one STEP_TIMEOUT passes with no
-# progress at all.
+# how much CPU QEMU gets, so a fixed STEP_TIMEOUT is not a bound on it. Keep
+# waiting while the selected vCPU's PC moves; stop at STEP_PROGRESS_CAP, or as
+# soon as one STEP_TIMEOUT passes with no progress at all.
+#
+# A scheduler-locked step must also never run one vCPU toward a lock the
+# frozen one may hold: progress then never comes (GitHub issues #784, #795).
+# The pre-#829 control froze CPU1 inside the process-run lock's critical
+# section and ran CPU0 toward it, and failed once under load. Every hold
+# point below is now lock-free: CPU1 at kernel_process_block_uart and
+# kernel_process_block_net entry (their callers hold no lock), CPU0 at
+# timer_irq_handler entry (every kernel lock masks interrupts).
 STEP_PROGRESS_CAP = 180.0
 
 

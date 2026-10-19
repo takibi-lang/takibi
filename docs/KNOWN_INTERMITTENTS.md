@@ -30,7 +30,6 @@ whether a row has gone quiet or has merely stopped being looked for.
 
 | Symptom | Rate | Issue | Last seen |
 | --- | --- | --- | --- |
-| `CPU0 timer did not acquire the process-run lock` | 1 land.sh allcheck on 186f0c85 (uart-wake peer-uart-and-net-wake-control, host loaded); 0 of 1 standalone; the gdb steps now wait on guest progress (no fixed 10 s cutoff); 0 of 4 lane runs reproduced it (3 beside 48 busy loops) | #784 | 2026-10-13 |
 | `workload: busy pair STARVED: a wait passed its bound` | 1 land.sh allcheck on 86bf0439 (race-window 609's armed kernel); 0 of 4 standalone | #690 | 2026-10-03 |
 | `passed, so the window was not crossed` | 1 land.sh allcheck on 660efe01 (race-window 609's reverted run); 0 of 3 standalone | #685 | 2026-10-03 |
 | `the payload never asked for its input` | 1 of 9 cicheck runs after the alloc-rollback split | #607 | 2026-10-04 |
