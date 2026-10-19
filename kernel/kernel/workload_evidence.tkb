@@ -189,6 +189,11 @@ struct WorkloadBusyPair {
     // by its first tag-3 report, before it opens the fixture file.
     peer_read_pid: usize;
     peer_read_reported: bool;
+    // GitHub issue #843: the registered reader was reaped without an
+    // accepted report. The console writer's turn waits on the report, and
+    // before this flag it asked for that turn forever with no line naming
+    // the fixture that never came.
+    peer_read_failed: bool;
     // The two filesystem readers rendezvous after pinning themselves to
     // opposite CPUs. This makes device-lock contention evidence a real
     // overlap rather than a race between when the init workers get scheduled.
@@ -200,6 +205,8 @@ struct WorkloadBusyPair {
     // A UART-BREAK DDB lane keeps it for one more record: held, pending,
     // then released by the debugger's entry.
     peer_console_pid: usize;
+    // GitHub issue #843: told to leave because the reader failed.
+    peer_console_abandoned: bool;
     peer_console_order_step: usize;
     peer_console_first_count: usize;
     peer_console_first_seen: bool;
@@ -1261,6 +1268,33 @@ fn workload_busy_peer_exit_reaped(pid: usize, parent_pid: usize,
     }
 }
 
+// GitHub issue #843: the registered /bin/peer-read was reaped. Its report
+// can be refused without a line while block-device contention has not been
+// seen on both CPUs, and it gives up after a bounded number of attempts (or
+// on its rendezvous with /bin/core-read) by exiting. Without this the only
+// trace was /bin/peer-console asking for its turn forever.
+fn workload_peer_read_reaped(pid: usize) {
+    let guard = process_run_lock();
+    if (pid != 0 && pid == workload_busy_pair.peer_read_pid &&
+        workload_busy_pair.peer_read_reported == false &&
+        workload_busy_pair.peer_read_failed == false) {
+        workload_busy_pair.peer_read_failed = true;
+        kernel_boot_log(
+            "workload: peer read FAILED: /bin/peer-read exited without an accepted report, block reads on cpu 1=");
+        uart_put_udec(block_read_call_count(SECONDARY_CORE_ID));
+        kernel_boot_log(" device waits cpu 0=");
+        uart_put_udec(block_device_wait_count(0));
+        kernel_boot_log(" cpu 1=");
+        uart_put_udec(block_device_wait_count(SECONDARY_CORE_ID));
+        kernel_boot_log(" ready core=");
+        if (workload_busy_pair.peer_read_core_ready) { uart_put_udec(1); } else { uart_put_udec(0); }
+        kernel_boot_log(" peer=");
+        if (workload_busy_pair.peer_read_peer_ready) { uart_put_udec(1); } else { uart_put_udec(0); }
+        kernel_boot_log("\n");
+    }
+    process_run_unlock(guard);
+}
+
 // Tag 3 belongs to /bin/peer-read, not to the CPU-bound pair. The first call
 // registers the init child for peer admission. Later calls claim one complete
 // 96 KiB read; accept one only when it returns on a peer and both CPUs have
@@ -1374,7 +1408,12 @@ fn workload_peer_net_wake_progress(current_authority: borrow ProcessCurrent[curr
 // then the actual first count and full retry of seventeen 63-byte input lines.
 // Every CPU uses the same terminal queue; the count depends on current room.
 // A DDB lane retains the writer until a late finite console-guard hold.
-// Returns 0 for refusal, 1 to poll, 2 to exit, or 4 to sleep before late arm.
+// Returns 0 for refusal, 1 to poll, 2 to exit, or 4 to sleep before late arm;
+// registration answers PEER_CONSOLE_ABANDONED once the reader has failed.
+// GitHub issue #843: the registration answer when the filesystem reader
+// failed. Not a CPU number, and outside the order opcode and count ranges.
+const PEER_CONSOLE_ABANDONED: usize = 0xDEAD;
+
 fn workload_peer_console_progress(first: usize, total: usize) -> usize {
     let guard = process_run_lock();
     let pid: usize = kernel_process_current_pid();
@@ -1390,6 +1429,19 @@ fn workload_peer_console_progress(first: usize, total: usize) -> usize {
         // verdict, which the admission rule used to do. Not a refusal: init
         // starts this writer long before that, and it asks again.
         if (workload_busy_pair.peer_read_reported == false) {
+            // GitHub issue #843: the reader is gone without its report, so
+            // this turn will never come. Say so and send the writer away
+            // instead of letting it ask forever.
+            if (workload_busy_pair.peer_read_failed) {
+                workload_busy_pair.refused = workload_busy_pair.refused + 1;
+                if (workload_busy_pair.peer_console_abandoned == false) {
+                    workload_busy_pair.peer_console_abandoned = true;
+                    kernel_boot_log(
+                        "workload: peer console FAILED: its turn follows the filesystem reader's report, which never came\n");
+                }
+                process_run_unlock(guard);
+                return PEER_CONSOLE_ABANDONED;
+            }
             process_run_unlock(guard);
             return 0;
         }

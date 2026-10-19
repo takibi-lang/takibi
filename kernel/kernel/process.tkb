@@ -10582,6 +10582,7 @@ private fn kernel_process_reap_zombie(parent: ProcessHandle,
     let pid: usize = scheduled_process_pid_of_handle(child);
     workload_busy_peer_exit_reaped(
         pid, scheduled_process_pid_of_handle(parent), stack_unowned);
+    workload_peer_read_reaped(pid);
     // GitHub issue #589: the unlink and the Exited take under the
     // process-run lock. Peer schedulers walk these same sibling links under
     // it, and the take now requires its guard. The teardown itself

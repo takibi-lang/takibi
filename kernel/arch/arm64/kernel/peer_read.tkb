@@ -28,6 +28,11 @@ const PEER_READ_CHECKSUM: usize = 8847360;
 const WRITE_SYSCALL: usize = 64;
 const PEER_CONSOLE_TAG: usize = 4;
 const PEER_CONSOLE_POLL_PAUSE: usize = 1048576;
+// GitHub issue #843: the kernel's registration answer once /bin/peer-read
+// was reaped without its report, and how many naps the forked child waits
+// for its parent's fourth write before it names the wait and leaves.
+const PEER_CONSOLE_ABANDONED: usize = 0xDEAD;
+const PEER_CONSOLE_CHILD_POLLS: usize = 10000;
 const PEER_TTY_TAG: usize = 5;
 const SETAFFINITY_SYSCALL: usize = 122;
 const NANOSLEEP_SYSCALL: usize = 101;
@@ -212,6 +217,13 @@ private fn peer_pin(cpu: usize) -> bool {
     return svc5(SETAFFINITY_SYSCALL, 0, 8, mask as *u8 as usize, 0, 0) == 0;
 }
 
+// GitHub issue #843: a named failure line, then leave.
+private fn peer_console_say(line: borrow []const u8) !{unsafe} {
+    // Raw ABI input only: this syscall reads the readonly bytes.
+    svc5(WRITE_SYSCALL, 1, (unsafe { line as *u8 }) as usize, line.len, 0, 0);
+    svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
+}
+
 // The writer's report was refused: say what the first write returned, then
 // leave. Shared by the early report after that write and the final one.
 private fn peer_console_refused(first: usize) !{unsafe} {
@@ -274,6 +286,9 @@ fn peer_console() !{unsafe} {
             svc5(NANOSLEEP_SYSCALL, nap as *u8 as usize, 0, 0, 0, 0);
         }
     }
+    if (peer_cpu == PEER_CONSOLE_ABANDONED) {
+        peer_console_say(bs"peer console: the filesystem reader failed, so this writer's turn never came\n");
+    }
     if (peer_pin(peer_cpu) == false) { svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0); }
     while (peer_read_cpu(cpu_bytes as []u8) != peer_cpu) {}
 
@@ -293,7 +308,15 @@ fn peer_console() !{unsafe} {
     if (child == 0) {
         if (peer_pin(0) == false) { peer_console_refused(0); }
         while (peer_read_cpu(cpu_bytes as []u8) != 0) {}
+        // GitHub issue #843: bounded. The parent writes step 4 right after
+        // the fork; if it was refused it has left, this child is no longer
+        // its child, and the step would never move.
+        let mut polls: usize = 0;
         while (svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_CONSOLE_TAG, 0x663, 0, 0, 0) < 4) {
+            polls = polls + 1;
+            if (polls >= PEER_CONSOLE_CHILD_POLLS) {
+                peer_console_say(bs"peer console: the child never saw its parent's fourth write\n");
+            }
             svc5(NANOSLEEP_SYSCALL, nap as *u8 as usize, 0, 0, 0, 0);
         }
         if (peer_console_order_write(bs"console order: 5 child core0\n", 0, 5,
