@@ -153,8 +153,10 @@ private let mut net_init_once: InitOnce;
 // rotating NIC route delivered to, while the capability holder clears and
 // reads them on its own core. Release stores and acquire loads order the
 // flag against the used ring the device wrote before raising the interrupt.
-private let mut virtio_rx_irq_flag: AtomicWord;
-private let mut virtio_tx_irq_flag: AtomicWord;
+// Not private: linux_user/virtio_net_tx's support file raises them in place
+// of the IRQ handler.
+let mut virtio_rx_irq_flag: AtomicWord;
+let mut virtio_tx_irq_flag: AtomicWord;
 // Initialization sets this latch once. Expiry clears it permanently: the
 // InitOnce gate refuses reinitialization and IRQs never change readiness.
 // In-place RX bytes may still belong to TX, so neither queue is republished.

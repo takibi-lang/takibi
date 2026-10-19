@@ -41,7 +41,7 @@ fn workload_profile_interrupt_wait() !{may_block} {
     fake_now = fake_now + wake_ticks;
     if (done_at >= 0 && fake_now >= done_at) {
         (*tx_used()).idx = virtio_ring_index_next(tx_used_seen);
-        virtio_tx_irq_flag = 1;
+        atomic_word_store(&virtio_tx_irq_flag, 1);
     }
 }
 
@@ -75,7 +75,7 @@ fn receive_id(ready: sink NetRxCanAcquire, id: u32) -> NetRxAcquire !{unsafe} {
     used.ring[slot].id = id;
     used.ring[slot].len = 74;
     used.idx = virtio_ring_index_next(rx_used_seen);
-    virtio_rx_irq_flag = 1;
+    atomic_word_store(&virtio_rx_irq_flag, 1);
     return net_rx_acquire(ready);
 }
 
@@ -306,7 +306,7 @@ fn run_initialized_case(ready: sink NetRxCanAcquire, reply_timeout: bool) !{may_
     late_rx.ring[late_slot].id = 0;
     late_rx.ring[late_slot].len = 74;
     late_rx.idx = virtio_ring_index_next(rx_used_seen);
-    virtio_rx_irq_flag = 1;
+    atomic_word_store(&virtio_rx_irq_flag, 1);
     let ready = match net_rx_acquire(ready) {
         NetRxAcquire::None(cap) => { cap }
         NetRxAcquire::Acquired(frame) => {
