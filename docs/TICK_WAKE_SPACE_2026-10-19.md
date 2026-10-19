@@ -6,12 +6,12 @@ on an intrusive list of the core it blocked on, threaded through two new
 list head and an earliest-due word. The boot gains `/bin/peer-sleep`, an EL0
 fixture, and three small workload words.
 
-Measured with `python3 scripts/space_delta.py origin/main` (base 578e1b1a,
+Measured with `python3 scripts/space_delta.py origin/main` (base 3cb21ec1,
 change at the #829 branch head):
 
 | | qemu base | qemu change | rpi5 base | rpi5 change |
 | --- | --- | --- | --- | --- |
-| text | 722976 | 725072 | 775660 | 777788 |
+| text | 723184 | 725408 | 775900 | 778156 |
 | data | 4744 | 4784 | 2889576 | 2889616 |
 | bss | 1510368 | 1510496 | 1717408 | 1717424 |
 | usable_ram_start | 0x40228000 | 0x40228000 | 0x728000 | 0x728000 |
@@ -28,7 +28,7 @@ Data/BSS symbols that changed size, both targets alike:
 
 Accounting boundaries:
 
-- Image: +2.1 KiB text per target (the list operations, the per-core walk,
+- Image: +2.2 KiB text per target (the list operations, the per-core walk,
   the fixture's syscall arm); data and BSS +40/+128 B (qemu) and +40/+16 B
   (rpi5, where alignment absorbs most of the BSS words);
   `usable_ram_start` unchanged, so no allocator page moves.
