@@ -29,7 +29,7 @@ use "kernel/lib/atomic_word.tkb";
 // file's own dispatch mechanics, not every syscall it implements.
 // - EPHEMERAL SCRATCH IS PER CORE, so independent handlers on two cores do
 //   not overwrite each other's file/path/sockaddr/uname/rlimit staging.
-//   Persistent inetd mode and the init logging latch live in ProcessRecord.
+//   The init logging latch lives in ProcessRecord.
 //   Exec handoff is still global even though it describes one process; it
 //   must move to process-owned storage before dispatch can be concurrent.
 //   Non-preemptible syscall execution is what keeps two processes on one core
@@ -367,7 +367,8 @@ private fn syscall_scratch_cpu_index() -> {0..<KERNEL_MAX_CORES as usize} {
 // GitHub issue #257: connection_open, socket_buffer_length/_offset and
 // inetd_response_length used to be four more [T; TCP_CONNECTION_MAX]
 // arrays here (step 2), and syscall_socket_buffer/syscall_inetd_response
-// two more, at 1460 bytes per connection each (step 4b). All six are gone.
+// two more, at 1460 bytes per connection each (step 4b). All six are gone,
+// and the inetd response frame and length went with inetd mode (#835).
 // The scalars are fields of kernel/net/tcp.tkb's TcpConnection; the two
 // buffers are pooled NetFrames owned there, reached by holding the frame's
 // permission (tcp_connection_frame_hold, #677). **No storage in
@@ -395,8 +396,6 @@ private fn syscall_rlimit_load(field: borrow [u8; 8..]) -> usize {
     }
     return value;
 }
-
-must_use variant KernelInetdAcceptResult { TimedOut; Accepted; }
 
 // GitHub issue #392: CloneFileState and UartBlockDelivery, and the two
 // `[T; KERNEL_PROCESS_MAX]` arrays that held them, are gone from this
@@ -451,7 +450,6 @@ fn kernel_syscall_daemon_start() {
             }
         }
     }
-    kernel_syscall_set_inetd_mode(false);
     syscall_test_lifecycle_daemon_reset();
     workload_peer_daemon_handoff();
 }
@@ -634,21 +632,6 @@ private fn syscall_script_line_here(slot: borrow SyscallSlot[0]) -> [u8; 256..] 
     let scratch: [u8; KERNEL_BLOCK_SIZE..] =
         syscall_scratch[slot.index].file_buffer as [u8; KERNEL_BLOCK_SIZE..];
     return scratch[768..<1024];
-}
-
-private fn kernel_syscall_inetd_mode() -> bool {
-    let slot: usize = kernel_syscall_process_slot();
-    let guard = process_run_lock();
-    let value: bool = scheduled_process_inetd_mode(guard, slot);
-    process_run_unlock(guard);
-    return value;
-}
-
-private fn kernel_syscall_set_inetd_mode(enabled: bool) {
-    let slot: usize = kernel_syscall_process_slot();
-    let guard = process_run_lock();
-    scheduled_process_set_inetd_mode(guard, slot, enabled);
-    process_run_unlock(guard);
 }
 
 // GitHub issue #591: the inode execve resolved its pathname to, which is
@@ -1475,7 +1458,6 @@ fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize)
     scheduled_process_reset_syscall_state_everywhere();
     tcp_connection_pool_init();
     syscall_test_evidence_reset_socket_counters();
-    kernel_syscall_set_inetd_mode(false);
     // This file's process-owned values are cleared above, in one walk over
     // the live processes -- configure is a whole-world reset and can run
     // while processes already exist, so it does not rely on
@@ -2237,8 +2219,7 @@ fn syscall_write_segment(current_authority: borrow ProcessCurrent[current_proces
 fn syscall_write_segment_with(slot: borrow SyscallSlot[0],
         current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], fd: usize, address: usize, length: usize)
         -> SyscallIoResult !{unsafe} {
-        if (kernel_connected_fd_is_open(fd) &&
-            (fd != 1 || kernel_syscall_inetd_mode() == false)) {
+        if (kernel_connected_fd_is_open(fd)) {
             syscall_test_evidence_record_connected_write();
             if (kernel_connected_fd_is_open(fd) == false) {
                 return SyscallIoResult::Errno(LINUX_EBADF);
@@ -2350,62 +2331,6 @@ fn syscall_write_segment_with(slot: borrow SyscallSlot[0],
                     }
                     }
                   }
-                }
-            }
-        }
-        if (fd == 1 && kernel_syscall_inetd_mode()) {
-            let inetd_write_slot: usize =
-                match kernel_connection_fd_lookup(fd) {
-                    KernelConnectionLookupResult::Missing => {
-                        return SyscallIoResult::Errno(LINUX_EBADF);
-                    }
-                    KernelConnectionLookupResult::Found(found) => { found }
-                };
-            let inetd_write_generation: usize = kernel_connection_fd_identity(fd);
-            // GitHub issue #581: the response buffer and its length are the
-            // connection's, so they are appended to under its owner.
-            match tcp_connection_take(inetd_write_slot, inetd_write_generation) {
-                TcpConnectionTakeResult::Missing => {
-                    return SyscallIoResult::Errno(LINUX_EINVAL);
-                }
-                TcpConnectionTakeResult::Ready(owner) => {
-                    let conn: &mut TcpConnection = tcp_connection_of(owner);
-                    if (conn.connection_open == false ||
-                        length > 1460 - conn.inetd_response_length) {
-                        tcp_connection_put(owner);
-                        return SyscallIoResult::Errno(LINUX_EINVAL);
-                    }
-                    let Place::Full(inetd) =
-                            tcp_connection_frame_hold(owner, TcpFrameRole::Inetd) else {
-                        Place::Empty => {
-                            tcp_frame_missing();
-                            tcp_connection_put(owner);
-                            return SyscallIoResult::Errno(LINUX_EINVAL);
-                        }
-                    };
-                    match user_range_check_read(current_authority, address, length) {
-                        UserReadRangeResult::Fault => {
-                            tcp_connection_frame_unhold(owner, TcpFrameRole::Inetd,
-                                                        inetd);
-                            tcp_connection_put(owner);
-                            return SyscallIoResult::Errno(LINUX_EFAULT);
-                        }
-                        UserReadRangeResult::Ok(range) => {
-                            if (copy_from_user_span(range, tcp_frame_bytes(inetd),
-                                                    conn.inetd_response_length,
-                                                    length) == false) {
-                                tcp_connection_frame_unhold(owner, TcpFrameRole::Inetd,
-                                                            inetd);
-                                tcp_connection_put(owner);
-                                return SyscallIoResult::Errno(LINUX_EFAULT);
-                            }
-                        }
-                    }
-                    tcp_connection_frame_unhold(owner, TcpFrameRole::Inetd,
-                                                inetd);
-                    conn.inetd_response_length = conn.inetd_response_length + length;
-                    tcp_connection_put(owner);
-                    return SyscallIoResult::Transferred(length);
                 }
             }
         }
@@ -4617,10 +4542,11 @@ private fn syscall_accept_claimed(current_authority: borrow ProcessCurrent[curre
                                     KernelSocketFdAllocResult::Allocated(found) => { found }
                                 };
                             // Issue #257 step 5: no Conflict arm and no
-                            // `slot >= TCP_CONNECTION_MAX` guard -- see
-                            // the identical site in the inetd accept
-                            // path above for why neither is a check
-                            // quietly dropped.
+                            // `slot >= TCP_CONNECTION_MAX` guard: the fd
+                            // records the connection's address and
+                            // generation, which tcp_connection_take
+                            // revalidates, so neither is a check quietly
+                            // dropped.
                             // GitHub issue #598: written under the owner,
                             // since this may run on a peer while core 0's
                             // receive path reaches the same connection.
@@ -4812,14 +4738,6 @@ fn syscall_peer_safe(number: usize, fd: usize, second: usize) -> bool {
     // capability, which is itself behind a Mutex. So a peer's call and core
     // 0's call on the same connection serialize on the owner, and two
     // connections serialize on the capability.
-    //
-    // GitHub issue #827: inetd response mode is admitted too. Its write
-    // appends to the connection's response frame and length under the same
-    // owner, its shutdown reads them under the owner and transmits holding
-    // the network capability, and its read is the connected read above. The
-    // mode flag is the caller's own ProcessRecord word, read under the
-    // process-run lock. None of this names a CPU, and neither the owner nor
-    // the capability depends on which core takes the network interrupt.
     //
     // GitHub issue #598 adds close, dup3 and shutdown, which reach the
     // transport release through kernel_connected_descriptor_close or the
@@ -6452,8 +6370,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     if (number == 210) {
         // shutdown(1, SHUT_WR) is a connected stream's end-of-response
         // boundary. Its writes are transmitted independently of RX ownership.
-        if (x0 == 1 && kernel_syscall_inetd_mode() == false &&
-            kernel_connected_fd_is_open(1) && x1 == 1) {
+        if (x0 == 1 && kernel_connected_fd_is_open(1) && x1 == 1) {
             let direct_shutdown_slot: usize =
                 match kernel_connection_fd_lookup(1) {
                     KernelConnectionLookupResult::Missing => {
@@ -6479,88 +6396,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             workload_peer_socket_teardown(true);
             return syscall_finish_current(frame, SyscallAction::Resume(0), current_authority);
         }
-        let inetd_shutdown_slot: usize =
-            match kernel_connection_fd_lookup(1) {
-                KernelConnectionLookupResult::Missing => {
-                    return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINVAL), current_authority);
-                }
-                KernelConnectionLookupResult::Found(found) => { found }
-            };
-        let inetd_shutdown_generation: usize = kernel_connection_fd_identity(1);
-        if (x0 != 1 || kernel_syscall_inetd_mode() == false) {
-            return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINVAL), current_authority);
-        }
-        // GitHub issue #581: open, response length and received length are
-        // read under the owner, as in the connected write above.
-        match tcp_connection_take(
-                inetd_shutdown_slot, inetd_shutdown_generation) {
-          TcpConnectionTakeResult::Missing => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINVAL), current_authority); }
-          TcpConnectionTakeResult::Ready(owner) => {
-           if (tcp_connection_of(owner).connection_open == false ||
-               tcp_connection_of(owner).inetd_response_length == 0) {
-               tcp_connection_put(owner);
-               return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINVAL), current_authority);
-           }
-           let received_length: usize =
-               tcp_connection_of(owner).socket_buffer_length;
-           match network_capability_take() {
-            NetworkCapabilityTakeResult::Empty => {
-                tcp_connection_put(owner);
-                return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EAGAIN), current_authority);
-            }
-            NetworkCapabilityTakeResult::Ready(ready) => {
-                let Place::Full(inetd) =
-                        tcp_connection_frame_hold(owner, TcpFrameRole::Inetd) else {
-                    Place::Empty => {
-                        tcp_frame_missing();
-                        match network_capability_put(ready) {
-                            NetworkCapabilityPutResult::Stored => {}
-                            NetworkCapabilityPutResult::Conflict => {}
-                        }
-                        tcp_connection_put(owner);
-                        return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINVAL), current_authority);
-                    }
-                };
-                let inetd_responses = tcp_frame_bytes(inetd);
-                let sent = kernel_tcp_send_received(
-                        owner, ready, inetd_responses[0..<1460],
-                        received_length,
-                        tcp_connection_of(owner).inetd_response_length);
-                tcp_connection_frame_unhold(owner, TcpFrameRole::Inetd,
-                                            inetd);
-                match sent {
-                    KernelTcpSendResult::Invalid(after_invalid) => {
-                        match network_capability_put(after_invalid) {
-                            NetworkCapabilityPutResult::Stored => { }
-                            NetworkCapabilityPutResult::Conflict => {
-                                kernel_connection_free_capped(owner);
-                                return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINVAL), current_authority);
-                            }
-                        }
-                        tcp_connection_put(owner);
-                        return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINVAL), current_authority);
-                    }
-                    KernelTcpSendResult::Sent(after_send) => {
-                        match kernel_tcp_close_stream(owner, after_send) {
-                            KernelTcpCloseResult::Closed(after_close) => {
-                                // GitHub issue #838: freed under the capability.
-                                tcp_connection_free(owner);
-                                match network_capability_put(after_close) {
-                                    NetworkCapabilityPutResult::Conflict => {
-                                        return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINVAL), current_authority);
-                                    }
-                                    NetworkCapabilityPutResult::Stored => {
-                                        return syscall_finish_current(frame, SyscallAction::Resume(0), current_authority);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-           }
-          }
-        }
+        return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINVAL), current_authority);
     }
 
     if (number == AARCH64_NR_EXECVE || number == AARCH64_NR_EXECVEAT) {
@@ -7392,10 +7228,12 @@ fn syscall_vectored_prefix_wait_probe(address: usize, slot: usize,
     return action == 1 && count == 1 && after_wait == prior_wait;
 }
 
-// Exercise the retained inetd buffer path without a live network exchange.
+// Exercise readv on a connected descriptor without a live network exchange.
 // The caller owns a mapped scratch page; this probe restores its stdout and
 // frees its private transport before returning, including on refusals.
-fn syscall_vectored_inetd_probe(address: usize) -> bool !{unsafe} {
+// GitHub issue #835: this was the inetd-mode probe; the mode is gone, and
+// what remains is the connected read it shared with every TCP descriptor.
+fn syscall_vectored_connected_read_probe(address: usize) -> bool !{unsafe} {
     let process: usize = kernel_syscall_process_slot();
     // The preceding process-table probe may have released root 0's context.
     match unified_fd_context_ensure(process) {
@@ -7443,61 +7281,17 @@ fn syscall_vectored_inetd_probe(address: usize) -> bool !{unsafe} {
         UnifiedOpenResult::Invalid => { ok = false; }
         UnifiedOpenResult::Full => { ok = false; }
         UnifiedOpenResult::Ok => {
-            kernel_syscall_set_inetd_mode(true);
-            // GitHub issue #827: every call this mode serves on fd 1 runs on
-            // the calling core. A refusal here would rerun it on core 0.
-            if (syscall_peer_safe(AARCH64_NR_WRITE, 1, address) == false ||
-                syscall_peer_safe(AARCH64_NR_WRITEV, 1, address) == false ||
-                syscall_peer_safe(63, 1, address) == false ||
-                syscall_peer_safe(AARCH64_NR_READV, 1, address) == false ||
-                syscall_peer_safe(210, 1, 1) == false) {
-                kernel_boot_log("syscall subset: inetd-mode descriptor refused by the peer-safety table\n");
-                ok = false;
-            }
+            // readv consumes the connected descriptor's RX data. A short
+            // first segment must leave the invalid (null) second untouched.
             let ProcessRunningHere::Running(probe_current) = process_running_here() else {};
-            match user_range_check_write(probe_current, address, 80) {
+            match user_range_check_write(probe_current, address, 32) {
                 UserWriteRangeResult::Fault => { ok = false; }
                 UserWriteRangeResult::Ok(range) => {
-                    let mut written = user_write_byte(range, 64, 0x61);
-                    written = user_write_join(written, user_write_byte(range, 65, 0x62));
-                    written = user_write_join(written,
-                        user_write_u64(range, 0, (address + 64) as u64));
-                    written = user_write_join(written, user_write_u64(range, 8, 1));
-                    written = user_write_join(written,
-                        user_write_u64(range, 16, (address + 65) as u64));
+                    let mut written = user_write_u64(range, 0, (address + 64) as u64);
+                    written = user_write_join(written, user_write_u64(range, 8, 4));
+                    written = user_write_join(written, user_write_u64(range, 16, 0));
                     written = user_write_join(written, user_write_u64(range, 24, 1));
                     match written {
-                        UserWriteResult::Fault => { ok = false; }
-                        UserWriteResult::Written => {}
-                    }
-                }
-            }
-            process_current_end(probe_current);
-            let (write_action, write_count) = kernel_syscall_dispatch(
-                SYSCALL_TRAP_ESR, AARCH64_NR_WRITEV, 1, address, 2, 0, 0, 0);
-            if (write_action != 1 || write_count != 2) { ok = false; }
-            // The second segment faults after one byte was already appended.
-            let ProcessRunningHere::Running(probe_current) = process_running_here() else {};
-            match user_range_check_write(probe_current, address, 32) {
-                UserWriteRangeResult::Fault => { ok = false; }
-                UserWriteRangeResult::Ok(range) => {
-                    match user_write_u64(range, 16, 0) {
-                        UserWriteResult::Fault => { ok = false; }
-                        UserWriteResult::Written => {}
-                    }
-                }
-            }
-            process_current_end(probe_current);
-            let (partial_action, partial_count) = kernel_syscall_dispatch(
-                SYSCALL_TRAP_ESR, AARCH64_NR_WRITEV, 1, address, 2, 0, 0, 0);
-            if (partial_action != 1 || partial_count != 1) { ok = false; }
-            // inetd reads still consume the connected descriptor's RX data.
-            // A short first segment must leave the invalid second untouched.
-            let ProcessRunningHere::Running(probe_current) = process_running_here() else {};
-            match user_range_check_write(probe_current, address, 32) {
-                UserWriteRangeResult::Fault => { ok = false; }
-                UserWriteRangeResult::Ok(range) => {
-                    match user_write_u64(range, 8, 4) {
                         UserWriteResult::Fault => { ok = false; }
                         UserWriteResult::Written => {}
                     }
@@ -7532,30 +7326,11 @@ fn syscall_vectored_inetd_probe(address: usize) -> bool !{unsafe} {
                     }
                 }
             }
-            kernel_syscall_set_inetd_mode(false);
         }
     }
     match tcp_connection_take(slot, generation) {
         TcpConnectionTakeResult::Missing => { ok = false; }
-        TcpConnectionTakeResult::Ready(after) => {
-            let conn = tcp_connection_of(after);
-            let Place::Full(inetd) =
-                    tcp_connection_frame_hold(after, TcpFrameRole::Inetd) else {
-                Place::Empty => {
-                    tcp_frame_missing();
-                    tcp_connection_free(after);
-                    kernel_connected_fd_clear(1);
-                    kernel_connected_fd_clear(saved_fd);
-                    return false;
-                }
-            };
-            let response = tcp_frame_bytes(inetd);
-            if (conn.inetd_response_length != 3 || response[0] != 0x61 ||
-                response[1] != 0x62 || response[2] != 0x61) { ok = false; }
-            tcp_connection_frame_unhold(after, TcpFrameRole::Inetd,
-                                        inetd);
-            tcp_connection_free(after);
-        }
+        TcpConnectionTakeResult::Ready(after) => { tcp_connection_free(after); }
     }
     kernel_connected_fd_clear(1);
     if (had_stdout && kernel_regular_fd_duplicate(saved_fd, 1) == false) {
@@ -7826,7 +7601,7 @@ fn kernel_syscall_subset_probe() -> bool !{unsafe} {
             }
             process_current_end(probe_current);
 
-            if (syscall_vectored_inetd_probe(oldact_va) == false) { ok = false; }
+            if (syscall_vectored_connected_read_probe(oldact_va) == false) { ok = false; }
             user_pte_clear(probe_index);
             return ok;
         }
@@ -8313,10 +8088,7 @@ private inline fn syscall_execve_current_with(slot: borrow SyscallSlot[0],
     // GitHub issue #610: an exec runs where it is called. The root
     // process's own (SyscallAction::Exec) returns through
     // run_initial_user's frame on PID 1's kernel stack, which is the same
-    // stack on whichever core PID 1 runs, so it too stays put (#775), and
-    // so does an exec in inetd mode (#827): its close-on-exec pass is the
-    // same unified_fd_close of the caller's own table that every exec runs
-    // from a peer, and the mode adds nothing to it.
+    // stack on whichever core PID 1 runs, so it too stays put (#775).
     let mut path_address: usize = x0;
     let mut argv_address: usize = x1;
     if (number == AARCH64_NR_EXECVEAT) {

@@ -243,7 +243,7 @@ Special, with the reason it stays so today:
 |---|---|---|---|
 | Boot | `boot/entry.S` parks every MPIDR but 0; core 0 runs `main()`, the GIC distributor, device bring-up and the boot fixtures | the firmware hands off one core, and machine-wide state is initialized once | no: one core has to come first |
 | PSCI start authority | `cpu_start_reserve` (`lib/occupancy.tkb`) | starting cores is a boot phase; no hotplug exists | only with CPU hotplug, which nothing needs |
-| Syscalls outside the peer-safety table | `syscall_peer_refused`, `syscall_peer_safe`; rerun on core 0 with the process pinned for the call | no subsystem entry is left: inetd-mode connected descriptors left in #827 (their write, read and shutdown take the connection's owner and the network capability exactly as direct mode does), and the BusyBox Extras exec that drains the TCP pool left in #828 (the drain frees each connection under its owner and holds the network capability). The terminal reboot and the payload fixture's parent-progress report are still refused by number, so the rerun path itself stays | yes, one entry at a time; each is its own follow-up |
+| Syscalls outside the peer-safety table | `syscall_peer_refused`, `syscall_peer_safe`; rerun on core 0 with the process pinned for the call | no subsystem entry is left: the BusyBox Extras exec that drains the TCP pool left in #828 (the drain frees each connection under its owner and holds the network capability). The terminal reboot and the payload fixture's parent-progress report are still refused by number, so the rerun path itself stays | yes, one entry at a time; each is its own follow-up |
 | Device interrupts | UART, GEM, virtio-net and xHCI SPIs target core 0; a secondary's dispatch handles only its tick and PMU line | their drivers' state is touched only from core 0 | yes, with per-driver locking or an IRQ affinity policy (decision) |
 | DDB entry by UART BREAK | the UART IRQ branch on core 0 | follows the device interrupt row; DDB then stops the others through the world stop | follows the device row |
 | UART input-flow requests | `kernel_log_console_poll` (`kernel/printk/log.tkb`), called at syscall entry and from core 0's idle loop | the UART is core 0's device (see the device interrupt row); since #613 slice 5 every CPU writes the log ring, so peer lines no longer pass through core 0 and the old peer drain and UartTx blocking are gone -- this flow-control poll is all that is left. A termios change sends the request itself from whichever CPU made it (#826), deciding under the console lock as the poll does | follows the device interrupt row |
@@ -376,8 +376,8 @@ address-space lock or a fault fixup on top of this.
 ## Connected sockets on a peer
 
 `read` and `write` on a connected TCP descriptor are admitted on any CPU
-(GitHub issue #581), and so is the rest of the socket group since #598,
-and the inetd response mode since #827. Every `TcpConnection` field those two calls read or
+(GitHub issue #581), and so is the rest of the socket group since #598.
+Every `TcpConnection` field those two calls read or
 write is accessed under the connection's owner: `tcp_connection_take` takes
 the connection's `TaskMutex` and revalidates the pool generation after the
 acquire, and the open check happens after that, not before. Receive and
@@ -385,11 +385,7 @@ transmit additionally hold the sole network capability, which is behind a
 `Mutex`, so two connections serialize there. Poll's pending-read probe takes
 no connection lock on purpose -- it must not wait behind a receive -- and the
 read that follows re-decides open and available bytes under the owner.
-Inetd mode adds a response frame and its length to the connection; its
-write appends to them and its `shutdown` sends them, both under the owner,
-the send also holding the capability. The mode flag itself is the caller's
-own process record word, read under the process-run lock. Neither lock
-names a CPU, so routing the network interrupt elsewhere changes nothing
+Neither lock names a CPU, so routing the network interrupt elsewhere changes nothing
 here.
 
 The rest of the group, and what each relies on (GitHub issue #598):

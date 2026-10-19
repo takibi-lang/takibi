@@ -356,11 +356,9 @@ struct ProcessRecord {
     // still owns every decision made with it.
     uart_block_delivery: UartBlockDelivery;
     clone_file_state: CloneFileState;
-    // Syscall policy belonging to this process. These used to be machine
-    // globals in syscall.tkb, with clone saving the parent's inetd flag and
-    // child exit restoring it. Keeping the value on each record makes that
-    // save/restore unnecessary and preserves it across future core migration.
-    inetd_mode: bool;
+    // Syscall policy belonging to this process, kept on each record so it
+    // survives core migration. (The inetd_mode flag beside it went with
+    // inetd mode in #835.)
     init_signal_wait_logged: bool;
     // GitHub issue #9: sched_setaffinity's mask, one bit per CPU. 0 means
     // the process never set one, which is every online CPU.
@@ -1900,15 +1898,6 @@ fn scheduled_process_set_clone_file_state(
 
 // GitHub issue #693 step 5: these per-process syscall flags are read and
 // written under the run guard, which their callers take.
-fn scheduled_process_inetd_mode(guard: borrow ProcessRunGuard[lock], slot: usize) -> bool {
-    return scheduled_process_record_locked(guard, slot).inetd_mode;
-}
-
-fn scheduled_process_set_inetd_mode(guard: borrow ProcessRunGuard[lock], slot: usize,
-                                    enabled: bool) {
-    scheduled_process_record_locked(guard, slot).inetd_mode = enabled;
-}
-
 fn scheduled_process_affinity_mask(guard: borrow ProcessRunGuard[lock],
         slot: usize) -> usize {
     return scheduled_process_record_locked(guard, slot).affinity_mask;
@@ -2094,7 +2083,6 @@ private fn scheduled_process_record_reset_syscall_state(
     record.uart_block_delivery = UartBlockDelivery::Scalar;
     let mut fresh: CloneFileState = { false };
     record.clone_file_state = fresh;
-    record.inetd_mode = false;
     record.init_signal_wait_logged = false;
     record.affinity_mask = 0;
     record.core0_for_call = false;

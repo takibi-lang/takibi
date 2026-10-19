@@ -22,7 +22,7 @@ ALLOWED = {
         "syscall_vectored_prefix_wait_probe": 3,
         # GitHub issue #202: boot probes that check a user range after the
         # dispatch they exercise take the boot process's authority for it.
-        "syscall_vectored_inetd_probe": 4,
+        "syscall_vectored_connected_read_probe": 2,
         "kernel_syscall_subset_probe": 2,
         "process_image_exec_resume_root": 1,
         "kernel_process_timer_schedule": 1,

@@ -183,7 +183,6 @@ struct TcpConnection {
     retired: bool;
     socket_buffer_length: usize;
     socket_buffer_offset: usize;
-    inetd_response_length: usize;
     // GitHub issue #469: the accept handshake's own state.
     //
     // These were locals of the old blocking accept loop, which was fine
@@ -220,11 +219,12 @@ struct TcpConnection {
     // deliberate-drop tests reads it.
     injected_data_entry: usize;
     injected_fin_entry: usize;
-    // Step 5: the three frame owners, which step 4 had to keep in a
+    // Step 5: the frame owners (three until #835 removed the inetd
+    // response frame; tx and rx remain), which step 4 had to keep in a
     // separate private array (ConnectionFrames) because a global holding
     // linear owners must be `private` and tcp_connections was read from
     // kernel/kernel/syscall.tkb. The connection lives in a private pool
-    // now, so they come home. Three stable owner fields under one mutex --
+    // now, so they come home. Stable owner fields under one mutex --
     // linux_user/tcp_pool_shape's first claim.
     //
     // Their presence is why every allocation of a TcpConnection must go
@@ -238,7 +238,7 @@ struct TcpConnection {
     // and masking interrupts for that would make the whole kernel's
     // interrupt latency the length of a send.
     //
-    // SEPARATE from frames_mutex below, which guards the three frame links
+    // SEPARATE from frames_mutex below, which guards the two frame links
     // and is taken by tcp_connection_frames_acquire/_release. free() calls
     // the latter while holding this one, and free() is itself called from
     // inside a take/put window -- one mutex for both would be the same
@@ -248,7 +248,6 @@ struct TcpConnection {
     private frames_mutex: Mutex;
     private tx: Place(exists p: addr. exists k: usize. RegionSlot(NetFrame)[p, k]);
     private rx: Place(exists p: addr. exists k: usize. RegionSlot(NetFrame)[p, k]);
-    private inetd: Place(exists p: addr. exists k: usize. RegionSlot(NetFrame)[p, k]);
 }
 
 // Issue #189: TCP connections have dynamic lifetimes. Callers receive a
@@ -752,7 +751,7 @@ fn tcp_frame_take() -> (Place(exists p: addr. exists k: usize. RegionSlot(NetFra
     return (Place::Empty, false);
 }
 
-// Hands this connection its three frames, or returns false having released
+// Hands this connection its two frames, or returns false having released
 // whatever it managed to take. Called from tcp_connection_alloc, whose Full
 // result is exactly the right thing to report when it fails -- a connection
 // with no frame to transmit from is not one this stack can serve.
@@ -765,13 +764,6 @@ fn tcp_connection_frames_acquire(conn: borrow &mut TcpConnection) -> bool !{unsa
     }
     let (rx, rx_taken) = tcp_frame_take();
     if (rx_taken == false) {
-        tcp_frame_release_link(rx);
-        tcp_frame_release_link(tx);
-        return false;
-    }
-    let (inetd, inetd_taken) = tcp_frame_take();
-    if (inetd_taken == false) {
-        tcp_frame_release_link(inetd);
         tcp_frame_release_link(rx);
         tcp_frame_release_link(tx);
         return false;
@@ -792,14 +784,6 @@ fn tcp_connection_frames_acquire(conn: borrow &mut TcpConnection) -> bool !{unsa
     };
     tcp_frame_unlock(rx_guard, &conn.frames_mutex);
     tcp_frame_release_displaced(displaced_rx);
-
-    let inetd_guard = tcp_frame_lock(&conn.frames_mutex);
-    let displaced_inetd: Place(exists p: addr. exists k: usize. RegionSlot(NetFrame)[p, k]) = match inetd {
-        Place::Empty => { place_take(inetd_guard, &conn.frames_mutex, conn.inetd) }
-        Place::Full(value) => { place_put(inetd_guard, &conn.frames_mutex, conn.inetd, value) }
-    };
-    tcp_frame_unlock(inetd_guard, &conn.frames_mutex);
-    tcp_frame_release_displaced(displaced_inetd);
 
     return true;
 }
@@ -830,17 +814,12 @@ fn tcp_connection_frames_release(conn: borrow &mut TcpConnection) !{unsafe} {
     tcp_frame_unlock(rx_guard, &conn.frames_mutex);
     tcp_frame_release_link(held_rx);
 
-    let inetd_guard = tcp_frame_lock(&conn.frames_mutex);
-    let held_inetd: Place(exists p: addr. exists k: usize. RegionSlot(NetFrame)[p, k]) = place_take(
-        inetd_guard, &conn.frames_mutex, conn.inetd);
-    tcp_frame_unlock(inetd_guard, &conn.frames_mutex);
-    tcp_frame_release_link(held_inetd);
 }
 
 // GitHub issue #677: a frame's bytes are reached only through its slot's
-// permission. A connection's three frames each have a role, which names the
+// permission. A connection's two frames each have a role, which names the
 // field the permission is parked in.
-enum TcpFrameRole: u8 { Tx; Rx; Inetd; }
+enum TcpFrameRole: u8 { Tx; Rx; }
 
 // Takes a frame's permission out of its field, leaving None there, so the
 // caller can borrow the bytes from it (tcp_frame_bytes) and must put it back
@@ -861,9 +840,6 @@ fn tcp_connection_frame_hold(owner: borrow TcpConnectionOwner[connection_pool, c
         TcpFrameRole::Rx => {
             place_take(guard, &conn.frames_mutex, conn.rx)
         }
-        TcpFrameRole::Inetd => {
-            place_take(guard, &conn.frames_mutex, conn.inetd)
-        }
     };
     tcp_frame_unlock(guard, &conn.frames_mutex);
     return held;
@@ -880,9 +856,6 @@ fn tcp_connection_frame_unhold(owner: borrow TcpConnectionOwner[connection_pool,
         }
         TcpFrameRole::Rx => {
             place_put(guard, &conn.frames_mutex, conn.rx, frame)
-        }
-        TcpFrameRole::Inetd => {
-            place_put(guard, &conn.frames_mutex, conn.inetd, frame)
         }
     };
     tcp_frame_unlock(guard, &conn.frames_mutex);
@@ -913,7 +886,7 @@ fn tcp_connection_frame_fill(owner: borrow TcpConnectionOwner[connection_pool, c
     return true;
 }
 
-// A hold that found no frame: a connection always has its three from
+// A hold that found no frame: a connection always has its two from
 // tcp_connection_alloc until it is freed, so this is a nested hold or a
 // bug. The caller gives up on the operation rather than touching anything.
 fn tcp_frame_missing() {

@@ -1873,7 +1873,7 @@ run, not a specification.
   returns a real error for anything else. `munmap` is unsupported by
   design: the process arena is reclaimed as a unit.
 - **Scatter/gather I/O.** `readv` and `writev` share the scalar fd operations,
-  including TCP aliases, files and the inetd response buffer. Empty segments
+  including TCP aliases and files. Empty segments
   are skipped and a short segment ends the call. An error or wait after a
   completed prefix returns that prefix, so a retry cannot replay its bytes.
   The scalar transfer limits also apply to each segment.
