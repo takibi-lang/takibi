@@ -1268,33 +1268,6 @@ fn workload_busy_peer_exit_reaped(pid: usize, parent_pid: usize,
     }
 }
 
-// GitHub issue #843: the registered /bin/peer-read was reaped. Its report
-// can be refused without a line while block-device contention has not been
-// seen on both CPUs, and it gives up after a bounded number of attempts (or
-// on its rendezvous with /bin/core-read) by exiting. Without this the only
-// trace was /bin/peer-console asking for its turn forever.
-fn workload_peer_read_reaped(pid: usize) {
-    let guard = process_run_lock();
-    if (pid != 0 && pid == workload_busy_pair.peer_read_pid &&
-        workload_busy_pair.peer_read_reported == false &&
-        workload_busy_pair.peer_read_failed == false) {
-        workload_busy_pair.peer_read_failed = true;
-        kernel_boot_log(
-            "workload: peer read FAILED: /bin/peer-read exited without an accepted report, block reads on cpu 1=");
-        uart_put_udec(block_read_call_count(SECONDARY_CORE_ID));
-        kernel_boot_log(" device waits cpu 0=");
-        uart_put_udec(block_device_wait_count(0));
-        kernel_boot_log(" cpu 1=");
-        uart_put_udec(block_device_wait_count(SECONDARY_CORE_ID));
-        kernel_boot_log(" ready core=");
-        if (workload_busy_pair.peer_read_core_ready) { uart_put_udec(1); } else { uart_put_udec(0); }
-        kernel_boot_log(" peer=");
-        if (workload_busy_pair.peer_read_peer_ready) { uart_put_udec(1); } else { uart_put_udec(0); }
-        kernel_boot_log("\n");
-    }
-    process_run_unlock(guard);
-}
-
 // Tag 3 belongs to /bin/peer-read, not to the CPU-bound pair. The first call
 // registers the init child for peer admission. Later calls claim one complete
 // 96 KiB read; accept one only when it returns on a peer and both CPUs have
@@ -1331,6 +1304,33 @@ fn workload_peer_read_progress(bytes: usize, checksum: usize) -> usize {
         "workload: peer read 98304 pattern bytes; block device mutex contended on both cpus\n");
     process_run_unlock(guard);
     return 2;
+}
+
+// GitHub issue #843: the registered /bin/peer-read was reaped. Its report
+// can be refused without a line while block-device contention has not been
+// seen on both CPUs, and it gives up after a bounded number of attempts (or
+// on its rendezvous with /bin/core-read) by exiting. Without this the only
+// trace was /bin/peer-console asking for its turn forever.
+fn workload_peer_read_reaped(pid: usize) {
+    let guard = process_run_lock();
+    if (pid != 0 && pid == workload_busy_pair.peer_read_pid &&
+        workload_busy_pair.peer_read_reported == false &&
+        workload_busy_pair.peer_read_failed == false) {
+        workload_busy_pair.peer_read_failed = true;
+        kernel_boot_log(
+            "workload: peer read FAILED: /bin/peer-read exited without an accepted report, block reads on cpu 1=");
+        uart_put_udec(block_read_call_count(SECONDARY_CORE_ID));
+        kernel_boot_log(" device waits cpu 0=");
+        uart_put_udec(block_device_wait_count(0));
+        kernel_boot_log(" cpu 1=");
+        uart_put_udec(block_device_wait_count(SECONDARY_CORE_ID));
+        kernel_boot_log(" ready core=");
+        if (workload_busy_pair.peer_read_core_ready) { uart_put_udec(1); } else { uart_put_udec(0); }
+        kernel_boot_log(" peer=");
+        if (workload_busy_pair.peer_read_peer_ready) { uart_put_udec(1); } else { uart_put_udec(0); }
+        kernel_boot_log("\n");
+    }
+    process_run_unlock(guard);
 }
 
 // Tag 10 belongs to /bin/core-read. Record that the core-0 reader has
