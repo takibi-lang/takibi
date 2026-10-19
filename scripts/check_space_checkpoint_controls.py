@@ -67,7 +67,7 @@ def main():
     land = (root / 'scripts/land.sh').read_text()
     hook = 'python3 scripts/space_checkpoint.py --base origin/main --head "$tested"'
     assert hook in land
-    assert land.index('git pull --rebase') < land.index(hook) < land.index('make clean >')
+    assert land.index('python3 scripts/checkpoint_rebase.py --onto origin/main') < land.index(hook) < land.index('make clean >')
     assert 'exit 2' in land[land.index(hook):land.index('log_dir=')]
     report_pass('space-checkpoint-controls',
                 f'milestone/reuse, source binding, deletion, publication hook and {cases.ran} refusal cases',
