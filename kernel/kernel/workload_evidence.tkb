@@ -2452,7 +2452,7 @@ fn workload_peer_sleep_progress(step: usize, child: usize) -> usize !{unsafe} {
         if (registered == child) {
             deadline = workload_peer_sleep_deadline(child);
         }
-        now = read_cntpct() as usize;
+        now = workload_peer_sleep_pause(frequency);
     }
     if (deadline == 0 || now >= deadline) {
         mutex_irq_restore(saved_irq);
@@ -2469,7 +2469,7 @@ fn workload_peer_sleep_progress(step: usize, child: usize) -> usize !{unsafe} {
     let mut woken: bool = false;
     while (woken == false && now < give_up) {
         woken = workload_peer_sleep_deadline(child) == 0;
-        now = read_cntpct() as usize;
+        now = workload_peer_sleep_pause(frequency);
     }
     mutex_irq_restore(saved_irq);
     workload_peer_sleep_finish();
@@ -2487,6 +2487,17 @@ fn workload_peer_sleep_progress(step: usize, child: usize) -> usize !{unsafe} {
     uart_put_udec(late);
     kernel_boot_log("\n");
     return 0;
+}
+
+// Between two looks at the sleeper, about 60 us away from the run lock.
+// The run lock is not fair: re-taken in a tight loop on RPi5 it starved
+// CPU 1's tick, which needs the same lock to wake the sleeper -- the masked
+// window then measured the probe, not the lists. Returns the time after.
+private fn workload_peer_sleep_pause(frequency: usize) -> usize {
+    let start: usize = read_cntpct() as usize;
+    let mut now: usize = start;
+    while (now - start < (frequency >> 14)) { now = read_cntpct() as usize; }
+    return now;
 }
 
 private fn workload_peer_sleep_finish() {
