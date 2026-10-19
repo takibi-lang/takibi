@@ -24,40 +24,12 @@ import re
 import sys
 
 from pass_line import report_pass
+from source_scan import code_skeleton
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = "kernel/arch/arm64/kernel"
 SYSCALL = "WORKLOAD_PROGRESS_SYSCALL"
 ANNOTATION = re.compile(r"//\s*poll-bound:\s*\S")
-
-
-def mask(source: str) -> str:
-    """Blank comments and string literals, keeping offsets and newlines."""
-    out = []
-    i = 0
-    n = len(source)
-    while i < n:
-        if source.startswith("//", i):
-            j = source.find("\n", i)
-            j = n if j < 0 else j
-            out.append(" " * (j - i))
-            i = j
-        elif source.startswith("/*", i):
-            j = source.find("*/", i + 2)
-            j = n if j < 0 else j + 2
-            out.append(re.sub(r"[^\n]", " ", source[i:j]))
-            i = j
-        elif source[i] == '"':
-            j = i + 1
-            while j < n and source[j] != '"':
-                j += 2 if source[j] == "\\" else 1
-            j = min(j + 1, n)
-            out.append('"' + " " * (j - i - 2) + '"' if j - i >= 2 else source[i:j])
-            i = j
-        else:
-            out.append(source[i])
-            i += 1
-    return "".join(out)
 
 
 def loops(masked: str):
@@ -89,7 +61,8 @@ def counted(condition: str, body: str) -> bool:
 def problems(files: dict[str, str]) -> tuple[list[str], int]:
     found, examined = [], 0
     for path, source in sorted(files.items()):
-        masked = mask(source)
+        masked = code_skeleton(source)
+        skeleton = masked.splitlines()
         lines = source.splitlines()
         for offset, condition, body in loops(masked):
             if SYSCALL not in condition and SYSCALL not in body:
@@ -97,7 +70,8 @@ def problems(files: dict[str, str]) -> tuple[list[str], int]:
             examined += 1
             line = masked.count("\n", 0, offset) + 1
             k, block = line - 2, []
-            while k >= 0 and lines[k].strip().startswith("//"):
+            # A comment-only line: text in the source, nothing in the skeleton.
+            while k >= 0 and lines[k].strip() and not skeleton[k].strip():
                 block.append(lines[k])
                 k -= 1
             if counted(condition, body) or any(ANNOTATION.search(c) for c in block):
