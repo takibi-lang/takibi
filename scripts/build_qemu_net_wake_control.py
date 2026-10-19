@@ -15,6 +15,10 @@ def replace_once(path: Path, before: str, after: str) -> None:
     path.write_text(source.replace(before, after), encoding="ascii")
 
 
+# The two sources the control rewrites; every other input is a symlink.
+OVERLAID = {"arch/arm64/kernel/secondary.tkb", "arch/arm64/kernel/timer.tkb"}
+
+
 def main() -> None:
     if len(sys.argv) != 3:
         raise SystemExit("usage: build_qemu_net_wake_control.py KERNEL_ROOT OVERLAY_ROOT")
@@ -42,23 +46,34 @@ def main() -> None:
         for name in files:
             relative_file = (current_path / name).relative_to(source_kernel)
             target = overlay_kernel / relative_file
-            if relative_file.as_posix() == "arch/arm64/kernel/secondary.tkb":
+            if relative_file.as_posix() in OVERLAID:
                 continue
             target.symlink_to(current_path / name)
 
-    secondary_path = overlay_kernel / "arch/arm64/kernel/secondary.tkb"
-    secondary_path.write_text(
-        (source_kernel / "arch/arm64/kernel/secondary.tkb").read_text(encoding="ascii"),
-        encoding="ascii",
-    )
-    # GitHub issue #829: the kernel before per-CPU tick-wake lists, in the
-    # one respect the lane asks about -- a secondary's tick wakes nothing of
-    # its own, so a NetRx waiter that blocked on CPU 1 waits for core 0.
+    for relative in sorted(OVERLAID):
+        (overlay_kernel / relative).write_text(
+            (source_kernel / relative).read_text(encoding="ascii"),
+            encoding="ascii",
+        )
+    # GitHub issue #829: the kernel before per-CPU tick-wake lists. A
+    # secondary's tick wakes nothing, and core 0's tick wakes the due
+    # sleepers of every core -- the old single walker, over the same lists.
     replace_once(
-        secondary_path,
+        overlay_kernel / "arch/arm64/kernel/secondary.tkb",
         "    kernel_process_tick_wake_if_due();\n",
         # Still referenced, so the unused-function check is not what fails.
         "    if (KERNEL_STALL_PROBES == 2) { kernel_process_tick_wake_if_due(); }\n",
+    )
+    replace_once(
+        overlay_kernel / "arch/arm64/kernel/timer.tkb",
+        "    kernel_process_tick_wake(guard);\n",
+        "    if (KERNEL_STALL_PROBES == 2) { kernel_process_tick_wake(guard); }\n"
+        "    for every_core: usize in 0..<KERNEL_MAX_CORES {\n"
+        "        if (every_core < KERNEL_MAX_CORES) {\n"
+        "            let walked: {0..<KERNEL_MAX_CORES as usize} = every_core;\n"
+        "            kernel_process_tick_wake_scan(guard, walked, read_cntpct() as usize);\n"
+        "        }\n"
+        "    }\n",
     )
 
 

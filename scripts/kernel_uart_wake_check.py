@@ -386,9 +386,25 @@ def run_peer_net_wake(connection: socket.socket) -> None:
         return
     net_block.delete()
 
-    # From here CPU0 stays stopped. The next entry into the fixture's
-    # syscall on CPU1 is the woken waiter retrying.
-    resumed = gdb.Breakpoint("workload_peer_net_wake_progress")
+    # Freeze CPU0 where it holds no lock: at its timer interrupt's entry.
+    # Every kernel lock masks interrupts, so a CPU taking one holds none.
+    # Stopped anywhere else, it may hold a pool lock CPU1's next syscall
+    # spins on with interrupts masked, and no tick could run there at all.
+    clean = gdb.Breakpoint("timer_irq_handler")
+    clean.condition = f"$_thread == {CPU0_THREAD}"
+    gdb.execute(f"thread {CPU0_THREAD}", to_string=True)
+    continue_until_hit(clean, CPU0_THREAD, True)
+    if clean.hit_count != 1:
+        verdict(False, "CPU0 did not reach its timer interrupt to be frozen")
+        gdb.execute("set scheduler-locking off")
+        gdb.execute("detach")
+        return
+    clean.delete()
+
+    # From here CPU0 stays stopped. CPU1's tick entering the wake of a due
+    # record on its own list is the property; running the woken waiter is
+    # the scheduler's business and is checked after CPU0 is released.
+    resumed = gdb.Breakpoint("kernel_process_tick_wake_one")
     resumed.condition = f"$_thread == {CPU1_THREAD}"
     gdb.execute(f"thread {CPU1_THREAD}", to_string=True)
     for _ in range(3):
