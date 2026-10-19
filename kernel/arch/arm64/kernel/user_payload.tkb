@@ -31,6 +31,10 @@ const ESRCH_RC: usize = 0xFFFFFFFFFFFFFFFD;
 const GETAFFINITY_SYSCALL: usize = 123;
 const SETAFFINITY_SYSCALL: usize = 122;
 const LARGE_LEN: usize = 1461;
+// GitHub issue #761: the long and the short segment the peer sends on
+// connection A (scripts/kernel_net_test.py, scripts/eth_tcp_echo_test.py).
+const RX_STALE_LONG_LEN: usize = 1000;
+const RX_STALE_SHORT_LEN: usize = 10;
 const SCHEDULER_CHILD_BUSY: usize = 0x0BEBC200;
 const SCHEDULER_PARENT_BUSY: usize = 0x17D78400;
 // GitHub issue #209: one polling slice of the parent's reap loop. Short
@@ -389,6 +393,38 @@ fn initial_user_payload() !{unsafe} {
     fail_if(svc5(64, 1, ((unsafe { socket_write_success as *u8 })) as usize,
                  socket_write_success.len, 0, 0) !=
             socket_write_success.len);
+
+    // GitHub issue #761: a long segment, then a short one, land in the same
+    // connection's receive frame (connection B, fd 6: A still has a dropped
+    // segment of its own waiting for close to retransmit it). The second read asks for more than the
+    // short segment holds; it must return only that segment's bytes and
+    // leave the rest of the buffer untouched, never the long segment's
+    // tail. The peer sends the short segment only after this fixture has
+    // read the long one and answered with one byte.
+    let rx_stale_ready: []const u8 = bs"k";
+    for i in 0..<LARGE_LEN {
+        user_payload_large_buf[i] = 0x5a;
+    }
+    fail_if(svc5(63, 6, ptr_of(large_base, 0), 1460, 0, 0) != RX_STALE_LONG_LEN);
+    for i in 0..<RX_STALE_LONG_LEN {
+        fail_if(user_payload_large_buf[i] != 0x4c);
+    }
+    fail_if(svc5(64, 6, (unsafe { rx_stale_ready as *u8 }) as usize, 1, 0, 0) != 1);
+    for i in 0..<LARGE_LEN {
+        user_payload_large_buf[i] = 0x5a;
+    }
+    fail_if(svc5(63, 6, ptr_of(large_base, 0), 1460, 0, 0) != RX_STALE_SHORT_LEN);
+    for i in 0..<LARGE_LEN {
+        if (i < RX_STALE_SHORT_LEN) {
+            fail_if(user_payload_large_buf[i] != 0x73);
+        } else {
+            fail_if(user_payload_large_buf[i] != 0x5a);
+        }
+    }
+    let rx_stale_success: []const u8 =
+        bs"userspace socket read: a short segment after a long one returns only its own bytes ok\n";
+    fail_if(svc5(64, 1, (unsafe { rx_stale_success as *u8 }) as usize,
+                 rx_stale_success.len, 0, 0) != rx_stale_success.len);
 
     fail_if(svc5(57, 6, 0, 0, 0, 0) != 0);
     fail_if(svc5(57, 5, 0, 0, 0, 0) != 0);

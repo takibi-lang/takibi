@@ -425,6 +425,12 @@ def test_connected_large_response(client_mac: bytes) -> bool:
     fin_acked = False
     second_response_ok = False
     second_fin_acked = False
+    # GitHub issue #761: after conn-B, B receives a long segment, the fixture
+    # answers it with one byte, then B receives a short one; the fixture
+    # checks the short read carries none of the long segment's tail.
+    rx_stale_long = b"L" * 1000
+    rx_stale_short = b"s" * 10
+    rx_stale_ready_ok = False
     # Generous but bounded: the kernel's own retry budget for one dropped
     # segment is TCP_RETRY_LIMIT(3) * retry_ticks(~200ms) =~ 600ms (see
     # kernel/net/tcp.tkb's accept retry comment) -- 10s covers
@@ -438,6 +444,7 @@ def test_connected_large_response(client_mac: bytes) -> bool:
     # requires a real peer ACK, not merely a retransmit attempt.
     deadline = time.monotonic() + 10.0
     while (len(collected) < want or not second_response_ok or
+           not rx_stale_ready_ok or
            not fin_acked or not second_fin_acked) and time.monotonic() < deadline:
         reply = recv_reply(sock, req, 2.0)
         if reply is None:
@@ -467,6 +474,22 @@ def test_connected_large_response(client_mac: bytes) -> bool:
                     sock.send(build_frame(
                         client_mac, RECONNECT_CLIENT_PORT,
                         second_client_seq, second_server_seq, FLAG_ACK))
+                    sock.send(build_frame(
+                        client_mac, RECONNECT_CLIENT_PORT,
+                        second_client_seq, second_server_seq,
+                        FLAG_ACK | FLAG_PSH, data=rx_stale_long))
+                    second_client_seq += len(rx_stale_long)
+                continue
+            if payload_len > 0 and not rx_stale_ready_ok:
+                payload = reply[54:54 + payload_len]
+                if rseq == second_server_seq and payload == b"k":
+                    second_server_seq += payload_len
+                    rx_stale_ready_ok = True
+                    sock.send(build_frame(
+                        client_mac, RECONNECT_CLIENT_PORT,
+                        second_client_seq, second_server_seq,
+                        FLAG_ACK | FLAG_PSH, data=rx_stale_short))
+                    second_client_seq += len(rx_stale_short)
                 continue
             if ((flags & FLAG_FIN) != 0 and not second_fin_acked and
                     rseq == second_server_seq):
@@ -516,6 +539,9 @@ def test_connected_large_response(client_mac: bytes) -> bool:
         return False
     if not second_response_ok:
         print("  second overlapping connection response mismatch")
+        return False
+    if not rx_stale_ready_ok:
+        print("  second connection never answered the long segment")
         return False
     if not second_fin_acked:
         print("  second overlapping connection FIN was never acknowledged")

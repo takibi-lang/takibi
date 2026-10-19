@@ -1,1 +1,1 @@
-^(linux socket syscalls:|linux socket retransmit queue:|userspace socket partial write:|userspace socket vectored io:)
+^(linux socket syscalls:|linux socket retransmit queue:|userspace socket partial write:|userspace socket vectored io:|userspace socket read:)

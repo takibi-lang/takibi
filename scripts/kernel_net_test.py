@@ -222,6 +222,12 @@ INIT_SOCKET_B_INPUT = b"second-B"
 INIT_SOCKET_B_RESPONSE = b"conn-B\n!"
 INIT_SOCKET_A_RESPONSE = b"HTTP/1.0 200 OK\r\n\r\n"
 INIT_LARGE_RESPONSE = b"Z" * 1461
+# GitHub issue #761: after conn-B, connection B receives a long segment, the
+# fixture answers it with one byte, then B receives a short one; the fixture
+# checks the short read carries none of the long segment's tail.
+INIT_RX_STALE_LONG = b"L" * 1000
+INIT_RX_STALE_SHORT = b"s" * 10
+INIT_RX_STALE_READY = b"k"
 
 
 def checksum_add(data: bytes, sum_in: int = 0) -> int:
@@ -542,8 +548,11 @@ def init_script_fixture(sock: socket.socket) -> bool:
     time.sleep(0.05)
     init_send(sock, first, DATA_ECHO_PAYLOAD)
 
-    expected_b = INIT_SOCKET_B_RESPONSE
+    before_long = INIT_SOCKET_B_RESPONSE
+    expected_b = before_long + INIT_RX_STALE_READY
     expected_a = INIT_SOCKET_A_RESPONSE + INIT_LARGE_RESPONSE
+    long_sent = False
+    short_sent = False
     received_b = bytearray()
     received_a = bytearray()
     next_b = second[2]
@@ -579,6 +588,13 @@ def init_script_fixture(sock: socket.socket) -> bool:
             sock.sendto(build_tcp_frame(
                 dst_port, second[1], next_b, FLAG_ACK,
                 server_port=INIT_SERVER_PORT), (QEMU_HOST, QEMU_PORT))
+            second[2] = next_b
+            if not long_sent and bytes(received_b) == before_long:
+                init_send(sock, second, INIT_RX_STALE_LONG)
+                long_sent = True
+            elif not short_sent and bytes(received_b) == expected_b:
+                init_send(sock, second, INIT_RX_STALE_SHORT)
+                short_sent = True
         else:
             if sequence == next_a:
                 received_a.extend(payload)

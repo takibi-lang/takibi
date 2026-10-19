@@ -1895,8 +1895,10 @@ fn kernel_syscall_socket_evidence() -> bool !{unsafe} {
            kernel_connected_fd_is_open(5) == false &&
            kernel_connected_fd_is_open(6) == false &&
            syscall_test_evidence_connected_close_calls() == 2 &&
-           syscall_test_evidence_connected_read_calls() == 4 &&
-           syscall_test_evidence_connected_write_calls() == 5 &&
+           // GitHub issue #761 added B's long and short reads and its
+           // one-byte answer between them.
+           syscall_test_evidence_connected_read_calls() == 6 &&
+           syscall_test_evidence_connected_write_calls() == 6 &&
            syscall_test_evidence_socket_close_calls() == 1 &&
            kernel_listener_state(4) == UnifiedListenerState::Closed;
     syscall_test_evidence_finish_socket_fixture();

@@ -1546,7 +1546,7 @@ KERNEL_QEMU_NET_WAKE_CONTROL_ELF := $(KERNEL_QEMU_BUILD_DIR)/kernel-net-wake-con
 # check it exercises reverted. scripts/build_qemu_race_window.py names them.
 KERNEL_QEMU_RACE_WINDOWS := 609 603 633 678 651
 # Controls only: a reverted kernel, and no armed one (the ordinary kernel is it).
-KERNEL_QEMU_RACE_CONTROLS := 635 705 705-missed-arrival 651-no-peer 651-resume-old 830-core0
+KERNEL_QEMU_RACE_CONTROLS := 635 705 705-missed-arrival 651-no-peer 651-resume-old 830-core0 761-unbounded
 KERNEL_QEMU_RACE_WINDOW_ELFS := $(foreach w,$(KERNEL_QEMU_RACE_WINDOWS),$(KERNEL_QEMU_BUILD_DIR)/kernel-race-$(w)-armed.elf $(KERNEL_QEMU_BUILD_DIR)/kernel-race-$(w)-reverted.elf) $(foreach w,$(KERNEL_QEMU_RACE_CONTROLS),$(KERNEL_QEMU_BUILD_DIR)/kernel-race-$(w)-reverted.elf)
 KERNEL_QEMU_LINK_LD      := $(KERNEL_DIR)/arch/arm64/boot/link_qemu.ld
 KERNEL_QEMU_ELF          := $(KERNEL_QEMU_BUILD_DIR)/kernel.elf
@@ -2089,7 +2089,7 @@ _kernelcheck-stack-overflow-qemu:
 ## it is crossed on every run. Armed, the ordinary suite must pass; with the
 ## check the window exercises reverted, the boot must fail-stop with that
 ## check's activity.
-kernelcheck-race-window-qemu: kernelcheck-race-window-609-qemu kernelcheck-race-window-603-qemu kernelcheck-race-window-633-qemu kernelcheck-race-window-635-qemu kernelcheck-race-window-705-qemu kernelcheck-race-window-678-qemu kernelcheck-race-window-830-qemu
+kernelcheck-race-window-qemu: kernelcheck-race-window-609-qemu kernelcheck-race-window-603-qemu kernelcheck-race-window-633-qemu kernelcheck-race-window-635-qemu kernelcheck-race-window-705-qemu kernelcheck-race-window-678-qemu kernelcheck-race-window-830-qemu kernelcheck-race-window-761-qemu
 
 ## One lane per window, so an aggregate runs them side by side: each is
 ## two boots in sequence, and the two together as one lane were the
@@ -2143,6 +2143,16 @@ _kernelcheck-probe-ticks-qemu:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_RACE_WINDOW=651 KERNEL_QEMU_RACE_WINDOW_REQUIRE_FAILURE=1 KERNEL_QEMU_RACE_WINDOW_SIGNATURE='^console contention stage: secondary-never-ready$$' KERNEL_QEMU_SERIAL_PORT=18513 KERNEL_QEMU_QMP_PORT=18514 KERNEL_QEMU_NETDEV_LOCAL_PORT=18515 KERNEL_QEMU_NETDEV_REMOTE_PORT=18516 bash scripts/run_kernel_race_window_qemutest.sh
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_probe_refusals_qemutest.sh
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_PROBE_REFUSALS_CONTROL=old-baseline bash scripts/run_kernel_probe_refusals_qemutest.sh
+
+# GitHub issue #761: a functional negative control. A connected read that
+# copies the requested length instead of the segment's must fail the
+# fixture's long-then-short read.
+.PHONY: kernelcheck-race-window-761-qemu _kernelcheck-race-window-761-qemu
+kernelcheck-race-window-761-qemu: kernelbuild-check
+	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-race-window-761-qemu
+
+_kernelcheck-race-window-761-qemu:
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_RACE_WINDOW=761-unbounded KERNEL_QEMU_RACE_WINDOW_ARMED=skip KERNEL_QEMU_RACE_WINDOW_REQUIRE_FAILURE=1 KERNEL_QEMU_RACE_WINDOW_SIGNATURE='^userspace syscall fixture: failed' KERNEL_QEMU_SERIAL_PORT=18622 KERNEL_QEMU_QMP_PORT=18623 KERNEL_QEMU_NETDEV_LOCAL_PORT=18624 KERNEL_QEMU_NETDEV_REMOTE_PORT=18625 bash scripts/run_kernel_race_window_qemutest.sh
 
 # GitHub issue #830: a functional negative control. The NIC fixture pinned
 # to core 0 must fail the pinned-phase check.
@@ -2314,7 +2324,7 @@ KERNELCHECK_QEMU_LANES := kernelcheck-qemu kernelcheck-qemu-debug \
 	kernelcheck-affinity-gdb-qemu kernelcheck-race-window-609-qemu \
 	kernelcheck-race-window-603-qemu kernelcheck-race-window-633-qemu \
 	kernelcheck-race-window-635-qemu kernelcheck-race-window-705-qemu kernelcheck-race-window-678-qemu \
-	kernelcheck-race-window-830-qemu \
+	kernelcheck-race-window-830-qemu kernelcheck-race-window-761-qemu \
 	kernelcheck-debug-return-abi-qemu kernelcheck-probe-ticks-qemu kernelcheck-console-gdb-qemu kernelcheck-churn-gdb-qemu \
 	kernelcheck-profile-qemu
 

@@ -872,18 +872,24 @@ fn tcp_frame_bytes(slot: borrow RegionSlot(NetFrame)[p, k])
 // Copies `source` to the start of one of the connection's frames: the
 // whole of a short access, held and given back here. False if the source
 // is longer than a frame or the frame is missing.
+// GitHub issue #761: must_use, so a caller cannot record a received length
+// for bytes that never reached the frame. A length recorded after a failed
+// fill would let the next read copy out whatever an earlier, longer
+// segment left there.
+must_use variant TcpFrameFill { Filled; NotFilled; }
+
 fn tcp_connection_frame_fill(owner: borrow TcpConnectionOwner[connection_pool, connection],
                              role: TcpFrameRole, source: borrow []u8)
-        -> bool !{unsafe} {
+        -> TcpFrameFill !{unsafe} {
     let length: usize = source.len;
-    if (length > 1514) { return false; }
+    if (length > 1514) { return TcpFrameFill::NotFilled; }
     let Place::Full(slot) = tcp_connection_frame_hold(owner, role) else {
-        Place::Empty => { tcp_frame_missing(); return false; }
+        Place::Empty => { tcp_frame_missing(); return TcpFrameFill::NotFilled; }
     };
     let frame = tcp_frame_bytes(slot);
     slice_copy(frame[0..<length], source);
     tcp_connection_frame_unhold(owner, role, slot);
-    return true;
+    return TcpFrameFill::Filled;
 }
 
 // A hold that found no frame: a connection always has its two from
@@ -3002,16 +3008,21 @@ fn kernel_tcp_accept_step(owner: borrow TcpConnectionOwner[connection_pool, conn
                                             payload_length <= 1460) {
                                             let source_payload_end: usize =
                                                 54 + payload_length;
-                                            let _filled: bool =
-                                                tcp_connection_frame_fill(
+                                            match tcp_connection_frame_fill(
                                                     owner, TcpFrameRole::Rx,
-                                                    frame[54..<source_payload_end]);
-                                            conn.rcv_nxt = conn.rcv_nxt +
-                                                (payload_length as u32);
-                                            conn.received_length = payload_length;
-                                            conn.socket_buffer_length =
-                                                payload_length;
-                                            conn.socket_buffer_offset = 0;
+                                                    frame[54..<source_payload_end]) {
+                                                // Not filled: nothing is recorded or acknowledged, so the
+                                                // peer retransmits the segment (GitHub issue #761).
+                                                TcpFrameFill::NotFilled => {}
+                                                TcpFrameFill::Filled => {
+                                                    conn.rcv_nxt = conn.rcv_nxt +
+                                                        (payload_length as u32);
+                                                    conn.received_length = payload_length;
+                                                    conn.socket_buffer_length =
+                                                        payload_length;
+                                                    conn.socket_buffer_offset = 0;
+                                                }
+                                            }
                                         }
                                     }
                                     if (tcp_injected_syn_pending &&
@@ -3205,15 +3216,20 @@ fn tcp_route_received_segment(current_address: usize,
                                 if (payload_length > 0) {
                                     let source_payload_end: usize =
                                         54 + payload_length;
-                                    let _filled: bool =
-                                        tcp_connection_frame_fill(
+                                    match tcp_connection_frame_fill(
                                             target_owner, TcpFrameRole::Rx,
-                                            frame[54..<source_payload_end]);
-                                    target.rcv_nxt = target.rcv_nxt +
-                                        (payload_length as u32);
-                                    target.received_length = payload_length;
-                                    target.socket_buffer_length = payload_length;
-                                    target.socket_buffer_offset = 0;
+                                            frame[54..<source_payload_end]) {
+                                        // Not filled: nothing is recorded or acknowledged, so the
+                                        // peer retransmits the segment (GitHub issue #761).
+                                        TcpFrameFill::NotFilled => {}
+                                        TcpFrameFill::Filled => {
+                                            target.rcv_nxt = target.rcv_nxt +
+                                                (payload_length as u32);
+                                            target.received_length = payload_length;
+                                            target.socket_buffer_length = payload_length;
+                                            target.socket_buffer_offset = 0;
+                                        }
+                                    }
                                 }
                                 if (tcp_injected_syn_pending &&
                                     tcp_injected_syn_retransmitted) {
@@ -3243,15 +3259,20 @@ fn tcp_route_received_segment(current_address: usize,
                                     tcp_connection_put(target_owner);
                                     return TcpReceiveRouteResult::Ack;
                                 }
-                                let _filled: bool =
-                                    tcp_connection_frame_fill(
+                                match tcp_connection_frame_fill(
                                         target_owner, TcpFrameRole::Rx,
-                                        frame[54..<source_payload_end]);
-                                target.rcv_nxt = target.rcv_nxt +
-                                    (payload_length as u32);
-                                target.received_length = payload_length;
-                                target.socket_buffer_length = payload_length;
-                                target.socket_buffer_offset = 0;
+                                        frame[54..<source_payload_end]) {
+                                    // Not filled: nothing is recorded or acknowledged, so the
+                                    // peer retransmits the segment (GitHub issue #761).
+                                    TcpFrameFill::NotFilled => {}
+                                    TcpFrameFill::Filled => {
+                                        target.rcv_nxt = target.rcv_nxt +
+                                            (payload_length as u32);
+                                        target.received_length = payload_length;
+                                        target.socket_buffer_length = payload_length;
+                                        target.socket_buffer_offset = 0;
+                                    }
+                                }
                                 if (tcp_ack_each_stream_segment) {
                                     tcp_split_request_segments =
                                         tcp_split_request_segments + 1;

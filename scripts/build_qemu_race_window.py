@@ -69,6 +69,19 @@ WINDOWS = {
                   '        }\n'
                   '    }\n'),
     },
+    # GitHub issue #761's negative control: a connected read copies what the
+    # caller asked for instead of what the segment holds, in both the direct
+    # and the buffered path. The fixture's short read after a long segment
+    # must then see the long segment's tail and fail.
+    "761-unbounded": {
+        "spin": None,
+        "check": [("kernel/syscall.tkb",
+                   "                    let mut amount: usize = received;\n",
+                   "                    let mut amount: usize = requested;\n"),
+                  ("kernel/syscall.tkb",
+                   "                   if (buffered > available) { buffered = available; }\n",
+                   "")],
+    },
     # GitHub issue #830's negative control: the boot fixture pins the NIC SPI
     # to core 0 instead of a peer, which is where every device interrupt
     # went before. The pinned-phase check must refuse it.
