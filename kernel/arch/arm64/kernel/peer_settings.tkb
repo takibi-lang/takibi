@@ -195,6 +195,13 @@ fn peer_settings() {
         svc5(KILL_SYSCALL, child, 9, 0, 0, 0);
         peer_settings_fail(bs"peer-settings: the raw settings were refused\n");
     }
+    // GitHub issue #841: the change wakes the reader on the secondary at
+    // once, and it used to be able to read and report before this process
+    // reported operation 3, which the kernel then refused and the boot
+    // stalled. Twenty naps make that order the one every boot takes, so the
+    // kernel's acceptance of it is checked each run (with the fix reverted,
+    // kernelcheck-qemu-main stalls into DDB on every boot).
+    for widen: usize in 0..<20 { peer_settings_nap(); }
     svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_SETTINGS_TAG, 3, 0, 0, 0);
     let mut verdict: usize = 0;
     for poll: usize in 0..<PEER_SETTINGS_POLLS {

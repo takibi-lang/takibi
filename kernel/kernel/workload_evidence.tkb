@@ -1708,11 +1708,29 @@ fn workload_settings_wake_progress(operation: usize, count: usize,
                 uart_put_udec(terminal_canonical() as usize);
                 kernel_boot_log("\n");
                 answer = 3;
+            } else if (secondary_tick_value() -
+                           workload_settings_wake.applied_tick >=
+                           SETTINGS_WAKE_GIVE_UP_TICKS) {
+                // GitHub issue #841: neither asleep nor reported. Before
+                // this arm the parent asked forever and the boot stalled
+                // into DDB with no line naming the fixture.
+                workload_settings_wake.read_bad = true;
+                kernel_boot_log(
+                    "workload: settings wake FAILED: the reader left its read without reporting what it read\n");
+                answer = 3;
             }
         }
     } else if (operation == 5) {
+        // GitHub issue #841: asleep_reported, not applied. The parent
+        // switches to raw and only then reports operation 3, and the change
+        // wakes the reader on the secondary at once: it can read and report
+        // here before the parent's operation 3 lands. Refusing it then
+        // left the reader exited with nothing recorded and the parent
+        // asking for a verdict forever. The parent changes the settings
+        // only after it was told the reader is asleep, so a report after
+        // that point is the reader the change woke.
         if (pid == workload_settings_wake.reader_pid &&
-            workload_settings_wake.applied &&
+            workload_settings_wake.asleep_reported &&
             workload_settings_wake.read_ok == false) {
             if (count == SETTINGS_WAKE_BYTES &&
                 checksum == SETTINGS_WAKE_CHECKSUM) {
