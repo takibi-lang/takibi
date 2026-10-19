@@ -99,6 +99,10 @@ EXEMPT = {
     "lib/diagnostic_ring.tkb":
         "per-CPU rings published through GitHub issue #299's protocol; the "
         "commit word is an atomic and the reader re-checks it",
+    "printk/log_ring_trace.tkb":
+        "the log-ring trace window (#656): each CPU writes only its own "
+        "buffer, indexed by cpu_id(); the window flag is an atomic; the "
+        "reader fields are written by core 0 around its own read",
     "kernel/protocol_trace.tkb":
         "every write is made holding the process-run lock, and the report "
         "reads the buffer only after a hold has closed the window",

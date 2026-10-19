@@ -20,6 +20,12 @@
 (* consistent; the AArch64 orderings that justify that are the litmus     *)
 (* tests (kernel/models/litmus/LogRing*.litmus), not this check.          *)
 (*                                                                         *)
+(* Each event also carries the system counter read before and after its   *)
+(* atomic access (t0, t1). The counter is one per system, so an event     *)
+(* whose interval ends before another's begins happened first: InOrder   *)
+(* keeps TLC to the interleavings that agree, which is what makes a reader *)
+(* stream next to the writers checkable (#656, maintainer option A).      *)
+(*                                                                         *)
 (* scripts/validate_log_ring_trace.py only parses: it writes the         *)
 (* window as the module LogRingTraceData, sequences shifted by a         *)
 (* multiple of the slot count (which keeps every slot index and order),   *)
@@ -140,10 +146,17 @@ ReaderStep(e) ==
        /\ \/ e.out = "kept" /\ e.seq \in returned'
           \/ e.out = "lost" /\ e.seq \notin returned' /\ Lost(e.seq)
 
+\* No other stream's next event ended before e began. A stream's stamps only
+\* grow, so its next event is the only one that could have.
+InOrder(s, e) ==
+    \A o \in Streams \ {s} :
+        pos[o] < Len(Trace[o]) => ~(Trace[o][pos[o] + 1].t1 + TraceMargin < e.t0)
+
 \* Stream 0 is the reader; stream c + 1 is CPU c, LogRing's writer c + 1.
 Next ==
     \E s \in Streams :
         /\ pos[s] < Len(Trace[s])
+        /\ InOrder(s, Trace[s][pos[s] + 1])
         /\ pos' = [pos EXCEPT ![s] = pos[s] + 1]
         /\ l' = l + 1
         /\ LET e == Trace[s][pos[s] + 1]

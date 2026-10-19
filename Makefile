@@ -445,6 +445,7 @@ KERNEL_UNUSED_CHECKED := \
 	kernel/net/wire.tkb \
 	kernel/printk/console_lock.tkb \
 	kernel/printk/log.tkb \
+	kernel/printk/log_ring_trace.tkb \
 	kernel/printk/number.tkb
 KERNEL_UNUSED_CHECKED_QEMU := \
 	kernel/platform/qemu/usb_disk_absent.tkb \

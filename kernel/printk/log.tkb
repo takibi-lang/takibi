@@ -10,6 +10,7 @@ use "kernel/printk/number.tkb";
 use "kernel/drivers/serial/terminal.tkb";
 use "kernel/drivers/serial/terminal_echo.tkb";
 use "kernel/printk/console_lock.tkb";
+use "kernel/printk/log_ring_trace.tkb";
 
 // GitHub issue #613 (docs/LOG_RING_DESIGN.md, option B): the retained ring is
 // fixed slots with one state word each, written through a reservation token
@@ -190,18 +191,33 @@ private fn kernel_log_previous_done(current: usize, seq: usize) -> bool {
     return kernel_log_word_seq(current) < seq;
 }
 
-// LogRing.tla Claim and Refuse, for one slot: compare-swap the observed
-// previous occupant to (seq, Reserved). The observed value is what decides;
-// a failed swap is a refusal and never a reason to wait.
-private fn kernel_log_claim(seq: usize, cpu: usize, span: usize) -> bool !{unsafe} {
+// LogRing.tla Claim and Refuse, for slot `index` of the record of `span`
+// slots at `first`: compare-swap the observed previous occupant to (seq,
+// Reserved). The observed value is what decides; a failed swap is a refusal
+// and never a reason to wait. A refusal returns the word that refused and
+// the trace stamp taken before the access that saw it (log_ring_trace.tkb):
+// the caller records the Refuse once the claimed slots are discarded, which
+// LogRing.tla does in the same step.
+private fn kernel_log_claim(first: usize, index: usize, span: usize, cpu: usize)
+        -> (bool, usize, usize) !{unsafe} {
+    let seq: usize = first + index;
+    let mut mark: usize = 0;
+    if (index == 0) { mark = span; }
     let slot: {0..<KERNEL_LOG_SLOT_COUNT as usize} = kernel_log_slot_of(seq);
+    let seen_at: usize = log_ring_trace_t0();
     let current: usize = kernel_log_observe(&kernel_log_slots[slot]);
-    if (kernel_log_previous_done(current, seq) == false) { return false; }
+    if (kernel_log_previous_done(current, seq) == false) {
+        return (false, current, seen_at);
+    }
+    let t0: usize = log_ring_trace_t0();
     match kernel_log_cas(&kernel_log_slots[slot], current,
-                         kernel_log_word(seq, cpu, span,
+                         kernel_log_word(seq, cpu, mark,
                                          KERNEL_LOG_STATE_RESERVED)) {
-        CasResult::Swapped => { return true; }
-        CasResult::Observed(_) => { return false; }
+        CasResult::Swapped => {
+            log_ring_trace_writer(t0, LOG_RING_TRACE_CLAIM, first, span, index, current);
+            return (true, current, t0);
+        }
+        CasResult::Observed(now) => { return (false, now, t0); }
     }
 }
 
@@ -247,26 +263,35 @@ private fn kernel_log_reserve(span: usize) -> KernelLogReserve !{unsafe} {
     let mut first: usize = kernel_log_observe(&kernel_log_head);
     let mut reserved: bool = false;
     while (reserved == false) {
+        let t0: usize = log_ring_trace_t0();
         match kernel_log_cas(&kernel_log_head, first, first + span) {
-            CasResult::Swapped => { reserved = true; }
+            CasResult::Swapped => {
+                reserved = true;
+                log_ring_trace_writer(t0, LOG_RING_TRACE_RESERVE, first, span, 0, 0);
+            }
             CasResult::Observed(now) => { first = now; }
         }
     }
     let mut claimed: usize = 0;
     let mut refused: bool = false;
+    let mut refused_word: usize = 0;
+    let mut refused_at: usize = 0;
     for index: usize in 0..<KERNEL_LOG_RECORD_SLOTS {
         if (index < span && refused == false) {
-            let mut mark: usize = 0;
-            if (index == 0) { mark = span; }
-            if (kernel_log_claim(first + index, cpu, mark)) {
+            let (taken, seen, at) = kernel_log_claim(first, index, span, cpu);
+            if (taken) {
                 claimed = index + 1;
             } else {
                 refused = true;
+                refused_word = seen;
+                refused_at = at;
             }
         }
     }
     if (refused) {
         kernel_log_discard_slots(first, cpu, span, claimed);
+        log_ring_trace_writer(refused_at, LOG_RING_TRACE_REFUSE, first, span, claimed,
+                              refused_word);
         kernel_log_note_given_up(first, span);
         return KernelLogReserve::Refused;
     }
@@ -314,8 +339,18 @@ private fn kernel_log_core_here() -> {0..<KERNEL_MAX_CORES as usize} {
 private fn kernel_log_write(token: borrow LogReservation[0],
                             core: {0..<KERNEL_MAX_CORES as usize}) !{unsafe} {
     let length: usize = kernel_log_core_state[core].length;
+    // LogRing.tla Write is per slot; the last slot's Write ends with the
+    // tick and metadata stores.
+    let mut last_at: usize = 0;
+    let mut last_index: usize = 0;
     for index: usize in 0..<KERNEL_LOG_RECORD_SLOTS {
         if (index < token.span) {
+            if (index != 0) {
+                log_ring_trace_writer(last_at, LOG_RING_TRACE_WRITE, token.seq,
+                                      token.span, last_index, 0);
+            }
+            last_at = log_ring_trace_t0();
+            last_index = index;
             let slot: {0..<KERNEL_LOG_SLOT_COUNT as usize} =
                 kernel_log_slot_of(token.seq + index);
             for word: usize in 0..<KERNEL_LOG_SLOT_WORDS {
@@ -342,6 +377,8 @@ private fn kernel_log_write(token: borrow LogReservation[0],
     if (kernel_log_core_state[core].continued) { meta = meta | KERNEL_LOG_META_CONTINUED; }
     kernel_log_publish(&kernel_log_ticks[first], kernel_log_core_state[core].tick as usize);
     kernel_log_publish(&kernel_log_meta[first], meta);
+    log_ring_trace_writer(last_at, LOG_RING_TRACE_WRITE, token.seq, token.span,
+                          last_index, 0);
 }
 
 // LogRing.tla Commit (and CommitLost): release compare-swap each slot from
@@ -355,13 +392,19 @@ private fn kernel_log_commit(token: sink LogReservation[0]) !{unsafe} {
             let mut mark: usize = 0;
             if (index == 0) { mark = token.span; }
             let slot: {0..<KERNEL_LOG_SLOT_COUNT as usize} = kernel_log_slot_of(seq);
+            let t0: usize = log_ring_trace_t0();
             match kernel_log_cas(&kernel_log_slots[slot],
                                  kernel_log_word(seq, token.cpu, mark,
                                                  KERNEL_LOG_STATE_RESERVED),
                                  kernel_log_word(seq, token.cpu, mark,
                                                  KERNEL_LOG_STATE_COMMITTED)) {
-                CasResult::Swapped => { }
-                CasResult::Observed(_) => {
+                CasResult::Swapped => {
+                    log_ring_trace_writer(t0, LOG_RING_TRACE_COMMIT, token.seq,
+                                          token.span, index, 0);
+                }
+                CasResult::Observed(now) => {
+                    log_ring_trace_writer(t0, LOG_RING_TRACE_COMMITLOST, token.seq,
+                                          token.span, index, now);
                     atomic_word_fetch_add(&kernel_log_commit_lost, 1);
                 }
             }
@@ -1412,9 +1455,13 @@ must_use variant KernelLogSlotView {
 }
 
 // LogRing.tla ReadHead's load: the first slot of sequence `seq`.
-private fn kernel_log_slot_view(seq: usize) -> KernelLogSlotView !{unsafe} {
+private fn kernel_log_slot_load(seq: usize) -> usize !{unsafe} {
     let slot: {0..<KERNEL_LOG_SLOT_COUNT as usize} = kernel_log_slot_of(seq);
-    let word: usize = kernel_log_observe(&kernel_log_slots[slot]);
+    return kernel_log_observe(&kernel_log_slots[slot]);
+}
+
+// ReadHead's classification of the `word` that load saw.
+private fn kernel_log_slot_view(seq: usize, word: usize) -> KernelLogSlotView {
     let state: usize = kernel_log_word_state(word);
     if (state == KERNEL_LOG_STATE_FREE) {
         return KernelLogSlotView::Unreported;
@@ -1433,10 +1480,15 @@ private fn kernel_log_slot_view(seq: usize) -> KernelLogSlotView !{unsafe} {
     return KernelLogSlotView::Readable(seen);
 }
 
-// LogRing.tla HeadCheck's re-load: the first slot still holds what was seen.
-private fn kernel_log_still(seen: KernelLogUnvalidated) -> bool !{unsafe} {
+// LogRing.tla HeadCheck's re-load: what the first slot holds now. The copy
+// is kept only when it is still what was seen (kernel_log_still).
+private fn kernel_log_reload(seen: KernelLogUnvalidated) -> usize !{unsafe} {
     let slot: {0..<KERNEL_LOG_SLOT_COUNT as usize} = kernel_log_slot_of(seen.seq);
-    return kernel_log_observe(&kernel_log_slots[slot]) == seen.word;
+    return kernel_log_observe(&kernel_log_slots[slot]);
+}
+
+private fn kernel_log_still(seen: KernelLogUnvalidated, now: usize) -> bool {
+    return now == seen.word;
 }
 
 private fn kernel_log_seen_span(seen: KernelLogUnvalidated) -> usize {
@@ -1488,15 +1540,32 @@ private fn kernel_log_snapshot_record(seq: usize, end: usize, second_check: bool
         -> KernelLogRecordCopy !{unsafe} {
     let snapshot: *KernelLogSnapshot = kernel_log_snapshot_here();
     let mark: usize = snapshot.length;
-    let seen: KernelLogUnvalidated = match kernel_log_slot_view(seq) {
+    // Each load below is stamped for log_ring_trace.tkb, which records it
+    // only inside a window (`at` is 0 otherwise).
+    let head_at: usize = log_ring_trace_t0();
+    let head_word: usize = kernel_log_slot_load(seq);
+    let seen: KernelLogUnvalidated = match kernel_log_slot_view(seq, head_word) {
         KernelLogSlotView::Readable(observed) => { observed }
-        KernelLogSlotView::Unreported => { return KernelLogRecordCopy::Lost(1); }
-        KernelLogSlotView::WriterReported => { return KernelLogRecordCopy::Skipped(1); }
+        KernelLogSlotView::Unreported => {
+            log_ring_trace_reader(head_at, LOG_RING_TRACE_HEAD, seq, head_word,
+                                  LOG_RING_TRACE_OUT_LOST, end);
+            return KernelLogRecordCopy::Lost(1);
+        }
+        KernelLogSlotView::WriterReported => {
+            log_ring_trace_reader(head_at, LOG_RING_TRACE_HEAD, seq, head_word,
+                                  LOG_RING_TRACE_OUT_OTHER, end);
+            return KernelLogRecordCopy::Skipped(1);
+        }
     };
     let span: usize = kernel_log_seen_span(seen);
     if (span > KERNEL_LOG_RECORD_SLOTS || seq + span > end) {
+        log_ring_trace_reader(head_at, LOG_RING_TRACE_HEAD, seq, head_word,
+                              LOG_RING_TRACE_OUT_LOST, end);
         return KernelLogRecordCopy::Lost(1);
     }
+    log_ring_trace_reader(head_at, LOG_RING_TRACE_HEAD, seq, head_word,
+                          LOG_RING_TRACE_OUT_GO, end);
+    let copy_at: usize = log_ring_trace_t0();
     let first: {0..<KERNEL_LOG_SLOT_COUNT as usize} = kernel_log_slot_of(seq);
     let meta: usize = kernel_log_observe(&kernel_log_meta[first]);
     let line_tick: usize = kernel_log_observe(&kernel_log_ticks[first]);
@@ -1525,8 +1594,15 @@ private fn kernel_log_snapshot_record(seq: usize, end: usize, second_check: bool
             let expected: usize = kernel_log_word(seq + index, kernel_log_seen_cpu(seen),
                                                   0, KERNEL_LOG_STATE_COMMITTED);
             // ContCopy's load: the continuation names this record.
-            if (index != 0 &&
-                kernel_log_observe(&kernel_log_slots[slot]) != expected) {
+            let mut cont_at: usize = 0;
+            let mut cont_word: usize = expected;
+            if (index != 0) {
+                cont_at = log_ring_trace_t0();
+                cont_word = kernel_log_observe(&kernel_log_slots[slot]);
+            }
+            if (cont_word != expected) {
+                log_ring_trace_reader(cont_at, LOG_RING_TRACE_CCOPY, seq + index, cont_word,
+                                      LOG_RING_TRACE_OUT_LOST, end);
                 intact = false;
             } else {
                 let from: usize = index * KERNEL_LOG_SLOT_BYTES;
@@ -1536,12 +1612,30 @@ private fn kernel_log_snapshot_record(seq: usize, end: usize, second_check: bool
                     kernel_log_copy_slot_text(slot, to - from, seq,
                                               overwrite_mid_copy && index == 0);
                 }
+                if (index == 0) {
+                    log_ring_trace_reader(copy_at, LOG_RING_TRACE_COPY, seq, 0, 0, end);
+                } else {
+                    log_ring_trace_reader(cont_at, LOG_RING_TRACE_CCOPY, seq + index,
+                                          cont_word, LOG_RING_TRACE_OUT_GO, end);
+                }
                 // HeadCheck / ContCheck: the word is still what it was.
                 if (second_check) {
+                    let check_at: usize = log_ring_trace_t0();
                     if (index == 0) {
-                        intact = kernel_log_still(seen);
+                        let now: usize = kernel_log_reload(seen);
+                        intact = kernel_log_still(seen, now);
+                        let mut out: usize = LOG_RING_TRACE_OUT_LOST;
+                        if (intact && span == 1) { out = LOG_RING_TRACE_OUT_GO; }
+                        if (intact && span != 1) { out = LOG_RING_TRACE_OUT_OTHER; }
+                        log_ring_trace_reader(check_at, LOG_RING_TRACE_CHECK, seq, now,
+                                              out, end);
                     } else {
-                        intact = kernel_log_observe(&kernel_log_slots[slot]) == expected;
+                        let now: usize = kernel_log_observe(&kernel_log_slots[slot]);
+                        intact = now == expected;
+                        let mut out: usize = LOG_RING_TRACE_OUT_LOST;
+                        if (intact) { out = LOG_RING_TRACE_OUT_GO; }
+                        log_ring_trace_reader(check_at, LOG_RING_TRACE_CCHECK, seq + index,
+                                              now, out, end);
                     }
                 }
             }

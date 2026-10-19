@@ -115,6 +115,24 @@ def main() -> int:
     ok &= refusal("a reader outcome the kind lacks",
                   window(["r begin 7 9", "r head 7 0x70012 kept"]),
                   "malformed event")
+    ok &= refusal("a reader word wider than the model's K",
+                  window(["r begin 7 9", "r head 7 0x70032 copy"]),
+                  "outside LogRing.tla's bound")
+    ok &= refusal("a malformed stamp", window(["w0 reserve 8 1 @12"]),
+                  "malformed stamp")
+    ok &= refusal("a stamped begin", window(["r begin 7 9 @1+1"]),
+                  "begin carries no stamp")
+    ok &= refusal("a stream's stamps going backwards",
+                  window(["w0 reserve 8 1 @100+5", "w0 claim 8 1 0 0 @90+1"]),
+                  "go backwards")
+    stamped = V.parse(window(["w0 reserve 8 1 @1000+5",
+                              "w0 claim 8 1 0 0"]))
+    when = V.stamps(stamped)
+    first, second = stamped.streams[1]
+    ok &= holds_true("stamps are rebased and an unstamped event overlaps "
+                     "everything", when[id(first)] == (1, 6)
+                     and when[id(second)] == (0, V.UNSTAMPED),
+                     f"({when[id(first)]}, {when[id(second)]})")
 
     # The opening state conventions.
     base, init = V.opening(V.parse(window(
@@ -165,7 +183,8 @@ def main() -> int:
     report_pass(
         "validate-log-ring-trace controls",
         "the parser refuses a missing, doubled, cut, lossy or miscounted "
-        "window and malformed, out-of-bound or misplaced events; the opening "
+        "window, malformed, out-of-bound or misplaced events and malformed "
+        "or backward stamps; stamps are rebased; the opening "
         "state conventions hold; LogRing.tla's Next, LogRingTrace.tla's "
         "labels and --without are one list, and the trace spec matches "
         "every event kind the parser reads",

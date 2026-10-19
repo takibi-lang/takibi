@@ -556,6 +556,9 @@ python3 "$REPO_ROOT/scripts/validate_kernel_dmesg_timestamps.py" \
 # GitHub issue #606: /bin/protocol-trace's window of the stack-ownership
 # protocol, checked by TLC against kernel/models/StackOwnershipTrace.tla.
 python3 "$REPO_ROOT/scripts/validate_protocol_trace.py" "$UART_LOG"
+# GitHub issue #656: the log ring's window that follows it, checked by TLC
+# against kernel/models/LogRing.tla through LogRingTrace.tla.
+python3 "$REPO_ROOT/scripts/validate_log_ring_trace.py" "$UART_LOG"
 python3 "$REPO_ROOT/scripts/profile_kernel_workload.py" collect \
     --uart-log "$UART_LOG" --output "$ARTIFACT_DIR/busy-pair-profile.json" \
     --target rpi5

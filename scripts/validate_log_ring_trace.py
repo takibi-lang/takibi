@@ -52,6 +52,13 @@ WORD is the raw slot word, seq << 16 | cpu << 8 | span << 4 | state
 (0 Free, 1 Reserved, 2 Committed, 3 Discarded), decimal or 0x hex. Lines
 of one stream are in that stream's program order.
 
+Every event but `r begin` may end in `@T0+D`: the system counter read
+before its atomic access (T0) and how much later it was read again after
+it (D). The counter is one per system, so an event whose interval ends
+before another's begins (by more than COUNTER_MARGIN ticks) happened
+first, and TLC is held to interleavings that agree (LogRingTrace.tla,
+InOrder). An event without one is ordered by nothing but its stream.
+
 Usage: validate_log_ring_trace.py UART_LOG [--without ACTION]
        [--model NAME=BOOL ...]
 Exit code only (0 = pass, 1 = fail).
@@ -93,6 +100,12 @@ FIXED = {"TRUST_RESERVED": False, "CHECK_PREV": True, "CONT_SEQ": True,
          "REPORT_REFUSAL": True}
 # LogRing.tla's K: the widest record the model has.
 MODEL_K = 2
+# Counter ticks of slack before one interval is taken to precede another.
+COUNTER_MARGIN = 2
+# An unstamped event's interval: [0, UNSTAMPED], which overlaps everything.
+# TLC's integers are 32-bit, so stamps are rebased and must stay below it.
+UNSTAMPED = 1 << 30
+STAMP_RE = re.compile(r"^@(\d+)\+(\d+)$")
 
 # What the window's probe makes happen on every run, whatever the timing.
 # Refusals, lost commits and two-slot records depend on timing and line
@@ -147,6 +160,8 @@ class Event:
     word: Word = None
     out: str = ""
     line: str = ""
+    t0: int = None       # counter before; None when the line had no stamp
+    t1: int = None       # counter after
 
 
 @dataclasses.dataclass
@@ -193,7 +208,17 @@ def parse(lines):
         fields = text.split()
         if len(fields) < 2:
             raise TraceError(f"malformed event: {text}")
+        stamp = None
+        if fields[-1].startswith("@"):
+            match = STAMP_RE.match(fields[-1])
+            if not match:
+                raise TraceError(f"malformed stamp: {text}")
+            stamp = (int(match.group(1)), int(match.group(1)) +
+                     int(match.group(2)))
+            fields = fields[:-1]
         who, kind, args = fields[0], fields[1], fields[2:]
+        if stamp is not None and who == "r" and kind == "begin":
+            raise TraceError(f"the reader's begin carries no stamp: {text}")
         if who == "r":
             if kind == "begin":
                 if window.reader_first is not None or window.streams[0]:
@@ -213,8 +238,14 @@ def parse(lines):
             if len(args) != want:
                 raise TraceError(f"malformed event: {text}")
             event = Event(0, kind, seq=number(args[0], text), line=text)
+            if stamp:
+                event.t0, event.t1 = stamp
             if outs is not None:
                 event.word = decode(args[1])
+                if event.word.span > MODEL_K:
+                    raise TraceError(
+                        f"a record of {event.word.span} slot(s) is outside "
+                        f"LogRing.tla's bound K = {MODEL_K}: {text}")
                 if args[2] not in outs:
                     raise TraceError(f"malformed event: {text}")
                 event.out = args[2]
@@ -235,6 +266,8 @@ def parse(lines):
             raise TraceError(f"a record of {k} slot(s) is outside "
                              f"LogRing.tla's bound K = {MODEL_K}: {text}")
         event = Event(cpu + 1, kind, first=first, k=k, seq=first, line=text)
+        if stamp:
+            event.t0, event.t1 = stamp
         if want >= 3:
             event.i = number(args[2], text)
             if event.i >= k:
@@ -243,7 +276,31 @@ def parse(lines):
         if want == 4:
             event.word = decode(args[3])
         window.streams[cpu + 1].append(event)
+    for stream, items in window.streams.items():
+        stamped = [e for e in items if e.t0 is not None]
+        for before, after in zip(stamped, stamped[1:]):
+            if after.t0 < before.t1:
+                raise TraceError("a stream's stamps go backwards: "
+                                 f"{before.line} then {after.line}")
     return window
+
+
+def stamps(window):
+    """{id(event): (t0, t1)}, rebased so TLC's integers hold them."""
+    every = [e for es in window.streams.values() for e in es]
+    stamped = [e for e in every if e.t0 is not None]
+    low = min((e.t0 for e in stamped), default=0) - 1
+    out = {}
+    for e in every:
+        if e.t0 is None:
+            out[id(e)] = (0, UNSTAMPED)
+            continue
+        t0, t1 = e.t0 - low, e.t1 - low
+        if t1 >= UNSTAMPED:
+            raise TraceError(f"the window spans more than {UNSTAMPED} counter "
+                             f"ticks: {e.line}")
+        out[id(e)] = (t0, t1)
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -348,11 +405,14 @@ def trace_module(window):
                if e.word is not None and e.word.seq >= 0] + [0])
     max_seq = top + 2 * MODEL_K + 2
 
+    when = stamps(window)
+
     def event(e):
         w = tla_word(e.word or FREE, base)
+        t0, t1 = when[id(e)]
         return (f'[kind |-> "{e.kind}", first |-> {e.first - base}, '
                 f'k |-> {e.k}, i |-> {e.i}, seq |-> {e.seq - base}, '
-                f'w |-> {w}, out |-> "{e.out}"]')
+                f'w |-> {w}, out |-> "{e.out}", t0 |-> {t0}, t1 |-> {t1}]')
 
     streams = []
     for stream in sorted(window.streams):
@@ -374,6 +434,7 @@ def trace_module(window):
             f"TraceN == {n}\n"
             f"TraceNW == {window.cpus}\n"
             f"TraceMaxSeq == {max_seq}\n"
+            f"TraceMargin == {COUNTER_MARGIN}\n"
             f"InitHead == {init['head']}\n"
             f"InitRnext == {init['rnext']}\n"
             f"InitWords == <<{words}>>\n"

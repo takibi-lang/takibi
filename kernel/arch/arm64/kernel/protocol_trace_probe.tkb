@@ -26,6 +26,7 @@ const PROTOCOL_TRACE_ARRIVAL_POLLS: usize = 1000000;
 const CLONE_FORK_SIGCHLD: usize = 0x11;
 const PROTOCOL_TRACE_OPEN_TAG: usize = 16;
 const PROTOCOL_TRACE_CLOSE_TAG: usize = 17;
+const LOG_RING_TRACE_TAG: usize = 22;
 const PROTOCOL_TRACE_ERROR_FLOOR: usize = 0xFFFFFFFFFFFFF000;
 // Every CPU the kernel can have, as an affinity mask.
 const PROTOCOL_TRACE_ANY_CPU: u8 = 0x0F;
@@ -114,6 +115,12 @@ fn protocol_trace_probe() {
     if (svc5(WORKLOAD_PROGRESS_SYSCALL, PROTOCOL_TRACE_CLOSE_TAG,
              0, 0, 0, 0) != 1) {
         protocol_trace_fail(bs"protocol-trace: the window did not close\n");
+    }
+    // GitHub issue #656: the log ring's window, also from CPU 0 -- a storm
+    // round with a syslog read inside it, which the kernel prints for
+    // scripts/validate_log_ring_trace.py.
+    if (svc5(WORKLOAD_PROGRESS_SYSCALL, LOG_RING_TRACE_TAG, 0, 0, 0, 0) != 1) {
+        protocol_trace_fail(bs"protocol-trace: the log-ring window did not run\n");
     }
     svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
 }

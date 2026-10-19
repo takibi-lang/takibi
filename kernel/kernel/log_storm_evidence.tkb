@@ -148,3 +148,44 @@ fn log_storm_probe() -> bool !{logs, unsafe} {
     kernel_boot_log("\n");
     return ok && writers_seen == expected + 1;
 }
+
+// GitHub issue #656: one more round, inside a log-ring trace window
+// (kernel/printk/log_ring_trace.tkb), with a syslog(2) read on core 0 while
+// the secondaries write. /bin/protocol-trace asks for it from core 0 after
+// its own window, which is after init's dmesg snapshot: the report is a few
+// hundred lines and would otherwise evict boot markers from the ring.
+// Core 0 writes one line first, so the read has a record of the window to
+// read; its other lines follow the read. True when the round ran as asked;
+// the report is the evidence, checked by scripts/validate_log_ring_trace.py.
+private let mut log_storm_trace_rounds: usize;
+
+fn log_storm_trace_probe() -> bool !{logs, unsafe} {
+    let expected: usize = kernel_online_core_count() - 1;
+    log_storm_trace_rounds = log_storm_trace_rounds + 1;
+    let round: usize = LOG_STORM_ROUNDS + log_storm_trace_rounds;
+    atomic_word_store(&log_storm_armed, 1);
+    atomic_word_store(&log_storm_registered, 0);
+    atomic_word_store(&log_storm_done, 0);
+    atomic_word_store(&log_storm_round, round);
+    let joined: bool = log_storm_wait_word(&log_storm_registered, expected);
+    let writers: usize = atomic_word_load(&log_storm_registered);
+    atomic_word_store(&log_storm_writers, writers);
+    log_ring_trace_open(kernel_log_raw_head());
+    let opening: bool = kernel_log_storm_write(round, 0);
+    atomic_word_store(&log_storm_go, round);
+    log_ring_trace_arm_reader();
+    let read: usize = kernel_log_snapshot_build();
+    log_ring_trace_disarm_reader();
+    let mut mine: bool = true;
+    for index: usize in 1..<64 {
+        if (index < kernel_log_storm_per_writer() && mine) {
+            mine = kernel_log_storm_write(round, index);
+        }
+    }
+    let finished: bool = log_storm_wait_word(&log_storm_done, writers);
+    log_ring_trace_close();
+    atomic_word_store(&log_storm_round, 0);
+    atomic_word_store(&log_storm_armed, 0);
+    log_ring_trace_report();
+    return joined && opening && mine && finished && read != 0;
+}

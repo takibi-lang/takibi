@@ -95,7 +95,7 @@ SILENT = W0 + [
 # The same pass counted: accepted.
 COUNTED = SILENT[:-1] + [f"r head 7 {word(11, 'R', cpu=1)} lost"]
 # A continuation whose first slot was overwritten, skipped uncounted: the
-# kernel reader's KernelLogSlotView::Continuation -> Skipped(1).
+# kernel reader's shape before #824 (a Continuation view -> Skipped(1)).
 CONTINUATION = ["w0 reserve 8 1", f"w0 claim 8 1 0 {word(4, 'C', span=2)}",
                 "r begin 5 9", f"r head 5 {word(5, 'C', span=0)} skip"]
 # Double owner: writer 1 claims 12 into slot 0 while writer 0 holds 8 there.
@@ -106,6 +106,20 @@ DOUBLE = ["w0 reserve 8 1", f"w0 claim 8 1 0 {word(4, 'C')}",
           "w1 reserve 11 1", f"w1 claim 11 1 0 {word(7, 'C')}",
           "w1 write 11 1 0", "w1 commit 11 1 0",
           "w1 reserve 12 1", f"w1 claim 12 1 0 {word(8, 'R', cpu=0)}"]
+
+
+# The short window with counter stamps. In order: writer 0's record, then
+# the reader. Early: the reader's load of 8 ends before writer 0 reserved 8,
+# yet saw 8 Committed -- no interleaving the stamps allow has that.
+def stamped(events, starts):
+    return [f"{e} @{t}+5" if not e.startswith("r begin") else e
+            for e, t in zip(events, starts)]
+
+
+IN_ORDER = (stamped(W0, [100, 110, 120, 130]) +
+            stamped(READ_7_8, [0, 140, 150, 160, 170, 180, 190]))
+EARLY = (stamped(W0, [100, 110, 120, 130]) +
+         stamped(READ_7_8, [0, 10, 20, 30, 40, 50, 60]))
 
 
 def run(text, *extra):
@@ -149,6 +163,11 @@ def cases():
                                                 refused]),
         expect("a short window, both writers and the reader",
                window(W0 + READ_7_8), (), True, ["PASS log-ring-trace"]),
+        expect("the short window, stamped in order", window(IN_ORDER), (),
+               True, ["PASS log-ring-trace"]),
+        expect("the short window, stamped with the reader's load of 8 "
+               "before its reservation", window(EARLY), (), False,
+               [none, "r head 8", refused]),
         expect("a torn read: the second load saw another record", window(TORN),
                (), False, [none, "r check 7", refused]),
         expect("a torn read: no second load", window(NO_RECHECK), (), False,
@@ -183,7 +202,9 @@ def main() -> int:
     report_pass(
         "log-ring-trace TLC controls",
         "TLC accepts the synthetic window and a short two-writer window as "
-        "LogRing.tla behaviours, refuses the synthetic one without Commit, "
+        "LogRing.tla behaviours, also with counter stamps in order, refuses "
+        "it when the stamps put a load before the write it saw, refuses "
+        "the synthetic one without Commit, "
         "and refuses a torn read (second load changed, or no second load), "
         "a silent loss (an overwritten sequence or a stray continuation "
         "skipped uncounted) and a double owner, which the model without the "

@@ -6033,6 +6033,13 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         if (x0 == 17) {
             return syscall_finish_current(frame, SyscallAction::Resume(kernel_process_protocol_trace_close()), current_authority);
         }
+        // /bin/protocol-trace's log-ring window (GitHub issue #656).
+        if (x0 == 22) {
+            if (log_storm_trace_probe()) {
+                return syscall_finish_current(frame, SyscallAction::Resume(1), current_authority);
+            }
+            return syscall_finish_current(frame, SyscallAction::Resume(0), current_authority);
+        }
         // /bin/peer-mutate's wait4 half (GitHub issue #609).
         if (x0 == 15) {
             return syscall_finish_current(frame, SyscallAction::Resume(workload_peer_wait_report()), current_authority);
