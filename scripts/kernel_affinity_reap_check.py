@@ -112,6 +112,15 @@ LINUX_ECHILD = 0xFFFFFFFFFFFFFFF6
 # QEMU's gdbstub numbers vCPUs from 1: thread 1 is CPU0, thread 2 is CPU1.
 CPU0_THREAD = 1
 CPU1_THREAD = 2
+# Where takibi-park-threads (scripts/kernel_gdb_stage.py) parks the vCPUs
+# this check never runs: its one wfi.
+IDLE_LOOP = "kernel_idle_loop"
+
+
+def other_threads() -> list:
+    """GDB thread numbers of every vCPU but CPU0 and CPU1."""
+    return [str(thread.num) for thread in gdb.selected_inferior().threads()
+            if thread.num not in (CPU0_THREAD, CPU1_THREAD)]
 
 output = bytearray()
 output_lock = threading.Lock()
@@ -233,6 +242,7 @@ def run() -> None:
     gdb.execute("set pagination off")
     gdb.execute("set confirm off")
     gdb.execute(f"target remote 127.0.0.1:{GDB_PORT}")
+    gdb.execute(f"source {Path(__file__).resolve().parent / 'kernel_gdb_stage.py'}")
     kill = gdb.Breakpoint(KILL)
     kill.condition = f"$_thread == {CPU0_THREAD}"
     # The probe's line fits the 16-byte PL011 FIFO, so it can go at once
@@ -263,14 +273,15 @@ def run() -> None:
         return
 
     kill.delete()
-    # scheduler-locking-waiver: CPU2 and CPU3 are not parked here or at the
-    # stage below; GitHub issue #849.
     # Park CPU1 somewhere it holds no lock BEFORE freezing it, by freezing
     # CPU0 first and letting only CPU1 run. CPU0 is stopped at the entry of
     # kernel_process_signal_send and holds nothing itself, so nothing of
     # CPU1's can be waiting on it.
     gdb.execute(f"thread {CPU1_THREAD}", to_string=True)
     gdb.execute("set scheduler-locking on")
+    # Every other vCPU (CPU2, CPU3 at the default SMP) first runs alone to
+    # the idle loop's wfi, so none stays frozen holding a lock (#795, #849).
+    gdb.execute(f"takibi-park-threads {IDLE_LOOP} {' '.join(other_threads())}")
     parks = [gdb.Breakpoint(name) for name in PEER_PARKS]
     for park in parks:
         park.condition = f"$_thread == {CPU1_THREAD}"
@@ -285,10 +296,11 @@ def run() -> None:
                 f"holds. UART tail: {uart_tail()!r}")
         gdb.execute("detach")
         return
-    # scheduler-locking-waiver: CPU2 and CPU3 as above, GitHub issue #849.
     # CPU1 is now stopped holding nothing; selecting CPU0 freezes it there.
     gdb.execute(f"thread {CPU0_THREAD}", to_string=True)
     gdb.execute("set scheduler-locking on")
+    # The others are still at the wfi; this only confirms it.
+    gdb.execute(f"takibi-park-threads {IDLE_LOOP} {' '.join(other_threads())}")
     walk = gdb.Breakpoint(FIRST_WALK)
     walk.condition = f"$_thread == {CPU0_THREAD}"
 
