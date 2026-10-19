@@ -49,11 +49,11 @@ private let mut pid_probe_overlap: AtomicWord;
 private let mut pid_probe_arrived: PeerRound;
 private let mut pid_probe_committed: PeerRound;
 
-// GitHub issue #510: entries into a peer's run function, counted and never
-// cleared. This is what core 0's entry gate waits on: a COUNT, not a level,
+// GitHub issue #510: entries into a peer's run function, counted per peer
+// since the phase's reset and never cleared by the peer. This is what core 0's entry gate waits on: a COUNT, not a level,
 // incremented before any rendezvous (gating on the per-round count would
 // deadlock -- it only advances after a rendezvous with core 0).
-private let mut pid_probe_entries: AtomicWord;
+private let mut pid_probe_entered: PeerTally;
 
 private fn pid_probe_cycle(cpu: usize, online: usize, sequence: usize)
         -> bool !{unsafe} {
@@ -106,7 +106,7 @@ fn pid_contention_secondary_run(raw_cpu: usize) !{unsafe} {
     if (atomic_word_load(&pid_probe_done[cpu]) >= PID_CONTENTION_ROUNDS) {
         return;
     }
-    atomic_word_fetch_add(&pid_probe_entries, 1);
+    peer_tally_enter(&pid_probe_entered, cpu);
     atomic_word_store(&pid_probe_active[cpu], 1);
     while (atomic_word_load(&pid_probe_done[cpu]) < PID_CONTENTION_ROUNDS &&
            atomic_word_load(&pid_probe_armed) == 1) {
@@ -184,7 +184,6 @@ private fn pid_probe_disarm_and_quiesce(online: usize) -> bool !{unsafe} {
 private fn pid_contention_phase(locked: bool) -> bool !{unsafe} {
     let online: usize = kernel_online_core_count();
     let next_before: usize = scheduled_process_pid_counter();
-    let entries_before: usize = atomic_word_load(&pid_probe_entries);
     for cpu: usize in 0..<KERNEL_MAX_CORES {
         atomic_word_store(&pid_probe_done[cpu], 0);
         atomic_word_store(&pid_probe_active[cpu], 0);
@@ -193,6 +192,7 @@ private fn pid_contention_phase(locked: bool) -> bool !{unsafe} {
     peer_round_reset(&pid_probe_arrived);
     peer_round_reset(&pid_probe_committed);
     atomic_word_store(&pid_probe_online, online);
+    peer_tally_reset(&pid_probe_entered, online);
     if (locked) {
         atomic_word_store(&pid_probe_locked_phase, 1);
     } else {
@@ -200,22 +200,10 @@ private fn pid_contention_phase(locked: bool) -> bool !{unsafe} {
     }
     atomic_word_store(&pid_probe_armed, 1);
 
-    // Every online peer must have entered: the entry count reaches the
-    // number of peers. Each wait is bounded by that peer's own ticks.
-    let mut entered: bool = online >= 2;
-    for cpu: usize in 1..<KERNEL_MAX_CORES {
-        if (cpu < online && entered) {
-            let mut entry_window = peer_tick_window_policy(cpu, PeerTickPolicy::Entry);
-            let mut started: bool = false;
-            while (started == false && peer_tick_window_open(entry_window)) {
-                if (atomic_word_load(&pid_probe_entries) >= entries_before + cpu) {
-                    started = true;
-                }
-            }
-            peer_tick_window_end(entry_window);
-            entered = started;
-        }
-    }
+    // Every online peer must have entered, each wait bounded by that peer's
+    // own ticks and asking about that peer's own entry count.
+    let entered: bool = peer_tally_peers_entered(&pid_probe_entered,
+                                                 PeerTickPolicy::Entry);
     if (entered == false) {
         atomic_word_store(&pid_probe_armed, 0);
         pid_contention_report("secondary-never-entered" as *u8, online, 0, 0);

@@ -2,7 +2,7 @@
 """Reject direct wall-clock rendezvous loops in maintained boot probes.
 
 Discover every while condition in contention evidence, occupancy evidence,
-and the FD refcount probe functions, including helper-based waits. Only the
+the FD refcount probe functions and kernel/lib/peer_round.tkb's waits, including helper-based waits. Only the
 six reviewed deliberate wall-clock holds below remain. This source check
 catches the observed direct counter/deadline shape; it does not prove a
 predicate or discover a clock hidden behind an arbitrary external callee.
@@ -30,7 +30,9 @@ def sources():
     paths = sorted(Path('kernel/kernel').glob('*_contention_evidence.tkb'))
     paths += [Path('kernel/kernel/occupancy_drain_evidence.tkb'),
               Path('kernel/kernel/fd_table.tkb'),
-              Path('kernel/lib/peer_tick_window.tkb')]
+              Path('kernel/lib/peer_tick_window.tkb'),
+              # GitHub issue #756: the probes' shared per-peer waits.
+              Path('kernel/lib/peer_round.tkb')]
     return {str(path): path.read_text(encoding='ascii') for path in paths}
 
 

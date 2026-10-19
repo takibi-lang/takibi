@@ -3366,21 +3366,15 @@ private fn fd_refcount_probe_refused_address() -> *AtomicWord {
     return &fd_refcount_probe_refused;
 }
 
-// GitHub issue #510: entries into the secondary's run function, counted and
-// never cleared.
+// GitHub issue #510: entries into a peer's run function, counted per peer in
+// fd_refcount_probe_tally (peer_tally_enter) and never cleared by the peer.
 //
 // This file INVENTED the two-way start handshake, and kept the one half of it
 // that a level cannot express. `active` is raised on entry and cleared on the
-// way out, and this secondary leaves while still armed the moment it reaches
+// way out, and a peer leaves while still armed the moment it reaches
 // FD_REFCOUNT_CONTENTION_ROUNDS -- so a core 0 that was slow to look sees 0
 // and reports `secondary-never-entered` about a core that finished every
-// round. The `started` gate below is already monotonic and would have caught
-// it, but the `entered` gate runs first and fails first.
-private let mut fd_refcount_probe_entries: AtomicWord;
-
-private fn fd_refcount_probe_entries_address() -> *AtomicWord {
-    return &fd_refcount_probe_entries;
-}
+// round. The entry count only grows.
 
 private fn fd_refcount_probe_overlap_address() -> *AtomicWord {
     return &fd_refcount_probe_overlap;
@@ -3423,7 +3417,6 @@ fn fd_refcount_contention_secondary_run(cpu: usize) !{unsafe} {
             FD_REFCOUNT_CONTENTION_ROUNDS) {
         return;
     }
-    atomic_word_fetch_add(fd_refcount_probe_entries_address(), 1);
     peer_tally_enter(&fd_refcount_probe_tally, cpu);
     // Complete one cycle before waiting for the primary. Together with the
     // primary-side wait below, this is a two-way start handshake: neither
@@ -3535,22 +3528,13 @@ fn fd_refcount_contention_probe() -> bool !{unsafe} {
     }
     let baseline: usize = unified_object_refs_of(fd_refcount_probe_handle);
     let doubles_before: usize = unified_object_double_release_count();
-    let entries_before: usize = atomic_word_load(fd_refcount_probe_entries_address());
     peer_tally_reset(&fd_refcount_probe_tally, kernel_online_core_count());
     atomic_word_store(fd_refcount_probe_overlap_address(), 0);
     atomic_word_store(fd_refcount_probe_armed_address(), 1);
     let peers: usize = peer_tally_peers(&fd_refcount_probe_tally);
 
-    let mut entry_window = peer_tick_window_policy(
-        peer_tick_window_peer(), PeerTickPolicy::Entry);
-    let mut entered: bool = false;
-    while (entered == false && peer_tick_window_open(entry_window)) {
-        if (peers > 0 && atomic_word_load(fd_refcount_probe_entries_address()) >=
-                entries_before + peers) {
-            entered = true;
-        }
-    }
-    peer_tick_window_end(entry_window);
+    let entered: bool = peers > 0 && peer_tally_peers_entered(
+        &fd_refcount_probe_tally, PeerTickPolicy::Entry);
     if (entered == false) {
         atomic_word_store(fd_refcount_probe_armed_address(), 0);
         fd_refcount_contention_report("secondary-never-entered" as *u8,

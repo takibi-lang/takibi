@@ -31,11 +31,14 @@ def main():
     # GitHub issue #845: `tail` makes a site whose binding repeats in its
     # file unique, since replace_once refuses a repeated anchor.
     for path, name, binding, tail in (
-            ('kernel/kernel/freelist_contention_evidence.tkb', 'freelist_contention_phase', 'entry_window', ''),
+            ('kernel/lib/peer_round.tkb', 'peer_tally_peers_entered', 'window',
+             ' &&\n                   atomic_word_load(&tally.entered[cpu])'),
+            ('kernel/lib/peer_round.tkb', 'peer_round_meet', 'window',
+             ' &&\n                   atomic_word_load(&round.arrived[cpu])'),
             ('kernel/kernel/init_once_contention_evidence.tkb', 'init_once_probe_wait_arrived', 'window',
              ' &&\n                   atomic_word_load(&init_once_probe_arrived)'),
-            ('kernel/kernel/pool_walk_contention_evidence.tkb', 'pool_walk_contention_probe', 'entry_window', ''),
-            ('kernel/kernel/fd_table.tkb', 'fd_refcount_contention_probe', 'entry_window', '')):
+            ('kernel/kernel/console_contention_evidence.tkb', 'console_probe_wait', 'window',
+             ') {\n        if (atomic_word_load(cell)')):
         anchor = f'peer_tick_window_open({binding})' + tail
         previous = replace_once(tree[path], anchor,
                                 'read_cntpct() - begin < read_cntfrq() >> 2' + tail)

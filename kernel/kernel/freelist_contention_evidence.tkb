@@ -93,8 +93,9 @@ private fn freelist_probe_empty_address() -> *AtomicWord {
     return &freelist_probe_empty;
 }
 
-// GitHub issue #510: entries into the secondary's run function, counted and
-// never cleared. This is what core 0's entry gate waits on.
+// GitHub issue #510: entries into a peer's run function, counted per peer in
+// freelist_probe_tally (peer_tally_enter). This is what core 0's entry gate
+// waits on.
 //
 // `active` cannot be that gate. It is a LEVEL the secondary clears on its
 // way out, and this probe's secondary CAN leave while still armed: the
@@ -109,12 +110,6 @@ private fn freelist_probe_empty_address() -> *AtomicWord {
 // rendezvous. Gating on the per-round cycle count instead would deadlock:
 // that count only advances after a rendezvous with core 0, and core 0 is the
 // one waiting.
-private let mut freelist_probe_entries: AtomicWord;
-
-private fn freelist_probe_entries_address() -> *AtomicWord {
-    return &freelist_probe_entries;
-}
-
 private fn freelist_probe_overlap_address() -> *AtomicWord {
     return &freelist_probe_overlap;
 }
@@ -250,7 +245,6 @@ fn freelist_contention_is_armed() -> bool !{unsafe} {
 // Every online peer runs this from its idle loop while the probe is armed.
 fn freelist_contention_secondary_run(cpu: usize) !{unsafe} {
     if (peer_tally_is_peer(&freelist_probe_tally, cpu) == false) { return; }
-    atomic_word_fetch_add(freelist_probe_entries_address(), 1);
     peer_tally_enter(&freelist_probe_tally, cpu);
     // The idle loop may enter again before the primary disarms this phase.
     // Keep the round in the phase's published count, not a fresh local loop:
@@ -297,32 +291,16 @@ private fn freelist_contention_phase(locked: bool) -> bool !{unsafe} {
     } else {
         atomic_word_store(freelist_probe_locked_phase_address(), 0);
     }
-    let entries_before: usize = atomic_word_load(freelist_probe_entries_address());
     atomic_word_store(freelist_probe_armed_address(), 1);
 
     // Every peer remains inside its first per-round rendezvous until core 0
     // arrives, so `active` can no longer be a pulse that a long QEMU vCPU
     // timeslice misses. In the unlocked phase each core has already read
     // the same freelist head before that rendezvous completes. The gate is
-    // the entry COUNT reaching one per peer, each wait bounded by that
+    // each peer's own entry count, each wait bounded by that
     // peer's own ticks.
-    let peers: usize = peer_tally_peers(&freelist_probe_tally);
-    let mut entered: bool = peers > 0;
-    for cpu: usize in 1..<KERNEL_MAX_CORES {
-        if (cpu <= peers && entered) {
-            let mut entry_window = peer_tick_window_policy(
-                cpu, PeerTickPolicy::Entry);
-            let mut started: bool = false;
-            while (started == false && peer_tick_window_open(entry_window)) {
-                if (atomic_word_load(freelist_probe_entries_address()) >=
-                        entries_before + cpu) {
-                    started = true;
-                }
-            }
-            peer_tick_window_end(entry_window);
-            entered = started;
-        }
-    }
+    let entered: bool = peer_tally_peers_entered(&freelist_probe_tally,
+                                                 PeerTickPolicy::Entry);
     if (entered == false) {
         atomic_word_store(freelist_probe_armed_address(), 0);
         freelist_contention_report("secondary-never-entered" as *u8);

@@ -160,12 +160,14 @@ import pathlib
 import re
 import sys
 log = pathlib.Path(sys.argv[1]).read_text(errors="replace")
-counts = re.search(r"freelist contention counts: primary=(\d+) secondary=(\d+) "
-                   r"duplicates=(\d+) empty=(\d+)", log)
+# GitHub issue #756: every online peer runs the probe; a restarted peer
+# shows as more peer rounds than 4096 per peer.
+counts = re.search(r"freelist contention counts: cores=(\d+) primary=(\d+) "
+                   r"peers-least=(\d+) peers-sum=(\d+) duplicates=(\d+) empty=(\d+)", log)
 if counts is None:
     raise SystemExit("FAIL race-window 678: no phase counts")
-primary, secondary, duplicates, empty = map(int, counts.groups())
-if primary != 4096 or secondary <= 4096 or empty != 0:
+cores, primary, least, peers_sum, duplicates, empty = map(int, counts.groups())
+if primary != 4096 or peers_sum <= 4096 * (cores - 1) or empty != 0:
     raise SystemExit("FAIL race-window 678: failure did not show extra peer rounds: "
                      + counts.group(0))
 print("PASS race-window 678 control: " + counts.group(0))

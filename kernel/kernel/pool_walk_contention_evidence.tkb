@@ -62,7 +62,6 @@ private let mut pool_walk_ready: bool = false;
 private let mut pool_walk_floor: RegionHeld(PoolWalkItem);
 
 private let mut pool_walk_armed: AtomicWord;
-private let mut pool_walk_entries: AtomicWord;
 // The rendezvous, as round numbers (GitHub issue #510): core 0 publishes
 // `seq`, the walker answers `held_seq` holding that round's reference,
 // core 0 answers `released_seq` once it is freed, and the walker answers
@@ -83,7 +82,6 @@ private let mut pool_walk_floor_bad: AtomicWord;
 private let mut pool_walk_steps: AtomicWord;
 
 private fn pool_walk_armed_address() -> *AtomicWord { return &pool_walk_armed; }
-private fn pool_walk_entries_address() -> *AtomicWord { return &pool_walk_entries; }
 private fn pool_walk_seq_address() -> *AtomicWord { return &pool_walk_seq; }
 private fn pool_walk_released_seq_address() -> *AtomicWord { return &pool_walk_released_seq; }
 private fn pool_walk_target_address() -> *AtomicWord { return &pool_walk_target; }
@@ -240,7 +238,6 @@ private fn pool_walk_once(cpu: usize) !{unsafe} {
 // Every online peer runs this from its idle loop while the probe is armed.
 fn pool_walk_contention_secondary_run(cpu: usize) !{unsafe} {
     if (peer_tally_is_peer(&pool_walk_held_seq, cpu) == false) { return; }
-    atomic_word_fetch_add(pool_walk_entries_address(), 1);
     peer_tally_enter(&pool_walk_held_seq, cpu);
     while (atomic_word_load(pool_walk_armed_address()) == 1) {
         pool_walk_once(cpu);
@@ -307,25 +304,10 @@ fn pool_walk_contention_probe() -> bool !{allocates, unsafe} {
     peer_tally_reset(&pool_walk_held_seq, online);
     peer_tally_reset(&pool_walk_probed_seq, online);
     let peers: usize = peer_tally_peers(&pool_walk_held_seq);
-    let entries_before: usize = atomic_word_load(pool_walk_entries_address());
     atomic_word_store(pool_walk_armed_address(), 1);
-    // Entries, a count that only grows: one per peer, each wait bounded by
-    // that peer's own ticks.
-    let mut entered: bool = peers > 0;
-    for cpu: usize in 1..<KERNEL_MAX_CORES {
-        if (cpu <= peers && entered) {
-            let mut entry_window = peer_tick_window_policy(cpu, PeerTickPolicy::Entry);
-            let mut started: bool = false;
-            while (started == false && peer_tick_window_open(entry_window)) {
-                if (atomic_word_load(pool_walk_entries_address()) >=
-                        entries_before + cpu) {
-                    started = true;
-                }
-            }
-            peer_tick_window_end(entry_window);
-            entered = started;
-        }
-    }
+    // Every peer's own entry count, each wait bounded by that peer's ticks.
+    let entered: bool = peers > 0 && peer_tally_peers_entered(
+        &pool_walk_held_seq, PeerTickPolicy::Entry);
     if (entered == false) {
         atomic_word_store(pool_walk_armed_address(), 0);
         pool_walk_report("secondary-never-entered" as *u8);

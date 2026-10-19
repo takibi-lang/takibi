@@ -40,9 +40,12 @@ KERNEL = ROOT / "kernel"
 
 # A gate is the bounded wait that decides whether the second core arrived. It
 # is recognised by the loop variable every one of these probes uses.
-GATE_START = re.compile(r"let mut (entered|started): bool = false;")
+# GitHub issue #756: the probes' gates moved into kernel/lib/peer_round.tkb's
+# per-peer waits, which are recognised by name.
+GATE_START = re.compile(r"let mut (entered|started): bool = false;"
+                        r"|fn peer_tally_peers_(entered|reached)\(")
 GATE_END = re.compile(r"^\s*\}\s*$")
-ACTIVE_READ = re.compile(r"_active_address\(\)")
+ACTIVE_READ = re.compile(r"_active_address\(\)|\.active\[")
 # `active == 0` inside a gate would be a settle wait, not an arrival gate.
 SETTLE = re.compile(r"==\s*0")
 
@@ -70,6 +73,7 @@ def gates(path: pathlib.Path):
 def main() -> int:
     targets = sorted(KERNEL.glob("kernel/*_contention_evidence.tkb"))
     targets.append(KERNEL / "kernel" / "fd_table.tkb")
+    targets.append(KERNEL / "lib" / "peer_round.tkb")
     problems = []
     checked = 0
     for path in targets:

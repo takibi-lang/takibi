@@ -69,6 +69,9 @@ struct PeerTally {
     online: AtomicWord;
     count: [AtomicWord; KERNEL_MAX_CORES];
     active: [AtomicWord; KERNEL_MAX_CORES];
+    // Entries into the run function since the reset: monotonic, so it says
+    // "was ever there", which `active` cannot (GitHub issue #510).
+    entered: [AtomicWord; KERNEL_MAX_CORES];
 }
 
 // Core 0, before arming: zero every word and fix the participants.
@@ -76,6 +79,7 @@ fn peer_tally_reset(tally: &mut PeerTally, online: usize) !{unsafe} {
     for cpu: usize in 0..<KERNEL_MAX_CORES {
         atomic_word_store(&tally.count[cpu], 0);
         atomic_word_store(&tally.active[cpu], 0);
+        atomic_word_store(&tally.entered[cpu], 0);
     }
     atomic_word_store(&tally.online, online);
 }
@@ -117,8 +121,31 @@ fn peer_tally_set(tally: &mut PeerTally, cpu: usize, value: usize) !{unsafe} {
 fn peer_tally_enter(tally: &mut PeerTally, cpu: usize) !{unsafe} {
     if (cpu < KERNEL_MAX_CORES) {
         let own: {0..<KERNEL_MAX_CORES as usize} = cpu;
+        atomic_word_fetch_add(&tally.entered[own], 1);
         atomic_word_store(&tally.active[own], 1);
     }
+}
+
+// Core 0: wait until every peer has entered its run function since the
+// reset, each wait bounded by THAT peer's own ticks. GitHub issue #756: one
+// shared entry count compared against `before + cpu` waited on peer k's
+// clock for whichever peer had not yet come, so a peer that had entered and
+// was ticking timed out the wait for one still masked.
+fn peer_tally_peers_entered(tally: &mut PeerTally, policy: PeerTickPolicy)
+        -> bool !{unsafe} {
+    let online: usize = atomic_word_load(&tally.online);
+    let mut all: bool = online >= 2;
+    for cpu: usize in 1..<KERNEL_MAX_CORES {
+        if (cpu < online && all) {
+            let mut window = peer_tick_window_policy(cpu, policy);
+            while (peer_tick_window_open(window) &&
+                   atomic_word_load(&tally.entered[cpu]) == 0) {
+            }
+            peer_tick_window_end(window);
+            all = atomic_word_load(&tally.entered[cpu]) != 0;
+        }
+    }
+    return all;
 }
 
 fn peer_tally_leave(tally: &mut PeerTally, cpu: usize) !{unsafe} {

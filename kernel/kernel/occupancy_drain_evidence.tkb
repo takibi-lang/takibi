@@ -352,14 +352,16 @@ fn world_stop_probe() -> bool !{unsafe} {
 // interrupts open -- and the other peers, idle, must acknowledge it. In
 // turn rather than at once: the stop is one-deep and refuses a second
 // initiator with Busy, which is a different property.
-private let mut world_stop_peer_probe_armed: AtomicWord;
-// The peer whose turn it is.
+// The peer whose turn it is, 0 when none. Armed for that peer alone, so the
+// others stay idle -- interrupts open -- to acknowledge its stop rather than
+// entering a probe that is not theirs.
 private let mut world_stop_peer_probe_turn: AtomicWord;
 // Per peer: 1 Complete, 2 Partial, 3 Busy, 0 not run.
 private let mut world_stop_peer_probe_result: PeerTally;
 
 fn world_stop_peer_probe_is_armed() -> bool !{unsafe} {
-    return atomic_word_load(&world_stop_peer_probe_armed) == 1;
+    let turn: usize = atomic_word_load(&world_stop_peer_probe_turn);
+    return turn != 0 && turn == cpu_id();
 }
 
 // Every online peer runs this from its idle loop; only the peer whose turn
@@ -396,10 +398,9 @@ fn world_stop_peer_probe() -> bool !{unsafe} {
     for cpu: usize in 1..<KERNEL_MAX_CORES {
         if (cpu <= peers && finished) {
             atomic_word_store(&world_stop_peer_probe_turn, cpu);
-            atomic_word_store(&world_stop_peer_probe_armed, 1);
             finished = peer_tally_peer_reached(&world_stop_peer_probe_result,
                                                cpu, 1, PeerTickPolicy::Complete);
-            atomic_word_store(&world_stop_peer_probe_armed, 0);
+            atomic_word_store(&world_stop_peer_probe_turn, 0);
             if (peer_tally_count(&world_stop_peer_probe_result, cpu) == 1) {
                 complete = complete + 1;
             }
