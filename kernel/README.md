@@ -247,6 +247,17 @@ by a Takibi name, and a Takibi interface is never mistaken for a Linux one.
   the session's mode and each core's stored and lost counts. The samples are
   printed by DDB `profile dump`, which also frees the buffers;
   `scripts/profile_kernel_session.py` captures and folds them.
+  Each core's line also carries the irqsoff tracer (#811):
+  `irqsoff_ticks T from A B C to D E F` is the longest span, in
+  generic-counter ticks, that the core spent with IRQs masked by an
+  outermost `mutex_irq_save` while the session sampled, and three return
+  addresses (innermost first, 0 where the frame walk stopped) of the caller
+  chain where it opened and where it closed; `fold` symbolizes them. The
+  walk starts from `caller_frame.S`'s x29 and reads only the current
+  process kernel stack (`frame_current_stack_word`). Not measured: spans
+  that mask without `mutex_irq_save` (exception entry to `eret`,
+  `syscall.tkb`'s direct `disable_irq`, `user_entry.S`), and sites of a
+  span opened on a boot stack (recorded as 0).
 
 ## Make targets
 

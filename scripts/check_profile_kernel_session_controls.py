@@ -78,6 +78,27 @@ def main():
                  summary["el0_weight"] == 1)
     ok &= expect("inclusive counts each function once per sample",
                  summary["inclusive"]["middle_fn"] == 4)
+    proc = ("cpu0 stored 2 lost 0 irqsoff_ticks 0 from 0x0 0x0 0x0 to 0x0 0x0 0x0\n"
+            "cpu1 stored 1 lost 1 irqsoff_ticks 77 from 0x2008 0x3004 0x0 "
+            "to 0x1010 0x0 0x0\n")
+    irqsoff = tool.irqsoff_records(DUMP + proc)
+    ok &= expect("irqsoff fields parsed per cpu",
+                 irqsoff[1]["ticks"] == 77 and irqsoff[0]["ticks"] == 0 and
+                 irqsoff[1]["from"] == [0x2008, 0x3004, 0])
+    ok &= expect("irqsoff sites at -4, stopping at the first 0",
+                 tool.irqsoff_sites(irqsoff[1]["from"], FakeSymbols()) ==
+                 ["middle_fn", "root_fn"])
+    ok &= expect("irqsoff check passes a symbolized span",
+                 not any("irqsoff" in problem for problem in tool.check_console(
+                     DUMP + proc, [], "", FakeSymbols(), True)))
+    ok &= expect("irqsoff check refuses no measured span",
+                 any("irqsoff" in problem for problem in tool.check_console(
+                     DUMP + proc.replace("ticks 77", "ticks 0"), [], "",
+                     FakeSymbols(), True)))
+    ok &= expect("irqsoff check refuses an unsymbolized site",
+                 any("symbolize" in problem for problem in tool.check_console(
+                     DUMP + proc.replace("to 0x1010", "to 0x0"), [], "",
+                     FakeSymbols(), True)))
     if not ok:
         return 1
     report_pass(
@@ -86,7 +107,9 @@ def main():
         "refused, a late sample weighs 1 + skid // period with the excess "
         "under a [masked] leaf, EL1 stacks fold "
         "root-first with return addresses at -4, EL0 stays apart, and the "
-        "masked weight is what the skids say",
+        "masked weight is what the skids say; irqsoff lines parse per cpu, "
+        "symbolize at -4 up to the first 0, and a check refuses a missing "
+        "span or an unsymbolized site",
         cases=CASES.ran)
     return 0
 

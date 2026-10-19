@@ -1,0 +1,10 @@
+// extern fn declarations for kernel/arch/arm64/kernel/caller_frame.S
+// (GitHub issue #811). Split into its own file for the reason
+// pmu_extern.tkb is: takibi rejects a second `extern fn` declaration of the
+// same name, so a future second consumer would otherwise conflict.
+
+// The calling function's x29: the address of its canonical frame record.
+extern fn caller_frame_address() -> usize;
+
+// The calling function's sp, which bounds a walk of its frame chain.
+extern fn caller_stack_address() -> usize;

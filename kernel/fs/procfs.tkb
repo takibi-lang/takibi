@@ -206,6 +206,26 @@ private fn procfs_put_usize(output: borrow [u8; 1024..], offset_in: usize,
     return offset;
 }
 
+// 0x-prefixed lowercase hex without leading zeros: return addresses the
+// host symbolizes (GitHub issue #811).
+private fn procfs_put_hex(output: borrow [u8; 1024..], offset_in: usize,
+                          value: usize) -> usize {
+    let mut offset: usize = procfs_put_text(output, offset_in, bs"0x");
+    let mut started: bool = false;
+    for index: usize in 0..<16 {
+        let nibble: usize = (value >> ((15 - index) * 4)) & 0xF;
+        if (nibble != 0 || started || index == 15) {
+            started = true;
+            if (nibble < 10) {
+                offset = procfs_put_byte(output, offset, 0x30 + (nibble as u8));
+            } else {
+                offset = procfs_put_byte(output, offset, 0x57 + (nibble as u8));
+            }
+        }
+    }
+    return offset;
+}
+
 private fn procfs_put_comm(output: borrow [u8; 1024..], offset_in: usize,
                            snapshot: ProcessDiagnosticSnapshot) -> usize {
     let mut start: usize = 0;
@@ -251,6 +271,18 @@ private fn procfs_render_profile(output: borrow [u8; 1024..]) -> usize {
             offset = procfs_put_usize(output, offset, profile_session_core_stored(cpu));
             offset = procfs_put_text(output, offset, bs" lost ");
             offset = procfs_put_usize(output, offset, profile_session_core_lost(cpu));
+            offset = procfs_put_text(output, offset, bs" irqsoff_ticks ");
+            offset = procfs_put_usize(output, offset, irqsoff_core_longest(cpu));
+            offset = procfs_put_text(output, offset, bs" from");
+            for slot: usize in 0..<IRQSOFF_DEPTH {
+                offset = procfs_put_byte(output, offset, 0x20);
+                offset = procfs_put_hex(output, offset, irqsoff_core_site(cpu, false, slot));
+            }
+            offset = procfs_put_text(output, offset, bs" to");
+            for slot: usize in 0..<IRQSOFF_DEPTH {
+                offset = procfs_put_byte(output, offset, 0x20);
+                offset = procfs_put_hex(output, offset, irqsoff_core_site(cpu, true, slot));
+            }
             offset = procfs_put_byte(output, offset, 0x0A);
         }
     }

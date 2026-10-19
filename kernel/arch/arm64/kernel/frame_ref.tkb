@@ -129,6 +129,24 @@ fn frame_interrupted_stack_word(frame: borrow FrameRef[process], address: usize)
     return FrameStackWord::Word(frame_word(frame, address - frame.sp));
 }
 
+// GitHub issue #811: one word of the kernel stack the CALLER runs on, for
+// the irqsoff tracer's frame-pointer walk. `sp` is the caller's own stack
+// pointer (caller_frame.S). Same span rule as above: a kernel process stack
+// is the upper half of a 2^(KERNEL_STACK_SHIFT+1)-aligned run, so the live
+// part of it is [sp, top of that run). An sp in a lower half (a boot or
+// other non-process stack) answers Outside for every address, and so does
+// any address outside the span or not 8-aligned; nothing outside it is read.
+fn frame_current_stack_word(sp: usize, address: usize) -> FrameStackWord !{unsafe} {
+    let run_bytes: usize = 1 << (KERNEL_STACK_SHIFT + 1);
+    if (((sp >> KERNEL_STACK_SHIFT) & 1) == 0) { return FrameStackWord::Outside; }
+    let top: usize = (sp | (run_bytes - 1)) + 1;
+    if (address % 8 != 0 || address < sp || address > top - 8) {
+        return FrameStackWord::Outside;
+    }
+    let word: *usize = unsafe { address as *usize };
+    return FrameStackWord::Word(*word);
+}
+
 private fn frame_word_set(frame: borrow FrameRef[process], offset: usize, value: usize)
         !{unsafe} {
     let word: *usize = unsafe { (frame.sp + offset) as *usize };

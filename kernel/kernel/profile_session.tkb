@@ -57,6 +57,7 @@
 // - A core that was not online at start has no buffer and never arms.
 
 use "kernel/arch/arm64/kernel/pmu_extern.tkb";
+use "kernel/arch/arm64/kernel/caller_frame_extern.tkb";
 use "kernel/arch/arm64/kernel/timer.tkb";
 use "kernel/lib/execution_model.tkb";
 use "kernel/lib/atomic_word.tkb";
@@ -268,6 +269,7 @@ fn profile_session_start(period: usize, samples: usize, depth: usize)
     if (profile_session_depth < 1) { profile_session_depth = 1; }
     profile_session_started = read_cntpct() as usize;
     profile_session_stopped = 0;
+    irqsoff_reset();
     atomic_word_store(&profile_session_epoch,
                       atomic_word_load(&profile_session_epoch) + 1);
     atomic_word_store(&profile_session_mode, 1);
@@ -442,6 +444,147 @@ fn profile_session_control(text: []const u8)
         ProfileStartResult::NoPmu => { return ProfileControlResult::NoPmu; }
         ProfileStartResult::OutOfMemory(cpu) => {
             return ProfileControlResult::OutOfMemory;
+        }
+    }
+}
+
+// GitHub issue #811: the irqsoff tracer. While a session samples, the
+// outermost mutex_irq_save on a core opens a masked span and the matching
+// mutex_irq_restore closes it; each core keeps its longest span in
+// generic-counter ticks, with IRQSOFF_DEPTH return addresses of the caller
+// chain where it opened and where it closed (symbolized on the host). Off
+// -- one acquire load and a branch per mask and unmask -- when no session
+// samples, as the maintainer asked on #771.
+//
+// Current limitations (2026-10-19):
+// - Only spans opened by mutex_irq_save are seen. Exception entry to eret,
+//   syscall.tkb's direct disable_irq and user_entry.S mask without it, so
+//   their spans are not measured (the issue's maintainer decision).
+// - The entry chain is walked at every traced open; the exit chain only
+//   when the span is a new longest. Spans already open when the session
+//   starts are not counted.
+// - Return addresses come from the canonical frame records of the
+//   --frame-pointers contract; a chain that leaves the current process
+//   kernel stack ends the walk early, and a span opened on a non-process
+//   (boot) stack records no sites at all.
+const IRQSOFF_DEPTH: usize = 3;
+
+struct IrqsoffCore {
+    // Counter value at the open, 0 when no span is open.
+    opened: usize;
+    longest: usize;
+    open_pcs: [usize; IRQSOFF_DEPTH];
+    longest_from: [usize; IRQSOFF_DEPTH];
+    longest_to: [usize; IRQSOFF_DEPTH];
+}
+
+private let mut irqsoff_core: [IrqsoffCore; KERNEL_MAX_CORES];
+
+// Fill this core's open_pcs (`to` false) or longest_to (`to` true) with
+// the return addresses of the caller chain above the function that called
+// the hook (frame 0 is the hook's own record, whose
+// return lies in mutex_irq_save/restore; it is skipped). Unwritten slots
+// are 0. Never faults: every record read is 16-byte aligned, strictly
+// above the previous one, and read only through frame_current_stack_word,
+// which reads nothing outside the caller's own process kernel stack.
+private fn irqsoff_walk(cpu: {0..<KERNEL_MAX_CORES as usize}, to: bool,
+                        fp_in: usize, sp: usize)
+        !{unsafe} {
+    let mut fp: usize = fp_in;
+    let mut stored: usize = 0;
+    let mut level: usize = 0;
+    // Fixed bound: the skipped frame plus the stored ones.
+    while (level < IRQSOFF_DEPTH + 1) {
+        if (fp % 16 != 0) { break; }
+        let mut previous: usize = 0;
+        let mut return_pc: usize = 0;
+        match frame_current_stack_word(sp, fp) {
+            FrameStackWord::Outside => { break; }
+            FrameStackWord::Word(word) => { previous = word; }
+        }
+        match frame_current_stack_word(sp, fp + 8) {
+            FrameStackWord::Outside => { break; }
+            FrameStackWord::Word(word) => { return_pc = word; }
+        }
+        if (return_pc == 0 || return_pc % 4 != 0) { break; }
+        if (level >= 1) {
+            if (stored < IRQSOFF_DEPTH) {
+                irqsoff_site_store(cpu, to, stored, return_pc);
+                stored = stored + 1;
+            }
+        }
+        if (previous <= fp) { break; }
+        fp = previous;
+        level = level + 1;
+    }
+    for slot: usize in 0..<IRQSOFF_DEPTH {
+        if (slot >= stored) { irqsoff_site_store(cpu, to, slot, 0); }
+    }
+}
+
+private fn irqsoff_site_store(cpu: {0..<KERNEL_MAX_CORES as usize}, to: bool,
+                              index: usize, pc: usize) {
+    if (index >= IRQSOFF_DEPTH) { return; }
+    let slot: {0..<IRQSOFF_DEPTH as usize} = index;
+    if (to) { irqsoff_core[cpu].longest_to[slot] = pc; }
+    else { irqsoff_core[cpu].open_pcs[slot] = pc; }
+}
+
+// Called with IRQs just masked by the outermost save on this core.
+fn irqsoff_open() !{unsafe} {
+    if (atomic_word_load(&profile_session_mode) != 1) { return; }
+    let raw_cpu: usize = cpu_id();
+    if (raw_cpu >= KERNEL_MAX_CORES) { return; }
+    let cpu: {0..<KERNEL_MAX_CORES as usize} = raw_cpu;
+    irqsoff_walk(cpu, false, caller_frame_address(),
+                 caller_stack_address());
+    irqsoff_core[cpu].opened = mrs_cntpct_el0();
+}
+
+// Called by the matching restore just before it unmasks. A span opened
+// before the session started has opened == 0 and is not counted.
+fn irqsoff_close() !{unsafe} {
+    if (atomic_word_load(&profile_session_mode) != 1) { return; }
+    let raw_cpu: usize = cpu_id();
+    if (raw_cpu >= KERNEL_MAX_CORES) { return; }
+    let cpu: {0..<KERNEL_MAX_CORES as usize} = raw_cpu;
+    let opened: usize = irqsoff_core[cpu].opened;
+    if (opened == 0) { return; }
+    irqsoff_core[cpu].opened = 0;
+    let now: usize = mrs_cntpct_el0();
+    if (now >= opened && now - opened > irqsoff_core[cpu].longest) {
+        irqsoff_core[cpu].longest = now - opened;
+        for slot: usize in 0..<IRQSOFF_DEPTH {
+            irqsoff_core[cpu].longest_from[slot] = irqsoff_core[cpu].open_pcs[slot];
+        }
+        irqsoff_walk(cpu, true, caller_frame_address(),
+                     caller_stack_address());
+    }
+}
+
+fn irqsoff_core_longest(cpu: {0..<KERNEL_MAX_CORES as usize}) -> usize {
+    return irqsoff_core[cpu].longest;
+}
+
+// Where the longest span began (`to` false) or ended (`to` true): return
+// address `slot` of the caller chain, innermost first; 0 when the walk
+// stopped before it.
+fn irqsoff_core_site(cpu: {0..<KERNEL_MAX_CORES as usize}, to: bool,
+                     slot: {0..<IRQSOFF_DEPTH as usize}) -> usize {
+    if (to) { return irqsoff_core[cpu].longest_to[slot]; }
+    return irqsoff_core[cpu].longest_from[slot];
+}
+
+// A new session starts every core's record afresh. No core opens or closes
+// a span meanwhile: the mode is not 1 until the caller publishes it.
+private fn irqsoff_reset() {
+    for cpu: usize in 0..<KERNEL_MAX_CORES {
+        irqsoff_core[cpu].opened = 0;
+        irqsoff_core[cpu].longest = 0;
+        for slot: usize in 0..<IRQSOFF_DEPTH {
+            irqsoff_core[cpu].open_pcs[slot] = 0;
+            irqsoff_core[cpu].longest_from[slot] = 0;
+            irqsoff_core[cpu].longest_to[slot] = 0;
         }
     }
 }

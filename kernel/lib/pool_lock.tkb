@@ -62,11 +62,13 @@ const DAIF_IRQ_BIT: usize = 7;
 fn mutex_irq_save() -> usize {
     let flags: usize = (mrs_daif() >> DAIF_IRQ_BIT) & 1;
     disable_irq();
+    if (flags == 0) { irqsoff_open(); }
     return flags;
 }
 
 // Enables ONLY if the matching save is the one that masked.
 fn mutex_irq_restore(flags: usize) !{restores_saved_irq} {
+    if (flags == 0) { irqsoff_close(); }
     if (flags == 0) { enable_irq(); }
 }
 

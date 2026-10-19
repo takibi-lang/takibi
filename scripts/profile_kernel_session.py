@@ -33,6 +33,17 @@ Usage:
   profile_kernel_session.py fold --elf kernel/build/rpi5/kernel-shell.elf
       --console DIR/console.log [--out DIR/kernel.folded] [--top 15]
 
+The irqsoff tracer (GitHub issue #811) adds to each `cpuN` line of
+/proc/takibi/profile the longest span, in generic-counter ticks, that the
+core spent with IRQs masked by mutex_irq_save while the session sampled,
+and three return addresses of the caller chain where it opened and closed:
+
+  cpuN stored S lost L irqsoff_ticks T from 0xA 0xB 0xC to 0xD 0xE 0xF
+
+`fold` prints them symbolized (innermost first; 0 means the walk stopped),
+and `check --expect-irqsoff` requires a measured span whose two sites
+symbolize to kernel functions.
+
 A late sample (skid past one period) folds as its stack with weight 1 plus
 the same stack under a "[masked]" leaf with the rest: the leaf of a late
 sample is where IRQs came back on, so masked time shows up at the end of
@@ -97,6 +108,33 @@ def parse_console(text: str):
         raise ValueError(f"dump declares {declared} samples, parsed {len(samples)}")
     samples.sort(key=lambda sample: sample["t"])
     return period, samples, {"declared": declared, "lost": int(end.group(2))}
+
+
+IRQSOFF_RE = re.compile(
+    r"^cpu(\d+) stored \d+ lost \d+ irqsoff_ticks (\d+) "
+    r"from ((?:0x[0-9a-f]+ ?)+)to((?: 0x[0-9a-f]+)+)\s*$", re.M)
+
+
+def irqsoff_records(text: str) -> dict:
+    """The last /proc/takibi/profile read's irqsoff fields, by cpu."""
+    cores = {}
+    for match in IRQSOFF_RE.finditer(text):
+        cores[int(match.group(1))] = {
+            "ticks": int(match.group(2)),
+            "from": [int(word, 16) for word in match.group(3).split()],
+            "to": [int(word, 16) for word in match.group(4).split()],
+        }
+    return cores
+
+
+def irqsoff_sites(pcs, symbols) -> list[str]:
+    """Return addresses symbolized at address - 4, up to the first 0."""
+    names = []
+    for pc in pcs:
+        if pc == 0:
+            break
+        names.append(symbols.name(pc - 4))
+    return names
 
 
 def weight_of(sample, period: int) -> int:
@@ -189,6 +227,11 @@ def cmd_fold(args) -> int:
     print("[profile] top self:")
     for name, value in summary["top_self"]:
         print(f"  {100 * value / total:5.1f}%  {value:6d}  {name}")
+    for cpu, core in sorted(irqsoff_records(text).items()):
+        print(f"[profile] irqsoff cpu{cpu} ticks={core['ticks']} from "
+              + " <- ".join(irqsoff_sites(core["from"], symbols) or ["?"])
+              + " to "
+              + " <- ".join(irqsoff_sites(core["to"], symbols) or ["?"]))
     print(f"[profile] folded stacks: {out}")
     return 0
 
@@ -205,7 +248,8 @@ def core_records(text: str) -> dict:
     return cores
 
 
-def check_console(text: str, require_cores, expect_function, symbols) -> list[str]:
+def check_console(text: str, require_cores, expect_function, symbols,
+                  expect_irqsoff: bool = False) -> list[str]:
     """What a capture must show; returns the problems, empty when it passes.
 
     - every core is accounted: each interrupt it took was stored, lost or
@@ -213,7 +257,9 @@ def check_console(text: str, require_cores, expect_function, symbols) -> list[st
       at all, which is what a misrouted line looked like);
     - each required core armed and stored samples (#497: a secondary whose
       dispatch skipped the sampler stored none while its line stormed);
-    - optionally, a function is among the top inclusive EL1 frames.
+    - optionally, a function is among the top inclusive EL1 frames;
+    - optionally (#811), some core measured an IRQ-off span, and both its
+      innermost open and close sites symbolize to a kernel function.
     """
     problems = []
     period, samples, _end = parse_console(text)
@@ -233,6 +279,17 @@ def check_console(text: str, require_cores, expect_function, symbols) -> list[st
         names = [name for name, _ in top if not name.startswith("[")][:10]
         if expect_function not in names:
             problems.append(f"{expect_function} is not in the top EL1 frames {names}")
+    if expect_irqsoff:
+        measured = [core for core in irqsoff_records(text).values()
+                    if core["ticks"] > 0]
+        if not measured:
+            problems.append("no core measured an irqsoff span")
+        for core in measured:
+            for end in ("from", "to"):
+                names = irqsoff_sites(core[end], symbols)
+                if not names or names[0].startswith("0x"):
+                    problems.append(f"irqsoff {end} site does not symbolize: "
+                                    f"{core[end]}")
     return problems
 
 
@@ -240,14 +297,17 @@ def cmd_check(args) -> int:
     text = Path(args.console).read_text(encoding="ascii", errors="replace").replace("\r", "")
     symbols = Symbols(args.elf, args.nm) if args.elf else None
     cores = [int(cpu) for cpu in args.require_cores.split(",") if cpu]
-    problems = check_console(text, cores, args.expect_function, symbols)
+    problems = check_console(text, cores, args.expect_function, symbols,
+                             args.expect_irqsoff)
     if problems:
         for problem in problems:
             print(f"FAIL profile-session: {problem}")
         return 1
     print(f"PASS profile-session: dump accounted for every interrupt; cores "
           f"{cores or 'none'} sampled"
-          + (f"; {args.expect_function} is a top frame" if args.expect_function else ""))
+          + (f"; {args.expect_function} is a top frame" if args.expect_function else "")
+          + ("; an irqsoff span was measured and its sites symbolize"
+             if args.expect_irqsoff else ""))
     return 0
 
 
@@ -386,6 +446,7 @@ def main() -> int:
     chk.add_argument("--nm", default="nm")
     chk.add_argument("--require-cores", default="")
     chk.add_argument("--expect-function", default="")
+    chk.add_argument("--expect-irqsoff", action="store_true")
     args = parser.parse_args()
     if args.action == "capture":
         return capture(args)
