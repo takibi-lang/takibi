@@ -1,0 +1,158 @@
+// GitHub issue #830: the network interface's interrupt rotates through the
+// online cores.
+//
+// The policy (maintainer decision 2026-10-19, option C): after each handled
+// NIC interrupt, the handling core retargets the SPI to the next online core
+// -- one GICD_ITARGETSR byte write and one rotation counter. Both NIC
+// handlers are trivial (acknowledge the device, SEV); the TCP work runs in
+// syscall context on the consumer's core, so which core takes the interrupt
+// does not decide cache locality, and spreading it costs one MMIO write.
+// Linux routes each SPI to one CPU and lets irqbalance move it now and then;
+// this rotates on every interrupt instead. Following the waiter (steering
+// to the core blocked on NetRx) is deferred until there is a multi-queue NIC
+// or protocol work in the interrupt.
+//
+// Both platforms' dispatch call nic_irq_handled from any core, after the
+// driver's own handler, before the EOI. virtio-net (QEMU) and GEM (RPi5)
+// each name their SPI; there is one NIC per build.
+//
+// Current limitations (2026-10-19). Keep this list current as call sites
+// change; a stale limitation is worse than none.
+// - ONLINE CORES ARE 0..online-1. The rotation counts kernel_online_core_count
+//   and targets core (turn % online); it assumes cores come online in index
+//   order, which kernel_secondary_boot does today.
+// - ONE NIC. The counter and the pin are global, not per INTID.
+// - A RETARGET RACES THE NEXT DELIVERY. Two cores can be in the NIC handler
+//   at once (the next interrupt arrives at the new target before the old
+//   core's EOI). Both handlers tolerate it: each acknowledges what it read,
+//   and virtio's flags are release/acquire words.
+
+use "kernel/lib/atomic_word.tkb";
+use "kernel/lib/execution_model.tkb";
+use "kernel/arch/arm64/kernel/gicv2.tkb";
+use "kernel/arch/arm64/kernel/secondary.tkb";
+use "kernel/arch/arm64/boot/cpu.tkb";
+
+// Incremented once per handled NIC interrupt; the next target is this
+// modulo the online core count.
+private let mut nic_irq_turn: AtomicWord;
+// 0: rotate. Otherwise 1 + the one core every NIC interrupt goes to: the
+// boot fixture's deterministic phase.
+private let mut nic_irq_pin: AtomicWord;
+// NIC interrupts each core handled, for the boot fixture.
+private let mut nic_irq_taken: [AtomicWord; KERNEL_MAX_CORES];
+// The fixture's snapshot of nic_irq_taken at the start of a phase.
+private let mut nic_irq_phase_start: [usize; KERNEL_MAX_CORES];
+// The NIC SPI the fixture pinned, so unpinning can route it again.
+private let mut nic_irq_evidence_intid: u32 = 0;
+
+fn nic_irq_target_core() -> usize !{unsafe} {
+    let pinned: usize = atomic_word_load(&nic_irq_pin);
+    if (pinned != 0) { return pinned - 1; }
+    let online: usize = kernel_online_core_count();
+    if (online == 0) { return 0; }
+    return atomic_word_load(&nic_irq_turn) % online;
+}
+
+// Writes the current target for `intid`. The drivers call this where they
+// used to write a fixed core 0.
+fn nic_irq_route(intid: u32) !{unsafe} {
+    let core: usize = nic_irq_target_core();
+    if (core >= 8) { return; }
+    gic_intid_target(intid, (1 << core) as u8);
+}
+
+// Called by the platform dispatch on the core that took the NIC interrupt,
+// after the driver's handler and before the EOI.
+fn nic_irq_handled(intid: u32) !{unsafe} {
+    let raw: usize = cpu_id();
+    if (raw < KERNEL_MAX_CORES) {
+        let core: {0..<KERNEL_MAX_CORES as usize} = raw;
+        let previous_taken: usize = atomic_word_fetch_add(&nic_irq_taken[core], 1);
+    }
+    let previous_turn: usize = atomic_word_fetch_add(&nic_irq_turn, 1);
+    nic_irq_route(intid);
+}
+
+private fn nic_irq_phase_mark() !{unsafe} {
+    for core: usize in 0..<KERNEL_MAX_CORES {
+        nic_irq_phase_start[core] = atomic_word_load(&nic_irq_taken[core]);
+    }
+}
+
+private fn nic_irq_phase_taken(core: {0..<KERNEL_MAX_CORES as usize}) -> usize !{unsafe} {
+    return atomic_word_load(&nic_irq_taken[core]) - nic_irq_phase_start[core];
+}
+
+// The boot fixture's first phase: every NIC interrupt goes to one non-zero
+// core, so the view can name it. Called before net_init enables the SPI.
+fn nic_irq_evidence_pin_begin(intid: u32) !{unsafe} {
+    if (kernel_online_core_count() <= SECONDARY_CORE_ID) { return; }
+    nic_irq_evidence_intid = intid;
+    atomic_word_store(&nic_irq_pin, NIC_IRQ_EVIDENCE_CORE + 1);
+    nic_irq_route(intid);
+    nic_irq_phase_mark();
+}
+
+// Back to rotation without a report: the boot exchange stopped early (no
+// fixture peer), so there is no phase to judge.
+fn nic_irq_evidence_unpin() !{unsafe} {
+    if (atomic_word_load(&nic_irq_pin) == 0) { return; }
+    atomic_word_store(&nic_irq_pin, 0);
+    nic_irq_route(nic_irq_evidence_intid);
+}
+
+// The core the pinned phase targets. scripts/build_qemu_race_window.py's
+// 830-core0 control rewrites this line to core 0.
+const NIC_IRQ_EVIDENCE_CORE: usize = SECONDARY_CORE_ID;
+
+private fn nic_irq_log_counts() !{logs, unsafe} {
+    kernel_boot_log(" taken=");
+    for core: usize in 0..<KERNEL_MAX_CORES {
+        if (core < kernel_online_core_count()) {
+            if (core != 0) { kernel_boot_log(","); }
+            uart_put_udec(nic_irq_phase_taken(core));
+        }
+    }
+    kernel_boot_log("\n");
+}
+
+// End of the pinned phase: report, then rotate from here on.
+fn nic_irq_evidence_pin_end() !{logs, unsafe} {
+    if (atomic_word_load(&nic_irq_pin) == 0) { return; }
+    let pinned: usize = atomic_word_load(&nic_irq_pin) - 1;
+    let mut elsewhere: usize = 0;
+    let mut there: usize = 0;
+    for core: usize in 0..<KERNEL_MAX_CORES {
+        if (core == pinned) {
+            there = nic_irq_phase_taken(core);
+        } else {
+            elsewhere = elsewhere + nic_irq_phase_taken(core);
+        }
+    }
+    if (pinned == SECONDARY_CORE_ID && there > 0 && elsewhere == 0) {
+        kernel_boot_log("nic irq: pinned to cpu 1, every NIC interrupt was taken there\n");
+    } else {
+        kernel_boot_log("nic irq: pinned phase FAILED: cpu ");
+        uart_put_udec(pinned);
+        nic_irq_log_counts();
+    }
+    atomic_word_store(&nic_irq_pin, 0);
+    nic_irq_route(nic_irq_evidence_intid);
+    nic_irq_phase_mark();
+}
+
+// End of the rotating phase: at least two cores took NIC interrupts.
+fn nic_irq_evidence_rotation_report() !{logs, unsafe} {
+    if (kernel_online_core_count() <= SECONDARY_CORE_ID) { return; }
+    let mut cores: usize = 0;
+    for core: usize in 0..<KERNEL_MAX_CORES {
+        if (nic_irq_phase_taken(core) > 0) { cores = cores + 1; }
+    }
+    if (cores >= 2) {
+        kernel_boot_log("nic irq: rotating, NIC interrupts were taken on at least two cpus\n");
+    } else {
+        kernel_boot_log("nic irq: rotation FAILED:");
+        nic_irq_log_counts();
+    }
+}

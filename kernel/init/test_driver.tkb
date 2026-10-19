@@ -1316,6 +1316,7 @@ fn kernel_test_driver_run() {
     // says -- but it does NOT mean nothing is held.
     page_baseline = page_allocator_live_count();
     kernel_test_platform_network();
+    nic_irq_evidence_unpin();
     kernel_test_platform_storage();
     if (virtio_blk_index_wrap_probe()) {
         kernel_boot_log("virtio blk: used index wrap ok\n");

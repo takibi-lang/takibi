@@ -1,0 +1,2 @@
+nic irq: pinned to cpu 1, every NIC interrupt was taken there
+nic irq: rotating, NIC interrupts were taken on at least two cpus

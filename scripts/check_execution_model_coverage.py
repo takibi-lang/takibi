@@ -198,6 +198,11 @@ EXEMPT = {
         "per-CPU rows are indexed below KERNEL_MAX_CORES; each is written "
         "only by its own CPU's IRQ dispatch and read by DDB under a world "
         "stop or by the boot fixture through one acquire load",
+    "kernel/nic_irq_affinity.tkb":
+        "GitHub issue #830: the rotation counter, the pin and the per-CPU "
+        "counts are AtomicWords any core may update; the fixture's phase "
+        "snapshot and pinned INTID are written only by the boot core's "
+        "network fixture",
     "kernel/profile_samples.tkb":
         "per-CPU samples are indexed below KERNEL_MAX_CORES and opened or "
         "read only for kernel_online_core_count() under a world stop",

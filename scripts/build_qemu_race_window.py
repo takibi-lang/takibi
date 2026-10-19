@@ -69,6 +69,15 @@ WINDOWS = {
                   '        }\n'
                   '    }\n'),
     },
+    # GitHub issue #830's negative control: the boot fixture pins the NIC SPI
+    # to core 0 instead of a peer, which is where every device interrupt
+    # went before. The pinned-phase check must refuse it.
+    "830-core0": {
+        "spin": None,
+        "check": [("kernel/nic_irq_affinity.tkb",
+                   "const NIC_IRQ_EVIDENCE_CORE: usize = SECONDARY_CORE_ID;\n",
+                   "const NIC_IRQ_EVIDENCE_CORE: usize = 0;\n")],
+    },
     # Deliberately never open CPU 0. The finite child may finish on CPU 1,
     # but its parent must refuse wait4 without a timer leave observation.
     "705-missed-arrival": {

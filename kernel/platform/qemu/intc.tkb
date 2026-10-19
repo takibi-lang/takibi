@@ -24,6 +24,7 @@ use "kernel/platform/qemu/timer_irq.tkb";
 use "kernel/arch/arm64/kernel/secondary.tkb";
 use "kernel/arch/arm64/boot/cpu.tkb";
 use "kernel/kernel/irq_counts.tkb";
+use "kernel/kernel/nic_irq_affinity.tkb";
 use "kernel/arch/arm64/kernel/gicv2.tkb";
 
 let mut qemu_uart_gic_intid: u32 = 33; // bootstrap route until DTB comparison
@@ -142,12 +143,23 @@ fn platform_irq_dispatch_inner(frame: sink FrameRef[process], lower_el: bool)
         workload_profile_irq_exit();
         return frame_any(frame);
     }
-    // core-role: device interrupts are routed to core 0 alone, so a
-    // secondary takes only its own timer tick here, which runs the shared
-    // scheduling policy (GitHub issues #447 and #775; see "Core roles" in
-    // kernel/CONCURRENCY.md). Everything below -- device drivers, the
-    // UART's DDB break -- is core 0's. GICC_IAR was read above: acknowledging
-    // is the interrupted core's own job on its own banked interface.
+    // GitHub issue #830: the NIC's SPI rotates through the online cores, so
+    // any core takes it. The handler acknowledges the device and sends SEV;
+    // the retarget names the next core before this EOI. The >= 0 guard keeps
+    // the "no device" sentinel -1 from matching (GitHub issue #237 M4).
+    if (virtio_net_gic_intid >= 0 && id == (virtio_net_gic_intid as u32)) {
+        virtio_net_irq_handler();
+        nic_irq_handled(id);
+        gicc.eoir = iar;
+        workload_profile_irq_exit();
+        return frame_any(frame);
+    }
+    // core-role: the UART is routed to core 0 alone, so a secondary takes
+    // only its own timer tick here, which runs the shared scheduling policy
+    // (GitHub issues #447 and #775; see "Core roles" in
+    // kernel/CONCURRENCY.md). Everything below -- the UART and its DDB
+    // break -- is core 0's. GICC_IAR was read above: acknowledging is the
+    // interrupted core's own job on its own banked interface.
     if (cpu_id() != 0) {
         let switch: TimerSwitch = kernel_secondary_tick(
             frame, lower_el, id == qemu_timer_gic_intid);
@@ -160,13 +172,6 @@ fn platform_irq_dispatch_inner(frame: sink FrameRef[process], lower_el: bool)
 
     if (id == qemu_uart_gic_intid) {
         debug_break = uart_irq_service();
-    } else if (id == (virtio_net_gic_intid as u32) && virtio_net_gic_intid >= 0) {
-        // GitHub issue #237 M4: virtio_net_gic_intid (kernel/drivers/net/
-        // virtio_net.tkb) is discovered at runtime, not a compile-time
-        // Unlike the DTB-discovered UART INTID above, it starts at -1 (no
-        // device found / net_init() not called yet), so the >= 0 guard
-        // keeps that sentinel from ever matching a real GICC_IAR value.
-        virtio_net_irq_handler();
     } else if (id == qemu_timer_gic_intid) {
         timer_irq_handler();
         // GitHub issue #453: this branch is why most of kernel/ can share

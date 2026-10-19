@@ -15,6 +15,7 @@ fn mutex_irq_restore(flags: usize) {}
 fn gic_intid_clear_pending(intid: u32) {}
 fn gic_intid_enable(intid: u32) {}
 fn gic_intid_target(intid: u32, cpu: u32) {}
+fn nic_irq_route(intid: u32) {}
 fn workload_profile_note_network_rx(len: usize) {}
 fn workload_profile_note_network_tx(len: usize) {}
 fn kernel_boot_log(message: *u8) { timeout_logs = timeout_logs + 1; }

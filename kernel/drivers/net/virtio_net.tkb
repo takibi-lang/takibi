@@ -38,6 +38,7 @@
 
 use "kernel/net/netconfig.tkb";
 use "kernel/lib/init_once.tkb";
+use "kernel/lib/atomic_word.tkb";
 use "kernel/drivers/virtio_ring.tkb";
 use "kernel/drivers/net/virtio_net_tx_wait.tkb";
 use "kernel/drivers/net/virtio_net_tx_dma.tkb";
@@ -148,8 +149,12 @@ let mut virtio_net_regs: IoHandle(VirtioMmioRegs);
 // interrupt dispatch guards that sentinel before comparing it with GICC_IAR.
 let mut virtio_net_gic_intid: i32 = -1;
 private let mut net_init_once: InitOnce;
-let mut virtio_rx_irq_flag: io u32;
-let mut virtio_tx_irq_flag: io u32;
+// GitHub issue #830: the IRQ handler sets these on whichever core the
+// rotating NIC route delivered to, while the capability holder clears and
+// reads them on its own core. Release stores and acquire loads order the
+// flag against the used ring the device wrote before raising the interrupt.
+private let mut virtio_rx_irq_flag: AtomicWord;
+private let mut virtio_tx_irq_flag: AtomicWord;
 // Initialization sets this latch once. Expiry clears it permanently: the
 // InitOnce gate refuses reinitialization and IRQs never change readiness.
 // In-place RX bytes may still belong to TX, so neither queue is republished.
@@ -201,7 +206,8 @@ fn virtio_net_gic_enable() {
     let intid: u32 = virtio_net_gic_intid as u32;
     gic_intid_clear_pending(intid);
     gic_intid_enable(intid);
-    gic_intid_target(intid, 1);
+    // GitHub issue #830: the rotating route (or the boot fixture's pin).
+    nic_irq_route(intid);
 }
 
 // Called from kernel/platform/qemu/intc.tkb's dispatch when the GIC IAR
@@ -210,8 +216,8 @@ fn virtio_net_gic_enable() {
 fn virtio_net_irq_handler() !{interrupt} {
     let status: i32 = virtio_net_regs.interrupt_status;
     virtio_net_regs.interrupt_ack = status;
-    virtio_rx_irq_flag = 1;
-    virtio_tx_irq_flag = 1;
+    atomic_word_store(&virtio_rx_irq_flag, 1);
+    atomic_word_store(&virtio_tx_irq_flag, 1);
     interrupt_notify();
 }
 
@@ -307,8 +313,8 @@ fn net_init() -> NetInitResult {
         return NetInitResult::Failed;
     }
 
-    virtio_rx_irq_flag = 0;
-    virtio_tx_irq_flag = 0;
+    atomic_word_store(&virtio_rx_irq_flag, 0);
+    atomic_word_store(&virtio_tx_irq_flag, 0);
     virtio_net_gic_enable();
 
     if (virtio_net_regs.version != VIRTIO_MMIO_VERSION_MODERN ||
@@ -366,17 +372,17 @@ fn kernel_net_rx_frame_pending() -> NetPendingState {
 // QEMU boot hanging well past kernel_arp_reply_once's own 15s deadline
 // with no host-side peer attached.
 fn net_rx_wait() !{may_block} {
-    if (virtio_net_ready && virtio_rx_irq_flag != 0) { return; }
+    if (virtio_net_ready && atomic_word_load(&virtio_rx_irq_flag) != 0) { return; }
     workload_profile_interrupt_wait();
 }
 
 fn net_rx_acquire(ready: sink NetRxCanAcquire) -> NetRxAcquire {
-    if (virtio_net_ready == false || virtio_rx_irq_flag == 0) {
+    if (virtio_net_ready == false || atomic_word_load(&virtio_rx_irq_flag) == 0) {
         // No frame, but buffers freed off-turn go back to the ring here.
         virtio_net_rx_refill();
         return NetRxAcquire::None(view NetRxCanAcquire);
     }
-    virtio_rx_irq_flag = 0;
+    atomic_word_store(&virtio_rx_irq_flag, 0);
     let VirtioNetUsed::Seen(ring) = virtio_net_used(VIRTIO_USED_NET_RX) else {
         VirtioNetUsed::None => { return NetRxAcquire::None(view NetRxCanAcquire); }
     };
@@ -384,7 +390,7 @@ fn net_rx_acquire(ready: sink NetRxCanAcquire) -> NetRxAcquire {
         virtio_net_rx_refill();
         return NetRxAcquire::None(view NetRxCanAcquire);
     }
-    virtio_rx_irq_flag = 1; // drain coalesced used-ring entries
+    atomic_word_store(&virtio_rx_irq_flag, 1); // drain coalesced used-ring entries
     let slot: {0..<8 as usize} = ((rx_used_seen as u16) as usize) % 8;
     let index: {0..<8 as usize} = min(ring.ring[slot].id, 7) as usize;
     let frame_total_len: i32 = min(ring.ring[slot].len, 0x7FFFFFFF) as i32;
@@ -724,7 +730,7 @@ fn virtio_net_tx_ring(length: usize) {
     avail_ring_set(tx_queue_mem as *u8, 0, 0);
     tx_avail_idx = virtio_ring_index_next(tx_avail_idx);
     avail_publish(tx_queue_mem as *u8, tx_avail_idx);
-    virtio_tx_irq_flag = 0;
+    atomic_word_store(&virtio_tx_irq_flag, 0);
     virtio_notify(1);
 }
 

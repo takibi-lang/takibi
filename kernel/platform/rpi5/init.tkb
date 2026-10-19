@@ -59,6 +59,9 @@ fn kernel_secondary_boot_cpu_on(start: CpuStart[&kernel_world_stop])
 }
 
 fn kernel_test_platform_network() {
+    // GitHub issue #830: ARP and ICMP run with the NIC SPI pinned to one
+    // non-zero core; the TCP echo after them runs with it rotating.
+    nic_irq_evidence_pin_begin(RPI5_GEM_GIC_INTID);
     match net_init() {
         NetInitResult::Failed => {
             kernel_boot_log("rp1 gem: link failed\n");
@@ -79,6 +82,7 @@ fn kernel_test_platform_network() {
                         }
                         KernelIcmpResult::Replied(icmp_ready) => {
                             kernel_boot_log("rp1 gem: icmp echo reply ok ip=192.168.20.2\n");
+                            nic_irq_evidence_pin_end();
                             match kernel_tcp_echo_check(icmp_ready) {
                                 KernelTcpResult::TimedOut(tcp_ready) => {
                                     kernel_boot_log("rp1 gem: tcp timeout\n");
@@ -86,6 +90,7 @@ fn kernel_test_platform_network() {
                                 }
                                 KernelTcpResult::Verified(tcp_ready) => {
                                     kernel_boot_log("rp1 gem: tcp handshake echo close reconnect ok\n");
+                                    nic_irq_evidence_rotation_report();
                                     match network_capability_install(tcp_ready) {
                                         NetworkCapabilityInstallResult::Installed => {
                                             kernel_boot_log("rp1 gem: rx capability stored for sockets\n");

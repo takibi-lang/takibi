@@ -47,6 +47,7 @@ use "kernel/platform/rpi5/timer_irq.tkb";
 use "kernel/arch/arm64/kernel/secondary.tkb";
 use "kernel/arch/arm64/boot/cpu.tkb";
 use "kernel/kernel/irq_counts.tkb";
+use "kernel/kernel/nic_irq_affinity.tkb";
 use "kernel/arch/arm64/kernel/gicv2.tkb";
 
 const RP1_UART0_VECTOR: u32 = 25;
@@ -202,6 +203,8 @@ fn platform_irq_init() {
     rpi5_gem_attach_bootstrap();
     rpi5_xhci_attach_bootstrap();
     rp1_vector_route(RPI5_GEM_GIC_INTID, RP1_GEM_VECTOR, true);
+    // GitHub issue #830: from here the GEM SPI follows the rotating route.
+    nic_irq_route(RPI5_GEM_GIC_INTID);
 
     timer_irq_setup();
 
@@ -286,7 +289,19 @@ fn rpi5_irq_dispatch_inner(frame: sink FrameRef[process], lower_el: bool)
         workload_profile_irq_exit();
         return frame_any(frame);
     }
-    // core-role: device interrupts are routed to core 0 alone, so a
+    // GitHub issue #830: the GEM SPI rotates through the online cores, so
+    // any core takes it. The handler acknowledges GEM's ISR and sends SEV;
+    // RP1's level-triggered MSI-X wrapper needs its IACK after that, and the
+    // retarget names the next core before this EOI.
+    if (id == RPI5_GEM_GIC_INTID) {
+        gem_irq_handler();
+        rp1_vector_iack(RP1_GEM_VECTOR);
+        nic_irq_handled(id);
+        gicc.eoir = iar;
+        workload_profile_irq_exit();
+        return frame_any(frame);
+    }
+    // core-role: the UART and USB are routed to core 0 alone, so a
     // secondary takes only its own timer tick here, which runs the shared
     // scheduling policy (GitHub issues #447 and #775; see "Core roles" in
     // kernel/CONCURRENCY.md). Everything below -- device drivers, the
@@ -313,10 +328,6 @@ fn rpi5_irq_dispatch_inner(frame: sink FrameRef[process], lower_el: bool)
         // Edge-triggered source (see rp1_usbhost0_msix_setup): no RP1-level
         // IACK write here, matching rp1_chained_handle_irq's own
         // rp1_level_triggered_irq[hwirq] check.
-    } else if (id == RPI5_GEM_GIC_INTID) {
-        gem_irq_handler();
-
-        rp1_vector_iack(RP1_GEM_VECTOR);
     } else if (id == rpi5_timer_gic_intid) {
         timer_irq_handler();
         // GitHub issue #453: this branch is why most of kernel/ can share
