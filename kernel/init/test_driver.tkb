@@ -898,13 +898,15 @@ private fn kernel_process_child_exec_prepare_with(current_authority: borrow Proc
                     // must never turn an accept() count into process
                     // termination for this unmodified BusyBox binary.
                     //
-                    // Only for BusyBox Extras (#591): the handoff drains
-                    // the TCP connection pool and ends the bounded socket
-                    // fixture, which any other musl binary -- taskset run
-                    // from the shell before that fixture -- must not do.
+                    // GitHub issue #836: an exec no longer drains the TCP
+                    // connection pool. On Linux connections belong to
+                    // their descriptors and close-on-exec, not to the exec
+                    // event, and the boot fixtures close their own. What
+                    // is left is the peer-run evidence line for the pinned
+                    // httpd's exec of BusyBox Extras (#591, #828).
                     if (kernel_exec_primary_is_busybox_extras(
                             images.primary.inode)) {
-                        kernel_syscall_daemon_start();
+                        workload_peer_daemon_handoff();
                     }
                     if (kernel_syscall_persistent_shell_active()) {
                         kernel_syscall_persistent_shell_checkpoint_exec_commit(

@@ -1786,16 +1786,17 @@ fn workload_peer_socket_teardown(is_shutdown: bool) {
     process_run_unlock(guard);
 }
 
-// GitHub issue #828: kernel_syscall_daemon_start (the BusyBox Extras exec's
-// TCP pool drain) completed on this CPU. Reported once from the secondary;
-// before #828 that exec was rerun on core 0 and this line never printed.
+// GitHub issue #828: the BusyBox Extras exec completed on this CPU.
+// Reported once from the secondary; before #828 that exec was rerun on
+// core 0 and this line never printed. #836 removed the pool drain the
+// exec used to run, and the line no longer claims it.
 fn workload_peer_daemon_handoff() {
     if (cpu_id() != SECONDARY_CORE_ID) { return; }
     let guard = process_run_lock();
     if (workload_busy_pair.peer_daemon_handoff_reported == false) {
         workload_busy_pair.peer_daemon_handoff_reported = true;
         kernel_boot_log(
-            "workload: pinned httpd exec'd BusyBox Extras and drained the TCP pool on the secondary cpu\n");
+            "workload: pinned httpd exec'd BusyBox Extras on the secondary cpu\n");
     }
     process_run_unlock(guard);
 }

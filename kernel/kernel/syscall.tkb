@@ -418,42 +418,6 @@ private fn syscall_rlimit_load(field: borrow [u8; 8..]) -> usize {
 
 must_use variant SyscallPathResult { Fault; Invalid; Name([]u8); }
 
-fn kernel_syscall_daemon_start() {
-    // Reinitialize only reusable TCP/socket scratch state; unlike
-    // kernel_syscall_process_configure(), this must not clear the parent
-    // shell's descriptors or the HTTPD child's clone-reap record. Interactive
-    // HTTPd uses this same handoff, but does not opt into the bounded test
-    // lifecycle below.
-    // GitHub issue #257 step 5: the per-connection reset loop that stood
-    // here is gone with the connections it walked. A connection exists only
-    // while it is allocated, and tcp_connection_pool_init drains every one
-    // -- there is no fixed set of slots left to put back into a clean
-    // state.
-    //
-    // GitHub issue #828: the drain holds the network capability. Each
-    // connection is freed under its owner, but freeing one walks the shared
-    // retransmit chain by take, filter and put back, which assumes the one
-    // TCP context that holds the capability (kernel/net/tcp.tkb's header).
-    // A connected read, write or close on another CPU holds it while it
-    // walks the same chain, so this waits for it rather than racing it. That
-    // was as true when this exec ran only on core 0 as it is on a peer:
-    // core 0 never owned the pool, the capability does.
-    match network_capability_take_waiting() {
-        NetworkCapabilityWaitResult::NeverInstalled => {
-            tcp_connection_pool_init();
-        }
-        NetworkCapabilityWaitResult::Ready(ready) => {
-            tcp_connection_pool_init();
-            match network_capability_put(ready) {
-                NetworkCapabilityPutResult::Stored => {}
-                NetworkCapabilityPutResult::Conflict => {}
-            }
-        }
-    }
-    syscall_test_lifecycle_daemon_reset();
-    workload_peer_daemon_handoff();
-}
-
 fn kernel_syscall_exec_pending() -> bool {
     let slot: usize = kernel_syscall_process_slot();
     let guard = process_run_lock();
@@ -8165,11 +8129,8 @@ private inline fn syscall_execve_current_with(slot: borrow SyscallSlot[0],
         }
     }
     // GitHub issue #610 kept exec'ing BusyBox Extras on core 0 because its
-    // handoff (kernel_syscall_daemon_start) drains the TCP connection pool.
-    // GitHub issue #828: it runs where it is called. The drain frees each
-    // connection under its owner and holds the network capability while it
-    // does, so a peer's drain and a connected call on any other CPU
-    // serialize on the same locks core 0's did.
+    // handoff drained the TCP connection pool; #828 ran it where it was
+    // called, and #836 removed the drain.
     let mut output_offset: usize = script_offset;
     let mut argc: usize = script_argc;
     let mut vector_terminated: bool = false;

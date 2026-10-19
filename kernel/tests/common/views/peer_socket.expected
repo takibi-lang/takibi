@@ -1,3 +1,3 @@
-workload: pinned httpd exec'd BusyBox Extras and drained the TCP pool on the secondary cpu
+workload: pinned httpd exec'd BusyBox Extras on the secondary cpu
 workload: pinned httpd read and wrote a connected socket on the secondary cpu
 workload: pinned httpd closed and shut down a connected socket on the secondary cpu

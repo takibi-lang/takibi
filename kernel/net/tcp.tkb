@@ -984,9 +984,9 @@ private fn tcp_connection_pin(pool: *RegionPool(TcpConnection) @ conns,
 }
 
 // Despite the name, this is a RESET, not a one-time constructor: it is
-// called again on every kernel_syscall_daemon_start() and
-// kernel_syscall_process_configure(), which is how a fresh daemon or a
-// reconfigured process gets clean connection state.
+// called again on every kernel_syscall_process_configure(), which is how a
+// reconfigured process gets clean connection state. (The BusyBox Extras
+// exec called it too until GitHub issue #836.)
 //
 // GitHub issue #257: that matters to the retransmit pool in a way it did
 // not matter to anything here before. Re-running intrusive_pool_init on a

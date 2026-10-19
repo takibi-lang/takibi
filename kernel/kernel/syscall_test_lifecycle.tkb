@@ -41,10 +41,6 @@ private let mut syscall_persistent_shell_checkpoint_selected_logged: bool;
 private let mut syscall_persistent_shell_checkpoint_exec_prepare_logged: bool;
 private let mut syscall_persistent_shell_checkpoint_exec_commit_logged: bool;
 
-fn syscall_test_lifecycle_daemon_reset() {
-    syscall_connected_fixture_pending = false;
-}
-
 // Called from kernel_syscall_process_configure() (syscall.tkb) alongside
 // its other real per-boot resets.
 fn syscall_test_lifecycle_persistent_shell_clear() {
@@ -79,6 +75,12 @@ fn kernel_syscall_connected_fixture_start() {
 
 fn kernel_syscall_persistent_shell_start() {
     syscall_persistent_shell = true;
+    // GitHub issue #836: the bounded suite owns the connected fixture, so
+    // its end retires the fixture's listener label if the fixture never
+    // listened. The BusyBox Extras exec used to clear it as a side effect.
+    let guard = process_run_lock();
+    syscall_connected_fixture_pending = false;
+    process_run_unlock(guard);
     // The "shell blocked on the UART" marker is a one-shot latch, and the
     // bounded phase's own interactive ash already spent it. Re-arming it
     // here is what makes the persistent shell's block announce itself --
