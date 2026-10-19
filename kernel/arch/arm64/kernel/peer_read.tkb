@@ -279,6 +279,8 @@ fn peer_console() !{unsafe} {
     nap[10] = 0x0F;
     let mut spin: usize = 0x9E3779B97F4A7C15;
     let mut peer_cpu: usize = 0;
+    // poll-bound: the kernel answers PEER_CONSOLE_ABANDONED once the
+    // filesystem reader is reaped without its report (GitHub issue #843).
     while (peer_cpu == 0) {
         peer_cpu = svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_CONSOLE_TAG,
                         0, 0, 0, 0);
@@ -356,6 +358,8 @@ fn peer_console() !{unsafe} {
     // in the poll's unused argument so the loop is not optimized away.
     let mut action: usize = svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_CONSOLE_TAG,
                                  first, total, 0, 0);
+    // poll-bound: the kernel answers 2 at once unless a UART-BREAK DDB lane
+    // is armed, and there the debugger's entry releases the hold.
     while (action != 2) {
         if (action == 0) {
             peer_console_refused(first);

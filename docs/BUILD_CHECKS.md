@@ -170,6 +170,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_platform_file_parity.py` | duplicated platform functions do not drift silently, and neither do identical inline runs of eight significant lines |
 | `check_platform_view_parity.py` | a view compared on one lane only says why it is not shared |
 | `check_platform_view_parity_controls.py` | Controls for the platform-view parity check |
+| `check_fixture_poll_bounds.py` | every `while` loop in an EL0 fixture that polls WORKLOAD_PROGRESS counts against an UPPER_CASE bound or carries a `// poll-bound:` reason (#844); controls plant an unbounded poll, an answer-only compare and masked bounds |
 | `check_peer_filesystem_controls.py` | the peer filesystem verdict requires CPU-1 reads, failed first lock attempts on both CPUs, and capture completion on both platforms; controls remove each link |
 | `check_peer_console_process_controls.py` | the peer-console verdict requires real EL0 writes, CPU migration, alternating parent/child order, actual short counts, all 1071 bytes, bounded DDB hold and release publication before IRQ restore |
 | `check_pool_release_paths.py` | every kernel pool has a release path or explicit exemption |

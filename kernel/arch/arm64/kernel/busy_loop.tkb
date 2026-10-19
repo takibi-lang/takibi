@@ -236,6 +236,8 @@ fn busy_loop_run(tag: usize) {
      * CPU-bound would stop being the thing a second core is measured
      * against; what is bounded here is the REPORTING, which is what keeps
      * the boot's UART capture finite. */
+    // poll-bound: none by design -- a persistent init worker; the kernel's
+    // answers end or restart it, and the boot's verdict does not wait on it.
     while (true) {
         for step: usize in 0..<BUSY_LOOP_ROUND_STEPS {
             state = state ^ (state << 13);
