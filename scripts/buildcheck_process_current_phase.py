@@ -21,19 +21,22 @@ def main():
     process = Path('kernel/kernel/process.tkb')
     source = (repo / process).read_text(encoding='ascii')
     cases = []
-    for phase, transition, extra in [
-            ('Running', 'scheduled_process_yield', ''),
-            ('Running', 'scheduled_process_block', ', ProcessWaitReason::ChildExit'),
-            ('Running', 'scheduled_process_exit', ''),
-            ('Constructing', 'scheduled_process_finish_clone', ', frame'),
-            ('Constructing', 'scheduled_process_cancel_clone', '')]:
+    # GitHub issue #829: the block queues on a tick-wake list, so it takes
+    # the run guard first.
+    for phase, transition, lead, extra in [
+            ('Running', 'scheduled_process_yield', '', ''),
+            ('Running', 'scheduled_process_block', 'guard, ', ', ProcessWaitReason::ChildExit'),
+            ('Running', 'scheduled_process_exit', '', ''),
+            ('Constructing', 'scheduled_process_finish_clone', '', ', frame'),
+            ('Constructing', 'scheduled_process_cancel_clone', '', '')]:
         cases.append((transition, f'''
 private fn current_phase_control(
+        guard: borrow ProcessRunGuard[lock],
         current: borrow ProcessCurrent[process, ProcessState::{phase}],
         owner: borrow ScheduledProcessOwner[process],
         state: sink ScheduledProcessState[process, ProcessState::{phase}],
         frame: borrow FrameRef[frame_process]) -> usize {{
-    let next = {transition}(owner, state{extra});
+    let next = {transition}({lead}owner, state{extra});
     let pid: usize = scheduled_process_record_current(current).pid;
     scheduled_process_state_drop(next);
     return pid;

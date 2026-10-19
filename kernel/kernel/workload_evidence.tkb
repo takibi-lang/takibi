@@ -2397,3 +2397,119 @@ private fn workload_busy_pair_report() !{unsafe} {
 // their exact goal, and only that CPU may request the stopped finish boundary.
 // Workload accounting and timeline storage remain per-core and cover every
 // active CPU; only the optional PC sample source has one explicit owner.
+
+// GitHub issue #829: /bin/peer-sleep, tag 23. Step 0 registers the caller,
+// running on CPU 1, as the sleeper. Step 1, asked once by its parent on
+// core 0, masks core 0's interrupts FIRST, then waits -- still masked, up to
+// ten seconds -- for the registered sleeper to be Blocked on its deadline,
+// and then spins until it is woken or a second past its deadline. 1 and the
+// view line when it was woken while core 0 was masked, within eight ticks of
+// its deadline; 0 otherwise, with the measured lateness.
+//
+// Masking before the sleeper blocks closes the window in which core 0 could
+// miss it; the sleeper needs nothing from core 0 to reach its sleep. The
+// masked spin is the long core-0 mask the per-CPU tick-wake lists exist for.
+// Nothing but the sleeper's own core's tick can wake it here: no signal is
+// sent, and core 0 takes no interrupt.
+private let mut workload_peer_sleep_pid: usize;
+private let mut workload_peer_sleep_done: bool;
+// Set once step 1 has unmasked; the competitor (step 2) then exits.
+private let mut workload_peer_sleep_finished: bool;
+
+fn workload_peer_sleep_progress(step: usize, child: usize) -> usize !{unsafe} {
+    if (step == 0) {
+        let guard = process_run_lock();
+        let mut answer: usize = 0;
+        if (workload_peer_sleep_pid == 0 && cpu_id() == SECONDARY_CORE_ID) {
+            workload_peer_sleep_pid = kernel_process_current_pid();
+            answer = 1;
+        }
+        process_run_unlock(guard);
+        return answer;
+    }
+    // The sleeper's competitor on CPU 1 asks whether it may exit yet.
+    if (step == 2) {
+        let finished_guard = process_run_lock();
+        let finished: bool = workload_peer_sleep_finished;
+        process_run_unlock(finished_guard);
+        if (finished) { return 1; }
+        return 0;
+    }
+    // core-role: the experiment masks core 0, whose tick alone woke every sleeper before #829
+    if (step != 1 || cpu_id() != 0 || workload_peer_sleep_done || child == 0) {
+        return 0;
+    }
+    workload_peer_sleep_done = true;
+    let frequency: usize = read_cntfrq() as usize;
+    disable_irq();
+    let start: usize = read_cntpct() as usize;
+    let mut now: usize = start;
+    let mut deadline: usize = 0;
+    while (deadline == 0 && now - start < frequency * 10) {
+        let guard = process_run_lock();
+        let registered: usize = workload_peer_sleep_pid;
+        process_run_unlock(guard);
+        if (registered == child) {
+            deadline = workload_peer_sleep_deadline(child);
+        }
+        now = read_cntpct() as usize;
+    }
+    if (deadline == 0 || now >= deadline) {
+        enable_irq();
+        workload_peer_sleep_finish();
+        kernel_boot_log("workload: peer sleeper never seen asleep before its deadline while core 0 was masked, registered=");
+        let report_guard = process_run_lock();
+        if (workload_peer_sleep_pid == child) { uart_put_udec(1); } else { uart_put_udec(0); }
+        kernel_boot_log("\n");
+        kernel_process_pid_log_wait(report_guard, child);
+        process_run_unlock(report_guard);
+        return 0;
+    }
+    let give_up: usize = deadline + frequency;
+    let mut woken: bool = false;
+    while (woken == false && now < give_up) {
+        woken = workload_peer_sleep_deadline(child) == 0;
+        now = read_cntpct() as usize;
+    }
+    enable_irq();
+    workload_peer_sleep_finish();
+    let mut late: usize = 0;
+    if (now > deadline) { late = now - deadline; }
+    // Eight of the woken core's ticks (each is CNTFRQ >> 6).
+    if (woken && late <= (frequency >> 3)) {
+        kernel_boot_log(
+            "workload: a sleeper on cpu 1 woke on time while core 0 was masked\n");
+        return 1;
+    }
+    kernel_boot_log("workload: peer sleeper not woken on time while core 0 was masked, woken=");
+    if (woken) { uart_put_udec(1); } else { uart_put_udec(0); }
+    kernel_boot_log(" late_ticks=");
+    uart_put_udec(late);
+    kernel_boot_log("\n");
+    return 0;
+}
+
+private fn workload_peer_sleep_finish() {
+    let guard = process_run_lock();
+    workload_peer_sleep_finished = true;
+    process_run_unlock(guard);
+}
+
+// The sleeper's absolute deadline while it is Blocked on it, else 0.
+private fn workload_peer_sleep_deadline(pid: usize) -> usize !{unsafe} {
+    let guard = process_run_lock();
+    let mut deadline: usize = 0;
+    match scheduled_process_slot_for_pid_locked(guard, pid) {
+        ProcessSlotForPidResult::Missing => {}
+        ProcessSlotForPidResult::Found(slot) => {
+            if (scheduled_process_record_state_locked(guard, slot) ==
+                    ProcessSlotState::Blocked &&
+                scheduled_process_record_wait_reason_locked(guard, slot) ==
+                    ProcessWaitReason::Deadline) {
+                deadline = scheduled_process_record_locked(guard, slot).deadline_ticks;
+            }
+        }
+    }
+    process_run_unlock(guard);
+    return deadline;
+}

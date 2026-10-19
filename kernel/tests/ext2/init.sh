@@ -237,6 +237,15 @@ if [ "$?" -ne 0 ]; then
     exit 1
 fi
 
+# GitHub issue #829: a deadline sleeper on CPU 1 is woken by CPU 1's own
+# tick while core 0 is masked. The kernel prints the peer_sleep_mask view's
+# line; this prints only a failure.
+/bin/peer-sleep
+if [ "$?" -ne 0 ]; then
+    echo "peer-sleep failed"
+    exit 1
+fi
+
 for phase in fd uart telnet; do
     echo "init: phase $phase"
 done

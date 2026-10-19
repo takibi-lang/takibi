@@ -121,6 +121,14 @@ check_model LogRing Safety 7 \
     silentrefuse:CInitSilentRefuse:NoSilentLoss:ok:3 \
     exactprev:CInitExactPrev:NoNeedlessRefusal:violated
 
+# GitHub issue #829: per-CPU tick-wake lists. Liveness is TLC's; the
+# core0only variant loses PeerSleeperWakes, which Apalache does not check,
+# so its shallow run shows only that it runs.
+check_model TickWake ListsMatchBlocked 6 \
+    fixed:CInitFixed:pass:ok \
+    core0only:CInitCore0Only:temporal:ok \
+    nounlink:CInitNoUnlink:ListsMatchBlocked:violated
+
 check_model RecordLifetime RecordInvariants 6 \
     fixed:CInitFixed:pass:ok \
     unfixed:CInitUnfixed:ReadsOnlyLiveRecords:violated \

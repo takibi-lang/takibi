@@ -1,0 +1,132 @@
+/* A peer sleeper wakes on time while core 0 is masked (GitHub issue #829).
+ * A static-PIE EL0 program, kept free of writable globals and compiled with
+ * --forbid-trap, run once from init.sh.
+ *
+ * It forks. The child forks a competitor that spins on CPU 1 until the
+ * experiment is over, then pins itself to CPU 1, registers with the kernel
+ * (workload tag 23, step 0) and sleeps PEER_SLEEP_NS in nanosleep. The
+ * parent pins itself to CPU 0 and asks tag 23 step 1 once: the kernel masks
+ * core 0's interrupts, waits for the child to be Blocked on its deadline,
+ * spins until it is woken or a second past its deadline, and answers 1 only
+ * when the child was woken while core 0 was still masked and within eight
+ * ticks of its deadline. Before #829 only core 0's tick
+ * woke a deadline sleeper on any CPU, so the answer was 0.
+ *
+ * The kernel prints the peer_sleep_mask view's line; this prints only a
+ * failure.
+ */
+
+const WRITE_SYSCALL: usize = 64;
+const EXIT_SYSCALL: usize = 93;
+const NANOSLEEP_SYSCALL: usize = 101;
+const CLONE_SYSCALL: usize = 220;
+const WAIT4_SYSCALL: usize = 260;
+const SETAFFINITY_SYSCALL: usize = 122;
+const GETCPU_SYSCALL: usize = 168;
+const WORKLOAD_PROGRESS_SYSCALL: usize = 453;
+const CLONE_FORK_SIGCHLD: usize = 0x11;
+const PEER_SLEEP_TAG: usize = 23;
+const PEER_SLEEP_REGISTER: usize = 0;
+const PEER_SLEEP_MASK: usize = 1;
+const PEER_SLEEP_COMPETITOR: usize = 2;
+const PEER_SLEEP_COMPETITOR_POLLS: usize = 50000000;
+const PEER_SLEEP_WOKE: usize = 1;
+const PEER_SLEEP_NS: u64 = 200000000;
+const PEER_SLEEP_ERROR_FLOOR: usize = 0xFFFFFFFFFFFFF000;
+const PEER_SLEEP_ARRIVAL_POLLS: usize = 1000000;
+
+private fn peer_sleep_fail(line: borrow []const u8) !{unsafe} {
+    // Raw ABI input only: these syscalls read the readonly bytes.
+    svc5(WRITE_SYSCALL, 1, (unsafe { line as *u8 }) as usize, line.len, 0, 0);
+    svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
+}
+
+private fn peer_sleep_cpu() -> u8 {
+    let mut cpu_bytes: [u8; 4];
+    cpu_bytes[0] = 99;
+    if (svc5(GETCPU_SYSCALL, cpu_bytes as *u8 as usize, 0, 0, 0, 0) != 0) {
+        return 99;
+    }
+    return cpu_bytes[0];
+}
+
+// Pin to one CPU and wait until this process is running there.
+private fn peer_sleep_move_to(cpu: u8) {
+    let mut mask: [u8; 8];
+    for index: usize in 0..<8 { mask[index] = 0; }
+    mask[0] = (1 << cpu) as u8;
+    if (svc5(SETAFFINITY_SYSCALL, 0, 8, mask as *u8 as usize, 0, 0) != 0) {
+        peer_sleep_fail(bs"peer-sleep: the affinity mask was refused\n");
+    }
+    let mut here: u8 = peer_sleep_cpu();
+    for poll: usize in 0..<PEER_SLEEP_ARRIVAL_POLLS {
+        if (here != cpu) { here = peer_sleep_cpu(); }
+    }
+    if (here != cpu) {
+        peer_sleep_fail(bs"peer-sleep: never arrived on the pinned cpu\n");
+    }
+}
+
+// A Ready competitor on CPU 1 for as long as the experiment runs. Without
+// one, nanosleep has nothing to switch to and waits in place for its own
+// core's interrupt (SyscallDeadlineResult::WaitInterrupt), never Blocked
+// and never queued, which would pass without testing the lists.
+private fn peer_sleep_competitor() {
+    peer_sleep_move_to(1);
+    let mut polls: usize = 0;
+    while (polls < PEER_SLEEP_COMPETITOR_POLLS &&
+           svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_SLEEP_TAG,
+                PEER_SLEEP_COMPETITOR, 0, 0, 0) != 1) {
+        polls = polls + 1;
+    }
+    svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
+}
+
+private fn peer_sleep_child() {
+    let competitor: usize = svc5(CLONE_SYSCALL, CLONE_FORK_SIGCHLD, 0, 0, 0, 0);
+    if (competitor == 0) { peer_sleep_competitor(); }
+    if (competitor >= PEER_SLEEP_ERROR_FLOOR) {
+        peer_sleep_fail(bs"peer-sleep: the competitor fork failed\n");
+    }
+    peer_sleep_move_to(1);
+    if (svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_SLEEP_TAG,
+             PEER_SLEEP_REGISTER, 0, 0, 0) != 1) {
+        peer_sleep_fail(bs"peer-sleep: the sleeper was not registered\n");
+    }
+    let mut request: [u64; 2];
+    request[0] = 0;
+    request[1] = PEER_SLEEP_NS;
+    if (svc5(NANOSLEEP_SYSCALL, request as *u64 as usize, 0, 0, 0, 0) != 0) {
+        peer_sleep_fail(bs"peer-sleep: nanosleep failed\n");
+    }
+    let mut status: [u8; 4];
+    for index: usize in 0..<4 { status[index] = 0xFF; }
+    if (svc5(WAIT4_SYSCALL, competitor, status as *u8 as usize, 0, 0, 0) != competitor ||
+        status[0] != 0 || status[1] != 0) {
+        peer_sleep_fail(bs"peer-sleep: the competitor did not exit cleanly\n");
+    }
+    svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
+}
+
+fn peer_sleep() {
+    // Fork before pinning: the child inherits this mask, and an unpinned
+    // child can reach CPU 1 while core 0 is masked below.
+    let child: usize = svc5(CLONE_SYSCALL, CLONE_FORK_SIGCHLD, 0, 0, 0, 0);
+    if (child == 0) { peer_sleep_child(); }
+    if (child >= PEER_SLEEP_ERROR_FLOOR) {
+        peer_sleep_fail(bs"peer-sleep: fork failed\n");
+    }
+    peer_sleep_move_to(0);
+    let answer: usize = svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_SLEEP_TAG,
+                             PEER_SLEEP_MASK, child, 0, 0);
+    let mut status: [u8; 4];
+    for index: usize in 0..<4 { status[index] = 0xFF; }
+    if (svc5(WAIT4_SYSCALL, child, status as *u8 as usize, 0, 0, 0) != child ||
+        status[0] != 0 || status[1] != 0) {
+        peer_sleep_fail(bs"peer-sleep: the sleeper did not exit cleanly\n");
+    }
+    if (answer != PEER_SLEEP_WOKE) {
+        peer_sleep_fail(bs"peer-sleep: the peer sleeper was not woken on time while cpu 0 was masked\n");
+    }
+    svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
+}

@@ -200,6 +200,14 @@ Symmetric now:
 
 - Taking a timer tick, entering the syscall and scheduler paths, and running
   any process whose affinity allows the core.
+- Deadline and NetRx wakes (#829): a process blocked on a deadline or a
+  NetRx retry is queued on the tick-wake list of the core it blocked on,
+  and that core's own tick wakes it (`kernel_process_tick_wake` from
+  `timer_irq_handler`, `kernel_process_tick_wake_if_due` from
+  `kernel_secondary_timer_schedule`). A long core-0 mask no longer delays
+  a peer's sleeper (`/bin/peer-sleep`, the peer_sleep_mask view). An
+  affinity change leaves a queued sleeper where it is: the wake only
+  publishes Ready, and any allowed core runs it.
 - Starting a world stop (GitHub issue #632) and serving one.
 - The PMU overflow line: every core enables its own through
   `gic_pmu_core_enable` and samples in one dispatch branch (#775; core 0
@@ -236,7 +244,6 @@ Special, with the reason it stays so today:
 | Boot | `boot/entry.S` parks every MPIDR but 0; core 0 runs `main()`, the GIC distributor, device bring-up and the boot fixtures | the firmware hands off one core, and machine-wide state is initialized once | no: one core has to come first |
 | PSCI start authority | `cpu_start_reserve` (`lib/occupancy.tkb`) | starting cores is a boot phase; no hotplug exists | only with CPU hotplug, which nothing needs |
 | Syscalls outside the peer-safety table | `syscall_peer_refused`, `syscall_peer_safe`; rerun on core 0 with the process pinned for the call | each names a subsystem whose state only core 0 touches: the BusyBox Extras exec that resets the TCP pool. Inetd-mode connected descriptors left in #827: their write, read and shutdown take the connection's owner and the network capability exactly as direct mode does | yes, one subsystem at a time; each entry is its own follow-up |
-| Deadline and NetRx wakes | `timer_irq_handler` runs `kernel_process_deadline_wake_all` and `kernel_process_net_wake_all`; `kernel_secondary_timer_schedule` runs neither | one walker of every slot per tick; a peer sleeper is woken by core 0's tick, so a long core-0 mask (DDB) delays it | yes (decision: every tick walks, or per-CPU deadline lists) |
 | Device interrupts | UART, GEM, virtio-net and xHCI SPIs target core 0; a secondary's dispatch handles only its tick and PMU line | their drivers' state is touched only from core 0 | yes, with per-driver locking or an IRQ affinity policy (decision) |
 | DDB entry by UART BREAK | the UART IRQ branch on core 0 | follows the device interrupt row; DDB then stops the others through the world stop | follows the device row |
 | UART input-flow requests | `kernel_log_console_poll` (`kernel/printk/log.tkb`), called at syscall entry and from core 0's idle loop | the UART is core 0's device (see the device interrupt row); since #613 slice 5 every CPU writes the log ring, so peer lines no longer pass through core 0 and the old peer drain and UartTx blocking are gone -- this flow-control poll is all that is left. A termios change sends the request itself from whichever CPU made it (#826), deciding under the console lock as the poll does | follows the device interrupt row |
@@ -269,9 +276,10 @@ transition out of any of them without the lock is a compile error. The
 Blocked take was the gap #587's three unlocked interrupt-side wakes went
 through. Code that must run the real transition without the lock does so
 only by forging a guard with `process_run_guard_forge_unlocked`, which is
-`unsafe` and counted in the trusted base: the two-core probes, and the
-`#587` negative control that `scripts/build_qemu_net_wake_control.py`
-builds. `kernel_process_reap_zombie` takes the lock for the child-list
+`unsafe` and counted in the trusted base: the two-core probes. The block
+and wake transitions (`scheduled_process_block`, `scheduled_process_wake`)
+take the guard too, because they queue and unlink the record on its core's
+tick-wake list (#829). `kernel_process_reap_zombie` takes the lock for the child-list
 unlink and the Exited take only; the teardown after it runs outside,
 because a world stop reached from there needs peers able to acknowledge
 it.

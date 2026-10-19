@@ -4659,8 +4659,8 @@ fn syscall_peer_safe(number: usize, fd: usize, second: usize) -> bool {
         return true;
     }
     // A per-process deadline, held in the caller's own record (86fb1cbd).
-    // Only core 0's tick runs kernel_process_deadline_wake_all, for a
-    // sleeper on any CPU (see "Core roles" in kernel/CONCURRENCY.md).
+    // The sleeper is queued on this CPU's tick-wake list and this CPU's
+    // own tick wakes it (#829; kernel_process_tick_wake_scan).
     if (number == AARCH64_NR_NANOSLEEP ||
         number == AARCH64_NR_CLOCK_NANOSLEEP) {
         return true;
@@ -6047,6 +6047,11 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         if (x0 == 11) {
             return syscall_finish_current(frame, SyscallAction::Resume(
                 workload_peer_read_peer_ready()), current_authority);
+        }
+        // /bin/peer-sleep (GitHub issue #829).
+        if (x0 == 23) {
+            return syscall_finish_current(frame, SyscallAction::Resume(
+                workload_peer_sleep_progress(x1, x2)), current_authority);
         }
         // /bin/peer-fork (GitHub issue #611).
         if (x0 == 19) {

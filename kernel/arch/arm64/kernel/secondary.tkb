@@ -132,8 +132,8 @@ fn kernel_core0_tick_note() !{unsafe} {
 
 // Called from a platform IRQ dispatch when the interrupted core is not core
 // 0 and the interrupt is the timer PPI. Rearms this core's own timer and
-// counts. Deliberately does NOT call kernel_process_net_wake_all() or
-// request a reschedule; the platform dispatch does that after this common
+// counts. Deliberately does NOT wake this core's sleepers or request a
+// reschedule; kernel_secondary_timer_schedule does both after this common
 // per-core timer accounting.
 fn secondary_timer_tick() !{interrupt, unsafe} {
     timer_tick_rearm();
@@ -363,6 +363,11 @@ fn kernel_idle_tick_reenter() {
 fn kernel_secondary_timer_schedule(frame: sink FrameRef[process], lower_el: bool)
         -> TimerSwitch !{interrupt} {
     secondary_timer_tick();
+    // GitHub issue #829: this core's own deadline and NetRx waiters, on
+    // every tick and before the scheduling half, so a sleeper woken here can
+    // be the successor this same tick picks. Takes the run lock only when
+    // its list has something due.
+    kernel_process_tick_wake_if_due();
     // GitHub issue #497: arm or disarm this core's profile counter.
     profile_session_sync();
     // GitHub issue #572: a tick on a CPU where a busy worker waits.

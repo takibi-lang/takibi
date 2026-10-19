@@ -69,6 +69,7 @@ peer-mutate
 peer-net-wake
 peer-read
 peer-settings
+peer-sleep
 peer-spin
 peer-tty
 ppoll-probe

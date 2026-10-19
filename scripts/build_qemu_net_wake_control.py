@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a source overlay for the issue #587 lockless-wake negative control."""
+"""Build a source overlay for the issue #829 per-CPU wake negative control."""
 
 import os
 from pathlib import Path
@@ -26,8 +26,8 @@ def main() -> None:
         shutil.rmtree(overlay_kernel)
     overlay_kernel.mkdir(parents=True)
 
-    # Mirror directories and symlink every input except the timer source whose
-    # single intended transformation removes protection from the NetRx scan.
+    # Mirror directories and symlink every input except the secondary-tick
+    # source, whose single intended transformation drops its own wake.
     for current, directories, files in os.walk(source_kernel):
         current_path = Path(current)
         relative = current_path.relative_to(source_kernel)
@@ -42,39 +42,24 @@ def main() -> None:
         for name in files:
             relative_file = (current_path / name).relative_to(source_kernel)
             target = overlay_kernel / relative_file
-            if relative_file.as_posix() == "arch/arm64/kernel/timer.tkb":
+            if relative_file.as_posix() == "arch/arm64/kernel/secondary.tkb":
                 continue
             target.symlink_to(current_path / name)
 
-    timer_path = overlay_kernel / "arch/arm64/kernel/timer.tkb"
-    timer_path.write_text(
-        (source_kernel / "arch/arm64/kernel/timer.tkb").read_text(encoding="ascii"),
+    secondary_path = overlay_kernel / "arch/arm64/kernel/secondary.tkb"
+    secondary_path.write_text(
+        (source_kernel / "arch/arm64/kernel/secondary.tkb").read_text(encoding="ascii"),
         encoding="ascii",
     )
+    # GitHub issue #829: the kernel before per-CPU tick-wake lists, in the
+    # one respect the lane asks about -- a secondary's tick wakes nothing of
+    # its own, so a NetRx waiter that blocked on CPU 1 waits for core 0.
     replace_once(
-        timer_path,
-        "    let guard = process_run_lock();\n"
-        "    kernel_process_net_wake_all(guard);\n"
-        "    kernel_process_deadline_wake_all(guard);",
-        # GitHub issue #589: the scan requires the run guard now, so the
-        # control has to FORGE one -- the only way to drop the lock, and a
-        # visible one.
-        "    let forged = process_run_guard_forge_unlocked();\n"
-        "    kernel_process_net_wake_scan(forged);\n"
-        "    process_run_guard_discard_unlocked(forged);\n"
-        "    let guard = process_run_lock();\n"
-        "    kernel_process_deadline_wake_all(guard);",
+        secondary_path,
+        "    kernel_process_tick_wake_if_due();\n",
+        # Still referenced, so the unused-function check is not what fails.
+        "    if (KERNEL_STALL_PROBES == 2) { kernel_process_tick_wake_if_due(); }\n",
     )
-    # Forging is unsafe, so the handler that does it has to say so. It
-    # already does since it counts core 0's tick (GitHub issue #649); the
-    # edit stays for a handler that stops needing to.
-    handler = timer_path.read_text(encoding="ascii")
-    if "fn timer_irq_handler() !{interrupt, unsafe} {" not in handler:
-        replace_once(
-            timer_path,
-            "fn timer_irq_handler() !{interrupt} {",
-            "fn timer_irq_handler() !{interrupt, unsafe} {",
-        )
 
 
 if __name__ == "__main__":

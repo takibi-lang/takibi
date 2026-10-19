@@ -1,0 +1,3 @@
+^workload: a sleeper on cpu 1 woke
+^workload: peer sleeper
+^peer-sleep[: ]

@@ -276,6 +276,15 @@ struct ProcessRecord {
     // Absolute generic-counter deadline for nanosleep/clock_nanosleep and
     // finite ppoll. Meaningful only while the published wait is Deadline.
     deadline_ticks: usize;
+    // GitHub issue #829: this record's place on the tick-wake list of the
+    // core it blocked on (kernel_process_tick_wake_enqueue). tick_wake_core
+    // is that core plus one while queued and 0 otherwise; tick_wake_next is
+    // the next queued slot as a link (slot | 1), 0 at the end. Both are
+    // written only under the process-run lock, and only by the block and
+    // wake transitions, so a record is queued exactly while it is Blocked
+    // on a wait a tick ends.
+    tick_wake_core: usize;
+    tick_wake_next: usize;
     // Linux signal sets use bit (signum - 1). Pending state and the set a
     // blocked rt_sigtimedwait accepts belong to the process whose frame is
     // parked, not to the syscall dispatcher globally.
@@ -3025,6 +3034,8 @@ private fn scheduled_process_record_reset(guard: borrow ProcessRunGuard[lock],
     process_state_free(&record.state);
     record.pending_block_reason = ProcessWaitReason::None;
     record.deadline_ticks = 0;
+    record.tick_wake_core = 0;
+    record.tick_wake_next = 0;
     record.signal_mask = 0;
     record.pending_signals = 0;
     record.sigwait_set = 0;
@@ -3258,6 +3269,7 @@ fn scheduled_process_table_clear() !{unsafe} {
     // permanent bootstrap root before releasing any nonzero backing record.
     process_image_activate_root(address_space_boot_root());
     scheduled_process_release_every_process();
+    kernel_process_tick_wake_clear();
 }
 
 // GitHub issue #392: a process record is a pool allocation now, so
@@ -3879,7 +3891,11 @@ fn scheduled_process_yield(
 // The one place a process becomes Blocked, and so the one place a wait is
 // published (GitHub issue #653): state and reason change together, so a
 // process that is still Running never carries one.
+// GitHub issue #829: and the one place a wait a tick ends is queued on this
+// core's tick-wake list, in the same critical section, which is why the run
+// guard is a parameter: a block that could not queue does not compile.
 fn scheduled_process_block(
+        guard: borrow ProcessRunGuard[lock],
         owner: borrow ScheduledProcessOwner[process],
         state: sink ScheduledProcessState[process, ProcessState::Running],
         reason: ProcessWaitReason)
@@ -3890,6 +3906,7 @@ fn scheduled_process_block(
             process_slot_word(owner.pool_index)), STALL_PROBE_BLOCK);
     }
     process_state_block(&scheduled_process_record_owned(owner).state, reason);
+    kernel_process_tick_wake_enqueue(guard, process_slot_word(owner.pool_index));
     workload_profile_note_block(
         scheduled_process_pid_of_slot(process_slot_word(owner.pool_index)));
     let mut blocked: ScheduledProcessState[process, ProcessState::Blocked] =
@@ -3907,13 +3924,14 @@ private fn scheduled_process_wait_settle(record: borrow &mut ProcessRecord) {
 
 // A wake leaves nothing pending: the wait it ends is cleared with the state.
 fn scheduled_process_wake(
+        guard: borrow ProcessRunGuard[lock],
         owner: borrow ScheduledProcessOwner[process],
         state: sink ScheduledProcessState[process, ProcessState::Blocked])
         -> ScheduledProcessState[process, ProcessState::Ready] {
     scheduled_process_wait_settle(
         scheduled_process_record_owned(owner));
     process_state_wake(&scheduled_process_record_owned(owner).state);
-    return scheduled_process_wake_ready(owner, state);
+    return scheduled_process_wake_ready(guard, owner, state);
 }
 
 // A ChildExit waiter woken by `child`'s exit on a CPU that cannot run it. It
@@ -3921,20 +3939,25 @@ fn scheduled_process_wake(
 // the CPU that admits it delivers that child's result even if a sibling
 // exits meanwhile (GitHub issue #633).
 fn scheduled_process_wake_keeping_wait4(
+        guard: borrow ProcessRunGuard[lock],
         owner: borrow ScheduledProcessOwner[process],
         state: sink ScheduledProcessState[process, ProcessState::Blocked],
         child_pid: usize)
         -> ScheduledProcessState[process, ProcessState::Ready] {
     process_state_wake_keeping_wait4(
         &scheduled_process_record_owned(owner).state, child_pid);
-    return scheduled_process_wake_ready(owner, state);
+    return scheduled_process_wake_ready(guard, owner, state);
 }
 
+// Every wake passes here, so this is where a record leaves its core's
+// tick-wake list (GitHub issue #829), whichever waker ended the wait.
 private fn scheduled_process_wake_ready(
+        guard: borrow ProcessRunGuard[lock],
         owner: borrow ScheduledProcessOwner[process],
         state: sink ScheduledProcessState[process, ProcessState::Blocked])
         -> ScheduledProcessState[process, ProcessState::Ready] {
     scheduled_process_state_drop(state);
+    kernel_process_tick_wake_unlink(guard, process_slot_word(owner.pool_index));
     if (KERNEL_STALL_PROBES != 0 && stall_probe_watching()) {
         stall_probe_event(scheduled_process_pid_of_slot(
             process_slot_word(owner.pool_index)), STALL_PROBE_WAKE);
@@ -7323,13 +7346,14 @@ private fn kernel_process_block_would_miss(
                 ProcessNextReadyResult::Next(zombie) => { return true; }
             }
         }
-        // Delivered again: core 0's timer tick (timer_irq_handler) wakes
-        // every NetRx waiter on every tick, under this lock. A frame that
-        // arrives inside the window costs at most one tick, not the wait.
+        // Delivered again: the block queues the waiter on this core's
+        // tick-wake list under this lock, and this core's next tick wakes
+        // it (#829). A frame that arrives inside the window costs at most
+        // one tick, not the wait.
         ProcessWaitReason::NetRx => { return false; }
-        // Delivered again: the same tick's kernel_process_deadline_wake_all
-        // wakes a Blocked waiter whose deadline has passed, whenever it
-        // passed.
+        // Delivered again: the same list's next tick
+        // (kernel_process_tick_wake_scan) wakes a Blocked waiter whose
+        // deadline has passed, whenever it passed.
         ProcessWaitReason::Deadline => { return false; }
         // A signal is raised under this lock (#570); one raised inside the
         // window is pending here.
@@ -7398,7 +7422,7 @@ private fn kernel_process_block_to_idle(
         ScheduledProcessRunningTakeResult::Running(from_resources) => {
             let (from_owner, from_running) = from_resources;
             let blocked = scheduled_process_block(
-                from_owner, from_running, reason);
+                guard, from_owner, from_running, reason);
             scheduled_process_release(from_owner, blocked);
         }
     }
@@ -7521,7 +7545,7 @@ private fn kernel_process_block_reserved(
                 ScheduledProcessRunningTakeResult::Running(from_resources) => {
                     let (from_owner, from_running) = from_resources;
                     let blocked = scheduled_process_block(
-                        from_owner, from_running, reason);
+                        guard, from_owner, from_running, reason);
                     scheduled_process_release(from_owner, blocked);
                 }
             }
@@ -7532,7 +7556,7 @@ private fn kernel_process_block_reserved(
                     ScheduledProcessBlockedTakeResult::Missing => {}
                     ScheduledProcessBlockedTakeResult::Blocked(resources) => {
                         let (from_owner, blocked) = resources;
-                        let ready = scheduled_process_wake(from_owner, blocked);
+                        let ready = scheduled_process_wake(guard, from_owner, blocked);
                         match scheduled_process_restart_check(
                                 guard, from_owner, ready) {
                             ScheduledProcessStartCheck::Startable(startable) => {
@@ -8084,7 +8108,7 @@ private fn kernel_process_signal_deliver_to(
                 let (owner, blocked) = resources;
                 record.deadline_ticks = 0;
                 record.deadline_result = 0;
-                let ready = scheduled_process_wake(owner, blocked);
+                let ready = scheduled_process_wake(guard, owner, blocked);
                 scheduled_process_release(owner, ready);
             }
         }
@@ -8110,7 +8134,7 @@ private fn kernel_process_signal_deliver_to(
                 record.sigwait_set = 0;
                 record.deadline_ticks = 0;
                 record.deadline_result = 0;
-                let ready = scheduled_process_wake(owner, blocked);
+                let ready = scheduled_process_wake(guard, owner, blocked);
                 scheduled_process_release(owner, ready);
             }
         }
@@ -8167,7 +8191,7 @@ fn kernel_process_terminal_settings_wake(
                                 KernelUartDeliveryResult::Consumed => { }
                                 KernelUartDeliveryResult::RetryRead => { }
                             }
-                            let ready = scheduled_process_wake(owner, blocked);
+                            let ready = scheduled_process_wake(guard, owner, blocked);
                             scheduled_process_release(owner, ready);
                         }
                     }
@@ -8297,120 +8321,204 @@ fn kernel_process_block_deadline(current: borrow FrameRef[process])
         current, ProcessWaitReason::Deadline, 4);
 }
 
-// Complete timed syscalls directly from their saved frame when the generic
-// counter reaches the per-process deadline.
-// GitHub issue #587: the caller's process-run lock, for the reason the net
-// wake above needs it. This one already walked every slot; what it did not
-// do is hold the lock a waiter publishes Blocked under.
-fn kernel_process_deadline_wake_all(guard: borrow ProcessRunGuard[lock])
+// -- Per-CPU tick-wake lists (GitHub issue #829) ------------------------
+//
+// A process blocked on a wait that a tick ends -- a deadline (nanosleep,
+// clock_nanosleep, finite ppoll, rt_sigtimedwait) or a NetRx retry -- is
+// queued on the list of the core it blocked on, and THAT core's tick wakes
+// it. This is Linux's per-CPU timer base and FreeBSD's per-CPU callout
+// wheel in their simplest form: an intrusive singly linked list per core,
+// threaded through the two tick_wake fields of ProcessRecord, so the storage
+// is bounded by the records that exist and nothing is allocated to queue.
+//
+// It replaced one walk of every slot from core 0's tick alone: a long
+// core-0 mask (DDB, a masked probe) delayed every sleeper on every core,
+// and core 0 paid for all of them.
+//
+// The discipline:
+// - Membership changes only under the process-run lock, and only in
+//   scheduled_process_block (queue) and scheduled_process_wake_ready
+//   (unlink), which both take the run guard as a parameter. A record is
+//   therefore queued exactly while it is Blocked on such a wait, whichever
+//   waker ends it -- the tick, a signal, a fatal signal.
+// - A record is queued on the core that ran its block, which is always an
+//   online core whose tick keeps running: an idle core takes its tick in
+//   the wfi loop, and a core that never started never runs a block.
+// - An affinity change does not move a queued sleeper. Its wake publishes
+//   Ready and nothing more, so the core that queued it wakes it on time and
+//   any core its mask allows then runs it -- Linux leaves an armed hrtimer
+//   on the base it was armed on for the same reason.
+// - kernel_process_tick_wake_due[core] is the earliest moment anything on
+//   that core's list is due: 0 for an empty list, 1 while a NetRx waiter is
+//   queued (every tick retries it), else the earliest deadline. Written
+//   only under the lock; the owning core's tick reads it without the lock
+//   to skip the lock when nothing is due. A value left low by a wake that
+//   was not the tick costs one extra walk, never a missed wake: every
+//   insert lowers it under the lock, and the walk recomputes it.
+//
+// Current limitations (2026-10-19):
+// - THE WAKE SOURCE FOR NETRX IS THE TICK. A frame arriving does not wake
+//   its waiter early; the next tick of the waiter's core retries it, as the
+//   single walk did. A device interrupt that wants to wake early walks the
+//   lists under the same lock -- membership is not tied to the waker's core.
+// - Unlink walks its core's list from the head, so it is linear in the
+//   sleepers queued on one core, which is a handful.
+
+private let mut kernel_process_tick_wake_head: [usize; KERNEL_MAX_CORES];
+private let mut kernel_process_tick_wake_due: [AtomicWord; KERNEL_MAX_CORES];
+
+// What a Blocked record's wait asks of a tick: 0 for nothing (not a tick
+// wait), 1 for a NetRx retry on every tick, else its absolute deadline.
+private fn kernel_process_tick_wake_due_of(
+        guard: borrow ProcessRunGuard[lock], slot: usize) -> usize !{unsafe} {
+    let reason: ProcessWaitReason =
+        scheduled_process_record_wait_reason_locked(guard, slot);
+    if (reason == ProcessWaitReason::NetRx) { return 1; }
+    if (reason == ProcessWaitReason::Deadline ||
+        reason == ProcessWaitReason::Signal) {
+        return scheduled_process_record_locked(guard, slot).deadline_ticks;
+    }
+    return 0;
+}
+
+// Queue a record that has just been published Blocked on this core's list,
+// when its wait is one a tick ends. Called from scheduled_process_block only.
+private fn kernel_process_tick_wake_enqueue(
+        guard: borrow ProcessRunGuard[lock], slot: usize) !{unsafe} {
+    let due: usize = kernel_process_tick_wake_due_of(guard, slot);
+    if (due == 0) { return; }
+    let raw_core: usize = cpu_id();
+    if (raw_core >= KERNEL_MAX_CORES) { return; }
+    let core: {0..<KERNEL_MAX_CORES as usize} = raw_core;
+    scheduled_process_record_locked(guard, slot).tick_wake_core = core + 1;
+    scheduled_process_record_locked(guard, slot).tick_wake_next =
+        kernel_process_tick_wake_head[core];
+    kernel_process_tick_wake_head[core] = slot | 1;
+    let earliest: usize = atomic_word_load(&kernel_process_tick_wake_due[core]);
+    if (earliest == 0 || due < earliest) {
+        atomic_word_store(&kernel_process_tick_wake_due[core], due);
+    }
+}
+
+// Take a record off whichever core's list holds it; nothing for a record
+// that is on none. Called from scheduled_process_wake_ready only.
+private fn kernel_process_tick_wake_unlink(
+        guard: borrow ProcessRunGuard[lock], slot: usize) !{unsafe} {
+    let marker: usize = scheduled_process_record_locked(guard, slot).tick_wake_core;
+    if (marker == 0) { return; }
+    let raw_core: usize = marker - 1;
+    if (raw_core >= KERNEL_MAX_CORES) { return; }
+    let core: {0..<KERNEL_MAX_CORES as usize} = raw_core;
+    let target: usize = slot | 1;
+    let after: usize = scheduled_process_record_locked(guard, slot).tick_wake_next;
+    if (kernel_process_tick_wake_head[core] == target) {
+        kernel_process_tick_wake_head[core] = after;
+    } else {
+        let mut link: usize = kernel_process_tick_wake_head[core];
+        while (link != 0) {
+            let at: usize = link ^ 1;
+            let next: usize = scheduled_process_record_locked(guard, at).tick_wake_next;
+            if (next == target) {
+                scheduled_process_record_locked(guard, at).tick_wake_next = after;
+                link = 0;
+            } else {
+                link = next;
+            }
+        }
+    }
+    scheduled_process_record_locked(guard, slot).tick_wake_core = 0;
+    scheduled_process_record_locked(guard, slot).tick_wake_next = 0;
+}
+
+// End one due wait from the tick. A deadline completes the timed syscall
+// directly from its saved frame with the result armed for it; a NetRx
+// waiter just runs again and retries. The wake unlinks the record.
+private fn kernel_process_tick_wake_one(
+        guard: borrow ProcessRunGuard[lock], slot: usize) !{interrupt, unsafe} {
+    let reason: ProcessWaitReason =
+        scheduled_process_record_wait_reason_locked(guard, slot);
+    match scheduled_process_blocked_take_slot(guard, slot) {
+        ScheduledProcessBlockedTakeResult::Missing => {}
+        ScheduledProcessBlockedTakeResult::Blocked(resources) => {
+            let (owner, blocked) = resources;
+            if (reason != ProcessWaitReason::NetRx) {
+                let parked = scheduled_process_saved_frame(owner);
+                el0_context_set_x0(
+                    parked,
+                    scheduled_process_record_locked(guard, process_slot_word(owner.pool_index))
+                        .deadline_result);
+            }
+            let ready = scheduled_process_wake(guard, owner, blocked);
+            if (reason != ProcessWaitReason::NetRx) {
+                scheduled_process_record_locked(guard, process_slot_word(owner.pool_index))
+                    .deadline_ticks = 0;
+                scheduled_process_record_locked(guard, process_slot_word(owner.pool_index))
+                    .deadline_result = 0;
+                scheduled_process_record_locked(guard, process_slot_word(owner.pool_index))
+                    .sigwait_set = 0;
+            }
+            scheduled_process_release(owner, ready);
+        }
+    }
+}
+
+// One core's tick: wake what is due on its own list, and recompute when the
+// list is next due. The scan reads the next link before a wake unlinks the
+// record it stands on.
+fn kernel_process_tick_wake_scan(guard: borrow ProcessRunGuard[lock],
+                                 core: {0..<KERNEL_MAX_CORES as usize},
+                                 now: usize) !{interrupt, unsafe} {
+    let mut next_due: usize = 0;
+    let mut link: usize = kernel_process_tick_wake_head[core];
+    while (link != 0) {
+        let slot: usize = link ^ 1;
+        let next: usize = scheduled_process_record_locked(guard, slot).tick_wake_next;
+        let due: usize = kernel_process_tick_wake_due_of(guard, slot);
+        if (scheduled_process_record_state_locked(guard, slot) ==
+                ProcessSlotState::Blocked && due != 0 && now >= due) {
+            kernel_process_tick_wake_one(guard, slot);
+        } else if (due != 0 && (next_due == 0 || due < next_due)) {
+            next_due = due;
+        }
+        link = next;
+    }
+    atomic_word_store(&kernel_process_tick_wake_due[core], next_due);
+}
+
+// This core's tick, with the run lock already held (core 0's handler holds
+// it for its busy-worker note too). Skips the walk when nothing is due.
+fn kernel_process_tick_wake(guard: borrow ProcessRunGuard[lock])
         !{interrupt, unsafe} {
+    let raw_core: usize = cpu_id();
+    if (raw_core >= KERNEL_MAX_CORES) { return; }
+    let core: {0..<KERNEL_MAX_CORES as usize} = raw_core;
+    let due: usize = atomic_word_load(&kernel_process_tick_wake_due[core]);
     let now: usize = read_cntpct() as usize;
-    let mut cursor = scheduled_process_first_slot();
-    let mut walking: bool = true;
-    while (walking) {
-        match cursor {
-            ProcessSlotCursor::Done => { walking = false; }
-            ProcessSlotCursor::At(slot) => {
-                let next = scheduled_process_next_slot(slot);
-                let reason: ProcessWaitReason =
-                    scheduled_process_record_wait_reason_locked(guard, slot);
-                if (scheduled_process_record_state_locked(guard, slot) ==
-                        ProcessSlotState::Blocked &&
-                    (reason == ProcessWaitReason::Deadline ||
-                     reason == ProcessWaitReason::Signal) &&
-                    scheduled_process_record_locked(guard, slot).deadline_ticks != 0 &&
-                    now >= scheduled_process_record_locked(guard, slot).deadline_ticks) {
-                    match scheduled_process_blocked_take_slot(guard, slot) {
-                        ScheduledProcessBlockedTakeResult::Missing => {}
-                        ScheduledProcessBlockedTakeResult::Blocked(resources) => {
-                            let (owner, blocked) = resources;
-                            let parked = scheduled_process_saved_frame(owner);
-                            el0_context_set_x0(
-                                parked,
-                                scheduled_process_record_locked(guard, process_slot_word(owner.pool_index))
-                                    .deadline_result);
-                            let ready = scheduled_process_wake(owner, blocked);
-                            scheduled_process_record_locked(guard, process_slot_word(owner.pool_index))
-                                .deadline_ticks = 0;
-                            scheduled_process_record_locked(guard, process_slot_word(owner.pool_index))
-                                .deadline_result = 0;
-                            scheduled_process_record_locked(guard, process_slot_word(owner.pool_index))
-                                .sigwait_set = 0;
-                            scheduled_process_release(owner, ready);
-                        }
-                    }
-                }
-                cursor = next;
-            }
-        }
-    }
+    if (due == 0 || now < due) { return; }
+    kernel_process_tick_wake_scan(guard, core, now);
 }
 
-// Every process waiting for a frame becomes runnable again.
-//
-// Called from the timer HANDLER, so a waiter is retried once per tick
-// whether or not anything arrived. That is deliberately coarse: what it
-// has to be is REGULAR, because a handshake that lost its SYN-ACK is
-// waiting on the retransmission timer inside its own retry, not on a
-// packet. A frame arriving earlier does not need to wake anybody either --
-// the next tick finds it still there.
-//
-// The handler and not kernel_process_timer_schedule, which is the tick's
-// EL0 half. A tick taken at EL1 does not reach that function, so a waiter
-// whose only company is a process sitting in the syscall retry loop would
-// never be woken by it -- every tick would land at EL1 and the two would
-// wait for each other. Waking is not a scheduling decision and does not
-// belong behind one.
-// GitHub issue #587: under the caller's process-run lock, and over every
-// slot rather than one process chain.
-//
-// The process-run lock closes the check-then-block race with a waiter
-// publishing Blocked, and the all-slot walk reaches waiters regardless of
-// which core or process family was interrupted. #581 must still keep socket
-// calls on core 0 until peer NetRx waiting has an end-to-end test.
-//
-// The lock is the one a waiter publishes Blocked under, so either this
-// finds it Blocked or it finds the frame afterwards -- #547's argument for
-// the terminal, one subsystem over, and the reason that issue's fix could
-// not be a local interrupt mask.
-//
-// The walk is the one kernel_process_deadline_wake_all already does from
-// this same handler, so the cost is established rather than new.
-// The timer's normal path calls this while holding the process-run lock.
-// Keeping the scan separate also lets the QEMU negative control compile the
-// identical scan without that lock, so the test changes only the protection
-// around the real production operation.
-fn kernel_process_net_wake_scan(guard: borrow ProcessRunGuard[lock])
-        !{interrupt, unsafe} {
-    let mut cursor = scheduled_process_first_slot();
-    let mut walking: bool = true;
-    while (walking) {
-        match cursor {
-            ProcessSlotCursor::Done => { walking = false; }
-            ProcessSlotCursor::At(slot) => {
-                let next = scheduled_process_next_slot(slot);
-                if (scheduled_process_record_state_locked(guard, slot) ==
-                        ProcessSlotState::Blocked &&
-                    scheduled_process_record_wait_reason_locked(guard, slot) ==
-                        ProcessWaitReason::NetRx) {
-                    match scheduled_process_blocked_take_slot(guard, slot) {
-                        ScheduledProcessBlockedTakeResult::Missing => {}
-                        ScheduledProcessBlockedTakeResult::Blocked(resources) => {
-                            let (owner, blocked) = resources;
-                            let ready = scheduled_process_wake(owner, blocked);
-                            scheduled_process_release(owner, ready);
-                        }
-                    }
-                }
-                cursor = next;
-            }
-        }
-    }
+// A secondary's tick, which holds no lock: it takes the run lock only when
+// its own list has something due, so an idle core's tick costs one load.
+fn kernel_process_tick_wake_if_due() !{interrupt, unsafe} {
+    let raw_core: usize = cpu_id();
+    if (raw_core >= KERNEL_MAX_CORES) { return; }
+    let core: {0..<KERNEL_MAX_CORES as usize} = raw_core;
+    let due: usize = atomic_word_load(&kernel_process_tick_wake_due[core]);
+    if (due == 0 || (read_cntpct() as usize) < due) { return; }
+    let guard = process_run_lock();
+    kernel_process_tick_wake_scan(guard, core, read_cntpct() as usize);
+    process_run_unlock(guard);
 }
 
-fn kernel_process_net_wake_all(guard: borrow ProcessRunGuard[lock])
-        !{interrupt, unsafe} {
-    kernel_process_net_wake_scan(guard);
+// Boot probes clear the whole table; no record survives to be on a list.
+private fn kernel_process_tick_wake_clear() !{unsafe} {
+    let guard = process_run_lock();
+    for core: usize in 0..<KERNEL_MAX_CORES {
+        kernel_process_tick_wake_head[core] = 0;
+        atomic_word_store(&kernel_process_tick_wake_due[core], 0);
+    }
+    process_run_unlock(guard);
 }
 
 // GitHub issue #544: a userspace write to the UART found the transmit queue
@@ -8425,7 +8533,7 @@ fn kernel_process_block_uart_tx(current: borrow FrameRef[process])
 
 // Every process waiting for room in the UART transmit queue becomes runnable.
 // Called from the PL011 interrupt once the TX drain has brought the queue to
-// its low-water mark, the counterpart of kernel_process_net_wake_all.
+// its low-water mark.
 // GitHub issue #587: the third instance of one shape. The net wake, this
 // one and the deadline wake all read process state and move a process from
 // Blocked to Ready out of an interrupt handler; two of the three took no
@@ -8447,7 +8555,7 @@ fn kernel_process_uart_tx_wake_all(guard: borrow ProcessRunGuard[lock])
                         ScheduledProcessBlockedTakeResult::Missing => {}
                         ScheduledProcessBlockedTakeResult::Blocked(resources) => {
                             let (owner, blocked) = resources;
-                            let ready = scheduled_process_wake(owner, blocked);
+                            let ready = scheduled_process_wake(guard, owner, blocked);
                             scheduled_process_release(owner, ready);
                         }
                     }
@@ -8544,8 +8652,7 @@ fn kernel_process_uart_wake(guard: borrow ProcessRunGuard[lock], value: usize)
     // so with none this used to answer Missing, the byte went into the ring,
     // and the Blocked reader was never woken -- /bin/peer-tty on RPi5 read
     // nothing in about one run in four once fcntl and dup3 stopped sending
-    // ash to core 0. With no current process, walk every slot instead, the
-    // walk kernel_process_net_wake_scan already makes from this context.
+    // ash to core 0. With no current process, walk every slot instead.
     let live: bool = execution_state[execution_cpu_index()].current_live;
     let mut waiter: ProcessHandle = execution_state[execution_cpu_index()].current_handle;
     let mut found: bool = false;
@@ -8721,7 +8828,7 @@ fn kernel_process_uart_wake(guard: borrow ProcessRunGuard[lock], value: usize)
                 KernelUartDeliveryResult::Consumed => {}
                 KernelUartDeliveryResult::RetryRead => { retry_read = true; }
             }
-            let ready = scheduled_process_wake(owner, blocked);
+            let ready = scheduled_process_wake(guard, owner, blocked);
             scheduled_process_release(owner, ready);
             let mut waker: ProcessHandle = waiter;
             if (live) { waker = execution_state[execution_cpu_index()].current_handle; }
@@ -9077,7 +9184,7 @@ private fn kernel_process_exit_waiter_probe(parent: ProcessHandle) -> bool {
             let (owner, ready) = resources;
             let running = scheduled_process_start(owner, ready);
             let blocked = scheduled_process_block(
-                owner, running, ProcessWaitReason::ChildExit);
+                guard, owner, running, ProcessWaitReason::ChildExit);
             scheduled_process_release(owner, blocked);
             arranged = true;
         }
@@ -9109,7 +9216,7 @@ private fn kernel_process_exit_waiter_probe(parent: ProcessHandle) -> bool {
         ScheduledProcessBlockedTakeResult::Missing => {}
         ScheduledProcessBlockedTakeResult::Blocked(resources) => {
             let (owner, blocked) = resources;
-            let ready = scheduled_process_wake(owner, blocked);
+            let ready = scheduled_process_wake(restore_guard, owner, blocked);
             scheduled_process_release(owner, ready);
             restored = true;
         }
@@ -10234,7 +10341,7 @@ fn kernel_process_child_exit(current_authority: sink ProcessCurrent[process, Pro
                         // The wait stays pending, naming this child, unless the
                         // direct start below clears it.
                         let ready = scheduled_process_wake_keeping_wait4(
-                            parent_owner, blocked,
+                            exit_guard, parent_owner, blocked,
                             scheduled_process_pid_of_handle(child));
                         kernel_process_trace_handle(
                             ProcessTraceWake, parent, child, status);

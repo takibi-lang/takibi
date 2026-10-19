@@ -49,17 +49,18 @@ fn timer_irq_setup() {
 fn timer_irq_handler() !{interrupt, unsafe} {
     timer_tick_rearm();
     kernel_core0_tick_note();
-    // Every tick wakes network waiters, regardless of which EL it
-    // interrupted. This is separate from the EL0-only scheduling half.
+    // GitHub issue #829: this core's own tick-wake list -- the deadline and
+    // NetRx waiters that blocked here -- on every tick, regardless of which
+    // EL it interrupted: waking is not a scheduling decision and does not
+    // belong behind the EL0-only half. Every secondary does the same from
+    // kernel_secondary_timer_schedule, so a sleeper on a peer no longer
+    // waits for this core's tick.
     //
-    // GitHub issue #587: one acquisition for both. They read process state
-    // and publish Ready, and the lock they need is the one a waiter
-    // publishes Blocked under -- so taking it twice would cost twice and
-    // prove the same thing. The lock masks interrupts, so this core cannot
+    // GitHub issue #587: under the lock a waiter publishes Blocked (and
+    // queues itself) under. The lock masks interrupts, so this core cannot
     // interrupt its own holder.
     let guard = process_run_lock();
-    kernel_process_net_wake_all(guard);
-    kernel_process_deadline_wake_all(guard);
+    kernel_process_tick_wake(guard);
     // GitHub issue #572: a tick on a CPU where a busy worker waits. Core 0
     // only: a secondary's tick takes kernel_secondary_timer_schedule.
     workload_busy_note_tick_locked(guard);
