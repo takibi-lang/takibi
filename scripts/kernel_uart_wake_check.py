@@ -212,6 +212,8 @@ class Counter(gdb.Breakpoint):
         return False
 
 
+# scheduler-locking-waiver: the lane runs at 2 vCPUs
+# (scripts/run_kernel_uart_wake_qemutest.sh), so no third vCPU is frozen.
 def continue_bounded(threads_locked: bool) -> None:
     """Resume the guest, or with the lock only the selected vCPU, for at
     most STEP_TIMEOUT."""

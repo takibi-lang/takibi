@@ -263,6 +263,8 @@ def run() -> None:
         return
 
     kill.delete()
+    # scheduler-locking-waiver: CPU2 and CPU3 are not parked here or at the
+    # stage below; GitHub issue #849.
     # Park CPU1 somewhere it holds no lock BEFORE freezing it, by freezing
     # CPU0 first and letting only CPU1 run. CPU0 is stopped at the entry of
     # kernel_process_signal_send and holds nothing itself, so nothing of
@@ -283,6 +285,7 @@ def run() -> None:
                 f"holds. UART tail: {uart_tail()!r}")
         gdb.execute("detach")
         return
+    # scheduler-locking-waiver: CPU2 and CPU3 as above, GitHub issue #849.
     # CPU1 is now stopped holding nothing; selecting CPU0 freezes it there.
     gdb.execute(f"thread {CPU0_THREAD}", to_string=True)
     gdb.execute("set scheduler-locking on")

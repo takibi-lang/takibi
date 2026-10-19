@@ -280,6 +280,8 @@ PYLINE
                           -ex "ignore \$bpnum 1"
                           -ex "break *crash_report_claim thread 2")
         fi
+        # scheduler-locking-waiver: cores 2 and 3 are not started until
+        # core 1's start finishes, so no third vCPU is online to be frozen.
         gdb_commands=(
             -ex "target remote :$GDB_PORT"
             -ex "set {int}kernel_secondary_main = $fault_instruction"
@@ -324,28 +326,43 @@ PYLINE
         #    `stepi`: QEMU single-steps an exclusive load by running a whole
         #    block at once, and here that block read the held word as free.
         # 5. Detach releases both at once.
+        #
+        # The all-stop at step 1 freezes every other core wherever it is,
+        # and with scheduler-locking on, cores 2 and 3 never run again until
+        # the detach. One frozen inside a spinlock (an idle-loop wake takes
+        # scheduled_process_run_lock) left core 1's or core 0's stage
+        # spinning on it for good (#795). So before anything is written,
+        # every peer is run alone to the idle loop's `wfi`, where it holds
+        # nothing; the BRKs go in only after, so no peer meets one on the way.
+        #
+        # Each stage is bounded on its own (#795): one that ends anywhere but
+        # at a breakpoint prints where every vCPU is and fails the lane.
+        STAGE_SECONDS=120
+        peer_threads=$(seq -s ' ' 2 "$(qemu_online_core_count)")
         gdb_commands=(
+            -ex "source $REPO_ROOT/scripts/kernel_gdb_stage.py"
             -ex "target remote :$GDB_PORT"
             -ex "break run_initial_user thread 1"
-            -ex "continue"
-            -ex "set {int}\$x0 = $fault_instruction"
+            -ex "takibi-bounded-continue $STAGE_SECONDS"
             -ex "delete"
-            -ex "set {int}kernel_log_peer_probe_step = $fault_instruction"
             -ex "set scheduler-locking on"
+            -ex "takibi-park-threads kernel_idle_loop $peer_threads"
+            -ex "set {int}\$x0 = $fault_instruction"
+            -ex "set {int}kernel_log_peer_probe_step = $fault_instruction"
             -ex "break *crash_snapshot_capture thread 2"
             -ex "thread 2"
-            -ex "continue"
+            -ex "takibi-bounded-continue $STAGE_SECONDS"
             -ex "delete"
             -ex "break *crash_snapshot_render thread 2"
-            -ex "continue"
+            -ex "takibi-bounded-continue $STAGE_SECONDS"
             -ex "delete"
             -ex "break *crash_report_claim thread 1"
             -ex "thread 1"
-            -ex "continue"
+            -ex "takibi-bounded-continue $STAGE_SECONDS"
             -ex "delete"
             -ex "break *crash_report_owner_address thread 1"
-            -ex "continue"
-            -ex "continue"
+            -ex "takibi-bounded-continue $STAGE_SECONDS"
+            -ex "takibi-bounded-continue $STAGE_SECONDS"
             -ex "delete"
             -ex "info threads"
             -ex "set scheduler-locking off"
@@ -392,7 +409,7 @@ PYLINE
         armed=true
         break
     fi
-    if [ "$gdb_status" -eq 124 ]; then
+    if [ "$gdb_status" -eq 124 ] || [ "$gdb_status" -eq 3 ]; then
         echo "FAIL kernel/qemu oops: GDB never reached a staged breakpoint" >&2
         sed 's/^/  /' "$ARTIFACT_DIR/arm-gdb.log" >&2 || true
         exit 1
