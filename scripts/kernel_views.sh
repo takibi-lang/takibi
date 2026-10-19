@@ -74,6 +74,15 @@ kernel_views_timing_only() {
     return 1
 }
 
+# Select a view's lines from a normalized capture: THE matching rule, held
+# once. scripts/check_kernel_view_filters.sh (#834) applies it to the
+# .expected files themselves, so an expected line its filter does not select
+# fails at build time instead of on a booted lane.
+kernel_views_select() {
+    local filter="$1" input="$2"
+    LC_ALL=C grep -E -f "$filter" "$input" || true
+}
+
 kernel_views_compare() {
     local label="$1" artifact_dir="$2" normalized="$3"
     local common_dir="$4" platform_dir="$5" expected_override="${6:-}"
@@ -116,7 +125,7 @@ kernel_views_compare() {
             echo "error: missing expected file for kernel view $name" >&2
             return 2
         fi
-        LC_ALL=C grep -E -f "$filter" "$normalized" >"$actual" || true
+        kernel_views_select "$filter" "$normalized" >"$actual"
         if ! cmp -s "$expected" "$actual" &&
                 kernel_views_timing_only "$label" "$name"; then
             # GitHub issue #692: a verdict decided by ticks is decided on the
