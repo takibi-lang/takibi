@@ -151,7 +151,8 @@ fn log_storm_probe() -> bool !{logs, unsafe} {
 
 // GitHub issue #656: one more round, inside a log-ring trace window
 // (kernel/printk/log_ring_trace.tkb), with a syslog(2) read on core 0 while
-// the secondaries write. /bin/protocol-trace asks for it from core 0 after
+// the secondaries write, from the window's first record (so it meets
+// records still in flight). /bin/protocol-trace asks for it from core 0 after
 // its own window, which is after init's dmesg snapshot: the report is a few
 // hundred lines and would otherwise evict boot markers from the ring.
 // Core 0 writes one line first, so the read has a record of the window to
@@ -170,11 +171,12 @@ fn log_storm_trace_probe() -> bool !{logs, unsafe} {
     let joined: bool = log_storm_wait_word(&log_storm_registered, expected);
     let writers: usize = atomic_word_load(&log_storm_registered);
     atomic_word_store(&log_storm_writers, writers);
-    log_ring_trace_open(kernel_log_raw_head());
+    let from: usize = kernel_log_raw_head();
+    log_ring_trace_open(from);
     let opening: bool = kernel_log_storm_write(round, 0);
     atomic_word_store(&log_storm_go, round);
     log_ring_trace_arm_reader();
-    let read: usize = kernel_log_snapshot_build();
+    let read: usize = kernel_log_snapshot_build_from(from);
     log_ring_trace_disarm_reader();
     let mut mine: bool = true;
     for index: usize in 1..<64 {

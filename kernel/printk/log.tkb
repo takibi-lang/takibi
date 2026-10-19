@@ -1653,6 +1653,15 @@ private fn kernel_log_snapshot_record(seq: usize, end: usize, second_check: bool
 // while this copied them, and records their writers gave up are each
 // reported explicitly instead of being presented as complete history.
 fn kernel_log_snapshot_build() -> usize !{unsafe} {
+    return kernel_log_snapshot_build_from(0);
+}
+
+// The same read, starting no earlier than `floor` (syslog(2): 0). The log
+// ring trace probe (#656) reads from its window's opening head, so the read
+// meets the records its writers are still committing instead of reaching
+// them only after a whole ring of older ones; the records it skips are
+// reported as overwritten, and that snapshot is never shown.
+fn kernel_log_snapshot_build_from(floor: usize) -> usize !{unsafe} {
     let snapshot: *KernelLogSnapshot = kernel_log_snapshot_here();
     snapshot.length = 0;
     let end: usize = kernel_log_observe(&kernel_log_head);
@@ -1660,6 +1669,7 @@ fn kernel_log_snapshot_build() -> usize !{unsafe} {
     if (end > KERNEL_LOG_SLOT_COUNT) {
         begin = end - KERNEL_LOG_SLOT_COUNT;
     }
+    if (floor > begin && floor <= end) { begin = floor; }
     if (begin != 0) {
         kernel_log_snapshot_text("<4>kernel log: overwritten records=" as *u8);
         kernel_log_snapshot_decimal6(begin % 1000000);

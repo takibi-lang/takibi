@@ -930,6 +930,19 @@ The same steps are held to `Wait4Block.tla` and
 `RecordLifetime.tla` on the parent pid each process line carries;
 `kernel/models/README.md` says what that does and does not prove.
 
+After closing that window, `/bin/protocol-trace` asks core 0 (workload tag
+22) for a window of the kernel log ring (#656): one log storm round in which
+every online CPU writes four lines while core 0 reads the ring through the
+syslog reader from the window's first record. Every compare-swap and reader
+load in `kernel/printk/log.tkb` records its observed slot word and a
+system-counter interval into its CPU's static buffer
+(`kernel/printk/log_ring_trace.tkb`); outside a window each site costs one
+acquire load. `scripts/validate_log_ring_trace.py` has TLC check the window
+against `kernel/models/LogRing.tla` through `LogRingTrace.tla`, in the
+interleavings the intervals allow, and fails the lane on a transition the
+model lacks, a broken invariant, a lost event, or a record wider than the
+model's two slots.
+
 ## QEMU/AArch64 integration
 
 QEMU/AArch64 lets anyone build and boot a substantial, real integration
