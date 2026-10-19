@@ -67,10 +67,10 @@ private fn peer_sleep_move_to(cpu: u8) {
     }
 }
 
-// A Ready competitor on CPU 1 for as long as the experiment runs. Without
-// one, nanosleep has nothing to switch to and waits in place for its own
-// core's interrupt (SyscallDeadlineResult::WaitInterrupt), never Blocked
-// and never queued, which would pass without testing the lists.
+// A Ready competitor on CPU 1 for as long as the experiment runs. Since
+// #840 a peer's nanosleep blocks and queues even with nothing else Ready;
+// the competitor still keeps CPU 1 busy so the sleeper's wake has to come
+// from the list rather than from an idle core re-asking.
 private fn peer_sleep_competitor() {
     peer_sleep_move_to(1);
     let mut polls: usize = 0;

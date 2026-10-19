@@ -2749,6 +2749,23 @@ must_use variant SyscallDeadlineResult {
     WaitInterrupt;
 }
 
+// Does a deadline or signal wait block (Blocked, queued on this core's
+// tick-wake list, #829) rather than retry through WaitInterrupt?
+//
+// GitHub issue #840: on a peer it always blocks, as Linux does. A peer
+// that found nothing else Ready used to keep the waiter Running in a wfe
+// retry loop (86fb1cbd), so a PID 1 placed on a peer (#775 2-1) showed DDB
+// a third stack root, Running in EL1, instead of a parked init. Blocking
+// costs nothing there: the peer idles in kernel_idle_loop, its own tick
+// wakes the deadline (kernel_process_tick_wake_scan), and a signal wakes
+// the waiter under the run lock. Core 0 keeps the retry when it is alone,
+// which the BusyBox console lanes were written against; it still blocks
+// whenever another process is Ready.
+fn syscall_timed_wait_blocks() -> bool {
+    if (cpu_id() != 0) { return true; }
+    return kernel_process_other_ready();
+}
+
 // Parse one Linux arm64 timespec and either finish a zero/already-expired
 // wait or arm the current process against the architectural generic counter.
 fn syscall_deadline_wait(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], timespec_address: usize, absolute: bool)
@@ -2785,7 +2802,7 @@ fn syscall_deadline_wait(current_authority: borrow ProcessCurrent[current_proces
         // and without this it held its CPU after others became Ready: the
         // DDB lane's BREAK found init at this read_cntpct on core 0 while
         // the workload it was waiting for got no time.
-        if (kernel_process_other_ready()) {
+        if (syscall_timed_wait_blocks()) {
             return SyscallDeadlineResult::Block;
         }
         return SyscallDeadlineResult::WaitInterrupt;
@@ -2817,7 +2834,7 @@ fn syscall_deadline_wait(current_authority: borrow ProcessCurrent[current_proces
     }
     if (deadline <= now) { return SyscallDeadlineResult::Ready; }
     kernel_process_current_arm_deadline(current_authority, deadline, 0);
-    if (kernel_process_other_ready()) {
+    if (syscall_timed_wait_blocks()) {
         return SyscallDeadlineResult::Block;
     }
     return SyscallDeadlineResult::WaitInterrupt;
@@ -2841,7 +2858,7 @@ fn syscall_signal_wait(current_authority: borrow ProcessCurrent[current_process,
             return SyscallAction::Resume(LINUX_EAGAIN);
         }
         // The same retry question as syscall_deadline_wait's.
-        if (kernel_process_other_ready()) { return SyscallAction::Block; }
+        if (syscall_timed_wait_blocks()) { return SyscallAction::Block; }
         return SyscallAction::WaitInterrupt;
     }
     if (timeout_address != 0) {
@@ -2914,7 +2931,7 @@ fn syscall_signal_wait(current_authority: borrow ProcessCurrent[current_process,
         kernel_boot_log(
             "signal: BusyBox init blocked in rt_sigtimedwait for SIGCHLD\n");
     }
-    if (kernel_process_other_ready()) { return SyscallAction::Block; }
+    if (syscall_timed_wait_blocks()) { return SyscallAction::Block; }
     return SyscallAction::WaitInterrupt;
 }
 
