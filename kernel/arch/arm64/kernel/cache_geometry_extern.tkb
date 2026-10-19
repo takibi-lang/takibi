@@ -1,0 +1,7 @@
+// extern fn declaration for kernel/arch/arm64/kernel/cache_geometry.S
+// (GitHub issue #759). Split into its own file for the same reason
+// pmu_extern.tkb is: takibi rejects a second `extern fn` declaration of the
+// same name, so one file owns it.
+
+// The calling core's raw CTR_EL0.
+extern fn cache_geometry_read_ctr_el0() -> usize;

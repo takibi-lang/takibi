@@ -571,7 +571,7 @@ views remain live; this is separate evidence from the bounded model.
 | Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
 | --- | --- | --- | --- | --- |
 | `StartReserve` | `cpu_start_reserve` | claim before adding the possible target, sharing the stop gate | exact bit encoding, and the gate's distinct start-holder value (#556) -- irrelevant to `NoUnstoppedRead`: the set is the mask's membership relation, and the value only names which holder a refused claim met | `8f6e5d1196b4` |
-| `StartFirmware`, `CpuArrive` | `qemu_psci_cpu_on`, `rpi5_psci_cpu_on`, `kernel_secondary_main` | reserved target can execute before or after the firmware call returns | entry assembly and PSCI encoding -- irrelevant to `NoUnstoppedRead`: a CPU may arrive at any step after reservation | `e7493cb8f732` |
+| `StartFirmware`, `CpuArrive` | `qemu_psci_cpu_on`, `rpi5_psci_cpu_on`, `kernel_secondary_main` | reserved target can execute before or after the firmware call returns | entry assembly and PSCI encoding -- irrelevant to `NoUnstoppedRead`: a CPU may arrive at any step after reservation; the cache-geometry halt before arrival (#759) -- irrelevant to `NoUnstoppedRead`: it reads no shared state and is a CPU that never arrives | `4130147f7ff7` |
 | `StartFinish`, `StartAbsent` | `cpu_start_finish`, `cpu_start_gate_release` | uncertain targets stay possible; only definitive absence removes a new reservation before releasing the gate | scheduler's contiguous online prefix -- irrelevant to `NoUnstoppedRead`: the full stop uses the independent possible-participant mask | `a474390de9c0` |
 | `Claim`, `Publish` | `world_stop_claim`, `world_stop_begin_claimed`, `world_stop_machine_begin`, `world_stop_machine_begin_holding_probe` | one initiator; set capture under the gate; fresh request generation | the whole-machine stop's bounded wait while a start reservation holds the gate, including a release right after a failed CAS, which is classified by the value that CAS observed (#556, #613) -- irrelevant to `NoUnstoppedRead`: it changes no state until the gate is free and then takes the same `Claim`, or answers Busy; generation exhaustion -- irrelevant to `NoUnstoppedRead`: two generations are never reused and exhaustion only refuses another request; subset probe API -- irrelevant to `NoUnstoppedRead`: its distinct WorldStopped type cannot enter a whole-machine reader | `54b290a1aee4` |
 | `Ack`, `PenExit`, `ToggleIrq` | `world_stop_hold`, `kernel_world_stop_serve`, `kernel_ddb_stopped_root_publish`, `kernel_ddb_stopped_root_retire` | ack current request only after entering the pen; exit only when request changes; masked IRQs can delay ack | physical instruction timing -- irrelevant to `NoUnstoppedRead`: arbitrary scheduling allows every delay; stopped-root sequence parity -- irrelevant to `NoUnstoppedRead`: an unsettled root is refused, while the repeated real-stop fixture checks usable publication separately | `8b426deb0339` |
@@ -816,6 +816,9 @@ properties, and the model proves nothing about them:
 - `CTR_EL0.DminLine` and the writeback granule `CTR_EL0.CWG` are at most
   64 bytes (`DMA_CACHE_LINE`), as on Cortex-A76; otherwise the loop's
   rounding would reach a neighbouring object's line.
+  Checked at bring-up on every core, which halts otherwise
+  (`kernel_cache_geometry_require` in `kernel/init/boot_prologue.tkb`,
+  decoding tested by `linux_user/cache_geometry`; GitHub issue #759).
 - The device's data writes reach memory before its Transfer Event can be
   observed (PCIe posted-write ordering; xHCI 1.2, 4.11.3.1), and a
   confirmed halt ends its writes (xHCI 1.2, 5.4.1.1). A completion event

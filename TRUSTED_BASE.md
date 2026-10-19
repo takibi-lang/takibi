@@ -295,6 +295,10 @@ rules globally.
   lines (shareability, migration) is checked once, independent of the
   declaration, by `kernel/models/DmaCacheVisibility.tla`, and stays
   trusted in each builtin's lowering.
+  The line size that model and the `dma_fixed` alignment assume (CTR_EL0
+  DminLine and CWG at most `DMA_CACHE_LINE`) is checked, not trusted: every
+  core reads its CTR_EL0 at bring-up and halts otherwise
+  (`kernel_cache_geometry_require`, GitHub issue #759).
   The maintained consumer is the xHCI producer rings
   (`kernel/platform/rpi5/usb_xhci_rings.tkb`): its trusted observations are
   a nonzero completion code from `usb_await_event` for the one outstanding

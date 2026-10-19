@@ -1,0 +1,52 @@
+// GitHub issue #759: the cache geometry the DMA lowering relies on, checked
+// rather than assumed.
+//
+// `dma_fixed` buffers are aligned and sized to the compile-time
+// DMA_CACHE_LINE (64 on AArch64), while the `dc cvac`/`dc ivac` loop the
+// compiler emits steps by CTR_EL0.DminLine read at run time. If a core's
+// smallest data cache line, or its writeback granule CTR_EL0.CWG, were
+// larger than DMA_CACHE_LINE, one maintenance operation would reach a
+// neighbouring object's bytes -- the case kernel/models/DmaCacheVisibility.tla
+// lists as an assumption. Boot calls cache_geometry_check() on every core
+// with that core's CTR_EL0 (kernel/init/boot_prologue.tkb) and halts on
+// anything but Fits.
+//
+// Pure decoding, no register access, so linux_user/cache_geometry runs it on
+// planted values; QEMU cannot change CTR_EL0.
+//
+// Encodings (Arm ARM DDI 0487, CTR_EL0): DminLine [19:16] and CWG [27:24]
+// are log2 of the size in 4-byte words. CWG 0 means "not reported", for
+// which the architecture says to assume the 2 KiB maximum -- that fails.
+
+must_use variant CacheGeometryCheck {
+    Fits;
+    // The smallest data cache line in bytes, larger than the limit.
+    DminLineTooLarge(usize);
+    // The writeback granule in bytes, larger than the limit.
+    WritebackGranuleTooLarge(usize);
+    WritebackGranuleUnreported;
+}
+
+fn cache_geometry_dminline_bytes(ctr: usize) -> usize {
+    return 4 << ((ctr >> 16) & 0xF);
+}
+
+fn cache_geometry_cwg_field(ctr: usize) -> usize {
+    return (ctr >> 24) & 0xF;
+}
+
+fn cache_geometry_check(ctr: usize, limit: usize) -> CacheGeometryCheck {
+    let dminline: usize = cache_geometry_dminline_bytes(ctr);
+    if (dminline > limit) {
+        return CacheGeometryCheck::DminLineTooLarge(dminline);
+    }
+    let cwg: usize = cache_geometry_cwg_field(ctr);
+    if (cwg == 0) {
+        return CacheGeometryCheck::WritebackGranuleUnreported;
+    }
+    let granule: usize = 4 << cwg;
+    if (granule > limit) {
+        return CacheGeometryCheck::WritebackGranuleTooLarge(granule);
+    }
+    return CacheGeometryCheck::Fits;
+}

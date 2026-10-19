@@ -13,6 +13,8 @@
 // to be reset afterwards; running it before the first real line means the
 // evidence a boot leaves is never the probe's.
 use "kernel/printk/log.tkb";
+use "kernel/arch/arm64/kernel/cache_geometry.tkb";
+use "kernel/arch/arm64/kernel/cache_geometry_extern.tkb";
 
 fn kernel_boot_prologue() !{logs, unsafe} {
     // First, before anything has had a chance to go deep: fill the unused
@@ -32,4 +34,40 @@ fn kernel_boot_prologue() !{logs, unsafe} {
     } else {
         kernel_boot_log("kernel log: bounds probe failed\n");
     }
+    // Before any DMA: no driver has been probed yet.
+    kernel_cache_geometry_require(0);
+}
+
+// GitHub issue #759: halt this core unless its CTR_EL0 fits DMA_CACHE_LINE
+// (see kernel/arch/arm64/kernel/cache_geometry.tkb). Every core calls it --
+// core 0 here, each secondary in kernel_secondary_main before it reports
+// itself started -- because CTR_EL0 is a per-core register and a
+// heterogeneous part may report different lines on different cores. The
+// cost is one mrs and a few shifts per core. Silent on success (debugging
+// aids log only on failure); the line on failure carries the raw register
+// so a board report needs nothing else.
+fn kernel_cache_geometry_require(core: usize) !{logs, unsafe} {
+    let ctr: usize = cache_geometry_read_ctr_el0();
+    match cache_geometry_check(ctr, DMA_CACHE_LINE) {
+        CacheGeometryCheck::Fits => { return; }
+        CacheGeometryCheck::DminLineTooLarge(bytes) => {
+            kernel_boot_log("cache: DminLine exceeds DMA_CACHE_LINE bytes=");
+            uart_put_udec(bytes);
+        }
+        CacheGeometryCheck::WritebackGranuleTooLarge(bytes) => {
+            kernel_boot_log("cache: CWG exceeds DMA_CACHE_LINE bytes=");
+            uart_put_udec(bytes);
+        }
+        CacheGeometryCheck::WritebackGranuleUnreported => {
+            kernel_boot_log("cache: CWG unreported (architectural 2 KiB) exceeds DMA_CACHE_LINE");
+        }
+    }
+    kernel_boot_log(" limit=");
+    uart_put_udec(DMA_CACHE_LINE);
+    kernel_boot_log(" core=");
+    uart_put_udec(core);
+    kernel_boot_log(" ctr_el0=");
+    uart_put_hex(ctr);
+    kernel_boot_log("; halting\n");
+    while (true) { }
 }

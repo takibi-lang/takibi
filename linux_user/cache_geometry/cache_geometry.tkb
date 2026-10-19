@@ -1,0 +1,42 @@
+// GitHub issue #759: kernel/arch/arm64/kernel/cache_geometry.tkb's verdict on
+// planted CTR_EL0 values. QEMU cannot change CTR_EL0 and every board we run
+// reports 64-byte lines, so the refusals are reachable only here.
+//
+// Expected output (linux_user/cache_geometry/cache_geometry.expected): one
+// line once every planted value got the verdict below.
+
+fn check(ok: bool, label: *u8) {
+    if (ok == false) {
+        uart_puts("FAIL cache-geometry: "); uart_puts(label); uart_puts("\r\n");
+        linux_exit(1);
+    }
+}
+
+// 0 = Fits, 1 = unreported CWG, otherwise the refused size in bytes; the
+// DminLine size is reported plus one so the two refusals cannot collide.
+fn verdict(ctr: usize) -> usize {
+    match cache_geometry_check(ctr, 64) {
+        CacheGeometryCheck::Fits => { return 0; }
+        CacheGeometryCheck::WritebackGranuleUnreported => { return 1; }
+        CacheGeometryCheck::DminLineTooLarge(bytes) => { return bytes + 1; }
+        CacheGeometryCheck::WritebackGranuleTooLarge(bytes) => { return bytes; }
+    }
+}
+
+fn app_main() {
+    // Cortex-A76 (RPi5) and QEMU's cortex-a53: DminLine 4, CWG 4 (64 bytes).
+    check(verdict(0x8444c004) == 0, "Cortex-A76 value fits");
+    check(verdict(0x84448004) == 0, "Cortex-A53 value fits");
+    // Smaller than the limit is fine: the loop steps finer.
+    check(verdict(0x84438004) == 0, "32-byte DminLine fits");
+    check(verdict(0x83448004) == 0, "32-byte CWG fits");
+    // One step past the boundary, each field alone.
+    check(verdict(0x84458004) == 129, "128-byte DminLine refused");
+    check(verdict(0x85448004) == 128, "128-byte CWG refused");
+    check(verdict(0x8f448004) == 131072, "largest CWG encoding refused");
+    // CWG 0: the architecture says assume the 2 KiB maximum.
+    check(verdict(0x80448004) == 1, "unreported CWG refused");
+    // DminLine is reported first when both are wrong.
+    check(verdict(0x80458004) == 129, "DminLine reported first");
+    uart_puts("cache-geometry: 64-byte lines fit, 128-byte DminLine/CWG and unreported CWG refused\r\n");
+}
