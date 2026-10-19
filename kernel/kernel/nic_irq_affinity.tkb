@@ -108,9 +108,11 @@ const NIC_IRQ_EVIDENCE_CORE: usize = SECONDARY_CORE_ID;
 
 private fn nic_irq_log_counts() !{logs, unsafe} {
     kernel_boot_log(" taken=");
+    let mut separator: bool = false;
     for core: usize in 0..<KERNEL_MAX_CORES {
         if (core < kernel_online_core_count()) {
-            if (core != 0) { kernel_boot_log(","); }
+            if (separator) { kernel_boot_log(","); }
+            separator = true;
             uart_put_udec(nic_irq_phase_taken(core));
         }
     }
