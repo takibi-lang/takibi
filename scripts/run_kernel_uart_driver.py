@@ -162,7 +162,8 @@ DDB_PROMPT = b"ddb> "
 #   intr     esr/far and whether the entry was an irq or a brk. An assertion
 #            arrives as brk, which is the 2026-09-07 case.
 #   bt       where the debugger CPU stopped.
-#   bt cpu N both maintained CPUs, including a peer stalled in a syscall.
+#   bt cpu N every maintained CPU (four), including a peer stalled in a
+#            syscall; cores 2 and 3 carry processes since #579.
 #   sched    enabled/pending/current and the ready/running/blocked counts.
 #   current  the process the snapshot belongs to.
 #   ps       what else existed, so `current` can be placed among them.
@@ -180,6 +181,7 @@ DDB_PROMPT = b"ddb> "
 # and `continue` because resuming a guest that stopped for a reason destroys
 # the state the next question would have asked about.
 POSTMORTEM_COMMANDS = (b"oops", b"intr", b"bt", b"bt cpu 0", b"bt cpu 1",
+                       b"bt cpu 2", b"bt cpu 3",
                        b"sched", b"current", b"ps",
                        b"stacks", b"events", b"log")
 

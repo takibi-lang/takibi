@@ -5410,13 +5410,17 @@ fn kernel_process_cpu_allows_slot(guard: borrow ProcessRunGuard[lock], cpu: usiz
         -> bool {
     if (cpu >= KERNEL_MAX_CORES) { return false; }
     let bit: {0..<KERNEL_MAX_CORES as usize} = cpu;
-    // Slot 0 is the permanent bootstrap record. Unlike an ordinary task, it
-    // can be Ready before it has a resumable EL0 frame; keep it on the core
-    // that owns the bootstrap execution context. Unset affinity on every
-    // pooled process still means every online CPU.
-    // core-role: slot 0 stays on core 0 (above); a call the peer-safety gate
-    // refused runs on core 0 until it completes
-    if (slot == 0) { return cpu == 0; }
+    // Slot 0 is PID 1's record. During boot it can be Ready before it has a
+    // resumable EL0 frame (the scheduler probes run on core 0 standing on
+    // it), so until peer dispatch opens -- just before run_initial_user,
+    // once PID 1 has its complete image -- it stays where boot runs. From
+    // then on it is Ready only after a block or switch saved its EL0 frame,
+    // and it runs on any core its mask allows, like every other process
+    // (GitHub issue #775).
+    // core-role: boot runs on core 0, so PID 1 does too until peer dispatch
+    // opens; a call the peer-safety gate refused runs on core 0 until it
+    // completes
+    if (slot == 0 && scheduled_process_peer_dispatch_enabled == false) { return cpu == 0; }
     if (scheduled_process_core0_for_call(guard, slot)) { return cpu == 0; }
     let mask: usize = scheduled_process_affinity_mask(guard, slot);
     if (mask == 0) {
@@ -6075,9 +6079,9 @@ fn kernel_process_secondary_start() -> ProcessSecondaryStart {
         match cursor {
             ProcessSlotCursor::Done => { walking = false; }
             ProcessSlotCursor::At(slot) => {
-                // Slot 0 is PID 1, which only core 0 may run
-                // (kernel_process_cpu_allows_slot). Core 0's idle loop
-                // (#592) takes it like any other: by the time peer dispatch
+                // Slot 0 is PID 1, which any core its mask allows may run
+                // once peer dispatch is open (#775). Every idle loop
+                // takes it like any other: by the time peer dispatch
                 // is enabled, just before run_initial_user, the bootstrap has
                 // its complete image, and from then on it is Ready only after
                 // a block or a switch saved its EL0 frame. It used to be

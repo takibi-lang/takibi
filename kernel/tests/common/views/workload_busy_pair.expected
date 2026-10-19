@@ -3,4 +3,4 @@ workload: busy pair waits bounded: no competitor picked more than 4 times, no wa
 workload: busy pair init restarted a only, b kept its pid and its counter
 workload: busy pair done
 workload: busy pair migrated across both cpus with stack handoff intact
-workload: peer exit stack released before init collected on core 0
+workload: peer exit stack released before init collected it

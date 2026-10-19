@@ -1248,9 +1248,11 @@ fn workload_busy_peer_exit_reaped(pid: usize, parent_pid: usize,
     if (workload_busy_pair.peer_exit_reported == false &&
         workload_busy_pair.peer_exit_pid == pid &&
         workload_busy_pair.peer_exit_stack_released && stack_unowned &&
-        cpu_id() == 0 && parent_pid == 1) {
+        parent_pid == 1) {
+        // Init reaps on whichever core it runs on since GitHub issue #775
+        // stopped pinning PID 1 to core 0.
         kernel_boot_log(
-        "workload: peer exit stack released before init collected on core 0\n");
+        "workload: peer exit stack released before init collected it\n");
         workload_busy_pair.peer_exit_reported = true;
     }
 }

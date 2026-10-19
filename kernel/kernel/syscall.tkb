@@ -8207,17 +8207,15 @@ private inline fn syscall_execve_current_with(slot: borrow SyscallSlot[0],
     if (kernel_syscall_exec_pending()) {
         return SyscallAction::Resume(LINUX_EAGAIN);
     }
-    // GitHub issue #610: a child's exec runs where it is called. The
-    // root process's own (SyscallAction::Exec) does not: it returns
-    // through run_initial_user, core 0's boot entry into PID 1, so a
-    // peer hands it to core 0 before anything is written. So does any
-    // exec in inetd mode: its close-on-exec pass may close a connected
-    // descriptor, and in that mode those are core 0's (see
+    // GitHub issue #610: an exec runs where it is called. The root
+    // process's own (SyscallAction::Exec) returns through
+    // run_initial_user's frame on PID 1's kernel stack, which is the same
+    // stack on whichever core PID 1 runs, so it too stays put (#775). An
+    // exec in inetd mode does not: its close-on-exec pass may close a
+    // connected descriptor, and in that mode those are core 0's (see
     // syscall_peer_safe).
-    // core-role: the root process's exec returns through run_initial_user,
-    // core 0's boot entry into PID 1
-    if (cpu_id() != 0 && (kernel_process_is_child(current_authority) == false ||
-        kernel_syscall_inetd_mode())) {
+    // core-role: inetd-mode connected descriptors are core 0's
+    if (cpu_id() != 0 && kernel_syscall_inetd_mode()) {
         return SyscallAction::Migrate;
     }
     let mut path_address: usize = x0;

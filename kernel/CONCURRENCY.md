@@ -134,7 +134,8 @@ on that process's own kernel stack -- a clone child's first return still
 stands on its parent's. The hand-off is the peers' ordering: publish no
 current process, move SP off the process stack, then make the process
 Ready with its stack unowned under the run lock. The idle loop takes a Ready
-process core 0 may run, PID 1 (slot 0) included: once peer dispatch is
+process core 0 may run, PID 1 (slot 0) included -- on every core since
+#775: once peer dispatch is
 enabled, just before `run_initial_user`, a Ready PID 1 always has a saved
 EL0 frame, and skipping it left init Ready and never run whenever its child
 exited on a peer. An exit with no
@@ -218,6 +219,15 @@ Symmetric now:
   it is, waits for an interrupt and reruns the syscall in place
   (`kernel_syscall_dispatch_action`, #775). A peer used to migrate the call
   to core 0 to wait there.
+- PID 1 (slot 0): once peer dispatch opens, just before `run_initial_user`,
+  it runs on any core its mask allows (`kernel_process_cpu_allows_slot`,
+  #775), and so does its own exec, whose `run_initial_user` frame is on
+  PID 1's kernel stack wherever PID 1 runs. Before that, during the boot
+  probes, slot 0 can be Ready without a saved EL0 frame, so it stays on the
+  boot core (the boot row). Its record is still the static bootstrap
+  record and its kernel stack is core 0's boot stack, which holds `main()`'s
+  frames; that stack is PID 1's, not core 0's, since core 0 idles on its
+  own idle stack (#592, #821).
 
 Special, with the reason it stays so today:
 
@@ -225,8 +235,6 @@ Special, with the reason it stays so today:
 |---|---|---|---|
 | Boot | `boot/entry.S` parks every MPIDR but 0; core 0 runs `main()`, the GIC distributor, device bring-up and the boot fixtures | the firmware hands off one core, and machine-wide state is initialized once | no: one core has to come first |
 | PSCI start authority | `cpu_start_reserve` (`lib/occupancy.tkb`) | starting cores is a boot phase; no hotplug exists | only with CPU hotplug, which nothing needs |
-| Slot 0 / PID 1's record | `kernel_process_cpu_allows_slot` | slot 0 is the static bootstrap record, Ready before it has a resumable EL0 frame, and its context is core 0's boot stack | yes, by making it an ordinary pooled record (decision; #672 evidence) |
-| The root process's exec | `syscall_execve_current_with` | it returns through `run_initial_user`, core 0's boot entry into PID 1 | follows the slot 0 row |
 | Syscalls outside the peer-safety table | `syscall_peer_refused`, `syscall_peer_safe`; rerun on core 0 with the process pinned for the call | each names a subsystem whose state only core 0 touches: UART attributes (ioctl), inetd-mode connected descriptors, the BusyBox Extras exec that resets the TCP pool | yes, one subsystem at a time; each entry is its own follow-up |
 | Deadline and NetRx wakes | `timer_irq_handler` runs `kernel_process_deadline_wake_all` and `kernel_process_net_wake_all`; `kernel_secondary_timer_schedule` runs neither | one walker of every slot per tick; a peer sleeper is woken by core 0's tick, so a long core-0 mask (DDB) delays it | yes (decision: every tick walks, or per-CPU deadline lists) |
 | Device interrupts | UART, GEM, virtio-net and xHCI SPIs target core 0; a secondary's dispatch handles only its tick and PMU line | their drivers' state is touched only from core 0 | yes, with per-driver locking or an IRQ affinity policy (decision) |
