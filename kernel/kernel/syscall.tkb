@@ -430,9 +430,30 @@ fn kernel_syscall_daemon_start() {
     // while it is allocated, and tcp_connection_pool_init drains every one
     // -- there is no fixed set of slots left to put back into a clean
     // state.
-    tcp_connection_pool_init();
+    //
+    // GitHub issue #828: the drain holds the network capability. Each
+    // connection is freed under its owner, but freeing one walks the shared
+    // retransmit chain by take, filter and put back, which assumes the one
+    // TCP context that holds the capability (kernel/net/tcp.tkb's header).
+    // A connected read, write or close on another CPU holds it while it
+    // walks the same chain, so this waits for it rather than racing it. That
+    // was as true when this exec ran only on core 0 as it is on a peer:
+    // core 0 never owned the pool, the capability does.
+    match network_capability_take_waiting() {
+        NetworkCapabilityWaitResult::NeverInstalled => {
+            tcp_connection_pool_init();
+        }
+        NetworkCapabilityWaitResult::Ready(ready) => {
+            tcp_connection_pool_init();
+            match network_capability_put(ready) {
+                NetworkCapabilityPutResult::Stored => {}
+                NetworkCapabilityPutResult::Conflict => {}
+            }
+        }
+    }
     kernel_syscall_set_inetd_mode(false);
     syscall_test_lifecycle_daemon_reset();
+    workload_peer_daemon_handoff();
 }
 
 fn kernel_syscall_exec_pending() -> bool {
@@ -4625,7 +4646,8 @@ fn syscall_peer_refused(number: usize) -> bool {
     // #550 had made its decision and its Blocked publication one critical
     // section; execve and execveat in #610, once exec's per-call state was
     // per CPU and its record writes one hold (#618), with the three execs
-    // that stay core 0's handed there from the handler; clone, clone3, fork
+    // that stayed core 0's handed there from the handler (the last, the
+    // BusyBox Extras exec, runs where it is called since #828); clone, clone3, fork
     // and vfork in #611, whose child's first return on its parent's stack
     // StackOwnership.tla already models on either core. syslog, the one
     // entry that was not lifecycle, left in #612: its reader takes no lock
@@ -8345,17 +8367,12 @@ private inline fn syscall_execve_current_with(slot: borrow SyscallSlot[0],
             }
         }
     }
-    // GitHub issue #610: exec'ing BusyBox Extras hands off the bounded
-    // socket fixture (kernel_syscall_daemon_start), which resets the TCP
-    // connection pool core 0's network path owns. That exec, alone,
-    // stays core 0's; nothing has been written yet, so the rerun there
-    // starts clean.
-    // core-role: the BusyBox Extras exec resets the TCP pool core 0's network
-    // path owns
-    if (cpu_id() != 0 && exec_inode != 0 &&
-        kernel_exec_primary_is_busybox_extras(exec_inode)) {
-        return SyscallAction::Migrate;
-    }
+    // GitHub issue #610 kept exec'ing BusyBox Extras on core 0 because its
+    // handoff (kernel_syscall_daemon_start) drains the TCP connection pool.
+    // GitHub issue #828: it runs where it is called. The drain frees each
+    // connection under its owner and holds the network capability while it
+    // does, so a peer's drain and a connected call on any other CPU
+    // serialize on the same locks core 0's did.
     let mut output_offset: usize = script_offset;
     let mut argc: usize = script_argc;
     let mut vector_terminated: bool = false;

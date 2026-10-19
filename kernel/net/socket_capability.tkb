@@ -21,6 +21,11 @@ use "kernel/lib/mutex.tkb";
 struct NetworkCapabilityStore {
     private mutex: Mutex;
     private value: Place(NetRxCanAcquire);
+    // GitHub issue #828: set, under `mutex`, the first time a capability is
+    // installed, and never cleared. Once set, an empty store means a holder
+    // is between take and put, which network_capability_take_waiting waits
+    // out; while clear, no capability exists anywhere.
+    private installed_once: bool;
 }
 
 private let mut network_capability_store: NetworkCapabilityStore;
@@ -70,6 +75,7 @@ fn network_capability_install(ready: sink NetRxCanAcquire)
         network_capability_store.value, ready);
     match previous {
         Place::Empty => {
+            network_capability_store.installed_once = true;
             network_capability_unlock(
                 guard, &network_capability_store.mutex);
             return NetworkCapabilityInstallResult::Installed;
@@ -107,6 +113,40 @@ fn network_capability_take() -> NetworkCapabilityTakeResult {
             return NetworkCapabilityTakeResult::Ready(ready);
         }
     }
+}
+
+must_use variant NetworkCapabilityWaitResult {
+    NeverInstalled;
+    Ready(NetRxCanAcquire);
+}
+
+// GitHub issue #828: the capability, waiting for a holder to put it back.
+// Every holder is a syscall between its take and its put on another CPU:
+// none holds it while blocked (see kernel/net/tcp.tkb's header), none from
+// an interrupt handler, and the caller holds no lock while it waits, so the
+// wait is bounded by one such section. NeverInstalled means no capability
+// was ever minted (network bring-up failed or found no device), so nothing
+// can be holding one either. Nothing here names a CPU (#830).
+fn network_capability_take_waiting() -> NetworkCapabilityWaitResult {
+    while (true) {
+        let guard = network_capability_lock(&network_capability_store.mutex);
+        let installed: bool = network_capability_store.installed_once;
+        let previous: Place(NetRxCanAcquire) = place_take(
+            guard, &network_capability_store.mutex,
+            network_capability_store.value);
+        network_capability_unlock(guard, &network_capability_store.mutex);
+        match previous {
+            Place::Full(ready) => {
+                return NetworkCapabilityWaitResult::Ready(ready);
+            }
+            Place::Empty => {
+                if (installed == false) {
+                    return NetworkCapabilityWaitResult::NeverInstalled;
+                }
+            }
+        }
+    }
+    return NetworkCapabilityWaitResult::NeverInstalled;
 }
 
 fn network_capability_put(ready: sink NetRxCanAcquire)

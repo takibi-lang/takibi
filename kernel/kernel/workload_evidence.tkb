@@ -222,6 +222,10 @@ struct WorkloadBusyPair {
     peer_socket_closed: bool;
     peer_socket_shut_down: bool;
     peer_socket_teardown_reported: bool;
+    // GitHub issue #828: the resident HTTPd's own exec of BusyBox Extras,
+    // whose handoff drains the TCP pool, ran on the secondary rather than
+    // being rerun on core 0.
+    peer_daemon_handoff_reported: bool;
     // A report this file refused: an unknown tag, or a caller that is not
     // a child of init. Zero on a healthy boot, and printed only when it
     // is not.
@@ -1778,6 +1782,20 @@ fn workload_peer_socket_teardown(is_shutdown: bool) {
         workload_busy_pair.peer_socket_teardown_reported = true;
         kernel_boot_log(
             "workload: pinned httpd closed and shut down a connected socket on the secondary cpu\n");
+    }
+    process_run_unlock(guard);
+}
+
+// GitHub issue #828: kernel_syscall_daemon_start (the BusyBox Extras exec's
+// TCP pool drain) completed on this CPU. Reported once from the secondary;
+// before #828 that exec was rerun on core 0 and this line never printed.
+fn workload_peer_daemon_handoff() {
+    if (cpu_id() != SECONDARY_CORE_ID) { return; }
+    let guard = process_run_lock();
+    if (workload_busy_pair.peer_daemon_handoff_reported == false) {
+        workload_busy_pair.peer_daemon_handoff_reported = true;
+        kernel_boot_log(
+            "workload: pinned httpd exec'd BusyBox Extras and drained the TCP pool on the secondary cpu\n");
     }
     process_run_unlock(guard);
 }
