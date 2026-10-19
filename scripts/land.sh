@@ -16,7 +16,9 @@
 #   1  a quick gate, clean or allcheck failed; the lane and log path are printed
 #   2  precondition failed: dirty tree, wrong branch, or missing space review
 #   3  origin/main moved during the check; run again from the start
-#   4  the rebase stopped on a conflict; resolve it, then run again
+#   4  the rebase stopped on a conflict outside docs/SPACE_CHECKPOINT.json
+#      (scripts/checkpoint_rebase.py resolves that one file); resolve it,
+#      then run again
 #
 # The allcheck output is kept under .git/takibi-land/ so a symptom can be
 # matched against docs/KNOWN_INTERMITTENTS.md after the run, and so are the
@@ -44,10 +46,25 @@ fi
 # author; the committer is taken from HEAD's author, for this one command
 # only -- never written to any git config (AGENTS.md, "Git and GitHub safety
 # boundary"). An agent identity set in the environment wins.
+#
+# The rebase goes through scripts/checkpoint_rebase.py (#832): a stop whose
+# only unmerged path is docs/SPACE_CHECKPOINT.json takes origin/main's side,
+# and the branch's own review is re-recorded for the rebased head in a new
+# commit. That commit is what space_checkpoint and the full check below test.
+# A conflict in any other path stops here exactly as a plain rebase would.
 echo "land: syncing with origin/main"
-if ! GIT_COMMITTER_NAME="${GIT_COMMITTER_NAME:-$(git log -1 --format=%an)}" \
-     GIT_COMMITTER_EMAIL="${GIT_COMMITTER_EMAIL:-$(git log -1 --format=%ae)}" \
-     git pull --rebase=merges --no-autostash; then
+if ! git fetch --quiet origin main; then
+    echo "land: fetch failed" >&2
+    exit 4
+fi
+GIT_COMMITTER_NAME="${GIT_COMMITTER_NAME:-$(git log -1 --format=%an)}" \
+GIT_COMMITTER_EMAIL="${GIT_COMMITTER_EMAIL:-$(git log -1 --format=%ae)}" \
+    python3 scripts/checkpoint_rebase.py --onto origin/main
+status=$?
+if [ "$status" -eq 2 ]; then
+    echo "land: current space checkpoint required; see docs/SPACE_REVIEW.md" >&2
+    exit 2
+elif [ "$status" -ne 0 ]; then
     echo "land: the rebase stopped; resolve it, then run land again" >&2
     exit 4
 fi

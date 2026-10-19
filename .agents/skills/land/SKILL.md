@@ -28,7 +28,12 @@ Run `scripts/land.sh`. It is the only way an agent pushes: a direct
 the rule above in code. It:
 
 1. refuses a dirty tree, a detached HEAD, or a branch other than `main`;
-2. runs `git pull --rebase=merges --no-autostash`;
+2. fetches and rebases onto `origin/main` through
+   `scripts/checkpoint_rebase.py` (#832): a stop whose only conflict is
+   `docs/SPACE_CHECKPOINT.json` takes origin/main's side, and the branch's
+   own review (which had to be current for the branch before the rebase) is
+   re-recorded for the rebased head in one new commit, which the gates below
+   test; any other conflict stops with exit 4 as before;
 3. records `HEAD` as the tested commit, runs `make langcheck`, `make test`
    and `make linuxcheck` separately, and stops at the first failing lane;
    after they pass, runs `make clean && make allcheck`, logging to

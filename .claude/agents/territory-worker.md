@@ -105,7 +105,11 @@ stale, do the review in [docs/SPACE_REVIEW.md](../../docs/SPACE_REVIEW.md)
 (measure with `scripts/space_delta.py`, or reuse evidence with the reason the
 policy allows) and commit the updated `docs/SPACE_CHECKPOINT.json`. Once the
 maintainer has approved the land, the ROADMAP.md update and the
-issue-closing commit go on the branch too.
+issue-closing commit go on the branch too. A later land that rewrites the
+checkpoint on main is not a reason to come back: the coordinator's rebase
+(`scripts/checkpoint_rebase.py`, #832) takes main's file and re-records your
+review for the rebased head, but only if your review was current for your
+own head, which is what this rule guarantees.
 
 Also run, on the final head after the rebase, `make langcheck linuxcheck test`
 in full -- not only the lanes you think your change touches. They take

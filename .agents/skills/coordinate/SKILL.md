@@ -89,10 +89,14 @@ refuses any branch but `main`).
    and #608 each cost a failed land round on it (2026-10-12). If a gate is
    missing, continue the worker with SendMessage to add it.
 4. In the main checkout, clean and on `main`:
-   `git -C <worktree> rebase main`, then `git merge --ff-only <branch>`.
-   Resolve integration conflicts yourself when they are mechanical (for
-   example `docs/SPACE_CHECKPOINT.json` touched by two workers); otherwise
-   send the conflict back to the worker.
+   `(cd <worktree> && python3 scripts/checkpoint_rebase.py --onto main)`,
+   then `git merge --ff-only <branch>`. The helper resolves a conflict
+   confined to `docs/SPACE_CHECKPOINT.json` by itself (#832: main's side,
+   then the branch's own review re-recorded for the rebased head in a new
+   commit), so that file no longer needs a round trip. Exit 2 means the
+   branch's own review was not current: send it back. Exit 4 is a conflict
+   in another file: resolve it yourself when it is mechanical, otherwise
+   send it back to the worker.
 5. Follow the `land` skill (`scripts/land.sh`). Never land two branches
    concurrently; never edit the tree while a land runs.
    On a red land, put main back to `origin/main` before sending the failure

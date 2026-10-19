@@ -111,6 +111,12 @@ def verify(source):
     assert status == 0, output
     assert [call[1] for call in trace if call[0] == 'make'] == [*lanes, 'clean', 'allcheck'], trace
     assert ['git', 'push', 'origin', '1' * 40 + ':refs/heads/main'] in trace, trace
+    # The rebase goes through the checkpoint-conflict resolver (#832), before
+    # the space gate, which therefore checks the re-recorded review.
+    rebase = ['python3', 'scripts/checkpoint_rebase.py', '--onto', 'origin/main']
+    assert rebase in trace and not any(call[:2] == ['git', 'pull'] for call in trace), trace
+    assert trace.index(rebase) < next(i for i, call in enumerate(trace)
+                                      if call[:2] == ['python3', 'scripts/space_checkpoint.py']), trace
     assert all('fixture pass: ' + lane in log for lane in (*lanes, 'clean', 'allcheck')), log
     cases += 1
     status, output, trace, log = run_case(source, fail='clean')

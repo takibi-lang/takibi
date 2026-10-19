@@ -218,6 +218,11 @@ condition below applies, and reports the land afterwards.
 - 2026-10-16 Compiler and tool input either passes or is an error; anything
   suspicious (a stale list entry, a flag that would be ignored) is never a
   warning, because warnings go unread. [active] #796
+- 2026-10-19 A rebase conflict confined to docs/SPACE_CHECKPOINT.json is
+  resolved by code (scripts/checkpoint_rebase.py, used by land.sh and the
+  coordinator): main's side, then the branch's own review, current for its
+  pre-rebase head, re-recorded for the rebased head and fully checked. Any
+  other conflict still stops the land. [active] #832
 - 2026-10-14 sched_yield is implemented as a plain reschedule; harnesses fail
   fast on an unimplemented-syscall line. [active] #665
 - 2026-10-15 RX capability split is option A (detached kept owner, holder refills,
