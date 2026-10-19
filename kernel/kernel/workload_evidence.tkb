@@ -1572,7 +1572,8 @@ fn workload_peer_tty_progress(count: usize, checksum: usize) -> usize {
 //
 // Operations (x1), each returning 0 for a refused report:
 //   0  the parent registers; answers the secondary CPU
-//   1  the child announces its canonical read; answers 1
+//   1  the child announces its canonical read; answers 1 only when its own
+//      TCGETS and TCSETSW completed on the secondary (GitHub issue #826)
 //   2  the parent asks whether the child is asleep with bytes queued; 1 when so
 //   3  the parent has applied raw mode; answers 1
 //   4  the parent asks for the verdict: 0 not yet, 2 woken and read, 3 never woken
@@ -1591,9 +1592,38 @@ struct WorkloadSettingsWake {
     read_ok: bool;
     read_bad: bool;
     refused: usize;
+    // GitHub issue #826: the terminal ioctls the would-be reader completed
+    // on the secondary, before it registers. Bit 0 TCGETS, bit 1 TCSETSW.
+    ioctl_pid: usize;
+    ioctl_peer_mask: usize;
 }
 
 private let mut workload_settings_wake: WorkloadSettingsWake;
+
+// GitHub issue #826: called by the terminal ioctl after it succeeded, under
+// the run lock it already holds. A process other than the registered parent
+// that completes TCGETS and TCSETSW on the secondary is the reader-to-be; a
+// rerun on core 0 would complete them there and leave its mask short.
+fn workload_settings_wake_ioctl_served(
+        guard: borrow ProcessRunGuard[scheduled_process_run_lock],
+        command: usize) {
+    if (workload_settings_wake.parent_pid == 0 ||
+        workload_settings_wake.reader_pid != 0) { return; }
+    let pid: usize = kernel_process_current_pid();
+    if (pid == workload_settings_wake.parent_pid) { return; }
+    if (pid != workload_settings_wake.ioctl_pid) {
+        workload_settings_wake.ioctl_pid = pid;
+        workload_settings_wake.ioctl_peer_mask = 0;
+    }
+    if (cpu_id() != SECONDARY_CORE_ID) { return; }
+    if (command == 0x5401) {
+        workload_settings_wake.ioctl_peer_mask =
+            workload_settings_wake.ioctl_peer_mask | 1;
+    } else if (command == 0x5403) {
+        workload_settings_wake.ioctl_peer_mask =
+            workload_settings_wake.ioctl_peer_mask | 2;
+    }
+}
 
 fn workload_settings_wake_progress(operation: usize, count: usize,
                                    checksum: usize) -> usize !{unsafe} {
@@ -1612,11 +1642,20 @@ fn workload_settings_wake_progress(operation: usize, count: usize,
             workload_settings_wake.reader_pid == 0 &&
             pid != workload_settings_wake.parent_pid &&
             cpu_id() == SECONDARY_CORE_ID) {
-            workload_settings_wake.reader_pid = pid;
-            if (KERNEL_STALL_PROBES != 0) { stall_probe_watch_pid(1, pid); }
-            kernel_boot_log(
-                "workload: settings wake reader waiting in a canonical read on the secondary cpu\n");
-            answer = 1;
+            if (workload_settings_wake.ioctl_pid == pid &&
+                workload_settings_wake.ioctl_peer_mask == 3) {
+                workload_settings_wake.reader_pid = pid;
+                if (KERNEL_STALL_PROBES != 0) { stall_probe_watch_pid(1, pid); }
+                kernel_boot_log(
+                    "workload: settings wake reader's TCGETS and TCSETSW completed on the secondary cpu\n");
+                kernel_boot_log(
+                    "workload: settings wake reader waiting in a canonical read on the secondary cpu\n");
+                answer = 1;
+            } else {
+                workload_settings_wake.read_bad = true;
+                kernel_boot_log(
+                    "workload: settings wake FAILED: the reader's TCGETS and TCSETSW did not both complete on the secondary cpu\n");
+            }
         }
     } else if (operation == 2) {
         if (pid == workload_settings_wake.parent_pid &&

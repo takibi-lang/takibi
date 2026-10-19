@@ -1,6 +1,7 @@
 // Bounded terminal echo operations, expanded one byte at a time by TX.
-// CPU 0 is the sole producer and consumer; callers mask IRQs while using
-// the queue. Compact erasure operations keep a full canonical-line kill
+// The RX interrupt is the sole producer; the consumer is any CPU's transmit
+// drain. Every push and drain holds the console lock, which masks IRQs;
+// an unlocked terminal_echo_pending() is a hint that a locked path rechecks. Compact erasure operations keep a full canonical-line kill
 // bounded without making the receive interrupt wait on a paused transmitter.
 use "kernel/lib/execution_model.tkb";
 
@@ -35,7 +36,7 @@ private fn terminal_echo_full() -> TerminalEchoPushResult {
 
 fn terminal_echo_push(operation: TerminalEchoOperation) -> TerminalEchoPushResult {
     static_assert(KERNEL_PREEMPTIBLE == 0,
-        "terminal echo queue requires CPU 0 and masked receive/transmit IRQs");
+        "terminal echo queue holders keep the console lock without preemption");
     // The two low bits encode the byte-expansion shape; the remaining
     // bits carry a byte or an erasure count, never an address or ownership.
     let mut encoded: u32 = 0;

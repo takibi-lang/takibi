@@ -12,6 +12,9 @@
  * woken, the kernel says so after a bounded number of ticks and the parent
  * reports it and gives up.
  *
+ * The reader's own TCGETS and TCSETSW must complete on the secondary
+ * (GitHub issue #826); the kernel refuses its registration otherwise.
+ *
  * Its own object, not another entry of peer_read.o: every entry of a shared
  * object links the whole object, and the root filesystem image has few free
  * blocks to spend on a copy of it.
@@ -91,6 +94,13 @@ private fn peer_settings_reader(peer_cpu: usize) {
     if (svc5(29, 0, 0x5401, settings as *u8 as usize, 0, 0) != 0 ||
         (settings[12] & PEER_SETTINGS_ICANON) == 0) {
         peer_settings_fail(bs"peer-settings: the terminal is not canonical\n");
+    }
+    // GitHub issue #826: the attribute ioctls run on the calling core. Write
+    // back the same settings, with the drain query, from here; the kernel
+    // refuses the registration below unless both ioctls completed on this
+    // CPU rather than being rerun on core 0.
+    if (svc5(29, 0, 0x5403, settings as *u8 as usize, 0, 0) != 0) {
+        peer_settings_fail(bs"peer-settings: TCSETSW on the secondary failed\n");
     }
     if (svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_SETTINGS_TAG, 1, 0, 0, 0) != 1) {
         peer_settings_fail(bs"peer-settings: the reader was refused\n");

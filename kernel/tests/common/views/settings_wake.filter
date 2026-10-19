@@ -1,1 +1,1 @@
-^workload: settings (wake reader waiting|change woke)
+^workload: settings (wake reader waiting|wake reader's TCGETS|change woke)

@@ -823,8 +823,9 @@ private fn uart_tx_spin_store_locked(guard: borrow ConsoleGuard[console_tx_lock]
     kernel_log_wire_last = c;
 }
 
-// Only CPU 0 sends UART input-flow requests. Readers on other CPUs publish
-// their desired state atomically; coalescing to the latest state cannot leave
+// CPU 0's console poll and a termios change on any CPU send UART input-flow
+// requests, each deciding under the console lock. Readers on every CPU
+// publish their desired state atomically; coalescing to the latest state cannot leave
 // the sender stopped after the receive ring became empty.
 private let mut kernel_log_terminal_input_stopped: bool;
 

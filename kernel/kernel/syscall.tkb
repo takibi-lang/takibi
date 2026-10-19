@@ -3106,7 +3106,40 @@ fn syscall_ppoll_dispatch(current_authority: borrow ProcessCurrent[current_proce
 }
 
 // Termios is shared by aliases of the single local UART, not by fd number.
-// ioctl runs on core 0; the run lock also orders its settings with peer reads.
+//
+// GitHub issue #826: ioctl runs on the calling core, like any other syscall.
+// The terminal's attribute state -- the settings, the receive ring and its
+// canonical interpretation -- is guarded by the process-run lock, which any
+// core takes, from a syscall or from its own interrupt handler: the UART RX
+// handler decodes and stores input under it (terminal_io_receive borrows
+// the guard), so moving the UART interrupt off core 0 needs no change here.
+// The transmit side (pending output, the echo queue, the TX interrupt
+// enable, the input-flow byte) is guarded by the console lock, which every
+// CPU's terminal write already takes. The drain query reads the PL011 flag
+// register, which is the same MMIO word from every core.
+// The attribute change and everything that follows from it, as one section
+// of the process-run lock. The guard parameter is the lock binding: the
+// settings and the receive ring are shared with the RX handler on whichever
+// core takes the UART interrupt, and with readers on every core.
+fn syscall_terminal_settings_commit(
+        guard: borrow ProcessRunGuard[scheduled_process_run_lock],
+        settings: borrow [u8; TERMINAL_TERMIOS_BYTES..], command: usize)
+        -> TerminalSettingsResult !{unsafe} {
+    match terminal_settings_apply(settings) {
+        TerminalSettingsResult::Unsupported => {
+            return TerminalSettingsResult::Unsupported;
+        }
+        TerminalSettingsResult::Applied => {
+            if (command == 0x5404) { kernel_uart_rx_ring_reset(); }
+            kernel_uart_rx_canonical_set(terminal_canonical());
+            terminal_input_flow_update(kernel_uart_rx_queued());
+            if (kernel_uart_rx_pending()) { kernel_process_terminal_settings_wake(guard); }
+            if (terminal_output_paused() == false) { kernel_process_uart_tx_wake_all(guard); }
+        }
+    }
+    return TerminalSettingsResult::Applied;
+}
+
 fn syscall_terminal_ioctl(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], fd: usize, request: usize, address: usize)
         -> SyscallAction !{unsafe} {
     if (kernel_syscall_terminal_is_open(fd) == false) {
@@ -3148,6 +3181,7 @@ fn syscall_terminal_ioctl(current_authority: borrow ProcessCurrent[current_proce
                         UserWriteResult::Written => {}
                     }
                 }
+                workload_settings_wake_ioctl_served(guard, command);
                 process_run_unlock(guard);
                 return SyscallAction::Resume(0);
             }
@@ -3178,17 +3212,13 @@ fn syscall_terminal_ioctl(current_authority: borrow ProcessCurrent[current_proce
             return syscall_terminal_write_wait(current_authority);
         }
     }
-    match terminal_settings_apply(settings as [u8; TERMINAL_TERMIOS_BYTES..]) {
+    match syscall_terminal_settings_commit(guard, settings as [u8; TERMINAL_TERMIOS_BYTES..], command) {
         TerminalSettingsResult::Unsupported => {
             process_run_unlock(guard);
             return SyscallAction::Resume(LINUX_EINVAL);
         }
         TerminalSettingsResult::Applied => {
-            if (command == 0x5404) { kernel_uart_rx_ring_reset(); }
-            kernel_uart_rx_canonical_set(terminal_canonical());
-            terminal_input_flow_update(kernel_uart_rx_queued());
-            if (kernel_uart_rx_pending()) { kernel_process_terminal_settings_wake(guard); }
-            if (terminal_output_paused() == false) { kernel_process_uart_tx_wake_all(guard); }
+            workload_settings_wake_ioctl_served(guard, command);
         }
     }
     process_run_unlock(guard);
@@ -4608,8 +4638,6 @@ fn syscall_peer_refused(number: usize) -> bool {
 
 fn syscall_peer_safe(number: usize, fd: usize, second: usize) -> bool {
     if (syscall_peer_refused(number)) { return false; }
-    // Attribute changes and transmitter-drain queries touch the UART on CPU 0.
-    if (number == AARCH64_NR_IOCTL) { return false; }
     // Session lookups and changes hold the process-run lock.
     if (number == AARCH64_NR_GETSID || number == AARCH64_NR_SETSID) {
         return true;
@@ -5857,8 +5885,8 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // return parks this one Ready and idles core 0 (#592).
         kernel_process_reschedule_if_excluded_here();
     }
-    // core-role: calls outside the peer-safety table run on core 0 (UART
-    // attributes, inetd descriptors)
+    // core-role: calls outside the peer-safety table run on core 0 (the
+    // parent-progress report, inetd-mode descriptors)
     if (cpu_id() != 0 && syscall_peer_safe(number, x0, x1) == false) {
         return syscall_finish_current(frame, SyscallAction::Migrate, current_authority);
     }

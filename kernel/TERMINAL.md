@@ -2,8 +2,10 @@
 
 The maintained platforms expose one local PL011 terminal. Every terminal fd
 alias uses the same termios settings and receive line discipline. UART IRQs
-run on CPU 0; a reader or writer can run on any admitted CPU. Termios ioctls
-migrate to CPU 0 because transmitter drain checks touch device registers.
+run on CPU 0; a reader, a writer or a termios ioctl runs on whichever CPU
+called it. The locks below are the only thing that orders them, and the RX
+handler takes the same process-run lock, so no part of this depends on which
+CPU takes the UART interrupt.
 
 ## Linux ABI and supported settings
 
@@ -81,8 +83,9 @@ input becomes readable. The internal scalar UART waiter still receives a
 real byte directly from the interrupt.
 
 TX paths acquire a single atomic pause word without taking the process-run
-lock. Readers publish the desired input-throttle state atomically; CPU 0 sends
-the latest request, so a peer that drains the ring cannot leave the sender
+lock. Readers publish the desired input-throttle state atomically; CPU 0's console
+poll, and a termios change on any CPU, send the latest request under the
+console lock, so a peer that drains the ring cannot leave the sender
 stopped indefinitely. Kernel diagnostics and debugger flushes remain available
 while terminal output is paused.
 

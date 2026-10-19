@@ -1,2 +1,3 @@
+workload: settings wake reader's TCGETS and TCSETSW completed on the secondary cpu
 workload: settings wake reader waiting in a canonical read on the secondary cpu
 workload: settings change woke the blocked peer reader, which read its queued bytes in order
