@@ -81,7 +81,6 @@ private let mut log_ring_trace_active: AtomicWord;
 private let mut log_ring_trace_cpus: [LogRingTraceCpu; KERNEL_MAX_CORES];
 // The head the window opened at; the reader records from there.
 private let mut log_ring_trace_from: usize;
-private let mut log_ring_trace_open_head: usize;
 // The traced reader's CPU plus one (0: none), and whether it has begun.
 private let mut log_ring_trace_reader_cpu: usize;
 private let mut log_ring_trace_reader_begun: bool;
@@ -156,7 +155,6 @@ fn log_ring_trace_open(head: usize) {
         log_ring_trace_cpus[cpu].lost = 0;
     }
     log_ring_trace_from = head;
-    log_ring_trace_open_head = head;
     log_ring_trace_reader_cpu = 0;
     log_ring_trace_reader_begun = false;
     atomic_word_store(&log_ring_trace_active, 1);
@@ -264,7 +262,7 @@ fn log_ring_trace_report() {
     kernel_boot_log(" slots=");
     uart_put_udec(kernel_log_raw_slot_count());
     kernel_boot_log(" head=");
-    uart_put_udec(log_ring_trace_open_head);
+    uart_put_udec(log_ring_trace_from);
     kernel_boot_log(" stored=");
     uart_put_udec(stored);
     kernel_boot_log(" lost=");
