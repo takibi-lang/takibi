@@ -213,6 +213,7 @@ for several rounds it gated `allbuild` so no kernel lane ran at all.
 
 | Check | Enforced invariant |
 | --- | --- |
+| `slowcheck_checkpoint_rebase_controls.py` | In scripted Git repos, a rebase conflict confined to `docs/SPACE_CHECKPOINT.json` resolves to the branch's review rebound to the rebased sources (space_checkpoint passes); a conflict that also touches another file stays stopped (exit 4); a branch whose own review was stale is refused (exit 2); a clean rebase adds no commit (#832) |
 | `slowcheck_land_precheck_controls.py` | The real land shell stops at the first failed host gate, names its lane and preserves diagnostics; green gates retain the full clean aggregate and exact-HEAD push, and failed clean/allcheck cannot publish |
 | `slowcheck_preflight_kernel_file_controls.py` | `scripts/preflight_kernel_file.py`, the on-demand list of every registry a new, moved or renamed kernel file, assembly file or lane runner must join, names each missing or stale row for planted files and reports an unchanged file clean |
 | `slowcheck_ddb_qemu_capture_controls.py` | Retained UART/software BREAK captures exercise the shared live/offline predicates; missing evidence, wrong values and ordering violations fail with individual diagnoses |
