@@ -112,8 +112,33 @@ class TakibiConsole(gdb.Command):
                      marks=bytes(marks[index] for index in indices).hex(),
                      unfinished_length=unfinished,
                      unfinished=repr(bytes(raw[index] for index in indices[queued - unfinished:])))
+            ticks = [atomic("secondary_tick_count", cpu) for cpu in range(cores)]
         finally:
             gdb.execute("maintenance packet Qqemu.PhyMemMode:0", to_string=True)
+        # GitHub issue #854: a boot probe that stalls names no core in the
+        # UART log, and the serial BREAK cannot reach DDB while core 0 spins
+        # with IRQs masked. Every vCPU's PC, its symbol, whether IRQs are
+        # masked, and its tick count say which core waits on which.
+        # QEMU numbers its GDB threads 1.. in CPU index order.
+        selected = gdb.selected_thread()
+        try:
+            for thread in sorted(threads, key=lambda item: item.num):
+                try:
+                    thread.switch()
+                    frame = gdb.newest_frame()
+                    pc = int(frame.read_register("pc")) & 0xFFFFFFFFFFFFFFFF
+                    sp = int(frame.read_register("sp")) & 0xFFFFFFFFFFFFFFFF
+                    pstate = int(frame.read_register("cpsr")) & 0xFFFFFFFF
+                    symbol = gdb.execute(f"info symbol {pc:#x}", to_string=True).strip()
+                    cpu = thread.num - 1
+                    emit("cpu", cpu=cpu, pc=hex(pc), sp=hex(sp), symbol=symbol,
+                         irq_masked=bool(pstate & (1 << 7)), el=(pstate >> 2) & 3,
+                         ticks=ticks[cpu] if 0 <= cpu < len(ticks) else None)
+                except Exception as error:  # one unreadable vCPU must not hide the rest
+                    emit("cpu", thread=thread.num, status="unavailable: " + str(error))
+        finally:
+            if selected is not None:
+                selected.switch()
         gdb.write("console snapshot complete\n")
 
 

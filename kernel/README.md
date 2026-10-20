@@ -1107,7 +1107,9 @@ needed for the stopped subsystem. Current helpers are:
   metadata and `_build/kernel-console-layout.gdb`. It reads each core's
   published/consumed peer sequences, unconsumed records and partial line,
   XOFF, echo/TX queue counts, PL011 TX interrupt enable, and pending RX bytes
-  with the unfinished canonical line. Offsets and capacities come from the
+  with the unfinished canonical line, then every vCPU's PC with its symbol,
+  SP, exception level, whether IRQs are masked, and that core's tick count
+  (GitHub issue #854: which core a stalled boot probe waits on). Offsets and capacities come from the
   compiler, including the `AtomicWord` wrapper. This command requires QEMU's
   physical-memory mode and stops all CPUs; it does not call guest functions
   or acquire guest locks. A publication caught halfway through is reported
