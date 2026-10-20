@@ -26,6 +26,7 @@
 
 use "kernel/lib/atomic_word.tkb";
 use "kernel/lib/execution_model.tkb";
+use "kernel/lib/peer_tick_window.tkb";
 
 // SGIs 0..15 and PPIs 16..31.
 const IRQ_COUNT_BANKED: usize = 32;
@@ -100,21 +101,28 @@ fn irq_count_other_of(core: {0..<KERNEL_MAX_CORES as usize}) -> usize !{unsafe} 
 // number of times, each only after core 1 has counted the one before, so a
 // pending SGI is never raised again and merged with it. DDB's `intr` view
 // must then show exactly that count for that INTID on core 1, and nothing
-// for it on core 0. Each round waits at most a sixteenth of a second.
+// for it on core 0. Each round waits at most four of core 1's own ticks.
+//
+// GitHub issue #859: a round used to wait a fixed sixteenth of a second of
+// CNTPCT. Under QEMU each vCPU is a host thread and CNTPCT is host time, so
+// a core 1 descheduled by a loaded host for that long counted nothing
+// although nothing was wrong (the #851 shape). Four ticks of core 1 are the
+// same sixteenth of a second while core 1 runs and do not elapse while it
+// does not; the window's ten-second wall backstop still ends a dead core.
 fn irq_count_fixture() !{logs, unsafe} {
     let core: {0..<KERNEL_MAX_CORES as usize} = 1;
     let raw_intid: usize = IRQ_COUNT_FIXTURE_SGI;
     if (raw_intid >= IRQ_COUNT_BANKED) { return; }
     let intid: {0..<IRQ_COUNT_BANKED as usize} = raw_intid;
     let start_count: usize = irq_count_banked_of(core, intid);
-    let window: i64 = read_cntfrq() >> 4;
     let mut counted: usize = 0;
     for round: usize in 0..<IRQ_COUNT_FIXTURE_ROUNDS {
         if (counted == round) {
             platform_gic_sgi_send((1 << core) as u32, IRQ_COUNT_FIXTURE_SGI as u32);
-            let start: i64 = read_cntpct();
-            while (irq_count_banked_of(core, intid) - start_count == round &&
-                   read_cntpct() - start < window) { }
+            let mut window = peer_tick_window_policy(core, PeerTickPolicy::Sgi);
+            while (peer_tick_window_open(window) &&
+                   irq_count_banked_of(core, intid) - start_count == round) { }
+            peer_tick_window_end(window);
             counted = irq_count_banked_of(core, intid) - start_count;
         }
     }

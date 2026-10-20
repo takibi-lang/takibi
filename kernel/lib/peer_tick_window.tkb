@@ -19,7 +19,8 @@
 use "kernel/lib/execution_model.tkb";
 
 // These policies preserve the existing boot windows at 64 ticks per second.
-enum PeerTickPolicy: usize { Entry = 16; Arrival = 32; Complete = 64; Finish = 128; }
+// Sgi is the IRQ-count fixture's per-SGI wait (GitHub issue #859).
+enum PeerTickPolicy: usize { Sgi = 4; Entry = 16; Arrival = 32; Complete = 64; Finish = 128; }
 struct PeerTickStamp[p: usize] { private value: usize; }
 struct PeerTickBudget[p: usize] { private ticks: usize; }
 struct WallTickStamp { private value: i64; }
