@@ -11,6 +11,13 @@
  *
  * GitHub issue #9: a stdin ppoll used to retry in EL1 however many other
  * processes were Ready, the same hog syscall_deadline_wait had.
+ *
+ * GitHub issue #870: then a second child calls ppoll(0, NULL), musl's
+ * pause(). The kernel says when that wait blocked, the driver then types a
+ * byte for the parent, and the parent sends SIGTERM, which has to wake the
+ * child Blocked in the wait and end it. A kernel that kept the pause Running
+ * in an EL1 wait never says it blocked, and the parent waits for a byte
+ * nobody sends.
  */
 
 const READ_SYSCALL: usize = 63;
@@ -19,6 +26,8 @@ const PPOLL_SYSCALL: usize = 73;
 const EXIT_SYSCALL: usize = 93;
 const CLONE_SYSCALL: usize = 220;
 const WAIT4_SYSCALL: usize = 260;
+const KILL_SYSCALL: usize = 129;
+const SIGTERM: usize = 15;
 const CLONE_FORK_SIGCHLD: usize = 0x11;
 const WNOHANG: usize = 1;
 const POLLIN: u8 = 1;
@@ -44,6 +53,43 @@ private fn ppoll_probe_child() {
         svc5(EXIT_SYSCALL, 2, 0, 0, 0, 0);
     }
     svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
+}
+
+// pause(): no fds, no timeout, no mask. Only a signal ends it, and this
+// child catches none, so its only way out is the parent's SIGTERM.
+private fn ppoll_probe_pause_child() {
+    svc5(PPOLL_SYSCALL, 0, 0, 0, 0, 0);
+    svc5(EXIT_SYSCALL, 3, 0, 0, 0, 0);
+}
+
+private fn ppoll_probe_pause() {
+    let child: usize = svc5(CLONE_SYSCALL, CLONE_FORK_SIGCHLD, 0, 0, 0, 0);
+    if (child == 0) { ppoll_probe_pause_child(); }
+    if (child >= PPOLL_PROBE_ERROR_FLOOR) {
+        ppoll_probe_say(bs"ppoll-probe: pause fork failed\n");
+        svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
+    }
+    // The driver types this byte once the kernel says the pause blocked.
+    let mut byte: [u8; 1];
+    if (svc5(READ_SYSCALL, 0, byte as *u8 as usize, 1, 0, 0) != 1) {
+        ppoll_probe_say(bs"ppoll-probe: pause read failed\n");
+    }
+    svc5(KILL_SYSCALL, child, SIGTERM, 0, 0, 0);
+    let mut status: [u8; 4];
+    for index: usize in 0..<4 { status[index] = 0; }
+    let reaped: usize = svc5(WAIT4_SYSCALL, child, status as *u8 as usize, 0,
+                             0, 0);
+    // This kernel reports a signal's end as exit status 128 + signal
+    // (kernel/SYSCALLS.md, kill); Linux's own form is accepted too.
+    let by_signal: bool = status[0] as usize == SIGTERM && status[1] == 0;
+    let by_status: bool = status[0] == 0 && status[1] as usize == 128 + SIGTERM;
+    if (reaped == child && (by_signal || by_status)) {
+        ppoll_probe_say(
+            bs"ppoll-probe: pause() blocked until SIGTERM ended it\n");
+        svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
+    }
+    ppoll_probe_say(bs"ppoll-probe: pause() did not end by SIGTERM\n");
+    svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
 }
 
 fn ppoll_probe() {
@@ -76,7 +122,7 @@ fn ppoll_probe() {
     if (reaped == child && status[0] == 0 && status[1] == 0) {
         ppoll_probe_say(
             bs"ppoll-probe: fd 0 became readable and the child read its byte\n");
-        svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
+        ppoll_probe_pause();
     }
     ppoll_probe_say(bs"ppoll-probe: the child's ppoll or read failed\n");
     svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);

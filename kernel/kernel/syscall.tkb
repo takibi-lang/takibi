@@ -2932,7 +2932,19 @@ fn syscall_ppoll_dispatch(current_authority: borrow ProcessCurrent[current_proce
                           timeout_address: usize, sigmask_address: usize)
         -> SyscallAction !{unsafe} {
     if (raw_nfds == 0) {
-        if (timeout_address == 0) { return SyscallAction::WaitInterrupt; }
+        // GitHub issue #870: ppoll(0, NULL) is musl's pause(). It sleeps,
+        // Blocked, until a signal it catches or one that ends it, as
+        // rt_sigsuspend does under the mask ppoll was given (the caller's
+        // own when none), and then answers EINTR after the handler.
+        if (timeout_address == 0) {
+            if (sigmask_address == 0) {
+                kernel_process_current_clear_signal_suspend();
+                return syscall_signal_suspend_under(
+                    current_authority, kernel_process_current_signal_mask(),
+                    true);
+            }
+            return syscall_signal_suspend(current_authority, sigmask_address, 8);
+        }
         match syscall_deadline_wait(current_authority, timeout_address, false) {
             SyscallDeadlineResult::Fault => {
                 return SyscallAction::Resume(LINUX_EFAULT);
@@ -5148,6 +5160,17 @@ fn syscall_signal_suspend(current_authority: borrow ProcessCurrent[current_proce
             mask = requested as usize;
         }
     }
+    return syscall_signal_suspend_under(current_authority, mask, false);
+}
+
+// The wait itself, once the caller's sigsuspend flag is clear: under `mask`,
+// run a caught signal already pending, or Block until one arrives. A
+// terminating signal ends the wait through the kill path's own wake.
+// `pause` marks ppoll's pause() form, whose first block by /bin/ppoll-probe
+// the ash lane's driver waits for before it lets the probe send its signal.
+fn syscall_signal_suspend_under(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], mask: usize,
+                                pause: bool)
+        -> SyscallAction !{unsafe} {
     kernel_process_current_suspend_mask_install(mask);
     match kernel_process_current_caught_signal_take() {
         ProcessSignalPendingResult::Pending(taken) => {
@@ -5161,6 +5184,10 @@ fn syscall_signal_suspend(current_authority: borrow ProcessCurrent[current_proce
     kernel_process_current_suspend_mask_restore();
     let wait_set: usize = kernel_process_current_caught_set(current_authority, mask);
     kernel_process_current_prepare_signal_suspend(current_authority, wait_set);
+    if (pause && syscall_terminal_ppoll_probe() &&
+        syscall_test_evidence_record_ppoll_pause_block()) {
+        kernel_boot_log("ppoll: pause blocked until a signal\n");
+    }
     return SyscallAction::Block;
 }
 

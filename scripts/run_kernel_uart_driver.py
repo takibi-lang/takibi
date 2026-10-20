@@ -615,6 +615,7 @@ def main() -> int:
     peer_settings_sent = False
     peer_settings_bytes_sent = False
     ppoll_probe_byte_sent = False
+    ppoll_pause_byte_sent = False
     httpd_done_seen_at = None
     capture_started = time.monotonic()
     capture_marker = (b"busybox interactive shell exit: 0" if args.ash_only
@@ -806,6 +807,15 @@ def main() -> int:
                         in output):
                     write_uart_line(connection, b"")
                     ppoll_probe_byte_sent = True
+
+                # GitHub issue #870: the probe's second child calls
+                # ppoll(0, NULL), pause(). Its parent sends SIGTERM only after
+                # reading the byte typed here, once the kernel says the pause
+                # blocked.
+                if (not ppoll_pause_byte_sent and
+                        b"ppoll: pause blocked until a signal\n" in output):
+                    write_uart_line(connection, b"")
+                    ppoll_pause_byte_sent = True
 
                 # The one init-managed service satisfies both readiness
                 # consumers retained by the host runners. There is no second

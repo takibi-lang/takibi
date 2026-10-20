@@ -38,7 +38,7 @@ ALLOWED = {
            "zombie stack held or zombie pick race, and the pass-through of "
            "an exit with no successor"),
     "syscall_ppoll_dispatch": (
-        2, "ppoll(nfds=0, NULL) (#870) and the invalid-slot fallback"),
+        1, "invalid-slot fallback: no scheduled process to block"),
     "syscall_read_uart": (
         1, "invalid-slot fallback: no scheduled process to block"),
     "syscall_io_action": (
