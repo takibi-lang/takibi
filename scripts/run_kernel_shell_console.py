@@ -11,6 +11,8 @@ import time
 import serial
 from serial.tools import miniterm
 
+from qmp_wire import qmp_reply
+
 
 # The bounded init.sh fixture emits the first marker while it exercises ash.
 # The shell exposed by kernelsh-* is its persistent self-replacement and emits
@@ -75,11 +77,11 @@ def qmp_execute(socket_path: str, command: str, arguments: dict) -> None:
                 "QMP greeting did not appear; the first line was %r"
                 % (greeting_line[:200],))
         stream.write(b'{"execute":"qmp_capabilities"}\n')
-        if "return" not in json.loads(stream.readline()):
+        if "return" not in qmp_reply(stream):
             raise RuntimeError("QMP capability negotiation failed")
         request = {"execute": command, "arguments": arguments}
         stream.write(json.dumps(request, separators=(",", ":")).encode() + b"\n")
-        response = json.loads(stream.readline())
+        response = qmp_reply(stream)
         if "return" not in response:
             raise RuntimeError(f"QMP command failed: {response}")
 

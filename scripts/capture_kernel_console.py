@@ -10,6 +10,8 @@ import subprocess
 import tempfile
 import time
 
+from qmp_wire import qmp_reply
+
 
 def qmp(port, command, arguments=None):
     if isinstance(port, int):
@@ -33,13 +35,14 @@ def qmp(port, command, arguments=None):
             for request in ({"execute": "qmp_capabilities", "id": 1},
                             {"execute": command, "arguments": arguments or {}, "id": 2}):
                 stream.write(json.dumps(request).encode("ascii") + b"\n")
-                while True:
-                    connection.settimeout(max(0.001, deadline - time.monotonic()))
-                    if time.monotonic() >= deadline:
-                        raise RuntimeError("QMP reply budget exhausted")
-                    response = json.loads(stream.readline(65536))
-                    if response.get("id") == request["id"]:
-                        break
+                try:
+                    response = qmp_reply(stream, request["id"],
+                                         connection=connection,
+                                         deadline=deadline)
+                except TimeoutError as error:
+                    raise RuntimeError(str(error)) from error
+                if not response:
+                    raise RuntimeError("QMP closed or sent a non-object line")
                 if "error" in response:
                     raise RuntimeError(str(response["error"]))
             return response["return"]

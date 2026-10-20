@@ -27,6 +27,8 @@ import pathlib
 import socket
 import sys
 
+from qmp_wire import qmp_reply
+
 
 def qmp(sock_path: pathlib.Path, command: str) -> str:
     connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -35,11 +37,11 @@ def qmp(sock_path: pathlib.Path, command: str) -> str:
     with connection, connection.makefile("rwb", buffering=0) as stream:
         stream.readline()  # greeting
         stream.write(b'{"execute":"qmp_capabilities"}\n')
-        stream.readline()
+        qmp_reply(stream)
         request = {"execute": "human-monitor-command",
                    "arguments": {"command-line": command}}
         stream.write(json.dumps(request).encode("ascii") + b"\n")
-        return json.loads(stream.readline()).get("return", "")
+        return qmp_reply(stream).get("return", "")
 
 
 def main() -> int:

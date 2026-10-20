@@ -11,6 +11,7 @@ import subprocess
 import time
 
 from await_timing import AwaitTiming
+from qmp_wire import qmp_reply
 
 from run_kernel_uart_driver import (
     QMP_CHARDEV, postmortem_budget, send_serial_break)
@@ -46,13 +47,13 @@ def sample_cpu_registers(port: int, budget: float) -> tuple[str, str]:
             if b"QMP" not in stream.readline():
                 return "", "QMP produced no greeting"
             stream.write(b'{"execute":"qmp_capabilities"}\n')
-            if b"return" not in stream.readline():
+            if "return" not in qmp_reply(stream):
                 return "", "QMP capability negotiation failed"
             for _ in range(REGISTER_SAMPLES):
                 stream.write(
                     b'{"execute":"human-monitor-command","arguments":'
                     b'{"command-line":"info registers -a"}}\n')
-                reply = json.loads(stream.readline())
+                reply = qmp_reply(stream)
                 if "return" not in reply:
                     return "\n".join(dumps), f"QMP refused: {reply!r:.160}"
                 dumps.append(reply["return"])
@@ -436,12 +437,12 @@ def capture_loop(args, serial, deadline, ceiling, ready_file, release_file, netw
                             "QMP greeting did not appear; the first line was "
                             "%r" % (greeting_line[:200],))
                     qmp_file.write(b'{"execute":"qmp_capabilities"}\n')
-                    if "return" not in json.loads(qmp_file.readline()):
+                    if "return" not in qmp_reply(qmp_file):
                         raise SystemExit("QMP capability negotiation failed")
                     qmp_file.write(
                         b'{"execute":"chardev-send-break",'
                         b'"arguments":{"id":"debug_uart"}}\n')
-                    if "return" not in json.loads(qmp_file.readline()):
+                    if "return" not in qmp_reply(qmp_file):
                         raise SystemExit("QMP could not send the serial BREAK")
                 hold_release.touch()
                 if hold.wait(timeout=10) != 0:

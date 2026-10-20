@@ -3,7 +3,6 @@
 
 import argparse
 import difflib
-import json
 import re
 from pathlib import Path
 import socket
@@ -12,6 +11,7 @@ import time
 
 import serial
 from await_timing import AwaitTiming
+from qmp_wire import qmp_reply
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "kernel/tests/common"))
 from terminal_driver import TerminalScenario
@@ -289,28 +289,6 @@ def postmortem_break_due(now: float, deadline: float, last_chunk_at: float,
     return (now >= deadline - postmortem_budget(timeout) and
             now >= peer_guard_until and
             now - last_chunk_at >= timeout * STOPPED_FRACTION)
-
-
-def qmp_reply(stream) -> dict:
-    """The next QMP command reply, skipping asynchronous events.
-
-    QEMU may emit an event (RESUME, STOP, ...) at any time, including between a
-    command and its reply; taking that event as the reply misread an accepted
-    BREAK as a refusal and emptied the postmortem walk (#871 repro run 2).
-    Returns {} when the stream ends or a line is not a JSON object.
-    """
-    while True:
-        line = stream.readline()
-        if not line:
-            return {}
-        try:
-            message = json.loads(line)
-        except ValueError:
-            return {}
-        if not isinstance(message, dict):
-            return {}
-        if "event" not in message:
-            return message
 
 
 def send_serial_break(port: int, chardev: str, budget: float) -> str:
