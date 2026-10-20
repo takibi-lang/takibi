@@ -65,7 +65,6 @@ fn kernel_platform_net_link_up() {
             kernel_boot_log("virtio net: link failed\n");
         }
         NetInitResult::Ready(link_ready) => {
-            kernel_boot_log("virtio net: link ready mac=02:00:20:00:00:02\n");
             match network_capability_install(link_ready) {
                 NetworkCapabilityInstallResult::Installed => {}
                 NetworkCapabilityInstallResult::AlreadyInstalled(incoming) => {
@@ -85,6 +84,11 @@ fn kernel_test_platform_network() {
     match network_capability_take() {
         NetworkCapabilityTakeResult::Empty => {}
         NetworkCapabilityTakeResult::Ready(link_ready) => {
+            // GitHub issue #837: printed here, at the start of the
+            // exchange, not at link-up: the host peers and the dmesg
+            // interval gate on this line, and link-up now precedes the
+            // secondary boot by seconds.
+            kernel_boot_log("virtio net: link ready mac=02:00:20:00:00:02\n");
             match kernel_arp_reply_once(link_ready) {
                 KernelArpResult::TimedOut(arp_ready) => {
                     kernel_boot_log("virtio net: arp timeout\n");

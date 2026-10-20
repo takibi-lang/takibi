@@ -165,10 +165,7 @@ def main() -> None:
     # the ash session's edges, the network interval and resource counters.
     assembled_prefix = b"memory: source=dtb base_bytes="
     if args.platform == "qemu":
-        # GitHub issue #837: the link comes up before the secondary cores
-        # now, seconds ahead of the exchange, so the interval starts at the
-        # exchange's first reply instead of at link-up.
-        listener = b"virtio net: arp reply ok ip=192.168.20.2"
+        listener = b"virtio net: link ready mac=02:00:20:00:00:02"
         resumed = b"virtio net: tcp handshake echo close reconnect ok"
         minimum_delay = 3_500_000
         maximum_delay = 5_500_000
@@ -185,7 +182,7 @@ def main() -> None:
             # distribution. Every run reports its profile and duration.
             maximum_boot = 35_000_000
     else:
-        listener = b"rp1 gem: arp reply ok ip=192.168.20.2"
+        listener = b"rp1 gem: link ready mac=02:00:20:00:00:02"
         resumed = b"rp1 gem: tcp handshake echo close reconnect ok"
         minimum_delay = 5_000_000
         maximum_delay = 9_000_000

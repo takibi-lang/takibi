@@ -71,7 +71,6 @@ fn kernel_platform_net_link_up() {
             kernel_boot_log("rp1 gem: link failed\n");
         }
         NetInitResult::Ready(link_ready) => {
-            kernel_boot_log("rp1 gem: link ready mac=02:00:20:00:00:02\n");
             kernel_platform_net_capability_return(link_ready);
         }
     }
@@ -97,6 +96,11 @@ fn kernel_test_platform_network() {
     match network_capability_take() {
         NetworkCapabilityTakeResult::Empty => {}
         NetworkCapabilityTakeResult::Ready(link_ready) => {
+            // GitHub issue #837: printed here, at the start of the
+            // exchange, not at link-up: the host peers and the dmesg
+            // interval gate on this line, and link-up now precedes the
+            // secondary boot by seconds.
+            kernel_boot_log("rp1 gem: link ready mac=02:00:20:00:00:02\n");
             match kernel_arp_reply_once(link_ready) {
                 KernelArpResult::TimedOut(arp_ready) => {
                     kernel_boot_log("rp1 gem: arp timeout\n");
