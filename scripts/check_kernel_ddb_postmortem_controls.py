@@ -764,6 +764,27 @@ def rpi5_early_failure(driver):
 
 CHECKS += (("rpi5-early-failure", rpi5_early_failure),)
 
+
+def rpi5_swd_parse(driver):
+    """The SWD snapshot's reading of a real OpenOCD transcript (2026-10-20)."""
+    import rpi5_swd_snapshot
+    text = ("swd: cpu=0 pc=0x000000000020a954 cpsr=0x80000345\n"
+            "swd: cpu=1 pc=0x000000000020a954 cpsr=0x800003c5\n"
+            "swd: cpu=2 halt-error=timed out\n"
+            "swd: ticks reader=0 values=0x3b0 0x0 0x3af 0x1\n")
+    lines = rpi5_swd_snapshot.parse(text, [(0x20a880, "kernel_idle_loop")])
+    wanted = [
+        "console: cpu cpu=0 pc=0x20a954 symbol=kernel_idle_loop+0xd4 cpsr=0x80000345 "
+        "el=1 daif=0xd irq_masked=False ticks=944",
+        "console: cpu cpu=1 pc=0x20a954 symbol=kernel_idle_loop+0xd4 cpsr=0x800003c5 "
+        "el=1 daif=0xf irq_masked=True ticks=4294968239",
+        "console: unavailable cpu=2 halt-error=timed out",
+    ]
+    return [] if lines == wanted else [f"parsed {lines!r}"]
+
+
+CHECKS += (("rpi5-swd-parse", rpi5_swd_parse),)
+
 CASES = CaseCount()
 
 

@@ -56,7 +56,7 @@ for {set c 0} {$c < %(cores)d} {incr c} {
 }
 if {$reader >= 0 && "%(ticks)s" ne ""} {
     targets bcm2712.cpu$reader
-    if {[catch {set words [read_memory %(ticks)s 64 %(cores)d]} error]} {
+    if {[catch {set words [read_memory %(ticks)s 32 [expr {2 * %(cores)d}]]} error]} {
         echo "swd: ticks-error=[string map {"\n" " "} $error]"
     } else {
         echo "swd: ticks reader=$reader values=$words"
@@ -102,8 +102,12 @@ def parse(text, table):
     lines, ticks = [], {}
     found = re.search(r"^swd: ticks reader=(\d+) values=(.*)$", text, re.M)
     if found:
-        for cpu, value in enumerate(found.group(2).split()):
-            ticks[cpu] = int(value, 0)
+        # Read as 32-bit halves: OpenOCD 0.12's `read_memory ADDR 64 N` read
+        # 32-bit units with stale upper halves on this board (2026-10-20,
+        # every count came back near 0x7efe00000000).
+        words = [int(value, 0) for value in found.group(2).split()]
+        for cpu in range(len(words) // 2):
+            ticks[cpu] = words[2 * cpu] | (words[2 * cpu + 1] << 32)
     for match in re.finditer(r"^swd: cpu=(\d+) pc=(0x[0-9a-fA-F]+) "
                              r"cpsr=(0x[0-9a-fA-F]+)$", text, re.M):
         cpu, pc, cpsr = int(match.group(1)), int(match.group(2), 16), int(match.group(3), 16)

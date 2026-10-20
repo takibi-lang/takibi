@@ -1121,7 +1121,14 @@ needed for the stopped subsystem. Current helpers are:
   compiler, including the `AtomicWord` wrapper. This command requires QEMU's
   physical-memory mode and stops all CPUs; it does not call guest functions
   or acquire guest locks. A publication caught halfway through is reported
-  as unavailable, and overwritten records are counted rather than invented;
+  as unavailable, and overwritten records are counted rather than invented.
+  The RPi5 lane has no GDB stub in its failure path; `scripts/rpi5_swd_snapshot.py`
+  is its counterpart (GitHub issue #869): it halts each core over SWD, records
+  pc with its symbol, CPSR, exception level, DAIF and each core's tick count in
+  `swd-snapshot.log`, and resumes them before the serial BREAK. Any failure of
+  `make kernelcheck-rpi5` after the load asks the UART driver for that snapshot
+  and the DDB walk (wait graph included, in `ddb-postmortem.log`), bounded at
+  60 seconds;
 - `scripts/kernel_debug_metadata.gdb`: load
   `_build/kernel-debug-metadata.json` with `takibi-debug-metadata`, then use
   `takibi-enum`, `takibi-constant`, or `takibi-variant-layout` to decode
