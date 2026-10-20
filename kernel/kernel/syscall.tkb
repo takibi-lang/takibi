@@ -2762,6 +2762,7 @@ must_use variant SyscallDeadlineResult {
 // which the BusyBox console lanes were written against; it still blocks
 // whenever another process is Ready.
 fn syscall_timed_wait_blocks() -> bool {
+    // core-role: the #840 decision covers peers; core 0 is #852.
     if (cpu_id() != 0) { return true; }
     return kernel_process_other_ready();
 }
