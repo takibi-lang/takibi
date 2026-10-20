@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 
+from control_patch import replace_once
 from pass_line import CaseCount, report_pass
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
@@ -29,9 +30,7 @@ def run(edit=None):
         if edit:
             path, old, new = edit
             text = (root / path).read_text()
-            if old not in text:
-                raise SystemExit(f"control edit target missing in {path}: {old!r}")
-            (root / path).write_text(text.replace(old, new, 1))
+            (root / path).write_text(replace_once(text, old, new, path))
         done = subprocess.run(
             [sys.executable, f"scripts/{CHECK}"], cwd=root,
             capture_output=True, text=True,
