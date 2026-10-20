@@ -1215,11 +1215,14 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 	mv $@.tmp $@
 
 $(KERNEL_SHELL_EXT2_IMAGE): $(KERNEL_EXT2_IMAGE) \
-	$(KERNEL_EXT2_FIXTURE_DIR)/inittab.shell
+	$(KERNEL_EXT2_FIXTURE_DIR)/inittab.shell $(KERNEL_EXT2_FIXTURE_DIR)/restart.sh
 	cp $(KERNEL_EXT2_IMAGE) $@.tmp
 	debugfs -w -R 'rm /etc/inittab' $@.tmp >/dev/null 2>&1
 	E2FSPROGS_FAKE_TIME=1700000000 \
 		e2cp $(KERNEL_EXT2_FIXTURE_DIR)/inittab.shell $@.tmp:/etc/inittab
+	E2FSPROGS_FAKE_TIME=1700000000 \
+		e2cp $(KERNEL_EXT2_FIXTURE_DIR)/restart.sh $@.tmp:/etc/restart.sh
+	debugfs -w -R 'set_inode_field /etc/restart.sh mode 0100755' $@.tmp >/dev/null 2>&1
 	e2fsck -fn $@.tmp >/dev/null
 	mv $@.tmp $@
 

@@ -2,3 +2,7 @@
 # BusyBox init keeps both services alive until the machine is powered off.
 ::respawn:/bin/httpd -f -p 8080 -h /
 ::respawn:/bin/sh -i
+# GitHub issue #862: SIGQUIT to PID 1 makes BusyBox init exec this in place
+# of itself, so PID 1 runs a new image and then exits (the fail-stop line).
+# Inert until something sends pid 1 SIGQUIT; only the PTY smoke does.
+::restart:/etc/restart.sh

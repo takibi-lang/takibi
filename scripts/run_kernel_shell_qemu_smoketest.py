@@ -63,6 +63,13 @@ TRANSCRIPT_PATH = os.path.join(ARTIFACT_DIR, "uart-transcript.log")
 START_TIMEOUT_SECONDS = 45
 START_CEILING_SECONDS = float(os.environ.get("KERNEL_QEMU_CEILING", "270"))
 EXIT_TIMEOUT_SECONDS = 15
+# GitHub issue #862: the fourth boot sends PID 1 SIGQUIT. BusyBox init then
+# exec's inittab.shell's ::restart: image (/etc/restart.sh) in place of
+# itself -- PID 1's own exec -- and that image exits, which is PID 1's exit
+# and the kernel's fail-stop (kernel_syscall_init_exit).
+INIT_EXIT = "init-exit"
+INIT_RESTART_MARKER = b"\ninit restart: pid=1\n"
+INIT_EXIT_STOP_MARKER = b"\ninit: PID 1 exited unexpectedly status=7\n"
 
 
 def terminate(pid):
@@ -116,7 +123,7 @@ def drain_terminal(terminal, transcript):
         transcript.extend(data)
 
 
-def verify_uart_transcript(pid, terminal_transcript, stop_marker):
+def verify_uart_transcript(pid, terminal_transcript, stop_marker, command):
     path_bytes = TRANSCRIPT_PATH.encode()
     for marker, description in (
         ("UART transcript: ".encode() + path_bytes, "transcript start path"),
@@ -132,12 +139,15 @@ def verify_uart_transcript(pid, terminal_transcript, stop_marker):
         fail(pid, terminal_transcript, f"UART transcript is not readable: {error}")
 
     required = (
-        (stop_marker, "all-core system stop"),
+        (stop_marker, "PID 1 exit fail-stop" if command == INIT_EXIT
+         else "all-core system stop"),
         (LISTENER_MARKER, "persistent HTTPd listener readiness"),
         (b"ddb: interrupt-safe UART debugger", "DDB entry"),
         (b"ddb: continuing", "DDB continue output"),
         (b"\n" + COMMAND_RESULT + b"\n", "post-resume shell output"),
     )
+    if command == INIT_EXIT:
+        required += ((INIT_RESTART_MARKER, "PID 1 running the exec'd image"),)
     for marker, description in required:
         if marker not in uart:
             fail(pid, terminal_transcript, f"UART transcript missed {description}")
@@ -161,7 +171,12 @@ def verify_http(url):
 
 def run_one(command, http_offset):
     name = "restart" if command == "reboot" else command
-    stop_marker = f"\nsystem stop: {name} (all cores parked)\n".encode("ascii")
+    if command == INIT_EXIT:
+        stop_marker = INIT_EXIT_STOP_MARKER
+        stop_line = b"x=; kill -QUIT 1\n"
+    else:
+        stop_marker = f"\nsystem stop: {name} (all cores parked)\n".encode("ascii")
+        stop_line = f"x=; /bin/busybox {command} -f\n".encode("ascii")
     startup_path = os.path.join(ARTIFACT_DIR, f"await-{command}.jsonl")
     exit_path = os.path.join(ARTIFACT_DIR, f"await-{command}-exit.jsonl")
     try:
@@ -262,7 +277,7 @@ def run_one(command, http_offset):
                     if (command_sent and not stop_sent and
                             b"\n" + COMMAND_RESULT + b"\n" in normalized):
                         startup_timing.record("command response", True, arrived_at)
-                        os.write(terminal, f"x=; /bin/busybox {command} -f\n".encode("ascii"))
+                        os.write(terminal, stop_line)
                         stop_sent = True
                     if stop_sent and stop_marker in normalized:
                         startup_timing.record("all cores parked", True, arrived_at)
@@ -288,10 +303,12 @@ def run_one(command, http_offset):
                 exit_timing.record("child process exit", True, time.monotonic())
                 if status == 0:
                     drain_terminal(terminal, transcript)
-                    verify_uart_transcript(pid, transcript, stop_marker)
+                    verify_uart_transcript(pid, transcript, stop_marker, command)
                     shutil.copyfile(TRANSCRIPT_PATH,
                                     os.path.join(ARTIFACT_DIR, f"uart-{command}.log"))
-                    print(f"kernelsh-qemu PTY smoke test: PASS ({name}, all cores parked)")
+                    outcome = ("PID 1 exec'd and exited, kernel stopped"
+                               if command == INIT_EXIT else "all cores parked")
+                    print(f"kernelsh-qemu PTY smoke test: PASS ({name}, {outcome})")
                     return
                 fail(pid, transcript, "make kernelsh-qemu exited unsuccessfully")
             time.sleep(0.1)
@@ -314,7 +331,8 @@ def main():
     # runner finds them on its ancestor. lease() re-executes this script, and
     # the build above is then a no-op.
     lease(shell_vcpus())
-    for http_offset, command in enumerate(("halt", "poweroff", "reboot")):
+    for http_offset, command in enumerate(("halt", "poweroff", "reboot",
+                                           INIT_EXIT)):
         run_one(command, http_offset)
 
 

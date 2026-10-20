@@ -988,7 +988,13 @@ chardev; this preserves LF input and local echo. Press Ctrl-] to leave the
 console and restore the host terminal settings.
 
 `kernelcheck-qemu` includes `kernelcheck-shell-qemu`, a PTY smoke test that
-exercises this interactive QEMU path automatically. The standalone target is
+exercises this interactive QEMU path automatically. Its four boots end in
+`halt`, `poweroff`, `reboot`, and `kill -QUIT 1`: the last makes BusyBox init
+exec its `::restart:` image (`/etc/restart.sh`) as PID 1, whose exit must
+print the fail-stop line `init: PID 1 exited unexpectedly status=7`. The
+restart entry is inert in an interactive session unless pid 1 gets SIGQUIT,
+and BusyBox's `kill(-1, ...)` before the exec is rejected (`kernel/SYSCALLS.md`),
+so the other processes survive into the new image. The standalone target is
 also useful when diagnosing a terminal-specific regression without running
 the whole QEMU suite.
 
