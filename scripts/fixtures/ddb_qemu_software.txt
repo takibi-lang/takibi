@@ -19,23 +19,24 @@ ddb: intr count cpu=0 intid=30 count=412
 ddb: intr count cpu=1 intid=1 count=1
 ddb: intr count cpu=1 intid=2 count=8
 ddb: intr count cpu=1 intid=30 count=397
-ddb: sched enabled=1 pending=1 current=1 ready=0 running=1 blocked=0 exited=0 truncated=0
-ddb: wait current=1 state=running reason=none awaited=0
+ddb: sched enabled=0 pending=0 current=0 ready=0 running=1 blocked=0 exited=0 constructing=1 truncated=0
+ddb: wait current=0 state=running reason=none awaited=0
 ddb: wait edges=0 blocked=0 unknown=0 truncated=0
-ddb: current pid=1 parent=0 state=2 wait=0
-ddb: activity cpu=0 syscall current=1 stack=1
+ddb: current pid=0 parent=0 state=2 wait=0
+ddb: activity cpu=0 syscall current=0 stack=0
 ddb: activity cpu=1 idle-loop current=0 stack=0
-ddb: vm pid=1 root=0 live=1 asid=1 l1=0x0000000040248000
+ddb: vm pid=0 root=1076772960 live=1 asid=1 l1=0x0000000040248000
 ddb: vm-global asid-width=16 asid-generation=2 asid-next=3 asid-rollovers=1 pages-live=2472 pages-total=261560
 ddb: page-runs calls=41 visits=57 ticks=118000 max-ticks=9100 freq=62500000
-ddb: fds pid=1 slots=16
-ddb: ps count=1 truncated=0
-ddb: ps pid=1 ppid=0 state=2 wait=0 root=0 sp=0x0000000040348000 pending=none masked=none owner=0 mask=0x0000000000000000 core0=0
-ddb: stacks cpus=2 processes=1 truncated=0
-ddb: stack cpu=0 pid=1 stack=0x00000000401e4000..0x00000000401e8000 owner=0 record=match
+ddb: fds pid=0 slots=16
+ddb: ps count=2 truncated=0
+ddb: ps pid=0 ppid=0 state=2 wait=0 root=0 sp=0x0000000000000000 pending=none masked=none owner=0 mask=0x0000000000000001 core0=0
+ddb: ps pid=1 ppid=0 state=5 wait=0 root=1076740192 sp=0x0000000040348000 pending=none masked=none owner=none mask=0x0000000000000000 core0=0
+ddb: stacks cpus=2 processes=2 truncated=0
+ddb: stack cpu=0 status=idle
 ddb: stack cpu=1 status=idle
-ddb: stacks roots=1 matched=1 missing=0 duplicate-process=0 owner-mismatch=0 range-mismatch=0 duplicate-pid=0 duplicate-stack=0
-ddb: wait current=1 state=running reason=none awaited=0
+ddb: stacks roots=0 matched=0 missing=0 duplicate-process=0 owner-mismatch=0 range-mismatch=0 duplicate-pid=0 duplicate-stack=0
+ddb: wait current=0 state=running reason=none awaited=0
 ddb: wait edges=0 blocked=0 unknown=0 truncated=0
 ddb: wait current=3 state=running reason=net-rx frame-pending=no connection-pending=unknown awaited=1
 ddb: wait pid=1 state=blocked waits-for child pid=2 state=blocked
@@ -50,15 +51,15 @@ ddb: wait pid=14 state=blocked waits-for event=uart-tx queued=320 low-water=256
 ddb: wait pid=15 state=blocked waits-for event=net-rx frame-pending=no connection-pending=unknown
 ddb: wait edges=8 blocked=9 unknown=2 truncated=1
 ddb: waittest ps pid=10 ppid=0 state=3 wait=1 waker=uart-rx queued=1 root=0 sp=0x0000000000000000 pending=none masked=none owner=none mask=0x0000000000000000 core0=0
-ddb: proc pid=1 ppid=0 state=2 wait=0 root=0 sp=0x0000000040348000 pending=none masked=none owner=0 mask=0x0000000000000000 core0=0
-ddb: bt source=cpu cpu=0 pid=1 stack=0x00000000401e4000..0x00000000401e8000
+ddb: proc pid=1 ppid=0 state=5 wait=0 root=1076740192 sp=0x0000000040348000 pending=none masked=none owner=none mask=0x0000000000000000 core0=0
+ddb: bt source=cpu cpu=0 pid=0 stack=0x00000000401e4000..0x00000000401e8000
 ddb: bt frame=0 pc=0x000000004008c050 boundary=assembly-bridge
 ddb: bt frame=1 pc=0x00000000400799a0 fp=0x00000000401e7be0
 ddb: bt frame=2 pc=0x000000004008290c fp=0x00000000401e7bf0
 ddb: bt frame=3 pc=0x000000004008bcf4 fp=0x00000000401e7f90
 ddb: bt frame=4 pc=0x0000000040000070 fp=0x00000000401e7ff0 boundary=assembly
 ddb: bt stop=assembly-boundary fp=0x00000000401e7ff0
-ddb: bt source=cpu cpu=0 pid=1 stack=0x00000000401e4000..0x00000000401e8000
+ddb: bt source=cpu cpu=0 pid=0 stack=0x00000000401e4000..0x00000000401e8000
 ddb: bt frame=0 pc=0x000000004008c050 boundary=assembly-bridge
 ddb: bt frame=1 pc=0x00000000400799a0 fp=0x00000000401e7be0
 ddb: bt frame=2 pc=0x000000004008290c fp=0x00000000401e7bf0
@@ -74,17 +75,17 @@ ddb: bt frame=1 pc=0x0000000040000110 fp=0x00000000401effe0 boundary=assembly
 ddb: bt stop=assembly-boundary fp=0x00000000401effe0
 ddb: bt cpu=9 not stopped here
 ddb: usage: bt [PID|cpu N]
-ddb: bt source=cpu cpu=0 pid=1 stack=0x00000000401e4000..0x00000000401e8000
+ddb: bt source=cpu cpu=0 pid=0 stack=0x00000000401e4000..0x00000000401e8000
 ddb: bt stop=unsupported-pc fp=0x00000000401e7be0
-ddb: bt source=cpu cpu=0 pid=1 stack=0x00000000401e4000..0x00000000401e8000
+ddb: bt source=cpu cpu=0 pid=0 stack=0x00000000401e4000..0x00000000401e8000
 ddb: bt stop=misaligned-pc fp=0x00000000401e7be0
-ddb: bt source=cpu cpu=0 pid=1 stack=0x00000000401e4000..0x00000000401e8000
+ddb: bt source=cpu cpu=0 pid=0 stack=0x00000000401e4000..0x00000000401e8000
 ddb: bt frame=0 pc=0x0000000040001000 boundary=exception
 ddb: bt stop=misaligned-frame fp=0x0000000000000003
-ddb: bt source=cpu cpu=0 pid=1 stack=0x00000000401e4000..0x00000000401e8000
+ddb: bt source=cpu cpu=0 pid=0 stack=0x00000000401e4000..0x00000000401e8000
 ddb: bt frame=0 pc=0x0000000040001000 boundary=exception
 ddb: bt stop=out-of-range fp=0x00000000401e8000
-ddb: bt source=cpu cpu=0 pid=1 stack=0x00000000401e4000..0x00000000401e8000
+ddb: bt source=cpu cpu=0 pid=0 stack=0x00000000401e4000..0x00000000401e8000
 ddb: bt frame=0 pc=0x0000000040001000 boundary=exception
 ddb: bt stop=depth-limit fp=0x00000000401e7be0
 ddb: bt test invalid saved contexts rejected
@@ -120,16 +121,16 @@ ddb: xp physical=0x00000000401d5078 count=2
 ddb: xp byte physical=0x00000000401d5078 value=0x0000000000000001
 ddb: xp byte physical=0x00000000401d5079 value=0x0000000000000001
 ddb: xp denied (not ordinary physical RAM) address=0x0000001000000000 count=1
-ddb: xu pid=1 root=0 address=0x0000000080000000 count=2
+ddb: xu pid=1 root=1076740192 address=0x0000000080000000 count=2
 ddb: xu byte address=0x0000000080000000 physical=0x0000000040250000 value=0x000000000000007f
 ddb: xu byte address=0x0000000080000001 physical=0x0000000040250001 value=0x0000000000000045
-ddb: xu pid=1 root=0 address=0x0000000080000fff count=2
+ddb: xu pid=1 root=1076740192 address=0x0000000080000fff count=2
 ddb: xu byte address=0x0000000080000fff physical=0x0000000040250fff value=0x0000000000000017
 ddb: xu byte address=0x0000000080001000 physical=0x0000000040252000 value=0x00000000000000c7
 ddb: usage: xu PID HEX_ADDRESS [COUNT_1_TO_64]
 ddb: usage: xu PID HEX_ADDRESS [COUNT_1_TO_64]
 ddb: xu pid not captured
-ddb: xu pid=1 root=0 address=0x0000000070000000 count=1
+ddb: xu pid=1 root=1076740192 address=0x0000000070000000 count=1
 ddb: xu unmapped address=0x0000000070000000
 ddb: profile nothing to dump
 ddb: usage: profile stop | profile dump (start: write to /proc/takibi/profile)

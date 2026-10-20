@@ -1,5 +1,41 @@
 # takibi Engineering History
 
+## 2026-10-20: PID 1 is a pooled process; slot 0 names none (#831)
+
+The remainder of #775 item 2-1. Slot value 0 had named a static bootstrap
+record since the process table became a pool (#392): the boot fixtures
+stood on it, PID 1 was it, and its kernel stack was core 0's boot stack,
+under `main()`'s frames. `run_initial_user` entered EL0 by a hand-written
+eret and returned into the boot driver on exit or on PID 1's own exec.
+
+Maintainer decisions (2026-10-20): 2-1 option A, the Linux shape -- `main()`
+ends in core 0's idle loop and PID 1's exit stops the kernel; 2-2 option B --
+the boot fixtures run on a pooled pid-0 kernel thread, Linux's swapper; 2-3
+-- kernel preemption stays #638. Option 2-1 B (PID 1 alone on a pooled
+stack, `main()` kept on the boot stack) and 2-2 A (no process context for
+the fixtures at all) were rejected: the first kept core 0 special, the
+second meant rewriting most fixtures.
+
+What changed, in three steps on one branch. PID 1 is created Constructing
+from the pool with its own stack, root, image record and fd context,
+BusyBox init is mapped into its root and installed as an exec image, and it
+is published Ready with a synthetic first frame on its own stack; core 0's
+idle loop starts it through `el0_context_resume`, and that first start
+opens dispatch on every core, which keeps PID 1's first entry deterministic
+for the oops lane's fault injection. PID 1's exec is an ordinary exec and
+`SyscallAction::Exec` is gone. The boot thread is pid 0 and takes no
+number, so PID 1 is pid 1; it runs on root 0, the kernel's own root, whose
+image record moved to a static beside root 0's backing. Core 0 then idles
+on its boot stack, as each peer idles on the PSCI stack it booted on, and
+its separate 32 KiB idle stack went.
+
+Defects met on the way, each now held by a check: "the parent is PID 1"
+was spelled "the parent is slot 0" and silently refused every init child,
+stalling the busy-pair workload; a root read back as slot 0 was looked up
+as a process record. `scripts/check_process_slot_zero.py` refuses a slot-0
+branch in placement, stack-run, record and root selection, the static
+record's names, and a per-process call given slot 0.
+
 ## 2026-10-12: definite initialization of field paths and scratch buffers (#203 stages 1-2)
 
 The checker now tracks a static init/uninit state per struct field, per

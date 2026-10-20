@@ -40,7 +40,7 @@ ddb: fd=1 kind=2 object=1076151152
 ddb: fd=2 kind=2 object=1076151152
 ddb: fd=3 kind=2 object=1076150832
 ddb: ps count=6 truncated=0
-ddb: ps pid=1 ppid=0 state=3 wait=4 waker=deadline root=0 sp=0x00000000401e7870 pending=none masked=sigint,sigquit,sigterm,sigchld+0x0000000020000a01 owner=none mask=0x0000000000000000 core0=0
+ddb: ps pid=1 ppid=0 state=3 wait=4 waker=deadline root=1076740192 sp=0x00000000401e7870 pending=none masked=sigint,sigquit,sigterm,sigchld+0x0000000020000a01 owner=none mask=0x0000000000000000 core0=0
 ddb: ps pid=41 ppid=1 state=3 wait=2 waker=child-exit root=1076145600 sp=0x00000000404b7cd0 pending=none masked=none owner=none mask=0x0000000000000000 core0=0
 ddb: ps pid=46 ppid=1 state=2 wait=0 root=1076146480 sp=0x0000000040417cd0 pending=none masked=none owner=0 mask=0x0000000000000001 core0=0
 ddb: ps pid=37 ppid=1 state=2 wait=0 root=1076147360 sp=0x0000000040277cd0 pending=none masked=none owner=1 mask=0x0000000000000002 core0=0
@@ -68,7 +68,7 @@ ddb: wait pid=14 state=blocked waits-for event=uart-tx queued=320 low-water=256
 ddb: wait pid=15 state=blocked waits-for event=net-rx frame-pending=no connection-pending=unknown
 ddb: wait edges=8 blocked=9 unknown=2 truncated=1
 ddb: waittest ps pid=10 ppid=0 state=3 wait=1 waker=uart-rx queued=1 root=0 sp=0x0000000000000000 pending=none masked=none owner=none mask=0x0000000000000000 core0=0
-ddb: proc pid=1 ppid=0 state=3 wait=4 waker=deadline root=0 sp=0x00000000401e7870 pending=none masked=sigint,sigquit,sigterm,sigchld+0x0000000020000a01 owner=none mask=0x0000000000000000 core0=0
+ddb: proc pid=1 ppid=0 state=3 wait=4 waker=deadline root=1076740192 sp=0x00000000401e7870 pending=none masked=sigint,sigquit,sigterm,sigchld+0x0000000020000a01 owner=none mask=0x0000000000000000 core0=0
 ddb: bt source=cpu cpu=0 pid=46 stack=0x0000000040414000..0x0000000040418000
 ddb: bt frame=0 pc=0x000000004000ec2c boundary=exception
 ddb: bt frame=1 pc=0x00000000400226e4 fp=0x0000000040417050
@@ -171,16 +171,16 @@ ddb: xp physical=0x00000000401d5078 count=2
 ddb: xp byte physical=0x00000000401d5078 value=0x0000000000000000
 ddb: xp byte physical=0x00000000401d5079 value=0x0000000000000001
 ddb: xp denied (not ordinary physical RAM) address=0x0000001000000000 count=1
-ddb: xu pid=1 root=0 address=0x0000000080000000 count=2
+ddb: xu pid=1 root=1076740192 address=0x0000000080000000 count=2
 ddb: xu byte address=0x0000000080000000 physical=0x0000000040250000 value=0x000000000000007f
 ddb: xu byte address=0x0000000080000001 physical=0x0000000040250001 value=0x0000000000000045
-ddb: xu pid=1 root=0 address=0x0000000080000fff count=2
+ddb: xu pid=1 root=1076740192 address=0x0000000080000fff count=2
 ddb: xu byte address=0x0000000080000fff physical=0x0000000040250fff value=0x0000000000000017
 ddb: xu byte address=0x0000000080001000 physical=0x0000000040252000 value=0x00000000000000c7
 ddb: usage: xu PID HEX_ADDRESS [COUNT_1_TO_64]
 ddb: usage: xu PID HEX_ADDRESS [COUNT_1_TO_64]
 ddb: xu pid not captured
-ddb: xu pid=1 root=0 address=0x0000000070000000 count=1
+ddb: xu pid=1 root=1076740192 address=0x0000000070000000 count=1
 ddb: xu unmapped address=0x0000000070000000
 ddb: profile nothing to dump
 ddb: usage: profile stop | profile dump (start: write to /proc/takibi/profile)

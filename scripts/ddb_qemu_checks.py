@@ -37,9 +37,9 @@ REQUIREMENTS = (
     ('page run counters', '^ddb: page-runs calls=[1-9][0-9]* visits=[1-9][0-9]* ticks=[0-9]+ max-ticks=[0-9]+ freq=[1-9][0-9]*$', 1, None, 'both'),
     ('fd table fields', '^ddb: fds pid=[0-9]+ slots=[0-9]+$', 1, None, 'both'),
     ('process count', '^ddb: ps count=[1-9][0-9]* truncated=[01]$', 1, None, 'both'),
-    ('PID 1 signal fields in ps', '^ddb: ps pid=1 ppid=0 state=[0-9]+ wait=[0-9]+( waker=[a-z-]+( queued=[0-9]+( low-water=[0-9]+)?| frame-pending=(yes|no|unknown) connection-pending=(yes|no|unknown))?)? root=0 sp=0x[0-9a-f]+ pending={sigset} masked={sigset} owner=(none|[0-9]+) mask=0x[0-9a-f]+ core0=[01]$', 1, None, 'both'),
+    ('PID 1 signal fields in ps', '^ddb: ps pid=1 ppid=0 state=[0-9]+ wait=[0-9]+( waker=[a-z-]+( queued=[0-9]+( low-water=[0-9]+)?| frame-pending=(yes|no|unknown) connection-pending=(yes|no|unknown))?)? root=[1-9][0-9]* sp=0x[0-9a-f]+ pending={sigset} masked={sigset} owner=(none|[0-9]+) mask=0x[0-9a-f]+ core0=[01]$', 1, None, 'both'),
     ('stack count', '^ddb: stacks cpus={cpus} processes=', 1, None, 'both'),
-    ('PID 1 signal fields in proc', '^ddb: proc pid=1 ppid=0 state=[0-9]+ wait=[0-9]+( waker=[a-z-]+( queued=[0-9]+( low-water=[0-9]+)?| frame-pending=(yes|no|unknown) connection-pending=(yes|no|unknown))?)? root=0 sp=0x[0-9a-f]+ pending={sigset} masked={sigset} owner=(none|[0-9]+) mask=0x[0-9a-f]+ core0=[01]$', 1, None, 'both'),
+    ('PID 1 signal fields in proc', '^ddb: proc pid=1 ppid=0 state=[0-9]+ wait=[0-9]+( waker=[a-z-]+( queued=[0-9]+( low-water=[0-9]+)?| frame-pending=(yes|no|unknown) connection-pending=(yes|no|unknown))?)? root=[1-9][0-9]* sp=0x[0-9a-f]+ pending={sigset} masked={sigset} owner=(none|[0-9]+) mask=0x[0-9a-f]+ core0=[01]$', 1, None, 'both'),
     ('backtrace sources', '^ddb: bt source=(cpu cpu=[0-9]+|saved) pid=[0-9]+ stack=0x[0-9a-f]+\\.\\.0x[0-9a-f]+$', 2, None, 'both'),
     ('backtrace roots', '^ddb: bt frame=0 pc=0x[0-9a-f]+ boundary=(exception|user|assembly|assembly-bridge)$', 2, None, 'both'),
     ('backtrace termination', '^ddb: bt (complete frames=[1-9][0-9]*|stop=(assembly-boundary|depth-limit|invalid-return-pc|nonmonotonic-frame|out-of-range) fp=0x[0-9a-f]+)$', 1, None, 'both'),
@@ -79,9 +79,9 @@ REQUIREMENTS = (
     ('physical read address', '^ddb: xp physical=0x0*{address} count=2$', 1, None, 'both'),
     ('physical read bytes', '^ddb: xp byte physical=0x.* value=0x', 2, None, 'both'),
     ('physical read denied address', '^ddb: xp denied \\(not ordinary physical RAM\\) address=0x0000001000000000 count=1$', 1, None, 'both'),
-    ('user read address', '^ddb: xu pid=1 root=0 address=0x0000000080000000 count=2$', 1, None, 'both'),
+    ('user read address', '^ddb: xu pid=1 root=[1-9][0-9]* address=0x0000000080000000 count=2$', 1, None, 'both'),
     ('user read bytes', '^ddb: xu byte address=0x000000008000000[01] physical=0x[0-9a-f]* value=0x[0-9a-f]*$', 2, None, 'both'),
-    ('user page boundary read', '^ddb: xu pid=1 root=0 address=0x0000000080000fff count=2$', 1, None, 'both'),
+    ('user page boundary read', '^ddb: xu pid=1 root=[1-9][0-9]* address=0x0000000080000fff count=2$', 1, None, 'both'),
     ('user page boundary first byte', '^ddb: xu byte address=0x0000000080000fff physical=0x', 1, None, 'both'),
     ('user page boundary second byte', '^ddb: xu byte address=0x0000000080001000 physical=0x', 1, None, 'both'),
     ('user read usage count', '^ddb: usage: xu PID HEX_ADDRESS \\[COUNT_1_TO_64\\]$', 2, 2, 'both'),
@@ -216,8 +216,13 @@ def capture_problems(text, metadata, hold_text=""):
         if not 0 <= migrated < stacks:
             problems.append("snapshot ordering: snapshot did not follow live migration")
     else:
-        if not (has(r"^ddb: stack cpu=1 status=idle$") and has(r"^ddb: stacks roots=1 matched=1 missing=0 duplicate-process=0 owner-mismatch=0 range-mismatch=0 duplicate-pid=0 duplicate-stack=0$")):
-            problems.append("boot idle root: CPU 1 was not idle with one matched root")
+        # GitHub issue #831: the software BRK stops the boot fixtures, which
+        # stand on the boot thread, pid 0, as Linux's boot code stands on
+        # swapper; DDB reports it as idle like every other CPU, and no
+        # process root is on a CPU yet. The UART BREAK walk above is where
+        # matched roots are checked.
+        if not (has(r"^ddb: stack cpu=0 status=idle$") and has(r"^ddb: stack cpu=1 status=idle$") and has(r"^ddb: stacks roots=0 matched=0 missing=0 duplicate-process=0 owner-mismatch=0 range-mismatch=0 duplicate-pid=0 duplicate-stack=0$")):
+            problems.append("boot idle root: the boot thread and CPU 1 were not idle with no process root")
         problems.extend("software BRK walk: " + problem for problem in backtrace_problems(
             text, metadata["generated_start"], metadata["generated_end"]))
     return problems
