@@ -57,10 +57,10 @@ fn xhci_irq_evidence_report() !{logs, unsafe} {
         kernel_boot_log("usb xhci: irq rotating, taken on at least two cpus\n");
         return;
     }
-    kernel_boot_log("usb xhci: irq rotation FAILED: taken=");
+    kernel_boot_log("usb xhci: irq rotation FAILED: taken");
     for core: usize in 0..<KERNEL_MAX_CORES {
         if (core < kernel_online_core_count()) {
-            if (core != 0) { kernel_boot_log(","); }
+            kernel_boot_log(" ");
             uart_put_udec(atomic_word_load(&xhci_irq_taken[core]));
         }
     }
