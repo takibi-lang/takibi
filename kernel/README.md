@@ -1470,7 +1470,9 @@ begins only once PID 1 is back in its signal wait with no deadline (GitHub
 issue #873): BusyBox init sleeps one second after each child it reaps, and a
 BREAK at the end of that sleep found init Running on a third CPU, or taken by
 an idle CPU that had not yet made it current, so the two-root and saved
-user-frame checks failed. Waiting for that wait lets init respawn a busy
+user-frame checks failed. The wait is bounded at five seconds: on RPi5
+init was still in that post-reap sleep after the 20 seconds its lane gives
+the hold, so there the hold proceeds and DDB's `wait` shows init. Waiting for that wait lets init respawn a busy
 worker first, which may hold a third CPU, so the root check asks that every
 root is a distinct process matching its record, and that none is PID 1,
 rather than for a fixed count. A failed root check prints every CPU's root
