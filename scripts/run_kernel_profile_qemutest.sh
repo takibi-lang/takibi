@@ -15,6 +15,18 @@ trap 'takibi_status=$?; echo "[$(basename "$0")] aborted at line $LINENO with ex
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ARTIFACT_DIR="${KERNEL_PROFILE_QEMU_ARTIFACT_DIR:-${TAKIBI_LANE_ARTIFACT_ROOT:-$REPO_ROOT/_build}/kernel-profile-qemu}"
 mkdir -p "$ARTIFACT_DIR"
+# GitHub issue #877: a failing run's capture was overwritten by the next run
+# before anyone read it. Snapshot it on any nonzero exit.
+archive_on_failure() {
+    local status=$?
+    if [ "$status" -ne 0 ]; then
+        KERNEL_QEMU_LABEL="kernel-profile-qemu" KERNEL_QEMU_ELF="${ELF:-unknown}" \
+            bash "$REPO_ROOT/scripts/archive_kernel_failure.sh" "$ARTIFACT_DIR" \
+            "$REPO_ROOT/_build/kernel-profile-qemu-failures" "exit status $status" || true
+    fi
+    return "$status"
+}
+trap archive_on_failure EXIT
 
 export KERNEL_QEMU_SHELL_SERIAL_PORT="${KERNEL_QEMU_SHELL_SERIAL_PORT:-18760}"
 export KERNEL_QEMU_SHELL_HTTP_PORT="${KERNEL_QEMU_SHELL_HTTP_PORT:-18761}"

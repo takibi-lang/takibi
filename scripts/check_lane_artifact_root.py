@@ -33,10 +33,17 @@ one stays outside the root deliberately: it is already timestamped and never
 overwritten, and keeping every archived capture under one path is what makes
 "show me the failing captures" a single listing rather than a walk over
 sample directories.
+
+The root protects a repeat; a plain rerun still writes the same
+ARTIFACT_DIR. GitHub issue #877: #876 lost a failing DDB capture to a passing
+rerun because that runner never archived, and thirteen others did not either.
+So every lane runner must also call archive_kernel_failure.sh from an EXIT
+trap (see check_archive).
 """
 
 import pathlib
 import re
+import shlex
 import sys
 
 from pass_line import report_pass
@@ -129,6 +136,86 @@ def check_literals(path, lane):
     return problems
 
 
+def trap_lines(text):
+    """(line number, handler, signals) for every `trap` command."""
+    found = []
+    for number, line in enumerate(text.splitlines(), 1):
+        stripped = line.strip()
+        if not stripped.startswith("trap "):
+            continue
+        try:
+            words = shlex.split(stripped)
+        except ValueError:
+            words = []
+        if len(words) < 3:
+            continue
+        found.append((number, words[1], words[2:]))
+    return found
+
+
+def function_body(text, name):
+    """The body of a `name() {` ... `}` shell function, or None."""
+    match = re.search(rf"^{re.escape(name)}\(\) \{{\n(.*?)^\}}", text,
+                      re.M | re.S)
+    return match.group(1) if match else None
+
+
+def check_archive(path):
+    """A lane runner archives its capture from an EXIT trap (issue #877).
+
+    A failing run's capture lives in ARTIFACT_DIR, which the next run of the
+    same lane overwrites. Only an EXIT trap sees every way a lane dies --
+    `set -e`, an explicit `exit 1`, a signal -- so the archive call has to sit
+    there, not beside one failure branch. A trap that is cleared afterwards
+    (`trap - EXIT`) leaves every later check unprotected, so a clear is
+    allowed only when an archiving EXIT trap is installed again after it, or
+    when nothing but comments follow it.
+    """
+    text = path.read_text(encoding="ascii")
+    lines = text.splitlines()
+
+    functions = set(re.findall(r"^([A-Za-z_][A-Za-z0-9_]*)\(\) \{$", text,
+                               re.M))
+
+    def archives(handler, seen=()):
+        # A handler may reach the archiver through a function it calls, as
+        # the RPi5 runner's cleanup calls archive_failure.
+        body = function_body(text, handler) if handler in functions \
+            else handler
+        if body is None:
+            return False
+        if ARCHIVE_CALL in body:
+            return True
+        return any(archives(name, seen + (handler,))
+                   for name in functions - set(seen) - {handler}
+                   if re.search(rf"\b{name}\b", body))
+
+    traps = [(n, h) for n, h, signals in trap_lines(text) if "EXIT" in signals]
+    problems = []
+    if not any(h != "-" and archives(h) for _, h in traps):
+        problems.append(
+            f"{path.name} never calls {ARCHIVE_CALL} from an EXIT trap: a "
+            f"failing run's capture is overwritten by the next run (#877)")
+        return problems
+    for number, handler in traps:
+        if handler == "-":
+            rest = [line for line in lines[number:]
+                    if line.strip() and not line.strip().startswith("#")]
+            rearmed = any(n > number and h != "-" and archives(h)
+                          for n, h in traps)
+            if rest and not rearmed:
+                problems.append(
+                    f"{path.name}:{number} clears its EXIT trap and never "
+                    f"re-arms an archiving one, so a check failing after "
+                    f"line {number} leaves no archive")
+        elif not archives(handler):
+            problems.append(
+                f"{path.name}:{number} installs an EXIT trap (`{handler}`) "
+                f"that does not call {ARCHIVE_CALL}, replacing the one "
+                f"that archives")
+    return problems
+
+
 def main() -> int:
     runners = sorted(SCRIPTS.glob("run_kernel_*.sh"))
     if not runners:
@@ -143,6 +230,7 @@ def main() -> int:
         if lane is not None:
             lanes += 1
             problems += check_literals(path, lane)
+            problems += check_archive(path)
 
     for name, reason in NO_CAPTURE.items():
         if not (SCRIPTS / name).exists():
@@ -186,7 +274,8 @@ def main() -> int:
                 f"{lanes} lane runner(s) plus "
                 f"{len(set(v for v, _ in overrides))} Makefile variant "
                 f"override(s) hang their capture off ${ROOT_VAR}, which "
-                f"repeat_kernel_lane.sh moves per sample",
+                f"repeat_kernel_lane.sh moves per sample, and every lane archives "
+                f"a failing capture from an EXIT trap",
                 lanes=lanes)
     return 0
 

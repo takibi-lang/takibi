@@ -20,7 +20,20 @@ resource_lease_vcpu_acquire "$TAKIBI_QEMU_SMP"
     -gdb "tcp:127.0.0.1:$GDB_PORT" -S \
     -kernel "$ELF" >"$ARTIFACT_DIR/qemu.log" 2>&1 &
 QEMU_PID=$!
-trap 'kill "$QEMU_PID" 2>/dev/null || true; wait "$QEMU_PID" 2>/dev/null || true' EXIT
+# GitHub issue #877: a failing run's capture was overwritten by the next run
+# before anyone read it. Snapshot it on any nonzero exit.
+cleanup_and_archive() {
+    local status=$?
+    kill "$QEMU_PID" 2>/dev/null || true
+    wait "$QEMU_PID" 2>/dev/null || true
+    if [ "$status" -ne 0 ]; then
+        KERNEL_QEMU_LABEL="kernel-gdb-helpers-qemu" KERNEL_QEMU_ELF="${ELF:-unknown}" \
+            bash "$REPO_ROOT/scripts/archive_kernel_failure.sh" "$ARTIFACT_DIR" \
+            "$REPO_ROOT/_build/kernel-gdb-helpers-qemu-failures" "exit status $status" || true
+    fi
+    return "$status"
+}
+trap cleanup_and_archive EXIT
 
 status=0
 timeout 120 gdb-multiarch -q -batch "$ELF" \

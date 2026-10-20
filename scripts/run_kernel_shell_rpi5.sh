@@ -107,5 +107,19 @@ cleanup() {
         wait "$NETWORK_PEER_PID" 2>/dev/null || true
     fi
 }
-trap cleanup EXIT INT TERM HUP
+# GitHub issue #877: a failing run's capture -- UART log, gdb log, verdict --
+# was overwritten by the next run before anyone read it. Snapshot it on any
+# nonzero exit, after cleanup has stopped everything that writes into it.
+cleanup_and_archive() {
+    local status=$?
+    cleanup
+    if [ "$status" -ne 0 ]; then
+        KERNEL_QEMU_LABEL="kernel-shell-rpi5" KERNEL_QEMU_ELF="${ELF:-unknown}" \
+            bash "$REPO_ROOT/scripts/archive_kernel_failure.sh" "$ARTIFACT_DIR" \
+            "$REPO_ROOT/_build/kernel-shell-rpi5-failures" "exit status $status" || true
+    fi
+    return "$status"
+}
+trap cleanup_and_archive EXIT
+trap 'cleanup; exit 130' INT TERM HUP
 python3 "$REPO_ROOT/scripts/run_kernel_shell_console.py" "$SERIAL_DEV" 115200

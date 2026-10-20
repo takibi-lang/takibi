@@ -81,6 +81,20 @@ def add_lane(name, body):
     return plant
 
 
+PEER_HEAD = ('#!/usr/bin/env bash\nset -euo pipefail\n'
+             'ARTIFACT_DIR="${KERNEL_QEMU_PEER_ARTIFACT_DIR:-'
+             '${TAKIBI_LANE_ARTIFACT_ROOT:-$REPO_ROOT/_build}'
+             '/kernel-peer-qemu}"\n'
+             'mkdir -p "$ARTIFACT_DIR"\n')
+ARCHIVING_TRAP = ('archive_on_failure() {\n'
+                  '    local status=$?\n'
+                  '    bash "$REPO_ROOT/scripts/archive_kernel_failure.sh" '
+                  '"$ARTIFACT_DIR" \\\n'
+                  '        "$REPO_ROOT/_build/kernel-peer-qemu-failures" late\n'
+                  '    return "$status"\n'
+                  '}\n'
+                  'trap archive_on_failure EXIT\n')
+
 ROOTED = ('ARTIFACT_DIR="${KERNEL_QEMU_DDB_ARTIFACT_DIR:-'
           '${TAKIBI_LANE_ARTIFACT_ROOT:-$REPO_ROOT/_build}/kernel-ddb-qemu}"')
 
@@ -132,12 +146,10 @@ def main() -> int:
     # An archive root is allowed only for a lane that actually archives.
     failures += case(
         "an archive root in a lane that archives nothing",
-        # The ash lane, since the DDB lane archives its failures (#876).
-        edit("scripts/run_kernel_ash_qemutest.sh",
-             '/kernel-hwtest-qemu-ash}"\n',
-             '/kernel-hwtest-qemu-ash}"\nmkdir -p '
-             '"$REPO_ROOT/_build/kernel-hwtest-qemu-ash-failures"\n'),
-        "never calls archive_kernel_failure.sh")
+        # A planted lane, since every existing lane archives (#877).
+        add_lane("run_kernel_peer_qemutest.sh", PEER_HEAD +
+                 'mkdir -p "$REPO_ROOT/_build/kernel-peer-qemu-failures"\n'),
+        "nothing archives into")
 
     # The other direction, so the archive allowance is a classification
     # rather than a hole: a NEW lane that hangs off the root and archives
@@ -151,10 +163,55 @@ def main() -> int:
                  'ARTIFACT_DIR="${KERNEL_QEMU_PEER_ARTIFACT_DIR:-'
                  '${TAKIBI_LANE_ARTIFACT_ROOT:-$REPO_ROOT/_build}'
                  '/kernel-peer-qemu}"\n'
-                 'mkdir -p "$ARTIFACT_DIR"\n'
-                 'bash "$REPO_ROOT/scripts/archive_kernel_failure.sh" '
-                 '"$ARTIFACT_DIR" \\\n'
-                 '    "$REPO_ROOT/_build/kernel-peer-qemu-failures" late\n'),
+                 'mkdir -p "$ARTIFACT_DIR"\n' + ARCHIVING_TRAP),
+        "", should_fail=False)
+
+    # GitHub issue #877: a lane with no failure archive. The DDB lane lost
+    # its failing capture to a passing rerun this way; planted by removing
+    # the profile lane's archiving trap, the shape it had before #877.
+    failures += case(
+        "a lane that never archives a failing capture",
+        edit("scripts/run_kernel_profile_qemutest.sh",
+             "trap archive_on_failure EXIT\n", ""),
+        "never calls archive_kernel_failure.sh from an EXIT trap")
+
+    # The archiver called, but from one failure branch rather than from an
+    # EXIT trap: `set -e` and every other exit skip it.
+    failures += case(
+        "an archive call outside any EXIT trap",
+        add_lane("run_kernel_peer_qemutest.sh", PEER_HEAD +
+                 'false || bash "$REPO_ROOT/scripts/archive_kernel_failure.sh" '
+                 '"$ARTIFACT_DIR" "$REPO_ROOT/_build/kernel-peer-qemu-failures" '
+                 'late\n'),
+        "never calls archive_kernel_failure.sh from an EXIT trap")
+
+    # A later EXIT trap that replaces the archiving one.
+    failures += case(
+        "a later EXIT trap that replaces the archiving one",
+        add_lane("run_kernel_peer_qemutest.sh", PEER_HEAD + ARCHIVING_TRAP +
+                 "trap 'kill $QEMU_PID' EXIT\n"),
+        "does not call archive_kernel_failure.sh")
+
+    # The pre-#877 alloc-rollback shape: the trap cleared once QEMU stopped,
+    # so every verdict check after it failed with no archive.
+    failures += case(
+        "an archiving EXIT trap cleared before the checks",
+        add_lane("run_kernel_peer_qemutest.sh", PEER_HEAD + ARCHIVING_TRAP +
+                 "trap - EXIT INT TERM HUP\ngrep -q PASS uart.log\n"),
+        "clears its EXIT trap and never re-arms")
+
+    # A clear followed by a re-armed archive (the RPi5 runner's shape), or by
+    # nothing at all (the RPi5 DDB runner's), is legitimate.
+    failures += case(
+        "a cleared trap that is re-armed",
+        add_lane("run_kernel_peer_qemutest.sh", PEER_HEAD + ARCHIVING_TRAP +
+                 "trap - EXIT INT TERM HUP\n" + ARCHIVING_TRAP +
+                 "grep -q PASS uart.log\n"),
+        "", should_fail=False)
+    failures += case(
+        "a cleared trap at the very end",
+        add_lane("run_kernel_peer_qemutest.sh", PEER_HEAD + ARCHIVING_TRAP +
+                 "trap - EXIT INT TERM HUP\n# done\n"),
         "", should_fail=False)
 
     # The Makefile's variant overrides bypass the root.
@@ -192,8 +249,11 @@ def main() -> int:
         "and a fixed lane directory, a new lane with no readable one, an "
         "unreadable assignment, a second capture directory, an archive root "
         "in a lane that archives nothing, a Makefile variant outside the "
-        "root, a root the environment cannot override, and a repeat runner "
-        "that stops moving it are each refused",
+        "root, a root the environment cannot override, a repeat runner "
+        "that stops moving it, a lane that never archives, an archive call "
+        "outside an EXIT trap, a later EXIT trap that replaces it, and a "
+        "cleared one never re-armed are each refused, while a re-armed or "
+        "final clear passes",
         cases=CASES.ran)
     return 0
 

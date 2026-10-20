@@ -181,7 +181,20 @@ stop_qemu() {
         QEMU_PID=""
     fi
 }
-trap stop_qemu EXIT
+# GitHub issue #877: a failing run's capture -- UART log, gdb log, verdict --
+# was overwritten by the next run before anyone read it. Snapshot it on any
+# nonzero exit, after stop_qemu has stopped everything that writes into it.
+cleanup_and_archive() {
+    local status=$?
+    stop_qemu
+    if [ "$status" -ne 0 ]; then
+        KERNEL_QEMU_LABEL="kernel-alloc-rollback-qemu" KERNEL_QEMU_ELF="${ELF:-unknown}" \
+            bash "$REPO_ROOT/scripts/archive_kernel_failure.sh" "$ARTIFACT_DIR" \
+            "$REPO_ROOT/_build/kernel-alloc-rollback-qemu-failures" "exit status $status" || true
+    fi
+    return "$status"
+}
+trap cleanup_and_archive EXIT
 trap 'stop_qemu; exit 130' INT TERM HUP
 
 # No --validate-ash here, unlike every other lane: one process creation in
@@ -276,7 +289,9 @@ touch "$INTERACTIVE_HTTPD_DONE"
 uart_driver_status=0
 wait "$uart_driver_pid" || uart_driver_status=$?
 stop_qemu
-trap - EXIT INT TERM HUP
+# QEMU is stopped; the EXIT trap stays armed so a failing check below still
+# archives the capture (#877).
+trap - INT TERM HUP
 
 sed 's/^/  /' "$UART_DRIVER_LOG"
 

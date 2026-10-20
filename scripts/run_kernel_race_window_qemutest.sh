@@ -79,6 +79,20 @@ python3 "$REPO_ROOT/scripts/qemu_port_guard.py" "$LABEL" \
     "udp:$NETDEV_REMOTE_PORT" || exit 1
 
 mkdir -p "$ROOT"
+# GitHub issue #877: every lane runner archives its capture on a failing
+# exit through scripts/archive_kernel_failure.sh, rather than through a copy
+# of it here. The label names the window, since an armed and a reverted
+# kernel run back to back on the same ports (#665).
+archive_on_failure() {
+    local status=$?
+    if [ "$status" -ne 0 ]; then
+        KERNEL_QEMU_LABEL="race-window $WINDOW" KERNEL_QEMU_ELF="kernel-race-$WINDOW-*.elf" \
+            bash "$REPO_ROOT/scripts/archive_kernel_failure.sh" "$ROOT" \
+            "$REPO_ROOT/_build/kernel-race-window-qemu-failures" "exit status $status" || true
+    fi
+    return "$status"
+}
+trap archive_on_failure EXIT
 # A control-only window (#635) has no spin to survive: its armed kernel is the
 # ordinary one, which the ordinary suite already runs.
 if [ "${KERNEL_QEMU_RACE_WINDOW_ARMED:-run}" = skip ]; then
@@ -91,40 +105,17 @@ elif ! run_variant armed; then
         # the RPi5. The reverted run's signature below still gates.
         echo "RECORDED $LABEL: the armed kernel's churn failed (QEMU timing verdict, gated on the RPi5; #692)"
         grep -E '^FAIL|^\[churn resync\]' "$ROOT/armed.log" | sed 's/^/  /' || true
-        keep="${ARTIFACT_DIR}-failures/$(date -u +%Y%m%dT%H%M%SZ)-$WINDOW-armed"
-        mkdir -p "$keep"
-        cp -r "$ROOT/armed.log" "$ROOT/armed" "$keep/" 2>/dev/null || true
-        {
-            echo "reason: armed $WORKLOAD failed (recorded, not gating)"
-            echo "commit: $(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null)"
-            echo "load: $(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)"
-            echo "lane: race-window $WINDOW armed"
-            if [ -f "$keep/armed/console-state.log" ]; then
-                echo "console snapshot: armed/console-state.log"
-                cat "$keep/armed/console-state.log"
-            fi
-        } > "$keep/MANIFEST"
-        echo "archived the armed run to: $keep"
+        # Not a failing exit, so the EXIT trap above does not archive it.
+        KERNEL_QEMU_LABEL="race-window $WINDOW armed (recorded)" \
+            KERNEL_QEMU_ELF="kernel-race-$WINDOW-armed.elf" \
+            bash "$REPO_ROOT/scripts/archive_kernel_failure.sh" "$ROOT" \
+            "$REPO_ROOT/_build/kernel-race-window-qemu-failures" \
+            "armed $WORKLOAD failed (recorded, not gating)" || true
     else
     echo "FAIL $LABEL: the armed kernel failed the $WORKLOAD with the check present" >&2
     grep -E '^FAIL|^\[churn resync\]' "$ROOT/armed.log" | sed 's/^/  /' >&2 || true
     # GitHub issue #655: an armed failure's evidence used to be overwritten
-    # by the next run of this lane, so a capture never survived to be read.
-    # Keep it where land.sh collects failures.
-    keep="${ARTIFACT_DIR}-failures/$(date -u +%Y%m%dT%H%M%SZ)-$WINDOW-armed"
-    mkdir -p "$keep"
-    cp -r "$ROOT/armed.log" "$ROOT/armed" "$keep/" 2>/dev/null || true
-    {
-        echo "reason: armed $WORKLOAD failed"
-        echo "commit: $(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null)"
-        echo "load: $(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)"
-        echo "lane: race-window $WINDOW armed"
-        if [ -f "$keep/armed/console-state.log" ]; then
-            echo "console snapshot: armed/console-state.log"
-            cat "$keep/armed/console-state.log"
-        fi
-    } > "$keep/MANIFEST"
-    echo "archived the armed run to: $keep" >&2
+    # by the next run of this lane; the EXIT trap archives it (#877).
     exit 1
     fi
 fi

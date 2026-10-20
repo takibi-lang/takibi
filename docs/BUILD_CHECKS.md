@@ -129,7 +129,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_known_intermittent_issues_controls.py` | Controls for the known-intermittent open-issue gate, with the GitHub answer injected rather than fetched |
 | `check_known_intermittents.py` | every row of the known-intermittent table names one issue and a symptom the tree still produces, and the roadmap points at the table rather than carrying the list |
 | `check_known_intermittents_controls.py` | Controls for the known-intermittent table's rules, in both directions |
-| `check_lane_artifact_root.py` | every kernel lane hangs its capture off one artifact root, so a repeated lane keeps each sample's evidence instead of overwriting it |
+| `check_lane_artifact_root.py` | every kernel lane hangs its capture off one artifact root, so a repeated lane keeps each sample's evidence instead of overwriting it, and archives a failing capture through `archive_kernel_failure.sh` from an EXIT trap (#877) |
 | `check_lane_artifact_root_controls.py` | Controls for the lane artifact-root check, in both directions |
 | `check_legacy_dma_rx_scope.py` | no legacy receive cache call remains in maintained code; GEM's buffer became a fixed allocation (#622) |
 | `check_legacy_dma_rx_scope_controls.py` | Controls: a planted legacy RX call in any file, GEM included, is refused |
