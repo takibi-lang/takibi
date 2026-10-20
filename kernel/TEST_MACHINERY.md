@@ -77,8 +77,16 @@ a pending reschedule at the reply and requires the exit syscall to remain
 on the same CPU; the later UART milestone still requires physical stack
 release before init collects the child. `KERNEL_PEER_EXIT_CONTROL=unpin`
 restores the former wide mask at the reply and must fail with the migration
-diagnosis. A missing DDB checkpoint also preserves live workload state,
+diagnosis. The reply breakpoint is inserted only after a write watchpoint
+sees `workload_busy_pair.peer_exit_cpu` set, so earlier syscall returns do
+not stop the VM (#876). A missing DDB checkpoint also preserves live workload state,
 per-core execution state, and registers in `checkpoint-failure-gdb.log`.
+A failing run's whole capture is archived under
+`_build/kernel-ddb-qemu-failures/`, and a scripted BREAK that never fired
+quotes the host peer's `init.sh` fixture lines from `net-peer.log`. The
+`wait` edge of a NetRx waiter adds `tick-wake=` (the core whose tick-wake
+list holds it, or `none`), `due=` (that core's due word), and `rx-cap=`
+(whether the one RX capability is in its store) (#876).
 
 The shared scheduler fixture also reserves a Ready parent with a pending
 wait4 continuation through the exit handoff's ordinary-successor path. It

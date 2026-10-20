@@ -278,6 +278,8 @@ struct DdbSnapshot {
     // Encoded by net_pending_state_code: 0=no, 1=yes, 2=unknown.
     net_rx_frame: usize;
     net_rx_connection: usize;
+    // GitHub issue #876: network_capability_ddb_stored, same encoding.
+    net_rx_capability: usize;
     process_l2: [usize; DDB_PROCESS_RECORDS];
     trace_count: usize;
     trace: [usize; KERNEL_CRASH_TRACE_WORDS];
@@ -2289,6 +2291,26 @@ private fn ddb_wait_reason_name(reason: usize) -> *u8 {
     }
 }
 
+// GitHub issue #876: the three facts that separate a NetRx waiter a tick keeps
+// retrying (and that keeps failing) from one nothing will ever retry. Both
+// look like `Blocked net-rx` with every CPU in wfi. `tick-wake=` names the
+// core whose tick-wake list holds the record, or `none` when it is on no
+// list; `due=` is that core's due word (1 means "every tick", 0 means the
+// core's tick skips its list); `rx-cap=` says whether the one RX capability
+// is in its store -- a reader that finds it missing waits without its 30 s
+// receive bound.
+private fn ddb_render_net_rx_retry(record: ProcessDdbRecord,
+                                   net_rx_capability: usize) !{unsafe} {
+    ddb_puts(" tick-wake=");
+    if (record.tick_wake_core == 0) {
+        ddb_puts("none");
+    } else {
+        ddb_puts("core"); ddb_put_udec(record.tick_wake_core - 1);
+    }
+    ddb_puts(" due="); ddb_put_udec(record.tick_wake_due);
+    ddb_puts(" rx-cap="); ddb_put_pending_state(net_rx_capability);
+}
+
 // One edge per process that is waiting for anything, plus a header naming the
 // current process and a trailer counting what was rendered.
 //
@@ -2313,7 +2335,7 @@ private fn ddb_render_wait_from(
         current_state: usize, current_reason: usize,
         uart_rx_queued: usize, uart_tx_queued: usize,
         uart_tx_low_water: usize, net_rx_frame: usize,
-        net_rx_connection: usize) !{unsafe} {
+        net_rx_connection: usize, net_rx_capability: usize) !{unsafe} {
     let mut awaited: usize = 0;
     for index: usize in 0..<DDB_PROCESS_RECORDS {
         if (index < count && records[index].state == 3 &&
@@ -2386,6 +2408,10 @@ private fn ddb_render_wait_from(
                     ddb_render_waker_detail(reason, uart_rx_queued,
                         uart_tx_queued, uart_tx_low_water, net_rx_frame,
                         net_rx_connection);
+                    if (reason == 3) {
+                        ddb_render_net_rx_retry(records[index],
+                                                net_rx_capability);
+                    }
                     ddb_puts("\n");
                     edges = edges + 1;
                 }
@@ -2410,7 +2436,8 @@ private fn ddb_render_wait() !{unsafe} {
                          ddb_snapshot.uart_tx_queued,
                          ddb_snapshot.uart_tx_low_water,
                          ddb_snapshot.net_rx_frame,
-                         ddb_snapshot.net_rx_connection);
+                         ddb_snapshot.net_rx_connection,
+                         ddb_snapshot.net_rx_capability);
 }
 
 // Issue #524's topology, rendered from records this file wrote rather than
@@ -2436,6 +2463,8 @@ private fn ddb_wait_test_record(index: {0..<DDB_PROCESS_RECORDS as usize},
     ddb_wait_test_records[index].stack_owner_cpu = KERNEL_MAX_CORES;
     ddb_wait_test_records[index].affinity_mask = 0;
     ddb_wait_test_records[index].core0_for_call = false;
+    ddb_wait_test_records[index].tick_wake_core = 0;
+    ddb_wait_test_records[index].tick_wake_due = 0;
 }
 
 private fn ddb_render_wait_test() !{unsafe} {
@@ -2463,8 +2492,12 @@ private fn ddb_render_wait_test() !{unsafe} {
     ddb_wait_test_record(7, 13, 0, 3, 0);
     ddb_wait_test_record(8, 14, 0, 3, 6);
     ddb_wait_test_record(9, 15, 0, 3, 3);
+    // #876: a NetRx waiter queued on core 1's tick-wake list, retried every
+    // tick (due 1). The current process (pid 3) is on no list.
+    ddb_wait_test_records[9].tick_wake_core = 2;
+    ddb_wait_test_records[9].tick_wake_due = 1;
     ddb_render_wait_from(ddb_wait_test_records as []ProcessDdbRecord,
-                         10, 1, 3, 2, 3, 1, 320, 256, 0, 2);
+                         10, 1, 3, 2, 3, 1, 320, 256, 0, 2, 0);
     ddb_puts("ddb: waittest ps");
     ddb_render_process(ddb_wait_test_records[4], 1, 320, 256, 0, 2);
 }
@@ -2600,6 +2633,8 @@ private fn kernel_ddb_enter_stopped(
     ddb_snapshot.net_rx_frame = net_pending_state_code(frame_pending);
     let connection_pending = kernel_tcp_ddb_connection_pending();
     ddb_snapshot.net_rx_connection = net_pending_state_code(connection_pending);
+    ddb_snapshot.net_rx_capability =
+        net_pending_state_code(network_capability_ddb_stored());
     for index: usize in 0..<DDB_PROCESS_RECORDS {
         ddb_snapshot.process_l2[index] = 0;
         if (index < ddb_snapshot.process_count) {

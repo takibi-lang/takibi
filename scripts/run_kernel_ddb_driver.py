@@ -68,6 +68,31 @@ def sample_cpu_registers(port: int, budget: float) -> tuple[str, str]:
     return "\n".join(dumps), "; ".join(samples)
 
 
+# GitHub issue #876: the stall left pid 10 (/bin/user_payload) Blocked on
+# net-rx, and whether the host peer had already given up on its fixture --
+# a handshake it stopped retrying, or a 10 s fixture budget it spent -- was
+# in net-peer.log, which a passing rerun then overwrote. Name the peer's
+# verdict in the stall message itself, so the failing run's own output says
+# which side stopped.
+PEER_FIXTURE_LINE = re.compile(r"^\s*(init\.sh .*)$", re.M)
+
+
+def peer_fixture_verdict(peer_log: str | None) -> str:
+    """One line: the peer's init.sh fixture lines, or why there are none."""
+    if not peer_log:
+        return "net-peer.log not supplied"
+    try:
+        text = Path(peer_log).read_text(errors="replace")
+    except OSError as error:
+        return f"net-peer.log unreadable: {error}"
+    lines = PEER_FIXTURE_LINE.findall(text)
+    if lines:
+        return "; ".join(line.strip() for line in lines)
+    tail = [line.strip() for line in text.splitlines() if line.strip()]
+    last = tail[-1] if tail else "empty"
+    return f"no init.sh fixture line yet (last peer line: {last!r:.160})"
+
+
 def connect(port: int, deadline: float) -> socket.socket:
     while time.monotonic() < deadline:
         try:
@@ -102,6 +127,8 @@ def main() -> int:
     parser.add_argument("--init-listener-file", required=True)
     parser.add_argument("--timeout", type=float, default=30.0,
                         help="UART inactivity budget; total capture is bounded by three budgets")
+    parser.add_argument("--peer-log",
+                        help="the host net peer's log, quoted in a stall message")
     parser.add_argument("--await-timing-log",
                         help="JSONL UART observations against the capture ceiling")
     args = parser.parse_args()
@@ -340,6 +367,8 @@ def capture_loop(args, serial, deadline, ceiling, ready_file, release_file, netw
                 print("[kernel/qemu ddb] the scripted BREAK never fired; still "
                       f"missing: {stall_reason}. Breaking in for a postmortem"
                       + (f" -- {failure}" if failure else ""), flush=True)
+                print("[kernel/qemu ddb] net peer at the stall: "
+                      + peer_fixture_verdict(args.peer_log), flush=True)
             if stall_break_at is not None:
                 prompts = received.count(b"ddb> ")
                 while (stall_sent < prompts and
@@ -454,7 +483,8 @@ def capture_loop(args, serial, deadline, ceiling, ready_file, release_file, netw
             f"postmortem BREAK walked {answered} of {len(STALL_COMMANDS)} "
             f"read-only commands ({walked or 'none answered'}). Registers "
             f"before the BREAK: {stall_registers} (full dump in "
-            f"{args.log}.cpus); transcript in {args.log}")
+            f"{args.log}.cpus); transcript in {args.log}. Net peer: "
+            f"{peer_fixture_verdict(args.peer_log)}")
     raise SystemExit("DDB BREAK/inspect/continue sequence did not complete")
 
 

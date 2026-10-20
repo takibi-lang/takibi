@@ -82,7 +82,25 @@ cleanup() {
     kill "$qemu_pid" 2>/dev/null || true
     wait "$qemu_pid" 2>/dev/null || true
 }
-trap cleanup EXIT INT TERM HUP
+# GitHub issue #876/#875: a failing run's capture -- uart.log, net-peer.log,
+# the postmortem register dump -- was overwritten by a passing rerun before
+# anyone read it, leaving only the timing file. Snapshot it on any nonzero
+# exit, after the guest and the peer have stopped writing.
+cleanup_and_archive() {
+    local status=$?
+    # The failing command already reported itself through the ERR trap.
+    trap - ERR
+    cleanup
+    if [ "$status" -ne 0 ]; then
+        KERNEL_QEMU_LABEL="kernel-ddb-qemu ($BREAK_SOURCE)" KERNEL_QEMU_ELF="$ELF" \
+            bash "$REPO_ROOT/scripts/archive_kernel_failure.sh" "$ARTIFACT_DIR" \
+            "$REPO_ROOT/_build/kernel-ddb-qemu-failures" \
+            "exit status $status ($BREAK_SOURCE BREAK)" || true
+    fi
+    return "$status"
+}
+trap cleanup_and_archive EXIT
+trap 'cleanup; exit 130' INT TERM HUP
 
 python3 "$REPO_ROOT/scripts/run_kernel_ddb_driver.py" \
     --serial-port "$SERIAL_PORT" --qmp-port "$QMP_PORT" \
@@ -91,6 +109,7 @@ python3 "$REPO_ROOT/scripts/run_kernel_ddb_driver.py" \
     --kernel-address "$KERNEL_READ_ADDRESS" \
     --log "$UART_LOG" \
     --await-timing-log "$ARTIFACT_DIR/await-timing.jsonl" \
+    --peer-log "$PEER_LOG" \
     --snapshot-ready-file "$SNAPSHOT_READY" \
     --snapshot-release-file "$SNAPSHOT_RELEASE" \
     --network-ready-file "$NETWORK_READY" \

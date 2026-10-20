@@ -132,9 +132,11 @@ def main() -> int:
     # An archive root is allowed only for a lane that actually archives.
     failures += case(
         "an archive root in a lane that archives nothing",
-        edit(LANE, 'mkdir -p "$ARTIFACT_DIR"',
-             'mkdir -p "$ARTIFACT_DIR" '
-             '"$REPO_ROOT/_build/kernel-ddb-qemu-failures"'),
+        # The ash lane, since the DDB lane archives its failures (#876).
+        edit("scripts/run_kernel_ash_qemutest.sh",
+             '/kernel-hwtest-qemu-ash}"\n',
+             '/kernel-hwtest-qemu-ash}"\nmkdir -p '
+             '"$REPO_ROOT/_build/kernel-hwtest-qemu-ash-failures"\n'),
         "never calls archive_kernel_failure.sh")
 
     # The other direction, so the archive allowance is a classification

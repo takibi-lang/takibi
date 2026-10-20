@@ -27,6 +27,12 @@ case "$command" in
         fi
         if [ "$1" = "$TAKIBI_LAND_CONTROL_FAIL" ]; then
             printf 'fixture diagnostic: %s\n' "$1"
+            if [ "$1" = allcheck ]; then
+                # A failing lane's capture, as a runner leaves it (#875).
+                mkdir -p "$TAKIBI_LAND_CONTROL_ROOT/_build/kernel-fixture-lane"
+                printf 'failing uart\n' > "$TAKIBI_LAND_CONTROL_ROOT/_build/kernel-fixture-lane/uart.log"
+                printf 'image\n' > "$TAKIBI_LAND_CONTROL_ROOT/_build/kernel-fixture-lane/ext2.img"
+            fi
             exit 7
         fi
         printf 'fixture pass: %s\n' "$1"
@@ -94,21 +100,25 @@ def run_case(source, fail='', equal=False, real_model=False, diff='compiler/main
                                 env=env, capture_output=True, text=True)
         trace = [line.split('\t') for line in (root / 'trace.tsv').read_text().splitlines()]
         log = root / '.git/takibi-land' / ('allcheck-' + '1' * 40 + '.log')
-        return result.returncode, result.stdout + result.stderr, trace, log.read_text() if log.exists() else ''
+        kept_dir = root / '.git/takibi-land' / ('1' * 40)
+        kept = sorted(str(path.relative_to(kept_dir)) for path in kept_dir.rglob('*')
+                      if path.is_file()) if kept_dir.is_dir() else []
+        return (result.returncode, result.stdout + result.stderr, trace,
+                log.read_text() if log.exists() else '', kept)
 
 
 def verify(source):
     lanes = ('langcheck', 'test', 'linuxcheck')
     cases = 0
     for position, lane in enumerate(lanes):
-        status, output, trace, log = run_case(source, fail=lane)
+        status, output, trace, log, kept = run_case(source, fail=lane)
         assert status == 1, (lane, status, output)
         assert 'land: FAIL precheck ' + lane in output, (lane, output)
         assert 'fixture diagnostic: ' + lane in log, (lane, log)
         assert [call[1] for call in trace if call[0] == 'make'] == list(lanes[:position + 1]), trace
         assert not any(call[:2] == ['git', 'push'] for call in trace), trace
         cases += 1
-    status, output, trace, log = run_case(source)
+    status, output, trace, log, kept = run_case(source)
     assert status == 0, output
     assert [call[1] for call in trace if call[0] == 'make'] == [*lanes, 'clean', 'allcheck'], trace
     assert ['git', 'push', 'origin', '1' * 40 + ':refs/heads/main'] in trace, trace
@@ -120,22 +130,26 @@ def verify(source):
                                       if call[:2] == ['python3', 'scripts/space_checkpoint.py']), trace
     assert all('fixture pass: ' + lane in log for lane in (*lanes, 'clean', 'allcheck')), log
     cases += 1
-    status, output, trace, log = run_case(source, fail='clean')
+    status, output, trace, log, kept = run_case(source, fail='clean')
     assert status == 1 and 'land: FAIL clean' in output, output
     assert [call[1] for call in trace if call[0] == 'make'] == [*lanes, 'clean'], trace
     assert not any(call[:2] == ['git', 'push'] for call in trace), trace
     cases += 1
-    status, output, trace, log = run_case(source, fail='allcheck')
+    status, output, trace, log, kept = run_case(source, fail='allcheck')
     assert status == 1 and 'land: FAIL allcheck' in output, output
     assert not any(call[:2] == ['git', 'push'] for call in trace), trace
+    # GitHub issue #875: the failed run's lane captures survive a rerun,
+    # under the tested commit, without the disk image.
+    assert kept == ['kernel-fixture-lane/uart.log'], kept
+    assert 'land: kept 1 lane capture(s)' in output, output
     cases += 1
-    status, output, trace, log = run_case(source, equal=True)
+    status, output, trace, log, kept = run_case(source, equal=True)
     assert status == 0 and 'nothing to push' in output, output
     assert not any(call[0] == 'make' for call in trace), trace
     cases += 1
     # A real maintained check, with an actually stale review stamp, must be
     # reported as the first quick lane failure before any long operation.
-    status, output, trace, log = run_case(source, real_model=True)
+    status, output, trace, log, kept = run_case(source, real_model=True)
     assert status == 1 and 'land: FAIL precheck langcheck' in output, output
     assert 'FAIL model-function-map' in log and '000000000000' in log, log
     assert [call[1] for call in trace if call[0] == 'make'] == ['langcheck'], trace
@@ -144,17 +158,17 @@ def verify(source):
     # Light route: only listed paths changed, so langcheck alone gates the
     # push. One unlisted path -- a contract document at the root, or anything
     # under docs/ -- takes the full route.
-    status, output, trace, log = run_case(source, diff='ROADMAP.md\n.github/workflows/ci.yml\n')
+    status, output, trace, log, kept = run_case(source, diff='ROADMAP.md\n.github/workflows/ci.yml\n')
     assert status == 0, output
     assert [call[1] for call in trace if call[0] == 'make'] == ['langcheck'], trace
     assert ['git', 'push', 'origin', '1' * 40 + ':refs/heads/main'] in trace, trace
     cases += 1
-    status, output, trace, log = run_case(source, diff='ROADMAP.md\n', fail='langcheck')
+    status, output, trace, log, kept = run_case(source, diff='ROADMAP.md\n', fail='langcheck')
     assert status == 1 and 'land: FAIL light langcheck' in output, output
     assert not any(call[:2] == ['git', 'push'] for call in trace), trace
     cases += 1
     for diff in ('ROADMAP.md\nEFFECTS.md\n', 'docs/ROADMAP.md\n', 'README.md.orig\n', ''):
-        status, output, trace, log = run_case(source, diff=diff)
+        status, output, trace, log, kept = run_case(source, diff=diff)
         assert status == 0, (diff, output)
         assert [call[1] for call in trace if call[0] == 'make'] == [*lanes, 'clean', 'allcheck'], (diff, trace)
         cases += 1
@@ -173,7 +187,9 @@ def main():
                # make line above it, since replace_once refuses a repeat.
                replace_once(source, 'make langcheck 2>&1 | tee -a "$log"\n    status=${PIPESTATUS[0]}',
                             'make langcheck 2>&1 | tee -a "$log"\n    status=0'),
-               replace_once(source, '[ "$path" = "$entry" ] && listed=1', 'listed=1')]
+               replace_once(source, '[ "$path" = "$entry" ] && listed=1', 'listed=1'),
+               # #875: a failed allcheck that forgets its captures.
+               replace_once(source, '        keep_failed_captures\n', '\n')]
     for mutant in mutants:
         cases.note()
         try:

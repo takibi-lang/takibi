@@ -23,7 +23,9 @@
 #
 # The allcheck output is kept under .git/takibi-land/ so a symptom can be
 # matched against docs/KNOWN_INTERMITTENTS.md after the run, and so are the
-# failing lanes' captures (failures/), each bounded to the newest few.
+# failing lanes' captures (failures/), each bounded to the newest few. A
+# failed allcheck also keeps every lane capture it wrote under
+# .git/takibi-land/<sha>/ (GitHub issue #875).
 
 set -uo pipefail
 
@@ -118,6 +120,32 @@ if [ -d "$failure_root" ]; then
 fi
 prune_newest "$keep_allcheck_logs" "$log_dir"/allcheck-*.log
 
+# GitHub issue #875: a failed allcheck's lane captures, kept where no rerun
+# writes. Only some runners archive their own failure
+# (scripts/archive_kernel_failure.sh), and a lane rerun to reproduce the
+# failure overwrote the failing uart.log and net-peer.log of those that do
+# not before anyone read them (#873's first samples, #854, #876). `make
+# clean` ran just before allcheck, so every _build/kernel-* directory is this
+# run's: copy them all rather than guess which lane failed -- the passing
+# captures beside the failing one are the comparison a diagnosis wants.
+# Disk images are copies of the built image and are left out; the newest few
+# commits' copies are kept.
+keep_land_captures=5
+keep_failed_captures() {
+    local dest="$log_dir/$tested"
+    local kept=0
+    local capture
+    for capture in _build/kernel-*; do
+        [ -d "$capture" ] || continue
+        mkdir -p "$dest"
+        if rsync -a --exclude='*.img' "$capture" "$dest/"; then
+            kept=$((kept + 1))
+        fi
+    done
+    echo "land: kept $kept lane capture(s) of the failed check in $dest" >&2
+    prune_newest "$keep_land_captures" "$log_dir"/????????????????????????????????????????
+}
+
 # Light route: every changed path is listed in scripts/land_light_paths.
 # langcheck still runs, since its checks read the listed documents too. An
 # empty diff (a merge that changes no file) or a missing list takes the full
@@ -178,6 +206,7 @@ else
     status=${PIPESTATUS[0]}
     if [ "$status" -ne 0 ]; then
         echo "land: FAIL allcheck on $tested; log: $log" >&2
+        keep_failed_captures
         exit 1
     fi
 fi

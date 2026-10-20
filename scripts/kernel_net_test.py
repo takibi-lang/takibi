@@ -540,10 +540,21 @@ def init_script_fixture(sock: socket.socket) -> bool:
     # reads eight bytes from each, writes conn-B on fd 6 and an HTTP status
     # line on fd 5, then writes a 1461-byte response split by the kernel's
     # deliberate dropped-data-segment fixture.
+    # GitHub issue #876: each step names itself, so a stalled guest's
+    # capture says whether the peer gave up on a handshake (the guest's
+    # accept then waits forever) or on the data exchange.
+    print("  init.sh fixture: connecting", flush=True)
     first = init_handshake(sock, INIT_CLIENT_PORTS[0], INIT_CLIENT_ISNS[0])
-    second = init_handshake(sock, INIT_CLIENT_PORTS[1], INIT_CLIENT_ISNS[1])
-    if first is None or second is None:
+    if first is None:
+        print("  init.sh fixture: handshake A got no SYN-ACK; gave up")
+        print("  init.sh connected I/O fixture: FAIL")
         return False
+    second = init_handshake(sock, INIT_CLIENT_PORTS[1], INIT_CLIENT_ISNS[1])
+    if second is None:
+        print("  init.sh fixture: handshake B got no SYN-ACK; gave up")
+        print("  init.sh connected I/O fixture: FAIL")
+        return False
+    print("  init.sh fixture: both connected; exchanging data", flush=True)
     # The fixture reads A before B. Deliver B first so A's receive syscall
     # must route the nonmatching frame into fd 6's connection buffer, then
     # let A's request arrive and unblock the fixture's first read.
@@ -615,6 +626,11 @@ def init_script_fixture(sock: socket.socket) -> bool:
                 reply_a_sent = True
     ok = (bytes(received_b) == expected_b and
           bytes(received_a) == expected_a and reply_a_sent)
+    if not ok:
+        print("  init.sh fixture: 10 s budget ended with A %d/%d bytes "
+              "(reply sent=%s, fin=%s) and B %d/%d bytes (fin=%s)" % (
+                  len(received_a), len(expected_a), reply_a_sent, fin_a,
+                  len(received_b), len(expected_b), fin_b))
     print("  init.sh connected I/O fixture: %s" % ("PASS" if ok else "FAIL"))
     return ok
 

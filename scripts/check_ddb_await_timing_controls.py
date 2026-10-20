@@ -29,7 +29,7 @@ class DdbSocket(Socket):
 
 
 def run(*, at=2.0, source='software', stalled=False, unanswered=False,
-        connect_failure=False, unavailable=False, progress=()):
+        connect_failure=False, unavailable=False, progress=(), peer=None):
     CASES.note()
     spec = importlib.util.spec_from_file_location('ddb_driver', ROOT / 'scripts/run_kernel_ddb_driver.py')
     driver = importlib.util.module_from_spec(spec)
@@ -63,6 +63,9 @@ def run(*, at=2.0, source='software', stalled=False, unanswered=False,
                      '--log', str(root / 'uart.log'), '--timeout', '10', '--break-source', source,
                      '--network-ready-file', str(root / 'net'), '--foreground-listener-file', str(root / 'fg'),
                      '--init-listener-file', str(root / 'init'), '--await-timing-log', str(path)]
+        if peer is not None:
+            (root / 'net-peer.log').write_text(peer)
+            arguments += ['--peer-log', str(root / 'net-peer.log')]
         saved = sys.argv
         try:
             sys.argv = arguments
@@ -89,6 +92,9 @@ def main():
     runner = (ROOT / 'scripts/run_kernel_ddb_qemutest.sh').read_text()
     require('--await-timing-log "$ARTIFACT_DIR/await-timing.jsonl"' in runner,
             'live runner lost its artifact')
+    # GitHub issue #876: the live runner hands the driver the peer's log.
+    require('--peer-log "$PEER_LOG"' in runner,
+            'live runner no longer names net-peer.log to the stall message')
     require(all(setting in runner for setting in (
         'CEILING_SECS="$((TIMEOUT_SECS * 3))"',
         'KERNEL_QEMU_TIMEOUT="$TIMEOUT_SECS" KERNEL_QEMU_CEILING="$CEILING_SECS"',
@@ -137,6 +143,20 @@ def main():
     require(isinstance(status, str) and 'scripted BREAK never fired' in status
             and post and elapsed <= 30.25,
             'postmortem output renewed its own budget or escaped the outer ceiling')
+    # GitHub issue #876: a stall names the host peer's fixture verdict, and
+    # says so when the peer never reached the fixture.
+    status, rows, post, sent, elapsed, output = run(
+        source='uart', stalled=True,
+        peer='  ARP ok\n  init.sh fixture: handshake A got no SYN-ACK; gave up\n'
+             '  init.sh connected I/O fixture: FAIL\n')
+    require(isinstance(status, str) and 'Net peer: init.sh fixture: handshake A got no '
+            'SYN-ACK; gave up; init.sh connected I/O fixture: FAIL' in status
+            and 'net peer at the stall: init.sh' in output,
+            'a stall did not quote the peer fixture verdict')
+    status, rows, post, sent, elapsed, output = run(source='uart', stalled=True,
+                                                  peer='  ARP ok\n')
+    require(isinstance(status, str) and "no init.sh fixture line yet (last peer line: 'ARP ok')"
+            in status, 'a stall before the fixture did not say the peer had not reached it')
     status, rows, post, sent, elapsed, output = run(unavailable=True)
     require(status == 0 and 'timing unavailable' in output, 'artifact failure replaced the capture verdict')
     report_pass('ddb await timing controls', 'UART progress renews capture within its ceiling; silence and continuous output remain bounded, and postmortem output cannot renew its separate budget', cases=CASES.ran)

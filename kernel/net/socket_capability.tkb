@@ -162,6 +162,46 @@ fn network_capability_put(ready: sink NetRxCanAcquire)
     }
 }
 
+// GitHub issue #876: whether the one RX capability is in the store, for DDB.
+// A NetRx read that finds the store Empty returns NetWait before its 30 s
+// receive bound is checked, so a capability that was never put back stalls
+// every network reader forever while each still looks like an ordinary
+// `Blocked net-rx`. DDB calls this with every other core stopped: a held
+// mutex then means a holder was stopped between take and put (Unknown, the
+// lock is not taken), and otherwise the lock is free and taking it is a
+// bounded, uncontended section. The capability is put straight back; the
+// Conflict arm cannot run while this core holds the mutex it just found the
+// store Empty under, and shuts the duplicate down as
+// network_capability_put does rather than leak a linear value.
+fn network_capability_ddb_stored() -> NetPendingState !{unsafe} {
+    if (mutex_is_held(&network_capability_store.mutex)) {
+        return NetPendingState::Unknown;
+    }
+    let guard = network_capability_lock(&network_capability_store.mutex);
+    let previous: Place(NetRxCanAcquire) = place_take(
+        guard, &network_capability_store.mutex,
+        network_capability_store.value);
+    match previous {
+        Place::Empty => {
+            network_capability_unlock(guard, &network_capability_store.mutex);
+            return NetPendingState::No;
+        }
+        Place::Full(ready) => {
+            let displaced: Place(NetRxCanAcquire) = place_put(
+                guard, &network_capability_store.mutex,
+                network_capability_store.value, ready);
+            network_capability_unlock(guard, &network_capability_store.mutex);
+            match displaced {
+                Place::Empty => { return NetPendingState::Yes; }
+                Place::Full(duplicate) => {
+                    net_shutdown(duplicate);
+                    return NetPendingState::Unknown;
+                }
+            }
+        }
+    }
+}
+
 // This store does not depend on KERNEL_ACTIVE_CORES. Its three public
 // operations take network_capability_store.mutex before moving the capability;
 // the net_init() flags that mint the initial driver capability live in the

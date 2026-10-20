@@ -60,6 +60,29 @@ def reach(boundary):
         raise gdb.GdbError("peer exit boundary was not reached")
 
 
+class PeerExitArmed(gdb.Breakpoint):
+    # GitHub issue #876: arm the syscall-return breakpoint only once the
+    # kernel has chosen the peer that will exit. A conditional breakpoint on
+    # kernel_syscall_resume_return for the whole boot stopped the VM for a
+    # Python round trip on every syscall return on every core, stretching
+    # the guest against the host net peer's wall-clock budgets. Before
+    # peer_exit_cpu is written, PeerExitBoundary.stop refuses every hit
+    # anyway, so waiting for that write first drops no stop the check uses.
+    def __init__(self):
+        super().__init__("workload_busy_pair.peer_exit_cpu",
+                         gdb.BP_WATCHPOINT, gdb.WP_WRITE)
+        self.reached = False
+
+    def stop(self):
+        if int(gdb.parse_and_eval("workload_busy_pair.peer_exit_cpu")) == 0:
+            return False
+        self.reached = True
+        return True
+
+
+armed = PeerExitArmed()
+reach(armed)
+armed.delete()
 reply = PeerExitBoundary("kernel_syscall_resume_return", True)
 reach(reply)
 record = current_record(reply.cpu)

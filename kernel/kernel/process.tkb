@@ -1388,6 +1388,15 @@ struct ProcessDdbRecord {
     // core 0 -- and neither was visible until these were copied.
     affinity_mask: usize;
     core0_for_call: bool;
+    // GitHub issue #876: whether a tick will retry this wait. tick_wake_core
+    // is the record's own field (its core plus one while queued on that
+    // core's tick-wake list, 0 otherwise), and tick_wake_due is that core's
+    // kernel_process_tick_wake_due word (0 when not queued). A Blocked NetRx
+    // waiter with tick_wake_core 0, or whose core's due is 0, is one no tick
+    // will ever retry -- the lost-wake suspect a bare `Blocked` cannot
+    // distinguish from a wait that is retried and keeps failing.
+    tick_wake_core: usize;
+    tick_wake_due: usize;
 }
 
 struct ProcessDdbCopyResult {
@@ -1450,6 +1459,14 @@ private fn scheduled_process_ddb_record(
     result.signal_mask = record.signal_mask;
     result.affinity_mask = record.affinity_mask;
     result.core0_for_call = record.core0_for_call;
+    result.tick_wake_core = record.tick_wake_core;
+    result.tick_wake_due = 0;
+    let queued_core: usize = record.tick_wake_core;
+    if (queued_core >= 1 && queued_core <= KERNEL_MAX_CORES) {
+        let core: {0..<KERNEL_MAX_CORES as usize} = queued_core - 1;
+        result.tick_wake_due =
+            atomic_word_load(&kernel_process_tick_wake_due[core]);
+    }
     return result;
 }
 
