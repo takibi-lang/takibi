@@ -11218,6 +11218,36 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     done;
     !restores
   in
+  (* GitHub issue #809: every function from which a `requires_irq_unmasked`
+     declaration is reachable through resolved direct calls. Calling one
+     while an IRQ-masking guard is live is rejected in check_affine_func; an
+     indirect call under such a guard is already rejected as a possible
+     restorer above, so it needs no case here. *)
+  let irq_unmasked_seeds =
+    let word = "requires_irq_unmasked" in
+    List.fold_left (fun acc -> function
+      | Ast.FuncDef f when has_annotation f.effects word ->
+          StringSet.add (overload_key f.name f.params) acc
+      | Ast.ExternFuncDef (name, params, _, effects)
+        when has_annotation effects word ->
+          StringSet.add (overload_key name params) acc
+      | _ -> acc) StringSet.empty prog
+  in
+  let irq_unmasked_requirers =
+    let reach = ref irq_unmasked_seeds in
+    let changed = ref true in
+    while !changed do
+      changed := false;
+      StringMap.iter (fun caller callees ->
+        if not (StringSet.mem caller !reach)
+           && not (StringSet.is_empty (StringSet.inter callees !reach))
+        then begin
+          reach := StringSet.add caller !reach;
+          changed := true
+        end) lock_callees
+    done;
+    !reach
+  in
   (* GitHub issue #493: effect-indexed invalidation.
 
      A plain handle -- a copyable struct naming a pooled object by slot and
@@ -12591,6 +12621,44 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                     visible_name guard_name name cause))
               | _ -> ()) guard_bindings
           end;
+          (* GitHub issue #809; see irq_unmasked_requirers. A lock guard
+             counts as well as an IRQ-masking one: every kernel lock masks
+             IRQs on acquire, and a core spinning on a lock this back-off
+             holds cannot take the stop either. A guard passed
+             to the call is skipped, as above: the callee holds it as a
+             parameter, and its own body is checked the same way. *)
+          if StringSet.mem target irq_unmasked_requirers then begin
+            let passed =List.fold_left (fun paths (a : Ast.expr) -> match a.desc with
+              | Ast.Var v -> PathSet.add (pvar_expr a v) paths
+              | _ -> paths) PathSet.empty args in
+            List.iter (fun (visible_name, id) ->
+              let rec irq_guard ty = match strip_borrow ty with
+                | Ast.TypeIndexed (guard_name, _) | Ast.TypeView (guard_name, _)
+                | Ast.TypeNamed guard_name ->
+                    if StringMap.mem guard_name irq_guard_types
+                       || StringMap.mem guard_name lock_guard_types
+                    then Some guard_name else None
+                | Ast.TypeExists (_, _, body) -> irq_guard body
+                | _ -> None
+              in
+              let path = PVar (id, visible_name) in
+              match irq_guard (binding_type id visible_name) with
+              | Some guard_name
+                when not (PathSet.mem path passed)
+                     && not (ResourceFlow.is_consumed_on_all_paths path moved) ->
+                  raise (TypeError (e.loc, Printf.sprintf
+                    "'%s' requires IRQs unmasked: it reaches a world-stop \
+                     back-off%s, and '%s' (%s) is live, so IRQs are masked \
+                     or a lock is held here, and two cores retrying this way \
+                     time each other out forever (#809). Release the guard \
+                     first"
+                    name
+                    (chain_text (call_chain target
+                       (fun callee -> StringSet.mem callee irq_unmasked_seeds)
+                       (fun _ -> false)))
+                    visible_name guard_name))
+              | _ -> ()) guard_bindings
+          end;
           let params = Option.value (StringMap.find_opt target call_params) ~default:[] in
           let rec check_args moved args params = match args with
             | [] -> moved
@@ -13944,6 +14012,182 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   List.iter (function
     | Ast.FuncDef f -> preempt_off_stmts f.name f.body
     | _ -> ()) prog;
+  (* GitHub issue #809: a bare mask. `msr_daifset_irq` reached with no
+     IRQ-masking guard live (a plain disable_irq, or a mutex_irq_save whose
+     flags are not yet restored) leaves IRQs masked for the rest of the
+     flow, and a call reaching `requires_irq_unmasked` there is rejected.
+
+     The state is (current, depth, saved). current is 0 where the point is
+     not reached (after a `noreturn` call or a `while (true)` with no
+     break), 1 unmasked, 2 possibly masked. A save -- mrs_daif, the read
+     every save/restore pair in the kernel starts with -- opens a nesting
+     level and, at the outermost one, records current in saved. A restore
+     -- a function marked `restores_saved_irq`, which is the claim that
+     marker already makes -- closes one: an inner restore leaves IRQs
+     masked, since the outer save masked them, and the outermost puts back
+     saved. Depth is capped at 3; deeper saves are judged masked until they
+     unwind, an over-approximation, never a miss. msr_daifset_irq masks;
+     msr_daifclr_irq unmasks. A function returning an `irq_masking_guard`
+     or `lock_guard_<rank>_<name>` guard leaves the state alone, and so does
+     a restore with no visible save, which pairs with such a guard: the
+     guard rule in check_affine_func covers the span the guard is live,
+     including a path where the acquire failed and returned no guard, which
+     a flow summary could not tell apart. Branches join by maximum, and a
+     loop body runs until stable.
+     Every other function is summarized from its body for each entry state.
+     An indirect call or a callee with no body leaves the state alone: this
+     rule follows only the masks it can see. *)
+  let requires_unmasked = closed_effect "requires_irq_unmasked" in
+  let mask_guards, mask_restorers, mask_noreturn =
+    List.fold_left (fun (guards, restorers, noreturn) -> function
+      | Ast.FuncDef f ->
+          let key = overload_key f.name f.params in
+          ((if has_annotation f.effects Effect_rules.irq_masking_guard_annotation
+               || lock_annotation f.effects Effect_rules.lock_guard_annotation <> None
+            then StringSet.add key guards else guards),
+           (if has_annotation f.effects Effect_rules.restores_saved_irq_annotation
+            then StringSet.add key restorers else restorers),
+           noreturn)
+      | Ast.ExternFuncDef (name, params, _, effects)
+        when has_annotation effects "noreturn" ->
+          (guards, restorers, StringSet.add (overload_key name params) noreturn)
+      | _ -> (guards, restorers, noreturn))
+      (StringSet.empty, StringSet.empty, StringSet.empty) prog in
+  let mask_bodies = List.fold_left (fun acc -> function
+    | Ast.FuncDef f ->
+        let key = overload_key f.name f.params in
+        if StringSet.mem key mask_guards || StringSet.mem key mask_restorers
+        then acc else StringMap.add key f.body acc
+    | _ -> acc) StringMap.empty prog in
+  let mask_entries = List.concat_map (fun current ->
+      List.concat_map (fun depth ->
+        List.map (fun saved -> (current, depth, saved)) [1; 2]) [0; 1; 2; 3])
+      [1; 2] in
+  let mask_summaries = ref StringMap.empty in
+  let mask_dead = (0, 0, 1) in
+  let mask_join ((c1, d1, s1) as a) ((c2, d2, s2) as b) =
+    if c1 = 0 then b else if c2 = 0 then a
+    else (max c1 c2, max d1 d2, max s1 s2) in
+  let mask_save (current, depth, saved) =
+    if depth = 0 then (current, 1, current)
+    else (current, min 3 (depth + 1), saved) in
+  let mask_restore ((_, depth, saved) as state) =
+    if depth = 0 then state
+    else if depth = 1 then (saved, 0, saved) else (2, depth - 1, saved) in
+  let mask_transfer target ((current, depth, saved) as state) =
+    if current = 0 then state
+    else if StringSet.mem target mask_noreturn then mask_dead
+    else if target = "mrs_daif" then mask_save state
+    else if target = "msr_daifset_irq" then (2, depth, saved)
+    else if target = "msr_daifclr_irq" then (1, depth, saved)
+    else if StringSet.mem target mask_restorers then mask_restore state
+    else if StringSet.mem target mask_guards then state
+    else match StringMap.find_opt target !mask_summaries with
+      | Some outs -> List.assoc state outs
+      | None -> if StringMap.mem target mask_bodies then mask_dead else state
+  in
+  let current_of (current, _, _) = current in
+  let rec has_break stmts = List.exists (fun (s : Ast.stmt) -> match s.desc with
+    | Ast.Break -> true
+    | Ast.Block xs | Ast.UnsafeBlock xs -> has_break xs
+    | Ast.If (_, yes, no) -> has_break yes || has_break no
+    | Ast.Match (_, arms) | Ast.LetMatch (_, _, _, _, arms) ->
+        List.exists (function
+          | Ast.ArmVariant (_, _, _, xs) | Ast.ArmWild xs | Ast.ArmMiss xs
+          | Ast.ArmIntLit (_, xs) | Ast.ArmByteSliceLit (_, xs) -> has_break xs) arms
+    | _ -> false) stmts in
+  (* on_masked_call receives the call and the callee whose transfer last
+     raised the state to "possibly masked", for the diagnostic. *)
+  let mask_walk body entry on_masked_call =
+    let returned = ref mask_dead in
+    let masker = ref "msr_daifset_irq" in
+    let rec expr state (e : Ast.expr) = match e.desc with
+      | Ast.Call (name, args) ->
+          let state = List.fold_left expr state args in
+          let target = Option.value
+            (StringMap.find_opt (loc_key e.loc) !resolved_call_targets)
+            ~default:name in
+          let indirect_requires = match StringMap.find_opt (loc_key e.loc)
+              !resolved_indirect_call_effects with
+            | Some (Some effects) -> List.mem "requires_irq_unmasked" effects
+            | _ -> false in
+          if current_of state = 2
+             && (StringSet.mem target requires_unmasked || indirect_requires) then
+            on_masked_call e name target !masker;
+          let after = mask_transfer target state in
+          if current_of after = 2 && current_of state <> 2 then masker := name;
+          after
+      | Ast.VariantCtor (_, _, x) | Ast.Bnot x | Ast.Deref x | Ast.AddrOf x
+      | Ast.Cast (_, x) | Ast.FieldGet (x, _) | Ast.Unsafe x -> expr state x
+      | Ast.BinOp (_, a, b) | Ast.Assign (a, b) | Ast.Index (a, b) ->
+          expr (expr state a) b
+      | Ast.StructLit xs | Ast.TupleLit xs -> List.fold_left expr state xs
+      | Ast.SliceOf (a, b, c) -> expr (expr (expr state a) b) c
+      | _ -> state
+    and stmts state xs = List.fold_left stmt state xs
+    and arms state xs = List.fold_left (fun acc arm -> match arm with
+      | Ast.ArmVariant (_, _, _, body) | Ast.ArmWild body | Ast.ArmMiss body
+      | Ast.ArmIntLit (_, body) | Ast.ArmByteSliceLit (_, body) ->
+          mask_join acc (stmts state body)) mask_dead xs
+    and loop state body =
+      let after = mask_join state (stmts state body) in
+      if after <> state then loop after body else after
+    and stmt state (s : Ast.stmt) = match s.desc with
+      | Ast.Return (Some e) ->
+          returned := mask_join !returned (expr state e); mask_dead
+      | Ast.Return None -> returned := mask_join !returned state; mask_dead
+      | Ast.Expr e | Ast.LetTuple (_, e) | Ast.Yield e -> expr state e
+      | Ast.Block xs | Ast.UnsafeBlock xs -> stmts state xs
+      | Ast.Let (_, _, _, init, _) -> Option.fold ~none:state ~some:(expr state) init
+      | Ast.If (c, yes, no) ->
+          let state = expr state c in
+          mask_join (stmts state yes) (stmts state no)
+      | Ast.While ({ desc = Ast.BoolLit true; _ }, body) when not (has_break body) ->
+          ignore (loop state body); mask_dead
+      | Ast.While (c, body) -> loop (expr state c) body
+      | Ast.For (_, _, lo, hi, body) -> loop (expr (expr state lo) hi) body
+      | Ast.ForEach (_, collection, body) -> loop (expr state collection) body
+      | Ast.Match (subject, xs) | Ast.LetMatch (_, _, _, subject, xs) ->
+          arms (expr state subject) xs
+      | _ -> state
+    in
+    let at_end = stmts entry body in
+    mask_join at_end !returned
+  in
+  let ignore_call _ _ _ _ = () in
+  let rec settle round =
+    let changed = ref false in
+    StringMap.iter (fun key body ->
+      let next = List.map (fun entry ->
+        (entry, mask_walk body entry ignore_call)) mask_entries in
+      if StringMap.find_opt key !mask_summaries <> Some next then begin
+        mask_summaries := StringMap.add key next !mask_summaries;
+        changed := true
+      end) mask_bodies;
+    if !changed then begin
+      if round >= 1000 then
+        raise (TypeError (Lexing.dummy_pos,
+          "internal: the IRQ-mask summaries of #809 did not settle"));
+      settle (round + 1)
+    end
+  in
+  settle 0;
+  if not (StringSet.is_empty requires_unmasked) then
+    List.iter (function
+      | Ast.FuncDef f ->
+          ignore (mask_walk f.body (1, 0, 1) (fun (e : Ast.expr) name target masker ->
+            let path = Option.value
+              (find_effect_path "requires_irq_unmasked" StringSet.empty target)
+              ~default:[display_effect_key target] in
+            raise (TypeError (e.loc, Printf.sprintf
+              "'%s' requires IRQs unmasked (via %s), but function '%s' may \
+               have masked them with no guard earlier on this path (at the \
+               call to '%s'); two cores retrying a world stop with IRQs \
+               masked time each other out forever (#809). Unmask first, or \
+               mask through an irq_masking_guard and release it before the \
+               call"
+              name (String.concat " -> " path) f.name masker))))
+      | _ -> ()) prog;
   StringMap.iter (fun key effects_opt ->
     let effects = Option.value effects_opt ~default:[] in
     (match StringMap.find_opt key effect_summaries with
@@ -13965,6 +14209,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           | "allocates" -> "may allocate"
           | "locks" -> "may acquire a lock"
           | "logs" -> "may log"
+          | "requires_irq_unmasked" ->
+              "reaches a back-off that needs IRQs unmasked (#809), but \
+               this root runs with IRQs masked,"
           | other -> "has effect " ^ other
         in
         raise (TypeError (StringMap.find key effect_locs, Printf.sprintf

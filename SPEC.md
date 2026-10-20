@@ -2141,6 +2141,29 @@ exempt a shadowed outer guard. With
 no guard marked, nothing is checked: a local save and conditional restore
 with no outer guard is unaffected. Both words are checker-only.
 
+A function that must run with IRQs unmasked declares
+`requires_irq_unmasked` (GitHub issue #809). The kernel's world-stop
+back-off does: it waits for the other cores to take the stop's interrupt,
+and two cores retrying with IRQs masked time each other out forever
+(`kernel/models/WorldStopRetry.tla`, variant `maskedbackoff`). The effect
+propagates to every caller, like `requires_devices`, and a function-pointer
+row may carry it. Reaching it is a compile error in three places:
+- from an `interrupt` or `exception` root, which runs masked;
+- while an `irq_masking_guard` or `lock_guard_<rank>_<name>` guard is live,
+  unless the guard is passed to the call (the callee holds it and is checked
+  the same way);
+- after a bare mask on the same path: `msr_daifset_irq` reached with no
+  guard, or a save (`mrs_daif`, as `mutex_irq_save` does) whose
+  `restores_saved_irq` restore has not yet run. Saves nest; an inner restore
+  leaves IRQs masked. Branches join as "may be masked", a loop body counts
+  at the top of its next iteration, and a path that ends in a `noreturn`
+  call or a `while (true)` with no break masks nothing after it. A guard
+  acquire and a restore with no visible save leave the state alone; the
+  guard rule above covers that span. A callee's effect on the mask is
+  summarized from its body; an indirect call or a callee with no body
+  leaves the state alone.
+The effect set is reviewed in GitHub issue #850.
+
 Effect-indexed invalidation (GitHub issue #493) covers plain handles: the
 copyable structs that name a pooled object by slot and generation.
 - A function after which a handle of struct type `T` may name a destroyed

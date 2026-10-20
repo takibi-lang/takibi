@@ -6386,7 +6386,13 @@ fn kernel_process_activate_stable_root(root: AddressSpaceRoot) {
 }
 
 // About (cpu + 1) x 100 microseconds of the generic counter.
-fn kernel_process_rollover_backoff() {
+// GitHub issue #809: the back-off waits for the other cores to take the
+// stop's interrupt and leave; with IRQs masked here as well, two cores
+// retrying time each other out forever (WorldStopRetry.tla, variant
+// maskedbackoff). requires_irq_unmasked makes reaching it from an interrupt
+// or exception root, under an IRQ-masking guard, or after a bare
+// disable_irq a compile error.
+fn kernel_process_rollover_backoff() !{requires_irq_unmasked} {
     let ticks: usize = (read_cntfrq() as usize / 10000) * (cpu_id() + 1);
     let start: usize = read_cntpct() as usize;
     while ((read_cntpct() as usize) - start < ticks) {}

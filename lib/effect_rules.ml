@@ -138,12 +138,12 @@ let rules = [
   { name = "interrupt"; declaration = Required; declaration_role = true;
     function_pointer = false; propagates = false; effect_free_forbidden = false;
     excludes_declared = ["may_block"; "allocates"; "logs"; "exception"; "mmu_off"];
-    excludes_reachable = ["may_block"; "allocates"; "logs"];
+    excludes_reachable = ["may_block"; "allocates"; "logs"; "requires_irq_unmasked"];
     rejects_unknown_indirect = true; forbids_reentry = false };
   { name = "exception"; declaration = Required; declaration_role = true;
     function_pointer = false; propagates = false; effect_free_forbidden = false;
     excludes_declared = ["may_block"; "allocates"; "logs"; "interrupt"; "mmu_off"];
-    excludes_reachable = ["may_block"; "allocates"; "logs"];
+    excludes_reachable = ["may_block"; "allocates"; "logs"; "requires_irq_unmasked"];
     rejects_unknown_indirect = true; forbids_reentry = true };
   { name = "mmu_off"; declaration = Required; declaration_role = true;
     function_pointer = false; propagates = false; effect_free_forbidden = false;
@@ -162,6 +162,20 @@ let rules = [
     excludes_declared = ["requires_devices"];
     excludes_reachable = ["requires_devices"];
     rejects_unknown_indirect = true; forbids_reentry = false };
+  (* GitHub issue #809: a function that spins until another core takes an
+     interrupt -- the world-stop back-off -- needs this core's IRQs
+     unmasked, or two cores retrying with IRQs masked time each other out
+     forever (WorldStopRetry.tla, variant maskedbackoff). Declared on the
+     back-off itself and inferred for every caller. Rejected three ways:
+     reachable from an `interrupt` or `exception` root (their
+     excludes_reachable), called while an `irq_masking_guard` guard is live,
+     and called after a bare msr_daifset_irq in the same flow (the last two
+     in type_inf.ml). #850 reviews the effect set. *)
+  { name = "requires_irq_unmasked"; declaration = Inferred;
+    declaration_role = false; function_pointer = true; propagates = true;
+    effect_free_forbidden = false; excludes_declared = [];
+    excludes_reachable = []; rejects_unknown_indirect = false;
+    forbids_reentry = false };
   { name = "noreturn"; declaration = Trusted_extern; declaration_role = false;
     function_pointer = false; propagates = false; effect_free_forbidden = false;
     excludes_declared = []; excludes_reachable = [];

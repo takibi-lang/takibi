@@ -698,17 +698,20 @@ Variants (`make modelcheck` requires each verdict):
   single-attempt `*_probe` functions that hold a pool guard on purpose.
 - `stuck`, `shortbudget`: assumptions 2 and 1 dropped, as above.
 
-What stays outside: `maskedbackoff`'s shape is not rejected statically.
-Every retrying caller runs at EL1 with IRQs open today (`KERNEL_PREEMPTIBLE`
-is 0, and a timer IRQ at EL1 only sets a flag); a caller in an exception
-handler or under an unranked mask would livelock. No real run is checked
+The compiler rejects `maskedbackoff`'s shape too (#809):
+`kernel_process_rollover_backoff` declares `requires_irq_unmasked`, so
+reaching it from an `interrupt` or `exception` root, while an IRQ-masking
+or lock guard is live, or after a bare `disable_irq` or an unrestored
+`mutex_irq_save` on the same path is a compile error (SPEC.md). What stays
+outside: a mask the checker cannot see -- one set in assembly before the
+Takibi entry, or behind an indirect call. No real run is checked
 against this model (#810: world-stop events are not recorded, and no lock
 orders them, so StackOwnershipTrace.tla's one-step-per-run-lock-hold
 mechanism does not carry over).
 
 | Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
 | --- | --- | --- | --- | --- |
-| `Need`, `Retry` | `kernel_process_activate_stable_root`, `kernel_process_activate_current_root`, `kernel_process_rollover_backoff` | RolloverNeeded begins a stop with IRQs saved and masked; after Busy or Partial the back-off runs with the caller's IRQ state restored, then preparation is retried and begins another stop only while a rollover is still needed | the busy-injection test hooks -- irrelevant to `RetrySucceeds`: they only add back-offs before the first real attempt, finitely many; the secondary-start path, which hands the process back instead of looping -- irrelevant to `RetrySucceeds`: the scheduler retries the same Ready process later, the same back-off and retry | `2050f9dd6e46` |
+| `Need`, `Retry` | `kernel_process_activate_stable_root`, `kernel_process_activate_current_root`, `kernel_process_rollover_backoff` | RolloverNeeded begins a stop with IRQs saved and masked; after Busy or Partial the back-off runs with the caller's IRQ state restored, then preparation is retried and begins another stop only while a rollover is still needed | the busy-injection test hooks -- irrelevant to `RetrySucceeds`: they only add back-offs before the first real attempt, finitely many; the secondary-start path, which hands the process back instead of looping -- irrelevant to `RetrySucceeds`: the scheduler retries the same Ready process later, the same back-off and retry | `894503630370` |
 | `Claim`, `Busy` | `world_stop_machine_begin`, `world_stop_machine_begin_holding_probe`, `world_stop_claim` | any CPU may claim; a held gate answers Busy at once | the bounded wait for a CPU-start holder (#556) -- modelled elsewhere: `WorldStop.StartReserve`; generation exhaustion -- irrelevant to `RetrySucceeds`: a 64-bit counter is not exhausted by any run | `4fda45eb00d9` |
 | `Complete`, `Timeout`, `Finish` | `world_stop_begin_claimed`, `machine_stop_release`, `machine_stop_partial_release`, `world_stop_resume` | Complete only when every other CPU acknowledged the live request; Partial when the budget runs out; release clears the request, then the gate | the spin count itself -- irrelevant to `RetrySucceeds`: assumption 1 states what the budget is assumed to cover; the rollover body -- irrelevant to `RetrySucceeds`: it runs under the Complete token and changes no stop state | `28656455d610` |
 | `Ack`, `PenExit` | `world_stop_hold`, `world_stop_interrupt_hold`, `kernel_world_stop_serve` | a CPU with IRQs open acknowledges the live request and spins until it is released or overtaken; the owner never holds itself | the two-step read-then-store of the hold -- modelled elsewhere: `WorldStop.Ack`; the stopped-root publication -- irrelevant to `RetrySucceeds`: it runs inside the pen and changes no stop state | `91554aa090ba` |

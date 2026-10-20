@@ -18336,6 +18336,121 @@ fn hidden_witnessed() -> usize {
          "fn issue528_not_guard() -> usize !{irq_masking_guard} { return 0; }" ());
 
   Alcotest.test_case
+    "issue #809: a world-stop back-off is not reached with IRQs masked"
+    `Quick
+    (fun () ->
+       (* The kernel's shapes in miniature: a back-off that needs IRQs
+          unmasked, a retry loop around it, an IRQ-masking guard, a ranked
+          lock guard, and the mutex_irq_save/restore pair. *)
+       let base =
+         "linear view G809[id: usize];
+          linear view L809[id: usize];
+          fn backoff809() !{requires_irq_unmasked} {}
+          fn retry809() { backoff809(); }
+          fn take809() -> G809[1] !{irq_masking_guard} { return view G809[1]; }
+          fn put809(g: sink G809[id]) !{restores_saved_irq} {}
+          fn lock809() -> L809[2] !{lock_guard_40_l809} { return view L809[2]; }
+          fn unlock809(g: sink L809[id]) {}
+          fn mask809() { msr_daifset_irq(); }
+          fn unmask809() { msr_daifclr_irq(); }
+          fn save809() -> usize {
+            let flags: usize = (mrs_daif() >> 7) & 1;
+            mask809();
+            return flags;
+          }
+          fn restore809(flags: usize) !{restores_saved_irq} {
+            if (flags == 0) { unmask809(); }
+          }
+          " in
+       (* Roots run masked. *)
+       expect_type_error
+         "interrupt function 'irq809' reaches a back-off that needs IRQs unmasked"
+         (base ^ "fn irq809() !{interrupt} { retry809(); }") ();
+       expect_type_error "via exc809 -> retry809 -> backoff809"
+         (base ^ "fn exc809() !{exception} { retry809(); }") ();
+       (* A live IRQ-masking guard, and a live lock guard. *)
+       expect_type_error "(retry809 -> backoff809)"
+         (base ^
+         "fn guarded809() {
+            let g = take809();
+            retry809();
+            put809(g);
+          }") ();
+       expect_type_error "is live, so IRQs are masked or a lock is held"
+         (base ^
+         "fn locked809() {
+            let l = lock809();
+            retry809();
+            unlock809(l);
+          }") ();
+       (* A bare mask, directly, through a helper, and on one branch. *)
+       expect_type_error "masked them with no guard earlier on this path"
+         (base ^ "fn bare809() { msr_daifset_irq(); retry809(); }") ();
+       expect_type_error "(at the call to 'mask809')"
+         (base ^ "fn helper809() { mask809(); retry809(); }") ();
+       expect_type_error "masked them with no guard"
+         (base ^
+         "fn branch809(c: bool) {
+            if (c) { mask809(); }
+            retry809();
+          }") ();
+       (* A save whose restore has not run yet: still masked, also nested. *)
+       expect_type_error "(at the call to 'save809')"
+         (base ^
+         "fn saved809() {
+            let flags: usize = save809();
+            retry809();
+            restore809(flags);
+          }") ();
+       expect_type_error "masked them with no guard"
+         (base ^
+         "fn nested809() {
+            let outer: usize = save809();
+            let inner: usize = save809();
+            restore809(inner);
+            retry809();
+            restore809(outer);
+          }") ();
+       (* A loop that masks at the end of its body is masked at the top
+          of the next iteration. *)
+       expect_type_error "masked them with no guard"
+         (base ^
+         "fn loop809(n: usize) {
+            let mut i: usize = 0;
+            while (i < n) { retry809(); mask809(); i = i + 1; }
+          }") ();
+       (* Accepted: after the guard, the lock, the restore, or an unmask;
+          a guard handed to the callee; a mask on a path that ends in a
+          terminal loop; and a back-off in plain code. *)
+       expect_ok (base ^
+         "fn after809() {
+            let g = take809();
+            put809(g);
+            let l = lock809();
+            unlock809(l);
+            let outer: usize = save809();
+            let inner: usize = save809();
+            restore809(inner);
+            restore809(outer);
+            mask809();
+            unmask809();
+            retry809();
+          }
+          fn handed809(g: sink G809[id]) { put809(g); retry809(); }
+          fn stop809(c: bool) {
+            if (c) { mask809(); while (true) {} }
+            retry809();
+          }") ();
+       (* The word is a propagating effect: a function-pointer row may
+          carry it, and a call through such a pointer counts. *)
+       expect_type_error "masked them with no guard"
+         (base ^
+         "fn via809(f: fn !{requires_irq_unmasked}() -> void) {
+            mask809();
+            f();
+          }") ());
+
+  Alcotest.test_case
     "issue #558: indirect calls cannot bypass IRQ and handle checks"
     `Quick
     (fun () ->
