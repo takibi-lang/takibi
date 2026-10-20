@@ -34,16 +34,11 @@ FUNCTION = re.compile(r"^(?:private\s+)?fn\s+([A-Za-z_0-9]+)")
 # function -> (count, reason)
 ALLOWED = {
     "kernel_syscall_dispatch_action": (
-        9, "transient: ext2 mutation in flight, listener claim busy, wait4 "
+        7, "transient: ext2 mutation in flight, listener claim busy, wait4 "
            "zombie stack held or zombie pick race, and the pass-through of "
-           "an exit with no successor and of timed waits"),
-    "syscall_deadline_wait": (
-        2, "core 0 timed-wait retry; removed by #852"),
-    "syscall_signal_wait": (
-        2, "core 0 timed-wait retry; removed by #852"),
+           "an exit with no successor"),
     "syscall_ppoll_dispatch": (
-        4, "ppoll(nfds=0, NULL) (#870), the invalid-slot fallback, and "
-           "pass-through of syscall_deadline_wait"),
+        2, "ppoll(nfds=0, NULL) (#870) and the invalid-slot fallback"),
     "syscall_read_uart": (
         1, "invalid-slot fallback: no scheduled process to block"),
     "syscall_io_action": (
