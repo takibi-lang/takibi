@@ -82,8 +82,16 @@ private fn occupancy_probe_armed_address() -> *AtomicWord {
     return &occupancy_probe_armed;
 }
 
+// Armed for a peer only until it has made its one visit. GitHub issue #853:
+// a peer released early used to keep re-entering this probe from its idle
+// loop until core 0 disarmed it, and under the 651 window every re-entry
+// sat 0.75 s with interrupts masked -- so core 0's world stop, begun right
+// after this probe, found core 1 masked and could not get its acknowledgement.
+// A peer that has visited stays idle, interrupts open, like the per-turn
+// arming of the world stop from a peer.
 fn occupancy_drain_is_armed() -> bool !{unsafe} {
-    return atomic_word_load(occupancy_probe_armed_address()) == 1;
+    return atomic_word_load(occupancy_probe_armed_address()) == 1 &&
+           peer_tally_count(&occupancy_probe_tally, cpu_id()) == 0;
 }
 
 // Enter, announce, and HOLD. Linear, so the leave is checked on every path
@@ -93,8 +101,9 @@ fn occupancy_drain_is_armed() -> bool !{unsafe} {
 // released peers 1..cpu.
 fn occupancy_drain_secondary_run(cpu: usize) !{unsafe} {
     if (peer_tally_is_peer(&occupancy_probe_tally, cpu) == false) { return; }
-    // Once per probe: the idle loop re-enters while core 0 still drains,
-    // and a second visit would make the final drain Busy.
+    // Once per probe: a second visit would make the final drain Busy.
+    // occupancy_drain_is_armed already turns a visited peer away (#853);
+    // this keeps the property local to the run function as well.
     if (peer_tally_count(&occupancy_probe_tally, cpu) != 0) { return; }
     let visit = occupancy_enter(&occupancy_probe_region);
     peer_tally_set(&occupancy_probe_tally, cpu, 1);
