@@ -194,6 +194,11 @@ struct WorkloadBusyPair {
     // before this flag it asked for that turn forever with no line naming
     // the fixture that never came.
     peer_read_failed: bool;
+    // GitHub issue #861: the pid this file told to exec /bin/peer-read
+    // (answer 4). If it is reaped before its first tag-3 report fixes
+    // peer_read_pid, the reader died before it registered, and the reap
+    // names that instead of leaving the console writer asking forever.
+    peer_read_exec_pid: usize;
     // The two filesystem readers rendezvous after pinning themselves to
     // opposite CPUs. This makes device-lock contention evidence a real
     // overlap rather than a race between when the init workers get scheduled.
@@ -1120,6 +1125,8 @@ private fn workload_busy_record_progress_locked(
                 return WorkloadBusyProgressResult::Value(0);
             }
             if (tag == workload_busy_pair.peer_exit_tag) {
+                workload_busy_pair.peer_read_exec_pid =
+                    kernel_process_current_pid();
                 return WorkloadBusyProgressResult::Value(4);
             }
             return WorkloadBusyProgressResult::Value(5);
@@ -1313,6 +1320,16 @@ fn workload_peer_read_progress(bytes: usize, checksum: usize) -> usize {
 // trace was /bin/peer-console asking for its turn forever.
 fn workload_peer_read_reaped(pid: usize) {
     let guard = process_run_lock();
+    // GitHub issue #861: the process told to become /bin/peer-read left
+    // before its registration (a refused tag-3 call, or a fault or kill
+    // before its first call). Its report will never come either.
+    if (pid != 0 && workload_busy_pair.peer_read_pid == 0 &&
+        pid == workload_busy_pair.peer_read_exec_pid &&
+        workload_busy_pair.peer_read_failed == false) {
+        workload_busy_pair.peer_read_failed = true;
+        kernel_boot_log(
+            "workload: peer read FAILED: /bin/peer-read exited before it registered\n");
+    }
     if (pid != 0 && pid == workload_busy_pair.peer_read_pid &&
         workload_busy_pair.peer_read_reported == false &&
         workload_busy_pair.peer_read_failed == false) {
