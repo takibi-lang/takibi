@@ -1548,6 +1548,15 @@ fn workload_peer_console_progress(first: usize, total: usize) -> usize {
         process_run_unlock(guard);
         return 4;
     }
+    // GitHub issue #873: the DDB checks expect exactly the two fixture roots
+    // and PID 1's saved user frame. BusyBox init sleeps a second after each
+    // reap; a BREAK at its wake found it Running on a third CPU, or taken
+    // by an idle CPU but not yet its current. Hold only once init is back
+    // in its signal wait, which nothing in the short hold can end.
+    if (kernel_process_pid_parked_on_signal(guard, 1) == false) {
+        process_run_unlock(guard);
+        return 4;
+    }
     workload_busy_pair.peer_console_reported = true;
     process_run_unlock(guard);
     // Console is innermost. No run guard may survive this hold: the BREAK

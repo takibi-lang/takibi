@@ -1465,6 +1465,17 @@ continues afterward. A second lane executes Takibi's reserved deliberate
 `ExceptionFrame`, advances ELR past that instruction, and proves the same
 resume behavior. Other Current-EL synchronous exceptions remain fatal.
 
+The UART BREAK lane lands while a peer holds the console lock. That hold
+begins only once PID 1 is back in its signal wait with no deadline (GitHub
+issue #873): BusyBox init sleeps one second after each child it reaps, and a
+BREAK at the end of that sleep found init Running on a third CPU, or taken by
+an idle CPU that had not yet made it current, so the two-root and saved
+user-frame checks failed. Waiting for that wait lets init respawn a busy
+worker first, which may hold a third CPU, so the root check asks that every
+root is a distinct process matching its record, and that none is PID 1,
+rather than for a fixed count. A failed root check prints every CPU's root
+and activity and PID 1's record.
+
 The QEMU DDB capture renews its UART inactivity budget when bytes arrive, with a
 total ceiling of three budgets. `KERNEL_QEMU_DDB_TIMEOUT` selects the inactivity
 budget (180 seconds by default); network and snapshot helpers share the total

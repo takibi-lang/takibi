@@ -8297,6 +8297,33 @@ fn kernel_process_pid_blocked_in_uart_read(
     return false;
 }
 
+// GitHub issue #873: true when `pid` is Blocked in a signal wait with no
+// deadline, so nothing but a signal can make it run. BusyBox init sleeps one
+// second after every child it reaps and only then returns to such a wait; a
+// fixture that needs init parked asks this rather than for any Blocked state.
+fn kernel_process_pid_parked_on_signal(
+        guard: borrow ProcessRunGuard[scheduled_process_run_lock],
+        pid: usize) -> bool {
+    let mut cursor = scheduled_process_first_slot();
+    let mut walking: bool = true;
+    while (walking) {
+        match cursor {
+            ProcessSlotCursor::Done => { walking = false; }
+            ProcessSlotCursor::At(slot) => {
+                if (scheduled_process_record_locked(guard, slot).pid == pid) {
+                    return scheduled_process_record_state_locked(guard, slot) ==
+                            ProcessSlotState::Blocked &&
+                        scheduled_process_record_wait_reason_locked(guard, slot) ==
+                            ProcessWaitReason::Signal &&
+                        scheduled_process_record_locked(guard, slot).deadline_ticks == 0;
+                }
+                cursor = scheduled_process_next_slot(slot);
+            }
+        }
+    }
+    return false;
+}
+
 // What a fixture that gave up on a sleeping pid says about it, so the failure
 // line is enough to tell a wake that never came from a wake that came and was
 // followed by another sleep. Codes are the DDB `ps` ones: state 0 free, 1 ready,

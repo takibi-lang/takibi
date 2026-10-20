@@ -85,6 +85,12 @@ def main():
                     (text.replace("ddb: stacks roots=", "missing roots="), hold, "migration stack attribution"),
                     (text.replace("workload: busy pair migrated across both cpus with stack handoff intact\n", "") + "workload: busy pair migrated across both cpus with stack handoff intact\n", hold, "snapshot ordering")):
                 run(mutated, metadata, witness, diagnosis)
+            # GitHub issue #873: each failure names the pid and CPU behind it.
+            third = "ddb: stack cpu=2 pid=1 stack=0x0000000040420000..0x0000000040424000 owner=2 record=match"
+            run(re.sub(r"^(ddb: stack cpu=1 pid=.*)$", r"\1\n" + third, text, flags=re.MULTILINE),
+                metadata, hold, ["migration stack attribution", "  " + third])
+            run(re.sub(r"^ddb: bt stop=user-boundary fp=0x.*$", "ddb: bt pid running on no stopped cpu", text, flags=re.MULTILINE),
+                metadata, hold, ["late UART backtrace", "  ddb: bt pid running on no stopped cpu", "  ddb: ps pid=1 "])
         else:
             run(text, {**metadata, "generated_end": metadata["generated_start"]}, hold, "validation inputs")
             run(text, {**metadata, "generated_start": 1, "generated_end": 2}, hold, "compiler frame outside")

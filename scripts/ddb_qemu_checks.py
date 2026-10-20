@@ -156,6 +156,21 @@ def replacements(metadata):
     }
 
 
+def root_evidence(text):
+    """The live capture's per-CPU stack roots, CPU activity, PID 1 record
+    and PID 1 backtrace answer, one per indented line (GitHub issue #873)."""
+    wanted = re.compile(
+        r"^ddb: (stack cpu=|stacks roots=|activity cpu=|ps pid=1 |"
+        r"bt pid running on no stopped cpu$|bt source=saved pid=1 )")
+    seen = []
+    for line in text.split("\n"):
+        if wanted.match(line) and line not in seen:
+            seen.append(line)
+    if not seen:
+        return "; no stack roots or PID 1 record captured"
+    return "".join("\n  " + line for line in seen)
+
+
 def capture_problems(text, metadata, hold_text=""):
     """Return all failed independent requirements; never contact a guest."""
     text = text.replace("\r", "")
@@ -201,16 +216,27 @@ def capture_problems(text, metadata, hold_text=""):
         if continuing < 0 or text.find("workload: peer tty read its 17-byte line", continuing) < 0:
             problems.append("peer terminal delivery: line was not delivered after continue")
         matched = len(re.findall(r"^ddb: stack cpu=[0-3] pid=[0-9]+ stack=0x[0-9a-f]+\.\.0x[0-9a-f]+ owner=(none|[0-3]) record=match$", text, re.MULTILINE))
-        two = has(r"^ddb: stacks roots=2 matched=2 missing=0 duplicate-process=0 owner-mismatch=0 range-mismatch=0 duplicate-pid=0 duplicate-stack=0$")
-        one = has(r"^ddb: stack cpu=1 status=idle$") and has(r"^ddb: stacks roots=1 matched=1 missing=0 duplicate-process=0 owner-mismatch=0 range-mismatch=0 duplicate-pid=0 duplicate-stack=0$")
-        if not (matched == 2 and two or matched == 1 and one):
-            problems.append("migration stack attribution: roots were not unique")
+        # GitHub issue #873: every root is a distinct process whose record
+        # matches it. How many there are is the workload's business -- init
+        # respawns a busy worker that may be on a third CPU -- but PID 1 is
+        # never one: the hold waits for init's signal wait, so init on a CPU
+        # is the WFI retry #840 removed coming back.
+        summary = re.search(r"^ddb: stacks roots=([0-9]+) matched=([0-9]+) missing=0 duplicate-process=0 owner-mismatch=0 range-mismatch=0 duplicate-pid=0 duplicate-stack=0$", text, re.MULTILINE)
+        unique = (summary is not None and
+                  1 <= matched == int(summary.group(1)) == int(summary.group(2)) <= online_cpus(metadata) and
+                  not has(r"^ddb: stack cpu=[0-3] pid=1 "))
+        # A failure names the pid and CPU behind every root, and PID 1's
+        # state.
+        evidence = root_evidence(text)
+        if not unique:
+            problems.append("migration stack attribution: roots were not unique" + evidence)
         for name, expression in (
                 ("late UART backtrace", r"^ddb: bt stop=user-boundary fp=0x"),
                 ("late UART event overflow", r"^ddb: events cpu=0 count=[1-9][0-9]* damaged=0 overwritten=[1-9][0-9]*$"),
                 ("late UART event record", r"^ddb: event seq=[1-9][0-9]* cpu=0 id=0x0000000000000101 a=0x")):
             if not has(expression):
-                problems.append(name + ": missing evidence")
+                problems.append(name + ": missing evidence" +
+                                (evidence if name == "late UART backtrace" else ""))
         migrated = text.find("workload: busy pair migrated across both cpus with stack handoff intact\n")
         stacks = text.find(f"ddb: stacks cpus={online_cpus(metadata)} processes=")
         if not 0 <= migrated < stacks:
