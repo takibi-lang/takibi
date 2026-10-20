@@ -216,7 +216,7 @@ fn kernel_idle_loop() !{unsafe} {
             tcp_pool_cost_secondary_poll(core_id);
             // GitHub issue #613 slice 5: every online secondary, not core 1
             // alone -- the point is all CPUs writing the log ring at once.
-            if (log_storm_is_armed()) {
+            if (log_storm_is_armed(core_id)) {
                 log_storm_secondary_run();
             }
             // GitHub issue #756: every contention probe rendezvouses with
@@ -226,49 +226,49 @@ fn kernel_idle_loop() !{unsafe} {
             // core-role: core 0 is every probe's primary and runs it from the
             // boot sequence, never from this loop.
             if (core_id != 0) {
-                if (pid_contention_is_armed()) {
+                if (pid_contention_is_armed(core_id)) {
                     pid_contention_secondary_run(core_id);
                 }
-                if (asid_contention_is_armed()) {
+                if (asid_contention_is_armed(core_id)) {
                     asid_contention_secondary_run(core_id);
                 }
-                if (pool_contention_is_armed()) {
+                if (pool_contention_is_armed(core_id)) {
                     pool_contention_secondary_run(core_id);
                 }
-                if (page_contention_is_armed()) {
+                if (page_contention_is_armed(core_id)) {
                     page_contention_secondary_run(core_id);
                 }
-                if (fd_refcount_contention_is_armed()) {
+                if (fd_refcount_contention_is_armed(core_id)) {
                     fd_refcount_contention_secondary_run(core_id);
                 }
-                if (schedule_contention_is_armed()) {
+                if (schedule_contention_is_armed(core_id)) {
                     schedule_contention_secondary_run(core_id);
                 }
-                if (freelist_contention_is_armed()) {
+                if (freelist_contention_is_armed(core_id)) {
                     freelist_contention_secondary_run(core_id);
                 }
-                if (occupancy_drain_is_armed()) {
+                if (occupancy_drain_is_armed(core_id)) {
                     occupancy_drain_secondary_run(core_id);
                 }
-                if (init_once_contention_is_armed()) {
+                if (init_once_contention_is_armed(core_id)) {
                     init_once_contention_secondary_run(core_id);
                 }
-                if (tcp_connection_contention_is_armed()) {
+                if (tcp_connection_contention_is_armed(core_id)) {
                     tcp_connection_contention_secondary_run(core_id);
                 }
-                if (console_contention_is_armed()) {
+                if (console_contention_is_armed(core_id)) {
                     console_contention_secondary_run(core_id);
                 }
-                if (signal_contention_is_armed()) {
+                if (signal_contention_is_armed(core_id)) {
                     signal_contention_secondary_run(core_id);
                 }
-                if (pool_walk_contention_is_armed()) {
+                if (pool_walk_contention_is_armed(core_id)) {
                     pool_walk_contention_secondary_run(core_id);
                 }
-                if (ext2_mutation_contention_is_armed()) {
+                if (ext2_mutation_contention_is_armed(core_id)) {
                     ext2_mutation_contention_secondary_run(core_id);
                 }
-                if (world_stop_peer_probe_is_armed()) {
+                if (world_stop_peer_probe_is_armed(core_id)) {
                     world_stop_peer_probe_secondary_run(core_id);
                 }
             }

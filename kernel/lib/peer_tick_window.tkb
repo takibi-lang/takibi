@@ -6,8 +6,11 @@
 // caller is a non-migrating boot probe that waits on one other online core
 // it names. Since #756 the multi-core rendezvous (kernel/lib/peer_round.tkb,
 // the pid and init-once contention probes) waits on any online peer, or a
-// peer on its primary; peer_tick_window_peer() still serves only the fixed
-// core 0 / CPU 1 pair probes (console, log storm, ext2 mutation, pool walk).
+// peer on its primary. peer_tick_window_peer() is one fixed clock (CPU 1's
+// on core 0, core 0's on a peer): a peer waiting on core 0 in the console,
+// log storm, ext2 mutation and pool walk probes, and ext2's first-contender
+// wait. A core-0 wait across several peers takes each peer's own window
+// (GitHub issue #860; scripts/check_probe_visit_latch.py keeps the list).
 // This is not a scheduler deadline API. A tick is an interrupt,
 // not proof that the peer reached the awaited instruction. Masked IRQs,
 // a stopped peer and a dead peer may prevent ticks; a separate ten-second

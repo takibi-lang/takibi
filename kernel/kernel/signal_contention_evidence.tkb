@@ -56,8 +56,11 @@ private let mut signal_probe_armed: AtomicWord;
 private let mut signal_probe_go: AtomicWord;
 private let mut signal_probe_done: PeerTally;
 
-fn signal_contention_is_armed() -> bool !{unsafe} {
-    return atomic_word_load(&signal_probe_armed) == 1;
+// Armed for `cpu` while it is a peer: the run function holds it until
+// disarmed, so it cannot re-enter an armed probe (GitHub issue #860).
+fn signal_contention_is_armed(cpu: usize) -> bool !{unsafe} {
+    return atomic_word_load(&signal_probe_armed) == 1 &&
+           peer_tally_is_peer(&signal_probe_done, cpu);
 }
 
 // A peer's own bit: bit `cpu`, so core 0's SIGNAL_PRIMARY_BIT is bit 0.

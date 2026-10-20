@@ -176,8 +176,10 @@ private fn schedule_probe_cycle() !{unsafe} {
     for spin: usize in 0..<SCHEDULE_CONTENTION_OUTSIDE_WORK { }
 }
 
-fn schedule_contention_is_armed() -> bool !{unsafe} {
-    return atomic_word_load(schedule_probe_armed_address()) == 1;
+// Armed for `cpu` only while it still has work (GitHub issue #860).
+fn schedule_contention_is_armed(cpu: usize) -> bool !{unsafe} {
+    return atomic_word_load(schedule_probe_armed_address()) == 1 &&
+           peer_tally_count(&schedule_probe_tally, cpu) < SCHEDULE_CONTENTION_ROUNDS;
 }
 
 // How many times phase 1 may be re-run before its failure to reproduce the

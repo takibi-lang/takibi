@@ -65,6 +65,12 @@ fn peer_round_meet(round: &mut PeerRound, self_cpu: usize, online: usize,
 // fixed by core 0 at reset before it arms the probe. A peer that never
 // reaches the awaited count fails that wait after its own ticks; the caller
 // reports which wait failed.
+//
+// Arming is per peer (GitHub issue #860, after #853): a probe's
+// `<name>_is_armed(cpu)`, asked by the idle loop, also reads `cpu`'s own
+// progress here -- its count below the rounds, or its served sequence -- so a
+// peer that has done its part stays idle with interrupts open rather than
+// re-entering. scripts/check_probe_visit_latch.py enforces it.
 struct PeerTally {
     online: AtomicWord;
     count: [AtomicWord; KERNEL_MAX_CORES];

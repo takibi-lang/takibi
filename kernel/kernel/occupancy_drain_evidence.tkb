@@ -89,9 +89,9 @@ private fn occupancy_probe_armed_address() -> *AtomicWord {
 // after this probe, found core 1 masked and could not get its acknowledgement.
 // A peer that has visited stays idle, interrupts open, like the per-turn
 // arming of the world stop from a peer.
-fn occupancy_drain_is_armed() -> bool !{unsafe} {
+fn occupancy_drain_is_armed(cpu: usize) -> bool !{unsafe} {
     return atomic_word_load(occupancy_probe_armed_address()) == 1 &&
-           peer_tally_count(&occupancy_probe_tally, cpu_id()) == 0;
+           peer_tally_count(&occupancy_probe_tally, cpu) == 0;
 }
 
 // Enter, announce, and HOLD. Linear, so the leave is checked on every path
@@ -390,9 +390,9 @@ private let mut world_stop_peer_probe_turn: AtomicWord;
 // Per peer: 1 Complete, 2 Partial, 3 Busy, 0 not run.
 private let mut world_stop_peer_probe_result: PeerTally;
 
-fn world_stop_peer_probe_is_armed() -> bool !{unsafe} {
+fn world_stop_peer_probe_is_armed(cpu: usize) -> bool !{unsafe} {
     let turn: usize = atomic_word_load(&world_stop_peer_probe_turn);
-    return turn != 0 && turn == cpu_id();
+    return turn != 0 && turn == cpu;
 }
 
 // Every online peer runs this from its idle loop; only the peer whose turn

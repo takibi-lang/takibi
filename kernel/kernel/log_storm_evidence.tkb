@@ -35,8 +35,13 @@ private let mut log_storm_writers: AtomicWord;
 private let mut log_storm_done: AtomicWord;
 private let mut log_storm_last_round: [usize; KERNEL_MAX_CORES];
 
-fn log_storm_is_armed() -> bool {
-    return atomic_word_load(&log_storm_armed) == 1;
+// Armed for `cpu` only while it still has work (GitHub issue #860).
+fn log_storm_is_armed(cpu: usize) -> bool {
+    if (cpu == 0 || cpu >= KERNEL_MAX_CORES) { return false; } // core-role: core 0 coordinates the storm; secondaries join
+    let core: {0..<KERNEL_MAX_CORES as usize} = cpu;
+    let round: usize = atomic_word_load(&log_storm_round);
+    return atomic_word_load(&log_storm_armed) == 1 && round != 0 &&
+           log_storm_last_round[core] != round;
 }
 
 private fn log_storm_write_share(round: usize) -> bool !{unsafe} {
@@ -48,6 +53,7 @@ private fn log_storm_write_share(round: usize) -> bool !{unsafe} {
     return true;
 }
 
+// A secondary: wait for core 0 to publish `value`, on core 0's ticks.
 private fn log_storm_wait_word(cell: *AtomicWord, value: usize) -> bool {
     let mut window = peer_tick_window_policy(
         peer_tick_window_peer(), PeerTickPolicy::Arrival);
@@ -56,6 +62,25 @@ private fn log_storm_wait_word(cell: *AtomicWord, value: usize) -> bool {
     }
     peer_tick_window_end(window);
     return false;
+}
+
+// Core 0: wait until `cell` reaches `value`, a count every secondary adds
+// to. GitHub issue #860, the #756 shape: one window on CPU 1's ticks timed
+// the whole count out while CPU 1 ticked and a later writer was still
+// masked. Each online secondary's window runs on its own ticks in turn, so
+// the wait ends early only once every one of them has had its budget.
+private fn log_storm_wait_peers(cell: *AtomicWord, value: usize) -> bool
+        !{unsafe} {
+    let online: usize = kernel_online_core_count();
+    for cpu: usize in 1..<KERNEL_MAX_CORES {
+        if (cpu < online) {
+            let mut window = peer_tick_window_policy(cpu, PeerTickPolicy::Arrival);
+            while (peer_tick_window_open(window) &&
+                   atomic_word_load(cell) < value) { }
+            peer_tick_window_end(window);
+        }
+    }
+    return atomic_word_load(cell) >= value;
 }
 
 // A secondary's part of the open round, at most once per round. A secondary
@@ -96,13 +121,13 @@ fn log_storm_probe() -> bool !{logs, unsafe} {
         atomic_word_store(&log_storm_registered, 0);
         atomic_word_store(&log_storm_done, 0);
         atomic_word_store(&log_storm_round, round);
-        let joined: bool = log_storm_wait_word(&log_storm_registered, expected);
+        let joined: bool = log_storm_wait_peers(&log_storm_registered, expected);
         let writers: usize = atomic_word_load(&log_storm_registered);
         atomic_word_store(&log_storm_writers, writers);
         let start: usize = kernel_log_raw_head();
         atomic_word_store(&log_storm_go, round);
         let mine: bool = log_storm_write_share(round);
-        let finished: bool = log_storm_wait_word(&log_storm_done, writers);
+        let finished: bool = log_storm_wait_peers(&log_storm_done, writers);
         let end: usize = kernel_log_raw_head();
         let (kept, others, missing, first, wrong) = kernel_log_storm_verify(start, end, round);
         if (writers + 1 > writers_seen) { writers_seen = writers + 1; }
@@ -169,7 +194,7 @@ fn log_storm_trace_probe() -> bool !{logs, unsafe} {
     atomic_word_store(&log_storm_registered, 0);
     atomic_word_store(&log_storm_done, 0);
     atomic_word_store(&log_storm_round, round);
-    let joined: bool = log_storm_wait_word(&log_storm_registered, expected);
+    let joined: bool = log_storm_wait_peers(&log_storm_registered, expected);
     let writers: usize = atomic_word_load(&log_storm_registered);
     atomic_word_store(&log_storm_writers, writers);
     let from: usize = kernel_log_raw_head();
@@ -177,12 +202,17 @@ fn log_storm_trace_probe() -> bool !{logs, unsafe} {
     let opening: bool = kernel_log_storm_write(round, 0);
     atomic_word_store(&log_storm_go, round);
     // Read once every writer has reserved its first line, so the read's end
-    // takes in records that may still be in flight.
-    let mut window = peer_tick_window_policy(
-        peer_tick_window_peer(), PeerTickPolicy::Arrival);
-    while (peer_tick_window_open(window) &&
-           kernel_log_raw_head() < from + 1 + writers) { }
-    peer_tick_window_end(window);
+    // takes in records that may still be in flight. Each secondary's window
+    // on its own ticks, as in log_storm_wait_peers (GitHub issue #860).
+    let online: usize = kernel_online_core_count();
+    for cpu: usize in 1..<KERNEL_MAX_CORES {
+        if (cpu < online) {
+            let mut window = peer_tick_window_policy(cpu, PeerTickPolicy::Arrival);
+            while (peer_tick_window_open(window) &&
+                   kernel_log_raw_head() < from + 1 + writers) { }
+            peer_tick_window_end(window);
+        }
+    }
     log_ring_trace_arm_reader();
     let read: usize = kernel_log_snapshot_build_from(from);
     log_ring_trace_disarm_reader();
@@ -192,7 +222,7 @@ fn log_storm_trace_probe() -> bool !{logs, unsafe} {
             mine = kernel_log_storm_write(round, index);
         }
     }
-    let finished: bool = log_storm_wait_word(&log_storm_done, writers);
+    let finished: bool = log_storm_wait_peers(&log_storm_done, writers);
     log_ring_trace_close();
     atomic_word_store(&log_storm_round, 0);
     atomic_word_store(&log_storm_armed, 0);

@@ -234,8 +234,10 @@ fn pool_contention_secondary_run(cpu: usize) !{unsafe} {
     peer_tally_leave(&contention_tally, cpu);
 }
 
-fn pool_contention_is_armed() -> bool !{unsafe} {
-    return atomic_word_load(contention_armed_address()) == 1;
+// Armed for `cpu` only while it still has work (GitHub issue #860).
+fn pool_contention_is_armed(cpu: usize) -> bool !{unsafe} {
+    return atomic_word_load(contention_armed_address()) == 1 &&
+           peer_tally_count(&contention_tally, cpu) < CONTENTION_ROUNDS;
 }
 
 // Every number this probe knows, printed on EVERY exit path including the

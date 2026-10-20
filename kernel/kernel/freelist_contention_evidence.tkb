@@ -238,8 +238,10 @@ private fn freelist_probe_cycle(cpu: usize, sequence: usize)
     return taken;
 }
 
-fn freelist_contention_is_armed() -> bool !{unsafe} {
-    return atomic_word_load(freelist_probe_armed_address()) == 1;
+// Armed for `cpu` only while it still has work (GitHub issue #860).
+fn freelist_contention_is_armed(cpu: usize) -> bool !{unsafe} {
+    return atomic_word_load(freelist_probe_armed_address()) == 1 &&
+           peer_tally_count(&freelist_probe_tally, cpu) < FREELIST_CONTENTION_ROUNDS;
 }
 
 // Every online peer runs this from its idle loop while the probe is armed.

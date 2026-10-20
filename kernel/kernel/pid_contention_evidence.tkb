@@ -90,8 +90,12 @@ private fn pid_probe_cycle(cpu: usize, online: usize, sequence: usize)
     return true;
 }
 
-fn pid_contention_is_armed() -> bool !{unsafe} {
-    return atomic_word_load(&pid_probe_armed) == 1;
+// Armed for `cpu` only while it still has work (GitHub issue #860).
+fn pid_contention_is_armed(cpu: usize) -> bool !{unsafe} {
+    if (cpu >= KERNEL_MAX_CORES) { return false; }
+    let own: {0..<KERNEL_MAX_CORES as usize} = cpu;
+    return atomic_word_load(&pid_probe_armed) == 1 &&
+           atomic_word_load(&pid_probe_done[own]) < PID_CONTENTION_ROUNDS;
 }
 
 // Every online peer runs this from its idle loop while the probe is armed.

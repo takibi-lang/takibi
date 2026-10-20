@@ -28,8 +28,10 @@ private let mut init_once_probe_won: PeerTally;
 private let mut init_once_probe_served: PeerTally;
 private let mut init_once_probe_naive_complete: usize;
 
-fn init_once_contention_is_armed() -> bool !{unsafe} {
-    return atomic_word_load(&init_once_probe_armed) == 1;
+// Armed for `cpu` only while it still has work (GitHub issue #860).
+fn init_once_contention_is_armed(cpu: usize) -> bool !{unsafe} {
+    return atomic_word_load(&init_once_probe_armed) == 1 &&
+           peer_tally_count(&init_once_probe_served, cpu) != atomic_word_load(&init_once_probe_sequence);
 }
 
 private fn init_once_probe_wait_release() !{unsafe} {

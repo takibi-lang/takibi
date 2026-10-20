@@ -183,8 +183,11 @@ private fn pool_walk_init() -> bool !{unsafe} {
 
 // -- The walking core --------------------------------------------------
 
-fn pool_walk_contention_is_armed() -> bool !{unsafe} {
-    return atomic_word_load(pool_walk_armed_address()) == 1;
+// Armed for `cpu` while it is a peer: the run function holds it until
+// disarmed, so it cannot re-enter an armed probe (GitHub issue #860).
+fn pool_walk_contention_is_armed(cpu: usize) -> bool !{unsafe} {
+    return atomic_word_load(pool_walk_armed_address()) == 1 &&
+           peer_tally_is_peer(&pool_walk_held_seq, cpu);
 }
 
 // One enumeration with no lock. Every slot is validated under the lock;

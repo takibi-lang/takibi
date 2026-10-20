@@ -27,8 +27,11 @@ private let mut console_probe_arrived: PeerTally;
 // Per peer: 1 once it passed the entry the phase tests.
 private let mut console_probe_entered: PeerTally;
 
-fn console_contention_is_armed() -> bool {
-    return atomic_word_load(&console_probe_armed) == 1;
+// Armed for `cpu` only while it still has work (GitHub issue #860).
+fn console_contention_is_armed(cpu: usize) -> bool {
+    return atomic_word_load(&console_probe_armed) == 1 &&
+           peer_tally_count(&console_probe_ready, cpu) !=
+               atomic_word_load(&console_probe_sequence);
 }
 
 // Every online peer runs this from its idle loop while the probe is armed.

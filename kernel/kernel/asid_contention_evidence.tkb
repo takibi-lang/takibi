@@ -57,8 +57,10 @@ private fn asid_probe_cycle() {
     for spin: usize in 0..<ASID_CONTENTION_OUTSIDE_WORK { }
 }
 
-fn asid_contention_is_armed() -> bool !{unsafe} {
-    return atomic_word_load(&asid_probe_armed) == 1;
+// Armed for `cpu` only while it still has work (GitHub issue #860).
+fn asid_contention_is_armed(cpu: usize) -> bool !{unsafe} {
+    return atomic_word_load(&asid_probe_armed) == 1 &&
+           peer_tally_count(&asid_probe_tally, cpu) < ASID_CONTENTION_ROUNDS;
 }
 
 // Every online peer runs this from its idle loop while the probe is armed.
