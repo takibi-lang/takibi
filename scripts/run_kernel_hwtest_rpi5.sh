@@ -36,6 +36,8 @@ INTERACTIVE_ARP_LOG="$ARTIFACT_DIR/interactive-httpd-arp.log"
 INTERACTIVE_HTTPD_LISTENER="$ARTIFACT_DIR/interactive-httpd.listener"
 INTERACTIVE_HTTPD_READY="$ARTIFACT_DIR/interactive-httpd.ready"
 INTERACTIVE_HTTPD_DONE="$ARTIFACT_DIR/interactive-httpd.done"
+POSTMORTEM_REQUEST="$ARTIFACT_DIR/postmortem.request"
+SWD_SNAPSHOT_LOG="$ARTIFACT_DIR/swd-snapshot.log"
 SOCKET_ACCEPT_LOG="$ARTIFACT_DIR/socket-accept.log"
 ETH_TEST_IFACE="${ETH_TEST_IFACE:-enp5s0}"
 ETH_TEST_SUBNET="${ETH_TEST_SUBNET:-192.168.20}"
@@ -50,6 +52,9 @@ if ! flock -n 9; then
     echo "FAIL kernel/rpi5: another hardware runner already owns $ARTIFACT_DIR" >&2
     exit 1
 fi
+# A previous run's request would make this driver break in at once, and a
+# previous snapshot would read as this run's.
+rm -f "$POSTMORTEM_REQUEST" "$SWD_SNAPSHOT_LOG"
 # The lock above covers this clone's artifact directory. The board is shared by
 # every clone, so take its lease before touching the device.
 . "$REPO_ROOT/scripts/resource_lease.sh"
@@ -125,6 +130,8 @@ timeout 1 cat "$SERIAL_DEV" >/dev/null 2>&1 || true
 python3 "$REPO_ROOT/scripts/run_kernel_uart_driver.py" \
     --port "$SERIAL_DEV" --log "$UART_LOG" --timing-log "$UART_TIMING_LOG" --timeout 180 \
     --postmortem-log "$ARTIFACT_DIR/ddb-postmortem.log" \
+    --postmortem-request-file "$POSTMORTEM_REQUEST" --serial-break \
+    --console-swd --console-elf "$ELF" --console-log "$SWD_SNAPSHOT_LOG" \
     --stdin "$ASH_DIR/ash.stdin" --expected "$ASH_DIR/ash.expected" \
     --stop-marker 'peer user console: record=17/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' \
     --interactive-httpd-listener-file "$INTERACTIVE_HTTPD_LISTENER" \
@@ -144,9 +151,32 @@ archive_failure() {
         "$REPO_ROOT/_build/kernel-hwtest-rpi5-failures" \
         "${archive_reason:-exit status $status}" || true
 }
+# GitHub issue #869: a step that fails while the kernel runs used to kill the
+# driver at once, so a boot that never reached a readiness marker left no
+# wait graph and no core state (#855 needed hand edits to get either). Ask
+# the driver for its postmortem instead -- SWD snapshot of every core, then a
+# serial BREAK and the DDB walk -- and wait for it, bounded: the driver's own
+# walk budget is 20s after a snapshot OpenOCD bounds at 20s.
+POSTMORTEM_WAIT=60
+kernel_loaded=0
+request_postmortem() {
+    local status="$1"
+    [ "$status" -ne 0 ] && [ "$kernel_loaded" -eq 1 ] || return 0
+    kill -0 "$uart_driver_pid" 2>/dev/null || return 0
+    echo "runner failed with exit $status${archive_reason:+ ($archive_reason)}" \
+        >"$POSTMORTEM_REQUEST"
+    echo "[kernel/rpi5] asking the UART driver for an SWD snapshot and DDB walk (at most ${POSTMORTEM_WAIT}s)" >&2
+    local waited=0
+    while kill -0 "$uart_driver_pid" 2>/dev/null &&
+            [ "$waited" -lt $((POSTMORTEM_WAIT * 10)) ]; do
+        sleep 0.1
+        waited=$((waited + 1))
+    done
+}
 cleanup() {
     status=$?
     if [ -n "${uart_driver_pid:-}" ]; then
+        request_postmortem "$status"
         kill "$uart_driver_pid" 2>/dev/null || true
         wait "$uart_driver_pid" 2>/dev/null || true
     fi
@@ -173,6 +203,7 @@ fi
 # Whether the tests below pass is a different question from whether the next
 # session will find a board that needs a power cycle.
 resource_lease_board_ok
+kernel_loaded=1
 # Say how many bytes went over SWD and how fast, not just how long it took.
 # GitHub issue #280 is about this number growing: 85% of what is transferred
 # is the embedded ext2 rootfs, the link is at its 30 MHz ceiling (40 MHz and

@@ -67,6 +67,7 @@ ANSWERS = {
     b"bt cpu 2": b"ddb: bt source=cpu cpu=2 pid=90 stack=0x40594000..0x40598000\r\n",
     b"bt cpu 3": b"ddb: bt source=cpu cpu=3 pid=91 stack=0x4059c000..0x405a0000\r\n",
     b"sched": b"ddb: sched enabled=1 pending=1 current=27 ready=0 running=1 blocked=2\r\n",
+    b"wait": b"ddb: wait edges=2 blocked=2 unknown=0 truncated=0\r\n",
     b"current": b"ddb: current pid=27 parent=1 state=2 wait=0\r\n",
     b"ps": b"ddb: ps count=3\r\n",
     b"stacks": b"ddb: stacks cpus=2\r\n",
@@ -120,6 +121,12 @@ class FakeUart:
         self.commands = []
         self.written = bytearray()
         self.closed = False
+        self.uart_breaks = 0
+
+    def send_break(self, duration):
+        """pyserial's line BREAK, the RPi5 lane's path (GitHub issue #869)."""
+        self.uart_breaks += 1
+        self.broke_in()
 
     def broke_in(self):
         """What a delivered serial BREAK does: the debugger prints a prompt."""
@@ -189,7 +196,8 @@ class Outcome:
 
 def drive(driver, uart, workdir, *, timeout, qmp_port=None,
           break_reaches_guest=True, break_failure="", peer_settings=False,
-          break_delay=0.0, ash_only=True, console_snapshots=None, console_failure=False):
+          break_delay=0.0, ash_only=True, console_snapshots=None, console_failure=False,
+          serial_break=False, request_reason=None, swd_snapshots=None):
     """Run the driver's own main() against a scripted endpoint.
 
     Returns what the lane would have reported, plus how far the clock moved,
@@ -229,6 +237,12 @@ def drive(driver, uart, workdir, *, timeout, qmp_port=None,
         argv += ["--peer-settings"]
     if qmp_port is not None:
         argv += ["--qmp-port", str(qmp_port)]
+    if serial_break:
+        argv += ["--serial-break"]
+    if request_reason is not None:
+        request = workdir / "postmortem.request"
+        request.write_text(request_reason + "\n", encoding="ascii")
+        argv += ["--postmortem-request-file", str(request)]
 
     import capture_kernel_console
     saved_capture = capture_kernel_console.capture
@@ -239,6 +253,16 @@ def drive(driver, uart, workdir, *, timeout, qmp_port=None,
             if console_failure:
                 raise OSError("fixture: artifact directory is unwritable")
         capture_kernel_console.capture = capture
+    import rpi5_swd_snapshot
+    saved_swd = rpi5_swd_snapshot.capture
+    if swd_snapshots is not None:
+        argv += ["--console-swd", "--console-elf", "fixture.elf",
+                 "--console-log", str(workdir / "swd-state.log")]
+        def capture_swd(elf, log, phase):
+            # The BREAK must not have reached the guest yet: DDB stops every
+            # core, so a snapshot after it would show the debugger, not the stall.
+            swd_snapshots.append((phase, uart.uart_breaks))
+        rpi5_swd_snapshot.capture = capture_swd
     saved = (driver.serial, driver.time, driver.send_serial_break, sys.argv)
     driver.serial = FakeSerial(uart)
     driver.time = clock
@@ -253,6 +277,7 @@ def drive(driver, uart, workdir, *, timeout, qmp_port=None,
     finally:
         driver.serial, driver.time, driver.send_serial_break, sys.argv = saved
         capture_kernel_console.capture = saved_capture
+        rpi5_swd_snapshot.capture = saved_swd
     return Outcome(verdict, clock.monotonic() - started, uart, walk_log, breaks)
 
 
@@ -506,7 +531,7 @@ def check_fixture_failure(driver) -> list[str]:
         uart = FakeUart(BOOT_FIRST + SETTINGS_FAILURE)
         result = drive(driver, uart, pathlib.Path(temporary), timeout=90.0,
                        peer_settings=True)
-        if result.breaks or "no QMP port configured" not in result.verdict:
+        if result.breaks or "no BREAK path configured" not in result.verdict:
             failures.append("a missing QMP transport was hidden or used")
     for output in (SETTINGS_FAILURE[:-2], b"echo " + SETTINGS_FAILURE,
                    b"peer-settings: " + SETTINGS_FAILURE):
@@ -702,6 +727,42 @@ def console_before_break(driver):
 
 
 CHECKS += (("console-before-break", console_before_break),)
+
+
+def rpi5_early_failure(driver):
+    """GitHub issue #869: the RPi5 runner failing before a readiness marker.
+
+    The runner writes the request file and waits; with no QMP the driver must
+    take the SWD snapshot first, then a pyserial BREAK, then the full walk
+    (the wait graph included), all inside the postmortem budget.
+    """
+    failures = []
+    with tempfile.TemporaryDirectory() as temporary:
+        snapshots = []
+        uart = FakeUart(BOOT_FIRST, prompt=driver.DDB_PROMPT, at_prompt=False)
+        budget = 180.0  # the RPi5 runner's own --timeout
+        result = drive(driver, uart, pathlib.Path(temporary), timeout=budget,
+                       ash_only=False, serial_break=True, swd_snapshots=snapshots,
+                       request_reason="kernel never reached the userspace-fixture "
+                                      "readiness marker")
+        if snapshots != [("before-break", 0)]:
+            failures.append(f"SWD snapshot missing, repeated or after the BREAK: {snapshots!r}")
+        if uart.uart_breaks != 1 or result.breaks:
+            failures.append(f"expected one pyserial BREAK and no QMP one, got "
+                            f"{uart.uart_breaks} and {result.breaks!r}")
+        if result.commands != list(driver.POSTMORTEM_COMMANDS):
+            failures.append(f"the walk sent {result.commands!r}")
+        if b"wait" not in result.commands:
+            failures.append("the walk did not ask for the wait graph")
+        if "readiness marker" not in result.verdict:
+            failures.append(f"the verdict lost the runner's reason: {result.verdict!r}")
+        if result.elapsed > driver.postmortem_budget(budget) + 1:
+            failures.append(f"the postmortem took {result.elapsed:.1f}s, over its "
+                            "budget")
+    return failures
+
+
+CHECKS += (("rpi5-early-failure", rpi5_early_failure),)
 
 CASES = CaseCount()
 

@@ -165,6 +165,9 @@ DDB_PROMPT = b"ddb> "
 #   bt cpu N every maintained CPU (four), including a peer stalled in a
 #            syscall; cores 2 and 3 carry processes since #579.
 #   sched    enabled/pending/current and the ready/running/blocked counts.
+#   wait     the wait graph: which pid waits for which, and on what event.
+#            #855's diagnosis turned on it (a shell blocked on uart-rx with
+#            nothing queued), and only a hand-typed walk asked (#869).
 #   current  the process the snapshot belongs to.
 #   ps       what else existed, so `current` can be placed among them.
 #   log      the retained kernel log, last: the lines the stall followed, and
@@ -182,7 +185,7 @@ DDB_PROMPT = b"ddb> "
 # the state the next question would have asked about.
 POSTMORTEM_COMMANDS = (b"oops", b"intr", b"bt", b"bt cpu 0", b"bt cpu 1",
                        b"bt cpu 2", b"bt cpu 3",
-                       b"sched", b"current", b"ps",
+                       b"sched", b"wait", b"current", b"ps",
                        b"stacks", b"events", b"log")
 
 # What the walk may spend, granted on top of whatever remains of the capture
@@ -317,6 +320,19 @@ def send_serial_break(port: int, chardev: str, budget: float) -> str:
     return ""
 
 
+def send_uart_break(connection) -> str:
+    """Hold the UART line in BREAK (GitHub issue #869); return what went wrong.
+
+    The Debug Probe's CDC ACM port forwards a line break to the RPi5 UART, the
+    same entry scripts/run_kernel_ddb_rpi5_driver.py proves on every run.
+    """
+    try:
+        connection.send_break(0.25)
+    except Exception as error:  # A failed diagnosis must not replace the verdict.
+        return f"the UART refused the BREAK: {error}"
+    return ""
+
+
 def postmortem_note(before: bytes, answered: int, log_path, *,
                     fixture_requested: bool = False) -> str:
     """What a lane that stopped at a debugger prompt should say instead of a timeout."""
@@ -411,6 +427,12 @@ def main() -> int:
     # QMP monitor to ask through, which is why it is optional rather than
     # required.
     parser.add_argument("--qmp-port", type=int)
+    # GitHub issue #869: the RPi5 lane has no QMP, but its Debug Probe UART
+    # delivers a real BREAK through pyserial, the way the DDB lane enters.
+    parser.add_argument("--serial-break", action="store_true")
+    # GitHub issue #869: the console snapshot comes over SWD instead of the
+    # QEMU GDB stub (scripts/rpi5_swd_snapshot.py).
+    parser.add_argument("--console-swd", action="store_true")
     parser.add_argument("--console-elf")
     parser.add_argument("--console-log")
     parser.add_argument("--interactive-httpd-listener-file")
@@ -439,16 +461,30 @@ def main() -> int:
 
     def capture_console(phase):
         nonlocal console_captured
-        if console_captured or not (args.console_elf and args.console_log and args.qmp_port):
+        if console_captured or not (args.console_elf and args.console_log and
+                                    (args.qmp_port or args.console_swd)):
             return
         console_captured = True
-        from capture_kernel_console import capture
         try:
-            capture(args.qmp_port, args.console_elf, args.console_log, phase)
+            if args.console_swd:
+                from rpi5_swd_snapshot import capture as capture_swd
+                capture_swd(args.console_elf, args.console_log, phase)
+            else:
+                from capture_kernel_console import capture
+                capture(args.qmp_port, args.console_elf, args.console_log, phase)
         except Exception as error:
             # Even an unwritable artifact directory must not hide the stall
             # or prevent the existing bounded serial BREAK/DDB walk.
             print(f"[kernel/uart] console snapshot unavailable: {error}", flush=True)
+
+    if args.qmp_port and args.serial_break:
+        raise RuntimeError("--qmp-port and --serial-break are two BREAK paths; give one")
+    can_break = bool(args.qmp_port or args.serial_break)
+
+    def request_break(budget):
+        if args.qmp_port:
+            return send_serial_break(args.qmp_port, QMP_CHARDEV, budget)
+        return send_uart_break(connection)
 
     interactive_httpd = args.interactive_httpd_ready_file is not None
     if interactive_httpd != (args.interactive_httpd_done_file is not None):
@@ -628,20 +664,19 @@ def main() -> int:
                         budget = postmortem_budget(args.timeout)
                         deadline = time.monotonic() + budget
                         if DDB_PROMPT not in output:
-                            if not args.qmp_port:
+                            if not can_break:
                                 raise RuntimeError(fixture_failure +
-                                    "; DDB walk unavailable: no QMP port configured")
+                                    "; DDB walk unavailable: no BREAK path configured")
                             break_asked = True
-                            print("[kernel/uart] fixture failed; asking QEMU for a "
+                            print("[kernel/uart] fixture failed; asking for a "
                                   "serial BREAK: " + fixture_failure, flush=True)
                             capture_console("before-break")
                             # Collection has its own outside bound. Preserve
                             # the DDB walk's budget after that stopped snapshot.
                             deadline = time.monotonic() + budget
-                            break_failure = send_serial_break(
-                                args.qmp_port, QMP_CHARDEV, min(5.0, budget))
+                            break_failure = request_break(min(5.0, budget))
 
-                if (args.qmp_port and not break_asked and
+                if (can_break and not break_asked and
                         postmortem_at is None and
                         args.postmortem_request_file and
                         Path(args.postmortem_request_file).exists()):
@@ -649,13 +684,12 @@ def main() -> int:
                     print("[kernel/uart] the host peer asked for a postmortem ("
                           + Path(args.postmortem_request_file).read_text(
                               encoding="ascii", errors="replace").strip()
-                          + "); asking QEMU for a serial BREAK", flush=True)
+                          + "); asking for a serial BREAK", flush=True)
                     capture_console("before-break")
-                    break_failure = send_serial_break(
-                        args.qmp_port, QMP_CHARDEV, 5.0)
+                    break_failure = request_break(5.0)
                     deadline = (time.monotonic()
                                 + postmortem_budget(args.timeout))
-                if (args.qmp_port and not break_asked and
+                if (can_break and not break_asked and
                         postmortem_at is None and
                         postmortem_break_due(
                             time.monotonic(), deadline, last_chunk_at,
@@ -663,11 +697,10 @@ def main() -> int:
                     break_asked = True
                     print("[kernel/uart] guest silent for "
                           f"{time.monotonic() - last_chunk_at:.0f}s with its "
-                          "budget nearly gone; asking QEMU for a serial BREAK",
+                          "budget nearly gone; asking for a serial BREAK",
                           flush=True)
                     capture_console("before-break")
-                    break_failure = send_serial_break(
-                        args.qmp_port, QMP_CHARDEV, 5.0)
+                    break_failure = request_break(5.0)
                     deadline = (time.monotonic()
                                 + postmortem_budget(args.timeout))
 
