@@ -7391,10 +7391,10 @@ private fn kernel_process_block_would_miss(
         // finding no Blocked reader.
         ProcessWaitReason::UartRx => { return kernel_uart_rx_pending(); }
         // The TX interrupt's wake (kernel_process_uart_tx_wake_all) runs
-        // under this lock on core 0. Only core 0 blocks on UartTx -- a peer
-        // writer waits for its tick (syscall_terminal_write_wait) -- and the
-        // lock masks core 0's interrupts, so the room read here cannot move
-        // before Blocked is published.
+        // under this lock, after the drain that made the room. A writer on
+        // any core blocks on UartTx (syscall_terminal_write_wait, #866), so
+        // a drain either lands before this read and is seen here, or its
+        // wake takes the lock after Blocked is published and finds it.
         ProcessWaitReason::UartTx => { return kernel_log_tx_writer_room(); }
         // #550's ChildExit window. kernel_process_child_exit makes the child
         // a zombie under this lock and wakes only a parent already Blocked

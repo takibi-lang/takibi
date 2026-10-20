@@ -2178,19 +2178,18 @@ fn syscall_terminal_write(slot: borrow SyscallSlot[0], current_authority: borrow
     return TerminalWriteResult::Written(written);
 }
 
-// The writer that could queue nothing sleeps when something else can run --
-// the same question a UART read asks -- and otherwise waits here for the TX
-// interrupt and runs the write again, which is what being alone means.
+// The writer that could queue nothing sleeps until the TX interrupt has
+// drained the queue, and runs the write again when it wakes. GitHub issue
+// #866: it blocks whether or not anything else is Ready -- a block with no
+// successor publishes Blocked and idles the CPU, as a UART read does (#583)
+// -- instead of staying Running in an EL1 retry loop.
 fn syscall_terminal_write_wait(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running]) -> SyscallAction {
     // Every CPU waits on the shared queue. The room recheck under the run
     // lock and the TX wake scan use the same UartTx wait reason.
     uart_user_write_note_wait();
-    if (kernel_process_other_ready()) {
-        uart_user_write_note_sleep();
-        kernel_process_current_set_pending_block(current_authority, ProcessWaitReason::UartTx, 0);
-        return SyscallAction::Block;
-    }
-    return SyscallAction::WaitInterrupt;
+    uart_user_write_note_sleep();
+    kernel_process_current_set_pending_block(current_authority, ProcessWaitReason::UartTx, 0);
+    return SyscallAction::Block;
 }
 
 // Shared scalar and vectored fd operation; byte counts and errors stay distinct.
@@ -4384,11 +4383,7 @@ private fn syscall_accept_claimed(current_authority: borrow ProcessCurrent[curre
     // the syscall when it is woken. A call that resumes a handshake
     // this listener already had is that same call coming back.
     // One accept step owns the RX capability briefly, then parks the
-    // handshake and returns it. A child or peer process may be running
-    // on another CPU even when no process is Ready on this one. An EL1
-    // wait would hold the sole capability away from that process.
-    let accept_exit_waiter: bool =
-        kernel_process_current_exit_has_waiter(current_authority);
+    // handshake and returns it before any wait.
     // GitHub issue #837: the capability comes first. Beginning a fresh
     // handshake resets the connection's retransmit entries, a walk of the
     // stack-wide chain that only the capability holder may make, and
@@ -4401,17 +4396,11 @@ private fn syscall_accept_claimed(current_authority: borrow ProcessCurrent[curre
             // slot is untouched, so the rerun resumes or begins as
             // this call would have.
             //
-            // There is no Ready successor to take a Block action, but
-            // the parent cannot become Ready until this process exits.
-            // Sleep interruptibly in this syscall instead: an RX or
-            // timer interrupt reruns it with the parked handshake and
-            // its original deadline intact. Re-read other_ready first:
-            // a UART interrupt may just have woken the shell that must
-            // run before this child can exit.
-            if (accept_exit_waiter &&
-                kernel_process_other_ready() == false) {
-                return SyscallAction::WaitInterrupt;
-            }
+            // GitHub issue #866: block on NetRx even with no Ready
+            // successor. The block idles this CPU, and the tick-wake
+            // list wakes a NetRx waiter on the next tick (#829), which
+            // reruns this call with the parked handshake and its
+            // original deadline intact.
             kernel_process_current_set_pending_block(current_authority,
                 ProcessWaitReason::NetRx, 0);
             return SyscallAction::Block;
@@ -4470,16 +4459,8 @@ private fn syscall_accept_claimed(current_authority: borrow ProcessCurrent[curre
                             // promises. So this process waits, off the
                             // run queue, holding nothing, and runs the
                             // syscall again when it is woken.
-                            // Re-read after progress: another core may
-                            // have moved the parent into wait4() while
-                            // accept_progress was examining the socket.
-                            // A simultaneous UART wake takes priority:
-                            // blocking this process is what lets that
-                            // newly Ready shell consume its byte.
-                            if (kernel_process_current_exit_has_waiter(current_authority) &&
-                                kernel_process_other_ready() == false) {
-                                return SyscallAction::WaitInterrupt;
-                            }
+                            // GitHub issue #866: with or without a Ready
+                            // successor; the next tick wakes NetRx.
                             kernel_process_current_set_pending_block(current_authority,
                                 ProcessWaitReason::NetRx, 0);
                             return SyscallAction::Block;
@@ -4505,9 +4486,6 @@ private fn syscall_accept_claimed(current_authority: borrow ProcessCurrent[curre
                             // terminate after an idle interval. Forget
                             // the stale peer and keep waiting; the next
                             // dispatch starts a fresh handshake.
-                            if (kernel_process_other_ready() == false) {
-                                return SyscallAction::WaitInterrupt;
-                            }
                             kernel_process_current_set_pending_block(current_authority,
                                 ProcessWaitReason::NetRx, 0);
                             return SyscallAction::Block;
