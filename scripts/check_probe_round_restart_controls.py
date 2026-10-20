@@ -23,7 +23,8 @@ def main():
     sources = checker.tracked_sources()
     check(sources, 0)
     cases.note()
-    path, corrected, previous = WINDOWS['678']['check']
+    # The run-loop edit; #860 put the arming edit before it.
+    path, corrected, previous = WINDOWS['678']['check'][-1]
     path = 'kernel/' + path
     assert sources[path].count(corrected) == 1
     old = sources[path].replace(corrected, previous)
