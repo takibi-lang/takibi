@@ -22,6 +22,7 @@ suffix is description; dispatch reads only the prefix.
 | Check | Enforced invariant |
 | --- | --- |
 | `check_space_checkpoint_controls.py` | milestone measurement, justified incremental reuse, source fingerprint freshness, tracked evidence, and the mandatory pre-allcheck publication hook |
+| `check_wait_interrupt_sites.py` | every `return` of `SyscallAction::WaitInterrupt` (or `InterruptWait`) in `kernel/kernel/syscall.tkb` is counted per function against a reviewed allowlist with reasons; an event wait must Block on its wake source instead of keeping the process Running (#866) |
 | `check_qemu_vcpu_lease.py` | every maintained QEMU guest starts through `scripts/qemu.sh`, never `qemu-system-aarch64` directly, and every file that starts the shim takes a vCPU lease from the host-wide budget |
 | `check_lease_before_deadline.py` | a driver that spawns a lease-taking QEMU runner (a script calling `resource_lease_vcpu_acquire`, or `make kernelsh-qemu`) takes the vCPU lease itself first, so no deadline is spent in the runner's wait (#719) |
 | `check_execution_model_coverage_controls.py` | a comment-only (line or block comment) mention of an execution-model constant and an empty EXEMPT reason are refused; a code `static_assert` and a reasoned EXEMPT entry are accepted |
