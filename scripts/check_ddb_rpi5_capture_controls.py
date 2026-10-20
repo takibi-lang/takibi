@@ -88,21 +88,59 @@ def main():
         os.environ["KERNEL_CONSOLE_HOLD_READY"] = str(ready)
         os.environ["KERNEL_CONSOLE_HOLD_RELEASE"] = str(release)
         try:
-            for phase, held, valid in ((1, 1, True), (1, 0, False), (0, 1, False)):
+            # GitHub issue #867: the observer resumes through
+            # gdb_progress.continue_by_ticks, so the fake gdb runs a guest:
+            # each `continue` advances every core's tick counter by `step`
+            # and hits the hold checkpoint when `hits`. A guest that never
+            # reaches it with ticks is a finding (QUIET); one whose ticks
+            # stopped is inconclusive (STALLED). Neither may publish ready.
+            cases = ((1, 1, True, True, 1, None),
+                     (1, 0, False, True, 1, "held guard"),
+                     (0, 1, False, True, 1, "held guard"),
+                     (1, 1, False, False, 1000, "was not reached within"),
+                     (1, 1, False, False, 0, "inconclusive"))
+            for phase, held, valid, hits, step, expected in cases:
                 count.note()
                 ready.unlink(missing_ok=True)
+                guest = {"ticks": 0}
+
+                class Breakpoint:
+                    def __init__(self, spec, internal=False):
+                        self.hit_count = 0
+                        guest.setdefault("breakpoints", []).append(self)
+
+                def execute(command, to_string=False, hits=hits, step=step):
+                    if command == "continue":
+                        guest["ticks"] += step
+                        if hits:
+                            for breakpoint in guest["breakpoints"]:
+                                breakpoint.hit_count += 1
+
+                def parse_and_eval(expression, phase=phase, held=held):
+                    if "secondary_tick_count" in expression:
+                        return guest["ticks"]
+                    return phase if "console_ddb_phase" in expression else held
+
+                threads = [SimpleNamespace(num=number) for number in (1, 2, 3, 4)]
                 sys.modules["gdb"] = SimpleNamespace(
-                    execute=lambda command: None,
-                    parse_and_eval=lambda expression: phase if "console_ddb_phase" in expression else held,
-                    GdbError=RuntimeError)
-                accepted = True
+                    execute=execute, parse_and_eval=parse_and_eval,
+                    Breakpoint=Breakpoint, GdbError=RuntimeError, error=RuntimeError,
+                    selected_inferior=lambda: SimpleNamespace(threads=lambda: threads),
+                    selected_thread=lambda: threads[0])
+                for module in ("gdb_progress", "gdb_tick_count"):
+                    sys.modules.pop(module, None)
+                accepted, reason = True, ""
                 try:
                     with contextlib.redirect_stdout(io.StringIO()):
                         runpy.run_path(str(ROOT / "scripts/kernel_console_hold_check.py"))
-                except RuntimeError:
-                    accepted = False
+                except RuntimeError as error:
+                    accepted, reason = False, str(error)
                 if accepted != valid or ready.exists() != valid:
-                    raise SystemExit("FAIL console BREAK observer accepted an unheld phase or mutex")
+                    raise SystemExit("FAIL console BREAK observer accepted an unheld "
+                                     "phase or mutex, or an unreached hold")
+                if expected is not None and expected not in reason:
+                    raise SystemExit(f"FAIL console BREAK observer: expected {expected!r}, "
+                                     f"got {reason!r}")
         finally:
             if previous_gdb is None:
                 sys.modules.pop("gdb", None)
@@ -124,7 +162,7 @@ def main():
         count.note()
         if software.shell_resumed(capture) != expected:
             raise SystemExit("FAIL software DDB capture control: prompt or output ordering")
-    report_pass("ddb-rpi5 capture controls", "LF/CRLF pass; missing hold, missing release, timeout-only evidence, unheld mutex or phase, echoed commands and invalid stopped-world evidence fail",
+    report_pass("ddb-rpi5 capture controls", "LF/CRLF pass; missing hold, missing release, timeout-only evidence, unheld mutex or phase, an unreached hold (QUIET) and a stalled guest (inconclusive), echoed commands and invalid stopped-world evidence fail",
                 cases=count.ran)
     return 0
 
