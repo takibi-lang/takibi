@@ -57,7 +57,7 @@ def reap_parse_cases():
                    line[split:] + b"\n")
     for cut in range(len(line) + 1):
         CASES.note()
-        echoed = b" # " + line[:cut] + b"\nworkload: x\n" + line[cut:] + b"\n"
+        echoed = b" # " + line[:cut] + b"\nworkload: pinned httpd read and wrote a connected socket on the secondary cpu\n" + line[cut:] + b"\n"
         assert count(echoed) is None, cut
     CASES.note()
     assert count(interleaved) is None
@@ -68,7 +68,7 @@ def reap_parse_cases():
     CASES.note()
     assert count(interleaved + begin[1:] + zombie + end) == 2
     CASES.note()
-    assert count(interleaved + begin[1:] + b"workload: late line\n" + zombie + end) == 2
+    assert count(interleaved + begin[1:] + b"workload: pinned httpd closed and shut down a connected socket on the secondary cpu\n" + zombie + end) == 2
     CASES.note()
     assert count(interleaved + begin[1:] + end) == 0
     CASES.note()
