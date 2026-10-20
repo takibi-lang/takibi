@@ -47,6 +47,7 @@ import time
 
 import serial
 from await_timing import AwaitTiming
+from typed_marker import typed_marker
 
 # The milestones, in the order the session reaches them.
 MILESTONES = ("wake-sent", "wake-acked", "break-sent", "first-prompt",
@@ -148,8 +149,10 @@ def resumed(normalized: bytes) -> bool:
     was describing a side effect of the race it now avoids.
 
     Anchored after `ddb: continuing` so nothing earlier in the capture can
-    satisfy it. Ash can echo the input command, but an echoed
-    `echo ddb-resume-ok` line cannot satisfy the exact output predicate.
+    satisfy it. Ash can echo the input command, and a peer-CPU line can
+    split that echo so a fragment lands on a line of its own; the command is
+    therefore typed as `echo ddb-re''sume-ok` (scripts/typed_marker.py, #857),
+    so no fragment of the echo is the output line.
 
     With or without a prompt in front of it, then. Which one appears is that
     same race -- whether the shell answered the waking newline before the
@@ -358,7 +361,7 @@ def main() -> int:
                 if (not resume_command_sent
                         or time.monotonic() - last_resume_write
                         >= RESUME_RETRY_SECONDS):
-                    uart.write(b"echo ddb-resume-ok\n")
+                    uart.write(b"echo " + typed_marker(b"ddb-resume-ok") + b"\n")
                     uart.flush()
                     last_resume_write = time.monotonic()
                     timeline.resume_attempts += 1

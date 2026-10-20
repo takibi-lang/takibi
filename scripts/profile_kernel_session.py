@@ -314,12 +314,14 @@ def cmd_check(args) -> int:
 # -- capture ------------------------------------------------------------
 
 LISTENER = b"listener ready port=8080"
+PROFILE_DONE = b"__PROFILE_DONE__"
 BRIDGE_RE = re.compile(r"httpd bridge: (http://127\.0\.0\.1:\d+/)".encode())
 
 
 def capture(args) -> int:
     sys.path.insert(0, str(HERE))
     from run_kernel_churn import Session, has_prompt, terminate
+    from typed_marker import typed_marker
 
     root = Path(args.root).resolve()
     out = Path(args.out)
@@ -342,10 +344,10 @@ def capture(args) -> int:
             raise RuntimeError("shell did not come up")
 
         def shell(command: str, seconds: float = 120) -> str:
-            mark = b"__PROFILE_DONE__"
             start = len(session.normalized())
-            session.send(command.encode() + b"; echo " + mark + b"\n")
-            if session.wait_for(lambda text: (b"\n" + mark + b"\n") in text[start:]
+            session.send(command.encode() + b"; echo " +
+                         typed_marker(PROFILE_DONE) + b"\n")
+            if session.wait_for(lambda text: (b"\n" + PROFILE_DONE + b"\n") in text[start:]
                                 or None, seconds) is None:
                 raise RuntimeError(f"shell command did not finish: {command}")
             return session.normalized()[start:].decode("ascii", "replace")

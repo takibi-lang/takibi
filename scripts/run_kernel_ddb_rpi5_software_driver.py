@@ -7,6 +7,7 @@ import re
 
 from ddb_software_brk_checks import backtrace_problems
 from await_timing import AwaitTiming
+from typed_marker import typed_marker
 import time
 
 import serial
@@ -109,7 +110,7 @@ def drive(args) -> int:
                         and b" # " in normalized.partition(b"ddb: continuing\n")[2]):
                     if command_timing:
                         command_timing.record("shell prompt", True, time.monotonic())
-                    write_line(uart, b"echo ddb-software-resume-ok")
+                    write_line(uart, b"echo " + typed_marker(b"ddb-software-resume-ok"))
                     shell_probe_sent = True
                 if shell_probe_sent and shell_resumed(normalized):
                     if command_timing:

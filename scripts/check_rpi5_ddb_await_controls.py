@@ -63,8 +63,10 @@ def software_case(*, first=1.0, release=1.0, echo_only=False, unavailable=False)
                 sent.append(command)
                 if command == b"continue":
                     answer = b"ddb: continuing\n" + b"ddb: console tx=queued\n" + b" # \x1b[6n"
-                elif command == b"echo ddb-software-resume-ok":
-                    answer = (b"echo ddb-software-resume-ok\n # " if echo_only else
+                elif command == b"echo ddb-softwar''e-resume-ok":
+                    # Typed with a quote split (#857), so the echo of the
+                    # command is never the awaited output line.
+                    answer = (b"echo ddb-softwar''e-resume-ok\n # " if echo_only else
                               b"\nddb-software-resume-ok\n # ")
                 elif command == b"bt":
                     answer = (b"ddb: bt frame=0 pc=0x1100 boundary=assembly-bridge\n"
@@ -109,7 +111,7 @@ def software_case(*, first=1.0, release=1.0, echo_only=False, unavailable=False)
             assert len(command_rows) == 13, command_rows
             assert all(row["timeout_seconds"] <= 8.0 for row in command_rows), command_rows
             assert all("snapshot released" in row["budget_origin"] for row in command_rows), command_rows
-            assert sent[-1] == b"echo ddb-software-resume-ok", sent
+            assert sent[-1] == b"echo ddb-softwar''e-resume-ok", sent
             if release > first:
                 assert boot[0]["elapsed_seconds"] < release, boot
             by_name = {row["await"]: row for row in command_rows}

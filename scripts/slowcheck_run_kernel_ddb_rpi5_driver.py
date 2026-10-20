@@ -175,7 +175,7 @@ def scripted_board(master: int, proc, answer_on_attempt: int, budget: float,
                     resumed_line += PEER_RECORD
                 os.write(master, b"\nddb: continuing\n" + resumed_line)
                 continued = True
-            elif command == b"echo ddb-resume-ok" and continued:
+            elif command == b"echo ddb-re''sume-ok" and continued:
                 resume_seen += 1
                 # answer_on_attempt == 0 means never answer.
                 if answer_on_attempt and resume_seen >= answer_on_attempt:

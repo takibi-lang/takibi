@@ -16,6 +16,7 @@ from lease_wait import lease_pending, timed_out_waiting
 from qemu_vcpu_lease import lease, shell_vcpus
 from progress_timeout import ProgressTimeout
 from await_timing import AwaitTiming
+from typed_marker import typed_marker
 
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -33,17 +34,6 @@ COMMAND_RESULT = b"__KERNELSH_PTY_SMOKE__"
 HTTPD_REAP_BEGIN = b"__KERNELSH_HTTPD_REAP_BEGIN__"
 HTTPD_REAP_END = b"__KERNELSH_HTTPD_REAP_END__"
 HTTPD_PROCESS = b"/bin/httpd -f -p 8080 -h"
-
-
-def typed_marker(marker):
-    """Spell MARKER so the echoed command line never contains it (#856).
-
-    ash echoes what the PTY types, and peer-CPU workload lines can split that
-    echo so a fragment of it lands on a line of its own.  An empty '' pair in
-    the middle keeps the typed text distinct; only echo's output is MARKER.
-    """
-    middle = len(marker) // 2
-    return marker[:middle] + b"''" + marker[middle:]
 
 
 COMMAND_LINE = b"x=; echo " + typed_marker(COMMAND_RESULT) + b"\n"

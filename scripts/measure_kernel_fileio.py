@@ -57,6 +57,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 from run_kernel_churn import Session, has_prompt, terminate  # noqa: E402
+from typed_marker import typed_marker  # noqa: E402
 
 LISTENER = b"listener ready port=8080"
 DONE = b"__FILEIO_DONE__"
@@ -92,7 +93,7 @@ def port_in_use(port):
 
 def run_command(session, command, seconds):
     start = len(session.normalized())
-    session.send(command.encode() + b"; echo " + DONE + b"\n")
+    session.send(command.encode() + b"; echo " + typed_marker(DONE) + b"\n")
     marker = b"\n" + DONE + b"\n"
 
     def finished(text):

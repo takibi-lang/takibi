@@ -50,7 +50,7 @@ class Session:
         if self.silent:
             return
         self.text += command
-        if command == b"echo __BULK_TCP_DONE__\n":
+        if command == driver.BULK_LINE:
             if not self.bulk_echoed_only:
                 self.text += b"\n__BULK_TCP_DONE__\n # "
             return

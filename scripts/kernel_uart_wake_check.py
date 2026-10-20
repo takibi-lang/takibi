@@ -63,6 +63,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from gdb_interrupt import interrupt_after  # noqa: E402
 from progress_timeout import ProgressTimeout  # noqa: E402
 from await_timing import AwaitTiming  # noqa: E402
+from typed_marker import typed_marker  # noqa: E402
 
 
 SERIAL_PORT = int(os.environ["UART_WAKE_SERIAL_PORT"])
@@ -77,8 +78,9 @@ BATCH_DEADLINE = time.monotonic() + float(
 STEP_TIMEOUT = 10.0
 
 WINDOW = "syscall_test_evidence_record_read_uart_wait"
-COMMAND = b"echo uart-wake-ok\n"
 ANSWER = "uart-wake-ok"
+# The typed line never contains ANSWER, so no split echo can answer (#857).
+COMMAND = b"echo " + typed_marker(ANSWER.encode()) + b"\n"
 SHELL_READY = b"interactive shell: uart blocked\n"
 # The same marker and answer scripts/run_kernel_uart_driver.py uses.
 PAYLOAD_READY = b"concurrency: parent progressed while child uart-blocked"

@@ -14,6 +14,7 @@ import urllib.request
 from await_timing import AwaitTiming
 from run_kernel_churn import Session, FailureMarker, has_prompt, terminate
 from measure_kernel_shell_tcp import measure_bulk
+from typed_marker import typed_marker
 
 ROOT = Path(__file__).resolve().parent.parent
 LISTENER = b"persistent server: listener ready port=8080"
@@ -23,6 +24,10 @@ PS_DONE = b"__RPI5_SHELL_HTTP_PS__"
 # Count its command prefix, as the QEMU shell smoke does, including workers.
 HTTPD = b"/bin/httpd -f -p 8080 -h"
 BODY_MARKER = b"<h1>Takibi Kernel</h1>"
+BULK_DONE = b"__BULK_TCP_DONE__"
+# Typed lines never contain the awaited marker (#857, scripts/typed_marker.py).
+PS_LINE = b"ps; echo " + typed_marker(PS_DONE) + b"\n"
+BULK_LINE = b"echo " + typed_marker(BULK_DONE) + b"\n"
 BOOT_SECONDS = 180
 COMMAND_SECONDS = 20
 EXIT_SECONDS = 15
@@ -91,7 +96,7 @@ def run(session, directory, url, note_phase=lambda _phase: None, *, elf_sha256=N
         note_phase(phase)
         print(f"[kernel/rpi5 shell smoke] {phase}", flush=True)
         start = len(session.normalized())
-        session.send(b"ps; echo " + PS_DONE + b"\n")
+        session.send(PS_LINE)
         snapshot = await_console(session, directory, phase, COMMAND_SECONDS,
                                  lambda text: process_snapshot(text[start:]), start)
         (directory / f"ps-{number}.log").write_bytes(snapshot)
@@ -100,9 +105,9 @@ def run(session, directory, url, note_phase=lambda _phase: None, *, elf_sha256=N
         measure_bulk(url, directory, ROOT, expected_elf_digest=elf_sha256)
         note_phase("prompt-after-bulk-tcp")
         start = len(session.normalized())
-        session.send(b"echo __BULK_TCP_DONE__\n")
+        session.send(BULK_LINE)
         await_console(session, directory, "prompt-after-bulk-tcp", COMMAND_SECONDS,
-                      lambda text: b"\n__BULK_TCP_DONE__\n" in text[start:] and
+                      lambda text: b"\n" + BULK_DONE + b"\n" in text[start:] and
                       has_prompt(text[start:]), start)
     return "console-exit"
 
