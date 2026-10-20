@@ -124,10 +124,11 @@ then reaps the cancelled record. Older live children and zombies remain linked.
 
 ## Core 0's idle context
 
-Core 0 idles on `core0_idle_stack_*` (GitHub issue #592), not on its boot
-stack, which still holds `main()`'s suspended frames; since #821 that stack
-is entry 0 of the idle stack array every core indexes, and the loop is the
-peers' one. It goes there only
+Core 0 idles on its boot stack, as every peer idles on the PSCI boot stack
+it started on (GitHub issues #592, #821, #831): `main()` never returns, and
+once it has handed off nothing else stands on that stack, so it is entry 0
+of the idle stack array every core indexes, and the loop is the peers' one.
+It goes there first when `main()` ends, and after that only
 from a syscall return that found no other process core 0 may run while the
 returning process's affinity excludes core 0, and only when core 0 stands
 on that process's own kernel stack -- a clone child's first return still
@@ -250,10 +251,10 @@ Symmetric now:
   views.
 - The idle path: every core leaves a process's stack through the same four
   `kernel_idle_*_enter` entries for the same `kernel_idle_loop` (#821). Its
-  idle stack is entry `cpu index` of one array starting at
-  `core0_idle_stack`; entries 1 to 3 are the secondaries' PSCI boot stacks,
-  and entry 0 is core 0's own because its boot stack still holds `main()`'s
-  frames and slot 0's context (the slot 0 row). Every core calls the same
+  idle stack is entry `cpu index` of one array starting at the boot stack:
+  every core idles on the stack it booted on (#831; core 0 had a separate
+  idle stack while its boot stack held `main()`'s frames and slot 0's
+  context). Every core calls the same
   console poll, which only core 0 acts on (the UART input-flow request,
   inside `kernel_log_console_poll`), and core 1 alone runs the peer log
   probe (the probes row).

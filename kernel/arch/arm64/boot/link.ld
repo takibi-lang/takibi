@@ -60,19 +60,17 @@ SECTIONS {
         stack_top = boot_stack_top;
         /* 0x8000-aligned again by construction, the run above being
            exactly 0x8000 long. */
-        /* GitHub issues #592 and #821: core 0's idle stack, entry 0 of
-           the per-core idle stack array whose entries 1 to 3 are the
-           secondary boot stacks below. Core 0's boot stack still holds
-           main()'s suspended frames and slot 0's kernel context, so core
-           0 idles here instead; every core finds its idle stack as
-           core0_idle_stack_top plus its core index times one stride
-           (user_entry.S, .Lidle_stack), so the idle path names no core.
-           Same 0x8000 shape as every stack around it. */
-        core0_idle_stack_run_bottom = .;
-        . += 0x4000;
-        core0_idle_stack_bottom = .;
-        . += 0x4000;
-        core0_idle_stack_top = .;
+        /* GitHub issues #592, #821 and #831: the boot stack is also
+           core 0's idle stack, entry 0 of the per-core idle stack array
+           whose entries 1 to 3 are the secondary boot stacks below, so each
+           core idles on the stack it booted on. main() never returns: it
+           ends by leaving this stack for the idle loop, which restarts it
+           from its top (kernel_idle_boot_enter), and nothing else stands on
+           it after that. Every core finds its idle stack as boot_stack_top
+           plus its core index times one stride (user_entry.S,
+           .Lidle_stack), so the idle path names no core. Core 0 had a
+           separate 0x8000 idle stack here while main()'s frames and the
+           static slot-0 record's context still lived on the boot stack. */
         secondary_stack_base = .;
         secondary_stack_run_bottom = .;
         . += 0x4000;

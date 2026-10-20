@@ -362,9 +362,10 @@ crash_snapshot_copy_saved_frame:
  * the matching reenter in arch/arm64/kernel/secondary.tkb, which releases
  * the stack (exit, yield, block) or only idles (tick). Every core takes the
  * same path (GitHub issue #821): its idle stack is entry <core index> of the
- * array that starts at core0_idle_stack (link.ld), where entries 1 to 3 are
- * the secondaries' PSCI boot stacks and entry 0 is core 0's own, since core
- * 0's boot stack still holds main()'s frames. Current-EL interrupts still
+ * array that starts at the boot stack (link.ld), entries 1 to 3 being the
+ * secondaries' PSCI boot stacks, so every core idles on the stack it booted
+ * on; core 0's is free once main() has handed off (#831), and main() never
+ * returns. Current-EL interrupts still
  * dispatch on the separate per-CPU IRQ stack selected by generated exception
  * entry. The process may change hands only after SP has left its stack. */
     .global kernel_idle_yield_enter
@@ -409,10 +410,10 @@ kernel_idle_boot_enter:
 kernel_idle_exit_enter:
     msr     DAIFSet, #0x2
     adr     x5, kernel_idle_exit_reenter
-/* x1 = core0_idle_stack_top + (TPIDR_EL1 / per-core stride) * idle stride */
+/* x1 = boot_stack_top + (TPIDR_EL1 / per-core stride) * idle stride */
 .Lidle_stack:
-    adrp    x1, core0_idle_stack_top
-    add     x1, x1, :lo12:core0_idle_stack_top
+    adrp    x1, boot_stack_top
+    add     x1, x1, :lo12:boot_stack_top
     mrs     x2, tpidr_el1
     adrp    x3, percpu_stack_group_end
     add     x3, x3, :lo12:percpu_stack_group_end

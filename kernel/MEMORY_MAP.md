@@ -127,25 +127,22 @@ kernels.
 | `boot_stack_run_bottom` | `+0x00000` | linker script `.stack` | CHECKED (ELF offset) |
 | `boot_stack_bottom` | `+0x04000` | linker script `.stack` | CHECKED (ELF offset) |
 | `boot_stack_top` | `+0x08000` | linker script `.stack` | CHECKED (ELF offset) |
-| `core0_idle_stack_run_bottom` | `+0x08000` | linker script `.stack` | CHECKED (ELF offset) |
-| `core0_idle_stack_bottom` | `+0x0c000` | linker script `.stack` | CHECKED (ELF offset) |
-| `core0_idle_stack_top` | `+0x10000` | linker script `.stack` | CHECKED (ELF offset) |
-| `secondary_stack_base` | `+0x10000` | linker script `.stack` | CHECKED (ELF offset) |
-| `secondary_stack_run_bottom` | `+0x10000` | linker script `.stack` | CHECKED (ELF offset) |
-| `secondary_stack_bottom` | `+0x14000` | linker script `.stack` | CHECKED (ELF offset) |
-| `secondary_stack_top` | `+0x18000` | linker script `.stack` | CHECKED (ELF offset) |
-| `secondary_stack_group_end` | `+0x18000` | linker script `.stack` | CHECKED (ELF offset) |
-| `percpu_stack_base` | `+0x28000` | linker script `.stack` | CHECKED (ELF offset) |
-| `overflow_stack_run_bottom` | `+0x28000` | linker script `.stack` | CHECKED (ELF offset) |
-| `overflow_stack_bottom` | `+0x2c000` | linker script `.stack` | CHECKED (ELF offset) |
-| `overflow_stack_top` | `+0x30000` | linker script `.stack` | CHECKED (ELF offset) |
-| `irq_stack_run_bottom` | `+0x30000` | linker script `.stack` | CHECKED (ELF offset) |
-| `irq_stack_bottom` | `+0x34000` | linker script `.stack` | CHECKED (ELF offset) |
-| `irq_stack_top` | `+0x38000` | linker script `.stack` | CHECKED (ELF offset) |
-| `percpu_stack_group_end` | `+0x38000` | linker script `.stack` | CHECKED (ELF offset) |
-| `secondary_percpu_stack_base` | `+0x38000` | linker script `.stack` | CHECKED (ELF offset) |
-| `percpu_stack_end` | `+0x68000` | linker script `.stack` | CHECKED (ELF offset) |
-| `usable_ram_start` | `+0x68000` | linker script, `ALIGN(4096)` | CHECKED (ELF offset) |
+| `secondary_stack_base` | `+0x08000` | linker script `.stack` | CHECKED (ELF offset) |
+| `secondary_stack_run_bottom` | `+0x08000` | linker script `.stack` | CHECKED (ELF offset) |
+| `secondary_stack_bottom` | `+0x0c000` | linker script `.stack` | CHECKED (ELF offset) |
+| `secondary_stack_top` | `+0x10000` | linker script `.stack` | CHECKED (ELF offset) |
+| `secondary_stack_group_end` | `+0x10000` | linker script `.stack` | CHECKED (ELF offset) |
+| `percpu_stack_base` | `+0x20000` | linker script `.stack` | CHECKED (ELF offset) |
+| `overflow_stack_run_bottom` | `+0x20000` | linker script `.stack` | CHECKED (ELF offset) |
+| `overflow_stack_bottom` | `+0x24000` | linker script `.stack` | CHECKED (ELF offset) |
+| `overflow_stack_top` | `+0x28000` | linker script `.stack` | CHECKED (ELF offset) |
+| `irq_stack_run_bottom` | `+0x28000` | linker script `.stack` | CHECKED (ELF offset) |
+| `irq_stack_bottom` | `+0x2c000` | linker script `.stack` | CHECKED (ELF offset) |
+| `irq_stack_top` | `+0x30000` | linker script `.stack` | CHECKED (ELF offset) |
+| `percpu_stack_group_end` | `+0x30000` | linker script `.stack` | CHECKED (ELF offset) |
+| `secondary_percpu_stack_base` | `+0x30000` | linker script `.stack` | CHECKED (ELF offset) |
+| `percpu_stack_end` | `+0x60000` | linker script `.stack` | CHECKED (ELF offset) |
+| `usable_ram_start` | `+0x60000` | linker script, `ALIGN(4096)` | CHECKED (ELF offset) |
 
 ### The image ceiling
 
@@ -209,12 +206,14 @@ on every `make kernelbuild`:
   address say which half of a stack region it is in, which the generated
   exception entries depend on -- see "Kernel stacks" below.
 
-`core0_idle_stack_run_bottom` to `core0_idle_stack_top` is core 0's idle
-stack (GitHub issue #592); its boot stack cannot serve, because it still
-holds `main()`'s suspended frames. It sits directly below the secondary boot
-stacks with their stride, so it is entry 0 of one idle stack array: every
-core's idle stack top is `core0_idle_stack_top` plus its core index times
-that stride (GitHub issue #821, `.Lidle_stack` in `user_entry.S`).
+The boot stack is also core 0's idle stack (GitHub issues #592, #821, #831):
+`main()` never returns, and once it hands off to PID 1 nothing else stands on
+it. It sits directly below the secondary boot stacks with their stride, so it
+is entry 0 of one idle stack array, and every core idles on the stack it
+booted on: every core's idle stack top is `boot_stack_top` plus its core
+index times that stride (`.Lidle_stack` in `user_entry.S`). Core 0 had a
+separate 32 KiB idle stack here until #831, while the boot stack still held
+`main()`'s suspended frames and the static slot-0 record's context.
 
 `stack_top` is an alias of `boot_stack_top`, kept because `entry.S` names
 it. `percpu_stack_end` and `usable_ram_start` are the same address:
