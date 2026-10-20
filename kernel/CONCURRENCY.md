@@ -232,6 +232,19 @@ Symmetric now:
   echo; the `nic_irq` view asserts both phases. Its negative control,
   `kernelcheck-race-window-830-qemu`, pins the SPI to core 0 instead and
   must fail.
+- The xHCI interrupt on RPi5 (#830, xHCI slice). It rotates like the NIC,
+  through the same `irq_rotation_core`
+  (`kernel/platform/rpi5/xhci_irq_affinity.tkb`). The handler clears
+  IMAN.IP and USBSTS.EINT, both write-1-to-clear, and sends SEV. It no
+  longer rewrites ERDP to clear EHB: that read-modify-write would race the
+  consumer's ERDP advance on another core, so the event consumer is now
+  ERDP's only writer (maintainer decision 2026-10-20, option A). An event
+  nobody awaits leaves EHB set until the consumer reaches it; the
+  consumer's poll loop is also woken by the timer, so it is not lost. The
+  boot report after USB provisioning asserts that at least two cores took
+  xHCI interrupts (`usb_storage` view). There is no separate RPi5 negative
+  control; the NIC's QEMU control covers the shared rotation (decision
+  2026-10-20, option B).
 - Crash capture on a fault, and the per-core rows of DDB's `intr` and tick
   views.
 - The idle path: every core leaves a process's stack through the same four
@@ -269,7 +282,7 @@ Special, with the reason it stays so today:
 | Boot | `boot/entry.S` parks every MPIDR but 0; core 0 runs `main()`, the GIC distributor, device bring-up and the boot fixtures | the firmware hands off one core, and machine-wide state is initialized once | no: one core has to come first |
 | PSCI start authority | `cpu_start_reserve` (`lib/occupancy.tkb`) | starting cores is a boot phase; no hotplug exists | only with CPU hotplug, which nothing needs |
 | Syscalls outside the peer-safety table | `syscall_peer_refused`, `syscall_peer_safe`; rerun on core 0 with the process pinned for the call | no subsystem entry is left: the BusyBox Extras exec left in #828, and the TCP pool drain it ran is gone since #836. The terminal reboot and the payload fixture's parent-progress report are still refused by number, so the rerun path itself stays | yes, one entry at a time; each is its own follow-up |
-| Device interrupts | UART and xHCI SPIs target core 0; a secondary's dispatch handles its tick, its PMU line and the NIC (above), nothing else | their drivers' state is touched only from core 0 | yes: the NIC moved in #830; xHCI, then the UART (with BREAK -> DDB and the input-flow poll), are #830's next slices |
+| Device interrupts | the UART SPI targets core 0; a secondary's dispatch handles its tick, its PMU line, the NIC and xHCI (above), nothing else | the UART driver's state is touched only from core 0 | yes: the NIC and xHCI moved in #830; the UART (with BREAK -> DDB and the input-flow poll) is #830's next slice |
 | DDB entry by UART BREAK | the UART IRQ branch on core 0 | follows the device interrupt row; DDB then stops the others through the world stop | follows the device row |
 | UART input-flow requests | `kernel_log_console_poll` (`kernel/printk/log.tkb`), called at syscall entry and from core 0's idle loop | the UART is core 0's device (see the device interrupt row); since #613 slice 5 every CPU writes the log ring, so peer lines no longer pass through core 0 and the old peer drain and UartTx blocking are gone -- this flow-control poll is all that is left. A termios change sends the request itself from whichever CPU made it (#826), deciding under the console lock as the poll does | follows the device interrupt row |
 | Two-core probes and fixtures | the idle loop's core-1 branch (the peer log probe), the peer console probe, `world_stop_probe`'s two-core stop, the spread-timer and busy-pair fixtures | each is an experiment written for core 0 against CPU 1 | no: the fixed pair is the experiment |

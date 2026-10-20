@@ -344,7 +344,8 @@ path has one command block, bounce buffer and event-ring cursor. Every
 single-block read, single-block write and read-ahead transfer holds that
 lock, through a linear `BlockDeviceGuard` the device functions take as a
 parameter. It is a `TaskMutex` rather than a `Mutex` because the USB path
-waits for the xHCI interrupt on core 0, which a masking lock would block.
+waits for the xHCI interrupt, which a masking lock would block on the core
+the rotating route names (GitHub issue #830).
 `usb_provision.tkb` writes around it, once, before any process exists.
 
 The same file's read-ahead run (GitHub issue #545) is one 64-block buffer

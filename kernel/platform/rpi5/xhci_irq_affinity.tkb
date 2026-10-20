@@ -1,0 +1,68 @@
+// GitHub issue #830 (xHCI slice): the USB host controller's interrupt
+// rotates through the online cores, as the NIC's does
+// (kernel/kernel/nic_irq_affinity.tkb has the policy and its reasons).
+//
+// The handler (xhci_irq_handler, usb_xhci.tkb) writes only IMAN.IP and
+// USBSTS.EINT, both write-1-to-clear, and sends SEV. It does not write ERDP:
+// the event-ring consumer, which holds the block device lock on whichever
+// core issued the command, is ERDP's only writer, so no read-modify-write
+// of ERDP spans two cores (maintainer decision 2026-10-20, option A).
+//
+// Current limitations (2026-10-20). Keep this list current as call sites
+// change; a stale limitation is worse than none.
+// - NO PIN AND NO OWN NEGATIVE CONTROL. The boot report only asserts that
+//   at least two cores took xHCI interrupts. The rotation itself is the
+//   NIC's irq_rotation_core, whose QEMU control
+//   (kernelcheck-race-window-830-qemu) stays the one negative control:
+//   maintainer decision 2026-10-20, option B (no extra RPi5 image).
+// - A RETARGET RACES THE NEXT DELIVERY, as for the NIC: two cores can be in
+//   the handler at once. Both W1C writes are idempotent.
+
+use "kernel/lib/atomic_word.tkb";
+use "kernel/lib/execution_model.tkb";
+use "kernel/kernel/nic_irq_affinity.tkb";
+use "kernel/arch/arm64/kernel/gicv2.tkb";
+use "kernel/arch/arm64/boot/cpu.tkb";
+
+// Incremented once per handled xHCI interrupt.
+private let mut xhci_irq_turn: AtomicWord;
+// xHCI interrupts each core handled since boot, for the boot report.
+private let mut xhci_irq_taken: [AtomicWord; KERNEL_MAX_CORES];
+
+fn xhci_irq_route(intid: u32) !{unsafe} {
+    let core: usize = irq_rotation_core(atomic_word_load(&xhci_irq_turn));
+    if (core >= 8) { return; }
+    gic_intid_target(intid, (1 << core) as u8);
+}
+
+// Called by the RPi5 dispatch on the core that took the xHCI interrupt,
+// after the handler and before the EOI.
+fn xhci_irq_handled(intid: u32) !{unsafe} {
+    let raw: usize = cpu_id();
+    if (raw < KERNEL_MAX_CORES) {
+        let core: {0..<KERNEL_MAX_CORES as usize} = raw;
+        let previous_taken: usize = atomic_word_fetch_add(&xhci_irq_taken[core], 1);
+    }
+    let previous_turn: usize = atomic_word_fetch_add(&xhci_irq_turn, 1);
+    xhci_irq_route(intid);
+}
+
+// After the boot provisioning's disk I/O, with the secondaries online.
+fn xhci_irq_evidence_report() !{logs, unsafe} {
+    let mut cores: usize = 0;
+    for core: usize in 0..<KERNEL_MAX_CORES {
+        if (atomic_word_load(&xhci_irq_taken[core]) > 0) { cores = cores + 1; }
+    }
+    if (cores >= 2) {
+        kernel_boot_log("usb xhci: irq rotating, taken on at least two cpus\n");
+        return;
+    }
+    kernel_boot_log("usb xhci: irq rotation FAILED: taken=");
+    for core: usize in 0..<KERNEL_MAX_CORES {
+        if (core < kernel_online_core_count()) {
+            if (core != 0) { kernel_boot_log(","); }
+            uart_put_udec(atomic_word_load(&xhci_irq_taken[core]));
+        }
+    }
+    kernel_boot_log("\n");
+}

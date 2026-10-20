@@ -182,9 +182,13 @@ EXEMPT = {
         "the next doorbell/await parameters, reached only from "
         "usb_xhci.tkb's commands (GitHub issue #720)",
     "platform/rpi5/usb_xhci.tkb":
-        "device state; MSI-X is routed to CPU0, and every mass-storage "
-        "command after provisioning is issued under memory.tkb's "
-        "block_device_lock (GitHub issue #533)",
+        "device state; the rotating interrupt handler (GitHub issue #830) "
+        "writes only the IMAN and USBSTS write-1-to-clear bits, and every "
+        "mass-storage command after provisioning is issued under "
+        "memory.tkb's block_device_lock (GitHub issue #533)",
+    "platform/rpi5/xhci_irq_affinity.tkb":
+        "GitHub issue #830: the rotation counter and the per-CPU counts are "
+        "AtomicWords any core may update",
 
     # --- Not state that depends on either number.
     "arch/arm64/mm/asid.tkb":

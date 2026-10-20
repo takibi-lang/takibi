@@ -1,5 +1,6 @@
 use "kernel/init/test_driver.tkb";
 use "kernel/platform/rpi5/usb_xhci.tkb";
+use "kernel/platform/rpi5/xhci_irq_affinity.tkb";
 use "kernel/platform/rpi5/memory.tkb";
 use "kernel/platform/rpi5/system_timer_dtb.tkb";
 use "kernel/platform/rpi5/rp1_dtb.tkb";
@@ -212,6 +213,8 @@ fn kernel_test_platform_storage() {
                 }
                 UsbProvisionVerifyResult::Equal => {
                     kernel_boot_log("usb ext2: provision verify byte-equal\n");
+                    // GitHub issue #830: provisioning ran with the USB SPI rotating.
+                    xhci_irq_evidence_report();
                 }
             }
             kernel_ext2_mount_and_run(usb_device);

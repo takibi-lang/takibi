@@ -46,12 +46,19 @@ private let mut nic_irq_phase_start: [usize; KERNEL_MAX_CORES];
 // The NIC SPI the fixture pinned, so unpinning can route it again.
 private let mut nic_irq_evidence_intid: u32 = 0;
 
+// The core a rotating device interrupt goes to on `turn`: the online cores
+// in index order. The xHCI route (kernel/platform/rpi5/xhci_irq_affinity.tkb)
+// shares this with the NIC.
+fn irq_rotation_core(turn: usize) -> usize !{unsafe} {
+    let online: usize = kernel_online_core_count();
+    if (online == 0) { return 0; }
+    return turn % online;
+}
+
 fn nic_irq_target_core() -> usize !{unsafe} {
     let pinned: usize = atomic_word_load(&nic_irq_pin);
     if (pinned != 0) { return pinned - 1; }
-    let online: usize = kernel_online_core_count();
-    if (online == 0) { return 0; }
-    return atomic_word_load(&nic_irq_turn) % online;
+    return irq_rotation_core(atomic_word_load(&nic_irq_turn));
 }
 
 // Writes the current target for `intid`. The drivers call this where they

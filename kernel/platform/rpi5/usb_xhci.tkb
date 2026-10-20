@@ -258,30 +258,25 @@ fn disk_io_ok(r: DiskIoResult) -> bool {
 }
 
 // GitHub issue #187: called from kernel/platform/rpi5/intc.tkb's
-// rpi5_irq_dispatch on GIC INTID 191 (RP1_USBHOST0_0). IMAN.IP (bit 0) and
+// rpi5_irq_dispatch on GIC INTID 191 (RP1_USBHOST0_0), on whichever core the
+// rotating route delivered it to (GitHub issue #830). IMAN.IP (bit 0) and
 // USBSTS.EINT (bit 3) are both write-1-to-clear per the xHCI spec; clearing
-// both here is what lets the controller assert the interrupt again for the
-// next event.
+// both here is what lets the controller assert the interrupt again.
 //
-// ERDP bit 3 (Event Handler Busy, RW1C) also has to be cleared here, not
-// only inside usb_await_event()'s own consumer loop below. An asynchronous
-// event that arrives while nothing is calling usb_await_event() (a Port
-// Status Change Event queued by xhci_address_device()'s USB port reset,
-// while that function is still busy polling PORTSC for reset completion,
-// is the concrete case that hung on real hardware) still raises exactly
-// one interrupt and sets EHB, but its own ERDP is never advanced by
-// anyone, so EHB stays set. Per the xHCI spec the xHC will not assert a
-// further interrupt while EHB=1, so the NEXT real event (Address Device's
-// own Command Completion Event) produces no interrupt at all and
-// usb_await_event()'s interrupt_wait() blocks forever. Re-reading and
-// rewriting the CURRENT ERDP value (not advancing xhci_evt_idx, which
-// stays owned by usb_await_event()'s own consumer loop) clears EHB
-// unconditionally on every interrupt, so a still-unconsumed event never
-// blocks the next one's interrupt from firing.
+// ERDP is NOT written here (GitHub issue #830, maintainer decision
+// 2026-10-20, option A; Linux likewise writes ERDP only where it consumes
+// events). The handler used to rewrite the current ERDP with EHB (bit 3,
+// RW1C) set, a read-modify-write that would race the consumer's own ERDP
+// advance once the handler runs on another core. The consumer,
+// xhci_evt_poll_release (usb_xhci_rings.tkb), writes ERDP with EHB set
+// after every event it takes. An event nobody is awaiting yet (a Port
+// Status Change queued during xhci_address_device's port reset, the case
+// #187 met on hardware) leaves EHB set, so the next event raises no
+// interrupt; usb_await_event still finds it, because its poll loop is woken
+// by the periodic timer as well, and consuming the stale event clears EHB.
 fn xhci_irq_handler() !{interrupt, unsafe} {
     rp1_xhci_rt.iman = rp1_xhci_rt.iman | 1; // IMAN.IP write-1-to-clear
     rp1_xhci_op.usbsts = 1 << 3; // USBSTS.EINT write-1-to-clear
-    rp1_xhci_rt.erdp_lo = rp1_xhci_rt.erdp_lo | (1 << 3); // ERDP.EHB write-1-to-clear
     interrupt_notify();
 }
 
@@ -294,8 +289,8 @@ fn xhci_ring_doorbell(target: usize, value: u32) {
 }
 
 // Event-ring consumer release: advance ERDP past what usb_await_event has
-// consumed, clearing EHB (RW1C) with it. Distinct from the interrupt
-// handler's EHB acknowledgement, which rewrites the current value.
+// consumed, clearing EHB (RW1C) with it. The only ERDP writer after
+// initialization (GitHub issue #830).
 fn xhci_event_dequeue_release(dequeue_dma: usize) {
     rp1_xhci_rt.erdp_lo = ((dequeue_dma & 0xFFFFFFFF) as u32) | (1 << 3);
     rp1_xhci_rt.erdp_hi = ((dequeue_dma >> 32) & 0xFFFFFFFF) as u32;
