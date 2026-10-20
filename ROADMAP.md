@@ -145,8 +145,7 @@ list (maintainer, 2026-10-09).
 boundaries, #702 (dedicated soak hardware, the maintainer's decision),
 #652 (lifecycle trace events for signals and wait4). Every QEMU lane runs
 four vCPUs since 2026-10-11; candidates on top of it: #756 (contention
-probes rendezvous with every online peer, not core 1 alone) and #757
-(uart-wake peer mode intermittently loses byte 1 at four vCPUs).
+probes rendezvous with every online peer, not core 1 alone).
 
 ### Territory B: slightly off the pillars, supporting A, by priority
 

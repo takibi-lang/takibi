@@ -175,7 +175,8 @@ condition below applies, and reports the land afterwards.
 
 ## Multicore
 
-- 2026-10-11 QEMU lanes run on 4 vCPUs; uart-wake pinned to 2 until #757. [active] #719 #757
+- 2026-10-11 QEMU lanes run on 4 vCPUs; uart-wake pinned to 2 until #757. [superseded by 2026-10-20] #719 #757
+- 2026-10-20 uart-wake runs on 4 vCPUs; every scheduler-locked step parks CPU2.. first. [active] #757
 - 2026-10-13 #9 closed; affinity follow-ups split into #775 and #776. [active] #9
 
 - 2026-10-18 The kernel log ring is option B: fixed slots with a per-slot
