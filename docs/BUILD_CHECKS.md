@@ -158,6 +158,8 @@ suffix is description; dispatch reads only the prefix.
 | `check_no_conflict_markers.py` | no tracked file is left mid-merge, where a pattern-scanning check would answer about the half above the marker |
 | `check_no_conflict_markers_controls.py` | Positive and faithful negative controls for the conflict-marker check |
 | `check_probe_tick_windows.py` | Direct wall-clock waits in boot contention/occupancy probes and FD refcount helpers are refused except six documented deliberate holds; this is a source-shape check, not a progress proof |
+| `check_probe_visit_latch.py` | Every idle-loop probe arming question takes `core_id` and reads the calling core's own progress, so a peer that has done its part does not re-enter (#853, #860; two reviewed holds); `peer_tick_window_peer()` only in reviewed functions, so a core-0 wait across several peers takes each peer's own window (#756, #860). Source shape only |
+| `check_probe_visit_latch_controls.py` | Arming without the visit latch, an idle-loop ask without `core_id`, stale hold/pair entries and a new fixed-pair wait reject; comments and strings pass |
 | `check_probe_tick_windows_controls.py` | Real entry/helper waits, new functions, extra holds and missing reasons reject; intentional holds, comments and strings pass |
 | `check_probe_round_restart.py` | Discover re-entered secondary probe entries and reject invocation-local `0..<ROUNDS` batches; not a proof of helper-hidden or arbitrary phase protocols |
 | `check_probe_round_restart_controls.py` | The actual previous freelist loop, iterator renaming and qualifiers reject; comments/strings and local buffer loops pass; new, absent and duplicate entry bodies are covered |
