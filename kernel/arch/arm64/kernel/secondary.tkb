@@ -93,8 +93,9 @@ fn kernel_online_core_note_cpu_on(
     }
 }
 
-// The one runtime authority for the contiguous online CPU set. QEMU reports
-// two while the RPi5 reports four, even though both images reserve and compile
+// The one runtime authority for the contiguous online CPU set. The RPi5
+// reports four; QEMU reports what -smp gives it (TAKIBI_QEMU_SMP, four by
+// default, two where CI sets it so), while both images reserve and compile
 // for KERNEL_ACTIVE_CORES.
 fn kernel_online_core_count() -> usize {
     let online: usize = kernel_online_cores as usize;
