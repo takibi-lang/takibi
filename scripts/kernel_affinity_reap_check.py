@@ -51,7 +51,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from gdb_progress import (Counter, DONE, continue_by_ticks,  # noqa: E402
+from gdb_progress import (DONE, continue_by_ticks,  # noqa: E402
                           resume_slice)
 from progress_timeout import ProgressTimeout  # noqa: E402
 from await_timing import AwaitTiming  # noqa: E402
@@ -72,13 +72,6 @@ BATCH_DEADLINE = time.monotonic() + float(os.environ.get("GDB_BATCH_TIMEOUT", "6
 # failure: about a minute of the guest's own time at 64 Hz.
 SLICE = 10.0
 STAGE_TICKS = 64 * 60
-# The repaired kernel's claim is that CPU1 alone can NOT finish the exit: it
-# spins on the process-run lock CPU0 holds, with its interrupts masked, so it
-# takes no ticks there. Its progress is measured by the spin itself: each
-# pass of spin_lock's wait loop. This many passes on the run lock's word,
-# with the exit still unpublished, is the evidence; a CPU1 that took neither
-# ticks nor passes in a slice was not given the time, which is inconclusive.
-PEER_SPINS = 256
 
 LABEL = "kernel/qemu affinity-reap"
 SHELL_READY = b"interactive shell: uart blocked\n"
@@ -361,29 +354,36 @@ def run() -> None:
     #
     # GitHub issue #865: this stage once gave CPU1 twelve host seconds, and
     # passed on wherever CPU1 stood when they ran out if its symbol named a
-    # lock. A CPU1 the host starved for those seconds proved nothing. Now
-    # CPU1's progress is counted: its ticks while it runs toward the exit,
-    # and its passes through spin_lock's wait loop once it waits on a lock
-    # with its interrupts masked. PEER_SPINS passes on the process-run
-    # lock's word is the repair's evidence; a slice with neither is a stall.
+    # lock. A CPU1 the host starved for those seconds proved nothing: it
+    # could be passing through any lock. Now the stage goes on while CPU1
+    # takes ticks, and ends when CPU1 stands in spin_lock's wait loop on
+    # scheduled_process_run_lock's own word. Only CPU0 can hold that lock
+    # (CPU2.. are parked holding nothing) and CPU0 is frozen, so from there
+    # CPU1 can never publish, however little host time it had: the position
+    # is the evidence, not a count of seconds. A CPU1 that spins with its
+    # interrupts masked takes no tick, so the stage then ends as STALLED and
+    # the position decides; anywhere else after a stall is inconclusive.
+    # (A counting breakpoint on the wait loop's load was tried first: QEMU
+    # counted one pass and then never stopped there again.)
     gdb.execute(f"thread {CPU1_THREAD}", to_string=True)
     peer_idle = gdb.Breakpoint(PEER_IDLE)
     peer_idle.condition = f"$_thread == {CPU1_THREAD}"
     wait_pc, lock_register = spin_wait_address()
-    spins = Counter(f"*{wait_pc:#x}", (CPU1_THREAD,), PEER_SPINS)
-    ticks = Counter("kernel_secondary_timer_schedule", (CPU1_THREAD,))
-    outcome, _ = run_until(
-        lambda: peer_idle.hit_count > 0 or spins.count >= PEER_SPINS,
-        CPU1_THREAD, progress=lambda: spins.count + ticks.count)
-    published = peer_idle.hit_count > 0
-    spun = spins.count
-    spins.delete()
-    ticks.delete()
-    peer_idle.delete()
-    waited_on = None
-    if not published and spun >= PEER_SPINS:
+    run_lock = int(gdb.parse_and_eval("(unsigned long)&scheduled_process_run_lock"))
+
+    def waiting_on():
+        """The lock word CPU1 spins on, or None when it is not in the loop."""
         gdb.execute(f"thread {CPU1_THREAD}", to_string=True)
-        waited_on = register(lock_register)
+        if register("pc") not in (wait_pc, wait_pc + 4):
+            return None
+        return register(lock_register)
+
+    outcome, _ = run_until(
+        lambda: peer_idle.hit_count > 0 or waiting_on() == run_lock,
+        CPU1_THREAD)
+    published = peer_idle.hit_count > 0
+    peer_idle.delete()
+    waited_on = None if published else waiting_on()
     peer_stopped_at = None if published else symbol_at(CPU1_THREAD)
     gdb.execute(f"thread {CPU0_THREAD}", to_string=True)
 
@@ -398,16 +398,15 @@ def run() -> None:
         if resume.hit_count > 0:
             answered = register("x1")
         resume.delete()
-    run_lock = int(gdb.parse_and_eval("(unsigned long)&scheduled_process_run_lock"))
     gdb.execute("set scheduler-locking off")
     gdb.execute("detach")
 
     if not published:
         if waited_on == run_lock:
             verdict(True, "with CPU0 stopped between wait4's two walks, CPU1 "
-                    f"could not publish its child's exit: it retried "
-                    f"{spun} times to take scheduled_process_run_lock, "
-                    "which CPU0 holds. The pair of walks and the peer's "
+                    "could not publish its child's exit: it spins in "
+                    "spin_lock on scheduled_process_run_lock's word, which "
+                    "only the frozen CPU0 can hold. The pair of walks and the peer's "
                     "Running-to-Exited transition exclude each other, so the "
                     "child is Running to both walks or Exited to both, and "
                     "the ECHILD that belonged to neither cannot be reached")
@@ -421,9 +420,9 @@ def run() -> None:
                     f"UART tail: {uart_tail()!r}")
             return
         verdict(False, "CPU1 neither published its child's exit nor waited "
-                f"{PEER_SPINS} times on a lock while CPU0 was stopped between "
-                f"the walks ({spun} waits; it stalled at {peer_stopped_at}, "
-                f"{outcome}), so the run is inconclusive, not a finding "
+                "on a lock while CPU0 was stopped between the walks (it "
+                f"stopped at {peer_stopped_at}, {outcome}), so the run is "
+                "inconclusive, not a finding "
                 f"(GitHub issue #865). UART tail: {uart_tail()!r}")
         return
     if answered is None:
