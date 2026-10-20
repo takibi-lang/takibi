@@ -1267,36 +1267,45 @@ private fn kernel_log_emit_byte_locked(guard: borrow ConsoleGuard[console_tx_loc
 // stay green.
 //
 // So this runs on every boot rather than behind a switch, for the same reason
-// the two-core contention probes do: evidence nobody turns on is evidence
-// nobody has. It costs five lines.
+// the contention probes do: evidence nobody turns on is evidence nobody
+// has. It costs five lines per peer.
 //
 // Bounded on purpose. It emits KERNEL_LOG_PEER_PROBE_LINES numbered lines and
 // then stops, so the count in the retained log is a fact a view can compare
 // rather than a stream whose length depends on how long the boot took.
 //
-// The shared `dmesg` view enumerates cpu1's five lines by name. A third core
-// would add five more and fail that view, which is the intended outcome: the
-// view is where somebody decides what a four-core boot's retained log should
-// look like, and failing there is cheaper than discovering it later.
+// Every online peer runs it (GitHub issue #848), in core order: a peer
+// starts only once the core below it has committed all of its lines, so the
+// retained log holds cpu1's five, then cpu2's, then cpu3's, and the shared
+// `dmesg` view can enumerate them by name. Without the order the peers'
+// lines would interleave by timing.
 const KERNEL_LOG_PEER_PROBE_LINES: usize = 5;
-private let mut kernel_log_peer_probe_emitted: [usize; KERNEL_MAX_CORES];
+// Per core, the lines committed so far: written by that core after the
+// commit, read by the core above it.
+private let mut kernel_log_peer_probe_emitted: [AtomicWord; KERNEL_MAX_CORES];
 
 // Not an interrupt function, and the effect checker is what settled that: an
 // !{interrupt} version was rejected for reaching kernel_boot_log, which is
 // the same rule that keeps a handler out of the ordinary console. So this
-// runs in the secondary's ordinary loop, and its lines go through the same
+// runs in each secondary's ordinary loop, and its lines go through the same
 // reservation token as core 0's: the probe is what shows a peer writing the
 // ring directly (#613 slice 5).
 fn kernel_log_peer_probe_step() !{logs, unsafe} {
     let raw_cpu: usize = cpu_id();
     if (raw_cpu == 0 || raw_cpu >= KERNEL_MAX_CORES) { return; } // core-role: the peer probe runs on secondaries only
     let core: {0..<KERNEL_MAX_CORES as usize} = raw_cpu;
-    let emitted: usize = kernel_log_peer_probe_emitted[core];
+    let emitted: usize = atomic_word_load(&kernel_log_peer_probe_emitted[core]);
     if (emitted >= KERNEL_LOG_PEER_PROBE_LINES) {
         kernel_log_peer_console_probe_step(core);
         return;
     }
-    kernel_log_peer_probe_emitted[core] = emitted + 1;
+    if (raw_cpu >= 2) { // core-role: core 1 comes first in the peers' fixed line order
+        let below: {0..<KERNEL_MAX_CORES as usize} = raw_cpu - 1;
+        if (atomic_word_load(&kernel_log_peer_probe_emitted[below]) <
+                KERNEL_LOG_PEER_PROBE_LINES) {
+            return;
+        }
+    }
     // GitHub issue #9: the last line starts with a newline inside the same
     // fragment, the shape of the busy pair's migration line. Its text used
     // to escape the record and reach the UART raw, so it never got into the
@@ -1308,44 +1317,46 @@ fn kernel_log_peer_probe_step() !{logs, unsafe} {
     }
     uart_put_udec(emitted + 1);
     kernel_boot_log("\n");
+    // After the commit, so the core above starts after this core's last line.
+    atomic_word_store(&kernel_log_peer_probe_emitted[core], emitted + 1);
 }
 
 // Four terminal records through the same bounded write entry as write(2).
 // Shared-queue admission is immediate, so init starts this only after SMP
 // bring-up and waits for the complete prefix before its next log line.
 // Ordinary kernel diagnostic fragments use their separate publication path.
+// GitHub issue #848: every online peer writes its four, one peer at a time:
+// core 0 gives the turn to each in core order (peer_console_probe in
+// kernel/init/contention_probes.tkb) and takes it back after, so the wire
+// order is fixed and a peer whose turn is over idles with interrupts open.
 const KERNEL_LOG_PEER_CONSOLE_PROBE_LINES: usize = 4;
-private let mut kernel_log_peer_console_probe_sent: [usize; KERNEL_MAX_CORES];
-private let mut kernel_log_peer_console_probe_armed: AtomicWord;
-private let mut kernel_log_peer_console_probe_done: AtomicWord;
+private let mut kernel_log_peer_console_probe_sent: [AtomicWord; KERNEL_MAX_CORES];
+// The peer whose turn it is, 0 when none.
+private let mut kernel_log_peer_console_probe_turn: AtomicWord;
 
-fn kernel_log_peer_console_probe() -> bool {
-    atomic_word_store(&kernel_log_peer_console_probe_armed, 1);
-    let start: i64 = read_cntpct();
-    let window: i64 = read_cntfrq() >> 1;
-    while (read_cntpct() - start < window) {
-        if (atomic_word_load(&kernel_log_peer_console_probe_done) ==
-                KERNEL_LOG_PEER_CONSOLE_PROBE_LINES) {
-            atomic_word_store(&kernel_log_peer_console_probe_armed, 0);
-            return true;
-        }
-    }
-    atomic_word_store(&kernel_log_peer_console_probe_armed, 0);
-    return false;
+// Core 0: give the turn to `cpu`, or take it back with 0.
+fn kernel_log_peer_console_probe_arm(cpu: usize) !{unsafe} {
+    atomic_word_store(&kernel_log_peer_console_probe_turn, cpu);
+}
+
+// Core 0: whether `cpu` has had all four records admitted whole.
+fn kernel_log_peer_console_probe_done(cpu: {0..<KERNEL_MAX_CORES as usize})
+        -> bool !{unsafe} {
+    return atomic_word_load(&kernel_log_peer_console_probe_sent[cpu]) >=
+               KERNEL_LOG_PEER_CONSOLE_PROBE_LINES;
 }
 
 private fn kernel_log_peer_console_probe_step(
         core: {0..<KERNEL_MAX_CORES as usize}) !{logs, unsafe} {
-    if (atomic_word_load(&kernel_log_peer_console_probe_armed) == 0) { return; }
-    let sent: usize = kernel_log_peer_console_probe_sent[core];
+    if (atomic_word_load(&kernel_log_peer_console_probe_turn) != core) { return; }
+    let sent: usize = atomic_word_load(&kernel_log_peer_console_probe_sent[core]);
     if (sent >= KERNEL_LOG_PEER_CONSOLE_PROBE_LINES) { return; }
     let mut line = bs"peer console probe: record=1 of 4\n";
     if (sent == 1) { line = bs"peer console probe: record=2 of 4\n"; }
     if (sent == 2) { line = bs"peer console probe: record=3 of 4\n"; }
     if (sent == 3) { line = bs"peer console probe: record=4 of 4\n"; }
     if (uart_user_write(line) == line.len) {
-        kernel_log_peer_console_probe_sent[core] = sent + 1;
-        atomic_word_store(&kernel_log_peer_console_probe_done, sent + 1);
+        atomic_word_store(&kernel_log_peer_console_probe_sent[core], sent + 1);
     }
 }
 

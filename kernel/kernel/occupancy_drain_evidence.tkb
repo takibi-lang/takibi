@@ -225,30 +225,42 @@ private fn world_stop_probe_inspect(stopped: borrow WorldStopped[id]) {
     world_stop_probe_inspections = world_stop_probe_inspections + 1;
 }
 
-// Exercise both runtime outcomes. The full path sends a real SGI to core 1;
-// the negative-control entry suppresses that notification so the same online
-// peer deliberately does not acknowledge and must produce Partial.
+// Exercise both runtime outcomes. The full path sends a real SGI to every
+// online peer; the negative-control entry suppresses that notification so
+// the same online peers deliberately do not acknowledge and must produce
+// Partial. GitHub issue #848: every online core, not core 0 and core 1 only.
 fn world_stop_probe() -> bool !{unsafe} {
     world_stop_probe_inspections = 0;
+    let online: usize = kernel_online_core_count();
     let mut full: bool = false;
     let mut acknowledged: bool = false;
     let mut resumed: bool = false;
     match world_stop_begin(
-            &kernel_world_stop, 2, WORLD_STOP_PROBE_SPINS) {
+            &kernel_world_stop, online, WORLD_STOP_PROBE_SPINS) {
         WorldStopResult::Busy => { }
         WorldStopResult::Partial(partial) => {
             world_stop_partial_release(partial, &kernel_world_stop);
         }
         WorldStopResult::Complete(stopped) => {
             acknowledged = true;
-            let held_before: usize = secondary_tick_value();
-            // Deliberate hold: a stopped peer must take no ticks throughout.
+            let mut held_before: [usize; KERNEL_MAX_CORES];
+            for cpu: usize in 0..<KERNEL_MAX_CORES {
+                held_before[cpu] = kernel_tick_count_of(cpu);
+            }
+            // Deliberate hold: no stopped peer may take a tick throughout.
             let mut hold_start: WallTickStamp = wall_tick_stamp();
             let mut hold_window: WallHoldBudget = wall_stopped_hold_budget();
             while (wall_hold_open(hold_start, hold_window)) { }
-            let held_after: usize = secondary_tick_value();
+            full = online >= 2;
+            for cpu: usize in 1..<KERNEL_MAX_CORES {
+                if (cpu < online && kernel_tick_count_of(cpu) != held_before[cpu]) {
+                    full = false;
+                }
+            }
             world_stop_probe_inspect(stopped);
-            full = held_before == held_after;
+            // Core 1's resume through the typed ticket, then every other
+            // peer's against the count it was held at: each wait ends at that
+            // peer's first tick after the release, or after its own window.
             let ticket = world_stop_release_for_tick(stopped, &kernel_world_stop, 1);
             let mut resume_window = peer_tick_window_policy(1, PeerTickPolicy::Entry);
             while (resumed == false && peer_tick_window_open(resume_window)) {
@@ -256,6 +268,16 @@ fn world_stop_probe() -> bool !{unsafe} {
             }
             peer_tick_window_end(resume_window);
             world_resume_tick_cancel(ticket);
+            for cpu: usize in 2..<KERNEL_MAX_CORES {
+                if (cpu < online && resumed) {
+                    let mut window = peer_tick_window_policy(cpu, PeerTickPolicy::Entry);
+                    while (peer_tick_window_open(window) &&
+                           kernel_tick_count_of(cpu) == held_before[cpu]) {
+                    }
+                    peer_tick_window_end(window);
+                    resumed = kernel_tick_count_of(cpu) != held_before[cpu];
+                }
+            }
         }
     }
 
@@ -267,7 +289,7 @@ fn world_stop_probe() -> bool !{unsafe} {
 
     let mut partial_ok: bool = false;
     match world_stop_begin_nonack_probe(
-            &kernel_world_stop, 2, WORLD_STOP_PROBE_SPINS) {
+            &kernel_world_stop, online, WORLD_STOP_PROBE_SPINS) {
         WorldStopResult::Busy => { }
         WorldStopResult::Complete(stopped) => {
             world_stop_release(stopped, &kernel_world_stop);
@@ -285,7 +307,7 @@ fn world_stop_probe() -> bool !{unsafe} {
     let mut repeated: usize = 0;
     let mut busy: usize = 0;
     for round: usize in 0..<16 {
-        match world_stop_begin(&kernel_world_stop, 2, WORLD_STOP_PROBE_SPINS) {
+        match world_stop_begin(&kernel_world_stop, online, WORLD_STOP_PROBE_SPINS) {
             WorldStopResult::Busy => { }
             WorldStopResult::Partial(partial) => {
                 world_stop_partial_release(partial, &kernel_world_stop);
@@ -305,7 +327,7 @@ fn world_stop_probe() -> bool !{unsafe} {
     // generation; the second injects that now-stale, NONZERO acknowledgement
     // after publication. Only Partial, with no acknowledged CPUs, is valid.
     let mut stale: bool = false;
-    match world_stop_begin_nonack_probe(&world_stop_stale_probe_controller, 2, 1) {
+    match world_stop_begin_nonack_probe(&world_stop_stale_probe_controller, online, 1) {
         WorldStopResult::Busy => { }
         WorldStopResult::Complete(unexpected) => {
             world_stop_release(unexpected, &world_stop_stale_probe_controller);
@@ -313,7 +335,7 @@ fn world_stop_probe() -> bool !{unsafe} {
         WorldStopResult::Partial(first) => {
             world_stop_partial_release(first, &world_stop_stale_probe_controller);
             match world_stop_begin_stale_ack_probe(
-                    &world_stop_stale_probe_controller, 2, 1) {
+                    &world_stop_stale_probe_controller, online, 1) {
                 WorldStopResult::Busy => { }
                 WorldStopResult::Complete(unexpected) => {
                     world_stop_release(unexpected, &world_stop_stale_probe_controller);

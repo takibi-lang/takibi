@@ -271,15 +271,11 @@ fn kernel_idle_loop() !{unsafe} {
                     world_stop_peer_probe_secondary_run(core_id);
                 }
             }
-            // Core 1 alone: the peer log probe (GitHub issue #465), the gated
-            // producer of retained peer text, here because the effect checker
-            // refuses to let an interrupt handler log. It and the peer console
-            // probe are written for exactly two participants and their views
-            // count one peer's lines; every contention probe above takes all
-            // online peers (GitHub issue #756).
-            if (core_id == SECONDARY_CORE_ID) {
-                kernel_log_peer_probe_step();
-            }
+            // The peer log probe (GitHub issue #465), the gated producer of
+            // retained peer text, here because the effect checker refuses to
+            // let an interrupt handler log. Every peer runs it and the peer
+            // console probe, in core order (GitHub issue #848).
+            kernel_log_peer_probe_step();
             if (KERNEL_STALL_PROBES != 0) { stall_probe_note(STALL_PROBE_IDLE_PASS); }
             match kernel_process_secondary_start() {
                 ProcessSecondaryStart::Idle => {}

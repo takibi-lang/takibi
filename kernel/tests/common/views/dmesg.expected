@@ -5,6 +5,16 @@
 [<time>] cpu1 peer log probe: line=3
 [<time>] cpu1 peer log probe: line=4
 [<time>] cpu1 peer log probe: line=5
+[<time>] cpu2 peer log probe: line=1
+[<time>] cpu2 peer log probe: line=2
+[<time>] cpu2 peer log probe: line=3
+[<time>] cpu2 peer log probe: line=4
+[<time>] cpu2 peer log probe: line=5
+[<time>] cpu3 peer log probe: line=1
+[<time>] cpu3 peer log probe: line=2
+[<time>] cpu3 peer log probe: line=3
+[<time>] cpu3 peer log probe: line=4
+[<time>] cpu3 peer log probe: line=5
 [<time>] distro stack: argc=2 argv auxv ready
 [<time>] linux socket: listener ready port=8080
 busybox dmesg exit: 0

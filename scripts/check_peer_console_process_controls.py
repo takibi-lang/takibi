@@ -149,12 +149,12 @@ def problems(tree: dict[str, str]) -> list[str]:
         result.append("view does not fix migrating and two-process write order")
     if tree["kernel/tests/common/views/console_order.filter"].strip() != "^console order:":
         result.append("ordering view lost its exact selection")
-    if "if (atomic_word_load(&kernel_log_peer_console_probe_armed) == 0) { return; }" not in log:
+    if "if (atomic_word_load(&kernel_log_peer_console_probe_turn) != core) { return; }" not in log:
         result.append("idle terminal probe can run before init starts it")
-    if "atomic_word_store(&kernel_log_peer_console_probe_done, sent + 1);" not in log:
+    if "atomic_word_store(&kernel_log_peer_console_probe_sent[core], sent + 1);" not in log:
         result.append("idle terminal probe does not publish actual admission")
     init = tree["kernel/init/contention_probes.tkb"]
-    if "if (kernel_log_peer_console_probe() == false) {" not in init:
+    if "if (peer_console_probe() == false) {" not in init:
         result.append("init does not wait for the terminal prefix after SMP bringup")
     # #613 slice 5: every CPU writes its own kernel line to the UART after
     # the ring commit, whole, under one console-lock hold.
@@ -285,13 +285,13 @@ def main() -> int:
     })
     mutations.update({
         "early idle terminal probe": ("kernel/printk/log.tkb",
-                                      "if (atomic_word_load(&kernel_log_peer_console_probe_armed) == 0) { return; }",
+                                      "if (atomic_word_load(&kernel_log_peer_console_probe_turn) != core) { return; }",
                                       ""),
         "terminal prefix completion": ("kernel/printk/log.tkb",
-                                       "atomic_word_store(&kernel_log_peer_console_probe_done, sent + 1);",
+                                       "atomic_word_store(&kernel_log_peer_console_probe_sent[core], sent + 1);",
                                        ""),
         "init waits for terminal prefix": ("kernel/init/contention_probes.tkb",
-                                           "if (kernel_log_peer_console_probe() == false) {",
+                                           "if (peer_console_probe() == false) {",
                                            "if (false) {"),
     })
     mutations.update({

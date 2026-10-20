@@ -264,12 +264,12 @@ WINDOWS["651-no-peer"] = {
         for name in PROBE_ENTRIES
     ] + [('kernel/occupancy_drain_evidence.tkb',
   '    match world_stop_begin(\n'
-  '            &kernel_world_stop, 2, WORLD_STOP_PROBE_SPINS) {\n',
+  '            &kernel_world_stop, online, WORLD_STOP_PROBE_SPINS) {\n',
   '    let chosen_stop = match world_stop_resume_control {\n'
   '        0 => { world_stop_begin_nonack_probe(\n'
-  '            &kernel_world_stop, 2, WORLD_STOP_PROBE_SPINS) }\n'
+  '            &kernel_world_stop, online, WORLD_STOP_PROBE_SPINS) }\n'
   '        _ => { world_stop_begin(\n'
-  '            &kernel_world_stop, 2, WORLD_STOP_PROBE_SPINS) }\n'
+  '            &kernel_world_stop, online, WORLD_STOP_PROBE_SPINS) }\n'
   '    };\n'
   '    match chosen_stop {\n'),
  ('kernel/occupancy_drain_evidence.tkb',

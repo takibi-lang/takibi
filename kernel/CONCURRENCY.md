@@ -256,13 +256,20 @@ Symmetric now:
   idle stack while its boot stack held `main()`'s frames and slot 0's
   context). Every core calls the same
   console poll, which only core 0 acts on (the UART input-flow request,
-  inside `kernel_log_console_poll`), and core 1 alone runs the peer log
-  probe (the probes row).
+  inside `kernel_log_console_poll`), and every peer runs the peer log
+  probe (the boot probes bullet below).
 - The boot contention probes (#756): core 0 arms each from the boot
   sequence and every other online core joins it from the idle loop, each
   per-core word indexed by its own id (`kernel/lib/peer_round.tkb`: a
   per-round barrier, PeerRound, and per-core counts, PeerTally). Two
-  cores is the degenerate case.
+  cores is the degenerate case. Since #848 the boot probes that were
+  written for core 0 and CPU 1 take every online core too:
+  `world_stop_probe` stops every online core and checks each peer's ticks
+  while the stop is held and after it is released; every peer writes the
+  peer log probe's lines and, on its turn, the peer console probe's
+  records. Both run in core order (each peer's log lines after the core
+  below it has committed its own; the console turns given by core 0), so
+  the `dmesg` and `peer_console` views can enumerate them.
 - An ext2 read that finds a mutation in flight: the calling core, whichever
   it is, waits for an interrupt and reruns the syscall in place
   (`kernel_syscall_dispatch_action`, #775). A peer used to migrate the call
@@ -295,7 +302,7 @@ Special, with the reason it stays so today:
 | Device interrupts | the UART SPI targets core 0; a secondary's dispatch handles its tick, its PMU line, the NIC and xHCI (above), nothing else | the UART driver's state is touched only from core 0 | yes: the NIC and xHCI moved in #830; the UART (with BREAK -> DDB and the input-flow poll) is #830's next slice |
 | DDB entry by UART BREAK | the UART IRQ branch on core 0 | follows the device interrupt row; DDB then stops the others through the world stop | follows the device row |
 | UART input-flow requests | `kernel_log_console_poll` (`kernel/printk/log.tkb`), called at syscall entry and from core 0's idle loop | the UART is core 0's device (see the device interrupt row); since #613 slice 5 every CPU writes the log ring, so peer lines no longer pass through core 0 and the old peer drain and UartTx blocking are gone -- this flow-control poll is all that is left. A termios change sends the request itself from whichever CPU made it (#826), deciding under the console lock as the poll does | follows the device interrupt row |
-| Two-core probes and fixtures | the idle loop's core-1 branch (the peer log probe), the peer console probe, `world_stop_probe`'s two-core stop, the spread-timer and busy-pair fixtures | each is an experiment written for core 0 against CPU 1 | no: the fixed pair is the experiment |
+| Two-core probes and fixtures | the spread-timer and busy-pair fixtures | each is an experiment written for core 0 against CPU 1 | no: the fixed pair is the experiment |
 | Timed-wait retry when alone | `syscall_timed_wait_blocks` (`kernel/kernel/syscall.tkb`): a deadline or signal wait on a peer always blocks (#840); on core 0 it retries through WaitInterrupt while no other process is Ready | the #840 maintainer decision (2026-10-20) covered peers, where a Running PID 1 broke DDB's stack-root check; the BusyBox console lanes were written against core 0's retry | yes: #852 |
 | Contention probe primary | every `*_contention_probe` and its siblings in `kernel/init/contention_probes.tkb` | the boot sequence runs on core 0, so it arms the probe and counts as participant 0; the peers are symmetric among themselves (#756) | only if probes ran outside the boot sequence |
 

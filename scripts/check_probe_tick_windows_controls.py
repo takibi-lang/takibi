@@ -38,12 +38,27 @@ def main():
             ('kernel/kernel/init_once_contention_evidence.tkb', 'init_once_probe_wait_arrived', 'window',
              ' &&\n                   atomic_word_load(&init_once_probe_arrived)'),
             ('kernel/kernel/console_contention_evidence.tkb', 'console_probe_wait', 'window',
-             ') {\n        if (atomic_word_load(cell)')):
+             ') {\n        if (atomic_word_load(cell)'),
+            # GitHub issue #848: the peer console probe's per-peer wait.
+            ('kernel/init/contention_probes.tkb', 'peer_console_probe', 'window',
+             ' &&\n                   kernel_log_peer_console_probe_done(cpu)')):
         anchor = f'peer_tick_window_open({binding})' + tail
         previous = replace_once(tree[path], anchor,
                                 'read_cntpct() - begin < read_cntfrq() >> 2' + tail)
         check({**tree, path: previous}, 1, f'{name}: wall-clock-only probe wait')
         cases.note()
+    # GitHub issue #848: the shape that escaped, a fixed host-time window in
+    # log.tkb's peer console probe; log.tkb's other loops stay out of scope.
+    log = 'kernel/printk/log.tkb'
+    check({**tree, log: tree[log] + (
+        'fn kernel_log_peer_console_probe() -> bool {\n'
+        '    while (read_cntpct() - start < window) {}\n    return false;\n}\n'
+        'fn kernel_log_other() { while (read_cntpct() < limit) {} }\n')}, 1,
+        'kernel_log_peer_console_probe: wall-clock-only probe wait')
+    cases.note()
+    check({**tree, log: tree[log] +
+           'fn kernel_log_other() { while (read_cntpct() < limit) {} }\n'}, 0)
+    cases.note()
     path = 'kernel/kernel/new_contention_evidence.tkb'
     body = 'fn fresh_wait() { while (read_cntpct() < deadline) {} }\n'
     for source in (body, body.replace('fn ', 'private noinline fn '),

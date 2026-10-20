@@ -2,7 +2,8 @@
 """Reject direct wall-clock rendezvous loops in maintained boot probes.
 
 Discover every while condition in contention evidence, occupancy evidence,
-the FD refcount probe functions and kernel/lib/peer_round.tkb's waits, including helper-based waits. Only the
+the FD refcount probe functions, kernel/lib/peer_round.tkb's waits, the boot
+probe sequence and log.tkb's peer probes, including helper-based waits. Only the
 six reviewed deliberate wall-clock holds below remain. This source check
 catches the observed direct counter/deadline shape; it does not prove a
 predicate or discover a clock hidden behind an arbitrary external callee.
@@ -32,7 +33,13 @@ def sources():
               Path('kernel/kernel/fd_table.tkb'),
               Path('kernel/lib/peer_tick_window.tkb'),
               # GitHub issue #756: the probes' shared per-peer waits.
-              Path('kernel/lib/peer_round.tkb')]
+              Path('kernel/lib/peer_round.tkb'),
+              # GitHub issue #848: the peer console probe's wait lived in
+              # log.tkb as a fixed half-second read_cntpct window, outside
+              # this list; it now lives here, and log.tkb's peer probes stay
+              # covered.
+              Path('kernel/init/contention_probes.tkb'),
+              Path('kernel/printk/log.tkb')]
     return {str(path): path.read_text(encoding='ascii') for path in paths}
 
 
@@ -62,6 +69,8 @@ def main(tree=None):
             continue
         for name in DEFINITION.findall(masked_sources(source)):
             if path.endswith('/fd_table.tkb') and not name.startswith('fd_refcount_'):
+                continue
+            if path.endswith('/log.tkb') and not name.startswith('kernel_log_peer_'):
                 continue
             body = function_body(name, source)
             if body is None:

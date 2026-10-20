@@ -148,6 +148,20 @@ qemu_smp_bringup_expected() {
     echo "smp bringup: an EL0 process ran on cpus=$cpus"
 }
 qemu_smp_bringup_expected >"$EXPECTED_VIEW_DIR/smp_bringup.expected"
+# GitHub issue #848: every online peer writes the peer log probe's lines and
+# the peer console probe's records, in core order. Derived the same way: at
+# four cores both are byte-identical to the common files.
+qemu_peer_probe_expected() {
+    local n
+    n="$(qemu_online_core_count)"
+    awk -v n="$n" 'match($0, /cpu[0-9]+ peer log probe/) {
+            if (substr($0, RSTART + 3, RLENGTH - 18) + 0 >= n) next
+        } { print }' "$COMMON_VIEW_DIR/dmesg.expected" \
+        >"$EXPECTED_VIEW_DIR/dmesg.expected"
+    awk -v n="$n" 'NR <= 4 * (n - 1)' "$COMMON_VIEW_DIR/peer_console.expected" \
+        >"$EXPECTED_VIEW_DIR/peer_console.expected"
+}
+qemu_peer_probe_expected
 resource_lease_vcpu_acquire "$TAKIBI_QEMU_SMP"
 "$REPO_ROOT/scripts/qemu.sh" \
     -machine virt -cpu cortex-a53 -smp "$TAKIBI_QEMU_SMP" -m 1024 -display none -monitor none \

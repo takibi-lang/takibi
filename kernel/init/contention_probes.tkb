@@ -33,9 +33,35 @@ use "kernel/kernel/ext2_mutation_contention_evidence.tkb";
 use "kernel/kernel/signal_contention_evidence.tkb";
 use "kernel/kernel/console_contention_evidence.tkb";
 use "kernel/kernel/log_storm_evidence.tkb";
+use "kernel/lib/peer_tick_window.tkb";
+
+// GitHub issue #848: the peer console probe (kernel/printk/log.tkb), one
+// online peer at a time in core order. Each wait ends when that peer's four
+// records are admitted, or after that peer's own ticks with the wall-clock
+// backstop -- not after a fixed host-time window, which a loaded host can
+// spend before the peer's vCPU runs at all (#851). The turn is taken back
+// after every visit, so a finished peer idles with interrupts open (#853).
+fn peer_console_probe() -> bool !{unsafe} {
+    let online: usize = kernel_online_core_count();
+    let mut all: bool = online >= 2;
+    for cpu: usize in 1..<KERNEL_MAX_CORES {
+        if (cpu < online && all) {
+            kernel_log_peer_console_probe_arm(cpu);
+            let mut window = peer_tick_window_policy(cpu, PeerTickPolicy::Complete);
+            while (peer_tick_window_open(window) &&
+                   kernel_log_peer_console_probe_done(cpu) == false) {
+            }
+            peer_tick_window_end(window);
+            all = kernel_log_peer_console_probe_done(cpu);
+            kernel_log_peer_console_probe_arm(0);
+        }
+    }
+    kernel_log_peer_console_probe_arm(0);
+    return all;
+}
 
 fn contention_probes() !{unsafe} {
-    if (kernel_log_peer_console_probe() == false) {
+    if (peer_console_probe() == false) {
         kernel_boot_log("peer console probe: failed\n");
     }
     // GitHub issue #613 slice 5: every online CPU writes the log ring at
@@ -109,7 +135,7 @@ fn contention_probes() !{unsafe} {
     // real SGI, then suppress that notification in a negative control to
     // prove that incomplete acknowledgement returns a partial token.
     if (world_stop_probe()) {
-        kernel_boot_log("world stop: full token stopped and resumed the online peer, partial token refused a non-acknowledging peer ok\n");
+        kernel_boot_log("world stop: full token stopped and resumed every online peer, partial token refused non-acknowledging peers ok\n");
     } else {
         kernel_boot_log("world stop: failed\n");
     }
