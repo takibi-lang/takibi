@@ -386,8 +386,8 @@ fn kernel_secondary_tick(frame: sink FrameRef[process], lower_el: bool, is_timer
 // The window is a fraction of a second derived from CNTFRQ_EL0 rather than
 // a cycle count, because the two boards' counters run at different
 // frequencies (54 MHz on RPi5) and a fixed spin count would be a different
-// duration on each. The secondary's tick period is CNTFRQ >> 6, so a
-// window of CNTFRQ >> 4 covers several ticks with margin.
+// duration on each. The window ends at the secondary's next tick, not at
+// a fixed length (see the end of this function).
 //
 // GitHub issue #851: that margin holds only once the secondary's timer is
 // armed. The core publishes that it started (kernel_secondary_main) BEFORE
@@ -410,12 +410,26 @@ fn secondary_ticks_independent_for(
     while (secondary_tick_value_for(core) == armed_from) {
         if (read_cntpct() - armed_start >= armed_deadline) { return false; }
     }
-    let window: i64 = read_cntfrq() >> 4;
+    // GitHub issue #851 again (release build, core 2, host load 35 on 24
+    // threads): the timer was armed, yet a fixed CNTFRQ >> 4 window still
+    // saw no tick. Under QEMU each vCPU is a host thread and the counter is
+    // host time, so a descheduled secondary loses ticks for as long as the
+    // host keeps it off a CPU; a fixed window was a wall-clock assertion.
+    // The claim does not need one: core 0 stays masked UNTIL the secondary's
+    // count moves, and the deadline only tells "never" from "slow" -- the
+    // same one second as the start and armed waits above, not a margin
+    // tuned to this failure.
+    let deadline: i64 = read_cntfrq();
     disable_irq();
     let before: usize = secondary_tick_value_for(core);
     let start: i64 = read_cntpct();
-    while (read_cntpct() - start < window) { }
-    let after: usize = secondary_tick_value_for(core);
+    let mut advanced: bool = false;
+    while (read_cntpct() - start < deadline) {
+        if (secondary_tick_value_for(core) != before) {
+            advanced = true;
+            break;
+        }
+    }
     enable_irq();
-    return after > before;
+    return advanced;
 }
