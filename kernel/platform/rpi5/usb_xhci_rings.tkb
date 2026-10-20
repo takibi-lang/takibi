@@ -1021,6 +1021,14 @@ fn xhci_event_next() -> XhciEventPoll {
                     return XhciEventPoll::Event(trb);
                 }
                 XhciEvents_xhci_evt_poll_Outcome::NoEvent => {
+                    // GitHub issue #830: the interrupt handler no longer
+                    // clears EHB, so the consumer does before it waits. An
+                    // event it consumed before the controller set EHB would
+                    // otherwise leave EHB set and the next event silent. The
+                    // value is the consumer's own dequeue pointer, not a
+                    // read-modify-write, so no other core's write is lost.
+                    let mut span: DmaDeviceSpan = XhciEvents_Live_span(live);
+                    xhci_event_dequeue_release(xhci_span_bus_address(span) + index * 16);
                     xhci_events_park(live);
                     return XhciEventPoll::NoEvent;
                 }

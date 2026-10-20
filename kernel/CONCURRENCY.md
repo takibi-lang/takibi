@@ -238,9 +238,10 @@ Symmetric now:
   IMAN.IP and USBSTS.EINT, both write-1-to-clear, and sends SEV. It no
   longer rewrites ERDP to clear EHB: that read-modify-write would race the
   consumer's ERDP advance on another core, so the event consumer is now
-  ERDP's only writer (maintainer decision 2026-10-20, option A). An event
-  nobody awaits leaves EHB set until the consumer reaches it; the
-  consumer's poll loop is also woken by the timer, so it is not lost. The
+  ERDP's only writer (maintainer decision 2026-10-20, option A). It clears
+  EHB after each event it takes and, rewriting its own dequeue pointer,
+  whenever a poll finds the ring empty, so a stale EHB cannot silence the
+  next event (without that, the RPi5 boot hung at the first child exec). The
   boot report after USB provisioning asserts that at least two cores took
   xHCI interrupts (`usb_storage` view). There is no separate RPi5 negative
   control; the NIC's QEMU control covers the shared rotation (decision

@@ -269,11 +269,12 @@ fn disk_io_ok(r: DiskIoResult) -> bool {
 // RW1C) set, a read-modify-write that would race the consumer's own ERDP
 // advance once the handler runs on another core. The consumer,
 // xhci_evt_poll_release (usb_xhci_rings.tkb), writes ERDP with EHB set
-// after every event it takes. An event nobody is awaiting yet (a Port
-// Status Change queued during xhci_address_device's port reset, the case
-// #187 met on hardware) leaves EHB set, so the next event raises no
-// interrupt; usb_await_event still finds it, because its poll loop is woken
-// by the periodic timer as well, and consuming the stale event clears EHB.
+// after every event it takes, and rewrites its own dequeue pointer with EHB
+// set whenever a poll finds the ring empty (xhci_event_next), before it
+// waits. Without that second write, an event consumed before the controller
+// set EHB, or one nobody awaited yet (the Port Status Change of #187), left
+// EHB set and the next event silent: the RPi5 boot hung at the first child
+// exec after BusyBox od on 2026-10-20.
 fn xhci_irq_handler() !{interrupt, unsafe} {
     rp1_xhci_rt.iman = rp1_xhci_rt.iman | 1; // IMAN.IP write-1-to-clear
     rp1_xhci_op.usbsts = 1 << 3; // USBSTS.EINT write-1-to-clear
