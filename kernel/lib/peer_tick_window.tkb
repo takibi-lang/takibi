@@ -2,9 +2,13 @@
 // rather than after host time in which its vCPU may never have been scheduled.
 // The predicate and its atomic ordering stay with the caller.
 //
-// Current limitations (2026-10-09): callers are the non-migrating CPU 0/1
-// boot probes. CPU 0 waits on CPU 1; CPU 1 waits on CPU 0. This is not an
-// arbitrary online-CPU or scheduler deadline API. A tick is an interrupt,
+// Current limitations (2026-10-20, checked against the callers): every
+// caller is a non-migrating boot probe that waits on one other online core
+// it names. Since #756 the multi-core rendezvous (kernel/lib/peer_round.tkb,
+// the pid and init-once contention probes) waits on any online peer, or a
+// peer on its primary; peer_tick_window_peer() still serves only the fixed
+// core 0 / CPU 1 pair probes (console, log storm, ext2 mutation, pool walk).
+// This is not a scheduler deadline API. A tick is an interrupt,
 // not proof that the peer reached the awaited instruction. Masked IRQs,
 // a stopped peer and a dead peer may prevent ticks; a separate ten-second
 // wall-clock backstop therefore remains trusted recovery policy. Unsigned
