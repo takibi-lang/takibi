@@ -1,1 +1,1 @@
-kernel stack guard: boot process witness clean, a disturbed byte reported, poison restored
+kernel stack guard: a pooled process witness clean, a disturbed byte reported, poison restored

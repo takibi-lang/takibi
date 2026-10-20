@@ -83,6 +83,11 @@ private fn kernel_stack_run_depth(slot: usize, offset: usize, count: usize) -> u
     region_held_view_drop(slot_view);
     return depth;
 }
+private fn kernel_stack_witness_fill(slot: usize, value: u8) {
+    let slot_view = probe(slot);
+    fill(payload(slot_view), value);
+    region_held_view_drop(slot_view);
+}
 private inline fn scheduled_process_locked_view_drop(source: sink ProcessRecordLockedView[l, p]) {
     region_held_view_drop(source.live);
 }

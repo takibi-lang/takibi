@@ -20,6 +20,8 @@ BUDGET = 0
 RAW_CALLS = Counter()
 OWNER_MINTS = Counter({name: 1 for name in (
     "scheduled_process_alloc_finish",
+    # GitHub issue #831: the boot thread's record, owned while it is built.
+    "scheduled_process_alloc_boot_thread",
     "scheduled_process_ready_take",
     "scheduled_process_constructing_take",
     "scheduled_process_exited_take",
@@ -71,7 +73,7 @@ def problems(text: str) -> list[str]:
     if sum(raw.values()) != BUDGET or raw != RAW_CALLS:
         result.append("bare record lookup must remain absent")
     if owners != OWNER_MINTS:
-        result.append("scheduled ownership mints differ from the seven "
+        result.append("scheduled ownership mints differ from the eight "
                       "reviewed allocation/state-transfer bodies")
     if not re.search(r"^private linear view ProcessCurrent\[", text, re.M):
         result.append("ProcessCurrent must remain a private view mint")
@@ -95,7 +97,7 @@ def main() -> int:
             print("FAIL process-record-bare-uses: " + failure, file=sys.stderr)
         return 1
     report_pass("process-record-bare-uses",
-                "no bare lookup, seven ownership mint bodies, "
+                "no bare lookup, eight ownership mint bodies, "
                 "private constructors, owned loan transfer and both destructive contracts",
                 lines=len(source.splitlines()), owner_mints=sum(OWNER_MINTS.values()))
     return 0

@@ -70,6 +70,10 @@ INDEX_ONLY_ALLOWED = {
         "a value snapshot (#672): it borrows the record's stack-run "
         "permission under the pool lock, measures the stack's poison depth "
         "and returns that count; it hands on no index or pointer",
+    "kernel_stack_witness_fill":
+        "a write through the record's own stack-run permission under the "
+        "pool lock (#672, #831): it fills one witness byte and returns "
+        "nothing, so it hands on no index or pointer",
 }
 
 # These consume a stored pool proof after the compiler checked loan_transfer.

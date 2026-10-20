@@ -1376,11 +1376,12 @@ fn kernel_syscall_process_configure_current(
     }
 }
 
-// The fd context, image record, terminal stdio and heap range of a process
-// the kernel starts itself rather than through clone: the boot context
-// (slot 0) for the boot fixtures, and PID 1 (GitHub issue #831), whose
-// pooled record already has its context and image record from allocation,
-// so the two ensures below find them.
+// The fd context, root image record, terminal stdio and heap range of a
+// process the kernel starts itself rather than through clone: the boot
+// thread for the boot fixtures, and PID 1 (GitHub issue #831), whose pooled
+// record already has its context and image record from allocation, so the
+// two ensures below find them. The image record is its root's: root 0's for
+// the boot thread, which runs on the kernel's own root.
 fn kernel_syscall_process_configure(process: usize, heap_start: usize,
                                     heap_limit: usize) !{unsafe} {
     unified_fd_context_pool_init();
@@ -1392,7 +1393,9 @@ fn kernel_syscall_process_configure(process: usize, heap_start: usize,
                 "physical page allocator" as *u8, page_allocator_total_count());
         }
     }
-    match process_image_record_ensure(process) {
+    let image_root: usize = address_space_root_slot(
+        scheduled_process_address_space_root_lookup(process));
+    match process_image_record_ensure(image_root) {
         ProcessImageRecordReady::Ready(evidence) => {}
         ProcessImageRecordReady::Missing => {
             kernel_boot_log_resource_exhausted(

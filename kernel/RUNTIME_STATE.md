@@ -71,15 +71,16 @@ fallback payload records. Checked lookups return their closed failure cases.
 
 ### Process/scheduler core (`kernel/kernel/process.tkb`)
 
-`scheduled_process_pool` (`RegionPool(ProcessRecord)`, private; records Held for their process's life) and the
-static `scheduled_process_boot_record` beside it, and
+`scheduled_process_pool` (`RegionPool(ProcessRecord)`, private; records Held for their process's life;
+since #831 the boot thread's and PID 1's too, with no static record beside
+it), and
 `execution_state: [ExecutionState; KERNEL_MAX_CORES]` -- the four
 former `execution_*` scalars (`current_handle`, `current_live`,
 `scheduler_enabled`, `reschedule_pending`), grouped and made an array by
 issue #222.
 
-**Why global:** the process pool and bootstrap record describe the one shared
-process namespace. The execution-state backing array is global storage, but
+**Why global:** the process pool describes the one shared process
+namespace. The execution-state backing array is global storage, but
 each active CPU selects its own element with `cpu_id()`; core 1 claims Ready
 work from its architectural idle loop and then follows the same timer and
 syscall-return scheduling paths as core 0.
@@ -92,8 +93,10 @@ build could have against participation counted separately. The pid counter
 beside it is minted under `scheduled_process_pid_lock`. `ProcessRecord` is already the per-process owner (#264) -- every
 process's state, wait reason, parent/child links, and saved SP live in one
 record, not scattered scalars. Since #392 that record is a pool allocation
-and a process slot is its ADDRESS; the bootstrap is the one static, because
-root 0 exists before the MMU is on. Issue
+and a process slot is its ADDRESS. Since #831 there is no static record:
+the boot fixtures stand on a pooled boot thread and PID 1 is pooled. Root 0,
+the kernel's own address space, exists before the MMU is on, so its backing
+and image record are statics in `kernel/mm/`. Issue
 #392 folded the kernel stack's page run in as a field and put the handles
 for the three pooled per-process records (fd context, image record,
 address-space backing) there too, so the parallel arrays those replaced

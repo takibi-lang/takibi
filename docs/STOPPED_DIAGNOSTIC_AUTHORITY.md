@@ -44,7 +44,8 @@ slot removal reject a live view; resume also rejects an outstanding derived
 pointer after the view itself has been dropped. A private `loan_transfer`
 boundary can move the checked pointer lifetime to the borrowed machine token.
 DDB record copies, parent-PID reads and address-space root selection use this
-path, including the bootstrap record before the pool is initialized.
+path. There is no static bootstrap record to read before the pool is
+initialized any more (#831); a slot the pool does not hold reads as absent.
 
 Full and partial machine stops save and mask the initiator's IRQ state before
 claiming the gate. CPU-start reservations do the same. Their linear result

@@ -324,7 +324,22 @@ private fn process_image_record_pin(
         pool: *RegionPool(ProcessImageRecord) @ images, root: usize)
         -> RegionPinned(ProcessImageRecord)[images] !{unsafe} {
     return process_image_record_pin_words(pool,
-        scheduled_process_image_record_handle(root));
+        process_image_record_handle_of_root(root));
+}
+
+// GitHub issue #831: root 0's image record handle. Root 0 is the kernel's
+// own address space, and no process record names it any more (the boot
+// thread runs on it the way Linux's kernel threads run on init_mm), so its
+// handle is kept here, as its backing is kept in address_space.tkb. Written
+// once, by the first ensure during boot, and never released.
+private let mut process_image_root0_record: ProcessPoolHandleWords;
+
+// The handle of a root's image record: root 0's own, or the one the record
+// of the process whose root it is holds.
+private fn process_image_record_handle_of_root(root: usize)
+        -> ProcessPoolHandleWords !{unsafe} {
+    if (root == 0) { return process_image_root0_record; }
+    return scheduled_process_image_record_handle(root);
 }
 
 private fn process_image_record_pin_words(
@@ -639,14 +654,13 @@ private fn process_image_record_reset(record: borrow &mut ProcessImageRecord) {
 }
 
 // Acquired by scheduled_process_alloc for every process, by
-// kernel_syscall_process_configure for the bootstrap, and on demand by any
-// access to a root that has none. Idempotent.
+// kernel_syscall_process_configure for root 0 (the boot thread's, #831), and
+// on demand by any access to a root that has none. Idempotent.
 //
 // Released by scheduled_process_reap_teardown and scheduled_process_table_clear,
 // beside the fd context and the address-space root, EXCEPT for root 0 --
-// the permanent bootstrap root, whose record is set up once during boot
-// and read on every later stack fault, exactly the exemption
-// address_space_release_root already makes one layer down.
+// the kernel's own root, whose record is set up once during boot, exactly
+// the exemption address_space_release_root already makes one layer down.
 // Minted only after successful publication or validation. Process ownership
 // prevents release while a caller borrows this erased write authority.
 private affine view ProcessImageRecordExists[root: usize];
@@ -658,7 +672,7 @@ must_use variant ProcessImageRecordReady[root: usize] {
 
 fn process_image_record_ensure(root: usize @ identity)
         -> ProcessImageRecordReady[identity] !{unsafe} {
-    if (scheduled_process_slot_valid(root) == false) {
+    if (address_space_root_slot_valid(root) == false) {
         return ProcessImageRecordReady::Missing;
     }
     match process_image_record_pin(&process_image_pool, root) {
@@ -699,8 +713,13 @@ private fn process_image_record_publish(
     let guard = process_image_pool_lock(pool);
     let mut handle: RegionHandle(ProcessImageRecord) = region_give(guard, fresh);
     process_image_pool_unlock(guard);
-    scheduled_process_set_image_record(
-        root, region_handle_address(handle), region_handle_generation(handle));
+    if (root == 0) {
+        process_image_root0_record.address = region_handle_address(handle);
+        process_image_root0_record.generation = region_handle_generation(handle);
+    } else {
+        scheduled_process_set_image_record(
+            root, region_handle_address(handle), region_handle_generation(handle));
+    }
     return ProcessImageRecordReady::Ready(view ProcessImageRecordExists[identity]);
 }
 
@@ -727,7 +746,7 @@ private fn process_image_pool_grow(
 
 // GitHub issue #392: gives a root's record back. Root 0 keeps its record
 // for the life of the kernel -- see process_image_record_ensure's own note
-// for why that is the bootstrap root's exemption and not a leak. The handle
+// for why that is root 0's exemption and not a leak. The handle
 // is cleared first, then the record is retired; the last pin frees it.
 fn process_image_record_release(root: usize) !{unsafe} {
     if (root == 0) { return; }
@@ -799,16 +818,16 @@ private fn process_image_clear_target_root_here() {
 // GitHub issue #392: a root is a process slot, and a process slot is a
 // pool address now, so there is no range to narrow it into. The question
 // the refinement stood in for -- does this name a real root -- is asked of
-// scheduled_process_slot_valid, which answers about a LIVE process rather
-// than about an index being in bounds. Root 0 is the bootstrap and always
-// valid.
+// address_space_root_slot_valid, which answers about a LIVE process rather
+// than about an index being in bounds. Root 0 is the kernel's own root and
+// always valid.
 // GitHub issue #410: two events, and they were one counter.
 //
 // "No target has been chosen yet" is an ordinary state of an early boot and
 // of the teardown negative control below; it happens twice in a healthy QEMU
 // boot. "A target was chosen and its root no longer names a live process" is
-// the #270 hazard -- a teardown resolving through root 0, which is BusyBox
-// init's live image, so it unmaps PID 1.
+// the #270 hazard -- a teardown resolving through root 0, which was BusyBox
+// init's live image until #831, so it unmapped PID 1.
 //
 // Sharing one counter meant the second could never be gated on zero, because
 // the first is legitimately nonzero. That is why this fallback stayed
@@ -885,7 +904,7 @@ fn process_image_target_root_result()
         }
         ProcessImageTargetState::Set(selected) => { selected }
     };
-    if (scheduled_process_slot_valid(address_space_root_slot(
+    if (address_space_root_slot_valid(address_space_root_slot(
             root)) == false) {
         let stale_count_core = process_image_cpu_index();
         process_image_root_stale_count[stale_count_core] = process_image_root_stale_count[stale_count_core] + 1;
@@ -1025,7 +1044,7 @@ fn process_stack_load_word(stack: borrow [u8; PROCESS_STACK_LAYOUT_BYTES..],
 fn process_clone_vm_rollback(dest_space: AddressSpaceRoot) {
     let dest: usize = address_space_root_slot(dest_space);
     address_space_release_user_mappings(dest_space);
-    if (scheduled_process_slot_valid(dest)) {
+    if (address_space_root_slot_valid(dest)) {
         let root: usize =
             process_image_narrow_root(dest);
         let evidence = match process_image_record_ensure(root) {
@@ -1051,14 +1070,14 @@ fn process_clone_vm_rollback(dest_space: AddressSpaceRoot) {
 // active), not a fixed "root 0" -- a process running on any root can
 // fork, not just the one on root 0.
 fn process_image_narrow_root(value: usize) -> usize !{unsafe} {
-    if (scheduled_process_slot_valid(value)) { return value; }
+    if (address_space_root_slot_valid(value)) { return value; }
     return 0;
 }
 
 fn process_image_clone_vm_begin(dest_space: AddressSpaceRoot) -> ProcessCloneVmResult !{unsafe} {
     let dest_root: usize = address_space_root_slot(dest_space);
     let mut source_space: AddressSpaceRoot = process_image_target_root_here();
-    if (scheduled_process_slot_valid(dest_root) == false ||
+    if (address_space_root_slot_valid(dest_root) == false ||
         dest_root == address_space_root_slot(source_space) ||
         address_space_is_live(dest_space) == false) {
         return ProcessCloneVmResult::OutOfMemory;
@@ -1206,7 +1225,7 @@ fn process_image_clone_vm_begin(dest_space: AddressSpaceRoot) -> ProcessCloneVmR
 // numbers.
 fn process_image_activate_root(target: AddressSpaceRoot) {
     let root: usize = address_space_root_slot(target);
-    if (scheduled_process_slot_valid(root) == false) { return; }
+    if (address_space_root_slot_valid(root) == false) { return; }
     // Root 0 owns permanent ASID 1 and never participates in rollover. Every
     // dynamic root uses the stopped preparation boundary, including exec and
     // boot-fixture callers outside the scheduler handoff paths.
@@ -1256,7 +1275,7 @@ fn process_image_cancel_activation(
 // lets two of them be outstanding at once.
 fn process_image_clone_vm_reap(dest_space: AddressSpaceRoot) -> ProcessCloneVmReapResult !{unsafe} {
     let dest_root: usize = address_space_root_slot(dest_space);
-    if (scheduled_process_slot_valid(dest_root) == false) {
+    if (address_space_root_slot_valid(dest_root) == false) {
         return ProcessCloneVmReapResult::Missing;
     }
     let dest: usize = process_image_narrow_root(dest_root);
@@ -1287,9 +1306,11 @@ fn process_image_clone_vm_reap(dest_space: AddressSpaceRoot) -> ProcessCloneVmRe
 // support stack growth at all), and the pinned Alpine BusyBox binary's
 // recursion depth is not something this test controls.
 // GitHub issue #516: with no target root chosen, no reader may answer about
-// root 0. By the time this runs root 0 is BusyBox init's live image, so
-// "answers about root 0" and "answers about PID 1" are the same sentence --
-// which is why the fallback was worth removing rather than counting.
+// root 0. Root 0 was BusyBox init's live image then, so "answers about root
+// 0" and "answers about PID 1" were the same sentence -- which is why the
+// fallback was worth removing rather than counting. Since #831 root 0 is the
+// kernel's own, and an answer about it is still an answer about nothing the
+// caller chose.
 //
 // Nothing here writes root 0. The readers this replaces READ it: a window
 // cleanliness answer taken from its tables, a fault resolved against them.
@@ -1576,7 +1597,7 @@ fn process_image_pages_discard(pages: sink ProcessImagePages[image]) {}
 // one is mapped over the same window, and by the time install runs the old
 // image's page-table entries have already been overwritten.
 fn process_image_exec_image_installed(root: usize) -> bool !{unsafe} {
-    if (scheduled_process_slot_valid(root) == false) { return false; }
+    if (address_space_root_slot_valid(root) == false) { return false; }
     return process_image_record_read(root).exec_image_installed;
 }
 
@@ -2364,7 +2385,8 @@ private fn process_image_pair_probe(slot: borrow ProcessImageSlot[0],
     // (this image's heap reaches further up) -- that difference used to be
     // two separate global constants, and is now just two seeds.
     // GitHub issue #516: no target root is a refusal, not root 0. Seeding a
-    // layout into root 0 here would write PID 1's live image record.
+    // layout into root 0 here would write the kernel root's image record
+    // (PID 1's, before #831).
     let root: usize = match process_image_target_root_result() {
         ProcessImageTargetRootResult::Missing => {
             return ProcessImagePairProbeResult::Invalid;
@@ -2554,7 +2576,7 @@ fn process_image_pair_map_ext2_in_root(
         argc: usize,
         target: AddressSpaceRoot) -> ProcessImagePairProbeResult {
     let root: usize = address_space_root_slot(target);
-    if (scheduled_process_slot_valid(root) == false ||
+    if (address_space_root_slot_valid(root) == false ||
         address_space_is_live(target) == false) {
         return ProcessImagePairProbeResult::Invalid;
     }
@@ -2705,7 +2727,7 @@ fn process_image_map_ext2_in_root(plan: DistroElfLoadPlan,
                                   argc: usize,
                                   target: AddressSpaceRoot) -> ProcessImageMapResult {
     let root: usize = address_space_root_slot(target);
-    if (scheduled_process_slot_valid(root) == false ||
+    if (address_space_root_slot_valid(root) == false ||
         address_space_is_live(target) == false) {
         return ProcessImageMapResult::InvalidImage;
     }

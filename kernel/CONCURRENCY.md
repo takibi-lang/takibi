@@ -134,11 +134,11 @@ on that process's own kernel stack -- a clone child's first return still
 stands on its parent's. The hand-off is the peers' ordering: publish no
 current process, move SP off the process stack, then make the process
 Ready with its stack unowned under the run lock. The idle loop takes a Ready
-process core 0 may run, PID 1 (slot 0) included -- on every core since
-#775: once peer dispatch is
-enabled, just before `run_initial_user`, a Ready PID 1 always has a saved
-EL0 frame, and skipping it left init Ready and never run whenever its child
-exited on a peer. An exit with no
+process core 0 may run, PID 1 included -- on every core since #775, as
+skipping it left init Ready and never run whenever its child exited on a
+peer. Since #831 core 0 also reaches the loop when `main()` ends: it gives
+the boot thread back, leaves the boot stack (`kernel_idle_boot_enter`), and
+starts PID 1 from the loop like any Ready process. An exit with no
 successor idles the same way (the exited process's stack is released by
 `kernel_process_stack_idle_complete`), and so does a wait: a block with no
 Ready successor publishes Blocked under the run lock, after the same last
@@ -266,21 +266,29 @@ Symmetric now:
   it is, waits for an interrupt and reruns the syscall in place
   (`kernel_syscall_dispatch_action`, #775). A peer used to migrate the call
   to core 0 to wait there.
-- PID 1 (slot 0): once peer dispatch opens, just before `run_initial_user`,
-  it runs on any core its mask allows (`kernel_process_cpu_allows_slot`,
-  #775), and so does its own exec, whose `run_initial_user` frame is on
-  PID 1's kernel stack wherever PID 1 runs. Before that, during the boot
-  probes, slot 0 can be Ready without a saved EL0 frame, so it stays on the
-  boot core (the boot row). Its record is still the static bootstrap
-  record and its kernel stack is core 0's boot stack, which holds `main()`'s
-  frames; that stack is PID 1's, not core 0's, since core 0 idles on its
-  own idle stack (#592, #821).
+- PID 1 (#831, maintainer decision 2026-10-20): an ordinary pooled
+  process. The boot driver creates it Constructing, maps BusyBox init into
+  a root of its own, and publishes it Ready with a first frame on its own
+  kernel stack (`kernel_process_init_publish`). `main()` then gives the boot
+  thread back and ends in core 0's idle loop, which starts PID 1 through
+  the same `el0_context_resume` as every resume; that first start opens
+  dispatch on every core. From then on PID 1 runs on any core its mask
+  allows (`kernel_process_cpu_allows_slot`, #775), its exec is an ordinary
+  exec, and its exit stops the kernel (`kernel_syscall_init_exit`), as
+  Linux's does. No placement, stack-run or address-space branch names a
+  slot any more; root 0 is the kernel's own root. With a pooled kernel stack
+  of its own, PID 1 is no longer in kernel preemption's way (#638).
+- The boot fixtures stand on a pooled boot thread, pid 0, as Linux's boot
+  code stands on swapper (`scheduled_process_alloc_boot_thread`, #831): no
+  EL0 frame, no stack run (it stands on the boot stack), and root 0 for its
+  address space. Its own mask names the CPU that runs boot, so no idle loop
+  takes it (the boot row).
 
 Special, with the reason it stays so today:
 
 | Role | Where | Why core 0 | Could be symmetric? |
 |---|---|---|---|
-| Boot | `boot/entry.S` parks every MPIDR but 0; core 0 runs `main()`, the GIC distributor, device bring-up and the boot fixtures | the firmware hands off one core, and machine-wide state is initialized once | no: one core has to come first |
+| Boot | `boot/entry.S` parks every MPIDR but 0; core 0 runs `main()`, the GIC distributor, device bring-up and the boot fixtures (on the boot thread, pinned there by its mask), and its idle loop takes the first process after `main()` hands off (`kernel_process_secondary_start`) | the firmware hands off one core, and machine-wide state is initialized once; PID 1's first entry is then deterministic, which the oops lane's fault injection relies on | no: one core has to come first |
 | PSCI start authority | `cpu_start_reserve` (`lib/occupancy.tkb`) | starting cores is a boot phase; no hotplug exists | only with CPU hotplug, which nothing needs |
 | Syscalls outside the peer-safety table | `syscall_peer_refused`, `syscall_peer_safe`; rerun on core 0 with the process pinned for the call | no subsystem entry is left: the BusyBox Extras exec left in #828, and the TCP pool drain it ran is gone since #836. The terminal reboot and the payload fixture's parent-progress report are still refused by number, so the rerun path itself stays | yes, one entry at a time; each is its own follow-up |
 | Device interrupts | the UART SPI targets core 0; a secondary's dispatch handles its tick, its PMU line, the NIC and xHCI (above), nothing else | the UART driver's state is touched only from core 0 | yes: the NIC and xHCI moved in #830; the UART (with BREAK -> DDB and the input-flow poll) is #830's next slice |
@@ -366,7 +374,7 @@ The checker-only `changes_witness_ProcessCurrent` contract rejects a context
 change or departure from Running/Constructing with any remaining live current
 witness, even without a retained record pointer. Boot-only calls with no live
 process retain the existing current-live
-gates and permanent bootstrap record; the view does not prove a process exists.
+gates and the boot thread; the view does not prove a process exists.
 The source check inventories entry and transition mints and requires
 that contract on every current-handle/current-live writer and state-writing
 primitive that consumes Running or Constructing. The synthetic early-Ready

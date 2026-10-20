@@ -506,9 +506,19 @@ private fn address_space_backing_write(
     }
 }
 
+// GitHub issue #831: whether a root slot names a root. Root 0 is the
+// kernel's own address space: it exists before any process (kernel_mmu_init
+// builds it with the MMU off), outlives them all, and is what the boot
+// thread and every idle CPU run on, as Linux's init_mm is. Every other root
+// is a live process's, named by its record's slot.
+fn address_space_root_slot_valid(slot: usize) -> bool !{unsafe} {
+    if (slot == 0) { return true; }
+    return scheduled_process_slot_valid(slot);
+}
+
 fn address_space_is_live(root: AddressSpaceRoot) -> bool {
     let slot: usize = root.slot;
-    if (scheduled_process_slot_valid(slot)) {
+    if (address_space_root_slot_valid(slot)) {
         let checked: usize = slot;
         return address_space_backing_read(root).live;
     }
@@ -538,7 +548,7 @@ fn address_space_root_slot(root: AddressSpaceRoot) -> usize {
 
 fn address_space_l1_physical(root: AddressSpaceRoot) -> usize {
     let slot: usize = root.slot;
-    if (scheduled_process_slot_valid(slot)) {
+    if (address_space_root_slot_valid(slot)) {
         let checked: usize = slot;
         if (address_space_backing_read(root).live) {
             return address_space_backing_read(root).l1_physical;
@@ -549,7 +559,7 @@ fn address_space_l1_physical(root: AddressSpaceRoot) -> usize {
 
 fn address_space_l2_physical(root: AddressSpaceRoot) -> usize {
     let slot: usize = root.slot;
-    if (scheduled_process_slot_valid(slot)) {
+    if (address_space_root_slot_valid(slot)) {
         let checked: usize = slot;
         if (address_space_backing_read(root).live) {
             return address_space_backing_read(root).l2_physical;
@@ -560,7 +570,7 @@ fn address_space_l2_physical(root: AddressSpaceRoot) -> usize {
 
 fn address_space_asid(root: AddressSpaceRoot) -> usize {
     let slot: usize = root.slot;
-    if (scheduled_process_slot_valid(slot)) {
+    if (address_space_root_slot_valid(slot)) {
         let checked: usize = slot;
         if (address_space_backing_read(root).live) {
             return address_space_backing_read(root).asid;
@@ -774,7 +784,7 @@ private fn address_space_ensure_boot_root() -> AddressSpaceEnsureResult {
 // exists, then adopted by the initial scheduler slot. Every nonzero slot is
 // made real by scheduled_process_alloc and released when that slot is reaped.
 fn address_space_ensure_root(slot: usize) -> AddressSpaceEnsureResult {
-    if (scheduled_process_slot_valid(slot) == false) {
+    if (address_space_root_slot_valid(slot) == false) {
         return AddressSpaceEnsureResult::SlotOutOfRange;
     }
     let evidence = match address_space_backing_ensure(
@@ -841,7 +851,7 @@ private fn address_space_activation_prepared_new(root: usize @ identity,
 fn address_space_prepare_activation(root: AddressSpaceRoot)
         -> AddressSpaceActivationPrepareResult {
     let slot: usize = root.slot;
-    if (scheduled_process_slot_valid(slot) == false) {
+    if (address_space_root_slot_valid(slot) == false) {
         return AddressSpaceActivationPrepareResult::Invalid;
     }
     let checked: usize = slot;
@@ -884,7 +894,7 @@ fn address_space_commit_activation(
         -> AddressSpaceActivationCommitResult {
     let slot: usize = prepared.root;
     let mut root: AddressSpaceRoot = prepared.target;
-    if (scheduled_process_slot_valid(slot) == false) {
+    if (address_space_root_slot_valid(slot) == false) {
         return AddressSpaceActivationCommitResult::Invalid;
     }
     let checked: usize = slot;
@@ -906,7 +916,7 @@ fn address_space_cancel_activation(
 
 fn address_space_activate_root(root: AddressSpaceRoot) {
     let slot: usize = root.slot;
-    if (scheduled_process_slot_valid(slot)) {
+    if (address_space_root_slot_valid(slot)) {
         let checked: usize = slot;
         match address_space_backing_read_checked(root) {
             AddressSpaceBackingReady::Missing => { address_space_backing_missing_note(); }
@@ -937,7 +947,7 @@ must_use variant AddressSpacePteWriteResult {
 
 fn address_space_l3_physical_for_branch(root: AddressSpaceRoot, branch: usize) -> usize {
     let slot: usize = root.slot;
-    if (scheduled_process_slot_valid(slot) == false || branch >= USER_L2_BRANCH_COUNT) {
+    if (address_space_root_slot_valid(slot) == false || branch >= USER_L2_BRANCH_COUNT) {
         return 0;
     }
     let checked: usize = slot;
@@ -959,7 +969,7 @@ fn address_space_l3_physical_for_index(root: AddressSpaceRoot, index: usize) -> 
 fn address_space_pte_write(root: AddressSpaceRoot, index: usize, value: usize)
         -> AddressSpacePteWriteResult {
     let slot: usize = root.slot;
-    if (scheduled_process_slot_valid(slot) == false || index >= USER_SPACE_PAGE_COUNT) {
+    if (address_space_root_slot_valid(slot) == false || index >= USER_SPACE_PAGE_COUNT) {
         return AddressSpacePteWriteResult::Invalid;
     }
     let checked: usize = slot;
@@ -1122,7 +1132,7 @@ fn address_space_resolve_cow(root: AddressSpaceRoot, index: usize) -> bool !{uns
 // root destruction without a USER_SPACE_PAGE_COUNT-sized shadow array.
 fn address_space_release_user_mappings(root: AddressSpaceRoot) {
     let slot: usize = root.slot;
-    if (scheduled_process_slot_valid(slot) == false) { return; }
+    if (address_space_root_slot_valid(slot) == false) { return; }
     let checked: usize = slot;
     if (address_space_backing_read(root).live == false) { return; }
     let l2_physical: usize = address_space_backing_read(root).l2_physical;
@@ -1169,7 +1179,7 @@ fn address_space_clear_root(root: AddressSpaceRoot) {
 // visible.
 fn address_space_user_window_is_clear(root: AddressSpaceRoot) -> bool !{unsafe} {
     let slot: usize = root.slot;
-    if (scheduled_process_slot_valid(slot) == false) { return true; }
+    if (address_space_root_slot_valid(slot) == false) { return true; }
     if (address_space_backing_read(root).live == false) { return true; }
     let l2_physical: usize = address_space_backing_read(root).l2_physical;
     for branch: usize in 0..<USER_L2_BRANCH_COUNT {
@@ -1193,7 +1203,7 @@ fn address_space_l3_branch_physical(root: AddressSpaceRoot, branch: usize) -> us
 // released only after the boundary has switched away from that root.
 fn address_space_release_root(root: AddressSpaceRoot) {
     let slot: usize = root.slot;
-    if (slot == 0 || scheduled_process_slot_valid(slot) == false) { return; }
+    if (slot == 0 || address_space_root_slot_valid(slot) == false) { return; }
     let checked: usize = slot;
     let evidence = match address_space_backing_read_checked(root) {
         AddressSpaceBackingReady::Missing => {

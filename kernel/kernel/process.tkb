@@ -18,20 +18,20 @@ use "kernel/lib/execution_model.tkb";
 use "kernel/lib/mutex.tkb";
 use "kernel/lib/locked_cell.tkb";
 
-// Current limitations (2026-08-13, issue #295). Keep this list current as
-// call sites change; a limitation that goes stale here is worse than
-// none.
-// - Peer process dispatch stays closed while the boot driver's destructive
+// Current limitations (2026-10-20, issues #295 and #831). Keep this list
+// current as call sites change; a limitation that goes stale here is worse
+// than none.
+// - Process dispatch stays closed while the boot driver's destructive
 //   scheduler probes reset the shared process table. The peer still starts,
-//   runs its contention probes, and handles its timer; the gate opens once
-//   PID 1's image is ready to enter userspace. From there, an unset affinity
-//   mask admits every online core.
+//   runs its contention probes, and handles its timer. When main() hands
+//   off, the boot core takes PID 1 from its idle loop, and that first start
+//   opens dispatch on every core. From there, an unset affinity mask admits
+//   every online core.
 // - PARTLY SYNCHRONIZED as of GitHub issue #479. The pid counter is minted
 //   inside a LockedCell whose guard is the only way to reach the count
 //   (issue #452), and execution_state is per-core,
 //   indexed by cpu_id(). Parent/sibling walks and all Ready/Running/Blocked
-//   transitions take the run lock, including the static bootstrap record;
-//   the crash trace uses per-core storage and an atomic global sequence.
+//   transitions take the run lock; the crash trace uses per-core storage and an atomic global sequence.
 //   What remains unsynchronized is named by this file's
 //   process_execution_model_assumption: one core cannot preempt a lifecycle
 //   operation with another process's operation on that same core.
@@ -44,9 +44,10 @@ use "kernel/lib/locked_cell.tkb";
 //   in this kernel moved in the same change.
 // - No fixed process-table capacity: a ProcessRecord is an
 //   IntrusivePool allocation, so the page allocator is the only limit
-//   (issue #392). The bootstrap is the exception and is a static record
-//   named by slot value 0, because root 0 exists before the MMU is on.
-//   Nothing on the creation path has a fixed ceiling any more: the ASID
+//   (issue #392), the boot thread's and PID 1's included (#831); slot value
+//   0 names no process. Root 0, the kernel's own address space, exists
+//   before the MMU is on, and its backing and image record are statics of
+//   their own files. Nothing on the creation path has a fixed ceiling any more: the ASID
 //   was the last one, and issue #402 replaced it with a generation that
 //   rolls over (kernel/arch/arm64/mm/asid.tkb) rather than a number that
 //   runs out.
@@ -178,9 +179,9 @@ const SCHEDULER_WORLD_STOP_SPINS: usize = 10000000;
 // store algorithm. The reusable table slot is never the static identity.
 // GitHub issue #392: pool_index is a pool SLOT ADDRESS now, not an index,
 // so there is no array bound left to refine it against. Since #518 it is
-// typed: only the pool mints one, and the none address is the bootstrap's
-// static record. What the refinement proved -- that the value named a real
-// array element -- is proved by intrusive_pool_probe_slot on every use
+// typed: only the pool mints one, and the none address names no process
+// (it named the bootstrap's static record until #831). What the refinement
+// proved -- that the value named a real array element -- is proved by intrusive_pool_probe_slot on every use
 // instead, and strictly more of it: a refinement could not tell a live
 // process from a recycled slot, which was always the generation's job.
 // The name is kept because it is what a hundred call sites spell.
@@ -204,16 +205,11 @@ private fn process_handle_new(slot: RegionHeld(ProcessRecord), generation: usize
     return handle;
 }
 
-// The bootstrap's record is static rather than a pool slot; its identity
-// is the pool's none address.
 // The slot's numeric identity, for the scheduler tables keyed by it. There
-// is no way back: a word becomes a handle again only through the pool.
+// is no way back: a word becomes a handle again only through the pool. Every
+// record is a pool slot (GitHub issue #831), so 0 names no process.
 private inline fn process_slot_word(slot: RegionHeld(ProcessRecord)) -> usize {
     return region_held_address(slot);
-}
-
-private inline fn process_slot_is_boot(slot: RegionHeld(ProcessRecord)) -> bool {
-    return region_held_equal(slot, region_held_none__ProcessRecord());
 }
 
 // GitHub issue #629: the standard Linux signals 1..31 each have an action.
@@ -241,8 +237,8 @@ struct ProcessRecord {
     // slot index is exactly what the remaining stage of this issue stops
     // being a small integer. A pid derived from a pool address would be
     // an address: visible to userspace through getpid()/wait4(), printed
-    // into every oops line, and expected to be 1 for the bootstrap
-    // process by the oops lane's own pattern.
+    // into every oops line, and expected to be 1 for PID 1 by the oops
+    // lane's own pattern.
     //
     // Allocated monotonically from scheduled_process_pid_cell, so a
     // reused slot does NOT reuse its pid. That is a deliberate behaviour
@@ -252,7 +248,8 @@ struct ProcessRecord {
     start_time_ticks: usize;
     // With no setpgid API, each session has exactly one process group.
     // Both IDs are inherited by fork and preserved by exec. Zero is the
-    // bootstrap group before PID 1 creates its userspace session.
+    // boot thread's group, and PID 1's until it creates its userspace
+    // session.
     session_id: usize;
     // Bounded kernel-owned diagnostic copy. procfs must never retain or
     // revisit userspace argv pointers while a process can exit or replace
@@ -371,6 +368,12 @@ struct ProcessRecord {
     // GitHub issue #9: the migration gate sent this process's current
     // syscall to core 0. It stays off every peer until that call completes.
     core0_for_call: bool;
+    // GitHub issue #831 (maintainer decision 2026-10-20, item 2-2 B): the
+    // boot thread, pid 0, Linux's swapper. It never enters EL0, stands on the
+    // boot stack rather than a run of its own, and runs on root 0, the
+    // kernel's own root, as Linux's kernel threads run on init_mm. Written
+    // once, before the record is published; false in every other record.
+    kernel_thread: bool;
     // GitHub issue #392 stage 1: the run backing this slot's kernel
     // stack, as its base physical address (0 = never backed). It was a
     // parallel [usize; KERNEL_PROCESS_MAX] beside this array, indexed in
@@ -581,19 +584,12 @@ private fn process_pool_next_slot(slot: usize) -> usize !{unsafe} {
 }
 private let mut scheduled_process_pool_ready: bool = false;
 
-// The bootstrap process's record, and the reason slot value 0 still means
-// something after every other slot became a pool address.
-//
-// A pool address is never 0, so the two namespaces are disjoint and `slot
-// == 0` keeps its meaning at the dozen call sites that already spell the
-// bootstrap that way. It has to: kernel/mm/address_space.tkb creates root
-// 0 from kernel_mmu_init, which runs with the MMU OFF, before anything may
-// allocate -- so the bootstrap's identity must exist before the pool does.
-// That file already keeps root 0's backing in a plain static for exactly
-// this reason; this is the same fact one layer up.
-private let mut scheduled_process_boot_record: ProcessRecord;
-private let mut scheduled_process_boot_live: bool = false;
-private let mut scheduled_process_boot_generation: usize = 0;
+// GitHub issue #831: there is no static bootstrap record any more. The boot
+// fixtures run as a pooled boot thread (scheduled_process_alloc_boot_thread)
+// and PID 1 is a pooled process, so a slot is always a pool address and 0
+// names none. Root 0, the kernel's own address space, still exists before
+// the pool does (kernel_mmu_init builds it with the MMU off), and its
+// backing and image record live in statics of their own files.
 // Boot-time process probes reset the shared table while CPU 1 is already in
 // its idle loop. Keep that loop from starting an EL0 context until the
 // initial userspace image is ready; after the one-way publication, normal
@@ -716,9 +712,9 @@ private fn scheduled_process_spare_unlock(
 private let mut scheduled_process_stack_deepest_reaped: usize = 0;
 // GitHub issue #392: the pid namespace, monotonic within one run of the
 // process table. Reset by scheduled_process_table_init/_clear -- the two
-// points that already restart slot numbering -- so the bootstrap process
-// created right after a reset is pid 1, which the oops lane matches
-// literally. Nothing recycles a pid inside one run: that is what makes it
+// points that already restart slot numbering -- so the first process
+// minted after a reset is pid 1, which the oops lane matches literally (the
+// boot thread is pid 0 and mints none, #831). Nothing recycles a pid inside one run: that is what makes it
 // independent of the slot it happens to occupy.
 //
 // GitHub issue #452: the counter and its lock are ONE value. #479 gave the
@@ -730,8 +726,8 @@ private let mut scheduled_process_stack_deepest_reaped: usize = 0;
 // HOW MANY pids have been minted, not WHICH pid is next: a LockedCell
 // carries no initialiser (its field belongs to another file), and this way
 // it needs none, because .bss zero is already the right starting count and
-// a pid is count + 1. So the bootstrap process is still pid 1 and the oops
-// lane still matches it literally.
+// a pid is count + 1. So PID 1 is pid 1 and the oops lane still matches it
+// literally.
 private let mut scheduled_process_pid_cell: LockedCell(usize);
 
 // The one place a pid is minted, and now the only place the counter is
@@ -885,7 +881,6 @@ private fn scheduled_process_pool_init() {
 fn scheduled_process_record_locked(guard: borrow ProcessRunGuard[lock],
                                    slot: usize) -> &mut ProcessRecord @ lock
         !{unsafe} {
-    if (slot == 0) { return &scheduled_process_boot_record; }
     if (scheduled_process_pool_ready == false) {
         scheduled_process_record_missing_count =
             scheduled_process_record_missing_count + 1;
@@ -1095,7 +1090,6 @@ private inline fn scheduled_process_current_view_drop(
 fn scheduled_process_record_current(running: borrow ProcessCurrent[process, phase])
         -> &mut ProcessRecord @ process !{unsafe} {
     let mut handle: ProcessHandle = process_current_handle(running);
-    if (process_slot_is_boot(handle.pool_index)) { return &scheduled_process_boot_record; }
     let pool_guard = process_pool_lock();
     match region_probe_held(pool_guard, handle.pool_index) {
         RegionHeldProbe(ProcessRecord)::Stale => {
@@ -1148,7 +1142,7 @@ fn scheduled_process_recycled_handle_count() -> usize !{unsafe} {
 // Validated on every call, which is strictly more than the old
 // `{0..<KERNEL_PROCESS_MAX as usize}` refinement proved: a refinement said
 // the index named a real array element, never that a live process was in
-// it. Slot 0 is always answerable -- the bootstrap record is a static.
+// it. Slot 0 names no record (#831) and reads as missing like any other.
 // The FIRST slot address this fallback was ever asked for, and which of
 // the two ways it missed (1 = the pool was not ready yet, 2 = the pool did
 // not recognise the address). A bare count says a lookup failed; these say
@@ -1344,10 +1338,10 @@ fn scheduled_process_missing_current_value() -> usize {
 }
 
 
-// Walking every live process. The bootstrap comes first and is not in the
-// pool, which is exactly the thing a hand-written walk would forget -- so
-// there is one walk and every caller uses it. Done rather than 0 for the
-// end, because 0 is a real slot here.
+// Walking every live process: one walk, which every caller uses. It used to
+// put the static bootstrap first, outside the pool, which is the thing a
+// hand-written walk would forget; since #831 every process is in the pool.
+// Done rather than 0 for the end.
 variant ProcessSlotCursor {
     Done;
     At(usize);
@@ -1436,9 +1430,8 @@ private fn scheduled_process_ddb_record(
     result.saved_sp = record.saved_sp;
     result.stack_bottom = 0;
     result.stack_top = 0;
-    if (slot == 0) {
-        // PID 1 executes on the linker-owned boot stack even if its record
-        // retained a reusable process-stack run from an earlier fixture.
+    if (record.kernel_thread) {
+        // The boot thread stands on the linker-owned boot stack (#831).
         result.stack_bottom = boot_stack_bottom;
         result.stack_top = boot_stack_top;
     } else if (kernel_stack_run_usable(record.stack_run)) {
@@ -1447,7 +1440,12 @@ private fn scheduled_process_ddb_record(
         result.stack_top = record.stack_run + KERNEL_STACK_RUN_BYTES;
     }
     result.stack_owner_cpu = record.stack_owner_cpu;
-    result.root_slot = slot;
+    // The boot thread runs on root 0 (#831).
+    if (record.kernel_thread) {
+        result.root_slot = 0;
+    } else {
+        result.root_slot = slot;
+    }
     result.pending_signals = record.pending_signals;
     result.signal_mask = record.signal_mask;
     result.affinity_mask = record.affinity_mask;
@@ -1478,17 +1476,11 @@ fn kernel_process_crash_frame_usable(
         stopped: borrow MachineStopped[&kernel_world_stop], frame_sp: usize) -> bool {
     if (execution_state[execution_cpu_index()].current_live == false) { return false; }
     let mut handle: ProcessHandle = execution_state[execution_cpu_index()].current_handle;
-    let mut generation_matches: bool = false;
-    if (process_slot_is_boot(handle.pool_index)) {
-        generation_matches = scheduled_process_boot_live &&
-            handle.generation == scheduled_process_boot_generation;
-    } else {
-        if (scheduled_process_pool_ready == false) { return false; }
-        if (region_pool_lock_is_held(&scheduled_process_pool)) { return false; }
-        let occupant: usize = region_pool_generation_unproven__ProcessRecord(
-            &scheduled_process_pool, process_slot_word(handle.pool_index));
-        generation_matches = occupant != 0 && occupant == handle.generation;
-    }
+    if (scheduled_process_pool_ready == false) { return false; }
+    if (region_pool_lock_is_held(&scheduled_process_pool)) { return false; }
+    let occupant: usize = region_pool_generation_unproven__ProcessRecord(
+        &scheduled_process_pool, process_slot_word(handle.pool_index));
+    let generation_matches: bool = occupant != 0 && occupant == handle.generation;
     if (generation_matches == false || (frame_sp & 15) != 0) { return false; }
     let mut record = kernel_process_current_stopped_record(stopped);
     let bottom: usize = record.stack_bottom;
@@ -1555,20 +1547,10 @@ private fn kernel_process_protocol_owner(owner: usize) -> usize {
     return owner;
 }
 
-// A record with no parent (the boot process, or an orphan the teardown
-// sweep detached) names nothing.
+// A record with no parent (PID 1, the boot thread, or an orphan the
+// teardown sweep detached) names nothing.
 private fn kernel_process_protocol_observe(unlocked: bool) !{unsafe} {
     protocol_trace_pass_begin(unlocked);
-    if (scheduled_process_boot_live) {
-        protocol_trace_observe_process(
-            scheduled_process_boot_record.pid,
-            kernel_process_protocol_state(process_state_kind(&scheduled_process_boot_record.state)),
-            kernel_process_protocol_owner(
-                scheduled_process_boot_record.stack_owner_cpu),
-            kernel_process_protocol_reason(
-                process_wait_reason(&scheduled_process_boot_record.state)),
-            PROTOCOL_TRACE_NONE);
-    }
     let mut slot: usize = 0;
     if (scheduled_process_pool_ready) {
         slot = process_pool_first_slot();
@@ -1667,7 +1649,6 @@ private fn scheduled_process_record_stopped(
         stopped: borrow MachineStopped[&kernel_world_stop],
         scope: borrow MachineStopped[stop], slot: usize)
         -> &mut ProcessRecord @ stop !{unsafe} {
-    if (slot == 0) { return &scheduled_process_boot_record; }
     if (scheduled_process_pool_ready == false) { return &scheduled_process_record_absent; }
     let generation: usize = region_pool_generation_unproven__ProcessRecord(
         &scheduled_process_pool, slot);
@@ -1730,6 +1711,7 @@ fn scheduled_process_address_space_root_stopped(
         stopped: borrow MachineStopped[&kernel_world_stop], slot: usize)
         -> AddressSpaceRoot !{unsafe} {
     let record = scheduled_process_record_stopped(stopped, stopped, slot);
+    if (record.kernel_thread) { return address_space_boot_root(); }
     return address_space_root_mint(slot, process_backing_words(record));
 }
 
@@ -1744,11 +1726,6 @@ fn kernel_process_ddb_copy(
         let mut refused: ProcessDdbCopyResult = { 0, true }; return refused;
     }
     let mut count: usize = 0;
-    if (scheduled_process_boot_live) {
-        scheduled_process_ddb_copy_one(
-            stopped, output, 0, 0, scheduled_process_record_stopped(stopped, stopped, 0));
-        count = count + 1;
-    }
     let mut slot: usize = 0;
     if (scheduled_process_pool_ready) {
         slot = process_pool_first_slot();
@@ -1810,12 +1787,10 @@ private fn scheduled_process_first_pool_slot() -> ProcessSlotCursor
 }
 
 fn scheduled_process_first_slot() -> ProcessSlotCursor !{unsafe} {
-    if (scheduled_process_boot_live) { return ProcessSlotCursor::At(0); }
     return scheduled_process_first_pool_slot();
 }
 
 fn scheduled_process_next_slot(slot: usize) -> ProcessSlotCursor !{unsafe} {
-    if (slot == 0) { return scheduled_process_first_pool_slot(); }
     if (scheduled_process_pool_ready == false) {
         return ProcessSlotCursor::Done;
     }
@@ -2087,7 +2062,10 @@ private fn scheduled_process_record_reset_syscall_state(
     let mut fresh: CloneFileState = { false };
     record.clone_file_state = fresh;
     record.init_signal_wait_logged = false;
-    record.affinity_mask = 0;
+    // The boot thread's mask is not sched_setaffinity's: it is what keeps
+    // the thread on the CPU that runs boot (#831), and a whole-world reset
+    // of syscall state leaves it.
+    if (record.kernel_thread == false) { record.affinity_mask = 0; }
     record.core0_for_call = false;
     record.command_line_length = record.command_line_length &
         ~(PROCESS_EXEC_PENDING | PROCESS_EXEC_ARGC_MASK |
@@ -2121,7 +2099,6 @@ private inline fn scheduled_process_scalar_copy(record: borrow &mut ProcessRecor
 
 private fn scheduled_process_scalar_snapshot(slot: usize)
         -> ProcessRecordScalarSnapshot !{unsafe} {
-    if (slot == 0) { return scheduled_process_scalar_copy(&scheduled_process_boot_record); }
     if (scheduled_process_pool_ready == false) {
         return scheduled_process_scalar_copy(&scheduled_process_record_absent);
     }
@@ -2203,9 +2180,6 @@ private fn scheduled_process_slot_for_pid_stopped(
         stopped: borrow MachineStopped[&kernel_world_stop], pid: usize)
         -> ProcessSlotForPidResult !{unsafe} {
     if (pid == 0) { return ProcessSlotForPidResult::Missing; }
-    if (scheduled_process_boot_live && scheduled_process_boot_record.pid == pid) {
-        return ProcessSlotForPidResult::Found(0);
-    }
     if (scheduled_process_pool_ready == false ||
             region_pool_lock_is_held(&scheduled_process_pool)) {
         return ProcessSlotForPidResult::Missing;
@@ -2333,9 +2307,6 @@ private fn scheduled_process_diagnostic_next_pid_stopped(
         stopped: borrow MachineStopped[&kernel_world_stop], after: usize)
         -> usize !{unsafe} {
     let mut next: usize = 0;
-    if (scheduled_process_boot_live && scheduled_process_boot_record.pid > after) {
-        next = scheduled_process_boot_record.pid;
-    }
     if (scheduled_process_pool_ready == false ||
             region_pool_lock_is_held(&scheduled_process_pool)) { return next; }
     let mut slot: usize = process_pool_first_slot();
@@ -2584,10 +2555,8 @@ fn scheduled_process_set_image_record(slot: usize, address: usize,
 // parsed before this file, so unable to name KERNEL_PROCESS_MAX in a
 // bound -- stop keeping its own copy of the number (issue #392).
 fn scheduled_process_slot_valid(slot: usize) -> bool !{unsafe} {
-    // Slot 0 is the bootstrap, whose record is a static and therefore
-    // always answerable -- including from kernel_mmu_init, with the MMU
-    // off, before the pool exists.
-    if (slot == 0) { return true; }
+    // Every record is a pool slot (#831); root 0's own validity is
+    // address_space_root_slot_valid's answer, not this one.
     if (scheduled_process_pool_ready == false) { return false; }
     return region_held_address(process_pool_held_at(slot)) != 0;
 }
@@ -2607,6 +2576,10 @@ private fn process_backing_words(record: borrow &mut ProcessRecord)
 // scripts/check_address_space_root_mints.py allows.
 fn scheduled_process_address_space_root_owned(
         owner: borrow ScheduledProcessOwner[process]) -> AddressSpaceRoot !{unsafe} {
+    // The boot thread runs on the kernel's own root (#831).
+    if (scheduled_process_record_owned(owner).kernel_thread) {
+        return address_space_boot_root();
+    }
     return address_space_root_mint(process_slot_word(owner.pool_index),
         process_backing_words(scheduled_process_record_owned(owner)));
 }
@@ -2614,6 +2587,9 @@ fn scheduled_process_address_space_root_owned(
 // A caller already holding the run guard derives the root from that guard.
 fn scheduled_process_address_space_root_locked(
         guard: borrow ProcessRunGuard[lock], slot: usize) -> AddressSpaceRoot !{unsafe} {
+    if (scheduled_process_record_locked(guard, slot).kernel_thread) {
+        return address_space_boot_root();
+    }
     return address_space_root_mint(slot,
         process_backing_words(scheduled_process_record_locked(guard, slot)));
 }
@@ -2624,6 +2600,11 @@ fn scheduled_process_address_space_root_locked(
 // A boot probe reads its root this way once, right after allocating its
 // process: the backing keeps its handle until the probe releases the slot.
 fn scheduled_process_address_space_root_lookup(slot: usize) -> AddressSpaceRoot !{unsafe} {
+    // A root slot of 0 is root 0, the kernel's own root, which no process
+    // record names (#831): the boot thread runs on it, an idle CPU selects
+    // it, and a root slot read back from TTBR0's record or a clone's source
+    // can be it.
+    if (slot == 0) { return address_space_boot_root(); }
     let guard = process_run_lock();
     let mut root: AddressSpaceRoot =
         scheduled_process_address_space_root_locked(guard, slot);
@@ -2634,6 +2615,9 @@ fn scheduled_process_address_space_root_lookup(slot: usize) -> AddressSpaceRoot 
 fn scheduled_process_address_space_root_current(
         running: borrow ProcessCurrent[process, phase]) -> AddressSpaceRoot !{unsafe} {
     let mut handle: ProcessHandle = process_current_handle(running);
+    if (scheduled_process_record_current(running).kernel_thread) {
+        return address_space_boot_root();
+    }
     return address_space_root_mint(process_slot_word(handle.pool_index),
         process_backing_words(scheduled_process_record_current(running)));
 }
@@ -2686,19 +2670,6 @@ private fn kernel_stack_run_usable(base: usize) -> bool {
 // pool's lock. 0 for a slot that is gone or has no run.
 private fn kernel_stack_run_depth(slot: usize, offset: usize, count: usize)
         -> usize !{unsafe} {
-    if (slot == 0) {
-        // The bootstrap's record is a static, reached by name.
-        let boot_guard = process_pool_lock();
-        let boot_depth: usize = match place_borrow(boot_guard,
-                scheduled_process_boot_record.stack) {
-            Place::Empty => { 0 }
-            Place::Full(run) => {
-                stack_run_poison_depth(run, offset, count, KERNEL_STACK_POISON)
-            }
-        };
-        process_pool_unlock(boot_guard);
-        return boot_depth;
-    }
     if (scheduled_process_pool_ready == false) { return 0; }
     let pool_guard = process_pool_lock();
     let mut held: RegionHeld(ProcessRecord) = region_held_at(pool_guard, slot);
@@ -2731,19 +2702,11 @@ private fn kernel_stack_bottom(slot: usize)
 
 
 // The shared rollback implementation produces a plain handle internally.
-// Its two public entry points wrap that value in distinct nominal types, so
-// code acquiring an ordinary pooled process cannot pass it to a bootstrap-only
-// operation. GitHub issue #415.
-//
-// The distinction ends explicitly at scheduled_*_process_handle. A full
-// split through ProcessHandle would duplicate the scheduler API rather than
-// strengthen it: the pre-split call graph had 103 ProcessHandle type uses and
-// 123 pool_index field uses, and both kinds must enter the same ready/running/
-// blocked lifecycle after allocation. The bootstrap-only storage and release
-// rules therefore remain at their existing process/address-space/image
-// boundaries; moving all of them onto separate APIs would require parallel
-// scheduler and VM surfaces. The type pays for the boundary where the
-// historical bug occurred, not for those parallel implementations.
+// GitHub issue #415 wrapped its two public entry points' results in distinct
+// nominal types so ordinary pooled code could not pass one to a
+// bootstrap-only operation. The bootstrap went in #831, and with it the
+// second type: every record is a pooled one, and PooledProcessHandle is what
+// the allocators hand back.
 must_use variant ScheduledProcessAllocResult {
     Full;
     Allocated(ProcessHandle);
@@ -2753,28 +2716,14 @@ struct PooledProcessHandle {
     private handle: ProcessHandle;
 }
 
-struct BootstrapProcessHandle {
-    private handle: ProcessHandle;
-}
-
 must_use variant ScheduledPooledProcessAllocResult {
     Full;
     Allocated(PooledProcessHandle);
 }
 
-must_use variant ScheduledBootstrapProcessAllocResult {
-    Full;
-    Allocated(BootstrapProcessHandle);
-}
-
 fn scheduled_pooled_process_handle(pooled: PooledProcessHandle)
         -> ProcessHandle {
     return pooled.handle;
-}
-
-fn scheduled_bootstrap_process_handle(bootstrap: BootstrapProcessHandle)
-        -> ProcessHandle {
-    return bootstrap.handle;
 }
 
 // The case keeps the name of what was taken, a Ready process; the token it
@@ -2909,8 +2858,6 @@ private inline fn scheduled_process_transfer_owned_loan(
 
 fn scheduled_process_record_owned(owner: borrow ScheduledProcessOwner[process])
         -> &mut ProcessRecord @ process !{unsafe} {
-    // The bootstrap and absent diagnostic records have permanent storage.
-    if (process_slot_is_boot(owner.pool_index)) { return &scheduled_process_boot_record; }
     let pool_guard = process_pool_lock();
     match region_probe_held(pool_guard, owner.pool_index) {
         RegionHeldProbe(ProcessRecord)::Stale => {
@@ -2955,10 +2902,6 @@ fn scheduled_process_saved_frame(
 // take path used to prove by finding an owner parked under the same pair,
 // asked of the SlotMap directly.
 fn scheduled_process_handle_matches(handle: ProcessHandle) -> bool {
-    if (process_slot_is_boot(handle.pool_index)) {
-        return scheduled_process_boot_live &&
-               handle.generation == scheduled_process_boot_generation;
-    }
     if (scheduled_process_pool_ready == false) { return false; }
     return process_pool_matches(handle.pool_index);
 }
@@ -3007,10 +2950,12 @@ fn scheduled_process_table_init() !{unsafe} {
     scheduled_process_release_every_process();
 }
 
-// The fresh state of one record, for the bootstrap's static -- a pool
-// record is destroyed rather than reset, so this is the only one that has
-// to be written back to zero. stack_run is deliberately NOT cleared: the
-// bootstrap keeps its run for the life of the kernel, as it always did.
+// The fresh state of one record, written just before the record is removed
+// (scheduled_process_reap_remove, scheduled_process_probe_slot_release), so a
+// reader under the same run guard never finds a half-torn-down record. It
+// used to exist for the bootstrap's static record, which survived its reset;
+// since #831 every record is a pool slot about to be handed back, which
+// costs a few stores and keeps one rule.
 // GitHub issue #693 step 7: a whole-record write, so under the run guard a
 // reader of this record holds.
 private fn scheduled_process_record_reset(guard: borrow ProcessRunGuard[lock],
@@ -3050,11 +2995,9 @@ private fn scheduled_process_record_reset(guard: borrow ProcessRunGuard[lock],
     scheduled_process_record_reset_syscall_state(record);
 }
 
-// Everything a reap does for one process, done for every
-// live one. Slot 0 is visited whether or not the bootstrap is live,
-// because its per-process resources (an fd context from
-// kernel_syscall_process_configure, an image record) can outlive the
-// process the way the static record itself does.
+// Everything a reap does for one process, done for every live one, the boot
+// thread included (GitHub issue #831: there is no static record left to
+// reset). Root 0's own image record is the kernel's and is kept.
 private fn scheduled_process_release_every_process() !{unsafe, changes_witness_ProcessCurrent} {
     let activity_before: KernelActivity =
         kernel_activity_enter(KernelActivity::ReleaseEveryProcess);
@@ -3074,11 +3017,6 @@ private fn scheduled_process_release_every_process() !{unsafe, changes_witness_P
             }
         }
     }
-    scheduled_process_release_slot_resources(0);
-    let reset_guard = process_run_lock();
-    scheduled_process_record_reset(reset_guard, 0);
-    process_run_unlock(reset_guard);
-    scheduled_process_boot_live = false;
     // Back to zero minted, so the next process created is pid 1 again.
     scheduled_process_pid_counter_restore(0);
     kernel_activity_leave(activity_before);
@@ -3097,8 +3035,7 @@ private fn scheduled_process_release_slot_resources(slot: usize) !{unsafe} {
     process_image_record_release(slot);
 }
 
-// Gives a slot back. The bootstrap's record is a static and is only
-// marked free; a pool record is removed, and its kernel stack run is
+// Gives a slot back. The record is removed, and its kernel stack run is
 // parked rather than freed (see scheduled_process_spare).
 //
 // GitHub issue #482: under the process-run lock, by type. Every CPU's
@@ -3112,10 +3049,6 @@ private fn scheduled_process_slot_remove(
         guard: borrow ProcessRunGuard[scheduled_process_run_lock],
         slot: usize) !{unsafe, record_mutates_ProcessRunGuard,
                       changes_witness_RegionInspection__ProcessRecord} {
-    if (slot == 0) {
-        scheduled_process_boot_live = false;
-        return;
-    }
     let mut held: RegionHeld(ProcessRecord) = process_pool_held_at(slot);
     if (region_held_address(held) == 0) { return; }
     // The run's permission leaves the record before the record goes (#672).
@@ -3273,8 +3206,8 @@ private fn scheduled_process_adopt_stack_run(
 }
 
 fn scheduled_process_table_clear() !{unsafe} {
-    // Reset can enter while a child root is in TTBR0_EL1. Select the
-    // permanent bootstrap root before releasing any nonzero backing record.
+    // Reset can enter while a child root is in TTBR0_EL1. Select root 0,
+    // the kernel's own, before releasing any nonzero backing record.
     process_image_activate_root(address_space_boot_root());
     scheduled_process_release_every_process();
     kernel_process_tick_wake_clear();
@@ -3296,7 +3229,7 @@ fn scheduled_process_table_clear() !{unsafe} {
 // default placement change without a probe's private process becoming
 // something a peer will try to resume.
 fn scheduled_process_alloc() -> ScheduledPooledProcessAllocResult !{unsafe} {
-    match scheduled_process_alloc_pending(false) {
+    match scheduled_process_alloc_pending() {
         ScheduledPooledProcessAllocResult::Full => {
             return ScheduledPooledProcessAllocResult::Full;
         }
@@ -3314,14 +3247,13 @@ fn scheduled_process_alloc() -> ScheduledPooledProcessAllocResult !{unsafe} {
 // installed. It must never pass through Ready while another CPU can select
 // it.
 //
-// GitHub issue #580: the flag says whether this record is RUNNABLE on
-// return, and it used to say `clone_pending` -- which named the one caller
-// that answered no rather than the property every caller has to answer.
-// The bootstrap is the only entry point that hands back a record something
-// is about to run; a clone's frame is installed later, and every other
-// caller is a probe that never runs its record at all. Those two were
-// indistinguishable while the question was "is this a clone".
-private fn scheduled_process_alloc_pending(runnable_now: bool)
+// GitHub issue #580 gave this a flag saying whether the record is RUNNABLE
+// on return, because the bootstrap was the one caller that answered yes. It
+// is gone since #831: PID 1 is installed and published like a clone, and the
+// boot thread has its own allocator, so every record comes back
+// Constructing and a probe publishes its own Ready
+// (scheduled_process_probe_publish_ready).
+private fn scheduled_process_alloc_pending()
         -> ScheduledPooledProcessAllocResult !{unsafe} {
     scheduled_process_pool_init();
     match process_pool_alloc_held() {
@@ -3333,7 +3265,7 @@ private fn scheduled_process_alloc_pending(runnable_now: bool)
         }
         ProcessPoolAlloc::Held(address) => {
             let generation: usize = region_held_generation(address);
-            match scheduled_process_alloc_finish(address, generation, runnable_now) {
+            match scheduled_process_alloc_finish(address, generation) {
                 ScheduledProcessAllocResult::Full => {
                     return ScheduledPooledProcessAllocResult::Full;
                 }
@@ -3346,40 +3278,74 @@ private fn scheduled_process_alloc_pending(runnable_now: bool)
     }
 }
 
-// The bootstrap process: the static record at slot 0, asked for by name.
+// GitHub issue #831 (maintainer decision 2026-10-20, item 2-2 B): the boot
+// fixtures stand on a pooled boot thread, pid 0, as Linux's boot code stands
+// on swapper. kernel_process_execution_reset asks for it after every reset
+// of the table, and main() gives it back when it hands off to PID 1.
 //
-// It used to be "whoever allocates first gets it", which is true of the
-// real boot path and false of anything else that allocates a process --
-// and a probe that acquires one silently took the bootstrap's record,
-// used it, and gave it back WITH slot 0's fd context and image record
-// attached, breaking a later probe that had set those up. One caller
-// wants the bootstrap; it says so.
-fn scheduled_process_alloc_bootstrap() -> ScheduledBootstrapProcessAllocResult
+// It is a pool record like any other, with an fd context of its own for the
+// fixtures' descriptors, and nothing else a process has: no kernel stack run
+// (it stands on the boot stack), no root of its own (it runs on root 0, as
+// Linux's kernel threads run on init_mm; root 0's image record is the
+// kernel's), no EL0 frame, and no pid number (the next process minted is
+// pid 1). It is Ready for the caller to start, and its mask names only the
+// CPU that asked, so no idle loop ever takes it.
+fn scheduled_process_alloc_boot_thread() -> ScheduledPooledProcessAllocResult
         !{unsafe} {
     scheduled_process_pool_init();
-    if (scheduled_process_boot_live) {
-        return ScheduledBootstrapProcessAllocResult::Full;
+    let core: usize = cpu_id();
+    if (core >= KERNEL_MAX_CORES) {
+        return ScheduledPooledProcessAllocResult::Full;
     }
-    scheduled_process_boot_generation = scheduled_process_boot_generation + 1;
-    scheduled_process_boot_live = true;
-    match scheduled_process_alloc_finish(
-            region_held_none__ProcessRecord(), scheduled_process_boot_generation, true) {
-        ScheduledProcessAllocResult::Full => {
-            return ScheduledBootstrapProcessAllocResult::Full;
+    let bit: {0..<KERNEL_MAX_CORES as usize} = core;
+    match process_pool_alloc_held() {
+        ProcessPoolAlloc::OutOfMemory => {
+            kernel_boot_log_resource_exhausted(
+                "physical page allocator" as *u8,
+                page_allocator_total_count());
+            return ScheduledPooledProcessAllocResult::Full;
         }
-        ScheduledProcessAllocResult::Allocated(handle) => {
-            let mut bootstrap: BootstrapProcessHandle = { handle };
-            return ScheduledBootstrapProcessAllocResult::Allocated(bootstrap);
+        ProcessPoolAlloc::Held(address) => {
+            let generation: usize = region_held_generation(address);
+            let slot: usize = process_slot_word(address);
+            let creating = scheduled_process_owner_new(address, generation);
+            scheduled_process_record_owned(creating).kernel_thread = true;
+            match unified_fd_context_ensure(slot) {
+                ProcessFdContextReady::Ready(evidence) => {}
+                ProcessFdContextReady::Missing => {
+                    kernel_boot_log_resource_exhausted(
+                        "physical page allocator" as *u8,
+                        page_allocator_total_count());
+                    let rollback_guard = process_run_lock();
+                    scheduled_process_slot_remove(rollback_guard, slot);
+                    process_run_unlock(rollback_guard);
+                    scheduled_process_owner_drop(creating);
+                    return ScheduledPooledProcessAllocResult::Full;
+                }
+            }
+            scheduled_process_record_owned(creating).saved_sp = 0;
+            scheduled_process_record_owned(creating).stack_owner_cpu =
+                PROCESS_STACK_UNOWNED;
+            scheduled_process_record_owned(creating).pid = 0;
+            scheduled_process_record_owned(creating).session_id = 0;
+            scheduled_process_record_owned(creating).start_time_ticks = 0;
+            scheduled_process_record_reset_syscall_state(
+                scheduled_process_record_owned(creating));
+            scheduled_process_record_owned(creating).affinity_mask = 1 << bit;
+            process_state_new(&scheduled_process_record_owned(creating).state,
+                              true);
+            let mut handle: ProcessHandle = { address, generation };
+            scheduled_process_owner_drop(creating);
+            let mut pooled: PooledProcessHandle = { handle };
+            return ScheduledPooledProcessAllocResult::Allocated(pooled);
         }
     }
 }
 
-// Everything a new process needs once it has a record: the same rollback
-// chain for both entry points above, so a bootstrap and an ordinary
-// process cannot drift apart in what they are given.
+// Everything a new process needs once it has a record, in one rollback
+// chain.
 private fn scheduled_process_alloc_finish(address: RegionHeld(ProcessRecord),
-                                         generation: usize @ process,
-                                         runnable_now: bool)
+                                         generation: usize @ process)
         -> ScheduledProcessAllocResult !{unsafe} {
     // GitHub issue #693 step 4: the process being created is not yet
     // visible to anyone else, so this path owns it; its record is read
@@ -3392,9 +3358,7 @@ private fn scheduled_process_alloc_finish(address: RegionHeld(ProcessRecord),
     // slots to reuse: a new process reuses a dead one's run.
     // A run the last reaped process left behind, else a fresh one. The
     // run's permission moves into the record (#672) and stays there until
-    // the reap parks it again. The bootstrap's static record keeps its run
-    // across reuse (its removal parks nothing), so a record already holding
-    // one keeps it.
+    // the reap parks it again. A record already holding one keeps it.
     if (scheduled_process_stack_backed(creating)) {
         // Nothing to adopt.
     } else {
@@ -3521,14 +3485,10 @@ private fn scheduled_process_alloc_finish(address: RegionHeld(ProcessRecord),
     scheduled_process_record_owned(creating).stack_owner_cpu =
         PROCESS_STACK_UNOWNED;
     // GitHub issue #392: the one place a pid is minted. Past every branch
-    // that can still refuse the slot. The boot context is pid 0, as Linux's
-    // swapper is, and takes no number: PID 1 is the first process minted
-    // after the last reset (GitHub issue #831).
-    if (process_slot_is_boot(address)) {
-        scheduled_process_record_owned(creating).pid = 0;
-    } else {
-        scheduled_process_record_owned(creating).pid = scheduled_process_mint_pid();
-    }
+    // that can still refuse the slot. The boot thread takes no number
+    // (scheduled_process_alloc_boot_thread), so PID 1 is the first process
+    // minted after the last reset (GitHub issue #831).
+    scheduled_process_record_owned(creating).pid = scheduled_process_mint_pid();
     scheduled_process_record_owned(creating).session_id = 0;
     let counter_frequency: usize = read_cntfrq() as usize;
     let tick_divisor: usize = counter_frequency / 100;
@@ -3540,9 +3500,8 @@ private fn scheduled_process_alloc_finish(address: RegionHeld(ProcessRecord),
     }
     scheduled_process_record_reset_syscall_state(
         scheduled_process_record_owned(creating));
-    // GitHub issue #580: Constructing unless the caller says this record is
-    // runnable now, which only the bootstrap does. The invariant above was
-    // already written down and the clone path was the only one keeping it.
+    // GitHub issue #580: Constructing. The invariant above was already
+    // written down and the clone path was the only one keeping it.
     //
     // A probe's fresh allocation published Ready with no EL0 frame anywhere.
     // What stopped a CPU running it was not that invariant but the placement
@@ -3555,12 +3514,12 @@ private fn scheduled_process_alloc_finish(address: RegionHeld(ProcessRecord),
     // cpu=1` twelve lines into the boot.
     //
     // Making this Constructing for every non-clone caller was the first
-    // attempt and it is wrong in a way worth recording: the bootstrap comes
-    // through the same branch, and it IS a real process about to run init.
-    // The boot then died at the first execve instead. The flag has to name
-    // the property rather than the caller.
+    // attempt, and it was wrong then: the bootstrap came through the same
+    // branch and was a real process about to run init, so #580 added a
+    // runnable flag. Since #831 PID 1 is constructed and then published, as
+    // a clone is, so the flag went again.
     process_state_new(&scheduled_process_record_owned(creating).state,
-                      runnable_now);
+                      false);
     let mut handle: ProcessHandle = { address, generation };
     { let mut __creating_result: ScheduledProcessAllocResult = ScheduledProcessAllocResult::Allocated(handle); scheduled_process_owner_drop(creating); return __creating_result; }
 }
@@ -3775,7 +3734,7 @@ must_use variant InitProcessCreateResult {
 }
 
 fn kernel_process_init_create() -> InitProcessCreateResult !{unsafe} {
-    match scheduled_process_alloc_pending(false) {
+    match scheduled_process_alloc_pending() {
         ScheduledPooledProcessAllocResult::Full => {
             return InitProcessCreateResult::Full;
         }
@@ -4122,9 +4081,8 @@ fn scheduled_process_reap_teardown(
 }
 
 // The record itself goes last: the teardown still needed to read it. Reset
-// first, because slot 0's record is a static that survives -- for a pool
-// slot the reset is written into memory about to be handed back, which
-// costs a few stores and keeps one rule instead of two. The record annotation
+// first (scheduled_process_record_reset): the reset is written into memory
+// about to be handed back, which costs a few stores. The record annotation
 // checks live loans before any reset, even though the guard itself is borrowed.
 fn scheduled_process_reap_remove(
         guard: borrow ProcessRunGuard[&scheduled_process_run_lock],
@@ -4150,8 +4108,7 @@ fn scheduled_process_reap_remove(
 // Plain usizes in and out, and 0 for "none", because the callers are in
 // kernel/mm/address_space.tkb and kernel/mm/process_image.tkb, both parsed
 // BEFORE this file: a function resolves regardless of file order, a type
-// does not. 0 is unambiguous -- it is the bootstrap, which this never
-// hands out.
+// does not. 0 is unambiguous: no record is slot 0 (#831).
 //
 // The address space allocated for the slot is given straight back: these
 // probes are about creating one, and want a slot that has none.
@@ -4393,8 +4350,7 @@ fn scheduled_process_table_probe() -> bool !{unsafe} {
     // and each has its own way of leaking.
     //
     // The image records: back to what the pool held before. This probe
-    // does not touch the bootstrap (scheduled_process_alloc_bootstrap is a
-    // separate entry point), so root 0's record -- the one release exempts
+    // does not touch root 0, so root 0's record -- the one release exempts
     // -- is neither created nor destroyed here.
     //
     // The process records: none survives. 24 allocated and 23 given back
@@ -4483,15 +4439,9 @@ fn kernel_process_entry_generation() -> usize {
 private fn kernel_process_frame_belongs_to(
         handle: ProcessHandle, frame: borrow FrameRef[process]) -> bool {
     let frame_sp: usize = frame_ref_address(frame);
-    let mut bottom: usize = 0;
     let mut top: usize = 0;
-    if (process_slot_is_boot(handle.pool_index)) {
-        bottom = boot_stack_bottom;
-        top = boot_stack_top;
-    } else {
-        bottom = kernel_stack_bottom(process_slot_word(handle.pool_index));
-        if (bottom != 0) { top = bottom + KERNEL_PROCESS_STACK_SIZE; }
-    }
+    let bottom: usize = kernel_stack_bottom(process_slot_word(handle.pool_index));
+    if (bottom != 0) { top = bottom + KERNEL_PROCESS_STACK_SIZE; }
     if (bottom == 0 || top <= bottom || frame_sp < bottom ||
         frame_sp >= top) {
         return false;
@@ -5296,13 +5246,14 @@ fn kernel_process_execution_reset() !{changes_witness_ProcessCurrent} {
     kernel_process_trace_enabled = kernel_process_trace_boot_enabled;
     kernel_process_crash_trace_reset();
     // No per-slot clearing loop: scheduled_process_table_clear above
-    // destroyed every pooled record and reset the bootstrap's static one,
-    // which is strictly more than this loop did (issue #392).
-    match scheduled_process_alloc_bootstrap() {
-        ScheduledBootstrapProcessAllocResult::Full => {}
-        ScheduledBootstrapProcessAllocResult::Allocated(bootstrap) => {
+    // destroyed every pooled record, the previous boot thread included, which
+    // is strictly more than this loop did (issue #392). The boot fixtures go
+    // on as a fresh boot thread (#831).
+    match scheduled_process_alloc_boot_thread() {
+        ScheduledPooledProcessAllocResult::Full => {}
+        ScheduledPooledProcessAllocResult::Allocated(pooled) => {
             let mut root: ProcessHandle =
-                scheduled_bootstrap_process_handle(bootstrap);
+                scheduled_pooled_process_handle(pooled);
             execution_state[execution_cpu_index()].current_handle = root;
             let start_guard = process_run_lock();
             execution_state[execution_cpu_index()].current_live =
@@ -5321,22 +5272,36 @@ fn kernel_process_execution_reset() !{changes_witness_ProcessCurrent} {
 }
 
 // GitHub issue #831 (maintainer decision 2026-10-20, item 2-1 A): main()'s
-// boot work ends here, as Linux's rest_init ends in cpu_startup_entry. The
-// boot context stops being core 0's current process and is given back, and
-// core 0 selects the kernel's own root. The caller then leaves the boot
+// boot work ends here, as Linux's rest_init ends in cpu_startup_entry. Core 0
+// selects the kernel's own root, and the boot thread stops being its current
+// process and is given back. The caller then leaves the boot
 // stack for core 0's idle loop (kernel_idle_boot_enter), where PID 1,
 // already published Ready, is started like any other process; that first
 // start opens dispatch on every core (kernel_process_secondary_start).
 fn kernel_process_boot_handoff() !{unsafe, changes_witness_ProcessCurrent} {
     execution_state[execution_cpu_index()].scheduler_enabled = false;
     execution_state[execution_cpu_index()].reschedule_pending = false;
+    process_image_activate_root(address_space_boot_root());
     let guard = process_run_lock();
+    let live: bool = execution_state[execution_cpu_index()].current_live;
+    let mut boot: ProcessHandle =
+        execution_state[execution_cpu_index()].current_handle;
     execution_state[execution_cpu_index()].current_live = false;
     execution_state[execution_cpu_index()].stack_live = false;
-    scheduled_process_slot_remove(guard, 0);
-    scheduled_process_boot_handed_off = true;
     process_run_unlock(guard);
-    process_image_activate_root(address_space_boot_root());
+    // The boot thread goes back as a table reset gives every record back:
+    // its fd context first, then the record (it has no root, image record
+    // or stack run of its own).
+    if (live && scheduled_process_handle_matches(boot)) {
+        let boot_slot: usize = process_slot_word(boot.pool_index);
+        scheduled_process_release_slot_resources(boot_slot);
+        let removal_guard = process_run_lock();
+        scheduled_process_slot_remove(removal_guard, boot_slot);
+        process_run_unlock(removal_guard);
+    }
+    let open_guard = process_run_lock();
+    scheduled_process_boot_handed_off = true;
+    process_run_unlock(open_guard);
 }
 
 fn kernel_process_request_reschedule() {
@@ -5523,13 +5488,11 @@ fn kernel_process_cpu_allows_slot(guard: borrow ProcessRunGuard[lock], cpu: usiz
         -> bool {
     if (cpu >= KERNEL_MAX_CORES) { return false; }
     let bit: {0..<KERNEL_MAX_CORES as usize} = cpu;
-    // Slot 0 is the boot context the boot fixtures stand on, not a process
-    // any core may resume: it can be Ready with no EL0 frame at all, and it
-    // is given back before the first dispatch (GitHub issue #831). PID 1 is
-    // a pooled process and is placed like every other.
-    // core-role: boot runs on core 0, and so does its boot context; a call
-    // the peer-safety gate refused runs on core 0 until it completes
-    if (slot == 0) { return cpu == 0; }
+    // GitHub issue #831: no slot is special. The boot thread is kept on the
+    // CPU that runs boot by its own mask, and PID 1 is placed like every
+    // other process.
+    // core-role: a call the peer-safety gate refused runs on core 0 until it
+    // completes
     if (scheduled_process_core0_for_call(guard, slot)) { return cpu == 0; }
     let mask: usize = scheduled_process_affinity_mask(guard, slot);
     if (mask == 0) {
@@ -5583,7 +5546,7 @@ fn kernel_process_core0_leave_excluded(frame: borrow FrameRef[process])
         return false;
     }
     let slot: usize = process_slot_word(execution_state[execution_cpu_index()].current_handle.pool_index);
-    if (slot == 0 || kernel_process_cpu_allows_slot(guard, 0, slot)) {
+    if (kernel_process_cpu_allows_slot(guard, 0, slot)) {
         process_run_unlock(guard);
         return false;
     }
@@ -5713,7 +5676,7 @@ fn kernel_process_spread_timer_progress(pid: usize, arm: bool)
                 scheduled_process_handle_matches(spread_timer_child) == false
             }
         };
-        if (available == false || slot == 0 ||
+        if (available == false ||
             scheduled_process_state_of_locked(guard, child) != ProcessSlotState::Ready ||
             scheduled_process_affinity_mask(guard, slot) != 2 ||
             scheduled_process_affinity_mask(guard, process_slot_word(parent.pool_index)) != 2) {
@@ -5846,8 +5809,7 @@ fn kernel_process_stack_owner_probe(pid: usize) -> usize !{unsafe} {
         }
         ProcessHandleOfSlot::Live(found) => { found }
     };
-    if (slot == 0 ||
-        scheduled_process_record_state_locked(guard, slot) != ProcessSlotState::Ready ||
+    if (scheduled_process_record_state_locked(guard, slot) != ProcessSlotState::Ready ||
         scheduled_process_record_locked(guard, slot).stack_owner_cpu !=
             PROCESS_STACK_UNOWNED) {
         process_run_unlock(guard);
@@ -6113,7 +6075,7 @@ private fn kernel_process_secondary_start_reserved(
 
 // An idle CPU that goes on idling beside a Ready process it may run and
 // could take. The walk above decides what to take; this asks the same
-// question independently -- every record, slot 0 included, by state, mask
+// question independently -- every record, PID 1's included, by state, mask
 // and stack owner alone -- so a filter the walk should not have had shows
 // up by name. It found nothing to watch for until b1447bfb, where the walk
 // skipped PID 1 and init was left Ready on every four-core RPi5 run; the
@@ -7073,8 +7035,8 @@ const STACK_GUARD_TIMING_ROUNDS: usize = 4096;
 private fn kernel_stack_guard_timing_report() !{unsafe} {
     let mut cursor = scheduled_process_first_slot();
     let mut chosen: usize = 0;
-    let mut found: bool = kernel_stack_bottom(0) != 0;
-    let mut walking: bool = found == false;
+    let mut found: bool = false;
+    let mut walking: bool = true;
     while (walking) {
         match cursor {
             ProcessSlotCursor::Done => { walking = false; }
@@ -7133,44 +7095,57 @@ private fn kernel_stack_guard_timing_report() !{unsafe} {
     kernel_boot_log("\n");
 }
 
-// GitHub issue #672: the guard's reader for slot 0 (the bootstrap's static
-// record) answers through that record's own place. The pass: the boot
-// process's lowest stack bytes read clean. The negative control: one byte
-// of that witness is overwritten through the run's permission, the reader
-// must report it, and the poison is restored. Runs where the boot suite
-// ends, when the boot process is not standing on its run's lowest bytes.
-private fn kernel_stack_boot_guard_probe() !{unsafe} {
-    if (kernel_stack_bottom(0) == 0) {
-        kernel_boot_log("kernel stack guard: no boot process stack\n");
+// One byte of a slot's lowest witness, written through the run's permission
+// in its record under the process pool's lock (#672).
+private fn kernel_stack_witness_fill(slot: usize, value: u8) !{unsafe} {
+    if (scheduled_process_pool_ready == false) { return; }
+    let pool_guard = process_pool_lock();
+    let mut held: RegionHeld(ProcessRecord) = region_held_at(pool_guard, slot);
+    match region_probe_held(pool_guard, held) {
+        RegionHeldProbe(ProcessRecord)::Stale => {
+            process_pool_unlock(pool_guard);
+        }
+        RegionHeldProbe(ProcessRecord)::Held(slot_view) => {
+            match place_borrow(pool_guard, region_held_record(slot_view).stack) {
+                Place::Empty => {}
+                Place::Full(run) => {
+                    stack_run_poison_fill(run, KERNEL_PROCESS_STACK_SIZE, 1,
+                                          value);
+                }
+            }
+            region_held_view_drop(slot_view);
+            process_pool_unlock(pool_guard);
+        }
+    }
+}
+
+// GitHub issue #672: the guard's reader answers through a record's own
+// place. The pass: a process's lowest stack bytes read clean. The negative
+// control: one byte of that witness is overwritten through the run's
+// permission, the reader must report it, and the poison is restored. It used
+// to read the bootstrap's static record, whose run nothing stood on; since
+// #831 every record is pooled, so the probe takes a private one of its own,
+// which no CPU may run and so no tick's guard reads while the byte is wrong.
+private fn kernel_stack_guard_probe() !{unsafe} {
+    let slot: usize = scheduled_process_probe_slot_acquire();
+    if (slot == 0) {
+        kernel_boot_log("kernel stack guard: no probe process\n");
         return;
     }
-    let clean: bool = kernel_stack_run_depth(0, KERNEL_PROCESS_STACK_SIZE,
-                                             KERNEL_STACK_WITNESS_BYTES) == 0;
-    let guard_hold = process_pool_lock();
-    match place_borrow(guard_hold, scheduled_process_boot_record.stack) {
-        Place::Empty => {}
-        Place::Full(run) => {
-            stack_run_poison_fill(run, KERNEL_PROCESS_STACK_SIZE, 1, 0);
-        }
-    }
-    process_pool_unlock(guard_hold);
-    let reported: bool = kernel_stack_run_depth(0, KERNEL_PROCESS_STACK_SIZE,
+    let clean: bool = kernel_stack_bottom(slot) != 0 &&
+        kernel_stack_run_depth(slot, KERNEL_PROCESS_STACK_SIZE,
+                               KERNEL_STACK_WITNESS_BYTES) == 0;
+    kernel_stack_witness_fill(slot, 0);
+    let reported: bool = kernel_stack_run_depth(slot, KERNEL_PROCESS_STACK_SIZE,
                                                 KERNEL_STACK_WITNESS_BYTES) != 0;
-    let restore_hold = process_pool_lock();
-    match place_borrow(restore_hold, scheduled_process_boot_record.stack) {
-        Place::Empty => {}
-        Place::Full(run) => {
-            stack_run_poison_fill(run, KERNEL_PROCESS_STACK_SIZE, 1,
-                                  KERNEL_STACK_POISON);
-        }
-    }
-    process_pool_unlock(restore_hold);
-    let restored: bool = kernel_stack_run_depth(0, KERNEL_PROCESS_STACK_SIZE,
+    kernel_stack_witness_fill(slot, KERNEL_STACK_POISON);
+    let restored: bool = kernel_stack_run_depth(slot, KERNEL_PROCESS_STACK_SIZE,
                                                 KERNEL_STACK_WITNESS_BYTES) == 0;
+    scheduled_process_probe_slot_release(slot);
     if (clean && reported && restored) {
-        kernel_boot_log("kernel stack guard: boot process witness clean, a disturbed byte reported, poison restored\n");
+        kernel_boot_log("kernel stack guard: a pooled process witness clean, a disturbed byte reported, poison restored\n");
     } else {
-        kernel_boot_log("kernel stack guard: boot process check FAILED\n");
+        kernel_boot_log("kernel stack guard: pooled process check FAILED\n");
     }
 }
 
@@ -7180,7 +7155,7 @@ private fn kernel_stack_boot_guard_probe() !{unsafe} {
 // shallow says something different from all of them being near it.
 fn kernel_stack_watermark_report() !{unsafe} {
     kernel_stack_guard_timing_report();
-    kernel_stack_boot_guard_probe();
+    kernel_stack_guard_probe();
     let deepest: usize = kernel_stack_deepest_bytes();
     kernel_boot_log("kernel stack watermark: size=");
     uart_put_udec(KERNEL_PROCESS_STACK_SIZE);
@@ -7313,7 +7288,7 @@ private fn kernel_process_tick_leave_excluded(
     }
     let mut outgoing: ProcessHandle = execution_state[execution_cpu_index()].current_handle;
     let slot: usize = process_slot_word(outgoing.pool_index);
-    if (slot == 0 || kernel_process_cpu_allows_slot(guard, cpu_id(), slot) ||
+    if (kernel_process_cpu_allows_slot(guard, cpu_id(), slot) ||
         kernel_process_frame_belongs_to(outgoing, frame) == false) {
         process_run_unlock(guard);
         return false;
@@ -9396,12 +9371,13 @@ fn kernel_process_scheduler_probe() -> bool !{changes_witness_ProcessCurrent} {
     if (scheduled_process_peer_dispatch_enabled) { return false; }
     let root_pid: usize = kernel_process_current_pid();
     let mut root_handle: ProcessHandle = execution_state[execution_cpu_index()].current_handle;
-    // The bootstrap is architectural state, not an ordinary affinity-zero
-    // process: its saved frame may be absent while the boot probes run.
-    // Prove no peer selector can take slot 0 before exercising normal tasks.
+    // The boot thread has no EL0 frame while the boot probes run (#831).
+    // Prove no peer selector can take it before exercising normal tasks: its
+    // own mask names only the CPU that runs boot.
     let probe_guard = process_run_lock();
     let mut bootstrap_peer_refused: bool =
-        process_slot_is_boot(root_handle.pool_index) &&
+        scheduled_process_record_locked(probe_guard,
+            process_slot_word(root_handle.pool_index)).kernel_thread &&
         kernel_process_cpu_allows_slot(probe_guard, 0, process_slot_word(root_handle.pool_index));
     for cpu: usize in 1..<KERNEL_MAX_CORES {
         if (kernel_process_cpu_allows_slot(probe_guard, cpu,
@@ -9529,8 +9505,8 @@ fn kernel_process_scheduler_probe() -> bool !{changes_witness_ProcessCurrent} {
         kernel_process_exit_continuation_probe(root_handle);
     kernel_process_scheduler_disable();
     scheduled_process_table_clear();
-    // scheduled_process_table_clear above destroyed every pooled record
-    // and reset the bootstrap's, so there is nothing left to clear here.
+    // scheduled_process_table_clear above destroyed every pooled record,
+    // the boot thread's included, so there is nothing left to clear here.
     execution_state[execution_cpu_index()].current_live = false;
     kernel_process_trace_disable();
     return ok && continuation_ok;
@@ -9770,7 +9746,7 @@ fn kernel_process_clone_begin(current_authority: ProcessCurrent[process, Process
     let mut parent: ProcessHandle = execution_state[execution_cpu_index()].current_handle;
     // Not runnable yet: the copied frame, VM and descriptors are installed
     // below, and kernel_syscall_clone_child_return publishes Ready.
-    match scheduled_process_alloc_pending(false) {
+    match scheduled_process_alloc_pending() {
         ScheduledPooledProcessAllocResult::Full => {
             return ProcessCloneResult::ResourceExhausted(current_authority);
         }
@@ -11214,13 +11190,11 @@ fn kernel_process_clone_evidence(current_authority: borrow ProcessCurrent[curren
 
 // GitHub issues #453/#479, re-derived against the current access paths.
 // execution_state and the crash-trace writer are per-core. The run lock spans
-// each shared process-tree walk and Ready/Running/Blocked transition, including
-// slot 0: two cores may inspect the bootstrap record, but only the core whose
-// guarded Ready -> Running transition succeeds can install it as current.
-// Bootstrap allocation itself has one caller, kernel_process_execution_reset,
-// while scheduling is disabled. Issue #415's narrower allocation type keeps a
-// pooled caller from acquiring slot 0; duplicating the whole lifecycle by
-// bootstrap/pooled type would not add a cross-core guarantee.
+// each shared process-tree walk and Ready/Running/Blocked transition: two
+// cores may inspect a record, but only the core whose guarded Ready -> Running
+// transition succeeds can install it as current. The boot thread is allocated
+// by one caller, kernel_process_execution_reset, while scheduling is disabled,
+// and its own mask names only the CPU that asked (#831).
 //
 // What remains is preemption on ONE core. Several lifecycle operations compose
 // short guarded transitions with caller-local work outside the run lock. They
@@ -11361,7 +11335,7 @@ private fn kernel_process_owner_slot_of(guard: borrow ProcessRunGuard[lock],
 // own check of it and this read (the shape kill() had, 60a09caf).
 // GitHub issue #518: a slot that holds no process answers Absent rather
 // than a handle. A handle's address is minted by the pool, and the pool
-// mints none for an empty slot; the none address is the bootstrap's.
+// mints none for an empty slot.
 variant ProcessHandleOfSlot {
     Absent;
     Live(ProcessHandle);
@@ -11369,11 +11343,6 @@ variant ProcessHandleOfSlot {
 
 private fn scheduled_process_handle_of_slot(guard: borrow ProcessRunGuard[lock],
                                             slot: usize) -> ProcessHandleOfSlot {
-    if (slot == 0) {
-        let mut boot: ProcessHandle =
-            { region_held_none__ProcessRecord(), scheduled_process_boot_generation };
-        return ProcessHandleOfSlot::Live(boot);
-    }
     let mut address: RegionHeld(ProcessRecord) = process_pool_held_at(slot);
     if (region_held_address(address) == 0) { return ProcessHandleOfSlot::Absent; }
     let mut live: ProcessHandle = { address, region_held_generation(address) };

@@ -45,7 +45,7 @@ under synchronization rather than direct pool storage.
 | Group and concrete examples | Existing authority or execution contract | Proposal |
 | --- | --- | --- |
 | Shared object pools: the three TCP pools, backing/image/FD records, FD blocks and shared objects | typed pool guards and checked slots/pins; process ownership for per-process mutation | retain shared allocation authority; consider a private context field for each subsystem, without merging locks or changing slot layout |
-| Scheduler pool and bootstrap record | run guard, running/owner makers, permanent root 0; assembly and debugger consumers | migrate last, together with the stored-authority boundary; preserve the bootstrap and named entry ABI |
+| Scheduler pool (the boot thread and PID 1 included since #831) | run guard, running/owner makers, permanent root 0; assembly and debugger consumers | migrate last, together with the stored-authority boundary; preserve the named entry ABI |
 | Boot page pool and root-0 backing | allocator LockedCell; early pre-MMU initialization; permanent fallback root | keep explicit boot mint/storage sites; do not move these as cosmetic grouping |
 | syscall_scratch and exec_args_store | checked per-CPU access, stable owner exchange for argv, non-preemptible EL1 assumption | keep their storage partition explicit; grouping cannot replace a CPU-separation/non-migration guarantee |
 | process_image_contexts | one synchronous mapping operation per CPU under non-preemptible EL1; process-owned record mutation | target and ext2 source presence are closed states in a private context per CPU; CPU/storage separation remains a caller contract |
