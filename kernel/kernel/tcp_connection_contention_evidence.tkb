@@ -87,11 +87,11 @@ private fn tcp_owner_probe_put_seen(seen: usize, peers: usize) !{unsafe} {
     }
 }
 
-fn tcp_connection_contention_probe() -> bool !{unsafe} {
+fn tcp_connection_contention_probe(ready: borrow NetRxCanAcquire) -> bool !{unsafe} {
     static_assert(KERNEL_ACTIVE_CORES >= 2,
                   "TCP connection contention evidence requires one peer");
     let online: usize = kernel_online_core_count();
-    tcp_connection_pool_init();
+    tcp_connection_pool_init(ready);
     let owner = match tcp_connection_alloc() {
         TcpConnectionAllocResult::Full => { return false; }
         TcpConnectionAllocResult::Allocated(value) => { value }
@@ -115,7 +115,7 @@ fn tcp_connection_contention_probe() -> bool !{unsafe} {
         TcpConnectionTakeResult::Ready(value) => { value }
     };
     let after: u32 = tcp_connection_of(final_owner).snd_nxt;
-    tcp_connection_free(final_owner);
+    tcp_connection_free(ready, final_owner);
     kernel_boot_log("tcp owner contention counts: busy=");
     tcp_owner_probe_put_seen(busy, peers);
     kernel_boot_log(" advanced=");
@@ -156,7 +156,7 @@ private fn tcp_pin_cost_report(sample: usize, pin_ticks: i64,
 
 must_use variant TcpPinCostEvidence { Failed; Complete; }
 
-fn tcp_pin_cost_evidence() -> TcpPinCostEvidence !{unsafe} {
+fn tcp_pin_cost_evidence(ready: borrow NetRxCanAcquire) -> TcpPinCostEvidence !{unsafe} {
     let first = match tcp_connection_alloc() {
         TcpConnectionAllocResult::Full => { return TcpPinCostEvidence::Failed; }
         TcpConnectionAllocResult::Allocated(owner) => { owner }
@@ -179,7 +179,7 @@ fn tcp_pin_cost_evidence() -> TcpPinCostEvidence !{unsafe} {
         };
         let pin_ticks: i64 = match tcp_connection_pin_cost(held) {
             TcpPinCostResult::Stale => {
-                tcp_connection_free(held);
+                tcp_connection_free(ready, held);
                 return TcpPinCostEvidence::Failed;
             }
             TcpPinCostResult::Measured(ticks) => { ticks }
@@ -219,7 +219,7 @@ fn tcp_pin_cost_evidence() -> TcpPinCostEvidence !{unsafe} {
                 TcpConnectionTakeResult::Missing => { return TcpPinCostEvidence::Failed; }
                 TcpConnectionTakeResult::Ready(owner) => { owner }
             };
-            tcp_connection_free(final_owner);
+            tcp_connection_free(ready, final_owner);
             return TcpPinCostEvidence::Failed;
         }
         tcp_pin_cost_report(sample, pin_ticks, owner_ticks, small_ticks, large_ticks);
@@ -228,7 +228,7 @@ fn tcp_pin_cost_evidence() -> TcpPinCostEvidence !{unsafe} {
         TcpConnectionTakeResult::Missing => { return TcpPinCostEvidence::Failed; }
         TcpConnectionTakeResult::Ready(owner) => { owner }
     };
-    tcp_connection_free(final_owner);
+    tcp_connection_free(ready, final_owner);
     kernel_boot_log("tcp pin cost digest: ");
     uart_put_udec(digest);
     kernel_boot_log("\n");
@@ -369,7 +369,7 @@ struct TcpPoolCostSample {
 }
 private let mut tcp_pool_cost_samples: [TcpPoolCostSample; 3];
 
-fn tcp_pool_cost_evidence() -> TcpPinCostEvidence !{unsafe} {
+fn tcp_pool_cost_evidence(ready: borrow NetRxCanAcquire) -> TcpPinCostEvidence !{unsafe} {
     let online: usize = kernel_online_core_count();
     if (online < 2 || online > KERNEL_MAX_CORES) { return TcpPinCostEvidence::Failed; }
     for cpu: usize in 0..<KERNEL_MAX_CORES {
@@ -413,7 +413,7 @@ fn tcp_pool_cost_evidence() -> TcpPinCostEvidence !{unsafe} {
                 TcpConnectionTakeResult::Missing => { return TcpPinCostEvidence::Failed; }
                 TcpConnectionTakeResult::Ready(value) => { value }
             };
-            tcp_connection_free(owner);
+            tcp_connection_free(ready, owner);
         }
     }
     return TcpPinCostEvidence::Complete;

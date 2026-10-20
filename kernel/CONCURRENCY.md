@@ -439,7 +439,11 @@ write is accessed under the connection's owner: `tcp_connection_take` takes
 the connection's `TaskMutex` and revalidates the pool generation after the
 acquire, and the open check happens after that, not before. Receive and
 transmit additionally hold the sole network capability, which is behind a
-`Mutex`, so two connections serialize there. Poll's pending-read probe takes
+`Mutex`, so two connections serialize there. The stack-wide retransmit
+chain is walked by take, filter and put back, so every walker -- a free, a
+drain, an accept begin, an ACK pass, a record -- takes a borrow of that
+capability (or of the received packet holding it), and a caller without it
+does not compile (GitHub issue #837). Poll's pending-read probe takes
 no connection lock on purpose -- it must not wait behind a receive -- and the
 read that follows re-decides open and available bytes under the owner.
 Neither lock names a CPU, so routing the network interrupt elsewhere changes nothing

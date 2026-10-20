@@ -36,7 +36,7 @@ HEALTHY = [
     (0.000350, "kernel log: overwrite+refusal+line split reported"),
     (0.062737, "memory: source=dtb base_bytes=524288 detected_mib=1019 "
                "regions=1 reservations=2 allocator_pages=259696"),
-    (3.100000, "virtio net: link ready mac=02:00:20:00:00:02"),
+    (3.100000, "virtio net: arp reply ok ip=192.168.20.2"),
     (7.100000, "virtio net: tcp handshake echo close reconnect ok"),
     (17.400000, "linux socket: listener ready port=8080"),
 ]
@@ -168,7 +168,7 @@ def main() -> int:
 
         # The checks that were here before #411 and had no control either.
         ("a non-monotonic record",
-         replace(HEALTHY, "virtio net: link ready mac=02:00:20:00:00:02", 0.000010),
+         replace(HEALTHY, "virtio net: arp reply ok ip=192.168.20.2", 0.000010),
          False, "not monotonic"),
         ("a network interval outside its window",
          replace(HEALTHY, "virtio net: tcp handshake echo close reconnect ok", 3.2),

@@ -29,6 +29,7 @@ use "kernel/kernel/occupancy_drain_evidence.tkb";
 use "kernel/kernel/pool_walk_contention_evidence.tkb";
 use "kernel/kernel/init_once_contention_evidence.tkb";
 use "kernel/kernel/tcp_connection_contention_evidence.tkb";
+use "kernel/net/socket_capability.tkb";
 use "kernel/kernel/ext2_mutation_contention_evidence.tkb";
 use "kernel/kernel/signal_contention_evidence.tkb";
 use "kernel/kernel/console_contention_evidence.tkb";
@@ -154,22 +155,41 @@ fn contention_probes() !{unsafe} {
     } else {
         kernel_boot_log("network init contention: failed\n");
     }
-    if (tcp_connection_contention_probe()) {
-        kernel_boot_log("tcp owner contention: every peer excluded while held and each completed one state transition after release ok\n");
-    } else {
-        kernel_boot_log("tcp owner contention: failed\n");
-    }
-    match tcp_pin_cost_evidence() {
-        TcpPinCostEvidence::Complete => {
-            kernel_boot_log("tcp pin cost evidence: 7 samples of 4096 operations and checksums consumed ok\n");
+    // GitHub issue #837: these three free TCP connections, and a free
+    // walks the stack-wide retransmit chain, which takes a borrow of the
+    // network capability. The link comes up before the secondaries (see
+    // kernel_platform_net_link_up), so core 0 takes the capability like
+    // any other caller; the peers only step a connection's owner, which
+    // needs none.
+    match network_capability_take_waiting() {
+        NetworkCapabilityWaitResult::NeverInstalled => {
+            kernel_boot_log("tcp owner contention: failed, no network capability\n");
         }
-        TcpPinCostEvidence::Failed => { kernel_boot_log("tcp pin cost evidence: failed\n"); }
-    }
-    match tcp_pool_cost_evidence() {
-        TcpPinCostEvidence::Complete => {
-            kernel_boot_log("tcp pool cost evidence: all online cores completed every lock and owner sample ok\n");
+        NetworkCapabilityWaitResult::Ready(ready) => {
+            if (tcp_connection_contention_probe(ready)) {
+                kernel_boot_log("tcp owner contention: every peer excluded while held and each completed one state transition after release ok\n");
+            } else {
+                kernel_boot_log("tcp owner contention: failed\n");
+            }
+            match tcp_pin_cost_evidence(ready) {
+                TcpPinCostEvidence::Complete => {
+                    kernel_boot_log("tcp pin cost evidence: 7 samples of 4096 operations and checksums consumed ok\n");
+                }
+                TcpPinCostEvidence::Failed => { kernel_boot_log("tcp pin cost evidence: failed\n"); }
+            }
+            match tcp_pool_cost_evidence(ready) {
+                TcpPinCostEvidence::Complete => {
+                    kernel_boot_log("tcp pool cost evidence: all online cores completed every lock and owner sample ok\n");
+                }
+                TcpPinCostEvidence::Failed => { kernel_boot_log("tcp pool cost evidence: failed\n"); }
+            }
+            match network_capability_put(ready) {
+                NetworkCapabilityPutResult::Stored => {}
+                NetworkCapabilityPutResult::Conflict => {
+                    kernel_boot_log("tcp owner contention: network capability conflict\n");
+                }
+            }
         }
-        TcpPinCostEvidence::Failed => { kernel_boot_log("tcp pool cost evidence: failed\n"); }
     }
     match pin_sharing_evidence() {
         TcpPinCostEvidence::Complete => {

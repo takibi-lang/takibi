@@ -53,18 +53,38 @@ fn kernel_secondary_boot_cpu_on(start: CpuStart[&kernel_world_stop])
     return status;
 }
 
-fn kernel_test_platform_network() {
-    // GitHub issue #830: ARP and ICMP run with the NIC SPI pinned to one
-    // non-zero core; the TCP echo after them runs with it rotating.
-    if (virtio_net_gic_intid >= 0) {
-        nic_irq_evidence_pin_begin(virtio_net_gic_intid as u32);
-    }
+// GitHub issue #837: the link comes up, and its one capability is stored,
+// before the secondaries start. Every free of a TCP connection walks the
+// stack-wide retransmit chain under a borrow of that capability, and the
+// secondary-boot contention probes free connections, so they need it to
+// exist; the boot exchange in kernel_test_platform_network takes it from
+// the store like any other caller and puts it back.
+fn kernel_platform_net_link_up() {
     match net_init() {
         NetInitResult::Failed => {
             kernel_boot_log("virtio net: link failed\n");
         }
         NetInitResult::Ready(link_ready) => {
             kernel_boot_log("virtio net: link ready mac=02:00:20:00:00:02\n");
+            match network_capability_install(link_ready) {
+                NetworkCapabilityInstallResult::Installed => {}
+                NetworkCapabilityInstallResult::AlreadyInstalled(incoming) => {
+                    net_shutdown(incoming);
+                }
+            }
+        }
+    }
+}
+
+fn kernel_test_platform_network() {
+    // GitHub issue #830: ARP and ICMP run with the NIC SPI pinned to one
+    // non-zero core; the TCP echo after them runs with it rotating.
+    if (virtio_net_gic_intid >= 0) {
+        nic_irq_evidence_pin_begin(virtio_net_gic_intid as u32);
+    }
+    match network_capability_take() {
+        NetworkCapabilityTakeResult::Empty => {}
+        NetworkCapabilityTakeResult::Ready(link_ready) => {
             match kernel_arp_reply_once(link_ready) {
                 KernelArpResult::TimedOut(arp_ready) => {
                     kernel_boot_log("virtio net: arp timeout\n");
@@ -211,6 +231,7 @@ fn main() !{unsafe} {
         kernel_boot_log("fp/simd irq: failed\n");
     }
 
+    kernel_platform_net_link_up();
     kernel_secondary_boot_report();
 
     kernel_test_rpi5_extended = false;

@@ -53,9 +53,9 @@ def main():
         start = text.index("fn kernel_test_platform_network() {")
         end = text.index("\n}\n", start) + 3
         body = """fn kernel_test_platform_network() {
-    match net_init() {
-        NetInitResult::Failed => { kernel_boot_log("FAIL gem-probe: init\\n"); }
-        NetInitResult::Ready(ready) => {
+    match network_capability_take() {
+        NetworkCapabilityTakeResult::Empty => { kernel_boot_log("FAIL gem-probe: init\\n"); }
+        NetworkCapabilityTakeResult::Ready(ready) => {
             kernel_boot_log("gem-probe: mode MODE\\n");
             gem_probe_run(ready);
         }
@@ -99,11 +99,11 @@ def main():
     unconfirmed = str(args.mode.startswith("unconfirmed")).lower()
     reply = str(args.mode.endswith("reply")).lower()
     body = """fn kernel_test_platform_network() {
-    match net_init() {
-        NetInitResult::Failed => {
+    match network_capability_take() {
+        NetworkCapabilityTakeResult::Empty => {
             gem_fixture_require(false, "physical GEM initialization");
         }
-        NetInitResult::Ready(ready) => {
+        NetworkCapabilityTakeResult::Ready(ready) => {
             kernel_boot_log("gem-tx fixture: mode MODE\\n");
             gem_fixture_hide_halt = UNCONFIRMED;
             gem_fixture_reply_path = REPLY;

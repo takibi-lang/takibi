@@ -1237,15 +1237,33 @@ fn kernel_test_common_probes() !{unsafe} {
     } else {
         kernel_boot_log("asid pool: failed\n");
     }
-    if (tcp_connection_pool_probe()) {
-        kernel_boot_log("tcp connection pool: five concurrent connections past the old ceiling of 2, each its own storage, stale address refused, everything given back ok\n");
-    } else {
-        kernel_boot_log("tcp connection pool: failed\n");
-    }
-    if (pending_tcp_chain_probe()) {
-        kernel_boot_log("tcp retransmit queue: five outstanding segments past the old ceiling of 4, per-segment records intact and in order, one connection's reset leaves another's, the emptied queue keeps its chunk ok\n");
-    } else {
-        kernel_boot_log("tcp retransmit queue: failed\n");
+    // GitHub issue #837: both probes free connections, and a free walks the
+    // stack-wide retransmit chain under a borrow of the network capability.
+    // The link is up before these run (kernel_platform_net_link_up), so they
+    // take it like any other caller.
+    match network_capability_take_waiting() {
+        NetworkCapabilityWaitResult::NeverInstalled => {
+            kernel_boot_log("tcp connection pool: failed, no network capability\n");
+            kernel_boot_log("tcp retransmit queue: failed, no network capability\n");
+        }
+        NetworkCapabilityWaitResult::Ready(ready) => {
+            if (tcp_connection_pool_probe(ready)) {
+                kernel_boot_log("tcp connection pool: five concurrent connections past the old ceiling of 2, each its own storage, stale address refused, everything given back ok\n");
+            } else {
+                kernel_boot_log("tcp connection pool: failed\n");
+            }
+            if (pending_tcp_chain_probe(ready)) {
+                kernel_boot_log("tcp retransmit queue: five outstanding segments past the old ceiling of 4, per-segment records intact and in order, one connection's reset leaves another's, the emptied queue keeps its chunk ok\n");
+            } else {
+                kernel_boot_log("tcp retransmit queue: failed\n");
+            }
+            match network_capability_put(ready) {
+                NetworkCapabilityPutResult::Stored => {}
+                NetworkCapabilityPutResult::Conflict => {
+                    kernel_boot_log("tcp retransmit queue: network capability conflict\n");
+                }
+            }
+        }
     }
 }
 

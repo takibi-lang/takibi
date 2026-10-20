@@ -59,27 +59,55 @@ fn kernel_secondary_boot_cpu_on(start: CpuStart[&kernel_world_stop])
     return status;
 }
 
-fn kernel_test_platform_network() {
-    // GitHub issue #830: ARP and ICMP run with the NIC SPI pinned to one
-    // non-zero core; the TCP echo after them runs with it rotating.
-    nic_irq_evidence_pin_begin(RPI5_GEM_GIC_INTID);
+// GitHub issue #837: the link comes up, and its one capability is stored,
+// before the secondaries start. Every free of a TCP connection walks the
+// stack-wide retransmit chain under a borrow of that capability, and the
+// secondary-boot contention probes free connections, so they need it to
+// exist; the boot exchange in kernel_test_platform_network takes it from
+// the store like any other caller and puts it back.
+fn kernel_platform_net_link_up() {
     match net_init() {
         NetInitResult::Failed => {
             kernel_boot_log("rp1 gem: link failed\n");
         }
         NetInitResult::Ready(link_ready) => {
             kernel_boot_log("rp1 gem: link ready mac=02:00:20:00:00:02\n");
+            kernel_platform_net_capability_return(link_ready);
+        }
+    }
+}
+
+// Back into the store. A boot exchange that timed out used to shut the
+// capability down here; since #837 it was installed at link-up and a
+// holder must put it back, or every later waiter (a free, a drain) would
+// wait for good on a store that records an install.
+fn kernel_platform_net_capability_return(ready: sink NetRxCanAcquire) {
+    match network_capability_install(ready) {
+        NetworkCapabilityInstallResult::Installed => {}
+        NetworkCapabilityInstallResult::AlreadyInstalled(incoming) => {
+            net_shutdown(incoming);
+        }
+    }
+}
+
+fn kernel_test_platform_network() {
+    // GitHub issue #830: ARP and ICMP run with the NIC SPI pinned to one
+    // non-zero core; the TCP echo after them runs with it rotating.
+    nic_irq_evidence_pin_begin(RPI5_GEM_GIC_INTID);
+    match network_capability_take() {
+        NetworkCapabilityTakeResult::Empty => {}
+        NetworkCapabilityTakeResult::Ready(link_ready) => {
             match kernel_arp_reply_once(link_ready) {
                 KernelArpResult::TimedOut(arp_ready) => {
                     kernel_boot_log("rp1 gem: arp timeout\n");
-                    net_shutdown(arp_ready);
+                    kernel_platform_net_capability_return(arp_ready);
                 }
                 KernelArpResult::Replied(arp_ready) => {
                     kernel_boot_log("rp1 gem: arp reply ok ip=192.168.20.2\n");
                     match kernel_icmp_reply_once(arp_ready) {
                         KernelIcmpResult::TimedOut(icmp_ready) => {
                             kernel_boot_log("rp1 gem: icmp timeout\n");
-                            net_shutdown(icmp_ready);
+                            kernel_platform_net_capability_return(icmp_ready);
                         }
                         KernelIcmpResult::Replied(icmp_ready) => {
                             kernel_boot_log("rp1 gem: icmp echo reply ok ip=192.168.20.2\n");
@@ -87,7 +115,7 @@ fn kernel_test_platform_network() {
                             match kernel_tcp_echo_check(icmp_ready) {
                                 KernelTcpResult::TimedOut(tcp_ready) => {
                                     kernel_boot_log("rp1 gem: tcp timeout\n");
-                                    net_shutdown(tcp_ready);
+                                    kernel_platform_net_capability_return(tcp_ready);
                                 }
                                 KernelTcpResult::Verified(tcp_ready) => {
                                     kernel_boot_log("rp1 gem: tcp handshake echo close reconnect ok\n");
@@ -454,6 +482,7 @@ fn main() !{unsafe} {
     // would free root 0's three already-in-use pages back into the pool
     // while they are still this kernel's own active page tables).
 
+    kernel_platform_net_link_up();
     kernel_secondary_boot_report();
 
     kernel_test_rpi5_extended = true;

@@ -1423,7 +1423,20 @@ fn kernel_syscall_process_configure(process: usize, heap_start: usize,
     syscall_test_evidence_reset_read_uart_waits();
     syscall_test_lifecycle_persistent_shell_clear();
     scheduled_process_reset_syscall_state_everywhere();
-    tcp_connection_pool_init();
+    // GitHub issue #837: draining frees connections, which walks the
+    // retransmit chain, so it borrows the capability like any other free.
+    // With none ever installed there is no connection to drain: every
+    // allocation outside the boot probes happens under the capability.
+    match network_capability_take_waiting() {
+        NetworkCapabilityWaitResult::NeverInstalled => {}
+        NetworkCapabilityWaitResult::Ready(ready) => {
+            tcp_connection_pool_init(ready);
+            match network_capability_put(ready) {
+                NetworkCapabilityPutResult::Stored => {}
+                NetworkCapabilityPutResult::Conflict => {}
+            }
+        }
+    }
     syscall_test_evidence_reset_socket_counters();
     // This file's process-owned values are cleared above, in one walk over
     // the live processes -- configure is a whole-world reset and can run
@@ -1682,17 +1695,21 @@ fn kernel_connected_transport_release(slot: usize, generation: usize)
 // the network capability back -- a Conflict arm, or a failure found after
 // the put. tcp_connection_free walks the shared retransmit chain, which
 // only the capability holder may do, so this takes the capability back
-// (waiting out a holder on another CPU) for the free. NeverInstalled is
-// unreachable here: every caller had a capability, and the store records
-// the first install for good. #837 makes the free take the capability by
-// type.
+// (waiting out a holder on another CPU) for the free. Since #837 the free
+// takes a borrow of the capability, so without one it does not compile.
+// NeverInstalled is unreachable for the syscall callers -- each had a
+// capability, and the store records the first install for good -- and for
+// the boot probes, which run after the link came up (#837). Should it
+// happen anyway, the connection is put back and named rather than freed
+// without the capability.
 fn kernel_connection_free_capped(owner: sink TcpConnectionOwner[connection_pool, connection]) {
     match network_capability_take_waiting() {
         NetworkCapabilityWaitResult::NeverInstalled => {
-            tcp_connection_free(owner);
+            kernel_boot_log("tcp: connection kept, no network capability to free it\n");
+            tcp_connection_put(owner);
         }
         NetworkCapabilityWaitResult::Ready(ready) => {
-            tcp_connection_free(owner);
+            tcp_connection_free(ready, owner);
             match network_capability_put(ready) {
                 NetworkCapabilityPutResult::Stored => {}
                 NetworkCapabilityPutResult::Conflict => {}
@@ -1720,7 +1737,7 @@ fn kernel_connected_transport_release_owned(
                 KernelTcpCloseResult::Closed(after_close) => {
                     // GitHub issue #838: freed while the capability is
                     // still held -- the free walks the retransmit chain.
-                    tcp_connection_free(owner);
+                    tcp_connection_free(after_close, owner);
                     match network_capability_put(after_close) {
                         NetworkCapabilityPutResult::Conflict => {
                             return KernelTransportReleaseResult::Failed;
@@ -4399,34 +4416,24 @@ private fn syscall_accept_claimed(current_authority: borrow ProcessCurrent[curre
     // "once per entry into this handler" -- a blocked accept re-runs
     // the syscall when it is woken. A call that resumes a handshake
     // this listener already had is that same call coming back.
-    if (pending_slot == 0) {
-        syscall_test_evidence_record_accept();
-    }
     // One accept step owns the RX capability briefly, then parks the
     // handshake and returns it. A child or peer process may be running
     // on another CPU even when no process is Ready on this one. An EL1
     // wait would hold the sole capability away from that process.
     let accept_exit_waiter: bool =
         kernel_process_current_exit_has_waiter(current_authority);
-    match kernel_tcp_accept_resume_or_begin(
-            pending_slot, pending_generation,
-            kernel_listener_port(accept_listener_fd)) {
-      TcpConnectionAllocResult::Full => {
-        kernel_boot_log_resource_exhausted(
-            "TCP connection pool" as *u8, 0);
-        return SyscallAction::Resume(LINUX_EAGAIN);
-      }
-      TcpConnectionAllocResult::Allocated(owner) => {
-       let slot: usize = tcp_connection_slot(owner);
-       let generation: usize = tcp_connection_identity(owner);
-       match network_capability_take() {
+    // GitHub issue #837: the capability comes first. Beginning a fresh
+    // handshake resets the connection's retransmit entries, a walk of the
+    // stack-wide chain that only the capability holder may make, and
+    // kernel_tcp_accept_resume_or_begin takes a borrow of it to say so.
+    match network_capability_take() {
         NetworkCapabilityTakeResult::Empty => {
             // The handshake keeps its place: somebody else holds the
             // one physical receive capability right now, which says
-            // nothing about this connection.
-            let parked: bool = kernel_listener_set_pending(
-                accept_listener_fd, slot, generation);
-            tcp_connection_put(owner);
+            // nothing about this connection. The listener's pending
+            // slot is untouched, so the rerun resumes or begins as
+            // this call would have.
+            //
             // There is no Ready successor to take a Block action, but
             // the parent cannot become Ready until this process exits.
             // Sleep interruptibly in this syscall instead: an RX or
@@ -4443,6 +4450,31 @@ private fn syscall_accept_claimed(current_authority: borrow ProcessCurrent[curre
             return SyscallAction::Block;
         }
         NetworkCapabilityTakeResult::Ready(ready) => {
+    // GitHub issue #469: counted once per accept(2) THE CALLER MADE,
+    // which is what it has always meant and is no longer the same as
+    // "once per entry into this handler" -- a blocked accept re-runs
+    // the syscall when it is woken. A call that resumes a handshake
+    // this listener already had is that same call coming back. Since
+    // #837 a call that found the capability taken parks nothing, so it
+    // is counted on the entry that first holds the capability.
+    if (pending_slot == 0) {
+        syscall_test_evidence_record_accept();
+    }
+    match kernel_tcp_accept_resume_or_begin(
+            ready, pending_slot, pending_generation,
+            kernel_listener_port(accept_listener_fd)) {
+      TcpConnectionAllocResult::Full => {
+        match network_capability_put(ready) {
+            NetworkCapabilityPutResult::Stored => {}
+            NetworkCapabilityPutResult::Conflict => {}
+        }
+        kernel_boot_log_resource_exhausted(
+            "TCP connection pool" as *u8, 0);
+        return SyscallAction::Resume(LINUX_EAGAIN);
+      }
+      TcpConnectionAllocResult::Allocated(owner) => {
+       let slot: usize = tcp_connection_slot(owner);
+       let generation: usize = tcp_connection_identity(owner);
             match kernel_tcp_accept_step(owner, ready) {
                 KernelTcpAcceptStep::Pending(next) => {
                     // Not finished, and not failed. Give the machine
@@ -4489,7 +4521,7 @@ private fn syscall_accept_claimed(current_authority: borrow ProcessCurrent[curre
                 }
                 KernelTcpAcceptStep::GaveUp(next) => {
                     // GitHub issue #838: freed under the capability.
-                    tcp_connection_free(owner);
+                    tcp_connection_free(next, owner);
                     match network_capability_put(next) {
                         NetworkCapabilityPutResult::Conflict => {
                             let cleared: bool = kernel_listener_set_pending(
@@ -7261,7 +7293,7 @@ fn syscall_vectored_connected_read_probe(address: usize) -> bool !{unsafe} {
             tcp_connection_frame_hold(owner, TcpFrameRole::Rx) else {
         Place::Empty => {
             tcp_frame_missing();
-            tcp_connection_free(owner);
+            kernel_connection_free_capped(owner);
             kernel_connected_fd_clear(saved_fd);
             return false;
         }
@@ -7327,7 +7359,7 @@ fn syscall_vectored_connected_read_probe(address: usize) -> bool !{unsafe} {
     }
     match tcp_connection_take(slot, generation) {
         TcpConnectionTakeResult::Missing => { ok = false; }
-        TcpConnectionTakeResult::Ready(after) => { tcp_connection_free(after); }
+        TcpConnectionTakeResult::Ready(after) => { kernel_connection_free_capped(after); }
     }
     kernel_connected_fd_clear(1);
     if (had_stdout && kernel_regular_fd_duplicate(saved_fd, 1) == false) {
