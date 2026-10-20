@@ -4,8 +4,19 @@
 # that an IRQ-masking peer can acknowledge world-stop before unlocking.
 import os
 from pathlib import Path
+import sys
 import time
 import gdb
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from gdb_progress import (DONE, QUIET, all_threads,  # noqa: E402
+                          continue_by_ticks)
+from gdb_tick_count import tick_count_progress  # noqa: E402
+
+# GitHub issue #867: the hold is reached within the ticks every vCPU takes
+# (scripts/gdb_progress.py), about a minute of guest time at 64 Hz, not
+# within whatever host time the outer timeout left.
+HOLD_TICKS = 64 * 60
 
 ready = Path(os.environ["KERNEL_CONSOLE_HOLD_READY"])
 release = Path(os.environ["KERNEL_CONSOLE_HOLD_RELEASE"])
@@ -15,10 +26,20 @@ release = Path(os.environ["KERNEL_CONSOLE_HOLD_RELEASE"])
 # physical access names the same bytes on every CPU, as
 # run_kernel_ddb_qemutest.sh already does for its checkpoint dump.
 gdb.execute("maintenance packet Qqemu.PhyMemMode:1")
-gdb.execute("break console_ddb_hold_checkpoint")
+hold = gdb.Breakpoint("console_ddb_hold_checkpoint")
 gdb.execute("set *(char *)&kernel_ddb_console_hold_armed = 1")
-# gdb-wallclock-waiver: not yet progress-bounded, GitHub issue #867
-gdb.execute("continue")
+threads = all_threads()
+# PhyMemMode stays on for the reads below, so read the counters directly
+# rather than through gdb_progress.tick_progress, which turns it off.
+outcome, ticks = continue_by_ticks(lambda: hold.hit_count > 0, threads, HOLD_TICKS,
+                                   progress=tick_count_progress(threads))
+if outcome == QUIET:
+    raise gdb.GdbError(f"console hold checkpoint was not reached within {ticks} "
+                       "ticks on every vCPU")
+if outcome != DONE:
+    raise gdb.GdbError("inconclusive: the guest stalled (a slice in which some "
+                       "vCPU took no scheduler tick, or the host-time cap) "
+                       "before the console hold checkpoint")
 phase = int(gdb.parse_and_eval("*(unsigned long *)&console_ddb_phase"))
 held = int(gdb.parse_and_eval("*(unsigned long *)&console_tx_lock"))
 if phase != 1 or held != 1:

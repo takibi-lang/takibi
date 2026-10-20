@@ -10,7 +10,13 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from gdb_interrupt import interrupt_after  # noqa: E402
+from gdb_progress import (DONE, QUIET, all_threads,  # noqa: E402
+                          continue_by_ticks)
+
+# GitHub issue #867: each boundary is reached within the ticks every vCPU
+# takes (scripts/gdb_progress.py), about a minute of guest time at 64 Hz;
+# KERNEL_PEER_EXIT_TIMEOUT is only the host-time cap over the whole step.
+STEP_TICKS = 64 * 60
 
 
 def current_record(cpu):
@@ -48,16 +54,18 @@ class PeerExitBoundary(gdb.Breakpoint):
 
 
 def reach(boundary):
-    # gdb-wallclock-waiver: not yet progress-bounded, GitHub issue #867
-    timer = interrupt_after(float(os.environ["KERNEL_PEER_EXIT_TIMEOUT"]))
-    try:
-        gdb.execute("continue")
-    except (gdb.error, KeyboardInterrupt):
-        pass
-    finally:
-        timer.cancel()
-    if not boundary.reached:
-        raise gdb.GdbError("peer exit boundary was not reached")
+    threads = all_threads()
+    outcome, ticks = continue_by_ticks(
+        lambda: boundary.reached, threads, STEP_TICKS,
+        cap_seconds=float(os.environ["KERNEL_PEER_EXIT_TIMEOUT"]))
+    if outcome == DONE:
+        return
+    if outcome == QUIET:
+        raise gdb.GdbError(f"peer exit boundary was not reached within {ticks} "
+                           "ticks on every vCPU")
+    raise gdb.GdbError("inconclusive: the guest stalled (a slice in which some "
+                       "vCPU took no scheduler tick, or the host-time cap) "
+                       "before the peer exit boundary was reached")
 
 
 class PeerExitArmed(gdb.Breakpoint):

@@ -18,7 +18,8 @@ import gdb
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from await_timing import AwaitTiming  # noqa: E402
-from gdb_interrupt import interrupt_after  # noqa: E402
+from gdb_progress import (DONE, QUIET, all_threads,  # noqa: E402
+                          continue_by_ticks)
 from progress_timeout import ProgressTimeout  # noqa: E402
 
 LABEL = "kernel/qemu exec-enomem"
@@ -29,6 +30,10 @@ DEADLINE = time.monotonic() + float(os.environ.get("GDB_BATCH_TIMEOUT", "600")) 
 SCRIPT_DIR = Path(__file__).resolve().parent
 METADATA = SCRIPT_DIR.parent / "_build/kernel-debug-metadata.json"
 ENOMEM = 0xFFFFFFFFFFFFFFF4
+# GitHub issue #867: each step is reached within the ticks every vCPU takes
+# (scripts/gdb_progress.py), about a minute of guest time at 64 Hz, the
+# guest-time equivalent of the former 60 s; the batch ceiling caps host time.
+STEP_TICKS = 64 * 60
 output = bytearray()
 output_lock = threading.Lock()
 
@@ -94,19 +99,21 @@ def register(name):
 
 
 def reach(breakpoint, phase):
-    budget = min(60, max(0, DEADLINE - time.monotonic()))
+    budget = max(0, DEADLINE - time.monotonic())
     if budget <= 0:
         raise RuntimeError(f"{phase}: GDB batch ceiling reached")
-    # gdb-wallclock-waiver: not yet progress-bounded, GitHub issue #867
-    timer = interrupt_after(budget)
-    try:
-        gdb.execute("continue")
-    except (gdb.error, KeyboardInterrupt):
-        pass
-    finally:
-        timer.cancel()
-    if breakpoint.hit_count == 0:
-        raise RuntimeError(f"{phase}: breakpoint was not reached, pc={register('pc'):#x}")
+    threads = all_threads()
+    outcome, ticks = continue_by_ticks(lambda: breakpoint.hit_count > 0,
+                                       threads, STEP_TICKS,
+                                       cap_seconds=budget)
+    if outcome == DONE:
+        return
+    if outcome == QUIET:
+        raise RuntimeError(f"{phase}: breakpoint was not reached within {ticks} "
+                           f"ticks on every vCPU, pc={register('pc'):#x}")
+    raise RuntimeError(f"{phase}: inconclusive, the guest stalled (a slice in "
+                       "which some vCPU took no scheduler tick, or the host-time "
+                       f"cap) before the breakpoint, pc={register('pc'):#x}")
 
 
 def run():

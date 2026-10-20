@@ -35,7 +35,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from gdb_interrupt import interrupt_after  # noqa: E402
+from gdb_progress import STALLED, continue_by_ticks  # noqa: E402
 from progress_timeout import ProgressTimeout  # noqa: E402
 from await_timing import AwaitTiming  # noqa: E402
 
@@ -49,6 +49,10 @@ NETWORK_READY = os.environ["AFFINITY_GDB_NETWORK_READY"]
 BOOT_TIMEOUT = float(os.environ.get("AFFINITY_GDB_BOOT_TIMEOUT", "120"))
 BATCH_DEADLINE = time.monotonic() + float(os.environ.get("GDB_BATCH_TIMEOUT", "600")) - 10.0
 STEP_TIMEOUT = 60.0
+# GitHub issue #867: a gdb step is bounded by the ticks both vCPUs take, not
+# by host seconds (scripts/gdb_progress.py). About a minute of the guest's own
+# time at 64 Hz, the guest-time equivalent of the former STEP_TIMEOUT.
+STEP_TICKS = 64 * 60
 
 LABEL = "kernel/qemu affinity-gdb"
 SHELL_READY = b"interactive shell: uart blocked\n"
@@ -148,22 +152,26 @@ def seen(predicate, timeout: float, *, phase, boot=False) -> bool:
         timing.finish(time.monotonic())
 
 
-def continue_bounded(budget: float = STEP_TIMEOUT) -> None:
-    """Resume both vCPUs for at most `budget` seconds.
+def continue_bounded(breakpoint: gdb.Breakpoint) -> str:
+    """Resume both vCPUs until `breakpoint` is hit, bounded by their ticks.
 
-    The budget is an argument because the gate-selection loop below resumes
-    repeatedly: a fixed per-resume bound there would let one lap spend the
-    whole step timeout after the loop's own deadline had passed, which is lane
-    time spent learning nothing.
+    Returns DONE, QUIET (both vCPUs took STEP_TICKS ticks and it was never
+    hit: a finding) or STALLED (a slice in which a vCPU took no tick, or the
+    host-time cap: inconclusive, never a negative verdict) (#865, #867).
     """
-    # gdb-wallclock-waiver: not yet progress-bounded, GitHub issue #867
-    timer = interrupt_after(max(budget, 1.0))
-    try:
-        gdb.execute("continue")
-    except (gdb.error, KeyboardInterrupt):
-        pass
-    finally:
-        timer.cancel()
+    threads = (CPU0_THREAD, CPU1_THREAD)
+    outcome, _ = continue_by_ticks(lambda: breakpoint.hit_count > 0,
+                                   threads, STEP_TICKS)
+    return outcome
+
+
+def stalled(step: str) -> str:
+    """The inconclusive verdict for a step the guest was not given time for:
+    distinct from every negative one, which needs QUIET (#867)."""
+    return (f"inconclusive at the {step} step: the guest stalled (a slice in "
+            "which CPU0 or CPU1 took no scheduler tick, or the host-time cap) "
+            f"before its breakpoint was hit. {where()}. "
+            f"UART tail: {uart_tail()!r}")
 
 
 def register(name: str) -> int:
@@ -230,7 +238,11 @@ def run() -> None:
     # The probe's line fits the 16-byte PL011 FIFO, so it can go at once
     # while the guest is held.
     connection.sendall(COMMAND)
-    continue_bounded()
+    outcome = continue_bounded(asked)
+    if outcome == STALLED:
+        verdict(False, stalled("ask"))
+        gdb.execute("detach")
+        return
     if asked.hit_count == 0:
         verdict(False, "/bin/affinity never asked parent_progress from CPU 1, so "
                 f"the migration gate had nothing to fire for. {where()}. "
@@ -241,7 +253,11 @@ def run() -> None:
 
     gate = gdb.Breakpoint(GATE)
     gate.condition = f"$_thread == {CPU1_THREAD}"
-    continue_bounded()
+    outcome = continue_bounded(gate)
+    if outcome == STALLED:
+        verdict(False, stalled("gate"))
+        gdb.execute("detach")
+        return
     if gate.hit_count == 0:
         verdict(False, "/bin/affinity asked parent_progress from CPU 1 and the "
                 "migration gate did not fire for it: that syscall was not "
@@ -253,7 +269,11 @@ def run() -> None:
 
     rerun = gdb.Breakpoint(DISPATCH)
     rerun.condition = f"$x1 == {MIGRATED_SYSCALL} && $_thread == {CPU0_THREAD}"
-    continue_bounded()
+    outcome = continue_bounded(rerun)
+    if outcome == STALLED:
+        verdict(False, stalled("rerun"))
+        gdb.execute("detach")
+        return
     if rerun.hit_count != 1:
         verdict(False, "the gate handed parent_progress off on CPU1, but core 0 never "
                 f"dispatched it again. {where()}. "

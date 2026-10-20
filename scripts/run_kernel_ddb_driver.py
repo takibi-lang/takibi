@@ -395,14 +395,20 @@ def capture_loop(args, serial, deadline, ceiling, ready_file, release_file, netw
                     "-ex", f"target remote 127.0.0.1:{args.gdb_port}",
                     "-ex", "source " + str(Path(__file__).with_name("kernel_console_hold_check.py")),
                 ], env=hold_env, stdout=hold_log, stderr=subprocess.STDOUT)
-                hold_deadline = min(deadline, time.monotonic() + 15.0)
-                while not hold_ready.exists() and hold.poll() is None and time.monotonic() < hold_deadline:
+                # GitHub issue #867: the gdb check bounds its own wait by the
+                # vCPUs' ticks and exits with an inconclusive or a negative
+                # verdict, so wait for it rather than a fixed host time.
+                while not hold_ready.exists() and hold.poll() is None and time.monotonic() < deadline:
                     time.sleep(0.01)
                 if not hold_ready.exists():
                     hold.kill()
                     hold.wait()
                     hold_log.close()
-                    raise SystemExit("peer console guard was not held before UART BREAK; see .hold-gdb.log")
+                    reason = [line for line in Path(args.log + ".hold-gdb.log").read_text(
+                        errors="replace").splitlines() if "console" in line or "inconclusive" in line]
+                    raise SystemExit("peer console guard was not held before UART BREAK: "
+                                     + (reason[-1] if reason else "no verdict")
+                                     + "; see .hold-gdb.log")
                 with connect(args.qmp_port, deadline) as qmp:
                     qmp_file = qmp.makefile("rwb", buffering=0)
                     # Say what arrived instead of naming only what did
