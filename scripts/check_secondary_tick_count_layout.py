@@ -23,6 +23,7 @@ import re
 import sys
 
 from pass_line import report_pass
+from source_scan import code_only, py_code_only
 
 SECONDARY = pathlib.Path("kernel/arch/arm64/kernel/secondary.tkb")
 ATOMIC = pathlib.Path("kernel/lib/atomic_word.tkb")
@@ -36,22 +37,23 @@ SINGLE_USIZE = re.compile(r"^\s*(?:private\s+)?\w+\s*:\s*usize\s*;?\s*$")
 STRIDE = re.compile(r"&secondary_tick_count\s*\+\s*\{8\s*\*\s*core\}")
 
 
-def code(text: str) -> str:
-    return "\n".join(line.split("//", 1)[0] for line in text.splitlines())
-
-
 def main() -> int:
     failures = []
-    if not DECLARATION.search(code(SECONDARY.read_text(encoding="utf-8"))):
+    facts = 0
+    if not DECLARATION.search(code_only(SECONDARY.read_text(encoding="utf-8"))):
         failures.append(f"{SECONDARY}: secondary_tick_count is no longer "
                         "[AtomicWord; KERNEL_MAX_CORES]")
-    match = ATOMIC_WORD.search(code(ATOMIC.read_text(encoding="utf-8")))
+    else:
+        facts += 1
+    match = ATOMIC_WORD.search(code_only(ATOMIC.read_text(encoding="utf-8")))
     if not match or not SINGLE_USIZE.match(match.group(1).strip()):
         failures.append(f"{ATOMIC}: AtomicWord is no longer one usize field")
-    reader = "\n".join(line for line in READER.read_text(encoding="utf-8").splitlines()
-                       if not line.lstrip().startswith("#"))
-    if not STRIDE.search(reader):
+    else:
+        facts += 1
+    if not STRIDE.search(py_code_only(READER.read_text(encoding="utf-8"))):
         failures.append(f"{READER}: the tick read no longer steps 8 bytes per core")
+    else:
+        facts += 1
     if failures:
         for line in failures:
             print(f"ERROR\tsecondary-tick-count-layout: {line}; the gdb "
@@ -60,7 +62,7 @@ def main() -> int:
         return 1
     report_pass("secondary-tick-count-layout",
                 "secondary_tick_count is one 8-byte AtomicWord per core, as "
-                "the gdb tick read assumes", files=3)
+                "the gdb tick read assumes", facts=facts)
     return 0
 
 

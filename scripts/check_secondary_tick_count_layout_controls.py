@@ -23,7 +23,7 @@ def run(edit=None):
     with tempfile.TemporaryDirectory() as raw:
         root = pathlib.Path(raw)
         for name in (SECONDARY, ATOMIC, READER, f"scripts/{CHECK}",
-                     "scripts/pass_line.py"):
+                     "scripts/pass_line.py", "scripts/source_scan.py"):
             (root / name).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(REPO / name, root / name)
         if edit:
