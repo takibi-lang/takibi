@@ -60,7 +60,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from gdb_interrupt import interrupt_after  # noqa: E402
+from gdb_progress import (Counter, QUIET,  # noqa: E402
+                          all_threads, continue_by_ticks, resume_slice)
 from progress_timeout import ProgressTimeout  # noqa: E402
 from await_timing import AwaitTiming  # noqa: E402
 from typed_marker import typed_marker  # noqa: E402
@@ -202,20 +203,6 @@ def answered(text: bytes) -> bool:
     return any(line.removeprefix("/ # ").removeprefix(" # ") == ANSWER for line in lines)
 
 
-class Counter(gdb.Breakpoint):
-    """Counts passes without stopping the guest."""
-
-    def __init__(self, spec: str, limit: int = 0):
-        super().__init__(spec, internal=True)
-        self.count = 0
-        self.limit = limit
-
-    def stop(self) -> bool:
-        """Stops only on reaching a nonzero limit."""
-        self.count += 1
-        return self.limit != 0 and self.count >= self.limit
-
-
 # GitHub issue #757: at four vCPUs, a locked step froze CPU2 and CPU3
 # wherever the all-stop caught them, possibly holding a lock CPU0 or CPU1
 # then spun on. Every locked step first parks them where they hold nothing:
@@ -244,25 +231,37 @@ def lock_and_park() -> bool:
 
 
 def continue_bounded(threads_locked: bool) -> None:
-    """Resume the guest, or with the lock only the selected vCPU, for at
-    most STEP_TIMEOUT."""
+    """Resume the guest, or with the lock only the selected vCPU, for one
+    slice of at most STEP_TIMEOUT. Only a step() slice: the slice alone
+    bounds nothing (#865)."""
     if threads_locked:
         if not lock_and_park():
             return
     else:
         gdb.execute("set scheduler-locking off")
-    timer = interrupt_after(STEP_TIMEOUT)
-    try:
-        gdb.execute("continue")
-    except (gdb.error, KeyboardInterrupt):
-        pass
-    finally:
-        timer.cancel()
+    resume_slice(STEP_TIMEOUT)
+
+
+def step(done, threads, ticks: int, threads_locked: bool):
+    """GitHub issue #865: resume until done() holds, bounded by the ticks
+    the listed vCPUs take rather than by host seconds. Returns DONE, QUIET
+    (each listed vCPU took `ticks` ticks without it: a finding) or STALLED
+    (the guest was not given the time: inconclusive), and the ticks taken."""
+    return continue_by_ticks(done, threads, ticks,
+                             resume=lambda: continue_bounded(threads_locked),
+                             slice_seconds=STEP_TIMEOUT,
+                             cap_seconds=STEP_PROGRESS_CAP)
+
+
+def stalled(what: str, taken: int, ticks: int) -> str:
+    return (f"{what}: the guest stalled after {taken} of the {ticks} ticks "
+            "this step is given, so the run is inconclusive, not a finding "
+            "(GitHub issue #865)")
 
 
 # A step the guest reaches deterministically, but whose host time depends on
 # how much CPU QEMU gets, so a fixed STEP_TIMEOUT is not a bound on it. Keep
-# waiting while the selected vCPU's PC moves; stop at STEP_PROGRESS_CAP, or as
+# waiting while the guest makes progress; stop at STEP_PROGRESS_CAP, or as
 # soon as one STEP_TIMEOUT passes with no progress at all.
 #
 # A scheduler-locked step must also never run one vCPU toward a lock the
@@ -277,6 +276,12 @@ STEP_PROGRESS_CAP = 180.0
 # (kernel_process_block_net); the peer net stage gives CPU1 several times
 # that many of its own ticks before it calls the waiter left asleep (#864).
 PEER_NET_WAKE_TICKS = 12
+# GitHub issue #865: a reader handed a byte comes back to its window within a
+# few ticks of its CPU; one second of them (64 Hz) before it is called
+# asleep. A step whose absence is only ever a failure gets far more, so that
+# only a guest that stops taking ticks, or the host cap, ends it early.
+READER_TICKS = 64
+STEP_TICKS = 64 * 60
 
 
 def continue_until_hit(bp, thread: int, threads_locked: bool) -> None:
@@ -344,11 +349,14 @@ def run_peer(connection: socket.socket) -> None:
     # there is the lane's premise: a reader with nothing else runnable on
     # its CPU never blocks, and this lane would then prove nothing.
     connection.sendall(PEER_LINE[:1])
-    continue_bounded(False)
+    outcome, taken = step(lambda: window.hit_count >= 1, (CPU1_THREAD,),
+                          READER_TICKS, False)
     if window.hit_count != 1:
         verdict(False, "the reader never went back to sleep on the secondary "
                 "cpu after its first byte, so the cross-cpu window was not on "
-                "its path; it needs something else runnable beside it")
+                "its path; it needs something else runnable beside it"
+                if outcome == QUIET else
+                stalled("the peer reader's first byte", taken, READER_TICKS))
         gdb.execute("detach")
         return
     last = len(PEER_LINE) - 1
@@ -367,13 +375,16 @@ def run_peer(connection: socket.socket) -> None:
         window_pc = thread_pc(CPU1_THREAD)
         push.enabled = True
         gdb.execute(f"thread {CPU0_THREAD}", to_string=True)
-        continue_bounded(True)
+        outcome, taken = step(lambda: push.hit_count >= index, (CPU0_THREAD,),
+                              STEP_TICKS, True)
         pushed = push.hit_count == index
         held = thread_pc(CPU1_THREAD) == window_pc
         push.enabled = False
         if not pushed:
             verdict(False, f"byte {index} ({value!r}) never reached the ring "
-                    "from CPU0's RX interrupt while CPU1 was held")
+                    "from CPU0's RX interrupt while CPU1 was held"
+                    + ("" if outcome == QUIET else
+                       "; " + stalled("CPU0's RX interrupt", taken, STEP_TICKS)))
             gdb.execute("detach")
             return
         if not held:
@@ -388,7 +399,8 @@ def run_peer(connection: socket.socket) -> None:
             gdb.execute("set scheduler-locking off")
             gdb.execute("detach")
             break
-        continue_bounded(False)
+        outcome, taken = step(lambda: window.hit_count >= index + 1,
+                              (CPU1_THREAD,), READER_TICKS, False)
         if window.hit_count != index + 1:
             gdb.execute("thread apply all bt 6")
             gdb.execute("x/4wx &terminal_settings")
@@ -396,8 +408,11 @@ def run_peer(connection: socket.socket) -> None:
                     f"byte {index} ({value!r}) of {PEER_LINE!r} was pushed "
                     "into the ring by CPU0 while the reader on CPU1 was past "
                     "its last lockless look, and the reader did not come back "
-                    f"to read within {STEP_TIMEOUT:.0f} s: it is asleep "
-                    "beside the byte (GitHub issue #547)")
+                    f"to read within {taken} of CPU1's ticks: it is asleep "
+                    "beside the byte (GitHub issue #547)"
+                    if outcome == QUIET else
+                    stalled(f"byte {index} of {PEER_LINE!r}", taken,
+                            READER_TICKS))
             gdb.execute("set scheduler-locking off")
             gdb.execute("detach")
             return
@@ -428,9 +443,12 @@ def run_peer_net_wake(connection: socket.socket) -> None:
     net_block = gdb.Breakpoint("kernel_process_block_net")
     net_block.condition = f"$_thread == {CPU1_THREAD}"
     connection.sendall(PEER_NET_WAKE_COMMAND)
-    continue_bounded(False)
+    outcome, taken = step(lambda: net_block.hit_count >= 1, (CPU1_THREAD,),
+                          STEP_TICKS, False)
     if net_block.hit_count != 1:
-        verdict(False, "the peer fixture did not enter kernel_process_block_net")
+        verdict(False, "the peer fixture did not enter kernel_process_block_net"
+                + ("" if outcome == QUIET else
+                   "; " + stalled("the peer NetRx fixture", taken, STEP_TICKS)))
         gdb.execute("detach")
         return
     net_block.delete()
@@ -459,27 +477,18 @@ def run_peer_net_wake(connection: socket.socket) -> None:
     # before CPU1 took the three ticks the NetRx wait is due after. Keep
     # continuing while CPU1's tick count (kernel_secondary_timer_schedule:
     # a secondary's tick never enters timer_irq_handler) grows; stop at
-    # PEER_NET_WAKE_TICKS
-    # of them, or when one STEP_TIMEOUT passes with no new tick.
+    # PEER_NET_WAKE_TICKS of them, or when one STEP_TIMEOUT passes with no
+    # new tick (#865: the shared step(), whose counter filters by thread in
+    # stop(), which gdb calls before any `.condition`).
     resumed = gdb.Breakpoint("kernel_process_tick_wake_one")
     resumed.condition = f"$_thread == {CPU1_THREAD}"
-    ticks = Counter("kernel_secondary_timer_schedule", PEER_NET_WAKE_TICKS)
-    ticks.condition = f"$_thread == {CPU1_THREAD}"
     gdb.execute(f"thread {CPU1_THREAD}", to_string=True)
-    waited = 0.0
-    while resumed.hit_count == 0 and ticks.count < PEER_NET_WAKE_TICKS \
-            and waited < STEP_PROGRESS_CAP:
-        before = ticks.count
-        continue_bounded(True)
-        waited += STEP_TIMEOUT
-        if resumed.hit_count == 0 and ticks.count == before:
-            break
+    outcome, taken = step(lambda: resumed.hit_count >= 1, (CPU1_THREAD,),
+                          PEER_NET_WAKE_TICKS, True)
     woken = resumed.hit_count >= 1
-    taken = ticks.count
     resumed.delete()
-    ticks.delete()
     gdb.execute("set scheduler-locking off")
-    if not woken and taken < PEER_NET_WAKE_TICKS:
+    if not woken and outcome != QUIET:
         gdb.execute("detach")
         verdict(False, f"CPU1 took only {taken} of {PEER_NET_WAKE_TICKS} "
                 "ticks while CPU0 was stopped and stalled; the stage could "
@@ -524,11 +533,14 @@ def run_scalar_buffering(connection: socket.socket) -> bool:
     scalar = gdb.Breakpoint("kernel_syscall_dispatch")
     scalar.condition = f"$x1 == {number}"
     connection.sendall(PAYLOAD[:1])
-    continue_bounded(False)
+    outcome, taken = step(lambda: scalar.hit_count >= 1, all_threads(),
+                          STEP_TICKS, False)
     if scalar.hit_count != 1:
         scalar.delete()
         gdb.execute("detach")
-        verdict(False, "the scalar reader did not resume after its first byte")
+        verdict(False, "the scalar reader did not resume after its first byte"
+                + ("" if outcome == QUIET else
+                   "; " + stalled("scalar first byte", taken, STEP_TICKS)))
         return False
 
     def queue(bytes_to_queue: bytes) -> None:
@@ -549,11 +561,20 @@ def run_scalar_buffering(connection: socket.socket) -> bool:
         # syscall. This must fail without a new interrupt rescuing the wait.
         gdb.execute("set *(unsigned char *)&kernel_uart_rx_canonical = 1")
     queue(PAYLOAD[1:2])
-    continue_bounded(False)
+    # GitHub issue #865: the canonical control expects the diagnosis below,
+    # and only a reader that every vCPU's READER_TICKS ticks did not bring
+    # back may be given it. A stall gets its own message, which the control
+    # does not accept.
+    outcome, taken = step(lambda: scalar.hit_count >= 2, all_threads(),
+                          READER_TICKS, False)
     if scalar.hit_count != 2:
         gdb.execute("thread apply all bt 6")
         scalar.delete()
         gdb.execute("detach")
+        if outcome != QUIET:
+            verdict(False, stalled("the queued scalar byte's step", taken,
+                                   READER_TICKS))
+            return False
         verdict(False, "queued scalar UART byte was not returned before a later input byte")
         return False
     # The next scalar call can now read the suffix already queued, proving
@@ -628,20 +649,21 @@ def run() -> None:
         # The guest is stopped; QEMU's main loop still moves the byte into
         # the PL011 FIFO and raises the interrupt line meanwhile.
         time.sleep(0.2)
-        timer = interrupt_after(STEP_TIMEOUT)
-        try:
-            gdb.execute("continue")
-        except (gdb.error, KeyboardInterrupt):
-            pass
-        finally:
-            timer.cancel()
+        outcome, taken = step(lambda: window.hit_count >= index + 1,
+                              all_threads(), READER_TICKS, False)
         if window.hit_count != index + 1:
             gdb.execute("thread apply all bt 6")
             gdb.execute("x/4wx &terminal_settings")
+            if outcome != QUIET:
+                verdict(False, stalled(f"byte {index} of {COMMAND!r}", taken,
+                                       READER_TICKS))
+                gdb.execute("detach")
+                return
             verdict(False,
                     f"byte {index} ({bytes([value])!r}) of {COMMAND!r} was sent "
                     "while the shell was on its way to sleep, and the shell "
-                    f"did not come back to read within {STEP_TIMEOUT:.0f} s: "
+                    f"did not come back to read within {taken} ticks of every "
+                    "vCPU: "
                     "it is asleep beside a byte that is already in the ring "
                     "(GitHub issue #546)")
             gdb.execute("detach")

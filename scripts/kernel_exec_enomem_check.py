@@ -97,6 +97,7 @@ def reach(breakpoint, phase):
     budget = min(60, max(0, DEADLINE - time.monotonic()))
     if budget <= 0:
         raise RuntimeError(f"{phase}: GDB batch ceiling reached")
+    # gdb-wallclock-waiver: not yet progress-bounded, GitHub issue #867
     timer = interrupt_after(budget)
     try:
         gdb.execute("continue")

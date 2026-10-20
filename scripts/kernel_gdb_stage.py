@@ -31,7 +31,14 @@ status 3) only if some vCPU is still not parked after every pass.
 breakpoint within SECONDS; otherwise it interrupts the target, prints where
 every vCPU is (`info threads`, `thread apply all bt`) and exits with status
 3. The plain `continue` it replaces was bounded only by the outer `timeout`,
-which killed gdb and left no record of where the vCPUs were.
+which killed gdb and left no record of where the vCPUs were. GitHub issue
+#865: SECONDS is one slice, not the whole bound. A stage still short of its
+breakpoint after a slice in which every vCPU it runs took scheduler ticks
+gets another, up to BOUNDED_SLICES; a guest the host starved is given its
+time, and one that stopped taking ticks fails after the first slice as before.
+`takibi-park-threads` keeps its fixed PARK_STEP_SECONDS steps on purpose: a
+vCPU that does not park in one is retried on a later pass, so a short step
+is never a verdict.
 """
 
 import os
@@ -42,6 +49,7 @@ import gdb
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from gdb_interrupt import interrupt_after  # noqa: E402
+from gdb_progress import TickCounter  # noqa: E402
 
 NO_STOP_STATUS = 3
 PARK_STEP_SECONDS = 3.0
@@ -51,6 +59,7 @@ PARK_STEP_SECONDS = 3.0
 # making progress. A pass that parks everything returns at once, so the
 # larger bound costs time only on the way to a failure.
 PARK_PASSES = 24
+BOUNDED_SLICES = 4
 
 
 def _diagnose_and_quit(message: str) -> None:
@@ -64,7 +73,8 @@ def _diagnose_and_quit(message: str) -> None:
 
 
 def _continue_until_breakpoint(seconds: float) -> bool:
-    """Continue; True only when a breakpoint ended it within SECONDS."""
+    """Continue; True only when a breakpoint ended it within SECONDS.
+    One slice: its callers decide what a slice that ran out means (#865)."""
     stops = []
 
     def note(event: gdb.StopEvent) -> None:
@@ -127,10 +137,23 @@ class BoundedContinue(gdb.Command):
 
     def invoke(self, argument: str, from_tty: bool) -> None:
         seconds = float(argument)
-        if _continue_until_breakpoint(seconds):
-            return
+        current = gdb.selected_thread()
+        running = ((current.num,) if gdb.parameter("scheduler-locking") == "on"
+                   else tuple(t.num for t in gdb.selected_inferior().threads()))
+        ticks = TickCounter(running)
+        try:
+            for _ in range(BOUNDED_SLICES):
+                before = ticks.least()
+                if _continue_until_breakpoint(seconds):
+                    return
+                if ticks.least() == before:
+                    break
+        finally:
+            ticks.delete()
         _diagnose_and_quit(
-            f"takibi-bounded-continue: no breakpoint within {seconds:g} s")
+            f"takibi-bounded-continue: no breakpoint within {seconds:g} s "
+            "with no scheduler tick on some running vCPU, or within "
+            f"{BOUNDED_SLICES} such slices while every one ticked")
 
 
 class ParkThreads(gdb.Command):

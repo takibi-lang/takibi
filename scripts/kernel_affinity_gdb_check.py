@@ -156,6 +156,7 @@ def continue_bounded(budget: float = STEP_TIMEOUT) -> None:
     whole step timeout after the loop's own deadline had passed, which is lane
     time spent learning nothing.
     """
+    # gdb-wallclock-waiver: not yet progress-bounded, GitHub issue #867
     timer = interrupt_after(max(budget, 1.0))
     try:
         gdb.execute("continue")

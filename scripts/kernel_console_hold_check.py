@@ -17,6 +17,7 @@ release = Path(os.environ["KERNEL_CONSOLE_HOLD_RELEASE"])
 gdb.execute("maintenance packet Qqemu.PhyMemMode:1")
 gdb.execute("break console_ddb_hold_checkpoint")
 gdb.execute("set *(char *)&kernel_ddb_console_hold_armed = 1")
+# gdb-wallclock-waiver: not yet progress-bounded, GitHub issue #867
 gdb.execute("continue")
 phase = int(gdb.parse_and_eval("*(unsigned long *)&console_ddb_phase"))
 held = int(gdb.parse_and_eval("*(unsigned long *)&console_tx_lock"))

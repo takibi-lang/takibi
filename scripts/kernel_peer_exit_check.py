@@ -48,6 +48,7 @@ class PeerExitBoundary(gdb.Breakpoint):
 
 
 def reach(boundary):
+    # gdb-wallclock-waiver: not yet progress-bounded, GitHub issue #867
     timer = interrupt_after(float(os.environ["KERNEL_PEER_EXIT_TIMEOUT"]))
     try:
         gdb.execute("continue")
