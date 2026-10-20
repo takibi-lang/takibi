@@ -43,13 +43,20 @@ def spin(label: str, peer_only: bool) -> str:
 WINDOWS = {
     # A completed peer can re-enter before the primary disarms the phase.
     # Holding the primary here exposes the old restart-from-zero loop.
+    # GitHub issue #860: per-peer arming keeps a completed peer out of the
+    # probe by construction, so --revert also puts back the arming that
+    # admitted it.
     "678": {
         "spin": ("kernel/freelist_contention_evidence.tkb",
                  "    // With per-round rendezvous this is the slowest peer's completion count\n"
                  "    // at the instant the primary finishes, not a scheduler-granularity\n"
                  "    // metric.\n",
                  False),
-        "check": ("kernel/freelist_contention_evidence.tkb",
+        "check": [("kernel/freelist_contention_evidence.tkb",
+                   "    return atomic_word_load(freelist_probe_armed_address()) == 1 &&\n"
+                   "           peer_tally_count(&freelist_probe_tally, cpu) < FREELIST_CONTENTION_ROUNDS;\n",
+                   "    return atomic_word_load(freelist_probe_armed_address()) == 1;\n"),
+                  ("kernel/freelist_contention_evidence.tkb",
                   '    // The idle loop may enter again before the primary disarms this phase.\n'
                   "    // Keep the round in the phase's published count, not a fresh local loop:\n"
                   '    // an old rendezvous sequence must never authorize another allocation.\n'
@@ -67,7 +74,7 @@ WINDOWS = {
                   '                peer_tally_add(&freelist_probe_tally, cpu);\n'
                   '            }\n'
                   '        }\n'
-                  '    }\n'),
+                  '    }\n')],
     },
     # GitHub issue #761's negative control: a connected read copies what the
     # caller asked for instead of what the segment holds, in both the direct
