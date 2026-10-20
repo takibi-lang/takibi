@@ -2766,26 +2766,13 @@ must_use variant SyscallDeadlineResult {
     Invalid;
     Ready;
     Block;
-    WaitInterrupt;
 }
 
-// Does a deadline or signal wait block (Blocked, queued on this core's
-// tick-wake list, #829) rather than retry through WaitInterrupt?
-//
-// GitHub issue #840: on a peer it always blocks, as Linux does. A peer
-// that found nothing else Ready used to keep the waiter Running in a wfe
-// retry loop (86fb1cbd), so a PID 1 placed on a peer (#775 2-1) showed DDB
-// a third stack root, Running in EL1, instead of a parked init. Blocking
-// costs nothing there: the peer idles in kernel_idle_loop, its own tick
-// wakes the deadline (kernel_process_tick_wake_scan), and a signal wakes
-// the waiter under the run lock. Core 0 keeps the retry when it is alone,
-// which the BusyBox console lanes were written against; it still blocks
-// whenever another process is Ready.
-fn syscall_timed_wait_blocks() -> bool {
-    // core-role: the #840 decision covers peers; core 0 is #852.
-    if (cpu_id() != 0) { return true; }
-    return kernel_process_other_ready();
-}
+// A deadline or signal wait always blocks (Blocked, queued on this core's
+// tick-wake list, #829), on every core, as Linux does: the core idles in
+// kernel_idle_loop, its own tick wakes the deadline, and a signal wakes the
+// waiter under the run lock. Core 0 used to retry through WaitInterrupt
+// while it was alone (#840 covered peers only); #852 made it equal.
 
 // Parse one Linux arm64 timespec and either finish a zero/already-expired
 // wait or arm the current process against the architectural generic counter.
@@ -2818,15 +2805,7 @@ fn syscall_deadline_wait(current_authority: borrow ProcessCurrent[current_proces
             kernel_process_current_clear_deadline(current_authority);
             return SyscallDeadlineResult::Ready;
         }
-        // Ask again on every retry, as the first entry does. A process that
-        // found nobody else Ready when it armed keeps retrying here in EL1,
-        // and without this it held its CPU after others became Ready: the
-        // DDB lane's BREAK found init at this read_cntpct on core 0 while
-        // the workload it was waiting for got no time.
-        if (syscall_timed_wait_blocks()) {
-            return SyscallDeadlineResult::Block;
-        }
-        return SyscallDeadlineResult::WaitInterrupt;
+        return SyscallDeadlineResult::Block;
     }
     let frequency: usize = read_cntfrq() as usize;
     let whole_ticks: usize = match checked_mul_usize(seconds, frequency) {
@@ -2855,10 +2834,7 @@ fn syscall_deadline_wait(current_authority: borrow ProcessCurrent[current_proces
     }
     if (deadline <= now) { return SyscallDeadlineResult::Ready; }
     kernel_process_current_arm_deadline(current_authority, deadline, 0);
-    if (syscall_timed_wait_blocks()) {
-        return SyscallDeadlineResult::Block;
-    }
-    return SyscallDeadlineResult::WaitInterrupt;
+    return SyscallDeadlineResult::Block;
 }
 
 fn syscall_signal_wait(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], wait_set: usize, timeout_address: usize)
@@ -2878,9 +2854,7 @@ fn syscall_signal_wait(current_authority: borrow ProcessCurrent[current_process,
             kernel_process_current_clear_deadline(current_authority);
             return SyscallAction::Resume(LINUX_EAGAIN);
         }
-        // The same retry question as syscall_deadline_wait's.
-        if (syscall_timed_wait_blocks()) { return SyscallAction::Block; }
-        return SyscallAction::WaitInterrupt;
+        return SyscallAction::Block;
     }
     if (timeout_address != 0) {
         let mut seconds: usize = 0;
@@ -2952,8 +2926,7 @@ fn syscall_signal_wait(current_authority: borrow ProcessCurrent[current_process,
         kernel_boot_log(
             "signal: BusyBox init blocked in rt_sigtimedwait for SIGCHLD\n");
     }
-    if (syscall_timed_wait_blocks()) { return SyscallAction::Block; }
-    return SyscallAction::WaitInterrupt;
+    return SyscallAction::Block;
 }
 
 fn syscall_ppoll_dispatch(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], fds_address: usize, raw_nfds: usize,
@@ -2972,9 +2945,6 @@ fn syscall_ppoll_dispatch(current_authority: borrow ProcessCurrent[current_proce
                 return SyscallAction::Resume(0);
             }
             SyscallDeadlineResult::Block => { return SyscallAction::Block; }
-            SyscallDeadlineResult::WaitInterrupt => {
-                return SyscallAction::WaitInterrupt;
-            }
         }
     }
     if (raw_nfds >= 0 && raw_nfds < POLL_MAX) {
@@ -3066,9 +3036,6 @@ fn syscall_ppoll_dispatch(current_authority: borrow ProcessCurrent[current_proce
                     }
                     SyscallDeadlineResult::Block => {
                         return SyscallAction::Block;
-                    }
-                    SyscallDeadlineResult::WaitInterrupt => {
-                        return SyscallAction::WaitInterrupt;
                     }
                 }
             }
@@ -7157,9 +7124,6 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 return syscall_finish_current(frame, SyscallAction::Resume(0), current_authority);
             }
             SyscallDeadlineResult::Block => { return syscall_finish_current(frame, SyscallAction::Block, current_authority); }
-            SyscallDeadlineResult::WaitInterrupt => {
-                return syscall_finish_current(frame, SyscallAction::WaitInterrupt, current_authority);
-            }
         }
     }
     if (number == AARCH64_NR_CLOCK_NANOSLEEP) {
@@ -7177,9 +7141,6 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 return syscall_finish_current(frame, SyscallAction::Resume(0), current_authority);
             }
             SyscallDeadlineResult::Block => { return syscall_finish_current(frame, SyscallAction::Block, current_authority); }
-            SyscallDeadlineResult::WaitInterrupt => {
-                return syscall_finish_current(frame, SyscallAction::WaitInterrupt, current_authority);
-            }
         }
     }
     if (number == AARCH64_NR_PRLIMIT64) {
