@@ -313,8 +313,10 @@ PYLINE
         #
         # 1. Core 0 stops at PID 1's first user instruction, which becomes
         #    BRK. Core 1 is online and idle: no other process exists yet.
-        # 2. Core 1's idle loop calls kernel_log_peer_probe_step on every
-        #    wake, and nothing else does; its first instruction becomes BRK.
+        # 2. Every peer's idle loop calls kernel_log_peer_probe_step on every
+        #    wake (#848); its first instruction becomes BRK, and only core 1
+        #    runs now. The original word goes back before the detach, so
+        #    cores 2 and 3, parked until then, do not fault as well.
         #    Core 1 alone runs, faults at EL1 and enters the fail-stop path.
         #    It is held once it has taken fault ticket 1 and the report
         #    claim, at the start of its own render. The ticket fixes the
@@ -355,6 +357,7 @@ PYLINE
             -ex "set scheduler-locking on"
             -ex "takibi-park-threads kernel_idle_loop $peer_threads"
             -ex "set {int}(*(long *)(\$x0 + 0x100)) = $fault_instruction"
+            -ex "set \$peer_probe_word = {int}kernel_log_peer_probe_step"
             -ex "set {int}kernel_log_peer_probe_step = $fault_instruction"
             -ex "break *crash_snapshot_capture thread 2"
             -ex "thread 2"
@@ -372,6 +375,7 @@ PYLINE
             -ex "takibi-bounded-continue $STAGE_SECONDS"
             -ex "delete"
             -ex "info threads"
+            -ex "set {int}kernel_log_peer_probe_step = \$peer_probe_word"
             -ex "set scheduler-locking off"
             -ex "detach"
         )
