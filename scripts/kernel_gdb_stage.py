@@ -45,7 +45,12 @@ from gdb_interrupt import interrupt_after  # noqa: E402
 
 NO_STOP_STATUS = 3
 PARK_STEP_SECONDS = 3.0
-PARK_PASSES = 8
+# #757: a pass can end with the helper and a listed vCPU each still
+# contending (core 0 finishing a block read under the block mutex, core 2
+# queued on it); 8 passes ran out once in 9 lane runs while both were still
+# making progress. A pass that parks everything returns at once, so the
+# larger bound costs time only on the way to a failure.
+PARK_PASSES = 24
 
 
 def _diagnose_and_quit(message: str) -> None:
