@@ -3,6 +3,7 @@
 
 import argparse
 import difflib
+import json
 import re
 from pathlib import Path
 import socket
@@ -290,6 +291,28 @@ def postmortem_break_due(now: float, deadline: float, last_chunk_at: float,
             now - last_chunk_at >= timeout * STOPPED_FRACTION)
 
 
+def qmp_reply(stream) -> dict:
+    """The next QMP command reply, skipping asynchronous events.
+
+    QEMU may emit an event (RESUME, STOP, ...) at any time, including between a
+    command and its reply; taking that event as the reply misread an accepted
+    BREAK as a refusal and emptied the postmortem walk (#871 repro run 2).
+    Returns {} when the stream ends or a line is not a JSON object.
+    """
+    while True:
+        line = stream.readline()
+        if not line:
+            return {}
+        try:
+            message = json.loads(line)
+        except ValueError:
+            return {}
+        if not isinstance(message, dict):
+            return {}
+        if "event" not in message:
+            return message
+
+
 def send_serial_break(port: int, chardev: str, budget: float) -> str:
     """Ask QEMU for a real serial BREAK; return what went wrong, or "".
 
@@ -308,13 +331,13 @@ def send_serial_break(port: int, chardev: str, budget: float) -> str:
                 return ("QMP produced no greeting, so QEMU is still starting "
                         f"or has already exited (first line {greeting[:80]!r})")
             stream.write(b'{"execute":"qmp_capabilities"}\n')
-            if b"return" not in stream.readline():
+            if "return" not in qmp_reply(stream):
                 return "QMP capability negotiation failed"
             stream.write(b'{"execute":"chardev-send-break","arguments":'
                          b'{"id":"' + chardev.encode("ascii") + b'"}}\n')
-            reply = stream.readline()
-            if b"return" not in reply:
-                return f"QMP refused the serial BREAK: {reply[:160]!r}"
+            reply = qmp_reply(stream)
+            if "return" not in reply:
+                return f"QMP refused the serial BREAK: {str(reply)[:160]!r}"
     except OSError as error:
         return f"QMP on port {port} was unreachable: {error}"
     return ""

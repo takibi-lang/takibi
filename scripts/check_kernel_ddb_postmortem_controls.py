@@ -547,8 +547,9 @@ def check_fixture_failure(driver) -> list[str]:
 class FakeQmp:
     """QEMU's monitor, far enough to answer one chardev-send-break."""
 
-    def __init__(self, refuse=False, greet=True):
+    def __init__(self, refuse=False, greet=True, event_first=False):
         self.refuse = refuse
+        self.event_first = event_first
         self.greet = greet
         self.breaks = []
         self.listener = socket.socket()
@@ -590,6 +591,9 @@ class FakeQmp:
                         stream.write(b'{"error": {"class": "DeviceNotFound"}}\n')
                         continue
                     self.breaks.append(request["arguments"]["id"])
+                    if self.event_first:
+                        stream.write(b'{"timestamp": {"seconds": 1, '
+                                     b'"microseconds": 0}, "event": "RESUME"}\n')
                 stream.write(b'{"return": {}}\n')
 
 
@@ -617,6 +621,14 @@ def check_qmp_wire(driver) -> list[str]:
     if qmp.breaks != [driver.QMP_CHARDEV]:
         failures.append(f"the monitor was asked for {qmp.breaks!r} rather than "
                         f"one break on {driver.QMP_CHARDEV!r}")
+
+    # #871 repro run 2: QEMU's RESUME event arrived between the BREAK and its
+    # reply, and the driver took the event for a refusal.
+    with FakeQmp(event_first=True) as qmp:
+        problem = driver.send_serial_break(qmp.port, driver.QMP_CHARDEV, 5.0)
+    if problem:
+        failures.append("an event before the reply was taken as the reply: "
+                        f"{problem!r}")
 
     with FakeQmp(refuse=True) as qmp:
         problem = driver.send_serial_break(qmp.port, driver.QMP_CHARDEV, 5.0)
