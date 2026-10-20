@@ -61,7 +61,7 @@ class Debugger:
         for byte in data:
             if byte == 0x0A:
                 self.commands.append(bytes(self.line))
-                self.pending += bytes(self.line) + b"\r\nddb: answer\r\n" + DDB_PROMPT
+                self.pending += bytes(self.line) + b"\r\n(answered)\r\n" + DDB_PROMPT
                 self.line.clear()
             else:
                 self.line.append(byte)
@@ -100,7 +100,7 @@ def check_collect():
             if clock.now - started > rpi5_postmortem.POSTMORTEM_CEILING + 1:
                 failures.append(f"{label}: took {clock.now - started:.1f}s")
             log = (Path(temporary) / "ddb-postmortem.log").read_bytes()
-            if not log.startswith(b"postmortem reason: fixture reason\n"):
+            if not log.startswith(b"postmortem reason=fixture reason\n"):
                 failures.append(f"{label}: log lost the reason")
             if answers:
                 if board.commands != list(POSTMORTEM_COMMANDS) or b"wait" not in board.commands:
@@ -242,7 +242,7 @@ def check_shell_smoke():
         thread.start()
         session = smoke.Session(0, ours.fileno())
         if console_up:
-            session.transcript += b"[kernel/rpi5] controls: Ctrl-] exits; " + smoke.CONSOLE_UP + b"\r\n"
+            session.transcript += smoke.CONSOLE_UP + b"\r\n"
         try:
             with tempfile.TemporaryDirectory() as temporary, \
                     patch.object(rpi5_swd_snapshot, "capture", recording_snapshot(board.events)):

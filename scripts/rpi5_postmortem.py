@@ -61,7 +61,7 @@ def collect(elf, directory, reason, *, send_break, write, read,
     answered = min(sent, max(0, walk.count(DDB_PROMPT) - 1))
     try:
         directory.mkdir(parents=True, exist_ok=True)
-        walk_log.write_bytes(b"postmortem reason: " + reason.encode("ascii", "replace")
+        walk_log.write_bytes(b"postmortem reason=" + reason.encode("ascii", "replace")
                              + b"\n" + bytes(walk))
     except OSError as error:
         failure += f"; could not save the walk: {error}"
