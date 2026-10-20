@@ -20,6 +20,8 @@ import re
 import sys
 from pathlib import Path
 
+from source_scan import code_only
+
 ROOT = Path(__file__).resolve().parent.parent
 SOURCE = ROOT / "kernel" / "kernel" / "syscall.tkb"
 
@@ -55,12 +57,11 @@ ALLOWED = {
 def producers(text):
     counts = {}
     function = None
-    for line in text.splitlines():
+    for line in code_only(text).splitlines():
         match = FUNCTION.match(line)
         if match:
             function = match.group(1)
-        code = line.split("//", 1)[0]
-        if PRODUCER.search(code):
+        if PRODUCER.search(line):
             counts[function] = counts.get(function, 0) + 1
     return counts
 
