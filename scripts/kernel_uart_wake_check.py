@@ -475,11 +475,10 @@ def run_peer_net_wake(connection: socket.socket) -> None:
     # GitHub issue #864: the stage is bounded by CPU1's own ticks, not by
     # host seconds. Under host load three wall-clock continues once ended
     # before CPU1 took the three ticks the NetRx wait is due after. Keep
-    # continuing while CPU1's tick count (kernel_secondary_timer_schedule:
-    # a secondary's tick never enters timer_irq_handler) grows; stop at
+    # continuing while CPU1's tick count (its secondary_tick_count entry,
+    # read between slices without a breakpoint, #865/#871) grows; stop at
     # PEER_NET_WAKE_TICKS of them, or when one STEP_TIMEOUT passes with no
-    # new tick (#865: the shared step(), whose counter filters by thread in
-    # stop(), which gdb calls before any `.condition`).
+    # new tick.
     resumed = gdb.Breakpoint("kernel_process_tick_wake_one")
     resumed.condition = f"$_thread == {CPU1_THREAD}"
     gdb.execute(f"thread {CPU1_THREAD}", to_string=True)

@@ -58,6 +58,7 @@ REVIEWED = {
     "check_gdb_bounded_controls.py": SHORT_CHILDREN,
     "check_gdb_scheduler_locking_controls.py": SHORT_CHILDREN,
     "check_gdb_wallclock_continue_controls.py": SHORT_CHILDREN,
+    "check_secondary_tick_count_layout_controls.py": SHORT_CHILDREN,
     "check_elf_symbol_alignment_controls.py": SHORT_CHILDREN,
     "check_race_window_overlay_only_controls.py": SHORT_CHILDREN,
     "check_found_by_policy_controls.py": SHORT_CHILDREN,

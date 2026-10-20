@@ -8,10 +8,10 @@ did not finish within ten seconds. And the same timeout decided the negative
 verdicts -- "the reader is asleep", "the control left the waiter asleep" --
 so a starved guest could read as a defect, or as a control that passed.
 
-continue_by_ticks() counts the scheduler ticks the vCPUs that matter take
-(timer_irq_handler on CPU0; kernel_secondary_timer_schedule on a secondary,
-whose tick never enters timer_irq_handler) and resumes in host-time slices
-until one of three outcomes:
+continue_by_ticks() reads the scheduler ticks the vCPUs that matter took
+from the kernel's own per-core counter, secondary_tick_count (core 0's tick
+bumps entry 0), between host-time slices, and resumes until one of three
+outcomes:
 
   DONE     the stage's own condition holds (its breakpoint was hit);
   QUIET    every listed vCPU took `ticks` ticks and the condition never held:
@@ -21,7 +21,15 @@ until one of three outcomes:
 
 A negative verdict may only be drawn from QUIET. A vCPU spinning with its
 interrupts masked takes no tick, so a stage whose expected outcome is such a
-spin measures that spin itself (Counter on the loop instruction) instead.
+spin decides from where the vCPU stands once it STALLS.
+
+The ticks are read, not counted by breakpoints: a breakpoint on the tick
+handlers stops every vCPU on every tick, and over the ddb uart lane's
+workload that perturbation hung the guest (#871, found by #867). The read
+goes through QEMU's physical-memory mode, since the selected vCPU may be at
+EL0 under a user table that does not map the kernel (#701, #757); the kernel
+is identity-mapped, so the address is the same. The counter's layout (one
+8-byte word per core) is held by scripts/check_secondary_tick_count_layout.py.
 
 Every gdb Python check bounds its continues through this module or says why
 not (scripts/check_gdb_wallclock_continue.py).
@@ -34,8 +42,8 @@ import gdb
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from gdb_interrupt import interrupt_after  # noqa: E402
+from gdb_tick_count import tick_count_progress  # noqa: E402
 
-TICK_FUNCTIONS = ("timer_irq_handler", "kernel_secondary_timer_schedule")
 # How long one resume may run in host seconds before the ticks are looked at.
 SLICE_SECONDS = 10.0
 # The whole stage's host-time ceiling, whatever the ticks say. Under the
@@ -76,20 +84,28 @@ class Counter(gdb.Breakpoint):
         return self.limit != 0 and self.count >= self.limit
 
 
-class TickCounter:
-    """Scheduler ticks taken by each listed gdb thread."""
+def tick_progress(threads):
+    """The least ticks any listed gdb thread's core took since this call,
+    read from secondary_tick_count (scripts/gdb_tick_count.py) in physical
+    mode, without a breakpoint."""
+    physical(True)
+    try:
+        read = tick_count_progress(threads)
+    finally:
+        physical(False)
 
-    def __init__(self, threads) -> None:
-        self.threads = tuple(threads)
-        self._counters = [Counter(name, self.threads) for name in TICK_FUNCTIONS]
+    def least() -> int:
+        physical(True)
+        try:
+            return read()
+        finally:
+            physical(False)
+    return least
 
-    def least(self) -> int:
-        return min(sum(counter.counts.get(number, 0) for counter in self._counters)
-                   for number in self.threads)
 
-    def delete(self) -> None:
-        for counter in self._counters:
-            counter.delete()
+def physical(on: bool) -> None:
+    gdb.execute(f"maintenance packet Qqemu.PhyMemMode:{1 if on else 0}",
+                to_string=True)
 
 
 def resume_slice(seconds: float = SLICE_SECONDS, command: str = "continue") -> bool:
@@ -120,25 +136,20 @@ def continue_by_ticks(done, threads, ticks: int, resume=None,
     `resume` runs one slice (default: resume_slice()). `progress`, when
     given, replaces the tick count as the measure of guest progress: a
     callable returning a number that grows while the listed vCPUs run."""
-    counter = TickCounter(threads) if progress is None else None
-    measure = counter.least if counter is not None else progress
+    measure = tick_progress(threads) if progress is None else progress
     waited = 0.0
-    try:
-        while waited < cap_seconds:
-            before = measure()
-            if resume is None:
-                resume_slice(slice_seconds)
-            else:
-                resume()
-            waited += slice_seconds
-            if done():
-                return DONE, measure()
-            taken = measure()
-            if taken >= ticks:
-                return QUIET, taken
-            if taken == before:
-                return STALLED, taken
-        return STALLED, measure()
-    finally:
-        if counter is not None:
-            counter.delete()
+    while waited < cap_seconds:
+        before = measure()
+        if resume is None:
+            resume_slice(slice_seconds)
+        else:
+            resume()
+        waited += slice_seconds
+        if done():
+            return DONE, measure()
+        taken = measure()
+        if taken >= ticks:
+            return QUIET, taken
+        if taken == before:
+            return STALLED, taken
+    return STALLED, measure()

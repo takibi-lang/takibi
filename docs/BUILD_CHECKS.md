@@ -86,6 +86,8 @@ suffix is description; dispatch reads only the prefix.
 | `check_flag_guarded_fields.py` | optional fields are read only after their presence flags |
 | `check_gdb_bounded.py` | every gdb a lane runner starts runs under `timeout`, so a `continue` that never stops cannot hold an aggregate |
 | `check_gdb_bounded_controls.py` | Controls for the bounded-gdb check, in both directions |
+| `check_secondary_tick_count_layout.py` | `secondary_tick_count` is one 8-byte AtomicWord per core, the layout the gdb tick read (`scripts/gdb_tick_count.py`) steps through (#865, #867) |
+| `check_secondary_tick_count_layout_controls.py` | Controls for the secondary_tick_count layout check, in both directions |
 | `check_gdb_wallclock_continue.py` | a gdb Python check resumes the guest under a host-time interrupt only in a slice primitive its callers bound by guest progress (`scripts/gdb_progress.py`), or a `gdb-wallclock-waiver:` comment says why not (#865) |
 | `check_gdb_wallclock_continue_controls.py` | Controls for the gdb wall-clock continue check, in both directions |
 | `check_gdb_scheduler_locking.py` | a gdb stage that turns scheduler-locking on first parks the vCPUs it leaves frozen (`takibi-park-threads`), or a `scheduler-locking-waiver:` comment says why not (#795) |

@@ -49,7 +49,7 @@ import gdb
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from gdb_interrupt import interrupt_after  # noqa: E402
-from gdb_progress import TickCounter  # noqa: E402
+from gdb_progress import tick_progress  # noqa: E402
 
 NO_STOP_STATUS = 3
 PARK_STEP_SECONDS = 3.0
@@ -140,16 +140,14 @@ class BoundedContinue(gdb.Command):
         current = gdb.selected_thread()
         running = ((current.num,) if gdb.parameter("scheduler-locking") == "on"
                    else tuple(t.num for t in gdb.selected_inferior().threads()))
-        ticks = TickCounter(running)
-        try:
-            for _ in range(BOUNDED_SLICES):
-                before = ticks.least()
-                if _continue_until_breakpoint(seconds):
-                    return
-                if ticks.least() == before:
-                    break
-        finally:
-            ticks.delete()
+        # Read between slices, never counted by a breakpoint (#871).
+        ticks = tick_progress(running)
+        for _ in range(BOUNDED_SLICES):
+            before = ticks()
+            if _continue_until_breakpoint(seconds):
+                return
+            if ticks() == before:
+                break
         _diagnose_and_quit(
             f"takibi-bounded-continue: no breakpoint within {seconds:g} s "
             "with no scheduler tick on some running vCPU, or within "
