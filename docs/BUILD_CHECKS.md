@@ -111,6 +111,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_typed_markers.py` | no console driver types `echo WORD` with WORD unquoted: an awaited output marker is typed through `scripts/typed_marker.py` so a workload-split echo of the command can never be the marker line (#856, #857) |
 | `check_typed_markers_controls.py` | the old #856/#857 driver spellings, names, byte-at-a-time loops and unseen words are refused; quoted, redirected and bare echoes and str file writes pass |
 | `check_gem_tx_fixture_controls.py` | Physical GEM ownership and IRQ evidence refuses stale verdicts, missing or corrupt frames, incorrect authorities, incomplete timestamps and missing or wrong-bank IRQ witnesses |
+| `check_rpi5_postmortem_controls.py` | The GEM fixture runner and the shell smoke take #869's SWD snapshot before one BREAK and the full DDB walk after a post-load failure (#872), and nothing before the load |
 | `check_rpi5_shell_smoke_controls.py` | Interactive RPi5 shell smoke checks two HTTP responses, fresh HTTPd process snapshots and optional bulk measurement completion; absent readiness, echoed markers, extra workers and bad responses fail |
 | `check_kernel_http_peer_controls.py` | Delayed replies from earlier HTTP phases cannot answer a new handshake; malformed current replies still fail |
 | `check_kernel_net_wait_controls.py` | UART progress renews readiness waits; silence and the outer ceiling still fail, with bounded DDB protection |
