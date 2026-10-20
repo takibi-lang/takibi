@@ -127,6 +127,9 @@ def validate_irq(text, frames, mode):
 def run_case(mode, device, directory, interface):
     import serial
     directory.mkdir(parents=True, exist_ok=True)
+    # A previous run's postmortem would read as this run's (#872).
+    for stale in ('ddb-postmortem.log', 'swd-snapshot.log'):
+        (directory / stale).unlink(missing_ok=True)
     source_elf = ROOT / f'kernel/build/rpi5/kernel-gem-tx-fixture-{mode}.elf'
     elf = directory.resolve() / 'kernel.elf'
     elf.write_bytes(source_elf.read_bytes())
@@ -221,7 +224,10 @@ def run_case(mode, device, directory, interface):
             # GitHub issue #872: a fixture that fails after the load used to
             # leave only its UART log. Take #869's SWD snapshot and DDB walk
             # while the kernel still runs; the capture thread stops first so
-            # the walk reads its own answers.
+            # the walk reads its own answers. On 2026-10-20 an induced
+            # failure got all four cores over SWD but no DDB prompt: the
+            # fixture parks core 0 in workload_profile_interrupt_wait during
+            # boot, so the snapshot is the evidence and the walk a bonus.
             stop.set()
             reader.join(timeout=1)
             result['postmortem'] = rpi5_postmortem.collect(

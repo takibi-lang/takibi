@@ -192,6 +192,8 @@ def main():
     except (OSError, RuntimeError) as error:
         result["error"] = str(error)
         result["postmortem"] = postmortem(session, directory, elf, str(error))
+        if result["postmortem"]:
+            print(f"[kernel/rpi5 shell smoke] {result['postmortem']}", file=sys.stderr)
         print(f"FAIL kernel/rpi5 shell smoke at {result['phase']}: {error}; artifacts: {directory}", file=sys.stderr)
         return 1
     finally:

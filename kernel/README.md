@@ -1128,7 +1128,11 @@ needed for the stopped subsystem. Current helpers are:
   `swd-snapshot.log`, and resumes them before the serial BREAK. Any failure of
   `make kernelcheck-rpi5` after the load asks the UART driver for that snapshot
   and the DDB walk (wait graph included, in `ddb-postmortem.log`), bounded at
-  60 seconds;
+  60 seconds. The GEM fixture runner and the shell smoke read the UART
+  themselves and call `scripts/rpi5_postmortem.py` for the same snapshot,
+  BREAK and walk after a post-load failure (GitHub issue #872); the GEM
+  fixtures park core 0 before DDB answers, so there the snapshot is the
+  evidence;
 - `scripts/kernel_debug_metadata.gdb`: load
   `_build/kernel-debug-metadata.json` with `takibi-debug-metadata`, then use
   `takibi-enum`, `takibi-constant`, or `takibi-variant-layout` to decode
