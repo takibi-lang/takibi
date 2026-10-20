@@ -20,6 +20,7 @@ import re
 import sys
 from pathlib import Path
 
+from pass_line import report_pass
 from source_scan import code_only
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -82,8 +83,10 @@ def main():
         for failure in failures:
             print(f"FAIL wait-interrupt-sites: {failure}")
         return 1
-    print(f"PASS wait-interrupt-sites: {sum(counts.values())} reviewed "
-          f"WaitInterrupt return(s) in {len(counts)} function(s)")
+    report_pass("wait-interrupt-sites",
+                f"{sum(counts.values())} reviewed WaitInterrupt return(s) in "
+                f"{len(counts)} function(s)",
+                functions=len(counts), returns=sum(counts.values()))
     return 0
 
 
