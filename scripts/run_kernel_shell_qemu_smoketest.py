@@ -30,7 +30,44 @@ HTTP_URL_PATTERN = re.compile(
 )
 HTTP_BODY_MARKER = b"<h1>Takibi Kernel</h1>"
 COMMAND_RESULT = b"__KERNELSH_PTY_SMOKE__"
-HTTPD_REAP_RESULT = b"__KERNELSH_HTTPD_REAP__"
+HTTPD_REAP_BEGIN = b"__KERNELSH_HTTPD_REAP_BEGIN__"
+HTTPD_REAP_END = b"__KERNELSH_HTTPD_REAP_END__"
+HTTPD_PROCESS = b"/bin/httpd -f -p 8080 -h"
+
+
+def typed_marker(marker):
+    """Spell MARKER so the echoed command line never contains it (#856).
+
+    ash echoes what the PTY types, and peer-CPU workload lines can split that
+    echo so a fragment of it lands on a line of its own.  An empty '' pair in
+    the middle keeps the typed text distinct; only echo's output is MARKER.
+    """
+    middle = len(marker) // 2
+    return marker[:middle] + b"''" + marker[middle:]
+
+
+COMMAND_LINE = b"x=; echo " + typed_marker(COMMAND_RESULT) + b"\n"
+HTTPD_REAP_LINE = (b"echo " + typed_marker(HTTPD_REAP_BEGIN) + b"; ps; echo " +
+                   typed_marker(HTTPD_REAP_END) + b"\n")
+
+
+def httpd_reap_count(normalized):
+    """Count httpd lines that ps printed between the reap markers.
+
+    Returns None until both marker lines arrived.  Only echo's output lines
+    anchor the window, so neither the echoed command line nor a workload line
+    interleaved with it can open or close the window (#856).
+    """
+    begin = b"\n" + HTTPD_REAP_BEGIN + b"\n"
+    end = b"\n" + HTTPD_REAP_END + b"\n"
+    start = normalized.find(begin)
+    if start < 0:
+        return None
+    stop = normalized.find(end, start + len(begin) - 1)
+    if stop < 0:
+        return None
+    window = normalized[start + len(begin):stop]
+    return sum(1 for line in window.splitlines() if HTTPD_PROCESS in line)
 ARTIFACT_DIR = os.path.join(REPO_ROOT, "_build", "kernelcheck-shell-qemu")
 TRANSCRIPT_PATH = os.path.join(ARTIFACT_DIR, "uart-transcript.log")
 START_TIMEOUT_SECONDS = 45
@@ -203,20 +240,16 @@ def run_one(command, http_offset):
                         startup_timing.record("shell ready", True, arrived_at)
                     if (not reap_check_sent and http_checked and ready and
                             b" # " in normalized):
-                        os.write(terminal, b"ps; echo " + HTTPD_REAP_RESULT + b"\n")
+                        os.write(terminal, HTTPD_REAP_LINE)
                         reap_check_sent = True
-                    reap_marker = b"\n" + HTTPD_REAP_RESULT + b"\n"
-                    if reap_check_sent and not reap_check_done and reap_marker in normalized:
-                        before_marker = normalized.split(reap_marker, 1)[0]
-                        process_lines = [
-                            line for line in before_marker.splitlines()
-                            if b"/bin/httpd -f -p 8080 -h" in line
-                        ]
-                        if len(process_lines) != 1:
+                    reap_marker = b"\n" + HTTPD_REAP_END + b"\n"
+                    httpd_count = httpd_reap_count(normalized) if reap_check_sent else None
+                    if not reap_check_done and httpd_count is not None:
+                        if httpd_count != 1:
                             fail(
                                 pid, transcript,
                                 "completed HTTP requests left child httpd zombies "
-                                f"(ps showed {len(process_lines)} httpd processes)",
+                                f"(ps showed {httpd_count} httpd processes)",
                             )
                         reap_check_done = True
                     after_reap_marker = b""
@@ -234,7 +267,7 @@ def run_one(command, http_offset):
                             os.write(terminal, b"continue\n")
                         ddb_prompt_count += 1
                     if (not command_sent and b"ddb: continuing\n" in normalized):
-                        os.write(terminal, b"x=; echo " + COMMAND_RESULT + b"\n")
+                        os.write(terminal, COMMAND_LINE)
                         command_sent = True
                     if (command_sent and not stop_sent and
                             b"\n" + COMMAND_RESULT + b"\n" in normalized):

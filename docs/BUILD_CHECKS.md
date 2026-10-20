@@ -102,7 +102,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_kernel_asm_invariants_controls.py` | Controls for the SCTLR alignment-policy disassembly check |
 | `check_kernel_elf_freshness_controls.sh` | Controls for the stale-kernel guard: a lane refuses to run against a kernel older than its own sources |
 | `check_kernel_ddb_postmortem_controls.py` | Controls for the UART driver's DDB postmortem walk, with no QEMU in the room |
-| `check_console_progress_controls.py` | PTY and GDB boot waits renew on UART; fixed protocol waits, injected verdicts, marker ordering and ceilings stay bounded; churn wait observations preserve half-budget flags, EOF, errors and failure priority |
+| `check_console_progress_controls.py` | PTY and GDB boot waits renew on UART; fixed protocol waits, injected verdicts, marker ordering and ceilings stay bounded; churn wait observations preserve half-budget flags, EOF, errors and failure priority; the PTY httpd reap count reads only echo output markers, never a workload-split command echo (#856) |
 | `check_gem_tx_fixture_controls.py` | Physical GEM ownership and IRQ evidence refuses stale verdicts, missing or corrupt frames, incorrect authorities, incomplete timestamps and missing or wrong-bank IRQ witnesses |
 | `check_rpi5_shell_smoke_controls.py` | Interactive RPi5 shell smoke checks two HTTP responses, fresh HTTPd process snapshots and optional bulk measurement completion; absent readiness, echoed markers, extra workers and bad responses fail |
 | `check_kernel_http_peer_controls.py` | Delayed replies from earlier HTTP phases cannot answer a new handshake; malformed current replies still fail |

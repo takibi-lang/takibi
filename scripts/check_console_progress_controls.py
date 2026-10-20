@@ -33,6 +33,49 @@ class Clock:
             action()
 
 
+def reap_parse_cases():
+    """#856: workload lines split the echoed reap command in the 2026-10-20
+    land log; the parser must read only echo's own marker lines."""
+    path = ROOT / "scripts/run_kernel_shell_qemu_smoketest.py"
+    spec = importlib.util.spec_from_file_location("pty_reap_control", path)
+    driver = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(driver)
+    count = driver.httpd_reap_count
+    line = driver.HTTPD_REAP_LINE.rstrip(b"\n")
+    assert driver.HTTPD_REAP_BEGIN not in line and driver.HTTPD_REAP_END not in line
+    assert driver.COMMAND_RESULT not in driver.COMMAND_LINE
+    begin = b"\n" + driver.HTTPD_REAP_BEGIN + b"\n"
+    end = driver.HTTPD_REAP_END + b"\n"
+    ps_one = (b"PID   USER     TIME  COMMAND\n    1 0         0:00 init\n"
+              b"   12 0         0:00 /bin/httpd -f -p 8080 -h /www\n")
+    zombie = ps_one + b"   31 0         0:00 /bin/httpd -f -p 8080 -h /www\n"
+    # The land log's shape: a workload line split the echoed command, and
+    # the old marker's tail landed alone on a line before ps ever ran.
+    split = len(line) // 2
+    interleaved = (b" # " + line[:split] +
+                   b"inned httpd closed and shut down a connected socket\n" +
+                   line[split:] + b"\n")
+    for cut in range(len(line) + 1):
+        CASES.note()
+        echoed = b" # " + line[:cut] + b"\nworkload: x\n" + line[cut:] + b"\n"
+        assert count(echoed) is None, cut
+    CASES.note()
+    assert count(interleaved) is None
+    CASES.note()
+    assert count(interleaved + begin[1:] + ps_one) is None
+    CASES.note()
+    assert count(interleaved + begin[1:] + ps_one + end) == 1
+    CASES.note()
+    assert count(interleaved + begin[1:] + zombie + end) == 2
+    CASES.note()
+    assert count(interleaved + begin[1:] + b"workload: late line\n" + zombie + end) == 2
+    CASES.note()
+    assert count(interleaved + begin[1:] + end) == 0
+    CASES.note()
+    # An httpd line outside the window (an earlier ps) is not counted.
+    assert count(zombie + interleaved + begin[1:] + ps_one + end) == 1
+
+
 def pty_case(events, want_pass, ceiling=28.0, exit_delay=0.0):
     CASES.note()
     path = ROOT / "scripts/run_kernel_shell_qemu_smoketest.py"
@@ -55,9 +98,10 @@ def pty_case(events, want_pass, ceiling=28.0, exit_delay=0.0):
             answer = b"ddb> "
         elif data == b"continue\n":
             answer = b"ddb: continuing\n"
-        elif driver.HTTPD_REAP_RESULT in data:
-            answer = b"\n1 /bin/httpd -f -p 8080 -h /\n" + driver.HTTPD_REAP_RESULT + b"\n # "
-        elif driver.COMMAND_RESULT in data:
+        elif data == driver.HTTPD_REAP_LINE:
+            answer = (b"\n" + driver.HTTPD_REAP_BEGIN + b"\n1 /bin/httpd -f -p 8080 -h /\n" +
+                      driver.HTTPD_REAP_END + b"\n # ")
+        elif data == driver.COMMAND_LINE:
             answer = driver.COMMAND_RESULT + b"\n"
         else:
             answer = b"\nsystem stop: halt (all cores parked)\n"
@@ -312,6 +356,7 @@ def main():
              + b"persistent shell: uart blocked\n"
              + b"interactive shell: uart blocked\n" + b" # ")
     assert pty_case([(4.0, b"boot\n"), (10.0, b"boot\n"), (16.0, ready)], True) < 28.0
+    reap_parse_cases()
     progress = [(4.0, b"boot\n"), (10.0, b"boot\n"), (16.0, ready)]
     assert pty_case(progress, True, exit_delay=5.0) > 20
     assert pty_case(progress, False, exit_delay=20.0) > 30
@@ -335,7 +380,9 @@ def main():
                        "the verdict failed for another reason") == 20.0
     report_pass("console progress controls",
                 "PTY and GDB waits accept advancing UART; silence and ceilings "
-                "fail; fixed responses, marker order and injected verdicts are preserved",
+                "fail; fixed responses, marker order and injected verdicts are preserved; "
+                "the httpd reap count reads only echo's marker lines, not a split "
+                "command echo, and a second httpd still counts (#856)",
                 cases=CASES.ran)
     return 0
 
