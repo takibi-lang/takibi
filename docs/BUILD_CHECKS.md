@@ -90,6 +90,8 @@ suffix is description; dispatch reads only the prefix.
 | `check_secondary_tick_count_layout_controls.py` | Controls for the secondary_tick_count layout check, in both directions |
 | `check_gdb_wallclock_continue.py` | a gdb Python check resumes the guest under a host-time interrupt only in a slice primitive its callers bound by guest progress (`scripts/gdb_progress.py`), or a `gdb-wallclock-waiver:` comment says why not (#865) |
 | `check_gdb_wallclock_continue_controls.py` | Controls for the gdb wall-clock continue check, in both directions |
+| `check_qmp_reply_reads.py` | a QMP client in scripts/ reads no command reply raw after the capability negotiation: replies go through `scripts/qmp_wire.py` qmp_reply, which skips async events (#879, #880) |
+| `check_qmp_reply_reads_controls.py` | Controls for the QMP reply-read check, and each QMP client against a fake QMP that sends an event before every reply |
 | `check_gdb_scheduler_locking.py` | a gdb stage that turns scheduler-locking on first parks the vCPUs it leaves frozen (`takibi-park-threads`), or a `scheduler-locking-waiver:` comment says why not (#795) |
 | `check_gdb_scheduler_locking_controls.py` | Controls for the scheduler-locking park check, in both directions |
 | `check_gdb_no_guest_memory_read.py` | a gdb check script decides from registers, not guest memory read through whatever translation the stopped CPU has active (#585) |
