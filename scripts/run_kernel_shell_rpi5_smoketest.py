@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import pty
+import select
 import signal
 import sys
 import time
@@ -15,6 +16,8 @@ from await_timing import AwaitTiming
 from run_kernel_churn import Session, FailureMarker, has_prompt, terminate
 from measure_kernel_shell_tcp import measure_bulk
 from typed_marker import typed_marker
+import rpi5_postmortem
+from run_kernel_shell_console import BREAK_HINT
 
 ROOT = Path(__file__).resolve().parent.parent
 LISTENER = b"persistent server: listener ready port=8080"
@@ -31,6 +34,9 @@ BULK_LINE = b"echo " + typed_marker(BULK_DONE) + b"\n"
 BOOT_SECONDS = 180
 COMMAND_SECONDS = 20
 EXIT_SECONDS = 15
+# The console prints this once miniterm owns the UART, after the SWD load:
+# from then on Ctrl-T b is the BREAK path (scripts/run_kernel_shell_console.py).
+CONSOLE_UP = BREAK_HINT.encode("ascii")
 
 
 def shell_ready(text):
@@ -112,6 +118,27 @@ def run(session, directory, url, note_phase=lambda _phase: None, *, elf_sha256=N
     return "console-exit"
 
 
+def postmortem(session, directory, elf, reason):
+    """GitHub issue #872: #869's SWD snapshot and DDB walk through miniterm."""
+    if CONSOLE_UP not in session.transcript:
+        return None
+
+    def read():
+        readable, _, _ = select.select([session.terminal], [], [], 0.25)
+        if not readable:
+            return b""
+        try:
+            data = os.read(session.terminal, 4096)
+        except OSError:
+            return b""
+        session.transcript.extend(data)
+        return data
+
+    return rpi5_postmortem.collect(elf, directory, reason,
+                                   send_break=lambda: session.send(b"\x14b"),
+                                   write=session.send, read=read)
+
+
 def main():
     default_directory = Path(os.environ.get("TAKIBI_LANE_ARTIFACT_ROOT", ROOT / "_build")) / "kernel-shell-smoke-rpi5"
     directory = Path(os.environ.get("KERNEL_RPI5_SHELL_SMOKE_ARTIFACT_DIR", default_directory)).resolve()
@@ -119,7 +146,8 @@ def main():
     # The shell launcher truncates its own UART capture. Remove only this
     # driver's previous results so a failed attempt cannot retain old verdicts.
     for pattern in ("http-*", "bulk-*", "ps-*.log", "await-*.jsonl", "result.json",
-                    "uart-transcript.log", "network-peer.log", "terminal.log"):
+                    "uart-transcript.log", "network-peer.log", "terminal.log",
+                    "ddb-postmortem.log", "swd-snapshot.log"):
         for path in directory.glob(pattern):
             path.unlink()
     elf = ROOT / "kernel/build/rpi5/kernel-shell.elf"
@@ -163,6 +191,7 @@ def main():
         raise RuntimeError("Ctrl-] did not exit the shell launcher within 15s")
     except (OSError, RuntimeError) as error:
         result["error"] = str(error)
+        result["postmortem"] = postmortem(session, directory, elf, str(error))
         print(f"FAIL kernel/rpi5 shell smoke at {result['phase']}: {error}; artifacts: {directory}", file=sys.stderr)
         return 1
     finally:

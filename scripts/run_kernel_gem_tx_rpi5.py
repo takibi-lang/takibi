@@ -14,6 +14,8 @@ import sys
 import threading
 import time
 
+import rpi5_postmortem
+
 ROOT = Path(__file__).resolve().parent.parent
 MODES = ('confirmed-ready', 'confirmed-reply', 'unconfirmed-ready', 'unconfirmed-reply')
 BOARD = bytes.fromhex('020020000002')
@@ -142,6 +144,7 @@ def run_case(mode, device, directory, interface):
     result['control'] = ('primary bank vs wrong additional-queue enable; real completions' if irq else result['control'])
     network = None
     reader = None
+    loaded = False
     started = time.monotonic()
     uart = serial.Serial(device, 115200, timeout=0.1)
     try:
@@ -181,6 +184,7 @@ def run_case(mode, device, directory, interface):
                 print(f'[kernel/rpi5 gem-tx] {mode}: {phase}', flush=True)
                 with (directory / f'{phase}.log').open('w') as output:
                     subprocess.run(command, cwd=ROOT, stdout=output, stderr=subprocess.STDOUT, check=True)
+                loaded = phase == 'load'
             deadline = time.monotonic() + 180
             while time.monotonic() < deadline:
                 text = bytes(transcript).replace(b'\r', b'')
@@ -213,6 +217,17 @@ def run_case(mode, device, directory, interface):
         print(f'PASS kernel/rpi5 gem-tx: {mode}; {detail}', flush=True)
     except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as error:
         result['error'] = str(error)
+        if loaded:
+            # GitHub issue #872: a fixture that fails after the load used to
+            # leave only its UART log. Take #869's SWD snapshot and DDB walk
+            # while the kernel still runs; the capture thread stops first so
+            # the walk reads its own answers.
+            stop.set()
+            reader.join(timeout=1)
+            result['postmortem'] = rpi5_postmortem.collect(
+                elf, directory, str(error), send_break=lambda: uart.send_break(0.25),
+                write=uart.write, read=lambda: uart.read(4096))
+            print(f'[kernel/rpi5 gem-tx] {mode}: {result["postmortem"]}', flush=True)
         raise
     finally:
         if network is not None and network.poll() is None:

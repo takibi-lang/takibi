@@ -36,6 +36,9 @@ LABEL = f"[kernel/{PLATFORM}]"
 # retry loop existed, like a hard failure with no way to tell "QEMU was just
 # slow to bind" apart from "QEMU crashed on startup" from the log alone.
 OPEN_RETRY_TIMEOUT_SECONDS = 10
+# Printed once miniterm owns the UART. The RPi5 shell smoke waits for it
+# before it sends its own Ctrl-T b for a postmortem (GitHub issue #872).
+BREAK_HINT = "Ctrl-T then b sends a 250 ms serial BREAK for DDB"
 OPEN_RETRY_INTERVAL_SECONDS = 0.2
 
 
@@ -349,8 +352,7 @@ def main() -> int:
     terminal.set_tx_encoding("UTF-8")
     terminal.exit_character = chr(0x1D)
     print(
-        f"{LABEL} controls: Ctrl-] exits; Ctrl-T then b sends a 250 ms "
-        "serial BREAK for DDB",
+        f"{LABEL} controls: Ctrl-] exits; {BREAK_HINT}",
         file=sys.stderr,
         flush=True,
     )
