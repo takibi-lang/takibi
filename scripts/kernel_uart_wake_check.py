@@ -205,13 +205,15 @@ def answered(text: bytes) -> bool:
 class Counter(gdb.Breakpoint):
     """Counts passes without stopping the guest."""
 
-    def __init__(self, spec: str):
+    def __init__(self, spec: str, limit: int = 0):
         super().__init__(spec, internal=True)
         self.count = 0
+        self.limit = limit
 
     def stop(self) -> bool:
+        """Stops only on reaching a nonzero limit."""
         self.count += 1
-        return False
+        return self.limit != 0 and self.count >= self.limit
 
 
 # GitHub issue #757: at four vCPUs, a locked step froze CPU2 and CPU3
@@ -271,6 +273,10 @@ def continue_bounded(threads_locked: bool) -> None:
 # kernel_process_block_net entry (their callers hold no lock), CPU0 at
 # timer_irq_handler entry (every kernel lock masks interrupts).
 STEP_PROGRESS_CAP = 180.0
+# The NetRx wait is due three ticks after it blocks
+# (kernel_process_block_net); the peer net stage gives CPU1 several times
+# that many of its own ticks before it calls the waiter left asleep (#864).
+PEER_NET_WAKE_TICKS = 12
 
 
 def continue_until_hit(bp, thread: int, threads_locked: bool) -> None:
@@ -447,16 +453,38 @@ def run_peer_net_wake(connection: socket.socket) -> None:
     # From here CPU0 stays stopped. CPU1's tick entering the wake of a due
     # record on its own list is the property; running the woken waiter is
     # the scheduler's business and is checked after CPU0 is released.
+    #
+    # GitHub issue #864: the stage is bounded by CPU1's own ticks, not by
+    # host seconds. Under host load three wall-clock continues once ended
+    # before CPU1 took the three ticks the NetRx wait is due after. Keep
+    # continuing while CPU1's tick count (kernel_secondary_timer_schedule:
+    # a secondary's tick never enters timer_irq_handler) grows; stop at
+    # PEER_NET_WAKE_TICKS
+    # of them, or when one STEP_TIMEOUT passes with no new tick.
     resumed = gdb.Breakpoint("kernel_process_tick_wake_one")
     resumed.condition = f"$_thread == {CPU1_THREAD}"
+    ticks = Counter("kernel_secondary_timer_schedule", PEER_NET_WAKE_TICKS)
+    ticks.condition = f"$_thread == {CPU1_THREAD}"
     gdb.execute(f"thread {CPU1_THREAD}", to_string=True)
-    for _ in range(3):
-        if resumed.hit_count:
-            break
+    waited = 0.0
+    while resumed.hit_count == 0 and ticks.count < PEER_NET_WAKE_TICKS \
+            and waited < STEP_PROGRESS_CAP:
+        before = ticks.count
         continue_bounded(True)
+        waited += STEP_TIMEOUT
+        if resumed.hit_count == 0 and ticks.count == before:
+            break
     woken = resumed.hit_count >= 1
+    taken = ticks.count
     resumed.delete()
+    ticks.delete()
     gdb.execute("set scheduler-locking off")
+    if not woken and taken < PEER_NET_WAKE_TICKS:
+        gdb.execute("detach")
+        verdict(False, f"CPU1 took only {taken} of {PEER_NET_WAKE_TICKS} "
+                "ticks while CPU0 was stopped and stalled; the stage could "
+                "not tell whether its tick wakes the NetRx waiter")
+        return
     if control:
         gdb.execute("detach")
         if woken:
