@@ -388,11 +388,28 @@ fn kernel_secondary_tick(frame: sink FrameRef[process], lower_el: bool, is_timer
 // frequencies (54 MHz on RPi5) and a fixed spin count would be a different
 // duration on each. The secondary's tick period is CNTFRQ >> 6, so a
 // window of CNTFRQ >> 4 covers several ticks with margin.
+//
+// GitHub issue #851: that margin holds only once the secondary's timer is
+// armed. The core publishes that it started (kernel_secondary_main) BEFORE
+// it sets up its GIC interface and timer, and the first tick comes one tick
+// period after that, so a window opened right at "started" also had to
+// contain the secondary's whole setup path. On the unoptimized debug build
+// under host load that path alone outlasted the window (core 1, idle but
+// no ticks). So first wait, unmasked and up to one second -- the same
+// deadline the start wait uses -- for the secondary's first tick, which
+// proves only that its timer is armed; the masked window then asks the
+// independence question about a timer already running.
 fn secondary_ticks_independent_for(
         core: {0..<KERNEL_MAX_CORES as usize}) -> bool !{unsafe} {
     // core-role: the probe asks whether a SECONDARY ticks while core 0 masks;
     // core 0 is the asker
     if (core == 0) { return false; }
+    let armed_from: usize = secondary_tick_value_for(core);
+    let armed_start: i64 = read_cntpct();
+    let armed_deadline: i64 = read_cntfrq();
+    while (secondary_tick_value_for(core) == armed_from) {
+        if (read_cntpct() - armed_start >= armed_deadline) { return false; }
+    }
     let window: i64 = read_cntfrq() >> 4;
     disable_irq();
     let before: usize = secondary_tick_value_for(core);
