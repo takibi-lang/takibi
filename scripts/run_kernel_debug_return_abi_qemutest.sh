@@ -90,7 +90,9 @@ stop_qemu() {
 cleanup_and_archive() {
     local status=$?
     stop_qemu
-    if [ "$status" -ne 0 ]; then
+    # A substituted sidecar is a counterfactual run, which is meant to fail;
+    # run_kernel_debug_return_abi_counterfactual.py judges it.
+    if [ "$status" -ne 0 ] && [ -z "${DEBUG_RETURN_ABI_METADATA:-}" ]; then
         KERNEL_QEMU_LABEL="kernel-debug-return-abi-qemu" KERNEL_QEMU_ELF="${ELF:-unknown}" \
             bash "$REPO_ROOT/scripts/archive_kernel_failure.sh" "$ARTIFACT_DIR" \
             "$REPO_ROOT/_build/kernel-debug-return-abi-qemu-failures" "exit status $status" || true
