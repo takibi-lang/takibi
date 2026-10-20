@@ -29,6 +29,9 @@ DEFINITION = re.compile(r'^(?:private\s+)?(?:inline\s+|noinline\s+)?fn\s+(\w+)\s
 
 def sources():
     paths = sorted(Path('kernel/kernel').glob('*_contention_evidence.tkb'))
+    # GitHub issue #859: the IRQ-count fixture's per-SGI wait was a fixed
+    # CNTPCT window outside this list.
+    paths.append(Path('kernel/kernel/irq_counts.tkb'))
     paths += [Path('kernel/kernel/occupancy_drain_evidence.tkb'),
               Path('kernel/kernel/fd_table.tkb'),
               Path('kernel/lib/peer_tick_window.tkb'),
