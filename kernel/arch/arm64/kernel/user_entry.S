@@ -1,6 +1,7 @@
 /* EL1/EL0 transition and register-frame mechanics only. Syscall policy and
- * process lifetime remain in Takibi. run_initial_user returns to its EL1
- * caller after exit, so linear VM/page owners stay live on that call frame.
+ * process lifetime remain in Takibi. Every EL0 entry, PID 1's first one
+ * included (GitHub issue #831), resumes a saved frame through the generated
+ * el0_context_resume; nothing here builds a first entry of its own.
  */
     .include "kernel/arch/arm64/kernel/exception_context.inc"
 
@@ -32,38 +33,6 @@ user_code_sync:
     dsb     ish
     isb
     ret
-
-    .global run_initial_user
-    .type run_initial_user, %function
-run_initial_user:
-    sub     sp, sp, #96
-    stp     x19, x20, [sp, #0]
-    stp     x21, x22, [sp, #16]
-    stp     x23, x24, [sp, #32]
-    stp     x25, x26, [sp, #48]
-    stp     x27, x28, [sp, #64]
-    stp     x29, x30, [sp, #80]
-    /* GitHub issue #229: the same ELR_EL1/SPSR_EL1-vs-eret window
-     * EXC_CONTEXT_RESTORE closes exists here too, and this path is reached
-     * with DAIF.I unmasked -- kernel/platform/rpi5/intc.tkb's
-     * platform_irq_init() runs its one global enable_irq() long before
-     * kernel/platform/rpi5/init.tkb gets here. An interrupt between these three msr
-     * instructions and the eret would return the EL0 image to EL1h, or to a
-     * kernel .text address, instead of to x0. EL0's own interrupt state is
-     * unaffected: it comes from the SPSR value written below, not from
-     * PSTATE.DAIF at the eret. */
-    msr     DAIFSet, #0x2
-    msr     sp_el0, x1
-    /* A new image must not inherit thread-local state from whichever EL0
-     * image last returned through this shared entry path. Its C runtime
-     * installs its own thread pointer during startup. */
-    msr     tpidr_el0, xzr
-    /* EL0t with IRQ delivery enabled. The Lower-EL IRQ vector saves the
-     * complete context before any scheduler decision. */
-    mov     x2, #0
-    msr     spsr_el1, x2
-    msr     elr_el1, x0
-    eret
 
     .global el0_sync_body
     .type el0_sync_body, %function
@@ -126,8 +95,6 @@ el0_sync_body:
     b.eq    .Lsyscall_block
     cmp     x6, #6
     b.eq    .Lsyscall_wait_interrupt
-    cmp     x6, #7
-    b.eq    .Lsyscall_exec
     cmp     x6, #8
     b.eq    .Lsyscall_child_exec
     cmp     x6, #9
@@ -201,16 +168,6 @@ el0_sync_body:
     wfe
     b       .Lsyscall_dispatch
 
-.Lsyscall_exec:
-    // GitHub issue #221 Step 7: byte-identical to .Lsyscall_exit below --
-    // neither calls any kernel_process_* logic that a second competing
-    // write path could race with (unlike Steps 2-6), so there is no bug
-    // class here for a .tkb migration to make unreachable. The one real
-    // improvement available is deduplicating the two copies of this
-    // sequence, which el1_return_from_syscall below does.
-    mov     x0, x7
-    b       el1_return_from_syscall
-
 .Lsyscall_child_exec:
     // GitHub issue #221 Step 5: moved to kernel_syscall_child_exec_return
     // (.tkb) -- this is the exact bug fixed in commit 8db27e3 (see that
@@ -228,26 +185,13 @@ el0_sync_body:
     b       kernel_syscall_resume_return
 
 .Lsyscall_exit:
+    // GitHub issue #831: only PID 1 exits through here -- every other
+    // process has a parent and leaves through .Lsyscall_clone_parent. PID 1
+    // has no EL1 caller to return to any more (it starts from a saved frame
+    // on its own kernel stack), and its exit stops the kernel, as Linux's
+    // "Attempted to kill init" does.
     mov     x0, x7
-    // fall through
-
-// The single shared "return to run_initial_user's EL1 caller" tail, reached
-// by both .Lsyscall_exit (action 2: parent exit) and .Lsyscall_exec (action
-// 7: parent-only execve pending) with x0 already set to the value each wants
-// to return. Pops exactly the frame run_initial_user's own prologue pushed,
-// so this must run on the same EL1 kernel stack that call was made from,
-// which is always true here: nothing between el0_sync_entry and this point
-// ever switches away from it.
-el1_return_from_syscall:
-    add     sp, sp, #EXC_CONTEXT_SIZE
-    ldp     x19, x20, [sp, #0]
-    ldp     x21, x22, [sp, #16]
-    ldp     x23, x24, [sp, #32]
-    ldp     x25, x26, [sp, #48]
-    ldp     x27, x28, [sp, #64]
-    ldp     x29, x30, [sp, #80]
-    add     sp, sp, #96
-    ret
+    b       kernel_syscall_init_exit
 
     .global el0_context_set_x0
 el0_context_set_x0:
@@ -448,6 +392,16 @@ kernel_idle_block_enter:
 kernel_idle_tick_enter:
     msr     DAIFSet, #0x2
     adr     x5, kernel_idle_tick_reenter
+    b       .Lidle_stack
+
+/* GitHub issue #831: main()'s end. Core 0 leaves its boot stack for its
+ * idle stack, as every other leave does, once the boot context has been
+ * given back and PID 1 published (kernel_process_boot_handoff). */
+    .global kernel_idle_boot_enter
+    .type kernel_idle_boot_enter, %function
+kernel_idle_boot_enter:
+    msr     DAIFSet, #0x2
+    adr     x5, kernel_idle_boot_reenter
     b       .Lidle_stack
 
     .global kernel_idle_exit_enter

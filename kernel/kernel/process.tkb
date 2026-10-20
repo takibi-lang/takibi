@@ -599,6 +599,9 @@ private let mut scheduled_process_boot_generation: usize = 0;
 // initial userspace image is ready; after the one-way publication, normal
 // affinity policy applies to every pooled process.
 private let mut scheduled_process_peer_dispatch_enabled: bool = false;
+// GitHub issue #831: main() has given its boot context back and PID 1 is
+// published; the boot core's idle loop may start it.
+private let mut scheduled_process_boot_handed_off: bool = false;
 
 // Reached only when a slot address names no live record. A real struct
 // rather than a null pointer so the impossible case is harmless instead of
@@ -3185,6 +3188,23 @@ private fn scheduled_process_park_stack_run(
     }
 }
 
+// The pages the parked run holds: a whole run, or none. The boot suite's
+// page check leaves them out on both sides of its comparison, because which
+// side of the baseline a run happens to be parked on is the allocator's
+// business: PID 1 takes the run the boot probes parked (GitHub issue #831),
+// and a child reaped later parks another.
+fn kernel_process_spare_stack_run_pages() -> usize {
+    let guard = scheduled_process_spare_lock(
+        &scheduled_process_spare.mutex);
+    let pages: usize = match place_borrow(guard, &scheduled_process_spare.mutex,
+            scheduled_process_spare.value) {
+        Place::Empty => { 0 }
+        Place::Full(run) => { KERNEL_STACK_RUN_PAGES }
+    };
+    scheduled_process_spare_unlock(guard, &scheduled_process_spare.mutex);
+    return pages;
+}
+
 // The parked run, unless the calling CPU is still standing on it.
 private fn scheduled_process_take_spare_stack_run()
         -> Place(exists run: usize. PageRunOwner[run]) !{unsafe} {
@@ -3501,8 +3521,14 @@ private fn scheduled_process_alloc_finish(address: RegionHeld(ProcessRecord),
     scheduled_process_record_owned(creating).stack_owner_cpu =
         PROCESS_STACK_UNOWNED;
     // GitHub issue #392: the one place a pid is minted. Past every branch
-    // that can still refuse the slot.
-    scheduled_process_record_owned(creating).pid = scheduled_process_mint_pid();
+    // that can still refuse the slot. The boot context is pid 0, as Linux's
+    // swapper is, and takes no number: PID 1 is the first process minted
+    // after the last reset (GitHub issue #831).
+    if (process_slot_is_boot(address)) {
+        scheduled_process_record_owned(creating).pid = 0;
+    } else {
+        scheduled_process_record_owned(creating).pid = scheduled_process_mint_pid();
+    }
     scheduled_process_record_owned(creating).session_id = 0;
     let counter_frequency: usize = read_cntfrq() as usize;
     let tick_divisor: usize = counter_frequency / 100;
@@ -3734,6 +3760,72 @@ private fn scheduled_process_cancel_clone(
     scheduled_process_state_drop(state);
     process_state_exit(&scheduled_process_record_owned(owner).state);
     return scheduled_process_exited_state(owner);
+}
+
+// GitHub issue #831: PID 1 is an ordinary pooled process. The boot driver
+// creates it Constructing, exactly as a clone child starts out, with its own
+// kernel stack, address-space root, image record and fd context; maps
+// /bin/busybox.static into that root; and publishes it Ready with a first
+// frame on its own kernel stack. Whichever CPU's idle loop finds it then
+// starts it, as it starts every other Ready process -- core 0's included,
+// which reaches that loop when main() hands off (kernel_process_boot_handoff).
+must_use variant InitProcessCreateResult {
+    Full;
+    Created(ProcessHandle);
+}
+
+fn kernel_process_init_create() -> InitProcessCreateResult !{unsafe} {
+    match scheduled_process_alloc_pending(false) {
+        ScheduledPooledProcessAllocResult::Full => {
+            return InitProcessCreateResult::Full;
+        }
+        ScheduledPooledProcessAllocResult::Allocated(pooled) => {
+            return InitProcessCreateResult::Created(
+                scheduled_pooled_process_handle(pooled));
+        }
+    }
+}
+
+// The slot word every per-process table keys the new process by: its root,
+// image record and fd context.
+fn kernel_process_init_slot(handle: ProcessHandle) -> usize {
+    return process_slot_word(handle.pool_index);
+}
+
+// The first frame goes at the top of PID 1's own stack, and the record
+// becomes Ready with that frame saved and the stack owned by no CPU. False
+// when the record is no longer the Constructing one this handle names.
+fn kernel_process_init_publish(handle: ProcessHandle, entry: usize,
+                               stack: usize) -> bool !{unsafe} {
+    let slot: usize = process_slot_word(handle.pool_index);
+    let bottom: usize = kernel_stack_bottom(slot);
+    if (bottom == 0) { return false; }
+    let frame = frame_ref_from_saved(
+        bottom + KERNEL_PROCESS_STACK_SIZE - EXC_CONTEXT_SIZE,
+        handle.generation);
+    frame_initial_user(frame, entry, stack);
+    let guard = process_run_lock();
+    match scheduled_process_constructing_take(guard, handle) {
+        ScheduledProcessConstructingTakeResult::Missing => {
+            process_run_unlock(guard);
+            return false;
+        }
+        ScheduledProcessConstructingTakeResult::Constructing(resources) => {
+            let (owner, constructing) = resources;
+            scheduled_process_state_drop(constructing);
+            scheduled_process_record_owned(owner).saved_sp =
+                frame_ref_address(frame);
+            scheduled_process_record_owned(owner).stack_owner_cpu =
+                PROCESS_STACK_UNOWNED;
+            // Its image is an installed exec image, as a child's is after
+            // its first exec, so its own exec tears that image down.
+            scheduled_process_record_owned(owner).exec_image_live = true;
+            process_state_publish(&scheduled_process_record_owned(owner).state);
+            scheduled_process_owner_drop(owner);
+        }
+    }
+    process_run_unlock(guard);
+    return true;
 }
 
 fn scheduled_process_exited_take(guard: borrow ProcessRunGuard[lock],
@@ -5228,6 +5320,25 @@ fn kernel_process_execution_reset() !{changes_witness_ProcessCurrent} {
     }
 }
 
+// GitHub issue #831 (maintainer decision 2026-10-20, item 2-1 A): main()'s
+// boot work ends here, as Linux's rest_init ends in cpu_startup_entry. The
+// boot context stops being core 0's current process and is given back, and
+// core 0 selects the kernel's own root. The caller then leaves the boot
+// stack for core 0's idle loop (kernel_idle_boot_enter), where PID 1,
+// already published Ready, is started like any other process; that first
+// start opens dispatch on every core (kernel_process_secondary_start).
+fn kernel_process_boot_handoff() !{unsafe, changes_witness_ProcessCurrent} {
+    execution_state[execution_cpu_index()].scheduler_enabled = false;
+    execution_state[execution_cpu_index()].reschedule_pending = false;
+    let guard = process_run_lock();
+    execution_state[execution_cpu_index()].current_live = false;
+    execution_state[execution_cpu_index()].stack_live = false;
+    scheduled_process_slot_remove(guard, 0);
+    scheduled_process_boot_handed_off = true;
+    process_run_unlock(guard);
+    process_image_activate_root(address_space_boot_root());
+}
+
 fn kernel_process_request_reschedule() {
     if (execution_state[execution_cpu_index()].scheduler_enabled) {
         execution_state[execution_cpu_index()].reschedule_pending = true;
@@ -5406,32 +5517,19 @@ fn kernel_process_online_mask() -> usize {
     return mask;
 }
 
-// The boot driver's scheduler probes deliberately dismantle and rebuild the
-// process table. Once PID 1 has a complete image and is about to enter EL0,
-// every Ready pooled process may be dispatched on every online core.
-fn kernel_process_peer_dispatch_enable() {
-    let guard = process_run_lock();
-    scheduled_process_peer_dispatch_enabled = true;
-    process_run_unlock(guard);
-}
-
 // One placement answer for a real process. A syscall the gate sent to core
 // 0 pins the process there until the call completes.
 fn kernel_process_cpu_allows_slot(guard: borrow ProcessRunGuard[lock], cpu: usize, slot: usize)
         -> bool {
     if (cpu >= KERNEL_MAX_CORES) { return false; }
     let bit: {0..<KERNEL_MAX_CORES as usize} = cpu;
-    // Slot 0 is PID 1's record. During boot it can be Ready before it has a
-    // resumable EL0 frame (the scheduler probes run on core 0 standing on
-    // it), so until peer dispatch opens -- just before run_initial_user,
-    // once PID 1 has its complete image -- it stays where boot runs. From
-    // then on it is Ready only after a block or switch saved its EL0 frame,
-    // and it runs on any core its mask allows, like every other process
-    // (GitHub issue #775).
-    // core-role: boot runs on core 0, so PID 1 does too until peer dispatch
-    // opens; a call the peer-safety gate refused runs on core 0 until it
-    // completes
-    if (slot == 0 && scheduled_process_peer_dispatch_enabled == false) { return cpu == 0; }
+    // Slot 0 is the boot context the boot fixtures stand on, not a process
+    // any core may resume: it can be Ready with no EL0 frame at all, and it
+    // is given back before the first dispatch (GitHub issue #831). PID 1 is
+    // a pooled process and is placed like every other.
+    // core-role: boot runs on core 0, and so does its boot context; a call
+    // the peer-safety gate refused runs on core 0 until it completes
+    if (slot == 0) { return cpu == 0; }
     if (scheduled_process_core0_for_call(guard, slot)) { return cpu == 0; }
     let mask: usize = scheduled_process_affinity_mask(guard, slot);
     if (mask == 0) {
@@ -6078,7 +6176,15 @@ fn kernel_process_secondary_start() -> ProcessSecondaryStart {
     }
     if (execution_state[execution_cpu_index()].current_live) { return ProcessSecondaryStart::Idle; }
     let guard = process_run_lock();
-    if (scheduled_process_peer_dispatch_enabled == false) {
+    // GitHub issue #831: the boot driver's probes reset the process table,
+    // so nothing is dispatched before main() hands off. The first start
+    // after that is the boot core's: it takes PID 1 from its own idle loop,
+    // and that start opens dispatch on every core.
+    // core-role: boot runs on core 0, and so does the first process it hands
+    // to; every core dispatches from then on
+    let first_start: bool = scheduled_process_peer_dispatch_enabled == false;
+    if (first_start && (scheduled_process_boot_handed_off == false ||
+                        cpu_id() != 0)) {
         process_run_unlock(guard);
         return ProcessSecondaryStart::Idle;
     }
@@ -6090,12 +6196,9 @@ fn kernel_process_secondary_start() -> ProcessSecondaryStart {
         match cursor {
             ProcessSlotCursor::Done => { walking = false; }
             ProcessSlotCursor::At(slot) => {
-                // Slot 0 is PID 1, which any core its mask allows may run
-                // once peer dispatch is open (#775). Every idle loop
-                // takes it like any other: by the time peer dispatch
-                // is enabled, just before run_initial_user, the bootstrap has
-                // its complete image, and from then on it is Ready only after
-                // a block or a switch saved its EL0 frame. It used to be
+                // PID 1 is a pooled process since #831, and every idle loop
+                // takes it like any other process its mask allows (#775).
+                // It used to be
                 // skipped here, which left PID 1 Ready and never run once
                 // #611 put init's children on peers: a child that exits on a
                 // peer leaves its parent Ready rather than starting it, and
@@ -6115,6 +6218,9 @@ fn kernel_process_secondary_start() -> ProcessSecondaryStart {
                         ScheduledProcessReadyTakeResult::Ready(resources) => {
                             let (owner, ready) = resources;
                             let running = scheduled_process_start(owner, ready);
+                            if (first_start) {
+                                scheduled_process_peer_dispatch_enabled = true;
+                            }
                             kernel_activity_leave(activity_before);
                             process_run_unlock(guard);
                             return kernel_process_secondary_start_reserved(
@@ -8936,6 +9042,8 @@ fn kernel_process_trace_block_wake_probe() -> bool !{unsafe} {
         (kernel_process_trace_probe_child_frame as *usize) as usize,
         kernel_process_entry_generation());
     let mut setup_ok: bool = false;
+    // The boot context's pid, 0 since #831, and its first child's.
+    let parent_pid: usize = kernel_process_current_pid();
     let ProcessRunningHere::Running(parent_authority) = process_running_here() else {};
     match kernel_process_clone_begin(parent_authority, 0x11, 0) {
         ProcessCloneResult::Invalid(retained) => { process_current_end(retained); }
@@ -8943,7 +9051,7 @@ fn kernel_process_trace_block_wake_probe() -> bool !{unsafe} {
         ProcessCloneResult::ChildConstructing(child_authority) => {
             let child_pid: usize = kernel_process_current_pid();
             let installed: bool = kernel_process_probe_installed(child_authority, parent_frame, child_frame);
-            if (child_pid == 2 &&
+            if (child_pid == parent_pid + 1 &&
                 installed &&
                 kernel_process_scheduler_probe_stack_depart() &&
                 kernel_process_scheduler_probe_stack_arrive() &&
@@ -8983,15 +9091,15 @@ fn kernel_process_trace_block_wake_probe() -> bool !{unsafe} {
             let kind: usize =
                 trace[base + KERNEL_PROCESS_TRACE_EVENT_WORD];
             if (kind == ProcessTraceBlock &&
-                trace[base + KERNEL_PROCESS_TRACE_PID_WORD] == 2 &&
-                trace[base + KERNEL_PROCESS_TRACE_PEER_PID_WORD] == 1 &&
+                trace[base + KERNEL_PROCESS_TRACE_PID_WORD] == parent_pid + 1 &&
+                trace[base + KERNEL_PROCESS_TRACE_PEER_PID_WORD] == parent_pid &&
                 trace[base + KERNEL_PROCESS_TRACE_STATE_WORD] == 3 &&
                 trace[base + KERNEL_PROCESS_TRACE_WAIT_REASON_WORD] == 1) {
                 saw_block = true;
             }
             if (kind == ProcessTraceWake &&
-                trace[base + KERNEL_PROCESS_TRACE_PID_WORD] == 2 &&
-                trace[base + KERNEL_PROCESS_TRACE_PEER_PID_WORD] == 1 &&
+                trace[base + KERNEL_PROCESS_TRACE_PID_WORD] == parent_pid + 1 &&
+                trace[base + KERNEL_PROCESS_TRACE_PEER_PID_WORD] == parent_pid &&
                 trace[base + KERNEL_PROCESS_TRACE_STATE_WORD] == 1 &&
                 trace[base + KERNEL_PROCESS_TRACE_WAIT_REASON_WORD] == 0) {
                 saw_wake = true;
@@ -9894,7 +10002,14 @@ fn kernel_process_parent_is_root(current_authority: borrow ProcessCurrent[curren
             .has_parent == false) { return false; }
     let mut parent: ProcessHandle =
         scheduled_process_record_current(current_authority).parent;
-    return process_slot_is_boot(parent.pool_index);
+    // GitHub issue #831: the root of the process tree is the process with no
+    // parent -- PID 1, or the boot context during the boot fixtures -- not a
+    // particular slot.
+    let guard = process_run_lock();
+    let root: bool = scheduled_process_handle_matches(parent) &&
+        scheduled_process_record_of_locked(guard, parent).has_parent == false;
+    process_run_unlock(guard);
+    return root;
 }
 
 // The current process's parent pid, sampled under ProcessRunGuard when the
@@ -11310,7 +11425,9 @@ fn kernel_process_parent_is_root_locked(guard: borrow ProcessRunGuard[lock]) -> 
     let record = scheduled_process_record_locked(guard, slot);
     if (record.has_parent == false) { return false; }
     let mut parent: ProcessHandle = record.parent;
-    return process_slot_is_boot(parent.pool_index);
+    // GitHub issue #831: the root is the process with no parent, as above.
+    return scheduled_process_handle_matches(parent) &&
+        scheduled_process_record_of_locked(guard, parent).has_parent == false;
 }
 
 fn kernel_process_current_set_pending_block_locked(

@@ -46,9 +46,11 @@ and the development container verifies the response with real `curl`.
 The EL0 exception frame preserves general-purpose registers, q0-q31, FPSR,
 FPCR, and the TPIDR_EL0 thread pointer across syscalls -- musl derives errno
 from TPIDR_EL0, so a context switch that leaves another process's thread
-pointer live sends the next errno write into an unrelated mapping. Process
-exit returns to the owning EL1 call frame so the complete address space can be
-unmapped and reclaimed.
+pointer live sends the next errno write into an unrelated mapping. An exited
+process's address space is unmapped and reclaimed when its parent reaps it.
+PID 1 is an ordinary pooled process started from a saved first frame on its
+own kernel stack; it has no parent, and its exit stops the kernel, as Linux's
+"Attempted to kill init" does.
 
 Address-space backing writes require a borrowed
 `AddressSpaceBackingExists[slot]` produced by successful lookup or publication.

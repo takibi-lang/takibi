@@ -200,10 +200,14 @@ console_driver_pid=$!
 
 # Fault injection is the sole GDB role before the oops. It enables the
 # debugger-owned boot-test trace switch before process setup, then stops at
-# run_initial_user, where x0 is the mapped EL0 entry, and replaces only that
-# first user instruction. Disable that breakpoint before resuming: another
-# process may enter the same routine first on a slower host, and treating that
-# stop as the evidence entry makes the following frame write miss silently.
+# the boot hand-off and, after it, at core 0's first el0_context_resume: that
+# is PID 1's first entry (GitHub issue #831: core 0's idle loop starts PID 1
+# from its saved first frame, and no other core dispatches before it). x0 is
+# that frame, PID 1's root is active, and the frame's ELR_EL1 word (offset
+# 0x100) is the mapped EL0 entry, whose first user instruction is replaced.
+# Disable each breakpoint before resuming: another process may enter the same
+# routine first on a slower host, and treating that stop as the evidence
+# entry makes the following frame write miss silently.
 # Stop once more at the common
 # evidence entry and alter the saved TPIDR_EL0 word to a deliberately distinct
 # value.  This is a test-only proof that the report contains both the live
@@ -342,12 +346,15 @@ PYLINE
         gdb_commands=(
             -ex "source $REPO_ROOT/scripts/kernel_gdb_stage.py"
             -ex "target remote :$GDB_PORT"
-            -ex "break run_initial_user thread 1"
+            -ex "break kernel_process_boot_handoff thread 1"
+            -ex "takibi-bounded-continue $STAGE_SECONDS"
+            -ex "delete"
+            -ex "break *el0_context_resume thread 1"
             -ex "takibi-bounded-continue $STAGE_SECONDS"
             -ex "delete"
             -ex "set scheduler-locking on"
             -ex "takibi-park-threads kernel_idle_loop $peer_threads"
-            -ex "set {int}\$x0 = $fault_instruction"
+            -ex "set {int}(*(long *)(\$x0 + 0x100)) = $fault_instruction"
             -ex "set {int}kernel_log_peer_probe_step = $fault_instruction"
             -ex "break *crash_snapshot_capture thread 2"
             -ex "thread 2"
@@ -386,11 +393,14 @@ PYLINE
             -ex "continue"
             -ex "set *(char *)&kernel_process_trace_boot_enabled = 1"
             -ex "disable 1"
-            -ex "break run_initial_user"
+            -ex "break kernel_process_boot_handoff"
+            -ex "continue"
+            -ex "disable 2"
+            -ex "break *el0_context_resume thread 1"
             -ex "continue"
             -ex "call (void) kernel_process_trace_report()"
-            -ex "set {int}\$x0 = $fault_instruction"
-            -ex "disable 2"
+            -ex "set {int}(*(long *)(\$x0 + 0x100)) = $fault_instruction"
+            -ex "disable 3"
             -ex "break el1_exception_evidence_from_frame"
             -ex "continue"
             -ex "set {long}(\$x1 + 0x320) = 0xfeedfacefeedface"
@@ -536,9 +546,9 @@ fi
 # true is that a running root has one at all, which a nonzero value says.
 if [ "$MODE" != child_exec ] && [ "$MODE" != child_exec_prepare_failure ] &&
         { ! grep -Eq '^oops: trace seq=[1-9][0-9]* cpu=0 event=7 pid=1 gen=[1-9][0-9]* ' "$UART_LOG" ||
-          ! grep -Eq '^oops: process pid=1 parent=0 state=2 wait=0 wait4_status_ptr=0x0+ root=0 asid=[1-9][0-9]* .* image=bootstrap$' "$UART_LOG" ||
+          ! grep -Eq '^oops: process pid=1 parent=0 state=2 wait=0 wait4_status_ptr=0x0+ root=[1-9][0-9]* asid=[1-9][0-9]* .* image=exec$' "$UART_LOG" ||
           ! grep -Eq '^oops: activity=[a-z-]+$' "$UART_LOG"; }; then
-    echo "FAIL kernel/qemu oops: expected bootstrap process trace" >&2
+    echo "FAIL kernel/qemu oops: expected PID 1 process trace" >&2
     sed 's/^/  /' "$UART_LOG" >&2 || true
     exit 1
 fi

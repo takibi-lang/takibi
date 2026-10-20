@@ -1,7 +1,6 @@
 use "kernel/arch/arm64/kernel/frame_ref.tkb";
 
 extern fn user_code_sync(address: usize, length: usize);
-extern fn run_initial_user(entry: usize, stack_top: usize) -> usize;
 extern fn el0_context_set_x0(frame: borrow FrameRef[process], value: usize);
 extern fn el0_context_set_elr_el1(frame: borrow FrameRef[process], value: usize);
 extern fn el0_context_set_sp_el0(frame: borrow FrameRef[process], value: usize);
@@ -20,6 +19,7 @@ extern fn kernel_idle_exit_enter() !{noreturn};
 extern fn kernel_idle_yield_enter() !{noreturn};
 extern fn kernel_idle_block_enter() !{noreturn};
 extern fn kernel_idle_tick_enter() !{noreturn};
+extern fn kernel_idle_boot_enter() !{noreturn};
 // Both entries report an explicit invariant stop. A borrowed frame is
 // optional diagnostic context, not proof of a synchronous exception.
 // Assembly captures the incoming LR before making any call.

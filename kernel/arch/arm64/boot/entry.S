@@ -263,7 +263,7 @@ el1_fpsimd_enable:
  * `struct packed ExceptionFrame` and `exception_entry` declarations (lib/
  * llvm_gen.ml's gen_exception_entry), the same way item 2 above generates
  * el1_vectors. See that file and HISTORY.md's issue #227 item 1 entry for
- * the full design. `.Ldata_abort`/`el0_context_resume`/`run_initial_user`
+ * the full design. `.Ldata_abort`/`el0_context_resume`
  * (kernel/arch/arm64/kernel/user_entry.S) still use exception_context.inc's
  * EXC_CONTEXT_RESTORE directly -- restore-only, without a preceding save,
  * is out of this first slice's scope. */

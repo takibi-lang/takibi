@@ -355,8 +355,7 @@ fn kernel_process_child_exec_map_result(current_authority: borrow ProcessCurrent
 // GitHub issue #270: the bounded boot fixture used to end at an event the
 // kernel could see directly -- init.sh calling execve on itself to hand PID
 // 1 to the demo wrapper. Under BusyBox init that event does not exist: PID 1
-// is init, it never execs and never exits, so nothing after
-// run_initial_user() runs at all.
+// is init, and it never exits (since #831 its exit stops the kernel).
 //
 // The structural equivalent is PID 1 REAPING its first child. With
 // `::sysinit:/etc/init.sh` in /etc/inittab that is exactly the bounded suite
@@ -755,7 +754,8 @@ fn kernel_init_boot_fixture_poll(current_authority: borrow ProcessCurrent[curren
     kernel_boot_log("\n");
     kernel_console_measure_report();
     kernel_log_ring_report();
-    if (page_allocator_live_count() == page_baseline) {
+    if (page_allocator_live_count() - kernel_process_spare_stack_run_pages() ==
+            page_baseline) {
         kernel_boot_log("resources: pages=0\n");
         // GitHub issue #376: reported beside the other
         // end-of-run resource facts, and for the same
@@ -777,8 +777,7 @@ fn kernel_init_boot_fixture_poll(current_authority: borrow ProcessCurrent[curren
 // takes the run lock, so argv cannot be the process record's command line
 // read under a guard held across it.
 fn kernel_process_child_exec_prepare(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running]) -> KernelChildExecPrepareResult {
-    if (kernel_process_is_child(current_authority) == false ||
-        kernel_syscall_exec_pending() == false) {
+    if (kernel_syscall_exec_pending() == false) {
         return KernelChildExecPrepareResult::NotChildOrPending;
     }
     // GitHub issue #700: execve allocated this page before deciding
@@ -1315,10 +1314,13 @@ fn kernel_test_driver_run() {
     // same from here. A stack run used to be retained PER SLOT for the life
     // of the kernel; runs are recycled now through a single parked spare
     // (scheduled_process_park_stack_run), so what this baseline absorbs is
-    // at most ONE run rather than one per slot. Both are constant between
-    // here and the final check, which is why `pages=0` still means what it
-    // says -- but it does NOT mean nothing is held.
-    page_baseline = page_allocator_live_count();
+    // at most ONE run rather than one per slot. Since #831 that run is left
+    // out on both sides instead (kernel_process_spare_stack_run_pages): PID 1
+    // is a pooled process and takes the run the probes parked, and a child
+    // reaped later parks another, so whether one is parked differs between
+    // the two points. `pages=0` still does NOT mean nothing is held.
+    page_baseline = page_allocator_live_count() -
+        kernel_process_spare_stack_run_pages();
     kernel_test_platform_network();
     nic_irq_evidence_unpin();
     kernel_test_platform_storage();
@@ -1440,7 +1442,7 @@ irq_uart_rx_unmask();
                                 }
                                 let (dynamic_heap_start, dynamic_heap_limit) =
                                     process_image_heap_range(dynamic_pages);
-                                kernel_syscall_process_configure(
+                                kernel_syscall_process_configure(0,
                                     dynamic_heap_start, dynamic_heap_limit);
                                 process_image_unmap(dynamic_pages);
                             }
@@ -1478,7 +1480,6 @@ irq_uart_rx_unmask();
     kernel_tcp_inject_drop_next_fin();
     kernel_uart_rx_ring_reset();
     kernel_process_execution_reset();
-    kernel_process_scheduler_enable();
     kernel_syscall_connected_fixture_start();
     match boot_execution.mount {
         BootMountState::Unconfigured => {}
@@ -1486,72 +1487,7 @@ irq_uart_rx_unmask();
             match boot_execution.root_image {
                 BootRootImageState::Unavailable => {}
                 BootRootImageState::Ready(image) => {
-                    match process_image_map_ext2(
-                            image.plan, mount, image.inode, image.file_length,
-                            bs"bin/busybox.static\0init\0", 2) {
-                        ProcessImageMapResult::InvalidImage => {
-                            kernel_boot_log("script map: invalid image\n");
-                        }
-                        ProcessImageMapResult::OutOfMemory => {
-                            kernel_boot_log("script map: out of memory\n");
-                        }
-                        ProcessImageMapResult::Mapped(script_pages) => {
-                            if (process_image_page_count(script_pages) == 401) {
-                                kernel_boot_log("distro map: pages=401 rx+rw-xn heap+stack=rw+xn\n");
-                            }
-                            if (process_image_gap_is_unmapped()) {
-                                kernel_boot_log("distro load: file bytes match bss=zero gap=unmapped\n");
-                            }
-                            if (process_image_entry(script_pages) ==
-                                    USER_TEXT_VA + 0x4524 &&
-                                process_image_stack_pointer(script_pages) ==
-                                    USER_TEXT_VA +
-                                    USER_SPACE_PAGE_COUNT * PAGE_SIZE - 512) {
-                                kernel_boot_log("distro stack: argc=2 argv auxv ready\n");
-                                kernel_ddb_breakpoint_test_checkpoint();
-                            }
-                            // GitHub issue #270: taken here rather than before the
-                            // probes, because PID 1's image is BusyBox init now and
-                            // stays mapped for the life of the kernel. It belongs in
-                            // the baseline for the same reason root 0's own permanent
-                            // pages do -- it is not a transient the fixture leaks.
-                            page_baseline = page_allocator_live_count();
-                            // GitHub issue #270: PID 1 is a real program now, so `ps`
-                            // should say which one. The bootstrap's image is mapped by
-                            // the kernel rather than by execve, so nothing else records
-                            // a command line for it, and procfs fell back to naming it
-                            // as a kernel thread.
-                            let init_name_guard = process_run_lock();
-                            scheduled_process_set_command_line(init_name_guard,
-                                0, bs"init\0" as []const u8, 5);
-                            process_run_unlock(init_name_guard);
-                            let (script_heap_start, script_heap_limit) =
-                                process_image_heap_range(script_pages);
-                            kernel_syscall_process_configure(
-                                script_heap_start, script_heap_limit);
-                            // The boot driver's scheduler probes reset the shared table
-                            // while the peer idle loop is already running. Open ordinary
-                            // peer dispatch only after PID 1 has a complete image.
-                            kernel_process_peer_dispatch_enable();
-                            let script_status: usize = run_initial_user(
-                                process_image_entry(script_pages),
-                                process_image_stack_pointer(script_pages));
-                            // GitHub issue #270: PID 1 is BusyBox init and does not
-                            // exit, so reaching here at all is the failure. The
-                            // bounded fixture's own evidence is reported from
-                            // kernel_init_boot_fixture_reaped() instead, at the point
-                            // init reaps its sysinit child.
-                            kernel_boot_log("init: PID 1 exited unexpectedly status=");
-                            uart_put_udec(script_status);
-                            kernel_boot_log("\n");
-                            // The ownership checker is right to ask: nothing unmaps this
-                            // image any more. PID 1's image is permanent now, the same
-                            // way root 0's own page tables are, so the linear owner is
-                            // given up here rather than pretending a teardown exists.
-                            process_image_pages_discard(script_pages);
-
-                        }
-                    }
+                    kernel_init_process_start(mount, image);
                 }
             }
         }
@@ -1564,6 +1500,97 @@ irq_uart_rx_unmask();
     // cleanup alongside every other init-launched applet.
 }
 
+}
+
+// GitHub issue #831: PID 1 is an ordinary pooled process (maintainer
+// decision 2026-10-20, item 2-1 A). It gets its own record, kernel stack,
+// root, image record and fd context from the allocator, BusyBox init is
+// mapped into that root, and it is published Ready with its first frame on
+// its own kernel stack. main() then hands core 0 to the idle loop and never
+// returns; PID 1 runs wherever an idle loop finds it first. Returns only
+// when PID 1 could not be built, and main() then shuts down as it always did
+// after a boot that never reached userspace.
+private fn kernel_init_process_start(mount: Ext2Mount, image: Ext2ExecImage) !{unsafe} {
+    let init: ProcessHandle = match kernel_process_init_create() {
+        InitProcessCreateResult::Full => {
+            kernel_boot_log("init: no process record\n");
+            return;
+        }
+        InitProcessCreateResult::Created(created) => { created }
+    };
+    let init_slot: usize = kernel_process_init_slot(init);
+    match process_image_map_ext2_in_root(
+            image.plan, mount, image.inode, image.file_length,
+            bs"bin/busybox.static\0init\0", 2,
+            scheduled_process_address_space_root_lookup(init_slot)) {
+        ProcessImageMapResult::InvalidImage => {
+            kernel_boot_log("script map: invalid image\n");
+        }
+        ProcessImageMapResult::OutOfMemory => {
+            kernel_boot_log("script map: out of memory\n");
+        }
+        ProcessImageMapResult::Mapped(script_pages) => {
+            if (process_image_page_count(script_pages) == 401) {
+                kernel_boot_log("distro map: pages=401 rx+rw-xn heap+stack=rw+xn\n");
+            }
+            if (process_image_gap_is_unmapped()) {
+                kernel_boot_log("distro load: file bytes match bss=zero gap=unmapped\n");
+            }
+            let entry: usize = process_image_entry(script_pages);
+            let stack: usize = process_image_stack_pointer(script_pages);
+            if (entry == USER_TEXT_VA + 0x4524 &&
+                stack == USER_TEXT_VA + USER_SPACE_PAGE_COUNT * PAGE_SIZE - 512) {
+                kernel_boot_log("distro stack: argc=2 argv auxv ready\n");
+                kernel_ddb_breakpoint_test_checkpoint();
+            }
+            // GitHub issue #270: PID 1 is a real program, so `ps` should say
+            // which one. Its image is mapped by the kernel rather than by
+            // execve, so nothing else records a command line for it.
+            let init_name_guard = process_run_lock();
+            scheduled_process_set_command_line(init_name_guard,
+                init_slot, bs"init\0" as []const u8, 5);
+            process_run_unlock(init_name_guard);
+            let (script_heap_start, script_heap_limit) =
+                process_image_heap_range(script_pages);
+            kernel_syscall_process_configure(init_slot,
+                script_heap_start, script_heap_limit);
+            // Installed as an exec image, as a child's is after its first
+            // execve, so PID 1's own execve replaces it the same way.
+            match process_image_exec_install(script_pages) {
+                ProcessImageExecInstallResult::AlreadyInstalled => {
+                    kernel_boot_log("init: image already installed\n");
+                    return;
+                }
+                ProcessImageExecInstallResult::OutOfMemory => {
+                    kernel_boot_log("init: image record out of memory\n");
+                    return;
+                }
+                ProcessImageExecInstallResult::NoTarget => {
+                    kernel_boot_log("init: image has no target root\n");
+                    return;
+                }
+                ProcessImageExecInstallResult::Installed => {}
+            }
+            if (kernel_process_init_publish(init, entry, stack) == false) {
+                kernel_boot_log("init: PID 1 could not be published\n");
+                return;
+            }
+            // GitHub issue #270: taken here rather than before the probes,
+            // because PID 1's image and records are permanent: it does not
+            // exit. They belong in the baseline for the same reason root 0's
+            // own permanent pages do -- they are not a transient the fixture
+            // leaks. The record baselines were taken before the probes, so
+            // PID 1's one record of each kind is added to them.
+            page_baseline = page_allocator_live_count() -
+                kernel_process_spare_stack_run_pages();
+            process_pool_baseline = process_pool_baseline + 1;
+            address_space_baseline = address_space_baseline + 1;
+            image_record_baseline = image_record_baseline + 1;
+            fd_context_baseline = fd_context_baseline + 1;
+            kernel_process_boot_handoff();
+            kernel_idle_boot_enter();
+        }
+    }
 }
 
 // Shared UART RX bridge used by syscall wait paths on both platforms.

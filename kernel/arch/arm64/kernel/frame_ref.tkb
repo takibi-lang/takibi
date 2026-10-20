@@ -164,6 +164,21 @@ fn frame_copy(destination: borrow FrameRef[to], source: borrow FrameRef[from]) !
     let copied: usize = slice_copy(dst, src);
 }
 
+// GitHub issue #831: the first frame of a process that has never run, which
+// is PID 1's. Every register is zero, SPSR 0 is EL0t with interrupts
+// enabled, and the image's entry and stack are the only state it carries; a
+// new image installs its own TPIDR_EL0. PID 1 is then started from it by the
+// same el0_context_resume every other saved frame goes through, so there is
+// no separate first-entry eret to keep correct.
+fn frame_initial_user(frame: borrow FrameRef[process], entry: usize, stack: usize)
+        !{unsafe} {
+    let base: *u8 = unsafe { frame.sp as *u8 };
+    let bytes: []u8 = unsafe { base[0..<EXC_CONTEXT_SIZE as isize] };
+    zero_fill(bytes);
+    frame_word_set(frame, offsetof(ExceptionFrame, elr_el1), entry);
+    frame_word_set(frame, offsetof(ExceptionFrame, sp_el0), stack);
+}
+
 // x0..x30, one word each.
 fn frame_general(frame: borrow FrameRef[process], index: {0..<31 as usize}) -> usize
         !{unsafe} {

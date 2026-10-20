@@ -87,6 +87,9 @@ FRAME_MINT_CALLERS = {
         "scheduled_process_saved_frame",
         # A child's frame, placed at the top of its new stack and then copied.
         "kernel_syscall_clone_child_return",
+        # PID 1's first frame, built at the top of its own new stack before
+        # the record is published Ready (GitHub issue #831).
+        "kernel_process_init_publish",
     },
     "maybe_frame_from_entry": {"kernel_syscall_dispatch"},
 }

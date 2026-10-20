@@ -111,6 +111,17 @@ fn process_state_new(cell: &mut ProcessStateCell, runnable_now: bool) {
     }
 }
 
+// GitHub issue #831: PID 1's first frame is installed on its own kernel
+// stack, and any CPU its mask allows may now start it.
+fn process_state_publish(cell: &mut ProcessStateCell) {
+    match (*cell).value {
+        ProcessRecordState::Constructing => {
+            (*cell).value = ProcessRecordState::Ready;
+        }
+        _ => {}
+    }
+}
+
 // A clone's frame is installed and it runs.
 fn process_state_run(cell: &mut ProcessStateCell) {
     (*cell).value = ProcessRecordState::Running;

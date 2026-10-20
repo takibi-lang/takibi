@@ -327,8 +327,8 @@ KERNEL_ASM_ENTRIES := main kernel_secondary_main \
 	el1_exception_evidence_from_frame kernel_invariant_evidence kernel_mmu_init \
 	kernel_mmu_init_secondary kernel_idle_exit_reenter \
 	kernel_idle_yield_reenter kernel_idle_block_reenter \
-	kernel_idle_tick_reenter \
-	kernel_syscall_migrate_return \
+	kernel_idle_tick_reenter kernel_idle_boot_reenter \
+	kernel_syscall_migrate_return kernel_syscall_init_exit \
 	kernel_syscall_block_return kernel_syscall_child_exec_return \
 	kernel_syscall_clone_child_return kernel_syscall_clone_parent_return \
 	kernel_syscall_dispatch kernel_syscall_resume_return \

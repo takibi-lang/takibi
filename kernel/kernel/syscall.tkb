@@ -1376,31 +1376,30 @@ fn kernel_syscall_process_configure_current(
     }
 }
 
-fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize)
-        !{unsafe} {
+// The fd context, image record, terminal stdio and heap range of a process
+// the kernel starts itself rather than through clone: the boot context
+// (slot 0) for the boot fixtures, and PID 1 (GitHub issue #831), whose
+// pooled record already has its context and image record from allocation,
+// so the two ensures below find them.
+fn kernel_syscall_process_configure(process: usize, heap_start: usize,
+                                    heap_limit: usize) !{unsafe} {
     unified_fd_context_pool_init();
     unified_fd_table_init();
-    // GitHub issue #392: process slot 0 is the bootstrap, which this
-    // kernel sets up directly rather than through
-    // scheduled_process_alloc -- so it is the one process that does not
-    // get an fd context from the allocation path, and has to be given one
-    // here. It got one for free while contexts were an array with an entry
-    // per slot whether or not a process occupied it.
-    match unified_fd_context_ensure(0) {
+    match unified_fd_context_ensure(process) {
         ProcessFdContextReady::Ready(evidence) => {}
         ProcessFdContextReady::Missing => {
             kernel_boot_log_resource_exhausted(
                 "physical page allocator" as *u8, page_allocator_total_count());
         }
     }
-    match process_image_record_ensure(0) {
+    match process_image_record_ensure(process) {
         ProcessImageRecordReady::Ready(evidence) => {}
         ProcessImageRecordReady::Missing => {
             kernel_boot_log_resource_exhausted(
                 "physical page allocator" as *u8, page_allocator_total_count());
         }
     }
-    match unified_terminal_stdio_open(0) {
+    match unified_terminal_stdio_open(process) {
         UnifiedOpenResult::Invalid => {}
         UnifiedOpenResult::Full => {
             kernel_boot_log_resource_exhausted(
@@ -1408,10 +1407,11 @@ fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize)
         }
         UnifiedOpenResult::Ok => {}
     }
-    match unified_fd_context_lookup(0) {
+    let configured: usize = process;
+    match unified_fd_context_lookup(configured) {
         ProcessFdContextReady::Missing => {}
         ProcessFdContextReady::Ready(evidence) => {
-            match unified_process_heap_range_configure(0, evidence, heap_start, heap_limit) {
+            match unified_process_heap_range_configure(configured, evidence, heap_start, heap_limit) {
                 UnifiedFdResult::Invalid => {}
                 UnifiedFdResult::Ok => {}
             }
@@ -3294,13 +3294,14 @@ must_use variant SyscallAction {
     Unreachable;         // 0: esr wasn't a real SVC; asm's own default path
                           //    already fail-stops before this can be selected
     Resume(usize);        // 1: resume EL0 with x0 = value
-    Exit(usize);           // 2: parent exit; return status to the EL1 caller
+    Exit(usize);           // 2: PID 1 exits; the kernel stops (#831)
     CloneChild(usize);      // 3: clone succeeded; value = child pid
     CloneParent(usize);      // 4: child exited; value = parent's saved SP
     Block;                    // 5: block this frame on the scheduler
     WaitInterrupt;             // 6: wfe, then run this syscall again
-    Exec;                       // 7: parent-only execve pending
-    ChildExec;                   // 8: child execve pending
+    // 7 was the parent-only execve, which returned PID 1 to its EL1 caller;
+    // PID 1 execs like every process since #831.
+    ChildExec;                   // 8: execve pending
     Migrate;                      // 9: rerun this syscall on core 0
 }
 
@@ -3313,15 +3314,14 @@ fn syscall_action_encode(action: SyscallAction) -> (usize, usize) {
         SyscallAction::CloneParent(value) => { return (4, value); }
         SyscallAction::Block => { return (5, 0); }
         SyscallAction::WaitInterrupt => { return (6, 0); }
-        SyscallAction::Exec => { return (7, 7); }
         SyscallAction::ChildExec => { return (8, 8); }
         SyscallAction::Migrate => { return (9, 0); }
     }
 }
 
 // Preserve clone-owned FD/VM teardown before returning through the parent
-// frame; returning SyscallAction::Exit directly is valid only for the root
-// EL0 process.
+// frame. SyscallAction::Exit is the root EL0 process's, PID 1's, whose exit
+// stops the kernel (kernel_syscall_init_exit).
 fn kernel_syscall_exit_current_process(current_authority: ProcessCurrent[current_process, ProcessState::Running], status: usize) -> SyscallAction {
     if (kernel_process_is_child(current_authority)) {
         // GitHub issue #448 made an exit with nowhere to hand the CPU wait
@@ -3870,6 +3870,21 @@ fn kernel_syscall_child_exec_return(frame_sp: usize) !{unsafe} {
     workload_profile_el0_enter();
     process_current_end(current_authority);
     el0_context_resume(frame);
+}
+
+// GitHub issue #831 (maintainer decision 2026-10-20, item 2-1 A): PID 1
+// exited. It used to return to the boot driver through run_initial_user's
+// frame, which then reported this line and shut down; PID 1 now starts from
+// a saved frame on its own kernel stack and has no caller to return to. Its
+// exit stops the kernel, as Linux's "Attempted to kill init" does, with the
+// line and the shutdown the boot driver gave it.
+fn kernel_syscall_init_exit(status: usize) !{unsafe} {
+    kernel_boot_log("init: PID 1 exited unexpectedly status=");
+    uart_put_udec(status);
+    kernel_boot_log("\n");
+    uart_tx_flush();
+    platform_shutdown();
+    while (true) { }
 }
 
 // The one place an ExitSwitch becomes the assembly's parent_sp: the frame to
@@ -5015,7 +5030,6 @@ fn syscall_signal_deliver(current_authority: ProcessCurrent[current_process, Pro
         }
         SyscallAction::Block => { process_current_end(current_authority); return SyscallAction::Block; }
         SyscallAction::WaitInterrupt => { process_current_end(current_authority); return SyscallAction::WaitInterrupt; }
-        SyscallAction::Exec => { process_current_end(current_authority); return SyscallAction::Exec; }
         SyscallAction::ChildExec => { process_current_end(current_authority); return SyscallAction::ChildExec; }
         SyscallAction::Migrate => { process_current_end(current_authority); return SyscallAction::Migrate; }
     };
@@ -5914,10 +5928,6 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 SyscallAction::CloneParent(value) => {
                     let delivered: usize = taken_signal_delivered(taken);
                     return SyscallAction::CloneParent(value);
-                }
-                SyscallAction::Exec => {
-                    let delivered: usize = taken_signal_delivered(taken);
-                    return SyscallAction::Exec;
                 }
                 SyscallAction::ChildExec => {
                     let delivered: usize = taken_signal_delivered(taken);
@@ -8069,10 +8079,8 @@ private inline fn syscall_execve_current_with(slot: borrow SyscallSlot[0],
     if (kernel_syscall_exec_pending()) {
         return SyscallAction::Resume(LINUX_EAGAIN);
     }
-    // GitHub issue #610: an exec runs where it is called. The root
-    // process's own (SyscallAction::Exec) returns through
-    // run_initial_user's frame on PID 1's kernel stack, which is the same
-    // stack on whichever core PID 1 runs, so it too stays put (#775).
+    // GitHub issue #610: an exec runs where it is called, PID 1's included
+    // (#775, #831).
     let mut path_address: usize = x0;
     let mut argv_address: usize = x1;
     if (number == AARCH64_NR_EXECVEAT) {
@@ -8246,15 +8254,12 @@ private inline fn syscall_execve_current_with(slot: borrow SyscallSlot[0],
     let packed_argc: {0..<16 as usize} = argc;
     // GitHub issue #700: the last fallible step, before anything below
     // records the exec as pending.
-    let child_exec: bool = kernel_process_is_child(current_authority);
-    if (child_exec) {
-        match kernel_syscall_exec_args_reserve(
-            page_alloc(PageOwnerTag::ExecArgs)) {
-            ExecArgsReserve::OutOfMemory => {
-                return SyscallAction::Resume(LINUX_ENOMEM);
-            }
-            ExecArgsReserve::Reserved => {}
+    match kernel_syscall_exec_args_reserve(
+        page_alloc(PageOwnerTag::ExecArgs)) {
+        ExecArgsReserve::OutOfMemory => {
+            return SyscallAction::Resume(LINUX_ENOMEM);
         }
+        ExecArgsReserve::Reserved => {}
     }
     let diagnostic_argv: []u8 = syscall_exec_argv_here(slot);
     // GitHub issue #618: one critical section, so a procfs snapshot on
@@ -8271,8 +8276,7 @@ private inline fn syscall_execve_current_with(slot: borrow SyscallSlot[0],
     scheduled_process_set_exec_pending(exec_guard,
         kernel_syscall_process_slot(), true);
     process_run_unlock(exec_guard);
-    if (child_exec) { return SyscallAction::ChildExec; }
-    return SyscallAction::Exec;
+    return SyscallAction::ChildExec;
 }
 
 // Borrow current through the mprotect operation; ownership stays at dispatch.

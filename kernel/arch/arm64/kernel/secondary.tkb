@@ -298,6 +298,12 @@ fn kernel_idle_loop() !{unsafe} {
 // has left the process's stack. Each releases what its path still owns,
 // then idles. The same four serve every core (GitHub issue #821).
 
+// GitHub issue #831: core 0's boot work is done and its boot context given
+// back; nothing is left to release.
+fn kernel_idle_boot_reenter() {
+    kernel_idle_loop();
+}
+
 // An EL0 process exited with no other eligible process on this CPU.
 fn kernel_idle_exit_reenter() {
     kernel_process_stack_idle_complete();
