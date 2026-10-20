@@ -44,7 +44,8 @@ class Clock:
 class Debugger:
     """What the board does: a BREAK prints a prompt, each line gets one."""
 
-    def __init__(self, answers=True):
+    def __init__(self, answers=True, clock=None):
+        self.clock = clock
         self.events = []
         self.pending = bytearray()
         self.line = bytearray()
@@ -66,6 +67,8 @@ class Debugger:
                 self.line.append(byte)
 
     def read(self):
+        if self.clock is not None:
+            self.clock.sleep(0.25)  # what a real read's wait costs
         data, self.pending = bytes(self.pending), bytearray()
         return data
 
@@ -83,7 +86,8 @@ def check_collect():
     for answers, snapshot_fails in ((True, False), (False, False), (True, True)):
         CASES.note()
         with tempfile.TemporaryDirectory() as temporary:
-            board, clock = Debugger(answers), Clock()
+            clock = Clock()
+            board = Debugger(answers, clock)
             with patch.object(rpi5_swd_snapshot, "capture",
                               recording_snapshot(board.events, fail=snapshot_fails)):
                 started = clock.now
@@ -107,7 +111,7 @@ def check_collect():
             elif board.commands or "no DDB prompt" not in note:
                 failures.append(f"{label}: silent board gave {board.commands!r}, {note!r}")
     CASES.note()
-    board = Debugger()
+    board = Debugger(clock=Clock())
 
     def refuse():
         raise OSError("fixture: port gone")
@@ -203,7 +207,8 @@ def check_gem_tx():
                 failures.append(f"after load: order {board.events!r}")
             if board.commands != list(POSTMORTEM_COMMANDS):
                 failures.append(f"after load: walked {board.commands!r}")
-            walk = (directory / "ddb-postmortem.log").read_bytes()
+            log = directory / "ddb-postmortem.log"
+            walk = log.read_bytes() if log.exists() else b"(no walk saved)"
             if b"physical fixture reported failure" not in walk.splitlines()[0]:
                 failures.append("after load: the walk lost the runner's reason")
     return failures
