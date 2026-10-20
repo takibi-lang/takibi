@@ -28,6 +28,7 @@ import sys
 from pathlib import Path
 
 from pass_line import report_pass
+from source_scan import per_file
 from typed_marker import typed_marker
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -115,6 +116,7 @@ def _direct_typing_calls(tree):
                 yield node
 
 
+@per_file
 def problems_in(source, label):
     tree = ast.parse(source)
     folder = Folder(tree)
@@ -135,7 +137,7 @@ def problems_in(source, label):
             found.append(f"{label}:{line}: typed `echo {shown}` spells its "
                          "output marker unquoted; use typed_marker() "
                          "(scripts/typed_marker.py, #857)")
-    return found, typed
+    return tuple(found), typed
 
 
 def _is_bytes(expression, folder, depth=0):
@@ -164,7 +166,7 @@ def main():
         if "echo" not in source:
             continue
         found, count = problems_in(source, str(path.relative_to(ROOT)))
-        problems += found
+        problems += list(found)
         typed += count
     if problems:
         print("\n".join(problems), file=sys.stderr)
