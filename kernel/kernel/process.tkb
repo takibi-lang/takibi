@@ -6481,31 +6481,6 @@ fn kernel_process_current_has_live_child(guard: borrow ProcessRunGuard[lock])
         process_slot_word(execution_state[execution_cpu_index()].current_handle.pool_index));
 }
 
-// Is there another process the scheduler could pick right now?
-//
-// GitHub issue #448: this is what a syscall about to wait for a device has
-// to ask before it waits INSIDE the kernel. The UART read path used to ask
-// "do I have a live child" instead, and answered "no" for an interactive
-// shell sitting at its prompt -- true, and the wrong question, because the
-// shell's SIBLINGS were runnable and got nothing while the kernel span at
-// EL1 waiting for a keystroke. Kernel mode does not preempt, so that spin
-// is the whole machine.
-fn kernel_process_other_ready() -> bool {
-    if (execution_state[execution_cpu_index()].current_live == false) { return false; }
-    // GitHub issue #693 step 3: the walk reads other processes' records,
-    // so it runs under the run lock. Its answer is a hint; the block path
-    // decides again under the lock.
-    let ready_guard = process_run_lock();
-    let mut other: bool = false;
-    match kernel_process_next_ready(ready_guard,
-                                    execution_state[execution_cpu_index()].current_handle, cpu_id()) {
-        ProcessNextReadyResult::Missing => {}
-        ProcessNextReadyResult::Next(next) => { other = true; }
-    }
-    process_run_unlock(ready_guard);
-    return other;
-}
-
 // Is the current process itself the event that can make a blocked parent
 // runnable?
 //
