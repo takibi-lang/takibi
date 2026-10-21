@@ -1164,7 +1164,7 @@ fn kernel_syscall_process_slot() -> ProcessSlot {
 }
 
 // The same process as the key the fd-context table indexes by (#858).
-fn kernel_syscall_process_key() -> usize {
+inline fn kernel_syscall_process_key() -> usize {
     return process_slot_address(kernel_process_current_slot());
 }
 

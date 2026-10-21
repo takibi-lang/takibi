@@ -238,7 +238,7 @@ private inline fn process_slot_none() -> ProcessSlot {
     return none;
 }
 
-fn process_slot_is_none(slot: ProcessSlot) -> bool {
+inline fn process_slot_is_none(slot: ProcessSlot) -> bool {
     return slot.word == 0;
 }
 
@@ -250,7 +250,7 @@ variant RootOwner {
     Process(ProcessSlot);
 }
 
-fn scheduled_process_slot_of_root(root: RootSlot) -> RootOwner {
+inline fn scheduled_process_slot_of_root(root: RootSlot) -> RootOwner {
     let word: usize = root_slot_word(root);
     if (word == 0) { return RootOwner::Kernel; }
     return RootOwner::Process(process_slot_from_pool(word));
@@ -258,16 +258,16 @@ fn scheduled_process_slot_of_root(root: RootSlot) -> RootOwner {
 
 // page.tkb's probe holds a root as a bare word because it is parsed before
 // either slot type exists (#406); it gives the word back here.
-fn scheduled_process_probe_slot_of_word(word: usize) -> RootOwner {
+inline fn scheduled_process_probe_slot_of_word(word: usize) -> RootOwner {
     if (word == 0) { return RootOwner::Kernel; }
     return RootOwner::Process(process_slot_from_pool(word));
 }
 
-fn process_slot_address(slot: ProcessSlot) -> usize {
+inline fn process_slot_address(slot: ProcessSlot) -> usize {
     return slot.word;
 }
 
-fn process_slot_same(a: ProcessSlot, b: ProcessSlot) -> bool {
+inline fn process_slot_same(a: ProcessSlot, b: ProcessSlot) -> bool {
     return a.word == b.word;
 }
 
@@ -2680,7 +2680,7 @@ fn scheduled_process_set_image_record(key: usize, address: usize,
 // usize identity; the five accessors above that serve them take that key.
 // A literal 0 there is what scripts/check_process_slot_zero.py still
 // rejects. Everything else names a process by ProcessSlot.
-fn scheduled_process_slot_key_valid(key: usize) -> bool !{unsafe} {
+inline fn scheduled_process_slot_key_valid(key: usize) -> bool !{unsafe} {
     return scheduled_process_slot_valid(process_slot_from_pool(key));
 }
 
@@ -10437,7 +10437,7 @@ fn kernel_process_current_slot() -> ProcessSlot {
 // process_image_activate_child() -- read it here rather than reaching
 // into execution_state[execution_cpu_index()].current_handle directly.
 // The running process's slot, named by its own authority (#858).
-fn kernel_process_slot_of_current(
+inline fn kernel_process_slot_of_current(
         running: borrow ProcessCurrent[process, phase]) -> ProcessSlot {
     let mut handle: ProcessHandle = process_current_handle(running);
     return process_slot_of(handle.pool_index);

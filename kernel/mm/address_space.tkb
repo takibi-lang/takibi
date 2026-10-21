@@ -75,23 +75,23 @@ struct RootSlot {
 // A root word read back from a table or a snapshot. Any word names a root
 // (0 is the kernel's), so this mint is public; what the type keeps closed is
 // the step from a root to a process (scheduled_process_slot_of_root).
-fn root_slot_of_key(word: usize) -> RootSlot {
+inline fn root_slot_of_key(word: usize) -> RootSlot {
     let mut typed: RootSlot = { word };
     return typed;
 }
 
-fn root_slot_kernel() -> RootSlot {
+inline fn root_slot_kernel() -> RootSlot {
     return root_slot_of_key(0);
 }
 
 // The numeric identity, for the per-root tables keyed by it and evidence.
-fn root_slot_word(slot: RootSlot) -> usize {
+inline fn root_slot_word(slot: RootSlot) -> usize {
     return slot.word;
 }
 
 // Whether a root is the one a process runs on, which is how the EL0-return
 // check compares the image target with the record.
-fn root_slot_names_process(root: RootSlot, slot: ProcessSlot) -> bool {
+inline fn root_slot_names_process(root: RootSlot, slot: ProcessSlot) -> bool {
     return root.word != 0 && root.word == process_slot_address(slot);
 }
 
@@ -573,11 +573,11 @@ fn address_space_root_slot_valid(slot: RootSlot) -> bool !{unsafe} {
 // keys its evidence by the root WORD, because an indexed view needs a usize
 // identity; these two serve that key. The word 0 is root 0 here, never a
 // process.
-fn address_space_root_key_valid(word: usize) -> bool !{unsafe} {
+inline fn address_space_root_key_valid(word: usize) -> bool !{unsafe} {
     return address_space_root_slot_valid(root_slot_of_key(word));
 }
 
-fn address_space_root_of_key(word: usize) -> AddressSpaceRoot !{unsafe} {
+inline fn address_space_root_of_key(word: usize) -> AddressSpaceRoot !{unsafe} {
     return scheduled_process_address_space_root_of(root_slot_of_key(word));
 }
 

@@ -881,7 +881,7 @@ fn process_image_root_index(root: ProcessImageRoot) -> usize {
     return root_slot_word(address_space_root_slot(root.root));
 }
 
-fn process_image_root_slot(root: ProcessImageRoot) -> RootSlot {
+inline fn process_image_root_slot(root: ProcessImageRoot) -> RootSlot {
     return address_space_root_slot(root.root);
 }
 
