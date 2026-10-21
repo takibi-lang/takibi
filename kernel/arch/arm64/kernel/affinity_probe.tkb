@@ -81,9 +81,10 @@ const AFFINITY_PIN_ATTEMPTS: usize = 200000;
 const AFFINITY_SPINNER_NS: usize = 20000000000;
 const CLOCK_GETTIME_SYSCALL: usize = 113;
 const CLOCK_MONOTONIC: usize = 1;
-// 128 + SIGTERM, the status kernel_syscall_exit_current_process gives a
-// process the termination signal ends (GitHub issue #563).
-const AFFINITY_SIGTERM_STATUS: u8 = 143;
+// wait4's status word for a process SIGTERM ended (GitHub issue #563):
+// Linux's form, the signal in the low byte and 0 above it. It was
+// 128 + SIGTERM in the exit byte until GitHub issue #882.
+const AFFINITY_SIGTERM_STATUS: u8 = 15;
 const AFFINITY_PEER_SPINNER_NS: usize = 2000000000;
 // A millisecond each, so the whole wait is bounded at a quarter second.
 const AFFINITY_PEER_PIN_POLLS: usize = 256;
@@ -478,11 +479,11 @@ fn affinity_probe() !{unsafe} {
         affinity_fail(bs"affinity: never came back to cpu 0\n");
     }
     // GitHub issue #563: WHY it was reaped. The spinner exits 0 on its own
-    // time limit and the kernel exits it with 128 + SIGTERM when the signal
-    // is taken, so this one byte separates "the SIGTERM reached a napping
+    // time limit and the kernel ends it by SIGTERM when the signal is
+    // taken, so this one byte separates "the SIGTERM reached a napping
     // process" from "it ran out the clock" -- which is the question that
     // issue's stall could not answer. Measured before it is asserted.
-    if (status[1] == 0) {
+    if (status[0] == 0 && status[1] == 0) {
         // The shape GitHub issue #563 recorded: the child ran its whole nap
         // count out with a SIGTERM its parent had already sent. Failing here
         // turns that into a bounded, named lane failure instead of the
@@ -490,7 +491,7 @@ fn affinity_probe() !{unsafe} {
         affinity_fail(
             bs"affinity: the napping spinner OUTLIVED the SIGTERM\n");
     }
-    if (status[1] != AFFINITY_SIGTERM_STATUS) {
+    if (status[0] != AFFINITY_SIGTERM_STATUS || status[1] != 0) {
         affinity_fail(
             bs"affinity: the napping spinner exited for a third reason\n");
     }
@@ -586,11 +587,11 @@ fn affinity_probe() !{unsafe} {
         affinity_fail(
             bs"affinity: the peer spinner was not reaped: answered another pid\n");
     }
-    if (status[1] == 0) {
+    if (status[0] == 0 && status[1] == 0) {
         affinity_fail(
             bs"affinity: the peer spinner OUTLIVED a SIGTERM sent from core 0\n");
     }
-    if (status[1] != AFFINITY_SIGTERM_STATUS) {
+    if (status[0] != AFFINITY_SIGTERM_STATUS || status[1] != 0) {
         affinity_fail(
             bs"affinity: the peer spinner exited for a third reason\n");
     }

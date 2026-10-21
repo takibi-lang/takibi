@@ -424,6 +424,7 @@ KERNEL_UNUSED_CHECKED := \
 	kernel/kernel/syscall_test_evidence.tkb \
 	kernel/kernel/syscall_test_lifecycle.tkb \
 	kernel/kernel/syscall_unimplemented.tkb \
+	kernel/kernel/wait_status.tkb \
 	kernel/kernel/tcp_connection_contention_evidence.tkb \
 	kernel/kernel/workload_evidence.tkb \
 	kernel/lib/peer_tick_window.tkb \
@@ -531,7 +532,7 @@ LINUX_USER_EXAMPLES      := linux_hello start checked_usize elf64_validate bump 
                              affine_escape_via_index align_ptr_proof linear_obligation tuple_pair region_proto region_inspection pool_space_replay \
                              field_lease match_int_lit record_loans \
                              callstack ringbuf crc8 djb2 slice slice_from_field logical_eval foreach for loop fizzbuzz fibonacci \
-                             bubblesort inet_checksum ip_parse tcp_parse wire_endian ref_type byte_slice atomic spinlock locked_cell diagnostic_ring publish fdt number usb_config usb_init_report xhci_event_match xhci_regs uart_rx_ring block_cache gem_tx_wait virtio_net_tx virtio_net_reply generic_variant runtime_bounds pin_placement place_array protocol_ring protocol_tx protocol_txrx protocol_snapshot region_held header_overlay cache_geometry
+                             bubblesort inet_checksum ip_parse tcp_parse wire_endian ref_type byte_slice atomic spinlock locked_cell diagnostic_ring publish fdt number usb_config usb_init_report xhci_event_match xhci_regs uart_rx_ring block_cache gem_tx_wait virtio_net_tx virtio_net_reply generic_variant runtime_bounds pin_placement place_array protocol_ring protocol_tx protocol_txrx protocol_snapshot region_held header_overlay cache_geometry wait_status
 LINUX_USER_BINS          := $(foreach e,$(LINUX_USER_EXAMPLES),$(LINUX_USER_DIR)/$(e)/$(e).exe)
 LINUX_USER_OBJS          := $(foreach e,$(LINUX_USER_EXAMPLES),$(LINUX_USER_DIR)/$(e)/$(e)_exe.o)
 
@@ -563,6 +564,8 @@ $(LINUX_USER_DIR)/virtio_net_tx/virtio_net_tx_exe.o $(LINUX_USER_DIR)/virtio_net
 $(LINUX_USER_DIR)/virtio_net_tx/virtio_net_tx_exe.o $(LINUX_USER_DIR)/virtio_net_reply/virtio_net_reply_exe.o: LINUX_USER_EXTRA_FLAGS := --regions --device-semantics-file kernel/drivers/net/virtio_net_tx_dma.tkb --device-semantics-file kernel/drivers/virtio_used.tkb
 $(LINUX_USER_DIR)/tcp_parse/tcp_parse_exe.o: $(LINUX_USER_DIR)/common/inet_checksum.tkb $(LINUX_USER_DIR)/common/netutil.tkb
 $(LINUX_USER_DIR)/byte_slice/byte_slice_exe.o: kernel/lib/byte_slice.tkb
+$(LINUX_USER_DIR)/wait_status/wait_status_exe.o: kernel/kernel/wait_status.tkb
+$(LINUX_USER_DIR)/wait_status/wait_status_exe.o: LINUX_USER_EXTRA_SRCS := kernel/kernel/wait_status.tkb
 # GitHub issue #470: the kernel's device-tree reader, run against a blob
 # shaped like the board's own. The blob is generated because it stands in
 # for another project's GPL binary; scripts/make_fdt_fixture.py carries the

@@ -63,7 +63,8 @@ for a delimiter so an overlong unfinished line cannot fill it forever.
 The last terminal reader's session is the UART foreground group. The process
 model currently uses one group per session; it does not implement setpgid or
 controlling terminals. INTR and QUIT use the existing default-termination
-resource-release path and normalized exit status 128+signal. Signal masks and
+resource-release path and end the process by that signal (wait4 status word
+in Linux's WTERMSIG form; a shell shows it as $? 128+signal). Signal masks and
 synchronous waits apply to generated signals. PID 1 is excluded from terminal
 signal delivery. Custom SIGINT/SIGQUIT handlers and core dumps are outside
 the maintained signal implementation, as described in `SYSCALLS.md`.

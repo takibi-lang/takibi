@@ -81,10 +81,12 @@ fn signal_boundary_probe() !{unsafe} {
         }
         let mut status: [u8; 4];
         for index: usize in 0..<4 { status[index] = 0xFF; }
-        let mut expected: u8 = 139;
+        // A refused frame ends the child by SIGSEGV: Linux's status word
+        // has 11 in its low byte (GitHub issue #882), not exit code 139.
+        let mut expected: u8 = 11;
         if (mode == 0 || mode == 4) { expected = 0; }
         if (svc5(260, child, status as *u8 as usize, 0, 0, 0) != child ||
-            status[0] != 0 || status[1] != expected) {
+            status[0] != expected || status[1] != 0) {
             boundary_fail(bs"boundary: FAIL signal child status\n");
             return;
         }

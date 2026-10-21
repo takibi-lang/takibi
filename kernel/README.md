@@ -1895,7 +1895,7 @@ run, not a specification.
   sends any standard signal 1-31 except the job-control ones (`SIGCONT`,
   `SIGSTOP`, `SIGTTIN`, `SIGTTOU`). Every standard signal keeps its own
   `rt_sigaction` action: an ignored one is discarded, one with no handler
-  and a terminating default ends the process with status 128+signal, and a
+  and a terminating default ends the process by that signal (Linux WTERMSIG status), and a
   handler is entered at a syscall return through a Linux arm64 signal frame
   and left through `rt_sigreturn`. `rt_sigsuspend` waits for any caught
   signal, which is what ash's `wait` builtin and `trap` need. A caught signal

@@ -10,6 +10,7 @@ use "kernel/drivers/serial/terminal.tkb";
 use "kernel/net/socket_capability.tkb";
 use "kernel/net/tcp.tkb";
 use "kernel/kernel/fd_table.tkb";
+use "kernel/kernel/wait_status.tkb";
 use "kernel/kernel/syscall_test_evidence.tkb";
 use "kernel/kernel/syscall_test_lifecycle.tkb";
 use "kernel/kernel/syscall_unimplemented.tkb";
@@ -3410,7 +3411,7 @@ fn kernel_syscall_wait4_deliver(
                     kernel_process_child_exit_status_for(parent_slot,
                                                          reaped_pid);
                 match user_write_u32(range, 0,
-                        ((status & 0xFF) << 8) as u32) {
+                        syscall_wait_status_word(status)) {
                     UserWriteResult::Fault => {
                         el0_context_set_x0(frame, LINUX_EFAULT);
                         return;
@@ -4921,6 +4922,7 @@ fn kernel_syscall_migrate_return(frame_sp: usize) {
 // installing a handler without one is refused.
 const LINUX_EINTR: usize = 0xFFFFFFFFFFFFFFFC;
 const LINUX_SIGSEGV: usize = 11;
+
 const LINUX_SA_RESTORER: usize = 0x04000000;
 const LINUX_SA_NODEFER: usize = 0x40000000;
 const LINUX_SA_RESETHAND: usize = 0x80000000;
@@ -5055,7 +5057,7 @@ private fn syscall_signal_deliver_into(current_authority: ProcessCurrent[current
                 // Linux forces SIGSEGV when the frame cannot be written.
                 let delivered: usize = taken_signal_delivered(taken);
                 return kernel_syscall_exit_current_process(current_authority,
-                    128 + LINUX_SIGSEGV);
+                    syscall_status_signaled(LINUX_SIGSEGV));
             }
             let delivered: usize = taken_signal_delivered(taken);
             let mut handler_mask: usize = restore_mask | handler.mask;
@@ -5096,7 +5098,7 @@ private fn syscall_signal_return_into(current_authority: ProcessCurrent[current_
     match user_range_check_read(current_authority, base,
                                 SIGFRAME_SIZE) {
         UserReadRangeResult::Fault => {
-            return kernel_syscall_exit_current_process(current_authority, 128 + LINUX_SIGSEGV);
+            return kernel_syscall_exit_current_process(current_authority, syscall_status_signaled(LINUX_SIGSEGV));
         }
         UserReadRangeResult::Ok(range) => {
             let (magic_ok, magic) = user_read_u32(range, SIGFRAME_FPSIMD);
@@ -5111,7 +5113,7 @@ private fn syscall_signal_return_into(current_authority: ProcessCurrent[current_
                 size as usize != SIGFRAME_FPSIMD_SIZE ||
                 ((pc as usize) & 3) != 0) {
                 return kernel_syscall_exit_current_process(current_authority,
-                    128 + LINUX_SIGSEGV);
+                    syscall_status_signaled(LINUX_SIGSEGV));
             }
             let mut x0: usize = 0;
             for index: usize in 0..<31 {
@@ -5902,7 +5904,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             // this syscall, and so does a migration: the rerun must still
             // see the signal it was for. TakenSignal is linear, so each arm
             // has to say which of the two happened (GitHub issue #600).
-            let status: usize = 128 + taken_signal_number(taken);
+            let status: usize = syscall_status_signaled(taken_signal_number(taken));
             match kernel_syscall_exit_current_process(current_authority, status) {
                 SyscallAction::WaitInterrupt => {
                     taken_signal_restore(taken);
@@ -6424,7 +6426,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         return syscall_clone_current(current_authority, frame);
     }
     if (number == AARCH64_NR_EXIT || number == AARCH64_NR_EXIT_GROUP) {
-        return kernel_syscall_exit_current_process(current_authority, x0);
+        return kernel_syscall_exit_current_process(current_authority, x0 & 0xFF);
     }
     if (number == AARCH64_NR_WAIT4) {
         let requested_pid: usize = x0;
@@ -6554,7 +6556,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                         }
                         UserWriteRangeResult::Ok(range) => {
                             match user_write_u32(range, 0,
-                                    ((status & 0xFF) << 8) as u32) {
+                                    syscall_wait_status_word(status)) {
                                 UserWriteResult::Fault => {
                                     return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
                                 }
@@ -6820,7 +6822,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         }
         if (x0 == kernel_process_current_pid() &&
             kernel_process_current_signal_terminates(x1)) {
-            return kernel_syscall_exit_current_process(current_authority, 128 + x1);
+            return kernel_syscall_exit_current_process(current_authority, syscall_status_signaled(x1));
         }
         match kernel_process_signal_send(x0, x1) {
             ProcessSignalSendResult::Missing => {

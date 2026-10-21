@@ -223,7 +223,7 @@ fn terminal_probe() {
                 svc5(137, mask as *u8 as usize, 0, 0, 8, 0) != 17) { terminal_probe_fail(); }
             let mut status: [u8; 4];
             if (svc5(260, child, status as *u8 as usize, 0, 0, 0) != child ||
-                status[0] != 0 || status[1] != (128 + signum) as u8) { terminal_probe_fail(); }
+                status[0] != signum as u8 || status[1] != 0) { terminal_probe_fail(); }
             if (signum == 2) { terminal_probe_write(bs"termios: fatal INT PASS\n"); }
             else { terminal_probe_write(bs"termios: fatal QUIT PASS\n"); }
         }

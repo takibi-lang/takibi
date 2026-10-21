@@ -1,0 +1,63 @@
+// GitHub issue #882: the kernel's wait4 status word, against Linux's own.
+//
+// The kernel used to record a signal's end as exit code 128+signal, a
+// shell's $? convention, and wait4 encoded it as an exit: WIFSIGNALED was
+// false and WEXITSTATUS was 143 for a SIGTERM-killed child. A kernel
+// fixture then accepted that form as "this kernel's" and nothing compared
+// it with Linux. Here the host Linux is the reference: a forked child
+// kills itself (no timing involved) or exits, and the status word the host
+// wait4 returns must equal the one kernel/kernel/wait_status.tkb encodes.
+extern fn linux_syscall(nr: usize, a0: usize, a1: usize, a2: usize, a3: usize) -> isize;
+
+const X86_64_NR_GETPID: usize = 39;
+const X86_64_NR_FORK: usize = 57;
+const X86_64_NR_EXIT: usize = 60;
+const X86_64_NR_WAIT4: usize = 61;
+const X86_64_NR_KILL: usize = 62;
+
+// Forks a child that ends by `signal` when it is nonzero, else by exit
+// `code`, and returns the host's wait4 status word for it.
+fn host_status(signal: usize, code: usize) -> u32 {
+    let child: isize = linux_syscall(X86_64_NR_FORK, 0, 0, 0, 0);
+    if (child == 0) {
+        if (signal != 0) {
+            let me: isize = linux_syscall(X86_64_NR_GETPID, 0, 0, 0, 0);
+            linux_syscall(X86_64_NR_KILL, me as usize, signal, 0, 0);
+        }
+        linux_syscall(X86_64_NR_EXIT, code, 0, 0, 0);
+    }
+    let mut word: u32 = 0xFFFFFFFF;
+    let reaped: isize = linux_syscall(X86_64_NR_WAIT4, child as usize,
+                                      &word as usize, 0, 0);
+    if (reaped != child) { return 0xFFFFFFFF; }
+    return word;
+}
+
+fn compare(label: *u8, host: u32, kernel: u32) {
+    uart_puts(label);
+    uart_puts(": host ");
+    uart_print(host);
+    uart_puts(" kernel ");
+    uart_print(kernel);
+    if (host == kernel) { uart_puts(" ok\n"); } else { uart_puts(" MISMATCH\n"); }
+}
+
+fn app_main() {
+    // Signals whose default is to terminate without a core dump: the
+    // kernel writes no cores, and a host core (SIGSEGV here) would set bit
+    // 0x80 according to the host's core_pattern rather than to Linux's
+    // encoding.
+    compare("SIGHUP", host_status(1, 0),
+            syscall_wait_status_word(syscall_status_signaled(1)));
+    compare("SIGKILL", host_status(9, 0),
+            syscall_wait_status_word(syscall_status_signaled(9)));
+    compare("SIGUSR1", host_status(10, 0),
+            syscall_wait_status_word(syscall_status_signaled(10)));
+    compare("SIGTERM", host_status(15, 0),
+            syscall_wait_status_word(syscall_status_signaled(15)));
+    compare("exit 0", host_status(0, 0), syscall_wait_status_word(0));
+    compare("exit 143", host_status(0, 143), syscall_wait_status_word(143));
+    // exit_group keeps the code's low byte, as Linux does.
+    compare("exit 300", host_status(0, 300),
+            syscall_wait_status_word(300 & 0xFF));
+}
