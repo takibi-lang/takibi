@@ -2704,9 +2704,9 @@ private fn kernel_ddb_enter_stopped(
     ddb_snapshot.parent_pid = current_record.ppid;
     ddb_snapshot.process_state = current_record.state;
     ddb_snapshot.wait_reason = current_record.wait_reason;
-    ddb_snapshot.root_slot = kernel_process_current_slot();
+    ddb_snapshot.root_slot = process_slot_address(kernel_process_current_slot());
     let mut vm: AddressSpaceDiagnosticSnapshot =
-        ddb_vm_snapshot_stopped(stopped_world, scheduled_process_address_space_root_stopped(stopped_world, ddb_snapshot.root_slot), ddb_snapshot.process_pid);
+        ddb_vm_snapshot_stopped(stopped_world, scheduled_process_address_space_root_stopped(stopped_world, root_slot_of_key(ddb_snapshot.root_slot)), ddb_snapshot.process_pid);
     ddb_snapshot.root_live = 0;
     if (vm.live) { ddb_snapshot.root_live = 1; }
     ddb_snapshot.root_l1 = vm.l1_physical;
@@ -2751,7 +2751,7 @@ private fn kernel_ddb_enter_stopped(
         if (index < ddb_snapshot.process_count) {
             let mut process_vm: AddressSpaceDiagnosticSnapshot =
                 ddb_vm_snapshot_stopped(stopped_world,
-                    scheduled_process_address_space_root_stopped(stopped_world, ddb_snapshot.processes[index].root_slot),
+                    scheduled_process_address_space_root_stopped(stopped_world, root_slot_of_key(ddb_snapshot.processes[index].root_slot)),
                     ddb_snapshot.processes[index].pid);
             if (process_vm.live) {
                 ddb_snapshot.process_l2[index] = process_vm.l2_physical;
@@ -3536,7 +3536,7 @@ private fn crash_snapshot_shared_stopped(
     crash_snapshot_here().wait4_status_ptr = wait4;
     crash_snapshot_here().image_kind = image;
     match address_space_diagnostic_snapshot(stopped,
-            scheduled_process_address_space_root_stopped(stopped, crash_snapshot_here().root_slot)) {
+            scheduled_process_address_space_root_stopped(stopped, root_slot_of_key(crash_snapshot_here().root_slot))) {
         AddressSpaceDiagnosticResult::Busy => {
             kernel_boot_log("oops: vm unavailable reason=pool-busy\n");
         }
@@ -3624,7 +3624,7 @@ private fn crash_snapshot_capture(slot: usize, frame_sp: usize, origin: usize, c
     crash_snapshot_here().sp_el0 = crash_snapshot_read_sp_el0();
     crash_snapshot_here().tpidr_el0 = crash_snapshot_read_tpidr_el0();
     crash_snapshot_here().ttbr0_el1 = crash_snapshot_read_ttbr0_el1();
-    crash_snapshot_here().root_slot = kernel_process_current_slot();
+    crash_snapshot_here().root_slot = process_slot_address(kernel_process_current_slot());
     crash_snapshot_here().activity = kernel_activity_code_here();
     crash_snapshot_here().saved_frame_available = 0;
     if (origin == 0 && frame_sp != 0) {

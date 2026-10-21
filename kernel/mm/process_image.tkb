@@ -672,7 +672,7 @@ must_use variant ProcessImageRecordReady[root: usize] {
 
 fn process_image_record_ensure(root: usize @ identity)
         -> ProcessImageRecordReady[identity] !{unsafe} {
-    if (address_space_root_slot_valid(root) == false) {
+    if (address_space_root_key_valid(root) == false) {
         return ProcessImageRecordReady::Missing;
     }
     match process_image_record_pin(&process_image_pool, root) {
@@ -878,6 +878,10 @@ private fn process_image_root(root: AddressSpaceRoot) -> ProcessImageRoot {
 }
 
 fn process_image_root_index(root: ProcessImageRoot) -> usize {
+    return root_slot_word(address_space_root_slot(root.root));
+}
+
+fn process_image_root_slot(root: ProcessImageRoot) -> RootSlot {
     return address_space_root_slot(root.root);
 }
 
@@ -1042,9 +1046,9 @@ fn process_stack_load_word(stack: borrow [u8; PROCESS_STACK_LAYOUT_BYTES..],
 // root describing no clone. Safe to call on a root whose clone never got
 // far enough to be recorded: the fields it clears are already clear.
 fn process_clone_vm_rollback(dest_space: AddressSpaceRoot) {
-    let dest: usize = address_space_root_slot(dest_space);
+    let dest: usize = root_slot_word(address_space_root_slot(dest_space));
     address_space_release_user_mappings(dest_space);
-    if (address_space_root_slot_valid(dest)) {
+    if (address_space_root_key_valid(dest)) {
         let root: usize =
             process_image_narrow_root(dest);
         let evidence = match process_image_record_ensure(root) {
@@ -1070,21 +1074,21 @@ fn process_clone_vm_rollback(dest_space: AddressSpaceRoot) {
 // active), not a fixed "root 0" -- a process running on any root can
 // fork, not just the one on root 0.
 fn process_image_narrow_root(value: usize) -> usize !{unsafe} {
-    if (address_space_root_slot_valid(value)) { return value; }
+    if (address_space_root_key_valid(value)) { return value; }
     return 0;
 }
 
 fn process_image_clone_vm_begin(dest_space: AddressSpaceRoot) -> ProcessCloneVmResult !{unsafe} {
-    let dest_root: usize = address_space_root_slot(dest_space);
+    let dest_root: usize = root_slot_word(address_space_root_slot(dest_space));
     let mut source_space: AddressSpaceRoot = process_image_target_root_here();
-    if (address_space_root_slot_valid(dest_root) == false ||
-        dest_root == address_space_root_slot(source_space) ||
+    if (address_space_root_key_valid(dest_root) == false ||
+        dest_root == root_slot_word(address_space_root_slot(source_space)) ||
         address_space_is_live(dest_space) == false) {
         return ProcessCloneVmResult::OutOfMemory;
     }
     let dest: usize =
         process_image_narrow_root(dest_root);
-    let source: usize = address_space_root_slot(source_space);
+    let source: usize = root_slot_word(address_space_root_slot(source_space));
     // GitHub issue #448: a clone already owed back on this root would be
     // leaked by overwriting its bookkeeping. It cannot happen (a root
     // belongs to one process, and that process cannot fork into itself),
@@ -1224,8 +1228,8 @@ fn process_image_clone_vm_begin(dest_space: AddressSpaceRoot) -> ProcessCloneVmR
 // child" and "the parent" are relative to whoever is switching, not fixed
 // numbers.
 fn process_image_activate_root(target: AddressSpaceRoot) {
-    let root: usize = address_space_root_slot(target);
-    if (address_space_root_slot_valid(root) == false) { return; }
+    let root: usize = root_slot_word(address_space_root_slot(target));
+    if (address_space_root_key_valid(root) == false) { return; }
     // Root 0 owns permanent ASID 1 and never participates in rollover. Every
     // dynamic root uses the stopped preparation boundary, including exec and
     // boot-fixture callers outside the scheduler handoff paths.
@@ -1253,7 +1257,7 @@ fn process_image_commit_activation(
         AddressSpaceActivationCommitResult::Activated(target) => {
             process_image_set_target_root_here(target);
             kernel_process_trace_address_space_activate(
-                address_space_root_slot(target));
+                root_slot_word(address_space_root_slot(target)));
             return true;
         }
     }
@@ -1274,8 +1278,8 @@ fn process_image_cancel_activation(
 // the kernel could have in flight out of a global. Naming the root is what
 // lets two of them be outstanding at once.
 fn process_image_clone_vm_reap(dest_space: AddressSpaceRoot) -> ProcessCloneVmReapResult !{unsafe} {
-    let dest_root: usize = address_space_root_slot(dest_space);
-    if (address_space_root_slot_valid(dest_root) == false) {
+    let dest_root: usize = root_slot_word(address_space_root_slot(dest_space));
+    if (address_space_root_key_valid(dest_root) == false) {
         return ProcessCloneVmReapResult::Missing;
     }
     let dest: usize = process_image_narrow_root(dest_root);
@@ -1288,7 +1292,7 @@ fn process_image_clone_vm_reap(dest_space: AddressSpaceRoot) -> ProcessCloneVmRe
     // non-preemptible EL1 span. Activate the retained source before releasing
     // mappings from a destination that may still be installed in TTBR0.
     kernel_process_activate_stable_root(
-        scheduled_process_address_space_root_lookup(source));
+        address_space_root_of_key(source));
     process_clone_vm_rollback(dest_space);
     clone_last_reaped_count[process_image_cpu_index()] = count;
     return ProcessCloneVmReapResult::Reaped;
@@ -1383,28 +1387,29 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
     // not the bare number 1 -- see
     // scheduled_process_probe_slot_acquire for why a probe has to be a
     // process to have a root of its own.
-    let child_root: usize = scheduled_process_probe_slot_acquire();
-    let mut child_root_root: AddressSpaceRoot = scheduled_process_address_space_root_lookup(child_root);
+    let mut child_root_slot: ProcessSlot = scheduled_process_probe_slot_acquire();
+    let child_root: usize = process_slot_address(child_root_slot);
+    let mut child_root_root: AddressSpaceRoot = scheduled_process_address_space_root_lookup(child_root_slot);
     if (child_root == 0) { return false; }
     if (address_space_is_live(child_root_root)) {
-        scheduled_process_probe_slot_release(child_root);
+        scheduled_process_probe_slot_release(child_root_slot);
         return false;
     }
-    match address_space_ensure_root(child_root) {
+    match address_space_ensure_root(child_root_slot) {
         AddressSpaceEnsureResult::Ok => {}
         AddressSpaceEnsureResult::SlotOutOfRange => {
-            scheduled_process_probe_slot_release(child_root);
+            scheduled_process_probe_slot_release(child_root_slot);
             return false;
         }
         AddressSpaceEnsureResult::OutOfMemory => {
-            scheduled_process_probe_slot_release(child_root);
+            scheduled_process_probe_slot_release(child_root_slot);
             return false;
         }
     }
     match page_alloc(PageOwnerTag::UserPage) {
         PageAllocResult::OutOfMemory => {
             address_space_release_root(child_root_root);
-            scheduled_process_probe_slot_release(child_root);
+            scheduled_process_probe_slot_release(child_root_slot);
             return false;
         }
         PageAllocResult::Allocated(stack_page) => {
@@ -1412,12 +1417,12 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
                     address_space_boot_root(), process_stack_top_page(), stack_page, USER_RW_XN_FLAGS) {
                 AddressSpacePteWriteResult::Invalid => {
                     address_space_release_root(child_root_root);
-                    scheduled_process_probe_slot_release(child_root);
+                    scheduled_process_probe_slot_release(child_root_slot);
                     return false;
                 }
                 AddressSpacePteWriteResult::OutOfMemory => {
                     address_space_release_root(child_root_root);
-                    scheduled_process_probe_slot_release(child_root);
+                    scheduled_process_probe_slot_release(child_root_slot);
                     return false;
                 }
                 AddressSpacePteWriteResult::Written => {
@@ -1536,7 +1541,7 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
     process_image_set_active_page_count(0, evidence, 0);
     process_image_set_stack_lowest_l3(0, evidence, process_stack_top_page());
     address_space_release_root(child_root_root);
-    scheduled_process_probe_slot_release(child_root);
+    scheduled_process_probe_slot_release(child_root_slot);
     return ok;
 }
 
@@ -1597,7 +1602,7 @@ fn process_image_pages_discard(pages: sink ProcessImagePages[image]) {}
 // one is mapped over the same window, and by the time install runs the old
 // image's page-table entries have already been overwritten.
 fn process_image_exec_image_installed(root: usize) -> bool !{unsafe} {
-    if (address_space_root_slot_valid(root) == false) { return false; }
+    if (address_space_root_key_valid(root) == false) { return false; }
     return process_image_record_read(root).exec_image_installed;
 }
 
@@ -2141,7 +2146,7 @@ private fn process_image_load_page_ext2(slot: borrow ProcessImageSlot[0],
 // transferred user page and every dynamic L3 table page. It needs no
 // per-image page-index list and scales with populated branches.
 private fn process_image_cleanup_root(target: AddressSpaceRoot) {
-    let root: usize = address_space_root_slot(target);
+    let root: usize = root_slot_word(address_space_root_slot(target));
     address_space_release_user_mappings(target);
     let evidence = match process_image_record_ensure(root) {
         ProcessImageRecordReady::Missing => { process_image_record_missing_note(); return; }
@@ -2575,8 +2580,8 @@ fn process_image_pair_map_ext2_in_root(
         argv: borrow []const u8,
         argc: usize,
         target: AddressSpaceRoot) -> ProcessImagePairProbeResult {
-    let root: usize = address_space_root_slot(target);
-    if (address_space_root_slot_valid(root) == false ||
+    let root: usize = root_slot_word(address_space_root_slot(target));
+    if (address_space_root_key_valid(root) == false ||
         address_space_is_live(target) == false) {
         return ProcessImagePairProbeResult::Invalid;
     }
@@ -2726,8 +2731,8 @@ fn process_image_map_ext2_in_root(plan: DistroElfLoadPlan,
                                   argv: borrow []const u8,
                                   argc: usize,
                                   target: AddressSpaceRoot) -> ProcessImageMapResult {
-    let root: usize = address_space_root_slot(target);
-    if (address_space_root_slot_valid(root) == false ||
+    let root: usize = root_slot_word(address_space_root_slot(target));
+    if (address_space_root_key_valid(root) == false ||
         address_space_is_live(target) == false) {
         return ProcessImageMapResult::InvalidImage;
     }

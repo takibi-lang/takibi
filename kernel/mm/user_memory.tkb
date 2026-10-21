@@ -413,7 +413,7 @@ fn user_range_reprotect(root: AddressSpaceRoot, first_l3: usize, last_l3: usize,
                         new_flags: usize) {
     let mut index: usize = first_l3;
     while (index <= last_l3) {
-        let root_slot: usize = address_space_root_slot(root);
+        let root_slot: usize = root_slot_word(address_space_root_slot(root));
         let old_pte: usize = address_space_pte_read(root, index);
         let phys: usize = old_pte & USER_PAGE_PHYS_MASK;
         match address_space_pte_write(root, index, phys | new_flags) {
@@ -542,24 +542,26 @@ fn user_memory_root_isolation_probe() -> bool !{unsafe} {
     // the bare slots 14 and 15 -- the top of a table that no longer has a
     // top. A root is a live process's record now, so the probe allocates
     // two processes and uses theirs.
-    let root_a: usize = scheduled_process_probe_slot_acquire();
-    let root_b: usize = scheduled_process_probe_slot_acquire();
-    let mut root_a_root: AddressSpaceRoot = scheduled_process_address_space_root_lookup(root_a);
-    let mut root_b_root: AddressSpaceRoot = scheduled_process_address_space_root_lookup(root_b);
+    let mut root_a_slot: ProcessSlot = scheduled_process_probe_slot_acquire();
+    let root_a: usize = process_slot_address(root_a_slot);
+    let mut root_b_slot: ProcessSlot = scheduled_process_probe_slot_acquire();
+    let root_b: usize = process_slot_address(root_b_slot);
+    let mut root_a_root: AddressSpaceRoot = scheduled_process_address_space_root_lookup(root_a_slot);
+    let mut root_b_root: AddressSpaceRoot = scheduled_process_address_space_root_lookup(root_b_slot);
     if (root_a == 0 || root_b == 0 ||
         address_space_is_live(root_a_root) || address_space_is_live(root_b_root)) {
-        scheduled_process_probe_slot_release(root_b);
-        scheduled_process_probe_slot_release(root_a);
+        scheduled_process_probe_slot_release(root_b_slot);
+        scheduled_process_probe_slot_release(root_a_slot);
         return false;
     }
     let mut roots_ok: bool = true;
-    match address_space_ensure_root(root_a) {
+    match address_space_ensure_root(root_a_slot) {
         AddressSpaceEnsureResult::Ok => {}
         AddressSpaceEnsureResult::SlotOutOfRange => { roots_ok = false; }
         AddressSpaceEnsureResult::OutOfMemory => { roots_ok = false; }
     }
     if (roots_ok) {
-        match address_space_ensure_root(root_b) {
+        match address_space_ensure_root(root_b_slot) {
             AddressSpaceEnsureResult::Ok => {}
             AddressSpaceEnsureResult::SlotOutOfRange => { roots_ok = false; }
             AddressSpaceEnsureResult::OutOfMemory => { roots_ok = false; }
@@ -568,8 +570,8 @@ fn user_memory_root_isolation_probe() -> bool !{unsafe} {
     if (roots_ok == false) {
         address_space_release_root(root_b_root);
         address_space_release_root(root_a_root);
-        scheduled_process_probe_slot_release(root_b);
-        scheduled_process_probe_slot_release(root_a);
+        scheduled_process_probe_slot_release(root_b_slot);
+        scheduled_process_probe_slot_release(root_a_slot);
         return false;
     }
     let va: usize = USER_TEXT_VA + index * PAGE_SIZE;
@@ -577,8 +579,8 @@ fn user_memory_root_isolation_probe() -> bool !{unsafe} {
         PageAllocResult::OutOfMemory => {
             address_space_release_root(root_b_root);
             address_space_release_root(root_a_root);
-            scheduled_process_probe_slot_release(root_b);
-            scheduled_process_probe_slot_release(root_a);
+            scheduled_process_probe_slot_release(root_b_slot);
+            scheduled_process_probe_slot_release(root_a_slot);
             return false;
         }
         PageAllocResult::Allocated(page_a) => {
@@ -587,8 +589,8 @@ fn user_memory_root_isolation_probe() -> bool !{unsafe} {
                     page_free(page_a);
                     address_space_release_root(root_b_root);
                     address_space_release_root(root_a_root);
-                    scheduled_process_probe_slot_release(root_b);
-                    scheduled_process_probe_slot_release(root_a);
+                    scheduled_process_probe_slot_release(root_b_slot);
+                    scheduled_process_probe_slot_release(root_a_slot);
                     return false;
                 }
                 PageAllocResult::Allocated(page_b) => {
@@ -596,8 +598,8 @@ fn user_memory_root_isolation_probe() -> bool !{unsafe} {
                         root_a_root, root_b_root, index, va, page_a, page_b);
                     address_space_release_root(root_b_root);
                     address_space_release_root(root_a_root);
-                    scheduled_process_probe_slot_release(root_b);
-                    scheduled_process_probe_slot_release(root_a);
+                    scheduled_process_probe_slot_release(root_b_slot);
+                    scheduled_process_probe_slot_release(root_a_slot);
                     return ok;
                 }
             }

@@ -831,7 +831,7 @@ private fn kernel_process_child_exec_prepare_with(current_authority: borrow Proc
     // user_payload's own fork of a UART-block/scheduler-preempt child)
     // needs its own current root here instead.
     let mut child_space: AddressSpaceRoot = kernel_process_current_root(current_authority);
-    let child_root: usize = address_space_root_slot(child_space);
+    let child_root: usize = root_slot_word(address_space_root_slot(child_space));
     // Which VM this exec replaces depends on how the process got the one it
     // has. A forked child is still running on the clone of its parent's, so
     // that clone is what gets reaped. A process execing for the SECOND time
@@ -1304,7 +1304,7 @@ fn kernel_test_driver_run() {
     // the kernel.
     kernel_process_execution_reset();
     let fd_context_ready: bool = match unified_fd_context_ensure(
-            kernel_syscall_process_slot()) {
+            kernel_syscall_process_key()) {
         ProcessFdContextReady::Missing => { false }
         ProcessFdContextReady::Ready(evidence) => { true }
     };
@@ -1544,7 +1544,7 @@ private fn kernel_init_process_start(mount: Ext2Mount, image: Ext2ExecImage) !{u
         }
         InitProcessCreateResult::Created(created) => { created }
     };
-    let init_slot: usize = kernel_process_init_slot(init);
+    let mut init_slot: ProcessSlot = kernel_process_init_slot(init);
     match process_image_map_ext2_in_root(
             image.plan, mount, image.inode, image.file_length,
             bs"bin/busybox.static\0init\0", 2,

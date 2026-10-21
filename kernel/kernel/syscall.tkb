@@ -421,14 +421,14 @@ private fn syscall_rlimit_load(field: borrow [u8; 8..]) -> usize {
 must_use variant SyscallPathResult { Fault; Invalid; Name([]u8); }
 
 fn kernel_syscall_exec_pending() -> bool {
-    let slot: usize = kernel_syscall_process_slot();
+    let mut slot: ProcessSlot = kernel_syscall_process_slot();
     let guard = process_run_lock();
     let value: bool = scheduled_process_exec_pending(guard, slot);
     process_run_unlock(guard);
     return value;
 }
 fn kernel_syscall_exec_argc() -> usize {
-    let slot: usize = kernel_syscall_process_slot();
+    let mut slot: ProcessSlot = kernel_syscall_process_slot();
     let guard = process_run_lock();
     let value: usize = scheduled_process_exec_argc(guard, slot);
     process_run_unlock(guard);
@@ -553,7 +553,7 @@ private fn kernel_syscall_exec_args_overlap_probe() -> bool !{unsafe} {
 }
 
 fn kernel_syscall_exec_argv_copy(destination: borrow [u8; 512..]) !{unsafe} {
-    let slot: usize = kernel_syscall_process_slot();
+    let mut slot: ProcessSlot = kernel_syscall_process_slot();
     let guard = process_run_lock();
     let copied: usize = slice_copy(destination as []u8,
         scheduled_process_command_line(guard, slot) as []u8);
@@ -605,7 +605,7 @@ private fn syscall_script_line_here(slot: borrow SyscallSlot[0]) -> [u8; 256..] 
 // `/bin/httpd`. Zero when no ELF inode was resolved (no filesystem yet, or
 // a `#!` script, whose image is the interpreter argv[0] names).
 fn kernel_syscall_exec_inode() -> usize {
-    let slot: usize = kernel_syscall_process_slot();
+    let mut slot: ProcessSlot = kernel_syscall_process_slot();
     let guard = process_run_lock();
     let value: usize = scheduled_process_exec_inode(guard, slot);
     process_run_unlock(guard);
@@ -1159,23 +1159,28 @@ must_use variant KernelListenerLookupResult {
 // GitHub issue #245: fd-table process slot == process.tkb's own
 // ProcessHandle.pool_index (same convention as the address-space root),
 // so this is now a direct pass-through instead of a binary pid==2?1:0.
-fn kernel_syscall_process_slot() -> usize {
+fn kernel_syscall_process_slot() -> ProcessSlot {
     return kernel_process_current_slot();
 }
 
+// The same process as the key the fd-context table indexes by (#858).
+fn kernel_syscall_process_key() -> usize {
+    return process_slot_address(kernel_process_current_slot());
+}
+
 fn kernel_syscall_file_lookup(fd: usize) -> UnifiedFileResult {
-    return unified_file_lookup(kernel_syscall_process_slot(), fd);
+    return unified_file_lookup(kernel_syscall_process_key(), fd);
 }
 
 fn kernel_syscall_directory_is_open(fd: usize) -> bool {
-    match unified_directory_lookup(kernel_syscall_process_slot(), fd) {
+    match unified_directory_lookup(kernel_syscall_process_key(), fd) {
         UnifiedDirectoryResult::Missing => { return false; }
         UnifiedDirectoryResult::Found(handle) => { return true; }
     }
 }
 
 fn kernel_syscall_directory_inode(fd: usize) -> usize {
-    match unified_directory_lookup(kernel_syscall_process_slot(), fd) {
+    match unified_directory_lookup(kernel_syscall_process_key(), fd) {
         UnifiedDirectoryResult::Missing => { return 0; }
         UnifiedDirectoryResult::Found(handle) => {
             return unified_directory_inode(handle);
@@ -1191,7 +1196,7 @@ fn kernel_syscall_file_is_open(fd: usize) -> bool {
 }
 
 fn kernel_syscall_terminal_is_open(fd: usize) -> bool {
-    return unified_terminal_is_open(kernel_syscall_process_slot(), fd);
+    return unified_terminal_is_open(kernel_syscall_process_key(), fd);
 }
 
 fn kernel_syscall_file_readable(fd: usize) -> bool {
@@ -1222,14 +1227,14 @@ fn kernel_syscall_file_inode(fd: usize) -> usize {
 }
 
 fn kernel_syscall_file_offset(fd: usize) -> usize {
-    match unified_fd_offset(kernel_syscall_process_slot(), fd) {
+    match unified_fd_offset(kernel_syscall_process_key(), fd) {
         UnifiedOffsetResult::Missing => { return 0; }
         UnifiedOffsetResult::Found(value) => { return value; }
     }
 }
 
 fn kernel_syscall_file_set_offset(fd: usize, value: usize) -> bool {
-    match unified_fd_set_offset(kernel_syscall_process_slot(), fd, value) {
+    match unified_fd_set_offset(kernel_syscall_process_key(), fd, value) {
         UnifiedFdResult::Invalid => { return false; }
         UnifiedFdResult::Ok => { return true; }
     }
@@ -1267,7 +1272,7 @@ private fn syscall_procfs_fixed_dirent(range: borrow UserWriteRange[process],
 fn kernel_syscall_procfs_open(node: ProcfsNode, fd: usize)
         -> SyscallAction {
     if (procfs_node_is_directory(node)) {
-        match unified_directory_open(kernel_syscall_process_slot(), fd,
+        match unified_directory_open(kernel_syscall_process_key(), fd,
                                      node.inode) {
             UnifiedOpenResult::Invalid => {
                 return SyscallAction::Resume(LINUX_EBADF);
@@ -1278,7 +1283,7 @@ fn kernel_syscall_procfs_open(node: ProcfsNode, fd: usize)
             UnifiedOpenResult::Ok => { return SyscallAction::Resume(fd); }
         }
     }
-    match unified_file_open(kernel_syscall_process_slot(), fd, node.inode,
+    match unified_file_open(kernel_syscall_process_key(), fd, node.inode,
                             true, procfs_node_is_writable(node)) {
         UnifiedOpenResult::Invalid => {
             return SyscallAction::Resume(LINUX_EBADF);
@@ -1295,7 +1300,7 @@ fn kernel_syscall_procfs_open(node: ProcfsNode, fd: usize)
 // the call is the point: two processes can now be refused at different
 // numbers.
 fn kernel_syscall_fd_limit_soft() -> usize !{unsafe} {
-    match unified_process_fd_limit(kernel_syscall_process_slot()) {
+    match unified_process_fd_limit(kernel_syscall_process_key()) {
         UnifiedFdLimitResult::Missing => { return 0; }
         UnifiedFdLimitResult::Found(pair) => {
             let (soft, hard) = pair;
@@ -1305,14 +1310,14 @@ fn kernel_syscall_fd_limit_soft() -> usize !{unsafe} {
 }
 
 fn kernel_syscall_heap_break() -> usize {
-    match unified_process_heap_break(kernel_syscall_process_slot()) {
+    match unified_process_heap_break(kernel_syscall_process_key()) {
         UnifiedOffsetResult::Missing => { return 0; }
         UnifiedOffsetResult::Found(value) => { return value; }
     }
 }
 
 fn kernel_syscall_heap_set(value: usize) -> bool {
-    let process: usize = kernel_syscall_process_slot();
+    let process: usize = kernel_syscall_process_key();
     let evidence = match unified_fd_context_lookup(process) {
         ProcessFdContextReady::Missing => { return false; }
         ProcessFdContextReady::Ready(ready) => { ready }
@@ -1329,13 +1334,13 @@ fn kernel_syscall_heap_set(value: usize) -> bool {
 fn syscall_munmap_pages(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], address: usize, length: usize) {
     let (span_ok, first, last) = user_range_l3_span(address, length);
     if (span_ok == false) { return; }
-    let process: usize = kernel_syscall_process_slot();
+    let process: usize = kernel_syscall_process_key();
     let evidence = match unified_fd_context_lookup(process) {
         ProcessFdContextReady::Missing => { return; }
         ProcessFdContextReady::Ready(ready) => { ready }
     };
     let mut root: AddressSpaceRoot = kernel_process_current_root(current_authority);
-    let slot: usize = address_space_root_slot(root);
+    let slot: usize = root_slot_word(address_space_root_slot(root));
     let mut index: usize = first;
     while (index <= last) {
         if (user_page_writable(address_space_pte_read(root, index))) {
@@ -1348,14 +1353,14 @@ fn syscall_munmap_pages(current_authority: borrow ProcessCurrent[current_process
 }
 
 fn kernel_syscall_heap_start() -> usize {
-    match unified_process_heap_start(kernel_syscall_process_slot()) {
+    match unified_process_heap_start(kernel_syscall_process_key()) {
         UnifiedOffsetResult::Missing => { return 0; }
         UnifiedOffsetResult::Found(value) => { return value; }
     }
 }
 
 fn kernel_syscall_heap_limit() -> usize {
-    match unified_process_heap_limit(kernel_syscall_process_slot()) {
+    match unified_process_heap_limit(kernel_syscall_process_key()) {
         UnifiedOffsetResult::Missing => { return 0; }
         UnifiedOffsetResult::Found(value) => { return value; }
     }
@@ -1366,7 +1371,7 @@ fn kernel_syscall_heap_limit() -> usize {
 // parent shell's descriptors or global TCP state.
 fn kernel_syscall_process_configure_current(
         heap_start: usize, heap_limit: usize) {
-    let process: usize = kernel_syscall_process_slot();
+    let process: usize = kernel_syscall_process_key();
     let evidence = match unified_fd_context_lookup(process) {
         ProcessFdContextReady::Missing => { return; }
         ProcessFdContextReady::Ready(ready) => { ready }
@@ -1384,8 +1389,9 @@ fn kernel_syscall_process_configure_current(
 // record already has its context and image record from allocation, so the
 // two ensures below find them. The image record is its root's: root 0's for
 // the boot thread, which runs on the kernel's own root.
-fn kernel_syscall_process_configure(process: usize, heap_start: usize,
+fn kernel_syscall_process_configure(slot: ProcessSlot, heap_start: usize,
                                     heap_limit: usize) !{unsafe} {
+    let process: usize = process_slot_address(slot);
     unified_fd_context_pool_init();
     unified_fd_table_init();
     match unified_fd_context_ensure(process) {
@@ -1395,8 +1401,8 @@ fn kernel_syscall_process_configure(process: usize, heap_start: usize,
                 "physical page allocator" as *u8, page_allocator_total_count());
         }
     }
-    let image_root: usize = address_space_root_slot(
-        scheduled_process_address_space_root_lookup(process));
+    let image_root: usize = root_slot_word(address_space_root_slot(
+        scheduled_process_address_space_root_lookup(slot)));
     match process_image_record_ensure(image_root) {
         ProcessImageRecordReady::Ready(evidence) => {}
         ProcessImageRecordReady::Missing => {
@@ -1451,10 +1457,11 @@ fn kernel_syscall_process_configure(process: usize, heap_start: usize,
 // pool_index kernel_process_clone_begin() actually allocated, passed in
 // by the caller once it knows it (see the CLONE syscall handler below,
 // which now calls kernel_process_clone_begin() first for exactly this).
-fn kernel_syscall_clone_files_begin(parent_slot: usize, child_slot: usize)
+fn kernel_syscall_clone_files_begin(parent_slot: ProcessSlot, child_slot: ProcessSlot)
         -> UnifiedFdResult {
     if (scheduled_process_slot_valid(child_slot)) {
-        match unified_fd_clone(parent_slot, child_slot) {
+        match unified_fd_clone(process_slot_address(parent_slot),
+                               process_slot_address(child_slot)) {
             UnifiedFdResult::Invalid => {
                 let mut failed: CloneFileState = { false };
                 let state_guard = process_run_lock();
@@ -1475,7 +1482,7 @@ fn kernel_syscall_clone_files_begin(parent_slot: usize, child_slot: usize)
 }
 
 fn kernel_connected_fd_is_open(fd: usize) -> bool {
-    match unified_socket_lookup(kernel_syscall_process_slot(), fd,
+    match unified_socket_lookup(kernel_syscall_process_key(), fd,
                                 UnifiedFdKind::Connection) {
         UnifiedSocketResult::Missing => { return false; }
         UnifiedSocketResult::Found(handle) => { return true; }
@@ -1483,14 +1490,14 @@ fn kernel_connected_fd_is_open(fd: usize) -> bool {
 }
 
 fn kernel_connected_fd_clear(fd: usize) {
-    match unified_fd_close(kernel_syscall_process_slot(), fd) {
+    match unified_fd_close(kernel_syscall_process_key(), fd) {
         UnifiedFdResult::Invalid => {}
         UnifiedFdResult::Ok => {}
     }
 }
 
 fn kernel_connection_fd_lookup(fd: usize) -> KernelConnectionLookupResult {
-    match unified_socket_lookup(kernel_syscall_process_slot(), fd,
+    match unified_socket_lookup(kernel_syscall_process_key(), fd,
                                 UnifiedFdKind::Connection) {
         UnifiedSocketResult::Missing => {}
         UnifiedSocketResult::Found(handle) => {
@@ -1505,7 +1512,7 @@ fn kernel_connection_fd_lookup(fd: usize) -> KernelConnectionLookupResult {
 }
 
 fn kernel_socket_fd_alloc(first: usize) -> KernelSocketFdAllocResult !{unsafe} {
-    match unified_fd_alloc(kernel_syscall_process_slot(), first) {
+    match unified_fd_alloc(kernel_syscall_process_key(), first) {
         UnifiedFdAllocResult::Full => { return KernelSocketFdAllocResult::Full; }
         UnifiedFdAllocResult::Allocated(fd) => {
             return KernelSocketFdAllocResult::Allocated(fd);
@@ -1514,7 +1521,7 @@ fn kernel_socket_fd_alloc(first: usize) -> KernelSocketFdAllocResult !{unsafe} {
 }
 
 fn kernel_listener_fd_lookup(fd: usize) -> KernelListenerLookupResult !{unsafe} {
-    match unified_socket_lookup(kernel_syscall_process_slot(), fd,
+    match unified_socket_lookup(kernel_syscall_process_key(), fd,
                                 UnifiedFdKind::Listener) {
         UnifiedSocketResult::Missing => {}
         UnifiedSocketResult::Found(handle) => {
@@ -1525,7 +1532,7 @@ fn kernel_listener_fd_lookup(fd: usize) -> KernelListenerLookupResult !{unsafe} 
 }
 
 fn kernel_listener_handle(fd: usize) -> UnifiedSocketResult {
-    return unified_socket_lookup(kernel_syscall_process_slot(), fd,
+    return unified_socket_lookup(kernel_syscall_process_key(), fd,
                                  UnifiedFdKind::Listener);
 }
 
@@ -1629,7 +1636,7 @@ fn kernel_listener_set_port(fd: usize, port: u16) -> bool {
 }
 
 fn kernel_connected_fd_duplicate(old_fd: usize, new_fd: usize) -> bool !{unsafe} {
-    match unified_fd_duplicate(kernel_syscall_process_slot(), old_fd,
+    match unified_fd_duplicate(kernel_syscall_process_key(), old_fd,
                                new_fd) {
         UnifiedFdInstallResult::Invalid => { return false; }
         UnifiedFdInstallResult::RefOverflow => { return false; }
@@ -1651,12 +1658,12 @@ fn kernel_regular_fd_duplicate(old_fd: usize, new_fd: usize) -> bool {
     if (kernel_syscall_terminal_is_open(new_fd) ||
         kernel_syscall_file_is_open(new_fd) ||
         kernel_syscall_directory_is_open(new_fd)) {
-        match unified_fd_close(kernel_syscall_process_slot(), new_fd) {
+        match unified_fd_close(kernel_syscall_process_key(), new_fd) {
             UnifiedFdResult::Invalid => { return false; }
             UnifiedFdResult::Ok => {}
         }
     }
-    match unified_fd_duplicate(kernel_syscall_process_slot(), old_fd, new_fd) {
+    match unified_fd_duplicate(kernel_syscall_process_key(), old_fd, new_fd) {
         UnifiedFdInstallResult::Invalid => { return false; }
         UnifiedFdInstallResult::RefOverflow => { return false; }
         UnifiedFdInstallResult::NoMemory => { return false; }
@@ -1665,7 +1672,7 @@ fn kernel_regular_fd_duplicate(old_fd: usize, new_fd: usize) -> bool {
 }
 
 fn kernel_connection_fd_identity(fd: usize) -> usize {
-    match unified_socket_lookup(kernel_syscall_process_slot(), fd,
+    match unified_socket_lookup(kernel_syscall_process_key(), fd,
                                 UnifiedFdKind::Connection) {
         UnifiedSocketResult::Missing => { return 0; }
         UnifiedSocketResult::Found(handle) => {
@@ -1771,7 +1778,7 @@ fn kernel_connected_transport_release_owned(
 // the owner either: only a holder can duplicate a descriptor, and a count
 // of one means the only holder is the caller.
 fn kernel_connected_descriptor_close(fd: usize) -> bool {
-    match unified_socket_lookup(kernel_syscall_process_slot(), fd,
+    match unified_socket_lookup(kernel_syscall_process_key(), fd,
                                 UnifiedFdKind::Connection) {
         UnifiedSocketResult::Missing => { return false; }
         UnifiedSocketResult::Found(handle) => {
@@ -1817,7 +1824,7 @@ fn kernel_connected_descriptor_close(fd: usize) -> bool {
 // kernel_syscall_process_slot() reports here, and is the slot whose
 // CloneFileState this reaps.
 fn kernel_syscall_clone_files_reap() -> KernelFdReapResult {
-    let child_slot: usize = kernel_syscall_process_slot();
+    let mut child_slot: ProcessSlot = kernel_syscall_process_slot();
     if (scheduled_process_slot_valid(child_slot)) {
         let state_guard = process_run_lock();
         let mut state: CloneFileState =
@@ -1833,7 +1840,7 @@ fn kernel_syscall_clone_files_reap() -> KernelFdReapResult {
         let mut scanning: bool = true;
         while (scanning) {
             scanning = false;
-            match unified_fd_next_open(child_slot, from) {
+            match unified_fd_next_open(process_slot_address(child_slot), from) {
                 UnifiedFdScanResult::Done => {}
                 UnifiedFdScanResult::Found(fd) => {
                     if (kernel_connected_fd_is_open(fd)) {
@@ -1846,7 +1853,7 @@ fn kernel_syscall_clone_files_reap() -> KernelFdReapResult {
                 }
             }
         }
-        match unified_fd_destroy(child_slot) {
+        match unified_fd_destroy(process_slot_address(child_slot)) {
             UnifiedFdResult::Invalid => { return KernelFdReapResult::Failed; }
             UnifiedFdResult::Ok => {}
         }
@@ -2102,7 +2109,7 @@ fn syscall_io_action(current_authority: borrow ProcessCurrent[current_process, P
             return SyscallAction::Block;
         }
         SyscallIoResult::UartWait => {
-            let process_slot: usize = kernel_syscall_process_slot();
+            let mut process_slot: ProcessSlot = kernel_syscall_process_slot();
             let delivery_guard = process_run_lock();
             scheduled_process_set_uart_block_delivery(
                 delivery_guard, process_slot, UartBlockDelivery::Read);
@@ -2919,7 +2926,7 @@ fn syscall_signal_wait(current_authority: borrow ProcessCurrent[current_process,
         kernel_process_current_arm_deadline(current_authority, deadline, LINUX_EAGAIN);
     }
     kernel_process_current_prepare_signal_wait(current_authority, wait_set);
-    let process_slot: usize = kernel_syscall_process_slot();
+    let mut process_slot: ProcessSlot = kernel_syscall_process_slot();
     let mut first_init_wait: bool = false;
     if (kernel_process_current_pid() == 1) {
         let logged_guard = process_run_lock();
@@ -3027,7 +3034,7 @@ fn syscall_ppoll_dispatch(current_authority: borrow ProcessCurrent[current_proce
                 // run lock (#547) covers a byte that arrives before it
                 // sleeps.
                 {
-                    let process_slot: usize = kernel_syscall_process_slot();
+                    let mut process_slot: ProcessSlot = kernel_syscall_process_slot();
                     if (scheduled_process_slot_valid(process_slot)) {
                         let delivery_guard = process_run_lock();
                         scheduled_process_set_uart_block_delivery(
@@ -3110,7 +3117,7 @@ fn syscall_terminal_settings_commit(
 fn syscall_terminal_ioctl(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], fd: usize, request: usize, address: usize)
         -> SyscallAction !{unsafe} {
     if (kernel_syscall_terminal_is_open(fd) == false) {
-        match unified_fd_next_open(kernel_syscall_process_slot(), fd) {
+        match unified_fd_next_open(kernel_syscall_process_key(), fd) {
             UnifiedFdScanResult::Done => { return SyscallAction::Resume(LINUX_EBADF); }
             UnifiedFdScanResult::Found(open) => {
                 if (open != fd) { return SyscallAction::Resume(LINUX_EBADF); }
@@ -3206,7 +3213,7 @@ private fn syscall_terminal_note_wait() {
 }
 
 private fn syscall_terminal_ppoll_probe() -> bool {
-    let slot: usize = kernel_syscall_process_slot();
+    let mut slot: ProcessSlot = kernel_syscall_process_slot();
     if (scheduled_process_slot_valid(slot) == false) { return false; }
     let guard = process_run_lock();
     let command = scheduled_process_command_line(guard, slot);
@@ -3250,7 +3257,7 @@ fn syscall_read_uart(current_authority: borrow ProcessCurrent[current_process, P
                 // peer whose only relatives run on core 0 has no Ready
                 // successor HERE, and an EL1 wait there held a CPU for
                 // nothing.
-                let process_slot: usize = kernel_syscall_process_slot();
+                let mut process_slot: ProcessSlot = kernel_syscall_process_slot();
                 if (scheduled_process_slot_valid(process_slot)) {
                     return SyscallIoResult::UartWait;
                 }
@@ -3472,7 +3479,7 @@ fn kernel_syscall_wait4_deliver(
         parent: borrow ScheduledProcessOwner[process],
         resuming: borrow ProcessCurrent[process, ProcessState::Running],
         frame: borrow FrameRef[process], reaped_pid: usize) !{unsafe} {
-    let parent_slot: usize = scheduled_process_owner_slot(parent);
+    let mut parent_slot: ProcessSlot = scheduled_process_owner_slot(parent);
     let wait4_status_ptr: usize =
         scheduled_process_record_wait4_status_ptr_owned(parent);
     if (wait4_status_ptr != 0) {
@@ -3596,7 +3603,7 @@ fn kernel_syscall_uart_deliver(
         waiter: borrow ScheduledProcessOwner[process],
         frame: borrow FrameRef[process], value: usize)
         -> KernelUartDeliveryResult !{interrupt} {
-    let process_slot: usize = scheduled_process_owner_slot(waiter);
+    let mut process_slot: ProcessSlot = scheduled_process_owner_slot(waiter);
     if (scheduled_process_slot_valid(process_slot)) {
         match scheduled_process_uart_block_delivery(guard, process_slot) {
             UartBlockDelivery::Scalar => {
@@ -3615,7 +3622,7 @@ fn kernel_syscall_uart_deliver(
 }
 
 fn kernel_syscall_uart_block_prepare(frame: borrow FrameRef[process]) {
-    let process_slot: usize = kernel_syscall_process_slot();
+    let mut process_slot: ProcessSlot = kernel_syscall_process_slot();
     if (scheduled_process_slot_valid(process_slot)) {
         let guard = process_run_lock();
         let delivery: UartBlockDelivery =
@@ -3739,7 +3746,7 @@ fn kernel_syscall_block_return(frame_sp: usize) {
             // syscall instead of treating an ordinary multicore race as fatal.
             // A terminal read was already rewound by uart_block_prepare above;
             // every other blocker still needs the rewind here.
-            let retry_slot: usize = kernel_syscall_process_slot();
+            let mut retry_slot: ProcessSlot = kernel_syscall_process_slot();
             let retry_guard = process_run_lock();
             let retry_delivery: UartBlockDelivery =
                 scheduled_process_uart_block_delivery(retry_guard, retry_slot);
@@ -3930,7 +3937,7 @@ fn kernel_syscall_child_exec_return(frame_sp: usize) !{unsafe} {
     // then on a descriptor set with F_SETFD or F_DUPFD_CLOEXEC survived
     // execve. GitHub issue #540's unused-function check found the orphaned
     // helper.
-    unified_fd_close_exec_descriptors(kernel_syscall_process_slot());
+    unified_fd_close_exec_descriptors(kernel_syscall_process_key());
     // Default-false debugger test switch: stop after the real prepare+commit
     // path without affecting ordinary exec or adding a userspace interface.
     if (kernel_process_trace_fail_after_exec_requested()) {
@@ -4627,7 +4634,7 @@ private fn syscall_accept_claimed(current_authority: borrow ProcessCurrent[curre
                             tcp_connection_of(owner).socket_buffer_offset = 0;
                             tcp_connection_put(owner);
                             match unified_connection_create(
-                                    kernel_syscall_process_slot(),
+                                    kernel_syscall_process_key(),
                                     connected_fd, slot, generation) {
                                 UnifiedOpenResult::Invalid => {
                                     return SyscallAction::Resume(LINUX_EAGAIN);
@@ -5293,7 +5300,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
     // GitHub issue #580: sample the real BusyBox sleep applet at syscall
     // entry, before peer-safety policy can migrate its frame to core 0.
     workload_ordinary_placement_note_syscall(number);
-    let caller_slot: usize = kernel_syscall_process_slot();
+    let mut caller_slot: ProcessSlot = kernel_syscall_process_slot();
     let (action_code, action_value) = syscall_action_encode(
         kernel_syscall_dispatch_action(esr, number, x0, x1, x2, x3, x4,
             maybe_frame_from_entry(frame_sp, kernel_process_entry_generation())));
@@ -5426,7 +5433,7 @@ private fn syscall_openat_with(slot: borrow SyscallSlot[0],
                 return SyscallAction::Resume(LINUX_EACCES);
             }
             let fd: usize = match unified_fd_alloc(
-                    kernel_syscall_process_slot(), 0) {
+                    kernel_syscall_process_key(), 0) {
                 UnifiedFdAllocResult::Full => {
                     return SyscallAction::Resume(LINUX_EMFILE);
                 }
@@ -5453,7 +5460,7 @@ private fn syscall_openat_with(slot: borrow SyscallSlot[0],
         }
         Ext2LookupResult::Found(inode_number) => {
             let access_mode: usize = x2 & 3;
-            match unified_fd_alloc(kernel_syscall_process_slot(), 0) {
+            match unified_fd_alloc(kernel_syscall_process_key(), 0) {
                 UnifiedFdAllocResult::Full => {
                     kernel_boot_log_resource_exhausted(
                         "process fd table" as *u8,
@@ -5465,7 +5472,7 @@ private fn syscall_openat_with(slot: borrow SyscallSlot[0],
                         mount, inode_number);
                     if ((inode_mode & 0xF000) == 0x4000) {
                         match unified_directory_open(
-                                kernel_syscall_process_slot(), fd,
+                                kernel_syscall_process_key(), fd,
                                 inode_number) {
                             UnifiedOpenResult::Invalid => {
                                 return SyscallAction::Resume(LINUX_EBADF);
@@ -5482,7 +5489,7 @@ private fn syscall_openat_with(slot: borrow SyscallSlot[0],
                         }
                     }
                     match unified_file_open(
-                            kernel_syscall_process_slot(), fd, inode_number,
+                            kernel_syscall_process_key(), fd, inode_number,
                             access_mode != 1, access_mode != 0) {
                         UnifiedOpenResult::Invalid => {
                             return SyscallAction::Resume(LINUX_EBADF);
@@ -5766,7 +5773,7 @@ private fn syscall_prlimit64_with(slot: borrow SyscallSlot[0],
     let mut soft: usize = LINUX_RLIM64_INFINITY;
     let mut hard: usize = LINUX_RLIM64_INFINITY;
     if (x1 == LINUX_RLIMIT_NOFILE) {
-        match unified_process_fd_limit(kernel_syscall_process_slot()) {
+        match unified_process_fd_limit(kernel_syscall_process_key()) {
             UnifiedFdLimitResult::Missing => {
                 return SyscallAction::Resume(LINUX_EINVAL);
             }
@@ -5823,7 +5830,7 @@ private fn syscall_prlimit64_with(slot: borrow SyscallSlot[0],
     // not have at all was refused above.
     if (x1 != LINUX_RLIMIT_NOFILE) { return SyscallAction::Resume(0); }
     match unified_process_fd_limit_configure(
-            kernel_syscall_process_slot(), new_soft, new_hard) {
+            kernel_syscall_process_key(), new_soft, new_hard) {
         UnifiedFdResult::Invalid => {
             return SyscallAction::Resume(LINUX_EINVAL);
         }
@@ -6244,14 +6251,14 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         if (command == LINUX_F_SETFD) {
             if (x2 != 0 && x2 != 1) { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINVAL), current_authority); }
             match unified_fd_set_close_on_exec(
-                    kernel_syscall_process_slot(), fd, x2 != 0) {
+                    kernel_syscall_process_key(), fd, x2 != 0) {
                 UnifiedFdResult::Invalid => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EBADF), current_authority); }
                 UnifiedFdResult::Ok => {}
             }
             return syscall_finish_current(frame, SyscallAction::Resume(0), current_authority);
         }
         if (command == LINUX_F_DUPFD || command == LINUX_F_DUPFD_CLOEXEC) {
-            match unified_fd_alloc(kernel_syscall_process_slot(), x2) {
+            match unified_fd_alloc(kernel_syscall_process_key(), x2) {
                 UnifiedFdAllocResult::Full => {
                     kernel_boot_log_resource_exhausted(
                         "process fd table" as *u8,
@@ -6260,7 +6267,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 }
                 UnifiedFdAllocResult::Allocated(new_fd) => {
                     match unified_fd_duplicate(
-                            kernel_syscall_process_slot(), fd, new_fd) {
+                            kernel_syscall_process_key(), fd, new_fd) {
                         UnifiedFdInstallResult::Invalid => {
                             return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EBADF), current_authority);
                         }
@@ -6282,7 +6289,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                         UnifiedFdInstallResult::Ok => {
                             if (command == LINUX_F_DUPFD_CLOEXEC) {
                                 match unified_fd_set_close_on_exec(
-                                        kernel_syscall_process_slot(),
+                                        kernel_syscall_process_key(),
                                         new_fd, true) {
                                     UnifiedFdResult::Invalid => {
                                         return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EBADF), current_authority);
@@ -6317,7 +6324,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         if (kernel_syscall_terminal_is_open(new_fd) ||
             kernel_syscall_file_is_open(new_fd) ||
             kernel_syscall_directory_is_open(new_fd)) {
-            match unified_fd_close(kernel_syscall_process_slot(), new_fd) {
+            match unified_fd_close(kernel_syscall_process_key(), new_fd) {
                 UnifiedFdResult::Invalid => {
                     return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EBADF), current_authority);
                 }
@@ -6350,7 +6357,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                     UnifiedListenerState::Closed) {
               return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EBADF), current_authority);
             }
-            match unified_fd_close(kernel_syscall_process_slot(),
+            match unified_fd_close(kernel_syscall_process_key(),
                                    close_listener_fd) {
                 UnifiedFdResult::Invalid => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EBADF), current_authority); }
                 UnifiedFdResult::Ok => {}
@@ -6364,7 +6371,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             kernel_syscall_directory_is_open(x0) == false) {
             return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EBADF), current_authority);
         }
-        match unified_fd_close(kernel_syscall_process_slot(), x0) {
+        match unified_fd_close(kernel_syscall_process_key(), x0) {
             UnifiedFdResult::Invalid => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EBADF), current_authority); }
             UnifiedFdResult::Ok => { return syscall_finish_current(frame, SyscallAction::Resume(0), current_authority); }
         }
@@ -6384,7 +6391,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EAGAIN), current_authority);
           }
           KernelSocketFdAllocResult::Allocated(created_socket_fd) => {
-            match unified_listener_create(kernel_syscall_process_slot(),
+            match unified_listener_create(kernel_syscall_process_key(),
                                           created_socket_fd) {
                 UnifiedOpenResult::Invalid => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EAGAIN), current_authority); }
                 UnifiedOpenResult::Full => {
@@ -7108,7 +7115,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // as Linux does when brk meets a mapping.
         if (x0 >= kernel_syscall_heap_start() &&
             x0 <= kernel_syscall_heap_limit() &&
-            unified_process_brk_blocked(kernel_syscall_process_slot(), x0)
+            unified_process_brk_blocked(kernel_syscall_process_key(), x0)
                 == false) {
             if (kernel_syscall_heap_set(x0) == false) {
                 return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINVAL), current_authority);
@@ -7152,7 +7159,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // to advance the break itself and munmap did nothing, so every
         // mapping was permanent and a long-lived process ran out of arena
         // with almost nothing live.
-        let process: usize = kernel_syscall_process_slot();
+        let process: usize = kernel_syscall_process_key();
         let evidence = match unified_fd_context_lookup(process) {
             ProcessFdContextReady::Missing => {
                 return syscall_finish_current(frame, SyscallAction::Resume(LINUX_ENOMEM), current_authority);
@@ -7320,7 +7327,7 @@ fn syscall_vectored_prefix_wait_probe(address: usize, slot: usize,
 // GitHub issue #835: this was the inetd-mode probe; the mode is gone, and
 // what remains is the connected read it shared with every TCP descriptor.
 fn syscall_vectored_connected_read_probe(address: usize) -> bool !{unsafe} {
-    let process: usize = kernel_syscall_process_slot();
+    let process: usize = kernel_syscall_process_key();
     // The preceding process-table probe may have released root 0's context.
     match unified_fd_context_ensure(process) {
         ProcessFdContextReady::Ready(evidence) => {}
@@ -7476,15 +7483,16 @@ fn kernel_syscall_cow_read_probe() -> SyscallCowReadReport !{unsafe} {
     };
     let address: usize = USER_TEXT_VA + probe_index * PAGE_SIZE;
     // A sibling address space maps the same page, as a fork leaves it.
-    let sibling: usize = scheduled_process_probe_slot_acquire();
+    let mut sibling_slot: ProcessSlot = scheduled_process_probe_slot_acquire();
+    let sibling: usize = process_slot_address(sibling_slot);
     if (sibling == 0) {
         user_pte_clear(probe_index);
         return SyscallCowReadReport::Failed;
     }
     let mut sibling_root: AddressSpaceRoot =
-        scheduled_process_address_space_root_lookup(sibling);
+        scheduled_process_address_space_root_lookup(sibling_slot);
     let mut shared: bool = false;
-    match address_space_ensure_root(sibling) {
+    match address_space_ensure_root(sibling_slot) {
         AddressSpaceEnsureResult::SlotOutOfRange => {}
         AddressSpaceEnsureResult::OutOfMemory => {}
         AddressSpaceEnsureResult::Ok => {
@@ -7519,7 +7527,7 @@ fn kernel_syscall_cow_read_probe() -> SyscallCowReadReport !{unsafe} {
         }
     }
 
-    let process: usize = kernel_syscall_process_slot();
+    let process: usize = kernel_syscall_process_key();
     let mut ok: bool = shared;
     let mut fd: usize = 0;
     match unified_fd_context_ensure(process) {
@@ -7579,7 +7587,7 @@ fn kernel_syscall_cow_read_probe() -> SyscallCowReadReport !{unsafe} {
     // Releasing the sibling drops its reference; the clear then gives back
     // the page this root maps, whether that is the shared page or its copy.
     address_space_release_root(sibling_root);
-    scheduled_process_probe_slot_release(sibling);
+    scheduled_process_probe_slot_release(sibling_slot);
     user_pte_clear(probe_index);
     return report;
 }
@@ -7719,7 +7727,7 @@ private fn syscall_clone_current(
         frame: MaybeFrame) -> SyscallAction !{unsafe} {
     let mut clone_flags: usize = 0x11;
     let mut clone_stack: usize = 0;
-    let parent_slot: usize = kernel_syscall_process_slot();
+    let mut parent_slot: ProcessSlot = kernel_syscall_process_slot();
     // GitHub issue #245: kernel_process_clone_begin() now runs first
     // (it used to run last), since the address-space root and
     // fd-table slot the VM/fd clone steps below need are the new
@@ -7760,7 +7768,7 @@ private fn syscall_clone_current(
                 kernel_syscall_persistent_shell_checkpoint_fork(child_pid);
             }
             let mut child_space: AddressSpaceRoot = kernel_process_current_root(child_authority);
-            let child_slot: usize = address_space_root_slot(child_space);
+            let child_slot: usize = root_slot_word(address_space_root_slot(child_space));
             match process_image_clone_vm_begin(child_space) {
                 ProcessCloneVmResult::OutOfMemory => {
                     match kernel_process_clone_rollback(child_authority) {
@@ -7774,7 +7782,7 @@ private fn syscall_clone_current(
                 }
                 ProcessCloneVmResult::Copied => {
                     match kernel_syscall_clone_files_begin(
-                        parent_slot, child_slot) {
+                        parent_slot, kernel_process_slot_of_current(child_authority)) {
                         UnifiedFdResult::Invalid => {
                             match process_image_clone_vm_reap(child_space) {
                                 ProcessCloneVmReapResult::Missing => {}

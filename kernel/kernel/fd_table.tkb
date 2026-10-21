@@ -602,7 +602,7 @@ must_use variant ProcessFdContextReady[process: usize] {
 
 fn unified_fd_context_lookup(process: usize @ identity)
         -> ProcessFdContextReady[identity] !{unsafe} {
-    if (scheduled_process_slot_valid(process) == false) {
+    if (scheduled_process_slot_key_valid(process) == false) {
         return ProcessFdContextReady::Missing;
     }
     match fd_context_pin(&fd_context_pool, process) {
@@ -618,7 +618,7 @@ fn unified_fd_context_lookup(process: usize @ identity)
 
 fn unified_fd_context_ensure(process: usize @ identity)
         -> ProcessFdContextReady[identity] !{unsafe} {
-    if (scheduled_process_slot_valid(process) == false) {
+    if (scheduled_process_slot_key_valid(process) == false) {
         return ProcessFdContextReady::Missing;
     }
     match unified_fd_context_lookup(process) {
@@ -2142,7 +2142,7 @@ fn unified_fd_close_on_exec(process: usize, fd: usize) -> bool !{unsafe} {
 // create another, so restarting the scan from the fd after the one just
 // closed terminates.
 fn unified_fd_close_exec_descriptors(process: usize) !{unsafe} {
-    if (scheduled_process_slot_valid(process) == false) { return; }
+    if (scheduled_process_slot_key_valid(process) == false) { return; }
     let mut from: usize = 0;
     let mut scanning: bool = true;
     while (scanning) {
@@ -3090,7 +3090,7 @@ fn unified_object_pool_probe() -> bool !{unsafe} {
 fn unified_object_ref_ceiling_probe() -> bool !{unsafe} {
     // GitHub issue #831: the process the probe stands on, the boot
     // thread, rather than slot 0.
-    let process: usize = kernel_syscall_process_slot();
+    let process: usize = kernel_syscall_process_key();
     unified_fd_table_init();
     unified_fd_context_release(process);
     match unified_fd_context_ensure(process) {
@@ -3140,7 +3140,8 @@ fn unified_object_ref_ceiling_probe() -> bool !{unsafe} {
             // means one more block of descriptor slots, so the same retain
             // that was refused above is allowed now. This is the half a
             // fixed constant could not have.
-            let extra: usize = scheduled_process_probe_slot_acquire();
+            let mut extra_slot: ProcessSlot = scheduled_process_probe_slot_acquire();
+            let extra: usize = process_slot_address(extra_slot);
             if (extra == 0) { ok = false; }
             if (ok) {
                 unified_fd_context_release(extra);
@@ -3177,7 +3178,7 @@ fn unified_object_ref_ceiling_probe() -> bool !{unsafe} {
                 UnifiedFdResult::Invalid => {}
                 UnifiedFdResult::Ok => {}
             }
-            scheduled_process_probe_slot_release(extra);
+            scheduled_process_probe_slot_release(extra_slot);
             // fd 0's own reference goes back through the descriptor path,
             // the rest through the same call that took them.
             match unified_fd_destroy(process) {
@@ -3219,7 +3220,7 @@ const FD_TABLE_PROBE_COUNT: usize = 40;
 fn unified_fd_table_growth_probe() -> bool !{unsafe} {
     // GitHub issue #831: the process the probe stands on, the boot
     // thread, rather than slot 0.
-    let process: usize = kernel_syscall_process_slot();
+    let process: usize = kernel_syscall_process_key();
     unified_fd_table_init();
     unified_fd_context_release(process);
     match unified_fd_context_ensure(process) {
@@ -3312,7 +3313,7 @@ fn unified_fd_table_growth_probe() -> bool !{unsafe} {
 fn unified_fd_probe_install(fd: usize, result: UnifiedObjectResult) -> bool {
     // GitHub issue #831: the process the probe stands on, the boot
     // thread, rather than slot 0.
-    let process: usize = kernel_syscall_process_slot();
+    let process: usize = kernel_syscall_process_key();
     match result {
         UnifiedObjectResult::Invalid => { return false; }
         UnifiedObjectResult::Full => { return false; }
@@ -3475,7 +3476,8 @@ fn fd_refcount_contention_probe() -> bool !{unsafe} {
         // whether or not any process did; this probe runs before the boot
         // fixtures, with no process yet, and the next table reset gives the
         // probe process back.
-        let process: usize = scheduled_process_probe_slot_acquire();
+        let mut process_slot: ProcessSlot = scheduled_process_probe_slot_acquire();
+        let process: usize = process_slot_address(process_slot);
         if (process == 0) {
             fd_refcount_contention_report("no-process" as *u8, 0, 0);
             return false;
@@ -3641,7 +3643,7 @@ private fn unified_fd_probe_object_references(process: usize, fd: usize)
 fn unified_fd_table_probe() -> bool !{unsafe} {
     // GitHub issue #831: the process the probe stands on, the boot
     // thread, rather than slot 0.
-    let process: usize = kernel_syscall_process_slot();
+    let process: usize = kernel_syscall_process_key();
     unified_fd_table_init();
     // GitHub issue #392: process 0's context has to exist before its heap
     // break can be set -- which is the probe standing in for what
@@ -3659,18 +3661,19 @@ fn unified_fd_table_probe() -> bool !{unsafe} {
     // It used to be the bare slot `1`, which named a process only while
     // every index below the ceiling did; a slot is a live process's record
     // now, so the probe allocates one.
-    let child: usize = scheduled_process_probe_slot_acquire();
+    let mut child_slot: ProcessSlot = scheduled_process_probe_slot_acquire();
+    let child: usize = process_slot_address(child_slot);
     if (child == 0) { return false; }
     unified_fd_context_release(child);
     let child_context = match unified_fd_context_ensure(child) {
         ProcessFdContextReady::Ready(evidence) => { evidence }
         ProcessFdContextReady::Missing => {
-            scheduled_process_probe_slot_release(child);
+            scheduled_process_probe_slot_release(child_slot);
             return false;
         }
     };
     let probe_address: usize = fd_context_address(process);
-    if (probe_address == 0) { scheduled_process_probe_slot_release(child);
+    if (probe_address == 0) { scheduled_process_probe_slot_release(child_slot);
  return false; }
     let RegionPinned(ProcessFdContext)::Pinned(ctx_pin) =
             fd_context_pin(&fd_context_pool, process) else {
@@ -3679,31 +3682,31 @@ fn unified_fd_table_probe() -> bool !{unsafe} {
     let ctx: &mut ProcessFdContext = region_pin_record(ctx_pin);
     ctx.heap_break = 0x50000000;
     match unified_terminal_stdio_open(process) {
-        UnifiedOpenResult::Invalid => { scheduled_process_probe_slot_release(child);
+        UnifiedOpenResult::Invalid => { scheduled_process_probe_slot_release(child_slot);
  { let __ctx_result: bool = false; fd_context_unpin(ctx_pin); return __ctx_result; } }
-        UnifiedOpenResult::Full => { scheduled_process_probe_slot_release(child);
+        UnifiedOpenResult::Full => { scheduled_process_probe_slot_release(child_slot);
  { let __ctx_result: bool = false; fd_context_unpin(ctx_pin); return __ctx_result; } }
         UnifiedOpenResult::Ok => {}
     }
     if (unified_terminal_is_open(process, 0) == false ||
         unified_terminal_is_open(process, 1) == false ||
         unified_terminal_is_open(process, 2) == false) {
-        scheduled_process_probe_slot_release(child);
+        scheduled_process_probe_slot_release(child_slot);
         { let __ctx_result: bool = false; fd_context_unpin(ctx_pin); return __ctx_result; }
     }
     match unified_fd_close(process, 0) {
-        UnifiedFdResult::Invalid => { scheduled_process_probe_slot_release(child);
+        UnifiedFdResult::Invalid => { scheduled_process_probe_slot_release(child_slot);
  { let __ctx_result: bool = false; fd_context_unpin(ctx_pin); return __ctx_result; } }
         UnifiedFdResult::Ok => {}
     }
     match unified_fd_alloc(process, 0) {
-        UnifiedFdAllocResult::Full => { scheduled_process_probe_slot_release(child);
+        UnifiedFdAllocResult::Full => { scheduled_process_probe_slot_release(child_slot);
  { let __ctx_result: bool = false; fd_context_unpin(ctx_pin); return __ctx_result; } }
         UnifiedFdAllocResult::Allocated(fd) => {
             let installed: bool = unified_fd_probe_install(
                 fd, unified_object_alloc_first(UnifiedFdKind::OpenFile));
             if (fd != 0 || installed == false) {
-                scheduled_process_probe_slot_release(child);
+                scheduled_process_probe_slot_release(child_slot);
                 { let __ctx_result: bool = false; fd_context_unpin(ctx_pin); return __ctx_result; }
             }
         }
@@ -3716,7 +3719,7 @@ fn unified_fd_table_probe() -> bool !{unsafe} {
         5, unified_object_alloc_first(UnifiedFdKind::Connection));
     if (file_installed == false || listener_installed == false ||
         connection_installed == false) {
-        scheduled_process_probe_slot_release(child);
+        scheduled_process_probe_slot_release(child_slot);
         { let __ctx_result: bool = false; fd_context_unpin(ctx_pin); return __ctx_result; }
     }
     // The parent has four distinct shared objects across six descriptors.
@@ -3733,28 +3736,28 @@ fn unified_fd_table_probe() -> bool !{unsafe} {
     if (refs0_before == 0 || refs1_before == 0 || refs2_before == 0 ||
         refs3_before == 0 || refs4_before == 0 || refs5_before == 0 ||
         doubles_before != 0 || bound_breaks_before != 0) {
-        scheduled_process_probe_slot_release(child);
+        scheduled_process_probe_slot_release(child_slot);
         { let __ctx_result: bool = false; fd_context_unpin(ctx_pin); return __ctx_result; }
     }
     match unified_fd_clone_test_fail_after(process, child, 1) {
         UnifiedFdCloneRunResult::Invalid => {
-            scheduled_process_probe_slot_release(child);
+            scheduled_process_probe_slot_release(child_slot);
             { let __ctx_result: bool = false; fd_context_unpin(ctx_pin); return __ctx_result; }
         }
         UnifiedFdCloneRunResult::Ok => {
-            scheduled_process_probe_slot_release(child);
+            scheduled_process_probe_slot_release(child_slot);
             { let __ctx_result: bool = false; fd_context_unpin(ctx_pin); return __ctx_result; }
         }
         UnifiedFdCloneRunResult::InjectedAfter(successful_installs) => {
             if (successful_installs != 1) {
-                scheduled_process_probe_slot_release(child);
+                scheduled_process_probe_slot_release(child_slot);
                 { let __ctx_result: bool = false; fd_context_unpin(ctx_pin); return __ctx_result; }
             }
         }
     }
     match unified_fd_next_open(child, 0) {
         UnifiedFdScanResult::Found(fd) => {
-            scheduled_process_probe_slot_release(child);
+            scheduled_process_probe_slot_release(child_slot);
             { let __ctx_result: bool = false; fd_context_unpin(ctx_pin); return __ctx_result; }
         }
         UnifiedFdScanResult::Done => {}
@@ -3767,21 +3770,21 @@ fn unified_fd_table_probe() -> bool !{unsafe} {
         unified_fd_probe_object_references(process, 5) != refs5_before ||
         unified_object_double_release_count() != 0 ||
         unified_object_ref_bound_breaks_count() != 0) {
-        scheduled_process_probe_slot_release(child);
+        scheduled_process_probe_slot_release(child_slot);
         { let __ctx_result: bool = false; fd_context_unpin(ctx_pin); return __ctx_result; }
     }
     match unified_fd_clone(process, child) {
-        UnifiedFdResult::Invalid => { scheduled_process_probe_slot_release(child);
+        UnifiedFdResult::Invalid => { scheduled_process_probe_slot_release(child_slot);
  { let __ctx_result: bool = false; fd_context_unpin(ctx_pin); return __ctx_result; } }
         UnifiedFdResult::Ok => {}
     }
     match unified_process_heap_configure(child, child_context, 0x50001000) {
-        UnifiedFdResult::Invalid => { scheduled_process_probe_slot_release(child);
+        UnifiedFdResult::Invalid => { scheduled_process_probe_slot_release(child_slot);
  { let __ctx_result: bool = false; fd_context_unpin(ctx_pin); return __ctx_result; } }
         UnifiedFdResult::Ok => {}
     }
     match unified_fd_set_offset(child, 3, 9) {
-        UnifiedFdResult::Invalid => { scheduled_process_probe_slot_release(child);
+        UnifiedFdResult::Invalid => { scheduled_process_probe_slot_release(child_slot);
  { let __ctx_result: bool = false; fd_context_unpin(ctx_pin); return __ctx_result; } }
         UnifiedFdResult::Ok => {}
     }
@@ -3793,17 +3796,17 @@ fn unified_fd_table_probe() -> bool !{unsafe} {
         }
     }
     match unified_fd_close(child, 4) {
-        UnifiedFdResult::Invalid => { scheduled_process_probe_slot_release(child);
+        UnifiedFdResult::Invalid => { scheduled_process_probe_slot_release(child_slot);
  { let __ctx_result: bool = false; fd_context_unpin(ctx_pin); return __ctx_result; } }
         UnifiedFdResult::Ok => {}
     }
     match unified_fd_destroy(child) {
-        UnifiedFdResult::Invalid => { scheduled_process_probe_slot_release(child);
+        UnifiedFdResult::Invalid => { scheduled_process_probe_slot_release(child_slot);
  { let __ctx_result: bool = false; fd_context_unpin(ctx_pin); return __ctx_result; } }
         UnifiedFdResult::Ok => {}
     }
     match unified_fd_destroy(process) {
-        UnifiedFdResult::Invalid => { scheduled_process_probe_slot_release(child);
+        UnifiedFdResult::Invalid => { scheduled_process_probe_slot_release(child_slot);
  { let __ctx_result: bool = false; fd_context_unpin(ctx_pin); return __ctx_result; } }
         UnifiedFdResult::Ok => {}
     }
@@ -3811,11 +3814,11 @@ fn unified_fd_table_probe() -> bool !{unsafe} {
     // nothing again" now -- an object that nobody references stops
     // existing rather than being marked free in place.
     if (unified_object_live_count() != 0) {
-        scheduled_process_probe_slot_release(child);
+        scheduled_process_probe_slot_release(child_slot);
         { let __ctx_result: bool = false; fd_context_unpin(ctx_pin); return __ctx_result; }
     }
     if (unified_object_double_release_count() != 0) {
-        scheduled_process_probe_slot_release(child);
+        scheduled_process_probe_slot_release(child_slot);
         { let __ctx_result: bool = false; fd_context_unpin(ctx_pin); return __ctx_result; }
     }
     let mut heap_independent: bool = false;
@@ -3825,7 +3828,7 @@ fn unified_fd_table_probe() -> bool !{unsafe} {
             if (value == 0x50000000) { heap_independent = true; }
         }
     }
-    scheduled_process_probe_slot_release(child);
+    scheduled_process_probe_slot_release(child_slot);
     { let __ctx_result: bool = shared && heap_independent; fd_context_unpin(ctx_pin); return __ctx_result; }
 }
 

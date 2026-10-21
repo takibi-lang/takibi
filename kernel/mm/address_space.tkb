@@ -59,6 +59,42 @@ struct AddressSpaceRoot {
     private backing: ProcessPoolHandleWords;
 }
 
+// GitHub issue #858: a root slot is its own type, distinct from ProcessSlot.
+// Root 0 is the kernel's own address space and names no process; every
+// other root is a process's, named by its record's slot. #831 met a root
+// slot read back as 0 and looked up as a process record; with the types
+// apart, a root slot reaches a process only through
+// scheduled_process_slot_of_root, whose Kernel case the caller must answer.
+// Made from a root (address_space_root_slot), as the kernel's
+// (root_slot_kernel), or from a root word a table or snapshot kept
+// (root_slot_of_key).
+struct RootSlot {
+    private word: usize;
+}
+
+// A root word read back from a table or a snapshot. Any word names a root
+// (0 is the kernel's), so this mint is public; what the type keeps closed is
+// the step from a root to a process (scheduled_process_slot_of_root).
+fn root_slot_of_key(word: usize) -> RootSlot {
+    let mut typed: RootSlot = { word };
+    return typed;
+}
+
+fn root_slot_kernel() -> RootSlot {
+    return root_slot_of_key(0);
+}
+
+// The numeric identity, for the per-root tables keyed by it and evidence.
+fn root_slot_word(slot: RootSlot) -> usize {
+    return slot.word;
+}
+
+// Whether a root is the one a process runs on, which is how the EL0-return
+// check compares the image target with the record.
+fn root_slot_names_process(root: RootSlot, slot: ProcessSlot) -> bool {
+    return root.word != 0 && root.word == process_slot_address(slot);
+}
+
 struct AddressSpaceBacking {
     live: bool;
     l1_physical: usize;
@@ -146,10 +182,10 @@ fn address_space_live_count() -> usize !{unsafe} {
 // because it needs the allocator's own metadata -- can call it: a function
 // resolves regardless of file order, a type does not.
 fn address_space_probe_root_acquire() -> usize !{unsafe} {
-    let slot: usize = scheduled_process_probe_slot_acquire();
-    if (slot == 0) { return 0; }
+    let mut slot: ProcessSlot = scheduled_process_probe_slot_acquire();
+    if (process_slot_is_none(slot)) { return 0; }
     match address_space_ensure_root(slot) {
-        AddressSpaceEnsureResult::Ok => { return slot; }
+        AddressSpaceEnsureResult::Ok => { return process_slot_address(slot); }
         AddressSpaceEnsureResult::SlotOutOfRange => {
             scheduled_process_probe_slot_release(slot);
             return 0;
@@ -161,10 +197,14 @@ fn address_space_probe_root_acquire() -> usize !{unsafe} {
     }
 }
 
-fn address_space_probe_root_release(slot: usize) !{unsafe} {
-    if (slot == 0) { return; }
-    address_space_release_root(scheduled_process_address_space_root_lookup(slot));
-    scheduled_process_probe_slot_release(slot);
+fn address_space_probe_root_release(word: usize) !{unsafe} {
+    match scheduled_process_probe_slot_of_word(word) {
+        RootOwner::Kernel => {}
+        RootOwner::Process(slot) => {
+            address_space_release_root(scheduled_process_address_space_root_lookup(slot));
+            scheduled_process_probe_slot_release(slot);
+        }
+    }
 }
 
 fn address_space_backing_missing_uses() -> usize {
@@ -271,11 +311,14 @@ private fn address_space_backing_pin(
 // Root 0 is exempt: its backing is a static, not a pool allocation, for
 // the MMU-off reason stated below.
 fn address_space_backing_release(root: AddressSpaceRoot) !{unsafe} {
-    let slot: usize = root.slot;
-    if (slot == 0) { return; }
+    let mut process: ProcessSlot = match scheduled_process_slot_of_root(
+            address_space_root_slot(root)) {
+        RootOwner::Kernel => { return; }
+        RootOwner::Process(owner) => { owner }
+    };
     if (root.backing.address == 0) { return; }
     let pinned = address_space_backing_pin(&address_space_backing_pool, root);
-    scheduled_process_set_address_space_backing(slot, 0, 0);
+    scheduled_process_set_address_space_backing(process, 0, 0);
     match pinned {
         RegionPinned(AddressSpaceBacking)::Stale => {
             kernel_boot_log("address spaces: releasing a stale backing handle\n");
@@ -366,11 +409,17 @@ private fn address_space_backing_publish(
     address_space_backing_pool_unlock(guard);
     let mut words: ProcessPoolHandleWords = {
         region_handle_address(handle), region_handle_generation(handle) };
+    let mut process: ProcessSlot = match scheduled_process_slot_of_root(
+            root_slot_of_key(slot)) {
+        // Root 0's backing is a static and is never published.
+        RootOwner::Kernel => { return AddressSpaceBackingReady::Missing; }
+        RootOwner::Process(owner) => { owner }
+    };
     scheduled_process_set_address_space_backing(
-        slot, words.address, words.generation);
+        process, words.address, words.generation);
     let mut empty: AddressSpaceBacking = { false, 0, 0, 0, 0 };
     return address_space_backing_exists(
-        slot, address_space_root_mint(slot, words), empty);
+        slot, address_space_root_mint(process, words), empty);
 }
 
 private fn address_space_backing_grow(
@@ -511,14 +560,30 @@ private fn address_space_backing_write(
 // builds it with the MMU off), outlives them all, and is what the boot
 // thread and every idle CPU run on, as Linux's init_mm is. Every other root
 // is a live process's, named by its record's slot.
-fn address_space_root_slot_valid(slot: usize) -> bool !{unsafe} {
-    if (slot == 0) { return true; }
-    return scheduled_process_slot_valid(slot);
+fn address_space_root_slot_valid(slot: RootSlot) -> bool !{unsafe} {
+    match scheduled_process_slot_of_root(slot) {
+        RootOwner::Kernel => { return true; }
+        RootOwner::Process(process) => {
+            return scheduled_process_slot_valid(process);
+        }
+    }
+}
+
+// GitHub issue #858: the image-record table (kernel/mm/process_image.tkb)
+// keys its evidence by the root WORD, because an indexed view needs a usize
+// identity; these two serve that key. The word 0 is root 0 here, never a
+// process.
+fn address_space_root_key_valid(word: usize) -> bool !{unsafe} {
+    return address_space_root_slot_valid(root_slot_of_key(word));
+}
+
+fn address_space_root_of_key(word: usize) -> AddressSpaceRoot !{unsafe} {
+    return scheduled_process_address_space_root_of(root_slot_of_key(word));
 }
 
 fn address_space_is_live(root: AddressSpaceRoot) -> bool {
     let slot: usize = root.slot;
-    if (address_space_root_slot_valid(slot)) {
+    if (address_space_root_key_valid(slot)) {
         let checked: usize = slot;
         return address_space_backing_read(root).live;
     }
@@ -529,9 +594,9 @@ fn address_space_is_live(root: AddressSpaceRoot) -> bool {
 // Boot-only probes use address_space_boot_root() explicitly instead.
 // The mint: a root from a slot and the backing handle read for it under an
 // authority. Its callers are listed by scripts/check_address_space_root_mints.py.
-fn address_space_root_mint(slot: usize, backing: ProcessPoolHandleWords)
+fn address_space_root_mint(slot: ProcessSlot, backing: ProcessPoolHandleWords)
         -> AddressSpaceRoot {
-    let mut root: AddressSpaceRoot = { slot, backing };
+    let mut root: AddressSpaceRoot = { process_slot_address(slot), backing };
     return root;
 }
 
@@ -539,16 +604,17 @@ fn address_space_root_mint(slot: usize, backing: ProcessPoolHandleWords)
 // handle and no authority.
 fn address_space_boot_root() -> AddressSpaceRoot {
     let mut none: ProcessPoolHandleWords = { 0, 0 };
-    return address_space_root_mint(0, none);
+    let mut root: AddressSpaceRoot = { 0, none };
+    return root;
 }
 
-fn address_space_root_slot(root: AddressSpaceRoot) -> usize {
-    return root.slot;
+fn address_space_root_slot(root: AddressSpaceRoot) -> RootSlot {
+    return root_slot_of_key(root.slot);
 }
 
 fn address_space_l1_physical(root: AddressSpaceRoot) -> usize {
     let slot: usize = root.slot;
-    if (address_space_root_slot_valid(slot)) {
+    if (address_space_root_key_valid(slot)) {
         let checked: usize = slot;
         if (address_space_backing_read(root).live) {
             return address_space_backing_read(root).l1_physical;
@@ -559,7 +625,7 @@ fn address_space_l1_physical(root: AddressSpaceRoot) -> usize {
 
 fn address_space_l2_physical(root: AddressSpaceRoot) -> usize {
     let slot: usize = root.slot;
-    if (address_space_root_slot_valid(slot)) {
+    if (address_space_root_key_valid(slot)) {
         let checked: usize = slot;
         if (address_space_backing_read(root).live) {
             return address_space_backing_read(root).l2_physical;
@@ -570,7 +636,7 @@ fn address_space_l2_physical(root: AddressSpaceRoot) -> usize {
 
 fn address_space_asid(root: AddressSpaceRoot) -> usize {
     let slot: usize = root.slot;
-    if (address_space_root_slot_valid(slot)) {
+    if (address_space_root_key_valid(slot)) {
         let checked: usize = slot;
         if (address_space_backing_read(root).live) {
             return address_space_backing_read(root).asid;
@@ -783,8 +849,8 @@ private fn address_space_ensure_boot_root() -> AddressSpaceEnsureResult {
 // Idempotent because root 0 is first made real before any ProcessHandle
 // exists, then adopted by the initial scheduler slot. Every nonzero slot is
 // made real by scheduled_process_alloc and released when that slot is reaped.
-fn address_space_ensure_root(slot: usize) -> AddressSpaceEnsureResult {
-    if (address_space_root_slot_valid(slot) == false) {
+fn address_space_ensure_root(slot: ProcessSlot) -> AddressSpaceEnsureResult {
+    if (scheduled_process_slot_valid(slot) == false) {
         return AddressSpaceEnsureResult::SlotOutOfRange;
     }
     let evidence = match address_space_backing_ensure(
@@ -851,7 +917,7 @@ private fn address_space_activation_prepared_new(root: usize @ identity,
 fn address_space_prepare_activation(root: AddressSpaceRoot)
         -> AddressSpaceActivationPrepareResult {
     let slot: usize = root.slot;
-    if (address_space_root_slot_valid(slot) == false) {
+    if (address_space_root_key_valid(slot) == false) {
         return AddressSpaceActivationPrepareResult::Invalid;
     }
     let checked: usize = slot;
@@ -894,7 +960,7 @@ fn address_space_commit_activation(
         -> AddressSpaceActivationCommitResult {
     let slot: usize = prepared.root;
     let mut root: AddressSpaceRoot = prepared.target;
-    if (address_space_root_slot_valid(slot) == false) {
+    if (address_space_root_key_valid(slot) == false) {
         return AddressSpaceActivationCommitResult::Invalid;
     }
     let checked: usize = slot;
@@ -916,7 +982,7 @@ fn address_space_cancel_activation(
 
 fn address_space_activate_root(root: AddressSpaceRoot) {
     let slot: usize = root.slot;
-    if (address_space_root_slot_valid(slot)) {
+    if (address_space_root_key_valid(slot)) {
         let checked: usize = slot;
         match address_space_backing_read_checked(root) {
             AddressSpaceBackingReady::Missing => { address_space_backing_missing_note(); }
@@ -947,7 +1013,7 @@ must_use variant AddressSpacePteWriteResult {
 
 fn address_space_l3_physical_for_branch(root: AddressSpaceRoot, branch: usize) -> usize {
     let slot: usize = root.slot;
-    if (address_space_root_slot_valid(slot) == false || branch >= USER_L2_BRANCH_COUNT) {
+    if (address_space_root_key_valid(slot) == false || branch >= USER_L2_BRANCH_COUNT) {
         return 0;
     }
     let checked: usize = slot;
@@ -969,7 +1035,7 @@ fn address_space_l3_physical_for_index(root: AddressSpaceRoot, index: usize) -> 
 fn address_space_pte_write(root: AddressSpaceRoot, index: usize, value: usize)
         -> AddressSpacePteWriteResult {
     let slot: usize = root.slot;
-    if (address_space_root_slot_valid(slot) == false || index >= USER_SPACE_PAGE_COUNT) {
+    if (address_space_root_key_valid(slot) == false || index >= USER_SPACE_PAGE_COUNT) {
         return AddressSpacePteWriteResult::Invalid;
     }
     let checked: usize = slot;
@@ -1132,7 +1198,7 @@ fn address_space_resolve_cow(root: AddressSpaceRoot, index: usize) -> bool !{uns
 // root destruction without a USER_SPACE_PAGE_COUNT-sized shadow array.
 fn address_space_release_user_mappings(root: AddressSpaceRoot) {
     let slot: usize = root.slot;
-    if (address_space_root_slot_valid(slot) == false) { return; }
+    if (address_space_root_key_valid(slot) == false) { return; }
     let checked: usize = slot;
     if (address_space_backing_read(root).live == false) { return; }
     let l2_physical: usize = address_space_backing_read(root).l2_physical;
@@ -1179,7 +1245,7 @@ fn address_space_clear_root(root: AddressSpaceRoot) {
 // visible.
 fn address_space_user_window_is_clear(root: AddressSpaceRoot) -> bool !{unsafe} {
     let slot: usize = root.slot;
-    if (address_space_root_slot_valid(slot) == false) { return true; }
+    if (address_space_root_key_valid(slot) == false) { return true; }
     if (address_space_backing_read(root).live == false) { return true; }
     let l2_physical: usize = address_space_backing_read(root).l2_physical;
     for branch: usize in 0..<USER_L2_BRANCH_COUNT {
@@ -1203,7 +1269,7 @@ fn address_space_l3_branch_physical(root: AddressSpaceRoot, branch: usize) -> us
 // released only after the boundary has switched away from that root.
 fn address_space_release_root(root: AddressSpaceRoot) {
     let slot: usize = root.slot;
-    if (slot == 0 || address_space_root_slot_valid(slot) == false) { return; }
+    if (slot == 0 || address_space_root_key_valid(slot) == false) { return; }
     let checked: usize = slot;
     let evidence = match address_space_backing_read_checked(root) {
         AddressSpaceBackingReady::Missing => {
@@ -1308,29 +1374,31 @@ fn process_address_space_probe() -> bool !{unsafe} {
     // the bare numbers 1 and 2, which named real roots only while any
     // index below the process ceiling was one. A root is a live process's
     // record now, so the probe allocates two processes and uses theirs.
-    let root_a: usize = scheduled_process_probe_slot_acquire();
-    let root_b: usize = scheduled_process_probe_slot_acquire();
-    let mut root_a_root: AddressSpaceRoot = scheduled_process_address_space_root_lookup(root_a);
-    let mut root_b_root: AddressSpaceRoot = scheduled_process_address_space_root_lookup(root_b);
+    let mut root_a_slot: ProcessSlot = scheduled_process_probe_slot_acquire();
+    let root_a: usize = process_slot_address(root_a_slot);
+    let mut root_b_slot: ProcessSlot = scheduled_process_probe_slot_acquire();
+    let root_b: usize = process_slot_address(root_b_slot);
+    let mut root_a_root: AddressSpaceRoot = scheduled_process_address_space_root_lookup(root_a_slot);
+    let mut root_b_root: AddressSpaceRoot = scheduled_process_address_space_root_lookup(root_b_slot);
     if (root_a == 0 || root_b == 0) {
-        scheduled_process_probe_slot_release(root_b);
-        scheduled_process_probe_slot_release(root_a);
+        scheduled_process_probe_slot_release(root_b_slot);
+        scheduled_process_probe_slot_release(root_a_slot);
         return false;
     }
     if (address_space_is_live(root_a_root) || address_space_is_live(root_b_root)) {
-        scheduled_process_probe_slot_release(root_b);
-        scheduled_process_probe_slot_release(root_a);
+        scheduled_process_probe_slot_release(root_b_slot);
+        scheduled_process_probe_slot_release(root_a_slot);
         return false;
     }
     let before: usize = page_allocator_live_count();
     let mut roots_ok: bool = true;
-    match address_space_ensure_root(root_a) {
+    match address_space_ensure_root(root_a_slot) {
         AddressSpaceEnsureResult::Ok => {}
         AddressSpaceEnsureResult::SlotOutOfRange => { roots_ok = false; }
         AddressSpaceEnsureResult::OutOfMemory => { roots_ok = false; }
     }
     if (roots_ok) {
-        match address_space_ensure_root(root_b) {
+        match address_space_ensure_root(root_b_slot) {
             AddressSpaceEnsureResult::Ok => {}
             AddressSpaceEnsureResult::SlotOutOfRange => { roots_ok = false; }
             AddressSpaceEnsureResult::OutOfMemory => { roots_ok = false; }
@@ -1339,8 +1407,8 @@ fn process_address_space_probe() -> bool !{unsafe} {
     if (roots_ok == false) {
         address_space_release_root(root_b_root);
         address_space_release_root(root_a_root);
-        scheduled_process_probe_slot_release(root_b);
-        scheduled_process_probe_slot_release(root_a);
+        scheduled_process_probe_slot_release(root_b_slot);
+        scheduled_process_probe_slot_release(root_a_slot);
         return false;
     }
     // GitHub issue #402: a freshly created root has NO ASID -- it takes one
@@ -1353,7 +1421,7 @@ fn process_address_space_probe() -> bool !{unsafe} {
         address_space_asid(root_a_root) == 0 && address_space_asid(root_b_root) == 0;
     address_space_activate_root(root_a_root);
     address_space_activate_root(root_b_root);
-    address_space_activate_root(scheduled_process_address_space_root_lookup(restore));
+    address_space_activate_root(scheduled_process_address_space_root_of(root_slot_of_key(restore)));
     let backing_ok: bool =
         unassigned_ok &&
         address_space_l1_physical(root_a_root) != 0 &&
@@ -1372,16 +1440,16 @@ fn process_address_space_probe() -> bool !{unsafe} {
         kernel_boot_log("\n");
         address_space_release_root(root_b_root);
         address_space_release_root(root_a_root);
-        scheduled_process_probe_slot_release(root_b);
-        scheduled_process_probe_slot_release(root_a);
+        scheduled_process_probe_slot_release(root_b_slot);
+        scheduled_process_probe_slot_release(root_a_slot);
         return false;
     }
     match page_alloc(PageOwnerTag::PageTable) {
         PageAllocResult::OutOfMemory => {
             address_space_release_root(root_b_root);
             address_space_release_root(root_a_root);
-            scheduled_process_probe_slot_release(root_b);
-            scheduled_process_probe_slot_release(root_a);
+            scheduled_process_probe_slot_release(root_b_slot);
+            scheduled_process_probe_slot_release(root_a_slot);
             return false;
         }
         PageAllocResult::Allocated(page1) => {
@@ -1390,8 +1458,8 @@ fn process_address_space_probe() -> bool !{unsafe} {
                     page_free(page1);
                     address_space_release_root(root_b_root);
                     address_space_release_root(root_a_root);
-                    scheduled_process_probe_slot_release(root_b);
-                    scheduled_process_probe_slot_release(root_a);
+                    scheduled_process_probe_slot_release(root_b_slot);
+                    scheduled_process_probe_slot_release(root_a_slot);
                     return false;
                 }
                 PageAllocResult::Allocated(page2) => {
@@ -1401,8 +1469,8 @@ fn process_address_space_probe() -> bool !{unsafe} {
                             page_free(page1);
                             address_space_release_root(root_b_root);
                             address_space_release_root(root_a_root);
-                            scheduled_process_probe_slot_release(root_b);
-                            scheduled_process_probe_slot_release(root_a);
+                            scheduled_process_probe_slot_release(root_b_slot);
+                            scheduled_process_probe_slot_release(root_a_slot);
                             return false;
                         }
                         PageAllocResult::Allocated(page3) => {
@@ -1471,8 +1539,8 @@ fn process_address_space_probe() -> bool !{unsafe} {
                                 uart_put_udec(page_allocator_live_count());
                                 kernel_boot_log("\n");
                             }
-                            scheduled_process_probe_slot_release(root_b);
-                            scheduled_process_probe_slot_release(root_a);
+                            scheduled_process_probe_slot_release(root_b_slot);
+                            scheduled_process_probe_slot_release(root_a_slot);
                             return clean;
                         }
                     }
@@ -1560,20 +1628,20 @@ fn address_space_asid_rollover_probe() -> bool {
     if (asid_generation_is_current(generation_before)) { ok = false; }
 
     let active_before: usize = address_space_active_slot_here();
-    match address_space_prepare_activation(scheduled_process_address_space_root_lookup(active_before)) {
+    match address_space_prepare_activation(scheduled_process_address_space_root_of(root_slot_of_key(active_before))) {
         AddressSpaceActivationPrepareResult::Invalid => { ok = false; }
         AddressSpaceActivationPrepareResult::RolloverNeeded => { ok = false; }
         AddressSpaceActivationPrepareResult::Prepared(prepared) => {
             match address_space_commit_activation(prepared) {
                 AddressSpaceActivationCommitResult::Invalid => { ok = false; }
                 AddressSpaceActivationCommitResult::Activated(root) => {
-                    if (address_space_root_slot(root) != active_before) { ok = false; }
+                    if (root_slot_word(address_space_root_slot(root)) != active_before) { ok = false; }
                 }
             }
         }
     }
     let active: usize = address_space_active_slot_here();
-    let mut running: AddressSpaceBacking = address_space_backing_read_existing(scheduled_process_address_space_root_lookup(active));
+    let mut running: AddressSpaceBacking = address_space_backing_read_existing(scheduled_process_address_space_root_of(root_slot_of_key(active)));
     if (active != 0 &&
         asid_generation_is_current(running.asid_generation) == false) {
         ok = false;
