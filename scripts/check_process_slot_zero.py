@@ -23,7 +23,19 @@ THE RULE.
 
 WHAT IT IS NOT. Lexical: a 0 passed through a variable is not seen. The
 missing-record counter (process table: records MISSING) is the runtime
-backstop for that, and a typed process slot would be the static one.
+backstop for that.
+
+WHAT THE TYPES TOOK OVER (GitHub issue #858). The placement, record-access
+and root-selection APIs of kernel/kernel/process.tkb take a ProcessSlot,
+minted only by that file, and roots are a separate RootSlot
+(kernel/mm/address_space.tkb), so a literal 0 or a root slot where a process
+is meant no longer type-checks there; those calls left PROCESS_FIRST and
+PROCESS_SECOND. What remains here is what the types do not see: the
+per-process tables that key their indexed evidence by the slot WORD (the
+fd-context table's unified_* calls and scheduled_process_set_image_record),
+the bootstrap names of rule 1, and rule 2's slot-0 branch, which a
+ProcessSlot compared with 0 reaches only as an internal compiler error today
+(GitHub issue #884), not as a type error.
 """
 
 import pathlib
@@ -69,16 +81,11 @@ PROCESS_FIRST = (
     "unified_terminal_stdio_open", "unified_terminal_is_open",
     "unified_fd_destroy", "unified_fd_clone", "unified_fd_offset",
     "unified_process_fd_limit_configure", "unified_process_heap_break",
-    "unified_process_heap_range_configure", "kernel_syscall_process_configure",
-    "scheduled_process_slot_valid", "scheduled_process_set_image_record",
-    "scheduled_process_set_address_space_backing")
-# Calls whose second argument, after the run guard, is a process slot.
-PROCESS_SECOND = (
-    "scheduled_process_record_locked", "scheduled_process_set_command_line")
+    "unified_process_heap_range_configure",
+    "scheduled_process_set_image_record", "scheduled_process_set_fd_context",
+    "scheduled_process_slot_key_valid")
 LITERAL_FIRST = re.compile(
     r"\b(" + "|".join(PROCESS_FIRST) + r")\(\s*0\s*[,)]")
-LITERAL_SECOND = re.compile(
-    r"\b(" + "|".join(PROCESS_SECOND) + r")\(\s*\w+\s*,\s*0\s*[,)]")
 
 FN_RE = re.compile(r"^(?:private )?(?:inline |noinline )?fn (\w+)\(")
 
@@ -102,7 +109,7 @@ def problems(root: pathlib.Path):
             if GONE.search(line):
                 found.append(f"{where}: names the static bootstrap record, "
                              "which #831 removed; every process is a pool slot")
-            for regex in (LITERAL_FIRST, LITERAL_SECOND):
+            for regex in (LITERAL_FIRST,):
                 hit = regex.search(line)
                 if hit:
                     found.append(f"{where}: {hit.group(1)} is given process "

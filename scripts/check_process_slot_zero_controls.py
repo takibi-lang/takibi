@@ -100,9 +100,9 @@ def main() -> int:
         clean, "fn other() { match unified_fd_context_ensure(0) {} }\n",
         "unified_fd_context_ensure is given process slot 0")
     failures += case(
-        "a record lookup for slot 0 under the run guard",
-        clean, "fn other() { scheduled_process_record_locked(guard, 0); }\n",
-        "scheduled_process_record_locked is given process slot 0")
+        "a word-keyed table setter handed slot 0",
+        clean, "fn other() { scheduled_process_set_fd_context(0, a, g); }\n",
+        "scheduled_process_set_fd_context is given process slot 0")
     failures += case(
         "a comment naming the old record is prose",
         clean, "// scheduled_process_boot_record went in #831\nfn other() {}\n",
