@@ -96,7 +96,13 @@ record, not scattered scalars. Since #392 that record is a pool allocation
 and a process slot is its ADDRESS. Since #831 there is no static record:
 the boot fixtures stand on a pooled boot thread and PID 1 is pooled. Root 0,
 the kernel's own address space, exists before the MMU is on, so its backing
-and image record are statics in `kernel/mm/`. Issue
+and image record are statics in `kernel/mm/`. Since #858 a process slot
+is typed `ProcessSlot`, minted only in `kernel/kernel/process.tkb`, and a
+root is typed `RootSlot` (`kernel/mm/address_space.tkb`), so neither a
+literal 0 nor a root type-checks where a process is meant; a root becomes a
+process only through `scheduled_process_slot_of_root`, which answers root 0
+as `Kernel`. The fd-context and image-record tables still key their indexed
+evidence by the slot word. Issue
 #392 folded the kernel stack's page run in as a field and put the handles
 for the three pooled per-process records (fd context, image record,
 address-space backing) there too, so the parallel arrays those replaced
