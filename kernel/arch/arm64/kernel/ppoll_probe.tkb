@@ -79,11 +79,10 @@ private fn ppoll_probe_pause() {
     for index: usize in 0..<4 { status[index] = 0; }
     let reaped: usize = svc5(WAIT4_SYSCALL, child, status as *u8 as usize, 0,
                              0, 0);
-    // This kernel reports a signal's end as exit status 128 + signal
-    // (kernel/SYSCALLS.md, kill); Linux's own form is accepted too.
-    let by_signal: bool = status[0] as usize == SIGTERM && status[1] == 0;
-    let by_status: bool = status[0] == 0 && status[1] as usize == 128 + SIGTERM;
-    if (reaped == child && (by_signal || by_status)) {
+    // Linux's status word for a SIGTERM end: the signal in the low byte.
+    // 128 + SIGTERM in the exit byte was this kernel's wrong form until
+    // GitHub issue #882, and is no longer accepted.
+    if (reaped == child && status[0] as usize == SIGTERM && status[1] == 0) {
         ppoll_probe_say(
             bs"ppoll-probe: pause() blocked until SIGTERM ended it\n");
         svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
