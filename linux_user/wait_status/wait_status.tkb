@@ -103,8 +103,24 @@ fn app_main() {
     compare("SIGCHLD exit 0", host_sigchld(0, 0), kernel_sigchld(process_end_exited(0)));
     compare("SIGCHLD exit 143", host_sigchld(0, 143), kernel_sigchld(process_end_exited(143)));
     compare("SIGCHLD exit 300", host_sigchld(0, 300), kernel_sigchld(process_end_exited(300)));
+    // GitHub issue #886: an end kept as a ProcessEndWord (TakenSignal, the
+    // boot fixture's global) comes back as the same end.
+    compare("stored SIGCHLD SIGKILL", host_sigchld(9, 0),
+            kernel_sigchld(stored(process_end_signaled(9))));
+    compare("stored SIGCHLD exit 0", host_sigchld(0, 0),
+            kernel_sigchld(stored(process_end_exited(0))));
+    // host_status after the SIGCHLD cases: their children's SIGCHLD stays
+    // pending and would be taken by a later host_sigchld.
+    compare("stored SIGTERM", host_status(15, 0),
+            syscall_wait_status_word(stored(process_end_signaled(15))));
+    compare("stored exit 143", host_status(0, 143),
+            syscall_wait_status_word(stored(process_end_exited(143))));
 }
 
 fn kernel_sigchld(end: ProcessEnd) -> u32 {
     return (syscall_sigchld_code(end) << 8) | syscall_sigchld_status(end);
+}
+
+fn stored(end: ProcessEnd) -> ProcessEnd {
+    return process_end_of_word(process_end_word(end));
 }
