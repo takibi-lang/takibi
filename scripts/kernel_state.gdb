@@ -166,23 +166,16 @@ def _tk_online_cpus():
 
 
 def _tk_trace_layout():
-    names = (
-        "sequence", "cpu", "event", "pid", "generation", "peer_pid",
-        "peer_generation", "state", "wait_reason", "root", "saved_sp",
-        "aux",
-    )
+    # A literal tuple and an f-string, so that
+    # scripts/buildcheck_gdb_helper_names.py resolves each constant name
+    # (GitHub issue #889).
     positions = {
-        name: _tk_constant(
-            "KERNEL_PROCESS_TRACE_"
-            + {
-                "generation": "GENERATION",
-                "peer_pid": "PEER_PID",
-                "peer_generation": "PEER_GENERATION",
-                "wait_reason": "WAIT_REASON",
-                "saved_sp": "SAVED_SP",
-            }.get(name, name.upper())
-            + "_WORD")
-        for name in names
+        name: _tk_constant(f"KERNEL_PROCESS_TRACE_{name.upper()}_WORD")
+        for name in (
+            "sequence", "cpu", "event", "pid", "generation", "peer_pid",
+            "peer_generation", "state", "wait_reason", "root", "saved_sp",
+            "aux",
+        )
     }
     stride = _tk_constant("KERNEL_PROCESS_TRACE_WORDS_PER_EVENT")
     if (len(set(positions.values())) != len(positions)

@@ -1746,7 +1746,7 @@ $(KERNEL_QEMU_DEBUG_ELF): $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(K
 # --controls renames one name of each kind in a copy of the helpers and
 # requires the check to fail. Any helper or script edit reruns it.
 KERNEL_GDB_HELPER_NAMES_STAMP := _build/gdb-helper-names.stamp
-$(KERNEL_GDB_HELPER_NAMES_STAMP): $(KERNEL_QEMU_DEBUG_ELF) $(KERNEL_DEBUG_METADATA) $(wildcard scripts/*.gdb) $(wildcard scripts/*.py)
+$(KERNEL_GDB_HELPER_NAMES_STAMP): $(KERNEL_QEMU_DEBUG_ELF) $(KERNEL_DEBUG_METADATA) $(wildcard scripts/*.gdb) $(wildcard scripts/*.py) $(wildcard scripts/*.sh)
 	python3 scripts/buildcheck_gdb_helper_names.py $(KERNEL_QEMU_DEBUG_ELF) --metadata $(KERNEL_DEBUG_METADATA)
 	python3 scripts/buildcheck_gdb_helper_names.py $(KERNEL_QEMU_DEBUG_ELF) --metadata $(KERNEL_DEBUG_METADATA) --controls
 	touch $@
@@ -1832,9 +1832,18 @@ _kernelbuild-rpi5: kernel-lib-check kernel-verify-exception-frame \
 kernelbuild-rpi5: build
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) _kernelbuild-rpi5
 
+# GitHub issue #889: the RPi5 runners' GDB commands, and the helpers they
+# source, against the RPi5 debug kernel they drive.
+KERNEL_RPI5_GDB_HELPER_NAMES_STAMP := _build/gdb-helper-names-rpi5.stamp
+$(KERNEL_RPI5_GDB_HELPER_NAMES_STAMP): $(KERNEL_RPI5_DEBUG_ELF) $(KERNEL_RPI5_DEBUG_METADATA) $(wildcard scripts/*.gdb) $(wildcard scripts/*.py) $(wildcard scripts/*.sh)
+	python3 scripts/buildcheck_gdb_helper_names.py $(KERNEL_RPI5_DEBUG_ELF) --metadata $(KERNEL_RPI5_DEBUG_METADATA) --rpi5
+	python3 scripts/buildcheck_gdb_helper_names.py $(KERNEL_RPI5_DEBUG_ELF) --metadata $(KERNEL_RPI5_DEBUG_METADATA) --rpi5 --controls
+	touch $@
+
 .PHONY: _kernelbuild-rpi5-debug kernelbuild-rpi5-debug
 _kernelbuild-rpi5-debug: kernel-lib-check kernel-verify-exception-frame \
-	$(KERNEL_RPI5_DEBUG_ELF) $(KERNEL_RPI5_DEBUG_METADATA)
+	$(KERNEL_RPI5_DEBUG_ELF) $(KERNEL_RPI5_DEBUG_METADATA) \
+	$(KERNEL_RPI5_GDB_HELPER_NAMES_STAMP)
 
 kernelbuild-rpi5-debug: build
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) _kernelbuild-rpi5-debug

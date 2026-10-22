@@ -64,7 +64,8 @@ ld.lld-19 -T "$FIXTURE/link.ld" "$RUN_DIR/entry.o" \
 # GitHub issue #766: debug_return_abi.gdb breaks on the fixture's probes by
 # name; refuse a fixture that no longer defines them before booting it.
 python3 "$REPO_ROOT/scripts/buildcheck_gdb_helper_names.py" \
-    "$RUN_DIR/fixture.elf" --only debug_return_abi.gdb
+    "$RUN_DIR/fixture.elf" --only debug_return_abi.gdb \
+    --metadata "$RUN_DIR/metadata.json"
 METADATA="${DEBUG_RETURN_ABI_METADATA:-$RUN_DIR/metadata.json}"
 
 . "$REPO_ROOT/scripts/qemu_session_ports.sh"
