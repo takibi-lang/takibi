@@ -127,6 +127,8 @@ ddb: bt test stopped-root publishing verdict=not-stopped
 ddb: bt test stopped-root moved verdict=changed
 ddb: bt test stopped-root retired verdict=not-stopped
 ddb: bt test stopped-root settled verdict=usable
+ddb: bt pid=999998 claimed by cpu=1, not yet current
+ddb: bt source=stopped cpu=1 pid=37 stack=0x0000000040274000..0x0000000040278000
 ddb: trace count=16
 ddb: trace seq=4055 cpu=1 event=7 pid=37 gen=77 peer=37 state=2 wait=0 root=1076147360 sp=0x0000000040277cd0 aux=0x0000000000000000
 ddb: trace seq=4056 cpu=1 event=5 pid=37 gen=77 peer=38 state=3 wait=4 root=1076147360 sp=0x0000000040277cd0 aux=0x0000000000000004

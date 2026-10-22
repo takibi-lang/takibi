@@ -262,6 +262,82 @@ def uart_wake_case(events, expected, *, boot=True, started=0.0,
         return clock.now
 
 
+class FakeBreakpoint:
+    """A breakpoint the stalled guest never reaches."""
+    def __init__(self, *_args, **_kwargs):
+        self.hit_count = 0
+        self.condition = None
+        self.enabled = True
+
+    def delete(self):
+        pass
+
+
+def stalled_stage_case(driver, outcome):
+    """#874 (from #878's audit): a stage that ends STALLED (the guest was not
+    given the ticks) is inconclusive, and only a QUIET one is a finding
+    (scripts/gdb_progress.py). Runs the driver's first gdb stage with a
+    guest that never reaches its breakpoint and returns the verdict."""
+    CASES.note()
+    path = ROOT / f"scripts/{driver}.py"
+    source = path.read_text()
+    prefix = "UART_WAKE" if driver == "kernel_uart_wake_check" else "AFFINITY_GDB"
+    fake_gdb = SimpleNamespace(
+        Breakpoint=FakeBreakpoint,
+        execute=lambda *_args, **_kwargs: "",
+        parse_and_eval=lambda *_args: 0,
+        parameter=lambda *_args: False)
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        env = {f"{prefix}_SERIAL_PORT": "1", f"{prefix}_GDB_PORT": "2",
+               f"{prefix}_UART_LOG": str(root / "uart"),
+               f"{prefix}_VERDICT": str(root / "verdict"),
+               f"{prefix}_INIT_LISTENER": str(root / "init"),
+               f"{prefix}_NETWORK_READY": str(root / "net")}
+        namespace = {"__file__": str(path), "__name__": "stalled_control"}
+        progress = SimpleNamespace(DONE="done", QUIET="quiet", STALLED="stalled",
+                                   Counter=FakeBreakpoint,
+                                   continue_by_ticks=None, resume_slice=None,
+                                   all_threads=lambda: ())
+        with patch.dict(os.environ, env, clear=True), patch.dict(
+                sys.modules, {"gdb": fake_gdb, "gdb_progress": progress}), \
+                contextlib.redirect_stdout(io.StringIO()):
+            exec(compile(source[:source.rindex("\ntry:\n    run()")],
+                         str(path), "exec"), namespace)
+            namespace["seen"] = lambda *_args, **_kwargs: True
+            namespace["time"] = SimpleNamespace(sleep=lambda _s: None,
+                                                monotonic=lambda: 0.0)
+            namespace["uart_tail"] = lambda: ""
+            if driver == "kernel_uart_wake_check":
+                namespace["step"] = lambda *_args: (outcome, 7)
+                namespace["run_peer"](SimpleNamespace(sendall=lambda _d: None))
+            else:
+                namespace["run_until"] = lambda *_args, **_kwargs: (outcome, 7)
+                namespace["connect"] = lambda _deadline: SimpleNamespace(
+                    sendall=lambda _d: None)
+                namespace["threading"] = SimpleNamespace(
+                    Thread=lambda **_kwargs: SimpleNamespace(start=lambda: None),
+                    Lock=threading_lock)
+                namespace["run"]()
+        return (root / "verdict").read_text()
+
+
+def threading_lock():
+    import threading
+    return threading.Lock()
+
+
+def stalled_stage_cases():
+    for driver, finding in (
+            ("kernel_uart_wake_check", "needs something else runnable"),
+            ("kernel_affinity_reap_check", "never reached the kill(2)")):
+        stalled = stalled_stage_case(driver, "stalled")
+        assert stalled.startswith("FAIL ") and "inconclusive" in stalled, stalled
+        quiet = stalled_stage_case(driver, "quiet")
+        assert quiet.startswith("FAIL ") and finding in quiet, quiet
+        assert "inconclusive" not in quiet, quiet
+
+
 def churn_wait_case(events, expected, *, broken=False, optional=False):
     CASES.note()
     import run_kernel_churn as driver
@@ -357,6 +433,7 @@ def main():
              + b"interactive shell: uart blocked\n" + b" # ")
     assert pty_case([(4.0, b"boot\n"), (10.0, b"boot\n"), (16.0, ready)], True) < 28.0
     reap_parse_cases()
+    stalled_stage_cases()
     progress = [(4.0, b"boot\n"), (10.0, b"boot\n"), (16.0, ready)]
     assert pty_case(progress, True, exit_delay=5.0) > 20
     assert pty_case(progress, False, exit_delay=20.0) > 30
@@ -382,7 +459,9 @@ def main():
                 "PTY and GDB waits accept advancing UART; silence and ceilings "
                 "fail; fixed responses, marker order and injected verdicts are preserved; "
                 "the httpd reap count reads only echo's marker lines, not a split "
-                "command echo, and a second httpd still counts (#856)",
+                "command echo, and a second httpd still counts (#856); a STALLED "
+                "uart-wake or affinity-reap stage reads as inconclusive, a QUIET "
+                "one as a finding (#874)",
                 cases=CASES.ran)
     return 0
 

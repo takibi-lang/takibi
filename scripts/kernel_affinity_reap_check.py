@@ -51,7 +51,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from gdb_progress import (DONE, continue_by_ticks,  # noqa: E402
+from gdb_progress import (DONE, STALLED, continue_by_ticks,  # noqa: E402
                           resume_slice)
 from progress_timeout import ProgressTimeout  # noqa: E402
 from await_timing import AwaitTiming  # noqa: E402
@@ -214,6 +214,15 @@ def run_until(done, thread: int, ticks: int = STAGE_TICKS, progress=None):
                              slice_seconds=SLICE, progress=progress)
 
 
+def unreached(message: str, outcome, taken) -> str:
+    """A stage that ended without its condition is a finding only when the
+    guest had the ticks (QUIET); a STALLED one says so (#865, #874)."""
+    if outcome == STALLED:
+        return (message + f"; the guest stalled after {taken} ticks, so the "
+                "run is inconclusive, not a finding (GitHub issue #865)")
+    return message
+
+
 def spin_wait_address() -> int:
     """The load at the head of spin_lock's wait loop: where a core waiting
     on a held lock passes once per retry, with the lock word's address in a
@@ -269,19 +278,21 @@ def run() -> None:
     # pair's, and are resumed without being examined.
     kills = 0
     armed = False
+    outcome, taken = DONE, 0
     gdb.execute("set scheduler-locking off")
     while not armed:
-        outcome, _ = run_until(lambda: kill.hit_count > kills, CPU0_THREAD)
+        outcome, taken = run_until(lambda: kill.hit_count > kills, CPU0_THREAD)
         if outcome != DONE:
             break
         kills = kill.hit_count
         with output_lock:
             armed = PEER_ARRANGEMENT in bytes(output)
     if not armed:
-        verdict(False, "/bin/affinity never reached the kill(2) of its "
+        verdict(False, unreached(
+                "/bin/affinity never reached the kill(2) of its "
                 f"cross-core arrangement ({kills} kills seen on core 0), so "
-                f"there was no peer reap to hold apart. "
-                f"UART tail: {uart_tail()!r}")
+                f"there was no peer reap to hold apart", outcome, taken) +
+                f". UART tail: {uart_tail()!r}")
         gdb.execute("detach")
         return
 
@@ -298,15 +309,17 @@ def run() -> None:
     parks = [gdb.Breakpoint(name) for name in PEER_PARKS]
     for park in parks:
         park.condition = f"$_thread == {CPU1_THREAD}"
-    run_until(lambda: any(park.hit_count > 0 for park in parks), CPU1_THREAD)
+    outcome, taken = run_until(
+        lambda: any(park.hit_count > 0 for park in parks), CPU1_THREAD)
     parked = any(park.hit_count > 0 for park in parks)
     for park in parks:
         park.delete()
     if not parked:
         gdb.execute("set scheduler-locking off")
-        verdict(False, "CPU1 never reached a lock-free entry it is parked "
-                f"at, so it could not be frozen without whatever lock it "
-                f"holds. UART tail: {uart_tail()!r}")
+        verdict(False, unreached(
+                "CPU1 never reached a lock-free entry it is parked "
+                "at, so it could not be frozen without whatever lock it "
+                "holds", outcome, taken) + f". UART tail: {uart_tail()!r}")
         gdb.execute("detach")
         return
     # CPU1 is now stopped holding nothing; selecting CPU0 freezes it there.
@@ -320,7 +333,7 @@ def run() -> None:
     hits = 0
     entered = False
     while not entered:
-        outcome, _ = run_until(lambda: walk.hit_count > hits, CPU0_THREAD)
+        outcome, taken = run_until(lambda: walk.hit_count > hits, CPU0_THREAD)
         if outcome != DONE:
             break
         hits = walk.hit_count
@@ -330,7 +343,7 @@ def run() -> None:
         # (#865); the walk does not recurse, and only CPU0 runs.
         back = gdb.Breakpoint(f"*{register('x30'):#x}", internal=True)
         back.condition = f"$_thread == {CPU0_THREAD}"
-        outcome, _ = run_until(lambda: back.hit_count > 0, CPU0_THREAD)
+        outcome, taken = run_until(lambda: back.hit_count > 0, CPU0_THREAD)
         back.delete()
         if outcome != DONE:
             break
@@ -338,10 +351,11 @@ def run() -> None:
         # wait4 and this is not the call under test.
         entered = (register("x0") & 1) == 0
     if not entered:
-        verdict(False, "core 0 was never caught between wait4's two walks "
+        verdict(False, unreached(
+                "core 0 was never caught between wait4's two walks "
                 f"with its peer child still running ({hits} hits on "
-                f"{FIRST_WALK} while CPU1 was frozen). "
-                f"UART tail: {uart_tail()!r}")
+                f"{FIRST_WALK} while CPU1 was frozen)", outcome, taken) +
+                f". UART tail: {uart_tail()!r}")
         gdb.execute("set scheduler-locking off")
         walk.delete()
         gdb.execute("detach")
@@ -388,13 +402,15 @@ def run() -> None:
     gdb.execute(f"thread {CPU0_THREAD}", to_string=True)
 
     answered = None
+    resumed, resume_taken = DONE, 0
     if published:
         # The peer's exit landed inside the window. Let CPU0 finish the
         # syscall it is in the middle of and read what it hands back.
         resume = gdb.Breakpoint(RESUME)
         resume.condition = f"$_thread == {CPU0_THREAD}"
         gdb.execute("set scheduler-locking off")
-        run_until(lambda: resume.hit_count > 0, CPU0_THREAD)
+        resumed, resume_taken = run_until(
+            lambda: resume.hit_count > 0, CPU0_THREAD)
         if resume.hit_count > 0:
             answered = register("x1")
         resume.delete()
@@ -426,9 +442,11 @@ def run() -> None:
                 f"(GitHub issue #865). UART tail: {uart_tail()!r}")
         return
     if answered is None:
-        verdict(False, "CPU1 published its child's exit inside the window, "
+        verdict(False, unreached(
+                "CPU1 published its child's exit inside the window, "
                 "but core 0 never reached a syscall return, so what wait4 "
-                f"answered was not read. UART tail: {uart_tail()!r}")
+                "answered was not read", resumed, resume_taken) +
+                f". UART tail: {uart_tail()!r}")
         return
     if answered == LINUX_ECHILD:
         verdict(False, "REPRODUCED GitHub issue #571: with CPU0 stopped "

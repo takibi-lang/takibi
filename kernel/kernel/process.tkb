@@ -6147,6 +6147,19 @@ private fn kernel_process_idle_starvation_note(
     }
 }
 
+// GitHub issue #874: the pid this CPU has taken (Ready -> Running) but not
+// yet made current -- the window in which kernel_process_secondary_start_reserved
+// prepares the ASID with the run lock released and IRQs open. A world stop
+// acknowledged there reports the CPU idle while the record says Running and
+// unowned, so DDB had no root to name for that pid. Written only by its own
+// CPU; DDB reads it through the stopped-root publication, which that CPU
+// makes itself, or directly on the debugger's own CPU. 0 when none.
+private let mut kernel_process_claimed_pid: [usize; KERNEL_MAX_CORES];
+
+fn kernel_process_claimed_pid_or_zero() -> usize {
+    return kernel_process_claimed_pid[execution_cpu_index()];
+}
+
 // Called by a secondary CPU's architectural idle loop. Idle means no admitted
 // Ready process exists yet; Frame carries a complete saved EL0 context.
 fn kernel_process_secondary_start() -> ProcessSecondaryStart {
@@ -6200,10 +6213,17 @@ fn kernel_process_secondary_start() -> ProcessSecondaryStart {
                             if (first_start) {
                                 scheduled_process_peer_dispatch_enabled = true;
                             }
+                            // GitHub issue #874: name the claim before the
+                            // unlock, for a world stop in the window.
+                            kernel_process_claimed_pid[execution_cpu_index()] =
+                                scheduled_process_record_locked(guard, slot).pid;
                             kernel_activity_leave(activity_before);
                             process_run_unlock(guard);
-                            return kernel_process_secondary_start_reserved(
-                                owner, running);
+                            let started: ProcessSecondaryStart =
+                                kernel_process_secondary_start_reserved(
+                                    owner, running);
+                            kernel_process_claimed_pid[execution_cpu_index()] = 0;
+                            return started;
                         }
                     }
                 }

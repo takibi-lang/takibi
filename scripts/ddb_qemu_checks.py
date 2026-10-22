@@ -51,6 +51,9 @@ REQUIREMENTS = (
     ('moved stopped root refusal', '^ddb: bt test stopped-root moved verdict=changed$', 1, None, 'both'),
     ('retired stopped root refusal', '^ddb: bt test stopped-root retired verdict=not-stopped$', 1, None, 'both'),
     ('settled stopped root acceptance', '^ddb: bt test stopped-root settled verdict=usable$', 1, None, 'both'),
+    # GitHub issue #874: a pid an idle CPU has taken but not made current
+    # is named as that CPU's claim and walked from its root.
+    ('claimed pid backtrace', '^ddb: bt pid=999998 claimed by cpu=1, not yet current$', 1, None, 'both'),
     ('missing PID refusal', '^ddb: bt pid not captured$', 1, None, 'both'),
     ('unsupported PC refusal', '^ddb: bt stop=unsupported-pc fp=0x', 1, None, 'both'),
     ('misaligned PC refusal', '^ddb: bt stop=misaligned-pc fp=0x', 1, None, 'both'),
@@ -161,7 +164,8 @@ def root_evidence(text):
     and PID 1 backtrace answer, one per indented line (GitHub issue #873)."""
     wanted = re.compile(
         r"^ddb: (stack cpu=|stacks roots=|activity cpu=|ps pid=1 |"
-        r"bt pid running on no stopped cpu$|bt source=saved pid=1 )")
+        r"bt pid running on no stopped cpu$|bt source=saved pid=1 |"
+        r"bt pid=1 claimed by cpu=)")
     seen = []
     for line in text.split("\n"):
         if wanted.match(line) and line not in seen:

@@ -1096,6 +1096,9 @@ struct DdbStoppedRoot {
     cpu: usize;
     pid: usize;
     frame_sp: usize;
+    // GitHub issue #874: the pid this CPU has taken but not yet made
+    // current (kernel_process_claimed_pid_or_zero), 0 when none.
+    claimed: usize;
 }
 
 private let mut ddb_stopped_root: [DdbStoppedRoot; KERNEL_MAX_CORES];
@@ -1108,7 +1111,8 @@ private fn ddb_stopped_sequence_address(core: usize) -> usize {
 
 // Called from each platform's interrupt dispatcher on the world-stop SGI,
 // with the frame that interrupt saved, immediately before the holding pen.
-fn kernel_ddb_stopped_root_publish(frame_sp: usize, pid: usize)
+fn kernel_ddb_stopped_root_publish(frame_sp: usize, pid: usize,
+                                   claimed: usize)
         !{interrupt, unsafe} {
     let raw_cpu: usize = cpu_id();
     if (raw_cpu >= KERNEL_MAX_CORES) { return; }
@@ -1125,6 +1129,7 @@ fn kernel_ddb_stopped_root_publish(frame_sp: usize, pid: usize)
     ddb_stopped_root[core].cpu = raw_cpu;
     ddb_stopped_root[core].pid = pid;
     ddb_stopped_root[core].frame_sp = frame_sp;
+    ddb_stopped_root[core].claimed = claimed;
     unsafe {
         atomic_store_release(ddb_stopped_sequence_address(raw_cpu),
                              settled + 2);
@@ -1141,7 +1146,8 @@ fn kernel_ddb_stopped_root_publish(frame_sp: usize, pid: usize)
 // threshold, which is the check working rather than the check complaining.
 fn kernel_world_stop_serve(frame: borrow FrameRef[process]) !{interrupt, unsafe} {
     kernel_ddb_stopped_root_publish(
-        frame_ref_address(frame), kernel_process_frame_pid_or_zero(frame));
+        frame_ref_address(frame), kernel_process_frame_pid_or_zero(frame),
+        kernel_process_claimed_pid_or_zero());
     world_stop_interrupt_hold();
     kernel_ddb_stopped_root_retire();
     // GitHub issue #497: a profile session DDB started or stopped while
@@ -1226,6 +1232,28 @@ private fn ddb_stopped_unwind_root(core: usize) -> DdbStoppedRootResult
         run_bottom + KERNEL_STACK_RUN_BYTES
     };
     return DdbStoppedRootResult::Root(root);
+}
+
+// GitHub issue #874: the pid a CPU has claimed but not yet made current, 0
+// when none or when its root is not settled. The debugger's own CPU is not
+// in the pen, so its own value is read directly.
+private fn ddb_claimed_pid(core: usize) -> usize !{unsafe} {
+    if (core == (ddb_snapshot.cpu & 0xFF)) {
+        return kernel_process_claimed_pid_or_zero();
+    }
+    if (core >= KERNEL_MAX_CORES) { return 0; }
+    let bounded: {0..<KERNEL_MAX_CORES as usize} = core;
+    let before: usize =
+        unsafe { atomic_load_acquire(ddb_stopped_sequence_address(core)) };
+    let frame_sp: usize = ddb_stopped_root[bounded].frame_sp;
+    let claimed: usize = ddb_stopped_root[bounded].claimed;
+    let after: usize =
+        unsafe { atomic_load_acquire(ddb_stopped_sequence_address(core)) };
+    match ddb_stopped_root_check(before, after, frame_sp) {
+        DdbStoppedCheck::Unstopped => { return 0; }
+        DdbStoppedCheck::Moved => { return 0; }
+        DdbStoppedCheck::Usable => { return claimed; }
+    }
 }
 
 // Exercise settled/retired publication on consecutive real stop requests.
@@ -1346,6 +1374,23 @@ private fn ddb_render_backtrace_cpu(core: usize) !{unsafe} {
     }
 }
 
+// GitHub issue #874: a Running pid on no CPU's root may have been taken by
+// an idle CPU that has not made it current yet. Its stack is still that
+// CPU's idle stack, so the root to walk is the CPU's, named as a claim.
+private fn ddb_render_backtrace_claimed(pid: usize) -> bool !{unsafe} {
+    if (pid == 0) { return false; }
+    for core: usize in 0..<KERNEL_MAX_CORES {
+        if (ddb_claimed_pid(core) == pid) {
+            ddb_puts("ddb: bt pid="); ddb_put_udec(pid);
+            ddb_puts(" claimed by cpu="); ddb_put_udec(core);
+            ddb_puts(", not yet current\n");
+            ddb_render_backtrace_cpu(core);
+            return true;
+        }
+    }
+    return false;
+}
+
 private fn ddb_render_backtrace_process(pid: usize) !{unsafe} {
     if (pid == ddb_snapshot.process_pid) {
         ddb_render_backtrace_current();
@@ -1377,6 +1422,7 @@ private fn ddb_render_backtrace_process(pid: usize) !{unsafe} {
                     ddb_render_backtrace_current();
                     return;
                 }
+                if (ddb_render_backtrace_claimed(pid)) { return; }
                 ddb_puts("ddb: bt pid running on no stopped cpu\n");
                 return;
             }
@@ -1494,7 +1540,22 @@ private fn ddb_render_backtrace_test() !{unsafe} {
     ddb_bt_test_stopped_check("retired", 4, 4, 0);
     ddb_bt_test_stopped_check("settled", 4, 4, 0x1000);
     }
+    // GitHub issue #874: a claim CPU 1 publishes is found and named, and
+    // its root walked. The window is too short to stop in on purpose, so
+    // the claim is written into CPU 1's settled root while it is held in
+    // the pen, and put back.
+    if (KERNEL_MAX_CORES > 1 && (ddb_snapshot.cpu & 0xFF) != 1) {
+        let held: usize = ddb_stopped_root[1].claimed;
+        ddb_stopped_root[1].claimed = DDB_BT_TEST_CLAIMED_PID;
+        if (ddb_render_backtrace_claimed(DDB_BT_TEST_CLAIMED_PID) == false) {
+            ddb_puts("ddb: bt test claimed pid not found\n");
+        }
+        ddb_stopped_root[1].claimed = held;
+    }
 }
+
+// Not a pid any lane's boot reaches.
+const DDB_BT_TEST_CLAIMED_PID: usize = 999998;
 
 private fn ddb_render_trace() !{unsafe} {
     ddb_puts("ddb: trace count="); ddb_put_udec(ddb_snapshot.trace_count);
@@ -2123,6 +2184,14 @@ private fn ddb_render_stack_root(
             if (root.pid == 0) {
                 ddb_puts("ddb: stack cpu="); ddb_put_udec(core);
                 ddb_puts(" status=idle\n");
+                // GitHub issue #874: an idle CPU may hold a claim. It is not
+                // a root (the stack is the CPU's own), so it is not counted.
+                let claimed: usize = ddb_claimed_pid(core);
+                if (claimed != 0) {
+                    ddb_puts("ddb: stack cpu="); ddb_put_udec(core);
+                    ddb_puts(" claimed pid="); ddb_put_udec(claimed);
+                    ddb_puts(" not-yet-current\n");
+                }
                 let mut absent: DdbStackRootSummary = { false, 0, 0, 0 };
                 let mut idle: DdbStackRenderResult = { absent, next };
                 return idle;

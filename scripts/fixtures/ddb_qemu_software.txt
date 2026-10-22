@@ -94,6 +94,8 @@ ddb: bt test stopped-root publishing verdict=not-stopped
 ddb: bt test stopped-root moved verdict=changed
 ddb: bt test stopped-root retired verdict=not-stopped
 ddb: bt test stopped-root settled verdict=usable
+ddb: bt pid=999998 claimed by cpu=1, not yet current
+ddb: bt source=stopped cpu=1 pid=0 stack=0x00000000401ec000..0x00000000401f0000
 ddb: trace count=0
 ddb: events cpu=0 count=0 damaged=0 overwritten=0
 ddb: events cpu=1 count=0 damaged=0 overwritten=0
