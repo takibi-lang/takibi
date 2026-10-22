@@ -704,26 +704,39 @@ fn sigchld_siginfo_probe() !{unsafe} {
     fail_if(svc5(135, 1, ptr_of(signal_base, 0), 0, 8, 0) != 0);
     sigchld_probe_expect(record_base, 3, CLD_EXITED, first, 5);
 
-    // A SIGCHLD sent by kill names no child: SI_USER (this kernel reports
-    // no sender pid, GitHub issue #629), and a child exiting while it is
-    // pending does not rename it.
+    // A SIGCHLD sent by kill names no child: SI_USER with si_pid the
+    // sender (GitHub issue #894), and a child exiting while it is pending
+    // does not rename it.
     let my_pid: usize = svc5(172, 0, 0, 0, 0, 0);
     fail_if(svc5(135, 0, ptr_of(signal_base, 0), 0, 8, 0) != 0);
     fail_if(svc5(129, my_pid, SIGCHLD, 0, 0, 0) != 0);
     let late: usize = sigchld_probe_child(7);
     sigchld_probe_reap(late);
     fail_if(svc5(135, 1, ptr_of(signal_base, 0), 0, 8, 0) != 0);
-    sigchld_probe_expect(record_base, 4, SI_USER, 0, 0);
+    sigchld_probe_expect(record_base, 4, SI_USER, my_pid, 0);
     // And unmasked, the kill's own return delivers it.
     fail_if(svc5(129, my_pid, SIGCHLD, 0, 0, 0) != 0);
-    sigchld_probe_expect(record_base, 5, SI_USER, 0, 0);
+    sigchld_probe_expect(record_base, 5, SI_USER, my_pid, 0);
+    // GitHub issue #894: another process's kill names that process, and
+    // a later kill while it is pending keeps the first sender.
+    fail_if(svc5(135, 0, ptr_of(signal_base, 0), 0, 8, 0) != 0);
+    let sender: usize = svc5(220, SIGCHLD, 0, 0, 0, 0);
+    if (sender == 0) {
+        svc5(129, my_pid, SIGCHLD, 0, 0, 0);
+        svc5(93, 0, 0, 0, 0, 0);
+    }
+    fail_if(sender >= 0x8000000000000000);
+    sigchld_probe_reap(sender);
+    fail_if(svc5(129, my_pid, SIGCHLD, 0, 0, 0) != 0);
+    fail_if(svc5(135, 1, ptr_of(signal_base, 0), 0, 8, 0) != 0);
+    sigchld_probe_expect(record_base, 6, SI_USER, sender, 0);
 
     payload_write_u64(action_base, 0, 0);
     payload_write_u64(action_base, 8, 0);
     payload_write_u64(action_base, 16, 0);
     fail_if(svc5(134, SIGCHLD, ptr_of(action_base, 0), 0, 8, 0) != 0);
     let message: []const u8 =
-        bs"userspace SIGCHLD siginfo: CLD_KILLED, CLD_EXITED, pending keeps first, kill SI_USER ok\n";
+        bs"userspace SIGCHLD siginfo: CLD_KILLED, CLD_EXITED, pending keeps first, kill SI_USER names first sender ok\n";
     fail_if(svc5(64, 1, (unsafe { message as *u8 }) as usize,
                  message.len, 0, 0) != message.len);
 }
