@@ -4,12 +4,13 @@
  *
  * It forks. The child forks a competitor that spins on CPU 1 until the
  * experiment is over, then pins itself to CPU 1, registers with the kernel
- * (workload tag 23, step 0) and sleeps PEER_SLEEP_NS in nanosleep. The
- * parent pins itself to CPU 0 and asks tag 23 step 1 once: the kernel masks
- * core 0's interrupts, waits for the child to be Blocked on its deadline,
- * spins until it is woken or a second past its deadline, and answers 1 only
- * when the child was woken while core 0 was still masked and within eight
- * ticks of its deadline. Before #829 only core 0's tick
+ * (workload tag 23, step 0, asked until it answers 1) and sleeps
+ * PEER_SLEEP_NS in nanosleep. The parent pins itself to CPU 0 and asks tag
+ * 23 step 1 once: the kernel masks core 0's interrupts, watches the child's
+ * tick wake, lets step 0 answer 1, and answers 1 only when CPU 1's tick
+ * recorded waking the child on its first tick at or after the deadline
+ * (GitHub issue #863: a recorded fact, not a sample core 0 takes against
+ * the wall clock). Before #829 only core 0's tick
  * woke a deadline sleeper on any CPU, so the answer was 0.
  *
  * The kernel prints the peer_sleep_mask view's line; this prints only a
@@ -89,8 +90,15 @@ private fn peer_sleep_child() {
         peer_sleep_fail(bs"peer-sleep: the competitor fork failed\n");
     }
     peer_sleep_move_to(1);
-    if (svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_SLEEP_TAG,
-             PEER_SLEEP_REGISTER, 0, 0, 0) != 1) {
+    // 2 until core 0 is masked and watching; sleep only after the 1.
+    let mut registered: usize = 2;
+    let mut polls: usize = 0;
+    while (registered == 2 && polls < PEER_SLEEP_COMPETITOR_POLLS) {
+        registered = svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_SLEEP_TAG,
+                          PEER_SLEEP_REGISTER, 0, 0, 0);
+        polls = polls + 1;
+    }
+    if (registered != 1) {
         peer_sleep_fail(bs"peer-sleep: the sleeper was not registered\n");
     }
     let mut request: [u64; 2];

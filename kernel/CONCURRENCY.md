@@ -206,7 +206,9 @@ Symmetric now:
   and that core's own tick wakes it (`kernel_process_tick_wake` from
   `timer_irq_handler`, `kernel_process_tick_wake_if_due` from
   `kernel_secondary_timer_schedule`). A long core-0 mask no longer delays
-  a peer's sleeper (`/bin/peer-sleep`, the peer_sleep_mask view). An
+  a peer's sleeper (`/bin/peer-sleep`, the peer_sleep_mask view, which
+  since #863 reads what the waking tick recorded through
+  `kernel_process_tick_wake_watch` rather than sampling the sleeper). An
   affinity change leaves a queued sleeper where it is: the wake only
   publishes Ready, and any allowed core runs it.
 - Starting a world stop (GitHub issue #632) and serving one.

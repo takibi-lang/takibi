@@ -8481,6 +8481,45 @@ fn kernel_process_block_deadline(current: borrow FrameRef[process])
 private let mut kernel_process_tick_wake_head: [usize; KERNEL_MAX_CORES];
 private let mut kernel_process_tick_wake_due: [AtomicWord; KERNEL_MAX_CORES];
 
+// GitHub issue #863: what a tick-wake records for a probe, so the probe
+// reads a fact the waking core wrote instead of sampling the sleeper from
+// another core against the wall clock. kernel_process_tick_wake_tick_now
+// [core] is the generic-counter time of that core's latest tick and
+// tick_wake_tick_before[core] the one before it; each core writes only its
+// own words, at the start of its own tick, and only its own tick-wake reads
+// them. One pid may be watched (kernel_process_tick_wake_watch, under the
+// run lock): when a tick ends its deadline wait, the tick records its core
+// plus one and whether it was that core's first tick at or after the
+// deadline (the tick before it fell short of the deadline).
+private let mut kernel_process_tick_wake_tick_now: [usize; KERNEL_MAX_CORES];
+private let mut kernel_process_tick_wake_tick_before: [usize; KERNEL_MAX_CORES];
+private let mut kernel_process_tick_wake_watched_pid: usize;
+private let mut kernel_process_tick_wake_watched_core: usize;
+private let mut kernel_process_tick_wake_watched_first: bool;
+
+// Start watching pid (0 stops), forgetting any earlier record.
+fn kernel_process_tick_wake_watch(guard: borrow ProcessRunGuard[lock], pid: usize) {
+    kernel_process_tick_wake_watched_pid = pid;
+    kernel_process_tick_wake_watched_core = 0;
+    kernel_process_tick_wake_watched_first = false;
+}
+
+// The watched pid's tick wake: 0 while none, else the waking core plus one.
+fn kernel_process_tick_wake_watched_core_locked(guard: borrow ProcessRunGuard[lock]) -> usize {
+    return kernel_process_tick_wake_watched_core;
+}
+
+// Whether the recorded wake came on its core's first tick past the deadline.
+fn kernel_process_tick_wake_watched_first_locked(guard: borrow ProcessRunGuard[lock]) -> bool {
+    return kernel_process_tick_wake_watched_first;
+}
+
+// The start of a tick on core: shift its tick times. Own core only.
+private fn kernel_process_tick_wake_note(core: {0..<KERNEL_MAX_CORES as usize}, now: usize) {
+    kernel_process_tick_wake_tick_before[core] = kernel_process_tick_wake_tick_now[core];
+    kernel_process_tick_wake_tick_now[core] = now;
+}
+
 // What a Blocked record's wait asks of a tick: 0 for nothing (not a tick
 // wait), 1 for a NetRx retry on every tick, else its absolute deadline.
 private fn kernel_process_tick_wake_due_of(
@@ -8562,6 +8601,20 @@ private fn kernel_process_tick_wake_one(
                     scheduled_process_record_locked(guard, process_slot_word(owner.pool_index))
                         .deadline_result);
             }
+            let woken_slot: usize = process_slot_word(owner.pool_index);
+            if (reason != ProcessWaitReason::NetRx &&
+                kernel_process_tick_wake_watched_pid != 0 &&
+                scheduled_process_record_locked(guard, woken_slot).pid ==
+                    kernel_process_tick_wake_watched_pid) {
+                let raw_core: usize = cpu_id();
+                if (raw_core < KERNEL_MAX_CORES) {
+                    let core: {0..<KERNEL_MAX_CORES as usize} = raw_core;
+                    kernel_process_tick_wake_watched_core = core + 1;
+                    kernel_process_tick_wake_watched_first =
+                        kernel_process_tick_wake_tick_before[core] <
+                            scheduled_process_record_locked(guard, woken_slot).deadline_ticks;
+                }
+            }
             let ready = scheduled_process_wake(guard, owner, blocked);
             if (reason != ProcessWaitReason::NetRx) {
                 scheduled_process_record_locked(guard, process_slot_word(owner.pool_index))
@@ -8608,6 +8661,7 @@ fn kernel_process_tick_wake(guard: borrow ProcessRunGuard[lock])
     let core: {0..<KERNEL_MAX_CORES as usize} = raw_core;
     let due: usize = atomic_word_load(&kernel_process_tick_wake_due[core]);
     let now: usize = read_cntpct() as usize;
+    kernel_process_tick_wake_note(core, now);
     if (due == 0 || now < due) { return; }
     kernel_process_tick_wake_scan(guard, core, now);
 }
@@ -8619,7 +8673,9 @@ fn kernel_process_tick_wake_if_due() !{interrupt, unsafe} {
     if (raw_core >= KERNEL_MAX_CORES) { return; }
     let core: {0..<KERNEL_MAX_CORES as usize} = raw_core;
     let due: usize = atomic_word_load(&kernel_process_tick_wake_due[core]);
-    if (due == 0 || (read_cntpct() as usize) < due) { return; }
+    let now: usize = read_cntpct() as usize;
+    kernel_process_tick_wake_note(core, now);
+    if (due == 0 || now < due) { return; }
     let guard = process_run_lock();
     kernel_process_tick_wake_scan(guard, core, read_cntpct() as usize);
     process_run_unlock(guard);
