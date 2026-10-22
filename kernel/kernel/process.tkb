@@ -291,6 +291,13 @@ struct ProcessRecord {
     // Linux gives SIGCHLD=SIG_IGN special process-lifecycle semantics:
     // children are discarded after exit instead of becoming waitable zombies.
     sigchld_ignored: bool;
+    // GitHub issue #885: the siginfo of this process's pending SIGCHLD --
+    // the child's pid and its recorded end (kernel/kernel/wait_status.tkb).
+    // Written when a child's exit raises a SIGCHLD that is not already
+    // pending, and not otherwise: standard signals do not queue, and Linux
+    // keeps the siginfo of the one that was. 0 pid when none was recorded.
+    sigchld_pid: usize;
+    sigchld_status: usize;
     // GitHub issues #627 and #629: each standard signal's action as
     // rt_sigaction installed it, indexed by signum - 1. handler 0 is
     // SIG_DFL and 1 SIG_IGN (sigchld_ignored above carries SIGCHLD's
@@ -2993,6 +3000,8 @@ private fn scheduled_process_record_reset(guard: borrow ProcessRunGuard[lock],
     record.pending_signals = 0;
     record.sigwait_set = 0;
     record.sigchld_ignored = false;
+    record.sigchld_pid = 0;
+    record.sigchld_status = 0;
     let mut cleared: SignalAction = { 0, 0, 0, 0 };
     for index: usize in 0..<PROCESS_SIGNAL_ACTIONS {
         record.signal_actions[index] = cleared;
@@ -7815,6 +7824,11 @@ linear struct TakenSignal[signal: usize] {
     private pool_index: RegionHeld(ProcessRecord);
     private generation: usize;
     private signum: usize @ signal;
+    // GitHub issue #885: for SIGCHLD, the siginfo it was queued with (the
+    // record's sigchld_pid/sigchld_status at the take), so a child exiting
+    // between the take and the frame write cannot rename it.
+    private child_pid: usize;
+    private child_status: usize;
 }
 
 must_use variant ProcessSignalPendingResult {
@@ -7823,9 +7837,21 @@ must_use variant ProcessSignalPendingResult {
 }
 
 private fn taken_signal_new(pool_index: RegionHeld(ProcessRecord), generation: usize,
-                            signum: usize @ signal) -> TakenSignal[signal] {
-    let mut taken: TakenSignal[signal] = { pool_index, generation, signum };
+                            signum: usize @ signal, child_pid: usize,
+                            child_status: usize) -> TakenSignal[signal] {
+    let mut taken: TakenSignal[signal] = { pool_index, generation, signum,
+                                           child_pid, child_status };
     return taken;
+}
+
+// The child a taken SIGCHLD names (0 when it names none), and that child's
+// recorded end.
+fn taken_signal_child_pid(taken: borrow TakenSignal[signal]) -> usize {
+    return taken.child_pid;
+}
+
+fn taken_signal_child_status(taken: borrow TakenSignal[signal]) -> usize {
+    return taken.child_status;
 }
 
 fn taken_signal_number(taken: borrow TakenSignal[signal]) -> usize {
@@ -7848,6 +7874,12 @@ fn taken_signal_restore(taken: sink TakenSignal[signal]) {
     let guard = process_run_lock();
     if (scheduled_process_handle_matches(handle)) {
         let record: &mut ProcessRecord = scheduled_process_record_of_locked(guard, handle);
+        // GitHub issue #885: the SIGCHLD put back is the one taken, with
+        // its siginfo, even if another child exited in between.
+        if (signum == 17 && taken.child_pid != 0) {
+            record.sigchld_pid = taken.child_pid;
+            record.sigchld_status = taken.child_status;
+        }
         process_signal_pending_raise(guard, record, 1 << (signum - 1));
     }
     process_run_unlock(guard);
@@ -7865,11 +7897,14 @@ fn kernel_process_current_signal_take(wait_set: usize)
     for bit: usize in 0..<64 {
         let bit_mask: usize = 1 << bit;
         if ((available & bit_mask) != 0) {
+            let child_pid: usize = record.sigchld_pid;
+            let child_status: usize = record.sigchld_status;
             process_signal_pending_clear(guard, record, bit_mask);
             process_run_unlock(guard);
             return ProcessSignalPendingResult::Pending(
                 taken_signal_new(handle.pool_index, handle.generation,
-                                 bit + 1));
+                                 bit + 1,
+                                 child_pid, child_status));
         }
     }
     process_run_unlock(guard);
@@ -7890,10 +7925,13 @@ fn kernel_process_current_termination_signal_take()
         let bit: usize = 1 << index;
         if ((record.pending_signals & bit) != 0 &&
             process_signal_terminates(record, index)) {
+            let child_pid: usize = record.sigchld_pid;
+            let child_status: usize = record.sigchld_status;
             process_signal_pending_clear(guard, record, bit);
             process_run_unlock(guard);
             return ProcessSignalPendingResult::Pending(
-                taken_signal_new(handle.pool_index, handle.generation, index + 1));
+                taken_signal_new(handle.pool_index, handle.generation, index + 1,
+                                 child_pid, child_status));
         }
     }
     process_run_unlock(guard);
@@ -8091,10 +8129,13 @@ fn kernel_process_current_caught_signal_take() -> ProcessSignalPendingResult {
     for index: usize in 0..<PROCESS_SIGNAL_ACTIONS {
         let bit: usize = 1 << index;
         if ((available & bit) != 0 && record.signal_actions[index].handler > 1) {
+            let child_pid: usize = record.sigchld_pid;
+            let child_status: usize = record.sigchld_status;
             process_signal_pending_clear(guard, record, bit);
             process_run_unlock(guard);
             return ProcessSignalPendingResult::Pending(
-                taken_signal_new(handle.pool_index, handle.generation, index + 1));
+                taken_signal_new(handle.pool_index, handle.generation, index + 1,
+                                 child_pid, child_status));
         }
     }
     process_run_unlock(guard);
@@ -8183,6 +8224,12 @@ private fn kernel_process_signal_deliver_to(
     if (masked == false && handled == false && terminates == false) {
         return ProcessSignalSendResult::Delivered;
     }
+    // GitHub issue #885: a newly queued SIGCHLD names no child unless
+    // kernel_process_signal_child_exit, its sender on an exit, says so.
+    if (signum == 17 && (record.pending_signals & bit) == 0) {
+        record.sigchld_pid = 0;
+        record.sigchld_status = 0;
+    }
     process_signal_pending_raise(guard, record, bit);
     // A fatal signal must interrupt a blocked target too, not wait for its
     // deadline or an unrelated input byte: the rerun of its syscall takes
@@ -8231,11 +8278,27 @@ private fn kernel_process_signal_deliver_to(
 
 fn kernel_process_signal_child_exit(
         guard: borrow ProcessRunGuard[scheduled_process_run_lock],
-        parent: ProcessHandle) {
+        parent: ProcessHandle, child_pid: usize, child_status: usize) {
+    // GitHub issue #885: the siginfo goes with the SIGCHLD that is queued;
+    // a second exit while one is pending is merged into it, as on Linux.
+    // kernel_process_signal_deliver_to clears it for a SIGCHLD it newly
+    // queues (one kill sends carries none), so it is set after.
+    let mut was_pending: bool = true;
+    if (scheduled_process_handle_matches(parent)) {
+        was_pending = (scheduled_process_record_of_locked(guard, parent)
+            .pending_signals & (1 << 16)) != 0;
+    }
     let result = kernel_process_signal_deliver_to(guard, parent, 17);
     match result {
         ProcessSignalSendResult::Missing => {}
-        ProcessSignalSendResult::Delivered => {}
+        ProcessSignalSendResult::Delivered => {
+            if (was_pending == false) {
+                let record: &mut ProcessRecord =
+                    scheduled_process_record_of_locked(guard, parent);
+                record.sigchld_pid = child_pid;
+                record.sigchld_status = child_status;
+            }
+        }
     }
 }
 
@@ -10496,7 +10559,8 @@ fn kernel_process_child_exit(current_authority: sink ProcessCurrent[process, Pro
     // the same exit scheduling decision. In particular, a peer scheduler
     // must not observe the parent wake before this CPU has stopped exposing
     // the child as Running.
-    kernel_process_signal_child_exit(exit_guard, parent);
+    kernel_process_signal_child_exit(exit_guard, parent,
+        scheduled_process_pid_of_handle(child), status);
     match scheduled_process_running_take(exit_guard, child) {
         ScheduledProcessRunningTakeResult::Missing => {
             process_current_end(current_authority);

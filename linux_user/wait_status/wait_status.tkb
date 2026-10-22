@@ -14,6 +14,9 @@ const X86_64_NR_FORK: usize = 57;
 const X86_64_NR_EXIT: usize = 60;
 const X86_64_NR_WAIT4: usize = 61;
 const X86_64_NR_KILL: usize = 62;
+const X86_64_NR_RT_SIGPROCMASK: usize = 14;
+const X86_64_NR_RT_SIGTIMEDWAIT: usize = 128;
+const SIGCHLD_SET: usize = 0x10000; // 1 << (SIGCHLD - 1)
 
 // Forks a child that ends by `signal` when it is nonzero, else by exit
 // `code`, and returns the host's wait4 status word for it.
@@ -31,6 +34,37 @@ fn host_status(signal: usize, code: usize) -> u32 {
                                       &word as usize, 0, 0);
     if (reaped != child) { return 0xFFFFFFFF; }
     return word;
+}
+
+// GitHub issue #885: the SIGCHLD siginfo the host queues for a child that
+// ends by `signal` (nonzero) or exit `code`, taken synchronously with
+// SIGCHLD blocked and rt_sigtimedwait, so no handler or timing is
+// involved. Returns si_code << 8 | si_status, or all ones when the
+// siginfo does not name the child.
+fn host_sigchld(signal: usize, code: usize) -> u32 {
+    let mut set: usize = SIGCHLD_SET;
+    linux_syscall(X86_64_NR_RT_SIGPROCMASK, 0, &set as usize, 0, 8);
+    let child: isize = linux_syscall(X86_64_NR_FORK, 0, 0, 0, 0);
+    if (child == 0) {
+        if (signal != 0) {
+            let me: isize = linux_syscall(X86_64_NR_GETPID, 0, 0, 0, 0);
+            linux_syscall(X86_64_NR_KILL, me as usize, signal, 0, 0);
+        }
+        linux_syscall(X86_64_NR_EXIT, code, 0, 0, 0);
+    }
+    // siginfo: si_signo 0, si_code 2, si_pid 4, si_status 6 (u32 words).
+    let mut info: [u32; 32];
+    for index: usize in 0..<32 { info[index] = 0; }
+    let taken: isize = linux_syscall(X86_64_NR_RT_SIGTIMEDWAIT, &set as usize,
+                                     &info as usize, 0, 8);
+    let mut word: u32 = 0;
+    let reaped: isize = linux_syscall(X86_64_NR_WAIT4, child as usize,
+                                      &word as usize, 0, 0);
+    if (taken != 17 || reaped != child || info[0] != 17 ||
+        info[4] != child as u32) {
+        return 0xFFFFFFFF;
+    }
+    return (info[2] << 8) | info[6];
 }
 
 fn compare(label: *u8, host: u32, kernel: u32) {
@@ -60,4 +94,17 @@ fn app_main() {
     // exit_group keeps the code's low byte, as Linux does.
     compare("exit 300", host_status(0, 300),
             syscall_wait_status_word(300 & 0xFF));
+    // GitHub issue #885: the SIGCHLD siginfo for the same ends. The
+    // kernel side names the child itself; si_code and si_status are what
+    // syscall_signal_frame_write takes from wait_status.tkb.
+    compare("SIGCHLD SIGHUP", host_sigchld(1, 0), kernel_sigchld(syscall_status_signaled(1)));
+    compare("SIGCHLD SIGKILL", host_sigchld(9, 0), kernel_sigchld(syscall_status_signaled(9)));
+    compare("SIGCHLD SIGTERM", host_sigchld(15, 0), kernel_sigchld(syscall_status_signaled(15)));
+    compare("SIGCHLD exit 0", host_sigchld(0, 0), kernel_sigchld(0));
+    compare("SIGCHLD exit 143", host_sigchld(0, 143), kernel_sigchld(143));
+    compare("SIGCHLD exit 300", host_sigchld(0, 300), kernel_sigchld(300 & 0xFF));
+}
+
+fn kernel_sigchld(status: usize) -> u32 {
+    return (syscall_sigchld_code(status) << 8) | syscall_sigchld_status(status);
 }

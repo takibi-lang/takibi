@@ -5,3 +5,9 @@ SIGTERM: host 15 kernel 15 ok
 exit 0: host 0 kernel 0 ok
 exit 143: host 36608 kernel 36608 ok
 exit 300: host 11264 kernel 11264 ok
+SIGCHLD SIGHUP: host 513 kernel 513 ok
+SIGCHLD SIGKILL: host 521 kernel 521 ok
+SIGCHLD SIGTERM: host 527 kernel 527 ok
+SIGCHLD exit 0: host 256 kernel 256 ok
+SIGCHLD exit 143: host 399 kernel 399 ok
+SIGCHLD exit 300: host 300 kernel 300 ok

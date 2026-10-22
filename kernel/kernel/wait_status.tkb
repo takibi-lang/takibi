@@ -36,3 +36,22 @@ fn syscall_status_shell_code(status: usize) -> usize {
     }
     return status & 0xFF;
 }
+
+// GitHub issue #885: the SIGCHLD siginfo's si_code and si_status for a
+// recorded end, as Linux reports them: CLD_KILLED (2) with the signal for a
+// killed child, CLD_EXITED (1) with the exit code otherwise. No CLD_DUMPED,
+// since no core is ever written.
+const SYSCALL_CLD_EXITED: u32 = 1;
+const SYSCALL_CLD_KILLED: u32 = 2;
+
+fn syscall_sigchld_code(status: usize) -> u32 {
+    if ((status & SYSCALL_STATUS_SIGNALED) != 0) { return SYSCALL_CLD_KILLED; }
+    return SYSCALL_CLD_EXITED;
+}
+
+fn syscall_sigchld_status(status: usize) -> u32 {
+    if ((status & SYSCALL_STATUS_SIGNALED) != 0) {
+        return (status & 0x7F) as u32;
+    }
+    return (status & 0xFF) as u32;
+}
