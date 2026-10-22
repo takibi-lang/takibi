@@ -1,0 +1,43 @@
+// The PL011 receive drain one RX interrupt runs (GitHub issue #868).
+//
+// The handler used to take ONE word per interrupt and then clear the
+// receive-timeout. With IFLS at 1/8 (4 of a 32-deep FIFO), a burst of 1..3
+// bytes never raises RXIS; after the first byte, the rest waited on RTIS
+// latching again, which a FIFO that receives nothing new need not do soon.
+// Linux's pl011_fifo_to_tty drains until RXFE on every interrupt, and so
+// does this: a short burst is delivered by the interrupt that announced it.
+//
+// The loop is bounded by the FIFO depth, so IRQ-masked time is at most one
+// FIFO's worth of reads even under a flood. It is deliberately NOT bounded
+// by the receive ring's free space: a byte left in the FIFO for a full ring
+// is lost later by a hardware overrun nobody counts, while a byte handed to
+// the handler now is counted by kernel_uart_rx_push as Dropped and printed
+// at the end of the boot (GitHub issue #543).
+//
+// Kept apart from pl011.tkb's IoHandle so linux_user/pl011_rx can compile
+// this file with a scripted FIFO in place of the register operations.
+
+// Words read per interrupt: the PL011 FIFO depth (DDI0183 r1p5, 32 x 12).
+const PL011_RX_FIFO_DEPTH: usize = 32;
+
+// True when a BREAK arrived and the caller should enter the debugger. A word
+// carrying DR.BE (QEMU's CHR_EVENT_BREAK) or a latched BEMIS (the board)
+// ends the drain there: what follows the BREAK belongs to the debugger.
+fn uart_rx_drain() -> bool !{interrupt, unsafe} {
+    for taken: usize in 0..<PL011_RX_FIFO_DEPTH {
+        if (uart_rx_ready() == false) { break; }
+        let received: u32 = uart_rx_word();
+        if ((received & (1 << 10)) != 0 || uart_break_flagged()) {
+            diagnostic_trace_record_uart_break(received as usize);
+            uart_break_clear();
+            return true;
+        }
+        uart_rx_handler(received as u8);
+    }
+    if (uart_break_flagged()) {
+        diagnostic_trace_record_uart_break(1 << 10);
+        uart_break_clear();
+        return true;
+    }
+    return false;
+}

@@ -379,6 +379,7 @@ KERNEL_UNUSED_CHECKED := \
 	kernel/drivers/virtio_ring.tkb \
 	kernel/drivers/virtio_used.tkb \
 	kernel/drivers/serial/pl011.tkb \
+	kernel/drivers/serial/pl011_rx.tkb \
 	kernel/drivers/serial/uart_rx_ring.tkb \
 	kernel/drivers/serial/terminal.tkb \
 	kernel/drivers/serial/terminal_echo.tkb \
@@ -532,7 +533,7 @@ LINUX_USER_EXAMPLES      := linux_hello start checked_usize elf64_validate bump 
                              affine_escape_via_index align_ptr_proof linear_obligation tuple_pair region_proto region_inspection pool_space_replay \
                              field_lease match_int_lit record_loans \
                              callstack ringbuf crc8 djb2 slice slice_from_field logical_eval foreach for loop fizzbuzz fibonacci \
-                             bubblesort inet_checksum ip_parse tcp_parse wire_endian ref_type byte_slice atomic spinlock locked_cell diagnostic_ring publish fdt number usb_config usb_init_report xhci_event_match xhci_regs uart_rx_ring block_cache gem_tx_wait virtio_net_tx virtio_net_reply generic_variant runtime_bounds pin_placement place_array protocol_ring protocol_tx protocol_txrx protocol_snapshot region_held header_overlay cache_geometry wait_status
+                             bubblesort inet_checksum ip_parse tcp_parse wire_endian ref_type byte_slice atomic spinlock locked_cell diagnostic_ring publish fdt number usb_config usb_init_report xhci_event_match xhci_regs uart_rx_ring pl011_rx block_cache gem_tx_wait virtio_net_tx virtio_net_reply generic_variant runtime_bounds pin_placement place_array protocol_ring protocol_tx protocol_txrx protocol_snapshot region_held header_overlay cache_geometry wait_status
 LINUX_USER_BINS          := $(foreach e,$(LINUX_USER_EXAMPLES),$(LINUX_USER_DIR)/$(e)/$(e).exe)
 LINUX_USER_OBJS          := $(foreach e,$(LINUX_USER_EXAMPLES),$(LINUX_USER_DIR)/$(e)/$(e)_exe.o)
 
@@ -643,6 +644,12 @@ $(LINUX_USER_DIR)/xhci_regs/xhci_regs_exe.o: LINUX_USER_EXTRA_SRCS := kernel/dri
 # boot what this costs nothing, and the capacity and drop rule are byte work.
 $(LINUX_USER_DIR)/uart_rx_ring/uart_rx_ring_exe.o: kernel/drivers/serial/uart_rx_ring.tkb kernel/drivers/serial/terminal.tkb kernel/drivers/serial/terminal_echo.tkb kernel/lib/execution_model.tkb $(LINUX_USER_DIR)/uart_rx_ring/terminal_policy.tkb
 $(LINUX_USER_DIR)/uart_rx_ring/uart_rx_ring_exe.o: LINUX_USER_EXTRA_SRCS := kernel/drivers/serial/uart_rx_ring.tkb $(LINUX_USER_DIR)/uart_rx_ring/terminal_policy.tkb
+
+# GitHub issue #868: the PL011 RX drain against a scripted FIFO. QEMU's
+# PL011 fixes its trigger level at one byte, so no QEMU lane can strand a
+# burst below the board's 1/8 trigger the way one-word-per-interrupt did.
+$(LINUX_USER_DIR)/pl011_rx/pl011_rx_exe.o: kernel/drivers/serial/pl011_rx.tkb
+$(LINUX_USER_DIR)/pl011_rx/pl011_rx_exe.o: LINUX_USER_EXTRA_SRCS := kernel/drivers/serial/pl011_rx.tkb
 
 # GitHub issue #208: the kernel's own block read cache, with two simulated
 # cores. Whether a write on one core retires the other's copies is exactly

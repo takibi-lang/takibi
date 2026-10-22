@@ -1,0 +1,120 @@
+// The kernel's PL011 receive drain, run against a scripted FIFO.
+//
+// GitHub issue #868. The RX interrupt took one word and cleared RTIS, so a
+// burst below the 1/8 trigger level left bytes in the FIFO waiting on an
+// interrupt that need not come. QEMU's PL011 interrupts on every byte (its
+// trigger level is fixed at 1), so no QEMU lane can show the stranded bytes;
+// this compiles kernel/drivers/serial/pl011_rx.tkb itself and counts what
+// ONE call delivers.
+
+private let mut fifo: [u32; 64];
+private let mut fifo_len: usize;
+private let mut fifo_next: usize;
+private let mut delivered: [u8; 64];
+private let mut delivered_len: usize;
+private let mut break_latched: bool;
+private let mut break_cleared: bool;
+
+fn uart_rx_ready() -> bool {
+    return fifo_next < fifo_len;
+}
+
+fn uart_rx_word() -> u32 !{interrupt} {
+    let index: usize = fifo_next;
+    if (index < 64) {
+        fifo_next = index + 1;
+        return fifo[index];
+    }
+    return 0;
+}
+
+fn uart_break_flagged() -> bool !{interrupt} {
+    return break_latched;
+}
+
+fn uart_break_clear() !{interrupt} {
+    break_latched = false;
+    break_cleared = true;
+}
+
+fn diagnostic_trace_record_uart_break(data: usize) !{interrupt, unsafe} {
+}
+
+fn uart_rx_handler(c: u8) !{unsafe} {
+    let index: usize = delivered_len;
+    if (index < 64) {
+        delivered[index] = c;
+        delivered_len = index + 1;
+    }
+}
+
+fn check(label: *u8, ok: bool) {
+    if (ok) {
+        uart_puts("ok     ");
+    } else {
+        uart_puts("FAILED ");
+    }
+    uart_puts(label);
+    uart_puts("\r\n");
+}
+
+private fn load(count: usize) {
+    fifo_len = 0;
+    fifo_next = 0;
+    delivered_len = 0;
+    break_latched = false;
+    break_cleared = false;
+    for i: usize in 0..<64 {
+        if (i < count) {
+            fifo[i] = (0x41 + i % 26) as u32;
+            fifo_len = i + 1;
+        }
+    }
+}
+
+private fn delivered_in_order() -> bool {
+    let mut ok: bool = true;
+    for i: usize in 0..<64 {
+        if (i < delivered_len && delivered[i] != (0x41 + i % 26) as u8) { ok = false; }
+    }
+    return ok;
+}
+
+fn app_main() !{interrupt, unsafe} {
+    // Three bytes: below the 1/8 trigger (4 of 32), the burst #868 stranded.
+    load(3);
+    let first: bool = uart_rx_drain();
+    check("a 3-byte burst is all delivered by one interrupt",
+          first == false && delivered_len == 3 && fifo_next == 3);
+    check("the burst arrives in order", delivered_in_order());
+
+    load(1);
+    let single: bool = uart_rx_drain();
+    check("a single byte is delivered", single == false && delivered_len == 1);
+
+    load(0);
+    let empty: bool = uart_rx_drain();
+    check("an empty FIFO delivers nothing", empty == false && delivered_len == 0);
+
+    // A flood larger than the FIFO: one interrupt takes one FIFO's worth and
+    // the rest is left for the next, so IRQ-masked time stays bounded.
+    load(40);
+    let flood: bool = uart_rx_drain();
+    check("one interrupt reads at most the 32-word FIFO depth",
+          flood == false && delivered_len == 32 && fifo_next == 32);
+    check("the flood arrives in order", delivered_in_order());
+
+    // A BREAK word (DR.BE) mid-burst ends the drain and enters the debugger.
+    load(5);
+    fifo[2] = 1 << 10;
+    let brk: bool = uart_rx_drain();
+    check("a BREAK word stops the drain and reports the debugger",
+          brk && delivered_len == 2 && fifo_next == 3 && break_cleared);
+
+    // BEMIS latched with the FIFO empty, as the board reports a BREAK.
+    load(0);
+    break_latched = true;
+    let latched: bool = uart_rx_drain();
+    check("a latched BREAK with an empty FIFO reports the debugger",
+          latched && break_cleared && break_latched == false);
+}

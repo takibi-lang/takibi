@@ -17,6 +17,7 @@
 // the else-if structure below drifting, which is the risk this file removes.
 use "kernel/lib/diagnostic_ring.tkb";
 use "kernel/printk/log.tkb";
+use "kernel/drivers/serial/pl011_rx.tkb";
 
 // The PL011 register block (ARM PrimeCell UART, DDI0183), at the offsets
 // the drivers use. Reached only through an IoHandle(Pl011Regs): every
@@ -136,17 +137,8 @@ fn uart_irq_service() -> bool !{interrupt, unsafe} {
             process_run_unlock(tx_guard);
         }
     }
-    if (uart_rx_ready()) {
-        let received: u32 = uart_rx_word();
-        if ((received & (1 << 10)) != 0 || uart_break_flagged()) {
-            diagnostic_trace_record_uart_break(received as usize);
-            uart_break_clear();
-            return true;
-        }
-        uart_rx_handler(received as u8);
-    } else if (uart_break_flagged()) {
-        diagnostic_trace_record_uart_break(1 << 10);
-        uart_break_clear();
+    // GitHub issue #868: drain to RXFE, not one word per interrupt.
+    if (uart_rx_drain()) {
         return true;
     }
     // Receive-timeout is latched separately from the FIFO level and must be

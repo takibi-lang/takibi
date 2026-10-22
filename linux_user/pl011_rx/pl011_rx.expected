@@ -1,0 +1,8 @@
+ok     a 3-byte burst is all delivered by one interrupt
+ok     the burst arrives in order
+ok     a single byte is delivered
+ok     an empty FIFO delivers nothing
+ok     one interrupt reads at most the 32-word FIFO depth
+ok     the flood arrives in order
+ok     a BREAK word stops the drain and reports the debugger
+ok     a latched BREAK with an empty FIFO reports the debugger
