@@ -204,7 +204,7 @@ WINDOWS = {
     # and the shell waits for good for the child it was never told about.
     "633": {
         "spin": ("kernel/syscall.tkb",
-                 "                let reaped_status: usize =\n"
+                 "                let reaped_status: ProcessEnd =\n"
                  "                    kernel_process_current_reap_pid(zombie_pid);\n",
                  False),
         # A child's exit no longer writes its parent's record, so the
