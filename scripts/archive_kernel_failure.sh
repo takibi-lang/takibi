@@ -61,6 +61,25 @@ cp -pr "$artifact_dir"/. "$archive/" 2>/dev/null || true
     # The host's load, because a lane that hit its guest timeout on a busy
     # machine and a guest that stopped look alike in the capture (#665).
     echo "load: $(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null || echo unknown)"
+    # GitHub issues #854 and #876: a load figure says the host was busy, not
+    # WHAT was busy. On 2026-10-21 four lanes went silent at once inside the
+    # lock-step boot probes (pid, freelist, pool walk) with load 70.9 on 24
+    # host CPUs and only 24 leased vCPUs, so most of that load was work the
+    # vCPU lease does not count -- and nothing recorded whose. So: the host's
+    # runnable/total task count, its CPU split (the load average and this line
+    # are host-wide; `top` lists only this container's processes, so a hog in
+    # another container shows as busy CPU with no process here), and the
+    # busiest processes this container can see, from top's second sample so
+    # %CPU is current rather than lifetime.
+    echo "running: $(cut -d' ' -f4 /proc/loadavg 2>/dev/null || echo unknown)"
+    if command -v top >/dev/null 2>&1; then
+        top -b -n 2 -d 0.5 -o %CPU -w 200 2>/dev/null |
+            awk '/^top -/ { frame++ } frame == 2' |
+            awk '/^%Cpu/ { print "host cpu: " $0; next }
+                 /^ *PID / { table = 1; next }
+                 table && shown < 15 && NF >= 12 && $9 + 0 > 0 {
+                     print "top: " $1 " " $9 "% " $12; shown++ }' || true
+    fi
     echo "lane: ${KERNEL_QEMU_LABEL:-unknown}"
     echo "kernel: $(basename "${KERNEL_QEMU_ELF:-unknown}")"
     if [ -f "$archive/console-state.log" ]; then

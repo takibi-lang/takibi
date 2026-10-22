@@ -49,6 +49,13 @@ named="$(find "$root_named" -mindepth 1 -maxdepth 1 -type d | head -1)"
 grep -q "^lane: qemu-race-603-reverted$" "$named/MANIFEST" && claim ||
     fail "MANIFEST lost the lane"
 grep -q "^load: " "$named/MANIFEST" && claim || fail "MANIFEST lost the host load"
+# GitHub issues #854 and #876: whose load, not only how much.
+grep -Eq "^running: [0-9]+/[0-9]+$" "$named/MANIFEST" && claim ||
+    fail "MANIFEST lost the host's runnable task count"
+if command -v top >/dev/null 2>&1; then
+    grep -q "^host cpu: %Cpu" "$named/MANIFEST" && claim ||
+        fail "MANIFEST lost the host CPU split"
+fi
 grep -q "^kernel: kernel-race-603-reverted.elf$" "$named/MANIFEST" && claim ||
     fail "MANIFEST lost the kernel"
 
