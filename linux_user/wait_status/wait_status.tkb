@@ -16,7 +16,9 @@ const X86_64_NR_WAIT4: usize = 61;
 const X86_64_NR_KILL: usize = 62;
 const X86_64_NR_RT_SIGPROCMASK: usize = 14;
 const X86_64_NR_RT_SIGTIMEDWAIT: usize = 128;
+const X86_64_NR_GETUID: usize = 102;
 const SIGCHLD_SET: usize = 0x10000; // 1 << (SIGCHLD - 1)
+const SIGUSR1_SET: usize = 0x200; // 1 << (SIGUSR1 - 1)
 
 // Forks a child that ends by `signal` when it is nonzero, else by exit
 // `code`, and returns the host's wait4 status word for it.
@@ -67,6 +69,41 @@ fn host_sigchld(signal: usize, code: usize) -> u32 {
     return (info[2] << 8) | info[6];
 }
 
+// GitHub issue #894: the siginfo of a signal kill(2) sent. Two children in
+// turn kill this process with SIGUSR1 while it is blocked, each reaped
+// before the next forks, so the order is fixed without timing; the
+// second send is merged into the pending instance. Returns si_code, or all
+// ones unless si_pid names the FIRST sender and si_uid its real uid --
+// what kernel_process_signal_deliver_to records and
+// syscall_signal_frame_write reports.
+fn host_kill_siginfo() -> u32 {
+    let mut set: usize = SIGUSR1_SET;
+    linux_syscall(X86_64_NR_RT_SIGPROCMASK, 0, &set as usize, 0, 8);
+    let parent: isize = linux_syscall(X86_64_NR_GETPID, 0, 0, 0, 0);
+    let mut first: isize = 0;
+    for round: usize in 0..<2 {
+        let child: isize = linux_syscall(X86_64_NR_FORK, 0, 0, 0, 0);
+        if (child == 0) {
+            linux_syscall(X86_64_NR_KILL, parent as usize, 10, 0, 0);
+            linux_syscall(X86_64_NR_EXIT, 0, 0, 0, 0);
+        }
+        let mut word: u32 = 0;
+        linux_syscall(X86_64_NR_WAIT4, child as usize, &word as usize, 0, 0);
+        if (round == 0) { first = child; }
+    }
+    // siginfo: si_signo 0, si_code 2, si_pid 4, si_uid 5 (u32 words).
+    let mut info: [u32; 32];
+    for index: usize in 0..<32 { info[index] = 0; }
+    let taken: isize = linux_syscall(X86_64_NR_RT_SIGTIMEDWAIT, &set as usize,
+                                     &info as usize, 0, 8);
+    let uid: isize = linux_syscall(X86_64_NR_GETUID, 0, 0, 0, 0);
+    if (taken != 10 || info[0] != 10 || info[4] != first as u32 ||
+        info[5] != uid as u32) {
+        return 0xFFFFFFFF;
+    }
+    return info[2];
+}
+
 fn compare(label: *u8, host: u32, kernel: u32) {
     uart_puts(label);
     uart_puts(": host ");
@@ -115,6 +152,9 @@ fn app_main() {
             syscall_wait_status_word(stored(process_end_signaled(15))));
     compare("stored exit 143", host_status(0, 143),
             syscall_wait_status_word(stored(process_end_exited(143))));
+    // GitHub issue #894: a kill-sent signal is SI_USER (0) naming its
+    // first sender.
+    compare("kill SIGUSR1 first sender", host_kill_siginfo(), 0);
 }
 
 fn kernel_sigchld(end: ProcessEnd) -> u32 {

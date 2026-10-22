@@ -357,6 +357,13 @@ struct ProcessRecord {
     // keeps the siginfo of the one that was. 0 pid when none was recorded.
     sigchld_pid: usize;
     sigchld_status: ProcessEnd;
+    // GitHub issue #894: the pid of the process whose kill(2) made each
+    // standard signal pending, indexed by signum - 1, for siginfo's si_pid
+    // with SI_USER. Written when the signal becomes pending and not while
+    // it stays pending (Linux keeps the first instance's siginfo); 0 when
+    // the kernel raised it. u32 because si_pid is; si_uid needs no slot,
+    // since every process is uid 0.
+    signal_sender: [u32; PROCESS_SIGNAL_ACTIONS];
     // GitHub issues #627 and #629: each standard signal's action as
     // rt_sigaction installed it, indexed by signum - 1. handler 0 is
     // SIG_DFL and 1 SIG_IGN (sigchld_ignored above carries SIGCHLD's
@@ -3125,6 +3132,7 @@ private fn scheduled_process_record_reset(guard: borrow ProcessRunGuard[lock],
     let mut cleared: SignalAction = { 0, 0, 0, 0 };
     for index: usize in 0..<PROCESS_SIGNAL_ACTIONS {
         record.signal_actions[index] = cleared;
+        record.signal_sender[index] = 0;
     }
     record.sigsuspend_saved_mask = 0;
     record.sigsuspend_mask_saved = false;
@@ -7954,6 +7962,8 @@ linear struct TakenSignal[signal: usize] {
     // between the take and the frame write cannot rename it.
     private child_pid: usize;
     private child_status: ProcessEnd;
+    // GitHub issue #894: the kill(2) sender recorded with it (0: none).
+    private sender_pid: usize;
 }
 
 must_use variant ProcessSignalPendingResult {
@@ -7961,12 +7971,30 @@ must_use variant ProcessSignalPendingResult {
     Pending(exists signal: usize. TakenSignal[signal]);
 }
 
-private fn taken_signal_new(pool_index: RegionHeld(ProcessRecord), generation: usize,
-                            signum: usize @ signal, child_pid: usize,
-                            child_status: ProcessEnd) -> TakenSignal[signal] {
-    let mut taken: TakenSignal[signal] = { pool_index, generation, signum,
-                                           child_pid, child_status };
+// Take `signum` off the pending set of `record` (which `handle` names),
+// with the siginfo recorded for it.
+private fn taken_signal_take(guard: borrow ProcessRunGuard[scheduled_process_run_lock],
+                             record: borrow &mut ProcessRecord,
+                             handle: ProcessHandle,
+                             signum: usize @ signal) -> TakenSignal[signal] {
+    let mut sender_pid: usize = 0;
+    let number: usize = signum;
+    if (number >= 1 && number <= PROCESS_SIGNAL_ACTIONS) {
+        let index: {0..<PROCESS_SIGNAL_ACTIONS as usize} = number - 1;
+        sender_pid = record.signal_sender[index] as usize;
+    }
+    let child_pid: usize = record.sigchld_pid;
+    let child_status: ProcessEnd = record.sigchld_status;
+    process_signal_pending_clear(guard, record, 1 << (signum - 1));
+    let mut taken: TakenSignal[signal] = { handle.pool_index, handle.generation,
+                                           signum, child_pid, child_status,
+                                           sender_pid };
     return taken;
+}
+
+// The kill(2) sender of a taken signal, 0 when the kernel raised it.
+fn taken_signal_sender_pid(taken: borrow TakenSignal[signal]) -> usize {
+    return taken.sender_pid;
 }
 
 // The child a taken SIGCHLD names (0 when it names none), and that child's
@@ -8005,6 +8033,10 @@ fn taken_signal_restore(taken: sink TakenSignal[signal]) {
             record.sigchld_pid = taken.child_pid;
             record.sigchld_status = taken.child_status;
         }
+        if (signum >= 1 && signum <= PROCESS_SIGNAL_ACTIONS) {
+            let index: {0..<PROCESS_SIGNAL_ACTIONS as usize} = signum - 1;
+            record.signal_sender[index] = taken.sender_pid as u32;
+        }
         process_signal_pending_raise(guard, record, 1 << (signum - 1));
     }
     process_run_unlock(guard);
@@ -8022,14 +8054,9 @@ fn kernel_process_current_signal_take(wait_set: usize)
     for bit: usize in 0..<64 {
         let bit_mask: usize = 1 << bit;
         if ((available & bit_mask) != 0) {
-            let child_pid: usize = record.sigchld_pid;
-            let child_status: ProcessEnd = record.sigchld_status;
-            process_signal_pending_clear(guard, record, bit_mask);
+            let taken = taken_signal_take(guard, record, handle, bit + 1);
             process_run_unlock(guard);
-            return ProcessSignalPendingResult::Pending(
-                taken_signal_new(handle.pool_index, handle.generation,
-                                 bit + 1,
-                                 child_pid, child_status));
+            return ProcessSignalPendingResult::Pending(taken);
         }
     }
     process_run_unlock(guard);
@@ -8050,13 +8077,9 @@ fn kernel_process_current_termination_signal_take()
         let bit: usize = 1 << index;
         if ((record.pending_signals & bit) != 0 &&
             process_signal_terminates(record, index)) {
-            let child_pid: usize = record.sigchld_pid;
-            let child_status: ProcessEnd = record.sigchld_status;
-            process_signal_pending_clear(guard, record, bit);
+            let taken = taken_signal_take(guard, record, handle, index + 1);
             process_run_unlock(guard);
-            return ProcessSignalPendingResult::Pending(
-                taken_signal_new(handle.pool_index, handle.generation, index + 1,
-                                 child_pid, child_status));
+            return ProcessSignalPendingResult::Pending(taken);
         }
     }
     process_run_unlock(guard);
@@ -8254,13 +8277,9 @@ fn kernel_process_current_caught_signal_take() -> ProcessSignalPendingResult {
     for index: usize in 0..<PROCESS_SIGNAL_ACTIONS {
         let bit: usize = 1 << index;
         if ((available & bit) != 0 && record.signal_actions[index].handler > 1) {
-            let child_pid: usize = record.sigchld_pid;
-            let child_status: ProcessEnd = record.sigchld_status;
-            process_signal_pending_clear(guard, record, bit);
+            let taken = taken_signal_take(guard, record, handle, index + 1);
             process_run_unlock(guard);
-            return ProcessSignalPendingResult::Pending(
-                taken_signal_new(handle.pool_index, handle.generation, index + 1,
-                                 child_pid, child_status));
+            return ProcessSignalPendingResult::Pending(taken);
         }
     }
     process_run_unlock(guard);
@@ -8324,7 +8343,7 @@ must_use variant ProcessSignalSendResult {
 
 private fn kernel_process_signal_deliver_to(
         guard: borrow ProcessRunGuard[scheduled_process_run_lock],
-        target: ProcessHandle, signum: usize)
+        target: ProcessHandle, signum: usize, sender_pid: usize)
         -> ProcessSignalSendResult !{unsafe} {
     if (signum == 0 || signum > 64 ||
         scheduled_process_handle_matches(target) == false ||
@@ -8354,6 +8373,13 @@ private fn kernel_process_signal_deliver_to(
     if (signum == 17 && (record.pending_signals & bit) == 0) {
         record.sigchld_pid = 0;
         record.sigchld_status = ProcessEnd::Exited(0);
+    }
+    // GitHub issue #894: the sender goes with the instance that becomes
+    // pending; a send while it is pending is merged and keeps the first.
+    if ((record.pending_signals & bit) == 0 && signum >= 1 &&
+        signum <= PROCESS_SIGNAL_ACTIONS) {
+        let index: {0..<PROCESS_SIGNAL_ACTIONS as usize} = signum - 1;
+        record.signal_sender[index] = sender_pid as u32;
     }
     process_signal_pending_raise(guard, record, bit);
     // A fatal signal must interrupt a blocked target too, not wait for its
@@ -8413,7 +8439,7 @@ fn kernel_process_signal_child_exit(
         was_pending = (scheduled_process_record_of_locked(guard, parent)
             .pending_signals & (1 << 16)) != 0;
     }
-    let result = kernel_process_signal_deliver_to(guard, parent, 17);
+    let result = kernel_process_signal_deliver_to(guard, parent, 17, 0);
     match result {
         ProcessSignalSendResult::Missing => {}
         ProcessSignalSendResult::Delivered => {
@@ -8578,7 +8604,7 @@ fn kernel_process_terminal_signal(
                         ProcessHandleOfSlot::Absent => {}
                         ProcessHandleOfSlot::Live(handle) => {
                             match kernel_process_signal_deliver_to(
-                                    guard, handle, signum) {
+                                    guard, handle, signum, 0) {
                                 ProcessSignalSendResult::Missing => {}
                                 ProcessSignalSendResult::Delivered => {}
                             }
@@ -8591,7 +8617,9 @@ fn kernel_process_terminal_signal(
     }
 }
 
-fn kernel_process_signal_send(pid: usize, signum: usize)
+// `sender_pid` is the pid of the process calling kill(2), which siginfo
+// reports as si_pid (GitHub issue #894).
+fn kernel_process_signal_send(pid: usize, signum: usize, sender_pid: usize)
         -> ProcessSignalSendResult !{unsafe} {
     // From the lookup to the delivery under one hold: see
     // scheduled_process_slot_for_pid_locked.
@@ -8610,7 +8638,7 @@ fn kernel_process_signal_send(pid: usize, signum: usize)
     let result = match scheduled_process_handle_of_slot(guard, slot) {
         ProcessHandleOfSlot::Absent => { ProcessSignalSendResult::Missing }
         ProcessHandleOfSlot::Live(handle) => {
-            kernel_process_signal_deliver_to(guard, handle, signum)
+            kernel_process_signal_deliver_to(guard, handle, signum, sender_pid)
         }
     };
     process_run_unlock(guard);

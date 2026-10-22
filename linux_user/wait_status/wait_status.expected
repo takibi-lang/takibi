@@ -15,3 +15,4 @@ stored SIGCHLD SIGKILL: host 521 kernel 521 ok
 stored SIGCHLD exit 0: host 256 kernel 256 ok
 stored SIGTERM: host 15 kernel 15 ok
 stored exit 143: host 36608 kernel 36608 ok
+kill SIGUSR1 first sender: host 0 kernel 0 ok

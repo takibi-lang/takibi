@@ -5037,7 +5037,8 @@ const SIGFRAME_STACK_GROWTH_ESR: usize = 0x90000007;
 fn syscall_signal_frame_write(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], frame: borrow FrameRef[process], value: usize,
                               signum: usize,
                               restore_mask: usize, child_pid: usize,
-                              child_status: ProcessEnd) -> (bool, usize)
+                              child_status: ProcessEnd, sender_pid: usize)
+        -> (bool, usize)
         !{unsafe} {
     let user_sp: usize = frame_sp_el0(frame);
     if (user_sp < SIGFRAME_SIZE + 16) { return (false, 0); }
@@ -5060,8 +5061,9 @@ fn syscall_signal_frame_write(current_authority: borrow ProcessCurrent[current_p
             // child it was queued for: si_pid (16), si_code CLD_EXITED or
             // CLD_KILLED, si_status (24) the exit code or the signal (GitHub
             // issue #885; si_uid, si_utime and si_stime stay 0). Any other
-            // signal, and a SIGCHLD kill sent, came from kill: SI_USER,
-            // without the sender's pid and uid (GitHub issue #629).
+            // signal, and a SIGCHLD kill sent, is SI_USER (0) with si_pid
+            // the kill(2) sender, 0 when the kernel raised it, and si_uid
+            // (20) the sender's uid, always 0 here (GitHub issue #894).
             written = user_write_join(written, user_write_u32(range, 0, signum as u32));
             if (signum == LINUX_SIGCHLD && child_pid != 0) {
                 written = user_write_join(written, user_write_u32(range, 8,
@@ -5070,6 +5072,9 @@ fn syscall_signal_frame_write(current_authority: borrow ProcessCurrent[current_p
                     child_pid as u32));
                 written = user_write_join(written, user_write_u32(range, 24,
                     syscall_sigchld_status(child_status)));
+            } else {
+                written = user_write_join(written, user_write_u32(range, 16,
+                    sender_pid as u32));
             }
             written = user_write_join(written, user_write_u64(range, SIGFRAME_UC_SIGMASK,
                                       restore_mask as u64));
@@ -5152,7 +5157,8 @@ private fn syscall_signal_deliver_into(current_authority: ProcessCurrent[current
             let (written, base) = syscall_signal_frame_write(current_authority,
                 here, value, signum, restore_mask,
                 taken_signal_child_pid(taken),
-                taken_signal_child_status(taken));
+                taken_signal_child_status(taken),
+                taken_signal_sender_pid(taken));
             if (written == false) {
                 // Linux forces SIGSEGV when the frame cannot be written.
                 let delivered: usize = taken_signal_delivered(taken);
@@ -6923,7 +6929,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             kernel_process_current_signal_terminates(x1)) {
             return kernel_syscall_exit_current_process(current_authority, process_end_signaled(x1));
         }
-        match kernel_process_signal_send(x0, x1) {
+        match kernel_process_signal_send(x0, x1, kernel_process_current_pid()) {
             ProcessSignalSendResult::Missing => {
                 return syscall_finish_current(frame, SyscallAction::Resume(LINUX_ESRCH), current_authority);
             }
