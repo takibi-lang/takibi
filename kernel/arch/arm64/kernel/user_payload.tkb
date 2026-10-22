@@ -20,6 +20,9 @@ extern fn scheduler_probe_run(asid_va: usize, asid_marker: usize,
                                simd_pattern: usize, busy_count: usize)
     -> usize;
 extern fn busy_spin(count: usize);
+extern fn sigchld_probe_arm(record: usize);
+extern fn sigchld_probe_handler_address() -> usize;
+extern fn sigchld_probe_restorer_address() -> usize;
 
 const EBADF_RC: usize = 0xFFFFFFFFFFFFFFF7;
 const EFAULT_RC: usize = 0xFFFFFFFFFFFFFFF2;
@@ -44,6 +47,14 @@ const SCHEDULER_PARENT_BUSY: usize = 0x17D78400;
 const SCHEDULER_PARENT_POLL_BUSY: usize = 0x00989680;
 const WAIT_POLL_MAX: usize = 10000;
 const WNOHANG: usize = 1;
+const EINTR_RC: usize = 0xFFFFFFFFFFFFFFFC;
+const SIGCHLD: usize = 17;
+const SIGTERM: usize = 15;
+const SA_SIGINFO: usize = 4;
+const SA_RESTORER: usize = 0x04000000;
+const CLD_EXITED: usize = 1;
+const CLD_KILLED: usize = 2;
+const SI_USER: usize = 0;
 
 /* GitHub issue #241: the real ELF this file links into carries its own
  * e_entry (set via the linker's -e initial_user_payload), so unlike the
@@ -645,8 +656,112 @@ fn initial_user_payload() !{unsafe} {
         fail_if(svc5(64, restore_fd, (unsafe { restore_content as *u8 }) as usize,
                      restore_content.len, 0, 0) != restore_content.len);
         fail_if(svc5(57, restore_fd, 0, 0, 0, 0) != 0);
+        sigchld_siginfo_probe();
         svc5(93, 0, 0, 0, 0, 0);
     }
+}
+
+/* GitHub issue #892: run the kernel's SIGCHLD siginfo path itself -- exit
+ * notify -> ProcessRecord.sigchld_pid/status -> TakenSignal -> signal frame
+ * (GitHub issue #885). An SA_SIGINFO handler (user_payload_asm.S) copies
+ * si_signo, si_code, si_pid and si_status into `record`; each case checks
+ * what the frame carried. Runs last, after every earlier fixture took its
+ * evidence, since its children take pids. */
+fn sigchld_siginfo_probe() !{unsafe} {
+    let mut record: [u8; 40];
+    let record_base: *u8 = record as *u8;
+    for index: usize in 0..<40 { record[index] = 0; }
+    sigchld_probe_arm(ptr_of(record_base, 0));
+    let mut action: [u8; 32];
+    let action_base: *u8 = action as *u8;
+    payload_write_u64(action_base, 0, sigchld_probe_handler_address());
+    payload_write_u64(action_base, 8, SA_SIGINFO | SA_RESTORER);
+    payload_write_u64(action_base, 16, sigchld_probe_restorer_address());
+    payload_write_u64(action_base, 24, 0);
+    fail_if(svc5(134, SIGCHLD, ptr_of(action_base, 0), 0, 8, 0) != 0);
+    let mut signal_set: [u8; 8];
+    let signal_base: *u8 = signal_set as *u8;
+    payload_write_u64(signal_base, 0, 1 << 16);
+
+    // A child killed by SIGTERM: CLD_KILLED, si_status the signal.
+    let killed: usize = sigchld_probe_child(0);
+    sigchld_probe_reap(killed);
+    sigchld_probe_expect(record_base, 1, CLD_KILLED, killed, SIGTERM);
+
+    // A child that exits 3: CLD_EXITED, si_status the exit code.
+    let exited: usize = sigchld_probe_child(3);
+    sigchld_probe_reap(exited);
+    sigchld_probe_expect(record_base, 2, CLD_EXITED, exited, 3);
+
+    // Standard signals do not queue: a second exit while SIGCHLD is
+    // pending keeps the first child's siginfo, and the handler runs once.
+    fail_if(svc5(135, 0, ptr_of(signal_base, 0), 0, 8, 0) != 0);
+    let first: usize = sigchld_probe_child(5);
+    sigchld_probe_reap(first);
+    let second: usize = sigchld_probe_child(6);
+    sigchld_probe_reap(second);
+    fail_if(payload_read_u64(record_base, 0) != 2);
+    fail_if(svc5(135, 1, ptr_of(signal_base, 0), 0, 8, 0) != 0);
+    sigchld_probe_expect(record_base, 3, CLD_EXITED, first, 5);
+
+    // A SIGCHLD sent by kill names no child: SI_USER (this kernel reports
+    // no sender pid, GitHub issue #629), and a child exiting while it is
+    // pending does not rename it.
+    let my_pid: usize = svc5(172, 0, 0, 0, 0, 0);
+    fail_if(svc5(135, 0, ptr_of(signal_base, 0), 0, 8, 0) != 0);
+    fail_if(svc5(129, my_pid, SIGCHLD, 0, 0, 0) != 0);
+    let late: usize = sigchld_probe_child(7);
+    sigchld_probe_reap(late);
+    fail_if(svc5(135, 1, ptr_of(signal_base, 0), 0, 8, 0) != 0);
+    sigchld_probe_expect(record_base, 4, SI_USER, 0, 0);
+    // And unmasked, the kill's own return delivers it.
+    fail_if(svc5(129, my_pid, SIGCHLD, 0, 0, 0) != 0);
+    sigchld_probe_expect(record_base, 5, SI_USER, 0, 0);
+
+    payload_write_u64(action_base, 0, 0);
+    payload_write_u64(action_base, 8, 0);
+    payload_write_u64(action_base, 16, 0);
+    fail_if(svc5(134, SIGCHLD, ptr_of(action_base, 0), 0, 8, 0) != 0);
+    let message: []const u8 =
+        bs"userspace SIGCHLD siginfo: CLD_KILLED, CLD_EXITED, pending keeps first, kill SI_USER ok\n";
+    fail_if(svc5(64, 1, (unsafe { message as *u8 }) as usize,
+                 message.len, 0, 0) != message.len);
+}
+
+// Fork a child that exits with `code`, or kills itself with SIGTERM when
+// `code` is 0. Returns the child's pid in the parent.
+fn sigchld_probe_child(code: usize) -> usize !{unsafe} {
+    let pid: usize = svc5(220, SIGCHLD, 0, 0, 0, 0);
+    if (pid == 0) {
+        if (code == 0) {
+            svc5(129, svc5(172, 0, 0, 0, 0, 0), SIGTERM, 0, 0, 0);
+            svc5(93, 99, 0, 0, 0, 0);
+        }
+        svc5(93, code, 0, 0, 0, 0);
+    }
+    fail_if(pid >= 0x8000000000000000);
+    return pid;
+}
+
+// Block until `pid` is reaped. A handler run may interrupt the wait.
+fn sigchld_probe_reap(pid: usize) !{unsafe} {
+    let mut reaped: usize = EINTR_RC;
+    while (reaped == EINTR_RC) {
+        reaped = svc5(260, pid, 0, 0, 0, 0);
+    }
+    fail_if(reaped != pid);
+}
+
+// The handler has run `runs` times in all, the last time with this siginfo.
+// The getpid makes one more syscall return, where a pending handler runs.
+fn sigchld_probe_expect(record_base: *u8, runs: usize, code: usize,
+                        pid: usize, status: usize) !{unsafe} {
+    svc5(172, 0, 0, 0, 0, 0);
+    fail_if(payload_read_u64(record_base, 0) != runs);
+    fail_if(payload_read_u64(record_base, 8) != SIGCHLD);
+    fail_if(payload_read_u64(record_base, 16) != code);
+    fail_if(payload_read_u64(record_base, 24) != pid);
+    fail_if(payload_read_u64(record_base, 32) != status);
 }
 
 fn fail_halt() !{unsafe} {

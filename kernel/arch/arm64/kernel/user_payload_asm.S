@@ -79,3 +79,51 @@ scheduler_probe_run:
     ldr     q8,       [sp, #48]
     add     sp, sp, #64
     ret
+
+/* GitHub issue #892: an SA_SIGINFO SIGCHLD handler and its SA_RESTORER
+ * trampoline, so the payload can read the siginfo the kernel's own signal
+ * frame carries (exit notify -> ProcessRecord.sigchld_* -> TakenSignal ->
+ * syscall_signal_frame_write). This payload has no writable globals
+ * (buildcheck_user_payload_no_rw_globals.py), so the handler finds its
+ * record through TPIDR_EL0, which the kernel saves per process and nothing
+ * else in this payload uses. The record is 40 bytes of the caller's stack:
+ * +0 handler runs (incremented), then the last siginfo's si_signo (+8),
+ * si_code (+16), si_pid (+24) and si_status (+32), each widened to u64. */
+    .global sigchld_probe_arm
+    .type sigchld_probe_arm, %function
+/* x0 = record address. */
+sigchld_probe_arm:
+    msr     tpidr_el0, x0
+    ret
+
+    .global sigchld_probe_handler_address
+    .type sigchld_probe_handler_address, %function
+sigchld_probe_handler_address:
+    adr     x0, sigchld_probe_handler
+    ret
+
+    .global sigchld_probe_restorer_address
+    .type sigchld_probe_restorer_address, %function
+sigchld_probe_restorer_address:
+    adr     x0, sigchld_probe_restorer
+    ret
+
+/* x0 = signum, x1 = siginfo, x2 = ucontext. Clobbers x9-x10 only. */
+sigchld_probe_handler:
+    mrs     x9, tpidr_el0
+    ldr     x10, [x9]
+    add     x10, x10, #1
+    str     x10, [x9]
+    ldr     w10, [x1, #0]
+    str     x10, [x9, #8]
+    ldr     w10, [x1, #8]
+    str     x10, [x9, #16]
+    ldr     w10, [x1, #16]
+    str     x10, [x9, #24]
+    ldr     w10, [x1, #24]
+    str     x10, [x9, #32]
+    ret
+
+sigchld_probe_restorer:
+    mov     x8, #139
+    svc     #0
