@@ -11,7 +11,6 @@ import gdb
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from gdb_progress import (DONE, QUIET, all_threads,  # noqa: E402
                           continue_by_ticks)
-from gdb_tick_count import tick_count_progress  # noqa: E402
 
 # GitHub issue #867: the hold is reached within the ticks every vCPU takes
 # (scripts/gdb_progress.py), about a minute of guest time at 64 Hz, not
@@ -29,10 +28,9 @@ gdb.execute("maintenance packet Qqemu.PhyMemMode:1")
 hold = gdb.Breakpoint("console_ddb_hold_checkpoint")
 gdb.execute("set *(char *)&kernel_ddb_console_hold_armed = 1")
 threads = all_threads()
-# PhyMemMode stays on for the reads below, so read the counters directly
-# rather than through gdb_progress.tick_progress, which turns it off.
-outcome, ticks = continue_by_ticks(lambda: hold.hit_count > 0, threads, HOLD_TICKS,
-                                   progress=tick_count_progress(threads))
+# PhyMemMode stays on for the reads below: continue_by_ticks's tick reads
+# restore the caller's mode (#878).
+outcome, ticks = continue_by_ticks(lambda: hold.hit_count > 0, threads, HOLD_TICKS)
 if outcome == QUIET:
     raise gdb.GdbError(f"console hold checkpoint was not reached within {ticks} "
                        "ticks on every vCPU")

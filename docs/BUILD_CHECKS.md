@@ -61,6 +61,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_ddb_command_inventory.py` | DDB dispatch, help, documentation, classification, and coverage agree |
 | `check_ddb_command_inventory_controls.py` | Positive and build-faithful negative controls for the DDB inventory check |
 | `check_ddb_rpi5_capture_controls.py` | Live and offline DDB verdicts accept LF/CRLF and refuse missing console-hold/release evidence, unheld mutex/phase, echoed commands, and invalid peer-stop evidence |
+| `check_gdb_progress_verdict_controls.py` | affinity-gdb, peer-exit and exec-enomem read a stalled guest (gdb_progress STALLED) as inconclusive at every stage and only a quiet one as a finding; each tick read restores the caller's QEMU PhyMemMode (#878) |
 | `check_ddb_signal_names.py` | DDB's process view names every signal kill(2) accepts, spelled from the ABI constant, and subtracts the named bits from its hex remainder; both QEMU runner gates accept the rendered sets |
 | `check_ddb_wait_reason_names.py` | DDB's wait view names every process state and wait reason the kernel encodes for the debugger snapshot, spelled from the enum case |
 | `check_ddb_wait_reason_names_controls.py` | Controls for the DDB wait-vocabulary check |

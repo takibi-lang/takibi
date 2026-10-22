@@ -28,14 +28,17 @@ handlers stops every vCPU on every tick, and over the ddb uart lane's
 workload that perturbation hung the guest (#871, found by #867). The read
 goes through QEMU's physical-memory mode, since the selected vCPU may be at
 EL0 under a user table that does not map the kernel (#701, #757); the kernel
-is identity-mapped, so the address is the same. The counter's layout (one
+is identity-mapped, so the address is the same; each read restores the caller's
+mode (#878). The counter's layout (one
 8-byte word per core) is held by scripts/check_secondary_tick_count_layout.py.
 
 Every gdb Python check bounds its continues through this module or says why
 not (scripts/check_gdb_wallclock_continue.py).
 """
 
+import contextlib
 import os
+import re
 import sys
 
 import gdb
@@ -87,25 +90,46 @@ class Counter(gdb.Breakpoint):
 def tick_progress(threads):
     """The least ticks any listed gdb thread's core took since this call,
     read from secondary_tick_count (scripts/gdb_tick_count.py) in physical
-    mode, without a breakpoint."""
-    physical(True)
-    try:
+    mode, without a breakpoint. Each read restores the caller's mode
+    (#878), so a caller that keeps physical mode on for its own accesses
+    keeps it."""
+    with physical():
         read = tick_count_progress(threads)
-    finally:
-        physical(False)
 
     def least() -> int:
-        physical(True)
-        try:
+        with physical():
             return read()
-        finally:
-            physical(False)
     return least
 
 
-def physical(on: bool) -> None:
+def physical_mode() -> bool:
+    """Whether QEMU's gdbstub reads memory physically now. The stub answers
+    `qqemu.PhyMemMode` with 1 or 0; gdb prints the reply as received: "N"."""
+    reply = gdb.execute("maintenance packet qqemu.PhyMemMode", to_string=True)
+    match = re.search(r'received: "([01])"', reply or "")
+    if match is None:
+        raise gdb.GdbError(f"QEMU did not report its PhyMemMode: {reply!r}")
+    return match.group(1) == "1"
+
+
+def set_physical(on: bool) -> None:
     gdb.execute(f"maintenance packet Qqemu.PhyMemMode:{1 if on else 0}",
                 to_string=True)
+
+
+@contextlib.contextmanager
+def physical():
+    """Physical-memory mode for the body, then the caller's mode again
+    (#878: it used to be forced off, which made console-hold, whose own
+    accesses need it on, bypass tick_progress)."""
+    saved = physical_mode()
+    if not saved:
+        set_physical(True)
+    try:
+        yield
+    finally:
+        if not saved:
+            set_physical(False)
 
 
 def resume_slice(seconds: float = SLICE_SECONDS, command: str = "continue") -> bool:

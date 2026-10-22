@@ -110,6 +110,12 @@ def main():
                         guest.setdefault("breakpoints", []).append(self)
 
                 def execute(command, to_string=False, hits=hits, step=step):
+                    # #878: the stub's PhyMemMode, queried and set as QEMU
+                    # does; the observer's own reads below need it on.
+                    if command == "maintenance packet qqemu.PhyMemMode":
+                        return f'received: "{guest.get("physical", 0)}"\n'
+                    if command.startswith("maintenance packet Qqemu.PhyMemMode:"):
+                        guest["physical"] = int(command[-1])
                     if command == "continue":
                         guest["ticks"] += step
                         if hits:
@@ -117,6 +123,8 @@ def main():
                                 breakpoint.hit_count += 1
 
                 def parse_and_eval(expression, phase=phase, held=held):
+                    if guest.get("physical") != 1:
+                        raise RuntimeError("virtual read: PhyMemMode was turned off")
                     if "secondary_tick_count" in expression:
                         return guest["ticks"]
                     return phase if "console_ddb_phase" in expression else held
