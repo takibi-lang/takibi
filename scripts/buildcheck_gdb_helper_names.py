@@ -44,6 +44,14 @@ register, or listed in DYNAMIC with a reason; an unlisted one fails, and so
 does a DYNAMIC entry that no call matches any more. An f-string placeholder
 that is not a loop name reads as 0.
 
+GitHub issue #891 reaches GDB Python the runners embed: a runner .py
+that does not import gdb is read for literal calls of CALLS and of its
+RUNNER_WRAPPERS (addr('sym'), off('record', 'field') -- the layout
+variable $takibi_<record>_<field>, struct matched lowercased -- and
+layout['<record>_<field>'] keys) inside its string constants; a shell
+heredoc that holds a python block is read as .gdb text; and a
+`python <statement>` command is read as one line of Python.
+
 Takibi enum, variant, case and constant names (takibi-enum,
 takibi-force-variant-return, takibi-variant-layout, takibi-constant, and
 kernel_state.gdb's _tk_enum, _tk_constant, _tk_named_constant) are looked
@@ -145,6 +153,7 @@ class Elf:
         self.variables = {}
         self.members = set()
         self.base_types = set()
+        self._lower_structs = None
         self.locals = {}
         self._read_dwarf(path)
         nm = subprocess.run([LLVM_NM, "--defined-only", path], check=True,
@@ -198,6 +207,15 @@ class Elf:
                     and parent[1] == "DW_TAG_compile_unit":
                 self.variables[name] = _quoted(attrs.get("DW_AT_type"),
                                                last=True)
+
+    def struct_lower(self, name):
+        """The struct whose name, lowercased, is `name`: the layout
+        files' $takibi_<struct>_<field> variables lowercase it."""
+        if self._lower_structs is None:
+            self._lower_structs = {}
+            for struct in self.structs:
+                self._lower_structs.setdefault(struct.lower(), struct)
+        return self._lower_structs.get(name.lower())
 
     def has_type(self, name):
         name = name.strip()
@@ -329,6 +347,13 @@ class Checker:
         words = line.split(None, 1)
         command = words[0].split("/")[0]
         rest = words[1] if len(words) > 1 else ""
+        if command in ("python", "py", "pi") and rest:
+            # `python <statement>`: one line of GDB Python.
+            prefix, _sep, number = where.rpartition(":")
+            if not number.isdigit():
+                prefix, number = where, "1"
+            self.python(prefix, [(int(number), rest)])
+            return
         if command in BREAK_COMMANDS:
             location = rest.split()[0].lstrip("*") if rest.split() else ""
             self.location(where, location)
@@ -761,6 +786,22 @@ class Checker:
                 if second not in self.elf.structs.get(value, {}):
                     self.fail(where, f"field '{second}' is not a member "
                               f"of {value}")
+        elif kind in ("layout-var", "layout-key"):
+            # A struct-layout variable $takibi_<struct>_<field>, the struct
+            # lowercased: off('record', 'field') names both halves, a
+            # layout['struct_field'] key splits at its first "_".
+            if kind == "layout-key":
+                value, _sep, second = value.partition("_")
+            self.names += 1
+            struct = self.elf.struct_lower(value)
+            if struct is None:
+                self.fail(where, f"struct '{value}' (lowercased) is not in "
+                          "the ELF's DWARF")
+            elif second and second != "size":
+                self.names += 1
+                if second not in self.elf.structs[struct]:
+                    self.fail(where, f"field '{second}' is not a member "
+                              f"of {struct}")
         elif isinstance(kind, tuple) and kind[0] == "member-of":
             self.names += 1
             if value not in self.elf.structs.get(kind[1], {}):
@@ -875,6 +916,69 @@ WRAPPERS = {
 }
 
 
+# Runners that do not import gdb but hand GDB Python as string literals,
+# and the helpers that Python defines (GitHub issue #891): per file, the
+# helper and its kind. "layout-var" is off('record', 'field') reading
+# $takibi_<record>_<field>; "layout-key" is layout['<record>_<field>'].
+RUNNER_WRAPPERS = {
+    "run_kernel_console_qemutest.py": {"addr": "symbol", "word": "symbol",
+                                       "off": "layout-var"},
+    "run_kernel_churn_gdb_qemutest.py": {"addr": "symbol",
+                                         "layout[": "layout-key"},
+}
+
+
+def check_runner_python(checker, path, text):
+    """GDB Python inside a runner's string literals: every literal call
+    of CALLS or of the file's RUNNER_WRAPPERS, and layout[...] keys."""
+    calls = dict(CALLS)
+    calls.update(RUNNER_WRAPPERS.get(path.name, {}))
+    names = [call for call in calls if not call.endswith("[")]
+    call_re = re.compile(
+        r"(?<![\w.])(" + "|".join(re.escape(call) for call in names)
+        + r")\(\s*" + _LITERAL + r"|layout\[\s*" + _LITERAL + r"\s*\]")
+    one_re = re.compile(
+        r"(?<![\w.])(" + "|".join(re.escape(call) for call in names)
+        + r")\(\s*(" + _LITERAL + r")(?:\s*,\s*(" + _LITERAL
+        + r"))?\s*[,)]")
+    key_re = re.compile(r"layout\[\s*(" + _LITERAL + r")\s*\]")
+    tree = ast.parse(text)
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
+            continue
+        value = node.value
+        for match in call_re.finditer(value):
+            where = f"{path}:{node.lineno + value.count(chr(10), 0, match.start())}"
+            one = one_re.match(value, match.start())
+            if one:
+                second = _literal_text(one.group(3)) if one.group(3) else None
+                checker.python_call(where, calls[one.group(1)],
+                                    _literal_text(one.group(2)), second)
+                continue
+            key = key_re.match(value, match.start())
+            if key and "layout[" in calls:
+                checker.python_call(where, calls["layout["],
+                                    _literal_text(key.group(1)), None)
+
+
+def gdb_heredocs(text):
+    """(first line number, lines) of each shell heredoc that holds GDB
+    text with a python block."""
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        match = re.search(r"<<-?\s*'?\"?(\w+)'?\"?\s*$", lines[index])
+        index += 1
+        if not match:
+            continue
+        start = index
+        while index < len(lines) and lines[index].strip() != match.group(1):
+            index += 1
+        body = lines[start:index]
+        if any(line.strip() == "python" for line in body):
+            yield list(enumerate(body, start=start + 1))
+
+
 def gdb_sources(scripts):
     """The GDB helpers: *.gdb, every script that imports gdb, and every
     other runner that hands GDB a command with -ex (checks under
@@ -885,7 +989,7 @@ def gdb_sources(scripts):
             continue
         text = path.read_text()
         if re.search(r"^\s*import gdb\s*$", text, re.M) or \
-                _EX_RE.search(text):
+                _EX_RE.search(text) or path.name in RUNNER_WRAPPERS:
             sources.append(path)
     return sources
 
@@ -911,11 +1015,20 @@ def check_file(checker, path):
     if path.suffix in (".py", ".sh"):
         check_runner(checker, path, text)
     if path.suffix == ".sh":
+        for body in gdb_heredocs(text):
+            check_gdb_text(checker, path, body)
         return
     if path.suffix == ".py":
         if re.search(r"^\s*import gdb\s*$", text, re.M):
             checker.python(str(path), numbered)
+        else:
+            check_runner_python(checker, path, text)
         return
+    check_gdb_text(checker, path, numbered)
+
+
+def check_gdb_text(checker, path, numbered):
+    """GDB command text: commands outside python blocks, Python inside."""
     python_block = []
     in_python = False
     for number, line in numbered:
@@ -1014,6 +1127,24 @@ CONTROLS += [
      "takibi-force-variant-return PageAllocResult OutOfMemory",
      "takibi-force-variant-return PageAllocOutcome OutOfMemory",
      "PageAllocOutcome"),
+]
+
+# --controls for the #891 sites: GDB Python a runner embeds in a string
+# literal, a heredoc, or a `python` command. (file, original, renamed, word)
+CONTROLS += [
+    # off('record', 'field'): a $takibi_<record>_<field> layout variable.
+    ("run_kernel_console_qemutest.py", "off('kernellogcorestate', 'active')",
+     "off('kernellogcorestate', 'enabled')", "enabled"),
+    # layout['<record>_<field>'], split at the first "_".
+    ("run_kernel_churn_gdb_qemutest.py", "layout['asidstate_next']",
+     "layout['asidstate_next_asid']", "next_asid"),
+    # gdb.execute in a heredoc's python block, from adjacent literals.
+    ("run_kernel_ddb_qemutest.sh", '"ddb_snapshot_published_sequence + 1")',
+     '"ddb_snapshot_published_seq + 1")', "ddb_snapshot_published_seq"),
+    # -ex "python <statement>".
+    ("run_kernel_oops_qemutest.sh",
+     "kernel_world_stop.claimed.value')) == 2",
+     "kernel_world_stop.claimed_cpus.value')) == 2", "claimed_cpus"),
 ]
 
 # --rpi5 --controls: one rename in an RPi5 runner's -ex commands.

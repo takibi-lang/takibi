@@ -1853,6 +1853,9 @@ kernelbuild-rpi5: build
 
 # GitHub issue #889: the RPi5 runners' GDB commands, and the helpers they
 # source, against the RPi5 debug kernel they drive.
+# allcheck runs this stamp with no wiring of its own (GitHub issue #891):
+# kernelcheck -> kernelbuild-check -> _kernelbuild-images ->
+# _kernelbuild-rpi5-debug, whose prerequisites include it.
 KERNEL_RPI5_GDB_HELPER_NAMES_STAMP := _build/gdb-helper-names-rpi5.stamp
 $(KERNEL_RPI5_GDB_HELPER_NAMES_STAMP): $(KERNEL_RPI5_DEBUG_ELF) $(KERNEL_RPI5_DEBUG_METADATA) $(wildcard scripts/*.gdb) $(wildcard scripts/*.py) $(wildcard scripts/*.sh)
 	python3 scripts/buildcheck_gdb_helper_names.py $(KERNEL_RPI5_DEBUG_ELF) --metadata $(KERNEL_RPI5_DEBUG_METADATA) --rpi5
