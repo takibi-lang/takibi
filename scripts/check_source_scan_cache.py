@@ -48,6 +48,7 @@ REVIEWED = {
     "check_liveness_proof_escapes": "function_qualifier controls import only its FN_RE",
     "check_kernel_interactive_httpd_protocol": "reads thirteen fixed files, no tree walk",
     "check_process_slot_zero": "controls walk two-file synthetic trees; the repository runs once",
+    "check_kernel_compile_flags": "reads the Makefile and three named scripts, no tree walk",
 }
 
 
