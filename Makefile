@@ -1068,10 +1068,19 @@ $(KERNEL_MUSL_LOADER): $(KERNEL_MUSL_APK)
 	tar -xOzf $< lib/ld-musl-aarch64.so.1 > $@
 	chmod +x $@
 
+# Every ext2 image is built reproducibly (#890): libext2fs takes every
+# timestamp it writes (inode times, superblock mtime/wtime/lastcheck) from
+# E2FSPROGS_FAKE_TIME, exported to the whole recipe so no debugfs call
+# falls back to the clock; mke2fs gets a fixed UUID and hash seed; files
+# are added in recipe order. kernel-image-repro-check builds the images
+# twice and fails on any byte difference.
+KERNEL_EXT2_FAKE_TIME := 1700000000
+$(KERNEL_EXT2_IMAGE) $(KERNEL_SHELL_EXT2_IMAGE): export E2FSPROGS_FAKE_TIME := $(KERNEL_EXT2_FAKE_TIME)
+
 $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT2_FIXTURE_DIR)/mutable.txt $(KERNEL_EXT2_FIXTURE_DIR)/index.html $(KERNEL_EXT2_FIXTURE_DIR)/about.html $(KERNEL_EXT2_FIXTURE_DIR)/icon.png $(KERNEL_EXT2_FIXTURE_DIR)/init.sh $(KERNEL_EXT2_FIXTURE_DIR)/httpd.sh $(KERNEL_EXT2_FIXTURE_DIR)/churn.sh $(KERNEL_EXT2_FIXTURE_DIR)/script-shebang.sh $(KERNEL_EXT2_FIXTURE_DIR)/script-interpreter-argument.sh $(KERNEL_EXT2_FIXTURE_DIR)/not-a-program $(KERNEL_EXT2_FIXTURE_DIR)/bad-interpreter.sh $(KERNEL_EXT2_FIXTURE_DIR)/crlf.sh $(KERNEL_EXT2_FIXTURE_DIR)/no-newline.sh $(KERNEL_EXT2_FIXTURE_DIR)/long-shebang.sh $(KERNEL_EXT2_FIXTURE_DIR)/inittab $(KERNEL_EXT2_FIXTURE_DIR)/large.txt $(KERNEL_RPI5_USER_PAYLOAD_ELF) $(KERNEL_BUSY_LOOP_A_ELF) $(KERNEL_BUSY_LOOP_B_ELF) $(KERNEL_BUSY_LOOP_PLACEMENT_REPORT_ELF) $(KERNEL_BUSY_LOOP_PLACEMENT_GUARD_ELF) $(KERNEL_BUSY_LOOP_PEER_SPIN_ELF) $(KERNEL_BUSY_LOOP_PEER_NET_WAKE_ELF) $(KERNEL_PEER_READ_ELF) $(KERNEL_CORE_READ_ELF) $(KERNEL_PEER_CONSOLE_ELF) $(KERNEL_PEER_TTY_ELF) $(KERNEL_PEER_SETTINGS_ELF) $(KERNEL_CLOEXEC_ELF) $(KERNEL_CLOEXEC_CHECK_ELF) $(KERNEL_PPOLL_PROBE_ELF) $(KERNEL_AFFINITY_ELF) $(KERNEL_SPREAD_ELF) $(KERNEL_MOVECOST_ELF) $(KERNEL_PEER_MUTATE_ELF) $(KERNEL_PROTOCOL_TRACE_ELF) $(KERNEL_PEER_EXEC_ELF) $(KERNEL_PEER_EXEC_IMAGE_ELF) $(KERNEL_PEER_FORK_ELF) $(KERNEL_PEER_SLEEP_ELF) $(KERNEL_SIGNAL_BOUNDARY_ELF) $(KERNEL_NESTED_EXEC_ELF) $(KERNEL_EXEC_ENOMEM_ELFS) $(KERNEL_SESSION_ELF) $(KERNEL_SESSION_CHECK_ELF) $(KERNEL_TERMINAL_ELF) $(KERNEL_NESTED_FIXTURES) $(KERNEL_BUSYBOX_STATIC) $(KERNEL_BUSYBOX_EXTRAS) $(KERNEL_MUSL_LOADER) $(KERNEL_TASKSET) scripts/make_interp_probe_elf.py | $(KERNEL_USER_BUILD_DIR)
 	rm -f $@.tmp
 	truncate -s 2883584 $@.tmp
-	E2FSPROGS_FAKE_TIME=1700000000 mke2fs -q -t ext2 -b 1024 -I 128 -N 1024 -O none -F -U 00000000-0000-0000-0000-000000000177 $@.tmp 2816
+	E2FSPROGS_FAKE_TIME=1700000000 mke2fs -q -t ext2 -b 1024 -I 128 -N 1024 -O none -F -U 00000000-0000-0000-0000-000000000177 -E hash_seed=00000000-0000-0000-0000-000000000890 $@.tmp 2816
 	debugfs -w -R 'mkdir /etc' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'mkdir /bin' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'mkdir /lib' $@.tmp >/dev/null 2>&1
@@ -1235,6 +1244,7 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 	debugfs -w -R 'link /hello.txt /etc/hlink' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /hello.txt links_count 2' $@.tmp >/dev/null 2>&1
 	e2fsck -fn $@.tmp >/dev/null
+	python3 scripts/ext2_fixed_times.py $@.tmp $(KERNEL_EXT2_FAKE_TIME)
 	python3 scripts/check_ext2_image_free_blocks.py $@.tmp
 	mv $@.tmp $@
 
@@ -1247,6 +1257,7 @@ $(KERNEL_SHELL_EXT2_IMAGE): $(KERNEL_EXT2_IMAGE) \
 	E2FSPROGS_FAKE_TIME=1700000000 \
 		e2cp $(KERNEL_EXT2_FIXTURE_DIR)/restart.sh $@.tmp:/etc/restart.sh
 	debugfs -w -R 'set_inode_field /etc/restart.sh mode 0100755' $@.tmp >/dev/null 2>&1
+	python3 scripts/ext2_fixed_times.py $@.tmp $(KERNEL_EXT2_FAKE_TIME)
 	e2fsck -fn $@.tmp >/dev/null
 	mv $@.tmp $@
 
@@ -1899,6 +1910,7 @@ _kernelbuild-check: _kernelbuild-images
 		buildcheck-backing-exists 'python3 scripts/buildcheck_backing_exists.py $(KERNELBUILD_CHECK_ARGS)' \
 		buildcheck-process-current-phase 'python3 scripts/buildcheck_process_current_phase.py $(KERNELBUILD_CHECK_ARGS)' \
 		buildcheck-user-write-result 'python3 scripts/buildcheck_user_write_result.py $(KERNELBUILD_CHECK_ARGS)'
+	MAKE='$(MAKE)' bash scripts/buildcheck_ext2_reproducible.sh $(KERNEL_USER_BUILD_DIR) $(KERNEL_EXT2_FAKE_TIME)
 
 kernelbuild-check: build
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) _kernelbuild-check

@@ -77,6 +77,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_el0_raw_deref_audit_controls.py` | A bypassed recipe, missing audit/gate/depfile/rebuild dependency, and empty EL0 coverage are refused |
 | `check_execution_model_coverage.py` | mutable kernel state declares its execution model |
 | `check_ext2_image_free_blocks.py` | the fixture ext2 image keeps at least 128 free blocks, so a program added to it cannot silently push a boot into the exhaustion stall of #658 |
+| `check_ext2_fixed_times.py` | self-test of `ext2_fixed_times.py`, the last step of each fixture image build, which pins every allocated inode's times: images stamped at different clocks converge, reserved and free inodes are kept, and a different epoch (the control) gives different bytes (#890) |
 | `check_ext2_mutation_guard.py` | every ext2 mutation is reached under the filesystem lock's guard, or its file is named with the reason it cannot race a peer |
 | `check_model_function_map_controls.py` | Function extraction preserves qualifiers, effects, nested blocks and first-definition semantics while total full-source scan work stays constant across distinct and repeated lookups |
 | `check_model_coverage_controls.py` | `scripts/model_coverage.py`, which `make modelcheck` runs on every fully explored TLC log, refuses an action never taken, an allow-list entry without a reason, a stale or unjudged entry, a log without coverage, and judges only the last coverage report (#802) |
@@ -283,6 +284,7 @@ run them, and why they sit outside both globs above.
 | `buildcheck_process_current_phase.py` | Real Running/Constructing transition APIs reject retained current authority; consuming it permits transition |
 | `buildcheck_kernel_asm_invariants.py` | Linked-kernel instruction invariants: UXN bits, eret masking, the spinlock and mutex sequences, broadcast TLB invalidation, per-core exception stacks, the stack handoff hook, explicit stops, and no misaligned q-register store in the MMU-off page allocator (#746) |
 | `buildcheck_kernel_memory_map.py` | Check kernel/MEMORY_MAP.md and allocator fixtures; render QEMU boot capacity from the loaded ELF |
+| `buildcheck_ext2_reproducible.sh` | run by kernelbuild-check: rebuilds ext2.img and ext2-shell.img from the same inputs and fails on any byte difference; the control rebuilds at another `KERNEL_EXT2_FAKE_TIME` and requires a difference; the prior images are restored with their timestamps (#890) |
 | `buildcheck_kernel_unused_coverage.py` | every kernel file a target compiles is checked for unused functions or exempt for a stated reason |
 | `measure_trusted_base.py --check-raw-deref` | the raw-pointer dereference ratchet (#639): run by each kernel object's rule on the compiler's `--emit-raw-deref-audit`, including standalone EL0 payload objects, it holds every file's dereference count to `raw_deref_budget.tsv`, so the count can only go down on purpose. Also the trusted-boundary inventory of `make trustedbasecheck` |
 | `buildcheck_suite_output.py` | Split a batched UART stream and compare each case with its fixture |
