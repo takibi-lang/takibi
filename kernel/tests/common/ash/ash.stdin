@@ -9,6 +9,9 @@ echo "shebang: status $?"
 script-interpreter-argument.sh three
 /hello.txt
 /bin/cat /hello.txt
+# GitHub issue #768: the read builtin polls stdin before reading it, so a
+# file redirected onto fd 0 must poll ready rather than wait on the UART.
+read line < /hello.txt; echo "read: $? $line"
 /etc
 /etc/not-a-program
 /etc/bad-interpreter.sh

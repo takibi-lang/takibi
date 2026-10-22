@@ -217,6 +217,7 @@ struct packed Pollfd {
 }
 
 const POLLIN: usize = 0x0001;
+const POLLOUT: usize = 0x0004;
 const POLLNVAL: usize = 0x0020;
 
 // Linux's own iovec-count cap (UIO_MAXIOV, include/uapi/linux/uio.h) --
@@ -2731,7 +2732,8 @@ fn syscall_read_segment_with(slot: borrow SyscallSlot[0],
 // finite timeouts remain out of scope for this first real wait path.
 // Connected TCP fds
 // check already-buffered data read-only (no mutation, so no risk to the
-// proven TCP send/receive paths). Everything else is POLLNVAL.
+// proven TCP send/receive paths). Regular files and directories are always
+// ready (#768); other terminal fds report nothing; the rest is POLLNVAL.
 // The UART RX ring lives in kernel/drivers/serial/uart_rx_ring.tkb (GitHub
 // issue #543); this file reads it through kernel_uart_rx_pending and
 // kernel_uart_rx_getc.
@@ -2754,8 +2756,15 @@ fn syscall_poll_fd_ready(fd: usize) -> (bool, usize) {
             }
         }
     }
-    if (kernel_syscall_terminal_is_open(fd) ||
-        kernel_syscall_file_is_open(fd)) {
+    // GitHub issue #768: a regular file or directory is always ready, as
+    // Linux's DEFAULT_POLLMASK says. ash's read builtin polls fd 0 with no
+    // timeout before each read, so a file redirected onto stdin that
+    // reported 0 here sent that poll into the UART wait.
+    if (kernel_syscall_file_is_open(fd) ||
+        kernel_syscall_directory_is_open(fd)) {
+        return (true, POLLIN | POLLOUT);
+    }
+    if (kernel_syscall_terminal_is_open(fd)) {
         return (true, 0);
     }
     return (false, POLLNVAL);
@@ -2982,7 +2991,11 @@ fn syscall_ppoll_dispatch(current_authority: borrow ProcessCurrent[current_proce
                 }
                 let fd: usize = fd_raw as usize;
                 let (valid, revents) = syscall_poll_fd_ready(fd);
-                let mut final_revents: usize = revents;
+                // Linux reports only the requested events, plus the
+                // conditions it always reports (POLLERR, POLLHUP, POLLNVAL).
+                let mut final_revents: usize =
+                    revents & ((events_raw as usize) | 0x0008 | 0x0010 |
+                               POLLNVAL);
                 if (valid == false) { final_revents = POLLNVAL; }
                 match user_write_u16(
                         array_range,
@@ -2995,6 +3008,7 @@ fn syscall_ppoll_dispatch(current_authority: borrow ProcessCurrent[current_proce
                 }
                 if (final_revents != 0) { ready_count = ready_count + 1; }
                 if (nfds == 1 && fd == 0 &&
+                    kernel_syscall_terminal_is_open(fd) &&
                     (events_raw as usize & POLLIN) != 0) {
                     uart_wait = true;
                 }

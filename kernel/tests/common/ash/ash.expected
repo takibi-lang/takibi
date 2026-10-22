@@ -119,6 +119,7 @@ shebang: status 7
 interpreter-argument /bin/script-interpreter-argument.sh three
 /bin/sh: /hello.txt: Permission denied
 hello from ext2
+read: 0 hello from ext2
 /bin/sh: /etc: Permission denied
 /etc/not-a-program: line 5: ENOEXEC-fallback-reached: not found
 /bin/sh: /etc/bad-interpreter.sh: not found
