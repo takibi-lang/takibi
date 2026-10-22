@@ -4,37 +4,79 @@
 //
 // Current limitations: pure functions over a value, no shared state. No
 // core dump is ever reported (bit 0x80 stays clear), and there are no
-// stopped/continued forms because there is no job control. Callers pass
-// an exit code already masked to its low byte, or a value from
-// syscall_status_signaled; nothing here enforces that.
+// stopped/continued forms because there is no job control.
 //
-// GitHub issue #882: a process's recorded end is an exit code 0..255 or,
-// with SYSCALL_STATUS_SIGNALED set, the signal that killed it. It used to
-// record a signal's end as exit code 128+signal, which wait4 then encoded
-// as an exit -- a shell's $? convention, not Linux's status word, so
-// WIFSIGNALED was false for a killed child. No core dumps: bit 0x80 stays 0.
-const SYSCALL_STATUS_SIGNALED: usize = 0x100;
+// GitHub issue #882: a process's recorded end used to be one integer for
+// both an exit code and a signal; a signal's end was recorded as exit code
+// 128+signal, which wait4 then encoded as an exit -- a shell's $?
+// convention, not Linux's status word, so WIFSIGNALED was false for a
+// killed child. GitHub issue #886: the end is now a closed variant, so an
+// exit code cannot be passed where a signal's end is meant, or the reverse,
+// and every report below is derived from the case rather than from a flag
+// bit. The constructors keep only what Linux keeps: an exit code's low
+// byte, a signal's low seven bits.
+variant ProcessEnd {
+    Exited(u8);
+    Signaled(u8);
+}
 
-fn syscall_status_signaled(signal: usize) -> usize {
-    return SYSCALL_STATUS_SIGNALED | (signal & 0x7F);
+fn process_end_exited(code: usize) -> ProcessEnd {
+    return ProcessEnd::Exited((code & 0xFF) as u8);
+}
+
+fn process_end_signaled(signal: usize) -> ProcessEnd {
+    return ProcessEnd::Signaled((signal & 0x7F) as u8);
+}
+
+// A ProcessEnd kept in an indexed owner's field (TakenSignal), which the
+// compiler does not let hold a variant. The packing is private to this
+// file: elsewhere it is only made from a ProcessEnd and turned back into
+// one, so it cannot be built from a bare integer.
+struct ProcessEndWord { private word: u32; }
+
+fn process_end_word(end: ProcessEnd) -> ProcessEndWord {
+    match end {
+        ProcessEnd::Exited(code) => {
+            let mut stored: ProcessEndWord = { code as u32 };
+            return stored;
+        }
+        ProcessEnd::Signaled(signal) => {
+            let mut stored: ProcessEndWord = { 0x100 | signal as u32 };
+            return stored;
+        }
+    }
+}
+
+// The packed word itself, for the process trace's aux field only: a
+// signal's end is 0x100 | signal, an exit is its code.
+fn process_end_trace_aux(end: ProcessEnd) -> usize {
+    let mut stored: ProcessEndWord = process_end_word(end);
+    return stored.word as usize;
+}
+
+fn process_end_of_word(stored: ProcessEndWord) -> ProcessEnd {
+    if ((stored.word & 0x100) != 0) {
+        return ProcessEnd::Signaled((stored.word & 0x7F) as u8);
+    }
+    return ProcessEnd::Exited((stored.word & 0xFF) as u8);
 }
 
 // The wait4 status word: Linux's WTERMSIG form (signal in the low seven
 // bits) for a killed process, WEXITSTATUS form (code << 8) for an exit.
-fn syscall_wait_status_word(status: usize) -> u32 {
-    if ((status & SYSCALL_STATUS_SIGNALED) != 0) {
-        return (status & 0x7F) as u32;
+fn syscall_wait_status_word(end: ProcessEnd) -> u32 {
+    match end {
+        ProcessEnd::Exited(code) => { return (code as u32) << 8; }
+        ProcessEnd::Signaled(signal) => { return signal as u32; }
     }
-    return ((status & 0xFF) << 8) as u32;
 }
 
 // What a shell's $? shows for it: the code, or 128 + signal. Only for
 // logs; wait4 reports syscall_wait_status_word.
-fn syscall_status_shell_code(status: usize) -> usize {
-    if ((status & SYSCALL_STATUS_SIGNALED) != 0) {
-        return 128 + (status & 0x7F);
+fn syscall_status_shell_code(end: ProcessEnd) -> usize {
+    match end {
+        ProcessEnd::Exited(code) => { return code as usize; }
+        ProcessEnd::Signaled(signal) => { return 128 + signal as usize; }
     }
-    return status & 0xFF;
 }
 
 // GitHub issue #885: the SIGCHLD siginfo's si_code and si_status for a
@@ -44,14 +86,16 @@ fn syscall_status_shell_code(status: usize) -> usize {
 const SYSCALL_CLD_EXITED: u32 = 1;
 const SYSCALL_CLD_KILLED: u32 = 2;
 
-fn syscall_sigchld_code(status: usize) -> u32 {
-    if ((status & SYSCALL_STATUS_SIGNALED) != 0) { return SYSCALL_CLD_KILLED; }
-    return SYSCALL_CLD_EXITED;
+fn syscall_sigchld_code(end: ProcessEnd) -> u32 {
+    match end {
+        ProcessEnd::Exited(_) => { return SYSCALL_CLD_EXITED; }
+        ProcessEnd::Signaled(_) => { return SYSCALL_CLD_KILLED; }
+    }
 }
 
-fn syscall_sigchld_status(status: usize) -> u32 {
-    if ((status & SYSCALL_STATUS_SIGNALED) != 0) {
-        return (status & 0x7F) as u32;
+fn syscall_sigchld_status(end: ProcessEnd) -> u32 {
+    match end {
+        ProcessEnd::Exited(code) => { return code as u32; }
+        ProcessEnd::Signaled(signal) => { return signal as u32; }
     }
-    return (status & 0xFF) as u32;
 }

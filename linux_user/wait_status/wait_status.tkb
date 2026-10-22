@@ -82,29 +82,29 @@ fn app_main() {
     // 0x80 according to the host's core_pattern rather than to Linux's
     // encoding.
     compare("SIGHUP", host_status(1, 0),
-            syscall_wait_status_word(syscall_status_signaled(1)));
+            syscall_wait_status_word(process_end_signaled(1)));
     compare("SIGKILL", host_status(9, 0),
-            syscall_wait_status_word(syscall_status_signaled(9)));
+            syscall_wait_status_word(process_end_signaled(9)));
     compare("SIGUSR1", host_status(10, 0),
-            syscall_wait_status_word(syscall_status_signaled(10)));
+            syscall_wait_status_word(process_end_signaled(10)));
     compare("SIGTERM", host_status(15, 0),
-            syscall_wait_status_word(syscall_status_signaled(15)));
-    compare("exit 0", host_status(0, 0), syscall_wait_status_word(0));
-    compare("exit 143", host_status(0, 143), syscall_wait_status_word(143));
+            syscall_wait_status_word(process_end_signaled(15)));
+    compare("exit 0", host_status(0, 0), syscall_wait_status_word(process_end_exited(0)));
+    compare("exit 143", host_status(0, 143), syscall_wait_status_word(process_end_exited(143)));
     // exit_group keeps the code's low byte, as Linux does.
     compare("exit 300", host_status(0, 300),
-            syscall_wait_status_word(300 & 0xFF));
+            syscall_wait_status_word(process_end_exited(300)));
     // GitHub issue #885: the SIGCHLD siginfo for the same ends. The
     // kernel side names the child itself; si_code and si_status are what
     // syscall_signal_frame_write takes from wait_status.tkb.
-    compare("SIGCHLD SIGHUP", host_sigchld(1, 0), kernel_sigchld(syscall_status_signaled(1)));
-    compare("SIGCHLD SIGKILL", host_sigchld(9, 0), kernel_sigchld(syscall_status_signaled(9)));
-    compare("SIGCHLD SIGTERM", host_sigchld(15, 0), kernel_sigchld(syscall_status_signaled(15)));
-    compare("SIGCHLD exit 0", host_sigchld(0, 0), kernel_sigchld(0));
-    compare("SIGCHLD exit 143", host_sigchld(0, 143), kernel_sigchld(143));
-    compare("SIGCHLD exit 300", host_sigchld(0, 300), kernel_sigchld(300 & 0xFF));
+    compare("SIGCHLD SIGHUP", host_sigchld(1, 0), kernel_sigchld(process_end_signaled(1)));
+    compare("SIGCHLD SIGKILL", host_sigchld(9, 0), kernel_sigchld(process_end_signaled(9)));
+    compare("SIGCHLD SIGTERM", host_sigchld(15, 0), kernel_sigchld(process_end_signaled(15)));
+    compare("SIGCHLD exit 0", host_sigchld(0, 0), kernel_sigchld(process_end_exited(0)));
+    compare("SIGCHLD exit 143", host_sigchld(0, 143), kernel_sigchld(process_end_exited(143)));
+    compare("SIGCHLD exit 300", host_sigchld(0, 300), kernel_sigchld(process_end_exited(300)));
 }
 
-fn kernel_sigchld(status: usize) -> u32 {
-    return (syscall_sigchld_code(status) << 8) | syscall_sigchld_status(status);
+fn kernel_sigchld(end: ProcessEnd) -> u32 {
+    return (syscall_sigchld_code(end) << 8) | syscall_sigchld_status(end);
 }

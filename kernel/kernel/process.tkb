@@ -356,7 +356,7 @@ struct ProcessRecord {
     // pending, and not otherwise: standard signals do not queue, and Linux
     // keeps the siginfo of the one that was. 0 pid when none was recorded.
     sigchld_pid: usize;
-    sigchld_status: usize;
+    sigchld_status: ProcessEnd;
     // GitHub issues #627 and #629: each standard signal's action as
     // rt_sigaction installed it, indexed by signum - 1. handler 0 is
     // SIG_DFL and 1 SIG_IGN (sigchld_ignored above carries SIGCHLD's
@@ -408,10 +408,11 @@ struct ProcessRecord {
     // there is no longer one. Written only by the reaper itself (#653: a
     // child's exit used to write it too, from another CPU).
     last_reaped_pid: usize;
-    // The status this process exited with, on the process that exited.
+    // How this process ended (an exit code or a signal, #886), on the
+    // process that exited.
     // It lives here because the record now survives the exit -- see
     // kernel_process_child_exit. Meaningful only while state is Exited.
-    exit_status: usize;
+    exit_status: ProcessEnd;
     exec_image_live: bool;
     // GitHub issue #392: kernel/kernel/syscall.tkb's own per-process
     // state, which had nowhere to live but an array keyed by this
@@ -3120,7 +3121,7 @@ private fn scheduled_process_record_reset(guard: borrow ProcessRunGuard[lock],
     record.sigwait_set = 0;
     record.sigchld_ignored = false;
     record.sigchld_pid = 0;
-    record.sigchld_status = 0;
+    record.sigchld_status = ProcessEnd::Exited(0);
     let mut cleared: SignalAction = { 0, 0, 0, 0 };
     for index: usize in 0..<PROCESS_SIGNAL_ACTIONS {
         record.signal_actions[index] = cleared;
@@ -3135,7 +3136,7 @@ private fn scheduled_process_record_reset(guard: borrow ProcessRunGuard[lock],
     record.has_first_child = false;
     record.has_next_sibling = false;
     record.last_reaped_pid = 0;
-    record.exit_status = 0;
+    record.exit_status = ProcessEnd::Exited(0);
     record.exec_image_live = false;
     scheduled_process_record_reset_syscall_state(record);
 }
@@ -4717,7 +4718,7 @@ fn kernel_process_stack_switch_complete(frame_sp: usize) {
     execution_state[execution_cpu_index()].deferred_reap_live = false;
     process_run_unlock(guard);
     if (reap_live) {
-        let reaped_status: usize =
+        let reaped_status: ProcessEnd =
             kernel_process_reap_zombie(reap_parent, reap_child);
         incoming = execution_state[execution_cpu_index()].current_handle;
         kernel_init_boot_fixture_reaped(
@@ -4767,7 +4768,7 @@ fn kernel_process_stack_idle_complete() {
     execution_state[execution_cpu_index()].deferred_reap_live = false;
     process_run_unlock(guard);
     if (reap_live) {
-        let reaped_status: usize =
+        let reaped_status: ProcessEnd =
             kernel_process_reap_zombie(reap_parent, reap_child);
     }
     workload_profile_idle_enter();
@@ -7952,7 +7953,7 @@ linear struct TakenSignal[signal: usize] {
     // record's sigchld_pid/sigchld_status at the take), so a child exiting
     // between the take and the frame write cannot rename it.
     private child_pid: usize;
-    private child_status: usize;
+    private child_status: ProcessEndWord;
 }
 
 must_use variant ProcessSignalPendingResult {
@@ -7962,9 +7963,10 @@ must_use variant ProcessSignalPendingResult {
 
 private fn taken_signal_new(pool_index: RegionHeld(ProcessRecord), generation: usize,
                             signum: usize @ signal, child_pid: usize,
-                            child_status: usize) -> TakenSignal[signal] {
+                            child_status: ProcessEnd) -> TakenSignal[signal] {
     let mut taken: TakenSignal[signal] = { pool_index, generation, signum,
-                                           child_pid, child_status };
+                                           child_pid,
+                                           process_end_word(child_status) };
     return taken;
 }
 
@@ -7974,8 +7976,8 @@ fn taken_signal_child_pid(taken: borrow TakenSignal[signal]) -> usize {
     return taken.child_pid;
 }
 
-fn taken_signal_child_status(taken: borrow TakenSignal[signal]) -> usize {
-    return taken.child_status;
+fn taken_signal_child_status(taken: borrow TakenSignal[signal]) -> ProcessEnd {
+    return process_end_of_word(taken.child_status);
 }
 
 fn taken_signal_number(taken: borrow TakenSignal[signal]) -> usize {
@@ -8002,7 +8004,7 @@ fn taken_signal_restore(taken: sink TakenSignal[signal]) {
         // its siginfo, even if another child exited in between.
         if (signum == 17 && taken.child_pid != 0) {
             record.sigchld_pid = taken.child_pid;
-            record.sigchld_status = taken.child_status;
+            record.sigchld_status = process_end_of_word(taken.child_status);
         }
         process_signal_pending_raise(guard, record, 1 << (signum - 1));
     }
@@ -8022,7 +8024,7 @@ fn kernel_process_current_signal_take(wait_set: usize)
         let bit_mask: usize = 1 << bit;
         if ((available & bit_mask) != 0) {
             let child_pid: usize = record.sigchld_pid;
-            let child_status: usize = record.sigchld_status;
+            let child_status: ProcessEnd = record.sigchld_status;
             process_signal_pending_clear(guard, record, bit_mask);
             process_run_unlock(guard);
             return ProcessSignalPendingResult::Pending(
@@ -8050,7 +8052,7 @@ fn kernel_process_current_termination_signal_take()
         if ((record.pending_signals & bit) != 0 &&
             process_signal_terminates(record, index)) {
             let child_pid: usize = record.sigchld_pid;
-            let child_status: usize = record.sigchld_status;
+            let child_status: ProcessEnd = record.sigchld_status;
             process_signal_pending_clear(guard, record, bit);
             process_run_unlock(guard);
             return ProcessSignalPendingResult::Pending(
@@ -8254,7 +8256,7 @@ fn kernel_process_current_caught_signal_take() -> ProcessSignalPendingResult {
         let bit: usize = 1 << index;
         if ((available & bit) != 0 && record.signal_actions[index].handler > 1) {
             let child_pid: usize = record.sigchld_pid;
-            let child_status: usize = record.sigchld_status;
+            let child_status: ProcessEnd = record.sigchld_status;
             process_signal_pending_clear(guard, record, bit);
             process_run_unlock(guard);
             return ProcessSignalPendingResult::Pending(
@@ -8352,7 +8354,7 @@ private fn kernel_process_signal_deliver_to(
     // kernel_process_signal_child_exit, its sender on an exit, says so.
     if (signum == 17 && (record.pending_signals & bit) == 0) {
         record.sigchld_pid = 0;
-        record.sigchld_status = 0;
+        record.sigchld_status = ProcessEnd::Exited(0);
     }
     process_signal_pending_raise(guard, record, bit);
     // A fatal signal must interrupt a blocked target too, not wait for its
@@ -8402,7 +8404,7 @@ private fn kernel_process_signal_deliver_to(
 
 fn kernel_process_signal_child_exit(
         guard: borrow ProcessRunGuard[scheduled_process_run_lock],
-        parent: ProcessHandle, child_pid: usize, child_status: usize) {
+        parent: ProcessHandle, child_pid: usize, child_status: ProcessEnd) {
     // GitHub issue #885: the siginfo goes with the SIGCHLD that is queued;
     // a second exit while one is pending is merged into it, as on Linux.
     // kernel_process_signal_deliver_to clears it for a SIGCHLD it newly
@@ -9503,7 +9505,7 @@ fn kernel_process_fanout_probe() -> bool !{changes_witness_ProcessCurrent, unsaf
         // Head insertion means the list runs newest-first, so the pid
         // stamped here is pids[2 - i].
         scheduled_process_record_of_locked(link_guard, cursor).exit_status =
-            42 - i;
+            process_end_exited(42 - i);
         process_run_unlock(link_guard);
         if (kernel_process_probe_run_to_exit(cursor) == false) {
             return false;
@@ -9512,7 +9514,7 @@ fn kernel_process_fanout_probe() -> bool !{changes_witness_ProcessCurrent, unsaf
         cursor = following;
     }
     if (kernel_process_child_waitable_pid_probe(pids[1]) == false) { return false; }
-    if (kernel_process_child_wait_status_pid(pids[1]) != 41) { return false; }
+    if (syscall_status_shell_code(kernel_process_child_wait_status_pid(pids[1])) != 41) { return false; }
     let reaped_pid: usize = match process_running_here() {
         ProcessRunningHere::Running(current_authority) => {
             let value: usize = kernel_process_last_reaped_pid(current_authority);
@@ -9524,8 +9526,8 @@ fn kernel_process_fanout_probe() -> bool !{changes_witness_ProcessCurrent, unsaf
     // The other two are untouched and still carry their own statuses --
     // the property a single parent-side field could not have.
     if (kernel_process_child_waitable_pid_probe(pids[1])) { return false; }
-    if (kernel_process_child_wait_status_pid(pids[0]) != 40) { return false; }
-    if (kernel_process_child_wait_status_pid(pids[2]) != 42) { return false; }
+    if (syscall_status_shell_code(kernel_process_child_wait_status_pid(pids[0])) != 40) { return false; }
+    if (syscall_status_shell_code(kernel_process_child_wait_status_pid(pids[2])) != 42) { return false; }
     if (kernel_process_child_waitable_probe()) { return false; }
     return true;
 }
@@ -9872,8 +9874,8 @@ private fn kernel_process_exit_continuation_probe(parent: ProcessHandle) -> bool
             scheduled_process_pid_of_handle(parent)) {
         return false;
     }
-    let status: usize = kernel_process_child_wait_status_pid(child_pid);
-    if (status != 0 || kernel_process_current_has_child_pid(child_pid)) { return false; }
+    let status: ProcessEnd = kernel_process_child_wait_status_pid(child_pid);
+    if (syscall_status_shell_code(status) != 0 || kernel_process_current_has_child_pid(child_pid)) { return false; }
     let mut resumed_parent: ProcessHandle = execution_state[execution_cpu_index()].current_handle;
     let select_guard = process_run_lock();
     let mut selectable: bool = false;
@@ -10585,7 +10587,7 @@ private fn kernel_process_exit_reserved(
     }
 }
 
-fn kernel_process_child_exit(current_authority: sink ProcessCurrent[process, ProcessState::Running], status: usize) -> ExitSwitch !{changes_witness_ProcessCurrent} {
+fn kernel_process_child_exit(current_authority: sink ProcessCurrent[process, ProcessState::Running], status: ProcessEnd) -> ExitSwitch !{changes_witness_ProcessCurrent} {
     process_test_evidence_record_child_exit(status);
     // GitHub issue #209: a child exit used to close the scheduling gate
     // here (kernel_process_scheduler_disable()), a leftover of the
@@ -10614,7 +10616,8 @@ fn kernel_process_child_exit(current_authority: sink ProcessCurrent[process, Pro
         child.generation,
         scheduled_process_pid_of_handle(parent), parent.generation, 2, 0,
         region_held_address(child.pool_index),
-        scheduled_process_record_current(current_authority).saved_sp, status);
+        scheduled_process_record_current(current_authority).saved_sp,
+        process_end_trace_aux(status));
     // GitHub issue #248: per-slot (indexed by the WAITING PARENT's own
     // pool_index), not a bare global -- see these fields' own header
     // comment for why a global here breaks a multi-level concurrent
@@ -10663,7 +10666,7 @@ fn kernel_process_child_exit(current_authority: sink ProcessCurrent[process, Pro
         match next_zombie {
             ProcessNextReadyResult::Missing => { draining = 0; }
             ProcessNextReadyResult::Next(grandchild) => {
-                let orphan_status: usize =
+                let orphan_status: ProcessEnd =
                     kernel_process_reap_zombie(child, grandchild);
             }
         }
@@ -10721,7 +10724,8 @@ fn kernel_process_child_exit(current_authority: sink ProcessCurrent[process, Pro
                             exit_guard, parent_owner, blocked,
                             scheduled_process_pid_of_handle(child));
                         kernel_process_trace_handle(
-                            ProcessTraceWake, parent, child, status);
+                            ProcessTraceWake, parent, child,
+                            process_end_trace_aux(status));
                         // A parent this CPU may not run is left Ready with
                         // its wait4 rewound (below) and reruns it wherever
                         // its mask lets it -- a peer included since #609, so
@@ -10911,7 +10915,7 @@ private fn kernel_process_pending_wait4_child(guard: borrow ProcessRunGuard[lock
 // whoever is there now and is the honest encoding of not knowing.
 private fn kernel_process_reap_zombie(parent: ProcessHandle,
                                       child: ProcessHandle)
-        -> usize !{unsafe} {
+        -> ProcessEnd !{unsafe} {
     let mut parent_slot: RegionHeld(ProcessRecord) = parent.pool_index;
     let parent_generation: usize = parent.generation;
     // GitHub issue #437: scheduled_process_reap_teardown ends in
@@ -10962,7 +10966,7 @@ private fn kernel_process_reap_zombie(parent: ProcessHandle,
     // status is settled by now, but its stack owner is cleared by the CPU
     // that leaves its stack, under this lock.
     let read_guard = process_run_lock();
-    let status: usize =
+    let status: ProcessEnd =
         scheduled_process_record_of_locked(read_guard, child).exit_status;
     let stack_unowned: bool =
         scheduled_process_record_of_locked(read_guard, child).stack_owner_cpu ==
@@ -11236,8 +11240,8 @@ private fn kernel_process_child_waitable_probe() -> bool {
 
 // wait4(pid)'s reap. Returns the status; the reaped pid is readable
 // afterwards through kernel_process_last_reaped_pid, same as wait4(-1).
-fn kernel_process_child_wait_status_pid(pid: usize) -> usize !{unsafe} {
-    if (execution_state[execution_cpu_index()].current_live == false) { return 0; }
+fn kernel_process_child_wait_status_pid(pid: usize) -> ProcessEnd !{unsafe} {
+    if (execution_state[execution_cpu_index()].current_live == false) { return ProcessEnd::Exited(0); }
     let mut parent: ProcessHandle = execution_state[execution_cpu_index()].current_handle;
     // GitHub issue #693 step 3: the search walks other processes' records,
     // so it runs under the run lock; the reap takes that lock itself, so it
@@ -11247,7 +11251,7 @@ fn kernel_process_child_wait_status_pid(pid: usize) -> usize !{unsafe} {
     let found = kernel_process_zombie_of_pid(search_guard, parent, pid);
     process_run_unlock(search_guard);
     match found {
-        ProcessNextReadyResult::Missing => { return 0; }
+        ProcessNextReadyResult::Missing => { return ProcessEnd::Exited(0); }
         ProcessNextReadyResult::Next(zombie) => {
             return kernel_process_reap_zombie(parent, zombie);
         }
@@ -11255,7 +11259,8 @@ fn kernel_process_child_wait_status_pid(pid: usize) -> usize !{unsafe} {
 }
 
 // GitHub issue #633: the ONE zombie a wait4 collects, named with its pid
-// and status together. wait4 used to write a status it peeked from the
+// and its wait4 status word (derived from its ProcessEnd, #886) together.
+// wait4 used to write a status it peeked from the
 // first zombie, reap the first zombie again, and return
 // last_child_pid read afterwards. A child exiting on another CPU writes that
 // field too, so the pid returned could name a child that was not the one
@@ -11263,7 +11268,7 @@ fn kernel_process_child_wait_status_pid(pid: usize) -> usize !{unsafe} {
 // rt_sigsuspend for a child it had already lost. Only the parent reaps its
 // own zombies, so the one named here is still there for
 // kernel_process_current_reap_pid.
-must_use variant ProcessChildZombieResult { Missing; Found((usize, usize)); }
+must_use variant ProcessChildZombieResult { Missing; Found((usize, u32)); }
 
 fn kernel_process_current_zombie_pick(selecting: bool, pid: usize)
         -> ProcessChildZombieResult {
@@ -11295,12 +11300,13 @@ private fn kernel_process_zombie_named(guard: borrow ProcessRunGuard[lock], foun
         ProcessNextReadyResult::Next(zombie) => {
             return ProcessChildZombieResult::Found((
                 scheduled_process_pid_of_handle(zombie),
-                scheduled_process_record_of_locked(guard, zombie).exit_status));
+                syscall_wait_status_word(
+                    scheduled_process_record_of_locked(guard, zombie).exit_status)));
         }
     }
 }
 
-fn kernel_process_current_reap_pid(pid: usize) -> usize !{unsafe} {
+fn kernel_process_current_reap_pid(pid: usize) -> ProcessEnd !{unsafe} {
     return kernel_process_child_wait_status_pid(pid);
 }
 
@@ -11320,41 +11326,41 @@ fn kernel_process_child_waitable(guard: borrow ProcessRunGuard[lock]) -> bool {
 // only at the switch -- the deferred reap comes after. The collecting
 // searches skip such a zombie (#609), which is right for a reap and wrong
 // for this read.
-fn kernel_process_child_exit_status_for(slot: ProcessSlot, pid: usize) -> usize {
+fn kernel_process_child_exit_status_for(slot: ProcessSlot, pid: usize) -> ProcessEnd {
     // GitHub issue #693 step 3: the children's records are read under the
     // run lock; kernel_syscall_wait4_deliver holds none.
     let status_guard = process_run_lock();
-    let status: usize =
+    let status: ProcessEnd =
         kernel_process_child_exit_status_for_locked(status_guard, slot, pid);
     process_run_unlock(status_guard);
     return status;
 }
 
 private fn kernel_process_child_exit_status_for_locked(
-        guard: borrow ProcessRunGuard[lock], slot: ProcessSlot, pid: usize) -> usize {
+        guard: borrow ProcessRunGuard[lock], slot: ProcessSlot, pid: usize) -> ProcessEnd {
     let mut parent: ProcessHandle = match scheduled_process_handle_of_slot(guard, slot) {
-        ProcessHandleOfSlot::Absent => { return 0; }
+        ProcessHandleOfSlot::Absent => { return ProcessEnd::Exited(0); }
         ProcessHandleOfSlot::Live(found) => { found }
     };
     if (scheduled_process_record_of_locked(guard, parent).has_first_child == false) {
-        return 0;
+        return ProcessEnd::Exited(0);
     }
     let mut cursor: ProcessHandle =
         scheduled_process_record_of_locked(guard, parent).first_child;
     let mut remaining: usize = scheduled_process_pool_live_count() + 1;
     while (remaining != 0) {
         remaining = remaining - 1;
-        if (scheduled_process_handle_matches(cursor) == false) { return 0; }
+        if (scheduled_process_handle_matches(cursor) == false) { return ProcessEnd::Exited(0); }
         if (scheduled_process_pid_of_handle(cursor) == pid &&
             scheduled_process_state_of_locked(guard, cursor) == ProcessSlotState::Exited) {
             return scheduled_process_record_of_locked(guard, cursor).exit_status;
         }
         if (scheduled_process_record_of_locked(guard, cursor).has_next_sibling == false) {
-            return 0;
+            return ProcessEnd::Exited(0);
         }
         cursor = scheduled_process_record_of_locked(guard, cursor).next_sibling;
     }
-    return 0;
+    return ProcessEnd::Exited(0);
 }
 
 // Called from kernel_process_child_exec_prepare() right after that
@@ -11585,7 +11591,7 @@ fn kernel_process_reap_own_zombies() !{unsafe} {
                                 match owner {
                                     ProcessHandleOfSlot::Absent => {}
                                     ProcessHandleOfSlot::Live(owner_handle) => {
-                                        let collected: usize =
+                                        let collected: ProcessEnd =
                                             kernel_process_reap_zombie(
                                                 owner_handle, victim_handle);
                                     }

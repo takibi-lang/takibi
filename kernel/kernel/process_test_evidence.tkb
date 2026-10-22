@@ -65,8 +65,13 @@ fn process_test_evidence_clone_calls() -> usize {
     return process_test_evidence.clone_calls;
 }
 
-fn process_test_evidence_record_child_exit(status: usize) {
-    if (status == 42) { process_test_evidence.exit_42_seen = true; }
+fn process_test_evidence_record_child_exit(status: ProcessEnd) {
+    match status {
+        ProcessEnd::Exited(code) => {
+            if (code == 42) { process_test_evidence.exit_42_seen = true; }
+        }
+        ProcessEnd::Signaled(_) => {}
+    }
 }
 
 fn process_test_evidence_exit_42_seen() -> bool {

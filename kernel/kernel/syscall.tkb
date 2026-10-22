@@ -3353,7 +3353,7 @@ private let mut init_child_exit_log_window: AtomicWord;
 private let mut init_child_exit_log_count: AtomicWord;
 private let mut init_child_exit_log_withheld: AtomicWord;
 
-private fn kernel_syscall_note_init_child_exit(status: usize) !{unsafe} {
+private fn kernel_syscall_note_init_child_exit(status: ProcessEnd) !{unsafe} {
     let mut slot: ProcessSlot = kernel_syscall_process_slot();
     if (scheduled_process_slot_valid(slot) == false) { return; }
     let mut image: [u8; INIT_CHILD_EXIT_IMAGE_BYTES];
@@ -3394,10 +3394,13 @@ private fn kernel_syscall_note_init_child_exit(status: usize) !{unsafe} {
     }
     kernel_boot_log("\"");
     if (ended == false) { kernel_boot_log("+"); }
-    if ((status & SYSCALL_STATUS_SIGNALED) != 0) {
-        kernel_boot_log(" signal="); uart_put_udec(status & 0x7F);
-    } else {
-        kernel_boot_log(" code="); uart_put_udec(status & 0xFF);
+    match status {
+        ProcessEnd::Signaled(signal) => {
+            kernel_boot_log(" signal="); uart_put_udec(signal as usize);
+        }
+        ProcessEnd::Exited(code) => {
+            kernel_boot_log(" code="); uart_put_udec(code as usize);
+        }
     }
     kernel_boot_log(" withheld=");
     uart_put_udec(atomic_word_load(&init_child_exit_log_withheld));
@@ -3407,7 +3410,7 @@ private fn kernel_syscall_note_init_child_exit(status: usize) !{unsafe} {
 // Preserve clone-owned FD/VM teardown before returning through the parent
 // frame. SyscallAction::Exit is the root EL0 process's, PID 1's, whose exit
 // stops the kernel (kernel_syscall_init_exit).
-fn kernel_syscall_exit_current_process(current_authority: ProcessCurrent[current_process, ProcessState::Running], status: usize) -> SyscallAction {
+fn kernel_syscall_exit_current_process(current_authority: ProcessCurrent[current_process, ProcessState::Running], status: ProcessEnd) -> SyscallAction {
     if (kernel_process_is_child(current_authority)) {
         kernel_syscall_note_init_child_exit(status);
         // GitHub issue #448 made an exit with nowhere to hand the CPU wait
@@ -3437,7 +3440,8 @@ fn kernel_syscall_exit_current_process(current_authority: ProcessCurrent[current
         return kernel_syscall_clone_parent_action(
             kernel_process_child_exit(current_authority, status));
     }
-    process_current_end(current_authority); return SyscallAction::Exit(status);
+    process_current_end(current_authority);
+    return SyscallAction::Exit(syscall_status_shell_code(status));
 }
 
 // The only asm-facing entry point (user_entry.S calls this exact name via
@@ -3494,7 +3498,7 @@ fn kernel_syscall_wait4_deliver(
                 return;
             }
             UserWriteRangeResult::Ok(range) => {
-                let status: usize =
+                let status: ProcessEnd =
                     kernel_process_child_exit_status_for(parent_slot,
                                                          reaped_pid);
                 match user_write_u32(range, 0,
@@ -5033,7 +5037,7 @@ const SIGFRAME_STACK_GROWTH_ESR: usize = 0x90000007;
 fn syscall_signal_frame_write(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], frame: borrow FrameRef[process], value: usize,
                               signum: usize,
                               restore_mask: usize, child_pid: usize,
-                              child_status: usize) -> (bool, usize)
+                              child_status: ProcessEnd) -> (bool, usize)
         !{unsafe} {
     let user_sp: usize = frame_sp_el0(frame);
     if (user_sp < SIGFRAME_SIZE + 16) { return (false, 0); }
@@ -5153,7 +5157,7 @@ private fn syscall_signal_deliver_into(current_authority: ProcessCurrent[current
                 // Linux forces SIGSEGV when the frame cannot be written.
                 let delivered: usize = taken_signal_delivered(taken);
                 return kernel_syscall_exit_current_process(current_authority,
-                    syscall_status_signaled(LINUX_SIGSEGV));
+                    process_end_signaled(LINUX_SIGSEGV));
             }
             let delivered: usize = taken_signal_delivered(taken);
             let mut handler_mask: usize = restore_mask | handler.mask;
@@ -5194,7 +5198,7 @@ private fn syscall_signal_return_into(current_authority: ProcessCurrent[current_
     match user_range_check_read(current_authority, base,
                                 SIGFRAME_SIZE) {
         UserReadRangeResult::Fault => {
-            return kernel_syscall_exit_current_process(current_authority, syscall_status_signaled(LINUX_SIGSEGV));
+            return kernel_syscall_exit_current_process(current_authority, process_end_signaled(LINUX_SIGSEGV));
         }
         UserReadRangeResult::Ok(range) => {
             let (magic_ok, magic) = user_read_u32(range, SIGFRAME_FPSIMD);
@@ -5209,7 +5213,7 @@ private fn syscall_signal_return_into(current_authority: ProcessCurrent[current_
                 size as usize != SIGFRAME_FPSIMD_SIZE ||
                 ((pc as usize) & 3) != 0) {
                 return kernel_syscall_exit_current_process(current_authority,
-                    syscall_status_signaled(LINUX_SIGSEGV));
+                    process_end_signaled(LINUX_SIGSEGV));
             }
             let mut x0: usize = 0;
             for index: usize in 0..<31 {
@@ -6000,7 +6004,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             // this syscall, and so does a migration: the rerun must still
             // see the signal it was for. TakenSignal is linear, so each arm
             // has to say which of the two happened (GitHub issue #600).
-            let status: usize = syscall_status_signaled(taken_signal_number(taken));
+            let status: ProcessEnd = process_end_signaled(taken_signal_number(taken));
             match kernel_syscall_exit_current_process(current_authority, status) {
                 SyscallAction::WaitInterrupt => {
                     taken_signal_restore(taken);
@@ -6522,7 +6526,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         return syscall_clone_current(current_authority, frame);
     }
     if (number == AARCH64_NR_EXIT || number == AARCH64_NR_EXIT_GROUP) {
-        return kernel_syscall_exit_current_process(current_authority, x0 & 0xFF);
+        return kernel_syscall_exit_current_process(current_authority, process_end_exited(x0));
     }
     if (number == AARCH64_NR_WAIT4) {
         let requested_pid: usize = x0;
@@ -6644,15 +6648,14 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 return syscall_finish_current(frame, SyscallAction::WaitInterrupt, current_authority);
             }
             ProcessChildZombieResult::Found(picked) => {
-                let (zombie_pid, status) = picked;
+                let (zombie_pid, status_word) = picked;
                 if (x1 != 0) {
                     match user_range_check_write(current_authority, x1, 4) {
                         UserWriteRangeResult::Fault => {
                             return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
                         }
                         UserWriteRangeResult::Ok(range) => {
-                            match user_write_u32(range, 0,
-                                    syscall_wait_status_word(status)) {
+                            match user_write_u32(range, 0, status_word) {
                                 UserWriteResult::Fault => {
                                     return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
                                 }
@@ -6661,7 +6664,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                         }
                     }
                 }
-                let reaped_status: usize =
+                let reaped_status: ProcessEnd =
                     kernel_process_current_reap_pid(zombie_pid);
                 // GitHub issue #270: PID 1 reaping its first child is where
                 // the bounded boot fixture ends now. The hook is a no-op for
@@ -6918,7 +6921,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         }
         if (x0 == kernel_process_current_pid() &&
             kernel_process_current_signal_terminates(x1)) {
-            return kernel_syscall_exit_current_process(current_authority, syscall_status_signaled(x1));
+            return kernel_syscall_exit_current_process(current_authority, process_end_signaled(x1));
         }
         match kernel_process_signal_send(x0, x1) {
             ProcessSignalSendResult::Missing => {
