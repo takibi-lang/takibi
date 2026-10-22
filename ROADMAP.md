@@ -259,9 +259,8 @@ usb_xhci_bus.tkb. Only the DCBAA stays legacy (D3).
    on type variables), #762 (no vector stores in MMU-off code), #774 (every
    IRQ dispatch arm acknowledges its source), #752 (typestate in more of
    the kernel).
-4. **Diagnostics and build checks:** #769 (--uses-of NAME), #766 (GDB
-   helper names checked), #747 (host GDB test), #760, #781, #788 (build
-   races and flags).
+4. **Diagnostics and build checks:** #769 (--uses-of NAME), #747 (host
+   GDB test), #760, #781, #788 (build races and flags).
 5. **Time measurement, then the optimizations waiting on it** (maintainer,
    2026-10-08: space and time are both kept): #502; then #520
    (TCP throughput), with #741 (locate the measured RPi5 HTTP SYN

@@ -13,6 +13,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 
+from kernel_compile_flags import kernel_compile_flags
 from pass_line import CaseCount, report_pass
 
 
@@ -20,8 +21,6 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("compiler", type=Path)
     parser.add_argument("sources", nargs="+")
-    # GitHub issue #720: the kernel list of device-semantics files, passed through.
-    parser.add_argument("--device-semantics-file", action="append", default=[])
     args = parser.parse_args()
     repo = Path(__file__).resolve().parent.parent
     compiler = args.compiler.resolve()
@@ -154,8 +153,7 @@ private fn fd_exists_control() -> ProcessFdContextExists[0] {
             target.unlink()
             target.write_text(original + addition, encoding="ascii")
             result = subprocess.run(
-                [str(compiler), *args.sources, *[x for f in args.device_semantics_file for x in ("--device-semantics-file", f)], "--regions", "--forbid-trap",
-                 "--target", "aarch64-none-elf", "--cpu", "cortex-a53",
+                [str(compiler), *args.sources, *kernel_compile_flags(),
                  "--emit-struct-layout", "AddressSpaceBacking", "-o", str(overlay / "layout")],
                 cwd=overlay, capture_output=True, text=True, check=False)
             ran.note()
