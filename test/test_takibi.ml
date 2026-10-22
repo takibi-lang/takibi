@@ -25639,6 +25639,7 @@ let infer_production_machine_boundary ?(platform = "qemu") code =
     let mut rpi5_psci_use_hvc: bool;
     let mut kernel_secondary_entry: usize;
     struct Record { value: usize; }
+    struct ProcessSlot { word: usize; }
     private let mut record: Record;
     private let mut record_pool: IntrusivePool(Record);
     linear struct ProcessRunGuard[g: addr] { private flags: usize; }
@@ -25845,7 +25846,8 @@ let production_machine_boundary_tests =
       "live RegionInspection__ProcessRecord" (full {|
         let inspected = native_fixture_ProcessRecord(stopped);
         let guard = guard_new(&kernel_world_stop);
-        scheduled_process_slot_remove(guard, 1);
+        let mut slot: ProcessSlot = { 1 };
+        scheduled_process_slot_remove(guard, slot);
         guard_end(guard); native_fixture_end_ProcessRecord(inspected);
       |});
     bad "production raw resume rejects retained start" "live CpuStart witness" {|

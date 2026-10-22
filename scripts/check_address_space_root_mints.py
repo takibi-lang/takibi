@@ -8,8 +8,10 @@ as the places a root is made:
 
 address_space_root_mint is the mint. Its callers are declared below: the
 authority-taking makers in kernel/kernel/process.tkb (run lock, owner,
-running evidence, full machine stop), root 0's maker, and the backing's
-publisher, which wrote the handle it mints with. The transitional maker that
+running evidence, full machine stop) and the backing's publisher, which
+wrote the handle it mints with. Since #858 the mint takes a ProcessSlot, so
+it cannot make root 0: address_space_boot_root builds that one root from
+its private fields, and nothing outside kernel/mm/address_space.tkb can. The transitional maker that
 read the handle with no authority (address_space_root_for_slot, 107 calls at
 its peak) is gone; adding a maker back is adding a name here.
 
@@ -28,7 +30,6 @@ MINT = "address_space_root_mint"
 
 ALLOWED = {
     "address_space_backing_publish",
-    "address_space_boot_root",
     "scheduled_process_address_space_root_locked",
     "scheduled_process_address_space_root_owned",
     "scheduled_process_address_space_root_stopped",
