@@ -3354,7 +3354,7 @@ private let mut init_child_exit_log_count: AtomicWord;
 private let mut init_child_exit_log_withheld: AtomicWord;
 
 private fn kernel_syscall_note_init_child_exit(status: usize) !{unsafe} {
-    let slot: usize = kernel_syscall_process_slot();
+    let mut slot: ProcessSlot = kernel_syscall_process_slot();
     if (scheduled_process_slot_valid(slot) == false) { return; }
     let mut image: [u8; INIT_CHILD_EXIT_IMAGE_BYTES];
     let guard = process_run_lock();
