@@ -106,10 +106,10 @@ $(TAKIBI):
 else
 $(TAKIBI): FORCE
 	@mkdir -p _build
-	@# dune writes _build/log at its workspace root; no fresh log here means
-	@# this dune built some other tree (issue #760).
-	flock $(DUNE_INVOCATION_LOCK) sh -c 'rm -f _build/log; dune build || exit $$?; \
-		test -s _build/log || { echo "FAIL dune-root: dune wrote no $(CURDIR)/_build/log; it built another workspace root (#760)" >&2; exit 1; }'
+	@# dune touches _build/.lock at its workspace root on every run; a lock
+	@# no newer than this stamp means this dune built another tree (#760).
+	flock $(DUNE_INVOCATION_LOCK) sh -c 'touch _build/.takibi-dune-start; dune build || exit $$?; \
+		test _build/.lock -nt _build/.takibi-dune-start || { echo "FAIL dune-root: dune did not touch $(CURDIR)/_build/.lock; it built another workspace root (#760)" >&2; exit 1; }'
 endif
 
 ## test: run the ordered unit tests, then one reproducible shuffled pass

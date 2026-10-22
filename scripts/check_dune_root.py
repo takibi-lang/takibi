@@ -18,7 +18,7 @@ The rule, over tracked scripts/*.py, scripts/*.sh and the Makefile:
 EXEMPT lists reviewed exceptions with the reason.
 
 The Makefile's $(TAKIBI) recipe also checks dynamically that dune wrote
-this tree's _build/log. Lexical; the controls plant each shape.
+this tree's _build/.lock. Lexical; the controls plant each shape.
 """
 
 import pathlib
@@ -76,6 +76,9 @@ def problems_in(name: str, text: str) -> list:
         if not MK_PINNED.search(text) or not MK_EXPORT.search(text):
             found.append("Makefile: no `override DUNE_ROOT := $(CURDIR)` "
                          "plus `export DUNE_ROOT`")
+        if "test _build/.lock -nt _build/.takibi-dune-start" not in text:
+            found.append("Makefile: the dune build recipe lost its "
+                         "_build/.lock freshness guard")
     elif name.endswith(".py"):
         for match in PY_DUNE.finditer(text):
             if not PY_PINNED.search(call_extent(text, match.start())):
@@ -95,14 +98,18 @@ def control() -> bool:
     bad_sh = 'cd x\ndune test --force\n'
     good_sh = 'cd x\nexport DUNE_ROOT="$PWD"\ndune test --force\n'
     bad_mk = "DUNE_ROOT ?= $(CURDIR)\nexport DUNE_ROOT\n"
-    good_mk = "override DUNE_ROOT := $(CURDIR)\nexport DUNE_ROOT\n"
+    guard = "\ttest _build/.lock -nt _build/.takibi-dune-start || exit 1\n"
+    bad_mk += guard
+    good_mk = "override DUNE_ROOT := $(CURDIR)\nexport DUNE_ROOT\n" + guard
+    unguarded_mk = "override DUNE_ROOT := $(CURDIR)\nexport DUNE_ROOT\n"
     return (len(problems_in("a.py", bad_py)) == 1
             and not problems_in("a.py", good_py)
             and len(problems_in("a.sh", bad_sh)) == 1
             and not problems_in("a.sh", good_sh)
             and not problems_in("a.sh", "# dune build in a comment\n")
             and len(problems_in("Makefile", bad_mk)) == 1
-            and not problems_in("Makefile", good_mk))
+            and not problems_in("Makefile", good_mk)
+            and len(problems_in("Makefile", unguarded_mk)) == 1)
 
 
 def main() -> int:
