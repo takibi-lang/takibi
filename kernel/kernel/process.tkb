@@ -8788,7 +8788,7 @@ private fn kernel_process_tick_wake_one(
                     scheduled_process_record_locked(guard, process_slot_of(owner.pool_index))
                         .deadline_result);
             }
-            let woken_slot: usize = process_slot_word(owner.pool_index);
+            let mut woken_slot: ProcessSlot = process_slot_of(owner.pool_index);
             if (reason != ProcessWaitReason::NetRx &&
                 kernel_process_tick_wake_watched_pid != 0 &&
                 scheduled_process_record_locked(guard, woken_slot).pid ==
