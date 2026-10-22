@@ -89,8 +89,12 @@ export DUNE_INVOCATION_LOCK
 
 # A worker's worktree lives under .claude/worktrees/ of the main checkout, and
 # dune takes the outermost dune-project as its root, so without this a
-# worktree's `make` would build the main checkout instead (issue #753).
-DUNE_ROOT ?= $(CURDIR)
+# worktree's `make` would build the main checkout instead (issues #753, #760).
+# `override :=`, not `?=`: a DUNE_ROOT inherited from the environment -- a
+# shell or make that ran in the main checkout first -- would otherwise point
+# this tree's build at the other tree's _build. scripts/check_dune_root.py
+# holds this line and every other dune call to pinning the root.
+override DUNE_ROOT := $(CURDIR)
 export DUNE_ROOT
 
 ifneq ($(TAKIBI_KERNEL_BUILD_LOCK_HELD)$(TAKIBI_LINUX_BUILD_LOCK_HELD),)
@@ -102,7 +106,10 @@ $(TAKIBI):
 else
 $(TAKIBI): FORCE
 	@mkdir -p _build
-	flock $(DUNE_INVOCATION_LOCK) dune build
+	@# dune writes _build/log at its workspace root; no fresh log here means
+	@# this dune built some other tree (issue #760).
+	flock $(DUNE_INVOCATION_LOCK) sh -c 'rm -f _build/log; dune build || exit $$?; \
+		test -s _build/log || { echo "FAIL dune-root: dune wrote no $(CURDIR)/_build/log; it built another workspace root (#760)" >&2; exit 1; }'
 endif
 
 ## test: run the ordered unit tests, then one reproducible shuffled pass

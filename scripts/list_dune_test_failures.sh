@@ -35,6 +35,9 @@
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# Issue #760: this tree is the dune root even inside a worktree nested in
+# another checkout, whatever DUNE_ROOT the caller's environment carries.
+export DUNE_ROOT="$PWD"
 
 echo "Running dune test --force..."
 # GitHub issue #673: one dune at a time across make processes (Makefile,
