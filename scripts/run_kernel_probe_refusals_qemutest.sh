@@ -10,7 +10,10 @@ trap 'status=$?; if [ "$status" -ne 0 ]; then bash "$REPO_ROOT/scripts/archive_k
 if [ "${KERNEL_PROBE_REFUSALS_CONTROL:-normal}" = old-baseline ]; then
     # The real pre-stop sample, with a tick forced before the stop, must not
     # be accepted as evidence of resume. Prove status and diagnosis separately.
+    # GitHub issue #883: this child is meant to fail, and its archive is the
+    # evidence the old baseline was refused, not a failure of this lane.
     if env KERNEL_PROBE_REFUSALS_CONTROL=normal \
+        TAKIBI_ARCHIVE_EXPECTED="probe-refusals old resume baseline, meant to fail" \
         KERNEL_PROBE_REFUSALS_ELF="$REPO_ROOT/kernel/build/qemu/kernel-race-651-resume-old-reverted.elf" \
         KERNEL_PROBE_REFUSALS_ARTIFACT_DIR="$ARTIFACT_DIR/old-baseline" \
         bash "$0" >"$ARTIFACT_DIR/old-baseline.log" 2>&1; then

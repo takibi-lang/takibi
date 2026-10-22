@@ -98,4 +98,12 @@ r="$(expected_archive reverted)"
 [ "$(grep -c 'TAKIBI_ARCHIVE_EXPECTED="$(expected_archive "$variant")"' "$RACE")" -eq 2 ] && claim ||
     fail "a race-window workload does not pass the marking to its runner"
 
+# 9. Every other child a lane runs meaning it to fail is marked too: the
+# probe-refusals old resume baseline (it archives through its own EXIT trap).
+# The debug-return-abi counterfactuals and the uart-wake scalar control do not
+# archive at all (#877).
+PROBE="$REPO_ROOT/scripts/run_kernel_probe_refusals_qemutest.sh"
+grep -B1 -A3 'TAKIBI_ARCHIVE_EXPECTED=' "$PROBE" | grep -q 'old-baseline' && claim ||
+    fail "the probe-refusals old-baseline child is not marked expected"
+
 echo "PASS lane-new-archives control: $cases claims -- a passing lane that left an unexpected failure archive is refused; expected, neighbour and failing runs are not"
