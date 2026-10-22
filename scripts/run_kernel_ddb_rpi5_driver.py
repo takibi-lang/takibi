@@ -237,6 +237,16 @@ def validate_capture(received: bytes, prompt_count: int, timeline: Timeline) -> 
     if re.search(r"^ddb: wait edges=\d+ blocked=\d+ unknown=\d+ "
                  r"truncated=[01]$", text, re.MULTILINE) is None:
         raise timeline.bail("RPi5 DDB did not render the wait summary")
+    # GitHub issue #881: the hold starts once PID 1 is parked in its
+    # no-deadline signal wait, or after five seconds regardless. A worker
+    # respawned every second kept init in its post-reap sleep for the whole
+    # lane and only the fallback let the hold begin; require the parked wait
+    # so a respawn loop fails here instead of hiding behind the fallback.
+    if re.search(r"^ddb: wait pid=1 state=blocked waits-for event=signal$",
+                 text, re.MULTILINE) is None:
+        raise timeline.bail(
+            "RPi5 DDB found PID 1 outside its signal wait: a child init "
+            "keeps reaping and respawning held it in its post-reap sleep")
     if "ddb: continuing\n" not in text:
         raise timeline.bail(
             "RPi5 DDB did not continue after post-fault inspection")

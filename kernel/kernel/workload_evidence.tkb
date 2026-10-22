@@ -199,6 +199,14 @@ struct WorkloadBusyPair {
     // peer_read_pid, the reader died before it registered, and the reap
     // names that instead of leaving the console writer asking forever.
     peer_read_exec_pid: usize;
+    // GitHub issue #881: the pid told to exec /bin/core-read (answer 5).
+    // Each reader image is handed out to one worker lifetime only; init's
+    // later replacements stay busy loops. Before this, every replacement was
+    // told to exec a reader again, the reader exited at once (peer-read is
+    // refused once registered; core-read re-runs its reads), init reaped it,
+    // slept a second and respawned the worker, forever -- on RPi5 PID 1
+    // never reached its no-deadline signal wait.
+    core_read_exec_pid: usize;
     // The two filesystem readers rendezvous after pinning themselves to
     // opposite CPUs. This makes device-lock contention evidence a real
     // overlap rather than a race between when the init workers get scheduled.
@@ -1124,11 +1132,22 @@ private fn workload_busy_record_progress_locked(
                 }
                 return WorkloadBusyProgressResult::Value(0);
             }
+            // GitHub issue #881: once per reader. The same pid may ask again
+            // after a failed exec and is answered again.
+            let asker: usize = kernel_process_current_pid();
             if (tag == workload_busy_pair.peer_exit_tag) {
-                workload_busy_pair.peer_read_exec_pid =
-                    kernel_process_current_pid();
+                if (workload_busy_pair.peer_read_exec_pid != 0 &&
+                    workload_busy_pair.peer_read_exec_pid != asker) {
+                    return WorkloadBusyProgressResult::Value(0);
+                }
+                workload_busy_pair.peer_read_exec_pid = asker;
                 return WorkloadBusyProgressResult::Value(4);
             }
+            if (workload_busy_pair.core_read_exec_pid != 0 &&
+                workload_busy_pair.core_read_exec_pid != asker) {
+                return WorkloadBusyProgressResult::Value(0);
+            }
+            workload_busy_pair.core_read_exec_pid = asker;
             return WorkloadBusyProgressResult::Value(5);
         }
         if (is_pair_worker) {
@@ -1558,9 +1577,10 @@ fn workload_peer_console_progress(first: usize, total: usize) -> usize {
     // reap; a BREAK at its wake found it Running on a third CPU, or taken
     // by an idle CPU but not yet its current. Hold only once init is back
     // in its signal wait, which nothing in the short hold can end.
-    // Bounded: on RPi5 init was still in its post-reap sleep (Deadline)
-    // after 20 seconds, the whole budget that lane gives the hold. After DDB_HOLD_PARK_SECONDS this holds anyway;
-    // DDB's own `wait` and `ps` then show what init was doing.
+    // Bounded: after DDB_HOLD_PARK_SECONDS this holds anyway, and DDB's own
+    // `wait` and `ps` show what init was doing. GitHub issue #881: a worker
+    // respawn loop once kept init in its post-reap sleep for the whole RPi5
+    // lane; the RPi5 driver now fails unless `wait` shows init parked.
     if (kernel_process_pid_parked_on_signal(guard, 1) == false) {
         let now: usize = read_cntpct() as usize;
         if (workload_ddb_hold_park_since == 0) {

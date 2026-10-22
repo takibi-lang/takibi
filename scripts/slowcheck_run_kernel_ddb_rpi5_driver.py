@@ -77,7 +77,8 @@ REPLIES = {
                   b"stack=0x00000000005bc000..0x00000000005c0000\n"
                   b"ddb: bt complete frames=2\n"),
     b"wait": (b"\nddb: wait current=37 state=running reason=none awaited=0\n"
-              b"ddb: wait edges=0 blocked=0 unknown=0 truncated=0\n"),
+              b"ddb: wait pid=1 state=blocked waits-for event=signal\n"
+              b"ddb: wait edges=1 blocked=1 unknown=0 truncated=0\n"),
 }
 # Quiet entries preserve the read-only postmortem before the fault exercise.
 # These extra commands are observed operations, not additional verdicts.
@@ -343,6 +344,12 @@ def main() -> int:
                             b"reason=none awaited=0\n")
         outcome = run_case("a wait listing with no summary", 1, 6.0, False,
                            ["did not render the wait summary"])
+    if outcome is not None:
+        # GitHub issue #881: init still in its post-reap sleep at the BREAK.
+        REPLIES[b"wait"] = intact_wait.replace(b"event=signal",
+                                               b"event=deadline")
+        outcome = run_case("PID 1 held in its post-reap sleep", 1, 6.0,
+                           False, ["PID 1 outside its signal wait"])
     REPLIES[b"wait"] = intact_wait
     if outcome is None:
         return 1
@@ -367,7 +374,8 @@ def main() -> int:
         "workload that never answers fails with the attempt count, a "
         "resume that leaves the console spinning fails, a break with no "
         "held console guard or one without its release witness fails, and "
-        "a wait view missing its header or its summary fails",
+        "a wait view missing its header or its summary, or with PID 1 "
+        "outside its signal wait, fails",
         cases=CASES.ran)
     return 0
 
