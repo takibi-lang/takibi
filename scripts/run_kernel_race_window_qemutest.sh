@@ -33,11 +33,25 @@ LABEL="kernel/qemu race-window $WINDOW"
 WORKLOAD="${KERNEL_QEMU_RACE_WINDOW_WORKLOAD:-suite}"
 CHURN_ROUNDS="${KERNEL_QEMU_RACE_WINDOW_CHURN_ROUNDS:-100}"
 
+# GitHub issue #883: a passing lane may not leave a failure archive, except
+# one it makes on purpose. The reverted kernel must fail, and its runner's
+# archive (kernel-hwtest-qemu-failures, labelled qemu-race-N-reverted, #665)
+# is that failure's evidence, so it is marked expected. The armed kernel is
+# never marked: its archive means a real failure.
+expected_archive() {
+    if [ "$1" = reverted ]; then
+        echo "race-window $WINDOW reverted kernel, meant to fail (#665)"
+    else
+        echo no
+    fi
+}
+
 run_variant() {
     local variant="$1"
     local elf="$REPO_ROOT/kernel/build/qemu/kernel-race-$WINDOW-$variant.elf"
     if [ "$WORKLOAD" = churn ]; then
         env KERNEL_QEMU_SHELL_ELF="$elf" \
+            TAKIBI_ARCHIVE_EXPECTED="$(expected_archive "$variant")" \
             TAKIBI_CONSOLE_EXTRA_GDB="$REPO_ROOT/scripts/stall_probe.gdb" \
             KERNEL_QEMU_SHELL_SERIAL_PORT="${KERNEL_QEMU_SERIAL_PORT:-18668}" \
             TAKIBI_LANE_ARTIFACT_ROOT="$ROOT/$variant" \
@@ -49,6 +63,7 @@ run_variant() {
     # GitHub issue #665: the race-window kernels carry stall probes
     # (kernel/kernel/stall_probe.tkb); a failure capture prints them.
     env KERNEL_QEMU_ELF="$elf" \
+        TAKIBI_ARCHIVE_EXPECTED="$(expected_archive "$variant")" \
         TAKIBI_CONSOLE_EXTRA_GDB="$REPO_ROOT/scripts/stall_probe.gdb" \
         KERNEL_QEMU_LABEL="qemu-race-$WINDOW-$variant" \
         KERNEL_QEMU_HWTEST_ARTIFACT_DIR="$ROOT/$variant" \
@@ -107,6 +122,7 @@ elif ! run_variant armed; then
         grep -E '^FAIL|^\[churn resync\]' "$ROOT/armed.log" | sed 's/^/  /' || true
         # Not a failing exit, so the EXIT trap above does not archive it.
         KERNEL_QEMU_LABEL="race-window $WINDOW armed (recorded)" \
+            TAKIBI_ARCHIVE_EXPECTED="race-window $WINDOW armed churn recorded, not gating (#692)" \
             KERNEL_QEMU_ELF="kernel-race-$WINDOW-armed.elf" \
             bash "$REPO_ROOT/scripts/archive_kernel_failure.sh" "$ROOT" \
             "$REPO_ROOT/_build/kernel-race-window-qemu-failures" \

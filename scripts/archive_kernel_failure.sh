@@ -82,6 +82,11 @@ cp -pr "$artifact_dir"/. "$archive/" 2>/dev/null || true
     fi
     echo "lane: ${KERNEL_QEMU_LABEL:-unknown}"
     echo "kernel: $(basename "${KERNEL_QEMU_ELF:-unknown}")"
+    # GitHub issue #883: which lane run made this archive, and, for one a
+    # passing lane makes on purpose, why. scripts/run_lane.sh refuses a
+    # passing lane that left an archive without an expected: reason.
+    echo "lane-run: ${TAKIBI_LANE_RUN_ID:-none}"
+    echo "expected: ${TAKIBI_ARCHIVE_EXPECTED:-no}"
     if [ -f "$archive/console-state.log" ]; then
         echo "console snapshot: console-state.log"
         cat "$archive/console-state.log"

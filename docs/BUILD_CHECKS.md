@@ -261,6 +261,7 @@ for several rounds it gated `allbuild` so no kernel lane ran at all.
 | `slowcheck_run_kernel_build_locked.sh` | Regression controls for the cross-Make kernel build lock |
 | `slowcheck_run_kernel_ddb_rpi5_driver.py` | PTY controls for console-hold and release evidence, a newline wake before BREAK on CPU 0, and the RPi5 DDB driver's resume retry |
 | `slowcheck_run_lane.sh` | Controls for the lane timing receipts and the summary built from them |
+| `slowcheck_lane_new_archives.sh` | `run_lane.sh` refuses a passing lane that left a failure archive tagged with its run id (`lane_new_archives.py`) unless the archive says why it is expected; the race-window reverted kernel is marked expected and the armed one never (#883) |
 | `slowcheck_run_tlc.py` | Parallel TLC jobs use private standard-module files, preserve JVM exit statuses, and clean temporary directories on success and failure |
 
 ## `buildcheck_*` -- checks of a build product

@@ -32,9 +32,23 @@ timing="$(dirname "$0")/lane_timing.sh"
 started="$(bash "$timing" now)"
 
 export TAKIBI_AWAIT_TIMING_LANE="$lane"
+# GitHub issue #883: names this run in every failure archive made under it
+# (scripts/archive_kernel_failure.sh), so a passing lane that left one is
+# refused below, and a neighbour lane's archive is not blamed on this one.
+TAKIBI_LANE_RUN_ID="$lane:$$:$started"
+export TAKIBI_LANE_RUN_ID
 
 status=0
 "$@" || status=$?
+
+# A passing lane that left an unexpected failure archive is a failing lane
+# (#883), and its timing record says so.
+if [ "$status" -eq 0 ]; then
+    repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+    python3 "$repo_root/scripts/lane_new_archives.py" "$TAKIBI_LANE_RUN_ID" \
+        "$repo_root/_build" "${TAKIBI_LANE_ARTIFACT_ROOT:-$repo_root/_build}" ||
+        status=$?
+fi
 
 # Recorded before the verdict is printed, and for a failure as well as a
 # pass: a lane that fails slowly is the one most worth measuring, and a
