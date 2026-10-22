@@ -61,6 +61,10 @@ llvm-mc-19 --triple=aarch64-none-elf --filetype=obj "$FIXTURE/entry.S" \
     -o "$RUN_DIR/entry.o"
 ld.lld-19 -T "$FIXTURE/link.ld" "$RUN_DIR/entry.o" \
     "$RUN_DIR/fixture.o" -o "$RUN_DIR/fixture.elf"
+# GitHub issue #766: debug_return_abi.gdb breaks on the fixture's probes by
+# name; refuse a fixture that no longer defines them before booting it.
+python3 "$REPO_ROOT/scripts/buildcheck_gdb_helper_names.py" \
+    "$RUN_DIR/fixture.elf" --only debug_return_abi.gdb
 METADATA="${DEBUG_RETURN_ABI_METADATA:-$RUN_DIR/metadata.json}"
 
 . "$REPO_ROOT/scripts/qemu_session_ports.sh"

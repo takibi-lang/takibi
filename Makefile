@@ -1649,6 +1649,7 @@ $(KERNEL_QEMU_BUILD_DIR)/race-%-reverted-main.o: $(KERNEL_QEMU_MAIN_O) scripts/b
 
 $(KERNEL_QEMU_BUILD_DIR)/kernel-race-%.elf: $(KERNEL_QEMU_BUILD_DIR)/race-%-main.o $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_CALLER_FRAME_O) $(KERNEL_QEMU_CACHE_GEOMETRY_O) $(KERNEL_QEMU_LINK_LD)
 	$(LLD) $(KERNEL_LDFLAGS) -T $(KERNEL_QEMU_LINK_LD) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_CALLER_FRAME_O) $(KERNEL_QEMU_CACHE_GEOMETRY_O) $< -o $@
+	python3 scripts/buildcheck_gdb_helper_names.py $@ --only stall_probe.gdb
 
 $(KERNEL_QEMU_NET_WAKE_CONTROL_ELF): $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_CALLER_FRAME_O) $(KERNEL_QEMU_CACHE_GEOMETRY_O) $(KERNEL_QEMU_NET_WAKE_CONTROL_O) $(KERNEL_QEMU_LINK_LD) $(KERNEL_RPI5_LINK_LD)
 	$(LLD) $(KERNEL_LDFLAGS) -T $(KERNEL_QEMU_LINK_LD) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_CALLER_FRAME_O) $(KERNEL_QEMU_CACHE_GEOMETRY_O) $(KERNEL_QEMU_NET_WAKE_CONTROL_O) -o $@
@@ -1733,8 +1734,18 @@ $(KERNEL_QEMU_DEBUG_ELF): $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(K
 	python3 scripts/buildcheck_kernel_asm_invariants.py $@ 1
 	python3 scripts/buildcheck_elf_symbol_alignment.py $@ boot_page_pool_cell 16
 
+# GitHub issue #766: every field, type, global and function the GDB helpers
+# name must still exist in the debug kernel (its DWARF and symbol table);
+# --controls renames one name of each kind in a copy of the helpers and
+# requires the check to fail. Any helper or script edit reruns it.
+KERNEL_GDB_HELPER_NAMES_STAMP := _build/gdb-helper-names.stamp
+$(KERNEL_GDB_HELPER_NAMES_STAMP): $(KERNEL_QEMU_DEBUG_ELF) $(KERNEL_DEBUG_METADATA) $(wildcard scripts/*.gdb) $(wildcard scripts/*.py)
+	python3 scripts/buildcheck_gdb_helper_names.py $(KERNEL_QEMU_DEBUG_ELF) --metadata $(KERNEL_DEBUG_METADATA)
+	python3 scripts/buildcheck_gdb_helper_names.py $(KERNEL_QEMU_DEBUG_ELF) --metadata $(KERNEL_DEBUG_METADATA) --controls
+	touch $@
+
 .PHONY: _kernelbuild-qemu-debug
-_kernelbuild-qemu-debug: kernel-lib-check kernel-verify-exception-frame $(KERNEL_QEMU_DEBUG_ELF) $(KERNEL_DEBUG_METADATA) $(KERNEL_CONSOLE_LAYOUT)
+_kernelbuild-qemu-debug: kernel-lib-check kernel-verify-exception-frame $(KERNEL_QEMU_DEBUG_ELF) $(KERNEL_DEBUG_METADATA) $(KERNEL_CONSOLE_LAYOUT) $(KERNEL_GDB_HELPER_NAMES_STAMP)
 
 kernelbuild-qemu-debug: build
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) _kernelbuild-qemu-debug
