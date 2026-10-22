@@ -1395,7 +1395,14 @@ mask. Each line ends with `owner=`, the CPU that holds the process's kernel
 stack (`none` when no CPU does), `mask=`, its affinity mask (0 is every
 online CPU), and `core0=1` while a syscall the refusal list keeps on core 0
 is pending: a Ready process that no idle CPU starts is explained by one of
-the three. The terminal crash console above intentionally has no `continue`.
+the three. After those comes `cmd="..."`: the first 24 bytes of the command
+line the process record caches for procfs, argv joined by spaces, a byte the
+quoting could misread printed as `?`, and a `+` after the closing quote when
+the line goes on. The kernel log names each exit of a direct child of PID 1
+as `exit: init child pid=N image="/bin/x" code=C withheld=W` (or `signal=S`),
+at most eight lines per second, `withheld=` counting the lines that bound
+dropped since boot. A respawn loop is then one image under rising pids in
+both. The terminal crash console above intentionally has no `continue`.
 
 `stacks` cross-checks each stopped CPU's published process frame against that
 same process snapshot. It reports the CPU, PID, stack range, and scheduler

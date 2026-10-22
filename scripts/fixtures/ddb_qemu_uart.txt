@@ -2,6 +2,7 @@
 init: ash bootstrap
 workload: busy pair migrated across both cpus with stack handoff intact
 workload: peer tty reading the terminal on the secondary cpu
+exit: init child pid=44 image="/bin/peer-read" code=0 withheld=0
 ddb: interrupt-safe UART debugger
 ddb: console lock probe phase=2 release=1 entry-held=yes
 ddb: world-stop complete mask=0x0000000000000002
@@ -40,12 +41,12 @@ ddb: fd=1 kind=2 object=1076151152
 ddb: fd=2 kind=2 object=1076151152
 ddb: fd=3 kind=2 object=1076150832
 ddb: ps count=6 truncated=0
-ddb: ps pid=1 ppid=0 state=3 wait=4 waker=deadline root=1076740192 sp=0x00000000401e7870 pending=none masked=sigint,sigquit,sigterm,sigchld+0x0000000020000a01 owner=none mask=0x0000000000000000 core0=0
-ddb: ps pid=41 ppid=1 state=3 wait=2 waker=child-exit root=1076145600 sp=0x00000000404b7cd0 pending=none masked=none owner=none mask=0x0000000000000000 core0=0
-ddb: ps pid=46 ppid=1 state=2 wait=0 root=1076146480 sp=0x0000000040417cd0 pending=none masked=none owner=0 mask=0x0000000000000001 core0=0
-ddb: ps pid=37 ppid=1 state=2 wait=0 root=1076147360 sp=0x0000000040277cd0 pending=none masked=none owner=1 mask=0x0000000000000002 core0=0
-ddb: ps pid=38 ppid=1 state=1 wait=0 root=1076148240 sp=0x0000000040407cd0 pending=none masked=none owner=none mask=0x0000000000000002 core0=0
-ddb: ps pid=49 ppid=41 state=3 wait=1 waker=uart-rx queued=0 root=1076149120 sp=0x0000000040427cd0 pending=none masked=none owner=none mask=0x0000000000000002 core0=0
+ddb: ps pid=1 ppid=0 state=3 wait=4 waker=deadline root=1076740192 sp=0x00000000401e7870 pending=none masked=sigint,sigquit,sigterm,sigchld+0x0000000020000a01 owner=none mask=0x0000000000000000 core0=0 cmd="init"
+ddb: ps pid=41 ppid=1 state=3 wait=2 waker=child-exit root=1076145600 sp=0x00000000404b7cd0 pending=none masked=none owner=none mask=0x0000000000000000 core0=0 cmd="/bin/sh -i"
+ddb: ps pid=46 ppid=1 state=2 wait=0 root=1076146480 sp=0x0000000040417cd0 pending=none masked=none owner=0 mask=0x0000000000000001 core0=0 cmd="/bin/peer-console"
+ddb: ps pid=37 ppid=1 state=2 wait=0 root=1076147360 sp=0x0000000040277cd0 pending=none masked=none owner=1 mask=0x0000000000000002 core0=0 cmd="/bin/busy-a"
+ddb: ps pid=38 ppid=1 state=1 wait=0 root=1076148240 sp=0x0000000040407cd0 pending=none masked=none owner=none mask=0x0000000000000002 core0=0 cmd="/bin/busy-a"
+ddb: ps pid=49 ppid=41 state=3 wait=1 waker=uart-rx queued=0 root=1076149120 sp=0x0000000040427cd0 pending=none masked=none owner=none mask=0x0000000000000002 core0=0 cmd="/bin/peer-tty"
 ddb: stacks cpus=2 processes=6 truncated=0
 ddb: stack cpu=0 pid=46 stack=0x0000000040414000..0x0000000040418000 owner=0 record=match
 ddb: stack cpu=1 pid=37 stack=0x0000000040274000..0x0000000040278000 owner=1 record=match
@@ -67,8 +68,8 @@ ddb: wait pid=13 state=blocked waits-for unknown
 ddb: wait pid=14 state=blocked waits-for event=uart-tx queued=320 low-water=256
 ddb: wait pid=15 state=blocked waits-for event=net-rx frame-pending=no connection-pending=unknown tick-wake=core1 due=1 rx-cap=no
 ddb: wait edges=8 blocked=9 unknown=2 truncated=1
-ddb: waittest ps pid=10 ppid=0 state=3 wait=1 waker=uart-rx queued=1 root=0 sp=0x0000000000000000 pending=none masked=none owner=none mask=0x0000000000000000 core0=0
-ddb: proc pid=1 ppid=0 state=3 wait=4 waker=deadline root=1076740192 sp=0x00000000401e7870 pending=none masked=sigint,sigquit,sigterm,sigchld+0x0000000020000a01 owner=none mask=0x0000000000000000 core0=0
+ddb: waittest ps pid=10 ppid=0 state=3 wait=1 waker=uart-rx queued=1 root=0 sp=0x0000000000000000 pending=none masked=none owner=none mask=0x0000000000000000 core0=0 cmd="/bin/peer-read a?b -x mo"+
+ddb: proc pid=1 ppid=0 state=3 wait=4 waker=deadline root=1076740192 sp=0x00000000401e7870 pending=none masked=sigint,sigquit,sigterm,sigchld+0x0000000020000a01 owner=none mask=0x0000000000000000 core0=0 cmd="init"
 ddb: bt source=cpu cpu=0 pid=46 stack=0x0000000040414000..0x0000000040418000
 ddb: bt frame=0 pc=0x000000004000ec2c boundary=exception
 ddb: bt frame=1 pc=0x00000000400226e4 fp=0x0000000040417050

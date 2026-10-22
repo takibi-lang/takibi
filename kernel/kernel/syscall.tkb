@@ -3332,11 +3332,77 @@ fn syscall_action_encode(action: SyscallAction) -> (usize, usize) {
     }
 }
 
+// GitHub issue #887: one log line per exit of a direct child of PID 1 -- pid,
+// the image it ran (argv[0] from the command-line cache, at most
+// INIT_CHILD_EXIT_IMAGE_BYTES), and how it ended -- so a respawn loop like
+// #881's shows in the kernel log as the same image under rising pids. The
+// rate is bounded: at most INIT_CHILD_EXIT_LOGS_PER_SECOND lines per second
+// of CNTPCT, and each line carries the running count of the ones withheld.
+// The window words only bound output, so a race between two exiting CPUs
+// costs at most one extra line per CPU, never a lost exit.
+const INIT_CHILD_EXIT_IMAGE_BYTES: usize = 32;
+const INIT_CHILD_EXIT_LOGS_PER_SECOND: usize = 8;
+private let mut init_child_exit_log_window: AtomicWord;
+private let mut init_child_exit_log_count: AtomicWord;
+private let mut init_child_exit_log_withheld: AtomicWord;
+
+private fn kernel_syscall_note_init_child_exit(status: usize) !{unsafe} {
+    let slot: usize = kernel_syscall_process_slot();
+    if (scheduled_process_slot_valid(slot) == false) { return; }
+    let mut image: [u8; INIT_CHILD_EXIT_IMAGE_BYTES];
+    let guard = process_run_lock();
+    let parent: usize = kernel_process_current_parent_pid(guard);
+    let command = scheduled_process_command_line(guard, slot);
+    for index: usize in 0..<INIT_CHILD_EXIT_IMAGE_BYTES {
+        image[index] = command[index];
+    }
+    process_run_unlock(guard);
+    if (parent != 1) { return; }
+    let frequency: usize = read_cntfrq() as usize;
+    let mut second: usize = 0;
+    if (frequency != 0) { second = (read_cntpct() as usize) / frequency; }
+    if (atomic_word_load(&init_child_exit_log_window) != second + 1) {
+        atomic_word_store(&init_child_exit_log_window, second + 1);
+        atomic_word_store(&init_child_exit_log_count, 0);
+    }
+    if (atomic_word_fetch_add(&init_child_exit_log_count, 1) >=
+            INIT_CHILD_EXIT_LOGS_PER_SECOND) {
+        atomic_word_fetch_add(&init_child_exit_log_withheld, 1);
+        return;
+    }
+    kernel_boot_log("exit: init child pid=");
+    uart_put_udec(kernel_process_current_pid());
+    kernel_boot_log(" image=\"");
+    let mut ended: bool = false;
+    for index: usize in 0..<INIT_CHILD_EXIT_IMAGE_BYTES {
+        let byte: u8 = image[index];
+        if (byte == 0) { ended = true; }
+        if (ended == false) {
+            if (byte < 0x20 || byte > 0x7E || byte == 0x22 || byte == 0x5C) {
+                uart_putc(0x3F);
+            } else {
+                uart_putc(byte);
+            }
+        }
+    }
+    kernel_boot_log("\"");
+    if (ended == false) { kernel_boot_log("+"); }
+    if ((status & SYSCALL_STATUS_SIGNALED) != 0) {
+        kernel_boot_log(" signal="); uart_put_udec(status & 0x7F);
+    } else {
+        kernel_boot_log(" code="); uart_put_udec(status & 0xFF);
+    }
+    kernel_boot_log(" withheld=");
+    uart_put_udec(atomic_word_load(&init_child_exit_log_withheld));
+    kernel_boot_log("\n");
+}
+
 // Preserve clone-owned FD/VM teardown before returning through the parent
 // frame. SyscallAction::Exit is the root EL0 process's, PID 1's, whose exit
 // stops the kernel (kernel_syscall_init_exit).
 fn kernel_syscall_exit_current_process(current_authority: ProcessCurrent[current_process, ProcessState::Running], status: usize) -> SyscallAction {
     if (kernel_process_is_child(current_authority)) {
+        kernel_syscall_note_init_child_exit(status);
         // GitHub issue #448 made an exit with nowhere to hand the CPU wait
         // for an interrupt and rerun, because core 0 had nowhere else to
         // go. It has since #592: an exit with no successor idles on any

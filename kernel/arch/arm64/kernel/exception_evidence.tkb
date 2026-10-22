@@ -2062,6 +2062,36 @@ private fn ddb_render_waker_detail(
     }
 }
 
+private fn ddb_command_byte(record: ProcessDdbRecord, index: usize) -> u8 {
+    let mut word: usize = record.command2;
+    if (index < 8) { word = record.command0; }
+    else if (index < 16) { word = record.command1; }
+    return ((word >> (8 * (index % 8))) & 0xFF) as u8;
+}
+
+// GitHub issue #887: the start of the cached command line, argv joined by
+// spaces, quoted so a reader can tell where it ends. A byte a terminal or the
+// quoting could misread prints as '?', the final NUL is dropped, and a
+// trailing '+' says the line went on past DDB_COMMAND_BYTES.
+private fn ddb_render_command(record: ProcessDdbRecord) !{unsafe} {
+    ddb_puts(" cmd=\"");
+    for index: usize in 0..<DDB_COMMAND_BYTES {
+        if (index < record.command_length) {
+            let byte: u8 = ddb_command_byte(record, index);
+            if (byte == 0) {
+                if (index + 1 < record.command_length) { uart_debug_putc(0x20); }
+            } else if (byte < 0x20 || byte > 0x7E || byte == 0x22 ||
+                       byte == 0x5C) {
+                uart_debug_putc(0x3F);
+            } else {
+                uart_debug_putc(byte);
+            }
+        }
+    }
+    ddb_puts("\"");
+    if (record.command_length > DDB_COMMAND_BYTES) { ddb_puts("+"); }
+}
+
 private fn ddb_render_process(
         record: ProcessDdbRecord, uart_rx_queued: usize,
         uart_tx_queued: usize, uart_tx_low_water: usize,
@@ -2091,6 +2121,7 @@ private fn ddb_render_process(
     }
     ddb_puts(" mask="); ddb_put_hex(record.affinity_mask);
     if (record.core0_for_call) { ddb_puts(" core0=1"); } else { ddb_puts(" core0=0"); }
+    ddb_render_command(record);
     ddb_puts("\n");
 }
 
@@ -2534,6 +2565,10 @@ private fn ddb_wait_test_record(index: {0..<DDB_PROCESS_RECORDS as usize},
     ddb_wait_test_records[index].core0_for_call = false;
     ddb_wait_test_records[index].tick_wake_core = 0;
     ddb_wait_test_records[index].tick_wake_due = 0;
+    ddb_wait_test_records[index].command0 = 0;
+    ddb_wait_test_records[index].command1 = 0;
+    ddb_wait_test_records[index].command2 = 0;
+    ddb_wait_test_records[index].command_length = 0;
 }
 
 private fn ddb_render_wait_test() !{unsafe} {
@@ -2567,6 +2602,13 @@ private fn ddb_render_wait_test() !{unsafe} {
     ddb_wait_test_records[9].tick_wake_due = 1;
     ddb_render_wait_from(ddb_wait_test_records as []ProcessDdbRecord,
                          10, 1, 3, 2, 3, 1, 320, 256, 0, 2, 0);
+    // #887: a command line longer than the copied prefix, holding an
+    // argument separator and a byte the quoting must not pass through.
+    // "/bin/peer-read\0a\"b\0-x\0mo", little-endian eight to a word.
+    ddb_wait_test_records[4].command0 = 0x6565702F6E69622F;
+    ddb_wait_test_records[4].command1 = 0x6100646165722D72;
+    ddb_wait_test_records[4].command2 = 0x6F6D00782D006222;
+    ddb_wait_test_records[4].command_length = 40;
     ddb_puts("ddb: waittest ps");
     ddb_render_process(ddb_wait_test_records[4], 1, 320, 256, 0, 2);
 }

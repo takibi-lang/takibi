@@ -30,8 +30,8 @@ ddb: vm-global asid-width=16 asid-generation=2 asid-next=3 asid-rollovers=1 page
 ddb: page-runs calls=41 visits=57 ticks=118000 max-ticks=9100 freq=62500000
 ddb: fds pid=0 slots=16
 ddb: ps count=2 truncated=0
-ddb: ps pid=0 ppid=0 state=2 wait=0 root=0 sp=0x0000000000000000 pending=none masked=none owner=0 mask=0x0000000000000001 core0=0
-ddb: ps pid=1 ppid=0 state=5 wait=0 root=1076740192 sp=0x0000000040348000 pending=none masked=none owner=none mask=0x0000000000000000 core0=0
+ddb: ps pid=0 ppid=0 state=2 wait=0 root=0 sp=0x0000000000000000 pending=none masked=none owner=0 mask=0x0000000000000001 core0=0 cmd=""
+ddb: ps pid=1 ppid=0 state=5 wait=0 root=1076740192 sp=0x0000000040348000 pending=none masked=none owner=none mask=0x0000000000000000 core0=0 cmd=""
 ddb: stacks cpus=2 processes=2 truncated=0
 ddb: stack cpu=0 status=idle
 ddb: stack cpu=1 status=idle
@@ -50,8 +50,8 @@ ddb: wait pid=13 state=blocked waits-for unknown
 ddb: wait pid=14 state=blocked waits-for event=uart-tx queued=320 low-water=256
 ddb: wait pid=15 state=blocked waits-for event=net-rx frame-pending=no connection-pending=unknown tick-wake=core1 due=1 rx-cap=no
 ddb: wait edges=8 blocked=9 unknown=2 truncated=1
-ddb: waittest ps pid=10 ppid=0 state=3 wait=1 waker=uart-rx queued=1 root=0 sp=0x0000000000000000 pending=none masked=none owner=none mask=0x0000000000000000 core0=0
-ddb: proc pid=1 ppid=0 state=5 wait=0 root=1076740192 sp=0x0000000040348000 pending=none masked=none owner=none mask=0x0000000000000000 core0=0
+ddb: waittest ps pid=10 ppid=0 state=3 wait=1 waker=uart-rx queued=1 root=0 sp=0x0000000000000000 pending=none masked=none owner=none mask=0x0000000000000000 core0=0 cmd="/bin/peer-read a?b -x mo"+
+ddb: proc pid=1 ppid=0 state=5 wait=0 root=1076740192 sp=0x0000000040348000 pending=none masked=none owner=none mask=0x0000000000000000 core0=0 cmd=""
 ddb: bt source=cpu cpu=0 pid=0 stack=0x00000000401e4000..0x00000000401e8000
 ddb: bt frame=0 pc=0x000000004008c050 boundary=assembly-bridge
 ddb: bt frame=1 pc=0x00000000400799a0 fp=0x00000000401e7be0

@@ -1366,6 +1366,7 @@ struct ProcessDiagnosticSnapshot {
 }
 
 const DDB_PROCESS_RECORDS: usize = 32;
+const DDB_COMMAND_BYTES: usize = 24;
 const DDB_PROCESS_PROBE_BUDGET: usize = 64;
 
 struct ProcessDdbRecord {
@@ -1404,11 +1405,34 @@ struct ProcessDdbRecord {
     // distinguish from a wait that is retried and keeps failing.
     tick_wake_core: usize;
     tick_wake_due: usize;
+    // GitHub issue #887: the first DDB_COMMAND_BYTES of the command line the
+    // record already caches for ps/procfs (argv joined by NUL), and its full
+    // length, so a fixed-size ps row names the image without a heap or a
+    // pointer into the record. A respawn loop (#881) shows as the same
+    // command under new pids.
+    // Bytes 0..<24, little-endian, eight to a word: scalar fields keep the
+    // record a plain value copy (an array field would need its own
+    // initialization proof on every path).
+    command0: usize;
+    command1: usize;
+    command2: usize;
+    command_length: usize;
 }
 
 struct ProcessDdbCopyResult {
     count: usize;
     truncated: bool;
+}
+
+// GitHub issue #887: eight command-line bytes from `offset`, little-endian.
+private fn ddb_command_word(record: borrow &mut ProcessRecord,
+                            offset: {0..<505 as usize}) -> usize {
+    let mut word: usize = 0;
+    for index: usize in 0..<8 {
+        word = word | ((record.command_line[offset + index] as usize)
+                       << (8 * index));
+    }
+    return word;
 }
 
 // `borrow &mut ProcessRecord` retains no record authority beyond the call. The caller reads
@@ -1474,6 +1498,11 @@ private fn scheduled_process_ddb_record(
         result.tick_wake_due =
             atomic_word_load(&kernel_process_tick_wake_due[core]);
     }
+    result.command_length =
+        record.command_line_length & PROCESS_COMMAND_LENGTH_MASK;
+    result.command0 = ddb_command_word(record, 0);
+    result.command1 = ddb_command_word(record, 8);
+    result.command2 = ddb_command_word(record, 16);
     return result;
 }
 
