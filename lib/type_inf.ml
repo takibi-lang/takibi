@@ -2660,6 +2660,32 @@ let is_raw_pointer_ty t =
   | TPtr _ | TAlignedPtr _ -> true
   | _ -> false
 
+(* GitHub issue #884: the comparison operators are defined only on scalar
+   values (integers, bool, enums, pointers and references). Code generation
+   lowers every comparison to one icmp, so an aggregate operand used to
+   reach LLVM verification as an internal error (struct, variant), or to
+   compare two stack addresses and fold to false (array). The match lists
+   every constructor without a wildcard, so a new type constructor must
+   decide here whether it is comparable. Returns the name of the kind that
+   has no comparison, or None. An enum is a TStruct by name but lowers to
+   its underlying integer, so [is_enum] keeps it comparable. *)
+let rec non_comparable_kind ~is_enum t =
+  match repr t with
+  | TBool | TI8 | TI16 | TI32 | TI64 | TU8 | TU16 | TU32 | TU64
+  | TU16Be | TU32Be | TIsize | TUsize
+  | TPtr _ | TAlignedPtr _ | TRef _ | TRefMut _ | TFun _ | TVar _ -> None
+  | TRefinedInt (_, _, t) | TMultiple (_, t) | TSingleton (t, _) | TIo t ->
+      non_comparable_kind ~is_enum t
+  | TStruct name when is_enum name -> None
+  | TStruct _ | TIndexedStruct _ -> Some "struct"
+  | TVariant _ -> Some "variant"
+  | TArray _ -> Some "array"
+  | TSlice _ -> Some "slice"
+  | TTuple _ -> Some "tuple"
+  | TExists _ -> Some "existential package"
+  | TView _ -> Some "view"
+  | TVoid -> Some "void"
+
 let null_pointer_advice =
   "use a closed variant whose case carries &T, or return a sentinel object \
    by reference (GitHub issue #659)"
@@ -3462,6 +3488,14 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                      that safe code cannot write: %s" null_pointer_advice))
             | _ -> ());
            unify_at e.loc (canon_ty t1) (canon_ty t2);
+           (match non_comparable_kind
+                    ~is_enum:(fun n -> StringMap.mem n eenv) t1 with
+            | Some kind ->
+                raise (TypeError (e.loc, Printf.sprintf
+                  "comparison operators are not defined on %s values (type %s); \
+                   compare a field or call an equality function \
+                   (GitHub issue #884)" kind (to_string t1)))
+            | None -> ());
            TBool
        (* Range propagation: n % m where m is a positive constant -> {0..<m}.
           Soundness condition: propagate only when n is guaranteed non-negative.

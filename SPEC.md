@@ -410,7 +410,10 @@ parameter value, or top-level declaration name.
 ## Expressions and Operators
 
 - Arithmetic: `+` `-` `*` `/` `%`. Comparison: `<` `>` `<=` `>=` `==`
-  `!=`. Logical: `||`, `&&` -- both operands and the result are `bool`
+  `!=`, defined on scalar operands only: integers (wire-endian ones take
+  only `==`/`!=`), `bool`, enums, and pointers. Comparing a struct,
+  variant, slice, tuple, or other aggregate is a compile error; compare a
+  field or call an equality function (GitHub issue #884). Logical: `||`, `&&` -- both operands and the result are `bool`
   (see the `cond` rule under "Statements" above).
   Bitwise: `~` (unary NOT), `>>` (right shift -- arithmetic/sign-extending
   for signed types, logical/zero-extending for unsigned), `<<`, `&`, `|`,

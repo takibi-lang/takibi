@@ -27905,7 +27905,62 @@ let text_search_tests = [
       (names "(region__u8) region__ region__Foo_region__Bar region__x"));
 ]
 
+(* GitHub issue #884: every comparison operator over every operand kind,
+   through both stages. A kind the checker accepts must also survive code
+   generation and the LLVM verifier (expect_ok); a kind without a lowering
+   must be a positioned type error, never an internal compiler error. A new
+   kind belongs in one of the two tables, and Type_inf.non_comparable_kind
+   lists every type constructor without a wildcard. *)
+let comparison_kind_tests =
+  let ops = ["=="; "!="; "<"; "<="; ">"; ">="] in
+  let decls =
+    "struct S { w: usize; }
+     enum E { A; B; }
+     variant V { Va; Vb(u32); }
+     variant U { Ua; Ub; }" in
+  (* name, parameter type, operators that exist on it *)
+  let accepted = [
+    "integer", "u32", ops;
+    "usize", "usize", ops;
+    "bool", "bool", ops;
+    "enum", "E", ops;
+    "refined integer", "{0..<8 as u32}", ops;
+    "raw pointer", "*u32", ops;
+    "wire-endian integer", "u16be", ["=="; "!="];
+  ] in
+  let rejected = [
+    "struct", "S";
+    "variant with payload", "V";
+    "payload-free variant", "U";
+    "slice", "[]u8";
+  ] in
+  let case expect kind ty op =
+    Alcotest.test_case
+      (Printf.sprintf "%s %s %s (issue #884)" kind op kind) `Quick
+      (expect (Printf.sprintf
+         "%s\nfn f(a: %s, b: %s) -> bool { return a %s b; }" decls ty ty op))
+  in
+  List.concat_map (fun (kind, ty, kops) ->
+    List.map (case expect_ok kind ty) kops) accepted
+  @ List.concat_map (fun (kind, ty) ->
+    List.map (case (expect_type_error "comparison operators are not defined")
+                kind ty) ops) rejected
+  @ [
+    Alcotest.test_case "a struct compared with the literal 0 is a type error, not an ICE (issue #884)" `Quick
+      (expect_type_error_at 2 33 "not defined on struct values"
+         "struct Slot { word: usize; }
+fn pick(s: Slot) -> usize { if (s == 0) { return 1; } return s.word; }");
+    Alcotest.test_case "a tuple comparison is a type error (issue #884)" `Quick
+      (expect_type_error "not defined on tuple values"
+         "fn q(a: u32) -> bool { let p = (a, a); let r = (a, a); return p == r; }");
+    Alcotest.test_case "comparing a struct's field stays accepted (issue #884)" `Quick
+      (expect_ok
+         "struct Slot { word: usize; }
+          fn same(s: Slot, t: Slot) -> bool { return s.word == t.word; }");
+  ]
+
 let named_groups_unisolated = [
+  "comparison-kinds", comparison_kind_tests;
   "readonly-literals", readonly_literal_tests;
   "private-default-construction", private_default_construction_tests;
   "cpu-authority-initialization", cpu_authority_initialization_tests;
