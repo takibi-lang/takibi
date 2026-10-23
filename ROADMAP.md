@@ -68,7 +68,7 @@ B): #819 (AtomicWord acq_rel cells), #920 (DDB world stop reaching a core
 spinning with IRQs masked: pseudo-NMI/FIQ stop, cf. #641; the hung-core
 DDB check is expected-fail until then), #932 (one timer-tick entry
 for every core, after #920), #933 (reboot on any core, after #920), #680 (region_pool handle validation without the lock), #812
-(contiguous page run search), #748 (page allocator metadata lending), #807
+(contiguous page run search), #807
 (product of two bounded variables), #798 (one width check for s[off + k]),
 #799 (sizeof proved at type-check time), #900 (page_allocator_total_count's
 IRQ-masked span on RPi5).
@@ -286,9 +286,8 @@ usb_xhci_bus.tkb. Only the DCBAA stays legacy (D3).
 5. **Time measurement, then the optimizations waiting on it** (maintainer,
    2026-10-08: space and time are both kept): #502; then #520
    (TCP throughput), with #741 (locate the measured RPi5 HTTP SYN
-   retransmission tails), #790 (size review of #720/#740), #748 (allocator
-   time, 2.75x slower since the per-page places; moved from A), then #680,
-   #681, #682 (region_pool lock-free validation, false sharing, pinless
+   retransmission tails), #790 (size review of #720/#740), then #680,
+   #682 (region_pool lock-free validation, false sharing, pinless
    single-user pools), #711, #718, #386.
 6. **Research applied to a real example, moved from A** (evaluated
    2026-09-29; reasoning on #13): indexed views generated from a TLA+
