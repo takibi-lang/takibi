@@ -107,6 +107,9 @@ el0_sync_body:
     mrs     x1, far_el1
     bl      process_image_handle_data_abort
     cbz     x0, .Lsync_fail
+    /* GitHub issue #920: every eret to EL0 resets the GIC priority mask to
+     * unmasked; DAIF.I has been set since the exception entry. */
+    bl      irq_mask_reset_el0
     EXC_CONTEXT_RESTORE
     add     sp, sp, #EXC_CONTEXT_SIZE
     eret

@@ -208,6 +208,10 @@ EXEMPT = {
         "per-CPU rows are indexed below KERNEL_MAX_CORES; each is written "
         "only by its own CPU's IRQ dispatch and read by DDB under a world "
         "stop or by the boot fixture through one acquire load",
+    "arch/arm64/boot/cpu.tkb":
+        "GitHub issue #920: the per-CPU shadow of the GIC priority mask and "
+        "its ready flag; each slot is written only by its own CPU, and the "
+        "stop handler that can interrupt the writer writes neither",
     "kernel/uart_irq_affinity.tkb":
         "GitHub issue #830: the serial-service word and the per-CPU counts "
         "are AtomicWords any core may update",

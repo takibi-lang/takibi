@@ -4727,6 +4727,9 @@ fn kernel_process_stack_switch_complete(frame_sp: usize) {
     kernel_signal_return_deliver(frame);
     // Back to EL0: the kernel is doing nothing on this CPU's behalf.
     kernel_activity_set(KernelActivity::None);
+    // GitHub issue #920: and EL0 runs with the GIC priority mask unmasked,
+    // whatever the kernel path that chose this frame left in it.
+    irq_mask_reset_el0();
 }
 
 // Called after kernel_idle_exit_enter has moved SP_EL1 onto this CPU's

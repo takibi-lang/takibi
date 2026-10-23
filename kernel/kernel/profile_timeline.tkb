@@ -76,8 +76,7 @@ private fn profile_timeline_note(kind: ProfileTimelineKind, pid: usize,
     // Ordinary syscall and scheduler paths can be interrupted by the IRQ
     // hooks below. Reserve and publish one local slot with IRQs masked so an
     // interrupt cannot overwrite a half-filled event.
-    let irq_was_masked: usize = (mrs_daif() >> 7) & 1;
-    disable_irq();
+    let irq_was_masked: usize = irq_save();
     // Test activation inside the same masked region as publication. A stop
     // SGI between an earlier test and this mask could close the interval,
     // then resume this writer into an already reported buffer.

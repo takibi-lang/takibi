@@ -6,8 +6,10 @@
 
 io struct GicV2Distributor {
     ctlr: u32 at 0x000;
+    typer: u32 at 0x004;
     isenabler: [u32; 32] at 0x100;
     icpendr: [u32; 32] at 0x280;
+    ipriorityr: [u8; 1024] at 0x400;
     itargetsr: [u8; 1024] at 0x800;
     icfgr: [u32; 64] at 0xC00;
     sgir: u32 at 0xF00;
@@ -16,6 +18,7 @@ io struct GicV2Distributor {
 io struct GicV2CpuInterface {
     ctlr: u32 at 0x00;
     pmr: u32 at 0x04;
+    bpr: u32 at 0x08;
     iar: u32 at 0x0C;
     eoir: u32 at 0x10;
 }
@@ -57,10 +60,60 @@ fn platform_gic_sgi_send(targets: u32, sgi: u32) !{unsafe} {
     gicd.sgir = (targets << 16) | (sgi & 0xF);
 }
 
+// GitHub issue #920: the priority-mask pseudo-NMI. Two levels: the
+// world-stop SGI at GIC_PRIORITY_NMI, every other source at
+// GIC_PRIORITY_IRQ. The kernel masks ordinary interrupts by raising GICC_PMR
+// to GIC_PMR_MASKED, which still admits the stop, so a stop reaches a core
+// whose ordinary IRQs are masked -- including one hung inside a handler
+// (kernel/arch/arm64/boot/cpu.tkb). A lower number is a higher priority, and
+// the GIC signals an interrupt only when its priority is below PMR.
+//
+// Every source this kernel sends or enables uses these values through the
+// two functions below; a source left at its reset priority (0 on QEMU, the
+// highest) would pass the mask. On the RPi5, whose firmware puts every
+// interrupt in Group 1 behind the GIC-400's security extensions, a
+// Non-secure write of v stores (v >> 1) | 0x80, which keeps the order:
+// 0x80 -> 0xC0, 0xA0 -> 0xD0, 0xF0 -> 0xF8, all on GIC-400's 32 levels.
+// GICC_BPR is written 0 (each implementation clamps it to its minimum) so
+// the two levels are distinct preemption groups and the stop preempts a
+// running ordinary handler.
+const GIC_WORLD_STOP_SGI: u32 = 1;
+const GIC_PRIORITY_NMI: u8 = 0x80;
+const GIC_PRIORITY_IRQ: u8 = 0xA0;
+const GIC_PMR_MASKED: u32 = 0xA0;
+const GIC_PMR_UNMASKED: u32 = 0xF0;
+
+// The priority-mask backend of the IRQ mask (kernel/arch/arm64/boot/cpu.tkb).
+// GICv2's mask is this banked MMIO register; a GICv3 backend would write
+// ICC_PMR_EL1 here instead, and nothing above this function would change.
+fn irq_priority_mask_write(masked: bool) {
+    if (masked) {
+        gicc.pmr = GIC_PMR_MASKED;
+    } else {
+        gicc.pmr = GIC_PMR_UNMASKED;
+    }
+}
+
+// The distributor's shared sources, SPIs 32 and up, as many as GICD_TYPER
+// says it implements. Core 0, once, from its platform_irq_init.
+fn gic_spi_priorities_init() {
+    let lines: usize = (((gicd.typer & 0x1F) as usize) + 1) * 32;
+    for intid: usize in 32..<1020 {
+        if (intid < lines) { gicd.ipriorityr[intid] = GIC_PRIORITY_IRQ; }
+    }
+}
+
 // GitHub issue #447: the CPU interface is BANKED PER CORE -- GICC_PMR and
-// GICC_CTLR -- so every core runs this for itself.
+// GICC_CTLR -- so every core runs this for itself. So are the priorities of
+// SGIs and PPIs (INTIDs 0..31), which is where the stop's own level is set
+// (#920). PMR starts unmasked; DAIF.I still masks until enable_irq.
 fn platform_irq_cpu_interface_init() {
-    gicc.pmr = 0xFF;
+    for intid: usize in 0..<32 {
+        gicd.ipriorityr[intid] = GIC_PRIORITY_IRQ;
+    }
+    gicd.ipriorityr[GIC_WORLD_STOP_SGI as usize] = GIC_PRIORITY_NMI;
+    gicc.bpr = 0;
+    irq_mask_cpu_interface_ready();
     gicc.ctlr = gicc.ctlr | 1;
 }
 

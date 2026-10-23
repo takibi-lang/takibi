@@ -382,7 +382,14 @@ def check_mutex_masks_before_taking(insns):
         if take_at is None and ("<spin_lock>" in text or "<spin_trylock>" in text):
             take_at = addr
     saver = [text for _, text, fn in insns if fn == "mutex_irq_save"]
-    if saver and not any("<disable_irq>" in x or "DAIFSet" in x for x in saver):
+    # GitHub issue #920: the save is irq_save, which masks (disable_irq,
+    # the GIC priority mask) only when IRQs were not already masked. It
+    # counts only if it does call disable_irq.
+    irq_save = [text for _, text, fn in insns if fn == "irq_save"]
+    irq_save_masks = any("<disable_irq>" in x for x in irq_save)
+    if saver and not any("<disable_irq>" in x or "DAIFSet" in x
+                         or ("<irq_save>" in x and irq_save_masks)
+                         for x in saver):
         failures.append(
             "mutex_irq_save does not mask: mutex_acquire calls it where the "
             "interrupt mask is supposed to happen, so the ordering check "

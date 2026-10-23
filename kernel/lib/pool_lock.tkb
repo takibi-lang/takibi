@@ -4,10 +4,13 @@
 // Current limitations (2026-08-27). Keep this list current as call sites
 // change; a limitation that goes stale here is worse than none, since it
 // invites relying on a guarantee that quietly stopped holding.
-// - The mask is DAIF.I only. FIQ, SError and debug exceptions are not
-//   masked, matching enable_irq/disable_irq's own scope. A handler at one
-//   of those levels that takes a pool lock deadlocks against interrupted
-//   code holding it, and nothing here can tell.
+// - The mask is the GIC priority mask (GitHub issue #920; DAIF.I before a
+//   core's GIC interface is up), matching enable_irq/disable_irq's own
+//   scope. The world-stop SGI is deliberately above it, and FIQ, SError and
+//   debug exceptions are not masked. A handler at one of those levels that
+//   takes a pool lock deadlocks against interrupted code holding it; for the
+//   stop's handler the compiler refuses it (an `nmi` root takes no lock),
+//   for the others nothing here can tell.
 // - The spin is unbounded and unfair. A core that never gets the word is
 //   indistinguishable from a core waiting on one that is making progress,
 //   so a lost release hangs rather than reporting. See
@@ -46,9 +49,6 @@
 use "kernel/arch/arm64/boot/cpu.tkb";
 use "kernel/lib/mutex.tkb";
 
-// Bit 7 of DAIF is the I (IRQ) mask.
-const DAIF_IRQ_BIT: usize = 7;
-
 // GitHub issue #451: the interrupt-mask half of every Mutex in this
 // kernel, kept here rather than in kernel/lib/mutex.tkb so that the Mutex
 // itself stays host-compilable -- linux_user substitutes this file and
@@ -60,8 +60,9 @@ const DAIF_IRQ_BIT: usize = 7;
 // what makes the pair correct inside an interrupt handler and correct when
 // two nest -- see this file's header.
 fn mutex_irq_save() -> usize {
-    let flags: usize = (mrs_daif() >> DAIF_IRQ_BIT) & 1;
-    disable_irq();
+    // GitHub issue #920: masked by either DAIF.I or the GIC priority mask
+    // (kernel/arch/arm64/boot/cpu.tkb), and masks only if neither did.
+    let flags: usize = irq_save();
     if (flags == 0) { irqsoff_open(); }
     return flags;
 }

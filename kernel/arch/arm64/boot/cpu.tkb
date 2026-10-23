@@ -10,10 +10,146 @@
 // (IMSC=0) until kernel/platform/rpi5/init.tkb's later irq_uart_rx_unmask() call,
 // so no UART interrupt can actually arrive before then even though
 // DAIF.I is already clear.
+//
+// GitHub issue #920: THE IRQ MASK IS THE GIC PRIORITY MASK, not DAIF.I. The
+// world-stop SGI runs above it (kernel/arch/arm64/kernel/gicv2.tkb), so DDB
+// stops a core whose ordinary IRQs are masked -- a pseudo-NMI, the
+// arrangement Linux uses on arm64 without NMI hardware.
+//
+// - disable_irq raises the priority mask; ordinary sources are held at the
+//   GIC, the stop is not. DAIF.I is left as it is.
+// - enable_irq lowers it and clears DAIF.I, so "IRQs on" means what it
+//   always meant wherever it is called.
+// - DAIF.I is still set by the hardware on every exception entry and by the
+//   exit and stack-switch sequences, where it masks everything, the stop
+//   included, for a few instructions. An ordinary IRQ handler hands its mask
+//   to the priority mask at once (irq_nest_open), so a handler that hangs
+//   can still be stopped; the stop's own handler keeps DAIF.I and is an
+//   `nmi` root, which the compiler holds to taking no lock.
+// - Every eret to EL0 resets the priority mask to unmasked
+//   (irq_mask_reset_el0), as does the idle loop's enable_irq, which is where
+//   every core starts and every thread first runs from.
+//
+// The mask is per core and so is its shadow below, which saves the MMIO
+// read a save would otherwise make. The rule that keeps the two equal is
+// that the shadow is written BEFORE the register, in both directions:
+//   masking -- an interrupt taken between the two finds the shadow masked,
+//     and its handler restores masked on the way out; the GIC answers its
+//     IAR with the spurious 1023 if the mask got there first;
+//   unmasking -- nothing ordinary can arrive until the register is written,
+//     by which time the shadow already says unmasked.
+// The stop's handler writes neither.
+//
+// Current limitations (2026-10-23). Keep this list current as call sites
+// change; a stale limitation is worse than none.
+// - THE BACKEND IS GICv2's GICC_PMR, one MMIO store per mask change
+//   (irq_priority_mask_write). A GICv3 backend writes ICC_PMR_EL1 there.
+// - BEFORE A CORE'S GIC CPU INTERFACE IS UP the mask is DAIF.I alone:
+//   irq_mask_cpu_interface_ready, called from platform_irq_cpu_interface_init,
+//   is what switches this core over. Until then disable_irq masks DAIF.I and
+//   touches no GIC register, which is what boot code before the device map
+//   needs.
+use "kernel/lib/execution_model.tkb";
+use "kernel/arch/arm64/kernel/gicv2.tkb";
+
+// Per core: 1 when ordinary IRQs are masked at the GIC (the shadow of
+// GICC_PMR), and 1 once the core's CPU interface takes the mask. Each slot
+// is written only by its own core.
+private let mut irq_pmr_masked: [usize; KERNEL_MAX_CORES];
+private let mut irq_pmr_ready: [usize; KERNEL_MAX_CORES];
+
+// This core's GIC CPU interface is configured: from here the mask is the
+// priority mask, starting unmasked. DAIF.I is unchanged.
+fn irq_mask_cpu_interface_ready() {
+    let raw: usize = cpu_id();
+    if (raw >= KERNEL_MAX_CORES) { return; }
+    let core: {0..<KERNEL_MAX_CORES as usize} = raw;
+    irq_pmr_masked[core] = 0;
+    irq_priority_mask_write(false);
+    irq_pmr_ready[core] = 1;
+}
+
 fn enable_irq() {
+    let raw: usize = cpu_id();
+    if (raw < KERNEL_MAX_CORES) {
+        let core: {0..<KERNEL_MAX_CORES as usize} = raw;
+        if (irq_pmr_ready[core] != 0) {
+            irq_pmr_masked[core] = 0;
+            irq_priority_mask_write(false);
+        }
+    }
     msr_daifclr_irq();
 }
 
-fn disable_irq() {
+fn disable_irq() !{masks_irq} {
+    let raw: usize = cpu_id();
+    if (raw < KERNEL_MAX_CORES) {
+        let core: {0..<KERNEL_MAX_CORES as usize} = raw;
+        if (irq_pmr_ready[core] != 0) {
+            irq_pmr_masked[core] = 1;
+            irq_priority_mask_write(true);
+            return;
+        }
+    }
     msr_daifset_irq();
+}
+
+// 1 if ordinary IRQs are masked on this core by either mask, 0 if they can
+// be taken. What a save records: DAIF.I is set inside the stop's handler and
+// on the way into and out of every exception, the priority mask everywhere
+// else.
+fn irq_mask_state() -> usize {
+    let daif_masked: usize = (mrs_daif() >> 7) & 1;
+    let raw: usize = cpu_id();
+    if (raw >= KERNEL_MAX_CORES) { return daif_masked; }
+    let core: {0..<KERNEL_MAX_CORES as usize} = raw;
+    return daif_masked | irq_pmr_masked[core];
+}
+
+// The local_irq_save half: masks only when IRQs were not already masked, and
+// returns what it found for mutex_irq_restore. Masking again when DAIF.I is
+// what masks -- an exception path -- would raise the priority mask with no
+// restore to lower it.
+fn irq_save() -> usize {
+    let flags: usize = irq_mask_state();
+    if (flags == 0) { disable_irq(); }
+    return flags;
+}
+
+// An ordinary IRQ handler, right after its IAR read: mask at the GIC, then
+// clear DAIF.I, so the stop can nest into this handler if it never returns.
+// The GIC's running priority already holds every other source while this
+// one is active; the mask is for the time after the handler's own EOI.
+// Returns the mask this handler interrupted, for irq_nest_close.
+fn irq_nest_open() -> usize !{masks_irq} {
+    let raw: usize = cpu_id();
+    if (raw >= KERNEL_MAX_CORES) { return 1; }
+    let core: {0..<KERNEL_MAX_CORES as usize} = raw;
+    let interrupted: usize = irq_pmr_masked[core];
+    irq_pmr_masked[core] = 1;
+    irq_priority_mask_write(true);
+    msr_daifclr_irq();
+    return interrupted;
+}
+
+// The same handler, before it returns: DAIF.I first, so nothing nests into
+// the exit path, then the mask it interrupted.
+fn irq_nest_close(interrupted: usize) !{restores_saved_irq} {
+    msr_daifset_irq();
+    let raw: usize = cpu_id();
+    if (raw >= KERNEL_MAX_CORES) { return; }
+    let core: {0..<KERNEL_MAX_CORES as usize} = raw;
+    irq_pmr_masked[core] = interrupted;
+    irq_priority_mask_write(interrupted != 0);
+}
+
+// Every return to EL0, with DAIF.I set: EL0 runs unmasked, whatever the
+// kernel path before it left in the priority mask.
+fn irq_mask_reset_el0() {
+    let raw: usize = cpu_id();
+    if (raw >= KERNEL_MAX_CORES) { return; }
+    let core: {0..<KERNEL_MAX_CORES as usize} = raw;
+    if (irq_pmr_ready[core] == 0) { return; }
+    irq_pmr_masked[core] = 0;
+    irq_priority_mask_write(false);
 }
