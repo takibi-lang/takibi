@@ -165,8 +165,7 @@ QEMU lane budget), #916 (compiler GC tuning), #921 and #922
 (variant reuse, domain-parallel codegen; both wait on the land-span
 measurement after #917's front-end fixes), #927 (QEMU lanes queueing for the vCPU lease), #893 (redundant csel in variant match), #888 (array field initialized in a
 loop), #949 (terminating signals and unwritable handler frames
-reaching a spinning process), #950 (wait4 EINVAL seen in #628's negative
-control), #652 (lifecycle trace for signals and wait4), #698 (ext2
+reaching a spinning process), #652 (lifecycle trace for signals and wait4), #698 (ext2
 exhaustion as ENOSPC), #846 (TCP retransmission with no reader), #793
 (proofs with an unresolved type variable), #769 (--uses-of NAME), #774
 (IRQ arms acknowledge their source), #762 (no vector/unaligned stores in
@@ -268,8 +267,7 @@ usb_xhci_bus.tkb. Only the DCBAA stays legacy (D3).
    acquires_lock_<rank>_<name>, after the syntax review).
    **Signals, moved from A (2026-10-16):** #949 (a terminating signal,
    or an unwritable handler frame, reaching a process that makes no
-   syscall; #628 made caught signals run at every return to EL0), #950
-   (an intermittent wait4 EINVAL #628's control build met), with #432
+   syscall; #628 made caught signals run at every return to EL0), with #432
    (timed blocking) beside them, and #948
    (a terminal-read fixture for the EINTR/SA_RESTART rule #726 added).
 3. **Other compiler and language work, respecting design gates:** #709 and #710
