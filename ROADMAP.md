@@ -160,7 +160,9 @@ four vCPUs since 2026-10-11.
 **Assigned queue (maintainer, 2026-10-23).** Low-dependency issues A does
 not hold, in this order; compiler work in this list is authorized; an item
 that reaches a decision is parked and the next one taken: #908 (fixed
-QEMU lane budget), #907 (one plain-variant field rule), #914 (race-window
+QEMU lane budget), #916 (compiler GC tuning), #917
+(compiler profiling, variant reuse, domains; tools set up by the
+maintainer), #907 (one plain-variant field rule), #914 (race-window
 kernels built before the lanes), #915 (backing-exists overlays in
 parallel), #897 (small plain variants in
 registers), #893 (redundant csel in variant match), #884 (struct == / !=
