@@ -5337,26 +5337,73 @@ private fn signal_handler_enter(current_authority: borrow ProcessCurrent[current
 //   for. Taking the signal here would run the handler first and then rerun
 //   the call with nothing left to interrupt it, so a wait4 or rt_sigsuspend
 //   that a signal woke would go back to sleep.
-// - The frame cannot be written. Linux would end the process with SIGSEGV;
-//   ending a process is a syscall-path step here, so the signal stays
-//   pending for the process's next syscall, whose return forces it.
+//
+// GitHub issue #949: two returns end the process instead, as Linux does on
+// its way back to user space, so a process spinning without syscalls is
+// not spared until its next one:
+// - A pending, unmasked signal whose default action terminates (SIGKILL
+//   always). It is taken first, whether or not the frame resumes at an
+//   SVC: the syscall there would end the process at its entry anyway.
+// - A caught signal whose frame cannot be written: Linux forces SIGSEGV.
 fn kernel_signal_return_deliver(frame: borrow FrameRef[process]) !{unsafe} {
     let ProcessRunningHere::Running(current_authority) = process_running_here() else {};
+    match kernel_process_current_termination_signal_take() {
+        ProcessSignalPendingResult::Missing => {}
+        ProcessSignalPendingResult::Pending(ending) => {
+            let signum: usize = taken_signal_delivered(ending);
+            signal_return_exit(current_authority, frame,
+                process_end_signaled(signum));
+            return;
+        }
+    }
     match kernel_process_current_caught_signal_take() {
         ProcessSignalPendingResult::Missing => {
             process_current_end(current_authority);
         }
         ProcessSignalPendingResult::Pending(taken) => {
-            if (signal_resumes_at_svc(current_authority, frame) ||
-                signal_handler_enter(current_authority, frame,
-                    frame_general(frame, 0), taken) == false) {
+            if (signal_resumes_at_svc(current_authority, frame)) {
                 taken_signal_restore(taken);
-            } else {
-                frame_general_set(frame, 0, taken_signal_delivered(taken));
+                process_current_end(current_authority);
+                return;
             }
+            if (signal_handler_enter(current_authority, frame,
+                    frame_general(frame, 0), taken) == false) {
+                let lost: usize = taken_signal_delivered(taken);
+                signal_return_exit(current_authority, frame,
+                    process_end_signaled(LINUX_SIGSEGV));
+                return;
+            }
+            frame_general_set(frame, 0, taken_signal_delivered(taken));
             process_current_end(current_authority);
         }
     }
+}
+
+// GitHub issue #949: end the current process from the return hook. Once
+// kernel_process_stack_switch_complete has made the process's stack this
+// CPU's own, this CPU is where a syscall's dispatch stands: the process
+// current and Running, on its own stack, no lock held, the interrupt that
+// led here acknowledged and its IRQ stack left. So the exit is the
+// syscall's, with IRQs unmasked as .Lsyscall_dispatch unmasks them (the
+// exit's file teardown may wait for a device interrupt), and its outcome
+// is acted on as the syscall tail acts on it: a child hands the CPU to its
+// successor or idles (kernel_syscall_clone_parent_return), PID 1 stops the
+// kernel. Neither returns; the frame on this stack is abandoned with it.
+private fn signal_return_exit(current_authority: ProcessCurrent[current_process, ProcessState::Running],
+                              frame: borrow FrameRef[process],
+                              status: ProcessEnd) !{unsafe} {
+    kernel_activity_set(KernelActivity::Syscall);
+    enable_irq();
+    match kernel_syscall_exit_current_process(current_authority, status) {
+        SyscallAction::CloneParent(parent_sp) => {
+            kernel_syscall_clone_parent_return(parent_sp);
+        }
+        SyscallAction::Exit(code) => { kernel_syscall_init_exit(code); }
+        _ => { }
+    }
+    // kernel_syscall_exit_current_process answers nothing else; the
+    // syscall tail fail-stops on Unreachable (its file reap failed) too.
+    kernel_invariant_stop_with_frame(frame);
 }
 
 // AArch64 SVC #imm16: 0xD4000001 with the immediate in bits 20..5.

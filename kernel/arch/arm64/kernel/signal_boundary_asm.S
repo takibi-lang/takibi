@@ -494,3 +494,40 @@ signal_spin_stray:
     ldp x21, x30, [sp], #16
     ret
 .size signal_spin_stray, .-signal_spin_stray
+
+/* GitHub issue #949: a process that only a signal can end.
+ * signal_spin_forever(set, bad_sp) unblocks the signals in *set (none when
+ * set is 0), then, with bad_sp nonzero, moves SP to the unmapped 0x1000 so
+ * no handler frame can be written below it, and spins without a syscall.
+ * It never returns: only a signal delivered at an interrupt return ends it.
+ */
+.global signal_spin_forever
+.type signal_spin_forever, %function
+signal_spin_forever:
+    mov x10, x1
+    cbz x0, .Lforever_sp
+    mov x1, x0
+    mov x0, #1
+    mov x2, #0
+    mov x3, #8
+    mov x8, #135
+    svc #0
+.Lforever_sp:
+    cbz x10, .Lforever_spin
+    mov x9, #0x1000
+    mov sp, x9
+.Lforever_spin:
+    b .Lforever_spin
+.size signal_spin_forever, .-signal_spin_forever
+
+/* GitHub issue #949: a handler that exits 3. It runs only while the stack
+ * is still good, which says the signal came before the spin. */
+.global signal_exit_handler
+.type signal_exit_handler, %function
+signal_exit_handler:
+    mov x0, #3
+    mov x8, #93
+    svc #0
+.Lexit_handler_failed:
+    b .Lexit_handler_failed
+.size signal_exit_handler, .-signal_exit_handler

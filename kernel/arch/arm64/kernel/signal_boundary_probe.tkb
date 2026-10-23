@@ -11,6 +11,8 @@ extern symbol signal_interrupt_handler;
 extern fn signal_spin_run() -> usize;
 extern fn signal_spin_stray(pid: usize, signum: usize) -> usize;
 extern symbol signal_spin_handler;
+extern fn signal_spin_forever(set: usize, bad_sp: usize) -> usize;
+extern symbol signal_exit_handler;
 
 private fn boundary_fail(line: borrow []const u8) !{unsafe} {
     // Raw ABI input only: these syscalls read the readonly bytes.
@@ -108,6 +110,7 @@ fn signal_boundary_probe() !{unsafe} {
     boundary_memory();
     boundary_interrupts();
     boundary_spin();
+    boundary_spin_end();
     svc5(93, 0, 0, 0, 0, 0);
 }
 
@@ -335,4 +338,106 @@ private fn boundary_spin() !{unsafe} {
             boundary_line(bs"boundary: kill from CPU 0 ran a handler on spinning CPU 1, registers intact\n");
         }
     }
+}
+
+// The wait4 status word of `child` once it has ended, polled every 10 ms
+// for up to two seconds; 0xFFFF when it is still alive then.
+private fn spin_end_status(child: usize) -> usize !{unsafe} {
+    let mut pause: [usize; 2];
+    pause[0] = 0;
+    pause[1] = 10000000;
+    for poll: usize in 0..<200 {
+        let mut status: [u8; 4];
+        for index: usize in 0..<4 { status[index] = 0xFF; }
+        if (svc5(260, child, status as *u8 as usize, 1, 0, 0) == child) {
+            return (status[0] as usize) | ((status[1] as usize) << 8);
+        }
+        svc5(101, pause as *usize as usize, 0, 0, 0, 0);
+    }
+    return 0xFFFF;
+}
+
+// GitHub issue #949: what ends a process at the return to EL0 ends a
+// spinning one at its next interrupt return, as on Linux: a signal whose
+// default action terminates, and a caught signal whose frame cannot be
+// written (SIGSEGV). The spinner is on CPU 1, the sender on CPU 0.
+// SIGTERM is blocked from the spinner's birth until the call that unblocks
+// it, after which it makes no syscall, so without delivery at the interrupt
+// return nothing ever ends it and the two-second wait fails. The bad-SP
+// spinner cannot be ordered that way, since that unblock's own return would
+// meet the bad stack; a signal that comes before its spin runs a handler
+// that exits 3 instead, and the case is tried again.
+private fn boundary_spin_end() !{unsafe} {
+    let mut everywhere: [u8; 8];
+    if (svc5(123, 0, 8, everywhere as *u8 as usize, 0, 0) != 8) {
+        boundary_fail(bs"boundary: FAIL spin-end getaffinity\n");
+        return;
+    }
+    let mut term_set: [usize; 1];
+    term_set[0] = 1 << 14;
+    if (svc5(135, 0, term_set as *usize as usize, 0, 8, 0) != 0) {
+        boundary_fail(bs"boundary: FAIL spin-end block\n");
+        return;
+    }
+    let spinner: usize = svc5(220, 17, 0, 0, 0, 0);
+    if (spinner == 0) {
+        if (spin_pin(1) == false) { svc5(93, 1, 0, 0, 0, 0); }
+        signal_spin_forever(term_set as *usize as usize, 0);
+        svc5(93, 1, 0, 0, 0, 0);
+        return;
+    }
+    if (svc5(135, 1, term_set as *usize as usize, 0, 8, 0) != 0 ||
+        spinner >= 0xFFFFFFFFFFFFF000 || spin_pin(0) == false) {
+        boundary_fail(bs"boundary: FAIL spin-end setup\n");
+        return;
+    }
+    let mut pause: [usize; 2];
+    pause[0] = 0;
+    pause[1] = 100000000;
+    svc5(101, pause as *usize as usize, 0, 0, 0, 0);
+    svc5(129, spinner, 15, 0, 0, 0);
+    if (spin_end_status(spinner) != 15) {
+        boundary_fail(bs"boundary: FAIL spinning process outlived SIGTERM\n");
+        return;
+    }
+    boundary_line(bs"boundary: SIGTERM from CPU 0 ended spinning CPU 1\n");
+    let mut segv: bool = false;
+    for attempt: usize in 0..<3 {
+        if (segv == false) {
+            let child: usize = svc5(220, 17, 0, 0, 0, 0);
+            if (child == 0) {
+                let mut action: [usize; 4];
+                action[0] = signal_exit_handler as usize;
+                action[1] = 0x04000000;
+                action[2] = signal_boundary_restorer as usize;
+                action[3] = 0;
+                if (svc5(134, 10, action as *usize as usize, 0, 8, 0) != 0 ||
+                    spin_pin(1) == false) {
+                    svc5(93, 1, 0, 0, 0, 0);
+                }
+                signal_spin_forever(0, 1);
+                svc5(93, 1, 0, 0, 0, 0);
+                return;
+            }
+            if (child >= 0xFFFFFFFFFFFFF000) {
+                boundary_fail(bs"boundary: FAIL spin-end fork\n");
+                return;
+            }
+            svc5(101, pause as *usize as usize, 0, 0, 0, 0);
+            svc5(129, child, 10, 0, 0, 0);
+            let status: usize = spin_end_status(child);
+            if (status == 11) {
+                segv = true;
+            } else if (status != 0x300) {
+                boundary_fail(bs"boundary: FAIL spinning process with a bad stack outlived its signal\n");
+                return;
+            }
+        }
+    }
+    if (segv == false ||
+        svc5(122, 0, 8, everywhere as *u8 as usize, 0, 0) != 0) {
+        boundary_fail(bs"boundary: FAIL spin-end bad stack never reached its spin\n");
+        return;
+    }
+    boundary_line(bs"boundary: unwritable handler frame ended spinning CPU 1 by SIGSEGV\n");
 }

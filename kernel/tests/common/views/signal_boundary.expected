@@ -14,3 +14,5 @@ boundary: ppoll interrupted: EINTR despite SA_RESTART
 boundary: spin handler outside the spin left x21 alone
 boundary: spinning process ran its SIGCHLD handler, registers intact
 boundary: kill from CPU 0 ran a handler on spinning CPU 1, registers intact
+boundary: SIGTERM from CPU 0 ended spinning CPU 1
+boundary: unwritable handler frame ended spinning CPU 1 by SIGSEGV
