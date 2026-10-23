@@ -2672,7 +2672,10 @@ private fn kernel_ddb_enter_stopped(
         atomic_store_release(ddb_snapshot_published_sequence_address(), 0);
     }
     ddb_snapshot.sequence = ddb_snapshot.sequence + 1;
-    ddb_snapshot.cpu = crash_snapshot_read_mpidr_el1();
+    // The logical core, not MPIDR: RPi5 numbers cores in Aff1 and keeps Aff0
+    // zero, so `MPIDR & 0xFF` named core 0 for every core. Hidden while only
+    // core 0 entered DDB; #830 lets any core enter.
+    ddb_snapshot.cpu = cpu_id();
     ddb_snapshot.entry_kind = entry_kind;
     ddb_snapshot.entry_source = entry_source;
     ddb_snapshot.live_daif = mrs_daif();
@@ -3613,7 +3616,8 @@ private fn crash_snapshot_capture(slot: usize, frame_sp: usize, origin: usize, c
     crash_snapshot_here().sequence = crash_snapshot_here().sequence + 1;
     crash_snapshot_here().fault_order =
         unsafe { atomic_fetch_add_relaxed(crash_fault_order_address(), 1) } + 1;
-    crash_snapshot_here().cpu = crash_snapshot_read_mpidr_el1();
+    // The logical core, not MPIDR (see kernel_ddb_enter_stopped, #830).
+    crash_snapshot_here().cpu = cpu_id();
     crash_snapshot_here().vector_slot = slot;
     crash_snapshot_here().origin = origin;
     crash_snapshot_here().caller_return_pc = caller_return_pc;

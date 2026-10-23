@@ -43,7 +43,6 @@ extern fn crash_snapshot_read_sp_el0() -> usize;
 extern fn kernel_stack_read_sp_el1() -> usize;
 extern fn crash_snapshot_read_tpidr_el0() -> usize;
 extern fn crash_snapshot_read_ttbr0_el1() -> usize;
-extern fn crash_snapshot_read_mpidr_el1() -> usize;
 extern fn crash_snapshot_copy_saved_frame(frame: borrow FrameRef[process], output: *usize);
 
 // Must match kernel/arch/arm64/kernel/exception_context.inc's EXC_CONTEXT_SIZE

@@ -337,11 +337,6 @@ crash_snapshot_read_ttbr0_el1:
     mrs     x0, ttbr0_el1
     ret
 
-    .global crash_snapshot_read_mpidr_el1
-crash_snapshot_read_mpidr_el1:
-    mrs     x0, mpidr_el1
-    ret
-
 // output[0..4] = ExceptionFrame's SP_EL0, ELR_EL1, SPSR_EL1, TPIDR_EL0.
 // The offsets come from exception_context.inc's compiler-generated .equ
 // constants, so this copies only the existing frame ABI rather than defining
