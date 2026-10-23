@@ -26494,14 +26494,15 @@ let infer_production_machine_boundary ?(platform = "qemu") code =
     fn cpu_id() -> usize { return 0; }
     fn read_cntpct() -> i64 { return 0; }
     fn read_cntfrq() -> i64 { return 1; }
-    fn platform_world_stop_notify(mask: usize, owner: usize) !{unsafe} {}
+    fn platform_world_stop_notify(mask: usize, owner: usize, debug: bool) !{unsafe} {}
   |} in
   let types = ["WorldStop"; "WorldStopped"; "WorldStopPartial";
     "CpuParticipants"; "MachineStopped"; "CpuStart"; "MachineStopPartial"] in
   let variants = ["WorldStopClaimResult"; "WorldStopResult"; "MachineStopResult"; "CpuStartResult"] in
   let functions = ["world_stop_claim_as"; "world_stop_claim"; "world_stop_begin_config";
     "world_stop_begin_claimed"; "world_stop_begin"; "world_stop_machine_begin";
-    "world_stop_machine_begin_holding_probe";
+    "world_stop_machine_begin_holding_probe"; "world_stop_machine_begin_kind";
+    "world_stop_debug_begin";
     "cpu_participants_end"; "machine_stop_release"; "machine_stop_keep_forever"; "machine_stopped_mask";
     "cpu_start_reserve"; "cpu_start_core"; "cpu_start_finish";
     "cpu_start_end"; "cpu_start_gate_release"; "world_stop_resume";
@@ -26516,7 +26517,7 @@ let infer_production_machine_boundary ?(platform = "qemu") code =
     | Ast.ConstDef (name, _, _, _) ->
         List.mem name ["WORLD_STOP_CLAIM_STOP"; "WORLD_STOP_CLAIM_START"]
     | _ -> false) (parse_here source) in
-  Alcotest.(check int) "all production machine declarations extracted" 37
+  Alcotest.(check int) "all production machine declarations extracted" 39
     (List.length boundary);
   let platform_path = "kernel/platform/" ^ platform ^ "/init.tkb" in
   let path = List.find Sys.file_exists ["../" ^ platform_path; platform_path] in

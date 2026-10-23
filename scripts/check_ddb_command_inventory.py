@@ -20,6 +20,9 @@ DEFAULTS = {
 }
 
 
+CRASH_CONSOLE_HELP = r"commands: oops trace ps proc PID\n"
+
+
 def without_comments(text: str) -> str:
     """Blank comments while preserving strings, offsets, and newlines."""
     out = list(text)
@@ -170,6 +173,10 @@ def check(paths: dict[str, Path]) -> int:
 
     expected_help = "commands: " + " ".join(usages) + r"\n"
     help_lines = re.findall(r'ddb_puts\("(commands: [^\"]+\\n)"\)', source)
+    # GitHub issue #920: the read-only crash console prints its own, smaller
+    # help through the same lock-free ddb_puts; it is not DDB's inventory.
+    help_lines = [line for line in help_lines
+                  if line != CRASH_CONSOLE_HELP]
     if help_lines != [expected_help]:
         fail("help", [expected_help], help_lines)
 

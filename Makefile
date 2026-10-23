@@ -338,7 +338,7 @@ LINUX_UNUSED_CHECK       := --reject-unused-functions --external-entry main
 # KERNEL_UNUSED_NO_FUNCTIONS holds files the flag rejects outright, because
 # they define no Takibi function (_extern.tkb files are skipped by name).
 KERNEL_ASM_ENTRIES := main kernel_secondary_main \
-	el1_exception_evidence_from_frame kernel_invariant_evidence kernel_mmu_init \
+	el1_exception_evidence_from_frame irq_mask_reset_el0 kernel_invariant_evidence kernel_mmu_init \
 	kernel_mmu_init_secondary kernel_idle_exit_reenter \
 	kernel_idle_yield_reenter kernel_idle_block_reenter \
 	kernel_idle_tick_reenter kernel_idle_boot_reenter \
