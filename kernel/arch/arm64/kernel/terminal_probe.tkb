@@ -25,6 +25,25 @@ private fn terminal_probe_word(bytes: borrow [u8; 40..], field: {0..<4 as usize}
     for byte: usize in 0..<4 { bytes[field * 4 + byte] = (word >> (byte * 8)) as u8; }
 }
 
+// GitHub issue #895: the SA_SIGINFO handler and restorer of
+// user_payload_asm.S (sigchld_probe_*), which record si_signo, si_code and
+// si_pid of the frame the kernel built, through TPIDR_EL0.
+extern fn sigchld_probe_arm(record: usize);
+extern fn sigchld_probe_handler_address() -> usize;
+extern fn sigchld_probe_restorer_address() -> usize;
+
+private fn terminal_probe_u64(bytes: borrow [u8; 32..], field: {0..<4 as usize},
+                              word: usize) {
+    for byte: usize in 0..<8 { bytes[field * 8 + byte] = (word >> (byte * 8)) as u8; }
+}
+
+private fn terminal_probe_read_u64(bytes: borrow [u8; 40..], field: {0..<5 as usize})
+        -> usize {
+    let mut word: usize = 0;
+    for byte: usize in 0..<8 { word = word | ((bytes[field * 8 + byte] as usize) << (byte * 8)); }
+    return word;
+}
+
 private fn terminal_probe_set(bytes: borrow [u8; 40..], request: usize) {
     if (svc5(29, 0, request, bytes as *u8 as usize, 0, 0) != 0) {
         terminal_probe_fail();
@@ -192,10 +211,30 @@ fn terminal_probe() {
         terminal_probe_write(bs"termios: masked signals input\n");
         terminal_probe_pin(cpu);
         terminal_probe_expect(bs"\n", cpu);
-        if (svc5(137, mask as *u8 as usize, 0, 0, 8, 0) != 2 ||
-            svc5(137, mask as *u8 as usize, 0, 0, 8, 0) != 3 ||
-            svc5(137, mask as *u8 as usize, 0, 0, 8, 0) != 20) { terminal_probe_fail(); }
+        // GitHub issue #895: ^C is left pending for an SA_SIGINFO handler,
+        // which the unmask below runs; QUIT and SUSP are consumed first.
+        let mut record: [u8; 40];
+        for index: usize in 0..<40 { record[index] = 0; }
+        sigchld_probe_arm(record as *u8 as usize);
+        let mut action: [u8; 32];
+        for index: usize in 0..<32 { action[index] = 0; }
+        terminal_probe_u64(action as [u8; 32..], 0, sigchld_probe_handler_address());
+        terminal_probe_u64(action as [u8; 32..], 1, 0x04000004);
+        terminal_probe_u64(action as [u8; 32..], 2, sigchld_probe_restorer_address());
+        if (svc5(134, 2, action as *u8 as usize, 0, 8, 0) != 0) { terminal_probe_fail(); }
+        let mut waited: [u8; 8];
+        for index: usize in 0..<8 { waited[index] = mask[index]; }
+        waited[0] = 4;
+        if (svc5(137, waited as *u8 as usize, 0, 0, 8, 0) != 3 ||
+            svc5(137, waited as *u8 as usize, 0, 0, 8, 0) != 20) { terminal_probe_fail(); }
         if (svc5(135, 1, mask as *u8 as usize, 0, 8, 0) != 0) { terminal_probe_fail(); }
+        // Linux: a signal the tty raises is SI_KERNEL (0x80), si_pid 0.
+        if (terminal_probe_read_u64(record as [u8; 40..], 0) != 1 ||
+            terminal_probe_read_u64(record as [u8; 40..], 1) != 2 ||
+            terminal_probe_read_u64(record as [u8; 40..], 2) != 0x80 ||
+            terminal_probe_read_u64(record as [u8; 40..], 3) != 0) { terminal_probe_fail(); }
+        for index: usize in 0..<32 { action[index] = 0; }
+        if (svc5(134, 2, action as *u8 as usize, 0, 8, 0) != 0) { terminal_probe_fail(); }
         terminal_probe_write(bs"termios: signals PASS\n");
         terminal_probe_write(bs"termios: orphan SUSP input\n");
         terminal_probe_expect(bs"\n", cpu);

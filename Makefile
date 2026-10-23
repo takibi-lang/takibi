@@ -1459,8 +1459,8 @@ $(KERNEL_TERMINAL_O): $(KERNEL_TERMINAL_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) 
 
 -include $(KERNEL_TERMINAL_O).d
 
-$(KERNEL_TERMINAL_ELF): $(KERNEL_TERMINAL_O)
-	$(LLD) -pie --no-dynamic-linker -e terminal_probe $< -o $@
+$(KERNEL_TERMINAL_ELF): $(KERNEL_TERMINAL_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O)
+	$(LLD) -pie --no-dynamic-linker -e terminal_probe $^ -o $@
 	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
 
 $(KERNEL_SESSION_O): $(KERNEL_SESSION_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) | $(KERNEL_BUILD_DIR)

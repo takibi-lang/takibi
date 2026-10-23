@@ -5017,6 +5017,8 @@ fn kernel_syscall_migrate_return(frame_sp: usize) {
 // installing a handler without one is refused.
 const LINUX_EINTR: usize = 0xFFFFFFFFFFFFFFFC;
 const LINUX_SIGSEGV: usize = 11;
+// siginfo si_code of a signal the kernel raised itself (GitHub issue #895).
+const LINUX_SI_KERNEL: u32 = 0x80;
 
 const LINUX_SA_RESTORER: usize = 0x04000000;
 const LINUX_SA_NODEFER: usize = 0x40000000;
@@ -5066,8 +5068,11 @@ fn syscall_signal_frame_write(current_authority: borrow ProcessCurrent[current_p
             // CLD_KILLED, si_status (24) the exit code or the signal (GitHub
             // issue #885; si_uid, si_utime and si_stime stay 0). Any other
             // signal, and a SIGCHLD kill sent, is SI_USER (0) with si_pid
-            // the kill(2) sender, 0 when the kernel raised it, and si_uid
-            // (20) the sender's uid, always 0 here (GitHub issue #894).
+            // the kill(2) sender and si_uid (20) the sender's uid, always 0
+            // here (GitHub issue #894). Sender pid 0 means the kernel raised
+            // it (the terminal's ^C, ^\ and ^Z; no process has pid 0), which
+            // Linux reports as SI_KERNEL with si_pid and si_uid 0 (GitHub
+            // issue #895).
             written = user_write_join(written, user_write_u32(range, 0, signum as u32));
             if (signum == LINUX_SIGCHLD && child_pid != 0) {
                 written = user_write_join(written, user_write_u32(range, 8,
@@ -5076,6 +5081,9 @@ fn syscall_signal_frame_write(current_authority: borrow ProcessCurrent[current_p
                     child_pid as u32));
                 written = user_write_join(written, user_write_u32(range, 24,
                     syscall_sigchld_status(child_status)));
+            } else if (sender_pid == 0) {
+                written = user_write_join(written, user_write_u32(range, 8,
+                    LINUX_SI_KERNEL));
             } else {
                 written = user_write_join(written, user_write_u32(range, 16,
                     sender_pid as u32));
