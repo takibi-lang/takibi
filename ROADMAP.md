@@ -71,8 +71,7 @@ DDB check is expected-fail until then), #932 (one timer-tick entry
 for every core, after #920), #933 (reboot on any core, after #920), #680 (region_pool handle validation without the lock), #812
 (contiguous page run search), #807
 (product of two bounded variables), #798 (one width check for s[off + k]),
-#799 (sizeof proved at type-check time), #900 (page_allocator_total_count's
-IRQ-masked span on RPi5).
+#799 (sizeof proved at type-check time).
 
 Done on the stored-authority route (2026-10-09): #637 stage 1's
 type-checker work and #731 step 1; #131's first slices -- field places
