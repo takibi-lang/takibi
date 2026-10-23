@@ -11,7 +11,7 @@
 
 (maintainers "Kiwamu Okabe <kiwamu@metasepi.org>")
 
-(license LICENSE)
+(license GPL-3.0-or-later)
 
 (documentation https://github.com/takibi-lang/takibi/blob/main/README.md)
 

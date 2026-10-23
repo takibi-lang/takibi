@@ -5,7 +5,7 @@ synopsis: "Takibi Language"
 description: "Takibi Language"
 maintainer: ["Kiwamu Okabe <kiwamu@metasepi.org>"]
 authors: ["Kiwamu Okabe <kiwamu@metasepi.org>"]
-license: "LICENSE"
+license: "GPL-3.0-or-later"
 tags: ["language" "compiler"]
 homepage: "https://github.com/takibi-lang/takibi"
 doc: "https://github.com/takibi-lang/takibi/blob/main/README.md"
