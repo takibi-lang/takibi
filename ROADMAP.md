@@ -159,9 +159,10 @@ four vCPUs since 2026-10-11.
 
 **Assigned queue (maintainer, 2026-10-23).** Low-dependency issues A does
 not hold, in this order; compiler work in this list is authorized; an item
-that reaches a decision is parked and the next one taken: #896 (plain
-variants in owned struct fields, variant payloads and globals, then
-ProcessEnd in place of ProcessEndWord), #897 (small plain variants in
+that reaches a decision is parked and the next one taken: #908 (fixed
+QEMU lane budget), then #909 (deterministic simulation umbrella, slice by
+slice; first fail points and host builds of closed subsystems), #906
+(zeroed refined globals), #897 (small plain variants in
 registers), #893 (redundant csel in variant match), #884 (struct == / !=
 accepted then an internal error), #888 (array field initialized in a
 loop), #895 (SI_KERNEL for terminal signals, after #894), #726 (EINTR /
