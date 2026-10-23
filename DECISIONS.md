@@ -185,6 +185,9 @@ condition below applies, and reports the land afterwards.
 - 2026-10-18 Memory-ordering checks are herd7 model checks tied to the
   emitted instructions; no litmus7 hardware runs. herdtools7 comes from opam,
   pinned in the devcontainer and CI. [active] #645
+- 2026-10-23 #830 lands with the hung-core DDB check recorded as expected-fail
+  (it fails the lane once the world stop reaches a core with IRQs masked);
+  the pseudo-NMI/FIQ stop gets its own issue. [active] #830
 
 ## Size and performance
 
