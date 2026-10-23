@@ -27728,6 +27728,32 @@ let snapshot_tests = [
        ~by:"fn evt_poll(s: borrow Evt_Live[b, o, 4, r])"
        "then the element value");
 ]
+(* GitHub issue #917: the non-allocating search that replaced String.sub
+   comparisons at every position must find exactly what that scan found,
+   including a needle at the very end, a near miss, and the resume rule of
+   the region planner's name scan (a prefix inside a matched name is not
+   matched again; a prefix with no name after it is skipped). *)
+let text_search_tests = [
+  ("text search: sub_at, find_sub and contains at the edges", `Quick, fun () ->
+    let open Takibi.Text_search in
+    Alcotest.(check bool) "at start" true (sub_at "abcabd" 0 "abc");
+    Alcotest.(check bool) "past end" false (sub_at "abcab" 3 "abc");
+    Alcotest.(check int) "near miss then hit" 3 (find_sub "abcabd" 1 "abd");
+    Alcotest.(check int) "at the very end" 4 (find_sub "xxxxab" 0 "ab");
+    Alcotest.(check int) "absent" (-1) (find_sub "aaaa" 0 "ab");
+    Alcotest.(check int) "start at length" (-1) (find_sub "ab" 2 "b");
+    Alcotest.(check bool) "empty needle" true (contains "" "");
+    Alcotest.(check bool) "longer needle" false (contains "ab" "abc"));
+  ("text search: the region planner's name scan resumes after a name", `Quick, fun () ->
+    let names text =
+      let found = ref [] in
+      Takibi.Region_builtin.names_after "region__" text (fun n -> found := n :: !found);
+      List.rev !found in
+    Alcotest.(check (list string)) "names"
+      [ "u8"; "Foo_region__Bar"; "x" ]
+      (names "(region__u8) region__ region__Foo_region__Bar region__x"));
+]
+
 let named_groups_unisolated = [
   "readonly-literals", readonly_literal_tests;
   "private-default-construction", private_default_construction_tests;
@@ -27759,6 +27785,7 @@ let named_groups_unisolated = [
   "protocol-snapshots", snapshot_tests;
   "protocol-sealed-owners", sealed_protocol_tests;
   "protocol-state-access", sealed_access_tests;
+  "text-search", text_search_tests;
 ]
 
 (* Each Alcotest case represents a fresh compiler invocation. In particular,

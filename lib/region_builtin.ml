@@ -1342,25 +1342,8 @@ fn io_handle_attach(handle: *IoHandle__@T@, window: sink region__u8[c, 0, n])
 }
 |}
 
-(* Whether [sub] occurs in [s] at [i], without allocating a substring
-   (#917: the planning scans below called String.sub at every position of
-   the printed program, which was most of a kernel compile's front end). *)
-let sub_at s i sub =
-  let m = String.length sub in
-  i >= 0 && i + m <= String.length s &&
-  (let rec go k = k = m || (String.unsafe_get s (i + k) = String.unsafe_get sub k
-                            && go (k + 1)) in
-   go 0)
-
-(* The first occurrence of [sub] in [s] at or after [i], or -1. The first
-   character is found by String.index_from, which is a C loop. *)
-let rec find_sub s i sub =
-  if sub = "" then i
-  else match String.index_from_opt s i sub.[0] with
-    | None -> -1
-    | Some k -> if sub_at s k sub then k
-                else if k + 1 >= String.length s then -1
-                else find_sub s (k + 1) sub
+let sub_at = Text_search.sub_at
+let find_sub = Text_search.find_sub
 
 let ident_char = function
   | 'A'..'Z' | 'a'..'z' | '0'..'9' | '_' -> true | _ -> false
@@ -1381,8 +1364,7 @@ let names_after prefix text add =
       end in
   go 0
 
-(* Whether [sub] occurs anywhere in [text]. *)
-let contains text sub = find_sub text 0 sub >= 0
+let contains = Text_search.contains
 
 (* The printed form of each top-level item, which the planning scans read.
    Printing the kernel takes seconds and every scan reads the same program,

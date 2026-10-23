@@ -7,10 +7,7 @@ module IntMap = Map.Make (Int)
 (* GitHub issue #310: used to scope guard_narrow_hints' own append to
    error messages that actually name the "unproven" failure shape,
    without needing a structured exception variant just for that check. *)
-let contains_substring haystack needle =
-  let hl = String.length haystack and nl = String.length needle in
-  let rec go i = i + nl <= hl && (String.sub haystack i nl = needle || go (i + 1)) in
-  nl = 0 || go 0
+let contains_substring = Text_search.contains
 
 let is_compiler_builtin = Language_words.is_compiler_builtin
 
@@ -967,9 +964,7 @@ let key_has_prefix prefix key =
   && String.sub key 0 (String.length prefix) = prefix
 
 let key_has_substring needle key =
-  let nl = String.length needle and kl = String.length key in
-  let rec go i = i + nl <= kl && (String.sub key i nl = needle || go (i + 1)) in
-  nl > 0 && go 0
+  needle <> "" && Text_search.contains key needle
 
 (* GitHub issue #158: an Index place key embeds its index sub-key inside
    brackets (static_place_key's own `id ^ "[" ^ idx_key ^ "]"`), e.g.

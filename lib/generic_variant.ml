@@ -217,9 +217,7 @@ let require_array_unmentioned (arr : expr) (st : stmt) =
   | Some name ->
       let text = show_stmt st in
       let key = "(Ast.Var \"" ^ name ^ "\")" in
-      let n = String.length text and m = String.length key in
-      let rec go i = i + m <= n && (String.sub text i m = key || go (i + 1)) in
-      if go 0 then raise (Types.TypeError (st.loc, Printf.sprintf
+      if Text_search.contains text key then raise (Types.TypeError (st.loc, Printf.sprintf
         "place_borrow lends one element of '%s' for its Full arm; the arm \
          cannot use '%s' until the element is back" name name))
 

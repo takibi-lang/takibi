@@ -320,8 +320,7 @@ let prof_path_max_depth = 12
 let should_profile_function name =
   !function_profiling_enabled
   && name <> "pendsv_dispatch"
-  && not (String.length name >= 7
-          && String.sub name (String.length name - 7) 7 = "Handler")
+  && not (String.ends_with ~suffix:"Handler" name)
 
 let require_profile_global r name =
   match !r with
@@ -2522,12 +2521,10 @@ let emit_recorded_trap_block loc what ~bad_bb ~ok_bb =
   position_at_end ok_bb builder
 
 let count_occurrences source needle =
-  let slen = String.length source and nlen = String.length needle in
+  let nlen = String.length needle in
   let rec loop offset count =
-    if offset + nlen > slen then count
-    else if String.sub source offset nlen = needle then
-      loop (offset + nlen) (count + 1)
-    else loop (offset + 1) count
+    let k = Text_search.find_sub source offset needle in
+    if k < 0 then count else loop (k + nlen) (count + 1)
   in
   if nlen = 0 then 0 else loop 0 0
 
