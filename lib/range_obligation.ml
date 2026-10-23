@@ -128,7 +128,7 @@ let body (o : t) =
   Buffer.contents buf
 
 let site_of_loc (loc : Lexing.position) =
-  Printf.sprintf "%s:%d:%d" loc.Lexing.pos_fname loc.Lexing.pos_lnum
+  Printf.sprintf "%s:%d:%d" (Ast.source_file_of_loc loc) loc.Lexing.pos_lnum
     (loc.Lexing.pos_cnum - loc.Lexing.pos_bol + 1)
 
 let record (loc : Lexing.position) (o : t) =
