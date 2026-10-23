@@ -48,6 +48,8 @@ SHAPES = (
 ALLOWED = {
     "buildcheck_kernel_asm_invariants.py":
         "strips objdump's `//` annotations from disassembled instructions, not source",
+    "buildcheck_kernel_same_operand_csel.py":
+        "strips objdump's `//` annotations from disassembled instructions, not source",
     "run_litmus_checks.py":
         "strips `//` from herd litmus assembly operands, not Takibi source",
     "find_stale_issue_workarounds.py":
