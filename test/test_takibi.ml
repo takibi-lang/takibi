@@ -20687,31 +20687,104 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
           return ftp4c1_checksum2(pkt[ihl..<ihl + tlc], 0);
         }");
 
+  (* GitHub issue #935: this case used to assert that max(a - b, 0) clamps
+     a Sub result's negative lower bound up to {0..<80}. On an unsigned
+     base that is unsound: a - b wraps to about 2^64 when a < b, and max on
+     usize is an unsigned compare that returns the wrapped value. An
+     unsigned Sub whose interval can go below zero now keeps no range, so
+     both the clamp and the raw subtraction keep their runtime check. *)
   Alcotest.test_case
-    "max(a - b, 0) clamps a Sub result whose OWN range has a spuriously \
-     negative lower bound (Sub-refined-refined's formula assumes the \
-     worst-case combination of a's minimum with b's maximum, which the \
-     type system cannot rule out even though the raw subtraction is never \
-     actually negative for these bounds) up to a genuinely non-negative \
-     range -- proven here by feeding the clamped result into the \
-     same-base rule's `wlo >= 0` guard directly, closing a subslice proof \
-     that the raw (unclamped) subtraction cannot close on its own. Same \
-     mechanism as the tcp_echo.tkb data_len fix in this session, though \
-     that site's capacity margin is too tight for the clamp alone to \
-     close the proof there (it remains behind `unsafe`) -- this test uses \
-     more forgiving bounds specifically to isolate and confirm the clamp \
-     mechanism itself" `Quick
+    "#935 max(a - b, 0) on usize does not prove a subslice (the Sub wraps)" `Quick
     (fun () ->
-       expect_trap_sites 0
+       expect_trap_sites 1
          "fn ftp4c1_clamp_sub(base: [u8; 1514..], a: {0..<100 as usize}, b: {20..<61 as usize}) -> []u8 {
-            let clamped: usize = max(a - b, 0);   // now honestly {0..<80 as i32}
+            let clamped: usize = max(a - b, 0);
             return base[b..<b + clamped];
           }" ();
        expect_trap_sites 1
          "fn ftp4c1_no_clamp(base: [u8; 1514..], a: {0..<100 as usize}, b: {20..<61 as usize}) -> []u8 {
-            let raw = a - b;                      // spuriously negative lower bound
+            let raw = a - b;
             return base[b..<b + raw];
           }" ());
+
+  Alcotest.test_case
+    "#935 max(a - b, 0) on usize does not prove an index (issue reproducer)" `Quick
+    (expect_trap_sites 1
+       "let mut words: [u32; 80];
+        fn h(a: {0..<100 as usize}, b: {20..<61 as usize}) {
+          let c: usize = max(a - b, 0);
+          words[c] = 0;
+        }");
+
+  Alcotest.test_case
+    "#935 an unsigned Sub that cannot go below zero keeps its range" `Quick
+    (expect_trap_sites 0
+       "let mut words: [u32; 80];
+        fn h(a: {60..<100 as usize}, b: {20..<61 as usize}) {
+          let c: usize = a - b;
+          words[c] = 0;
+        }");
+
+  Alcotest.test_case
+    "#935 a signed Sub keeps its negative lower bound" `Quick
+    (fun () ->
+       let pt = infer
+         "fn f(a: {0..<100 as i32}, b: {20..<61 as i32}) -> {0 - 60..<80 as i32} {
+            return a - b; }" in
+       let fi = Types.StringMap.find "f" pt.Types.functions in
+       Alcotest.check type_t "return type keeps the signed range"
+         (Ast.TypeRefined (-60, 80, Ast.TypeI32)) fi.Types.ret_type);
+
+  Alcotest.test_case
+    "#935 usize minus a constant past its lower bound keeps no range" `Quick
+    (expect_trap_sites 1
+       "let mut words: [u32; 80];
+        fn h(a: {0..<50 as usize}) {
+          let c: usize = a - 10;
+          words[c] = 0;
+        }");
+
+  Alcotest.test_case "#935 a u64 range past 2^32 does not survive a truncating `as i32`" `Quick
+    (expect_trap_sites 1
+       "let mut words: [u32; 20];
+        fn h(a: {4294967296..<4294967306 as u64}) {
+          let s: i32 = a as i32;
+          let w: usize = (s as usize) - 4294967296;
+          words[w] = 0;
+        }");
+  Alcotest.test_case "#935 a u16 range past 255 does not survive a truncating `as u8`" `Quick
+    (expect_trap_sites 1
+       "let mut words: [u32; 20];
+        fn h(a: {300..<310 as u16}) {
+          let s: u8 = a as u8;
+          let w: usize = s as usize;
+          words[w - 290] = 0;
+        }");
+  Alcotest.test_case "#935 zero minus a usize range keeps no range" `Quick
+    (expect_trap_sites 1
+       "let mut words: [u32; 20];
+        fn h(a: {0..<10 as usize}) {
+          let s: usize = 0 - a;
+          let w: usize = s + 15;
+          words[w] = 0;
+        }");
+  Alcotest.test_case "#935 a signed i8 Sub past its base keeps no range" `Quick
+    (expect_trap_sites 1
+       "let mut words: [u32; 300];
+        fn h(a: {100..<101 as i8}, b: {0 - 100..<0 - 99 as i8}) {
+          let s: i8 = a - b;
+          words[s as usize] = 0;
+        }");
+  Alcotest.test_case "#935 the type checker drops a range through a truncating cast" `Quick
+    (expect_type_error "unproven"
+       "fn k(a: {4294967296..<4294967306 as u64}) -> {0..<10 as usize} {
+          return ((a as i32) as usize) - 4294967296; }");
+
+  Alcotest.test_case
+    "#935 a constant minus a usize range past zero keeps no range" `Quick
+    (expect_type_error "unproven"
+       "fn g(x: {0..<80 as usize}) {}
+        fn f(a: {0..<50 as usize}) { g(40 - a); }");
 
   (* -- P4c-1 follow-up (issue #249): unsafe extended to SINGLE-ELEMENT ---- *)
   (* array/slice indexing, not just subslice range construction. Before

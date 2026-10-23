@@ -2087,6 +2087,17 @@ let rec refinement_range = function
   | TypeRefined (lo, hi, _) -> Some (lo, hi)
   | _ -> None
 
+(* GitHub issues #807 and #935, sync rule with type_inf.ml's
+   refined_or_base: the one constructor of a propagated range. A range is
+   kept only when it was computed without overflow and fits its base
+   (an unsigned base needs lo >= 0). Arithmetic and cast rules build their
+   result range only through this function
+   (scripts/check_refined_range_constructor.py). *)
+let refined_or_base base lo hi =
+  match Type_inf.range_within_base (Types.of_ast base) lo hi with
+  | Some (lo, hi) -> TypeRefined (lo, hi, base)
+  | None -> base
+
 (* Small compile-time integer evaluator used by the range-propagation mirror
    of type_inf.ml. Keep the shared Const_env implementation here too so type
    inference and codegen cannot disagree about checked constant arithmetic. *)
@@ -3464,13 +3475,9 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                     e.loc.Lexing.pos_lnum amt width))
             | None -> ())
        | _ -> ());
-      (* GitHub issue #807 follow-up, sync rule with type_inf.ml's
-         refined_or_base: a range is kept only when it fits its base. *)
-      let refined_or_base base lo hi =
-        match Type_inf.range_within_base (Types.of_ast base) lo hi with
-        | Some (lo, hi) -> TypeRefined (lo, hi, base)
-        | None -> base in
       (match op with
+       (* refined-range rules begin (#935): a result range here is built only
+          through refined_or_base; scripts/check_refined_range_constructor.py *)
        | Add ->
            (* Pointer arithmetic: ptr + isize -> GEP. *io T = TypePtr(TypeIo T) also matches TypePtr *)
            (match ty1 with
@@ -3515,10 +3522,13 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                 let diff = build_sub v1 v2 "subtmp" builder in
                 let ret_ty = match ty1, ty2 with
                   | TypeRefined (a, b, base), TypeRefined (c, d, _) ->
-                      TypeRefined (a - d + 1, b - c, base)
+                      refined_or_base base (Type_inf.checked_sub a (d - 1))
+                        (Type_inf.checked_sub b c)
                   | _ ->
                       (match ty1, intlit_opt e2 with
-                       | TypeRefined (a, b, base), Some k -> TypeRefined (a - k, b - k, base)
+                       | TypeRefined (a, b, base), Some k ->
+                           refined_or_base base (Type_inf.checked_sub a k)
+                             (Type_inf.checked_sub b k)
                        | _ -> canon_ty ty1)
                 in
                 (ret_ty, diff))
@@ -3548,7 +3558,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                         else build_sdiv v1 v2 "divtmp" builder
            in
            let ret_ty = match Const_env.folded_value e with
-             | Some k -> TypeRefined (k, k + 1, canon_ty ty1)
+             | Some k -> refined_or_base (canon_ty ty1) (Some k) (Type_inf.checked_add k 1)
              | None -> ty1
            in
            (ret_ty, result)
@@ -3589,9 +3599,9 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
              if canon_ty ty1 = TypeU16Be || canon_ty ty1 = TypeU32Be
              then canon_ty ty1 else
              match intlit_opt e2 with
-             | Some k when k >= 0 -> TypeRefined (0, k + 1, canon_ty ty1)
+             | Some k when k >= 0 -> refined_or_base (canon_ty ty1) (Some 0) (Type_inf.checked_add k 1)
              | _ -> (match intlit_opt e1 with
-                     | Some k when k >= 0 -> TypeRefined (0, k + 1, canon_ty ty1)
+                     | Some k when k >= 0 -> refined_or_base (canon_ty ty1) (Some 0) (Type_inf.checked_add k 1)
                      | _ -> canon_ty ty1)
            in
            (ret_ty, build_and v1 v2 "andtmp" builder)
@@ -3612,13 +3622,14 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            let ret_ty = match intlit_opt e2 with
              | Some m when m > 0 ->
                  (match ty1 with
-                  | TypeRefined (lo, _, base) when lo >= 0 -> TypeRefined (0, m, base)
-                  | _ when is_unsigned ty1 -> TypeRefined (0, m, ty1)
+                  | TypeRefined (lo, _, base) when lo >= 0 -> refined_or_base base (Some 0) (Some m)
+                  | _ when is_unsigned ty1 -> refined_or_base ty1 (Some 0) (Some m)
                   | _ -> canon_ty ty1)
              | _ -> canon_ty ty1
            in
            (ret_ty, result))
 
+       (* refined-range rules end *)
   | Bnot e1 ->
       let (ty1, v1) = gen_expr locals e1 in
       (ty1, build_not v1 "bnottmp" builder)
@@ -3761,6 +3772,8 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       in
       (result_ty, const_of_int64 (ltype_of_ast TypeUsize) offset false)
 
+  (* refined-range rules begin (#935): a result range here is built only
+     through refined_or_base; scripts/check_refined_range_constructor.py *)
   | Cast (target_ty, src_e) ->
       let (src_ty_raw, v) = gen_expr locals src_e in
       (* GitHub issue #316: any `as *io T` cast reaching codegen at all was
@@ -3813,17 +3826,13 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
         | (TypeI8|TypeI16|TypeI32|TypeI64|TypeU8|TypeU16|TypeU32|TypeU64
           |TypeIsize|TypeUsize),
           TypeRefined (lo, hi, _) ->
-            let fits = match target_ty with
-              | TypeI32 | TypeI64 | TypeIsize      -> true
-              | TypeU8                             -> lo >= 0 && hi <= 256
-              | TypeU16                             -> lo >= 0 && hi <= 65536
-              | TypeU32 | TypeU64 | TypeUsize       -> lo >= 0
-              | TypeI8                              -> lo >= -128   && hi <= 128
-              | TypeI16                             -> lo >= -32768 && hi <= 32768
-              | _                                   -> false
-            in
-            if fits then TypeRefined (lo, hi, target_ty) else target_ty
+            (* GitHub issue #935: the same base check as the arithmetic
+               rules. The range survives only when every value in it is
+               representable in the target, so the cast cannot truncate
+               or reinterpret (an i32 target used to keep any range). *)
+            refined_or_base target_ty (Some lo) (Some hi)
         | _ -> target_ty
+  (* refined-range rules end *)
       in
       (* GitHub issue #186: u16be <-> u16 needs a real byte-swap at the exact
          point of conversion -- the entire reason this cast exists -- instead

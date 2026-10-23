@@ -52,6 +52,8 @@ suffix is description; dispatch reads only the prefix.
 | `check_ci_opam_deps.py` | every library the dune files name is provided by a package in dune-project's depends stanza or by the compiler |
 | `check_ci_opam_deps_controls.py` | Controls for the Dune project dependency link, including what it is allowed to read |
 | `check_compiler_sync_rules.py` | declared compiler counterpart changes stay synchronized |
+| `check_refined_range_constructor.py` | range-propagation and cast rules in type_inf.ml/llvm_gen.ml build a refined result only through the base-checked refined_or_base (#935) |
+| `check_refined_range_constructor_controls.py` | Controls for the refined-range constructor check: issue #935's raw Sub constructor is refused |
 | `check_await_summary_controls.py` | Aggregate await capture isolation, phase budgets, half-budget boundaries, missing observations and summary wiring |
 | `check_rpi5_ddb_await_controls.py` | RPi5 DDB first-arrival observations; software BRK boot and post-snapshot budgets, delayed release, echoed-only output, missing milestones and unavailable UART |
 | `check_fixed_wait_await_controls.py` | The FDT multi-bank boots and the stack-overflow runner (through `await_timing.py`'s command line) record arrival against their fixed budgets, print the margin past half without changing the verdict, and record a missing line as not arrived |

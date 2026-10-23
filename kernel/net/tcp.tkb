@@ -2818,27 +2818,12 @@ fn kernel_tcp_echo_check(ready_in: sink NetRxCanAcquire)
                                                         conn.snd_nxt + 1;
                                                     conn.state = ConnState::LastAck;
                                                 } else {
-                                                    // max(.., 0): tcp_len - tcp_hdr_len's raw
-                                                    // Sub-derived range has a spuriously negative
-                                                    // lower bound (the type system can't see the
-                                                    // tcp_len>=tcp_hdr_len guard that makes a
-                                                    // genuinely negative result impossible), which
-                                                    // would otherwise make data_len look like it
-                                                    // could be negative to any code reading its
-                                                    // type. Clamping to >=0 here doesn't change
-                                                    // observable behavior at all: a malformed
-                                                    // packet where the raw subtraction WOULD have
-                                                    // been negative clamps to exactly 0, and 0
-                                                    // still fails the `data_len > 0` check below
-                                                    // exactly like a negative value would have --
-                                                    // this only makes data_len's OWN type honestly
-                                                    // reflect a fact that was already true, safe
-                                                    // improvement in isolation (P4c section).
-                                                    // data_len/data_off are u16 (matching tcp_len/
-                                                    // tcp_hdr_len's base): both flow into the same
-                                                    // `data_off + data_len` addition below, which
-                                                    // needs them to share a type regardless of the
-                                                    let data_len: u16 = max(header.tcp_len - header.tcp_hdr_len, 0);
+                                                    // tcp_len >= tcp_hdr_len holds: the header parser
+                                                    // only builds a TcpHeader after checking it, so this
+                                                    // u16 subtraction cannot wrap. (It used to read
+                                                    // max(.., 0), which on an unsigned base is no clamp
+                                                    // at all -- issue #935.)
+                                                    let data_len: u16 = header.tcp_len - header.tcp_hdr_len;
                                                     if (data_len > 0 &&
                                                         header.tcp_hdr_len == 20 &&
                                                         (header.flags & TCP_FLAG_ACK) != 0 &&

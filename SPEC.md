@@ -4600,12 +4600,18 @@ moved across functions.
   operand's own base (not always `i32`): `{a..<b} + {c..<d} ->
   {a+c..<b+d-1}`; `{a..<b} + k -> {a+k..<b+k}` (`k` may be checked
   `+`/`-`/`*`/`/` arithmetic over literals and `const` names, symmetric);
-  `{a..<b} - {c..<d} -> {a-d+1..<b-c}`; `{a..<b} * k -> {a*k..<(b-1)*k+1}`
+  `{a..<b} - {c..<d} -> {a-d+1..<b-c}`; `{a..<b} - k -> {a-k..<b-k}`;
+  `k - {c..<d} -> {k-d+1..<k-c+1}`; `{a..<b} * k -> {a*k..<(b-1)*k+1}`
   for a positive compile-time `k` of the same checked-arithmetic form;
-  the same base check applies to every `+` and `* k` rule above: a
-  propagated upper bound past the base's representable range (or a
-  signed lower bound below it) drops the range rather than describe a
-  value the machine operation has wrapped;
+  the same base check applies to every rule here and to a range carried
+  through a cast: a propagated range that reaches past the base's
+  representable values drops the range rather than describe a value the
+  machine operation has wrapped or the cast has truncated. On an unsigned
+  base that includes any negative lower bound, so an unsigned Sub that can
+  go below zero keeps no range, and `max(a - b, 0)` on `usize` proves
+  nothing (the subtraction wraps and the unsigned `max` returns the
+  wrapped value; GitHub issue #935). Prove `a >= b` from the operands'
+  own ranges, or compute in a signed type;
   `x & k -> {0..<k+1}` for a non-negative literal mask `k`, regardless of
   `x`'s own sign or range; `n % m -> {0..<m}` for a positive literal `m`,
   **only** when `n`'s own lower bound is already known non-negative

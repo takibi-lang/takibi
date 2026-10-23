@@ -321,23 +321,32 @@ let product_limit_of_ty = function
       Some (product_limit_of_base_bits ~signed:true (Target_info.pointer_bit_width ()))
   | _ -> None
 
-(* GitHub issue #807 follow-up: a propagated range [lo, hi) is kept only
-   when the checker computed it without overflow (lo/hi are Some) and it
-   lies inside the base's representable values, so the machine operation
-   at the base width cannot have wrapped. An unsigned base with lo < 0 is
-   left as it was: Sub's negative lower bound on an unsigned base is a
-   separate gap. Sync rule:
-   lib/llvm_gen.ml's Add/Mul ranges use this same function. *)
+let checked_sub a b =
+  if b = min_int then None else checked_add a (- b)
+
+(* GitHub issue #807 follow-up and #935: a propagated range [lo, hi) is
+   kept only when the checker computed it without overflow (lo/hi are
+   Some) and it lies inside the base's representable values, so the
+   machine operation at the base width cannot have wrapped. For an
+   unsigned base that means lo >= 0: an unsigned Sub whose interval can go
+   below zero wraps to a huge value, and keeping {lo..<hi} with lo < 0
+   would let max(a - b, 0) -- an unsigned compare that returns the wrapped
+   value -- prove an index (#935). A negative lo is kept only on a base
+   known to be signed. Every arithmetic rule builds its result range
+   through refined_or_base (scripts/check_refined_range_constructor.py).
+   Sync rule: lib/llvm_gen.ml's Add/Sub/Mul ranges use this same
+   function. *)
 let range_within_base base lo hi =
   match lo, hi with
-  | Some lo, Some hi ->
-      (match product_limit_of_ty base with
-       | None -> Some (lo, hi)
-       | Some limit ->
-           let unsigned = (match base with
-             | TU8 | TU16 | TU32 | TU64 | TUsize -> true | _ -> false) in
-           if hi <= limit && (unsigned || lo >= - limit) then Some (lo, hi)
-           else None)
+  | Some lo, Some hi when lo < hi ->
+      let signed = (match base with
+        | TI8 | TI16 | TI32 | TI64 | TIsize -> true | _ -> false) in
+      if lo < 0 && not signed then None
+      else
+        (match product_limit_of_ty base with
+         | None -> Some (lo, hi)
+         | Some limit ->
+             if hi <= limit && lo >= - limit then Some (lo, hi) else None)
   | _ -> None
 
 let refined_or_base base lo hi =
@@ -3404,6 +3413,8 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                 operator; convert with `as u16`/`as u32` first (==, !=, &, \
                 |, ^ are allowed directly)")));
       (match op with
+       (* refined-range rules begin (#935): a result range here is built only
+          through refined_or_base; scripts/check_refined_range_constructor.py *)
        | Add ->
            (* Pointer arithmetic: ptr + isize -> returns the same pointer type. TIo is a value type, excluded.
               Range propagation (interval arithmetic; sync rule: llvm_gen's
@@ -3512,12 +3523,12 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                 (match repr t2 with
                  | TRefinedInt (c, d, base2) ->
                      unify_at e.loc base base2;
-                     TRefinedInt (a - d + 1, b - c, base)
+                     refined_or_base base (checked_sub a (d - 1)) (checked_sub b c)
                  | _ ->
                      (match intlit_opt e2 with
                       | Some k ->
                           unify_at e2.loc t2 base;
-                          TRefinedInt (a - k, b - k, base)
+                          refined_or_base base (checked_sub a k) (checked_sub b k)
                       | None ->
                           unify_at e2.loc (canon_ty t2) base;
                           base))
@@ -3525,7 +3536,8 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                 (match intlit_opt e1, repr t2 with
                  | Some k, TRefinedInt (c, d, base) ->
                      unify_at e1.loc t1 base;
-                     TRefinedInt (k - d + 1, k - c + 1, base)
+                     refined_or_base base (checked_sub k (d - 1))
+                       (Option.bind (checked_sub k c) (fun t -> checked_add t 1))
                  | _ ->
                      let ct1 = canon_ty t1 and ct2 = canon_ty t2 in
                      unify_at e.loc ct1 ct2;
@@ -3560,7 +3572,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
             | _ -> ());
            record_divisor_nonzero_proof t2 e2;
            (match Const_env.folded_value e with
-            | Some k -> TRefinedInt (k, k + 1, ct1)
+            | Some k -> refined_or_base ct1 (Some k) (checked_add k 1)
             | None -> ct1)
        | Lt | Gt | Le | Ge | Eq | Ne ->
            (* GitHub issue #659: with a null pointer unwritable there is no
@@ -3593,8 +3605,8 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            (match intlit_opt e2 with
             | Some m when m > 0 ->
                 (match repr t1 with
-                 | TRefinedInt (lo, _, _) when lo >= 0 -> TRefinedInt (0, m, ct1)
-                 | t when is_unsigned_ty t -> TRefinedInt (0, m, ct1)
+                 | TRefinedInt (lo, _, _) when lo >= 0 -> refined_or_base ct1 (Some 0) (Some m)
+                 | t when is_unsigned_ty t -> refined_or_base ct1 (Some 0) (Some m)
                  | _ -> ct1)
             | _ -> ct1)
        | Or | And ->
@@ -3623,14 +3635,15 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
               check. *)
            if ct1 = TU16Be || ct1 = TU32Be then ct1 else
            (match intlit_opt e2 with
-            | Some k when k >= 0 -> TRefinedInt (0, k + 1, ct1)
+            | Some k when k >= 0 -> refined_or_base ct1 (Some 0) (checked_add k 1)
             | _ -> (match intlit_opt e1 with
-                    | Some k when k >= 0 -> TRefinedInt (0, k + 1, ct1)
+                    | Some k when k >= 0 -> refined_or_base ct1 (Some 0) (checked_add k 1)
                     | _ -> ct1))
        | Bor | Bxor | Shr | Shl ->
            let ct1 = canon_ty t1 and ct2 = canon_ty t2 in
            unify_at e.loc ct1 ct2;
            ct1)
+       (* refined-range rules end *)
   | Bnot e1 ->
       let t1 = infer_expr senv eenv tyenv fenv e1 in
       if contains_view_ty t1 then
@@ -3660,6 +3673,8 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
           "stable owner container storage cannot be dereferenced or copied as a whole; access its ordinary fields through the pointer"));
       inner
   | AddrOf inner -> infer_addrof_wrapped senv eenv tyenv fenv e inner `Ptr
+  (* refined-range rules begin (#935): a result range here is built only
+     through refined_or_base; scripts/check_refined_range_constructor.py *)
   | Cast (target_ty, e) ->
       let src_ty = match target_ty, e.desc with
         | Ast.TypeSlice _, FieldGet (base_expr, fname) ->
@@ -3979,7 +3994,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                   is a legal conversion"
                  (to_string src_ty) (to_string tgt)));
              match repr src_ty with
-             | TRefinedInt (lo, hi, _) -> TRefinedInt (lo, hi, tgt)
+             | TRefinedInt (lo, hi, _) -> refined_or_base tgt (Some lo) (Some hi)
              | _ -> tgt
            end else
            (match repr src_ty with
@@ -4163,7 +4178,10 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                  | TI8 | TI16 | TI32 | TI64
                  | TU8 | TU16 | TU32 | TU64
                  | TIsize | TUsize ->
-                     (try unify src_ty tgt; TRefinedInt (lo, hi, tgt)
+                     (* GitHub issue #935: the same base check as the
+                        arithmetic rules, so a range the target cannot
+                        represent does not survive a truncating cast. *)
+                     (try unify src_ty tgt; refined_or_base tgt (Some lo) (Some hi)
                       with Unify_error _ -> tgt)
                  | _ ->
                      (* A refined integer (e.g. a for-loop-proven
@@ -4178,6 +4196,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                      check_null_pointer_literal e.loc e tgt;
                      check_nonliteral_ptr_cast_needs_unsafe e.loc e tgt;
                      tgt)
+  (* refined-range rules end *)
             | _ ->
                 (* A calculated integer has no compiler evidence that it
                    denotes valid storage. Issue #218 therefore requires an
