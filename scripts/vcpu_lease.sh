@@ -119,10 +119,116 @@ resource_lease_vcpu_record_wait() {
         >>"$TAKIBI_LANE_TIMING_DIR/vcpu-lease.waits" 2>/dev/null || true
 }
 
+# -- Grant order (GitHub issue #927) -----------------------------------------
+# Without an order, the slots went to whichever waiter flock woke first. One
+# allcheck then waited about 4350 s in total for vCPUs, and the longest lane
+# (probe-ticks, three guests in a row) queued again behind every fresh lane
+# before each of its guests, so it finished last and alone. A waiter now
+# takes a ticket and only the first live ticket may go for the slots. The
+# order is: the earlier run first (so a second allcheck on the host cannot
+# overtake the first), then the lane's rank in TAKIBI_VCPU_LANE_ORDER, a
+# longest-lane-first list, then the earlier wait. Longest-first is the
+# classic list-scheduling rule for a span: the long lanes start at once and
+# the short ones fill the gaps around them. A lane missing from the list
+# ranks after every listed one, so a new lane is never wrong, only unordered.
+#
+# The order is by each lane's time holding vCPUs -- its duration less its
+# lease wait, both printed by scripts/summarize_lane_timing.py -- measured on
+# the QEMU lanes 2026-10-23. A stale order costs span, never a verdict.
+TAKIBI_VCPU_LANE_ORDER="${TAKIBI_VCPU_LANE_ORDER:-kernelcheck-probe-ticks-qemu
+kernelcheck-race-window-705-qemu kernelcheck-race-window-603-qemu
+kernelcheck-qemu-main kernelcheck-race-window-609-qemu
+kernelcheck-race-window-633-qemu kernelcheck-race-window-678-qemu
+kernelcheck-uart-wake-qemu kernelcheck-alloc-rollback-qemu
+kernelcheck-race-window-635-qemu kernelcheck-race-window-830-qemu
+kernelcheck-qemu-debug-main kernelcheck-affinity-gdb-qemu
+kernelcheck-oops-qemu kernelcheck-race-window-761-qemu kernelcheck-ddb-qemu}"
+
+# The ticket's name sorts into grant order.
+resource_lease_vcpu_ticket_key() {
+    local began="$1" lane="${TAKIBI_AWAIT_TIMING_LANE:-}" origin="" rank=999 i=0 name
+    if [ -n "${TAKIBI_LANE_TIMING_DIR:-}" ] && [ -f "$TAKIBI_LANE_TIMING_DIR/run.origin" ]; then
+        origin="$(head -n 1 "$TAKIBI_LANE_TIMING_DIR/run.origin" 2>/dev/null)"
+    fi
+    case "$origin" in ''|*[!0-9.]*) origin="$began";; esac
+    if [ -n "$lane" ]; then
+        for name in $TAKIBI_VCPU_LANE_ORDER; do
+            if [ "$name" = "$lane" ]; then rank="$i"; break; fi
+            i=$((i + 1))
+        done
+    fi
+    printf '%010d-%03d-%s-%s\n' "${origin%.*}" "$rank" "$began" "$$"
+}
+
+RESOURCE_LEASE_VCPU_TICKET_FD=""
+RESOURCE_LEASE_VCPU_TICKET=""
+
+resource_lease_vcpu_ticket_drop() {
+    [ -n "$RESOURCE_LEASE_VCPU_TICKET" ] && rm -f "$RESOURCE_LEASE_VCPU_TICKET"
+    [ -n "$RESOURCE_LEASE_VCPU_TICKET_FD" ] && exec {RESOURCE_LEASE_VCPU_TICKET_FD}>&-
+    RESOURCE_LEASE_VCPU_TICKET_FD=""
+    RESOURCE_LEASE_VCPU_TICKET=""
+}
+
+# The first ticket whose owner still holds its lock. A ticket nobody holds
+# was left by a runner that died, and is removed. The owner locks its ticket
+# under a temporary name and renames it into place, so no live ticket is ever
+# seen unlocked.
+resource_lease_vcpu_queue_head() {
+    local queue="$1" file probe
+    shopt -s nullglob
+    for file in "$queue"/*.ticket; do
+        [ "$file" = "$RESOURCE_LEASE_VCPU_TICKET" ] && { printf '%s\n' "$file"; break; }
+        exec {probe}<"$file" 2>/dev/null || continue
+        if flock -n "$probe"; then
+            rm -f "$file"
+            exec {probe}<&-
+            continue
+        fi
+        exec {probe}<&-
+        printf '%s\n' "$file"
+        break
+    done
+    shopt -u nullglob
+}
+
+# resource_lease_vcpu_ticket_take DIR TARGET -- queue this runner; the
+# caller drops the ticket once it has its slots or gives up.
+resource_lease_vcpu_ticket_take() {
+    local dir="$1" target="$2" queue key tmp
+    queue="$dir/queue"
+    mkdir -p "$queue"
+    key="$(resource_lease_vcpu_ticket_key "$(date +%s.%3N)")"
+    tmp="$queue/.$key.tmp"
+    exec {RESOURCE_LEASE_VCPU_TICKET_FD}>"$tmp"
+    flock -n "$RESOURCE_LEASE_VCPU_TICKET_FD"
+    printf 'target=%s\nsession=%s\n' "$target" "${TAKIBI_SESSION:-unknown}" >"$tmp"
+    RESOURCE_LEASE_VCPU_TICKET="$queue/$key.ticket"
+    mv "$tmp" "$RESOURCE_LEASE_VCPU_TICKET"
+}
+
+# resource_lease_vcpu_queue_wait DIR DEADLINE -- return once this runner's
+# ticket is the first live one; nonzero at the deadline.
+resource_lease_vcpu_queue_wait() {
+    local queue="$1/queue" deadline="$2" announced=0
+    while [ "$(resource_lease_vcpu_queue_head "$queue")" != "$RESOURCE_LEASE_VCPU_TICKET" ]; do
+        if [ "$announced" -eq 0 ]; then
+            echo "[lease] queued for vCPUs behind earlier or longer lanes" >&2
+            announced=1
+        fi
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            echo "FAIL resource-lease: still queued for vCPUs after ${RESOURCE_LEASE_TIMEOUT_SECONDS}s" >&2
+            return 1
+        fi
+        sleep 0.5
+    done
+}
+
 # resource_lease_vcpu_acquire N [TARGET] -- hold N slots in this shell.
 resource_lease_vcpu_acquire() {
     local want="$1" target="${2:-$0}"
     local have budget dir alloc fd need i deadline announced=0 began
+    local -a held
 
     case "$want" in ''|*[!0-9]*|0) echo "error: vCPU lease needs a positive count, got '$want'" >&2; return 1;; esac
     have="$(resource_lease_vcpu_held)"
@@ -136,50 +242,71 @@ resource_lease_vcpu_acquire() {
     began="$(date +%s.%3N)"
     dir="$(resource_lease_vcpu_dir)"
     mkdir -p "$dir"
-    exec {alloc}>"$dir/alloc.lock"
-    if ! flock -n "$alloc"; then
-        echo "[lease] waiting for the vCPU allocator (another runner is waiting for slots)" >&2
-        announced=1
-        if ! flock -w "$RESOURCE_LEASE_TIMEOUT_SECONDS" "$alloc"; then
-            echo "FAIL resource-lease: the vCPU allocator was still held after ${RESOURCE_LEASE_TIMEOUT_SECONDS}s" >&2
-            exec {alloc}>&-
-            resource_lease_vcpu_record_wait "$want" "$target" "$began" null
-            return 1
-        fi
-    fi
-
-    need="$want"
+    resource_lease_vcpu_ticket_take "$dir" "$target"
     deadline=$((SECONDS + RESOURCE_LEASE_TIMEOUT_SECONDS))
     while :; do
-        for ((i = 0; i < budget && need > 0; i++)); do
-            exec {fd}>"$dir/slot.$i.lock"
-            if flock -n "$fd"; then
-                resource_lease_write "$dir/slot.$i.holder" \
-                    "session=${TAKIBI_SESSION:-unknown}" \
-                    "target=$target" \
-                    "pid=$$" \
-                    "started=$(date +%H:%M:%S)"
-                need=$((need - 1))
-            else
-                exec {fd}>&-
-            fi
-        done
-        [ "$need" -eq 0 ] && break
-        if [ "$announced" -eq 0 ]; then
-            echo "[lease] waiting for $need more of $want vCPUs (budget $budget):" \
-                 "$(resource_lease_vcpu_holders)" >&2
-            announced=1
-        fi
-        if [ "$SECONDS" -ge "$deadline" ]; then
-            echo "FAIL resource-lease: $want vCPUs were not free after" \
-                 "${RESOURCE_LEASE_TIMEOUT_SECONDS}s: $(resource_lease_vcpu_holders)" >&2
-            exec {alloc}>&-
+        resource_lease_vcpu_queue_wait "$dir" "$deadline" || {
+            resource_lease_vcpu_ticket_drop
             resource_lease_vcpu_record_wait "$want" "$target" "$began" null
             return 1
+        }
+        exec {alloc}>"$dir/alloc.lock"
+        if ! flock -n "$alloc"; then
+            echo "[lease] waiting for the vCPU allocator (another runner is waiting for slots)" >&2
+            announced=1
+            if ! flock -w "$RESOURCE_LEASE_TIMEOUT_SECONDS" "$alloc"; then
+                echo "FAIL resource-lease: the vCPU allocator was still held after ${RESOURCE_LEASE_TIMEOUT_SECONDS}s" >&2
+                exec {alloc}>&-
+                resource_lease_vcpu_ticket_drop
+                resource_lease_vcpu_record_wait "$want" "$target" "$began" null
+                return 1
+            fi
         fi
-        sleep 0.5
+
+        need="$want"
+        held=()
+        while :; do
+            for ((i = 0; i < budget && need > 0; i++)); do
+                exec {fd}>"$dir/slot.$i.lock"
+                if flock -n "$fd"; then
+                    resource_lease_write "$dir/slot.$i.holder" \
+                        "session=${TAKIBI_SESSION:-unknown}" \
+                        "target=$target" \
+                        "pid=$$" \
+                        "started=$(date +%H:%M:%S)"
+                    held+=("$fd")
+                    need=$((need - 1))
+                else
+                    exec {fd}>&-
+                fi
+            done
+            [ "$need" -eq 0 ] && break 2
+            if [ "$announced" -eq 0 ]; then
+                echo "[lease] waiting for $need more of $want vCPUs (budget $budget):" \
+                     "$(resource_lease_vcpu_holders)" >&2
+                announced=1
+            fi
+            if [ "$SECONDS" -ge "$deadline" ]; then
+                echo "FAIL resource-lease: $want vCPUs were not free after" \
+                     "${RESOURCE_LEASE_TIMEOUT_SECONDS}s: $(resource_lease_vcpu_holders)" >&2
+                for fd in "${held[@]}"; do exec {fd}>&-; done
+                exec {alloc}>&-
+                resource_lease_vcpu_ticket_drop
+                resource_lease_vcpu_record_wait "$want" "$target" "$began" null
+                return 1
+            fi
+            sleep 0.5
+            # A longer lane queued behind this one while it waited (#927):
+            # give back the partial hold and the allocator, and queue again.
+            if [ "$(resource_lease_vcpu_queue_head "$dir/queue")" != "$RESOURCE_LEASE_VCPU_TICKET" ]; then
+                for fd in "${held[@]}"; do exec {fd}>&-; done
+                exec {alloc}>&-
+                continue 2
+            fi
+        done
     done
     exec {alloc}>&-
+    resource_lease_vcpu_ticket_drop
     resource_lease_vcpu_record_wait "$want" "$target" "$began" "$(date +%s.%3N)"
     [ "$announced" -eq 0 ] || echo "[lease] got $want vCPUs" >&2
 }

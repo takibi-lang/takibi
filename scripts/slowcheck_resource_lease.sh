@@ -232,6 +232,38 @@ wait "$vcpu_a" 2>/dev/null || true
 wait "$vcpu_d" && wait "$vcpu_e" \
     && claim || fail "two waiters for 3 of 4 vCPUs did not both run in turn"
 
+# GitHub issue #927: the slots go to the longer lane first, not to whoever
+# asked first. lane-h holds the whole budget; a lane missing from the order
+# asks before a listed one, and the listed one must still be granted first.
+# Both lanes belong to one run, as allcheck's do: the run's origin stamp
+# comes before the rank in the order.
+order="lane-long"
+mkdir -p "$tmp_dir/timing"
+date +%s.%3N >"$tmp_dir/timing/run.origin"
+vcpu lane-h 5 "resource_lease_vcpu_acquire 4 lane-h && : > '$tmp_dir/lane-h.held'; exec sleep 30" 2>/dev/null &
+vcpu_h=$!
+for _ in $(seq 1 300); do
+    [ -e "$tmp_dir/lane-h.held" ] && break
+    sleep 0.1
+done
+[ -e "$tmp_dir/lane-h.held" ] || fail "lane-h did not acquire 4 of 4 vCPUs within 30 s"
+TAKIBI_LANE_TIMING_DIR="$tmp_dir/timing" TAKIBI_VCPU_LANE_ORDER="$order" TAKIBI_AWAIT_TIMING_LANE=lane-short \
+    vcpu lane-short 20 "resource_lease_vcpu_acquire 4 lane-short && echo short >>'$tmp_dir/grant-order'" 2>/dev/null &
+vcpu_short=$!
+for _ in $(seq 1 300); do
+    ls "$registry"/leases/vcpu/queue/*.ticket >/dev/null 2>&1 && break
+    sleep 0.1
+done
+TAKIBI_LANE_TIMING_DIR="$tmp_dir/timing" TAKIBI_VCPU_LANE_ORDER="$order" TAKIBI_AWAIT_TIMING_LANE=lane-long \
+    vcpu lane-long 20 "resource_lease_vcpu_acquire 4 lane-long && echo long >>'$tmp_dir/grant-order'; sleep 1" 2>/dev/null &
+vcpu_long=$!
+sleep 1
+pkill -KILL -P "$vcpu_h" 2>/dev/null || true
+wait "$vcpu_h" 2>/dev/null || true
+wait "$vcpu_long"; wait "$vcpu_short"
+[ "$(tr '\n' ' ' <"$tmp_dir/grant-order" 2>/dev/null)" = "long short " ] \
+    && claim || fail "the vCPU grant order was '$(tr '\n' ' ' <"$tmp_dir/grant-order" 2>/dev/null)', not the listed lane first"
+
 # The QEMU shim refuses a guest larger than its runner's lease, including a
 # runner whose Python subprocess closed the inherited descriptors.
 mkdir -p "$tmp_dir/bin"
