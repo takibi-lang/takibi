@@ -60,17 +60,9 @@ lane (`kernelcheck-race-window-*-qemu`) before its issue closes.
 
 ### Territory A: the trunk, in this order
 
-**Assigned queue (maintainer, 2026-10-23).** Memory safety and multicore
-backbone only. Taken in order whenever the numbered trunk items below have
-no step ready; an item that reaches a decision is parked and the next one
-taken (#894, already under way here, finishes here; its follow-ups go to
-B): #819 (AtomicWord acq_rel cells), #830 (device interrupts on any core),
-#775 (core-role asymmetry inventory), #681 (region_pool per-slot false
-sharing), #680 (region_pool handle validation without the lock), #812
-(contiguous page run search), #748 (page allocator metadata lending), #807
-(product of two bounded variables), #798 (one width check for s[off + k]),
-#799 (sizeof proved at type-check time), #900 (page_allocator_total_count's
-IRQ-masked span on RPi5).
+**Queue (maintainer, 2026-10-23)**, when no trunk step is ready; park any
+item needing a decision: #894, #819, #830, #775, #681, #680, #812, #748,
+#807, #798, #799, #900.
 
 Done on the stored-authority route (2026-10-09): #637 stage 1's
 type-checker work and #731 step 1; #131's first slices -- field places
@@ -161,24 +153,9 @@ probes rendezvous with every online peer, not core 1 alone).
 
 ### Territory B: slightly off the pillars, supporting A, by priority
 
-**Assigned queue (maintainer, 2026-10-23).** Low-dependency issues A does
-not hold, in this order; compiler work in this list is authorized; an item
-that reaches a decision is parked and the next one taken: #896 (plain
-variants in owned struct fields, variant payloads and globals, then
-ProcessEnd in place of ProcessEndWord), #897 (small plain variants in
-registers), #893 (redundant csel in variant match), #884 (struct == / !=
-accepted then an internal error), #888 (array field initialized in a
-loop), #895 (SI_KERNEL for terminal signals, after #894), #726 (EINTR /
-SA_RESTART for a sleeping syscall), #628 (signal delivery at interrupt
-return), #652 (lifecycle trace for signals and wait4), #698 (ext2
-exhaustion as ENOSPC), #846 (TCP retransmission with no reader), #793
-(proofs with an unresolved type variable), #769 (--uses-of NAME), #774
-(IRQ arms acknowledge their source), #762 (no vector/unaligned stores in
-MMU-off code). Audit follow-ups filed 2026-10-23: #901 (ppoll sigmask with
-nfds > 0), #902 (poll on terminal fds other than 0), #898 (DDB
-schedule_reserved window), #899 (probe-gate checks from #756), #904
-(position-dependent controls, FAILED line after a poll bound), #905
-(peer_sleep_mask negative control), #903 (reproducible guest ELFs).
+**Queue (maintainer, 2026-10-23)**, compiler work authorized; park any item
+needing a decision: #896, #897, #893, #884, #888, #895, #726, #628, #652,
+#698, #846, #901, #902, #898, #899, #904, #905, #903, #793, #769, #774, #762.
 
 On 2026-10-04 the maintainer authorized autonomous B work in priority order
 where acceptance is settled; leave design investigations and unmet
