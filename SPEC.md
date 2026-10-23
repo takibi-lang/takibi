@@ -3490,7 +3490,7 @@ anything.
 
 **Atomic cells (GitHub issue #637 stage 3).** A word shared without a lock
 is declared as an `AtomicWord` (`struct no_copy AtomicWord { private value:
-usize; }`, kernel/lib/atomic_word.tkb) and reached only through six
+usize; }`, kernel/lib/atomic_word.tkb) and reached only through seven
 built-in operations that take a pointer to one:
 
 ```
@@ -3502,6 +3502,8 @@ atomic_word_compare_exchange(cell: *AtomicWord, expected: usize,
                              desired: usize) -> bool          // acquire
 atomic_word_compare_swap(cell: *AtomicWord, expected: usize,
                          desired: usize) -> CasResult         // acquire
+atomic_word_compare_swap_acq_rel(cell: *AtomicWord, expected: usize,
+                         desired: usize) -> CasResult         // acq_rel
 ```
 
 They need no `unsafe`: the field is private to its file, so every access to

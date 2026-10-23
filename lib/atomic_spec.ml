@@ -69,6 +69,9 @@ let cell_ops = [
   ("atomic_word_fetch_add", "atomic_fetch_add_relaxed");
   ("atomic_word_compare_exchange", "atomic_compare_exchange_acquire");
   ("atomic_word_compare_swap", "atomic_compare_swap_acquire");
+  (* GitHub issue #819: a compare-swap that also publishes (the log ring's
+     commit must release, LogRingCommit+unfixed-writer). *)
+  ("atomic_word_compare_swap_acq_rel", "atomic_compare_swap_acq_rel");
 ]
 let cell_intrinsic name = List.assoc_opt name cell_ops
 let is_cell_op name = Option.is_some (cell_intrinsic name)

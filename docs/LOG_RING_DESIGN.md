@@ -286,7 +286,6 @@ Not expressible in the types, and where it lives instead:
 | No silent loss (every sequence returned or reported) | LogRing.tla NoSilentLoss; at run time the end-of-boot `discarded=` line and log_storm_evidence (all CPUs, every sequence accounted) | A global counting property over all writers |
 | Memory ordering of claim, commit, text stores, recheck | herd7 litmus tests in kernel/models/litmus (Never for fixed, Sometimes for unfixed controls) | Ordering is a comment on AtomicWord, not part of a type (atomic_word.tkb, first limitation) |
 | The litmus tests describe the emitted code | scripts/run_litmus_checks.py with emitted_map.txt (disassembly lint, CASAL/STLR/LDAR classes per function) | The compiler does not expose per-access ordering to check against; the lint follows addresses only through moves, adds and two call levels |
-| Only log.tkb uses the raw acq_rel intrinsic | scripts/check_lock_discipline.py raw-atomic allowlist (kernel_log_cas) | No AtomicWord acq_rel cell op yet (#819) |
 | Per-CPU line stage not handed to another thread | `static_assert(KERNEL_PREEMPTIBLE == 0)` in kernel_log_execution_model_assumption | The stage lives across the caller's fragments, outside any preempt_off region (#638) |
 
 Slice 7 (#720's protocol declaration generator) would need, to replace the

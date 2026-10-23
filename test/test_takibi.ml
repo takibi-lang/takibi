@@ -19258,7 +19258,7 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
           "atomic_compare_exchange_acquire";
           "atomic_compare_exchange_acq_rel";
           "atomic_compare_swap_acquire"; "atomic_compare_swap_acq_rel";
-          "atomic_word_compare_swap"]);
+          "atomic_word_compare_swap"; "atomic_word_compare_swap_acq_rel"]);
 
   (* ---- GitHub issue #613: compare-and-swap returns the value it observed
      on failure, so no second load stands in for the failed observation. *)
@@ -19399,6 +19399,29 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
            Alcotest.(check bool) "not single-thread scoped"
              false (contains_substring ir "syncscope(\"singlethread\")")))
          ["aarch64-none-elf"; "x86_64-pc-linux-gnu"]);
+
+  (* ---- GitHub issue #819: the AtomicWord acq_rel compare-swap cell op
+     needs no unsafe and lowers with release on success. *)
+  Alcotest.test_case
+    "issue #819: atomic_word_compare_swap_acq_rel is an acq_rel cmpxchg"
+    `Quick
+    (fun () ->
+       with_codegen_target "aarch64-none-elf" (fun () ->
+         expect_codegen_ok
+           "struct no_copy AtomicWord { private value: usize; }
+            struct Gate { word: AtomicWord; }
+            fn commit(g: *Gate, w: usize) -> usize {
+              match atomic_word_compare_swap_acq_rel(&(*g).word, w, w + 1) {
+                CasResult::Swapped => { return 0; }
+                CasResult::Observed(seen) => { return seen; }
+              }
+              return 1;
+            }" ();
+         let ir = Llvm.string_of_llmodule !Llvm_gen.the_module in
+         Alcotest.(check bool) "acq_rel success, acquire failure"
+           true (contains_substring ir "acq_rel acquire");
+         Alcotest.(check bool) "no acquire-only compare-swap"
+           false (contains_substring ir "acquire acquire")));
 
   (* ---- GitHub issue #299: fixed-layout records with atomic commit
      publication. The record whose declaration these reuse is the shape

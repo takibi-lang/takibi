@@ -77,13 +77,6 @@ ATOMIC_ALLOWED = {
         "release ordering prevents an external debugger from accepting its "
         "fields before the completed sequence is published. A lock cannot "
         "help a halted out-of-band reader",
-    "printk/log.tkb":
-        "GitHub issue #613: the lockless log ring's reserve, claim, commit "
-        "and discard are acq_rel compare-swaps (kernel/models/LogRing.tla, "
-        "litmus/LogRing*.litmus). AtomicWord's own compare-swap is acquire "
-        "only, and a commit without release lets a reader see Committed "
-        "before the text (LogRingCommit+unfixed-writer). One helper, "
-        "kernel_log_cas, makes every such call",
 }
 
 

@@ -123,13 +123,12 @@ private fn kernel_log_observe(word: *AtomicWord) -> usize !{unsafe} {
     return atomic_word_load(word);
 }
 
-// Every compare-swap of the ring, acq_rel. Raw because an AtomicWord's own
-// compare-swap is acquire only, and a commit must release
-// (LogRingCommit+unfixed-writer); scripts/check_lock_discipline.py lists
-// this file for it.
+// Every compare-swap of the ring, acq_rel: a commit must release
+// (LogRingCommit+unfixed-writer). One helper, so emitted_map.txt ties every
+// compare-swap to one CASAL.
 private fn kernel_log_cas(word: *AtomicWord, expected: usize, desired: usize)
-        -> CasResult !{unsafe} {
-    return unsafe { atomic_compare_swap_acq_rel(word as usize, expected, desired) };
+        -> CasResult {
+    return atomic_word_compare_swap_acq_rel(word, expected, desired);
 }
 
 private fn kernel_log_word(seq: usize, cpu: usize, span: usize, state: usize)
