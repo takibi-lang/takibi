@@ -75,6 +75,9 @@ FRAME_MINT_CALLERS = {
         # The debugger and the crash reporter, declared mint code by design.
         "ddb_current_unwind_root", "kernel_ddb_sync_dispatch",
         "crash_snapshot_capture",
+        # GitHub issue #920: the crash path's debug-stop root, split out of
+        # crash_snapshot_capture so the compiler can hold it to no lock.
+        "crash_world_stop_report",
         # Boot-time probes that stand in frames which are not real ones.
         "kernel_process_probe_tick_address",
         "kernel_process_trace_block_wake_probe",
@@ -115,7 +118,8 @@ FRAME_USIZE_SEAMS = {
     # The debugger and crash reporter read frames as integers by design.
     "kernel_ddb_enter", "kernel_ddb_sync_dispatch",
     "kernel_ddb_stopped_root_publish", "el1_exception_evidence_from_frame",
-    "crash_snapshot_capture", "kernel_invariant_evidence",
+    "crash_snapshot_capture", "crash_world_stop_report",
+    "kernel_invariant_evidence",
     "kernel_process_crash_frame_usable", "ddb_stopped_root_check",
     "ddb_bt_test_stopped_check", "kernel_ddb_enter_stopped",
 }
