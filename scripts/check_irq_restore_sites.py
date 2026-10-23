@@ -67,6 +67,14 @@ ALLOWED = {
             "platform_irq_init(), which is where interrupt delivery is turned "
             "on for the first time in the boot",
     },
+    "kernel/kernel/syscall.tkb": {
+        "enable_irq();":
+            "signal_return_exit (#949): the return-to-EL0 hook ending the "
+            "process. The only mask there is the exception entry's own, and "
+            "this path never returns to it: it unmasks exactly as "
+            ".Lsyscall_dispatch does before a syscall's exit, and leaves "
+            "through el0_context_resume or the idle stack, which mask again",
+    },
     "kernel/platform/rpi5/intc.tkb": {
         "enable_irq();":
             "platform_irq_init(), same as QEMU's",
