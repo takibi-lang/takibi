@@ -144,3 +144,72 @@ fn platform_irq_cpu_interface_init() {
 fn platform_pmu_irq_debug() -> usize {
     return gic_enable_words();
 }
+
+// GitHub issue #920: the head of both platforms' IRQ dispatch, shared because
+// it is GIC-only: acknowledge, count, serve the debug stop with DAIF.I still
+// set, otherwise hand the mask to the GIC priority mask for the rest of the
+// handler. The platform's own sources are platform_irq_dispatch_ordinary,
+// defined once in each kernel/platform/<target>/intc.tkb.
+fn gic_irq_dispatch(frame: sink FrameRef[process], lower_el: bool)
+        -> AnyFrame !{interrupt, unsafe} {
+    // GitHub issue #632: GICC_IAR is not the interrupt number alone. For an
+    // SGI, bits [12:10] name the CPU that sent it, so the world-stop SGI from
+    // core 3 reads 0xC01, not 1, and comparing the raw word recognised only
+    // stops that core 0 had started. A stop begun on a peer -- an ASID
+    // rollover under a four-core workload -- was acknowledged by nobody.
+    // Decide on the INTID; EOI with the whole word, which is what the GIC
+    // requires to deactivate that sender's SGI.
+    let iar: u32 = gicc.iar;
+    let id: u32 = iar & 0x3FF;
+    // GitHub issue #715: counted before any branch, so the world stop and
+    // every acknowledged INTID are in DDB's `intr` view. Only this CPU's
+    // own row is written.
+    irq_count_record(id);
+
+    // Stop before touching profiling, scheduler, driver, or reporter state:
+    // those are consumers of the proof the initiator is waiting to receive.
+    // GitHub issue #920: the debug stop, above the priority mask; DAIF.I
+    // stays set for the whole pen.
+    if (id == GIC_DEBUG_STOP_SGI) {
+        // GitHub issue #505: the pen, and the root this core publishes on
+        // the way into it.
+        kernel_world_stop_serve(frame);
+        gicc.eoir = iar;
+        return frame_any(frame);
+    }
+    // GitHub issue #920: every other source hands this handler's mask to
+    // the GIC priority mask and clears DAIF.I, so the stop above can still
+    // nest into the handler if it never returns; the mask it interrupted is
+    // put back, DAIF.I first, on the way out.
+    let interrupted: usize = irq_nest_open();
+    let resumed: AnyFrame = gic_irq_dispatch_after_open(frame, lower_el, iar, id);
+    irq_nest_close(interrupted);
+    return resumed;
+}
+
+
+// The quiescent stop is an ordinary source: taken only where ordinary IRQs
+// were open, so this core holds no masking lock while it waits in the pen.
+fn gic_irq_dispatch_after_open(frame: sink FrameRef[process], lower_el: bool,
+        iar: u32, id: u32) -> AnyFrame !{interrupt, unsafe} {
+    if (id == GIC_WORLD_STOP_SGI) {
+        kernel_world_stop_serve(frame);
+        gicc.eoir = iar;
+        return frame_any(frame);
+    }
+    return platform_irq_dispatch_ordinary(frame, lower_el, iar, id);
+}
+
+// The exception_entry dispatch targets (kernel/arch/arm64/kernel/
+// exception_frame.tkb), one for each entry vector.
+fn platform_irq_dispatch(frame_sp: usize) -> usize !{interrupt} {
+    return frame_any_address(gic_irq_dispatch(
+        frame_ref_from_entry(frame_sp, kernel_process_entry_generation()),
+        false));
+}
+
+fn platform_el0_irq_dispatch(frame_sp: usize) -> usize !{interrupt} {
+    return frame_any_address(gic_irq_dispatch(
+        frame_ref_from_entry(frame_sp, kernel_process_entry_generation()),
+        true));
+}

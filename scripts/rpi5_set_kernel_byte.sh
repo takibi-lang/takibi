@@ -3,7 +3,7 @@
 #
 # OpenOCD writes memory by making the selected core do the access, so the core
 # must be stopped in EL1 before it touches a kernel address. Both active cores
-# may now be running EL0 code. Catch core 0 at rpi5_irq_dispatch_inner with a
+# may now be running EL0 code. Catch core 0 at gic_irq_dispatch with a
 # temporary hardware breakpoint; its periodic timer takes it there without an
 # external timing race, rather than depending on which exception level an
 # asynchronous halt happens to hit.
@@ -29,9 +29,9 @@ if [ -z "${address#0x}" ]; then
     echo "error: symbol not found in $ELF: $SYMBOL" >&2
     exit 1
 fi
-irq_address="0x$(llvm-nm-19 "$ELF" | awk '$3 == "rpi5_irq_dispatch_inner" && !seen { print $1; seen = 1 }')"
+irq_address="0x$(llvm-nm-19 "$ELF" | awk '$3 == "gic_irq_dispatch" && !seen { print $1; seen = 1 }')"
 if [ -z "${irq_address#0x}" ]; then
-    echo "error: rpi5_irq_dispatch_inner not found in $ELF" >&2
+    echo "error: gic_irq_dispatch not found in $ELF" >&2
     exit 1
 fi
 speed_args=()

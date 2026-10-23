@@ -30,7 +30,8 @@ from pass_line import report_pass
 from source_scan import code_only
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-INTC_GLOB = "kernel/platform/*/intc.tkb"
+# GitHub issue #920: the shared GICv2 dispatch head reads IAR now.
+INTC_GLOBS = ("kernel/platform/*/intc.tkb", "kernel/arch/arm64/kernel/gicv2.tkb")
 
 # The read is `gicc.iar` through the GIC's IoHandle (#637 step A); the raw
 # `*gicc_iar` spelling it replaced is still recognized, so a revert is seen.
@@ -94,7 +95,7 @@ def main() -> int:
         print("FAIL gic-iar-intid: the control plants the pre-#632 raw "
               "comparison and the check did not refuse it", file=sys.stderr)
         return 1
-    files = sorted(REPO.glob(INTC_GLOB))
+    files = sorted(f for g in INTC_GLOBS for f in REPO.glob(g))
     total_reads = 0
     problems = []
     for path in files:

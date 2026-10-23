@@ -41,7 +41,7 @@ def run_case(mode: str) -> subprocess.CompletedProcess[str]:
             tools / "llvm-nm-19",
             "#!/bin/sh\n"
             "printf '%s\\n' '0000000000555651 B test_flag' "
-            "'0000000000201820 T rpi5_irq_dispatch_inner'\n",
+            "'0000000000201820 T gic_irq_dispatch'\n",
         )
         if mode == "success":
             openocd = "printf '%s\\n' '0x00555651: 01'\n"
