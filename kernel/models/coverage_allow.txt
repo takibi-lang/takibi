@@ -25,3 +25,6 @@ WorldStopRetry fixed NeedLocked: only variant holdlock begins a stop while holdi
 LogRing fixed CommitLost: only variant noprev lets a claim take a Reserved slot
 LogRing fixed4 CommitLost: only variant noprev lets a claim take a Reserved slot
 LogRing fixed2 CommitLost: only variant noprev lets a claim take a Reserved slot
+# Under GICv2's active-state gate the busy word is cleared before the EOI
+# that lets the SPI reach another core, so the try-lock is never contended.
+UartServe gated TryLockBusy: the active gate keeps a second core out until the server's EOI, after its release

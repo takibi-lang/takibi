@@ -146,6 +146,13 @@ check_model ConsoleOwner Safety 8 \
     blind:CInitBlind:TerminalStays:violated \
     nosticky:CInitNoSticky:TerminalStays:violated
 
+# GitHub issue #925: the UART serve try-lock under 1-of-N delivery. Quiesces
+# is TLC's; the edge variant also loses NoStranded, which Apalache checks.
+check_model UartServe Safety 8 \
+    fixed:CInitFixed:pass:ok \
+    gated:CInitGated:pass:ok \
+    edge:CInitEdge:NoStranded:violated
+
 check_model FixedDmaOwnership Safety 5 \
     fixed:CInitFixed:pass:ok \
     unfixed:CInitUnfixed:Safety:violated \

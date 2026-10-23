@@ -594,6 +594,40 @@ of which may enter DDB, continue, or enter a terminal path.
 | `Terminal` | `kernel_log_tx_stand_down`, `kernel_log_enter_emergency`, `crash_console_run` | a take at emergency or panic priority, or TERMINAL alone when outranked; the core never returns | the per-core emergency byte path -- irrelevant to `TerminalStays`: it makes that core spin and never reads the word; the bounded retry of a lost compare-swap -- irrelevant to `TerminalStays`: each attempt is this one action, and an exhausted retry leaves the word as some other terminal taker set it | `6b348510407b` |
 | `Resume` | `kernel_log_tx_resume` | the compare-swap from DDB's own owner field back to the found owner, keeping TERMINAL; `BLIND` stores it unconditionally | the read-back line DDB prints -- irrelevant to `TerminalStays`: it only reads the word | `004cf2fbbddf` |
 
+## UartServe.tla -- the UART serve try-lock under 1-of-N delivery (#925)
+
+#830 routes the UART SPI to every online core (GICv2 1-of-N), and one core
+at a time serves it: `uart_irq_serve` takes `uart_irq_service_busy` by
+compare-swap, and a core that finds it taken EOIs and leaves. That is safe
+only because every PL011 source is level: what the server did not drain
+keeps the line up, so the interrupt is pending again. Three cores, an RX
+FIFO of two bytes, and three source events (RX bytes or TX-space) in all.
+`NoStranded`: no RX byte or TX-space event waits with no core about to serve
+it and nothing pending; `OneServer`; `Quiesces` (liveness, TLC only): once
+the sources stop, everything is served.
+
+- `fixed` drops GICv2's active-state gate (`GATE = FALSE`): the SPI may reach
+  a second core while the first is inside the handler, as
+  `uart_irq_affinity.tkb` conservatively assumes. This is the variant that
+  contends the try-lock.
+- `gated` keeps the gate. The kernel clears the busy word before its EOI,
+  so under the gate the try-lock is never contended (`TryLockBusy` is
+  allow-listed as dead): the try-lock is a defence for deliveries the gate
+  does not cover, not a path QEMU's GIC takes.
+- `edge` (`EDGE = TRUE`) latches the interrupt on a rising line and lets a
+  delivery consume it. A byte arriving after the server's drain goes to a
+  core that finds the service busy and leaves. TLC reports `NoStranded`.
+
+| Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
+| --- | --- | --- | --- | --- |
+| `Deliver` | `uart_irq_route` | the GIC hands the pending SPI to any idle core of the route, which acknowledges it; `GATE` forbids it while the SPI is active | which cores are online and the route rewrite after each EOI -- irrelevant to `NoStranded`: a narrower route only forbids some deliveries, and pending stays a property of the source | `aedb240b2679` |
+| `TryLockWin` | `uart_irq_serve` | the compare-swap of the busy word from 0 to 1 wins | the per-core taken counter -- irrelevant to `NoStranded`: it is only read by the boot report | `c9cd68dff270` |
+| `TryLockBusy` | `uart_irq_serve` | the compare-swap finds the word taken; the core goes to its EOI | nothing | `c9cd68dff270` |
+| `ServeTx` | `uart_irq_service`, `uart_tx_service` | the TX FIFO is refilled above its level | the writer wake under the run lock -- modelled elsewhere: `ConsoleTx.TxWake` | `875994c4fc77` |
+| `DrainRx` | `uart_irq_service`, `uart_rx_drain` | the RX FIFO is drained to RXFE | a BREAK that ends the drain early -- irrelevant to `NoStranded`: the bytes it leaves keep the line asserted, the same as bytes that arrive after the drain | `cf3a268c3ce0` |
+| `Release` | `uart_irq_serve` | the busy word is stored back to 0 | nothing | `c9cd68dff270` |
+| `Eoi` | `rp1_vector_iack`, `uart_irq_after_eoi` | the SPI stops being active on this core | DDB entry after the EOI -- irrelevant to `NoStranded`: the core takes no further UART step, which the model already allows by never delivering to it | `2b6c064a0f33` |
+
 ## WorldStop.tla -- CPU startup and a complete machine stop
 
 A shared nonblocking gate serializes CPU_ON reservations and stop requests.
