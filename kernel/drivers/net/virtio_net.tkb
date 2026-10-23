@@ -346,20 +346,6 @@ fn net_init() -> NetInitResult {
     return NetInitResult::Ready(view NetRxCanAcquire);
 }
 
-// DDB reads the device completion index only after the driver has published
-// its RX ring. The acquire barrier pairs with the device's DMA writes; no
-// receive token is taken or consumed by this observation.
-fn kernel_net_rx_frame_pending() -> NetPendingState {
-    if (virtio_net_ready == false) { return NetPendingState::No; }
-    let VirtioNetUsed::Seen(ring) = virtio_net_used(VIRTIO_USED_NET_RX) else {
-        VirtioNetUsed::None => { return NetPendingState::No; }
-    };
-    if (rx_used_seen == ring.idx) {
-        return NetPendingState::No;
-    }
-    return NetPendingState::Yes;
-}
-
 // GitHub issue #237 M4: exactly ONE interrupt_wait() call, not a retry
 // loop -- unlike examples/common_qemu/virtio_mmio.tkb's own net_rx_wait()
 // (which this was first copied from), this driver's callers

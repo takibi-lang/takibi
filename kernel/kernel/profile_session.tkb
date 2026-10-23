@@ -128,6 +128,29 @@ private fn profile_buffer_lock(lock: *Mutex @ address) -> ProfileBufferGuard[add
     return guard;
 }
 
+// GitHub issue #920: DDB's dump runs under the debug stop, where a held
+// core (a PMU interrupt mid-store) may own a buffer lock. One attempt.
+must_use variant ProfileBufferTry[lock: addr] {
+    Busy;
+    Taken(ProfileBufferGuard[lock]);
+}
+
+private fn profile_buffer_try_lock(lock: *Mutex @ address)
+        -> ProfileBufferTry[address] !{unsafe} {
+    match mutex_try_acquire(lock) {
+        MutexTry::Busy => { return ProfileBufferTry::Busy; }
+        MutexTry::Taken(flags) => {
+            let mut guard: ProfileBufferGuard[address] = { flags };
+            return ProfileBufferTry::Taken(guard);
+        }
+    }
+}
+
+private fn profile_buffer_try_unlock(guard: sink ProfileBufferGuard[address],
+                                     lock: *Mutex @ address) !{unsafe} {
+    mutex_try_release(lock, guard.flags);
+}
+
 private fn profile_buffer_unlock(guard: sink ProfileBufferGuard[address],
                                  lock: *Mutex @ address) {
     mutex_release(lock, guard.flags);
@@ -744,12 +767,18 @@ fn profile_session_dump() !{unsafe} {
     let mut total: usize = 0;
     let mut lost: usize = 0;
     for cpu: usize in 0..<KERNEL_MAX_CORES {
-        let guard = profile_buffer_lock(&profile_core_store[cpu].mutex);
+      match profile_buffer_try_lock(&profile_core_store[cpu].mutex) {
+       ProfileBufferTry::Busy => {
+        profile_puts(bs"profile-session: core cpu=");
+        profile_put_udec(cpu);
+        profile_puts(bs" busy\n");
+       }
+       ProfileBufferTry::Taken(guard) => {
         let taken = place_take(guard, &profile_core_store[cpu].mutex,
                                profile_core_store[cpu].buffer);
         match taken {
             Place::Empty => {
-                profile_buffer_unlock(guard, &profile_core_store[cpu].mutex);
+                profile_buffer_try_unlock(guard, &profile_core_store[cpu].mutex);
             }
             Place::Full(records) => {
                 let stored: usize = profile_core_state[cpu].stored;
@@ -780,7 +809,7 @@ fn profile_session_dump() !{unsafe} {
                 profile_puts(bs"\n");
                 let back = place_put(guard, &profile_core_store[cpu].mutex,
                                      profile_core_store[cpu].buffer, records);
-                profile_buffer_unlock(guard, &profile_core_store[cpu].mutex);
+                profile_buffer_try_unlock(guard, &profile_core_store[cpu].mutex);
                 match back {
                     Place::Empty => {}
                     Place::Full(other) => {
@@ -790,15 +819,17 @@ fn profile_session_dump() !{unsafe} {
                 }
             }
         }
+       }
+      }
     }
     profile_puts(bs"profile-session: end samples=");
     profile_put_udec(total);
     profile_puts(bs" lost=");
     profile_put_udec(lost);
     profile_puts(bs"\n");
-    for cpu: usize in 0..<KERNEL_MAX_CORES {
-        profile_core_release(cpu);
-    }
+    // GitHub issue #920: the buffers are not given back here: the page
+    // allocator's lock may be held by a core this stop holds. The next
+    // profile_session_start releases them before it allocates.
     atomic_word_store(&profile_session_epoch,
                       atomic_word_load(&profile_session_epoch) + 1);
     atomic_word_store(&profile_session_mode, 0);

@@ -2438,8 +2438,8 @@ private fn kernel_process_monitor_put_command(snapshot: ProcessDiagnosticSnapsho
     while (index < snapshot.command_line_length && index < 512) {
         let byte: u8 = snapshot.command_line[index];
         if (byte == 0) { return; }
-        if (byte >= 0x20 && byte <= 0x7E) { uart_putc(byte); }
-        else { uart_putc(0x3F); }
+        if (byte >= 0x20 && byte <= 0x7E) { uart_debug_putc(byte); }
+        else { uart_debug_putc(0x3F); }
         index = index + 1;
     }
 }
@@ -2449,9 +2449,9 @@ private fn kernel_process_monitor_put_command(snapshot: ProcessDiagnosticSnapsho
 // stopped, and the UART frontend does not become a second process model.
 fn kernel_process_monitor_ps(stopped: borrow MachineStopped[&kernel_world_stop]) !{unsafe} {
     if (kernel_process_stopped_metadata_busy(stopped)) {
-        kernel_boot_log("ps: unavailable reason=pool-busy\n"); return;
+        ddb_puts("ps: unavailable reason=pool-busy\n"); return;
     }
-    kernel_boot_log("ps: pid ppid state pages command\n");
+    ddb_puts("ps: pid ppid state pages command\n");
     let mut after: usize = 0;
     let mut walking: bool = true;
     while (walking) {
@@ -2460,16 +2460,16 @@ fn kernel_process_monitor_ps(stopped: borrow MachineStopped[&kernel_world_stop])
         else {
             match scheduled_process_diagnostic_copy(stopped, pid) {
                 ProcessStoppedDiagnosticResult::Missing => {}
-                ProcessStoppedDiagnosticResult::Busy => { kernel_boot_log("ps: unavailable reason=pool-busy\n"); }
-                ProcessStoppedDiagnosticResult::Stale => { kernel_boot_log("ps: unavailable reason=stale-image\n"); }
+                ProcessStoppedDiagnosticResult::Busy => { ddb_puts("ps: unavailable reason=pool-busy\n"); }
+                ProcessStoppedDiagnosticResult::Stale => { ddb_puts("ps: unavailable reason=stale-image\n"); }
                 ProcessStoppedDiagnosticResult::Found(snapshot) => {
-                    kernel_boot_log("ps: "); uart_put_udec(snapshot.pid);
-                    kernel_boot_log(" "); uart_put_udec(snapshot.ppid);
-                    kernel_boot_log(" "); uart_putc(snapshot.state);
-                    kernel_boot_log(" "); uart_put_udec(snapshot.resident_pages);
-                    kernel_boot_log(" ");
+                    ddb_puts("ps: "); ddb_put_udec(snapshot.pid);
+                    ddb_puts(" "); ddb_put_udec(snapshot.ppid);
+                    ddb_puts(" "); uart_debug_putc(snapshot.state);
+                    ddb_puts(" "); ddb_put_udec(snapshot.resident_pages);
+                    ddb_puts(" ");
                     kernel_process_monitor_put_command(snapshot);
-                    kernel_boot_log("\n");
+                    ddb_puts("\n");
                 }
             }
             after = pid;
@@ -2479,11 +2479,11 @@ fn kernel_process_monitor_ps(stopped: borrow MachineStopped[&kernel_world_stop])
 
 fn kernel_process_monitor_proc(stopped: borrow MachineStopped[&kernel_world_stop], pid: usize) !{unsafe} {
     if (kernel_process_stopped_metadata_busy(stopped)) {
-        kernel_boot_log("proc: unavailable reason=pool-busy\n"); return;
+        ddb_puts("proc: unavailable reason=pool-busy\n"); return;
     }
     let mut slot: ProcessSlot = match scheduled_process_slot_for_pid_stopped(stopped, pid) {
         ProcessSlotForPidResult::Missing => {
-            kernel_boot_log("proc: no such pid\n");
+            ddb_puts("proc: no such pid\n");
             return;
         }
         ProcessSlotForPidResult::Found(found) => { found }
@@ -2491,32 +2491,32 @@ fn kernel_process_monitor_proc(stopped: borrow MachineStopped[&kernel_world_stop
     let snapshot: ProcessDiagnosticSnapshot =
         match scheduled_process_diagnostic_copy(stopped, pid) {
             ProcessStoppedDiagnosticResult::Missing => {
-                kernel_boot_log("proc: no such pid\n");
+                ddb_puts("proc: no such pid\n");
                 return;
             }
-            ProcessStoppedDiagnosticResult::Busy => { kernel_boot_log("proc: unavailable reason=pool-busy\n"); return; }
-            ProcessStoppedDiagnosticResult::Stale => { kernel_boot_log("proc: unavailable reason=stale-image\n"); return; }
+            ProcessStoppedDiagnosticResult::Busy => { ddb_puts("proc: unavailable reason=pool-busy\n"); return; }
+            ProcessStoppedDiagnosticResult::Stale => { ddb_puts("proc: unavailable reason=stale-image\n"); return; }
             ProcessStoppedDiagnosticResult::Found(found) => { found }
         };
-    kernel_boot_log("proc: pid="); uart_put_udec(snapshot.pid);
-    kernel_boot_log(" ppid="); uart_put_udec(snapshot.ppid);
-    kernel_boot_log(" state="); uart_putc(snapshot.state);
-    kernel_boot_log(" wait=");
+    ddb_puts("proc: pid="); ddb_put_udec(snapshot.pid);
+    ddb_puts(" ppid="); ddb_put_udec(snapshot.ppid);
+    ddb_puts(" state="); uart_debug_putc(snapshot.state);
+    ddb_puts(" wait=");
     match process_wait_reason(&scheduled_process_record_stopped(stopped, stopped, slot).state) {
-        ProcessWaitReason::None => { uart_put_udec(0); }
-        ProcessWaitReason::UartRx => { uart_put_udec(1); }
-        ProcessWaitReason::ChildExit => { uart_put_udec(2); }
-        ProcessWaitReason::NetRx => { uart_put_udec(3); }
-        ProcessWaitReason::Deadline => { uart_put_udec(4); }
-        ProcessWaitReason::Signal => { uart_put_udec(5); }
-        ProcessWaitReason::UartTx => { uart_put_udec(6); }
+        ProcessWaitReason::None => { ddb_put_udec(0); }
+        ProcessWaitReason::UartRx => { ddb_put_udec(1); }
+        ProcessWaitReason::ChildExit => { ddb_put_udec(2); }
+        ProcessWaitReason::NetRx => { ddb_put_udec(3); }
+        ProcessWaitReason::Deadline => { ddb_put_udec(4); }
+        ProcessWaitReason::Signal => { ddb_put_udec(5); }
+        ProcessWaitReason::UartTx => { ddb_put_udec(6); }
     }
-    kernel_boot_log(" saved_sp=");
-    uart_put_hex(scheduled_process_record_stopped(stopped, stopped, slot).saved_sp);
-    kernel_boot_log(" pages="); uart_put_udec(snapshot.resident_pages);
-    kernel_boot_log(" command=");
+    ddb_puts(" saved_sp=");
+    ddb_put_hex(scheduled_process_record_stopped(stopped, stopped, slot).saved_sp);
+    ddb_puts(" pages="); ddb_put_udec(snapshot.resident_pages);
+    ddb_puts(" command=");
     kernel_process_monitor_put_command(snapshot);
-    kernel_boot_log("\n");
+    ddb_puts("\n");
 }
 
 // GitHub issue #693 step 5: the exec staging setters take the run guard
@@ -5270,21 +5270,21 @@ fn kernel_process_exec_failure_render() {
     if (kernel_process_exec_failure_reason == KernelExecFailureReason::None) {
         return;
     }
-    kernel_boot_log("oops: exec prepare=");
+    ddb_puts("oops: exec prepare=");
     match kernel_process_exec_failure_reason {
-        KernelExecFailureReason::None => { kernel_boot_log("none\n"); }
-        KernelExecFailureReason::NotChildOrPending => { kernel_boot_log("not-child-or-pending\n"); }
-        KernelExecFailureReason::CloneVmMissing => { kernel_boot_log("clone-vm-missing\n"); }
-        KernelExecFailureReason::DynamicResolveInvalid => { kernel_boot_log("dynamic-resolve-invalid\n"); }
-        KernelExecFailureReason::DynamicPairInvalid => { kernel_boot_log("dynamic-pair-invalid\n"); }
-        KernelExecFailureReason::ImageAlreadyInstalled => { kernel_boot_log("image-already-installed\n"); }
-        KernelExecFailureReason::ImageNoTargetRoot => { kernel_boot_log("image-no-target-root\n"); }
-        KernelExecFailureReason::NoImageResolved => { kernel_boot_log("no-image-resolved\n"); }
-        KernelExecFailureReason::StaticImageInvalid => { kernel_boot_log("static-image-invalid\n"); }
-        KernelExecFailureReason::StaticMapOutOfMemory => { kernel_boot_log("static-map-out-of-memory\n"); }
-        KernelExecFailureReason::ArgvPageMissing => { kernel_boot_log("argv-page-missing\n"); }
-        KernelExecFailureReason::ImageRecordOutOfMemory => { kernel_boot_log("image-record-out-of-memory\n"); }
-        KernelExecFailureReason::DebuggerAfterCommit => { kernel_boot_log("debugger-after-commit\n"); }
+        KernelExecFailureReason::None => { ddb_puts("none\n"); }
+        KernelExecFailureReason::NotChildOrPending => { ddb_puts("not-child-or-pending\n"); }
+        KernelExecFailureReason::CloneVmMissing => { ddb_puts("clone-vm-missing\n"); }
+        KernelExecFailureReason::DynamicResolveInvalid => { ddb_puts("dynamic-resolve-invalid\n"); }
+        KernelExecFailureReason::DynamicPairInvalid => { ddb_puts("dynamic-pair-invalid\n"); }
+        KernelExecFailureReason::ImageAlreadyInstalled => { ddb_puts("image-already-installed\n"); }
+        KernelExecFailureReason::ImageNoTargetRoot => { ddb_puts("image-no-target-root\n"); }
+        KernelExecFailureReason::NoImageResolved => { ddb_puts("no-image-resolved\n"); }
+        KernelExecFailureReason::StaticImageInvalid => { ddb_puts("static-image-invalid\n"); }
+        KernelExecFailureReason::StaticMapOutOfMemory => { ddb_puts("static-map-out-of-memory\n"); }
+        KernelExecFailureReason::ArgvPageMissing => { ddb_puts("argv-page-missing\n"); }
+        KernelExecFailureReason::ImageRecordOutOfMemory => { ddb_puts("image-record-out-of-memory\n"); }
+        KernelExecFailureReason::DebuggerAfterCommit => { ddb_puts("debugger-after-commit\n"); }
     }
 }
 
@@ -5420,46 +5420,46 @@ fn kernel_process_crash_trace_copy(output: borrow [usize; KERNEL_CRASH_TRACE_WOR
 fn kernel_process_trace_render(
         trace: borrow [usize; KERNEL_CRASH_TRACE_WORDS..],
         count: usize, prefix: *u8) {
-    kernel_boot_log(prefix);
-    kernel_boot_log(" count=");
-    uart_put_udec(count);
-    kernel_boot_log("\n");
+    ddb_puts(prefix);
+    ddb_puts(" count=");
+    ddb_put_udec(count);
+    ddb_puts("\n");
     for item: usize in 0..<KERNEL_CRASH_TRACE_EVENTS {
         if (item < count) {
             let base: usize = item * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT;
-            kernel_boot_log(prefix);
-            kernel_boot_log(" seq=");
-            uart_put_udec(trace[
+            ddb_puts(prefix);
+            ddb_puts(" seq=");
+            ddb_put_udec(trace[
                 base + KERNEL_PROCESS_TRACE_SEQUENCE_WORD]);
-            kernel_boot_log(" cpu=");
-            uart_put_udec(trace[base + KERNEL_PROCESS_TRACE_CPU_WORD]);
-            kernel_boot_log(" event=");
-            uart_put_udec(trace[base + KERNEL_PROCESS_TRACE_EVENT_WORD]);
-            kernel_boot_log(" pid=");
-            uart_put_udec(trace[base + KERNEL_PROCESS_TRACE_PID_WORD]);
-            kernel_boot_log(" gen=");
-            uart_put_udec(trace[
+            ddb_puts(" cpu=");
+            ddb_put_udec(trace[base + KERNEL_PROCESS_TRACE_CPU_WORD]);
+            ddb_puts(" event=");
+            ddb_put_udec(trace[base + KERNEL_PROCESS_TRACE_EVENT_WORD]);
+            ddb_puts(" pid=");
+            ddb_put_udec(trace[base + KERNEL_PROCESS_TRACE_PID_WORD]);
+            ddb_puts(" gen=");
+            ddb_put_udec(trace[
                 base + KERNEL_PROCESS_TRACE_GENERATION_WORD]);
-            kernel_boot_log(" peer=");
-            uart_put_udec(trace[
+            ddb_puts(" peer=");
+            ddb_put_udec(trace[
                 base + KERNEL_PROCESS_TRACE_PEER_PID_WORD]);
-            kernel_boot_log(" peer-gen=");
-            uart_put_udec(trace[
+            ddb_puts(" peer-gen=");
+            ddb_put_udec(trace[
                 base + KERNEL_PROCESS_TRACE_PEER_GENERATION_WORD]);
-            kernel_boot_log(" state=");
-            uart_put_udec(trace[base + KERNEL_PROCESS_TRACE_STATE_WORD]);
-            kernel_boot_log(" wait=");
-            uart_put_udec(trace[
+            ddb_puts(" state=");
+            ddb_put_udec(trace[base + KERNEL_PROCESS_TRACE_STATE_WORD]);
+            ddb_puts(" wait=");
+            ddb_put_udec(trace[
                 base + KERNEL_PROCESS_TRACE_WAIT_REASON_WORD]);
-            kernel_boot_log(" root=");
-            uart_put_udec(trace[base + KERNEL_PROCESS_TRACE_ROOT_WORD]);
-            kernel_boot_log(" sp=");
-            uart_put_hex(
+            ddb_puts(" root=");
+            ddb_put_udec(trace[base + KERNEL_PROCESS_TRACE_ROOT_WORD]);
+            ddb_puts(" sp=");
+            ddb_put_hex(
                 trace[base + KERNEL_PROCESS_TRACE_SAVED_SP_WORD]);
-            kernel_boot_log(" aux=");
-            uart_put_hex(
+            ddb_puts(" aux=");
+            ddb_put_hex(
                 trace[base + KERNEL_PROCESS_TRACE_AUX_WORD]);
-            kernel_boot_log("\n");
+            ddb_puts("\n");
         }
     }
 }

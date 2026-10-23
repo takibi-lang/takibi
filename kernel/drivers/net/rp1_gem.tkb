@@ -420,15 +420,6 @@ fn net_init() -> NetInitResult !{unsafe} {
     return NetInitResult::Ready(view NetRxCanAcquire);
 }
 
-// DDB sees a completed hardware-owned descriptor without acquiring or
-// returning the RX capability. Refreshing the live descriptor permits a
-// completion check without acquiring the separate RX data buffer.
-fn kernel_net_rx_frame_pending() -> NetPendingState {
-    if (rp1_gem_net_ready == false) { return NetPendingState::No; }
-    if (gem_rx_ring_poll()) { return NetPendingState::Yes; }
-    return NetPendingState::No;
-}
-
 // Queue-0 status can be clear-on-read or W1C (DCFG1.IRQCOR). Read the
 // primary ISR and acknowledge only the observed bits. Writing them after a
 // clear-on-read is harmless; RP1's level-triggered vector is IACKed by the

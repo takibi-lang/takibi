@@ -99,19 +99,6 @@ let mut mip0: IoHandle(Rp1Mip);
 let mut rp1_msix: IoHandle(Rp1MsixTable);
 let mut rp1_msix_cfg_set: IoHandle(Rp1MsixCfgSet);
 
-// Send the world-stop SGI to every active CPU except the initiator. GICv2's
-// target-list field uses the same CPU-interface bits as ITARGETSR.
-fn platform_world_stop_notify(mask: usize, owner: usize) !{unsafe} {
-    let mut targets: u32 = 0;
-    for cpu: usize in 0..<KERNEL_MAX_CORES {
-        if ((mask & (1 << cpu)) != 0 && cpu != owner) {
-            targets = targets | ((1 << cpu) as u32);
-        }
-    }
-    if (targets == 0) { return; }
-    platform_gic_sgi_send(targets, GIC_WORLD_STOP_SGI);
-}
-
 // GitHub issue #447: the GICv2 CPU INTERFACE. GICC_PMR and GICC_CTLR are
 // BANKED PER CORE, so core 0's write does not reach core 1, and a core that
 // never runs this has interrupts disabled at its own interface however the
@@ -273,7 +260,9 @@ fn rpi5_irq_dispatch_inner(frame: sink FrameRef[process], lower_el: bool)
 
     // Stop before touching profiling, scheduler, driver, or reporter state:
     // those are consumers of the proof the initiator is waiting to receive.
-    if (id == GIC_WORLD_STOP_SGI) {
+    // GitHub issue #920: the debug stop, above the priority mask; DAIF.I
+    // stays set for the whole pen.
+    if (id == GIC_DEBUG_STOP_SGI) {
         // GitHub issue #505: the pen, and the root this core publishes on
         // the way into it -- one shared body, because the two platforms
         // differ here only in the SGI id and the EOI register.
@@ -297,6 +286,13 @@ fn rpi5_irq_dispatch_inner(frame: sink FrameRef[process], lower_el: bool)
 // puts the mask back instead.
 fn rpi5_irq_dispatch_ordinary(frame: sink FrameRef[process], lower_el: bool,
         iar: u32, id: u32) -> AnyFrame !{interrupt, unsafe} {
+    // The quiescent stop: taken only where ordinary IRQs were open, so this
+    // core holds no masking lock while it waits in the pen.
+    if (id == GIC_WORLD_STOP_SGI) {
+        kernel_world_stop_serve(frame);
+        gicc.eoir = iar;
+        return frame_any(frame);
+    }
     workload_profile_irq_enter();
 
     // GitHub issue #497: a PMU overflow, on any core, before the tick path

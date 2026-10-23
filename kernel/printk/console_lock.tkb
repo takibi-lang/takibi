@@ -84,6 +84,28 @@ fn console_unlock(guard: sink ConsoleGuard[console_tx_lock]) {
     mutex_release(&console_tx_lock, guard.flags);
 }
 
+// GitHub issue #920: one attempt, for DDB and the crash path after the debug
+// stop, where a held core may own the lock. Not measured: the measurement
+// state is the lock's, and an attempt that fails must not touch it.
+must_use variant ConsoleTry[lock: addr] {
+    Busy;
+    Taken(ConsoleGuard[lock]);
+}
+
+fn console_try_lock() -> ConsoleTry[console_tx_lock] !{unsafe} {
+    match mutex_try_acquire(&console_tx_lock) {
+        MutexTry::Busy => { return ConsoleTry::Busy; }
+        MutexTry::Taken(flags) => {
+            let mut guard: ConsoleGuard[console_tx_lock] = { flags, 0, false };
+            return ConsoleTry::Taken(guard);
+        }
+    }
+}
+
+fn console_try_unlock(guard: sink ConsoleGuard[console_tx_lock]) !{unsafe} {
+    mutex_try_release(&console_tx_lock, guard.flags);
+}
+
 // Observation for the contention detector; this does not acquire the lock.
 fn console_lock_is_held() -> bool { return mutex_is_held(&console_tx_lock); }
 

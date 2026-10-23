@@ -67,6 +67,30 @@ fn network_capability_unlock(guard: sink NetworkCapabilityGuard[address],
     mutex_release(lock, guard.flags);
 }
 
+// GitHub issue #920: DDB runs under the debug stop and takes no lock; one
+// attempt instead, with its own release.
+must_use variant NetworkCapabilityTry[lock: addr] {
+    Busy;
+    Taken(NetworkCapabilityGuard[lock]);
+}
+
+private fn network_capability_try_lock(lock: *Mutex @ address)
+        -> NetworkCapabilityTry[address] !{unsafe} {
+    match mutex_try_acquire(lock) {
+        MutexTry::Busy => { return NetworkCapabilityTry::Busy; }
+        MutexTry::Taken(flags) => {
+            let mut guard: NetworkCapabilityGuard[address] = { flags };
+            return NetworkCapabilityTry::Taken(guard);
+        }
+    }
+}
+
+private fn network_capability_try_unlock(
+        guard: sink NetworkCapabilityGuard[address], lock: *Mutex @ address)
+        !{unsafe} {
+    mutex_try_release(lock, guard.flags);
+}
+
 fn network_capability_install(ready: sink NetRxCanAcquire)
         -> NetworkCapabilityInstallResult {
     let guard = network_capability_lock(&network_capability_store.mutex);
@@ -169,28 +193,29 @@ fn network_capability_put(ready: sink NetRxCanAcquire)
 // `Blocked net-rx`. DDB calls this with every other core stopped: a held
 // mutex then means a holder was stopped between take and put (Unknown, the
 // lock is not taken), and otherwise the lock is free and taking it is a
-// bounded, uncontended section. The capability is put straight back; the
+// bounded, uncontended section. Since #920 that is one try-lock, not a look
+// then a take: a core the debug stop holds may own the lock. The capability is put straight back; the
 // Conflict arm cannot run while this core holds the mutex it just found the
 // store Empty under, and shuts the duplicate down as
 // network_capability_put does rather than leak a linear value.
 fn network_capability_ddb_stored() -> NetPendingState !{unsafe} {
-    if (mutex_is_held(&network_capability_store.mutex)) {
-        return NetPendingState::Unknown;
-    }
-    let guard = network_capability_lock(&network_capability_store.mutex);
+    let NetworkCapabilityTry::Taken(guard) =
+        network_capability_try_lock(&network_capability_store.mutex) else {
+        NetworkCapabilityTry::Busy => { return NetPendingState::Unknown; }
+    };
     let previous: Place(NetRxCanAcquire) = place_take(
         guard, &network_capability_store.mutex,
         network_capability_store.value);
     match previous {
         Place::Empty => {
-            network_capability_unlock(guard, &network_capability_store.mutex);
+            network_capability_try_unlock(guard, &network_capability_store.mutex);
             return NetPendingState::No;
         }
         Place::Full(ready) => {
             let displaced: Place(NetRxCanAcquire) = place_put(
                 guard, &network_capability_store.mutex,
                 network_capability_store.value, ready);
-            network_capability_unlock(guard, &network_capability_store.mutex);
+            network_capability_try_unlock(guard, &network_capability_store.mutex);
             match displaced {
                 Place::Empty => { return NetPendingState::Yes; }
                 Place::Full(duplicate) => {

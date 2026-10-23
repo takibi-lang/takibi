@@ -121,6 +121,28 @@ fn mutex_is_held(m: *Mutex @ id) -> bool !{unsafe} {
     return spin_lock_is_held(&m.word);
 }
 
+// GitHub issue #920: one attempt, never a wait. For the side that stopped
+// the machine with the debug stop, where a held core may own the lock and
+// waiting for it would never end. Taken carries what mutex_release restores.
+must_use variant MutexTry {
+    Busy;
+    Taken(usize);
+}
+
+fn mutex_try_acquire(m: *Mutex @ id) -> MutexTry !{unsafe} {
+    let flags: usize = mutex_irq_save();
+    if (spin_trylock(&m.word)) { return MutexTry::Taken(flags); }
+    mutex_irq_restore(flags);
+    return MutexTry::Busy;
+}
+
+// The release of a mutex_try_acquire. The same two steps as mutex_release;
+// it waits on nothing, so it does not carry `locks`.
+fn mutex_try_release(m: *Mutex @ id, flags: usize) !{unsafe} {
+    spin_unlock(&m.word);
+    mutex_irq_restore(flags);
+}
+
 // The console's measurement records an actual failed first acquisition, not
 // an unlocked observation that could race with another CPU's acquisition.
 // Current limitations (2026-10-03): only the console uses this result; its

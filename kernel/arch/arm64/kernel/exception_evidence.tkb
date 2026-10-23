@@ -356,14 +356,14 @@ private fn ddb_snapshot_published_sequence_address() -> usize {
     return (&ddb_snapshot_published_sequence) as usize;
 }
 
-private fn ddb_puts(text: *u8) !{unsafe} {
+fn ddb_puts(text: *u8) !{unsafe} {
     while (*text != 0) {
         uart_debug_putc(*text);
         text = text + 1;
     }
 }
 
-private fn ddb_put_hex(value: usize) !{unsafe} {
+fn ddb_put_hex(value: usize) !{unsafe} {
     ddb_puts("0x");
     let mut shift: usize = 60;
     while (true) {
@@ -375,7 +375,7 @@ private fn ddb_put_hex(value: usize) !{unsafe} {
     }
 }
 
-private fn ddb_put_udec(value_in: usize) !{unsafe} {
+fn ddb_put_udec(value_in: usize) !{unsafe} {
     let mut digits: [u8; 20];
     let mut count: usize = 0;
     let mut value: usize = value_in;
@@ -2834,7 +2834,9 @@ private fn kernel_ddb_enter_stopped(
     ddb_snapshot.uart_rx_queued = kernel_uart_rx_queued();
     ddb_snapshot.uart_tx_queued = kernel_log_tx_queue_count();
     ddb_snapshot.uart_tx_low_water = kernel_log_tx_writer_low_water();
-    let frame_pending = kernel_net_rx_frame_pending();
+    // GitHub issue #920: not polled. The NIC ring's lock may be owned by a
+    // core this debug stop holds, and DDB takes no lock; say unknown.
+    let frame_pending: NetPendingState = NetPendingState::Unknown;
     ddb_snapshot.net_rx_frame = net_pending_state_code(frame_pending);
     let connection_pending = kernel_tcp_ddb_connection_pending();
     ddb_snapshot.net_rx_connection = net_pending_state_code(connection_pending);
@@ -2873,7 +2875,7 @@ private fn kernel_ddb_enter_stopped(
     // resumes into the spinning console it interrupted rather than queueing
     // bytes that nothing would drain.
     let console: KernelLogTxStandDown =
-        kernel_log_tx_stand_down(KERNEL_CONSOLE_PRIORITY_DEBUGGER);
+        kernel_log_tx_stand_down_stopped(KERNEL_CONSOLE_PRIORITY_DEBUGGER);
     ddb_puts("\nddb: interrupt-safe UART debugger\n");
     ddb_puts("ddb: console lock probe phase=");
     ddb_put_udec(console_ddb_probe_phase());
@@ -3086,10 +3088,13 @@ fn ddb_render_world_stop_holder() !{interrupt, unsafe} {
 // page allocator's lock-free diagnostic view. A partial token is deliberately
 // not passed to kernel_ddb_enter_stopped: report the stopped set, resume it,
 // and return without inspecting shared state.
+//
+// GitHub issue #920: the debug stop reaches a masked or hung core, which may
+// own any lock, so this root takes none (debug_stopped).
 fn kernel_ddb_enter(frame_sp: usize, entry_kind: usize, entry_source: usize)
-        !{interrupt, unsafe} {
+        !{interrupt, unsafe, debug_stopped} {
     console_ddb_note_entry();
-    match world_stop_machine_begin(DDB_WORLD_STOP_SPINS) {
+    match world_stop_debug_begin(DDB_WORLD_STOP_SPINS) {
         MachineStopResult::Busy => {
             ddb_puts("\nddb: world-stop busy; inspection refused\n");
             ddb_render_world_stop_holder();
@@ -3139,15 +3144,15 @@ fn kernel_ddb_sync_dispatch(frame_sp: usize) -> usize !{interrupt, unsafe} {
 fn crash_snapshot_put_data_abort(esr: usize) {
     let ec: usize = (esr >> 26) & 0x3F;
     if (ec == 0x20 || ec == 0x21) {
-        kernel_boot_log("oops: access=instruction-fetch\n");
+        ddb_puts("oops: access=instruction-fetch\n");
         return;
     }
     if (ec == 0x24 || ec == 0x25) {
-        kernel_boot_log("oops: data-abort dfsc=");
-        uart_put_hex(esr & 0x3F);
-        kernel_boot_log(" access=");
-        if ((esr & (1 << 6)) != 0) { kernel_boot_log("write\n"); }
-        else { kernel_boot_log("read\n"); }
+        ddb_puts("oops: data-abort dfsc=");
+        ddb_put_hex(esr & 0x3F);
+        ddb_puts(" access=");
+        if ((esr & (1 << 6)) != 0) { ddb_puts("write\n"); }
+        else { ddb_puts("read\n"); }
     }
 }
 
@@ -3192,40 +3197,40 @@ private fn crash_snapshot_render_every_core() !{unsafe} {
         rendered = rendered + 1;
         crash_snapshot_render_core(best_core);
     }
-    kernel_boot_log("oops: cores reported=");
-    uart_put_udec(rendered);
-    kernel_boot_log(" faults=");
-    uart_put_udec(unsafe { atomic_load_acquire(crash_fault_order_address()) });
-    kernel_boot_log(" contended=");
-    uart_put_udec(crash_report_contended);
-    kernel_boot_log(" abandoned=");
-    uart_put_udec(crash_report_abandoned);
-    kernel_boot_log("\n");
+    ddb_puts("oops: cores reported=");
+    ddb_put_udec(rendered);
+    ddb_puts(" faults=");
+    ddb_put_udec(unsafe { atomic_load_acquire(crash_fault_order_address()) });
+    ddb_puts(" contended=");
+    ddb_put_udec(crash_report_contended);
+    ddb_puts(" abandoned=");
+    ddb_put_udec(crash_report_abandoned);
+    ddb_puts("\n");
 }
 
 private fn crash_snapshot_render_from(record: *CrashSnapshot,
                                       root_slot: usize) !{unsafe} {
     // A peer can publish while the crash console is waiting at its prompt.
     // Its report starts a fresh line under the existing report claim.
-    kernel_boot_log("\n");
-    kernel_boot_log("oops: fail-stop seq=");
-    uart_put_udec(record.sequence);
-    kernel_boot_log(" cpu=");
-    uart_put_udec(record.cpu & 0xFF);
-    kernel_boot_log(" slot=");
-    uart_put_udec(record.vector_slot);
-    kernel_boot_log(" ec=");
-    uart_put_hex((record.esr_el1 >> 26) & 0x3F);
-    kernel_boot_log(" esr="); uart_put_hex(record.esr_el1);
-    kernel_boot_log(" far="); uart_put_hex(record.far_el1);
-    kernel_boot_log(" elr="); uart_put_hex(record.elr_el1);
-    kernel_boot_log("\n");
+    ddb_puts("\n");
+    ddb_puts("oops: fail-stop seq=");
+    ddb_put_udec(record.sequence);
+    ddb_puts(" cpu=");
+    ddb_put_udec(record.cpu & 0xFF);
+    ddb_puts(" slot=");
+    ddb_put_udec(record.vector_slot);
+    ddb_puts(" ec=");
+    ddb_put_hex((record.esr_el1 >> 26) & 0x3F);
+    ddb_puts(" esr="); ddb_put_hex(record.esr_el1);
+    ddb_puts(" far="); ddb_put_hex(record.far_el1);
+    ddb_puts(" elr="); ddb_put_hex(record.elr_el1);
+    ddb_puts("\n");
     if (record.origin == 1) {
-        kernel_boot_log("oops: origin=explicit caller_return_pc=");
-        uart_put_hex(record.caller_return_pc);
-        kernel_boot_log(" architectural-registers=raw\n");
+        ddb_puts("oops: origin=explicit caller_return_pc=");
+        ddb_put_hex(record.caller_return_pc);
+        ddb_puts(" architectural-registers=raw\n");
     } else {
-        kernel_boot_log("oops: origin=exception\n");
+        ddb_puts("oops: origin=exception\n");
     }
     if (record.origin == 0) { crash_snapshot_put_data_abort(record.esr_el1); }
     // GitHub issue #384: WHO owns the pages this fault names. Both
@@ -3237,26 +3242,26 @@ private fn crash_snapshot_render_from(record: *CrashSnapshot,
     // kernel stack; that reads here as one line.
     crash_snapshot_put_page_owner("far", record.far_el1, root_slot, record.far_physical, record.vm_available != 0);
     crash_snapshot_put_page_owner("elr", record.elr_el1, root_slot, record.elr_physical, record.vm_available != 0);
-    kernel_boot_log("oops: live sp_el0="); uart_put_hex(record.sp_el0);
-    kernel_boot_log(" tpidr_el0="); uart_put_hex(record.tpidr_el0);
-    kernel_boot_log(" ttbr0="); uart_put_hex(record.ttbr0_el1);
-    kernel_boot_log("\n");
-    if (record.image_kind == 2) { kernel_boot_log("oops: process unavailable reason=shared-state-not-inspected\n"); }
-    kernel_boot_log("oops: process pid="); uart_put_udec(record.process_pid);
-    kernel_boot_log(" parent="); uart_put_udec(record.parent_pid);
-    kernel_boot_log(" state="); uart_put_udec(record.process_state);
-    kernel_boot_log(" wait="); uart_put_udec(record.wait_reason);
-    kernel_boot_log(" wait4_status_ptr="); uart_put_hex(record.wait4_status_ptr);
-    kernel_boot_log(" root="); uart_put_udec(record.root_slot);
-    kernel_boot_log(" asid="); uart_put_udec(record.root_asid);
-    kernel_boot_log(" l1="); uart_put_hex(record.root_l1);
-    kernel_boot_log(" image=");
-    if (record.image_kind == 1) { kernel_boot_log("exec\n"); }
-    else if (record.image_kind == 2) { kernel_boot_log("unavailable\n"); }
-    else { kernel_boot_log("bootstrap\n"); }
-    kernel_boot_log("oops: activity=");
-    kernel_boot_log(kernel_activity_name_for_code(record.activity));
-    kernel_boot_log("\n");
+    ddb_puts("oops: live sp_el0="); ddb_put_hex(record.sp_el0);
+    ddb_puts(" tpidr_el0="); ddb_put_hex(record.tpidr_el0);
+    ddb_puts(" ttbr0="); ddb_put_hex(record.ttbr0_el1);
+    ddb_puts("\n");
+    if (record.image_kind == 2) { ddb_puts("oops: process unavailable reason=shared-state-not-inspected\n"); }
+    ddb_puts("oops: process pid="); ddb_put_udec(record.process_pid);
+    ddb_puts(" parent="); ddb_put_udec(record.parent_pid);
+    ddb_puts(" state="); ddb_put_udec(record.process_state);
+    ddb_puts(" wait="); ddb_put_udec(record.wait_reason);
+    ddb_puts(" wait4_status_ptr="); ddb_put_hex(record.wait4_status_ptr);
+    ddb_puts(" root="); ddb_put_udec(record.root_slot);
+    ddb_puts(" asid="); ddb_put_udec(record.root_asid);
+    ddb_puts(" l1="); ddb_put_hex(record.root_l1);
+    ddb_puts(" image=");
+    if (record.image_kind == 1) { ddb_puts("exec\n"); }
+    else if (record.image_kind == 2) { ddb_puts("unavailable\n"); }
+    else { ddb_puts("bootstrap\n"); }
+    ddb_puts("oops: activity=");
+    ddb_puts(kernel_activity_name_for_code(record.activity));
+    ddb_puts("\n");
     // A SEPARATE line, not fields appended above: the oops lane matches that
     // one with `image=bootstrap$` anchored at the end, and no view filter
     // selects `oops:` at all, so a new line costs nothing and an appended
@@ -3266,28 +3271,28 @@ private fn crash_snapshot_render_from(record: *CrashSnapshot,
     // printed above against root0 l1 here. Equal means activation took its
     // silent fallback to the bootstrap root; different from both that and the
     // record's own l1 means TTBR0 held some third root.
-    kernel_boot_log("oops: root0 asid=");
-    uart_put_udec(record.root0_asid);
-    kernel_boot_log(" l1=");
-    uart_put_hex(record.root0_l1);
-    kernel_boot_log("\n");
+    ddb_puts("oops: root0 asid=");
+    ddb_put_udec(record.root0_asid);
+    ddb_puts(" l1=");
+    ddb_put_hex(record.root0_l1);
+    ddb_puts("\n");
     kernel_process_exec_failure_render();
     for fd: usize in 0..<CRASH_FD_SNAPSHOT_SLOTS {
         if (record.fd_kind[fd] != 0) {
-            kernel_boot_log("oops: fd="); uart_put_udec(fd);
-            kernel_boot_log(" kind="); uart_put_udec(record.fd_kind[fd]);
-            kernel_boot_log(" object="); uart_put_udec(record.fd_object[fd]);
-            kernel_boot_log("\n");
+            ddb_puts("oops: fd="); ddb_put_udec(fd);
+            ddb_puts(" kind="); ddb_put_udec(record.fd_kind[fd]);
+            ddb_puts(" object="); ddb_put_udec(record.fd_object[fd]);
+            ddb_puts("\n");
         }
     }
     if (record.saved_frame_available != 0) {
-        kernel_boot_log("oops: saved sp_el0="); uart_put_hex(record.saved_sp_el0);
-        kernel_boot_log(" tpidr_el0="); uart_put_hex(record.saved_tpidr_el0);
-        kernel_boot_log(" elr="); uart_put_hex(record.saved_elr_el1);
-        kernel_boot_log(" spsr="); uart_put_hex(record.saved_spsr_el1);
-        kernel_boot_log("\n");
+        ddb_puts("oops: saved sp_el0="); ddb_put_hex(record.saved_sp_el0);
+        ddb_puts(" tpidr_el0="); ddb_put_hex(record.saved_tpidr_el0);
+        ddb_puts(" elr="); ddb_put_hex(record.saved_elr_el1);
+        ddb_puts(" spsr="); ddb_put_hex(record.saved_spsr_el1);
+        ddb_puts("\n");
     } else {
-        kernel_boot_log("oops: saved-frame=unavailable\n");
+        ddb_puts("oops: saved-frame=unavailable\n");
     }
     kernel_process_trace_render(
         record.trace as []usize, record.trace_count,
@@ -3359,7 +3364,7 @@ private fn crash_console_dispatch_cached(
         return true;
     }
     if (crash_console_command_is(line, length, bs"help")) {
-        kernel_boot_log("commands: oops trace ps proc PID\n");
+        ddb_puts("commands: oops trace ps proc PID\n");
         return true;
     }
     return false;
@@ -3377,23 +3382,23 @@ private fn crash_console_dispatch_stopped(
         CrashConsolePidResult::Parsed(pid) => { kernel_process_monitor_proc(stopped, pid); return; }
         CrashConsolePidResult::Invalid => {}
     }
-    kernel_boot_log("ddb: unknown command; try help\n");
+    ddb_puts("ddb: unknown command; try help\n");
 }
 
 private fn crash_console_dispatch_unavailable(
         line: borrow [u8; CRASH_CONSOLE_LINE_BYTES..], length: usize) !{unsafe} {
     if (crash_console_dispatch_cached(line, length)) { return; }
     if (crash_console_command_is(line, length, bs"ps")) {
-        kernel_boot_log("ps: unavailable reason=machine-not-stopped\n");
+        ddb_puts("ps: unavailable reason=machine-not-stopped\n");
         return;
     }
     match crash_console_parse_proc(line, length) {
         CrashConsolePidResult::Parsed(pid) => {
-            kernel_boot_log("proc: unavailable reason=machine-not-stopped\n"); return;
+            ddb_puts("proc: unavailable reason=machine-not-stopped\n"); return;
         }
         CrashConsolePidResult::Invalid => {}
     }
-    kernel_boot_log("ddb: unknown command; try help\n");
+    ddb_puts("ddb: unknown command; try help\n");
 }
 
 private fn crash_console_append(
@@ -3418,40 +3423,55 @@ private fn crash_console_append(
 // before that core reports a fault of its own. It is reported, and the
 // console retains cached reporting, while shared process commands require
 // the complete stop authority.
-must_use variant CrashStopResult {
-    Unavailable;
-    Stopped(MachineStopped[&kernel_world_stop]);
-}
-
-private fn crash_world_stop() -> CrashStopResult !{unsafe, irq_masking_guard} {
-    match world_stop_machine_begin(DDB_WORLD_STOP_SPINS) {
+// GitHub issue #920: the debug stop, which escalates to the NMI-priority SGI
+// and so may hold a core that owns any lock. This root obtains the token and
+// spends it here, taking no lock (debug_stopped); it never returns once the
+// console runs.
+private fn crash_world_stop_report(origin: usize, frame_sp: usize)
+        !{unsafe, debug_stopped} {
+    let snapshot: *CrashSnapshot = crash_snapshot_here();
+    match world_stop_debug_begin(DDB_WORLD_STOP_SPINS) {
         MachineStopResult::Busy => {
             crash_report_claim();
             // The peer can fault halfway through a bootstrap log fragment.
-            kernel_boot_log("\n");
-            kernel_boot_log("oops: world-stop busy; other cores still run\n");
+            ddb_puts("\n");
+            ddb_puts("oops: world-stop busy; other cores still run\n");
             crash_report_release();
-            return CrashStopResult::Unavailable;
+            crash_snapshot_publish();
+            if (crash_console_claim()) { crash_console_run(); }
         }
         MachineStopResult::Partial(partial) => {
             let mask: usize = machine_stop_partial_mask(partial);
             machine_stop_partial_release(partial, &kernel_world_stop);
             crash_report_claim();
             // The peer can fault halfway through a bootstrap log fragment.
-            kernel_boot_log("\n");
-            kernel_boot_log("oops: world-stop partial mask="); uart_put_hex(mask);
-            kernel_boot_log(" released; other cores still run\n");
+            ddb_puts("\n");
+            ddb_puts("oops: world-stop partial mask="); ddb_put_hex(mask);
+            ddb_puts(" released; other cores still run\n");
             crash_report_release();
-            return CrashStopResult::Unavailable;
+            crash_snapshot_publish();
+            if (crash_console_claim()) { crash_console_run(); }
         }
         MachineStopResult::Complete(stopped) => {
             let mask: usize = machine_stopped_mask(stopped);
             crash_report_claim();
             // The peer can fault halfway through a bootstrap log fragment.
-            kernel_boot_log("\n");
-            kernel_boot_log("oops: world-stop complete mask="); uart_put_hex(mask);
-            kernel_boot_log("\n"); crash_report_release();
-            return CrashStopResult::Stopped(stopped);
+            ddb_puts("\n");
+            ddb_puts("oops: world-stop complete mask="); ddb_put_hex(mask);
+            ddb_puts("\n"); crash_report_release();
+            if (origin == 1 && frame_sp != 0 &&
+                kernel_process_crash_frame_usable(stopped, frame_sp)) {
+                crash_snapshot_copy_saved_frame(
+                    frame_ref_from_entry(frame_sp, kernel_process_entry_generation()),
+                    &snapshot.saved_sp_el0);
+                crash_snapshot_here().saved_frame_available = 1;
+            }
+            crash_snapshot_shared_stopped(stopped);
+            crash_snapshot_publish();
+            if (crash_console_claim()) { crash_console_run_stopped(stopped); }
+            // The console borrows the owner for its whole terminal loop.
+            // If it ever returns, end the authority without resuming peers.
+            machine_stop_keep_forever(stopped);
         }
     }
 }
@@ -3471,7 +3491,9 @@ private fn crash_console_prepare() !{unsafe} {
     // token is matched rather than dropped because must_use will not let it
     // be dropped, which is exactly what stops a path that DOES return from
     // forgetting.
-    match kernel_log_tx_stand_down(KERNEL_CONSOLE_PRIORITY_PANIC) {
+    // GitHub issue #920: without draining under the console lock, which a
+    // core held by the debug stop may own.
+    match kernel_log_tx_stand_down_stopped(KERNEL_CONSOLE_PRIORITY_PANIC) {
         KernelLogTxStandDown::Took(found) => { }
         KernelLogTxStandDown::Outranked => { }
     }
@@ -3481,7 +3503,7 @@ private fn crash_console_prepare() !{unsafe} {
     // left core 0 taking the RX interrupt, and it ate `trace`.
     uart_rx_irq_disable();
     crash_report_claim();
-    kernel_boot_log("ddb: read-only crash console\n");
+    ddb_puts("ddb: read-only crash console\n");
     crash_report_release();
 }
 
@@ -3500,14 +3522,14 @@ private fn crash_console_read(line: borrow [u8; CRASH_CONSOLE_LINE_BYTES..])
     // stopped counting. Two cores' output racing is not only ugly; it
     // silently disables whatever is reading it.
     crash_report_claim();
-    kernel_boot_log("ddb> ");
+    ddb_puts("ddb> ");
     crash_report_release();
     let mut reading: bool = true;
     while (reading) {
         let byte: u8 = uart_debug_getc();
         if (byte == 0x0A || byte == 0x0D) {
             crash_report_claim();
-            kernel_boot_log("\n");
+            ddb_puts("\n");
             crash_report_release();
             reading = false;
         } else {
@@ -3556,34 +3578,34 @@ private fn crash_console_run() !{unsafe} {
 private fn crash_snapshot_put_page_owner(what: *u8, address: usize,
                                          root_slot: usize, physical: usize,
                                          inspected: bool) {
-    kernel_boot_log("oops: ");
-    kernel_boot_log(what);
-    kernel_boot_log(" page ");
+    ddb_puts("oops: ");
+    ddb_puts(what);
+    ddb_puts(" page ");
     if (page_owner_tag_at_reporter(address) != PageOwnerTag::Unowned) {
-        kernel_boot_log("(physical) is ");
-        kernel_boot_log(page_owner_description_reporter(address));
-        kernel_boot_log("\n");
+        ddb_puts("(physical) is ");
+        ddb_puts(page_owner_description_reporter(address));
+        ddb_puts("\n");
         return;
     }
     if (inspected == false) {
-        kernel_boot_log("translation unavailable; shared state was not inspected\n");
+        ddb_puts("translation unavailable; shared state was not inspected\n");
         return;
     }
     if (physical == 0) {
-        kernel_boot_log("is ");
-        kernel_boot_log(page_owner_description_reporter(address));
-        kernel_boot_log(", not mapped in root ");
-        uart_put_udec(root_slot);
-        kernel_boot_log("\n");
+        ddb_puts("is ");
+        ddb_puts(page_owner_description_reporter(address));
+        ddb_puts(", not mapped in root ");
+        ddb_put_udec(root_slot);
+        ddb_puts("\n");
         return;
     }
-    kernel_boot_log("(via root ");
-    uart_put_udec(root_slot);
-    kernel_boot_log(" -> ");
-    uart_put_hex(physical);
-    kernel_boot_log(") is ");
-    kernel_boot_log(page_owner_description_reporter(physical));
-    kernel_boot_log("\n");
+    ddb_puts("(via root ");
+    ddb_put_udec(root_slot);
+    ddb_puts(" -> ");
+    ddb_put_hex(physical);
+    ddb_puts(") is ");
+    ddb_puts(page_owner_description_reporter(physical));
+    ddb_puts("\n");
 }
 
 private fn crash_snapshot_shared_unavailable() {
@@ -3634,10 +3656,10 @@ private fn crash_snapshot_shared_stopped(
     match address_space_diagnostic_snapshot(stopped,
             scheduled_process_address_space_root_stopped(stopped, root_slot_of_key(crash_snapshot_here().root_slot))) {
         AddressSpaceDiagnosticResult::Busy => {
-            kernel_boot_log("oops: vm unavailable reason=pool-busy\n");
+            ddb_puts("oops: vm unavailable reason=pool-busy\n");
         }
         AddressSpaceDiagnosticResult::Stale => {
-            kernel_boot_log("oops: vm unavailable reason=stale-backing\n");
+            ddb_puts("oops: vm unavailable reason=stale-backing\n");
         }
         AddressSpaceDiagnosticResult::Ready(vm) => {
             if (vm.live) { crash_snapshot_here().vm_available = 1; }
@@ -3688,8 +3710,8 @@ private fn crash_console_claim() -> bool !{unsafe} {
 
 private fn crash_snapshot_park() {
     crash_report_claim();
-    kernel_boot_log("\n");
-    kernel_boot_log("oops: console owned by another core; parking\n");
+    ddb_puts("\n");
+    ddb_puts("oops: console owned by another core; parking\n");
     crash_report_release();
     while (true) { interrupt_wait(); }
 }
@@ -3698,7 +3720,7 @@ private fn crash_snapshot_capture(slot: usize, frame_sp: usize, origin: usize, c
     kernel_log_enter_emergency();
     let snapshot: *CrashSnapshot = crash_snapshot_here();
     if (*crash_snapshot_capturing_here()) {
-        kernel_boot_log("oops: recursive exception; parking\n");
+        ddb_puts("oops: recursive exception; parking\n");
         while (true) { interrupt_wait(); }
     }
     *crash_snapshot_capturing_here() = true;
@@ -3733,27 +3755,7 @@ private fn crash_snapshot_capture(slot: usize, frame_sp: usize, origin: usize, c
     crash_snapshot_here().trace_count = kernel_process_crash_trace_copy(
         crash_snapshot_here().trace as []usize);
     crash_snapshot_shared_unavailable();
-    match crash_world_stop() {
-        CrashStopResult::Unavailable => {
-            crash_snapshot_publish();
-            if (crash_console_claim()) { crash_console_run(); }
-        }
-        CrashStopResult::Stopped(stopped) => {
-            if (origin == 1 && frame_sp != 0 &&
-                kernel_process_crash_frame_usable(stopped, frame_sp)) {
-                crash_snapshot_copy_saved_frame(
-                    frame_ref_from_entry(frame_sp, kernel_process_entry_generation()),
-                    &snapshot.saved_sp_el0);
-                crash_snapshot_here().saved_frame_available = 1;
-            }
-            crash_snapshot_shared_stopped(stopped);
-            crash_snapshot_publish();
-            if (crash_console_claim()) { crash_console_run_stopped(stopped); }
-            // The console borrows the owner for its whole terminal loop.
-            // If it ever returns, end the authority without resuming peers.
-            machine_stop_keep_forever(stopped);
-        }
-    }
+    crash_world_stop_report(origin, frame_sp);
     crash_snapshot_park();
 }
 

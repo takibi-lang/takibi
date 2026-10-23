@@ -54,15 +54,36 @@ fn gic_enable_words() -> usize {
     return (gicd.isenabler[0] as usize) | ((gicd.isenabler[1] as usize) << 32);
 }
 
+// The world-stop notification, both platforms: every core in `mask` but the
+// initiator. `debug` picks the NMI-priority SGI (#920).
+fn platform_world_stop_notify(mask: usize, owner: usize, debug: bool) !{unsafe} {
+    let mut targets: u32 = 0;
+    for cpu: usize in 0..<KERNEL_MAX_CORES {
+        if ((mask & (1 << cpu)) != 0 && cpu != owner) {
+            targets = targets | ((1 << cpu) as u32);
+        }
+    }
+    if (targets == 0) { return; }
+    if (debug) {
+        platform_gic_sgi_send(targets, GIC_DEBUG_STOP_SGI);
+    } else {
+        platform_gic_sgi_send(targets, GIC_WORLD_STOP_SGI);
+    }
+}
+
 // One SGI to the cores in `targets` (GICD_SGIR's CPU target list).
 fn platform_gic_sgi_send(targets: u32, sgi: u32) !{unsafe} {
     dsb_ishst();
     gicd.sgir = (targets << 16) | (sgi & 0xF);
 }
 
-// GitHub issue #920: the priority-mask pseudo-NMI. Two levels: the
-// world-stop SGI at GIC_PRIORITY_NMI, every other source at
-// GIC_PRIORITY_IRQ. The kernel masks ordinary interrupts by raising GICC_PMR
+// GitHub issue #920: the priority-mask pseudo-NMI. Two levels: the debug
+// stop SGI at GIC_PRIORITY_NMI, every other source -- the quiescent world
+// stop SGI included -- at GIC_PRIORITY_IRQ (maintainer decision: two stop
+// kinds). The quiescent stop keeps the old meaning: a core whose IRQs are
+// masked, and so may hold a lock, does not take it. Only DDB and the crash
+// path escalate to the debug stop, and the compiler holds them to taking no
+// lock once they have (`debug_stopped`). The kernel masks ordinary interrupts by raising GICC_PMR
 // to GIC_PMR_MASKED, which still admits the stop, so a stop reaches a core
 // whose ordinary IRQs are masked -- including one hung inside a handler
 // (kernel/arch/arm64/boot/cpu.tkb). A lower number is a higher priority, and
@@ -78,6 +99,7 @@ fn platform_gic_sgi_send(targets: u32, sgi: u32) !{unsafe} {
 // the two levels are distinct preemption groups and the stop preempts a
 // running ordinary handler.
 const GIC_WORLD_STOP_SGI: u32 = 1;
+const GIC_DEBUG_STOP_SGI: u32 = 2;
 const GIC_PRIORITY_NMI: u8 = 0x80;
 const GIC_PRIORITY_IRQ: u8 = 0xA0;
 const GIC_PMR_MASKED: u32 = 0xA0;
@@ -111,7 +133,7 @@ fn platform_irq_cpu_interface_init() {
     for intid: usize in 0..<32 {
         gicd.ipriorityr[intid] = GIC_PRIORITY_IRQ;
     }
-    gicd.ipriorityr[GIC_WORLD_STOP_SGI as usize] = GIC_PRIORITY_NMI;
+    gicd.ipriorityr[GIC_DEBUG_STOP_SGI as usize] = GIC_PRIORITY_NMI;
     gicc.bpr = 0;
     irq_mask_cpu_interface_ready();
     gicc.ctlr = gicc.ctlr | 1;

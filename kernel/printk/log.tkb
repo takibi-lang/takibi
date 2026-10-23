@@ -686,6 +686,33 @@ private fn kernel_console_owner_word(priority: usize) -> usize {
 // Every priority but the debugger's is a path that never gives the console
 // back.
 fn kernel_log_tx_stand_down(priority: usize) -> KernelLogTxStandDown !{unsafe} {
+    match kernel_log_tx_take_owner(priority) {
+        KernelLogTxStandDown::Took(found) => {
+            uart_tx_flush();
+            return KernelLogTxStandDown::Took(found);
+        }
+        KernelLogTxStandDown::Outranked => { return KernelLogTxStandDown::Outranked; }
+    }
+}
+
+// GitHub issue #920: the same, for a core that has stopped the machine with
+// the debug stop. A held core may own the console lock, so the queue drains
+// only if the lock is free now (uart_tx_flush_stopped). Every later byte
+// this side writes goes straight to the FIFO (uart_debug_putc).
+fn kernel_log_tx_stand_down_stopped(priority: usize) -> KernelLogTxStandDown
+        !{unsafe} {
+    match kernel_log_tx_take_owner(priority) {
+        KernelLogTxStandDown::Took(found) => {
+            uart_tx_flush_stopped();
+            return KernelLogTxStandDown::Took(found);
+        }
+        KernelLogTxStandDown::Outranked => { return KernelLogTxStandDown::Outranked; }
+    }
+}
+
+// The ownership half both share: compare-exchanges only, no lock.
+private fn kernel_log_tx_take_owner(priority: usize)
+        -> KernelLogTxStandDown !{unsafe} {
     let mine: usize = kernel_console_owner_word(priority);
     let mut terminal: usize = KERNEL_CONSOLE_TERMINAL;
     if (priority == KERNEL_CONSOLE_PRIORITY_DEBUGGER) { terminal = 0; }
@@ -704,7 +731,6 @@ fn kernel_log_tx_stand_down(priority: usize) -> KernelLogTxStandDown !{unsafe} {
         } else {
             match kernel_log_cas(&kernel_console_owner, current, sticky | mine) {
                 CasResult::Swapped => {
-                    uart_tx_flush();
                     return KernelLogTxStandDown::Took(current & KERNEL_CONSOLE_OWNER_MASK);
                 }
                 CasResult::Observed(seen) => { }
@@ -1230,6 +1256,23 @@ fn uart_user_write_sleep_total() -> usize {
 // paths that must not depend on interrupts -- DDB entry, the crash console,
 // a halt -- because those write through uart_debug_putc, and a byte they emit
 // while the queue still holds earlier output would arrive out of order.
+// GitHub issue #920: uart_tx_flush after the debug stop. The queue drains
+// only if the console lock is free; a held core may own it, and then what it
+// queued stays queued and goes out after the machine resumes.
+fn uart_tx_flush_stopped() !{unsafe} {
+    match console_try_lock() {
+        ConsoleTry::Busy => { uart_tx_irq_disable(); }
+        ConsoleTry::Taken(guard) => {
+            while (uart_terminal_output_pending_locked(guard)) {
+                while (uart_tx_fifo_full()) { }
+                uart_tx_drain_into_fifo_force(guard);
+            }
+            uart_tx_irq_disable();
+            console_try_unlock(guard);
+        }
+    }
+}
+
 fn uart_tx_flush() !{unsafe} {
     let guard = console_lock();
     while (uart_terminal_output_pending_locked(guard)) {

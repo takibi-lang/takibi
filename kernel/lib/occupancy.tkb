@@ -279,13 +279,14 @@ private fn world_stop_begin_config(stop: *WorldStop @ id, cores: usize,
         WorldStopClaimResult::StopHeld => { return WorldStopResult::Busy; }
     }
     let mask: usize = (1 << cores) - 1;
-    return world_stop_begin_claimed(stop, mask, spins, notify, stale_ack_probe);
+    return world_stop_begin_claimed(stop, mask, spins, notify, stale_ack_probe,
+                                    false);
 }
 
 // The caller owns the claim gate, including on every refusal return.
 private fn world_stop_begin_claimed(stop: *WorldStop @ id, mask: usize,
                                     spins: usize, notify: bool,
-                                    stale_ack_probe: bool)
+                                    stale_ack_probe: bool, debug: bool)
         -> WorldStopResult[id] !{unsafe} {
     let raw_owner: usize = cpu_id();
     let previous: usize = (*stop).generation;
@@ -310,12 +311,20 @@ private fn world_stop_begin_claimed(stop: *WorldStop @ id, mask: usize,
             }
         }
     }
-    if (notify) { platform_world_stop_notify(mask, raw_owner); }
+    if (notify) { platform_world_stop_notify(mask, raw_owner, false); }
 
+    // GitHub issue #920 (maintainer decision 2): a debug stop escalates the
+    // way Linux's smp_send_stop does. The quiescent SGI first; once half the
+    // budget has gone, the NMI-priority SGI to every target that has not
+    // acknowledged -- a core whose IRQs are masked, or hung in a handler.
+    let escalate_at: usize = spins / 2;
     let mut remaining: usize = spins;
     let mut stopped_mask: usize = 0;
     let mut complete: bool = false;
     while (complete == false && remaining != 0) {
+        if (debug && notify && remaining == escalate_at) {
+            platform_world_stop_notify(mask & ~stopped_mask, raw_owner, true);
+        }
         remaining = remaining - 1;
         complete = true;
         stopped_mask = 0;
@@ -365,6 +374,24 @@ fn world_stop_machine_begin(spins: usize)
 fn world_stop_machine_begin_holding_probe(spins: usize)
         -> MachineStopResult[&kernel_world_stop]
         !{unsafe, irq_masking_guard, lock_guard_40_world_stop} {
+    return world_stop_machine_begin_kind(spins, false);
+}
+
+// GitHub issue #920: the debug and crash stop. The same claim and token as
+// world_stop_machine_begin, escalating to the NMI-priority SGI for targets
+// that have not acknowledged by half the budget. A core it holds may own any
+// lock, so its caller must be a `debug_stopped` root, which the compiler
+// holds to taking none and to spending the token inside.
+fn world_stop_debug_begin(spins: usize)
+        -> MachineStopResult[&kernel_world_stop]
+        !{unsafe, irq_masking_guard, acquires_lock_10_world_stop,
+          lock_guard_40_world_stop, starts_debug_stop} {
+    return world_stop_machine_begin_kind(spins, true);
+}
+
+private fn world_stop_machine_begin_kind(spins: usize, debug: bool)
+        -> MachineStopResult[&kernel_world_stop]
+        !{unsafe, irq_masking_guard, lock_guard_40_world_stop} {
     let irq_flags: usize = mutex_irq_save();
     // GitHub issue #556: a CPU start reservation is held only across PSCI
     // CPU_ON, and the core it starts may fault before core 0 gives it back.
@@ -400,7 +427,8 @@ fn world_stop_machine_begin_holding_probe(spins: usize)
         return MachineStopResult::Busy;
     }
     let mut participants: CpuParticipants[&kernel_world_stop] = { mask };
-    match world_stop_begin_claimed(&kernel_world_stop, mask, spins, true, false) {
+    match world_stop_begin_claimed(&kernel_world_stop, mask, spins, true, false,
+                                   debug) {
         WorldStopResult::Busy => {
             cpu_participants_end(participants);
             mutex_irq_restore(irq_flags);
