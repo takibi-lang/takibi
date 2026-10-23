@@ -40,6 +40,7 @@ REVIEWED = {
     "check_fd_clone_transaction": "scans one file (fd_table.tkb) per call",
     "check_agents_paths": "reads AGENTS.md and a file listing, not sources",
     "check_el0_raw_deref_audit": "reads the Makefile once",
+    "check_lane_budget": "reads the Makefile and the lane timing receipts, no source scan",
     "check_ash_bin_inventory": "reads five fixed files, no tree walk",
     "check_wall_clock_bounds": "controls walk small synthetic trees; production runs once",
     "check_legacy_dma_rx_scope": "controls pass small synthetic source maps",
