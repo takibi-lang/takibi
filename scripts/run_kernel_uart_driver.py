@@ -101,10 +101,20 @@ def workload_ready(output: bytes, marker: str | None) -> bool:
     return marker is None or marker.encode("ascii") in output
 
 
+# GitHub issue #900: /bin/core-read is reaped on its own schedule (64 bounded
+# read passes, independent of the console writer). On RPi5 init's reap line
+# for it landed inside the echo of '/bin/peer-settings' three runs in a row
+# once a timing shift moved it past the writer's final reports.
+CORE_READ_REAPED = b'image="/bin/core-read" '
+
+
 def peer_command_ready(output: bytes, stop_marker: str) -> bool:
-    """Wait for the writer's final reports before testing a whole echo line."""
+    """Wait for the writer's final reports, and for init's reap of the
+    asynchronous /bin/core-read, before testing a whole echo line."""
     return (stop_marker.encode("ascii") in output and
-            b"syscall: no unimplemented number reached\n" in output)
+            b"syscall: no unimplemented number reached\n" in output and
+            CORE_READ_REAPED in output and
+            output.find(b"\n", output.rfind(CORE_READ_REAPED)) >= 0)
 
 
 def interactive_capture_complete(output: bytes, httpd_ready: bool,

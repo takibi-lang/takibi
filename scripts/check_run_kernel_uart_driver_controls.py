@@ -95,11 +95,17 @@ def main() -> int:
     last_record = b"peer user console: record=17/17"
     report = b"workload: peer console accepted all 1071 bytes through the shared queue after ordered writes on both CPUs\n"
     final_report = b"syscall: no unimplemented number reached\n"
+    # GitHub issue #900: and init's reap of /bin/core-read, which arrives on
+    # its own schedule, whole.
+    reaped = b'exit: init child pid=135 image="/bin/core-read" code=0 withheld=0\n'
     for output, expected in ((last_record, False),
                              (last_record + report, False),
                              (last_record + report + final_report[:-1], False),
-                             (last_record + report + final_report, True),
-                             (final_report, False)):
+                             (last_record + report + final_report, False),
+                             (reaped + last_record + report + final_report, True),
+                             (last_record + report + final_report + reaped, True),
+                             (last_record + report + final_report + reaped[:-1], False),
+                             (final_report + reaped, False)):
         CASES.note()
         if driver.peer_command_ready(output, last_record.decode()) != expected:
             failures.append("peer command gate ignored a split final report or its stop marker")
