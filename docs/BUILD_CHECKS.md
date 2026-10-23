@@ -111,6 +111,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_irq_restore_sites.py` | no `enable_irq()` restores interrupts without consulting the state it overwrites |
 | `check_kernel_asm_entries.py` | the Makefile declares exactly the Takibi functions kernel assembly calls by name as entry points |
 | `check_kernel_asm_invariants_controls.py` | Controls for the SCTLR alignment-policy disassembly check |
+| `check_kernel_same_operand_csel_controls.py` | Controls for the same-operand csel ceiling: the #893 `mov`+`csel` and a direct same-register `csel` are counted, distinct sources and a `mov` in another function are not, and one planted above the ceiling is refused |
 | `check_kernel_elf_freshness_controls.sh` | Controls for the stale-kernel guard: a lane refuses to run against a kernel older than its own sources |
 | `check_kernel_ddb_postmortem_controls.py` | Controls for the UART driver's DDB postmortem walk, with no QEMU in the room |
 | `check_console_progress_controls.py` | PTY and GDB boot waits renew on UART; fixed protocol waits, injected verdicts, marker ordering and ceilings stay bounded; churn wait observations preserve half-budget flags, EOF, errors and failure priority; the PTY httpd reap count reads only echo output markers, never a workload-split command echo (#856) |
@@ -290,6 +291,7 @@ run them, and why they sit outside both globs above.
 | `buildcheck_process_current_phase.py` | Real Running/Constructing transition APIs reject retained current authority; consuming it permits transition |
 | `overlay_jobs.py` | not a check: the three overlay buildchecks above run their cases through it on a pool of a quarter of the host threads, one symlinked overlay per worker, reporting in case order (#915); `TAKIBI_BUILDCHECK_JOBS=1` restores the serial run |
 | `buildcheck_kernel_asm_invariants.py` | Linked-kernel instruction invariants: UXN bits, eret masking, the spinlock and mutex sequences, broadcast TLB invalidation, per-core exception stacks, the stack handoff hook, explicit stops, and no misaligned q-register store in the MMU-off page allocator (#746) |
+| `buildcheck_kernel_same_operand_csel.py` | Linked production kernels: the number of `csel` whose two sources are one value (directly or through a `mov` among the three instructions before it) stays at or under its ceiling, 6 QEMU and 10 RPi5 (#893; the remaining ones are #939) |
 | `buildcheck_kernel_memory_map.py` | Check kernel/MEMORY_MAP.md and allocator fixtures; render QEMU boot capacity from the loaded ELF |
 | `buildcheck_ext2_reproducible.sh` | run by kernelbuild-check: rebuilds ext2.img and ext2-shell.img from the same inputs and fails on any byte difference; the control rebuilds at another `KERNEL_EXT2_FAKE_TIME` and requires a difference; the prior images are restored with their timestamps (#890) |
 | `buildcheck_kernel_unused_coverage.py` | every kernel file a target compiles is checked for unused functions or exempt for a stated reason |

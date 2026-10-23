@@ -1538,6 +1538,7 @@ $(KERNEL_RPI5_ELF): $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_
 	$(LLD) $(KERNEL_LDFLAGS) -T $(KERNEL_RPI5_LINK_LD) $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_CALLER_FRAME_O) $(KERNEL_RPI5_CACHE_GEOMETRY_O) $(KERNEL_RPI5_MAIN_O) -o $@ $(KERNEL_GC_LIST)
 	python3 scripts/buildcheck_kernel_asm_invariants.py $@ 2
 	python3 scripts/buildcheck_elf_symbol_alignment.py $@ boot_page_pool_cell 16
+	python3 scripts/buildcheck_kernel_same_operand_csel.py $@ 10
 
 $(KERNEL_RPI5_SHELL_ELF): $(KERNEL_RPI5_ELF) $(KERNEL_EXT2_IMAGE) \
 	$(KERNEL_SHELL_EXT2_IMAGE) scripts/patch_embedded_image.py
@@ -1700,6 +1701,7 @@ $(KERNEL_QEMU_ELF): $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_
 	$(LLD) $(KERNEL_LDFLAGS) -T $(KERNEL_QEMU_LINK_LD) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_CALLER_FRAME_O) $(KERNEL_QEMU_CACHE_GEOMETRY_O) $(KERNEL_QEMU_MAIN_O) -o $@ $(KERNEL_GC_LIST)
 	python3 scripts/buildcheck_kernel_asm_invariants.py $@ 1
 	python3 scripts/buildcheck_elf_symbol_alignment.py $@ boot_page_pool_cell 16
+	python3 scripts/buildcheck_kernel_same_operand_csel.py $@ 6
 
 .PHONY: _kernelbuild-qemu
 _kernelbuild-qemu: kernel-lib-check kernel-verify-exception-frame $(KERNEL_QEMU_ELF) $(KERNEL_DEBUG_METADATA) $(KERNEL_CONSOLE_LAYOUT)
