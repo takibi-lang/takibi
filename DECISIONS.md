@@ -188,6 +188,12 @@ condition below applies, and reports the land afterwards.
 - 2026-10-23 #830 lands with the hung-core DDB check recorded as expected-fail
   (it fails the lane once the world stop reaches a core with IRQs masked);
   the pseudo-NMI/FIQ stop gets its own issue. [active] #830
+- 2026-10-23 The masked-core stop is a GICv2 priority-mask pseudo-NMI: GICC_PMR
+  is the IRQ mask, the stop SGI at 0x80 above all else at 0xA0 (PMR 0xA0
+  masked, 0xF0 unmasked); handlers run with PMR masked and DAIF.I clear so
+  the stop nests; a new `nmi` effect excludes locks, blocking, allocation
+  and logs; cost measured on RPi5 before choosing PMR everywhere or a
+  hybrid; GICv3 (#926) slots in later. [active] #920
 
 ## Size and performance
 
