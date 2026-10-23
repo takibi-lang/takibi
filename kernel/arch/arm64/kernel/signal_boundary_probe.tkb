@@ -9,6 +9,7 @@ extern fn signal_interrupt_svc(number: usize, a0: usize, a1: usize, a2: usize,
                                a3: usize, ran: usize) -> usize;
 extern symbol signal_interrupt_handler;
 extern fn signal_spin_run() -> usize;
+extern fn signal_spin_stray(pid: usize, signum: usize) -> usize;
 extern symbol signal_spin_handler;
 
 private fn boundary_fail(line: borrow []const u8) !{unsafe} {
@@ -295,6 +296,13 @@ private fn boundary_spin() !{unsafe} {
         return;
     }
     let me: usize = svc5(172, 0, 0, 0, 0, 0);
+    // GitHub issue #950: the handler, run at a syscall return outside the
+    // spin, leaves the caller's x21 alone.
+    if (signal_spin_stray(me, 10) != 0) {
+        boundary_fail(bs"boundary: FAIL spin handler bumped x21 outside the spin\n");
+        return;
+    }
+    boundary_line(bs"boundary: spin handler outside the spin left x21 alone\n");
     for case: usize in 0..<2 {
         let mut signum: usize = 0;
         let mut linger: usize = 0;

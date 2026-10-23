@@ -468,3 +468,29 @@ signal_spin_handler:
     msr fpsr, xzr
     ret
 .size signal_spin_handler, .-signal_spin_handler
+
+/* GitHub issue #950: signal_spin_handler running outside the spin leaves
+ * x21 alone. signal_spin_stray(pid, signum) holds a pattern in x21, sends
+ * itself `signum` (whose handler is signal_spin_handler) so the handler
+ * runs at that syscall's return, and returns 0 when x21 came back intact,
+ * 1 when the handler bumped it, 2 when kill failed. Without the PC window
+ * the handler adds 1 to whatever compiled code keeps in x21.
+ */
+.global signal_spin_stray
+.type signal_spin_stray, %function
+signal_spin_stray:
+    stp x21, x30, [sp, #-16]!
+    spin_pattern x21, 21
+    mov x8, #129
+    svc #0
+    cbnz x0, .Lstray_kill
+    spin_pattern x9, 21
+    cmp x21, x9
+    cset x0, ne
+    b .Lstray_return
+.Lstray_kill:
+    mov x0, #2
+.Lstray_return:
+    ldp x21, x30, [sp], #16
+    ret
+.size signal_spin_stray, .-signal_spin_stray

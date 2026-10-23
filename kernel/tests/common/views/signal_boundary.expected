@@ -11,5 +11,6 @@ boundary: wait4 interrupted: handler ran, EINTR
 boundary: wait4 restarted under SA_RESTART after handler
 boundary: rt_sigtimedwait interrupted: EINTR despite SA_RESTART
 boundary: ppoll interrupted: EINTR despite SA_RESTART
+boundary: spin handler outside the spin left x21 alone
 boundary: spinning process ran its SIGCHLD handler, registers intact
 boundary: kill from CPU 0 ran a handler on spinning CPU 1, registers intact
