@@ -10,3 +10,4 @@ boundary: nanosleep interrupted: handler ran, EINTR, time left
 boundary: wait4 interrupted: handler ran, EINTR
 boundary: wait4 restarted under SA_RESTART after handler
 boundary: rt_sigtimedwait interrupted: EINTR despite SA_RESTART
+boundary: ppoll interrupted: EINTR despite SA_RESTART

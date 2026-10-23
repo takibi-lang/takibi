@@ -222,4 +222,19 @@ private fn boundary_interrupts() !{unsafe} {
         return;
     }
     boundary_line(bs"boundary: rt_sigtimedwait interrupted: EINTR despite SA_RESTART\n");
+
+    // ppoll never restarts. Its sleep here is the timeout alone (no
+    // descriptors): a terminal wait could be ended by a byte on a real
+    // UART line instead, which this fixture cannot exclude.
+    let poll_started: usize = interrupt_seconds();
+    let poller: usize = interrupt_sender(me, 12, 100, 0);
+    let polled: usize = signal_interrupt_svc(73, 0, 0, request as *usize as usize,
+        0, ran as *usize as usize);
+    let poll_elapsed: usize = interrupt_seconds() - poll_started;
+    if (polled != INTERRUPT_EINTR || ran[0] != 1 || poll_elapsed > 2 ||
+        interrupt_reap(poller) == false) {
+        boundary_fail(bs"boundary: FAIL ppoll not interrupted\n");
+        return;
+    }
+    boundary_line(bs"boundary: ppoll interrupted: EINTR despite SA_RESTART\n");
 }
