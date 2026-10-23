@@ -25,3 +25,4 @@ kernel/lib/peer_tick_window.tkb	wall_emergency_budget	1	backstop	10 s emergency 
 kernel/tests/rpi5/gem_tx/fixture.tkb	gem_fixture_reply	1	protocol	physical-only fixture waits for the host Ethernet peer (10 s); not run under QEMU
 kernel/tests/rpi5/gem_tx/irq_fixture.tkb	gem_probe_peer	1	protocol	physical-only IRQ fixture waits for a real host RX handshake (10 s); not run under QEMU
 kernel/drivers/net/virtio_net_tx_wait.tkb	virtio_net_tx_wait	1	backstop	elapsed completion backstop follows current virtio-blk policy; expiry disables queues without reusing TX or in-place RX bytes; native tests use a deterministic clock
+kernel/kernel/uart_irq_affinity.tkb	uart_irq_hang_poll	1	pending	DDB lane hung-core spin (8 s, #830): the second BREAK must arrive while the armed core is still masked, which a starved host can miss
