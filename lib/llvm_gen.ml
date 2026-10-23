@@ -1387,6 +1387,134 @@ let setup_target ?(triple = "") ?(cpu = "") ?(features = "") () =
   configured_datalayout_str := layout_str;
   machine
 
+(* GitHub issue #893: a variant merged from two control-flow paths.
+   simplifycfg merges a function's returns into one aggregate
+   `select c, {0, undef}, {1, payload}` or `phi [{0, undef}, a],
+   [{1, payload}, b]`. The backend splits it per field but keeps the
+   undefined field as an operand: a csel whose two operands are one
+   register, and, once the function is inlined into a match, a switch on a
+   selected tag instead of a branch on `c`. This pipeline has no
+   instcombine, which is what splits such aggregates in a default pipeline.
+
+   This rewrites each select or phi of a struct into one select or phi per
+   scalar field, reassembled with insertvalue, which is an identity. A
+   select field whose other side is undef or poison takes the defined side
+   (any value refines those). A field is read through the insertvalue
+   chain that built it. early-cse then folds a phi field that is one
+   value or undef, folds readers' extractvalue through the insertvalue
+   chain, and simplifycfg turns a switch on `select c, 0, 1` into a branch
+   on `c`. It runs once, after the last simplifycfg that can make such a
+   merge, and is followed by early-cse and simplifycfg. *)
+let split_aggregate_merges () =
+  let undefined v = is_undef v || is_poison v in
+  let is_struct ty = classify_type ty = TypeKind.Struct in
+  (* An array field of a merged phi would become a phi of an array, which
+     the backend copies element by element when two or more paths bring a
+     defined array (+796 B in virtio_net_used). A phi qualifies when every
+     array field is provably undefined on all paths but one -- a variant's
+     inactive cases, e.g. ProcessStoppedDiagnosticResult's snapshot. *)
+  let rec field_undefined v path =
+    undefined v ||
+    match path with
+    | [] -> false
+    | i :: rest ->
+        (match classify_value v with
+         | ValueKind.Instruction Opcode.InsertValue
+           when Array.length (indices v) = 1 ->
+             if (indices v).(0) = i then field_undefined (operand v 1) rest
+             else field_undefined (operand v 0) path
+         | ValueKind.ConstantStruct -> field_undefined (operand v i) rest
+         | _ -> false) in
+  let rec array_paths prefix ty =
+    match classify_type ty with
+    | TypeKind.Struct ->
+        List.concat (List.mapi (fun i f -> array_paths (prefix @ [i]) f)
+          (Array.to_list (struct_element_types ty)))
+    | TypeKind.Array -> [prefix]
+    | _ -> [] in
+  let phi_splittable phi =
+    is_struct (type_of phi)
+    && List.for_all (fun path ->
+         List.length (List.filter (fun (v, _) -> not (field_undefined v path))
+                        (incoming phi)) <= 1)
+         (array_paths [] (type_of phi)) in
+  (* Field i of v, read through a chain of one-index insertvalue (what a
+     constructor builds) because early-cse folds only the matching index. *)
+  let rec field_of b v i =
+    match classify_value v with
+    | ValueKind.Instruction Opcode.InsertValue
+      when Array.length (indices v) = 1 ->
+        if (indices v).(0) = i then operand v 1 else field_of b (operand v 0) i
+    | _ -> build_extractvalue v i "split.ev" b
+  in
+  (* Build the merged value of type `ty` from its parts: `leaf` makes a
+     scalar field from the field's parts, `part` takes field i of a part. *)
+  let rec split ~assemble ~leaf ~part parts ty =
+    if not (is_struct ty) then leaf parts
+    else
+      let acc = ref (undef ty) in
+      Array.iteri (fun i fty ->
+        let field = split ~assemble ~leaf ~part (List.map (part i) parts) fty in
+        acc := build_insertvalue !acc field i "split.agg" assemble)
+        (struct_element_types ty);
+      !acc
+  in
+  let rewrite_select sel =
+    let b = builder_before context sel in
+    let c = operand sel 0 in
+    let leaf = function
+      | [x; y] ->
+          if undefined x then y
+          else if undefined y then x
+          else build_select c x y "split.sel" b
+      | _ -> raise (Error "BUG: #893 select with other than two arms") in
+    let part i v = field_of b v i in
+    split ~assemble:b ~leaf ~part [operand sel 1; operand sel 2] (type_of sel)
+  in
+  let rewrite_phi phi =
+    let bb = instr_parent phi in
+    let first_non_phi = fold_left_instrs (fun acc i ->
+      match acc with
+      | Some _ -> acc
+      | None -> if instr_opcode i = Opcode.PHI then None else Some i) None bb in
+    let assemble = match first_non_phi with
+      | Some i -> builder_before context i
+      | None -> raise (Error "BUG: #893 block without a terminator") in
+    let at_top = builder_at context (instr_begin bb) in
+    let leaf incoming = build_phi incoming "split.phi" at_top in
+    (* A predecessor listed twice (two switch cases to one block) must
+       bring one value, so each (value, predecessor, field) is extracted
+       once. *)
+    let extracted = ref [] in
+    let part i (v, pred) =
+      match List.find_opt (fun ((v', p', i'), _) ->
+          v' = v && p' = pred && i' = i) !extracted with
+      | Some (_, r) -> (r, pred)
+      | None ->
+          (match block_terminator pred with
+           | Some t ->
+               let r = field_of (builder_before context t) v i in
+               extracted := ((v, pred, i), r) :: !extracted;
+               (r, pred)
+           | None ->
+               raise (Error "BUG: #893 predecessor without a terminator")) in
+    split ~assemble ~leaf ~part (incoming phi) (type_of phi)
+  in
+  let rewrite i =
+    let r = if instr_opcode i = Opcode.Select then rewrite_select i
+      else rewrite_phi i in
+    replace_all_uses_with i r;
+    delete_instruction i
+  in
+  iter_functions (fun f ->
+    iter_blocks (fun bb ->
+      let merges = fold_left_instrs (fun acc i ->
+        match instr_opcode i with
+        | Opcode.Select when is_struct (type_of i) -> i :: acc
+        | Opcode.PHI when phi_splittable i -> i :: acc
+        | _ -> acc) [] bb in
+      List.iter rewrite (List.rev merges)) f) !the_module
+
 (* Run IR-level optimization passes.
    - Vectorization is disabled: AArch64 bare-metal may lack NEON.
    - "default<O2>" includes the loop-idiom pass, which replaces memset/memcpy-like loops
@@ -1400,34 +1528,39 @@ let setup_target ?(triple = "") ?(cpu = "") ?(features = "") () =
      * constraint-elimination: stronger constraint-based elimination (deduplicates range checks)
      * always-inline        : honor Takibi `inline fn` without enabling default<O2>/loop-idiom
                               (disabled for -g builds to keep GDB stepping/locals stable)
-     * simplifycfg          : final cleanup of dead blocks *)
+     * simplifycfg          : final cleanup of dead blocks
+   - Release builds then split aggregate selects and phis
+     (split_aggregate_merges, #893) and run early-cse,simplifycfg again. *)
 let run_optimizations machine =
   if !function_profiling_enabled then ()
   else
   let opts = Llvm_passbuilder.create_passbuilder_options () in
   Llvm_passbuilder.passbuilder_options_set_loop_vectorization opts false;
   Llvm_passbuilder.passbuilder_options_set_slp_vectorization opts false;
-  let pipeline =
-    if !debug_info_enabled then
-      "function(mem2reg,early-cse,simplifycfg,\
-                correlated-propagation,constraint-elimination,simplifycfg)"
-    else
-      (* Private indexed wrappers retain a real proof through a loan transfer.
-         Scalar replacement before and after inlining removes their stack
-         copies while preserving the ordinary load/store semantics. Keep the
-         debug pipeline unchanged so its local-variable locations stay stable.
-         globaldce drops region built-ins no code calls (internal linkage,
-         #744). *)
-      "function(sroa,mem2reg,early-cse,simplifycfg,\
-                correlated-propagation,constraint-elimination,simplifycfg),\
-       always-inline,\
-       function(sroa,mem2reg,early-cse,simplifycfg,\
-                correlated-propagation,constraint-elimination,simplifycfg),\
-       globaldce"
+  let run pipeline =
+    match Llvm_passbuilder.run_passes !the_module pipeline machine opts with
+    | Ok ()    -> ()
+    | Error msg -> raise (Error (Printf.sprintf "IR optimization failed: %s" msg))
   in
-  (match Llvm_passbuilder.run_passes !the_module pipeline machine opts with
-   | Ok ()    -> ()
-   | Error msg -> raise (Error (Printf.sprintf "IR optimization failed: %s" msg)));
+  if !debug_info_enabled then
+    run "function(mem2reg,early-cse,simplifycfg,\
+                  correlated-propagation,constraint-elimination,simplifycfg)"
+  else begin
+    (* Private indexed wrappers retain a real proof through a loan transfer.
+       Scalar replacement before and after inlining removes their stack
+       copies while preserving the ordinary load/store semantics. Keep the
+       debug pipeline unchanged so its local-variable locations stay stable.
+       globaldce drops region built-ins no code calls (internal linkage,
+       #744). Aggregate selects and phis are split per field after the
+       second round, then folded (#893). *)
+    run "function(sroa,mem2reg,early-cse,simplifycfg,\
+                  correlated-propagation,constraint-elimination,simplifycfg),\
+         always-inline,\
+         function(sroa,mem2reg,early-cse,simplifycfg,\
+                  correlated-propagation,constraint-elimination,simplifycfg)";
+    split_aggregate_merges ();
+    run "function(early-cse,simplifycfg),globaldce"
+  end;
   Llvm_passbuilder.dispose_passbuilder_options opts
 
 let emit_object machine output_path =

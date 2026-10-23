@@ -20961,6 +20961,117 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
          true (contains_substring ir "!DIDerivedType(tag: DW_TAG_member, name: \"len\"")));
 
   Alcotest.test_case
+    "#893: the release pipeline splits aggregate selects and phis, so a variant match branches on the condition and no payload is selected against undef"
+    `Quick
+    (fun () ->
+       (* The release pipeline: a -g test before this one must not leak. *)
+       Llvm_gen.disable_debug_info ();
+       let machine = Llvm_gen.setup_target ~triple:"aarch64-none-elf" () in
+       Llvm_gen.set_external_entries ["owner_valid"; "read_snap"; "three_snap"];
+       let src =
+         "struct OwnerSlot { word: usize; }
+          variant Owner { Kernel; Process(OwnerSlot); }
+          variant Io { Invalid; Ok; Retry; }
+          variant Rd { Invalid; Read(usize); }
+          extern fn slot_valid(s: OwnerSlot) -> bool;
+          extern fn io_read(x: usize) -> Io;
+          inline fn owner_of(word: usize) -> Owner {
+            if (word == 0) { return Owner::Kernel; }
+            let mut s: OwnerSlot = { word };
+            return Owner::Process(s);
+          }
+          fn owner_valid(word: usize) -> bool {
+            match owner_of(word) {
+              Owner::Kernel => { return true; }
+              Owner::Process(p) => { return slot_valid(p); }
+            }
+          }
+          fn read_snap(x: usize) -> Rd {
+            match io_read(x) {
+              Io::Invalid => { return Rd::Invalid; }
+              Io::Ok => { return Rd::Read(1024); }
+              Io::Retry => { return Rd::Invalid; }
+            }
+          }
+          fn three_snap(x: usize) -> Rd {
+            match io_read(x) {
+              Io::Invalid => { return Rd::Invalid; }
+              Io::Ok => { return Rd::Read(x); }
+              Io::Retry => { return Rd::Read(x + 1); }
+            }
+          }" in
+       let result = (try ignore (gen_codegen src);
+                       Llvm_gen.run_optimizations machine; None
+                     with Llvm_gen.Error msg -> Some msg) in
+       Llvm_gen.set_external_entries [];
+       (match result with
+        | Some msg -> Alcotest.failf "unexpected Error: %s" msg
+        | None -> ());
+       List.iter (fun name ->
+         match Llvm.lookup_function name !Llvm_gen.the_module with
+         | Some f ->
+             Alcotest.(check bool) (name ^ " is valid after splitting") true
+               (Llvm_analysis.verify_function f)
+         | None -> Alcotest.failf "function '%s' not found" name)
+         ["owner_valid"; "read_snap"; "three_snap"];
+       let fn_ir name =
+         match Llvm.lookup_function name !Llvm_gen.the_module with
+         | Some f -> Llvm.string_of_llvalue f
+         | None -> Alcotest.failf "function '%s' not found" name in
+       let no_aggregate_merge name =
+         String.split_on_char '\n' (fn_ir name)
+         |> List.for_all (fun line ->
+              not ((contains_substring line "= select i1 "
+                    && contains_substring line ", {")
+                   || contains_substring line "= phi {")) in
+       List.iter (fun name ->
+         Alcotest.(check bool) (name ^ ": no aggregate select or phi") true
+           (no_aggregate_merge name)) ["owner_valid"; "read_snap"; "three_snap"];
+       let owner = fn_ir "owner_valid" in
+       Alcotest.(check bool) "the match branches on the inlined condition" true
+         (not (contains_substring owner "switch")
+          && contains_substring owner "br i1 %eqtmp");
+       Alcotest.(check bool) "an undefined payload leaves the defined one" true
+         (contains_substring (fn_ir "read_snap") "i64 1024, 1"));
+
+  Alcotest.test_case
+    "#893: a phi whose array field two paths define stays one aggregate phi; one defined path splits"
+    `Quick
+    (fun () ->
+       let open Llvm in
+       let ctx = Llvm_gen.context in
+       Llvm_gen.the_module := create_module ctx "split_arrays";
+       let i32 = i32_type ctx and i8 = i8_type ctx in
+       let agg = struct_type ctx [| i32; array_type i8 4 |] in
+       let make name second_defined =
+         let fn = define_function name
+             (function_type agg [| i1_type ctx; agg; agg |])
+             !Llvm_gen.the_module in
+         let entry = entry_block fn in
+         let a = append_block ctx "a" fn and b = append_block ctx "b" fn
+         and join = append_block ctx "join" fn in
+         let bld = builder_at_end ctx entry in
+         ignore (build_cond_br (param fn 0) a b bld);
+         position_at_end a bld; ignore (build_br join bld);
+         position_at_end b bld; ignore (build_br join bld);
+         position_at_end join bld;
+         let other =
+           if second_defined then param fn 2
+           else const_named_struct agg [| const_int i32 0; undef (array_type i8 4) |] in
+         let phi = build_phi [ (param fn 1, a); (other, b) ] "m" bld in
+         ignore (build_ret phi bld);
+         fn in
+       let two = make "two_defined" true and one = make "one_defined" false in
+       Llvm_gen.split_aggregate_merges ();
+       (match Llvm_analysis.verify_module !Llvm_gen.the_module with
+        | None -> () | Some msg -> Alcotest.failf "invalid module: %s" msg);
+       Alcotest.(check bool) "two defined arrays keep the aggregate phi" true
+         (contains_substring (string_of_llvalue two) "phi { i32, [4 x i8] }");
+       Alcotest.(check bool) "one defined array splits per field" true
+         (not (contains_substring (string_of_llvalue one) "phi { i32, [4 x i8] }")
+          && contains_substring (string_of_llvalue one) "phi [4 x i8]"));
+
+  Alcotest.test_case
     "#897: a scalar-payload variant crosses Takibi calls as {tag, active payload}; extern and external entries keep the aggregate"
     `Quick
     (fun () ->
