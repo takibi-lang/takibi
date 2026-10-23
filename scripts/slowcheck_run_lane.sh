@@ -129,29 +129,45 @@ claim
 
 # --- vCPU lease waits are recorded and summarized (GitHub issue #914) -----
 # A real acquire against a private registry: a holder takes the whole budget
-# of 2 for about a second, and a lane named `racer` must wait for it. The
-# wait must reach the lane-timing directory and the summary, per lane and in
-# total; without the record, the minute a race-window lane spends here is
-# indistinguishable from a slow boot.
+# of 2 and keeps it until this test says release, and a lane named `racer`
+# must wait for it. The wait must reach the lane-timing directory and the
+# summary, per lane and in total; without the record, the minute a race-window
+# lane spends here is indistinguishable from a slow boot.
+# No step depends on timing (GitHub issue #928: a fixed 1.2 s hold let a racer
+# started late under allcheck load wait only 0.087 s). The holder holds until
+# `release` exists; the racer runs in the background; the release comes only
+# after the racer has said it is waiting; and the assertion is causal -- the
+# wait began before the release and was granted after it -- not a duration.
 timing="$work/lease"
 registry="$work/registry"
 mkdir -p "$timing"
 TAKIBI_SESSION_REGISTRY="$registry" TAKIBI_QEMU_VCPU_BUDGET=2 bash -c \
-    '. "$1/scripts/vcpu_lease.sh"; resource_lease_vcpu_acquire 2 holder || exit 1; touch "$2"; sleep 1.2' \
-    _ "$REPO_ROOT" "$work/held" &
+    '. "$1/scripts/vcpu_lease.sh"; resource_lease_vcpu_acquire 2 holder || exit 1
+     touch "$2"; until [ -e "$3" ]; do sleep 0.05; done' \
+    _ "$REPO_ROOT" "$work/held" "$work/release" &
 holder=$!
-for _ in $(seq 100); do [ -f "$work/held" ] && break; sleep 0.05; done
-[ -f "$work/held" ] && claim || fail "the holder never took its vCPUs"
+for _ in $(seq 600); do [ -f "$work/held" ] && break; sleep 0.05; done
+[ -f "$work/held" ] && claim || { touch "$work/release"; fail "the holder never took its vCPUs"; }
 TAKIBI_SESSION_REGISTRY="$registry" TAKIBI_QEMU_VCPU_BUDGET=2 \
 TAKIBI_LANE_TIMING_DIR="$timing" TAKIBI_AWAIT_TIMING_LANE=racer bash -c \
-    '. "$1/scripts/vcpu_lease.sh"; resource_lease_vcpu_acquire 2 racer-target' _ "$REPO_ROOT" 2>/dev/null \
-    && claim || fail "the waiting acquire failed"
+    '. "$1/scripts/vcpu_lease.sh"; resource_lease_vcpu_acquire 2 racer-target' \
+    _ "$REPO_ROOT" 2>"$work/racer.log" &
+racer=$!
+for _ in $(seq 600); do grep -q "waiting for 2 more of 2 vCPUs" "$work/racer.log" && break; sleep 0.05; done
+grep -q "waiting for 2 more of 2 vCPUs" "$work/racer.log" \
+    && claim || { touch "$work/release"; fail "the racer never waited: $(cat "$work/racer.log")"; }
+[ ! -e "$timing/vcpu-lease.waits" ] \
+    && claim || { touch "$work/release"; fail "the racer was granted while the holder held the budget"; }
+released="$(date +%s.%3N)"
+touch "$work/release"
+wait "$racer" && claim || fail "the waiting acquire failed"
 wait "$holder"
-python3 - "$timing/vcpu-lease.waits" <<'PY' && claim || fail "the lease wait was not recorded with its duration"
+python3 - "$timing/vcpu-lease.waits" "$released" <<'PY' && claim || fail "the lease wait was not recorded around the release"
 import json, sys
 wait = json.loads(open(sys.argv[1]).read().strip())
+released = float(sys.argv[2])
 assert wait["lane"] == "racer" and wait["vcpus"] == 2, wait
-assert wait["granted"] - wait["wait_start"] >= 0.5, wait
+assert wait["wait_start"] <= released <= wait["granted"], (wait, released)
 PY
 TAKIBI_LANE_TIMING_DIR="$timing" bash "$REPO_ROOT/scripts/lane_timing.sh" record racer 1000.000 0
 cat >>"$timing/vcpu-lease.waits" <<'JSON'

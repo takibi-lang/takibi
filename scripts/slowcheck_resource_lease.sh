@@ -58,9 +58,15 @@ lease agent-a 'resource_lease_acquire testboard "make kernelcheck-rpi5"' \
 # `exec` so the process that holds the lease is the one this test kills, which
 # is the ordinary case: a runner holds its own lease.
 env TAKIBI_SESSION_REGISTRY="$registry" TAKIBI_SESSION=agent-a \
-    bash -c ". '$helper'; resource_lease_acquire testboard slow; exec sleep 30" &
+    bash -c ". '$helper'; resource_lease_acquire testboard slow && : >'$tmp_dir/first.held'; exec sleep 30" &
 first=$!
-sleep 0.5
+# Ask only once the first holds the board: a fixed sleep let a loaded host
+# hand it to the second instead (GitHub issue #928, the shape of #785).
+for _ in $(seq 1 300); do
+    [ -e "$tmp_dir/first.held" ] && break
+    sleep 0.1
+done
+[ -e "$tmp_dir/first.held" ] || fail "the first session did not take testboard within 30 s"
 if env TAKIBI_SESSION_REGISTRY="$registry" TAKIBI_SESSION=agent-b \
         TAKIBI_RESOURCE_LEASE_TIMEOUT=1 \
         bash -c ". '$helper'; resource_lease_acquire testboard second" \
@@ -159,7 +165,9 @@ env -u TAKIBI_RESOURCE_LEASE_HELD \
     bash -c ". '$helper'; resource_lease_run_suite allcheck \
         bash -c 'echo \$\$ >\"$tmp_dir/suite-child.pid\"; exec sleep 30'" &
 suite_runner=$!
-for _attempt in 1 2 3 4 5; do
+# Bounded only on the child starting (GitHub issue #928): 0.5 s was too short
+# for a loaded host.
+for _attempt in $(seq 1 300); do
     [ -s "$tmp_dir/suite-child.pid" ] && break
     sleep 0.1
 done
