@@ -1,0 +1,7 @@
+direct (exit 3, signal 9, exit 300): 3 1009 44
+pass-through and flip: 1005 1006
+struct field round trip: 1011 1 4294967295
+wide payloads (u16, u64 high bits, bool, none): 65535 2147483648 1 3
+pointer payload: 77 12
+nine arguments: 3045
+done

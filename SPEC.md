@@ -1449,6 +1449,16 @@ For example, `NetRxAcquire` retains the tag plus
 equality, range proof, and linear obligation have no separate runtime field.
 A variant whose only payload is an erased view lowers to the tag alone, so
 `NetInitResult` is tag-only and `NetRxAcquire::None` adds no payload field.
+The layout above is the in-memory form. Between Takibi functions, a variant
+in which at least two cases carry a runtime payload, each a single integer,
+`bool` or pointer, is passed and returned as `{ i32 tag, payload }`: the
+active case's payload, zero-extended to 32 bits, or to 64 when any payload
+is a pointer or wider than 32 bits. That is two registers however many cases
+there are. `extern fn` declarations and `--external-entry` functions keep
+the aggregate form, which LLVM passes one register per scalar field, and a
+function that does cannot be used as a function value. The debug sidecar's
+`return_abi` names the first form `tag_payload` (GitHub issue #897).
+
 Full source-level tagged-union DWARF metadata and a compact union ABI are
 deferred; code must not treat this first implementation as a stable C ABI.
 

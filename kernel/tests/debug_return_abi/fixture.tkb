@@ -9,6 +9,8 @@
 //           say indirect.
 //   Eight:  tag + seven u64 = eight leaves, the last register case (x0..x7).
 //   Nine:   tag + eight u64 = nine leaves, returned through the x8 buffer.
+//   Shared: two scalar-payload cases, returned as tag in x0 and the active
+//           payload in x1 (GitHub issue #897), not one register per case.
 //
 // Every probe runs twice: once normally (the control that the fixture ran
 // and the cases are distinguishable) and once with GDB forcing Forced. The
@@ -23,6 +25,7 @@ struct DebugAbiEight { w0: u64; w1: u64; w2: u64; w3: u64; w4: u64; w5: u64; w6:
 variant DebugAbiDirect { Normal(DebugAbiThree); Forced; }
 variant DebugAbiEightLeaves { Normal(DebugAbiSeven); Forced; }
 variant DebugAbiNineLeaves { Normal(DebugAbiEight); Forced; }
+variant DebugAbiShared { Low(u32); Wide(u64); Forced; }
 
 const DEBUG_ABI_UART: usize = 0x09000000;
 const DEBUG_ABI_FORCE_KEY: u64 = 0x7E;
@@ -67,6 +70,11 @@ noinline fn debug_abi_nine(key: u64) -> DebugAbiNineLeaves {
     return DebugAbiNineLeaves::Normal(words);
 }
 
+noinline fn debug_abi_shared(key: u64) -> DebugAbiShared {
+    if (key == DEBUG_ABI_FORCE_KEY) { return DebugAbiShared::Forced; }
+    return DebugAbiShared::Wide(key + 3);
+}
+
 // A normal result must carry the payload the callee built from its key.
 fn debug_abi_report(name: *u8, round: *u8, normal: bool, intact: bool) !{unsafe} {
     debug_abi_puts("debug-return-abi: ");
@@ -105,10 +113,18 @@ fn debug_abi_round(round: *u8, key: u64) !{unsafe} {
         }
         DebugAbiNineLeaves::Forced => { debug_abi_report("nine", round, false, true); }
     }
+    let shared_key: u64 = key + 3 * DEBUG_ABI_KEY_STEP;
+    match debug_abi_shared(shared_key) {
+        DebugAbiShared::Wide(w) => {
+            debug_abi_report("shared", round, true, w == shared_key + 3);
+        }
+        DebugAbiShared::Low(_) => { debug_abi_report("shared", round, true, false); }
+        DebugAbiShared::Forced => { debug_abi_report("shared", round, false, true); }
+    }
 }
 
 // The runner's GDB forces only the second round, whose keys are
-// 0x50, 0x51 and 0x52 in the high half.
+// 0x50, 0x51, 0x52 and 0x53 in the high half.
 fn debug_abi_main() !{unsafe} {
     let seed: u64 = debug_abi_seed();
     debug_abi_round("control", (seed + 0x20) * DEBUG_ABI_KEY_STEP);

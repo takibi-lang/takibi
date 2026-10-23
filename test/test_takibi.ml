@@ -20961,6 +20961,46 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
          true (contains_substring ir "!DIDerivedType(tag: DW_TAG_member, name: \"len\"")));
 
   Alcotest.test_case
+    "#897: a scalar-payload variant crosses Takibi calls as {tag, active payload}; extern and external entries keep the aggregate"
+    `Quick
+    (fun () ->
+       Llvm_gen.set_external_entries ["abi_entry"];
+       let src =
+         "variant AbiEnd { Exited(u8); Signaled(u8); }
+          variant AbiPtr { None; Some(*u8); Flag(bool); }
+          variant AbiBoxed { One(u8); }
+          extern fn abi_extern(end: AbiEnd) -> AbiEnd;
+          fn abi_make(code: u8) -> AbiEnd { return AbiEnd::Signaled(code); }
+          fn abi_ptr(p: *u8) -> AbiPtr { return AbiPtr::Some(p); }
+          fn abi_boxed(v: AbiBoxed) -> AbiBoxed { return v; }
+          fn abi_pass(end: AbiEnd) -> AbiEnd { return end; }
+          fn abi_entry(end: AbiEnd) -> AbiEnd { return abi_pass(end); }
+          fn abi_code(end: AbiEnd) -> u8 {
+            match abi_pass(abi_extern(end)) {
+              AbiEnd::Exited(c) => { return c; }
+              AbiEnd::Signaled(s) => { return s; }
+            }
+          }" in
+       let result = (try ignore (gen_codegen src); None
+                     with Llvm_gen.Error msg -> Some msg) in
+       Llvm_gen.set_external_entries [];
+       (match result with
+        | Some msg -> Alcotest.failf "unexpected codegen Error: %s" msg
+        | None -> ());
+       let ir = Llvm.string_of_llmodule !Llvm_gen.the_module in
+       let has s = contains_substring ir s in
+       Alcotest.(check bool) "internal result and argument are {tag, payload}" true
+         (has "define { i32, i32 } @abi_pass({ i32, i32 }");
+       Alcotest.(check bool) "a pointer payload widens the slot to i64" true
+         (has "define { i32, i64 } @abi_ptr(");
+       Alcotest.(check bool) "one payload case keeps the aggregate" true
+         (has "define { i32, i8 } @abi_boxed({ i32, i8 }");
+       Alcotest.(check bool) "an external entry keeps the aggregate" true
+         (has "define { i32, i8, i8 } @abi_entry({ i32, i8, i8 }");
+       Alcotest.(check bool) "an extern keeps the aggregate" true
+         (has "declare { i32, i8, i8 } @abi_extern({ i32, i8, i8 }"));
+
+  Alcotest.test_case
     "debug metadata sidecar: enum discriminants, variant target layout, and integer constants share one compiler-owned artifact"
     `Quick
     (fun () ->
@@ -20998,9 +21038,9 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
        Alcotest.(check bool) "variant target size and tag layout" true
          (contains_substring metadata
            "\"name\":\"DebugMetaResult\",\"size\":16,\"tag_offset\":0,\"tag_size\":4");
-       Alcotest.(check bool) "small variant return registers are compiler-owned" true
+       Alcotest.(check bool) "scalar-payload variant returns tag and active payload (#897)" true
          (contains_substring metadata
-           "\"return_abi\":{\"kind\":\"registers\",\"return_address_register\":\"x30\",\"parts\":[{\"register\":\"x0\",\"offset\":0,\"size\":4},{\"register\":\"x1\",\"offset\":4,\"size\":1},{\"register\":\"x2\",\"offset\":8,\"size\":8}]");
+           "\"name\":\"DebugMetaResult\",\"size\":16,\"tag_offset\":0,\"tag_size\":4,\"return_abi\":{\"kind\":\"tag_payload\",\"tag_register\":\"x0\",\"payload_register\":\"x1\",\"return_address_register\":\"x30\"}");
        Alcotest.(check bool) "large variant scalar return registers are compiler-owned" true
          (contains_substring metadata
            "\"name\":\"DebugMetaLarge\",\"size\":32,\"tag_offset\":0,\"tag_size\":4,\"return_abi\":{\"kind\":\"registers\",\"return_address_register\":\"x30\",\"parts\":[{\"register\":\"x0\",\"offset\":0,\"size\":4},{\"register\":\"x1\",\"offset\":8,\"size\":8},{\"register\":\"x2\",\"offset\":16,\"size\":8},{\"register\":\"x3\",\"offset\":24,\"size\":8}]");

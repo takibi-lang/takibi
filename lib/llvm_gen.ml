@@ -7614,8 +7614,15 @@ let debug_type_metadata () =
          Printf.sprintf "{\"name\":%s,\"value\":%d}"
            (quote case_name) value) cases))
   in
-  let variant_return_abi llty =
-    if starts_with !configured_target_triple "aarch64" then
+  let variant_return_abi name llty =
+    if starts_with !configured_target_triple "aarch64"
+       && shared_payload_abi name <> None then
+      (* GitHub issue #897: a Takibi function returns this variant as
+         { i32 tag, payload }: the tag in x0 and the active case's payload,
+         zero-extended, in x1. External entries keep the aggregate form;
+         the sidecar describes the convention of Takibi functions. *)
+      "{\"kind\":\"tag_payload\",\"tag_register\":\"x0\",\"payload_register\":\"x1\",\"return_address_register\":\"x30\"}"
+    else if starts_with !configured_target_triple "aarch64" then
       (* Takibi currently declares a direct LLVM aggregate return, without an
          sret parameter. LLVM's AArch64 lowering assigns one result register
          to each scalar leaf (PageRunAllocResult is 40 bytes and returns in
@@ -7660,7 +7667,7 @@ let debug_type_metadata () =
     let cases = Hashtbl.find variant_cases_tbl name in
     Printf.sprintf
       "{\"name\":%s,\"size\":%Ld,\"tag_offset\":0,\"tag_size\":4,\"return_abi\":%s,\"cases\":[%s]}"
-      (quote name) size (variant_return_abi llty)
+      (quote name) size (variant_return_abi name llty)
       (comma_list (fun (case_name, layout) ->
          let payload = match layout.variant_payload_field,
                              layout.variant_payload with

@@ -1,0 +1,111 @@
+// GitHub issue #897: a variant whose cases carry scalar payloads crosses a
+// Takibi call as its tag and the active case's payload, two registers,
+// instead of one register per case. Each section passes such variants
+// through a different boundary -- a direct call, a pass-through, a global
+// struct field, more arguments than there are registers -- and
+// prints what arrived. The convention itself is pinned in test/test_takibi.ml.
+
+variant End { Exited(u8); Signaled(u8); }
+variant Wide { Small(u16); Large(u64); Flag(bool); Nothing; }
+variant Where { Nowhere; At(*u8); Count(usize); }
+
+struct Holder { before: u8; end: End; after: u32; }
+
+let mut marker: u8 = 77;
+let mut held: Holder;
+
+noinline fn end_exit(code: usize) -> End { return End::Exited((code & 0xFF) as u8); }
+noinline fn end_signal(signal: usize) -> End { return End::Signaled((signal & 0x7F) as u8); }
+
+noinline fn end_code(end: End) -> usize {
+    match end {
+        End::Exited(code) => { return code as usize; }
+        End::Signaled(signal) => { return 1000 + signal as usize; }
+    }
+}
+
+noinline fn end_pass(end: End) -> End { return end; }
+
+noinline fn end_flip(end: End) -> End {
+    match end {
+        End::Exited(code) => { return End::Signaled(code); }
+        End::Signaled(signal) => { return End::Exited(signal); }
+    }
+}
+
+noinline fn wide_code(w: Wide) -> u64 {
+    match w {
+        Wide::Small(v) => { return v as u64; }
+        Wide::Large(v) => { return v; }
+        Wide::Flag(b) => { if (b) { return 1; } return 2; }
+        Wide::Nothing => { return 3; }
+    }
+}
+
+noinline fn where_code(w: Where) -> usize {
+    match w {
+        Where::Nowhere => { return 0; }
+        Where::At(p) => { return *p as usize; }
+        Where::Count(n) => { return n; }
+    }
+}
+
+// Nine variant arguments: more registers than AArch64 or AMD64 pass.
+noinline fn many(a: End, b: End, c: End, d: End, e: End,
+                 f: Wide, g: Wide, h: Where, i: End) -> u64 {
+    return (end_code(a) + end_code(b) + end_code(c) + end_code(d)
+            + end_code(e) + where_code(h) + end_code(i)) as u64
+        + wide_code(f) + wide_code(g);
+}
+
+fn app_main() !{unsafe} {
+    uart_puts("direct (exit 3, signal 9, exit 300): ");
+    uart_print(end_code(end_exit(3)));
+    uart_puts(" ");
+    uart_print(end_code(end_signal(9)));
+    uart_puts(" ");
+    uart_print(end_code(end_exit(300)));
+    uart_puts("\n");
+
+    uart_puts("pass-through and flip: ");
+    uart_print(end_code(end_pass(end_pass(end_signal(5)))));
+    uart_puts(" ");
+    uart_print(end_code(end_flip(end_exit(6))));
+    uart_puts("\n");
+
+    uart_puts("struct field round trip: ");
+    held.before = 1;
+    held.after = 0xFFFFFFFF;
+    held.end = end_signal(11);
+    uart_print(end_code(end_pass(held.end)));
+    uart_puts(" ");
+    uart_print(held.before as usize);
+    uart_puts(" ");
+    uart_print(held.after as usize);
+    uart_puts("\n");
+
+    uart_puts("wide payloads (u16, u64 high bits, bool, none): ");
+    uart_print(wide_code(Wide::Small(65535)) as usize);
+    uart_puts(" ");
+    let big: u64 = 0x8000000000000001;
+    uart_print((wide_code(Wide::Large(big)) >> 32) as usize);
+    uart_puts(" ");
+    uart_print(wide_code(Wide::Flag(true)) as usize);
+    uart_puts(" ");
+    uart_print(wide_code(Wide::Nothing) as usize);
+    uart_puts("\n");
+
+    uart_puts("pointer payload: ");
+    let p: *u8 = &marker as *u8;
+    uart_print(where_code(Where::At(p)));
+    uart_puts(" ");
+    uart_print(where_code(Where::Count(12)));
+    uart_puts("\n");
+
+    uart_puts("nine arguments: ");
+    uart_print(many(end_exit(1), end_exit(2), end_signal(3), end_exit(4),
+                    end_signal(5), Wide::Small(6), Wide::Large(7),
+                    Where::Count(8), end_signal(9)) as usize);
+    uart_puts("\n");
+    uart_puts("done\n");
+}

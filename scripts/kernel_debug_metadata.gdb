@@ -170,7 +170,12 @@ class TakibiForceVariantReturn(gdb.Command):
         value_bytes[tag_offset:tag_offset + len(tag_bytes)] = tag_bytes
 
         register_values = []
-        if abi["kind"] == "registers":
+        if abi["kind"] == "tag_payload":
+            # GitHub issue #897: tag in one register, the active case's
+            # payload in another. A payload-free case leaves the payload
+            # register unread.
+            register_values.append((abi["tag_register"], int(case["tag"])))
+        elif abi["kind"] == "registers":
             for part in abi["parts"]:
                 start = part["offset"]
                 end = start + part["size"]
