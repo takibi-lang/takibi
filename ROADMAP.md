@@ -165,8 +165,7 @@ not hold, in this order; compiler work in this list is authorized; an item
 that reaches a decision is parked and the next one taken: #908 (fixed
 QEMU lane budget), #916 (compiler GC tuning), #921 and #922
 (variant reuse, domain-parallel codegen; both wait on the land-span
-measurement after #917's front-end fixes), #914 (race-window
-kernels built before the lanes), #915 (backing-exists overlays in
+measurement after #917's front-end fixes), #915 (backing-exists overlays in
 parallel), #897 (small plain variants in
 registers), #893 (redundant csel in variant match), #884 (struct == / !=
 accepted then an internal error), #888 (array field initialized in a
