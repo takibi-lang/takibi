@@ -45,13 +45,21 @@ def compare_fields(label: str, uart_line: str, gdb_line: str,
                 f"GDB={gdb.get(key)!r}")
 
 
-def indexed(lines: list[str], prefix: str, key: str) -> dict[int, str]:
+def indexed(lines: list[str], prefix: str, *keys: str) -> dict:
+    """Index lines by one numeric field, or by a tuple of them.
+
+    Diagnostic event sequence numbers are per CPU (each core has its own
+    ring), so events are keyed by (cpu, seq); a global seq key rejected a
+    valid dump once two cores' rings overlapped in seq (#830).
+    """
     result = {}
     for line in many(lines, prefix):
         parsed = fields(line)
-        index = parsed.get(key)
-        if not isinstance(index, int):
-            raise ValueError(f"{prefix} has no numeric {key}: {line}")
+        values = tuple(parsed.get(key) for key in keys)
+        if not all(isinstance(value, int) for value in values):
+            raise ValueError(f"{prefix} has no numeric {keys}: {line}")
+        index = values[0] if len(values) == 1 else values
+        key = "/".join(keys)
         if index in result:
             raise ValueError(f"duplicate {prefix} {key}={index}")
         result[index] = line
@@ -211,8 +219,8 @@ def main() -> int:
             gdb_event_headers[cpu],
             ("cpu", "count", "damaged", "overwritten"),
         )
-    uart_events = indexed(uart, "ddb: event seq=", "seq")
-    gdb_events = indexed(gdb, "takibi-kernel: event seq=", "seq")
+    uart_events = indexed(uart, "ddb: event seq=", "cpu", "seq")
+    gdb_events = indexed(gdb, "takibi-kernel: event seq=", "cpu", "seq")
     if uart_events.keys() != gdb_events.keys():
         raise ValueError("diagnostic event sets differ")
     for sequence in uart_events:
