@@ -296,6 +296,9 @@ Wake(p) ==
 \* and left Ready with its continuation -- that parent and no other process.
 \* The core has no current process and still stands on the zombie's stack.
 \* A process with no parent (init) does not exit in this model.
+\* Settled is all the exit asks, so the action covers an exit from a
+\* syscall and one from the return-to-EL0 hook after SwitchComplete
+\* (signal_return_exit, #949) alike.
 ChildExit(c) ==
     /\ current[c] # None
     /\ Settled(c, current[c])

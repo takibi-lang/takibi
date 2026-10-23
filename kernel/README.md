@@ -1908,11 +1908,12 @@ run, not a specification.
   `SIGSTOP`, `SIGTTIN`, `SIGTTOU`). Every standard signal keeps its own
   `rt_sigaction` action: an ignored one is discarded, one with no handler
   and a terminating default ends the process by that signal (Linux WTERMSIG status), and a
-  handler is entered at a syscall return through a Linux arm64 signal frame
+  handler is entered at a return to EL0 through a Linux arm64 signal frame
   and left through `rt_sigreturn`. `rt_sigsuspend` waits for any caught
-  signal, which is what ash's `wait` builtin and `trap` need. A caught signal
-  does not wake a process asleep in any other call; it runs at that
-  process's next syscall return.
+  signal, which is what ash's `wait` builtin and `trap` need. Both a
+  handler and a terminating signal reach a process computing without
+  syscalls at the return from its next timer interrupt
+  (`kernel/SYSCALLS.md`).
 - **Memory.** `mmap` is anonymous-only through a heap-break cursor rather
   than a real independent mapping. `mprotect` performs exactly one
   permission transition (`RW+XN` <-> `R+XN` on data, heap, and stack) and
