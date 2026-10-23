@@ -18640,6 +18640,38 @@ fn hidden_witnessed() -> usize {
          "extern fn lock920b() !{locks};
           fn irq920() !{interrupt} { lock920b(); }" ());
 
+  (* GitHub issue #920 (decisions 2 and 3): the debug/crash stop escalates
+     to the pseudo-NMI, so a held core may own any lock. Its caller is a
+     `debug_stopped` root: it reaches no lock and spends the token inside. *)
+  Alcotest.test_case
+    "issue #920: the debug stop's caller takes no lock and keeps the token"
+    `Quick
+    (fun () ->
+       let base =
+         "linear view Tok920[id: usize];
+          extern fn lock920() !{locks};
+          fn begin920() -> Tok920[1] !{starts_debug_stop} { return view Tok920[1]; }
+          fn end920(t: sink Tok920[id]) {}
+          fn inspect920(t: borrow Tok920[id]) {}
+          " in
+       expect_ok (base ^
+         "fn ddb920() !{interrupt, debug_stopped} {
+            let t = begin920(); inspect920(t); end920(t);
+          }") ();
+       expect_type_error "begins the debug stop through 'begin920' but does not declare debug_stopped"
+         (base ^ "fn plain920() { let t = begin920(); end920(t); }") ();
+       expect_type_error "debug_stopped function 'locked920' has effect locks via locked920 -> helper920 -> lock920"
+         (base ^
+         "fn helper920() { lock920(); }
+          fn locked920() !{interrupt, debug_stopped} {
+            let t = begin920(); helper920(); end920(t);
+          }") ();
+       expect_type_error "may not return a linear value"
+         (base ^
+         "fn leak920() -> Tok920[1] !{debug_stopped} { return begin920(); }") ();
+       (* An interrupt root may still lock; only the debug root may not. *)
+       expect_ok (base ^ "fn irq920c() !{interrupt} { lock920(); }") ());
+
   Alcotest.test_case
     "issue #809: a world-stop back-off is not reached with IRQs masked"
     `Quick

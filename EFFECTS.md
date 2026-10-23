@@ -12,6 +12,7 @@
 | `unsafe` | local explicit + inferred | no | yes | yes | - | - | allowed | allowed |
 | `interrupt` | explicit | yes | no | no | may_block, allocates, logs, exception, mmu_off | may_block, allocates, logs, requires_irq_unmasked | rejected | allowed |
 | `nmi` | explicit | yes | no | no | may_block, allocates, logs, locks, interrupt, exception, mmu_off | locks, may_block, allocates, logs, requires_irq_unmasked | rejected | allowed |
+| `debug_stopped` | explicit | yes | no | no | may_block, allocates, locks, mmu_off | locks, may_block, allocates, requires_irq_unmasked | rejected | allowed |
 | `exception` | explicit | yes | no | no | may_block, allocates, logs, interrupt, mmu_off | may_block, allocates, logs, requires_irq_unmasked | rejected | forbidden |
 | `mmu_off` | explicit | yes | no | no | interrupt, exception, requires_mmu | requires_mmu, requires_devices | rejected | allowed |
 | `requires_devices` | inferred | no | yes | yes | - | - | allowed | allowed |

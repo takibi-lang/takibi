@@ -2145,6 +2145,18 @@ contain `locks`, `may_block`, `allocates`, `logs` or
 `requires_irq_unmasked`, and an unknown indirect call is rejected as for
 `interrupt`. `nmi` cannot be combined with `interrupt` or `exception`.
 
+`debug_stopped` is the same rule for the side that STOPS the machine for a
+debugger or a crash report (GitHub issue #920). That stop escalates to the
+pseudo-NMI, so a core it holds may own any lock, and the stopping side must
+never wait on one. A function that begins such a stop declares the
+checker-only word `starts_debug_stop`; every direct caller of it must declare
+`debug_stopped`, whose reachable call graph must not contain `locks`,
+`may_block`, `allocates` or `requires_irq_unmasked` (an unknown indirect call
+is rejected). A `debug_stopped` function may not return a linear value or a
+variant carrying one, so the stop token it obtains is spent inside the
+checked root and every function it is lent to is reachable from it.
+`debug_stopped` combines with `interrupt` and `exception`.
+
 `logs` covers UART and console emission, including recursion through a
 logging helper, without a second redundant "reentrant logging" effect. It
 stays forbidden in a handler for a reason worth stating: at 115200 baud a

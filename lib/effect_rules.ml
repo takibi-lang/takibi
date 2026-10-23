@@ -63,6 +63,12 @@ let restores_saved_irq_annotation = "restores_saved_irq"
    is not an unmask). Checker-only, like the two words above. *)
 let masks_irq_annotation = "masks_irq"
 
+(* GitHub issue #920 (maintainer decision 2): the debug/crash stop escalates
+   to the pseudo-NMI, so it can hold a core that owns any lock. The function
+   that begins it declares `starts_debug_stop`; every caller of such a
+   function must be a `debug_stopped` root (below). Checker-only. *)
+let starts_debug_stop_annotation = "starts_debug_stop"
+
 (* GitHub issue #493: the two checker-only words of effect-indexed
    invalidation. `invalidates_<Type>` marks a function after which a
    plain handle of struct type <Type> may name a destroyed object; the
@@ -107,6 +113,7 @@ let dynamic_rule name =
     || name = single_instance_lock_annotation
     || name = restores_saved_irq_annotation
     || name = masks_irq_annotation
+    || name = starts_debug_stop_annotation
     || invalidation_annotation name <> None
     || name = handle_of_witness_annotation
     || record_mutation_annotation name <> None
@@ -161,6 +168,19 @@ let rules = [
     excludes_declared = ["may_block"; "allocates"; "logs"; "locks"; "interrupt";
                          "exception"; "mmu_off"];
     excludes_reachable = ["locks"; "may_block"; "allocates"; "logs";
+                          "requires_irq_unmasked"];
+    rejects_unknown_indirect = true; forbids_reentry = false };
+  (* GitHub issue #920 (maintainer decision 3): a function that begins the
+     debug/crash stop. Once the machine is stopped that way a held core may
+     own any lock, so the stopping side never waits on one: its reachable
+     calls exclude `locks`, like an `nmi` root's -- Linux's lock-free panic
+     path, made static. It combines with `interrupt` or `exception` (DDB and
+     the crash path run in both). It may not return a linear value or a
+     variant carrying one, so the stop token cannot leave the checked root. *)
+  { name = "debug_stopped"; declaration = Required; declaration_role = true;
+    function_pointer = false; propagates = false; effect_free_forbidden = false;
+    excludes_declared = ["may_block"; "allocates"; "locks"; "mmu_off"];
+    excludes_reachable = ["locks"; "may_block"; "allocates";
                           "requires_irq_unmasked"];
     rejects_unknown_indirect = true; forbids_reentry = false };
   { name = "exception"; declaration = Required; declaration_role = true;

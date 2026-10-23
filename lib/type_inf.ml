@@ -14864,6 +14864,64 @@ let infer_program (prog : Ast.toplevel list) : program_types =
        zero-propagation, grep-visible marker at the definition site,
        not a composing effect. *)
   ) declared_effects;
+  (* GitHub issue #920: the debug/crash stop. A `debug_stopped` root reaches
+     no lock (excludes_reachable); every direct caller of a
+     `starts_debug_stop` function is such a root; and such a root returns no
+     linear value or variant, so the stop token it holds is spent inside. *)
+  StringMap.iter (fun key effects_opt ->
+    let effects = Option.value effects_opt ~default:[] in
+    if List.mem "debug_stopped" effects then begin
+      let rule = Option.get (Effect_rules.find "debug_stopped") in
+      List.iter (fun eff ->
+        if StringSet.mem key (closed_effect eff) then begin
+          let path = Option.value (find_effect_path eff StringSet.empty key)
+            ~default:[display_effect_key key] in
+          raise (TypeError (StringMap.find key effect_locs, Printf.sprintf
+            "debug_stopped function '%s' has effect %s via %s; a core held \
+             by the debug stop may own any lock (#920)"
+            (display_effect_key key) eff (String.concat " -> " path)))
+        end) rule.excludes_reachable;
+      if StringSet.mem key may_reach_unknown then begin
+        let path = Option.value (find_unknown_path StringSet.empty key)
+          ~default:[display_effect_key key; "<indirect call>"] in
+        raise (TypeError (StringMap.find key effect_locs, Printf.sprintf
+          "debug_stopped function '%s' reaches a call with unknown effects via %s"
+          (display_effect_key key) (String.concat " -> " path)))
+      end
+    end) declared_effects;
+  let debug_starters = List.fold_left (fun acc -> function
+    | Ast.FuncDef f when (match f.effects with
+        | Some es -> List.mem Effect_rules.starts_debug_stop_annotation es
+        | None -> false) -> StringSet.add (overload_key f.name f.params) acc
+    | _ -> acc) StringSet.empty prog in
+  List.iter (function
+    | Ast.FuncDef f ->
+        let key = overload_key f.name f.params in
+        let declared = match f.effects with Some es -> es | None -> [] in
+        let is_root = List.mem "debug_stopped" declared in
+        let callees = Option.value (StringMap.find_opt key lock_callees)
+          ~default:StringSet.empty in
+        (match StringSet.choose_opt (StringSet.inter callees debug_starters) with
+         | Some starter when not is_root ->
+             raise (TypeError (f.def_loc, Printf.sprintf
+               "function '%s' begins the debug stop through '%s' but does not \
+                declare debug_stopped; once a held core may own any lock, the \
+                stopping side must be checked to take none (#920)"
+               f.name starter))
+         | _ -> ());
+        if is_root then begin
+          let escapes = match f.ret_type with
+            | Some (Ast.TypeNamed n | Ast.TypeIndexed (n, _))
+              when Hashtbl.mem variant_kinds n -> true
+            | Some ty -> is_linear_type ty
+            | None -> false in
+          if escapes then
+            raise (TypeError (f.def_loc, Printf.sprintf
+              "debug_stopped function '%s' may not return a linear value or a \
+               variant carrying one: the debug stop token must be spent inside it (#920)"
+              f.name))
+        end
+    | _ -> ()) prog;
   let functions = StringMap.mapi (fun key info ->
     let declared = match StringMap.find_opt key declared_effects with
       | Some (Some effects) -> effects
