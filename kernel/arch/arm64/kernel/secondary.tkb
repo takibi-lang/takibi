@@ -208,11 +208,6 @@ fn kernel_idle_loop() !{unsafe} {
     let core_id: usize = cpu_id();
     enable_irq();
     while (true) {
-            // Console housekeeping (the UART input-flow request) on every
-            // wake, as at syscall entry: an idle core takes no syscalls.
-            // Only core 0 sends it; the callee returns on any other core.
-            // Peer output no longer waits for core 0 here (#613 slice 5).
-            kernel_log_console_poll();
             tcp_pool_cost_secondary_poll(core_id);
             // GitHub issue #613 slice 5: every online secondary, not core 1
             // alone -- the point is all CPUs writing the log ring at once.

@@ -256,10 +256,14 @@ Symmetric now:
   idle stack is entry `cpu index` of one array starting at the boot stack:
   every core idles on the stack it booted on (#831; core 0 had a separate
   idle stack while its boot stack held `main()`'s frames and slot 0's
-  context). Every core calls the same
-  console poll, which only core 0 acts on (the UART input-flow request,
-  inside `kernel_log_console_poll`), and every peer runs the peer log
-  probe (the boot probes bullet below).
+  context). Every peer runs the peer log probe (the boot probes bullet
+  below).
+- UART input-flow requests (#830): the RX handler, a terminal read that
+  drained the receive ring, and a termios change each send the STOP or
+  START byte themselves, from whichever core runs them, deciding under the
+  console lock (`kernel_log_terminal_flow_poll`). There is no longer a
+  console poll at syscall entry or in the idle loop, so no core is asked to
+  send it for another.
 - The boot contention probes (#756): core 0 arms each from the boot
   sequence and every other online core joins it from the idle loop, each
   per-core word indexed by its own id (`kernel/lib/peer_round.tkb`: a
@@ -301,9 +305,8 @@ Special, with the reason it stays so today:
 | Boot | `boot/entry.S` parks every MPIDR but 0; core 0 runs `main()`, the GIC distributor, device bring-up and the boot fixtures (on the boot thread, pinned there by its mask), and its idle loop takes the first process after `main()` hands off (`kernel_process_secondary_start`) | the firmware hands off one core, and machine-wide state is initialized once; PID 1's first entry is then deterministic, which the oops lane's fault injection relies on | no: one core has to come first |
 | PSCI start authority | `cpu_start_reserve` (`lib/occupancy.tkb`) | starting cores is a boot phase; no hotplug exists | only with CPU hotplug, which nothing needs |
 | Syscalls outside the peer-safety table | `syscall_peer_refused`, `syscall_peer_safe`; rerun on core 0 with the process pinned for the call | no subsystem entry is left: the BusyBox Extras exec left in #828, and the TCP pool drain it ran is gone since #836. The terminal reboot and the payload fixture's parent-progress report are still refused by number, so the rerun path itself stays | yes, one entry at a time; each is its own follow-up |
-| Device interrupts | the UART SPI targets core 0; a secondary's dispatch handles its tick, its PMU line, the NIC and xHCI (above), nothing else | the UART driver's state is touched only from core 0 | yes: the NIC and xHCI moved in #830; the UART (with BREAK -> DDB and the input-flow poll) is #830's next slice |
+| Device interrupts | the UART SPI targets core 0; a secondary's dispatch handles its tick, its PMU line, the NIC and xHCI (above), nothing else | the UART driver's state is touched only from core 0 | yes: the NIC and xHCI moved in #830; the UART (with BREAK -> DDB) is #830's next slice; the input-flow request already left core 0 in #830 |
 | DDB entry by UART BREAK | the UART IRQ branch on core 0 | follows the device interrupt row; DDB then stops the others through the world stop | follows the device row |
-| UART input-flow requests | `kernel_log_console_poll` (`kernel/printk/log.tkb`), called at syscall entry and from core 0's idle loop | the UART is core 0's device (see the device interrupt row); since #613 slice 5 every CPU writes the log ring, so peer lines no longer pass through core 0 and the old peer drain and UartTx blocking are gone -- this flow-control poll is all that is left. A termios change sends the request itself from whichever CPU made it (#826), deciding under the console lock as the poll does | follows the device interrupt row |
 | Two-core probes and fixtures | the spread-timer and busy-pair fixtures | each is an experiment written for core 0 against CPU 1 | no: the fixed pair is the experiment |
 | Contention probe primary | every `*_contention_probe` and its siblings in `kernel/init/contention_probes.tkb` | the boot sequence runs on core 0, so it arms the probe and counts as participant 0; the peers are symmetric among themselves (#756) | only if probes ran outside the boot sequence |
 

@@ -61,7 +61,8 @@ kernel/printk/log.tkb (see "As built, slice 4" and "As built, slice 5").
   (`kernel_log_peer_*`, 6 KiB of text plus lengths, ticks and sequence
   words), core 0's drain and its deferred cpu/tick attribution are deleted.
   kernel_log_peer_drain became kernel_log_console_poll (the input-flow
-  request only).
+  request only), which #830 later removed: the reader that drains the
+  receive ring sends that request itself.
 - Line state: `KernelLogCoreState` per CPU holds emergency, capturing,
   active, continued, length, tick and a 640-byte stage, reached by a checked
   index (no raw pointer; log.tkb's raw-deref budget fell from 46 to 21).

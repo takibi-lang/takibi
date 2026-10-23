@@ -3287,6 +3287,10 @@ fn syscall_read_uart(current_authority: borrow ProcessCurrent[current_process, P
             }
             terminal_input_flow_update(kernel_uart_rx_queued());
             process_run_unlock(guard);
+            // GitHub issue #830: the reader that drained the ring sends the
+            // START itself, on whichever core it runs, as a termios change
+            // does; no core polls for it.
+            kernel_log_terminal_flow_poll();
             return SyscallIoResult::Transferred(transferred);
         }
     }
@@ -5305,7 +5309,6 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                            x2: usize, x3: usize, x4: usize, frame_sp: usize)
         -> (usize, usize) !{unsafe} {
     kernel_activity_set(KernelActivity::Syscall);
-    kernel_log_console_poll();
     workload_profile_note_syscall(number);
     // GitHub issue #580: sample the real BusyBox sleep applet at syscall
     // entry, before peer-safety policy can migrate its frame to core 0.

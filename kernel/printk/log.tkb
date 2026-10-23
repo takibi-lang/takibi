@@ -822,8 +822,9 @@ private fn uart_tx_spin_store_locked(guard: borrow ConsoleGuard[console_tx_lock]
     kernel_log_wire_last = c;
 }
 
-// CPU 0's console poll and a termios change on any CPU send UART input-flow
-// requests, each deciding under the console lock. Readers on every CPU
+// The RX handler, a terminal read and a termios change send UART input-flow
+// requests from whichever CPU runs them, each deciding under the console lock
+// (GitHub issue #830: no core polls for them). Readers on every CPU
 // publish their desired state atomically; coalescing to the latest state cannot leave
 // the sender stopped after the receive ring became empty.
 private let mut kernel_log_terminal_input_stopped: bool;
@@ -1357,14 +1358,6 @@ private fn kernel_log_peer_console_probe_step(
     if (uart_user_write(line) == line.len) {
         atomic_word_store(&kernel_log_peer_console_probe_sent[core], sent + 1);
     }
-}
-
-// Core 0's console housekeeping at syscall entry and on each wake of its
-// idle loop: the UART input-flow request. Peer lines no longer pass through
-// core 0 (#613 slice 5), so this is all that is left of the old peer drain.
-fn kernel_log_console_poll() !{unsafe} {
-    if (cpu_id() != 0) { return; } // core-role: core 0 alone sends UART input-flow requests
-    kernel_log_terminal_flow_poll();
 }
 
 // Terminal exception paths must remain visible on every CPU and must not
