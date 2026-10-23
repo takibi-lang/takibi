@@ -80,8 +80,10 @@ SOURCES = {
 TABLES = {
     "GicV2Distributor": {
         "ctlr": (0x000, None, "gicv2"),
+        "typer": (0x004, None, "gicv2"),
         "isenabler": (0x100, 32, "gicv2"),
         "icpendr": (0x280, 32, "gicv2"),
+        "ipriorityr": (0x400, 1024, "gicv2"),
         "itargetsr": (0x800, 1024, "gicv2"),
         "icfgr": (0xC00, 64, "gicv2"),
         "sgir": (0xF00, None, "gicv2"),
@@ -89,6 +91,7 @@ TABLES = {
     "GicV2CpuInterface": {
         "ctlr": (0x00, None, "gicv2"),
         "pmr": (0x04, None, "gicv2"),
+        "bpr": (0x08, None, "gicv2"),
         "iar": (0x0C, None, "gicv2"),
         "eoir": (0x10, None, "gicv2"),
     },
