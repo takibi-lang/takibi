@@ -3980,7 +3980,12 @@ the constraints; a false or unprovable constraint is a compile error, with
 no runtime fallback. `where` is a keyword.
 
 Constants, normalized static expressions and constant refinement intervals
-keep their existing fast paths. A bounded order graph additionally uses:
+keep their existing fast paths. In the interval path a product of static
+indices, such as `where x * y < 100`, is bounded from its factors'
+intervals when every factor is known non-negative (GitHub issue #807); a
+factor with no interval or a negative bound leaves it unprovable, and a
+bound too large for the compiler's own arithmetic is treated as unknown,
+never wrapped. A bounded order graph additionally uses:
 
 - The enclosing function's declared `where` clauses as body assumptions.
 - Direct `<`, `<=`, `>` and `>=` comparisons, including conjunctions, in
@@ -4613,6 +4618,13 @@ moved across functions.
   nothing (the subtraction wraps and the unsigned `max` returns the
   wrapped value; GitHub issue #935). Prove `a >= b` from the operands'
   own ranges, or compute in a signed type;
+  `{a..<b} * {c..<d} -> {a*c..<(b-1)*(d-1)+1}` for two refined factors of
+  the same base when both are non-negative (`a >= 0`, `c >= 0`) and the
+  maximum `(b-1)*(d-1)` lies inside the base's representable range
+  (`usize`/`isize` at the target's pointer width), so neither the
+  machine multiplication nor the compiler's own bound arithmetic can
+  wrap; a factor with a negative bound, an unrefined factor, or a product
+  that may exceed the base keeps the plain base type with no range;
   `x & k -> {0..<k+1}` for a non-negative literal mask `k`, regardless of
   `x`'s own sign or range; `n % m -> {0..<m}` for a positive literal `m`,
   **only** when `n`'s own lower bound is already known non-negative

@@ -3546,6 +3546,11 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                  refined_or_base base (Type_inf.checked_mul a k)
                    (Option.bind (Type_inf.checked_mul (b - 1) k)
                       (fun t -> Type_inf.checked_add t 1))
+             | TypeRefined (a, b, base), _, TypeRefined (c, d, _), _ ->
+                 (* GitHub issue #807, sync rule with type_inf.ml's Mul:
+                    the same refined_product_range decides. *)
+                 let (lo, hi) = Type_inf.refined_product_range a b c d in
+                 refined_or_base base lo hi
              | _ -> canon_ty ty1
            in
            (ret_ty, build_mul v1 v2 "multmp" builder)

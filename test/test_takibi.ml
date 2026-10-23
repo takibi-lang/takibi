@@ -7404,6 +7404,59 @@ fn f() -> *usize { return &temp_address_outer().r.a; }");
          words[w] = 0;
        }");
 
+  (* GitHub issue #807: interval multiplication of two refined factors. *)
+  Alcotest.test_case "#807 refined * refined multiplies the ranges" `Quick (fun () ->
+    let pt = infer
+      "fn f(i: {4..<33 as usize}, ctx: {8..<17 as usize}) -> {32..<513 as usize} {
+         return i * ctx; }" in
+    let fi = Types.StringMap.find "f" pt.Types.functions in
+    Alcotest.check type_t "return type is {32..<513 as usize}"
+      (Ast.TypeRefined (32, 513, Ast.TypeUsize)) fi.Types.ret_type);
+
+  Alcotest.test_case "#807 a product of two ranges proves an index (usb_xhci shape)" `Quick
+    (expect_trap_sites 0
+      "let mut words: [u32; 528];
+       fn f(endpoint: {1..<16 as usize}, ctx: {8..<17 as usize}) {
+         let endpoint_index: usize = endpoint * 2;
+         let context_word: usize = (endpoint_index + 2) * ctx;
+         words[context_word + 3] = 0;
+       }");
+
+  Alcotest.test_case "#807 a product just past the array still needs its check" `Quick
+    (expect_trap_sites 1
+      "let mut words: [u32; 515];
+       fn f(endpoint: {1..<16 as usize}, ctx: {8..<17 as usize}) {
+         let endpoint_index: usize = endpoint * 2;
+         let context_word: usize = (endpoint_index + 2) * ctx;
+         words[context_word + 3] = 0;
+       }");
+
+  Alcotest.test_case "#807 an unbounded factor gives no range" `Quick
+    (expect_type_error "unproven"
+      "fn g(x: {0..<64 as usize}) {}
+       fn f(i: {0..<8 as usize}, n: usize) { g(i * n); }");
+
+  Alcotest.test_case "#807 a factor with a negative bound gives no range" `Quick
+    (expect_type_error "unproven"
+      "fn g(x: {0..<64 as i32}) {}
+       fn f(i: {0..<8 as i32}, n: {0 - 1..<8 as i32}) { g(i * n); }");
+
+  Alcotest.test_case "#807 a product that overflows its base type gives no range" `Quick
+    (expect_type_error "unproven"
+      "fn g(x: {0..<40000 as u32}) {}
+       fn f(a: {0..<200 as u8}, b: {0..<200 as u8}) { g((a * b) as u32); }");
+
+  Alcotest.test_case "#807 a product that fits its base type exactly is kept" `Quick
+    (expect_ok
+      "fn g(x: {0..<226 as u8}) {}
+       fn f(a: {0..<16 as u8}, b: {0..<16 as u8}) { g(a * b); }");
+
+  Alcotest.test_case "#807 bounds whose product overflows the checker give no range" `Quick
+    (expect_type_error "unproven"
+      "fn g(x: {0..<64 as u64}) {}
+       fn f(a: {4294967296..<4294967297 as u64}, b: {4294967296..<4294967297 as u64}) {
+         g(a * b); }");
+
   Alcotest.test_case "TRefinedInt result is subtype of i32 return" `Quick
     (expect_ok "fn f(i: {0..<7 as i32}) -> i32 { return i + 1; }");
 
@@ -26281,6 +26334,19 @@ let runtime_bounds_tests =
       -> usize { if (index < middle && middle <= limit) {
         return bounded(limit, index); } return 0; }|});
     bad "equal index is rejected" (bounded ^ "fn bad() -> usize { return bounded(8, 8); }");
+    (* GitHub issue #807: a degree-2 monomial is bounded from its atoms. *)
+    ok "#807 product clause from two ranges" {|fn area(w: usize @ x, h: usize @ y) -> usize
+        where x * y < 100 { return w; }
+      fn use_area(w: {0..<10 as usize}, h: {0..<11 as usize}) -> usize { return area(w, h); }|};
+    bad "#807 product clause past the limit" {|fn area(w: usize @ x, h: usize @ y) -> usize
+        where x * y < 100 { return w; }
+      fn use_area(w: {0..<10 as usize}, h: {0..<13 as usize}) -> usize { return area(w, h); }|};
+    bad "#807 product clause with an unbounded atom" {|fn area(w: usize @ x, h: usize @ y) -> usize
+        where x * y < 100 { return w; }
+      fn use_area(w: {0..<10 as usize}, h: usize) -> usize { return area(w, h); }|};
+    bad "#807 product clause with a negative atom" {|fn area(w: i32 @ x, h: i32 @ y) -> i32
+        where 0 < x * y + 50 { return w; }
+      fn use_area(w: {0 - 9..<10 as i32}, h: {0..<10 as i32}) -> i32 { return area(w, h); }|};
     bad "missing guard is rejected" (bounded ^ {|fn bad(n: usize, k: usize) -> usize {
       return bounded(n, k); }|});
     bad "non-strict guard is rejected" (bounded ^ {|fn bad(n: usize, k: usize) -> usize {

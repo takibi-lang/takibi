@@ -1177,14 +1177,12 @@ fn xhci_configure_endpoint(in_num: {1..<16 as usize},
 
     // Endpoint contexts sit at context (index + 1) of the Input Context,
     // each `ctx` words long (HCCPARAMS1.CSZ, read at attach time). The
-    // bound below always holds (index <= 31, ctx <= 16) but is a product
-    // the checker does not multiply out, so it is tested once here.
+    // checker multiplies the two ranges (#807): (index + 2) is in
+    // {4..<33} and ctx in {8..<17}, so each word offset is in {32..<513}
+    // and every `+ 3` below stays inside the 528-word Input Context.
     let ctx: {8..<17 as usize} = xhci_context_words(rp1_xhci_caps);
     let in_ctx_word: usize = (in_idx + 2) * ctx;
     let out_ctx_word: usize = (out_idx + 2) * ctx;
-    if (in_ctx_word >= 525 || out_ctx_word >= 525) {
-        return XhciConfigureOutcome::Malformed;
-    }
 
     let XhciInputTake::Ready(input) = xhci_input_take() else {
         XhciInputTake::Unavailable => { return XhciConfigureOutcome::Transfer(0); }

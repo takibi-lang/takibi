@@ -300,7 +300,7 @@ let checked_add a b =
   if (a >= 0) = (b >= 0) && (s >= 0) <> (a >= 0) then None else Some s
 
 (* Exclusive upper limit of the values a base type represents, for the
-   range base check below. usize/isize follow the configured pointer width
+   range base check and the product rule below. usize/isize follow the configured pointer width
    (32 bits in inference-only unit tests, the conservative choice).
    Bases with no ordinary arithmetic (wire-endian) give None. *)
 let product_limit_of_base_bits ~signed bits =
@@ -354,6 +354,41 @@ let refined_or_base base lo hi =
   | Some (lo, hi) -> TRefinedInt (lo, hi, base)
   | None -> base
 
+(* GitHub issue #807: {a..<b} * {c..<d} for two refined factors. Sound
+   only when both factors are non-negative (a >= 0, c >= 0): then the
+   product is monotone in each factor, its minimum is a*c and its maximum
+   (b-1)*(d-1). The products use checked_mul, so the checker's own
+   arithmetic cannot wrap, and the caller builds the range through
+   refined_or_base, which drops it unless the maximum fits the base -- so
+   the machine multiplication cannot wrap either. A factor with a negative
+   bound gives (None, None): no range (no use yet; the four-corner rule
+   would also have to reason about the sign of the machine product). Sync
+   rule: lib/llvm_gen.ml's Mul range uses this same function. *)
+let refined_product_range a b c d =
+  if a < 0 || c < 0 || b <= a || d <= c then (None, None)
+  else
+    (checked_mul a c,
+     Option.bind (checked_mul (b - 1) (d - 1)) (fun t -> checked_add t 1))
+
+(* GitHub issue #807: the least value of c * x1 * ... * xn over the atoms'
+   inclusive intervals, for a where-clause monomial of any degree. Only
+   when every atom is non-negative (then the product is monotone, and its
+   extremes are the products of the lower and of the upper bounds); None
+   on a missing or negative interval or on checker overflow. *)
+let monomial_lower_bound bounds c atoms =
+  let rec fold lo hi = function
+    | [] -> Some (lo, hi)
+    | k :: rest ->
+        (match Hashtbl.find_opt bounds k with
+         | Some (klo, khi) when klo >= 0 && khi >= klo ->
+             (match checked_mul lo klo, checked_mul hi khi with
+              | Some lo, Some hi -> fold lo hi rest
+              | _ -> None)
+         | _ -> None) in
+  match fold 1 1 atoms with
+  | Some (plo, phi) -> checked_mul c (if c > 0 then plo else phi)
+  | None -> None
+
 (* Constant/interval fast paths complement the order graph. The existing
    normalized difference must have a non-negative lower bound, or a stable
    relational path must discharge the obligation. No runtime fallback. *)
@@ -370,12 +405,19 @@ let check_where_clause loc fname bounds names relations cmp a b =
   let lower = List.fold_left (fun acc (m, c) ->
     match acc, m with
     | None, _ -> None
-    | Some s, [] -> Some (s + c)
+    | Some s, [] -> checked_add s c
     | Some s, [ k ] ->
         (match Hashtbl.find_opt bounds k with
-         | Some (lo, hi) -> Some (s + (if c > 0 then c * lo else c * hi))
+         | Some (lo, hi) ->
+             (match checked_mul c (if c > 0 then lo else hi) with
+              | Some t -> checked_add s t
+              | None -> None)
          | None -> None)
-    | Some _, _ -> None) (Some 0) poly in
+    | Some s, atoms ->
+        (* GitHub issue #807: degree >= 2, non-negative atoms only. *)
+        (match monomial_lower_bound bounds c atoms with
+         | Some t -> checked_add s t
+         | None -> None)) (Some 0) poly in
   match lower with
   | _ when relational -> ()
   | Some l when l >= 0 -> ()
@@ -3568,6 +3610,12 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                 unify_at e1.loc t1 base;
                 refined_or_base base (checked_mul a k)
                   (Option.bind (checked_mul (b - 1) k) (fun t -> checked_add t 1))
+            | TRefinedInt (a, b, base1), _, TRefinedInt (c, d, base2), _ ->
+                (* GitHub issue #807: two refined factors; see
+                   refined_product_range for the soundness conditions. *)
+                unify_at e.loc base1 base2;
+                let (lo, hi) = refined_product_range a b c d in
+                refined_or_base base1 lo hi
             | _ ->
                 let ct1 = canon_ty t1 and ct2 = canon_ty t2 in
                 unify_at e.loc ct1 ct2;
