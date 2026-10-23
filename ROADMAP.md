@@ -69,7 +69,8 @@ B): #819 (AtomicWord acq_rel cells), #830 (device interrupts on any core),
 sharing), #680 (region_pool handle validation without the lock), #812
 (contiguous page run search), #748 (page allocator metadata lending), #807
 (product of two bounded variables), #798 (one width check for s[off + k]),
-#799 (sizeof proved at type-check time).
+#799 (sizeof proved at type-check time), #900 (page_allocator_total_count's
+IRQ-masked span on RPi5).
 
 Done on the stored-authority route (2026-10-09): #637 stage 1's
 type-checker work and #731 step 1; #131's first slices -- field places
@@ -173,7 +174,11 @@ return), #652 (lifecycle trace for signals and wait4), #698 (ext2
 exhaustion as ENOSPC), #846 (TCP retransmission with no reader), #793
 (proofs with an unresolved type variable), #769 (--uses-of NAME), #774
 (IRQ arms acknowledge their source), #762 (no vector/unaligned stores in
-MMU-off code).
+MMU-off code). Audit follow-ups filed 2026-10-23: #901 (ppoll sigmask with
+nfds > 0), #902 (poll on terminal fds other than 0), #898 (DDB
+schedule_reserved window), #899 (probe-gate checks from #756), #904
+(position-dependent controls, FAILED line after a poll bound), #905
+(peer_sleep_mask negative control), #903 (reproducible guest ELFs).
 
 On 2026-10-04 the maintainer authorized autonomous B work in priority order
 where acceptance is settled; leave design investigations and unmet
