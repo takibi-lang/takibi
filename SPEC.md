@@ -4602,6 +4602,10 @@ moved across functions.
   `+`/`-`/`*`/`/` arithmetic over literals and `const` names, symmetric);
   `{a..<b} - {c..<d} -> {a-d+1..<b-c}`; `{a..<b} * k -> {a*k..<(b-1)*k+1}`
   for a positive compile-time `k` of the same checked-arithmetic form;
+  the same base check applies to every `+` and `* k` rule above: a
+  propagated upper bound past the base's representable range (or a
+  signed lower bound below it) drops the range rather than describe a
+  value the machine operation has wrapped;
   `x & k -> {0..<k+1}` for a non-negative literal mask `k`, regardless of
   `x`'s own sign or range; `n % m -> {0..<m}` for a positive literal `m`,
   **only** when `n`'s own lower bound is already known non-negative

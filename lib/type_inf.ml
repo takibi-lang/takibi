@@ -284,6 +284,67 @@ let bounds_static_node term =
     Some (Runtime_bounds.Static poly)
   with Unify_error _ -> None
 
+(* GitHub issue #807: overflow-checked arithmetic on the checker's own
+   native ints, so a product of two large bounds cannot wrap inside the
+   compiler and fabricate a small (false) bound. None means "too large to
+   reason about here"; every caller then drops the proof. *)
+let checked_mul a b =
+  if a = 0 || b = 0 then Some 0
+  else if (a = -1 && b = min_int) || (b = -1 && a = min_int) then None
+  else
+    let p = a * b in
+    if p / b = a then Some p else None
+
+let checked_add a b =
+  let s = a + b in
+  if (a >= 0) = (b >= 0) && (s >= 0) <> (a >= 0) then None else Some s
+
+(* Exclusive upper limit of the values a base type represents, for the
+   range base check below. usize/isize follow the configured pointer width
+   (32 bits in inference-only unit tests, the conservative choice).
+   Bases with no ordinary arithmetic (wire-endian) give None. *)
+let product_limit_of_base_bits ~signed bits =
+  if bits >= 63 then max_int
+  else if signed then 1 lsl (bits - 1)
+  else 1 lsl bits
+
+let product_limit_of_ty = function
+  | TU8 -> Some 256 | TU16 -> Some 65536
+  | TU32 -> Some (product_limit_of_base_bits ~signed:false 32)
+  | TU64 -> Some max_int
+  | TI8 -> Some 128 | TI16 -> Some 32768
+  | TI32 -> Some (product_limit_of_base_bits ~signed:true 32)
+  | TI64 -> Some max_int
+  | TUsize ->
+      Some (product_limit_of_base_bits ~signed:false (Target_info.pointer_bit_width ()))
+  | TIsize ->
+      Some (product_limit_of_base_bits ~signed:true (Target_info.pointer_bit_width ()))
+  | _ -> None
+
+(* GitHub issue #807 follow-up: a propagated range [lo, hi) is kept only
+   when the checker computed it without overflow (lo/hi are Some) and it
+   lies inside the base's representable values, so the machine operation
+   at the base width cannot have wrapped. An unsigned base with lo < 0 is
+   left as it was: Sub's negative lower bound on an unsigned base is a
+   separate gap. Sync rule:
+   lib/llvm_gen.ml's Add/Mul ranges use this same function. *)
+let range_within_base base lo hi =
+  match lo, hi with
+  | Some lo, Some hi ->
+      (match product_limit_of_ty base with
+       | None -> Some (lo, hi)
+       | Some limit ->
+           let unsigned = (match base with
+             | TU8 | TU16 | TU32 | TU64 | TUsize -> true | _ -> false) in
+           if hi <= limit && (unsigned || lo >= - limit) then Some (lo, hi)
+           else None)
+  | _ -> None
+
+let refined_or_base base lo hi =
+  match range_within_base (repr base) lo hi with
+  | Some (lo, hi) -> TRefinedInt (lo, hi, base)
+  | None -> base
+
 (* Constant/interval fast paths complement the order graph. The existing
    normalized difference must have a non-negative lower bound, or a stable
    relational path must discharge the obligation. No runtime fallback. *)
@@ -3386,12 +3447,13 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                 t2
             | TRefinedInt (a, b, base1), TRefinedInt (c, d, base2) ->
                 unify_at e.loc base1 base2;
-                TRefinedInt (a + c, b + d - 1, base1)
+                refined_or_base base1 (checked_add a c)
+                  (Option.bind (checked_add b d) (fun s -> checked_add s (-1)))
             | TRefinedInt (a, b, base), _ ->
                 (match intlit_opt e2 with
                  | Some k ->
                      unify_at e2.loc t2 base;
-                     TRefinedInt (a + k, b + k, base)
+                     refined_or_base base (checked_add a k) (checked_add b k)
                  | None ->
                      unify_at e2.loc (canon_ty t2) base;
                      base)
@@ -3399,7 +3461,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                 (match intlit_opt e1 with
                  | Some k ->
                      unify_at e1.loc t1 base;
-                     TRefinedInt (c + k, d + k, base)
+                     refined_or_base base (checked_add c k) (checked_add d k)
                  | None ->
                      unify_at e1.loc (canon_ty t1) base;
                      base)
@@ -3479,10 +3541,12 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            (match repr t1, k2, repr t2, k1 with
             | TRefinedInt (a, b, base), Some k, _, _ when k > 0 ->
                 unify_at e2.loc t2 base;
-                TRefinedInt (a * k, (b - 1) * k + 1, base)
+                refined_or_base base (checked_mul a k)
+                  (Option.bind (checked_mul (b - 1) k) (fun t -> checked_add t 1))
             | _, _, TRefinedInt (a, b, base), Some k when k > 0 ->
                 unify_at e1.loc t1 base;
-                TRefinedInt (a * k, (b - 1) * k + 1, base)
+                refined_or_base base (checked_mul a k)
+                  (Option.bind (checked_mul (b - 1) k) (fun t -> checked_add t 1))
             | _ ->
                 let ct1 = canon_ty t1 and ct2 = canon_ty t2 in
                 unify_at e.loc ct1 ct2;

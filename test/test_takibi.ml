@@ -7386,6 +7386,24 @@ fn f() -> *usize { return &temp_address_outer().r.a; }");
          words[context_word + 3] = 0;
        }");
 
+  Alcotest.test_case "#807 a refined sum past its base's width keeps no range" `Quick
+    (expect_trap_sites 1
+      "let mut words: [u32; 20];
+       fn h(a: {4000000000..<4000000001 as u32}, b: {300000000..<300000001 as u32}) {
+         let s: u32 = a + b;
+         let w: usize = (s as usize) - 4299999990;
+         words[w] = 0;
+       }");
+
+  Alcotest.test_case "#807 a refined times-constant past its base's width keeps no range" `Quick
+    (expect_trap_sites 1
+      "let mut words: [u32; 20];
+       fn h(a: {3000000000..<3000000001 as u32}) {
+         let s: u32 = a * 2;
+         let w: usize = (s as usize) - 5999999990;
+         words[w] = 0;
+       }");
+
   Alcotest.test_case "TRefinedInt result is subtype of i32 return" `Quick
     (expect_ok "fn f(i: {0..<7 as i32}) -> i32 { return i + 1; }");
 

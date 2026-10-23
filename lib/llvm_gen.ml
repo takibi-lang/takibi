@@ -3464,6 +3464,12 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                     e.loc.Lexing.pos_lnum amt width))
             | None -> ())
        | _ -> ());
+      (* GitHub issue #807 follow-up, sync rule with type_inf.ml's
+         refined_or_base: a range is kept only when it fits its base. *)
+      let refined_or_base base lo hi =
+        match Type_inf.range_within_base (Types.of_ast base) lo hi with
+        | Some (lo, hi) -> TypeRefined (lo, hi, base)
+        | None -> base in
       (match op with
        | Add ->
            (* Pointer arithmetic: ptr + isize -> GEP. *io T = TypePtr(TypeIo T) also matches TypePtr *)
@@ -3481,12 +3487,16 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                      let sum = build_add v1 v2 "addtmp" builder in
                      let ret_ty = match ty1, ty2 with
                        | TypeRefined (a, b, base), TypeRefined (c, d, _) ->
-                           TypeRefined (a + c, b + d - 1, base)
+                           refined_or_base base (Type_inf.checked_add a c)
+                             (Option.bind (Type_inf.checked_add b d)
+                                (fun s -> Type_inf.checked_add s (-1)))
                        | _ ->
                            (match ty1, intlit_opt e2 with
-                            | TypeRefined (a, b, base), Some k -> TypeRefined (a + k, b + k, base)
+                            | TypeRefined (a, b, base), Some k ->
+                                refined_or_base base (Type_inf.checked_add a k) (Type_inf.checked_add b k)
                             | _ -> (match ty2, intlit_opt e1 with
-                                    | TypeRefined (c, d, base), Some k -> TypeRefined (c + k, d + k, base)
+                                    | TypeRefined (c, d, base), Some k ->
+                                        refined_or_base base (Type_inf.checked_add c k) (Type_inf.checked_add d k)
                                     | _ -> canon_ty ty1))
                      in
                      (ret_ty, sum)))
@@ -3519,9 +3529,13 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            let k2 = intlit_opt e2 and k1 = intlit_opt e1 in
            let ret_ty = match ty1, k2, ty2, k1 with
              | TypeRefined (a, b, base), Some k, _, _ when k > 0 ->
-                 TypeRefined (a * k, (b - 1) * k + 1, base)
+                 refined_or_base base (Type_inf.checked_mul a k)
+                   (Option.bind (Type_inf.checked_mul (b - 1) k)
+                      (fun t -> Type_inf.checked_add t 1))
              | _, _, TypeRefined (a, b, base), Some k when k > 0 ->
-                 TypeRefined (a * k, (b - 1) * k + 1, base)
+                 refined_or_base base (Type_inf.checked_mul a k)
+                   (Option.bind (Type_inf.checked_mul (b - 1) k)
+                      (fun t -> Type_inf.checked_add t 1))
              | _ -> canon_ty ty1
            in
            (ret_ty, build_mul v1 v2 "multmp" builder)
