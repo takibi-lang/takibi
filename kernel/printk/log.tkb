@@ -524,38 +524,38 @@ private fn kernel_log_stage_byte(core: {0..<KERNEL_MAX_CORES as usize}, value: u
 // longer is not a measurement that changes what it measures.
 //
 // Counted here rather than in the two platform drivers so both report one
-// number through one path. Only core 0's bytes are counted, so these
-// counters keep their original meaning: core 0's console cost.
-private let mut kernel_log_tx_spin_ticks: usize = 0;
-private let mut kernel_log_tx_bytes: usize = 0;
+// number through one path. Every core's bytes are counted (#775): since
+// #830 the UART interrupt, the console queue and terminal output run on any
+// core, so a core-0-only count no longer measured the console. The counters
+// are atomic because any core, or an interrupt on the counting core, may add.
+private let mut kernel_log_tx_spin_ticks: AtomicWord;
+private let mut kernel_log_tx_bytes: AtomicWord;
 // Bytes that had to WAIT, which is no longer every byte: once the queue is
 // live a caller usually returns without touching the FIFO at all, and the
 // share that still spins is what says whether the queue is big enough.
-private let mut kernel_log_tx_spun: usize = 0;
+private let mut kernel_log_tx_spun: AtomicWord;
 
 fn kernel_log_note_tx_byte() {
-    if (cpu_id() != 0) { return; } // core-role: console cost counters measure core 0, the TX interrupt owner
-    kernel_log_tx_bytes = kernel_log_tx_bytes + 1;
+    atomic_word_fetch_add(&kernel_log_tx_bytes, 1);
 }
 
 fn kernel_log_note_tx_spin(ticks: i64) {
-    if (cpu_id() != 0) { return; } // core-role: console cost counters measure core 0, the TX interrupt owner
-    kernel_log_tx_spun = kernel_log_tx_spun + 1;
+    atomic_word_fetch_add(&kernel_log_tx_spun, 1);
     if (ticks > 0) {
-        kernel_log_tx_spin_ticks = kernel_log_tx_spin_ticks + (ticks as usize);
+        atomic_word_fetch_add(&kernel_log_tx_spin_ticks, ticks as usize);
     }
 }
 
 fn kernel_log_tx_spin_ticks_total() -> usize {
-    return kernel_log_tx_spin_ticks;
+    return atomic_word_load(&kernel_log_tx_spin_ticks);
 }
 
 fn kernel_log_tx_byte_total() -> usize {
-    return kernel_log_tx_bytes;
+    return atomic_word_load(&kernel_log_tx_bytes);
 }
 
 fn kernel_log_tx_spun_total() -> usize {
-    return kernel_log_tx_spun;
+    return atomic_word_load(&kernel_log_tx_spun);
 }
 
 // GitHub issue #454: the transmit queue, and the switch that decides whether
@@ -1639,11 +1639,13 @@ private fn kernel_log_snapshot_record(seq: usize, end: usize, second_check: bool
     // prints no prefix of its own.
     if ((meta & KERNEL_LOG_META_CONTINUED) == 0) {
         kernel_log_snapshot_timestamp(line_tick as i64);
-        // GitHub issue #465: a core column, printed only for a core that is
-        // not the console owner. Every line a single-core boot retains is
+        // GitHub issue #465: a core column, printed only for a core other
+        // than core 0. Since #830 any core may own the console, so this is no
+        // longer "the console owner"; core 0 stays unprefixed only so that
+        // dmesg's format is unchanged (#775). Every line a single-core boot retains is
         // core 0's, so its dmesg is unchanged -- and a peer's line is the one
         // that could not previously be told from core 0's at all.
-        if (line_cpu != 0) { // core-role: dmesg prints a cpu column only for non-console-owner lines
+        if (line_cpu != 0) { // core-role: dmesg keeps core 0's lines unprefixed, the pre-#465 format
             kernel_log_snapshot_text("cpu" as *u8);
             kernel_log_snapshot_push(((line_cpu % 10) + 48) as u8);
             kernel_log_snapshot_push(32);
