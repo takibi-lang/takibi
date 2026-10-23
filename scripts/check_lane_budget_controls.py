@@ -45,6 +45,34 @@ def main() -> int:
         (directory / "b.jsonl").write_text(json.dumps({"lane": "b", "elapsed": 2.5}) + "\n")
         cases.note()
         assert lane_seconds(directory) == (4.0, 2), "receipts are summed"
+        # #927: a QEMU lane's receipt with no lease-wait recording is refused,
+        # since its waits would silently count as work.
+        cases.note()
+        try:
+            lane_seconds(directory, frozenset({"a"}))
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("a QEMU receipt without vcpu-lease.waits must be refused")
+        # The wait is left out, and parallel waits of one lane count once.
+        (directory / "a.jsonl").write_text(
+            json.dumps({"lane": "a", "start": 100.0, "elapsed": 10.0}) + "\n")
+        (directory / "vcpu-lease.waits").write_text("".join(
+            json.dumps(w) + "\n" for w in (
+                {"lane": "a", "vcpus": 4, "wait_start": 100.0, "granted": 104.0},
+                {"lane": "a", "vcpus": 4, "wait_start": 101.0, "granted": 106.0},
+                {"lane": "a", "vcpus": 4, "wait_start": 107.0, "granted": None})))
+        cases.note()
+        assert lane_seconds(directory, frozenset({"a"})) == (6.5, 2), \
+            "busy seconds are elapsed less the union of granted waits"
+        # Over budget by busy time fails even though no single lane is long.
+        cases.note()
+        many = "".join(json.dumps({"lane": f"l{i}", "start": 0.0,
+                                   "elapsed": LANE_SECONDS_LIMIT / 10}) + "\n"
+                       for i in range(11))
+        (directory / "c.jsonl").write_text(many)
+        assert verdict(1, lane_seconds(directory, frozenset({"a"}))), \
+            "busy lane-seconds past the budget fail"
     report_pass("lane-budget controls",
                 f"{len(leaves)} leaf lanes read; budget boundaries and "
                 f"{cases.ran} shapes behave", controls=cases.ran)

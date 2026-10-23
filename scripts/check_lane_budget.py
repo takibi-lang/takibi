@@ -86,17 +86,67 @@ def qemu_leaf_lanes(text: str) -> list[str]:
     return leaves
 
 
-def lane_seconds(directory: pathlib.Path) -> tuple[float, int] | None:
+def lease_waits(directory: pathlib.Path) -> dict[str, list[tuple[float, float]]] | None:
+    """Lane -> granted (start, end) vCPU lease waits; None without the file."""
+    path = directory / "vcpu-lease.waits"
+    if not path.is_file():
+        return None
+    waits: dict[str, list[tuple[float, float]]] = {}
+    for line in path.read_text().splitlines():
+        if not line.strip():
+            continue
+        wait = json.loads(line)
+        if wait.get("granted") is None:
+            continue
+        waits.setdefault(str(wait["lane"]), []).append(
+            (float(wait["wait_start"]), float(wait["granted"])))
+    return waits
+
+
+def waited(spans: list[tuple[float, float]], start: float, finish: float) -> float:
+    """Seconds of [start, finish] covered by at least one wait. A lane that
+    leases for several guests at once (alloc-rollback) waits in parallel, and
+    summing those would count one idle second several times."""
+    total, reach = 0.0, start
+    for lo, hi in sorted(spans):
+        lo, hi = max(lo, reach), min(hi, finish)
+        if hi > lo:
+            total += hi - lo
+            reach = hi
+    return total
+
+
+def lane_seconds(directory: pathlib.Path,
+                 qemu_lanes: frozenset[str] = frozenset()) -> tuple[float, int] | None:
+    """Busy lane-seconds: each receipt's elapsed time less the time it spent
+    waiting for vCPUs (#927). Raises ValueError when a QEMU lane finished and
+    the run recorded no lease waits: every acquire appends one, so the file's
+    absence means the recording broke, and the waits would count as work."""
     files = sorted(directory.glob("*.jsonl")) if directory.is_dir() else []
     if not files:
         return None
-    total, count = 0.0, 0
+    records = []
     for path in files:
         for line in path.read_text().splitlines():
             if line.strip():
-                total += float(json.loads(line)["elapsed"])
-                count += 1
-    return total, count
+                records.append(json.loads(line))
+    waits = lease_waits(directory)
+    if waits is None:
+        finished = sorted(r["lane"] for r in records if r["lane"] in qemu_lanes)
+        if finished:
+            raise ValueError(
+                f"{finished[0]} finished but {directory}/vcpu-lease.waits is "
+                "missing, so the lane-seconds cannot leave out the lease wait")
+        waits = {}
+    total = 0.0
+    for record in records:
+        elapsed = float(record["elapsed"])
+        spans = waits.get(record["lane"], [])
+        if spans and "start" in record:
+            start = float(record["start"])
+            elapsed -= waited(spans, start, start + elapsed)
+        total += elapsed
+    return total, len(records)
 
 
 def verdict(leaves: int, seconds: tuple[float, int] | None,
@@ -119,7 +169,11 @@ def verdict(leaves: int, seconds: tuple[float, int] | None,
 
 def main() -> int:
     leaves = qemu_leaf_lanes(MAKEFILE.read_text(encoding="ascii"))
-    seconds = lane_seconds(TIMING_DIR)
+    try:
+        seconds = lane_seconds(TIMING_DIR, frozenset(leaves))
+    except ValueError as error:
+        print(f"FAIL lane-budget: {error}")
+        return 1
     failures = verdict(len(leaves), seconds)
     for failure in failures:
         print(f"FAIL lane-budget: {failure}")
@@ -127,7 +181,7 @@ def main() -> int:
         return 1
     timing = ("no lane timing artifact to read" if seconds is None else
               f"last allcheck {seconds[0]:.0f} of at most "
-              f"{LANE_SECONDS_LIMIT:.0f} lane-seconds")
+              f"{LANE_SECONDS_LIMIT:.0f} busy lane-seconds")
     report_pass("lane-budget",
                 f"{len(leaves)} of at most {QEMU_LANE_LIMIT} QEMU lanes; {timing}",
                 lanes=len(leaves))
