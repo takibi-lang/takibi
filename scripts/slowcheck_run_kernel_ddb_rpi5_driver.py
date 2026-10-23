@@ -21,8 +21,9 @@ answers at all and is required to fail with the attempt count in the message.
 The peer-console fixture also deliberately holds CPU 1 output until DDB
 continue. A shell on that CPU cannot acknowledge the wake byte over UART
 before BREAK. The quiet control retains the input event and succeeds only
-through BREAK, inspection, release and resume. Missing, wrong-byte,
-wrong-core and out-of-order wake records must still fail.
+through BREAK, inspection, release and resume. Missing, wrong-byte
+and out-of-order wake records must still fail; since #830 a wake on
+another core's ring is accepted.
 """
 
 import os
@@ -302,8 +303,9 @@ def main() -> int:
                                                   b"a=0x000000000000000b")),
         ("wake after BREAK", intact_events.replace(b"seq=1 cpu=0",
                                                    b"seq=3 cpu=0")),
-        ("wake from another CPU", intact_events.replace(b"seq=1 cpu=0",
-                                                        b"seq=1 cpu=1")),
+        # A wake retained on another CPU's ring is accepted since #830 (the
+        # UART interrupt goes to every online core; rings do not order each
+        # other), so it is no longer a corruption here.
     )
     for label, events in corruptions:
         REPLIES[b"events"] = events
@@ -372,7 +374,7 @@ def main() -> int:
     report_pass(
         "ddb-rpi5-driver controls",
         "a wake response held until continue passes only with a newline "
-        "event before BREAK on CPU 0; missing, wrong-byte, wrong-core and "
+        "event before BREAK (in order within one ring); missing, wrong-byte and "
         "late wake events and an unanswered BREAK fail; an immediate resume takes one "
         "command, a dropped first command is retried during silence, a "
         "workload that never answers fails with the attempt count, a "
