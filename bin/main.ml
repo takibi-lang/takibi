@@ -39,6 +39,13 @@ let parse_file filename =
   result
 
 let () =
+  (* Issue #916: a full kernel compile allocates about 53 GB of short-lived
+     words; the default 256K-word minor heap and space_overhead 120 spent a
+     third of the run in the GC.  A 4M-word (32 MiB) minor heap and
+     space_overhead 200 cut that without changing any output.
+     OCAMLRUNPARAM still applies first, so set these only when it is unset. *)
+  if Sys.getenv_opt "OCAMLRUNPARAM" = None then
+    Gc.set { (Gc.get ()) with Gc.minor_heap_size = 4 * 1024 * 1024; space_overhead = 200 };
   (* Parse arguments: takibi <input>... [-o <output.o>] [--target <triple>]
      [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] *)
   let input_files  = ref [] in
