@@ -263,8 +263,8 @@ Symmetric now:
   2026-10-23), rewritten after each handled interrupt as cores come online
   (`kernel/kernel/uart_irq_affinity.tkb`); both dispatches take it before
   the `core-role` test. Because this handler moves data, one core at a time
-  serves it through a three-state word (idle, busy, busy-again): a core that
-  finds it busy marks it and leaves, and the busy core reruns the drain.
+  serves it: a core that finds it busy leaves at once, and the level-held
+  source raises the interrupt again for whatever the busy core left.
   A BREAK enters DDB on the core that saw it, after its EOI, and the world
   stop takes the others. The TXIM disable for XOFF now holds the console
   lock like every TXIM enable. The boot report asserts that at least two

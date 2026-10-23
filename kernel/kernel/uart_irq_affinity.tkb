@@ -13,18 +13,25 @@
 // data: it drains the RX FIFO into the receive ring and refills the TX FIFO.
 // Two cores draining at once could deliver bytes out of order, and a GIC may
 // hand the next interrupt to another core while the first is still inside
-// the handler. So one core at a time runs the service, through a three-state
-// word: idle, busy, and busy-again. A core that finds it busy marks it again
-// and leaves; the busy core reruns the service before it goes idle, so no
-// interrupt's bytes wait for a later one.
+// the handler. So one core at a time runs the service: a core that finds
+// another inside it leaves at once. Nothing is lost by leaving, because every
+// PL011 source this kernel enables is level: RX and RX-timeout stay asserted
+// while the FIFO holds bytes, TX while it is below its level, BREAK until it
+// is cleared. On QEMU the SPI is level-sensitive, so it is delivered again
+// after this core's EOI; on RPi5 RP1's MSI-X wrapper sends again at the IACK
+// while its level source is still asserted. Whatever the busy core did not
+// drain therefore raises the interrupt again once it is gone.
 //
 // Current limitations (2026-10-23). Keep this list current as call sites
 // change; a stale limitation is worse than none.
 // - ONLINE CORES ARE 0..online-1 and at most eight (GICv2 ITARGETSR is a
 //   byte), as kernel_secondary_boot brings them up today.
-// - A BREAK ENDS THE SERVICE LOOP AT ONCE. The core that saw it enters DDB
-//   after its EOI; a pending again-mark is dropped, and the interrupt line,
-//   still asserted while bytes wait, brings the service back after DDB.
+// - A BREAK ENDS THE SERVICE. The core that saw it enters DDB after its EOI;
+//   the line, still asserted while bytes wait, brings the service back after
+//   DDB.
+// - A CORE THAT FINDS THE SERVICE BUSY EOIs AND RETURNS, so while the busy
+//   core drains, a still-asserted line can be delivered again at once: a
+//   short burst of empty interrupts, bounded by one FIFO drain.
 
 use "kernel/lib/atomic_word.tkb";
 use "kernel/lib/execution_model.tkb";
@@ -33,22 +40,10 @@ use "kernel/arch/arm64/kernel/secondary.tkb";
 use "kernel/arch/arm64/boot/cpu.tkb";
 use "kernel/drivers/serial/pl011.tkb";
 
-const UART_IRQ_IDLE: usize = 0;
-const UART_IRQ_BUSY: usize = 1;
-const UART_IRQ_AGAIN: usize = 2;
-
-// The serial-service word above.
-private let mut uart_irq_service_state: AtomicWord;
+// 1 while a core is inside uart_irq_service.
+private let mut uart_irq_service_busy: AtomicWord;
 // UART interrupts each core handled since boot, for the boot report.
 private let mut uart_irq_taken: [AtomicWord; KERNEL_MAX_CORES];
-
-// Attempts to either take the service or leave an again-mark. Each failed
-// compare-swap means the busy core changed the word in between, which it
-// does once per round, so a few attempts settle it.
-const UART_IRQ_SERVICE_ATTEMPTS: usize = 16;
-// Rounds one core serves before it lets the word go. Each round drains a
-// whole FIFO; another core's again-mark asks for one more.
-const UART_IRQ_SERVICE_ROUNDS: usize = 64;
 
 // Every online core, as an ITARGETSR byte.
 fn uart_irq_route(intid: u32) !{unsafe} {
@@ -68,42 +63,13 @@ fn uart_irq_serve() -> bool !{interrupt, unsafe} {
         let core: {0..<KERNEL_MAX_CORES as usize} = raw;
         let previous_taken: usize = atomic_word_fetch_add(&uart_irq_taken[core], 1);
     }
-    let mut serving: bool = false;
-    for attempt: usize in 0..<UART_IRQ_SERVICE_ATTEMPTS {
-        if (serving == false) {
-            match atomic_word_compare_swap_acq_rel(
-                    &uart_irq_service_state, UART_IRQ_IDLE, UART_IRQ_BUSY) {
-                CasResult::Swapped => { serving = true; }
-                CasResult::Observed(seen) => {
-                    // Busy elsewhere: leave the again-mark for that core.
-                    // Idle again by now: the next attempt takes it.
-                    if (seen != UART_IRQ_IDLE) {
-                        match atomic_word_compare_swap_acq_rel(
-                                &uart_irq_service_state, seen, UART_IRQ_AGAIN) {
-                            CasResult::Swapped => { return false; }
-                            CasResult::Observed(other) => { }
-                        }
-                    }
-                }
-            }
-        }
+    match atomic_word_compare_swap_acq_rel(&uart_irq_service_busy, 0, 1) {
+        CasResult::Swapped => { }
+        CasResult::Observed(seen) => { return false; }
     }
-    if (serving == false) { return false; }
-    for round: usize in 0..<UART_IRQ_SERVICE_ROUNDS {
-        if (uart_irq_service()) {
-            atomic_word_store(&uart_irq_service_state, UART_IRQ_IDLE);
-            return true;
-        }
-        match atomic_word_compare_swap_acq_rel(
-                &uart_irq_service_state, UART_IRQ_BUSY, UART_IRQ_IDLE) {
-            CasResult::Swapped => { return false; }
-            CasResult::Observed(seen) => {
-                atomic_word_store(&uart_irq_service_state, UART_IRQ_BUSY);
-            }
-        }
-    }
-    atomic_word_store(&uart_irq_service_state, UART_IRQ_IDLE);
-    return false;
+    let debug_break: bool = uart_irq_service();
+    atomic_word_store(&uart_irq_service_busy, 0);
+    return debug_break;
 }
 
 // Both dispatches' tail after their own EOI: the route names every core
