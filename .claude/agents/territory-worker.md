@@ -81,7 +81,10 @@ branch and final commit. Answer all nine:
 6. For each guarantee: statically excluded, or moved into the trusted base?
 7. Similar shapes elsewhere: other call sites, the kernel/linux_user copies,
    other compiler stages.
-8. Classify every finding as fixed-verified, remaining, or YAGNI.
+8. Classify every finding as fixed-verified, remaining, or YAGNI. Every
+   remaining item names its issue number (filed, or an existing issue that
+   covers it), or says "unfiled: <proposed title>" so the coordinator files
+   it before landing; a bare "remaining" is not an answer.
 9. Whether ROADMAP.md needs updating, and which closed issues it should drop.
    GitHub issues themselves are never deleted.
 

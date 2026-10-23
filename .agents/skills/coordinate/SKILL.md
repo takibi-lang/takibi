@@ -76,6 +76,10 @@ refuses any branch but `main`).
    verbatim from the audit, and (b) one line listing the defaults applied.
    If nothing escalates, say so in one line, land, and report the land.
    The full audit stays in the batch file; show it verbatim on request.
+   Before landing, every remaining item in the audit carries an issue
+   number; file each "unfiled" one yourself (`Found-by: review`), or ask
+   the maintainer when filing needs a decision. Nothing remaining leaves
+   the audit without a number or a YAGNI reason.
    Recurrence prevention is among the most important parts: check that
    each defect names its prevention rung (compile-time check, then model
    check, then lint-like build check, then test) and why higher rungs were
