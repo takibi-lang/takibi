@@ -2132,10 +2132,22 @@ let rec refinement_range = function
    (an unsigned base needs lo >= 0). Arithmetic and cast rules build their
    result range only through this function
    (scripts/check_refined_range_constructor.py). *)
-let refined_or_base base lo hi =
+let refined_or_base ?ob base lo hi =
   match Type_inf.range_within_base (Types.of_ast base) lo hi with
-  | Some (lo, hi) -> TypeRefined (lo, hi, base)
+  | Some (lo, hi) ->
+      (* GitHub issue #952: the same obligation type_inf.ml records; an
+         identical one is solved once (it is keyed by its text). *)
+      (match ob with
+       | Some ob when !Range_obligation.enabled ->
+           ignore (Type_inf.refined_or_base ~ob (Types.of_ast base) (Some lo) (Some hi))
+       | _ -> ());
+      TypeRefined (lo, hi, base)
   | None -> base
+
+let rec obligation_operand = function
+  | TypeSingleton (base, _) -> obligation_operand base
+  | TypeRefined (lo, hi, _) -> Range_obligation.Range (lo, hi)
+  | _ -> Range_obligation.Any
 
 (* Small compile-time integer evaluator used by the range-propagation mirror
    of type_inf.ml. Keep the shared Const_env implementation here too so type
@@ -4088,15 +4100,18 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                      let ret_ty = match ty1, ty2 with
                        | TypeRefined (a, b, base), TypeRefined (c, d, _) ->
                            refined_or_base base (Type_inf.checked_add a c)
+                             ~ob:(e.loc, Range_obligation.Add, Range_obligation.Range (a, b), Some (Range_obligation.Range (c, d)))
                              (Option.bind (Type_inf.checked_add b d)
                                 (fun s -> Type_inf.checked_add s (-1)))
                        | _ ->
                            (match ty1, intlit_opt e2 with
                             | TypeRefined (a, b, base), Some k ->
                                 refined_or_base base (Type_inf.checked_add a k) (Type_inf.checked_add b k)
+                                  ~ob:(e.loc, Range_obligation.Add, Range_obligation.Range (a, b), Some (Range_obligation.Const k))
                             | _ -> (match ty2, intlit_opt e1 with
                                     | TypeRefined (c, d, base), Some k ->
                                         refined_or_base base (Type_inf.checked_add c k) (Type_inf.checked_add d k)
+                                          ~ob:(e.loc, Range_obligation.Add, Range_obligation.Const k, Some (Range_obligation.Range (c, d)))
                                     | _ -> canon_ty ty1))
                      in
                      (ret_ty, sum)))
@@ -4116,11 +4131,13 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                 let ret_ty = match ty1, ty2 with
                   | TypeRefined (a, b, base), TypeRefined (c, d, _) ->
                       refined_or_base base (Type_inf.checked_sub a (d - 1))
+                        ~ob:(e.loc, Range_obligation.Sub, Range_obligation.Range (a, b), Some (Range_obligation.Range (c, d)))
                         (Type_inf.checked_sub b c)
                   | _ ->
                       (match ty1, intlit_opt e2 with
                        | TypeRefined (a, b, base), Some k ->
                            refined_or_base base (Type_inf.checked_sub a k)
+                             ~ob:(e.loc, Range_obligation.Sub, Range_obligation.Range (a, b), Some (Range_obligation.Const k))
                              (Type_inf.checked_sub b k)
                        | _ -> canon_ty ty1)
                 in
@@ -4133,10 +4150,12 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            let ret_ty = match ty1, k2, ty2, k1 with
              | TypeRefined (a, b, base), Some k, _, _ when k > 0 ->
                  refined_or_base base (Type_inf.checked_mul a k)
+                   ~ob:(e.loc, Range_obligation.Mul, Range_obligation.Range (a, b), Some (Range_obligation.Const k))
                    (Option.bind (Type_inf.checked_mul (b - 1) k)
                       (fun t -> Type_inf.checked_add t 1))
              | _, _, TypeRefined (a, b, base), Some k when k > 0 ->
                  refined_or_base base (Type_inf.checked_mul a k)
+                   ~ob:(e.loc, Range_obligation.Mul, Range_obligation.Const k, Some (Range_obligation.Range (a, b)))
                    (Option.bind (Type_inf.checked_mul (b - 1) k)
                       (fun t -> Type_inf.checked_add t 1))
              | TypeRefined (a, b, base), _, TypeRefined (c, d, _), _ ->
@@ -4155,8 +4174,12 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                         then build_udiv v1 v2 "divtmp" builder
                         else build_sdiv v1 v2 "divtmp" builder
            in
-           let ret_ty = match Const_env.folded_value e with
-             | Some k -> refined_or_base (canon_ty ty1) (Some k) (Type_inf.checked_add k 1)
+           let ret_ty = match Type_inf.fold_at_base (Types.of_ast (canon_ty ty1)) e with
+             | Some k ->
+                 let ob = match intlit_opt e1, intlit_opt e2 with
+                   | Some x, Some y -> Some (e.loc, Range_obligation.Div, Range_obligation.Const x, Some (Range_obligation.Const y))
+                   | _ -> None in
+                 refined_or_base ?ob (canon_ty ty1) (Some k) (Type_inf.checked_add k 1)
              | None -> ty1
            in
            (ret_ty, result)
@@ -4197,9 +4220,13 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
              if canon_ty ty1 = TypeU16Be || canon_ty ty1 = TypeU32Be
              then canon_ty ty1 else
              match intlit_opt e2 with
-             | Some k when k >= 0 -> refined_or_base (canon_ty ty1) (Some 0) (Type_inf.checked_add k 1)
+             | Some k when k >= 0 ->
+                 refined_or_base (canon_ty ty1) (Some 0) (Type_inf.checked_add k 1)
+                   ~ob:(e.loc, Range_obligation.Band, obligation_operand ty1, Some (Range_obligation.Const k))
              | _ -> (match intlit_opt e1 with
-                     | Some k when k >= 0 -> refined_or_base (canon_ty ty1) (Some 0) (Type_inf.checked_add k 1)
+                     | Some k when k >= 0 ->
+                         refined_or_base (canon_ty ty1) (Some 0) (Type_inf.checked_add k 1)
+                           ~ob:(e.loc, Range_obligation.Band, Range_obligation.Const k, Some (obligation_operand ty2))
                      | _ -> canon_ty ty1)
            in
            (ret_ty, build_and v1 v2 "andtmp" builder)
@@ -4220,8 +4247,12 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            let ret_ty = match intlit_opt e2 with
              | Some m when m > 0 ->
                  (match ty1 with
-                  | TypeRefined (lo, _, base) when lo >= 0 -> refined_or_base base (Some 0) (Some m)
-                  | _ when is_unsigned ty1 -> refined_or_base ty1 (Some 0) (Some m)
+                  | TypeRefined (lo, _, base) when lo >= 0 ->
+                      refined_or_base base (Some 0) (Some m)
+                        ~ob:(e.loc, Range_obligation.Mod, obligation_operand ty1, Some (Range_obligation.Const m))
+                  | _ when is_unsigned ty1 ->
+                      refined_or_base ty1 (Some 0) (Some m)
+                        ~ob:(e.loc, Range_obligation.Mod, obligation_operand ty1, Some (Range_obligation.Const m))
                   | _ -> canon_ty ty1)
              | _ -> canon_ty ty1
            in
@@ -4423,12 +4454,16 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
         match target_ty, src_ty with
         | (TypeI8|TypeI16|TypeI32|TypeI64|TypeU8|TypeU16|TypeU32|TypeU64
           |TypeIsize|TypeUsize),
-          TypeRefined (lo, hi, _) ->
+          TypeRefined (lo, hi, src_base) ->
             (* GitHub issue #935: the same base check as the arithmetic
                rules. The range survives only when every value in it is
                representable in the target, so the cast cannot truncate
                or reinterpret (an i32 target used to keep any range). *)
-            refined_or_base target_ty (Some lo) (Some hi)
+            let ob = match Type_inf.obligation_width (Types.of_ast src_base) with
+              | Some (w, s) ->
+                  Some (e.loc, Range_obligation.Cast (w, s), Range_obligation.Range (lo, hi), None)
+              | None -> None in
+            refined_or_base ?ob target_ty (Some lo) (Some hi)
         | _ -> target_ty
   (* refined-range rules end *)
       in
@@ -4679,7 +4714,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
          narrowing_ctx/raw-inferred-type fallback, kept only as a defensive
          net for the case (not expected in practice) where type_inf.ml
          never populated an entry for this location. *)
-      let idx_ty = match Const_env.folded_value idx with
+      let idx_ty = match Type_inf.fold_at_base Types.TUsize idx with
         | Some k -> TypeRefined (k, k + 1, TypeUsize)  (* idx_v is already forced to usize width via to_index_width above *)
         | None ->
             (match Hashtbl.find_opt Type_inf.index_resolved_ty idx.loc with
@@ -6265,7 +6300,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            let idx_v = to_index_width ~is_signed:(not (is_unsigned idx_ty_raw)) idx_raw in
            (* GitHub issue #311: same priority as the read-Index case above
               -- see that one's own comment for the full rationale. *)
-           let idx_ty = match Const_env.folded_value idx with
+           let idx_ty = match Type_inf.fold_at_base Types.TUsize idx with
              | Some k -> TypeRefined (k, k + 1, TypeUsize)
              | None ->
                  (match Hashtbl.find_opt Type_inf.index_resolved_ty idx.loc with
@@ -6468,7 +6503,7 @@ and gen_index_place locals (base : Ast.expr) (idx : Ast.expr) loc
     : Ast.type_expr * llvm_place * bool =
   let (idx_ty_raw, idx_raw) = gen_expr locals idx in
   let idx_v = to_index_width ~is_signed:(not (is_unsigned idx_ty_raw)) idx_raw in
-  let idx_ty = match Const_env.folded_value idx with
+  let idx_ty = match Type_inf.fold_at_base Types.TUsize idx with
     | Some k -> TypeRefined (k, k + 1, TypeUsize)
     | None ->
         (match Hashtbl.find_opt Type_inf.index_resolved_ty idx.loc with

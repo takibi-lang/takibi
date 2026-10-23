@@ -5,6 +5,9 @@
 #   tla2tools.jar  TLC, the explicit-state model checker, and SANY, the parser
 #   apalache       the symbolic model checker; here its type checker and a
 #                  shallow check, so the specs stay Apalache-ready
+#   z3             the SMT solver that re-checks every refinement range the
+#                  compiler derives (GitHub issue #952,
+#                  scripts/buildcheck_range_obligations.py)
 #
 # Where. Outside the repository, so `make clean` (which removes _build/) never
 # deletes them. The default is the directory the devcontainer already binds
@@ -22,10 +25,13 @@
 #
 # Versions and checksums are the whole contract and live only here. The
 # Apalache sum is the one its release publishes in sha256sum.txt; tla2tools.jar
-# ships none, so its sum was recorded on first download (2026-09-26).
+# ships none, so its sum was recorded on first download (2026-09-26). Z3's
+# release ships none either; its sum was recorded on first download
+# (2026-10-23). The glibc-2.35 build runs on Ubuntu 22.04 and later (the
+# devcontainer and the CI runners are 24.04).
 #
-# Requires java (21 or later: Apalache 0.62 is built for it), curl, tar and
-# sha256sum. Idempotent: with both
+# Requires java (21 or later: Apalache 0.62 is built for it), curl, tar,
+# unzip and sha256sum. Idempotent: with both
 # tools present and verified it downloads nothing.
 set -euo pipefail
 
@@ -37,6 +43,10 @@ APALACHE_VERSION=0.62.2
 APALACHE_SHA256=765f610537281a0f25b8c30f2554f19523e2859c824e80e62276653ee23c10e2
 APALACHE_URL="https://github.com/apalache-mc/apalache/releases/download/v${APALACHE_VERSION}/apalache-${APALACHE_VERSION}.tgz"
 
+Z3_VERSION=4.13.4
+Z3_SHA256=93f91f9c6f4a00a041c19fc7a74adc1f441c8244ce70d486e19abcd89c6a014b
+Z3_URL="https://github.com/Z3Prover/z3/releases/download/z3-${Z3_VERSION}/z3-${Z3_VERSION}-x64-glibc-2.35.zip"
+
 if [ -n "${TAKIBI_MODEL_TOOLS_DIR:-}" ]; then
     root="$TAKIBI_MODEL_TOOLS_DIR"
 elif [ -d "$HOME/.takibi-sessions" ]; then
@@ -46,7 +56,7 @@ else
 fi
 mkdir -p "$root"
 
-for tool in java curl tar sha256sum; do
+for tool in java curl tar unzip sha256sum; do
     command -v "$tool" >/dev/null 2>&1 || {
         echo "fetch_model_tools: $tool is required and was not found" >&2
         exit 1
@@ -90,6 +100,26 @@ if [ ! -x "$apalache_dir/bin/apalache-mc" ]; then
     trap - EXIT
     [ -x "$apalache_dir/bin/apalache-mc" ] || {
         echo "fetch_model_tools: apalache $APALACHE_VERSION unpacked without bin/apalache-mc" >&2
+        exit 1
+    }
+fi
+
+z3_dir="$root/z3-$Z3_VERSION"
+if [ ! -x "$z3_dir/bin/z3" ]; then
+    work="$(mktemp -d "$root/.z3.XXXXXX")"
+    trap 'rm -rf "$work"' EXIT
+    curl -fsSL -o "$work/z3.zip" "$Z3_URL"
+    if ! verify "$work/z3.zip" "$Z3_SHA256"; then
+        echo "fetch_model_tools: z3 $Z3_VERSION failed its sha256 check" >&2
+        exit 1
+    fi
+    unzip -q "$work/z3.zip" -d "$work"
+    # The archive holds one top-level directory, z3-<version>-x64-glibc-2.35/.
+    mv "$work/z3-$Z3_VERSION-x64-glibc-2.35" "$z3_dir" 2>/dev/null || true
+    rm -rf "$work"
+    trap - EXIT
+    [ -x "$z3_dir/bin/z3" ] || {
+        echo "fetch_model_tools: z3 $Z3_VERSION unpacked without bin/z3" >&2
         exit 1
     }
 fi

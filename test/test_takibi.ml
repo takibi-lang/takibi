@@ -20788,6 +20788,22 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
        Alcotest.check type_t "return type keeps the signed range"
          (Ast.TypeRefined (-60, 80, Ast.TypeI32)) fi.Types.ret_type);
 
+  (* GitHub issue #952, found by the z3 range obligations on the kernel:
+     Const_env folds 0xFFFFFFFFFFFFFFFF as -1, so the Div rule derived
+     -1 / 64 = 0, {0..<1 as u64}, for a quotient the machine computes as
+     2^58 - 1 (kernel/mm/page.tkb's overflow guards), and Value_facts took
+     the same fold as the exact value of q, so the store below compiled
+     with no check at all. Two sites now: the index, and the u64 -> usize
+     narrowing of this test's 32-bit default target. *)
+  Alcotest.test_case
+    "#952 a folded u64 quotient of an all-ones literal proves no index" `Quick
+    (expect_trap_sites 2
+       "let mut words: [u32; 1];
+        fn h() {
+          let q: u64 = 0xFFFFFFFFFFFFFFFF / 64;
+          words[q as usize] = 0;
+        }");
+
   Alcotest.test_case
     "#935 usize minus a constant past its lower bound keeps no range" `Quick
     (expect_trap_sites 1

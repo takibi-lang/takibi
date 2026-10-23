@@ -14,6 +14,12 @@ drops a range its base cannot hold (an unsigned base needs lo >= 0). This
 check keeps it that way: between the `refined-range rules begin` and `end`
 markers, the raw constructor may appear only as a pattern (left of `->` in a
 match arm), never as a constructed value.
+
+GitHub issue #952: each refined_or_base call there also passes `~ob` (or
+`?ob`), the operation and operands its range was derived from, so z3
+re-checks it under --emit-range-obligations
+(scripts/buildcheck_range_obligations.py). A call that cannot describe its
+operation says why in a `no-range-obligation:` comment just above it.
 """
 
 from __future__ import annotations
@@ -32,6 +38,7 @@ FILES = {
 BEGIN = "refined-range rules begin"
 END = "refined-range rules end"
 HELPER = "refined_or_base"
+OBLIGATION_EXEMPT = "no-range-obligation:"
 COMMENT = re.compile(r"\(\*.*?\*\)", re.DOTALL)
 
 
@@ -82,6 +89,15 @@ def scan(path: pathlib.Path, constructor: str, text: str) -> tuple[int, int, lis
         if not inside:
             continue
         helpers += line.count(HELPER)
+        for _ in re.finditer(r"\b" + HELPER + r"\b", line):
+            window = " ".join(code[number - 1:number + 2])
+            exempt = any(OBLIGATION_EXEMPT in l
+                         for l in lines[max(0, number - 4):number])
+            if "~ob" not in window and "?ob" not in window and not exempt:
+                errors.append(
+                    f"{path.name}:{number}: {HELPER} without ~ob; pass the "
+                    f"rule and operands so z3 re-checks the range (#952), "
+                    f"or say why not in a '{OBLIGATION_EXEMPT}' comment")
         for match in token.finditer(line):
             if not is_pattern(line[:match.start()], line[match.end():]):
                 errors.append(

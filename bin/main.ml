@@ -164,6 +164,21 @@ let () =
            let out = open_out path in
            Printf.fprintf out "%.0f\n" words;
            close_out out)
+     | "--range-obligation-fault-control" ->
+         (* GitHub issue #952: plants #935's unsound rule for the z3
+            check's failing control; never used in a real build. *)
+         Takibi.Range_obligation.fault_unsigned_negative_lo := true
+     | "--emit-range-obligations" ->
+         (* GitHub issue #952: one SMT-LIB file per derived range, for
+            scripts/buildcheck_range_obligations.py to re-check with z3. *)
+         incr i;
+         if !i >= Array.length Sys.argv then (
+           Printf.eprintf "Error: --emit-range-obligations requires a directory\n";
+           exit 1
+         );
+         let dir = Sys.argv.(!i) in
+         Takibi.Range_obligation.enabled := true;
+         at_exit (fun () -> Takibi.Range_obligation.write_dir dir)
      | "--emit-tla" ->
          incr i;
          if !i >= Array.length Sys.argv then (
@@ -268,7 +283,7 @@ let () =
 
   if input_files = [] then (
     Printf.eprintf
-      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--frame-pointers] [--function-sections] [--forbid-trap] [--forbid-unsafe] [--confine-raw-authority] [--raw-mint-file <path>] [--device-semantics-file <path>] [--regions] [--reject-unused-functions] [--external-entry <function>] [--check-unused-file <path>] [--explain-inference] [--emit-effect-matrix] [--emit-exception-frame-offsets <StructName>] [--emit-struct-layout <StructName>] [--emit-debug-metadata <path>] [--emit-depfile <path>] [--emit-overflow-audit <path>] [--emit-raw-deref-audit <path>] [--emit-raw-site-counts <path>] [--emit-alloc-words <path>] [--emit-held-guards <path>] [--emit-tla <dir> [--emit-tla-omit-cache publish|finish|refresh]] [--emit-protocol-source <dir>] [--version]\n"
+      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--frame-pointers] [--function-sections] [--forbid-trap] [--forbid-unsafe] [--confine-raw-authority] [--raw-mint-file <path>] [--device-semantics-file <path>] [--regions] [--reject-unused-functions] [--external-entry <function>] [--check-unused-file <path>] [--explain-inference] [--emit-effect-matrix] [--emit-exception-frame-offsets <StructName>] [--emit-struct-layout <StructName>] [--emit-debug-metadata <path>] [--emit-depfile <path>] [--emit-overflow-audit <path>] [--emit-raw-deref-audit <path>] [--emit-raw-site-counts <path>] [--emit-alloc-words <path>] [--emit-held-guards <path>] [--emit-range-obligations <dir>] [--emit-tla <dir> [--emit-tla-omit-cache publish|finish|refresh]] [--emit-protocol-source <dir>] [--version]\n"
       Sys.argv.(0);
     exit 1
   );

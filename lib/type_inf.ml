@@ -341,7 +341,7 @@ let range_within_base base lo hi =
   | Some lo, Some hi when lo < hi ->
       let signed = (match base with
         | TI8 | TI16 | TI32 | TI64 | TIsize -> true | _ -> false) in
-      if lo < 0 && not signed then None
+      if lo < 0 && not signed && not !Range_obligation.fault_unsigned_negative_lo then None
       else
         (match product_limit_of_ty base with
          | None -> Some (lo, hi)
@@ -349,9 +349,61 @@ let range_within_base base lo hi =
              if hi <= limit && lo >= - limit then Some (lo, hi) else None)
   | _ -> None
 
-let refined_or_base base lo hi =
+(* GitHub issue #952: the width and signedness the machine operation on a
+   base runs at, for the range obligation each derived range emits. *)
+let obligation_width base = match repr base with
+  | TU8 -> Some (8, false) | TU16 -> Some (16, false)
+  | TU32 -> Some (32, false) | TU64 -> Some (64, false)
+  | TI8 -> Some (8, true) | TI16 -> Some (16, true)
+  | TI32 -> Some (32, true) | TI64 -> Some (64, true)
+  | TUsize -> Some (Target_info.pointer_bit_width (), false)
+  | TIsize -> Some (Target_info.pointer_bit_width (), true)
+  | _ -> None
+
+let obligation_operand t = match repr t with
+  | TRefinedInt (lo, hi, _) -> Range_obligation.Range (lo, hi)
+  | _ -> Range_obligation.Any
+
+(* ~ob names the source site, the rule, and the operands the range was
+   derived from; every call in the refined-range rules passes it
+   (scripts/check_refined_range_constructor.py), so each derived range is
+   re-checked by z3 under --emit-range-obligations (#952). *)
+(* GitHub issue #952: Const_env folds on the checker's native ints; a fold
+   is the machine's value only when nothing wraps at the base's width
+   (Const_env.folded_value_within). None for a base without one. *)
+let fold_limits_of_bits ~signed bits =
+  let limit = product_limit_of_base_bits ~signed bits in
+  if signed then (- limit, limit) else (0, limit)
+
+let fold_at_base base e =
+  match repr base with
+  | TI8 | TI16 | TI32 | TI64 | TIsize | TU8 | TU16 | TU32 | TU64 | TUsize ->
+      (match product_limit_of_ty (repr base) with
+       | Some limit ->
+           let signed = (match repr base with
+             | TI8 | TI16 | TI32 | TI64 | TIsize -> true | _ -> false) in
+           Const_env.folded_value_within (if signed then - limit else 0) limit e
+       | None -> None)
+  | TVar _ ->
+      (* A literal-only operand whose type is not resolved yet (#791's
+         refined-argument context): fold at i32, the literal default.
+         Residual: an 8- or 16-bit context resolved later could wrap an
+         intermediate step that i32 does not. *)
+      let limit = product_limit_of_base_bits ~signed:true 32 in
+      Const_env.folded_value_within (- limit) limit e
+  | _ -> None
+
+let refined_or_base ?ob base lo hi =
   match range_within_base (repr base) lo hi with
-  | Some (lo, hi) -> TRefinedInt (lo, hi, base)
+  | Some (lo, hi) ->
+      (match ob, obligation_width base with
+       | Some (loc, rule, a, b), Some (bits, signed)
+         when !Range_obligation.enabled ->
+           Range_obligation.record loc
+             { Range_obligation.rule; a; b; bits; signed;
+               type_name = Types.to_string (repr base); lo; hi }
+       | _ -> ());
+      TRefinedInt (lo, hi, base)
   | None -> base
 
 (* GitHub issue #807: {a..<b} * {c..<d} for two refined factors. Sound
@@ -1504,6 +1556,14 @@ let value_facts_base_of_ty t =
   | TUsize -> Some { signedness = Unsigned; bits = Target_info.pointer_bit_width () }
   | _ -> None
 
+(* GitHub issue #952: a folded constant is exact only when no step wraps
+   at the base's width. *)
+let fold_within_facts_base (base : Value_facts.base) expr =
+  let (lo, hi) = fold_limits_of_bits
+      ~signed:(base.Value_facts.signedness = Value_facts.Signed)
+      base.Value_facts.bits in
+  Const_env.folded_value_within lo hi expr
+
 let rec value_facts_of_expr ty (expr : Ast.expr) =
   let open Value_facts in
   (* A singleton carries a static equality witness but preserves all runtime
@@ -1575,7 +1635,7 @@ let rec value_facts_of_expr ty (expr : Ast.expr) =
                                Some (List.fold_left add_exclusion facts excluded)
                            | None -> Some facts))
                  | None ->
-                     (match Const_env.folded_value expr with
+                     (match fold_within_facts_base base expr with
                       | Some value ->
                           let mathematical = match base.signedness with
                             | Signed -> of_signed_int64 (Int64.of_int value)
@@ -1586,7 +1646,7 @@ let rec value_facts_of_expr ty (expr : Ast.expr) =
                       | None -> Some (unknown base)))
             | None -> Some (unknown base))
        | _ ->
-           match Const_env.folded_value expr with
+           match fold_within_facts_base base expr with
            | Some value ->
                let value = Int64.of_int value in
                let mathematical = match base.signedness with
@@ -3510,12 +3570,16 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
             | TRefinedInt (a, b, base1), TRefinedInt (c, d, base2) ->
                 unify_at e.loc base1 base2;
                 refined_or_base base1 (checked_add a c)
+                  ~ob:(e.loc, Range_obligation.Add, Range_obligation.Range (a, b),
+                       Some (Range_obligation.Range (c, d)))
                   (Option.bind (checked_add b d) (fun s -> checked_add s (-1)))
             | TRefinedInt (a, b, base), _ ->
                 (match intlit_opt e2 with
                  | Some k ->
                      unify_at e2.loc t2 base;
                      refined_or_base base (checked_add a k) (checked_add b k)
+                       ~ob:(e.loc, Range_obligation.Add, Range_obligation.Range (a, b),
+                            Some (Range_obligation.Const k))
                  | None ->
                      unify_at e2.loc (canon_ty t2) base;
                      base)
@@ -3524,6 +3588,8 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                  | Some k ->
                      unify_at e1.loc t1 base;
                      refined_or_base base (checked_add c k) (checked_add d k)
+                       ~ob:(e.loc, Range_obligation.Add, Range_obligation.Const k,
+                            Some (Range_obligation.Range (c, d)))
                  | None ->
                      unify_at e1.loc (canon_ty t1) base;
                      base)
@@ -3575,11 +3641,15 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                  | TRefinedInt (c, d, base2) ->
                      unify_at e.loc base base2;
                      refined_or_base base (checked_sub a (d - 1)) (checked_sub b c)
+                       ~ob:(e.loc, Range_obligation.Sub, Range_obligation.Range (a, b),
+                            Some (Range_obligation.Range (c, d)))
                  | _ ->
                      (match intlit_opt e2 with
                       | Some k ->
                           unify_at e2.loc t2 base;
                           refined_or_base base (checked_sub a k) (checked_sub b k)
+                            ~ob:(e.loc, Range_obligation.Sub, Range_obligation.Range (a, b),
+                                 Some (Range_obligation.Const k))
                       | None ->
                           unify_at e2.loc (canon_ty t2) base;
                           base))
@@ -3588,6 +3658,8 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                  | Some k, TRefinedInt (c, d, base) ->
                      unify_at e1.loc t1 base;
                      refined_or_base base (checked_sub k (d - 1))
+                       ~ob:(e.loc, Range_obligation.Sub, Range_obligation.Const k,
+                            Some (Range_obligation.Range (c, d)))
                        (Option.bind (checked_sub k c) (fun t -> checked_add t 1))
                  | _ ->
                      let ct1 = canon_ty t1 and ct2 = canon_ty t2 in
@@ -3605,10 +3677,14 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
             | TRefinedInt (a, b, base), Some k, _, _ when k > 0 ->
                 unify_at e2.loc t2 base;
                 refined_or_base base (checked_mul a k)
+                  ~ob:(e.loc, Range_obligation.Mul, Range_obligation.Range (a, b),
+                       Some (Range_obligation.Const k))
                   (Option.bind (checked_mul (b - 1) k) (fun t -> checked_add t 1))
             | _, _, TRefinedInt (a, b, base), Some k when k > 0 ->
                 unify_at e1.loc t1 base;
                 refined_or_base base (checked_mul a k)
+                  ~ob:(e.loc, Range_obligation.Mul, Range_obligation.Const k,
+                       Some (Range_obligation.Range (a, b)))
                   (Option.bind (checked_mul (b - 1) k) (fun t -> checked_add t 1))
             | TRefinedInt (a, b, base1), _, TRefinedInt (c, d, base2), _ ->
                 (* GitHub issue #807: two refined factors; see
@@ -3628,8 +3704,14 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                 raise (TypeError (e2.loc, "division by zero"))
             | _ -> ());
            record_divisor_nonzero_proof t2 e2;
-           (match Const_env.folded_value e with
-            | Some k -> refined_or_base ct1 (Some k) (checked_add k 1)
+           (match fold_at_base ct1 e with
+            | Some k ->
+                let ob = match intlit_opt e1, intlit_opt e2 with
+                  | Some x, Some y ->
+                      Some (e.loc, Range_obligation.Div, Range_obligation.Const x,
+                            Some (Range_obligation.Const y))
+                  | _ -> None in
+                refined_or_base ?ob ct1 (Some k) (checked_add k 1)
             | None -> ct1)
        | Lt | Gt | Le | Ge | Eq | Ne ->
            (* GitHub issue #659: with a null pointer unwritable there is no
@@ -3662,8 +3744,14 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            (match intlit_opt e2 with
             | Some m when m > 0 ->
                 (match repr t1 with
-                 | TRefinedInt (lo, _, _) when lo >= 0 -> refined_or_base ct1 (Some 0) (Some m)
-                 | t when is_unsigned_ty t -> refined_or_base ct1 (Some 0) (Some m)
+                 | TRefinedInt (lo, _, _) when lo >= 0 ->
+                     refined_or_base ct1 (Some 0) (Some m)
+                       ~ob:(e.loc, Range_obligation.Mod, obligation_operand t1,
+                            Some (Range_obligation.Const m))
+                 | t when is_unsigned_ty t ->
+                     refined_or_base ct1 (Some 0) (Some m)
+                       ~ob:(e.loc, Range_obligation.Mod, obligation_operand t1,
+                            Some (Range_obligation.Const m))
                  | _ -> ct1)
             | _ -> ct1)
        | Or | And ->
@@ -3692,9 +3780,15 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
               check. *)
            if ct1 = TU16Be || ct1 = TU32Be then ct1 else
            (match intlit_opt e2 with
-            | Some k when k >= 0 -> refined_or_base ct1 (Some 0) (checked_add k 1)
+            | Some k when k >= 0 ->
+                refined_or_base ct1 (Some 0) (checked_add k 1)
+                  ~ob:(e.loc, Range_obligation.Band, obligation_operand t1,
+                       Some (Range_obligation.Const k))
             | _ -> (match intlit_opt e1 with
-                    | Some k when k >= 0 -> refined_or_base ct1 (Some 0) (checked_add k 1)
+                    | Some k when k >= 0 ->
+                        refined_or_base ct1 (Some 0) (checked_add k 1)
+                          ~ob:(e.loc, Range_obligation.Band, Range_obligation.Const k,
+                               Some (obligation_operand t2))
                     | _ -> ct1))
        | Bor | Bxor | Shr | Shl ->
            let ct1 = canon_ty t1 and ct2 = canon_ty t2 in
@@ -4051,6 +4145,9 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                   is a legal conversion"
                  (to_string src_ty) (to_string tgt)));
              match repr src_ty with
+             (* no-range-obligation: a wire-endian cast keeps the logical
+                value's range (#186); the byte swap is not an arithmetic
+                operation on it, so there is nothing for z3 to check. *)
              | TRefinedInt (lo, hi, _) -> refined_or_base tgt (Some lo) (Some hi)
              | _ -> tgt
            end else
@@ -4211,7 +4308,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                          "cannot cast a slice to %s (only `as *T`, or `as &T` / \
                           `as &mut T` for a packed header, is allowed)"
                          (to_string tgt))))
-            | TRefinedInt (lo, hi, _) ->
+            | TRefinedInt (lo, hi, src_base) ->
                 (* GitHub issue #72: a BARE cast target (`x as usize`, not the
                    explicit `x as {lo..<hi as usize}` form) still infers the
                    tightest possible refined type when x's own range is
@@ -4238,7 +4335,13 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                      (* GitHub issue #935: the same base check as the
                         arithmetic rules, so a range the target cannot
                         represent does not survive a truncating cast. *)
-                     (try unify src_ty tgt; refined_or_base tgt (Some lo) (Some hi)
+                     (try unify src_ty tgt;
+                        let ob = match obligation_width src_base with
+                          | Some (w, s) ->
+                              Some (e.loc, Range_obligation.Cast (w, s),
+                                    Range_obligation.Range (lo, hi), None)
+                          | None -> None in
+                        refined_or_base ?ob tgt (Some lo) (Some hi)
                       with Unify_error _ -> tgt)
                  | _ ->
                      (* A refined integer (e.g. a for-loop-proven

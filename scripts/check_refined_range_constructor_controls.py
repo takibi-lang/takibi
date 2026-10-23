@@ -41,7 +41,7 @@ PRE_935_SUB = """\
            (match repr t1, repr t2 with
             | TRefinedInt (a, b, base), TRefinedInt (c, d, _) ->
                 TRefinedInt (a - d + 1, b - c, base)
-            | _ -> refined_or_base t1 None None)
+            | _ -> refined_or_base ~ob t1 None None)
 """
 
 FIXED_SUB = """\
@@ -49,25 +49,36 @@ FIXED_SUB = """\
            (match repr t1, repr t2 with
             | TRefinedInt (a, b, base), TRefinedInt (c, d, _) ->
                 refined_or_base base (checked_sub a (d - 1)) (checked_sub b c)
+                  ~ob:(e.loc, Sub, Range (a, b), Some (Range (c, d)))
             | _ -> t1)
+"""
+
+# GitHub issue #952: the same rule with no obligation for z3.
+NO_OBLIGATION_SUB = FIXED_SUB.replace(
+    "                  ~ob:(e.loc, Sub, Range (a, b), Some (Range (c, d)))\n", "")
+
+EXEMPT_CAST = """\
+             (* no-range-obligation: a wire-endian cast keeps the logical
+                value's range; there is no bit operation to check. *)
+             | TRefinedInt (lo, hi, _) -> refined_or_base tgt (Some lo) (Some hi)
 """
 
 SPLIT_PATTERN = """\
         match target_ty, src_ty with
         | (TypeI8|TypeU8),
           TypeRefined (lo, hi, _) ->
-            refined_or_base target_ty (Some lo) (Some hi)
+            refined_or_base ?ob target_ty (Some lo) (Some hi)
 """
 
 CONSTRUCTED_AFTER_ARROW = """\
            (match Const_env.folded_value e with
             | Some k -> TRefinedInt (k, k + 1, ct1)
-            | None -> refined_or_base ct1 None None)
+            | None -> refined_or_base ?ob ct1 None None)
 """
 
 COMMENTED = """\
            (* used to read TRefinedInt (a - k, b - k, base) *)
-           refined_or_base base (checked_sub a k) (checked_sub b k)
+           refined_or_base base (checked_sub a k) (checked_sub b k) ~ob
 """
 
 
@@ -93,6 +104,12 @@ def main() -> int:
         ("a raw constructor outside the marked rules",
          PRE_935_SUB + HEAD + FIXED_SUB + TAIL, "TRefinedInt", 0,
          "PASS refined-range-constructor"),
+        ("a refined_or_base call without ~ob (#952)",
+         HEAD + NO_OBLIGATION_SUB + TAIL, "TRefinedInt", 1,
+         "refined_or_base without ~ob"),
+        ("a call exempted by a no-range-obligation comment",
+         HEAD + EXEMPT_CAST + TAIL, "TRefinedInt", 0,
+         "PASS refined-range-constructor"),
         ("markers removed", FIXED_SUB, "TRefinedInt", 1,
          "no 'refined-range rules begin' markers"),
         ("a region that never ends", HEAD + FIXED_SUB, "TRefinedInt", 1,
@@ -115,7 +132,7 @@ def main() -> int:
 
     report_pass("refined-range-constructor-controls",
                 "the repository passes; issue #935's raw Sub constructor, a "
-                "constructor after an arrow, a lost marker, an unterminated "
+                "constructor after an arrow, a call without ~ob, a lost marker, an unterminated "
                 "region and a helper-free region are refused; patterns, "
                 "comments and code outside the rules are not",
                 cases=CASES.ran)

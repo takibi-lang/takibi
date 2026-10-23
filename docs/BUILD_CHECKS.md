@@ -52,8 +52,8 @@ suffix is description; dispatch reads only the prefix.
 | `check_ci_opam_deps.py` | every library the dune files name is provided by a package in dune-project's depends stanza or by the compiler |
 | `check_ci_opam_deps_controls.py` | Controls for the Dune project dependency link, including what it is allowed to read |
 | `check_compiler_sync_rules.py` | declared compiler counterpart changes stay synchronized |
-| `check_refined_range_constructor.py` | range-propagation and cast rules in type_inf.ml/llvm_gen.ml build a refined result only through the base-checked refined_or_base (#935) |
-| `check_refined_range_constructor_controls.py` | Controls for the refined-range constructor check: issue #935's raw Sub constructor is refused |
+| `check_refined_range_constructor.py` | range-propagation and cast rules in type_inf.ml/llvm_gen.ml build a refined result only through the base-checked refined_or_base (#935), and each such call passes `~ob` so z3 re-checks it, or names why not in a `no-range-obligation:` comment (#952) |
+| `check_refined_range_constructor_controls.py` | Controls for the refined-range constructor check: issue #935's raw Sub constructor and a call without `~ob` are refused |
 | `check_await_summary_controls.py` | Aggregate await capture isolation, phase budgets, half-budget boundaries, missing observations and summary wiring |
 | `check_rpi5_ddb_await_controls.py` | RPi5 DDB first-arrival observations; software BRK boot and post-snapshot budgets, delayed release, echoed-only output, missing milestones and unavailable UART |
 | `check_fixed_wait_await_controls.py` | The FDT multi-bank boots and the stack-overflow runner (through `await_timing.py`'s command line) record arrival against their fixed budgets, print the margin past half without changing the verdict, and record a missing line as not arrived |
@@ -299,6 +299,7 @@ run them, and why they sit outside both globs above.
 | `buildcheck_kernel_memory_map.py` | Check kernel/MEMORY_MAP.md and allocator fixtures; render QEMU boot capacity from the loaded ELF |
 | `buildcheck_ext2_reproducible.sh` | run by kernelbuild-check: rebuilds ext2.img and ext2-shell.img from the same inputs and fails on any byte difference; the control rebuilds at another `KERNEL_EXT2_FAKE_TIME` and requires a difference; the prior images are restored with their timestamps (#890) |
 | `buildcheck_kernel_unused_coverage.py` | every kernel file a target compiles is checked for unused functions or exempt for a stated reason |
+| `buildcheck_range_obligations.py` | z3 (pinned in `scripts/fetch_model_tools.sh`) proves every range the compiler derived for a kernel main.o (`--emit-range-obligations`, format in [RANGE_OBLIGATIONS.md](RANGE_OBLIGATIONS.md)); `sat` prints the counterexample, `unknown` fails; `--control` plants #935's rule and must report it (`make range-obligation-control`, in modelcheck) (#952) |
 | `buildcheck_compile_alloc_budget.py` | the QEMU kernel main.o compile allocates no more OCaml heap words (`--emit-alloc-words`) than its recorded budget; a load-independent guard on compiler speed (#923) |
 | `measure_trusted_base.py --check-raw-deref` | the raw-pointer dereference ratchet (#639): run by each kernel object's rule on the compiler's `--emit-raw-deref-audit`, including standalone EL0 payload objects, it holds every file's dereference count to `raw_deref_budget.tsv`, so the count can only go down on purpose. Also the trusted-boundary inventory of `make trustedbasecheck` |
 | `buildcheck_suite_output.py` | Split a batched UART stream and compare each case with its fixture |

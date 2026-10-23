@@ -106,3 +106,30 @@ let rec folded_value (e : Ast.expr) =
        | Some x, Some y -> checked_div x y
        | _ -> None)
   | _ -> None
+
+(* GitHub issue #952: folded_value computes on the checker's native ints,
+   and an integer literal is a 64-bit pattern (0xFFFFFFFFFFFFFFFF folds as
+   -1). That is the machine's value only when nothing wraps at the
+   operation's width. folded_value_within lo hi accepts a fold only when
+   every leaf and every intermediate result lies in [lo, hi), the values
+   the expression's base holds: then native and machine arithmetic agree
+   exactly (Div truncates toward zero on both). z3 found the difference:
+   on u64, `0xFFFFFFFFFFFFFFFF / 64` folded to 0, and an index proved by it
+   wrote 2^58 - 1 words past an array (scripts/buildcheck_range_obligations.py). *)
+let folded_value_within lo hi (e : Ast.expr) =
+  let inside = function
+    | Some v when v >= lo && v < hi -> Some v
+    | _ -> None in
+  let rec go (e : Ast.expr) =
+    match e.Ast.desc with
+    | Ast.BinOp ((Ast.Add | Ast.Sub | Ast.Mul | Ast.Div) as op, a, b) ->
+        (match go a, go b with
+         | Some x, Some y ->
+             inside (match op with
+               | Ast.Add -> checked_add x y
+               | Ast.Sub -> checked_sub x y
+               | Ast.Mul -> checked_mul x y
+               | _ -> checked_div x y)
+         | _ -> None)
+    | _ -> inside (folded_value e) in
+  go e
