@@ -27996,11 +27996,11 @@ let text_search_tests = [
       (names "(region__u8) region__ region__Foo_region__Bar region__x"));
 ]
 
-(* GitHub issues #884, #942: every binary operator over every operand
+(* GitHub issues #884, #941, #942: every binary operator over every operand
    kind, through both stages. A kind the checker accepts must also survive
    code generation and the LLVM verifier (expect_ok); a kind without a
    lowering must be a positioned type error, never an internal compiler
-   error. A new kind belongs in one of the
+   error or a silent address comparison. A new kind belongs in one of the
    tables, and Type_inf.non_scalar_kind lists every type constructor
    without a wildcard. *)
 let operator_kind_tests =
@@ -28041,7 +28041,25 @@ let operator_kind_tests =
   @ List.concat_map (fun (kind, ty) ->
     List.map (case (expect_type_error (Printf.sprintf "is not defined on"))
                 kind ty) (cmp @ arith)) rejected
+  @ List.map (fun op ->
+    Alcotest.test_case
+      (Printf.sprintf "two local arrays with %s are a type error (issue #941)" op) `Quick
+      (expect_type_error "is not defined on array values"
+         (Printf.sprintf
+            "fn f() -> bool { let mut s: [u8; 4] = { 1, 2, 3, 4 };
+                              let mut t: [u8; 4] = { 1, 2, 3, 4 };
+                              return s %s t; }" op))) cmp
   @ [
+    Alcotest.test_case "an array parameter compared is a type error (issue #941)" `Quick
+      (expect_type_error "is not defined on array values"
+         "fn f(s: [u8; 4], t: [u8; 4]) -> bool { return s == t; }");
+    Alcotest.test_case "a struct field array compared is a type error (issue #941)" `Quick
+      (expect_type_error "is not defined on array values"
+         "struct B { d: [u8; 4]; }
+          fn f(x: B, y: B) -> bool { return x.d != y.d; }");
+    Alcotest.test_case "comparing array elements stays accepted (issue #941)" `Quick
+      (expect_ok
+         "fn f(s: [u8; 4], t: [u8; 4]) -> bool { return s[0] == t[0]; }");
     Alcotest.test_case "~ on a struct is a type error, not an ICE (issue #942)" `Quick
       (expect_type_error "operator ~ is not defined on struct values"
          "struct S { w: usize; }

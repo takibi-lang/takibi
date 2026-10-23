@@ -3381,24 +3381,33 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
          written the same way) -- real network code keeps values in wire
          order from receive through transmit, so this is deliberately not
          "reject everything". Anything else must `as u16` first. *)
-      (* GitHub issues #884, #942: every operator except && and || needs
-         scalar operands. An array operand has already decayed to its
-         element pointer here (GitHub issue #941). *)
+      (* GitHub issues #884, #941, #942: every operator except && and ||
+         needs scalar operands. An array operand has already decayed to
+         its element pointer in t1/t2, so for a comparison its place type
+         is looked up before decay: `a == b` on two arrays compared two
+         addresses. *)
       (match op with
        | And | Or -> ()
        | _ ->
-           List.iter (fun t ->
+           List.iter (fun (operand, t) ->
              let kind = match non_scalar_kind
                                 ~is_enum:(fun n -> StringMap.mem n eenv) t with
                | Some _ as k -> k
-               | None -> None in
+               | None ->
+                   (* Arithmetic on a decayed array is pointer arithmetic
+                      and stays; only a comparison compares contents in
+                      the reader's eyes but addresses in the code. *)
+                   (match op with
+                    | Lt | Gt | Le | Ge | Eq | Ne ->
+                        undecayed_array_kind senv eenv tyenv fenv operand
+                    | _ -> None) in
              match kind with
              | Some kind ->
                  raise (TypeError (e.loc, Printf.sprintf
                    "operator %s is not defined on %s values; operate on a \
-                    field, or call a function (GitHub issues #884, \
-                    #942)" (binop_symbol op) kind))
-             | None -> ()) [ t1; t2 ]);
+                    field or element, or call a function (GitHub issues \
+                    #884, #941, #942)" (binop_symbol op) kind))
+             | None -> ()) [ (e1, t1); (e2, t2) ]);
       (let is_wire_be_ty t = match repr t with
          | TU16Be | TU32Be -> true
          | TRefinedInt (_, _, (TU16Be | TU32Be)) -> true
@@ -6646,6 +6655,19 @@ and byte_view_cast senv eenv (e : Ast.expr) src_ty tgt el_want want_min want_acc
   end;
   Hashtbl.replace byte_view_len e.loc n;
   TSlice (TU8, n, want_access)
+
+(* GitHub issue #941: an operand that names an array place (a variable or
+   a field chain) reaches an operator as its decayed element pointer; this
+   recovers "array" from the place's declared type. Array parameters are
+   pointers in the environment already and stay pointers. *)
+and undecayed_array_kind senv eenv tyenv fenv (e : Ast.expr) : string option =
+  match e.desc with
+  | Ast.Var _ | Ast.FieldGet _ ->
+      (match repr (place_undecayed_type senv eenv tyenv fenv e) with
+       | TArray _ -> Some "array"
+       | _ -> None
+       | exception TypeError _ -> None)
+  | _ -> None
 
 and place_undecayed_type senv eenv tyenv fenv (e : Ast.expr) : ty =
   match e.desc with

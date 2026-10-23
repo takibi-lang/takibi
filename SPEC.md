@@ -412,11 +412,12 @@ parameter value, or top-level declaration name.
 - Arithmetic: `+` `-` `*` `/` `%`. Comparison: `<` `>` `<=` `>=` `==`
   `!=`, defined on scalar operands only: integers (wire-endian ones take
   only `==`/`!=`), `bool`, enums, and pointers. Comparing a struct,
-  variant, slice, tuple, or other aggregate is a compile error; compare a
-  field or call an equality function (GitHub issue #884). Arithmetic and
-  bitwise operators likewise reject aggregate operands (GitHub issue #942).
-  An array operand decays to its element pointer first, so `a == b` on
-  two arrays compares their addresses (GitHub issue #941). Logical: `||`,
+  variant, array, slice, tuple, or other aggregate is a compile error;
+  compare a field or element, or call an equality function (GitHub issues
+  #884, #941). An array operand is classified before it decays to its
+  element pointer, so `a == b` on two arrays is rejected rather than
+  comparing their addresses. Arithmetic and bitwise operators likewise
+  reject aggregate operands (GitHub issue #942). Logical: `||`,
   `&&` -- both operands and the result are `bool` (see the `cond` rule
   under "Statements" above).
   Bitwise: `~` (unary NOT), `>>` (right shift -- arithmetic/sign-extending
