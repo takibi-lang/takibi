@@ -5259,37 +5259,118 @@ private fn syscall_signal_deliver_into(current_authority: ProcessCurrent[current
             process_current_end(current_authority); return SyscallAction::Resume(value);
         }
         ProcessSignalPendingResult::Pending(taken) => {
-            let signum: usize = taken_signal_number(taken);
-            let mut handler: SignalAction =
-                kernel_process_current_signal_action(current_authority, signum);
-            let restore_mask: usize = kernel_process_current_frame_mask_take();
-            let (written, base) = syscall_signal_frame_write(current_authority,
-                here, value, signum, restore_mask,
-                taken_signal_child_pid(taken),
-                taken_signal_child_status(taken),
-                taken_signal_sender_pid(taken));
-            if (written == false) {
+            if (signal_handler_enter(current_authority, here, value, taken) == false) {
                 // Linux forces SIGSEGV when the frame cannot be written.
                 let delivered: usize = taken_signal_delivered(taken);
                 return kernel_syscall_exit_current_process(current_authority,
                     process_end_signaled(LINUX_SIGSEGV));
             }
-            let delivered: usize = taken_signal_delivered(taken);
-            let mut handler_mask: usize = restore_mask | handler.mask;
-            if ((handler.flags & LINUX_SA_NODEFER) == 0) {
-                handler_mask = handler_mask | (1 << (signum - 1));
-            }
-            kernel_process_current_set_signal_mask(handler_mask);
-            if ((handler.flags & LINUX_SA_RESETHAND) != 0) {
-                let mut reset: SignalAction = { 0, 0, 0, 0 };
-                kernel_process_current_set_signal_action(current_authority, signum, reset);
-            }
-            frame_general_set(here, 1, base);
-            frame_general_set(here, 2, base + 128);
-            frame_general_set(here, 30, handler.restorer);
-            frame_sp_el0_set(here, base);
-            frame_elr_el1_set(here, handler.handler);
+            let signum: usize = taken_signal_delivered(taken);
             process_current_end(current_authority); return SyscallAction::Resume(signum);
+        }
+    }
+}
+
+// Point `here` at the handler for `taken`: write the frame that records
+// the interrupted context, with x0 as `value`, below its user stack, then
+// apply the handler's mask and SA_RESETHAND and set x1, x2, x30, SP and PC
+// for the handler. x0 (the signal number) is the caller's to set, since a
+// syscall return sets it from its result. False, with `here` and the
+// handler table unchanged, when the frame cannot be written.
+private fn signal_handler_enter(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
+                                here: borrow FrameRef[process], value: usize,
+                                taken: borrow TakenSignal[signal])
+        -> bool !{unsafe} {
+    let signum: usize = taken_signal_number(taken);
+    let mut handler: SignalAction =
+        kernel_process_current_signal_action(current_authority, signum);
+    let restore_mask: usize = kernel_process_current_frame_mask_take();
+    let (written, base) = syscall_signal_frame_write(current_authority,
+        here, value, signum, restore_mask,
+        taken_signal_child_pid(taken),
+        taken_signal_child_status(taken),
+        taken_signal_sender_pid(taken));
+    if (written == false) { return false; }
+    let mut handler_mask: usize = restore_mask | handler.mask;
+    if ((handler.flags & LINUX_SA_NODEFER) == 0) {
+        handler_mask = handler_mask | (1 << (signum - 1));
+    }
+    kernel_process_current_set_signal_mask(handler_mask);
+    if ((handler.flags & LINUX_SA_RESETHAND) != 0) {
+        let mut reset: SignalAction = { 0, 0, 0, 0 };
+        kernel_process_current_set_signal_action(current_authority, signum, reset);
+    }
+    frame_general_set(here, 1, base);
+    frame_general_set(here, 2, base + 128);
+    frame_general_set(here, 30, handler.restorer);
+    frame_sp_el0_set(here, base);
+    frame_elr_el1_set(here, handler.handler);
+    return true;
+}
+
+// GitHub issue #628: every return to EL0 runs a pending caught signal's
+// handler, as Linux does on every return to user space -- the return from
+// an interrupt taken in EL0 included, so a process that computes without
+// making a syscall still runs its handler at its next timer tick.
+//
+// kernel_process_stack_switch_complete calls this last, on the stack of
+// the process `frame` belongs to, which it has just made this CPU's own,
+// with that process current, its root active and DAIF.I set. That hook
+// ends every resume of a saved EL0 frame: the IRQ return (el0_irq_entry),
+// whether or not its tick switched processes, and el0_context_resume, which
+// every syscall return, switch and first start goes through. It is not the
+// IRQ handler's context: the interrupt is acknowledged and the CPU is off
+// its IRQ stack, which is why the frame write may grow the user stack here
+// as it does from a syscall. A syscall return has already run its own
+// signal through syscall_signal_deliver; a second pending one runs here,
+// its frame stacked on the first, as Linux delivers every pending signal
+// before it returns.
+//
+// The frame holds the whole interrupted context, as the entry saved it,
+// and the signal frame records all of it, x0 included; rt_sigreturn puts
+// it back. Two returns leave the signal pending instead:
+// - The frame resumes at an SVC. That is a syscall rewound to rerun -- by a
+//   signal's wake (#726), a Retry or a migration -- or one the process is
+//   about to make; either way the syscall comes next, and its own return
+//   runs the handler: before EINTR, or before the restart SA_RESTART asks
+//   for. Taking the signal here would run the handler first and then rerun
+//   the call with nothing left to interrupt it, so a wait4 or rt_sigsuspend
+//   that a signal woke would go back to sleep.
+// - The frame cannot be written. Linux would end the process with SIGSEGV;
+//   ending a process is a syscall-path step here, so the signal stays
+//   pending for the process's next syscall, whose return forces it.
+fn kernel_signal_return_deliver(frame: borrow FrameRef[process]) !{unsafe} {
+    let ProcessRunningHere::Running(current_authority) = process_running_here() else {};
+    match kernel_process_current_caught_signal_take() {
+        ProcessSignalPendingResult::Missing => {
+            process_current_end(current_authority);
+        }
+        ProcessSignalPendingResult::Pending(taken) => {
+            if (signal_resumes_at_svc(current_authority, frame) ||
+                signal_handler_enter(current_authority, frame,
+                    frame_general(frame, 0), taken) == false) {
+                taken_signal_restore(taken);
+            } else {
+                frame_general_set(frame, 0, taken_signal_delivered(taken));
+            }
+            process_current_end(current_authority);
+        }
+    }
+}
+
+// AArch64 SVC #imm16: 0xD4000001 with the immediate in bits 20..5.
+const AARCH64_SVC_MASK: u32 = 0xFFE0001F;
+const AARCH64_SVC: u32 = 0xD4000001;
+
+// True when the instruction `frame` resumes at is an SVC. An unreadable PC
+// is not one: the process faults there before it can make a syscall.
+private fn signal_resumes_at_svc(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
+                                 frame: borrow FrameRef[process]) -> bool !{unsafe} {
+    match user_range_check_read(current_authority, frame_elr_el1(frame), 4) {
+        UserReadRangeResult::Fault => { return false; }
+        UserReadRangeResult::Ok(range) => {
+            let (read_ok, instruction) = user_read_u32(range, 0);
+            return read_ok && (instruction & AARCH64_SVC_MASK) == AARCH64_SVC;
         }
     }
 }

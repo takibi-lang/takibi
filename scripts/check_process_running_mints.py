@@ -32,6 +32,10 @@ ALLOWED = {
         "kernel_syscall_block_return": 1,
         "kernel_syscall_child_exec_return": 1,
         "kernel_syscall_dispatch_action": 1,
+        # GitHub issue #628: the signal check every return to EL0 makes, at
+        # the end of the stack-switch hook that has just made the process
+        # current on this CPU.
+        "kernel_signal_return_deliver": 1,
     }),
     "process_constructing_here": Counter({"kernel_syscall_clone_child_return": 1}),
     "process_running_new": Counter({"process_running_here": 1,

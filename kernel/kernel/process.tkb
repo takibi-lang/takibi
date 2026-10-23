@@ -4735,6 +4735,9 @@ fn kernel_process_stack_switch_complete(frame_sp: usize) {
     // Last, after the deferred reap: that reap is the path that left the
     // target at root 0 in #437.
     kernel_process_root_authorities_check(incoming, frame);
+    // GitHub issue #628: on the way back to EL0, a pending caught signal's
+    // handler, whatever path reached this return.
+    kernel_signal_return_deliver(frame);
     // Back to EL0: the kernel is doing nothing on this CPU's behalf.
     kernel_activity_set(KernelActivity::None);
 }

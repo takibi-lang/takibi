@@ -303,3 +303,140 @@ signal_interrupt_handler:
     str x9, [x1, #480]
     ret
 .size signal_interrupt_handler, .-signal_interrupt_handler
+
+/* GitHub issue #628: a process that makes no syscall still runs its
+ * handler, at the return from the timer interrupt that preempts it.
+ * signal_spin_run() fills every general register it may -- all but x20 (the
+ * SP copy), x21 (the handler count) and x22 (the bound) -- every vector
+ * register, FPCR, FPSR and NZCV with known values, then spins without a
+ * syscall until signal_spin_handler has run, or the bound runs out. The
+ * handler counts itself in the interrupted x21 through the signal frame,
+ * as signal_interrupt_handler does, and clobbers what it can; on return
+ * every register must hold its value again. x0..x18 are what a syscall
+ * return would not have had to keep.
+ * Returns 0; 1 when the bound ran out (no handler ran); 2 when a register
+ * came back changed; 3 when SP did.
+ */
+.macro spin_pattern reg, n
+    movz \reg, #(0x1100 + \n)
+    movk \reg, #(0x5a00 + \n), lsl #16
+    movk \reg, #0xa5a5, lsl #48
+.endm
+
+.global signal_spin_run
+.type signal_spin_run, %function
+signal_spin_run:
+    sub sp, sp, #192
+    stp x19, x20, [sp, #0]
+    stp x21, x22, [sp, #16]
+    stp x23, x24, [sp, #32]
+    stp x25, x26, [sp, #48]
+    stp x27, x28, [sp, #64]
+    stp x29, x30, [sp, #80]
+    stp d8, d9, [sp, #96]
+    stp d10, d11, [sp, #112]
+    stp d12, d13, [sp, #128]
+    stp d14, d15, [sp, #144]
+    mrs x9, fpcr
+    mrs x10, fpsr
+    stp x9, x10, [sp, #160]
+    mov x20, sp
+    mov x21, #0
+    mov x22, #1
+    lsl x22, x22, #32
+    .irp v, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31
+    mov w9, #(0x31 + \v)
+    dup v\v\().16b, w9
+    .endr
+    mov x9, #0x400000
+    msr fpcr, x9
+    mov x9, #1
+    msr fpsr, x9
+    mov x9, #0xa0000000
+    msr nzcv, x9
+    .irp n, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,23,24,25,26,27,28,29,30
+    spin_pattern x\n, \n
+    .endr
+    // No syscall and no flag-setting instruction until the handler ran.
+.Lspin_loop:
+    cbnz x21, .Lspin_ran
+    sub x22, x22, #1
+    cbnz x22, .Lspin_loop
+    mov x0, #1
+    b .Lspin_return
+.Lspin_ran:
+    mrs x21, nzcv
+    mov x22, #0xa0000000
+    cmp x21, x22
+    b.ne .Lspin_bad
+    .irp n, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,23,24,25,26,27,28,29,30
+    spin_pattern x22, \n
+    cmp x\n, x22
+    b.ne .Lspin_bad
+    .endr
+    // Each vector register against its byte; v0 is checked first, since
+    // it then serves as the scratch for the rest.
+    .irp v, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31
+    mov w9, #(0x31 + \v)
+    dup v0.16b, w9
+    cmeq v0.16b, v0.16b, v\v\().16b
+    uminv b0, v0.16b
+    umov w9, v0.b[0]
+    cmp w9, #0xff
+    b.ne .Lspin_bad
+    .endr
+    mrs x21, fpcr
+    mov x22, #0x400000
+    cmp x21, x22
+    b.ne .Lspin_bad
+    mrs x21, fpsr
+    cmp x21, #1
+    b.ne .Lspin_bad
+    mov x21, sp
+    cmp x21, x20
+    b.ne .Lspin_sp
+    mov x0, #0
+    b .Lspin_return
+.Lspin_sp:
+    mov x0, #3
+    b .Lspin_return
+.Lspin_bad:
+    mov x0, #2
+.Lspin_return:
+    mov sp, x20
+    ldp x9, x10, [sp, #160]
+    msr fpcr, x9
+    msr fpsr, x10
+    ldp d8, d9, [sp, #96]
+    ldp d10, d11, [sp, #112]
+    ldp d12, d13, [sp, #128]
+    ldp d14, d15, [sp, #144]
+    ldp x19, x20, [sp, #0]
+    ldp x21, x22, [sp, #16]
+    ldp x23, x24, [sp, #32]
+    ldp x25, x26, [sp, #48]
+    ldp x27, x28, [sp, #64]
+    ldp x29, x30, [sp, #80]
+    add sp, sp, #192
+    ret
+.size signal_spin_run, .-signal_spin_run
+
+.global signal_spin_handler
+.type signal_spin_handler, %function
+signal_spin_handler:
+    ldr x9, [x1, #480]
+    add x9, x9, #1
+    str x9, [x1, #480]
+    // Clobber what the interrupted context must get back.
+    .irp n, 3,4,5,6,7,8,10,11,12,13,14,15,16,17,18
+    mov x\n, #0
+    .endr
+    .irp v, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31
+    movi v\v\().16b, #0
+    .endr
+    mov x9, #0
+    cmp x9, #1
+    msr fpcr, xzr
+    msr fpsr, xzr
+    ret
+.size signal_spin_handler, .-signal_spin_handler
