@@ -1477,29 +1477,14 @@ struct ProcessDdbRecord {
     // length, so a fixed-size ps row names the image without a heap or a
     // pointer into the record. A respawn loop (#881) shows as the same
     // command under new pids.
-    // Bytes 0..<24, little-endian, eight to a word: scalar fields keep the
-    // record a plain value copy (an array field would need its own
-    // initialization proof on every path).
-    command0: usize;
-    command1: usize;
-    command2: usize;
+    // Filled by one counted loop, which initializes the whole field (#888).
+    command: [u8; DDB_COMMAND_BYTES];
     command_length: usize;
 }
 
 struct ProcessDdbCopyResult {
     count: usize;
     truncated: bool;
-}
-
-// GitHub issue #887: eight command-line bytes from `offset`, little-endian.
-private fn ddb_command_word(record: borrow &mut ProcessRecord,
-                            offset: {0..<505 as usize}) -> usize {
-    let mut word: usize = 0;
-    for index: usize in 0..<8 {
-        word = word | ((record.command_line[offset + index] as usize)
-                       << (8 * index));
-    }
-    return word;
 }
 
 // `borrow &mut ProcessRecord` retains no record authority beyond the call. The caller reads
@@ -1567,9 +1552,9 @@ private fn scheduled_process_ddb_record(
     }
     result.command_length =
         record.command_line_length & PROCESS_COMMAND_LENGTH_MASK;
-    result.command0 = ddb_command_word(record, 0);
-    result.command1 = ddb_command_word(record, 8);
-    result.command2 = ddb_command_word(record, 16);
+    for index: usize in 0..<DDB_COMMAND_BYTES {
+        result.command[index] = record.command_line[index];
+    }
     return result;
 }
 
