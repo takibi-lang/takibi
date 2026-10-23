@@ -3,10 +3,9 @@
 
 import argparse
 from pathlib import Path
-import subprocess
-import tempfile
 
 from kernel_compile_flags import kernel_compile_flags
+from overlay_jobs import run_overlay_cases
 from pass_line import CaseCount, report_pass
 
 
@@ -61,31 +60,28 @@ private fn current_phase_control(
     return pid;
 }
 ''', True))
+    def judge(case, result):
+        name, _, accepts = case
+        output = result.stdout + result.stderr
+        status_ok = (result.returncode == 0) == accepts
+        diagnostic_ok = accepts or 'contains a live ProcessCurrent witness' in output
+        if status_ok and diagnostic_ok:
+            return None
+        return f'FAIL process-current-phase: {name}: status={result.returncode}\n{output}'
+
+    failures = run_overlay_cases(
+        repo, 'takibi-current-phase-', cases,
+        lambda case: (process, source + case[1]),
+        lambda overlay: [str(compiler), *args.sources, *kernel_compile_flags(),
+                         '--emit-struct-layout', 'ProcessRecord', '-o', str(overlay / 'layout')],
+        judge)
     ran = CaseCount()
-    with tempfile.TemporaryDirectory(prefix='takibi-current-phase-') as tmp:
-        overlay = Path(tmp)
-        for original in (repo / 'kernel').rglob('*'):
-            target = overlay / original.relative_to(repo)
-            if original.is_dir():
-                target.mkdir(parents=True, exist_ok=True)
-            elif original.is_file():
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.symlink_to(original)
-        target = overlay / process
-        target.unlink()
-        for name, addition, accepts in cases:
-            target.write_text(source + addition, encoding='ascii')
-            result = subprocess.run(
-                [str(compiler), *args.sources, *kernel_compile_flags(),
-                 '--emit-struct-layout', 'ProcessRecord', '-o', str(overlay / 'layout')],
-                cwd=overlay, capture_output=True, text=True, check=False)
-            ran.note()
-            output = result.stdout + result.stderr
-            status_ok = (result.returncode == 0) == accepts
-            diagnostic_ok = accepts or 'contains a live ProcessCurrent witness' in output
-            if not status_ok or not diagnostic_ok:
-                print(f'FAIL process-current-phase: {name}: status={result.returncode}\n{output}')
-                return 1
+    for failure in failures:
+        ran.note()
+        if failure is not None:
+            print(failure)
+    if any(failures):
+        return 1
     report_pass('process-current-phase',
                 'five phase transitions and both table resets reject retained current authority; consumption permits transition',
                 cases=ran.ran)

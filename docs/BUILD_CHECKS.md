@@ -288,6 +288,7 @@ run them, and why they sit outside both globs above.
 | `buildcheck_backing_exists.py` | Real kernel overlays accept borrowed backing/image/FD evidence and reject unensured writers, wrong-record evidence and foreign minting |
 | `buildcheck_user_write_result.py` | Real kernel overlays accept a matched user-memory store and reject an ignored, unmatched or bool-read `UserWriteResult` (#725) |
 | `buildcheck_process_current_phase.py` | Real Running/Constructing transition APIs reject retained current authority; consuming it permits transition |
+| `overlay_jobs.py` | not a check: the three overlay buildchecks above run their cases through it on a pool of a quarter of the host threads, one symlinked overlay per worker, reporting in case order (#915); `TAKIBI_BUILDCHECK_JOBS=1` restores the serial run |
 | `buildcheck_kernel_asm_invariants.py` | Linked-kernel instruction invariants: UXN bits, eret masking, the spinlock and mutex sequences, broadcast TLB invalidation, per-core exception stacks, the stack handoff hook, explicit stops, and no misaligned q-register store in the MMU-off page allocator (#746) |
 | `buildcheck_kernel_memory_map.py` | Check kernel/MEMORY_MAP.md and allocator fixtures; render QEMU boot capacity from the loaded ELF |
 | `buildcheck_ext2_reproducible.sh` | run by kernelbuild-check: rebuilds ext2.img and ext2-shell.img from the same inputs and fails on any byte difference; the control rebuilds at another `KERNEL_EXT2_FAKE_TIME` and requires a difference; the prior images are restored with their timestamps (#890) |

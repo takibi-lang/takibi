@@ -16,10 +16,9 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-import subprocess
-import tempfile
 
 from kernel_compile_flags import kernel_compile_flags
+from overlay_jobs import run_overlay_cases
 from pass_line import CaseCount, report_pass
 
 
@@ -58,36 +57,28 @@ private fn user_write_control(range: borrow UserWriteRange[process], source: []u
 }
 """, ("cannot unify", "UserWriteResult", "bool")),
     ]
+    def judge(case, result):
+        name, _, expected = case
+        output = result.stdout + result.stderr
+        status_ok = result.returncode == 0 if expected is None else result.returncode != 0
+        diagnostic_ok = expected is None or all(part in output for part in expected)
+        if status_ok and diagnostic_ok:
+            return None
+        return f"FAIL user-write-result: {name}: status={result.returncode}; expected={expected}\n{output}"
+
+    failures = run_overlay_cases(
+        repo, "takibi-user-write-result-", cases,
+        lambda case: (edited, source + case[1]),
+        lambda overlay: [str(compiler), *args.sources, *kernel_compile_flags(),
+                         "--emit-struct-layout", "UserWriteRange", "-o", str(overlay / "layout")],
+        judge)
     ran = CaseCount()
-    with tempfile.TemporaryDirectory(prefix="takibi-user-write-result-") as tmp:
-        overlay = Path(tmp)
-        # Symlink files individually so changing one source cannot touch the
-        # real tree. Generated kernel files remain available after kernelbuild.
-        for original in (repo / "kernel").rglob("*"):
-            relative = original.relative_to(repo)
-            target = overlay / relative
-            if original.is_dir():
-                target.mkdir(parents=True, exist_ok=True)
-            elif original.is_file():
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.symlink_to(original)
-        target = overlay / edited
-        for name, addition, expected in cases:
-            target.unlink()
-            target.write_text(source + addition, encoding="ascii")
-            result = subprocess.run(
-                [str(compiler), *args.sources, *kernel_compile_flags(),
-                 "--emit-struct-layout", "UserWriteRange", "-o", str(overlay / "layout")],
-                cwd=overlay, capture_output=True, text=True, check=False)
-            ran.note()
-            output = result.stdout + result.stderr
-            status_ok = result.returncode == 0 if expected is None else result.returncode != 0
-            diagnostic_ok = expected is None or all(part in output for part in expected)
-            if not status_ok or not diagnostic_ok:
-                print(f"FAIL user-write-result: {name}: status={result.returncode}; expected={expected}\n{output}")
-                return 1
-        target.unlink()
-        target.symlink_to(repo / edited)
+    for failure in failures:
+        ran.note()
+        if failure is not None:
+            print(failure)
+    if any(failures):
+        return 1
     report_pass("user-write-result", f"{ran.ran} real-kernel cases accept a matched store and reject an ignored, unmatched or bool-read user-memory store", cases=ran.ran)
     return 0
 

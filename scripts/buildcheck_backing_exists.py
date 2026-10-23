@@ -10,10 +10,9 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-import subprocess
-import tempfile
 
 from kernel_compile_flags import kernel_compile_flags
+from overlay_jobs import run_overlay_cases
 from pass_line import CaseCount, report_pass
 
 
@@ -134,37 +133,32 @@ private fn fd_exists_control() -> ProcessFdContextExists[0] {
         cases.append((f"FD {function} without evidence", fd,
                       f"\nprivate fn fd_exists_control(){signature} {{ {statement}{function}(0, {extra}); }}\n",
                       (f"{function} expects {count} argument(s), got {count - 1}",)))
+    def edit(case):
+        _, edited, addition, _ = case
+        original = source if edited == backing else (repo / edited).read_text(encoding="ascii")
+        return edited, original + addition
+
+    def judge(case, result):
+        name, _, _, expected = case
+        output = result.stdout + result.stderr
+        status_ok = result.returncode == 0 if expected is None else result.returncode != 0
+        diagnostic_ok = expected is None or all(part in output for part in expected)
+        if status_ok and diagnostic_ok:
+            return None
+        return f"FAIL backing-exists: {name}: status={result.returncode}; expected={expected}\n{output}"
+
+    failures = run_overlay_cases(
+        repo, "takibi-backing-exists-", cases, edit,
+        lambda overlay: [str(compiler), *args.sources, *kernel_compile_flags(),
+                         "--emit-struct-layout", "AddressSpaceBacking", "-o", str(overlay / "layout")],
+        judge)
     ran = CaseCount()
-    with tempfile.TemporaryDirectory(prefix="takibi-backing-exists-") as tmp:
-        overlay = Path(tmp)
-        # Symlink files individually so changing one source cannot touch the
-        # real tree. Generated kernel files remain available after kernelbuild.
-        for original in (repo / "kernel").rglob("*"):
-            relative = original.relative_to(repo)
-            target = overlay / relative
-            if original.is_dir():
-                target.mkdir(parents=True, exist_ok=True)
-            elif original.is_file():
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.symlink_to(original)
-        for name, edited, addition, expected in cases:
-            target = overlay / edited
-            original = source if edited == backing else (repo / edited).read_text(encoding="ascii")
-            target.unlink()
-            target.write_text(original + addition, encoding="ascii")
-            result = subprocess.run(
-                [str(compiler), *args.sources, *kernel_compile_flags(),
-                 "--emit-struct-layout", "AddressSpaceBacking", "-o", str(overlay / "layout")],
-                cwd=overlay, capture_output=True, text=True, check=False)
-            ran.note()
-            output = result.stdout + result.stderr
-            status_ok = result.returncode == 0 if expected is None else result.returncode != 0
-            diagnostic_ok = expected is None or all(part in output for part in expected)
-            if not status_ok or not diagnostic_ok:
-                print(f"FAIL backing-exists: {name}: status={result.returncode}; expected={expected}\n{output}")
-                return 1
-            target.unlink()
-            target.symlink_to(repo / edited)
+    for failure in failures:
+        ran.note()
+        if failure is not None:
+            print(failure)
+    if any(failures):
+        return 1
     report_pass("backing-exists", f"{ran.ran} real-kernel cases accept borrowed evidence and reject unensured writes, wrong-record evidence and foreign minting", cases=ran.ran)
     return 0
 
