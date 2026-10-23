@@ -27905,14 +27905,16 @@ let text_search_tests = [
       (names "(region__u8) region__ region__Foo_region__Bar region__x"));
 ]
 
-(* GitHub issue #884: every comparison operator over every operand kind,
-   through both stages. A kind the checker accepts must also survive code
-   generation and the LLVM verifier (expect_ok); a kind without a lowering
-   must be a positioned type error, never an internal compiler error. A new
-   kind belongs in one of the two tables, and Type_inf.non_comparable_kind
-   lists every type constructor without a wildcard. *)
-let comparison_kind_tests =
-  let ops = ["=="; "!="; "<"; "<="; ">"; ">="] in
+(* GitHub issues #884, #942: every binary operator over every operand
+   kind, through both stages. A kind the checker accepts must also survive
+   code generation and the LLVM verifier (expect_ok); a kind without a
+   lowering must be a positioned type error, never an internal compiler
+   error. A new kind belongs in one of the
+   tables, and Type_inf.non_scalar_kind lists every type constructor
+   without a wildcard. *)
+let operator_kind_tests =
+  let cmp = ["=="; "!="; "<"; "<="; ">"; ">="] in
+  let arith = ["+"; "-"; "*"; "/"; "%"; "&"; "|"; "^"; "<<"; ">>"] in
   let decls =
     "struct S { w: usize; }
      enum E { A; B; }
@@ -27920,13 +27922,13 @@ let comparison_kind_tests =
      variant U { Ua; Ub; }" in
   (* name, parameter type, operators that exist on it *)
   let accepted = [
-    "integer", "u32", ops;
-    "usize", "usize", ops;
-    "bool", "bool", ops;
-    "enum", "E", ops;
-    "refined integer", "{0..<8 as u32}", ops;
-    "raw pointer", "*u32", ops;
-    "wire-endian integer", "u16be", ["=="; "!="];
+    "integer", "u32", cmp @ arith;
+    "usize", "usize", cmp @ arith;
+    "bool", "bool", cmp;
+    "enum", "E", cmp;
+    "refined integer", "{0..<8 as u32}", cmp;
+    "raw pointer", "*u32", cmp;
+    "wire-endian integer", "u16be", ["=="; "!="; "&"; "|"; "^"];
   ] in
   let rejected = [
     "struct", "S";
@@ -27934,18 +27936,25 @@ let comparison_kind_tests =
     "payload-free variant", "U";
     "slice", "[]u8";
   ] in
+  let src ty op =
+    let result = if List.mem op cmp then "bool" else ty in
+    Printf.sprintf "%s\nfn f(a: %s, b: %s) -> %s { return a %s b; }"
+      decls ty ty result op in
   let case expect kind ty op =
     Alcotest.test_case
-      (Printf.sprintf "%s %s %s (issue #884)" kind op kind) `Quick
-      (expect (Printf.sprintf
-         "%s\nfn f(a: %s, b: %s) -> bool { return a %s b; }" decls ty ty op))
+      (Printf.sprintf "%s %s %s (issues #884, #942)" kind op kind) `Quick
+      (expect (src ty op))
   in
   List.concat_map (fun (kind, ty, kops) ->
     List.map (case expect_ok kind ty) kops) accepted
   @ List.concat_map (fun (kind, ty) ->
-    List.map (case (expect_type_error "comparison operators are not defined")
-                kind ty) ops) rejected
+    List.map (case (expect_type_error (Printf.sprintf "is not defined on"))
+                kind ty) (cmp @ arith)) rejected
   @ [
+    Alcotest.test_case "~ on a struct is a type error, not an ICE (issue #942)" `Quick
+      (expect_type_error "operator ~ is not defined on struct values"
+         "struct S { w: usize; }
+          fn f(a: S) -> S { return ~a; }");
     Alcotest.test_case "a struct compared with the literal 0 is a type error, not an ICE (issue #884)" `Quick
       (expect_type_error_at 2 33 "not defined on struct values"
          "struct Slot { word: usize; }
@@ -27960,7 +27969,7 @@ fn pick(s: Slot) -> usize { if (s == 0) { return 1; } return s.word; }");
   ]
 
 let named_groups_unisolated = [
-  "comparison-kinds", comparison_kind_tests;
+  "operator-kinds", operator_kind_tests;
   "readonly-literals", readonly_literal_tests;
   "private-default-construction", private_default_construction_tests;
   "cpu-authority-initialization", cpu_authority_initialization_tests;

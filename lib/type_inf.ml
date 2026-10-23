@@ -2660,22 +2660,22 @@ let is_raw_pointer_ty t =
   | TPtr _ | TAlignedPtr _ -> true
   | _ -> false
 
-(* GitHub issue #884: the comparison operators are defined only on scalar
-   values (integers, bool, enums, pointers and references). Code generation
-   lowers every comparison to one icmp, so an aggregate operand used to
-   reach LLVM verification as an internal error (struct, variant), or to
-   compare two stack addresses and fold to false (array). The match lists
-   every constructor without a wildcard, so a new type constructor must
-   decide here whether it is comparable. Returns the name of the kind that
-   has no comparison, or None. An enum is a TStruct by name but lowers to
+(* GitHub issues #884, #942: the comparison, arithmetic and bitwise
+   operators are defined only on scalar values (integers, bool, enums,
+   pointers and references; each operator's own rule narrows further).
+   Code generation lowers each of them to one LLVM instruction, so an
+   aggregate operand used to reach LLVM verification as an internal error.
+   The match lists every constructor without a wildcard, so a new type
+   constructor must decide here whether it is scalar. Returns the name of
+   the kind that is not, or None. An enum is a TStruct by name but lowers to
    its underlying integer, so [is_enum] keeps it comparable. *)
-let rec non_comparable_kind ~is_enum t =
+let rec non_scalar_kind ~is_enum t =
   match repr t with
   | TBool | TI8 | TI16 | TI32 | TI64 | TU8 | TU16 | TU32 | TU64
   | TU16Be | TU32Be | TIsize | TUsize
   | TPtr _ | TAlignedPtr _ | TRef _ | TRefMut _ | TFun _ | TVar _ -> None
   | TRefinedInt (_, _, t) | TMultiple (_, t) | TSingleton (t, _) | TIo t ->
-      non_comparable_kind ~is_enum t
+      non_scalar_kind ~is_enum t
   | TStruct name when is_enum name -> None
   | TStruct _ | TIndexedStruct _ -> Some "struct"
   | TVariant _ -> Some "variant"
@@ -2685,6 +2685,12 @@ let rec non_comparable_kind ~is_enum t =
   | TExists _ -> Some "existential package"
   | TView _ -> Some "view"
   | TVoid -> Some "void"
+
+let binop_symbol : Ast.binop -> string = function
+  | Add -> "+" | Sub -> "-" | Mul -> "*" | Div -> "/" | Mod -> "%"
+  | Lt -> "<" | Gt -> ">" | Le -> "<=" | Ge -> ">=" | Eq -> "==" | Ne -> "!="
+  | Or -> "||" | And -> "&&" | Bor -> "|" | Bxor -> "^" | Band -> "&"
+  | Shr -> ">>" | Shl -> "<<"
 
 let null_pointer_advice =
   "use a closed variant whose case carries &T, or return a sentinel object \
@@ -3305,6 +3311,24 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
          written the same way) -- real network code keeps values in wire
          order from receive through transmit, so this is deliberately not
          "reject everything". Anything else must `as u16` first. *)
+      (* GitHub issues #884, #942: every operator except && and || needs
+         scalar operands. An array operand has already decayed to its
+         element pointer here (GitHub issue #941). *)
+      (match op with
+       | And | Or -> ()
+       | _ ->
+           List.iter (fun t ->
+             let kind = match non_scalar_kind
+                                ~is_enum:(fun n -> StringMap.mem n eenv) t with
+               | Some _ as k -> k
+               | None -> None in
+             match kind with
+             | Some kind ->
+                 raise (TypeError (e.loc, Printf.sprintf
+                   "operator %s is not defined on %s values; operate on a \
+                    field, or call a function (GitHub issues #884, \
+                    #942)" (binop_symbol op) kind))
+             | None -> ()) [ t1; t2 ]);
       (let is_wire_be_ty t = match repr t with
          | TU16Be | TU32Be -> true
          | TRefinedInt (_, _, (TU16Be | TU32Be)) -> true
@@ -3488,14 +3512,6 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                      that safe code cannot write: %s" null_pointer_advice))
             | _ -> ());
            unify_at e.loc (canon_ty t1) (canon_ty t2);
-           (match non_comparable_kind
-                    ~is_enum:(fun n -> StringMap.mem n eenv) t1 with
-            | Some kind ->
-                raise (TypeError (e.loc, Printf.sprintf
-                  "comparison operators are not defined on %s values (type %s); \
-                   compare a field or call an equality function \
-                   (GitHub issue #884)" kind (to_string t1)))
-            | None -> ());
            TBool
        (* Range propagation: n % m where m is a positive constant -> {0..<m}.
           Soundness condition: propagate only when n is guaranteed non-negative.
@@ -3556,6 +3572,11 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       if contains_view_ty t1 then
         raise (TypeError (e.loc,
           "erased views cannot be operands of runtime operators"));
+      (match non_scalar_kind ~is_enum:(fun n -> StringMap.mem n eenv) t1 with
+       | Some kind ->
+           raise (TypeError (e.loc, Printf.sprintf
+             "operator ~ is not defined on %s values (GitHub issue #942)" kind))
+       | None -> ());
       canon_ty t1
   | Deref e1 ->
       let t1 = infer_expr senv eenv tyenv fenv e1 in

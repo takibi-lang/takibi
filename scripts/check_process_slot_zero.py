@@ -33,9 +33,10 @@ is meant no longer type-checks there; those calls left PROCESS_FIRST and
 PROCESS_SECOND. What remains here is what the types do not see: the
 per-process tables that key their indexed evidence by the slot WORD (the
 fd-context table's unified_* calls and scheduled_process_set_image_record),
-the bootstrap names of rule 1, and rule 2's slot-0 branch, which a
-ProcessSlot compared with 0 reaches only as an internal compiler error today
-(GitHub issue #884), not as a type error.
+the bootstrap names of rule 1, and rule 2's slot-0 branch on a slot WORD
+(usize). A ProcessSlot compared with 0 is a type error since GitHub issue
+#884, so rule 2 now matters only where a placement function still holds the
+slot as a word.
 """
 
 import pathlib
