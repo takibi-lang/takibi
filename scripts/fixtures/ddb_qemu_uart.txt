@@ -193,3 +193,8 @@ ddb: console tx=queued
 workload: peer tty read its 17-byte line on the secondary cpu, none lost, repeated or reordered
 
 ddb: event seq=38 cpu=0 id=0x0000000000000101 a=0x0000000000000400 b=0x0000000000000000 c=0x0000000000000000 d=0x0000000000000000
+ddb: interrupt-safe UART debugger
+ddb: world-stop complete mask=0x0000000000000002
+ddb: break seq=2 cpu=0 elr=0x000000004000c150 sp_el0=0x00000000bffffdc0
+ddb> continue
+ddb: continuing

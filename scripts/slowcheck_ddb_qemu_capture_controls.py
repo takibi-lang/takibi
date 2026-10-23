@@ -97,6 +97,14 @@ def main():
             run(text.replace("boundary=assembly-bridge", "boundary=user"), metadata, hold, "backtrace root")
             run(text.replace("ddb: stack cpu=1 status=idle", "missing idle"), metadata, hold, "boot idle root")
         run(text + "ddb: intr count cpu=0 intid=2 count=1\n", metadata, hold, "fixture SGI on CPU 0")
+        if source == "uart":
+            # GitHub issue #830: a hung-core BREAK whose stop stayed partial,
+            # or that entered on the masked core, is refused.
+            run(text.replace("ddb: world-stop complete mask=0x0000000000000002",
+                             "ddb: world-stop partial mask=0x0000000000000000; inspection refused"),
+                metadata, hold, "hung-core BREAK: the world stop did not reach")
+            run(text.replace("ddb: break seq=2 cpu=0 ", "ddb: break seq=2 cpu=1 "),
+                metadata, hold, "hung-core BREAK: entered on the masked cpu")
         # GitHub issue #830: the stop mask follows the core that entered, so
         # a capture whose BREAK line names another core refuses the mask.
         run(re.sub(r"^(ddb: break seq=[0-9]+ cpu=)[0-9]+ ", r"\g<1>2 ", text, flags=re.MULTILINE),

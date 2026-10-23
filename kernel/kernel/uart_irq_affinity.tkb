@@ -101,3 +101,21 @@ fn uart_irq_evidence_report() !{logs, unsafe} {
     }
     kernel_boot_log("\n");
 }
+
+// GitHub issue #830 (D2, maintainer 2026-10-23): the DDB lane's hung-core
+// scenario. A debugger writes 1 + a core number here; that core, on its next
+// interrupt, spins with interrupts masked for UART_IRQ_HANG_SECONDS. A BREAK
+// sent meanwhile must still enter DDB on another core, and the lane checks
+// what the world stop reaches. Zero (the default) costs one load per
+// interrupt. Only the lane's GDB writes it; the kernel only reads it, and
+// clears it when the spin ends.
+let mut uart_irq_hang_request: AtomicWord;
+const UART_IRQ_HANG_SECONDS: i64 = 8;
+
+fn uart_irq_hang_poll() !{interrupt, unsafe} {
+    let requested: usize = atomic_word_load(&uart_irq_hang_request);
+    if (requested == 0 || requested != cpu_id() + 1) { return; }
+    let until: i64 = read_cntpct() + read_cntfrq() * UART_IRQ_HANG_SECONDS;
+    while (read_cntpct() < until) { }
+    atomic_word_store(&uart_irq_hang_request, 0);
+}

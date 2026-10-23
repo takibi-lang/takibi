@@ -194,6 +194,31 @@ def root_evidence(text):
     return "".join("\n  " + line for line in seen)
 
 
+# The core scripts/run_kernel_ddb_driver.py makes spin with interrupts masked
+# before the second BREAK.
+HUNG_CORE = 1
+
+
+def hung_core_problems(text):
+    """The hung-core BREAK (GitHub issue #830): the second DDB entry, if the
+    world stop completed, names its entering core; a partial stop names
+    only the mask it reached."""
+    stops = re.findall(r"^ddb: world-stop (complete|partial) mask=0x([0-9a-f]+)",
+                       text, re.MULTILINE)
+    if len(stops) < 2:
+        return ["hung-core BREAK: no second DDB entry while a core spun masked"]
+    kind, mask = stops[1]
+    if kind != "complete":
+        return [f"hung-core BREAK: the world stop did not reach the masked "
+                f"cpu {HUNG_CORE} (partial mask=0x{mask}; inspection refused)"]
+    breaks = re.findall(r"^ddb: break seq=[0-9]+ cpu=([0-9]+) ", text, re.MULTILINE)
+    if len(breaks) < 2 or int(breaks[-1]) == HUNG_CORE:
+        return [f"hung-core BREAK: entered on the masked cpu {HUNG_CORE} or not at all"]
+    if int(mask, 16) & (1 << HUNG_CORE) == 0:
+        return [f"hung-core BREAK: the complete stop did not include cpu {HUNG_CORE}"]
+    return []
+
+
 def capture_problems(text, metadata, hold_text=""):
     """Return all failed independent requirements; never contact a guest."""
     text = text.replace("\r", "")
@@ -260,6 +285,10 @@ def capture_problems(text, metadata, hold_text=""):
             if not has(expression):
                 problems.append(name + ": missing evidence" +
                                 (evidence if name == "late UART backtrace" else ""))
+        # GitHub issue #830 (D2, maintainer 2026-10-23): the second BREAK
+        # arrives while HUNG_CORE spins with interrupts masked. Another core
+        # must enter DDB, and the world stop must reach the hung core too.
+        problems.extend(hung_core_problems(text))
         migrated = text.find("workload: busy pair migrated across both cpus with stack handoff intact\n")
         stacks = text.find(f"ddb: stacks cpus={online_cpus(metadata)} processes=")
         if not 0 <= migrated < stacks:

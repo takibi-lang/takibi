@@ -336,6 +336,9 @@ fn rpi5_irq_dispatch_inner(frame: sink FrameRef[process], lower_el: bool)
         if (debug_break) { kernel_ddb_enter(frame_ref_address(frame), 1, id as usize); }
         return frame_any(frame);
     }
+    // GitHub issue #830: the DDB lane's hung-core scenario (a no-op unless
+    // a debugger armed it for this core).
+    uart_irq_hang_poll();
     // core-role: a secondary takes only its own timer tick here, which runs
     // the shared scheduling policy (GitHub issues #447 and #775; see "Core
     // roles" in kernel/CONCURRENCY.md); core 0's tick below also runs the

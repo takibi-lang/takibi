@@ -211,6 +211,48 @@ def drive(args, started, deadline):
             observer.finish(time.monotonic())
 
 
+# GitHub issue #830 (D2, maintainer 2026-10-23): after the first DDB session
+# has continued, the UART lane makes one core spin with interrupts masked
+# (kernel/kernel/uart_irq_affinity.tkb, uart_irq_hang_poll) and sends a second
+# BREAK. ddb_qemu_checks.py requires another core to enter DDB and the world
+# stop to reach the hung core. This core is the stopped peer of no other
+# requirement once the first session is over.
+HUNG_CORE = 1
+
+
+def send_break(args, deadline):
+    """One QEMU serial BREAK through QMP."""
+    with connect(args.qmp_port, deadline) as qmp:
+        # The connect timeout is 0.5s; a monitor that has just served the
+        # first BREAK's client may take longer to greet the second.
+        qmp.settimeout(10)
+        qmp_file = qmp.makefile("rwb", buffering=0)
+        greeting_line = qmp_file.readline()
+        if not greeting_line or b"QMP" not in greeting_line:
+            raise SystemExit("QMP greeting did not appear for the hung-core BREAK")
+        qmp_file.write(b'{"execute":"qmp_capabilities"}\n')
+        if "return" not in qmp_reply(qmp_file):
+            raise SystemExit("QMP capability negotiation failed")
+        qmp_file.write(b'{"execute":"chardev-send-break",'
+                       b'"arguments":{"id":"debug_uart"}}\n')
+        if "return" not in qmp_reply(qmp_file):
+            raise SystemExit("QMP could not send the hung-core serial BREAK")
+
+
+def arm_hung_core(args):
+    """Ask HUNG_CORE to spin with interrupts masked on its next interrupt."""
+    result = subprocess.run([
+        "gdb-multiarch", "-q", "-batch", args.elf,
+        "-ex", f"target remote 127.0.0.1:{args.gdb_port}",
+        "-ex", f"set {{unsigned long}}&uart_irq_hang_request = {HUNG_CORE + 1}",
+        "-ex", "detach",
+    ], capture_output=True, text=True, timeout=60)
+    with open(args.log + ".hang-gdb.log", "w") as hang_log:
+        hang_log.write(result.stdout + result.stderr)
+    if result.returncode != 0:
+        raise SystemExit("could not arm the hung-core scenario; see .hang-gdb.log")
+
+
 def capture_loop(args, serial, deadline, ceiling, ready_file, release_file, network_ready_file,
                  foreground_listener_file, init_listener_file, awaited, commands, timing, observers):
     received = bytearray()
@@ -229,6 +271,8 @@ def capture_loop(args, serial, deadline, ceiling, ready_file, release_file, netw
     payload_sent = False
     post_timing = None
     post_prompt_base = 0
+    hang_offset = None
+    hang_continue_sent = False
 
     with serial, open(args.log, "wb") as log:
         while time.monotonic() < deadline:
@@ -477,7 +521,23 @@ def capture_loop(args, serial, deadline, ceiling, ready_file, release_file, netw
                     b"ddb: continuing\n" in received and
                     b"init: ash bootstrap\n" in received and
                     peer_delivery_ready and peer_tty_done):
-                return 0
+                if args.break_source != "uart":
+                    return 0
+                if hang_offset is None:
+                    arm_hung_core(args)
+                    # The armed core spins at its next interrupt: a tick.
+                    time.sleep(0.5)
+                    hang_offset = len(received)
+                    send_break(args, deadline)
+                    continue
+                after = bytes(received[hang_offset:])
+                if b"inspection refused\n" in after:
+                    return 0
+                if b"ddb> " in after and not hang_continue_sent:
+                    serial.sendall(b"continue\n")
+                    hang_continue_sent = True
+                if hang_continue_sent and b"ddb: continuing\n" in after:
+                    return 0
 
     if stall_break_at is not None:
         answered = max(0, min(received.count(b"ddb> ") - 1,
