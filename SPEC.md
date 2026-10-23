@@ -1558,9 +1558,10 @@ it is stored like an integer or a plain struct:
 - as the whole payload of another variant's case;
 - as the whole type of a global. The global must be `let mut` with no
   initializer: zeroed storage selects case zero with a zeroed payload, and a
-  variant initializer is rejected. A refined payload whose range excludes
-  zero is not re-checked for that zeroed state, the same rule a zeroed plain
-  struct follows. A shared global still needs the ordinary synchronization
+  variant initializer is rejected. Like every global without an
+  initializer, its type must admit the zeroed value: a refined integer
+  whose range excludes zero, or a reference, reached through a struct
+  field, an array element or case zero's payload is rejected. A shared global still needs the ordinary synchronization
   rules; a tag and payload read without them can tear like any multi-word
   struct.
 

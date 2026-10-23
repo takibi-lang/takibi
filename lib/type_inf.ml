@@ -2347,6 +2347,42 @@ let check_private_default_construction ~zeroed (senv : senv) loc ty =
   in
   walk [] ty
 
+(* GitHub issue #906: a global without an initializer is zero-filled, so
+   its type must admit the all-zero bit pattern. Walks struct fields,
+   array elements and variant case zero's payload; a refined integer
+   whose range excludes zero has no zeroed value. *)
+let check_zero_admissible (senv : senv) loc name ty =
+  let reject what =
+    raise (TypeError (loc, Printf.sprintf
+      "global '%s' has no initializer, so it starts zeroed, but %s does not \
+       admit zero; give it an initializer" name what)) in
+  let rec walk seen ty =
+    let ty = repr ty in
+    if not (List.mem ty seen) then begin
+      let seen = ty :: seen in
+      match ty with
+      | TRefinedInt (lo, hi, _) ->
+          if not (lo <= 0 && 0 < hi) then
+            reject (Printf.sprintf "its refined range {%d..<%d}" lo hi)
+      | TRef _ | TRefMut _ -> reject "a reference type"
+      | TIndexedStruct (sname, _) | TStruct sname ->
+          (match StringMap.find_opt sname senv with
+           | Some (fields, _, _) ->
+               List.iter (fun (_, fty) -> walk seen (of_ast fty)) fields
+           | None -> ())
+      | TVariant (vname, _, targs) ->
+          (match Hashtbl.find_opt variant_defs vname with
+           | Some ((_, payload) :: _) ->
+               with_variant_type_args vname targs (fun () ->
+                 Option.iter (fun pty -> walk seen (of_ast pty)) payload)
+           | _ -> ())
+      | TArray (ety, n) -> if n > 0 then walk seen ety
+      | TIo ety | TSingleton (ety, _) | TExists (_, _, _, ety) -> walk seen ety
+      | _ -> ()
+    end
+  in
+  walk [] ty
+
 let check_private_type_construction (loc : Ast.loc) (target : Ast.type_expr) =
   let rec walk = function
     | Ast.TypeNamed n ->
@@ -10622,6 +10658,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                raise (TypeError (Lexing.dummy_pos,
                  Printf.sprintf "immutable global '%s' must have an initializer; use 'let mut' for uninitialized globals" name));
              check_private_default_construction ~zeroed:true senv loc ty;
+             check_zero_admissible senv loc name ty;
              genv
          | Some { desc = Ast.StructLit exprs; loc } ->
              (match repr ty with

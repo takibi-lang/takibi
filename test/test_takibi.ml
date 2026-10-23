@@ -14958,6 +14958,35 @@ let codegen_tests = [
          "variant L { Low; High(u8); }
           let g: L = L::High(3);");
 
+  (* GitHub issue #906: a global without an initializer is zero-filled,
+     so its type must admit zero, through struct fields, array elements
+     and variant case zero's payload. *)
+  Alcotest.test_case
+    "a zeroed global whose type excludes zero is rejected (issue #906)" `Quick
+    (fun () ->
+       let rejects label src =
+         match infer src with
+         | _ -> Alcotest.failf "%s: expected a rejection" label
+         | exception Types.TypeError (_, msg) ->
+             if not (contains_substring msg "does not admit zero") then
+               Alcotest.failf "%s: unexpected message: %s" label msg
+       in
+       let accepts label src =
+         match infer src with
+         | _ -> ()
+         | exception e ->
+             Alcotest.failf "%s: expected acceptance, got %s" label
+               (Printexc.to_string e)
+       in
+       rejects "refined scalar" "let mut g: {1..<10 as u8};";
+       rejects "struct field" "struct S { a: u8; b: {1..<10 as u8}; }\nlet mut g: S;";
+       rejects "array element" "let mut g: [{1..<10 as u8}; 4];";
+       rejects "case-zero payload" "variant V { A({1..<10 as u8}); B; }\nlet mut g: V;";
+       accepts "range containing zero" "let mut g: {0..<10 as u8};";
+       accepts "non-zero payload outside case zero"
+         "variant V { A; B({1..<10 as u8}); }\nlet mut g: V;";
+       accepts "initialized refined global" "let mut g: {1..<10 as u8} = 3;");
+
   (* GitHub issue #369: `contains_stable_owner(T)` exposes to a
      static_assert what the checker already knew -- whether T is, or
      reaches, stable owner storage (a private field whose type is a
