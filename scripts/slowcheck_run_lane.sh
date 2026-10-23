@@ -127,6 +127,51 @@ grep -q "did not finish" <<<"$summary" \
     && fail "the origin stamp was reported as an unfinished lane: $summary"
 claim
 
+# --- vCPU lease waits are recorded and summarized (GitHub issue #914) -----
+# A real acquire against a private registry: a holder takes the whole budget
+# of 2 for about a second, and a lane named `racer` must wait for it. The
+# wait must reach the lane-timing directory and the summary, per lane and in
+# total; without the record, the minute a race-window lane spends here is
+# indistinguishable from a slow boot.
+timing="$work/lease"
+registry="$work/registry"
+mkdir -p "$timing"
+TAKIBI_SESSION_REGISTRY="$registry" TAKIBI_QEMU_VCPU_BUDGET=2 bash -c \
+    '. "$1/scripts/vcpu_lease.sh"; resource_lease_vcpu_acquire 2 holder || exit 1; touch "$2"; sleep 1.2' \
+    _ "$REPO_ROOT" "$work/held" &
+holder=$!
+for _ in $(seq 100); do [ -f "$work/held" ] && break; sleep 0.05; done
+[ -f "$work/held" ] && claim || fail "the holder never took its vCPUs"
+TAKIBI_SESSION_REGISTRY="$registry" TAKIBI_QEMU_VCPU_BUDGET=2 \
+TAKIBI_LANE_TIMING_DIR="$timing" TAKIBI_AWAIT_TIMING_LANE=racer bash -c \
+    '. "$1/scripts/vcpu_lease.sh"; resource_lease_vcpu_acquire 2 racer-target' _ "$REPO_ROOT" 2>/dev/null \
+    && claim || fail "the waiting acquire failed"
+wait "$holder"
+python3 - "$timing/vcpu-lease.waits" <<'PY' && claim || fail "the lease wait was not recorded with its duration"
+import json, sys
+wait = json.loads(open(sys.argv[1]).read().strip())
+assert wait["lane"] == "racer" and wait["vcpus"] == 2, wait
+assert wait["granted"] - wait["wait_start"] >= 0.5, wait
+PY
+TAKIBI_LANE_TIMING_DIR="$timing" bash "$REPO_ROOT/scripts/lane_timing.sh" record racer 1000.000 0
+cat >>"$timing/vcpu-lease.waits" <<'JSON'
+{"lane":"other","vcpus":4,"wait_start":10.0,"granted":13.0}
+{"lane":"other","vcpus":4,"wait_start":20.0,"granted":22.0}
+{"lane":"stuck","vcpus":4,"wait_start":30.0,"granted":null}
+JSON
+summary="$(python3 "$SUMMARIZE" "$timing")" && claim || fail "the lease summary failed"
+grep -q "^  other  *5.0s  over 2 lease(s)" <<<"$summary" \
+    && claim || fail "two waits of one lane were not summed to 5.0s: $summary"
+grep -q "^  racer  *[0-9.]*s  over 1 lease(s)" <<<"$summary" \
+    && claim || fail "the measured wait was not reported per lane: $summary"
+grep -q "stuck.*timed out waiting" <<<"$summary" \
+    && claim || fail "a wait that never got its slots was dropped: $summary"
+grep -q "^lease wait: *[0-9.]*s  summed over 2 lane(s), 1 timed out" <<<"$summary" \
+    && claim || fail "the total lease wait is missing: $summary"
+grep -q "Traceback\|did not finish" <<<"$summary" \
+    && fail "the lease log was read as a lane: $summary"
+claim
+
 # --- concurrent checks overlap, keep their output whole, report failures ---
 CONCURRENT="$REPO_ROOT/scripts/run_concurrent_checks.sh"
 timing="$work/concurrent"
@@ -151,4 +196,5 @@ echo "PASS run-lane controls: $cases claims -- a slow passing lane is visible, a
 "keeps its status and record, an unmeasured lane is unchanged, a lane that "\
 "never finished is reported, an empty run is refused, and longest and tail "\
 "name different lanes, pre-lane time is reported from the origin stamp, "\
-"and concurrent checks overlap and report whole"
+"concurrent checks overlap and report whole, and vCPU lease waits are "\
+"recorded and summed per lane and in total"

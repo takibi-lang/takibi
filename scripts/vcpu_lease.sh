@@ -101,10 +101,28 @@ resource_lease_vcpu_holders() {
     shopt -u nullglob
 }
 
+# GitHub issue #914: the race-window lanes spent their extra allcheck time
+# waiting here before boot, and nothing recorded how long. When the run has a
+# lane-timing directory, every acquire that has to take slots appends one
+# JSON line -- lane, vCPUs, when the wait began and when the slots were
+# granted (null when it timed out) -- to vcpu-lease.waits there. The suffix is
+# not .jsonl on purpose: scripts/summarize_lane_timing.py reads every .jsonl
+# as a finished lane, and reports these separately.
+resource_lease_vcpu_record_wait() {
+    local want="$1" target="$2" began="$3" granted="$4" lane
+    [ -n "${TAKIBI_LANE_TIMING_DIR:-}" ] || return 0
+    mkdir -p "$TAKIBI_LANE_TIMING_DIR" 2>/dev/null || return 0
+    lane="${TAKIBI_AWAIT_TIMING_LANE:-$target}"
+    lane="$(printf '%s' "$lane" | tr -d '"\\')"
+    printf '{"lane":"%s","vcpus":%s,"wait_start":%s,"granted":%s}\n' \
+        "$lane" "$want" "$began" "$granted" \
+        >>"$TAKIBI_LANE_TIMING_DIR/vcpu-lease.waits" 2>/dev/null || true
+}
+
 # resource_lease_vcpu_acquire N [TARGET] -- hold N slots in this shell.
 resource_lease_vcpu_acquire() {
     local want="$1" target="${2:-$0}"
-    local have budget dir alloc fd need i deadline announced=0
+    local have budget dir alloc fd need i deadline announced=0 began
 
     case "$want" in ''|*[!0-9]*|0) echo "error: vCPU lease needs a positive count, got '$want'" >&2; return 1;; esac
     have="$(resource_lease_vcpu_held)"
@@ -115,6 +133,7 @@ resource_lease_vcpu_acquire() {
         return 1
     fi
 
+    began="$(date +%s.%3N)"
     dir="$(resource_lease_vcpu_dir)"
     mkdir -p "$dir"
     exec {alloc}>"$dir/alloc.lock"
@@ -124,6 +143,7 @@ resource_lease_vcpu_acquire() {
         if ! flock -w "$RESOURCE_LEASE_TIMEOUT_SECONDS" "$alloc"; then
             echo "FAIL resource-lease: the vCPU allocator was still held after ${RESOURCE_LEASE_TIMEOUT_SECONDS}s" >&2
             exec {alloc}>&-
+            resource_lease_vcpu_record_wait "$want" "$target" "$began" null
             return 1
         fi
     fi
@@ -154,11 +174,13 @@ resource_lease_vcpu_acquire() {
             echo "FAIL resource-lease: $want vCPUs were not free after" \
                  "${RESOURCE_LEASE_TIMEOUT_SECONDS}s: $(resource_lease_vcpu_holders)" >&2
             exec {alloc}>&-
+            resource_lease_vcpu_record_wait "$want" "$target" "$began" null
             return 1
         fi
         sleep 0.5
     done
     exec {alloc}>&-
+    resource_lease_vcpu_record_wait "$want" "$target" "$began" "$(date +%s.%3N)"
     [ "$announced" -eq 0 ] || echo "[lease] got $want vCPUs" >&2
 }
 

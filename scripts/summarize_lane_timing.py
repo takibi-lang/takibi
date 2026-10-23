@@ -22,6 +22,12 @@ from that stamp to the first lane's start: image builds and anything else a
 run does before its first receipt, which was otherwise invisible (GitHub
 issue #820: 29 minutes of a CI part read off log timestamps by hand).
 
+VCPU-LEASE WAIT is how long each lane waited in scripts/vcpu_lease.sh for
+its guest's vCPUs before it could boot, read from `vcpu-lease.waits` (GitHub
+issue #914: the race-window lanes' extra time was spent there and nothing
+recorded it). A lane that leased more than once is summed; a wait that never
+got its slots is reported as timed out.
+
 A lane with a start stamp and no record did not finish -- it is reported as
 incomplete rather than dropped, because a lane that died is the one a reader
 is most likely to be looking for.
@@ -79,7 +85,53 @@ def load_origin(directory: pathlib.Path):
         return None
 
 
-def summarize(records, incomplete, origin=None) -> int:
+def load_lease_waits(directory: pathlib.Path):
+    """vCPU lease waits from vcpu-lease.waits, as dicts; [] when none."""
+    path = directory / "vcpu-lease.waits"
+    if not path.is_file():
+        return []
+    waits = []
+    for number, line in enumerate(path.read_text().splitlines(), 1):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            wait = json.loads(line)
+            float(wait["wait_start"])
+            wait["lane"]
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+            print(f"warning: {path.name}:{number} is not a lease wait, ignored",
+                  file=sys.stderr)
+            continue
+        waits.append(wait)
+    return waits
+
+
+def summarize_lease_waits(waits) -> None:
+    if not waits:
+        return
+    per_lane: dict[str, list[float]] = {}
+    timed_out: list[str] = []
+    for wait in waits:
+        lane = str(wait["lane"])
+        if wait.get("granted") is None:
+            timed_out.append(lane)
+            continue
+        per_lane.setdefault(lane, []).append(
+            float(wait["granted"]) - float(wait["wait_start"]))
+    ordered = sorted(per_lane.items(), key=lambda kv: sum(kv[1]), reverse=True)
+    width = max([len(lane) for lane, _ in ordered] + [len(l) for l in timed_out])
+    print("vCPU lease waits, longest first:")
+    for lane, spans in ordered:
+        print(f"  {lane:<{width}}  {sum(spans):7.1f}s  over {len(spans)} lease(s)")
+    for lane in timed_out:
+        print(f"  {lane:<{width}}  {'--':>7}   timed out waiting")
+    total = sum(sum(spans) for _, spans in ordered)
+    print(f"lease wait: {total:7.1f}s  summed over {len(ordered)} lane(s)"
+          + (f", {len(timed_out)} timed out" if timed_out else ""))
+
+
+def summarize(records, incomplete, origin=None, waits=()) -> int:
     ordered = sorted(records, key=lambda r: r["elapsed"], reverse=True)
     width = max(len(r["lane"]) for r in ordered)
 
@@ -115,6 +167,7 @@ def summarize(records, incomplete, origin=None) -> int:
     if incomplete:
         print(f"incomplete: {len(incomplete)} lane(s) started and left no "
               "record: " + ", ".join(incomplete))
+    summarize_lease_waits(list(waits))
     return 0
 
 
@@ -132,7 +185,8 @@ def main() -> int:
                  + ", ".join(incomplete) + ")" if incomplete else ""),
               file=sys.stderr)
         return 1
-    return summarize(records, incomplete, load_origin(directory))
+    return summarize(records, incomplete, load_origin(directory),
+                     load_lease_waits(directory))
 
 
 if __name__ == "__main__":
