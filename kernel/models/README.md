@@ -79,6 +79,8 @@ touches belongs to no existing one.
 Two cores; a parent, its child, and one other runnable process. Since #726
 the parent can also be sent a signal it catches; `SIGRECHECK` is the
 publication's re-check of a pending one, as `RECHECK` is of the zombie.
+Since #628 a handler also runs at the return to EL0 from a timer interrupt
+(`IRQDELIVER`), except at the wait4 SVC a wake rewound it to (`IRQSKIPSVC`).
 
 | Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
 | --- | --- | --- | --- | --- |
@@ -87,6 +89,7 @@ publication's re-check of a pending one, as `RECHECK` is of the zombie.
 | `ChildExit` | `kernel_process_child_exit` | the child becomes a zombie and wakes the parent only if the parent is Blocked in ChildExit | zombie draining -- irrelevant to `NoLostWakeup`: it reaps the exiting child's own children, never this parent or this child; SIGCHLD -- irrelevant to `NoLostWakeup`: it makes no process Blocked or Exited, and only such a step can break the property; the direct parent start -- modelled elsewhere: `StackOwnership.ChildExitStart` | `406e635f25e2` |
 | `Wait4Resume` | `kernel_syscall_wait4_deliver` | the woken parent reaps | the user-memory status write -- irrelevant to `NoLostWakeup`: it runs after the reap, when the child is no longer Exited | `58c8f2d2ce42` |
 | `SendSignal` | `kernel_process_signal_deliver_to` | a caught, unmasked signal becomes pending, and a parent Blocked in wait4 is woken in the same critical section to rerun the call | which signal, the sender, siginfo and SA_RESTART -- irrelevant to `NoSleepWithSignal`: only whether a caught signal is pending, and whether the parent is Blocked, decide it; terminating signals -- modelled elsewhere: `TickWake.SignalWake` | `c2b1d22acbc8` |
+| `TickDeliver` | `kernel_signal_return_deliver`, `signal_resumes_at_svc` | a return to EL0 takes a pending caught signal and enters its handler, unless the parent resumes at its wait4 SVC | the frame write and its failure, which leaves the signal pending -- irrelevant to `SignalWakeEndsWait`: a signal left pending is still met by the rerun; returns through `el0_context_resume` from a syscall -- irrelevant to `SignalWakeEndsWait`: they resume after the SVC, at "done", or at it, where the rule is the same | `e0507b58c6b2` |
 | `Preempt` | `kernel_process_timer_schedule` | the timer takes a process off its core, never inside the parent's wait4 syscall (`KERNEL_PREEMPTIBLE` is 0) | the test-only spread rendezvous -- irrelevant to `NoLostWakeup`: it changes affinity before scheduling and observes an existing leave, without changing a wait or wake | `aeae68758f24` |
 | `Dispatch` | `kernel_process_secondary_start`, `kernel_process_schedule` | an idle core takes a Ready process | affinity -- irrelevant to `NoLostWakeup`: it only forbids some dispatches, and the model already allows each one it forbids; the debugger-armed starvation injection of the busy-pair control -- irrelevant to `NoLostWakeup`: like affinity it only forbids some dispatches; the boot gate that lets only the boot core take the first process after main() hands off (#831) -- irrelevant to `NoLostWakeup`: like affinity it only forbids some dispatches; stack ownership -- modelled elsewhere: `StackOwnership.Reserve` | `aed2a904d5c4` |
 
@@ -100,8 +103,14 @@ Properties:
   in four steps: decide, signal sent, block. `Wait4Decide` stands for the
   decision and its Block return (`syscall_block_interrupt`), which answers
   EINTR; the gap between those two is the one `Wait4Block` re-checks.
+- `SignalWakeEndsWait` (safety, #628): a wait4 a signal woke is never asleep
+  again. The `svcunfixed` variant, which takes the signal at the rewound SVC,
+  violates it: the handler runs and the rerun sleeps.
 - `Wait4Finishes` (liveness, TLC only): wait4 eventually completes, under the
   fairness the kernel's scheduler rotation provides.
+- `SignalRuns` (liveness, TLC only, #628): a pending caught signal is
+  eventually handled, by a parent that makes no syscall too. The
+  `irqunfixed` variant, with no delivery at the interrupt return, loses it.
 - `TypeOK`, `RunningMatchesCores`: bookkeeping sanity.
 
 ## StackOwnership.tla -- kernel stacks across switch, exit and idle
@@ -165,7 +174,7 @@ model, not of the kernel.
 | --- | --- | --- | --- | --- |
 | `CloneBegin` | `kernel_process_clone_begin` | the child becomes the core's current process while still Constructing; the core stands on the parent's stack | fork's fd, VM and inherited session copies -- irrelevant to `StackSafety`: they touch no kernel stack and no core's current process | `cb9a605a170c` |
 | `CloneFinish` | `kernel_process_clone_context_install` | the child is Running and the parent Ready, in a later hold | nothing | `03065b3d7144` |
-| `SwitchComplete` | `kernel_process_stack_switch_complete` | the physical handoff at exception return: release the stack stood on, own the current process's | the deferred reap it runs after the release -- modelled elsewhere: `Wait4Reap` | `eb05eef0da72` |
+| `SwitchComplete` | `kernel_process_stack_switch_complete` | the physical handoff at exception return: release the stack stood on, own the current process's | the deferred reap it runs after the release -- modelled elsewhere: `Wait4Reap`; the signal handler it enters last -- modelled elsewhere: `Wait4Block.TickDeliver` | `76ee5adb131b` |
 | `Reserve` | `kernel_process_schedule`, `kernel_process_secondary_start`, `kernel_process_block_current` | a core takes a Ready process whose stack no core owns, and a parent with a continuation only once the child's stack is free too, and marks it Running before it is current | affinity -- irrelevant to `StartsOnFreeStack`: it only forbids some reservations, and the model already allows each one it forbids; the debugger-armed starvation injection of the busy-pair control -- irrelevant to `StartsOnFreeStack`: like affinity it only forbids some reservations; the boot gate before the first start after main() hands off (#831) -- irrelevant to `StartsOnFreeStack`: like affinity it only forbids some reservations; the unlocked ASID preparation before the commit -- irrelevant to `StackSafety`: it moves no stack, and the reserved process is Running, so no other core can take it | `5b80149af3e6` |
 | `Commit` | `kernel_process_secondary_start_reserved`, `kernel_process_exit_reserved` | the reserved successor becomes current on a core with no running current process | Ready wait4 marker consumption -- irrelevant to `StackSafety`: it changes no physical owner, and the reservation already checked the child stack before clearing the marker | `00200b285211` |
 | `SwitchAway` | `kernel_process_schedule_reserved`, `kernel_process_block_reserved` | the reserved successor replaces a running current process, which is preempted, naps, or blocks in wait4; the core still stands on the outgoing stack, or on its IRQ stack inside an interrupt from EL0 | which child a wait4 waits for, and whether it has exited -- modelled elsewhere: `Wait4Block.Wait4Block` | `990aeb07ae79` |

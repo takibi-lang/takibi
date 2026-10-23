@@ -21,6 +21,16 @@
 (* publication must re-check it too: SIGRECHECK = FALSE is the kernel     *)
 (* without that re-check, and TLC must find NoSleepWithSignal violated.   *)
 (*                                                                         *)
+(* GitHub issue #628 adds the other place a handler runs: the return to   *)
+(* EL0 from a timer interrupt (TickDeliver). IRQDELIVER = FALSE is the    *)
+(* kernel before it: a parent that has finished wait4 and computes without *)
+(* a syscall never runs its handler, and TLC must find SignalRuns          *)
+(* violated. That return must leave a signal pending when the parent is   *)
+(* at its wait4 SVC -- the rerun a signal's wake rewound it to -- so that  *)
+(* the rerun meets the signal and ends with EINTR. IRQSKIPSVC = FALSE      *)
+(* takes it there, and TLC must find SignalWakeEndsWait violated: the      *)
+(* handler runs, and the rerun goes back to sleep.                         *)
+(*                                                                         *)
 (* Each action is ONE critical section under the process-run lock in the  *)
 (* kernel -- an action is atomic here exactly because it is atomic there.  *)
 (* kernel/models/README.md maps every action to the function it abstracts. *)
@@ -33,7 +43,11 @@ CONSTANT
     \* @type: Bool;
     RECHECK,
     \* @type: Bool;
-    SIGRECHECK
+    SIGRECHECK,
+    \* @type: Bool;
+    IRQDELIVER,
+    \* @type: Bool;
+    IRQSKIPSVC
 
 \* Two cores, and three processes: the waiting parent, its child, and one
 \* other runnable process. The other one matters: wait4 only takes the
@@ -50,9 +64,11 @@ VARIABLES
     \* @type: Str;
     wait,       \* the parent's wait4: "call" | "decided" | "asleep" | "woken" | "done"
     \* @type: Bool;
-    sig         \* a signal the parent catches, and does not mask, is pending
+    sig,        \* a signal the parent catches, and does not mask, is pending
+    \* @type: Bool;
+    woke        \* a signal woke the parent's wait4 to rerun it (#726)
 
-vars == <<state, current, wait, sig>>
+vars == <<state, current, wait, sig, woke>>
 
 ----------------------------------------------------------------------------
 (* Helpers *)
@@ -75,6 +91,7 @@ Init ==
                     IF c = "c0" THEN "parent" ELSE "child"]
     /\ wait = "call"
     /\ sig = FALSE
+    /\ woke = FALSE
 
 ----------------------------------------------------------------------------
 (* Actions *)
@@ -98,7 +115,7 @@ Wait4Decide ==
               /\ UNCHANGED state
          ELSE /\ wait' = "decided"
               /\ UNCHANGED <<state, sig>>
-    /\ UNCHANGED current
+    /\ UNCHANGED <<current, woke>>
 
 \* Publishing Blocked, and switching this core to a Ready successor --
 \* any Ready process, as kernel_process_next_ready picks one -- or, with
@@ -122,7 +139,7 @@ Wait4Block ==
              ELSE /\ state' = [state EXCEPT !["parent"] = "Blocked"]
                   /\ current' = [current EXCEPT ![c] = None]
                   /\ wait' = "asleep"
-        /\ UNCHANGED sig
+        /\ UNCHANGED <<sig, woke>>
 
 \* The child exits. It wakes the parent only if the parent is already
 \* Blocked in wait4; the core it ran on goes idle.
@@ -135,21 +152,38 @@ ChildExit ==
                               !["parent"] = IF wakes THEN "Ready" ELSE @]
                /\ wait' = IF wakes THEN "woken" ELSE wait
         /\ current' = [current EXCEPT ![c] = None]
-        /\ UNCHANGED sig
+        /\ UNCHANGED <<sig, woke>>
 
 \* Another process sends the parent a signal it catches (#726). The raise
 \* and the wake are one critical section (kernel_process_signal_deliver_to):
 \* a parent Blocked in wait4 is woken to rerun the call; one that is not
-\* Blocked is left to meet the signal at its own Block return.
+\* Blocked is left to meet the signal at its own Block return, or, once
+\* wait4 is done, at a return to EL0 (#628).
 SendSignal ==
     /\ ~sig
-    /\ wait \in {"call", "decided", "asleep"}
+    /\ wait \in {"call", "decided", "asleep", "done"}
     /\ sig' = TRUE
     /\ IF state["parent"] = "Blocked" /\ wait = "asleep"
          THEN /\ state' = [state EXCEPT !["parent"] = "Ready"]
               /\ wait' = "call"
-         ELSE UNCHANGED <<state, wait>>
+              /\ woke' = TRUE
+         ELSE UNCHANGED <<state, wait, woke>>
     /\ UNCHANGED current
+
+\* #628: the return to EL0 from a timer interrupt runs the handler of a
+\* pending signal (kernel_signal_return_deliver, from the stack-switch
+\* hook). "call" is the parent at its wait4 SVC -- before the first call,
+\* or rewound there by a signal's wake -- and "done" is user code after
+\* it; in between it is in the kernel or asleep, where no interrupt
+\* returns to EL0. With IRQSKIPSVC, a parent at its SVC keeps the signal
+\* for the syscall it is about to make (signal_resumes_at_svc).
+TickDeliver ==
+    /\ IRQDELIVER
+    /\ sig
+    /\ \E c \in Cores : RunsOn("parent", c)
+    /\ wait \in (IF IRQSKIPSVC THEN {"done"} ELSE {"call", "done"})
+    /\ sig' = FALSE
+    /\ UNCHANGED <<state, current, wait, woke>>
 
 \* A woken parent runs again and finishes wait4 by reaping the zombie.
 Wait4Resume ==
@@ -158,7 +192,7 @@ Wait4Resume ==
     /\ state' = [state EXCEPT !["child"] = "Reaped"]
     /\ wait' = "done"
     /\ sig' = FALSE
-    /\ UNCHANGED current
+    /\ UNCHANGED <<current, woke>>
 
 \* The timer takes a Running process off its core.
 Preempt(c) ==
@@ -166,7 +200,7 @@ Preempt(c) ==
     /\ Preemptible(current[c])
     /\ state' = [state EXCEPT ![current[c]] = "Ready"]
     /\ current' = [current EXCEPT ![c] = None]
-    /\ UNCHANGED <<wait, sig>>
+    /\ UNCHANGED <<wait, sig, woke>>
 
 \* An idle core takes a Ready process.
 \* @type: (Str, Str) => Bool;
@@ -175,7 +209,7 @@ Dispatch(c, p) ==
     /\ state[p] = "Ready"
     /\ state' = [state EXCEPT ![p] = "Running"]
     /\ current' = [current EXCEPT ![c] = p]
-    /\ UNCHANGED <<wait, sig>>
+    /\ UNCHANGED <<wait, sig, woke>>
 
 Next ==
     \/ Wait4Decide
@@ -183,6 +217,7 @@ Next ==
     \/ ChildExit
     \/ Wait4Resume
     \/ SendSignal
+    \/ TickDeliver
     \/ \E c \in Cores : Preempt(c)
     \/ \E c \in Cores, p \in Procs : Dispatch(c, p)
 
@@ -200,6 +235,7 @@ Fairness ==
     /\ SF_vars(Wait4Block)
     /\ SF_vars(ChildExit)
     /\ SF_vars(Wait4Resume)
+    /\ SF_vars(TickDeliver)
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
@@ -212,6 +248,7 @@ TypeOK ==
     /\ \A c \in Cores : current[c] \in Procs \union {None}
     /\ wait \in {"call", "decided", "asleep", "woken", "done"}
     /\ sig \in BOOLEAN
+    /\ woke \in BOOLEAN
 
 \* A process is Running exactly when some core runs it, and no process
 \* runs on two cores.
@@ -231,17 +268,33 @@ NoLostWakeup ==
 NoSleepWithSignal ==
     ~(state["parent"] = "Blocked" /\ wait = "asleep" /\ sig)
 
-\* Both lost wakeups at once, for Apalache's shallow runs.
-Safety == NoLostWakeup /\ NoSleepWithSignal
+\* #628: a wait4 that a signal woke is never asleep again. Its rerun meets
+\* the signal and ends with EINTR, or reaps the child that has exited.
+SignalWakeEndsWait ==
+    ~(woke /\ wait = "asleep")
+
+\* The safety properties at once, for Apalache's shallow runs.
+Safety == NoLostWakeup /\ NoSleepWithSignal /\ SignalWakeEndsWait
 
 \* #550, as the liveness property #601 asks for: wait4 finishes.
 Wait4Finishes == <>(wait = "done")
 
+\* #628, liveness: a pending caught signal is eventually handled, even by
+\* a parent that makes no further syscall.
+SignalRuns == sig ~> ~sig
+
 ----------------------------------------------------------------------------
 (* Constant initializers for Apalache (TLC reads the .cfg files instead). *)
 
-CInitFixed == RECHECK = TRUE /\ SIGRECHECK = TRUE
-CInitUnfixed == RECHECK = FALSE /\ SIGRECHECK = TRUE
-CInitSigUnfixed == RECHECK = TRUE /\ SIGRECHECK = FALSE
+CInitFixed == RECHECK = TRUE /\ SIGRECHECK = TRUE /\
+    IRQDELIVER = TRUE /\ IRQSKIPSVC = TRUE
+CInitUnfixed == RECHECK = FALSE /\ SIGRECHECK = TRUE /\
+    IRQDELIVER = TRUE /\ IRQSKIPSVC = TRUE
+CInitSigUnfixed == RECHECK = TRUE /\ SIGRECHECK = FALSE /\
+    IRQDELIVER = TRUE /\ IRQSKIPSVC = TRUE
+CInitIrqUnfixed == RECHECK = TRUE /\ SIGRECHECK = TRUE /\
+    IRQDELIVER = FALSE /\ IRQSKIPSVC = TRUE
+CInitSvcUnfixed == RECHECK = TRUE /\ SIGRECHECK = TRUE /\
+    IRQDELIVER = TRUE /\ IRQSKIPSVC = FALSE
 
 =============================================================================

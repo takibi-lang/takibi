@@ -5003,10 +5003,11 @@ fn kernel_syscall_migrate_return(frame_sp: usize) {
 // then loops on sigsuspend until its handler has set a flag; with neither
 // call it spun forever beside an unreaped child.
 //
-// A handler runs only from a syscall return: kernel_syscall_dispatch hands
-// every Resume to syscall_signal_deliver below, which builds the frame the
-// handler returns through. A process that never makes a syscall never runs
-// its handler; ash, and every caller that waits for one, makes one.
+// A syscall return runs a handler: kernel_syscall_dispatch hands every
+// Resume to syscall_signal_deliver below, which builds the frame the
+// handler returns through. Every other return to EL0 runs one too, the
+// timer interrupt's included (kernel_signal_return_deliver, GitHub issue
+// #628).
 //
 // The frame is Linux's arm64 rt_sigframe, so a handler that reads its
 // ucontext reads what it would on Linux: siginfo (128 bytes), then the

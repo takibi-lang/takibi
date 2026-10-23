@@ -305,17 +305,20 @@ private fn boundary_spin() !{unsafe} {
             return;
         }
         let spun: usize = signal_spin_run();
-        if (svc5(122, 0, 8, everywhere as *u8 as usize, 0, 0) != 0 ||
-            interrupt_reap(sender) == false) {
-            boundary_fail(bs"boundary: FAIL spin sender\n");
-            return;
-        }
         if (spun == 1) {
             boundary_fail(bs"boundary: FAIL spinning process never ran its handler\n");
             return;
         }
         if (spun != 0) {
             boundary_fail(bs"boundary: FAIL spinning process lost its registers\n");
+            return;
+        }
+        if (svc5(122, 0, 8, everywhere as *u8 as usize, 0, 0) != 0) {
+            boundary_fail(bs"boundary: FAIL spin unpin\n");
+            return;
+        }
+        if (interrupt_reap(sender) == false) {
+            boundary_fail(bs"boundary: FAIL spin sender\n");
             return;
         }
         if (case == 0) {
