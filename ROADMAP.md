@@ -64,7 +64,10 @@ lane (`kernelcheck-race-window-*-qemu`) before its issue closes.
 backbone only. Taken in order whenever the numbered trunk items below have
 no step ready; an item that reaches a decision is parked and the next one
 taken (#894, already under way here, finishes here; its follow-ups go to
-B): #819 (AtomicWord acq_rel cells), #830 (device interrupts on any core),
+B): #819 (AtomicWord acq_rel cells), #920 (DDB world stop reaching a core
+spinning with IRQs masked: pseudo-NMI/FIQ stop, cf. #641; the hung-core
+DDB check is expected-fail until then), #925 (model the UART serve
+try-lock under 1-of-N delivery),
 #775 (core-role asymmetry inventory), #681 (region_pool per-slot false
 sharing), #680 (region_pool handle validation without the lock), #812
 (contiguous page run search), #748 (page allocator metadata lending), #807
@@ -270,7 +273,7 @@ usb_xhci_bus.tkb. Only the DCBAA stays legacy (D3).
    #783 (xHCI batched TD write path).
 2. **Independent pillar issues, moved from A (2026-10-16):** #775
    (core-role asymmetries: inventory, 2-1 placement and 2-3 landed; remaining
-   row is #830); #789 (lock order as ranked capability tokens, absorbing
+   row, #830, landed; its DDB follow-up is #920); #789 (lock order as ranked capability tokens, absorbing
    acquires_lock_<rank>_<name>, after the syntax review).
    **Signals, moved from A (2026-10-16):** #628 (delivery at an
    interrupt return), then #726 (a caught signal interrupts a sleeping
