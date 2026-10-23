@@ -163,8 +163,7 @@ four vCPUs since 2026-10-11.
 **Assigned queue (maintainer, 2026-10-23).** Low-dependency issues A does
 not hold, in this order; compiler work in this list is authorized; an item
 that reaches a decision is parked and the next one taken: #908 (fixed
-QEMU lane budget), #916 (compiler GC tuning), #923
-(allocation budget on the kernel main.o compile), #921 and #922
+QEMU lane budget), #916 (compiler GC tuning), #921 and #922
 (variant reuse, domain-parallel codegen; both wait on the land-span
 measurement after #917's front-end fixes), #914 (race-window
 kernels built before the lanes), #915 (backing-exists overlays in
@@ -177,7 +176,7 @@ return), #652 (lifecycle trace for signals and wait4), #698 (ext2
 exhaustion as ENOSPC), #846 (TCP retransmission with no reader), #793
 (proofs with an unresolved type variable), #769 (--uses-of NAME), #774
 (IRQ arms acknowledge their source), #762 (no vector/unaligned stores in
-MMU-off code). Audit follow-ups filed 2026-10-23: #901 (ppoll sigmask with
+MMU-off code), #926 (GICv3 driver for QEMU virt gic-version=3). Audit follow-ups filed 2026-10-23: #901 (ppoll sigmask with
 nfds > 0), #902 (poll on terminal fds other than 0), #898 (DDB
 schedule_reserved window), #899 (probe-gate checks from #756), #904
 (position-dependent controls, FAILED line after a poll bound), #905
