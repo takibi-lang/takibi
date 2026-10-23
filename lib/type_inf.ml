@@ -9885,6 +9885,27 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                  "struct field '%s.%s' holds linear state directly; declare it as a Place of that type"
                  sname fname)))
           end;
+          (* GitHub issue #907: an unkinded variant in an ordinary field
+             answers the same question as an owned field, a payload or a
+             global (#896), so it uses the same predicate. Before #907 any
+             unkinded variant passed here, including must_use, generic,
+             static-parameter variants and variants nested in arrays or
+             pointers; no program used those shapes. A Place field is
+             stable owner storage with its own rules (#131). *)
+          let is_place = match ty with
+            | Ast.TypeVariant (name, _, [_]) -> name = Generic_variant.place_name
+            | _ -> false
+          in
+          if not is_place && type_mentions_variant ty
+             && not (type_mentions_kinded_variant ty)
+             && not (is_plain_variant_type ty) then
+            raise (TypeError (sloc, Printf.sprintf
+              "struct field '%s.%s' can hold only a plain variant (no \
+               must_use, static parameters, generic arguments, affine/linear \
+               kind, erased view, indexed owner, existential, borrow, \
+               singleton or stable owner storage in any payload), and only \
+               as the field's whole type"
+              sname fname));
           if ast_contains_stable_owner_value ty then
             raise (TypeError (sloc, Printf.sprintf
               "struct field '%s.%s' cannot contain stable owner storage '%s'"
@@ -9989,6 +10010,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             raise (TypeError (sloc, Printf.sprintf
               "struct field '%s.%s' cannot hold a nested erased view"
               sname fname));
+          (* GitHub issue #907: an ordinary indexed struct (owned = false)
+             still has no variant rule here; whether it should is open
+             (the issue #368 test BrNode holds BrLink[o] in one). *)
           if owned && type_mentions_variant ty
              && not (is_plain_variant_type ty) then
             raise (TypeError (sloc, Printf.sprintf

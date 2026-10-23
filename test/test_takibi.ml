@@ -14916,6 +14916,40 @@ let codegen_tests = [
            Alcotest.failf "expected plain variants to be storable, got: %s"
              (Printexc.to_string e));
 
+  (* GitHub issue #907: an ordinary struct field uses the same plain-variant
+     predicate. Each rejected shape passed the older kind-based rule; no
+     program in tests, kernel/ or linux_user/ used one. *)
+  Alcotest.test_case
+    "an ordinary struct field holds only a plain variant, as its whole type \
+     (issue #907)" `Quick
+    (fun () ->
+       let rejects label src =
+         match infer src with
+         | _ -> Alcotest.failf "%s: expected a rejection" label
+         | exception Types.TypeError (_, msg) ->
+             if not (contains_substring msg "can hold only a plain variant") then
+               Alcotest.failf "%s: unexpected message: %s" label msg
+       in
+       (match infer
+          "struct Span { lo: u16; hi: u32; }
+           variant Level { Low; High(u8); }
+           variant Reading { Missing; At(Level); Range(Span); }
+           struct Holder { r: Reading; n: u32; }"
+        with
+        | _ -> ()
+        | exception e ->
+            Alcotest.failf "expected a plain variant field, got: %s"
+              (Printexc.to_string e));
+       rejects "must_use variant"
+         "must_use variant R { Ok; Err; }
+          struct H { r: R; }";
+       rejects "array of plain variants"
+         "variant L { Low; High(u8); }
+          struct H { ls: [L; 4]; }";
+       rejects "pointer to a plain variant"
+         "variant L { Low; High(u8); }
+          struct H { p: *L; }");
+
   Alcotest.test_case
     "a kinded or non-plain variant stays rejected in owned fields, payloads \
      and globals (issue #896)" `Quick
