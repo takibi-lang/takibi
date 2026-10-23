@@ -1,0 +1,5 @@
+zeroed globals select case zero (level, reading): 1 0
+globals after assignment (level, reading): 109 1103
+a nested payload (at low, range): 1001 2045
+owned struct fields (sum): 1110
+done

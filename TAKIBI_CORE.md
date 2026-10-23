@@ -716,7 +716,11 @@ existentials only around a direct indexed runtime owner. The later typed-copy
 channel increment lifts unrestricted ordinary struct payloads and
 plain-variant struct fields only. Arrays, indexed-owner payload structs,
 ownership-bearing aggregate payloads, and affine/linear variant storage remain
-ownership-tracking limits, not claims about the final Core.
+ownership-tracking limits, not claims about the final Core. A later increment
+(2026-10-23) admits a plain variant -- no kind, view, indexed owner,
+existential, borrow, singleton, static parameter or must_use anywhere in its
+payloads -- as an owned struct field, a nested payload, and a zeroed mutable
+global (SPEC.md, "Plain variants in storage").
 
 ### Slice 4: runtime mutable owners and effects (implemented 2026-07-15)
 

@@ -9232,6 +9232,44 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeExists (_, _, body) -> type_mentions_singleton body
     | _ -> false
   in
+  (* GitHub issue #896: a plain variant is a value like an integer or a
+     plain struct. It may sit in an owned struct field, in another
+     variant's payload, or in a global. Plain means: a declared
+     (non-generic) variant with no static parameters, not must_use (storing
+     the value would drop the obligation), no affine/linear kind, and every
+     payload recursively free of erased views, indexed owners,
+     existentials, borrows, stable owner storage, singletons and linear
+     values; a nested variant payload must itself be plain. *)
+  let plain_variant_defs = Hashtbl.create 16 in
+  List.iter (function
+    | Ast.VariantDef (name, params, cases, must_use, _) ->
+        Hashtbl.replace plain_variant_defs name (params, cases, must_use)
+    | _ -> ()) prog;
+  let rec is_plain_variant_type_in seen ty = match ty with
+    | Ast.TypeVariant (name, [], []) when not (List.mem name seen) ->
+        not (Hashtbl.mem variant_kinds name)
+        && (match Hashtbl.find_opt plain_variant_defs name with
+            | Some ([], cases, false) ->
+                List.for_all (fun (_, payload) -> match payload with
+                  | None -> true
+                  | Some schema -> plain_variant_payload (name :: seen) schema)
+                  cases
+            | _ -> false)
+    | _ -> false
+  and plain_variant_payload seen schema = match schema with
+    | Ast.TypeVariant _ -> is_plain_variant_type_in seen schema
+    | _ ->
+        not (type_mentions_variant schema)
+        && not (type_mentions_view schema)
+        && not (type_mentions_indexed_owner schema)
+        && not (type_mentions_exists schema)
+        && not (contains_borrow schema)
+        && not (ast_contains_stable_owner_value schema)
+        && not (type_mentions_singleton schema)
+        && not (type_mentions_linear schema)
+        && payload_kind schema = Ast.KindPlain
+  in
+  let is_plain_variant_type ty = is_plain_variant_type_in [] ty in
   let rec singleton_under_storage inside = function
     | Ast.TypeSingleton _ -> inside
     | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeAlignedPtr (_, t)
@@ -9750,9 +9788,13 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           if type_mentions_view t then
             raise (TypeError (gloc, Printf.sprintf
               "global '%s' cannot hold an erased view" gname));
-          if type_mentions_variant t then
+          if type_mentions_variant t && not (is_plain_variant_type t) then
             raise (TypeError (gloc, Printf.sprintf
-              "global '%s' cannot hold a variant in Slice 3" gname));
+              "global '%s' can hold only a plain variant (no must_use, \
+               static parameters, generic arguments, affine/linear kind, \
+               erased view, indexed owner, existential, borrow, singleton \
+               or stable owner storage in any payload), and only as its \
+               whole type" gname));
           if type_mentions_indexed_owner t then
             raise (TypeError (gloc, Printf.sprintf
               "global '%s' cannot hold an indexed owner" gname));
@@ -9911,9 +9953,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             raise (TypeError (sloc, Printf.sprintf
               "struct field '%s.%s' cannot hold a nested erased view"
               sname fname));
-          if owned && type_mentions_variant ty then
+          if owned && type_mentions_variant ty
+             && not (is_plain_variant_type ty) then
             raise (TypeError (sloc, Printf.sprintf
-              "struct field '%s.%s' cannot hold a nested variant"
+              "struct field '%s.%s' can hold only a plain variant (no \
+               must_use, static parameters, generic arguments, affine/linear \
+               kind, erased view, indexed owner, existential, borrow, \
+               singleton or stable owner storage in any payload), and only \
+               as the field's whole type"
               sname fname));
           if owned && type_mentions_indexed_owner ty then
             raise (TypeError (sloc, Printf.sprintf
@@ -9966,9 +10013,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               raise (TypeError (vloc, Printf.sprintf
                 "variant payload '%s::%s' cannot contain borrow/sink"
                 vname cname));
-            if type_mentions_variant schema then
+            if type_mentions_variant schema
+               && not (is_plain_variant_type schema) then
               raise (TypeError (vloc, Printf.sprintf
-                "variant payload '%s::%s' cannot nest another variant in Slice 3"
+                "variant payload '%s::%s' can nest only a plain variant (no \
+                 must_use, static parameters, generic arguments, \
+                 affine/linear kind, erased view, indexed owner, \
+                 existential, borrow, singleton or stable owner storage in \
+                 any payload), and only as the whole payload"
                 vname cname));
             let rec strip_exists = function
               | Ast.TypeExists (_, _, body) -> strip_exists body
@@ -10645,9 +10697,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
              if contains_view_ty et then
                raise (TypeError (e.loc, Printf.sprintf
                  "global '%s' cannot hold an erased view" name));
+             (* GitHub issue #896: a plain variant global is zeroed
+                storage (case zero) assigned at run time; there is no
+                constant evaluator for a variant initializer. *)
              if contains_variant_ty et then
                raise (TypeError (e.loc, Printf.sprintf
-                 "global '%s' cannot hold a variant in Slice 3" name));
+                 "global '%s' cannot be initialized with a variant; declare \
+                  it `let mut` without an initializer (zeroed storage selects \
+                  case zero) and assign it" name));
              (* GitHub issue #77: `unify et (strip_io ty)` -- actual
                 (initializer) type first, declared annotation second --
                 matching the "actual, expected" convention every other

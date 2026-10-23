@@ -7953,7 +7953,7 @@ linear struct TakenSignal[signal: usize] {
     // record's sigchld_pid/sigchld_status at the take), so a child exiting
     // between the take and the frame write cannot rename it.
     private child_pid: usize;
-    private child_status: ProcessEndWord;
+    private child_status: ProcessEnd;
 }
 
 must_use variant ProcessSignalPendingResult {
@@ -7965,8 +7965,7 @@ private fn taken_signal_new(pool_index: RegionHeld(ProcessRecord), generation: u
                             signum: usize @ signal, child_pid: usize,
                             child_status: ProcessEnd) -> TakenSignal[signal] {
     let mut taken: TakenSignal[signal] = { pool_index, generation, signum,
-                                           child_pid,
-                                           process_end_word(child_status) };
+                                           child_pid, child_status };
     return taken;
 }
 
@@ -7977,7 +7976,7 @@ fn taken_signal_child_pid(taken: borrow TakenSignal[signal]) -> usize {
 }
 
 fn taken_signal_child_status(taken: borrow TakenSignal[signal]) -> ProcessEnd {
-    return process_end_of_word(taken.child_status);
+    return taken.child_status;
 }
 
 fn taken_signal_number(taken: borrow TakenSignal[signal]) -> usize {
@@ -8004,7 +8003,7 @@ fn taken_signal_restore(taken: sink TakenSignal[signal]) {
         // its siginfo, even if another child exited in between.
         if (signum == 17 && taken.child_pid != 0) {
             record.sigchld_pid = taken.child_pid;
-            record.sigchld_status = process_end_of_word(taken.child_status);
+            record.sigchld_status = taken.child_status;
         }
         process_signal_pending_raise(guard, record, 1 << (signum - 1));
     }

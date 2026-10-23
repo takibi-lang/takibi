@@ -1,0 +1,89 @@
+// GitHub issue #896: a plain variant -- one whose payloads carry no
+// ownership, view, owner index or existential -- is a value like an
+// integer, so it may sit in an owned struct field, in another variant's
+// payload, and in a zero-initialized global. Each section prints what it
+// read back; the still-rejected kinded cases are in test/test_takibi.ml.
+
+variant Level {
+    Low;
+    High(u8);
+}
+
+struct Span { lo: u16; hi: u32; }
+
+// A plain variant nesting another one, and a plain struct.
+variant Reading {
+    Missing;
+    At(Level);
+    Range(Span);
+}
+
+// An owned struct holding plain variants in its fields, around a u8 so
+// the fields' alignment is exercised.
+affine struct Probe[p: usize] {
+    private id: usize @ p;
+    private level: Level;
+    private tail: u8;
+    private reading: Reading;
+}
+
+// A zero-initialized global selects case zero.
+let mut last_level: Level;
+let mut last_reading: Reading;
+
+fn level_code(l: Level) -> usize {
+    match l {
+        Level::Low => { return 1; }
+        Level::High(v) => { return 100 + (v as usize); }
+    }
+}
+
+fn reading_code(r: Reading) -> usize {
+    match r {
+        Reading::Missing => { return 0; }
+        Reading::At(l) => { return 1000 + level_code(l); }
+        Reading::Range(s) => { return 2000 + (s.lo as usize) + (s.hi as usize); }
+    }
+}
+
+fn probe_new(id: usize @ p, level: Level, reading: Reading) -> Probe[p] {
+    let mut probe: Probe[p] = { id, level, 7, reading };
+    return probe;
+}
+
+fn probe_sum(probe: borrow Probe[p]) -> usize {
+    return level_code(probe.level) + reading_code(probe.reading) + (probe.tail as usize);
+}
+
+fn probe_end(probe: sink Probe[p]) {}
+
+fn app_main() {
+    uart_puts("zeroed globals select case zero (level, reading): ");
+    uart_print(level_code(last_level));
+    uart_puts(" ");
+    uart_print(reading_code(last_reading));
+    uart_puts("\n");
+
+    last_level = Level::High(9);
+    last_reading = Reading::At(Level::High(3));
+    uart_puts("globals after assignment (level, reading): ");
+    uart_print(level_code(last_level));
+    uart_puts(" ");
+    uart_print(reading_code(last_reading));
+    uart_puts("\n");
+
+    uart_puts("a nested payload (at low, range): ");
+    uart_print(reading_code(Reading::At(Level::Low)));
+    uart_puts(" ");
+    let mut s: Span = { 5, 40 };
+    uart_print(reading_code(Reading::Range(s)));
+    uart_puts("\n");
+
+    uart_puts("owned struct fields (sum): ");
+    let id: usize = 4;
+    let probe = probe_new(id, Level::High(2), Reading::At(Level::Low));
+    uart_print(probe_sum(probe));
+    probe_end(probe);
+    uart_puts("\n");
+    uart_puts("done\n");
+}

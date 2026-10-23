@@ -14874,18 +14874,89 @@ let codegen_tests = [
      followed the static parameters over: they exist because an owned
      aggregate tracks its fields' ownership, which an ordinary one does
      not. *)
+  (* GitHub issue #896 narrowed this: a plain variant field is accepted
+     (below); a must_use one is still a nested variant the owned struct
+     would carry without tracking. *)
   Alcotest.test_case
-    "an affine struct still rejects a nested variant field, indexed or not \
+    "an affine struct still rejects a must_use variant field, indexed or not \
      (issue #368)" `Quick
     (fun () ->
        match infer
-         "variant Plain2 { A; B; }
+         "must_use variant Plain2 { A; B; }
           affine struct Owned2[o: addr] { private v: Plain2; }"
        with
-       | _ -> Alcotest.fail "expected an affine struct to reject a nested variant"
+       | _ -> Alcotest.fail "expected an affine struct to reject a must_use variant"
        | exception Types.TypeError (_, msg) ->
-           Alcotest.(check bool) "names the nested variant" true
-             (contains_substring msg "nested variant"));
+           Alcotest.(check bool) "names the plain-variant rule" true
+             (contains_substring msg "can hold only a plain variant"));
+
+  (* GitHub issue #896: a plain variant is a value, so the three Slice 3
+     storage limits (owned struct field, variant payload, global) admit
+     it. Executed in linux_user/plain_variant. *)
+  Alcotest.test_case
+    "a plain variant is accepted in an owned field, a payload and a global \
+     (issue #896)" `Quick
+    (fun () ->
+       let (_ : Llvm_target.TargetMachine.t) =
+         Llvm_gen.setup_target ~triple:"aarch64-none-elf" ()
+       in
+       match gen_codegen
+         "struct Span { lo: u16; hi: u32; }
+          variant Level { Low; High(u8); }
+          variant Reading { Missing; At(Level); Range(Span); }
+          linear struct Probe[p: usize] { private id: usize @ p; private r: Reading; }
+          let mut last: Reading;
+          fn probe() -> usize {
+            last = Reading::At(Level::High(1));
+            match last { Reading::At(l) => { return 1; } _ => { return 0; } }
+          }"
+       with
+       | _ -> ()
+       | exception e ->
+           Alcotest.failf "expected plain variants to be storable, got: %s"
+             (Printexc.to_string e));
+
+  Alcotest.test_case
+    "a kinded or non-plain variant stays rejected in owned fields, payloads \
+     and globals (issue #896)" `Quick
+    (fun () ->
+       let rejects label needle src =
+         match infer src with
+         | _ -> Alcotest.failf "%s: expected a rejection" label
+         | exception Types.TypeError (_, msg) ->
+             if not (contains_substring msg needle) then
+               Alcotest.failf "%s: unexpected message: %s" label msg
+       in
+       let affine_payload =
+         "affine opaque struct Tok;
+          variant Held { None; Some(*Tok); }\n" in
+       rejects "affine variant in an owned field" "can hold only a plain variant"
+         (affine_payload ^ "affine struct O[p: usize] { private id: usize @ p; private h: Held; }");
+       rejects "affine variant nested in a payload" "can nest only a plain variant"
+         (affine_payload ^ "variant Outer { A; B(Held); }");
+       rejects "affine variant in a global" "can hold only a plain variant"
+         (affine_payload ^ "let mut g: Held;");
+       rejects "must_use variant in a global" "can hold only a plain variant"
+         "must_use variant R { Ok; Err; }
+          let mut g: R;";
+       rejects "must_use variant nested in a payload" "can nest only a plain variant"
+         "must_use variant R { Ok; Err; }
+          variant Outer { A; B(R); }";
+       rejects "erased view payload in a global" "can hold only a plain variant"
+         "affine view Perm;
+          variant E { A; B(Perm); }
+          let mut g: E;";
+       rejects "static parameters in an owned field" "can hold only a plain variant"
+         "variant S[o: usize] { A; B(usize); }
+          affine struct O[p: usize] { private id: usize @ p; private s: S[p]; }";
+       rejects "non-plain nested variant reached through a plain-looking one"
+         "only a plain variant"
+         "must_use variant R { Ok; Err; }
+          variant Wrap { A; B(R); }
+          let mut g: Wrap;";
+       rejects "a variant initializer for a global" "cannot be initialized with a variant"
+         "variant L { Low; High(u8); }
+          let g: L = L::High(3);");
 
   (* GitHub issue #369: `contains_stable_owner(T)` exposes to a
      static_assert what the checker already knew -- whether T is, or

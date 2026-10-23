@@ -28,37 +28,13 @@ fn process_end_signaled(signal: usize) -> ProcessEnd {
     return ProcessEnd::Signaled((signal & 0x7F) as u8);
 }
 
-// A ProcessEnd kept in an indexed owner's field (TakenSignal), which the
-// compiler does not let hold a variant. The packing is private to this
-// file: elsewhere it is only made from a ProcessEnd and turned back into
-// one, so it cannot be built from a bare integer.
-struct ProcessEndWord { private word: u32; }
-
-fn process_end_word(end: ProcessEnd) -> ProcessEndWord {
-    match end {
-        ProcessEnd::Exited(code) => {
-            let mut stored: ProcessEndWord = { code as u32 };
-            return stored;
-        }
-        ProcessEnd::Signaled(signal) => {
-            let mut stored: ProcessEndWord = { 0x100 | signal as u32 };
-            return stored;
-        }
-    }
-}
-
-// The packed word itself, for the process trace's aux field only: a
-// signal's end is 0x100 | signal, an exit is its code.
+// The process trace's aux field for an end: a signal's end is
+// 0x100 | signal, an exit is its code.
 fn process_end_trace_aux(end: ProcessEnd) -> usize {
-    let mut stored: ProcessEndWord = process_end_word(end);
-    return stored.word as usize;
-}
-
-fn process_end_of_word(stored: ProcessEndWord) -> ProcessEnd {
-    if ((stored.word & 0x100) != 0) {
-        return ProcessEnd::Signaled((stored.word & 0x7F) as u8);
+    match end {
+        ProcessEnd::Exited(code) => { return code as usize; }
+        ProcessEnd::Signaled(signal) => { return 0x100 | (signal as usize); }
     }
-    return ProcessEnd::Exited((stored.word & 0xFF) as u8);
 }
 
 // The wait4 status word: Linux's WTERMSIG form (signal in the low seven
