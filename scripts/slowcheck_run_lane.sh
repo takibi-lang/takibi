@@ -191,13 +191,17 @@ claim
 # --- concurrent checks overlap, keep their output whole, report failures ---
 CONCURRENT="$REPO_ROOT/scripts/run_concurrent_checks.sh"
 timing="$work/concurrent"
-started="$(date +%s.%3N)"
+# Overlap is proven by a rendezvous, not a duration (GitHub issue #928: on a
+# starved CPU two 1 s sleeps that did overlap took 2 s). Each check marks
+# itself started and waits for the other's mark; run serially, the first
+# would wait out its 60 s bound and fail.
+meet="$work/meet"
+mkdir -p "$meet"
+rendezvous='touch "$1/$2"; for _ in $(seq 1200); do [ -e "$1/$3" ] && exit 0; sleep 0.05; done; exit 1'
 out="$(TAKIBI_LANE_TIMING_DIR="$timing" bash "$CONCURRENT" \
-    one 'echo one-a; sleep 1; echo one-b' two 'sleep 1; echo two')" \
-    && claim || fail "two passing concurrent checks exited nonzero: $out"
-elapsed="$(awk -v a="$(date +%s.%3N)" -v b="$started" 'BEGIN { print a - b }')"
-awk -v e="$elapsed" 'BEGIN { exit !(e < 1.8) }' \
-    && claim || fail "two 1s concurrent checks took ${elapsed}s, so they ran serially"
+    one "echo one-a; bash -c '$rendezvous' _ '$meet' one two && echo one-b" \
+    two "bash -c '$rendezvous' _ '$meet' two one && echo two")" \
+    && claim || fail "two concurrent checks that wait for each other did not both finish, so they ran serially: $out"
 [ "$out" = "$(printf 'one-a\none-b\ntwo')" ] \
     && claim || fail "concurrent output was not printed whole in argument order: $out"
 [ -f "$timing/one.jsonl" ] && [ -f "$timing/two.jsonl" ] \
