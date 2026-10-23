@@ -11,10 +11,13 @@
 //
 // SERIAL SERVICE. Unlike the NIC and xHCI handlers, the UART handler moves
 // data: it drains the RX FIFO into the receive ring and refills the TX FIFO.
-// Two cores draining at once could deliver bytes out of order, and a GIC may
-// hand the next interrupt to another core while the first is still inside
-// the handler. So one core at a time runs the service: a core that finds
-// another inside it leaves at once. Nothing is lost by leaving, because every
+// Two cores draining at once could deliver bytes out of order. On QEMU and
+// RPi5, GICv2's active state already prevents that: the SPI is not signalled
+// to another core until this core's EOI, and the busy word below is cleared
+// before that EOI, so the try-lock is never contended there
+// (kernel/models/UartServe.tla, variant gated). It is a defence for delivery
+// without that gate (variant fixed): one core at a time runs the service,
+// and a core that finds another inside it leaves at once. Nothing is lost by leaving, because every
 // PL011 source this kernel enables is level: RX and RX-timeout stay asserted
 // while the FIFO holds bytes, TX while it is below its level, BREAK until it
 // is cleared. On QEMU the SPI is level-sensitive, so it is delivered again
