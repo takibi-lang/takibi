@@ -5,6 +5,9 @@
 extern fn signal_boundary_run(mode: usize) -> usize;
 extern symbol signal_boundary_handler;
 extern symbol signal_boundary_restorer;
+extern fn signal_interrupt_svc(number: usize, a0: usize, a1: usize, a2: usize,
+                               a3: usize, ran: usize) -> usize;
+extern symbol signal_interrupt_handler;
 
 private fn boundary_fail(line: borrow []const u8) !{unsafe} {
     // Raw ABI input only: these syscalls read the readonly bytes.
@@ -100,5 +103,123 @@ fn signal_boundary_probe() !{unsafe} {
         }
     }
     boundary_memory();
+    boundary_interrupts();
     svc5(93, 0, 0, 0, 0, 0);
+}
+
+const INTERRUPT_EINTR: usize = 0xFFFFFFFFFFFFFFFC;
+
+// A child that sleeps `delay_ms`, sends `signum` to `target`, sleeps
+// `linger_ms` more and exits 0. Returns its pid to the parent.
+private fn interrupt_sender(target: usize, signum: usize, delay_ms: usize,
+                            linger_ms: usize) -> usize !{unsafe} {
+    let child: usize = svc5(220, 17, 0, 0, 0, 0);
+    if (child != 0) { return child; }
+    let mut pause: [usize; 2];
+    pause[0] = 0;
+    pause[1] = delay_ms * 1000000;
+    svc5(101, pause as *usize as usize, 0, 0, 0, 0);
+    svc5(129, target, signum, 0, 0, 0);
+    if (linger_ms != 0) {
+        pause[1] = linger_ms * 1000000;
+        svc5(101, pause as *usize as usize, 0, 0, 0, 0);
+    }
+    svc5(93, 0, 0, 0, 0, 0);
+    return 0;
+}
+
+private fn interrupt_reap(child: usize) -> bool !{unsafe} {
+    let mut status: [u8; 4];
+    for index: usize in 0..<4 { status[index] = 0xFF; }
+    return svc5(260, child, status as *u8 as usize, 0, 0, 0) == child &&
+           status[0] == 0 && status[1] == 0;
+}
+
+private fn interrupt_seconds() -> usize !{unsafe} {
+    let mut now: [usize; 2];
+    svc5(113, 1, now as *usize as usize, 0, 0, 0);
+    return now[0];
+}
+
+// GitHub issue #726: a caught signal ends a sleeping syscall, as on Linux.
+// SIGUSR1's handler has no SA_RESTART, SIGUSR2's has; both count their
+// runs in `ran`. Without the wake, each call below sleeps until its own
+// end -- a four-second nanosleep returns 0, a wait4 returns the child --
+// and the checks fail.
+private fn boundary_interrupts() !{unsafe} {
+    let mut action: [usize; 4];
+    action[0] = signal_interrupt_handler as usize;
+    action[1] = 0x04000000;
+    action[2] = signal_boundary_restorer as usize;
+    action[3] = 0;
+    if (svc5(134, 10, action as *usize as usize, 0, 8, 0) != 0) {
+        boundary_fail(bs"boundary: FAIL interrupt sigaction\n");
+        return;
+    }
+    action[1] = 0x14000000;
+    if (svc5(134, 12, action as *usize as usize, 0, 8, 0) != 0) {
+        boundary_fail(bs"boundary: FAIL restart sigaction\n");
+        return;
+    }
+    let me: usize = svc5(172, 0, 0, 0, 0, 0);
+    let mut ran: [usize; 1];
+
+    // nanosleep never restarts: EINTR even under SA_RESTART, with the
+    // time that was left written to rem.
+    let mut request: [usize; 2];
+    request[0] = 4;
+    request[1] = 0;
+    let mut left: [usize; 2];
+    left[0] = 99;
+    left[1] = 0;
+    let started: usize = interrupt_seconds();
+    let sender: usize = interrupt_sender(me, 12, 100, 0);
+    let slept: usize = signal_interrupt_svc(101, request as *usize as usize,
+        left as *usize as usize, 0, 0, ran as *usize as usize);
+    let elapsed: usize = interrupt_seconds() - started;
+    if (slept != INTERRUPT_EINTR || ran[0] != 1 || elapsed > 2 ||
+        left[0] > 3 || (left[0] == 0 && left[1] == 0) ||
+        interrupt_reap(sender) == false) {
+        boundary_fail(bs"boundary: FAIL nanosleep not interrupted\n");
+        return;
+    }
+    boundary_line(bs"boundary: nanosleep interrupted: handler ran, EINTR, time left\n");
+
+    // wait4 without SA_RESTART: EINTR, and the child is still there.
+    let waited: usize = interrupt_sender(me, 10, 100, 300);
+    let mut status: [u8; 4];
+    for index: usize in 0..<4 { status[index] = 0xFF; }
+    let first: usize = signal_interrupt_svc(260, waited, status as *u8 as usize,
+        0, 0, ran as *usize as usize);
+    if (first != INTERRUPT_EINTR || ran[0] != 1 ||
+        interrupt_reap(waited) == false) {
+        boundary_fail(bs"boundary: FAIL wait4 not interrupted\n");
+        return;
+    }
+    boundary_line(bs"boundary: wait4 interrupted: handler ran, EINTR\n");
+
+    // wait4 under SA_RESTART: the handler runs, then the wait goes on.
+    let restarted: usize = interrupt_sender(me, 12, 100, 300);
+    for index: usize in 0..<4 { status[index] = 0xFF; }
+    let reaped: usize = signal_interrupt_svc(260, restarted, status as *u8 as usize,
+        0, 0, ran as *usize as usize);
+    if (reaped != restarted || ran[0] != 1 || status[0] != 0) {
+        boundary_fail(bs"boundary: FAIL wait4 not restarted\n");
+        return;
+    }
+    boundary_line(bs"boundary: wait4 restarted under SA_RESTART after handler\n");
+
+    // rt_sigtimedwait never restarts: a caught signal outside its set ends
+    // it with EINTR even under SA_RESTART.
+    let mut wait_set: [usize; 1];
+    wait_set[0] = 1;
+    let poker: usize = interrupt_sender(me, 12, 100, 0);
+    let waited_signal: usize = signal_interrupt_svc(137, wait_set as *usize as usize,
+        0, 0, 8, ran as *usize as usize);
+    if (waited_signal != INTERRUPT_EINTR || ran[0] != 1 ||
+        interrupt_reap(poker) == false) {
+        boundary_fail(bs"boundary: FAIL rt_sigtimedwait not interrupted\n");
+        return;
+    }
+    boundary_line(bs"boundary: rt_sigtimedwait interrupted: EINTR despite SA_RESTART\n");
 }

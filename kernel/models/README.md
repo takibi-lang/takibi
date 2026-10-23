@@ -76,7 +76,9 @@ touches belongs to no existing one.
 
 ## Wait4Block.tla -- the wait4 ChildExit window (#550)
 
-Two cores; a parent, its child, and one other runnable process.
+Two cores; a parent, its child, and one other runnable process. Since #726
+the parent can also be sent a signal it catches; `SIGRECHECK` is the
+publication's re-check of a pending one, as `RECHECK` is of the zombie.
 
 | Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
 | --- | --- | --- | --- | --- |
@@ -84,6 +86,7 @@ Two cores; a parent, its child, and one other runnable process.
 | `Wait4Block` | `kernel_process_block_current`, `kernel_process_block_reserved` | successor choice and the Blocked publication in one critical section; `RECHECK` is the zombie re-check there | ASID preparation and the lock drop around it -- irrelevant to `NoLostWakeup`: the drop comes after Blocked is published and re-checked, and the successor it crosses with is already reserved Running | `119a666d4e72` |
 | `ChildExit` | `kernel_process_child_exit` | the child becomes a zombie and wakes the parent only if the parent is Blocked in ChildExit | zombie draining -- irrelevant to `NoLostWakeup`: it reaps the exiting child's own children, never this parent or this child; SIGCHLD -- irrelevant to `NoLostWakeup`: it makes no process Blocked or Exited, and only such a step can break the property; the direct parent start -- modelled elsewhere: `StackOwnership.ChildExitStart` | `406e635f25e2` |
 | `Wait4Resume` | `kernel_syscall_wait4_deliver` | the woken parent reaps | the user-memory status write -- irrelevant to `NoLostWakeup`: it runs after the reap, when the child is no longer Exited | `58c8f2d2ce42` |
+| `SendSignal` | `kernel_process_signal_deliver_to` | a caught, unmasked signal becomes pending, and a parent Blocked in wait4 is woken in the same critical section to rerun the call | which signal, the sender, siginfo and SA_RESTART -- irrelevant to `NoSleepWithSignal`: only whether a caught signal is pending, and whether the parent is Blocked, decide it; terminating signals -- modelled elsewhere: `TickWake.SignalWake` | `c2b1d22acbc8` |
 | `Preempt` | `kernel_process_timer_schedule` | the timer takes a process off its core, never inside the parent's wait4 syscall (`KERNEL_PREEMPTIBLE` is 0) | the test-only spread rendezvous -- irrelevant to `NoLostWakeup`: it changes affinity before scheduling and observes an existing leave, without changing a wait or wake | `aeae68758f24` |
 | `Dispatch` | `kernel_process_secondary_start`, `kernel_process_schedule` | an idle core takes a Ready process | affinity -- irrelevant to `NoLostWakeup`: it only forbids some dispatches, and the model already allows each one it forbids; the debugger-armed starvation injection of the busy-pair control -- irrelevant to `NoLostWakeup`: like affinity it only forbids some dispatches; the boot gate that lets only the boot core take the first process after main() hands off (#831) -- irrelevant to `NoLostWakeup`: like affinity it only forbids some dispatches; stack ownership -- modelled elsewhere: `StackOwnership.Reserve` | `aed2a904d5c4` |
 
@@ -92,6 +95,11 @@ Properties:
 - `NoLostWakeup` (safety): the parent is never Blocked while its child is a
   zombie. The unfixed variant violates it in four steps: decide, child exits,
   block.
+- `NoSleepWithSignal` (safety, #726): the parent is never asleep in wait4
+  while a signal it catches is pending. The `sigunfixed` variant violates it
+  in four steps: decide, signal sent, block. `Wait4Decide` stands for the
+  decision and its Block return (`syscall_block_interrupt`), which answers
+  EINTR; the gap between those two is the one `Wait4Block` re-checks.
 - `Wait4Finishes` (liveness, TLC only): wait4 eventually completes, under the
   fairness the kernel's scheduler rotation provides.
 - `TypeOK`, `RunningMatchesCores`: bookkeeping sanity.
@@ -282,7 +290,7 @@ signal wake that leaves the record on its list (`nounlink` breaks
 | `Block` | `scheduled_process_block`, `kernel_process_tick_wake_enqueue` | Blocked is published and the record queued on this core's list in one critical section | the successor choice and the switch -- modelled elsewhere: `Wait4Block.Wait4Block`; waits a tick does not end -- irrelevant to `ListsMatchBlocked`: they are never queued, and the model's processes stand for the queued ones | `b455a4c14d48` |
 | `Expire` | `kernel_process_tick_wake_due_of` | a queued wait becomes due (a NetRx retry is due at once) | the deadline's value -- irrelevant to `PeerSleeperWakes`: only whether it has passed decides a wake | `998254dc4693` |
 | `Tick` | `kernel_process_tick_wake_scan`, `kernel_process_tick_wake`, `kernel_process_tick_wake_if_due` | a core's tick wakes every due record on its own list, and no other list | the unlocked due-word skip -- irrelevant to `PeerSleeperWakes`: the word is never above the earliest due entry, so a skipped tick had nothing due; the frame result write, the per-core tick times and the watched pid's wake record (#863) -- irrelevant to `ListsMatchBlocked`: they change no state or list | `259c8be0c9c4` |
-| `SignalWake` | `scheduled_process_wake_ready`, `kernel_process_tick_wake_unlink`, `kernel_process_signal_deliver_to` | a wake that is not the tick makes the record Ready and, with `UNLINK`, takes it off its list | which signal and its pending bits -- irrelevant to `ListsMatchBlocked`: only the state and list change matters | `73e5067f334a` |
+| `SignalWake` | `scheduled_process_wake_ready`, `kernel_process_tick_wake_unlink`, `kernel_process_signal_deliver_to` | a wake that is not the tick makes the record Ready and, with `UNLINK`, takes it off its list | which signal and its pending bits -- irrelevant to `ListsMatchBlocked`: only the state and list change matters | `096e6f6d2ece` |
 | `Run` | `kernel_process_schedule` | a Ready process runs again on the core its mask allows | stack ownership -- modelled elsewhere: `StackOwnership.Reserve` | `7a417ffc219f` |
 | `SetAffinity` | `kernel_process_affinity_set` | the mask changes, and a queued sleeper stays on its list | the pin and the migration of a running process -- irrelevant to `PeerSleeperWakes`: neither touches a list | `e6683f044154` |
 | `Mask` | `workload_peer_sleep_progress` | core 0 masks its interrupts and takes no tick | how long -- irrelevant to `PeerSleeperWakes`: the model masks for good, the worst case; the wake record it reads (#863) -- irrelevant to `PeerSleeperWakes`: watching changes no state or list | `b3d46381ddb9` |

@@ -6,3 +6,7 @@ boundary: signal PSTATE limited to NZCV
 boundary: signal frame overflow refused
 boundary: mmap reuse zero-filled
 boundary: brk mapping collision refused
+boundary: nanosleep interrupted: handler ran, EINTR, time left
+boundary: wait4 interrupted: handler ran, EINTR
+boundary: wait4 restarted under SA_RESTART after handler
+boundary: rt_sigtimedwait interrupted: EINTR despite SA_RESTART

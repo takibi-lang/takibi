@@ -269,3 +269,37 @@ signal_boundary_restorer:
 .Lboundary_restorer_failed:
     b .Lboundary_restorer_failed
 .size signal_boundary_restorer, .-signal_boundary_restorer
+
+/* GitHub issue #726: one syscall that a caught signal may interrupt.
+ * signal_interrupt_svc(number, a0, a1, a2, a3, ran) makes the call with x21
+ * zero and stores x21 to *ran afterwards. signal_interrupt_handler counts
+ * itself in the interrupted context's x21, which rt_sigreturn restores, so
+ * *ran says how many handlers ran before the call returned -- including
+ * before a call that SA_RESTART reran.
+ */
+.global signal_interrupt_svc
+.type signal_interrupt_svc, %function
+signal_interrupt_svc:
+    stp x21, x30, [sp, #-16]!
+    stp x5, xzr, [sp, #-16]!
+    mov x21, #0
+    mov x8, x0
+    mov x0, x1
+    mov x1, x2
+    mov x2, x3
+    mov x3, x4
+    svc #0
+    ldp x5, x9, [sp], #16
+    str x21, [x5]
+    ldp x21, x30, [sp], #16
+    ret
+.size signal_interrupt_svc, .-signal_interrupt_svc
+
+.global signal_interrupt_handler
+.type signal_interrupt_handler, %function
+signal_interrupt_handler:
+    ldr x9, [x1, #480]
+    add x9, x9, #1
+    str x9, [x1, #480]
+    ret
+.size signal_interrupt_handler, .-signal_interrupt_handler

@@ -7538,6 +7538,16 @@ fn kernel_process_syscall_return_schedule(current: borrow FrameRef[process])
 private fn kernel_process_block_would_miss(
         guard: borrow ProcessRunGuard[lock], from: ProcessHandle,
         reason: ProcessWaitReason) -> bool {
+    // GitHub issue #726: a caught signal raised after the syscall decided to
+    // block, and before this publication, found the process Running and
+    // woke nobody. It is pending here, under the lock its raise took; the
+    // rerun meets it at the Block return (syscall_block_interrupt) and
+    // answers EINTR or restarts, instead of sleeping beside it.
+    // kernel/models/Wait4Block.tla checks this re-check (SIGRECHECK).
+    if (reason != ProcessWaitReason::None &&
+        process_signal_interrupt_of(scheduled_process_record_of_locked(guard, from)) != 0) {
+        return true;
+    }
     match reason {
         // Not a wait: nothing blocks with it.
         ProcessWaitReason::None => { return false; }
@@ -8330,6 +8340,68 @@ private fn process_signal_terminates(record: borrow &mut ProcessRecord,
     }
 }
 
+// GitHub issue #726: the signal that interrupts a sleeping syscall -- the
+// lowest pending one the process catches and does not mask, which is the
+// one a syscall return delivers first -- or 0 for none. rt_sigsuspend and
+// pause wait under a mask of their own and answer EINTR by their own rule,
+// so a suspended wait is never interrupted this way.
+fn process_signal_interrupt_of(record: borrow &mut ProcessRecord) -> usize {
+    if (record.sigwait_suspend) { return 0; }
+    let available: usize = record.pending_signals & ~record.signal_mask;
+    for index: usize in 0..<PROCESS_SIGNAL_ACTIONS {
+        if ((available & (1 << index)) != 0 &&
+            record.signal_actions[index].handler > 1) {
+            return index + 1;
+        }
+    }
+    return 0;
+}
+
+// What syscall_block_interrupt is told about a syscall that is about to
+// block: nothing interrupts it, or `signal` does, with its sa_flags and the
+// deadline the wait had armed (0 for none) for nanosleep's remaining time.
+struct SignalInterruption {
+    signum: usize;
+    flags: usize;
+    deadline: usize;
+}
+
+must_use variant ProcessSignalInterrupt {
+    Missing;
+    Interrupt(SignalInterruption);
+}
+
+// GitHub issue #726: asked at every Block return. When a caught signal
+// interrupts, the wait the syscall recorded is abandoned here -- its
+// pending reason, deadline, signal set and terminal delivery mode -- so
+// that neither a later syscall nor a waker sees a wait that is not there.
+fn kernel_process_current_signal_interrupt(
+        current_authority: borrow ProcessCurrent[current_process, ProcessState::Running])
+        -> ProcessSignalInterrupt {
+    if (execution_state[execution_cpu_index()].current_live == false) {
+        return ProcessSignalInterrupt::Missing;
+    }
+    let guard = process_run_lock();
+    let record: &mut ProcessRecord = scheduled_process_record_of_locked(
+        guard, execution_state[execution_cpu_index()].current_handle);
+    let signum: usize = process_signal_interrupt_of(record);
+    if (signum < 1 || signum > PROCESS_SIGNAL_ACTIONS) {
+        process_run_unlock(guard);
+        return ProcessSignalInterrupt::Missing;
+    }
+    let index: {0..<PROCESS_SIGNAL_ACTIONS as usize} = signum - 1;
+    let flags: usize = record.signal_actions[index].flags;
+    let deadline: usize = record.deadline_ticks;
+    record.pending_block_reason = ProcessWaitReason::None;
+    record.deadline_ticks = 0;
+    record.deadline_result = 0;
+    record.sigwait_set = 0;
+    record.uart_block_delivery = UartBlockDelivery::Scalar;
+    process_run_unlock(guard);
+    let mut interruption: SignalInterruption = { signum, flags, deadline };
+    return ProcessSignalInterrupt::Interrupt(interruption);
+}
+
 fn kernel_process_block_signal(current: borrow FrameRef[process])
         -> BlockSwitch {
     return kernel_process_block_current(
@@ -8420,6 +8492,46 @@ private fn kernel_process_signal_deliver_to(
                 record.deadline_ticks = 0;
                 record.deadline_result = 0;
                 let ready = scheduled_process_wake(guard, owner, blocked);
+                scheduled_process_release(owner, ready);
+            }
+        }
+        return ProcessSignalSendResult::Delivered;
+    }
+    // GitHub issue #726: a caught, unmasked signal ends any other sleep, as
+    // on Linux. The woken process reruns the syscall it slept in, and that
+    // rerun -- finding the condition it waited for, or not -- either
+    // completes or meets the signal at its Block return, which answers
+    // EINTR or restarts it under SA_RESTART after the handler. Waits whose
+    // block already rewound the frame (a terminal read or ppoll, accept, a
+    // terminal write) need nothing more; the rest are rewound here. A
+    // deadline or rt_sigtimedwait wait keeps its armed deadline and reason,
+    // so the rerun resumes that wait rather than starting a new one, and
+    // nanosleep can report the time that was left.
+    if (handled && masked == false &&
+        process_signal_interrupt_of(record) != 0 &&
+        scheduled_process_state_of_locked(guard, target) == ProcessSlotState::Blocked) {
+        let reason: ProcessWaitReason =
+            scheduled_process_wait_reason_of_locked(guard, target);
+        let rewound: bool =
+            reason == ProcessWaitReason::NetRx ||
+            reason == ProcessWaitReason::UartTx ||
+            (reason == ProcessWaitReason::UartRx &&
+             record.uart_block_delivery == UartBlockDelivery::Read);
+        match scheduled_process_blocked_take(guard, target) {
+            ScheduledProcessBlockedTakeResult::Missing => {}
+            ScheduledProcessBlockedTakeResult::Blocked(resources) => {
+                let (owner, blocked) = resources;
+                if (rewound == false) {
+                    let parked = scheduled_process_saved_frame(owner);
+                    el0_context_retry_syscall(parked);
+                }
+                let ready = scheduled_process_wake(guard, owner, blocked);
+                if (reason == ProcessWaitReason::Deadline ||
+                    reason == ProcessWaitReason::Signal) {
+                    let resumed: &mut ProcessRecord =
+                        scheduled_process_record_of_locked(guard, target);
+                    resumed.pending_block_reason = reason;
+                }
                 scheduled_process_release(owner, ready);
             }
         }

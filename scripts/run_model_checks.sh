@@ -91,9 +91,10 @@ check_model() {
     done
 }
 
-check_model Wait4Block NoLostWakeup 4 \
+check_model Wait4Block Safety 4 \
     fixed:CInitFixed:pass:ok \
-    unfixed:CInitUnfixed:NoLostWakeup:violated
+    unfixed:CInitUnfixed:NoLostWakeup:violated \
+    sigunfixed:CInitSigUnfixed:NoSleepWithSignal:violated
 
 check_model StackOwnership CoreInvariants 6 \
     fixed:CInitFixed:pass:ok \

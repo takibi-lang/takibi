@@ -5137,7 +5137,7 @@ fn syscall_signal_deliver(current_authority: ProcessCurrent[current_process, Pro
         SyscallAction::CloneParent(sp) => {
             process_current_end(current_authority); return SyscallAction::CloneParent(sp);
         }
-        SyscallAction::Block => { process_current_end(current_authority); return SyscallAction::Block; }
+        SyscallAction::Block => { return syscall_block_interrupt(current_authority, frame); }
         SyscallAction::WaitInterrupt => { process_current_end(current_authority); return SyscallAction::WaitInterrupt; }
         SyscallAction::ChildExec => { process_current_end(current_authority); return SyscallAction::ChildExec; }
         SyscallAction::Migrate => { process_current_end(current_authority); return SyscallAction::Migrate; }
@@ -5149,6 +5149,103 @@ fn syscall_signal_deliver(current_authority: ProcessCurrent[current_process, Pro
         }
         MaybeFrame::Frame(present) => {
             return syscall_signal_deliver_into(current_authority, present, value);
+        }
+    }
+}
+
+const LINUX_SA_RESTART: usize = 0x10000000;
+
+// GitHub issue #726, signal(7) "Interruption of system calls and library
+// functions by signal handlers": the calls Linux never restarts after a
+// handler, whatever SA_RESTART says. Each answers EINTR. Every other call
+// that sleeps here -- read, readv and ppoll's terminal wait excepted, write
+// and writev on the terminal, wait4, accept and accept4, the network reads
+// -- restarts under SA_RESTART. rt_sigsuspend never reaches this question
+// (process_signal_interrupt_of).
+fn syscall_never_restarts(number: usize) -> bool {
+    return number == AARCH64_NR_PPOLL || number == AARCH64_NR_NANOSLEEP ||
+           number == AARCH64_NR_CLOCK_NANOSLEEP ||
+           number == AARCH64_NR_RT_SIGTIMEDWAIT ||
+           number == AARCH64_NR_RT_SIGSUSPEND;
+}
+
+// GitHub issue #726: every Block passes here before the process sleeps. A
+// caught, unmasked signal already pending -- raised before the call, or
+// the one whose wake made this a rerun -- interrupts the call instead:
+// it returns EINTR, or under SA_RESTART is rewound with its first argument
+// back in x0, and either way the handler runs first, from the frame
+// syscall_signal_deliver_into builds. The block path's re-check under the
+// run lock (kernel_process_block_would_miss) covers a signal raised after
+// this, and kernel_process_signal_deliver_to one raised after the sleep.
+private fn syscall_block_interrupt(
+        current_authority: ProcessCurrent[current_process, ProcessState::Running],
+        frame: MaybeFrame) -> SyscallAction !{unsafe} {
+    match frame {
+        MaybeFrame::NoFrame => {
+            process_current_end(current_authority); return SyscallAction::Block;
+        }
+        MaybeFrame::Frame(present) => {
+            match kernel_process_current_signal_interrupt(current_authority) {
+                ProcessSignalInterrupt::Missing => {
+                    process_current_end(current_authority); return SyscallAction::Block;
+                }
+                ProcessSignalInterrupt::Interrupt(interruption) => {
+                    let flags: usize = interruption.flags;
+                    let deadline: usize = interruption.deadline;
+                    let number: usize = frame_general(present, 8);
+                    if ((flags & LINUX_SA_RESTART) != 0 &&
+                        syscall_never_restarts(number) == false) {
+                        el0_context_retry_syscall(present);
+                        return syscall_signal_deliver_into(current_authority, present,
+                            frame_general(present, 0));
+                    }
+                    let mut result: usize = LINUX_EINTR;
+                    let mut remaining: usize = 0;
+                    if (number == AARCH64_NR_NANOSLEEP) {
+                        remaining = frame_general(present, 1);
+                    } else if (number == AARCH64_NR_CLOCK_NANOSLEEP &&
+                               frame_general(present, 1) == 0) {
+                        remaining = frame_general(present, 3);
+                    }
+                    if (remaining != 0 &&
+                        syscall_sleep_remaining_write(current_authority,
+                            remaining, deadline) == false) {
+                        result = LINUX_EFAULT;
+                    }
+                    return syscall_signal_deliver_into(current_authority, present,
+                                                       result);
+                }
+            }
+        }
+    }
+}
+
+// nanosleep's `rem` after a signal: the time from now to the deadline the
+// sleep had armed, as a timespec, or zero once it has passed. False when
+// `rem` faults, which Linux answers with EFAULT instead of EINTR.
+private fn syscall_sleep_remaining_write(
+        current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
+        address: usize, deadline: usize) -> bool {
+    let now: usize = read_cntpct() as usize;
+    let frequency: usize = read_cntfrq() as usize;
+    let mut seconds: usize = 0;
+    let mut nanoseconds: usize = 0;
+    if (deadline > now && frequency != 0) {
+        let left: usize = deadline - now;
+        seconds = left / frequency;
+        // Below one second of ticks times 10^9: fits in 64 bits for any
+        // counter frequency under 18 GHz.
+        nanoseconds = ((left % frequency) * 1000000000) / frequency;
+    }
+    match user_range_check_write(current_authority, address, 16) {
+        UserWriteRangeResult::Fault => { return false; }
+        UserWriteRangeResult::Ok(range) => {
+            let mut written = user_write_u64(range, 0, seconds as u64);
+            written = user_write_join(written, user_write_u64(range, 8, nanoseconds as u64));
+            match written {
+                UserWriteResult::Fault => { return false; }
+                UserWriteResult::Written => { return true; }
+            }
         }
     }
 }
