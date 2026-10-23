@@ -276,6 +276,9 @@ signal_boundary_restorer:
  * itself in the interrupted context's x21, which rt_sigreturn restores, so
  * *ran says how many handlers ran before the call returned -- including
  * before a call that SA_RESTART reran.
+ * The handler counts only when the interrupted PC lies between the zeroing
+ * of x21 and the store to *ran: anywhere else x21 belongs to compiled
+ * code, and bumping it would corrupt a caller's live value (#950).
  */
 .global signal_interrupt_svc
 .type signal_interrupt_svc, %function
@@ -283,6 +286,7 @@ signal_interrupt_svc:
     stp x21, x30, [sp, #-16]!
     stp x5, xzr, [sp, #-16]!
     mov x21, #0
+.Linterrupt_counting:
     mov x8, x0
     mov x0, x1
     mov x1, x2
@@ -291,6 +295,7 @@ signal_interrupt_svc:
     svc #0
     ldp x5, x9, [sp], #16
     str x21, [x5]
+.Linterrupt_counted:
     ldp x21, x30, [sp], #16
     ret
 .size signal_interrupt_svc, .-signal_interrupt_svc
@@ -298,9 +303,17 @@ signal_interrupt_svc:
 .global signal_interrupt_handler
 .type signal_interrupt_handler, %function
 signal_interrupt_handler:
+    ldr x9, [x1, #568]
+    adr x10, .Linterrupt_counting
+    cmp x9, x10
+    b.lo .Linterrupt_stray
+    adr x10, .Linterrupt_counted
+    cmp x9, x10
+    b.hs .Linterrupt_stray
     ldr x9, [x1, #480]
     add x9, x9, #1
     str x9, [x1, #480]
+.Linterrupt_stray:
     ret
 .size signal_interrupt_handler, .-signal_interrupt_handler
 
@@ -316,6 +329,12 @@ signal_interrupt_handler:
  * return would not have had to keep.
  * Returns 0; 1 when the bound ran out (no handler ran); 2 when a register
  * came back changed; 3 when SP did.
+ * The handler counts only when the interrupted PC is inside the spin, from
+ * the zeroing of x21 to .Lspin_ran. A handler that runs elsewhere -- at a
+ * later syscall return when delivery at the interrupt return is missing --
+ * must not touch x21, which compiled code then holds live: the caller kept
+ * the sender's pid there, and the bump turned the cleanup wait4 into
+ * EINVAL for pid+1 (#950).
  */
 .macro spin_pattern reg, n
     movz \reg, #(0x1100 + \n)
@@ -342,6 +361,7 @@ signal_spin_run:
     stp x9, x10, [sp, #160]
     mov x20, sp
     mov x21, #0
+.Lspin_counting:
     mov x22, #1
     lsl x22, x22, #32
     .irp v, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31
@@ -424,9 +444,17 @@ signal_spin_run:
 .global signal_spin_handler
 .type signal_spin_handler, %function
 signal_spin_handler:
+    ldr x9, [x1, #568]
+    adr x10, .Lspin_counting
+    cmp x9, x10
+    b.lo .Lspin_handler_stray
+    adr x10, .Lspin_ran
+    cmp x9, x10
+    b.hs .Lspin_handler_stray
     ldr x9, [x1, #480]
     add x9, x9, #1
     str x9, [x1, #480]
+.Lspin_handler_stray:
     // Clobber what the interrupted context must get back.
     .irp n, 3,4,5,6,7,8,10,11,12,13,14,15,16,17,18
     mov x\n, #0
