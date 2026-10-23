@@ -164,7 +164,7 @@ that reaches a decision is parked and the next one taken: #908 (fixed
 QEMU lane budget), #916 (compiler GC tuning), #921 and #922
 (variant reuse, domain-parallel codegen; both wait on the land-span
 measurement after #917's front-end fixes), #927 (QEMU lanes queueing for the vCPU lease), #893 (redundant csel in variant match), #888 (array field initialized in a
-loop), #895 (SI_KERNEL for terminal signals, after #894), #726 (EINTR /
+loop), #726 (EINTR /
 SA_RESTART for a sleeping syscall), #628 (signal delivery at interrupt
 return), #652 (lifecycle trace for signals and wait4), #698 (ext2
 exhaustion as ENOSPC), #846 (TCP retransmission with no reader), #793
