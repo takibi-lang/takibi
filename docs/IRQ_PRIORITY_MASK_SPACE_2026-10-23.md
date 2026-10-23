@@ -7,7 +7,7 @@ escalating debug stop, and the lock-free DDB/crash side.
 
 | | qemu base | qemu change | rpi5 base | rpi5 change |
 | --- | --- | --- | --- | --- |
-| text | 737168 | 739884 | 789160 | 792052 |
+| text | 737168 | 739964 | 789160 | 792116 |
 | data | 4792 | 4808 | 2889640 | 2889656 |
 | bss | 1481856 | 1481920 | 1690736 | 1690736 |
 | usable_ram_start | 0x40220000 | 0x40220000 | 0x720000 | 0x720000 |
@@ -16,7 +16,7 @@ Data/BSS symbols added: `irq_pmr_masked` and `irq_pmr_ready`, 32 B each
 (one word per core, KERNEL_MAX_CORES = 4) on both targets. No record, pool
 or linker change; rpi5 BSS unchanged (absorbed by alignment).
 
-Text grows by +2716 B (qemu) and +2892 B (rpi5): the PMR mask functions,
+Text grows by +2796 B (qemu) and +2956 B (rpi5): the PMR mask functions,
 the nested-dispatch wrapper in both dispatchers, the second stop branch and
 the escalation, the try-lock paths of the debug side, and the boot-time
 `irq mask cost:` probe.
