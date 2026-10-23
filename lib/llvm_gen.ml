@@ -2001,6 +2001,134 @@ let ltype_of_ret_ast = function
   | TypeVoid | TypeView _ -> void_type context
   | t        -> ltype_of_ast t
 
+(* GitHub issue #897: the call convention of a variant whose cases carry
+   scalar payloads.
+
+   A variant's LLVM type is `{ i32 tag, payload0, payload1, ... }`, one
+   field per runtime-bearing case, and LLVM passes a first-class aggregate
+   one register per scalar leaf. ProcessEnd (Exited(u8), Signaled(u8))
+   therefore took three registers at every call and return, one of them
+   always dead, and every caller kept three values alive across its calls.
+
+   Only the active case's payload is ever read, so between Takibi functions
+   such a variant travels as `{ i32 tag, iN payload }`: the tag and the
+   active case's payload, zero-extended (a pointer as its address). That is
+   two registers whatever the number of cases. It applies when at least two
+   cases carry a runtime payload and every payload is one integer, bool or
+   pointer; N is 64 when one of them is wider than 32 bits or a pointer, 32
+   otherwise. The in-memory layout does not change.
+
+   Packing selects the active payload by tag; a constructor's constant tag
+   folds that select away, and a value passed straight through unpacks into
+   every payload field and packs back to the same register. Unpacking writes
+   the payload into every payload field; the inactive ones were undefined
+   before and nothing reads them.
+
+   The convention is chosen once, in the function's LLVM type; call sites
+   and bodies compare that type with the aggregate type and pack or unpack
+   when they differ, so a caller cannot disagree with its callee. Functions
+   that non-Takibi code calls or implements keep the aggregate convention:
+   `extern fn` and every `--external-entry` (the kernel's assembly and
+   debugger entries). *)
+let external_entry_names : (string, unit) Hashtbl.t = Hashtbl.create 8
+
+let set_external_entries names =
+  Hashtbl.reset external_entry_names;
+  List.iter (fun n -> Hashtbl.replace external_entry_names n ()) names
+
+(* The variant a runtime type is, through the wrappers ltype_of_ast sees
+   through. *)
+let rec variant_name_of_ast = function
+  | TypeVariant (name, _, targs) ->
+      let name = Generic_variant.instance_name name targs in
+      if Hashtbl.mem variant_cases_tbl name then Some name else None
+  | TypeNamed name | TypeIndexed (name, _) ->
+      if Hashtbl.mem variant_cases_tbl name then Some name else None
+  | TypeExists (_, _, t) | TypeRefined (_, _, t) | TypeMultiple (_, t)
+  | TypeSingleton (t, _) | TypeBorrow t | TypeSink t | TypeIo t ->
+      variant_name_of_ast t
+  | _ -> None
+
+(* For an eligible variant: its aggregate type, the shared payload type,
+   and each payload-bearing case as (tag, field index). *)
+let shared_payload_abi name =
+  let llty = Hashtbl.find variant_lltypes name in
+  let fields = struct_element_types llty in
+  let carriers = Hashtbl.find variant_cases_tbl name
+    |> List.filter_map (fun (_, layout) ->
+         Option.map (fun field -> (layout.variant_tag, field))
+           layout.variant_payload_field) in
+  let scalar ty = match classify_type ty with
+    | TypeKind.Integer | TypeKind.Pointer -> true
+    | _ -> false in
+  if List.length carriers < 2
+     || not (List.for_all (fun (_, f) -> scalar fields.(f)) carriers)
+  then None
+  else
+    let wide = List.exists (fun (_, f) ->
+      let ty = fields.(f) in
+      classify_type ty = TypeKind.Pointer || integer_bitwidth ty > 32)
+      carriers in
+    let slot = if wide then i64_type context else i32_type context in
+    Some (llty, slot, carriers)
+
+let abi_lltype_of_ast ty =
+  match variant_name_of_ast ty with
+  | Some name ->
+      (match shared_payload_abi name with
+       | Some (_, slot, _) -> struct_type context [| i32_type context; slot |]
+       | None -> ltype_of_ast ty)
+  | None -> ltype_of_ast ty
+
+let abi_ret_lltype_of_ast = function
+  | TypeVoid | TypeView _ -> void_type context
+  | t -> abi_lltype_of_ast t
+
+(* Pack an aggregate variant value of type `ty` for a slot of LLVM type
+   `slot_ty`, or return it unchanged when the slot is the aggregate. *)
+let to_abi_slot ty v slot_ty =
+  if type_of v = slot_ty then v
+  else match Option.bind (variant_name_of_ast ty) shared_payload_abi with
+    | None -> raise (Error "BUG: #897 abi slot differs from a non-shared-payload value")
+    | Some (_, slot, carriers) ->
+        let tag = build_extractvalue v 0 "variant.tag" builder in
+        let widen f =
+          let p = build_extractvalue v f "variant.payload" builder in
+          match classify_type (type_of p) with
+          | TypeKind.Pointer -> build_ptrtoint p slot "variant.payload.int" builder
+          | _ -> build_zext_or_bitcast p slot "variant.payload.int" builder
+        in
+        let payload = match List.rev carriers with
+          | [] -> raise (Error "BUG: #897 shared payload with no carrier")
+          | (_, last) :: rest ->
+              List.fold_left (fun acc (t, f) ->
+                let is_t = build_icmp Icmp.Eq tag
+                    (const_int (i32_type context) t) "variant.is" builder in
+                build_select is_t (widen f) acc "variant.active" builder)
+                (widen last) rest
+        in
+        let packed = build_insertvalue (undef slot_ty) tag 0 "variant.abi" builder in
+        build_insertvalue packed payload 1 "variant.abi" builder
+
+(* Unpack an argument or result of type `ty` received in `v`. *)
+let from_abi_slot ty v =
+  let llty = ltype_of_ast ty in
+  if type_of v = llty then v
+  else match Option.bind (variant_name_of_ast ty) shared_payload_abi with
+    | None -> raise (Error "BUG: #897 abi slot differs from a non-shared-payload type")
+    | Some (_, _, carriers) ->
+        let fields = struct_element_types llty in
+        let tag = build_extractvalue v 0 "variant.tag" builder in
+        let payload = build_extractvalue v 1 "variant.payload" builder in
+        let agg = build_insertvalue (undef llty) tag 0 "variant.unpacked" builder in
+        List.fold_left (fun agg (_, f) ->
+          let fty = fields.(f) in
+          let p = match classify_type fty with
+            | TypeKind.Pointer -> build_inttoptr payload fty "variant.payload" builder
+            | _ -> build_trunc_or_bitcast payload fty "variant.payload" builder
+          in
+          build_insertvalue agg p f "variant.unpacked" builder) agg carriers
+
 (* Coerce an llvalue to match a destination AST type.
    Invariant: arithmetic values arrive here at i32 (for <=32-bit types) or i64 (for 64-bit types).
    Handles truncation to narrow types, extension to i64, bool conversion,
@@ -2929,13 +3057,29 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
             | None ->
                 (* Use function name as a function pointer value *)
                 match Hashtbl.find_opt functions name with
-                | Some (_, f) ->
+                | Some (ft, f) ->
                     let param_asts = match Hashtbl.find_opt func_param_ast_types name with
                       | Some ps -> ps | None -> []
                     in
                     let ret_ast = match Hashtbl.find_opt func_ret_ast_types name with
                       | Some r -> r | None -> TypeVoid
                     in
+                    (* GitHub issue #897: an indirect call uses the Takibi
+                       small-variant convention. An extern or external
+                       entry that keeps the aggregate one cannot become a
+                       function value. *)
+                    let expected = function_type
+                      (abi_ret_lltype_of_ast ret_ast)
+                      (param_asts
+                       |> List.filter (fun t -> not (is_erased_view_type t))
+                       |> List.map (fun t -> match t with
+                            | TypeBorrowMut _ -> ltype_of_ast t
+                            | _ -> abi_lltype_of_ast t)
+                       |> Array.of_list) in
+                    if expected <> ft then
+                      raise (Error (Printf.sprintf
+                        "function '%s' passes a small variant in the convention non-Takibi code uses (extern or --external-entry); it cannot be used as a function value"
+                        name));
                     (TypeFn (param_asts, ret_ast, None), f)
                 | None when Language_words.is_predeclared_name name ->
                     (match Target_info.dma_cache_line () with
@@ -5225,7 +5369,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                    (match a.desc with
                     | Var name ->
                         (match local_find_opt locals name with
-                         | Some (Mut (_, ptr)) -> Some ptr
+                         | Some (Mut (_, ptr)) -> Some (param_ast, ptr)
                          | _ -> raise (Error (Printf.sprintf
                              "BUG: borrow mut argument '%s' has no mutable storage"
                              name)))
@@ -5233,11 +5377,14 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                         "BUG: borrow mut argument is not a bare variable"))
                | _ ->
                    let (_, av) = gen_expr ~expected_ty:param_ast locals a in
-                   Some (coerce av param_ast)
+                   Some (param_ast, coerce av param_ast)
              ) args param_asts
              |> List.filter_map Fun.id
              |> Array.of_list
            in
+           let slots = param_types ft in
+           let arg_vals = Array.mapi (fun i (param_ast, v) ->
+             to_abi_slot param_ast v slots.(i)) arg_vals in
            let ret_lty = return_type ft in
            let call_name = if ret_lty = void_type context then "" else "calltmp" in
            let v = build_call ft callee arg_vals call_name builder in
@@ -5250,6 +5397,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            if is_erased_view_type ast_ret then
              (ast_ret, erased_view_value ())
            else
+             let v = from_abi_slot ast_ret v in
              (ast_ret, to_arith_width ast_ret v)
        | None ->
            (* Indirect call: local or global function pointer variable *)
@@ -5269,16 +5417,24 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            in
            (match fn_ast_ty with
             | TypeFn (param_asts, ret_ast, _) ->
-                let param_lls = List.map ltype_of_ast param_asts |> Array.of_list in
-                let ret_ll    = ltype_of_ret_ast ret_ast in
+                (* GitHub issue #897: a function value always has the
+                   Takibi convention; taking one that does not is rejected
+                   where the value is formed. *)
+                let param_lls = List.map abi_lltype_of_ast param_asts
+                  |> Array.of_list in
+                let ret_ll    = abi_ret_lltype_of_ast ret_ast in
                 let ft        = function_type ret_ll param_lls in
                 let arg_vals  =
-                  List.map2 (fun a param_ast ->
-                    coerce (snd (gen_expr ~expected_ty:param_ast locals a)) param_ast
-                  ) args param_asts |> Array.of_list
+                  List.mapi (fun i (a, param_ast) ->
+                    to_abi_slot param_ast
+                      (coerce (snd (gen_expr ~expected_ty:param_ast locals a)) param_ast)
+                      param_lls.(i)
+                  ) (List.combine args param_asts) |> Array.of_list
                 in
                 let call_name = if ret_ll = void_type context then "" else "calltmp" in
                 let v = build_call ft fn_ptr arg_vals call_name builder in
+                let v = if ret_ll = void_type context then v
+                  else from_abi_slot ret_ast v in
                 (ret_ast, to_arith_width ret_ast v)
             | _ ->
                 raise (Error (Printf.sprintf
@@ -5747,7 +5903,7 @@ let gen_func ?prog_types fdef =
      never saw -- raise instead of quietly re-declaring it (which used to
      populate `functions`/`func_ret_ast_types` but not
      `func_param_ast_types`, a real asymmetry masked by this fallback). *)
-  let (_, f) =
+  let (f_ty, f) =
     match Hashtbl.find_opt functions key with
     | Some x -> x
     | None -> raise (Error (Printf.sprintf
@@ -5902,7 +6058,8 @@ let gen_func ?prog_types fdef =
       | _ ->
           let ptr = build_alloca (ltype_of_ast ast_ty) name builder in
           apply_struct_align ast_ty ptr;
-          let inst = build_store (param f i) ptr builder in
+          let inst = build_store
+              (from_abi_slot ast_ty (param f i)) ptr builder in
           if !debug_info_enabled && is_debug_aggregate_ty ast_ty then set_volatile true inst;
           local_bind locals name binding_id (Mut (ast_ty, ptr));
           declare_var ~is_param:true ~argno:(i + 1) ~name ~ast_ty
@@ -6018,7 +6175,7 @@ let gen_func ?prog_types fdef =
         if is_erased_view_type ret_ast then
           emit_profile_return key (fun () -> ignore (build_ret_void builder))
         else
-          let rv = coerce v ret_ast in
+          let rv = to_abi_slot ret_ast (coerce v ret_ast) (return_type f_ty) in
           emit_profile_return key (fun () -> ignore (build_ret rv builder))
 
     | Expr e ->
@@ -6752,7 +6909,7 @@ let gen_func ?prog_types fdef =
     if ret_ast = TypeVoid || is_erased_view_type ret_ast then
       emit_profile_return key (fun () -> ignore (build_ret_void builder))
     else
-      let rv = const_int (ltype_of_ast ret_ast) 0 in
+      let rv = to_abi_slot ret_ast (const_int (ltype_of_ast ret_ast) 0) (return_type f_ty) in
       emit_profile_return key (fun () -> ignore (build_ret rv builder))
   end;
 
@@ -7247,11 +7404,19 @@ let declare_func ?prog_types fdef =
       | Some (TypeBorrowMut _) -> TypeBorrowMut resolved
       | _ -> resolved
     ) fdef.params in
+    (* GitHub issue #897: an external entry keeps the aggregate convention
+       its assembly or debugger caller expects. *)
+    let entry = Hashtbl.mem external_entry_names key in
     let param_lls = param_ast
       |> List.filter (fun t -> not (is_erased_view_type t))
-      |> List.map ltype_of_ast |> Array.of_list in
+      |> List.map (fun t -> match t with
+           | TypeBorrowMut _ -> ltype_of_ast t
+           | _ when entry -> ltype_of_ast t
+           | _ -> abi_lltype_of_ast t)
+      |> Array.of_list in
     let ret_ast   = resolve_ret_ast prog_types key fdef.ret_type in
-    let ret_ll    = ltype_of_ret_ast ret_ast in
+    let ret_ll    = if entry then ltype_of_ret_ast ret_ast
+      else abi_ret_lltype_of_ast ret_ast in
     let ft        = function_type ret_ll param_lls in
     let f         = declare_function key ft !the_module in
     (* A region built-in is emitted for every element type a program names,

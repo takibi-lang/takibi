@@ -623,6 +623,7 @@ let () =
           Type_layout.register_variant name cases
       | _ -> ()) (Generic_variant.instance_defs prog
                     (Type_inf.generic_variant_site_instances ()));
+    Llvm_gen.set_external_entries !external_entries;
     Llvm_gen.gen_program ~prog_types prog;
 
     (* GitHub issue #362: the three layout implementations must still
