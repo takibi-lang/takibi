@@ -10,8 +10,8 @@ The rule: outside the files below, kernel code names the current core with
 the platform's `cpu_id()`, never by reading MPIDR_EL1. Each allowed file
 says why it must read the register itself.
 
-Lexical: comments are stripped (Takibi comments by source_scan.code_only,
-assembly `//` and `/* */` comments here), then any `mpidr_el1` token is a
+Lexical: comments are stripped by source_scan.code_only (the kernel's .S
+files use the same `//` and `/* */` comments), then any `mpidr_el1` token is a
 read. A built-in control proves a read in another file is refused.
 """
 
@@ -34,13 +34,11 @@ ALLOWED = {
 }
 
 MPIDR_RE = re.compile(r"mpidr_el1\b", re.IGNORECASE)
-ASM_COMMENT_RE = re.compile(r"/\*.*?\*/|//[^\n]*", re.DOTALL)
 
 
 def strip(path: str, text: str) -> str:
-    if path.endswith(".tkb"):
-        return code_only(text)
-    return ASM_COMMENT_RE.sub(lambda m: re.sub(r"[^\n]", " ", m.group(0)), text)
+    # The kernel's .S files use the same // and /* */ comments as Takibi.
+    return code_only(text)
 
 
 def violations(files: dict[str, str]) -> list[str]:
