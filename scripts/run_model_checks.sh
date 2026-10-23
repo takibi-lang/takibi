@@ -212,7 +212,9 @@ check_model WorldStopRetry Safety 4 \
     maskedbackoff:CInitMaskedBackoff:temporal:ok \
     holdlock:CInitHoldLock:temporal:ok \
     stuck:CInitStuck:temporal:ok \
-    shortbudget:CInitShortBudget:temporal:ok
+    shortbudget:CInitShortBudget:temporal:ok \
+    debugstop:CInitDebugStop:pass:ok \
+    debuglocks:CInitDebugLocks:temporal:ok
 
 # GitHub issue #720: RegionTransfer.tkb is the protocol declaration form of
 # SharedRegionTransfer above. Its generated model must reproduce the fixed

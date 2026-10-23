@@ -715,9 +715,13 @@ satisfy the board witness. No ordinary terminal ring or DDB ring rendezvous
 remains. Kernel log lines are a separate stream that writes the retained log
 ring directly from every CPU.
 
-This tests a finite holder. UART BREAK and the stop SGI are IRQ-dependent:
-a permanently IRQ-masked CPU can prevent entry or complete world-stop. DDB
-refuses shared-state inspection without all required acknowledgements. Such
+This tests a finite holder. UART BREAK is IRQ-dependent, but reaches any
+online core. DDB's world stop escalates to the pseudo-NMI SGI above the GIC
+priority mask (GitHub issue #920), so a peer masked in a lock or hung in a
+handler is stopped too, and DDB then takes no lock it could own
+(`debug_stopped`); only a peer with DAIF.I set for good prevents a complete
+stop. DDB refuses shared-state inspection without all required
+acknowledgements. Such
 failures need the existing external SWD or QEMU host diagnostics; an independent
 exception-based entry route is outside the maintained debugger guarantee.
 

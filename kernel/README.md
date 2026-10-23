@@ -418,12 +418,20 @@ rather than overwritten. The transcript can contain typed shell commands,
 command output, addresses, and other sensitive session data, so review it
 before sharing.
 
-DDB entry through UART BREAK and the peer stop SGI depends on IRQ delivery.
-A finite console critical section may delay entry until its guard is released;
-the maintained UART-BREAK lanes exercise this case on QEMU and RPi5. A CPU
-permanently masking IRQs may prevent entry or a complete world-stop. DDB does
-not inspect shared state without the required acknowledgements; use external
-SWD or QEMU host diagnostics in that case.
+DDB entry through UART BREAK depends on IRQ delivery to SOME core: the UART
+interrupt goes to every online core, so one core spinning masked does not keep
+a BREAK out. A finite console critical section may delay entry until its guard
+is released; the maintained UART-BREAK lanes exercise this case on QEMU and
+RPi5. The IRQ mask is the GIC priority mask (GitHub issue #920), and DDB's
+world stop escalates to a pseudo-NMI SGI above it, so a peer that spins with
+IRQs masked -- in a lock, or hung inside an interrupt handler -- is still
+stopped and inspected (the DDB lane's hung-core BREAK). What still prevents a
+complete stop is a peer with DAIF.I set for good: a fault loop at EL1 or a
+core that never came up. DDB does not inspect shared state without the
+required acknowledgements; use external SWD or QEMU host diagnostics then.
+Because a core the debug stop holds may own any lock, DDB and the crash path
+take none once they have stopped the machine (the compiler's
+`debug_stopped` rule).
 
 To stop a live kernel in DDB from either `make kernelsh-qemu` or
 `make kernelsh-rpi5`, press Ctrl-T and then the ordinary lowercase `b` key.

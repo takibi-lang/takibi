@@ -33,7 +33,11 @@ CONSTANTS
     \* @type: Bool;
     LONG_ENDS,       \* a masked section longer than the budget still ends
     \* @type: Bool;
-    BUDGET_COVERS    \* Timeout only while some target cannot ack in time
+    BUDGET_COVERS,   \* Timeout only while some target cannot ack in time
+    \* @type: Bool;
+    NMI_STOP,        \* #920: the debug stop, which reaches masked CPUs
+    \* @type: Bool;
+    STOPPED_LOCKS    \* the work under the token takes the modelled lock
 VARIABLES
     \* @type: Int -> Str;
     pc,
@@ -74,6 +78,10 @@ Init ==
 AckAccepts == ANY_INITIATOR \/ owner = 1
 
 IrqOpen(c) == pc[c] = "Run" \/ (pc[c] = "Backoff" /\ OPEN_BACKOFF)
+    \* GitHub issue #920: the debug stop escalates to the NMI-priority SGI,
+    \* which a CPU takes inside a masked section, a lock spin or a hung
+    \* handler, and while holding the lock.
+    \/ (NMI_STOP /\ pc[c] \in {"Masked", "Spin", "Long"})
 
 \* The SGI is pending at c. A pending SGI is taken at the first instruction
 \* that runs with IRQs open, so while it is pending an IRQ-open CPU does
@@ -87,9 +95,11 @@ Pending(c) ==
 
 \* Target t cannot acknowledge within the spin budget of initiator o.
 LongMasked(t, o) ==
-    \/ pc[t] = "Long"                       \* masked past the budget
+    \* The debug stop (#920) reaches a masked or spinning CPU anyway.
+    \/ (pc[t] = "Long" /\ ~NMI_STOP)        \* masked past the budget
     \/ pc[t] = "Dead"
-    \/ (pc[t] = "Spin" /\ (lock = o \/ (lock # 0 /\ pc[lock] = "Pen")))
+    \/ (pc[t] = "Spin" /\ ~NMI_STOP
+        /\ (lock = o \/ (lock # 0 /\ pc[lock] = "Pen")))
     \/ (pc[t] \in {"Try", "Backoff"} /\ ~OPEN_BACKOFF)
     \/ ~AckAccepts
 
@@ -217,6 +227,11 @@ Timeout(c) ==
 \* back-off and finds a current generation (Retry).
 Finish(c) ==
     /\ pc[c] = "Wait" /\ owner = c /\ phase = "Complete"
+    \* asid_rollover_stopped takes asid_cell under the token. Under the
+    \* quiescent stop no held CPU can own it; under the debug stop one can,
+    \* and the work waits for it forever (variant debuglocks). The compiler
+    \* rejects that shape: a debug_stopped root reaches no lock (#920).
+    /\ (~STOPPED_LOCKS \/ lock \in {0, c})
     /\ pc' = [pc EXCEPT ![c] = IF lock = c THEN "Masked" ELSE "Run"]
     /\ phase' = "Idle"
     /\ owner' = 0
@@ -272,10 +287,14 @@ RetrySucceeds == \A c \in Cpus : (c \in wants) ~> (c \notin wants)
 \* Every stopped CPU is resumed: release lets exactly the pen go.
 PenResumes == \A c \in Cpus : (pc[c] = "Pen") ~> (pc[c] # "Pen")
 
-\* @type: (Bool, Bool, Bool, Bool, Bool, Bool) => Bool;
-Variant(r, a, o, l, e, b) ==
+\* @type: (Bool, Bool, Bool, Bool, Bool, Bool, Bool, Bool) => Bool;
+Variant8(r, a, o, l, e, b, n, s) ==
     /\ RETRY = r /\ ANY_INITIATOR = a /\ OPEN_BACKOFF = o
     /\ LOCK_FREE_STOP = l /\ LONG_ENDS = e /\ BUDGET_COVERS = b
+    /\ NMI_STOP = n /\ STOPPED_LOCKS = s
+\* The quiescent stop, whose work (the ASID rollover) takes the lock.
+\* @type: (Bool, Bool, Bool, Bool, Bool, Bool) => Bool;
+Variant(r, a, o, l, e, b) == Variant8(r, a, o, l, e, b, FALSE, TRUE)
 CInitFixed == Variant(TRUE, TRUE, TRUE, TRUE, TRUE, TRUE)
 CInitFailStop == Variant(FALSE, TRUE, TRUE, TRUE, TRUE, TRUE)
 CInitCore0Ack == Variant(TRUE, FALSE, TRUE, TRUE, TRUE, TRUE)
@@ -283,4 +302,9 @@ CInitMaskedBackoff == Variant(TRUE, TRUE, FALSE, TRUE, TRUE, TRUE)
 CInitHoldLock == Variant(TRUE, TRUE, TRUE, FALSE, TRUE, TRUE)
 CInitStuck == Variant(TRUE, TRUE, TRUE, TRUE, FALSE, TRUE)
 CInitShortBudget == Variant(TRUE, TRUE, TRUE, TRUE, TRUE, FALSE)
+\* #920: the debug stop, lock-free under its token (the debug_stopped rule),
+\* reaches even a CPU masked for good; and the same stop whose work takes
+\* the lock deadlocks against a held holder.
+CInitDebugStop == Variant8(TRUE, TRUE, TRUE, TRUE, FALSE, TRUE, TRUE, FALSE)
+CInitDebugLocks == Variant8(TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE)
 =============================================================================

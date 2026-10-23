@@ -28,3 +28,6 @@ LogRing fixed2 CommitLost: only variant noprev lets a claim take a Reserved slot
 # Under GICv2's active-state gate the busy word is cleared before the EOI
 # that lets the SPI reach another core, so the try-lock is never contended.
 UartServe gated TryLockBusy: the active gate keeps a second core out until the server's EOI, after its release
+WorldStopRetry debugstop LongExit: the variant keeps one CPU masked for good (LONG_ENDS false), which the debug stop must still reach
+WorldStopRetry debugstop NeedLocked: only variant holdlock begins a stop while holding the lock
+WorldStopRetry debugstop Timeout: the debug stop reaches every target, so no target is masked past the budget (#920)
