@@ -67,8 +67,7 @@ taken (#894, already under way here, finishes here; its follow-ups go to
 B): #819 (AtomicWord acq_rel cells), #920 (DDB world stop reaching a core
 spinning with IRQs masked: pseudo-NMI/FIQ stop, cf. #641; the hung-core
 DDB check is expected-fail until then), #932 (one timer-tick entry
-for every core, after #920), #933 (reboot on any core, after #920), #681 (region_pool per-slot false
-sharing), #680 (region_pool handle validation without the lock), #812
+for every core, after #920), #933 (reboot on any core, after #920), #680 (region_pool handle validation without the lock), #812
 (contiguous page run search), #748 (page allocator metadata lending), #807
 (product of two bounded variables), #798 (one width check for s[off + k]),
 #799 (sizeof proved at type-check time), #900 (page_allocator_total_count's
