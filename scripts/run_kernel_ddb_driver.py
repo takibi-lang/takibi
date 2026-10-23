@@ -237,6 +237,7 @@ def send_break(args, deadline):
                        b'"arguments":{"id":"debug_uart"}}\n')
         if "return" not in qmp_reply(qmp_file):
             raise SystemExit("QMP could not send the hung-core serial BREAK")
+        qmp_file.close()
 
 
 def arm_hung_core(args):
@@ -488,6 +489,10 @@ def capture_loop(args, serial, deadline, ceiling, ready_file, release_file, netw
                         b'"arguments":{"id":"debug_uart"}}\n')
                     if "return" not in qmp_reply(qmp_file):
                         raise SystemExit("QMP could not send the serial BREAK")
+                    # A socket closes only once its makefile is closed too;
+                    # QEMU's monitor greets one client at a time, so a
+                    # lingering one would starve the hung-core BREAK (#830).
+                    qmp_file.close()
                 hold_release.touch()
                 if hold.wait(timeout=10) != 0:
                     raise SystemExit("held console BREAK rendezvous failed; see .hold-gdb.log")
