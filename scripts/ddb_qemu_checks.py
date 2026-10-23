@@ -198,6 +198,29 @@ def root_evidence(text):
 # before the second BREAK.
 HUNG_CORE = 1
 
+# GitHub issue #920 (maintainer decision on #830, 2026-10-23, option B):
+# the world stop is an SGI and cannot reach a core spinning with IRQs
+# masked, so the hung-core BREAK is expected to stop partially and refuse
+# inspection. While this names an issue, exactly that refusal is accepted
+# and anything else fails -- including an unexpected pass, which means the
+# stop now reaches the masked core and this marker must be removed.
+HUNG_CORE_EXPECTED_FAIL = "#920"
+HUNG_CORE_EXPECTED_SYMPTOM = "hung-core BREAK: the world stop did not reach the masked "
+
+
+def hung_core_verdict(text):
+    """hung_core_problems, read through HUNG_CORE_EXPECTED_FAIL."""
+    problems = hung_core_problems(text)
+    if not HUNG_CORE_EXPECTED_FAIL:
+        return problems
+    if not problems:
+        return [f"hung-core BREAK: unexpected pass: the world stop reached the "
+                f"masked cpu {HUNG_CORE}; remove HUNG_CORE_EXPECTED_FAIL "
+                f"({HUNG_CORE_EXPECTED_FAIL})"]
+    if len(problems) == 1 and problems[0].startswith(HUNG_CORE_EXPECTED_SYMPTOM):
+        return []
+    return problems
+
 
 def hung_core_problems(text):
     """The hung-core BREAK (GitHub issue #830): the second DDB entry, if the
@@ -288,7 +311,7 @@ def capture_problems(text, metadata, hold_text=""):
         # GitHub issue #830 (D2, maintainer 2026-10-23): the second BREAK
         # arrives while HUNG_CORE spins with interrupts masked. Another core
         # must enter DDB, and the world stop must reach the hung core too.
-        problems.extend(hung_core_problems(text))
+        problems.extend(hung_core_verdict(text))
         migrated = text.find("workload: busy pair migrated across both cpus with stack handoff intact\n")
         stacks = text.find(f"ddb: stacks cpus={online_cpus(metadata)} processes=")
         if not 0 <= migrated < stacks:

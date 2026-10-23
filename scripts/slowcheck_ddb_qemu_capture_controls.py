@@ -98,13 +98,20 @@ def main():
             run(text.replace("ddb: stack cpu=1 status=idle", "missing idle"), metadata, hold, "boot idle root")
         run(text + "ddb: intr count cpu=0 intid=2 count=1\n", metadata, hold, "fixture SGI on CPU 0")
         if source == "uart":
-            # GitHub issue #830: a hung-core BREAK whose stop stayed partial,
-            # or that entered on the masked core, is refused.
-            run(text.replace("ddb: world-stop complete mask=0x0000000000000002",
-                             "ddb: world-stop partial mask=0x0000000000000000; inspection refused"),
-                metadata, hold, "hung-core BREAK: the world stop did not reach")
-            run(text.replace("ddb: break seq=2 cpu=0 ", "ddb: break seq=2 cpu=1 "),
+            # GitHub issue #830/#920: the fixture's hung-core BREAK stops
+            # partially, as expected while #920 is open. A stop that reaches
+            # the masked core is an unexpected pass; one that entered on the
+            # masked core, or never entered, is refused.
+            partial = "ddb: world-stop partial mask=0x0000000000000005; inspection refused\n"
+            complete = ("ddb: interrupt-safe UART debugger\n"
+                        "ddb: world-stop complete mask=0x0000000000000002\n"
+                        "ddb: break seq=2 cpu={cpu} elr=0x000000004000c150 sp_el0=0x00000000bffffdc0\n")
+            run(text.replace(partial, complete.format(cpu=0)),
+                metadata, hold, "hung-core BREAK: unexpected pass")
+            run(text.replace(partial, complete.format(cpu=1)),
                 metadata, hold, "hung-core BREAK: entered on the masked cpu")
+            run(text.replace(partial, ""),
+                metadata, hold, "hung-core BREAK: no second DDB entry")
         # GitHub issue #830: the stop mask follows the core that entered, so
         # a capture whose BREAK line names another core refuses the mask.
         run(re.sub(r"^(ddb: break seq=[0-9]+ cpu=)[0-9]+ ", r"\g<1>2 ", text, flags=re.MULTILINE),
