@@ -4,6 +4,9 @@
 # Every case uses a fictitious board and a command that touches nothing, so
 # this runs anywhere and never drives real hardware.
 set -euo pipefail
+# The planted vCPU waits below (lane-a, lane-b, ...) are not the run's own:
+# without this they land in the enclosing allcheck's lease-wait summary (#914).
+unset TAKIBI_LANE_TIMING_DIR TAKIBI_AWAIT_TIMING_LANE
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 helper="$repo_root/scripts/resource_lease.sh"
