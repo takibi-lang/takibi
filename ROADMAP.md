@@ -69,8 +69,7 @@ first), #819 (AtomicWord acq_rel cells), #920 (DDB world stop reaching a core
 spinning with IRQs masked: pseudo-NMI/FIQ stop, cf. #641; the hung-core
 DDB check is expected-fail until then), #932 (one timer-tick entry
 for every core, after #920), #933 (reboot on any core, after #920), #680 (region_pool handle validation without the lock), #812
-(contiguous page run search), #807
-(product of two bounded variables), #798 (one width check for s[off + k]),
+(contiguous page run search), #798 (one width check for s[off + k]),
 #799 (sizeof proved at type-check time).
 
 Done on the stored-authority route (2026-10-09): #637 stage 1's
@@ -129,9 +128,9 @@ list (maintainer, 2026-10-09).
    requests per ring (S2) will need a request identity beyond the TRB
    address); general exclusive backing
    storage is done (2026-10-12: `region let mut` backing globals, whose name
-   has no use besides the claim); the one run-time guard left by a
-   context-stride product is
-   #807 (refinement bound for a product of two bounded variables). log.tkb's raw sites go with
+   has no use besides the claim); the context-stride product's run-time
+   guard is gone (2026-10-23, #807: the checker multiplies two refined
+   ranges). log.tkb's raw sites go with
    #613: a lockless multi-writer log ring with its protocol in the type
    system, its orderings checked by #645's herd7 litmus tests.
 4. **Preemption.** #638's typed preparation -- a preemption-disabled
