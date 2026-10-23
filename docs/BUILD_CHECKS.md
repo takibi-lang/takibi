@@ -158,6 +158,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_comment_strippers_controls.py` | each pre-#818 stripper shape is refused; a commented shape, a longer comment anchor and `source_scan` itself pass; stale allow-list entries are refused |
 | `check_text_search.py` | no `String.sub s i m = x` (or `<>`) at a non-zero offset in lib/ or bin/: a search must use `lib/text_search.ml`, which does not allocate per position (#917) |
 | `check_text_search_controls.py` | each pre-#917 search shape is refused; a prefix test at 0, a value use, a comment and `==` pass |
+| `check_compile_alloc_budget_controls.py` | the pre-#917 allocation, one word over budget, malformed counts and an unknown target are refused by `buildcheck_compile_alloc_budget.py`; the budget and the measurement pass (#923) |
 | `check_fast_gate_no_spawn.py` | no fast-gate Python member spawns a non-git process (subprocess, os.system, os.exec/spawn) unless reviewed with why it stays fast (#808: a member waiting on children overran the 10 s bound under the parallel allcheck; such members are `slowcheck_*`) |
 | `check_fast_gate_no_spawn_controls.py` | a Python child, a compiler child, a computed argv, os.system and os.execv are refused; git and a spawn named in a string pass; stale reviewed entries are refused |
 | `check_lock_rank_wrappers_controls.py` | the process pool losing its rank, a commented rank, new unranked region, mutex and one-line wrappers, a neighbour's rank, and a stale exemption are each refused |
@@ -291,6 +292,7 @@ run them, and why they sit outside both globs above.
 | `buildcheck_kernel_memory_map.py` | Check kernel/MEMORY_MAP.md and allocator fixtures; render QEMU boot capacity from the loaded ELF |
 | `buildcheck_ext2_reproducible.sh` | run by kernelbuild-check: rebuilds ext2.img and ext2-shell.img from the same inputs and fails on any byte difference; the control rebuilds at another `KERNEL_EXT2_FAKE_TIME` and requires a difference; the prior images are restored with their timestamps (#890) |
 | `buildcheck_kernel_unused_coverage.py` | every kernel file a target compiles is checked for unused functions or exempt for a stated reason |
+| `buildcheck_compile_alloc_budget.py` | the QEMU kernel main.o compile allocates no more OCaml heap words (`--emit-alloc-words`) than its recorded budget; a load-independent guard on compiler speed (#923) |
 | `measure_trusted_base.py --check-raw-deref` | the raw-pointer dereference ratchet (#639): run by each kernel object's rule on the compiler's `--emit-raw-deref-audit`, including standalone EL0 payload objects, it holds every file's dereference count to `raw_deref_budget.tsv`, so the count can only go down on purpose. Also the trusted-boundary inventory of `make trustedbasecheck` |
 | `buildcheck_suite_output.py` | Split a batched UART stream and compare each case with its fixture |
 | `buildcheck_user_payload_no_rw_globals.py` | TODO |
