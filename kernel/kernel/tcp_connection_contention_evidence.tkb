@@ -156,6 +156,47 @@ private fn tcp_pin_cost_report(sample: usize, pin_ticks: i64,
     kernel_boot_log("\n");
 }
 
+// GitHub issue #920: the irqsave cost the GIC priority mask adds, measured
+// beside the TCP samples. `pmr` is today's mutex_irq_save/restore pair (a
+// shadow load, an MMIO store to GICC_PMR each way, DAIF.I cleared on
+// unmask); `daif` is the same pair as it was before #920 (mrs DAIF, msr
+// DAIFSet/DAIFClr), with the same irqsoff hooks. Both from IRQs enabled.
+// Observations, not limits.
+private fn irq_mask_cost_pmr() -> i64 !{unsafe} {
+    let start: i64 = tcp_pin_cost_clock();
+    for round: usize in 0..<4096 {
+        let flags: usize = mutex_irq_save();
+        mutex_irq_restore(flags);
+    }
+    return tcp_pin_cost_clock() - start;
+}
+
+private fn irq_mask_cost_daif() -> i64 !{unsafe} {
+    let start: i64 = tcp_pin_cost_clock();
+    for round: usize in 0..<4096 {
+        let flags: usize = (mrs_daif() >> 7) & 1;
+        msr_daifset_irq();
+        if (flags == 0) { irqsoff_open(); }
+        if (flags == 0) { irqsoff_close(); }
+        if (flags == 0) { msr_daifclr_irq(); }
+    }
+    return tcp_pin_cost_clock() - start;
+}
+
+private fn irq_mask_cost_report(sample: usize) !{unsafe} {
+    let pmr: i64 = irq_mask_cost_pmr();
+    let daif: i64 = irq_mask_cost_daif();
+    kernel_boot_log("irq mask cost: sample=");
+    uart_put_udec(sample);
+    kernel_boot_log(" rounds=4096 pmr=");
+    uart_put_udec(pmr as usize);
+    kernel_boot_log(" daif=");
+    uart_put_udec(daif as usize);
+    kernel_boot_log(" frequency=");
+    uart_put_udec(read_cntfrq() as usize);
+    kernel_boot_log("\n");
+}
+
 must_use variant TcpPinCostEvidence { Failed; Complete; }
 
 fn tcp_pin_cost_evidence(ready: borrow NetRxCanAcquire) -> TcpPinCostEvidence !{unsafe} {
@@ -225,6 +266,7 @@ fn tcp_pin_cost_evidence(ready: borrow NetRxCanAcquire) -> TcpPinCostEvidence !{
             return TcpPinCostEvidence::Failed;
         }
         tcp_pin_cost_report(sample, pin_ticks, owner_ticks, small_ticks, large_ticks);
+        irq_mask_cost_report(sample);
     }
     let final_owner = match tcp_connection_take(address, generation) {
         TcpConnectionTakeResult::Missing => { return TcpPinCostEvidence::Failed; }
