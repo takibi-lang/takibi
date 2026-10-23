@@ -4163,6 +4163,8 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                     the same refined_product_range decides. *)
                  let (lo, hi) = Type_inf.refined_product_range a b c d in
                  refined_or_base base lo hi
+                   ~ob:(e.loc, Range_obligation.Mul, Range_obligation.Range (a, b),
+                        Some (Range_obligation.Range (c, d)))
              | _ -> canon_ty ty1
            in
            (ret_ty, build_mul v1 v2 "multmp" builder)

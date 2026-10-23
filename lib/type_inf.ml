@@ -3692,6 +3692,8 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                 unify_at e.loc base1 base2;
                 let (lo, hi) = refined_product_range a b c d in
                 refined_or_base base1 lo hi
+                  ~ob:(e.loc, Range_obligation.Mul, Range_obligation.Range (a, b),
+                       Some (Range_obligation.Range (c, d)))
             | _ ->
                 let ct1 = canon_ty t1 and ct2 = canon_ty t2 in
                 unify_at e.loc ct1 ct2;
