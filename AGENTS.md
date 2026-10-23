@@ -121,6 +121,11 @@ timing, caches, or concurrency -- not on every commit. One board serves every
 session, so a hardware lane per commit makes it the queue everyone waits in.
 QEMU lanes carry no such cost; run them freely.
 
+Adding a QEMU lane is different: every lane adds its own time to every land.
+A new error-case or race test goes into an existing lane of its kind
+(`docs/LANE_INVENTORY.md` classifies them); a new lane, or raising either
+number in `scripts/check_lane_budget.py`, needs the maintainer (#908).
+
 Treat any target whose name contains `allcheck`, `hwcheck`, or `kernelcheck`
 as hardware-touching, because those aggregates reach the hardware lanes even
 when the change under test is unrelated. `make cicheck`, `make allbuild` and

@@ -201,6 +201,8 @@ suffix is description; dispatch reads only the prefix.
 | `check_raw_pos_fname.py` | source identity uses the canonical path helpers |
 | `check_keyword_tables.py` | the lexer's keyword table and `Language_words.hard_keywords` name the same words, so a new keyword cannot silently lex as an identifier (#704) |
 | `check_repeat_kernel_lane_controls.sh` | Regression controls for the repeat runner's two modes |
+| `check_lane_budget.py` | allcheck runs at most 25 leaf QEMU lanes and, when `_build/lane-timing` is present, the last allcheck spent at most 9000 lane-seconds; a new error case joins an existing lane (`docs/LANE_INVENTORY.md`, #908) |
+| `check_lane_budget_controls.py` | an added lane is counted, aggregates expand to leaves, both budget boundaries hold, a renamed lane list is refused and receipts are summed |
 | `check_roadmap_size.py` | ROADMAP.md stays the current work split rather than regrowing into a knowledge base |
 | `check_lane_kernel_prereqs.py` | no public phony Make target names a kernel build output as a direct prerequisite; it must build it under the kernel build lock (#645 land: litmuscheck raced allcheck's kernel lanes on ext2.img) |
 | `check_lane_kernel_prereqs_controls.py` | a direct object, a continued-line image and a literal kernel/build path are refused; private inner targets, file rules, order-only directories and reviewed targets pass |
