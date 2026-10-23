@@ -140,7 +140,10 @@ class TakibiVariantLayout(gdb.Command):
 
 
 class TakibiForceVariantReturn(gdb.Command):
-    """Return immediately from the current function with a payload-free variant case."""
+    """Return immediately from the current function with a variant case.
+
+    A payload-free case takes no value. A case whose payload is one scalar
+    takes it as a third argument (GitHub issue #897)."""
 
     def __init__(self):
         super().__init__("takibi-force-variant-return", gdb.COMMAND_RUNNING)
@@ -149,15 +152,17 @@ class TakibiForceVariantReturn(gdb.Command):
         if _takibi_debug_metadata is None:
             raise gdb.GdbError("load metadata with takibi-debug-metadata first")
         args = gdb.string_to_argv(argument)
-        if len(args) != 2:
+        if len(args) not in (2, 3):
             raise gdb.GdbError(
-                "usage: takibi-force-variant-return TYPE CASE")
+                "usage: takibi-force-variant-return TYPE CASE [PAYLOAD]")
         variant = _takibi_named(
             _takibi_debug_metadata["variants"], args[0], "variant")
         case = _takibi_named(variant["cases"], args[1], "variant case")
-        if case["payload"] is not None:
+        payload = case["payload"]
+        if (payload is None) != (len(args) == 2):
             raise gdb.GdbError(
-                "takibi-force-variant-return only supports payload-free cases")
+                "a payload-free case takes no PAYLOAD; a payload case needs one")
+        payload_value = int(args[2], 0) if payload is not None else 0
         abi = variant.get("return_abi")
         if abi is None:
             raise gdb.GdbError(
@@ -168,13 +173,19 @@ class TakibiForceVariantReturn(gdb.Command):
         value_bytes = bytearray(variant["size"])
         tag_offset = variant["tag_offset"]
         value_bytes[tag_offset:tag_offset + len(tag_bytes)] = tag_bytes
+        if payload is not None:
+            start = payload["offset"]
+            value_bytes[start:start + payload["size"]] = payload_value.to_bytes(
+                payload["size"], byteorder="little", signed=False)
 
         register_values = []
         if abi["kind"] == "tag_payload":
             # GitHub issue #897: tag in one register, the active case's
             # payload in another. A payload-free case leaves the payload
-            # register unread.
+            # register unread; a payload case's value goes there whole.
             register_values.append((abi["tag_register"], int(case["tag"])))
+            if payload is not None:
+                register_values.append((abi["payload_register"], payload_value))
         elif abi["kind"] == "registers":
             for part in abi["parts"]:
                 start = part["offset"]

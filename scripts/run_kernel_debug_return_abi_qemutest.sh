@@ -139,7 +139,7 @@ fail() {
 [ "$qemu_status" -eq 0 ] || fail "QEMU exited with status $qemu_status before the fixture's semihosting exit"
 grep -qx 'debug-return-abi: done' "$RUN_DIR/uart.log" ||
     fail "the fixture never reported done"
-for probe in direct eight nine shared; do
+for probe in direct eight nine shared payload; do
     grep -qx "debug-return-abi: $probe control observed=normal" "$RUN_DIR/uart.log" ||
         fail "$probe control round did not observe an intact normal result"
     observed="$(sed -n "s/^debug-return-abi: $probe forced observed=//p" "$RUN_DIR/uart.log")"
@@ -150,8 +150,9 @@ done
 for expected in 'DebugAbiDirect::Forced via registers' \
                 'DebugAbiEightLeaves::Forced via registers' \
                 'DebugAbiNineLeaves::Forced via indirect' \
-                'DebugAbiShared::Forced via tag_payload'; do
+                'DebugAbiShared::Forced via tag_payload' \
+                'DebugAbiShared::Wide via tag_payload'; do
     grep -qF "takibi-force-variant-return: $expected" "$gdb_log" ||
         fail "GDB did not report '$expected'"
 done
-echo "PASS $LABEL: forced results arrived through the real return convention at four, eight and nine leaves and a shared payload"
+echo "PASS $LABEL: forced results arrived through the real return convention at four, eight and nine leaves and a shared payload, forced with and without one"

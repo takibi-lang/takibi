@@ -12,6 +12,9 @@ reason would also exit non-zero.
   c-size-rule:       the C aggregate rule, every result over 16 bytes
                      through x8, so the 32-byte four-leaf result and the
                      eight-leaf result are described as indirect.
+  per-field-registers: the pre-#897 rule for a scalar-payload variant,
+                     one register per case's field, so a forced payload
+                     goes to x2 while the caller reads x1.
 """
 
 from qemu_vcpu_lease import lease
@@ -31,6 +34,8 @@ EXPECTED = {
         "return ABI mismatch at nine: the caller observed normal-corrupt",
     "c-size-rule":
         "return ABI mismatch at direct: the caller observed normal-corrupt",
+    "per-field-registers":
+        "return ABI mismatch at payload: the caller observed normal-corrupt",
 }
 
 
@@ -44,6 +49,16 @@ def regress(metadata, mode):
             variant["return_abi"] = {"kind": "registers",
                                      "return_address_register": "x30",
                                      "parts": leaves}
+        if mode == "per-field-registers" and abi["kind"] == "tag_payload":
+            parts = [{"register": "x0", "offset": 0, "size": 4}]
+            for case in variant["cases"]:
+                if case["payload"] is not None:
+                    parts.append({"register": f"x{len(parts)}",
+                                  "offset": case["payload"]["offset"],
+                                  "size": case["payload"]["size"]})
+            variant["return_abi"] = {"kind": "registers",
+                                     "return_address_register": "x30",
+                                     "parts": parts}
         if mode == "c-size-rule" and variant["size"] > 16:
             variant["return_abi"] = {"kind": "indirect",
                                      "pointer_register": "x8",
