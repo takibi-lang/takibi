@@ -272,7 +272,7 @@ for several rounds it gated `allbuild` so no kernel lane ran at all.
 | `slowcheck_board_link_gate.sh` | Controls for the shared board-link gate |
 | `slowcheck_kernel_net_readiness.py` | Controls for the host peer's readiness waits, with no QEMU in the room |
 | `slowcheck_qemu_session_ports.sh` | Regression controls for the per-session QEMU port block claim |
-| `slowcheck_resource_lease.sh` | Regression controls for cross-container board and aggregate-suite leases |
+| `slowcheck_resource_lease.sh` | Regression controls for cross-container board and aggregate-suite leases, and the vCPU grant order (longest lane first, #927) |
 | `slowcheck_run_kernel_build_locked.sh` | Regression controls for the cross-Make kernel build lock |
 | `slowcheck_run_kernel_ddb_rpi5_driver.py` | PTY controls for console-hold and release evidence, a newline wake before BREAK on CPU 0, and the RPi5 DDB driver's resume retry |
 | `slowcheck_run_lane.sh` | Controls for the lane timing receipts and the summary built from them |

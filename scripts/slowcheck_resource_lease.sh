@@ -263,6 +263,12 @@ wait "$vcpu_h" 2>/dev/null || true
 wait "$vcpu_long"; wait "$vcpu_short"
 [ "$(tr '\n' ' ' <"$tmp_dir/grant-order" 2>/dev/null)" = "long short " ] \
     && claim || fail "the vCPU grant order was '$(tr '\n' ' ' <"$tmp_dir/grant-order" 2>/dev/null)', not the listed lane first"
+# A renamed lane would drop silently to the back of the order.
+for lane in $(env -u TAKIBI_VCPU_LANE_ORDER bash -c ". '$repo_root/scripts/vcpu_lease.sh'; echo \$TAKIBI_VCPU_LANE_ORDER"); do
+    grep -q "^$lane:" "$repo_root/Makefile" \
+        || fail "TAKIBI_VCPU_LANE_ORDER names $lane, which the Makefile does not define"
+done
+claim
 
 # The QEMU shim refuses a guest larger than its runner's lease, including a
 # runner whose Python subprocess closed the inherited descriptors.
