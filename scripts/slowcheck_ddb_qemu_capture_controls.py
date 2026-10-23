@@ -58,7 +58,7 @@ def main():
         hold = (FIXTURES / "ddb_qemu_uart_hold.txt").read_text(encoding="ascii") if source == "uart" else ""
         run(text, metadata, hold, external=True)
         run(text.replace("\n", "\r\n"), metadata, hold.replace("\n", "\r\n"))
-        replacements = checks.replacements(metadata)
+        replacements = checks.replacements(metadata, checks.entry_cpu(text))
         for name, expression, minimum, maximum, applies in checks.REQUIREMENTS:
             if applies not in (source, "both"):
                 continue
@@ -97,6 +97,10 @@ def main():
             run(text.replace("boundary=assembly-bridge", "boundary=user"), metadata, hold, "backtrace root")
             run(text.replace("ddb: stack cpu=1 status=idle", "missing idle"), metadata, hold, "boot idle root")
         run(text + "ddb: intr count cpu=0 intid=2 count=1\n", metadata, hold, "fixture SGI on CPU 0")
+        # GitHub issue #830: the stop mask follows the core that entered, so
+        # a capture whose BREAK line names another core refuses the mask.
+        run(re.sub(r"^(ddb: break seq=[0-9]+ cpu=)[0-9]+ ", r"\g<1>2 ", text, flags=re.MULTILINE),
+            metadata, hold, "world stop acknowledgement")
         # Several independent missing fields must be reported in one invocation.
         run(text.replace("ddb: world-stop complete", "missing stop").replace("ddb: console tx=queued", "missing queue"),
             metadata, hold, ["world stop acknowledgement", "console queued after continue"], external=True)

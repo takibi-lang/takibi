@@ -1,0 +1,137 @@
+// GitHub issue #830 (UART slice): the console UART's interrupt may be taken
+// by any online core, and a serial BREAK enters DDB on whichever core took it.
+//
+// The route is GICv2's 1-of-N model: the SPI's ITARGETSR byte names every
+// online core, and the distributor hands each interrupt to one of them
+// (maintainer decision 2026-10-23, D2). Unlike the NIC's per-interrupt
+// rotation, no single core is the target at any moment, so a core spinning
+// with interrupts masked does not keep a BREAK from reaching DDB. The route
+// is rewritten after each handled interrupt, so cores that came online since
+// the last one join it.
+//
+// SERIAL SERVICE. Unlike the NIC and xHCI handlers, the UART handler moves
+// data: it drains the RX FIFO into the receive ring and refills the TX FIFO.
+// Two cores draining at once could deliver bytes out of order, and a GIC may
+// hand the next interrupt to another core while the first is still inside
+// the handler. So one core at a time runs the service, through a three-state
+// word: idle, busy, and busy-again. A core that finds it busy marks it again
+// and leaves; the busy core reruns the service before it goes idle, so no
+// interrupt's bytes wait for a later one.
+//
+// Current limitations (2026-10-23). Keep this list current as call sites
+// change; a stale limitation is worse than none.
+// - ONLINE CORES ARE 0..online-1 and at most eight (GICv2 ITARGETSR is a
+//   byte), as kernel_secondary_boot brings them up today.
+// - A BREAK ENDS THE SERVICE LOOP AT ONCE. The core that saw it enters DDB
+//   after its EOI; a pending again-mark is dropped, and the interrupt line,
+//   still asserted while bytes wait, brings the service back after DDB.
+
+use "kernel/lib/atomic_word.tkb";
+use "kernel/lib/execution_model.tkb";
+use "kernel/arch/arm64/kernel/gicv2.tkb";
+use "kernel/arch/arm64/kernel/secondary.tkb";
+use "kernel/arch/arm64/boot/cpu.tkb";
+use "kernel/drivers/serial/pl011.tkb";
+
+const UART_IRQ_IDLE: usize = 0;
+const UART_IRQ_BUSY: usize = 1;
+const UART_IRQ_AGAIN: usize = 2;
+
+// The serial-service word above.
+private let mut uart_irq_service_state: AtomicWord;
+// UART interrupts each core handled since boot, for the boot report.
+private let mut uart_irq_taken: [AtomicWord; KERNEL_MAX_CORES];
+
+// Attempts to either take the service or leave an again-mark. Each failed
+// compare-swap means the busy core changed the word in between, which it
+// does once per round, so a few attempts settle it.
+const UART_IRQ_SERVICE_ATTEMPTS: usize = 16;
+// Rounds one core serves before it lets the word go. Each round drains a
+// whole FIFO; another core's again-mark asks for one more.
+const UART_IRQ_SERVICE_ROUNDS: usize = 64;
+
+// Every online core, as an ITARGETSR byte.
+fn uart_irq_route(intid: u32) !{unsafe} {
+    let online: usize = kernel_online_core_count();
+    let mut mask: usize = 0;
+    for core: usize in 0..<8 {
+        if (core < online) { mask = mask | (1 << core); }
+    }
+    gic_intid_target(intid, mask as u8);
+}
+
+// The UART interrupt, on whichever core took it. True when a BREAK arrived
+// and this core should enter DDB after its EOI.
+fn uart_irq_serve() -> bool !{interrupt, unsafe} {
+    let raw: usize = cpu_id();
+    if (raw < KERNEL_MAX_CORES) {
+        let core: {0..<KERNEL_MAX_CORES as usize} = raw;
+        let previous_taken: usize = atomic_word_fetch_add(&uart_irq_taken[core], 1);
+    }
+    let mut serving: bool = false;
+    for attempt: usize in 0..<UART_IRQ_SERVICE_ATTEMPTS {
+        if (serving == false) {
+            match atomic_word_compare_swap_acq_rel(
+                    &uart_irq_service_state, UART_IRQ_IDLE, UART_IRQ_BUSY) {
+                CasResult::Swapped => { serving = true; }
+                CasResult::Observed(seen) => {
+                    // Busy elsewhere: leave the again-mark for that core.
+                    // Idle again by now: the next attempt takes it.
+                    if (seen != UART_IRQ_IDLE) {
+                        match atomic_word_compare_swap_acq_rel(
+                                &uart_irq_service_state, seen, UART_IRQ_AGAIN) {
+                            CasResult::Swapped => { return false; }
+                            CasResult::Observed(other) => { }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (serving == false) { return false; }
+    for round: usize in 0..<UART_IRQ_SERVICE_ROUNDS {
+        if (uart_irq_service()) {
+            atomic_word_store(&uart_irq_service_state, UART_IRQ_IDLE);
+            return true;
+        }
+        match atomic_word_compare_swap_acq_rel(
+                &uart_irq_service_state, UART_IRQ_BUSY, UART_IRQ_IDLE) {
+            CasResult::Swapped => { return false; }
+            CasResult::Observed(seen) => {
+                atomic_word_store(&uart_irq_service_state, UART_IRQ_BUSY);
+            }
+        }
+    }
+    atomic_word_store(&uart_irq_service_state, UART_IRQ_IDLE);
+    return false;
+}
+
+// Both dispatches' tail after their own EOI: the route names every core
+// online now. A BREAK then enters DDB on this core, from the dispatch.
+fn uart_irq_after_eoi(intid: u32) !{unsafe} {
+    uart_irq_route(intid);
+    workload_profile_irq_exit();
+}
+
+// At the end of the boot: at least two cores took UART interrupts.
+fn uart_irq_evidence_report() !{logs, unsafe} {
+    if (kernel_online_core_count() <= 1) { return; }
+    let mut cores: usize = 0;
+    for core: usize in 0..<KERNEL_MAX_CORES {
+        if (atomic_word_load(&uart_irq_taken[core]) > 0) { cores = cores + 1; }
+    }
+    if (cores >= 2) {
+        kernel_boot_log("uart irq: taken on at least two cpus\n");
+        return;
+    }
+    kernel_boot_log("uart irq: FAILED, taken=");
+    let mut separator: bool = false;
+    for core: usize in 0..<KERNEL_MAX_CORES {
+        if (core < kernel_online_core_count()) {
+            if (separator) { kernel_boot_log(","); }
+            separator = true;
+            uart_put_udec(atomic_word_load(&uart_irq_taken[core]));
+        }
+    }
+    kernel_boot_log("\n");
+}

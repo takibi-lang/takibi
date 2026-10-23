@@ -1,6 +1,7 @@
 // UART line discipline shared by the two platform RX handlers.
-// CPU 0 receives and echoes. The process-run guard serializes editing and
-// settings against readers on every CPU; its IRQ masking also protects TX.
+// The core that took the UART interrupt receives and echoes (any core since
+// GitHub issue #830, one at a time). The process-run guard serializes editing
+// and settings against readers on every CPU; its IRQ masking also protects TX.
 use "kernel/drivers/serial/terminal.tkb";
 use "kernel/drivers/serial/uart_rx_ring.tkb";
 use "kernel/printk/log.tkb";
@@ -148,7 +149,7 @@ fn terminal_io_receive(guard: borrow ProcessRunGuard[scheduled_process_run_lock]
                 }
             }
         }
-        TerminalInput::StopOutput => { uart_tx_irq_disable(); }
+        TerminalInput::StopOutput => { uart_terminal_stop_output(); }
         TerminalInput::StartOutput => { kernel_process_uart_tx_wake_all(guard); }
         TerminalInput::Signal(signum) => {
             kernel_uart_rx_ring_reset();

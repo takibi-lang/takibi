@@ -153,7 +153,10 @@ EXEMPT = {
     "drivers/serial/uart_rx_ring.tkb":
         "the process-run lock serializes CPU 0's RX interrupt, termios "
         "line editing and terminal reads on any CPU",
-    "platform/qemu/uart.tkb": "device state; SPIs are routed to CPU0",
+    "platform/qemu/uart.tkb":
+        "the console's base address and boot-time setup, written on CPU0 "
+        "before the UART SPI is enabled; the interrupt it serves runs on any "
+        "core one at a time (kernel/uart_irq_affinity.tkb, GitHub issue #830)",
     "arch/arm64/kernel/gicv2.tkb":
         "the GIC's IoHandles, attached on CPU0 during boot before secondaries start",
     "drivers/serial/pl011.tkb":
@@ -166,7 +169,10 @@ EXEMPT = {
         "boot-time device discovery, written on CPU0 before secondaries start",
     "platform/qemu/timer_irq.tkb":
         "GIC device state is initialized before interrupts and used by its routed cores",
-    "platform/rpi5/uart.tkb": "device state; MSI-X is routed to CPU0",
+    "platform/rpi5/uart.tkb":
+        "the console's boot-time setup, written on CPU0 before the UART "
+        "vector is enabled; the interrupt it serves runs on any core one at "
+        "a time (kernel/uart_irq_affinity.tkb, GitHub issue #830)",
     "platform/rpi5/usb_provision.tkb":
         "the image and its copy buffers, used once by CPU0 while storage is "
         "set up, before any process exists",
@@ -202,6 +208,9 @@ EXEMPT = {
         "per-CPU rows are indexed below KERNEL_MAX_CORES; each is written "
         "only by its own CPU's IRQ dispatch and read by DDB under a world "
         "stop or by the boot fixture through one acquire load",
+    "kernel/uart_irq_affinity.tkb":
+        "GitHub issue #830: the serial-service word and the per-CPU counts "
+        "are AtomicWords any core may update",
     "kernel/nic_irq_affinity.tkb":
         "GitHub issue #830: the rotation counter, the pin and the per-CPU "
         "counts are AtomicWords any core may update; the fixture's phase "
@@ -239,7 +248,8 @@ EXEMPT = {
     # reasons below restate those comments.
     "arch/arm64/kernel/platform_uart_common.tkb":
         "the UART RX callback is installed once on CPU0 before the RX source "
-        "is unmasked and never replaced; UART interrupts are routed to CPU0",
+        "is unmasked and never replaced; the interrupt that calls it runs on "
+        "any core, one at a time (GitHub issue #830)",
     "kernel/fd_table.tkb":
         "pools are guard-required by typing, refcounts and the slot total "
         "share the refcount Mutex, descriptor chains are owned by their "

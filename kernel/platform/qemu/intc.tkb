@@ -25,6 +25,7 @@ use "kernel/arch/arm64/kernel/secondary.tkb";
 use "kernel/arch/arm64/boot/cpu.tkb";
 use "kernel/kernel/irq_counts.tkb";
 use "kernel/kernel/nic_irq_affinity.tkb";
+use "kernel/kernel/uart_irq_affinity.tkb";
 use "kernel/arch/arm64/kernel/gicv2.tkb";
 
 let mut qemu_uart_gic_intid: u32 = 33; // bootstrap route until DTB comparison
@@ -52,7 +53,9 @@ fn platform_world_stop_notify(mask: usize, owner: usize) !{unsafe} {
 }
 
 fn gic_uart_spi_setup() {
-    gic_intid_target(qemu_uart_gic_intid, 1); // route the discovered UART SPI to CPU0
+    // GitHub issue #830: every core online now (core 0 alone at boot);
+    // uart_irq_handled widens it as secondaries come up.
+    uart_irq_route(qemu_uart_gic_intid);
     gic_intid_enable(qemu_uart_gic_intid);
     gicd.ctlr = gicd.ctlr | 1;
 }
@@ -154,11 +157,21 @@ fn platform_irq_dispatch_inner(frame: sink FrameRef[process], lower_el: bool)
         workload_profile_irq_exit();
         return frame_any(frame);
     }
-    // core-role: the UART is routed to core 0 alone, so a secondary takes
-    // only its own timer tick here, which runs the shared scheduling policy
-    // (GitHub issues #447 and #775; see "Core roles" in
-    // kernel/CONCURRENCY.md). Everything below -- the UART and its DDB
-    // break -- is core 0's. GICC_IAR was read above: acknowledging is the
+    // GitHub issue #830 (UART slice): the UART SPI goes to every online core
+    // (GICv2 1-of-N), so any core takes it. One core at a time serves it
+    // (uart_irq_serve); the route is rewritten after the EOI, and a BREAK
+    // enters DDB on this core after it.
+    if (id == qemu_uart_gic_intid) {
+        let debug_break: bool = uart_irq_serve();
+        gicc.eoir = iar;
+        uart_irq_after_eoi(id);
+        if (debug_break) { kernel_ddb_enter(frame_ref_address(frame), 1, id as usize); }
+        return frame_any(frame);
+    }
+    // core-role: a secondary takes only its own timer tick here, which runs
+    // the shared scheduling policy (GitHub issues #447 and #775; see "Core
+    // roles" in kernel/CONCURRENCY.md); core 0's tick below also runs the
+    // boot-time timer handler. GICC_IAR was read above: acknowledging is the
     // interrupted core's own job on its own banked interface.
     if (cpu_id() != 0) {
         let switch: TimerSwitch = kernel_secondary_tick(
@@ -168,11 +181,7 @@ fn platform_irq_dispatch_inner(frame: sink FrameRef[process], lower_el: bool)
         return kernel_timer_tick_leave(switch);
     }
 
-    let mut debug_break: bool = false;
-
-    if (id == qemu_uart_gic_intid) {
-        debug_break = uart_irq_service();
-    } else if (id == qemu_timer_gic_intid) {
+    if (id == qemu_timer_gic_intid) {
         timer_irq_handler();
         // GitHub issue #453: this branch is why most of kernel/ can share
         // mutable state with no lock. Interrupted EL0 -> switch now.
@@ -194,9 +203,6 @@ fn platform_irq_dispatch_inner(frame: sink FrameRef[process], lower_el: bool)
 
     gicc.eoir = iar;
     workload_profile_irq_exit();
-    if (debug_break) {
-        kernel_ddb_enter(frame_ref_address(frame), 1, id as usize);
-    }
     return frame_any(frame);
 }
 

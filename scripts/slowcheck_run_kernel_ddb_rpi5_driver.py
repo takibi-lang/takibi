@@ -76,6 +76,10 @@ REPLIES = {
     b"bt cpu 1": (b"\nddb: bt source=stopped cpu=1 pid=37 "
                   b"stack=0x00000000005bc000..0x00000000005c0000\n"
                   b"ddb: bt complete frames=2\n"),
+    # GitHub issue #830: the core that entered (here 0) answers from itself.
+    b"bt cpu 0": (b"\nddb: bt source=cpu cpu=0 pid=37 "
+                  b"stack=0x00000000005bc000..0x00000000005c0000\n"
+                  b"ddb: bt complete frames=2\n"),
     b"wait": (b"\nddb: wait current=37 state=running reason=none awaited=0\n"
               b"ddb: wait pid=1 state=blocked waits-for event=signal\n"
               b"ddb: wait edges=1 blocked=1 unknown=0 truncated=0\n"),

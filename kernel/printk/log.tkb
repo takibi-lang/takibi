@@ -898,8 +898,18 @@ fn kernel_log_terminal_flow_poll() !{logs, unsafe} {
     if (control != 0) { uart_wire_byte(control); }
 }
 
+// XOFF from the terminal: stop the transmit interrupt. Under the console lock,
+// because every core that queues output enables TXIM under it, and IMSC is a
+// read-modify-write (GitHub issue #830: the RX handler need not run on the
+// core that queued).
+fn uart_terminal_stop_output() {
+    let guard = console_lock();
+    uart_tx_irq_disable();
+    console_unlock(guard);
+}
+
 // Echo operations are bounded and never spin in the receive interrupt.
-// The caller is CPU 0 with IRQs masked, including the RX handler itself.
+// The caller is the RX handler, on whichever core took it, with IRQs masked.
 fn uart_terminal_echo(operation: TerminalEchoOperation) {
     let guard = console_lock();
     match terminal_echo_push(operation) {

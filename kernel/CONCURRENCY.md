@@ -258,6 +258,18 @@ Symmetric now:
   idle stack while its boot stack held `main()`'s frames and slot 0's
   context). Every peer runs the peer log probe (the boot probes bullet
   below).
+- The UART interrupt and DDB entry by BREAK (#830, UART slice). The SPI's
+  ITARGETSR names every online core (GICv2 1-of-N, maintainer decision
+  2026-10-23), rewritten after each handled interrupt as cores come online
+  (`kernel/kernel/uart_irq_affinity.tkb`); both dispatches take it before
+  the `core-role` test. Because this handler moves data, one core at a time
+  serves it through a three-state word (idle, busy, busy-again): a core that
+  finds it busy marks it and leaves, and the busy core reruns the drain.
+  A BREAK enters DDB on the core that saw it, after its EOI, and the world
+  stop takes the others. The TXIM disable for XOFF now holds the console
+  lock like every TXIM enable. The boot report asserts that at least two
+  cores took UART interrupts (`uart_rx_irq` view); the DDB lanes read the
+  entering core from the `ddb: break` line.
 - Console ownership for terminal paths (#830, maintainer decision
   2026-10-23, option C, after Linux's nbcon): one atomic word
   (`kernel_console_owner`, `kernel/printk/log.tkb`) holds an owner priority
@@ -315,8 +327,6 @@ Special, with the reason it stays so today:
 | Boot | `boot/entry.S` parks every MPIDR but 0; core 0 runs `main()`, the GIC distributor, device bring-up and the boot fixtures (on the boot thread, pinned there by its mask), and its idle loop takes the first process after `main()` hands off (`kernel_process_secondary_start`) | the firmware hands off one core, and machine-wide state is initialized once; PID 1's first entry is then deterministic, which the oops lane's fault injection relies on | no: one core has to come first |
 | PSCI start authority | `cpu_start_reserve` (`lib/occupancy.tkb`) | starting cores is a boot phase; no hotplug exists | only with CPU hotplug, which nothing needs |
 | Syscalls outside the peer-safety table | `syscall_peer_refused`, `syscall_peer_safe`; rerun on core 0 with the process pinned for the call | no subsystem entry is left: the BusyBox Extras exec left in #828, and the TCP pool drain it ran is gone since #836. The terminal reboot and the payload fixture's parent-progress report are still refused by number, so the rerun path itself stays | yes, one entry at a time; each is its own follow-up |
-| Device interrupts | the UART SPI targets core 0; a secondary's dispatch handles its tick, its PMU line, the NIC and xHCI (above), nothing else | the UART driver's state is touched only from core 0 | yes: the NIC and xHCI moved in #830; the UART (with BREAK -> DDB) is #830's next slice; the input-flow request already left core 0 in #830 |
-| DDB entry by UART BREAK | the UART IRQ branch on core 0 | follows the device interrupt row; DDB then stops the others through the world stop | follows the device row |
 | Two-core probes and fixtures | the spread-timer and busy-pair fixtures | each is an experiment written for core 0 against CPU 1 | no: the fixed pair is the experiment |
 | Contention probe primary | every `*_contention_probe` and its siblings in `kernel/init/contention_probes.tkb` | the boot sequence runs on core 0, so it arms the probe and counts as participant 0; the peers are symmetric among themselves (#756) | only if probes ran outside the boot sequence |
 

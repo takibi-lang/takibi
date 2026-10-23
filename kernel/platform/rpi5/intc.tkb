@@ -48,6 +48,7 @@ use "kernel/arch/arm64/kernel/secondary.tkb";
 use "kernel/arch/arm64/boot/cpu.tkb";
 use "kernel/kernel/irq_counts.tkb";
 use "kernel/kernel/nic_irq_affinity.tkb";
+use "kernel/kernel/uart_irq_affinity.tkb";
 use "kernel/platform/rpi5/xhci_irq_affinity.tkb";
 use "kernel/arch/arm64/kernel/gicv2.tkb";
 
@@ -200,6 +201,9 @@ fn platform_irq_init() {
     pcie2_mip0_inbound_setup();
     // UART0 and ETH are level-high in rp1.dtsi; USBHOST0_0 is edge-rising.
     rp1_vector_route(RPI5_UART0_GIC_INTID, RP1_UART0_VECTOR, true);
+    // GitHub issue #830 (UART slice): every core online now; widened by
+    // uart_irq_handled as secondaries come up.
+    uart_irq_route(RPI5_UART0_GIC_INTID);
     rp1_vector_route(RPI5_USB0_GIC_INTID, RP1_USB0_VECTOR, false);
     // The GEM handle is attached before its vector can be dispatched.
     rpi5_gem_attach_bootstrap();
@@ -318,12 +322,25 @@ fn rpi5_irq_dispatch_inner(frame: sink FrameRef[process], lower_el: bool)
         workload_profile_irq_exit();
         return frame_any(frame);
     }
-    // core-role: the UART is routed to core 0 alone, so a
-    // secondary takes only its own timer tick here, which runs the shared
-    // scheduling policy (GitHub issues #447 and #775; see "Core roles" in
-    // kernel/CONCURRENCY.md). Everything below -- device drivers, the
-    // UART's DDB break -- is core 0's. GICC_IAR was read above: acknowledging
-    // is the interrupted core's own job on its own banked interface.
+    // GitHub issue #830 (UART slice): the UART SPI goes to every online core
+    // (GICv2 1-of-N), so any core takes it. One core at a time serves it
+    // (uart_irq_serve). RP1's level-triggered MSI-X wrapper needs an IACK
+    // after the device source has been serviced, matching
+    // rp1_chained_handle_irq; the route is rewritten after the EOI, and a
+    // BREAK enters DDB on this core after it.
+    if (id == RPI5_UART0_GIC_INTID) {
+        let debug_break: bool = uart_irq_serve();
+        rp1_vector_iack(RP1_UART0_VECTOR);
+        gicc.eoir = iar;
+        uart_irq_after_eoi(id);
+        if (debug_break) { kernel_ddb_enter(frame_ref_address(frame), 1, id as usize); }
+        return frame_any(frame);
+    }
+    // core-role: a secondary takes only its own timer tick here, which runs
+    // the shared scheduling policy (GitHub issues #447 and #775; see "Core
+    // roles" in kernel/CONCURRENCY.md); core 0's tick below also runs the
+    // boot-time timer handler. GICC_IAR was read above: acknowledging is the
+    // interrupted core's own job on its own banked interface.
     if (cpu_id() != 0) {
         let switch: TimerSwitch = kernel_secondary_tick(
             frame, lower_el, id == rpi5_timer_gic_intid);
@@ -332,15 +349,7 @@ fn rpi5_irq_dispatch_inner(frame: sink FrameRef[process], lower_el: bool)
         return kernel_timer_tick_leave(switch);
     }
 
-    let mut debug_break: bool = false;
-
-    if (id == RPI5_UART0_GIC_INTID) {
-        debug_break = uart_irq_service();
-
-        // RP1's level-triggered MSI-X wrapper needs an IACK after the
-        // device source has been serviced, matching rp1_chained_handle_irq.
-        rp1_vector_iack(RP1_UART0_VECTOR);
-    } else if (id == rpi5_timer_gic_intid) {
+    if (id == rpi5_timer_gic_intid) {
         timer_irq_handler();
         // GitHub issue #453: this branch is why most of kernel/ can share
         // mutable state with no lock. Interrupted EL0 -> switch now.
@@ -362,9 +371,6 @@ fn rpi5_irq_dispatch_inner(frame: sink FrameRef[process], lower_el: bool)
 
     gicc.eoir = iar;
     workload_profile_irq_exit();
-    if (debug_break) {
-        kernel_ddb_enter(frame_ref_address(frame), 1, id as usize);
-    }
     return frame_any(frame);
 }
 

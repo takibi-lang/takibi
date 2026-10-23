@@ -415,6 +415,7 @@ KERNEL_UNUSED_CHECKED := \
 	kernel/kernel/fd_table.tkb \
 	kernel/kernel/irq_counts.tkb \
 	kernel/kernel/nic_irq_affinity.tkb \
+	kernel/kernel/uart_irq_affinity.tkb \
 	kernel/kernel/log_storm_evidence.tkb \
 	kernel/kernel/freelist_contention_evidence.tkb \
 	kernel/kernel/console_contention_evidence.tkb \

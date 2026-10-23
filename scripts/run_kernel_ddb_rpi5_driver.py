@@ -67,19 +67,34 @@ SILENT_POSTMORTEM_COMMANDS = (b"oops\n", b"intr\n", b"bt\n", b"sched\n",
 
 
 def wake_preceded_break(text: str) -> bool:
-    """Both IRQ events are recorded on CPU 0; compare only that ring's order."""
-    wake_sequences = []
-    break_sequences = []
-    for seq, event, value in re.findall(
-        r"^ddb: event seq=(\d+) cpu=0 id=(0x[0-9a-f]+) "
+    """A newline UART-wake event and the BREAK event were both retained.
+
+    Each CPU has its own ring and its own sequence numbers. Since GitHub
+    issue #830 the UART interrupt goes to every online core, so the two
+    events may sit in different rings, where sequence numbers do not order
+    them; the driver's own pacing (BREAK only after the wake's visible
+    response) orders them then. In one ring the sequence must agree."""
+    wakes: dict[str, list[int]] = {}
+    breaks: dict[str, list[int]] = {}
+    for seq, cpu, event, value in re.findall(
+        r"^ddb: event seq=(\d+) cpu=(\d+) id=(0x[0-9a-f]+) "
         r"a=(0x[0-9a-f]+) ", text.replace("\r", ""), re.MULTILINE
     ):
         if int(event, 16) == 0x0201 and int(value, 16) == 0x0A:
-            wake_sequences.append(int(seq))
+            wakes.setdefault(cpu, []).append(int(seq))
         elif int(event, 16) == 0x0101:
-            break_sequences.append(int(seq))
-    return bool(wake_sequences and break_sequences and
-                min(wake_sequences) < min(break_sequences))
+            breaks.setdefault(cpu, []).append(int(seq))
+    if not wakes or not breaks:
+        return False
+    return all(min(wakes[cpu]) < min(breaks[cpu])
+               for cpu in wakes if cpu in breaks)
+
+
+def entry_cpu(text: str) -> int:
+    """The core that entered DDB, from its `ddb: break` line (#830)."""
+    found = re.search(r"^ddb: break seq=\d+ cpu=(\d+) ",
+                      text.replace("\r", ""), re.MULTILINE)
+    return int(found.group(1)) if found else 0
 
 
 # How long a resume command may draw no echo before it is sent again. A
@@ -185,7 +200,8 @@ def validate_capture(received: bytes, prompt_count: int, timeline: Timeline) -> 
             "RPi5 DDB did not return to a prompt after guarded fault")
     if "ddb: xk fault address=0x0000000800000000" not in text:
         raise timeline.bail("RPi5 DDB guarded fault was not reported")
-    if "ddb: world-stop complete mask=0x000000000000000e" not in text:
+    entered = entry_cpu(text)
+    if f"ddb: world-stop complete mask=0x{0xF & ~(1 << entered):016x}" not in text:
         raise timeline.bail(
             "RPi5 DDB did not stop and acknowledge all online peers")
     if "ddb: events cpu=0 count=" not in text:
@@ -219,7 +235,8 @@ def validate_capture(received: bytes, prompt_count: int, timeline: Timeline) -> 
     # published entering the world-stop pen. QEMU proves the decision; only
     # this lane proves that a real second core, stopped by a real SGI, has a
     # frame the walker can follow.
-    if re.search(r"^ddb: bt source=stopped cpu=1 pid=\d+ "
+    peer = 0 if entered == 1 else 1
+    if re.search(rf"^ddb: bt source=stopped cpu={peer} pid=\d+ "
                  r"stack=0x[0-9a-f]+\.\.0x[0-9a-f]+$", text,
                  re.MULTILINE) is None:
         raise timeline.bail("RPi5 DDB did not backtrace the stopped peer")
@@ -296,7 +313,7 @@ def main() -> int:
     resume_command_sent = False
     last_resume_write = 0.0
     commands = (b"xkfault\n", b"events\n", b"bt\n", b"bt cpu 1\n",
-                b"wait\n", b"continue\n")
+                b"bt cpu 0\n", b"wait\n", b"continue\n")
     with timeline, serial.Serial(args.port, 115200, timeout=0.25) as uart, open(
         args.log, "ab"
     ) as log:

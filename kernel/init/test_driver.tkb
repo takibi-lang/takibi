@@ -4,6 +4,7 @@
 use "kernel/kernel/process.tkb";
 use "kernel/init/pool_space.tkb";
 use "kernel/drivers/serial/terminal_io.tkb";
+use "kernel/kernel/uart_irq_affinity.tkb";
 use "kernel/kernel/syscall.tkb";
 use "kernel/fs/elf64.tkb";
 use "kernel/mm/address_space.tkb";
@@ -722,6 +723,9 @@ fn kernel_init_boot_fixture_poll(current_authority: borrow ProcessCurrent[curren
     kernel_boot_log(" dropped=");
     uart_put_udec(kernel_uart_rx_dropped_count());
     kernel_boot_log("\n");
+    // GitHub issue #830 (UART slice): the UART interrupt went to every
+    // online core, and more than one took it during this boot.
+    uart_irq_evidence_report();
     kernel_boot_log("terminal echo: operations=");
     uart_put_udec(TERMINAL_ECHO_OPERATIONS);
     kernel_boot_log(" dropped=");

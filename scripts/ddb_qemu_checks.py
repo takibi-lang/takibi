@@ -49,7 +49,9 @@ REQUIREMENTS = (
     ('backtrace roots', '^ddb: bt frame=0 pc=0x[0-9a-f]+ boundary=(exception|user|assembly|assembly-bridge)$', 2, None, 'both'),
     ('backtrace termination', '^ddb: bt (complete frames=[1-9][0-9]*|stop=(assembly-boundary|depth-limit|invalid-return-pc|nonmonotonic-frame|out-of-range) fp=0x[0-9a-f]+)$', 1, None, 'both'),
     ('backtrace usage', '^ddb: usage: bt \\[PID\\|cpu N\\]$', 1, None, 'both'),
-    ('stopped peer backtrace', '^ddb: bt source=stopped cpu=1 pid=[0-9]+ stack=0x[0-9a-f]+\\.\\.0x[0-9a-f]+$', 1, None, 'both'),
+    # GitHub issue #830: `bt cpu 1` and `bt cpu 0` are both sent; the one
+    # that is not the entering core is a stopped peer.
+    ('stopped peer backtrace', '^ddb: bt source=stopped cpu={peer} pid=[0-9]+ stack=0x[0-9a-f]+\\.\\.0x[0-9a-f]+$', 1, None, 'both'),
     ('invalid CPU refusal', '^ddb: bt cpu=9 not stopped here$', 1, None, 'both'),
     ('unheld stopped root refusal', '^ddb: bt test stopped-root unheld verdict=not-stopped$', 1, None, 'both'),
     ('publishing stopped root refusal', '^ddb: bt test stopped-root publishing verdict=not-stopped$', 1, None, 'both'),
@@ -149,8 +151,18 @@ def online_cpus(metadata):
     return metadata.get("online_cpus", 2)
 
 
-def replacements(metadata):
-    """The REQUIREMENTS placeholders for one capture's metadata."""
+def entry_cpu(text):
+    """The core that entered DDB, from its `ddb: break` line (GitHub issue
+    #830: the UART interrupt goes to every online core, so a BREAK may
+    enter on any of them). 0 when the line is missing; the BREAK frame
+    requirement reports that."""
+    found = re.search(r"^ddb: break seq=[0-9]+ cpu=([0-9]+) ", text, re.MULTILINE)
+    return int(found.group(1)) if found else 0
+
+
+def replacements(metadata, entered=0):
+    """The REQUIREMENTS placeholders for one capture's metadata, given the
+    core that entered DDB."""
     source = metadata["break_source"]
     cpus = online_cpus(metadata)
     return {
@@ -159,8 +171,10 @@ def replacements(metadata):
         "address": f'{metadata["kernel_address"]:x}',
         "sigset": SIGNALS,
         "cpus": str(cpus),
-        # Core 0 takes the BREAK and stops every other online core.
-        "stopmask": f"{((1 << cpus) - 1) & ~1:016x}",
+        # The entering core stops every other online core.
+        "stopmask": f"{((1 << cpus) - 1) & ~(1 << entered):016x}",
+        "peer": "0" if entered == 1 else "1",
+        "entered": str(entered),
     }
 
 
@@ -185,7 +199,7 @@ def capture_problems(text, metadata, hold_text=""):
     text = text.replace("\r", "")
     lines = text.split("\n")
     source = metadata["break_source"]
-    placeholders = replacements(metadata)
+    placeholders = replacements(metadata, entry_cpu(text))
     problems = []
     for name, expression, minimum, maximum, applies in REQUIREMENTS:
         if applies != "both" and applies != source:
@@ -241,8 +255,8 @@ def capture_problems(text, metadata, hold_text=""):
             problems.append("migration stack attribution: roots were not unique" + evidence)
         for name, expression in (
                 ("late UART backtrace", r"^ddb: bt stop=user-boundary fp=0x"),
-                ("late UART event overflow", r"^ddb: events cpu=0 count=[1-9][0-9]* damaged=0 overwritten=[1-9][0-9]*$"),
-                ("late UART event record", r"^ddb: event seq=[1-9][0-9]* cpu=0 id=0x0000000000000101 a=0x")):
+                ("late UART event overflow", r"^ddb: events cpu=[0-9]+ count=[1-9][0-9]* damaged=0 overwritten=[1-9][0-9]*$"),
+                ("late UART event record", r"^ddb: event seq=[1-9][0-9]* cpu=" + placeholders["entered"] + r" id=0x0000000000000101 a=0x")):
             if not has(expression):
                 problems.append(name + ": missing evidence" +
                                 (evidence if name == "late UART backtrace" else ""))
