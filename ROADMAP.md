@@ -66,8 +66,7 @@ no step ready; an item that reaches a decision is parked and the next one
 taken (#894, already under way here, finishes here; its follow-ups go to
 B): #819 (AtomicWord acq_rel cells), #920 (DDB world stop reaching a core
 spinning with IRQs masked: pseudo-NMI/FIQ stop, cf. #641; the hung-core
-DDB check is expected-fail until then), #925 (model the UART serve
-try-lock under 1-of-N delivery),
+DDB check is expected-fail until then),
 #775 (core-role asymmetry inventory), #681 (region_pool per-slot false
 sharing), #680 (region_pool handle validation without the lock), #812
 (contiguous page run search), #748 (page allocator metadata lending), #807
