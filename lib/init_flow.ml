@@ -31,7 +31,8 @@
      padding uninit, an untracked value
      (a call result, a parameter) counts as initialized;
    - a store into an element of an array leaf changes nothing (stage 1
-     has no ranges) and reads nothing;
+     has no ranges) and reads nothing, except the whole-length counted
+     loop of `filled_by_loop` (#888);
    - zero_fill(p), unsafe assume_init(p), passing p (or `p as []T`, `&p`)
      to a `borrow uninit` parameter initialize everything under p, padding
      included. Passing `&p` to a `&mut T` parameter initializes its field
@@ -415,6 +416,61 @@ let check
     | Ast.TypeArray _ -> false
     | _ -> true
   in
+  (* GitHub issue #888: the one loop shape that initializes a whole array
+     leaf element by element,
+
+       for i in 0 ..< N { ...; P[i] = e; ... }
+
+     where P is a whole array leaf named by a variable and field chain (no
+     index, so P is the same place on every iteration), N is its length
+     (a literal or a `const`), the store is a statement at the top
+     level of the body (inside plain or unsafe blocks only, never under an
+     if, match or inner loop), its index is the loop's own counter, and
+     nothing in the body leaves the iteration early: no `return` anywhere,
+     no `break` or `continue` outside an inner loop. Every iteration
+     0..N-1 then runs that store, so every element is written once the loop
+     ends. The body itself is still checked with P uninit, so it may not
+     read P (not even an element it already wrote); a read after the loop
+     sees P init. Any other shape leaves the state as before the loop. *)
+  let rec leaves_iteration depth ss = List.exists (fun (s : Ast.stmt) ->
+    match s.desc with
+    | Ast.Return _ -> true
+    | Ast.Break | Ast.Continue -> depth = 0
+    | Ast.Block b | Ast.UnsafeBlock b -> leaves_iteration depth b
+    | Ast.If (_, a, b) -> leaves_iteration depth a || leaves_iteration depth b
+    | Ast.While (_, b) | Ast.For (_, _, _, _, b) | Ast.ForEach (_, _, b) ->
+        leaves_iteration (depth + 1) b
+    | Ast.Match (_, arms) | Ast.LetMatch (_, _, _, _, arms) ->
+        List.exists (fun a -> leaves_iteration depth (arm_body a)) arms
+    | Ast.Let _ | Ast.LetTuple _ | Ast.Expr _ | Ast.Yield _
+    | Ast.StaticAssert _ -> false) ss
+  in
+  let filled_by_loop (s : Ast.stmt) lo hi body =
+    let counter = match Local_bindings.ids_for_stmt bindings s with
+      | [_; binder] -> Some binder | _ -> None in
+    let rec plain_chain (e : Ast.expr) = match e.desc with
+      | Ast.Var _ -> true
+      | Ast.FieldGet (b, _) -> plain_chain b
+      | _ -> false in
+    let rec top_stores ss = List.concat_map (fun (st : Ast.stmt) ->
+      match st.desc with
+      | Ast.Block b | Ast.UnsafeBlock b -> top_stores b
+      | Ast.Expr { desc = Ast.Assign (
+          { desc = Ast.Index (base, ({ desc = Ast.Var _; _ } as iv)); _ }, _); _ }
+        when plain_chain base
+             && counter <> None
+             && Local_bindings.id_for_expr bindings iv = counter ->
+          (match place base with
+           | Some p when not p.inside ->
+               (match Option.map strip (leaf_type p.root p.path) with
+                | Some (Ast.TypeArray (_, n)) ->
+                    if Const_env.bound_value hi = Some n then [p] else []
+                | _ -> [])
+           | _ -> [])
+      | _ -> []) ss in
+    if Const_env.bound_value lo <> Some 0 || leaves_iteration 0 body then []
+    else top_stores body
+  in
   let rec stmts st ss =
     List.fold_left (fun (st, dead) s ->
       if dead then (st, dead) else stmt st s) (st, false) ss
@@ -464,7 +520,8 @@ let check
         ignore (stmts st body); (st, false)
     | Ast.For (_, _, lo, hi, body) ->
         let st = expr (expr st lo) hi in
-        ignore (stmts st body); (st, false)
+        ignore (stmts st body);
+        (List.fold_left fill st (filled_by_loop s lo hi body), false)
     | Ast.ForEach (_, seq, body) ->
         let st = expr st seq in
         ignore (stmts st body); (st, false)

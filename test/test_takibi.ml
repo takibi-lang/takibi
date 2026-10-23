@@ -25054,6 +25054,61 @@ let definite_init_tests =
       (expect_ok "fn f(dst: borrow uninit []u8) !{unsafe} { unsafe { assume_init(dst); } }");
     t "issue #203: init and uninit stay ordinary identifiers elsewhere"
       (expect_ok "fn f(init: usize, uninit: usize) -> usize { return init + uninit; }");
+  ] @
+  (* GitHub issue #888: a counted loop over the whole length that stores
+     every element of an array leaf initializes it; nothing else does. *)
+  let rec888 = "const LEN888: usize = 4;\n\
+                struct Rec888 { n: u64; buf: [u8; LEN888]; }\n" in
+  let ok body = expect_ok (rec888 ^ "fn f(c: bool, s: []u8) -> u8 { let mut r: Rec888; r.n = 1;\n"
+                           ^ body ^ "\n return r.buf[1]; }") in
+  let bad body = expect_type_error "'r.buf' is uninitialized"
+      (rec888 ^ "fn f(c: bool, s: []u8) -> u8 { let mut r: Rec888; r.n = 1;\n"
+       ^ body ^ "\n return r.buf[1]; }") in
+  [
+    t "issue #888: a loop over 0..<N storing buf[i] initializes the field"
+      (ok "for i: usize in 0..<LEN888 { r.buf[i] = i as u8; }");
+    t "issue #888: a literal bound equal to the length is accepted"
+      (ok "for i: usize in 0..<4 { r.buf[i] = 0; }");
+    t "issue #888: other statements, blocks and inner loops with break are accepted"
+      (ok "for i: usize in 0..<LEN888 { let x: u8 = 7;
+             for j: usize in 0..<3 { if (c) { break; } }
+             { r.buf[i] = x; } }");
+    t "issue #888: a whole struct copy after the loop is accepted"
+      (expect_ok (rec888 ^ "fn f() -> u64 { let mut r: Rec888; r.n = 1;
+         for i: usize in 0..<LEN888 { r.buf[i] = 0; }
+         let mut w: Rec888 = r; return w.n; }"));
+    t "issue #888: a loop that skips element 0 is rejected"
+      (bad "for i: usize in 1..<LEN888 { r.buf[i] = 0; }");
+    t "issue #888: a loop shorter than the array is rejected"
+      (bad "for i: usize in 0..<3 { r.buf[i] = 0; }");
+    t "issue #888: a runtime bound is rejected"
+      (bad "for i: usize in 0..<s.len { if (i < 4) { r.buf[i] = 0; } }");
+    t "issue #888: a store under an if is rejected"
+      (bad "for i: usize in 0..<LEN888 { if (c) { r.buf[i] = 0; } }");
+    t "issue #888: a break in the loop is rejected"
+      (bad "for i: usize in 0..<LEN888 { r.buf[i] = 0; if (c) { break; } }");
+    t "issue #888: a continue before the store is rejected"
+      (bad "for i: usize in 0..<LEN888 { if (c) { continue; } r.buf[i] = 0; }");
+    t "issue #888: a return in the loop is rejected"
+      (bad "for i: usize in 0..<LEN888 { if (c) { return 0; } r.buf[i] = 0; }");
+    t "issue #888: a store at another index is rejected"
+      (bad "for i: usize in 0..<LEN888 { r.buf[0] = 0; }");
+    t "issue #888: a shadowed counter is rejected"
+      (bad "for i: usize in 0..<LEN888 { let i: usize = 0; r.buf[i] = 0; }");
+    t "issue #888: the counter cannot be reassigned to repeat an element"
+      (expect_type_error "cannot assign to immutable variable 'i'"
+         (rec888 ^ "fn f() -> u8 { let mut r: Rec888; r.n = 1;
+            for i: usize in 0..<LEN888 { i = 0; r.buf[i] = 0; }
+            return r.buf[1]; }"));
+    t "issue #888: a while loop is not an initializing loop"
+      (bad "let mut i: usize = 0; while (i < LEN888) { r.buf[i] = 0; i = i + 1; }");
+    t "issue #888: a store inside a nested loop is rejected"
+      (bad "for i: usize in 0..<LEN888 { for j: usize in 0..<1 { r.buf[i] = 0; } }");
+    t "issue #888: reading the array inside the initializing loop is rejected"
+      (expect_type_error "'r.buf' is uninitialized"
+         (rec888 ^ "fn f() -> u8 { let mut r: Rec888; r.n = 1; let mut x: u8 = 0;
+            for i: usize in 0..<LEN888 { r.buf[i] = 0; x = r.buf[i]; }
+            return x; }"));
   ]
 
 let indexed_reference_tests = [

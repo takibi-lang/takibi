@@ -742,7 +742,25 @@ Rules:
   `init` for any other value (a call result, a parameter). A field store never
   writes padding.
 - Storing to an element of an array leaf, `a[i] = x`, neither reads it nor
-  makes it `init`: arrays are tracked whole.
+  makes it `init`: arrays are tracked whole. One loop shape initializes a
+  whole array leaf (GitHub issue #888):
+
+  ```takibi
+  for i: usize in 0..<N { ...; P[i] = e; ... }
+  ```
+
+  makes `P` `init` after the loop when all of these hold: `P` is a whole
+  array leaf named by a variable and field chain with no index in it (the
+  same place on every iteration); the lower bound is `0` and the upper
+  bound `N` is a literal or `const` equal to `P`'s length; the store is a
+  statement at the top level of the body (plain or `unsafe` blocks allowed,
+  not under an `if`, `match` or inner loop) and indexes with the loop's own
+  counter; and the body has no `return`, and no `break` or `continue`
+  outside an inner loop. The counter is immutable, so iteration `k` stores
+  element `k` for every `k` in `0..<N`. The body is still checked with `P`
+  `uninit`, so it may not read `P`, not even an element already stored.
+  Any other loop -- a `while`, a partial or runtime range, a conditional
+  store, an early exit -- leaves `P` as it was before the loop.
 - `zero_fill(dst)` stores zero over every byte of a writable slice or of a
   pointer's pointee, padding included, and makes the place `init`. The
   target's type must accept all-zero bytes (GitHub issue #794): a refined
@@ -793,7 +811,7 @@ fn fill(dst: borrow uninit []u8) { zero_fill(dst); }   // init on return
 
 Known limitations: local arrays declared without an initializer are not
 tracked yet, so reading one before writing it is not rejected. Element writes
-never make an array `init`, and a fill that writes only a range (`copy_from_user`
+make an array `init` only through the loop above, and a fill that writes only a range (`copy_from_user`
 into part of a buffer, a device receive) cannot be expressed. Stage 3 adds
 byte-range facts and `ensures init(...)` contracts for those.
 
