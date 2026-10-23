@@ -92,8 +92,8 @@ After the nine answers, add one row per defect found (product defects, test
 defects, and failures met during the work), so the maintainer can check at a
 glance that every defect got every question:
 
-| Defect | Root cause | Debugging aid that would have helped | Prevention rung taken, why not higher (done / issue #) | Model check (yes, how / no, why) | Compile-time check (yes, how / no, why) |
-|---|---|---|---|---|---|
+| Defect | Root cause | Debugging aid that would have helped | Prevention rung taken, why not higher (done / issue #) | Model check (yes, how / no, why) | Compile-time check (yes, how / no, why) | SMT/Z3 (yes, obligation, #952 comment / no, why) | Proof assistant (yes, compiler or .tkb level, #955 comment / no, why) |
+|---|---|---|---|---|---|---|---|
 
 Write "none" when no defect was found; do not drop the table.
 

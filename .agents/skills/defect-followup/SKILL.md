@@ -29,6 +29,13 @@ answer on the diff and the tests actually run.
    `linux_user/` copies, and the corresponding compiler stage.
 7. **Debugging aid.** Name a debugger feature or script that would have made
    this faster. Build it if it is cheap, or file it.
+8. **Solver or proof assistant.** Would an SMT check (Z3 over bit-vector or
+   linear-integer obligations) have caught it? If yes, add a comment on #952
+   with the defect, the obligation and the issue. Would a proof assistant
+   (Lean/Rocq) have prevented it, and at which level: a compiler rule proved
+   once, or a property of the .tkb program? If yes, add a comment on #955
+   with the defect, the level, what would have been proved, and a rough proof
+   size. Say "no" with the reason otherwise. Record only; do not implement.
 
 ## Ask the maintainer
 

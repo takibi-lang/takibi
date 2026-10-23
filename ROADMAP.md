@@ -69,8 +69,7 @@ first), #819 (AtomicWord acq_rel cells), #920 (DDB world stop reaching a core
 spinning with IRQs masked: pseudo-NMI/FIQ stop, cf. #641; the hung-core
 DDB check is expected-fail until then), #932 (one timer-tick entry
 for every core, after #920), #933 (reboot on any core, after #920), #680 (region_pool handle validation without the lock), #812
-(contiguous page run search), #798 (one width check for s[off + k]),
-#799 (sizeof proved at type-check time).
+(contiguous page run search). #798 and #799 wait under #954 (verification direction).
 
 Done on the stored-authority route (2026-10-09): #637 stage 1's
 type-checker work and #731 step 1; #131's first slices -- field places
@@ -159,7 +158,11 @@ four vCPUs since 2026-10-11.
 
 **Assigned queue (maintainer, 2026-10-23).** Low-dependency issues A does
 not hold, in this order; compiler work in this list is authorized; an item
-that reaches a decision is parked and the next one taken: #908 (fixed
+that reaches a decision is parked and the next one taken. First, the
+verification direction (#954, maintainer 2026-10-23; B owns the refinement
+code): #952 (Z3 re-check of derived ranges), then a thin slice of
+function-boundary initialization contracts, a design review, and the rest
+of #954 stage 2. Then: #908 (fixed
 QEMU lane budget), #916 (compiler GC tuning), #921 and #922
 (variant reuse, domain-parallel codegen; both wait on the land-span
 measurement after #917's front-end fixes), #927 (QEMU lanes queueing for the vCPU lease), #893 (redundant csel in variant match), #888 (array field initialized in a

@@ -158,6 +158,14 @@ condition below applies, and reports the land afterwards.
   level) initializes P; a general loop-invariant form is wanted later
   rather than more special shapes. [active] #888
 
+- 2026-10-23 Verification direction: explicit contracts at function
+  boundaries, decidable local inference, SMT first as a checker; staged with
+  the multicore work, B owns the refinement code. New range rules go through
+  refined_or_base and add no special shapes. [active] #954 #952
+- 2026-10-23 Proof assistants (Lean/Rocq) start only once #955's evidence
+  log justifies it; audits record which defects SMT or a proof assistant
+  would have prevented. [active] #955 #952
+
 ## Trust and safety
 
 - 2026-10-13 Only files in kernel/DEVICE_SEMANTICS_FILES may declare device
