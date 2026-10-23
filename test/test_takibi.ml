@@ -14853,22 +14853,18 @@ let codegen_tests = [
      looked at TypeNamed, so an indexed one slipped past the ordering and
      surfaced much later as "Unknown indexed type". *)
   Alcotest.test_case
-    "an ordinary struct can take static parameters and hold an indexed \
-     variant field (issue #368)" `Quick
+    "an ordinary indexed struct cannot hold an indexed variant with a linear \
+     payload (issue #368, narrowed by #907)" `Quick
     (fun () ->
-       let (_ : Llvm_target.TargetMachine.t) =
-         Llvm_gen.setup_target ~triple:"aarch64-none-elf" ()
-       in
-       match gen_codegen
+       match infer
          "linear struct BrHandle[o: addr, a: usize] { private s: usize; private g: usize @ a; }
           variant BrLink[o: addr] { End; More(exists a: usize. BrHandle[o, a]); }
-          struct BrNode[o: addr] { private mutex: i32; private link: BrLink[o]; }
-          fn probe() i32 { return 0; }"
+          struct BrNode[o: addr] { private mutex: i32; private link: BrLink[o]; }"
        with
-       | _ -> ()
-       | exception e ->
-           Alcotest.failf "expected an indexed ordinary struct to compile, got: %s"
-             (Printexc.to_string e));
+       | _ -> Alcotest.fail "expected BrNode.link to be rejected"
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.(check bool) "names the plain-variant rule" true
+             (contains_substring msg "can hold only a plain variant"));
 
   (* The restrictions an affine/linear struct's fields carry must NOT have
      followed the static parameters over: they exist because an owned
@@ -14943,6 +14939,9 @@ let codegen_tests = [
        rejects "must_use variant"
          "must_use variant R { Ok; Err; }
           struct H { r: R; }";
+       rejects "static parameters in an ordinary indexed struct"
+         "variant S[o: usize] { A; B(usize); }
+          struct H[p: usize] { id: usize @ p; s: S[p]; }";
        rejects "array of plain variants"
          "variant L { Low; High(u8); }
           struct H { ls: [L; 4]; }";

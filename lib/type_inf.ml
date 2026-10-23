@@ -10010,10 +10010,15 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             raise (TypeError (sloc, Printf.sprintf
               "struct field '%s.%s' cannot hold a nested erased view"
               sname fname));
-          (* GitHub issue #907: an ordinary indexed struct (owned = false)
-             still has no variant rule here; whether it should is open
-             (the issue #368 test BrNode holds BrLink[o] in one). *)
-          if owned && type_mentions_variant ty
+          (* GitHub issue #907: an ordinary indexed struct answers the same
+             question, so the rule no longer depends on [owned]: a free
+             struct cannot hold a variant that carries linear state or
+             static parameters (maintainer decision; hold it in an owned
+             struct). A Place field keeps its own rules (#131). *)
+          if (owned || not (match ty with
+                | Ast.TypeVariant (name, _, [_]) -> name = Generic_variant.place_name
+                | _ -> false))
+             && type_mentions_variant ty
              && not (is_plain_variant_type ty) then
             raise (TypeError (sloc, Printf.sprintf
               "struct field '%s.%s' can hold only a plain variant (no \

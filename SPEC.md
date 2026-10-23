@@ -556,10 +556,13 @@ linear struct Name[n: usize] { field: T; }   // indexed runtime obligation
   variant can. They let a container name the identity of what it holds --
   a cell storing `Owner[pool]` rather than `exists p. Owner[p]` -- and
   they erase exactly as elsewhere. The field restrictions an owned struct
-  carries (no nested view or indexed owner, and no variant that is not
-  plain -- see "Plain variants in storage") do NOT apply: those
-  exist because an owned aggregate tracks its fields' ownership, which an
-  ordinary one does not. A static argument is a name bound by the
+  carries (no nested view or indexed owner) do NOT apply: those exist
+  because an owned aggregate tracks its fields' ownership, which an
+  ordinary one does not. The variant rule does apply (GitHub issue #907):
+  like every ordinary struct, an indexed one holds a variant only if it is
+  plain ("Plain variants in storage") and only as a field's whole type, so
+  a variant with static parameters or a linear payload is held by an owned
+  struct instead. A static argument is a name bound by the
   enclosing signature, an integer, an enum case, or `&global`. The last
   form has sort `addr` and identifies a top-level `let` object, including
   one declared later in the file. It always names a global, even when a
@@ -1517,11 +1520,13 @@ examples:
   body must directly package an indexed runtime owner or indexed erased view;
 - there is no explicit `forall`; static names in function signatures remain
   implicit universals;
-- plain variants may additionally be fields of ordinary structs and may be
-  copied through those fields. A linear variant has only the private stable
-  owner-slot exception described below. A plain variant in the stricter
-  sense below may also be an owned struct's field, another variant's whole
-  payload, or a mutable zero-initialized global. Variants cannot otherwise
+- a plain variant (defined below) may be the whole type of an ordinary
+  struct's field, indexed or not, and is copied through it; must_use,
+  static-parameter and other non-plain variants, and variants inside
+  arrays or pointers, are rejected there (GitHub issue #907). A linear
+  variant has only the private stable owner-slot exception described
+  below. A plain variant may also be an owned struct's field, another
+  variant's whole payload, or a mutable zero-initialized global. Variants cannot otherwise
   be nested in arrays/slices, tuples, pointers, other variants, or globals;
 - variants cannot be addressed or cast, and payload schemas cannot contain
   `borrow`/`sink`;
@@ -1554,6 +1559,8 @@ view, indexed owner, `exists`, `borrow`/`sink`, singleton, stable owner
 storage, or affine/linear value. Such a value carries no ownership state, so
 it is stored like an integer or a plain struct:
 
+- as the whole type of an ordinary struct's field (#907: one predicate
+  for every storage site);
 - as the whole type of an `affine`/`linear` struct's field;
 - as the whole payload of another variant's case;
 - as the whole type of a global. The global must be `let mut` with no
@@ -1565,7 +1572,7 @@ it is stored like an integer or a plain struct:
   rules; a tag and payload read without them can tear like any multi-word
   struct.
 
-A variant that is not plain stays rejected in all three places. The kernel's
+A variant that is not plain stays rejected in all four places. The kernel's
 `ProcessEnd` is stored this way in `TakenSignal` and a boot-fixture global;
 `linux_user/plain_variant` executes each form.
 
