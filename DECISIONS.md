@@ -147,6 +147,17 @@ condition below applies, and reports the land afterwards.
   lock_order style), absorbing acquires_lock_<rank>_<name>, after the syntax
   review. [active] #789
 
+- 2026-10-23 Refinement soundness: every propagated range is built through a
+  base-checked constructor; unsigned max(a - b, 0) and casts that cannot
+  hold the range are rejected (programs rejected only where unsound). [active] #935
+- 2026-10-23 A product of two non-negative refined factors gets an interval
+  when its maximum fits the base. [active] #807
+- 2026-10-23 Comparing two arrays with == is rejected; content comparison is
+  a separate API, never ==. [active] #941
+- 2026-10-23 `for i in 0..<N { P[i] = e }` (no early exit, store at top
+  level) initializes P; a general loop-invariant form is wanted later
+  rather than more special shapes. [active] #888
+
 ## Trust and safety
 
 - 2026-10-13 Only files in kernel/DEVICE_SEMANTICS_FILES may declare device
@@ -211,6 +222,13 @@ condition below applies, and reports the land afterwards.
 ## Interfaces
 
 - 2026-10-13 Takibi-only interfaces live under /proc/takibi/. [active] #497
+
+- 2026-10-23 The lane budget counts elapsed minus vCPU lease wait; lease
+  grants are ordered longest lane first. [active] #927
+- 2026-10-23 page_alloc_contiguous's linear search is parked until a churn or
+  long TCP workload shows max_ticks growing. [active] #812
+- 2026-10-23 A temporary +1.8 KiB text from #888's DDB byte array is
+  accepted; #943 (byte-array struct copies) is raised to recover it. [active] #888 #943
 
 ## Process
 
