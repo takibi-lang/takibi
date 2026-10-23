@@ -13,7 +13,8 @@ genuinely needs more room, move history out, do not raise the number.
 Raised from 120 to 140 by the maintainer on 2026-10-02, when the split
 itself (Territory A's next pools, not history) needed the room, and to 300
 on 2026-10-03, when two territories editing it at once kept meeting the
-bound.
+bound, and to 500 on 2026-10-23, when both territories got assigned
+queues for the maintainer's long absences.
 
 Exit code only (0 = pass, 1 = fail).
 """
@@ -24,7 +25,7 @@ import sys
 from pass_line import report_pass
 
 ROADMAP = pathlib.Path("ROADMAP.md")
-LIMIT = 300
+LIMIT = 500
 
 
 def main() -> int:

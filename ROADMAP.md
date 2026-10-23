@@ -128,18 +128,15 @@ list (maintainer, 2026-10-09).
    requests per ring (S2) will need a request identity beyond the TRB
    address); general exclusive backing
    storage is done (2026-10-12: `region let mut` backing globals, whose name
-   has no use besides the claim); the ERSTSZ write is #754; the register
-   blocks are placed where the controller reports them (2026-10-17, #804 and
-   #806: CAPLENGTH, RTSOFF and DBOFF read at attach time, CSZ and MaxPorts
-   used), and the one run-time guard left by a context-stride product is
+   has no use besides the claim); the one run-time guard left by a
+   context-stride product is
    #807 (refinement bound for a product of two bounded variables). log.tkb's raw sites go with
    #613: a lockless multi-writer log ring with its protocol in the type
    system, its orderings checked by #645's herd7 litmus tests.
 4. **Preemption.** #638's typed preparation -- a preemption-disabled
    authority, with per-CPU access (`cpu_authority`) derived from it in place
    of the `KERNEL_PREEMPTIBLE == 0` asserts -- with #813 (stage 3 of the TLC
-   trace spec; #656 extended it to the log ring) and #641
-   (the world stop in TLA+). Then the flip: measure candidate designs on
+   trace spec). Then the flip: measure candidate designs on
    RPi5 and set `KERNEL_PREEMPTIBLE` to 1, with the models passing without
    their no-preemption guards. Never while #584's soak is being run for a
    step's evidence.
@@ -156,8 +153,7 @@ list (maintainer, 2026-10-09).
 **Evidence for the trunk, scheduled by A:** #584's soak at natural
 boundaries, #702 (dedicated soak hardware, the maintainer's decision),
 #652 (lifecycle trace events for signals and wait4). Every QEMU lane runs
-four vCPUs since 2026-10-11; candidates on top of it: #756 (contention
-probes rendezvous with every online peer, not core 1 alone).
+four vCPUs since 2026-10-11.
 
 ### Territory B: slightly off the pillars, supporting A, by priority
 
@@ -190,8 +186,7 @@ allocator migration remains a separate design gate.
 
 Initialization does not prove CPU freshness across preemption.
 
-Profiler follow-ups: seeing inside IRQ-masked spans is #773 (Arm SPE); the
-irqsoff-style tracer (#811) landed.
+Profiler follow-ups: seeing inside IRQ-masked spans is #773 (Arm SPE).
 
 **Next, ahead of the list below (maintainer, 2026-10-14):** #740:
 a socket's receive queue keeping the packet (step 3) is decided after the
@@ -258,9 +253,7 @@ usb_xhci_bus.tkb. Only the DCBAA stays legacy (D3).
      SPEC.md "Device protocols") with generated cache work on publishing
      and finishing edges, device-state spans, kernel/DEVICE_SEMANTICS_FILES
      and a line-ownership check; a generated owner kept in a Place across
-     functions works (linux_user/protocol_tx). Done 2026-10-16 (#778): the emitted
-     model carries the cache and generator-side omit controls (#801:
-     snapshot invalidate, per-core lines). Open: #779 (line ownership of split or converted
+     functions works (linux_user/protocol_tx). Open: #779 (line ownership of split or converted
      regions), wrong-ring slot identity (#750). Done 2026-10-13 (slice 2,
      decision B `access write addressed`): the four xHCI producer rings are
      XhciRing owners in usb_xhci_rings.tkb (the device-semantics file),
@@ -273,8 +266,7 @@ usb_xhci_bus.tkb. Only the DCBAA stays legacy (D3).
    #783 (xHCI batched TD write path).
 2. **Independent pillar issues, moved from A (2026-10-16):** #775
    (core-role asymmetries: inventory, 2-1 placement and 2-3 landed; remaining
-   rows are #831, #827, #828, #829, #830); #776 (runtime test of one process changing a running peer's
-   affinity mask); #789 (lock order as ranked capability tokens, absorbing
+   row is #830); #789 (lock order as ranked capability tokens, absorbing
    acquires_lock_<rank>_<name>, after the syntax review).
    **Signals, moved from A (2026-10-16):** #628 (delivery at an
    interrupt return), then #726 (a caught signal interrupts a sleeping
@@ -283,15 +275,14 @@ usb_xhci_bus.tkb. Only the DCBAA stays legacy (D3).
 3. **Other compiler and language work, respecting design gates:** #709 and #710
    (generation exhaustion of region tables and the intrusive pool), #203
    (no uninitialized kernel bytes copied to userspace: stages 1-2 done;
-   stage 3 (cross-call contracts, byte ranges) remains, with #761's TCP rx
-   bound),
+   stage 3 (cross-call contracts, byte ranges) remains),
    #732's later slices (static parameters on generic variants, implicit
    statics inside a type argument), #793 (index and refined-cast proofs
    on type variables), #762 (no vector stores in MMU-off code), #774 (every
    IRQ dispatch arm acknowledges its source), #752 (typestate in more of
    the kernel).
 4. **Diagnostics and build checks:** #769 (--uses-of NAME), #747 (host
-   GDB test), #760, #781, #788 (build races and flags).
+   GDB test).
 5. **Time measurement, then the optimizations waiting on it** (maintainer,
    2026-10-08: space and time are both kept): #502; then #520
    (TCP throughput), with #741 (locate the measured RPi5 HTTP SYN
