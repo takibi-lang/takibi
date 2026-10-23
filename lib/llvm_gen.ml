@@ -2479,10 +2479,17 @@ let function_key (pt : Types.program_types option) (fdef : Ast.func) =
         List.for_all2 (fun d (_, actual) -> match d with
           | Some t -> abi_type t = abi_type actual | None -> true) declared fi.Types.param_types
       in
-      let candidates = Types.StringMap.bindings pt.Types.functions
-        |> List.filter (fun (key, fi) ->
-             (key = fdef.name || String.starts_with ~prefix:("_TK_" ^ fdef.name ^ "__") key)
-             && matches key fi)
+      (* The exact name, then the contiguous run of keys under the
+         instance prefix: a range read of the sorted map rather than a scan
+         of every function per function (#917, quadratic in the kernel). *)
+      let prefix = "_TK_" ^ fdef.name ^ "__" in
+      let exact = match Types.StringMap.find_opt fdef.name pt.Types.functions with
+        | Some fi -> [ (fdef.name, fi) ] | None -> [] in
+      let instances = Types.StringMap.to_seq_from prefix pt.Types.functions
+        |> Seq.take_while (fun (key, _) -> String.starts_with ~prefix key)
+        |> List.of_seq in
+      let candidates = List.filter (fun (key, fi) -> matches key fi)
+          (List.sort (fun (a, _) (b, _) -> String.compare a b) (exact @ instances))
       in
       match candidates with
       | [(key, _)] -> key

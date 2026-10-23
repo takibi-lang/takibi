@@ -95,15 +95,22 @@ let check ~external_entries ~check_files (prog : toplevel list) (types : program
     | None -> Some (Unknown_entry name)
     | Some keys -> List.iter (fun key -> roots := StringSet.add key !roots) keys; None)
       external_entries in
-  let normalized_file file = Filename.concat (Sys.getcwd ()) file in
+  (* The working directory and each definition's file are read once: per
+     definition and check file they were quadratic in the kernel (#917). *)
+  let cwd = Sys.getcwd () in
+  let normalized_file file = Filename.concat cwd file in
   let def_file f =
     let file = Ast.source_file_of_loc f.def_loc in
     if Filename.is_relative file then normalized_file file else file in
+  let def_files = List.fold_left (fun acc f -> StringSet.add (def_file f) acc)
+      StringSet.empty definitions in
+  let check_set = List.fold_left (fun acc file ->
+      StringSet.add (normalized_file file) acc) StringSet.empty check_files in
   let check_errors = List.filter_map (fun file ->
     if not (Sys.file_exists file) then Some (Missing_check_file file) else
     let file = normalized_file file in
-    let matches = List.filter (fun f -> def_file f = file) definitions in
-    if matches = [] then Some (Unknown_check_file file) else None) check_files in
+    if not (StringSet.mem file def_files) then Some (Unknown_check_file file)
+    else None) check_files in
   let rec close seen pending = match StringSet.choose_opt pending with
     | None -> seen
     | Some key ->
@@ -119,7 +126,7 @@ let check ~external_entries ~check_files (prog : toplevel list) (types : program
        speculative copy emitted for another instantiation is not a source
        declaration the programmer can remove independently. *)
     not (String.contains f.name '$') &&
-    (check_files = [] || List.exists (fun file -> def_file f = normalized_file file) check_files) in
+    (check_files = [] || StringSet.mem (def_file f) check_set) in
   entry_errors @ check_errors @ List.filter_map (fun f ->
     if not (is_candidate f) || StringSet.mem (key_of f) reachable
     then None else Some (Unused f)) definitions

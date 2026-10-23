@@ -1342,12 +1342,66 @@ fn io_handle_attach(handle: *IoHandle__@T@, window: sink region__u8[c, 0, n])
 }
 |}
 
+(* Whether [sub] occurs in [s] at [i], without allocating a substring
+   (#917: the planning scans below called String.sub at every position of
+   the printed program, which was most of a kernel compile's front end). *)
+let sub_at s i sub =
+  let m = String.length sub in
+  i >= 0 && i + m <= String.length s &&
+  (let rec go k = k = m || (String.unsafe_get s (i + k) = String.unsafe_get sub k
+                            && go (k + 1)) in
+   go 0)
+
+(* The first occurrence of [sub] in [s] at or after [i], or -1. The first
+   character is found by String.index_from, which is a C loop. *)
+let rec find_sub s i sub =
+  if sub = "" then i
+  else match String.index_from_opt s i sub.[0] with
+    | None -> -1
+    | Some k -> if sub_at s k sub then k
+                else if k + 1 >= String.length s then -1
+                else find_sub s (k + 1) sub
+
+let ident_char = function
+  | 'A'..'Z' | 'a'..'z' | '0'..'9' | '_' -> true | _ -> false
+
+(* Calls [add] with the identifier characters that follow each occurrence
+   of [prefix] in [text]; a match resumes the search after those
+   characters, so a prefix inside a matched name is not matched again. *)
+let names_after prefix text add =
+  let lp = String.length prefix and n = String.length text in
+  let rec go i =
+    if i + lp <= n then
+      let k = find_sub text i prefix in
+      if k >= 0 then begin
+        let j = ref (k + lp) in
+        while !j < n && ident_char text.[!j] do incr j done;
+        if !j > k + lp then add (String.sub text (k + lp) (!j - k - lp));
+        go (if !j > k then !j else k + 1)
+      end in
+  go 0
+
+(* Whether [sub] occurs anywhere in [text]. *)
+let contains text sub = find_sub text 0 sub >= 0
+
+(* The printed form of each top-level item, which the planning scans read.
+   Printing the kernel takes seconds and every scan reads the same program,
+   so the texts of the last program printed are kept (#917). *)
+let shown_cache : (Ast.toplevel list * string list) option ref = ref None
+let shown (prog : Ast.toplevel list) =
+  match !shown_cache with
+  | Some (p, texts) when p == prog -> texts
+  | _ ->
+      let texts = List.map Ast.show_toplevel prog in
+      shown_cache := Some (prog, texts);
+      texts
+
 let replace_all ~sub ~by s =
   let lsub = String.length sub in
   let buf = Buffer.create (String.length s) in
   let i = ref 0 in
   while !i < String.length s do
-    if !i + lsub <= String.length s && String.sub s !i lsub = sub then begin
+    if !i + lsub <= String.length s && sub_at s !i sub then begin
       Buffer.add_string buf by; i := !i + lsub
     end else begin
       Buffer.add_char buf s.[!i]; incr i
@@ -1458,20 +1512,7 @@ let element_types (prog : Ast.toplevel list) claimed =
   List.iter (fun (_, (elem, _)) -> Hashtbl.replace found elem ()) claimed;
   let scan text =
     List.iter (fun prefix ->
-      let lp = String.length prefix in
-      let n = String.length text in
-      let i = ref 0 in
-      while !i + lp <= n do
-        if String.sub text !i lp = prefix then begin
-          let j = ref (!i + lp) in
-          while !j < n && (match text.[!j] with
-              | 'A'..'Z' | 'a'..'z' | '0'..'9' | '_' -> true | _ -> false) do
-            incr j done;
-          if !j > !i + lp then
-            Hashtbl.replace found (String.sub text (!i + lp) (!j - !i - lp)) ();
-          i := !j
-        end else incr i
-      done) [ "region__"; "RegionSplit__"; "RegionOf__"; "RegionTable__";
+      names_after prefix text (fun name -> Hashtbl.replace found name ())) [ "region__"; "RegionSplit__"; "RegionOf__"; "RegionTable__";
          "RegionTableOf__"; "RegionTake__"; "RegionAlloc__"; "RegionHandle__";
          "RegionReleaseSlot__"; "RegionReleaseAdopt__"; "RegionPoolAlloc__";
          "RegionSlot__"; "RegionPool__"; "RegionPoolGuard__"; "RegionGrow__";
@@ -1480,7 +1521,7 @@ let element_types (prog : Ast.toplevel list) claimed =
          "RegionInspection__"; "RegionInspectionProbe__"; "RegionTyped__"; "places__";
          "PlaceBack__"; "PlaceRun__"; "PlacesFrom__";
          "RegionHeld__"; "RegionHeldView__"; "RegionHeldProbe__" ] in
-  List.iter (fun item -> scan (Ast.show_toplevel item)) prog;
+  List.iter scan (shown prog);
   Hashtbl.fold (fun k () acc -> k :: acc) found [] |> List.sort compare
 
 (* Every global array of a named element type: name -> (element, length).
@@ -1498,50 +1539,30 @@ let global_arrays (prog : Ast.toplevel list) =
 (* A program that names RegionBytes or region_bytes_assume without any
    typed region still needs the u8 instance and the common source. *)
 let region_bytes_used (prog : Ast.toplevel list) =
-  List.exists (fun item ->
-    let text = Ast.show_toplevel item in
-    let contains sub =
-      let n = String.length text and m = String.length sub in
-      let rec go i = i + m <= n && (String.sub text i m = sub || go (i + 1)) in
-      go 0 in
+  List.exists (fun text ->
+    let contains = contains text in
     contains "region_bytes_assume" || contains "RegionBytes"
-    || contains "IoHandle__") prog
+    || contains "IoHandle__") (shown prog)
 
 (* Whether a program names any region built-in at all -- a region,
    array of places, slots, pool or table type, or a claim -- so a build
    without --regions can say so up front instead of failing on an
    undefined name or type. *)
 let mentions_builtins (prog : Ast.toplevel list) =
-  Region_backing.any () || region_bytes_used prog || List.exists (fun item ->
-    let text = Ast.show_toplevel item in
-    let contains sub =
-      let n = String.length text and m = String.length sub in
-      let rec go i = i + m <= n && (String.sub text i m = sub || go (i + 1)) in
-      go 0 in
+  Region_backing.any () || region_bytes_used prog || List.exists (fun text ->
+    let contains = contains text in
     List.exists contains
       [ "region__"; "places__"; "slots__"; "RegionOf__"; "RegionTable__";
         "RegionPool__"; "RegionTyped__"; "\"region_of\""; "\"region_table_of\"";
-        "\"region_table_lock\"" ]) prog
+        "\"region_table_lock\"" ]) (shown prog)
 
 (* The io structs a program names in IoHandle(T): one io_source each. *)
 let io_types (prog : Ast.toplevel list) =
   let found = Hashtbl.create 4 in
   let prefix = "IoHandle__" in
-  List.iter (fun item ->
-    let text = Ast.show_toplevel item in
-    let lp = String.length prefix and n = String.length text in
-    let i = ref 0 in
-    while !i + lp <= n do
-      if String.sub text !i lp = prefix then begin
-        let j = ref (!i + lp) in
-        while !j < n && (match text.[!j] with
-            | 'A'..'Z' | 'a'..'z' | '0'..'9' | '_' -> true | _ -> false) do
-          incr j done;
-        if !j > !i + lp then
-          Hashtbl.replace found (String.sub text (!i + lp) (!j - !i - lp)) ();
-        i := !j
-      end else incr i
-    done) prog;
+  List.iter (fun text ->
+    names_after prefix text (fun name -> Hashtbl.replace found name ()))
+    (shown prog);
   Hashtbl.fold (fun k () acc -> k :: acc) found [] |> List.sort compare
 
 (* GitHub issue #749 phase 2: an array whose elements are places holding a
@@ -1641,21 +1662,9 @@ private fn __slots_forget__@P@(v: sink @EXV@) {}
 let slots_types (prog : Ast.toplevel list) =
   let found = Hashtbl.create 4 in
   let prefix = "slots__" in
-  List.iter (fun item ->
-    let text = Ast.show_toplevel item in
-    let lp = String.length prefix and n = String.length text in
-    let i = ref 0 in
-    while !i + lp <= n do
-      if String.sub text !i lp = prefix then begin
-        let j = ref (!i + lp) in
-        while !j < n && (match text.[!j] with
-            | 'A'..'Z' | 'a'..'z' | '0'..'9' | '_' -> true | _ -> false) do
-          incr j done;
-        if !j > !i + lp then
-          Hashtbl.replace found (String.sub text (!i + lp) (!j - !i - lp)) ();
-        i := !j
-      end else incr i
-    done) prog;
+  List.iter (fun text ->
+    names_after prefix text (fun name -> Hashtbl.replace found name ()))
+    (shown prog);
   Hashtbl.fold (fun k () acc -> k :: acc) found [] |> List.sort compare
 
 let slots_instance prog name =
@@ -1723,26 +1732,28 @@ let plan prog : string list =
      and a type that holds a built-in one cannot be measured before the
      built-in is parsed. *)
   let calls_of fname =
-    List.concat_map (fun item ->
-      let text = Ast.show_toplevel item in
+    List.concat_map (fun text ->
       let key = "\"" ^ fname ^ "\"," in
       let found = ref [] in
       let n = String.length text and m = String.length key in
-      let i = ref 0 in
-      while !i + m <= n do
-        if String.sub text !i m = key then begin
-          let var = "Ast.Var \"" in
-          let j = ref (!i + m) in
-          while !j + String.length var <= n
-                && String.sub text !j (String.length var) <> var do incr j done;
-          let start = !j + String.length var in
-          let stop = ref start in
-          while !stop < n && text.[!stop] <> '"' do incr stop done;
-          if start < n then found := String.sub text start (!stop - start) :: !found;
-          i := !stop
-        end else incr i
-      done;
-      !found) prog in
+      let var = "Ast.Var \"" in
+      let lv = String.length var in
+      let rec go i =
+        if i + m <= n then
+          let k = find_sub text i key in
+          if k >= 0 then begin
+            (* The first variable named after the key; none puts the
+               start past the end, as a scan that runs out would. *)
+            let v = find_sub text (k + m) var in
+            let j = if v >= 0 then v else max (k + m) (n - lv + 1) in
+            let start = j + lv in
+            let stop = ref start in
+            while !stop < n && text.[!stop] <> '"' do incr stop done;
+            if start < n then found := String.sub text start (!stop - start) :: !found;
+            go !stop
+          end in
+      go 0;
+      !found) (shown prog) in
   let once = calls_of "region_of" @ calls_of "region_table_of" in
   let locks = List.sort_uniq compare (calls_of "region_table_lock") in
   let claims = List.sort_uniq compare (once @ locks) in
@@ -1786,6 +1797,7 @@ let plan prog : string list =
   defs @ [ flags; lock_defs ]
 
 let parse_planned sources =
+  shown_cache := None;
   next_first_line := 1;
   List.concat_map parse_source sources
 

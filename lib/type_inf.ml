@@ -14221,19 +14221,32 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | _ -> false) stmts in
   (* on_masked_call receives the call and the callee whose transfer last
      raised the state to "possibly masked", for the diagnostic. *)
+  let mask_deps = ref StringSet.empty in
+  (* A call's resolved target and whether an indirect callee requires IRQs
+     unmasked, read once per call site: the walks repeat for every entry
+     state and round, and printing the location key dominated them (#917). *)
+  let mask_call_cache = Hashtbl.create 1024 in
+  let mask_call_info (e : Ast.expr) name =
+    match Hashtbl.find_opt mask_call_cache (e.loc, name) with
+    | Some info -> info
+    | None ->
+        let key = loc_key e.loc in
+        let target = Option.value
+          (StringMap.find_opt key !resolved_call_targets) ~default:name in
+        let indirect_requires = match StringMap.find_opt key
+            !resolved_indirect_call_effects with
+          | Some (Some effects) -> List.mem "requires_irq_unmasked" effects
+          | _ -> false in
+        Hashtbl.add mask_call_cache (e.loc, name) (target, indirect_requires);
+        (target, indirect_requires) in
   let mask_walk body entry on_masked_call =
     let returned = ref mask_dead in
     let masker = ref "msr_daifset_irq" in
     let rec expr state (e : Ast.expr) = match e.desc with
       | Ast.Call (name, args) ->
           let state = List.fold_left expr state args in
-          let target = Option.value
-            (StringMap.find_opt (loc_key e.loc) !resolved_call_targets)
-            ~default:name in
-          let indirect_requires = match StringMap.find_opt (loc_key e.loc)
-              !resolved_indirect_call_effects with
-            | Some (Some effects) -> List.mem "requires_irq_unmasked" effects
-            | _ -> false in
+          let target, indirect_requires = mask_call_info e name in
+          mask_deps := StringSet.add target !mask_deps;
           if current_of state = 2
              && (StringSet.mem target requires_unmasked || indirect_requires) then
             on_masked_call e name target !masker;
@@ -14278,14 +14291,37 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     mask_join at_end !returned
   in
   let ignore_call _ _ _ _ = () in
+  (* A walk reads other summaries only at its body's call targets (which
+     mask_walk records in mask_deps), so a
+     body none of whose targets changed since its last walk would give the
+     same summary again and is skipped. The rounds, their order and the
+     result are those of walking every body every round (#917: that was
+     a tenth of a kernel compile). *)
+  let clock = ref 0 in
+  let changed_at = Hashtbl.create 256 in
+  let walked_at = Hashtbl.create 256 in
+  let walk_deps = Hashtbl.create 256 in
   let rec settle round =
     let changed = ref false in
     StringMap.iter (fun key body ->
+      let stale = match Hashtbl.find_opt walked_at key with
+        | None -> true
+        | Some at -> StringSet.exists (fun target ->
+            match Hashtbl.find_opt changed_at target with
+            | Some c -> c > at | None -> false) (Hashtbl.find walk_deps key) in
+      if stale then begin
+      incr clock;
+      Hashtbl.replace walked_at key !clock;
+      mask_deps := StringSet.empty;
       let next = List.map (fun entry ->
         (entry, mask_walk body entry ignore_call)) mask_entries in
+      Hashtbl.replace walk_deps key !mask_deps;
       if StringMap.find_opt key !mask_summaries <> Some next then begin
         mask_summaries := StringMap.add key next !mask_summaries;
+        incr clock;
+        Hashtbl.replace changed_at key !clock;
         changed := true
+      end
       end) mask_bodies;
     if !changed then begin
       if round >= 1000 then
