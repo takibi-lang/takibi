@@ -64,7 +64,8 @@ lane (`kernelcheck-race-window-*-qemu`) before its issue closes.
 backbone only. Taken in order whenever the numbered trunk items below have
 no step ready; an item that reaches a decision is parked and the next one
 taken (#894, already under way here, finishes here; its follow-ups go to
-B): #819 (AtomicWord acq_rel cells), #920 (DDB world stop reaching a core
+B): #935 (unsigned Sub keeps a negative lower bound; a soundness hole,
+first), #819 (AtomicWord acq_rel cells), #920 (DDB world stop reaching a core
 spinning with IRQs masked: pseudo-NMI/FIQ stop, cf. #641; the hung-core
 DDB check is expected-fail until then), #932 (one timer-tick entry
 for every core, after #920), #933 (reboot on any core, after #920), #680 (region_pool handle validation without the lock), #812
