@@ -8682,7 +8682,22 @@ let gen_exception_entry name frame dispatch tail before after_switch guard dispa
           The bug it removes was found the expensive way: with one global
           irq_stack_top, core 1's first timer interrupt wrote its own INTID
           over core 0's saved ELR. *)
-       a "\tmrs\tx2, tpidr_el1\n\tadd\tx1, x1, x2\n\tmov\tsp, x1\n";
+       a "\tmrs\tx2, tpidr_el1\n\tadd\tx1, x1, x2\n";
+       (* GitHub issue #920: an exception taken while this core is already
+          on that stack -- the pseudo-NMI world stop arriving inside a
+          handler that unmasked DAIF.I -- must not reset SP to its top,
+          which is where the interrupted handler's own frames are. The
+          stack discipline the guard relies on (every stack is the upper
+          half of a `2 << shift`-aligned region) says the frame is on it
+          exactly when the frame and the stack's last byte agree from bit
+          `shift` up. Then the handler runs on below the frame instead. *)
+       let shift = match guard with
+         | Some (shift, _, _) -> shift
+         | None -> raise (Error (Printf.sprintf
+             "BUG: exception_entry '%s' dispatch_stack without a stack guard \
+              -- type_inf.ml should have already rejected this" name)) in
+       a "\tsub\tx3, x1, #1\n\teor\tx3, x3, x19\n\tlsr\tx3, x3, #%d\n" shift;
+       a "\tcbz\tx3, .L%s_nested\n\tmov\tsp, x1\n.L%s_nested:\n" name name;
        Option.iter (fun b -> a "\tbl\t%s\n" b) before;
        a "\tmov\tx0, x19\n"
    | None ->
@@ -8696,10 +8711,14 @@ let gen_exception_entry name frame dispatch tail before after_switch guard dispa
      sp already points at. The msr DAIFSet below is then a same-behavior-
      either-way re-assertion, matching exception_context.inc's own
      EXC_CONTEXT_RESTORE macro, which unconditionally re-masks here too. *)
+  (* GitHub issue #920: masked BEFORE the switch. A dispatcher that let a
+     nested exception in (the pseudo-NMI world stop) re-masks before it
+     returns, but this entry does not rely on that: an exception between
+     `mov sp, x0` and the mask would build its frame below the resumed
+     context's stack, which may be another process's. *)
   (match dispatch_stack with
-   | Some _ -> a "\tbl\t%s\n\tmov\tsp, x0\n" dispatch
-   | None -> a "\tmov\tx0, sp\n\tbl\t%s\n\tmov\tsp, x0\n" dispatch);
-  a "\tmsr\tDAIFSet, #0x2\n";
+   | Some _ -> a "\tbl\t%s\n\tmsr\tDAIFSet, #0x2\n\tmov\tsp, x0\n" dispatch
+   | None -> a "\tmov\tx0, sp\n\tbl\t%s\n\tmsr\tDAIFSet, #0x2\n\tmov\tsp, x0\n" dispatch);
   Option.iter (fun hook ->
     a "\tmov\tx0, sp\n\tbl\t%s\n" hook) after_switch;
   emit_exception_restore off total);

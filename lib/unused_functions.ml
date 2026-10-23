@@ -57,7 +57,8 @@ let check ~external_entries ~check_files (prog : toplevel list) (types : program
   in
   List.iter (fun f -> List.iter (stmt (Some (key_of f))) f.body) definitions;
   List.iter (fun (f : Ast.func) -> match f.effects with
-    | Some effects when List.mem "interrupt" effects || List.mem "exception" effects ->
+    | Some effects when List.mem "interrupt" effects || List.mem "exception" effects
+                     || List.mem "nmi" effects ->
         roots := StringSet.add (key_of f) !roots
     | _ -> ()) definitions;
   (* GitHub issue #540: a function whose whole body is static_assert

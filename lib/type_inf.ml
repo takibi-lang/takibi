@@ -10597,6 +10597,12 @@ let infer_program (prog : Ast.toplevel list) : program_types =
          | _ -> raise (TypeError (loc, Printf.sprintf
              "exception_entry '%s' must give all three of stack_guard_shift, stack_guard_stack and stack_guard_handler, or none of them"
              name)));
+        (* GitHub issue #920: the generated entry decides from the stack
+           guard's discipline whether it is already on its dispatch stack
+           (a nested exception), so the two come together. *)
+        if !dispatch_stack <> None && !guard_shift = None then
+          raise (TypeError (loc, Printf.sprintf
+              "exception_entry '%s' dispatch_stack requires a stack guard" name));
         if !tail <> None && !guard_shift = None then
           raise (TypeError (loc, Printf.sprintf
               "exception_entry '%s' tail requires a stack guard" name));
@@ -11639,8 +11645,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     List.fold_left (fun (discharged, guards) item -> match item with
       | Ast.FuncDef f ->
           let key = overload_key f.name f.params in
+          (* GitHub issue #920: a `masks_irq` primitive never restores,
+             even when its body clears DAIF.I to hand the mask to PMR. *)
           let discharged =
             if has_annotation f.effects Effect_rules.restores_saved_irq_annotation
+               || has_annotation f.effects Effect_rules.masks_irq_annotation
             then StringSet.add key discharged else discharged in
           let guards =
             if not (has_annotation f.effects
@@ -14517,8 +14526,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
      An indirect call or a callee with no body leaves the state alone: this
      rule follows only the masks it can see. *)
   let requires_unmasked = closed_effect "requires_irq_unmasked" in
-  let mask_guards, mask_restorers, mask_noreturn =
-    List.fold_left (fun (guards, restorers, noreturn) -> function
+  let mask_guards, mask_restorers, mask_noreturn, mask_primitives =
+    List.fold_left (fun (guards, restorers, noreturn, primitives) -> function
       | Ast.FuncDef f ->
           let key = overload_key f.name f.params in
           ((if has_annotation f.effects Effect_rules.irq_masking_guard_annotation
@@ -14526,16 +14535,22 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             then StringSet.add key guards else guards),
            (if has_annotation f.effects Effect_rules.restores_saved_irq_annotation
             then StringSet.add key restorers else restorers),
-           noreturn)
+           noreturn,
+           (* GitHub issue #920: a `masks_irq` function masks, whatever its
+              body does to DAIF; it is read as msr_daifset_irq is. *)
+           (if has_annotation f.effects Effect_rules.masks_irq_annotation
+            then StringSet.add key primitives else primitives))
       | Ast.ExternFuncDef (name, params, _, effects)
         when has_annotation effects "noreturn" ->
-          (guards, restorers, StringSet.add (overload_key name params) noreturn)
-      | _ -> (guards, restorers, noreturn))
-      (StringSet.empty, StringSet.empty, StringSet.empty) prog in
+          (guards, restorers, StringSet.add (overload_key name params) noreturn,
+           primitives)
+      | _ -> (guards, restorers, noreturn, primitives))
+      (StringSet.empty, StringSet.empty, StringSet.empty, StringSet.empty) prog in
   let mask_bodies = List.fold_left (fun acc -> function
     | Ast.FuncDef f ->
         let key = overload_key f.name f.params in
         if StringSet.mem key mask_guards || StringSet.mem key mask_restorers
+           || StringSet.mem key mask_primitives
         then acc else StringMap.add key f.body acc
     | _ -> acc) StringMap.empty prog in
   let mask_entries = List.concat_map (fun current ->
@@ -14557,7 +14572,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     if current = 0 then state
     else if StringSet.mem target mask_noreturn then mask_dead
     else if target = "mrs_daif" then mask_save state
-    else if target = "msr_daifset_irq" then (2, depth, saved)
+    else if target = "msr_daifset_irq"
+            || StringSet.mem target mask_primitives then (2, depth, saved)
     else if target = "msr_daifclr_irq" then (1, depth, saved)
     else if StringSet.mem target mask_restorers then mask_restore state
     else if StringSet.mem target mask_guards then state
@@ -14734,7 +14750,19 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           (display_effect_key key) description (String.concat " -> " path)))
       end
     ) rule.excludes_reachable in
-    if List.mem "interrupt" effects then begin
+    if List.mem "nmi" effects then begin
+      (* GitHub issue #920: the pseudo-NMI handler interrupts any section
+         its own core masked, so a lock it took could be held below it. *)
+      check_forbidden "nmi";
+      if (Option.get (Effect_rules.find "nmi")).rejects_unknown_indirect
+         && StringSet.mem key may_reach_unknown then begin
+        let path = Option.value (find_unknown_path StringSet.empty key)
+          ~default:[display_effect_key key; "<indirect call>"] in
+        raise (TypeError (StringMap.find key effect_locs, Printf.sprintf
+          "nmi function '%s' reaches a call with unknown effects via %s"
+          (display_effect_key key) (String.concat " -> " path)))
+      end
+    end else if List.mem "interrupt" effects then begin
       check_forbidden "interrupt";
       if (Option.get (Effect_rules.find "interrupt")).rejects_unknown_indirect
          && StringSet.mem key may_reach_unknown then begin

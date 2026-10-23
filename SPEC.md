@@ -2135,6 +2135,16 @@ says so with `may_block`, which is forbidden there --
 `kernel/lib/task_mutex.tkb` is the one, and an interrupt handler reaching
 it is rejected with the call path.
 
+`nmi` is the one root that forbids it (GitHub issue #920). The kernel's
+world-stop interrupt is a pseudo-NMI: it is raised above the interrupt
+controller's priority mask, so it reaches a core whose ordinary IRQs are
+masked -- including one that holds a masking lock. Masking is then no
+defense, and a handler that took a lock could wait for a holder it has
+interrupted on its own core. An `nmi` root's reachable call graph must not
+contain `locks`, `may_block`, `allocates`, `logs` or
+`requires_irq_unmasked`, and an unknown indirect call is rejected as for
+`interrupt`. `nmi` cannot be combined with `interrupt` or `exception`.
+
 `logs` covers UART and console emission, including recursion through a
 logging helper, without a second redundant "reentrant logging" effect. It
 stays forbidden in a handler for a reason worth stating: at 115200 baud a
@@ -2240,6 +2250,15 @@ exempt a shadowed outer guard. With
 no guard marked, nothing is checked: a local save and conditional restore
 with no outer guard is unaffected. Both words are checker-only.
 
+The IRQ mask the kernel uses need not be `DAIF.I` (GitHub issue #920). With
+a priority-mask pseudo-NMI, masking is a store to the interrupt controller's
+priority-mask register, which nothing here can recognise from its body. A
+function declaring `masks_irq` is that store: both this rule and the one
+below read every call to it as they read `msr_daifset_irq`, and its body is
+trusted rather than summarised -- in particular a `msr_daifclr_irq` inside
+it, handing the mask from `DAIF.I` to the priority mask, is not a restore.
+The word is checker-only.
+
 A function that must run with IRQs unmasked declares
 `requires_irq_unmasked` (GitHub issue #809). The kernel's world-stop
 back-off does: it waits for the other cores to take the stop's interrupt,
@@ -2251,8 +2270,8 @@ row may carry it. Reaching it is a compile error in three places:
 - while an `irq_masking_guard` or `lock_guard_<rank>_<name>` guard is live,
   unless the guard is passed to the call (the callee holds it and is checked
   the same way);
-- after a bare mask on the same path: `msr_daifset_irq` reached with no
-  guard, or a save (`mrs_daif`, as `mutex_irq_save` does) whose
+- after a bare mask on the same path: `msr_daifset_irq` or a `masks_irq`
+  function reached with no guard, or a save (`mrs_daif`, as `mutex_irq_save` does) whose
   `restores_saved_irq` restore has not yet run. Saves nest; an inner restore
   leaves IRQs masked. Branches join as "may be masked", a loop body counts
   at the top of its next iteration, and a path that ends in a `noreturn`
@@ -4548,6 +4567,14 @@ moved across functions.
   deepest ordinary path and the deepest interrupt path at once.
   `before`, if given, also runs on the new stack; the frame's address is
   carried across it in `x19`, which is already saved in the frame.
+  `dispatch_stack` requires the three stack-guard keys below, because the
+  generated code uses their stack discipline to recognise a NESTED entry
+  (GitHub issue #920): when the frame was saved on the dispatch stack itself
+  -- its address and the stack's last byte agree from bit
+  `stack_guard_shift` up -- SP stays below the frame instead of returning to
+  the stack's top, where the interrupted handler's own frames are. After
+  `dispatch` returns, `DAIF.I` is masked before SP moves to the frame it
+  returned.
 
   Three further optional keys -- `stack_guard_shift: CONST_NAME;`,
   `stack_guard_stack: extern_symbol;`, `stack_guard_handler: fn_name;` --

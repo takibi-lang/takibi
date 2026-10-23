@@ -17807,18 +17807,24 @@ let codegen_tests = [
        ignore (gen_codegen
          (exc_frame_src ^
           "extern symbol my_irq_stack_top;
+           extern symbol guard_stack_top;
+           const STACK_SHIFT: usize = 14;
            fn my_dispatch(frame_sp: usize) -> usize { return frame_sp; }
            fn my_before() {}
+           fn my_overflow(sp: usize) {}
            exception_entry el1_current_irq_entry {
              frame: ExcFrame;
              before: my_before;
              dispatch: my_dispatch;
              dispatch_stack: my_irq_stack_top;
+             stack_guard_shift: STACK_SHIFT;
+             stack_guard_stack: guard_stack_top;
+             stack_guard_handler: my_overflow;
            }"));
        let asm = Buffer.contents Llvm_gen.raw_asm_buf in
        (* The frame is still allocated on the interrupted stack. *)
        Alcotest.(check bool) "frame still on the interrupted stack" true
-         (contains_substring asm "sub\tsp, sp, #816\n\tstr\tx0,");
+         (contains_substring asm "sub\tsp, sp, #816\n\tadd\tsp, sp, x0\n");
        Alcotest.(check bool) "switches to the named stack" true
          (contains_substring asm "adrp\tx1, my_irq_stack_top");
        (* x19, not x0, across `before`: an ordinary call may clobber
@@ -17827,8 +17833,33 @@ let codegen_tests = [
          (contains_substring asm "mov\tx19, sp");
        Alcotest.(check bool) "dispatch gets the frame address" true
          (contains_substring asm "mov\tx0, x19\n\tbl\tmy_dispatch");
-       Alcotest.(check bool) "returns to the frame dispatch chose" true
-         (contains_substring asm "bl\tmy_dispatch\n\tmov\tsp, x0");
+       (* GitHub issue #920: masked before SP leaves the dispatch stack. *)
+       Alcotest.(check bool) "masks, then returns to the frame dispatch chose" true
+         (contains_substring asm
+            "bl\tmy_dispatch\n\tmsr\tDAIFSet, #0x2\n\tmov\tsp, x0");
+       (* GitHub issue #920: a nested exception already on the dispatch
+          stack (the frame shares the stack top's bits from the guard
+          shift up) keeps SP below its frame rather than resetting it to
+          the top, where the interrupted handler's frames are. *)
+       Alcotest.(check bool) "nested entry keeps SP on the dispatch stack" true
+         (contains_substring asm
+            "sub\tx3, x1, #1\n\teor\tx3, x3, x19\n\tlsr\tx3, x3, #14\n\
+             \tcbz\tx3, .Lel1_current_irq_entry_nested\n\tmov\tsp, x1\n\
+             .Lel1_current_irq_entry_nested:\n\tbl\tmy_before");
+       Target_info.configure "thumbv7em-none-eabi");
+
+  Alcotest.test_case "exception_entry rejects dispatch_stack without a stack guard" `Quick
+    (fun () ->
+       Target_info.configure "aarch64-none-elf";
+       expect_type_error "dispatch_stack requires a stack guard"
+         (exc_frame_src ^
+          "extern symbol my_irq_stack_top;
+           fn my_dispatch(frame_sp: usize) -> usize { return frame_sp; }
+           exception_entry el1_current_irq_entry {
+             frame: ExcFrame;
+             dispatch: my_dispatch;
+             dispatch_stack: my_irq_stack_top;
+           }") ();
        Target_info.configure "thumbv7em-none-eabi");
 
   Alcotest.test_case "exception_entry without dispatch_stack keeps the interrupted stack" `Quick
@@ -17863,7 +17894,7 @@ let codegen_tests = [
        let asm = Buffer.contents Llvm_gen.raw_asm_buf in
        Alcotest.(check bool) "switch, mask, then hook" true
          (contains_substring asm
-            "bl\tmy_dispatch\n\tmov\tsp, x0\n\tmsr\tDAIFSet, #0x2\n\tmov\tx0, sp\n\tbl\tmy_after");
+            "bl\tmy_dispatch\n\tmsr\tDAIFSet, #0x2\n\tmov\tsp, x0\n\tmov\tx0, sp\n\tbl\tmy_after");
        Target_info.configure "thumbv7em-none-eabi");
 
   Alcotest.test_case "exception_entry rejects a dispatch_stack that is not an extern symbol" `Quick
@@ -17871,11 +17902,17 @@ let codegen_tests = [
        Target_info.configure "aarch64-none-elf";
        expect_type_error "not an extern symbol"
          (exc_frame_src ^
-          "fn my_dispatch(frame_sp: usize) -> usize { return frame_sp; }
+          "extern symbol guard_stack_top;
+           const STACK_SHIFT: usize = 14;
+           fn my_dispatch(frame_sp: usize) -> usize { return frame_sp; }
+           fn my_overflow(sp: usize) {}
            exception_entry el1_current_irq_entry {
              frame: ExcFrame;
              dispatch: my_dispatch;
              dispatch_stack: my_dispatch;
+             stack_guard_shift: STACK_SHIFT;
+             stack_guard_stack: guard_stack_top;
+             stack_guard_handler: my_overflow;
            }") ();
        Target_info.configure "thumbv7em-none-eabi");
 
@@ -18538,6 +18575,70 @@ fn hidden_witnessed() -> usize {
           }") ();
        expect_type_error "irq_masking_guard annotation requires a linear returned guard type"
          "fn issue528_not_guard() -> usize !{irq_masking_guard} { return 0; }" ());
+
+  (* GitHub issue #920: the kernel's IRQ mask moved from DAIF.I to the GIC
+     priority mask, an MMIO store the #528/#809 checks cannot see. A
+     `masks_irq` function is read as msr_daifset_irq is, and the DAIF.I
+     clear inside it (the hand-over to PMR) is not an unmask. *)
+  Alcotest.test_case
+    "issue #920: a masks_irq primitive is a mask, not a restore"
+    `Quick
+    (fun () ->
+       let base =
+         "linear view G920[id: usize];
+          fn backoff920() !{requires_irq_unmasked} {}
+          fn pmr_write920(v: usize) {}
+          fn mask920() !{masks_irq} { pmr_write920(160); msr_daifclr_irq(); }
+          fn plain920() { pmr_write920(160); msr_daifclr_irq(); }
+          fn take920() -> G920[1] !{irq_masking_guard} { return view G920[1]; }
+          fn put920(g: sink G920[id]) !{restores_saved_irq} {}
+          " in
+       (* #809 sees the PMR mask, directly and through a helper. *)
+       expect_type_error "(at the call to 'mask920')"
+         (base ^ "fn bare920() { mask920(); backoff920(); }") ();
+       expect_type_error "masked them with no guard"
+         (base ^ "fn wrap920() { mask920(); }
+                  fn helper920() { wrap920(); backoff920(); }") ();
+       (* Control: the same body unannotated is summarised from its DAIF.I
+          clear, so it masks nothing the check can see. *)
+       expect_ok (base ^ "fn unseen920() { plain920(); backoff920(); }") ();
+       (* #528: under a live guard the primitive is not a restore, while
+          the same body unannotated is one. *)
+       expect_ok (base ^
+         "fn guarded920() { let g = take920(); mask920(); put920(g); }") ();
+       expect_type_error "cannot restore IRQs while"
+         (base ^
+         "fn restoring920() { let g = take920(); plain920(); put920(g); }") ());
+
+  (* GitHub issue #920: the world-stop SGI runs above the priority mask, so
+     its handler can interrupt a holder of any lock on its own core. An
+     `nmi` root therefore reaches no lock, besides what an `interrupt` root
+     may not reach. *)
+  Alcotest.test_case
+    "issue #920: an nmi root takes no lock"
+    `Quick
+    (fun () ->
+       expect_type_error "nmi function 'stop920' may acquire a lock via stop920 -> helper920 -> lock920"
+         "extern fn lock920() !{locks};
+          fn helper920() { lock920(); }
+          fn stop920() !{nmi} { helper920(); }" ();
+       expect_type_error "nmi function 'stoplog920' may log via"
+         "extern fn log920() !{logs};
+          fn stoplog920() !{nmi} { log920(); }" ();
+       expect_type_error "nmi function 'stopback920' reaches a back-off"
+         "fn back920() !{requires_irq_unmasked} {}
+          fn stopback920() !{nmi} { back920(); }" ();
+       expect_type_error "reaches a call with unknown effects"
+         "fn stopcall920(callback: fn () -> void) !{nmi} { callback(); }" ();
+       expect_type_error "cannot combine nmi with interrupt"
+         "fn both920() !{nmi, interrupt} {}" ();
+       (* A spin on plain loads is what the pen is, and is accepted; the
+          same lock from an interrupt root still is (#449). *)
+       expect_ok
+         "fn pen920(n: usize) !{nmi} { let mut i: usize = 0; while (i < n) { i = i + 1; } }" ();
+       expect_ok
+         "extern fn lock920b() !{locks};
+          fn irq920() !{interrupt} { lock920b(); }" ());
 
   Alcotest.test_case
     "issue #809: a world-stop back-off is not reached with IRQs masked"

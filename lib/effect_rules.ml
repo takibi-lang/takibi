@@ -54,6 +54,15 @@ let irq_masking_guard_annotation = "irq_masking_guard"
 let single_instance_lock_annotation = "single_instance_lock"
 let restores_saved_irq_annotation = "restores_saved_irq"
 
+(* GitHub issue #920: the IRQ mask need not be DAIF.I. With a GICv2
+   priority-mask pseudo-NMI the kernel masks ordinary interrupts by writing
+   GICC_PMR, an MMIO store the #528/#809 checks cannot recognise as a mask.
+   `masks_irq` marks the function that performs that store: every call to it
+   is read as msr_daifset_irq is, and its body is trusted rather than
+   summarised (it may clear DAIF.I as part of handing the mask to PMR, which
+   is not an unmask). Checker-only, like the two words above. *)
+let masks_irq_annotation = "masks_irq"
+
 (* GitHub issue #493: the two checker-only words of effect-indexed
    invalidation. `invalidates_<Type>` marks a function after which a
    plain handle of struct type <Type> may name a destroyed object; the
@@ -97,6 +106,7 @@ let dynamic_rule name =
     || name = irq_masking_guard_annotation
     || name = single_instance_lock_annotation
     || name = restores_saved_irq_annotation
+    || name = masks_irq_annotation
     || invalidation_annotation name <> None
     || name = handle_of_witness_annotation
     || record_mutation_annotation name <> None
@@ -139,6 +149,19 @@ let rules = [
     function_pointer = false; propagates = false; effect_free_forbidden = false;
     excludes_declared = ["may_block"; "allocates"; "logs"; "exception"; "mmu_off"];
     excludes_reachable = ["may_block"; "allocates"; "logs"; "requires_irq_unmasked"];
+    rejects_unknown_indirect = true; forbids_reentry = false };
+  (* GitHub issue #920: the handler of the pseudo-NMI -- the world-stop SGI,
+     raised above the GIC priority mask so it reaches a core whose ordinary
+     IRQs are masked, including one hung inside an IRQ handler. It can
+     interrupt a holder of any lock on its own core, so it may take none:
+     besides what an `interrupt` root may not reach, an `nmi` root may not
+     reach `locks`. *)
+  { name = "nmi"; declaration = Required; declaration_role = true;
+    function_pointer = false; propagates = false; effect_free_forbidden = false;
+    excludes_declared = ["may_block"; "allocates"; "logs"; "locks"; "interrupt";
+                         "exception"; "mmu_off"];
+    excludes_reachable = ["locks"; "may_block"; "allocates"; "logs";
+                          "requires_irq_unmasked"];
     rejects_unknown_indirect = true; forbids_reentry = false };
   { name = "exception"; declaration = Required; declaration_role = true;
     function_pointer = false; propagates = false; effect_free_forbidden = false;
@@ -219,5 +242,5 @@ let markdown () =
     "\nA bare `!{}` contract forbids the transitive effects: ";
   Buffer.add_string b (String.concat ", " (List.map (Printf.sprintf "`%s`") effect_free_forbidden));
   Buffer.add_string b
-    ". `locks` propagates and is forbidden by `!{}`, but is intentionally allowed from `interrupt` and `exception` roots.\n";
+    ". `locks` propagates and is forbidden by `!{}`, but is intentionally allowed from `interrupt` and `exception` roots; an `nmi` root forbids it.\n";
   Buffer.contents b
