@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 
 from pass_line import report_pass
+from source_scan import per_file
 
 ROOT = Path(__file__).resolve().parent.parent
 ARG = r"(?:!?[\w.']+|\([^()]*\))"
@@ -26,10 +27,11 @@ SHAPE = re.compile(
 COMMENT = re.compile(r"\(\*.*?\*\)", re.S)
 
 
-def hits(text: str) -> list:
+@per_file
+def hits(text: str) -> tuple:
     """Line numbers of the refused shape, outside OCaml comments."""
     code = COMMENT.sub(lambda m: re.sub(r"[^\n]", " ", m.group(0)), text)
-    return [code.count("\n", 0, m.start()) + 1 for m in SHAPE.finditer(code)]
+    return tuple(code.count("\n", 0, m.start()) + 1 for m in SHAPE.finditer(code))
 
 
 def problems(sources: dict) -> list:
