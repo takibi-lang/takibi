@@ -2532,8 +2532,12 @@ let count_occurrences source needle =
   if nlen = 0 then 0 else loop 0 0
 
 let assert_trap_accounting_consistent () =
-  let ir_calls = count_occurrences (string_of_llmodule !the_module)
-      "call void @llvm.trap(" in
+  (* Every use of llvm.trap: the helpers only ever call it. Counting uses
+     rather than printing the module and searching it saves seconds on the
+     kernel (#917), and a use that is not a call is counted too. *)
+  let ir_calls = match lookup_function "llvm.trap" !the_module with
+    | None -> 0
+    | Some f -> fold_left_uses (fun n _ -> n + 1) 0 f in
   let recorded = List.length !trap_sites in
   if ir_calls <> recorded then
     raise (Error (Printf.sprintf
