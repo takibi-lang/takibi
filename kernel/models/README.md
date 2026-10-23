@@ -567,6 +567,33 @@ Properties:
   fairness on each action.
 - `TypeOK`: bookkeeping sanity.
 
+## ConsoleOwner.tla -- console ownership by priority, any core (#830)
+
+The switch between the queued console and the spinning one, after the UART
+interrupt (and with it the queue's drain) stopped being core 0's. Maintainer
+decision 2026-10-23, option C, modeled on Linux's nbcon: one atomic word in
+`kernel/printk/log.tkb` holds an owner priority and cpu and a TERMINAL bit,
+and the queue is live only while the platform has armed it and the word is
+zero. Emergency (1), DDB (2) and the crash console (3) take the word by
+compare-swap over a strictly lower priority, from any core; the two that
+never return set TERMINAL even when outranked, and DDB gives back what it
+displaced only while its own owner field is still there. Two cores, each
+of which may enter DDB, continue, or enter a terminal path.
+
+- `BLIND = TRUE` is the resume the kernel had before: it stores the found
+  state back unconditionally. A DDB that continues after an emergency on the
+  other core makes the queue live under it. TLC reports `TerminalStays`.
+- `NOSTICKY = TRUE` is an outranked emergency that leaves no mark: the same
+  continue, through a correct compare-swap, does the same. TLC reports
+  `TerminalStays`.
+
+| Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
+| --- | --- | --- | --- | --- |
+| `Activate` | `kernel_log_tx_activate` | the platform arms the queue once | the boot probe's re-init (`kernel_log_tx_ownership_reset`) -- irrelevant to `TerminalStays`: it runs on core 0 before any other core or terminal path exists | `ff3a607ce36f` |
+| `EnterDdb` | `kernel_log_tx_stand_down`, `kernel_ddb_enter_stopped` | one compare-swap at debugger priority, or Outranked with no token | the queue flush after a successful take -- irrelevant to `TerminalStays`: it changes no ownership; the world stop -- irrelevant to `TerminalStays`: it only forbids some interleavings, and the model already allows each one it forbids | `87592fe152d0` |
+| `Terminal` | `kernel_log_tx_stand_down`, `kernel_log_enter_emergency`, `crash_console_run` | a take at emergency or panic priority, or TERMINAL alone when outranked; the core never returns | the per-core emergency byte path -- irrelevant to `TerminalStays`: it makes that core spin and never reads the word; the bounded retry of a lost compare-swap -- irrelevant to `TerminalStays`: each attempt is this one action, and an exhausted retry leaves the word as some other terminal taker set it | `6b348510407b` |
+| `Resume` | `kernel_log_tx_resume` | the compare-swap from DDB's own owner field back to the found owner, keeping TERMINAL; `BLIND` stores it unconditionally | the read-back line DDB prints -- irrelevant to `TerminalStays`: it only reads the word | `004cf2fbbddf` |
+
 ## WorldStop.tla -- CPU startup and a complete machine stop
 
 A shared nonblocking gate serializes CPU_ON reservations and stop requests.
@@ -605,7 +632,7 @@ views remain live; this is separate evidence from the bounded model.
 | `Ack`, `PenExit`, `ToggleIrq` | `world_stop_hold`, `kernel_world_stop_serve`, `kernel_ddb_stopped_root_publish`, `kernel_ddb_stopped_root_retire` | ack current request only after entering the pen; exit only when request changes; masked IRQs can delay ack | physical instruction timing -- irrelevant to `NoUnstoppedRead`: arbitrary scheduling allows every delay; stopped-root sequence parity -- irrelevant to `NoUnstoppedRead`: an unsettled root is refused, while the repeated real-stop fixture checks usable publication separately | `10740c455c99` |
 | `Complete`, `Timeout` | `world_stop_begin_claimed` | all captured targets must ack the current generation; timeout yields no complete authority | spin count -- irrelevant to `NoUnstoppedRead`: timeout may happen at any waiting step | `4912d7384d61` |
 | `Release` | `world_stop_resume`, `machine_stop_release`, `machine_stop_partial_release` | end the local authority before clearing request and releasing claim, then restore saved initiator IRQs | terminal keep-forever -- irrelevant to `NoUnstoppedRead`: it never resumes or releases the gate | `367da389422d` |
-| `Read` | `kernel_process_ddb_copy`, `kernel_ddb_enter_stopped`, `process_record_inspect_stopped`, `scheduled_process_record_stopped`, `scheduled_process_slot_remove`, `address_space_inspect_stopped`, `fd_context_inspect_stopped`, `fd_block_inspect_stopped`, `kernel_fd_table_stopped_entry`, `process_image_inspect_stopped`, `scheduled_process_diagnostic_copy`, `crash_snapshot_shared_stopped`, `crash_console_dispatch_stopped` | inspection requires the borrowed machine authority; scoped pool loans cannot cross resume or slot destruction | pool metadata Busy/Stale refusals and which record fields and memory commands are inspected -- irrelevant to `NoUnstoppedRead`: every successful inspection is gated by the same machine authority, while metadata consistency is a separate trusted mint condition checked before inspection | `8060fc598709` |
+| `Read` | `kernel_process_ddb_copy`, `kernel_ddb_enter_stopped`, `process_record_inspect_stopped`, `scheduled_process_record_stopped`, `scheduled_process_slot_remove`, `address_space_inspect_stopped`, `fd_context_inspect_stopped`, `fd_block_inspect_stopped`, `kernel_fd_table_stopped_entry`, `process_image_inspect_stopped`, `scheduled_process_diagnostic_copy`, `crash_snapshot_shared_stopped`, `crash_console_dispatch_stopped` | inspection requires the borrowed machine authority; scoped pool loans cannot cross resume or slot destruction | pool metadata Busy/Stale refusals and which record fields and memory commands are inspected -- irrelevant to `NoUnstoppedRead`: every successful inspection is gated by the same machine authority, while metadata consistency is a separate trusted mint condition checked before inspection | `d44382355207` |
 
 ## Keeping models and the kernel in step
 

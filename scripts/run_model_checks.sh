@@ -141,6 +141,11 @@ check_model ConsoleTx Safety 10 \
     norecheck:CInitNoRecheck:NoLostWakeup:violated \
     nested:CInitNested:deadlock:ok
 
+check_model ConsoleOwner Safety 8 \
+    fixed:CInitFixed:pass:ok \
+    blind:CInitBlind:TerminalStays:violated \
+    nosticky:CInitNoSticky:TerminalStays:violated
+
 check_model FixedDmaOwnership Safety 5 \
     fixed:CInitFixed:pass:ok \
     unfixed:CInitUnfixed:Safety:violated \

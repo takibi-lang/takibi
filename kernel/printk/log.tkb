@@ -437,6 +437,7 @@ private fn kernel_log_retain_line(core: {0..<KERNEL_MAX_CORES as usize}, wire: b
 }
 
 fn kernel_log_init() {
+    kernel_log_tx_ownership_reset();
     for core: usize in 0..<KERNEL_MAX_CORES {
         kernel_log_core_state[core].emergency = false;
         kernel_log_core_state[core].capturing = false;
@@ -596,19 +597,55 @@ private let mut kernel_log_tx_count: usize = 0;
 // mid-line (kernel_log_emit_line). The retained log never sees it.
 private let mut kernel_log_wire_last: u8 = 10;
 
-// False until the platform has armed its TX interrupt. Early boot runs before
-// platform_irq_init(), so a byte queued then would never be drained; DDB and
-// the crash console must not depend on interrupts at all. Both therefore
-// spin, deliberately, and this says which regime is in effect rather than
-// letting anything infer it.
-private let mut kernel_log_tx_live: bool = false;
+// Whether a caller queues or spins: the queue is live when the platform has
+// armed its TX interrupt AND no terminal path owns the console.
+//
+// ARMED. Zero until the platform has armed its TX interrupt. Early boot runs
+// before platform_irq_init(), so a byte queued then would never be drained.
+//
+// OWNER (GitHub issue #830, maintainer decision 2026-10-23, option C,
+// modeled on Linux's nbcon console ownership). One atomic word names who
+// owns the console beyond ordinary queued output: 0 is nobody at normal
+// priority; otherwise bits 0..7 are the owning cpu + 1, bits 8..15 its
+// priority, and bit 16 (TERMINAL) says a path that never returns has been
+// entered. A path entered with interrupts masked -- a stack-guard
+// emergency, DDB, the crash console -- takes the word with a compare-swap
+// at its own priority, which succeeds only over a strictly lower one, and
+// then every byte spins, because nothing is left to drain a queue. Any core
+// may take it; no core owns the console by identity. The UART interrupt,
+// and with it the queue's drain, may run on any core (#830), so "core 0
+// owns the queue" stopped being true and stopped being a reason.
+//
+// Only DDB gives the word back (kernel_log_tx_resume): it puts back the
+// owner it displaced, by a compare-swap that succeeds only while its own
+// owner field is still there, and it keeps TERMINAL. A non-returning path
+// (emergency, crash console) sets TERMINAL even when it is outranked, so a
+// DDB that resumes after an emergency on another core cannot make the
+// queue live under it. kernel/models/ConsoleOwner.tla checks both: once a
+// non-returning path has been entered the queue is never live again this
+// boot, and a DDB with no such path behind it puts back the queue it found.
+const KERNEL_CONSOLE_PRIORITY_EMERGENCY: usize = 1;
+const KERNEL_CONSOLE_PRIORITY_DEBUGGER: usize = 2;
+const KERNEL_CONSOLE_PRIORITY_PANIC: usize = 3;
+const KERNEL_CONSOLE_OWNER_MASK: usize = 0xFFFF;
+const KERNEL_CONSOLE_TERMINAL: usize = 0x10000;
+private let mut kernel_log_tx_armed: AtomicWord;
+private let mut kernel_console_owner: AtomicWord;
 
-fn kernel_log_tx_is_live() -> bool {
-    return kernel_log_tx_live;
+fn kernel_log_tx_is_live() -> bool !{unsafe} {
+    return atomic_word_load(&kernel_log_tx_armed) != 0 &&
+        atomic_word_load(&kernel_console_owner) == 0;
 }
 
-fn kernel_log_tx_activate() {
-    kernel_log_tx_live = true;
+fn kernel_log_tx_activate() !{unsafe} {
+    atomic_word_store(&kernel_log_tx_armed, 1);
+}
+
+// kernel_log_init's half: the boot probe that enters the emergency on
+// purpose is followed by a re-init, which must give the console back.
+private fn kernel_log_tx_ownership_reset() !{unsafe} {
+    atomic_word_store(&kernel_log_tx_armed, 0);
+    atomic_word_store(&kernel_console_owner, 0);
 }
 
 // Put the console back the way it was before the queue existed: everything
@@ -618,70 +655,84 @@ fn kernel_log_tx_activate() {
 // the wire before it proceeds". A single flush is not enough for a TERMINAL
 // path. The crash console runs under disable_irq() and then blocks on input
 // after each `ddb> `, so a byte still in the queue has nothing left to drain
-// it -- the prompt would sit there and the console would look hung. Turning
-// the queue off at entry is one statement instead of a flush before every
-// write, and it makes the acceptance condition literal: DDB and the crash
-// console emit byte-identical output through exactly the path they used
-// before this change.
+// it. Taking the console at entry is one statement instead of a flush before
+// every write.
 //
-// It used to be one-way for the rest of the boot, DDB's `continue` included,
-// and for the debugger that was a defect rather than a decision: GitHub issue
-// #531. The crash console never returns, so one-way is right there. DDB does
-// return -- kernel_ddb_enter is reached only from the two IRQ dispatchers on a
-// serial BREAK, so `continue` resumes a kernel that was healthy all along --
-// and everything logged after it paid 78.9 us/byte again, turning a
-// `console tx spin=81 ms` boot into a 2519 ms one after a single BREAK.
+// GitHub issue #531: DDB does return, so `continue` must put back the state
+// the entry FOUND, never "on": a BREAK between platform_irq_init() and
+// kernel_log_tx_activate() resumes into the spinning console it interrupted.
+// The found state is the token, and the token is the only state the resume
+// takes.
 //
-// The fix is not `kernel_log_tx_activate()` on the way out: the resume must
-// put back the value the stand-down FOUND. platform_irq_init() and
-// kernel_log_tx_activate() are adjacent but not atomic, so a BREAK between
-// them enters with the queue not yet live, and enabling it there would queue
-// bytes that nothing drains -- there is no armed TX interrupt yet. Same rule
-// as mutex_irq_restore against enable_irq, and getting that one wrong is what
-// removed DDB from RPi5 in the first place.
-//
-// So the found state is the return value, and it is the only argument the
-// resume takes. There is no kernel_log_tx_resume() that reads no saved state,
-// which is what "by construction" means here: the shape
-// scripts/check_irq_restore_sites.py has to look for lexically in the
-// interrupt case is, for this flag, the only shape that type-checks.
-//
-// NotConsoleOwner is the third answer, and it is not "it was spinning". Core
-// 0 owns this flag and this queue; a peer stands nothing down, so a peer must
-// put nothing back. Reporting a peer's finding as WasLive would let its
-// resume write core 0's flag back to true after core 0 had deliberately
-// stood the queue down -- the queue would come back under a terminal path
-// with interrupts masked and nothing left to drain it.
+// Outranked is the answer when an equal or higher priority already owns the
+// console (or the compare-swap kept losing, which only other terminal takers
+// can cause): the console is spinning already and there is nothing to give
+// back. #830 replaced the former NotConsoleOwner, which every core but 0
+// got whatever the console's state.
 must_use variant KernelLogTxStandDown {
-    WasLive;
-    WasSpinning;
-    NotConsoleOwner;
+    Took(usize);
+    Outranked;
 }
 
-fn kernel_log_tx_stand_down() -> KernelLogTxStandDown !{unsafe} {
-    if (cpu_id() != 0) { return KernelLogTxStandDown::NotConsoleOwner; } // core-role: core 0 owns the TX queue switch
-    let was_live: bool = kernel_log_tx_live;
-    uart_tx_flush();
-    kernel_log_tx_live = false;
-    if (was_live) {
-        return KernelLogTxStandDown::WasLive;
+// The compare-swap retries only when another terminal path changed the word
+// in between; each such change raises the priority or is DDB's one resume,
+// so a handful of attempts is far more than can be needed.
+const KERNEL_CONSOLE_TAKE_ATTEMPTS: usize = 16;
+
+private fn kernel_console_owner_word(priority: usize) -> usize {
+    return (priority << 8) | ((cpu_id() & 0xFF) + 1);
+}
+
+// Every priority but the debugger's is a path that never gives the console
+// back.
+fn kernel_log_tx_stand_down(priority: usize) -> KernelLogTxStandDown !{unsafe} {
+    let mine: usize = kernel_console_owner_word(priority);
+    let mut terminal: usize = KERNEL_CONSOLE_TERMINAL;
+    if (priority == KERNEL_CONSOLE_PRIORITY_DEBUGGER) { terminal = 0; }
+    for attempt: usize in 0..<KERNEL_CONSOLE_TAKE_ATTEMPTS {
+        let current: usize = atomic_word_load(&kernel_console_owner);
+        let sticky: usize = (current & KERNEL_CONSOLE_TERMINAL) | terminal;
+        if (((current >> 8) & 0xFF) >= priority) {
+            // Outranked: the console already spins. Only leave TERMINAL.
+            if ((current | sticky) == current) {
+                return KernelLogTxStandDown::Outranked;
+            }
+            match kernel_log_cas(&kernel_console_owner, current, current | sticky) {
+                CasResult::Swapped => { return KernelLogTxStandDown::Outranked; }
+                CasResult::Observed(seen) => { }
+            }
+        } else {
+            match kernel_log_cas(&kernel_console_owner, current, sticky | mine) {
+                CasResult::Swapped => {
+                    uart_tx_flush();
+                    return KernelLogTxStandDown::Took(current & KERNEL_CONSOLE_OWNER_MASK);
+                }
+                CasResult::Observed(seen) => { }
+            }
+        }
     }
-    return KernelLogTxStandDown::WasSpinning;
+    return KernelLogTxStandDown::Outranked;
 }
 
-// Put back what was found, and nothing else. Re-arming the TX interrupt is
-// not this function's business: uart_tx_flush() disabled it, and the next
-// queued byte enables it again in uart_putc, so the flag is the whole of the
-// state a stand-down took away.
-//
-// must_use on the token is what makes a terminal path say so out loud: the
-// crash console has to match its stand-down and decide, rather than dropping
-// it, and a path that DOES return cannot forget.
-fn kernel_log_tx_resume(previous: KernelLogTxStandDown) {
+// Put back the owner that was found, only while this core's own owner field
+// is still there, and keep TERMINAL. Re-arming the TX interrupt is not this
+// function's business: uart_tx_flush() disabled it, and the next queued byte
+// enables it again.
+fn kernel_log_tx_resume(previous: KernelLogTxStandDown, priority: usize) !{unsafe} {
     match previous {
-        KernelLogTxStandDown::WasLive => { kernel_log_tx_live = true; }
-        KernelLogTxStandDown::WasSpinning => { }
-        KernelLogTxStandDown::NotConsoleOwner => { }
+        KernelLogTxStandDown::Took(found) => {
+            let mine: usize = kernel_console_owner_word(priority);
+            for attempt: usize in 0..<KERNEL_CONSOLE_TAKE_ATTEMPTS {
+                let current: usize = atomic_word_load(&kernel_console_owner);
+                if ((current & KERNEL_CONSOLE_OWNER_MASK) != mine) { return; }
+                let restored: usize = (current & KERNEL_CONSOLE_TERMINAL) | found;
+                match kernel_log_cas(&kernel_console_owner, current, restored) {
+                    CasResult::Swapped => { return; }
+                    CasResult::Observed(seen) => { }
+                }
+            }
+        }
+        KernelLogTxStandDown::Outranked => { }
     }
 }
 
@@ -1369,17 +1420,16 @@ fn kernel_log_enter_emergency() {
     kernel_log_core_state[core].emergency = true;
     kernel_log_core_state[core].capturing = false;
     // Terminal stack guards can park without entering crash_console_run.
-    // Flush the owner queue here so neither their last line nor its prompt
-    // depends on an interrupt after the terminal path masks IRQs. A peer
-    // stands nothing down and already writes with polling UART output.
+    // Take the console at emergency priority, from whichever core this is
+    // (#830), so neither the last line nor its prompt depends on an
+    // interrupt after the terminal path masks IRQs.
     //
     // Terminal on purpose, so the token is matched and dropped rather than
     // discarded: GitHub issue #531 made that a decision the compiler asks
     // for, which is what stops a path that DOES return from forgetting.
-    match kernel_log_tx_stand_down() {
-        KernelLogTxStandDown::WasLive => { }
-        KernelLogTxStandDown::WasSpinning => { }
-        KernelLogTxStandDown::NotConsoleOwner => { }
+    match kernel_log_tx_stand_down(KERNEL_CONSOLE_PRIORITY_EMERGENCY) {
+        KernelLogTxStandDown::Took(found) => { }
+        KernelLogTxStandDown::Outranked => { }
     }
 }
 

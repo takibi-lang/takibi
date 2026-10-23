@@ -2778,7 +2778,8 @@ private fn kernel_ddb_enter_stopped(
     // BREAK that lands between platform_irq_init() and kernel_log_tx_activate()
     // resumes into the spinning console it interrupted rather than queueing
     // bytes that nothing would drain.
-    let console: KernelLogTxStandDown = kernel_log_tx_stand_down();
+    let console: KernelLogTxStandDown =
+        kernel_log_tx_stand_down(KERNEL_CONSOLE_PRIORITY_DEBUGGER);
     ddb_puts("\nddb: interrupt-safe UART debugger\n");
     ddb_puts("ddb: console lock probe phase=");
     ddb_put_udec(console_ddb_probe_phase());
@@ -2939,7 +2940,7 @@ private fn kernel_ddb_enter_stopped(
     // profile session started or stopped above; peers do it on leaving
     // the pen.
     profile_session_sync();
-    kernel_log_tx_resume(console);
+    kernel_log_tx_resume(console, KERNEL_CONSOLE_PRIORITY_DEBUGGER);
     // Said at all because nothing else could see this: both DDB lanes resume
     // into the interactive shell and end there, so neither reaches the
     // end-of-boot `console: tx spin` measurement that would otherwise show a
@@ -3374,10 +3375,9 @@ private fn crash_console_prepare() !{unsafe} {
     // token is matched rather than dropped because must_use will not let it
     // be dropped, which is exactly what stops a path that DOES return from
     // forgetting.
-    match kernel_log_tx_stand_down() {
-        KernelLogTxStandDown::WasLive => { }
-        KernelLogTxStandDown::WasSpinning => { }
-        KernelLogTxStandDown::NotConsoleOwner => { }
+    match kernel_log_tx_stand_down(KERNEL_CONSOLE_PRIORITY_PANIC) {
+        KernelLogTxStandDown::Took(found) => { }
+        KernelLogTxStandDown::Outranked => { }
     }
     // GitHub issue #619: whatever crash_world_stop managed, no core's UART
     // interrupt may take the bytes this loop polls for. A stop that was only

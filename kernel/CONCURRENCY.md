@@ -258,6 +258,16 @@ Symmetric now:
   idle stack while its boot stack held `main()`'s frames and slot 0's
   context). Every peer runs the peer log probe (the boot probes bullet
   below).
+- Console ownership for terminal paths (#830, maintainer decision
+  2026-10-23, option C, after Linux's nbcon): one atomic word
+  (`kernel_console_owner`, `kernel/printk/log.tkb`) holds an owner priority
+  and cpu and a TERMINAL bit. A stack-guard emergency (1), DDB (2) or the
+  crash console (3) takes it by compare-swap over a strictly lower
+  priority from any core, and the transmit queue is live only while the
+  word is zero. The non-returning two set TERMINAL even when outranked;
+  DDB's continue gives back what it displaced only while its own owner field
+  is still there. `kernel/models/ConsoleOwner.tla` checks it. Before, core 0
+  alone could stand the queue down and a peer got `NotConsoleOwner`.
 - UART input-flow requests (#830): the RX handler, a terminal read that
   drained the receive ring, and a termios change each send the STOP or
   START byte themselves, from whichever core runs them, deciding under the

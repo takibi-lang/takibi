@@ -80,7 +80,8 @@ class TakibiConsole(gdb.Command):
                  echo_count=word("terminal_echo_count"), echo_head=word("terminal_echo_head"),
                  echo_tail=word("terminal_echo_tail"), echo_dropped=word("terminal_echo_dropped"),
                  tx_count=word("kernel_log_tx_count"), tx_head=word("kernel_log_tx_head"),
-                 tx_tail=word("kernel_log_tx_tail"), tx_live=bool(integer(address("kernel_log_tx_live"), 1)),
+                 tx_tail=word("kernel_log_tx_tail"), tx_live=atomic("kernel_log_tx_armed") != 0 and atomic("kernel_console_owner") == 0,
+                 console_owner=hex(atomic("kernel_console_owner")),
                  tx_pending=word("kernel_log_tx_count") != 0)
             uart = word("uart_base")
             # Only this QEMU virt PL011 window is safe to inspect. A damaged
