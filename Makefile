@@ -1796,6 +1796,7 @@ kernel-lib-check:
 	python3 scripts/check_invariant_lines_unviewed.py
 	python3 scripts/check_fallback_counters.py
 	python3 scripts/check_probe_entry_gates.py
+	python3 scripts/check_mpidr_reads.py
 
 # Generate AArch64 exception-frame offset constants from the struct
 # definition (GitHub issue #286). This is a REAL file-based Make rule (not
