@@ -294,6 +294,16 @@ struct BootPagePool align(16) {
     // Candidate runs examined: deterministic where ticks are not, so a
     // probe can hold a run of one to a single look (#771).
     run_visits: usize;
+    // GitHub issue #900: pages the allocator owns (owner not Unavailable).
+    // Only page_allocator_fill_metadata marks a page Unavailable and nothing
+    // clears the mark, so the count is fixed once the runtime metadata is
+    // applied: page_allocator_apply_memory walks once, at boot, and
+    // page_allocator_total_count answers from here instead of walking every
+    // page with the IRQ-masking lock held. available_walk_ticks is what that
+    // one walk cost -- the hold each call used to pay. In .bss, like the
+    // #771 counters, so zero until applied.
+    available_pages: usize;
+    available_walk_ticks: usize;
 }
 
 // GitHub issue #479. Everything below this line is shared mutable
@@ -1352,6 +1362,9 @@ fn page_allocator_apply_memory(memory: FdtMemoryMap)
     if (page_allocator_build_frames(pool, metas, extents, slots, tag_bytes) == false) {
         kernel_invariant_stop();
     }
+    let walk_started: i64 = read_cntpct();
+    pool.available_pages = page_allocator_total_count_locked(pool, metas, extents);
+    pool.available_walk_ticks = (read_cntpct() - walk_started) as usize;
     // The bootstrap places are retired: every bootstrap page is in an
     // extent's places now, or out with an owner that gives it back there
     // by address. The store's bootstrap array becomes an empty one.
@@ -2813,9 +2826,18 @@ private fn page_owner_description_locked(pool: borrow &mut BootPagePool, metas: 
 // another file (kernel/kernel/fd_table.tkb derives Linux's
 // files_stat.max_files from the memory that exists) can then ask without
 // depending on parse order, which a const in a refined bound would.
+//
+// GitHub issue #900: once the runtime metadata is applied the answer is the
+// count page_allocator_apply_memory recorded, an O(1) hold. Before that only
+// the bootstrap pages exist and the walk is over those.
 fn page_allocator_total_count() -> usize !{unsafe} {
     let guard = locked_cell_take(&boot_page_pool_cell);
     let pool = memory_map_pool_record(guard, &boot_page_pool_cell);
+    if (pool.runtime_applied) {
+        let applied: usize = pool.available_pages;
+        locked_cell_give(&boot_page_pool_cell, guard);
+        return applied;
+    }
     let result: usize = match place_borrow(guard, page_meta_store.metas) {
         Place::Empty => { 0 }
         Place::Full(metas) => {
@@ -2954,6 +2976,33 @@ fn page_run_stats_log() !{unsafe} {
     uart_put_udec(longest);
     kernel_boot_log(" freq=");
     uart_put_udec(read_cntfrq() as usize);
+    kernel_boot_log("\n");
+    page_allocator_total_count_log();
+}
+
+// GitHub issue #900: the recorded total against a fresh walk (without the
+// lock: Unavailable marks never change after boot), and what the one boot
+// walk cost -- the IRQ-masked hold each call paid before the record.
+private fn page_allocator_total_count_log() !{unsafe} {
+    let recorded: usize = page_allocator_total_count();
+    let (live, walked) = page_allocator_counts_reporter();
+    let unlocked = locked_cell_take_unlocked(&boot_page_pool_cell);
+    let pool = memory_map_pool_record(unlocked, &boot_page_pool_cell);
+    let ticks: usize = pool.available_walk_ticks;
+    locked_cell_give_unlocked(&boot_page_pool_cell, unlocked);
+    if (recorded == walked) {
+        kernel_boot_log("resources: page allocator total recorded at boot matches a walk\n");
+    } else {
+        kernel_boot_log("resources: PAGE ALLOCATOR TOTAL MISMATCH\n");
+    }
+    kernel_boot_log("RECORDED page allocator total: pages=");
+    uart_put_udec(recorded);
+    kernel_boot_log(" walked=");
+    uart_put_udec(walked);
+    kernel_boot_log(" live=");
+    uart_put_udec(live);
+    kernel_boot_log(" walk_ticks=");
+    uart_put_udec(ticks);
     kernel_boot_log("\n");
 }
 
