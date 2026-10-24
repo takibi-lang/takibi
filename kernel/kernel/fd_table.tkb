@@ -151,10 +151,8 @@ private fn fd_block_pool_lock(pool: *RegionPool(FdBlock) @ blocks)
         -> RegionPoolGuard(FdBlock)[blocks] !{unsafe, acquires_lock_40_fd_block_pool, single_instance_lock,
           lock_guard_40_fd_block_pool} {
     let flags: usize = mutex_irq_save();
-    let contended: bool = region_pool_lock_is_held(pool);
-    let guard = region_pool_lock_saving(pool, flags);
-    pool_lock_wait_note(PoolLockWaitPool::FdBlock, contended);
-    return guard;
+    if (region_pool_lock_is_held(pool)) { pool_lock_wait_contended(PoolLockWaitPool::FdBlock); }
+    return region_pool_lock_saving(pool, flags);
 }
 
 private fn fd_block_pool_unlock(guard: sink RegionPoolGuard(FdBlock)[blocks]) {
@@ -286,10 +284,8 @@ private fn fd_context_pool_lock(pool: *RegionPool(ProcessFdContext) @ contexts)
         -> RegionPoolGuard(ProcessFdContext)[contexts] !{unsafe, acquires_lock_40_fd_context_pool, single_instance_lock,
           lock_guard_40_fd_context_pool} {
     let flags: usize = mutex_irq_save();
-    let contended: bool = region_pool_lock_is_held(pool);
-    let guard = region_pool_lock_saving(pool, flags);
-    pool_lock_wait_note(PoolLockWaitPool::FdContext, contended);
-    return guard;
+    if (region_pool_lock_is_held(pool)) { pool_lock_wait_contended(PoolLockWaitPool::FdContext); }
+    return region_pool_lock_saving(pool, flags);
 }
 
 private fn fd_context_pool_unlock(
@@ -837,10 +833,8 @@ private fn object_pool_lock(pool: *RegionPool(SharedObject) @ objects)
         -> RegionPoolGuard(SharedObject)[objects] !{unsafe, acquires_lock_40_object_pool, single_instance_lock,
           lock_guard_40_object_pool} {
     let flags: usize = mutex_irq_save();
-    let contended: bool = region_pool_lock_is_held(pool);
-    let guard = region_pool_lock_saving(pool, flags);
-    pool_lock_wait_note(PoolLockWaitPool::Object, contended);
-    return guard;
+    if (region_pool_lock_is_held(pool)) { pool_lock_wait_contended(PoolLockWaitPool::Object); }
+    return region_pool_lock_saving(pool, flags);
 }
 
 private fn object_pool_unlock(guard: sink RegionPoolGuard(SharedObject)[objects]) {

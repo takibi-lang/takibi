@@ -231,10 +231,8 @@ private fn process_image_pool_lock(pool: *RegionPool(ProcessImageRecord) @ image
         -> RegionPoolGuard(ProcessImageRecord)[images] !{unsafe, acquires_lock_40_process_image_pool, single_instance_lock,
           lock_guard_40_process_image_pool} {
     let flags: usize = mutex_irq_save();
-    let contended: bool = region_pool_lock_is_held(pool);
-    let guard = region_pool_lock_saving(pool, flags);
-    pool_lock_wait_note(PoolLockWaitPool::ProcessImage, contended);
-    return guard;
+    if (region_pool_lock_is_held(pool)) { pool_lock_wait_contended(PoolLockWaitPool::ProcessImage); }
+    return region_pool_lock_saving(pool, flags);
 }
 
 private fn process_image_pool_unlock(

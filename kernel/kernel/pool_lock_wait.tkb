@@ -2,14 +2,15 @@
 // held when a core came to take it. The evidence that brings parked
 // issue #680 (region_pool validation under the pool lock) back:
 // scripts/check_parked_triggers.py reads the RECORDED line below from the
-// RPi5 log and fails when the contended share passes the threshold its
+// RPi5 log and fails when the contended count passes the threshold its
 // header derives.
 //
 // Each production pool's lock wrapper asks region_pool_lock_is_held before
 // it takes the lock (one load of the line the compare-exchange fetches
-// anyway) and, once it holds the lock, counts the acquire and whether it
-// was contended in its own CPU's row: plain stores to a line no other CPU
-// writes, so counting creates no contention of its own.
+// anyway) and, only when the lock is held, counts one contended acquire in
+// its own CPU's row: plain stores to a line no other CPU writes, so
+// counting creates no contention of its own, and the uncontended path
+// counts nothing (#953: counting every acquire cost 6.1 ns per pair).
 //
 // Current limitations (2026-10-24). Keep this list current as call sites
 // change; a stale limitation is worse than none.
@@ -54,31 +55,28 @@ inline fn pool_lock_wait_index(pool: PoolLockWaitPool) -> {0..<POOL_LOCK_WAIT_PO
     }
 }
 
-// Per CPU, per pool: acquires at 2*pool, contended at 2*pool+1. A row is
-// 24 words (three 64-byte lines) so no two CPUs' rows share a line. Only
-// the row's own CPU writes it, with plain loads and stores and no barrier;
-// the reporter sums the rows once, after the suite (a torn or stale read
-// there costs at most a count in flight, never a verdict on its own).
-const POOL_LOCK_WAIT_ROW: usize = 24;
+// Per CPU, per pool: the contended acquires. A row is 16 words (two
+// 64-byte lines) so no two CPUs' rows share a line. Only the row's own CPU
+// writes it, with plain loads and stores and no barrier; the reporter sums
+// the rows once, after the suite (a stale read there costs at most a count
+// in flight).
+const POOL_LOCK_WAIT_ROW: usize = 16;
 struct PoolLockWaitCore { words: [usize; POOL_LOCK_WAIT_ROW]; }
 private let mut pool_lock_wait_cores: [PoolLockWaitCore; KERNEL_MAX_CORES];
 // 1 while contention_probes() runs its deliberate contention fixtures.
-// Written by core 0 twice per boot; a read-mostly line.
+// Written by core 0 twice per boot; read only on the contended path.
 private let mut pool_lock_wait_paused: AtomicWord;
 
-// Called by the pool's lock wrapper once it holds the lock, with what
-// region_pool_lock_is_held said before it tried.
-fn pool_lock_wait_note(tag: PoolLockWaitPool, contended: bool) !{unsafe} {
+// Called by a pool's lock wrapper, before it takes the lock, only when
+// region_pool_lock_is_held said the lock is held: the uncontended path
+// pays one load of the lock line the compare-exchange fetches anyway.
+fn pool_lock_wait_contended(tag: PoolLockWaitPool) !{unsafe} {
     if (atomic_word_load(&pool_lock_wait_paused) != 0) { return; }
     let raw: usize = cpu_id();
     if (raw >= KERNEL_MAX_CORES) { return; }
     let core: {0..<KERNEL_MAX_CORES as usize} = raw;
     let at: {0..<POOL_LOCK_WAIT_POOLS as usize} = pool_lock_wait_index(tag);
-    let slot: usize = 2 * at;
-    pool_lock_wait_cores[core].words[slot] = pool_lock_wait_cores[core].words[slot] + 1;
-    if (contended) {
-        pool_lock_wait_cores[core].words[slot + 1] = pool_lock_wait_cores[core].words[slot + 1] + 1;
-    }
+    pool_lock_wait_cores[core].words[at] = pool_lock_wait_cores[core].words[at] + 1;
 }
 
 fn pool_lock_wait_pause(paused: bool) {
@@ -89,7 +87,7 @@ fn pool_lock_wait_pause(paused: bool) {
     }
 }
 
-// One RECORDED line: per pool, acquires/contended. A cost, not a verdict
+// One RECORDED line: per pool, the contended acquires. A cost, not a verdict
 // here; the verdict is scripts/check_parked_triggers.py's.
 fn pool_lock_wait_log() !{unsafe} {
     kernel_boot_log("RECORDED pool lock wait:");
@@ -107,15 +105,10 @@ fn pool_lock_wait_log() !{unsafe} {
 
 private fn pool_lock_wait_log_one(label: *u8, tag: PoolLockWaitPool) {
     let at: {0..<POOL_LOCK_WAIT_POOLS as usize} = pool_lock_wait_index(tag);
-    let slot: usize = 2 * at;
-    let mut acquires: usize = 0;
     let mut contended: usize = 0;
     for core: usize in 0..<KERNEL_MAX_CORES {
-        acquires = acquires + pool_lock_wait_cores[core].words[slot];
-        contended = contended + pool_lock_wait_cores[core].words[slot + 1];
+        contended = contended + pool_lock_wait_cores[core].words[at];
     }
     kernel_boot_log(label);
-    uart_put_udec(acquires);
-    kernel_boot_log("/");
     uart_put_udec(contended);
 }

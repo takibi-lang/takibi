@@ -18,31 +18,31 @@ def page_line(max_ticks):
             f"max_ticks={max_ticks} freq=54000000")
 
 
-def pool_line(acquires, contended):
-    return (f"RECORDED pool lock wait: process={acquires}/{contended} "
-            f"fd_block=10/0 tcp_retx=0/0")
+def pool_line(contended):
+    return (f"RECORDED pool lock wait: process={contended} "
+            f"fd_block=0 tcp_retx=0")
 
 
-QUIET = [page_line(534), pool_line(100000, 0)]
+QUIET = [page_line(534), pool_line(2000)]
 LIMIT_TICKS = int(3 * 15.2e-6 * 54000000)  # 2462 ticks at 54 MHz
-POOL_LIMIT = 3 * v.BASELINE_680
+POOL_LIMIT = 3 * v.BASELINE_680  # 8217 acquires
 
 CASES = (
     # name, lines, issue that must be named (None: must pass)
     ("baseline passes", QUIET, None),
     ("timestamped duplicate lines pass",
      QUIET + ["[000004.1] " + l for l in QUIET], None),
-    ("#812 just under", [page_line(LIMIT_TICKS), pool_line(100000, 0)], None),
-    ("#812 fires", [page_line(LIMIT_TICKS + 2), pool_line(100000, 0)], 812),
-    ("#812 missing", [pool_line(100000, 0)], 812),
+    ("#812 just under", [page_line(LIMIT_TICKS), pool_line(2000)], None),
+    ("#812 fires", [page_line(LIMIT_TICKS + 2), pool_line(2000)], 812),
+    ("#812 missing", [pool_line(2000)], 812),
     ("#812 two different lines",
-     [page_line(534), page_line(535), pool_line(100000, 0)], 812),
-    ("#680 just under", [page_line(534), pool_line(100000, int(POOL_LIMIT * 100000))], None),
+     [page_line(534), page_line(535), pool_line(2000)], 812),
+    ("#680 just under", [page_line(534), pool_line(POOL_LIMIT)], None),
     ("#680 fires", [page_line(534),
-                    pool_line(100000, int(POOL_LIMIT * 100000) + 2)], 680),
+                    pool_line(POOL_LIMIT + 1)], 680),
     ("#680 missing", [page_line(534)], 680),
-    ("#680 nothing counted", [page_line(534),
-                              "RECORDED pool lock wait: process=0/0 tcp_retx=0/0"], 680),
+    ("#680 old acquires/contended format", [page_line(534),
+                              "RECORDED pool lock wait: process=10/0 tcp_retx=0/0"], 680),
 )
 
 

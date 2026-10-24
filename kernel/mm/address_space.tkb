@@ -241,10 +241,8 @@ private fn address_space_backing_pool_lock(
         -> RegionPoolGuard(AddressSpaceBacking)[backings] !{unsafe, acquires_lock_40_address_space_backing_pool, single_instance_lock,
           lock_guard_40_address_space_backing_pool} {
     let flags: usize = mutex_irq_save();
-    let contended: bool = region_pool_lock_is_held(pool);
-    let guard = region_pool_lock_saving(pool, flags);
-    pool_lock_wait_note(PoolLockWaitPool::AddressSpace, contended);
-    return guard;
+    if (region_pool_lock_is_held(pool)) { pool_lock_wait_contended(PoolLockWaitPool::AddressSpace); }
+    return region_pool_lock_saving(pool, flags);
 }
 
 private fn address_space_backing_pool_unlock(
