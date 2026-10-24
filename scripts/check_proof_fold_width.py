@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Refuse a raw Const_env.folded_value outside const_env.ml (GitHub issue #956).
+"""Refuse a raw Const_env.folded_value or bound_value outside const_env.ml
+(GitHub issues #956, #961).
 
 Const_env.folded_value computes on the checker's native ints. An integer
 literal is a 64-bit pattern, so 0xFFFFFFFFFFFFFFFF folds as -1, and nothing
@@ -16,6 +17,12 @@ base's width. This check keeps it that way: in lib/ and bin/ (const_env.ml
 itself excepted) a raw `Const_env.folded_value` is allowed only with a
 `fold-not-proof:` comment on its line or within the four lines above it,
 saying why the fold proves nothing (a rejection, or the value emitted).
+
+#961: Const_env.bound_value reads a bare literal or const leaf the same
+native way (0xFFFFFFFFFFFFFFFF as -1), and an unannotated for-loop counter,
+a min/max operand and a singleton literal each proved a range the machine
+value breaks. Proof paths read a leaf through Type_inf.bound_at_base; a raw
+Const_env.bound_value takes the same `fold-not-proof:` exemption.
 """
 
 from __future__ import annotations
@@ -30,7 +37,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 DIRS = ("lib", "bin")
 EXCLUDED = {"const_env.ml"}
 EXEMPT = "fold-not-proof:"
-RAW = re.compile(r"\bConst_env\s*\.\s*folded_value\b(?!_)")
+RAW = re.compile(r"\bConst_env\s*\.\s*(folded_value|bound_value)\b(?!_)")
 COMMENT = re.compile(r"\(\*.*?\*\)", re.DOTALL)
 WINDOW = 4
 
@@ -56,16 +63,16 @@ def scan(path: pathlib.Path, text: str) -> tuple[int, list[str]]:
     code = blank_comments(text).split("\n")
     exempted = 0
     for number, line in enumerate(code, 1):
-        for _ in RAW.finditer(line):
+        for match in RAW.finditer(line):
             window = lines[max(0, number - 1 - WINDOW):number]
             if any(EXEMPT in raw for raw in window):
                 exempted += 1
             else:
                 errors.append(
-                    f"{path.name}:{number}: raw Const_env.folded_value; fold "
-                    f"at the operand's base with fold_at_base/fold_at_ty "
-                    f"(#956), or say why it proves nothing in a "
-                    f"'{EXEMPT}' comment")
+                    f"{path.name}:{number}: raw Const_env.{match.group(1)}; "
+                    f"read it at the operand's base with fold_at_base/"
+                    f"fold_at_ty/bound_at_base (#956, #961), or say why it "
+                    f"proves nothing in a '{EXEMPT}' comment")
     return exempted, errors
 
 

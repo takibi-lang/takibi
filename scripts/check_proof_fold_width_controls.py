@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Controls for check_proof_fold_width.py (GitHub issue #956)."""
+"""Controls for check_proof_fold_width.py (GitHub issues #956, #961)."""
 
 import contextlib
 import importlib.util
@@ -78,6 +78,16 @@ SPACED = """\
   Const_env . folded_value e
 """
 
+# The unannotated for-loop bound as #956 left it: 0xFFFFFFFFFFFFFFFF read
+# as -1 gave a u64 counter {0..<-1} (#961).
+PRE_961_FOR = """\
+        | None -> (Const_env.bound_value lo_expr, Const_env.bound_value hi_expr)
+"""
+
+FIXED_FOR = """\
+        | None -> (bound_at_base base lo_expr, bound_at_base ~bound:true base hi_expr)
+"""
+
 
 def main() -> int:
     checker = load()
@@ -99,6 +109,10 @@ def main() -> int:
         ("the width-aware fold", WIDTH_AWARE, 0, "PASS proof-fold-width"),
         ("a raw fold spelled with spaces", SPACED, 1,
          "raw Const_env.folded_value"),
+        ("the pre-#961 native for-loop bound", PRE_961_FOR, 1,
+         "raw Const_env.bound_value"),
+        ("the width-aware for-loop bound", FIXED_FOR, 0,
+         "PASS proof-fold-width"),
     ]
     with tempfile.TemporaryDirectory() as name:
         for index, (label, text, expected, needle) in enumerate(cases):
@@ -112,9 +126,11 @@ def main() -> int:
                 return 1
 
     report_pass("proof-fold-width-controls",
-                "the repository passes; the pre-#956 native fold, an "
+                "the repository passes; the pre-#956 native fold, the "
+                "pre-#961 native bound, an "
                 "exemption out of reach and a spaced spelling are refused; "
                 "an exempted rejection, a comment and the width-aware fold "
+                "and bound "
                 "are not",
                 cases=CASES.ran)
     return 0

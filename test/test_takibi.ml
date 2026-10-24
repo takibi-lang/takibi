@@ -21038,6 +21038,36 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
        "let mut a: [u8; 3];
         fn g(i: {0..<3 as u32}) { a[i as usize] = 0; }
         fn h() { g(0 - 2 + 5); }");
+  (* GitHub issue #961: Const_env.bound_value read a literal's 64-bit
+     pattern natively, so 0xFFFFFFFFFFFFFFFF was -1 on every path that read
+     a bare literal or const leaf. Each case below compiled under
+     --forbid-trap and wrote outside `words`. An unannotated counter took
+     {0..<-1}, an empty range that passed g while the u64 loop ran 2^64 - 1
+     times; max(x & 3, 0xFFFFFFFFFFFFFFFF) on u64 was {0..<4} and stored
+     at words[2^64 - 1]; a singleton literal discharged `where k < n`. *)
+  Alcotest.test_case
+    "#961 an unannotated for bound is read at the counter's base" `Quick
+    (expect_type_error "for-loop bound has no exact value at the counter's type 'u64'"
+       "let mut words: [u32; 4];
+        fn g(i: {0..<4 as u64}) { words[i as usize] = 7; }
+        fn h() { for i in 0..<0xFFFFFFFFFFFFFFFF { g(i); } }");
+  Alcotest.test_case
+    "#961 a max literal operand is read at the result's base" `Quick
+    (expect_trap_sites 1
+       "let mut words: [u32; 4];
+        fn h(x: u64) { let i: u64 = max(x & 3, 0xFFFFFFFFFFFFFFFF); words[i as usize] = 7; }");
+  Alcotest.test_case
+    "#961 a singleton literal is read at the parameter's base" `Quick
+    (expect_type_error "requires"
+       "fn bounded(limit: usize @ n, index: usize @ k) -> usize where k < n { return index; }
+        fn h() -> usize { return bounded(1, 0xFFFFFFFFFFFFFFFF); }");
+  (* #961 control: a bound the counter's base holds keeps the range. *)
+  Alcotest.test_case
+    "#961 an unannotated for bound the base holds stays refined" `Quick
+    (expect_trap_sites 0
+       "let mut words: [u32; 4];
+        fn g(i: {0..<4 as u64}) { words[i as usize] = 7; }
+        fn h() { for i in 0..<4 { g(i); } }");
   Alcotest.test_case
     "#956 the same constant fits a signed refined parameter" `Quick
     (expect_ok

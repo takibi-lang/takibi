@@ -394,6 +394,18 @@ let fold_at_base ?(bound = false) base e =
       Const_env.folded_value_unresolved e
   | _ -> None
 
+(* GitHub issue #961: the compile-time value of a bare literal or const
+   leaf (Const_env.bound_value's shapes) at [base]'s width. bound_value
+   reads a literal's 64-bit pattern as a native int, so
+   0xFFFFFFFFFFFFFFFF reads as -1: that is the machine's value at i64 and
+   not at u64. Every proof path reads a leaf through here,
+   never through a raw Const_env.bound_value
+   (scripts/check_proof_fold_width.py). *)
+let bound_at_base ?bound base (e : Ast.expr) =
+  match e.Ast.desc with
+  | Ast.IntLit _ | Ast.Var _ -> fold_at_base ?bound base e
+  | _ -> None
+
 let refined_or_base ?ob base lo hi =
   match range_within_base (repr base) lo hi with
   | Some (lo, hi) ->
@@ -1046,6 +1058,7 @@ let record_raw_reference_mint loc ty =
 let check_integer_literal_target_shape loc (e : Ast.expr) (target : ty) =
   match strip_singleton target with
   | TBool ->
+      (* fold-not-proof: a rejection; the value only names the literal. *)
       (match Const_env.bound_value e with
        | Some k ->
            raise (TypeError (loc, Printf.sprintf
@@ -1075,6 +1088,7 @@ let check_integer_literal_target_shape loc (e : Ast.expr) (target : ty) =
      `adapt_actual_to_expected`), and an accept-list would have to keep up
      with every such case or start breaking them. *)
   | TArray _ | TStruct _ | TIndexedStruct _ | TTuple _ | TSlice _ ->
+      (* fold-not-proof: a rejection; the value only names the literal. *)
       (match Const_env.bound_value e with
        | Some k ->
            raise (TypeError (loc, Printf.sprintf
@@ -1196,7 +1210,14 @@ let adapt_actual_to_expected (tyenv : tyenv) (e : Ast.expr)
           | Var name -> identity_for_immutable_name ~is_address:true name
           | _ -> fresh_rigid_static ()
         else
-          match Const_env.bound_value e with
+          (* #961: a literal's static value at the parameter's base; a
+             64-bit pattern the base cannot hold gets a hidden identity,
+             not the native reading (0xFFFFFFFFFFFFFFFF as -1 discharged
+             `where k < n` for a u64 index). *)
+          let base = match strip_singleton expected_base with
+            | TRefinedInt (_, _, b) | TMultiple (_, b) -> b
+            | t -> t in
+          match bound_at_base base e with
           | Some k -> SConst k
           | None ->
               (match e.desc with
@@ -1545,7 +1566,6 @@ let check_match_int_literal_range loc lit base =
    fold_at_ty mirrors this, change together. *)
 let fold_at_ty t (e : Ast.expr) : int option =
   fold_at_base (canon_ty t) e
-
 let value_facts_base_of_ty t =
   let open Value_facts in
   match repr (canon_ty t) with
@@ -2670,13 +2690,19 @@ let rec gcd a b = if b = 0 then abs a else gcd b (a mod b)
    call, multiplying two non-constant operands, ...) yields None -- the
    caller then requires `unsafe`, same as everywhere else this scoped-not
    -general style of proof falls short in this codebase. *)
+(* #961: only divisibility by the alignment, a power of two N <= 2^w, is
+   concluded from the reads below; the native reading differs from the
+   machine value by a multiple of 2^64, so N divides one iff it divides the
+   other. *)
 let rec provable_multiple_of (e : Ast.expr) : int option =
+  (* fold-not-proof: divisibility only, see above. *)
   match Const_env.bound_value e with
   | Some n when n <> 0 -> Some (abs n)
   | _ ->
   match e.desc with
   | Cast (_, inner) -> provable_multiple_of inner
   | BinOp (Mul, a, b) ->
+      (* fold-not-proof: divisibility only, see provable_multiple_of. *)
       (match Const_env.bound_value a, Const_env.bound_value b with
        | Some n, _ when n <> 0 -> Some (abs n)
        | _, Some n when n <> 0 -> Some (abs n)
@@ -4583,7 +4609,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                       never a same-named local. Only fall through to the
                       refined-variable check for a genuine non-const
                       variable. *)
-                   match Const_env.bound_value w with
+                   match bound_at_base TUsize w with
                    | Some k when k >= 0 -> Some k
                    | Some _ -> None
                    | None ->
@@ -5953,7 +5979,9 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
               destination -- see sentinel_lo below). *)
            let base = repr base_raw in
            let range_of (ae : Ast.expr) (aty : ty) =
-             match Const_env.bound_value ae with
+             (* #961: at the result's base, so max(x, 0xFFFFFFFFFFFFFFFF)
+                on u64 is not {..} below x's range. *)
+             match bound_at_base base ae with
              | Some k -> Some (k, k + 1)
              | None -> (match repr aty with TRefinedInt (x, y, _) -> Some (x, y) | _ -> None)
            in
@@ -6919,8 +6947,8 @@ and check_expr senv eenv tyenv fenv (e : Ast.expr) (expected : ty) : ty =
              | Some (t, _) ->
                  (match repr t with
                   | TMultiple (k, TUsize) -> Some k
-                  | _ -> Const_env.bound_value expr)
-             | None -> Const_env.bound_value expr)
+                  | _ -> None)
+             | None -> None)
         | Ast.BinOp ((Ast.Add | Ast.Sub), a, b) ->
             (match factor a, factor b with
              | Some ka, Some kb -> Some (gcd ka kb)
@@ -7716,7 +7744,12 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
         | Some _ ->
             (fold_at_base base_raw lo_expr,
              fold_at_base ~bound:true base_raw hi_expr)
-        | None -> (Const_env.bound_value lo_expr, Const_env.bound_value hi_expr)
+        | None ->
+            (* #961: the counter's base is not resolved yet; the native
+               reading is re-checked at the resolved base after the body
+               (check_for_bound_at_base below). *)
+            (* fold-not-proof: validated at the base after the body. *)
+            (Const_env.bound_value lo_expr, Const_env.bound_value hi_expr)
       in
       (* fold-not-proof: the annotation check below rejects a bound that
          does not fit, read as written (#956 keeps the proof above at the
@@ -7826,6 +7859,25 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
        | _ -> raise (TypeError (lo_expr.loc,
            Printf.sprintf "for-loop bounds must be an integer type, got '%s'"
              (to_string base_raw))));
+      (* GitHub issue #961: an unannotated counter's constant bounds were
+         read natively before its base was known; the counter's range is
+         sound only if each one is the machine value at that base.
+         `for i in 0..<0xFFFFFFFFFFFFFFFF` on u64 read the bound as -1,
+         an empty range that passed every refined argument while the
+         machine loop ran 2^64 - 1 times. llvm_gen.ml's For reads the
+         bounds at the resolved base (Type_inf.bound_at_base), which
+         agrees with the native reading exactly when this check passes. *)
+      (if ty_opt = None then
+         let check_bound ~bound e v =
+           match v with
+           | Some k when bound_at_base ~bound base_raw e <> Some k ->
+               raise (TypeError (e.Ast.loc, Printf.sprintf
+                 "for-loop bound has no exact value at the counter's type \
+                  '%s' (it reads as %d); write a bound the type holds"
+                 (to_string (repr base_raw)) k))
+           | _ -> () in
+         check_bound ~bound:false lo_expr (fst const_bounds);
+         check_bound ~bound:true hi_expr (snd const_bounds));
       record_stmt_binding_type s 0 idx_ty;
       record_stmt_binding_type s 1 idx_ty;
       (tyenv, raw_locals')

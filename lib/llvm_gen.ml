@@ -4889,7 +4889,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                    (* A const reference (GitHub issue #185) resolves the
                       same way type_inf.ml's mirror now does -- sync rule
                       above still applies to everything else. *)
-                   (match Const_env.bound_value w with
+                   (match Type_inf.bound_at_base Types.TUsize w with
                     | Some k when k >= 0 -> Some k
                     | Some _ -> None
                     | None ->
@@ -6105,7 +6105,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
           (at, av, bt, bv)
       in
       let range_of (ae : Ast.expr) (aty : Ast.type_expr) =
-        match Const_env.bound_value ae with
+        match Type_inf.bound_at_base (Types.of_ast (canon_ty at)) ae with
         | Some k -> Some (k, k + 1)
         | None -> refinement_range aty
       in
@@ -7329,7 +7329,12 @@ let gen_func ?prog_types fdef =
           | Some _ ->
               (fold_at_ty counter_base lo_expr,
                Type_inf.fold_at_base ~bound:true (Types.of_ast counter_base) hi_expr)
-          | None -> (Const_env.bound_value lo_expr, Const_env.bound_value hi_expr)
+          | None ->
+              (* #961: at the resolved base; type_inf.ml rejects a bound
+                 whose native reading differs, so the two agree. *)
+              let base = Types.of_ast counter_base in
+              (Type_inf.bound_at_base base lo_expr,
+               Type_inf.bound_at_base ~bound:true base hi_expr)
         in
         let loop_ty = match loop_bounds with
           | Some lo_k, Some hi_k -> TypeRefined (lo_k, hi_k, counter_base)
