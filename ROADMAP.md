@@ -151,7 +151,7 @@ list (maintainer, 2026-10-09).
 
 **Evidence for the trunk, scheduled by A:** #584's soak at natural
 boundaries, #702 (dedicated soak hardware, the maintainer's decision),
-#652 (lifecycle trace events for signals and wait4). Every QEMU lane runs
+#965 (the ordinary suite with the lifecycle trace on from boot). Every QEMU lane runs
 four vCPUs since 2026-10-11.
 
 ### Territory B: slightly off the pillars, supporting A, by priority
@@ -166,7 +166,7 @@ of #954 stage 2. Then: #908 (fixed
 QEMU lane budget), #916 (compiler GC tuning), #921 and #922
 (variant reuse, domain-parallel codegen; both wait on the land-span
 measurement after #917's front-end fixes), #927 (QEMU lanes queueing for the vCPU lease), #893 (redundant csel in variant match),
-#652 (lifecycle trace for signals and wait4), #698 (ext2
+#698 (ext2
 exhaustion as ENOSPC), #846 (TCP retransmission with no reader), #793
 (proofs with an unresolved type variable), #769 (--uses-of NAME), #774
 (IRQ arms acknowledge their source), #762 (no vector/unaligned stores in
