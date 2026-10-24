@@ -120,9 +120,12 @@ let uncovered ?(eqs = []) ?(facts = no_facts) (ivs : interval list) ((a, b) : in
   let ivs = List.map (fun (lo, hi) -> (n lo, n hi)) ivs in
   let b = n b in
   let pool = ref ivs in
-  let rec go cur fuel =
+  (* [report] is the point a failure names: the walk's position after its
+     last step that provably advanced, so a step through a possibly empty
+     interval never names a point outside the goal. *)
+  let rec go cur report fuel =
     if ge cur b then None
-    else if fuel = 0 then Some cur
+    else if fuel = 0 then Some report
     else
       (* An interval that starts at or before cur and reaches b ends the
          walk; else one that starts at or before cur and ends at or past
@@ -139,10 +142,11 @@ let uncovered ?(eqs = []) ?(facts = no_facts) (ivs : interval list) ((a, b) : in
       (match step with
        | Some hi ->
            pool := List.filter (fun (_, h) -> not (equal h hi)) !pool;
-           go hi (fuel - 1)
-       | None -> Some cur)
+           let advanced = entails facts (sub (sub hi cur) (const 1)) in
+           go hi (if advanced then hi else report) (fuel - 1)
+       | None -> Some report)
   in
-  go (n a) (List.length ivs + 1)
+  go (n a) (n a) (List.length ivs + 1)
 
 (* ---- z3 obligations ---------------------------------------------------- *)
 

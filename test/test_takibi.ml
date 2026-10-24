@@ -25564,6 +25564,12 @@ fn peek(s: borrow Slot954[0]) -> u8 requires init(ss[s.index].buf) {
    linear facts for the interval walk (SPEC.md "Initialization contracts"). *)
 let init_path_fact_tests =
   let t name f = Alcotest.test_case name `Quick f in
+  let cursor_put = "fn put(o: borrow uninit [u8; 64..], at: usize, b: u8) -> usize
+        requires init(o[0..<at]) ensures init(o[0..<result]) {
+    if (at < 64) { o[at] = b; return at + 1; }
+    return at;
+}
+" in
   let span = "fn fetch(dst: borrow uninit []u8, off: usize, n: usize) -> bool
         ensures init(dst[off..<off + n]) if (result) {
     if (off > dst.len) { return false; }
@@ -25777,6 +25783,42 @@ fn g(b: borrow uninit []u8) -> u8 { zero_fill(b); return 0; }" in
             "init-trace f 3:5 for buf: uninit; known [0, 4); path facts: buf.len - 8 >= 0\n"];
          Alcotest.(check bool) "other functions untraced" false
            (contains_substring out "init-trace g"));
+    (* GitHub issue #977: the procfs renderers' cursor shape. A step whose
+       start offset is an immutable parameter extends a possibly empty
+       prefix [0, offset) by one element, and steps chain through lets and
+       `return g(...)`. *)
+    t "issue #977: a byte stored at offset extends a possibly empty prefix"
+      (expect_ok cursor_put);
+    t "issue #977: chained cursor steps through lets and a returned call"
+      (expect_ok (cursor_put ^ "fn two(o: borrow uninit [u8; 64..], b: u8) -> usize
+                 ensures init(o[0..<result]) {
+           let first: usize = put(o, 0, b);
+           return put(o, first, b); }"));
+    t "issue #977: a step that skips an element is rejected"
+      (expect_type_error "the ensures clause needs it initialized"
+         "fn put(o: borrow uninit [u8; 64..], at: usize, b: u8) -> usize
+                 requires init(o[0..<at]) ensures init(o[0..<result]) {
+           if (at < 63) { o[at + 1] = b; return at + 2; }
+           return at; }");
+    t "issue #977: a returned call without a matching ensures is rejected"
+      (expect_type_error "the ensures clause needs it initialized"
+         (cursor_put ^ "fn skip(o: borrow uninit [u8; 64..], at: usize) -> usize
+                 requires init(o[0..<at]) { return at + 1; }
+         fn two(o: borrow uninit [u8; 64..], b: u8) -> usize
+                 ensures init(o[0..<result]) {
+           let first: usize = put(o, 0, b);
+           return skip(o, first); }"));
+    t "issue #977: the walk steps through an interval that may be empty"
+      (fun () ->
+         let o = Init_pred.atom "o" in
+         let one = Init_pred.const 1 in
+         let ivs = [(Init_pred.const 0, o); (o, Init_pred.add o one)] in
+         Alcotest.(check bool) "covered" true
+           (Init_pred.uncovered ivs (Init_pred.const 0, Init_pred.add o one) = None);
+         Alcotest.(check bool) "a gap stays uncovered" true
+           (Init_pred.uncovered [(Init_pred.const 0, o);
+                                 (Init_pred.add o one, Init_pred.add o (Init_pred.const 2))]
+              (Init_pred.const 0, Init_pred.add o (Init_pred.const 2)) <> None));
   ]
 
 let definite_init_tests =
