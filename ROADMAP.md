@@ -68,8 +68,10 @@ B): #935 (unsigned Sub keeps a negative lower bound; a soundness hole,
 first), #819 (AtomicWord acq_rel cells), #920 (DDB world stop reaching a core
 spinning with IRQs masked: pseudo-NMI/FIQ stop, cf. #641; the hung-core
 DDB check is expected-fail until then), #932 (one timer-tick entry
-for every core, after #920), #933 (reboot on any core, after #920), #680 (region_pool handle validation without the lock), #812
-(contiguous page run search). #798 and #799 wait under #954 (verification direction).
+for every core, after #920), #933 (reboot on any core, after #920), #680 (region_pool handle validation without the lock) and #812
+(contiguous page run search) are parked; the RPi5 lane fails naming either
+one when its reopen condition is met (scripts/validate_parked_triggers.py,
+#953). #798 and #799 wait under #954 (verification direction).
 
 Done on the stored-authority route (2026-10-09): #637 stage 1's
 type-checker work and #731 step 1; #131's first slices -- field places

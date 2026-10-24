@@ -70,3 +70,24 @@ word), a `tbz`, and one more saved register. The counting itself is not
 reached. Against the inlined mask + lock (no wrapper call) the difference
 was 5172-5174 vs 5925-5931 (+5.5 ns), but most of that is the wrapper call
 main already pays.
+
+## Inline contended hint (final, same day)
+
+The uncontended path now reads the lock word through
+region_pool_lock_contended_hint, an inline plain load (an `ldr` and a
+`cbz` in each wrapper); region_pool_lock_is_held keeps its acquire load.
+Same probe, main's wrapper vs this one:
+
+| sample | main's wrapper | final wrapper |
+|---|---|---|
+| 0 | 5422 | 5453 |
+| 1 | 5417 | 5438 |
+| 2 | 5415 | 5462 |
+
++21..47 ticks per 4096 pairs: +0.1..0.2 ns per pair.
+
+Final size against origin/main d6290064 (scripts/space_delta.py): text
++924 B (QEMU) / +876 B (RPi5), data +16 B, BSS +528 B (QEMU;
+`pool_lock_wait_cores` 512 B, `pool_lock_wait_paused` 8 B; on RPi5 the
+BSS total is unchanged by alignment). usable_ram_start unchanged on both
+targets: no allocator page cost.
