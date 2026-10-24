@@ -174,7 +174,10 @@ MMU-off code), #926 (GICv3 driver for QEMU virt gic-version=3). Audit follow-ups
 nfds > 0), #902 (poll on terminal fds other than 0), #898 (DDB
 schedule_reserved window), #899 (probe-gate checks from #756), #904
 (position-dependent controls, FAILED line after a poll bound), #905
-(peer_sleep_mask negative control), #903 (reproducible guest ELFs).
+(peer_sleep_mask negative control), #903 (reproducible guest ELFs). #943's
+follow-ups (2026-10-24): #962 (array-holding results copied per byte
+through sret), #963 (aggregate assignment of array-holding values copied
+per element).
 
 On 2026-10-04 the maintainer authorized autonomous B work in priority order
 where acceptance is settled; leave design investigations and unmet
