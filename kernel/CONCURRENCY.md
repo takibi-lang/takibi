@@ -80,6 +80,13 @@ reverse, so the two pools cannot wait on each other. The rest of the first
 kind moves the same way, or into regions where it
 does not span a blocking call, before the flip.
 
+A fourth dependency names no constant: a raw `cpu_id()` read outside a
+region assumes the task cannot move to another CPU before it uses the
+index. `scripts/check_raw_cpu_id_sites.py` counts those calls per file, so
+the worklist cannot grow unseen; the flip reviews each file and either moves
+its sites into a region or records why a switch cannot happen there
+(interrupt context, IRQs masked, boot) or does no harm (a diagnostic).
+
 Raising either prints a worklist: files assert the constant they depend on
 with a per-site message. `scripts/check_execution_model_coverage.py` requires
 every file with a mutable global to carry a `static_assert` on a constant (a
