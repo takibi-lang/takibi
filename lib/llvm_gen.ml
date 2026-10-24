@@ -1515,6 +1515,44 @@ let split_aggregate_merges () =
         | _ -> acc) [] bb in
       List.iter rewrite (List.rev merges)) f) !the_module
 
+(* GitHub issue #962: every fixed-length llvm.memcpy is made
+   llvm.memcpy.inline again after optimization.
+
+   Takibi emits only memcpy.inline, which the backend always expands, since
+   no memcpy symbol is linked into the kernel or the native tests. SROA
+   rewrites the copies it splits as plain llvm.memcpy, and the backend
+   lowers one longer than a few hundred bytes to a memcpy call:
+   kernel_process_monitor_proc's 528-byte snapshot copy was an undefined
+   memcpy at link time. Both intrinsics take the same operands. *)
+let keep_memcpys_inline () =
+  let ptr = pointer_type context in
+  let i64 = i64_type context in
+  let fty = function_type (void_type context) [| ptr; ptr; i64; i1_type context |] in
+  match lookup_function "llvm.memcpy.p0.p0.i64" !the_module with
+  | None -> ()
+  | Some plain ->
+      let inline = match lookup_function "llvm.memcpy.inline.p0.p0.i64" !the_module with
+        | Some fn -> fn
+        | None -> declare_function "llvm.memcpy.inline.p0.p0.i64" fty !the_module in
+      let calls = ref [] in
+      iter_functions (fun f ->
+        iter_blocks (fun bb ->
+          iter_instrs (fun i ->
+            if instr_opcode i = Opcode.Call && operand i (num_operands i - 1) == plain
+               && is_constant (operand i 2)
+            then calls := i :: !calls) bb) f) !the_module;
+      List.iter (fun call ->
+        let b = builder_before context call in
+        let args = Array.init 4 (fun k -> operand call k) in
+        let copy = build_call fty inline args "" b in
+        List.iter (fun k ->
+          Array.iter (fun a ->
+            match repr_of_attr a with
+            | AttrRepr.Enum (kind, _) when kind = enum_attr_kind "align" ->
+                add_call_site_attr copy a (AttrIndex.Param k)
+            | _ -> ()) (call_site_attrs call (AttrIndex.Param k))) [0; 1];
+        delete_instruction call) !calls
+
 (* Run IR-level optimization passes.
    - Vectorization is disabled: AArch64 bare-metal may lack NEON.
    - "default<O2>" includes the loop-idiom pass, which replaces memset/memcpy-like loops
@@ -1561,7 +1599,8 @@ let run_optimizations machine =
     split_aggregate_merges ();
     run "function(early-cse,simplifycfg),globaldce"
   end;
-  Llvm_passbuilder.dispose_passbuilder_options opts
+  Llvm_passbuilder.dispose_passbuilder_options opts;
+  keep_memcpys_inline ()
 
 let emit_object machine output_path =
   run_optimizations machine;
@@ -2300,6 +2339,15 @@ let rec lltype_holds_array ty =
   | TypeKind.Struct -> Array.exists lltype_holds_array (struct_element_types ty)
   | _ -> false
 
+(* GitHub issue #962: result slots of the current function. Only the call
+   that owns a slot writes it, so a value loaded from one may be re-read
+   from the slot at any later point the load dominates. *)
+let result_slots : (llvalue, unit) Hashtbl.t = Hashtbl.create 16
+
+(* Storage no other name reaches: result slots, the sret parameter, and the
+   caller's copy behind a #943 parameter or argument. *)
+let private_storage : (llvalue, unit) Hashtbl.t = Hashtbl.create 16
+
 let abi_param_lltype_of_ast ty =
   let abi = abi_lltype_of_ast ty in
   if lltype_holds_array abi then pointer_type context else abi
@@ -2340,6 +2388,7 @@ let to_abi_arg ty v slot_ty =
   else begin
     let llty = type_of v in
     let tmp = entry_alloca llty "arg.copy" in
+    Hashtbl.replace private_storage tmp ();
     (match ty with
      | TypeNamed sname | TypeIndexed (sname, _) ->
          (match Hashtbl.find_opt struct_alignments sname with
@@ -2356,6 +2405,241 @@ let to_abi_arg ty v slot_ty =
      | _ -> ignore (build_store v tmp builder));
     tmp
   end
+
+(* GitHub issue #962: a result whose type holds an array is returned
+   between Takibi functions through a slot the caller provides, passed
+   first with the `sret` attribute (x8 on AArch64), and the function
+   returns void.
+
+   LLVM returns a first-class aggregate leaf by leaf: a variant carrying a
+   ProcessDiagnosticSnapshot (512-byte command line) was assembled from
+   about 500 byte loads and stores in each of five functions. Through the
+   slot, `return` is a store into caller-owned memory, which
+   `lower_array_holding_stores` turns into memcpy.inline, and the caller
+   reads the result from its slot, written only by that call.
+
+   As in #897 and #943, the convention is chosen once, in the function's
+   LLVM type: extern fns and --external-entry functions keep the aggregate
+   return. A call site recognizes the convention by a void LLVM return for
+   a result that has a type. *)
+let ret_uses_sret ret_ast =
+  not (is_erased_view_type ret_ast)
+  && (match ret_ast with
+      | TypeVoid | TypeView _ -> false
+      | t -> lltype_holds_array (abi_lltype_of_ast t))
+
+let takibi_function_type ret_ast param_lls =
+  if ret_uses_sret ret_ast then
+    function_type (void_type context)
+      (Array.append [| pointer_type context |] param_lls)
+  else function_type (abi_ret_lltype_of_ast ret_ast) param_lls
+
+let fn_type_has_sret ft ret_ast =
+  ret_uses_sret ret_ast && return_type ft = void_type context
+
+let sret_attr ret_ast =
+  Llvm_ext.create_type_attr context "sret" (ltype_of_ast ret_ast)
+
+(* The caller's result slot for a call through `ft`, or None. *)
+let sret_slot_for_call ft ret_ast =
+  if not (fn_type_has_sret ft ret_ast) then None
+  else begin
+    let slot = entry_alloca (ltype_of_ast ret_ast) "ret.slot" in
+    (match ret_ast with
+     | TypeNamed sname | TypeIndexed (sname, _) ->
+         (match Hashtbl.find_opt struct_alignments sname with
+          | Some n -> set_alignment n slot
+          | None -> ())
+     | _ -> ());
+    Hashtbl.replace result_slots slot ();
+    Hashtbl.replace private_storage slot ();
+    Some slot
+  end
+
+let finish_sret_call call slot ret_ast =
+  add_call_site_attr call (sret_attr ret_ast) (AttrIndex.Param 0);
+  build_load (ltype_of_ast ret_ast) slot "call.result" builder
+
+(* GitHub issues #962/#963: a store of a value whose type holds an array is
+   rewritten, after the function is generated, into stores of its parts.
+
+   LLVM splits a first-class aggregate store into one store per scalar
+   leaf, so a [512 x i8] field built into a variant became 512 byte
+   stores. The value is taken apart along the instructions that built it:
+   an insertvalue stores its base and then its element; undef stores
+   nothing; a constant struct stores its elements; and a part read by a
+   load (through extractvalues) becomes llvm.memcpy.inline from the place
+   the load read -- provided that place still holds what the load read
+   when the store runs: a result slot (see `result_slots`), or a load in
+   the same block with no write or call between it and the store. Any
+   other part, and every part without an array, is stored as before.
+   Volatile stores are left alone. *)
+let lower_array_holding_stores f =
+  let dl = match !target_data with
+    | Some dl -> dl
+    | None -> raise (Error "BUG: #962 store lowering before the data layout") in
+  let i32 = i32_type context in
+  let may_write i =
+    match instr_opcode i with
+    | Opcode.Store | Opcode.Call | Opcode.Invoke | Opcode.AtomicRMW
+    | Opcode.AtomicCmpXchg | Opcode.Fence | Opcode.VAArg -> true
+    | _ -> false in
+  let rec unchanged_between i stop =
+    if i == stop then true
+    else if may_write i then false
+    else match instr_succ i with
+      | Before next -> unchanged_between next stop
+      | At_end _ -> false in
+  let source_unchanged load store =
+    Hashtbl.mem result_slots (operand load 0)
+    || (instr_parent load == instr_parent store
+        && (match instr_succ load with
+            | Before next -> unchanged_between next store
+            | At_end _ -> false)) in
+  (* The object an address points into, when it is one this function owns
+     or a global: an alloca, a global, or private storage (a result slot
+     or the caller's copy behind an sret or #943 parameter). Two distinct
+     such objects never overlap, which the piecewise copy relies on. *)
+  let rec base_object p =
+    match classify_value p with
+    | ValueKind.Instruction Opcode.GetElementPtr -> base_object (operand p 0)
+    | ValueKind.ConstantExpr when constexpr_opcode p = Opcode.GetElementPtr ->
+        base_object (operand p 0)
+    | ValueKind.Instruction Opcode.Alloca | ValueKind.GlobalVariable -> Some p
+    | _ when Hashtbl.mem private_storage p -> Some p
+    | _ -> None in
+  let disjoint dst src =
+    match base_object dst, base_object src with
+    | Some a, Some b -> a != b
+    | _ -> false in
+  (* The address `path` steps into `ptr` (of LLVM type `ty`), its byte
+     offset, and the part's type. *)
+  let step b ty ptr path =
+    if path = [] then (ptr, 0L, ty)
+    else
+      let (off, part_ty) = List.fold_left (fun (off, t) i ->
+        match classify_type t with
+        | TypeKind.Struct ->
+            (Int64.add off (Llvm_target.DataLayout.offset_of_element t i dl),
+             (struct_element_types t).(i))
+        | _ ->
+            let e = element_type t in
+            (Int64.add off
+               (Int64.mul (Int64.of_int i) (Llvm_target.DataLayout.abi_size e dl)),
+             e)) (0L, ty) path in
+      let idx = Array.of_list (List.map (const_int i32) (0 :: path)) in
+      (build_in_bounds_gep ty ptr idx "part" b, off, part_ty)
+  in
+  let align_at base off =
+    if off = 0L then base
+    else
+      let low = Int64.to_int (Int64.logand off (Int64.neg off)) in
+      max 1 (min base low) in
+  (* A load, possibly under extractvalues: (load, path). *)
+  let rec loaded v =
+    match classify_value v with
+    | ValueKind.Instruction Opcode.Load when not (is_volatile v) -> Some (v, [])
+    | ValueKind.Instruction Opcode.ExtractValue ->
+        Option.map (fun (l, p) -> (l, p @ Array.to_list (indices v)))
+          (loaded (operand v 0))
+    | _ -> None in
+  let safe : (llvalue, bool) Hashtbl.t = Hashtbl.create 8 in
+  let rec emit b dst_ty dst path dst_align v =
+    let (ptr, off, _) = step b dst_ty dst path in
+    let align = align_at dst_align off in
+    if not (lltype_holds_array (type_of v)) then
+      set_alignment align (build_store v ptr b)
+    else if is_undef v || is_poison v then ()
+    else match classify_value v with
+      | ValueKind.Instruction Opcode.InsertValue ->
+          emit b dst_ty dst path dst_align (operand v 0);
+          emit b dst_ty dst (path @ Array.to_list (indices v)) dst_align
+            (operand v 1)
+      | ValueKind.ConstantStruct ->
+          for i = 0 to num_operands v - 1 do
+            emit b dst_ty dst (path @ [i]) dst_align (operand v i)
+          done
+      | _ ->
+          match loaded v with
+          | Some (load, src_path) when Hashtbl.find safe load ->
+              let src_ty = type_of load in
+              let (src, src_off, _) = step b src_ty (operand load 0) src_path in
+              let size = Llvm_target.DataLayout.abi_size (type_of v) dl in
+              let fty = function_type (void_type context)
+                  [| pointer_type context; pointer_type context;
+                     i64_type context; i1_type context |] in
+              let fn = match lookup_function "llvm.memcpy.inline.p0.p0.i64" !the_module with
+                | Some fn -> fn
+                | None -> declare_function "llvm.memcpy.inline.p0.p0.i64" fty !the_module in
+              let call = build_call fty fn
+                  [| ptr; src; const_of_int64 (i64_type context) size false;
+                     const_int (i1_type context) 0 |] "" b in
+              let attr n = create_enum_attr context "align" (Int64.of_int n) in
+              add_call_site_attr call (attr align) (AttrIndex.Param 0);
+              add_call_site_attr call
+                (attr (align_at (max 1 (alignment load)) src_off)) (AttrIndex.Param 1)
+          | _ -> set_alignment align (build_store v ptr b)
+  in
+  let stores = ref [] in
+  iter_blocks (fun bb ->
+    iter_instrs (fun i ->
+      if instr_opcode i = Opcode.Store && not (is_volatile i)
+         && lltype_holds_array (type_of (operand i 0))
+         && (match classify_value (operand i 0) with
+             | ValueKind.Instruction (Opcode.InsertValue | Opcode.Load
+                                      | Opcode.ExtractValue)
+             | ValueKind.ConstantStruct -> true
+             | _ -> false)
+      then stores := i :: !stores) bb) f;
+  List.iter (fun store ->
+    let v = operand store 0 in
+    let dst = operand store 1 in
+    let b = builder_before context store in
+    (* A store of one loaded value copies one place to another of the same
+       type, and two typed places are either the same or disjoint (only a
+       raw-pointer cast inside unsafe code can make them overlap
+       partially). A value assembled from parts writes some parts before
+       it reads others, so there the two objects must be told apart. *)
+    let whole = loaded v <> None in
+    (* Decide every part's source before emitting a part. *)
+    let rec plan v =
+      if lltype_holds_array (type_of v) then
+        match classify_value v with
+        | ValueKind.Instruction Opcode.InsertValue ->
+            plan (operand v 0); plan (operand v 1)
+        | ValueKind.ConstantStruct ->
+            for i = 0 to num_operands v - 1 do plan (operand v i) done
+        | _ ->
+            Option.iter (fun (load, _) ->
+              Hashtbl.replace safe load
+                (source_unchanged load store
+                 && (whole || disjoint dst (operand load 0))))
+              (loaded v) in
+    Hashtbl.reset safe;
+    plan v;
+    emit b (type_of v) dst [] (max 1 (alignment store)) v;
+    delete_instruction store) (List.rev !stores);
+  (* Drop the aggregate loads this left unused, and those #943's argument
+     copies left: SROA splits a first-class aggregate load leaf by leaf even
+     when nothing uses it, and that splits the whole alloca into one slot
+     per array element, copies included (VirtioUsed_virtio_used_peek kept
+     174 byte loads and stores so). *)
+  let dead i =
+    use_begin i = None
+    && lltype_holds_array (type_of i)
+    && (match instr_opcode i with
+        | Opcode.Load -> not (is_volatile i)
+        | Opcode.ExtractValue | Opcode.InsertValue -> true
+        | _ -> false) in
+  let rec sweep () =
+    let victims = ref [] in
+    iter_blocks (fun bb ->
+      iter_instrs (fun i -> if dead i then victims := i :: !victims) bb) f;
+    if !victims <> [] then begin
+      List.iter delete_instruction !victims;
+      sweep ()
+    end in
+  sweep ()
 
 (* Coerce an llvalue to match a destination AST type.
    Invariant: arithmetic values arrive here at i32 (for <=32-bit types) or i64 (for 64-bit types).
@@ -3296,8 +3580,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                        small-variant convention. An extern or external
                        entry that keeps the aggregate one cannot become a
                        function value. *)
-                    let expected = function_type
-                      (abi_ret_lltype_of_ast ret_ast)
+                    let expected = takibi_function_type ret_ast
                       (param_asts
                        |> List.filter (fun t -> not (is_erased_view_type t))
                        |> List.map (fun t -> match t with
@@ -5627,18 +5910,26 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
              |> List.filter_map Fun.id
              |> Array.of_list
            in
-           let slots = param_types ft in
-           let arg_vals = Array.mapi (fun i (param_ast, v) ->
-             to_abi_arg param_ast v slots.(i)) arg_vals in
-           let ret_lty = return_type ft in
-           let call_name = if ret_lty = void_type context then "" else "calltmp" in
-           let v = build_call ft callee arg_vals call_name builder in
            let ast_ret = match Hashtbl.find_opt func_ret_ast_types direct_name with
              | Some t -> t
              | None -> raise (Error (Printf.sprintf
                  "BUG: Call: '%s' has no func_ret_ast_types entry despite being declared"
                  direct_name))
            in
+           let sret = sret_slot_for_call ft ast_ret in
+           let slots = param_types ft in
+           let skip = if sret = None then 0 else 1 in
+           let arg_vals = Array.mapi (fun i (param_ast, v) ->
+             to_abi_arg param_ast v slots.(i + skip)) arg_vals in
+           let arg_vals = match sret with
+             | Some slot -> Array.append [| slot |] arg_vals
+             | None -> arg_vals in
+           let ret_lty = return_type ft in
+           let call_name = if ret_lty = void_type context then "" else "calltmp" in
+           let v = build_call ft callee arg_vals call_name builder in
+           let v = match sret with
+             | Some slot -> finish_sret_call v slot ast_ret
+             | None -> v in
            if is_erased_view_type ast_ret then
              (ast_ret, erased_view_value ())
            else
@@ -5667,8 +5958,9 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                    where the value is formed. *)
                 let param_lls = List.map abi_param_lltype_of_ast param_asts
                   |> Array.of_list in
-                let ret_ll    = abi_ret_lltype_of_ast ret_ast in
-                let ft        = function_type ret_ll param_lls in
+                let ft        = takibi_function_type ret_ast param_lls in
+                let ret_ll    = return_type ft in
+                let sret      = sret_slot_for_call ft ret_ast in
                 let arg_vals  =
                   List.mapi (fun i (a, param_ast) ->
                     to_abi_arg param_ast
@@ -5676,10 +5968,15 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                       param_lls.(i)
                   ) (List.combine args param_asts) |> Array.of_list
                 in
+                let arg_vals = match sret with
+                  | Some slot -> Array.append [| slot |] arg_vals
+                  | None -> arg_vals in
                 let call_name = if ret_ll = void_type context then "" else "calltmp" in
                 let v = build_call ft fn_ptr arg_vals call_name builder in
-                let v = if ret_ll = void_type context then v
-                  else from_abi_slot ret_ast v in
+                let v = match sret with
+                  | Some slot -> finish_sret_call v slot ret_ast
+                  | None when ret_ll = void_type context -> v
+                  | None -> from_abi_slot ret_ast v in
                 (ret_ast, to_arith_width ret_ast v)
             | _ ->
                 raise (Error (Printf.sprintf
@@ -6163,6 +6460,16 @@ let gen_func ?prog_types fdef =
 
   let entry_bb = append_block context "entry" f in
   position_at_end entry_bb builder;
+  Hashtbl.reset result_slots;
+  Hashtbl.reset private_storage;
+  (* GitHub issue #962: with a result slot, LLVM parameter 0 is the slot and
+     the declared parameters follow it. *)
+  let sret = fn_type_has_sret f_ty ret_ast in
+  if sret then begin
+    set_value_name "result" (Llvm.param f 0);
+    Hashtbl.replace private_storage (Llvm.param f 0) ()
+  end;
+  let param f i = Llvm.param f (if sret then i + 1 else i) in
 
   (* DWARF: one DISubprogram per function, captured (together with the
      DIBuilder and DIFile used to create it) so gen_stmt and the two
@@ -6305,6 +6612,7 @@ let gen_func ?prog_types fdef =
           (* GitHub issue #943: the caller's copy is this parameter's
              storage. *)
           let ptr = param f i in
+          Hashtbl.replace private_storage ptr ();
           set_value_name name ptr;
           local_bind locals name binding_id (Mut (ast_ty, ptr));
           declare_var ~is_param:true ~argno:(i + 1) ~name ~ast_ty
@@ -6428,7 +6736,11 @@ let gen_func ?prog_types fdef =
         let (_, v) = gen_expr ~expected_ty:ret_ast locals e in
         if is_erased_view_type ret_ast then
           emit_profile_return key (fun () -> ignore (build_ret_void builder))
-        else
+        else if sret then begin
+          (* GitHub issue #962: the result goes to the caller's slot. *)
+          ignore (build_store (coerce v ret_ast) (Llvm.param f 0) builder);
+          emit_profile_return key (fun () -> ignore (build_ret_void builder))
+        end else
           let rv = to_abi_slot ret_ast (coerce v ret_ast) (return_type f_ty) in
           emit_profile_return key (fun () -> ignore (build_ret rv builder))
 
@@ -7160,7 +7472,7 @@ let gen_func ?prog_types fdef =
 
   (* Ensure the exit block has a terminator *)
   if block_terminator (insertion_block builder) = None then begin
-    if ret_ast = TypeVoid || is_erased_view_type ret_ast then
+    if ret_ast = TypeVoid || is_erased_view_type ret_ast || sret then
       emit_profile_return key (fun () -> ignore (build_ret_void builder))
     else
       let rv = to_abi_slot ret_ast (const_int (ltype_of_ast ret_ast) 0) (return_type f_ty) in
@@ -7177,6 +7489,7 @@ let gen_func ?prog_types fdef =
      already doesn't catch Error specially, same as every other internal
      Error in this file) and the test suite report a normal, attributable
      failure. *)
+  lower_array_holding_stores f;
   if not (Llvm_analysis.verify_function f) then begin
     (* verify_function answers yes/no and nothing else, which leaves the
        reader to spot the defect in a dumped function by eye. verify_module
@@ -7669,10 +7982,13 @@ let declare_func ?prog_types fdef =
            | _ -> abi_param_lltype_of_ast t)
       |> Array.of_list in
     let ret_ast   = resolve_ret_ast prog_types key fdef.ret_type in
-    let ret_ll    = if entry then ltype_of_ret_ast ret_ast
-      else abi_ret_lltype_of_ast ret_ast in
-    let ft        = function_type ret_ll param_lls in
+    let ft = if entry then function_type (ltype_of_ret_ast ret_ast) param_lls
+      else takibi_function_type ret_ast param_lls in
     let f         = declare_function key ft !the_module in
+    if fn_type_has_sret ft ret_ast then begin
+      add_function_attr f (sret_attr ret_ast) (AttrIndex.Param 0);
+      add_function_attr f (create_enum_attr context "noalias" 0L) (AttrIndex.Param 0)
+    end;
     (* A region built-in is emitted for every element type a program names,
        whole: pool, table and pin operations alike. Internal linkage lets
        LLVM drop the ones the program never calls (#744: two new element
@@ -7877,8 +8193,8 @@ let debug_type_metadata () =
          the sidecar describes the convention of Takibi functions. *)
       "{\"kind\":\"tag_payload\",\"tag_register\":\"x0\",\"payload_register\":\"x1\",\"return_address_register\":\"x30\"}"
     else if starts_with !configured_target_triple "aarch64" then
-      (* Takibi currently declares a direct LLVM aggregate return, without an
-         sret parameter. LLVM's AArch64 lowering assigns one result register
+      (* A variant without an array is a direct LLVM aggregate return,
+         without an sret parameter. LLVM's AArch64 lowering assigns one result register
          to each scalar leaf (PageRunAllocResult is 40 bytes and returns in
          x0..x4). Only x0..x7 are available; a result that needs more scalar
          registers is returned through the incoming x8 buffer. Describe that
@@ -7901,7 +8217,9 @@ let debug_type_metadata () =
             [(base, Llvm_target.DataLayout.abi_size ty dl)]
       in
       let leaves = scalar_parts 0L llty in
-      if List.length leaves > 8 then
+      (* GitHub issue #962: a variant holding an array is returned through
+         the caller's sret slot, which AArch64 passes in x8. *)
+      if List.length leaves > 8 || lltype_holds_array llty then
         "{\"kind\":\"indirect\",\"pointer_register\":\"x8\",\"return_address_register\":\"x30\"}"
       else
       let parts = leaves |> List.mapi (fun index (offset, size) ->

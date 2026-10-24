@@ -14,6 +14,9 @@
 //   Payload: the same variant, forced to Wide(DEBUG_ABI_FORCED_WIDE). Under
 //           a per-field description GDB would put the payload in x2, the
 //           caller would read x1, and the value would not arrive.
+//   Array:  tag + [u8; 4] = five leaves, which would fit x0..x4, returned
+//           through the caller's sret slot in x8 because it holds an array
+//           (GitHub issue #962).
 //
 // Every probe runs twice: once normally (the control that the fixture ran
 // and the cases are distinguishable) and once with GDB forcing Forced. The
@@ -29,6 +32,8 @@ variant DebugAbiDirect { Normal(DebugAbiThree); Forced; }
 variant DebugAbiEightLeaves { Normal(DebugAbiSeven); Forced; }
 variant DebugAbiNineLeaves { Normal(DebugAbiEight); Forced; }
 variant DebugAbiShared { Low(u32); Wide(u64); Forced; }
+struct DebugAbiFour { b: [u8; 4]; }
+variant DebugAbiArray { Normal(DebugAbiFour); Forced; }
 
 const DEBUG_ABI_UART: usize = 0x09000000;
 const DEBUG_ABI_FORCE_KEY: u64 = 0x7E;
@@ -82,6 +87,14 @@ noinline fn debug_abi_shared(key: u64) -> DebugAbiShared {
 noinline fn debug_abi_payload(key: u64) -> DebugAbiShared {
     if (key == DEBUG_ABI_FORCE_KEY) { return DebugAbiShared::Forced; }
     return DebugAbiShared::Low((key >> 32) as u32);
+}
+
+noinline fn debug_abi_array(key: u64) -> DebugAbiArray {
+    if (key == DEBUG_ABI_FORCE_KEY) { return DebugAbiArray::Forced; }
+    let mut four: DebugAbiFour;
+    let top: u8 = (key >> 32) as u8;
+    for i: usize in 0..<4 { four.b[i] = top + (i as u8); }
+    return DebugAbiArray::Normal(four);
 }
 
 // A normal result must carry the payload the callee built from its key.
@@ -145,10 +158,20 @@ fn debug_abi_round(round: *u8, key: u64) !{unsafe} {
         }
         DebugAbiShared::Forced => { debug_abi_report("payload", round, true, false); }
     }
+    let array_key: u64 = key + 5 * DEBUG_ABI_KEY_STEP;
+    match debug_abi_array(array_key) {
+        DebugAbiArray::Normal(four) => {
+            let mut bytes: DebugAbiFour = four;
+            let top: u8 = (array_key >> 32) as u8;
+            debug_abi_report("array", round, true,
+                             bytes.b[0] == top && bytes.b[3] == top + 3);
+        }
+        DebugAbiArray::Forced => { debug_abi_report("array", round, false, true); }
+    }
 }
 
 // The runner's GDB forces only the second round, whose keys are
-// 0x50 to 0x54 in the high half.
+// 0x50 to 0x55 in the high half.
 fn debug_abi_main() !{unsafe} {
     let seed: u64 = debug_abi_seed();
     debug_abi_round("control", (seed + 0x20) * DEBUG_ABI_KEY_STEP);

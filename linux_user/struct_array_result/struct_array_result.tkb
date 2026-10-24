@@ -1,0 +1,133 @@
+// Results and copies of values that hold an array (GitHub issues #962 and
+// #963). Such a result is returned through a slot the caller provides, and
+// a copy of such a value is a block copy. This checks the copy semantics
+// survive: each call fills its own slot, a returned value is independent
+// of the callee's storage, a variant built from a value that is about to
+// be overwritten keeps the old bytes, and a function value returns the
+// same way as a direct call. A 520-byte record copied out of a result and
+// passed on is the shape whose split copy LLVM turned into a memcpy call,
+// which this program, linked without a C library, could not resolve.
+
+struct Named {
+    id: usize;
+    name: [u8; 6];
+}
+
+variant Lookup {
+    Found(Named);
+    Missing;
+}
+
+struct Wide {
+    id: usize;
+    text: [u8; 512];
+}
+
+variant WideLookup {
+    Found(Wide);
+    Busy;
+}
+
+fn wide(id: usize) -> WideLookup {
+    if (id == 0) { return WideLookup::Busy; }
+    let mut w: Wide;
+    w.id = id;
+    for i: usize in 0..<512 { w.text[i] = 'A' + ((i % 26) as u8); }
+    return WideLookup::Found(w);
+}
+
+fn put_wide(w: Wide) {
+    uart_putc(w.text[0]);
+    uart_putc(w.text[25]);
+    uart_putc(w.text[511]);
+    uart_puts("\r\n");
+}
+
+fn show_wide(id: usize) {
+    let w: Wide = match wide(id) {
+        WideLookup::Busy => { uart_puts("busy\r\n"); return; }
+        WideLookup::Found(found) => { found }
+    };
+    if (w.id == id) { uart_puts("wide id ok\r\n"); }
+    put_wide(w);
+}
+
+fn put_name(n: Named) {
+    for i: usize in 0..<6 {
+        uart_putc(n.name[i]);
+    }
+    uart_puts("\r\n");
+}
+
+fn named(id: usize, first: u8) -> Named {
+    let mut n: Named;
+    n.id = id;
+    for i: usize in 0..<6 { n.name[i] = first + (i as u8); }
+    return n;
+}
+
+fn lookup(id: usize) -> Lookup {
+    if (id == 0) { return Lookup::Missing; }
+    return Lookup::Found(named(id, 'a' + (id as u8)));
+}
+
+// The result passes straight through a second function.
+fn lookup_again(id: usize) -> Lookup {
+    return lookup(id);
+}
+
+fn renamed(n: Named) -> Named {
+    let mut m: Named = n;
+    m.name[0] = 'R';
+    return m;
+}
+
+fn report(l: Lookup) {
+    match l {
+        Lookup::Found(n) => { put_name(n); }
+        Lookup::Missing => { uart_puts("missing\r\n"); }
+    }
+}
+
+fn test_struct_array_result() {
+    uart_puts("=== struct array result ===\r\n");
+    let mut a: Named = named(1, 'a');
+    put_name(a);
+    let mut b: Named = renamed(a);
+    put_name(b);
+    put_name(a);
+
+    // Plain assignment copies the whole value and leaves the source alone.
+    a = b;
+    b.name[1] = '!';
+    put_name(a);
+    put_name(b);
+
+    // One call site in a loop: every iteration's result is its own.
+    let mut table: [Named; 3];
+    for k: usize in 0..<3 {
+        table[k] = named(k, 'p' + (k as u8));
+    }
+    for k: usize in 0..<3 { put_name(table[k]); }
+
+    report(lookup(2));
+    report(lookup_again(3));
+    report(lookup(0));
+
+    // The variant is built from `a` before `a` is overwritten.
+    let mut held: Lookup = Lookup::Found(a);
+    a = named(9, 'x');
+    report(held);
+    put_name(a);
+
+    let f: fn(Named) -> Named = renamed;
+    put_name(f(a));
+
+    show_wide(4);
+    show_wide(0);
+    uart_puts("done\r\n");
+}
+
+fn app_main() {
+    test_struct_array_result();
+}

@@ -7,3 +7,7 @@ external build_atomic_cmpxchg :
   Llvm.llbuilder -> Llvm.llvalue
   = "takibi_llvm_build_atomic_cmpxchg_bytecode"
     "takibi_llvm_build_atomic_cmpxchg_native"
+
+external create_type_attr :
+  Llvm.llcontext -> string -> Llvm.lltype -> Llvm.llattribute
+  = "takibi_llvm_create_type_attr"

@@ -548,7 +548,7 @@ LINUX_USER_EXAMPLES      := linux_hello start checked_usize elf64_validate bump 
                              affine_escape_via_index align_ptr_proof linear_obligation tuple_pair region_proto region_inspection pool_space_replay \
                              field_lease match_int_lit record_loans \
                              callstack ringbuf crc8 djb2 slice slice_from_field logical_eval foreach for loop fizzbuzz fibonacci \
-                             bubblesort inet_checksum ip_parse tcp_parse wire_endian ref_type byte_slice atomic spinlock locked_cell diagnostic_ring publish fdt number usb_config usb_init_report xhci_event_match xhci_regs uart_rx_ring pl011_rx block_cache gem_tx_wait virtio_net_tx virtio_net_reply generic_variant runtime_bounds pin_placement place_array protocol_ring protocol_tx protocol_txrx protocol_snapshot region_held header_overlay cache_geometry wait_status plain_variant variant_abi struct_array_arg
+                             bubblesort inet_checksum ip_parse tcp_parse wire_endian ref_type byte_slice atomic spinlock locked_cell diagnostic_ring publish fdt number usb_config usb_init_report xhci_event_match xhci_regs uart_rx_ring pl011_rx block_cache gem_tx_wait virtio_net_tx virtio_net_reply generic_variant runtime_bounds pin_placement place_array protocol_ring protocol_tx protocol_txrx protocol_snapshot region_held header_overlay cache_geometry wait_status plain_variant variant_abi struct_array_arg struct_array_result
 LINUX_USER_BINS          := $(foreach e,$(LINUX_USER_EXAMPLES),$(LINUX_USER_DIR)/$(e)/$(e).exe)
 LINUX_USER_OBJS          := $(foreach e,$(LINUX_USER_EXAMPLES),$(LINUX_USER_DIR)/$(e)/$(e)_exe.o)
 
@@ -1539,6 +1539,7 @@ $(KERNEL_RPI5_ELF): $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_
 	python3 scripts/buildcheck_kernel_asm_invariants.py $@ 2
 	python3 scripts/buildcheck_elf_symbol_alignment.py $@ boot_page_pool_cell 16
 	python3 scripts/buildcheck_kernel_same_operand_csel.py $@ 10
+	python3 scripts/buildcheck_kernel_byte_copy.py $@ 0
 
 $(KERNEL_RPI5_SHELL_ELF): $(KERNEL_RPI5_ELF) $(KERNEL_EXT2_IMAGE) \
 	$(KERNEL_SHELL_EXT2_IMAGE) scripts/patch_embedded_image.py
@@ -1702,6 +1703,7 @@ $(KERNEL_QEMU_ELF): $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_
 	python3 scripts/buildcheck_kernel_asm_invariants.py $@ 1
 	python3 scripts/buildcheck_elf_symbol_alignment.py $@ boot_page_pool_cell 16
 	python3 scripts/buildcheck_kernel_same_operand_csel.py $@ 6
+	python3 scripts/buildcheck_kernel_byte_copy.py $@ 0
 
 .PHONY: _kernelbuild-qemu
 _kernelbuild-qemu: kernel-lib-check kernel-verify-exception-frame $(KERNEL_QEMU_ELF) $(KERNEL_DEBUG_METADATA) $(KERNEL_CONSOLE_LAYOUT)

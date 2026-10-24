@@ -1,0 +1,19 @@
+=== struct array result ===
+abcdef
+Rbcdef
+abcdef
+Rbcdef
+R!cdef
+pqrstu
+qrstuv
+rstuvw
+cdefgh
+defghi
+missing
+Rbcdef
+xyz{|}
+Ryz{|}
+wide id ok
+AZR
+busy
+done

@@ -21288,6 +21288,53 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
          (has "call void @llvm.memcpy.inline.p0.p0.i64("));
 
   Alcotest.test_case
+    "#962/#963: an array-holding result is returned through an sret slot and copied with llvm.memcpy.inline; extern and external entries keep the aggregate"
+    `Quick
+    (fun () ->
+       Llvm_gen.set_external_entries ["ret_entry"];
+       let src =
+         "struct RetRec { pid: usize; command: [u8; 24]; }
+          struct RetPlain { a: usize; b: usize; }
+          variant RetFound { Found(RetRec); Missing; }
+          extern fn ret_extern(k: usize) -> RetRec;
+          fn ret_make(r: RetRec, k: usize) -> RetFound {
+            if (k == 0) { return RetFound::Missing; }
+            return RetFound::Found(r);
+          }
+          fn ret_plain(k: usize) -> RetPlain { let mut p: RetPlain; p.a = k; p.b = k; return p; }
+          fn ret_entry(r: RetRec) -> RetFound { return ret_make(r, 1); }
+          fn ret_use(r: RetRec) -> usize {
+            match ret_make(r, 1) {
+              RetFound::Found(f) => { let mut g: RetRec = f; return g.pid; }
+              RetFound::Missing => { return 0; }
+            }
+          }" in
+       let result = (try ignore (gen_codegen src); None
+                     with Llvm_gen.Error msg -> Some msg) in
+       Llvm_gen.set_external_entries [];
+       (match result with
+        | Some msg -> Alcotest.failf "unexpected codegen Error: %s" msg
+        | None -> ());
+       let ir = Llvm.string_of_llmodule !Llvm_gen.the_module in
+       let has s = contains_substring ir s in
+       Alcotest.(check bool) "an array-holding result takes an sret slot" true
+         (has "define void @ret_make(ptr noalias sret({ i32, { i64, [24 x i8] } }) %result, ptr");
+       Alcotest.(check bool) "the caller passes its slot with sret" true
+         (has "call void @ret_make(ptr sret({ i32, { i64, [24 x i8] } }) %ret.slot");
+       Alcotest.(check bool) "a result without an array keeps the aggregate" true
+         (has "define { i64, i64 } @ret_plain(i64");
+       Alcotest.(check bool) "an external entry keeps the aggregate result" true
+         (has "define { i32, { i64, [24 x i8] } } @ret_entry({ i64, [24 x i8] }");
+       Alcotest.(check bool) "an extern keeps the aggregate result" true
+         (has "declare { i64, [24 x i8] } @ret_extern(i64");
+       (* Only ret_entry's aggregate parameter, which has no parts to take
+         apart, is stored whole. *)
+       Alcotest.(check bool) "a returned or bound value is not stored whole" false
+         (has "store { i32, { i64, [24 x i8] } }"
+          || has "store { i64, [24 x i8] } %variant"
+          || has "store { i64, [24 x i8] } %r"));
+
+  Alcotest.test_case
     "debug metadata sidecar: enum discriminants, variant target layout, and integer constants share one compiler-owned artifact"
     `Quick
     (fun () ->
@@ -21296,10 +21343,12 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
           variant DebugMetaResult { Empty; Byte(u8); Wide(u64); }
           struct DebugMetaWords { first: u64; second: u64; third: u64; }
           variant DebugMetaLarge { Empty; Words(DebugMetaWords); }
-          struct DebugMetaSeven { words: [u64; 7]; }
-          struct DebugMetaEight { words: [u64; 8]; }
+          struct DebugMetaSeven { w0: u64; w1: u64; w2: u64; w3: u64; w4: u64; w5: u64; w6: u64; }
+          struct DebugMetaEight { w0: u64; w1: u64; w2: u64; w3: u64; w4: u64; w5: u64; w6: u64; w7: u64; }
+          struct DebugMetaBytes { bytes: [u8; 2]; }
           variant DebugMetaRegisterLimit { Empty; Words(DebugMetaSeven); }
           variant DebugMetaIndirect { Empty; Words(DebugMetaEight); }
+          variant DebugMetaArray { Empty; Bytes(DebugMetaBytes); }
           const DebugMetaEventStart: usize = 7;
           fn debug_meta_use(value: DebugMetaResult) -> usize {
             match value {
@@ -21340,6 +21389,9 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
        Alcotest.(check bool) "nine scalar leaves use the incoming result buffer" true
          (contains_substring metadata
            "\"name\":\"DebugMetaIndirect\",\"size\":72,\"tag_offset\":0,\"tag_size\":4,\"return_abi\":{\"kind\":\"indirect\",\"pointer_register\":\"x8\",\"return_address_register\":\"x30\"}");
+       Alcotest.(check bool) "an array-holding variant uses the sret slot whatever its leaves (#962)" true
+         (contains_substring metadata
+           "\"name\":\"DebugMetaArray\",\"size\":8,\"tag_offset\":0,\"tag_size\":4,\"return_abi\":{\"kind\":\"indirect\",\"pointer_register\":\"x8\",\"return_address_register\":\"x30\"}");
        Alcotest.(check bool) "x8 is never described as a direct result register" false
          (contains_substring metadata "\"register\":\"x8\"");
        Alcotest.(check bool) "variant payload uses target offset" true

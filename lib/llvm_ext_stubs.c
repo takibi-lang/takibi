@@ -27,3 +27,13 @@ CAMLprim value takibi_llvm_build_atomic_cmpxchg_bytecode(value *argv,
   return takibi_llvm_build_atomic_cmpxchg_native(
       argv[0], argv[1], argv[2], argv[3], argv[4], argv[5], argv[6], argv[7]);
 }
+
+/* LLVMCreateTypeAttribute, for `sret(<ty>)` (GitHub issue #962): the OCaml
+   bindings create enum and string attributes only. */
+CAMLprim value takibi_llvm_create_type_attr(value context, value name,
+                                            value type) {
+  unsigned kind = LLVMGetEnumAttributeKindForName(String_val(name),
+                                                  caml_string_length(name));
+  return to_val(LLVMCreateTypeAttribute(
+      (LLVMContextRef)from_val(context), kind, (LLVMTypeRef)from_val(type)));
+}

@@ -1492,7 +1492,17 @@ caller makes on its own stack; the callee uses that copy as the parameter's
 storage. Semantics are those of a by-value copy: the callee's writes never
 reach the caller's value. `extern fn` declarations and `--external-entry`
 functions keep the aggregate form, and a function that does cannot be used
-as a function value. Results are unchanged (GitHub issue #943).
+as a function value (GitHub issue #943).
+
+A result whose runtime type holds an array is returned the same way in
+reverse: the caller passes the address of a result slot on its own stack as
+a hidden first argument (LLVM `sret`, `x8` on AArch64) and the function
+returns nothing in registers; the debug sidecar describes such a variant's
+`return_abi` as `indirect` through `x8`. `extern fn` and `--external-entry`
+functions keep the aggregate result (GitHub issue #962). Copies of values
+that hold an array -- assignment, a returned or constructed value, a
+binding -- are emitted as inline block copies rather than one load and store
+per element (GitHub issue #963), and never as a call to a `memcpy` symbol.
 
 Full source-level tagged-union DWARF metadata and a compact union ABI are
 deferred; code must not treat this first implementation as a stable C ABI.
