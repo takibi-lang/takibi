@@ -174,7 +174,7 @@ QEMU lane budget), #916 (compiler GC tuning), #921 and #922
 (variant reuse, domain-parallel codegen; both wait on the land-span
 measurement after #917's front-end fixes), #893 (redundant csel in variant match),
 #967 and #968 (ext2 O_CREAT and indirect directory growth, after #698),
-#846 (TCP retransmission with no reader), #793
+#793
 (proofs with an unresolved type variable), #769 (--uses-of NAME), #774
 (IRQ arms acknowledge their source), #762 (no vector/unaligned stores in
 MMU-off code), #926 (GICv3 driver for QEMU virt gic-version=3). Audit follow-ups filed 2026-10-23: #901 (ppoll sigmask with
