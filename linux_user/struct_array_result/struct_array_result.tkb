@@ -53,8 +53,8 @@ fn show_wide(id: usize) {
 }
 
 // GitHub issue #964: a payload bound by `let ... else` and only read is
-// read in the caller's result slot rather than copied out of it; in a loop
-// the call runs again, so there each iteration's binding keeps a copy.
+// read in the caller's result slot rather than copied out of it, also in a
+// loop, where the call refills the slot before each iteration's binding.
 fn lookup_id(id: usize) -> usize {
     let Lookup::Found(n) = lookup(id) else {
         Lookup::Missing => { return 99; }
@@ -72,6 +72,29 @@ fn lookup_sum(count: usize) -> usize {
         sum = sum + n.id * 10 + ((n.name[0] - 'a') as usize);
     }
     return sum;
+}
+
+// A written local the result only initializes is the result slot; in a
+// loop each iteration's call refills it before the local is read again.
+fn renamed_sum(count: usize) -> usize {
+    let mut sum: usize = 0;
+    for k: usize in 0..<count {
+        let mut n: Named = named(k, 'a');
+        n.name[3] = 'z';
+        sum = sum + n.id + ((n.name[3] - n.name[0]) as usize);
+    }
+    return sum;
+}
+
+// A copy into a local read at two places keeps only the bytes between
+// them; the written byte past them stays the local's own.
+let mut name_table: [Named; 2];
+fn table_pick(i: usize) -> usize {
+    if (i >= 2) { return 0; }
+    let mut n: Named = name_table[i];
+    n.name[5] = '?';
+    if (n.name[5] != '?') { return 77; }
+    return n.id + ((n.name[1] - 'a') as usize);
 }
 
 fn put_name(n: Named) {
@@ -148,6 +171,12 @@ fn test_struct_array_result() {
     if (lookup_id(4) == 4 && lookup_id(0) == 99) { uart_puts("bound read ok\r\n"); }
     // k = 1, 2, 3 are found with id k and name[0] = 'a' + k: 11 * 6.
     if (lookup_sum(4) == 66) { uart_puts("loop bound ok\r\n"); }
+
+    // k = 0..3: id k plus 'z' - 'a' = 25 each.
+    if (renamed_sum(4) == 106) { uart_puts("written slot ok\r\n"); }
+    name_table[0] = named(5, 'a');
+    name_table[1] = named(6, 'c');
+    if (table_pick(1) == 9 && name_table[1].name[5] == 'h') { uart_puts("short copy ok\r\n"); }
 
     show_wide(4);
     show_wide(0);

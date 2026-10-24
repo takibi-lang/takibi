@@ -11,3 +11,9 @@ external build_atomic_cmpxchg :
 external create_type_attr :
   Llvm.llcontext -> string -> Llvm.lltype -> Llvm.llattribute
   = "takibi_llvm_create_type_attr"
+
+external gep_source_element_type : Llvm.llvalue -> Llvm.lltype
+  = "takibi_llvm_gep_source_element_type"
+
+external allocated_type : Llvm.llvalue -> Llvm.lltype
+  = "takibi_llvm_allocated_type"

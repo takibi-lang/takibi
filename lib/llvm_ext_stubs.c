@@ -37,3 +37,13 @@ CAMLprim value takibi_llvm_create_type_attr(value context, value name,
   return to_val(LLVMCreateTypeAttribute(
       (LLVMContextRef)from_val(context), kind, (LLVMTypeRef)from_val(type)));
 }
+
+/* GitHub issue #964: the types a GEP steps through and an alloca holds,
+   for measuring which bytes of a local are read. */
+CAMLprim value takibi_llvm_gep_source_element_type(value gep) {
+  return to_val(LLVMGetGEPSourceElementType(Value_val(gep)));
+}
+
+CAMLprim value takibi_llvm_allocated_type(value alloca) {
+  return to_val(LLVMGetAllocatedType(Value_val(alloca)));
+}

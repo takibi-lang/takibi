@@ -21354,6 +21354,17 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
             };
             return r.pid;
           }
+          fn fwd_mut(k: usize) -> usize {
+            let mut f: FwdFound = fwd_make(k);
+            f = FwdFound::Missing;
+            match f { FwdFound::Found(r) => { return r.pid; } FwdFound::Missing => { return 1; } }
+          }
+          let mut fwd_table: [FwdRec; 4];
+          fn fwd_short(i: usize) -> usize {
+            if (i >= 4) { return 0; }
+            let mut r: FwdRec = fwd_table[i];
+            return r.pid + (r.command[2] as usize);
+          }
           fn fwd_loop(n: usize) -> usize {
             let mut s: usize = 0;
             for k: usize in 0..<n {
@@ -21375,10 +21386,16 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
          (contains_substring one "memcpy");
        Alcotest.(check bool) "the field is read through the slot" true
          (contains_substring one "getelementptr inbounds { i32, { i64, [24 x i8] } }, ptr %ret.slot");
-       (* The call re-runs on the loop's back edge, so there the slot is not
-          known to keep the payload and the binding keeps its copy. *)
-       Alcotest.(check bool) "a binding whose call is reachable again keeps its copy" true
-         (contains_substring (body "fwd_loop") "memcpy.inline"));
+       (* The call re-runs on the loop's back edge, but every read of the
+          binding follows the store that fills it from this iteration's
+          result. *)
+       Alcotest.(check bool) "a binding inside a loop is read in the slot too" false
+         (contains_substring (body "fwd_loop") "memcpy");
+       Alcotest.(check bool) "a written local the slot only initializes becomes the slot" false
+         (contains_substring (body "fwd_mut") "memcpy");
+       (* pid is bytes 0..8 and command[2] byte 10: the 32-byte copy keeps 11. *)
+       Alcotest.(check bool) "a copy into a local is cut to the bytes read" true
+         (contains_substring (body "fwd_short") "i64 11, i1 false)"));
 
   Alcotest.test_case
     "debug metadata sidecar: enum discriminants, variant target layout, and integer constants share one compiler-owned artifact"

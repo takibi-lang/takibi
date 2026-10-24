@@ -2460,6 +2460,113 @@ let finish_sret_call call slot ret_ast =
   add_call_site_attr call (sret_attr ret_ast) (AttrIndex.Param 0);
   build_load (ltype_of_ast ret_ast) slot "call.result" builder
 
+(* GitHub issue #964: a block copy into a local is cut to the bytes the
+   local is ever read at. A `let mut record = table[i]` read for three
+   fields copied all of `record` with memcpy.inline, which LLVM does not
+   shorten, where the per-leaf stores it replaced lost their unread leaves.
+
+   Every use of the alloca must be understood: a load, a store into it, a
+   GEP with constant indices, or a constant-length memcpy into or out of
+   it. Reads (loads, and copies out) are bounded by one byte range; each
+   copy into the local keeps only its part inside that range, and goes
+   away if none is. Bytes outside the range are never read, so whatever
+   they hold is unobservable. Any other use (an address passed on, a
+   dynamic index) leaves the local's copies as they are. *)
+let shorten_copies_into_locals dl f =
+  let is_memcpy i =
+    instr_opcode i = Opcode.Call
+    && (let n = value_name (operand i (num_operands i - 1)) in
+        n = "llvm.memcpy.inline.p0.p0.i64" || n = "llvm.memcpy.p0.p0.i64")
+    && is_constant (operand i 2) && is_constant (operand i 3)
+    && Int64.equal (Option.value ~default:1L (int64_of_const (operand i 3))) 0L in
+  let const_len i = Option.value ~default:(-1L) (int64_of_const (operand i 2)) in
+  let gep_offset g =
+    let n = num_operands g in
+    let rec go k ty acc =
+      if k >= n then Some acc
+      else match int64_of_const (operand g k) with
+        | None -> None
+        | Some idx ->
+            (match classify_type ty with
+             | TypeKind.Struct ->
+                 let i = Int64.to_int idx in
+                 go (k + 1) (struct_element_types ty).(i)
+                   (Int64.add acc (Llvm_target.DataLayout.offset_of_element ty i dl))
+             | TypeKind.Array ->
+                 let e = element_type ty in
+                 go (k + 1) e
+                   (Int64.add acc (Int64.mul idx (Llvm_target.DataLayout.abi_size e dl)))
+             | _ -> None) in
+    if n < 2 || not (List.for_all (fun k -> is_constant (operand g k))
+                       (List.init (n - 1) (fun k -> k + 1))) then None
+    else
+      let src_ty = Llvm_ext.gep_source_element_type g in
+      match int64_of_const (operand g 1) with
+      | None -> None
+      | Some first ->
+          go 2 src_ty (Int64.mul first (Llvm_target.DataLayout.abi_size src_ty dl)) in
+  let shorten a =
+    let lo = ref Int64.max_int and hi = ref Int64.min_int in
+    let read o len =
+      lo := min !lo o; hi := max !hi (Int64.add o len) in
+    let copies = ref [] in
+    let rec walk p off =
+      fold_left_uses (fun ok u ->
+        ok &&
+        let i = user u in
+        match instr_opcode i with
+        | Opcode.Load ->
+            read off (Llvm_target.DataLayout.abi_size (type_of i) dl); true
+        | Opcode.Store -> operand i 0 != p
+        | Opcode.GetElementPtr ->
+            operand i 0 == p
+            && (match gep_offset i with
+                | Some d -> walk i (Int64.add off d)
+                | None -> false)
+        | Opcode.Call when is_memcpy i && const_len i >= 0L ->
+            let len = const_len i in
+            if operand i 0 == p && operand i 1 != p then
+              (copies := (i, off, len) :: !copies; true)
+            else if operand i 1 == p && operand i 0 != p then
+              (read off len; true)
+            else false
+        | _ -> false) true p in
+    if walk a 0L then
+      List.iter (fun (call, o, n) ->
+        let e = Int64.add o n in
+        let s' = max o !lo and e' = min e !hi in
+        if Int64.compare s' e' >= 0 then delete_instruction call
+        else if s' <> o || e' <> e then begin
+          let b = builder_before context call in
+          let i8 = i8_type context and i64 = i64_type context in
+          let shift ptr k =
+            let d = Int64.sub s' o in
+            let q = if d = 0L then ptr
+              else build_in_bounds_gep i8 ptr [| const_of_int64 i64 d false |] "part" b in
+            let old = Option.value ~default:1L (List.find_map (fun at ->
+              match repr_of_attr at with
+              | AttrRepr.Enum (kind, n) when kind = enum_attr_kind "align" -> Some n
+              | _ -> None) (Array.to_list (call_site_attrs call (AttrIndex.Param k)))) in
+            let low = Int64.logand d (Int64.neg d) in
+            let al = if d = 0L then old else max 1L (min old low) in
+            (q, al) in
+          let (dst, dal) = shift (operand call 0) 0 in
+          let (src, sal) = shift (operand call 1) 1 in
+          let fn = operand call (num_operands call - 1) in
+          let fty = function_type (void_type context)
+              [| pointer_type context; pointer_type context; i64; i1_type context |] in
+          let c = build_call fty fn
+              [| dst; src; const_of_int64 i64 (Int64.sub e' s') false;
+                 const_int (i1_type context) 0 |] "" b in
+          add_call_site_attr c (create_enum_attr context "align" dal) (AttrIndex.Param 0);
+          add_call_site_attr c (create_enum_attr context "align" sal) (AttrIndex.Param 1);
+          delete_instruction call
+        end) !copies in
+  let allocas = ref [] in
+  iter_instrs (fun i ->
+    if instr_opcode i = Opcode.Alloca then allocas := i :: !allocas) (entry_block f);
+  List.iter shorten !allocas
+
 (* GitHub issues #962/#963: a store of a value whose type holds an array is
    rewritten, after the function is generated, into stores of its parts.
 
@@ -2587,54 +2694,69 @@ let lower_array_holding_stores f =
      replaced by the address of the part in the slot when:
      - the store is the alloca's only write, and every other use is a load,
        an address into it that is only loaded, or the source of a memcpy;
-     - the slot's call is not reachable from the store, so the slot still
-       holds what was stored wherever the alloca is read (a read before the
-       store read an uninitialized alloca, which any value refines);
-     - the slot and the GEP that addresses the part sit in the entry block
-       before any non-alloca instruction, so the address dominates every
-       use of the alloca;
-     - the part in the slot is at least as aligned as the alloca. *)
-  let rec read_only_uses ~store p =
-    let ok = ref true in
-    iter_uses (fun u ->
-      let i = user u in
-      if !ok then
-        match classify_value i with
-        | ValueKind.Instruction Opcode.Load -> ()
-        | ValueKind.Instruction Opcode.Store ->
-            if not (i == store && operand i 1 == p) then ok := false
-        | ValueKind.Instruction Opcode.GetElementPtr ->
-            if operand i 0 == p then ok := read_only_uses ~store i
-            else ok := false
-        | ValueKind.Instruction Opcode.Call ->
-            let callee = operand i (num_operands i - 1) in
-            let name = value_name callee in
-            if not ((name = "llvm.memcpy.inline.p0.p0.i64"
-                     || name = "llvm.memcpy.p0.p0.i64")
-                    && operand i 0 != p && operand i 1 == p) then ok := false
-        | _ -> ok := false) p;
-    !ok in
-  let reachable_from store =
+     - no read of the alloca is reachable from the slot's call without
+       passing the store, so wherever the alloca is read after the store,
+       the slot still holds what was stored (a read before the store read
+       an uninitialized alloca, which any value refines);
+     - the address of the part is computed in the entry block's prefix of
+       allocas and such addresses, so it dominates every use of the alloca;
+     - the part in the slot is at least as aligned as the alloca.
+     A local the slot only initializes (`let mut fresh = f()`, the slot read
+     by nothing else) may be written too: it becomes the slot.
+     A local forwarded so is itself a part of the slot: a payload bound out
+     of it (`let Held::Ready(r) = held else`) is forwarded in turn. A -g
+     build keeps the alloca, so the debugger finds the local where its
+     declaration says. *)
+  let slot_parts : (llvalue, llvalue * int64) Hashtbl.t = Hashtbl.create 8 in
+  let slot_part p =
+    if Hashtbl.mem result_slots p then Some (p, 0L)
+    else Hashtbl.find_opt slot_parts p in
+  (* The reads of `p`, or None if anything else uses it. *)
+  let rec reads ~writes ~store p acc =
+    fold_left_uses (fun acc u ->
+      match acc with
+      | None -> None
+      | Some l ->
+          let i = user u in
+          match classify_value i with
+          | ValueKind.Instruction Opcode.Load -> Some (i :: l)
+          | ValueKind.Instruction Opcode.Store
+            when operand i 1 == p && operand i 0 != p
+                 && (i == store || writes) -> acc
+          | ValueKind.Instruction Opcode.GetElementPtr when operand i 0 == p ->
+              reads ~writes ~store i acc
+          | ValueKind.Instruction Opcode.Call ->
+              let name = value_name (operand i (num_operands i - 1)) in
+              let memcpy = name = "llvm.memcpy.inline.p0.p0.i64"
+                           || name = "llvm.memcpy.p0.p0.i64" in
+              if memcpy && operand i 0 != p && operand i 1 == p
+              then Some (i :: l)
+              else if memcpy && writes && operand i 0 == p && operand i 1 != p
+              then acc
+              else None
+          | _ -> None) acc p in
+  (* Whether a read in `rd` is reachable from just after `call` on a path
+     that does not pass `store`. *)
+  let read_after_call ~store rd call =
     let seen : (llbasicblock, unit) Hashtbl.t = Hashtbl.create 16 in
-    let rec visit bb =
-      if not (Hashtbl.mem seen bb) then begin
-        Hashtbl.replace seen bb ();
-        match block_terminator bb with
-        | Some t -> Array.iter visit (successors t)
-        | None -> ()
-      end in
-    (match block_terminator (instr_parent store) with
-     | Some t -> Array.iter visit (successors t)
-     | None -> ());
-    seen in
-  let rec precedes a b =
-    match instr_succ a with
-    | Before n -> n == b || precedes n b
-    | At_end _ -> false in
-  let in_alloca_prefix slot =
+    let rec scan = function
+      | Before i when i == store -> false
+      | Before i when List.memq i rd -> true
+      | Before i -> scan (instr_succ i)
+      | At_end bb ->
+          (match block_terminator bb with
+           | Some t -> Array.exists enter (successors t)
+           | None -> false)
+    and enter bb =
+      if Hashtbl.mem seen bb then false
+      else (Hashtbl.replace seen bb (); scan (instr_begin bb)) in
+    scan (instr_succ call) in
+  let in_entry_prefix p =
     let rec go = function
-      | Before i when i == slot -> true
-      | Before i when instr_opcode i = Opcode.Alloca -> go (instr_succ i)
+      | Before i when i == p -> true
+      | Before i when (match instr_opcode i with
+          | Opcode.Alloca | Opcode.GetElementPtr -> true
+          | _ -> false) -> go (instr_succ i)
       | _ -> false in
     go (instr_begin (entry_block f)) in
   let forward_from_result_slot store =
@@ -2642,33 +2764,44 @@ let lower_array_holding_stores f =
     let dst = operand store 1 in
     match loaded v, classify_value dst with
     | Some (load, path), ValueKind.Instruction Opcode.Alloca
-      when Hashtbl.mem result_slots (operand load 0) ->
-        let slot = operand load 0 in
-        let calls = ref [] in
-        iter_uses (fun u ->
-          let i = user u in
-          if instr_opcode i = Opcode.Call then calls := i :: !calls) slot;
-        let reach = lazy (reachable_from store) in
-        let call_after c =
-          Hashtbl.mem (Lazy.force reach) (instr_parent c)
-          || (instr_parent c == instr_parent store && precedes store c) in
-        if !calls = [] || List.exists call_after !calls
-           || not (in_alloca_prefix slot)
-           || not (read_only_uses ~store dst) then false
-        else begin
-          let b = match instr_succ slot with
-            | Before i -> builder_before context i
-            | At_end bb -> builder_at_end context bb in
-          let (part, off, _) = step b (type_of load) slot path in
-          if align_at (max 1 (alignment slot)) off < alignment dst then begin
-            if part != slot then delete_instruction part;
-            false
-          end else begin
-            replace_all_uses_with dst part;
-            delete_instruction dst;
-            true
-          end
-        end
+      when not !debug_info_enabled
+           && type_of v = Llvm_ext.allocated_type dst ->
+        let src = operand load 0 in
+        (* The local may also be written when the slot is nothing but
+           its initial value: the whole slot, read only by this store. *)
+        let sole_reader =
+          path = [] && Hashtbl.mem result_slots src
+          && fold_left_uses (fun ok u ->
+               ok && (let i = user u in
+                      i == load
+                      || (instr_opcode i = Opcode.Call && operand i 0 == src)))
+             true src
+          && fold_left_uses (fun ok u -> ok && user u == store) true load in
+        (match slot_part src, reads ~writes:sole_reader ~store dst (Some []) with
+         | Some (slot, base_off), Some rd when in_entry_prefix src ->
+             let calls = fold_left_uses (fun l u ->
+               let i = user u in
+               if instr_opcode i = Opcode.Call && operand i 0 == slot
+               then i :: l else l) [] slot in
+             if calls = [] || List.exists (read_after_call ~store rd) calls
+             then false
+             else begin
+               let b = match instr_succ src with
+                 | Before i -> builder_before context i
+                 | At_end bb -> builder_at_end context bb in
+               let (part, off, _) = step b (type_of load) src path in
+               let off = Int64.add base_off off in
+               if align_at (max 1 (alignment slot)) off < alignment dst then begin
+                 if part != src then delete_instruction part;
+                 false
+               end else begin
+                 if part != src then Hashtbl.replace slot_parts part (slot, off);
+                 replace_all_uses_with dst part;
+                 delete_instruction dst;
+                 true
+               end
+             end
+         | _ -> false)
     | _ -> false in
   let stores = ref [] in
   iter_blocks (fun bb ->
@@ -2731,7 +2864,8 @@ let lower_array_holding_stores f =
       List.iter delete_instruction !victims;
       sweep ()
     end in
-  sweep ()
+  sweep ();
+  shorten_copies_into_locals dl f
 
 (* Coerce an llvalue to match a destination AST type.
    Invariant: arithmetic values arrive here at i32 (for <=32-bit types) or i64 (for 64-bit types).
