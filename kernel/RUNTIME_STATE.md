@@ -132,6 +132,8 @@ scheduler; the maximum-core count reserves the storage they will use.
 `kernel_crash_trace`/`kernel_crash_trace_next`,
 `kernel_process_trace_probe_parent_frame`/`_child_frame`,
 `kernel_process_trace_boot_enabled`/`_fail_after_exec`/`_enabled`,
+`kernel_process_trace_omit_events`/`_omit_pid_set`/`_omit_pid` (DDB-owned
+filters, GitHub issue #652),
 `kernel_process_rollover_busy_injections` and
 `kernel_process_clone_rollover_busy_injections` (debugger-owned, zero in
 normal boot).

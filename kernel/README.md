@@ -433,7 +433,7 @@ The existing TCP UART/miniterm data path is unchanged. The kernel prints
 `ddb>` and accepts the following commands.
 <!-- DDB-COMMAND-INVENTORY-START -->
 `oops`; `regs`; `intr`; `sched`; `current`; `vm`; `fds`; `ps`; `stacks`; `wait`;
-`proc PID`; `bt [PID|cpu N]`; `trace`; `events`; `unimpl`; `log`; `xk ADDRESS [COUNT]`;
+`proc PID`; `bt [PID|cpu N]`; `trace [on|off|all|omit EVENT|pid PID|pid none]`; `events`; `unimpl`; `log`; `xk ADDRESS [COUNT]`;
 `xp PHYSICAL [COUNT]`; `xu PID ADDRESS [COUNT]`; `profile stop|dump`; `help`; `continue`.
 <!-- DDB-COMMAND-INVENTORY-END -->
 `wait` derives who is waiting for what from that same snapshot: a blocked
@@ -1334,7 +1334,7 @@ scheduler, sleep, filesystem, network, or ordinary logging dependency. Its
 public command inventory follows.
 <!-- DDB-COMMAND-INVENTORY-START -->
 `oops`; `regs`; `intr`; `sched`; `current`; `vm`; `fds`; `ps`; `stacks`; `wait`;
-`proc PID`; `bt [PID|cpu N]`; `trace`; `events`; `unimpl`; `log`; `xk ADDRESS [COUNT]`;
+`proc PID`; `bt [PID|cpu N]`; `trace [on|off|all|omit EVENT|pid PID|pid none]`; `events`; `unimpl`; `log`; `xk ADDRESS [COUNT]`;
 `xp PHYSICAL [COUNT]`; `xu PID ADDRESS [COUNT]`; `profile stop|dump`; `help`; `continue`.
 <!-- DDB-COMMAND-INVENTORY-END -->
 `help` lists the same inventory.
@@ -1357,7 +1357,21 @@ counter frequency. The bounded suite prints the same counters as a
 copy registers with handwritten assembly and does not duplicate frame
 offsets; the compiler-generated exception entry and return path remain the
 only owner of register save/restore. `trace` takes a bounded copy of the
-committed lifecycle ring. `continue` returns through the existing IRQ restore
+committed lifecycle ring. Its events are 1 fork, 2 exec prepare, 3 exec
+commit, 4 schedule, 5 block, 6 wake, 7 resume, 8 exit, 9 reap, 10
+address-space activation, 11 signal raised (peer: the sender, or the child
+whose exit raised SIGCHLD; aux: signal number, outcome in bits 8-15: 1
+pending, 2 merged into a pending one, 3 discarded as ignored), 12 signal taken
+into its handler at a return to EL0 (aux outcome 1 handler, 2 unwritable
+frame), and 13 the value wait4 returns to EL0 (peer: the pid, 0, or the
+negative errno; aux: the status word). The ring is off in an ordinary boot and
+prints nothing unless asked (GitHub issue #652): `trace on`/`trace off` switch
+it from the next event on and survive an execution reset, `trace omit EVENT`
+leaves one kind out, `trace pid PID` leaves out the events whose subject is
+that pid (`trace pid none` undoes it), and `trace all` clears both filters;
+each prints the resulting state. `scripts/run_kernel_churn.py` switches it on
+before its workload, leaving out event 10 and HTTPd's pid, so a hang's
+capture holds the last exits, reaps and wait4 results. `continue` returns through the existing IRQ restore
 path. `intr` identifies IRQ versus deliberate BRK entry and reports both the
 live and interrupted DAIF masks; ESR/FAR are shown only for synchronous entry,
 because those registers do not describe an IRQ. It then prints one `intr

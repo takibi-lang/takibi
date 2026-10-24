@@ -336,6 +336,49 @@ def ddb_walk_hang(session):
                          await_name=f"DDB prompt after {command.decode('ascii')}")
 
 
+HTTPD_PS = re.compile(rb"\nddb: ps pid=([0-9]+) [^\n]*cmd=\"/bin/httpd")
+TRACE_STATE = re.compile(rb"\nddb: trace enabled=1 omit=0x[0-9a-f]+ omit-pid=\S+\n")
+
+
+def ddb_trace_setup(session, omit_events, omit_pid):
+    """Turn the lifecycle trace on from DDB before the workload (#652).
+
+    The ring is silent: it is read only by the hang capture's `trace`, so a
+    passing run prints nothing more. Event 10 (address-space activation) is
+    left out by default, or a hang's ring holds little else. False if DDB
+    did not answer.
+    """
+    start = len(session.normalized())
+    session.send(b"\x14b")
+    if session.wait_for(lambda n: n.count(b"ddb> ", start) > 0, 20,
+                        await_name="DDB prompt for trace setup") is None:
+        return False
+    if omit_pid is None:
+        # HTTPd's net-rx resume/block pairs fill the ring of a hung churn
+        # within seconds, so its own events are left out; ps names its pid.
+        seen = session.normalized().count(b"ddb> ")
+        session.send(b"ps\n")
+        session.wait_for(lambda n: n.count(b"ddb> ") > seen, 20,
+                         await_name="DDB prompt after ps for trace setup")
+        httpd = HTTPD_PS.search(session.normalized(), start)
+        if httpd is not None:
+            omit_pid = int(httpd.group(1))
+    commands = [b"trace on"] + [b"trace omit %d" % event for event in omit_events]
+    if omit_pid is not None:
+        commands.append(b"trace pid %d" % omit_pid)
+    for command in commands:
+        seen = session.normalized().count(b"ddb> ")
+        session.send(command + b"\n")
+        if session.wait_for(lambda n: n.count(b"ddb> ") > seen, 20,
+                            await_name="DDB prompt after trace setup") is None:
+            return False
+    if TRACE_STATE.search(session.normalized(), start) is None:
+        return False
+    session.send(b"continue\n")
+    return session.wait_for(lambda n: DDB_CONTINUED in n[start:], 20,
+                            await_name="DDB continue after trace setup") is not None
+
+
 def run_phase(session, rounds, asid_jump=None):
     """Type one `churn.sh ROUNDS` and judge it. None, or why it failed."""
     if shell_resync(session) is False:
@@ -413,6 +456,15 @@ def main():
                         help="QEMU only: dump all CPUs before the stall watchdog tries DDB")
     parser.add_argument("--asid-jump", type=int,
                         help="QEMU --long only: advance ASID next once at phase two")
+    parser.add_argument("--no-trace", action="store_true",
+                        help="leave the lifecycle trace off (it is on by "
+                             "default, read only by a hang's DDB capture)")
+    parser.add_argument("--trace-omit", type=int, action="append",
+                        help="lifecycle event kind to leave out of the ring; "
+                             "repeatable, default 10 (address-space activation)")
+    parser.add_argument("--trace-omit-pid", type=int,
+                        help="a pid whose own lifecycle events the ring leaves "
+                             "out; default HTTPd's, found with DDB ps")
     args = parser.parse_args()
     if args.rounds <= 0 or args.stall_seconds < 0:
         parser.error("rounds must be positive and stall-seconds nonnegative")
@@ -484,6 +536,10 @@ def main():
                 session.gdb.open()
             except Exception as error:
                 failure = f"cannot prepare GDB diagnostics: {error}"
+        if failure is None and not args.no_trace:
+            omit = args.trace_omit if args.trace_omit is not None else [10]
+            if not ddb_trace_setup(session, omit, args.trace_omit_pid):
+                failure = "DDB did not switch the lifecycle trace on"
         phases = 2 if args.long else 1
         for phase in range(phases + 1):
             if failure is not None:

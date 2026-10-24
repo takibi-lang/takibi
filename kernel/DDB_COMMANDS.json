@@ -62,7 +62,7 @@
     },
     {
       "name": "trace",
-      "usage": "trace",
+      "usage": "trace [on|off|all|omit EVENT|pid PID|pid none]",
       "coverage": "qemu"
     },
     {

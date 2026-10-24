@@ -16,7 +16,7 @@ inspection, and resume.
 
 <!-- DDB-COMMAND-INVENTORY-START -->
 `oops`; `regs`; `intr`; `sched`; `current`; `vm`; `fds`; `ps`; `stacks`; `wait`;
-`proc PID`; `bt [PID|cpu N]`; `trace`; `events`; `unimpl`; `log`; `xk ADDRESS [COUNT]`;
+`proc PID`; `bt [PID|cpu N]`; `trace [on|off|all|omit EVENT|pid PID|pid none]`; `events`; `unimpl`; `log`; `xk ADDRESS [COUNT]`;
 `xp PHYSICAL [COUNT]`; `xu PID ADDRESS [COUNT]`; `profile stop|dump`; `help`; `continue`.
 <!-- DDB-COMMAND-INVENTORY-END -->
 
@@ -54,7 +54,10 @@ inspection, and resume.
   instead of guessing.
 - `vm`, `fds`: the captured current process's address space and bounded file
   descriptor view.
-- `trace`: the typed process-lifecycle tail.
+- `trace`: the typed process-lifecycle tail. It is off in an ordinary boot;
+  `trace on`, `trace omit EVENT`, `trace pid PID` and `trace all` set it up
+  from DDB before reproducing (GitHub issue #652; events and filters in
+  kernel/README.md). The churn runner does this itself.
 - `events`: per-CPU diagnostic rings. Read CPUs independently; no total order
   is claimed across CPUs. Treat `damaged` and `overwritten` as evidence loss.
 - `unimpl`: the syscall numbers processes reached that the dispatcher has no arm

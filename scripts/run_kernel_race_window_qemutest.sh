@@ -180,6 +180,32 @@ if primary != 4096 or peers_sum <= 4096 * (cores - 1) or empty != 0:
 print("PASS race-window 678 control: " + counts.group(0))
 PYCONTROL
 fi
+# GitHub issue #652: the hang capture's lifecycle trace (switched on by the
+# churn runner from DDB) must hold what #633's diagnosis had to read from
+# the code: a child's exit, its reap, and the pid wait4 returned for it.
+if [ "$WINDOW" = 633 ]; then
+    python3 - "$(signature_file)" <<'PYCONTROL'
+import pathlib
+import re
+import sys
+log = pathlib.Path(sys.argv[1]).read_text(errors="replace")
+# The last `trace` view: the records after the last count line.
+tail = log[log.rfind("ddb: trace count="):]
+events = [(int(kind), int(pid), int(peer)) for kind, pid, peer in re.findall(
+    r"^ddb: trace seq=\d+ cpu=\d+ event=(\d+) pid=(\d+) gen=\d+ peer=(\d+)",
+    tail, re.M)]
+exited = {pid for kind, pid, _ in events if kind == 8}
+reaped = {pid for kind, pid, _ in events if kind == 9}
+returned = {peer for kind, _, peer in events if kind == 13}
+shown = exited & reaped & returned
+if not shown:
+    raise SystemExit("FAIL race-window 633 trace: no child with exit, reap and "
+                     "wait4 return in the hang's lifecycle trace (#652): "
+                     f"exited={sorted(exited)} reaped={sorted(reaped)} "
+                     f"wait4={sorted(returned)}")
+print(f"PASS race-window 633 trace: child {max(shown)} exit, reap and wait4 return shown")
+PYCONTROL
+fi
 if [ "${KERNEL_QEMU_RACE_WINDOW_ARMED:-run}" = skip ]; then
     echo "PASS $LABEL: with the check reverted, the $WORKLOAD failed showing $SIGNATURE"
 else
