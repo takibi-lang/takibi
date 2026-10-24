@@ -1201,8 +1201,11 @@ let check
           | Some id, `Val _ when not (is_written x id) -> Some (v_atom id)
           | Some id, `Len _ -> Some (len_atom id)
           | _ -> None in
-  let check_ensures st (eo : Ast.expr option) (gs : guarded list) loc =
-    let result = match eo with Some e -> lin e | None -> None in
+  let check_ensures ?ret st (eo : Ast.expr option) (gs : guarded list) loc =
+    let result = match ret, eo with
+      | Some t, _ -> Some t
+      | None, Some e -> lin e
+      | None, None -> None in
     let need_pred st ~binder p =
       List.fold_left (fun st r -> match r with
         | Some f -> need_fact st f loc "the ensures clause needs it initialized"
@@ -1509,13 +1512,23 @@ let check
     | Ast.Let (_, _, _, Some e, _) | Ast.LetTuple (_, e) | Ast.Expr e
     | Ast.Yield e -> (expr st e, false)
     | Ast.Return eo ->
+        (* GitHub issue #977: `return g(...)` names g's result by an atom
+           of its own, so g's ensures over `result` meets this function's
+           ensures over `result`, as `let r = g(...); return r;` would. *)
+        let ret = match eo with
+          | Some { desc = Ast.Call (name, _); _ }
+            when name <> "min"
+                 && (match fdef.Ast.ret_type with
+                     | Some t -> unsigned_ty t | None -> false) ->
+              Some (Init_pred.atom "ret:call")
+          | _ -> None in
         let (st, gs) = match eo with
-          | Some ({ desc = Ast.Call _; _ } as e) -> call st e ~result:None
+          | Some ({ desc = Ast.Call _; _ } as e) -> call st e ~result:ret
           | Some ({ desc = Ast.Var _; _ } as e) when bound_guarded e <> None ->
               (expr st e, Option.get (bound_guarded e))
           | Some e -> (expr st e, [])
           | None -> (st, []) in
-        check_outs st s.loc; check_ensures st eo gs s.loc; (st, true)
+        check_outs st s.loc; check_ensures ?ret st eo gs s.loc; (st, true)
     | Ast.Block b -> stmts st b
     | Ast.UnsafeBlock b ->
         incr unsafe_depth;

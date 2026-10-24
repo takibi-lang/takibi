@@ -12,7 +12,8 @@
    Coverage of a goal [a, b) is decided by a chain walk that needs only
    constant differences between terms: from cur = a, stop when b - cur <= 0
    or some interval has lo <= cur and hi >= b; else take an interval with
-   lo <= cur < hi and continue from hi. With all terms constant this is exact on a finite set; with
+   lo <= cur <= hi (each interval once) and continue from hi. With all
+   terms constant this is exact on a finite set; with
    symbolic terms it is a sound, incomplete decision in quantifier-free
    linear integer arithmetic. Every positive conclusion is written as an
    SMT-LIB obligation (QF_LIA, one existential point k) that z3 re-checks
@@ -118,20 +119,27 @@ let uncovered ?(eqs = []) ?(facts = no_facts) (ivs : interval list) ((a, b) : in
   let ge x y = entails facts (sub x y) in   (* x >= y *)
   let ivs = List.map (fun (lo, hi) -> (n lo, n hi)) ivs in
   let b = n b in
+  let pool = ref ivs in
   let rec go cur fuel =
     if ge cur b then None
     else if fuel = 0 then Some cur
     else
       (* An interval that starts at or before cur and reaches b ends the
-         walk; else one that starts at or before cur and ends past it
-         advances it. *)
+         walk; else one that starts at or before cur and ends at or past
+         it advances it. *)
       let reaches = List.exists (fun (lo, hi) -> ge cur lo && ge hi b) ivs in
       if reaches then None else
+      (* GitHub issue #977: a step needs only lo <= cur <= hi, not
+         progress: [a, cur) and [lo, hi) then cover [a, hi). So a possibly
+         empty prefix [0, offset) chains into [offset, offset + 1). Each
+         interval is stepped through at most once, so the walk ends. *)
       let step = List.find_map (fun (lo, hi) ->
-        if ge cur lo && entails facts (sub (sub hi cur) (const 1)) then Some hi
-        else None) ivs in
+        if ge cur lo && ge hi cur && not (equal hi cur) then Some hi
+        else None) !pool in
       (match step with
-       | Some hi -> go hi (fuel - 1)
+       | Some hi ->
+           pool := List.filter (fun (_, h) -> not (equal h hi)) !pool;
+           go hi (fuel - 1)
        | None -> Some cur)
   in
   go (n a) (List.length ivs + 1)

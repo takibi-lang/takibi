@@ -2627,11 +2627,10 @@ fn syscall_read_segment_with(slot: borrow SyscallSlot[0],
         }
         let opened_inode: usize = kernel_syscall_file_inode(fd);
         if (procfs_inode_is_ours(opened_inode)) {
-            // GitHub issue #203: a procfs renderer writes its text piecewise
-            // with no contract on which bytes, so its staging starts zeroed.
-            // The ext2 path below copies out only what the chunk read
-            // initialized (#975) and needs no fill.
-            zero_fill(syscall_scratch[slot.index].file_buffer as []u8);
+            // GitHub issue #977: the renderer ensures init of the prefix it
+            // reports, and only bytes inside that prefix are copied out, so
+            // the staging needs no zero_fill (nor does the ext2 path below,
+            // #975).
             let staging_buffer: []u8 =
                 syscall_scratch[slot.index].file_buffer as []u8;
             let total: usize = procfs_render_file(opened_inode,
@@ -2640,8 +2639,7 @@ fn syscall_read_segment_with(slot: borrow SyscallSlot[0],
             if (offset >= total || requested == 0) {
                 return SyscallIoResult::Transferred(0);
             }
-            let mut amount: usize = total - offset;
-            if (amount > requested) { amount = requested; }
+            let amount: usize = min(total - offset, requested);
             match user_range_check_write(current_authority, address, amount) {
                 UserWriteRangeResult::Fault => {
                     return SyscallIoResult::Errno(LINUX_EFAULT);
