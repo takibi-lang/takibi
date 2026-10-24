@@ -20,7 +20,6 @@ MATCHERS = {
     'check_wall_clock_bounds': 'FN_RE',
     'check_platform_file_parity': 'FN_RE',
     'check_stack_proof_states': 'FUNCTION_RE',
-    'check_ext2_mutation_guard': 'FUNCTION_RE',
     'check_slot_proof_dropped_to_index': 'FUNCTION_RE',
 }
 

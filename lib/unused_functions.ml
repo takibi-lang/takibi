@@ -26,8 +26,9 @@ let check ~external_entries ~check_files (prog : toplevel list) (types : program
   in
   (* GitHub issue #987: the edges come from the traversal --emit-call-graph
      writes, so the two cannot disagree about what calls what. *)
-  Call_graph.iter_references (fun from -> function
-    | Call_graph.Call target | Call_graph.Value target -> add_reference from target
+  Call_graph.iter_references (fun from reference target ->
+    match reference with
+    | Call_graph.Call | Call_graph.Value -> add_reference from target
     | Call_graph.Indirect -> ()) prog types;
   List.iter (fun (f : Ast.func) -> match f.effects with
     | Some effects when List.mem "interrupt" effects || List.mem "exception" effects

@@ -1529,6 +1529,7 @@ $(KERNEL_RPI5_MAIN_O): $(KERNEL_RPI5_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(
     $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_INTC_TKB) $(KERNEL_RPI5_TIMER_IRQ_TKB) $(KERNEL_RPI5_TIMER_TKB) $(KERNEL_RPI5_EXC_EVIDENCE_TKB) $(KERNEL_RPI5_VECTOR_TABLE_TKB) $(KERNEL_RPI5_EXC_FRAME_TKB) $(TAKIBI) Makefile | $(KERNEL_BUILD_DIR)
 	$(NICE_HEAVY) $(TAKIBI) $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_FDT_TKB) $< $(KERNEL_RPI5_COMPILE_FLAGS) $(KERNEL_RAW_CONFINE) $(KERNEL_EXECUTION_MODEL) $(KERNEL_UNUSED_CHECK_RPI5) --emit-depfile $@.d --emit-raw-deref-audit $@.rawderef.tsv --emit-raw-site-counts $@.rawsites.tsv --emit-call-graph $@.callgraph.tsv --emit-range-obligations $@.rangeobl -o $@
 	python3 scripts/buildcheck_kernel_unused_coverage.py rpi5 $@.d
+	python3 scripts/buildcheck_ext2_mutation_guard.py $@.callgraph.tsv
 	$(NICE_HEAVY) python3 scripts/buildcheck_range_obligations.py $@.rangeobl
 	python3 scripts/measure_trusted_base.py --check-raw-deref rpi5 $@.rawderef.tsv $@.d
 
@@ -1662,6 +1663,7 @@ $(KERNEL_QEMU_MAIN_O): $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(
     $(KERNEL_QEMU_UART_TKB) $(KERNEL_QEMU_INTC_TKB) $(KERNEL_QEMU_TIMER_IRQ_TKB) $(KERNEL_RPI5_TIMER_TKB) $(KERNEL_RPI5_EXC_EVIDENCE_TKB) $(KERNEL_RPI5_VECTOR_TABLE_TKB) $(KERNEL_RPI5_EXC_FRAME_TKB) $(TAKIBI) Makefile | $(KERNEL_QEMU_BUILD_DIR)
 	$(NICE_HEAVY) $(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_QEMU_USB_ABSENT_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $< $(KERNEL_QEMU_COMPILE_FLAGS) $(KERNEL_RAW_CONFINE) $(KERNEL_EXECUTION_MODEL) $(KERNEL_UNUSED_CHECK_QEMU) --emit-depfile $@.d --emit-raw-deref-audit $@.rawderef.tsv --emit-raw-site-counts $@.rawsites.tsv --emit-call-graph $@.callgraph.tsv --emit-alloc-words $@.allocwords --emit-range-obligations $@.rangeobl -o $@
 	python3 scripts/buildcheck_kernel_unused_coverage.py qemu $@.d
+	python3 scripts/buildcheck_ext2_mutation_guard.py $@.callgraph.tsv
 	$(NICE_HEAVY) python3 scripts/buildcheck_range_obligations.py $@.rangeobl
 	python3 scripts/buildcheck_compile_alloc_budget.py qemu $@.allocwords
 	python3 scripts/measure_trusted_base.py --check-raw-deref qemu $@.rawderef.tsv $@.d
@@ -1796,7 +1798,6 @@ kernel-lib-check:
 	python3 scripts/check_lock_discipline.py
 	python3 scripts/check_lock_rank_wrappers.py
 	python3 scripts/check_guest_syscalls_dispatched.py
-	python3 scripts/check_ext2_mutation_guard.py
 	python3 scripts/check_liveness_proof_escapes.py
 	python3 scripts/check_process_running_mints.py
 	python3 scripts/check_process_record_bare_uses.py

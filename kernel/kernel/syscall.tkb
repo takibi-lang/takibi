@@ -4899,8 +4899,8 @@ fn syscall_peer_safe(number: usize, fd: usize, second: usize) -> bool {
     //
     // NOT the file write path, which stays core 0's by descriptor. The
     // directory mutations are admitted since #597, and
-    // scripts/check_ext2_mutation_guard.py is what proves each mutator is
-    // reached with the guard held.
+    // scripts/buildcheck_ext2_mutation_guard.py, over the compiler's call
+    // graph, is what proves each mutator is reached with the guard held.
     //
     // #559 closed the in-flight window: a reader is counted until its
     // syscall is done, and a mutation waits for the count to drain.

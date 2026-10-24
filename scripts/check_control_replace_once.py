@@ -18,7 +18,7 @@ import sys
 from pass_line import report_pass
 
 ROOT = Path(__file__).resolve().parent.parent
-EXTRA = ("check_ext2_mutation_guard.py",)
+EXTRA = ()
 CAPTURE = ("mutates a generated capture or log, where the first record is "
            "the intended target by construction")
 EXEMPT = {

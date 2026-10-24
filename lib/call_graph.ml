@@ -19,11 +19,14 @@ open Types
 
 module StringSet = Set.Make (String)
 
-(* What one expression site refers to. *)
+(* What one expression site refers to. The target is passed beside it, not
+   inside it, so a compile without --emit-call-graph allocates nothing more
+   for --reject-unused-functions than it did before the traversal was
+   shared (#923's budget measures words). *)
 type reference =
-  | Call of string    (* a resolved direct call, by definition key *)
-  | Value of string   (* a function named as a value, by definition key *)
-  | Indirect          (* a call through a function value *)
+  | Call      (* a resolved direct call; the target is its definition key *)
+  | Value     (* a function named as a value; likewise *)
+  | Indirect  (* a call through a function value; the target is "" *)
 
 (* The key type inference gives a definition. Generic instances share their
    template's def_loc (lib/monomorphize.ml copies it), so the loc-keyed
@@ -39,18 +42,21 @@ let definition_key (types : program_types) (f : func) =
 
 (* Every reference in the program, with the definition key of the function
    it occurs in, or None for a global or constant initializer. *)
-let iter_references (visit : string option -> reference -> unit)
+let iter_references (visit : string option -> reference -> string -> unit)
     (prog : toplevel list) (types : program_types) =
   let indirect = !Type_inf.resolved_indirect_call_effects in
   let rec expr from (e : expr) =
-    (match StringMap.find_opt (loc_key e.loc) types.function_values with
-     | Some target -> visit from (Value target) | None -> ());
+    (* One key per expression: loc_key formats a string, and a second one
+       per call would be the only allocation the shared walk added to
+       --reject-unused-functions. *)
+    let key = loc_key e.loc in
+    (match StringMap.find_opt key types.function_values with
+     | Some target -> visit from Value target | None -> ());
     match e.desc with
     | Call (_, args) ->
-        (match StringMap.find_opt (loc_key e.loc) types.call_targets with
-         | Some target -> visit from (Call target)
-         | None ->
-             if StringMap.mem (loc_key e.loc) indirect then visit from Indirect);
+        (match StringMap.find_opt key types.call_targets with
+         | Some target -> visit from Call target
+         | None -> if StringMap.mem key indirect then visit from Indirect "");
         List.iter (expr from) args
     | VariantCtor (_, _, x) | Bnot x | Deref x | AddrOf x | Cast (_, x)
     | FieldGet (x, _) | Unsafe x -> expr from x
@@ -217,16 +223,16 @@ let write_table (out : out_channel) (prog : toplevel list) (types : program_type
   let target_label key = match Hashtbl.find_opt row_of_key key with
     | Some id -> Some id, label id
     | None -> None, key ^ "@-" in
-  iter_references (fun from reference ->
+  iter_references (fun from reference key ->
     match Option.bind from (Hashtbl.find_opt row_of_key) with
     | None -> ()
     | Some id -> match reference with
       | Indirect -> add callees id "*"
-      | Call key ->
+      | Call ->
           let target, text = target_label key in
           add callees id text;
           Option.iter (fun target -> add callers target (label id)) target
-      | Value key -> add values id (snd (target_label key))) prog types;
+      | Value -> add values id (snd (target_label key))) prog types;
   let lexed = Hashtbl.create 64 in
   let tokens_of file = match Hashtbl.find_opt lexed file with
     | Some tokens -> tokens

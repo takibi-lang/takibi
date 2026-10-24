@@ -13,7 +13,7 @@ let enabled = ref false
 
 let ends : (string * int, Lexing.position) Hashtbl.t = Hashtbl.create 0
 
-let key (pos : Lexing.position) = (pos.Lexing.pos_fname, pos.Lexing.pos_cnum)
+let key (pos : Lexing.position) = (Ast.source_file_of_loc pos, pos.Lexing.pos_cnum)
 
 let record (start : Lexing.position) (stop : Lexing.position) =
   if !enabled then Hashtbl.replace ends (key start) stop
