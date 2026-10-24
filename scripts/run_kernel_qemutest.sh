@@ -162,8 +162,31 @@ qemu_peer_probe_expected() {
         >"$EXPECTED_VIEW_DIR/peer_console.expected"
 }
 qemu_peer_probe_expected
+# GitHub issue #965: KERNEL_QEMU_TRACE_FROM_BOOT=on boots the suite with the
+# lifecycle trace recording from main on (kernelcheck-qemu-debug-main sets
+# it); =fail_after_exec is its negative control, which must fail. The guest
+# starts halted on a GDB stub, scripts/kernel_trace_from_boot.py sets the
+# switches at main and detaches, and after the stop marker reads them back.
+TRACE_FROM_BOOT="${KERNEL_QEMU_TRACE_FROM_BOOT:-}"
+trace_qemu_args=()
+TRACE_SOCKET_DIR=""
+case "$TRACE_FROM_BOOT" in
+    '') ;;
+    on|fail_after_exec)
+        # A Unix socket address holds 107 bytes; the artifact path may not.
+        TRACE_SOCKET_DIR="$(mktemp -d /tmp/tk-trace.XXXXXX)"
+        TRACE_SOCKET="$TRACE_SOCKET_DIR/gdb"
+        TRACE_LOG="$ARTIFACT_DIR/trace-from-boot.log"
+        rm -f "$TRACE_LOG"
+        trace_qemu_args=(-S -gdb "unix:$TRACE_SOCKET,server=on,wait=off")
+        ;;
+    *)
+        echo "error: KERNEL_QEMU_TRACE_FROM_BOOT must be on or fail_after_exec, not '$TRACE_FROM_BOOT'" >&2
+        exit 2
+        ;;
+esac
 resource_lease_vcpu_acquire "$TAKIBI_QEMU_SMP"
-"$REPO_ROOT/scripts/qemu.sh" \
+"$REPO_ROOT/scripts/qemu.sh" ${trace_qemu_args[@]+"${trace_qemu_args[@]}"} \
     -machine virt -cpu cortex-a53 -smp "$TAKIBI_QEMU_SMP" -m 1024 -display none -monitor none \
     -qmp "tcp:127.0.0.1:$QMP_PORT,server=on,wait=off" \
     -chardev "socket,id=debug_uart,host=127.0.0.1,port=$SERIAL_PORT,server=on,wait=on" \
@@ -198,6 +221,7 @@ archive_on_failure() {
 cleanup_and_archive() {
     local status=$?
     stop_qemu
+    [ -z "$TRACE_SOCKET_DIR" ] || rm -rf "$TRACE_SOCKET_DIR"
     archive_on_failure "$status"
     return "$status"
 }
@@ -225,6 +249,16 @@ python3 "$REPO_ROOT/scripts/run_kernel_uart_driver.py" \
     --workload-marker 'workload: busy pair done' \
     --validate-ash &
 uart_driver_pid=$!
+trace_arm_pid=""
+if [ -n "$TRACE_FROM_BOOT" ]; then
+    trace_arm_flags=()
+    [ "$TRACE_FROM_BOOT" != fail_after_exec ] ||
+        trace_arm_flags=(--fail-after-exec)
+    python3 "$REPO_ROOT/scripts/kernel_trace_from_boot.py" arm \
+        --elf "$ELF" --socket "$TRACE_SOCKET" --log "$TRACE_LOG" \
+        ${trace_arm_flags[@]+"${trace_arm_flags[@]}"} &
+    trace_arm_pid=$!
+fi
 
 # Host-side peer: drives ARP, ICMP, and the full TCP handshake/echo/close/
 # reconnect sequence kernel_tcp_echo_check() counts before returning
@@ -259,6 +293,15 @@ touch "$INTERACTIVE_HTTPD_DONE"
 uart_driver_status=0
 wait "$uart_driver_pid" || uart_driver_status=$?
 uart_driver_pid=""
+trace_status=0
+if [ -n "$trace_arm_pid" ]; then
+    wait "$trace_arm_pid" || trace_status=$?
+    if [ "$trace_status" -eq 0 ]; then
+        python3 "$REPO_ROOT/scripts/kernel_trace_from_boot.py" verify \
+            --elf "$ELF" --socket "$TRACE_SOCKET" --log "$TRACE_LOG" ||
+            trace_status=$?
+    fi
+fi
 stop_qemu
 # QEMU is down, but the archive trap stays: every failure below this line
 # is a view or an integration mismatch, which is exactly what somebody
@@ -383,4 +426,10 @@ python3 "$REPO_ROOT/scripts/profile_kernel_samples.py" \
     --symbolizer llvm-addr2line-19 \
     --commit "$(git -C "$REPO_ROOT" rev-parse HEAD)"
 
-echo "PASS $RUN_LABEL ($view_count views, one boot)"
+if [ "$trace_status" -ne 0 ]; then
+    echo "FAIL $RUN_LABEL: the lifecycle trace was not on for the whole suite" >&2
+    archive_reason="trace from boot"
+    exit 1
+fi
+
+echo "PASS $RUN_LABEL ($view_count views, one boot${TRACE_FROM_BOOT:+, trace from boot})"

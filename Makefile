@@ -2067,7 +2067,13 @@ kernelcheck-qemu-debug-main: kernelbuild-check
 	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-qemu-debug-main
 
 _kernelcheck-qemu-debug-main:
-	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_ELF="$(KERNEL_QEMU_DEBUG_ELF)" KERNEL_QEMU_LABEL=qemu-debug KERNEL_QEMU_HWTEST_ARTIFACT_DIR="$(TAKIBI_LANE_ARTIFACT_ROOT)/kernel-hwtest-qemu-debug" KERNEL_QEMU_SERIAL_PORT=18683 KERNEL_QEMU_QMP_PORT=18678 KERNEL_QEMU_NETDEV_LOCAL_PORT=18684 KERNEL_QEMU_NETDEV_REMOTE_PORT=18685 bash scripts/run_kernel_qemutest.sh
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_TRACE_FROM_BOOT=on KERNEL_QEMU_ELF="$(KERNEL_QEMU_DEBUG_ELF)" KERNEL_QEMU_LABEL=qemu-debug KERNEL_QEMU_HWTEST_ARTIFACT_DIR="$(TAKIBI_LANE_ARTIFACT_ROOT)/kernel-hwtest-qemu-debug" KERNEL_QEMU_SERIAL_PORT=18683 KERNEL_QEMU_QMP_PORT=18678 KERNEL_QEMU_NETDEV_LOCAL_PORT=18684 KERNEL_QEMU_NETDEV_REMOTE_PORT=18685 bash scripts/run_kernel_qemutest.sh
+
+# GitHub issue #965: the negative control for debug-main's trace-from-boot
+# variant. On demand, not in allcheck; see the script's header.
+.PHONY: kernelcheck-trace-from-boot-control
+kernelcheck-trace-from-boot-control: kernelbuild-check
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_trace_from_boot_control.sh
 
 ## Preserve every boot separately when chasing a probabilistic failure.
 ## This is intentionally not part of allcheck: repetition is a diagnostic
