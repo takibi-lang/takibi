@@ -72,8 +72,9 @@
 //   services only its own connection's deadlines, but the return to EL0
 //   after an interrupt and the idle loop run tcp_retx_service_all over every connection when
 //   they can take the capability without waiting. It is bounded (four
-//   sends, 1 ms) because the EL0 return runs it with interrupts masked,
-//   and it skips a connection a syscall holds, so a segment can wait one
+//   sends, 1 ms) because the EL0 return runs it before the process
+//   resumes (interrupts unmasked, so a TX completion wait is not
+//   interrupt latency), and it skips a connection a syscall holds, so a segment can wait one
 //   more interrupt or idle iteration past its deadline. It does not take
 //   received frames: an ACK is still consumed by the next syscall that
 //   receives, so a segment nobody reads for is resent up to
@@ -2544,8 +2545,9 @@ private fn retx_chain_keep(kept: Place(exists p: addr. exists k: usize. RegionSl
 private let mut tcp_retx_due_at: AtomicWord;
 
 // At most this many retransmits per pass, and none started once the pass
-// has run for TCP_RETX_PASS_MICROS: the pass runs with interrupts masked on
-// the EL0-return path, so its length is interrupt latency. Due entries
+// has run for TCP_RETX_PASS_MICROS: on the EL0-return path the pass delays
+// the interrupted process's resume (kernel_irq_return_complete unmasks
+// interrupts for it, so it is not interrupt latency). Due entries
 // left over keep tcp_retx_due_at in the past, and the next return or idle
 // iteration takes them.
 const TCP_RETX_PASS_SEND_MAX: usize = 4;
