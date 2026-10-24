@@ -20793,16 +20793,123 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
      -1 / 64 = 0, {0..<1 as u64}, for a quotient the machine computes as
      2^58 - 1 (kernel/mm/page.tkb's overflow guards), and Value_facts took
      the same fold as the exact value of q, so the store below compiled
-     with no check at all. Two sites now: the index, and the u64 -> usize
-     narrowing of this test's 32-bit default target. *)
+     with no check at all. One site now: the index. (Before #956 a second
+     site was a spurious divide-by-zero check on the literal 64, left by
+     the type variable the i32 fold had refined to {0..<1}.) *)
   Alcotest.test_case
     "#952 a folded u64 quotient of an all-ones literal proves no index" `Quick
-    (expect_trap_sites 2
+    (expect_trap_sites 1
        "let mut words: [u32; 1];
         fn h() {
           let q: u64 = 0xFFFFFFFFFFFFFFFF / 64;
           words[q as usize] = 0;
         }");
+
+  (* GitHub issue #956: every folded constant on a proof path folds at its
+     operand's base width (Type_inf.fold_at_base). Each case below read
+     0xFFFFFFFFFFFFFFFF / 64 as -1 / 64 = 0 through a raw
+     Const_env.folded_value and proved a range the machine value (2^58 - 1
+     and its neighbours) breaks; each refined argument is now unproven. *)
+  Alcotest.test_case
+    "#956 a misfolded u64 constant proves nothing: Band mask" `Quick
+    (expect_type_error "cannot pass unproven"
+       "fn f(i: {0..<1 as u64}) -> u64 { return i; }
+        fn f2(i: {0..<2 as u64}) -> u64 { return i; }
+        fn g(i: {1..<2 as u64}) -> u64 { return i; }
+        fn h(x: u64) -> u64 { return f(x & (0xFFFFFFFFFFFFFFFF / 64)); }");
+  Alcotest.test_case
+    "#956 a misfolded u64 constant proves nothing: Mod divisor" `Quick
+    (expect_type_error "cannot pass unproven"
+       "fn f(i: {0..<1 as u64}) -> u64 { return i; }
+        fn f2(i: {0..<2 as u64}) -> u64 { return i; }
+        fn g(i: {1..<2 as u64}) -> u64 { return i; }
+        fn h(x: u64) -> u64 { return f(x % (0xFFFFFFFFFFFFFFFF / 0x2000000000000000 + 1)); }");
+  Alcotest.test_case
+    "#956 a misfolded u64 constant proves nothing: Add constant" `Quick
+    (expect_type_error "cannot pass unproven"
+       "fn f(i: {0..<1 as u64}) -> u64 { return i; }
+        fn f2(i: {0..<2 as u64}) -> u64 { return i; }
+        fn g(i: {1..<2 as u64}) -> u64 { return i; }
+        fn h(x: u64) -> u64 { let i = x & 0; return f(i + 0xFFFFFFFFFFFFFFFF / 64); }");
+  Alcotest.test_case
+    "#956 a misfolded u64 constant proves nothing: constant Add" `Quick
+    (expect_type_error "cannot pass unproven"
+       "fn f(i: {0..<1 as u64}) -> u64 { return i; }
+        fn f2(i: {0..<2 as u64}) -> u64 { return i; }
+        fn g(i: {1..<2 as u64}) -> u64 { return i; }
+        fn h(x: u64) -> u64 { let i = x & 0; return f(0xFFFFFFFFFFFFFFFF / 64 + i); }");
+  Alcotest.test_case
+    "#956 a misfolded u64 constant proves nothing: Sub constant" `Quick
+    (expect_type_error "cannot pass unproven"
+       "fn f(i: {0..<1 as u64}) -> u64 { return i; }
+        fn f2(i: {0..<2 as u64}) -> u64 { return i; }
+        fn g(i: {1..<2 as u64}) -> u64 { return i; }
+        fn h(x: u64) -> u64 { let i = x & 0; return f(i - 0xFFFFFFFFFFFFFFFF / 64); }");
+  Alcotest.test_case
+    "#956 a misfolded u64 constant proves nothing: constant Sub" `Quick
+    (expect_type_error "cannot pass unproven"
+       "fn f(i: {0..<1 as u64}) -> u64 { return i; }
+        fn f2(i: {0..<2 as u64}) -> u64 { return i; }
+        fn g(i: {1..<2 as u64}) -> u64 { return i; }
+        fn h(x: u64) -> u64 { let i = x & 0; return g((0xFFFFFFFFFFFFFFFF / 64 + 1) - i); }");
+  Alcotest.test_case
+    "#956 a misfolded u64 constant proves nothing: Mul factor" `Quick
+    (expect_type_error "cannot pass unproven"
+       "fn f(i: {0..<1 as u64}) -> u64 { return i; }
+        fn f2(i: {0..<2 as u64}) -> u64 { return i; }
+        fn g(i: {1..<2 as u64}) -> u64 { return i; }
+        fn h(x: u64) -> u64 { let i = x & 1; return f2(i * (0xFFFFFFFFFFFFFFFF / 64 + 1)); }");
+  Alcotest.test_case
+    "#956 a misfolded u64 constant proves nothing: comparison narrowing" `Quick
+    (expect_type_error "cannot pass unproven"
+       "fn f(i: {0..<1 as u64}) -> u64 { return i; }
+        fn f2(i: {0..<2 as u64}) -> u64 { return i; }
+        fn g(i: {1..<2 as u64}) -> u64 { return i; }
+        fn h(x: u64) -> u64 { if (x < 0xFFFFFFFFFFFFFFFF / 64 + 1) { return f(x); } return 0; }");
+  Alcotest.test_case
+    "#956 a misfolded u64 constant proves nothing: annotated for-loop bound" `Quick
+    (expect_type_error "cannot pass unproven"
+       "fn f(i: {0..<1 as u64}) -> u64 { return i; }
+        fn f2(i: {0..<2 as u64}) -> u64 { return i; }
+        fn g(i: {1..<2 as u64}) -> u64 { return i; }
+        fn h() -> u64 { let mut s: u64 = 0; for i: u64 in 0..<(0xFFFFFFFFFFFFFFFF / 64 + 1) { s = f(i); } return s; }");
+  (* #956: `x != K` excludes K from x only when K folds at x's width; the
+     raw fold excluded 0 here and dropped the divide-by-zero check. *)
+  Alcotest.test_case
+    "#956 a misfolded u64 constant excludes no divisor value" `Quick
+    (expect_trap_sites 1
+       "fn h(x: u64, y: u64) -> u64 {
+          if (x != 0xFFFFFFFFFFFFFFFF / 64) { return y / x; }
+          return 0;
+        }");
+  (* #956: i32_min() / -1 folds natively to 2^31, which i32 cannot hold;
+     the raw fold marked the signed-overflow check proved and dropped it. *)
+  Alcotest.test_case
+    "#956 an overflowing constant quotient keeps its signed-overflow check" `Quick
+    (expect_trap_sites 1
+       "fn h() -> i32 { return i32_min() / (0 - 1); }");
+  (* #956: a literal-only operand whose type is unresolved folds only where
+     every base agrees; (0 - 2) steps below zero, which an unsigned base
+     would wrap, so no range is derived -- and the argument, left a bare
+     type variable, used to take the refined parameter type by unification
+     with no proof at all: g(0 - 2 + 5) passed 3 to {0..<3}. A constant
+     expression with no exact value at the parameter's base is refused. *)
+  Alcotest.test_case
+    "#956 an unresolved fold that steps below zero proves nothing" `Quick
+    (expect_type_error "constant expression has no exact value at type 'u32'"
+       "fn g(i: {0..<3 as u32}) -> u32 { return i; }
+        fn h() -> u32 { return g((0 - 2) / 2 + 3); }");
+  Alcotest.test_case
+    "#956 a wrapping constant argument does not take a refined type unproven" `Quick
+    (expect_type_error "constant expression has no exact value at type 'u32'"
+       "let mut a: [u8; 3];
+        fn g(i: {0..<3 as u32}) { a[i as usize] = 0; }
+        fn h() { g(0 - 2 + 5); }");
+  Alcotest.test_case
+    "#956 the same constant fits a signed refined parameter" `Quick
+    (expect_ok
+       "fn g(i: {0..<4 as i32}) -> i32 { return i; }
+        fn h() -> i32 { return g(0 - 2 + 5); }");
 
   Alcotest.test_case
     "#935 usize minus a constant past its lower bound keeps no range" `Quick

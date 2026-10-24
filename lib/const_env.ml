@@ -133,3 +133,24 @@ let folded_value_within lo hi (e : Ast.expr) =
          | _ -> None)
     | _ -> inside (folded_value e) in
   go e
+
+(* GitHub issue #956: a fold whose base is not resolved yet (a literal-only
+   operand in #791's refined-argument context) cannot be checked at the
+   base's width. Accept it only where every width agrees: every leaf and
+   every intermediate result lies in [0, max(127, largest leaf)]. Values in
+   [0, 127] fit every integer base, the largest leaf fits whatever base the
+   literal resolves to, so every value between them does too -- no step
+   wraps and signed and unsigned operations agree. A negative leaf (a
+   64-bit pattern such as 0xFFFFFFFFFFFFFFFF folds as -1) refuses. *)
+let folded_value_unresolved (e : Ast.expr) =
+  let rec leaf_max (e : Ast.expr) =
+    match e.Ast.desc with
+    | Ast.BinOp ((Ast.Add | Ast.Sub | Ast.Mul | Ast.Div), a, b) ->
+        (match leaf_max a, leaf_max b with
+         | Some x, Some y -> Some (max x y)
+         | _ -> None)
+    | _ -> folded_value e in
+  match leaf_max e with
+  | Some m when m >= 0 && m < 0x8000_0000 ->
+      folded_value_within 0 (max 128 (m + 1)) e
+  | _ -> None

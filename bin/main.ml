@@ -545,7 +545,7 @@ let () =
             Types.to_string base,
             Printf.sprintf "singleton:%s" (Types.static_to_string n), "-"
         | base ->
-            let fact = match Const_env.folded_value expr with
+            let fact = match Type_inf.fold_at_base base expr with
               | Some n -> Printf.sprintf "constant:%d" n
               | None -> "unknown"
             in

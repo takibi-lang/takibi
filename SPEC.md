@@ -643,7 +643,14 @@ linear struct Name[n: usize] { field: T; }   // indexed runtime obligation
   is accepted with no runtime check; an unproven runtime value is
   rejected at compile time (narrow it first, e.g. `if (v >= lo && v <
   hi) { s.field = v; }`); a compile-time constant that does NOT fit is a
-  compile error, not silently truncated.
+  compile error, not silently truncated. A compile-time constant counts
+  only when it has an exact value at the target's base: every literal and
+  every intermediate step of its arithmetic must lie in the base's range
+  (GitHub issue #956). `0 - 2 + 5` fits `{0..<4 as i32}` but is refused
+  for `{0..<3 as u32}`, where `0 - 2` leaves the base; so is any constant
+  whose literal is a 64-bit pattern above the signed range, such as
+  `0xFFFFFFFFFFFFFFFF / 64`. Range propagation folds constant operands the
+  same way, so such an operand derives no range.
 - **`opaque struct Name;`** has no constructible value, fields, or size
   -- usable only behind a pointer. Intended for driver-owned state
   handles the application never inspects directly. Two distinct opaque

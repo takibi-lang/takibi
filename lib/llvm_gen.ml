@@ -192,11 +192,19 @@ let const_field_offset (sname : string) (field : string) : int option =
       in go fields
   | _ -> None
 
+(* The compile-time value of [e] as an operand of type [ty], folded at its
+   base's width. Mirror of type_inf.ml's fold_at_ty (sync rule, #956): the
+   range-propagation rules below and type inference fold through the same
+   Type_inf.fold_at_ty, so they cannot disagree, and neither reads a raw
+   Const_env.folded_value on a proof path (scripts/check_proof_fold_width.py). *)
+let fold_at_ty ty (e : Ast.expr) : int option =
+  Type_inf.fold_at_ty (Types.of_ast ty) e
+
 (* Codegen mirror of type_inf.ml's static_slice_bound. Only layouts for
    which both phases can compute a target-independent value participate;
    SizeOf codegen separately cross-checks that value against DataLayout. *)
 let static_slice_bound (e : Ast.expr) : int option =
-  match Const_env.folded_value e with
+  match fold_at_ty TypeUsize e with
   | Some _ as value -> value
   | None ->
       (match e.desc with
@@ -1048,8 +1056,16 @@ let collect_bounds_cond (locals : local_env)
       | Some p -> p | None -> (None, None) in
     Types.StringMap.add name (take_lo lo_opt pl, take_hi hi_opt ph) acc
   in
-  let range_of (e : Ast.expr) =
-    match Const_env.folded_value e with
+  (* #956: a constant folds at the base of the variable it is compared
+     with (sync rule with type_inf.ml's collect_bounds). *)
+  let var_ty m = match Hashtbl.find_opt narrowing_ctx m with
+    | Some t -> Some t
+    | None ->
+        (match local_find_opt locals m with
+         | Some (Imm (t, _)) | Some (Mut (t, _)) -> Some t
+         | None -> None) in
+  let range_of ~against (e : Ast.expr) =
+    match Option.bind (var_ty against) (fun t -> fold_at_ty t e) with
     | Some k -> Some (k, k + 1)
     | None ->
         (match e.desc with
@@ -1089,12 +1105,18 @@ let collect_bounds_cond (locals : local_env)
   let rec go e acc = match e.desc with
     | BinOp (And, e1, e2) -> go e2 (go e1 acc)
     | BinOp ((Ge | Gt | Le | Lt | Eq) as op, l, r) ->
-        let acc = match l.desc, range_of r with
-          | Var n, Some rng -> constrain_left op n rng acc
+        let acc = match l.desc with
+          | Var n ->
+              (match range_of ~against:n r with
+               | Some rng -> constrain_left op n rng acc
+               | None -> acc)
           | _ -> acc
         in
-        (match r.desc, range_of l with
-         | Var n, Some rng -> constrain_right op n rng acc
+        (match r.desc with
+         | Var n ->
+             (match range_of ~against:n l with
+              | Some rng -> constrain_right op n rng acc
+              | None -> acc)
          | _ -> acc)
     | _ -> acc
   in
@@ -2149,11 +2171,6 @@ let rec obligation_operand = function
   | TypeRefined (lo, hi, _) -> Range_obligation.Range (lo, hi)
   | _ -> Range_obligation.Any
 
-(* Small compile-time integer evaluator used by the range-propagation mirror
-   of type_inf.ml. Keep the shared Const_env implementation here too so type
-   inference and codegen cannot disagree about checked constant arithmetic. *)
-let intlit_opt (e : Ast.expr) : int option =
-  Const_env.folded_value e
 
 (* Widen a loaded value to the arithmetic width (i32 or i64).
    i8/u8/i16/u16 -> i32 (C-style integer promotion).
@@ -4014,15 +4031,17 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
           | 16 -> (fun k -> const_int (type_of other_v) (swap16 (k land 0xFFFF)))
           | _  -> (fun k -> const_int (type_of other_v) (swap32 (k land 0xFFFFFFFF)))
         in
+        (* fold-not-proof: emits the operand's own value, byte-swapped. *)
         match wire_be_width ty1 with
         | Some w ->
-            (match intlit_opt e2 with
+            (match Const_env.folded_value e2 with
              | Some k -> (v1, swapped_const v2 w k)
              | None -> (v1, v2))
         | None ->
             (match wire_be_width ty2 with
              | Some w ->
-                 (match intlit_opt e1 with
+                 (* fold-not-proof: as above. *)
+                 (match Const_env.folded_value e1 with
                   | Some k -> (swapped_const v1 w k, v2)
                   | None -> (v1, v2))
              | None -> (v1, v2))
@@ -4070,15 +4089,17 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
          larger range-inference problem. *)
       (match op with
        | (Shl | Shr) ->
-           (match intlit_opt e2 with
-            | Some amt ->
+           (* fold-not-proof: a rejection; a fold at either reading that is
+              out of range is refused. *)
+           let amounts = List.filter_map Fun.id
+               [Const_env.folded_value e2; fold_at_ty ty2 e2] in
+           List.iter (fun amt ->
                 let width = integer_bitwidth (type_of v1) in
                 if amt < 0 || amt >= width then
                   raise (Error (Printf.sprintf
                     "line %d: shift amount %d is out of range for the %d-bit \
                      operand type -- undefined behavior"
-                    e.loc.Lexing.pos_lnum amt width))
-            | None -> ())
+                    e.loc.Lexing.pos_lnum amt width))) amounts
        | _ -> ());
       (match op with
        (* refined-range rules begin (#935): a result range here is built only
@@ -4104,11 +4125,11 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                              (Option.bind (Type_inf.checked_add b d)
                                 (fun s -> Type_inf.checked_add s (-1)))
                        | _ ->
-                           (match ty1, intlit_opt e2 with
+                           (match ty1, fold_at_ty ty1 e2 with
                             | TypeRefined (a, b, base), Some k ->
                                 refined_or_base base (Type_inf.checked_add a k) (Type_inf.checked_add b k)
                                   ~ob:(e.loc, Range_obligation.Add, Range_obligation.Range (a, b), Some (Range_obligation.Const k))
-                            | _ -> (match ty2, intlit_opt e1 with
+                            | _ -> (match ty2, fold_at_ty ty2 e1 with
                                     | TypeRefined (c, d, base), Some k ->
                                         refined_or_base base (Type_inf.checked_add c k) (Type_inf.checked_add d k)
                                           ~ob:(e.loc, Range_obligation.Add, Range_obligation.Const k, Some (Range_obligation.Range (c, d)))
@@ -4134,7 +4155,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                         ~ob:(e.loc, Range_obligation.Sub, Range_obligation.Range (a, b), Some (Range_obligation.Range (c, d)))
                         (Type_inf.checked_sub b c)
                   | _ ->
-                      (match ty1, intlit_opt e2 with
+                      (match ty1, fold_at_ty ty1 e2 with
                        | TypeRefined (a, b, base), Some k ->
                            refined_or_base base (Type_inf.checked_sub a k)
                              ~ob:(e.loc, Range_obligation.Sub, Range_obligation.Range (a, b), Some (Range_obligation.Const k))
@@ -4146,7 +4167,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            (* Range propagation (sync rule with type_inf.ml's Mul):
               {a..<b} * k (a positive compile-time constant expression)
               -> {a*k..<(b-1)*k+1} *)
-           let k2 = intlit_opt e2 and k1 = intlit_opt e1 in
+           let k2 = fold_at_ty ty1 e2 and k1 = fold_at_ty ty2 e1 in
            let ret_ty = match ty1, k2, ty2, k1 with
              | TypeRefined (a, b, base), Some k, _, _ when k > 0 ->
                  refined_or_base base (Type_inf.checked_mul a k)
@@ -4178,7 +4199,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            in
            let ret_ty = match Type_inf.fold_at_base (Types.of_ast (canon_ty ty1)) e with
              | Some k ->
-                 let ob = match intlit_opt e1, intlit_opt e2 with
+                 let ob = match fold_at_ty ty1 e1, fold_at_ty ty1 e2 with
                    | Some x, Some y -> Some (e.loc, Range_obligation.Div, Range_obligation.Const x, Some (Range_obligation.Const y))
                    | _ -> None in
                  refined_or_base ?ob (canon_ty ty1) (Some k) (Type_inf.checked_add k 1)
@@ -4221,11 +4242,11 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            let ret_ty =
              if canon_ty ty1 = TypeU16Be || canon_ty ty1 = TypeU32Be
              then canon_ty ty1 else
-             match intlit_opt e2 with
+             match fold_at_ty ty1 e2 with
              | Some k when k >= 0 ->
                  refined_or_base (canon_ty ty1) (Some 0) (Type_inf.checked_add k 1)
                    ~ob:(e.loc, Range_obligation.Band, obligation_operand ty1, Some (Range_obligation.Const k))
-             | _ -> (match intlit_opt e1 with
+             | _ -> (match fold_at_ty ty1 e1 with
                      | Some k when k >= 0 ->
                          refined_or_base (canon_ty ty1) (Some 0) (Type_inf.checked_add k 1)
                            ~ob:(e.loc, Range_obligation.Band, Range_obligation.Const k, Some (obligation_operand ty2))
@@ -4246,7 +4267,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                         then build_urem v1 v2 "modtmp" builder
                         else build_defined_signed_remainder v1 v2
            in
-           let ret_ty = match intlit_opt e2 with
+           let ret_ty = match fold_at_ty ty1 e2 with
              | Some m when m > 0 ->
                  (match ty1 with
                   | TypeRefined (lo, _, base) when lo >= 0 ->
@@ -4823,7 +4844,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                       | Some t -> t | None -> bty_raw)
           | _ -> bty_raw
         in
-        let range = match Const_env.folded_value be with
+        let range = match fold_at_ty bty_raw be with
           | Some k -> Some (k, k + 1)
           | None -> refinement_range bty
         in
@@ -4931,13 +4952,13 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
         let runtime_endpoint_proven =
           let hi_within = endpoint_proven hi_e || is_base_len hi_e in
           let constant_start_within_min =
-            match Const_env.folded_value lo_e with
+            match fold_at_ty TypeUsize lo_e with
             | Some start -> start >= 0 && start <= min_len
             | None -> false
           in
           let ordered =
             same_base_len <> None
-            || (Const_env.folded_value lo_e = Some 0)
+            || (fold_at_ty TypeUsize lo_e = Some 0)
             || (is_base_len hi_e && endpoint_proven lo_e)
             || (is_base_len hi_e && constant_start_within_min)
           in
@@ -7304,11 +7325,13 @@ let gen_func ?prog_types fdef =
            counter to hi_expr's own upper bound, with lo taken from
            whichever of lo_expr's constant value or its own proven
            TypeRefined lower bound is available. *)
-        let loop_bound_value = match ty_opt with
-          | Some _ -> Const_env.folded_value
-          | None -> Const_env.bound_value
+        let loop_bounds = match ty_opt with
+          | Some _ ->
+              (fold_at_ty counter_base lo_expr,
+               Type_inf.fold_at_base ~bound:true (Types.of_ast counter_base) hi_expr)
+          | None -> (Const_env.bound_value lo_expr, Const_env.bound_value hi_expr)
         in
-        let loop_ty = match loop_bound_value lo_expr, loop_bound_value hi_expr with
+        let loop_ty = match loop_bounds with
           | Some lo_k, Some hi_k -> TypeRefined (lo_k, hi_k, counter_base)
           | lo_c, _ ->
               (match hi_ty0 with

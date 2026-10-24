@@ -375,22 +375,23 @@ let fold_limits_of_bits ~signed bits =
   let limit = product_limit_of_base_bits ~signed bits in
   if signed then (- limit, limit) else (0, limit)
 
-let fold_at_base base e =
+(* ?bound: [e] is an exclusive upper bound (a for-loop's hi), which may be
+   one past the base's largest value. *)
+let fold_at_base ?(bound = false) base e =
   match repr base with
   | TI8 | TI16 | TI32 | TI64 | TIsize | TU8 | TU16 | TU32 | TU64 | TUsize ->
       (match product_limit_of_ty (repr base) with
        | Some limit ->
            let signed = (match repr base with
              | TI8 | TI16 | TI32 | TI64 | TIsize -> true | _ -> false) in
-           Const_env.folded_value_within (if signed then - limit else 0) limit e
+           Const_env.folded_value_within (if signed then - limit else 0)
+             (if bound && limit < max_int then limit + 1 else limit) e
        | None -> None)
   | TVar _ ->
       (* A literal-only operand whose type is not resolved yet (#791's
-         refined-argument context): fold at i32, the literal default.
-         Residual: an 8- or 16-bit context resolved later could wrap an
-         intermediate step that i32 does not. *)
-      let limit = product_limit_of_base_bits ~signed:true 32 in
-      Const_env.folded_value_within (- limit) limit e
+         refined-argument context): accept only a fold every base agrees
+         on (Const_env.folded_value_unresolved, #956). *)
+      Const_env.folded_value_unresolved e
   | _ -> None
 
 let refined_or_base ?ob base lo hi =
@@ -960,7 +961,7 @@ let const_field_offset (senv : senv) (sname : string) (field : string) : int opt
    singleton types. llvm_gen.ml mirrors this resolver and rechecks those
    layouts against LLVM's actual DataLayout. *)
 let static_slice_bound (senv : senv) (e : Ast.expr) : int option =
-  match Const_env.folded_value e with
+  match fold_at_base TUsize e with
   | Some _ as value -> value
   | None ->
       (match e.desc with
@@ -1533,13 +1534,17 @@ let check_match_int_literal_range loc lit base =
     raise (TypeError (loc, Printf.sprintf
       "match arm literal %d does not fit type '%s'" lit (to_string base)))
 
-(* Extract a small-number-scoped compile-time integer from an expression.
-   Const_env.folded_value accepts literals/consts and checked arithmetic
-   over them, while returning None for overflow, division by zero, or a
-   runtime value. Used throughout range propagation below; sync rule:
-   llvm_gen.ml's own intlit_opt mirrors this exactly, change together. *)
-let intlit_opt (e : Ast.expr) : int option =
-  Const_env.folded_value e
+(* The compile-time value of [e] as an operand of type [t]: literals,
+   consts and checked arithmetic over them, folded at t's base width
+   (fold_at_base). None for a runtime value, an overflow, a division by
+   zero, or a step the machine would wrap. GitHub issue #956: every proof
+   path folds through here or fold_at_base, never through a raw
+   Const_env.folded_value (scripts/check_proof_fold_width.py); a raw fold
+   read 0xFFFFFFFFFFFFFFFF / 64 as 0 in `x & (0xFFFFFFFFFFFFFFFF / 64)` and
+   proved an index the mask leaves at 2^58 - 1. Sync rule: llvm_gen.ml's
+   fold_at_ty mirrors this, change together. *)
+let fold_at_ty t (e : Ast.expr) : int option =
+  fold_at_base (canon_ty t) e
 
 let value_facts_base_of_ty t =
   let open Value_facts in
@@ -1681,7 +1686,20 @@ let check_expected_type_value loc (e : Ast.expr) (target : ty) =
              raise (TypeError (loc, Printf.sprintf
                "constant value %s does not fit the refined type {%d..<%d}"
                (Value_facts.to_string exact) lo hi))
-       | Some _ | None -> ())
+       | Some _ | None ->
+           (* GitHub issue #956: a constant expression with no exact value
+              at the base's width (a step wraps, or a leaf is a 64-bit
+              pattern the checker reads as negative) gives the unifier
+              nothing to prove its range with; refuse it rather than let a
+              type variable take the refined type unproven, as
+              `g(0 - 2 + 5)` did for `g(i: {0..<3 as u32})`.
+              fold-not-proof: the raw fold only detects a constant. *)
+           if Const_env.folded_value e <> None then
+             raise (TypeError (loc, Printf.sprintf
+               "constant expression has no exact value at type '%s' (a step \
+                leaves the type's range), so it cannot be proved to fit the \
+                refined type {%d..<%d}; write the value directly"
+               (to_string base_ty) lo hi)))
   | _ -> ()
 
 (* GitHub issue #791: a divisor whose type is still an unresolved variable
@@ -1749,11 +1767,14 @@ let record_refined_cast_proof lo hi source_ty target_base
         Hashtbl.replace refined_cast_proven_in_bounds_at cast_loc ()
   | None -> ()
 
-let collect_excluded_cond (cond : Ast.expr) =
-  let constant expr =
+let collect_excluded_cond tyenv (cond : Ast.expr) =
+  (* #956: the constant folds at the compared variable's base. *)
+  let constant name expr =
+    let folded = match StringMap.find_opt name tyenv with
+      | Some (t, _) -> fold_at_ty t expr
+      | None -> None in
     Option.map (fun value ->
-      Value_facts.of_signed_int64 (Int64.of_int value))
-      (Const_env.folded_value expr)
+      Value_facts.of_signed_int64 (Int64.of_int value)) folded
   in
   let binding_id expr = match !active_local_bindings with
     | Some bindings -> Local_bindings.id_for_expr bindings expr
@@ -1773,7 +1794,7 @@ let collect_excluded_cond (cond : Ast.expr) =
       | _ -> false) distinguished
   in
   let facts_for var name ~variable_on_left op constant_expr =
-    match constant constant_expr with
+    match constant name constant_expr with
     | Some value when op = Ast.Ne -> singleton var name value
     | Some value when op = Ast.Gt || op = Ast.Lt ->
         (match binding_id var with
@@ -1817,7 +1838,7 @@ let collect_excluded_cond (cond : Ast.expr) =
   go cond
 
 let exclusion_additions tyenv cond killed =
-  collect_excluded_cond cond |> IntMap.filter (fun id (name, _) ->
+  collect_excluded_cond tyenv cond |> IntMap.filter (fun id (name, _) ->
     not (List.mem name killed)
     && (match StringMap.find_opt name tyenv with
         | Some (_, false) -> true
@@ -2825,7 +2846,9 @@ let is_io_pointee = function
 let rec literal_zero_through_casts (e : Ast.expr) : bool =
   match e.desc with
   | Cast (_, inner) -> literal_zero_through_casts inner
-  | _ -> (match Const_env.folded_value e with Some 0 -> true | _ -> false)
+  | _ ->
+      (* fold-not-proof: rejects a null; any fold that reads 0 is refused. *)
+      (match Const_env.folded_value e with Some 0 -> true | _ -> false)
 
 let is_raw_pointer_ty t =
   match repr t with
@@ -3111,8 +3134,13 @@ let collect_bounds tyenv (cond : Ast.expr) : (int option * int option) StringMap
     StringMap.add name (take_lo lo_opt pl, take_hi hi_opt ph) acc
   in
   (* Static value range of a comparison operand, when known. *)
-  let range_of (e : Ast.expr) =
-    match Const_env.folded_value e with
+  (* #956: a constant folds at the base of the variable it is compared
+     with, the width the comparison runs at. *)
+  let range_of ~against (e : Ast.expr) =
+    let folded = match StringMap.find_opt against tyenv with
+      | Some (t, _) -> fold_at_ty t e
+      | None -> None in
+    match folded with
     | Some k -> Some (k, k + 1)
     | None ->
         (match e.desc with
@@ -3148,12 +3176,18 @@ let collect_bounds tyenv (cond : Ast.expr) : (int option * int option) StringMap
   let rec go (e : Ast.expr) acc = match e.desc with
     | BinOp (And, e1, e2) -> go e2 (go e1 acc)
     | BinOp ((Ge | Gt | Le | Lt | Eq) as op, l, r) ->
-        let acc = match l.desc, range_of r with
-          | Var n, Some rng -> constrain_left op n rng acc
+        let acc = match l.desc with
+          | Var n ->
+              (match range_of ~against:n r with
+               | Some rng -> constrain_left op n rng acc
+               | None -> acc)
           | _ -> acc
         in
-        (match r.desc, range_of l with
-         | Var n, Some rng -> constrain_right op n rng acc
+        (match r.desc with
+         | Var n ->
+             (match range_of ~against:n l with
+              | Some rng -> constrain_right op n rng acc
+              | None -> acc)
          | _ -> acc)
     | _ -> acc
   in
@@ -3462,7 +3496,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            in
            (match op with
             | Div ->
-                (match Const_env.folded_value e with
+                (match fold_at_ty t1 e with
                  | Some _ ->
                      Hashtbl.replace signed_division_overflow_proven_safe_at
                        e2.loc ()
@@ -3574,7 +3608,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                        Some (Range_obligation.Range (c, d)))
                   (Option.bind (checked_add b d) (fun s -> checked_add s (-1)))
             | TRefinedInt (a, b, base), _ ->
-                (match intlit_opt e2 with
+                (match fold_at_base base e2 with
                  | Some k ->
                      unify_at e2.loc t2 base;
                      refined_or_base base (checked_add a k) (checked_add b k)
@@ -3584,7 +3618,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                      unify_at e2.loc (canon_ty t2) base;
                      base)
             | _, TRefinedInt (c, d, base) ->
-                (match intlit_opt e1 with
+                (match fold_at_base base e1 with
                  | Some k ->
                      unify_at e1.loc t1 base;
                      refined_or_base base (checked_add c k) (checked_add d k)
@@ -3644,7 +3678,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                        ~ob:(e.loc, Range_obligation.Sub, Range_obligation.Range (a, b),
                             Some (Range_obligation.Range (c, d)))
                  | _ ->
-                     (match intlit_opt e2 with
+                     (match fold_at_base base e2 with
                       | Some k ->
                           unify_at e2.loc t2 base;
                           refined_or_base base (checked_sub a k) (checked_sub b k)
@@ -3654,7 +3688,10 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                           unify_at e2.loc (canon_ty t2) base;
                           base))
             | _, _ ->
-                (match intlit_opt e1, repr t2 with
+                let k1 = match repr t2 with
+                  | TRefinedInt (_, _, base) -> fold_at_base base e1
+                  | _ -> None in
+                (match k1, repr t2 with
                  | Some k, TRefinedInt (c, d, base) ->
                      unify_at e1.loc t1 base;
                      refined_or_base base (checked_sub k (d - 1))
@@ -3672,7 +3709,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
               makes `tcp_hdr_len = doff * 4` carry doff's narrowed {5..<16}
               into {20..<61}. Sync rule with llvm_gen as for Add/Sub.
               Runtime or non-positive multipliers fall back to i32. *)
-           let k2 = intlit_opt e2 and k1 = intlit_opt e1 in
+           let k2 = fold_at_ty t1 e2 and k1 = fold_at_ty t2 e1 in
            (match repr t1, k2, repr t2, k1 with
             | TRefinedInt (a, b, base), Some k, _, _ when k > 0 ->
                 unify_at e2.loc t2 base;
@@ -3701,14 +3738,16 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | Div ->
            let ct1 = canon_ty t1 and ct2 = canon_ty t2 in
            unify_at e.loc ct1 ct2;
-           (match intlit_opt e2 with
+           (* fold-not-proof: a rejection, not a proof; the machine divisor
+              stays checked unless record_divisor_nonzero_proof proves it. *)
+           (match Const_env.folded_value e2 with
             | Some 0 ->
                 raise (TypeError (e2.loc, "division by zero"))
             | _ -> ());
            record_divisor_nonzero_proof t2 e2;
            (match fold_at_base ct1 e with
             | Some k ->
-                let ob = match intlit_opt e1, intlit_opt e2 with
+                let ob = match fold_at_ty ct1 e1, fold_at_ty ct1 e2 with
                   | Some x, Some y ->
                       Some (e.loc, Range_obligation.Div, Range_obligation.Const x,
                             Some (Range_obligation.Const y))
@@ -3738,12 +3777,13 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | Mod ->
            let ct1 = canon_ty t1 and ct2 = canon_ty t2 in
            unify_at e.loc ct1 ct2;
-           (match intlit_opt e2 with
+           (* fold-not-proof: a rejection, as for Div above. *)
+           (match Const_env.folded_value e2 with
             | Some 0 ->
                 raise (TypeError (e2.loc, "remainder by zero"))
             | _ -> ());
            record_divisor_nonzero_proof t2 e2;
-           (match intlit_opt e2 with
+           (match fold_at_ty ct1 e2 with
             | Some m when m > 0 ->
                 (match repr t1 with
                  | TRefinedInt (lo, _, _) when lo >= 0 ->
@@ -3781,12 +3821,12 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
               that --forbid-trap code could then trust to elide a real
               check. *)
            if ct1 = TU16Be || ct1 = TU32Be then ct1 else
-           (match intlit_opt e2 with
+           (match fold_at_ty ct1 e2 with
             | Some k when k >= 0 ->
                 refined_or_base ct1 (Some 0) (checked_add k 1)
                   ~ob:(e.loc, Range_obligation.Band, obligation_operand t1,
                        Some (Range_obligation.Const k))
-            | _ -> (match intlit_opt e1 with
+            | _ -> (match fold_at_ty ct1 e1 with
                     | Some k when k >= 0 ->
                         refined_or_base ct1 (Some 0) (checked_add k 1)
                           ~ob:(e.loc, Range_obligation.Band, Range_obligation.Const k,
@@ -4485,13 +4525,13 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            require_isize_offset lo_e.loc lo_t;
            require_isize_offset hi_e.loc hi_t
        | _ -> ());
-      let const_bounds = (Const_env.folded_value lo_e, Const_env.folded_value hi_e) in
+      let const_bounds = (fold_at_ty lo_t lo_e, fold_at_ty hi_t hi_e) in
       (* Static value range of a bound: a compile-time constant k is {k..<k+1};
          a refined-typed expression contributes its own range. Sync rule:
          llvm_gen.ml's SliceOf makes the same proven/checked decision through
          the same formula (see its bound_range helper) -- change together. *)
       let bound_range be bt =
-        match Const_env.folded_value be with
+        match fold_at_ty bt be with
         | Some k -> Some (k, k + 1)
         | None -> (match repr bt with TRefinedInt (a, b, _) -> Some (a, b) | _ -> None)
       in
@@ -5510,7 +5550,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            let static_range what (be : Ast.expr) =
              let bt = infer_expr senv eenv tyenv fenv be in
              require_usize_index be.loc bt;
-             match Const_env.folded_value be with
+             match fold_at_base TUsize be with
              | Some k -> (k, k + 1)
              | None ->
                  (match repr bt with
@@ -6870,7 +6910,7 @@ and check_expr senv eenv tyenv fenv (e : Ast.expr) (expected : ty) : ty =
       let actual = infer_expr senv eenv tyenv fenv e in
       unify_at e.loc actual TUsize;
       let rec factor expr =
-        match Const_env.folded_value expr with
+        match fold_at_base TUsize expr with
         | Some value -> Some value
         | None ->
         match expr.Ast.desc with
@@ -7672,11 +7712,19 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
          For runtime variables, conservatively use the bounds' own base.
          Sync rule: llvm_gen.ml's For case makes the same decision through
          the same resolver choice; keep them identical. *)
-      let loop_bound_value = match ty_opt with
-        | Some _ -> Const_env.folded_value
-        | None -> Const_env.bound_value
+      let const_bounds = match ty_opt with
+        | Some _ ->
+            (fold_at_base base_raw lo_expr,
+             fold_at_base ~bound:true base_raw hi_expr)
+        | None -> (Const_env.bound_value lo_expr, Const_env.bound_value hi_expr)
       in
-      let const_bounds = (loop_bound_value lo_expr, loop_bound_value hi_expr) in
+      (* fold-not-proof: the annotation check below rejects a bound that
+         does not fit, read as written (#956 keeps the proof above at the
+         base's width). *)
+      let written_bounds = match ty_opt with
+        | Some _ -> (Const_env.folded_value lo_expr, Const_env.folded_value hi_expr)
+        | None -> const_bounds
+      in
       (* If both bounds are compile-time constants AND an explicit
          annotation was given, validate the bounds actually fit the
          annotated base -- a bare-literal bound has no inherent width of
@@ -7686,7 +7734,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
          own bound check exists to prevent (see check_refined_base_range
          in parser.mly, sync rule -- same reasoning, different
          representation and call site). *)
-      (match ty_opt, const_bounds with
+      (match ty_opt, written_bounds with
        | Some _, (Some lo_v, Some hi_v) ->
            check_for_annotation_range lo_expr.loc lo_v hi_v (repr base_raw)
        | _ -> ());

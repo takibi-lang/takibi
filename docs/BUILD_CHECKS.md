@@ -54,6 +54,8 @@ suffix is description; dispatch reads only the prefix.
 | `check_compiler_sync_rules.py` | declared compiler counterpart changes stay synchronized |
 | `check_refined_range_constructor.py` | range-propagation and cast rules in type_inf.ml/llvm_gen.ml build a refined result only through the base-checked refined_or_base (#935), and each such call passes `~ob` so z3 re-checks it, or names why not in a `no-range-obligation:` comment (#952) |
 | `check_refined_range_constructor_controls.py` | Controls for the refined-range constructor check: issue #935's raw Sub constructor and a call without `~ob` are refused |
+| `check_proof_fold_width.py` | outside const_env.ml, lib/ and bin/ fold a constant through the width-aware fold_at_base/fold_at_ty, never a raw `Const_env.folded_value`, unless a `fold-not-proof:` comment within four lines says why the fold proves nothing (#956) |
+| `check_proof_fold_width_controls.py` | Controls for the proof-fold width check: the pre-#956 native fold behind intlit_opt, an exemption out of reach and a spaced spelling are refused; an exempted rejection, a comment and the width-aware fold are not |
 | `check_await_summary_controls.py` | Aggregate await capture isolation, phase budgets, half-budget boundaries, missing observations and summary wiring |
 | `check_rpi5_ddb_await_controls.py` | RPi5 DDB first-arrival observations; software BRK boot and post-snapshot budgets, delayed release, echoed-only output, missing milestones and unavailable UART |
 | `check_fixed_wait_await_controls.py` | The FDT multi-bank boots and the stack-overflow runner (through `await_timing.py`'s command line) record arrival against their fixed budgets, print the margin past half without changing the verdict, and record a missing line as not arrived |
