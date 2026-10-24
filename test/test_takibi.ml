@@ -21256,6 +21256,38 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
          (has "declare { i32, i8, i8 } @abi_extern({ i32, i8, i8 }"));
 
   Alcotest.test_case
+    "#943: a by-value argument holding an array crosses Takibi calls as a pointer to the caller's inline copy; extern and external entries keep the aggregate"
+    `Quick
+    (fun () ->
+       Llvm_gen.set_external_entries ["arr_entry"];
+       let src =
+         "struct ArrRec { pid: usize; command: [u8; 24]; }
+          struct ArrPlain { a: usize; b: usize; }
+          extern fn arr_extern(r: ArrRec) -> usize;
+          fn arr_take(r: ArrRec) -> usize { let b: u8 = r.command[3]; return r.pid + (b as usize); }
+          fn arr_plain(p: ArrPlain) -> usize { return p.a; }
+          fn arr_entry(r: ArrRec) -> usize { return arr_take(r); }
+          fn arr_call(r: ArrRec) -> usize { return arr_take(r) + arr_extern(r); }" in
+       let result = (try ignore (gen_codegen src); None
+                     with Llvm_gen.Error msg -> Some msg) in
+       Llvm_gen.set_external_entries [];
+       (match result with
+        | Some msg -> Alcotest.failf "unexpected codegen Error: %s" msg
+        | None -> ());
+       let ir = Llvm.string_of_llmodule !Llvm_gen.the_module in
+       let has s = contains_substring ir s in
+       Alcotest.(check bool) "an array-holding struct is passed by pointer" true
+         (has "define i64 @arr_take(ptr");
+       Alcotest.(check bool) "a struct without an array keeps the aggregate" true
+         (has "define i64 @arr_plain({ i64, i64 }");
+       Alcotest.(check bool) "an external entry keeps the aggregate" true
+         (has "define i64 @arr_entry({ i64, [24 x i8] }");
+       Alcotest.(check bool) "an extern keeps the aggregate" true
+         (has "declare i64 @arr_extern({ i64, [24 x i8] }");
+       Alcotest.(check bool) "the caller copies with llvm.memcpy.inline" true
+         (has "call void @llvm.memcpy.inline.p0.p0.i64("));
+
+  Alcotest.test_case
     "debug metadata sidecar: enum discriminants, variant target layout, and integer constants share one compiler-owned artifact"
     `Quick
     (fun () ->

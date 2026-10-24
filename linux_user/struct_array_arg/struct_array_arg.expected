@@ -1,0 +1,9 @@
+=== struct array arg ===
+Zbcdef
+callee id ok
+abcdef
+caller id kept
+abcdef
+abcde!
+ab#def
+done

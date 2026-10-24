@@ -2273,6 +2273,90 @@ let from_abi_slot ty v =
           in
           build_insertvalue agg p f "variant.unpacked" builder) agg carriers
 
+(* GitHub issue #943: a by-value argument whose type holds an array travels
+   between Takibi functions as a pointer to a copy the caller makes.
+
+   LLVM passes a first-class aggregate one register or stack slot per
+   scalar leaf, so a [24 x i8] field became 24 eight-byte stack slots: the
+   caller stored every byte, the callee loaded every byte and stored it
+   into its own copy (#888: +1.8 KiB over seven DDB functions taking a
+   ProcessDdbRecord). Instead the caller copies the value into a stack
+   temporary of its own and passes the address; the callee uses that
+   temporary as its parameter's storage. Copy semantics are unchanged: the
+   temporary is fresh at every call, so the callee may write it and the
+   caller's value is never aliased.
+
+   When the argument is a load (a variable, field or element read), the
+   copy is an llvm.memcpy.inline from the loaded address, placed where the
+   load is, so it reads exactly what the load read; the intrinsic is
+   always expanded inline (no libcall). Otherwise the value is stored.
+
+   Like #897 the convention is chosen once, in the function's LLVM type,
+   and extern fns and --external-entry functions keep the aggregate one.
+   Returns are unchanged. *)
+let rec lltype_holds_array ty =
+  match classify_type ty with
+  | TypeKind.Array -> true
+  | TypeKind.Struct -> Array.exists lltype_holds_array (struct_element_types ty)
+  | _ -> false
+
+let abi_param_lltype_of_ast ty =
+  let abi = abi_lltype_of_ast ty in
+  if lltype_holds_array abi then pointer_type context else abi
+
+(* An alloca at the top of the current function's entry block, so a call
+   inside a loop does not grow the stack. *)
+let entry_alloca llty name =
+  let f = block_parent (insertion_block builder) in
+  let entry = entry_block f in
+  let b = match instr_begin entry with
+    | Before i -> builder_before context i
+    | At_end bb -> builder_at_end context bb in
+  build_alloca llty name b
+
+let copy_aggregate_inline ~at ~src_align dst src llty =
+  let dl = match !target_data with
+    | Some dl -> dl
+    | None -> raise (Error "BUG: #943 aggregate copy before the data layout") in
+  let size = Llvm_target.DataLayout.abi_size llty dl in
+  let i64 = i64_type context in
+  let ptr = pointer_type context in
+  let fty = function_type (void_type context) [| ptr; ptr; i64; i1_type context |] in
+  let fn = match lookup_function "llvm.memcpy.inline.p0.p0.i64" !the_module with
+    | Some fn -> fn
+    | None -> declare_function "llvm.memcpy.inline.p0.p0.i64" fty !the_module in
+  let call = build_call fty fn
+      [| dst; src; const_of_int64 i64 size false; const_int (i1_type context) 0 |]
+      "" at in
+  let attr n = create_enum_attr context "align" (Int64.of_int (max 1 n)) in
+  add_call_site_attr call (attr (alignment dst)) (AttrIndex.Param 0);
+  add_call_site_attr call (attr src_align) (AttrIndex.Param 1)
+
+(* The argument `v` of AST type `ty` for a slot of LLVM type `slot_ty`. *)
+let to_abi_arg ty v slot_ty =
+  if type_of v = slot_ty || classify_type slot_ty <> TypeKind.Pointer
+     || classify_type (type_of v) = TypeKind.Pointer then
+    to_abi_slot ty v slot_ty
+  else begin
+    let llty = type_of v in
+    let tmp = entry_alloca llty "arg.copy" in
+    (match ty with
+     | TypeNamed sname | TypeIndexed (sname, _) ->
+         (match Hashtbl.find_opt struct_alignments sname with
+          | Some n -> set_alignment n tmp
+          | None -> ())
+     | _ -> ());
+    (match classify_value v with
+     | ValueKind.Instruction Opcode.Load when not (is_volatile v) ->
+         let src = operand v 0 in
+         (* The copy reads the source at the load's position, so a later
+            argument's side effects cannot reach it. *)
+         copy_aggregate_inline ~at:(builder_before context v)
+           ~src_align:(alignment v) tmp src llty
+     | _ -> ignore (build_store v tmp builder));
+    tmp
+  end
+
 (* Coerce an llvalue to match a destination AST type.
    Invariant: arithmetic values arrive here at i32 (for <=32-bit types) or i64 (for 64-bit types).
    Handles truncation to narrow types, extension to i64, bool conversion,
@@ -3218,11 +3302,11 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                        |> List.filter (fun t -> not (is_erased_view_type t))
                        |> List.map (fun t -> match t with
                             | TypeBorrowMut _ -> ltype_of_ast t
-                            | _ -> abi_lltype_of_ast t)
+                            | _ -> abi_param_lltype_of_ast t)
                        |> Array.of_list) in
                     if expected <> ft then
                       raise (Error (Printf.sprintf
-                        "function '%s' passes a small variant in the convention non-Takibi code uses (extern or --external-entry); it cannot be used as a function value"
+                        "function '%s' passes a small variant or an array-holding value in the convention non-Takibi code uses (extern or --external-entry); it cannot be used as a function value"
                         name));
                     (TypeFn (param_asts, ret_ast, None), f)
                 | None when Language_words.is_predeclared_name name ->
@@ -5545,7 +5629,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            in
            let slots = param_types ft in
            let arg_vals = Array.mapi (fun i (param_ast, v) ->
-             to_abi_slot param_ast v slots.(i)) arg_vals in
+             to_abi_arg param_ast v slots.(i)) arg_vals in
            let ret_lty = return_type ft in
            let call_name = if ret_lty = void_type context then "" else "calltmp" in
            let v = build_call ft callee arg_vals call_name builder in
@@ -5581,13 +5665,13 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                 (* GitHub issue #897: a function value always has the
                    Takibi convention; taking one that does not is rejected
                    where the value is formed. *)
-                let param_lls = List.map abi_lltype_of_ast param_asts
+                let param_lls = List.map abi_param_lltype_of_ast param_asts
                   |> Array.of_list in
                 let ret_ll    = abi_ret_lltype_of_ast ret_ast in
                 let ft        = function_type ret_ll param_lls in
                 let arg_vals  =
                   List.mapi (fun i (a, param_ast) ->
-                    to_abi_slot param_ast
+                    to_abi_arg param_ast
                       (coerce (snd (gen_expr ~expected_ty:param_ast locals a)) param_ast)
                       param_lls.(i)
                   ) (List.combine args param_asts) |> Array.of_list
@@ -6213,6 +6297,15 @@ let gen_func ?prog_types fdef =
       match abi_ty with
       | TypeBorrowMut _ ->
           let ptr = param f i in
+          local_bind locals name binding_id (Mut (ast_ty, ptr));
+          declare_var ~is_param:true ~argno:(i + 1) ~name ~ast_ty
+            ~line:fdef.def_loc.Lexing.pos_lnum ~ptr
+      | _ when classify_type (type_of (param f i)) = TypeKind.Pointer
+               && classify_type (ltype_of_ast ast_ty) <> TypeKind.Pointer ->
+          (* GitHub issue #943: the caller's copy is this parameter's
+             storage. *)
+          let ptr = param f i in
+          set_value_name name ptr;
           local_bind locals name binding_id (Mut (ast_ty, ptr));
           declare_var ~is_param:true ~argno:(i + 1) ~name ~ast_ty
             ~line:fdef.def_loc.Lexing.pos_lnum ~ptr
@@ -7573,7 +7666,7 @@ let declare_func ?prog_types fdef =
       |> List.map (fun t -> match t with
            | TypeBorrowMut _ -> ltype_of_ast t
            | _ when entry -> ltype_of_ast t
-           | _ -> abi_lltype_of_ast t)
+           | _ -> abi_param_lltype_of_ast t)
       |> Array.of_list in
     let ret_ast   = resolve_ret_ast prog_types key fdef.ret_type in
     let ret_ll    = if entry then ltype_of_ret_ast ret_ast

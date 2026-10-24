@@ -1485,6 +1485,15 @@ the aggregate form, which LLVM passes one register per scalar field, and a
 function that does cannot be used as a function value. The debug sidecar's
 `return_abi` names the first form `tag_payload` (GitHub issue #897).
 
+Any by-value parameter whose runtime type holds an array, at any depth (a
+struct with a `[u8; 24]` field, a variant with such a payload, an array
+itself), is passed between Takibi functions as the address of a copy the
+caller makes on its own stack; the callee uses that copy as the parameter's
+storage. Semantics are those of a by-value copy: the callee's writes never
+reach the caller's value. `extern fn` declarations and `--external-entry`
+functions keep the aggregate form, and a function that does cannot be used
+as a function value. Results are unchanged (GitHub issue #943).
+
 Full source-level tagged-union DWARF metadata and a compact union ABI are
 deferred; code must not treat this first implementation as a stable C ABI.
 

@@ -1,0 +1,57 @@
+// By-value arguments whose struct holds a byte array (GitHub issue #943).
+// Such an argument crosses a Takibi call as a pointer to a copy the caller
+// makes; this checks the copy semantics survive: the callee's writes stay
+// in its copy, and a value read from a variable, an array element, or a
+// nested field arrives intact.
+
+struct Named {
+    id: usize;
+    name: [u8; 6];
+}
+
+struct Holder {
+    tag: u8;
+    inner: Named;
+}
+
+fn put_name(n: Named) {
+    for i: usize in 0..<6 {
+        uart_putc(n.name[i]);
+    }
+    uart_puts("\r\n");
+}
+
+fn scribble(n: Named) -> usize {
+    n.name[0] = 'Z';
+    n.id = n.id + 100;
+    put_name(n);
+    return n.id;
+}
+
+fn test_struct_array_arg() {
+    uart_puts("=== struct array arg ===\r\n");
+    let mut a: Named;
+    a.id = 7;
+    for i: usize in 0..<6 { a.name[i] = 'a' + (i as u8); }
+    let got = scribble(a);
+    if (got == 107) { uart_puts("callee id ok\r\n"); }
+    put_name(a);
+    if (a.id == 7) { uart_puts("caller id kept\r\n"); }
+
+    let mut table: [Named; 2];
+    table[0] = a;
+    table[1] = a;
+    table[1].name[5] = '!';
+    for k: usize in 0..<2 { put_name(table[k]); }
+
+    let mut h: Holder;
+    h.tag = 1;
+    h.inner = a;
+    h.inner.name[2] = '#';
+    put_name(h.inner);
+    uart_puts("done\r\n");
+}
+
+fn app_main() {
+    test_struct_array_arg();
+}
