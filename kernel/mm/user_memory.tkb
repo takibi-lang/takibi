@@ -290,7 +290,11 @@ fn user_range_resolve_cow(range: borrow UserWriteRange[process]) -> bool !{unsaf
     return true;
 }
 
-fn copy_from_user(range: borrow UserReadRange[process], destination: borrow []u8) -> bool !{unsafe} {
+// GitHub issue #954: a true result initializes the whole destination, so a
+// caller need not zero-fill a buffer it then reads only on success.
+fn copy_from_user(range: borrow UserReadRange[process], destination: borrow uninit []u8) -> bool
+        !{unsafe}
+        ensures init(destination) if (result) {
     if (destination.len > range.length) { return false; }
     let source_base: *u8 = unsafe { range.address as *u8 };
     let source_view = unsafe { source_base[0..<range.length as isize] };
@@ -315,8 +319,9 @@ fn copy_to_user(range: borrow UserWriteRange[process], source: borrow init []con
 // checked against the slice here, as a checked tail, so a caller never forms
 // a raw pointer into its buffer; a span outside the slice is refused like a
 // fault.
-fn copy_from_user_span(range: borrow UserReadRange[process], destination: borrow []u8,
-                       offset: usize, length: usize) -> bool !{unsafe} {
+fn copy_from_user_span(range: borrow UserReadRange[process], destination: borrow uninit []u8,
+                       offset: usize, length: usize) -> bool !{unsafe}
+        ensures init(destination[offset..<offset + length]) if (result) {
     if (offset > destination.len) { return false; }
     let tail = destination[offset..<destination.len];
     if (length > tail.len) { return false; }

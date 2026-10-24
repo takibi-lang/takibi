@@ -35,12 +35,19 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 
 from pass_line import report_pass
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 FETCH = ROOT / "scripts" / "fetch_model_tools.sh"
 HEADER = "; takibi-range-obligation v1"
+# GitHub issue #954: initialization coverage claims (lib/init_pred.ml) share
+# the directory, naming and cache. Their cold z3 time has a budget, reported
+# as a share like the #923 compile allocation budget.
+INIT_HEADER = "; takibi-init-obligation v1"
+INIT_BUDGET_SECONDS = 5.0
+INIT_STATS = {"count": 0, "seconds": 0.0}
 TIMEOUT_SECONDS = 20
 
 
@@ -83,14 +90,19 @@ def split(text: str) -> tuple[list[str], str]:
 
 
 def solve(z3: str, text: str, extra: str = "") -> str:
+    return solve_timed(z3, text, extra)[0]
+
+
+def solve_timed(z3: str, text: str, extra: str = "") -> tuple[str, float]:
+    start = time.monotonic()
     try:
         out = subprocess.run(
             [z3, f"-T:{TIMEOUT_SECONDS}", "-in"], input=text + extra,
             text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             timeout=TIMEOUT_SECONDS + 10)
     except subprocess.TimeoutExpired:
-        return "timeout"
-    return out.stdout
+        return "timeout", time.monotonic() - start
+    return out.stdout, time.monotonic() - start
 
 
 def check_dir(directory: pathlib.Path, z3: str,
@@ -104,28 +116,42 @@ def check_dir(directory: pathlib.Path, z3: str,
     for path in files:
         text = path.read_text()
         sites, body = split(text)
-        if not text.startswith(HEADER):
-            failures.append(f"{path.name}: not a v1 range obligation")
+        is_init = text.startswith(INIT_HEADER)
+        if not text.startswith(HEADER) and not is_init:
+            failures.append(f"{path.name}: not a v1 range or init obligation")
             continue
         digest = hashlib.md5(body.encode()).hexdigest()
         if digest != path.stem:
             failures.append(f"{path.name}: content digest is {digest}")
             continue
+        if is_init:
+            INIT_STATS["count"] += 1
         if cache is not None and (cache / digest).exists():
+            if is_init:
+                # The cache entry of an init obligation holds its cold time.
+                try:
+                    INIT_STATS["seconds"] += float(
+                        (cache / digest).read_text() or "0")
+                except ValueError:
+                    pass
             continue
         todo.append((path, sites, body))
 
     def one(item):
         path, sites, body = item
-        return item, solve(z3, body)
+        return item, solve_timed(z3, body)
 
     workers = min(8, os.cpu_count() or 1)
     with concurrent.futures.ThreadPoolExecutor(workers) as pool:
-        for (path, sites, body), out in pool.map(one, todo):
+        for (path, sites, body), (out, seconds) in pool.map(one, todo):
+            is_init = body.startswith(INIT_HEADER)
+            if is_init:
+                INIT_STATS["seconds"] += seconds
             verdict = out.strip().splitlines()[0] if out.strip() else "no output"
             if verdict == "unsat":
                 if cache is not None:
-                    (cache / path.stem).touch()
+                    (cache / path.stem).write_text(
+                        f"{seconds:.4f}" if is_init else "")
                 continue
             claim = next((l for l in body.splitlines()
                           if l.startswith("; claim:")), "")
@@ -133,7 +159,11 @@ def check_dir(directory: pathlib.Path, z3: str,
                          if l.startswith("; rule:")), "")
             report = [f"{path.name}: {verdict}  ({rule[2:]}, {claim[2:]})"]
             report += [f"  at {s}" for s in sites]
-            if verdict == "sat":
+            if verdict == "sat" and is_init:
+                model = solve(z3, body, "(get-model)\n(get-value (k))\n")
+                report.append("  counterexample (k: an element not covered):")
+                report += ["    " + l for l in model.strip().splitlines()[1:]]
+            elif verdict == "sat":
                 model = solve(z3, body, "(get-model)\n(get-value (r))\n")
                 report.append("  counterexample (a, b: inputs; r: result):")
                 report += ["    " + l for l in model.strip().splitlines()[1:]]
@@ -202,9 +232,21 @@ def main(argv: list[str]) -> int:
         print(f"FAIL range-obligations: {len(failures)} derived range(s) not "
               f"proved by z3 in {directory}")
         return 1
+    share = 100.0 * INIT_STATS["seconds"] / INIT_BUDGET_SECONDS
+    if INIT_STATS["seconds"] > INIT_BUDGET_SECONDS:
+        print(f"FAIL init-obligation-budget: {INIT_STATS['count']} init "
+              f"obligation(s) took {INIT_STATS['seconds']:.2f} s of cold z3 "
+              f"time, over the {INIT_BUDGET_SECONDS:.1f} s budget "
+              f"({share:.0f}%; docs/VERIFICATION_DESIGN.md)")
+        return 1
     report_pass("range-obligations",
                 f"z3 proves every derived refinement range in {directory}",
                 obligations=len(list(directory.glob('*.smt2'))))
+    if INIT_STATS["count"]:
+        report_pass("init-obligation-budget",
+                    f"{INIT_STATS['seconds']:.2f} s cold z3 time, "
+                    f"{share:.0f}% of the {INIT_BUDGET_SECONDS:.1f} s budget",
+                    obligations=INIT_STATS["count"])
     return 0
 
 

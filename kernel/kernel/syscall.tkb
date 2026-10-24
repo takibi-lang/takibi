@@ -385,7 +385,8 @@ private fn syscall_scratch_cpu_index() -> {0..<KERNEL_MAX_CORES as usize} {
 // rather than through a pointer cast onto the buffer: the cast would be
 // unsafe (issue #316) and would assume an alignment a u8 array does not
 // promise, and this is called twice per prlimit64 call.
-private fn syscall_rlimit_store(field: borrow [u8; 8..], value: usize) {
+private fn syscall_rlimit_store(field: borrow uninit [u8; 8..], value: usize)
+        ensures init(field[0..<8]) {
     for i: usize in 0..<8 {
         field[i] = ((value >> (i * 8)) & 0xFF) as u8;
     }
@@ -1934,11 +1935,11 @@ fn kernel_syscall_socket_evidence() -> bool !{unsafe} {
     return valid;
 }
 
-// GitHub issue #203 (TRUSTED_BASE.md, assume_init sites): the path buffer as
-// kernel_syscall_path_name left it. Call it only after that function returned
-// Name in the same syscall; it zero-fills the buffer before writing it.
-private fn syscall_path_view_here(slot: borrow SyscallSlot[0]) -> [u8; 256..] !{unsafe} {
-    unsafe { assume_init(syscall_scratch[slot.index].path_buffer as []u8); }
+// The path buffer as kernel_syscall_path_name left it. GitHub issue #954: the
+// requires clause is checked at every call, where kernel_syscall_path_name's
+// ensures established it; it replaced an assume_init site.
+private fn syscall_path_view_here(slot: borrow SyscallSlot[0]) -> [u8; 256..]
+        requires init(syscall_scratch[slot.index].path_buffer) {
     return syscall_scratch[slot.index].path_buffer as [u8; 256..];
 }
 
@@ -1949,7 +1950,8 @@ private fn syscall_path_view_here(slot: borrow SyscallSlot[0]) -> [u8; 256..] !{
 // GitHub issue #203: the path buffer is per-call scratch, zero-filled here
 // because the copy below writes only up to the terminator. A caller reads it
 // afterwards only through syscall_path_view_here.
-fn kernel_syscall_path_name(slot: borrow SyscallSlot[0], current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], address: usize) -> SyscallPathResult {
+fn kernel_syscall_path_name(slot: borrow SyscallSlot[0], current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], address: usize) -> SyscallPathResult
+        ensures init(syscall_scratch[slot.index].path_buffer) {
     zero_fill(syscall_scratch[slot.index].path_buffer as []u8);
     let path_view: []u8 = syscall_scratch[slot.index].path_buffer as []u8;
     let mut length: usize = 0;
@@ -6035,10 +6037,9 @@ private fn syscall_prlimit64_with(slot: borrow SyscallSlot[0],
     if (x1 >= LINUX_RLIM_NLIMITS) {
         return SyscallAction::Resume(LINUX_EINVAL);
     }
-    // GitHub issue #203: per-call scratch. The two 8-byte stores below
-    // cover the buffer, but stage 2 tracks arrays whole, so it is
-    // zero-filled first; without this fill the copy-out is rejected.
-    zero_fill(syscall_scratch[slot.index].rlimit_buffer as []u8);
+    // GitHub issue #954: per-call scratch, not zero-filled. The two 8-byte
+    // stores below initialize [0, 8) and [8, 16) (syscall_rlimit_store's
+    // ensures), and a successful copy_from_user_span all 16 bytes.
     let mut soft: usize = LINUX_RLIM64_INFINITY;
     let mut hard: usize = LINUX_RLIM64_INFINITY;
     if (x1 == LINUX_RLIMIT_NOFILE) {

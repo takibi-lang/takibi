@@ -10,9 +10,9 @@
    mathematical value is the machine's.
 
    Coverage of a goal [a, b) is decided by a chain walk that needs only
-   constant differences between terms: from cur = a, take an interval with
-   lo <= cur < hi (both differences constant) and continue from hi, until
-   b - cur <= 0. With all terms constant this is exact on a finite set; with
+   constant differences between terms: from cur = a, stop when b - cur <= 0
+   or some interval has lo <= cur and hi >= b; else take an interval with
+   lo <= cur < hi and continue from hi. With all terms constant this is exact on a finite set; with
    symbolic terms it is a sound, incomplete decision in quantifier-free
    linear integer arithmetic. Every positive conclusion is written as an
    SMT-LIB obligation (QF_LIA, one existential point k) that z3 re-checks
@@ -84,6 +84,14 @@ let uncovered ?(eqs = []) (ivs : interval list) ((a, b) : interval) =
     | Some d when d <= 0 -> None
     | _ when fuel = 0 -> Some cur
     | _ ->
+        (* An interval that starts at or before cur and reaches b ends the
+           walk; else one that starts at or before cur and ends a constant
+           distance past it advances it. *)
+        let reaches = List.exists (fun (lo, hi) ->
+          match diff cur lo, diff hi b with
+          | Some x, Some y -> x >= 0 && y >= 0
+          | _ -> false) ivs in
+        if reaches then None else
         let step = List.find_map (fun (lo, hi) ->
           match diff cur lo, diff hi cur with
           | Some x, Some y when x >= 0 && y > 0 -> Some hi

@@ -423,10 +423,12 @@ rules globally.
   `kernel/kernel/syscall.tkb:syscall_exec_path_here` and
   `kernel/kernel/syscall.tkb:syscall_script_line_here`, which rely on
   `syscall_execve_current` zero-filling `file_buffer` before execve's staging
-  begins; `kernel/kernel/syscall.tkb:syscall_path_view_here` relies on
-  `kernel_syscall_path_name`
-  zero-filling `path_buffer` before it writes it. Uninitialized local arrays
-  are not tracked yet.
+  begins. (`syscall_path_view_here` was a fourth; since GitHub issue #954 its
+  `requires init(...)` is checked at every call instead.) A `requires` or
+  `ensures` clause on a scratch slot, `syscall_scratch[slot.index].f`, rests
+  on the same per-CPU premise; the held `SyscallSlot` is what keeps another
+  holder from reaching the element between the calls. Uninitialized local
+  arrays are not tracked yet.
 - A RegionPool walked with no lock (`region_pool_first_unproven` and
   `region_pool_next_unproven`, GitHub issue #745) trusts that the pool's
   chunks are never shrunk while a walker may stand in one: the cursor reads

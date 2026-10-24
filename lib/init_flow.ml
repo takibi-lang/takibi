@@ -388,6 +388,7 @@ let check
   let ivs_of st l = List.filter_map (fun (l', iv) -> if l' = l then Some iv else None) st.iv in
   (* Record that elements [lo, hi) of the view's leaf are initialized; a
      leaf whose whole length is covered leaves [u]. *)
+  let cur_loc = ref fdef.Ast.def_loc in
   let add_iv st (p : place) (iv : Init_pred.interval) =
     let l = (p.root, p.path) in
     if not (Leaves.mem l st.u) || Init_pred.is_empty iv then st
@@ -395,6 +396,12 @@ let check
       let st = { st with iv = (l, iv) :: st.iv } in
       match leaf_len p with
       | Some n when Init_pred.uncovered ~eqs:st.eqs (ivs_of st l) (Init_pred.const 0, n) = None ->
+          (* The whole leaf is covered: a conclusion z3 re-checks too. *)
+          let whole = path_to_string (root_display p) p.path in
+          Range_obligation.record_text !cur_loc
+            (Init_pred.obligation
+               ~claim:(Printf.sprintf "init(%s[0..<%s])" whole (show n))
+               st.eqs (ivs_of st l) (Init_pred.const 0, n));
           { st with u = Leaves.remove l st.u;
                     iv = List.filter (fun (l', _) -> l' <> l) st.iv }
       | _ -> st
@@ -1204,7 +1211,9 @@ let check
   let rec stmts st ss =
     List.fold_left (fun (st, dead) s ->
       if dead then (st, dead) else stmt st s) (st, false) ss
-  and stmt st (s : Ast.stmt) = match s.desc with
+  and stmt st (s : Ast.stmt) =
+    cur_loc := s.loc;
+    match s.desc with
     | Ast.Let (_, name, _, None, _) ->
         (match Local_bindings.ids_for_stmt bindings s with
          | id :: _ ->
