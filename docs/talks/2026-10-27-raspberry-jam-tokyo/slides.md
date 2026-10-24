@@ -14,6 +14,8 @@ footer: "Raspberry JAM Tokyo 2026.10, 2026-10-27"
 ## SWD on Raspberry Pi 5 with the Debug Probe
 
 Kiwamu Okabe
+kiwamu@metasepi.org
+https://metasepi.org/
 
 ---
 
@@ -43,7 +45,8 @@ power on -> EEPROM -> TF-A -> kernel_2712.img (the stub)
                OpenOCD: halt -> load_image -> set PC/SP -> resume
 ```
 
-- Write the SD card **once** (`os_check=0` in `config.txt`)
+- Write the stub to the SD card **once**, then **power-cycle**
+  (`os_check=0` in `config.txt`)
 - Every new kernel goes **straight into RAM over SWD**
 - An arm64 Image header makes firmware hand over the DTB as usual
 
@@ -91,23 +94,6 @@ Error: bcm2712.cpu0: how to reset?
 
 ---
 
-# A reset does not re-read the SD card
-
-- Swapped `kernel_2712.img` on the SD card, then PSCI reset
-  -> **the old image booted**
-- A warm reset **re-runs the image already resident**
-
-| What changed | What you need |
-|---|---|
-| The kernel written into RAM | A PSCI reset is enough |
-| The file on the SD card | **A power cycle** |
-
-The script refuses to run without `--resident-image-unchanged`
-
-[rpi5_jtag_reset.sh](https://github.com/takibi-lang/takibi/blob/ab3e773af9703ce2024080e95bd12213d9c41c87/scripts/rpi5_jtag_reset.sh#L22)
-
----
-
 # At EL2: our OS, or Linux?
 
 - Before writing, make sure the halted CPU is **not running Raspberry Pi OS**
@@ -136,11 +122,12 @@ ESR=0, ELR=0          <- impossible
 ESR_EL1 = 0x02000000  <- the real value
 ```
 
-- `mdw` / `mdd` read **DRAM directly**
-- What the CPU wrote is still **in the D-cache**
-- **Registers come straight from the CPU**, so they are right
+> SWD reads DRAM, not the cache -- clean it first, or ask the CPU
 
-> Not "SWD can't be trusted": `.text` matched the ELF exactly
+How we cope
+- CPU state -> read **registers**, not memory
+- Kernel **cleans the cache** before it parks
+- Need kernel memory? Make the **halted CPU** read or write it
 
 [HISTORY.md](https://github.com/takibi-lang/takibi/blob/ab3e773af9703ce2024080e95bd12213d9c41c87/HISTORY.md#L11613)
 
