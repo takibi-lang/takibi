@@ -40,10 +40,24 @@ let definition_key (types : program_types) (f : func) =
   if String.contains f.name '$' then f.name
   else StringMap.find (loc_key f.def_loc) types.function_def_keys
 
+(* The key must name one definition. A collision attributes one
+   definition's calls to another, which is the #987 defect's shape; it is
+   an internal error, checked on every compile that walks the graph. *)
+let check_distinct_keys (types : program_types) (prog : toplevel list) =
+  ignore (List.fold_left (fun seen -> function
+    | FuncDef f ->
+        let key = definition_key types f in
+        if StringSet.mem key seen then
+          failwith (Printf.sprintf
+            "internal error: two function definitions share the key '%s'" key);
+        StringSet.add key seen
+    | _ -> seen) StringSet.empty prog)
+
 (* Every reference in the program, with the definition key of the function
    it occurs in, or None for a global or constant initializer. *)
 let iter_references (visit : string option -> reference -> string -> unit)
     (prog : toplevel list) (types : program_types) =
+  check_distinct_keys types prog;
   let indirect = !Type_inf.resolved_indirect_call_effects in
   let rec expr from (e : expr) =
     (* One key per expression: loc_key formats a string, and a second one

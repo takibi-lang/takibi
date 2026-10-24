@@ -177,7 +177,10 @@ everything below (maintainer, 2026-10-24, from #567's re-measurement:
 the build checks take more than twice the commits of the compiler they
 guard): #987 (--emit-call-graph, the resolved call graph as a table the
 `.tkb`-reading checks consume instead of parsing source); #988 and #989
-are done. With them, #850's stop-gap
+are done. #987's flag and its first reader
+(buildcheck_ext2_mutation_guard.py) landed 2026-10-24; its model-map
+migration waits for a maintainer decision (options on #987). With them,
+#850's stop-gap
 (maintainer, 2026-10-24): EFFECTS.md gains the table of checker-only
 effect words, and no new such word is added (DECISIONS.md). Then the
 verification direction (#954, maintainer 2026-10-23; B owns the refinement
