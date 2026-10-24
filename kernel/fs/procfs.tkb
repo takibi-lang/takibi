@@ -167,14 +167,11 @@ fn procfs_node_is_directory(node: ProcfsNode) -> bool {
            node.kind == ProcfsNodeKind::TakibiDirectory;
 }
 
-// GitHub issue #977: every renderer step takes the offset it starts at as
-// an immutable parameter, requires the bytes before it initialized and
-// ensures init(output[0..<result]), so a caller chains steps through
-// immutable lets and the procfs read path stages into scratch without a
-// zero_fill. A loop carrying a mutable offset would need facts about a
-// mutable local, which the init checker does not track, so the two
-// fixed-count loops of the profile renderer are unrolled under
-// static_asserts of their counts.
+// GitHub issue #977: every renderer step requires the bytes before its
+// start offset initialized and ensures init(output[0..<result]), so the
+// procfs read path stages into scratch without a zero_fill. The offset is
+// a mutable local the checker versions (#978): a loop that advances it
+// through these steps keeps init(output[0..<offset]) as its invariant.
 private fn procfs_put_byte(output: borrow uninit [u8; 1024..], offset: usize,
                            byte: u8) -> usize
         requires init(output[0..<offset])
@@ -186,71 +183,65 @@ private fn procfs_put_byte(output: borrow uninit [u8; 1024..], offset: usize,
     return offset;
 }
 
-private fn procfs_put_text(output: borrow uninit [u8; 1024..], offset: usize,
+private fn procfs_put_text(output: borrow uninit [u8; 1024..], offset_in: usize,
                            text: borrow []const u8) -> usize
-        requires init(output[0..<offset])
+        requires init(output[0..<offset_in])
         ensures init(output[0..<result]) {
-    if (offset >= 1024) { return offset; }
-    let copied: usize = slice_copy(output[offset..<1024], text);
-    return offset + copied;
+    let mut offset: usize = offset_in;
+    for byte in text { offset = procfs_put_byte(output, offset, byte); }
+    return offset;
 }
 
-private fn procfs_put_usize(output: borrow uninit [u8; 1024..], offset: usize,
+private fn procfs_put_usize(output: borrow uninit [u8; 1024..], offset_in: usize,
                             value_in: usize) -> usize
-        requires init(output[0..<offset])
+        requires init(output[0..<offset_in])
         ensures init(output[0..<result]) {
-    let mut reverse: [u8; 20];
+    let mut digits: [u8; 20];
     let mut count: usize = 0;
     let mut value: usize = value_in;
-    if (value == 0) { return procfs_put_byte(output, offset, 0x30); }
+    if (value == 0) { return procfs_put_byte(output, offset_in, 0x30); }
     for index: usize in 0..<20 {
         if (value != 0) {
-            reverse[index] = 0x30 + ((value % 10) as u8);
+            digits[index] = 0x30 + ((value % 10) as u8);
             count = count + 1;
             value = value / 10;
         }
     }
-    let mut digits: [u8; 20];
-    let mut at: usize = 0;
-    while (count != 0 && at < 20) {
+    let mut offset: usize = offset_in;
+    while (count != 0) {
         count = count - 1;
         if (count >= 0 && count < 20) {
-            digits[at] = reverse[count];
+            offset = procfs_put_byte(output, offset, digits[count]);
         }
-        at = at + 1;
     }
-    let length: usize = min(at, 20);
-    return procfs_put_text(output, offset, digits[0..<length]);
+    return offset;
 }
 
 // 0x-prefixed lowercase hex without leading zeros: return addresses the
 // host symbolizes (GitHub issue #811).
-private fn procfs_put_hex(output: borrow uninit [u8; 1024..], offset: usize,
+private fn procfs_put_hex(output: borrow uninit [u8; 1024..], offset_in: usize,
                           value: usize) -> usize
-        requires init(output[0..<offset])
+        requires init(output[0..<offset_in])
         ensures init(output[0..<result]) {
-    let mut digits: [u8; 16];
-    let mut at: usize = 0;
+    let mut offset: usize = procfs_put_text(output, offset_in, bs"0x");
     let mut started: bool = false;
     for index: usize in 0..<16 {
         let nibble: usize = (value >> ((15 - index) * 4)) & 0xF;
         if (nibble != 0 || started || index == 15) {
             started = true;
-            let mut glyph: u8 = 0x57 + (nibble as u8);
-            if (nibble < 10) { glyph = 0x30 + (nibble as u8); }
-            let place: usize = at;
-            if (place < 16) { digits[place] = glyph; }
-            at = at + 1;
+            if (nibble < 10) {
+                offset = procfs_put_byte(output, offset, 0x30 + (nibble as u8));
+            } else {
+                offset = procfs_put_byte(output, offset, 0x57 + (nibble as u8));
+            }
         }
     }
-    let length: usize = min(at, 16);
-    let prefixed: usize = procfs_put_text(output, offset, bs"0x");
-    return procfs_put_text(output, prefixed, digits[0..<length]);
+    return offset;
 }
 
-private fn procfs_put_comm(output: borrow uninit [u8; 1024..], offset: usize,
+private fn procfs_put_comm(output: borrow uninit [u8; 1024..], offset_in: usize,
                            snapshot: ProcessDiagnosticSnapshot) -> usize
-        requires init(output[0..<offset])
+        requires init(output[0..<offset_in])
         ensures init(output[0..<result]) {
     let mut start: usize = 0;
     let mut index: usize = 0;
@@ -260,124 +251,58 @@ private fn procfs_put_comm(output: borrow uninit [u8; 1024..], offset: usize,
         if (byte == 0x2F) { start = index + 1; }
         index = index + 1;
     }
-    let mut name: [u8; 15];
-    let mut copied: usize = 0;
+    let mut offset: usize = offset_in;
     let mut at: usize = start;
+    let mut copied: usize = 0;
     while (at < index && copied < 15 && at < 512) {
-        name[copied] = snapshot.command_line[at];
+        offset = procfs_put_byte(output, offset,
+                                 snapshot.command_line[at]);
         at = at + 1;
         copied = copied + 1;
     }
-    if (copied == 0) { return procfs_put_text(output, offset, bs"kernel"); }
-    let length: usize = min(copied, 15);
-    return procfs_put_text(output, offset, name[0..<length]);
-}
-
-// One "from" or "to" list of a core's longest irqs-off span.
-private fn procfs_put_sites(output: borrow uninit [u8; 1024..], offset: usize,
-                            cpu: {0..<KERNEL_MAX_CORES as usize},
-                            to: bool) -> usize
-        requires init(output[0..<offset])
-        ensures init(output[0..<result]) {
-    static_assert(IRQSOFF_DEPTH == 3,
-                  "procfs_put_sites writes one entry per irqsoff site slot");
-    let gap0: usize = procfs_put_byte(output, offset, 0x20);
-    let site0: usize = procfs_put_hex(output, gap0, irqsoff_core_site(cpu, to, 0));
-    let gap1: usize = procfs_put_byte(output, site0, 0x20);
-    let site1: usize = procfs_put_hex(output, gap1, irqsoff_core_site(cpu, to, 1));
-    let gap2: usize = procfs_put_byte(output, site1, 0x20);
-    return procfs_put_hex(output, gap2, irqsoff_core_site(cpu, to, 2));
-}
-
-// One core's line of /proc/takibi/profile, or nothing for an offline core.
-private fn procfs_put_core(output: borrow uninit [u8; 1024..], offset: usize,
-                           cpu: {0..<KERNEL_MAX_CORES as usize},
-                           online: usize) -> usize
-        requires init(output[0..<offset])
-        ensures init(output[0..<result]) {
-    if (cpu >= online) { return offset; }
-    let label: usize = procfs_put_text(output, offset, bs"cpu");
-    let number: usize = procfs_put_usize(output, label, cpu);
-    let stored_label: usize = procfs_put_text(output, number, bs" stored ");
-    let stored: usize = procfs_put_usize(output, stored_label,
-                                         profile_session_core_stored(cpu));
-    let lost_label: usize = procfs_put_text(output, stored, bs" lost ");
-    let lost: usize = procfs_put_usize(output, lost_label,
-                                       profile_session_core_lost(cpu));
-    let ticks_label: usize = procfs_put_text(output, lost, bs" irqsoff_ticks ");
-    let ticks: usize = procfs_put_usize(output, ticks_label,
-                                        irqsoff_core_longest(cpu));
-    let from_label: usize = procfs_put_text(output, ticks, bs" from");
-    let from: usize = procfs_put_sites(output, from_label, cpu, false);
-    let to_label: usize = procfs_put_text(output, from, bs" to");
-    let to: usize = procfs_put_sites(output, to_label, cpu, true);
-    return procfs_put_byte(output, to, 0x0A);
-}
-
-private fn procfs_mode_text(mode: usize) -> []const u8 {
-    if (mode == 0) { return bs"idle"; }
-    if (mode == 1) { return bs"sampling"; }
-    return bs"stopped";
+    if (copied == 0) { offset = procfs_put_text(output, offset, bs"kernel"); }
+    return offset;
 }
 
 // /proc/takibi/profile read back: the session and each core's counts.
 private fn procfs_render_profile(output: borrow uninit [u8; 1024..]) -> usize
         ensures init(output[0..<result]) {
-    static_assert(KERNEL_MAX_CORES == 4,
-                  "procfs_render_profile writes one line per possible core");
-    let mode_label: usize = procfs_put_text(output, 0, bs"mode ");
-    let mode: usize = procfs_put_text(output, mode_label,
-                                      procfs_mode_text(profile_session_mode_now()));
-    let period_label: usize = procfs_put_text(output, mode, bs"\nperiod ");
-    let period: usize = procfs_put_usize(output, period_label,
-                                         profile_session_period_now());
-    let depth_label: usize = procfs_put_text(output, period, bs"\ndepth ");
-    let depth: usize = procfs_put_usize(output, depth_label,
-                                        profile_session_depth_now());
-    let header: usize = procfs_put_byte(output, depth, 0x0A);
+    let mut offset: usize = 0;
+    let mode: usize = profile_session_mode_now();
+    offset = procfs_put_text(output, offset, bs"mode ");
+    if (mode == 0) { offset = procfs_put_text(output, offset, bs"idle"); }
+    else if (mode == 1) { offset = procfs_put_text(output, offset, bs"sampling"); }
+    else { offset = procfs_put_text(output, offset, bs"stopped"); }
+    offset = procfs_put_text(output, offset, bs"\nperiod ");
+    offset = procfs_put_usize(output, offset, profile_session_period_now());
+    offset = procfs_put_text(output, offset, bs"\ndepth ");
+    offset = procfs_put_usize(output, offset, profile_session_depth_now());
+    offset = procfs_put_byte(output, offset, 0x0A);
     let online: usize = kernel_online_core_count();
-    let core0: usize = procfs_put_core(output, header, 0, online);
-    let core1: usize = procfs_put_core(output, core0, 1, online);
-    let core2: usize = procfs_put_core(output, core1, 2, online);
-    return procfs_put_core(output, core2, 3, online);
-}
-
-// /proc/<pid>/stat for one diagnostic snapshot.
-private fn procfs_render_stat(output: borrow uninit [u8; 1024..],
-                              snapshot: ProcessDiagnosticSnapshot) -> usize
-        ensures init(output[0..<result]) {
-    let pid: usize = procfs_put_usize(output, 0, snapshot.pid);
-    let open: usize = procfs_put_text(output, pid, bs" (");
-    let comm: usize = procfs_put_comm(output, open, snapshot);
-    let close: usize = procfs_put_text(output, comm, bs") ");
-    let state: usize = procfs_put_byte(output, close, snapshot.state);
-    let state_gap: usize = procfs_put_byte(output, state, 0x20);
-    let ppid: usize = procfs_put_usize(output, state_gap, snapshot.ppid);
-    // Fields 5 and 6: one process group per session until setpgid exists.
-    let pgrp_gap: usize = procfs_put_byte(output, ppid, 0x20);
-    let pgrp: usize = procfs_put_usize(output, pgrp_gap, snapshot.session_id);
-    let session_gap: usize = procfs_put_byte(output, pgrp, 0x20);
-    let session: usize = procfs_put_usize(output, session_gap,
-                                          snapshot.session_id);
-    // Fields 7 through 13: tty_nr, tpgid, flags and faults.
-    let faults: usize = procfs_put_text(output, session,
-        bs" 0 0 0 0 0 0 0");
-    // Fields 14 through 24: utime, stime, child times, priority, nice,
-    // thread count, itrealvalue, starttime, vsize and rss. Fields 25 through
-    // 39 are consumed (though mostly discarded) by Alpine's enabled
-    // FEATURE_TOP_SMP_PROCESS parser. Zero is an honest value until the
-    // scheduler and VM expose accounted counters.
-    let times: usize = procfs_put_text(output, faults,
-        bs" 0 0 0 0 0 0 1 0 ");
-    let start: usize = procfs_put_usize(output, times,
-                                        snapshot.start_time_ticks);
-    let vsize_gap: usize = procfs_put_byte(output, start, 0x20);
-    let vsize: usize = procfs_put_usize(output, vsize_gap,
-                                        snapshot.resident_pages * 4096);
-    let rss_gap: usize = procfs_put_byte(output, vsize, 0x20);
-    let rss: usize = procfs_put_usize(output, rss_gap, snapshot.resident_pages);
-    return procfs_put_text(output, rss,
-        bs" 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n");
+    for cpu: usize in 0..<KERNEL_MAX_CORES {
+        if (cpu < online) {
+            offset = procfs_put_text(output, offset, bs"cpu");
+            offset = procfs_put_usize(output, offset, cpu);
+            offset = procfs_put_text(output, offset, bs" stored ");
+            offset = procfs_put_usize(output, offset, profile_session_core_stored(cpu));
+            offset = procfs_put_text(output, offset, bs" lost ");
+            offset = procfs_put_usize(output, offset, profile_session_core_lost(cpu));
+            offset = procfs_put_text(output, offset, bs" irqsoff_ticks ");
+            offset = procfs_put_usize(output, offset, irqsoff_core_longest(cpu));
+            offset = procfs_put_text(output, offset, bs" from");
+            for slot: usize in 0..<IRQSOFF_DEPTH {
+                offset = procfs_put_byte(output, offset, 0x20);
+                offset = procfs_put_hex(output, offset, irqsoff_core_site(cpu, false, slot));
+            }
+            offset = procfs_put_text(output, offset, bs" to");
+            for slot: usize in 0..<IRQSOFF_DEPTH {
+                offset = procfs_put_byte(output, offset, 0x20);
+                offset = procfs_put_hex(output, offset, irqsoff_core_site(cpu, true, slot));
+            }
+            offset = procfs_put_byte(output, offset, 0x0A);
+        }
+    }
+    return offset;
 }
 
 // Renders a procfs file's text into output and answers its length. The
@@ -401,7 +326,38 @@ fn procfs_render_file(inode: usize, output: borrow uninit [u8; 1024..])
         let copied: usize = slice_copy(output, source[0..<length]);
         return copied;
     }
-    return procfs_render_stat(output, snapshot);
+    let mut offset: usize = 0;
+    offset = procfs_put_usize(output, offset, snapshot.pid);
+    offset = procfs_put_text(output, offset, bs" (");
+    offset = procfs_put_comm(output, offset, snapshot);
+    offset = procfs_put_text(output, offset, bs") ");
+    offset = procfs_put_byte(output, offset, snapshot.state);
+    offset = procfs_put_byte(output, offset, 0x20);
+    offset = procfs_put_usize(output, offset, snapshot.ppid);
+    // Fields 5 and 6: one process group per session until setpgid exists.
+    offset = procfs_put_byte(output, offset, 0x20);
+    offset = procfs_put_usize(output, offset, snapshot.session_id);
+    offset = procfs_put_byte(output, offset, 0x20);
+    offset = procfs_put_usize(output, offset, snapshot.session_id);
+    // Fields 7 through 13: tty_nr, tpgid, flags and faults.
+    offset = procfs_put_text(output, offset,
+        bs" 0 0 0 0 0 0 0");
+    // Fields 14 through 24: utime, stime, child times, priority, nice,
+    // thread count, itrealvalue, starttime, vsize and rss. Fields 25 through
+    // 39 are consumed (though mostly discarded) by Alpine's enabled
+    // FEATURE_TOP_SMP_PROCESS parser. Zero is an honest value until the
+    // scheduler and VM expose accounted counters.
+    offset = procfs_put_text(output, offset,
+        bs" 0 0 0 0 0 0 1 0 ");
+    offset = procfs_put_usize(output, offset, snapshot.start_time_ticks);
+    offset = procfs_put_byte(output, offset, 0x20);
+    offset = procfs_put_usize(output, offset,
+                              snapshot.resident_pages * 4096);
+    offset = procfs_put_byte(output, offset, 0x20);
+    offset = procfs_put_usize(output, offset, snapshot.resident_pages);
+    offset = procfs_put_text(output, offset,
+        bs" 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n");
+    return offset;
 }
 
 fn procfs_next_pid(after: usize) -> usize !{unsafe} {

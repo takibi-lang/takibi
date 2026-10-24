@@ -87,9 +87,24 @@ facts listed. Every covering conclusion's obligation asserts the facts it
 had (`min` as `ite`), so z3 re-checks the derivation.
 
 A merge keeps a fact that every falling-through arm has, syntactically. A
-loop body starts from the state before the loop plus the loop's own
-condition or counter range; facts mention only immutable atoms, whose
-values are fixed for the whole loop.
+loop body starts from the loop's head state plus its own condition or
+counter range.
+
+### Versioned mutable locals (#978)
+
+A `let mut` unsigned local whose address is never taken is an atom per
+version (`v<id>@<k>`), SSA style: an assignment starts a version, so no
+fact is ever invalidated, it just stops being about the local. A merge is
+a phi: differing versions get a fresh one and each arm's facts are renamed
+to it. A loop's head versions carry an inductive invariant over init
+intervals only: candidates are what one iteration ends with plus
+`[0 or an entry start, x@head)`; a candidate stays if it holds on entry
+and after the body (end version renamed to head, the head's own atom moved
+aside first), shrinking to a fixpoint, with errors, obligations and the
+trace suppressed during the trial runs. The body is then checked once
+from the fixpoint, and each kept interval writes two obligations ("on
+entry", "preserved"). A body that can leave an iteration early keeps no
+candidate. Everything stays quantifier free.
 
 Representation 2, a bitmask for a constant N, turned out not to be needed:
 with constant bounds the interval union is already an exact finite set, and
@@ -185,15 +200,11 @@ such owner, and naming one is an error.
    ensures `init(output[0..<result])`, and the read copies out
    `[offset, offset + min(total - offset, requested))` under
    `offset < total`. Every renderer step (`procfs_put_byte`, `_text`,
-   `_usize`, `_hex`, `_comm`, `_sites`, `_core`) takes its start offset as
-   an immutable parameter, requires `init(output[0..<offset])` and ensures
-   `init(output[0..<result])`; the renderers chain the steps through
-   immutable `let`s. The profile renderer's per-core and per-site loops
-   carried a mutable offset, which would need facts about a mutable local
-   (versioned atoms), so they are unrolled under
-   `static_assert(KERNEL_MAX_CORES == 4)` and
-   `static_assert(IRQSOFF_DEPTH == 3)`. Two checker changes made the shape
-   provable: the coverage walk steps through `[lo, hi)` with
+   `_usize`, `_hex`, `_comm`) requires `init(output[0..<offset])` and
+   ensures `init(output[0..<result])`. The renderers keep their loops and
+   their mutable offset: #978's versioned locals carry
+   `init(output[0..<offset])` through each loop. Two smaller checker
+   changes were needed too: the coverage walk steps through `[lo, hi)` with
    `lo <= cur <= hi` (the prefix `[0, offset)` may be empty), and
    `return g(...)` names `g`'s result.
 5. #974 removed the last three `assume_init` sites, execve's
@@ -229,14 +240,14 @@ The init obligations' cold z3 time is budgeted at 5 s on a kernel build.
 (`init-obligation-budget`). A cache entry keeps each obligation's cold
 time, so the share is reported on warm builds too. Measured on the QEMU kernel on
 2026-10-24: 7 obligations, 0.19 s cold (4%). After #975: 33 obligations,
-0.63 s cold (13%). After #974: unchanged, 0.64 s cold (13%). After #977:
-102 obligations (67 of them procfs steps), 2.3 to 2.8 s cold (47 to 57%),
-measured uncached under a load average near 8 on 24 cores; each obligation
-is one z3 process of about 25 ms. The budget may grow when a
+0.63 s cold (13%). After #974: unchanged, 0.64 s cold (13%). After #977
+and #978: 114 obligations (16 of them loop invariants), 2.2 to 2.3 s cold
+(44 to 46%), measured uncached under a load average near 4 on 24 cores;
+each obligation is one z3 process of about 20 ms. The budget may grow when a
 later change needs it, as long as the build and lane budgets are unaffected.
 
 ## Out of this slice
 
-- Interval merging across arms with different bounds, facts about mutable
-  locals (versioned atoms), disequalities, and sparse or quantified init
+- Interval merging across arms with different bounds, loop invariants
+  over facts other than init intervals, disequalities, and sparse or quantified init
   (#109).

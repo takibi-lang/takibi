@@ -751,8 +751,8 @@ Rules:
 - An array or slice leaf that is `uninit` also carries the set of its
   elements known `init` (GitHub issue #954): a union of intervals
   `[lo, hi)` whose bounds are linear integer terms -- literals, `const`s,
-  `sizeof`, immutable integer bindings and parameters, `.len` of a slice
-  binding, `+`, `-` and `*` by a constant. Reading element `P[j]` needs `j`
+  `sizeof`, immutable integer bindings and parameters, versioned mutable
+  locals (below), `.len` of a slice binding, `+`, `-` and `*` by a constant. Reading element `P[j]` needs `j`
   in the set, reading or viewing `P[a..<b]` needs `[a, b)`, and reading the
   whole leaf needs `[0, len)`; once the set covers `[0, len)` the leaf is
   `init`. A binding that is assigned or whose address is taken is not a
@@ -899,10 +899,36 @@ fn path_view(slot: borrow SyscallSlot[0]) -> [u8; 256..]
   `[lo, hi)` with `lo <= cur <= hi` moves `cur` to `hi`, each interval at
   most once, so a possibly empty prefix `[0, n)` chains into
   `[n, n + 1)`. This is the cursor shape (GitHub issue #977): a step
-  takes its start offset as an immutable parameter,
   `requires init(o[0..<at]) ensures init(o[0..<result])`, and a caller
-  chains steps through immutable `let`s. A loop that carries the offset in
-  a mutable local gives no fact.
+  advances a cursor through it.
+
+#### Versioned mutable locals (GitHub issue #978)
+
+A `let mut` binding of an unsigned integer type whose address is never
+taken is a term too, one atom per version. `let mut x = e` and every
+`x = e` start a new version; a fact about an earlier version stays true
+but no longer speaks of `x`. The new version equals `e` when `e` is a fact
+side (below), and is the callee's `result` when `e` is a call, so
+`offset = put(o, offset, b)` gets `put`'s `ensures` for the new offset.
+Any other `e` (a sum, say) gives no fact. Where arms of an `if` or `match`
+leave `x` at different versions, the merge gives `x` a fresh version and
+restates each arm's facts for it before keeping the common ones.
+
+A loop (`while`, `for`, `for ... in`) gives every versioned local its body
+assigns one head version, and keeps as its invariant the intervals that
+hold on entry (head version = entry version) and that every iteration
+re-establishes (end-of-body version = head version). The candidates are
+the intervals one iteration ends with and `[s, x)` for `s` 0 or an entry
+interval's start; the set shrinks to a fixpoint. A body with a `break`,
+`continue` or `return` keeps none. Both checks of a kept interval are z3
+obligations. After the loop the locals are at their head versions (with a
+`while` condition false), so
+
+```takibi
+let mut offset: usize = at;
+for byte in text { offset = put_byte(output, offset, byte); }
+return offset;   // init(output[0..<offset]) holds here
+```
 
 #### Path facts (GitHub issue #975)
 
@@ -917,8 +943,8 @@ Coverage may use linear facts that hold on the path, all quantifier free:
   sides that are a nonnegative constant, an immutable binding of an
   unsigned integer type (a parameter, `let`, payload binder or `for`
   counter), a view's `.len`, or `a - b` of such sides once the facts
-  already show `b <= a`. Any other side (a sum, a signed value, a mutable
-  local, a call) gives no fact, because its machine value may differ from
+  already show `b <= a`, or a versioned mutable local (its current
+  version). Any other side (a sum, a signed value, a call) gives no fact, because its machine value may differ from
   its mathematical one;
 - `for i in lo..<hi`: `lo <= i < hi` in the body, for such sides;
 - `let x: usize = min(a, b)`: `x = min(a, b)`, or `x <= a` when only `a`

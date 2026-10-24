@@ -25552,12 +25552,20 @@ fn peek(s: borrow Slot954[0]) -> u8 requires init(ss[s.index].buf) {
     t "issue #954: a contract names a parameter"
       (expect_type_error "'q' is not a parameter"
          "fn f(dst: borrow uninit []u8) ensures init(q) { zero_fill(dst); }");
-    t "issue #954: a mutable bound is not an atom"
-      (expect_type_error "'sb.buf' is viewed as memory here, but 'sb.buf' is uninitialized"
+    (* GitHub issue #978: a mutable bound is a versioned atom: the store
+       used k's first version (0), the read after `k = 8` its second. *)
+    t "issue #978: a fact about a mutable bound holds for its version"
+      (expect_ok
          (store8 ^ "struct B954 { buf: [u8; 16]; }
            scratch let mut sb: B954;
            fn f() -> usize { let s = sb.buf as []u8; let mut k: usize = 0;
            store8(s[k..<k + 8], 1); k = 8; return out(sb.buf[0..<8]); }"));
+    t "issue #978: a fact about an older version is not about the new value"
+      (expect_type_error "element 8 of it"
+         (store8 ^ "struct B954 { buf: [u8; 16]; }
+           scratch let mut sb: B954;
+           fn f() -> usize { let s = sb.buf as []u8; let mut k: usize = 0;
+           store8(s[k..<k + 8], 1); k = 8; return out(s[k..<k + 8]); }"));
   ]
 
 (* GitHub issue #975: branch conditions, loop bounds and min bindings as
@@ -25808,6 +25816,42 @@ fn g(b: borrow uninit []u8) -> u8 { zero_fill(b); return 0; }" in
                  ensures init(o[0..<result]) {
            let first: usize = put(o, 0, b);
            return skip(o, first); }"));
+    (* GitHub issue #978: a mutable cursor is a versioned atom; a merge
+       restates each arm's facts for a fresh version, and a loop keeps the
+       intervals that hold on entry and that each iteration re-establishes. *)
+    t "issue #978: a cursor advanced in a loop keeps its prefix invariant"
+      (expect_ok (cursor_put ^ "fn text(o: borrow uninit [u8; 64..], at: usize,
+                         t: borrow []const u8) -> usize
+                 requires init(o[0..<at]) ensures init(o[0..<result]) {
+           let mut c: usize = at;
+           for b in t { c = put(o, c, b); }
+           return c; }"));
+    t "issue #978: a cursor advanced in a counted loop keeps its invariant"
+      (expect_ok (cursor_put ^ "fn rows(o: borrow uninit [u8; 64..], n: usize) -> usize
+                 ensures init(o[0..<result]) {
+           let mut c: usize = 0;
+           for i: usize in 0..<4 { if (i < n) { c = put(o, c, 1); c = put(o, c, 2); } }
+           return c; }"));
+    t "issue #978: a loop that skips an element breaks the invariant"
+      (expect_type_error "required initialized by 'put'"
+         (cursor_put ^ "fn text(o: borrow uninit [u8; 64..], t: borrow []const u8) -> usize
+                 ensures init(o[0..<result]) {
+           let mut c: usize = 0;
+           for b in t { c = put(o, c + 1, b); }
+           return c; }"));
+    t "issue #978: an if that advances the cursor on one arm merges as a phi"
+      (expect_ok (cursor_put ^ "fn maybe(o: borrow uninit [u8; 64..], b: u8) -> usize
+                 ensures init(o[0..<result]) {
+           let mut c: usize = put(o, 0, b);
+           if (b == 0) { c = put(o, c, b); }
+           return c; }"));
+    t "issue #978: a loop with a break keeps no invariant"
+      (expect_type_error "the ensures clause needs it initialized"
+         (cursor_put ^ "fn text(o: borrow uninit [u8; 64..], t: borrow []const u8) -> usize
+                 ensures init(o[0..<result]) {
+           let mut c: usize = 0;
+           for b in t { if (b == 0) { break; } c = put(o, c, b); }
+           return c; }"));
     t "issue #977: the walk steps through an interval that may be empty"
       (fun () ->
          let o = Init_pred.atom "o" in

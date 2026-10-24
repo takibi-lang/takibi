@@ -109,6 +109,12 @@ type state = {
   iv : (leaf * Init_pred.interval) list;
   eqs : Init_pred.eqs;
   facts : Init_pred.facts;   (* GitHub issue #975: linear path facts *)
+  vers : int Types.IntMap.t;
+    (* GitHub issue #978: the current version of each versioned mutable
+       local (binding id -> version). Atom `v<id>@<k>` is the value the
+       local held at version k; an assignment starts a new version, so a
+       fact about an older version stays true and simply stops being about
+       the local. *)
 }
 
 (* A tracked view of an array or slice leaf: elements [off, off + len) of
@@ -233,12 +239,16 @@ let check
     | _ -> ()) contracts;
   (* ---- immutable bindings: the atoms of linear terms ------------------- *)
   let mutable_ids = Hashtbl.create 16 in
+  let let_mut_ids = Hashtbl.create 16 in
   let binding_names = Hashtbl.create 16 in
   let rec scan_stmts ss = List.iter scan_stmt ss
   and scan_stmt (s : Ast.stmt) =
     (match s.desc, Local_bindings.ids_for_stmt bindings s with
      | (Ast.Let (_, n, _, _, _) | Ast.LetMatch (_, n, _, _, _)), id :: _
      | Ast.For (n, _, _, _, _), [_; id] -> Hashtbl.replace binding_names id n
+     | _ -> ());
+    (match s.desc, Local_bindings.ids_for_stmt bindings s with
+     | Ast.Let (true, _, _, _, _), id :: _ -> Hashtbl.replace let_mut_ids id ()
      | _ -> ());
     (match s.desc with
      | Ast.Let (true, _, _, _, _) | Ast.LetTuple _ | Ast.LetMatch (true, _, _, _, _) ->
@@ -277,6 +287,7 @@ let check
      atoms. By binding id where the name resolves (GitHub issue #975: a
      same-named binding elsewhere in the function stays an atom), else by
      name, conservatively. *)
+  let addr_taken = Hashtbl.create 8 in
   let written =
     let acc = Hashtbl.create 8 in
     let note (v : Ast.expr) n =
@@ -284,7 +295,11 @@ let check
       | Some id -> Hashtbl.replace acc ("#" ^ string_of_int id) ()
       | None -> Hashtbl.replace acc n () in
     let rec go (e : Ast.expr) = match e.desc with
-      | Ast.AddrOf ({ desc = Ast.Var n; _ } as v) -> note v n
+      | Ast.AddrOf ({ desc = Ast.Var n; _ } as v) ->
+          note v n;
+          (match Local_bindings.id_for_expr bindings v with
+           | Some id -> Hashtbl.replace addr_taken id ()
+           | None -> Hashtbl.replace addr_taken (-1) ())
       | Ast.Assign (({ desc = Ast.Var n; _ } as v), rhs) -> note v n; go rhs
       | Ast.Assign (l, r) -> go l; go r
       | Ast.AddrOf x | Ast.Bnot x | Ast.Deref x | Ast.Cast (_, x)
@@ -325,7 +340,9 @@ let check
     if String.length a > 3 && String.sub a 0 3 = "len" then
       name_of (String.sub a 3 (String.length a - 3)) ^ ".len"
     else if String.length a > 1 && a.[0] = 'v' then
-      name_of (String.sub a 1 (String.length a - 1))
+      (match String.index_opt a '@' with
+       | Some i -> name_of (String.sub a 1 (i - 1)) ^ "@" ^ String.sub a (i + 1) (String.length a - i - 1)
+       | None -> name_of (String.sub a 1 (String.length a - 1)))
     else a in
   let show l = Init_pred.to_string ~name:atom_name l in
   (* ---- places ---------------------------------------------------------- *)
@@ -377,6 +394,30 @@ let check
                                  && p.root.[0] = 'L' ->
         Some (len_atom (int_of_string (String.sub p.root 1 (String.length p.root - 1))))
     | _ -> None in
+  let unsigned_ty t = match strip t with
+    | Ast.TypeU8 | Ast.TypeU16 | Ast.TypeU32 | Ast.TypeU64 | Ast.TypeUsize -> true
+    | _ -> false in
+  let arm_types : (int, Ast.type_expr) Hashtbl.t = Hashtbl.create 8 in
+  let id_type id = match Types.IntMap.find_opt id finfo.Types.binding_types with
+    | Some t -> Some t
+    | None when Hashtbl.mem arm_types id -> Hashtbl.find_opt arm_types id
+    | None ->
+        (match List.find_opt (fun (_, i) -> i = id) param_ids with
+         | Some (n, _) -> List.assoc_opt n param_types
+         | None -> None) in
+  let unsigned_id id = match id_type id with Some t -> unsigned_ty t | None -> false in
+  (* GitHub issue #978: a mutable unsigned local whose address is never
+     taken is a versioned atom. [cur_vers] is the version map of the state
+     being walked; every walk entry point sets it from its state. *)
+  let versionable x id =
+    not (immutable_var x id) && Hashtbl.mem let_mut_ids id && unsigned_id id
+    && not (Hashtbl.mem addr_taken id) && not (Hashtbl.mem addr_taken (-1)) in
+  let cur_vers = ref Types.IntMap.empty in
+  let next_ver = ref 0 in
+  let fresh_ver () = incr next_ver; !next_ver in
+  let ver_name id k = Printf.sprintf "v%d@%d" id k in
+  let ver_of vers id = match Types.IntMap.find_opt id vers with Some k -> k | None -> 0 in
+  let ver_atom id = Init_pred.atom (ver_name id (ver_of !cur_vers id)) in
   let aliases : (int, view) Hashtbl.t = Hashtbl.create 8 in
   (* Linear integer terms of the body. *)
   let rec lin (e : Ast.expr) : Init_pred.lin option =
@@ -385,6 +426,7 @@ let check
     | Ast.Var x ->
         (match Local_bindings.id_for_expr bindings e with
          | Some id when immutable_var x id -> Some (v_atom id)
+         | Some id when versionable x id -> Some (ver_atom id)
          | Some _ -> None
          | None -> Option.map Init_pred.const (Const_env.find x))
     | Ast.SizeOf t -> Option.map Init_pred.const (size_of t)
@@ -429,18 +471,6 @@ let check
          | _ -> None)
   in
   (* ---- path facts (GitHub issue #975) ---------------------------------- *)
-  let unsigned_ty t = match strip t with
-    | Ast.TypeU8 | Ast.TypeU16 | Ast.TypeU32 | Ast.TypeU64 | Ast.TypeUsize -> true
-    | _ -> false in
-  let arm_types : (int, Ast.type_expr) Hashtbl.t = Hashtbl.create 8 in
-  let id_type id = match Types.IntMap.find_opt id finfo.Types.binding_types with
-    | Some t -> Some t
-    | None when Hashtbl.mem arm_types id -> Hashtbl.find_opt arm_types id
-    | None ->
-        (match List.find_opt (fun (_, i) -> i = id) param_ids with
-         | Some (n, _) -> List.assoc_opt n param_types
-         | None -> None) in
-  let unsigned_id id = match id_type id with Some t -> unsigned_ty t | None -> false in
   (* A comparison side whose mathematical value is its machine value, so a
      fact about it is a fact about the program: a nonnegative constant, an
      immutable unsigned binding, a view's length, or a - b of such sides
@@ -455,6 +485,7 @@ let check
     | Ast.Var x ->
         (match Local_bindings.id_for_expr bindings e with
          | Some id when immutable_var x id && unsigned_id id -> Some (v_atom id)
+         | Some id when versionable x id -> Some (ver_atom id)
          | Some _ -> None
          | None -> nonneg_const (lin e))
     | Ast.FieldGet (b, "len") when view_of b <> None -> lin e
@@ -860,10 +891,79 @@ let check
   let bound_guarded (e : Ast.expr) = match Local_bindings.id_for_expr bindings e with
     | Some id -> Hashtbl.find_opt bound_gs id
     | None -> None in
+  (* GitHub issue #978: the versioned locals a statement or expression may
+     assign (or rebind with a `let`), syntactically. *)
+  let var_id (v : Ast.expr) x = match Local_bindings.id_for_expr bindings v with
+    | Some id when versionable x id -> Some id
+    | _ -> None in
+  let rec assigned_e acc (e : Ast.expr) = match e.desc with
+    | Ast.Assign (({ desc = Ast.Var x; _ } as v), r) ->
+        let acc = match var_id v x with Some id -> id :: acc | None -> acc in
+        assigned_e acc r
+    | Ast.Assign (l, r) | Ast.BinOp (_, l, r) | Ast.Index (l, r) ->
+        assigned_e (assigned_e acc l) r
+    | Ast.AddrOf x | Ast.Bnot x | Ast.Deref x | Ast.Cast (_, x)
+    | Ast.FieldGet (x, _) | Ast.Unsafe x | Ast.VariantCtor (_, _, x) -> assigned_e acc x
+    | Ast.SliceOf (a, b, c) -> assigned_e (assigned_e (assigned_e acc a) b) c
+    | Ast.Call (_, xs) | Ast.StructLit xs | Ast.TupleLit xs -> List.fold_left assigned_e acc xs
+    | _ -> acc
+  and assigned_s acc (s : Ast.stmt) =
+    let acc = match s.desc, Local_bindings.ids_for_stmt bindings s with
+      | (Ast.Let (true, n, _, _, _)), id :: _ when versionable n id -> id :: acc
+      | _ -> acc in
+    match s.desc with
+    | Ast.Let (_, _, _, Some e, _) | Ast.LetTuple (_, e) | Ast.Expr e
+    | Ast.Return (Some e) | Ast.Yield e -> assigned_e acc e
+    | Ast.Block b | Ast.UnsafeBlock b -> List.fold_left assigned_s acc b
+    | Ast.If (c, a, b) ->
+        List.fold_left assigned_s (List.fold_left assigned_s (assigned_e acc c) a) b
+    | Ast.While (c, b) -> List.fold_left assigned_s (assigned_e acc c) b
+    | Ast.For (_, _, lo, hi, b) ->
+        List.fold_left assigned_s (assigned_e (assigned_e acc lo) hi) b
+    | Ast.ForEach (_, e, b) -> List.fold_left assigned_s (assigned_e acc e) b
+    | Ast.Match (d, arms) | Ast.LetMatch (_, _, _, d, arms) ->
+        List.fold_left (fun acc a -> match a with
+          | Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b | Ast.ArmMiss b
+          | Ast.ArmIntLit (_, b) | Ast.ArmByteSliceLit (_, b) ->
+              List.fold_left assigned_s acc b) (assigned_e acc d) arms
+    | _ -> acc in
+  (* A fresh version for each of [ids]: nothing is known of the new values. *)
+  let bump st ids =
+    let vers = List.fold_left (fun m id -> Types.IntMap.add id (fresh_ver ()) m)
+        st.vers ids in
+    cur_vers := vers; { st with vers } in
+  (* Assign versioned local [id] the value of [rhs]: a call's result is
+     named by the new version, so the callee's ensures over `result` is
+     about it; a fact side (a constant, another atom) is recorded as an
+     equality. Any other value gives no fact. *)
+  let assign_versioned (expr : state -> Ast.expr -> state)
+      (call : state -> Ast.expr -> result:Init_pred.lin option -> state * guarded list)
+      st id (rhs : Ast.expr) =
+    cur_vers := st.vers;
+    let k = fresh_ver () in
+    let name = ver_name id k in
+    let finish st eq =
+      let vers = Types.IntMap.add id k st.vers in
+      cur_vers := vers;
+      let st = { st with vers } in
+      match eq with
+      | Some t -> { st with eqs = st.eqs @ [(name, t)] }
+      | None -> st in
+    match rhs.desc with
+    | Ast.Call (f, _) when f <> "min" && f <> "zero_fill" && f <> "assume_init" ->
+        let (st, _) = call st rhs ~result:(Some (Init_pred.atom name)) in
+        finish st None
+    | _ ->
+        let st = expr st rhs in
+        cur_vers := st.vers;
+        finish st (side st.facts rhs) in
   (* ---- expressions ------------------------------------------------------ *)
   let rec expr st (e : Ast.expr) : state =
+    cur_vers := st.vers;
     if is_len_of e then st else
     match e.desc with
+    | Ast.Assign (({ desc = Ast.Var x; _ } as v), rhs) when var_id v x <> None ->
+        assign_versioned expr call st (Option.get (var_id v x)) rhs
     | Ast.Index (b, j) when view_of b <> None ->
         let v = Option.get (view_of b) in
         let st = expr st j in
@@ -914,7 +1014,8 @@ let check
     | Ast.BinOp ((Ast.And | Ast.Or) as op, l, r) ->
         let st = expr st l in
         (* The right operand runs only when the left one did not decide. *)
-        ignore (expr (assume st l (op = Ast.And)) r); st
+        ignore (expr (assume st l (op = Ast.And)) r);
+        bump st (assigned_e [] r)
     | Ast.BinOp (_, l, r) -> expr (expr st l) r
     | Ast.Index (l, r) -> expr (expr st l) r
     | Ast.Assign ({ desc = Ast.Index (b, j); _ }, rhs) when view_of b <> None ->
@@ -1290,13 +1391,44 @@ let check
     | Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b | Ast.ArmMiss b
     | Ast.ArmIntLit (_, b) | Ast.ArmByteSliceLit (_, b) -> b
   in
+  (* GitHub issue #978: restate a state's facts about atom [a] for atom
+     [b]. *)
+  let rename_state st a b =
+    let t = Init_pred.atom b in
+    let r = Init_pred.subst a t in
+    { st with
+      iv = List.map (fun (l, (lo, hi)) -> (l, (r lo, r hi))) st.iv;
+      eqs = List.map (fun (x, e) -> ((if x = a then b else x), r e)) st.eqs;
+      facts = { Init_pred.ge = List.map r st.facts.Init_pred.ge;
+                mins = List.map (fun (x, l, h) ->
+                  ((if x = a then b else x), r l, r h)) st.facts.Init_pred.mins } } in
   (* A merge keeps an interval only if every live arm has it, or has the
      leaf fully initialized. *)
   let merge results =
     match List.filter (fun (_, dead) -> not dead) results with
-    | [] -> ({ u = Leaves.empty; iv = []; eqs = []; facts = Init_pred.no_facts }, true)
-    | (first, _) :: rest ->
-        let all = List.map fst ((first, false) :: rest) in
+    | [] -> ({ u = Leaves.empty; iv = []; eqs = []; facts = Init_pred.no_facts;
+                vers = Types.IntMap.empty }, true)
+    | live ->
+        (* GitHub issue #978: a local whose version differs between arms
+           gets a fresh version, and each arm's facts about its own version
+           are restated for the fresh one (a phi). *)
+        let states = List.map fst live in
+        let ids = List.sort_uniq compare (List.concat_map (fun s ->
+          List.map fst (Types.IntMap.bindings s.vers)) states) in
+        let (vers, states) = List.fold_left (fun (vers, states) id ->
+          let vs = List.map (fun s -> Types.IntMap.find_opt id s.vers) states in
+          match vs with
+          | Some k :: rest when List.for_all (( = ) (Some k)) rest ->
+              (Types.IntMap.add id k vers, states)
+          | _ ->
+              let k = fresh_ver () in
+              (Types.IntMap.add id k vers,
+               List.map (fun s -> match Types.IntMap.find_opt id s.vers with
+                 | Some old -> rename_state s (ver_name id old) (ver_name id k)
+                 | None -> s) states))
+          (Types.IntMap.empty, states) ids in
+        let first = List.hd states and rest = List.map (fun s -> (s, false)) (List.tl states) in
+        let all = states in
         let u = List.fold_left (fun acc s -> Leaves.union acc s.u) first.u
             (List.map fst rest) in
         let cands = List.sort_uniq compare
@@ -1321,7 +1453,7 @@ let check
           in_all (fun s -> List.exists (fun (x', a', b') ->
             x = x' && Init_pred.equal a a' && Init_pred.equal b b') s.facts.Init_pred.mins))
           first.facts.Init_pred.mins in
-        ({ u; iv; eqs; facts = { Init_pred.ge; mins } }, false)
+        ({ u; iv; eqs; facts = { Init_pred.ge; mins }; vers }, false)
   in
   let trackable ty = match strip ty with
     | Ast.TypeArray _ -> false
@@ -1421,7 +1553,14 @@ let check
     r
   and stmt_inner st (s : Ast.stmt) =
     cur_loc := s.loc;
+    cur_vers := st.vers;
     match s.desc with
+    | Ast.Let (true, name, _, Some e, _)
+      when (match Local_bindings.ids_for_stmt bindings s with
+            | id :: _ -> versionable name id | [] -> false) ->
+        (* GitHub issue #978: `let mut x = e` starts a version of x. *)
+        let id = List.hd (Local_bindings.ids_for_stmt bindings s) in
+        (assign_versioned expr call st id e, false)
     | Ast.Let (_, name, _, None, _) ->
         (match Local_bindings.ids_for_stmt bindings s with
          | id :: _ ->
@@ -1543,8 +1682,9 @@ let check
              let st = expr st c in
              merge [stmts (assume st c true) yes; stmts (assume st c false) no])
     | Ast.While (c, body) ->
-        let st = expr st c in
-        ignore (stmts (assume st c true) body); (st, false)
+        let head = loop_head st body (fun h ->
+          let h = expr h c in (assume h c true, h)) in
+        (assume (expr head c) c false, false)
     | Ast.For (_, _, lo, hi, body) ->
         let st = expr (expr st lo) hi in
         (* GitHub issue #975: the counter lies in [lo, hi) in the body. *)
@@ -1557,12 +1697,17 @@ let check
                | Some h -> add_fact st (Init_pred.sub (Init_pred.sub h i) (Init_pred.const 1))
                | None -> st)
           | _ -> st in
-        ignore (stmts in_body body);
-        (List.fold_left (fun st (p, iv) -> add_iv st p iv) st
+        let head = loop_head st body (fun h ->
+          (* the head state plus the counter's range facts, which are
+             about the immutable counter and bounds fixed before the loop *)
+          ({ h with facts = { h.facts with Init_pred.ge =
+               List.filter (fun t -> not (List.exists (Init_pred.equal t) st.facts.Init_pred.ge))
+                 in_body.facts.Init_pred.ge @ h.facts.Init_pred.ge } }, h)) in
+        (List.fold_left (fun st (p, iv) -> add_iv st p iv) head
            (filled_by_loop s lo hi body), false)
     | Ast.ForEach (_, seq, body) ->
         let st = expr st seq in
-        ignore (stmts st body); (st, false)
+        (loop_head st body (fun h -> (h, h)), false)
     | Ast.Match (d, arms) | Ast.LetMatch (_, _, _, d, arms) ->
         let (st, gs) = match d.desc with
           | Ast.Call _ -> call st d ~result:None
@@ -1587,9 +1732,109 @@ let check
           stmts st (arm_body a)) arms)
     | Ast.Break | Ast.Continue -> (st, true)
     | Ast.StaticAssert _ -> (st, false)
+  (* GitHub issue #978: the state at a loop's head. The versioned locals
+     the body assigns get one fresh version each, the head version, and
+     the head keeps the candidate intervals that hold on entry (with the
+     head version equal to the entry version) and that each iteration
+     re-establishes (with the end-of-body version renamed to the head's):
+     a quantifier-free inductive invariant, found by shrinking the
+     candidate set to a fixpoint. Both checks of a kept candidate become
+     z3 obligations. A body that leaves an iteration by `break` or
+     `continue` keeps no candidate. [enter h] gives the state the body
+     starts from and the head state itself (a `while` evaluates its
+     condition first). The body is checked once, for real, from the
+     fixpoint. *)
+  and loop_head st body enter =
+    let ids = List.sort_uniq compare (List.fold_left assigned_s [] body) in
+    let hv = List.map (fun id -> (id, fresh_ver ())) ids in
+    let to_head (s : state) =
+      let s = List.fold_left (fun s (id, k) ->
+        match Types.IntMap.find_opt id s.vers with
+        | Some old when old <> k ->
+            (* the head version's atom still names the value at the
+               iteration's start; move it aside before the end version
+               takes its name *)
+            let s = rename_state s (ver_name id k) (ver_name id (fresh_ver ())) in
+            rename_state s (ver_name id old) (ver_name id k)
+        | _ -> s) s hv in
+      { s with vers = List.fold_left (fun m (id, k) -> Types.IntMap.add id k m) s.vers hv } in
+    let head_of cands =
+      let h = { st with vers = List.fold_left (fun m (id, k) -> Types.IntMap.add id k m)
+                                 st.vers hv } in
+      { h with iv = h.iv @ List.filter (fun (l, _) -> Leaves.mem l h.u) cands } in
+    (* entry: the head versions equal the entry ones *)
+    let entry_eqs = List.filter_map (fun (id, k) ->
+      match Types.IntMap.find_opt id st.vers with
+      | Some old -> Some (ver_name id k, Init_pred.atom (ver_name id old))
+      | None -> None) hv in
+    let holds (s : state) eqs (l, iv) =
+      not (Leaves.mem l s.u)
+      || Init_pred.uncovered ~eqs:(eqs @ s.eqs) ~facts:s.facts (ivs_of s l) iv = None in
+    let record (s : state) eqs (l, iv) what =
+      if Leaves.mem l s.u then
+        Range_obligation.record_text !cur_loc
+          (Init_pred.obligation
+             ~claim:(Printf.sprintf "loop invariant %s: [%s, %s)" what
+                       (show (fst iv)) (show (snd iv)))
+             ~facts:s.facts (eqs @ s.eqs) (ivs_of s l) iv) in
+    let run h =
+      let (start, _) = enter h in
+      let (fin, dead) = stmts start body in
+      if dead then None else Some (to_head fin) in
+    let mentions_head (_, (lo, hi)) =
+      List.exists (fun (id, k) ->
+        let a = ver_name id k in
+        Init_pred.SMap.mem a lo.Init_pred.m || Init_pred.SMap.mem a hi.Init_pred.m) hv in
+    let quiet f =
+      let saved_errors = !errors and saved_obl = !Range_obligation.enabled
+      and saved_trace = !trace_func in
+      Range_obligation.enabled := false; trace_func := None;
+      let r = f () in
+      errors := saved_errors; Range_obligation.enabled := saved_obl;
+      trace_func := saved_trace; r in
+    let cands =
+      if ids = [] || leaves_iteration 0 body then []
+      else
+        quiet (fun () ->
+          (* candidates: what one iteration from the bare head ends with *)
+          let first = match run (head_of []) with
+            | Some fin -> List.filter mentions_head fin.iv
+            | None -> [] in
+          (* and the prefix shape: from 0, or from an entry interval's
+             start, up to each head version *)
+          let starts l = Init_pred.const 0 :: List.map fst (ivs_of st l) in
+          let shaped = List.concat_map (fun l ->
+            List.concat_map (fun lo ->
+              List.map (fun (id, k) -> (l, (lo, Init_pred.atom (ver_name id k)))) hv)
+              (starts l)) (Leaves.elements st.u) in
+          let first = List.sort_uniq compare (first @ shaped) in
+          let first = List.filter (holds st entry_eqs) first in
+          let rec fix cands n =
+            if cands = [] || n = 0 then [] else
+            match run (head_of cands) with
+            | None -> cands
+            | Some fin ->
+                let kept = List.filter (holds fin []) cands in
+                if List.length kept = List.length cands then cands
+                else fix kept (n - 1) in
+          fix first 6) in
+    let head = head_of cands in
+    (* the real check, and the invariant's obligations *)
+    let (start, at_head) = enter head in
+    let (fin, dead) = stmts start body in
+    if not dead then begin
+      let fin = to_head fin in
+      List.iter (fun c ->
+        record st entry_eqs c "on entry";
+        record fin [] c "preserved") cands
+    end;
+    cur_vers := at_head.vers;
+    at_head
   in
   (* Requires: assumed at entry. *)
-  let entry = { u = entry_u; iv = []; eqs = []; facts = Init_pred.no_facts } in
+  ignore assigned_s;
+  let entry = { u = entry_u; iv = []; eqs = []; facts = Init_pred.no_facts;
+                vers = Types.IntMap.empty } in
   let entry = List.fold_left (fun st (c : Init_state.clause) ->
     match c.body with
     | Init_state.CPlain p when c.requires ->
