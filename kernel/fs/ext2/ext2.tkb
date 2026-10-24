@@ -1459,13 +1459,16 @@ fn ext2_bitmap_fill(mount: Ext2Mount, inode_bitmap: bool,
         BlockIoResult::Invalid => { }
         BlockIoResult::Ok => { ok = ext2_recount(slot, mount); }
     }
-    ext2_slot_release(slot);
     let mut fill: Ext2BitmapFill[0] = { inode_bitmap, marked };
-    if (ok) { return Ext2BitmapFillResult::Filled(fill); }
-    match ext2_bitmap_fill_restore(mount, fill, saved) {
+    if (ok) {
+        ext2_slot_release(slot);
+        return Ext2BitmapFillResult::Filled(fill);
+    }
+    match ext2_bitmap_fill_restore_with(slot, mount, fill, saved) {
         Ext2OwnerReleaseResult::Invalid => { }
         Ext2OwnerReleaseResult::Released => { }
     }
+    ext2_slot_release(slot);
     return Ext2BitmapFillResult::Invalid;
 }
 
@@ -1478,16 +1481,24 @@ fn ext2_bitmap_fill_marked(fill: borrow Ext2BitmapFill[0]) -> usize {
 fn ext2_bitmap_fill_restore(mount: Ext2Mount, fill: sink Ext2BitmapFill[0],
                             saved: [u8; KERNEL_BLOCK_SIZE..])
         -> Ext2OwnerReleaseResult !{unsafe} {
+    let slot: Ext2Slot[0] = ext2_slot_acquire();
+    let result: Ext2OwnerReleaseResult =
+        ext2_bitmap_fill_restore_with(slot, mount, fill, saved);
+    ext2_slot_release(slot);
+    return result;
+}
+
+private fn ext2_bitmap_fill_restore_with(slot: borrow Ext2Slot[0],
+        mount: Ext2Mount, fill: sink Ext2BitmapFill[0],
+        saved: [u8; KERNEL_BLOCK_SIZE..])
+        -> Ext2OwnerReleaseResult !{unsafe} {
     let mut bitmap_block: usize = mount.block_bitmap_block;
     if (fill.inode_bitmap) { bitmap_block = mount.inode_bitmap_block; }
     match block_write(mount.device, bitmap_block, saved) {
         BlockIoResult::Invalid => { return Ext2OwnerReleaseResult::Invalid; }
         BlockIoResult::Ok => { }
     }
-    let slot: Ext2Slot[0] = ext2_slot_acquire();
-    let ok: bool = ext2_recount(slot, mount);
-    ext2_slot_release(slot);
-    if (ok) { return Ext2OwnerReleaseResult::Released; }
+    if (ext2_recount(slot, mount)) { return Ext2OwnerReleaseResult::Released; }
     return Ext2OwnerReleaseResult::Invalid;
 }
 
