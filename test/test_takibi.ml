@@ -62,6 +62,38 @@ let unused_errors ?(external_entries = ["main"]) src =
   let types = Type_inf.infer_program prog in
   Unused_functions.check ~external_entries ~check_files:[] prog types
 
+(* GitHub issue #987: the --emit-call-graph table for one source, written
+   to a real file because the body hash re-lexes the definition from disk.
+   Rows are (name, [(column, cell)]). *)
+let call_graph_rows src =
+  let file = Filename.temp_file "call_graph" ".tkb" in
+  let table = Filename.temp_file "call_graph" ".tsv" in
+  Out_channel.with_open_bin file (fun oc -> output_string oc src);
+  Def_extent.enabled := true;
+  let parsed =
+    Fun.protect ~finally:(fun () -> Def_extent.enabled := false) (fun () ->
+      ignore (parse "fn reset_only() {}"); (* the resets only *)
+      In_channel.with_open_bin file (fun ic ->
+        let lexbuf = Lexing.from_channel ic in
+        Lexing.set_filename lexbuf file;
+        Parser.program Lexer.read lexbuf)) in
+  let prog = Declared_type_resolver.run
+      (Monomorphize.run (Dma_fixed_record.run (Publish_record.run parsed))) in
+  let types = Type_inf.infer_program prog in
+  Out_channel.with_open_bin table (fun oc -> Call_graph.write_table oc prog types);
+  let lines = In_channel.with_open_bin table In_channel.input_all
+    |> String.split_on_char '\n' |> List.filter (( <> ) "") in
+  Sys.remove file; Sys.remove table;
+  match lines with
+  | version :: header :: rows ->
+      Alcotest.(check bool) "format line" true
+        (String.starts_with ~prefix:"# takibi call graph, format 1" version);
+      let columns = String.split_on_char '\t' header in
+      List.map (fun row ->
+        let cells = List.combine columns (String.split_on_char '\t' row) in
+        (List.assoc "name" cells, cells)) rows
+  | _ -> Alcotest.fail "call graph table has no header"
+
 (* Parses each (filename, src) pair as if it were a distinct source file
    (Lexing.set_filename, matching bin/main.ml's own parse_file) and
    concatenates the results, mirroring how multiple .tkb files given to
@@ -3020,6 +3052,66 @@ let infer_tests = [
       | [Unused_functions.Unused f] ->
           Alcotest.(check string) "the mixed function" "mixed" f.Ast.name
       | _ -> Alcotest.fail "expected exactly one unused function");
+
+  (* GitHub issue #987: generic instances share their template's def_loc,
+     and the loc-keyed definition key named one instance for all of them,
+     so a helper reached only through the other instance was reported
+     unused. Which instance won depended on the type names, so both
+     orders are compiled. *)
+  Alcotest.test_case "unused function reachability follows every generic instance" `Quick
+    (fun () ->
+      List.iter (fun (used, other) ->
+        match unused_errors
+            (Printf.sprintf
+              "struct %s { x: usize; } struct %s { y: u8; }
+               fn helper() -> usize { return 1; }
+               fn g(T: type, p: &T) -> usize { return helper(); }
+               fn main() -> usize { let mut a: %s = { 1 }; return g(&a); }
+               fn other() -> usize { let mut b: %s = { 2 }; return g(&b); }"
+              used other used other) with
+        | [Unused_functions.Unused f] ->
+            Alcotest.(check string) ("only the uncalled caller, with " ^ used)
+              "other" f.Ast.name
+        | errors -> Alcotest.failf "with %s: expected only 'other' unused, got %d"
+                      used (List.length errors)) ["A", "B"; "Z", "B"]);
+
+  Alcotest.test_case "call graph table rows" `Quick
+    (fun () ->
+      let rows = call_graph_rows
+        "struct A { x: usize; } struct B { y: u8; }
+         private fn secret() -> usize { return 1; }
+         fn g(T: type, p: &T) -> usize { return secret(); }
+         fn callback() {}
+         fn take(f: fn() -> void) { f(); }
+         fn main() -> usize {
+           let mut a: A = { 1 }; let mut b: B = { 2 };
+           take(callback);
+           return g(&a) + g(&b);
+         }" in
+      let field name column = List.assoc column (List.assoc name rows) in
+      Alcotest.(check string) "private qualifier" "private" (field "secret" "qualifiers");
+      Alcotest.(check string) "generic instances are one row" "1"
+        (string_of_int (List.length (List.filter (fun (n, _) -> n = "g") rows)));
+      Alcotest.(check bool) "callee keeps its file and line" true
+        (String.starts_with ~prefix:"secret@" (field "g" "callees"));
+      Alcotest.(check string) "both instances' callers merge"
+        "1" (string_of_int (List.length
+          (String.split_on_char ',' (field "g" "callers"))));
+      Alcotest.(check string) "indirect call is *" "*" (field "take" "callees");
+      Alcotest.(check string) "params" "f: fn()->void" (field "take" "params");
+      Alcotest.(check bool) "function value" true
+        (String.starts_with ~prefix:"callback@" (field "main" "values")));
+
+  Alcotest.test_case "call graph body hash ignores comments, not literals" `Quick
+    (fun () ->
+      let hash src = List.assoc "body_hash" (List.assoc "f" (call_graph_rows src)) in
+      let base = hash "fn f() -> usize {\n  // why\n  let s = \"a // b\";\n  return 1;\n}\nfn main() { f(); }" in
+      Alcotest.(check string) "comment-only edit keeps the hash" base
+        (hash "fn f() -> usize {\n  /* reworded */ // other\n  let s =   \"a // b\";\n  return 1; }\nfn main() { f(); }");
+      Alcotest.(check bool) "literal edit changes it" true
+        (base <> hash "fn f() -> usize {\n  // why\n  let s = \"a // b\";\n  return 2;\n}\nfn main() { f(); }");
+      Alcotest.(check bool) "string edit changes it" true
+        (base <> hash "fn f() -> usize {\n  // why\n  let s = \"a  // b\";\n  return 1;\n}\nfn main() { f(); }"));
   Alcotest.test_case "overflow audit records source integer operators only and resets" `Quick
     (fun () ->
       ignore (infer_files ["audit.tkb",

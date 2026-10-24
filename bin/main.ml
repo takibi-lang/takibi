@@ -76,6 +76,7 @@ let () =
   let emit_overflow_audit = ref "" in
   let emit_raw_deref_audit = ref "" in
   let emit_raw_site_counts = ref "" in
+  let emit_call_graph = ref "" in
   let emit_held_guards = ref "" in
   let emit_effect_matrix = ref false in
   let emit_tla = ref "" in
@@ -157,6 +158,16 @@ let () =
            exit 1
          );
          emit_raw_site_counts := Sys.argv.(!i)
+     | "--emit-call-graph" ->
+         (* GitHub issue #987: the resolved call graph, one TSV row per
+            function definition (docs/CALL_GRAPH.md), for the build checks
+            that would otherwise re-derive it from source. *)
+         incr i;
+         if !i >= Array.length Sys.argv then (
+           Printf.eprintf "Error: --emit-call-graph requires a path\n";
+           exit 1
+         );
+         emit_call_graph := Sys.argv.(!i)
      | "--emit-alloc-words" ->
          (* GitHub issue #923: the words this run allocated on the OCaml
             heap, written at exit. Unlike time it does not depend on host
@@ -302,7 +313,7 @@ let () =
 
   if input_files = [] then (
     Printf.eprintf
-      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--frame-pointers] [--function-sections] [--forbid-trap] [--forbid-unsafe] [--confine-raw-authority] [--raw-mint-file <path>] [--require-execution-model <path>] [--device-semantics-file <path>] [--regions] [--reject-unused-functions] [--external-entry <function>] [--check-unused-file <path>] [--explain-inference] [--emit-effect-matrix] [--emit-exception-frame-offsets <StructName>] [--emit-struct-layout <StructName>] [--emit-debug-metadata <path>] [--emit-depfile <path>] [--emit-overflow-audit <path>] [--emit-raw-deref-audit <path>] [--emit-raw-site-counts <path>] [--emit-alloc-words <path>] [--emit-held-guards <path>] [--emit-range-obligations <dir>] [--emit-tla <dir> [--emit-tla-omit-cache publish|finish|refresh]] [--emit-protocol-source <dir>] [--version]\n"
+      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--frame-pointers] [--function-sections] [--forbid-trap] [--forbid-unsafe] [--confine-raw-authority] [--raw-mint-file <path>] [--require-execution-model <path>] [--device-semantics-file <path>] [--regions] [--reject-unused-functions] [--external-entry <function>] [--check-unused-file <path>] [--explain-inference] [--emit-effect-matrix] [--emit-exception-frame-offsets <StructName>] [--emit-struct-layout <StructName>] [--emit-debug-metadata <path>] [--emit-depfile <path>] [--emit-overflow-audit <path>] [--emit-raw-deref-audit <path>] [--emit-raw-site-counts <path>] [--emit-call-graph <path>] [--emit-alloc-words <path>] [--emit-held-guards <path>] [--emit-range-obligations <dir>] [--emit-tla <dir> [--emit-tla-omit-cache publish|finish|refresh]] [--emit-protocol-source <dir>] [--version]\n"
       Sys.argv.(0);
     exit 1
   );
@@ -325,6 +336,8 @@ let () =
     result
   in
 
+  (* The parser records definition ends only for the call-graph table. *)
+  Def_extent.enabled := !emit_call_graph <> "";
   (try
     Const_env.reset ();
     Type_layout.reset ();
@@ -516,6 +529,12 @@ let () =
       let out = open_out !emit_raw_site_counts in
       List.iter (fun (file, n) -> Printf.fprintf out "%d\t%s\n" n file)
         (Raw_authority_policy.site_counts ~source_program:source_prog ());
+      close_out out
+    end;
+
+    if !emit_call_graph <> "" then begin
+      let out = open_out !emit_call_graph in
+      Call_graph.write_table out prog prog_types;
       close_out out
     end;
 

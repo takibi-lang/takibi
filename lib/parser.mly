@@ -782,6 +782,7 @@ func_def:
     {
       Init_state.set_contracts $symbolstartpos cs;
       Init_state.finish_func $symbolstartpos $5;
+      Def_extent.record $symbolstartpos $endpos;
       Ast.{ name = $3; params = $5; ret_type = $7; effects = $8;
             body = body_stmts; is_inline = false; is_noinline = false; is_private = p;
             where_clauses = w; def_loc = $symbolstartpos }
@@ -790,6 +791,7 @@ func_def:
     {
       Init_state.set_contracts $symbolstartpos cs;
       Init_state.finish_func $symbolstartpos $6;
+      Def_extent.record $symbolstartpos $endpos;
       Ast.{ name = $4; params = $6; ret_type = $8; effects = $9;
             body = body_stmts; is_inline = true; is_noinline = false; is_private = p;
             where_clauses = w; def_loc = $symbolstartpos }
@@ -798,6 +800,7 @@ func_def:
     {
       Init_state.set_contracts $symbolstartpos cs;
       Init_state.finish_func $symbolstartpos $6;
+      Def_extent.record $symbolstartpos $endpos;
       Ast.{ name = $4; params = $6; ret_type = $8; effects = $9;
             body = body_stmts; is_inline = false; is_noinline = true; is_private = p;
             where_clauses = w; def_loc = $symbolstartpos }

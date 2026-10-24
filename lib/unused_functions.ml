@@ -8,7 +8,7 @@ type error = Unknown_entry of string | Missing_check_file of string
 
 let check ~external_entries ~check_files (prog : toplevel list) (types : program_types) =
   let definitions = List.filter_map (function FuncDef f -> Some f | _ -> None) prog in
-  let key_of f = StringMap.find (loc_key f.def_loc) types.function_def_keys in
+  let key_of f = Call_graph.definition_key types f in
   let by_name = List.fold_left (fun m f ->
     let old = Option.value (StringMap.find_opt f.name m) ~default:[] in
     StringMap.add f.name (key_of f :: old) m
@@ -24,38 +24,11 @@ let check ~external_entries ~check_files (prog : toplevel list) (types : program
         let old = Option.value (StringMap.find_opt caller !edges) ~default:StringSet.empty in
         edges := StringMap.add caller (StringSet.add target old) !edges
   in
-  let rec expr from (e : expr) =
-    (match StringMap.find_opt (loc_key e.loc) types.function_values with
-     | Some target -> add_reference from target | None -> ());
-    match e.desc with
-    | Call (_, args) ->
-        (match StringMap.find_opt (loc_key e.loc) types.call_targets with
-         | Some target -> add_reference from target | None -> ());
-        List.iter (expr from) args
-    | VariantCtor (_, _, x) | Bnot x | Deref x | AddrOf x | Cast (_, x)
-    | FieldGet (x, _) | Unsafe x -> expr from x
-    | BinOp (_, a, b) | Index (a, b) | Assign (a, b) -> expr from a; expr from b
-    | SliceOf (base, lo, hi) -> expr from base; expr from lo; expr from hi
-    | StructLit xs | TupleLit xs -> List.iter (expr from) xs
-    | IntLit _ | BoolLit _ | StringLit _ | ByteSliceLit _ | Var _ | ViewLit _
-    | EnumVariant _ | SizeOf _ | ContainsStableOwner _ | AlignOf _ | OffsetOf _
-    | EmbedFile _ -> ()
-  and stmt from (s : stmt) = match s.desc with
-    | Return (Some e) | Expr e | Yield e | LetTuple (_, e) | StaticAssert (e, _) -> expr from e
-    | Return None | Break | Continue -> ()
-    | Block ss | UnsafeBlock ss -> List.iter (stmt from) ss
-    | Let (_, _, _, init, _) -> Option.iter (expr from) init
-    | If (c, yes, no) -> expr from c; List.iter (stmt from) yes; List.iter (stmt from) no
-    | While (c, body) -> expr from c; List.iter (stmt from) body
-    | For (_, _, lo, hi, body) -> expr from lo; expr from hi; List.iter (stmt from) body
-    | ForEach (_, collection, body) -> expr from collection; List.iter (stmt from) body
-    | Match (subject, arms) | LetMatch (_, _, _, subject, arms) ->
-        expr from subject;
-        List.iter (function
-          | ArmVariant (_, _, _, body) | ArmWild body | ArmMiss body | ArmIntLit (_, body)
-          | ArmByteSliceLit (_, body) -> List.iter (stmt from) body) arms
-  in
-  List.iter (fun f -> List.iter (stmt (Some (key_of f))) f.body) definitions;
+  (* GitHub issue #987: the edges come from the traversal --emit-call-graph
+     writes, so the two cannot disagree about what calls what. *)
+  Call_graph.iter_references (fun from -> function
+    | Call_graph.Call target | Call_graph.Value target -> add_reference from target
+    | Call_graph.Indirect -> ()) prog types;
   List.iter (fun (f : Ast.func) -> match f.effects with
     | Some effects when List.mem "interrupt" effects || List.mem "exception" effects
                      || List.mem "nmi" effects ->
@@ -74,7 +47,6 @@ let check ~external_entries ~check_files (prog : toplevel list) (types : program
     if f.body <> [] && List.for_all assertion_only f.body then
       roots := StringSet.add (key_of f) !roots) definitions;
   List.iter (function
-    | ConstDef (_, _, init, _) | LetDef (_, _, Some init, _, _, _, _) -> expr None init
     | VectorTableDef (entries, _) ->
         List.iter (fun (_, name) ->
           List.iter (add_reference None)
