@@ -160,7 +160,8 @@ four vCPUs since 2026-10-11.
 not hold, in this order; compiler work in this list is authorized; an item
 that reaches a decision is parked and the next one taken. First, the
 verification direction (#954, maintainer 2026-10-23; B owns the refinement
-code): #952 (Z3 re-check of derived ranges), then a thin slice of
+code): #960 (z3 checks a constant operand's fold itself), #961 (64-bit
+literal patterns read as negative bounds), then a thin slice of
 function-boundary initialization contracts, a design review, and the rest
 of #954 stage 2. Then: #908 (fixed
 QEMU lane budget), #916 (compiler GC tuning), #921 and #922
