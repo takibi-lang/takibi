@@ -21061,6 +21061,18 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
     (expect_type_error "requires"
        "fn bounded(limit: usize @ n, index: usize @ k) -> usize where k < n { return index; }
         fn h() -> usize { return bounded(1, 0xFFFFFFFFFFFFFFFF); }");
+  (* #961 audit: max with an operand of no known range took the
+     placeholder {0..<1_000_000_000} on u64, so y = 2^40 passed. *)
+  Alcotest.test_case
+    "#961 max of an unbounded u64 operand is not refined" `Quick
+    (expect_type_error "cannot pass unproven"
+       "fn g(i: {0..<1000000000 as u64}) -> u64 { return i; }
+        fn h(x: u64, y: u64) -> u64 { return g(max(x & 3, y)); }");
+  Alcotest.test_case
+    "#961 max of an unbounded u32 operand stays within u32" `Quick
+    (expect_type_error "{0..<4294967296} vs {0..<1000000000}"
+       "fn g(i: {0..<1000000000 as u32}) -> u32 { return i; }
+        fn h(x: u32, y: u32) -> u32 { return g(max(x & 3, y)); }");
   (* #961 control: a bound the counter's base holds keeps the range. *)
   Alcotest.test_case
     "#961 an unannotated for bound the base holds stays refined" `Quick

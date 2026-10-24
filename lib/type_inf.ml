@@ -1314,24 +1314,33 @@ let is_unsigned_ty = function
   | TU8 | TU16 | TU32 | TU64 | TUsize | TMultiple (_, TUsize) -> true
   | _ -> false
 
-(* min/max's "unknown bound" placeholder (see the Call case below) must
-   itself be a legal value of whichever base type the result unifies
-   against, or a fully-unconstrained call fails to type-check for no real
-   reason: types.ml's TRefinedInt subtyping rules reject bounds wider than
-   a narrow type's own representable range (u8 needs hi <= 256, u16 needs
-   hi <= 65536, i8/i16 need |lo|/hi within their own range), so one fixed
-   magic constant everywhere is only safe for i32/i64/u32/u64/usize, not
-   u8/u16/i8/i16. Clamp per base instead. Sync rule: lib/llvm_gen.ml's
-   min/max codegen mirrors this exactly (base must be repr'd first --
-   see the Call case's own comment on why). *)
-let min_max_sentinel base =
-  match base with
-  | TI8  -> (-128, 128)
-  | TI16 -> (-32768, 32768)
-  | TU8  -> (0, 256)
-  | TU16 -> (0, 65536)
-  | t when is_unsigned_ty t -> (0, 1_000_000_000)
-  | _ -> (-1_000_000_000, 1_000_000_000)
+(* min/max's result range. A bound an operand does not give comes from the
+   base's own range, the value every operand of the base can take. GitHub
+   issue #961 (found in its audit): the placeholder used to be
+   {0..<1_000_000_000} for every wider base, so max(x & 3, y) on u64 claimed
+   y < 10^9 for any y and passed a refined parameter. Now a base whose
+   range is exact here (8, 16 and 32 bits; a 64-bit unsigned lower bound)
+   gives that range, and a bound past a native int (64 bits) leaves the
+   result unrefined. Sync rule: lib/llvm_gen.ml's min/max codegen calls
+   this same function on the canonical base. *)
+let min_max_range fname base ra rb =
+  let (sentinel_lo, sentinel_hi) = match obligation_width base with
+    | Some (bits, signed) when bits < 63 ->
+        if signed then (Some (- (1 lsl (bits - 1))), Some (1 lsl (bits - 1)))
+        else (Some 0, Some (1 lsl bits))
+    | Some (_, false) -> (Some 0, None)
+    | _ -> (None, None) in
+  let lo = match ra, rb with
+    | Some (la, _), Some (lb, _) -> Some (if fname = "min" then min la lb else max la lb)
+    | Some (la, _), None | None, Some (la, _) when fname = "max" -> Some la
+    | _ -> sentinel_lo in
+  let hi = match ra, rb with
+    | Some (_, ha), Some (_, hb) -> Some (if fname = "min" then min ha hb else max ha hb)
+    | Some (_, ha), None | None, Some (_, ha) when fname = "min" -> Some ha
+    | _ -> sentinel_hi in
+  match lo, hi with
+  | Some lo, Some hi -> Some (lo, hi)
+  | _ -> None
 
 (* if/while/&&/|| conditions must be bool, matching Rust/Zig -- no C-style
    implicit int-truthy coercion. Previously fell back to `unify_at loc ct
@@ -5985,29 +5994,10 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
              | Some k -> Some (k, k + 1)
              | None -> (match repr aty with TRefinedInt (x, y, _) -> Some (x, y) | _ -> None)
            in
-           let (sentinel_lo, sentinel_hi) = min_max_sentinel base in
            let ra = range_of a at and rb = range_of b bt in
-           let lo =
-             match ra, rb with
-             | Some (la, _), Some (lb, _) ->
-                 if fname = "min" then min la lb else max la lb
-             | _ -> if fname = "max" then
-                      (match ra, rb with
-                       | Some (la, _), None | None, Some (la, _) -> la
-                       | _ -> sentinel_lo)
-                    else sentinel_lo
-           in
-           let hi =
-             match ra, rb with
-             | Some (_, ha), Some (_, hb) ->
-                 if fname = "min" then min ha hb else max ha hb
-             | _ -> if fname = "min" then
-                      (match ra, rb with
-                       | Some (_, ha), None | None, Some (_, ha) -> ha
-                       | _ -> sentinel_hi)
-                    else sentinel_hi
-           in
-           TRefinedInt (lo, hi, base)
+           (match min_max_range fname base ra rb with
+            | Some (lo, hi) -> TRefinedInt (lo, hi, base)
+            | None -> base)
        | _ -> raise (TypeError (e.loc,
            Printf.sprintf "%s expects 2 arguments: %s(a, b)" fname fname)))
 
