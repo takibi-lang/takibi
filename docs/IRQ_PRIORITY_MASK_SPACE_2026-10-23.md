@@ -1,22 +1,22 @@
 # IRQ priority mask (GitHub issue #920) -- space and cost, 2026-10-23
 
 Workload: linked production kernels, qemu and rpi5, measured with
-`python3 scripts/space_delta.py origin/main` (base 237595ac) against the
+`python3 scripts/space_delta.py origin/main` (base 3dac688b, re-measured 2026-10-24) against the
 #920 branch: the GICv2 priority-mask pseudo-NMI, two stop SGIs, the
 escalating debug stop, and the lock-free DDB/crash side.
 
 | | qemu base | qemu change | rpi5 base | rpi5 change |
 | --- | --- | --- | --- | --- |
-| text | 737168 | 739964 | 789160 | 792116 |
-| data | 4792 | 4808 | 2889640 | 2889656 |
-| bss | 1481856 | 1481920 | 1690736 | 1690736 |
-| usable_ram_start | 0x40220000 | 0x40220000 | 0x720000 | 0x720000 |
+| text | 669176 | 671964 | 722984 | 725932 |
+| data | 4816 | 4832 | 2889664 | 2889680 |
+| bss | 1481888 | 1481952 | 1690736 | 1690736 |
+| usable_ram_start | 0x40210000 | 0x40210000 | 0x710000 | 0x710000 |
 
 Data/BSS symbols added: `irq_pmr_masked` and `irq_pmr_ready`, 32 B each
 (one word per core, KERNEL_MAX_CORES = 4) on both targets. No record, pool
 or linker change; rpi5 BSS unchanged (absorbed by alignment).
 
-Text grows by +2796 B (qemu) and +2956 B (rpi5): the PMR mask functions,
+Text grows by +2788 B (qemu) and +2948 B (rpi5): the PMR mask functions,
 the nested-dispatch wrapper in both dispatchers, the second stop branch and
 the escalation, the try-lock paths of the debug side, and the boot-time
 `irq mask cost:` probe.
