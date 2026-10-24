@@ -1,7 +1,8 @@
 # Range obligations
 
 GitHub issue #952. The type checker derives a refinement range for the result
-of `+`, `-`, `* k`, a constant `/`, `% m`, `& k` and a widening cast. Each
+of `+`, `-`, `* k`, a constant `/`, `% m`, `& k`, the builtin `min`/`max`
+(#984) and a widening cast. Each
 derived range is built through `refined_or_base` (lib/type_inf.ml, mirrored in
 lib/llvm_gen.ml), and each call names the operation and the operand ranges it
 reasoned from. `takibi --emit-range-obligations DIR` turns every such
@@ -16,7 +17,9 @@ of its interval arithmetic, at the machine's own bit width.
   1790 sites; 3.6 s cold on 8 threads, 0.1 s with the verdict cache.
 - `make range-obligation-control` (in `modelcheck`) compiles a Sub with #935's
   rule planted (`--range-obligation-fault-control`: an unsigned base keeps a
-  negative lower bound) and requires z3 to report the counterexample.
+  negative lower bound) and a `max` with #961's placeholder planted (an
+  unknown u64 bound read as 10^9, #984), and requires z3 to report each
+  counterexample.
 - z3 4.13.4 is pinned and sha256-checked by `scripts/fetch_model_tools.sh`,
   which the devcontainer and the CI model-tools step already run.
   `TAKIBI_Z3` names another binary. Only `unsat` verdicts are cached, under
@@ -43,7 +46,7 @@ by both type_inf.ml and llvm_gen.ml, is one file.
 ```
 ; takibi-range-obligation v1
 ; site: kernel/net/tcp.tkb:812:20         (zero or more, sorted; not hashed)
-; rule: sub                               add sub mul div mod band cast
+; rule: sub                               add sub mul div mod band min max cast
 ; claim: {0..<1461 as usize}              the derived range, lo..<hi, and base
 (set-logic QF_BV)
 (declare-const a (_ BitVec 64))           operand a, at the operation's width
@@ -69,7 +72,12 @@ outside `[lo, hi)`. `unsat` proves the range; `sat` is a counterexample.
   `a` has the source width; `r` is `a` truncated (`extract`) or extended by the
   source's signedness.
 - Operations: `bvadd`, `bvsub`, `bvmul`, `bvudiv`/`bvsdiv`, `bvurem`/`bvsrem`,
-  `bvand`, by the base's signedness.
+  `bvand`, by the base's signedness. `min` and `max` are the machine's compare
+  and select, `(ite (bvult a b) a b)` and `(ite (bvugt a b) a b)` (`bvslt`/
+  `bvsgt` when signed), the same `icmp` and `select` codegen emits; a bound an
+  operand does not give is the base's own, so an unrefined operand is
+  unconstrained. These two rules use only QF_BV terms the format already
+  allowed, so they are not a version bump.
 - Comparisons. Every bound comparison extends the value by two bits
   (`zero_extend` for unsigned, `sign_extend` for signed) and compares signed at
   width + 2, so `hi = 2^w` (u8's 256) is a constant like any other. Constants

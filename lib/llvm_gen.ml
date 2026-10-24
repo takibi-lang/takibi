@@ -6104,10 +6104,23 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
          that then fails ret_ty's OWN subtyping check below. *)
       let base = canon_ty at in
       let ra = range_of a_e at and rb = range_of b_e bt in
-      (* Sync rule: the same range type_inf.ml derives (#961). *)
+      (* Sync rule: the same range type_inf.ml derives (#961), and the
+         same obligation (#984), solved once.
+         refined-range rules begin (#935): a result range here is built only
+         through refined_or_base; scripts/check_refined_range_constructor.py *)
       let ret_ty = match Type_inf.min_max_range fname (Types.of_ast base) ra rb with
-        | Some (lo, hi) -> TypeRefined (lo, hi, base)
+        | Some (lo, hi) ->
+            let operand (ae : Ast.expr) r =
+              match Type_inf.bound_at_base (Types.of_ast base) ae, r with
+              | Some k, _ -> Range_obligation.Const k
+              | None, Some (x, y) -> Range_obligation.Range (x, y)
+              | None, None -> Range_obligation.Any in
+            let rule = if fname = "min" then Range_obligation.Min
+              else Range_obligation.Max in
+            refined_or_base ~ob:(e.loc, rule, operand a_e ra, Some (operand b_e rb))
+              base (Some lo) (Some hi)
         | None -> base in
+      (* refined-range rules end *)
       let cmp = if is_unsigned at then
                   (if fname = "min" then build_icmp Icmp.Ult av bv "mm_cmp" builder
                    else build_icmp Icmp.Ugt av bv "mm_cmp" builder)

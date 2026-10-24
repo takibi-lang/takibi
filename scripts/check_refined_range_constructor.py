@@ -20,6 +20,12 @@ GitHub issue #952: each refined_or_base call there also passes `~ob` (or
 re-checks it under --emit-range-obligations
 (scripts/buildcheck_range_obligations.py). A call that cannot describe its
 operation says why in a `no-range-obligation:` comment just above it.
+
+GitHub issue #984: min/max derived its range with min_max_range and built
+it with the raw constructor outside every marked region, so no obligation
+was emitted and #961's unsound {0..<10^9} placeholder on u64 was never
+re-checked. A call of a range-deriving helper (DERIVERS) must now sit
+inside a marked region, where its result reaches refined_or_base.
 """
 
 from __future__ import annotations
@@ -39,6 +45,9 @@ BEGIN = "refined-range rules begin"
 END = "refined-range rules end"
 HELPER = "refined_or_base"
 OBLIGATION_EXEMPT = "no-range-obligation:"
+# Functions whose result is a derived range: called only inside the rules.
+DERIVERS = ("min_max_range", "refined_product_range")
+DERIVER = re.compile(r"\b(" + "|".join(DERIVERS) + r")\b")
 COMMENT = re.compile(r"\(\*.*?\*\)", re.DOTALL)
 
 
@@ -87,6 +96,14 @@ def scan(path: pathlib.Path, constructor: str, text: str) -> tuple[int, int, lis
             inside = False
             continue
         if not inside:
+            for match in DERIVER.finditer(line):
+                if line[:match.start()].strip() == "let":
+                    continue   # the definition itself
+                errors.append(
+                    f"{path.name}:{number}: {match.group(1)} called outside "
+                    f"the marked rules; derive a range only inside "
+                    f"'{BEGIN}' ... '{END}' so it is built through {HELPER} "
+                    f"with ~ob (#984)")
             continue
         helpers += line.count(HELPER)
         for _ in re.finditer(r"\b" + HELPER + r"\b", line):

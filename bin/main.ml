@@ -167,7 +167,9 @@ let () =
      | "--range-obligation-fault-control" ->
          (* GitHub issue #952: plants #935's unsound rule for the z3
             check's failing control; never used in a real build. *)
-         Takibi.Range_obligation.fault_unsigned_negative_lo := true
+         Takibi.Range_obligation.fault_unsigned_negative_lo := true;
+         (* #984: and #961's min/max placeholder range. *)
+         Takibi.Range_obligation.fault_min_max_placeholder := true
      | "--trace-init-flow" ->
          (* GitHub issue #976: print FUNC's init state after each
             statement (docs/VERIFICATION_DESIGN.md). *)

@@ -6866,6 +6866,27 @@ fn stored_release(holder: sink StoredHolder[k]) { stored_drop(holder.token); }
         }");
 
   Alcotest.test_case
+    "issue #984: a min/max result range records a z3 obligation" `Quick
+    (fun () ->
+      Hashtbl.reset Range_obligation.table;
+      Range_obligation.enabled := true;
+      Fun.protect ~finally:(fun () ->
+          Range_obligation.enabled := false;
+          Hashtbl.reset Range_obligation.table)
+        (fun () ->
+          expect_ok "fn f984(x: u64, y: {3..<9 as u8}) -> u64 {
+              let p = min(x, 20); let q = max(y, 5 as u8);
+              return p + (q as u64); }" ();
+          let texts = Hashtbl.fold (fun _ (t, _) acc -> t :: acc)
+              Range_obligation.table [] in
+          let has needle = List.exists (fun t -> contains_substring t needle) texts in
+          Alcotest.(check bool) "min on u64" true
+            (has "; rule: min\n; claim: {0..<21 as u64}");
+          Alcotest.(check bool) "unsigned select" true (has "(ite (bvult a ");
+          Alcotest.(check bool) "max on u8" true
+            (has "; rule: max\n; claim: {5..<9 as u8}")));
+
+  Alcotest.test_case
     "issue #983: a literal index past 2^63 is out of bounds, not -1" `Quick
     (expect_type_error "index 18446744073709551615 is out of bounds for array of size 4"
        "fn f983(a: [u8; 4]) -> u8 { return a[0xFFFFFFFFFFFFFFFF]; }");

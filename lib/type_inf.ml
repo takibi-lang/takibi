@@ -1328,7 +1328,9 @@ let min_max_range fname base ra rb =
     | Some (bits, signed) when bits < 63 ->
         if signed then (Some (- (1 lsl (bits - 1))), Some (1 lsl (bits - 1)))
         else (Some 0, Some (1 lsl bits))
-    | Some (_, false) -> (Some 0, None)
+    | Some (_, false) ->
+        (Some 0, if !Range_obligation.fault_min_max_placeholder
+                 then Some 1_000_000_000 else None)
     | _ -> (None, None) in
   let lo = match ra, rb with
     | Some (la, _), Some (lb, _) -> Some (if fname = "min" then min la lb else max la lb)
@@ -5990,9 +5992,24 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
              | None -> (match repr aty with TRefinedInt (x, y, _) -> Some (x, y) | _ -> None)
            in
            let ra = range_of a at and rb = range_of b bt in
+           (* refined-range rules begin (#935): a result range here is built
+              only through refined_or_base; scripts/check_refined_range_constructor.py *)
+           (* GitHub issue #984: the range is a derived range like any
+              arithmetic rule's, so z3 re-checks it at the machine width
+              (#952): a literal operand is its value at the base, a refined
+              one its range, anything else any value of the base. *)
            (match min_max_range fname base ra rb with
-            | Some (lo, hi) -> TRefinedInt (lo, hi, base)
+            | Some (lo, hi) ->
+                let operand (ae : Ast.expr) r = match bound_at_base base ae, r with
+                  | Some k, _ -> Range_obligation.Const k
+                  | None, Some (x, y) -> Range_obligation.Range (x, y)
+                  | None, None -> Range_obligation.Any in
+                let rule = if fname = "min" then Range_obligation.Min
+                  else Range_obligation.Max in
+                refined_or_base ~ob:(e.loc, rule, operand a ra, Some (operand b rb))
+                  base (Some lo) (Some hi)
             | None -> base)
+           (* refined-range rules end *)
        | _ -> raise (TypeError (e.loc,
            Printf.sprintf "%s expects 2 arguments: %s(a, b)" fname fname)))
 

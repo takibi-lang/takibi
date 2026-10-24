@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Controls for check_refined_range_constructor.py (GitHub issue #935)."""
+"""Controls for check_refined_range_constructor.py (GitHub issues #935, #984)."""
 
 import contextlib
 import importlib.util
@@ -82,6 +82,21 @@ COMMENTED = """\
 """
 
 
+# min/max as it stood before #984: no marked region, no obligation.
+MIN_MAX_OUTSIDE = """\
+           (match min_max_range fname base ra rb with
+            | Some (lo, hi) -> TRefinedInt (lo, hi, base)
+            | None -> base)
+"""
+
+MIN_MAX_INSIDE = """\
+           (match min_max_range fname base ra rb with
+            | Some (lo, hi) ->
+                refined_or_base ~ob:(e.loc, rule, oa, Some ob) base (Some lo) (Some hi)
+            | None -> base)
+"""
+
+
 def main() -> int:
     checker = load()
     status, output = run(checker)
@@ -114,6 +129,15 @@ def main() -> int:
          "no 'refined-range rules begin' markers"),
         ("a region that never ends", HEAD + FIXED_SUB, "TRefinedInt", 1,
          "never ends"),
+        ("#984's min/max range derived outside the rules",
+         MIN_MAX_OUTSIDE + HEAD + FIXED_SUB + TAIL, "TRefinedInt", 1,
+         "min_max_range called outside the marked rules"),
+        ("min/max derived inside the rules",
+         HEAD + MIN_MAX_INSIDE + FIXED_SUB + TAIL, "TRefinedInt", 0,
+         "PASS refined-range-constructor"),
+        ("the deriving helper's own definition",
+         "let min_max_range fname base ra rb =\n  None\n" + HEAD + FIXED_SUB
+         + TAIL, "TRefinedInt", 0, "PASS refined-range-constructor"),
         ("a region that never calls the helper",
          HEAD + "           t1\n" + TAIL, "TRefinedInt", 1,
          "never call refined_or_base"),
@@ -132,7 +156,8 @@ def main() -> int:
 
     report_pass("refined-range-constructor-controls",
                 "the repository passes; issue #935's raw Sub constructor, a "
-                "constructor after an arrow, a call without ~ob, a lost marker, an unterminated "
+                "constructor after an arrow, a call without ~ob, #984's min/max range "
+                "derived outside the rules, a lost marker, an unterminated "
                 "region and a helper-free region are refused; patterns, "
                 "comments and code outside the rules are not",
                 cases=CASES.ran)

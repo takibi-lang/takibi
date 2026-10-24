@@ -17,7 +17,9 @@ Usage:
   buildcheck_range_obligations.py --control TAKIBI
                                                failing control: compile a
                                                Sub with #935's rule planted
-                                               and require a counterexample
+                                               and a max with #961's range
+                                               (#984), and require a
+                                               counterexample for each
 
 z3 is the version pinned in scripts/fetch_model_tools.sh (TAKIBI_Z3 names
 another binary). Verdicts are cached by obligation digest and z3 version
@@ -295,6 +297,11 @@ fn wrap(a: {0..<100 as usize}, b: {20..<61 as usize}) -> usize {
     return 0;
 }
 
+fn widest(x: u64, y: u64) -> u64 {
+    let m = max(x & 3, y);
+    return m;
+}
+
 fn main() -> i32 {
     return wrap(10, 50) as i32;
 }
@@ -372,8 +379,20 @@ def control(takibi: str) -> int:
         print("FAIL range-obligation control: the planted path-fact claim "
               "(#975) was not reported with k in [16, 20)")
         return 1
+    # GitHub issue #984: #961's min/max placeholder, planted: max(x & 3, y)
+    # on u64 claimed {0..<10^9}. z3 must give a counterexample.
+    mm_planted = [f for f in failures
+                  if ": sat " in f and "rule: max" in f
+                  and "claim: {0..<1000000000 as u64}" in f
+                  and "counterexample" in f]
+    if len(mm_planted) != 1:
+        print("\n".join(failures))
+        print("FAIL range-obligation control: #961's planted min/max range "
+              "(#984) was not reported with a counterexample")
+        return 1
     failures = [f for f in failures
-                if f not in init_planted and f not in fact_planted]
+                if f not in init_planted and f not in fact_planted
+                and f not in mm_planted]
     planted = [f for f in failures
                if ": sat " in f and "rule: sub" in f and "claim: {-60..<80 as usize}" in f
                and "counterexample" in f]
@@ -384,10 +403,12 @@ def control(takibi: str) -> int:
         return 1
     print(planted[0])
     report_pass("range-obligation-control",
-                "z3 reports #935's planted unsigned-Sub range, a planted "
+                "z3 reports #935's planted unsigned-Sub range, #961's "
+                "planted min/max range (#984), a planted "
                 "init coverage claim (#954) and a planted path-fact claim "
                 "(#975) with counterexamples",
-                obligations=len(failures) + len(init_planted) + len(fact_planted))
+                obligations=len(failures) + len(init_planted)
+                + len(fact_planted) + len(mm_planted))
     return 0
 
 

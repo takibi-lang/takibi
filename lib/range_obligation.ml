@@ -14,7 +14,7 @@
    File format (version 1; docs/RANGE_OBLIGATIONS.md is the reference):
 
      ; takibi-range-obligation v1
-     ; rule: <add|sub|mul|div|mod|band|cast>
+     ; rule: <add|sub|mul|div|mod|band|min|max|cast>
      ; claim: {lo..<hi as T}
      ; site: file:line:col          (one line per site, sorted)
      (set-logic QF_BV)
@@ -40,6 +40,7 @@ type operand =
 
 type rule =
   | Add | Sub | Mul | Div | Mod | Band
+  | Min | Max            (* GitHub issue #984: the builtin min/max *)
   | Cast of int * bool   (* source width and signedness *)
 
 type t = {
@@ -81,7 +82,8 @@ let in_range ~signed name w lo hi =
 
 let rule_name = function
   | Add -> "add" | Sub -> "sub" | Mul -> "mul" | Div -> "div"
-  | Mod -> "mod" | Band -> "band" | Cast _ -> "cast"
+  | Mod -> "mod" | Band -> "band" | Min -> "min" | Max -> "max"
+  | Cast _ -> "cast"
 
 let body (o : t) =
   let buf = Buffer.create 512 in
@@ -114,6 +116,9 @@ let body (o : t) =
     | Div -> Printf.sprintf "(%s %s %s)" (if s then "bvsdiv" else "bvudiv") a b
     | Mod -> Printf.sprintf "(%s %s %s)" (if s then "bvsrem" else "bvurem") a b
     | Band -> Printf.sprintf "(bvand %s %s)" a b
+    (* #984: the machine's compare and select (llvm_gen.ml's mm_cmp). *)
+    | Min -> Printf.sprintf "(ite (%s %s %s) %s %s)" (if s then "bvslt" else "bvult") a b a b
+    | Max -> Printf.sprintf "(ite (%s %s %s) %s %s)" (if s then "bvsgt" else "bvugt") a b a b
     | Cast (w, src_signed) ->
         if w = o.bits then a
         else if w > o.bits then
@@ -170,6 +175,11 @@ let write_dir dir =
    scripts/buildcheck_range_obligations.py can show it reports the
    counterexample. Never set in a real build. *)
 let fault_unsigned_negative_lo = ref false
+
+(* Fault control only, set by the same flag (GitHub issue #984): plants
+   #961's min/max placeholder, an unknown 64-bit unsigned upper bound read
+   as 10^9, so the control shows z3 reports a wrong min/max range. *)
+let fault_min_max_placeholder = ref false
 
 (* GitHub issue #954: an obligation whose text another module built (an
    initialization coverage claim, Init_pred.obligation). It shares the
