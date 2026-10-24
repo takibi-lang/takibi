@@ -21073,6 +21073,15 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
     (expect_type_error "{0..<4294967296} vs {0..<1000000000}"
        "fn g(i: {0..<1000000000 as u32}) -> u32 { return i; }
         fn h(x: u32, y: u32) -> u32 { return g(max(x & 3, y)); }");
+  (* #961 control: the counter's type is resolved only by the body (a u8
+     and a u64 use), and bounds that type holds -- 256 is one past u8's
+     largest value, 2^40 fits u64 -- stay accepted. *)
+  Alcotest.test_case
+    "#961 a bound that fits the counter's later-resolved type is accepted" `Quick
+    (expect_codegen_ok
+       "fn g(b: {0..<256 as u8}) -> u8 { return b; }
+        fn w(b: {0..<0x10000000000 as u64}) -> u64 { return b; }
+        fn h() { for i in 0..<256 { g(i); } for j in 0..<0x10000000000 { w(j); } }");
   (* #961 control: a bound the counter's base holds keeps the range. *)
   Alcotest.test_case
     "#961 an unannotated for bound the base holds stays refined" `Quick
