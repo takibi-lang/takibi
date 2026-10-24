@@ -165,7 +165,7 @@ function-boundary initialization contracts, a design review, and the rest
 of #954 stage 2. Then: #908 (fixed
 QEMU lane budget), #916 (compiler GC tuning), #921 and #922
 (variant reuse, domain-parallel codegen; both wait on the land-span
-measurement after #917's front-end fixes), #927 (QEMU lanes queueing for the vCPU lease), #893 (redundant csel in variant match),
+measurement after #917's front-end fixes), #893 (redundant csel in variant match),
 #698 (ext2
 exhaustion as ENOSPC), #846 (TCP retransmission with no reader), #793
 (proofs with an unresolved type variable), #769 (--uses-of NAME), #774
