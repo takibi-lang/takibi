@@ -2142,8 +2142,8 @@ must_use variant TerminalWriteResult { Errno(usize); Written(usize); WouldBlock;
 fn syscall_terminal_write(slot: borrow SyscallSlot[0], current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], address: usize, length: usize)
         -> TerminalWriteResult !{unsafe} {
     if (length == 0) { return TerminalWriteResult::Written(0); }
-    // GitHub issue #203: the staging buffer is per-call scratch.
-    zero_fill(syscall_scratch[slot.index].file_buffer as []u8);
+    // GitHub issue #975: each chunk is read only after copy_from_user
+    // initialized it, so the scratch staging buffer is not zero-filled.
     let mut written: usize = 0;
     while (written < length) {
         let room: usize = uart_user_write_room();
@@ -2343,7 +2343,8 @@ fn syscall_write_segment_with(slot: borrow SyscallSlot[0],
             if (length == 0 || length > KERNEL_BLOCK_SIZE) {
                 return SyscallIoResult::Errno(LINUX_EINVAL);
             }
-            zero_fill(syscall_scratch[slot.index].file_buffer as []u8);
+            // GitHub issue #975: the content read below is the span that
+            // copy_from_user_span initialized; no zero fill.
             match user_range_check_read(current_authority, address, length) {
                 UserReadRangeResult::Fault => { return SyscallIoResult::Errno(LINUX_EFAULT); }
                 UserReadRangeResult::Ok(range) => {
@@ -2626,11 +2627,12 @@ fn syscall_read_segment_with(slot: borrow SyscallSlot[0],
             return SyscallIoResult::Errno(LINUX_EBADF);
         }
         let opened_inode: usize = kernel_syscall_file_inode(fd);
-        // GitHub issue #203: both branches stage through per-call scratch
-        // and copy part of it out, so it starts zeroed: stage 2 has no
-        // ranges to prove which bytes a fill wrote.
-        zero_fill(syscall_scratch[slot.index].file_buffer as []u8);
         if (procfs_inode_is_ours(opened_inode)) {
+            // GitHub issue #203: a procfs renderer writes its text piecewise
+            // with no contract on which bytes, so its staging starts zeroed.
+            // The ext2 path below copies out only what the chunk read
+            // initialized (#975) and needs no fill.
+            zero_fill(syscall_scratch[slot.index].file_buffer as []u8);
             let staging_buffer: []u8 =
                 syscall_scratch[slot.index].file_buffer as []u8;
             let total: usize = procfs_render_file(opened_inode,
@@ -3571,11 +3573,11 @@ private fn syscall_syslog_with(slot: borrow SyscallSlot[0],
     let mut amount: usize = requested;
     if (amount > available) { amount = available; }
     if (amount == 0) { return SyscallAction::Resume(0); }
-    zero_fill(syscall_scratch[slot.index].file_buffer as []u8);
+    // GitHub issue #975: each chunk copied out is the prefix that
+    // kernel_log_snapshot_copy initialized (staged == chunk); no zero fill.
     let mut copied: usize = 0;
     while (copied < amount) {
-        let mut chunk: usize = amount - copied;
-        if (chunk > KERNEL_BLOCK_SIZE) { chunk = KERNEL_BLOCK_SIZE; }
+        let chunk: usize = min(amount - copied, KERNEL_BLOCK_SIZE);
         let staging_buffer = syscall_scratch[slot.index].file_buffer as []u8;
         if (chunk > staging_buffer.len) {
             return SyscallAction::Resume(LINUX_EINVAL);
@@ -4410,9 +4412,10 @@ private fn syscall_bind_claimed_with(slot: borrow SyscallSlot[0],
         };
     if (kernel_listener_state(bind_fd) != UnifiedListenerState::Created ||
         x2 < 16) { return SyscallAction::Resume(LINUX_EINVAL); }
-    let mut sockaddr_len: usize = x2;
-    if (sockaddr_len > 28) { sockaddr_len = 28; }
-    zero_fill(syscall_scratch[slot.index].sockaddr_buffer as []u8);
+    // GitHub issue #975: x2 >= 16 here, and the IPv6 bytes are read only
+    // once x2 >= 28, so every byte read is inside the copied span; the
+    // scratch sockaddr buffer is not zero-filled.
+    let sockaddr_len: usize = min(x2, 28);
     match user_range_check_read(current_authority, x1, sockaddr_len) {
         UserReadRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
         UserReadRangeResult::Ok(range) => {
@@ -8274,7 +8277,8 @@ private inline fn syscall_getdents64_current_with(slot: borrow SyscallSlot[0],
                 SyscallFilesystemReady::Unconfigured => { return SyscallAction::Resume(LINUX_EBADF); }
                 SyscallFilesystemReady::Configured(found) => { found }
             };
-            zero_fill(syscall_scratch[slot.index].file_buffer as []u8);
+            // GitHub issue #975: every entry read lies in the chunk the
+            // directory read initialized; no zero fill.
             while (written < x2) {
                 match ext2_read_directory_chunk(
                     mount, inode_number,
@@ -8296,14 +8300,14 @@ private inline fn syscall_getdents64_current_with(slot: borrow SyscallSlot[0],
                         }
                         let mut cursor: usize = 0;
                         while (cursor < chunk && written < x2) {
-                            if (chunk - cursor < 8) {
+                            let entry_start: usize = cursor;
+                            if (entry_start > chunk || chunk - entry_start < 8) {
                                 if (written != 0) {
                                     return SyscallAction::Resume(written);
                                 }
                                 return SyscallAction::Resume(LINUX_EINVAL);
                             }
                             let file_bytes = syscall_scratch[slot.index].file_buffer as []u8;
-                            let entry_start: usize = cursor;
                             if (entry_start > file_bytes.len) {
                                 if (written != 0) { return SyscallAction::Resume(written); }
                                 return SyscallAction::Resume(LINUX_EINVAL);
@@ -8320,7 +8324,7 @@ private inline fn syscall_getdents64_current_with(slot: borrow SyscallSlot[0],
                                 ext2_slice_u16(entry, 4) as usize;
                             let name_length: usize = entry[6] as usize;
                             if (record_length < 8 ||
-                                record_length > chunk - cursor ||
+                                record_length > chunk - entry_start ||
                                 name_length > record_length - 8) {
                                 if (written != 0) {
                                     return SyscallAction::Resume(written);
@@ -8438,7 +8442,8 @@ private inline fn syscall_sendfile_current_with(slot: borrow SyscallSlot[0],
         SyscallFilesystemReady::Unconfigured => { return SyscallAction::Resume(LINUX_EBADF); }
         SyscallFilesystemReady::Configured(found) => { found }
     };
-    zero_fill(syscall_scratch[slot.index].file_buffer as []u8);
+    // GitHub issue #975: the bytes queued are the chunk the file read
+    // initialized; no zero fill.
     let mut copied: usize = 0;
     while (copied < requested) {
         let mut chunk_limit: usize = requested - copied;

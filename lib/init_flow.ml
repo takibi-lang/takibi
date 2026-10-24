@@ -96,6 +96,7 @@ type state = {
   u : Leaves.t;
   iv : (leaf * Init_pred.interval) list;
   eqs : Init_pred.eqs;
+  facts : Init_pred.facts;   (* GitHub issue #975: linear path facts *)
 }
 
 (* A tracked view of an array or slice leaf: elements [off, off + len) of
@@ -118,6 +119,7 @@ let check
     ~(scratch : (string * Ast.type_expr) list)
     ?(variant_cases : string -> (string * bool) list option = fun _ -> None)
     ?(linear_owner : string -> bool = fun _ -> false)
+    ?(variant_payload : string -> string -> Ast.type_expr option = fun _ _ -> None)
     ?(callee_ret : string -> Ast.type_expr option = fun _ -> None)
     (finfo : Types.func_info) (fdef : Ast.func) =
   let bindings = finfo.Types.bindings in
@@ -196,6 +198,36 @@ let check
         List.fold_left (fun s l -> Leaves.add l s) st (all_leaves key)
     | _ -> st) entry_u fdef.Ast.params bindings.Local_bindings.param_ids in
   let contracts = Init_state.contracts_of fdef.Ast.def_loc in
+  (* GitHub issue #975: parameters a requires clause names. Such a
+     parameter that is not `borrow uninit` is tracked too, initialized at
+     entry exactly where the clause says, so the body is checked against
+     the clause rather than against a whole-init default. *)
+  let required_params cs =
+    List.concat_map (fun (c : Init_state.clause) ->
+      match c.body with
+      | Init_state.CPlain (Init_state.PInit e) when c.requires ->
+          let rec base (e : Ast.expr) = match e.desc with
+            | Ast.SliceOf (b, _, _) -> base b
+            | Ast.Var x -> [x]
+            | _ -> [] in
+          base e
+      | _ -> []) cs in
+  let own_required = required_params contracts in
+  let entry_u = List.fold_left2 (fun st (name, ty) id ->
+    let key = "L" ^ string_of_int id in
+    match ty with
+    | Some ty when List.mem name own_required && not (Hashtbl.mem roots key) ->
+        let pointee = match strip ty with
+          | Ast.TypeBorrow t | Ast.TypeBorrowMut t -> strip t
+          | t -> t in
+        let pointee = match pointee with
+          | Ast.TypeRefMut t | Ast.TypePtr t | Ast.TypeRef t -> t
+          | t -> t in
+        Hashtbl.replace roots key
+          { display = name; leaves = leaves_of [] [] pointee;
+            array_root = false; out_param = false };
+        List.fold_left (fun s l -> Leaves.add l s) st (all_leaves key)
+    | _ -> st) entry_u fdef.Ast.params bindings.Local_bindings.param_ids in
   (* ---- immutable bindings: the atoms of linear terms ------------------- *)
   let mutable_ids = Hashtbl.create 16 in
   let binding_names = Hashtbl.create 16 in
@@ -221,6 +253,10 @@ let check
      | Ast.Match (d, arms) | Ast.LetMatch (_, _, _, d, arms) ->
          scan_expr d;
          List.iteri (fun i a ->
+           (match a, Local_bindings.id_for_arm bindings s.loc i with
+            | Ast.ArmVariant (_, _, Some (Ast.PayloadBind (n, _)), _), Some id ->
+                Hashtbl.replace binding_names id n
+            | _ -> ());
            (match a with
             | Ast.ArmVariant (_, _, Some (Ast.PayloadBind (_, true)), _) ->
                 (match Local_bindings.id_for_arm bindings s.loc i with
@@ -234,14 +270,19 @@ let check
   and scan_expr (_ : Ast.expr) = ()
   in
   scan_stmts fdef.Ast.body;
-  (* Names assigned as a whole (`x = e`) or address-taken (`&x`): their
-     bindings are not atoms. Name-based, so a shadowed name is
-     conservatively mutable everywhere. *)
+  (* Bindings assigned as a whole (`x = e`) or address-taken (`&x`) are not
+     atoms. By binding id where the name resolves (GitHub issue #975: a
+     same-named binding elsewhere in the function stays an atom), else by
+     name, conservatively. *)
   let written =
     let acc = Hashtbl.create 8 in
+    let note (v : Ast.expr) n =
+      match Local_bindings.id_for_expr bindings v with
+      | Some id -> Hashtbl.replace acc ("#" ^ string_of_int id) ()
+      | None -> Hashtbl.replace acc n () in
     let rec go (e : Ast.expr) = match e.desc with
-      | Ast.AddrOf { desc = Ast.Var n; _ } -> Hashtbl.replace acc n ()
-      | Ast.Assign ({ desc = Ast.Var n; _ }, rhs) -> Hashtbl.replace acc n (); go rhs
+      | Ast.AddrOf ({ desc = Ast.Var n; _ } as v) -> note v n
+      | Ast.Assign (({ desc = Ast.Var n; _ } as v), rhs) -> note v n; go rhs
       | Ast.Assign (l, r) -> go l; go r
       | Ast.AddrOf x | Ast.Bnot x | Ast.Deref x | Ast.Cast (_, x)
       | Ast.FieldGet (x, _) | Ast.Unsafe x | Ast.VariantCtor (_, _, x) -> go x
@@ -266,7 +307,8 @@ let check
     List.iter st fdef.Ast.body;
     Hashtbl.fold (fun n () l -> n :: l) acc [] in
   let immutable id = not (Hashtbl.mem mutable_ids id) in
-  let immutable_var x id = immutable id && not (List.mem x written) in
+  let is_written x id = List.mem x written || List.mem ("#" ^ string_of_int id) written in
+  let immutable_var x id = immutable id && not (is_written x id) in
   let v_atom id = Init_pred.atom ("v" ^ string_of_int id) in
   let len_atom id = Init_pred.atom ("len" ^ string_of_int id) in
   let atom_name a =
@@ -383,6 +425,76 @@ let check
              Some { vp = p; off = Init_pred.const 0; len = leaf_len p }
          | _ -> None)
   in
+  (* ---- path facts (GitHub issue #975) ---------------------------------- *)
+  let unsigned_ty t = match strip t with
+    | Ast.TypeU8 | Ast.TypeU16 | Ast.TypeU32 | Ast.TypeU64 | Ast.TypeUsize -> true
+    | _ -> false in
+  let arm_types : (int, Ast.type_expr) Hashtbl.t = Hashtbl.create 8 in
+  let id_type id = match Types.IntMap.find_opt id finfo.Types.binding_types with
+    | Some t -> Some t
+    | None when Hashtbl.mem arm_types id -> Hashtbl.find_opt arm_types id
+    | None ->
+        (match List.find_opt (fun (_, i) -> i = id) param_ids with
+         | Some (n, _) -> List.assoc_opt n param_types
+         | None -> None) in
+  let unsigned_id id = match id_type id with Some t -> unsigned_ty t | None -> false in
+  (* A comparison side whose mathematical value is its machine value, so a
+     fact about it is a fact about the program: a nonnegative constant, an
+     immutable unsigned binding, a view's length, or a - b of such sides
+     when the facts already show b <= a (no wraparound). Anything else,
+     such as a + b, gives no fact. *)
+  let rec side (facts : Init_pred.facts) (e : Ast.expr) : Init_pred.lin option =
+    let nonneg_const = function
+      | Some (l : Init_pred.lin) when Init_pred.SMap.is_empty l.m && l.c >= 0 -> Some l
+      | _ -> None in
+    match e.desc with
+    | Ast.IntLit _ | Ast.SizeOf _ -> nonneg_const (lin e)
+    | Ast.Var x ->
+        (match Local_bindings.id_for_expr bindings e with
+         | Some id when immutable_var x id && unsigned_id id -> Some (v_atom id)
+         | Some _ -> None
+         | None -> nonneg_const (lin e))
+    | Ast.FieldGet (b, "len") when view_of b <> None -> lin e
+    | Ast.FieldGet ({ desc = Ast.Var x; _ } as b, "len") ->
+        (match Local_bindings.id_for_expr bindings b with
+         | Some id when immutable_var x id
+                        && (match Option.map strip (id_type id) with
+                            | Some (Ast.TypeSlice _) -> true | _ -> false) ->
+             Some (len_atom id)
+         | _ -> None)
+    | Ast.BinOp (Ast.Sub, a, b) ->
+        (match side facts a, side facts b with
+         | Some x, Some y when Init_pred.entails facts (Init_pred.sub x y) ->
+             Some (Init_pred.sub x y)
+         | _ -> None)
+    | _ -> None
+  in
+  let add_fact (st : state) t =
+    if List.exists (Init_pred.equal t) st.facts.Init_pred.ge then st
+    else { st with facts = { st.facts with Init_pred.ge = t :: st.facts.Init_pred.ge } } in
+  (* The state on the path where condition [c] evaluated to [b]. Operands
+     of `&&` (true) and `||` (false) are assumed left to right, so a later
+     operand's subtraction may rely on an earlier operand. *)
+  let rec assume (st : state) (c : Ast.expr) (b : bool) : state =
+    match c.desc, b with
+    | Ast.BinOp (Ast.And, l, r), true | Ast.BinOp (Ast.Or, l, r), false ->
+        assume (assume st l b) r b
+    | Ast.BinOp ((Ast.Lt | Ast.Le | Ast.Gt | Ast.Ge | Ast.Eq | Ast.Ne) as op, l, r), _ ->
+        (match side st.facts l, side st.facts r with
+         | Some x, Some y ->
+             let one = Init_pred.const 1 in
+             let sub = Init_pred.sub in
+             let ts = match op, b with
+               | Ast.Lt, true | Ast.Ge, false -> [sub (sub y x) one]
+               | Ast.Lt, false | Ast.Ge, true -> [sub x y]
+               | Ast.Le, true | Ast.Gt, false -> [sub y x]
+               | Ast.Le, false | Ast.Gt, true -> [sub (sub x y) one]
+               | Ast.Eq, true | Ast.Ne, false -> [sub x y; sub y x]
+               | _ -> [] in
+             List.fold_left add_fact st ts
+         | _ -> st)
+    | _ -> st
+  in
   (* ---- the state ------------------------------------------------------- *)
   let leaf_of_view v = (v.vp.root, v.vp.path) in
   let ivs_of st l = List.filter_map (fun (l', iv) -> if l' = l then Some iv else None) st.iv in
@@ -395,28 +507,39 @@ let check
     else
       let st = { st with iv = (l, iv) :: st.iv } in
       match leaf_len p with
-      | Some n when Init_pred.uncovered ~eqs:st.eqs (ivs_of st l) (Init_pred.const 0, n) = None ->
+      | Some n when Init_pred.uncovered ~eqs:st.eqs ~facts:st.facts (ivs_of st l)
+                      (Init_pred.const 0, n) = None ->
           (* The whole leaf is covered: a conclusion z3 re-checks too. *)
           let whole = path_to_string (root_display p) p.path in
           Range_obligation.record_text !cur_loc
             (Init_pred.obligation
                ~claim:(Printf.sprintf "init(%s[0..<%s])" whole (show n))
-               st.eqs (ivs_of st l) (Init_pred.const 0, n));
+               ~facts:st.facts st.eqs (ivs_of st l) (Init_pred.const 0, n));
           { st with u = Leaves.remove l st.u;
                     iv = List.filter (fun (l', _) -> l' <> l) st.iv }
       | _ -> st
   in
+  (* GitHub issue #975: the linear facts the walk had, for the message. *)
+  let path_facts st =
+    let f = st.facts in
+    let ge = List.rev_map (fun t -> show t ^ " >= 0") f.Init_pred.ge in
+    let mins = List.rev_map (fun (x, l, r) ->
+      Printf.sprintf "%s = min(%s, %s)" (show (Init_pred.atom x)) (show l) (show r))
+      f.Init_pred.mins in
+    match ge @ mins with
+    | [] -> "; no path facts"
+    | fs -> "; path facts: " ^ String.concat ", " fs in
   let need st (v : view) ((a, b) : Init_pred.interval) loc what =
     let l = leaf_of_view v in
     if not (Leaves.mem l st.u) then st
     else
       let ivs = ivs_of st l in
       let whole = path_to_string (root_display v.vp) v.vp.path in
-      match Init_pred.uncovered ~eqs:st.eqs ivs (a, b) with
+      match Init_pred.uncovered ~eqs:st.eqs ~facts:st.facts ivs (a, b) with
       | None ->
           let claim = Printf.sprintf "init(%s[%s..<%s])" whole (show a) (show b) in
           Range_obligation.record_text loc
-            (Init_pred.obligation ~claim st.eqs ivs (a, b));
+            (Init_pred.obligation ~claim ~facts:st.facts st.eqs ivs (a, b));
           st
       | Some _ when ivs = [] ->
           error loc (Printf.sprintf
@@ -432,7 +555,8 @@ let check
           error loc (Printf.sprintf
             "'%s' is %s here, but element %s of it (in [%s, %s)) is not \
              shown initialized on some path to this point; known \
-             initialized: %s" whole what (show cur) (show a) (show b) known);
+             initialized: %s%s" whole what (show cur) (show a) (show b) known
+            (path_facts st));
           { st with u = Leaves.remove l st.u;
                     iv = List.filter (fun (l', _) -> l' <> l) st.iv }
   in
@@ -659,7 +783,8 @@ let check
   (* Resolve a contract predicate to facts in the CURRENT function's terms.
      [arg_view x] gives the view the caller passes for parameter x (or the
      callee's own root, when checking a body); [env] maps names to terms. *)
-  let resolve_pred ~arg_view ~env (p : Init_state.pred) : (view * Init_pred.interval) option list =
+  let resolve_pred ?(strengthen = false) ~arg_view ~env (p : Init_state.pred)
+      : (view * Init_pred.interval) option list =
     match p with
     | Init_state.PTrue -> []
     | Init_state.PInit e ->
@@ -694,7 +819,11 @@ let check
                   (match iv with
                    | Some iv -> [Some (v, iv)]
                    | None ->
-                       if bounds = None then
+                       (* A requires shown at a call (strengthen) may ask
+                          for the whole leaf when its bounds are not
+                          terms here: a stronger need, never a weaker
+                          fact. *)
+                       if bounds = None || strengthen then
                          [Some ({ v with len = None },
                                 (Init_pred.const 0, Init_pred.const (-1)))]
                        else [None])))
@@ -723,6 +852,10 @@ let check
     Init_pred.SMap.mem a lo.Init_pred.m || Init_pred.SMap.mem a hi.Init_pred.m
     || (match v.len with Some l -> Init_pred.SMap.mem a l.Init_pred.m | None -> false) in
   let unsafe_depth = ref 0 in
+  let bound_gs : (int, guarded list) Hashtbl.t = Hashtbl.create 8 in
+  let bound_guarded (e : Ast.expr) = match Local_bindings.id_for_expr bindings e with
+    | Some id -> Hashtbl.find_opt bound_gs id
+    | None -> None in
   (* ---- expressions ------------------------------------------------------ *)
   let rec expr st (e : Ast.expr) : state =
     if is_len_of e then st else
@@ -774,9 +907,10 @@ let check
     | Ast.Call ("zero_fill", [a]) -> fill_arg st a
     | Ast.Call ("assume_init", [a]) -> fill_arg st a
     | Ast.Call _ -> fst (call st e ~result:None)
-    | Ast.BinOp ((Ast.And | Ast.Or), l, r) ->
+    | Ast.BinOp ((Ast.And | Ast.Or) as op, l, r) ->
         let st = expr st l in
-        ignore (expr st r); st
+        (* The right operand runs only when the left one did not decide. *)
+        ignore (expr (assume st l (op = Ast.And)) r); st
     | Ast.BinOp (_, l, r) -> expr (expr st l) r
     | Ast.Index (l, r) -> expr (expr st l) r
     | Ast.Assign ({ desc = Ast.Index (b, j); _ }, rhs) when view_of b <> None ->
@@ -905,6 +1039,7 @@ let check
         let cs = match params with
           | Some (_, loc) -> Init_state.contracts_of loc | None -> [] in
         let named = named_params cs in
+        let required = required_params cs in
         let (st, fills) = List.fold_left (fun (st, fills) (i, a) ->
           let out = match params with
             | Some (ps, loc) ->
@@ -912,6 +1047,7 @@ let check
                 (match Init_state.param_qual loc pname with
                  | Some Init_state.Uninit when List.mem pname named -> `Contract
                  | Some Init_state.Uninit -> `Out
+                 | _ when List.mem pname required -> `Contract
                  | _ ->
                      let rec is_ref_mut t = match strip t with
                        | Ast.TypeBorrow t -> is_ref_mut t
@@ -985,7 +1121,7 @@ let check
                     error e.loc (Printf.sprintf
                       "cannot show the requires clause of '%s' at this call: \
                        its place or bounds are not expressible here" name);
-                    st) st (resolve_pred ~arg_view ~env:(env ~binder:None) p)
+                    st) st (resolve_pred ~strengthen:true ~arg_view ~env:(env ~binder:None) p)
           | _ -> st) st cs in
         let st = List.fold_left (fun st f -> match f with
           | `P (p, `Fields) -> fill_fields st p
@@ -1060,7 +1196,7 @@ let check
       | Some (b, t) when b = x -> t
       | _ ->
           match List.assoc_opt x param_ids, kind with
-          | Some id, `Val _ when not (List.mem x written) -> Some (v_atom id)
+          | Some id, `Val _ when not (is_written x id) -> Some (v_atom id)
           | Some id, `Len _ -> Some (len_atom id)
           | _ -> None in
   let check_ensures st (eo : Ast.expr option) (gs : guarded list) loc =
@@ -1114,6 +1250,20 @@ let check
                (match arm_for case with
                 | Some (_, p) -> ignore (need_pred st ~binder:None p)
                 | None -> ())
+           | Some { desc = Ast.Var _; _ } when gs <> [] ->
+               (* GitHub issue #975: a bound call result: each arm under
+                  the facts the call gave that case. *)
+               let cases = match ret_variant with Some cs -> List.map fst cs | None -> [] in
+               List.iter (fun ((pat : Init_state.arm_pat), p) ->
+                 let mine = match pat.case with
+                   | Some k -> [k]
+                   | None -> List.filter (fun k -> not (List.exists
+                       (fun ((q : Init_state.arm_pat), _) -> q.case = Some k) arms)) cases in
+                 List.iter (fun k ->
+                   let t = Option.map (fun b -> Init_pred.atom ("ret:" ^ b)) pat.bind in
+                   let st = apply_case st gs k t in
+                   let binder = Option.map (fun b -> (b, t)) pat.bind in
+                   ignore (need_pred st ~binder p)) mine) arms
            | _ ->
                List.iter (fun ((pat : Init_state.arm_pat), p) ->
                  let binder = Option.map (fun b -> (b, None)) pat.bind in
@@ -1139,7 +1289,7 @@ let check
      leaf fully initialized. *)
   let merge results =
     match List.filter (fun (_, dead) -> not dead) results with
-    | [] -> ({ u = Leaves.empty; iv = []; eqs = [] }, true)
+    | [] -> ({ u = Leaves.empty; iv = []; eqs = []; facts = Init_pred.no_facts }, true)
     | (first, _) :: rest ->
         let all = List.map fst ((first, false) :: rest) in
         let u = List.fold_left (fun acc s -> Leaves.union acc s.u) first.u
@@ -1156,7 +1306,17 @@ let check
           List.for_all (fun s ->
             List.exists (fun (a', t') -> a = a' && Init_pred.equal t t') s.eqs) all)
             first.eqs in
-        ({ u; iv; eqs }, false)
+        (* GitHub issue #975: a path fact survives a merge when every live
+           arm knows it. *)
+        let in_all f = List.for_all f all in
+        let ge = List.filter (fun t ->
+          in_all (fun s -> List.exists (Init_pred.equal t) s.facts.Init_pred.ge))
+          first.facts.Init_pred.ge in
+        let mins = List.filter (fun (x, a, b) ->
+          in_all (fun s -> List.exists (fun (x', a', b') ->
+            x = x' && Init_pred.equal a a' && Init_pred.equal b b') s.facts.Init_pred.mins))
+          first.facts.Init_pred.mins in
+        ({ u; iv; eqs; facts = { Init_pred.ge; mins } }, false)
   in
   let trackable ty = match strip ty with
     | Ast.TypeArray _ -> false
@@ -1266,13 +1426,56 @@ let check
         (match Local_bindings.ids_for_stmt bindings s with
          | id :: _ when immutable id -> Hashtbl.replace aliases id v; (st, false)
          | _ -> (need_view st v e.loc "viewed as memory", false))
+    | Ast.Let (false, _, _, Some ({ desc = Ast.Call ("min", [a; b]); _ } as e), _) ->
+        (* GitHub issue #975: x = min(a, b) as a fact; with one side not a
+           fact side, only x <= the other. *)
+        let st = fst (call st e ~result:None) in
+        (match Local_bindings.ids_for_stmt bindings s with
+         | id :: _ when immutable id && unsigned_id id ->
+             let x = v_atom id in
+             let xa = "v" ^ string_of_int id in
+             (match side st.facts a, side st.facts b with
+              | Some l, Some r ->
+                  ({ st with facts = { st.facts with
+                       Init_pred.mins = (xa, l, r) :: st.facts.Init_pred.mins } }, false)
+              | Some l, None | None, Some l -> (add_fact st (Init_pred.sub l x), false)
+              | None, None -> (st, false))
+         | _ -> (st, false))
     | Ast.Let (_, _, _, Some ({ desc = Ast.Call _; _ } as e), _) ->
-        (fst (call st e ~result:(bind_result s)), false)
+        let (st, gs) = call st e ~result:(bind_result s) in
+        (* GitHub issue #975: an immutable binding of a call's result keeps
+           the facts that depend on it, for a later `match` or `return`. *)
+        (match Local_bindings.ids_for_stmt bindings s with
+         | id :: _ when immutable id && gs <> [] -> Hashtbl.replace bound_gs id gs
+         | _ -> ());
+        (st, false)
+    | Ast.Let (false, _, _, Some ({ desc = Ast.SliceOf (b, lo, _); _ } as e), _)
+      when view_of e = None && view_of b <> None && lin lo <> None
+           && (match Local_bindings.ids_for_stmt bindings s with
+               | id :: _ ->
+                   immutable id
+                   && (match Option.map strip
+                               (Types.IntMap.find_opt id finfo.Types.binding_types) with
+                       | Some (Ast.TypeSlice _) -> true
+                       | _ -> false)
+               | [] -> false) ->
+        (* GitHub issue #975: a sub-slice whose end is not a linear term
+           (a mutable bound, say) is still an alias; its length is fixed
+           once bound, so it is the binding's own `.len` atom. *)
+        let v = Option.get (view_of b) in
+        let id = List.hd (Local_bindings.ids_for_stmt bindings s) in
+        let st = place_subexprs_view st e in
+        Hashtbl.replace aliases id
+          { v with off = Init_pred.add v.off (Option.get (lin lo));
+                   len = Some (len_atom id) };
+        (st, false)
     | Ast.Let (_, _, _, Some e, _) | Ast.LetTuple (_, e) | Ast.Expr e
     | Ast.Yield e -> (expr st e, false)
     | Ast.Return eo ->
         let (st, gs) = match eo with
           | Some ({ desc = Ast.Call _; _ } as e) -> call st e ~result:None
+          | Some ({ desc = Ast.Var _; _ } as e) when bound_guarded e <> None ->
+              (expr st e, Option.get (bound_guarded e))
           | Some e -> (expr st e, [])
           | None -> (st, []) in
         check_outs st s.loc; check_ensures st eo gs s.loc; (st, true)
@@ -1288,13 +1491,23 @@ let check
              merge [stmts (apply_bool st gs b) yes; stmts (apply_bool st gs (not b)) no]
          | None ->
              let st = expr st c in
-             merge [stmts st yes; stmts st no])
+             merge [stmts (assume st c true) yes; stmts (assume st c false) no])
     | Ast.While (c, body) ->
         let st = expr st c in
-        ignore (stmts st body); (st, false)
+        ignore (stmts (assume st c true) body); (st, false)
     | Ast.For (_, _, lo, hi, body) ->
         let st = expr (expr st lo) hi in
-        ignore (stmts st body);
+        (* GitHub issue #975: the counter lies in [lo, hi) in the body. *)
+        let in_body = match Local_bindings.ids_for_stmt bindings s with
+          | [_; id] when unsigned_id id ->
+              let i = v_atom id in
+              let st = match side st.facts lo with
+                | Some l -> add_fact st (Init_pred.sub i l) | None -> st in
+              (match side st.facts hi with
+               | Some h -> add_fact st (Init_pred.sub (Init_pred.sub h i) (Init_pred.const 1))
+               | None -> st)
+          | _ -> st in
+        ignore (stmts in_body body);
         (List.fold_left (fun st (p, iv) -> add_iv st p iv) st
            (filled_by_loop s lo hi body), false)
     | Ast.ForEach (_, seq, body) ->
@@ -1303,8 +1516,14 @@ let check
     | Ast.Match (d, arms) | Ast.LetMatch (_, _, _, d, arms) ->
         let (st, gs) = match d.desc with
           | Ast.Call _ -> call st d ~result:None
+          | Ast.Var _ when bound_guarded d <> None -> (expr st d, Option.get (bound_guarded d))
           | _ -> (expr st d, []) in
         merge (List.mapi (fun i a ->
+          (* GitHub issue #975: the binder's payload type, for its facts. *)
+          (match a, Local_bindings.id_for_arm bindings s.loc i with
+           | Ast.ArmVariant (vname, case, Some (Ast.PayloadBind (_, false)), _), Some id ->
+               Option.iter (Hashtbl.replace arm_types id) (variant_payload vname case)
+           | _ -> ());
           let st = match a with
             | Ast.ArmVariant (_, case, payload, _) when gs <> [] ->
                 let term = match payload with
@@ -1320,7 +1539,7 @@ let check
     | Ast.StaticAssert _ -> (st, false)
   in
   (* Requires: assumed at entry. *)
-  let entry = { u = entry_u; iv = []; eqs = [] } in
+  let entry = { u = entry_u; iv = []; eqs = []; facts = Init_pred.no_facts } in
   let entry = List.fold_left (fun st (c : Init_state.clause) ->
     match c.body with
     | Init_state.CPlain p when c.requires ->

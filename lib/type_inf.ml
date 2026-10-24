@@ -11225,10 +11225,15 @@ let infer_program (prog : Ast.toplevel list) : program_types =
      linear owners that make a held slot capability. *)
   let init_variants = Hashtbl.create 32 in
   let init_linear = Hashtbl.create 16 in
+  (* GitHub issue #975: payload types, so a binder can carry path facts. *)
+  let init_payloads = Hashtbl.create 32 in
   List.iter (function
     | Ast.VariantDef (n, _, cases, _, _) | Ast.GenericVariantDef (n, _, _, cases, _, _) ->
         Hashtbl.replace init_variants n
-          (List.map (fun (c, payload) -> (c, payload <> None)) cases)
+          (List.map (fun (c, payload) -> (c, payload <> None)) cases);
+        List.iter (fun (c, payload) -> match payload with
+          | Some t -> Hashtbl.replace init_payloads (n, c) t
+          | None -> ()) cases
     | Ast.OwnedStructDef (n, Ast.KindLinear, _, _, _, _, _, _, _) ->
         Hashtbl.replace init_linear n ()
     | _ -> ()) prog;
@@ -11248,6 +11253,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                   ~callee:(Hashtbl.find_opt init_callees)
                   ~scratch:init_scratch
                   ~variant_cases:(Hashtbl.find_opt init_variants)
+                  ~variant_payload:(fun v c -> Hashtbl.find_opt init_payloads (v, c))
                   ~linear_owner:(Hashtbl.mem init_linear) finfo fdef
               with
               | Types.TypeError (loc, msg) ->

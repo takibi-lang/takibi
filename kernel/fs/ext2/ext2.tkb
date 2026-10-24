@@ -852,8 +852,10 @@ private inline fn ext2_read_small_file_with(slot: borrow Ext2Slot[0],
 // single- and double-indirect pointer fanout of this filesystem's block size.
 // Triple-indirect traversal remains outside the present rootfs requirement.
 fn ext2_read_file_chunk(mount: Ext2Mount, inode_number: usize,
-                        offset: usize, destination: []u8)
-        -> Ext2ReadResult !{unsafe} {
+                        offset: usize, destination: borrow uninit []u8)
+        -> Ext2ReadResult !{unsafe}
+        ensures match result { Ext2ReadResult::Read(n) => init(destination[0..<n]),
+                               Ext2ReadResult::Invalid => true } {
     let slot: Ext2Slot[0] = ext2_slot_acquire();
     let result: Ext2ReadResult = ext2_read_file_chunk_with(slot, mount,
             inode_number, offset, destination);
@@ -863,8 +865,10 @@ fn ext2_read_file_chunk(mount: Ext2Mount, inode_number: usize,
 
 private inline fn ext2_read_file_chunk_with(slot: borrow Ext2Slot[0],
         mount: Ext2Mount, inode_number: usize,
-                        offset: usize, destination: []u8)
-        -> Ext2ReadResult !{unsafe} {
+                        offset: usize, destination: borrow uninit []u8)
+        -> Ext2ReadResult !{unsafe}
+        ensures match result { Ext2ReadResult::Read(n) => init(destination[0..<n]),
+                               Ext2ReadResult::Invalid => true } {
     match ext2_read_inode(slot, mount, inode_number) {
         Ext2InodeResult::Invalid => { return Ext2ReadResult::Invalid; }
         Ext2InodeResult::Inode(inode) => {
@@ -906,15 +910,19 @@ private inline fn ext2_read_file_chunk_with(slot: borrow Ext2Slot[0],
             if (chunk > destination.len) {
                 return Ext2ReadResult::Invalid;
             }
-            slice_copy(destination, source);
-            return Ext2ReadResult::Read(chunk);
+            // GitHub issue #975: the copied count, which the checks above
+            // make equal to chunk, is what the ensures clause names.
+            let copied: usize = slice_copy(destination, source);
+            return Ext2ReadResult::Read(copied);
         }
     }
 }
 
 fn ext2_read_directory_chunk(mount: Ext2Mount, inode_number: usize,
-                             offset: usize, destination: []u8)
-        -> Ext2ReadResult !{unsafe} {
+                             offset: usize, destination: borrow uninit []u8)
+        -> Ext2ReadResult !{unsafe}
+        ensures match result { Ext2ReadResult::Read(n) => init(destination[0..<n]),
+                               Ext2ReadResult::Invalid => true } {
     let slot: Ext2Slot[0] = ext2_slot_acquire();
     let result: Ext2ReadResult = ext2_read_directory_chunk_with(slot, mount,
             inode_number, offset, destination);
@@ -924,8 +932,10 @@ fn ext2_read_directory_chunk(mount: Ext2Mount, inode_number: usize,
 
 private inline fn ext2_read_directory_chunk_with(slot: borrow Ext2Slot[0],
         mount: Ext2Mount, inode_number: usize,
-                             offset: usize, destination: []u8)
-        -> Ext2ReadResult !{unsafe} {
+                             offset: usize, destination: borrow uninit []u8)
+        -> Ext2ReadResult !{unsafe}
+        ensures match result { Ext2ReadResult::Read(n) => init(destination[0..<n]),
+                               Ext2ReadResult::Invalid => true } {
     match ext2_read_inode(slot, mount, inode_number) {
         Ext2InodeResult::Invalid => { return Ext2ReadResult::Invalid; }
         Ext2InodeResult::Inode(inode) => {
@@ -967,8 +977,10 @@ private inline fn ext2_read_directory_chunk_with(slot: borrow Ext2Slot[0],
             if (chunk > destination.len) {
                 return Ext2ReadResult::Invalid;
             }
-            slice_copy(destination, source);
-            return Ext2ReadResult::Read(chunk);
+            // GitHub issue #975: the copied count, which the checks above
+            // make equal to chunk, is what the ensures clause names.
+            let copied: usize = slice_copy(destination, source);
+            return Ext2ReadResult::Read(copied);
         }
     }
 }

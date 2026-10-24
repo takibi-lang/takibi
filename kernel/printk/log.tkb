@@ -1826,29 +1826,21 @@ fn kernel_log_snapshot_capacity() -> usize {
     return KERNEL_LOG_SNAPSHOT_CAPACITY;
 }
 
-fn kernel_log_snapshot_copy(offset: usize, destination: borrow []u8) -> usize {
+// GitHub issue #975: initializes exactly the prefix it reports copying,
+// so a caller staging into scratch need not zero-fill it first.
+fn kernel_log_snapshot_copy(offset: usize, destination: borrow uninit []u8) -> usize
+        ensures init(destination[0..<result]) {
     let snapshot: *KernelLogSnapshot = kernel_log_snapshot_here();
     let snapshot_length: usize = snapshot.length;
     if (offset >= snapshot_length) { return 0; }
-    let mut amount: usize = destination.len;
-    if (amount > snapshot_length - offset) {
-        amount = snapshot_length - offset;
-    }
-    let mut index: usize = 0;
-    while (index < amount) {
-        let source_index: usize = match checked_add_usize(offset, index) {
-            CheckedUsize::Overflow => { return index; }
-            CheckedUsize::Value(value) => { value }
-        };
-        if (source_index < KERNEL_LOG_SNAPSHOT_CAPACITY &&
-            index < destination.len) {
-            let safe_source:
-                {0..<KERNEL_LOG_SNAPSHOT_CAPACITY as usize} = source_index;
-            destination[index] = snapshot.bytes[safe_source];
-        }
-        index = index + 1;
-    }
-    return amount;
+    let bytes = snapshot.bytes as []const u8;
+    if (offset > bytes.len) { return 0; }
+    let tail = bytes[offset..<bytes.len];
+    let available: usize = snapshot_length - offset;
+    if (available > tail.len) { return 0; }
+    let source = tail[0..<available];
+    let copied: usize = slice_copy(destination, source);
+    return copied;
 }
 
 // GitHub issue #613: the debugger's raw view of the ring. The world is

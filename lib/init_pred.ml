@@ -74,31 +74,65 @@ type eqs = (string * lin) list
 
 let normalize (eqs : eqs) x = List.fold_left (fun x (a, t) -> subst a t x) x eqs
 
+(* GitHub issue #975: linear facts known on the path, from branch
+   conditions, loop bounds and `min` bindings. [ge] holds terms t with
+   t >= 0; [mins] holds definitions atom = min(a, b). Both are
+   quantifier-free linear integer arithmetic. *)
+type facts = { ge : lin list; mins : (string * lin * lin) list }
+
+let no_facts = { ge = []; mins = [] }
+
+let normalize_facts (eqs : eqs) f =
+  { ge = List.map (normalize eqs) f.ge;
+    mins = List.map (fun (x, a, b) -> (x, normalize eqs a, normalize eqs b)) f.mins }
+
+let coeff a x = match SMap.find_opt a x.m with Some k -> k | None -> 0
+
+(* Does t >= 0 follow from the facts? A sound, incomplete search: t holds
+   outright when its constant and every coefficient are nonnegative (every
+   atom is a usize); else subtract a fact that shares an atom with t with
+   the same sign (t = g + (t - g) with g >= 0), or expand an atom defined as a min: k*min(a, b) + r >= 0
+   holds iff both k*a + r and k*b + r do (k > 0), and -k*min(a, b) + r >= 0
+   holds if either -k*a + r or -k*b + r does. [depth] bounds the steps. *)
+let entails ?(depth = 4) (f : facts) (t : lin) =
+  let rec go depth t =
+    (t.c >= 0 && SMap.for_all (fun _ k -> k >= 0) t.m)
+    || (depth > 0 &&
+        (List.exists (fun g ->
+           SMap.exists (fun a k -> let j = coeff a g in j <> 0 && (j > 0) = (k > 0)) t.m
+           && go (depth - 1) (sub t g)) f.ge
+         || List.exists (fun (x, a, b) ->
+              let k = coeff x t in
+              if k = 0 then false else
+              let rest = { t with m = SMap.remove x t.m } in
+              let ta = add rest (scale k a) and tb = add rest (scale k b) in
+              if k > 0 then go (depth - 1) ta && go (depth - 1) tb
+              else go (depth - 1) ta || go (depth - 1) tb) f.mins))
+  in
+  go depth t
+
 (* None: covered. Some cur: the first point the walk could not cover. *)
-let uncovered ?(eqs = []) (ivs : interval list) ((a, b) : interval) =
+let uncovered ?(eqs = []) ?(facts = no_facts) (ivs : interval list) ((a, b) : interval) =
   let n = normalize eqs in
+  let facts = normalize_facts eqs facts in
+  let ge x y = entails facts (sub x y) in   (* x >= y *)
   let ivs = List.map (fun (lo, hi) -> (n lo, n hi)) ivs in
   let b = n b in
   let rec go cur fuel =
-    match diff b cur with
-    | Some d when d <= 0 -> None
-    | _ when fuel = 0 -> Some cur
-    | _ ->
-        (* An interval that starts at or before cur and reaches b ends the
-           walk; else one that starts at or before cur and ends a constant
-           distance past it advances it. *)
-        let reaches = List.exists (fun (lo, hi) ->
-          match diff cur lo, diff hi b with
-          | Some x, Some y -> x >= 0 && y >= 0
-          | _ -> false) ivs in
-        if reaches then None else
-        let step = List.find_map (fun (lo, hi) ->
-          match diff cur lo, diff hi cur with
-          | Some x, Some y when x >= 0 && y > 0 -> Some hi
-          | _ -> None) ivs in
-        (match step with
-         | Some hi -> go hi (fuel - 1)
-         | None -> Some cur)
+    if ge cur b then None
+    else if fuel = 0 then Some cur
+    else
+      (* An interval that starts at or before cur and reaches b ends the
+         walk; else one that starts at or before cur and ends past it
+         advances it. *)
+      let reaches = List.exists (fun (lo, hi) -> ge cur lo && ge hi b) ivs in
+      if reaches then None else
+      let step = List.find_map (fun (lo, hi) ->
+        if ge cur lo && entails facts (sub (sub hi cur) (const 1)) then Some hi
+        else None) ivs in
+      (match step with
+       | Some hi -> go hi (fuel - 1)
+       | None -> Some cur)
   in
   go (n a) (List.length ivs + 1)
 
@@ -124,10 +158,13 @@ let smt x =
   | ts, 0 -> "(+ " ^ String.concat " " ts ^ ")"
   | ts, c -> "(+ " ^ String.concat " " ts ^ " " ^ smt_int c ^ ")"
 
-let obligation ~claim (eqs : eqs) (ivs : interval list) ((a, b) : interval) =
+let obligation ~claim ?(facts = no_facts) (eqs : eqs) (ivs : interval list)
+    ((a, b) : interval) =
   let all = List.concat_map (fun (lo, hi) -> atoms lo @ atoms hi)
       ((a, b) :: ivs)
-    @ List.concat_map (fun (x, t) -> x :: atoms t) eqs in
+    @ List.concat_map (fun (x, t) -> x :: atoms t) eqs
+    @ List.concat_map atoms facts.ge
+    @ List.concat_map (fun (x, l, r) -> x :: atoms l @ atoms r) facts.mins in
   let all = List.sort_uniq compare all in
   let buf = Buffer.create 512 in
   let line s = Buffer.add_string buf s; Buffer.add_char buf '\n' in
@@ -141,6 +178,10 @@ let obligation ~claim (eqs : eqs) (ivs : interval list) ((a, b) : interval) =
             (smt_atom x) (smt_atom x))) all;
   List.iter (fun (x, t) ->
     line (Printf.sprintf "(assert (= %s %s))" (smt_atom x) (smt t))) eqs;
+  List.iter (fun t -> line (Printf.sprintf "(assert (>= %s 0))" (smt t))) facts.ge;
+  List.iter (fun (x, l, r) ->
+    line (Printf.sprintf "(assert (= %s (ite (<= %s %s) %s %s)))"
+            (smt_atom x) (smt l) (smt r) (smt l) (smt r))) facts.mins;
   line "(declare-const k Int)";
   line (Printf.sprintf "(assert (and (<= %s k) (< k %s)))" (smt a) (smt b));
   let inside = List.map (fun (lo, hi) ->
