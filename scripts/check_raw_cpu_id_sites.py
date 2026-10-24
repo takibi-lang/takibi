@@ -58,7 +58,7 @@ LISTED = {
     "kernel/kernel/profile_timeline.tkb": (1, FLIP, "not yet reviewed for migration"),
     "kernel/kernel/protocol_trace.tkb": (1, FLIP, "not yet reviewed for migration"),
     "kernel/kernel/stall_probe.tkb": (3, FLIP, "not yet reviewed for migration"),
-    "kernel/kernel/syscall.tkb": (6, FLIP, "not yet reviewed for migration"),
+    "kernel/kernel/syscall.tkb": (5, FLIP, "not yet reviewed for migration"),
     "kernel/kernel/uart_irq_affinity.tkb": (2, FLIP, "not yet reviewed for migration"),
     "kernel/kernel/workload_evidence.tkb": (46, FLIP, "not yet reviewed for migration"),
     "kernel/lib/diagnostic_ring.tkb": (1, FLIP, "not yet reviewed for migration"),
