@@ -18,15 +18,27 @@ Two bounds:
                    Leaves are what each costs a guest and a receipt. 25 on
                    2026-10-23, the count when the budget was set.
 
-  LANE_SECONDS_LIMIT  the summed elapsed time of every receipt in the last
-                   allcheck's lane timing artifact (_build/lane-timing, one
-                   JSON record per lane, written by scripts/lane_timing.sh).
-                   The 2026-10-23 allcheck in the main checkout measured
-                   6825 s (5598 s of it in QEMU lanes); #886 measured about
-                   9000 s. The limit is 9000 s: today plus about 30 % for
-                   host load. Checked only when the artifact is present,
-                   since a fresh worktree has none; a partial artifact (this
-                   gate runs beside allcheck's lanes) can only sum lower.
+  LANE_SECONDS_LIMIT  the busy lane-seconds of the last allcheck: every
+                   receipt's elapsed time in the lane timing artifact
+                   (_build/lane-timing, written by scripts/lane_timing.sh)
+                   less the time that lane waited for vCPUs, read from
+                   vcpu-lease.waits (#927). Waiting is queueing, not work:
+                   when #927 granted leases longest lane first, the span fell
+                   and the summed elapsed time rose by about 2100 s, because
+                   the short lanes now wait for the long ones. The budget
+                   counts what a lane costs the host, so the grant order
+                   cannot move it.
+                   Derivation (maintainer decision 2026-10-23, #927): a solo
+                   allcheck on a quiet host, 2026-10-24, rebased on b10ee276,
+                   measured 3301 busy lane-seconds over 34 receipts (summed
+                   elapsed 9119 s, lease wait 6546 s, span 610 s). The limit
+                   is 4300 s: that plus about 30 % for host load, the same
+                   headroom the earlier 9000 s elapsed limit had (#908).
+                   Checked only when the artifact is present, since a fresh
+                   worktree has none; a partial artifact (this gate runs
+                   beside allcheck's lanes) can only sum lower. A QEMU lane's
+                   receipt with no vcpu-lease.waits is refused, since its
+                   waits would count as work.
 
 Exit code only (0 = pass, 1 = fail).
 """
@@ -43,7 +55,7 @@ from pass_line import report_pass
 MAKEFILE = pathlib.Path("Makefile")
 TIMING_DIR = pathlib.Path("_build/lane-timing")
 QEMU_LANE_LIMIT = 25
-LANE_SECONDS_LIMIT = 9000.0
+LANE_SECONDS_LIMIT = 4300.0
 
 
 def rules(text: str) -> dict[str, list[str]]:
