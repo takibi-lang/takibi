@@ -13,9 +13,23 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ARTIFACT_DIR="${TAKIBI_LANE_ARTIFACT_ROOT:-$REPO_ROOT/_build}/kernel-hwtest-qemu-trace-control"
+ARTIFACT_DIR="${KERNEL_TRACE_CONTROL_ARTIFACT_DIR:-${TAKIBI_LANE_ARTIFACT_ROOT:-$REPO_ROOT/_build}/kernel-hwtest-qemu-trace-control}"
 LOG="$ARTIFACT_DIR/control.log"
 mkdir -p "$ARTIFACT_DIR"
+# A control that wrongly passed or failed for the wrong reason must keep its
+# capture (#877): snapshot it on any nonzero exit.
+archive_on_failure() {
+    local status=$?
+    if [ "$status" -ne 0 ]; then
+        KERNEL_QEMU_LABEL="qemu-trace-control" \
+            KERNEL_QEMU_ELF="$REPO_ROOT/kernel/build/qemu/kernel-debug.elf" \
+            bash "$REPO_ROOT/scripts/archive_kernel_failure.sh" "$ARTIFACT_DIR" \
+            "$REPO_ROOT/_build/kernel-hwtest-qemu-trace-control-failures" \
+            "exit status $status" || true
+    fi
+    return "$status"
+}
+trap archive_on_failure EXIT
 
 status=0
 env KERNEL_QEMU_TRACE_FROM_BOOT=fail_after_exec \
