@@ -29436,6 +29436,28 @@ let text_search_tests = [
     Alcotest.(check (list string)) "names"
       [ "u8"; "Foo_region__Bar"; "x" ]
       (names "(region__u8) region__ region__Foo_region__Bar region__x"));
+  (* #921: the one-pass scan over several prefixes finds, per prefix, what
+     names_after finds for that prefix alone -- overlapping prefixes, a
+     prefix inside another's name, runs of underscores, a name at the end. *)
+  ("text search: the multi-prefix name scan equals one scan per prefix", `Quick, fun () ->
+    let module R = Takibi.Region_builtin in
+    let prefixes = [ "region__"; "Region__"; "RegionOf__"; "Of__"; "places__" ] in
+    let texts = [
+      "(region__u8) region__ region__Foo_region__Bar region__x";
+      "RegionOf__T RegionOf__RegionOf__U Of__V xRegion__W";
+      "a___region___b region____c places__ places__z___";
+      "region__"; ""; "__"; "_"; "Of__Of__Of__q" ] in
+    let sorted f = List.sort compare (let l = ref [] in f (fun n -> l := n :: !l); !l) in
+    List.iter (fun text ->
+      Alcotest.(check (list string)) text
+        (sorted (fun add -> List.iter (fun p -> R.names_after p text add) prefixes))
+        (sorted (R.names_after_any prefixes text))) texts);
+  ("text search: replace_all replaces every occurrence, left to right", `Quick, fun () ->
+    let r = Takibi.Region_builtin.replace_all in
+    Alcotest.(check string) "several" "xAyAz" (r ~sub:"@T@" ~by:"A" "x@T@y@T@z");
+    Alcotest.(check string) "overlap" "B@" (r ~sub:"@@" ~by:"B" "@@@");
+    Alcotest.(check string) "at the ends" "AmA" (r ~sub:"@T@" ~by:"A" "@T@m@T@");
+    Alcotest.(check string) "none" "abc" (r ~sub:"@T@" ~by:"A" "abc"));
 ]
 
 (* GitHub issues #884, #941, #942: every binary operator over every operand

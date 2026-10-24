@@ -1373,6 +1373,36 @@ let names_after prefix text add =
       end in
   go 0
 
+(* [names_after] for several prefixes in one pass over [text] (#921): the
+   same names, each prefix matched and resumed exactly as its own
+   [names_after] would, but the text is read once rather than once per
+   prefix. Every prefix ends in "__", so every occurrence of one ends at a
+   "__" of the text, and those are visited in order. *)
+let names_after_any prefixes =
+  let prefixes = Array.of_list prefixes in
+  Array.iter (fun p ->
+    if not (String.ends_with ~suffix:"__" p) then
+      invalid_arg ("names_after_any: " ^ p ^ " does not end in __")) prefixes;
+  fun text add ->
+    let n = String.length text in
+    let resume = Array.make (Array.length prefixes) 0 in
+    let rec go i =
+      match String.index_from_opt text i '_' with
+      | Some p when p + 1 < n ->
+          if String.unsafe_get text (p + 1) = '_' then
+            Array.iteri (fun idx prefix ->
+              let lp = String.length prefix in
+              let k = p + 2 - lp in
+              if k >= resume.(idx) && sub_at text k prefix then begin
+                let j = ref (k + lp) in
+                while !j < n && ident_char text.[!j] do incr j done;
+                if !j > k + lp then add (String.sub text (k + lp) (!j - k - lp));
+                resume.(idx) <- !j
+              end) prefixes;
+          go (p + 1)
+      | _ -> () in
+    if n > 0 then go 0
+
 let contains = Text_search.contains
 
 (* The printed form of each top-level item, which the planning scans read.
@@ -1387,17 +1417,22 @@ let shown (prog : Ast.toplevel list) =
       shown_cache := Some (prog, texts);
       texts
 
+(* Every occurrence of [sub] in [s], left to right and not overlapping,
+   replaced by [by]. Copies the text between occurrences in one piece, and
+   finds the next occurrence by its first character (#921). *)
 let replace_all ~sub ~by s =
-  let lsub = String.length sub in
-  let buf = Buffer.create (String.length s) in
-  let i = ref 0 in
-  while !i < String.length s do
-    if !i + lsub <= String.length s && sub_at s !i sub then begin
-      Buffer.add_string buf by; i := !i + lsub
-    end else begin
-      Buffer.add_char buf s.[!i]; incr i
-    end
-  done;
+  let lsub = String.length sub and n = String.length s in
+  if lsub = 0 then invalid_arg "replace_all: empty sub";
+  let buf = Buffer.create (n + 64) in
+  let rec go i =
+    let k = find_sub s i sub in
+    if k < 0 then Buffer.add_substring buf s i (n - i)
+    else begin
+      Buffer.add_substring buf s i (k - i);
+      Buffer.add_string buf by;
+      go (k + lsub)
+    end in
+  go 0;
   Buffer.contents buf
 
 (* Record-only accessors retain the same slot, pin or stopped inspection
@@ -1498,12 +1533,7 @@ let parse_source src =
    `RegionOf(T)` all reach the AST as a mangled name, and a claimed array
    names its element type in its declaration. Read off the printed AST,
    which every construct derives. *)
-let element_types (prog : Ast.toplevel list) claimed =
-  let found = Hashtbl.create 8 in
-  List.iter (fun (_, (elem, _)) -> Hashtbl.replace found elem ()) claimed;
-  let scan text =
-    List.iter (fun prefix ->
-      names_after prefix text (fun name -> Hashtbl.replace found name ())) [ "region__"; "RegionSplit__"; "RegionOf__"; "RegionTable__";
+let element_prefixes = names_after_any [ "region__"; "RegionSplit__"; "RegionOf__"; "RegionTable__";
          "RegionTableOf__"; "RegionTake__"; "RegionAlloc__"; "RegionHandle__";
          "RegionReleaseSlot__"; "RegionReleaseAdopt__"; "RegionPoolAlloc__";
          "RegionSlot__"; "RegionPool__"; "RegionPoolGuard__"; "RegionGrow__";
@@ -1511,7 +1541,13 @@ let element_types (prog : Ast.toplevel list) claimed =
          "RegionUnpin__"; "RegionRetire__"; "RegionNext__";
          "RegionInspection__"; "RegionInspectionProbe__"; "RegionTyped__"; "places__";
          "PlaceBack__"; "PlaceRun__"; "PlacesFrom__";
-         "RegionHeld__"; "RegionHeldView__"; "RegionHeldProbe__" ] in
+         "RegionHeld__"; "RegionHeldView__"; "RegionHeldProbe__" ]
+
+let element_types (prog : Ast.toplevel list) claimed =
+  let found = Hashtbl.create 8 in
+  List.iter (fun (_, (elem, _)) -> Hashtbl.replace found elem ()) claimed;
+  let scan text =
+    element_prefixes text (fun name -> Hashtbl.replace found name ()) in
   List.iter scan (shown prog);
   Hashtbl.fold (fun k () acc -> k :: acc) found [] |> List.sort compare
 
@@ -1722,29 +1758,47 @@ let plan prog : string list =
   (* Read off the printed AST rather than lowered: lowering measures types,
      and a type that holds a built-in one cannot be measured before the
      built-in is parsed. *)
-  let calls_of fname =
-    List.concat_map (fun text ->
-      let key = "\"" ^ fname ^ "\"," in
-      let found = ref [] in
-      let n = String.length text and m = String.length key in
-      let var = "Ast.Var \"" in
-      let lv = String.length var in
+  (* The first variable named after each call of [fnames], per name, in
+     one pass over each text (#921): every key starts with "\"region_",
+     and each key resumes after its own match as a scan of its own would. *)
+  let calls_of_all fnames =
+    let keys = Array.of_list (List.map (fun f -> "\"" ^ f ^ "\",") fnames) in
+    let anchor = "\"region_" in
+    Array.iter (fun key ->
+      if not (String.starts_with ~prefix:anchor key) then
+        invalid_arg ("calls_of_all: " ^ key)) keys;
+    let found = Array.make (Array.length keys) [] in
+    let var = "Ast.Var \"" in
+    let lv = String.length var in
+    List.iter (fun text ->
+      let n = String.length text in
+      let here = Array.make (Array.length keys) [] in
+      let resume = Array.make (Array.length keys) 0 in
       let rec go i =
-        if i + m <= n then
-          let k = find_sub text i key in
-          if k >= 0 then begin
-            (* The first variable named after the key; none puts the
-               start past the end, as a scan that runs out would. *)
-            let v = find_sub text (k + m) var in
-            let j = if v >= 0 then v else max (k + m) (n - lv + 1) in
-            let start = j + lv in
-            let stop = ref start in
-            while !stop < n && text.[!stop] <> '"' do incr stop done;
-            if start < n then found := String.sub text start (!stop - start) :: !found;
-            go !stop
-          end in
+        let k = find_sub text i anchor in
+        if k >= 0 then begin
+          Array.iteri (fun idx key ->
+            let m = String.length key in
+            if k >= resume.(idx) && sub_at text k key then begin
+              (* The first variable named after the key; none puts the
+                 start past the end, as a scan that runs out would. *)
+              let v = find_sub text (k + m) var in
+              let j = if v >= 0 then v else max (k + m) (n - lv + 1) in
+              let start = j + lv in
+              let stop = ref start in
+              while !stop < n && text.[!stop] <> '"' do incr stop done;
+              if start < n then here.(idx) <- String.sub text start (!stop - start) :: here.(idx);
+              resume.(idx) <- !stop
+            end) keys;
+          go (k + 1)
+        end in
       go 0;
-      !found) (shown prog) in
+      Array.iteri (fun idx l -> found.(idx) <- l :: found.(idx)) here) (shown prog);
+    Array.map (fun per_text -> List.concat (List.rev per_text)) found in
+  let calls = calls_of_all [ "region_of"; "region_table_of"; "region_table_lock" ] in
+  let calls_of = function
+    | "region_of" -> calls.(0) | "region_table_of" -> calls.(1)
+    | "region_table_lock" -> calls.(2) | f -> invalid_arg ("calls_of: " ^ f) in
   let once = calls_of "region_of" @ calls_of "region_table_of" in
   let locks = List.sort_uniq compare (calls_of "region_table_lock") in
   let claims = List.sort_uniq compare (once @ locks) in

@@ -174,6 +174,25 @@ and eval_size ~(resolve_ty : type_expr -> type_expr)
            else Some (x / y)
        | _ -> None)
 
+(* A function's local types for call resolution: its own bindings over the
+   program's global ones. Copying the global table for every function made
+   this pass quadratic on the kernel (#921); a local binding or removal
+   shadows the global entry, as it did in the copy. *)
+type local_types = {
+  own : (string, type_expr option) Hashtbl.t;
+  globals : (string, type_expr) Hashtbl.t;
+}
+
+let local_types_of globals = { own = Hashtbl.create 16; globals }
+
+let local_find lt name =
+  match Hashtbl.find_opt lt.own name with
+  | Some bound -> bound
+  | None -> Hashtbl.find_opt lt.globals name
+
+let local_bind lt name t = Hashtbl.replace lt.own name (Some t)
+let local_unbind lt name = Hashtbl.replace lt.own name None
+
 let no_subst (_ : string) : type_expr option = None
 let no_vsubst (_ : string) : int option = None
 
@@ -982,14 +1001,14 @@ let run ?(explain_inference = false) (prog : toplevel list) : toplevel list =
 
        GitHub issue #322: this is the companion half of unify_arg's own
        sync-risk comment above -- see that one for the checklist. *)
-    let derive_arg_type (local_types : (string, type_expr) Hashtbl.t) (e : expr)
+    let derive_arg_type (local_types : local_types) (e : expr)
         : type_expr option =
       match e.desc with
-      | Var name -> Hashtbl.find_opt local_types name
+      | Var name -> local_find local_types name
       | AddrOf { desc = Var name; _ } ->
-          Option.map (fun t -> TypePtr t) (Hashtbl.find_opt local_types name)
+          Option.map (fun t -> TypePtr t) (local_find local_types name)
       | AddrOf { desc = FieldGet ({ desc = Var name; _ }, fname); _ } ->
-          (match Hashtbl.find_opt local_types name with
+          (match local_find local_types name with
            | Some (TypePtr (TypeGenericInst (sname, args)))
            | Some (TypeRef (TypeGenericInst (sname, args)))
            | Some (TypeRefMut (TypeGenericInst (sname, args)))
@@ -1059,7 +1078,7 @@ let run ?(explain_inference = false) (prog : toplevel list) : toplevel list =
        raw_fns expansion further down both follow this same convention). *)
     let fn_requests : (string, string * generic_arg list) Hashtbl.t = Hashtbl.create 8 in
 
-    let resolve_call (local_types : (string, type_expr) Hashtbl.t)
+    let resolve_call (local_types : local_types)
         (name : string) (args : expr list) : string option =
       match Hashtbl.find_opt fn_templates name with
       | None -> None
@@ -1190,8 +1209,8 @@ let run ?(explain_inference = false) (prog : toplevel list) : toplevel list =
             let ty_opt = Option.map ty ty_opt in
             let e_opt = Option.map ex e_opt in
             (match ty_opt with
-             | Some t -> Hashtbl.replace local_types name t
-             | None -> Hashtbl.remove local_types name);
+             | Some t -> local_bind local_types name t
+             | None -> local_unbind local_types name);
             Let (m, name, ty_opt, e_opt, align_opt)
         | If (c, t, e) -> If (ex c, sts t, sts e)
         | While (c, b) -> While (ex c, sts b)
@@ -1217,8 +1236,8 @@ let run ?(explain_inference = false) (prog : toplevel list) : toplevel list =
                be THIS mechanism that supplies it anymore. *)
             let t_opt = Option.map ty t_opt in
             (match t_opt with
-             | Some t -> Hashtbl.replace local_types name t
-             | None -> Hashtbl.remove local_types name);
+             | Some t -> local_bind local_types name t
+             | None -> local_unbind local_types name);
             LetMatch (m, name, t_opt, ex e, List.map (walk_arm_calls ~subst ~vsubst local_types) arms)
       in
       { s with desc }
@@ -1233,9 +1252,9 @@ let run ?(explain_inference = false) (prog : toplevel list) : toplevel list =
     in
     let walk_func_calls (f : func) : func =
       let ty t = transform ~subst:no_subst ~vsubst:no_vsubst ~resolve_inst:collect_resolve t in
-      let local_types = Hashtbl.copy global_types in
+      let local_types = local_types_of global_types in
       List.iter (fun (n, t) -> match t with
-        | Some t -> Hashtbl.replace local_types n t
+        | Some t -> local_bind local_types n t
         | None -> ()) f.params;
       { f with
         params = List.map (fun (n, t) -> (n, Option.map ty t)) f.params;
@@ -1356,8 +1375,8 @@ let run ?(explain_inference = false) (prog : toplevel list) : toplevel list =
               let ty t = transform ~subst ~vsubst ~resolve_inst:collect_resolve t in
               let params = List.map (fun (n, t) -> (n, ty t)) tpl.fn_value_params in
               let ret_type = Option.map ty tpl.fn_ret_type in
-              let local_types = Hashtbl.copy global_types in
-              List.iter (fun (n, t) -> Hashtbl.replace local_types n t) params;
+              let local_types = local_types_of global_types in
+              List.iter (fun (n, t) -> local_bind local_types n t) params;
               let body = List.map (walk_stmt_calls ~subst ~vsubst local_types) tpl.fn_body in
               (* Relocate every stmt/expr node's own loc to be unique to
                  THIS instantiation (see relocate_stmt's own comment) --
