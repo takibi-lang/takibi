@@ -16058,6 +16058,26 @@ let codegen_tests = [
           return 0;
         }");
 
+  (* GitHub issue #991: a bare literal index is read at the index's
+     resolved width (usize), not reported as an i32. *)
+  Alcotest.test_case
+    "trap report names a bare literal slice index as usize (issue #991)"
+    `Quick
+    (expect_single_trap_reason
+       "index type usize cannot prove range"
+       "fn f991_lit(text: []const u8) -> u8 {
+          return text[0xFFFFFFFFFFFFFFFF];
+        }");
+
+  Alcotest.test_case
+    "trap report names a bare literal slice store index as usize \
+     (issue #991)" `Quick
+    (expect_single_trap_reason
+       "index type usize cannot prove range"
+       "fn f991_store(text: []u8) {
+          text[0xFFFFFFFFFFFFFFFF] = 0;
+        }");
+
   Alcotest.test_case
     "multi-level struct field chain a.b.c[i] indexes the innermost \
      array field directly (issue #217: only the OUTERMOST field needs \

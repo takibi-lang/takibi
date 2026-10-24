@@ -4510,8 +4510,12 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       let vt = place_undecayed_type senv eenv tyenv fenv base in
       record_raw_deref e.loc "index" vt;
       let it = infer_expr senv eenv tyenv fenv idx in
-      Hashtbl.replace index_resolved_ty idx.loc (to_ast it);  (* GitHub issue #311 *)
-      (match repr vt with
+      (* GitHub issue #311; #991: recorded after the index rules below,
+         which resolve a bare literal's type variable to usize -- recorded
+         before, to_ast read the unresolved literal as i32. *)
+      let record_index_ty () =
+        Hashtbl.replace index_resolved_ty idx.loc (to_ast it) in
+      let result = (match repr vt with
        | TArray (elem, n) ->
            require_usize_index idx.loc it;
            record_array_index_proof n it idx;
@@ -4544,7 +4548,9 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            require_isize_offset idx.loc it;
            strip_io elem
        | _ -> raise (TypeError (e.loc,
-           Printf.sprintf "index operator on non-array/pointer type '%s'" (to_string vt))))
+           Printf.sprintf "index operator on non-array/pointer type '%s'" (to_string vt)))) in
+      record_index_ty ();
+      result
 
   | SliceOf (base, lo_e, hi_e) ->
       let vt = place_undecayed_type senv eenv tyenv fenv base in
@@ -6310,7 +6316,6 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                   record field))
             | _ -> ());
            let it = infer_expr senv eenv tyenv fenv idx in
-           Hashtbl.replace index_resolved_ty idx.loc (to_ast it);  (* GitHub issue #311 *)
            let elem_ty = match repr vt with
              | TArray (elem, n) ->
                  require_usize_index idx.loc it;
@@ -6333,6 +6338,9 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
              | _ -> raise (TypeError (e.loc,
                  Printf.sprintf "index operator on non-array/pointer type '%s'" (to_string vt)))
            in
+           (* GitHub issue #311; #991: after the index rules resolve a bare
+              literal's type variable, as in infer_expr's Index. *)
+           Hashtbl.replace index_resolved_ty idx.loc (to_ast it);
            reject_no_copy_whole_store senv e.loc elem_ty;
            if contains_stable_owner_value_ty elem_ty then
              raise (TypeError (e.loc,
