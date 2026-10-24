@@ -77,6 +77,7 @@
 //   logging-only fixes over control-flow changes when diagnosing an
 //   exhaustion/edge case that isn't the actual bug being fixed.
 //
+use "kernel/kernel/pool_lock_wait.tkb";
 use "kernel/net/checksum.tkb";
 use "kernel/net/arp.tkb";
 use "kernel/net/wire.tkb";
@@ -330,7 +331,10 @@ private fn tcp_connection_pool_lock(
         -> RegionPoolGuard(TcpConnection)[conns] !{unsafe, acquires_lock_40_tcp_connection_pool, single_instance_lock,
           lock_guard_40_tcp_connection_pool} {
     let flags: usize = mutex_irq_save();
-    return region_pool_lock_saving(pool, flags);
+    let contended: bool = region_pool_lock_is_held(pool);
+    let guard = region_pool_lock_saving(pool, flags);
+    pool_lock_wait_note(PoolLockWaitPool::TcpConnection, contended);
+    return guard;
 }
 
 private fn tcp_connection_pool_unlock(
@@ -636,7 +640,10 @@ private fn tcp_frame_pool_lock(pool: *RegionPool(NetFrame) @ frames)
         -> RegionPoolGuard(NetFrame)[frames] !{unsafe, acquires_lock_40_tcp_frame_pool, single_instance_lock,
           lock_guard_40_tcp_frame_pool} {
     let flags: usize = mutex_irq_save();
-    return region_pool_lock_saving(pool, flags);
+    let contended: bool = region_pool_lock_is_held(pool);
+    let guard = region_pool_lock_saving(pool, flags);
+    pool_lock_wait_note(PoolLockWaitPool::TcpFrame, contended);
+    return guard;
 }
 
 private fn tcp_frame_pool_unlock(guard: sink RegionPoolGuard(NetFrame)[frames]) {
@@ -1813,7 +1820,10 @@ private fn tcp_retx_pool_lock(pool: *RegionPool(RetxEntry) @ entries)
         -> RegionPoolGuard(RetxEntry)[entries] !{unsafe, acquires_lock_40_tcp_retx_pool, single_instance_lock,
           lock_guard_40_tcp_retx_pool} {
     let flags: usize = mutex_irq_save();
-    return region_pool_lock_saving(pool, flags);
+    let contended: bool = region_pool_lock_is_held(pool);
+    let guard = region_pool_lock_saving(pool, flags);
+    pool_lock_wait_note(PoolLockWaitPool::TcpRetx, contended);
+    return guard;
 }
 
 private fn tcp_retx_pool_unlock(guard: sink RegionPoolGuard(RetxEntry)[entries]) {

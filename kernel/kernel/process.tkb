@@ -1,4 +1,5 @@
 use "kernel/lib/atomic_word.tkb";
+use "kernel/kernel/pool_lock_wait.tkb";
 use "kernel/kernel/stall_probe.tkb";
 use "kernel/kernel/stack_poison.tkb";
 use "kernel/mm/page.tkb";
@@ -547,7 +548,10 @@ private fn process_pool_lock()
         -> RegionPoolGuard(ProcessRecord)[&scheduled_process_pool] !{unsafe, acquires_lock_40_process_pool, single_instance_lock,
           lock_guard_40_process_pool} {
     let flags: usize = mutex_irq_save();
-    return region_pool_lock_saving(&scheduled_process_pool, flags);
+    let contended: bool = region_pool_lock_is_held(&scheduled_process_pool);
+    let guard = region_pool_lock_saving(&scheduled_process_pool, flags);
+    pool_lock_wait_note(PoolLockWaitPool::Process, contended);
+    return guard;
 }
 
 private fn process_pool_unlock(

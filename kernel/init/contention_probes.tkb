@@ -35,6 +35,7 @@ use "kernel/kernel/signal_contention_evidence.tkb";
 use "kernel/kernel/console_contention_evidence.tkb";
 use "kernel/kernel/log_storm_evidence.tkb";
 use "kernel/lib/peer_tick_window.tkb";
+use "kernel/kernel/pool_lock_wait.tkb";
 
 // GitHub issue #848: the peer console probe (kernel/printk/log.tkb), one
 // online peer at a time in core order. Each wait ends when that peer's four
@@ -61,7 +62,15 @@ fn peer_console_probe() -> bool !{unsafe} {
     return all;
 }
 
+// GitHub issue #953: the deliberate contention fixtures below are not what
+// the pool lock wait counters (kernel/kernel/pool_lock_wait.tkb) measure.
 fn contention_probes() !{unsafe} {
+    pool_lock_wait_pause(true);
+    contention_probes_run();
+    pool_lock_wait_pause(false);
+}
+
+private fn contention_probes_run() !{unsafe} {
     if (peer_console_probe() == false) {
         kernel_boot_log("peer console probe: failed\n");
     }

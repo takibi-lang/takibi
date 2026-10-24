@@ -423,6 +423,7 @@ KERNEL_UNUSED_CHECKED := \
 	kernel/kernel/occupancy_drain_evidence.tkb \
 	kernel/kernel/page_contention_evidence.tkb \
 	kernel/kernel/pid_contention_evidence.tkb \
+	kernel/kernel/pool_lock_wait.tkb \
 	kernel/kernel/pool_contention_evidence.tkb \
 	kernel/kernel/pool_walk_contention_evidence.tkb \
 	kernel/kernel/process.tkb \

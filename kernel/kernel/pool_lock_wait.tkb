@@ -1,0 +1,104 @@
+// GitHub issue #953: how often a production region pool's lock was found
+// held when a core came to take it. The evidence that brings parked
+// issue #680 (region_pool validation under the pool lock) back:
+// scripts/check_parked_triggers.py reads the RECORDED line below from the
+// RPi5 log and fails when the contended share passes the threshold its
+// header derives.
+//
+// Each production pool's lock wrapper asks region_pool_lock_is_held before
+// it takes the lock (one load of the line the compare-exchange fetches
+// anyway) and, once it holds the lock, counts the acquire and whether it
+// was contended. The counters are written only by the lock's holder, so the
+// fetch_add never contends; AtomicWord is what lets the reporter read them
+// without the lock.
+//
+// Current limitations (2026-10-24). Keep this list current as call sites
+// change; a stale limitation is worse than none.
+// - CONTENDED MEANS "SEEN HELD AT THE DOOR", not spin iterations or wait
+//   time: a core that found the lock free but lost the compare-exchange
+//   counts as uncontended. It is a lower bound on contention.
+// - THE CONTENTION PROBES ARE NOT COUNTED. contention_probes() pauses the
+//   count while its deliberately dense fixtures run (the tcp pool cost
+//   fixture alone takes the TCP pool lock ~100k times from every core); a
+//   real acquire on another core during that window is not counted either.
+// - ONLY THE NINE PRODUCTION POOLS listed below are counted; fixture-private
+//   pools (pin sharing, pool walk, pool contention) are not.
+
+use "kernel/lib/atomic_word.tkb";
+use "kernel/lib/execution_model.tkb";
+
+const POOL_LOCK_WAIT_POOLS: usize = 9;
+
+variant PoolLockWaitPool {
+    Process;
+    FdBlock;
+    FdContext;
+    Object;
+    AddressSpace;
+    ProcessImage;
+    TcpConnection;
+    TcpFrame;
+    TcpRetx;
+}
+
+private fn pool_lock_wait_index(pool: PoolLockWaitPool) -> {0..<POOL_LOCK_WAIT_POOLS as usize} {
+    match pool {
+        PoolLockWaitPool::Process => { return 0; }
+        PoolLockWaitPool::FdBlock => { return 1; }
+        PoolLockWaitPool::FdContext => { return 2; }
+        PoolLockWaitPool::Object => { return 3; }
+        PoolLockWaitPool::AddressSpace => { return 4; }
+        PoolLockWaitPool::ProcessImage => { return 5; }
+        PoolLockWaitPool::TcpConnection => { return 6; }
+        PoolLockWaitPool::TcpFrame => { return 7; }
+        PoolLockWaitPool::TcpRetx => { return 8; }
+    }
+}
+
+private let mut pool_lock_wait_acquires: [AtomicWord; POOL_LOCK_WAIT_POOLS];
+private let mut pool_lock_wait_contended: [AtomicWord; POOL_LOCK_WAIT_POOLS];
+// 1 while contention_probes() runs its deliberate contention fixtures.
+private let mut pool_lock_wait_paused: AtomicWord;
+
+// Called by the pool's lock wrapper once it holds the lock, with what
+// region_pool_lock_is_held said before it tried.
+fn pool_lock_wait_note(tag: PoolLockWaitPool, contended: bool) {
+    let pool: {0..<POOL_LOCK_WAIT_POOLS as usize} = pool_lock_wait_index(tag);
+    if (atomic_word_load(&pool_lock_wait_paused) != 0) { return; }
+    let acquires: usize = atomic_word_fetch_add(&pool_lock_wait_acquires[pool], 1);
+    if (contended) {
+        let waits: usize = atomic_word_fetch_add(&pool_lock_wait_contended[pool], 1);
+    }
+}
+
+fn pool_lock_wait_pause(paused: bool) {
+    if (paused) {
+        atomic_word_store(&pool_lock_wait_paused, 1);
+    } else {
+        atomic_word_store(&pool_lock_wait_paused, 0);
+    }
+}
+
+// One RECORDED line: per pool, acquires/contended. A cost, not a verdict
+// here; the verdict is scripts/check_parked_triggers.py's.
+fn pool_lock_wait_log() !{unsafe} {
+    kernel_boot_log("RECORDED pool lock wait:");
+    pool_lock_wait_log_one(" process=", PoolLockWaitPool::Process);
+    pool_lock_wait_log_one(" fd_block=", PoolLockWaitPool::FdBlock);
+    pool_lock_wait_log_one(" fd_context=", PoolLockWaitPool::FdContext);
+    pool_lock_wait_log_one(" object=", PoolLockWaitPool::Object);
+    pool_lock_wait_log_one(" address_space=", PoolLockWaitPool::AddressSpace);
+    pool_lock_wait_log_one(" process_image=", PoolLockWaitPool::ProcessImage);
+    pool_lock_wait_log_one(" tcp_connection=", PoolLockWaitPool::TcpConnection);
+    pool_lock_wait_log_one(" tcp_frame=", PoolLockWaitPool::TcpFrame);
+    pool_lock_wait_log_one(" tcp_retx=", PoolLockWaitPool::TcpRetx);
+    kernel_boot_log("\n");
+}
+
+private fn pool_lock_wait_log_one(label: *u8, tag: PoolLockWaitPool) {
+    let pool: {0..<POOL_LOCK_WAIT_POOLS as usize} = pool_lock_wait_index(tag);
+    kernel_boot_log(label);
+    uart_put_udec(atomic_word_load(&pool_lock_wait_acquires[pool]));
+    kernel_boot_log("/");
+    uart_put_udec(atomic_word_load(&pool_lock_wait_contended[pool]));
+}

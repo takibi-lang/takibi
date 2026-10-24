@@ -211,6 +211,9 @@ EXEMPT = {
     "kernel/uart_irq_affinity.tkb":
         "GitHub issue #830: the serial-service word and the per-CPU counts "
         "are AtomicWords any core may update",
+    "kernel/pool_lock_wait.tkb":
+        "GitHub issue #953: the counters and the pause word are AtomicWords; "
+        "the counters are written only by the holder of their pool's lock",
     "kernel/nic_irq_affinity.tkb":
         "GitHub issue #830: the rotation counter, the pin and the per-CPU "
         "counts are AtomicWords any core may update; the fixture's phase "
