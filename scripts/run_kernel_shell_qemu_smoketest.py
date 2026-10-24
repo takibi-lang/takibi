@@ -141,6 +141,8 @@ def verify_uart_transcript(pid, terminal_transcript, stop_marker, command):
     required = (
         (stop_marker, "PID 1 exit fail-stop" if command == INIT_EXIT
          else "all-core system stop"),
+        *(((b"\nsystem stop: initiator cpu=1\n", "peer-initiated system stop"),)
+          if command != INIT_EXIT else ()),
         (LISTENER_MARKER, "persistent HTTPd listener readiness"),
         (b"ddb: interrupt-safe UART debugger", "DDB entry"),
         (b"ddb: continuing", "DDB continue output"),
@@ -176,7 +178,10 @@ def run_one(command, http_offset):
         stop_line = b"x=; kill -QUIT 1\n"
     else:
         stop_marker = f"\nsystem stop: {name} (all cores parked)\n".encode("ascii")
-        stop_line = f"x=; /bin/busybox {command} -f\n".encode("ascii")
+        # GitHub issue #933: issue the stop from a peer. The initiator line
+        # tells a local stop from a rerun on core 0.
+        stop_line = (f"x=; /bin/taskset -c 1 /bin/busybox {command} -f\n"
+                     .encode("ascii"))
     startup_path = os.path.join(ARTIFACT_DIR, f"await-{command}.jsonl")
     exit_path = os.path.join(ARTIFACT_DIR, f"await-{command}-exit.jsonl")
     try:

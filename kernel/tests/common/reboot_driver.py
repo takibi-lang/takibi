@@ -19,7 +19,10 @@ def main():
     captured = bytearray()
     with serial.serial_for_url(args.port, baudrate=115200, timeout=0.1) as uart:
         with open(args.log, 'wb') as log:
-            uart.write(f'x=; /bin/busybox {args.command} -f\n'.encode('ascii'))
+            # GitHub issue #933: stop from a peer core, and require the
+            # kernel to report that core as the initiator.
+            uart.write(f'x=; /bin/taskset -c 1 /bin/busybox {args.command} -f\n'
+                       .encode('ascii'))
             uart.flush()
             deadline = time.monotonic() + 20
             while time.monotonic() < deadline:
@@ -28,7 +31,10 @@ def main():
                     log.write(data)
                     log.flush()
                     captured.extend(data)
-                    if marker in bytes(captured).replace(b'\r', b''):
+                    text = bytes(captured).replace(b'\r', b'')
+                    if marker in text:
+                        if b'\nsystem stop: initiator cpu=1\n' not in text:
+                            raise SystemExit(f'FAIL system stop: {name}: not initiated on cpu 1; log: {args.log}')
                         print(f'PASS system stop: {name} (all cores parked)')
                         return
     raise SystemExit(f'FAIL system stop: {name}: expected marker missing; log: {args.log}')

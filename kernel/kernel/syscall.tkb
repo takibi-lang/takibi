@@ -4703,9 +4703,8 @@ private fn syscall_accept_claimed(current_authority: borrow ProcessCurrent[curre
 // of the call. What each group needs before it can leave the list is on
 // issue #583.
 fn syscall_peer_refused(number: usize) -> bool {
-    // The terminal reboot path publishes its marker through core 0's
-    // console queue, after stopping every peer through the shared controller.
-    if (number == 142) { return true; }
+    // reboot (142) left this list in #933: its world stop takes the owner
+    // from cpu_id(), and the console is owned on any core since #830.
     // The payload fixture's parent report, the last of the process
     // lifecycle here. Every multicore defect this project has closed lived in
     // that lifecycle (#532, #552, #569, #571), each found with its operations
@@ -5722,6 +5721,12 @@ fn syscall_system_stop(marker: *u8) -> SyscallAction !{unsafe} {
         MachineStopResult::Complete(stopped) => {
             disable_irq();
             machine_stop_keep_forever(stopped);
+            // GitHub issue #933: name the initiating core, so a test that
+            // pins the caller to a peer can tell a local stop from a rerun
+            // on core 0. Printed before the marker drivers wait for.
+            kernel_boot_log("system stop: initiator cpu=" as *u8);
+            uart_put_udec(cpu_id());
+            kernel_boot_log("\n" as *u8);
             kernel_boot_log(marker);
             uart_tx_flush();
             platform_shutdown();
