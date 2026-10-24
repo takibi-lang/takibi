@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Controls for buildcheck_compile_alloc_budget.py (GitHub issue #923).
 
-The pre-#917 allocation, one word over the budget, a malformed count and an
-unknown target must be refused; the budget itself and the post-#917
-measurement must pass.
+The pre-#917 and post-#917 allocations, one word over the budget, a
+malformed count and an unknown target must be refused; the budget itself
+and the post-#921 measurement must pass.
 """
 
 import sys
@@ -18,6 +18,7 @@ def main() -> int:
     budget = BUDGET_WORDS["qemu"]
     refused = {
         "pre-#917 allocation": ("qemu", "6600000000\n"),
+        "post-#917, pre-#921 allocation": ("qemu", "903223947\n"),
         "one word over": ("qemu", f"{budget + 1}\n"),
         "empty file": ("qemu", ""),
         "float": ("qemu", "9.0e8\n"),
@@ -29,7 +30,7 @@ def main() -> int:
             failures.append(f"{name}: accepted")
     accepted = {
         "exactly the budget": ("qemu", f"{budget}\n"),
-        "post-#917 measurement": ("qemu", "903223947\n"),
+        "post-#921 measurement": ("qemu", "690697545\n"),
     }
     for name, (target, text) in accepted.items():
         cases.note()
@@ -42,7 +43,7 @@ def main() -> int:
         print("FAIL compile-alloc-budget controls")
         return 1
     report_pass("compile-alloc-budget controls",
-                "the pre-#917 count, one word over, malformed counts and an "
+                "the pre-#917 and pre-#921 counts, one word over, malformed counts and an "
                 "unknown target are refused; the budget and the measurement pass",
                 cases=cases.ran)
     return 0
