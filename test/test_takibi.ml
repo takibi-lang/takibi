@@ -28,6 +28,37 @@ let () =
 
 (* -- Helpers --------------------------------------------------------------- *)
 
+(* GitHub issue #995: the region planner reads Ast_strings instead of the
+   printed AST, and must read what the printed text held. The oracle is the
+   text itself: every quoted string of Ast.show_toplevel, whether a comma
+   follows its closing quote, and whether `Ast.Var ` precedes it. Every
+   program the suite parses is checked against it (see [parse]), so each
+   construct some test writes is compared without a list of its own. *)
+let printed_strings text =
+  let n = String.length text in
+  let rec go i acc =
+    match String.index_from_opt text i '"' with
+    | None -> List.rev acc
+    | Some q ->
+        let rec close j = if text.[j] = '\\' then close (j + 2)
+          else if text.[j] = '"' then j else close (j + 1) in
+        let e = close (q + 1) in
+        let var = "Ast.Var " in
+        let lv = String.length var in
+        let kind =
+          if q >= lv && String.sub text (q - lv) lv = var then Ast_strings.Var
+          else if e + 1 < n && text.[e + 1] = ',' then Ast_strings.Comma
+          else Ast_strings.Plain in
+        go (e + 1) ((kind, String.sub text (q + 1) (e - q - 1)) :: acc) in
+  go 0 []
+
+let check_ast_strings prog =
+  List.iter (fun top ->
+    let text = Ast.show_toplevel top in
+    if Array.to_list (Ast_strings.item top) <> printed_strings text then
+      failwith ("Ast_strings disagrees with the printed item (#995): " ^ text))
+    prog
+
 let parse src =
   Const_env.reset ();
   Type_layout.reset ();
@@ -44,7 +75,9 @@ let parse src =
   Generic_scope.reset ();
   Ast.reset_precedence_errors ();
   let lexbuf = Lexing.from_string src in
-  Parser.program Lexer.read lexbuf
+  let prog = Parser.program Lexer.read lexbuf in
+  check_ast_strings prog;
+  prog
 
 (* Mirrors bin/main.ml's pipeline order: validate publish records and mint
    their write tokens, monomorphize, then resolve the parser's ambiguous
@@ -29452,6 +29485,19 @@ let text_search_tests = [
       Alcotest.(check (list string)) text
         (sorted (fun add -> List.iter (fun p -> R.names_after p text add) prefixes))
         (sorted (R.names_after_any prefixes text))) texts);
+  (* #995: the oracle [parse] checks Ast_strings against reads a call's
+     name as Comma, its variable as Var, and an escaped quote as content. *)
+  ("ast strings: a call's name, its variable and an escaped string", `Quick, fun () ->
+    let prog = parse {|fn f() { region_of(a); let s: *u8 = "q\"x"; }|} in
+    let kinds = Array.to_list (Ast_strings.item (List.hd prog)) in
+    Alcotest.(check bool) "call name then variable" true
+      (List.mem (Ast_strings.Comma, "region_of") kinds
+       && List.mem (Ast_strings.Var, "a") kinds);
+    Alcotest.(check bool) "escaped as printed" true
+      (List.mem (Ast_strings.Plain, "q\\\"x") kinds);
+    Alcotest.(check bool) "oracle sees a dropped string" true
+      (printed_strings {|(Ast.Call ("region_of", [(Ast.Var "a")]))|}
+       = [ (Ast_strings.Comma, "region_of"); (Ast_strings.Var, "a") ]));
   ("text search: replace_all replaces every occurrence, left to right", `Quick, fun () ->
     let r = Takibi.Region_builtin.replace_all in
     Alcotest.(check string) "several" "xAyAz" (r ~sub:"@T@" ~by:"A" "x@T@y@T@z");
