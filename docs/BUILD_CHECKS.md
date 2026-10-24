@@ -76,6 +76,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_direct_mmio_literals_controls.py` | Positive and negative controls for check_direct_mmio_literals.py |
 | `check_documented_counts.py` | a count transcribed into documentation still matches the tree it counts |
 | `check_documented_counts_controls.py` | Controls for the documented-count check |
+| `check_parked_triggers_controls.py` | Controls for `validate_parked_triggers.py`, the RPi5 lane's parked-issue triggers (#953), in process: each trigger (#812 longest page-lock hold, #680 contended pool lock share) fires above its threshold naming its issue and saying to reopen it, passes just under it, and fails when its RECORDED line is missing, doubled with different numbers, or counted nothing |
 | `check_elf_symbol_alignment_controls.py` | Positive and faithful negative controls for the ELF alignment guard |
 | `check_el0_raw_deref_audit.py` | Every Takibi object linked into an EL0 PIE uses the shared audit recipe and rebuilds when the budget or checker changes |
 | `check_el0_raw_deref_audit_controls.py` | A bypassed recipe, missing audit/gate/depfile/rebuild dependency, and empty EL0 coverage are refused |
