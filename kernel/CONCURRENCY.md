@@ -200,12 +200,14 @@ route -- is listed here by hand.
 Symmetric now:
 
 - Taking a timer tick, entering the syscall and scheduler paths, and running
-  any process whose affinity allows the core.
+  any process whose affinity allows the core. Every core's tick takes the one
+  entry `kernel_tick` -> `timer_irq_handler` (#932): rearm, the per-core
+  tick count, the tick-wake, the profiler sync and the busy-worker note are
+  each this core's own.
 - Deadline and NetRx wakes (#829): a process blocked on a deadline or a
   NetRx retry is queued on the tick-wake list of the core it blocked on,
-  and that core's own tick wakes it (`kernel_process_tick_wake` from
-  `timer_irq_handler`, `kernel_process_tick_wake_if_due` from
-  `kernel_secondary_timer_schedule`). A long core-0 mask no longer delays
+  and that core's own tick wakes it (`kernel_process_tick_wake_if_due`
+  from `timer_irq_handler`). A long core-0 mask no longer delays
   a peer's sleeper (`/bin/peer-sleep`, the peer_sleep_mask view, which
   since #863 reads what the waking tick recorded through
   `kernel_process_tick_wake_watch` rather than sampling the sleeper). An
@@ -332,7 +334,7 @@ Special, with the reason it stays so today:
 | Boot | `boot/entry.S` parks every MPIDR but 0; core 0 runs `main()`, the GIC distributor, device bring-up and the boot fixtures (on the boot thread, pinned there by its mask), and its idle loop takes the first process after `main()` hands off (`kernel_process_secondary_start`) | the firmware hands off one core, and machine-wide state is initialized once; PID 1's first entry is then deterministic, which the oops lane's fault injection relies on | no: one core has to come first |
 | PSCI start authority | `cpu_start_reserve` (`lib/occupancy.tkb`) | starting cores is a boot phase; no hotplug exists | only with CPU hotplug, which nothing needs |
 | Syscalls outside the peer-safety table | `syscall_peer_refused`, `syscall_peer_safe`; rerun on core 0 with the process pinned for the call | no subsystem entry is left: the BusyBox Extras exec left in #828, and the TCP pool drain it ran is gone since #836. The terminal reboot and the payload fixture's parent-progress report are still refused by number. Parent progress (452) is the probe `/bin/affinity` and `kernel_affinity_gdb_check.py` use to drive the rerun path, so it stays refused while that path exists; reboot waits on the world-stop work (#933, after #920) | yes, one entry at a time; each is its own follow-up |
-| Tick dispatch | both platforms' `intc.tkb` branch on `cpu_id() != 0`: a peer's tick takes `kernel_secondary_tick`, core 0's takes `timer_irq_handler` (`kernel_core0_tick_note`, `workload_busy_note_tick_locked`, `profile_session_sync`) and then `kernel_process_timer_schedule` | the scheduling policy is shared, but core 0's tick still carries the boot-era evidence counters and the profiler sync | yes, by one tick entry for every core; it changes interrupt dispatch, next to #920's masking work, so it is a follow-up (#932) |
+| Tick SEV | `timer_irq_handler` sends `interrupt_notify()` only on core 0 | every `interrupt_wait()` caller is wake-and-recheck, and some count wakes as time (`usb_xhci.tkb`'s `timeout_ms` loop); a SEV from every core would multiply wakes, and shorten those bounds, by the online core count. A waiter's own tick wakes it regardless | yes, once no wait counts wakes as time; until then one elected core keeps today's rate (#932) |
 | dmesg's cpu column | `kernel_log_snapshot_line` prints `cpuN ` for every core but 0 (#465) | only so that core 0's lines keep the format every view and the single-core boot already read; the old reason, "the console owner", stopped holding with #830 | yes, by printing the column on every line; that changes the dmesg format every view parses, a maintainer choice recorded on #775 |
 | Two-core probes and fixtures | the spread-timer and busy-pair fixtures | each is an experiment written for core 0 against CPU 1 | no: the fixed pair is the experiment |
 | Contention probe primary | every `*_contention_probe` and its siblings in `kernel/init/contention_probes.tkb` | the boot sequence runs on core 0, so it arms the probe and counts as participant 0; the peers are symmetric among themselves (#756) | only if probes ran outside the boot sequence |

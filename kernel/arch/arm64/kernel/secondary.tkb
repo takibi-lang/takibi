@@ -125,19 +125,9 @@ fn kernel_tick_count_of(core: {0..<KERNEL_MAX_CORES as usize}) -> usize
     return secondary_tick_value_for(core);
 }
 
-// Core 0's tick, which does not come through secondary_timer_tick.
-fn kernel_core0_tick_note() !{unsafe} {
-    if (KERNEL_STALL_PROBES != 0) { stall_probe_note(STALL_PROBE_TICK); }
-    let previous: usize = atomic_word_fetch_add(&secondary_tick_count[0], 1);
-}
-
-// Called from a platform IRQ dispatch when the interrupted core is not core
-// 0 and the interrupt is the timer PPI. Rearms this core's own timer and
-// counts. Deliberately does NOT wake this core's sleepers or request a
-// reschedule; kernel_secondary_timer_schedule does both after this common
-// per-core timer accounting.
-fn secondary_timer_tick() !{interrupt, unsafe} {
-    timer_tick_rearm();
+// GitHub issue #932: this core's tick, counted from timer_irq_handler on
+// every core, core 0 included.
+fn kernel_tick_note() !{unsafe} {
     if (KERNEL_STALL_PROBES != 0) { stall_probe_note(STALL_PROBE_TICK); }
     let raw_core: usize = cpu_id();
     if (raw_core >= KERNEL_MAX_CORES) { return; }
@@ -340,35 +330,25 @@ fn kernel_idle_tick_reenter() {
     kernel_idle_loop();
 }
 
-// Shared timer policy; each platform still acknowledges its own GIC source
-// after this returns. Only a lower-EL interrupt may replace the saved frame.
-fn kernel_secondary_timer_schedule(frame: sink FrameRef[process], lower_el: bool)
-        -> TimerSwitch !{interrupt} {
-    secondary_timer_tick();
-    // GitHub issue #829: this core's own deadline and NetRx waiters, on
-    // every tick and before the scheduling half, so a sleeper woken here can
-    // be the successor this same tick picks. Takes the run lock only when
-    // its list has something due.
-    kernel_process_tick_wake_if_due();
-    // GitHub issue #497: arm or disarm this core's profile counter.
-    profile_session_sync();
-    // GitHub issue #572: a tick on a CPU where a busy worker waits.
-    workload_busy_note_tick();
+// The one timer-tick entry for every core (GitHub issues #447, #775, #932).
+// Each platform acknowledges its own GIC source after this returns and then
+// leaves for idle if the tick said so (kernel_timer_tick_leave).
+//
+// GitHub issue #453: this branch is why most of kernel/ can share mutable
+// state with no lock. Interrupted EL0 -> switch now. Interrupted EL1 --
+// inside a syscall -- only REQUEST a reschedule, so the switch happens on
+// the way out of the syscall and a handler always runs to completion. That
+// is KERNEL_PREEMPTIBLE == 0 in kernel/lib/execution_model.tkb, and the
+// files that depend on it assert it. Changing this line means changing that
+// constant, whose assertions then name every site.
+fn kernel_tick(frame: sink FrameRef[process], lower_el: bool)
+        -> TimerSwitch !{interrupt, unsafe} {
+    timer_irq_handler();
     if (lower_el) {
-        kernel_stack_guard_check_interrupt(frame_ref_address(frame));
+        kernel_stack_guard_check_interrupt(frame_ref_address(frame));  // issue #375
         return kernel_process_timer_schedule(frame);
     }
     kernel_process_request_reschedule();
-    return TimerSwitch::Resume(frame);
-}
-
-// What a secondary core does with an interrupt that is not the world-stop
-// SGI: its timer tick runs the shared policy, anything else resumes the frame.
-// The platform acknowledges the source afterwards and then leaves for idle if
-// the tick said so (kernel_timer_tick_leave).
-fn kernel_secondary_tick(frame: sink FrameRef[process], lower_el: bool, is_timer: bool)
-        -> TimerSwitch !{interrupt} {
-    if (is_timer) { return kernel_secondary_timer_schedule(frame, lower_el); }
     return TimerSwitch::Resume(frame);
 }
 

@@ -138,37 +138,14 @@ fn platform_irq_dispatch_ordinary(frame: sink FrameRef[process], lower_el: bool,
     // GitHub issue #830: the DDB lane's hung-core scenario (a no-op unless
     // a debugger armed it for this core).
     uart_irq_hang_poll();
-    // core-role: a secondary takes only its own timer tick here, which runs
-    // the shared scheduling policy (GitHub issues #447 and #775; see "Core
-    // roles" in kernel/CONCURRENCY.md); core 0's tick below also runs the
-    // boot-time timer handler. GICC_IAR was read above: acknowledging is the
-    // interrupted core's own job on its own banked interface.
-    if (cpu_id() != 0) {
-        let switch: TimerSwitch = kernel_secondary_tick(
-            frame, lower_el, id == qemu_timer_gic_intid);
+    // GitHub issue #932: one timer-tick entry for every core. GICC_IAR was
+    // read above: acknowledging is the interrupted core's own job on its
+    // own banked interface.
+    if (id == qemu_timer_gic_intid) {
+        let switch: TimerSwitch = kernel_tick(frame, lower_el);
         gicc.eoir = iar;
         workload_profile_irq_exit();
         return kernel_timer_tick_leave(switch);
-    }
-
-    if (id == qemu_timer_gic_intid) {
-        timer_irq_handler();
-        // GitHub issue #453: this branch is why most of kernel/ can share
-        // mutable state with no lock. Interrupted EL0 -> switch now.
-        // Interrupted EL1 -- inside a syscall -- fall through and only
-        // REQUEST a reschedule, so the switch happens on the way out of
-        // the syscall and a handler always runs to completion. That is
-        // KERNEL_PREEMPTIBLE == 0 in kernel/lib/execution_model.tkb, and
-        // the files that depend on it assert it. Changing this line means
-        // changing that constant, whose assertions then name every site.
-        if (lower_el) {
-            kernel_stack_guard_check_interrupt(frame_ref_address(frame));  // issue #375
-            let switch: TimerSwitch = kernel_process_timer_schedule(frame);
-            gicc.eoir = iar;
-            workload_profile_irq_exit();
-            return kernel_timer_tick_leave(switch);
-        }
-        kernel_process_request_reschedule();
     }
 
     gicc.eoir = iar;

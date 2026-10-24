@@ -58,21 +58,22 @@ def main() -> None:
     # GitHub issue #829: the kernel before per-CPU tick-wake lists. A
     # secondary's tick wakes nothing, and core 0's tick wakes the due
     # sleepers of every core -- the old single walker, over the same lists.
-    replace_once(
-        overlay_kernel / "arch/arm64/kernel/secondary.tkb",
-        "    kernel_process_tick_wake_if_due();\n",
-        # Still referenced, so the unused-function check is not what fails.
-        "    if (KERNEL_STALL_PROBES == 2) { kernel_process_tick_wake_if_due(); }\n",
-    )
+    # Since #932 every core's tick runs the one timer_irq_handler body.
     replace_once(
         overlay_kernel / "arch/arm64/kernel/timer.tkb",
-        "    kernel_process_tick_wake(guard);\n",
-        "    if (KERNEL_STALL_PROBES == 2) { kernel_process_tick_wake(guard); }\n"
-        "    for every_core: usize in 0..<KERNEL_MAX_CORES {\n"
-        "        if (every_core < KERNEL_MAX_CORES) {\n"
-        "            let walked: {0..<KERNEL_MAX_CORES as usize} = every_core;\n"
-        "            kernel_process_tick_wake_scan(guard, walked, read_cntpct() as usize);\n"
+        "    kernel_process_tick_wake_if_due();\n",
+        # Still referenced, so the unused-function check is not what fails.
+        "    if (KERNEL_STALL_PROBES == 2) { kernel_process_tick_wake_if_due(); }\n"
+        "    // core-role: the control's pre-#829 single walker\n"
+        "    if (cpu_id() == 0) {\n"
+        "        let guard = process_run_lock();\n"
+        "        for every_core: usize in 0..<KERNEL_MAX_CORES {\n"
+        "            if (every_core < KERNEL_MAX_CORES) {\n"
+        "                let walked: {0..<KERNEL_MAX_CORES as usize} = every_core;\n"
+        "                kernel_process_tick_wake_scan(guard, walked, read_cntpct() as usize);\n"
+        "            }\n"
         "        }\n"
+        "        process_run_unlock(guard);\n"
         "    }\n",
     )
 

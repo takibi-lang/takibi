@@ -46,26 +46,30 @@ fn timer_irq_setup() {
     enable_cntp();
 }
 
+// GitHub issue #932: every core's timer tick, core 0's included, runs this
+// one body; kernel_tick (secondary.tkb) then runs the shared scheduling
+// half. Rearm, count, wake, profile, busy-worker note: each is this core's
+// own and costs one load or compare when there is nothing to do.
 fn timer_irq_handler() !{interrupt, unsafe} {
     timer_tick_rearm();
-    kernel_core0_tick_note();
+    kernel_tick_note();
     // GitHub issue #829: this core's own tick-wake list -- the deadline and
     // NetRx waiters that blocked here -- on every tick, regardless of which
     // EL it interrupted: waking is not a scheduling decision and does not
-    // belong behind the EL0-only half. Every secondary does the same from
-    // kernel_secondary_timer_schedule, so a sleeper on a peer no longer
-    // waits for this core's tick.
-    //
-    // GitHub issue #587: under the lock a waiter publishes Blocked (and
-    // queues itself) under. The lock masks interrupts, so this core cannot
-    // interrupt its own holder.
-    let guard = process_run_lock();
-    kernel_process_tick_wake(guard);
-    // GitHub issue #572: a tick on a CPU where a busy worker waits. Core 0
-    // only: a secondary's tick takes kernel_secondary_timer_schedule.
-    workload_busy_note_tick_locked(guard);
-    process_run_unlock(guard);
+    // belong behind the EL0-only half. Takes the run lock only when its
+    // list has something due (GitHub issue #587: the lock a waiter
+    // publishes Blocked under; it masks interrupts, so this core cannot
+    // interrupt its own holder).
+    kernel_process_tick_wake_if_due();
     // GitHub issue #497: arm or disarm this core's profile counter.
     profile_session_sync();
-    interrupt_notify();
+    // GitHub issue #572: a tick on a CPU where a busy worker waits.
+    workload_busy_note_tick();
+    // core-role: one elected core sends the tick's SEV (GitHub issue #932).
+    // Every interrupt_wait() caller is a wake-and-recheck loop, and some
+    // count wakes as time (usb_xhci.tkb's timeout_ms loop); a SEV from
+    // every core would wake them once per core per tick and shorten those
+    // bounds by the online core count. A waiter's own core's tick wakes it
+    // regardless. See "Core roles" in kernel/CONCURRENCY.md.
+    if (cpu_id() == 0) { interrupt_notify(); }
 }

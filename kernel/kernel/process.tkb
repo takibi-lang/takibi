@@ -9135,22 +9135,9 @@ fn kernel_process_tick_wake_scan(guard: borrow ProcessRunGuard[lock],
     atomic_word_store(&kernel_process_tick_wake_due[core], next_due);
 }
 
-// This core's tick, with the run lock already held (core 0's handler holds
-// it for its busy-worker note too). Skips the walk when nothing is due.
-fn kernel_process_tick_wake(guard: borrow ProcessRunGuard[lock])
-        !{interrupt, unsafe} {
-    let raw_core: usize = cpu_id();
-    if (raw_core >= KERNEL_MAX_CORES) { return; }
-    let core: {0..<KERNEL_MAX_CORES as usize} = raw_core;
-    let due: usize = atomic_word_load(&kernel_process_tick_wake_due[core]);
-    let now: usize = read_cntpct() as usize;
-    kernel_process_tick_wake_note(core, now);
-    if (due == 0 || now < due) { return; }
-    kernel_process_tick_wake_scan(guard, core, now);
-}
-
-// A secondary's tick, which holds no lock: it takes the run lock only when
-// its own list has something due, so an idle core's tick costs one load.
+// Every core's tick (GitHub issue #932), which holds no lock: it takes the
+// run lock only when its own list has something due, so an idle core's tick
+// costs one load.
 fn kernel_process_tick_wake_if_due() !{interrupt, unsafe} {
     let raw_core: usize = cpu_id();
     if (raw_core >= KERNEL_MAX_CORES) { return; }

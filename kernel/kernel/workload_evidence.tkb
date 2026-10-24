@@ -432,9 +432,9 @@ private fn workload_busy_wait_note_selected(core: usize, previous: usize,
     }
 }
 
-// A secondary's tick, which does not pass through timer_irq_handler and so
-// takes the run lock here -- only while the window is open, which is the
-// only time there is anything to count.
+// Every core's tick, from timer_irq_handler (GitHub issue #932), which
+// holds no lock and so takes the run lock here -- only while the window is
+// open, which is the only time there is anything to count.
 fn workload_busy_note_tick() {
     if (workload_profile_active == false) { return; }
     let guard = process_run_lock();
@@ -442,8 +442,7 @@ fn workload_busy_note_tick() {
     process_run_unlock(guard);
 }
 
-// Every timer tick: core 0's from timer_irq_handler, under the lock it
-// already holds, and a secondary's through workload_busy_note_tick.
+// Every timer tick, through workload_busy_note_tick.
 fn workload_busy_note_tick_locked(guard: borrow ProcessRunGuard[lock]) {
     if (workload_profile_active == false) { return; }
     let core: usize = cpu_id();
