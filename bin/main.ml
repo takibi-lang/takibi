@@ -345,20 +345,7 @@ let () =
   (* The parser records definition ends only for the call-graph table. *)
   Def_extent.enabled := !emit_call_graph <> "";
   (try
-    Const_env.reset ();
-    Type_layout.reset ();
-    Publish_registry.reset ();
-    No_copy_registry.reset ();
-    Per_cpu_registry.reset ();
-    Init_state.reset ();
-    Region_backing.reset ();
-    Guarded_registry.reset ();
-    Io_struct_registry.reset ();
-    Hashtbl.reset Generic_variant.proven_empty_puts;
-    Dma_fixed_registry.reset ();
-    Device_protocol_registry.reset ();
-    Generic_scope.reset ();
-    Ast.reset_precedence_errors ();
+    Compilation_state.reset ();
     (* GitHub issue #55: every file named on the command line is an entry
        point into Use_resolver's `use "path";` closure -- if none of them
        (or anything they transitively `use`) has a single `use`
@@ -439,20 +426,7 @@ let () =
       if not !regions then prog
       else begin
         let sources = Region_builtin.plan prog in
-        Const_env.reset ();
-        Type_layout.reset ();
-        Publish_registry.reset ();
-        No_copy_registry.reset ();
-        Per_cpu_registry.reset ();
-        Init_state.reset ();
-        Region_backing.reset ();
-        Guarded_registry.reset ();
-        Io_struct_registry.reset ();
-        Hashtbl.reset Generic_variant.proven_empty_puts;
-        Dma_fixed_registry.reset ();
-        Device_protocol_registry.reset ();
-        Generic_scope.reset ();
-        Ast.reset_precedence_errors ();
+        Compilation_state.reset ();
         let defs = Region_builtin.parse_planned sources in
         let again =
           try Use_resolver.resolve ~parse_file ~prescan:prescan_file input_files

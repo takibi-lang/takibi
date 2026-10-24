@@ -8715,22 +8715,16 @@ let validate_per_cpu (prog : Ast.toplevel list) =
            | _ -> ())) types
     | _ -> ()) prog
 
-let infer_program (prog : Ast.toplevel list) : program_types =
-  Cas_load_rule.check prog;
+(* GitHub issue #996: every per-compilation table of this module, cleared
+   in one place. infer_program calls it first; so does
+   Compilation_state.reset, which the driver and the test parse helpers
+   call before parsing, so a policy pass that reads these site tables
+   without type-checking first never sees an earlier compilation's. *)
+let reset_compilation_state () =
+  runtime_bounds_regions := StringSet.empty;
   active_runtime_bounds_key := "";
   runtime_bounds := Runtime_bounds.empty;
   runtime_bounds_address_taken := [];
-  runtime_bounds_regions := List.fold_left (fun names -> function
-    | Ast.OwnedStructDef (name, _, _, _, _, _, _, _, loc)
-      when Ast.source_file_of_loc loc = Ast.builtin_region_file
-           && (String.starts_with ~prefix:"region__" name
-               || String.starts_with ~prefix:"places__" name
-               || String.starts_with ~prefix:"slots__" name) -> StringSet.add name names
-    | _ -> names) StringSet.empty prog;
-  (* The declared-type phase is a required boundary: silently repairing an
-     unresolved AST here would hide a caller that bypassed it. *)
-  Declared_type_resolver.validate prog;
-  validate_per_cpu prog;
   unsafe_depth := 0;  (* see its comment: fresh per compilation / per unit test *)
   collected_type_errors := [];  (* fresh per compilation / per unit test *)
   type_checker_unsafe_use_marker := 0;  (* GitHub issue #328, fresh per compilation / per unit test *)
@@ -8815,7 +8809,22 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     "stable_owner_fields", Hashtbl.length stable_owner_fields;
     "stable_owner_structs", Hashtbl.length stable_owner_structs;
     "guard_narrow_hints", Hashtbl.length guard_narrow_hints;
-  ];
+  ]
+
+let infer_program (prog : Ast.toplevel list) : program_types =
+  Cas_load_rule.check prog;
+  reset_compilation_state ();
+  runtime_bounds_regions := List.fold_left (fun names -> function
+    | Ast.OwnedStructDef (name, _, _, _, _, _, _, _, loc)
+      when Ast.source_file_of_loc loc = Ast.builtin_region_file
+           && (String.starts_with ~prefix:"region__" name
+               || String.starts_with ~prefix:"places__" name
+               || String.starts_with ~prefix:"slots__" name) -> StringSet.add name names
+    | _ -> names) StringSet.empty prog;
+  (* The declared-type phase is a required boundary: silently repairing an
+     unresolved AST here would hide a caller that bypassed it. *)
+  Declared_type_resolver.validate prog;
+  validate_per_cpu prog;
   (* GitHub issue #79 follow-up: ONE flat namespace for every top-level
      name, not just functions and globals (the two kinds fixed earlier in
      this same follow-up) -- struct, opaque struct, and enum names now

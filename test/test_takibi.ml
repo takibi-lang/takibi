@@ -60,20 +60,7 @@ let check_ast_strings prog =
     prog
 
 let parse src =
-  Const_env.reset ();
-  Type_layout.reset ();
-  Publish_registry.reset ();
-  No_copy_registry.reset ();
-  Per_cpu_registry.reset ();
-  Init_state.reset ();
-  Region_backing.reset ();
-  Guarded_registry.reset ();
-  Io_struct_registry.reset ();
-  Hashtbl.reset Generic_variant.proven_empty_puts;
-  Dma_fixed_registry.reset ();
-  Device_protocol_registry.reset ();
-  Generic_scope.reset ();
-  Ast.reset_precedence_errors ();
+  Compilation_state.reset ();
   let lexbuf = Lexing.from_string src in
   let prog = Parser.program Lexer.read lexbuf in
   check_ast_strings prog;
@@ -135,20 +122,7 @@ let call_graph_rows src =
    whole group, not per file, matching bin/main.ml's own reset-once
    discipline (cross-file constant/layout state is meant to accumulate). *)
 let infer_files files =
-  Const_env.reset ();
-  Type_layout.reset ();
-  Publish_registry.reset ();
-  No_copy_registry.reset ();
-  Per_cpu_registry.reset ();
-  Init_state.reset ();
-  Region_backing.reset ();
-  Guarded_registry.reset ();
-  Io_struct_registry.reset ();
-  Hashtbl.reset Generic_variant.proven_empty_puts;
-  Dma_fixed_registry.reset ();
-  Device_protocol_registry.reset ();
-  Generic_scope.reset ();
-  Ast.reset_precedence_errors ();
+  Compilation_state.reset ();
   let prog = List.concat_map (fun (filename, src) ->
     let lexbuf = Lexing.from_string src in
     Lexing.set_filename lexbuf filename;
@@ -2485,20 +2459,7 @@ let slot_index_fixture =
 
 (* GitHub issue #672: the built-in region, enabled as --regions does. *)
 let infer_region_files files =
-  Const_env.reset ();
-  Type_layout.reset ();
-  Publish_registry.reset ();
-  No_copy_registry.reset ();
-  Per_cpu_registry.reset ();
-  Init_state.reset ();
-  Region_backing.reset ();
-  Guarded_registry.reset ();
-  Io_struct_registry.reset ();
-  Hashtbl.reset Generic_variant.proven_empty_puts;
-  Dma_fixed_registry.reset ();
-  Device_protocol_registry.reset ();
-  Generic_scope.reset ();
-  Ast.reset_precedence_errors ();
+  Compilation_state.reset ();
   ignore (Llvm_gen.setup_target ~triple:"x86_64-pc-linux-gnu" ());
   let program = List.concat_map (fun (filename, src) ->
     let lexbuf = Lexing.from_string src in
@@ -25342,9 +25303,7 @@ let execution_model_errors ?(policy = "") ?(compiled = []) files =
       | _ -> line)
       (String.split_on_char '\n' policy)) in
   write "POLICY" ("constant KERNEL_ACTIVE_CORES\nconstant KERNEL_PREEMPTIBLE\n" ^ policy ^ "\n");
-  Init_state.reset ();
-  Region_backing.reset ();
-  Const_env.reset ();
+  Compilation_state.reset ();
   let program = List.concat_map (fun (name, text) ->
     let lexbuf = Lexing.from_string text in
     Lexing.set_filename lexbuf (path name);
@@ -25431,7 +25390,7 @@ let execution_model_policy_tests = [
     let dir = Filename.get_temp_dir_name () in
     let policy = Filename.concat dir (Printf.sprintf "takibi-em-undeclared-%d" (Unix.getpid ())) in
     let out = open_out policy in output_string out "constant NO_SUCH_CONSTANT\n"; close_out out;
-    Init_state.reset (); Region_backing.reset ();
+    Compilation_state.reset ();
     let errors = Execution_model_policy.check ~policy_file:policy ~compiled_files:[]
         (Parser.program Lexer.read (Lexing.from_string "fn f() { }\n")) in
     Alcotest.(check bool) "undeclared constant named" true
@@ -25515,6 +25474,18 @@ let raw_authority_policy_tests = [
   (* GitHub issue #989: the cases of check_lock_discipline's retired RULE 2.
      A raw atomic intrinsic call is a counted site wherever it is called,
      even with no `unsafe` block of real authority around it. *)
+  (* GitHub issue #996: the parse helper (Compilation_state.reset) clears
+     Type_inf's per-compilation site tables, so a policy test that reads
+     them without type-checking first never sees an earlier test's sites. *)
+  Alcotest.test_case "parse clears Type_inf's site tables of an earlier compilation" `Quick
+    (fun () ->
+      ignore (Type_inf.infer_program (Declared_type_resolver.run (Monomorphize.run
+        (parse "fn poke(p: *mut u8) !{unsafe} { unsafe { *p = 1; } } fn main() -> usize { return 42; }"))));
+      Alcotest.(check bool) "the earlier compilation recorded a site" true
+        (Type_inf.unsafe_authority_sites () <> []);
+      ignore (parse "fn main() -> usize { return 42; }");
+      Alcotest.(check int) "no site survives the next parse" 0
+        (List.length (Type_inf.unsafe_authority_sites ())));
   Alcotest.test_case "raw atomic intrinsic call requires a declared mint file" `Quick
     (fun () ->
       let atomic_errors source_program mint_files =
@@ -25524,13 +25495,6 @@ let raw_authority_policy_tests = [
         let callee = spec.Atomic_spec.name in
         let source = "fn poke(address: usize) !{unsafe} { let seen = " ^ callee
                      ^ "(address); } fn main() -> usize { return 42; }" in
-        (* site_counts also reads Type_inf's per-compilation site tables,
-           which a preceding (shuffled) test may have left filled under the
-           same file name; this source does not type-check (no `unsafe`),
-           so an empty program's check clears them. *)
-        ignore (Type_inf.infer_program
-          (Declared_type_resolver.run (Monomorphize.run
-             (parse "fn main() -> usize { return 42; }"))));
         let source_program = parse source in
         (match atomic_errors source_program [] with
          | [(loc, message)] ->
@@ -28495,20 +28459,7 @@ fn main() -> i32 {
 |}
 
 let infer_sealed ?(proto = sealed_protocol) ?(use = sealed_consumer) () =
-  Const_env.reset ();
-  Type_layout.reset ();
-  Publish_registry.reset ();
-  No_copy_registry.reset ();
-  Per_cpu_registry.reset ();
-  Init_state.reset ();
-  Region_backing.reset ();
-  Guarded_registry.reset ();
-  Io_struct_registry.reset ();
-  Hashtbl.reset Generic_variant.proven_empty_puts;
-  Dma_fixed_registry.reset ();
-  Device_protocol_registry.reset ();
-  Generic_scope.reset ();
-  Ast.reset_precedence_errors ();
+  Compilation_state.reset ();
   ignore (Llvm_gen.setup_target ~triple:"x86_64-pc-linux-gnu" ());
   let program = List.concat_map (fun (filename, src) ->
     let lexbuf = Lexing.from_string src in
@@ -28700,20 +28651,7 @@ fn main() -> i32 {
    lines) unless told otherwise; answers the module's IR text. *)
 let compile_device ?(triple = "aarch64-none-elf") ?(device_files = [ "dev.tkb" ])
     ?(proto = device_protocol) ?(use = device_consumer) () =
-  Const_env.reset ();
-  Type_layout.reset ();
-  Publish_registry.reset ();
-  No_copy_registry.reset ();
-  Per_cpu_registry.reset ();
-  Init_state.reset ();
-  Region_backing.reset ();
-  Guarded_registry.reset ();
-  Io_struct_registry.reset ();
-  Hashtbl.reset Generic_variant.proven_empty_puts;
-  Dma_fixed_registry.reset ();
-  Device_protocol_registry.reset ();
-  Generic_scope.reset ();
-  Ast.reset_precedence_errors ();
+  Compilation_state.reset ();
   Fun.protect ~finally:(fun () ->
       Protocol_decl.device_semantics_files := [];
       Llvm_gen.reset_target ())
