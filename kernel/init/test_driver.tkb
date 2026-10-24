@@ -1513,6 +1513,9 @@ irq_uart_rx_unmask();
     // byte at 3), sent while the fixture blocks reading connection B, so
     // only the stack-wide retransmit pass can resend it.
     kernel_tcp_inject_drop_data_segment_again(4);
+    // ...and keep the stack-wide pass off the first drop, so #842's blocked
+    // read on A is still what must resend it.
+    kernel_tcp_hold_retransmit_pass_until_recovered();
     kernel_tcp_inject_drop_next_fin();
     kernel_uart_rx_ring_reset();
     kernel_process_execution_reset();

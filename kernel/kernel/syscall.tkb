@@ -5421,6 +5421,7 @@ fn kernel_signal_return_deliver(frame: borrow FrameRef[process]) !{unsafe} {
 // holds. A syscall itself still services only its own connection (#257).
 fn kernel_net_retransmit_pass() !{may_block, unsafe} {
     if (tcp_retx_pass_due() == false) { return; }
+    if (tcp_retx_pass_held()) { return; }
     match network_capability_take() {
         NetworkCapabilityTakeResult::Empty => {}
         NetworkCapabilityTakeResult::Ready(ready) => {

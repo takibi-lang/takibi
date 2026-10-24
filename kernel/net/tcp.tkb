@@ -564,6 +564,12 @@ let mut tcp_kept_segments: usize = 0;
 // their connection.
 let mut tcp_retx_pass_sent: usize = 0;
 let mut tcp_retx_pass_busy: usize = 0;
+// GitHub issue #846: a test hold. While set, the stack-wide pass does
+// nothing until the first injected data drop has been recovered, so the
+// #842 fixture still proves that a blocked read resends its own
+// connection's segment; the pass would otherwise resend it first and hide
+// a regression there. Never set outside the boot fixture.
+let mut tcp_retx_pass_hold_until_recovered: bool = false;
 let mut tcp_injected_data_retransmitted: bool = false;
 let mut tcp_injected_data_recovery_observed: bool = false;
 let mut tcp_drop_next_fin: bool = false;
@@ -1732,6 +1738,17 @@ fn kernel_tcp_inject_drop_data_segment(index: usize) !{unsafe} {
 // of whichever connection sends one next.
 fn kernel_tcp_inject_drop_data_segment_again(index: usize) {
     tcp_drop_data_segment_rearm = index as i32;
+}
+
+// GitHub issue #846: hold the stack-wide pass off until the armed drop's
+// recovery has been observed (see tcp_retx_pass_hold_until_recovered).
+fn kernel_tcp_hold_retransmit_pass_until_recovered() {
+    tcp_retx_pass_hold_until_recovered = true;
+}
+
+fn tcp_retx_pass_held() -> bool {
+    return tcp_retx_pass_hold_until_recovered &&
+           tcp_injected_data_recovery_observed == false;
 }
 
 fn kernel_tcp_inject_drop_next_fin() !{unsafe} {
