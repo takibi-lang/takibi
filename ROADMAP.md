@@ -184,11 +184,10 @@ migration waits for a maintainer decision (options on #987). With them,
 (maintainer, 2026-10-24): EFFECTS.md gains the table of checker-only
 effect words, and no new such word is added (DECISIONS.md). Then the
 verification direction (#954, maintainer 2026-10-23; B owns the refinement
-code): #960 (z3 checks a constant operand's fold itself; #983 showed the gap:
-the init obligation carried the folded -1), then #990 (no-wrap guards
-re-checked by z3) and #991 (literal index diagnostic); #983 (init_flow
-terms are machine values) and #984 (min/max range obligations) done
-2026-10-24; the thin slice of
+code): #990 (no-wrap guards re-checked by z3) and #991 (literal index
+diagnostic); #960 (obligations carry a constant's expression, range format
+v2), #983 (init_flow terms are machine values) and #984 (min/max range
+obligations) done 2026-10-24; the thin slice of
 function-boundary initialization contracts (#954 step 2,
 docs/VERIFICATION_DESIGN.md) and step 3, the design review, are done;
 step 4 runs #975 (branch conditions as linear facts; done 2026-10-24,
