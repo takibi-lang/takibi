@@ -100,3 +100,9 @@ scripts/validate_parked_triggers.py. With it, against origin/main d6290064:
 text +1420 B (QEMU) / +1436 B (RPi5), data +16 B, BSS +528 B (QEMU);
 usable_ram_start unchanged on both targets, so the probe ships in the
 production image rather than behind a build flag.
+
+## After rebase onto 3dac688b
+
+Against origin/main 3dac688b: text +1420 B (QEMU) / +1436 B (RPi5), data +16 B,
+BSS +528 B (QEMU); usable_ram_start 0x40210000 / 0x710000 unchanged, so
+the allocator page counts are main's.
