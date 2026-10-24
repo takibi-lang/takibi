@@ -279,6 +279,10 @@ condition below applies, and reports the land afterwards.
 - 2026-10-19 Kernel work that needs an instruction the compiler has no
   intrinsic for uses a small .S helper with no logic (precedent pmu.S), not a
   new compiler intrinsic. [active] #759 #811
+- 2026-10-24 Folding the `.tkb`-reading build checks into the compiler is
+  more urgent than it was: #567's Stage 1 (--emit-call-graph, #987) and the
+  first two retirements (#988, #989) go to the head of Territory B's queue,
+  ahead of #954 stage 2. [active] #567 #987
 - 2026-10-19 A rebase conflict confined to docs/SPACE_CHECKPOINT.json is
   resolved by code (scripts/checkpoint_rebase.py, used by land.sh and the
   coordinator): main's side, then the branch's own review, current for its

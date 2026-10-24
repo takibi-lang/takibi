@@ -167,7 +167,15 @@ four vCPUs since 2026-10-11.
 
 **Assigned queue (maintainer, 2026-10-23).** Low-dependency issues A does
 not hold, in this order; compiler work in this list is authorized; an item
-that reaches a decision is parked and the next one taken. First, the
+that reaches a decision is parked and the next one taken. Ahead of
+everything below (maintainer, 2026-10-24, from #567's re-measurement:
+the build checks take more than twice the commits of the compiler they
+guard): #987 (--emit-call-graph, the resolved call graph as a table the
+`.tkb`-reading checks consume instead of parsing source), then #988
+(--require-execution-model replaces check_execution_model_coverage.py)
+and #989 (raw atomic intrinsic calls counted under
+--confine-raw-authority; check_lock_discipline RULE 2 retires); the
+three are independent of one another. Then the
 verification direction (#954, maintainer 2026-10-23; B owns the refinement
 code): #960 (z3 checks a constant operand's fold itself), #983 (init_flow
 reads literals at no width), #984 (min/max range obligations); the thin slice of
