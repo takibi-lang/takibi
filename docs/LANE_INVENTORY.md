@@ -30,7 +30,7 @@ point, one more GDB stop in affinity-gdb), not to a lane of its own.
 | kernelcheck-qemu-fdt-multibank | 102 | integration | boot with a multi-bank FDT memory map |
 | kernelcheck-dma-qemu | 4 | integration | virtio-blk DMA fixture against the device model |
 | kernelcheck-invariant-qemu | 1 | integration | kernel stop call sites resolved against the exact ELF |
-| kernelcheck-qemu-debug-main | 97 | integration | the same suite on the DWARF debug kernel, lifecycle trace on from main (#965, about +20 s) |
+| kernelcheck-qemu-debug-main | 97 | integration | the same suite on the DWARF debug kernel, lifecycle trace on from main (#965; 2026-10-24 back-to-back runs on 87 and 105 s, off 85, 92 and 136 s: inside host noise) |
 | kernelcheck-gdb-helpers-qemu | 5 | integration | documented gdb helpers against a live debug kernel (#744) |
 | kernelcheck-console-gdb-qemu | 165 | integration | crash/console layout read back with GDB |
 | kernelcheck-churn-gdb-qemu | 235 | integration | process and ASID churn, MMU state read by GDB |
