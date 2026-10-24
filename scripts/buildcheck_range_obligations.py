@@ -212,6 +212,23 @@ def control(takibi: str) -> int:
                         "(check-sat)\n")
         digest = hashlib.md5(planted_init.encode()).hexdigest()
         (out_dir / f"{digest}.smt2").write_text(planted_init)
+        # GitHub issue #975: a planted claim that needs a path fact it does
+        # not have: [0, 20) by [0, s) with x >= 16 and s = min(x, 28). z3
+        # must name an uncovered k in [16, 20).
+        planted_fact = (INIT_HEADER + "\n; rule: init\n"
+                        "; claim: init(planted_fact[0..<20])\n"
+                        "(set-logic QF_LIA)\n"
+                        "(declare-const x_s Int)\n(declare-const x_x Int)\n"
+                        "(assert (and (<= 0 x_s) (< x_s 18446744073709551616)))\n"
+                        "(assert (and (<= 0 x_x) (< x_x 18446744073709551616)))\n"
+                        "(assert (>= (+ x_x (- 16)) 0))\n"
+                        "(assert (= x_s (ite (<= x_x 28) x_x 28)))\n"
+                        "(declare-const k Int)\n"
+                        "(assert (and (<= 0 k) (< k 20)))\n"
+                        "(assert (not (or false (and (<= 0 k) (< k x_s)))))\n"
+                        "(check-sat)\n")
+        digest = hashlib.md5(planted_fact.encode()).hexdigest()
+        (out_dir / f"{digest}.smt2").write_text(planted_fact)
         failures = check_dir(out_dir, z3, None)
     init_planted = [f for f in failures
                     if ": sat " in f and "rule: init" in f
@@ -221,7 +238,16 @@ def control(takibi: str) -> int:
         print("FAIL range-obligation control: the planted init coverage "
               "claim was not reported with k = 7")
         return 1
-    failures = [f for f in failures if f not in init_planted]
+    fact_planted = [f for f in failures
+                    if ": sat " in f and "planted_fact" in f
+                    and re.search(r"\(k (16|17|18|19)\)", f.replace("\n", " "))]
+    if len(fact_planted) != 1:
+        print("\n".join(failures))
+        print("FAIL range-obligation control: the planted path-fact claim "
+              "(#975) was not reported with k in [16, 20)")
+        return 1
+    failures = [f for f in failures
+                if f not in init_planted and f not in fact_planted]
     planted = [f for f in failures
                if ": sat " in f and "rule: sub" in f and "claim: {-60..<80 as usize}" in f
                and "counterexample" in f]
@@ -232,9 +258,10 @@ def control(takibi: str) -> int:
         return 1
     print(planted[0])
     report_pass("range-obligation-control",
-                "z3 reports #935's planted unsigned-Sub range and a planted "
-                "init coverage claim (#954) with counterexamples",
-                obligations=len(failures) + len(init_planted))
+                "z3 reports #935's planted unsigned-Sub range, a planted "
+                "init coverage claim (#954) and a planted path-fact claim "
+                "(#975) with counterexamples",
+                obligations=len(failures) + len(init_planted) + len(fact_planted))
     return 0
 
 

@@ -53,11 +53,35 @@ length. Its old restrictions (top-level store, no early exit, the counter as
 the index) are unchanged and are what make the row sound. The old "length
 equals N" restriction is gone.
 
-Coverage of a goal `[a, b)` is decided by a walk that needs only constant
-differences between terms (Init_pred.uncovered). It is sound and
-incomplete. It never needs a quantifier or a solver call, so what it accepts
-does not depend on a z3 version. Path equalities enter only from a
-contract's own result (`return copied == destination.len`).
+Coverage of a goal `[a, b)` is decided by a walk (Init_pred.uncovered)
+whose comparisons `x >= y` ask Init_pred.entails whether `x - y >= 0`
+follows from the path facts. It is sound and incomplete. It never needs a
+quantifier or a solver call, so what it accepts does not depend on a z3
+version.
+
+### Path facts (#975)
+
+A fact is a linear term `t >= 0`, or a definition `x = min(a, b)`. Facts
+come from `if` and `while` conditions, `&&` and `||` operands, `for`
+counters and `min` bindings (SPEC.md lists the exact sides). Only sides
+whose machine value equals their mathematical value give a fact: a
+constant, an immutable unsigned binding, a `.len`, or `a - b` once `b <= a`
+is already a fact. A sum may wrap, so it gives none. Path equalities from a
+contract's own result (`return copied == destination.len`) stay as before.
+
+`entails` is a bounded search (depth 4): `t` holds outright when its
+constant and coefficients are nonnegative (atoms are usize); else it
+subtracts a fact sharing an atom with `t` with the same sign, or expands a
+`min` atom (`k*min(a, b) + r >= 0` needs both `k*a + r` and `k*b + r` for
+`k > 0`, and either for `k < 0`). Each step is a valid derivation, so a
+yes is sound; a no may be wrong, and then the program is rejected with the
+facts listed. Every covering conclusion's obligation asserts the facts it
+had (`min` as `ite`), so z3 re-checks the derivation.
+
+A merge keeps a fact that every falling-through arm has, syntactically. A
+loop body starts from the state before the loop plus the loop's own
+condition or counter range; facts mention only immutable atoms, whose
+values are fixed for the whole loop.
 
 Representation 2, a bitmask for a constant N, turned out not to be needed:
 with constant bounds the interval union is already an exact finite set, and
@@ -75,8 +99,8 @@ lowering leaves QF_LIA. Exhaustiveness is checked syntactically against the
 variant's cases, like an ordinary match. Two limits keep it decidable rather
 than merely satisfiable. A payload that is not an integer cannot appear in a
 bound, because the bound must be a linear term. And a caller gets an arm's
-facts only in a `match` directly on the call, where the tag and payload are
-the arm's.
+facts only in a `match` on the call, or on an immutable binding of it
+(#975), where the tag and payload are the arm's.
 
 ### Why a scratch-slot contract is tractable (the frame problem)
 
@@ -121,9 +145,18 @@ such owner, and naming one is an error.
    `unsafe { assume_init(...) }` is gone, so TRUSTED_BASE.md lists one site
    fewer. The requires is shown at all nine calls.
 
-The other copy_from_user callers keep their zero_fill for now: each still
-reads a range that depends on a path condition the checker does not track
-(for example sockaddr's `x2 >= 28` branch).
+4. #975 removed the partial-fill staging fills with path facts:
+   terminal write (copy_from_user into a chunk alias), file write
+   (copy_from_user_span then the same span), the ext2 read loop and
+   sendfile (`Ext2ReadResult::Read(n)` ensures `[0, n)`, and
+   copy_to_user_span now requires only `source[offset..<offset + length]`),
+   syslog (`kernel_log_snapshot_copy` ensures `[0, result)`, and
+   `staged != chunk` returns, so `staged = chunk` after it), bind's
+   sockaddr (`x2 >= 16`, `len = min(x2, 28)`, and the IPv6 bytes after
+   `x2 >= 28`), and getdents (`entry_start + 8 <= chunk` and
+   `name_length <= record_length - 8` bound every entry read). The procfs
+   read branch keeps its fill: a renderer writes its text piecewise through
+   a mutable offset, with no contract on which bytes.
 
 ## Census of workarounds before the slice (origin/main a17c1028)
 
@@ -145,12 +178,14 @@ The init obligations' cold z3 time is budgeted at 5 s on a kernel build.
 `scripts/buildcheck_range_obligations.py` prints the share used
 (`init-obligation-budget`). A cache entry keeps each obligation's cold
 time, so the share is reported on warm builds too. Measured on the QEMU kernel on
-2026-10-24: 7 obligations, 0.19 s cold (4%). The budget may grow when a
+2026-10-24: 7 obligations, 0.19 s cold (4%). After #975: 33 obligations,
+0.63 s cold (13%). The budget may grow when a
 later change needs it, as long as the build and lane budgets are unaffected.
 
 ## Out of this slice
 
 - The execve staging helpers (syscall.tkb 575, 586, 597): every function on
   the path from the zero_fill at 8469 to them would need `requires`.
-- Path conditions other than a contract's result, interval merging across
-  arms with different bounds, and sparse or quantified init (#109).
+- Interval merging across arms with different bounds, facts about mutable
+  locals (versioned atoms), disequalities, and sparse or quantified init
+  (#109).

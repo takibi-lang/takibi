@@ -25481,6 +25481,190 @@ fn peek(s: borrow Slot954[0]) -> u8 requires init(ss[s.index].buf) {
            store8(s[k..<k + 8], 1); k = 8; return out(sb.buf[0..<8]); }"));
   ]
 
+(* GitHub issue #975: branch conditions, loop bounds and min bindings as
+   linear facts for the interval walk (SPEC.md "Initialization contracts"). *)
+let init_path_fact_tests =
+  let t name f = Alcotest.test_case name `Quick f in
+  let span = "fn fetch(dst: borrow uninit []u8, off: usize, n: usize) -> bool
+        ensures init(dst[off..<off + n]) if (result) {
+    if (off > dst.len) { return false; }
+    let tail = dst[off..<dst.len];
+    if (n > tail.len) { return false; }
+    zero_fill(tail[0..<n]);
+    return true;
+}
+fn ready() -> bool { return true; }
+struct S975 { buf: [u8; 28]; }
+scratch let mut sb: S975;
+" in
+  let read = "variant R975 { Read(usize); Bad; }
+fn read(buf: borrow uninit []u8) -> R975
+        ensures match result { R975::Read(n) => init(buf[0..<n]), R975::Bad => true } {
+    if (buf.len < 4) { return R975::Bad; }
+    for i: usize in 0..<4 { buf[i] = 7; }
+    return R975::Read(4);
+}
+struct S975 { buf: [u8; 28]; }
+scratch let mut sb: S975;
+" in
+  (* sockaddr's shape: x2 >= 16 from an || early return, len = min(x2, 28). *)
+  let sock body = span ^ "fn f(x2: usize) -> u8 {
+    if (ready() == false || x2 < 16) { return 0; }
+    let len: usize = min(x2, 28);
+    if (fetch(sb.buf as []u8, 0, len) == false) { return 0; }
+    let a: []u8 = sb.buf as []u8;
+    " ^ body ^ " }" in
+  [
+    t "issue #975: an || early return and a min binding bound the copied span"
+      (expect_ok (sock "return a[0] + a[15];"));
+    t "issue #975: a read past the guarded lower bound is rejected"
+      (expect_type_error "element 16 of it (in [16, 17)) is not shown initialized"
+         (sock "return a[16];"));
+    t "issue #975: a later guard extends the span inside its branch"
+      (expect_ok (sock "if (x2 < 28) { return a[0]; }
+         let mut s: u8 = 0;
+         for i: usize in 8..<24 { s = s + a[i]; }
+         return s + a[27];"));
+    t "issue #975: the for counter's bound is a fact; past the guard is not"
+      (expect_type_error "element i of it (in [i, i + 1))"
+         (sock "let mut s: u8 = 0;
+         for i: usize in 8..<24 { s = s + a[i]; }
+         return s;"));
+    t "issue #975: the error lists the path facts it had"
+      (expect_type_error "path facts: x2 - 16 >= 0, len = min(x2, 28)"
+         (sock "return a[20];"));
+    t "issue #975: a guard on the other branch of && is not a fact"
+      (expect_type_error "is not shown initialized"
+         (span ^ "fn f(x2: usize) -> u8 {
+           if (x2 > 28) { return 0; }
+           if (fetch(sb.buf as []u8, 0, x2) == false) { return 0; }
+           let a: []u8 = sb.buf as []u8;
+           if (x2 >= 4 && ready()) { return 0; }
+           return a[2]; }"));
+    t "issue #975: the && right operand sees the left one"
+      (expect_ok (span ^ "fn f(x2: usize) -> bool {
+           if (x2 > 28) { return false; }
+           if (fetch(sb.buf as []u8, 0, x2) == false) { return false; }
+           let a: []u8 = sb.buf as []u8;
+           return x2 >= 4 && a[3] == 0; }"));
+    t "issue #975: an equality on the success path relates two terms"
+      (expect_ok (span ^ "fn f(n: usize, m: usize) -> u8 {
+           if (m > 28) { return 0; }
+           if (fetch(sb.buf as []u8, 0, m) == false) { return 0; }
+           if (m != n || n < 1) { return 0; }
+           let a: []u8 = sb.buf as []u8;
+           let head = a[0..<n];
+           return head[0]; }"));
+    t "issue #975: without the equality the range is not shown"
+      (expect_type_error "element 0 of it (in [0, 1))"
+         (span ^ "fn f(n: usize, m: usize) -> u8 {
+           if (m > 28 || n < 1) { return 0; }
+           if (fetch(sb.buf as []u8, 0, m) == false) { return 0; }
+           let a: []u8 = sb.buf as []u8;
+           let head = a[0..<n];
+           return head[0]; }"));
+    t "issue #975: a sum on a comparison side gives no fact (it may wrap)"
+      (expect_type_error "is not shown initialized"
+         (span ^ "fn f(x: usize, y: usize) -> u8 {
+           if (fetch(sb.buf as []u8, 0, 8) == false) { return 0; }
+           if (x + y > 4) { return 0; }
+           let a: []u8 = sb.buf as []u8;
+           return a[x]; }"));
+    t "issue #975: a difference is a fact side once it cannot wrap"
+      (expect_ok (span ^ "fn f(x: usize, y: usize) -> u8 {
+           if (fetch(sb.buf as []u8, 0, 8) == false) { return 0; }
+           if (y > 8 || x > y || y - x < 1) { return 0; }
+           let a: []u8 = sb.buf as []u8;
+           return a[x]; }"));
+    t "issue #975: a signed comparison gives no fact"
+      (expect_type_error "is not shown initialized"
+         (span ^ "fn f(x: i64, n: usize) -> u8 {
+           if (n > 28) { return 0; }
+           if (fetch(sb.buf as []u8, 0, n) == false) { return 0; }
+           if (x < 1) { return 0; }
+           let a: []u8 = sb.buf as []u8;
+           return a[0]; }"));
+    t "issue #975: a sub-slice with a mutable end is an alias of its own length"
+      (expect_ok (span ^ "fn out(src: borrow []const u8) -> usize { return src.len; }
+         fn f(length: usize) -> usize {
+           let mut chunk: usize = length;
+           if (chunk > 28) { chunk = 28; }
+           let all = sb.buf as []u8;
+           if (chunk > all.len) { return 0; }
+           let staging = all[0..<chunk];
+           if (fetch(staging, 0, staging.len) == false) { return 0; }
+           return out(staging); }"));
+    t "issue #975: a payload binder carries the arm's facts"
+      (expect_ok (read ^ "fn f(k: usize) -> u8 {
+           match read(sb.buf as []u8) {
+             R975::Read(n) => {
+               if (k > n || n - k < 2) { return 0; }
+               let a: []u8 = sb.buf as []u8;
+               return a[k + 1];
+             }
+             R975::Bad => { return 0; }
+           } }"));
+    t "issue #975: a bound call result is returned under its contract"
+      (expect_ok (read ^ "fn wrap(buf: borrow uninit []u8) -> R975
+                 ensures match result { R975::Read(n) => init(buf[0..<n]), R975::Bad => true } {
+           let r: R975 = read(buf);
+           return r; }"));
+    t "issue #975: a bound call result does not show a wider range"
+      (expect_type_error "the ensures clause needs it initialized"
+         (read ^ "fn wrap(buf: borrow uninit []u8) -> R975
+                 ensures match result { R975::Read(n) => init(buf[0..<n + 1]), R975::Bad => true } {
+           let r: R975 = read(buf);
+           return r; }"));
+    t "issue #975: a match on a bound call result gets the arm's range"
+      (expect_ok (read ^ "fn f() -> u8 {
+           let r: R975 = read(sb.buf as []u8);
+           match r {
+             R975::Read(n) => { if (n < 2) { return 0; } return sb.buf[1]; }
+             R975::Bad => { return 0; }
+           } }"));
+    t "issue #975: a requires on a borrow parameter is all a caller must show"
+      (expect_ok (span ^ "fn put(src: borrow []const u8, off: usize, n: usize) -> u8
+                 requires init(src[off..<off + n]) {
+           if (off > src.len) { return 0; }
+           let tail = src[off..<src.len];
+           if (n < 1 || n > tail.len) { return 0; }
+           return tail[0]; }
+         fn f() -> u8 {
+           if (fetch(sb.buf as []u8, 4, 8) == false) { return 0; }
+           return put(sb.buf as []u8, 4, 8); }"));
+    t "issue #975: a requires on a borrow parameter is checked at the call"
+      (expect_type_error "'put' requires it initialized"
+         (span ^ "fn put(src: borrow []const u8, off: usize, n: usize) -> u8
+                 requires init(src[off..<off + n]) { return 0; }
+         fn f() -> u8 {
+           if (fetch(sb.buf as []u8, 4, 8) == false) { return 0; }
+           return put(sb.buf as []u8, 0, 8); }"));
+    t "issue #975: the body of a requires on a borrow parameter stays inside it"
+      (expect_type_error "element off + n of it"
+         "fn put(src: borrow []const u8, off: usize, n: usize) -> u8
+                 requires init(src[off..<off + n]) {
+           if (off > src.len) { return 0; }
+           let tail = src[off..<src.len];
+           if (n >= tail.len) { return 0; }
+           return tail[n]; }");
+    t "issue #975: a covering conclusion's obligation carries the path facts"
+      (fun () ->
+         let lin = Init_pred.(add (atom "x") (const (-16))) in
+         let facts = { Init_pred.ge = [lin];
+                       mins = [("s", Init_pred.atom "x", Init_pred.const 28)] } in
+         let goal = (Init_pred.const 0, Init_pred.const 16) in
+         let ivs = [(Init_pred.const 0, Init_pred.atom "s")] in
+         Alcotest.(check bool) "covered" true
+           (Init_pred.uncovered ~facts ivs goal = None);
+         Alcotest.(check bool) "not covered without the facts" true
+           (Init_pred.uncovered ivs goal <> None);
+         let text = Init_pred.obligation ~claim:"c" ~facts [] ivs goal in
+         Alcotest.(check bool) "fact asserted" true
+           (contains_substring text "(assert (>= (+ x_x (- 16)) 0))");
+         Alcotest.(check bool) "min defined" true
+           (contains_substring text "(assert (= x_s (ite (<= x_x 28) x_x 28)))"));
+  ]
+
 let definite_init_tests =
   let padded = "struct Pad203 { a: u8; b: u64; }\n" in
   let flat = "struct Flat203 { a: u64; b: u64; }\n" in
@@ -28792,6 +28976,7 @@ let named_groups_unisolated = [
   "indexed-reference", indexed_reference_tests;
   "definite-init", definite_init_tests;
   "init-contracts", init_contract_tests;
+  "init-path-facts", init_path_fact_tests;
   "raw-authority-policy", raw_authority_policy_tests;
   "witness-changes", witness_change_tests;
   "record-loan-contracts", record_loan_contract_tests;

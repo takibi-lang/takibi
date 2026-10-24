@@ -880,12 +880,46 @@ fn path_view(slot: borrow SyscallSlot[0]) -> [u8; 256..]
   a `match g(...)` arm `K(x)` in the caller gets `C` with `x` the arm's
   binder.
 - `requires C` is unconditional. It is shown at every call against the
-  caller's state and assumed at the callee's entry.
+  caller's state and assumed at the callee's entry. A parameter it names
+  that is not `borrow uninit` (GitHub issue #975) is initialized at entry
+  exactly where `C` says, so the body may read only there, and a caller
+  shows only `C` for that argument rather than the whole argument. When
+  the clause's bounds are not terms at the call, the caller shows the whole
+  argument's leaf instead.
+- A call result bound to an immutable `let` keeps the facts that depend on
+  it: a `match` on the binding gets each arm's facts, and `return` of it
+  meets an `ensures match result` arm by arm.
+
+#### Path facts (GitHub issue #975)
+
+Coverage may use linear facts that hold on the path, all quantifier free:
+
+- an `if` condition in its then branch and its negation in the else branch
+  (and after the `if` when the other branch cannot fall through); a `while`
+  condition in its body; the right operand of `&&` (`||`) under the left
+  one true (false); operands of a true `&&` or a false `||` are taken left
+  to right;
+- the comparisons `<`, `<=`, `>`, `>=`, `==` and, when false, `!=`, between
+  sides that are a nonnegative constant, an immutable binding of an
+  unsigned integer type (a parameter, `let`, payload binder or `for`
+  counter), a view's `.len`, or `a - b` of such sides once the facts
+  already show `b <= a`. Any other side (a sum, a signed value, a mutable
+  local, a call) gives no fact, because its machine value may differ from
+  its mathematical one;
+- `for i in lo..<hi`: `lo <= i < hi` in the body, for such sides;
+- `let x: usize = min(a, b)`: `x = min(a, b)`, or `x <= a` when only `a`
+  is such a side.
+
+A fact survives a merge only when every arm that falls through has it. A
+sub-slice bound with an end that is not a linear term (`let s = v[0..<m]`
+with `m` mutable) is an alias whose length is its own `.len`. When a read
+is rejected, the message lists the path facts the checker had.
 
 Every covering conclusion becomes a `; takibi-init-obligation v1` file under
-`--emit-range-obligations` (docs/RANGE_OBLIGATIONS.md): z3 re-checks the
-checker's interval reasoning in QF_LIA, outside the trusted base, and a
-failed one reports the uncovered element `k`. docs/VERIFICATION_DESIGN.md
+`--emit-range-obligations` (docs/RANGE_OBLIGATIONS.md), with the path facts
+it used as assertions (a `min` as an `ite`): z3 re-checks the checker's
+interval reasoning in QF_LIA, outside the trusted base, and a failed one
+reports the uncovered element `k`. docs/VERIFICATION_DESIGN.md
 records the design and its budget.
 
 ## Indexed Runtime Owners
