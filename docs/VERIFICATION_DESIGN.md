@@ -74,7 +74,13 @@ come from `if` and `while` conditions, `&&` and `||` operands, `for`
 counters and `min` bindings (SPEC.md lists the exact sides). Only sides
 whose machine value equals their mathematical value give a fact: a
 constant, an immutable unsigned binding, a `.len`, or `a - b` once `b <= a`
-is already a fact. A sum may wrap, so it gives none. Path equalities from a
+is already a fact. A sum may wrap, so it gives none. The same rule
+holds for every term the walk records (#983): an index, a sub-slice bound,
+an argument mapped into a callee's contract and a returned value are
+terms only when no step wraps, a literal leaf reads at usize (a
+`0xFFFFFFFFFFFFFFFF` argument once read as -1 let a callee's `[n, 8)`
+cover `[0, 8)`), and Init_pred's own native arithmetic refuses a step past
+2^62. Path equalities from a
 contract's own result (`return copied == destination.len`) stay as before.
 
 `entails` is a bounded search (depth 4): `t` holds outright when its

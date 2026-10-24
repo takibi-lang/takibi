@@ -950,6 +950,15 @@ Coverage may use linear facts that hold on the path, all quantifier free:
 - `let x: usize = min(a, b)`: `x = min(a, b)`, or `x <= a` when only `a`
   is such a side.
 
+A linear term of the body (an index, a sub-slice bound, an argument, a
+returned value) stands for the machine value of its expression (#983):
+a literal or constant leaf is a `usize` value at most 2^60 (so
+`0xFFFFFFFFFFFFFFFF` is not read as -1), `a - b` is a term only when the
+path facts show `b <= a`, and `a + b` or `k * a` only when they show the
+result at most 2^60 or at most some other term's atom. Anything else is no
+term, so its interval or equality is not recorded. A contract's own bounds
+are mathematical over its atoms; their literal leaves read the same way.
+
 A fact survives a merge only when every arm that falls through has it. A
 sub-slice bound with an end that is not a linear term (`let s = v[0..<m]`
 with `m` mutable) is an alias whose length is its own `.len`. When a read

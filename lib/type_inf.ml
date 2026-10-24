@@ -4513,14 +4513,9 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
               way rather than silently passing through unchecked. *)
            (match idx.desc with
             | IntLit k64 ->
-                (match Ast.int_of_intlit k64 with
-                 | Some k when k >= n ->
-                     raise (TypeError (idx.loc,
-                       Printf.sprintf "index %d is out of bounds for array of size %d" k n))
-                 | Some _ -> ()
-                 | None ->
-                     raise (TypeError (idx.loc,
-                       Printf.sprintf "index %Ld is out of bounds for array of size %d" k64 n)))
+                (* fold-not-proof: a rejection; a negative native reading is
+                   a usize literal past 2^63 (#983), out of bounds too. *)
+                (match Ast.int_of_intlit k64 with                 | Some k when k >= 0 && k < n -> ()                 | _ ->                     raise (TypeError (idx.loc,                       Printf.sprintf "index %Lu is out of bounds for array of size %d" k64 n)))
             | _ -> ());
            elem
        | TSlice (elem, _, _) ->
@@ -6299,14 +6294,8 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                  record_array_index_proof n it idx;
                  (match idx.desc with
                   | IntLit k64 ->
-                      (match Ast.int_of_intlit k64 with
-                       | Some k when k >= n ->
-                           raise (TypeError (idx.loc,
-                             Printf.sprintf "index %d is out of bounds for array of size %d" k n))
-                       | Some _ -> ()
-                       | None ->
-                           raise (TypeError (idx.loc,
-                             Printf.sprintf "index %Ld is out of bounds for array of size %d" k64 n)))
+                      (* fold-not-proof: a rejection, as above (#983). *)
+                      (match Ast.int_of_intlit k64 with                       | Some k when k >= 0 && k < n -> ()                       | _ ->                           raise (TypeError (idx.loc,                             Printf.sprintf "index %Lu is out of bounds for array of size %d" k64 n)))
                   | _ -> ());
                  elem
              | TSlice (elem, _, _) ->

@@ -5,9 +5,9 @@
    Terms are mathematical integers over ATOMS: the value of an immutable
    binding (`v<id>`), the length of a slice binding (`len<id>`), a call's
    result (`result`) or a contract arm's payload binder. Every atom is a
-   usize, so it lies in [0, 2^64). A term only ever comes from a slice
-   bound or an index the program itself computes and bounds-checks, so the
-   mathematical value is the machine's.
+   usize, so it lies in [0, 2^64). Init_flow builds a term of the body
+   only when its mathematical value is the machine's: leaves at the usize
+   width, and no step that may wrap (#983).
 
    Coverage of a goal [a, b) is decided by a chain walk that needs only
    constant differences between terms: from cur = a, stop when b - cur <= 0
@@ -26,12 +26,43 @@ type lin = { c : int; m : int SMap.t }   (* c + sum coeff * atom *)
 let const c = { c; m = SMap.empty }
 let atom a = { c = 0; m = SMap.singleton a 1 }
 
+(* GitHub issue #983: terms compute on the checker's native ints, which
+   are 63 bits wide, so a sum or product can wrap where the mathematical
+   value does not. Every constant and coefficient stays inside
+   (-2^62, 2^62); a step that would leave it raises [Overflow], which the
+   deciders below read as "not shown" and Init_flow reports as an error.
+   A leaf constant is at most [limit] (2^60), so ordinary terms never get
+   near the edge. *)
+exception Overflow
+
+let limit = 1 lsl 60
+
+let edge = 1 lsl 62 - 1
+
+let chk v = if v > edge || v < - edge then raise Overflow else v
+
+let chk_add a b =
+  let s = a + b in
+  (* Native wrap: the sign of the sum disagrees with both operands. *)
+  if (a >= 0 && b >= 0 && s < 0) || (a < 0 && b < 0 && s >= 0) then raise Overflow
+  else chk s
+
+let chk_mul a b =
+  if a = 0 || b = 0 then 0
+  else
+    let p = a * b in
+    if p / b <> a || (a = min_int && b = -1) || (b = min_int && a = -1)
+    then raise Overflow
+    else chk p
+
 let add x y =
-  { c = x.c + y.c;
-    m = SMap.union (fun _ a b -> if a + b = 0 then None else Some (a + b)) x.m y.m }
+  { c = chk_add x.c y.c;
+    m = SMap.union (fun _ a b ->
+          let s = chk_add a b in if s = 0 then None else Some s) x.m y.m }
 
 let scale k x =
-  if k = 0 then const 0 else { c = k * x.c; m = SMap.map (fun a -> k * a) x.m }
+  if k = 0 then const 0
+  else { c = chk_mul k x.c; m = SMap.map (fun a -> chk_mul k a) x.m }
 
 let sub x y = add x (scale (-1) y)
 
@@ -110,10 +141,11 @@ let entails ?(depth = 4) (f : facts) (t : lin) =
               if k > 0 then go (depth - 1) ta && go (depth - 1) tb
               else go (depth - 1) ta || go (depth - 1) tb) f.mins))
   in
-  go depth t
+  try go depth t with Overflow -> false
 
 (* None: covered. Some cur: the first point the walk could not cover. *)
 let uncovered ?(eqs = []) ?(facts = no_facts) (ivs : interval list) ((a, b) : interval) =
+  try
   let n = normalize eqs in
   let facts = normalize_facts eqs facts in
   let ge x y = entails facts (sub x y) in   (* x >= y *)
@@ -147,6 +179,7 @@ let uncovered ?(eqs = []) ?(facts = no_facts) (ivs : interval list) ((a, b) : in
        | None -> Some report)
   in
   go (n a) (n a) (List.length ivs + 1)
+  with Overflow -> Some a
 
 (* ---- z3 obligations ---------------------------------------------------- *)
 

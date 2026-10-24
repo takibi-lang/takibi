@@ -23,6 +23,14 @@ native way (0xFFFFFFFFFFFFFFFF as -1), and an unannotated for-loop counter,
 a min/max operand and a singleton literal each proved a range the machine
 value breaks. Proof paths read a leaf through Type_inf.bound_at_base; a raw
 Const_env.bound_value takes the same `fold-not-proof:` exemption.
+
+#983: Ast.int_of_intlit is the same native read (a literal's 64-bit
+pattern, so 0xFFFFFFFFFFFFFFFF reads as -1), and lib/init_flow.ml's linear
+terms read literals and constants with it and Const_env.find; a callee's
+[n, 8) with n = 0xFFFFFFFFFFFFFFFF covered [0, 8). A raw Ast.int_of_intlit
+anywhere in lib/ and bin/, and a raw Const_env.find in init_flow.ml, must be
+the argument of init_flow's `leaf_const` (a usize leaf in [0, 2^60]) on the
+same line, or carry the `fold-not-proof:` exemption.
 """
 
 from __future__ import annotations
@@ -38,6 +46,11 @@ DIRS = ("lib", "bin")
 EXCLUDED = {"const_env.ml"}
 EXEMPT = "fold-not-proof:"
 RAW = re.compile(r"\bConst_env\s*\.\s*(folded_value|bound_value)\b(?!_)")
+# #983: native literal reads, allowed as `leaf_const (...)`'s argument.
+LEAF_READ = re.compile(r"\bAst\s*\.\s*(int_of_intlit)\b")
+INIT_LEAF_READ = re.compile(r"\bConst_env\s*\.\s*(find)\b")
+LEAF_HELPER = re.compile(r"\bleaf_const\s*\(\s*$")
+INIT_FLOW = "init_flow.ml"
 COMMENT = re.compile(r"\(\*.*?\*\)", re.DOTALL)
 WINDOW = 4
 
@@ -63,6 +76,21 @@ def scan(path: pathlib.Path, text: str) -> tuple[int, list[str]]:
     code = blank_comments(text).split("\n")
     exempted = 0
     for number, line in enumerate(code, 1):
+        leaf = list(LEAF_READ.finditer(line))
+        if path.name == INIT_FLOW:
+            leaf += list(INIT_LEAF_READ.finditer(line))
+        for match in leaf:
+            if LEAF_HELPER.search(line[:match.start()]):
+                continue
+            window = lines[max(0, number - 1 - WINDOW):number]
+            if any(EXEMPT in raw for raw in window):
+                exempted += 1
+            else:
+                errors.append(
+                    f"{path.name}:{number}: raw {match.group(0)}; a literal "
+                    f"or constant leaf reads at the usize width through "
+                    f"leaf_const (#983), or says why it proves nothing in "
+                    f"a '{EXEMPT}' comment")
         for match in RAW.finditer(line):
             window = lines[max(0, number - 1 - WINDOW):number]
             if any(EXEMPT in raw for raw in window):

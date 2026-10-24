@@ -419,28 +419,68 @@ let check
   let ver_of vers id = match Types.IntMap.find_opt id vers with Some k -> k | None -> 0 in
   let ver_atom id = Init_pred.atom (ver_name id (ver_of !cur_vers id)) in
   let aliases : (int, view) Hashtbl.t = Hashtbl.create 8 in
-  (* Linear integer terms of the body. *)
-  let rec lin (e : Ast.expr) : Init_pred.lin option =
+  (* Linear integer terms of the body, under the path facts [f].
+
+     GitHub issue #983: a term is the MACHINE value of its expression, so
+     coverage decided over mathematical integers is coverage of the
+     program's elements. Every operand is a usize; a leaf reads at that
+     width: a literal or constant is a value in [0, 2^64), so a negative
+     native reading (0xFFFFFFFFFFFFFFFF reads as -1) is refused, and so is
+     one at or past Init_pred.limit. A step must not wrap: `a - b` needs
+     the facts to show a - b >= 0, and `a + b` or `k * a` needs them to show
+     the result at most a constant below 2^64 or at most some atom (every
+     atom is a usize, so below 2^64). Without these, `0xFFFF_FFFF_FFFF_FFFF`
+     passed as an offset or `m - 1` under m == 0 read as -1, and a callee's
+     [n, 8) covered [0, 8) in the caller. *)
+  let leaf_const = function
+    | Some c when c >= 0 && c <= Init_pred.limit -> Some (Init_pred.const c)
+    | _ -> None in
+  (* Does [t] >= 0 (nonneg) or t <= some value below 2^64 (fits_above)
+     follow from the path's equalities and facts? *)
+  let nonneg (st : state) (t : Init_pred.lin) =
+    Init_pred.entails (Init_pred.normalize_facts st.eqs st.facts)
+      (Init_pred.normalize st.eqs t) in
+  let fits_above (st : state) (t : Init_pred.lin) =
+    let f = Init_pred.normalize_facts st.eqs st.facts in
+    let t = Init_pred.normalize st.eqs t in
+    Init_pred.entails f (Init_pred.sub (Init_pred.const Init_pred.limit) t)
+    || List.exists (fun a -> Init_pred.entails f (Init_pred.sub (Init_pred.atom a) t))
+         (List.sort_uniq compare
+            (Init_pred.atoms t
+             @ List.concat_map Init_pred.atoms f.Init_pred.ge
+             @ List.concat_map (fun (x, _, _) -> [x]) f.Init_pred.mins)) in
+  let checked k = try k () with Init_pred.Overflow -> None in
+  let rec lin (f : state) (e : Ast.expr) : Init_pred.lin option =
     match e.desc with
-    | Ast.IntLit n -> Option.map Init_pred.const (Ast.int_of_intlit n)
+    | Ast.IntLit n -> leaf_const (Ast.int_of_intlit n)
     | Ast.Var x ->
         (match Local_bindings.id_for_expr bindings e with
          | Some id when immutable_var x id -> Some (v_atom id)
          | Some id when versionable x id -> Some (ver_atom id)
          | Some _ -> None
-         | None -> Option.map Init_pred.const (Const_env.find x))
-    | Ast.SizeOf t -> Option.map Init_pred.const (size_of t)
+         | None -> leaf_const (Const_env.find x))
+    | Ast.SizeOf t -> leaf_const (size_of t)
     | Ast.BinOp (Ast.Add, a, b) ->
-        (match lin a, lin b with Some x, Some y -> Some (Init_pred.add x y) | _ -> None)
+        (match lin f a, lin f b with
+         | Some x, Some y ->
+             checked (fun () ->
+               let t = Init_pred.add x y in if fits_above f t then Some t else None)
+         | _ -> None)
     | Ast.BinOp (Ast.Sub, a, b) ->
-        (match lin a, lin b with Some x, Some y -> Some (Init_pred.sub x y) | _ -> None)
+        (match lin f a, lin f b with
+         | Some x, Some y ->
+             checked (fun () ->
+               let t = Init_pred.sub x y in if nonneg f t then Some t else None)
+         | _ -> None)
     | Ast.BinOp (Ast.Mul, a, b) ->
-        (match lin a, lin b with
-         | Some x, Some y when Init_pred.SMap.is_empty x.m -> Some (Init_pred.scale x.c y)
-         | Some x, Some y when Init_pred.SMap.is_empty y.m -> Some (Init_pred.scale y.c x)
+        let prod k y = checked (fun () ->
+          let t = Init_pred.scale k y in if fits_above f t then Some t else None) in
+        (match lin f a, lin f b with
+         | Some x, Some y when Init_pred.SMap.is_empty x.m -> prod x.c y
+         | Some x, Some y when Init_pred.SMap.is_empty y.m -> prod y.c x
          | _ -> None)
     | Ast.FieldGet (b, "len") ->
-        (match view_of b with
+        (match view_of f b with
          | Some v -> v.len
          | None ->
              (match b.desc, Local_bindings.id_for_expr bindings b with
@@ -448,19 +488,22 @@ let check
               | _ -> None))
     | _ -> None
   (* A tracked view: an array or slice leaf, an alias of one, a sub-slice
-     of a view with linear bounds, or a same-element `as` slice cast. *)
-  and view_of (e : Ast.expr) : view option =
+     of a view with linear bounds, or a same-element `as` slice cast. The
+     bounds are machine values (lin); the sub-slice's bounds check then
+     keeps off + lo and hi - lo inside the leaf. *)
+  and view_of (f : state) (e : Ast.expr) : view option =
     match e.desc with
     | Ast.Var _ when (match Local_bindings.id_for_expr bindings e with
                       | Some id -> Hashtbl.mem aliases id | None -> false) ->
         Hashtbl.find_opt aliases (Option.get (Local_bindings.id_for_expr bindings e))
     | Ast.SliceOf (b, lo, hi) ->
-        (match view_of b, lin lo, lin hi with
+        (match view_of f b, lin f lo, lin f hi with
          | Some v, Some lo, Some hi ->
-             Some { v with off = Init_pred.add v.off lo; len = Some (Init_pred.sub hi lo) }
+             checked (fun () ->
+               Some { v with off = Init_pred.add v.off lo; len = Some (Init_pred.sub hi lo) })
          | _ -> None)
     | Ast.Cast (t, inner) ->
-        (match strip t, view_of inner with
+        (match strip t, view_of f inner with
          | (Ast.TypeSlice (el, _, _) | Ast.TypeArray (el, _)), Some v
            when leaf_elem v.vp = Some (strip el) -> Some v
          | _ -> None)
@@ -476,19 +519,19 @@ let check
      immutable unsigned binding, a view's length, or a - b of such sides
      when the facts already show b <= a (no wraparound). Anything else,
      such as a + b, gives no fact. *)
-  let rec side (facts : Init_pred.facts) (e : Ast.expr) : Init_pred.lin option =
+  let rec side (st : state) (e : Ast.expr) : Init_pred.lin option =
     let nonneg_const = function
       | Some (l : Init_pred.lin) when Init_pred.SMap.is_empty l.m && l.c >= 0 -> Some l
       | _ -> None in
     match e.desc with
-    | Ast.IntLit _ | Ast.SizeOf _ -> nonneg_const (lin e)
+    | Ast.IntLit _ | Ast.SizeOf _ -> nonneg_const (lin st e)
     | Ast.Var x ->
         (match Local_bindings.id_for_expr bindings e with
          | Some id when immutable_var x id && unsigned_id id -> Some (v_atom id)
          | Some id when versionable x id -> Some (ver_atom id)
          | Some _ -> None
-         | None -> nonneg_const (lin e))
-    | Ast.FieldGet (b, "len") when view_of b <> None -> lin e
+         | None -> nonneg_const (lin st e))
+    | Ast.FieldGet (b, "len") when view_of st b <> None -> lin st e
     | Ast.FieldGet ({ desc = Ast.Var x; _ } as b, "len") ->
         (match Local_bindings.id_for_expr bindings b with
          | Some id when immutable_var x id
@@ -497,8 +540,8 @@ let check
              Some (len_atom id)
          | _ -> None)
     | Ast.BinOp (Ast.Sub, a, b) ->
-        (match side facts a, side facts b with
-         | Some x, Some y when Init_pred.entails facts (Init_pred.sub x y) ->
+        (match side st a, side st b with
+         | Some x, Some y when Init_pred.entails st.facts (Init_pred.sub x y) ->
              Some (Init_pred.sub x y)
          | _ -> None)
     | _ -> None
@@ -514,7 +557,7 @@ let check
     | Ast.BinOp (Ast.And, l, r), true | Ast.BinOp (Ast.Or, l, r), false ->
         assume (assume st l b) r b
     | Ast.BinOp ((Ast.Lt | Ast.Le | Ast.Gt | Ast.Ge | Ast.Eq | Ast.Ne) as op, l, r), _ ->
-        (match side st.facts l, side st.facts r with
+        (match side st l, side st r with
          | Some x, Some y ->
              let one = Init_pred.const 1 in
              let sub = Init_pred.sub in
@@ -634,9 +677,9 @@ let check
                   iv = List.filter (fun (l', _) -> not (Leaves.mem l' bad)) st.iv }
   in
   (* `.len` of a slice or array place reads metadata, not the elements. *)
-  let is_len_of (e : Ast.expr) = match e.desc with
+  let is_len_of f (e : Ast.expr) = match e.desc with
     | Ast.FieldGet (base, "len") ->
-        view_of base <> None ||
+        view_of f base <> None ||
         (match place base with
          | Some p ->
              (match leaf_type p.root p.path with
@@ -668,21 +711,29 @@ let check
   let rec clin (env : string -> [`Val of Init_pred.lin option | `Len of Init_pred.lin option]
                       -> Init_pred.lin option) (e : Ast.expr) =
     match e.desc with
-    | Ast.IntLit n -> Option.map Init_pred.const (Ast.int_of_intlit n)
+    (* GitHub issue #983: a contract term is mathematical over its atoms
+       (the callee proves exactly that interval, and the caller maps each
+       atom to a machine value through [lin]), but its leaves read at the
+       usize width as [lin]'s do. *)
+    | Ast.IntLit n -> leaf_const (Ast.int_of_intlit n)
     | Ast.Var x ->
         (match env x (`Val None) with
          | Some t -> Some t
-         | None -> Option.map Init_pred.const (Const_env.find x))
-    | Ast.SizeOf t -> Option.map Init_pred.const (size_of t)
+         | None -> leaf_const (Const_env.find x))
+    | Ast.SizeOf t -> leaf_const (size_of t)
     | Ast.FieldGet ({ desc = Ast.Var x; _ }, "len") -> env x (`Len None)
     | Ast.BinOp (Ast.Add, a, b) ->
-        (match clin env a, clin env b with Some x, Some y -> Some (Init_pred.add x y) | _ -> None)
+        (match clin env a, clin env b with
+         | Some x, Some y -> checked (fun () -> Some (Init_pred.add x y)) | _ -> None)
     | Ast.BinOp (Ast.Sub, a, b) ->
-        (match clin env a, clin env b with Some x, Some y -> Some (Init_pred.sub x y) | _ -> None)
+        (match clin env a, clin env b with
+         | Some x, Some y -> checked (fun () -> Some (Init_pred.sub x y)) | _ -> None)
     | Ast.BinOp (Ast.Mul, a, b) ->
         (match clin env a, clin env b with
-         | Some x, Some y when Init_pred.SMap.is_empty x.m -> Some (Init_pred.scale x.c y)
-         | Some x, Some y when Init_pred.SMap.is_empty y.m -> Some (Init_pred.scale y.c x)
+         | Some x, Some y when Init_pred.SMap.is_empty x.m ->
+             checked (fun () -> Some (Init_pred.scale x.c y))
+         | Some x, Some y when Init_pred.SMap.is_empty y.m ->
+             checked (fun () -> Some (Init_pred.scale y.c x))
          | _ -> None)
     | _ -> None
   in
@@ -956,25 +1007,25 @@ let check
     | _ ->
         let st = expr st rhs in
         cur_vers := st.vers;
-        finish st (side st.facts rhs) in
+        finish st (side st rhs) in
   (* ---- expressions ------------------------------------------------------ *)
   let rec expr st (e : Ast.expr) : state =
     cur_vers := st.vers;
-    if is_len_of e then st else
+    if is_len_of st e then st else
     match e.desc with
     | Ast.Assign (({ desc = Ast.Var x; _ } as v), rhs) when var_id v x <> None ->
         assign_versioned expr call st (Option.get (var_id v x)) rhs
-    | Ast.Index (b, j) when view_of b <> None ->
-        let v = Option.get (view_of b) in
+    | Ast.Index (b, j) when view_of st b <> None ->
+        let v = Option.get (view_of st b) in
         let st = expr st j in
         let st = place_subexprs_view st b in
-        (match lin j with
+        (match lin st j with
          | Some j ->
              let k = Init_pred.add v.off j in
              need st v (k, Init_pred.add k (Init_pred.const 1)) e.loc "read"
          | None -> need_view st v e.loc "read")
-    | _ when view_of e <> None && not (is_plain_place e) ->
-        let v = Option.get (view_of e) in
+    | _ when view_of st e <> None && not (is_plain_place e) ->
+        let v = Option.get (view_of st e) in
         let st = view_subexprs st e in
         need_view st v e.loc "viewed as memory"
     | _ ->
@@ -1018,13 +1069,13 @@ let check
         bump st (assigned_e [] r)
     | Ast.BinOp (_, l, r) -> expr (expr st l) r
     | Ast.Index (l, r) -> expr (expr st l) r
-    | Ast.Assign ({ desc = Ast.Index (b, j); _ }, rhs) when view_of b <> None ->
+    | Ast.Assign ({ desc = Ast.Index (b, j); _ }, rhs) when view_of st b <> None ->
         (* An element store writes element j of the view. *)
-        let v = Option.get (view_of b) in
+        let v = Option.get (view_of st b) in
         let st = expr st rhs in
         let st = expr st j in
         let st = place_subexprs_view st b in
-        (match lin j with
+        (match lin st j with
          | Some j ->
              let k = Init_pred.add v.off j in
              add_iv st v.vp (k, Init_pred.add k (Init_pred.const 1))
@@ -1071,8 +1122,8 @@ let check
   and view_subexprs st e = place_subexprs_view st e
   (* An out argument cut from a view with bounds that are not linear: it
      writes an unknown range, so it neither reads nor initializes. *)
-  and has_view_base (a : Ast.expr) = match a.desc with
-    | Ast.SliceOf (b, _, _) | Ast.Cast (_, b) -> view_of b <> None || has_view_base b
+  and has_view_base f (a : Ast.expr) = match a.desc with
+    | Ast.SliceOf (b, _, _) | Ast.Cast (_, b) -> view_of f b <> None || has_view_base f b
     | _ -> false
   and place_subexprs_any st (e : Ast.expr) = match e.desc with
     | Ast.SliceOf (b, lo, hi) -> place_subexprs (expr (expr st lo) hi) b
@@ -1098,12 +1149,12 @@ let check
     match fill_target a with
     | `Whole (p, inner) -> fill (place_subexprs st inner) p
     | `Partial inner ->
-        (match view_of a with
+        (match view_of st a with
          | Some ({ len = Some n; _ } as v) ->
              add_iv (place_subexprs_view st a) v.vp (v.off, Init_pred.add v.off n)
          | _ -> place_subexprs_any st inner)
     | `Other ->
-        (match view_of a with
+        (match view_of st a with
          | Some ({ len = Some n; _ } as v) ->
              add_iv (place_subexprs_view st a) v.vp (v.off, Init_pred.add v.off n)
          | _ -> expr st a)
@@ -1129,9 +1180,9 @@ let check
      the term the caller binds the result to, if any. *)
   and call st (e : Ast.expr) ~result : state * guarded list =
     match e.desc with
-    | Ast.Call ("slice_copy", [d; s]) when view_of d <> None ->
+    | Ast.Call ("slice_copy", [d; s]) when view_of st d <> None ->
         (* Builtin contract: init(dst[0..<result]). *)
-        let v = Option.get (view_of d) in
+        let v = Option.get (view_of st d) in
         let st = expr st s in
         let st = place_subexprs_view st d in
         (match result with
@@ -1162,29 +1213,29 @@ let check
             | None -> `No in
           match out with
           | `Contract ->
-              (match view_of a with
+              (match view_of st a with
                | Some _ -> (place_subexprs_view st a, fills)
                | None ->
                    (match fill_target a with
                     | `Whole (_, inner) -> (place_subexprs st inner, fills)
                     | `Partial inner -> (place_subexprs_any st inner, fills)
-                    | `Other when has_view_base a -> (place_subexprs_view st a, fills)
+                    | `Other when has_view_base st a -> (place_subexprs_view st a, fills)
                     | `Other -> (expr st a, fills)))
           | `Out | `Fields ->
               (match fill_target a with
                | `Whole (p, inner) -> (place_subexprs st inner, (`P (p, out)) :: fills)
                | `Partial inner ->
-                   (match view_of a with
+                   (match view_of st a with
                     | Some ({ len = Some n; _ } as v) when out = `Out ->
                         (place_subexprs_view st a,
                          (`V (v, (v.off, Init_pred.add v.off n))) :: fills)
                     | _ -> (place_subexprs_any st inner, fills))
                | `Other ->
-                   (match view_of a with
+                   (match view_of st a with
                     | Some ({ len = Some n; _ } as v) when out = `Out ->
                         (place_subexprs_view st a,
                          (`V (v, (v.off, Init_pred.add v.off n))) :: fills)
-                    | _ when has_view_base a -> (place_subexprs_view st a, fills)
+                    | _ when has_view_base st a -> (place_subexprs_view st a, fills)
                     | _ -> (expr st a, fills)))
           | `No -> (expr st a, fills))
           (st, []) (List.mapi (fun i a -> (i, a)) args) in
@@ -1194,7 +1245,7 @@ let check
           | Some i -> Some (List.nth args i) | None -> None in
         let arg_view x = match arg_of x with
           | Some a ->
-              (match view_of a with
+              (match view_of st a with
                | Some v -> Some (`View v)
                | None ->
                    (match fill_target a with
@@ -1207,11 +1258,11 @@ let check
             | Some (b, t) when b = x -> t
             | _ ->
                 match arg_of x, kind with
-                | Some a, `Val _ -> lin a
+                | Some a, `Val _ -> lin st a
                 | Some a, `Len _ ->
-                    (match view_of a with
+                    (match view_of st a with
                      | Some v -> v.len
-                     | None -> lin { a with desc = Ast.FieldGet (a, "len") })
+                     | None -> lin st { a with desc = Ast.FieldGet (a, "len") })
                 | None, _ -> None in
         let st = List.fold_left (fun st (c : Init_state.clause) ->
           if not c.requires then st else
@@ -1305,7 +1356,7 @@ let check
   let check_ensures ?ret st (eo : Ast.expr option) (gs : guarded list) loc =
     let result = match ret, eo with
       | Some t, _ -> Some t
-      | None, Some e -> lin e
+      | None, Some e -> lin st e
       | None, None -> None in
     let need_pred st ~binder p =
       List.fold_left (fun st r -> match r with
@@ -1326,7 +1377,7 @@ let check
           (match eo with
            | Some { desc = Ast.BoolLit b; _ } when b <> pol -> ()
            | Some ({ desc = Ast.BinOp (Ast.Eq, x, y); _ }) when pol ->
-               let st = match lin x, lin y with
+               let st = match lin st x, lin st y with
                  | Some x, Some y ->
                      let d = Init_pred.sub x y in
                      (match Init_pred.SMap.min_binding_opt d.m with
@@ -1349,7 +1400,7 @@ let check
            | Some { desc = Ast.VariantCtor (_, case, payload); _ } ->
                (match arm_for case with
                 | Some (pat, p) ->
-                    let binder = Option.map (fun b -> (b, lin payload)) pat.bind in
+                    let binder = Option.map (fun b -> (b, lin st payload)) pat.bind in
                     ignore (need_pred st ~binder p)
                 | None -> ())
            | Some { desc = Ast.EnumVariant (_, case); _ } ->
@@ -1487,7 +1538,7 @@ let check
     | Ast.Let _ | Ast.LetTuple _ | Ast.Expr _ | Ast.Yield _
     | Ast.StaticAssert _ -> false) ss
   in
-  let filled_by_loop (s : Ast.stmt) lo hi body =
+  let filled_by_loop f (s : Ast.stmt) lo hi body =
     let counter = match Local_bindings.ids_for_stmt bindings s with
       | [_; binder] -> Some binder | _ -> None in
     let rec plain_chain (e : Ast.expr) = match e.desc with
@@ -1502,7 +1553,7 @@ let check
         when plain_chain base
              && counter <> None
              && Local_bindings.id_for_expr bindings iv = counter ->
-          (match view_of base, lin lo, lin hi with
+          (match view_of f base, lin f lo, lin f hi with
            | Some v, Some lo, Some hi ->
                [(v.vp, (Init_pred.add v.off lo, Init_pred.add v.off hi))]
            | _ -> [])
@@ -1590,7 +1641,7 @@ let check
               | None -> (st, false))
          | [] -> (st, false))
     | Ast.Let (false, _, _, Some e, _)
-      when view_of e <> None
+      when view_of st e <> None
            && (match Local_bindings.ids_for_stmt bindings s with
                | id :: _ ->
                    (match Option.map strip
@@ -1600,7 +1651,7 @@ let check
                | [] -> false) ->
         (* GitHub issue #954: an immutable view binding is an alias; it
            reads nothing until it is used. *)
-        let v = Option.get (view_of e) in
+        let v = Option.get (view_of st e) in
         let st = place_subexprs_view st e in
         (match Local_bindings.ids_for_stmt bindings s with
          | id :: _ when immutable id -> Hashtbl.replace aliases id v; (st, false)
@@ -1613,7 +1664,7 @@ let check
          | id :: _ when immutable id && unsigned_id id ->
              let x = v_atom id in
              let xa = "v" ^ string_of_int id in
-             (match side st.facts a, side st.facts b with
+             (match side st a, side st b with
               | Some l, Some r ->
                   ({ st with facts = { st.facts with
                        Init_pred.mins = (xa, l, r) :: st.facts.Init_pred.mins } }, false)
@@ -1629,7 +1680,7 @@ let check
          | _ -> ());
         (st, false)
     | Ast.Let (false, _, _, Some ({ desc = Ast.SliceOf (b, lo, _); _ } as e), _)
-      when view_of e = None && view_of b <> None && lin lo <> None
+      when view_of st e = None && view_of st b <> None && lin st lo <> None
            && (match Local_bindings.ids_for_stmt bindings s with
                | id :: _ ->
                    immutable id
@@ -1641,11 +1692,11 @@ let check
         (* GitHub issue #975: a sub-slice whose end is not a linear term
            (a mutable bound, say) is still an alias; its length is fixed
            once bound, so it is the binding's own `.len` atom. *)
-        let v = Option.get (view_of b) in
+        let v = Option.get (view_of st b) in
         let id = List.hd (Local_bindings.ids_for_stmt bindings s) in
         let st = place_subexprs_view st e in
         Hashtbl.replace aliases id
-          { v with off = Init_pred.add v.off (Option.get (lin lo));
+          { v with off = Init_pred.add v.off (Option.get (lin st lo));
                    len = Some (len_atom id) };
         (st, false)
     | Ast.Let (_, _, _, Some e, _) | Ast.LetTuple (_, e) | Ast.Expr e
@@ -1691,9 +1742,9 @@ let check
         let in_body = match Local_bindings.ids_for_stmt bindings s with
           | [_; id] when unsigned_id id ->
               let i = v_atom id in
-              let st = match side st.facts lo with
+              let st = match side st lo with
                 | Some l -> add_fact st (Init_pred.sub i l) | None -> st in
-              (match side st.facts hi with
+              (match side st hi with
                | Some h -> add_fact st (Init_pred.sub (Init_pred.sub h i) (Init_pred.const 1))
                | None -> st)
           | _ -> st in
@@ -1704,7 +1755,7 @@ let check
                List.filter (fun t -> not (List.exists (Init_pred.equal t) st.facts.Init_pred.ge))
                  in_body.facts.Init_pred.ge @ h.facts.Init_pred.ge } }, h)) in
         (List.fold_left (fun st (p, iv) -> add_iv st p iv) head
-           (filled_by_loop s lo hi body), false)
+           (filled_by_loop st s lo hi body), false)
     | Ast.ForEach (_, seq, body) ->
         let st = expr st seq in
         (loop_head st body (fun h -> (h, h)), false)
@@ -1844,11 +1895,20 @@ let check
           (resolve_pred ~arg_view:own_arg_view
              ~env:(own_env ~result:None ~binder:None) p)
     | _ -> st) entry contracts in
-  let (st, dead) = stmts entry fdef.Ast.body in
-  if not dead then begin
-    check_outs st fdef.Ast.def_loc;
-    check_ensures st None [] fdef.Ast.def_loc
-  end;
+  (* GitHub issue #983: a term step past the checker's native range is
+     refused where a term is read; one that still escapes from combining
+     stored terms rejects the function rather than deciding on a wrapped
+     native value. *)
+  (try
+     let (st, dead) = stmts entry fdef.Ast.body in
+     if not dead then begin
+       check_outs st fdef.Ast.def_loc;
+       check_ensures st None [] fdef.Ast.def_loc
+     end
+   with Init_pred.Overflow ->
+     error fdef.Ast.def_loc
+       "an initialization interval bound leaves the checker's integer range \
+        (2^62); bound it with a smaller constant");
   match List.rev !errors with
   | [] -> ()
   | [(loc, msg)] -> raise (Types.TypeError (loc, msg))

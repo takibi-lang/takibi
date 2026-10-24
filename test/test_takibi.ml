@@ -6866,6 +6866,11 @@ fn stored_release(holder: sink StoredHolder[k]) { stored_drop(holder.token); }
         }");
 
   Alcotest.test_case
+    "issue #983: a literal index past 2^63 is out of bounds, not -1" `Quick
+    (expect_type_error "index 18446744073709551615 is out of bounds for array of size 4"
+       "fn f983(a: [u8; 4]) -> u8 { return a[0xFFFFFFFFFFFFFFFF]; }");
+
+  Alcotest.test_case
     "issue #385: an out-of-bounds indexed address is rejected at compile time" `Quick
     (expect_type_error "index 4 is out of bounds for array of size 4"
        "struct Refnum385OobCell { value: u8; }
@@ -25409,6 +25414,11 @@ fn read(buf: borrow uninit []u8) -> R954
 struct B954 { buf: [u8; 16]; }
 scratch let mut sb: B954;
 " in
+  let tail983 = "fn tail(dst: borrow uninit [u8; 8..], n: usize) ensures init(dst[n..<8]) {
+    if (n > 8) { return; }
+    zero_fill(dst[n..<8]);
+}
+" in
   let slot = "linear struct Slot954[u: usize] { index: {0..<2 as usize}; }
 struct Pair954 { buf: [u8; 8]; }
 scratch let mut ss: [Pair954; 2];
@@ -25566,6 +25576,48 @@ fn peek(s: borrow Slot954[0]) -> u8 requires init(ss[s.index].buf) {
            scratch let mut sb: B954;
            fn f() -> usize { let s = sb.buf as []u8; let mut k: usize = 0;
            store8(s[k..<k + 8], 1); k = 8; return out(s[k..<k + 8]); }"));
+    (* GitHub issue #983: a term is the machine value of its expression.
+       Each of these was accepted: 0xFFFFFFFFFFFFFFFF read as -1, and
+       m - 1 under m == 0, m + 9 and n == m + 9 computed without wrapping,
+       so the callee's [n, 8) or [0, n) covered elements the machine
+       never stored. *)
+    t "issue #983: a literal past 2^63 is not -1 in a contract argument"
+      (expect_type_error "'o' is uninitialized"
+         (tail983 ^ "fn f(o: borrow uninit [u8; 8..]) ensures init(o[0..<8]) {
+             tail(o, 0xFFFFFFFFFFFFFFFF); }"));
+    t "issue #983: the in-range literal still gives its interval"
+      (expect_ok (tail983 ^ "fn f(o: borrow uninit [u8; 8..]) ensures init(o[0..<8]) {
+             tail(o, 0); }"));
+    t "issue #983: m - 1 under m == 0 wraps and is no argument term"
+      (expect_type_error "'o' is uninitialized"
+         (tail983 ^ "fn f(o: borrow uninit [u8; 8..], m: usize) ensures init(o[0..<8]) {
+             if (m == 0) { tail(o, m - 1); return; }
+             zero_fill(o[0..<8]); }"));
+    t "issue #983: m + 9 may wrap and is no argument term"
+      (expect_type_error "'o' is uninitialized"
+         "fn head(dst: borrow uninit [u8; 8..], n: usize) -> bool
+                 ensures init(dst[0..<n]) if (result) {
+             if (n > dst.len) { return false; }
+             zero_fill(dst[0..<n]); return true; }
+          fn f(o: borrow uninit [u8; 8..], m: usize) -> bool
+                 ensures init(o[0..<8]) if (result) {
+             if (head(o, m + 9)) { return true; }
+             return false; }");
+    t "issue #983: a returned n == m + 9 gives no equality when m + 9 may wrap"
+      (expect_type_error "element 0 of it"
+         "fn h(o: borrow uninit [u8; 9..], n: usize, m: usize) -> bool
+                 requires init(o[0..<n]) ensures init(o[0..<9]) if (result) {
+             return n == m + 9; }");
+    t "issue #983: a bounded m + 1 is still a term"
+      (expect_ok
+         "fn h(o: borrow uninit [u8; 9..], n: usize, m: usize) -> bool
+                 requires init(o[0..<n]) ensures init(o[0..<9]) if (result) {
+             if (m < 100) { return n == m + 9; }
+             return false; }");
+    t "issue #983: a contract bound literal past 2^63 is not a term"
+      (expect_type_error "must be a linear integer term"
+         "fn f(dst: borrow uninit []u8)
+                 ensures init(dst[0..<0xFFFFFFFFFFFFFFFF]) { zero_fill(dst); }");
   ]
 
 (* GitHub issue #975: branch conditions, loop bounds and min bindings as
