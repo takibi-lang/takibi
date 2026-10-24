@@ -95,6 +95,23 @@ Representation 2, a bitmask for a constant N, turned out not to be needed:
 with constant bounds the interval union is already an exact finite set, and
 the walk decides it exactly. A separate bitmask would duplicate it.
 
+### Tracing the state (#976)
+
+`takibi --trace-init-flow FUNC` writes, to stderr, the state after each
+statement of every function named `FUNC` (nested statements included, in
+check order), one line per tracked leaf:
+
+    init-trace FUNC LINE:COL KIND LEAF: init
+    init-trace FUNC LINE:COL KIND LEAF: uninit; known [lo, hi), ...; path facts: ...
+
+`KIND` is the statement form (`let`, `if`, `for`, `return`, ...), the
+intervals are the leaf's known-initialized elements and the facts are those
+of #975 (`; no path facts` when none). The format is stable; tests match it.
+The trace is written before the rejection message, so a rejected function
+shows the last statement where the uncovered interval was still covered or
+the guard that never became a fact. Without the flag nothing is printed and
+the check does one comparison per statement.
+
 ### Lowering a contract match (decidability)
 
 `ensures match result { K1(x) => C1, K2 => C2, _ => C3 }` lowers to one

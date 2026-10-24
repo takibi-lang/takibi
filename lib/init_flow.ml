@@ -54,6 +54,18 @@ end)
 
 let pad = "#pad"
 
+(* GitHub issue #976: --trace-init-flow FUNC. When [trace_func] names the
+   function being checked, the state after each top-level-or-nested
+   statement is written to [trace_out] as lines of the stable form
+
+     init-trace FUNC LINE:COL KIND LEAF: init
+     init-trace FUNC LINE:COL KIND LEAF: uninit; known [lo, hi), ...; FACTS
+
+   one per tracked leaf, in leaf order. Off (None) by default; the flag-off
+   path is one comparison per statement and allocates nothing. *)
+let trace_func : string option ref = ref None
+let trace_out : (string -> unit) ref = ref prerr_string
+
 type root = {
   display : string;
   leaves : (string list * Ast.type_expr) list;
@@ -1366,10 +1378,45 @@ let check
     match Local_bindings.ids_for_stmt bindings s with
     | id :: _ when immutable id -> Some (v_atom id)
     | _ -> None in
+  let trace_state (s : Ast.stmt) st =
+    let kind = match s.desc with
+      | Ast.Let _ | Ast.LetTuple _ -> "let" | Ast.LetMatch _ -> "let-match"
+      | Ast.Expr _ -> "expr" | Ast.Yield _ -> "yield" | Ast.Return _ -> "return"
+      | Ast.Block _ -> "block" | Ast.UnsafeBlock _ -> "unsafe"
+      | Ast.If _ -> "if" | Ast.While _ -> "while" | Ast.For _ -> "for"
+      | Ast.ForEach _ -> "foreach" | Ast.Match _ -> "match"
+      | Ast.Break -> "break" | Ast.Continue -> "continue"
+      | Ast.StaticAssert _ -> "static_assert" in
+    let pos = s.loc in
+    let head = Printf.sprintf "init-trace %s %d:%d %s " fdef.Ast.name
+        pos.Lexing.pos_lnum (pos.Lexing.pos_cnum - pos.Lexing.pos_bol + 1) kind in
+    let keys = List.sort compare
+        (Hashtbl.fold (fun k _ acc -> k :: acc) roots []) in
+    List.iter (fun key ->
+      let r = Hashtbl.find roots key in
+      List.iter (fun (path, _) ->
+        let l = (key, path) in
+        let name = path_to_string r.display path
+                   ^ (if is_pad path then ".#pad" else "") in
+        let body =
+          if not (Leaves.mem l st.u) then "init"
+          else match ivs_of st l with
+            | [] -> "uninit; known none" ^ path_facts st
+            | ivs -> "uninit; known " ^ String.concat ", " (List.map (fun (lo, hi) ->
+                Printf.sprintf "[%s, %s)" (show lo) (show hi)) (List.rev ivs))
+                ^ path_facts st in
+        !trace_out (head ^ name ^ ": " ^ body ^ "\n")) r.leaves) keys
+  in
   let rec stmts st ss =
     List.fold_left (fun (st, dead) s ->
       if dead then (st, dead) else stmt st s) (st, false) ss
   and stmt st (s : Ast.stmt) =
+    let r = stmt_inner st s in
+    (match !trace_func with
+     | Some f when f = fdef.Ast.name -> trace_state s (fst r)
+     | _ -> ());
+    r
+  and stmt_inner st (s : Ast.stmt) =
     cur_loc := s.loc;
     match s.desc with
     | Ast.Let (_, name, _, None, _) ->

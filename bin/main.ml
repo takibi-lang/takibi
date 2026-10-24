@@ -168,6 +168,15 @@ let () =
          (* GitHub issue #952: plants #935's unsound rule for the z3
             check's failing control; never used in a real build. *)
          Takibi.Range_obligation.fault_unsigned_negative_lo := true
+     | "--trace-init-flow" ->
+         (* GitHub issue #976: print FUNC's init state after each
+            statement (docs/VERIFICATION_DESIGN.md). *)
+         incr i;
+         if !i >= Array.length Sys.argv then (
+           Printf.eprintf "Error: --trace-init-flow requires a function name\n";
+           exit 1
+         );
+         Takibi.Init_flow.trace_func := Some Sys.argv.(!i)
      | "--emit-range-obligations" ->
          (* GitHub issue #952: one SMT-LIB file per derived range, for
             scripts/buildcheck_range_obligations.py to re-check with z3. *)

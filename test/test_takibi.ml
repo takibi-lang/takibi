@@ -25701,6 +25701,31 @@ scratch let mut sb: S975;
            (contains_substring text "(assert (>= (+ x_x (- 16)) 0))");
          Alcotest.(check bool) "min defined" true
            (contains_substring text "(assert (= x_s (ite (<= x_x 28) x_x 28)))"));
+    t "issue #976: --trace-init-flow shows where coverage was lost"
+      (fun () ->
+         let buf = Buffer.create 256 in
+         Init_flow.trace_func := Some "f";
+         Init_flow.trace_out := Buffer.add_string buf;
+         let src = "fn f(buf: borrow uninit []u8) -> u8 {
+    if (buf.len < 8) { return 0; }
+    for i: usize in 0..<4 { buf[i] = 7; }
+    return buf[5];
+}
+fn g(b: borrow uninit []u8) -> u8 { zero_fill(b); return 0; }" in
+         let rejected = match infer src with
+           | _ -> false
+           | exception (Types.TypeError _ | Types.MultiTypeError _) -> true in
+         Init_flow.trace_func := None;
+         Init_flow.trace_out := prerr_string;
+         Alcotest.(check bool) "rejected" true rejected;
+         let out = Buffer.contents buf in
+         List.iter (fun line ->
+           if not (contains_substring out line) then
+             Alcotest.failf "trace lacks %S:\n%s" line out)
+           ["init-trace f 2:5 if buf: uninit; known none; path facts: buf.len - 8 >= 0\n";
+            "init-trace f 3:5 for buf: uninit; known [0, 4); path facts: buf.len - 8 >= 0\n"];
+         Alcotest.(check bool) "other functions untraced" false
+           (contains_substring out "init-trace g"));
   ]
 
 let definite_init_tests =
