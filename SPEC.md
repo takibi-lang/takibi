@@ -18,6 +18,7 @@ describes behavior in prose instead.
 File extension: `.tkb`. Compiler invocation: `takibi <file1.tkb>
 [file2.tkb ...] [-o out.o] [--target <triple>] [--cpu <cpu>] [--features
 <features>] [-g] [--forbid-trap] [--forbid-unsafe] [--confine-raw-authority] [--raw-mint-file <path>]
+[--require-execution-model <path>]
 [--device-semantics-file <path>] [--reject-unused-functions]
 [--external-entry <function>] [--check-unused-file <path>] [--explain-inference]
 [--emit-effect-matrix] [--emit-held-guards <path>] [--emit-protocol-source <dir>] [--version]`. Multiple `.tkb` files are
@@ -5285,6 +5286,23 @@ loading a value; this mint is checked separately from raw dereference counts.
 A mint-file
 argument without the confinement flag is an error. Application mint declarations
 are an explicit build policy, not inferred from the presence of unsafe code.
+
+## Execution-model coverage
+
+`--require-execution-model <path>` makes a missing execution model a
+compile error (GitHub issue #988). The policy file lists `constant NAME`
+lines and `exempt PATH  reason` lines (`#` starts a comment line). Every
+compiled source file that declares a mutable top-level global -- `let mut`
+or `private let mut`; `region` and `scratch` globals are not counted --
+must contain, in any function body of that same file, a `static_assert`
+whose condition (as parsed, so a comment or the message string never
+counts) references one of the constants, or be exempted with a non-empty
+reason. The error names the file's first mutable global. Every listed
+constant must be declared in the program. The exempt list is a ratchet: an
+entry whose file does not exist, or a compiled entry that declares no
+mutable global, is an error; an existing file this compilation does not
+read is skipped. A duplicate or empty-reason entry is an error. The rule
+does not check that an assertion is correct.
 
 ## --forbid-trap
 

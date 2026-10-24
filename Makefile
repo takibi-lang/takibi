@@ -1527,7 +1527,7 @@ $(KERNEL_PEER_SLEEP_ELF): $(KERNEL_PEER_SLEEP_O)
 
 $(KERNEL_RPI5_MAIN_O): $(KERNEL_RPI5_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(KERNEL_FREELIST_TKB) $(KERNEL_SLOTMAP_TKB) $(KERNEL_REFCOUNT_SLOTMAP_TKB) $(KERNEL_PAGE_TKB) $(KERNEL_ADDRESS_SPACE_TKB) $(KERNEL_USER_MEMORY_TKB) $(KERNEL_PROCESS_IMAGE_TKB) $(KERNEL_PROCESS_TKB) $(KERNEL_SYSCALL_TKB) $(KERNEL_ELF64_TKB) $(KERNEL_MEMORY_BLOCK_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_EXT2_TKB) $(KERNEL_EXT2_MUTATION_LOCK_TKB) $(KERNEL_EXT2_MUTATION_PROBE_TKB) $(KERNEL_LOG_TKB) $(KERNEL_RPI5_MMU_TKB) $(KERNEL_RPI5_ASID_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_USER_EXTERN) $(KERNEL_RPI5_BOOT_EXTERN) $(KERNEL_RPI5_FPSIMD_EXTERN) $(KERNEL_PMU_EXTERN) $(KERNEL_CACHE_GEOMETRY_EXTERN) $(KERNEL_EXT2_IMAGE) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_NETCONFIG_TKB) $(KERNEL_ARP_TKB) $(KERNEL_CHECKSUM_TKB) $(KERNEL_ICMP_TKB) $(KERNEL_WIRE_TKB) $(KERNEL_TCP_TKB) $(KERNEL_SOCKET_CAP_TKB) $(KERNEL_RPI5_MEMORY_TKB) $(KERNEL_FDT_TKB) \
     $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_INTC_TKB) $(KERNEL_RPI5_TIMER_IRQ_TKB) $(KERNEL_RPI5_TIMER_TKB) $(KERNEL_RPI5_EXC_EVIDENCE_TKB) $(KERNEL_RPI5_VECTOR_TABLE_TKB) $(KERNEL_RPI5_EXC_FRAME_TKB) $(TAKIBI) Makefile | $(KERNEL_BUILD_DIR)
-	$(NICE_HEAVY) $(TAKIBI) $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_FDT_TKB) $< $(KERNEL_RPI5_COMPILE_FLAGS) $(KERNEL_RAW_CONFINE) $(KERNEL_UNUSED_CHECK_RPI5) --emit-depfile $@.d --emit-raw-deref-audit $@.rawderef.tsv --emit-raw-site-counts $@.rawsites.tsv --emit-range-obligations $@.rangeobl -o $@
+	$(NICE_HEAVY) $(TAKIBI) $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_FDT_TKB) $< $(KERNEL_RPI5_COMPILE_FLAGS) $(KERNEL_RAW_CONFINE) $(KERNEL_EXECUTION_MODEL) $(KERNEL_UNUSED_CHECK_RPI5) --emit-depfile $@.d --emit-raw-deref-audit $@.rawderef.tsv --emit-raw-site-counts $@.rawsites.tsv --emit-range-obligations $@.rangeobl -o $@
 	python3 scripts/buildcheck_kernel_unused_coverage.py rpi5 $@.d
 	$(NICE_HEAVY) python3 scripts/buildcheck_range_obligations.py $@.rangeobl
 	python3 scripts/measure_trusted_base.py --check-raw-deref rpi5 $@.rawderef.tsv $@.d
@@ -1660,7 +1660,7 @@ $(KERNEL_QEMU_CACHE_GEOMETRY_O): $(KERNEL_CACHE_GEOMETRY_S) | $(KERNEL_QEMU_BUIL
 # duplicate top-level definition is a compile error by design.
 $(KERNEL_QEMU_MAIN_O): $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(KERNEL_FREELIST_TKB) $(KERNEL_SLOTMAP_TKB) $(KERNEL_REFCOUNT_SLOTMAP_TKB) $(KERNEL_PAGE_TKB) $(KERNEL_ADDRESS_SPACE_TKB) $(KERNEL_USER_MEMORY_TKB) $(KERNEL_PROCESS_IMAGE_TKB) $(KERNEL_PROCESS_TKB) $(KERNEL_SYSCALL_TKB) $(KERNEL_ELF64_TKB) $(KERNEL_MEMORY_BLOCK_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_EXT2_TKB) $(KERNEL_EXT2_MUTATION_LOCK_TKB) $(KERNEL_EXT2_MUTATION_PROBE_TKB) $(KERNEL_LOG_TKB) $(KERNEL_RPI5_MMU_TKB) $(KERNEL_RPI5_ASID_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_RPI5_USER_EXTERN) $(KERNEL_RPI5_BOOT_EXTERN) $(KERNEL_RPI5_FPSIMD_EXTERN) $(KERNEL_PMU_EXTERN) $(KERNEL_CACHE_GEOMETRY_EXTERN) $(KERNEL_EXT2_IMAGE) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_QEMU_USB_ABSENT_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_NETCONFIG_TKB) $(KERNEL_ARP_TKB) $(KERNEL_CHECKSUM_TKB) $(KERNEL_ICMP_TKB) $(KERNEL_WIRE_TKB) $(KERNEL_TCP_TKB) $(KERNEL_SOCKET_CAP_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_FDT_TKB) \
     $(KERNEL_QEMU_UART_TKB) $(KERNEL_QEMU_INTC_TKB) $(KERNEL_QEMU_TIMER_IRQ_TKB) $(KERNEL_RPI5_TIMER_TKB) $(KERNEL_RPI5_EXC_EVIDENCE_TKB) $(KERNEL_RPI5_VECTOR_TABLE_TKB) $(KERNEL_RPI5_EXC_FRAME_TKB) $(TAKIBI) Makefile | $(KERNEL_QEMU_BUILD_DIR)
-	$(NICE_HEAVY) $(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_QEMU_USB_ABSENT_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $< $(KERNEL_QEMU_COMPILE_FLAGS) $(KERNEL_RAW_CONFINE) $(KERNEL_UNUSED_CHECK_QEMU) --emit-depfile $@.d --emit-raw-deref-audit $@.rawderef.tsv --emit-raw-site-counts $@.rawsites.tsv --emit-alloc-words $@.allocwords --emit-range-obligations $@.rangeobl -o $@
+	$(NICE_HEAVY) $(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_QEMU_USB_ABSENT_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $< $(KERNEL_QEMU_COMPILE_FLAGS) $(KERNEL_RAW_CONFINE) $(KERNEL_EXECUTION_MODEL) $(KERNEL_UNUSED_CHECK_QEMU) --emit-depfile $@.d --emit-raw-deref-audit $@.rawderef.tsv --emit-raw-site-counts $@.rawsites.tsv --emit-alloc-words $@.allocwords --emit-range-obligations $@.rangeobl -o $@
 	python3 scripts/buildcheck_kernel_unused_coverage.py qemu $@.d
 	$(NICE_HEAVY) python3 scripts/buildcheck_range_obligations.py $@.rangeobl
 	python3 scripts/buildcheck_compile_alloc_budget.py qemu $@.allocwords
@@ -1793,7 +1793,6 @@ kernel-lib-check:
 	python3 scripts/check_kernel_lib_limitations_header.py $(KERNEL_DIR)/lib $(KERNEL_DIR)/kernel $(KERNEL_DIR)/net
 	python3 scripts/check_diagnostic_event_ids.py
 	python3 scripts/check_flag_guarded_fields.py $(KERNEL_DIR)
-	python3 scripts/check_execution_model_coverage.py
 	python3 scripts/check_lock_discipline.py
 	python3 scripts/check_lock_rank_wrappers.py
 	python3 scripts/check_guest_syscalls_dispatched.py
@@ -2655,6 +2654,11 @@ KERNEL_DMA_SRCS := kernel/platform/qemu/uart.tkb kernel/platform/rpi5/pcie.tkb k
 # the files in kernel/RAW_MINT_FILES (a ratchet; see that file).
 KERNEL_RAW_MINT_FILES := $(shell grep -v '^\#' kernel/RAW_MINT_FILES | grep -v '^$$')
 KERNEL_RAW_CONFINE := --confine-raw-authority $(foreach f,$(KERNEL_RAW_MINT_FILES),--raw-mint-file $(f))
+# GitHub issue #988: every kernel file with a mutable global states its
+# execution model (a static_assert naming a constant, or an exemption with a
+# reason in kernel/EXECUTION_MODEL); replaces check_execution_model_coverage.py.
+# The fixture images compile from their own directories, hence abspath.
+KERNEL_EXECUTION_MODEL := --require-execution-model $(abspath kernel/EXECUTION_MODEL)
 # GitHub issue #739: the compiler rejects a stale entry (a missing file, or
 # a compiled file with no raw site). raw-site-counts prints each target's
 # per-file raw-site counts (count, file; declared or not) to choose the
@@ -2695,8 +2699,8 @@ $(KERNEL_BUILD_DIR)/jtag_stub.elf: $(KERNEL_BUILD_DIR)/jtag_stub.o $(RPI5_JTAG_D
 $(KERNEL_BUILD_DIR)/jtag_stub.img: $(KERNEL_BUILD_DIR)/jtag_stub.elf
 	$(LLVM_OBJCOPY) -O binary $< $@
 
-kernel/build/qemu/main.o kernel/build/rpi5/main.o: kernel/RAW_MINT_FILES kernel/DEVICE_SEMANTICS_FILES
-KERNEL_DMA_FLAGS := $(KERNEL_QEMU_COMPILE_FLAGS) --reject-unused-functions --external-entry main --check-unused-file kernel/tests/qemu/dma/virtio_blk_fixture.tkb
+kernel/build/qemu/main.o kernel/build/rpi5/main.o: kernel/RAW_MINT_FILES kernel/DEVICE_SEMANTICS_FILES kernel/EXECUTION_MODEL
+KERNEL_DMA_FLAGS := $(KERNEL_QEMU_COMPILE_FLAGS) $(KERNEL_EXECUTION_MODEL) --reject-unused-functions --external-entry main --check-unused-file kernel/tests/qemu/dma/virtio_blk_fixture.tkb
 KERNEL_DMA_ELF := $(KERNEL_QEMU_BUILD_DIR)/kernel-dma-fixture-positive.elf
 .PHONY: _kernelbuild-dma-qemu kernelbuild-dma-qemu kernelcheck-dma-qemu
 # Positive has no planted mutation; the four named controls change one real
@@ -2736,7 +2740,7 @@ kernelcheck-invariant-qemu: kernelbuild-invariant-qemu
 # are built with the maintained kernels; their board execution is on demand.
 KERNEL_GEM_TX_MODES := confirmed-ready confirmed-reply unconfirmed-ready unconfirmed-reply irq-primary irq-wrong-enable
 KERNEL_GEM_TX_SRCS := $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_FDT_TKB) $(KERNEL_RPI5_MAIN_TKB)
-KERNEL_GEM_TX_FLAGS := $(KERNEL_RPI5_COMPILE_FLAGS) $(KERNEL_RAW_CONFINE) --reject-unused-functions --external-entry main
+KERNEL_GEM_TX_FLAGS := $(KERNEL_RPI5_COMPILE_FLAGS) $(KERNEL_RAW_CONFINE) $(KERNEL_EXECUTION_MODEL) --reject-unused-functions --external-entry main
 KERNEL_GEM_TX_ELFS := $(foreach mode,$(KERNEL_GEM_TX_MODES),$(KERNEL_BUILD_DIR)/kernel-gem-tx-fixture-$(mode).elf)
 .PHONY: _kernelbuild-gem-tx-rpi5 kernelbuild-gem-tx-rpi5
 $(KERNEL_BUILD_DIR)/gem-tx-fixture-%.o: $(KERNEL_RPI5_MAIN_O) scripts/build_rpi5_gem_tx_fixture.py kernel/tests/rpi5/gem_tx/fixture.tkb kernel/tests/rpi5/gem_tx/irq_fixture.tkb Makefile

@@ -48,9 +48,10 @@
 // change; a limitation that goes stale here is worse than none, since it
 // invites relying on a guarantee that quietly stopped holding.
 // - THE ASSERTION SET IS A CLAIM, NOT A PROOF. Nothing checks that every
-//   site depending on these numbers actually asserts them:
-//   scripts/check_execution_model_coverage.py only forces each stateful
-//   file to assert one or carry a written exemption (#814). The audit
+//   site depending on these numbers actually asserts them: the compiler's
+//   --require-execution-model (GitHub issue #988, policy in
+//   kernel/EXECUTION_MODEL) only forces each stateful file to assert one
+//   in code or carry a written exemption (#814). The audit
 //   behind the current set is recorded in issue #453; a new piece of
 //   unsynchronized shared state added without an assertion is exactly as
 //   invisible as it was before this file existed. What this buys is that

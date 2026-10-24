@@ -58,6 +58,7 @@ let () =
   let forbid_unsafe = ref false in
   let confine_raw_authority = ref false in
   let raw_mint_files = ref [] in
+  let execution_model_file = ref "" in
   let device_semantics_files = ref [] in
   let regions = ref false in
   let reject_unused_functions = ref false in
@@ -91,6 +92,13 @@ let () =
            exit 1
          end;
          raw_mint_files := Sys.argv.(!i) :: !raw_mint_files
+     | "--require-execution-model" ->
+         incr i;
+         if !i >= Array.length Sys.argv then begin
+           Printf.eprintf "Error: --require-execution-model requires a path\n";
+           exit 1
+         end;
+         execution_model_file := Sys.argv.(!i)
      | "--device-semantics-file" ->
          incr i;
          if !i >= Array.length Sys.argv then begin
@@ -294,7 +302,7 @@ let () =
 
   if input_files = [] then (
     Printf.eprintf
-      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--frame-pointers] [--function-sections] [--forbid-trap] [--forbid-unsafe] [--confine-raw-authority] [--raw-mint-file <path>] [--device-semantics-file <path>] [--regions] [--reject-unused-functions] [--external-entry <function>] [--check-unused-file <path>] [--explain-inference] [--emit-effect-matrix] [--emit-exception-frame-offsets <StructName>] [--emit-struct-layout <StructName>] [--emit-debug-metadata <path>] [--emit-depfile <path>] [--emit-overflow-audit <path>] [--emit-raw-deref-audit <path>] [--emit-raw-site-counts <path>] [--emit-alloc-words <path>] [--emit-held-guards <path>] [--emit-range-obligations <dir>] [--emit-tla <dir> [--emit-tla-omit-cache publish|finish|refresh]] [--emit-protocol-source <dir>] [--version]\n"
+      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--frame-pointers] [--function-sections] [--forbid-trap] [--forbid-unsafe] [--confine-raw-authority] [--raw-mint-file <path>] [--require-execution-model <path>] [--device-semantics-file <path>] [--regions] [--reject-unused-functions] [--external-entry <function>] [--check-unused-file <path>] [--explain-inference] [--emit-effect-matrix] [--emit-exception-frame-offsets <StructName>] [--emit-struct-layout <StructName>] [--emit-debug-metadata <path>] [--emit-depfile <path>] [--emit-overflow-audit <path>] [--emit-raw-deref-audit <path>] [--emit-raw-site-counts <path>] [--emit-alloc-words <path>] [--emit-held-guards <path>] [--emit-range-obligations <dir>] [--emit-tla <dir> [--emit-tla-omit-cache publish|finish|refresh]] [--emit-protocol-source <dir>] [--version]\n"
       Sys.argv.(0);
     exit 1
   );
@@ -458,6 +466,17 @@ let () =
        Before monomorphization so that everything downstream sees only
        ordinary StructDef/OpaqueStructDef declarations. *)
     let source_prog = prog in
+    (* GitHub issue #988: every file with a mutable global states its
+       execution model (Execution_model_policy). Parsed source only, so it
+       runs before type checking and fails fast. *)
+    if !execution_model_file <> "" then begin
+      let errors = Execution_model_policy.check ~policy_file:!execution_model_file
+          ~compiled_files source_prog in
+      List.iter (function
+        | Some loc, message -> report_error loc message
+        | None, message -> Printf.eprintf "Error: %s\n" message) errors;
+      if errors <> [] then exit 1
+    end;
     let prog = Publish_record.run prog in
     let prog = Dma_fixed_record.run prog in
 

@@ -99,7 +99,6 @@ def main() -> int:
         (root / "kernel/kernel/planted.tkb").write_text(NEW_TKB)
         status, output = preflight(root, "kernel/kernel/planted.tkb")
         expect(output, status, 1, [
-            "MISSING  check_execution_model_coverage.py",
             "MISSING  check_kernel_lib_limitations_header.py",
             "MISSING  Makefile: in no KERNEL_UNUSED_* list",
         ], "a new kernel file")
@@ -109,7 +108,6 @@ def main() -> int:
         status, output = preflight(
             root, "kernel/kernel/protocol_trace.tkb=kernel/kernel/protocol_renamed.tkb")
         expect(output, status, 1, [
-            "MISSING  check_execution_model_coverage.py",
             "MISSING  Makefile: in no KERNEL_UNUSED_* list",
             "STALE    Makefile:",
             "STALE    kernel/kernel/process.tkb:",

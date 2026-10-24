@@ -1,0 +1,108 @@
+# Execution-model policy for --require-execution-model (GitHub issue #988,
+# which moved scripts/check_execution_model_coverage.py into the compiler).
+#
+# kernel/lib/execution_model.tkb declares the numbers most of this kernel's
+# unsynchronized state is safe BECAUSE OF. A file that declares a mutable
+# top-level global (`let mut`; `region` and `scratch` globals keep their own
+# rules) must either hold a static_assert whose condition names one of the
+# constants below, or be exempted here with a non-empty reason. A mention in
+# a comment does not count (GitHub issue #814): the compiler reads the
+# parsed condition. Why the rule exists: kernel/mm/page.tkb and
+# kernel/kernel/workload_evidence.tkb (2026-08-29/30) held unsynchronized
+# state with no assertion, and two cores on the allocator produced 1618
+# double frees.
+#
+# Deliberately NOT a check that an assertion is CORRECT; the rule is "a file
+# with state says something".
+#
+# Adding an exemption is a claim a reviewer can disagree with. "NOT AUDITED"
+# is a legitimate reason and better than absence, because it is visible.
+# The list is a ratchet: an entry whose file is missing, or which a compile
+# reads and which no longer declares a mutable global, is a compile error.
+#
+# Format: `constant NAME`, or `exempt PATH  reason` on one line.
+
+constant KERNEL_ACTIVE_CORES
+constant KERNEL_PREEMPTIBLE
+
+exempt kernel/kernel/stall_probe.tkb  diagnostic words read by GDB at a stall, off in production (KERNEL_STALL_PROBES); a torn record is accepted (#665)
+# --- Deliberately concurrent: these files ARE the two-core evidence,
+# and every shared word in them is an atomic. An assertion on the core
+# count would be backwards.
+exempt kernel/kernel/pool_contention_evidence.tkb  the two-core probes; every shared word is an atomic by design
+exempt kernel/kernel/freelist_contention_evidence.tkb  the two-core probes; every shared word is an atomic by design
+exempt kernel/kernel/page_contention_evidence.tkb  the two-core probes; every shared word is an atomic by design
+exempt kernel/kernel/asid_contention_evidence.tkb  the two-core probes; every shared word is an atomic by design
+exempt kernel/kernel/pid_contention_evidence.tkb  the two-core probes; every shared word is an atomic by design
+exempt kernel/kernel/schedule_contention_evidence.tkb  the two-core probes; every shared word is an atomic by design
+exempt kernel/kernel/occupancy_drain_evidence.tkb  the two-core probes; every shared word is an atomic by design
+exempt kernel/kernel/pool_walk_contention_evidence.tkb  the two-core probes; every shared word is an atomic by design
+exempt kernel/kernel/ext2_mutation_contention_evidence.tkb  the two-core probes; every shared word is an atomic by design
+exempt kernel/kernel/log_storm_evidence.tkb  the all-core log ring probe (#613); every shared word is an atomic and log_storm_last_round is indexed by the writing core
+exempt kernel/lib/diagnostic_ring.tkb  per-CPU rings published through GitHub issue #299's protocol; the commit word is an atomic and the reader re-checks it
+exempt kernel/printk/log_ring_trace.tkb  the log-ring trace window (#656): each CPU writes only its own buffer, indexed by cpu_id(); the window flag is an atomic; the reader fields are written by core 0 around its own read
+exempt kernel/kernel/protocol_trace.tkb  every write is made holding the process-run lock, and the report reads the buffer only after a hold has closed the window
+exempt kernel/arch/arm64/kernel/secondary.tkb  the secondary cores' entry point: the boot-state and tick words are per-core atomics, and the online count is written only by core 0 around each CPU_ON (one writer) and read as an io word; the entry once carried an assertion, but it no longer does, and the earlier reason claiming one was stale (GitHub issue #814)
+# --- Device state, single-core by interrupt routing rather than by a
+# number. Device SPIs are targeted at CPU0 (gicd_itargetsr8 =
+# 0x01010101), so the handler and the state it publishes stay on one
+# core by hardware configuration. GitHub issue #483 covers what a
+# syscall from a second core would reach.
+exempt kernel/drivers/net/virtio_net.tkb  device state; SPIs are routed to CPU0
+exempt kernel/drivers/net/virtio_net_tx_dma.tkb  the packet pool's owner slots, exchanged under their own Mutexes, and the observation record and published address (GitHub issue #740)
+exempt kernel/drivers/net/rp1_gem.tkb  device state; MSI-X is routed to CPU0
+exempt kernel/drivers/net/rp1_gem_desc.tkb  the GEM descriptor rings' and packet buffers' owner slots, exchanged under their own Mutexes, and the observation records their lowerings read (GitHub issue #740)
+exempt kernel/tests/qemu/dma/virtio_blk_fixture.tkb  test-only entry boots no peers and keeps IRQs masked; independent of the production scheduler execution model
+exempt kernel/drivers/block/virtio_blk.tkb  device state; every command is issued under memory.tkb's block_device_lock (GitHub issue #533)
+exempt kernel/drivers/block/virtio_blk_dma.tkb  the receive allocation's owner slot and its mint functions, reached only from virtio_blk.tkb under block_device_lock (GitHub issue #716)
+exempt kernel/drivers/virtio_used.tkb  the virtio used rings' owner slots, exchanged under their own Mutexes, and the reset record its quiesces lowering reads (GitHub issue #740)
+exempt kernel/drivers/block/memory.tkb  GitHub issue #638: counters and read-ahead run are a slot pool handed out by compare-exchange under a linear BlockSlot, which holds for any core count and with preemption; the device is reached only under block_device_lock (GitHub issue #533)
+exempt kernel/drivers/block/block_cache.tkb  per-writer slots sized by KERNEL_MAX_CORES and indexed by the BlockSlot its only caller, memory.tkb, holds (GitHub issue #638, scripts/check_slot_pool_entries.py); another writer's writes arrive through the write epoch
+exempt kernel/drivers/serial/uart_rx_ring.tkb  the process-run lock serializes CPU 0's RX interrupt, termios line editing and terminal reads on any CPU
+exempt kernel/platform/qemu/uart.tkb  the console's base address and boot-time setup, written on CPU0 before the UART SPI is enabled; the interrupt it serves runs on any core one at a time (kernel/uart_irq_affinity.tkb, GitHub issue #830)
+exempt kernel/arch/arm64/kernel/gicv2.tkb  the GIC's IoHandles, attached on CPU0 during boot before secondaries start
+exempt kernel/drivers/serial/pl011.tkb  the console's IoHandle, attached on CPU0 during boot before secondaries start
+exempt kernel/mm/memory_map.tkb  the page allocator's LockedCell; every access holds its guard
+exempt kernel/platform/rpi5/system_timer_dtb.tkb  the system timer's IoHandle, attached and read once by CPU0's boot DTB check
+exempt kernel/platform/qemu/device_map.tkb  boot-time device discovery, written on CPU0 before secondaries start
+exempt kernel/platform/qemu/timer_irq.tkb  GIC device state is initialized before interrupts and used by its routed cores
+exempt kernel/platform/rpi5/uart.tkb  the console's boot-time setup, written on CPU0 before the UART vector is enabled; the interrupt it serves runs on any core one at a time (kernel/uart_irq_affinity.tkb, GitHub issue #830)
+exempt kernel/platform/rpi5/usb_provision.tkb  the image and its copy buffers, used once by CPU0 while storage is set up, before any process exists
+exempt kernel/platform/rpi5/pcie.tkb  PCIe2 device state is initialized and used only by CPU0
+exempt kernel/platform/rpi5/timer_irq.tkb  GIC device state is initialized before interrupts and used by its routed cores
+exempt kernel/platform/rpi5/usb_xhci_dma.tkb  the receive allocations' owner slots and their mint functions, reached only from usb_xhci.tkb's commands (GitHub issue #716)
+exempt kernel/platform/rpi5/usb_xhci_rings.tkb  the producer rings' owner slots (each behind its own mutex) and the next doorbell/await parameters, reached only from usb_xhci.tkb's commands (GitHub issue #720)
+exempt kernel/platform/rpi5/usb_xhci.tkb  device state; the rotating interrupt handler (GitHub issue #830) writes only the IMAN and USBSTS write-1-to-clear bits, and every mass-storage command after provisioning is issued under memory.tkb's block_device_lock (GitHub issue #533)
+exempt kernel/platform/rpi5/xhci_irq_affinity.tkb  GitHub issue #830: the rotation counter and the per-CPU counts are AtomicWords any core may update
+# --- Not state that depends on either number.
+exempt kernel/arch/arm64/mm/asid.tkb  GitHub issue #452: the four numbers an assignment touches are a private field of a LockedCell, so an unguarded read is a compile error rather than a thing an assertion has to warn about; what is left (asid_bits, asid_last, asid_ready) is written once by asid_init in the MMU-off window, before PSCI has been asked for a second core
+exempt kernel/kernel/irq_counts.tkb  per-CPU rows are indexed below KERNEL_MAX_CORES; each is written only by its own CPU's IRQ dispatch and read by DDB under a world stop or by the boot fixture through one acquire load
+exempt kernel/arch/arm64/boot/cpu.tkb  GitHub issue #920: the per-CPU shadow of the GIC priority mask and its ready flag; each slot is written only by its own CPU, and the stop handler that can interrupt the writer writes neither
+exempt kernel/kernel/uart_irq_affinity.tkb  GitHub issue #830: the serial-service word and the per-CPU counts are AtomicWords any core may update
+exempt kernel/kernel/pool_lock_wait.tkb  GitHub issue #953: each CPU writes only its own row of counters; the pause word is an AtomicWord written by core 0
+exempt kernel/kernel/nic_irq_affinity.tkb  GitHub issue #830: the rotation counter, the pin and the per-CPU counts are AtomicWords any core may update; the fixture's phase snapshot and pinned INTID are written only by the boot core's network fixture
+exempt kernel/kernel/profile_samples.tkb  per-CPU samples are indexed below KERNEL_MAX_CORES and opened or read only for kernel_online_core_count() under a world stop
+exempt kernel/kernel/profile_session.tkb  per-CPU buffers and counts are indexed below KERNEL_MAX_CORES; each is written by its own CPU's PMU interrupt or by DDB under a world stop, and the session mode is written only by DDB under a world stop
+exempt kernel/kernel/profile_timeline.tkb  per-CPU intervals are indexed below KERNEL_MAX_CORES and opened or read only for kernel_online_core_count() under a world stop
+exempt kernel/kernel/workload_evidence.tkb  per-CPU evidence is indexed below KERNEL_MAX_CORES and its shared profile snapshots use kernel_online_core_count() under a world stop
+exempt kernel/fs/elf64.tkb  ELF_IDENT_MAGIC is a lookup table that is never written; `let mut` is how this language declares an initialised array
+exempt kernel/fs/ext2/ext2.tkb  GitHub issue #638: the operation scratch is a slot pool handed out by compare-exchange under a linear Ext2Slot, which holds for any core count and with preemption; the fence words are written only by mutators, serialized by ext2_mutation_lock (which asserts the constant) or by the boot fixture before peers run
+exempt kernel/fs/ext2/mutation_lock.tkb  GitHub issue #533: the file's only mutable state IS the lock word, whose whole purpose is to hold whatever the core count becomes; an assertion on that count would be backwards
+# --- GitHub issue #814: these files mentioned a constant only in a
+# comment, and each comment says the file does NOT depend on it. The
+# reasons below restate those comments.
+exempt kernel/arch/arm64/kernel/platform_uart_common.tkb  the UART RX callback is installed once on CPU0 before the RX source is unmasked and never replaced; the interrupt that calls it runs on any core, one at a time (GitHub issue #830)
+exempt kernel/kernel/fd_table.tkb  pools are guard-required by typing, refcounts and the slot total share the refcount Mutex, descriptor chains are owned by their process lifecycle, and the probe words are atomics
+exempt kernel/lib/occupancy.tkb  the world-stop controller's words are atomics, its generation is written only by the holder of the atomic claim, and KERNEL_ACTIVE_CORES is only its storage bound
+exempt kernel/mm/address_space.tkb  the backing pool is guard-required by typing, its ready flag settles on core 0 before PSCI starts core 1, fallback storage is per-core, and root 0's backing is immutable after MMU-off boot
+exempt kernel/net/socket_capability.tkb  every public operation takes network_capability_store.mutex
+exempt kernel/platform/qemu/intc.tkb  GIC addresses and INTIDs, written by CPU0's boot device discovery before secondaries start and read-only afterwards
+exempt kernel/platform/rpi5/intc.tkb  the RP1 MIP/MSI-X IoHandles, attached on CPU0 during boot before secondaries start
+exempt kernel/platform/rpi5/psci_dtb.tkb  the PSCI conduit flag, written by the boot core before CPU_ON; secondaries never enter the parser
+# --- Test-only state, reached from the boot fixture on core 0.
+exempt kernel/init/test_driver.tkb  boot fixture state, driven from core 0's boot sequence only
+exempt kernel/kernel/process_test_evidence.tkb  test counters, read by the boot fixture only
+exempt kernel/kernel/syscall_test_evidence.tkb  test counters, read by the boot fixture only
+exempt kernel/kernel/syscall_test_lifecycle.tkb  test-driver lifecycle state, driven from core 0 only
+exempt kernel/printk/console_lock.tkb  the lock word serializes every transmit writer and protects the measurement counters and window flag, so no core count is assumed
+exempt kernel/kernel/syscall_unimplemented.tkb  every slot is claimed by an atomic compare-exchange and read by an atomic load, so no core count is assumed

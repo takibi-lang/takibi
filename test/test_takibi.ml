@@ -25172,6 +25172,132 @@ private fn ref_read(owner: borrow RefOwner[g]) -> &RefRecord @ g {
 }
 |}
 
+(* GitHub issue #988: --require-execution-model. Each case writes its files
+   and policy to a fresh directory, parses them as distinct source files
+   (as bin/main.ml does) and runs Execution_model_policy.check. The
+   refusing cases are planted defects, so the rule is shown to reject even
+   though the real tree has zero sites (the pass_line vacuity rule carried
+   over from check_execution_model_coverage_controls.py). *)
+let execution_model_dir = ref 0
+
+let execution_model_errors ?(policy = "") ?(compiled = []) files =
+  incr execution_model_dir;
+  let dir = Filename.concat (Filename.get_temp_dir_name ())
+      (Printf.sprintf "takibi-execution-model-%d-%d" (Unix.getpid ()) !execution_model_dir) in
+  (try Unix.mkdir dir 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
+  let path name = Filename.concat dir name in
+  let write name text = let out = open_out (path name) in output_string out text; close_out out in
+  List.iter (fun (name, text) -> write name text) files;
+  let defs = "const KERNEL_ACTIVE_CORES: usize = 1;\nconst KERNEL_PREEMPTIBLE: usize = 0;\n" in
+  write "model.tkb" defs;
+  let policy = String.concat "\n" (List.map (fun line ->
+      match String.index_opt line ' ' with
+      | Some i when String.sub line 0 i = "exempt" ->
+          "exempt " ^ path (String.sub line (i + 1) (String.length line - i - 1))
+      | _ -> line)
+      (String.split_on_char '\n' policy)) in
+  write "POLICY" ("constant KERNEL_ACTIVE_CORES\nconstant KERNEL_PREEMPTIBLE\n" ^ policy ^ "\n");
+  Init_state.reset ();
+  Region_backing.reset ();
+  Const_env.reset ();
+  let program = List.concat_map (fun (name, text) ->
+    let lexbuf = Lexing.from_string text in
+    Lexing.set_filename lexbuf (path name);
+    Parser.program Lexer.read lexbuf) (("model.tkb", defs) :: files) in
+  let compiled = List.map path
+      ("model.tkb" :: (if compiled = [] then List.map fst files else compiled)) in
+  Execution_model_policy.check ~policy_file:(path "POLICY") ~compiled_files:compiled program
+  |> List.map snd
+
+let execution_model_state = "let mut word: usize = 0;\n"
+
+let execution_model_refused name ?policy ?compiled files fragment =
+  Alcotest.test_case name `Quick (fun () ->
+    match execution_model_errors ?policy ?compiled files with
+    | [] -> Alcotest.failf "accepted; expected an error containing %S" fragment
+    | errors ->
+        if not (List.exists (fun m -> contains_substring m fragment) errors) then
+          Alcotest.failf "errors %s do not contain %S" (String.concat " | " errors) fragment)
+
+let execution_model_accepted name ?policy ?compiled files =
+  Alcotest.test_case name `Quick (fun () ->
+    match execution_model_errors ?policy ?compiled files with
+    | [] -> ()
+    | errors -> Alcotest.failf "refused: %s" (String.concat " | " errors))
+
+let execution_model_policy_tests = [
+  execution_model_refused "a mutable global with no assertion is refused"
+    [ "a.tkb", execution_model_state ] "mutable global 'word'";
+  execution_model_refused "a private mutable global with no assertion is refused"
+    [ "a.tkb", "private let mut hidden: usize = 0;\n" ] "mutable global 'hidden'";
+  execution_model_refused "a constant named only in a line comment is refused (#814)"
+    [ "a.tkb", execution_model_state ^ "// This does not depend on KERNEL_PREEMPTIBLE.\n" ]
+    "mutable global 'word'";
+  execution_model_refused "an assertion inside a trailing comment is refused"
+    [ "a.tkb", execution_model_state
+               ^ "fn f() { } // static_assert(KERNEL_ACTIVE_CORES == 1, \"x\");\n" ]
+    "mutable global 'word'";
+  execution_model_refused "an assertion inside a block comment is refused"
+    [ "a.tkb", execution_model_state
+               ^ "/* static_assert(KERNEL_PREEMPTIBLE == 0, \"x\"); */\n" ]
+    "mutable global 'word'";
+  execution_model_refused "a constant named only in an assertion message is refused"
+    [ "a.tkb", execution_model_state
+               ^ "fn f() { static_assert(1 == 1, \"KERNEL_ACTIVE_CORES\"); }\n" ]
+    "mutable global 'word'";
+  execution_model_refused "another file's assertion does not cover this file"
+    [ "a.tkb", execution_model_state;
+      "b.tkb", "fn f() { static_assert(KERNEL_ACTIVE_CORES == 1, \"b\"); }\n" ]
+    "mutable global 'word'";
+  execution_model_accepted "a static_assert naming a constant is accepted"
+    [ "a.tkb", execution_model_state
+               ^ "fn f() {\n    static_assert(KERNEL_PREEMPTIBLE == 0,\n\
+                 \                  \"word is safe only without preemption\");\n}\n" ];
+  execution_model_accepted "an assertion with // in its message is accepted"
+    [ "a.tkb", execution_model_state
+               ^ "fn f() { static_assert(KERNEL_ACTIVE_CORES == 1, \"see https://x\"); }\n" ];
+  execution_model_accepted "an assertion nested in a branch is accepted"
+    [ "a.tkb", execution_model_state
+               ^ "fn f(x: usize) { if (x == 0) { static_assert(KERNEL_ACTIVE_CORES <= 1); } }\n" ];
+  execution_model_accepted "an exemption with a reason is accepted"
+    ~policy:"exempt a.tkb  boot-only state, CPU0"
+    [ "a.tkb", execution_model_state ];
+  execution_model_refused "an exemption with an empty reason is refused"
+    ~policy:"exempt a.tkb" [ "a.tkb", execution_model_state ] "empty reason";
+  execution_model_refused "a duplicate exemption is refused"
+    ~policy:"exempt a.tkb  one\nexempt a.tkb  two" [ "a.tkb", execution_model_state ]
+    "exempted twice";
+  execution_model_refused "a stale exemption (no mutable global) is refused"
+    ~policy:"exempt a.tkb  was state once" [ "a.tkb", "let constant_word: usize = 0;\n" ]
+    "declares no mutable global";
+  execution_model_refused "an exemption of a missing file is refused"
+    ~policy:"exempt gone.tkb  was state once" [ "a.tkb", "fn f() { }\n" ]
+    "does not exist";
+  execution_model_accepted "an exemption of a file this target does not compile is kept"
+    ~policy:"exempt other.tkb  the other target's state" ~compiled:[ "a.tkb" ]
+    [ "a.tkb", "fn f() { }\n"; "other.tkb", "fn g() { }\n" ];
+  execution_model_accepted "region and scratch globals keep their own rules"
+    [ "a.tkb", "private region let mut bytes: [u8; 64];\nscratch let mut tmp: usize;\n" ];
+  execution_model_accepted "a file without mutable globals needs nothing"
+    [ "a.tkb", "let fixed: usize = 3;\nfn f() { }\n" ];
+  execution_model_refused "an unknown policy entry is refused" ~policy:"exampt a.tkb  x"
+    [ "a.tkb", "fn f() { }\n" ] "unknown entry";
+  Alcotest.test_case "a constant the program does not declare is refused" `Quick (fun () ->
+    let dir = Filename.get_temp_dir_name () in
+    let policy = Filename.concat dir (Printf.sprintf "takibi-em-undeclared-%d" (Unix.getpid ())) in
+    let out = open_out policy in output_string out "constant NO_SUCH_CONSTANT\n"; close_out out;
+    Init_state.reset (); Region_backing.reset ();
+    let errors = Execution_model_policy.check ~policy_file:policy ~compiled_files:[]
+        (Parser.program Lexer.read (Lexing.from_string "fn f() { }\n")) in
+    Alcotest.(check bool) "undeclared constant named" true
+      (List.exists (fun (_, m) -> contains_substring m "'NO_SUCH_CONSTANT' is not declared") errors));
+  Alcotest.test_case "a missing policy file is refused" `Quick (fun () ->
+    let errors = Execution_model_policy.check ~policy_file:"/nonexistent/EXECUTION_MODEL"
+        ~compiled_files:[] [] in
+    Alcotest.(check bool) "missing file named" true
+      (List.exists (fun (_, m) -> contains_substring m "does not exist") errors));
+]
+
 let raw_authority_policy_tests = [
   Alcotest.test_case "implicit raw field reference mint requires its source file" `Quick
     (fun () ->
@@ -29251,6 +29377,7 @@ let named_groups_unisolated = [
   "init-contracts", init_contract_tests;
   "init-path-facts", init_path_fact_tests;
   "raw-authority-policy", raw_authority_policy_tests;
+  "execution-model-policy", execution_model_policy_tests;
   "witness-changes", witness_change_tests;
   "record-loan-contracts", record_loan_contract_tests;
   "record-loan-boundaries", record_boundary_tests;

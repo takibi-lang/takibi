@@ -2518,8 +2518,9 @@ private fn workload_busy_pair_report() !{unsafe} {
 // the state a busy-loop process reports into -- which is precisely the
 // state a process on a SECOND core would report into. It was found by
 // chasing which syscall the busy loop actually makes, the same accidental
-// way kernel/mm/page.tkb was, which is why
-// scripts/check_execution_model_coverage.py now exists.
+// way kernel/mm/page.tkb was, which is why the compiler's
+// --require-execution-model (kernel/EXECUTION_MODEL, GitHub issue #988)
+// now exists.
 //
 // What is and is not shared here, because the answer is not uniform:
 //

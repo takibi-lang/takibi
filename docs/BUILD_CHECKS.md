@@ -26,7 +26,6 @@ suffix is description; dispatch reads only the prefix.
 | `check_wait_status_sites.py` | every `process_end_exited` argument in a kernel `.tkb` is a reviewed form (exit/exit_group's code, a probe's stamped codes) -- the `ProcessEnd` variant (#886) already keeps an exit code and a signal apart, but not an integer that mixes them going in -- and no kernel `.tkb` outside `kernel/kernel/wait_status.tkb` adds 128 to a signal or status in code: wait4 reports Linux's WTERMSIG form, not a shell's `$?` (#882) |
 | `check_qemu_vcpu_lease.py` | every maintained QEMU guest starts through `scripts/qemu.sh`, never `qemu-system-aarch64` directly, and every file that starts the shim takes a vCPU lease from the host-wide budget |
 | `check_lease_before_deadline.py` | a driver that spawns a lease-taking QEMU runner (a script calling `resource_lease_vcpu_acquire`, or `make kernelsh-qemu`) takes the vCPU lease itself first, so no deadline is spent in the runner's wait (#719) |
-| `check_execution_model_coverage_controls.py` | a comment-only (line or block comment) mention of an execution-model constant and an empty EXEMPT reason are refused; a code `static_assert` and a reasoned EXEMPT entry are accepted |
 | `check_lease_wait_controls.py` | `lease_wait.lease_pending` classifies waiting, allocator waits, waits after a grant and transcripts without a wait, and only a pending wait is named in a timeout |
 | `check_service_space_controls.py` | actual FD/fork phase and actor coverage, open-description sharing, retained capacities, Takibi pool resource identities, repeats, and incomplete/error capture rejection |
 | `check_pool_retention_controls.py` | real-kernel retention accounting, workload completion, repeated counts, platform clock separation, and malformed capture rejection |
@@ -83,7 +82,6 @@ suffix is description; dispatch reads only the prefix.
 | `check_elf_symbol_alignment_controls.py` | Positive and faithful negative controls for the ELF alignment guard |
 | `check_el0_raw_deref_audit.py` | Every Takibi object linked into an EL0 PIE uses the shared audit recipe and rebuilds when the budget or checker changes |
 | `check_el0_raw_deref_audit_controls.py` | A bypassed recipe, missing audit/gate/depfile/rebuild dependency, and empty EL0 coverage are refused |
-| `check_execution_model_coverage.py` | mutable kernel state declares its execution model |
 | `check_ext2_image_free_blocks.py` | the fixture ext2 image keeps at least 128 free blocks, so a program added to it cannot silently push a boot into the exhaustion stall of #658 |
 | `check_ext2_fixed_times.py` | self-test of `ext2_fixed_times.py`, the last step of each fixture image build, which pins every allocated inode's times: images stamped at different clocks converge, reserved and free inodes are kept, and a different epoch (the control) gives different bytes (#890) |
 | `check_ext2_mutation_guard.py` | every ext2 mutation is reached under the filesystem lock's guard, or its file is named with the reason it cannot race a peer |
@@ -312,6 +310,17 @@ run them, and why they sit outside both globs above.
 | `buildcheck_user_payload_no_rw_globals.py` | TODO |
 | `buildcheck_wont_compile_samples.py` | every program the defect catalog prints is rejected with the diagnostic beside it, or accepted, by the built compiler |
 | `buildcheck_regions_flag.py` | a program using region built-ins without `--regions` is refused up front with a diagnostic naming the flag, and compiles with it |
+
+## Compiler policies -- checks folded into the compiler
+
+A rule that reads only parsed `.tkb` source belongs in the compiler, which
+cannot drift from its own parser (GitHub issue #567 Stage 3). Each is an
+opt-in flag passed by the kernel recipes; its controls are Alcotest cases in
+`test/test_takibi.ml`, run by `make test`.
+
+| Flag | Enforced invariant | Replaced |
+| --- | --- | --- |
+| `--require-execution-model kernel/EXECUTION_MODEL` | every compiled file that declares a mutable top-level global (`let mut`; `region` and `scratch` globals keep their own rules) holds a `static_assert` whose parsed condition names a listed constant (`KERNEL_ACTIVE_CORES`, `KERNEL_PREEMPTIBLE`), or is exempted in the policy file with a non-empty reason; a missing exempted file, or a compiled exempted file with no mutable global, is refused. Passed to both production kernels and the DMA and GEM TX fixture images, whose fixture files no production image compiles (#988) | `check_execution_model_coverage.py` and its controls |
 
 ## Reporting
 
