@@ -26,7 +26,6 @@
       "Edit(~/.takibi-sessions/audits/**)"
     ],
     "deny": [
-      "Bash(git push:*)",
       "Bash(git rm -r:*)",
       "Bash(rm -rf:*)",
       "Bash(git reset --hard:*)",
