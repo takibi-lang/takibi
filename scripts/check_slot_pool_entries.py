@@ -5,7 +5,8 @@ Per-operation scratch that an operation holds across a call that may block
 lives in a pool of KERNEL_MAX_CORES slots, handed out as a linear token:
 kernel/fs/ext2/ext2.tkb's Ext2Slot (slice 2) and
 kernel/drivers/block/memory.tkb's BlockSlot (slice 3) and
-kernel/mm/process_image.tkb's ProcessImageSlot (the exec staging). The compiler checks
+kernel/mm/process_image.tkb's ProcessImageSlot (the exec staging) and
+kernel/init/test_driver.tkb's ExecWindowSlot (the exec's ELF metadata). The compiler checks
 each token: released on every path, never released twice, never used after
 release. What it does not check is how many tokens of one pool an operation
 holds. If a function that holds a slot called a public entry point, which
@@ -61,6 +62,8 @@ POOLS = [
      "ProcessImageSlot", "leaf"),
     ("kernel/kernel/syscall.tkb", "syscall_slot_acquire", "SyscallSlot",
      "holders"),
+    ("kernel/init/test_driver.tkb", "exec_window_slot_acquire",
+     "ExecWindowSlot", "leaf"),
 ]
 # The scheduler sleeps a syscall takes after its handler returns.
 SLEEP = re.compile(r"^(?:kernel_process_block_\w+|kernel_syscall_block_return)$")

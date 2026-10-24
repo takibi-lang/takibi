@@ -3903,8 +3903,9 @@ fn kernel_syscall_child_exec_return(frame_sp: usize) !{unsafe} {
         syscall_ext2_reader[syscall_scratch_cpu_index()] = false;
         ext2_read_leave();
     }
+    let mut user_entry: ExecUserEntry = { 0, 0 };
     match result {
-        KernelChildExecPrepareResult::Prepared => {}
+        KernelChildExecPrepareResult::Prepared(prepared) => { user_entry = prepared; }
         KernelChildExecPrepareResult::NotChildOrPending => {
             kernel_process_exec_failure_set(KernelChildExecPrepareResult::NotChildOrPending);
             process_current_end(current_authority);
@@ -3978,8 +3979,8 @@ fn kernel_syscall_child_exec_return(frame_sp: usize) !{unsafe} {
         process_current_end(current_authority);
             kernel_invariant_stop_with_frame(frame);
     }
-    let entry: usize = kernel_process_child_exec_entry();
-    let stack: usize = kernel_process_child_exec_stack();
+    let entry: usize = user_entry.entry;
+    let stack: usize = user_entry.stack;
     el0_context_set_sp_el0(frame, stack);
     el0_context_set_elr_el1(frame, entry);
     // exec starts a new runtime image. Do not expose the previous image's

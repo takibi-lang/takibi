@@ -54,28 +54,60 @@ fn kernel_boot_mount_configure(mount: Ext2Mount) {
 // streams from ext2.
 const EXEC_METADATA_SIZE: usize = 1024;
 let mut rootfs_metadata: [u8; EXEC_METADATA_SIZE];
-// GitHub issue #610: what one execve carries from resolving its image to
-// returning into it, per CPU. A resolved plan's `image` is a slice of these
-// buffers, and the prepare that maps it and the return that enters it run
-// on the same CPU in one non-preemptible EL1 span; two CPUs exec'ing at
-// once each have their own.
-struct ExecScratch {
-    resolve_image: [u8; EXEC_METADATA_SIZE];
-    primary_metadata: [u8; EXEC_METADATA_SIZE];
-    interpreter_metadata: [u8; EXEC_METADATA_SIZE];
-    entry: usize;
-    stack: usize;
+// GitHub issue #610: an execve's ELF metadata windows -- the image argv[0]
+// names, a dynamic exec's primary, and its interpreter. A resolved plan's
+// `image` is a slice of one of them, mapped before the prepare ends; the
+// entry point and stack pointer leave in KernelChildExecPrepareResult's
+// Prepared payload, so nothing outlives the prepare.
+//
+// GitHub issue #981: the prepare reads ext2 (may_block) while it holds the
+// windows, so they are a pool of KERNEL_MAX_CORES slots, one per prepare in
+// flight, reached only through a linear ExecWindowSlot (the #638 shape:
+// ext2's, the block layer's and the exec staging's pools). Trusted here,
+// and only here (TRUSTED_BASE.md): exec_window_slot_acquire returns a slot
+// no other live ExecWindowSlot names; its compare-exchange over
+// exec_window_words is what makes that so. The one entry point is
+// kernel_process_child_exec_prepare (scripts/check_slot_pool_entries.py).
+const EXEC_WINDOWS_SIZE: usize = 3 * EXEC_METADATA_SIZE;
+const EXEC_WINDOW_PRIMARY: usize = EXEC_METADATA_SIZE;
+const EXEC_WINDOW_INTERPRETER: usize = 2 * EXEC_METADATA_SIZE;
+struct ExecWindows {
+    bytes: [u8; EXEC_WINDOWS_SIZE];
+}
+private let mut exec_windows: [ExecWindows; KERNEL_MAX_CORES];
+private let mut exec_window_words: [AtomicWord; KERNEL_MAX_CORES];
+
+// `[unit]` is always 0, as ProcessImageSlot's.
+linear struct ExecWindowSlot[unit: usize] {
+    private index: {0..<KERNEL_MAX_CORES as usize};
 }
 
-private let mut exec_scratch: [ExecScratch; KERNEL_MAX_CORES];
-
-// The same bounded array-decay as syscall.tkb's syscall_scratch_here().
-private fn exec_scratch_here() -> *ExecScratch {
-    let base: *ExecScratch = exec_scratch;
-    let core: usize = cpu_id();
-    if (core >= KERNEL_MAX_CORES) { return base; }
-    return base + (core as isize);
+// A free slot, waiting for one if every slot is held. The acquire pairs with
+// the release store below, so the previous holder's reads of the windows
+// happen before this holder's ext2 reads overwrite them.
+private fn exec_window_slot_acquire() -> ExecWindowSlot[0] !{may_block} {
+    let mut index: {0..<KERNEL_MAX_CORES as usize} = 0;
+    let mut held: bool = false;
+    while (held == false) {
+        for i: usize in 0..<KERNEL_MAX_CORES {
+            if (held == false &&
+                atomic_word_compare_exchange(&exec_window_words[i], 0, 1)) {
+                index = i;
+                held = true;
+            }
+        }
+    }
+    let mut slot: ExecWindowSlot[0] = { index };
+    return slot;
 }
+
+private fn exec_window_slot_release(slot: sink ExecWindowSlot[0]) {
+    atomic_word_store(&exec_window_words[slot.index], 0);
+}
+
+// The boot-time loader check's windows: it runs once, on the boot CPU,
+// before any exec.
+private let mut boot_exec_windows: [u8; EXEC_WINDOWS_SIZE];
 
 fn exec_metadata_prefix(metadata: [u8; EXEC_METADATA_SIZE..],
                         length: usize) -> []u8 {
@@ -177,10 +209,11 @@ fn kernel_exec_resolve_ext2_inode_at(mount: Ext2Mount, inode: usize,
     }
 }
 
-fn kernel_exec_resolve_ext2_name(mount: Ext2Mount, name: borrow []const u8)
+fn kernel_exec_resolve_ext2_name(mount: Ext2Mount, name: borrow []const u8,
+                                 windows: [u8; EXEC_WINDOWS_SIZE..])
         -> ExecResolveResult !{unsafe} {
     return kernel_exec_resolve_ext2_name_at(
-        mount, name, exec_scratch_here().resolve_image as []u8);
+        mount, name, windows[0..<EXEC_METADATA_SIZE]);
 }
 
 // The one interpreter this kernel maps: the musl loader. Its PT_INTERP
@@ -207,14 +240,16 @@ fn kernel_exec_interpreter_is_musl(plan: DistroElfLoadPlan) -> bool {
     return true;
 }
 
-fn kernel_exec_resolve_musl_pair(primary: Ext2ExecImage, mount: Ext2Mount)
+fn kernel_exec_resolve_musl_pair(primary: Ext2ExecImage, mount: Ext2Mount,
+                                 windows: [u8; EXEC_WINDOWS_SIZE..])
         -> DynamicExecResolveResult !{unsafe} {
     if (kernel_exec_interpreter_is_musl(primary.plan) == false) {
         return DynamicExecResolveResult::Invalid;
     }
     match kernel_exec_resolve_ext2_name_at(
             mount, bs"lib/ld-musl-aarch64.so.1",
-            exec_scratch_here().interpreter_metadata as []u8) {
+            windows[EXEC_WINDOW_INTERPRETER..<
+                    EXEC_WINDOW_INTERPRETER + EXEC_METADATA_SIZE]) {
         ExecResolveResult::NotFound => {
             return DynamicExecResolveResult::Invalid;
         }
@@ -228,16 +263,18 @@ fn kernel_exec_resolve_musl_pair(primary: Ext2ExecImage, mount: Ext2Mount)
 }
 
 // The boot-time loader check: the resident HTTPd's pair, by name.
-fn kernel_exec_resolve_dynamic_ext2_images(mount: Ext2Mount)
+fn kernel_exec_resolve_dynamic_ext2_images(mount: Ext2Mount,
+                                           windows: [u8; EXEC_WINDOWS_SIZE..])
         -> DynamicExecResolveResult !{unsafe} {
     match kernel_exec_resolve_ext2_name_at(
             mount, bs"bin/busybox-extras",
-            exec_scratch_here().primary_metadata as []u8) {
+            windows[EXEC_WINDOW_PRIMARY..<
+                    EXEC_WINDOW_PRIMARY + EXEC_METADATA_SIZE]) {
         ExecResolveResult::NotFound => {
             return DynamicExecResolveResult::Invalid;
         }
         ExecResolveResult::Resolved(primary) => {
-            return kernel_exec_resolve_musl_pair(primary, mount);
+            return kernel_exec_resolve_musl_pair(primary, mount, windows);
         }
     }
 }
@@ -246,12 +283,15 @@ fn kernel_exec_resolve_dynamic_ext2_images(mount: Ext2Mount)
 // PT_INTERP, whatever its path. One that does not is left to the argv[0] and
 // static path below; one naming an interpreter other than musl's is refused
 // rather than mapped as if it were static.
-fn kernel_exec_resolve_dynamic_ext2(mount: Ext2Mount)
+fn kernel_exec_resolve_dynamic_ext2(mount: Ext2Mount,
+                                    windows: [u8; EXEC_WINDOWS_SIZE..])
         -> DynamicExecResolveResult !{unsafe} {
     let inode: usize = kernel_syscall_exec_inode();
     if (inode == 0) { return DynamicExecResolveResult::NotRequested; }
     match kernel_exec_resolve_ext2_inode_at(
-            mount, inode, exec_scratch_here().primary_metadata as []u8) {
+            mount, inode,
+            windows[EXEC_WINDOW_PRIMARY..<
+                    EXEC_WINDOW_PRIMARY + EXEC_METADATA_SIZE]) {
         ExecResolveResult::NotFound => {
             return DynamicExecResolveResult::NotRequested;
         }
@@ -259,7 +299,7 @@ fn kernel_exec_resolve_dynamic_ext2(mount: Ext2Mount)
             if (primary.plan.interpreter_length == 0) {
                 return DynamicExecResolveResult::NotRequested;
             }
-            return kernel_exec_resolve_musl_pair(primary, mount);
+            return kernel_exec_resolve_musl_pair(primary, mount, windows);
         }
     }
 }
@@ -289,7 +329,8 @@ fn kernel_exec_interpreter_bias(primary: DistroElfLoadPlan) -> usize {
 // (relative paths unsupported, same as every existing scenario) and looks
 // the name up with that slash stripped. The name stays a local slice of
 // argv: it is tied to the exec's argv page and cannot ride in a variant.
-fn kernel_exec_resolve_argv0(mount: Ext2Mount, argv: borrow []u8)
+fn kernel_exec_resolve_argv0(mount: Ext2Mount, argv: borrow []u8,
+                             windows: [u8; EXEC_WINDOWS_SIZE..])
         -> ExecResolveResult !{unsafe} {
     if (argv.len < 2) { return ExecResolveResult::NotFound; }
     let first_byte: u8 = argv[0];
@@ -304,7 +345,8 @@ fn kernel_exec_resolve_argv0(mount: Ext2Mount, argv: borrow []u8)
         }
     }
     if (end < name_bytes.len) {
-        return kernel_exec_resolve_ext2_name(mount, name_bytes[0..<end]);
+        return kernel_exec_resolve_ext2_name(mount, name_bytes[0..<end],
+                                             windows);
     }
     return ExecResolveResult::NotFound;
 }
@@ -320,8 +362,9 @@ fn kernel_process_child_exec_map_result(current_authority: borrow ProcessCurrent
             return KernelChildExecPrepareResult::StaticMapOutOfMemory;
         }
         ProcessImageMapResult::Mapped(pages) => {
-            exec_scratch_here().entry = process_image_entry(pages);
-            exec_scratch_here().stack = process_image_stack_pointer(pages);
+            let mut user_entry: ExecUserEntry = {
+                process_image_entry(pages), process_image_stack_pointer(pages)
+            };
             let (heap_start, heap_limit) = process_image_heap_range(pages);
             match process_image_exec_install(pages) {
                 ProcessImageExecInstallResult::AlreadyInstalled => {
@@ -349,7 +392,7 @@ fn kernel_process_child_exec_map_result(current_authority: borrow ProcessCurrent
                     kernel_process_current_pid());
             }
             kernel_syscall_exec_clear();
-            return KernelChildExecPrepareResult::Prepared;
+            return KernelChildExecPrepareResult::Prepared(user_entry);
         }
     }
 }
@@ -798,15 +841,20 @@ fn kernel_process_child_exec_prepare(current_authority: borrow ProcessCurrent[cu
             let args: [u8; PAGE_SIZE..] = page_bytes(args_page);
             let argv: [u8; 512..] = args[0..<512];
             kernel_syscall_exec_argv_copy(argv);
+            let slot: ExecWindowSlot[0] = exec_window_slot_acquire();
             let result: KernelChildExecPrepareResult =
-                kernel_process_child_exec_prepare_with(current_authority, argv);
+                kernel_process_child_exec_prepare_with(
+                    current_authority, argv,
+                    exec_windows[slot.index].bytes as []u8);
+            exec_window_slot_release(slot);
             page_free(args_page);
             return result;
         }
     }
 }
 
-private fn kernel_process_child_exec_prepare_with(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], argv: borrow []u8)
+private fn kernel_process_child_exec_prepare_with(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], argv: borrow []u8,
+        windows: [u8; EXEC_WINDOWS_SIZE..])
         -> KernelChildExecPrepareResult {
     kernel_process_trace_exec_prepare();
     if (kernel_syscall_persistent_shell_active()) {
@@ -825,7 +873,7 @@ private fn kernel_process_child_exec_prepare_with(current_authority: borrow Proc
         BootMountState::Mounted(found) => { found }
     };
     let mut target: BootRootImageState = boot_execution.root_image;
-    match kernel_exec_resolve_argv0(mount, argv) {
+    match kernel_exec_resolve_argv0(mount, argv, windows) {
         ExecResolveResult::NotFound => {}
         ExecResolveResult::Resolved(image) => {
             target = BootRootImageState::Ready(image);
@@ -857,7 +905,7 @@ private fn kernel_process_child_exec_prepare_with(current_authority: borrow Proc
         }
     }
 
-    match kernel_exec_resolve_dynamic_ext2(mount) {
+    match kernel_exec_resolve_dynamic_ext2(mount, windows) {
         DynamicExecResolveResult::NotRequested => {}
         DynamicExecResolveResult::Invalid => {
             return KernelChildExecPrepareResult::DynamicResolveInvalid;
@@ -880,9 +928,10 @@ private fn kernel_process_child_exec_prepare_with(current_authority: borrow Proc
                     return KernelChildExecPrepareResult::DynamicPairInvalid;
                 }
                 ProcessImagePairProbeResult::Ready(pages) => {
-                    exec_scratch_here().entry = process_image_entry(pages);
-                    exec_scratch_here().stack =
-                        process_image_stack_pointer(pages);
+                    let mut user_entry: ExecUserEntry = {
+                        process_image_entry(pages),
+                        process_image_stack_pointer(pages)
+                    };
                     let (heap_start, heap_limit) =
                         process_image_heap_range(pages);
                     match process_image_exec_install(pages) {
@@ -923,7 +972,7 @@ private fn kernel_process_child_exec_prepare_with(current_authority: borrow Proc
                     process_image_activate_root(child_space);
                     kernel_process_child_exec_mark(current_authority);
                     kernel_syscall_exec_clear();
-                    return KernelChildExecPrepareResult::Prepared;
+                    return KernelChildExecPrepareResult::Prepared(user_entry);
                 }
             }
         }
@@ -939,14 +988,6 @@ private fn kernel_process_child_exec_prepare_with(current_authority: borrow Proc
                     kernel_syscall_exec_argc(), child_space), child_space);
         }
     }
-}
-
-fn kernel_process_child_exec_entry() -> usize {
-    return exec_scratch_here().entry;
-}
-
-fn kernel_process_child_exec_stack() -> usize {
-    return exec_scratch_here().stack;
 }
 
 fn kernel_process_child_exec_reap() {
@@ -1427,7 +1468,8 @@ irq_uart_rx_unmask();
     match boot_execution.mount {
         BootMountState::Unconfigured => {}
         BootMountState::Mounted(mount) => {
-            match kernel_exec_resolve_dynamic_ext2_images(mount) {
+            match kernel_exec_resolve_dynamic_ext2_images(
+                    mount, boot_exec_windows as []u8) {
                 DynamicExecResolveResult::NotRequested => {}
                 DynamicExecResolveResult::Invalid => {
                     kernel_boot_log("httpd images: invalid ext2 pair\n");

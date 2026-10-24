@@ -124,8 +124,9 @@ list (maintainer, 2026-10-09).
    raw-site-counts` prints each listed file's raw sites to choose the next
    one to migrate. Per-CPU scratch is #981: slice 1 done (2026-10-24:
    address_space_active and the idle-starvation pair are `struct per_cpu`
-   stores); next is test_driver.tkb's exec_scratch as a pool once #974
-   lands, which takes that file off the list. address_space.tkb's EL0-VA
+   stores); slice 2 too: test_driver.tkb has left the list -- an exec's ELF
+   metadata windows are an ExecWindowSlot pool and its entry and stack
+   ride in the prepare's result (2026-10-24). address_space.tkb's EL0-VA
    probe is #982. Consolidating the kernel-driven built-ins into general features
    is #750 (holder-tied identities, option C, is its central item; a
    shrink protocol for RegionPools walked with no lock belongs there). For #720

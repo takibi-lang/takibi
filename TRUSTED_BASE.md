@@ -400,6 +400,14 @@ rules globally.
   `kernel/mm/process_image.tkb` returns a slot no other live token names
   (its compare-exchange). The one-slot-per-operation rule is the same build
   check.
+- An execve's ELF metadata windows (the argv[0] image, a dynamic pair's
+  primary and interpreter) are the same shape: a pool of `KERNEL_MAX_CORES`
+  slots reached through a linear `ExecWindowSlot` (#981). Trusted:
+  `exec_window_slot_acquire` in `kernel/init/test_driver.tkb` returns a slot
+  no other live token names (its compare-exchange). A resolved plan's image
+  slice points into the slot's bytes and is not checked to die with the
+  slot: kernel_process_child_exec_prepare maps it before the release. The
+  one-slot-per-operation rule is the same build check.
 - The syscall scratch (`SyscallScratch`: file, path, sockaddr, uname,
   rlimit, interpreter and ELF buffers) is a pool of `KERNEL_MAX_CORES`
   slots reached through a linear `SyscallSlot` (#638), acquired narrowly

@@ -5020,8 +5020,15 @@ enum KernelExecFailureReason: u8 {
 }
 private let mut kernel_process_exec_failure_reason: KernelExecFailureReason;
 
+// Where a prepared exec enters EL0: the new image's entry point and initial
+// stack pointer, carried to the child-exec return in the result itself.
+struct ExecUserEntry {
+    entry: usize;
+    stack: usize;
+}
+
 must_use variant KernelChildExecPrepareResult {
-    Prepared;
+    Prepared(ExecUserEntry);
     NotChildOrPending;
     CloneVmMissing;
     DynamicResolveInvalid;
@@ -5247,7 +5254,7 @@ fn kernel_process_exec_failure_clear() {
 
 fn kernel_process_exec_failure_set(result: KernelChildExecPrepareResult) {
     match result {
-        KernelChildExecPrepareResult::Prepared => { kernel_process_exec_failure_reason = KernelExecFailureReason::None; }
+        KernelChildExecPrepareResult::Prepared(_) => { kernel_process_exec_failure_reason = KernelExecFailureReason::None; }
         KernelChildExecPrepareResult::NotChildOrPending => { kernel_process_exec_failure_reason = KernelExecFailureReason::NotChildOrPending; }
         KernelChildExecPrepareResult::CloneVmMissing => { kernel_process_exec_failure_reason = KernelExecFailureReason::CloneVmMissing; }
         KernelChildExecPrepareResult::DynamicResolveInvalid => { kernel_process_exec_failure_reason = KernelExecFailureReason::DynamicResolveInvalid; }
