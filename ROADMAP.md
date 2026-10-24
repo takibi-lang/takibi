@@ -165,9 +165,11 @@ not hold, in this order; compiler work in this list is authorized; an item
 that reaches a decision is parked and the next one taken. First, the
 verification direction (#954, maintainer 2026-10-23; B owns the refinement
 code): #960 (z3 checks a constant operand's fold itself), #961 (64-bit
-literal patterns read as negative bounds), then a thin slice of
-function-boundary initialization contracts, a design review, and the rest
-of #954 stage 2. Then: #908 (fixed
+literal patterns read as negative bounds); the thin slice of
+function-boundary initialization contracts (#954 step 2,
+docs/VERIFICATION_DESIGN.md) is done, its follow-ups are #974, #975 and
+#976, and step 3, the design review, is next, then the rest of #954
+stage 2. Then: #908 (fixed
 QEMU lane budget), #916 (compiler GC tuning), #921 and #922
 (variant reuse, domain-parallel codegen; both wait on the land-span
 measurement after #917's front-end fixes), #893 (redundant csel in variant match),
