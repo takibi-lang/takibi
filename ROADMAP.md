@@ -171,8 +171,8 @@ of #954 stage 2. Then: #908 (fixed
 QEMU lane budget), #916 (compiler GC tuning), #921 and #922
 (variant reuse, domain-parallel codegen; both wait on the land-span
 measurement after #917's front-end fixes), #893 (redundant csel in variant match),
-#698 (ext2
-exhaustion as ENOSPC), #846 (TCP retransmission with no reader), #793
+#967 and #968 (ext2 O_CREAT and indirect directory growth, after #698),
+#846 (TCP retransmission with no reader), #793
 (proofs with an unresolved type variable), #769 (--uses-of NAME), #774
 (IRQ arms acknowledge their source), #762 (no vector/unaligned stores in
 MMU-off code), #926 (GICv3 driver for QEMU virt gic-version=3). Audit follow-ups filed 2026-10-23: #901 (ppoll sigmask with
@@ -302,7 +302,7 @@ usb_xhci_bus.tkb. Only the DCBAA stays legacy (D3).
 9. **Toolchain and portability:** #123, #124, #122, #95, #51, #50, #85.
 10. **Deferred or not a scheduled work item:** #220 (telnet; waits on PTY
    and `pselect6` scoping), #555, #250, #444, #429, #149, #567, #539, #536,
-   #698 (ext2 metadata exhaustion as ENOSPC), #374 (physically contiguous
+   #969 (counting Ext2Slot holdings in the effect system), #374 (physically contiguous
    memory; waits for a dynamic DMA allocation); #13 for `Phi`, with #216
    and #109 as candidate examples, only after the solver threshold in
    `TAKIBI_CORE.md` is met; #712 (compiler-derived liveness-escape
