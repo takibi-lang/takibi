@@ -169,8 +169,8 @@ literal patterns read as negative bounds); the thin slice of
 function-boundary initialization contracts (#954 step 2,
 docs/VERIFICATION_DESIGN.md) and step 3, the design review, are done;
 step 4 runs #975 (branch conditions as linear facts; done 2026-10-24,
-follow-ups #977 and #978), then #974 (the execve staging requires, next),
-then #976, then the rest of #954 stage 2. Then: #908 (fixed
+follow-ups #977 and #978), then #974 (the execve staging requires; done 2026-10-24),
+then #976 (next), then the rest of #954 stage 2. Then: #908 (fixed
 QEMU lane budget), #916 (compiler GC tuning), #921 and #922
 (variant reuse, domain-parallel codegen; both wait on the land-span
 measurement after #917's front-end fixes), #893 (redundant csel in variant match),
