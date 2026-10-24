@@ -176,11 +176,10 @@ that reaches a decision is parked and the next one taken. Ahead of
 everything below (maintainer, 2026-10-24, from #567's re-measurement:
 the build checks take more than twice the commits of the compiler they
 guard): #987 (--emit-call-graph, the resolved call graph as a table the
-`.tkb`-reading checks consume instead of parsing source), then #988
-(--require-execution-model replaces check_execution_model_coverage.py)
-and #989 (raw atomic intrinsic calls counted under
---confine-raw-authority; check_lock_discipline RULE 2 retires); the
-three are independent of one another. With them, #850's stop-gap
+`.tkb`-reading checks consume instead of parsing source), then #989
+(raw atomic intrinsic calls counted under --confine-raw-authority;
+check_lock_discipline RULE 2 retires); the two are independent of one
+another (#988 is done). With them, #850's stop-gap
 (maintainer, 2026-10-24): EFFECTS.md gains the table of checker-only
 effect words, and no new such word is added (DECISIONS.md). Then the
 verification direction (#954, maintainer 2026-10-23; B owns the refinement
