@@ -5328,6 +5328,8 @@ fn kernel_process_trace_handle(event: usize, subject: ProcessHandle,
 // SIGCHLD is for, wait4's result. Its peer generation word is 0.
 fn kernel_process_trace_handle_peer_pid(event: usize, subject: ProcessHandle,
                                         peer: usize, aux: usize) !{unsafe} {
+    // Before the peeks: a disabled trace costs the signal path one load.
+    if (kernel_process_trace_enabled == false) { return; }
     let state: ProcessSlotState = scheduled_process_peek_state(
         process_slot_of(subject.pool_index));
     let reason: ProcessWaitReason = scheduled_process_peek_wait_reason(
