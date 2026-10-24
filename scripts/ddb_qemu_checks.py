@@ -73,8 +73,12 @@ REQUIREMENTS = (
     ('lifecycle trace omit event', '^ddb: trace enabled=[01] omit=0x0000000000000400 omit-pid=none$', 2, 2, 'both'),
     ('lifecycle trace omit pid', '^ddb: trace enabled=[01] omit=0x0000000000000400 omit-pid=2$', 1, 1, 'both'),
     ('lifecycle trace omit refusal', '^ddb: usage: trace omit EVENT_1_TO_13$', 1, 1, 'both'),
-    ('lifecycle trace off', '^ddb: trace enabled=0 omit=0x0000000000000000 omit-pid=none$', 1, 2, 'both'),
-    ('lifecycle trace on', '^ddb: trace enabled=1 omit=0x0000000000000000 omit-pid=none$', 1, 2, 'both'),
+    # `trace all` prints the state before `trace off`: on after the boot's
+    # own enable at a UART BREAK, still off at the early software BRK.
+    ('lifecycle trace off', '^ddb: trace enabled=0 omit=0x0000000000000000 omit-pid=none$', 1, 1, 'uart'),
+    ('lifecycle trace off', '^ddb: trace enabled=0 omit=0x0000000000000000 omit-pid=none$', 2, 2, 'software'),
+    ('lifecycle trace on', '^ddb: trace enabled=1 omit=0x0000000000000000 omit-pid=none$', 2, 2, 'uart'),
+    ('lifecycle trace on', '^ddb: trace enabled=1 omit=0x0000000000000000 omit-pid=none$', 1, 1, 'software'),
     ('lifecycle trace usage', '^ddb: usage: trace \\[on\\|off\\|all\\|omit EVENT_1_TO_13\\|pid PID\\|pid none\\]$', 1, 1, 'both'),
     ('diagnostic event count', '^ddb: events cpu=0 count=', 1, None, 'both'),
     ('unimplemented syscall count', '^ddb: unimpl count=0$', 1, None, 'both'),

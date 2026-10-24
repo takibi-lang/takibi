@@ -147,6 +147,14 @@ ddb: trace seq=4067 cpu=1 event=10 pid=37 gen=77 peer=0 state=3 wait=4 root=1076
 ddb: trace seq=4068 cpu=1 event=7 pid=38 gen=78 peer=37 state=2 wait=0 root=1076148240 sp=0x0000000040407cd0 aux=0x0000000000000000
 ddb: trace seq=4069 cpu=1 event=5 pid=38 gen=78 peer=38 state=3 wait=3 root=1076148240 sp=0x0000000040407cd0 aux=0x0000000000000003
 ddb: trace seq=4070 cpu=1 event=7 pid=37 gen=77 peer=37 state=2 wait=0 root=1076147360 sp=0x0000000040277cd0 aux=0x0000000000000000
+ddb: trace enabled=1 omit=0x0000000000000400 omit-pid=none
+ddb: trace enabled=1 omit=0x0000000000000400 omit-pid=2
+ddb: usage: trace omit EVENT_1_TO_13
+ddb: trace enabled=1 omit=0x0000000000000400 omit-pid=none
+ddb: trace enabled=1 omit=0x0000000000000000 omit-pid=none
+ddb: trace enabled=0 omit=0x0000000000000000 omit-pid=none
+ddb: trace enabled=1 omit=0x0000000000000000 omit-pid=none
+ddb: usage: trace [on|off|all|omit EVENT_1_TO_13|pid PID|pid none]
 ddb: events cpu=0 count=8 damaged=0 overwritten=30
 ddb: event seq=31 cpu=0 id=0x0000000000000201 a=0x000000000000002d b=0x0000000000000027 c=0x0000000000000000 d=0x0000000000000001
 ddb: events cpu=1 count=0 damaged=0 overwritten=0
@@ -187,7 +195,7 @@ ddb: xu pid=1 root=1076740192 address=0x0000000070000000 count=1
 ddb: xu unmapped address=0x0000000070000000
 ddb: profile nothing to dump
 ddb: usage: profile stop | profile dump (start: write to /proc/takibi/profile)
-commands: oops regs intr sched current vm fds ps stacks wait proc PID bt [PID|cpu N] trace events unimpl log xk ADDRESS [COUNT] xp PHYSICAL [COUNT] xu PID ADDRESS [COUNT] profile stop|dump help continue
+commands: oops regs intr sched current vm fds ps stacks wait proc PID bt [PID|cpu N] trace [on|off|all|omit EVENT|pid PID|pid none] events unimpl log xk ADDRESS [COUNT] xp PHYSICAL [COUNT] xu PID ADDRESS [COUNT] profile stop|dump help continue
 ddb: continuing
 ddb: console tx=queued
 workload: peer tty read its 17-byte line on the secondary cpu, none lost, repeated or reordered

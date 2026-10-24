@@ -97,6 +97,14 @@ ddb: bt test stopped-root settled verdict=usable
 ddb: bt pid=999998 claimed by cpu=1, not yet current
 ddb: bt source=stopped cpu=1 pid=0 stack=0x00000000401ec000..0x00000000401f0000
 ddb: trace count=0
+ddb: trace enabled=0 omit=0x0000000000000400 omit-pid=none
+ddb: trace enabled=0 omit=0x0000000000000400 omit-pid=2
+ddb: usage: trace omit EVENT_1_TO_13
+ddb: trace enabled=0 omit=0x0000000000000400 omit-pid=none
+ddb: trace enabled=0 omit=0x0000000000000000 omit-pid=none
+ddb: trace enabled=0 omit=0x0000000000000000 omit-pid=none
+ddb: trace enabled=1 omit=0x0000000000000000 omit-pid=none
+ddb: usage: trace [on|off|all|omit EVENT_1_TO_13|pid PID|pid none]
 ddb: events cpu=0 count=0 damaged=0 overwritten=0
 ddb: events cpu=1 count=0 damaged=0 overwritten=0
 ddb: events cpu=2 count=0 damaged=0 overwritten=0
@@ -136,7 +144,7 @@ ddb: xu pid=1 root=1076740192 address=0x0000000070000000 count=1
 ddb: xu unmapped address=0x0000000070000000
 ddb: profile nothing to dump
 ddb: usage: profile stop | profile dump (start: write to /proc/takibi/profile)
-commands: oops regs intr sched current vm fds ps stacks wait proc PID bt [PID|cpu N] trace events unimpl log xk ADDRESS [COUNT] xp PHYSICAL [COUNT] xu PID ADDRESS [COUNT] profile stop|dump help continue
+commands: oops regs intr sched current vm fds ps stacks wait proc PID bt [PID|cpu N] trace [on|off|all|omit EVENT|pid PID|pid none] events unimpl log xk ADDRESS [COUNT] xp PHYSICAL [COUNT] xu PID ADDRESS [COUNT] profile stop|dump help continue
 ddb: continuing
 ddb: console tx=queued
 init: ash bootstrap
