@@ -241,7 +241,7 @@ private fn address_space_backing_pool_lock(
         -> RegionPoolGuard(AddressSpaceBacking)[backings] !{unsafe, acquires_lock_40_address_space_backing_pool, single_instance_lock,
           lock_guard_40_address_space_backing_pool} {
     let flags: usize = mutex_irq_save();
-    if (region_pool_lock_is_held(pool)) { pool_lock_wait_contended(PoolLockWaitPool::AddressSpace); }
+    if (region_pool_lock_contended_hint(pool)) { pool_lock_wait_contended(PoolLockWaitPool::AddressSpace); }
     return region_pool_lock_saving(pool, flags);
 }
 

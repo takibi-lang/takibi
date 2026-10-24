@@ -5,7 +5,7 @@
 // RPi5 log and fails when the contended count passes the threshold its
 // header derives.
 //
-// Each production pool's lock wrapper asks region_pool_lock_is_held before
+// Each production pool's lock wrapper asks region_pool_lock_contended_hint before
 // it takes the lock (one load of the line the compare-exchange fetches
 // anyway) and, only when the lock is held, counts one contended acquire in
 // its own CPU's row: plain stores to a line no other CPU writes, so
@@ -68,7 +68,7 @@ private let mut pool_lock_wait_cores: [PoolLockWaitCore; KERNEL_MAX_CORES];
 private let mut pool_lock_wait_paused: AtomicWord;
 
 // Called by a pool's lock wrapper, before it takes the lock, only when
-// region_pool_lock_is_held said the lock is held: the uncontended path
+// region_pool_lock_contended_hint said the lock is held: the uncontended path
 // pays one load of the lock line the compare-exchange fetches anyway.
 fn pool_lock_wait_contended(tag: PoolLockWaitPool) !{unsafe} {
     if (atomic_word_load(&pool_lock_wait_paused) != 0) { return; }

@@ -998,6 +998,15 @@ fn region_pool_lock_is_held(p: *@P@ @ b) -> bool !{unsafe} {
     return unsafe { atomic_load_acquire(p as usize) } != 0;
 }
 
+// A HEURISTIC, for counting contention only (#953): whether the lock word
+// looked held, read with a plain load and no ordering. The answer can be
+// stale the moment it is read and orders nothing; never use it to decide
+// ownership, for an assertion, or to skip taking the lock. Inline so the
+// uncontended lock path pays one load and a branch.
+inline fn region_pool_lock_contended_hint(p: *@P@ @ b) -> bool !{unsafe} {
+    return unsafe { *((p as usize) as *usize) } != 0;
+}
+
 fn region_handle_address(h: @H@) -> usize !{unsafe} {
     if (h.chunk == 0) { return 0; }
     return pool_slots_base(h.chunk) + h.slot * sizeof(@T@);

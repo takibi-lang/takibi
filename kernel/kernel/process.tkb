@@ -548,7 +548,7 @@ private fn process_pool_lock()
         -> RegionPoolGuard(ProcessRecord)[&scheduled_process_pool] !{unsafe, acquires_lock_40_process_pool, single_instance_lock,
           lock_guard_40_process_pool} {
     let flags: usize = mutex_irq_save();
-    if (region_pool_lock_is_held(&scheduled_process_pool)) { pool_lock_wait_contended(PoolLockWaitPool::Process); }
+    if (region_pool_lock_contended_hint(&scheduled_process_pool)) { pool_lock_wait_contended(PoolLockWaitPool::Process); }
     return region_pool_lock_saving(&scheduled_process_pool, flags);
 }
 
@@ -1584,7 +1584,7 @@ fn kernel_process_crash_frame_usable(
     if (execution_state[execution_cpu_index()].current_live == false) { return false; }
     let mut handle: ProcessHandle = execution_state[execution_cpu_index()].current_handle;
     if (scheduled_process_pool_ready == false) { return false; }
-    if (region_pool_lock_is_held(&scheduled_process_pool)) { return false; }
+    if (region_pool_lock_contended_hint(&scheduled_process_pool)) { return false; }
     let occupant: usize = region_pool_generation_unproven__ProcessRecord(
         &scheduled_process_pool, region_held_address(handle.pool_index));
     let generation_matches: bool = occupant != 0 && occupant == handle.generation;

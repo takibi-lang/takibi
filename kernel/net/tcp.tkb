@@ -331,7 +331,7 @@ private fn tcp_connection_pool_lock(
         -> RegionPoolGuard(TcpConnection)[conns] !{unsafe, acquires_lock_40_tcp_connection_pool, single_instance_lock,
           lock_guard_40_tcp_connection_pool} {
     let flags: usize = mutex_irq_save();
-    if (region_pool_lock_is_held(pool)) { pool_lock_wait_contended(PoolLockWaitPool::TcpConnection); }
+    if (region_pool_lock_contended_hint(pool)) { pool_lock_wait_contended(PoolLockWaitPool::TcpConnection); }
     return region_pool_lock_saving(pool, flags);
 }
 
@@ -348,7 +348,7 @@ const TCP_DDB_CONNECTION_PROBE_BUDGET: usize = 64;
 // through a write, so the snapshot reports Unknown. The slot walk is bounded
 // because this function runs on the interrupted stack.
 fn kernel_tcp_ddb_connection_pending() -> NetPendingState !{unsafe} {
-    if (region_pool_lock_is_held(&tcp_connection_pool)) {
+    if (region_pool_lock_contended_hint(&tcp_connection_pool)) {
         return NetPendingState::Unknown;
     }
     let guard = tcp_connection_pool_lock(&tcp_connection_pool);
@@ -638,7 +638,7 @@ private fn tcp_frame_pool_lock(pool: *RegionPool(NetFrame) @ frames)
         -> RegionPoolGuard(NetFrame)[frames] !{unsafe, acquires_lock_40_tcp_frame_pool, single_instance_lock,
           lock_guard_40_tcp_frame_pool} {
     let flags: usize = mutex_irq_save();
-    if (region_pool_lock_is_held(pool)) { pool_lock_wait_contended(PoolLockWaitPool::TcpFrame); }
+    if (region_pool_lock_contended_hint(pool)) { pool_lock_wait_contended(PoolLockWaitPool::TcpFrame); }
     return region_pool_lock_saving(pool, flags);
 }
 
@@ -1816,7 +1816,7 @@ private fn tcp_retx_pool_lock(pool: *RegionPool(RetxEntry) @ entries)
         -> RegionPoolGuard(RetxEntry)[entries] !{unsafe, acquires_lock_40_tcp_retx_pool, single_instance_lock,
           lock_guard_40_tcp_retx_pool} {
     let flags: usize = mutex_irq_save();
-    if (region_pool_lock_is_held(pool)) { pool_lock_wait_contended(PoolLockWaitPool::TcpRetx); }
+    if (region_pool_lock_contended_hint(pool)) { pool_lock_wait_contended(PoolLockWaitPool::TcpRetx); }
     return region_pool_lock_saving(pool, flags);
 }
 
