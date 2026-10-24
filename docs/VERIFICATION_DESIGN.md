@@ -23,5 +23,5 @@ The zero-is-the-meaning sites stay. The others are the slice's targets.
 
 ## Proposed skeleton
 
-See the #954 decision comment for the syntax options; this section is
+The syntax options went to the maintainer for decision; this section is
 filled in once one is chosen.
