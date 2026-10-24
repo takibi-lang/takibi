@@ -35,7 +35,7 @@ def longest_runs(insns):
     longest run of consecutive byte-store offsets from one base."""
     offsets = {}
     for _, text, fn in insns:
-        m = STORE_RE.match(text.split("//", 1)[0].strip())
+        m = STORE_RE.match(text.strip())
         if m:
             off = int(m.group(2), 0) if m.group(2) else 0
             offsets.setdefault((fn, m.group(1)), set()).add(off)
