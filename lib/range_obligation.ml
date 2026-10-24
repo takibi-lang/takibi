@@ -170,3 +170,17 @@ let write_dir dir =
    scripts/buildcheck_range_obligations.py can show it reports the
    counterexample. Never set in a real build. *)
 let fault_unsigned_negative_lo = ref false
+
+(* GitHub issue #954: an obligation whose text another module built (an
+   initialization coverage claim, Init_pred.obligation). It shares the
+   directory, digest naming and site lines of the range obligations. *)
+let record_text (loc : Lexing.position) (text : string) =
+  if !enabled then begin
+    let key = Digest.to_hex (Digest.string text) in
+    let sites = match Hashtbl.find_opt table key with
+      | Some (_, sites) -> sites
+      | None ->
+          let sites = Hashtbl.create 4 in
+          Hashtbl.replace table key (text, sites); sites in
+    Hashtbl.replace sites (site_of_loc loc) ()
+  end

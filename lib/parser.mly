@@ -258,7 +258,7 @@ let promote_be_field_type = function
 %token <string> BS_STRING
 %token GUARDED_BY
 %token BORROW_INIT BORROW_UNINIT
-%token FN INLINE NOINLINE WHERE RETURN CONST LET MUT EXTERN SYMBOL STRUCT OPAQUE AFFINE LINEAR VIEW VARIANT MUST_USE EXISTS BORROW SINK PACKED BE PUBLISH NO_COPY DMA_FIXED PER_CPU CPU_AUTHORITY PREEMPT_OFF IO ENUM MATCH ALIGN MULTIPLE SIZEOF ALIGNOF CONTAINS_STABLE_OWNER OFFSETOF UNSAFE USE PRIVATE VECTOR_TABLE EXCEPTION_ENTRY EXCEPTION_RESTORE EMBED_FILE
+%token FN INLINE NOINLINE WHERE REQUIRES ENSURES RETURN CONST LET MUT EXTERN SYMBOL STRUCT OPAQUE AFFINE LINEAR VIEW VARIANT MUST_USE EXISTS BORROW SINK PACKED BE PUBLISH NO_COPY DMA_FIXED PER_CPU CPU_AUTHORITY PREEMPT_OFF IO ENUM MATCH ALIGN MULTIPLE SIZEOF ALIGNOF CONTAINS_STABLE_OWNER OFFSETOF UNSAFE USE PRIVATE VECTOR_TABLE EXCEPTION_ENTRY EXCEPTION_RESTORE EMBED_FILE
 %token TYPE GENERIC
 %token DARROW COLONCOLON UNDERSCORE BANG
 %token LBRACE RBRACE LPAREN RPAREN LBRACKET RBRACKET COMMA SEMI DOTDOTLT DOTDOT AT
@@ -655,7 +655,7 @@ proto_item:
       | _ -> raise (Types.TypeError (loc, Printf.sprintf
                "unknown protocol item '%s %s'" k r.pr_name)) }
   | k = IDENT n = IDENT LPAREN i = proto_ref w = option(preceded(COMMA, proto_ref))
-    RPAREN mods = list(IDENT) ARROW alts = separated_nonempty_list(PIPE, proto_alt) SEMI
+    RPAREN mods = list(proto_mod) ARROW alts = separated_nonempty_list(PIPE, proto_alt) SEMI
     { let loc = $symbolstartpos in
       match k with
       | "transition" ->
@@ -683,6 +683,13 @@ proto_item:
         raise (Types.TypeError (loc, Printf.sprintf
           "unknown protocol item '%s %s'" k n));
       PModel (n, Int64.to_int v, loc) }
+
+(* GitHub issue #954: `requires` and `ensures` are keywords for function
+   contracts; a protocol transition still takes `requires` as a modifier. *)
+proto_mod:
+  | m = IDENT { m }
+  | REQUIRES { "requires" }
+  | ENSURES { "ensures" }
 
 proto_ref:
   | n = IDENT args = loption(delimited(LBRACKET, separated_nonempty_list(COMMA, proto_arg), RBRACKET))
@@ -771,27 +778,71 @@ variant_cases:
     { (name, Some payload) :: rest }
 
 func_def:
-  | p = private_flag FN IDENT LPAREN params RPAREN ret_type_opt effects_opt w = where_opt LBRACE body_stmts = stmts RBRACE
+  | p = private_flag FN IDENT LPAREN params RPAREN ret_type_opt effects_opt w = where_opt cs = contracts_opt LBRACE body_stmts = stmts RBRACE
     {
+      Init_state.set_contracts $symbolstartpos cs;
       Init_state.finish_func $symbolstartpos $5;
       Ast.{ name = $3; params = $5; ret_type = $7; effects = $8;
             body = body_stmts; is_inline = false; is_noinline = false; is_private = p;
             where_clauses = w; def_loc = $symbolstartpos }
     }
-  | p = private_flag INLINE FN IDENT LPAREN params RPAREN ret_type_opt effects_opt w = where_opt LBRACE body_stmts = stmts RBRACE
+  | p = private_flag INLINE FN IDENT LPAREN params RPAREN ret_type_opt effects_opt w = where_opt cs = contracts_opt LBRACE body_stmts = stmts RBRACE
     {
+      Init_state.set_contracts $symbolstartpos cs;
       Init_state.finish_func $symbolstartpos $6;
       Ast.{ name = $4; params = $6; ret_type = $8; effects = $9;
             body = body_stmts; is_inline = true; is_noinline = false; is_private = p;
             where_clauses = w; def_loc = $symbolstartpos }
     }
-  | p = private_flag NOINLINE FN IDENT LPAREN params RPAREN ret_type_opt effects_opt w = where_opt LBRACE body_stmts = stmts RBRACE
+  | p = private_flag NOINLINE FN IDENT LPAREN params RPAREN ret_type_opt effects_opt w = where_opt cs = contracts_opt LBRACE body_stmts = stmts RBRACE
     {
+      Init_state.set_contracts $symbolstartpos cs;
       Init_state.finish_func $symbolstartpos $6;
       Ast.{ name = $4; params = $6; ret_type = $8; effects = $9;
             body = body_stmts; is_inline = false; is_noinline = true; is_private = p;
             where_clauses = w; def_loc = $symbolstartpos }
     }
+
+(* GitHub issue #954: `requires` / `ensures` initialization contracts.
+   Both are keywords: a contextual word would conflict with the arrowless
+   return type `fn f() T`. *)
+contracts_opt:
+  | /* empty */ { [] }
+  | c = contract_clause rest = contracts_opt { c :: rest }
+
+contract_clause:
+  | REQUIRES body = contract_body
+    { Init_state.{ requires = true; body; cloc = $symbolstartpos } }
+  | ENSURES body = contract_body
+    { Init_state.{ requires = false; body; cloc = $symbolstartpos } }
+
+contract_body:
+  | p = contract_pred { Init_state.CPlain p }
+  | p = contract_pred IF LPAREN c = expr RPAREN { Init_state.CIf (c, p) }
+  | MATCH subject = IDENT LBRACE arms = separated_nonempty_list(COMMA, contract_arm) RBRACE
+    { if subject <> "result" then
+        raise (Types.TypeError ($symbolstartpos,
+          "a contract match must be over 'result'"));
+      Init_state.CMatch arms }
+
+contract_pred:
+  | TRUE { Init_state.PTrue }
+  | word = IDENT LPAREN e = expr RPAREN
+    { if word <> "init" then
+        raise (Types.TypeError ($symbolstartpos, Printf.sprintf
+          "unknown contract predicate '%s' (expected init(...) or true)" word));
+      Init_state.PInit e }
+
+contract_arm:
+  | pat = contract_pattern DARROW p = contract_pred { (pat, p) }
+
+contract_pattern:
+  | UNDERSCORE { Init_state.{ case = None; bind = None } }
+  | v = variant_ref COLONCOLON c = IDENT { ignore v; Init_state.{ case = Some c; bind = None } }
+  | v = variant_ref COLONCOLON c = IDENT LPAREN b = IDENT RPAREN
+    { ignore v; Init_state.{ case = Some c; bind = Some b } }
+  | v = variant_ref COLONCOLON c = IDENT LPAREN UNDERSCORE RPAREN
+    { ignore v; Init_state.{ case = Some c; bind = None } }
 
 (* `where k < n, k <= m` before a function body (#672). *)
 where_opt:

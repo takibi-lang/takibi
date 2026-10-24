@@ -20,10 +20,35 @@ let pending : (Ast.type_expr * qual) list ref = ref []
 let params : (string * int * int * string, qual) Hashtbl.t = Hashtbl.create 16
 let scratch : (string, unit) Hashtbl.t = Hashtbl.create 4
 
+(* GitHub issue #954: `requires` / `ensures` initialization contracts at a
+   function boundary (docs/VERIFICATION_DESIGN.md, SPEC.md "Initialization
+   contracts"). The parser records them here under the function's source
+   position, like the borrow qualifiers above; Init_flow checks the body
+   against them and applies them at every call. *)
+type pred =
+  | PInit of Ast.expr          (* init(P), init(P[lo..<hi]) *)
+  | PTrue
+
+type arm_pat = {
+  case : string option;        (* None: the wildcard `_` *)
+  bind : string option;        (* payload binder, `Read(r)` *)
+}
+
+type cbody =
+  | CPlain of pred
+  | CIf of Ast.expr * pred     (* `init(..) if (cond)`, cond over result *)
+  | CMatch of (arm_pat * pred) list   (* `match result { ... }` *)
+
+type clause = { requires : bool; body : cbody; cloc : Ast.loc }
+
+let contracts : (string * int * int, clause list) Hashtbl.t = Hashtbl.create 16
+
+
 let reset () =
   pending := [];
   Hashtbl.reset params;
-  Hashtbl.reset scratch
+  Hashtbl.reset scratch;
+  Hashtbl.reset contracts
 
 let mark (ty : Ast.type_expr) (q : qual) =
   pending := (ty, q) :: !pending;
@@ -71,3 +96,15 @@ let assume_init_only_stmts (ss : Ast.stmt list) =
     match s.desc with
     | Ast.Expr e -> assume_init_only_expr e
     | _ -> false) ss
+
+
+let set_contracts (def_loc : Ast.loc) (cs : clause list) =
+  if cs <> [] then begin
+    let (file, line, col) = loc_key def_loc in
+    Hashtbl.replace contracts (file, line, col) cs
+  end
+
+let contracts_of (def_loc : Ast.loc) : clause list =
+  let (file, line, col) = loc_key def_loc in
+  match Hashtbl.find_opt contracts (file, line, col) with
+  | Some cs -> cs | None -> []
