@@ -1535,7 +1535,7 @@ let parse_source src =
 
 (* Element types the program names: `region(T)`, `RegionSplit(T)` and
    `RegionOf(T)` all reach the AST as a mangled name, and a claimed array
-   names its element type in its declaration. Read off the printed AST,
+   names its element type in its declaration. Read off the AST's strings,
    which every construct derives. *)
 let element_prefixes = names_after_any [ "region__"; "RegionSplit__"; "RegionOf__"; "RegionTable__";
          "RegionTableOf__"; "RegionTake__"; "RegionAlloc__"; "RegionHandle__";
