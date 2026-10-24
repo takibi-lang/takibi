@@ -552,7 +552,8 @@ let check
      (docs/VERIFICATION_DESIGN.md)" in
   (* Validate a function's own contracts (GitHub issue #954). *)
   let ret_variant = match Option.map strip fdef.Ast.ret_type with
-    | Some (Ast.TypeNamed n | Ast.TypeIndexed (n, _)) -> variant_cases n
+    | Some (Ast.TypeNamed n | Ast.TypeIndexed (n, _) | Ast.TypeVariant (n, _, _)) ->
+        variant_cases n
     | _ -> None in
   let ret_is_bool = match Option.map strip fdef.Ast.ret_type with
     | Some Ast.TypeBool -> true | _ -> false in
@@ -829,6 +830,11 @@ let check
     | Ast.Cast (_, b) -> place_subexprs_view st b
     | _ -> place_subexprs st e
   and view_subexprs st e = place_subexprs_view st e
+  (* An out argument cut from a view with bounds that are not linear: it
+     writes an unknown range, so it neither reads nor initializes. *)
+  and has_view_base (a : Ast.expr) = match a.desc with
+    | Ast.SliceOf (b, _, _) | Ast.Cast (_, b) -> view_of b <> None || has_view_base b
+    | _ -> false
   and place_subexprs_any st (e : Ast.expr) = match e.desc with
     | Ast.SliceOf (b, lo, hi) -> place_subexprs (expr (expr st lo) hi) b
     | Ast.AddrOf b | Ast.Cast (_, b) -> place_subexprs_any st b
@@ -923,6 +929,7 @@ let check
                    (match fill_target a with
                     | `Whole (_, inner) -> (place_subexprs st inner, fills)
                     | `Partial inner -> (place_subexprs_any st inner, fills)
+                    | `Other when has_view_base a -> (place_subexprs_view st a, fills)
                     | `Other -> (expr st a, fills)))
           | `Out | `Fields ->
               (match fill_target a with
@@ -938,6 +945,7 @@ let check
                     | Some ({ len = Some n; _ } as v) when out = `Out ->
                         (place_subexprs_view st a,
                          (`V (v, (v.off, Init_pred.add v.off n))) :: fills)
+                    | _ when has_view_base a -> (place_subexprs_view st a, fills)
                     | _ -> (expr st a, fills)))
           | `No -> (expr st a, fills))
           (st, []) (List.mapi (fun i a -> (i, a)) args) in

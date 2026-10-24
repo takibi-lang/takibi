@@ -25327,6 +25327,160 @@ let array_record_loan_fixture = {|
 
 (* GitHub issue #203 stages 1 and 2: definite initialization of field
    paths, padding, scratch globals and borrow init/uninit parameters. *)
+(* GitHub issue #954: requires/ensures initialization contracts and the
+   interval predicate (SPEC.md "Initialization contracts"). *)
+let init_contract_tests =
+  let t name f = Alcotest.test_case name `Quick f in
+  let store8 = "fn store8(field: borrow uninit [u8; 8..], v: u8)
+        ensures init(field[0..<8]) {
+    for i: usize in 0..<8 { field[i] = v; }
+}
+fn out(src: borrow init []const u8) -> usize { return src.len; }
+" in
+  let fetch = "fn fetch(dst: borrow uninit []u8, n: usize, ok: bool) -> bool
+        ensures init(dst[0..<n]) if (result) {
+    if (ok == false || n > dst.len) { return false; }
+    let head = dst[0..<n];
+    for i: usize in 0..<n { head[i] = 1; }
+    return true;
+}
+struct B954 { buf: [u8; 16]; }
+scratch let mut sb: B954;
+fn out(src: borrow init []const u8) -> usize { return src.len; }
+" in
+  let read = "variant R954 { Read(usize); Eof; Fail; }
+fn read(buf: borrow uninit []u8) -> R954
+        ensures match result { R954::Read(n) => init(buf[0..<n]), R954::Eof => true, _ => true } {
+    if (buf.len < 4) { return R954::Fail; }
+    for i: usize in 0..<4 { buf[i] = 7; }
+    return R954::Read(4);
+}
+struct B954 { buf: [u8; 16]; }
+scratch let mut sb: B954;
+" in
+  let slot = "linear struct Slot954[u: usize] { index: {0..<2 as usize}; }
+struct Pair954 { buf: [u8; 8]; }
+scratch let mut ss: [Pair954; 2];
+fn fill(s: borrow Slot954[0]) ensures init(ss[s.index].buf) {
+    zero_fill(ss[s.index].buf as []u8);
+}
+fn peek(s: borrow Slot954[0]) -> u8 requires init(ss[s.index].buf) {
+    return ss[s.index].buf[3];
+}
+" in
+  [
+    t "issue #954: ensures on a borrow uninit sub-range is shown by a loop"
+      (expect_ok store8);
+    t "issue #954: an ensures range the body does not reach is rejected"
+      (expect_type_error "element 7 of it"
+         "fn store8(field: borrow uninit [u8; 8..], v: u8)
+                 ensures init(field[0..<8]) {
+             for i: usize in 0..<7 { field[i] = v; } }");
+    t "issue #954: two sub-slice calls cover an array, which is then read whole"
+      (expect_ok (store8 ^ "fn f() -> usize { let mut a: [u8; 16];
+           store8(a[0..<8], 1); store8(a[8..<16], 2); return out(a as []u8); }"));
+    t "issue #954: a read past the covered range names the first uncovered element"
+      (expect_type_error "element 8 of it (in [0, 16)) is not shown initialized"
+         (store8 ^ "struct B954 { buf: [u8; 16]; }
+           scratch let mut sb: B954;
+           fn f() -> usize { store8(sb.buf[0..<8], 1);
+             return out(sb.buf[0..<16]); }"));
+    t "issue #954: a sub-range read inside the covered range is accepted"
+      (expect_ok (store8 ^ "struct B954 { buf: [u8; 16]; }
+           scratch let mut sb: B954;
+           fn f() -> usize { store8(sb.buf[0..<8], 1); return out(sb.buf[2..<6]); }"));
+    t "issue #954: a conditional ensures holds on the success branch"
+      (expect_ok (fetch ^ "fn f(n: usize) -> u8 {
+           if (fetch(sb.buf as []u8, 16, true) == false) { return 0; }
+           return sb.buf[15]; }"));
+    t "issue #954: a conditional ensures does not hold on the failure branch"
+      (expect_type_error "'sb.buf' is read here, but 'sb.buf' is uninitialized"
+         (fetch ^ "fn f() -> u8 {
+           if (fetch(sb.buf as []u8, 16, true)) { return 1; }
+           return sb.buf[0]; }"));
+    t "issue #954: a conditional ensures with a symbolic length covers [0, n)"
+      (expect_ok (fetch ^ "fn f(n: usize) -> usize {
+           let bytes = sb.buf as []u8;
+           if (n > 16) { return 0; }
+           if (fetch(bytes, n, true)) { return out(bytes[0..<n]); }
+           return 0; }"));
+    t "issue #954: returning true without the range is rejected"
+      (expect_type_error "the ensures clause needs it initialized"
+         "fn fetch(dst: borrow uninit []u8, n: usize) -> bool
+                 ensures init(dst[0..<n]) if (result) { return true; }");
+    t "issue #954: a match ensures gives the arm its payload's range"
+      (expect_ok (read ^ "fn out(src: borrow init []const u8) -> usize { return src.len; }
+         fn f() -> usize {
+           match read(sb.buf as []u8) {
+             R954::Read(n) => { if (n > 16) { return 0; } return out(sb.buf[0..<n]); }
+             R954::Eof => { return 0; }
+             R954::Fail => { return 0; }
+           } }"));
+    t "issue #954: a match ensures arm is checked against the returned case"
+      (expect_type_error "element 4 of it"
+         "variant R954 { Read(usize); Eof; }
+          fn read(buf: borrow uninit []u8) -> R954
+                  ensures match result { R954::Read(n) => init(buf[0..<n]), R954::Eof => true } {
+              if (buf.len < 5) { return R954::Eof; }
+              for i: usize in 0..<4 { buf[i] = 7; }
+              return R954::Read(5); }");
+    t "issue #954: a contract match must be exhaustive"
+      (expect_type_error "not exhaustive: missing Fail"
+         "variant R954 { Read(usize); Eof; Fail; }
+          fn read(buf: borrow uninit []u8) -> R954
+                  ensures match result { R954::Read(n) => init(buf[0..<n]), R954::Eof => true } {
+              zero_fill(buf); return R954::Eof; }");
+    t "issue #954: a contract match names only the result type's cases"
+      (expect_type_error "'Gone' is not a case"
+         "variant R954 { Read(usize); Eof; }
+          fn read(buf: borrow uninit []u8) -> R954
+                  ensures match result { R954::Gone => true, _ => true } {
+              zero_fill(buf); return R954::Eof; }");
+    t "issue #954: slice_copy initializes [0, its result) of its destination"
+      (expect_ok "fn out(src: borrow init []const u8) -> usize { return src.len; }
+         fn f(src: []u8) -> usize { let mut a: [u8; 8];
+           let copied: usize = slice_copy(a as []u8, src);
+           if (copied > 8) { return 0; }
+           return out(a[0..<copied]); }");
+    t "issue #954: a scratch slot ensures and requires pair across calls"
+      (expect_ok (slot ^ "fn f(s: borrow Slot954[0]) -> u8 { fill(s); return peek(s); }"));
+    t "issue #954: a scratch slot requires is checked at the call"
+      (expect_type_error "'peek' requires it initialized"
+         (slot ^ "fn f(s: borrow Slot954[0]) -> u8 { return peek(s); }"));
+    t "issue #954: a contract cannot name an ordinary global"
+      (expect_type_error "only as a scratch slot reached through a held slot capability"
+         "struct Pair954 { buf: [u8; 8]; }
+          let mut gs: [Pair954; 2];
+          fn peek(i: usize) -> u8 requires init(gs[i].buf) { return 0; }");
+    t "issue #954: a scratch slot needs a linear owner's index"
+      (expect_type_error "only as a scratch slot reached through a held slot capability"
+         "struct Pair954 { buf: [u8; 8]; }
+          struct Plain954 { index: usize; }
+          scratch let mut ss: [Pair954; 2];
+          fn peek(s: Plain954) -> u8 requires init(ss[s.index].buf) { return 0; }");
+    t "issue #954: requires is unconditional in this slice"
+      (expect_type_error "a requires clause is unconditional"
+         "fn f(dst: borrow uninit []u8, ok: bool) -> bool
+                 requires init(dst) if (result) { return false; }");
+    t "issue #954: an if condition needs a bool result"
+      (expect_type_error "`result` or `result == true/false` of a bool function"
+         "fn f(dst: borrow uninit []u8) -> usize
+                 ensures init(dst) if (result) { zero_fill(dst); return 0; }");
+    t "issue #954: a contract bound must be a linear term"
+      (expect_type_error "must be a linear integer term"
+         "fn f(dst: borrow uninit []u8, n: usize)
+                 ensures init(dst[0..<n * n]) { zero_fill(dst); }");
+    t "issue #954: a contract names a parameter"
+      (expect_type_error "'q' is not a parameter"
+         "fn f(dst: borrow uninit []u8) ensures init(q) { zero_fill(dst); }");
+    t "issue #954: a mutable bound is not an atom"
+      (expect_type_error "'sb.buf' is viewed as memory here, but 'sb.buf' is uninitialized"
+         (store8 ^ "struct B954 { buf: [u8; 16]; }
+           scratch let mut sb: B954;
+           fn f() -> usize { let s = sb.buf as []u8; let mut k: usize = 0;
+           store8(s[k..<k + 8], 1); k = 8; return out(sb.buf[0..<8]); }"));
+  ]
+
 let definite_init_tests =
   let padded = "struct Pad203 { a: u8; b: u64; }\n" in
   let flat = "struct Flat203 { a: u64; b: u64; }\n" in
@@ -28637,6 +28791,7 @@ let named_groups_unisolated = [
   "loan-transfer", loan_transfer_tests;
   "indexed-reference", indexed_reference_tests;
   "definite-init", definite_init_tests;
+  "init-contracts", init_contract_tests;
   "raw-authority-policy", raw_authority_policy_tests;
   "witness-changes", witness_change_tests;
   "record-loan-contracts", record_loan_contract_tests;

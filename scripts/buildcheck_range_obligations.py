@@ -202,7 +202,26 @@ def control(takibi: str) -> int:
             print(run.stdout)
             print("FAIL range-obligation control: the control did not compile")
             return 1
+        # GitHub issue #954: a planted init coverage claim, [0, 8) shown
+        # by [0, 7) only, in lib/init_pred.ml's format. z3 must name k = 7.
+        planted_init = (INIT_HEADER + "\n; rule: init\n"
+                        "; claim: init(planted[0..<8])\n"
+                        "(set-logic QF_LIA)\n(declare-const k Int)\n"
+                        "(assert (and (<= 0 k) (< k 8)))\n"
+                        "(assert (not (or false (and (<= 0 k) (< k 7)))))\n"
+                        "(check-sat)\n")
+        digest = hashlib.md5(planted_init.encode()).hexdigest()
+        (out_dir / f"{digest}.smt2").write_text(planted_init)
         failures = check_dir(out_dir, z3, None)
+    init_planted = [f for f in failures
+                    if ": sat " in f and "rule: init" in f
+                    and "(k 7)" in f.replace("\n", " ")]
+    if len(init_planted) != 1:
+        print("\n".join(failures))
+        print("FAIL range-obligation control: the planted init coverage "
+              "claim was not reported with k = 7")
+        return 1
+    failures = [f for f in failures if f not in init_planted]
     planted = [f for f in failures
                if ": sat " in f and "rule: sub" in f and "claim: {-60..<80 as usize}" in f
                and "counterexample" in f]
@@ -213,8 +232,9 @@ def control(takibi: str) -> int:
         return 1
     print(planted[0])
     report_pass("range-obligation-control",
-                "z3 reports #935's planted unsigned-Sub range with a "
-                "counterexample", obligations=len(failures))
+                "z3 reports #935's planted unsigned-Sub range and a planted "
+                "init coverage claim (#954) with counterexamples",
+                obligations=len(failures) + len(init_planted))
     return 0
 
 
