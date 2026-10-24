@@ -152,8 +152,8 @@ list (maintainer, 2026-10-09).
    `struct per_cpu` plus regions, or a pool where it spans a blocking call.
 
 **Evidence for the trunk, scheduled by A:** #584's soak at natural
-boundaries, #702 (dedicated soak hardware, the maintainer's decision),
-#965 (the ordinary suite with the lifecycle trace on from boot). Every QEMU lane runs
+boundaries, #702 (dedicated soak hardware, the maintainer's decision).
+Every QEMU lane runs
 four vCPUs since 2026-10-11.
 
 ### Territory B: slightly off the pillars, supporting A, by priority
