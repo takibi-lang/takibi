@@ -618,6 +618,54 @@ def check_process_stack_handoff_hook(insns):
     return failures
 
 
+# GitHub issue #920: the IRQ mask is the GIC priority mask, which is per CPU,
+# not per frame. Every eret to EL0 must reset it to unmasked, or EL0 runs with
+# its ordinary interrupts held at the GIC. An eret is an EL0 return unless its
+# function is one of the EL1 returns below. Each EL0 eret must be preceded,
+# since the function's previous eret, by a call to irq_mask_reset_el0 or to
+# the stack-handoff hook, and the hook itself must call irq_mask_reset_el0.
+EL1_ERET_FUNCTIONS = {
+    "el1_current_irq_entry": "returns to the interrupted EL1 context",
+    "el1_current_sync_entry": "returns to the interrupted EL1 context",
+    "el2_drop_to_el1": "cold boot, EL2 to EL1",
+}
+PMR_RESET = "irq_mask_reset_el0"
+
+
+def check_el0_return_resets_pmr(insns):
+    failures = []
+    bodies = {}
+    for _, text, fn in insns:
+        bodies.setdefault(fn, []).append(text)
+    calls = lambda text, name: re.match(r"^bl\s+.*<%s>$" % name, text)
+    hook = bodies.get(STACK_SWITCH_HOOK)
+    if hook is None or not any(calls(t, PMR_RESET) for t in hook):
+        failures.append("issue #920 regression: %s does not call %s, so an "
+                        "EL0 return through it may leave the GIC priority "
+                        "mask raised" % (STACK_SWITCH_HOOK, PMR_RESET))
+    checked = 0
+    for fn, body in bodies.items():
+        if fn in EL1_ERET_FUNCTIONS:
+            continue
+        reset = False
+        for text in body:
+            if calls(text, PMR_RESET) or calls(text, STACK_SWITCH_HOOK):
+                reset = True
+            if re.match(r"^eret$", text):
+                checked += 1
+                if not reset:
+                    failures.append(
+                        "issue #920 regression: %s returns to EL0 with no "
+                        "call to %s or %s before its eret; EL0 would run "
+                        "with the GIC priority mask possibly raised"
+                        % (fn, PMR_RESET, STACK_SWITCH_HOOK))
+                reset = False
+    if checked == 0:
+        failures.append("issue #920: no EL0 eret was found, so the priority "
+                        "mask reset was checked against nothing")
+    return failures
+
+
 STOP_ENTRIES = ("kernel_invariant_stop", "kernel_invariant_stop_with_frame")
 
 
@@ -712,6 +760,7 @@ def main():
         + check_tlb_invalidate_all_is_broadcast(insns)
         + check_exception_stacks_are_per_core(insns)
         + check_process_stack_handoff_hook(insns)
+        + check_el0_return_resets_pmr(insns)
         + check_mmu_off_vector_stores(insns)
     )
     if failures:
@@ -724,7 +773,7 @@ def main():
           "before it takes, the whole-TLB invalidate broadcasting "
           "while MMU activation stays local, and every exception entry "
           "switching to a stack of its own core, with every EL0 process "
-          "return crossing the physical stack-handoff hook, and no misaligned "
+          "return crossing the physical stack-handoff hook and resetting the GIC priority mask, and no misaligned "
           "q-register store in the MMU-off page allocator, all verified "
           "statically",
                 insns=len(insns))

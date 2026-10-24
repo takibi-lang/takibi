@@ -54,6 +54,38 @@ def main():
         print("FAIL kernel-asm-alignment control: missing function passed")
         return 1
 
+    # GitHub issue #920: every EL0 eret resets the GIC priority mask.
+    pmr_ok = [
+        (0x3000, "bl 0x4000 <irq_mask_reset_el0>", "kernel_process_stack_switch_complete"),
+        (0x3004, "ret", "kernel_process_stack_switch_complete"),
+        (0x2000, "bl 0x3000 <kernel_process_stack_switch_complete>", "el0_irq_entry"),
+        (0x2004, "eret", "el0_irq_entry"),
+        (0x2100, "bl 0x4000 <irq_mask_reset_el0>", "el0_sync_body"),
+        (0x2104, "eret", "el0_sync_body"),
+        (0x2200, "eret", "el1_current_irq_entry"),
+    ]
+    CASES.note()
+    if checker.check_el0_return_resets_pmr(pmr_ok):
+        print("FAIL kernel-asm-pmr control: a correct EL0 return was refused")
+        return 1
+    CASES.note()
+    missing = [i for i in pmr_ok if i[1] != "bl 0x4000 <irq_mask_reset_el0>" or i[2] != "el0_sync_body"]
+    failures = checker.check_el0_return_resets_pmr(missing)
+    if len(failures) != 1 or "el0_sync_body returns to EL0" not in failures[0]:
+        print("FAIL kernel-asm-pmr control: an EL0 eret without the reset passed")
+        return 1
+    CASES.note()
+    hook_without = [i for i in pmr_ok if i[2] != "kernel_process_stack_switch_complete" or i[1] == "ret"]
+    failures = checker.check_el0_return_resets_pmr(hook_without)
+    if len(failures) != 1 or "does not call irq_mask_reset_el0" not in failures[0]:
+        print("FAIL kernel-asm-pmr control: a hook without the reset passed")
+        return 1
+    CASES.note()
+    failures = checker.check_el0_return_resets_pmr(pmr_ok + [(0x2300, "eret", "new_el0_return")])
+    if len(failures) != 1 or "new_el0_return" not in failures[0]:
+        print("FAIL kernel-asm-pmr control: an unlisted eret function passed")
+        return 1
+
     handoff_ok = [
         (0x2000, "mov sp, x0", "el0_irq_entry"),
         (0x2004, "msr DAIFSet, #0x2", "el0_irq_entry"),
