@@ -257,7 +257,14 @@ done
 TAKIBI_LANE_TIMING_DIR="$tmp_dir/timing" TAKIBI_VCPU_LANE_ORDER="$order" TAKIBI_AWAIT_TIMING_LANE=lane-long \
     vcpu lane-long 20 "resource_lease_vcpu_acquire 4 lane-long && echo long >>'$tmp_dir/grant-order'; sleep 1" 2>/dev/null &
 vcpu_long=$!
-sleep 1
+# Release the holder only once both waiters hold tickets: a fixed sleep let a
+# loaded host free the slots before lane-long queued (#927's control, #929).
+for _ in $(seq 1 300); do
+    [ "$(ls "$registry"/leases/vcpu/queue/*.ticket 2>/dev/null | wc -l)" -ge 2 ] && break
+    sleep 0.1
+done
+[ "$(ls "$registry"/leases/vcpu/queue/*.ticket 2>/dev/null | wc -l)" -ge 2 ] \
+    || fail "lane-long did not queue behind lane-short within 30 s"
 pkill -KILL -P "$vcpu_h" 2>/dev/null || true
 wait "$vcpu_h" 2>/dev/null || true
 wait "$vcpu_long"; wait "$vcpu_short"
