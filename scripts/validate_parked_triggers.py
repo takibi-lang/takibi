@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+"""Fail the RPi5 lane when a parked issue's reopen condition is met.
+
+GitHub issue #953. Some issues are parked (GitHub label `parked`) by the
+maintainer until a measurement shows they matter. So that the discussion is
+not forgotten, each one has a row in TRIGGERS below: the RECORDED boot line
+that measures it, the measurement, and a threshold. When the measurement
+passes the threshold, this script fails with a message naming the issue and
+saying to reopen it. The issue numbers live in that table and nowhere else
+in source. When an issue is resumed, remove its row (and, if nothing else
+reads it, the counter behind it).
+
+The RPi5 runner (scripts/run_kernel_hwtest_rpi5.sh) calls this with the
+lane's UART log. QEMU timing is emulated, so neither trigger is judged there.
+A missing or malformed line fails too: a trigger that cannot see its
+measurement would otherwise stay silent forever.
+
+Thresholds and their derivation:
+
+#812, page_alloc_contiguous's linear run search (parked 2026-10-23, option
+  (a): until a churn or long-running TCP workload shows max_ticks growing).
+  Measurement: `RECORDED page run allocator: ... max_ticks=T ... freq=F`,
+  the longest single IRQ-masked hold of the page lock inside
+  page_alloc_contiguous (#771's counters), T / F seconds.
+  Baseline: 819 ticks at 54 MHz = 15.2 us, the worst of the RPi5 runs
+  recorded on #812 (issuecomment of 2026-10-23; other runs 528..534 ticks).
+  Threshold: 3x baseline = 45.6 us, the factor the maintainer named.
+
+#680, region_pool validation under the pool lock (parked 2026-10-23,
+  option D: until a multicore TCP/fd workload shows the lock matters).
+  Measurement: `RECORDED pool lock wait: <pool>=A/C ...`, per production
+  pool the acquires A and the acquires C that found the lock already held
+  (kernel/kernel/pool_lock_wait.tkb), outside the deliberate contention
+  probes. The share judged is the sum of C over the sum of A, across every
+  pool: the per-pool shares of the small pools swing on a handful of
+  acquires.
+  Baseline: one RPi5 kernelcheck run, 2026-10-24: 2739 contended of
+  8063482 acquires = 0.034% (process 6479935/2640, address_space
+  1199643/99, every other pool 0 contended). The process pool is the
+  scheduler's, contended by every online core's idle and run paths.
+  Threshold: 3x baseline = 0.102%, the same factor as #812. It rests on
+  one run; if an unchanged tree trips it, widen it from more runs rather
+  than reopening #680.
+
+Controls: scripts/check_parked_triggers_controls.py.
+"""
+
+import argparse
+import pathlib
+import re
+import sys
+
+from pass_line import report_pass
+
+# The share of production pool lock acquires that found the lock held, on
+# RPi5, 2026-10-24.
+BASELINE_680 = 2739 / 8063482
+
+PAGE_RUN_LINE = re.compile(
+    r"RECORDED page run allocator: calls=\d+ visits=\d+ ticks=\d+ "
+    r"max_ticks=(\d+) freq=(\d+)\s*$")
+POOL_WAIT_LINE = re.compile(r"RECORDED pool lock wait:((?: \w+=\d+/\d+)+)\s*$")
+POOL_WAIT_FIELD = re.compile(r"(\w+)=(\d+)/(\d+)")
+
+
+class Unreadable(Exception):
+    """The measurement is missing or malformed."""
+
+
+def one_match(lines, pattern, what):
+    """The single line matching `pattern`. The RPi5 log carries each RECORDED
+    line twice (raw console and timestamped dmesg replay), with the same
+    numbers, so distinct matches are what must be one."""
+    found = {m.groups() for m in (pattern.search(l) for l in lines) if m}
+    if not found:
+        raise Unreadable(f"no `{what}` line")
+    if len(found) > 1:
+        raise Unreadable(f"{len(found)} different `{what}` lines")
+    return found.pop()
+
+
+def page_run_max_us(lines):
+    ticks, freq = one_match(lines, PAGE_RUN_LINE, "RECORDED page run allocator:")
+    if int(freq) == 0:
+        raise Unreadable("RECORDED page run allocator: freq=0")
+    return int(ticks) * 1e6 / int(freq), f"max_ticks={ticks} freq={freq}"
+
+
+def pool_wait_share(lines):
+    (fields,) = one_match(lines, POOL_WAIT_LINE, "RECORDED pool lock wait:")
+    acquires = contended = 0
+    for _, a, c in POOL_WAIT_FIELD.findall(fields):
+        acquires += int(a)
+        contended += int(c)
+    if acquires == 0:
+        raise Unreadable("RECORDED pool lock wait: no acquire counted")
+    return contended / acquires, f"contended={contended} acquires={acquires}"
+
+
+# issue, what it is about, measurement, unit, threshold.
+TRIGGERS = (
+    (812, "page_alloc_contiguous linear run search",
+     page_run_max_us, "us longest IRQ-masked page-lock hold", 3 * 15.2),
+    (680, "region_pool validation under the pool lock",
+     pool_wait_share, "share of pool lock acquires that found it held",
+     3 * BASELINE_680),
+)
+
+
+def evaluate(lines, triggers=TRIGGERS):
+    """(failures, judged) for one log's lines."""
+    failures = []
+    for issue, about, measure, unit, threshold in triggers:
+        try:
+            value, detail = measure(lines)
+        except Unreadable as error:
+            failures.append(
+                f"FAIL parked-trigger #{issue}: cannot read its measurement "
+                f"({error}); a trigger that cannot see stays silent forever")
+            continue
+        if value > threshold:
+            failures.append(
+                f"FAIL parked-trigger #{issue} ({about}): {value:.4g} {unit} "
+                f"exceeds the threshold {threshold:.4g} ({detail}). Its "
+                f"reopen condition is met: reopen the discussion on GitHub "
+                f"issue #{issue} (remove its `parked` label), and remove its "
+                f"row from TRIGGERS in scripts/validate_parked_triggers.py "
+                f"when work resumes.")
+    return failures, len(triggers)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("uart_log", type=pathlib.Path)
+    args = parser.parse_args(argv)
+    lines = args.uart_log.read_bytes().decode("ascii", "replace").splitlines()
+    failures, judged = evaluate(lines)
+    if failures:
+        for failure in failures:
+            print(failure, file=sys.stderr)
+        return 1
+    report_pass("parked-triggers",
+                f"{judged} parked issue trigger(s) read and below threshold",
+                triggers=judged)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

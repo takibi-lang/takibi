@@ -1352,6 +1352,11 @@ and the pages in use and owned by the allocator; and `ddb: page-runs`:
 spent holding the IRQ-masking page lock, the longest single hold, and the
 counter frequency. The bounded suite prints the same counters as a
 `RECORDED page run allocator:` line.
+Beside it, `RECORDED pool lock wait:` gives, per production region pool,
+the lock acquires and how many found the lock already held, outside the
+deliberate contention probes (`kernel/kernel/pool_lock_wait.tkb`, #953).
+On RPi5, `scripts/validate_parked_triggers.py` fails the lane when either
+line passes a parked issue's reopen threshold (#812, #680).
 
 `regs` reads the compiler-defined `ExceptionFrame` directly. DDB does not
 copy registers with handwritten assembly and does not duplicate frame

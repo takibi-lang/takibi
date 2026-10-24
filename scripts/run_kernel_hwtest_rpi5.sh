@@ -590,6 +590,9 @@ python3 "$REPO_ROOT/scripts/validate_protocol_trace.py" "$UART_LOG"
 # GitHub issue #656: the log ring's window that follows it, checked by TLC
 # against kernel/models/LogRing.tla through LogRingTrace.tla.
 python3 "$REPO_ROOT/scripts/validate_log_ring_trace.py" "$UART_LOG"
+# GitHub issue #953: parked issues' reopen conditions (#812, #680), from
+# the suite's RECORDED counters; the table lives in the script.
+python3 "$REPO_ROOT/scripts/validate_parked_triggers.py" "$UART_LOG"
 python3 "$REPO_ROOT/scripts/profile_kernel_workload.py" collect \
     --uart-log "$UART_LOG" --output "$ARTIFACT_DIR/busy-pair-profile.json" \
     --target rpi5
