@@ -19,7 +19,11 @@ of its interval arithmetic, at the machine's own bit width.
   rule planted (`--range-obligation-fault-control`: an unsigned base keeps a
   negative lower bound) and a `max` with #961's placeholder planted (an
   unknown u64 bound read as 10^9, #984), and requires z3 to report each
-  counterexample.
+  counterexample. GitHub issue #960: the same flag plants the three historical
+  misreadings of a constant, and z3 must refute each from the obligation's own
+  expression: #956's native fold (`x & (0xFFFFFFFFFFFFFFFF / 64)` claims
+  `{0..<1 as u64}`), #961's native leaf (`max(x & 3, 0xFFFFFFFFFFFFFFFF)`
+  claims `{0..<4 as u64}`) and #983's native init leaf (see below).
 - z3 4.13.4 is pinned and sha256-checked by `scripts/fetch_model_tools.sh`,
   which the devcontainer and the CI model-tools step already run.
   `TAKIBI_Z3` names another binary. Only `unsat` verdicts are cached, under
@@ -37,14 +41,14 @@ of its interval arithmetic, at the machine's own bit width.
   obligations. On the QEMU kernel with 114 init obligations at load average 16:
   2.7-3.0 s before, 0.42-0.53 s after.
 
-## File format, version 1
+## File format, version 2
 
 One file per distinct obligation, named `<md5>.smt2`, where the MD5 is over the
 file's text without its `; site:` lines. An obligation derived at many sites, or
 by both type_inf.ml and llvm_gen.ml, is one file.
 
 ```
-; takibi-range-obligation v1
+; takibi-range-obligation v2
 ; site: kernel/net/tcp.tkb:812:20         (zero or more, sorted; not hashed)
 ; rule: sub                               add sub mul div mod band min max cast
 ; claim: {0..<1461 as usize}              the derived range, lo..<hi, and base
@@ -64,9 +68,17 @@ outside `[lo, hi)`. `unsat` proves the range; `sat` is a counterexample.
 
 - Operands. A range operand is declared and constrained to its `[lo, hi)`. An
   operand with no known range (`% m` and `& k` on a plain unsigned value) is
-  declared unconstrained. A literal is inlined as its bit pattern at the width,
-  which is the value the machine holds (`0xFFFFFFFFFFFFFFFF` on u64 is all ones,
-  not -1).
+  declared unconstrained. A compile-time constant operand is
+  `(define-fun a () (_ BitVec W) EXPR)`, where EXPR is the constant's SOURCE
+  expression (GitHub issue #960): a literal is the low W bits of its 64-bit
+  pattern (`0xFFFFFFFFFFFFFFFF` on u64 is all ones, not -1), a `const` name is
+  its declared literal (`Const_env.raw_literal`), and `+ - * /` are `bvadd`,
+  `bvsub`, `bvmul`, `bvudiv`/`bvsdiv` at W by the base's signedness. The
+  checker's folded value is never written, so z3 evaluates the fold itself: a
+  fold that differs from the machine's value (#956's
+  `0xFFFFFFFFFFFFFFFF / 64` read as 0) is a counterexample, not an assumption.
+  Version 1 inlined the folded value; z3 then checked the rule against the
+  checker's own reading and answered unsat for #956, #961 and #983.
 - Width and signedness. A binary rule's operands and result share the base's
   width (`usize`/`isize` follow the target's pointer width). A cast's operand
   `a` has the source width; `r` is `a` truncated (`extract`) or extended by the
@@ -86,7 +98,10 @@ outside `[lo, hi)`. `unsat` proves the range; `sat` is a counterexample.
 The format is deliberately plain QF_BV with one existential query, so another
 back end can read it unchanged: a Lean `bv_decide` proof of the same statement
 (`forall a b, in_range a -> in_range b -> in_range (op a b)`) is the negation
-of this query at the same widths. Changing anything above is a version bump:
+of this query at the same widths. A constant operand's `define-fun` is a
+closed QF_BV term, so such a proof would evaluate it by `decide`/`bv_decide`
+too; a back end that instead took the constant as a parameter would have to
+add the equation `a = EXPR` (#960). Changing anything above is a version bump:
 the first line names the version, and the checker refuses other versions.
 
 ## Initialization obligations (GitHub issue #954)
