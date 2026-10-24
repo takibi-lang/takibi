@@ -58,7 +58,10 @@ def main():
     pmr_ok = [
         (0x3000, "bl 0x4000 <irq_mask_reset_el0>", "kernel_process_stack_switch_complete"),
         (0x3004, "ret", "kernel_process_stack_switch_complete"),
-        (0x2000, "bl 0x3000 <kernel_process_stack_switch_complete>", "el0_irq_entry"),
+        (0x3400, "bl 0x3000 <kernel_process_stack_switch_complete>", "kernel_irq_return_complete"),
+        (0x3404, "bl 0x3c00 <kernel_net_retransmit_pass>", "kernel_irq_return_complete"),
+        (0x3408, "bl 0x4000 <irq_mask_reset_el0>", "kernel_irq_return_complete"),
+        (0x2000, "bl 0x3400 <kernel_irq_return_complete>", "el0_irq_entry"),
         (0x2004, "eret", "el0_irq_entry"),
         (0x2100, "bl 0x4000 <irq_mask_reset_el0>", "el0_sync_body"),
         (0x2104, "eret", "el0_sync_body"),
@@ -79,6 +82,14 @@ def main():
     failures = checker.check_el0_return_resets_pmr(hook_without)
     if len(failures) != 1 or "does not call irq_mask_reset_el0" not in failures[0]:
         print("FAIL kernel-asm-pmr control: a hook without the reset passed")
+        return 1
+    # GitHub issue #846: the wrapper resets the mask again after the pass.
+    CASES.note()
+    failures = checker.check_el0_return_resets_pmr(
+        [i for i in pmr_ok if i[0] != 0x3408])
+    if len(failures) != 1 or "kernel_irq_return_complete does not call" not in failures[0]:
+        print("FAIL kernel-asm-pmr control: a retransmit wrapper without the "
+              "reset after the pass passed")
         return 1
     CASES.note()
     failures = checker.check_el0_return_resets_pmr(pmr_ok + [(0x2300, "eret", "new_el0_return")])

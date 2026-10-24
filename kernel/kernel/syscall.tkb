@@ -5452,10 +5452,10 @@ fn kernel_net_retransmit_pass() !{may_block, unsafe} {
 // process's own stack, which this CPU now owns, and never switches: kernel
 // mode is not preempted. DAIF.I is set again with the raw instruction, not
 // disable_irq: the generated restore after this hook relies on DAIF.I being
-// set, and under the GIC priority mask disable_irq would mask at the GIC
-// and leave DAIF.I clear. The priority mask is left unmasked for EL0, as
-// kernel_process_stack_switch_complete leaves it (the pass's own locks
-// save and restore it). scripts/buildcheck_kernel_asm_invariants.py checks
+// set, and under the GIC priority mask (#920) disable_irq would mask at the
+// GIC and leave DAIF.I clear. enable_irq lowers the priority mask and
+// clears DAIF.I; after the pass the priority mask is reset for EL0 as
+// kernel_process_stack_switch_complete resets it. scripts/buildcheck_kernel_asm_invariants.py checks
 // that this function sets DAIF.I again after the pass and before it
 // returns.
 fn kernel_irq_return_complete(frame_sp: usize) !{unsafe} {
@@ -5464,6 +5464,10 @@ fn kernel_irq_return_complete(frame_sp: usize) !{unsafe} {
     enable_irq();
     kernel_net_retransmit_pass();
     msr_daifset_irq();
+    // GitHub issue #920: and EL0 runs with the GIC priority mask unmasked,
+    // whatever the pass left in it (its locks save and restore it, so this
+    // is the hook's own reset again, not a repair).
+    irq_mask_reset_el0();
 }
 
 // GitHub issue #949: end the current process from the return hook. Once

@@ -721,13 +721,24 @@ def check_el0_return_resets_pmr(insns):
         failures.append("issue #920 regression: %s does not call %s, so an "
                         "EL0 return through it may leave the GIC priority "
                         "mask raised" % (STACK_SWITCH_HOOK, PMR_RESET))
+    # GitHub issue #846: the interrupt return's wrapper runs the retransmit
+    # pass after the hook, so it must reset the mask again after the pass.
+    wrapper = bodies.get(IRQ_RETURN_HOOK, [])
+    pass_calls = [i for i, t in enumerate(wrapper) if calls(t, RETRANSMIT_PASS)]
+    if not pass_calls or not any(calls(t, PMR_RESET)
+                                 for t in wrapper[pass_calls[-1] + 1:]):
+        failures.append("issue #920 regression: %s does not call %s after "
+                        "%s, so an EL0 return through it may leave the GIC "
+                        "priority mask raised"
+                        % (IRQ_RETURN_HOOK, PMR_RESET, RETRANSMIT_PASS))
     checked = 0
     for fn, body in bodies.items():
         if fn in EL1_ERET_FUNCTIONS:
             continue
         reset = False
         for text in body:
-            if calls(text, PMR_RESET) or calls(text, STACK_SWITCH_HOOK):
+            if (calls(text, PMR_RESET) or calls(text, STACK_SWITCH_HOOK) or
+                    calls(text, IRQ_RETURN_HOOK)):
                 reset = True
             if re.match(r"^eret$", text):
                 checked += 1
