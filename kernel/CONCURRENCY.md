@@ -474,7 +474,15 @@ transmit additionally hold the sole network capability, which is behind a
 chain is walked by take, filter and put back, so every walker -- a free, a
 drain, an accept begin, an ACK pass, a record -- takes a borrow of that
 capability (or of the received packet holding it), and a caller without it
-does not compile (GitHub issue #837). Poll's pending-read probe takes
+does not compile (GitHub issue #837). Besides syscalls, two contexts may
+hold the capability, and only when they can take it without waiting
+(GitHub issue #846): the return to EL0 at the end of
+`kernel_process_stack_switch_complete`, and the idle loop. Each runs
+`tcp_retx_service_all`, which retransmits any connection's due segments
+within a budget of four sends and 1 ms, takes each connection with
+`tcp_connection_try_take` and skips one a syscall holds, and so never
+waits on a lock while it holds the capability. A syscall still services
+only its own connection's deadlines (#257). Poll's pending-read probe takes
 no connection lock on purpose -- it must not wait behind a receive -- and the
 read that follows re-decides open and available bytes under the owner.
 Neither lock names a CPU, so routing the network interrupt elsewhere changes nothing

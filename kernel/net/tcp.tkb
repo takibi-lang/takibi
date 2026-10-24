@@ -68,6 +68,16 @@
 //   capability (or of a received packet, which holds it), so a caller
 //   without it does not compile. The link therefore comes up before the
 //   secondary cores, whose boot probes free connections.
+// - RETRANSMISSION NEEDS NO SYSCALL (2026-10-24, issue #846). A syscall
+//   services only its own connection's deadlines, but the return to EL0
+//   and the idle loop run tcp_retx_service_all over every connection when
+//   they can take the capability without waiting. It is bounded (four
+//   sends, 1 ms) because the EL0 return runs it with interrupts masked,
+//   and it skips a connection a syscall holds, so a segment can wait one
+//   more interrupt or idle iteration past its deadline. It does not take
+//   received frames: an ACK is still consumed by the next syscall that
+//   receives, so a segment nobody reads for is resent up to
+//   TCP_RETRY_LIMIT times and then dropped, as before.
 // - No congestion control or window scaling; retransmission is a fixed,
 //   bounded retry count (TCP_RETRY_LIMIT), not RTT-adaptive.
 // - This subsystem's retry/retransmit timing has been a recurring source

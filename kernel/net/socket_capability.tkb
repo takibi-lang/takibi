@@ -9,7 +9,9 @@
 
 // Current limitations (2026-09-07): there is exactly one NetRxCanAcquire
 // capability for the whole kernel: no multi-NIC support, and every
-// network-facing syscall path serializes through this single store. The
+// network-facing syscall path serializes through this single store, as do
+// the two non-syscall holders (2026-10-24, GitHub issue #846): the return
+// to EL0 and the idle loop, which take it only without waiting. The
 // store's Mutex provides cross-core exclusion, while the indexed linear guard
 // makes access without holding that particular mutex a compile error. Driver
 // initialization remains CPU0-owned by each platform's interrupt routing; it
@@ -145,10 +147,14 @@ must_use variant NetworkCapabilityWaitResult {
 }
 
 // GitHub issue #828: the capability, waiting for a holder to put it back.
-// Every holder is a syscall between its take and its put on another CPU:
-// none holds it while blocked (see kernel/net/tcp.tkb's header), none from
-// an interrupt handler, and the caller holds no lock while it waits, so the
-// wait is bounded by one such section. NeverInstalled means no capability
+// Every holder is a syscall between its take and its put on another CPU,
+// or (GitHub issue #846) the stack-wide retransmit pass, which the return
+// to EL0 and the idle loop run only when network_capability_take finds the
+// capability free -- they never wait for it -- and which never waits on a
+// connection lock while it holds it. None holds it while blocked (see
+// kernel/net/tcp.tkb's header), none from an interrupt handler, and the
+// caller holds no lock that a holder waits for, so the wait is bounded by
+// one such section. NeverInstalled means no capability
 // was ever minted (network bring-up failed or found no device), so nothing
 // can be holding one either. Nothing here names a CPU (#830).
 fn network_capability_take_waiting() -> NetworkCapabilityWaitResult {
