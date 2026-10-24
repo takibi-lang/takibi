@@ -158,6 +158,10 @@ list (maintainer, 2026-10-09).
    run, cache and counters, held across device I/O, moved to a `BlockSlot`
    pool. Next: the other per-CPU scratch, file by file, into
    `struct per_cpu` plus regions, or a pool where it spans a blocking call.
+   Flip plan stage 1 done (2026-10-24): `scripts/check_raw_cpu_id_sites.py`
+   inventories the raw `cpu_id()` calls (157 in 34 files) that assume no
+   migration. Stage 2, the semantics of preempt_off (a per-CPU count
+   or an IRQ mask), waits for the maintainer (#638 comment 6383896647).
 
 **Evidence for the trunk, scheduled by A:** #584's soak at natural
 boundaries, #702 (dedicated soak hardware, the maintainer's decision).
