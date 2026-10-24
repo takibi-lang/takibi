@@ -25480,7 +25480,7 @@ let raw_authority_policy_tests = [
   Alcotest.test_case "parse clears Type_inf's site tables of an earlier compilation" `Quick
     (fun () ->
       ignore (Type_inf.infer_program (Declared_type_resolver.run (Monomorphize.run
-        (parse "fn poke(p: *mut u8) !{unsafe} { unsafe { *p = 1; } } fn main() -> usize { return 42; }"))));
+        (parse "fn f() !{unsafe} { unsafe { let dr: *io u8 = 0x09000000; } } fn main() -> usize { return 42; }"))));
       Alcotest.(check bool) "the earlier compilation recorded a site" true
         (Type_inf.unsafe_authority_sites () <> []);
       ignore (parse "fn main() -> usize { return 42; }");
