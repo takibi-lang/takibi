@@ -24,12 +24,13 @@ from pathlib import Path
 
 from pass_line import report_pass
 
-# Measured 690,697,545 words on 2026-10-24 (after #921's planner and
-# monomorphize fixes; 903,223,947 after #917), the
-# same count on repeated runs; the budget is that plus about 25%. The
-# pre-#917 compile used about 6.6e9.
+# Measured 471,111,858 words on 2026-10-24 after #995 (the region planner
+# reads the AST instead of printing it; 729,265,200 for the same kernel just
+# before, 690,697,545 after #921 and 903,223,947 after #917), the same count
+# on repeated runs; the budget is that plus about 25%. The pre-#917 compile
+# used about 6.6e9.
 BUDGET_WORDS = {
-    "qemu": 865_000_000,
+    "qemu": 589_000_000,
 }
 
 
