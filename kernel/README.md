@@ -285,7 +285,8 @@ make kernelbuild-qemu  # build kernel/build/qemu/kernel.elf
 make kernelcheck-qemu  # build and run the complete QEMU integration test (no hardware needed)
 make kernelcheck-shell-qemu  # PTY smoke test for the interactive QEMU ash path
 make kernelbuild-qemu-debug  # build kernel/build/qemu/kernel-debug.elf with DWARF info
-make kernelcheck-qemu-debug  # run the complete QEMU integration test against the DWARF build
+make kernelcheck-qemu-debug  # run the complete QEMU integration test against the DWARF build, lifecycle trace on from main
+make kernelcheck-trace-from-boot-control  # on demand: a trace-on boot that fail-stops after exec must fail that runner
 make kernelcheck-qemu-debug-repeat  # repeat it 5 times, preserving each boot's artifacts
 make kernelcheck-oops-qemu  # verify parked QEMU oops records and the retained lifecycle trace
 make kernelcheck-ddb-qemu  # enter DDB through a real UART BREAK, inspect, and resume
@@ -1376,7 +1377,10 @@ leaves one kind out, `trace pid PID` leaves out the events whose subject is
 that pid (`trace pid none` undoes it), and `trace all` clears both filters;
 each prints the resulting state. `scripts/run_kernel_churn.py` switches it on
 before its workload, leaving out event 10 and HTTPd's pid, so a hang's
-capture holds the last exits, reaps and wait4 results. `continue` returns through the existing IRQ restore
+capture holds the last exits, reaps and wait4 results. `kernelcheck-qemu-debug-main`
+runs the whole ordinary suite with the trace on from `main` (GitHub issue #965,
+`scripts/kernel_trace_from_boot.py`) and fails unless both switches are still on
+and the ring recorded events at the end. `continue` returns through the existing IRQ restore
 path. `intr` identifies IRQ versus deliberate BRK entry and reports both the
 live and interrupted DAIF masks; ESR/FAR are shown only for synchronous entry,
 because those registers do not describe an IRQ. It then prints one `intr

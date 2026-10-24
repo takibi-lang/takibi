@@ -102,7 +102,11 @@ def judge(output: str) -> str:
 
 
 def verify(args: argparse.Namespace) -> None:
+    # The stop lands wherever a CPU is, often at EL0 under a user root whose
+    # TTBR0 does not map the kernel's identity addresses; read physical
+    # memory (kernel VA == PA on QEMU) through the stub instead.
     output = gdb(args.elf, args.socket, [
+        "maintenance packet Qqemu.PhyMemMode:1",
         "printf \"trace-from-boot state boot=%d live=%d sequence=%lu\\n\", "
         "*(char *)&kernel_process_trace_boot_enabled, "
         "*(char *)&kernel_process_trace_enabled, "
