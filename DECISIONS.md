@@ -174,6 +174,15 @@ condition below applies, and reports the land afterwards.
   only, an interval-union init predicate, z3 re-check, 5 s cold budget.
   [active] #954
 
+- 2026-10-24 No new checker-only word in the `!{...}` effect row (the
+  `dynamic_rule` family: lock ranks, IRQ guards, witnesses, invalidation,
+  loan transfer). A new need is a token type in the #789 / #638 shape, or
+  waits for #850's review; the existing words migrate to types in #789's
+  and #638's order. [active] #850 #789
+- 2026-10-24 EFFECTS.md lists the checker-only words too (name pattern,
+  what it marks, the analysis that reads it, the replacing token type), so
+  a new one changes a tracked contract document. [active] #850
+
 ## Trust and safety
 
 - 2026-10-13 Only files in kernel/DEVICE_SEMANTICS_FILES may declare device

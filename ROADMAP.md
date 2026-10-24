@@ -175,7 +175,9 @@ guard): #987 (--emit-call-graph, the resolved call graph as a table the
 (--require-execution-model replaces check_execution_model_coverage.py)
 and #989 (raw atomic intrinsic calls counted under
 --confine-raw-authority; check_lock_discipline RULE 2 retires); the
-three are independent of one another. Then the
+three are independent of one another. With them, #850's stop-gap
+(maintainer, 2026-10-24): EFFECTS.md gains the table of checker-only
+effect words, and no new such word is added (DECISIONS.md). Then the
 verification direction (#954, maintainer 2026-10-23; B owns the refinement
 code): #960 (z3 checks a constant operand's fold itself), #983 (init_flow
 reads literals at no width), #984 (min/max range obligations); the thin slice of
@@ -287,7 +289,11 @@ usb_xhci_bus.tkb. Only the DCBAA stays legacy (D3).
      boundary and an in-place reply design decision.
    #783 (xHCI batched TD write path).
 2. **Independent pillar issues, moved from A (2026-10-16):** #789 (lock order as ranked capability tokens, absorbing
-   acquires_lock_<rank>_<name>, after the syntax review).
+   acquires_lock_<rank>_<name>, after the syntax review); with it, #850's
+   migration of the IRQ words (irq_masking_guard, restores_saved_irq,
+   masks_irq, requires_irq_unmasked, starts_debug_stop) to an IrqState
+   token in the preempt_off shape (#638), which retires the #809 flow
+   pass; the authority-boundary words follow.
    **Signals, moved from A (2026-10-16):** #432 (timed blocking), and #948
    (a terminal-read fixture for the EINTR/SA_RESTART rule #726 added).
 3. **Other compiler and language work, respecting design gates:** #709 and #710
