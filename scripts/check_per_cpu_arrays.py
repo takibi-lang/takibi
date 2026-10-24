@@ -111,7 +111,6 @@ LISTED = {
     ("kernel/arch/arm64/boot/cpu.tkb", "irq_pmr_ready"): (PENDING, "PMR shadow, as irq_pmr_masked"),
     ("kernel/kernel/process.tkb", "kernel_process_claimed_pid"): (PENDING, "set and cleared across kernel_process_secondary_start_reserved; options on #981"),
     ("kernel/mm/process_image.tkb", "process_image_contexts"): (PENDING, "per-operation target root held across may_block and read by the COW fault path; maintainer decision (#981)"),
-    ("kernel/kernel/syscall.tkb", "syscall_ext2_reader"): (PENDING, "own-CPU flag across the syscall return; next #981 slice"),
     ("kernel/printk/log.tkb", "kernel_log_peer_probe_emitted"): (PENDING, "log.tkb waits for #613"),
 }
 

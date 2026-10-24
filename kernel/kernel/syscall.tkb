@@ -356,15 +356,26 @@ private fn syscall_slot_release(slot: sink SyscallSlot[0]) {
 // GitHub issue #559: this CPU's current syscall is a counted ext2 reader
 // and owes ext2_read_leave. Kept out of the scratch above: it is state one
 // function leaves for another, not per-call scratch.
-private let mut syscall_ext2_reader: [bool; KERNEL_MAX_CORES];
+// A per-CPU store (#704, #981), reached only with the CpuHere a preempt_off
+// block mints; an MPIDR beyond KERNEL_MAX_CORES stops in the mint instead of
+// sharing core 0's flag.
+struct per_cpu SyscallExt2Reader {
+    private reading: bool;
+}
+private let mut syscall_ext2_reader: [SyscallExt2Reader; KERNEL_MAX_CORES];
 
-// Syscall dispatch retains the non-preemptible, non-migrating per-CPU
-// contract. Check affinity at the array boundary and preserve slot zero
-// for an affinity outside the maintained layout.
-private fn syscall_scratch_cpu_index() -> {0..<KERNEL_MAX_CORES as usize} {
-    let core: usize = cpu_id();
-    if (core < KERNEL_MAX_CORES) { return core; }
-    return 0;
+private fn syscall_ext2_reader_mark() {
+    preempt_off (cpu) { syscall_ext2_reader[cpu].reading = true; }
+}
+
+// Whether this CPU's syscall was a counted reader, clearing the mark: the
+// caller owes ext2_read_leave exactly when this answers true.
+private fn syscall_ext2_reader_take() -> bool {
+    preempt_off (cpu) {
+        let reading: bool = syscall_ext2_reader[cpu].reading;
+        syscall_ext2_reader[cpu].reading = false;
+        return reading;
+    }
 }
 // GitHub issue #257: connection_open, socket_buffer_length/_offset and
 // inetd_response_length used to be four more [T; TCP_CONNECTION_MAX]
@@ -3897,8 +3908,7 @@ fn kernel_syscall_child_exec_return(frame_sp: usize) !{unsafe} {
     kernel_process_exec_failure_clear();
     let result: KernelChildExecPrepareResult = kernel_process_child_exec_prepare(current_authority);
     // GitHub issue #597: the prepare was the last ext2 read of this execve.
-    if (syscall_ext2_reader[syscall_scratch_cpu_index()]) {
-        syscall_ext2_reader[syscall_scratch_cpu_index()] = false;
+    if (syscall_ext2_reader_take()) {
         ext2_read_leave();
     }
     let mut user_entry: ExecUserEntry = { 0, 0 };
@@ -5647,9 +5657,8 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
     // that is -- Block and Migrate included. ChildExec is the exception
     // (#597): its exec prepare reads the image after this returns, and
     // kernel_syscall_child_exec_return releases the registration then.
-    if (syscall_ext2_reader[syscall_scratch_cpu_index()] && action_code != 8) {
-        syscall_ext2_reader[syscall_scratch_cpu_index()] = false;
-        ext2_read_leave();
+    if (action_code != 8) {
+        if (syscall_ext2_reader_take()) { ext2_read_leave(); }
     }
     // A call that completed no longer needs core 0 (GitHub issue #9). A
     // blocked or waiting one keeps the mark until it completes, and a
@@ -6332,7 +6341,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             // process's placement for a condition no core owns.
             return syscall_finish_current(frame, SyscallAction::WaitInterrupt, current_authority);
         }
-        syscall_ext2_reader[syscall_scratch_cpu_index()] = true;
+        syscall_ext2_reader_mark();
     }
     kernel_init_boot_fixture_poll(current_authority);
     kernel_syscall_persistent_shell_checkpoint_selected();
