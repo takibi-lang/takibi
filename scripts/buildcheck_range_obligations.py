@@ -47,7 +47,7 @@ from pass_line import report_pass
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 FETCH = ROOT / "scripts" / "fetch_model_tools.sh"
-HEADER = "; takibi-range-obligation v1"
+HEADER = "; takibi-range-obligation v2"
 # GitHub issue #954: initialization coverage claims (lib/init_pred.ml) share
 # the directory, naming and cache. Their cold z3 time has a budget, reported
 # as a share like the #923 compile allocation budget.
@@ -302,6 +302,11 @@ fn widest(x: u64, y: u64) -> u64 {
     return m;
 }
 
+fn fold956(x: u64) -> u64 {
+    let m = x & (0xFFFFFFFFFFFFFFFF / 64);
+    return m;
+}
+
 fn main() -> i32 {
     return wrap(10, 50) as i32;
 }
@@ -402,6 +407,17 @@ def control(takibi: str) -> int:
               "reported with a counterexample")
         return 1
     print(planted[0])
+    # GitHub issue #960: #956's native fold, planted: the mask
+    # 0xFFFFFFFFFFFFFFFF / 64 read as 0 claims {0..<1}. The obligation spells
+    # the mask's expression, so z3 folds it at u64 and refutes the claim.
+    fold_planted = [f for f in failures
+                    if ": sat " in f and "rule: band" in f
+                    and "claim: {0..<1 as u64}" in f and "counterexample" in f]
+    if len(fold_planted) != 1:
+        print("\n".join(failures))
+        print("FAIL range-obligation control: #956's planted native fold "
+              "(#960) was not reported with a counterexample")
+        return 1
     report_pass("range-obligation-control",
                 "z3 reports #935's planted unsigned-Sub range, #961's "
                 "planted min/max range (#984), a planted "

@@ -4114,11 +4114,11 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                            (match ty1, fold_at_ty ty1 e2 with
                             | TypeRefined (a, b, base), Some k ->
                                 refined_or_base base (Type_inf.checked_add a k) (Type_inf.checked_add b k)
-                                  ~ob:(e.loc, Range_obligation.Add, Range_obligation.Range (a, b), Some (Range_obligation.Const k))
+                                  ~ob:(e.loc, Range_obligation.Add, Range_obligation.Range (a, b), Some (Range_obligation.Const e2))
                             | _ -> (match ty2, fold_at_ty ty2 e1 with
                                     | TypeRefined (c, d, base), Some k ->
                                         refined_or_base base (Type_inf.checked_add c k) (Type_inf.checked_add d k)
-                                          ~ob:(e.loc, Range_obligation.Add, Range_obligation.Const k, Some (Range_obligation.Range (c, d)))
+                                          ~ob:(e.loc, Range_obligation.Add, Range_obligation.Const e1, Some (Range_obligation.Range (c, d)))
                                     | _ -> canon_ty ty1))
                      in
                      (ret_ty, sum)))
@@ -4144,7 +4144,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                       (match ty1, fold_at_ty ty1 e2 with
                        | TypeRefined (a, b, base), Some k ->
                            refined_or_base base (Type_inf.checked_sub a k)
-                             ~ob:(e.loc, Range_obligation.Sub, Range_obligation.Range (a, b), Some (Range_obligation.Const k))
+                             ~ob:(e.loc, Range_obligation.Sub, Range_obligation.Range (a, b), Some (Range_obligation.Const e2))
                              (Type_inf.checked_sub b k)
                        | _ -> canon_ty ty1)
                 in
@@ -4157,12 +4157,12 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            let ret_ty = match ty1, k2, ty2, k1 with
              | TypeRefined (a, b, base), Some k, _, _ when k > 0 ->
                  refined_or_base base (Type_inf.checked_mul a k)
-                   ~ob:(e.loc, Range_obligation.Mul, Range_obligation.Range (a, b), Some (Range_obligation.Const k))
+                   ~ob:(e.loc, Range_obligation.Mul, Range_obligation.Range (a, b), Some (Range_obligation.Const e2))
                    (Option.bind (Type_inf.checked_mul (b - 1) k)
                       (fun t -> Type_inf.checked_add t 1))
              | _, _, TypeRefined (a, b, base), Some k when k > 0 ->
                  refined_or_base base (Type_inf.checked_mul a k)
-                   ~ob:(e.loc, Range_obligation.Mul, Range_obligation.Const k, Some (Range_obligation.Range (a, b)))
+                   ~ob:(e.loc, Range_obligation.Mul, Range_obligation.Const e1, Some (Range_obligation.Range (a, b)))
                    (Option.bind (Type_inf.checked_mul (b - 1) k)
                       (fun t -> Type_inf.checked_add t 1))
              | TypeRefined (a, b, base), _, TypeRefined (c, d, _), _ ->
@@ -4186,7 +4186,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            let ret_ty = match Type_inf.fold_at_base (Types.of_ast (canon_ty ty1)) e with
              | Some k ->
                  let ob = match fold_at_ty ty1 e1, fold_at_ty ty1 e2 with
-                   | Some x, Some y -> Some (e.loc, Range_obligation.Div, Range_obligation.Const x, Some (Range_obligation.Const y))
+                   | Some _, Some _ -> Some (e.loc, Range_obligation.Div, Range_obligation.Const e1, Some (Range_obligation.Const e2))
                    | _ -> None in
                  refined_or_base ?ob (canon_ty ty1) (Some k) (Type_inf.checked_add k 1)
              | None -> ty1
@@ -4231,11 +4231,11 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
              match fold_at_ty ty1 e2 with
              | Some k when k >= 0 ->
                  refined_or_base (canon_ty ty1) (Some 0) (Type_inf.checked_add k 1)
-                   ~ob:(e.loc, Range_obligation.Band, obligation_operand ty1, Some (Range_obligation.Const k))
+                   ~ob:(e.loc, Range_obligation.Band, obligation_operand ty1, Some (Range_obligation.Const e2))
              | _ -> (match fold_at_ty ty1 e1 with
                      | Some k when k >= 0 ->
                          refined_or_base (canon_ty ty1) (Some 0) (Type_inf.checked_add k 1)
-                           ~ob:(e.loc, Range_obligation.Band, Range_obligation.Const k, Some (obligation_operand ty2))
+                           ~ob:(e.loc, Range_obligation.Band, Range_obligation.Const e1, Some (obligation_operand ty2))
                      | _ -> canon_ty ty1)
            in
            (ret_ty, build_and v1 v2 "andtmp" builder)
@@ -4258,10 +4258,10 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                  (match ty1 with
                   | TypeRefined (lo, _, base) when lo >= 0 ->
                       refined_or_base base (Some 0) (Some m)
-                        ~ob:(e.loc, Range_obligation.Mod, obligation_operand ty1, Some (Range_obligation.Const m))
+                        ~ob:(e.loc, Range_obligation.Mod, obligation_operand ty1, Some (Range_obligation.Const e2))
                   | _ when is_unsigned ty1 ->
                       refined_or_base ty1 (Some 0) (Some m)
-                        ~ob:(e.loc, Range_obligation.Mod, obligation_operand ty1, Some (Range_obligation.Const m))
+                        ~ob:(e.loc, Range_obligation.Mod, obligation_operand ty1, Some (Range_obligation.Const e2))
                   | _ -> canon_ty ty1)
              | _ -> canon_ty ty1
            in
@@ -6112,7 +6112,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
         | Some (lo, hi) ->
             let operand (ae : Ast.expr) r =
               match Type_inf.bound_at_base (Types.of_ast base) ae, r with
-              | Some k, _ -> Range_obligation.Const k
+              | Some _, _ -> Range_obligation.Const ae
               | None, Some (x, y) -> Range_obligation.Range (x, y)
               | None, None -> Range_obligation.Any in
             let rule = if fname = "min" then Range_obligation.Min

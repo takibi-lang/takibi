@@ -11,9 +11,9 @@
    `sat` comes with a counterexample. scripts/buildcheck_range_obligations.py
    runs z3 on every file.
 
-   File format (version 1; docs/RANGE_OBLIGATIONS.md is the reference):
+   File format (version 2, #960; docs/RANGE_OBLIGATIONS.md is the reference):
 
-     ; takibi-range-obligation v1
+     ; takibi-range-obligation v2
      ; rule: <add|sub|mul|div|mod|band|min|max|cast>
      ; claim: {lo..<hi as T}
      ; site: file:line:col          (one line per site, sorted)
@@ -27,8 +27,8 @@
 
    Ranges are compared at width W+2 after extending the value by its
    signedness, so a bound such as hi = 2^W (u8's 256) is representable and
-   every comparison is a plain signed comparison. A constant operand is the
-   literal reduced modulo 2^W, which is what the machine holds. The site
+   every comparison is a plain signed comparison. A constant operand is its
+   source expression at W (const_expr, #960), never the checker's fold. The site
    lines are comments; the obligation's identity (and file name) is the MD5
    of the remaining text, so an obligation shared by many sites, or derived
    by both type_inf.ml and llvm_gen.ml, is written and solved once. *)
@@ -36,7 +36,13 @@
 type operand =
   | Range of int * int   (* known [lo, hi) *)
   | Any                  (* any value of the operand's width *)
-  | Const of int         (* a compile-time literal *)
+  | Const of Ast.expr    (* GitHub issue #960: a compile-time constant, as
+                            its SOURCE expression (literals, const names,
+                            + - * /). The obligation spells the expression
+                            in QF_BV at the operand's width, so z3 folds it
+                            itself; the checker's folded value is never
+                            written, and a wrong fold (#956, #961) is a
+                            counterexample instead of an assumption. *)
 
 type rule =
   | Add | Sub | Mul | Div | Mod | Band
@@ -80,6 +86,37 @@ let in_range ~signed name w lo hi =
   Printf.sprintf "(and (bvsle %s %s) (bvslt %s %s))"
     (bv lo x) (ext ~signed name) (ext ~signed name) (bv hi x)
 
+(* GitHub issue #960: a constant operand's source expression in QF_BV at
+   width w. A literal is its 64-bit pattern's low w bits (the value the
+   machine holds: 0xFFFFFFFFFFFFFFFF is all ones, whatever the checker's
+   native int reads); a const name is its declared literal
+   (Const_env.raw_literal, the pattern, not the checker's reading); each
+   step is the machine operation at w, by the operand's signedness. The
+   shapes are exactly Const_env.folded_value's, which every fold the
+   checker turns into a Const goes through; anything else is a compiler
+   bug, refused loudly. *)
+let bv64 (n : Int64.t) w =
+  "#b" ^ String.init w (fun i ->
+    let bit = w - 1 - i in
+    if Int64.logand (Int64.shift_right_logical n bit) 1L = 1L then '1' else '0')
+
+let rec const_expr ~signed w (e : Ast.expr) =
+  let go = const_expr ~signed w in
+  match e.Ast.desc with
+  | Ast.IntLit n -> bv64 n w
+  | Ast.Var name ->
+      (match Const_env.raw_literal name with
+       | Some n -> bv64 n w
+       | None -> failwith ("range obligation: constant '" ^ name ^ "' has no literal"))
+  | Ast.Call ("i32_min", []) -> bv64 (-2147483648L) w
+  | Ast.Call ("i32_max", []) -> bv64 2147483647L w
+  | Ast.BinOp (Ast.Add, a, b) -> Printf.sprintf "(bvadd %s %s)" (go a) (go b)
+  | Ast.BinOp (Ast.Sub, a, b) -> Printf.sprintf "(bvsub %s %s)" (go a) (go b)
+  | Ast.BinOp (Ast.Mul, a, b) -> Printf.sprintf "(bvmul %s %s)" (go a) (go b)
+  | Ast.BinOp (Ast.Div, a, b) ->
+      Printf.sprintf "(%s %s %s)" (if signed then "bvsdiv" else "bvudiv") (go a) (go b)
+  | _ -> failwith "range obligation: a constant operand outside Const_env.folded_value's shapes"
+
 let rule_name = function
   | Add -> "add" | Sub -> "sub" | Mul -> "mul" | Div -> "div"
   | Mod -> "mod" | Band -> "band" | Min -> "min" | Max -> "max"
@@ -88,7 +125,7 @@ let rule_name = function
 let body (o : t) =
   let buf = Buffer.create 512 in
   let line s = Buffer.add_string buf s; Buffer.add_char buf '\n' in
-  line "; takibi-range-obligation v1";
+  line "; takibi-range-obligation v2";
   line ("; rule: " ^ rule_name o.rule);
   line (Printf.sprintf "; claim: {%d..<%d as %s}" o.lo o.hi o.type_name);
   line "(set-logic QF_BV)";
@@ -96,7 +133,10 @@ let body (o : t) =
     | Cast (w, s) -> w, s
     | _ -> o.bits, o.signed in
   let operand name w signed = function
-    | Const k -> bv k w
+    | Const e ->
+        line (Printf.sprintf "(define-fun %s () (_ BitVec %d) %s)" name w
+                (const_expr ~signed w e));
+        name
     | Range (lo, hi) ->
         line (Printf.sprintf "(declare-const %s (_ BitVec %d))" name w);
         line (Printf.sprintf "(assert %s)" (in_range ~signed name w lo hi));
@@ -180,6 +220,15 @@ let fault_unsigned_negative_lo = ref false
    #961's min/max placeholder, an unknown 64-bit unsigned upper bound read
    as 10^9, so the control shows z3 reports a wrong min/max range. *)
 let fault_min_max_placeholder = ref false
+
+(* Fault control only, set by the same flag (GitHub issue #960): the three
+   historical misreadings of a constant, planted so the control shows the
+   obligation's own expression catches each. #956: a fold on native ints
+   (0xFFFFFFFFFFFFFFFF / 64 is 0). #961: a bare leaf read natively
+   (0xFFFFFFFFFFFFFFFF is -1). #983: an init leaf read natively. *)
+let fault_native_fold = ref false
+let fault_native_leaf = ref false
+let fault_native_init_leaf = ref false
 
 (* GitHub issue #954: an obligation whose text another module built (an
    initialization coverage claim, Init_pred.obligation). It shares the

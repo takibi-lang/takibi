@@ -378,6 +378,9 @@ let fold_limits_of_bits ~signed bits =
 (* ?bound: [e] is an exclusive upper bound (a for-loop's hi), which may be
    one past the base's largest value. *)
 let fold_at_base ?(bound = false) base e =
+  (* fold-not-proof: fault control only (#960), plants #956's native fold
+     so the range obligation control shows z3 refutes it. *)
+  if !Range_obligation.fault_native_fold then Const_env.folded_value e else
   match repr base with
   | TI8 | TI16 | TI32 | TI64 | TIsize | TU8 | TU16 | TU32 | TU64 | TUsize ->
       (match product_limit_of_ty (repr base) with
@@ -402,6 +405,9 @@ let fold_at_base ?(bound = false) base e =
    never through a raw Const_env.bound_value
    (scripts/check_proof_fold_width.py). *)
 let bound_at_base ?bound base (e : Ast.expr) =
+  (* fold-not-proof: fault control only (#960), plants #961's native leaf
+     reading so the range obligation control shows z3 refutes it. *)
+  if !Range_obligation.fault_native_leaf then Const_env.bound_value e else
   match e.Ast.desc with
   | Ast.IntLit _ | Ast.Var _ -> fold_at_base ?bound base e
   | _ -> None
@@ -3650,7 +3656,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                      unify_at e2.loc t2 base;
                      refined_or_base base (checked_add a k) (checked_add b k)
                        ~ob:(e.loc, Range_obligation.Add, Range_obligation.Range (a, b),
-                            Some (Range_obligation.Const k))
+                            Some (Range_obligation.Const e2))
                  | None ->
                      unify_at e2.loc (canon_ty t2) base;
                      base)
@@ -3659,7 +3665,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                  | Some k ->
                      unify_at e1.loc t1 base;
                      refined_or_base base (checked_add c k) (checked_add d k)
-                       ~ob:(e.loc, Range_obligation.Add, Range_obligation.Const k,
+                       ~ob:(e.loc, Range_obligation.Add, Range_obligation.Const e1,
                             Some (Range_obligation.Range (c, d)))
                  | None ->
                      unify_at e1.loc (canon_ty t1) base;
@@ -3720,7 +3726,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                           unify_at e2.loc t2 base;
                           refined_or_base base (checked_sub a k) (checked_sub b k)
                             ~ob:(e.loc, Range_obligation.Sub, Range_obligation.Range (a, b),
-                                 Some (Range_obligation.Const k))
+                                 Some (Range_obligation.Const e2))
                       | None ->
                           unify_at e2.loc (canon_ty t2) base;
                           base))
@@ -3732,7 +3738,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                  | Some k, TRefinedInt (c, d, base) ->
                      unify_at e1.loc t1 base;
                      refined_or_base base (checked_sub k (d - 1))
-                       ~ob:(e.loc, Range_obligation.Sub, Range_obligation.Const k,
+                       ~ob:(e.loc, Range_obligation.Sub, Range_obligation.Const e1,
                             Some (Range_obligation.Range (c, d)))
                        (Option.bind (checked_sub k c) (fun t -> checked_add t 1))
                  | _ ->
@@ -3752,12 +3758,12 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                 unify_at e2.loc t2 base;
                 refined_or_base base (checked_mul a k)
                   ~ob:(e.loc, Range_obligation.Mul, Range_obligation.Range (a, b),
-                       Some (Range_obligation.Const k))
+                       Some (Range_obligation.Const e2))
                   (Option.bind (checked_mul (b - 1) k) (fun t -> checked_add t 1))
             | _, _, TRefinedInt (a, b, base), Some k when k > 0 ->
                 unify_at e1.loc t1 base;
                 refined_or_base base (checked_mul a k)
-                  ~ob:(e.loc, Range_obligation.Mul, Range_obligation.Const k,
+                  ~ob:(e.loc, Range_obligation.Mul, Range_obligation.Const e1,
                        Some (Range_obligation.Range (a, b)))
                   (Option.bind (checked_mul (b - 1) k) (fun t -> checked_add t 1))
             | TRefinedInt (a, b, base1), _, TRefinedInt (c, d, base2), _ ->
@@ -3785,9 +3791,9 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            (match fold_at_base ct1 e with
             | Some k ->
                 let ob = match fold_at_ty ct1 e1, fold_at_ty ct1 e2 with
-                  | Some x, Some y ->
-                      Some (e.loc, Range_obligation.Div, Range_obligation.Const x,
-                            Some (Range_obligation.Const y))
+                  | Some _, Some _ ->
+                      Some (e.loc, Range_obligation.Div, Range_obligation.Const e1,
+                            Some (Range_obligation.Const e2))
                   | _ -> None in
                 refined_or_base ?ob ct1 (Some k) (checked_add k 1)
             | None -> ct1)
@@ -3826,11 +3832,11 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                  | TRefinedInt (lo, _, _) when lo >= 0 ->
                      refined_or_base ct1 (Some 0) (Some m)
                        ~ob:(e.loc, Range_obligation.Mod, obligation_operand t1,
-                            Some (Range_obligation.Const m))
+                            Some (Range_obligation.Const e2))
                  | t when is_unsigned_ty t ->
                      refined_or_base ct1 (Some 0) (Some m)
                        ~ob:(e.loc, Range_obligation.Mod, obligation_operand t1,
-                            Some (Range_obligation.Const m))
+                            Some (Range_obligation.Const e2))
                  | _ -> ct1)
             | _ -> ct1)
        | Or | And ->
@@ -3862,11 +3868,11 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
             | Some k when k >= 0 ->
                 refined_or_base ct1 (Some 0) (checked_add k 1)
                   ~ob:(e.loc, Range_obligation.Band, obligation_operand t1,
-                       Some (Range_obligation.Const k))
+                       Some (Range_obligation.Const e2))
             | _ -> (match fold_at_ty ct1 e1 with
                     | Some k when k >= 0 ->
                         refined_or_base ct1 (Some 0) (checked_add k 1)
-                          ~ob:(e.loc, Range_obligation.Band, Range_obligation.Const k,
+                          ~ob:(e.loc, Range_obligation.Band, Range_obligation.Const e1,
                                Some (obligation_operand t2))
                     | _ -> ct1))
        | Bor | Bxor | Shr | Shl ->
@@ -6001,7 +6007,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            (match min_max_range fname base ra rb with
             | Some (lo, hi) ->
                 let operand (ae : Ast.expr) r = match bound_at_base base ae, r with
-                  | Some k, _ -> Range_obligation.Const k
+                  | Some _, _ -> Range_obligation.Const ae
                   | None, Some (x, y) -> Range_obligation.Range (x, y)
                   | None, None -> Range_obligation.Any in
                 let rule = if fname = "min" then Range_obligation.Min

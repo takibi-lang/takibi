@@ -12,9 +12,20 @@
 
 let table : (string, int) Hashtbl.t = Hashtbl.create 8
 
+(* GitHub issue #960: each recorded constant's declared literal as its
+   64-bit pattern, NOT the native reading [table] holds. A range
+   obligation spells a const reference with this, so z3 reads the literal
+   at the operand's width independently of the checker. *)
+let raw_table : (string, Int64.t) Hashtbl.t = Hashtbl.create 8
+
+let raw_literal name = Hashtbl.find_opt raw_table name
+
 let reset () =
   Hashtbl.reset table;
-  Option.iter (fun n -> Hashtbl.replace table "DMA_CACHE_LINE" n)
+  Hashtbl.reset raw_table;
+  Option.iter (fun n ->
+      Hashtbl.replace table "DMA_CACHE_LINE" n;
+      Hashtbl.replace raw_table "DMA_CACHE_LINE" (Int64.of_int n))
     (Target_info.dma_cache_line ())
 
 let is_builtin = Language_words.is_predeclared_name
@@ -28,6 +39,7 @@ let find name = Hashtbl.find_opt table name
 let define_if_literal name (init_opt : Ast.expr option) =
   match init_opt with
   | Some { Ast.desc = Ast.IntLit n; _ } ->
+      Hashtbl.replace raw_table name n;
       (* IntLit's Int64.t payload can hold a genuinely 64-bit value, but
          this table only ever backs small-number proof sites. A value too
          large to narrow safely (see Ast.int_of_intlit) is simply not

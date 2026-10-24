@@ -188,7 +188,12 @@ let () =
             check's failing control; never used in a real build. *)
          Takibi.Range_obligation.fault_unsigned_negative_lo := true;
          (* #984: and #961's min/max placeholder range. *)
-         Takibi.Range_obligation.fault_min_max_placeholder := true
+         Takibi.Range_obligation.fault_min_max_placeholder := true;
+         (* #960: and the three native constant readings (#956, #961,
+            #983), which each obligation's own expression must refute. *)
+         Takibi.Range_obligation.fault_native_fold := true;
+         Takibi.Range_obligation.fault_native_leaf := true;
+         Takibi.Range_obligation.fault_native_init_leaf := true
      | "--trace-init-flow" ->
          (* GitHub issue #976: print FUNC's init state after each
             statement (docs/VERIFICATION_DESIGN.md). *)
