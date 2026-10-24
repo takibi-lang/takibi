@@ -68,6 +68,8 @@ fn contention_probes() !{unsafe} {
     pool_lock_wait_pause(true);
     contention_probes_run();
     pool_lock_wait_pause(false);
+    // GitHub issue #953: after the pause, so the count is on.
+    tcp_pool_lock_wait_cost_log();
 }
 
 private fn contention_probes_run() !{unsafe} {

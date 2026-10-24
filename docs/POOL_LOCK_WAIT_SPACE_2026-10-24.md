@@ -91,3 +91,12 @@ Final size against origin/main d6290064 (scripts/space_delta.py): text
 `pool_lock_wait_cores` 512 B, `pool_lock_wait_paused` 8 B; on RPi5 the
 BSS total is unchanged by alignment). usable_ram_start unchanged on both
 targets: no allocator page cost.
+
+## Standing cost line (same day)
+
+The probe is now permanent: `RECORDED pool lock wait cost:` (kernel/net/tcp.tkb,
+called at the end of contention_probes), with a 1 ns per pair ceiling in
+scripts/validate_parked_triggers.py. With it, against origin/main d6290064:
+text +1420 B (QEMU) / +1436 B (RPi5), data +16 B, BSS +528 B (QEMU);
+usable_ram_start unchanged on both targets, so the probe ships in the
+production image rather than behind a build flag.

@@ -1307,6 +1307,48 @@ fn tcp_pin_cost_clock() -> i64 {
     return ticks;
 }
 
+// GitHub issue #953: the production wrapper without its contention count,
+// only so the cost line below can compare the two.
+private fn tcp_connection_pool_lock_uncounted(
+        pool: *RegionPool(TcpConnection) @ conns)
+        -> RegionPoolGuard(TcpConnection)[conns] !{unsafe, acquires_lock_40_tcp_connection_pool, single_instance_lock,
+          lock_guard_40_tcp_connection_pool} {
+    let flags: usize = mutex_irq_save();
+    return region_pool_lock_saving(pool, flags);
+}
+
+// GitHub issue #953: what the pool lock wait count adds to an uncontended
+// lock pair. The least of three samples of 4096 pairs each, uncounted and
+// production wrapper; scripts/validate_parked_triggers.py fails the RPi5
+// lane when the difference passes 1 ns per pair. Run by core 0 with the
+// peers idle, so the lock is uncontended.
+fn tcp_pool_lock_wait_cost_log() !{unsafe, acquires_lock_40_tcp_connection_pool, single_instance_lock} {
+    let mut plain: i64 = 0;
+    let mut counted: i64 = 0;
+    for sample: usize in 0..<3 {
+        let s0: i64 = tcp_pin_cost_clock();
+        for round: usize in 0..<4096 {
+            let guard = tcp_connection_pool_lock_uncounted(&tcp_connection_pool);
+            tcp_connection_pool_unlock(guard);
+        }
+        let s1: i64 = tcp_pin_cost_clock();
+        for round: usize in 0..<4096 {
+            let guard = tcp_connection_pool_lock(&tcp_connection_pool);
+            tcp_connection_pool_unlock(guard);
+        }
+        let s2: i64 = tcp_pin_cost_clock();
+        if (sample == 0 || s1 - s0 < plain) { plain = s1 - s0; }
+        if (sample == 0 || s2 - s1 < counted) { counted = s2 - s1; }
+    }
+    kernel_boot_log("RECORDED pool lock wait cost: pairs=4096 plain=");
+    uart_put_udec(plain as usize);
+    kernel_boot_log(" counted=");
+    uart_put_udec(counted as usize);
+    kernel_boot_log(" freq=");
+    uart_put_udec(read_cntfrq() as usize);
+    kernel_boot_log("\n");
+}
+
 // Empty critical-section cost, separate from handle and object-lock work.
 fn tcp_connection_pool_lock_cost() -> i64 !{unsafe} {
     let start: i64 = tcp_pin_cost_clock();

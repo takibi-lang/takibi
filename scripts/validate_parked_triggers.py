@@ -43,6 +43,16 @@ Thresholds and their derivation:
   five runs; if an unchanged tree trips it, widen it from more runs
   rather than reopening #680.
 
+Cost ceiling of the counter itself (#953): the #680 counter sits on every
+production pool lock acquire, so its own cost must stay out of the hot
+path. `RECORDED pool lock wait cost: pairs=N plain=P counted=C freq=F`
+gives the least of three samples of N uncontended tcp_connection pool
+lock/unlock pairs through the wrapper without the count (P) and through
+the production wrapper (C). Fail when (C - P) / N / F exceeds
+COUNTER_CEILING_NS. Measured 2026-10-24: +0.1..0.2 ns per pair (24.5 ns
+pair); counting every acquire had cost +6.1 ns, an out-of-line held check
++2.6 ns. This is not a parked issue: it fails naming #953.
+
 Controls: scripts/check_parked_triggers_controls.py.
 """
 
@@ -56,6 +66,11 @@ from pass_line import report_pass
 # Contended production pool lock acquires per bounded suite, RPi5,
 # 2026-10-24 (the highest of five runs).
 BASELINE_680 = 2739
+
+COUNTER_CEILING_NS = 1.0
+COST_LINE = re.compile(
+    r"RECORDED pool lock wait cost: pairs=(\d+) plain=(\d+) counted=(\d+) "
+    r"freq=(\d+)\s*$")
 
 PAGE_RUN_LINE = re.compile(
     r"RECORDED page run allocator: calls=\d+ visits=\d+ ticks=\d+ "
@@ -106,9 +121,29 @@ TRIGGERS = (
 )
 
 
+def counter_cost(lines):
+    """Failures of the #953 counter cost ceiling."""
+    try:
+        pairs, plain, counted, freq = (int(x) for x in one_match(
+            lines, COST_LINE, "RECORDED pool lock wait cost:"))
+    except Unreadable as error:
+        return [f"FAIL pool-lock-counter-cost (#953): cannot read its "
+                f"measurement ({error})"]
+    if pairs == 0 or freq == 0 or plain == 0:
+        return ["FAIL pool-lock-counter-cost (#953): pairs, plain or freq is 0"]
+    extra_ns = (counted - plain) * 1e9 / freq / pairs
+    if extra_ns > COUNTER_CEILING_NS:
+        return [f"FAIL pool-lock-counter-cost (#953): the pool lock wait "
+                f"count adds {extra_ns:.2f} ns per uncontended lock pair, over "
+                f"{COUNTER_CEILING_NS} ns (plain={plain} counted={counted} "
+                f"pairs={pairs} freq={freq}). Keep the uncontended path free "
+                f"of counting (kernel/kernel/pool_lock_wait.tkb)."]
+    return []
+
+
 def evaluate(lines, triggers=TRIGGERS):
     """(failures, judged) for one log's lines."""
-    failures = []
+    failures = counter_cost(lines)
     for issue, about, measure, unit, threshold in triggers:
         try:
             value, detail = measure(lines)
