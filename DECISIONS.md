@@ -231,6 +231,11 @@ condition below applies, and reports the land afterwards.
   precedent). Submit-only NIC TX (#972) waits with TCP throughput work.
   [active] #846 #972
 
+- 2026-10-24 Priorities: DDB and the stop/crash paths aim at "consistent and
+  works reasonably" (#933 kept the quiescent-only reboot; #980, #957-#959
+  are low priority); spare capacity goes to memory safety, multicore and
+  the staged refinement/z3/proof-assistant review (#954, #955). [active] #933 #980
+
 ## Size and performance
 
 - 2026-10-13 Dead code is removed by the linker (--gc-sections), not by more
