@@ -2,6 +2,7 @@ use "kernel/mm/page.tkb";
 use "kernel/kernel/pool_lock_wait.tkb";
 use "kernel/mm/memory_map.tkb";
 use "kernel/lib/execution_model.tkb";
+use "kernel/kernel/cpu_authority.tkb";
 use "kernel/arch/arm64/mm/mmu.tkb";
 use "kernel/arch/arm64/mm/asid.tkb";
 
@@ -146,20 +147,28 @@ private let mut address_space_backing_missing_count:
 // gives up an exiting process's root before the process can be reaped --
 // through its successor's activation, or, going idle, by activating root 0
 // in kernel_process_stack_idle_complete under the run lock.
-private let mut address_space_active_slot: [usize; KERNEL_MAX_CORES];
-
-private fn address_space_cpu_index() -> {0..<KERNEL_MAX_CORES as usize} {
-    let core: usize = cpu_id();
-    if (core < KERNEL_MAX_CORES) { return core; }
-    return 0;
+//
+// A per-CPU store (#704): reached only as address_space_active[cpu] with the
+// CpuHere a preempt_off block mints, so no CPU can name another's slot, and
+// an MPIDR beyond KERNEL_MAX_CORES stops in the mint instead of aliasing
+// core 0's slot. The TTBR0 write and the slot it records are one region.
+struct per_cpu AddressSpaceActive {
+    private slot: usize;
 }
+
+private let mut address_space_active: [AddressSpaceActive; KERNEL_MAX_CORES];
 
 private fn address_space_active_slot_here() -> usize {
-    return address_space_active_slot[address_space_cpu_index()];
+    preempt_off (cpu) { return address_space_active[cpu].slot; }
 }
 
-private fn address_space_set_active_slot_here(slot: usize) {
-    address_space_active_slot[address_space_cpu_index()] = slot;
+// Installs a root's tables on this CPU and records which root it is.
+private fn address_space_install_here(l1_physical: usize, asid: usize,
+                                      slot: usize) {
+    preempt_off (cpu) {
+        mmu_activate_root(l1_physical, asid);
+        address_space_active[cpu].slot = slot;
+    }
 }
 
 // GitHub issue #406: how many address spaces exist right now. Root 0's
@@ -974,8 +983,7 @@ fn address_space_commit_activation(
             asid_generation_is_current(backing.asid_generation) == false) {
         return AddressSpaceActivationCommitResult::Invalid;
     }
-    mmu_activate_root(backing.l1_physical, backing.asid);
-    address_space_set_active_slot_here(checked);
+    address_space_install_here(backing.l1_physical, backing.asid, checked);
     return AddressSpaceActivationCommitResult::Activated(root);
 }
 
@@ -992,8 +1000,8 @@ fn address_space_activate_root(root: AddressSpaceRoot) {
                 let mut backing: AddressSpaceBacking = evidence.value;
                 if (backing.live) {
                     address_space_refresh_asid(evidence, &backing);
-                    mmu_activate_root(backing.l1_physical, backing.asid);
-                    address_space_set_active_slot_here(checked);
+                    address_space_install_here(backing.l1_physical,
+                                               backing.asid, checked);
                     return;
                 }
             }
@@ -1003,8 +1011,8 @@ fn address_space_activate_root(root: AddressSpaceRoot) {
     // invalid or already-released slot never reaches TTBR0_EL1.
     let fallback: usize = 0;
     let mut fallback_backing: AddressSpaceBacking = address_space_backing_read_existing(address_space_boot_root());
-    mmu_activate_root(fallback_backing.l1_physical, fallback_backing.asid);
-    address_space_set_active_slot_here(0);
+    address_space_install_here(fallback_backing.l1_physical,
+                               fallback_backing.asid, 0);
 }
 
 must_use variant AddressSpacePteWriteResult {
@@ -1656,7 +1664,7 @@ fn address_space_asid_rollover_probe() -> bool {
 
 // GitHub issue #479. Re-derived as each shared scalar moved to its real axis.
 //
-// address_space_active_slot USED to be the interesting one: it records
+// address_space_active USED to be the interesting one: it records
 // which address space is active, which is a property of a core rather than
 // of the kernel, and it was a single global. That is fixed -- it is an
 // array indexed by cpu_id() now, the same shape execution_state got --

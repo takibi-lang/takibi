@@ -117,13 +117,10 @@ private fn process_image_set_pair_source(slot: borrow ProcessImageSlot[0],
     let mut source: ProcessImageExt2Source = { mount, inode, length };
     process_image_staging[slot.index].pair_source = ProcessImageSourceState::Ext2(source);
 }
-// GitHub issue #448: how many pages the LAST reap gave back, which is a
-// report about an event rather than about a process, so it stays here.
-// What used to sit beside it -- the source root, the destination root, and
-// the running page count of "the clone in flight" -- moved into the
-// destination's own ProcessImageRecord, because there is no longer one
-// clone in flight. See ProcessCloneVm* below for what that ceiling cost.
-private let mut clone_last_reaped_count: [usize; KERNEL_MAX_CORES];
+// GitHub issue #448: the source root, the destination root, and the running
+// page count of "the clone in flight" live in the destination's own
+// ProcessImageRecord, because there is no longer one clone in flight. See
+// ProcessCloneVm* below for what that ceiling cost.
 
 // GitHub issues #258 and #264: one persistent record per address-space
 // root, replacing the prior ProcessLayout table plus the separate flattened
@@ -792,7 +789,7 @@ fn process_image_record_release_words(root: usize,
 // wrong root without needing the fast path's help.
 //
 // A context array indexed by cpu_id(), sized by KERNEL_MAX_CORES, the same shape
-// execution_state and address_space_active_slot have. Not a lock: the
+// execution_state and address_space_active have. Not a lock: the
 // state is not shared, it is per-core state that was stored as though it
 // were global, and making two cores agree on it would be agreeing on the
 // wrong thing.
@@ -1288,7 +1285,6 @@ fn process_image_clone_vm_reap(dest_space: AddressSpaceRoot) -> ProcessCloneVmRe
     if (process_image_record_read(dest).clone_vm_outstanding == false) {
         return ProcessCloneVmReapResult::Missing;
     }
-    let count: usize = process_image_record_read(dest).clone_vm_page_count;
     let source: usize = process_image_record_read(dest).clone_vm_source_root;
     // The caller remains the logical current process throughout this
     // non-preemptible EL1 span. Activate the retained source before releasing
@@ -1296,7 +1292,6 @@ fn process_image_clone_vm_reap(dest_space: AddressSpaceRoot) -> ProcessCloneVmRe
     kernel_process_activate_stable_root(
         address_space_root_of_key(source));
     process_clone_vm_rollback(dest_space);
-    clone_last_reaped_count[process_image_cpu_index()] = count;
     return ProcessCloneVmReapResult::Reaped;
 }
 
@@ -2810,7 +2805,7 @@ fn process_image_gap_is_unmapped() -> bool {
 // another -- per-OPERATION state living in a global, which on two cores
 // means one answer held for two concurrent operations. It is an array
 // indexed by cpu_id() now, the same treatment execution_state and
-// address_space_active_slot got.
+// address_space_active got.
 //
 // It had already produced a real fault with only one writer: issue #437's
 // RPi5-only failure was this variable left at 0 on wait4's fast path,

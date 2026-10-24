@@ -181,7 +181,7 @@ section's entries stopped being plain unsynchronized globals:
 |---|---|
 | `page.tkb`'s `boot_page_pool` | one acquire of `page_allocator_lock` covers each allocator entry point; `page_alloc_boot`/`page_free_boot` are the MMU-off window's lock-free path, because AArch64 has no exclusives on Device memory |
 | `asid.tkb`'s `asid_next`/`asid_generation` | minted under `asid_lock`; the file's execution-model assertion was deleted, since nothing there is left to assert |
-| `address_space.tkb`'s `address_space_active_slot` | now `[usize; KERNEL_MAX_CORES]` indexed by `cpu_id()` -- it was never shared state, it was PER-CORE state stored as one global |
+| `address_space.tkb`'s `address_space_active` | a per-CPU store (`struct per_cpu`, #704), reached only with the CPU authority a `preempt_off` block mints -- it was never shared state, it was PER-CORE state stored as one global |
 | `process_image.tkb`'s `process_image_contexts` | the per-CPU target root as a closed state; Set(root 0) differs from Unset without a separate flag. The ext2 exec staging (source, pair source, block buffer) is a `ProcessImageSlot` pool slot (#638), not per-CPU |
 
 The image context holds only the target root, one per CPU; the ext2 staging
@@ -207,13 +207,12 @@ parking lot for a linear exec image, is gone the same way
 `tcp_connection_store` went -- the root's own record holds what the reap
 path asks of an installed image), the ext2-image-loading staging fields
 (the source and pair_source states in `process_image_staging`, one
-per `ProcessImageSlot`), and
-`clone_last_reaped_count`; `mm/address_space.tkb`'s
+per `ProcessImageSlot`); `mm/address_space.tkb`'s
 `address_space_backing_pool` (the built-in
 `RegionPool(AddressSpaceBacking)` since #672: read and written as value
 copies under a pin), its missing-backing counter
 `address_space_backing_missing_count`, the static
-`address_space_backing_root0`, and `address_space_active_slot`;
+`address_space_backing_root0`, and `address_space_active`;
 `mm/page.tkb`'s `boot_page_pool`;
 `arch/arm64/mm/asid.tkb`'s `asid_pool`.
 
@@ -228,8 +227,8 @@ page count. They were singleton by design, and the design was wrong:
 one clone in flight is a ceiling, not a fact, and a second `fork()`
 taken before the first child had `execve`d was refused with `-EAGAIN`.
 They live in the destination's own `ProcessImageRecord` now, following
-that struct's own rule. `clone_last_reaped_count` stayed, because it
-reports on the last reap rather than on a process. The physical pools
+that struct's own rule. `clone_last_reaped_count`, the last reap's page
+count, was written and never read, and was deleted (#981). The physical pools
 (`boot_page_pool`, `asid_pool`) are genuinely global machine resources,
 already SlotMap-backed with explicit exhaustion results (see
 `RESOURCE_LIMITS.md`).

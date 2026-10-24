@@ -6377,15 +6377,18 @@ private fn kernel_process_secondary_start_reserved(
 // released), so only the same pid left for KERNEL_IDLE_STARVATION_PASSES
 // consecutive empty passes on this CPU is reported, once per boot.
 const KERNEL_IDLE_STARVATION_PASSES: usize = 256;
-private let mut kernel_idle_starvation_pid: [usize; KERNEL_MAX_CORES];
-private let mut kernel_idle_starvation_passes: [usize; KERNEL_MAX_CORES];
+// Per CPU (#704): reached only with the CpuHere a preempt_off block mints.
+struct per_cpu IdleStarvation {
+    private pid: usize;
+    private passes: usize;
+}
+private let mut kernel_idle_starvation: [IdleStarvation; KERNEL_MAX_CORES];
 private let mut kernel_idle_starvation_reported: bool = false;
 
 private fn kernel_process_idle_starvation_note(
         guard: borrow ProcessRunGuard[scheduled_process_run_lock]) !{unsafe} {
     let raw_cpu: usize = cpu_id();
     if (raw_cpu >= KERNEL_MAX_CORES) { return; }
-    let cpu: {0..<KERNEL_MAX_CORES as usize} = raw_cpu;
     let mut left: usize = 0;
     let mut cursor = scheduled_process_first_slot();
     let mut walking: bool = true;
@@ -6405,13 +6408,17 @@ private fn kernel_process_idle_starvation_note(
             }
         }
     }
-    if (left == 0 || left != kernel_idle_starvation_pid[cpu]) {
-        kernel_idle_starvation_pid[cpu] = left;
-        kernel_idle_starvation_passes[cpu] = 0;
-        return;
+    let mut passes: usize = 0;
+    preempt_off (here) {
+        if (left == 0 || left != kernel_idle_starvation[here].pid) {
+            kernel_idle_starvation[here].pid = left;
+            kernel_idle_starvation[here].passes = 0;
+            return;
+        }
+        passes = kernel_idle_starvation[here].passes + 1;
+        kernel_idle_starvation[here].passes = passes;
     }
-    kernel_idle_starvation_passes[cpu] = kernel_idle_starvation_passes[cpu] + 1;
-    if (kernel_idle_starvation_passes[cpu] == KERNEL_IDLE_STARVATION_PASSES &&
+    if (passes == KERNEL_IDLE_STARVATION_PASSES &&
         kernel_idle_starvation_reported == false) {
         kernel_idle_starvation_reported = true;
         kernel_boot_log("sched: STARVED cpu=");
