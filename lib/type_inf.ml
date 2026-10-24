@@ -11221,6 +11221,17 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.FuncDef f ->
         Hashtbl.replace init_callees f.name (f.params, f.def_loc)
     | _ -> ()) prog;
+  (* GitHub issue #954: variant cases for `ensures match result`, and the
+     linear owners that make a held slot capability. *)
+  let init_variants = Hashtbl.create 32 in
+  let init_linear = Hashtbl.create 16 in
+  List.iter (function
+    | Ast.VariantDef (n, _, cases, _, _) | Ast.GenericVariantDef (n, _, _, cases, _, _) ->
+        Hashtbl.replace init_variants n
+          (List.map (fun (c, payload) -> (c, payload <> None)) cases)
+    | Ast.OwnedStructDef (n, Ast.KindLinear, _, _, _, _, _, _, _) ->
+        Hashtbl.replace init_linear n ()
+    | _ -> ()) prog;
   let init_scratch = List.filter_map (function
     | Ast.LetDef (name, Some ty, _, _, _, _, _) when Init_state.is_scratch name ->
         Some (name, ty)
@@ -11235,7 +11246,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                     | Some (fields, _, _) -> Some fields
                     | None -> None)
                   ~callee:(Hashtbl.find_opt init_callees)
-                  ~scratch:init_scratch finfo fdef
+                  ~scratch:init_scratch
+                  ~variant_cases:(Hashtbl.find_opt init_variants)
+                  ~linear_owner:(Hashtbl.mem init_linear) finfo fdef
               with
               | Types.TypeError (loc, msg) ->
                   collected_type_errors := (loc, msg) :: !collected_type_errors

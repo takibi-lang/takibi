@@ -25426,8 +25426,14 @@ let definite_init_tests =
           scratch let mut sb: S203;
           fn out(src: borrow init []const u8) -> usize { return src.len; }
           fn f() -> usize { zero_fill(sb.buf as []u8); return out(sb.buf as []u8); }");
-    t "issue #203: an element store does not initialize a scratch array"
-      (expect_type_error "'sb.buf' is uninitialized"
+    t "issue #954: element stores that miss one element leave a scratch array uninit"
+      (expect_type_error "element 1 of it"
+         "struct S203 { buf: [u8; 2]; }
+          scratch let mut sb: S203;
+          fn out(src: borrow init []const u8) -> usize { return src.len; }
+          fn f() -> usize { sb.buf[0] = 1; return out(sb.buf as []u8); }");
+    t "issue #954: element stores of every element initialize a scratch array"
+      (expect_ok
          "struct S203 { buf: [u8; 2]; }
           scratch let mut sb: S203;
           fn out(src: borrow init []const u8) -> usize { return src.len; }
@@ -25480,10 +25486,16 @@ let definite_init_tests =
       (expect_ok (rec888 ^ "fn f() -> u64 { let mut r: Rec888; r.n = 1;
          for i: usize in 0..<LEN888 { r.buf[i] = 0; }
          let mut w: Rec888 = r; return w.n; }"));
-    t "issue #888: a loop that skips element 0 is rejected"
-      (bad "for i: usize in 1..<LEN888 { r.buf[i] = 0; }");
-    t "issue #888: a loop shorter than the array is rejected"
-      (bad "for i: usize in 0..<3 { r.buf[i] = 0; }");
+    t "issue #888: a loop that skips element 0 leaves element 0 uninit"
+      (expect_type_error "element 0 of it"
+         (rec888 ^ "fn f() -> u8 { let mut r: Rec888; r.n = 1;
+            for i: usize in 1..<LEN888 { r.buf[i] = 0; } return r.buf[0]; }"));
+    t "issue #954: a loop over 1..<N initializes the elements it stores"
+      (ok "for i: usize in 1..<LEN888 { r.buf[i] = 0; }");
+    t "issue #888: a loop shorter than the array leaves the tail uninit"
+      (expect_type_error "element 3 of it"
+         (rec888 ^ "fn f() -> u8 { let mut r: Rec888; r.n = 1;
+            for i: usize in 0..<3 { r.buf[i] = 0; } return r.buf[3]; }"));
     t "issue #888: a runtime bound is rejected"
       (bad "for i: usize in 0..<s.len { if (i < 4) { r.buf[i] = 0; } }");
     t "issue #888: a store under an if is rejected"
@@ -25507,10 +25519,15 @@ let definite_init_tests =
       (bad "let mut i: usize = 0; while (i < LEN888) { r.buf[i] = 0; i = i + 1; }");
     t "issue #888: a store inside a nested loop is rejected"
       (bad "for i: usize in 0..<LEN888 { for j: usize in 0..<1 { r.buf[i] = 0; } }");
-    t "issue #888: reading the array inside the initializing loop is rejected"
-      (expect_type_error "'r.buf' is uninitialized"
+    t "issue #954: reading the element just stored inside the loop is accepted"
+      (expect_ok
          (rec888 ^ "fn f() -> u8 { let mut r: Rec888; r.n = 1; let mut x: u8 = 0;
             for i: usize in 0..<LEN888 { r.buf[i] = 0; x = r.buf[i]; }
+            return x; }"));
+    t "issue #888: reading a later element inside the initializing loop is rejected"
+      (expect_type_error "element i + 1 of it (in [i + 1, i + 2)) is not shown initialized"
+         (rec888 ^ "fn f() -> u8 { let mut r: Rec888; r.n = 1; let mut x: u8 = 0;
+            for i: usize in 0..<3 { r.buf[i] = 0; x = r.buf[i + 1]; }
             return x; }"));
   ]
 
