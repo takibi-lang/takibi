@@ -211,9 +211,9 @@ WINDOWS = {
         # reverted kernel also puts that write back.
         "check": [
             ("kernel/syscall.tkb",
-             "                return syscall_finish_current(frame, SyscallAction::Resume(zombie_pid), current_authority);\n",
-             "                return syscall_finish_current(frame, SyscallAction::Resume(\n"
-             "                    kernel_process_last_reaped_pid(current_authority)), current_authority);\n"),
+             "                return syscall_wait4_resume(frame, zombie_pid, current_authority, status_word as usize);\n",
+             "                return syscall_wait4_resume(frame,\n"
+             "                    kernel_process_last_reaped_pid(current_authority), current_authority, status_word as usize);\n"),
             ("kernel/process.tkb",
              "    execution_state[execution_cpu_index()].last_exited_child_pid =\n"
              "        scheduled_process_pid_of_handle(child);\n",

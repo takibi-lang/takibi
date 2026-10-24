@@ -4909,6 +4909,27 @@ const ProcessTraceResume: usize = 7;
 const ProcessTraceExit: usize = 8;
 const ProcessTraceReap: usize = 9;
 const ProcessTraceAddressSpaceActivate: usize = 10;
+// GitHub issue #652: the facts #633's diagnosis needed and the ring did not
+// hold. SignalRaise: a send reached a live target (subject the target, peer
+// the sender, or for an exit's SIGCHLD the child that exited); aux is the
+// signal number in bits 0..7 and the outcome in bits 8..15
+// (ProcessTraceSignal*). SignalTake: a pending caught signal was taken into
+// its handler at a return to EL0; aux the same encoding. Wait4Return: the
+// value a wait4 hands EL0 (peer word: the pid, 0 for WNOHANG, or the
+// negative errno as a two's-complement word; aux the status word written,
+// 0 when none).
+const ProcessTraceSignalRaise: usize = 11;
+const ProcessTraceSignalTake: usize = 12;
+const ProcessTraceWait4Return: usize = 13;
+// The largest event kind; `trace omit N` refuses anything above it.
+const ProcessTraceEventLast: usize = 13;
+// SignalRaise outcomes.
+const ProcessTraceSignalPending: usize = 1;    // newly pending
+const ProcessTraceSignalMerged: usize = 2;     // already pending, merged
+const ProcessTraceSignalDiscarded: usize = 3;  // unblocked and ignored
+// SignalTake outcomes.
+const ProcessTraceSignalHandler: usize = 1;    // handler frame written
+const ProcessTraceSignalFrameFault: usize = 2; // frame unwritable: SIGSEGV
 // GitHub issue #479 Group B: PER-CPU storage, one global sequence.
 //
 // This ring was one segment and one `next` counter, and `next` was a read,
@@ -5012,6 +5033,16 @@ must_use variant KernelChildExecPrepareResult {
     ImageRecordOutOfMemory;
 }
 private let mut kernel_process_trace_enabled: bool;
+// GitHub issue #652: debugger-owned filters, set from DDB (`trace omit N`,
+// `trace pid N`) or GDB, never by kernel code. A long workload's ring is
+// otherwise all AddressSpaceActivate records and one busy process's
+// resume/block pairs, and the record that answers the question has been
+// overwritten. Bit N of the mask drops event kind N; a record whose
+// SUBJECT pid is the omitted pid is dropped (`trace pid none` clears it).
+// Read only after the enabled check, so a disabled trace pays nothing.
+private let mut kernel_process_trace_omit_events: usize;
+private let mut kernel_process_trace_omit_pid_set: bool;
+private let mut kernel_process_trace_omit_pid: usize;
 
 // Layout: sequence, cpu, kind, subject pid/generation, peer
 // pid/generation, state, wait reason, root, saved SP, event-specific aux.
@@ -5073,6 +5104,13 @@ fn kernel_process_trace_record(event: usize, pid: usize, generation: usize,
                                state: usize, wait_reason: usize, root: usize,
                                saved_sp: usize, aux: usize) !{unsafe} {
     if (kernel_process_trace_enabled == false) { return; }
+    if (event < 64 && (kernel_process_trace_omit_events & (1 << event)) != 0) {
+        return;
+    }
+    if (kernel_process_trace_omit_pid_set &&
+        pid == kernel_process_trace_omit_pid) {
+        return;
+    }
     // Publish the reservation before touching the entry. An IRQ that arrives
     // while ordinary EL1 code is recording therefore receives the next slot,
     // rather than interleaving words into this one. `sequence` is written
@@ -5109,7 +5147,90 @@ fn kernel_process_trace_record(event: usize, pid: usize, generation: usize,
 }
 
 fn kernel_process_trace_enable() { kernel_process_trace_enabled = true; }
-fn kernel_process_trace_disable() { kernel_process_trace_enabled = false; }
+// GitHub issue #652: a probe that switched the trace on for its own evidence
+// hands it back to the boot's setting, not to off. Switching it off here
+// ended a debugger-enabled trace at the first probe, so a boot traced from
+// the start lost everything after the scheduler probe.
+fn kernel_process_trace_disable() {
+    kernel_process_trace_enabled = kernel_process_trace_boot_enabled;
+}
+
+// GitHub issue #652: the DDB controls. `on` also sets the boot switch, so
+// an execution reset or a probe's disable keeps it on.
+fn kernel_process_trace_debugger_set(enabled: bool) {
+    kernel_process_trace_boot_enabled = enabled;
+    kernel_process_trace_enabled = enabled;
+}
+
+fn kernel_process_trace_debugger_enabled() -> bool {
+    return kernel_process_trace_enabled;
+}
+
+// False when `event` names no kind.
+fn kernel_process_trace_debugger_omit_event(event: usize) -> bool {
+    if (event == 0 || event > ProcessTraceEventLast) { return false; }
+    kernel_process_trace_omit_events =
+        kernel_process_trace_omit_events | (1 << event);
+    return true;
+}
+
+fn kernel_process_trace_debugger_omit_pid(set: bool, pid: usize) {
+    kernel_process_trace_omit_pid_set = set;
+    kernel_process_trace_omit_pid = pid;
+}
+
+fn kernel_process_trace_debugger_keep_all() {
+    kernel_process_trace_omit_events = 0;
+    kernel_process_trace_omit_pid_set = false;
+    kernel_process_trace_omit_pid = 0;
+}
+
+fn kernel_process_trace_debugger_omitted_events() -> usize {
+    return kernel_process_trace_omit_events;
+}
+
+// The omitted pid, or None.
+must_use variant ProcessTraceOmittedPid { None; Pid(usize); }
+
+fn kernel_process_trace_debugger_omitted_pid() -> ProcessTraceOmittedPid {
+    if (kernel_process_trace_omit_pid_set) {
+        return ProcessTraceOmittedPid::Pid(kernel_process_trace_omit_pid);
+    }
+    return ProcessTraceOmittedPid::None;
+}
+
+// GitHub issue #652: a pending caught signal taken into its handler (or
+// found unwritable) on the current process.
+fn kernel_process_trace_signal_take(signum: usize, outcome: usize) !{unsafe} {
+    if (kernel_process_trace_enabled == false) { return; }
+    if (execution_state[execution_cpu_index()].current_live == false) { return; }
+    let mut current: ProcessHandle = execution_state[execution_cpu_index()].current_handle;
+    kernel_process_trace_handle_peer_pid(ProcessTraceSignalTake, current, 0,
+        (signum & 0xFF) | (outcome << 8));
+}
+
+// GitHub issue #652: the value the current process's wait4 returns to EL0
+// from the syscall itself (a zombie found, WNOHANG, or an error).
+fn kernel_process_trace_wait4_return(value: usize, status: usize) !{unsafe} {
+    if (kernel_process_trace_enabled == false) { return; }
+    if (execution_state[execution_cpu_index()].current_live == false) { return; }
+    let mut current: ProcessHandle = execution_state[execution_cpu_index()].current_handle;
+    kernel_process_trace_handle_peer_pid(ProcessTraceWait4Return, current,
+        value, status);
+}
+
+// The same for a wait4 that blocked and is completed by a child's exit:
+// `parent` is the blocked parent whose saved frame receives `value`.
+fn kernel_process_trace_wait4_deliver(parent: borrow ScheduledProcessOwner[process],
+                                      value: usize, status: usize) !{unsafe} {
+    if (kernel_process_trace_enabled == false) { return; }
+    kernel_process_trace_record(
+        ProcessTraceWait4Return,
+        scheduled_process_pid_of_slot(process_slot_of(parent.pool_index)),
+        parent.generation, value, 0, 2, 0,
+        region_held_address(parent.pool_index),
+        scheduled_process_record_owned(parent).saved_sp, status);
+}
 
 fn kernel_process_trace_fail_after_exec_requested() -> bool {
     return kernel_process_trace_fail_after_exec;
@@ -5198,6 +5319,25 @@ fn kernel_process_trace_handle(event: usize, subject: ProcessHandle,
         event, scheduled_process_pid_of_handle(subject), subject.generation,
         scheduled_process_pid_of_handle(peer), peer.generation, state_code,
         reason_code, region_held_address(subject.pool_index),
+        scheduled_process_peek_saved_sp(process_slot_of(subject.pool_index)),
+        aux);
+}
+
+// kernel_process_trace_handle with a peer that is a pid (or a returned
+// value) rather than a process: the sender of a signal, the child an exit's
+// SIGCHLD is for, wait4's result. Its peer generation word is 0.
+fn kernel_process_trace_handle_peer_pid(event: usize, subject: ProcessHandle,
+                                        peer: usize, aux: usize) !{unsafe} {
+    let state: ProcessSlotState = scheduled_process_peek_state(
+        process_slot_of(subject.pool_index));
+    let reason: ProcessWaitReason = scheduled_process_peek_wait_reason(
+        process_slot_of(subject.pool_index));
+    let state_u8: u8 = state as u8;
+    let reason_u8: u8 = reason as u8;
+    kernel_process_trace_record(
+        event, scheduled_process_pid_of_handle(subject), subject.generation,
+        peer, 0, state_u8 as usize, reason_u8 as usize,
+        region_held_address(subject.pool_index),
         scheduled_process_peek_saved_sp(process_slot_of(subject.pool_index)),
         aux);
 }
@@ -8405,6 +8545,17 @@ private fn kernel_process_signal_deliver_to(
         guard: borrow ProcessRunGuard[scheduled_process_run_lock],
         target: ProcessHandle, signum: usize, sender_pid: usize)
         -> ProcessSignalSendResult !{unsafe} {
+    return kernel_process_signal_deliver_traced(guard, target, signum,
+                                                sender_pid, sender_pid);
+}
+
+// `trace_peer` is what the lifecycle trace names as the cause (GitHub issue
+// #652): the sender, or for an exit's SIGCHLD the child that exited.
+private fn kernel_process_signal_deliver_traced(
+        guard: borrow ProcessRunGuard[scheduled_process_run_lock],
+        target: ProcessHandle, signum: usize, sender_pid: usize,
+        trace_peer: usize)
+        -> ProcessSignalSendResult !{unsafe} {
     if (signum == 0 || signum > 64 ||
         scheduled_process_handle_matches(target) == false ||
         scheduled_process_state_of_locked(guard, target) == ProcessSlotState::Exited) {
@@ -8426,8 +8577,16 @@ private fn kernel_process_signal_deliver_to(
     }
     let masked: bool = (record.signal_mask & bit) != 0 && bit != PROCESS_SIGKILL_BIT;
     if (masked == false && handled == false && terminates == false) {
+        kernel_process_trace_handle_peer_pid(ProcessTraceSignalRaise, target,
+            trace_peer, signum | (ProcessTraceSignalDiscarded << 8));
         return ProcessSignalSendResult::Delivered;
     }
+    let mut trace_outcome: usize = ProcessTraceSignalPending;
+    if ((record.pending_signals & bit) != 0) {
+        trace_outcome = ProcessTraceSignalMerged;
+    }
+    kernel_process_trace_handle_peer_pid(ProcessTraceSignalRaise, target,
+        trace_peer, signum | (trace_outcome << 8));
     // GitHub issue #885: a newly queued SIGCHLD names no child unless
     // kernel_process_signal_child_exit, its sender on an exit, says so.
     if (signum == 17 && (record.pending_signals & bit) == 0) {
@@ -8539,7 +8698,8 @@ fn kernel_process_signal_child_exit(
         was_pending = (scheduled_process_record_of_locked(guard, parent)
             .pending_signals & (1 << 16)) != 0;
     }
-    let result = kernel_process_signal_deliver_to(guard, parent, 17, 0);
+    let result = kernel_process_signal_deliver_traced(guard, parent, 17, 0,
+                                                      child_pid);
     match result {
         ProcessSignalSendResult::Missing => {}
         ProcessSignalSendResult::Delivered => {

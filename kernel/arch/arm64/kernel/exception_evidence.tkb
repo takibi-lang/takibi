@@ -1557,10 +1557,103 @@ private fn ddb_render_backtrace_test() !{unsafe} {
 // Not a pid any lane's boot reaches.
 const DDB_BT_TEST_CLAIMED_PID: usize = 999998;
 
+// GitHub issue #652: the lifecycle trace's debugger controls. They change
+// what the ring records from the next event on; `trace` still shows the
+// snapshot taken when DDB was entered.
+must_use variant DdbTraceCommand {
+    Invalid;
+    On;
+    Off;
+    KeepAll;
+    OmitEvent(usize);
+    OmitPid(usize);
+    KeepPid;
+}
+
+// The decimal number after `prefix`, or None for no digits, a non-digit or
+// an overflow.
+must_use variant DdbDecimalResult { None; Parsed(usize); }
+
+private fn ddb_parse_decimal_after(line: borrow [u8; CRASH_CONSOLE_LINE_BYTES..],
+                                   length: usize, start: usize)
+        -> DdbDecimalResult {
+    let mut value: usize = 0;
+    let mut digits: usize = 0;
+    for index: usize in 0..<32 {
+        if (index >= start && index < length) {
+            let byte: u8 = line[index];
+            if (byte < 0x30 || byte > 0x39) { return DdbDecimalResult::None; }
+            let digit: usize = (byte - 0x30) as usize;
+            if (value > (0xFFFFFFFFFFFFFFFF - digit) / 10) {
+                return DdbDecimalResult::None;
+            }
+            value = value * 10 + digit;
+            digits = digits + 1;
+        }
+    }
+    if (digits == 0) { return DdbDecimalResult::None; }
+    return DdbDecimalResult::Parsed(value);
+}
+
+private fn ddb_parse_trace(line: borrow [u8; CRASH_CONSOLE_LINE_BYTES..],
+                           length: usize) -> DdbTraceCommand {
+    if (ddb_command_is(line, length, bs"trace on")) { return DdbTraceCommand::On; }
+    if (ddb_command_is(line, length, bs"trace off")) { return DdbTraceCommand::Off; }
+    if (ddb_command_is(line, length, bs"trace all")) { return DdbTraceCommand::KeepAll; }
+    if (ddb_command_is(line, length, bs"trace pid none")) { return DdbTraceCommand::KeepPid; }
+    if (ddb_command_starts_with(line, length, bs"trace omit ")) {
+        match ddb_parse_decimal_after(line, length, 11) {
+            DdbDecimalResult::None => { return DdbTraceCommand::Invalid; }
+            DdbDecimalResult::Parsed(event) => { return DdbTraceCommand::OmitEvent(event); }
+        }
+    }
+    if (ddb_command_starts_with(line, length, bs"trace pid ")) {
+        match ddb_parse_decimal_after(line, length, 10) {
+            DdbDecimalResult::None => { return DdbTraceCommand::Invalid; }
+            DdbDecimalResult::Parsed(pid) => { return DdbTraceCommand::OmitPid(pid); }
+        }
+    }
+    return DdbTraceCommand::Invalid;
+}
+
+private fn ddb_command_trace(command: DdbTraceCommand) {
+    match command {
+        DdbTraceCommand::Invalid => {
+            ddb_puts("ddb: usage: trace [on|off|all|omit EVENT_1_TO_13|pid PID|pid none]\n");
+            return;
+        }
+        DdbTraceCommand::On => { kernel_process_trace_debugger_set(true); }
+        DdbTraceCommand::Off => { kernel_process_trace_debugger_set(false); }
+        DdbTraceCommand::KeepAll => { kernel_process_trace_debugger_keep_all(); }
+        DdbTraceCommand::OmitEvent(event) => {
+            if (kernel_process_trace_debugger_omit_event(event) == false) {
+                ddb_puts("ddb: usage: trace omit EVENT_1_TO_13\n");
+                return;
+            }
+        }
+        DdbTraceCommand::OmitPid(pid) => {
+            kernel_process_trace_debugger_omit_pid(true, pid);
+        }
+        DdbTraceCommand::KeepPid => {
+            kernel_process_trace_debugger_omit_pid(false, 0);
+        }
+    }
+    ddb_puts("ddb: trace enabled=");
+    if (kernel_process_trace_debugger_enabled()) { ddb_puts("1"); } else { ddb_puts("0"); }
+    ddb_puts(" omit=");
+    ddb_put_hex(kernel_process_trace_debugger_omitted_events());
+    ddb_puts(" omit-pid=");
+    match kernel_process_trace_debugger_omitted_pid() {
+        ProcessTraceOmittedPid::None => { ddb_puts("none"); }
+        ProcessTraceOmittedPid::Pid(pid) => { ddb_put_udec(pid); }
+    }
+    ddb_puts("\n");
+}
+
 private fn ddb_render_trace() !{unsafe} {
     ddb_puts("ddb: trace count="); ddb_put_udec(ddb_snapshot.trace_count);
     ddb_puts("\n");
-    for item: usize in 0..<16 {
+    for item: usize in 0..<KERNEL_CRASH_TRACE_EVENTS {
         if (item < ddb_snapshot.trace_count) {
             let base: usize = item * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT;
             ddb_puts("ddb: trace seq="); ddb_put_udec(ddb_snapshot.trace[
@@ -2879,6 +2972,8 @@ private fn kernel_ddb_enter_stopped(
                     CrashConsolePidResult::Invalid => {
                     if (ddb_command_is(line as []u8, length, bs"trace")) {
                         ddb_render_trace();
+                    } else if (ddb_command_starts_with(line as []u8, length, bs"trace ")) {
+                        ddb_command_trace(ddb_parse_trace(line as []u8, length));
                     } else if (kernel_ddb_backtrace_test_enabled &&
                             ddb_command_is(line as []u8, length, bs"bttest")) {
                         ddb_render_backtrace_test();
@@ -2918,7 +3013,7 @@ private fn kernel_ddb_enter_stopped(
                         // lane instead of waiting for the stall to recur.
                         ddb_render_wait_test();
                     } else if (ddb_command_is(line as []u8, length, bs"help")) {
-                        ddb_puts("commands: oops regs intr sched current vm fds ps stacks wait proc PID bt [PID|cpu N] trace events unimpl log xk ADDRESS [COUNT] xp PHYSICAL [COUNT] xu PID ADDRESS [COUNT] profile stop|dump help continue\n");
+                        ddb_puts("commands: oops regs intr sched current vm fds ps stacks wait proc PID bt [PID|cpu N] trace [on|off|all|omit EVENT|pid PID|pid none] events unimpl log xk ADDRESS [COUNT] xp PHYSICAL [COUNT] xu PID ADDRESS [COUNT] profile stop|dump help continue\n");
                     } else {
                         ddb_command_profile(ddb_parse_profile(line as []u8, length));
                     }
