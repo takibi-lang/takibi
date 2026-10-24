@@ -223,6 +223,9 @@ enum PageOwnerTag: u8 {
     // A sampling profile's per-core buffer, held from DDB `profile start`
     // to `profile dump` (kernel/kernel/profile_session.tkb, #497).
     ProfileBuffer;
+    // A boot fixture's scratch page, held only while that fixture runs
+    // (kernel/init/ext2_fixture.tkb's full-bitmap save, GitHub issue #698).
+    BootFixture;
 }
 
 struct PageMeta {
@@ -2817,6 +2820,9 @@ private fn page_owner_description_locked(pool: borrow &mut BootPagePool, metas: 
     }
     if (owner == PageOwnerTag::ProfileBuffer) {
         return "a sampling profile buffer" as *u8;
+    }
+    if (owner == PageOwnerTag::BootFixture) {
+        return "a boot fixture's scratch page" as *u8;
     }
     return "occupied but UNTAGGED (invariant break)" as *u8;
 }

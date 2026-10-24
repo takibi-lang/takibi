@@ -200,7 +200,9 @@ private fn ext2_write_exhaustion_check(mount: Ext2Mount) -> bool {
 // case claimed before its inode claim failed. After the bitmap is put back,
 // the same two names are created and removed again: the control that the
 // refusal was the full bitmap and not the name or the directory.
-private let mut ext2_full_fixture_saved: [u8; KERNEL_BLOCK_SIZE];
+// The saved bitmap lives in a page taken for the fixture's duration, not in
+// BSS: a test-only buffer must not cost the production image its page
+// reservation (a 1 KiB BSS array moved usable_ram_start by 32 KiB).
 
 private fn ext2_full_names_absent(mount: Ext2Mount) -> bool {
     match ext2_lookup_root(mount, bs"full-dir") {
@@ -272,6 +274,21 @@ private fn ext2_full_control(mount: Ext2Mount) -> bool {
 
 private fn ext2_full_check_one(mount: Ext2Mount, inode_bitmap: bool,
                                blocks: usize, inodes: usize) -> bool {
+    match page_alloc(PageOwnerTag::BootFixture) {
+        PageAllocResult::OutOfMemory => { return false; }
+        PageAllocResult::Allocated(page) => {
+            let bytes: [u8; PAGE_SIZE..] = page_bytes(page);
+            let ok: bool = ext2_full_check_in(mount, inode_bitmap, blocks,
+                    inodes, bytes[0..<KERNEL_BLOCK_SIZE]);
+            page_free(page);
+            return ok;
+        }
+    }
+}
+
+private fn ext2_full_check_in(mount: Ext2Mount, inode_bitmap: bool,
+                              blocks: usize, inodes: usize,
+                              saved: borrow [u8; KERNEL_BLOCK_SIZE..]) -> bool {
     match ext2_block_bitmap_snapshot(
             mount, ext2_write_fixture_bitmap as [u8; KERNEL_BLOCK_SIZE..]) {
         Ext2ReadResult::Invalid => { return false; }
@@ -281,7 +298,7 @@ private fn ext2_full_check_one(mount: Ext2Mount, inode_bitmap: bool,
     }
     let mut ok: bool = false;
     match ext2_bitmap_fill(mount, inode_bitmap,
-            ext2_full_fixture_saved as [u8; KERNEL_BLOCK_SIZE..]) {
+            saved) {
         Ext2BitmapFillResult::Invalid => { return false; }
         Ext2BitmapFillResult::Filled(fill) => {
             let marked: usize = ext2_bitmap_fill_marked(fill);
@@ -303,7 +320,7 @@ private fn ext2_full_check_one(mount: Ext2Mount, inode_bitmap: bool,
                  ext2_counters_match_bitmaps(mount);
             if (inode_bitmap) { ok = ok && ext2_io_bitmap_matches(mount); }
             match ext2_bitmap_fill_restore(mount, fill,
-                    ext2_full_fixture_saved as [u8; KERNEL_BLOCK_SIZE..]) {
+                    saved) {
                 Ext2OwnerReleaseResult::Invalid => { return false; }
                 Ext2OwnerReleaseResult::Released => { }
             }

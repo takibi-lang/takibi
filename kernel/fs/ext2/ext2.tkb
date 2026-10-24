@@ -1424,7 +1424,7 @@ linear struct Ext2BitmapFill[unit: usize] {
 must_use variant Ext2BitmapFillResult { Invalid; Filled(Ext2BitmapFill[0]); }
 
 fn ext2_bitmap_fill(mount: Ext2Mount, inode_bitmap: bool,
-                    saved: [u8; KERNEL_BLOCK_SIZE..])
+                    saved: borrow [u8; KERNEL_BLOCK_SIZE..])
         -> Ext2BitmapFillResult !{unsafe} {
     let mut bitmap_block: usize = mount.block_bitmap_block;
     let mut item_count: usize = mount.filesystem_blocks - 1;
@@ -1435,13 +1435,17 @@ fn ext2_bitmap_fill(mount: Ext2Mount, inode_bitmap: bool,
     if (item_count > KERNEL_BLOCK_SIZE * 8) {
         return Ext2BitmapFillResult::Invalid;
     }
-    match block_read(mount.device, bitmap_block, saved) {
-        BlockIoResult::Invalid => { return Ext2BitmapFillResult::Invalid; }
+    let slot: Ext2Slot[0] = ext2_slot_acquire();
+    match block_read(mount.device, bitmap_block,
+                     ext2_scratch[slot.index].metadata as []u8) {
+        BlockIoResult::Invalid => {
+            ext2_slot_release(slot);
+            return Ext2BitmapFillResult::Invalid;
+        }
         BlockIoResult::Ok => { }
     }
-    let slot: Ext2Slot[0] = ext2_slot_acquire();
     for i: usize in 0..<KERNEL_BLOCK_SIZE {
-        ext2_scratch[slot.index].metadata[i] = saved[i];
+        saved[i] = ext2_scratch[slot.index].metadata[i];
     }
     let mut bitmap: Ext2Bytes = ext2_metadata();
     let mut marked: usize = 0;
@@ -1479,7 +1483,7 @@ fn ext2_bitmap_fill_marked(fill: borrow Ext2BitmapFill[0]) -> usize {
 // Puts the saved bitmap back with the raw write, as a repair does, so a
 // fence raised meanwhile cannot strand the marked items.
 fn ext2_bitmap_fill_restore(mount: Ext2Mount, fill: sink Ext2BitmapFill[0],
-                            saved: [u8; KERNEL_BLOCK_SIZE..])
+                            saved: borrow [u8; KERNEL_BLOCK_SIZE..])
         -> Ext2OwnerReleaseResult !{unsafe} {
     let slot: Ext2Slot[0] = ext2_slot_acquire();
     let result: Ext2OwnerReleaseResult =
@@ -1490,11 +1494,15 @@ fn ext2_bitmap_fill_restore(mount: Ext2Mount, fill: sink Ext2BitmapFill[0],
 
 private fn ext2_bitmap_fill_restore_with(slot: borrow Ext2Slot[0],
         mount: Ext2Mount, fill: sink Ext2BitmapFill[0],
-        saved: [u8; KERNEL_BLOCK_SIZE..])
+        saved: borrow [u8; KERNEL_BLOCK_SIZE..])
         -> Ext2OwnerReleaseResult !{unsafe} {
     let mut bitmap_block: usize = mount.block_bitmap_block;
     if (fill.inode_bitmap) { bitmap_block = mount.inode_bitmap_block; }
-    match block_write(mount.device, bitmap_block, saved) {
+    for i: usize in 0..<KERNEL_BLOCK_SIZE {
+        ext2_scratch[slot.index].metadata[i] = saved[i];
+    }
+    match block_write(mount.device, bitmap_block,
+                      ext2_scratch[slot.index].metadata as []u8) {
         BlockIoResult::Invalid => { return Ext2OwnerReleaseResult::Invalid; }
         BlockIoResult::Ok => { }
     }
