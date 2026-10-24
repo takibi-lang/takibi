@@ -482,6 +482,10 @@ struct RetxEntry {
     // against a reader that walks to them. If any of these ever gains a
     // second writer it belongs in RetxRetryState above, not here.
     connection: usize;
+    // GitHub issue #846: the connection's pool generation beside its
+    // address, so the stack-wide pass can take it (tcp_connection_try_take)
+    // knowing only the entry.
+    connection_generation: usize;
     kind: PendingTcpKind;
     frame_length: usize;
     expected_ack: u32;
@@ -542,6 +546,11 @@ let mut tcp_drop_data_segment_index: i32 = -1;
 // GitHub issue #740 step 2: segments queued from a kept driver buffer
 // rather than a copy, for the boot evidence that the path ran.
 let mut tcp_kept_segments: usize = 0;
+// GitHub issue #846: what the stack-wide pass did, for the boot evidence:
+// segments it retransmitted, and entries it skipped because a syscall held
+// their connection.
+let mut tcp_retx_pass_sent: usize = 0;
+let mut tcp_retx_pass_busy: usize = 0;
 let mut tcp_injected_data_retransmitted: bool = false;
 let mut tcp_injected_data_recovery_observed: bool = false;
 let mut tcp_drop_next_fin: bool = false;
@@ -2054,6 +2063,8 @@ fn pending_tcp_record(ready: borrow NetRxCanAcquire, connection_owner: borrow Tc
             // already zeroed all of it.
             mutex_init(&entry.mutex);
             entry.connection = conn.self_address;
+            entry.connection_generation =
+                tcp_connection_identity(connection_owner);
             entry.kind = kind;
             entry.frame_length = frame_length;
             entry.expected_ack = conn.snd_nxt;
@@ -2089,6 +2100,8 @@ fn pending_tcp_record(ready: borrow NetRxCanAcquire, connection_owner: borrow Tc
             }
             conn.retx_count =
                 conn.retx_count + 1;
+            tcp_retx_due_lower(ready,
+                init_retry.sent_at + tcp_retx_retry_ticks());
             return entry_address;
         }
     }
@@ -2335,6 +2348,82 @@ fn pending_tcp_ack_frame(held: borrow NetPacket[pb, po], conn: borrow &mut TcpCo
     }
 }
 
+// One entry of `conn` against its retry_ticks deadline: retransmitted when
+// due, Expired once it has used TCP_RETRY_LIMIT retries (the caller frees
+// it), Waiting otherwise. The deadline is read and written under the
+// entry's own guard, so a second pass that reaches the same entry later
+// finds it no longer due: the handler is idempotent (GitHub issue #846).
+must_use variant RetxEntryService {
+    Waiting(NetRxCanAcquire);
+    Sent(NetRxCanAcquire);
+    Expired(NetRxCanAcquire);
+}
+
+fn retx_entry_service(conn: borrow &mut TcpConnection,
+                      parked: borrow RegionSlot(RetxEntry)[p, k],
+                      ready_in: sink NetRxCanAcquire,
+                      now: i64, retry_ticks: i64)
+        -> RetxEntryService !{may_block, unsafe} {
+    let mut ready = ready_in;
+    let entry: &mut RetxEntry = region_slot_record(parked);
+    // GitHub issue #452: decide and mutate under the guard, TRANSMIT
+    // OUTSIDE IT. mutex_acquire masks interrupts, and holding that across
+    // net_transmit_ready would mask them for as long as handing a
+    // 1514-byte frame to the NIC takes. The retry state is two words; the
+    // transmit is not, and it needs none of it.
+    //
+    // `sent_at` is set before the transmit rather than after, and the
+    // stored VALUE is unchanged: `now` is read once by the caller, so both
+    // orders wrote the same number.
+    let mut retransmit: bool = false;
+    let mut expired: bool = false;
+    let mut length: usize = 0;
+    let scan_guard = retx_lock(&entry.mutex);
+    let mut retry: RetxRetryState = retx_retry_read(scan_guard, entry);
+    if (now - retry.sent_at >= retry_ticks) {
+        if (retry.retries < TCP_RETRY_LIMIT) {
+            retry.sent_at = now;
+            retry.retries = retry.retries + 1;
+            retx_retry_write(scan_guard, entry, retry);
+            retransmit = true;
+            length = entry.frame_length;
+        } else {
+            // Give up silently on this one segment -- the same
+            // per-segment exhaustion behavior this file always had, scoped
+            // to this entry rather than the whole queue.
+            expired = true;
+        }
+    }
+    retx_unlock(scan_guard, &entry.mutex);
+    if (expired) {
+        return RetxEntryService::Expired(ready);
+    }
+    if (retransmit == false) {
+        return RetxEntryService::Waiting(ready);
+    }
+    if (entry.kept_slot != NET_KEPT_NONE) {
+        // #740 step 2: resent from the driver's kept buffer, which its
+        // completion parks Kept again.
+        match net_packet_kept_claim(entry.kept_slot) {
+            NetKeptClaim::None => {}
+            NetKeptClaim::Claimed(segment) => {
+                ready = net_packet_kept_resend(ready, segment);
+            }
+        }
+    } else {
+        let frame_bytes = entry.frame as []u8;
+        ready = net_transmit_ready(
+            ready, frame_bytes[0..<1514], length as i32);
+    }
+    if (region_slot_address(parked) == conn.injected_data_entry) {
+        tcp_injected_data_retransmitted = true;
+    }
+    if (region_slot_address(parked) == conn.injected_fin_entry) {
+        tcp_injected_fin_retransmitted = true;
+    }
+    return RetxEntryService::Sent(ready);
+}
+
 // The second half of pending_tcp_service_once: retransmit each entry of
 // this connection past its retry_ticks deadline, giving up on one at
 // TCP_RETRY_LIMIT. GitHub issue #842: a blocked read runs this too, on
@@ -2356,59 +2445,15 @@ fn pending_tcp_retransmit_due(conn: borrow &mut TcpConnection,
                 let entry: &mut RetxEntry = region_slot_record(parked);
                 let following: Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]) = retx_entry_take_next(entry);
                 let mut expired: bool = false;
-                // GitHub issue #452: decide and mutate under the guard,
-                // TRANSMIT OUTSIDE IT. mutex_acquire masks interrupts,
-                // and holding that across net_transmit_ready would mask
-                // them for as long as handing a 1514-byte frame to the
-                // NIC takes. The retry state is two words; the transmit
-                // is not, and it needs none of it.
-                //
-                // `sent_at` is set before the transmit rather than
-                // after, and the stored VALUE is unchanged: `now` is
-                // read once before this loop, so both orders wrote the
-                // same number.
-                let mut retransmit: bool = false;
-                let mut length: usize = 0;
                 if (entry.connection == conn.self_address) {
-                    let scan_guard = retx_lock(&entry.mutex);
-                    let mut retry: RetxRetryState = retx_retry_read(scan_guard, entry);
-                    if (now - retry.sent_at >= retry_ticks) {
-                        if (retry.retries < TCP_RETRY_LIMIT) {
-                            retry.sent_at = now;
-                            retry.retries = retry.retries + 1;
-                            retx_retry_write(scan_guard, entry, retry);
-                            retransmit = true;
-                            length = entry.frame_length;
-                        } else {
-                            // Give up silently on this one segment --
-                            // the same per-segment exhaustion behavior
-                            // this file always had, scoped to this
-                            // entry rather than the whole queue.
+                    match retx_entry_service(conn, parked, ready, now,
+                                             retry_ticks) {
+                        RetxEntryService::Waiting(after) => { ready = after; }
+                        RetxEntryService::Sent(after) => { ready = after; }
+                        RetxEntryService::Expired(after) => {
+                            ready = after;
                             expired = true;
                         }
-                    }
-                    retx_unlock(scan_guard, &entry.mutex);
-                }
-                if (retransmit && entry.kept_slot != NET_KEPT_NONE) {
-                    // #740 step 2: resent from the driver's kept buffer,
-                    // which its completion parks Kept again.
-                    match net_packet_kept_claim(entry.kept_slot) {
-                        NetKeptClaim::None => {}
-                        NetKeptClaim::Claimed(segment) => {
-                            ready = net_packet_kept_resend(ready, segment);
-                        }
-                    }
-                } else if (retransmit) {
-                    let frame_bytes = entry.frame as []u8;
-                    ready = net_transmit_ready(
-                        ready, frame_bytes[0..<1514], length as i32);
-                }
-                if (retransmit) {
-                    if (region_slot_address(parked) == conn.injected_data_entry) {
-                        tcp_injected_data_retransmitted = true;
-                    }
-                    if (region_slot_address(parked) == conn.injected_fin_entry) {
-                        tcp_injected_fin_retransmitted = true;
                     }
                 }
                 if (expired) {
@@ -2416,10 +2461,7 @@ fn pending_tcp_retransmit_due(conn: borrow &mut TcpConnection,
                     conn.retx_count =
                         retx_count_after_release(conn);
                 } else {
-                    if (retx_entry_put_next(entry, kept) == false) {
-                        kernel_boot_log("tcp retx: chain link was not empty\n");
-                    }
-                    kept = Place::Full(parked);
+                    kept = retx_chain_keep(kept, parked);
                 }
                 link = following;
             }
@@ -2432,6 +2474,182 @@ fn pending_tcp_retransmit_due(conn: borrow &mut TcpConnection,
     if (retx_chain_put(retx_chain_turn(ready), retx_chain_reverse(kept)) == false) {
         kernel_boot_log("tcp retx: queue was not empty on reinstall\n");
     }
+    return ready;
+}
+
+// Push one surviving entry onto a walk's kept list (reversed; the walker
+// reverses it back before reinstalling it).
+private fn retx_chain_keep(kept: Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]),
+                           parked: sink RegionSlot(RetxEntry)[p, k])
+        -> Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]) {
+    let entry: &mut RetxEntry = region_slot_record(parked);
+    if (retx_entry_put_next(entry, kept) == false) {
+        kernel_boot_log("tcp retx: chain link was not empty\n");
+    }
+    return Place::Full(parked);
+}
+
+// GitHub issue #846: the stack-wide retransmit pass, for the contexts that
+// hold no connection -- the return to EL0 after an interrupt and the idle
+// loop (kernel_net_retransmit_pass in kernel/kernel/syscall.tkb). A
+// syscall still services only its own connection's deadlines (#257); this
+// pass is what makes a connection nobody is reading or closing retransmit
+// at all, as Linux's per-socket retransmit timer does.
+//
+// tcp_retx_due_at is the earliest moment any entry could be due, 0 when
+// the chain was empty at the last pass. It is written only by a holder of
+// the network capability (the borrow below says so), and read without it
+// by tcp_retx_pass_due, so the post-IRQ return costs one load and a branch
+// when nothing is outstanding. A value left low (an ACK freed the entry, a
+// syscall's own walk retransmitted it) costs one empty pass, never a
+// missed one: every record lowers it, and every pass recomputes it from
+// what it leaves on the chain.
+private let mut tcp_retx_due_at: AtomicWord;
+
+// At most this many retransmits per pass, and none started once the pass
+// has run for TCP_RETX_PASS_MICROS: the pass runs with interrupts masked on
+// the EL0-return path, so its length is interrupt latency. Due entries
+// left over keep tcp_retx_due_at in the past, and the next return or idle
+// iteration takes them.
+const TCP_RETX_PASS_SEND_MAX: usize = 4;
+const TCP_RETX_PASS_MICROS: i64 = 1000;
+
+// The retry interval every caller in this file passes: 200 ms.
+fn tcp_retx_retry_ticks() -> i64 {
+    return read_cntfrq() / 5;
+}
+
+fn tcp_retx_due_lower(ready: borrow NetRxCanAcquire, due: i64) {
+    if (due <= 0) { return; }
+    let earliest: usize = atomic_word_load(&tcp_retx_due_at);
+    if (earliest == 0 || (due as usize) < earliest) {
+        atomic_word_store(&tcp_retx_due_at, due as usize);
+    }
+}
+
+private fn tcp_retx_due_set(ready: borrow NetRxCanAcquire, due: i64) {
+    if (due <= 0) {
+        atomic_word_store(&tcp_retx_due_at, 0);
+        return;
+    }
+    atomic_word_store(&tcp_retx_due_at, due as usize);
+}
+
+// The hot-path test, without the capability: false while nothing is
+// outstanding (one load), or while the earliest entry is not yet due.
+fn tcp_retx_pass_due() -> bool {
+    let due: usize = atomic_word_load(&tcp_retx_due_at);
+    if (due == 0) { return false; }
+    let now: i64 = read_cntpct();
+    if (now <= 0) { return false; }
+    return (now as usize) >= due;
+}
+
+// When this entry is next due, read under its guard.
+private fn retx_entry_due_at(entry: borrow &mut RetxEntry, retry_ticks: i64) -> i64 {
+    let guard = retx_lock(&entry.mutex);
+    let mut retry: RetxRetryState = retx_retry_read(guard, entry);
+    retx_unlock(guard, &entry.mutex);
+    return retry.sent_at + retry_ticks;
+}
+
+private fn retx_due_earliest(current: i64, candidate: i64) -> i64 {
+    if (current == 0 || candidate < current) { return candidate; }
+    return current;
+}
+
+// The entry's connection, without waiting for its lock, when `attempt`.
+private fn retx_pass_try_take(attempt: bool, entry: borrow &mut RetxEntry)
+        -> TcpConnectionTryTakeResult !{unsafe} {
+    if (attempt == false) {
+        return TcpConnectionTryTakeResult::Missing;
+    }
+    return tcp_connection_try_take(entry.connection,
+                                   entry.connection_generation);
+}
+
+// Every due entry, whichever connection it belongs to, within the budget.
+// A connection is taken without waiting (tcp_connection_try_take): one a
+// syscall holds is skipped and retried by the next pass, so this never
+// waits on a lock while it holds the capability and masks interrupts.
+fn tcp_retx_service_all(ready_in: sink NetRxCanAcquire)
+        -> NetRxCanAcquire !{may_block, unsafe} {
+    let mut ready = ready_in;
+    let retry_ticks: i64 = tcp_retx_retry_ticks();
+    let started: i64 = read_cntpct();
+    let time_budget: i64 = read_cntfrq() / 1000000 * TCP_RETX_PASS_MICROS;
+    let mut sends: usize = 0;
+    let mut next_due: i64 = 0;
+    let mut link: Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]) = retx_chain_take(retx_chain_turn(ready));
+    let mut kept: Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]) = Place::Empty;
+    let mut walking: bool = true;
+    while (walking) {
+        match link {
+            Place::Empty => { walking = false; link = Place::Empty; }
+            Place::Full(parked) => {
+                let entry: &mut RetxEntry = region_slot_record(parked);
+                let following: Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]) = retx_entry_take_next(entry);
+                let now: i64 = read_cntpct();
+                let mut attempt: bool = false;
+                if (now >= retx_entry_due_at(entry, retry_ticks) &&
+                    sends < TCP_RETX_PASS_SEND_MAX &&
+                    now - started < time_budget) {
+                    attempt = true;
+                }
+                match retx_pass_try_take(attempt, entry) {
+                    TcpConnectionTryTakeResult::Missing => {
+                        next_due = retx_due_earliest(
+                            next_due, retx_entry_due_at(entry, retry_ticks));
+                        kept = retx_chain_keep(kept, parked);
+                    }
+                    TcpConnectionTryTakeResult::Busy => {
+                        tcp_retx_pass_busy = tcp_retx_pass_busy + 1;
+                        next_due = retx_due_earliest(
+                            next_due, retx_entry_due_at(entry, retry_ticks));
+                        kept = retx_chain_keep(kept, parked);
+                    }
+                    TcpConnectionTryTakeResult::Ready(owner) => {
+                        let conn: &mut TcpConnection = tcp_connection_of(owner);
+                        match retx_entry_service(conn, parked, ready, now,
+                                                 retry_ticks) {
+                            RetxEntryService::Waiting(after) => {
+                                ready = after;
+                                tcp_connection_put(owner);
+                                next_due = retx_due_earliest(
+                                    next_due, retx_entry_due_at(entry, retry_ticks));
+                                kept = retx_chain_keep(kept, parked);
+                            }
+                            RetxEntryService::Sent(after) => {
+                                ready = after;
+                                sends = sends + 1;
+                                tcp_retx_pass_sent = tcp_retx_pass_sent + 1;
+                                tcp_connection_put(owner);
+                                next_due = retx_due_earliest(
+                                    next_due, retx_entry_due_at(entry, retry_ticks));
+                                kept = retx_chain_keep(kept, parked);
+                            }
+                            RetxEntryService::Expired(after) => {
+                                ready = after;
+                                retx_entry_release(parked);
+                                conn.retx_count =
+                                    retx_count_after_release(conn);
+                                tcp_connection_put(owner);
+                            }
+                        }
+                    }
+                }
+                link = following;
+            }
+        }
+    }
+    match link {
+        Place::Empty => {}
+        Place::Full(leftover) => { retx_entry_release(leftover); }
+    }
+    if (retx_chain_put(retx_chain_turn(ready), retx_chain_reverse(kept)) == false) {
+        kernel_boot_log("tcp retx: queue was not empty on reinstall\n");
+    }
+    tcp_retx_due_set(ready, next_due);
     return ready;
 }
 

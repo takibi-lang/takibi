@@ -1737,12 +1737,17 @@ fn kernel_connected_transport_release_owned(
         tcp_connection_put(owner);
         return KernelTransportReleaseResult::NotOpen;
     }
-    match network_capability_take() {
-        NetworkCapabilityTakeResult::Empty => {
+    // GitHub issue #846: waits out another holder rather than failing the
+    // close with EAGAIN. The stack-wide retransmit pass now holds the
+    // capability for a bounded moment from the EL0-return hook and the
+    // idle loop, so an Empty store is no longer rare, and that pass never
+    // waits for this connection's lock (it try-takes, and skips a busy one).
+    match network_capability_take_waiting() {
+        NetworkCapabilityWaitResult::NeverInstalled => {
             tcp_connection_put(owner);
             return KernelTransportReleaseResult::Failed;
         }
-        NetworkCapabilityTakeResult::Ready(ready) => {
+        NetworkCapabilityWaitResult::Ready(ready) => {
             match kernel_tcp_close_stream(owner, ready) {
                 KernelTcpCloseResult::Closed(after_close) => {
                     // GitHub issue #838: freed while the capability is
@@ -5399,6 +5404,30 @@ fn kernel_signal_return_deliver(frame: borrow FrameRef[process]) !{unsafe} {
             }
             frame_general_set(frame, 0, taken_signal_delivered(taken));
             process_current_end(current_authority);
+        }
+    }
+}
+
+// GitHub issue #846: retransmit every connection's due segments, from a
+// context that holds no connection and no lock -- the return to EL0
+// (the end of kernel_process_stack_switch_complete) and the idle loop
+// (kernel/arch/arm64/kernel/secondary.tkb). Linux runs its retransmit
+// timer as a softirq on the way out of an interrupt; this is that shape
+// without a new thread. Nothing is due: one load and a branch. Otherwise
+// the capability is taken only if it is free right now -- a syscall
+// holding it is never waited for, and the next return tries again -- and
+// tcp_retx_service_all bounds the work and skips a connection a syscall
+// holds. A syscall itself still services only its own connection (#257).
+fn kernel_net_retransmit_pass() !{may_block, unsafe} {
+    if (tcp_retx_pass_due() == false) { return; }
+    match network_capability_take() {
+        NetworkCapabilityTakeResult::Empty => {}
+        NetworkCapabilityTakeResult::Ready(ready) => {
+            let after: NetRxCanAcquire = tcp_retx_service_all(ready);
+            match network_capability_put(after) {
+                NetworkCapabilityPutResult::Stored => {}
+                NetworkCapabilityPutResult::Conflict => {}
+            }
         }
     }
 }

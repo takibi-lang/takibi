@@ -280,6 +280,10 @@ fn kernel_idle_loop() !{unsafe} {
                     el0_context_resume(next);
                 }
             }
+            // GitHub issue #846: an idle CPU retransmits what nobody
+            // reading or closing a connection would; nothing due costs a
+            // load and a branch.
+            kernel_net_retransmit_pass();
             kernel_activity_set(KernelActivity::IdleLoop);
             if (KERNEL_STALL_PROBES != 0) { stall_probe_note(STALL_PROBE_WFI); }
             wfi();

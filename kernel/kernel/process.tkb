@@ -4725,6 +4725,14 @@ fn kernel_process_stack_switch_complete(frame_sp: usize) {
     // GitHub issue #628: on the way back to EL0, a pending caught signal's
     // handler, whatever path reached this return.
     kernel_signal_return_deliver(frame);
+    // GitHub issue #846: every connection's due retransmits, when the
+    // network capability is free right now. Here the interrupt that led to
+    // this return is acknowledged, the CPU is on the process's own stack
+    // and holds no lock, as for the signal above; a syscall that led here
+    // has finished, so its own rule (#257: it services only its own
+    // connection) is not what runs. DAIF.I stays set, which is why the pass
+    // is bounded. Nothing due costs one load and a branch.
+    kernel_net_retransmit_pass();
     // Back to EL0: the kernel is doing nothing on this CPU's behalf.
     kernel_activity_set(KernelActivity::None);
     // GitHub issue #920: and EL0 runs with the GIC priority mask unmasked,
