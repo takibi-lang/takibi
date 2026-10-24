@@ -36,11 +36,11 @@ Thresholds and their derivation:
   kernel's contention does. Only contended acquires are counted, so the
   uncontended lock path pays no counter (counting every acquire, for a
   share, cost 6.1 ns per lock pair on RPi5; #953).
-  Baseline: RPi5 kernelcheck runs on 2026-10-24 found 2739, 2517 and
-  BASELINE_680_RUN3 contended acquires (process pool most, then
+  Baseline: five RPi5 kernelcheck boots on 2026-10-24 found 2739, 2517,
+  2205, 1685 and 1342 contended acquires (process pool most, then
   address_space; every other pool 0-3). Baseline 2739, the highest.
   Threshold: 3x baseline = 8217, the same factor as #812. It rests on
-  three runs; if an unchanged tree trips it, widen it from more runs
+  five runs; if an unchanged tree trips it, widen it from more runs
   rather than reopening #680.
 
 Controls: scripts/check_parked_triggers_controls.py.
@@ -54,7 +54,7 @@ import sys
 from pass_line import report_pass
 
 # Contended production pool lock acquires per bounded suite, RPi5,
-# 2026-10-24 (the highest of three runs).
+# 2026-10-24 (the highest of five runs).
 BASELINE_680 = 2739
 
 PAGE_RUN_LINE = re.compile(
