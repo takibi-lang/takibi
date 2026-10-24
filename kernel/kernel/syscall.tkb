@@ -5442,12 +5442,28 @@ fn kernel_net_retransmit_pass() !{may_block, unsafe} {
 // (maintainer, 2026-10-24); scripts/buildcheck_kernel_asm_invariants.py
 // checks both halves in the linked image. Here the interrupt is
 // acknowledged, the CPU is off its IRQ stack and on the process's own, and
-// no lock is held, as kernel_signal_return_deliver's comment states; DAIF.I
-// stays set, which is why the pass is bounded. A return hook that ended
-// the process does not come back here.
+// no lock is held, as kernel_signal_return_deliver's comment states. A
+// return hook that ended the process does not come back here.
+//
+// The pass runs with interrupts unmasked (maintainer, 2026-10-24): a send
+// waits for its TX completion (up to 14 ms on GEM), and that wait must not
+// be interrupt latency. signal_return_exit unmasks from this hook the same
+// way. An interrupt taken here enters el1_current_irq_entry on the
+// process's own stack, which this CPU now owns, and never switches: kernel
+// mode is not preempted. DAIF.I is set again with the raw instruction, not
+// disable_irq: the generated restore after this hook relies on DAIF.I being
+// set, and under the GIC priority mask disable_irq would mask at the GIC
+// and leave DAIF.I clear. The priority mask is left unmasked for EL0, as
+// kernel_process_stack_switch_complete leaves it (the pass's own locks
+// save and restore it). scripts/buildcheck_kernel_asm_invariants.py checks
+// that this function sets DAIF.I again after the pass and before it
+// returns.
 fn kernel_irq_return_complete(frame_sp: usize) !{unsafe} {
     kernel_process_stack_switch_complete(frame_sp);
+    if (tcp_retx_pass_due() == false) { return; }
+    enable_irq();
     kernel_net_retransmit_pass();
+    msr_daifset_irq();
 }
 
 // GitHub issue #949: end the current process from the return hook. Once

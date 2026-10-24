@@ -659,6 +659,25 @@ def check_retransmit_pass_placement(insns):
         failures.append(
             "issue #846 regression: %s changes x0 before it calls %s" %
             (IRQ_RETURN_HOOK, STACK_SWITCH_HOOK))
+    else:
+        # The pass runs unmasked, so DAIF.I must be set again after the last
+        # call to it and before every return: the generated restore that
+        # follows the hook relies on it (maintainer, 2026-10-24).
+        mask = re.compile(r"^msr\s+DAIFSet,\s*#0x[2-9a-f]$", re.I)
+        unmask = re.compile(r"^msr\s+DAIFClr,\s*#0x[2-9a-f]$", re.I)
+        last_pass = max(index for index, text in enumerate(wrapper)
+                        if pass_call.match(text))
+        for index, text in enumerate(wrapper):
+            if not re.match(r"^ret\b", text) or index < last_pass:
+                continue
+            between = wrapper[last_pass + 1:index]
+            masked = [i for i, item in enumerate(between) if mask.match(item)]
+            if not masked or any(unmask.match(item)
+                                 for item in between[masked[-1] + 1:]):
+                failures.append(
+                    "issue #846 regression: %s returns after %s without "
+                    "setting DAIF.I again" % (IRQ_RETURN_HOOK, RETRANSMIT_PASS))
+                break
     edges = call_graph(insns)
     seen = set()
     stack = [STACK_SWITCH_HOOK]

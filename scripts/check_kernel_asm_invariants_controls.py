@@ -102,8 +102,12 @@ def main():
         (0x3400, "stp x29, x30, [sp, #-16]!", "kernel_irq_return_complete"),
         (0x3404, "bl 0x3000 <kernel_process_stack_switch_complete>",
          "kernel_irq_return_complete"),
-        (0x3408, "bl 0x3c00 <kernel_net_retransmit_pass>",
+        (0x3408, "msr DAIFClr, #0x2", "kernel_irq_return_complete"),
+        (0x340C, "bl 0x3c00 <kernel_net_retransmit_pass>",
          "kernel_irq_return_complete"),
+        (0x3410, "msr DAIFSet, #0x2", "kernel_irq_return_complete"),
+        (0x3414, "ldp x29, x30, [sp], #16", "kernel_irq_return_complete"),
+        (0x3418, "ret", "kernel_irq_return_complete"),
     ]
     CASES.note()
     if checker.check_process_stack_handoff_hook(handoff_ok):
@@ -133,11 +137,19 @@ def main():
         return 1
 
     CASES.note()
-    no_pass = [item for item in handoff_ok if item[0] != 0x3408]
+    no_pass = [item for item in handoff_ok if item[0] != 0x340C]
     failures = checker.check_process_stack_handoff_hook(no_pass)
     if len(failures) != 1 or "kernel_irq_return_complete must" not in failures[0]:
         print("FAIL kernel-asm-alignment control: a wrapper without the "
               "pass passed")
+        return 1
+
+    CASES.note()
+    no_remask = [item for item in handoff_ok if item[0] != 0x3410]
+    failures = checker.check_process_stack_handoff_hook(no_remask)
+    if len(failures) != 1 or "without setting DAIF.I again" not in failures[0]:
+        print("FAIL kernel-asm-alignment control: a wrapper returning "
+              "unmasked after the pass passed")
         return 1
 
     CASES.note()
