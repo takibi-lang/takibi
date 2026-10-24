@@ -174,7 +174,7 @@ reads literals at no width), #984 (min/max range obligations); the thin slice of
 function-boundary initialization contracts (#954 step 2,
 docs/VERIFICATION_DESIGN.md) and step 3, the design review, are done;
 step 4 runs #975 (branch conditions as linear facts; done 2026-10-24,
-follow-ups #977 and #978), then #974 (the execve staging requires; done 2026-10-24),
+follow-ups #977 and #978 done 2026-10-24, with #985 queued), then #974 (the execve staging requires; done 2026-10-24),
 then #976 (--trace-init-flow, done 2026-10-24), which completes step 4;
 then the rest of #954 stage 2. Then: #908 (fixed
 QEMU lane budget), #916 (compiler GC tuning), #921 and #922
