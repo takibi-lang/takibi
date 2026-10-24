@@ -286,7 +286,7 @@ usb_xhci_bus.tkb. Only the DCBAA stays legacy (D3).
    GDB test).
 5. **Time measurement, then the optimizations waiting on it** (maintainer,
    2026-10-08: space and time are both kept): #502; then #520
-   (TCP throughput), with #741 (locate the measured RPi5 HTTP SYN
+   (TCP throughput, with #972: submit-only NIC TX), with #741 (locate the measured RPi5 HTTP SYN
    retransmission tails), #790 (size review of #720/#740), then #680,
    #682 (region_pool lock-free validation, false sharing, pinless
    single-user pools), #711, #718, #386.

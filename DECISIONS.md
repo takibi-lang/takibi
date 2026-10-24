@@ -166,6 +166,14 @@ condition below applies, and reports the land afterwards.
   log justifies it; audits record which defects SMT or a proof assistant
   would have prevented. [active] #955 #952
 
+- 2026-10-24 One meaning per type: `borrow T` is always fully initialized;
+  partial initialization is written only as `borrow uninit` with
+  requires/ensures. [active] #975 #954
+- 2026-10-24 #954's skeleton is confirmed: requires/ensures init(...) with
+  linear bounds, exhaustive match conditions, slot-owned scratch globals
+  only, an interval-union init predicate, z3 re-check, 5 s cold budget.
+  [active] #954
+
 ## Trust and safety
 
 - 2026-10-13 Only files in kernel/DEVICE_SEMANTICS_FILES may declare device
@@ -213,6 +221,15 @@ condition below applies, and reports the land afterwards.
   the stop nests; a new `nmi` effect excludes locks, blocking, allocation
   and logs; cost measured on RPi5 before choosing PMR everywhere or a
   hybrid; GICv3 (#926) slots in later. [active] #920
+
+- 2026-10-24 The IRQ mask is the GIC priority mask everywhere (about
+  +20 ns per masking lock pair on RPi5, no measurable suite-time change);
+  cost reduction is #966. [active] #920 #966
+- 2026-10-24 TCP retransmits for unread connections run in the post-IRQ
+  EL0-return hook (IRQs unmasked for the pass) and the idle loop, which may
+  try-take the network capability; never on syscall return (Linux/BSD
+  precedent). Submit-only NIC TX (#972) waits with TCP throughput work.
+  [active] #846 #972
 
 ## Size and performance
 
