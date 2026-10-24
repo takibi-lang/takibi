@@ -551,8 +551,10 @@ Two, and the distinction is which contexts may take them.
 A global `Mutex` needs no `mutex_init`: `.bss` is zeroed by both entry paths
 and a zeroed word is free. Calling `mutex_init` on one is worse than
 redundant, because it FORCE-FREES -- on two cores it releases a lock somebody
-else holds. `scripts/check_lock_discipline.py` makes that a build failure, and
-also holds the allowlist of files permitted to use raw atomic intrinsics.
+else holds. `scripts/check_lock_discipline.py` makes that a build failure. A
+raw atomic intrinsic call is a raw site under `--confine-raw-authority`
+(GitHub issue #989), so `kernel/RAW_MINT_FILES` is the one list of files
+permitted to make one.
 
 ## Lock order
 

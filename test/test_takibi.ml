@@ -25367,6 +25367,50 @@ let raw_authority_policy_tests = [
             contains_substring message "an address becomes a region")
           (Raw_authority_policy.check ~source_program ~mint_files:[file] ()))));
 
+  (* GitHub issue #989: the cases of check_lock_discipline's retired RULE 2.
+     A raw atomic intrinsic call is a counted site wherever it is called,
+     even with no `unsafe` block of real authority around it. *)
+  Alcotest.test_case "raw atomic intrinsic call requires a declared mint file" `Quick
+    (fun () ->
+      let atomic_errors source_program mint_files =
+        List.filter (fun (_, message) -> contains_substring message "raw atomic intrinsic")
+          (Raw_authority_policy.check ~source_program ~mint_files ()) in
+      List.iter (fun spec ->
+        let callee = spec.Atomic_spec.name in
+        let source = "fn poke(address: usize) !{unsafe} { let seen = " ^ callee
+                     ^ "(address); } fn main() -> usize { return 42; }" in
+        let source_program = parse source in
+        (match atomic_errors source_program [] with
+         | [(loc, message)] ->
+             Alcotest.(check bool) (callee ^ ": names the intrinsic") true
+               (contains_substring message ("'" ^ callee ^ "'"));
+             Alcotest.(check bool) (callee ^ ": names the function") true
+               (contains_substring message "'poke'");
+             let file = Ast.source_file_of_loc loc in
+             Alcotest.(check bool) (callee ^ ": names the file") true
+               (contains_substring message file);
+             Alcotest.(check int) (callee ^ ": wrong file cannot authorize") 1
+               (List.length (atomic_errors source_program ["elsewhere.tkb"]));
+             Alcotest.(check int) (callee ^ ": declared file accepted") 0
+               (List.length (atomic_errors source_program [file]));
+             Alcotest.(check (option int)) (callee ^ ": counted once") (Some 1)
+               (List.assoc_opt (Raw_authority_policy.normalize file)
+                  (Raw_authority_policy.site_counts ~source_program ()))
+         | errors -> Alcotest.failf "%s: expected one error, got %d" callee
+                       (List.length errors))) Atomic_spec.all;
+      (* A call inside an expression `unsafe` and in a nested arm is found. *)
+      let nested = parse "fn poll(address: usize) -> usize { if (address == 0) { return 0; } return unsafe { atomic_load_acquire(address) }; } fn main() -> usize { return 42; }" in
+      Alcotest.(check int) "expression unsafe call rejected" 1
+        (List.length (atomic_errors nested []));
+      (* Positive: the AtomicWord operations and a same-prefix name are not raw. *)
+      let word = parse "fn atomic_load_acquired(x: usize) -> usize { return x; } fn use_word(x: usize) -> usize { return atomic_load_acquired(x); } fn main() -> usize { return 42; }" in
+      Alcotest.(check int) "same-prefix ordinary function not counted" 0
+        (List.length (atomic_errors word []));
+      List.iter (fun name ->
+        Alcotest.(check bool) (name ^ " is not a raw intrinsic") false
+          (Atomic_spec.is_intrinsic name))
+        ["atomic_word_load"; "atomic_word_store"; "atomic_word_swap"]);
+
   (* GitHub issue #739: the mint list is a ratchet; a stale entry fails. *)
   Alcotest.test_case "stale mint-list entries are rejected" `Quick
     (fun () ->

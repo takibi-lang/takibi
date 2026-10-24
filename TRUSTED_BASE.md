@@ -236,9 +236,11 @@ rules globally.
 - Raw atomic intrinsics (`atomic_load_acquire`, `atomic_store_release`,
   `atomic_swap_acquire`, `atomic_fetch_add_relaxed`, and
   `atomic_compare_exchange_acquire`) make a cross-core ordering or atomicity
-  claim. The inventory reports these blocks as `raw atomic operation` and
-  checks that their source files agree with RULE 2's allowlist in
-  `scripts/check_lock_discipline.py`. This identifies the review question; it
+  claim. The inventory reports these blocks as `raw atomic operation`. The
+  compiler counts each intrinsic call as a raw site under
+  `--confine-raw-authority` (GitHub issue #989), so a call outside a file on
+  `kernel/RAW_MINT_FILES` fails the kernel build; the mint list is the one
+  place the files are reviewed. This identifies the review question; it
   does not prove the protocol correct. Bounded model check (GitHub issue
   #645): the kernel log's #612 publication (text word before length; record
   count before slot reuse; reader acquire loads and re-check) is checked by
@@ -587,7 +589,8 @@ of operation receives one primary category, so the detailed list is a review
 queue rather than a semantic proof. A new explicit escape surface must either
 fit a documented category or make the inventory report it as unclassified.
 When one block contains a raw atomic intrinsic and another recognized pattern,
-the atomic rationale is its primary category. The inventory also fails if its
-classified atomic source files and the RULE 2 allowlist disagree.
+the atomic rationale is its primary category. Which files may call a raw
+atomic intrinsic is the compiler's mint list (GitHub issue #989), not the
+inventory's.
 Language guarantee changes belong in `SPEC.md` and must also be reflected here
 when they change the meaning of a trusted boundary.

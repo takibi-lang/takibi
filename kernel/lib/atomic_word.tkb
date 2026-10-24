@@ -17,8 +17,8 @@
 // is in the intrinsics (SPEC.md, "Atomic Operations").
 //
 // The compiler, not this file, turns a cell into the intrinsics' address.
-// The allowlist in scripts/check_lock_discipline.py lists every file that
-// still calls an intrinsic directly, with its reason.
+// A direct intrinsic call is a raw site (GitHub issue #989): only a file on
+// kernel/RAW_MINT_FILES may make one. These operations are not raw sites.
 //
 // Current limitations (2026-10-01). Keep this list current as call sites
 // change; a limitation that goes stale here is worse than none, since it

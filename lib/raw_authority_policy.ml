@@ -60,13 +60,18 @@ let source_assertions program =
    counted here by name. *)
 let address_mint_builtins = [ "region_bytes_assume" ]
 
-let address_mint_sites program =
+(* GitHub issue #989 (#567 Stage 3): a raw atomic intrinsic call makes a
+   cross-core ordering claim the compiler does not check, so it is a counted
+   site of its own wherever it is called, however the `unsafe` around it is
+   shaped. The names are the compiler's own inventory, Atomic_spec; the
+   AtomicWord operations are ordinary functions and are not counted. *)
+let named_call_sites is_named program =
   let sites = ref [] in
   let rec expr name (e : Ast.expr) =
     let open Ast in
     (match e.desc with
-     | Call (callee, _) when List.mem callee address_mint_builtins ->
-         sites := (e.loc, name) :: !sites
+     | Call (callee, _) when is_named callee ->
+         sites := (e.loc, name, callee) :: !sites
      | _ -> ());
     match e.desc with
     | Unsafe inner -> expr name inner
@@ -96,6 +101,12 @@ let address_mint_sites program =
     | Ast.FuncDef f -> List.iter (stmt f.name) f.body
     | _ -> ()) program;
   !sites
+
+let address_mint_sites program =
+  named_call_sites (fun callee -> List.mem callee address_mint_builtins) program
+  |> List.map (fun (loc, name, _) -> (loc, name))
+
+let atomic_intrinsic_sites program = named_call_sites Atomic_spec.is_intrinsic program
 
 module Sites = Map.Make (struct
   type t = string * int * int
@@ -137,10 +148,15 @@ let check ?(source_program = []) ~mint_files () =
       Some (Ast.source_loc loc, Printf.sprintf
         "raw-authority confinement: an address becomes a region in '%s' outside a declared mint file"
         name)) in
+  let atomics = atomic_intrinsic_sites source_program |> List.filter_map (fun (loc, name, callee) ->
+    if declared (Ast.source_file_of_loc loc) then None else
+      Some (Ast.source_loc loc, Printf.sprintf
+        "raw-authority confinement: raw atomic intrinsic '%s' called in '%s' (%s) is outside a declared mint file; use AtomicWord (kernel/lib/atomic_word.tkb) or the lock, or add the file to the mint list by a reviewed decision"
+        callee name (Ast.source_file_of_loc loc))) in
   List.sort_uniq (fun (left, a) (right, b) ->
     compare (Ast.source_file_of_loc left, left.pos_lnum, left.pos_cnum, a)
       (Ast.source_file_of_loc right, right.pos_lnum, right.pos_cnum, b))
-      (raw @ unsafe @ references @ address_mints)
+      (raw @ unsafe @ references @ address_mints @ atomics)
 
 (* GitHub issue #739: every counted raw site, declared or not, keyed by its
    normalized source file. The compiler's own virtual files are left out:
@@ -157,7 +173,9 @@ let site_counts ?(source_program = []) () =
                 (loc, name) sites) Sites.empty
          |> Sites.bindings |> List.map snd)
     @ List.map (fun (loc, _) -> Ast.source_file_of_loc loc)
-        (address_mint_sites source_program) in
+        (address_mint_sites source_program)
+    @ List.map (fun (loc, _, _) -> Ast.source_file_of_loc loc)
+        (atomic_intrinsic_sites source_program) in
   let counts = List.fold_left (fun counts file ->
     if file = Ast.builtin_region_file || String.starts_with ~prefix:"<protocol " file
     then counts else

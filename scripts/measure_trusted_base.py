@@ -19,12 +19,28 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-from check_lock_discipline import ATOMIC_ALLOWED, ATOMIC_RE
 from pass_line import report_pass
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 KERNEL_DIR = REPO_ROOT / "kernel"
 ATOMIC_CATEGORY = "raw atomic operation"
+# The raw intrinsics, read from the compiler's own inventory (GitHub issue
+# #613 slice 4: a hand-written copy went stale). Which files may call one is
+# the compiler's --confine-raw-authority mint list (#989), not this script.
+ATOMIC_SPEC = REPO_ROOT / "lib/atomic_spec.ml"
+
+
+def atomic_intrinsics() -> list:
+    text = ATOMIC_SPEC.read_text(encoding="ascii")
+    body = text[text.index("let all = ["):]
+    body = body[:body.index("]\n")]
+    return re.findall(r'name = "(atomic_\w+)"', body)
+
+
+ATOMIC_NAMES = atomic_intrinsics()
+if len(ATOMIC_NAMES) < 8 or "atomic_compare_swap_acq_rel" not in ATOMIC_NAMES:
+    sys.exit(f"error: lib/atomic_spec.ml's intrinsic list was not read (found {ATOMIC_NAMES!r})")
+ATOMIC_RE = re.compile(r"\b(?:" + "|".join(ATOMIC_NAMES) + r")\b")
 
 
 def read_depfile_sources(depfile: Path) -> list[str]:
@@ -322,8 +338,6 @@ def main() -> None:
         path.relative_to(KERNEL_DIR).as_posix()
         for path, _ in sites[ATOMIC_CATEGORY]
     }
-    missing_allowlist = sorted(atomic_files - ATOMIC_ALLOWED.keys())
-    unused_allowlist = sorted(ATOMIC_ALLOWED.keys() - atomic_files)
     raw_casts = classify_raw_pointer_casts(source_paths)
     assembly = classify_assembly()
 
@@ -344,17 +358,7 @@ def main() -> None:
     for category in categories:
         print(f"  {category:36}: {len(sites[category]):4} blocks, "
               f"{body_lines[category]:5} lines")
-    if missing_allowlist or unused_allowlist:
-        print("  atomic ordering / RULE 2 allowlist: MISMATCH")
-        for name in missing_allowlist:
-            print(f"    classified atomic use is not allowlisted: {name}")
-        for name in unused_allowlist:
-            print(f"    allowlisted file has no classified atomic block: {name}")
-    else:
-        print(
-            f"  atomic ordering / RULE 2 allowlist: agree "
-            f"({len(atomic_files)} files)"
-        )
+    print(f"  atomic ordering files (mint-listed, #989): {len(atomic_files)}")
     print(f"  {'total':36}: "
           f"{sum(len(sites[c]) for c in categories):4} blocks, "
           f"{sum(body_lines[c] for c in categories):5} lines")
@@ -382,9 +386,6 @@ def main() -> None:
         for category in sorted(sites):
             for path, line in sites[category]:
                 print(f"  {category}: {path.relative_to(REPO_ROOT)}:{line}")
-
-    if missing_allowlist or unused_allowlist:
-        sys.exit("error: atomic trusted-base inventory disagrees with RULE 2 allowlist")
 
 
 if __name__ == "__main__":

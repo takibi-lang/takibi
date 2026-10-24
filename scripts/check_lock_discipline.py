@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Two rules about how this kernel's locks and atomics may be used.
+"""A rule about how this kernel's locks may be used.
 
-Both come from defects made on 2026-08-30, in the same session that added
+It comes from defects made on 2026-08-30, in the same session that added
 five locks to remove races.
 
 RULE 1 -- a GLOBAL Mutex must not be passed to mutex_init.
@@ -24,20 +24,10 @@ RULE 1 -- a GLOBAL Mutex must not be passed to mutex_init.
     zero-initialisation is not what the caller has. IntrusivePool's
     per-pool lock is the real caller.
 
-RULE 2 -- the raw atomic intrinsics have an allowlist.
-
-    They are `unsafe`-gated already, and SPEC.md says ordinary code should
-    reach them through the lock or through issue #299's publication
-    record. That is a sentence; this is the check. What it buys is not
-    prevention but REVIEW: adding a file here is a claim that this
-    particular use needs the raw instruction.
-
-    The compiler now gives every raw atomic a `requires_mmu` effect, so an
-    atomic reachable from an `!{mmu_off}` function is a build error. The
-    allowlist remains a separate source-level policy: ordinary code should
-    use the reviewed lock or publication abstraction even after the MMU is
-    active, rather than spreading unchecked ordering arguments through the
-    kernel.
+RULE 2 (raw atomic intrinsics need a reviewed file) retired with GitHub
+issue #989 (#567 Stage 3): the compiler counts a raw atomic intrinsic call
+as a raw site under --confine-raw-authority, so kernel/RAW_MINT_FILES is
+now the one list of files that may call one.
 
 Exit code only (0 = pass, 1 = fail).
 """
@@ -52,32 +42,6 @@ KERNEL = pathlib.Path("kernel")
 
 GLOBAL_RE = re.compile(r"^(?:private )?let mut ([A-Za-z_0-9]+)\s*:", re.M)
 MUTEX_INIT_RE = re.compile(r"mutex_init\(&([A-Za-z_0-9]+)")
-# The raw intrinsics, read from the compiler's own inventory rather than
-# listed here. GitHub issue #613 slice 4: the observed-value compare-swaps
-# were added to lib/atomic_spec.ml without joining a hand-written copy of
-# this list, so a raw compare-swap anywhere in the kernel passed unreviewed.
-ATOMIC_SPEC = pathlib.Path(__file__).resolve().parent.parent / "lib/atomic_spec.ml"
-
-
-def atomic_intrinsics() -> list:
-    text = ATOMIC_SPEC.read_text(encoding="ascii")
-    body = text[text.index("let all = ["):]
-    body = body[:body.index("]\n")]
-    return re.findall(r'name = "(atomic_\w+)"', body)
-
-
-ATOMIC_NAMES = atomic_intrinsics()
-ATOMIC_RE = re.compile(r"\b(?:" + "|".join(ATOMIC_NAMES) + r")\b")
-
-# Files permitted to use the raw atomic intrinsics, and why.
-ATOMIC_ALLOWED = {
-    "arch/arm64/kernel/exception_evidence.tkb":
-        "GitHub issue #496: DdbSnapshot's one valid-last word. The snapshot "
-        "is captured with interrupts masked and has no competing writer; "
-        "release ordering prevents an external debugger from accepting its "
-        "fields before the completed sequence is published. A lock cannot "
-        "help a halted out-of-band reader",
-}
 
 
 def main():
@@ -86,12 +50,7 @@ def main():
         return 1
 
     failures = []
-    if len(ATOMIC_NAMES) < 8 or "atomic_compare_swap_acq_rel" not in ATOMIC_NAMES:
-        print("FAIL lock-discipline: lib/atomic_spec.ml's intrinsic list was "
-              "not read (found %r)" % ATOMIC_NAMES, file=sys.stderr)
-        return 1
     checked_files = 0
-    atomic_users = []
     global_inits = 0
 
     for path in sorted(KERNEL.rglob("*.tkb")):
@@ -111,36 +70,14 @@ def main():
                     "cores this can release a lock another core holds. "
                     "Delete the call; see kernel/lib/mutex.tkb" % (rel, name))
 
-        # RULE 2
-        if ATOMIC_RE.search(text):
-            atomic_users.append(rel)
-            if rel not in ATOMIC_ALLOWED:
-                failures.append(
-                    "%s uses a raw atomic intrinsic and is not in this "
-                    "script's allowlist. Ordinary kernel code reaches an "
-                    "atomic through kernel/lib/spinlock.tkb's lock or "
-                    "through GitHub issue #299's publication record; if this "
-                    "use really needs the raw instruction, add the file here "
-                    "with the reason" % rel)
-
-    stale = [name for name in ATOMIC_ALLOWED
-             if not (KERNEL / name).exists()
-             or not ATOMIC_RE.search((KERNEL / name).read_text())]
-    for name in stale:
-        failures.append(
-            "%s is allowed to use raw atomics here but no longer does (or no "
-            "longer exists): remove the entry rather than leaving a claim "
-            "about nothing" % name)
-
     if failures:
         for f in failures:
             print("FAIL lock-discipline: %s" % f, file=sys.stderr)
         return 1
 
     report_pass("lock-discipline",
-                "%d files checked; no global Mutex is initialised, and %d "
-                "files use a raw atomic, all of them declared"
-                % (checked_files, len(atomic_users)),
+                "%d files checked; no global Mutex is initialised"
+                % checked_files,
                 files=checked_files)
     return 0
 
