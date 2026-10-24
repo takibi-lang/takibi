@@ -122,7 +122,11 @@ list (maintainer, 2026-10-09).
    decision): the linker-bounded stacks and the DTB blob as regions, which
    would take stack_poison.tkb's last integer ranges away. `make
    raw-site-counts` prints each listed file's raw sites to choose the next
-   one to migrate. Consolidating the kernel-driven built-ins into general features
+   one to migrate. Per-CPU scratch is #981: slice 1 done (2026-10-24:
+   address_space_active and the idle-starvation pair are `struct per_cpu`
+   stores); next is test_driver.tkb's exec_scratch as a pool once #974
+   lands, which takes that file off the list. address_space.tkb's EL0-VA
+   probe is #982. Consolidating the kernel-driven built-ins into general features
    is #750 (holder-tied identities, option C, is its central item; a
    shrink protocol for RegionPools walked with no lock belongs there). For #720
    (B): the doorbell, ERDP-release and stop/reset boundaries are in place;
