@@ -180,9 +180,22 @@ such owner, and naming one is an error.
    `staged != chunk` returns, so `staged = chunk` after it), bind's
    sockaddr (`x2 >= 16`, `len = min(x2, 28)`, and the IPv6 bytes after
    `x2 >= 28`), and getdents (`entry_start + 8 <= chunk` and
-   `name_length <= record_length - 8` bound every entry read). The procfs
-   read branch keeps its fill: a renderer writes its text piecewise through
-   a mutable offset, with no contract on which bytes.
+   `name_length <= record_length - 8` bound every entry read).
+6. #977 removed the procfs read branch's fill. `procfs_render_file`
+   ensures `init(output[0..<result])`, and the read copies out
+   `[offset, offset + min(total - offset, requested))` under
+   `offset < total`. Every renderer step (`procfs_put_byte`, `_text`,
+   `_usize`, `_hex`, `_comm`, `_sites`, `_core`) takes its start offset as
+   an immutable parameter, requires `init(output[0..<offset])` and ensures
+   `init(output[0..<result])`; the renderers chain the steps through
+   immutable `let`s. The profile renderer's per-core and per-site loops
+   carried a mutable offset, which would need facts about a mutable local
+   (versioned atoms), so they are unrolled under
+   `static_assert(KERNEL_MAX_CORES == 4)` and
+   `static_assert(IRQSOFF_DEPTH == 3)`. Two checker changes made the shape
+   provable: the coverage walk steps through `[lo, hi)` with
+   `lo <= cur <= hi` (the prefix `[0, offset)` may be empty), and
+   `return g(...)` names `g`'s result.
 5. #974 removed the last three `assume_init` sites, execve's
    `file_buffer` staging helpers (`syscall_exec_argv_here`,
    `syscall_exec_path_here`, `syscall_script_line_here`). Each requires
@@ -216,7 +229,10 @@ The init obligations' cold z3 time is budgeted at 5 s on a kernel build.
 (`init-obligation-budget`). A cache entry keeps each obligation's cold
 time, so the share is reported on warm builds too. Measured on the QEMU kernel on
 2026-10-24: 7 obligations, 0.19 s cold (4%). After #975: 33 obligations,
-0.63 s cold (13%). After #974: unchanged, 0.64 s cold (13%). The budget may grow when a
+0.63 s cold (13%). After #974: unchanged, 0.64 s cold (13%). After #977:
+102 obligations (67 of them procfs steps), 2.3 to 2.8 s cold (47 to 57%),
+measured uncached under a load average near 8 on 24 cores; each obligation
+is one z3 process of about 25 ms. The budget may grow when a
 later change needs it, as long as the build and lane budgets are unaffected.
 
 ## Out of this slice

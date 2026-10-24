@@ -892,6 +892,17 @@ fn path_view(slot: borrow SyscallSlot[0]) -> [u8; 256..]
 - A call result bound to an immutable `let` keeps the facts that depend on
   it: a `match` on the binding gets each arm's facts, and `return` of it
   meets an `ensures match result` arm by arm.
+- `return g(...)` in a function with an unsigned integer result names
+  `g`'s result as this function's `result`, so `g`'s `ensures` over its
+  `result` meets this function's (GitHub issue #977).
+- Coverage of `[a, b)` walks the known intervals from `a`: an interval
+  `[lo, hi)` with `lo <= cur <= hi` moves `cur` to `hi`, each interval at
+  most once, so a possibly empty prefix `[0, n)` chains into
+  `[n, n + 1)`. This is the cursor shape (GitHub issue #977): a step
+  takes its start offset as an immutable parameter,
+  `requires init(o[0..<at]) ensures init(o[0..<result])`, and a caller
+  chains steps through immutable `let`s. A loop that carries the offset in
+  a mutable local gives no fact.
 
 #### Path facts (GitHub issue #975)
 
