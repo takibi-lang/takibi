@@ -47,3 +47,26 @@ Assessment: accepted. The counters are the measurement the maintainer
 asked for to bring parked #680 back (#953); there is no cheaper source of
 the contended share. The 8-page reservation step is a boundary effect of
 1.8 KiB of text, not new state.
+
+## Contended-only counting (option B, same day)
+
+The wrapper now calls out of line only when region_pool_lock_is_held
+reports the lock held. Text returns under the 32 KiB reservation step, so
+the allocator page counts are main's again (no page cost); the temporary
+probe's own code pushed it back over, so the margin is small.
+
+The same probe, with the baseline changed to main's wrapper (an out-of-line
+call to mask + lock, no counting) so that only the counting differs:
+
+| sample | main's wrapper | B wrapper |
+|---|---|---|
+| 0 | 5418 | 5998 |
+| 1 | 5415 | 5995 |
+| 2 | 5419 | 5993 |
+
+Per pair: 24.5 ns vs 27.1 ns, +2.6 ns (+11%). The uncontended path is a
+`bl` to the monomorphized region_pool_lock_is_held (one `ldar` of the lock
+word), a `tbz`, and one more saved register. The counting itself is not
+reached. Against the inlined mask + lock (no wrapper call) the difference
+was 5172-5174 vs 5925-5931 (+5.5 ns), but most of that is the wrapper call
+main already pays.
