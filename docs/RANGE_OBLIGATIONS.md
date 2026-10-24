@@ -69,6 +69,34 @@ back end can read it unchanged: a Lean `bv_decide` proof of the same statement
 of this query at the same widths. Changing anything above is a version bump:
 the first line names the version, and the checker refuses other versions.
 
+## Initialization obligations (GitHub issue #954)
+
+The same directory holds one file per initialization coverage conclusion of
+`lib/init_flow.ml` (lib/init_pred.ml builds it), under its own header:
+
+```
+; takibi-init-obligation v1
+; site: kernel/mm/user_memory.tkb:302:5
+; rule: init
+; claim: init(destination[0..<destination.len])
+(set-logic QF_LIA)
+(declare-const x_len1 Int)                 one Int per atom (a binding, a .len)
+(assert (and (<= 0 x_len1) (< x_len1 18446744073709551616)))
+...
+(assert (= x_len1 x_v4))                   path equalities the checker used
+(declare-const k Int)
+(assert (and (<= 0 k) (< k x_len1)))       k inside the goal [a, b)
+(assert (not (or false (and (<= 0 k) (< k x_v4)))))   k in no known interval
+(check-sat)
+```
+
+`unsat` proves the goal covered. Terms are mathematical integers: each comes
+from a slice bound or index the program bounds-checks, so no wrap is
+modelled. The checker prints the share of the cold z3 time budget these use
+(`init-obligation-budget`, 5 s on a kernel build; a cache entry keeps each
+obligation's cold time), and `make range-obligation-control` also plants a
+false coverage claim and requires the counterexample `k = 7`.
+
 ## Not covered
 
 - A wire-endian cast (`u16be <-> u16`) keeps the logical value's range and has

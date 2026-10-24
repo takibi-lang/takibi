@@ -748,26 +748,42 @@ Rules:
   source's padding state when the source is a tracked place, and counts as
   `init` for any other value (a call result, a parameter). A field store never
   writes padding.
-- Storing to an element of an array leaf, `a[i] = x`, neither reads it nor
-  makes it `init`: arrays are tracked whole. One loop shape initializes a
-  whole array leaf (GitHub issue #888):
+- An array or slice leaf that is `uninit` also carries the set of its
+  elements known `init` (GitHub issue #954): a union of intervals
+  `[lo, hi)` whose bounds are linear integer terms -- literals, `const`s,
+  `sizeof`, immutable integer bindings and parameters, `.len` of a slice
+  binding, `+`, `-` and `*` by a constant. Reading element `P[j]` needs `j`
+  in the set, reading or viewing `P[a..<b]` needs `[a, b)`, and reading the
+  whole leaf needs `[0, len)`; once the set covers `[0, len)` the leaf is
+  `init`. A binding that is assigned or whose address is taken is not a
+  term. Each covering conclusion is also a z3 obligation (below).
+- Writes that add intervals: an element store `P[j] = x` adds `[j, j+1)`;
+  passing the view `P[a..<b]` to a `borrow uninit` parameter adds `[a, b)`
+  (or what the callee's `ensures` states); `slice_copy(P[a..<b], src)` adds
+  `[a, a + r)` when its result is bound to an immutable `r`; and a counted
+  loop (GitHub issue #888, generalized by #954)
 
   ```takibi
-  for i: usize in 0..<N { ...; P[i] = e; ... }
+  for i: usize in lo..<hi { ...; P[i] = e; ... }
   ```
 
-  makes `P` `init` after the loop when all of these hold: `P` is a whole
-  array leaf named by a variable and field chain with no index in it (the
-  same place on every iteration); the lower bound is `0` and the upper
-  bound `N` is a literal or `const` equal to `P`'s length; the store is a
-  statement at the top level of the body (plain or `unsafe` blocks allowed,
-  not under an `if`, `match` or inner loop) and indexes with the loop's own
-  counter; and the body has no `return`, and no `break` or `continue`
-  outside an inner loop. The counter is immutable, so iteration `k` stores
-  element `k` for every `k` in `0..<N`. The body is still checked with `P`
-  `uninit`, so it may not read `P`, not even an element already stored.
-  Any other loop -- a `while`, a partial or runtime range, a conditional
-  store, an early exit -- leaves `P` as it was before the loop.
+  adds `[lo, hi)` after the loop when all of these hold: `P` is a view
+  named by a variable and field chain with no index in it, or an alias (the
+  same place on every iteration); `lo` and `hi` are linear terms; the store
+  is a statement at the top level of the body (plain or `unsafe` blocks
+  allowed, not under an `if`, `match` or inner loop) and indexes with the
+  loop's own counter; and the body has no `return`, and no `break` or
+  `continue` outside an inner loop. The counter is immutable, so iteration
+  `k` stores element `k` for every `k` in `lo..<hi`. With `lo = 0` and `hi`
+  the array's length the whole leaf becomes `init`. The body is checked
+  against the state before the loop plus its own stores, so it may read the
+  element it already stored in the same iteration and nothing later. Any
+  other loop -- a `while`, a conditional store, an early exit -- leaves `P`
+  as it was before the loop.
+- An immutable binding of a slice view of a tracked leaf, `let v = P as []T`
+  or `let v = P[a..<b]` (linear bounds; `T` the leaf's element type), is an
+  alias: it reads nothing when bound, and each later use reads its own
+  range of `P`.
 - `zero_fill(dst)` stores zero over every byte of a writable slice or of a
   pointer's pointee, padding included, and makes the place `init`. The
   target's type must accept all-zero bytes (GitHub issue #794): a refined
@@ -817,10 +833,60 @@ fn fill(dst: borrow uninit []u8) { zero_fill(dst); }   // init on return
 ```
 
 Known limitations: local arrays declared without an initializer are not
-tracked yet, so reading one before writing it is not rejected. Element writes
-make an array `init` only through the loop above, and a fill that writes only a range (`copy_from_user`
-into part of a buffer, a device receive) cannot be expressed. Stage 3 adds
-byte-range facts and `ensures init(...)` contracts for those.
+tracked yet, so reading one before writing it is not rejected. Intervals are
+compared only by constant differences between their bounds (an incomplete,
+sound check), path conditions other than a contract's own result are not
+used, and a merge keeps an interval only when every arm has the same one.
+
+### Initialization contracts (GitHub issue #954)
+
+A function may state, after its signature and `where` clause, which elements
+are `init` on entry and on return. `requires` and `ensures` are keywords.
+
+```takibi
+fn copy_from_user_span(range: borrow UserReadRange[process],
+                       destination: borrow uninit []u8,
+                       offset: usize, length: usize) -> bool !{unsafe}
+        ensures init(destination[offset..<offset + length]) if (result) { ... }
+
+fn read(buf: borrow uninit []u8) -> ReadResult
+        ensures match result { ReadResult::Read(n) => init(buf[0..<n]),
+                               ReadResult::Eof => true, _ => true } { ... }
+
+fn path_view(slot: borrow SyscallSlot[0]) -> [u8; 256..]
+        requires init(syscall_scratch[slot.index].path_buffer) { ... }
+```
+
+- `init(P)` or `init(P[lo..<hi])` names a parameter, or a field of a
+  `scratch` global indexed by a held slot capability: `G[s.index].f...`
+  where `s` is a parameter of a `linear struct` owner type. Any other
+  global is an error: the slot's linear ownership is what keeps another
+  function from changing the element between caller and callee. `lo` and
+  `hi` are linear terms over the parameters, their `.len`, constants and
+  `result` (for an integer result) or an arm's payload binder.
+- `ensures C` holds at every return. On a `borrow uninit` parameter it
+  replaces the default "whole parameter `init` at every return". At a call
+  it is applied to the arguments: the callee's element `k` of parameter `x`
+  is element `off + k` of the view the caller passed for `x`.
+- `ensures C if (result)` (or `result == true/false`) needs a `bool` result.
+  The caller gets `C` in the branch of an `if` whose condition is the call
+  itself or `call == true/false`, and in the callee a `return false` needs
+  nothing, `return a == b` may use `a = b`, and `return g(...)` may use `g`'s
+  own conditional ensures.
+- `ensures match result { K(x) => C, ..., _ => C }` needs a variant result.
+  The arms are checked like an ordinary match: every case once, or a `_`.
+  Each arm means `tag == K and payload == x implies C`, which stays
+  quantifier free. A `return K(e)` must show its arm's `C` with `x := e`;
+  a `match g(...)` arm `K(x)` in the caller gets `C` with `x` the arm's
+  binder.
+- `requires C` is unconditional. It is shown at every call against the
+  caller's state and assumed at the callee's entry.
+
+Every covering conclusion becomes a `; takibi-init-obligation v1` file under
+`--emit-range-obligations` (docs/RANGE_OBLIGATIONS.md): z3 re-checks the
+checker's interval reasoning in QF_LIA, outside the trusted base, and a
+failed one reports the uncovered element `k`. docs/VERIFICATION_DESIGN.md
+records the design and its budget.
 
 ## Indexed Runtime Owners
 
