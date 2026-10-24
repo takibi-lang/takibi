@@ -16,7 +16,6 @@ kernel/boot/fdt.tkb	1	0	the device tree blob as raw memory (#637 H)
 kernel/drivers/block/virtio_blk.tkb	13	0	virtio rings and request buffers, plus device registers (#637 A, E); +1 plain +4 io for the completion-timeout snapshot DDB prints (2026-10-04); 4 io moved to virtio_blk_dma.tkb and 1 io folded into its used-index poll (#716); -7 plain: the request header and TX data are fixed DMA records (#717); -14 io: registers are an IoHandle (#637 A)
 kernel/drivers/net/rp1_gem.tkb	0	9	RP1 clock and GPIO registers (#637 A); GEM registers use an IoHandle (#733)
 kernel/drivers/net/virtio_net.tkb	5	0	virtio rings and frames (#637 E); registers are an IoHandle
-kernel/mm/address_space.tkb	6	0	Backing records use indexed references and active roots use bounded per-CPU array places; remaining raw sites are the deliberate user-VA CoW probe byte mints
 kernel/mm/user_memory.tkb	7	0	the user-range mint site: user addresses become slices here (#637 D)
 kernel/platform/qemu/device_map.tkb	0	3	virtio-mmio magic and device-id probes during DTB discovery (#637 A); the device-window mint
 kernel/printk/log.tkb	21	0	the syslog snapshot buffers and NUL-terminated string walks; per-CPU line state is indexed since #613 slice 5 (#637 B)

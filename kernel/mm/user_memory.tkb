@@ -248,6 +248,34 @@ fn user_probe_boot_read_matches(address: usize, expected: borrow [const u8; 8..]
     return true;
 }
 
+// Boot probes only: put `root` on this CPU and store or load one byte at
+// `address` through a range validated against that same root's table
+// (#982). Activating inside the accessor is what makes the validated root
+// and the TTBR0 the access goes through one root by construction; the
+// caller puts its own root back afterwards. The range never leaves the
+// function, like user_probe_boot_read_matches' own. A refused validation
+// is reported as Fault / (false, 0) and nothing is dereferenced, so a
+// probe can expect a fault as a refusal rather than as an EL1 abort.
+fn user_probe_root_write_byte(root: AddressSpaceRoot, address: usize, value: u8)
+        -> UserWriteResult !{unsafe} {
+    if (user_range_span_ok(root, address, 1, UserAccessMode::Write) == false) {
+        return UserWriteResult::Fault;
+    }
+    address_space_activate_root(root);
+    let mut range: UserWriteRange[0] = { root, address, 1 };
+    return user_write_byte(range, 0, value);
+}
+
+fn user_probe_root_read_byte(root: AddressSpaceRoot, address: usize)
+        -> (bool, u8) !{unsafe} {
+    if (user_range_span_ok(root, address, 1, UserAccessMode::Read) == false) {
+        return (false, 0);
+    }
+    address_space_activate_root(root);
+    let mut range: UserReadRange[0] = { root, address, 1 };
+    return (true, user_read_byte(range, 0));
+}
+
 // GitHub issue #199 follow-up: a write-validated range's underlying page
 // is always also readable on this architecture -- a writable user
 // mapping's AP bits already imply read access (USER_RW_XN_FLAGS is the

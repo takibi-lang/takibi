@@ -36,7 +36,6 @@ kernel/platform/rpi5/usb_xhci_bus.tkb
 # R: to be rewritten to authority-derived access, then removed
 # kernel/init/test_driver.tkb left (2026-10-24, #981): its exec scratch, a
 # per-CPU array reached by pointer arithmetic, is a slot pool now.
-kernel/mm/address_space.tkb
 
 # D: deferred by decision (#613 for log; stopped-machine reporters for exception_evidence)
 kernel/arch/arm64/kernel/exception_evidence.tkb
