@@ -174,9 +174,7 @@ MMU-off code), #926 (GICv3 driver for QEMU virt gic-version=3). Audit follow-ups
 nfds > 0), #902 (poll on terminal fds other than 0), #898 (DDB
 schedule_reserved window), #899 (probe-gate checks from #756), #904
 (position-dependent controls, FAILED line after a poll bound), #905
-(peer_sleep_mask negative control), #903 (reproducible guest ELFs). #962/#963's
-follow-up (2026-10-24): #964 (shorten or forward whole memcpy.inline
-copies of results read for one field).
+(peer_sleep_mask negative control), #903 (reproducible guest ELFs).
 
 On 2026-10-04 the maintainer authorized autonomous B work in priority order
 where acceptance is settled; leave design investigations and unmet
