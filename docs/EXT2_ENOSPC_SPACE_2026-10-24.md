@@ -5,14 +5,14 @@ against origin/main 751d6bc6, measured with `scripts/space_delta.py`.
 
 | | qemu base | qemu change | rpi5 base | rpi5 change |
 |---|---|---|---|---|
-| text | 669176 | 673504 | 722984 | 727376 |
+| text | 669176 | 673712 | 722984 | 727584 |
 | data | 4816 | 4824 | 2889664 | 2889672 |
 | bss | 1481888 | 1482912 | 1690736 | 1691760 |
 | usable_ram_start | 0x40210000 | 0x40218000 | 0x710000 | 0x718000 |
 
 Symbols: `ext2_full_fixture_saved` (1024 B BSS) added on both kernels.
 
-Assessment: +4.3 KiB text for the NoSpace outcomes (inode allocation,
+Assessment: +4.5 KiB text for the NoSpace outcomes (inode allocation,
 directory insertion, create, mkdir, rename) and the boot fixture that fills
 each bitmap; the fixture's one-block save buffer crosses a page boundary, so
 usable_ram_start moves by 32 KiB (8 allocator pages fewer). No pool, record
