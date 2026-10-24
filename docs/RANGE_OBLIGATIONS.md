@@ -132,6 +132,31 @@ modelled. The checker prints the share of the cold z3 time budget these use
 obligation's cold time), and `make range-obligation-control` also plants a
 false coverage claim and requires the counterexample `k = 7`.
 
+GitHub issue #960: an init term is exact over mathematical integers (Init_pred
+refuses a native overflow), so the one fold it carries is the reading of each
+literal or `const` leaf. Each leaf the checker reads gets its own obligation
+in the same header, `; rule: leaf`:
+
+```
+; takibi-init-obligation v1
+; rule: leaf
+; claim: literal 0xffffffffffffffff at usize
+(set-logic QF_LIA)
+(declare-const k Int)
+(assert (= k 5))                           the checker's reading
+(assert (not (= k 5)))                     the literal's pattern, unsigned at usize
+(check-sat)
+```
+
+The right-hand value is printed from the source's 64-bit pattern
+(`Const_env.raw_literal` for a `const`), not through the checker's reading, so
+`sat` (z3's `k`) names a misreading such as #983's -1. A new rule in the same
+QF_LIA shape, so not a version bump. `SizeOf` leaves have no literal and are
+not checked this way. On the QEMU kernel (2026-10-24, load average 23): 871
+obligations, 231 of them leaves; the init share of the cold budget went from
+0.33 s to 0.93 s (19% of 5 s), and the whole check runs 2.7 s cold on 8
+threads.
+
 ## Not covered
 
 - A wire-endian cast (`u16be <-> u16`) keeps the logical value's range and has

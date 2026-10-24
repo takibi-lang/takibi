@@ -432,9 +432,26 @@ let check
      atom is a usize, so below 2^64). Without these, `0xFFFF_FFFF_FFFF_FFFF`
      passed as an offset or `m - 1` under m == 0 read as -1, and a callee's
      [n, 8) covered [0, 8) in the caller. *)
-  let leaf_const = function
-    | Some c when c >= 0 && c <= Init_pred.limit -> Some (Init_pred.const c)
+  let leaf_const ?src v =
+    let ok = match v with
+      | Some c -> (c >= 0 || !Range_obligation.fault_native_init_leaf)
+                  && c <= Init_pred.limit
+      | None -> false in
+    match v with
+    | Some c when ok ->
+        (* GitHub issue #960: z3 re-reads the literal from its source
+           pattern at usize and compares it with the checker's reading,
+           so a native misreading (#983) is a counterexample. *)
+        (match src with
+         | Some (loc, pattern) ->
+             Range_obligation.record_text loc
+               (Init_pred.leaf_obligation ~read:c ~pattern
+                  ~bits:(Target_info.pointer_bit_width ()))
+         | None -> ());
+        Some (Init_pred.const c)
     | _ -> None in
+  let const_src (e : Ast.expr) x =
+    Option.map (fun n -> (e.Ast.loc, n)) (Const_env.raw_literal x) in
   (* Does [t] >= 0 (nonneg) or t <= some value below 2^64 (fits_above)
      follow from the path's equalities and facts? *)
   let nonneg (st : state) (t : Init_pred.lin) =
@@ -452,13 +469,13 @@ let check
   let checked k = try k () with Init_pred.Overflow -> None in
   let rec lin (f : state) (e : Ast.expr) : Init_pred.lin option =
     match e.desc with
-    | Ast.IntLit n -> leaf_const (Ast.int_of_intlit n)
+    | Ast.IntLit n -> leaf_const ~src:(e.loc, n) (Ast.int_of_intlit n)
     | Ast.Var x ->
         (match Local_bindings.id_for_expr bindings e with
          | Some id when immutable_var x id -> Some (v_atom id)
          | Some id when versionable x id -> Some (ver_atom id)
          | Some _ -> None
-         | None -> leaf_const (Const_env.find x))
+         | None -> leaf_const ?src:(const_src e x) (Const_env.find x))
     | Ast.SizeOf t -> leaf_const (size_of t)
     | Ast.BinOp (Ast.Add, a, b) ->
         (match lin f a, lin f b with
@@ -715,11 +732,11 @@ let check
        (the callee proves exactly that interval, and the caller maps each
        atom to a machine value through [lin]), but its leaves read at the
        usize width as [lin]'s do. *)
-    | Ast.IntLit n -> leaf_const (Ast.int_of_intlit n)
+    | Ast.IntLit n -> leaf_const ~src:(e.loc, n) (Ast.int_of_intlit n)
     | Ast.Var x ->
         (match env x (`Val None) with
          | Some t -> Some t
-         | None -> leaf_const (Const_env.find x))
+         | None -> leaf_const ?src:(const_src e x) (Const_env.find x))
     | Ast.SizeOf t -> leaf_const (size_of t)
     | Ast.FieldGet ({ desc = Ast.Var x; _ }, "len") -> env x (`Len None)
     | Ast.BinOp (Ast.Add, a, b) ->

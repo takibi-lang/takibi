@@ -234,3 +234,25 @@ let obligation ~claim ?(facts = no_facts) (eqs : eqs) (ivs : interval list)
   line (Printf.sprintf "(assert (not (or false %s)))" (String.concat " " inside));
   line "(check-sat)";
   Buffer.contents buf
+
+(* GitHub issue #960: the checker's reading of a literal or const leaf
+   against the literal itself. [pattern] is the source's 64-bit pattern;
+   this obligation spells it as the unsigned value at [bits] (usize), never
+   through the checker's reading, and asks z3 for a reading k that differs.
+   So the leaves every init term is built from are checked by z3, not
+   assumed: #983's 0xFFFFFFFFFFFFFFFF read as -1 is a counterexample. The
+   terms built from leaves are exact over mathematical integers (checked
+   against Overflow), so the leaf is the one fold a term carries. *)
+let leaf_obligation ~read ~(pattern : Int64.t) ~bits =
+  let value =
+    if bits >= 64 then Printf.sprintf "%Lu" pattern
+    else Printf.sprintf "%Lu"
+        (Int64.logand pattern (Int64.sub (Int64.shift_left 1L bits) 1L)) in
+  String.concat "\n" [
+    header; "; rule: leaf";
+    Printf.sprintf "; claim: literal 0x%Lx at usize" pattern;
+    "(set-logic QF_LIA)";
+    "(declare-const k Int)";
+    Printf.sprintf "(assert (= k %s))" (smt_int read);
+    Printf.sprintf "(assert (not (= k %s)))" value;
+    "(check-sat)"; "" ]

@@ -307,6 +307,20 @@ fn fold956(x: u64) -> u64 {
     return m;
 }
 
+fn leaf961(x: u64) -> u64 {
+    let m = max(x & 3, 0xFFFFFFFFFFFFFFFF);
+    return m;
+}
+
+fn tail983(dst: borrow uninit [u8; 8..], n: usize) ensures init(dst[n..<8]) {
+    if (n > 8) { return; }
+    zero_fill(dst[n..<8]);
+}
+
+fn whole983(o: borrow uninit [u8; 8..]) ensures init(o[0..<8]) {
+    tail983(o, 0xFFFFFFFFFFFFFFFF);
+}
+
 fn main() -> i32 {
     return wrap(10, 50) as i32;
 }
@@ -418,9 +432,33 @@ def control(takibi: str) -> int:
         print("FAIL range-obligation control: #956's planted native fold "
               "(#960) was not reported with a counterexample")
         return 1
+    # #961's native leaf, planted: max(x & 3, 0xFFFFFFFFFFFFFFFF) on u64
+    # with the literal read as -1 claims {0..<4}; z3 reads the literal's
+    # pattern at u64.
+    leaf_planted = [f for f in failures
+                    if ": sat " in f and "rule: max" in f
+                    and "claim: {0..<4 as u64}" in f and "counterexample" in f]
+    if len(leaf_planted) != 1:
+        print("\n".join(failures))
+        print("FAIL range-obligation control: #961's planted native leaf "
+              "(#960) was not reported with a counterexample")
+        return 1
+    # #983's native init leaf, planted: 0xFFFFFFFFFFFFFFFF passed as a
+    # contract offset read as -1. z3 must report the reading k = -1 against
+    # the literal's usize value.
+    init_leaf_planted = [f for f in failures
+                         if ": sat " in f and "rule: leaf" in f
+                         and "0xffffffffffffffff" in f
+                         and "(k (- 1))" in f.replace("\n", " ")]
+    if len(init_leaf_planted) != 1:
+        print("\n".join(failures))
+        print("FAIL range-obligation control: #983's planted native init "
+              "leaf (#960) was not reported with k = -1")
+        return 1
     report_pass("range-obligation-control",
                 "z3 reports #935's planted unsigned-Sub range, #961's "
-                "planted min/max range (#984), a planted "
+                "planted min/max range (#984), the three planted native "
+                "constant readings of #956, #961 and #983 (#960), a planted "
                 "init coverage claim (#954) and a planted path-fact claim "
                 "(#975) with counterexamples",
                 obligations=len(failures) + len(init_planted)
