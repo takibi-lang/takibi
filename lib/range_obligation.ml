@@ -230,6 +230,11 @@ let fault_native_fold = ref false
 let fault_native_leaf = ref false
 let fault_native_init_leaf = ref false
 
+(* Fault control only, same flag (GitHub issue #990): init_flow judges
+   every `a - b` not to wrap, so the control shows the no-wrap obligation
+   refutes a wrong judgement. *)
+let fault_init_nowrap = ref false
+
 (* GitHub issue #954: an obligation whose text another module built (an
    initialization coverage claim, Init_pred.obligation). It shares the
    directory, digest naming and site lines of the range obligations. *)

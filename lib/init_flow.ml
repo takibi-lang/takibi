@@ -454,9 +454,17 @@ let check
     Option.map (fun n -> (e.Ast.loc, n)) (Const_env.raw_literal x) in
   (* Does [t] >= 0 (nonneg) or t <= some value below 2^64 (fits_above)
      follow from the path's equalities and facts? *)
+  (* GitHub issue #990: each no-wrap judgement below is also written as an
+     obligation stating the machine property (the term is a usize) under
+     the same path facts, so z3 re-checks the checker's search. *)
+  let nowrap_ob (st : state) loc kind (t : Init_pred.lin) =
+    Range_obligation.record_text loc
+      (Init_pred.nowrap_obligation ~claim:(show t) ~facts:st.facts st.eqs
+         ~bits:(Target_info.pointer_bit_width ()) kind t) in
   let nonneg (st : state) (t : Init_pred.lin) =
-    Init_pred.entails (Init_pred.normalize_facts st.eqs st.facts)
-      (Init_pred.normalize st.eqs t) in
+    !Range_obligation.fault_init_nowrap
+    || Init_pred.entails (Init_pred.normalize_facts st.eqs st.facts)
+         (Init_pred.normalize st.eqs t) in
   let fits_above (st : state) (t : Init_pred.lin) =
     let f = Init_pred.normalize_facts st.eqs st.facts in
     let t = Init_pred.normalize st.eqs t in
@@ -481,17 +489,23 @@ let check
         (match lin f a, lin f b with
          | Some x, Some y ->
              checked (fun () ->
-               let t = Init_pred.add x y in if fits_above f t then Some t else None)
+               let t = Init_pred.add x y in
+               if fits_above f t then (nowrap_ob f e.loc Init_pred.Below t; Some t)
+               else None)
          | _ -> None)
     | Ast.BinOp (Ast.Sub, a, b) ->
         (match lin f a, lin f b with
          | Some x, Some y ->
              checked (fun () ->
-               let t = Init_pred.sub x y in if nonneg f t then Some t else None)
+               let t = Init_pred.sub x y in
+               if nonneg f t then (nowrap_ob f e.loc Init_pred.Nonneg t; Some t)
+               else None)
          | _ -> None)
     | Ast.BinOp (Ast.Mul, a, b) ->
         let prod k y = checked (fun () ->
-          let t = Init_pred.scale k y in if fits_above f t then Some t else None) in
+          let t = Init_pred.scale k y in
+          if fits_above f t then (nowrap_ob f e.loc Init_pred.Below t; Some t)
+          else None) in
         (match lin f a, lin f b with
          | Some x, Some y when Init_pred.SMap.is_empty x.m -> prod x.c y
          | Some x, Some y when Init_pred.SMap.is_empty y.m -> prod y.c x
@@ -559,6 +573,8 @@ let check
     | Ast.BinOp (Ast.Sub, a, b) ->
         (match side st a, side st b with
          | Some x, Some y when Init_pred.entails st.facts (Init_pred.sub x y) ->
+             (* #990: the same no-wrap judgement, re-checked by z3. *)
+             nowrap_ob st e.loc Init_pred.Nonneg (Init_pred.sub x y);
              Some (Init_pred.sub x y)
          | _ -> None)
     | _ -> None

@@ -157,6 +157,32 @@ obligations, 231 of them leaves; the init share of the cold budget went from
 0.33 s to 0.93 s (19% of 5 s), and the whole check runs 2.7 s cold on 8
 threads.
 
+GitHub issue #990: a term is built from `a - b`, `a + b` or `k * a` only
+when the checker judges that the step does not wrap at usize (#983). Each such
+judgement also gets an obligation, `; rule: nowrap-sub` (the term is >= 0) or
+`; rule: nowrap-add` (the term is below 2^W), under the same path equalities
+and facts that the checker searched:
+
+```
+; takibi-init-obligation v1
+; rule: nowrap-sub
+; claim: m - 1
+(set-logic QF_LIA)
+...                                        atoms, equalities, facts
+(declare-const k Int)
+(assert (= k (+ x_v3 (- 1))))
+(assert (not (>= k 0)))                    or (not (< k 2^W)) for nowrap-add
+(check-sat)
+```
+
+The query states the machine property itself, not the checker's sufficient
+reason (an atom bound, a fact chain), so `sat` names the wrapped value. Like
+the leaf rule, this is a new rule in the same shape, not a version bump.
+`make range-obligation-control` plants a checker that judges every `a - b`
+not to wrap, and requires `k = -1` for `m - 1`. On the QEMU kernel
+(2026-10-24): 85 no-wrap obligations out of 954; the init share of the cold
+budget is 1.06 s (21% of 5 s), and the whole check runs 2.6 s cold.
+
 ## Not covered
 
 - A wire-endian cast (`u16be <-> u16`) keeps the logical value's range and has

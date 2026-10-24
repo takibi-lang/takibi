@@ -321,6 +321,11 @@ fn whole983(o: borrow uninit [u8; 8..]) ensures init(o[0..<8]) {
     tail983(o, 0xFFFFFFFFFFFFFFFF);
 }
 
+fn sub990(o: borrow uninit [u8; 8..], m: usize) ensures init(o[0..<8]) {
+    tail983(o, m - 1);
+    zero_fill(o[0..<8]);
+}
+
 fn main() -> i32 {
     return wrap(10, 50) as i32;
 }
@@ -455,10 +460,22 @@ def control(takibi: str) -> int:
         print("FAIL range-obligation control: #983's planted native init "
               "leaf (#960) was not reported with k = -1")
         return 1
+    # GitHub issue #990: a wrong no-wrap judgement, planted: every `a - b`
+    # judged not to wrap, so `m - 1` with no fact on m becomes a term (m = 0 wraps). The
+    # no-wrap obligation must report the wrapped value k = -1.
+    nowrap_planted = [f for f in failures
+                      if ": sat " in f and "rule: nowrap-sub" in f
+                      and "(k (- 1))" in f.replace("\n", " ")]
+    if not nowrap_planted:
+        print("\n".join(failures))
+        print("FAIL range-obligation control: #990's planted no-wrap "
+              "judgement was not reported with k = -1")
+        return 1
     report_pass("range-obligation-control",
                 "z3 reports #935's planted unsigned-Sub range, #961's "
                 "planted min/max range (#984), the three planted native "
                 "constant readings of #956, #961 and #983 (#960), a planted "
+                "no-wrap judgement (#990), a planted "
                 "init coverage claim (#954) and a planted path-fact claim "
                 "(#975) with counterexamples",
                 obligations=len(failures) + len(init_planted)

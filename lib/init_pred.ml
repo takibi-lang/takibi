@@ -203,10 +203,11 @@ let smt x =
   | ts, 0 -> "(+ " ^ String.concat " " ts ^ ")"
   | ts, c -> "(+ " ^ String.concat " " ts ^ " " ^ smt_int c ^ ")"
 
-let obligation ~claim ?(facts = no_facts) (eqs : eqs) (ivs : interval list)
-    ((a, b) : interval) =
-  let all = List.concat_map (fun (lo, hi) -> atoms lo @ atoms hi)
-      ((a, b) :: ivs)
+(* The shared prelude of an init obligation: header, every atom declared
+   as a usize, the path's equalities and facts. [terms] are the other
+   terms the query names, so their atoms are declared too. *)
+let prelude ~rule ~claim ?(facts = no_facts) (eqs : eqs) (terms : lin list) =
+  let all = List.concat_map atoms terms
     @ List.concat_map (fun (x, t) -> x :: atoms t) eqs
     @ List.concat_map atoms facts.ge
     @ List.concat_map (fun (x, l, r) -> x :: atoms l @ atoms r) facts.mins in
@@ -214,7 +215,7 @@ let obligation ~claim ?(facts = no_facts) (eqs : eqs) (ivs : interval list)
   let buf = Buffer.create 512 in
   let line s = Buffer.add_string buf s; Buffer.add_char buf '\n' in
   line header;
-  line "; rule: init";
+  line ("; rule: " ^ rule);
   line ("; claim: " ^ claim);
   line "(set-logic QF_LIA)";
   List.iter (fun x ->
@@ -227,11 +228,41 @@ let obligation ~claim ?(facts = no_facts) (eqs : eqs) (ivs : interval list)
   List.iter (fun (x, l, r) ->
     line (Printf.sprintf "(assert (= %s (ite (<= %s %s) %s %s)))"
             (smt_atom x) (smt l) (smt r) (smt l) (smt r))) facts.mins;
+  buf, line
+
+let obligation ~claim ?(facts = no_facts) (eqs : eqs) (ivs : interval list)
+    ((a, b) : interval) =
+  let buf, line = prelude ~rule:"init" ~claim ~facts eqs
+      (List.concat_map (fun (lo, hi) -> [lo; hi]) ((a, b) :: ivs)) in
   line "(declare-const k Int)";
   line (Printf.sprintf "(assert (and (<= %s k) (< k %s)))" (smt a) (smt b));
   let inside = List.map (fun (lo, hi) ->
     Printf.sprintf "(and (<= %s k) (< k %s))" (smt lo) (smt hi)) ivs in
   line (Printf.sprintf "(assert (not (or false %s)))" (String.concat " " inside));
+  line "(check-sat)";
+  Buffer.contents buf
+
+(* GitHub issue #990: a term Init_flow built from a step it judged not to
+   wrap at the usize width ([bits]): `a - b` (the term is >= 0) or `a + b`,
+   `k * a` (the term is below 2^bits). The judgement is the checker's own
+   search over the path facts (entails); this obligation states the machine
+   property itself under the same equalities and facts, and asks z3 for a
+   value k of the term outside the usize range. `unsat` proves the step is
+   the machine's; `sat` names the wrapped value. *)
+type nowrap = Nonneg | Below
+
+let nowrap_obligation ~claim ~facts eqs ~bits (kind : nowrap) (t : lin) =
+  let buf, line = prelude ~rule:(match kind with Nonneg -> "nowrap-sub"
+                                              | Below -> "nowrap-add")
+      ~claim ~facts eqs [t] in
+  line "(declare-const k Int)";
+  line (Printf.sprintf "(assert (= k %s))" (smt t));
+  (match kind with
+   | Nonneg -> line "(assert (not (>= k 0)))"
+   | Below ->
+       line (Printf.sprintf "(assert (not (< k %s)))"
+               (if bits >= 64 then "18446744073709551616"
+                else string_of_int (1 lsl bits))));
   line "(check-sat)";
   Buffer.contents buf
 

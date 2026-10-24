@@ -193,7 +193,8 @@ let () =
             #983), which each obligation's own expression must refute. *)
          Takibi.Range_obligation.fault_native_fold := true;
          Takibi.Range_obligation.fault_native_leaf := true;
-         Takibi.Range_obligation.fault_native_init_leaf := true
+         Takibi.Range_obligation.fault_native_init_leaf := true;
+         Takibi.Range_obligation.fault_init_nowrap := true
      | "--trace-init-flow" ->
          (* GitHub issue #976: print FUNC's init state after each
             statement (docs/VERIFICATION_DESIGN.md). *)
