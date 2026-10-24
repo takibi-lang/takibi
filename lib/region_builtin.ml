@@ -1405,17 +1405,21 @@ let names_after_any prefixes =
 
 let contains = Text_search.contains
 
-(* The printed form of each top-level item, which the planning scans read.
-   Printing the kernel takes seconds and every scan reads the same program,
-   so the texts of the last program printed are kept (#917). *)
-let shown_cache : (Ast.toplevel list * string list) option ref = ref None
-let shown (prog : Ast.toplevel list) =
-  match !shown_cache with
-  | Some (p, texts) when p == prog -> texts
-  | _ ->
-      let texts = List.map Ast.show_toplevel prog in
-      shown_cache := Some (prog, texts);
-      texts
+(* The strings of every top-level item, which the planning scans read
+   (Ast_strings, #995): the planner used to print each item and scan the
+   text, and a scan of one string sees what it saw between that string's
+   quotes in the text. Every name the scans look for is made of identifier
+   characters, so no match ran from one string into the next. *)
+let iter_strings prog f =
+  List.iter (Array.iter (fun (_, s) -> f s)) (Ast_strings.items prog)
+
+let exists_string prog p =
+  List.exists (Array.exists (fun (_, s) -> p s)) (Ast_strings.items prog)
+
+(* Whether the printed text held [name] in quotes at the end of the string
+   [s]: [s] is [name], or ends in an escaped quote and [name]. *)
+let quoted name s =
+  s = name || String.ends_with ~suffix:("\\\"" ^ name) s
 
 (* Every occurrence of [sub] in [s], left to right and not overlapping,
    replaced by [by]. Copies the text between occurrences in one piece, and
@@ -1546,9 +1550,8 @@ let element_prefixes = names_after_any [ "region__"; "RegionSplit__"; "RegionOf_
 let element_types (prog : Ast.toplevel list) claimed =
   let found = Hashtbl.create 8 in
   List.iter (fun (_, (elem, _)) -> Hashtbl.replace found elem ()) claimed;
-  let scan text =
-    element_prefixes text (fun name -> Hashtbl.replace found name ()) in
-  List.iter scan (shown prog);
+  iter_strings prog (fun s ->
+    element_prefixes s (fun name -> Hashtbl.replace found name ()));
   Hashtbl.fold (fun k () acc -> k :: acc) found [] |> List.sort compare
 
 (* Every global array of a named element type: name -> (element, length).
@@ -1566,30 +1569,29 @@ let global_arrays (prog : Ast.toplevel list) =
 (* A program that names RegionBytes or region_bytes_assume without any
    typed region still needs the u8 instance and the common source. *)
 let region_bytes_used (prog : Ast.toplevel list) =
-  List.exists (fun text ->
-    let contains = contains text in
+  exists_string prog (fun s ->
+    let contains = contains s in
     contains "region_bytes_assume" || contains "RegionBytes"
-    || contains "IoHandle__") (shown prog)
+    || contains "IoHandle__")
 
 (* Whether a program names any region built-in at all -- a region,
    array of places, slots, pool or table type, or a claim -- so a build
    without --regions can say so up front instead of failing on an
    undefined name or type. *)
 let mentions_builtins (prog : Ast.toplevel list) =
-  Region_backing.any () || region_bytes_used prog || List.exists (fun text ->
-    let contains = contains text in
-    List.exists contains
+  Region_backing.any () || region_bytes_used prog || exists_string prog (fun s ->
+    List.exists (contains s)
       [ "region__"; "places__"; "slots__"; "RegionOf__"; "RegionTable__";
-        "RegionPool__"; "RegionTyped__"; "\"region_of\""; "\"region_table_of\"";
-        "\"region_table_lock\"" ]) (shown prog)
+        "RegionPool__"; "RegionTyped__" ]
+    || List.exists (fun name -> quoted name s)
+         [ "region_of"; "region_table_of"; "region_table_lock" ])
 
 (* The io structs a program names in IoHandle(T): one io_source each. *)
 let io_types (prog : Ast.toplevel list) =
   let found = Hashtbl.create 4 in
   let prefix = "IoHandle__" in
-  List.iter (fun text ->
-    names_after prefix text (fun name -> Hashtbl.replace found name ()))
-    (shown prog);
+  iter_strings prog (fun s ->
+    names_after prefix s (fun name -> Hashtbl.replace found name ()));
   Hashtbl.fold (fun k () acc -> k :: acc) found [] |> List.sort compare
 
 (* GitHub issue #749 phase 2: an array whose elements are places holding a
@@ -1689,9 +1691,8 @@ private fn __slots_forget__@P@(v: sink @EXV@) {}
 let slots_types (prog : Ast.toplevel list) =
   let found = Hashtbl.create 4 in
   let prefix = "slots__" in
-  List.iter (fun text ->
-    names_after prefix text (fun name -> Hashtbl.replace found name ()))
-    (shown prog);
+  iter_strings prog (fun s ->
+    names_after prefix s (fun name -> Hashtbl.replace found name ()));
   Hashtbl.fold (fun k () acc -> k :: acc) found [] |> List.sort compare
 
 let slots_instance prog name =
@@ -1755,46 +1756,33 @@ let meta_name array = "__region_meta__" ^ array
    (bin/main.ml). *)
 let plan prog : string list =
   Monomorphize.region_arrays := global_arrays prog;
-  (* Read off the printed AST rather than lowered: lowering measures types,
-     and a type that holds a built-in one cannot be measured before the
-     built-in is parsed. *)
-  (* The first variable named after each call of [fnames], per name, in
-     one pass over each text (#921): every key starts with "\"region_",
-     and each key resumes after its own match as a scan of its own would. *)
+  (* Read off the AST rather than lowered: lowering measures types, and a
+     type that holds a built-in one cannot be measured before the built-in
+     is parsed. *)
+  (* The first variable named after each call of [fnames], per name: the
+     printed text's first `Ast.Var` after `"f",` in the same item. A call's
+     name is a string with a comma after it (Ast_strings.Comma); until its
+     variable is found, a later call of the same name is not counted, as
+     the text scan resumed past the variable it took. An item with no
+     variable after the call names none. *)
   let calls_of_all fnames =
-    let keys = Array.of_list (List.map (fun f -> "\"" ^ f ^ "\",") fnames) in
-    let anchor = "\"region_" in
-    Array.iter (fun key ->
-      if not (String.starts_with ~prefix:anchor key) then
-        invalid_arg ("calls_of_all: " ^ key)) keys;
+    let keys = Array.of_list fnames in
     let found = Array.make (Array.length keys) [] in
-    let var = "Ast.Var \"" in
-    let lv = String.length var in
-    List.iter (fun text ->
-      let n = String.length text in
-      let here = Array.make (Array.length keys) [] in
-      let resume = Array.make (Array.length keys) 0 in
-      let rec go i =
-        let k = find_sub text i anchor in
-        if k >= 0 then begin
-          Array.iteri (fun idx key ->
-            let m = String.length key in
-            if k >= resume.(idx) && sub_at text k key then begin
-              (* The first variable named after the key; none puts the
-                 start past the end, as a scan that runs out would. *)
-              let v = find_sub text (k + m) var in
-              let j = if v >= 0 then v else max (k + m) (n - lv + 1) in
-              let start = j + lv in
-              let stop = ref start in
-              while !stop < n && text.[!stop] <> '"' do incr stop done;
-              if start < n then here.(idx) <- String.sub text start (!stop - start) :: here.(idx);
-              resume.(idx) <- !stop
-            end) keys;
-          go (k + 1)
-        end in
-      go 0;
-      Array.iteri (fun idx l -> found.(idx) <- l :: found.(idx)) here) (shown prog);
-    Array.map (fun per_text -> List.concat (List.rev per_text)) found in
+    List.iter (fun (item : Ast_strings.item) ->
+      let waiting = Array.make (Array.length keys) false in
+      Array.iter (fun (kind, s) ->
+        match kind with
+        | Ast_strings.Var ->
+            Array.iteri (fun idx w ->
+              if w then begin
+                found.(idx) <- s :: found.(idx);
+                waiting.(idx) <- false
+              end) waiting
+        | Ast_strings.Comma ->
+            Array.iteri (fun idx f ->
+              if not waiting.(idx) && quoted f s then waiting.(idx) <- true) keys
+        | Ast_strings.Plain -> ()) item) (Ast_strings.items prog);
+    Array.map List.rev found in
   let calls = calls_of_all [ "region_of"; "region_table_of"; "region_table_lock" ] in
   let calls_of = function
     | "region_of" -> calls.(0) | "region_table_of" -> calls.(1)
@@ -1842,7 +1830,7 @@ let plan prog : string list =
   defs @ [ flags; lock_defs ]
 
 let parse_planned sources =
-  shown_cache := None;
+  Ast_strings.reset ();
   next_first_line := 1;
   List.concat_map parse_source sources
 
