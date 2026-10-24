@@ -1503,6 +1503,9 @@ functions keep the aggregate result (GitHub issue #962). Copies of values
 that hold an array -- assignment, a returned or constructed value, a
 binding -- are emitted as inline block copies rather than one load and store
 per element (GitHub issue #963), and never as a call to a `memcpy` symbol.
+A binding that only holds a copy of a result is read in the result slot,
+and a copy into a local is cut to the bytes the local is read at (GitHub
+issue #964).
 
 Full source-level tagged-union DWARF metadata and a compact union ABI are
 deferred; code must not treat this first implementation as a stable C ABI.
