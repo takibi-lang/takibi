@@ -19,8 +19,7 @@
     "source=${localEnv:HOME}/codex/dot.codex,target=/home/vscode/.codex,type=bind",
     "source=${localEnv:HOME}/github/dot.copilot,target=/home/vscode/.copilot,type=bind",
     "source=${localEnv:HOME}/github/dot.config-gh,target=/home/vscode/.config/gh,type=bind",
-    "source=${localEnv:HOME}/takibi-sessions,target=/home/vscode/.takibi-sessions,type=bind",
-    "source=takibi-opam-fp,target=/home/vscode/opam-fp,type=volume"
+    "source=${localEnv:HOME}/takibi-sessions,target=/home/vscode/.takibi-sessions,type=bind"
   ],
   "runArgs": [
     "-v", "/dev:/dev-host:ro",
@@ -35,7 +34,7 @@
     "--cap-add=PERFMON",
     "--security-opt=seccomp=unconfined"
   ],
-  "postCreateCommand": "sudo chown -R vscode:vscode /home/vscode/.claude /home/vscode/opam-fp && sudo apt-get update && sudo apt-get install -y cmake llvm-19-dev libzstd-dev lld-19 qemu-system-arm qemu-user gdb-multiarch openocd stlink-tools bubblewrap mtools cpio e2fsprogs e2tools iputils-arping ethtool tshark tcpdump python3-serial graphviz openjdk-21-jre-headless ripgrep unzip time hyperfine valgrind bc linux-tools-generic && sudo ln -sf \"$(ls -d /usr/lib/linux-tools/*/perf | sort -V | tail -n1)\" /usr/local/bin/perf && sudo usermod -aG plugdev,dialout vscode && sudo npm install -g @openai/codex && sudo npm install -g @github/copilot && opam update && opam install -y ppx_deriving llvm bisect_ppx_ng herdtools7.7.58 landmarks landmarks-ppx memtrace runtime_events_tools && git clone --depth 1 https://github.com/brendangregg/FlameGraph /home/vscode/FlameGraph && gh auth setup-git && git config --global url.https://github.com/.insteadOf git@github.com: && git config rerere.enabled true && git config pull.rebase merges && bash scripts/fetch_model_tools.sh",
+  "postCreateCommand": "sudo chown -R vscode:vscode /home/vscode/.claude && sudo apt-get update && sudo apt-get install -y cmake llvm-19-dev libzstd-dev lld-19 qemu-system-arm qemu-user gdb-multiarch openocd stlink-tools bubblewrap mtools cpio e2fsprogs e2tools iputils-arping ethtool tshark tcpdump python3-serial graphviz openjdk-21-jre-headless ripgrep unzip time hyperfine valgrind bc linux-tools-generic && sudo ln -sf \"$(ls -d /usr/lib/linux-tools/*/perf | sort -V | tail -n1)\" /usr/local/bin/perf && sudo usermod -aG plugdev,dialout vscode && sudo npm install -g @openai/codex && sudo npm install -g @github/copilot && opam update && opam install -y ppx_deriving llvm bisect_ppx_ng herdtools7.7.58 landmarks landmarks-ppx memtrace runtime_events_tools && git clone --depth 1 https://github.com/brendangregg/FlameGraph /home/vscode/FlameGraph && gh auth setup-git && git config --global url.https://github.com/.insteadOf git@github.com: && git config rerere.enabled true && git config pull.rebase merges && bash scripts/fetch_model_tools.sh",
   "containerEnv": {
     "LANG": "en_US.UTF-8",
     "LC_ALL": "en_US.UTF-8",

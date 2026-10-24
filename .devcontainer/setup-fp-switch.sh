@@ -3,15 +3,17 @@
 # `perf record --call-graph=fp` sees through OCaml frames. Run by hand when
 # profiling; postCreateCommand does not run it (it takes tens of minutes).
 #
-# The switch is a local (directory) switch inside the named volume mounted at
-# /home/vscode/opam-fp, so it survives container rebuilds. ~/.opam does not:
-# it is part of the container and postCreateCommand rebuilds the default
-# switch. It lives outside the workspace so dune never walks into its _opam.
+# The switch is a local (directory) switch in the host-bound session
+# directory, beside the model tools (scripts/fetch_model_tools.sh), so it
+# survives container rebuilds and every clone shares one copy. ~/.opam does
+# not survive: it is part of the container and postCreateCommand rebuilds the
+# default switch. It lives outside the workspace so dune never walks into its
+# _opam. An opam switch embeds its absolute path, so the path stays fixed.
 #
-# Use:  eval $(opam env --switch=/home/vscode/opam-fp --set-switch)
+# Use:  eval $(opam env --switch=/home/vscode/.takibi-sessions/cache/opam-fp --set-switch)
 set -euo pipefail
 
-dir=/home/vscode/opam-fp
+dir=/home/vscode/.takibi-sessions/cache/opam-fp
 # The project's own dependencies come from dune-project (as in ci.yml); the
 # rest are the profilers.
 packages=(landmarks landmarks-ppx memtrace runtime_events_tools)
