@@ -65,9 +65,7 @@ backbone only. Taken in order whenever the numbered trunk items below have
 no step ready; an item that reaches a decision is parked and the next one
 taken (#894, already under way here, finishes here; its follow-ups go to
 B): #935 (unsigned Sub keeps a negative lower bound; a soundness hole,
-first), #819 (AtomicWord acq_rel cells), #932 (one timer-tick entry
-for every core; #920's GIC priority-mask pseudo-NMI stop has landed),
-#933 (reboot on any core), #957 (an RPi5 lane for the hung-core BREAK),
+first), #819 (AtomicWord acq_rel cells), #933 (reboot on any core), #957 (an RPi5 lane for the hung-core BREAK),
 #958 (longest IRQ-masked span outside profile sessions), #959 (DDB's
 lock-free NIC RX pending), #966 (recover #920's +20 ns per masking lock
 pair). #680 (region_pool handle validation without the lock) and #812
