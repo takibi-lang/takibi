@@ -164,8 +164,8 @@ four vCPUs since 2026-10-11.
 not hold, in this order; compiler work in this list is authorized; an item
 that reaches a decision is parked and the next one taken. First, the
 verification direction (#954, maintainer 2026-10-23; B owns the refinement
-code): #960 (z3 checks a constant operand's fold itself), #961 (64-bit
-literal patterns read as negative bounds); the thin slice of
+code): #960 (z3 checks a constant operand's fold itself), #983 (init_flow
+reads literals at no width), #984 (min/max range obligations); the thin slice of
 function-boundary initialization contracts (#954 step 2,
 docs/VERIFICATION_DESIGN.md) and step 3, the design review, are done;
 step 4 runs #975 (branch conditions as linear facts; done 2026-10-24,
