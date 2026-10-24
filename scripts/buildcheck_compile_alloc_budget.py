@@ -28,7 +28,9 @@ from pass_line import report_pass
 # reads the AST instead of printing it; 729,265,200 for the same kernel just
 # before, 690,697,545 after #921 and 903,223,947 after #917), the same count
 # on repeated runs; the budget is that plus about 25%. The pre-#917 compile
-# used about 6.6e9.
+# used about 6.6e9. Re-measured 471,083,467 after #996; #997 profiled the
+# scope Hashtbl.copy calls (0.01% of compile CPU) and left them, so the
+# budget stays that plus about 25%.
 BUDGET_WORDS = {
     "qemu": 589_000_000,
 }

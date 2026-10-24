@@ -198,7 +198,8 @@ QEMU lane budget), #916 (compiler GC tuning), #921 and #922
 (variant reuse, domain-parallel codegen; both wait on the land-span
 measurement after #917's front-end fixes), #995 (the region
 planner reads the AST instead of printing every item; done 2026-10-24), #996 (one reset,
-Compilation_state.reset, for every per-compilation table; done 2026-10-24), #893 (redundant csel in variant match),
+Compilation_state.reset, for every per-compilation table; done 2026-10-24), #997 (scope
+Hashtbl.copy calls measured at 0.01% of the kernel compile and left; closed 2026-10-24), #893 (redundant csel in variant match),
 #967 and #968 (ext2 O_CREAT and indirect directory growth, after #698),
 #793
 (proofs with an unresolved type variable), #769 (--uses-of NAME), #774
