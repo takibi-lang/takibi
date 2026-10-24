@@ -581,12 +581,39 @@ fn initial_user_payload() !{unsafe} {
         fail_if(svc5(63, exhaustion_read, read_block as *u8 as usize,
                      1, 0, 0) != 0);
         fail_if(svc5(57, exhaustion_read, 0, 0, 0, 0) != 0);
-        // GitHub issue #698: the volume has no free block now, so mkdirat
-        // must say ENOSPC (it said EIO) and leave no entry behind; the
-        // same name succeeds below once the fillers are gone.
-        fail_if(svc5(34, 0xFFFFFFFFFFFFFF9C, "/enospc-dir" as *u8 as usize,
-                     0x1ED, 0, 0) != ENOSPC_RC);
-        fail_if(svc5(56, 0, "/enospc-dir" as *u8 as usize, 0, 0, 0) < 64);
+        // GitHub issue #698: the write above failed because it stages a
+        // copy of every block, so a few blocks are still free. mkdirat
+        // takes one block and one inode each: make directories until the
+        // bitmap is empty, and the one that finds it empty must say ENOSPC
+        // (it said EIO) and leave no entry. All of them go again below.
+        let mut dir_path: [u8; 12];
+        let dir_stem: []const u8 = bs"/enospc-d";
+        for byte: usize in 0..<9 { dir_path[byte] = dir_stem[byte]; }
+        dir_path[10] = 0;
+        dir_path[11] = 0;
+        let mut made: usize = 0;
+        let mut refused: bool = false;
+        for attempt: usize in 0..<32 {
+            if (refused == false) {
+                dir_path[9] = (0x41 + attempt) as u8;
+                let answer: usize = svc5(34, 0xFFFFFFFFFFFFFF9C,
+                                         dir_path as *u8 as usize, 0x1ED, 0, 0);
+                if (answer == 0) { made = made + 1; }
+                else {
+                    fail_if(answer != ENOSPC_RC);
+                    refused = true;
+                }
+            }
+        }
+        fail_if(refused == false || made == 0);
+        fail_if(svc5(56, 0, dir_path as *u8 as usize, 0, 0, 0) < 64);
+        for attempt: usize in 0..<32 {
+            if (attempt < made) {
+                dir_path[9] = (0x41 + attempt) as u8;
+                fail_if(svc5(35, 0xFFFFFFFFFFFFFF9C, dir_path as *u8 as usize,
+                             0x200, 0, 0) != 0);
+            }
+        }
         // Last-link unlink supports direct files today. Shrink both fillers
         // through write(2) first: replacement releases their indirect blocks,
         // and unlinkat then releases the one remaining block and inode.
