@@ -1932,8 +1932,9 @@ fn kernel_syscall_socket_evidence() -> bool !{unsafe} {
            syscall_test_evidence_connected_close_calls() == 2 &&
            // GitHub issue #761 added B's long and short reads and its
            // one-byte answer between them; #842 the blocked read on A.
-           syscall_test_evidence_connected_read_calls() == 7 &&
-           syscall_test_evidence_connected_write_calls() == 6 &&
+           // #846 one more of each: A's unread byte and B's read.
+           syscall_test_evidence_connected_read_calls() == 8 &&
+           syscall_test_evidence_connected_write_calls() == 7 &&
            syscall_test_evidence_socket_close_calls() == 1 &&
            kernel_listener_state(4) == UnifiedListenerState::Closed;
     syscall_test_evidence_finish_socket_fixture();

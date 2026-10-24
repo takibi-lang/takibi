@@ -553,6 +553,9 @@ private let mut tcp_retx_chain: RetxChain;
 private let mut tcp_retx_pool: RegionPool(RetxEntry);
 
 let mut tcp_drop_data_segment_index: i32 = -1;
+// GitHub issue #846: a second index, armed once the first drop fires, so
+// one boot can drop two segments (-1: none).
+let mut tcp_drop_data_segment_rearm: i32 = -1;
 // GitHub issue #740 step 2: segments queued from a kept driver buffer
 // rather than a copy, for the boot evidence that the path ran.
 let mut tcp_kept_segments: usize = 0;
@@ -1719,9 +1722,16 @@ fn kernel_tcp_clear_injection_markers() !{unsafe} {
 
 fn kernel_tcp_inject_drop_data_segment(index: usize) !{unsafe} {
     tcp_drop_data_segment_index = index as i32;
+    tcp_drop_data_segment_rearm = -1;
     kernel_tcp_clear_injection_markers();
     tcp_injected_data_retransmitted = false;
     tcp_injected_data_recovery_observed = false;
+}
+
+// GitHub issue #846: after the armed drop fires, drop data segment `index`
+// of whichever connection sends one next.
+fn kernel_tcp_inject_drop_data_segment_again(index: usize) {
+    tcp_drop_data_segment_rearm = index as i32;
 }
 
 fn kernel_tcp_inject_drop_next_fin() !{unsafe} {
@@ -3814,7 +3824,8 @@ fn kernel_tcp_send_received(owner: borrow TcpConnectionOwner[connection_pool, co
                 // recovery-observed flag, both come from
                 // pending_tcp_service_once's real timeout+peer-ack path,
                 // the same one every other segment uses.
-                tcp_drop_data_segment_index = -1;
+                tcp_drop_data_segment_index = tcp_drop_data_segment_rearm;
+                tcp_drop_data_segment_rearm = -1;
                 conn.injected_data_entry = this_entry;
                 tcp_connection_frame_unhold(owner, TcpFrameRole::Tx,
                                             tx);

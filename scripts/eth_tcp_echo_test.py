@@ -431,6 +431,10 @@ def test_connected_large_response(client_mac: bytes) -> bool:
     rx_stale_long = b"L" * 1000
     rx_stale_short = b"s" * 10
     rx_stale_ready_ok = False
+    # GitHub issue #846: after the short segment the fixture sends one byte
+    # on A, dropped once, and blocks reading B; B gets its byte only once
+    # A's has arrived, which only the stack-wide retransmit pass can send.
+    unread_ok = False
     # Generous but bounded: the kernel's own retry budget for one dropped
     # segment is TCP_RETRY_LIMIT(3) * retry_ticks(~200ms) =~ 600ms (see
     # kernel/net/tcp.tkb's accept retry comment) -- 10s covers
@@ -444,7 +448,7 @@ def test_connected_large_response(client_mac: bytes) -> bool:
     # requires a real peer ACK, not merely a retransmit attempt.
     deadline = time.monotonic() + 10.0
     while (len(collected) < want or not second_response_ok or
-           not rx_stale_ready_ok or
+           not rx_stale_ready_ok or not unread_ok or
            not fin_acked or not second_fin_acked) and time.monotonic() < deadline:
         reply = recv_reply(sock, req, 2.0)
         if reply is None:
@@ -528,6 +532,20 @@ def test_connected_large_response(client_mac: bytes) -> bool:
                 client_seq += 1
             continue
 
+        if len(collected) >= want and payload_len > 0:
+            payload = reply[54:54 + payload_len]
+            if not unread_ok and rseq == server_seq and payload == b"p":
+                server_seq += payload_len
+                unread_ok = True
+                sock.send(build_frame(
+                    client_mac, RECONNECT_CLIENT_PORT,
+                    second_client_seq, second_server_seq,
+                    FLAG_ACK | FLAG_PSH, data=b"q"))
+                second_client_seq += 1
+            sock.send(build_frame(client_mac, HANDSHAKE_CLIENT_PORT,
+                                  client_seq, server_seq, FLAG_ACK))
+            continue
+
         if (flags & FLAG_FIN) != 0 and not fin_acked and rseq == server_seq:
             server_seq += 1  # FIN consumes one sequence number
             fin_ack = build_frame(client_mac, HANDSHAKE_CLIENT_PORT,
@@ -550,6 +568,9 @@ def test_connected_large_response(client_mac: bytes) -> bool:
         return False
     if not rx_stale_ready_ok:
         print("  second connection never answered the long segment")
+        return False
+    if not unread_ok:
+        print("  connection A's unread byte never arrived (#846)")
         return False
     if not second_fin_acked:
         print("  second overlapping connection FIN was never acknowledged")

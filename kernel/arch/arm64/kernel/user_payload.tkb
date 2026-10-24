@@ -449,6 +449,22 @@ fn initial_user_payload() !{unsafe} {
     fail_if(svc5(64, 1, (unsafe { rx_stale_success as *u8 }) as usize,
                  rx_stale_success.len, 0, 0) != rx_stale_success.len);
 
+    // GitHub issue #846: one byte on connection A whose first transmit the
+    // kernel drops, then a read blocked on connection B. The peer answers
+    // on B only once it has A's byte. Nothing here reads, writes or closes
+    // A, and B's read services only B's own deadlines (#257), so A's byte
+    // is resent only by the stack-wide pass from the EL0 return or an idle
+    // CPU. Without that pass this read ends at its 30-second timeout.
+    let unread_byte: []const u8 = bs"p";
+    fail_if(svc5(64, 5, (unsafe { unread_byte as *u8 }) as usize, 1, 0, 0) != 1);
+    user_payload_rx_buf[0] = 0;
+    fail_if(svc5(63, 6, ptr_of(rx_base, 0), 1, 0, 0) != 1);
+    fail_if(user_payload_rx_buf[0] != 0x71);
+    let unread_success: []const u8 =
+        bs"userspace socket retransmit: a connection nobody reads resends its dropped segment ok\n";
+    fail_if(svc5(64, 1, (unsafe { unread_success as *u8 }) as usize,
+                 unread_success.len, 0, 0) != unread_success.len);
+
     fail_if(svc5(57, 6, 0, 0, 0, 0) != 0);
     fail_if(svc5(57, 5, 0, 0, 0, 0) != 0);
     fail_if(svc5(57, 4, 0, 0, 0, 0) != 0);

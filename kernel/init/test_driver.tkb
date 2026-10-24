@@ -1509,6 +1509,10 @@ irq_uart_rx_unmask();
     // segments (indices 0 and 1). Index 2 is the 1460-byte body; the final
     // byte is index 3. Keep the genuine body drop as the vector shape changes.
     kernel_tcp_inject_drop_data_segment(2);
+    // GitHub issue #846: then A's one-byte 'p' (index 4, after the final
+    // byte at 3), sent while the fixture blocks reading connection B, so
+    // only the stack-wide retransmit pass can resend it.
+    kernel_tcp_inject_drop_data_segment_again(4);
     kernel_tcp_inject_drop_next_fin();
     kernel_uart_rx_ring_reset();
     kernel_process_execution_reset();

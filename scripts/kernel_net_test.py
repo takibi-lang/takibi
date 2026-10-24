@@ -231,6 +231,10 @@ INIT_RX_STALE_READY = b"k"
 # GitHub issue #842: the byte the peer sends on connection A only once it
 # has the whole response, whose first segment the kernel dropped once.
 INIT_BLOCKED_READ_REPLY = b"r"
+# GitHub issue #846: the byte the fixture sends on A (dropped once) before
+# it blocks reading B, and the byte B gets only once A's has arrived.
+INIT_UNREAD_A = b"p"
+INIT_UNREAD_B_REPLY = b"q"
 
 
 def checksum_add(data: bytes, sum_in: int = 0) -> int:
@@ -564,7 +568,9 @@ def init_script_fixture(sock: socket.socket) -> bool:
 
     before_long = INIT_SOCKET_B_RESPONSE
     expected_b = before_long + INIT_RX_STALE_READY
-    expected_a = INIT_SOCKET_A_RESPONSE + INIT_LARGE_RESPONSE
+    before_unread = INIT_SOCKET_A_RESPONSE + INIT_LARGE_RESPONSE
+    expected_a = before_unread + INIT_UNREAD_A
+    unread_reply_sent = False
     long_sent = False
     short_sent = False
     received_b = bytearray()
@@ -621,15 +627,22 @@ def init_script_fixture(sock: socket.socket) -> bool:
                 dst_port, first[1], next_a, FLAG_ACK,
                 server_port=INIT_SERVER_PORT), (QEMU_HOST, QEMU_PORT))
             first[2] = next_a
-            if not reply_a_sent and bytes(received_a) == expected_a:
+            if not reply_a_sent and bytes(received_a) == before_unread:
                 init_send(sock, first, INIT_BLOCKED_READ_REPLY)
                 reply_a_sent = True
+            elif (not unread_reply_sent and short_sent and
+                  bytes(received_a) == expected_a):
+                init_send(sock, second, INIT_UNREAD_B_REPLY)
+                unread_reply_sent = True
     ok = (bytes(received_b) == expected_b and
-          bytes(received_a) == expected_a and reply_a_sent)
+          bytes(received_a) == expected_a and reply_a_sent and
+          unread_reply_sent)
     if not ok:
         print("  init.sh fixture: 10 s budget ended with A %d/%d bytes "
-              "(reply sent=%s, fin=%s) and B %d/%d bytes (fin=%s)" % (
-                  len(received_a), len(expected_a), reply_a_sent, fin_a,
+              "(reply sent=%s, unread reply sent=%s, fin=%s) and B %d/%d "
+              "bytes (fin=%s)" % (
+                  len(received_a), len(expected_a), reply_a_sent,
+                  unread_reply_sent, fin_a,
                   len(received_b), len(expected_b), fin_b))
     print("  init.sh connected I/O fixture: %s" % ("PASS" if ok else "FAIL"))
     return ok
