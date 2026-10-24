@@ -416,15 +416,15 @@ rules globally.
   `syscall_scratch`, indexed by a live `SyscallSlot`). A callee
   handed `&p` through a `&mut T` parameter stores every field of `p`. Each
   `unsafe { assume_init(...) }` states that bytes were written by means the
-  checker cannot see. The maintained `assume_init` sites, each named
-  `path:function` (`scripts/check_assume_init_sites.py` refuses an unlisted
-  site and a stale entry, GitHub issue #764), are
-  `kernel/kernel/syscall.tkb:syscall_exec_argv_here`,
-  `kernel/kernel/syscall.tkb:syscall_exec_path_here` and
-  `kernel/kernel/syscall.tkb:syscall_script_line_here`, which rely on
-  `syscall_execve_current` zero-filling `file_buffer` before execve's staging
-  begins. (`syscall_path_view_here` was a fourth; since GitHub issue #954 its
-  `requires init(...)` is checked at every call instead.) A `requires` or
+  checker cannot see. Maintained `assume_init` sites would be listed here,
+  each named `path:function` (`scripts/check_assume_init_sites.py` refuses
+  an unlisted site and a stale entry, GitHub issue #764); there are none.
+  The four former sites now carry a `requires init(...)` checked at every
+  call: `syscall_path_view_here` since GitHub issue #954, and execve's
+  `file_buffer` staging helpers (`syscall_exec_argv_here`,
+  `syscall_exec_path_here`, `syscall_script_line_here`) and every function
+  between them and `syscall_execve_current`'s zero fill since GitHub issue
+  #974. A `requires` or
   `ensures` clause on a scratch slot, `syscall_scratch[slot.index].f`, rests
   on the same per-CPU premise; the held `SyscallSlot` is what keeps another
   holder from reaching the element between the calls. Uninitialized local

@@ -166,6 +166,17 @@ such owner, and naming one is an error.
    `name_length <= record_length - 8` bound every entry read). The procfs
    read branch keeps its fill: a renderer writes its text piecewise through
    a mutable offset, with no contract on which bytes.
+5. #974 removed the last three `assume_init` sites, execve's
+   `file_buffer` staging helpers (`syscall_exec_argv_here`,
+   `syscall_exec_path_here`, `syscall_script_line_here`). Each requires
+   `init(syscall_scratch[slot.index].file_buffer)`, and so does every
+   function between them and `syscall_execve_current`'s zero fill
+   (`syscall_exec_format`, `syscall_exec_script_prefix`,
+   `syscall_exec_argv_append`, `syscall_exec_argv_append_line`). A whole
+   leaf needs no path fact and adds no z3 obligation. The requires also
+   reached a caller the old premise ("only the execve path calls them")
+   missed: `kernel_syscall_filesystem_unconfigured_probe` called
+   `syscall_exec_format` with no fill, and now fills first.
 
 ## Census of workarounds before the slice (origin/main a17c1028)
 
@@ -188,13 +199,11 @@ The init obligations' cold z3 time is budgeted at 5 s on a kernel build.
 (`init-obligation-budget`). A cache entry keeps each obligation's cold
 time, so the share is reported on warm builds too. Measured on the QEMU kernel on
 2026-10-24: 7 obligations, 0.19 s cold (4%). After #975: 33 obligations,
-0.63 s cold (13%). The budget may grow when a
+0.63 s cold (13%). After #974: unchanged, 0.64 s cold (13%). The budget may grow when a
 later change needs it, as long as the build and lane budgets are unaffected.
 
 ## Out of this slice
 
-- The execve staging helpers (syscall.tkb 575, 586, 597): every function on
-  the path from the zero_fill at 8469 to them would need `requires`.
 - Interval merging across arms with different bounds, facts about mutable
   locals (versioned atoms), disequalities, and sparse or quantified init
   (#109).

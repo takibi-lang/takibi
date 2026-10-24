@@ -1106,7 +1106,7 @@ let check
           | Init_state.CPlain p ->
               List.fold_left (fun st r -> match r with
                 | Some f -> need_fact st f e.loc
-                              (Printf.sprintf "'%s' requires it initialized" name)
+                              (Printf.sprintf "required initialized by '%s'" name)
                 | None ->
                     error e.loc (Printf.sprintf
                       "cannot show the requires clause of '%s' at this call: \

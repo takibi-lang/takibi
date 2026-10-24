@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Controls for check_assume_init_sites.py (GitHub issue #764): an unlisted
 site and a stale listing are refused; a comment-only mention is ignored; the
-real listed sites are accepted."""
+real tree and a planted listed site are accepted (the real tree has no
+site since GitHub issue #974)."""
 
 import sys
 from pathlib import Path
@@ -36,17 +37,17 @@ def main():
             (refused, files, markdown + f"\n`{FILE}:planted_gone`\n"),
         "a comment-only mention is ignored":
             (accepted, {**files, FILE: files[FILE] + comment}, markdown),
-        "the listed real sites are accepted":
+        "the real tree is accepted":
             (accepted, files, markdown),
+        "a listed site is accepted":
+            (accepted, {**files, FILE: files[FILE] + planted},
+             markdown + f"\n`{FILE}:planted_view`\n"),
     }
     failures = []
     for label, (verdict, tree, md) in cases.items():
         result = check.problems_in(tree, md)
         if not verdict(result):
             failures.append(f"{label}: got {result}")
-    if not check.listed_sites(markdown):
-        failures.append("TRUSTED_BASE.md lists no site, so the accept "
-                        "control examined nothing")
     for failure in failures:
         print(f"ERROR\tassume-init-sites-controls: {failure}")
     if failures:
@@ -54,7 +55,7 @@ def main():
         return 1
     report_pass("assume-init-sites-controls",
                 "unlisted site and stale listing refused, comment-only "
-                "mention ignored, listed real sites accepted",
+                "mention ignored, real tree and listed site accepted",
                 cases=len(cases))
     return 0
 

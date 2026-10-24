@@ -99,10 +99,15 @@ def main():
     if problems:
         print("FAIL assume-init-sites: assume_init sites and TRUSTED_BASE.md disagree")
         return 1
+    # No site at all is the right answer since GitHub issue #974 removed the
+    # last ones, so only the scanned files must be nonzero: the check still
+    # refuses any new, unlisted site.
+    sites = len(listed_sites(markdown))
     report_pass("assume-init-sites",
-                f"{len(files)} Takibi files scanned; every assume_init site "
-                "is listed in TRUSTED_BASE.md and every listing is live",
-                files=len(files), sites=len(listed_sites(markdown)))
+                f"{len(files)} Takibi files scanned, {sites} assume_init "
+                "site(s); every site is listed in TRUSTED_BASE.md and every "
+                "listing is live",
+                files=len(files))
     return 0
 
 

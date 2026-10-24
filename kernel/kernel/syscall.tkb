@@ -568,34 +568,26 @@ fn kernel_syscall_exec_clear() {
     process_run_unlock(guard);
 }
 
-private fn syscall_exec_argv_here(slot: borrow SyscallSlot[0]) -> [u8; 512..] !{unsafe} {
-    // GitHub issue #203 (TRUSTED_BASE.md, assume_init sites): execve's
-    // staging spans several functions of one call. syscall_execve_current
-    // zero-fills file_buffer before the first of these helpers runs, and
-    // only the execve path calls them.
-    unsafe { assume_init(syscall_scratch[slot.index].file_buffer as []u8); }
+// execve's file_buffer staging spans several functions of one call. GitHub
+// issue #974: these three views, and every function between them and
+// syscall_execve_current's zero fill, require the buffer initialized, so
+// each call is checked rather than trusted (they replaced assume_init).
+private fn syscall_exec_argv_here(slot: borrow SyscallSlot[0]) -> [u8; 512..]
+        requires init(syscall_scratch[slot.index].file_buffer) {
     let scratch: [u8; KERNEL_BLOCK_SIZE..] =
         syscall_scratch[slot.index].file_buffer as [u8; KERNEL_BLOCK_SIZE..];
     return scratch[0..<512];
 }
 
-private fn syscall_exec_path_here(slot: borrow SyscallSlot[0]) -> [u8; 256..] !{unsafe} {
-    // GitHub issue #203 (TRUSTED_BASE.md, assume_init sites): execve's
-    // staging spans several functions of one call. syscall_execve_current
-    // zero-fills file_buffer before the first of these helpers runs, and
-    // only the execve path calls them.
-    unsafe { assume_init(syscall_scratch[slot.index].file_buffer as []u8); }
+private fn syscall_exec_path_here(slot: borrow SyscallSlot[0]) -> [u8; 256..]
+        requires init(syscall_scratch[slot.index].file_buffer) {
     let scratch: [u8; KERNEL_BLOCK_SIZE..] =
         syscall_scratch[slot.index].file_buffer as [u8; KERNEL_BLOCK_SIZE..];
     return scratch[512..<768];
 }
 
-private fn syscall_script_line_here(slot: borrow SyscallSlot[0]) -> [u8; 256..] !{unsafe} {
-    // GitHub issue #203 (TRUSTED_BASE.md, assume_init sites): execve's
-    // staging spans several functions of one call. syscall_execve_current
-    // zero-fills file_buffer before the first of these helpers runs, and
-    // only the execve path calls them.
-    unsafe { assume_init(syscall_scratch[slot.index].file_buffer as []u8); }
+private fn syscall_script_line_here(slot: borrow SyscallSlot[0]) -> [u8; 256..]
+        requires init(syscall_scratch[slot.index].file_buffer) {
     let scratch: [u8; KERNEL_BLOCK_SIZE..] =
         syscall_scratch[slot.index].file_buffer as [u8; KERNEL_BLOCK_SIZE..];
     return scratch[768..<1024];
@@ -705,7 +697,8 @@ must_use variant SyscallArgvAppendResult { Full; Appended(usize); }
 // Append one NUL-terminated entry to the pending execve argv buffer and
 // return the offset the next entry starts at.
 private fn syscall_exec_argv_append(slot: borrow SyscallSlot[0], offset: usize, source: []u8)
-        -> SyscallArgvAppendResult {
+        -> SyscallArgvAppendResult
+        requires init(syscall_scratch[slot.index].file_buffer) {
     let argv_view: []u8 = syscall_exec_argv_here(slot);
     if (offset > argv_view.len) { return SyscallArgvAppendResult::Full; }
     let tail = argv_view[offset..<argv_view.len];
@@ -730,7 +723,8 @@ private fn syscall_exec_argv_append(slot: borrow SyscallSlot[0], offset: usize, 
 // walk instead of a slice construction.
 private fn syscall_exec_argv_append_line(slot: borrow SyscallSlot[0], offset: usize, from: usize,
                                          to: usize)
-        -> SyscallArgvAppendResult {
+        -> SyscallArgvAppendResult
+        requires init(syscall_scratch[slot.index].file_buffer) {
     let argv_view: []u8 = syscall_exec_argv_here(slot);
     let line: []u8 = syscall_script_line_here(slot);
     let mut cursor: usize = offset;
@@ -759,7 +753,8 @@ private fn syscall_exec_argv_append_line(slot: borrow SyscallSlot[0], offset: us
 // The stored pathname then becomes the next interpreter to resolve.
 private fn syscall_exec_script_prefix(slot: borrow SyscallSlot[0], path_length: usize, previous_argc: usize,
                                       previous_length: usize)
-        -> SyscallExecFormatResult {
+        -> SyscallExecFormatResult
+        requires init(syscall_scratch[slot.index].file_buffer) {
     let line: []u8 = syscall_script_line_here(slot);
     let mut end: usize = 0;
     let mut line_terminated: bool = false;
@@ -1026,7 +1021,8 @@ private fn syscall_exec_elf_interpreter(slot: borrow SyscallSlot[0], mount: Ext2
 }
 
 private fn syscall_exec_format(slot: borrow SyscallSlot[0], path_length: usize)
-        -> SyscallExecFormatResult !{unsafe} {
+        -> SyscallExecFormatResult !{unsafe}
+        requires init(syscall_scratch[slot.index].file_buffer) {
     let mount: Ext2Mount = match syscall_filesystem_lookup() {
         SyscallFilesystemReady::Unconfigured => { return SyscallExecFormatResult::NotMounted; }
         SyscallFilesystemReady::Configured(found) => { found }
@@ -1879,6 +1875,9 @@ fn kernel_syscall_filesystem_unconfigured_probe() -> bool !{unsafe} {
         SyscallFilesystemReady::Configured(mount) => { return false; }
     }
     let slot: SyscallSlot[0] = syscall_slot_acquire();
+    // syscall_exec_format requires the staging buffer initialized, as
+    // syscall_execve_current leaves it; this probe stages it the same way.
+    zero_fill(syscall_scratch[slot.index].file_buffer as []u8);
     let refused: bool = match syscall_exec_format(slot, 0) {
         SyscallExecFormatResult::NotMounted => { true }
         _ => { false }
@@ -8544,8 +8543,9 @@ private inline fn syscall_execve_current_with(slot: borrow SyscallSlot[0],
     if (path_length == 0 || argv_address == 0) { return SyscallAction::Resume(LINUX_EINVAL); }
     let exec_path_absolute: bool = path_view[0] == 0x2F;
     if (path_length > 256) { return SyscallAction::Resume(LINUX_EINVAL); }
-    // GitHub issue #203: the staging helpers assume this fill (see
-    // syscall_exec_argv_here).
+    // GitHub issue #974: the staging helpers and every function between
+    // here and them require file_buffer initialized; this fill is what
+    // shows it, checked at each call.
     zero_fill(syscall_scratch[slot.index].file_buffer as []u8);
     let exec_path: []u8 = syscall_exec_path_here(slot);
     for path_index: usize in 0..<256 { exec_path[path_index] = 0; }

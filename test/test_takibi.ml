@@ -25445,8 +25445,36 @@ fn peek(s: borrow Slot954[0]) -> u8 requires init(ss[s.index].buf) {
     t "issue #954: a scratch slot ensures and requires pair across calls"
       (expect_ok (slot ^ "fn f(s: borrow Slot954[0]) -> u8 { fill(s); return peek(s); }"));
     t "issue #954: a scratch slot requires is checked at the call"
-      (expect_type_error "'peek' requires it initialized"
+      (expect_type_error "required initialized by 'peek'"
          (slot ^ "fn f(s: borrow Slot954[0]) -> u8 { return peek(s); }"));
+    (* #974: execve's file_buffer staging. A zero fill in the entry, a
+       requires on every function between it and the view helper, a view
+       written in place and refilled by a borrow uninit callee in between. *)
+    t "issue #974: a scratch requires carries along a staging chain"
+      (expect_ok (slot ^ "fn window(s: borrow Slot954[0]) -> [u8; 4..]
+                 requires init(ss[s.index].buf) {
+             let all: [u8; 8..] = ss[s.index].buf as [u8; 8..];
+             return all[4..<8]; }
+         fn refill(dst: borrow uninit []u8) { zero_fill(dst); }
+         fn step(s: borrow Slot954[0]) -> u8 requires init(ss[s.index].buf) {
+             let v: []u8 = window(s);
+             v[0] = 1;
+             refill(v);
+             return peek(s); }
+         fn entry(s: borrow Slot954[0]) -> u8 {
+             zero_fill(ss[s.index].buf as []u8);
+             let a: u8 = step(s);
+             return a + step(s); }"));
+    t "issue #974: a staging step without the requires is rejected"
+      (expect_type_error "required initialized by 'peek'"
+         (slot ^ "fn step(s: borrow Slot954[0]) -> u8 { return peek(s); }
+         fn entry(s: borrow Slot954[0]) -> u8 {
+             zero_fill(ss[s.index].buf as []u8); return step(s); }"));
+    t "issue #974: a staging entry without the fill is rejected"
+      (expect_type_error "'ss[_].buf' is required initialized by 'step' here"
+         (slot ^ "fn step(s: borrow Slot954[0]) -> u8 requires init(ss[s.index].buf) {
+             return peek(s); }
+         fn probe(s: borrow Slot954[0]) -> u8 { return step(s); }"));
     t "issue #954: a contract cannot name an ordinary global"
       (expect_type_error "only as a scratch slot reached through a held slot capability"
          "struct Pair954 { buf: [u8; 8]; }
@@ -25633,7 +25661,7 @@ scratch let mut sb: S975;
            if (fetch(sb.buf as []u8, 4, 8) == false) { return 0; }
            return put(sb.buf as []u8, 4, 8); }"));
     t "issue #975: a requires on a borrow uninit parameter is checked at the call"
-      (expect_type_error "'put' requires it initialized"
+      (expect_type_error "required initialized by 'put'"
          (span ^ "fn put(src: borrow uninit []const u8, off: usize, n: usize) -> u8
                  requires init(src[off..<off + n]) { return 0; }
          fn f() -> u8 {
