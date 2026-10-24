@@ -2580,6 +2580,96 @@ let lower_array_holding_stores f =
                 (attr (align_at (max 1 (alignment load)) src_off)) (AttrIndex.Param 1)
           | _ -> set_alignment align (build_store v ptr b)
   in
+  (* GitHub issue #964: a local that only ever holds a copy of (part of) a
+     result slot is that part of the slot. `let V::Seen(ring) = f() else`
+     stored the payload into `ring`'s alloca, a whole memcpy.inline that
+     LLVM does not shorten, and then read one field of it.  The alloca is
+     replaced by the address of the part in the slot when:
+     - the store is the alloca's only write, and every other use is a load,
+       an address into it that is only loaded, or the source of a memcpy;
+     - the slot's call is not reachable from the store, so the slot still
+       holds what was stored wherever the alloca is read (a read before the
+       store read an uninitialized alloca, which any value refines);
+     - the slot and the GEP that addresses the part sit in the entry block
+       before any non-alloca instruction, so the address dominates every
+       use of the alloca;
+     - the part in the slot is at least as aligned as the alloca. *)
+  let rec read_only_uses ~store p =
+    let ok = ref true in
+    iter_uses (fun u ->
+      let i = user u in
+      if !ok then
+        match classify_value i with
+        | ValueKind.Instruction Opcode.Load -> ()
+        | ValueKind.Instruction Opcode.Store ->
+            if not (i == store && operand i 1 == p) then ok := false
+        | ValueKind.Instruction Opcode.GetElementPtr ->
+            if operand i 0 == p then ok := read_only_uses ~store i
+            else ok := false
+        | ValueKind.Instruction Opcode.Call ->
+            let callee = operand i (num_operands i - 1) in
+            let name = value_name callee in
+            if not ((name = "llvm.memcpy.inline.p0.p0.i64"
+                     || name = "llvm.memcpy.p0.p0.i64")
+                    && operand i 0 != p && operand i 1 == p) then ok := false
+        | _ -> ok := false) p;
+    !ok in
+  let reachable_from store =
+    let seen : (llbasicblock, unit) Hashtbl.t = Hashtbl.create 16 in
+    let rec visit bb =
+      if not (Hashtbl.mem seen bb) then begin
+        Hashtbl.replace seen bb ();
+        match block_terminator bb with
+        | Some t -> Array.iter visit (successors t)
+        | None -> ()
+      end in
+    (match block_terminator (instr_parent store) with
+     | Some t -> Array.iter visit (successors t)
+     | None -> ());
+    seen in
+  let rec precedes a b =
+    match instr_succ a with
+    | Before n -> n == b || precedes n b
+    | At_end _ -> false in
+  let in_alloca_prefix slot =
+    let rec go = function
+      | Before i when i == slot -> true
+      | Before i when instr_opcode i = Opcode.Alloca -> go (instr_succ i)
+      | _ -> false in
+    go (instr_begin (entry_block f)) in
+  let forward_from_result_slot store =
+    let v = operand store 0 in
+    let dst = operand store 1 in
+    match loaded v, classify_value dst with
+    | Some (load, path), ValueKind.Instruction Opcode.Alloca
+      when Hashtbl.mem result_slots (operand load 0) ->
+        let slot = operand load 0 in
+        let calls = ref [] in
+        iter_uses (fun u ->
+          let i = user u in
+          if instr_opcode i = Opcode.Call then calls := i :: !calls) slot;
+        let reach = lazy (reachable_from store) in
+        let call_after c =
+          Hashtbl.mem (Lazy.force reach) (instr_parent c)
+          || (instr_parent c == instr_parent store && precedes store c) in
+        if !calls = [] || List.exists call_after !calls
+           || not (in_alloca_prefix slot)
+           || not (read_only_uses ~store dst) then false
+        else begin
+          let b = match instr_succ slot with
+            | Before i -> builder_before context i
+            | At_end bb -> builder_at_end context bb in
+          let (part, off, _) = step b (type_of load) slot path in
+          if align_at (max 1 (alignment slot)) off < alignment dst then begin
+            if part != slot then delete_instruction part;
+            false
+          end else begin
+            replace_all_uses_with dst part;
+            delete_instruction dst;
+            true
+          end
+        end
+    | _ -> false in
   let stores = ref [] in
   iter_blocks (fun bb ->
     iter_instrs (fun i ->
@@ -2615,9 +2705,11 @@ let lower_array_holding_stores f =
                 (source_unchanged load store
                  && (whole || disjoint dst (operand load 0))))
               (loaded v) in
-    Hashtbl.reset safe;
-    plan v;
-    emit b (type_of v) dst [] (max 1 (alignment store)) v;
+    if not (forward_from_result_slot store) then begin
+      Hashtbl.reset safe;
+      plan v;
+      emit b (type_of v) dst [] (max 1 (alignment store)) v
+    end;
     delete_instruction store) (List.rev !stores);
   (* Drop the aggregate loads this left unused, and those #943's argument
      copies left: SROA splits a first-class aggregate load leaf by leaf even

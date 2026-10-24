@@ -52,6 +52,28 @@ fn show_wide(id: usize) {
     put_wide(w);
 }
 
+// GitHub issue #964: a payload bound by `let ... else` and only read is
+// read in the caller's result slot rather than copied out of it; in a loop
+// the call runs again, so there each iteration's binding keeps a copy.
+fn lookup_id(id: usize) -> usize {
+    let Lookup::Found(n) = lookup(id) else {
+        Lookup::Missing => { return 99; }
+    };
+    if (n.name[5] != 'a' + (id as u8) + 5) { return 98; }
+    return n.id;
+}
+
+fn lookup_sum(count: usize) -> usize {
+    let mut sum: usize = 0;
+    for k: usize in 0..<count {
+        let Lookup::Found(n) = lookup(k) else {
+            Lookup::Missing => { continue; }
+        };
+        sum = sum + n.id * 10 + ((n.name[0] - 'a') as usize);
+    }
+    return sum;
+}
+
 fn put_name(n: Named) {
     for i: usize in 0..<6 {
         uart_putc(n.name[i]);
@@ -122,6 +144,10 @@ fn test_struct_array_result() {
 
     let f: fn(Named) -> Named = renamed;
     put_name(f(a));
+
+    if (lookup_id(4) == 4 && lookup_id(0) == 99) { uart_puts("bound read ok\r\n"); }
+    // k = 1, 2, 3 are found with id k and name[0] = 'a' + k: 11 * 6.
+    if (lookup_sum(4) == 66) { uart_puts("loop bound ok\r\n"); }
 
     show_wide(4);
     show_wide(0);

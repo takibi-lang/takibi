@@ -21335,6 +21335,52 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
           || has "store { i64, [24 x i8] } %r"));
 
   Alcotest.test_case
+    "#964: a payload bound from an sret result and only read is read in the result slot, not copied"
+    `Quick
+    (fun () ->
+       let src =
+         "struct FwdRec { pid: usize; command: [u8; 24]; }
+          variant FwdFound { Found(FwdRec); Missing; }
+          fn fwd_make(k: usize) -> FwdFound {
+            if (k == 0) { return FwdFound::Missing; }
+            let mut r: FwdRec;
+            r.pid = k;
+            for i: usize in 0..<24 { r.command[i] = 0; }
+            return FwdFound::Found(r);
+          }
+          fn fwd_one(k: usize) -> usize {
+            let FwdFound::Found(r) = fwd_make(k) else {
+              FwdFound::Missing => { return 0; }
+            };
+            return r.pid;
+          }
+          fn fwd_loop(n: usize) -> usize {
+            let mut s: usize = 0;
+            for k: usize in 0..<n {
+              let FwdFound::Found(r) = fwd_make(k) else {
+                FwdFound::Missing => { continue; }
+              };
+              s = s + r.pid;
+            }
+            return s;
+          }" in
+       ignore (gen_codegen src);
+       let ir = Llvm.string_of_llmodule !Llvm_gen.the_module in
+       let body name =
+         let start = Option.get (substring_position ir ("@" ^ name ^ "(")) in
+         let rest = String.sub ir start (String.length ir - start) in
+         String.sub rest 0 (Option.get (substring_position rest "\n}\n")) in
+       let one = body "fwd_one" in
+       Alcotest.(check bool) "the bound payload is not copied out of the slot" false
+         (contains_substring one "memcpy");
+       Alcotest.(check bool) "the field is read through the slot" true
+         (contains_substring one "getelementptr inbounds { i32, { i64, [24 x i8] } }, ptr %ret.slot");
+       (* The call re-runs on the loop's back edge, so there the slot is not
+          known to keep the payload and the binding keeps its copy. *)
+       Alcotest.(check bool) "a binding whose call is reachable again keeps its copy" true
+         (contains_substring (body "fwd_loop") "memcpy.inline"));
+
+  Alcotest.test_case
     "debug metadata sidecar: enum discriminants, variant target layout, and integer constants share one compiler-owned artifact"
     `Quick
     (fun () ->

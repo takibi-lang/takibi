@@ -13,6 +13,8 @@ missing
 Rbcdef
 xyz{|}
 Ryz{|}
+bound read ok
+loop bound ok
 wide id ok
 AZR
 busy
