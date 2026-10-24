@@ -25491,6 +25491,13 @@ let raw_authority_policy_tests = [
         let callee = spec.Atomic_spec.name in
         let source = "fn poke(address: usize) !{unsafe} { let seen = " ^ callee
                      ^ "(address); } fn main() -> usize { return 42; }" in
+        (* site_counts also reads Type_inf's per-compilation site tables,
+           which a preceding (shuffled) test may have left filled under the
+           same file name; this source does not type-check (no `unsafe`),
+           so an empty program's check clears them. *)
+        ignore (Type_inf.infer_program
+          (Declared_type_resolver.run (Monomorphize.run
+             (parse "fn main() -> usize { return 42; }"))));
         let source_program = parse source in
         (match atomic_errors source_program [] with
          | [(loc, message)] ->
