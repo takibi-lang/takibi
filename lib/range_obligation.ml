@@ -115,7 +115,7 @@ let rec const_expr ~signed w (e : Ast.expr) =
   | Ast.BinOp (Ast.Mul, a, b) -> Printf.sprintf "(bvmul %s %s)" (go a) (go b)
   | Ast.BinOp (Ast.Div, a, b) ->
       Printf.sprintf "(%s %s %s)" (if signed then "bvsdiv" else "bvudiv") (go a) (go b)
-  | _ -> failwith "range obligation: a constant operand outside Const_env.folded_value's shapes"
+  | _ -> failwith "range obligation: a constant operand outside the constant fold's shapes"
 
 let rule_name = function
   | Add -> "add" | Sub -> "sub" | Mul -> "mul" | Div -> "div"

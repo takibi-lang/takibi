@@ -469,13 +469,13 @@ let check
   let checked k = try k () with Init_pred.Overflow -> None in
   let rec lin (f : state) (e : Ast.expr) : Init_pred.lin option =
     match e.desc with
-    | Ast.IntLit n -> leaf_const ~src:(e.loc, n) (Ast.int_of_intlit n)
+    | Ast.IntLit n -> leaf_const (Ast.int_of_intlit n) ~src:(e.loc, n)
     | Ast.Var x ->
         (match Local_bindings.id_for_expr bindings e with
          | Some id when immutable_var x id -> Some (v_atom id)
          | Some id when versionable x id -> Some (ver_atom id)
          | Some _ -> None
-         | None -> leaf_const ?src:(const_src e x) (Const_env.find x))
+         | None -> leaf_const (Const_env.find x) ?src:(const_src e x))
     | Ast.SizeOf t -> leaf_const (size_of t)
     | Ast.BinOp (Ast.Add, a, b) ->
         (match lin f a, lin f b with
@@ -732,11 +732,11 @@ let check
        (the callee proves exactly that interval, and the caller maps each
        atom to a machine value through [lin]), but its leaves read at the
        usize width as [lin]'s do. *)
-    | Ast.IntLit n -> leaf_const ~src:(e.loc, n) (Ast.int_of_intlit n)
+    | Ast.IntLit n -> leaf_const (Ast.int_of_intlit n) ~src:(e.loc, n)
     | Ast.Var x ->
         (match env x (`Val None) with
          | Some t -> Some t
-         | None -> leaf_const ?src:(const_src e x) (Const_env.find x))
+         | None -> leaf_const (Const_env.find x) ?src:(const_src e x))
     | Ast.SizeOf t -> leaf_const (size_of t)
     | Ast.FieldGet ({ desc = Ast.Var x; _ }, "len") -> env x (`Len None)
     | Ast.BinOp (Ast.Add, a, b) ->
