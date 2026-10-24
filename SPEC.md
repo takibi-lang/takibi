@@ -880,12 +880,15 @@ fn path_view(slot: borrow SyscallSlot[0]) -> [u8; 256..]
   a `match g(...)` arm `K(x)` in the caller gets `C` with `x` the arm's
   binder.
 - `requires C` is unconditional. It is shown at every call against the
-  caller's state and assumed at the callee's entry. A parameter it names
-  that is not `borrow uninit` (GitHub issue #975) is initialized at entry
-  exactly where `C` says, so the body may read only there, and a caller
-  shows only `C` for that argument rather than the whole argument. When
-  the clause's bounds are not terms at the call, the caller shows the whole
-  argument's leaf instead.
+  caller's state and assumed at the callee's entry. One meaning per type
+  (GitHub issue #975, maintainer 2026-10-24): a plain `borrow T` is always
+  wholly initialized, and partial state lives only in contracts, so a
+  `requires` may name a parameter only if it is `borrow uninit` (anything
+  else is an error). Such a parameter is initialized at entry exactly where
+  `C` says, the body may read only there, it owes nothing at return unless
+  an `ensures` names it, and a caller shows only `C` for that argument.
+  When the clause's bounds are not terms at the call, the caller shows the
+  whole argument's leaf instead.
 - A call result bound to an immutable `let` keeps the facts that depend on
   it: a `match` on the binding gets each arm's facts, and `return` of it
   meets an `ensures match result` arm by arm.

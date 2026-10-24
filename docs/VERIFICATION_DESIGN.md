@@ -59,6 +59,14 @@ follows from the path facts. It is sound and incomplete. It never needs a
 quantifier or a solver call, so what it accepts does not depend on a z3
 version.
 
+### One meaning per type (#975)
+
+A plain `borrow T` is always wholly initialized; the maintainer decided on
+2026-10-24 that partial initialization is expressed only by `borrow uninit`
+plus `requires`/`ensures`. A `requires` naming a plain borrow is an error,
+so reading a signature's type never needs its contracts to know whether
+the value is whole.
+
 ### Path facts (#975)
 
 A fact is a linear term `t >= 0`, or a definition `x = min(a, b)`. Facts
@@ -149,7 +157,8 @@ such owner, and naming one is an error.
    terminal write (copy_from_user into a chunk alias), file write
    (copy_from_user_span then the same span), the ext2 read loop and
    sendfile (`Ext2ReadResult::Read(n)` ensures `[0, n)`, and
-   copy_to_user_span now requires only `source[offset..<offset + length]`),
+   copy_to_user_span's source is `borrow uninit` with
+   `requires init(source[offset..<offset + length])`),
    syslog (`kernel_log_snapshot_copy` ensures `[0, result)`, and
    `staged != chunk` returns, so `staged = chunk` after it), bind's
    sockaddr (`x2 >= 16`, `len = min(x2, 28)`, and the IPv6 bytes after

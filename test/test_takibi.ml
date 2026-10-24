@@ -25622,8 +25622,8 @@ scratch let mut sb: S975;
              R975::Read(n) => { if (n < 2) { return 0; } return sb.buf[1]; }
              R975::Bad => { return 0; }
            } }"));
-    t "issue #975: a requires on a borrow parameter is all a caller must show"
-      (expect_ok (span ^ "fn put(src: borrow []const u8, off: usize, n: usize) -> u8
+    t "issue #975: a requires on a borrow uninit parameter is all a caller must show"
+      (expect_ok (span ^ "fn put(src: borrow uninit []const u8, off: usize, n: usize) -> u8
                  requires init(src[off..<off + n]) {
            if (off > src.len) { return 0; }
            let tail = src[off..<src.len];
@@ -25632,16 +25632,26 @@ scratch let mut sb: S975;
          fn f() -> u8 {
            if (fetch(sb.buf as []u8, 4, 8) == false) { return 0; }
            return put(sb.buf as []u8, 4, 8); }"));
-    t "issue #975: a requires on a borrow parameter is checked at the call"
+    t "issue #975: a requires on a borrow uninit parameter is checked at the call"
       (expect_type_error "'put' requires it initialized"
-         (span ^ "fn put(src: borrow []const u8, off: usize, n: usize) -> u8
+         (span ^ "fn put(src: borrow uninit []const u8, off: usize, n: usize) -> u8
                  requires init(src[off..<off + n]) { return 0; }
          fn f() -> u8 {
            if (fetch(sb.buf as []u8, 4, 8) == false) { return 0; }
            return put(sb.buf as []u8, 0, 8); }"));
-    t "issue #975: the body of a requires on a borrow parameter stays inside it"
+    t "issue #975: a requires cannot narrow a plain borrow (wholly initialized)"
+      (expect_type_error "'src' is not `borrow uninit`"
+         "fn put(src: borrow []const u8, n: usize) -> u8
+                 requires init(src[0..<n]) { return 0; }");
+    t "issue #975: a plain borrow argument is still read whole"
+      (expect_type_error "is not shown initialized"
+         "fn put(src: borrow []const u8) -> u8 { return 0; }
+          struct S975 { buf: [u8; 28]; }
+          scratch let mut sb: S975;
+          fn f() -> u8 { sb.buf[0] = 1; return put(sb.buf as []u8); }");
+    t "issue #975: the body of a requires on a borrow uninit parameter stays inside it"
       (expect_type_error "element off + n of it"
-         "fn put(src: borrow []const u8, off: usize, n: usize) -> u8
+         "fn put(src: borrow uninit []const u8, off: usize, n: usize) -> u8
                  requires init(src[off..<off + n]) {
            if (off > src.len) { return 0; }
            let tail = src[off..<src.len];

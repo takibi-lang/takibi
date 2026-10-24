@@ -198,36 +198,27 @@ let check
         List.fold_left (fun s l -> Leaves.add l s) st (all_leaves key)
     | _ -> st) entry_u fdef.Ast.params bindings.Local_bindings.param_ids in
   let contracts = Init_state.contracts_of fdef.Ast.def_loc in
-  (* GitHub issue #975: parameters a requires clause names. Such a
-     parameter that is not `borrow uninit` is tracked too, initialized at
-     entry exactly where the clause says, so the body is checked against
-     the clause rather than against a whole-init default. *)
-  let required_params cs =
-    List.concat_map (fun (c : Init_state.clause) ->
-      match c.body with
-      | Init_state.CPlain (Init_state.PInit e) when c.requires ->
-          let rec base (e : Ast.expr) = match e.desc with
-            | Ast.SliceOf (b, _, _) -> base b
-            | Ast.Var x -> [x]
-            | _ -> [] in
-          base e
-      | _ -> []) cs in
-  let own_required = required_params contracts in
-  let entry_u = List.fold_left2 (fun st (name, ty) id ->
-    let key = "L" ^ string_of_int id in
-    match ty with
-    | Some ty when List.mem name own_required && not (Hashtbl.mem roots key) ->
-        let pointee = match strip ty with
-          | Ast.TypeBorrow t | Ast.TypeBorrowMut t -> strip t
-          | t -> t in
-        let pointee = match pointee with
-          | Ast.TypeRefMut t | Ast.TypePtr t | Ast.TypeRef t -> t
-          | t -> t in
-        Hashtbl.replace roots key
-          { display = name; leaves = leaves_of [] [] pointee;
-            array_root = false; out_param = false };
-        List.fold_left (fun s l -> Leaves.add l s) st (all_leaves key)
-    | _ -> st) entry_u fdef.Ast.params bindings.Local_bindings.param_ids in
+  (* GitHub issue #975 (maintainer, 2026-10-24): one meaning per type. A
+     plain `borrow T` is wholly initialized; partial state lives only in a
+     `borrow uninit` parameter's requires/ensures. So a requires clause may
+     narrow only a `borrow uninit` parameter. *)
+  List.iter (fun (c : Init_state.clause) ->
+    match c.body with
+    | Init_state.CPlain (Init_state.PInit e) when c.requires ->
+        let rec base (e : Ast.expr) = match e.desc with
+          | Ast.SliceOf (b, _, _) -> base b
+          | Ast.Var x -> Some x
+          | _ -> None in
+        (match base e with
+         | Some x when List.mem_assoc x fdef.Ast.params
+                       && Init_state.param_qual fdef.Ast.def_loc x
+                          <> Some Init_state.Uninit ->
+             error c.cloc (Printf.sprintf
+               "requires init(%s...): '%s' is not `borrow uninit`; a plain \
+                borrow is wholly initialized, so partial initialization needs \
+                `%s: borrow uninit ...` with this requires" x x x)
+         | _ -> ())
+    | _ -> ()) contracts;
   (* ---- immutable bindings: the atoms of linear terms ------------------- *)
   let mutable_ids = Hashtbl.create 16 in
   let binding_names = Hashtbl.create 16 in
@@ -764,11 +755,12 @@ let check
                      "the contract match is not exhaustive: missing %s"
                      (String.concat ", " (List.map fst missing)))))
      | Init_state.CPlain _ -> ())) contracts;
-  (* Parameters an ensures clause names: their whole-init default at return
-     is replaced by the clauses. *)
+  (* Parameters a contract names: their whole-init default at return (and,
+     at a call, the whole-argument read) is replaced by the clauses. A
+     requires-only `borrow uninit` parameter is read where the requires
+     says and owes nothing at return (#975). *)
   let named_params cs =
     List.concat_map (fun (c : Init_state.clause) ->
-      if c.requires then [] else
       let preds = match c.body with
         | Init_state.CPlain p | Init_state.CIf (_, p) -> [p]
         | Init_state.CMatch arms -> List.map snd arms in
@@ -1039,7 +1031,6 @@ let check
         let cs = match params with
           | Some (_, loc) -> Init_state.contracts_of loc | None -> [] in
         let named = named_params cs in
-        let required = required_params cs in
         let (st, fills) = List.fold_left (fun (st, fills) (i, a) ->
           let out = match params with
             | Some (ps, loc) ->
@@ -1047,7 +1038,6 @@ let check
                 (match Init_state.param_qual loc pname with
                  | Some Init_state.Uninit when List.mem pname named -> `Contract
                  | Some Init_state.Uninit -> `Out
-                 | _ when List.mem pname required -> `Contract
                  | _ ->
                      let rec is_ref_mut t = match strip t with
                        | Ast.TypeBorrow t -> is_ref_mut t

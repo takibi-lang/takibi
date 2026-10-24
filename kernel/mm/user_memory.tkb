@@ -328,8 +328,9 @@ fn copy_from_user_span(range: borrow UserReadRange[process], destination: borrow
     return copy_from_user(range, tail[0..<length]);
 }
 
-// GitHub issue #975: only the span copied out needs to be initialized.
-fn copy_to_user_span(range: borrow UserWriteRange[process], source: borrow []const u8,
+// GitHub issue #975: only the span copied out needs to be initialized, so
+// the source is borrow uninit with that requires.
+fn copy_to_user_span(range: borrow UserWriteRange[process], source: borrow uninit []const u8,
                      offset: usize, length: usize) -> UserWriteResult !{unsafe}
         requires init(source[offset..<offset + length]) {
     if (offset > source.len) { return UserWriteResult::Fault; }
