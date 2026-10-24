@@ -221,13 +221,21 @@ must_use variant Ext2BlockAllocResult {
     Allocated(exists block: usize. Ext2BlockOwner[block]);
 }
 
+// NoSpace: the inode bitmap had no clear bit; nothing was written.
 must_use variant Ext2InodeAllocResult {
     Failed;
+    NoSpace;
     Allocated(exists inode: usize. Ext2InodeOwner[inode]);
 }
 
 must_use variant Ext2OwnerReleaseResult { Invalid; Released; }
 must_use variant Ext2DirectoryResult { Invalid; Updated; }
+// What adding a name can answer (GitHub issue #698). NoSpace: the directory
+// had to grow and could not -- either the block bitmap had no clear bit, or
+// the directory already holds EXT2_MAX_DIRECT_BLOCKS blocks, the
+// representational limit of this implementation (Linux would chain an
+// indirect block). Neither writes anything.
+must_use variant Ext2DirectoryAddResult { Invalid; NoSpace; Updated; }
 
 // A write keeps every new data block (and, when needed, the indirect block)
 // here until its inode has been published. One linear obligation owns the
@@ -250,8 +258,12 @@ linear struct Ext2LinkedFile[inode: usize, block: usize] {
     private block_number: usize @ block;
 }
 
+// NoSpace (GitHub issue #698): a block, an inode or room in the directory
+// could not be had. Everything claimed on the way was released and the
+// directory is unchanged.
 must_use variant Ext2CreateResult {
     Invalid;
+    NoSpace;
     Created(exists inode: usize. exists block: usize.
             Ext2LinkedFile[inode, block]);
 }
@@ -270,8 +282,11 @@ linear struct Ext2LinkedDirectory[inode: usize, block: usize] {
     private block_number: usize @ block;
 }
 
+// NoSpace: as for Ext2CreateResult; the parent's links and the group's
+// directory count are unchanged as well.
 must_use variant Ext2MkdirResult {
     Invalid;
+    NoSpace;
     Created(exists inode: usize. exists block: usize.
             Ext2LinkedDirectory[inode, block]);
 }
@@ -300,6 +315,7 @@ must_use variant Ext2UnlinkNameResult {
 
 must_use variant Ext2RenameResult {
     Invalid;
+    NoSpace;
     NotFound;
     IsDirectory;
     NotDirectory;
@@ -1393,6 +1409,88 @@ private inline fn ext2_counters_match_bitmaps_with(slot: borrow Ext2Slot[0],
     }
 }
 
+// GitHub issue #698: block or inode exhaustion for the boot fixture. Every
+// create here costs a block and an inode, and the fixture image has far more
+// free inodes than free blocks, so no sequence of ordinary creates empties
+// the inode bitmap while blocks remain; and nothing reachable from the boot
+// fixture creates a file without a block. Fill sets every clear bit of one
+// bitmap at once and recounts; the linear token is what makes the caller put
+// the saved bitmap back. Nothing names the marked items, so the token must
+// not outlive the boot fixture: e2fsck would report every one of them.
+linear struct Ext2BitmapFill[unit: usize] {
+    private inode_bitmap: bool;
+    private marked: usize;
+}
+must_use variant Ext2BitmapFillResult { Invalid; Filled(Ext2BitmapFill[0]); }
+
+fn ext2_bitmap_fill(mount: Ext2Mount, inode_bitmap: bool,
+                    saved: [u8; KERNEL_BLOCK_SIZE..])
+        -> Ext2BitmapFillResult !{unsafe} {
+    let mut bitmap_block: usize = mount.block_bitmap_block;
+    let mut item_count: usize = mount.filesystem_blocks - 1;
+    if (inode_bitmap) {
+        bitmap_block = mount.inode_bitmap_block;
+        item_count = mount.inode_count;
+    }
+    if (item_count > KERNEL_BLOCK_SIZE * 8) {
+        return Ext2BitmapFillResult::Invalid;
+    }
+    match block_read(mount.device, bitmap_block, saved) {
+        BlockIoResult::Invalid => { return Ext2BitmapFillResult::Invalid; }
+        BlockIoResult::Ok => { }
+    }
+    let slot: Ext2Slot[0] = ext2_slot_acquire();
+    for i: usize in 0..<KERNEL_BLOCK_SIZE {
+        ext2_scratch[slot.index].metadata[i] = saved[i];
+    }
+    let mut bitmap: Ext2Bytes = ext2_metadata();
+    let mut marked: usize = 0;
+    for index: usize in 0..<item_count {
+        let value: u8 = ext2_byte(slot, bitmap, index / 8);
+        let mask: u8 = (1 << ((index % 8) as u8)) as u8;
+        if ((value & mask) == 0) {
+            ext2_set_byte(slot, bitmap, index / 8, value | mask);
+            marked = marked + 1;
+        }
+    }
+    let mut ok: bool = false;
+    match ext2_block_write(mount, bitmap_block,
+                           ext2_scratch[slot.index].metadata as []u8) {
+        BlockIoResult::Invalid => { }
+        BlockIoResult::Ok => { ok = ext2_recount(slot, mount); }
+    }
+    ext2_slot_release(slot);
+    let mut fill: Ext2BitmapFill[0] = { inode_bitmap, marked };
+    if (ok) { return Ext2BitmapFillResult::Filled(fill); }
+    match ext2_bitmap_fill_restore(mount, fill, saved) {
+        Ext2OwnerReleaseResult::Invalid => { }
+        Ext2OwnerReleaseResult::Released => { }
+    }
+    return Ext2BitmapFillResult::Invalid;
+}
+
+fn ext2_bitmap_fill_marked(fill: borrow Ext2BitmapFill[0]) -> usize {
+    return fill.marked;
+}
+
+// Puts the saved bitmap back with the raw write, as a repair does, so a
+// fence raised meanwhile cannot strand the marked items.
+fn ext2_bitmap_fill_restore(mount: Ext2Mount, fill: sink Ext2BitmapFill[0],
+                            saved: [u8; KERNEL_BLOCK_SIZE..])
+        -> Ext2OwnerReleaseResult !{unsafe} {
+    let mut bitmap_block: usize = mount.block_bitmap_block;
+    if (fill.inode_bitmap) { bitmap_block = mount.inode_bitmap_block; }
+    match block_write(mount.device, bitmap_block, saved) {
+        BlockIoResult::Invalid => { return Ext2OwnerReleaseResult::Invalid; }
+        BlockIoResult::Ok => { }
+    }
+    let slot: Ext2Slot[0] = ext2_slot_acquire();
+    let ok: bool = ext2_recount(slot, mount);
+    ext2_slot_release(slot);
+    if (ok) { return Ext2OwnerReleaseResult::Released; }
+    return Ext2OwnerReleaseResult::Invalid;
+}
+
 // Give back one claim that will never be handed out. Fences the mount when
 // the bit or the counters cannot be made right.
 private fn ext2_settle_claim(slot: borrow Ext2Slot[0], mount: Ext2Mount,
@@ -1675,7 +1773,7 @@ fn ext2_allocate_inode(slot: borrow Ext2Slot[0],
     // therefore the first allocatable inode (inode number 11).
     match ext2_bitmap_claim(slot, mount, true, 10, mount.inode_count) {
         Ext2BitmapClaimResult::Full => {
-            return Ext2InodeAllocResult::Failed;
+            return Ext2InodeAllocResult::NoSpace;
         }
         Ext2BitmapClaimResult::Invalid => {
             return Ext2InodeAllocResult::Failed;
@@ -2379,6 +2477,13 @@ private inline fn ext2_owner_roundtrip_check_with(slot: borrow Ext2Slot[0],
                     }
                     return Ext2BitmapProbeResult::Invalid;
                 }
+                Ext2InodeAllocResult::NoSpace => {
+                    match ext2_release_block(slot, mount, block_owner) {
+                        Ext2OwnerReleaseResult::Invalid => { }
+                        Ext2OwnerReleaseResult::Released => { }
+                    }
+                    return Ext2BitmapProbeResult::Invalid;
+                }
                 Ext2InodeAllocResult::Allocated(inode_owner) => {
                     let inode_number: usize = ext2_inode_number(inode_owner);
                     if (inode_number == 0) {
@@ -2524,21 +2629,19 @@ private fn ext2_directory_grow_publish(slot: borrow Ext2Slot[0],
 
 // Every block was walked and none had room.
 //
-// Past twelve blocks, or on a volume with no free block, this still answers
-// Invalid, and the caller cannot tell that from a malformed directory:
-// Ext2DirectoryResult has two cases. mkdirat therefore answers EIO where
-// Linux would answer ENOSPC; the case is worth adding with the first lane
-// that fills a directory or a volume, since nothing exercises either.
+// Past twelve blocks (this implementation's limit) or on a volume with no
+// free block this answers NoSpace, before anything is written; a malformed
+// directory or a device failure stays Invalid (GitHub issue #698).
 private fn ext2_directory_grow(slot: borrow Ext2Slot[0], mount: Ext2Mount,
         directory: Ext2Inode,
                                blocks: usize, inode_number: usize,
-                               name: borrow []const u8) -> Ext2DirectoryResult !{unsafe} {
+                               name: borrow []const u8) -> Ext2DirectoryAddResult !{unsafe} {
     if (blocks >= EXT2_MAX_DIRECT_BLOCKS) {
-        return Ext2DirectoryResult::Invalid;
+        return Ext2DirectoryAddResult::NoSpace;
     }
     match ext2_allocate_block(slot, mount) {
-        Ext2BlockAllocResult::NoSpace => { return Ext2DirectoryResult::Invalid; }
-        Ext2BlockAllocResult::Failed => { return Ext2DirectoryResult::Invalid; }
+        Ext2BlockAllocResult::NoSpace => { return Ext2DirectoryAddResult::NoSpace; }
+        Ext2BlockAllocResult::Failed => { return Ext2DirectoryAddResult::Invalid; }
         Ext2BlockAllocResult::Allocated(owner) => {
             match ext2_directory_grow_publish(slot, mount, directory, blocks,
                                               owner.block_number,
@@ -2548,11 +2651,11 @@ private fn ext2_directory_grow(slot: borrow Ext2Slot[0], mount: Ext2Mount,
                         Ext2OwnerReleaseResult::Invalid => { }
                         Ext2OwnerReleaseResult::Released => { }
                     }
-                    return Ext2DirectoryResult::Invalid;
+                    return Ext2DirectoryAddResult::Invalid;
                 }
                 Ext2DirectoryResult::Updated => {
                     ext2_block_owner_linked(owner);
-                    return Ext2DirectoryResult::Updated;
+                    return Ext2DirectoryAddResult::Updated;
                 }
             }
         }
@@ -2562,16 +2665,16 @@ private fn ext2_directory_grow(slot: borrow Ext2Slot[0], mount: Ext2Mount,
 fn ext2_directory_add(slot: borrow Ext2Slot[0], mount: Ext2Mount,
         directory_inode: usize,
                       inode_number: usize,
-                      name: borrow []const u8) -> Ext2DirectoryResult !{unsafe} {
+                      name: borrow []const u8) -> Ext2DirectoryAddResult !{unsafe} {
     if (name.len == 0 || name.len > 255 || inode_number == 0 ||
         directory_inode == 0) {
-        return Ext2DirectoryResult::Invalid;
+        return Ext2DirectoryAddResult::Invalid;
     }
     match ext2_read_inode(slot, mount, directory_inode) {
-        Ext2InodeResult::Invalid => { return Ext2DirectoryResult::Invalid; }
+        Ext2InodeResult::Invalid => { return Ext2DirectoryAddResult::Invalid; }
         Ext2InodeResult::Inode(directory) => {
             if (ext2_directory_mutable(directory) == false) {
-                return Ext2DirectoryResult::Invalid;
+                return Ext2DirectoryAddResult::Invalid;
             }
             let needed: usize = (8 + name.len + 3) & 0xFFFFFFFFFFFFFFFC;
             let blocks: usize = ext2_directory_block_count(directory);
@@ -2579,11 +2682,11 @@ fn ext2_directory_add(slot: borrow Ext2Slot[0], mount: Ext2Mount,
                 if (index >= blocks) { break; }
                 let block: usize =
                     ext2_directory_block_at(slot, mount, directory, index);
-                if (block == 0) { return Ext2DirectoryResult::Invalid; }
+                if (block == 0) { return Ext2DirectoryAddResult::Invalid; }
                 match block_read(mount.device, block,
                                  ext2_scratch[slot.index].file as []u8) {
                     BlockIoResult::Invalid => {
-                        return Ext2DirectoryResult::Invalid;
+                        return Ext2DirectoryAddResult::Invalid;
                     }
                     BlockIoResult::Ok => { }
                 }
@@ -2591,7 +2694,7 @@ fn ext2_directory_add(slot: borrow Ext2Slot[0], mount: Ext2Mount,
                 let mut cursor: usize = 0;
                 while (cursor < KERNEL_BLOCK_SIZE) {
                     if (cursor > KERNEL_BLOCK_SIZE - 8) {
-                        return Ext2DirectoryResult::Invalid;
+                        return Ext2DirectoryAddResult::Invalid;
                     }
                     let mut entry: Ext2Bytes = ext2_at(base, cursor);
                     let entry_inode: usize = ext2_u32(slot, entry, 0) as usize;
@@ -2604,7 +2707,7 @@ fn ext2_directory_add(slot: borrow Ext2Slot[0], mount: Ext2Mount,
                         record_length > KERNEL_BLOCK_SIZE - cursor ||
                         name_length > record_length - 8 ||
                         actual > record_length) {
-                        return Ext2DirectoryResult::Invalid;
+                        return Ext2DirectoryAddResult::Invalid;
                     }
                     // A dead record -- inode zero, left behind when the first
                     // entry of a block was removed -- holds no name, so the
@@ -2622,31 +2725,31 @@ fn ext2_directory_add(slot: borrow Ext2Slot[0], mount: Ext2Mount,
                                     inode_number as u32) == false ||
                             ext2_put_u16(slot, new_entry, 4,
                                     new_length as u16) == false) {
-                            return Ext2DirectoryResult::Invalid;
+                            return Ext2DirectoryAddResult::Invalid;
                         }
                         ext2_set_byte(slot, new_entry, 6, name.len as u8);
                         ext2_set_byte(slot, new_entry, 7, 0);
                         let data = ext2_scratch[slot.index].file as []u8;
                         if (new_offset > data.len) {
-                            return Ext2DirectoryResult::Invalid;
+                            return Ext2DirectoryAddResult::Invalid;
                         }
                         let new_entry_bytes = data[new_offset..<data.len];
                         if (new_entry_bytes.len < 8) {
-                            return Ext2DirectoryResult::Invalid;
+                            return Ext2DirectoryAddResult::Invalid;
                         }
                         let name_target =
                             new_entry_bytes[8..<new_entry_bytes.len];
                         if (name.len > name_target.len) {
-                            return Ext2DirectoryResult::Invalid;
+                            return Ext2DirectoryAddResult::Invalid;
                         }
                         slice_copy(name_target, name);
                         match ext2_block_write(mount, block,
                                           ext2_scratch[slot.index].file as []u8) {
                             BlockIoResult::Invalid => {
-                                return Ext2DirectoryResult::Invalid;
+                                return Ext2DirectoryAddResult::Invalid;
                             }
                             BlockIoResult::Ok => {
-                                return Ext2DirectoryResult::Updated;
+                                return Ext2DirectoryAddResult::Updated;
                             }
                         }
                     }
@@ -2943,7 +3046,7 @@ private fn ext2_create_file_in_with(slot: borrow Ext2Slot[0], mount: Ext2Mount,
         Ext2LookupResult::NotFound => { }
     }
     match ext2_allocate_block(slot, mount) {
-        Ext2BlockAllocResult::NoSpace => { return Ext2CreateResult::Invalid; }
+        Ext2BlockAllocResult::NoSpace => { return Ext2CreateResult::NoSpace; }
         Ext2BlockAllocResult::Failed => { return Ext2CreateResult::Invalid; }
         Ext2BlockAllocResult::Allocated(block_owner) => {
             match ext2_allocate_inode(slot, mount) {
@@ -2953,6 +3056,13 @@ private fn ext2_create_file_in_with(slot: borrow Ext2Slot[0], mount: Ext2Mount,
                         Ext2OwnerReleaseResult::Released => { }
                     }
                     return Ext2CreateResult::Invalid;
+                }
+                Ext2InodeAllocResult::NoSpace => {
+                    match ext2_release_block(slot, mount, block_owner) {
+                        Ext2OwnerReleaseResult::Invalid => { }
+                        Ext2OwnerReleaseResult::Released => { }
+                    }
+                    return Ext2CreateResult::NoSpace;
                 }
                 Ext2InodeAllocResult::Allocated(inode_owner) => {
                     match ext2_initialize_regular_inode(slot, 
@@ -2970,25 +3080,29 @@ private fn ext2_create_file_in_with(slot: borrow Ext2Slot[0], mount: Ext2Mount,
                         }
                         Ext2DirectoryResult::Updated => { }
                     }
+                    let mut no_space: bool = false;
                     match ext2_directory_add(slot, 
                             mount, directory_inode,
                             inode_owner.inode_number, name) {
-                        Ext2DirectoryResult::Invalid => {
-                            match ext2_release_inode(slot, mount, inode_owner) {
-                                Ext2OwnerReleaseResult::Invalid => { }
-                                Ext2OwnerReleaseResult::Released => { }
-                            }
-                            match ext2_release_block(slot, mount, block_owner) {
-                                Ext2OwnerReleaseResult::Invalid => { }
-                                Ext2OwnerReleaseResult::Released => { }
-                            }
-                            return Ext2CreateResult::Invalid;
+                        Ext2DirectoryAddResult::Invalid => { }
+                        Ext2DirectoryAddResult::NoSpace => {
+                            no_space = true;
                         }
-                        Ext2DirectoryResult::Updated => {
+                        Ext2DirectoryAddResult::Updated => {
                             return Ext2CreateResult::Created(
                                 ext2_linked_file_new(block_owner, inode_owner));
                         }
                     }
+                    match ext2_release_inode(slot, mount, inode_owner) {
+                        Ext2OwnerReleaseResult::Invalid => { }
+                        Ext2OwnerReleaseResult::Released => { }
+                    }
+                    match ext2_release_block(slot, mount, block_owner) {
+                        Ext2OwnerReleaseResult::Invalid => { }
+                        Ext2OwnerReleaseResult::Released => { }
+                    }
+                    if (no_space) { return Ext2CreateResult::NoSpace; }
+                    return Ext2CreateResult::Invalid;
                 }
             }
         }
@@ -3181,25 +3295,30 @@ private fn ext2_link_new_directory(slot: borrow Ext2Slot[0], mount: Ext2Mount,
         parent_inode: usize,
                                    inode_number: usize, block: usize,
                                    name: borrow []const u8)
-        -> Ext2DirectoryResult !{unsafe} {
+        -> Ext2DirectoryAddResult !{unsafe} {
     match ext2_initialize_directory(slot, mount, inode_number, block,
             parent_inode) {
-        Ext2DirectoryResult::Invalid => { return Ext2DirectoryResult::Invalid; }
+        Ext2DirectoryResult::Invalid => { return Ext2DirectoryAddResult::Invalid; }
         Ext2DirectoryResult::Updated => { }
     }
     match ext2_directory_add(slot, mount, parent_inode, inode_number, name) {
-        Ext2DirectoryResult::Invalid => { return Ext2DirectoryResult::Invalid; }
-        Ext2DirectoryResult::Updated => { }
+        Ext2DirectoryAddResult::Invalid => {
+            return Ext2DirectoryAddResult::Invalid;
+        }
+        Ext2DirectoryAddResult::NoSpace => {
+            return Ext2DirectoryAddResult::NoSpace;
+        }
+        Ext2DirectoryAddResult::Updated => { }
     }
     match ext2_adjust_parent_links(slot, mount, parent_inode, true) {
-        Ext2DirectoryResult::Updated => { return Ext2DirectoryResult::Updated; }
+        Ext2DirectoryResult::Updated => { return Ext2DirectoryAddResult::Updated; }
         Ext2DirectoryResult::Invalid => {
             match ext2_directory_remove(slot, mount, parent_inode, inode_number,
                                         name) {
                 Ext2DirectoryResult::Invalid => { }
                 Ext2DirectoryResult::Updated => { }
             }
-            return Ext2DirectoryResult::Invalid;
+            return Ext2DirectoryAddResult::Invalid;
         }
     }
 }
@@ -3237,7 +3356,7 @@ private inline fn ext2_make_directory_in_with(slot: borrow Ext2Slot[0],
         Ext2LookupResult::NotFound => { }
     }
     match ext2_allocate_block(slot, mount) {
-        Ext2BlockAllocResult::NoSpace => { return Ext2MkdirResult::Invalid; }
+        Ext2BlockAllocResult::NoSpace => { return Ext2MkdirResult::NoSpace; }
         Ext2BlockAllocResult::Failed => { return Ext2MkdirResult::Invalid; }
         Ext2BlockAllocResult::Allocated(block_owner) => {
             match ext2_allocate_inode(slot, mount) {
@@ -3248,27 +3367,38 @@ private inline fn ext2_make_directory_in_with(slot: borrow Ext2Slot[0],
                     }
                     return Ext2MkdirResult::Invalid;
                 }
+                Ext2InodeAllocResult::NoSpace => {
+                    match ext2_release_block(slot, mount, block_owner) {
+                        Ext2OwnerReleaseResult::Invalid => { }
+                        Ext2OwnerReleaseResult::Released => { }
+                    }
+                    return Ext2MkdirResult::NoSpace;
+                }
                 Ext2InodeAllocResult::Allocated(inode_owner) => {
+                    let mut no_space: bool = false;
                     match ext2_link_new_directory(slot, 
                             mount, parent_inode, inode_owner.inode_number,
                             block_owner.block_number, name) {
-                        Ext2DirectoryResult::Invalid => {
-                            match ext2_release_inode(slot, mount, inode_owner) {
-                                Ext2OwnerReleaseResult::Invalid => { }
-                                Ext2OwnerReleaseResult::Released => { }
-                            }
-                            match ext2_release_block(slot, mount, block_owner) {
-                                Ext2OwnerReleaseResult::Invalid => { }
-                                Ext2OwnerReleaseResult::Released => { }
-                            }
-                            return Ext2MkdirResult::Invalid;
+                        Ext2DirectoryAddResult::Invalid => { }
+                        Ext2DirectoryAddResult::NoSpace => {
+                            no_space = true;
                         }
-                        Ext2DirectoryResult::Updated => {
+                        Ext2DirectoryAddResult::Updated => {
                             return Ext2MkdirResult::Created(
                                 ext2_linked_directory_new(block_owner,
                                                           inode_owner));
                         }
                     }
+                    match ext2_release_inode(slot, mount, inode_owner) {
+                        Ext2OwnerReleaseResult::Invalid => { }
+                        Ext2OwnerReleaseResult::Released => { }
+                    }
+                    match ext2_release_block(slot, mount, block_owner) {
+                        Ext2OwnerReleaseResult::Invalid => { }
+                        Ext2OwnerReleaseResult::Released => { }
+                    }
+                    if (no_space) { return Ext2MkdirResult::NoSpace; }
+                    return Ext2MkdirResult::Invalid;
                 }
             }
         }
@@ -3618,8 +3748,9 @@ private inline fn ext2_rename_in_with(slot: borrow Ext2Slot[0], mount: Ext2Mount
         }
     }
     match ext2_directory_add(slot, mount, new_parent, inode_number, new_name) {
-        Ext2DirectoryResult::Invalid => { return Ext2RenameResult::Invalid; }
-        Ext2DirectoryResult::Updated => { }
+        Ext2DirectoryAddResult::Invalid => { return Ext2RenameResult::Invalid; }
+        Ext2DirectoryAddResult::NoSpace => { return Ext2RenameResult::NoSpace; }
+        Ext2DirectoryAddResult::Updated => { }
     }
     match ext2_directory_remove(slot, mount, old_parent, inode_number,
             old_name) {

@@ -581,6 +581,12 @@ fn initial_user_payload() !{unsafe} {
         fail_if(svc5(63, exhaustion_read, read_block as *u8 as usize,
                      1, 0, 0) != 0);
         fail_if(svc5(57, exhaustion_read, 0, 0, 0, 0) != 0);
+        // GitHub issue #698: the volume has no free block now, so mkdirat
+        // must say ENOSPC (it said EIO) and leave no entry behind; the
+        // same name succeeds below once the fillers are gone.
+        fail_if(svc5(34, 0xFFFFFFFFFFFFFF9C, "/enospc-dir" as *u8 as usize,
+                     0x1ED, 0, 0) != ENOSPC_RC);
+        fail_if(svc5(56, 0, "/enospc-dir" as *u8 as usize, 0, 0, 0) < 64);
         // Last-link unlink supports direct files today. Shrink both fillers
         // through write(2) first: replacement releases their indirect blocks,
         // and unlinkat then releases the one remaining block and inode.
@@ -597,6 +603,10 @@ fn initial_user_payload() !{unsafe} {
                      "/enospc-a" as *u8 as usize, 0, 0, 0) != 0);
         fail_if(svc5(35, 0xFFFFFFFFFFFFFF9C,
                      "/enospc-b" as *u8 as usize, 0, 0, 0) != 0);
+        fail_if(svc5(34, 0xFFFFFFFFFFFFFF9C, "/enospc-dir" as *u8 as usize,
+                     0x1ED, 0, 0) != 0);
+        fail_if(svc5(35, 0xFFFFFFFFFFFFFF9C,
+                     "/enospc-dir" as *u8 as usize, 0x200, 0, 0) != 0);
         // Retrying on the SAME fd appends at 7168. A failure that moved its
         // offset would create a zero-filled gap, caught by the read and EOF.
         write_block[0] = 0x21;
@@ -618,7 +628,7 @@ fn initial_user_payload() !{unsafe} {
         fail_if(svc5(63, retry_read, read_block as *u8 as usize, 1, 0, 0) != 0);
         fail_if(svc5(57, retry_read, 0, 0, 0, 0) != 0);
         let exhaustion_message: []const u8 =
-            bs"userspace ext2 exhaustion: ENOSPC data+offset unchanged, unlink+retry ok\n";
+            bs"userspace ext2 exhaustion: write+mkdir ENOSPC, data+offset unchanged, unlink+retry ok\n";
         fail_if(svc5(64, 1, (unsafe { exhaustion_message as *u8 }) as usize,
                      exhaustion_message.len, 0, 0) != exhaustion_message.len);
         let write_fd: usize = svc5(56, 0, mutable_path as usize, 1, 0, 0);

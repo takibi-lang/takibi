@@ -105,6 +105,7 @@ private fn ext2_exhaustion_filler(mount: Ext2Mount, name: []const u8,
     if (blocks == 0 || blocks > EXT2_MAX_SINGLE_FILE_BLOCKS) { return false; }
     match ext2_create_root_file(mount, name, bs"x") {
         Ext2CreateResult::Invalid => { return false; }
+        Ext2CreateResult::NoSpace => { return false; }
         Ext2CreateResult::Created(linked) => { ext2_linked_file_keep(linked); }
     }
     match ext2_lookup_root(mount, name) {
@@ -191,6 +192,144 @@ private fn ext2_write_exhaustion_check(mount: Ext2Mount) -> bool {
     return ext2_io_file_is(mount, inode, false, false) &&
            ext2_io_bitmap_matches(mount) &&
            ext2_write_fixture_counts_match(mount, 13, inodes - 2) &&
+           ext2_counters_match_bitmaps(mount);
+}
+
+// GitHub issue #698: with one bitmap full, mkdir and create answer NoSpace
+// and leave everything as it was -- in particular the block the inode-full
+// case claimed before its inode claim failed. After the bitmap is put back,
+// the same two names are created and removed again: the control that the
+// refusal was the full bitmap and not the name or the directory.
+private let mut ext2_full_fixture_saved: [u8; KERNEL_BLOCK_SIZE];
+
+private fn ext2_full_names_absent(mount: Ext2Mount) -> bool {
+    match ext2_lookup_root(mount, bs"full-dir") {
+        Ext2LookupResult::NotFound => { }
+        Ext2LookupResult::Invalid => { return false; }
+        Ext2LookupResult::Found(existing) => { return false; }
+    }
+    match ext2_lookup_root(mount, bs"full-file") {
+        Ext2LookupResult::NotFound => { return true; }
+        Ext2LookupResult::Invalid => { return false; }
+        Ext2LookupResult::Found(existing) => { return false; }
+    }
+}
+
+private fn ext2_full_refuses(mount: Ext2Mount) -> bool {
+    let mut refused: bool = true;
+    match ext2_make_directory_in(mount, 2, bs"full-dir") {
+        Ext2MkdirResult::NoSpace => { }
+        Ext2MkdirResult::Invalid => { refused = false; }
+        Ext2MkdirResult::Created(directory) => {
+            match ext2_remove_directory_in(mount, 2, directory, bs"full-dir") {
+                Ext2RmdirResult::Removed => { }
+                Ext2RmdirResult::Invalid => { }
+                Ext2RmdirResult::NotEmpty(kept) => { ext2_directory_keep(kept); }
+                Ext2RmdirResult::Refused(kept) => { ext2_directory_keep(kept); }
+            }
+            refused = false;
+        }
+    }
+    match ext2_create_root_file(mount, bs"full-file", bs"x") {
+        Ext2CreateResult::NoSpace => { }
+        Ext2CreateResult::Invalid => { refused = false; }
+        Ext2CreateResult::Created(linked) => {
+            match ext2_unlink_root_file(mount, linked, bs"full-file") {
+                Ext2UnlinkResult::Invalid => { }
+                Ext2UnlinkResult::Unlinked => { }
+            }
+            refused = false;
+        }
+    }
+    return refused;
+}
+
+private fn ext2_full_control(mount: Ext2Mount) -> bool {
+    let mut ok: bool = false;
+    match ext2_make_directory_in(mount, 2, bs"full-dir") {
+        Ext2MkdirResult::NoSpace => { }
+        Ext2MkdirResult::Invalid => { }
+        Ext2MkdirResult::Created(directory) => {
+            match ext2_remove_directory_in(mount, 2, directory, bs"full-dir") {
+                Ext2RmdirResult::Removed => { ok = true; }
+                Ext2RmdirResult::Invalid => { }
+                Ext2RmdirResult::NotEmpty(kept) => { ext2_directory_keep(kept); }
+                Ext2RmdirResult::Refused(kept) => { ext2_directory_keep(kept); }
+            }
+        }
+    }
+    match ext2_create_root_file(mount, bs"full-file", bs"x") {
+        Ext2CreateResult::NoSpace => { return false; }
+        Ext2CreateResult::Invalid => { return false; }
+        Ext2CreateResult::Created(linked) => {
+            match ext2_unlink_root_file(mount, linked, bs"full-file") {
+                Ext2UnlinkResult::Invalid => { return false; }
+                Ext2UnlinkResult::Unlinked => { return ok; }
+            }
+        }
+    }
+}
+
+private fn ext2_full_check_one(mount: Ext2Mount, inode_bitmap: bool,
+                               blocks: usize, inodes: usize) -> bool {
+    match ext2_block_bitmap_snapshot(
+            mount, ext2_write_fixture_bitmap as [u8; KERNEL_BLOCK_SIZE..]) {
+        Ext2ReadResult::Invalid => { return false; }
+        Ext2ReadResult::Read(length) => {
+            if (length != KERNEL_BLOCK_SIZE) { return false; }
+        }
+    }
+    let mut ok: bool = false;
+    match ext2_bitmap_fill(mount, inode_bitmap,
+            ext2_full_fixture_saved as [u8; KERNEL_BLOCK_SIZE..]) {
+        Ext2BitmapFillResult::Invalid => { return false; }
+        Ext2BitmapFillResult::Filled(fill) => {
+            let marked: usize = ext2_bitmap_fill_marked(fill);
+            let mut full_blocks: usize = blocks;
+            let mut full_inodes: usize = inodes - marked;
+            if (inode_bitmap == false) {
+                full_blocks = blocks - marked;
+                full_inodes = inodes;
+            }
+            // The inode-full case must leave the block bitmap bit for bit
+            // as it was; the block-full case cannot claim an inode at all.
+            ok = marked > 0 && (full_blocks == 0 || full_inodes == 0) &&
+                 ext2_write_fixture_counts_match(mount, full_blocks,
+                                                 full_inodes) &&
+                 ext2_full_refuses(mount) &&
+                 ext2_write_fixture_counts_match(mount, full_blocks,
+                                                 full_inodes) &&
+                 ext2_full_names_absent(mount) &&
+                 ext2_counters_match_bitmaps(mount);
+            if (inode_bitmap) { ok = ok && ext2_io_bitmap_matches(mount); }
+            match ext2_bitmap_fill_restore(mount, fill,
+                    ext2_full_fixture_saved as [u8; KERNEL_BLOCK_SIZE..]) {
+                Ext2OwnerReleaseResult::Invalid => { return false; }
+                Ext2OwnerReleaseResult::Released => { }
+            }
+        }
+    }
+    return ok && ext2_io_bitmap_matches(mount) &&
+           ext2_write_fixture_counts_match(mount, blocks, inodes) &&
+           ext2_counters_match_bitmaps(mount);
+}
+
+fn ext2_full_check(mount: Ext2Mount) -> bool {
+    ext2_write_fixture_execution_model_assumption();
+    let mut blocks: usize = 0;
+    let mut inodes: usize = 0;
+    match ext2_free_counts(mount) {
+        Ext2FreeCountsResult::Invalid => { return false; }
+        Ext2FreeCountsResult::Counts(counts) => {
+            let (free_blocks, free_inodes) = counts;
+            blocks = free_blocks;
+            inodes = free_inodes;
+        }
+    }
+    return ext2_full_check_one(mount, false, blocks, inodes) &&
+           ext2_full_check_one(mount, true, blocks, inodes) &&
+           ext2_full_control(mount) &&
+           ext2_write_fixture_counts_match(mount, blocks, inodes) &&
            ext2_counters_match_bitmaps(mount);
 }
 
@@ -358,6 +497,7 @@ fn ext2_create_check(mount: Ext2Mount) -> bool {
     match ext2_create_root_file(
             mount, bs"created.txt", bs"created on ext2\n") {
         Ext2CreateResult::Invalid => { return false; }
+        Ext2CreateResult::NoSpace => { return false; }
         Ext2CreateResult::Created(linked) => {
             let mut content_ok: bool = false;
             match ext2_lookup_root(mount, bs"created.txt") {
@@ -407,6 +547,7 @@ fn ext2_create_in_directory_check(mount: Ext2Mount) -> bool {
     match ext2_create_file_in(mount, directory, bs"nested.txt",
                               bs"created in /etc\n") {
         Ext2CreateResult::Invalid => { return false; }
+        Ext2CreateResult::NoSpace => { return false; }
         Ext2CreateResult::Created(linked) => {
             let mut content_ok: bool = false;
             match ext2_lookup_directory(mount, directory, bs"nested.txt") {
@@ -892,6 +1033,11 @@ fn kernel_ext2_fixture_run(mount: Ext2Mount) !{logs, unsafe} {
         kernel_boot_log("ext2 io failure: every phase rolled back or committed, fence+recover ok\n");
     } else {
         kernel_boot_log("ext2 io failure: failed\n");
+    }
+    if (ext2_full_check(mount)) {
+        kernel_boot_log("ext2 full: block+inode NoSpace for mkdir+create, rolled back, control ok\n");
+    } else {
+        kernel_boot_log("ext2 full: failed\n");
     }
     match ext2_exhaustion_mode(mount) {
         Ext2ExhaustionMode::Invalid => {

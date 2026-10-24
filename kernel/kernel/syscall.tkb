@@ -4115,6 +4115,7 @@ private fn syscall_ext2_mkdir_under(mount: Ext2Mount,
         // from now on, and a later rmdir claims it back from the tree.
         match ext2_make_directory_in(mount, parent_inode, leaf) {
             Ext2MkdirResult::Invalid => { answer = LINUX_EIO; }
+            Ext2MkdirResult::NoSpace => { answer = LINUX_ENOSPC; }
             Ext2MkdirResult::Created(directory) => {
                 ext2_directory_keep(directory);
             }
@@ -4188,6 +4189,7 @@ private fn syscall_ext2_rename_under(mount: Ext2Mount,
         Ext2RenameResult::NotDirectory => { LINUX_ENOTDIR }
         Ext2RenameResult::Unsupported => { LINUX_EPERM }
         Ext2RenameResult::Invalid => { LINUX_EIO }
+        Ext2RenameResult::NoSpace => { LINUX_ENOSPC }
     };
     return answer;
 }
