@@ -112,6 +112,9 @@ FRAME_USIZE_SEAMS = {
     "kernel_syscall_clone_parent_return", "kernel_syscall_migrate_return",
     "kernel_process_stack_switch_complete", "platform_irq_dispatch",
     "platform_el0_irq_dispatch", "kernel_syscall_dispatch",
+    # el0_irq_entry's after_switch, which hands frame_sp straight to
+    # kernel_process_stack_switch_complete (GitHub issue #846).
+    "kernel_irq_return_complete",
     "kernel_stack_guard_check", "kernel_stack_guard_check_interrupt",
     "kernel_stack_guard_inspect", "maybe_frame_from_entry",
     "frame_ref_from_entry", "frame_ref_from_saved",
@@ -123,6 +126,16 @@ FRAME_USIZE_SEAMS = {
     "kernel_process_crash_frame_usable", "ddb_stopped_root_check",
     "ddb_bt_test_stopped_check", "kernel_ddb_enter_stopped",
 }
+
+
+# GitHub issue #846: the stack-wide TCP retransmit pass runs on the return
+# to EL0 after an interrupt and in the idle loop, never on a syscall's
+# return (maintainer, 2026-10-24): Linux runs softirqs at irq_exit, not in
+# exit_to_user_mode_loop. Its callers are this set, so a call added to
+# kernel_process_stack_switch_complete, which every syscall return runs,
+# is refused. The linked-image half is buildcheck_kernel_asm_invariants.py.
+RETRANSMIT_PASS = "kernel_net_retransmit_pass"
+RETRANSMIT_PASS_CALLERS = {"kernel_irq_return_complete", "kernel_idle_loop"}
 
 
 def body_start(text: str, opener: int) -> int:
@@ -232,6 +245,12 @@ def check_frames(files: dict[str, str]) -> tuple[list[str], int]:
                     failures.append(
                         f"{path}: {name} calls {mint} and is not one of its "
                         "declared callers")
+            if re.search(rf"\b{RETRANSMIT_PASS}\(", body) and \
+                    name != RETRANSMIT_PASS and \
+                    name not in RETRANSMIT_PASS_CALLERS:
+                failures.append(
+                    f"{path}: {name} calls {RETRANSMIT_PASS}, which only an "
+                    "interrupt's return to EL0 and the idle loop may run")
             if FRAME_PARAM_RE.search(" ".join(signature.split())) and \
                     name not in FRAME_USIZE_SEAMS:
                 failures.append(

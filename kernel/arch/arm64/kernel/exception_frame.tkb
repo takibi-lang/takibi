@@ -108,7 +108,9 @@ exception_entry el0_irq_entry {
     frame: ExceptionFrame;
     before: kernel_process_stack_interrupt_depart;
     dispatch: platform_el0_irq_dispatch;
-    after_switch: kernel_process_stack_switch_complete;
+    // kernel_process_stack_switch_complete, then the TCP retransmit pass
+    // that only an interrupt return runs (GitHub issue #846).
+    after_switch: kernel_irq_return_complete;
     stack_guard_shift: KERNEL_STACK_SHIFT;
     stack_guard_stack: overflow_stack_top;
     stack_guard_handler: kernel_stack_overflow_fail_stop;

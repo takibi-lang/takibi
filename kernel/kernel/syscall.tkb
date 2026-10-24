@@ -5410,8 +5410,8 @@ fn kernel_signal_return_deliver(frame: borrow FrameRef[process]) !{unsafe} {
 }
 
 // GitHub issue #846: retransmit every connection's due segments, from a
-// context that holds no connection and no lock -- the return to EL0
-// (the end of kernel_process_stack_switch_complete) and the idle loop
+// context that holds no connection and no lock -- the return to EL0 after
+// an interrupt (kernel_irq_return_complete below) and the idle loop
 // (kernel/arch/arm64/kernel/secondary.tkb). Linux runs its retransmit
 // timer as a softirq on the way out of an interrupt; this is that shape
 // without a new thread. Nothing is due: one load and a branch. Otherwise
@@ -5431,6 +5431,22 @@ fn kernel_net_retransmit_pass() !{may_block, unsafe} {
             }
         }
     }
+}
+
+// GitHub issue #846: el0_irq_entry's after_switch, and the only EL0
+// return that runs the retransmit pass. Everything
+// kernel_process_stack_switch_complete does for every EL0 return comes
+// first. A syscall return (el0_context_resume) does not run the pass, as
+// Linux runs softirqs at irq_exit and never on the way out of a syscall
+// (maintainer, 2026-10-24); scripts/buildcheck_kernel_asm_invariants.py
+// checks both halves in the linked image. Here the interrupt is
+// acknowledged, the CPU is off its IRQ stack and on the process's own, and
+// no lock is held, as kernel_signal_return_deliver's comment states; DAIF.I
+// stays set, which is why the pass is bounded. A return hook that ended
+// the process does not come back here.
+fn kernel_irq_return_complete(frame_sp: usize) !{unsafe} {
+    kernel_process_stack_switch_complete(frame_sp);
+    kernel_net_retransmit_pass();
 }
 
 // GitHub issue #949: end the current process from the return hook. Once

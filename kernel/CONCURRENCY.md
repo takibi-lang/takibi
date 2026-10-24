@@ -476,8 +476,10 @@ drain, an accept begin, an ACK pass, a record -- takes a borrow of that
 capability (or of the received packet holding it), and a caller without it
 does not compile (GitHub issue #837). Besides syscalls, two contexts may
 hold the capability, and only when they can take it without waiting
-(GitHub issue #846): the return to EL0 at the end of
-`kernel_process_stack_switch_complete`, and the idle loop. Each runs
+(GitHub issue #846): the return to EL0 after an interrupt
+(`kernel_irq_return_complete`, el0_irq_entry's after-switch hook, after
+`kernel_process_stack_switch_complete`; a syscall return does not run it),
+and the idle loop. Each runs
 `tcp_retx_service_all`, which retransmits any connection's due segments
 within a budget of four sends and 1 ms, takes each connection with
 `tcp_connection_try_take` and skips one a syscall holds, and so never

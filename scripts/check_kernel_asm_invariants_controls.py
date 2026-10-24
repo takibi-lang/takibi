@@ -90,17 +90,54 @@ def main():
         (0x2000, "mov sp, x0", "el0_irq_entry"),
         (0x2004, "msr DAIFSet, #0x2", "el0_irq_entry"),
         (0x2008, "mov x0, sp", "el0_irq_entry"),
-        (0x200C, "bl 0x3000 <kernel_process_stack_switch_complete>",
+        (0x200C, "bl 0x3400 <kernel_irq_return_complete>",
          "el0_irq_entry"),
         (0x2100, "mov sp, x0", "el0_context_resume"),
         (0x2104, "msr DAIFSet, #0x2", "el0_context_resume"),
         (0x2108, "mov x0, sp", "el0_context_resume"),
         (0x210C, "bl 0x3000 <kernel_process_stack_switch_complete>",
          "el0_context_resume"),
+        (0x3000, "bl 0x3800 <kernel_signal_return_deliver>",
+         "kernel_process_stack_switch_complete"),
+        (0x3400, "stp x29, x30, [sp, #-16]!", "kernel_irq_return_complete"),
+        (0x3404, "bl 0x3000 <kernel_process_stack_switch_complete>",
+         "kernel_irq_return_complete"),
+        (0x3408, "bl 0x3c00 <kernel_net_retransmit_pass>",
+         "kernel_irq_return_complete"),
     ]
     CASES.note()
     if checker.check_process_stack_handoff_hook(handoff_ok):
         print("FAIL kernel-asm-alignment control: valid stack handoff failed")
+        return 1
+
+    # GitHub issue #846: only the interrupt return reaches the pass.
+    CASES.note()
+    syscall_pass = handoff_ok + [
+        (0x3804, "bl 0x3c00 <kernel_net_retransmit_pass>",
+         "kernel_signal_return_deliver")]
+    failures = checker.check_process_stack_handoff_hook(syscall_pass)
+    if len(failures) != 1 or "every syscall" not in failures[0]:
+        print("FAIL kernel-asm-alignment control: a syscall return reaching "
+              "the retransmit pass passed")
+        return 1
+
+    CASES.note()
+    direct_hook = [
+        (address, "bl 0x3000 <kernel_process_stack_switch_complete>", fn)
+        if address == 0x200C else (address, text, fn)
+        for address, text, fn in handoff_ok]
+    failures = checker.check_process_stack_handoff_hook(direct_hook)
+    if len(failures) != 1 or "el0_irq_entry does not" not in failures[0]:
+        print("FAIL kernel-asm-alignment control: an interrupt return "
+              "without the retransmit wrapper passed")
+        return 1
+
+    CASES.note()
+    no_pass = [item for item in handoff_ok if item[0] != 0x3408]
+    failures = checker.check_process_stack_handoff_hook(no_pass)
+    if len(failures) != 1 or "kernel_irq_return_complete must" not in failures[0]:
+        print("FAIL kernel-asm-alignment control: a wrapper without the "
+              "pass passed")
         return 1
 
     CASES.note()
@@ -165,7 +202,7 @@ def main():
     report_pass(
         "kernel-asm-alignment controls",
         "A-bit clear accepted and set rejected; both physical stack-handoff "
-        "paths select the returned frame and call with IRQs masked",
+        "paths select the returned frame and call with IRQs masked, and a syscall return reaching the TCP retransmit pass is refused",
         cases=CASES.ran)
     return 0
 

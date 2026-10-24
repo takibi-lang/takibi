@@ -70,7 +70,7 @@
 //   secondary cores, whose boot probes free connections.
 // - RETRANSMISSION NEEDS NO SYSCALL (2026-10-24, issue #846). A syscall
 //   services only its own connection's deadlines, but the return to EL0
-//   and the idle loop run tcp_retx_service_all over every connection when
+//   after an interrupt and the idle loop run tcp_retx_service_all over every connection when
 //   they can take the capability without waiting. It is bounded (four
 //   sends, 1 ms) because the EL0 return runs it with interrupts masked,
 //   and it skips a connection a syscall holds, so a segment can wait one

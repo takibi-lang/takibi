@@ -566,6 +566,16 @@ def check_exception_stacks_are_per_core(insns):
 # CPU actually executes.
 STACK_SWITCH_FUNCTIONS = ("el0_irq_entry", "el0_context_resume")
 STACK_SWITCH_HOOK = "kernel_process_stack_switch_complete"
+# GitHub issue #846: the interrupt return calls a wrapper that runs the
+# hook first and then the TCP retransmit pass; the syscall return calls
+# the hook itself, and nothing the hook reaches runs the pass (maintainer,
+# 2026-10-24: softirq work at irq_exit, never on the way out of a syscall).
+IRQ_RETURN_HOOK = "kernel_irq_return_complete"
+RETRANSMIT_PASS = "kernel_net_retransmit_pass"
+STACK_SWITCH_CALLS = {
+    "el0_irq_entry": IRQ_RETURN_HOOK,
+    "el0_context_resume": STACK_SWITCH_HOOK,
+}
 
 
 def check_process_stack_handoff_hook(insns):
@@ -579,8 +589,9 @@ def check_process_stack_handoff_hook(insns):
     mask_irqs = re.compile(r"^msr\s+DAIFSet,\s*#0x2$", re.I)
     unmask_irqs = re.compile(r"^msr\s+DAIFClr,\s*#0x2$", re.I)
     pass_current_sp = re.compile(r"^mov\s+x0,\s*sp$", re.I)
-    call_hook = re.compile(r"^bl\s+.*<%s>$" % STACK_SWITCH_HOOK)
     for fn in STACK_SWITCH_FUNCTIONS:
+        hook = STACK_SWITCH_CALLS[fn]
+        call_hook = re.compile(r"^bl\s+.*<%s>$" % hook)
         body = bodies.get(fn)
         if body is None:
             failures.append(
@@ -614,7 +625,55 @@ def check_process_stack_handoff_hook(insns):
                 "frame and call %s with its current SP while IRQs remain "
                 "masked; another CPU "
                 "could acquire the process stack before this CPU leaves it"
-                % (fn, STACK_SWITCH_HOOK))
+                % (fn, hook))
+    failures += check_retransmit_pass_placement(insns)
+    return failures
+
+
+def call_graph(insns):
+    """Direct `bl` edges between the image's functions."""
+    edges = {}
+    target = re.compile(r"^bl\s+0x[0-9a-f]+\s+<([\w.$]+)>$", re.I)
+    for _, text, fn in insns:
+        match = target.match(text)
+        if match:
+            edges.setdefault(fn, set()).add(match.group(1))
+    return edges
+
+
+def check_retransmit_pass_placement(insns):
+    """#846: only the interrupt return reaches the retransmit pass."""
+    failures = []
+    wrapper = [text for _, text, fn in insns if fn == IRQ_RETURN_HOOK]
+    calls = [text for text in wrapper if re.match(r"^bl\s", text)]
+    hook_call = re.compile(r"^bl\s+.*<%s>$" % STACK_SWITCH_HOOK)
+    pass_call = re.compile(r"^bl\s+.*<%s>$" % RETRANSMIT_PASS)
+    if (not calls or not hook_call.match(calls[0]) or
+            not any(pass_call.match(text) for text in calls[1:])):
+        failures.append(
+            "issue #846 regression: %s must call %s first, with the frame "
+            "address it was given, and then %s" %
+            (IRQ_RETURN_HOOK, STACK_SWITCH_HOOK, RETRANSMIT_PASS))
+    elif any(re.match(r"^(?:mov|ldr|add|sub)\s+x0,", text)
+             for text in wrapper[:wrapper.index(calls[0])]):
+        failures.append(
+            "issue #846 regression: %s changes x0 before it calls %s" %
+            (IRQ_RETURN_HOOK, STACK_SWITCH_HOOK))
+    edges = call_graph(insns)
+    seen = set()
+    stack = [STACK_SWITCH_HOOK]
+    while stack:
+        fn = stack.pop()
+        if fn in seen:
+            continue
+        seen.add(fn)
+        if fn == RETRANSMIT_PASS:
+            failures.append(
+                "issue #846 regression: %s reaches %s, so every syscall "
+                "return would run the TCP retransmit pass" %
+                (STACK_SWITCH_HOOK, RETRANSMIT_PASS))
+            break
+        stack.extend(edges.get(fn, ()))
     return failures
 
 
@@ -773,7 +832,7 @@ def main():
           "before it takes, the whole-TLB invalidate broadcasting "
           "while MMU activation stays local, and every exception entry "
           "switching to a stack of its own core, with every EL0 process "
-          "return crossing the physical stack-handoff hook and resetting the GIC priority mask, and no misaligned "
+          "return crossing the physical stack-handoff hook and resetting the GIC priority mask (only the interrupt return reaching the TCP retransmit pass), and no misaligned "
           "q-register store in the MMU-off page allocator, all verified "
           "statically",
                 insns=len(insns))
