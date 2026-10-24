@@ -22,7 +22,10 @@ Usage:
 z3 is the version pinned in scripts/fetch_model_tools.sh (TAKIBI_Z3 names
 another binary). Verdicts are cached by obligation digest and z3 version
 under the model-tools directory, so an unchanged obligation is not solved
-twice; only `unsat` is cached.
+twice; only `unsat` is cached. GitHub issue #985: the cache key and the
+in-run sharing use the obligation's canonical form (atoms renamed), and the
+obligations run in a few long-lived z3 processes, `(reset)` between them; any
+verdict but `unsat` is re-solved alone for the report.
 """
 
 from __future__ import annotations
@@ -35,6 +38,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 from pass_line import report_pass
@@ -105,6 +109,89 @@ def solve_timed(z3: str, text: str, extra: str = "") -> tuple[str, float]:
     return out.stdout, time.monotonic() - start
 
 
+ATOM = re.compile(r"\bx_[A-Za-z0-9_]+\b")
+
+
+def canonical(body: str) -> str:
+    """GitHub issue #985: the obligation up to renaming of its atoms.
+
+    Comments (rule, claim) go; the header's kind stays; every init atom
+    (`x_...`) is renamed by its first occurrence. Two obligations with one
+    canonical text are the same formula, so they share one z3 verdict, in the
+    cache and within one run. The renaming is a bijection on names that no
+    fixed name (`k`, `a`, `b`, `r`) shares, so it keeps satisfiability.
+    """
+    kind = body.splitlines()[0] if body else ""
+    names: dict[str, str] = {}
+    lines = [kind]
+    for line in body.splitlines():
+        if line.startswith(";"):
+            continue
+        lines.append(ATOM.sub(
+            lambda m: names.setdefault(m.group(0), f"x_c{len(names)}"), line))
+    return "\n".join(lines) + "\n"
+
+
+def batch_solve(z3: str, bodies: list[str]) -> list[tuple[str, float]]:
+    """GitHub issue #985: solve several obligations in one z3 process.
+
+    Each is followed by `(reset)`, which returns z3 to its start state, so
+    every obligation is checked exactly as by a fresh process; only process
+    start-up is shared. Each verdict is timed from the write of its query to
+    its answer line. A verdict that is not `unsat`, or a dead process, is
+    left to the caller, which re-solves that obligation alone (the
+    authoritative verdict and the counterexample come from that run).
+    """
+    results: list[tuple[str, float]] = []
+    try:
+        proc = subprocess.Popen(
+            [z3, f"-t:{TIMEOUT_SECONDS * 1000}", "-in"], text=True,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT)
+    except OSError:
+        return [("no output", 0.0)] * len(bodies)
+    assert proc.stdin is not None and proc.stdout is not None
+    start = time.monotonic()
+    try:
+        for index, body in enumerate(bodies):
+            # The marker delimits this obligation's output, so an error line
+            # can never shift a later obligation's verdict onto this one.
+            marker = f"takibi-obligation-end-{index}"
+            proc.stdin.write(body + f'(echo "{marker}")\n(reset)\n')
+            proc.stdin.flush()
+            # A query z3 never answers (an unbalanced parenthesis swallows the
+            # marker) must not hang the build: kill the process, which ends
+            # the batch with "no output" for the rest.
+            watchdog = threading.Timer(TIMEOUT_SECONDS + 10, proc.kill)
+            watchdog.start()
+            lines: list[str] = []
+            while True:
+                line = proc.stdout.readline()
+                if not line or line.strip() == marker:
+                    break
+                lines.append(line.strip())
+            watchdog.cancel()
+            now = time.monotonic()
+            verdict = lines[0] if len(lines) == 1 else "no output"
+            if not line:
+                verdict = "no output"
+            results.append((verdict, now - start))
+            start = now
+            if not line:
+                break
+    except (BrokenPipeError, OSError):
+        pass
+    finally:
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
+        proc.kill()
+        proc.wait()
+    results += [("no output", 0.0)] * (len(bodies) - len(results))
+    return results
+
+
 def check_dir(directory: pathlib.Path, z3: str,
               cache: pathlib.Path | None) -> list[str]:
     """Check every obligation; return the failure reports."""
@@ -112,7 +199,8 @@ def check_dir(directory: pathlib.Path, z3: str,
     if not files:
         return [f"no obligations in {directory}"]
     failures: list[str] = []
-    todo: list[tuple[pathlib.Path, list[str], str]] = []
+    # Canonical digest -> the obligations of that form (GitHub issue #985).
+    groups: dict[str, list[tuple[pathlib.Path, list[str], str]]] = {}
     for path in files:
         text = path.read_text()
         sites, body = split(text)
@@ -126,32 +214,60 @@ def check_dir(directory: pathlib.Path, z3: str,
             continue
         if is_init:
             INIT_STATS["count"] += 1
-        if cache is not None and (cache / digest).exists():
-            if is_init:
+        key = hashlib.md5(
+            ("canonical-v1\n" + canonical(body)).encode()).hexdigest()
+        groups.setdefault(key, []).append((path, sites, body))
+    todo: list[tuple[str, list[tuple[pathlib.Path, list[str], str]]]] = []
+    for key, members in groups.items():
+        if cache is not None and (cache / key).exists():
+            if members[0][2].startswith(INIT_HEADER):
                 # The cache entry of an init obligation holds its cold time.
                 try:
                     INIT_STATS["seconds"] += float(
-                        (cache / digest).read_text() or "0")
+                        (cache / key).read_text() or "0")
                 except ValueError:
                     pass
             continue
-        todo.append((path, sites, body))
+        todo.append((key, members))
+
+    # Init obligations run first, in one process of their own, so their
+    # budgeted time is not inflated by the range obligations' parallel load.
+    init_todo = [t for t in todo if t[1][0][2].startswith(INIT_HEADER)]
+    range_todo = [t for t in todo if not t[1][0][2].startswith(INIT_HEADER)]
+
+    def run_chunk(chunk):
+        return chunk, batch_solve(z3, [m[0][2] for _, m in chunk])
+
+    solved = list(zip(*run_chunk(init_todo))) if init_todo else []
+    workers = max(1, min(8, os.cpu_count() or 1, len(range_todo)))
+    chunks = [c for c in (range_todo[i::workers] for i in range(workers)) if c]
+    with concurrent.futures.ThreadPoolExecutor(workers) as pool:
+        solved += [pair for chunk, verdicts in pool.map(run_chunk, chunks)
+                   for pair in zip(chunk, verdicts)]
+
+    retry: list[tuple[pathlib.Path, list[str], str]] = []
+    for (key, members), (verdict, seconds) in solved:
+        if members[0][2].startswith(INIT_HEADER):
+            INIT_STATS["seconds"] += seconds
+        if verdict == "unsat":
+            if cache is not None:
+                (cache / key).write_text(
+                    f"{seconds:.4f}" if members[0][2].startswith(INIT_HEADER)
+                    else "")
+            continue
+        retry += members
 
     def one(item):
-        path, sites, body = item
-        return item, solve_timed(z3, body)
+        return item, solve_timed(z3, item[2])
 
-    workers = min(8, os.cpu_count() or 1)
-    with concurrent.futures.ThreadPoolExecutor(workers) as pool:
-        for (path, sites, body), (out, seconds) in pool.map(one, todo):
+    with concurrent.futures.ThreadPoolExecutor(min(8, os.cpu_count() or 1)) as pool:
+        for (path, sites, body), (out, seconds) in pool.map(one, retry):
             is_init = body.startswith(INIT_HEADER)
-            if is_init:
-                INIT_STATS["seconds"] += seconds
             verdict = out.strip().splitlines()[0] if out.strip() else "no output"
             if verdict == "unsat":
-                if cache is not None:
-                    (cache / path.stem).write_text(
-                        f"{seconds:.4f}" if is_init else "")
+                # The batch did not answer it (a dead process); this run did.
+                if is_init:
+                    INIT_STATS["seconds"] += seconds
                 continue
             claim = next((l for l in body.splitlines()
                           if l.startswith("; claim:")), "")
@@ -188,6 +304,16 @@ fn main() -> i32 {
 def control(takibi: str) -> int:
     """#935's rule planted: unsigned Sub keeps lo < 0. Must be sat."""
     z3, _ = find_z3()
+    # GitHub issue #985: one batch must keep one verdict per obligation, in
+    # order, even past a sat answer and a malformed query.
+    unsat_q = "(declare-const k Int)\n(assert (< k k))\n(check-sat)\n"
+    sat_q = "(declare-const k Int)\n(assert (= k 7))\n(check-sat)\n"
+    broken_q = "(assert (< undeclared 0))\n(check-sat)\n"
+    got = [v for v, _ in batch_solve(z3, [unsat_q, sat_q, broken_q, unsat_q])]
+    if got[0] != "unsat" or got[1] != "sat" or got[2] == "unsat" \
+            or got[3] != "unsat":
+        print(f"FAIL range-obligation control: batch verdicts {got}")
+        return 1
     with tempfile.TemporaryDirectory(prefix="takibi-range-obl-") as tmp:
         tmp_path = pathlib.Path(tmp)
         src = tmp_path / "control.tkb"

@@ -21,6 +21,18 @@ of its interval arithmetic, at the machine's own bit width.
   which the devcontainer and the CI model-tools step already run.
   `TAKIBI_Z3` names another binary. Only `unsat` verdicts are cached, under
   `<model-tools>/range-obligation-cache-z3-<version>/<digest>`.
+- GitHub issue #985: `<digest>` there is the MD5 of `canonical-v1` and the
+  obligation's canonical form (comments dropped, init atoms `x_...` renamed by
+  first occurrence), so obligations equal up to renaming share one verdict, in
+  the cache and within one run. Obligations run in a few long-lived z3
+  processes, `(reset)` and an `(echo)` marker after each, so each still gets
+  its own verdict; anything but `unsat` is solved again alone, and that run
+  gives the report and the counterexample; a query unanswered for 30 s kills
+  its process. The range obligation control checks one batch keeps its verdicts
+  aligned past a sat answer and a malformed query. Init obligations run first,
+  in one process, so their budgeted time is not inflated by the parallel range
+  obligations. On the QEMU kernel with 114 init obligations at load average 16:
+  2.7-3.0 s before, 0.42-0.53 s after.
 
 ## File format, version 1
 
