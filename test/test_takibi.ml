@@ -16123,12 +16123,12 @@ let codegen_tests = [
 
   (* The --forbid-trap report says why the fact was missing. *)
   Alcotest.test_case
-    "trap report names the statement that dropped a while fact (issue #797)"
+    "trap report names the facts left after a while body write (issues #797, #1011)"
     `Quick
     (expect_single_trap_reason
-       "the enclosing while condition's fact on `index` was dropped at the \
-        body statement on line 5, which writes, rebinds or takes the \
-        address of `index`"
+       (* #1011: an immutable slice index reports Init_flow's facts. *)
+       "init-flow cannot show index@9 < text.len; path facts: \
+        text.len + -1*index@3 - 1 >= 0"
        "fn f797_why(text: []const u8) -> u8 {
           let mut index: usize = 0;
           let mut total: u8 = 0;
@@ -16155,12 +16155,11 @@ let codegen_tests = [
         }");
 
   Alcotest.test_case
-    "trap report says the runtime_bounds family is not carried from || \
-     (issue #797)" `Quick
+    "trap report says no fact is carried from || \
+     (issues #797, #1011)" `Quick
     (expect_single_trap_reason
-       "no runtime fact `index < text.len` reaches this index; the \
-        runtime_bounds family is carried only from an if or while \
-        condition joined by &&"
+       (* #1011: Init_flow reads no fact from an || condition. *)
+       "init-flow cannot show index@1 < text.len; no path facts"
        "fn f797_why_or(text: []const u8, v: usize, c: bool) -> u8 {
           let mut index: usize = v;
           while (index < text.len || c) {
