@@ -36,8 +36,8 @@ row overwrite
 row unlink_indirect
 1 mkdir unlink_indirect -> 0
   unlink_indirect dir
-2 fill unlink_indirect/f 14 -> 0
-  unlink_indirect/f file size=14336
+2 fill unlink_indirect/f 13 -> 0
+  unlink_indirect/f file size=13312
 3 unlink unlink_indirect/f -> 0
   unlink_indirect/f absent
 row dir_indirect

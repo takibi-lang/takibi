@@ -59,6 +59,7 @@ LOG = "eq-log"       # the guest's log, beside ROOT in the image root
 FAKE_TIME = "1700000000"
 NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$")
 TEXT_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+FILL_MAX = 13       # busybox, cat and 13 paths: execve takes 15 (#591)
 LONG = "n" * 200     # a long entry name: four to a 1 KiB directory block
 
 
@@ -115,6 +116,13 @@ def parse(text):
                 raise EqError(f"line {lineno}: text {arg!r} is not [A-Za-z0-9_.-]+")
             if kind == "count" and not re.fullmatch(r"[0-9]{1,4}", arg):
                 raise EqError(f"line {lineno}: count {arg!r}")
+        # `fill` runs `/bin/busybox cat k k ...`, one argument per KiB; the
+        # kernel's execve takes fifteen arguments (#591) and answers E2BIG,
+        # exit 126 from ash, past that -- a row that differs for that reason
+        # would differ for the wrong one.
+        if op == "fill" and int(args[1]) > FILL_MAX:
+            raise EqError(f"line {lineno}: fill takes at most {FILL_MAX} KiB "
+                          "(execve's fifteen arguments, GitHub issue #591)")
         rows[-1][3].append((lineno, op, args))
     if not rows:
         raise EqError("no rows")
@@ -150,7 +158,7 @@ def gen_sh(rows):
         for step, (_lineno, op, args) in enumerate(ops, 1):
             label = f"{step} {op} {' '.join(args)}"
             if op == "fill":
-                cmd = 'cat ' + " ".join(['"$R/k"'] * int(args[1])) + f' >"$R/{args[0]}"'
+                cmd = '$B cat ' + " ".join(['"$R/k"'] * int(args[1])) + f' >"$R/{args[0]}"'
             elif op == "files":
                 cmd = (f'i=0; ok=0; while [ $i -lt {args[1]} ]; do '
                        f'$B true >"$R/{args[0]}/{LONG}$i" 2>/dev/null && ok=$((ok+1)); '
@@ -477,12 +485,22 @@ def self_test():
     assert "$B echo -n x >\"$R/a/f\"" in script, script
     for bad in ("mkdir a\n", "row a maybe -\n", "row a match -\nmkdir b\n",
                 "row a match -\nwrite a/f 'x y'\n", "row a match -\nrow a match -\n",
-                "row a match -\nfrob a\n"):
+                "row a match -\nfrob a\n", "row a match -\nfill a/f 14\n"):
         try:
             parse(bad)
         except EqError:
             continue
         raise AssertionError(f"accepted {bad!r}")
+    # Every file the script writes is written by an external /bin/busybox
+    # applet: a redirected builtin or NOFORK applet (`cat`, `printf`) writes
+    # nothing on the guest (dup3 serves only stdin/stdout aliasing), so a
+    # row would differ for the wrong reason (#1034's first fill, #1067).
+    every = parse("row a match -\nmkdir a\nwrite a/f x\nfill a/g 13\n"
+                  "overwrite a/f a/g\nfiles a 2\n")
+    for line in gen_sh(every).splitlines():
+        for part in re.split(r";|&&|\bdo\b", line):
+            if re.search(r'>"\$R/', part) and not part.strip().startswith("$B "):
+                raise AssertionError(f"a file written by a non-external command: {line!r}")
     log = "row a\n1 mkdir a -> 0\n  a dir\nrow b\neq done\n"
     assert split_log(log) == {"a": ["1 mkdir a -> 0", "  a dir"], "b": []}
     files = {"/eq/a": ("dir", 0o755, None, 2, None, ("f",), None),
@@ -493,7 +511,7 @@ def self_test():
     assert len(row_differences("a", files, other, {}, {})) == 1
     assert row_differences("b", files, other, {}, {}) == []
     report_pass("ext2-eq self-test", "parser, generator, log and row diff",
-                cases=7)
+                cases=9)
 
 
 def main(argv):
