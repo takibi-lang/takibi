@@ -576,8 +576,12 @@ LINUX_USER_EXAMPLES      := linux_hello start checked_usize elf64_validate bump 
                              field_lease match_int_lit record_loans \
                              callstack ringbuf crc8 djb2 slice slice_from_field logical_eval foreach for loop fizzbuzz fibonacci \
                              bubblesort inet_checksum ip_parse tcp_parse wire_endian ref_type byte_slice atomic spinlock locked_cell diagnostic_ring publish fdt number usb_config usb_init_report xhci_event_match xhci_regs uart_rx_ring pl011_rx block_cache gem_tx_wait virtio_net_tx virtio_net_reply generic_variant runtime_bounds pin_placement place_array protocol_ring protocol_tx protocol_txrx protocol_snapshot region_held header_overlay cache_geometry wait_status plain_variant variant_abi struct_array_arg struct_array_result preempt_region
-LINUX_USER_BINS          := $(foreach e,$(LINUX_USER_EXAMPLES),$(LINUX_USER_DIR)/$(e)/$(e).exe)
-LINUX_USER_OBJS          := $(foreach e,$(LINUX_USER_EXAMPLES),$(LINUX_USER_DIR)/$(e)/$(e)_exe.o)
+# GitHub issue #1035: linux_user/ext2_host is a driver program, not a
+# stdout-against-.expected test: scripts/ext2_host.py runs it (image on fd 3,
+# operations on stdin). It is built with the others, outside the loop below.
+LINUX_USER_DRIVERS       := ext2_host
+LINUX_USER_BINS          := $(foreach e,$(LINUX_USER_EXAMPLES) $(LINUX_USER_DRIVERS),$(LINUX_USER_DIR)/$(e)/$(e).exe)
+LINUX_USER_OBJS          := $(foreach e,$(LINUX_USER_EXAMPLES) $(LINUX_USER_DRIVERS),$(LINUX_USER_DIR)/$(e)/$(e)_exe.o)
 
 # Keep each %_exe.o after linking instead of GNU Make's default behavior of
 # auto-deleting pattern-rule intermediates (.tkb -> _exe.o -> .exe is a
@@ -699,6 +703,18 @@ $(LINUX_USER_DIR)/pl011_rx/pl011_rx_exe.o: LINUX_USER_EXTRA_SRCS := kernel/drive
 # because the cache's per-core slots are sized by its KERNEL_MAX_CORES.
 $(LINUX_USER_DIR)/block_cache/block_cache_exe.o: kernel/drivers/block/block_cache.tkb kernel/lib/execution_model.tkb
 $(LINUX_USER_DIR)/block_cache/block_cache_exe.o: LINUX_USER_EXTRA_SRCS := kernel/lib/execution_model.tkb kernel/drivers/block/block_cache.tkb
+
+# GitHub issue #1035: the kernel's ext2 driver, block layer and the
+# syscalls' ext2 halves, compiled as the kernel compiles them, over a RAM
+# disk. host_support.tkb stands in for the platform (cpu_id, the absent
+# virtio backend, the workload profile); host_stubs.S for the two assembly
+# helpers of cpu_stop_extern.tkb.
+EXT2_HOST_DIR := $(LINUX_USER_DIR)/ext2_host
+$(EXT2_HOST_DIR)/ext2_host_exe.o: kernel/fs/ext2/ext2.tkb kernel/fs/ext2/ext2_syscall.tkb kernel/fs/ext2/mutation_lock.tkb kernel/drivers/block/memory.tkb kernel/drivers/block/block_cache.tkb kernel/lib/execution_model.tkb kernel/lib/task_mutex.tkb kernel/lib/spinlock.tkb kernel/lib/atomic_word.tkb kernel/lib/byte_slice.tkb kernel/kernel/cpu_authority.tkb kernel/arch/arm64/kernel/cpu_stop_extern.tkb $(EXT2_HOST_DIR)/host_support.tkb $(EXT2_HOST_DIR)/ram_disk.tkb
+$(EXT2_HOST_DIR)/ext2_host_exe.o: LINUX_USER_EXTRA_SRCS := kernel/lib/execution_model.tkb $(EXT2_HOST_DIR)/host_support.tkb $(EXT2_HOST_DIR)/ram_disk.tkb
+$(LINUX_USER_BUILD_DIR)/ext2_host_stubs.o: $(EXT2_HOST_DIR)/host_stubs.S | $(LINUX_USER_BUILD_DIR)
+	$(LLVM_MC) --triple=$(LINUX_AMD64_TARGET) --filetype=obj $< -o $@
+$(EXT2_HOST_DIR)/ext2_host.exe: $(LINUX_USER_BUILD_DIR)/ext2_host_stubs.o
 
 # GitHub issue #445: the kernel's own spinlock, compiled and run natively.
 # The same source the kernel links, not a copy -- see the freelist/slotmap

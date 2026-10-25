@@ -12,7 +12,13 @@
 // bytes, read whole at start. Standard input is the operation script, one
 // operation per line; each answers one line on standard output:
 //
-//   N OP ARGS -> ERRNO        (0, or the errno's name)
+//   N OP ARGS -> ERRNO [written=BYTES] free=BLOCKS/INODES
+//
+// ERRNO is 0 or the errno's name; written= is printed when the operation's
+// openat(2) succeeded (trunc, write, pwrite, overwrite) and counts the bytes
+// of the write(2)s that succeeded before the one that failed; free=
+// is the superblock's free counts after the operation (ext2_free_counts,
+// which also checks the group descriptor agrees).
 //
 // Paths are relative to the root and their directory part must name an
 // existing directory: resolving it is syscall.tkb's path walk, which is not
@@ -25,6 +31,9 @@
 //   pwrite P OFF LEN SEED   openat(O_CREAT), then write(2)s of at most
 //                           1 KiB (the kernel's limit) from OFF, of LEN
 //                           pattern bytes (pattern_byte below)
+//   seekwrite P OFF LEN SEED  as pwrite, from min(OFF, P's size): never
+//                           past end of file, whatever P's size turned out
+//                           to be (a write past it leaves a hole on Linux)
 //   overwrite P SRC         openat(O_CREAT) P, then write SRC's bytes from
 //                           offset 0 without O_TRUNC (dd conv=notrunc)
 //   fault K torn|reject     the next operation's write number K (from 0)
@@ -56,6 +65,11 @@ let mut script_len: usize = 0;
 let mut chunk: [u8; WRITE_CHUNK];
 let mut leaf_buffer: [u8; 256];
 let mut leaf_buffer_new: [u8; 256];
+// How many bytes the last pwrite or overwrite wrote before it stopped.
+let mut host_written: usize = 0;
+// Whether the operation's openat(2) succeeded (trunc, write, pwrite,
+// overwrite): the oracle needs it to replay an ENOSPC exactly.
+let mut host_opened: bool = false;
 let mut walk_stack: [usize; WALK_DIRS_MAX];
 let mut walk_block: [u8; 1024];
 let mut walk_file: [u8; 1024];
@@ -227,6 +241,7 @@ fn host_rename(mount: Ext2Mount, guard: borrow Ext2MutationGuard[ext2_mutation_l
 fn host_pwrite(mount: Ext2Mount, guard: borrow Ext2MutationGuard[ext2_mutation_lock],
                inode: usize, offset: usize, length: usize, seed: usize) -> usize !{unsafe} {
     let mut done: usize = 0;
+    host_written = 0;
     let buffer = chunk as []u8;
     while (done < length) {
         let mut piece: usize = length - done;
@@ -242,6 +257,7 @@ fn host_pwrite(mount: Ext2Mount, guard: borrow Ext2MutationGuard[ext2_mutation_l
                                                   offset + done, content);
         if (answer != 0) { return answer; }
         done = done + piece;
+        host_written = done;
     }
     return 0;
 }
@@ -257,6 +273,7 @@ fn host_overwrite(mount: Ext2Mount, guard: borrow Ext2MutationGuard[ext2_mutatio
     };
     let buffer = chunk as []u8;
     let mut offset: usize = 0;
+    host_written = 0;
     while (true) {
         let got: usize = match ext2_read_file_chunk(mount, source, offset, buffer) {
             Ext2ReadResult::Invalid => { return LINUX_EIO; }
@@ -271,6 +288,7 @@ fn host_overwrite(mount: Ext2Mount, guard: borrow Ext2MutationGuard[ext2_mutatio
                                                   content);
         if (answer != 0) { return answer; }
         offset = offset + got;
+        host_written = offset;
     }
     return 0;
 }
@@ -466,6 +484,8 @@ fn run_line(mount: Ext2Mount, number: usize, line: []const u8) !{unsafe} {
 
     let guard = ext2_mutation_take();
     let mut answer: usize = LINUX_EINVAL;
+    host_opened = false;
+    host_written = 0;
     match op {
         bs"mkdir" => { answer = host_leaf_op(mount, guard, 0, a); }
         bs"rmdir" => { answer = host_leaf_op(mount, guard, 1, a); }
@@ -474,13 +494,14 @@ fn run_line(mount: Ext2Mount, number: usize, line: []const u8) !{unsafe} {
         bs"trunc" => {
             match host_open(mount, guard, a, true) {
                 HostOpen::Errno(errno) => { answer = errno; }
-                HostOpen::Opened(inode) => { answer = 0; }
+                HostOpen::Opened(inode) => { host_opened = true; answer = 0; }
             }
         }
         bs"write" => {
             match host_open(mount, guard, a, true) {
                 HostOpen::Errno(errno) => { answer = errno; }
                 HostOpen::Opened(inode) => {
+                    host_opened = true;
                     let buffer = chunk as []u8;
                     match host_copy(buffer, b) {
                         HostSpan::Outside => { answer = LINUX_EINVAL; }
@@ -489,6 +510,7 @@ fn run_line(mount: Ext2Mount, number: usize, line: []const u8) !{unsafe} {
                             if (text.len > 0) {
                                 answer = ext2_syscall_write_at(mount, guard, inode, 0, text);
                             }
+                            if (answer == 0) { host_written = text.len; }
                         }
                     }
                 }
@@ -498,7 +520,21 @@ fn run_line(mount: Ext2Mount, number: usize, line: []const u8) !{unsafe} {
             match host_open(mount, guard, a, false) {
                 HostOpen::Errno(errno) => { answer = errno; }
                 HostOpen::Opened(inode) => {
+                    host_opened = true;
                     answer = host_pwrite(mount, guard, inode, parse_number(b),
+                                         parse_number(c), parse_number(d));
+                }
+            }
+        }
+        bs"seekwrite" => {
+            match host_open(mount, guard, a, false) {
+                HostOpen::Errno(errno) => { answer = errno; }
+                HostOpen::Opened(inode) => {
+                    host_opened = true;
+                    let mut offset: usize = parse_number(b);
+                    let size: usize = ext2_regular_file_size(mount, inode);
+                    if (offset > size) { offset = size; }
+                    answer = host_pwrite(mount, guard, inode, offset,
                                          parse_number(c), parse_number(d));
                 }
             }
@@ -507,6 +543,7 @@ fn run_line(mount: Ext2Mount, number: usize, line: []const u8) !{unsafe} {
             match host_open(mount, guard, a, false) {
                 HostOpen::Errno(errno) => { answer = errno; }
                 HostOpen::Opened(inode) => {
+                    host_opened = true;
                     answer = host_overwrite(mount, guard, inode, b);
                 }
             }
@@ -519,6 +556,17 @@ fn run_line(mount: Ext2Mount, number: usize, line: []const u8) !{unsafe} {
     put_slice(line);
     uart_puts(" -> ");
     uart_puts(errno_name(answer));
+    if (host_opened) {
+        uart_puts(" written="); uart_print(host_written);
+    }
+    match ext2_free_counts(mount) {
+        Ext2FreeCountsResult::Invalid => { uart_puts(" free=invalid"); }
+        Ext2FreeCountsResult::Counts(counts) => {
+            let (blocks, inodes) = counts;
+            uart_puts(" free="); uart_print(blocks);
+            uart_puts("/"); uart_print(inodes);
+        }
+    }
     uart_puts("\n");
     let injected: usize = ram_disk_fault_disarm();
     if (slice_eq(op, bs"fault") == false && injected > 0) {
@@ -551,7 +599,16 @@ fn app_main() !{unsafe} {
         }
         Ext2MountResult::Mounted(found) => { found }
     };
-    uart_puts("mounted\n");
+    uart_puts("mounted");
+    match ext2_free_counts(mount) {
+        Ext2FreeCountsResult::Invalid => { uart_puts(" free=invalid"); }
+        Ext2FreeCountsResult::Counts(counts) => {
+            let (blocks, inodes) = counts;
+            uart_puts(" free="); uart_print(blocks);
+            uart_puts("/"); uart_print(inodes);
+        }
+    }
+    uart_puts("\n");
     let all: []const u8 = match host_span(script as []u8, 0, script_len) {
         HostSpan::Outside => { return; }
         HostSpan::Inside(span) => { span }
