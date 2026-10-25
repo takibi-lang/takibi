@@ -503,14 +503,56 @@ struct IrqsoffCore {
 
 private let mut irqsoff_core: [IrqsoffCore; KERNEL_MAX_CORES];
 
-// Fill this core's open_pcs (`to` false) or longest_to (`to` true) with
-// the return addresses of the caller chain above the function that called
-// the hook (frame 0 is the hook's own record, whose
-// return lies in mutex_irq_save/restore; it is skipped). Unwritten slots
-// are 0. Never faults: every record read is 16-byte aligned, strictly
-// above the previous one, and read only through frame_current_stack_word,
-// which reads nothing outside the caller's own process kernel stack.
-private fn irqsoff_walk(cpu: {0..<KERNEL_MAX_CORES as usize}, to: bool,
+// GitHub issue #958: the standing sampler. Outside any profile session,
+// from the first lock of the boot until the boot report
+// (irqsoff_standing_log), every outermost mutex_irq_save on a core stamps
+// the generic counter and the matching restore measures the span. Each core
+// keeps its longest span and a table of IRQSOFF_CLASS_SLOTS lock classes,
+// a class being the return-address chain where the span closed. A span
+// walks that chain only when it beats the smallest entry of its core's
+// table, so the common short span pays two counter reads, a store and a
+// compare. The host (scripts/report_irqsoff_spans.py) symbolizes the
+// chains, folds them to the first function outside the lock wrappers, and
+// prints the longest span per class. Same blind spots as the session
+// tracer above: masks taken without mutex_irq_save are not seen.
+const IRQSOFF_CLASS_SLOTS: usize = 8;
+
+struct IrqsoffClass {
+    ticks: usize;
+    sites: [usize; IRQSOFF_DEPTH];
+}
+
+struct IrqsoffStanding {
+    // Counter value at the open, 0 when no span is open.
+    opened: usize;
+    longest: usize;
+    // The smallest ticks in classes: a span must beat it to be walked.
+    floor: usize;
+    // The span being recorded, and the chain irqsoff_walk just wrote.
+    pending: usize;
+    scratch: [usize; IRQSOFF_DEPTH];
+    classes: [IrqsoffClass; IRQSOFF_CLASS_SLOTS];
+}
+
+private let mut irqsoff_standing: [IrqsoffStanding; KERNEL_MAX_CORES];
+// 0 while the standing sampler runs (from boot), 1 once the boot report has
+// read it. Never set back to 0, so no span opened before the stop can be
+// closed against a later start.
+private let mut irqsoff_standing_stopped: AtomicWord;
+// Nonzero while a cost probe measures the hooks without the sampler.
+private let mut irqsoff_standing_paused: AtomicWord;
+
+variant IrqsoffSink { Open; LongestTo; Standing; }
+
+// Fill this core's open_pcs (Open), longest_to (LongestTo) or standing
+// scratch chain (Standing) with the return addresses of the caller chain
+// above the function that called the hook (frame 0 is the hook's own
+// record, whose return lies in mutex_irq_save/restore; it is skipped).
+// Unwritten slots are 0. Never faults: every record read is 16-byte
+// aligned, strictly above the previous one, and read only through
+// frame_current_stack_word, which reads nothing outside the caller's own
+// process kernel stack.
+private fn irqsoff_walk(cpu: {0..<KERNEL_MAX_CORES as usize}, target: IrqsoffSink,
                         fp_in: usize, sp: usize)
         !{unsafe} {
     let mut fp: usize = fp_in;
@@ -532,7 +574,7 @@ private fn irqsoff_walk(cpu: {0..<KERNEL_MAX_CORES as usize}, to: bool,
         if (return_pc == 0 || return_pc % 4 != 0) { break; }
         if (level >= 1) {
             if (stored < IRQSOFF_DEPTH) {
-                irqsoff_site_store(cpu, to, stored, return_pc);
+                irqsoff_site_store(cpu, target, stored, return_pc);
                 stored = stored + 1;
             }
         }
@@ -541,47 +583,169 @@ private fn irqsoff_walk(cpu: {0..<KERNEL_MAX_CORES as usize}, to: bool,
         level = level + 1;
     }
     for slot: usize in 0..<IRQSOFF_DEPTH {
-        if (slot >= stored) { irqsoff_site_store(cpu, to, slot, 0); }
+        if (slot >= stored) { irqsoff_site_store(cpu, target, slot, 0); }
     }
 }
 
-private fn irqsoff_site_store(cpu: {0..<KERNEL_MAX_CORES as usize}, to: bool,
+private fn irqsoff_site_store(cpu: {0..<KERNEL_MAX_CORES as usize}, target: IrqsoffSink,
                               index: usize, pc: usize) {
     if (index >= IRQSOFF_DEPTH) { return; }
     let slot: {0..<IRQSOFF_DEPTH as usize} = index;
-    if (to) { irqsoff_core[cpu].longest_to[slot] = pc; }
-    else { irqsoff_core[cpu].open_pcs[slot] = pc; }
+    match target {
+        IrqsoffSink::Open => { irqsoff_core[cpu].open_pcs[slot] = pc; }
+        IrqsoffSink::LongestTo => { irqsoff_core[cpu].longest_to[slot] = pc; }
+        IrqsoffSink::Standing => { irqsoff_standing[cpu].scratch[slot] = pc; }
+    }
+}
+
+private fn irqsoff_standing_sampling() -> bool {
+    if (atomic_word_load(&irqsoff_standing_stopped) != 0) { return false; }
+    return atomic_word_load(&irqsoff_standing_paused) == 0;
 }
 
 // Called with IRQs just masked by the outermost save on this core.
 fn irqsoff_open() !{unsafe} {
-    if (atomic_word_load(&profile_session_mode) != 1) { return; }
+    let profiling: bool = atomic_word_load(&profile_session_mode) == 1;
+    let standing: bool = irqsoff_standing_sampling();
+    if (profiling == false && standing == false) { return; }
     let raw_cpu: usize = cpu_id();
     if (raw_cpu >= KERNEL_MAX_CORES) { return; }
     let cpu: {0..<KERNEL_MAX_CORES as usize} = raw_cpu;
-    irqsoff_walk(cpu, false, caller_frame_address(),
-                 caller_stack_address());
-    irqsoff_core[cpu].opened = mrs_cntpct_el0();
+    if (profiling) {
+        irqsoff_walk(cpu, IrqsoffSink::Open, caller_frame_address(),
+                     caller_stack_address());
+    }
+    let now: usize = mrs_cntpct_el0();
+    if (profiling) { irqsoff_core[cpu].opened = now; }
+    if (standing) { irqsoff_standing[cpu].opened = now; }
 }
 
 // Called by the matching restore just before it unmasks. A span opened
 // before the session started has opened == 0 and is not counted.
 fn irqsoff_close() !{unsafe} {
-    if (atomic_word_load(&profile_session_mode) != 1) { return; }
+    let profiling: bool = atomic_word_load(&profile_session_mode) == 1;
+    let standing: bool = irqsoff_standing_sampling();
+    if (profiling == false && standing == false) { return; }
     let raw_cpu: usize = cpu_id();
     if (raw_cpu >= KERNEL_MAX_CORES) { return; }
     let cpu: {0..<KERNEL_MAX_CORES as usize} = raw_cpu;
+    let now: usize = mrs_cntpct_el0();
+    if (standing) {
+        if (irqsoff_standing_close(cpu, now)) {
+            irqsoff_walk(cpu, IrqsoffSink::Standing, caller_frame_address(),
+                         caller_stack_address());
+            irqsoff_standing_record(cpu);
+        }
+    }
+    if (profiling == false) { return; }
     let opened: usize = irqsoff_core[cpu].opened;
     if (opened == 0) { return; }
     irqsoff_core[cpu].opened = 0;
-    let now: usize = mrs_cntpct_el0();
     if (now >= opened && now - opened > irqsoff_core[cpu].longest) {
         irqsoff_core[cpu].longest = now - opened;
         for slot: usize in 0..<IRQSOFF_DEPTH {
             irqsoff_core[cpu].longest_from[slot] = irqsoff_core[cpu].open_pcs[slot];
         }
-        irqsoff_walk(cpu, true, caller_frame_address(),
+        irqsoff_walk(cpu, IrqsoffSink::LongestTo, caller_frame_address(),
                      caller_stack_address());
+    }
+}
+
+// Ends this core's standing span; true when it beats the class table's
+// floor, so the caller walks the closing chain and records it.
+private fn irqsoff_standing_close(cpu: {0..<KERNEL_MAX_CORES as usize},
+                                  now: usize) -> bool {
+    let opened: usize = irqsoff_standing[cpu].opened;
+    if (opened == 0) { return false; }
+    irqsoff_standing[cpu].opened = 0;
+    if (now < opened) { return false; }
+    let span: usize = now - opened;
+    if (span > irqsoff_standing[cpu].longest) {
+        irqsoff_standing[cpu].longest = span;
+    }
+    if (span <= irqsoff_standing[cpu].floor) { return false; }
+    irqsoff_standing[cpu].pending = span;
+    return true;
+}
+
+// Raise the matching class to the pending span, or replace the smallest
+// class with it, then recompute the floor. An empty class has ticks 0, so
+// it is the smallest until the table is full.
+private fn irqsoff_standing_record(cpu: {0..<KERNEL_MAX_CORES as usize}) {
+    let span: usize = irqsoff_standing[cpu].pending;
+    let mut smallest: {0..<IRQSOFF_CLASS_SLOTS as usize} = 0;
+    let mut matched: bool = false;
+    for slot: usize in 0..<IRQSOFF_CLASS_SLOTS {
+        let mut same: bool = irqsoff_standing[cpu].classes[slot].ticks != 0;
+        for site: usize in 0..<IRQSOFF_DEPTH {
+            if (irqsoff_standing[cpu].classes[slot].sites[site] !=
+                irqsoff_standing[cpu].scratch[site]) { same = false; }
+        }
+        if (same) {
+            matched = true;
+            if (span > irqsoff_standing[cpu].classes[slot].ticks) {
+                irqsoff_standing[cpu].classes[slot].ticks = span;
+            }
+        }
+        if (irqsoff_standing[cpu].classes[slot].ticks <
+            irqsoff_standing[cpu].classes[smallest].ticks) {
+            smallest = slot;
+        }
+    }
+    if (matched == false) {
+        irqsoff_standing[cpu].classes[smallest].ticks = span;
+        for site: usize in 0..<IRQSOFF_DEPTH {
+            irqsoff_standing[cpu].classes[smallest].sites[site] =
+                irqsoff_standing[cpu].scratch[site];
+        }
+    }
+    let mut floor: usize = irqsoff_standing[cpu].classes[0].ticks;
+    for slot: usize in 0..<IRQSOFF_CLASS_SLOTS {
+        if (irqsoff_standing[cpu].classes[slot].ticks < floor) {
+            floor = irqsoff_standing[cpu].classes[slot].ticks;
+        }
+    }
+    irqsoff_standing[cpu].floor = floor;
+}
+
+// The cost probe's switch (tcp_connection_contention_evidence.tkb): its
+// `pmr` and `daif` pairs run paused, its `sampled` pair with the sampler
+// on. A paused close does nothing, and the next open overwrites the stamp.
+fn irqsoff_standing_pause(paused: bool) {
+    if (paused) { atomic_word_store(&irqsoff_standing_paused, 1); }
+    else { atomic_word_store(&irqsoff_standing_paused, 0); }
+}
+
+// The boot report: stop the sampler for good, then one RECORDED line per
+// core that measured a span and one per recorded class. A core still
+// inside its close when the stop lands may update its table while it is
+// printed; the numbers are observations, judged by no lane.
+fn irqsoff_standing_log() !{unsafe} {
+    atomic_word_store(&irqsoff_standing_stopped, 1);
+    for cpu: usize in 0..<KERNEL_MAX_CORES {
+        if (irqsoff_standing[cpu].longest != 0) {
+            kernel_boot_log("RECORDED irqsoff: cpu=");
+            uart_put_udec(cpu);
+            kernel_boot_log(" longest=");
+            uart_put_udec(irqsoff_standing[cpu].longest);
+            kernel_boot_log(" freq=");
+            uart_put_udec(read_cntfrq() as usize);
+            kernel_boot_log("\n");
+            for slot: usize in 0..<IRQSOFF_CLASS_SLOTS {
+                if (irqsoff_standing[cpu].classes[slot].ticks != 0) {
+                    kernel_boot_log("RECORDED irqsoff class: cpu=");
+                    uart_put_udec(cpu);
+                    kernel_boot_log(" ticks=");
+                    uart_put_udec(irqsoff_standing[cpu].classes[slot].ticks);
+                    kernel_boot_log(" to");
+                    for site: usize in 0..<IRQSOFF_DEPTH {
+                        kernel_boot_log(" ");
+                        uart_put_hex(irqsoff_standing[cpu].classes[slot].sites[site]);
+                    }
+                    kernel_boot_log("\n");
+                }
+            }
+        }
     }
 }
 

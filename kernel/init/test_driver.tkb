@@ -22,6 +22,7 @@ use "kernel/mm/process_image.tkb";
 use "kernel/mm/page.tkb";
 use "kernel/lib/pool_lock.tkb";
 use "kernel/kernel/pool_lock_wait.tkb";
+use "kernel/kernel/profile_session.tkb";
 use "kernel/arch/arm64/mm/asid.tkb";
 use "kernel/printk/log.tkb";
 use "kernel/fs/ext2/ext2.tkb";
@@ -692,6 +693,9 @@ fn kernel_init_boot_fixture_poll(current_authority: borrow ProcessCurrent[curren
     }
     page_run_stats_log();
     pool_lock_wait_log();
+    // GitHub issue #958: the longest IRQ-masked spans per lock class since
+    // boot; scripts/report_irqsoff_spans.py symbolizes them.
+    irqsoff_standing_log();
     if (page_allocator_double_free_count() == 0) {
         kernel_boot_log("resources: no double free\n");
     } else {

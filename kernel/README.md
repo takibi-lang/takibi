@@ -1367,6 +1367,15 @@ how many acquires found the lock already held, outside the deliberate
 contention probes (`kernel/kernel/pool_lock_wait.tkb`, #953).
 On RPi5, `scripts/validate_parked_triggers.py` fails the lane when either
 line passes a parked issue's reopen threshold (#812, #680).
+`RECORDED irqsoff:` and `RECORDED irqsoff class:` give, per core, the
+longest span IRQs stayed masked by an outermost `mutex_irq_save` from boot
+to the report, and the longest per closing call chain, measured by the
+standing sampler in `kernel/kernel/profile_session.tkb` (#958). Both lane
+runners pass the log to `scripts/report_irqsoff_spans.py`, which symbolizes
+the chains, folds each to the first function outside the lock wrappers,
+and prints the longest span per lock class; it fails only when the lines
+are missing. `irq mask cost:` carries the sampler's own cost as `sampled`
+(the `pmr` pair with the sampler on).
 
 `regs` reads the compiler-defined `ExceptionFrame` directly. DDB does not
 copy registers with handwritten assembly and does not duplicate frame

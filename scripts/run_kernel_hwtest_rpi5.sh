@@ -593,6 +593,10 @@ python3 "$REPO_ROOT/scripts/validate_log_ring_trace.py" "$UART_LOG"
 # GitHub issue #953: parked issues' reopen conditions (#812, #680), from
 # the suite's RECORDED counters; the table lives in the script.
 python3 "$REPO_ROOT/scripts/validate_parked_triggers.py" "$UART_LOG"
+# GitHub issue #958: the longest IRQ-masked span per lock class since boot,
+# from the boot report's standing sampler, symbolized against the ELF.
+python3 "$REPO_ROOT/scripts/report_irqsoff_spans.py" "$UART_LOG" \
+    --elf "$ELF" --label kernel/rpi5
 python3 "$REPO_ROOT/scripts/profile_kernel_workload.py" collect \
     --uart-log "$UART_LOG" --output "$ARTIFACT_DIR/busy-pair-profile.json" \
     --target rpi5

@@ -183,15 +183,23 @@ private fn irq_mask_cost_daif() -> i64 !{unsafe} {
     return tcp_pin_cost_clock() - start;
 }
 
+// GitHub issue #958: `pmr` and `daif` run with the standing irqsoff
+// sampler paused, so they keep #920's meaning; `sampled` is the `pmr` pair
+// again with the sampler on, which is what every pair in the boot pays.
 private fn irq_mask_cost_report(sample: usize) !{unsafe} {
+    let sampled: i64 = irq_mask_cost_pmr();
+    irqsoff_standing_pause(true);
     let pmr: i64 = irq_mask_cost_pmr();
     let daif: i64 = irq_mask_cost_daif();
+    irqsoff_standing_pause(false);
     kernel_boot_log("irq mask cost: sample=");
     uart_put_udec(sample);
     kernel_boot_log(" rounds=4096 pmr=");
     uart_put_udec(pmr as usize);
     kernel_boot_log(" daif=");
     uart_put_udec(daif as usize);
+    kernel_boot_log(" sampled=");
+    uart_put_udec(sampled as usize);
     kernel_boot_log(" frequency=");
     uart_put_udec(read_cntfrq() as usize);
     kernel_boot_log("\n");

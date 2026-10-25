@@ -352,6 +352,10 @@ python3 "$REPO_ROOT/scripts/validate_protocol_trace.py" "$UART_LOG"
 # GitHub issue #656: the log ring's window that follows it, checked by TLC
 # against kernel/models/LogRing.tla through LogRingTrace.tla.
 python3 "$REPO_ROOT/scripts/validate_log_ring_trace.py" "$UART_LOG"
+# GitHub issue #958: the longest IRQ-masked span per lock class since boot,
+# from the boot report's standing sampler, symbolized against the ELF.
+python3 "$REPO_ROOT/scripts/report_irqsoff_spans.py" "$UART_LOG" \
+    --elf "$ELF" --label "$RUN_LABEL"
 
 views_status=0
 kernel_views_compare "$RUN_LABEL" "$ARTIFACT_DIR" "$UART_LOG.normalized" \
