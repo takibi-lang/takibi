@@ -1373,8 +1373,9 @@ to the report, and the longest per closing call chain, measured by the
 standing sampler in `kernel/kernel/profile_session.tkb` (#958). Both lane
 runners pass the log to `scripts/report_irqsoff_spans.py`, which symbolizes
 the chains, folds each to the first function outside the lock wrappers,
-and prints the longest span per lock class; it fails only when the lines
-are missing. `irq mask cost:` carries the sampler's own cost as `sampled`
+and prints the longest span per lock class; it fails when the lines are
+missing and, on RPi5 only (`--judge`, #1093), when a class exceeds 3x its
+baseline in `BASELINE_RPI5_US` (QEMU spans spread too widely to judge). `irq mask cost:` carries the sampler's own cost as `sampled`
 (the `pmr` pair with the sampler on).
 
 `regs` reads the compiler-defined `ExceptionFrame` directly. DDB does not
