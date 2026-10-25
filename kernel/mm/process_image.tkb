@@ -25,15 +25,7 @@ struct ProcessImageExt2Source {
     length: usize;
 }
 variant ProcessImageSourceState { Absent; Ext2(ProcessImageExt2Source); }
-variant ProcessImageTargetState { Unset; Set(AddressSpaceRoot); }
 
-// The per-CPU part: the target root of the operation running on this CPU.
-// It stays per-CPU only under the non-preemptible execution contract below
-// (process_image_execution_model_assumption).
-struct ProcessImageContext {
-    private target: ProcessImageTargetState;
-}
-private let mut process_image_contexts: [ProcessImageContext; KERNEL_MAX_CORES];
 
 private fn process_image_cpu_index() -> {0..<KERNEL_MAX_CORES as usize} {
     let core: usize = cpu_id();
@@ -776,43 +768,12 @@ fn process_image_record_release_words(root: usize,
     }
 }
 
-// GitHub issue #479: which root an image operation is aimed at, set when
-// one begins and cleared when it ends -- so it is PER-OPERATION state, and
-// on two cores that means per-core. A single global held one answer for
-// two concurrent operations, and each would overwrite the other's target
-// between the set and the read.
-//
-// This variable has already produced a real fault on one core. Issue
-// #437's RPi5-only failure was it left at 0 on wait4's fast path, aiming
-// the COW handler at PID 1's live image -- and that took a hardware bisect
-// to find, with only one writer. Two writers would reach the same class of
-// wrong root without needing the fast path's help.
-//
-// A context array indexed by cpu_id(), sized by KERNEL_MAX_CORES, the same shape
-// execution_state and address_space_active have. Not a lock: the
-// state is not shared, it is per-core state that was stored as though it
-// were global, and making two cores agree on it would be agreeing on the
-// wrong thing.
-//
-// GitHub issue #693 step 5: the target is held as the AddressSpaceRoot the
-// operation was given, handle and all, so what an operation acts on is the
-// root its caller made from an authority, not a slot re-read later.
-// Root 0 is a real target. The closed Unset case distinguishes absence
-// without an independently mutable flag or another root array.
-private fn process_image_target_root_here() -> AddressSpaceRoot {
-    match process_image_contexts[process_image_cpu_index()].target {
-        ProcessImageTargetState::Unset => { return address_space_boot_root(); }
-        ProcessImageTargetState::Set(root) => { return root; }
-    }
-}
-
-private fn process_image_set_target_root_here(root: AddressSpaceRoot) {
-    process_image_contexts[process_image_cpu_index()].target = ProcessImageTargetState::Set(root);
-}
-
-private fn process_image_clear_target_root_here() {
-    process_image_contexts[process_image_cpu_index()].target = ProcessImageTargetState::Unset;
-}
+// GitHub issue #479 made the root an image operation is aimed at per-CPU
+// state, set by one call and read by another. GitHub issue #981 removed it:
+// every reader takes the root as a parameter from a caller that holds it --
+// a map operation its target, a fault the current process's root, an image
+// its ProcessImagePages -- so no operation can read a root another left
+// behind (#437's stale root 0 on wait4's fast path was exactly that).
 
 // GitHub issue #392: a root is a process slot, and a process slot is a
 // pool address now, so there is no range to narrow it into. The question
@@ -820,20 +781,11 @@ private fn process_image_clear_target_root_here() {
 // address_space_root_slot_valid, which answers about a LIVE process rather
 // than about an index being in bounds. Root 0 is the kernel's own root and
 // always valid.
-// GitHub issue #410: two events, and they were one counter.
-//
-// "No target has been chosen yet" is an ordinary state of an early boot and
-// of the teardown negative control below; it happens twice in a healthy QEMU
-// boot. "A target was chosen and its root no longer names a live process" is
-// the #270 hazard -- a teardown resolving through root 0, which was BusyBox
-// init's live image until #831, so it unmapped PID 1.
-//
-// Sharing one counter meant the second could never be gated on zero, because
-// the first is legitimately nonzero. That is why this fallback stayed
-// advisory while it was the ONLY one with a counter and no reader: nothing
-// could have asserted the number without asserting the benign half too.
-private let mut process_image_root_unset_count:
-    [usize; KERNEL_MAX_CORES];
+// GitHub issue #410: a root that was chosen and no longer names a live
+// process is the #270 hazard -- a teardown resolving through root 0, which
+// was BusyBox init's live image until #831, so it unmapped PID 1. Counted
+// and gated on zero. (The "no target chosen" half went with the per-CPU
+// target, #981.)
 private let mut process_image_root_stale_count:
     [usize; KERNEL_MAX_CORES];
 
@@ -843,13 +795,6 @@ private fn process_image_root_counter_total(counts: borrow [usize; KERNEL_MAX_CO
         total = total + counts[core];
     }
     return total;
-}
-
-// No target chosen. Readers retain the old root-0 fallback because their many
-// call sites cannot act on a miss; teardown opens ProcessImageTargetRootResult
-// and does nothing. Reported, not gated: a healthy boot reaches it.
-fn process_image_root_unset_uses() -> usize {
-    return process_image_root_counter_total(process_image_root_unset_count as []usize);
 }
 
 // A target that was chosen and whose root has since stopped naming a live
@@ -880,10 +825,6 @@ fn process_image_root_index(root: ProcessImageRoot) -> usize {
     return root_slot_word(address_space_root_slot(root.root));
 }
 
-inline fn process_image_root_slot(root: ProcessImageRoot) -> RootSlot {
-    return address_space_root_slot(root.root);
-}
-
 fn process_image_root_space(root: ProcessImageRoot) -> AddressSpaceRoot {
     return root.root;
 }
@@ -893,20 +834,10 @@ must_use variant ProcessImageTargetRootResult {
     Ready(ProcessImageRoot);
 }
 
-// GitHub issue #516: public, because it is the API readers outside this file
-// are asked to open. It replaced a process_image_root_index() that answered
-// 0 for a missing target. It counts the two ways a target can be absent as it goes, which is why
-// asking it is not free and why callers ask once and carry the answer.
-fn process_image_target_root_result()
+// GitHub issue #516: a root that no longer names a live process is refused,
+// and counted (process_image_root_stale_fallback_uses), rather than read.
+fn process_image_root_checked(root: AddressSpaceRoot)
         -> ProcessImageTargetRootResult !{unsafe} {
-    let root: AddressSpaceRoot = match process_image_contexts[process_image_cpu_index()].target {
-        ProcessImageTargetState::Unset => {
-            let unset_count_core = process_image_cpu_index();
-            process_image_root_unset_count[unset_count_core] = process_image_root_unset_count[unset_count_core] + 1;
-            return ProcessImageTargetRootResult::Missing;
-        }
-        ProcessImageTargetState::Set(selected) => { selected }
-    };
     if (address_space_root_slot_valid(address_space_root_slot(
             root)) == false) {
         let stale_count_core = process_image_cpu_index();
@@ -917,32 +848,18 @@ fn process_image_target_root_result()
         process_image_root(root));
 }
 
-// GitHub issue #468: this CPU's target root for a check, WITHOUT counting.
-// process_image_target_root_result counts every absent answer and a view
-// asserts those counts, so a check asked on every EL0 return must not move
-// them.
-fn process_image_target_root_peek() -> ProcessImageTargetRootResult {
-    match process_image_contexts[process_image_cpu_index()].target {
-        ProcessImageTargetState::Unset => {
-            return ProcessImageTargetRootResult::Missing;
-        }
-        ProcessImageTargetState::Set(root) => {
-            return ProcessImageTargetRootResult::Ready(process_image_root(root));
-        }
-    }
-}
-
-fn process_image_pte_read(index: usize) -> usize {
-    return address_space_pte_read(process_image_target_root_here(), index);
+private fn process_image_pte_read(target: AddressSpaceRoot, index: usize) -> usize {
+    return address_space_pte_read(target, index);
 }
 
 // Do not transfer PageOwner until the lazy-L3 allocation and PTE write have
 // both succeeded. This is the mapping-side half of address_space.tkb's OOM
 // contract; the failure arm returns the still-owned physical page directly.
-fn process_image_install_page(page: sink PageOwner[page_id],
+private fn process_image_install_page(target: AddressSpaceRoot,
+                              page: sink PageOwner[page_id],
                               index: usize, flags: usize) -> bool {
     match address_space_map_page(
-            process_image_target_root_here(), index, page, flags) {
+            target, index, page, flags) {
         AddressSpacePteWriteResult::Invalid => {
             return false;
         }
@@ -1069,17 +986,16 @@ fn process_clone_vm_rollback(dest_space: AddressSpaceRoot) {
 // 1" -- process.tkb's kernel_process_clone_begin() allocates the child's
 // process-table slot first and passes that slot's index straight through,
 // so root index == ProcessHandle.pool_index holds everywhere. The source
-// is always process_image_target_root (whichever root is currently
-// active), not a fixed "root 0" -- a process running on any root can
+// is the caller's current root (GitHub issue #981: a parameter), not a fixed "root 0" -- a process running on any root can
 // fork, not just the one on root 0.
 fn process_image_narrow_root(value: usize) -> usize !{unsafe} {
     if (address_space_root_key_valid(value)) { return value; }
     return 0;
 }
 
-fn process_image_clone_vm_begin(dest_space: AddressSpaceRoot) -> ProcessCloneVmResult !{unsafe} {
+fn process_image_clone_vm_begin(source_space: AddressSpaceRoot,
+                                dest_space: AddressSpaceRoot) -> ProcessCloneVmResult !{unsafe} {
     let dest_root: usize = root_slot_word(address_space_root_slot(dest_space));
-    let mut source_space: AddressSpaceRoot = process_image_target_root_here();
     if (address_space_root_key_valid(dest_root) == false ||
         dest_root == root_slot_word(address_space_root_slot(source_space)) ||
         address_space_is_live(dest_space) == false) {
@@ -1233,7 +1149,6 @@ fn process_image_activate_root(target: AddressSpaceRoot) {
     // dynamic root uses the stopped preparation boundary, including exec and
     // boot-fixture callers outside the scheduler handoff paths.
     if (root == 0) {
-        process_image_set_target_root_here(target);
         address_space_activate_root(target);
         kernel_process_trace_address_space_activate(root);
         return;
@@ -1242,8 +1157,7 @@ fn process_image_activate_root(target: AddressSpaceRoot) {
 }
 
 // Split activation for scheduler handoffs that may need an ASID rollover.
-// Preparation changes neither this CPU's target-root record nor TTBR0; commit
-// changes both only after the caller has revalidated its reserved process.
+// Preparation does not change TTBR0; commit changes it only after the caller has revalidated its reserved process.
 fn process_image_prepare_activation(root: AddressSpaceRoot)
         -> AddressSpaceActivationPrepareResult {
     return address_space_prepare_activation(root);
@@ -1254,7 +1168,6 @@ fn process_image_commit_activation(
     match address_space_commit_activation(prepared) {
         AddressSpaceActivationCommitResult::Invalid => { return false; }
         AddressSpaceActivationCommitResult::Activated(target) => {
-            process_image_set_target_root_here(target);
             kernel_process_trace_address_space_activate(
                 root_slot_word(address_space_root_slot(target)));
             return true;
@@ -1306,80 +1219,11 @@ fn process_image_clone_vm_reap(dest_space: AddressSpaceRoot) -> ProcessCloneVmRe
 // whole address space smaller than one growth-region page (never meant to
 // support stack growth at all), and the pinned Alpine BusyBox binary's
 // recursion depth is not something this test controls.
-// GitHub issue #516: with no target root chosen, no reader may answer about
-// root 0. Root 0 was BusyBox init's live image then, so "answers about root
-// 0" and "answers about PID 1" were the same sentence -- which is why the
-// fallback was worth removing rather than counting. Since #831 root 0 is the
-// kernel's own, and an answer about it is still an answer about nothing the
-// caller chose.
-//
-// Nothing here writes root 0. The readers this replaces READ it: a window
-// cleanliness answer taken from its tables, a fault resolved against them.
-// So the proof is the refusal, plus root 0's own flags reading the same on
-// both sides of the calls -- a reader that consumed the state would have had
-// to go through the record this checks.
-//
-// The target is restored afterwards. This probe runs inside a boot whose
-// later steps have their own targets, and a fixture that left the per-CPU
-// target cleared would be testing everything after it as well.
-const PROCESS_IMAGE_PROBE_ABORT_ESR: usize = 0x92000007;
-const PROCESS_IMAGE_PROBE_ABORT_ADDRESS: usize = 0x0000FFFFFFFFE000;
-
-fn process_image_no_target_probe() -> bool !{unsafe} {
-    let mut restore_root: AddressSpaceRoot = address_space_boot_root();
-    let mut had_root: bool = false;
-    match process_image_target_root_result() {
-        ProcessImageTargetRootResult::Missing => {}
-        ProcessImageTargetRootResult::Ready(target) => {
-            restore_root = process_image_root_space(target);
-            had_root = true;
-        }
-    }
-    let mut refused: bool = true;
-    // Root 0 is a selected target, not the zero-initialized Unset state.
-    // Peek avoids changing the established missing/stale evidence counts.
-    process_image_set_target_root_here(address_space_boot_root());
-    match process_image_target_root_peek() {
-        ProcessImageTargetRootResult::Missing => { refused = false; }
-        ProcessImageTargetRootResult::Ready(target) => {
-            if (process_image_root_index(target) != 0) { refused = false; }
-        }
-    }
-    process_image_clear_target_root_here();
-    match process_image_target_root_peek() {
-        ProcessImageTargetRootResult::Missing => {}
-        ProcessImageTargetRootResult::Ready(target) => { refused = false; }
-    }
-    let installed_before: bool =
-        process_image_record_read(0).exec_image_installed;
-    let pages_before: usize =
-        process_image_record_read(0).exec_image_page_count;
-    // A cleared target cannot say the user window is clear. Before #516 this
-    // answered about root 0's window.
-    if (process_image_window_is_clear()) { refused = false; }
-    // Nor resolve an EL0 data abort. ESR 0x92000007 is a lower-EL data abort
-    // with a level-3 translation fault, the stack-growth shape; the address
-    // is never reached, because the refusal happens before it is read.
-    if (process_image_handle_data_abort(PROCESS_IMAGE_PROBE_ABORT_ESR,
-                                        PROCESS_IMAGE_PROBE_ABORT_ADDRESS)) {
-        refused = false;
-    }
-    if (process_image_record_read(0).exec_image_installed != installed_before) {
-        refused = false;
-    }
-    if (process_image_record_read(0).exec_image_page_count != pages_before) {
-        refused = false;
-    }
-    if (had_root) { process_image_set_target_root_here(restore_root); }
-    return refused;
-}
-
 fn process_image_clone_growth_probe() -> bool !{unsafe} {
     let evidence = match process_image_record_ensure(0) {
         ProcessImageRecordReady::Missing => { return false; }
         ProcessImageRecordReady::Ready(ready) => { ready }
     };
-    process_image_set_target_root_here(address_space_boot_root());
     // GitHub issue #392: the child root is a live process's record now,
     // not the bare number 1 -- see
     // scheduled_process_probe_slot_acquire for why a probe has to be a
@@ -1438,27 +1282,8 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
     process_image_set_heap_page_count(0, evidence, PROCESS_HEAP_PAGES_DEFAULT);
 
     let mut ok: bool = true;
-    // GitHub issue #438: unset is distinct from selecting the real root 0.
-    // Exercise the actual teardown helper while root 0 has both a mapping
-    // and live demand-stack metadata. A miss must be counted and must not
-    // turn into cleanup of the bootstrap address space. Restore the count
-    // afterwards so this deliberate negative control does not masquerade
-    // as a fault in the healthy-boot evidence.
-    let fallback_count_core = process_image_cpu_index();
-    let fallback_before: usize = process_image_root_unset_count[fallback_count_core];
-    process_image_clear_target_root_here();
-    process_image_unmap_pages(1);
-    if (process_image_root_unset_count[fallback_count_core] != fallback_before + 1 ||
-        address_space_pte_read(address_space_boot_root(), process_stack_top_page()) == 0 ||
-        process_image_record_read(0).stack_growth_active == false ||
-        process_image_record_read(0).active_page_count != 1 ||
-        process_image_record_read(0).stack_lowest_l3 != process_stack_top_page()) {
-        ok = false;
-    }
-    process_image_root_unset_count[fallback_count_core] = fallback_before;
-    process_image_set_target_root_here(address_space_boot_root());
     let mut cow_parent_physical: usize = 0;
-    match process_image_clone_vm_begin(child_root_root) {
+    match process_image_clone_vm_begin(address_space_boot_root(), child_root_root) {
         ProcessCloneVmResult::OutOfMemory => { ok = false; }
         ProcessCloneVmResult::Copied => {}
     }
@@ -1483,7 +1308,7 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
         // child's present COW PTE.
         let cow_esr: usize = 0x9000004F;
         let cow_fault: usize = USER_TEXT_VA + top_page * PAGE_SIZE;
-        if (ok && (process_image_handle_data_abort(cow_esr, cow_fault) == false ||
+        if (ok && (process_image_handle_data_abort(child_root_root, cow_esr, cow_fault) == false ||
             address_space_pte_is_cow(address_space_pte_read(child_root_root, top_page)) ||
             address_space_pte_is_writable(address_space_pte_read(child_root_root, top_page)) == false ||
             (address_space_pte_read(address_space_boot_root(), top_page) & USER_PAGE_PHYS_MASK) ==
@@ -1496,7 +1321,7 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
         let l3_esr: usize = 0x90000007;
         let first_page: usize = process_stack_top_page() - 11;
         let first_fault: usize = USER_TEXT_VA + first_page * PAGE_SIZE;
-        if (process_image_handle_data_abort(l3_esr, first_fault) == false ||
+        if (process_image_handle_data_abort(child_root_root, l3_esr, first_fault) == false ||
             address_space_pte_read(child_root_root, first_page) == 0) {
             ok = false;
         }
@@ -1506,7 +1331,7 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
         let l2_esr: usize = 0x90000006;
         let second_page: usize = process_stack_top_page() - 512;
         let second_fault: usize = USER_TEXT_VA + second_page * PAGE_SIZE;
-        if (ok && (process_image_handle_data_abort(l2_esr, second_fault) == false ||
+        if (ok && (process_image_handle_data_abort(child_root_root, l2_esr, second_fault) == false ||
             address_space_pte_read(child_root_root, second_page) == 0 ||
             address_space_pte_read(child_root_root, second_page + 1) == 0 ||
             address_space_pte_read(child_root_root, first_page - 1) == 0)) {
@@ -1544,6 +1369,9 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
 
 linear struct ProcessImagePages[image: usize] {
     private image: usize @ image;
+    // The root these pages were mapped into (#981): install and unmap act
+    // on it, not on a root some other operation left selected.
+    private root: AddressSpaceRoot;
     private count: usize;
     private entry: usize;
     private stack_pointer: usize;
@@ -1603,10 +1431,11 @@ fn process_image_exec_image_installed(root: usize) -> bool !{unsafe} {
     return process_image_record_read(root).exec_image_installed;
 }
 
-// GitHub issue #516: NoTarget is the third outcome, and it is the one this
-// issue is about. Installing with no target chosen used to consult ROOT 0's
-// `exec_image_installed` flag and then write ROOT 0's page count -- PID 1's
-// live image, decided by a fallback rather than by a caller.
+// GitHub issue #516: NoTarget is the third outcome. Installing with no target
+// chosen used to consult ROOT 0's `exec_image_installed` flag and then write
+// ROOT 0's page count -- PID 1's live image, decided by a fallback rather
+// than by a caller. Since #981 the root comes with the pages, so NoTarget
+// means that root has stopped naming a live process.
 must_use variant ProcessImageExecInstallResult {
     Installed;
     AlreadyInstalled;
@@ -1616,7 +1445,7 @@ must_use variant ProcessImageExecInstallResult {
 
 fn process_image_exec_install(
         pages: sink ProcessImagePages[image]) -> ProcessImageExecInstallResult {
-    let root: usize = match process_image_target_root_result() {
+    let root: usize = match process_image_root_checked(pages.root) {
         ProcessImageTargetRootResult::Missing => {
             // The incoming image is this function's to dispose of on every
             // path that does not install it, exactly as AlreadyInstalled
@@ -1649,9 +1478,7 @@ fn process_image_exec_install(
 // GitHub issue #209: an applet used to be launched by the kernel itself,
 // which then unmapped the image and checked process_image_window_is_clear()
 // on the spot. Applets are children of the init script now, so their images
-// are torn down here instead -- and process_image_unmap() clears this
-// module's target on its way out, so a caller can no longer inspect the
-// root that was just emptied. Counting both reaps and clean reaps here
+// are torn down here instead. Counting both reaps and clean reaps here
 // keeps that VM-hygiene assertion, and does it for every applet at once
 // rather than one hand-written check per kernel-side launch.
 private let mut process_image_exec_reap_count: usize;
@@ -1688,10 +1515,8 @@ fn process_image_exec_reap_evidence() -> (usize, usize, usize) {
 // names the fault rather than PID 1's next write.
 fn process_image_exec_teardown(target: AddressSpaceRoot,
                                words: ProcessPoolHandleWords) !{unsafe} {
-    process_image_set_target_root_here(target);
-    match process_image_target_root_result() {
+    match process_image_root_checked(target) {
         ProcessImageTargetRootResult::Missing => {
-            process_image_clear_target_root_here();
             return;
         }
         ProcessImageTargetRootResult::Ready(root) => {
@@ -1734,7 +1559,6 @@ fn process_image_exec_teardown(target: AddressSpaceRoot,
             }
         }
     }
-    process_image_clear_target_root_here();
 }
 
 // The RESUME half stays where it was, at the parent's return, because that
@@ -2154,31 +1978,24 @@ private fn process_image_cleanup_root(target: AddressSpaceRoot) {
     process_image_set_stack_lowest_l3(root, evidence, process_stack_top_page());
 }
 
-fn process_image_cleanup() {
-    match process_image_target_root_result() {
-        ProcessImageTargetRootResult::Missing => { return; }
-        ProcessImageTargetRootResult::Ready(root) => {
-            process_image_cleanup_root(process_image_root_space(root));
-        }
-    }
-}
 
 // Called directly from el0_sync_entry for a lower-EL data-abort translation
 // fault. It accepts only an address inside the reserved, downward-growing
 // stack and maps every missing page down to that address. Mapping the whole
 // gap handles an ABI that subtracts a large stack frame before its first
 // store, while the guard page below the reservation remains unmapped.
-fn process_image_handle_data_abort(esr: usize, fault_address: usize) -> bool {
+fn process_image_handle_data_abort(target: AddressSpaceRoot, esr: usize,
+                                   fault_address: usize) -> bool {
     // GitHub issue #516: refuse the fault when no target is chosen, rather
     // than resolving it against root 0. kernel/kernel/process.tkb's reaper
     // comment is what this is: a reaper that returned to EL0 with the COW
     // handler aimed at root 0 -- PID 1's live image -- and fail-stopped on
     // its next write. Returning false here fail-stops on the FAULT instead,
     // which names the right thing.
-    let root: usize = match process_image_target_root_result() {
+    let root: usize = match process_image_root_checked(target) {
         ProcessImageTargetRootResult::Missing => { return false; }
-        ProcessImageTargetRootResult::Ready(target) => {
-            process_image_root_index(target)
+        ProcessImageTargetRootResult::Ready(checked) => {
+            process_image_root_index(checked)
         }
     };
     let exception_class: usize = (esr >> 26) & 0x3F;
@@ -2193,7 +2010,7 @@ fn process_image_handle_data_abort(esr: usize, fault_address: usize) -> bool {
             return false;
         }
         let index: usize = (fault_address - USER_TEXT_VA) / PAGE_SIZE;
-        return address_space_resolve_cow(process_image_target_root_here(), index);
+        return address_space_resolve_cow(target, index);
     }
     // A missing PTE inside an existing L3 is a level-3 translation fault
     // (0x07). A stack expansion into an unpopulated lazy-L3 branch faults
@@ -2222,7 +2039,7 @@ fn process_image_handle_data_abort(esr: usize, fault_address: usize) -> bool {
     for l3_index: usize in
             fault_index..<process_image_record_read(root).stack_lowest_l3 {
         if (process_image_record_read(root).active_page_count >= USER_SPACE_PAGE_COUNT ||
-            process_image_pte_read(l3_index) != 0) {
+            process_image_pte_read(target, l3_index) != 0) {
             return false;
         }
         match page_alloc(PageOwnerTag::UserPage) {
@@ -2230,7 +2047,7 @@ fn process_image_handle_data_abort(esr: usize, fault_address: usize) -> bool {
             PageAllocResult::Allocated(stack_page) => {
                 let bytes = page_bytes(stack_page);
                 for i: usize in 0..<4096 { bytes[i] = 0; }
-                if (process_image_install_page(
+                if (process_image_install_page(target,
                         stack_page, l3_index, USER_RW_XN_FLAGS) == false) {
                     return false;
                 }
@@ -2247,10 +2064,9 @@ fn process_image_handle_data_abort(esr: usize, fault_address: usize) -> bool {
 // the owner, so each has a half that takes the count on its own -- which
 // is what process_image_exec_reap calls, now that what it reaps is a
 // record field rather than a parked linear value.
-fn process_image_unmap_pages(count: usize) {
-    match process_image_target_root_result() {
+private fn process_image_unmap_pages(target: AddressSpaceRoot, count: usize) {
+    match process_image_root_checked(target) {
         ProcessImageTargetRootResult::Missing => {
-            process_image_clear_target_root_here();
             return;
         }
         ProcessImageTargetRootResult::Ready(root) => {
@@ -2258,7 +2074,6 @@ fn process_image_unmap_pages(count: usize) {
             let evidence = match process_image_record_ensure(root_index) {
                 ProcessImageRecordReady::Missing => {
                     process_image_cleanup_root(process_image_root_space(root));
-                    process_image_clear_target_root_here();
                     return;
                 }
                 ProcessImageRecordReady::Ready(ready) => { ready }
@@ -2273,41 +2088,42 @@ fn process_image_unmap_pages(count: usize) {
             process_image_cleanup_root(process_image_root_space(root));
         }
     }
-    process_image_clear_target_root_here();
 }
 
 fn process_image_unmap(pages: sink ProcessImagePages[image]) {
     let count: usize = pages.count;
+    let mut target: AddressSpaceRoot = pages.root;
     process_image_pages_discard(pages);
-    process_image_unmap_pages(count);
+    process_image_unmap_pages(target, count);
 }
 
 private fn process_image_map_segments(slot: borrow ProcessImageSlot[0],
+                              target: AddressSpaceRoot,
                               plan: DistroElfLoadPlan,
                               load_bias: usize,
                               already_mapped: usize)
         -> ProcessImageSegmentsResult {
     if (plan.extent > USER_SPACE_BYTES ||
         load_bias > USER_SPACE_BYTES - plan.extent) {
-        process_image_cleanup();
+        process_image_cleanup_root(target);
         return ProcessImageSegmentsResult::OutOfMemory;
     }
     let mut mapped: usize = already_mapped;
     let image = plan.image;
     if (plan.program_offset > image.len) {
-        process_image_cleanup();
+        process_image_cleanup_root(target);
         return ProcessImageSegmentsResult::Invalid;
     }
     for segment_index: usize in 0..<plan.program_count {
         let header_offset: usize = plan.program_offset +
                                    segment_index * ELF_PROGRAM_HEADER_SIZE;
         if (header_offset > image.len) {
-            process_image_cleanup();
+            process_image_cleanup_root(target);
             return ProcessImageSegmentsResult::Invalid;
         }
         let header_tail = image[header_offset..<image.len];
         if (header_tail.len < sizeof(KernelElf64ProgramHeader)) {
-            process_image_cleanup();
+            process_image_cleanup_root(target);
             return ProcessImageSegmentsResult::Invalid;
         }
         let header_bytes =
@@ -2318,7 +2134,7 @@ private fn process_image_map_segments(slot: borrow ProcessImageSlot[0],
             // PF_R=4 (rodata), PF_R|PF_X=5 (text), PF_R|PF_W=6 (data). A
             // writable+executable combination is never accepted.
             if (header.flags != 4 && header.flags != 5 && header.flags != 6) {
-                process_image_cleanup();
+                process_image_cleanup_root(target);
                 return ProcessImageSegmentsResult::Invalid;
             }
             let virtual_address: usize =
@@ -2328,17 +2144,17 @@ private fn process_image_map_segments(slot: borrow ProcessImageSlot[0],
             let last_byte: usize = virtual_address + memory_size;
             let last_page: usize = (last_byte + 4095) / PAGE_SIZE;
             if (last_page > USER_SPACE_PAGE_COUNT) {
-                process_image_cleanup();
+                process_image_cleanup_root(target);
                 return ProcessImageSegmentsResult::OutOfMemory;
             }
             for l3_index: usize in first_page..<last_page {
-                if (process_image_pte_read(l3_index) != 0) {
-                    process_image_cleanup();
+                if (process_image_pte_read(target, l3_index) != 0) {
+                    process_image_cleanup_root(target);
                     return ProcessImageSegmentsResult::Invalid;
                 }
                 match page_alloc(PageOwnerTag::UserPage) {
                     PageAllocResult::OutOfMemory => {
-                        process_image_cleanup();
+                        process_image_cleanup_root(target);
                         return ProcessImageSegmentsResult::OutOfMemory;
                     }
                     PageAllocResult::Allocated(page) => {
@@ -2346,7 +2162,7 @@ private fn process_image_map_segments(slot: borrow ProcessImageSlot[0],
                                 slot, page, plan, header, load_bias, l3_index) {
                             ProcessImagePageLoadResult::Invalid => {
                                 page_free(page);
-                                process_image_cleanup();
+                                process_image_cleanup_root(target);
                                 return ProcessImageSegmentsResult::Invalid;
                             }
                             ProcessImagePageLoadResult::Loaded => {
@@ -2359,9 +2175,9 @@ private fn process_image_map_segments(slot: borrow ProcessImageSlot[0],
                                 if (header.flags == 4) {
                                     flags = USER_RODATA_R_FLAGS;
                                 }
-                                if (process_image_install_page(
+                                if (process_image_install_page(target,
                                         page, l3_index, flags) == false) {
-                                    process_image_cleanup();
+                                    process_image_cleanup_root(target);
                                     return ProcessImageSegmentsResult::OutOfMemory;
                                 }
                                 mapped = mapped + 1;
@@ -2376,6 +2192,7 @@ private fn process_image_map_segments(slot: borrow ProcessImageSlot[0],
 }
 
 private fn process_image_pair_probe(slot: borrow ProcessImageSlot[0],
+                            target: AddressSpaceRoot,
                             primary: DistroElfLoadPlan,
                             interpreter: DistroElfLoadPlan,
                             interpreter_bias: usize,
@@ -2389,12 +2206,12 @@ private fn process_image_pair_probe(slot: borrow ProcessImageSlot[0],
     // GitHub issue #516: no target root is a refusal, not root 0. Seeding a
     // layout into root 0 here would write the kernel root's image record
     // (PID 1's, before #831).
-    let root: usize = match process_image_target_root_result() {
+    let root: usize = match process_image_root_checked(target) {
         ProcessImageTargetRootResult::Missing => {
             return ProcessImagePairProbeResult::Invalid;
         }
-        ProcessImageTargetRootResult::Ready(target) => {
-            process_image_root_index(target)
+        ProcessImageTargetRootResult::Ready(checked) => {
+            process_image_root_index(checked)
         }
     };
     // GitHub issue #591: the caller chooses the bias per primary now, so the
@@ -2409,7 +2226,7 @@ private fn process_image_pair_probe(slot: borrow ProcessImageSlot[0],
     process_image_set_stack_top_page(root, evidence, process_stack_top_page());
     process_image_set_stack_low_page(root, evidence, PROCESS_STACK_LOW_DYNAMIC);
     process_image_set_heap_page_count(root, evidence, PROCESS_HEAP_PAGES_DEFAULT);
-    match process_image_map_segments(slot, primary, 0, 0) {
+    match process_image_map_segments(slot, target, primary, 0, 0) {
         ProcessImageSegmentsResult::Invalid => {
             return ProcessImagePairProbeResult::Invalid;
         }
@@ -2425,7 +2242,7 @@ private fn process_image_pair_probe(slot: borrow ProcessImageSlot[0],
                 }
             }
             match process_image_map_segments(
-                    slot, interpreter, interpreter_bias, primary_count) {
+                    slot, target, interpreter, interpreter_bias, primary_count) {
                 ProcessImageSegmentsResult::Invalid => {
                     return ProcessImagePairProbeResult::Invalid;
                 }
@@ -2447,27 +2264,27 @@ private fn process_image_pair_probe(slot: borrow ProcessImageSlot[0],
                     // the measured numbers for that pair.
                     if (heap_last_page >=
                         process_image_record_read(root).stack_low_page) {
-                        process_image_cleanup();
+                        process_image_cleanup_root(target);
                         return ProcessImagePairProbeResult::Invalid;
                     }
                     let mut mapped: usize = total;
                     for l3_index: usize in heap_first_page..<heap_last_page {
-                        if (process_image_pte_read(l3_index) != 0) {
-                            process_image_cleanup();
+                        if (process_image_pte_read(target, l3_index) != 0) {
+                            process_image_cleanup_root(target);
                             return ProcessImagePairProbeResult::Invalid;
                         }
                         match page_alloc(PageOwnerTag::UserPage) {
                             PageAllocResult::OutOfMemory => {
-                                process_image_cleanup();
+                                process_image_cleanup_root(target);
                                 return ProcessImagePairProbeResult::Invalid;
                             }
                             PageAllocResult::Allocated(heap_page) => {
                                 let bytes = page_bytes(heap_page);
                                 for i: usize in 0..<4096 { bytes[i] = 0; }
-                                if (process_image_install_page(
+                                if (process_image_install_page(target,
                                         heap_page, l3_index,
                                         USER_RW_XN_FLAGS) == false) {
-                                    process_image_cleanup();
+                                    process_image_cleanup_root(target);
                                     return ProcessImagePairProbeResult::Invalid;
                                 }
                                 mapped = mapped + 1;
@@ -2483,22 +2300,22 @@ private fn process_image_pair_probe(slot: borrow ProcessImageSlot[0],
                             process_stack_top_page() -
                             (PROCESS_DYNAMIC_STACK_INITIAL_PAGES - 1)..<
                             process_stack_top_page() {
-                        if (process_image_pte_read(l3_index) != 0) {
-                            process_image_cleanup();
+                        if (process_image_pte_read(target, l3_index) != 0) {
+                            process_image_cleanup_root(target);
                             return ProcessImagePairProbeResult::Invalid;
                         }
                         match page_alloc(PageOwnerTag::UserPage) {
                             PageAllocResult::OutOfMemory => {
-                                process_image_cleanup();
+                                process_image_cleanup_root(target);
                                 return ProcessImagePairProbeResult::Invalid;
                             }
                             PageAllocResult::Allocated(stack_page) => {
                                 let bytes = page_bytes(stack_page);
                                 for i: usize in 0..<4096 { bytes[i] = 0; }
-                                if (process_image_install_page(
+                                if (process_image_install_page(target,
                                         stack_page, l3_index,
                                         USER_RW_XN_FLAGS) == false) {
-                                    process_image_cleanup();
+                                    process_image_cleanup_root(target);
                                     return ProcessImagePairProbeResult::Invalid;
                                 }
                                 mapped = mapped + 1;
@@ -2507,7 +2324,7 @@ private fn process_image_pair_probe(slot: borrow ProcessImageSlot[0],
                     }
                     match page_alloc(PageOwnerTag::UserPage) {
                         PageAllocResult::OutOfMemory => {
-                            process_image_cleanup();
+                            process_image_cleanup_root(target);
                             return ProcessImagePairProbeResult::Invalid;
                         }
                         PageAllocResult::Allocated(stack) => {
@@ -2516,14 +2333,14 @@ private fn process_image_pair_probe(slot: borrow ProcessImageSlot[0],
                                     argv, argc) {
                                 ProcessImageStackResult::Invalid => {
                                     page_free(stack);
-                                    process_image_cleanup();
+                                    process_image_cleanup_root(target);
                                     return ProcessImagePairProbeResult::Invalid;
                                 }
                                 ProcessImageStackResult::Ready => {
-                                        if (process_image_install_page(
+                                        if (process_image_install_page(target,
                                                 stack, process_stack_top_page(),
                                                 USER_RW_XN_FLAGS) == false) {
-                                            process_image_cleanup();
+                                            process_image_cleanup_root(target);
                                             return ProcessImagePairProbeResult::Invalid;
                                         }
                                         mapped = mapped + 1;
@@ -2545,14 +2362,14 @@ private fn process_image_pair_probe(slot: borrow ProcessImageSlot[0],
                         let heap_limit: usize =
                             USER_TEXT_VA + heap_last_page * PAGE_SIZE;
                         let mut pages: ProcessImagePages[1] = {
-                            image, mapped, entry, stack_pointer,
+                            image, target, mapped, entry, stack_pointer,
                             heap_start, heap_limit
                         };
                         process_image_set_active_page_count(root, evidence, mapped);
                         process_image_set_stack_growth_active(root, evidence, true);
                         return ProcessImagePairProbeResult::Ready(pages);
                     }
-                    process_image_cleanup();
+                    process_image_cleanup_root(target);
                     return ProcessImagePairProbeResult::Invalid;
                 }
             }
@@ -2582,30 +2399,30 @@ fn process_image_pair_map_ext2_in_root(
         address_space_is_live(target) == false) {
         return ProcessImagePairProbeResult::Invalid;
     }
-    process_image_set_target_root_here(target);
     let slot: ProcessImageSlot[0] = process_image_slot_acquire();
     process_image_set_source(
         slot, primary_mount, primary_inode, primary_length);
     process_image_set_pair_source(
         slot, interpreter_mount, interpreter_inode, interpreter_length);
     let result = process_image_pair_probe(
-        slot, primary, interpreter, interpreter_bias, argv, argc);
+        slot, target, primary, interpreter, interpreter_bias, argv, argc);
     process_image_slot_release(slot);
     return result;
 }
 
 private fn process_image_map_current(slot: borrow ProcessImageSlot[0],
+                             target: AddressSpaceRoot,
                              plan: DistroElfLoadPlan,
                              argv: borrow []const u8,
                              argc: usize) -> ProcessImageMapResult {
     // GitHub issue #516: the same refusal, through this function's own
     // "cannot map" case.
-    let root: usize = match process_image_target_root_result() {
+    let root: usize = match process_image_root_checked(target) {
         ProcessImageTargetRootResult::Missing => {
             return ProcessImageMapResult::InvalidImage;
         }
-        ProcessImageTargetRootResult::Ready(target) => {
-            process_image_root_index(target)
+        ProcessImageTargetRootResult::Ready(checked) => {
+            process_image_root_index(checked)
         }
     };
     let evidence = match process_image_record_ensure(root) {
@@ -2622,7 +2439,7 @@ private fn process_image_map_current(slot: borrow ProcessImageSlot[0],
         return ProcessImageMapResult::OutOfMemory;
     }
     let mut mapped: usize = 0;
-    match process_image_map_segments(slot, plan, 0, 0) {
+    match process_image_map_segments(slot, target, plan, 0, 0) {
         ProcessImageSegmentsResult::Invalid => {
             return ProcessImageMapResult::InvalidImage;
         }
@@ -2635,52 +2452,52 @@ private fn process_image_map_current(slot: borrow ProcessImageSlot[0],
     let heap_last_page: usize =
         heap_first_page + process_image_record_read(root).heap_page_count;
     if (heap_last_page >= process_image_record_read(root).stack_low_page) {
-        process_image_cleanup();
+        process_image_cleanup_root(target);
         return ProcessImageMapResult::OutOfMemory;
     }
     for l3_index: usize in heap_first_page..<heap_last_page {
-        if (process_image_pte_read(l3_index) != 0) {
-            process_image_cleanup();
+        if (process_image_pte_read(target, l3_index) != 0) {
+            process_image_cleanup_root(target);
             return ProcessImageMapResult::InvalidImage;
         }
         match page_alloc(PageOwnerTag::UserPage) {
             PageAllocResult::OutOfMemory => {
-                process_image_cleanup();
+                process_image_cleanup_root(target);
                 return ProcessImageMapResult::OutOfMemory;
             }
             PageAllocResult::Allocated(heap_page) => {
                 let bytes = page_bytes(heap_page);
                 for i: usize in 0..<4096 { bytes[i] = 0; }
-                if (process_image_install_page(
+                if (process_image_install_page(target,
                         heap_page, l3_index, USER_RW_XN_FLAGS) == false) {
-                    process_image_cleanup();
+                    process_image_cleanup_root(target);
                     return ProcessImageMapResult::OutOfMemory;
                 }
                 mapped = mapped + 1;
             }
         }
     }
-    if (process_image_pte_read(process_stack_top_page()) != 0) {
-        process_image_cleanup();
+    if (process_image_pte_read(target, process_stack_top_page()) != 0) {
+        process_image_cleanup_root(target);
         return ProcessImageMapResult::InvalidImage;
     }
     match page_alloc(PageOwnerTag::UserPage) {
         PageAllocResult::OutOfMemory => {
-            process_image_cleanup();
+            process_image_cleanup_root(target);
             return ProcessImageMapResult::OutOfMemory;
         }
         PageAllocResult::Allocated(stack) => {
             match process_image_prepare_stack(stack, plan, argv, argc) {
                 ProcessImageStackResult::Invalid => {
                     page_free(stack);
-                    process_image_cleanup();
+                    process_image_cleanup_root(target);
                     return ProcessImageMapResult::InvalidImage;
                 }
                 ProcessImageStackResult::Ready => {
-                        if (process_image_install_page(
+                        if (process_image_install_page(target,
                                 stack, process_stack_top_page(),
                                 USER_RW_XN_FLAGS) == false) {
-                            process_image_cleanup();
+                            process_image_cleanup_root(target);
                             return ProcessImageMapResult::OutOfMemory;
                         }
                         mapped = mapped + 1;
@@ -2696,7 +2513,7 @@ private fn process_image_map_current(slot: borrow ProcessImageSlot[0],
     let heap_start: usize = USER_TEXT_VA + heap_first_page * PAGE_SIZE;
     let heap_limit: usize = USER_TEXT_VA + heap_last_page * PAGE_SIZE;
     let mut pages: ProcessImagePages[0] = {
-        image, mapped, entry, stack_pointer, heap_start, heap_limit
+        image, target, mapped, entry, stack_pointer, heap_start, heap_limit
     };
     process_image_set_active_page_count(root, evidence, mapped);
     process_image_set_stack_growth_active(root, evidence, true);
@@ -2713,10 +2530,10 @@ fn process_image_map_ext2(plan: DistroElfLoadPlan,
                           file_length: usize,
                           argv: borrow []const u8,
                           argc: usize) -> ProcessImageMapResult {
-    process_image_set_target_root_here(address_space_boot_root());
+    let mut target: AddressSpaceRoot = address_space_boot_root();
     let slot: ProcessImageSlot[0] = process_image_slot_acquire();
     process_image_set_source(slot, mount, inode, file_length);
-    let result = process_image_map_current(slot, plan, argv, argc);
+    let result = process_image_map_current(slot, target, plan, argv, argc);
     process_image_slot_release(slot);
     return result;
 }
@@ -2733,10 +2550,9 @@ fn process_image_map_ext2_in_root(plan: DistroElfLoadPlan,
         address_space_is_live(target) == false) {
         return ProcessImageMapResult::InvalidImage;
     }
-    process_image_set_target_root_here(target);
     let slot: ProcessImageSlot[0] = process_image_slot_acquire();
     process_image_set_source(slot, mount, inode, file_length);
-    let result = process_image_map_current(slot, plan, argv, argc);
+    let result = process_image_map_current(slot, target, plan, argv, argc);
     process_image_slot_release(slot);
     return result;
 }
@@ -2772,40 +2588,23 @@ fn process_image_heap_range(pages: borrow ProcessImagePages[image])
     return (pages.heap_start, pages.heap_limit);
 }
 
-// GitHub issue #516: false, not "clear", when there is no target. Both
-// callers are boot-fixture assertions of the form `== false -> fail`, so
-// answering `clear` for a root nobody chose would pass an assertion about
-// nothing -- which is the shape the fallback to root 0 had, one step further
-// on: it answered about PID 1's live image instead.
-fn process_image_window_is_clear() -> bool !{unsafe} {
-    match process_image_target_root_result() {
-        ProcessImageTargetRootResult::Missing => { return false; }
-        ProcessImageTargetRootResult::Ready(root) => {
-            return address_space_user_window_is_clear(
-                process_image_root_space(root));
-        }
-    }
-}
-
-fn process_image_gap_is_unmapped() -> bool {
+fn process_image_gap_is_unmapped(pages: borrow ProcessImagePages[image]) -> bool {
+    let mut target: AddressSpaceRoot = pages.root;
     // Alpine BusyBox's first PT_LOAD ends at page 266 and its second starts at
     // page 285. Keeping this gap absent is part of the current fixture's VM
     // contract; it must not become zero-filled executable memory by accident.
     for i: usize in 266..<285 {
-        if (process_image_pte_read(i) != 0) { return false; }
+        if (process_image_pte_read(target, i) != 0) { return false; }
     }
     return true;
 }
 
 // GitHub issue #479. Twenty globals, and they fall into three kinds.
 //
-// ONE WAS THE WRONG SHAPE and is fixed. process_image_target_root plus its
-// explicit set flag name
-// the root an image operation is aimed at, set by one call and read by
-// another -- per-OPERATION state living in a global, which on two cores
-// means one answer held for two concurrent operations. It is an array
-// indexed by cpu_id() now, the same treatment execution_state and
-// address_space_active got.
+// ONE WAS THE WRONG SHAPE and is gone. process_image_target_root named the
+// root an image operation is aimed at, set by one call and read by another
+// -- per-OPERATION state living in a global. #479 made it per-CPU; #981 made
+// it a parameter of every reader, so no per-CPU or global copy remains.
 //
 // It had already produced a real fault with only one writer: issue #437's
 // RPi5-only failure was this variable left at 0 on wait4's fast path,
@@ -2818,9 +2617,8 @@ fn process_image_gap_is_unmapped() -> bool {
 // The missing-record fallback and its count are per-core, so one core cannot
 // overwrite another core's failure record.
 //
-// The target-root fallback count and last clone-reap page count are per-core
-// too. The former is summed for the boot diagnostic; the latter describes the
-// current core's most recent clone-reap event.
+// The stale-root fallback count is per-core too, summed for the boot
+// diagnostic.
 //
 // The pool initializer is shared but not concurrent: secondary-core startup
 // calls process_image_pool_init_before_secondary() before PSCI can make core 1
@@ -2829,7 +2627,7 @@ fn process_image_gap_is_unmapped() -> bool {
 // completion before another process can overwrite the same slot.
 fn process_image_execution_model_assumption() {
     static_assert(KERNEL_PREEMPTIBLE == 0,
-                  "process_image's target root is per-CPU, not per-task; before KERNEL_PREEMPTIBLE is 1 it must move into the process record or be saved at context switch (GitHub issue #638, flip item (a))");
+                  "process_image's per-CPU fallback counters are a read-modify-write of this CPU's element; before KERNEL_PREEMPTIBLE is 1 they must be per_cpu stores or atomic (GitHub issue #638)");
 }
 
 // Samples allocator metadata while holding only this pool allocation guard.

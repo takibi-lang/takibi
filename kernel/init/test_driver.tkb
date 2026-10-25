@@ -549,9 +549,6 @@ fn kernel_init_boot_fixture_poll(current_authority: borrow ProcessCurrent[curren
     kernel_boot_log(" max_ticks=");
     uart_put_udec(virtio_blk_completion_max());
     kernel_boot_log("\n");
-    kernel_boot_log("resources: image target root unset uses=");
-    uart_put_udec(process_image_root_unset_uses());
-    kernel_boot_log("\n");
     if (address_space_backing_missing_uses() != 0) {
         kernel_boot_log("address space: backings MISSING uses=");
         uart_put_udec(address_space_backing_missing_uses());
@@ -1263,15 +1260,6 @@ fn kernel_test_common_probes() !{unsafe} {
     // took a translation fault on its next push. So it runs here, among the
     // probes. Since #831 PID 1 has a root of its own and root 0 is only the
     // kernel's, which the boot thread runs on.
-    // GitHub issue #516: no reader answers about root 0 when no target is
-    // chosen. Reported as a `resources:` line so the process_lifecycle view
-    // asserts it on both platforms.
-    if (process_image_no_target_probe()) {
-        kernel_boot_log(
-            "resources: no image reader answers about root 0 with no target\n");
-    } else {
-        kernel_boot_log("resources: NO-TARGET IMAGE READER ANSWERED\n");
-    }
     clone_growth_probe_ok = process_image_clone_growth_probe();
     if (address_space_asid_rollover_probe()) {
         // The width is PRINTED, not asserted in the message: the view
@@ -1614,7 +1602,7 @@ private fn kernel_init_process_start(mount: Ext2Mount, image: Ext2ExecImage) !{u
             if (process_image_page_count(script_pages) == 401) {
                 kernel_boot_log("distro map: pages=401 rx+rw-xn heap+stack=rw+xn\n");
             }
-            if (process_image_gap_is_unmapped()) {
+            if (process_image_gap_is_unmapped(script_pages)) {
                 kernel_boot_log("distro load: file bytes match bss=zero gap=unmapped\n");
             }
             let entry: usize = process_image_entry(script_pages);

@@ -105,7 +105,7 @@ el0_sync_body:
 
 .Ldata_abort:
     mrs     x1, far_el1
-    bl      process_image_handle_data_abort
+    bl      kernel_process_handle_el0_data_abort
     cbz     x0, .Lsync_fail
     /* GitHub issue #920: every eret to EL0 resets the GIC priority mask to
      * unmasked; DAIF.I has been set since the exception entry. */

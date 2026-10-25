@@ -346,7 +346,7 @@ KERNEL_ASM_ENTRIES := main kernel_secondary_main \
 	kernel_syscall_block_return kernel_syscall_child_exec_return \
 	kernel_syscall_clone_child_return kernel_syscall_clone_parent_return \
 	kernel_syscall_dispatch kernel_syscall_resume_return \
-	process_image_handle_data_abort
+	kernel_process_handle_el0_data_abort
 KERNEL_DEBUGGER_ENTRIES := kernel_process_trace_report page_owner_description
 # GitHub issue #786: every kernel link removes the sections nothing reaches
 # (the compiler emits one section per function and data object under

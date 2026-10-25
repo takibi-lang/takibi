@@ -67,8 +67,7 @@ struct AddressSpaceRoot {
 // slot read back as 0 and looked up as a process record; with the types
 // apart, a root slot reaches a process only through
 // scheduled_process_slot_of_root, whose Kernel case the caller must answer.
-// Made from a root (address_space_root_slot), as the kernel's
-// (root_slot_kernel), or from a root word a table or snapshot kept
+// Made from a root (address_space_root_slot), or from a root word a table or snapshot kept
 // (root_slot_of_key).
 struct RootSlot {
     private word: usize;
@@ -82,19 +81,9 @@ inline fn root_slot_of_key(word: usize) -> RootSlot {
     return typed;
 }
 
-inline fn root_slot_kernel() -> RootSlot {
-    return root_slot_of_key(0);
-}
-
 // The numeric identity, for the per-root tables keyed by it and evidence.
 inline fn root_slot_word(slot: RootSlot) -> usize {
     return slot.word;
-}
-
-// Whether a root is the one a process runs on, which is how the EL0-return
-// check compares the image target with the record.
-inline fn root_slot_names_process(root: RootSlot, slot: ProcessSlot) -> bool {
-    return root.word != 0 && root.word == process_slot_address(slot);
 }
 
 struct AddressSpaceBacking {

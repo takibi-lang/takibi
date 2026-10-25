@@ -5093,6 +5093,7 @@ fn syscall_signal_frame_write(current_authority: borrow ProcessCurrent[current_p
     // and the range check below is what decides.
     let irq_flags: usize = mutex_irq_save();
     let grown: bool = process_image_handle_data_abort(
+        kernel_process_current_root(current_authority),
         SIGFRAME_STACK_GROWTH_ESR, base);
     mutex_irq_restore(irq_flags);
     match user_range_check_write(current_authority, base,
@@ -8079,6 +8080,9 @@ private fn syscall_clone_current(
     let mut clone_flags: usize = 0x11;
     let mut clone_stack: usize = 0;
     let mut parent_slot: ProcessSlot = kernel_syscall_process_slot();
+    // GitHub issue #981: the root the child's VM is copied from, named
+    // while current_authority is still the parent's.
+    let mut parent_space: AddressSpaceRoot = kernel_process_current_root(current_authority);
     // GitHub issue #245: kernel_process_clone_begin() now runs first
     // (it used to run last), since the address-space root and
     // fd-table slot the VM/fd clone steps below need are the new
@@ -8120,7 +8124,7 @@ private fn syscall_clone_current(
             }
             let mut child_space: AddressSpaceRoot = kernel_process_current_root(child_authority);
             let child_slot: usize = root_slot_word(address_space_root_slot(child_space));
-            match process_image_clone_vm_begin(child_space) {
+            match process_image_clone_vm_begin(parent_space, child_space) {
                 ProcessCloneVmResult::OutOfMemory => {
                     match kernel_process_clone_rollback(child_authority) {
                         ProcessCloneRollbackResult::Invalid => {

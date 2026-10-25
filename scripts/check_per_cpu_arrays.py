@@ -98,7 +98,6 @@ LISTED = {
     ("kernel/kernel/workload_evidence.tkb", "workload_profile_cores"): (CROSS, "the workload profile report"),
     ("kernel/mm/address_space.tkb", "address_space_backing_missing_count"): (CROSS, "the missing-backing total"),
     ("kernel/mm/process_image.tkb", "process_image_record_missing_count"): (CROSS, "the missing-record total"),
-    ("kernel/mm/process_image.tkb", "process_image_root_unset_count"): (CROSS, "the unset-root total"),
     ("kernel/mm/process_image.tkb", "process_image_root_stale_count"): (CROSS, "the stale-root total"),
     ("kernel/net/tcp.tkb", "tcp_absent_fallback_count"): (CROSS, "the absent-fallback total"),
     ("kernel/printk/log.tkb", "kernel_log_snapshots"): (CROSS, "DDB's log snapshots (#613)"),
@@ -107,9 +106,8 @@ LISTED = {
     ("kernel/printk/log.tkb", "kernel_log_storm_found"): (CROSS, "the log-storm report"),
     ("kernel/printk/log_ring_trace.tkb", "log_ring_trace_cpus"): (CROSS, "the log ring trace dump"),
     # Own-CPU only, left an ordinary array by decision or for now.
-    ("kernel/arch/arm64/boot/cpu.tkb", "irq_pmr_masked"): (PENDING, "PMR shadow: an out-of-range CPU must fall back to DAIF, not stop in the mint; revisited with #638 (#981)"),
+    ("kernel/arch/arm64/boot/cpu.tkb", "irq_pmr_masked"): (PENDING, "PMR shadow: an out-of-range CPU must fall back to DAIF, not stop in the mint; revisited with #638, option 2 of #981"),
     ("kernel/arch/arm64/boot/cpu.tkb", "irq_pmr_ready"): (PENDING, "PMR shadow, as irq_pmr_masked"),
-    ("kernel/mm/process_image.tkb", "process_image_contexts"): (PENDING, "per-operation target root held across may_block and read by the COW fault path; maintainer decision (#981)"),
     ("kernel/printk/log.tkb", "kernel_log_peer_probe_emitted"): (PENDING, "log.tkb waits for #613"),
 }
 

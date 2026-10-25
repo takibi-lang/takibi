@@ -4594,15 +4594,16 @@ private fn kernel_process_frame_belongs_to(
 // onto this CPU's IRQ stack. The interrupted process frame remains intact,
 // but the physical process stack is no longer in use and may become eligible
 // for another CPU once its logical state becomes Ready.
-// GitHub issue #468: three authorities answer "which address-space root is
-// active" -- the process record's own root, this CPU's software target root
-// (process_image.tkb), and TTBR0_EL1, which is what the hardware walks --
-// and #437's hardest bug was two of them disagreeing while each looked
-// valid. EL0 return is the one moment all three must name the same root,
-// and the last moment a disagreement is still a report rather than a user
-// access through the wrong page table. So they are compared here, on every
-// EL0 return, and a disagreement fail-stops with all three values. Not a
+// GitHub issue #468: authorities answer "which address-space root is
+// active" -- the process record's own root and TTBR0_EL1, which is what the
+// hardware walks -- and #437's hardest bug was two of them disagreeing while
+// each looked valid. EL0 return is the one moment they must name the same
+// root, and the last moment a disagreement is still a report rather than a
+// user access through the wrong page table. So they are compared here, on
+// every EL0 return, and a disagreement fail-stops with both values. Not a
 // counter: the fallback counter #437 had was healthy and wrong at once.
+// (A third authority, process_image's per-CPU target root, was removed by
+// #981: the fault path now takes the current record's root, this one.)
 //
 // Measured before it became a fail-stop: 6615 EL0 returns in one QEMU boot,
 // no disagreement.
@@ -4614,17 +4615,7 @@ private fn kernel_process_root_authorities_check(incoming: ProcessHandle,
     let record_l1: usize = address_space_l1_physical(
         scheduled_process_address_space_root_lookup(slot));
     let hardware_l1: usize = crash_snapshot_read_ttbr0_el1() & TTBR0_BADDR_MASK;
-    let mut target: RootSlot = root_slot_kernel();
-    let mut target_set: bool = false;
-    match process_image_target_root_peek() {
-        ProcessImageTargetRootResult::Missing => {}
-        ProcessImageTargetRootResult::Ready(root) => {
-            target = process_image_root_slot(root);
-            target_set = true;
-        }
-    }
-    if (record_l1 == hardware_l1 && target_set &&
-            root_slot_names_process(target, slot)) { return; }
+    if (record_l1 == hardware_l1) { return; }
     kernel_boot_log("oops: root authorities disagree at EL0 return: pid=");
     uart_put_udec(scheduled_process_pid_of_handle(incoming));
     kernel_boot_log(" slot=");
@@ -4633,16 +4624,7 @@ private fn kernel_process_root_authorities_check(incoming: ProcessHandle,
     uart_put_hex(record_l1);
     kernel_boot_log(" ttbr0_l1=");
     uart_put_hex(hardware_l1);
-    if (target_set == false) {
-        kernel_boot_log(" target=unset\n");
-    } else {
-        kernel_boot_log(" target_slot=");
-        uart_put_udec(root_slot_word(target));
-        kernel_boot_log(" target_l1=");
-        uart_put_hex(address_space_l1_physical(
-            scheduled_process_address_space_root_of(target)));
-        kernel_boot_log("\n");
-    }
+    kernel_boot_log("\n");
     kernel_invariant_stop_with_frame(frame);
 }
 
@@ -10753,6 +10735,36 @@ inline fn kernel_process_slot_of_current(
     return process_slot_of(handle.pool_index);
 }
 
+// GitHub issue #981: the root of the process current on this CPU, for a
+// caller with no ProcessCurrent to borrow (the EL0 data-abort entry, the
+// reaper's resume). Idle when no process is current. This replaced
+// process_image's per-CPU target root, which named the last root any
+// operation selected rather than the current process's.
+must_use variant CurrentRootHere { Idle; Root(AddressSpaceRoot); }
+
+fn kernel_process_current_root_here() -> CurrentRootHere !{unsafe} {
+    if (execution_state[execution_cpu_index()].current_live == false) {
+        return CurrentRootHere::Idle;
+    }
+    let mut slot: ProcessSlot = process_slot_of(
+        execution_state[execution_cpu_index()].current_handle.pool_index);
+    return CurrentRootHere::Root(
+        scheduled_process_address_space_root_lookup(slot));
+}
+
+// Called directly from el0_sync_entry for a lower-EL data abort: resolves it
+// against the current process's root. With no current process there is no
+// root to grow or copy into, so the fault is refused (and fail-stops there).
+fn kernel_process_handle_el0_data_abort(esr: usize, fault_address: usize)
+        -> bool !{unsafe} {
+    match kernel_process_current_root_here() {
+        CurrentRootHere::Idle => { return false; }
+        CurrentRootHere::Root(root) => {
+            return process_image_handle_data_abort(root, esr, fault_address);
+        }
+    }
+}
+
 fn kernel_process_current_root(current_authority: borrow ProcessCurrent[current_process, current_phase]) -> AddressSpaceRoot !{unsafe} {
     if (execution_state[execution_cpu_index()].current_live) {
         return scheduled_process_address_space_root_current(current_authority);
@@ -11255,13 +11267,11 @@ private fn kernel_process_reap_zombie(parent: ProcessHandle,
     // the IRQ stack and cleared current_live. It has already activated root
     // 0, and has no userspace root to restore after the ignored child is
     // reaped. Every ordinary syscall-context caller still preserves its root.
-    if (execution_state[execution_cpu_index()].current_live) {
-        match process_image_target_root_result() {
-            ProcessImageTargetRootResult::Missing => {}
-            ProcessImageTargetRootResult::Ready(target) => {
-                resume_root = process_image_root_space(target);
-                has_resume_root = true;
-            }
+    match kernel_process_current_root_here() {
+        CurrentRootHere::Idle => {}
+        CurrentRootHere::Root(current_root) => {
+            resume_root = current_root;
+            has_resume_root = true;
         }
     }
     // Move away from any root the reap may release before teardown starts.
