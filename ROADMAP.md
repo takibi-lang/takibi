@@ -102,8 +102,9 @@ safety and multicore backbone only. Taken in order whenever the numbered
 trunk items below have no step ready; an item that reaches a decision is
 parked and the next one taken:
 #958 (longest IRQ-masked span outside profile sessions), #959 (DDB's
-lock-free NIC RX pending), #966's follow-up (unmask the Mutex-based locks
-no interrupt reaches; #966 itself unmasked the fd and TCP pools). #980
+lock-free NIC RX pending), #1096 (the three locks #1071 left masked --
+spare stack, exec args, generated DMA owners -- and the RPi5 cost
+measurement; #966 and #1071 unmasked the rest). #980
 (reboot through the debug stop) is done (HISTORY.md). #799 waits under #954 until a site needs it.
 
 1. **Stored authority and the mint list (#637 stage 3).** Done since
