@@ -77,7 +77,9 @@ fn report_region(result: FdtMemoryRegionResult) {
     }
 }
 
-fn report_memory(result: FdtMemoryResult) !{unsafe} {
+// `blob` is the fixture's own address: the map exports no raw base
+// (GitHub issue #1018, the frame API rule).
+fn report_memory(result: FdtMemoryResult, blob: usize) !{unsafe} {
     match result {
         FdtMemoryResult::Invalid => { uart_puts("memory invalid\n"); }
         FdtMemoryResult::NotFound => { uart_puts("memory not found\n"); }
@@ -105,8 +107,8 @@ fn report_memory(result: FdtMemoryResult) !{unsafe} {
                 uart_puts("no\n");
             }
             uart_puts("blob overlap ");
-            if (fdt_blob_overlaps(found, fdt_blob_base(found), 1) &&
-                fdt_blob_overlaps(found, fdt_blob_base(found) + 4156, 1) ==
+            if (fdt_blob_overlaps(found, blob, 1) &&
+                fdt_blob_overlaps(found, blob + 4156, 1) ==
                     false) {
                 uart_puts("yes\n");
             } else {
@@ -368,21 +370,21 @@ fn app_main() !{unsafe} {
         invalid_gic_blob, bs"arm,cortex-a15-gic"));
     report_gic("invalid rpi5 gic", fdt_find_compatible_gicv2_regions(
         invalid_gic_blob, bs"arm,gic-400"));
-    report_memory(fdt_detect_memory(blob));
+    report_memory(fdt_detect_memory(blob), blob);
 
     let invalid_memory_blob: usize =
         (fdt_invalid_memory_fixture as *u8) as usize;
-    report_memory(fdt_detect_memory(invalid_memory_blob));
+    report_memory(fdt_detect_memory(invalid_memory_blob), invalid_memory_blob);
 
     let invalid_reservation_blob: usize =
         (fdt_invalid_reservation_fixture as *u8) as usize;
-    report_memory(fdt_detect_memory(invalid_reservation_blob));
+    report_memory(fdt_detect_memory(invalid_reservation_blob), invalid_reservation_blob);
 
     let invalid_tree_reservation_blob: usize =
         (fdt_invalid_tree_reservation_fixture as *u8) as usize;
-    report_memory(fdt_detect_memory(invalid_tree_reservation_blob));
+    report_memory(fdt_detect_memory(invalid_tree_reservation_blob), invalid_tree_reservation_blob);
 
     // One byte into the header the magic no longer matches, and every
     // reader refuses before it reads anything else.
-    report_memory(fdt_detect_memory(blob + 1));
+    report_memory(fdt_detect_memory(blob + 1), blob + 1);
 }
