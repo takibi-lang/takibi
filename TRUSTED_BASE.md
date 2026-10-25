@@ -252,6 +252,28 @@ rules globally.
   Buffer ownership, descriptor validity, device completion, cache topology,
   and the chosen protocol remain trusted unless represented by separate
   checked types and state transitions.
+  Relation to the DMA ownership model (GitHub issue #994 step 1,
+  2026-10-25; not yet confined): three groups, by what a call can break.
+  (a) Raw-pointer cache maintenance, `dma_prepare_tx` (clean) and
+  `dma_prepare_rx`/`dma_finish_rx` (invalidate): direct calls only in
+  `exception_evidence.tkb` (crash-snapshot writeback, mint-listed, no DMA
+  transition) and `usb_xhci.tkb` (two DCBAA cleans before the doorbell,
+  outside every ownership model by the #720 "DCBAA stays legacy" decision,
+  and not mint-listed); protocol and dma_fixed cache work reaches the same
+  lowerings only through generated wrappers (`__protocol_dma_*`) on their
+  checked publish/finish edges. This group is the address-taking authority
+  #637 would confine. (b) Zero-argument ordering (`dma_publish`,
+  `dma_consume`, `signal_fence`, `device_fence`, `dsb_ish`, `dsb_ishst`,
+  `isb`): called in virtio_blk, virtio_blk_dma, virtio_net (submit and
+  used-ring observation), uart_rx_ring, mmu, gicv2, timer, tcp, ext2
+  mutation_lock and log_ring_trace; a call names no address and cannot
+  break a type's claim, only its omission can, so a mint list would confine
+  the harmless direction and would re-list virtio_blk_dma.tkb, which #740
+  took off. (c) Ownership transitions (`dma_begin_*`,
+  `dma_finish_owned_*`): the #740 capability split itself; the finishing
+  calls are already confined per function by
+  `scripts/check_dma_mint_files.py`, so counting them would duplicate that
+  list.
 - Fixed DMA records (`struct dma_fixed`) carry buffer ownership in CPU and
   Device tokens, so the checker rejects CPU access while the device may
   use the buffer. What stays trusted is the observation that returns
