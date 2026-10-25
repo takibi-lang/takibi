@@ -324,8 +324,16 @@ private fn pipe_probe_wake() {
     let (answer, events) = pipe_probe_poll(read_end, POLLIN, false);
     let mut byte: [u8; 1];
     byte[0] = 0;
-    if (answer != 1 || events != POLLIN ||
-        svc5(READ_SYSCALL, read_end, byte as *u8 as usize, 1, 0, 0) != 1 ||
+    // The writer exits right after its byte, so by the time this process
+    // runs again the write end may be closed as well: POLLIN, with or
+    // without POLLHUP, as on Linux. Each way to fail says which it is.
+    if (answer != 1) {
+        pipe_probe_fail(bs"pipe-probe: a ppoll on an empty pipe returned without one ready descriptor\n");
+    }
+    if ((events & POLLIN) == 0 || (events & ~(POLLIN | POLLHUP)) != 0) {
+        pipe_probe_fail(bs"pipe-probe: a ppoll on an empty pipe woke with revents other than POLLIN and POLLHUP\n");
+    }
+    if (svc5(READ_SYSCALL, read_end, byte as *u8 as usize, 1, 0, 0) != 1 ||
         byte[0] != 0x52) {
         pipe_probe_fail(bs"pipe-probe: a ppoll on an empty pipe did not wake for the write on cpu 1\n");
     }
