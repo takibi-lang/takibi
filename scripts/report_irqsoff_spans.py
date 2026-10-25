@@ -43,6 +43,17 @@ COST_LINE = re.compile(
 # The lock wrappers a span closes through; the class is the first frame
 # outside them.
 WRAPPER = re.compile(r"^(mutex_|pool_lock_|irqsoff_)")
+# GitHub issue #1110: classes whose masked span is a deliberate experiment,
+# not a wait. Each is printed on its own `excluded` line and kept out of the
+# per-class list (and so out of #1093's thresholds); the core's `longest`
+# line stays the raw maximum. The controls check that every name here is
+# still a kernel function, so a rename cannot leave a stale entry.
+DELIBERATE = {
+    # #829: /bin/peer-sleep step 1 masks core 0 on purpose and spins,
+    # masked, until CPU 1's own tick wakes the sleeper (about 200 ms;
+    # up to 10 s) -- the evidence that per-CPU tick-wake lists work.
+    "workload_peer_sleep_progress": "#829 peer-sleep masks core 0 on purpose",
+}
 
 
 class Symbols:
@@ -143,11 +154,17 @@ def report(text: str, symbols, label: str) -> int:
         print(f"[{label}] irqsoff cpu{cpu}: longest {ticks} ticks "
               f"= {ticks / freq * 1e6:.1f} us")
     merged = fold(classes, symbols)
+    excluded = {key: merged.pop(key) for key in list(merged)
+                if key in DELIBERATE}
     for key, (ticks, cpu, names) in sorted(merged.items(),
                                            key=lambda item: -item[1][0]):
         print(f"[{label}] irqsoff class {key}: {ticks} ticks "
               f"= {ticks / freq * 1e6:.1f} us (cpu{cpu}; "
               f"{' <- '.join(names) or 'no frames'})")
+    for key, (ticks, cpu, _names) in sorted(excluded.items()):
+        print(f"[{label}] irqsoff excluded class {key}: {ticks} ticks "
+              f"= {ticks / freq * 1e6:.1f} us (cpu{cpu}; deliberate: "
+              f"{DELIBERATE[key]})")
     if costs:
         rounds = costs[0][0]
         pmr = min(cost[1] for cost in costs)

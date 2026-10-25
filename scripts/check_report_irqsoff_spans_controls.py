@@ -5,11 +5,15 @@ In process, over planted boot lines and a fake symbol table: the report
 folds each closing chain past the lock wrappers to its class, merges cores
 keeping the longest span, survives dmesg timestamps and repeated replays,
 and fails when the core line is missing, malformed, doubled with different
-numbers, or a class line has no core line.
+numbers, or a class line has no core line. #1110: a DELIBERATE class (the
+#829 peer-sleep span) is printed as excluded, not as a lock class; a near
+name is not excluded; every DELIBERATE name is still a kernel fn.
 """
 
 import contextlib
 import io
+import pathlib
+import re
 import sys
 
 from pass_line import report_pass
@@ -19,7 +23,9 @@ import report_irqsoff_spans as r
 class FakeSymbols:
     TABLE = {0x1000: "mutex_irq_restore", 0x2000: "mutex_release",
              0x3000: "pool_lock_release", 0x4000: "page_alloc_contiguous",
-             0x5000: "fd_table_close", 0x6000: "world_stop_machine_end"}
+             0x5000: "fd_table_close", 0x6000: "world_stop_machine_end",
+             0x7000: "workload_peer_sleep_progress",
+             0x8000: "workload_peer_sleep_pause"}
 
     def name(self, address):
         return self.TABLE.get(address & ~0xfff, f"0x{address:x}")
@@ -34,6 +40,10 @@ STOP0 = "RECORDED irqsoff class: cpu=0 ticks=50 to 0x6010 0x0 0x0"
 COST = ("irq mask cost: sample=1 rounds=4096 pmr=5886 daif=1478 "
         "sampled=6500 frequency=54000000")
 GOOD = [CORE0, PAGE0, STOP0, CORE1, PAGE1, FD1, COST]
+# #1110: the deliberate peer-sleep span, longer than every real class, and
+# its negative control: a near name the exclusion must not match.
+PEER0 = "RECORDED irqsoff class: cpu=0 ticks=9000 to 0x1008 0x7010 0x0"
+NEAR0 = "RECORDED irqsoff class: cpu=0 ticks=8000 to 0x1008 0x8010 0x0"
 
 
 def run(lines):
@@ -54,6 +64,12 @@ CASES = (
     ("timestamped replay passes",
      GOOD + ["[000004.000001] " + line for line in GOOD], 0,
      ["3 lock class(es)"]),
+    ("deliberate span excluded, still shown", GOOD + [PEER0], 0,
+     ["irqsoff excluded class workload_peer_sleep_progress: 9000 ticks",
+      "deliberate: #829", "3 lock class(es)"]),
+    ("near name is not excluded", GOOD + [NEAR0], 0,
+     ["irqsoff class workload_peer_sleep_pause: 8000 ticks",
+      "4 lock class(es)"]),
     ("no cost line still reports", GOOD[:-1], 0, ["3 lock class(es)"]),
     ("missing core line fails", [PAGE0], 1, ["without its core line"]),
     ("no lines at all fails", [COST], 1, ["#958"]),
@@ -82,6 +98,14 @@ def main():
             ordered.index("fd_table_close:") <
             ordered.index("world_stop_machine_end:")):
         failures.append("classes not printed longest first")
+    if "irqsoff class workload_peer_sleep_progress" in run(GOOD + [PEER0])[1]:
+        failures.append("deliberate class also listed as a lock class")
+    # Every exclusion still names a kernel function (no stale entry).
+    root = pathlib.Path(__file__).resolve().parent.parent / "kernel" / "kernel"
+    source = "".join(path.read_text() for path in root.glob("*.tkb"))
+    for name in r.DELIBERATE:
+        if not re.search(rf"\bfn {re.escape(name)}\(", source):
+            failures.append(f"DELIBERATE names {name}, no such kernel fn")
     if failures:
         for failure in failures:
             print(f"FAIL report-irqsoff-spans-controls: {failure}",
