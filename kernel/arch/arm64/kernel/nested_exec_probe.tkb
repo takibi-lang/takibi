@@ -33,9 +33,9 @@ fn nested_exec_probe() !{unsafe} {
     // differ from /etc/interp-other (ELIBBAD) in that one field, so a
     // validator that accepted them would answer ELIBBAD; the old kernel
     // answered by running BusyBox here, and this probe never printed ok.
-    if (svc5(NESTED_EXEC, "/etc/et-exec" as *u8 as usize,
+    if (svc5(NESTED_EXEC, "/nested/et-exec" as *u8 as usize,
              vector, 0, 0, 0) != 0xFFFFFFFFFFFFFFF8) { nested_fail(); }
-    if (svc5(NESTED_EXEC, "/etc/wide-span" as *u8 as usize,
+    if (svc5(NESTED_EXEC, "/nested/wide-span" as *u8 as usize,
              vector, 0, 0, 0) != 0xFFFFFFFFFFFFFFF8) { nested_fail(); }
     for index: usize in 1..<9 {
         args[index] = "extra" as *u8 as usize;
