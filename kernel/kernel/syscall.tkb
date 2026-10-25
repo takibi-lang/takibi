@@ -2766,8 +2766,11 @@ fn syscall_write_segment_with(slot: borrow SyscallSlot[0],
             if (kernel_syscall_file_writable(fd) == false) {
                 return SyscallIoResult::Errno(LINUX_EBADF);
             }
+            // GitHub issue #1092: a zero-length write to an ext2 or procfs
+            // file transfers nothing and changes nothing, as on Linux (and
+            // as syscall_pipe_write already does); it is not EINVAL.
             if (length == 0) {
-                return SyscallIoResult::Errno(LINUX_EINVAL);
+                return SyscallIoResult::Transferred(0);
             }
             // GitHub issue #497: /proc/takibi/profile, the one writable
             // procfs node, takes a command rather than file data; a command

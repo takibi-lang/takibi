@@ -203,6 +203,10 @@ fn initial_user_payload() !{unsafe} {
      * the bytes it covers and keeps the rest, size included. */
     let fd7: usize = svc5(56, 0, mutable_path as usize, 1, 0, 0);
     fail_if(fd7 != 3);
+    /* GitHub issue #1092: a zero-length write returns 0 (not EINVAL), even
+     * with a null buffer, and moves neither the offset nor the content:
+     * the "EX" write below still lands at offset 0. */
+    fail_if(svc5(64, fd7, 0, 0, 0, 0) != 0);
     fail_if(svc5(64, fd7, "EX" as *u8 as usize, 2, 0, 0) != 2);
     fail_if(svc5(57, fd7, 0, 0, 0, 0) != 0);
     let fd8: usize = svc5(56, 0, mutable_path as usize, 0, 0, 0);
