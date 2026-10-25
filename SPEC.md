@@ -2950,18 +2950,26 @@ storage are not stack-tied. General stack-derived raw-pointer lifetime
 tracking is not yet part of this rule.
 
 **Indexing**: `s[i]` needs no runtime check when `i`'s proven range
-satisfies `lo >= 0 && hi <= minimum`, or the bounded order-contract checker
-proves `i < s.len` for the current bindings. The latter also covers
-`prefix.len <= s.len && i < prefix.len`, an equality such as the
-fallthrough of `if (n != s.len) { return; }` followed by `i < n`, and
-immutable aliases of numeric values/lengths. When neither proves it, an index
-into an immutable slice binding is still trap-free when the linear path facts
-of "Initialization contracts" (branch conditions, loop counters, `min`
-bindings) entail `i < s.len`, with `i` a term whose steps do not wrap
-(GitHub issue #798): after `if (off >= s.len || s.len - off < 4) { return; }`
-the reads `s[off]` through `s[off + 3]` need no check. z3 re-checks each such
-proof as an index obligation under `--emit-range-obligations`. Index loads,
-stores and element addresses consume the same proof. Otherwise a runtime check against the actual `.len` is generated.
+satisfies `lo >= 0 && hi <= minimum`, or when one of two checkers proves
+`i < s.len`, chosen by the shape of the index (GitHub issue #1007):
+
+- An index into an immutable slice binding, with `i` a term whose steps do
+  not wrap, is decided by the linear path facts of "Initialization
+  contracts" alone (branch conditions joined by `&&` or `||`, loop
+  counters, `min` bindings, immutable `let` aliases of such values and of
+  lengths): it is trap-free when they entail `i < s.len` (GitHub issue
+  #798). After `if (off >= s.len || s.len - off < 4) { return; }` the reads
+  `s[off]` through `s[off + 3]` need no check; so does `s[i]` under
+  `if (i < s.len)`, or in `let n = s.len; for i in 0..<n`. z3 re-checks each
+  such proof as an index obligation under `--emit-range-obligations`.
+- Any other index (a mutable slice binding, a region count) is decided by
+  the bounded order-contract checker, which proves `i < s.len` for the
+  current bindings, including `prefix.len <= s.len && i < prefix.len`, an
+  equality such as the fallthrough of `if (n != s.len) { return; }`
+  followed by `i < n`, and immutable aliases of numeric values/lengths.
+
+Index loads, stores and element addresses consume the same proof.
+Otherwise a runtime check against the actual `.len` is generated.
 See "where constraints" for the supported relations and invalidation rules.
 
 **Length narrowing**: `if (s.len >= K) { ... }` upgrades the binding's
@@ -5377,8 +5385,9 @@ investigations behind any of these, see `HISTORY.md`.
   is not supported. The bounded order-contract graph supports the direct
   comparisons described under "where constraints", without a solver or
   runtime refinement bounds. `while (u < s.len) { s[u]; u = u + 1; }` is
-  proved by that graph (GitHub issue #797), and an offset expression by
-  the linear path facts (GitHub issue #798): `if (s.len - off >= 2)
+  trap-free (GitHub issue #797; for an immutable slice binding it is
+  decided by the linear path facts, GitHub issue #1007), and so is an
+  offset expression (GitHub issue #798): `if (s.len - off >= 2)
   { s[off + 1] }` is trap-free once `off <= s.len` is a fact too. A
   nonlinear index or a mutable slice binding keeps its check.
   `for x in s { ... }` sidesteps the question by never materializing an

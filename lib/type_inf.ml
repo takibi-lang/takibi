@@ -11327,13 +11327,20 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                   ~variant_cases:(Hashtbl.find_opt init_variants)
                   ~variant_payload:(fun v c -> Hashtbl.find_opt init_payloads (v, c))
                   ~linear_owner:(Hashtbl.mem init_linear)
-                  ~index_proven:(fun loc ->
-                    Hashtbl.mem runtime_slice_index_proven_at
-                      (overload_key fdef.name fdef.params, loc))
-                  ~prove_index:(fun loc ->
+                  ~decide_index:(fun loc ok ->
                     let key = (overload_key fdef.name fdef.params, loc) in
-                    Hashtbl.replace runtime_slice_index_proven_at key ();
-                    Hashtbl.remove range_fact_unavailable_at key)
+                    if ok then begin
+                      Hashtbl.replace runtime_slice_index_proven_at key ();
+                      Hashtbl.remove range_fact_unavailable_at key
+                    end else begin
+                      Hashtbl.remove runtime_slice_index_proven_at key;
+                      if not (Hashtbl.mem range_fact_unavailable_at key) then
+                        Hashtbl.replace range_fact_unavailable_at key
+                          "the linear path facts do not entail the index below \
+                           the slice length (#1007: an index into an immutable \
+                           slice binding is decided by the init-flow checker \
+                           alone)"
+                    end)
                   finfo fdef
               with
               | Types.TypeError (loc, msg) ->

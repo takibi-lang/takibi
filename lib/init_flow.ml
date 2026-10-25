@@ -139,8 +139,7 @@ let check
     ?(linear_owner : string -> bool = fun _ -> false)
     ?(variant_payload : string -> string -> Ast.type_expr option = fun _ _ -> None)
     ?(callee_ret : string -> Ast.type_expr option = fun _ -> None)
-    ?(index_proven : Ast.loc -> bool = fun _ -> true)
-    ?(prove_index : Ast.loc -> unit = fun _ -> ())
+    ?(decide_index : Ast.loc -> bool -> unit = fun _ _ -> ())
     (finfo : Types.func_info) (fdef : Ast.func) =
   let bindings = finfo.Types.bindings in
   (* GitHub issue #763: every independent error is recorded, in traversal
@@ -1045,14 +1044,18 @@ let check
         cur_vers := st.vers;
         finish st (side st rhs) in
   (* ---- expressions ------------------------------------------------------ *)
-  (* GitHub issue #798: an index into an immutable slice binding that the
-     runtime order graph (type_inf, lib/runtime_bounds.ml) left unproven is
-     discharged here when the path facts entail `j < b.len`, with [j] a
-     machine-value term (lin: no step wraps). Only the real check proves;
-     a loop's trial runs (in_trial) never do, since their head state is a
-     candidate. Each proof writes an index obligation z3 re-checks. *)
+  (* GitHub issues #798, #1007: an index into an immutable slice binding,
+     with [j] a machine-value term (lin: no step wraps), is decided here and
+     only here: proven when the path facts entail `j < b.len`. The runtime
+     order graph (type_inf, lib/runtime_bounds.ml) no longer decides this
+     shape; it keeps the shapes this checker does not read. Only the real
+     check decides; a loop's trial runs (in_trial) never do, since their
+     head state is a candidate. A site visited more than once is proven
+     only when every visit entails it. Each proof writes an index
+     obligation z3 re-checks. *)
+  let index_decisions : (Ast.loc, bool) Hashtbl.t = Hashtbl.create 8 in
   let slice_index (st : state) (b : Ast.expr) (j : Ast.expr) =
-    if not !in_trial && not (index_proven j.Ast.loc) then
+    if not !in_trial then
       match b.desc, Local_bindings.id_for_expr bindings b with
       | Ast.Var x, Some id
         when immutable_var x id
@@ -1064,13 +1067,16 @@ let check
                let f = Init_pred.normalize_facts st.eqs st.facts in
                let goal = Init_pred.normalize st.eqs
                    (Init_pred.sub (Init_pred.sub len t) (Init_pred.const 1)) in
-               if !Range_obligation.fault_index || Init_pred.entails f goal then begin
-                 prove_index j.Ast.loc;
-                 Range_obligation.record_text j.Ast.loc
+               let ok = !Range_obligation.fault_index || Init_pred.entails f goal in
+               let loc = j.Ast.loc in
+               let prior = Option.value ~default:true
+                   (Hashtbl.find_opt index_decisions loc) in
+               Hashtbl.replace index_decisions loc (prior && ok);
+               if ok then
+                 Range_obligation.record_text loc
                    (Init_pred.index_obligation
                       ~claim:(Printf.sprintf "%s < %s.len" (show t) x)
                       ~facts:st.facts st.eqs ~index:t ~len)
-               end
            | None -> ())
       | _ -> ()
   in
@@ -1768,6 +1774,21 @@ let check
           { v with off = Init_pred.add v.off (Option.get (lin st lo));
                    len = Some (len_atom id) };
         (st, false)
+    | Ast.Let (false, _, _, Some e, _)
+      when (match Local_bindings.ids_for_stmt bindings s with
+            | id :: _ -> immutable id && unsigned_id id
+            | [] -> false) ->
+        (* GitHub issue #1007: an immutable unsigned `let x = e` whose value
+           is a fact side (a constant, another immutable binding, a slice
+           length, a non-wrapping difference) is that term, as the runtime
+           order graph equated it: `let n = s.len; for i in 0..<n { s[i] }`. *)
+        let st = expr st e in
+        let id = List.hd (Local_bindings.ids_for_stmt bindings s) in
+        (match side st e with
+         | Some t ->
+             let t = Init_pred.normalize st.eqs t in
+             ({ st with eqs = st.eqs @ [("v" ^ string_of_int id, t)] }, false)
+         | None -> (st, false))
     | Ast.Let (_, _, _, Some e, _) | Ast.LetTuple (_, e) | Ast.Expr e
     | Ast.Yield e -> (expr st e, false)
     | Ast.Return eo ->
@@ -1980,6 +2001,7 @@ let check
      error fdef.Ast.def_loc
        "an initialization interval bound leaves the checker's integer range \
         (2^62); bound it with a smaller constant");
+  Hashtbl.iter decide_index index_decisions;
   match List.rev !errors with
   | [] -> ()
   | [(loc, msg)] -> raise (Types.TypeError (loc, msg))

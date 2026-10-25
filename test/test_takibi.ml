@@ -15965,6 +15965,43 @@ let codegen_tests = [
           return s[offset + 1];
         }");
 
+  (* GitHub issue #1007: an index into an immutable slice binding is
+     decided by Init_flow alone, so an index the runtime order graph also
+     proves (a plain `i < s.len` guard, a for counter bounded by a let
+     alias of s.len) now writes an index obligation for z3. *)
+  Alcotest.test_case "#1007 order-graph shapes are decided by entails" `Quick
+    (fun () ->
+      Hashtbl.reset Range_obligation.table;
+      Range_obligation.enabled := true;
+      Fun.protect ~finally:(fun () ->
+          Range_obligation.enabled := false;
+          Hashtbl.reset Range_obligation.table)
+        (fun () ->
+          expect_trap_sites 0
+            "fn f1007_guard(s: []const u8, i: usize) -> u8 {
+               if (i < s.len) { return s[i]; }
+               return 0;
+             }
+             fn f1007_alias(s: []usize) -> usize {
+               let n: usize = s.len;
+               let mut total: usize = 0;
+               for i: usize in 0..<n { total = total + s[i]; }
+               return total;
+             }" ();
+          let texts = Hashtbl.fold (fun _ (t, _) acc -> t :: acc)
+              Range_obligation.table [] in
+          let index = List.filter (fun t -> contains_substring t "; rule: index\n") texts in
+          Alcotest.(check int) "one index obligation per index" 2
+            (List.length index)));
+
+  Alcotest.test_case "#1007 a let alias of a guarded value is not the length" `Quick
+    (expect_trap_sites 1
+       "fn f1007_alias_short(s: []const u8, m: usize) -> u8 {
+          let n: usize = m;
+          if (n < s.len) { return s[n + 1]; }
+          return 0;
+        }");
+
   Alcotest.test_case "#798 a fact on an older version proves no index" `Quick
     (expect_trap_sites 1
        "fn f798_loop(bytes: []const u8) -> u8 {

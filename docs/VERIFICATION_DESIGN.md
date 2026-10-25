@@ -289,6 +289,15 @@ lib/runtime_bounds.ml. Stage 2 covers index bounds as well as init.
    sites: the getdents and procfs cursors.
 3. **Follow-up: retire the runtime order graph** for the cases `entails`
    covers, so one checker remains.
+   Done (#1007): Init_flow decides every index into an immutable slice
+   binding with a linear index (proven, or left to a runtime check); the
+   order graph decides only the other shapes (mutable slice bindings,
+   region counts, where clauses). Every kernel index the graph proved is
+   still proved; the one shape it covered that `entails` did not, an
+   immutable `let n = s.len` alias as a for bound, became the let-alias
+   equality rule (an immutable unsigned `let x = e` with e a fact side is
+   the equation x = e). Kernel index obligations: 42 (QEMU), 56 (RPi5),
+   0.25 s cold.
 
 #799 (static sizeof for enums, refined types and non-packed structs) is not
 in stage 2 and stays off ROADMAP until a site needs it.
