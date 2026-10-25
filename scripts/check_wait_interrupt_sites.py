@@ -43,6 +43,9 @@ ALLOWED = {
         1, "invalid-slot fallback: no scheduled process to block"),
     "syscall_io_action": (
         1, "maps syscall_read_uart's invalid-slot fallback"),
+    "syscall_finish_write": (
+        1, "pass-through: hands a write's own WaitInterrupt on unchanged "
+           "(#1042)"),
     "syscall_execve_current": (
         2, "pass-through of an exit with no successor"),
     "syscall_signal_deliver": (

@@ -89,7 +89,7 @@ def main() -> int:
     status, report = run(REPO)
     if status != 0:
         failures.append(f"the repository itself does not pass: {report.strip()!r}")
-    elif "13 process state and wait reason(s)" not in report:
+    elif "14 process state and wait reason(s)" not in report:
         failures.append(f"the repository passed about an unexpected "
                         f"vocabulary size: {report.strip()!r}")
 
@@ -105,8 +105,8 @@ def main() -> int:
         edit(PROCESS,
              "        ProcessWaitReason::UartTx => { result.wait_reason = 6; }",
              "        ProcessWaitReason::UartTx => { result.wait_reason = 6; }\n"
-             "        ProcessWaitReason::DiskIo => { result.wait_reason = 7; }"),
-        "names no 7")
+             "        ProcessWaitReason::DiskIo => { result.wait_reason = 8; }"),
+        "names no 8")
 
     # The word left behind after the enum case it stood for was renamed.
     failures += case(
@@ -119,7 +119,7 @@ def main() -> int:
     failures += case(
         "a name for a state that cannot occur",
         edit(DEBUGGER, '6 => { return "uart-tx"; }',
-             '6 => { return "uart-tx"; }\n        7 => { return "disk-io"; }'),
+             '6 => { return "uart-tx"; }\n        8 => { return "disk-io"; }'),
         "a word for a state that cannot occur")
 
     # The check reads process.tkb's own snapshot encoding. If that moves, the
