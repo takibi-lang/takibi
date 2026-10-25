@@ -71,7 +71,8 @@ struct no_copy Mutex { private word: AtomicWord; }
 // locks added on 2026-08-30 got this wrong. The last callers that needed one
 // (a lock embedded in recycled storage: the TCP connection frames lock and
 // the retransmit entry lock) became TaskMutex in #1071, whose
-// task_mutex_init is the init for that case.
+// task_mutex_init is the init for that case; linux_user's IntrusivePool
+// zero-fills its Mutex instead.
 
 // Takes it, and returns the interrupt state a matching release must
 // restore: 1 if IRQs were already masked, 0 if they were enabled.

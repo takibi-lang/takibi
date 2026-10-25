@@ -946,8 +946,10 @@ fn intrusive_pool_init_retaining(T: type, pool: &mut IntrusivePool(T) @ pool_id,
     pool.pool_tag = intrusive_pool_mix_tag(intrusive_pool_mint_tag());
     // Free. Re-initialising a pool that some core is inside would be a bug
     // this cannot detect, and is not a thing any caller does: init runs
-    // once, before the pool is reachable.
-    mutex_init(&(*pool).lock);
+    // once, before the pool is reachable. A zeroed Mutex is free
+    // (mutex_acquire asserts SPIN_LOCK_FREE == 0); kernel/lib/mutex.tkb has
+    // no init since #1071, when its last kernel caller became a TaskMutex.
+    zero_fill(&(*pool).lock);
     pool.chunk_head = 0;
     pool.partial_head = 0;
     pool.empty_chunk_count = 0;
