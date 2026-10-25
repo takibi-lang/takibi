@@ -37,7 +37,9 @@ as matching Linux or as a known divergence naming its issue (GitHub issue
 when `/lib/ext2-eq.enable` exists: `scripts/run_kernel_qemutest.sh`, the one runner
 that compares the rows, plants it in its copy of the disk (and not under
 `KERNEL_QEMU_EXT2_EQ=off`, which the race-window lanes set), so no other
-lane pays for them (#1075). The
+lane pays for them (#1075). The same runner plants the sparse
+doubly-indirect `/lib/ext2-eq-dind` (`ext2_eq.py fixture`) that row
+`truncate_dind` adopts, since the kernel cannot write one (#1021). The
 expected log is host Linux's: `make linuxcheck` runs the same script under
 the pinned BusyBox in qemu-aarch64 user mode and refuses a committed
 `host.expected` that differs. After the qemu-main session the runner writes
