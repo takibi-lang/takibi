@@ -111,8 +111,9 @@ debug stop). #799 waits under #954 until a site needs it.
    `IoHandle` as `usb_xhci` did (#720), which is also "drivers out of the
    frame" in #1017; then section regions (#777, awaiting its decision) take
    `stack_poison.tkb`'s last integer ranges and the DTB blob. The frame API
-   rule #1018 (a mint file's public function returns a capability type,
-   never a raw pointer) is a list-file check B can land now. `make
+   rule holds as `scripts/check_frame_api.py` (#1018, done 2026-10-25):
+   eight ratchet exports remain, two of them (`mmu_user_l3_physical`,
+   `fdt_memory_first_base`) to owners under #637. `make
    raw-site-counts` picks the next file. #750 (consolidating the built-ins)
    follows #732.
 2. **The process record.** Threads sharing an address space are #742
@@ -172,8 +173,8 @@ next one taken. The done record of the previous queue is in HISTORY.md
    done 2026-10-25) and #1028 (other address-taking intrinsics); #1031 slice 1 (classify the 119
    `kernel_invariant_stop` sites and ratchet them; done 2026-10-25,
    `scripts/invariant_stop_sites.tsv`: 120 sites, frame 31, unmodelled 18,
-   ladder 71); #1018 (the frame API
-   rule as a list-file check); #986 slice 1 (the trust ledger as a dated
+   ladder 71); #1018 (the frame API rule as a list-file check; done
+   2026-10-25, 8 ratchet entries); #986 slice 1 (the trust ledger as a dated
    checkpoint series, each row attributed to the rule that retired it).
 1. **Verification (#954; B owns the refinement code).** The rest of #954
    stage 2 (docs/VERIFICATION_DESIGN.md, "Stage 2 scope"), then #955's
