@@ -2989,6 +2989,23 @@ let infer_tests = [
         Alcotest.(check bool) ("matrix row for " ^ name) true
           (contains_substring matrix (Printf.sprintf "| `%s` |" name))) names);
 
+  Alcotest.test_case "EFFECTS.md lists every checker-only word (#850)" `Quick
+    (fun () ->
+      let matrix = Effect_rules.markdown () in
+      List.iter (fun w ->
+        Alcotest.(check bool) ("row for " ^ w.Effect_rules.pattern) true
+          (contains_substring matrix
+             (Printf.sprintf "| `%s` |" w.Effect_rules.pattern))) Effect_rules.checker_words;
+      List.iter (fun (name, expected) ->
+        Alcotest.(check bool) ("dynamic_rule " ^ name) expected
+          (Effect_rules.dynamic_rule name <> None))
+        [ "acquires_lock_3_proc", true; "lock_guard_0_x", true;
+          "irq_masking_guard", true; "masks_irq", true;
+          "invalidates_Proc", true; "record_mutates_K", true;
+          "changes_witness_K", true; "loan_transfer", true;
+          "acquires_lock_x", false; "invalidates_", false;
+          "not_a_word", false ]);
+
   Alcotest.test_case "effect exclusion table is enforced by declarations" `Quick
     (fun () ->
       List.iter (fun rule -> List.iter (fun forbidden ->

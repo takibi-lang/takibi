@@ -105,20 +105,86 @@ let witness_change_annotation name =
 (* A private, checked source-loan to destination-authority return boundary. *)
 let loan_transfer_annotation = "loan_transfer"
 
+(* GitHub issue #850: the checker-only words, one row each. `dynamic_rule`
+   accepts exactly the words this table matches, and `markdown` prints it
+   into EFFECTS.md, so a new word changes that tracked contract document
+   (DECISIONS.md 2026-10-24: no new such word). *)
+type checker_word = {
+  pattern : string;
+  matches : string -> bool;
+  marks : string;
+  read_by : string;
+  replaced_by : string;
+}
+
+let exact word name = String.equal name word
+let some f name = f name <> None
+
+let checker_words = [
+  { pattern = "acquires_lock_<rank>_<name>";
+    matches = some lock_acquire_annotation;
+    marks = "a function that acquires the ranked lock class <name>";
+    read_by = "lock rank order";
+    replaced_by = "ranked lock token (#789)" };
+  { pattern = "lock_guard_<rank>_<name>";
+    matches = some lock_guard_annotation;
+    marks = "a function returning the linear guard of lock class <name>";
+    read_by = "lock rank order";
+    replaced_by = "ranked lock token (#789)" };
+  { pattern = "single_instance_lock";
+    matches = exact single_instance_lock_annotation;
+    marks = "an acquisition whose lock class has one instance";
+    read_by = "lock rank order, equal-rank self-deadlock (#694)";
+    replaced_by = "ranked lock token (#789)" };
+  { pattern = "irq_masking_guard";
+    matches = exact irq_masking_guard_annotation;
+    marks = "a function returning a guard that saved and masked IRQs";
+    read_by = "IRQ restoration (#528)";
+    replaced_by = "IrqState token (#638, #850)" };
+  { pattern = "restores_saved_irq";
+    matches = exact restores_saved_irq_annotation;
+    marks = "the trusted restore of a state its caller saved";
+    read_by = "IRQ restoration (#528)";
+    replaced_by = "IrqState token (#638, #850)" };
+  { pattern = "masks_irq";
+    matches = exact masks_irq_annotation;
+    marks = "a call read as msr_daifset_irq (GIC PMR mask); body trusted";
+    read_by = "IRQ restoration and IRQ flow (#528, #809, #920)";
+    replaced_by = "IrqState token (#638, #850)" };
+  { pattern = "starts_debug_stop";
+    matches = exact starts_debug_stop_annotation;
+    marks = "the function that begins the debug/crash stop";
+    read_by = "debug-stop callers must be debug_stopped roots (#920)";
+    replaced_by = "IrqState token (#638, #850)" };
+  { pattern = "invalidates_<Type>";
+    matches = some invalidation_annotation;
+    marks = "a call after which a plain <Type> handle may be destroyed";
+    read_by = "effect-indexed invalidation (#493)";
+    replaced_by = "witness and authority types (#850)" };
+  { pattern = "handle_of_witness";
+    matches = exact handle_of_witness_annotation;
+    marks = "the trusted accessor from a live witness to its handle";
+    read_by = "effect-indexed invalidation (#493)";
+    replaced_by = "witness and authority types (#850)" };
+  { pattern = "record_mutates_<Kind>";
+    matches = some record_mutation_annotation;
+    marks = "a destructive boundary keyed by an indexed authority kind";
+    read_by = "record mutation";
+    replaced_by = "witness and authority types (#850)" };
+  { pattern = "changes_witness_<Kind>";
+    matches = some witness_change_annotation;
+    marks = "a logical-context replacement of linear witness kind <Kind>";
+    read_by = "witness change";
+    replaced_by = "witness and authority types (#850)" };
+  { pattern = "loan_transfer";
+    matches = exact loan_transfer_annotation;
+    marks = "a checked source-loan to destination-authority return";
+    read_by = "loan transfer";
+    replaced_by = "witness and authority types (#850)" };
+]
+
 let dynamic_rule name =
-  let checker_only =
-    lock_acquire_annotation name <> None
-    || lock_guard_annotation name <> None
-    || name = irq_masking_guard_annotation
-    || name = single_instance_lock_annotation
-    || name = restores_saved_irq_annotation
-    || name = masks_irq_annotation
-    || name = starts_debug_stop_annotation
-    || invalidation_annotation name <> None
-    || name = handle_of_witness_annotation
-    || record_mutation_annotation name <> None
-    || witness_change_annotation name <> None
-    || name = loan_transfer_annotation in
+  let checker_only = List.exists (fun w -> w.matches name) checker_words in
   if not checker_only then None else Some {
       name; declaration = Required; declaration_role = false;
       function_pointer = false; propagates = false;
@@ -263,4 +329,9 @@ let markdown () =
   Buffer.add_string b (String.concat ", " (List.map (Printf.sprintf "`%s`") effect_free_forbidden));
   Buffer.add_string b
     ". `locks` propagates and is forbidden by `!{}`, but is intentionally allowed from `interrupt` and `exception` roots; an `nmi` root forbids it.\n";
+  Buffer.add_string b
+    "\n# Checker-only words\n\nAccepted in an explicit `!{...}` row only; never in a function-pointer row, never propagated. No new word is added (DECISIONS.md, 2026-10-24); each row migrates to the replacing type.\n\n| Word | Marks | Read by | Replaced by |\n| --- | --- | --- | --- |\n";
+  List.iter (fun w ->
+    Printf.bprintf b "| `%s` | %s | %s | %s |\n"
+      w.pattern w.marks w.read_by w.replaced_by) checker_words;
   Buffer.contents b

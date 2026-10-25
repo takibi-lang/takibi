@@ -21,3 +21,22 @@
 | `noreturn` | trusted extern only | no | no | no | - | - | allowed | allowed |
 
 A bare `!{}` contract forbids the transitive effects: `may_block`, `allocates`, `locks`, `logs`. `locks` propagates and is forbidden by `!{}`, but is intentionally allowed from `interrupt` and `exception` roots; an `nmi` root forbids it.
+
+# Checker-only words
+
+Accepted in an explicit `!{...}` row only; never in a function-pointer row, never propagated. No new word is added (DECISIONS.md, 2026-10-24); each row migrates to the replacing type.
+
+| Word | Marks | Read by | Replaced by |
+| --- | --- | --- | --- |
+| `acquires_lock_<rank>_<name>` | a function that acquires the ranked lock class <name> | lock rank order | ranked lock token (#789) |
+| `lock_guard_<rank>_<name>` | a function returning the linear guard of lock class <name> | lock rank order | ranked lock token (#789) |
+| `single_instance_lock` | an acquisition whose lock class has one instance | lock rank order, equal-rank self-deadlock (#694) | ranked lock token (#789) |
+| `irq_masking_guard` | a function returning a guard that saved and masked IRQs | IRQ restoration (#528) | IrqState token (#638, #850) |
+| `restores_saved_irq` | the trusted restore of a state its caller saved | IRQ restoration (#528) | IrqState token (#638, #850) |
+| `masks_irq` | a call read as msr_daifset_irq (GIC PMR mask); body trusted | IRQ restoration and IRQ flow (#528, #809, #920) | IrqState token (#638, #850) |
+| `starts_debug_stop` | the function that begins the debug/crash stop | debug-stop callers must be debug_stopped roots (#920) | IrqState token (#638, #850) |
+| `invalidates_<Type>` | a call after which a plain <Type> handle may be destroyed | effect-indexed invalidation (#493) | witness and authority types (#850) |
+| `handle_of_witness` | the trusted accessor from a live witness to its handle | effect-indexed invalidation (#493) | witness and authority types (#850) |
+| `record_mutates_<Kind>` | a destructive boundary keyed by an indexed authority kind | record mutation | witness and authority types (#850) |
+| `changes_witness_<Kind>` | a logical-context replacement of linear witness kind <Kind> | witness change | witness and authority types (#850) |
+| `loan_transfer` | a checked source-loan to destination-authority return | loan transfer | witness and authority types (#850) |
