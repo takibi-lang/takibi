@@ -1,6 +1,6 @@
 usb xhci: caplength=0x0000000000000020 rtsoff=0x0000000000000460 dboff=0x0000000000000500 max_ports=3 context_bytes=64
 usb msc: ready sector=512
-usb ext2: provisioned blocks=2816
+usb ext2: provisioned blocks=6144
 usb ext2: provision verify byte-equal
 usb xhci: irq rotating, taken on at least two cpus
 rootfs: ext2 on usb

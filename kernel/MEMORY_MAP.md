@@ -155,7 +155,7 @@ the one row `--update` refuses to move for you.
 
 | Span | Ceiling | State |
 |---|---|---|
-| `usable_ram_start` - `_start` | `0x00540000` | CHECKED (ELF ceiling) |
+| `usable_ram_start` - `_start` | `0x00880000` | CHECKED (ELF ceiling) |
 
 Raised from `0x400000` on 2026-09-12, when reserving boot and per-core
 stacks for cores 2 and 3 took RPi5 to `0x408000` (4.03 MiB). QEMU was
@@ -185,6 +185,15 @@ pools (#638) added about 3.3 KiB of RPi5 code and the image end crossed its
 next 32 KiB step to `0x520000`. The growth is code (wrappers that acquire and
 release a slot around each scratch-using handler), plus 64 bytes of slot
 words; the staging buffers themselves only moved. About 0.02 s more SWD time.
+
+Raised from `0x540000` to `0x880000` on 2026-10-25 by the maintainer's
+decision on GitHub issue #742 (option b: one board build, the rootfs sized
+from content), when the fixture root filesystem grew from 2816 to 6144
+blocks (6 MiB) to hold stress-ng and hackbench beside BusyBox and the
+existing fixtures, with about 517 blocks free. The image is embedded in
+`.data`, so this growth is 3.25 MiB of file bytes: roughly 18 s more SWD
+transfer on each RPi5 lane run. The ceiling leaves 160 KiB above the
+0x858000 the build reached.
 
 What the span costs is not one number. The RPi5 lane loads the ELF with
 OpenOCD's `load_image ... elf`, which writes each LOAD segment's file

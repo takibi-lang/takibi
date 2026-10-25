@@ -6,10 +6,8 @@ programs Linux distributions ship -- BusyBox `xargs -P`, stress-ng's fork,
 pipe and exec stressors, hackbench -- and no threads. /bin/load.sh runs
 them; this runner boots the interactive shell under a pty, as
 run_kernel_churn.py does, types `load.sh SECONDS JOBS LOOPS PHASE...`, and
-reads one result per phase. On QEMU the root is the load image
-(`kernel/build/user/ext2-load.img`, 8 MiB, with stress-ng and hackbench);
-on the RPi5 it is the ordinary shell image, whose 2.75 MiB extent holds
-load.sh and the BusyBox phase only.
+reads one result per phase. Both platforms boot the same interactive
+shell rootfs, which holds stress-ng and hackbench beside BusyBox.
 
 It is a FINDER, not a check, and it is in no aggregate. A clean run proves
 nothing about a rare window and is never the evidence a defect is fixed;
@@ -44,7 +42,6 @@ from qemu_vcpu_lease import lease, shell_vcpus
 
 
 REPO_ROOT = churn.REPO_ROOT
-LOAD_IMAGE = os.path.join(REPO_ROOT, "kernel/build/user/ext2-load.img")
 # /bin/load.sh's phases, in the order it runs those asked for, and its last
 # line. The prefixes are fixed
 # strings so scripts/check_kernel_log_expectations.py can hold them to the
@@ -60,16 +57,10 @@ PHASE_WAITS = {
     "pipe": "#1041 and #1042 (pipe2)",
     "hackbench": "#1042 (pipe2)",
 }
-# The board's rootfs is the 2.75 MiB extent the kernel embeds and exposes
-# (KERNEL_EXT2_IMAGE_LEN); stress-ng alone is 3 MiB. Growing it changes the
-# board image for every lane, so it waits for a decision.
-RPI5_PHASE_WAITS = {
-    name: "a board rootfs larger than its 2.75 MiB extent (a decision)"
-    for name in PHASES if name != "xargs"}
 
 
 def phase_waits(platform):
-    return RPI5_PHASE_WAITS if platform == "rpi5" else PHASE_WAITS
+    return PHASE_WAITS
 
 
 def default_phases(platform):
@@ -370,9 +361,6 @@ def main():
         parser.error("phases must come from " + ",".join(PHASES))
     if min(args.seconds, args.jobs, args.loops) <= 0 or args.stall_seconds < 0:
         parser.error("seconds, jobs and loops must be positive")
-    if args.platform == "qemu" and not os.path.isfile(LOAD_IMAGE):
-        parser.error(f"{os.path.relpath(LOAD_IMAGE, REPO_ROOT)} is missing; "
-                     "run make load-qemu")
     stall_seconds = args.stall_seconds or max(600, 3 * args.seconds + 300)
     # GitHub issue #719: hold the shell runner's vCPUs before any deadline
     # starts; the runner below finds them on its ancestor.
@@ -394,7 +382,6 @@ def main():
         os.environ.pop("KERNEL_SHELL_TRANSCRIPT", None)
         if args.platform == "qemu":
             os.environ["KERNEL_QEMU_SHELL_ARTIFACT_DIR"] = artifact_dir
-            os.environ["KERNEL_QEMU_SHELL_EXT2_IMAGE"] = LOAD_IMAGE
             os.environ["KERNEL_QEMU_SHELL_SKIP_NETWORK"] = "1"
             os.execvp("bash", ["bash", "scripts/run_kernel_shell_qemu.sh"])
         # As run_kernel_churn.py: the board's shell runner, without the

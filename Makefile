@@ -939,13 +939,10 @@ KERNEL_TASKSET            := $(KERNEL_USER_BUILD_DIR)/taskset
 KERNEL_EXT2_FIXTURE_DIR  := $(KERNEL_DIR)/tests/ext2
 KERNEL_EXT2_IMAGE        := $(KERNEL_USER_BUILD_DIR)/ext2.img
 KERNEL_SHELL_EXT2_IMAGE  := $(KERNEL_USER_BUILD_DIR)/ext2-shell.img
-# GitHub issue #742 stage 1: the shell image (which carries /bin/load.sh and
-# /bin/load-job.sh, so the RPi5 shell has them too) grown to one full 8 MiB
-# block group, with stress-ng and hackbench added; the board's rootfs
-# extent is 2.75 MiB, so they are QEMU's only. Built only by the
-# load targets; the programs come from scripts/build_load_programs.sh, which
-# keeps its downloads in TAKIBI_LOAD_CACHE, outside the repository.
-KERNEL_LOAD_EXT2_IMAGE   := $(KERNEL_USER_BUILD_DIR)/ext2-load.img
+# GitHub issue #742 stage 1: stress-ng and hackbench, musl static PIEs from
+# scripts/build_load_programs.sh (downloads kept in TAKIBI_LOAD_CACHE,
+# outside the repository), live in the fixture rootfs itself, so QEMU and the
+# board boot the same load programs. The shell image adds /bin/load.sh.
 KERNEL_LOAD_PROGRAMS     := $(KERNEL_USER_BUILD_DIR)/load-programs
 KERNEL_RPI5_LINK_LD     := $(KERNEL_DIR)/arch/arm64/boot/link.ld
 KERNEL_INIT_TEST_DRIVER_TKB := $(KERNEL_DIR)/init/test_driver.tkb
@@ -1112,10 +1109,10 @@ KERNEL_EXT2_FAKE_TIME := 1700000000
 KERNEL_EXT2_IMAGES := $(KERNEL_EXT2_IMAGE) $(KERNEL_SHELL_EXT2_IMAGE)
 $(KERNEL_EXT2_IMAGES): export E2FSPROGS_FAKE_TIME := $(KERNEL_EXT2_FAKE_TIME)
 
-$(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT2_FIXTURE_DIR)/mutable.txt $(KERNEL_EXT2_FIXTURE_DIR)/index.html $(KERNEL_EXT2_FIXTURE_DIR)/about.html $(KERNEL_EXT2_FIXTURE_DIR)/icon.png $(KERNEL_EXT2_FIXTURE_DIR)/init.sh $(KERNEL_EXT2_FIXTURE_DIR)/httpd.sh $(KERNEL_EXT2_FIXTURE_DIR)/churn.sh $(KERNEL_EXT2_FIXTURE_DIR)/script-shebang.sh $(KERNEL_EXT2_FIXTURE_DIR)/script-interpreter-argument.sh $(KERNEL_EXT2_FIXTURE_DIR)/not-a-program $(KERNEL_EXT2_FIXTURE_DIR)/bad-interpreter.sh $(KERNEL_EXT2_FIXTURE_DIR)/crlf.sh $(KERNEL_EXT2_FIXTURE_DIR)/no-newline.sh $(KERNEL_EXT2_FIXTURE_DIR)/long-shebang.sh $(KERNEL_EXT2_FIXTURE_DIR)/inittab $(KERNEL_EXT2_FIXTURE_DIR)/large.txt $(KERNEL_RPI5_USER_PAYLOAD_ELF) $(KERNEL_BUSY_LOOP_A_ELF) $(KERNEL_BUSY_LOOP_B_ELF) $(KERNEL_BUSY_LOOP_PLACEMENT_REPORT_ELF) $(KERNEL_BUSY_LOOP_PLACEMENT_GUARD_ELF) $(KERNEL_BUSY_LOOP_PEER_SPIN_ELF) $(KERNEL_BUSY_LOOP_PEER_NET_WAKE_ELF) $(KERNEL_PEER_READ_ELF) $(KERNEL_CORE_READ_ELF) $(KERNEL_PEER_CONSOLE_ELF) $(KERNEL_PEER_TTY_ELF) $(KERNEL_PEER_SETTINGS_ELF) $(KERNEL_CLOEXEC_ELF) $(KERNEL_CLOEXEC_CHECK_ELF) $(KERNEL_PPOLL_PROBE_ELF) $(KERNEL_AFFINITY_ELF) $(KERNEL_SPREAD_ELF) $(KERNEL_MOVECOST_ELF) $(KERNEL_PEER_MUTATE_ELF) $(KERNEL_PROTOCOL_TRACE_ELF) $(KERNEL_PEER_EXEC_ELF) $(KERNEL_PEER_EXEC_IMAGE_ELF) $(KERNEL_PEER_FORK_ELF) $(KERNEL_PEER_SLEEP_ELF) $(KERNEL_SIGNAL_BOUNDARY_ELF) $(KERNEL_NESTED_EXEC_ELF) $(KERNEL_EXEC_ENOMEM_ELFS) $(KERNEL_SESSION_ELF) $(KERNEL_SESSION_CHECK_ELF) $(KERNEL_TERMINAL_ELF) $(KERNEL_NESTED_FIXTURES) $(KERNEL_BUSYBOX_STATIC) $(KERNEL_BUSYBOX_EXTRAS) $(KERNEL_MUSL_LOADER) $(KERNEL_TASKSET) scripts/make_interp_probe_elf.py | $(KERNEL_USER_BUILD_DIR)
+$(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT2_FIXTURE_DIR)/mutable.txt $(KERNEL_EXT2_FIXTURE_DIR)/index.html $(KERNEL_EXT2_FIXTURE_DIR)/about.html $(KERNEL_EXT2_FIXTURE_DIR)/icon.png $(KERNEL_EXT2_FIXTURE_DIR)/init.sh $(KERNEL_EXT2_FIXTURE_DIR)/httpd.sh $(KERNEL_EXT2_FIXTURE_DIR)/churn.sh $(KERNEL_EXT2_FIXTURE_DIR)/script-shebang.sh $(KERNEL_EXT2_FIXTURE_DIR)/script-interpreter-argument.sh $(KERNEL_EXT2_FIXTURE_DIR)/not-a-program $(KERNEL_EXT2_FIXTURE_DIR)/bad-interpreter.sh $(KERNEL_EXT2_FIXTURE_DIR)/crlf.sh $(KERNEL_EXT2_FIXTURE_DIR)/no-newline.sh $(KERNEL_EXT2_FIXTURE_DIR)/long-shebang.sh $(KERNEL_EXT2_FIXTURE_DIR)/inittab $(KERNEL_EXT2_FIXTURE_DIR)/large.txt $(KERNEL_RPI5_USER_PAYLOAD_ELF) $(KERNEL_BUSY_LOOP_A_ELF) $(KERNEL_BUSY_LOOP_B_ELF) $(KERNEL_BUSY_LOOP_PLACEMENT_REPORT_ELF) $(KERNEL_BUSY_LOOP_PLACEMENT_GUARD_ELF) $(KERNEL_BUSY_LOOP_PEER_SPIN_ELF) $(KERNEL_BUSY_LOOP_PEER_NET_WAKE_ELF) $(KERNEL_PEER_READ_ELF) $(KERNEL_CORE_READ_ELF) $(KERNEL_PEER_CONSOLE_ELF) $(KERNEL_PEER_TTY_ELF) $(KERNEL_PEER_SETTINGS_ELF) $(KERNEL_CLOEXEC_ELF) $(KERNEL_CLOEXEC_CHECK_ELF) $(KERNEL_PPOLL_PROBE_ELF) $(KERNEL_AFFINITY_ELF) $(KERNEL_SPREAD_ELF) $(KERNEL_MOVECOST_ELF) $(KERNEL_PEER_MUTATE_ELF) $(KERNEL_PROTOCOL_TRACE_ELF) $(KERNEL_PEER_EXEC_ELF) $(KERNEL_PEER_EXEC_IMAGE_ELF) $(KERNEL_PEER_FORK_ELF) $(KERNEL_PEER_SLEEP_ELF) $(KERNEL_SIGNAL_BOUNDARY_ELF) $(KERNEL_NESTED_EXEC_ELF) $(KERNEL_EXEC_ENOMEM_ELFS) $(KERNEL_SESSION_ELF) $(KERNEL_SESSION_CHECK_ELF) $(KERNEL_TERMINAL_ELF) $(KERNEL_NESTED_FIXTURES) $(KERNEL_BUSYBOX_STATIC) $(KERNEL_BUSYBOX_EXTRAS) $(KERNEL_MUSL_LOADER) $(KERNEL_TASKSET) $(KERNEL_LOAD_PROGRAMS)/stress-ng $(KERNEL_LOAD_PROGRAMS)/hackbench scripts/make_interp_probe_elf.py | $(KERNEL_USER_BUILD_DIR)
 	rm -f $@.tmp
-	truncate -s 2883584 $@.tmp
-	E2FSPROGS_FAKE_TIME=1700000000 mke2fs -q -t ext2 -b 1024 -I 128 -N 1024 -O none -F -U 00000000-0000-0000-0000-000000000177 -E hash_seed=00000000-0000-0000-0000-000000000890 $@.tmp 2816
+	truncate -s 6291456 $@.tmp
+	E2FSPROGS_FAKE_TIME=1700000000 mke2fs -q -t ext2 -b 1024 -I 128 -N 1024 -O none -F -U 00000000-0000-0000-0000-000000000177 -E hash_seed=00000000-0000-0000-0000-000000000890 $@.tmp 6144
 	debugfs -w -R 'mkdir /etc' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'mkdir /bin' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'mkdir /lib' $@.tmp >/dev/null 2>&1
@@ -1213,6 +1210,10 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 	debugfs -w -R 'set_inode_field /bin/busybox-extras mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /lib/ld-musl-aarch64.so.1 mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /bin/taskset mode 0100755' $@.tmp >/dev/null 2>&1
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_LOAD_PROGRAMS)/stress-ng $@.tmp:/bin/stress-ng
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_LOAD_PROGRAMS)/hackbench $@.tmp:/bin/hackbench
+	debugfs -w -R 'set_inode_field /bin/stress-ng mode 0100755' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/hackbench mode 0100755' $@.tmp >/dev/null 2>&1
 	# Execute-only file for the maintained access/faccessat R_OK and W_OK checks.
 	debugfs -w -R 'set_inode_field /etc/interp-absent mode 0100111' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /etc/interp-other mode 0100755' $@.tmp >/dev/null 2>&1
@@ -1303,19 +1304,6 @@ $(KERNEL_SHELL_EXT2_IMAGE): $(KERNEL_EXT2_IMAGE) \
 
 $(KERNEL_LOAD_PROGRAMS)/stress-ng $(KERNEL_LOAD_PROGRAMS)/hackbench &: scripts/build_load_programs.sh
 	bash scripts/build_load_programs.sh $(KERNEL_LOAD_PROGRAMS)
-
-$(KERNEL_LOAD_EXT2_IMAGE): $(KERNEL_SHELL_EXT2_IMAGE) \
-	$(KERNEL_LOAD_PROGRAMS)/stress-ng $(KERNEL_LOAD_PROGRAMS)/hackbench
-	cp $(KERNEL_SHELL_EXT2_IMAGE) $@.tmp
-	truncate -s 8388608 $@.tmp
-	resize2fs -f $@.tmp 8192 >/dev/null 2>&1
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_LOAD_PROGRAMS)/stress-ng $@.tmp:/bin/stress-ng
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_LOAD_PROGRAMS)/hackbench $@.tmp:/bin/hackbench
-	debugfs -w -R 'set_inode_field /bin/stress-ng mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/hackbench mode 0100755' $@.tmp >/dev/null 2>&1
-	python3 scripts/ext2_fixed_times.py $@.tmp $(KERNEL_EXT2_FAKE_TIME)
-	e2fsck -fn $@.tmp >/dev/null
-	mv $@.tmp $@
 
 $(KERNEL_RPI5_ENTRY_O): $(KERNEL_RPI5_ENTRY_S) | $(KERNEL_BUILD_DIR)
 	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
@@ -2458,8 +2446,7 @@ hwcheck-churn-rpi5: kernelbuild-rpi5
 ## finds gets a deterministic lane; its times are RECORDED, never judged on
 ## QEMU. LOAD_SECONDS is each stressor's run, LOAD_JOBS the xargs jobs,
 ## LOAD_LOOPS hackbench's loops. The report lands in
-## _build/kernel-load-<platform>/load-report.txt. The board runs the BusyBox
-## phase only: its rootfs extent is 2.75 MiB, and stress-ng alone is 3 MiB.
+## _build/kernel-load-<platform>/load-report.txt. Both boot the same rootfs.
 ## Time verdicts are the board's, over repeated samples
 ## (scripts/repeat_kernel_lane.sh N make hwcheck-load-rpi5).
 LOAD_SECONDS ?= 10
@@ -2470,7 +2457,7 @@ LOAD_LOOPS ?= 200
 LOAD_PHASES ?=
 .PHONY: load-qemu
 load-qemu: kernelbuild-qemu
-	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) $(KERNEL_LOAD_EXT2_IMAGE)
+	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) $(KERNEL_SHELL_EXT2_IMAGE)
 	@KERNEL_QEMU_SHELL_SMP=4 python3 scripts/run_kernel_load.py --platform qemu --seconds $(LOAD_SECONDS) --jobs $(LOAD_JOBS) --loops $(LOAD_LOOPS) $(if $(LOAD_PHASES),--phases $(LOAD_PHASES))
 
 .PHONY: hwcheck-load-rpi5
