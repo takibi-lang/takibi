@@ -317,6 +317,12 @@ condition below applies, and reports the land afterwards.
 - 2026-10-25 #954 stage 2 is scoped by a stage-2 review first; its first item
   is #798 rebuilt inside the confirmed skeleton as linear facts the checker
   decides and z3 re-checks. [active] #954 #798
+- 2026-10-25 #954 stage 2 scope: index bounds are in; items in order are
+  #798 (order graph first, `entails` fallback), index bounds from versioned
+  locals (committed; #798's site count sets when), then retiring the order
+  graph. Index obligations share the 5 s z3 budget with their own report
+  line. #799 is out and stays off ROADMAP until a site needs it.
+  [active] #954 #798
 - 2026-10-25 #921 closes on the measured front-end speedups; the shared
   multi-variant run is not built. #922 (domain-parallel codegen, at most ~25%
   on a solo build and nothing on a land) leaves ROADMAP and stays open until

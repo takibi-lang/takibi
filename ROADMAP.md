@@ -73,7 +73,8 @@ then escalate a partial world stop to the debug stop; #933 left reboot
 quiescent-only, maintainer 2026-10-24). #680 (region_pool handle validation without the lock) and #812
 (contiguous page run search) are parked; the RPi5 lane fails naming either
 one when its reopen condition is met (scripts/validate_parked_triggers.py,
-#953). #798 and #799 wait under #954 (verification direction).
+#953). #798 is #954 stage 2's first item; #799 waits under #954 until a site
+needs it.
 
 Done on the stored-authority route (2026-10-09): #637 stage 1's
 type-checker work and #731 step 1; #131's first slices -- field places
@@ -193,7 +194,9 @@ docs/VERIFICATION_DESIGN.md) and step 3, the design review, are done;
 step 4 runs #975 (branch conditions as linear facts; done 2026-10-24,
 follow-ups #977 and #978 done 2026-10-24, and #985, batched z3 for the init budget, done 2026-10-24), then #974 (the execve staging requires; done 2026-10-24),
 then #976 (--trace-init-flow, done 2026-10-24), which completes step 4;
-then the rest of #954 stage 2. Then: #908 (fixed
+then the rest of #954 stage 2 (docs/VERIFICATION_DESIGN.md, "Stage 2
+scope"): #798 (index bounds from one width check), index bounds from
+versioned locals, then retiring the runtime order graph. Then: #908 (fixed
 QEMU lane budget), #916 (compiler GC tuning), #921 (front-end scans and
 overlay local types instead of a shared multi-variant run, which the profile
 showed not worth it; done 2026-10-24), #995 (the region
