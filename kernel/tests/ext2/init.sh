@@ -92,6 +92,24 @@ fi
 # fixture lists /, /bin, /many and /etc, and a marker there changes them.
 if [ -e /lib/ext2-eq.enable ]; then
     /bin/sh /lib/ext2-eq.sh >/eq-log 2>&1
+    # GitHub issues #968, #1033 and #1085: ask /grow for a thirteenth entry
+    # block. Each 250-byte name takes a 260-byte record, three to a block, so
+    # the 37th mkdir needs block 13: Linux grows /grow through an indirect
+    # block, Takibi refuses with ENOSPC and changes nothing. The children go
+    # again; /grow stays twelve blocks long for the known-divergence row of
+    # scripts/ext2_known_divergences.tsv. Here, under the same marker, because
+    # these 74 directory operations cost seconds per boot and only the
+    # comparing lane's postcheck reads the row (#1085).
+    g=nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnggggggggggggggggggggggggggggggggggggggggggggggggg
+    set --
+    i=10
+    while [ "$i" -lt 47 ]; do
+        set -- "$@" "/grow/$g$i"
+        i=$((i + 1))
+    done
+    /bin/mkdir /grow "$@" 2>/dev/null
+    /bin/rmdir "$@" 2>/dev/null
+    set --
 fi
 
 # GitHub issue #503: what one move between cores costs. Silent on success;

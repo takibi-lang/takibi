@@ -1872,7 +1872,8 @@ run, not a specification.
   counters are its own accounting), any `ext2 blocks capacity=` line against
   the superblock, and the known divergences in
   `scripts/ext2_known_divergences.tsv`, each a fact that must not yet hold
-  (#968: the shell asks `/grow` for a thirteenth block). qemu-main also
+  (#968: in the comparing lane, `/etc/init.sh` asks `/grow` for a
+  thirteenth block). qemu-main also
   checks that the fixture's grown `/etc` and the directories the shell made
   through `mkdirat`, `/etc/moved` and `/kept`, are on it.
   Block reads go through a write-through, least-recently-used cache of

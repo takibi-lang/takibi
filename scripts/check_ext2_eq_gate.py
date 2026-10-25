@@ -49,6 +49,9 @@ def problems(init, runner, ash=""):
             gated = True
         elif re.match(r"\s*fi\s*$", line):
             gated = False
+        elif "/grow" in line and not gated:
+            found.append(f"{INIT}: touches /grow outside the /lib/ext2-eq.enable "
+                         "gate; its directory operations cost every boot (#1085)")
         elif "/lib/ext2-eq.sh" in line:
             runs += 1
             if not gated:

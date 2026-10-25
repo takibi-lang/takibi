@@ -43,12 +43,6 @@ long_name=nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
 rmdir "/etc/${long_name}e"; /bin/ls -1 /etc; /bin/busybox stat -c %s /etc
 mkdir "/etc/${long_name}e"; /bin/ls -1 /etc; /bin/busybox stat -c %s /etc
 rmdir "/etc/${long_name}e"; for suffix in a b c d; do rmdir "/etc/$long_name$suffix"; done; /bin/busybox stat -c %s /etc; mv /etc/mva /etc/mvc && mv /etc/mvc /etc/mvb && echo mv1
-# GitHub issues #968 and #1033: ask /grow for a thirteenth entry block.
-# Each 250-byte name takes a 260-byte record, three to a block, so the 37th
-# of these 40 mkdirs needs block 13: Linux grows /grow through an indirect
-# block, Takibi refuses with ENOSPC and changes nothing. The children go
-# again; /grow stays twelve blocks long for scripts/ext2_known_divergences.tsv.
-g=${long_name}ggggggggggggggggggggggggggggggggggggggggggggggggg; set --; i=10; while [ $i -lt 50 ]; do set -- "$@" "/grow/$g$i"; i=$((i+1)); done; mkdir /grow "$@" 2>/dev/null; rmdir "$@" 2>/dev/null; echo grow-968
 # Leave /etc grown on disk after removing every probe directory.
 # GitHub issue #538: mv through renameat. The first line renames within a
 # directory and then over an existing file; the second moves a file into

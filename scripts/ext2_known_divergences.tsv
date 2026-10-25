@@ -4,6 +4,7 @@
 # the regex (what the stat prints once the issue is fixed) matches, the lane
 # FAILS, so the fix removes its row here rather than passing silently.
 # Columns, tab-separated: issue, path, regex of the fixed stat, reason.
-# The ash script (kernel/tests/common/ash/ash.stdin) makes /grow.
+# kernel/tests/ext2/init.sh makes /grow, only in the boots whose runner
+# plants /lib/ext2-eq.enable (#1085); elsewhere the row is not reached.
 # Content and size divergences (#1019, #1023) are tier B, #1034.
 #968	/grow	\(IND\)	/grow is asked for a 13th entry block; Linux grows it through an indirect block, Takibi returns ENOSPC

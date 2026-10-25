@@ -205,7 +205,6 @@ script-shebang.sh
 2048
 2048
 mv1
-grow-968
 mv2
 mv: can't rename '/etc/mva': No such file or directory
 mv: can't rename '/kept': Operation not permitted
