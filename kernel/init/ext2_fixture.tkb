@@ -942,19 +942,27 @@ private fn ext2_io_failure_check(mount: Ext2Mount) -> bool {
 
 // GitHub issue #1088: O_TRUNC, the last unlink, rename over a file and rmdir
 // under a rejected write. Each operation runs with one write failing at
-// every position it reaches, and then with every write failing from that
-// position on, and must leave either its whole effect or none of it: the
+// every position up to its commit, and once with every write failing from
+// the second on (a rollback that cannot land), and must leave either its whole effect or none of it: the
 // names, the file's size, the counters agreeing with the bitmaps, and --
 // when it did nothing -- the free counts and the block bitmap exactly as
 // they were. A sticky failure fences the mount; ext2_recover must then
 // finish the rollback (or the recount) on its own.
+//
+// It runs in every boot, on the board too, so it is kept small: a two-block
+// file (the release path is the same for indirect blocks; only the walk is
+// longer), the sweep stops at the first committed position, since every
+// later write is the post-commit recount or scrub, and one sticky case per
+// operation. The first version swept thirteen-block files at every position
+// in both modes and cost about 23 s of RPi5 boot (#1088 land).
 must_use variant Ext2ReleaseCase { Broken; Clean; RolledBack; Committed; }
 
 const EXT2_RELEASE_OP_TRUNCATE: usize = 0;
 const EXT2_RELEASE_OP_UNLINK: usize = 1;
 const EXT2_RELEASE_OP_RENAME: usize = 2;
 const EXT2_RELEASE_OP_RMDIR: usize = 3;
-const EXT2_RELEASE_SWEEP_LIMIT: usize = 64;
+const EXT2_RELEASE_SWEEP_LIMIT: usize = 16;
+const EXT2_RELEASE_FILE_BYTES: usize = 2 * KERNEL_BLOCK_SIZE;
 
 // The inodes of release.bin and release.new as the setup made them.
 private let mut ext2_release_first: usize;
@@ -1003,7 +1011,7 @@ private fn ext2_release_setup(mount: Ext2Mount, op: usize) -> bool {
         }
     }
     ext2_release_first = ext2_release_file(mount, bs"release.bin",
-                                           EXT2_WRITE_FIXTURE_BYTES);
+                                           EXT2_RELEASE_FILE_BYTES);
     if (ext2_release_first == 0) { return false; }
     if (op == EXT2_RELEASE_OP_RENAME) {
         ext2_release_second = ext2_release_file(mount, bs"release.new",
@@ -1066,11 +1074,11 @@ private fn ext2_release_run(mount: Ext2Mount, op: usize) -> bool {
     return ext2_release_rmdir(mount);
 }
 
-// release.bin as the setup wrote it: thirteen blocks through the
-// singly-indirect block, and its first block's bytes.
+// release.bin as the setup wrote it: two direct blocks, and its first
+// block's bytes.
 private fn ext2_release_full_file(mount: Ext2Mount, inode: usize) -> bool {
-    if (ext2_regular_file_size(mount, inode) != EXT2_WRITE_FIXTURE_BYTES ||
-        ext2_write_fixture_sectors_match(mount, inode, 28) == false) {
+    if (ext2_regular_file_size(mount, inode) != EXT2_RELEASE_FILE_BYTES ||
+        ext2_write_fixture_sectors_match(mount, inode, 4) == false) {
         return false;
     }
     match ext2_read_file_chunk(mount, inode, 0,
@@ -1160,9 +1168,9 @@ private fn ext2_release_case(mount: Ext2Mount, op: usize, skip: usize,
         Ext2ReadResult::Invalid => { return Ext2ReleaseCase::Broken; }
         Ext2ReadResult::Read(length) => { }
     }
-    // What the operation frees: the file's thirteen blocks and its pointer
-    // block, or the directory's one block, and the inode unless O_TRUNC.
-    let mut freed_blocks: usize = 14;
+    // What the operation frees: the file's two blocks, or the directory's
+    // one block, and the inode unless O_TRUNC.
+    let mut freed_blocks: usize = 2;
     let mut freed_inodes: usize = 1;
     if (op == EXT2_RELEASE_OP_TRUNCATE) { freed_inodes = 0; }
     if (op == EXT2_RELEASE_OP_RMDIR) { freed_blocks = 1; }
@@ -1203,23 +1211,30 @@ private fn ext2_release_case(mount: Ext2Mount, op: usize, skip: usize,
     return Ext2ReleaseCase::RolledBack;
 }
 
-// Fail the write at each position from 0 on until a run finishes before
-// reaching it. False on a broken verdict, or when no position rolled back.
-private fn ext2_release_sweep(mount: Ext2Mount, op: usize, sticky: bool,
+// Fail one write at each position from 0 on until a run commits (or
+// finishes before reaching it), then once with every write failing from the
+// second on. False on a broken verdict, or when no position rolled back.
+private fn ext2_release_sweep(mount: Ext2Mount, op: usize,
                               base_blocks: usize, base_inodes: usize)
         -> bool {
     let mut done: bool = false;
     let mut rolled_back: bool = false;
     for skip: usize in 0..<EXT2_RELEASE_SWEEP_LIMIT {
         if (done == false) {
-            match ext2_release_case(mount, op, skip, sticky, base_blocks,
+            match ext2_release_case(mount, op, skip, false, base_blocks,
                                     base_inodes) {
                 Ext2ReleaseCase::Broken => { return false; }
                 Ext2ReleaseCase::Clean => { done = true; }
                 Ext2ReleaseCase::RolledBack => { rolled_back = true; }
-                Ext2ReleaseCase::Committed => { }
+                Ext2ReleaseCase::Committed => { done = true; }
             }
         }
+    }
+    match ext2_release_case(mount, op, 1, true, base_blocks, base_inodes) {
+        Ext2ReleaseCase::Broken => { return false; }
+        Ext2ReleaseCase::Clean => { return false; }
+        Ext2ReleaseCase::RolledBack => { }
+        Ext2ReleaseCase::Committed => { }
     }
     return done && rolled_back;
 }
@@ -1240,15 +1255,13 @@ fn ext2_release_failure_check(mount: Ext2Mount) -> bool {
     }
     ext2_release_fenced = 0;
     for op: usize in 0..<4 {
-        if (ext2_release_sweep(mount, op, false, base_blocks,
-                               base_inodes) == false ||
-            ext2_release_sweep(mount, op, true, base_blocks,
+        if (ext2_release_sweep(mount, op, base_blocks,
                                base_inodes) == false) {
             return false;
         }
     }
-    // Every sticky failure before a commit leaves a rollback that cannot
-    // land, so recover must have finished at least one per operation.
+    // Each sticky case fails a write after the first logged row, so its
+    // rollback cannot land and recover must finish it: one per operation.
     return ext2_release_fenced >= 4;
 }
 
