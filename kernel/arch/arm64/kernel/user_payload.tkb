@@ -37,6 +37,7 @@ const O_CREAT_EXCL_RDWR: usize = 0xC2;
 // GitHub issue #1016: O_TRUNC is 0x200.
 const O_TRUNC_RDWR: usize = 0x202;
 const O_TRUNC_RDONLY: usize = 0x200;
+const EPERM_RC: usize = 0xFFFFFFFFFFFFFFFF;
 const EINVAL_RC: usize = 0xFFFFFFFFFFFFFFEA;
 const EACCES_RC: usize = 0xFFFFFFFFFFFFFFF3;
 const EAGAIN_RC: usize = 0xFFFFFFFFFFFFFFF5;
@@ -809,6 +810,11 @@ fn initial_user_payload() !{unsafe} {
             fail_if(answer != 1024);
         }
         fail_if(svc5(57, write_fd, 0, 0, 0, 0) != 0);
+        // GitHub issue #1016: thirteen blocks reach the indirect block,
+        // which O_TRUNC does not release yet: EPERM, and the readback
+        // below shows every block still there.
+        fail_if(svc5(56, 0, mutable_path as usize, O_TRUNC_RDONLY,
+                     0, 0) != EPERM_RC);
         let read_fd: usize = svc5(56, 0, mutable_path as usize, 0, 0, 0);
         fail_if(read_fd >= 64);
         for block: usize in 0..<13 {
@@ -842,17 +848,22 @@ fn initial_user_payload() !{unsafe} {
 // GitHub issue #1016: the free block count as userspace can see it, with no
 // statfs. mkdirat takes one block (and one inode) per directory, so the
 // number made before ENOSPC is the free block count while inodes outnumber
-// blocks; every one is removed again. More than 32 fails the probe.
+// blocks; every one is removed again. The volume has about 225 free blocks
+// at the call (QEMU, 2026-10-25); more than 676 fails the probe. If inodes
+// ran out first, both counts would be the inode count and the caller's
+// "three more" check would fail rather than pass vacuously.
 fn free_blocks_by_mkdir() -> usize !{unsafe} {
     let mut probe_path: [u8; 12];
-    let probe_stem: []const u8 = bs"/trunc-pro";
-    for byte: usize in 0..<10 { probe_path[byte] = probe_stem[byte]; }
+    let probe_stem: []const u8 = bs"/trunc-p";
+    for byte: usize in 0..<8 { probe_path[byte] = probe_stem[byte]; }
+    probe_path[10] = 0;
     probe_path[11] = 0;
     let mut made: usize = 0;
     let mut refused: bool = false;
-    for attempt: usize in 0..<32 {
+    for attempt: usize in 0..<676 {
         if (refused == false) {
-            probe_path[10] = (0x41 + attempt) as u8;
+            probe_path[8] = (0x41 + attempt / 26) as u8;
+            probe_path[9] = (0x41 + attempt % 26) as u8;
             let answer: usize = svc5(34, 0xFFFFFFFFFFFFFF9C,
                                      probe_path as *u8 as usize, 0x1ED, 0, 0);
             if (answer == 0) { made = made + 1; }
@@ -863,9 +874,10 @@ fn free_blocks_by_mkdir() -> usize !{unsafe} {
         }
     }
     fail_if(refused == false);
-    for attempt: usize in 0..<32 {
+    for attempt: usize in 0..<676 {
         if (attempt < made) {
-            probe_path[10] = (0x41 + attempt) as u8;
+            probe_path[8] = (0x41 + attempt / 26) as u8;
+            probe_path[9] = (0x41 + attempt % 26) as u8;
             fail_if(svc5(35, 0xFFFFFFFFFFFFFF9C, probe_path as *u8 as usize,
                          0x200, 0, 0) != 0);
         }
