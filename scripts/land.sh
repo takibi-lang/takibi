@@ -209,6 +209,14 @@ else
         keep_failed_captures
         exit 1
     fi
+    # GitHub issue #1123: the lane-budget precheck measures only a green
+    # allcheck's receipts. A red run's (a hung lane, and lanes queued behind
+    # it) stay in _build/lane-timing for diagnosis, and `make clean` would
+    # remove a copy kept under _build, so the copy lives in the git dir.
+    if ! python3 scripts/check_lane_budget.py --keep-green _build/lane-timing; then
+        echo "land: FAIL keeping the green lane receipts on $tested" >&2
+        exit 1
+    fi
 fi
 
 # The check built from the working tree, not from the commit: a tracked file

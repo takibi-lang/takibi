@@ -34,7 +34,16 @@ Two bounds:
                    elapsed 9119 s, lease wait 6546 s, span 610 s). The limit
                    is 4300 s: that plus about 30 % for host load, the same
                    headroom the earlier 9000 s elapsed limit had (#908).
-                   Checked only when the artifact is present, since a fresh
+                   Only a GREEN allcheck's receipts are read (#1123): land.sh
+                   copies _build/lane-timing, after allcheck passed, to
+                   <git common dir>/takibi-land/lane-timing-green
+                   (`--keep-green`), and this check reads that copy. A red
+                   run's receipts stay in _build/lane-timing for diagnosis but
+                   are never measured: a lane that hung to its timeout, and
+                   the lanes that queued behind it, inflated the sum past the
+                   budget and refused the next land's precheck. A green run
+                   that grew past the budget still fails the next land.
+                   Checked only when the copy is present, since a fresh
                    worktree has none; a partial artifact (this gate runs
                    beside allcheck's lanes) can only sum lower. A QEMU lane's
                    receipt with no vcpu-lease.waits is refused, since its
@@ -48,12 +57,42 @@ from __future__ import annotations
 import json
 import pathlib
 import re
+import shutil
+import subprocess
 import sys
 
 from pass_line import report_pass
 
 MAKEFILE = pathlib.Path("Makefile")
 TIMING_DIR = pathlib.Path("_build/lane-timing")
+GREEN_NAME = "lane-timing-green"
+
+
+def green_dir() -> pathlib.Path | None:
+    """Where land.sh keeps the last green allcheck's receipts; None outside git."""
+    try:
+        common = subprocess.run(["git", "rev-parse", "--git-common-dir"],
+                                capture_output=True, text=True, check=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return pathlib.Path(common).resolve() / "takibi-land" / GREEN_NAME
+
+
+def keep_green(source: pathlib.Path, dest: pathlib.Path) -> None:
+    """Replace dest with a copy of a green run's receipts, so a reader sees
+    the old copy or the new one, never half of each."""
+    if not source.is_dir():
+        raise ValueError(f"{source} is not a lane timing artifact")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    staging = dest.with_name(dest.name + ".new")
+    old = dest.with_name(dest.name + ".old")
+    for stale in (staging, old):
+        shutil.rmtree(stale, ignore_errors=True)
+    shutil.copytree(source, staging)
+    if dest.exists():
+        dest.rename(old)
+    staging.rename(dest)
+    shutil.rmtree(old, ignore_errors=True)
 QEMU_LANE_LIMIT = 25
 LANE_SECONDS_LIMIT = 4300.0
 
@@ -172,17 +211,33 @@ def verdict(leaves: int, seconds: tuple[float, int] | None,
             "a new lane needs the maintainer (AGENTS.md)")
     if seconds is not None and seconds[0] > seconds_limit:
         failures.append(
-            f"the last allcheck spent {seconds[0]:.0f} lane-seconds over "
+            f"the last green allcheck spent {seconds[0]:.0f} lane-seconds over "
             f"{seconds[1]} receipts, over the budget of {seconds_limit:.0f}. "
             "Find the lane that grew (scripts/summarize_lane_timing.py) "
             "rather than raising the number")
     return failures
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    args = sys.argv[1:] if argv is None else argv
+    if args[:1] == ["--keep-green"]:
+        source = pathlib.Path(args[1]) if len(args) > 1 else TIMING_DIR
+        dest = pathlib.Path(args[2]) if len(args) > 2 else green_dir()
+        if dest is None:
+            print("FAIL lane-budget: no git directory to keep the green receipts in")
+            return 1
+        try:
+            keep_green(source, dest)
+        except (OSError, ValueError) as error:
+            print(f"FAIL lane-budget: {error}")
+            return 1
+        print(f"lane-budget: kept the green allcheck's receipts in {dest}")
+        return 0
+    directory = pathlib.Path(args[0]) if args else green_dir()
     leaves = qemu_leaf_lanes(MAKEFILE.read_text(encoding="ascii"))
     try:
-        seconds = lane_seconds(TIMING_DIR, frozenset(leaves))
+        seconds = (None if directory is None else
+                   lane_seconds(directory, frozenset(leaves)))
     except ValueError as error:
         print(f"FAIL lane-budget: {error}")
         return 1
@@ -191,8 +246,8 @@ def main() -> int:
         print(f"FAIL lane-budget: {failure}")
     if failures:
         return 1
-    timing = ("no lane timing artifact to read" if seconds is None else
-              f"last allcheck {seconds[0]:.0f} of at most "
+    timing = ("no green lane timing artifact to read" if seconds is None else
+              f"last green allcheck {seconds[0]:.0f} of at most "
               f"{LANE_SECONDS_LIMIT:.0f} busy lane-seconds")
     report_pass("lane-budget",
                 f"{len(leaves)} of at most {QEMU_LANE_LIMIT} QEMU lanes; {timing}",

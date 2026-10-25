@@ -7,6 +7,7 @@ import tempfile
 
 from check_lane_budget import (LANE_SECONDS_LIMIT, MAKEFILE, QEMU_LANE_LIMIT,
                                lane_seconds, qemu_leaf_lanes, verdict)
+from check_lane_budget import main as budget_main
 from pass_line import CaseCount, report_pass
 
 
@@ -73,6 +74,32 @@ def main() -> int:
         (directory / "c.jsonl").write_text(many)
         assert verdict(1, lane_seconds(directory, frozenset({"a"}))), \
             "busy lane-seconds past the budget fail"
+    # #1123: only the kept green copy is measured. A red run over the budget
+    # in _build/lane-timing does not refuse the next land; a green run over
+    # the budget, once kept, does.
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        red, green_run, kept = root / "red", root / "green", root / "git" / "kept"
+        for directory, elapsed in ((red, LANE_SECONDS_LIMIT * 3), (green_run, 10.0)):
+            directory.mkdir()
+            (directory / "x.jsonl").write_text(
+                json.dumps({"lane": "x", "elapsed": elapsed}) + "\n")
+        cases.note()
+        assert budget_main([str(kept)]) == 0, "no kept green copy yet passes"
+        assert budget_main(["--keep-green", str(green_run), str(kept)]) == 0
+        cases.note()
+        assert budget_main([str(kept)]) == 0, "a green run within budget passes"
+        cases.note()
+        assert budget_main([str(red)]) == 1 and budget_main([str(kept)]) == 0, \
+            "a red run's receipts are over budget but not the kept copy"
+        cases.note()
+        assert budget_main(["--keep-green", str(red), str(kept)]) == 0 \
+            and budget_main([str(kept)]) == 1, "a green run over the budget still fails"
+        cases.note()
+        assert not (root / "git" / "kept.new").exists() \
+            and not (root / "git" / "kept.old").exists(), "no staging copy is left"
+        assert budget_main(["--keep-green", str(root / "absent"), str(kept)]) == 1 \
+            and budget_main([str(kept)]) == 1, "a missing source is refused, the copy kept"
     report_pass("lane-budget controls",
                 f"{len(leaves)} leaf lanes read; budget boundaries and "
                 f"{cases.ran} shapes behave", controls=cases.ran)
