@@ -442,3 +442,11 @@ condition below applies, and reports the land afterwards.
   runs: host CPU contention inflates busy lane-seconds and trips silence
   watchdogs. Until #1145 makes the lanes wait on the land's lease, the
   coordinator holds workers' QEMU runs during a land. [active] #1145
+- 2026-10-25 Assembly is a leaf (#1133): called from Takibi it returns to its
+  caller and never relays between Takibi functions; asm-started paths save
+  state and enter one Takibi function. #1080 option (A) is the first
+  instance. A typed boundary declaration with a disassembly-checked register
+  pass-through comes only where a value cannot avoid crossing assembly.
+  Untrusted FFI re-validates what it returns (#1134). A pseudo-.tkb model of
+  assembly is YAGNI: checking it would shake the trusted base.
+  [active] #1080 #1133 #1134
