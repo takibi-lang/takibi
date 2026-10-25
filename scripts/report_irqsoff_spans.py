@@ -15,10 +15,14 @@ chains against the kernel ELF, folds each to its CLASS -- the first function
 outside the lock wrappers (WRAPPER below) -- merges the cores, and prints the
 longest span per class, longest first.
 
-It is a report, not a verdict: no threshold is judged here, because no
-baseline exists yet (#958 asks for the number to be visible). It fails only
-when the measurement is missing or malformed, since a report that cannot see
-its lines would otherwise stay silent forever.
+With --judge (the RPi5 runner passes it), each class is also judged
+against BASELINE_RPI5_US below (GitHub issue #1093): a class whose longest
+span exceeds 3x its baseline fails, naming the class and the chain. A class
+without a baseline is printed as such and not judged. QEMU is never judged:
+its timing is emulated and its spans spread up to 9x across runs. Without
+--judge, the script fails only when the measurement is missing or
+malformed, since a report that cannot see its lines would otherwise stay
+silent forever.
 
 Also printed, when the boot carries `irq mask cost:` lines (#920's probe),
 the sampler's own cost per mask pair: least `sampled` minus least `pmr`.
@@ -53,6 +57,22 @@ DELIBERATE = {
     # masked, until CPU 1's own tick wakes the sleeper (about 200 ms;
     # up to 10 s) -- the evidence that per-CPU tick-wake lists work.
     "workload_peer_sleep_progress": "#829 peer-sleep masks core 0 on purpose",
+}
+
+# GitHub issue #1093: per-class baseline, RPi5, the highest longest span (us)
+# over the eight land runs f629db38..544ec036 (2026-10-25; spread per class
+# in the comment). A class fails above JUDGE_FACTOR x its baseline, the
+# factor the maintainer named for #812/#680. If an unchanged tree trips it,
+# widen the baseline from more runs. Every name here must still be a
+# kernel fn (checked by the controls), so a rename cannot leave the class
+# unjudged under its new name without notice ("no baseline" is printed).
+JUDGE_FACTOR = 3
+BASELINE_RPI5_US = {
+    "locked_cell_give$BootPagePool": 2799.6,  # 8 runs, 2771.7..2799.6
+    "process_run_unlock": 977.4,              # 8 runs, 977.0..977.4
+    "tcp_connection_pool_unlock": 107.7,      # 8 runs, 107.5..107.7
+    "console_unlock": 53.3,                   # 8 runs, 53.0..53.3
+    "process_pool_unlock": 20.7,              # 6 of 8 runs, 18.5..20.7
 }
 
 
@@ -137,7 +157,28 @@ def fold(classes, symbols):
     return merged
 
 
-def report(text: str, symbols, label: str) -> int:
+def judge(merged, freq, label):
+    """Failures of the #1093 per-class thresholds."""
+    failures = []
+    for key, (ticks, cpu, names) in sorted(merged.items()):
+        us = ticks / freq * 1e6
+        baseline = BASELINE_RPI5_US.get(key)
+        if baseline is None:
+            print(f"[{label}] irqsoff class {key}: no baseline, not judged "
+                  f"(#1093; add it to BASELINE_RPI5_US once it recurs)")
+            continue
+        if us > JUDGE_FACTOR * baseline:
+            failures.append(
+                f"FAIL irqsoff-spans (#1093): class {key} masked IRQs for "
+                f"{us:.1f} us on cpu{cpu}, over {JUDGE_FACTOR}x its RPi5 "
+                f"baseline {baseline} us ({' <- '.join(names) or 'no frames'})."
+                f" Find what lengthened the span; widen BASELINE_RPI5_US in "
+                f"scripts/report_irqsoff_spans.py only if an unchanged tree "
+                f"trips it.")
+    return failures
+
+
+def report(text: str, symbols, label: str, judged: bool = False) -> int:
     try:
         cores, classes, costs = parse(text)
     except ValueError as error:
@@ -173,6 +214,12 @@ def report(text: str, symbols, label: str) -> int:
         print(f"[{label}] irqsoff sampler cost: "
               f"{(sampled - pmr) / rounds / cost_freq * 1e9:.1f} ns per mask "
               f"pair (least of {len(costs)} samples, {rounds} pairs each)")
+    if judged:
+        failures = judge(merged, freq, label)
+        if failures:
+            for failure in failures:
+                print(failure, file=sys.stderr)
+            return 1
     report_pass("irqsoff-spans",
                 f"{len(cores)} core(s), {len(merged)} lock class(es) reported",
                 cores=len(cores), classes=len(merged))
@@ -185,10 +232,12 @@ def main() -> int:
     parser.add_argument("--elf", required=True)
     parser.add_argument("--nm", default="nm")
     parser.add_argument("--label", default="kernel")
+    parser.add_argument("--judge", action="store_true",
+                        help="fail a class over 3x its RPi5 baseline (#1093)")
     args = parser.parse_args()
     with open(args.log, "rb") as handle:
         text = handle.read().decode("utf-8", "replace")
-    return report(text, Symbols(args.elf, args.nm), args.label)
+    return report(text, Symbols(args.elf, args.nm), args.label, args.judge)
 
 
 if __name__ == "__main__":

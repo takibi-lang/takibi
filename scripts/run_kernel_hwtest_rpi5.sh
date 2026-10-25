@@ -594,9 +594,10 @@ python3 "$REPO_ROOT/scripts/validate_log_ring_trace.py" "$UART_LOG"
 # the suite's RECORDED counters; the table lives in the script.
 python3 "$REPO_ROOT/scripts/validate_parked_triggers.py" "$UART_LOG"
 # GitHub issue #958: the longest IRQ-masked span per lock class since boot,
-# from the boot report's standing sampler, symbolized against the ELF.
+# from the boot report's standing sampler, symbolized against the ELF;
+# #1093: each class judged against 3x its RPi5 baseline (in the script).
 python3 "$REPO_ROOT/scripts/report_irqsoff_spans.py" "$UART_LOG" \
-    --elf "$ELF" --label kernel/rpi5
+    --elf "$ELF" --label kernel/rpi5 --judge
 python3 "$REPO_ROOT/scripts/profile_kernel_workload.py" collect \
     --uart-log "$UART_LOG" --output "$ARTIFACT_DIR/busy-pair-profile.json" \
     --target rpi5
