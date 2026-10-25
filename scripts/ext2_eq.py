@@ -59,7 +59,7 @@ LOG = "eq-log"       # the guest's log, beside ROOT in the image root
 FAKE_TIME = "1700000000"
 NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$")
 TEXT_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
-FILL_MAX = 13       # busybox, cat and 13 paths: execve takes 15 (#591)
+FILL_MAX = 1024     # KiB; the source, the BusyBox binary, is over 1 MiB
 LONG = "n" * 200     # a long entry name: four to a 1 KiB directory block
 
 
@@ -116,13 +116,10 @@ def parse(text):
                 raise EqError(f"line {lineno}: text {arg!r} is not [A-Za-z0-9_.-]+")
             if kind == "count" and not re.fullmatch(r"[0-9]{1,4}", arg):
                 raise EqError(f"line {lineno}: count {arg!r}")
-        # `fill` runs `/bin/busybox cat k k ...`, one argument per KiB; the
-        # kernel's execve takes fifteen arguments (#591) and answers E2BIG,
-        # exit 126 from ash, past that -- a row that differs for that reason
-        # would differ for the wrong one.
+        # `fill` copies the first N KiB of the BusyBox binary; past its end
+        # dd would write a short file and the row would differ for that
         if op == "fill" and int(args[1]) > FILL_MAX:
-            raise EqError(f"line {lineno}: fill takes at most {FILL_MAX} KiB "
-                          "(execve's fifteen arguments, GitHub issue #591)")
+            raise EqError(f"line {lineno}: fill takes at most {FILL_MAX} KiB")
         rows[-1][3].append((lineno, op, args))
     if not rows:
         raise EqError("no rows")
@@ -143,22 +140,21 @@ def gen_sh(rows):
         # applets /bin does not link are run through the multicall binary on
         # the guest; on the host BusyBox runs them in-process (B empty)
         'B="${2-/bin/busybox}"',
+        # the bytes `fill` writes: the BusyBox binary, the same file on both
+        # sides. dd copies them with read(2) and write(2): printf writes
+        # nothing on the guest (#1067), and cat's sendfile goes to the
+        # console whatever fd 1 is (#1070)
+        'S="${3-/bin/busybox}"',
         'mkdir "$R"',
-        # one 1 KiB block, the unit `fill` concatenates: the script's own
-        # first KiB, so it does not depend on printf (which fails on the
-        # guest, #1067); its status is logged so a failed copy shows
-        '$B dd if="$0" of="$R/k" bs=1024 count=1 2>/dev/null',
-        'echo "k -> $?"',
         "t() { if [ -d \"$1\" ]; then echo \"  $2 dir\"; elif [ -f \"$1\" ]; "
         "then $B stat -c \"  $2 file size=%s\" \"$1\"; else echo \"  $2 absent\"; fi; }",
-        't "$R/k" k',
     ]
     for name, _expect, _issue, ops in rows:
         out.append(f"echo 'row {name}'")
         for step, (_lineno, op, args) in enumerate(ops, 1):
             label = f"{step} {op} {' '.join(args)}"
             if op == "fill":
-                cmd = '$B cat ' + " ".join(['"$R/k"'] * int(args[1])) + f' >"$R/{args[0]}"'
+                cmd = f'$B dd if="$S" of="$R/{args[0]}" bs=1024 count={args[1]}'
             elif op == "files":
                 cmd = (f'i=0; ok=0; while [ $i -lt {args[1]} ]; do '
                        f'$B true >"$R/{args[0]}/{LONG}$i" 2>/dev/null && ok=$((ok+1)); '
@@ -195,7 +191,8 @@ def run_host(rows, busybox, workdir):
         handle.write(gen_sh(rows))
     tree = os.path.join(workdir, "root")
     os.mkdir(tree)
-    done = subprocess.run([qemu_user(), busybox, "ash", script, tree, ""],
+    done = subprocess.run([qemu_user(), busybox, "ash", script, tree, "",
+                           os.path.abspath(busybox)],
                           preexec_fn=lambda: os.umask(0o022),
                           capture_output=True, text=True, timeout=120)
     if done.returncode != 0 or not done.stdout.endswith("eq done\n"):
@@ -485,7 +482,7 @@ def self_test():
     assert "$B echo -n x >\"$R/a/f\"" in script, script
     for bad in ("mkdir a\n", "row a maybe -\n", "row a match -\nmkdir b\n",
                 "row a match -\nwrite a/f 'x y'\n", "row a match -\nrow a match -\n",
-                "row a match -\nfrob a\n", "row a match -\nfill a/f 14\n"):
+                "row a match -\nfrob a\n", "row a match -\nfill a/f 1025\n"):
         try:
             parse(bad)
         except EqError:
@@ -494,13 +491,15 @@ def self_test():
     # Every file the script writes is written by an external /bin/busybox
     # applet: a redirected builtin or NOFORK applet (`cat`, `printf`) writes
     # nothing on the guest (dup3 serves only stdin/stdout aliasing), so a
-    # row would differ for the wrong reason (#1034's first fill, #1067).
+    # row would differ for the wrong reason (#1034's first fill, #1067, #1070).
     every = parse("row a match -\nmkdir a\nwrite a/f x\nfill a/g 13\n"
                   "overwrite a/f a/g\nfiles a 2\n")
     for line in gen_sh(every).splitlines():
         for part in re.split(r";|&&|\bdo\b", line):
             if re.search(r'>"\$R/', part) and not part.strip().startswith("$B "):
                 raise AssertionError(f"a file written by a non-external command: {line!r}")
+            if re.search(r'\b(cat|printf)\b', part):
+                raise AssertionError(f"cat (sendfile, #1070) or printf (#1067): {line!r}")
     log = "row a\n1 mkdir a -> 0\n  a dir\nrow b\neq done\n"
     assert split_log(log) == {"a": ["1 mkdir a -> 0", "  a dir"], "b": []}
     files = {"/eq/a": ("dir", 0o755, None, 2, None, ("f",), None),

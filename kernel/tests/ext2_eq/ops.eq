@@ -8,7 +8,7 @@
 # Operations (paths are under the row's own directory, /eq/NAME):
 #   mkdir P | rmdir P | unlink P | rename A B
 #   write P TEXT        open(O_CREAT|O_TRUNC) and write TEXT
-#   fill P N            write N KiB (N <= 13) in 1 KiB writes (the script's first KiB)
+#   fill P N            write the BusyBox binary's first N KiB (N <= 1024), dd bs=1024
 #   overwrite P SRC     write SRC's bytes at offset 0 without O_TRUNC
 #   files D N           create N empty files with 200-byte names in D
 #
@@ -48,7 +48,7 @@ overwrite overwrite/f overwrite/src
 
 row unlink_indirect differ #1020
 mkdir unlink_indirect
-fill unlink_indirect/f 13
+fill unlink_indirect/f 14
 unlink unlink_indirect/f
 
 row dir_indirect differ #968

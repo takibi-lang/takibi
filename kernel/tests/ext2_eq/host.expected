@@ -1,5 +1,3 @@
-k -> 0
-  k file size=1024
 row base
 1 mkdir base -> 0
   base dir
@@ -36,8 +34,8 @@ row overwrite
 row unlink_indirect
 1 mkdir unlink_indirect -> 0
   unlink_indirect dir
-2 fill unlink_indirect/f 13 -> 0
-  unlink_indirect/f file size=13312
+2 fill unlink_indirect/f 14 -> 0
+  unlink_indirect/f file size=14336
 3 unlink unlink_indirect/f -> 0
   unlink_indirect/f absent
 row dir_indirect
