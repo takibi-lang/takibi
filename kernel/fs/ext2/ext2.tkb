@@ -2024,6 +2024,19 @@ private inline fn ext2_write_regular_file_range_with(slot: borrow Ext2Slot[0],
                                     true, EXT2_MAX_WRITE_ALLOCATIONS);
 }
 
+// GitHub issue #1023: a write past EOF (a peer fd's offset after a
+// truncate) leaves a gap that reads as zeros; the old last block's bytes
+// past the old size are not file data, whatever they hold. Out of line so
+// ext2_update_regular_file's frame stays at its budget (#1081).
+private fn ext2_zero_past_size(slot: borrow Ext2Slot[0], start: usize,
+                               size: usize) !{unsafe} {
+    for byte: usize in 0..<KERNEL_BLOCK_SIZE {
+        if (start + byte >= size) {
+            ext2_scratch[slot.index].file[byte] = 0;
+        }
+    }
+}
+
 private fn ext2_update_regular_file(slot: borrow Ext2Slot[0], mount: Ext2Mount,
         inode_number: usize,
                                     offset: usize, source: []const u8,
@@ -2147,17 +2160,8 @@ private fn ext2_update_regular_file(slot: borrow Ext2Slot[0], mount: Ext2Mount,
                                     }
                                     BlockIoResult::Ok => { }
                                 }
-                                // GitHub issue #1023: a write past EOF (a
-                                // peer fd's offset after a truncate) leaves
-                                // a gap that reads as zeros; the old last
-                                // block's bytes past the old size are not
-                                // file data, whatever they hold.
-                                let kept: usize = index * KERNEL_BLOCK_SIZE;
-                                for byte: usize in 0..<KERNEL_BLOCK_SIZE {
-                                    if (kept + byte >= inode.size) {
-                                        ext2_scratch[slot.index].file[byte] = 0;
-                                    }
-                                }
+                                ext2_zero_past_size(slot,
+                                        index * KERNEL_BLOCK_SIZE, inode.size);
                             } else {
                                 for byte: usize in 0..<KERNEL_BLOCK_SIZE {
                                     ext2_scratch[slot.index].file[byte] = 0;
