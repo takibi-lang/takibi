@@ -4987,6 +4987,9 @@ fn syscall_peer_safe(number: usize, fd: usize, second: usize) -> bool {
 fn syscall_reaches_filesystem(number: usize, fd: usize, flags: usize) -> bool {
     // GitHub issue #967: O_CREAT is a mutation, which takes the guard
     // instead; a counted reader that then took it would wait for itself.
+    // scripts/buildcheck_ext2_reader_self_wait.py refuses a registered
+    // handler that reaches the guard (GitHub issue #1015); a number added
+    // here whose dispatch arm takes the guard inline is not visible to it.
     if (number == AARCH64_NR_OPENAT && (flags & LINUX_O_CREAT) != 0) {
         return false;
     }

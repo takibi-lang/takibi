@@ -1530,6 +1530,7 @@ $(KERNEL_RPI5_MAIN_O): $(KERNEL_RPI5_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(
 	$(NICE_HEAVY) $(TAKIBI) $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_FDT_TKB) $< $(KERNEL_RPI5_COMPILE_FLAGS) $(KERNEL_RAW_CONFINE) $(KERNEL_EXECUTION_MODEL) $(KERNEL_UNUSED_CHECK_RPI5) --emit-depfile $@.d --emit-raw-deref-audit $@.rawderef.tsv --emit-raw-site-counts $@.rawsites.tsv --emit-call-graph $@.callgraph.tsv --emit-range-obligations $@.rangeobl -o $@
 	python3 scripts/buildcheck_kernel_unused_coverage.py rpi5 $@.d
 	python3 scripts/buildcheck_ext2_mutation_guard.py $@.callgraph.tsv
+	python3 scripts/buildcheck_ext2_reader_self_wait.py $@.callgraph.tsv
 	$(NICE_HEAVY) python3 scripts/buildcheck_range_obligations.py $@.rangeobl
 	python3 scripts/measure_trusted_base.py --check-raw-deref rpi5 $@.rawderef.tsv $@.d
 
@@ -1664,6 +1665,7 @@ $(KERNEL_QEMU_MAIN_O): $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(
 	$(NICE_HEAVY) $(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_QEMU_USB_ABSENT_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $< $(KERNEL_QEMU_COMPILE_FLAGS) $(KERNEL_RAW_CONFINE) $(KERNEL_EXECUTION_MODEL) $(KERNEL_UNUSED_CHECK_QEMU) --emit-depfile $@.d --emit-raw-deref-audit $@.rawderef.tsv --emit-raw-site-counts $@.rawsites.tsv --emit-call-graph $@.callgraph.tsv --emit-alloc-words $@.allocwords --emit-range-obligations $@.rangeobl -o $@
 	python3 scripts/buildcheck_kernel_unused_coverage.py qemu $@.d
 	python3 scripts/buildcheck_ext2_mutation_guard.py $@.callgraph.tsv
+	python3 scripts/buildcheck_ext2_reader_self_wait.py $@.callgraph.tsv
 	$(NICE_HEAVY) python3 scripts/buildcheck_range_obligations.py $@.rangeobl
 	python3 scripts/buildcheck_compile_alloc_budget.py qemu $@.allocwords
 	python3 scripts/measure_trusted_base.py --check-raw-deref qemu $@.rawderef.tsv $@.d
