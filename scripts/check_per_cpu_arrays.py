@@ -85,6 +85,7 @@ LISTED = {
     ("kernel/kernel/profile_session.tkb", "profile_core_store"): (CROSS, "the profile session's collector"),
     ("kernel/kernel/profile_session.tkb", "profile_core_state"): (CROSS, "the profile session's collector"),
     ("kernel/kernel/profile_session.tkb", "irqsoff_core"): (CROSS, "the irqsoff report"),
+    ("kernel/kernel/profile_session.tkb", "irqsoff_standing"): (CROSS, "the boot report's irqsoff lines (#958)"),
     ("kernel/kernel/profile_timeline.tkb", "profile_timeline_cores"): (CROSS, "the timeline report"),
     ("kernel/kernel/protocol_trace.tkb", "protocol_trace_cores"): (CROSS, "the protocol trace dump"),
     ("kernel/kernel/stall_probe.tkb", "stall_probe_last_tick"): (CROSS, "read from GDB by symbol name; the probe is off by default (KERNEL_STALL_PROBES)"),
