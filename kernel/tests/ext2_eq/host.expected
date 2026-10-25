@@ -57,4 +57,11 @@ row peer
   past []
 2 peer peer/f -> 0
   peer/f file size=7
+row truncate_dind
+1 mkdir truncate_dind -> 0
+  truncate_dind dir
+2 adopt truncate_dind/f -> 0
+  truncate_dind/f file size=276480
+3 write truncate_dind/f ab -> 0
+  truncate_dind/f file size=2
 eq done

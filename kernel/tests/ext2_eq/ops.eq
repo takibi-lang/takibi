@@ -15,6 +15,9 @@
 #   peer P              write 0123456789 to P, hold it open as fd 3 and read
 #                       6 bytes, truncate P to "ab" through another open,
 #                       then read and write "Z" through fd 3 (#1023)
+#   adopt P             mv the doubly-indirect fixture the comparing lane's
+#                       runner planted at /lib/ext2-eq-dind to P (#1021;
+#                       scripts/ext2_eq.py DIND_BLOCKS; at most once)
 #
 # The script runs from /etc/init.sh after /bin/user_payload has released its
 # ENOSPC fillers; the rows share the image's free space (about 230 blocks).
@@ -22,10 +25,6 @@
 # printf writes nothing on the guest (#1067) and cat's sendfile goes to the
 # console (#1070). (dup3 duplicates any file descriptor; the earlier note
 # here that it served only stdin/stdout was wrong, #1023.)
-#
-# Not rows yet (GitHub issue #1034 records why):
-#   #1021 needs a doubly-indirect file (over 268 KiB), more than the image's
-#         free space.
 
 row base match -
 mkdir base
@@ -64,3 +63,13 @@ truncate truncate/f
 row peer match #1023
 mkdir peer
 peer peer/f
+
+# #1016's O_TRUNC release of a doubly-indirect tree (#1021). The kernel
+# writes no file past the singly-indirect range (268 KiB), so the file is
+# the runner's planted sparse fixture: 270 KiB long, data in a direct
+# block, under the singly-indirect block, and two under the doubly-indirect
+# block's second-level block. The O_TRUNC write frees all seven blocks.
+row truncate_dind match #1021
+mkdir truncate_dind
+adopt truncate_dind/f
+write truncate_dind/f ab

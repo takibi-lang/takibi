@@ -41,6 +41,7 @@ Usage:
   ext2_eq.py check-expected OPS BUSYBOX EXPECTED
   ext2_eq.py replay OPS BUSYBOX PRISTINE OUT
   ext2_eq.py compare OPS EXPECTED KERNEL_IMAGE HOST_IMAGE
+  ext2_eq.py fixture OUT                    the sparse doubly-indirect fixture
   ext2_eq.py self-test
 """
 
@@ -61,6 +62,19 @@ NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$")
 TEXT_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 FILL_MAX = 1024     # KiB; the source, the BusyBox binary, is over 1 MiB
 LONG = "n" * 200     # a long entry name: four to a 1 KiB directory block
+# GitHub issue #1021: the doubly-indirect fixture `adopt` moves into a row.
+# The kernel writes no file past the singly-indirect range, and the image
+# has fewer free blocks than a dense doubly-indirect file, so the comparing
+# lane's runner (scripts/run_kernel_qemutest.sh) plants this sparse file on
+# its own disk copy with debugfs, written by `ext2_eq.py fixture`; the host
+# side seeds the same file. (offset KiB, byte) for each 1 KiB data block:
+# a direct block, one under the singly-indirect block, and two under the
+# doubly-indirect block's first second-level block -- 7 blocks in all.
+DIND_FIXTURE = "lib/ext2-eq-dind"
+DIND_BLOCKS = ((0, 0x41), (12, 0x42), (268, 0x43), (269, 0x44))
+# 12 direct blocks and one singly-indirect block of 256 pointers (1 KiB
+# blocks): a block at or past this offset hangs under the doubly-indirect
+SINGLE_LIMIT_KIB = 12 + 256
 
 
 class EqError(Exception):
@@ -82,7 +96,22 @@ OPS = {
     "rename": (("path", "path"), 'mv "$R/{0}" "$R/{1}"'),
     "files": (("path", "count"), None),
     "peer": (("path",), None),
+    # mv the planted doubly-indirect fixture to P (#1021)
+    "adopt": (("path",), 'mv "$F/' + DIND_FIXTURE + '" "$R/{0}"'),
 }
+
+
+def adopted(rows):
+    return any(op == "adopt" for _n, _e, _i, ops in rows for _l, op, _a in ops)
+
+
+def write_fixture(path):
+    """The sparse doubly-indirect fixture, mode 0644."""
+    with open(path, "wb") as handle:
+        for kib, byte in DIND_BLOCKS:
+            handle.seek(kib * 1024)
+            handle.write(bytes([byte]) * 1024)
+    os.chmod(path, 0o644)
 
 
 def parse(text):
@@ -123,6 +152,9 @@ def parse(text):
         # dd would write a short file and the row would differ for that
         if op == "fill" and int(args[1]) > FILL_MAX:
             raise EqError(f"line {lineno}: fill takes at most {FILL_MAX} KiB")
+        # the fixture is one file: a second adopt would find it gone
+        if op == "adopt" and adopted(rows):
+            raise EqError(f"line {lineno}: adopt used twice; the fixture is one file")
         rows[-1][3].append((lineno, op, args))
     if not rows:
         raise EqError("no rows")
@@ -148,6 +180,9 @@ def gen_sh(rows):
         # nothing on the guest (#1067), and cat's sendfile goes to the
         # console whatever fd 1 is (#1070)
         'S="${3-/bin/busybox}"',
+        # the image root, where `adopt` finds the planted fixture: / on the
+        # guest, the scratch root (seeded with the same file) on the host
+        'F="$1"',
         'mkdir "$R"',
         "t() { if [ -d \"$1\" ]; then echo \"  $2 dir\"; elif [ -f \"$1\" ]; "
         "then $B stat -c \"  $2 file size=%s\" \"$1\"; else echo \"  $2 absent\"; fi; }",
@@ -209,6 +244,9 @@ def run_host(rows, busybox, workdir):
         handle.write(gen_sh(rows))
     tree = os.path.join(workdir, "root")
     os.mkdir(tree)
+    if adopted(rows):
+        os.makedirs(os.path.join(tree, os.path.dirname(DIND_FIXTURE)))
+        write_fixture(os.path.join(tree, DIND_FIXTURE))
     done = subprocess.run([qemu_user(), busybox, "ash", script, tree, "",
                            os.path.abspath(busybox)],
                           preexec_fn=lambda: os.umask(0o022),
@@ -520,6 +558,18 @@ def self_test():
                 raise AssertionError(f"a file written by a non-external command: {line!r}")
             if re.search(r'\b(cat|printf)\b', part):
                 raise AssertionError(f"cat (sendfile, #1070) or printf (#1067): {line!r}")
+    # `adopt` moves the planted fixture, once (#1021); the fixture reaches
+    # past the singly-indirect range, or the row tests no doubly-indirect
+    # release
+    try:
+        parse("row a match -\nmkdir a\nadopt a/f\nadopt a/g\n")
+        raise AssertionError("accepted a second adopt")
+    except EqError:
+        pass
+    adopting = parse("row a match -\nmkdir a\nadopt a/f\n")
+    assert adopted(adopting) and not adopted(rows)
+    assert f'mv "$F/{DIND_FIXTURE}" "$R/a/f"' in gen_sh(adopting)
+    assert max(k for k, _b in DIND_BLOCKS) >= SINGLE_LIMIT_KIB
     log = "row a\n1 mkdir a -> 0\n  a dir\nrow b\neq done\n"
     assert split_log(log) == {"a": ["1 mkdir a -> 0", "  a dir"], "b": []}
     files = {"/eq/a": ("dir", 0o755, None, 2, None, ("f",), None),
@@ -530,13 +580,16 @@ def self_test():
     assert len(row_differences("a", files, other, {}, {})) == 1
     assert row_differences("b", files, other, {}, {}) == []
     report_pass("ext2-eq self-test", "parser, generator, log and row diff",
-                cases=9)
+                cases=12)
 
 
 def main(argv):
     try:
         if argv[1:] == ["self-test"]:
             self_test()
+            return 0
+        if len(argv) == 3 and argv[1] == "fixture":
+            write_fixture(argv[2])
             return 0
         command, args = argv[1], argv[2:]
         rows = parse(open(args[0]).read())

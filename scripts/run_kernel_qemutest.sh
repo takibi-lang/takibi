@@ -105,6 +105,16 @@ case "$EXT2_EQ" in
         if ! debugfs -R 'stat /lib/ext2-eq.enable' "$QEMU_EXT2_IMAGE" 2>/dev/null | grep -q '^Inode:'; then
             echo "FAIL $RUN_LABEL: could not plant /lib/ext2-eq.enable on the guest's disk" >&2
             exit 1
+        fi
+        # GitHub issue #1021: row truncate_dind's doubly-indirect file. The
+        # kernel cannot write one and the image lacks the free blocks for a
+        # dense one, so a sparse fixture goes on this copy, /pad untouched.
+        python3 "$REPO_ROOT/scripts/ext2_eq.py" fixture "$ARTIFACT_DIR/ext2-eq-dind"
+        E2FSPROGS_FAKE_TIME=1700000000 debugfs -w \
+            -R "write $ARTIFACT_DIR/ext2-eq-dind /lib/ext2-eq-dind" "$QEMU_EXT2_IMAGE" >/dev/null 2>&1
+        if ! debugfs -R 'stat /lib/ext2-eq-dind' "$QEMU_EXT2_IMAGE" 2>/dev/null | grep -q '(DIND)'; then
+            echo "FAIL $RUN_LABEL: could not plant the doubly-indirect /lib/ext2-eq-dind on the guest's disk" >&2
+            exit 1
         fi ;;
     off) ;;
     *) echo "error: KERNEL_QEMU_EXT2_EQ must be on or off, not '$EXT2_EQ'" >&2
