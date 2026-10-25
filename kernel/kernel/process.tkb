@@ -6443,10 +6443,19 @@ private fn kernel_process_idle_starvation_note(
 // unowned, so DDB had no root to name for that pid. Written only by its own
 // CPU; DDB reads it through the stopped-root publication, which that CPU
 // makes itself, or directly on the debugger's own CPU. 0 when none.
-private let mut kernel_process_claimed_pid: [usize; KERNEL_MAX_CORES];
+//
+// A per-CPU store (#981): the set and the clear in
+// kernel_process_secondary_start are one preempt_off region spanning
+// kernel_process_secondary_start_reserved, so the compiler checks both name
+// the same CPU and that nothing in between may block.
+struct per_cpu ProcessClaim {
+    private pid: usize;
+}
+
+private let mut kernel_process_claim: [ProcessClaim; KERNEL_MAX_CORES];
 
 fn kernel_process_claimed_pid_or_zero() -> usize {
-    return kernel_process_claimed_pid[execution_cpu_index()];
+    preempt_off (cpu) { return kernel_process_claim[cpu].pid; }
 }
 
 // Called by a secondary CPU's architectural idle loop. Idle means no admitted
@@ -6503,16 +6512,20 @@ fn kernel_process_secondary_start() -> ProcessSecondaryStart {
                                 scheduled_process_peer_dispatch_enabled = true;
                             }
                             // GitHub issue #874: name the claim before the
-                            // unlock, for a world stop in the window.
-                            kernel_process_claimed_pid[execution_cpu_index()] =
-                                scheduled_process_record_locked(guard, slot).pid;
-                            kernel_activity_leave(activity_before);
-                            process_run_unlock(guard);
-                            let started: ProcessSecondaryStart =
-                                kernel_process_secondary_start_reserved(
-                                    owner, running);
-                            kernel_process_claimed_pid[execution_cpu_index()] = 0;
-                            return started;
+                            // unlock, for a world stop in the window. One
+                            // region, so the clear names the CPU the set did
+                            // (#981).
+                            preempt_off (cpu) {
+                                kernel_process_claim[cpu].pid =
+                                    scheduled_process_record_locked(guard, slot).pid;
+                                kernel_activity_leave(activity_before);
+                                process_run_unlock(guard);
+                                let started: ProcessSecondaryStart =
+                                    kernel_process_secondary_start_reserved(
+                                        owner, running);
+                                kernel_process_claim[cpu].pid = 0;
+                                return started;
+                            }
                         }
                     }
                 }

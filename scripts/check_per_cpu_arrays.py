@@ -109,7 +109,6 @@ LISTED = {
     # Own-CPU only, left an ordinary array by decision or for now.
     ("kernel/arch/arm64/boot/cpu.tkb", "irq_pmr_masked"): (PENDING, "PMR shadow: an out-of-range CPU must fall back to DAIF, not stop in the mint; revisited with #638 (#981)"),
     ("kernel/arch/arm64/boot/cpu.tkb", "irq_pmr_ready"): (PENDING, "PMR shadow, as irq_pmr_masked"),
-    ("kernel/kernel/process.tkb", "kernel_process_claimed_pid"): (PENDING, "set and cleared across kernel_process_secondary_start_reserved; options on #981"),
     ("kernel/mm/process_image.tkb", "process_image_contexts"): (PENDING, "per-operation target root held across may_block and read by the COW fault path; maintainer decision (#981)"),
     ("kernel/printk/log.tkb", "kernel_log_peer_probe_emitted"): (PENDING, "log.tkb waits for #613"),
 }
