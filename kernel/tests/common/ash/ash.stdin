@@ -53,6 +53,10 @@ rmdir "/etc/${long_name}e"; for suffix in a b c d; do rmdir "/etc/$long_name$suf
 mv /etc/mvb /etc/made && mv /etc/made /etc/moved && echo mv2
 mv /etc/mva /kept /etc/moved
 /bin/cat /etc/moved/mvb
+# GitHub issue #1034: ext2 equivalence, tier B. The script generated from
+# kernel/tests/ext2_eq/ops.eq runs the rows under /eq and logs to /eq-log;
+# the QEMU lane compares the disk with host Linux and libext2fs afterwards.
+/bin/sh /lib/ext2-eq.sh "" >/eq-log
 # GitHub issue #540: close-on-exec across execve. /bin/cloexec
 # flags fds 20 and 22, keeps 21, and execs /bin/cloexec-check.
 /bin/cloexec

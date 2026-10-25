@@ -391,6 +391,23 @@ if ! e2fsck -fn "$QEMU_EXT2_IMAGE" >"$ARTIFACT_DIR/e2fsck.log" 2>&1; then
     exit 1
 fi
 
+# GitHub issue #1034: ext2 equivalence, tier B. The ash fixture ran the rows
+# of kernel/tests/ext2_eq/ops.eq on this disk; host Linux runs the same
+# script (qemu-aarch64 user mode, the same BusyBox), libext2fs writes the
+# tree it left onto a pristine image, and the two disks are compared
+# logically, row by row, each row's outcome against the one ops.eq records.
+python3 "$REPO_ROOT/scripts/ext2_eq.py" replay "$REPO_ROOT/kernel/tests/ext2_eq/ops.eq" \
+    "$REPO_ROOT/kernel/build/user/busybox-static" "$EXT2_IMAGE" "$ARTIFACT_DIR/ext2-eq-host.img"
+if ! python3 "$REPO_ROOT/scripts/ext2_eq.py" compare "$REPO_ROOT/kernel/tests/ext2_eq/ops.eq" \
+        "$REPO_ROOT/kernel/tests/ext2_eq/host.expected" "$QEMU_EXT2_IMAGE" \
+        "$ARTIFACT_DIR/ext2-eq-host.img" >"$ARTIFACT_DIR/ext2-eq.log" 2>&1; then
+    sed 's/^/  /' "$ARTIFACT_DIR/ext2-eq.log" >&2
+    echo "FAIL $RUN_LABEL: ext2 equivalence rows (kernel/tests/ext2_eq/ops.eq)" >&2
+    archive_reason="ext2 equivalence"
+    exit 1
+fi
+tail -n 1 "$ARTIFACT_DIR/ext2-eq.log"
+
 python3 "$REPO_ROOT/scripts/profile_kernel_workload.py" collect \
     --uart-log "$UART_LOG" --output "$ARTIFACT_DIR/busy-pair-profile.json" \
     --target qemu
