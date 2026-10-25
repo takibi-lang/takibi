@@ -1,0 +1,26 @@
+{
+  "series": [
+    {
+      "date": "2026-10-25",
+      "head": "c75492dc",
+      "counts": {
+        "raw_mint_files": 15,
+        "frame_lines": 12860,
+        "device_semantics_files": 4,
+        "raw_deref_plain": 232,
+        "raw_deref_io": 16,
+        "raw_deref_builtin_region": 113,
+        "unsafe_blocks": 139,
+        "extern_fns": 55,
+        "invariant_stop_sites": 120,
+        "assembly_lines": 2369,
+        "per_cpu_ordinary_arrays": 72,
+        "per_cpu_stores": 7,
+        "raw_cpu_id_calls": 155
+      },
+      "changes": {
+        "*": "first entry: #986 slice 1; earlier figures are the manual table in #986 body (2026-09-29 baseline, 2026-10-24 grep)"
+      }
+    }
+  ]
+}
