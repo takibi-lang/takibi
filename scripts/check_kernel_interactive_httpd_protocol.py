@@ -75,7 +75,9 @@ def main(root: Path = ROOT) -> int:
         print("ERROR\tinteractive URL is not gated by exact listener readiness")
         failed = True
     for runner, expected in (
-        ("scripts/run_kernel_shell_qemu.sh", 'ext2-shell.img"'),
+        # The default image; KERNEL_QEMU_SHELL_EXT2_IMAGE overrides it only
+        # for the #742 load image.
+        ("scripts/run_kernel_shell_qemu.sh", 'kernel/build/user/ext2-shell.img}"'),
         ("scripts/run_kernel_shell_rpi5.sh", 'kernel-shell.elf"'),
     ):
         runner_text = read(root, runner)
