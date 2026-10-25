@@ -189,7 +189,8 @@ next one taken. The done record of the previous queue is in HISTORY.md
 2. **Equivalence oracles.** ext2: tier B (#1034, landed 2026-10-25:
    `kernel/tests/ext2_eq/ops.eq` replayed on host Linux and libext2fs,
    compared logically in kernelcheck-qemu-main), #1033 (tier A, fsck after
-   every writing lane, counters against the kernel's own), #1035 (tier C,
+   every writing lane, counters against the kernel's own; done 2026-10-25,
+   `scripts/ext2_postcheck.py`), #1035 (tier C,
    the ext2 driver as a host process over a RAM disk, #909 slice 2's first
    instance; seeded sequences, fault injection, hostile images). The ext2
    fixes #1019, #1020 and #968 are `differ` rows of ops.eq and land with
