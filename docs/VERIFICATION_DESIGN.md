@@ -257,3 +257,80 @@ later change needs it, as long as the build and lane budgets are unaffected.
 - Interval merging across arms with different bounds, loop invariants
   over facts other than init intervals, disequalities, and sparse or quantified init
   (#109).
+
+## Stage 2 scope (proposed)
+
+Proposal for the stage-2 review (DECISIONS.md, 2026-10-25 #954). Not
+approved; nothing below is implemented. Stage 2 reuses the confirmed
+skeleton: the checker decides with #975's path facts and `entails`, z3
+re-checks each conclusion through #952's channel, and the 5 s cold budget
+bounds it. No new special shape goes into lib/runtime_bounds.ml.
+
+### Items, in order
+
+1. **#798, indexes from one width check.** The compiler accepts
+   `s[off + k]` (constant `k`) once the path facts entail `off + k + 1 <=
+   s.len` and `off + k` does not wrap. `bytes.len - offset < K` on the
+   false side is already a fact (`a - b` after `b <= a`, #975); the new part
+   is that the index-bounds check asks `entails` the same way the coverage
+   walk does, instead of the runtime order graph. Each discharged index
+   writes one QF_LIA obligation (facts => `0 <= off + k < s.len`).
+   Kernel sites: `ext2_slice_u16` and `ext2_slice_u32`
+   (kernel/fs/ext2/ext2.tkb 396-414) lose their `b1`/`b2`/`b3` re-checks.
+   A grep for other `len - x < K` guards followed by re-checks is part of
+   the item; the expected count is small (open question 2).
+2. **Index bounds from versioned locals (#978).** Loop counters and
+   cursors held in `let mut` locals are already atoms per version; item 1's
+   index check then also covers `s[cursor]` after `cursor < s.len` without a
+   separate `let` copy. Same obligation form. Sites: the getdents and
+   procfs cursors, whose reads now go through checked indexing (counted in
+   the item).
+3. **#799, static sizeof for enums, refined types and non-packed
+   structs.** Not a linear-fact item: it makes `const_type_size` return the
+   real size at type check, so a byte view's static minimum length is
+   exact and constant indexes into it are proven by item 1. It moves the
+   view length out of the codegen trust in TRUSTED_BASE.md. No maintained
+   site uses it yet (#799), so it is last and may be dropped (open
+   question 3).
+
+### Budget
+
+Items 1 and 2 add one obligation per discharged index, about 20 ms cold
+each. Before landing each item the share is measured with
+`scripts/buildcheck_range_obligations.py`; if it exceeds the 5 s budget,
+obligations with identical facts and goal are shared, not dropped.
+
+### Excluded from stage 2
+
+- Sparse or quantified init and lemmas (D, #109); type-level init (A);
+  qualifier sugar (B); contracts other than init and index bounds.
+- Nonlinear index terms (`i * k` with a non-constant factor) and
+  disequalities.
+- z3 as a decider: a goal the checker cannot entail is rejected even if z3
+  could prove it.
+- Range-rule changes in lib/type_inf.ml's interval arithmetic other than
+  routing through refined_or_base (stage 0a).
+
+### Evidence for #955
+
+- Per item: the derivation rules `entails` gained (each is a lemma "facts
+  imply goal at width 64"), so #955 can count compiler-level rule lemmas
+  and their size.
+- Any obligation z3 refuted during development (a checker unsoundness),
+  logged on #952 and, as a rule-soundness case, on #955.
+- Goals the checker rejected but a human could prove (nonlinear, induction):
+  the object-level candidates.
+
+### Open questions for the maintainer
+
+1. Does stage 2 cover index bounds at all, or only init contracts? Item 1
+   extends the skeleton from `init` goals to index goals with the same
+   facts; that is the reading this proposal takes of "#798 inside the
+   skeleton".
+2. Should item 1 retire the runtime order graph for the cases `entails`
+   covers, or keep both (order graph first, `entails` as fallback)?
+   Keeping both is cheaper to land; retiring it removes a second checker.
+3. Is #799 in stage 2, or does it stay off ROADMAP until a site needs it?
+4. Is item 2 wanted now, or only after item 1's site count shows it pays?
+5. Does an index obligation count against the same 5 s budget as init
+   obligations, or get its own line in the budget report?
