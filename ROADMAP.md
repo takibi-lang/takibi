@@ -175,11 +175,11 @@ not hold, in this order; compiler work in this list is authorized; an item
 that reaches a decision is parked and the next one taken. Ahead of
 everything below (maintainer, 2026-10-24, from #567's re-measurement:
 the build checks take more than twice the commits of the compiler they
-guard): #987 (--emit-call-graph, the resolved call graph as a table the
-`.tkb`-reading checks consume instead of parsing source); #988 and #989
-are done. #987's flag and its first reader
-(buildcheck_ext2_mutation_guard.py) landed 2026-10-24; its model-map
-migration waits for a maintainer decision (options on #987). With them,
+guard): #987 (--emit-call-graph), #988 and #989 are done; the model map
+check now runs from the kernel build on both kernels' call-graph tables
+(buildcheck_model_function_map.py, restamped by `make model-map-restamp`).
+The remaining `.tkb`-reading checks move to the table one by one under
+#567. With them,
 #850's stop-gap
 (maintainer, 2026-10-24): EFFECTS.md gains the table of checker-only
 effect words, and no new such word is added (DECISIONS.md). Then the
