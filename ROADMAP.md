@@ -175,7 +175,8 @@ next one taken. The done record of the previous queue is in HISTORY.md
    `scripts/invariant_stop_sites.tsv`: 120 sites, frame 31, unmodelled 18,
    ladder 71); #1018 (the frame API rule as a list-file check; done
    2026-10-25, 8 ratchet entries); #986 slice 1 (the trust ledger as a dated
-   checkpoint series, each row attributed to the rule that retired it).
+   checkpoint series, each row attributed to the rule that retired it; done
+   2026-10-25, `docs/TRUST_LEDGER.json`, #986 stays open).
 1. **Verification (#954; B owns the refinement code).** The rest of #954
    stage 2 (docs/VERIFICATION_DESIGN.md, "Stage 2 scope"), then #955's
    evidence log; #986 slice 2 (region arithmetic and overlay length as

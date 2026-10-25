@@ -555,6 +555,27 @@ raw casts, MMIO, extern declarations, and DMA/cache operations are reported as
 separate boundaries. Counts intentionally live in generated output rather than
 this document so that prose cannot silently become a stale status dashboard.
 
+The trust ledger keeps the dated series those counts form
+(`docs/TRUST_LEDGER.json`, #986 slice 1). Each entry records the date, the
+HEAD it measured and one count per category -- the frame (`RAW_MINT_FILES`
+files and lines, `DEVICE_SEMANTICS_FILES`), the raw dereference budget,
+production `unsafe` blocks, assembly lines, `extern fn`, ordinary per-CPU
+arrays and per_cpu stores, raw `cpu_id()` calls, `kernel_invariant_stop`
+sites, the frame API ratchet, and, with a build, `--emit-raw-site-counts`
+per target and the z3 range obligations -- and, for every count that moved,
+why: a fallen trust count names the rule that retired it (a name from
+`RULES` in `scripts/check_trust_ledger.py`), a risen one the issue that
+accepted it. `make langcheck` refuses an unattributed change and a tree whose
+trust counts exceed the last entry. Append an entry with
+
+```sh
+python3 scripts/check_trust_ledger.py --append --build-dir kernel/build \
+    --reason raw_mint_files='IoHandle: ...' --reason unsafe_blocks='#NNN ...'
+```
+
+The ledger reports `kernel_invariant_stop` sites as their own row: they
+contain a failed premise, they do not remove trust (DECISIONS 2026-10-25).
+
 Unsafe blocks are reported as both a count and the number of lines they
 enclose, because those two move independently and only the second is the size
 of what the compiler cannot check. Splitting one routine into named
