@@ -121,6 +121,29 @@
         "unsafe_blocks": "#1042 /bin/pipe-probe's write of a readonly line, the EL0 probes' one raw ABI pattern",
         "frame_lines": "#1042 DDB names for the pipe wait reason and the two pipe fd kinds in exception_evidence.tkb"
       }
+    },
+    {
+      "date": "2026-10-25",
+      "head": "7dd44337",
+      "counts": {
+        "raw_mint_files": 15,
+        "frame_lines": 12898,
+        "device_semantics_files": 4,
+        "raw_deref_plain": 232,
+        "raw_deref_io": 16,
+        "raw_deref_builtin_region": 113,
+        "unsafe_blocks": 145,
+        "extern_fns": 55,
+        "invariant_stop_sites": 120,
+        "assembly_lines": 2369,
+        "per_cpu_ordinary_arrays": 73,
+        "per_cpu_stores": 7,
+        "raw_cpu_id_calls": 156,
+        "frame_api_ratchet": 8
+      },
+      "changes": {
+        "unsafe_blocks": "#1121 one EL0 fixture success-line slice-to-pointer conversion in user_payload.tkb, the pattern every fixture message uses"
+      }
     }
   ]
 }
