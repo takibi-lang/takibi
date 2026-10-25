@@ -73,7 +73,7 @@ then escalate a partial world stop to the debug stop; #933 left reboot
 quiescent-only, maintainer 2026-10-24). #680 (region_pool handle validation without the lock) and #812
 (contiguous page run search) are parked; the RPi5 lane fails naming either
 one when its reopen condition is met (scripts/validate_parked_triggers.py,
-#953). #798, #954 stage 2's first item, is done (2026-10-25); #799 waits under #954 until a site
+#953). #798, #954 stage 2's first item, is done (2026-10-25), and so is #1007 (the order graph retired for immutable slice indexes, 2026-10-25); #799 waits under #954 until a site
 needs it.
 
 Done on the stored-authority route (2026-10-09): #637 stage 1's
@@ -194,7 +194,7 @@ follow-ups #977 and #978 done 2026-10-24, and #985, batched z3 for the init budg
 then #976 (--trace-init-flow, done 2026-10-24), which completes step 4;
 then the rest of #954 stage 2 (docs/VERIFICATION_DESIGN.md, "Stage 2
 scope"): #798 (index bounds from one width check; done 2026-10-25), index bounds from
-versioned locals, then retiring the runtime order graph. Then: #908 (fixed
+versioned locals (measured 2026-10-25: no kernel site drops a check without loop invariants), then retiring the runtime order graph (#1007, done 2026-10-25). Then: #908 (fixed
 QEMU lane budget), #916 (compiler GC tuning), #921 (front-end scans and
 overlay local types instead of a shared multi-variant run, which the profile
 showed not worth it; done 2026-10-24), #995 (the region
