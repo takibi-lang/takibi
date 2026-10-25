@@ -8,7 +8,7 @@ another timing game on the same overloaded runner.
 
 import re
 
-import check_model_function_map as mapping
+import function_source as mapping
 from pass_line import CaseCount, report_pass
 
 
@@ -58,9 +58,9 @@ def main():
     finally:
         mapping.re = original
     if counter.work > 2 * len(source):
-        raise SystemExit("FAIL model-function-map controls: function extraction "
+        raise SystemExit("FAIL function-source controls: function extraction "
                          "rescanned the full source per lookup")
-    report_pass("model-function-map controls",
+    report_pass("function-source controls",
                 "qualified/effectful bodies, nested blocks and the first duplicate definition survive; full-source scan work stays constant across lookups",
                 cases=cases.ran)
 

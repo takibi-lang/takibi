@@ -42,7 +42,7 @@ import re
 import sys
 
 from pass_line import report_pass
-from check_model_function_map import masked_sources
+from function_source import masked_sources
 from source_scan import code_only
 
 SOURCE = Path("kernel/kernel/process.tkb")

@@ -14,7 +14,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from check_model_function_map import function_body, masked_sources
+from function_source import function_body, masked_sources
 from pass_line import report_pass
 
 DRIVER = 'kernel/arch/arm64/kernel/secondary.tkb'

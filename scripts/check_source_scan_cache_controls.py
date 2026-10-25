@@ -21,7 +21,7 @@ def main() -> int:
         # The #808 shape: a check its controls run in-process, uncached.
         "in-process check without per_file": {target: uncached},
         # The thrashing shape: a bounded functools cache, either spelling.
-        "bounded lru_cache": {"check_model_function_map": modules["check_model_function_map"]
+        "bounded lru_cache": {"check_probe_visit_latch": modules["check_probe_visit_latch"]
                               + "\nfrom functools import lru_cache\n"},
         "functools.lru_cache attribute": {"check_lock_rank_wrappers":
                                           modules["check_lock_rank_wrappers"]
@@ -48,7 +48,7 @@ def main() -> int:
     cases.note()
     # Transitive use counts: a check importing a module that uses per_file.
     assert not problems({**modules, "check_zz_controls": "import check_zz\n",
-                         "check_zz": "import check_model_function_map\n"}), "transitive"
+                         "check_zz": "import check_probe_visit_latch\n"}), "transitive"
 
     # per_file: unbounded, and a mutable result is refused.
     calls = []
