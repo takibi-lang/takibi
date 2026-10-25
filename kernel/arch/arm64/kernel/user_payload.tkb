@@ -27,6 +27,13 @@ extern fn sigchld_probe_restorer_address() -> usize;
 const EBADF_RC: usize = 0xFFFFFFFFFFFFFFF7;
 const EFAULT_RC: usize = 0xFFFFFFFFFFFFFFF2;
 const ENOSPC_RC: usize = 0xFFFFFFFFFFFFFFE4;
+const ENOENT_RC: usize = 0xFFFFFFFFFFFFFFFE;
+const EEXIST_RC: usize = 0xFFFFFFFFFFFFFFEF;
+const EISDIR_RC: usize = 0xFFFFFFFFFFFFFFEB;
+// openat flags (GitHub issue #967): O_CREAT is 0x40, O_EXCL 0x80.
+const O_CREAT_RDONLY: usize = 0x40;
+const O_CREAT_WRONLY: usize = 0x41;
+const O_CREAT_EXCL_RDWR: usize = 0xC2;
 const EINVAL_RC: usize = 0xFFFFFFFFFFFFFFEA;
 const EACCES_RC: usize = 0xFFFFFFFFFFFFFFF3;
 const EAGAIN_RC: usize = 0xFFFFFFFFFFFFFFF5;
@@ -623,6 +630,43 @@ fn initial_user_payload() !{unsafe} {
         }
         fail_if(refused == false || made == 0);
         fail_if(svc5(56, 0, dir_path as *u8 as usize, 0, 0, 0) < 64);
+        // GitHub issue #967: openat(O_CREAT) on the same full volume. An
+        // empty file takes an inode and no block, so creation goes on until
+        // the root directory's last block has no room for one more entry
+        // and it cannot grow: that call must say ENOSPC and leave no name.
+        let mut file_path: [u8; 12];
+        let file_stem: []const u8 = bs"/enospc-f";
+        for byte: usize in 0..<9 { file_path[byte] = file_stem[byte]; }
+        file_path[11] = 0;
+        let mut created: usize = 0;
+        let mut create_refused: bool = false;
+        for attempt: usize in 0..<104 {
+            if (create_refused == false) {
+                file_path[9] = (0x41 + attempt / 26) as u8;
+                file_path[10] = (0x41 + attempt % 26) as u8;
+                let answer: usize = svc5(56, 0xFFFFFFFFFFFFFF9C,
+                                         file_path as *u8 as usize,
+                                         O_CREAT_WRONLY, 0x1A4, 0);
+                if (answer < 64) {
+                    fail_if(svc5(57, answer, 0, 0, 0, 0) != 0);
+                    created = created + 1;
+                } else {
+                    fail_if(answer != ENOSPC_RC);
+                    create_refused = true;
+                }
+            }
+        }
+        fail_if(create_refused == false);
+        fail_if(svc5(56, 0xFFFFFFFFFFFFFF9C, file_path as *u8 as usize,
+                     0, 0, 0) != ENOENT_RC);
+        for attempt: usize in 0..<104 {
+            if (attempt < created) {
+                file_path[9] = (0x41 + attempt / 26) as u8;
+                file_path[10] = (0x41 + attempt % 26) as u8;
+                fail_if(svc5(35, 0xFFFFFFFFFFFFFF9C, file_path as *u8 as usize,
+                             0, 0, 0) != 0);
+            }
+        }
         for attempt: usize in 0..<32 {
             if (attempt < made) {
                 dir_path[9] = (0x41 + attempt) as u8;
@@ -650,6 +694,30 @@ fn initial_user_payload() !{unsafe} {
                      0x1ED, 0, 0) != 0);
         fail_if(svc5(35, 0xFFFFFFFFFFFFFF9C,
                      "/enospc-dir" as *u8 as usize, 0x200, 0, 0) != 0);
+        // GitHub issue #967: with room again, O_CREAT|O_EXCL makes an empty
+        // file; a second O_EXCL says EEXIST; plain O_CREAT opens the file as
+        // it is; and O_CREAT naming a directory says EISDIR.
+        let created_fd: usize = svc5(56, 0xFFFFFFFFFFFFFF9C,
+                                     "/creat-file" as *u8 as usize,
+                                     O_CREAT_EXCL_RDWR, 0x1A4, 0);
+        fail_if(created_fd >= 64);
+        fail_if(svc5(63, created_fd, read_block as *u8 as usize, 1, 0, 0) != 0);
+        write_block[0] = 0x43;
+        fail_if(svc5(64, created_fd, write_block as *u8 as usize, 1, 0, 0) != 1);
+        fail_if(svc5(57, created_fd, 0, 0, 0, 0) != 0);
+        fail_if(svc5(56, 0xFFFFFFFFFFFFFF9C, "/creat-file" as *u8 as usize,
+                     O_CREAT_EXCL_RDWR, 0x1A4, 0) != EEXIST_RC);
+        let reopened_fd: usize = svc5(56, 0xFFFFFFFFFFFFFF9C,
+                                      "/creat-file" as *u8 as usize,
+                                      O_CREAT_RDONLY, 0x1A4, 0);
+        fail_if(reopened_fd >= 64);
+        fail_if(svc5(63, reopened_fd, read_block as *u8 as usize, 2, 0, 0) != 1);
+        fail_if(read_block[0] != 0x43);
+        fail_if(svc5(57, reopened_fd, 0, 0, 0, 0) != 0);
+        fail_if(svc5(56, 0xFFFFFFFFFFFFFF9C, "/" as *u8 as usize,
+                     O_CREAT_WRONLY, 0x1A4, 0) != EISDIR_RC);
+        fail_if(svc5(35, 0xFFFFFFFFFFFFFF9C,
+                     "/creat-file" as *u8 as usize, 0, 0, 0) != 0);
         // Retrying on the SAME fd appends at 7168. A failure that moved its
         // offset would create a zero-filled gap, caught by the read and EOF.
         write_block[0] = 0x21;
@@ -671,7 +739,7 @@ fn initial_user_payload() !{unsafe} {
         fail_if(svc5(63, retry_read, read_block as *u8 as usize, 1, 0, 0) != 0);
         fail_if(svc5(57, retry_read, 0, 0, 0, 0) != 0);
         let exhaustion_message: []const u8 =
-            bs"userspace ext2 exhaustion: write+mkdir ENOSPC, data+offset unchanged, unlink+retry ok\n";
+            bs"userspace ext2 exhaustion: write+mkdir+creat ENOSPC, data+offset unchanged, unlink+retry ok, creat excl+reopen ok\n";
         fail_if(svc5(64, 1, (unsafe { exhaustion_message as *u8 }) as usize,
                      exhaustion_message.len, 0, 0) != exhaustion_message.len);
         let write_fd: usize = svc5(56, 0, mutable_path as usize, 1, 0, 0);

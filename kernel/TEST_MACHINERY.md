@@ -40,7 +40,7 @@ starts:
 |---|---|
 | `ext2_bitmap_roundtrip_check` | Allocates and releases a block and inode, then checks the ext2 free counts returned to their starting values. Those bitmap counts are not exposed by a Linux syscall. |
 | `ext2_owner_roundtrip_check` | Checks that linear block and inode owners can be claimed and returned. Owner tokens are a kernel-side resource contract. |
-| `ext2_create_check` and `ext2_create_in_directory_check` | Exercise regular-file creation through the ext2 API. `openat` does not implement `O_CREAT`, so userspace cannot reach these operations. |
+| `ext2_create_check` and `ext2_create_in_directory_check` | Exercise regular-file creation with initial content through the ext2 API, a shape no syscall has: `openat` with `O_CREAT` makes an empty file (`ext2_create_empty_file_in`), which the userspace payload exercises. |
 | `ext2_read_fast_symlink` for `/latest` | The ext2 path walker does not follow symlinks, so userspace cannot read the target through this path yet. |
 
 The direct reads of `/hello.txt` and `/large.txt`, the directory-growth

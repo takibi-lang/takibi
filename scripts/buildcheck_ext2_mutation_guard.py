@@ -66,8 +66,9 @@ DEFINING = {MUTATOR_FILE, LOCK_FILE}
 # Files permitted to mutate without the guard, and why.
 UNGUARDED_ALLOWED = {
     "kernel/init/ext2_fixture.tkb":
-        "the remaining file-creation fixture exercises O_CREAT-unreachable "
-        "ext2 APIs before userspace can reach the filesystem",
+        "the remaining file-creation fixture exercises content-bearing "
+        "creation APIs no syscall reaches, before userspace can reach the "
+        "filesystem",
 }
 
 

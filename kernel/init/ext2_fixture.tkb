@@ -9,8 +9,9 @@
 //
 // And that one block was a COVERAGE GAP. QEMU's mutation probes ran here
 // while the board skipped them. Both platforms now run the checks retained
-// below: bitmap and owner round trips are kernel-internal, and regular-file
-// creation is not reachable through openat because O_CREAT is unsupported.
+// below: bitmap and owner round trips are kernel-internal, and creating a
+// regular file WITH content in one step is no syscall's shape (openat's
+// O_CREAT makes an empty file, which the ash fixture's payload exercises).
 // File reads and directory growth moved to the shared ash fixture, where
 // userspace checks their contents and directory size through Linux syscalls.
 // The board provisions its filesystem fresh onto USB on every boot, so these
