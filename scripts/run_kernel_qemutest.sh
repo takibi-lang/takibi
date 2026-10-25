@@ -94,15 +94,16 @@ rm -f "$INTERACTIVE_HTTPD_LISTENER" "$INTERACTIVE_HTTPD_READY" \
     "$NETWORK_READY" "$ARTIFACT_DIR/console-state.log"
 cp "$EXT2_IMAGE" "$QEMU_EXT2_IMAGE"
 # GitHub issue #1075: the #1034 equivalence rows cost every boot that runs
-# them, so kernel/tests/ext2/init.sh runs them only when /eq-enable exists.
+# them, so kernel/tests/ext2/init.sh runs them only when /lib/ext2-eq.enable
+# exists (in /lib, which no ash listing shows).
 # This runner is the one that compares them, and it plants the marker in its
 # own copy of the disk; KERNEL_QEMU_EXT2_EQ=off (the race-window lanes, whose
 # verdict is the window, not the disk) leaves it out and skips the compare.
 EXT2_EQ="${KERNEL_QEMU_EXT2_EQ:-on}"
 case "$EXT2_EQ" in
-    on) debugfs -w -R 'write /dev/null /eq-enable' "$QEMU_EXT2_IMAGE" >/dev/null 2>&1
-        if ! debugfs -R 'stat /eq-enable' "$QEMU_EXT2_IMAGE" 2>/dev/null | grep -q '^Inode:'; then
-            echo "FAIL $RUN_LABEL: could not plant /eq-enable on the guest's disk" >&2
+    on) debugfs -w -R 'write /dev/null /lib/ext2-eq.enable' "$QEMU_EXT2_IMAGE" >/dev/null 2>&1
+        if ! debugfs -R 'stat /lib/ext2-eq.enable' "$QEMU_EXT2_IMAGE" 2>/dev/null | grep -q '^Inode:'; then
+            echo "FAIL $RUN_LABEL: could not plant /lib/ext2-eq.enable on the guest's disk" >&2
             exit 1
         fi ;;
     off) ;;

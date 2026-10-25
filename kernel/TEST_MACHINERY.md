@@ -32,7 +32,7 @@ with `e2fsck` after the session.
 as matching Linux or as a known divergence naming its issue (GitHub issue
 #1034). `scripts/ext2_eq.py gen-sh` turns it into `/lib/ext2-eq.sh`, which
 `/etc/init.sh` runs after `/bin/user_payload`, logging to `/eq-log`, only
-when `/eq-enable` exists: `scripts/run_kernel_qemutest.sh`, the one runner
+when `/lib/ext2-eq.enable` exists: `scripts/run_kernel_qemutest.sh`, the one runner
 that compares the rows, plants it in its copy of the disk (and not under
 `KERNEL_QEMU_EXT2_EQ=off`, which the race-window lanes set), so no other
 lane pays for them (#1075). The

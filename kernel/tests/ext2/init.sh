@@ -87,9 +87,10 @@ fi
 # the QEMU lane compares the disk with host Linux and libext2fs afterwards.
 # Here, after user_payload has released its ENOSPC fillers, so the rows have
 # the image's free space. Silent: its verdict is the lane's comparison.
-# Only the comparing lane's runner plants /eq-enable (#1075): every other
-# boot would pay for rows nothing reads.
-if [ -e /eq-enable ]; then
+# Only the comparing lane's runner plants /lib/ext2-eq.enable (#1075):
+# every other boot would pay for rows nothing reads. /lib, because the ash
+# fixture lists /, /bin, /many and /etc, and a marker there changes them.
+if [ -e /lib/ext2-eq.enable ]; then
     /bin/sh /lib/ext2-eq.sh >/eq-log 2>&1
 fi
 
