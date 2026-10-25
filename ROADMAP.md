@@ -120,7 +120,9 @@ debug stop). #799 waits under #954 until a site needs it.
    2026-10-24): (1) the raw `cpu_id()` inventory check, done; (2)
    `preempt_off` lowers to a per-CPU preempt count reached through
    TPIDR_EL1, with a debug-build assert, constant still 0, measured on
-   RPi5 (decided 2026-10-25, DECISIONS.md; the route review's other
+   RPi5 (decided 2026-10-25, DECISIONS.md; done 2026-10-25 except the RPi5
+   measurement: a .S helper reads TPIDR_EL1, the asserts run in every
+   image; the route review's other
    recommendations are taken with it: an immediate switch at IRQ return
    only, El0-only deliveries, bounded yield-and-retry slot pools,
    `!{interrupt}` deriving `PreemptOff` with `nmi` and `debug_stopped`
