@@ -327,3 +327,8 @@ condition below applies, and reports the land afterwards.
   multi-variant run is not built. #922 (domain-parallel codegen, at most ~25%
   on a solo build and nothing on a land) leaves ROADMAP and stays open until
   compile time is felt again. [active] #921 #922
+- 2026-10-25 Loop invariants are not introduced for now; #954 stage 2 item 2
+  closes without new code. When they come, the compiler infers them by
+  default (abstract interpretation, z3 Spacer where its cost fits the 5 s
+  budget), and the programmer writes an invariant or a proof only where
+  inference fails. Evidence for #955. [active] #954 #955

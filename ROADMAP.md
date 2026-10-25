@@ -194,7 +194,7 @@ follow-ups #977 and #978 done 2026-10-24, and #985, batched z3 for the init budg
 then #976 (--trace-init-flow, done 2026-10-24), which completes step 4;
 then the rest of #954 stage 2 (docs/VERIFICATION_DESIGN.md, "Stage 2
 scope"): #798 (index bounds from one width check; done 2026-10-25), index bounds from
-versioned locals (measured 2026-10-25: no kernel site drops a check without loop invariants), then retiring the runtime order graph (#1007, done 2026-10-25). Then: #908 (fixed
+versioned locals (closed 2026-10-25: nothing left without loop invariants, which are deferred), then retiring the runtime order graph (#1007, done 2026-10-25). Then: #908 (fixed
 QEMU lane budget), #916 (compiler GC tuning), #921 (front-end scans and
 overlay local types instead of a shared multi-variant run, which the profile
 showed not worth it; done 2026-10-24), #995 (the region

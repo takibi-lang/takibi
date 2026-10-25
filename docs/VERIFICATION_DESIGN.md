@@ -282,11 +282,27 @@ lib/runtime_bounds.ml. Stage 2 covers index bounds as well as init.
    real check (never a loop's trial run), and writes rule `index` under
    the init header; `--range-obligation-fault-control` plants a wrong
    proof that z3 must refute.
-2. **Index bounds from versioned locals (#978).** Committed; item 1's site
-   count decides when it runs, not whether. Cursors held in `let mut`
-   locals are already atoms per version, so `s[cursor]` after
-   `cursor < s.len` is discharged without a separate `let` copy. Candidate
-   sites: the getdents and procfs cursors.
+2. **Index bounds from versioned locals (#978).** Closed without new code
+   (maintainer, 2026-10-25): #978, #798 and #1007 already decide indexes
+   through versioned `let mut` cursors. The six kernel guards left
+   (syscall.tkb path probe, terminal_probe, diagnostic_ring, procfs and
+   exception_evidence counters; about 8-12 B each) need a loop invariant or
+   a noreturn call, and loop invariants are not introduced for now.
+
+### Loop invariants (deferred)
+
+Not introduced for now (maintainer, 2026-10-25). A rough estimate: hand
+annotations add about 600-1200 lines plus tests to the ~2600 lines of
+init_flow, init_pred and range_obligation, and inference adds about
+1500-3000; both add a soundness surface around per-iteration havoc, where
+#935, #956, #961 and #983 were found. The six sites above save about
+50-70 B in total.
+
+When they come, the intended direction is: the compiler infers invariants
+by default (interval and linear abstract interpretation with widening; z3's
+CHC engine, Spacer, is a candidate where its cost fits the 5 s budget), and
+the programmer writes an invariant or a proof only where inference fails.
+This is evidence for #955 (proof assistants).
 3. **Follow-up: retire the runtime order graph** for the cases `entails`
    covers, so one checker remains.
    Done (#1007): Init_flow decides every index into an immutable slice
