@@ -61,6 +61,8 @@ the table change in the same commit.
 - `scripts/buildcheck_ext2_mutation_guard.py`: `callees` and `params`.
 - `scripts/buildcheck_ext2_reader_self_wait.py`: `name`, `file`, `line`,
   `callees` and `callers`.
+- `scripts/buildcheck_ext2_release_log.py`: `name`, `file`, `line` and
+  `callees`.
 - `scripts/buildcheck_world_stop_rank.py`: `name`, `file`, `line`,
   `declared` (the `acquires_lock_<rank>_<class>` ranks) and `callers`.
 - `scripts/buildcheck_model_function_map.py`: `name`, `body_hash` (the
