@@ -239,6 +239,30 @@ effect-matrix-control: build
 	fi; \
 	echo "PASS effect-matrix-control: EFFECTS.md matches compiler effect rules"
 
+# GitHub issues #1003 and #1027 step 1: WORDS.md (every compiler-owned word)
+# and CLI.md (every compiler flag) are generated and tracked, so adding a
+# keyword, builtin or flag is a visible diff, as adding an effect row is a
+# diff of EFFECTS.md.
+.PHONY: language-words-control
+language-words-control: build
+	@tmp=`mktemp`; trap 'rm -f "$$tmp"' EXIT; \
+	$(NICE_HEAVY) $(TAKIBI) --emit-doc words > "$$tmp"; \
+	if ! cmp -s WORDS.md "$$tmp"; then \
+		echo "FAIL language-words-control: WORDS.md is stale; regenerate with $(TAKIBI) --emit-doc words > WORDS.md" >&2; \
+		diff -u WORDS.md "$$tmp" >&2 || true; exit 1; \
+	fi; \
+	echo "PASS language-words-control: WORDS.md matches lib/language_words.ml"
+
+.PHONY: cli-flags-control
+cli-flags-control: build
+	@tmp=`mktemp`; trap 'rm -f "$$tmp"' EXIT; \
+	$(NICE_HEAVY) $(TAKIBI) --emit-doc cli > "$$tmp"; \
+	if ! cmp -s CLI.md "$$tmp"; then \
+		echo "FAIL cli-flags-control: CLI.md is stale; regenerate with $(TAKIBI) --emit-doc cli > CLI.md" >&2; \
+		diff -u CLI.md "$$tmp" >&2 || true; exit 1; \
+	fi; \
+	echo "PASS cli-flags-control: CLI.md matches the flag table in bin/main.ml"
+
 # GitHub issue #526: the fast gate's membership rule, expressed as a number.
 # The slowest legitimate member measured about 0.8s standalone
 # (check_process_running_mints_controls.py, 2026-10-17, after #808 moved the
@@ -263,7 +287,7 @@ CHECK_CPU_BUDGET_REFS    := 18
 # CHECK_TIMEOUT_SECONDS, which is what makes "the fast gate is for checks
 # that read tracked files" a mechanism instead of a sentence: a member that
 # waits is killed and this lane goes red.
-langcheck: unused-function-control forbid-unsafe-control effect-matrix-control pool-liveness-control wont-compile-control regions-flag-control
+langcheck: unused-function-control forbid-unsafe-control effect-matrix-control language-words-control cli-flags-control pool-liveness-control wont-compile-control regions-flag-control
 	@bash scripts/lane_timing.sh begin langcheck
 	@bash scripts/run_check_lane.sh check $(CHECK_TIMEOUT_SECONDS) $(CHECK_CPU_BUDGET_MS) $(CHECK_CPU_BUDGET_REFS)
 # -I skips binary files. Without it a build directory left in the worktree

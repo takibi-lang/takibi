@@ -46,13 +46,17 @@ let () =
      OCAMLRUNPARAM still applies first, so set these only when it is unset. *)
   if Sys.getenv_opt "OCAMLRUNPARAM" = None then
     Gc.set { (Gc.get ()) with Gc.minor_heap_size = 4 * 1024 * 1024; space_overhead = 200 };
-  (* Parse arguments: takibi <input>... [-o <output.o>] [--target <triple>]
-     [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] *)
+  (* GitHub issue #1027 step 1: every flag is one row of [flags] -- name,
+     group, argument, one-line help, handler -- and nothing else parses
+     argv. `--emit-doc cli` prints the table as CLI.md, which
+     cli-flags-control (make langcheck) keeps fresh, so adding a flag is a
+     visible diff of a tracked document. An argument that starts with '-'
+     and names no row is an error, never an input file (DECISIONS
+     2026-10-16: ignored input is an error). *)
   let input_files  = ref [] in
   let output_file = ref "" in
   let target_triple = ref "" in
   let target_cpu = ref "" in
-  let target_features = ref "" in
   let debug_info = ref false in
   let forbid_trap = ref false in
   let forbid_unsafe = ref false in
@@ -64,11 +68,10 @@ let () =
   let reject_unused_functions = ref false in
   let external_entries = ref [] in
   let check_unused_files = ref [] in
-  let explain_inference = ref false in
-  let profile_functions = ref false in
   let frame_pointers = ref false in
   let function_sections = ref false in
   let show_version = ref false in
+  let emit_doc = ref "" in
   let emit_exception_frame_offsets = ref "" in
   let emit_struct_layout = ref "" in
   let emit_debug_metadata = ref "" in
@@ -82,232 +85,121 @@ let () =
   let emit_tla = ref "" in
   let emit_tla_omit = ref None in
   let emit_protocol_source = ref "" in
-  let i = ref 1 in
-  while !i < Array.length Sys.argv do
-    (match Sys.argv.(!i) with
-     | "--confine-raw-authority" -> confine_raw_authority := true
-     | "--raw-mint-file" ->
-         incr i;
-         if !i >= Array.length Sys.argv then begin
-           Printf.eprintf "Error: --raw-mint-file requires a path\n";
-           exit 1
-         end;
-         raw_mint_files := Sys.argv.(!i) :: !raw_mint_files
-     | "--require-execution-model" ->
-         incr i;
-         if !i >= Array.length Sys.argv then begin
-           Printf.eprintf "Error: --require-execution-model requires a path\n";
-           exit 1
-         end;
-         execution_model_file := Sys.argv.(!i)
-     | "--device-semantics-file" ->
-         incr i;
-         if !i >= Array.length Sys.argv then begin
-           Printf.eprintf "Error: --device-semantics-file requires a path\n";
-           exit 1
-         end;
-         device_semantics_files := Sys.argv.(!i) :: !device_semantics_files
-     | "--version" ->
-         show_version := true
-     | "--emit-exception-frame-offsets" ->
-         incr i;
-         if !i >= Array.length Sys.argv then (
-           Printf.eprintf "Error: --emit-exception-frame-offsets requires a struct name\n";
-           exit 1
-         );
-         emit_exception_frame_offsets := Sys.argv.(!i)
-     | "--emit-struct-layout" ->
-         incr i;
-         if !i >= Array.length Sys.argv then (
-           Printf.eprintf "Error: --emit-struct-layout requires a struct name\n";
-           exit 1
-         );
-         emit_struct_layout := Sys.argv.(!i)
-     | "--emit-debug-metadata" ->
-         incr i;
-         if !i >= Array.length Sys.argv then (
-           Printf.eprintf "Error: --emit-debug-metadata requires a path\n";
-           exit 1
-         );
-         emit_debug_metadata := Sys.argv.(!i)
-     | "--emit-depfile" ->
-         incr i;
-         if !i >= Array.length Sys.argv then (
-           Printf.eprintf "Error: --emit-depfile requires a path\n";
-           exit 1
-         );
-         emit_depfile := Sys.argv.(!i)
-     | "--emit-overflow-audit" ->
-         incr i;
-         if !i >= Array.length Sys.argv then (
-           Printf.eprintf "Error: --emit-overflow-audit requires a path\n";
-           exit 1
-         );
-         emit_overflow_audit := Sys.argv.(!i)
-     | "--emit-raw-deref-audit" ->
-         incr i;
-         if !i >= Array.length Sys.argv then (
-           Printf.eprintf "Error: --emit-raw-deref-audit requires a path\n";
-           exit 1
-         );
-         emit_raw_deref_audit := Sys.argv.(!i)
-     | "--emit-raw-site-counts" ->
-         incr i;
-         if !i >= Array.length Sys.argv then (
-           Printf.eprintf "Error: --emit-raw-site-counts requires a path\n";
-           exit 1
-         );
-         emit_raw_site_counts := Sys.argv.(!i)
-     | "--emit-call-graph" ->
-         (* GitHub issue #987: the resolved call graph, one TSV row per
-            function definition (docs/CALL_GRAPH.md), for the build checks
-            that would otherwise re-derive it from source. *)
-         incr i;
-         if !i >= Array.length Sys.argv then (
-           Printf.eprintf "Error: --emit-call-graph requires a path\n";
-           exit 1
-         );
-         emit_call_graph := Sys.argv.(!i)
-     | "--emit-alloc-words" ->
-         (* GitHub issue #923: the words this run allocated on the OCaml
-            heap, written at exit. Unlike time it does not depend on host
-            load, so a build check can hold it to a budget. *)
-         incr i;
-         if !i >= Array.length Sys.argv then (
-           Printf.eprintf "Error: --emit-alloc-words requires a path\n";
-           exit 1
-         );
-         let path = Sys.argv.(!i) in
+  let set r = Cli_flags.Arg (fun v -> r := v) in
+  let add r = Cli_flags.Arg (fun v -> r := v :: !r) in
+  let on r = Cli_flags.No_arg (fun () -> r := true) in
+  let path = ("<path>", "a path") in
+  let dir = ("<dir>", "a directory") in
+  let open Cli_flags in
+  let flags = [
+    flag "-o" Target_output ~arg:("<output.o>", "an argument") (set output_file)
+      "object file to write";
+    flag "--target" Target_output ~arg:("<triple>", "an argument") (set target_triple)
+      "LLVM target triple (default: the host)";
+    flag "--cpu" Target_output ~arg:("<cpu>", "an argument") (set target_cpu)
+      "LLVM target CPU";
+    flag "-g" Target_output (on debug_info) "emit DWARF debug information";
+    flag "--version" Target_output (on show_version) "print the compiler version and exit";
+    flag "--frame-pointers" Codegen (on frame_pointers)
+      "keep AArch64 frame-pointer chains (the kernel debugger walks them)";
+    flag "--function-sections" Codegen (on function_sections)
+      "one section per function and global, for the linker's --gc-sections";
+    flag "--forbid-trap" Policy (on forbid_trap)
+      "reject any compiler-inserted trap site";
+    flag "--forbid-unsafe" Policy (on forbid_unsafe)
+      "reject a reachable unsafe effect";
+    flag "--confine-raw-authority" Policy (on confine_raw_authority)
+      "only the --raw-mint-file files may mint raw authority";
+    flag "--raw-mint-file" Policy ~arg:path (add raw_mint_files)
+      "a file allowed to mint raw authority (repeatable)";
+    flag "--require-execution-model" Policy ~arg:path (set execution_model_file)
+      "check the execution-model declarations in this file";
+    flag "--device-semantics-file" Policy ~arg:path (add device_semantics_files)
+      "a file allowed to declare device semantics (repeatable)";
+    flag "--regions" Policy (on regions) "enable the region built-ins";
+    flag "--reject-unused-functions" Policy (on reject_unused_functions)
+      "reject a function nothing reachable uses";
+    flag "--external-entry" Policy ~arg:("<function>", "a function name") (add external_entries)
+      "a function called from outside Takibi (repeatable)";
+    flag "--check-unused-file" Policy ~arg:("<path>", "a source path") (add check_unused_files)
+      "restrict the unused-function check to this file (repeatable)";
+    flag "--emit-doc" Facts ~arg:("words|cli", "'words' or 'cli'")
+      (Arg (fun v ->
+         if v <> "words" && v <> "cli" then (
+           Printf.eprintf "Error: --emit-doc requires 'words' or 'cli'\n"; exit 1);
+         emit_doc := v))
+      "print WORDS.md (words) or CLI.md (cli) and exit";
+    flag "--emit-effect-matrix" Facts (on emit_effect_matrix)
+      "print EFFECTS.md and exit";
+    flag "--emit-exception-frame-offsets" Facts ~arg:("<StructName>", "a struct name")
+      (set emit_exception_frame_offsets) "print a struct's exception-frame offsets";
+    flag "--emit-struct-layout" Facts ~arg:("<StructName>", "a struct name")
+      (set emit_struct_layout) "print a struct's layout";
+    flag "--emit-debug-metadata" Facts ~arg:path (set emit_debug_metadata)
+      "write the debug-metadata side file";
+    flag "--emit-depfile" Facts ~arg:path (set emit_depfile)
+      "write a Make depfile of the use closure";
+    flag "--emit-overflow-audit" Facts ~arg:path (set emit_overflow_audit)
+      "write the overflow audit";
+    flag "--emit-raw-deref-audit" Facts ~arg:path (set emit_raw_deref_audit)
+      "write the raw-dereference audit";
+    flag "--emit-raw-site-counts" Facts ~arg:path (set emit_raw_site_counts)
+      "write raw-site counts per file";
+    (* GitHub issue #987: the resolved call graph (docs/CALL_GRAPH.md). *)
+    flag "--emit-call-graph" Facts ~arg:path (set emit_call_graph)
+      "write the call-graph table";
+    (* GitHub issue #923: allocated words, independent of host load. *)
+    flag "--emit-alloc-words" Facts ~arg:path
+      (Arg (fun path ->
          at_exit (fun () ->
            let words = Gc.allocated_bytes () /. float_of_int (Sys.word_size / 8) in
            let out = open_out path in
            Printf.fprintf out "%.0f\n" words;
-           close_out out)
-     | "--range-obligation-fault-control" ->
-         (* GitHub issue #952: plants #935's unsound rule for the z3
-            check's failing control; never used in a real build. *)
+           close_out out)))
+      "write the OCaml words this run allocated, at exit";
+    flag "--emit-held-guards" Facts ~arg:path (set emit_held_guards)
+      "write the held-guard table";
+    (* GitHub issue #952: one SMT-LIB file per derived range. *)
+    flag "--emit-range-obligations" Facts ~arg:dir
+      (Arg (fun dir ->
+         Takibi.Range_obligation.enabled := true;
+         at_exit (fun () -> Takibi.Range_obligation.write_dir dir)))
+      "write one SMT-LIB file per range obligation";
+    flag "--emit-tla" Generated ~arg:dir (set emit_tla)
+      "write each protocol's TLA+ model and exit";
+    (* GitHub issue #778: a model-check fault control only. *)
+    flag "--emit-tla-omit-cache" Generated ~arg:("publish|finish|refresh", "'publish', 'finish' or 'refresh'")
+      (Arg (fun v ->
+         match Protocol_decl.omit_of_string v with
+         | Some o -> emit_tla_omit := Some o
+         | None ->
+             Printf.eprintf "Error: --emit-tla-omit-cache requires 'publish', 'finish' or 'refresh'\n";
+             exit 1))
+      "with --emit-tla, leave one cache step out (fault control)";
+    (* GitHub issue #758. *)
+    flag "--emit-protocol-source" Generated ~arg:dir (set emit_protocol_source)
+      "write each protocol's generated source and exit";
+    (* GitHub issue #976 (docs/VERIFICATION_DESIGN.md). *)
+    flag "--trace-init-flow" Development ~arg:("<function>", "a function name")
+      (Arg (fun f -> Takibi.Init_flow.trace_func := Some f))
+      "print a function's init state after each statement";
+    (* GitHub issue #952: plants the unsound rules the z3 check must catch;
+       never used in a real build. *)
+    flag "--range-obligation-fault-control" Development
+      (No_arg (fun () ->
          Takibi.Range_obligation.fault_unsigned_negative_lo := true;
-         (* #984: and #961's min/max placeholder range. *)
          Takibi.Range_obligation.fault_min_max_placeholder := true;
-         (* #960: and the three native constant readings (#956, #961,
-            #983), which each obligation's own expression must refute. *)
          Takibi.Range_obligation.fault_native_fold := true;
          Takibi.Range_obligation.fault_native_leaf := true;
          Takibi.Range_obligation.fault_native_init_leaf := true;
          Takibi.Range_obligation.fault_init_nowrap := true;
-         (* #798: and every slice index proved from the path facts. *)
-         Takibi.Range_obligation.fault_index := true
-     | "--trace-init-flow" ->
-         (* GitHub issue #976: print FUNC's init state after each
-            statement (docs/VERIFICATION_DESIGN.md). *)
-         incr i;
-         if !i >= Array.length Sys.argv then (
-           Printf.eprintf "Error: --trace-init-flow requires a function name\n";
-           exit 1
-         );
-         Takibi.Init_flow.trace_func := Some Sys.argv.(!i)
-     | "--emit-range-obligations" ->
-         (* GitHub issue #952: one SMT-LIB file per derived range, for
-            scripts/buildcheck_range_obligations.py to re-check with z3. *)
-         incr i;
-         if !i >= Array.length Sys.argv then (
-           Printf.eprintf "Error: --emit-range-obligations requires a directory\n";
-           exit 1
-         );
-         let dir = Sys.argv.(!i) in
-         Takibi.Range_obligation.enabled := true;
-         at_exit (fun () -> Takibi.Range_obligation.write_dir dir)
-     | "--emit-tla" ->
-         incr i;
-         if !i >= Array.length Sys.argv then (
-           Printf.eprintf "Error: --emit-tla requires a directory\n";
-           exit 1
-         );
-         emit_tla := Sys.argv.(!i)
-     | "--emit-tla-omit-cache" ->
-         (* GitHub issue #778: a model-check fault control only. *)
-         incr i;
-         (match if !i < Array.length Sys.argv
-                then Protocol_decl.omit_of_string Sys.argv.(!i) else None with
-          | Some o -> emit_tla_omit := Some o
-          | None ->
-              Printf.eprintf "Error: --emit-tla-omit-cache requires 'publish', 'finish' or 'refresh'\n";
-              exit 1)
-     | "--emit-protocol-source" ->
-         incr i;
-         if !i >= Array.length Sys.argv then (
-           Printf.eprintf "Error: --emit-protocol-source requires a directory\n";
-           exit 1
-         );
-         emit_protocol_source := Sys.argv.(!i)
-     | "--emit-effect-matrix" ->
-         emit_effect_matrix := true
-     | "--emit-held-guards" ->
-         incr i;
-         if !i >= Array.length Sys.argv then (
-           Printf.eprintf "Error: --emit-held-guards requires a path\n";
-           exit 1
-         );
-         emit_held_guards := Sys.argv.(!i)
-     | "-o" ->
-         incr i;
-         if !i >= Array.length Sys.argv then (
-           Printf.eprintf "Error: -o requires an argument\n"; exit 1
-         );
-         output_file := Sys.argv.(!i)
-     | "--target" ->
-         incr i;
-         if !i >= Array.length Sys.argv then (
-           Printf.eprintf "Error: --target requires an argument\n"; exit 1
-         );
-         target_triple := Sys.argv.(!i)
-     | "--cpu" ->
-         incr i;
-         if !i >= Array.length Sys.argv then (
-           Printf.eprintf "Error: --cpu requires an argument\n"; exit 1
-         );
-         target_cpu := Sys.argv.(!i)
-     | "--features" ->
-         incr i;
-         if !i >= Array.length Sys.argv then (
-           Printf.eprintf "Error: --features requires an argument\n"; exit 1
-         );
-         target_features := Sys.argv.(!i)
-     | "-g" ->
-         debug_info := true
-     | "--forbid-trap" ->
-         forbid_trap := true
-     | "--forbid-unsafe" ->
-         forbid_unsafe := true
-     | "--regions" ->
-         regions := true
-     | "--reject-unused-functions" ->
-         reject_unused_functions := true
-     | "--external-entry" ->
-         incr i;
-         if !i >= Array.length Sys.argv then (
-           Printf.eprintf "Error: --external-entry requires a function name\n"; exit 1
-         );
-         external_entries := Sys.argv.(!i) :: !external_entries
-     | "--check-unused-file" ->
-         incr i;
-         if !i >= Array.length Sys.argv then (
-           Printf.eprintf "Error: --check-unused-file requires a source path\n"; exit 1
-         );
-         check_unused_files := Sys.argv.(!i) :: !check_unused_files
-     | "--explain-inference" ->
-         explain_inference := true
-     | "--profile-functions" ->
-         profile_functions := true
-     | "--frame-pointers" ->
-         frame_pointers := true
-     | "--function-sections" ->
-         function_sections := true
-     | arg ->
-         input_files := arg :: !input_files);
-    incr i
-  done;
-  let input_files = List.rev !input_files in
+         Takibi.Range_obligation.fault_index := true))
+      "plant known-unsound range rules (z3 check's failing control)";
+  ] in
+  (match Cli_flags.parse flags (Array.to_list Sys.argv |> List.tl) with
+   | Ok files -> input_files := files
+   | Error message -> Printf.eprintf "Error: %s\n" message; exit 1);
+  let input_files = !input_files in
 
   if !show_version then (
     Printf.printf "takibi %s\n" version;
@@ -319,19 +211,21 @@ let () =
     exit 0
   );
 
+  (match !emit_doc with
+   | "words" -> print_string (Words_doc.markdown ()); exit 0
+   | "cli" -> print_string (Cli_flags.markdown flags); exit 0
+   | _ -> ());
+
   if input_files = [] then (
-    Printf.eprintf
-      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--frame-pointers] [--function-sections] [--forbid-trap] [--forbid-unsafe] [--confine-raw-authority] [--raw-mint-file <path>] [--require-execution-model <path>] [--device-semantics-file <path>] [--regions] [--reject-unused-functions] [--external-entry <function>] [--check-unused-file <path>] [--explain-inference] [--emit-effect-matrix] [--emit-exception-frame-offsets <StructName>] [--emit-struct-layout <StructName>] [--emit-debug-metadata <path>] [--emit-depfile <path>] [--emit-overflow-audit <path>] [--emit-raw-deref-audit <path>] [--emit-raw-site-counts <path>] [--emit-call-graph <path>] [--emit-alloc-words <path>] [--emit-held-guards <path>] [--emit-range-obligations <dir>] [--emit-tla <dir> [--emit-tla-omit-cache publish|finish|refresh]] [--emit-protocol-source <dir>] [--version]\n"
-      Sys.argv.(0);
+    Printf.eprintf "Usage: %s %s\n" Sys.argv.(0) (Cli_flags.usage flags);
     exit 1
   );
 
   let machine =
     Llvm_gen.setup_target ~triple:!target_triple ~cpu:!target_cpu
-      ~features:!target_features ()
+      ()
   in
   if !debug_info then Llvm_gen.enable_debug_info (List.hd input_files);
-  Llvm_gen.set_function_profiling !profile_functions;
   Llvm_gen.set_frame_pointers !frame_pointers;
   Llvm_gen.set_function_sections !function_sections;
 
@@ -475,7 +369,7 @@ let () =
     let prog = Publish_record.run prog in
     let prog = Dma_fixed_record.run prog in
 
-    let prog = Monomorphize.run ~explain_inference:!explain_inference prog in
+    let prog = Monomorphize.run prog in
     (* After monomorphization: lowering region_of and friends walks every
        function, and a generic template's symbolic sizes are only resolved
        here (#672). *)
