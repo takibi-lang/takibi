@@ -3780,6 +3780,94 @@ private fn ext2_unlink_name_with(slot: borrow Ext2Slot[0], mount: Ext2Mount,
     }
 }
 
+// GitHub issue #1016: openat's O_TRUNC. A regular file loses its data:
+// size 0, no block pointers, no sectors, then its blocks go back to the
+// bitmap. The inode is written first, so a failure between the two leaks
+// blocks (e2fsck reclaims them) rather than leaving the inode naming a
+// freed block. A file reaching an indirect block is Unsupported, as for
+// the last-link unlink; a file already empty is Truncated with nothing
+// written. The caller holds the ext2 mutation guard.
+must_use variant Ext2TruncateResult { Invalid; Unsupported; Truncated; }
+
+fn ext2_truncate_regular_file(mount: Ext2Mount, inode_number: usize)
+        -> Ext2TruncateResult !{unsafe} {
+    let slot: Ext2Slot[0] = ext2_slot_acquire();
+    let result: Ext2TruncateResult = ext2_truncate_regular_file_with(slot,
+            mount, inode_number);
+    ext2_slot_release(slot);
+    return result;
+}
+
+private fn ext2_truncate_regular_file_with(slot: borrow Ext2Slot[0],
+        mount: Ext2Mount, inode_number: usize)
+        -> Ext2TruncateResult !{unsafe} {
+    if (ext2_fenced) { return Ext2TruncateResult::Invalid; }
+    if (inode_number < 2) { return Ext2TruncateResult::Invalid; }
+    match ext2_read_inode(slot, mount, inode_number) {
+        Ext2InodeResult::Invalid => { return Ext2TruncateResult::Invalid; }
+        Ext2InodeResult::Inode(file) => {
+            if ((file.mode & 0xF000) != 0x8000) {
+                return Ext2TruncateResult::Invalid;
+            }
+            if (file.size == 0) { return Ext2TruncateResult::Truncated; }
+            if (file.size > ext2_direct_file_size()) {
+                return Ext2TruncateResult::Unsupported;
+            }
+            let blocks: usize =
+                (file.size + KERNEL_BLOCK_SIZE - 1) / KERNEL_BLOCK_SIZE;
+            let mut pointers: [usize; EXT2_MAX_DIRECT_BLOCKS];
+            for index: usize in 0..<EXT2_MAX_DIRECT_BLOCKS {
+                pointers[index] = 0;
+                if (index < blocks) {
+                    let block: usize =
+                        ext2_inode_block_pointer(slot, mount, file, index);
+                    if (block < 2 || block >= mount.filesystem_blocks) {
+                        return Ext2TruncateResult::Invalid;
+                    }
+                    pointers[index] = block;
+                }
+            }
+            match block_read(mount.device, file.table_block,
+                             ext2_scratch[slot.index].metadata as []u8) {
+                BlockIoResult::Invalid => { return Ext2TruncateResult::Invalid; }
+                BlockIoResult::Ok => { }
+            }
+            let mut inode_pointer: Ext2Bytes =
+                ext2_at(ext2_metadata(), file.table_offset);
+            if (ext2_put_u32(slot, inode_pointer, 4, 0) == false ||
+                ext2_put_u32(slot, inode_pointer, 28, 0) == false) {
+                return Ext2TruncateResult::Invalid;
+            }
+            for index: usize in 0..<EXT2_MAX_DIRECT_BLOCKS {
+                if (ext2_put_u32(slot, inode_pointer, 40 + index * 4,
+                                 0) == false) {
+                    return Ext2TruncateResult::Invalid;
+                }
+            }
+            match ext2_block_write(mount, file.table_block,
+                              ext2_scratch[slot.index].metadata as []u8) {
+                BlockIoResult::Invalid => { return Ext2TruncateResult::Invalid; }
+                BlockIoResult::Ok => { }
+            }
+            // The inode no longer names the blocks: every release is tried.
+            let mut released: bool = true;
+            for index: usize in 0..<EXT2_MAX_DIRECT_BLOCKS {
+                if (index < blocks) {
+                    let block: usize = pointers[index];
+                    match ext2_release_block(slot,
+                            mount, ext2_block_owner_new(block - 1, block,
+                                                        block)) {
+                        Ext2OwnerReleaseResult::Invalid => { released = false; }
+                        Ext2OwnerReleaseResult::Released => { }
+                    }
+                }
+            }
+            if (released) { return Ext2TruncateResult::Truncated; }
+            return Ext2TruncateResult::Invalid;
+        }
+    }
+}
+
 private fn ext2_name_is_dot_entry(name: borrow []const u8) -> bool {
     if (name.len == 1) {
         if (name[0] == 0x2E) { return true; }

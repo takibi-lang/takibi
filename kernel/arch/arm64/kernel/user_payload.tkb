@@ -34,6 +34,9 @@ const EISDIR_RC: usize = 0xFFFFFFFFFFFFFFEB;
 const O_CREAT_RDONLY: usize = 0x40;
 const O_CREAT_WRONLY: usize = 0x41;
 const O_CREAT_EXCL_RDWR: usize = 0xC2;
+// GitHub issue #1016: O_TRUNC is 0x200.
+const O_TRUNC_RDWR: usize = 0x202;
+const O_TRUNC_RDONLY: usize = 0x200;
 const EINVAL_RC: usize = 0xFFFFFFFFFFFFFFEA;
 const EACCES_RC: usize = 0xFFFFFFFFFFFFFFF3;
 const EAGAIN_RC: usize = 0xFFFFFFFFFFFFFFF5;
@@ -718,6 +721,54 @@ fn initial_user_payload() !{unsafe} {
                      O_CREAT_WRONLY, 0x1A4, 0) != EISDIR_RC);
         fail_if(svc5(35, 0xFFFFFFFFFFFFFF9C,
                      "/creat-file" as *u8 as usize, 0, 0, 0) != 0);
+        // GitHub issue #1016: O_TRUNC frees a file's blocks. A three-block
+        // file is truncated by openat; afterwards fstat and read say size 0
+        // and the volume has exactly three more free blocks, counted by
+        // mkdirat (one block each) until ENOSPC before and after.
+        let trunc_fd: usize = svc5(56, 0xFFFFFFFFFFFFFF9C,
+                                   "/trunc-file" as *u8 as usize,
+                                   O_CREAT_EXCL_RDWR, 0x1A4, 0);
+        fail_if(trunc_fd >= 64);
+        for block: usize in 0..<3 {
+            for byte: usize in 0..<1024 {
+                write_block[byte] = (block + 0x61) as u8;
+            }
+            fail_if(svc5(64, trunc_fd, write_block as *u8 as usize,
+                         1024, 0, 0) != 1024);
+        }
+        fail_if(svc5(57, trunc_fd, 0, 0, 0, 0) != 0);
+        let mut trunc_stat: [u8; 128];
+        let trunc_stat_base: *u8 = trunc_stat as *u8;
+        fail_if(svc5(79, 0xFFFFFFFFFFFFFF9C, "/trunc-file" as *u8 as usize,
+                     ptr_of(trunc_stat_base, 0), 0, 0) != 0);
+        fail_if(payload_read_u64(trunc_stat_base, 48) != 3072);
+        let free_before: usize = free_blocks_by_mkdir();
+        let truncated_fd: usize = svc5(56, 0xFFFFFFFFFFFFFF9C,
+                                       "/trunc-file" as *u8 as usize,
+                                       O_TRUNC_RDWR, 0, 0);
+        fail_if(truncated_fd >= 64);
+        fail_if(svc5(63, truncated_fd, read_block as *u8 as usize,
+                     1, 0, 0) != 0);
+        fail_if(svc5(57, truncated_fd, 0, 0, 0, 0) != 0);
+        fail_if(svc5(79, 0xFFFFFFFFFFFFFF9C, "/trunc-file" as *u8 as usize,
+                     ptr_of(trunc_stat_base, 0), 0, 0) != 0);
+        fail_if(payload_read_u64(trunc_stat_base, 48) != 0);
+        fail_if(free_blocks_by_mkdir() != free_before + 3);
+        // An empty file truncates again; a missing name without O_CREAT is
+        // ENOENT and creates nothing; a directory is EISDIR.
+        let again_fd: usize = svc5(56, 0xFFFFFFFFFFFFFF9C,
+                                   "/trunc-file" as *u8 as usize,
+                                   O_TRUNC_RDONLY, 0, 0);
+        fail_if(again_fd >= 64);
+        fail_if(svc5(57, again_fd, 0, 0, 0, 0) != 0);
+        fail_if(svc5(56, 0xFFFFFFFFFFFFFF9C, "/trunc-none" as *u8 as usize,
+                     O_TRUNC_RDWR, 0, 0) != ENOENT_RC);
+        fail_if(svc5(56, 0xFFFFFFFFFFFFFF9C, "/trunc-none" as *u8 as usize,
+                     0, 0, 0) != ENOENT_RC);
+        fail_if(svc5(56, 0xFFFFFFFFFFFFFF9C, "/" as *u8 as usize,
+                     O_TRUNC_RDONLY, 0, 0) != EISDIR_RC);
+        fail_if(svc5(35, 0xFFFFFFFFFFFFFF9C,
+                     "/trunc-file" as *u8 as usize, 0, 0, 0) != 0);
         // Retrying on the SAME fd appends at 7168. A failure that moved its
         // offset would create a zero-filled gap, caught by the read and EOF.
         write_block[0] = 0x21;
@@ -739,7 +790,7 @@ fn initial_user_payload() !{unsafe} {
         fail_if(svc5(63, retry_read, read_block as *u8 as usize, 1, 0, 0) != 0);
         fail_if(svc5(57, retry_read, 0, 0, 0, 0) != 0);
         let exhaustion_message: []const u8 =
-            bs"userspace ext2 exhaustion: write+mkdir+creat ENOSPC, data+offset unchanged, unlink+retry ok, creat excl+reopen ok\n";
+            bs"userspace ext2 exhaustion: write+mkdir+creat ENOSPC, data+offset unchanged, unlink+retry ok, creat excl+reopen ok, trunc frees blocks\n";
         fail_if(svc5(64, 1, (unsafe { exhaustion_message as *u8 }) as usize,
                      exhaustion_message.len, 0, 0) != exhaustion_message.len);
         let write_fd: usize = svc5(56, 0, mutable_path as usize, 1, 0, 0);
@@ -788,6 +839,40 @@ fn initial_user_payload() !{unsafe} {
  * si_signo, si_code, si_pid and si_status into `record`; each case checks
  * what the frame carried. Runs last, after every earlier fixture took its
  * evidence, since its children take pids. */
+// GitHub issue #1016: the free block count as userspace can see it, with no
+// statfs. mkdirat takes one block (and one inode) per directory, so the
+// number made before ENOSPC is the free block count while inodes outnumber
+// blocks; every one is removed again. More than 32 fails the probe.
+fn free_blocks_by_mkdir() -> usize !{unsafe} {
+    let mut probe_path: [u8; 12];
+    let probe_stem: []const u8 = bs"/trunc-pro";
+    for byte: usize in 0..<10 { probe_path[byte] = probe_stem[byte]; }
+    probe_path[11] = 0;
+    let mut made: usize = 0;
+    let mut refused: bool = false;
+    for attempt: usize in 0..<32 {
+        if (refused == false) {
+            probe_path[10] = (0x41 + attempt) as u8;
+            let answer: usize = svc5(34, 0xFFFFFFFFFFFFFF9C,
+                                     probe_path as *u8 as usize, 0x1ED, 0, 0);
+            if (answer == 0) { made = made + 1; }
+            else {
+                fail_if(answer != ENOSPC_RC);
+                refused = true;
+            }
+        }
+    }
+    fail_if(refused == false);
+    for attempt: usize in 0..<32 {
+        if (attempt < made) {
+            probe_path[10] = (0x41 + attempt) as u8;
+            fail_if(svc5(35, 0xFFFFFFFFFFFFFF9C, probe_path as *u8 as usize,
+                         0x200, 0, 0) != 0);
+        }
+    }
+    return made;
+}
+
 fn sigchld_siginfo_probe() !{unsafe} {
     let mut record: [u8; 40];
     let record_base: *u8 = record as *u8;

@@ -146,6 +146,9 @@ const LINUX_ELIBBAD: usize = 0xFFFFFFFFFFFFFFB0;
 const LINUX_ENOSPC: usize = 0xFFFFFFFFFFFFFFE4;
 const LINUX_O_CREAT: usize = 0x40;
 const LINUX_O_EXCL: usize = 0x80;
+const LINUX_O_TRUNC: usize = 0x200;
+// The openat flags that mutate ext2 and so take the guard (#967, #1016).
+const LINUX_O_MUTATING: usize = 0x240;
 // A regular file whose bytes cannot be read. Linux answers execve(2) with
 // this when the header read itself fails, rather than with a verdict about a
 // format it never saw.
@@ -4991,7 +4994,8 @@ fn syscall_reaches_filesystem(number: usize, fd: usize, flags: usize) -> bool {
     // scripts/buildcheck_ext2_reader_self_wait.py refuses a registered
     // handler that reaches the guard (GitHub issue #1015); a number added
     // here whose dispatch arm takes the guard inline is not visible to it.
-    if (number == AARCH64_NR_OPENAT && (flags & LINUX_O_CREAT) != 0) {
+    // So is O_TRUNC (GitHub issue #1016).
+    if (number == AARCH64_NR_OPENAT && (flags & LINUX_O_MUTATING) != 0) {
         return false;
     }
     if (number == AARCH64_NR_OPENAT || number == AARCH64_NR_CLOSE ||
@@ -5893,6 +5897,13 @@ private fn syscall_openat_with(slot: borrow SyscallSlot[0],
 // regular file, mode 0644 whatever the mode argument says, since every
 // process is root. ENOSPC when the inode bitmap has no clear bit or the
 // parent would have to grow and cannot; nothing is changed then.
+//
+// GitHub issue #1016: O_TRUNC, with or without O_CREAT, comes here too. An
+// existing regular file loses its blocks and its size before it opens, as
+// Linux does whatever the access mode; without O_CREAT a missing name is
+// ENOENT and O_EXCL means nothing. O_TRUNC asks for write access, so a
+// directory is EISDIR. A file reaching an indirect block is EPERM, as
+// unlinkat answers for one: releasing those is not written yet.
 private fn syscall_openat_create_under(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
         guard: borrow Ext2MutationGuard[ext2_mutation_lock],
         x0: usize, x1: usize, x2: usize) -> SyscallAction !{unsafe} {
@@ -5907,7 +5918,9 @@ private fn syscall_openat_create_under_with(slot: borrow SyscallSlot[0],
         current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
         guard: borrow Ext2MutationGuard[ext2_mutation_lock],
         x0: usize, x1: usize, x2: usize) -> SyscallAction !{unsafe} {
-    let exclusive: bool = (x2 & LINUX_O_EXCL) != 0;
+    let create: bool = (x2 & LINUX_O_CREAT) != 0;
+    let exclusive: bool = create && (x2 & LINUX_O_EXCL) != 0;
+    let truncate: bool = (x2 & LINUX_O_TRUNC) != 0;
     let mount: Ext2Mount = match syscall_filesystem_lookup() {
         SyscallFilesystemReady::Unconfigured => { return SyscallAction::Resume(LINUX_EBADF); }
         SyscallFilesystemReady::Configured(found) => { found }
@@ -5948,12 +5961,26 @@ private fn syscall_openat_create_under_with(slot: borrow SyscallSlot[0],
         Ext2LookupResult::Invalid => { return SyscallAction::Resume(LINUX_EIO); }
         Ext2LookupResult::Found(existing) => {
             if (exclusive) { return SyscallAction::Resume(LINUX_EEXIST); }
-            if ((ext2_inode_mode(mount, existing) & 0xF000) == 0x4000) {
+            let mode: usize = ext2_inode_mode(mount, existing) & 0xF000;
+            if (mode == 0x4000) {
                 return SyscallAction::Resume(LINUX_EISDIR);
+            }
+            if (truncate && mode == 0x8000) {
+                match ext2_truncate_regular_file(mount, existing) {
+                    Ext2TruncateResult::Invalid => {
+                        return SyscallAction::Resume(LINUX_EIO);
+                    }
+                    Ext2TruncateResult::Unsupported => {
+                        return SyscallAction::Resume(LINUX_EPERM);
+                    }
+                    Ext2TruncateResult::Truncated => { }
+                }
             }
             return syscall_openat_inode(mount, existing, x2);
         }
-        Ext2LookupResult::NotFound => { }
+        Ext2LookupResult::NotFound => {
+            if (create == false) { return SyscallAction::Resume(LINUX_ENOENT); }
+        }
     }
     match ext2_create_empty_file_in(mount, parent.inode, leaf) {
         Ext2CreateEmptyResult::Invalid => { return SyscallAction::Resume(LINUX_EIO); }
@@ -6648,7 +6675,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         return syscall_finish_current(frame, syscall_io_action(current_authority, syscall_write_segment(current_authority, x0, x1, x2)), current_authority);
     }
 
-    if (number == 56 && (x2 & LINUX_O_CREAT) != 0) {
+    if (number == 56 && (x2 & LINUX_O_MUTATING) != 0) {
         let guard = ext2_mutation_take();
         let action: SyscallAction =
             syscall_openat_create_under(current_authority, guard, x0, x1, x2);
