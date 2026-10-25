@@ -46,6 +46,7 @@ MUTATORS = (
     "ext2_create_root_file",
     "ext2_unlink_root_file",
     "ext2_create_file_in",
+    "ext2_create_empty_file_in",
     "ext2_unlink_file_in",
     "ext2_make_directory_in",
     "ext2_claim_directory",

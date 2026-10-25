@@ -144,6 +144,8 @@ const LINUX_ENOEXEC: usize = 0xFFFFFFFFFFFFFFF8;
 // Linux's answer for an ELF interpreter that exists but cannot be used.
 const LINUX_ELIBBAD: usize = 0xFFFFFFFFFFFFFFB0;
 const LINUX_ENOSPC: usize = 0xFFFFFFFFFFFFFFE4;
+const LINUX_O_CREAT: usize = 0x40;
+const LINUX_O_EXCL: usize = 0x80;
 // A regular file whose bytes cannot be read. Linux answers execve(2) with
 // this when the header read itself fails, rather than with a verdict about a
 // format it never saw.
@@ -4982,7 +4984,12 @@ fn syscall_peer_safe(number: usize, fd: usize, second: usize) -> bool {
 // which the table refused and the per-pid rule admitted anyway. The table
 // admits the read path itself now, so "the table does not admit it" has
 // stopped being the same question and the two are asked separately.
-fn syscall_reaches_filesystem(number: usize, fd: usize) -> bool {
+fn syscall_reaches_filesystem(number: usize, fd: usize, flags: usize) -> bool {
+    // GitHub issue #967: O_CREAT is a mutation, which takes the guard
+    // instead; a counted reader that then took it would wait for itself.
+    if (number == AARCH64_NR_OPENAT && (flags & LINUX_O_CREAT) != 0) {
+        return false;
+    }
     if (number == AARCH64_NR_OPENAT || number == AARCH64_NR_CLOSE ||
         number == AARCH64_NR_NEWFSTATAT) {
         return true;
@@ -5762,13 +5769,82 @@ fn syscall_reboot(magic1: usize, magic2: usize, command: usize)
     }
 }
 
+// The procfs half of openat: a virtual node, never ext2.
+private fn syscall_openat_procfs(node: ProcfsNode, flags: usize)
+        -> SyscallAction !{unsafe} {
+    let access_mode: usize = flags & 3;
+    if (access_mode != 0 && (access_mode == 3 ||
+            procfs_node_is_writable(node) == false)) {
+        return SyscallAction::Resume(LINUX_EACCES);
+    }
+    let fd: usize = match unified_fd_alloc(
+            kernel_syscall_process_key(), 0) {
+        UnifiedFdAllocResult::Full => {
+            return SyscallAction::Resume(LINUX_EMFILE);
+        }
+        UnifiedFdAllocResult::Allocated(allocated) => { allocated }
+    };
+    return kernel_syscall_procfs_open(node, fd);
+}
+
+// The descriptor half of openat, once the path has named an ext2 inode --
+// found by lookup, or just made by O_CREAT (GitHub issue #967).
+private fn syscall_openat_inode(mount: Ext2Mount, inode_number: usize,
+        flags: usize) -> SyscallAction !{unsafe} {
+    let access_mode: usize = flags & 3;
+    match unified_fd_alloc(kernel_syscall_process_key(), 0) {
+        UnifiedFdAllocResult::Full => {
+            kernel_boot_log_resource_exhausted(
+                "process fd table" as *u8,
+                kernel_syscall_fd_limit_soft());
+            return SyscallAction::Resume(LINUX_EMFILE);
+        }
+        UnifiedFdAllocResult::Allocated(fd) => {
+            let inode_mode: usize = ext2_inode_mode(
+                mount, inode_number);
+            if ((inode_mode & 0xF000) == 0x4000) {
+                match unified_directory_open(
+                        kernel_syscall_process_key(), fd,
+                        inode_number) {
+                    UnifiedOpenResult::Invalid => {
+                        return SyscallAction::Resume(LINUX_EBADF);
+                    }
+                    UnifiedOpenResult::Full => {
+                        kernel_boot_log_resource_exhausted(
+                            "shared object pool" as *u8,
+                            unified_object_max_files());
+                        return SyscallAction::Resume(LINUX_ENFILE);
+                    }
+                    UnifiedOpenResult::Ok => {
+                        return SyscallAction::Resume(fd);
+                    }
+                }
+            }
+            match unified_file_open(
+                    kernel_syscall_process_key(), fd, inode_number,
+                    access_mode != 1, access_mode != 0) {
+                UnifiedOpenResult::Invalid => {
+                    return SyscallAction::Resume(LINUX_EBADF);
+                }
+                UnifiedOpenResult::Full => {
+                    kernel_boot_log_resource_exhausted(
+                        "shared object pool" as *u8,
+                        unified_object_max_files());
+                    return SyscallAction::Resume(LINUX_ENFILE);
+                }
+                UnifiedOpenResult::Ok => { return SyscallAction::Resume(fd); }
+            }
+        }
+    }
+}
+
 private fn syscall_openat_with(slot: borrow SyscallSlot[0],
         current_authority: borrow ProcessCurrent[process, ProcessState::Running],
         x0: usize, x1: usize, x2: usize)
         -> SyscallAction !{unsafe} {
-    // openat(dirfd, pathname, flags): absolute paths start at the ext2
-    // root; relative paths use an open directory fd (or AT_FDCWD, whose
-    // unsigned value lies outside the descriptor namespace).
+    // openat(dirfd, pathname, flags) without O_CREAT: absolute paths start
+    // at the ext2 root; relative paths use an open directory fd (or
+    // AT_FDCWD, whose unsigned value lies outside the descriptor namespace).
     let mount: Ext2Mount = match syscall_filesystem_lookup() {
         SyscallFilesystemReady::Unconfigured => { return SyscallAction::Resume(LINUX_EBADF); }
         SyscallFilesystemReady::Configured(found) => { found }
@@ -5781,19 +5857,7 @@ private fn syscall_openat_with(slot: borrow SyscallSlot[0],
     match procfs_lookup(path_name) {
         ProcfsLookupResult::Missing => {}
         ProcfsLookupResult::Found(node) => {
-            let access_mode: usize = x2 & 3;
-            if (access_mode != 0 && (access_mode == 3 ||
-                    procfs_node_is_writable(node) == false)) {
-                return SyscallAction::Resume(LINUX_EACCES);
-            }
-            let fd: usize = match unified_fd_alloc(
-                    kernel_syscall_process_key(), 0) {
-                UnifiedFdAllocResult::Full => {
-                    return SyscallAction::Resume(LINUX_EMFILE);
-                }
-                UnifiedFdAllocResult::Allocated(allocated) => { allocated }
-            };
-            return kernel_syscall_procfs_open(node, fd);
+            return syscall_openat_procfs(node, x2);
         }
     }
     let path_view: [u8; 256..] = syscall_path_view_here(slot);
@@ -5813,51 +5877,87 @@ private fn syscall_openat_with(slot: borrow SyscallSlot[0],
             return SyscallAction::Resume(LINUX_ENOENT);
         }
         Ext2LookupResult::Found(inode_number) => {
-            let access_mode: usize = x2 & 3;
-            match unified_fd_alloc(kernel_syscall_process_key(), 0) {
-                UnifiedFdAllocResult::Full => {
-                    kernel_boot_log_resource_exhausted(
-                        "process fd table" as *u8,
-                        kernel_syscall_fd_limit_soft());
-                    return SyscallAction::Resume(LINUX_EMFILE);
-                }
-                UnifiedFdAllocResult::Allocated(fd) => {
-                    let inode_mode: usize = ext2_inode_mode(
-                        mount, inode_number);
-                    if ((inode_mode & 0xF000) == 0x4000) {
-                        match unified_directory_open(
-                                kernel_syscall_process_key(), fd,
-                                inode_number) {
-                            UnifiedOpenResult::Invalid => {
-                                return SyscallAction::Resume(LINUX_EBADF);
-                            }
-                            UnifiedOpenResult::Full => {
-                                kernel_boot_log_resource_exhausted(
-                                    "shared object pool" as *u8,
-                                    unified_object_max_files());
-                                return SyscallAction::Resume(LINUX_ENFILE);
-                            }
-                            UnifiedOpenResult::Ok => {
-                                return SyscallAction::Resume(fd);
-                            }
-                        }
-                    }
-                    match unified_file_open(
-                            kernel_syscall_process_key(), fd, inode_number,
-                            access_mode != 1, access_mode != 0) {
-                        UnifiedOpenResult::Invalid => {
-                            return SyscallAction::Resume(LINUX_EBADF);
-                        }
-                        UnifiedOpenResult::Full => {
-                            kernel_boot_log_resource_exhausted(
-                                "shared object pool" as *u8,
-                                unified_object_max_files());
-                            return SyscallAction::Resume(LINUX_ENFILE);
-                        }
-                        UnifiedOpenResult::Ok => { return SyscallAction::Resume(fd); }
-                    }
-                }
+            return syscall_openat_inode(mount, inode_number, x2);
+        }
+    }
+}
+
+// GitHub issue #967: openat with O_CREAT, its lookup, creation and open one
+// section under the mutation guard its caller holds, as mkdirat's are
+// (#597). An existing name opens as without O_CREAT (EEXIST under O_EXCL,
+// EISDIR for a directory, as Linux says); a missing one becomes an empty
+// regular file, mode 0644 whatever the mode argument says, since every
+// process is root. ENOSPC when the inode bitmap has no clear bit or the
+// parent would have to grow and cannot; nothing is changed then.
+private fn syscall_openat_create_under(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
+        guard: borrow Ext2MutationGuard[ext2_mutation_lock],
+        x0: usize, x1: usize, x2: usize) -> SyscallAction !{unsafe} {
+    let slot: SyscallSlot[0] = syscall_slot_acquire();
+    let action: SyscallAction = syscall_openat_create_under_with(slot,
+            current_authority, guard, x0, x1, x2);
+    syscall_slot_release(slot);
+    return action;
+}
+
+private fn syscall_openat_create_under_with(slot: borrow SyscallSlot[0],
+        current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
+        guard: borrow Ext2MutationGuard[ext2_mutation_lock],
+        x0: usize, x1: usize, x2: usize) -> SyscallAction !{unsafe} {
+    let exclusive: bool = (x2 & LINUX_O_EXCL) != 0;
+    let mount: Ext2Mount = match syscall_filesystem_lookup() {
+        SyscallFilesystemReady::Unconfigured => { return SyscallAction::Resume(LINUX_EBADF); }
+        SyscallFilesystemReady::Configured(found) => { found }
+    };
+    let path_name: []u8 = match kernel_syscall_path_name(slot, current_authority, x1) {
+        SyscallPathResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
+        SyscallPathResult::Invalid => { return SyscallAction::Resume(LINUX_ENOENT); }
+        SyscallPathResult::Name(path) => { path }
+    };
+    match procfs_lookup(path_name) {
+        ProcfsLookupResult::Missing => {}
+        ProcfsLookupResult::Found(node) => {
+            if (exclusive) { return SyscallAction::Resume(LINUX_EEXIST); }
+            return syscall_openat_procfs(node, x2);
+        }
+    }
+    let path_view: [u8; 256..] = syscall_path_view_here(slot);
+    let absolute: bool = path_view[0] == 0x2F;
+    let parent: SyscallParent = match kernel_syscall_parent_of(mount,
+            x0, absolute, path_name) {
+        SyscallParentResult::Errno(errno) => {
+            return SyscallAction::Resume(errno);
+        }
+        SyscallParentResult::Found(found) => { found }
+    };
+    let leaf: []u8 = kernel_syscall_leaf(path_name, parent);
+    // A trailing slash, `/`, `.` and `..` all name a directory, and
+    // O_CREAT on a directory is EISDIR (EEXIST first under O_EXCL).
+    let names_directory: bool = leaf.len == 0 ||
+        parent.leaf_end != path_name.len ||
+        kernel_syscall_leaf_is_dot(leaf) ||
+        kernel_syscall_leaf_is_dot_dot(leaf);
+    if (names_directory) {
+        if (exclusive) { return SyscallAction::Resume(LINUX_EEXIST); }
+        return SyscallAction::Resume(LINUX_EISDIR);
+    }
+    match ext2_lookup_directory(mount, parent.inode, leaf) {
+        Ext2LookupResult::Invalid => { return SyscallAction::Resume(LINUX_EIO); }
+        Ext2LookupResult::Found(existing) => {
+            if (exclusive) { return SyscallAction::Resume(LINUX_EEXIST); }
+            if ((ext2_inode_mode(mount, existing) & 0xF000) == 0x4000) {
+                return SyscallAction::Resume(LINUX_EISDIR);
             }
+            return syscall_openat_inode(mount, existing, x2);
+        }
+        Ext2LookupResult::NotFound => { }
+    }
+    match ext2_create_empty_file_in(mount, parent.inode, leaf) {
+        Ext2CreateEmptyResult::Invalid => { return SyscallAction::Resume(LINUX_EIO); }
+        Ext2CreateEmptyResult::NoSpace => {
+            return SyscallAction::Resume(LINUX_ENOSPC);
+        }
+        Ext2CreateEmptyResult::Created(inode_number) => {
+            return syscall_openat_inode(mount, inode_number, x2);
         }
     }
 }
@@ -6335,7 +6435,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     // starts meanwhile waits for it -- the entry question alone let a
     // mutation start during an admitted read. A call the peer-safety table
     // refuses has been sent to core 0 above already.
-    if (syscall_reaches_filesystem(number, x0)) {
+    if (syscall_reaches_filesystem(number, x0, x2)) {
         if (ext2_read_enter() == false) {
             // GitHub issue #775: every core waits in place. A peer used to
             // hand the call to core 0 to wait there, which changed the
@@ -6542,6 +6642,14 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     // destination address on a stream socket is left to ENOSYS below.
     if (number == 206 && x4 == 0) {
         return syscall_finish_current(frame, syscall_io_action(current_authority, syscall_write_segment(current_authority, x0, x1, x2)), current_authority);
+    }
+
+    if (number == 56 && (x2 & LINUX_O_CREAT) != 0) {
+        let guard = ext2_mutation_take();
+        let action: SyscallAction =
+            syscall_openat_create_under(current_authority, guard, x0, x1, x2);
+        ext2_mutation_give(guard);
+        return syscall_finish_current(frame, action, current_authority);
     }
 
     if (number == 56) {

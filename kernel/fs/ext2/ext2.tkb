@@ -3133,6 +3133,98 @@ private fn ext2_create_file_in_with(slot: borrow Ext2Slot[0], mount: Ext2Mount,
     }
 }
 
+// GitHub issue #967: openat's O_CREAT. A new file is empty, so it takes an
+// inode and no block: size 0, no block pointers, no sectors -- the shape the
+// write path and the last-link unlink already accept for a file shrunk to
+// nothing. NoSpace is the inode bitmap with no clear bit or a directory that
+// had to grow and could not; either way the inode is released and the
+// directory is unchanged. Created names the inode, which the tree owns from
+// here on, as a mkdirat directory is.
+must_use variant Ext2CreateEmptyResult { Invalid; NoSpace; Created(usize); }
+
+// The inode of an empty file that stays: its directory entry names it now.
+private fn ext2_inode_keep(owner: sink Ext2InodeOwner[inode]) {}
+
+private fn ext2_initialize_empty_regular_inode(slot: borrow Ext2Slot[0],
+        mount: Ext2Mount, inode_owner: borrow Ext2InodeOwner[inode])
+        -> Ext2DirectoryResult !{unsafe} {
+    let byte_offset: usize = inode_owner.bitmap_index * mount.inode_size;
+    let table_block: usize = mount.inode_table_block +
+                             byte_offset / KERNEL_BLOCK_SIZE;
+    let table_offset: usize = byte_offset % KERNEL_BLOCK_SIZE;
+    match block_read(mount.device, table_block,
+                     ext2_scratch[slot.index].metadata as []u8) {
+        BlockIoResult::Invalid => { return Ext2DirectoryResult::Invalid; }
+        BlockIoResult::Ok => { }
+    }
+    let mut inode_pointer: Ext2Bytes =
+        ext2_at(ext2_metadata(), table_offset);
+    for i: usize in 0..<128 { ext2_set_byte(slot, inode_pointer, i, 0); }
+    if (ext2_put_u16(slot, inode_pointer, 0, 0x81A4) == false ||
+        ext2_put_u16(slot, inode_pointer, 26, 1) == false) {
+        return Ext2DirectoryResult::Invalid;
+    }
+    match ext2_block_write(mount, table_block,
+                      ext2_scratch[slot.index].metadata as []u8) {
+        BlockIoResult::Invalid => { return Ext2DirectoryResult::Invalid; }
+        BlockIoResult::Ok => { return Ext2DirectoryResult::Updated; }
+    }
+}
+
+fn ext2_create_empty_file_in(mount: Ext2Mount, directory_inode: usize,
+                             name: borrow []const u8)
+        -> Ext2CreateEmptyResult !{unsafe} {
+    let slot: Ext2Slot[0] = ext2_slot_acquire();
+    let result: Ext2CreateEmptyResult = ext2_create_empty_file_in_with(slot,
+            mount, directory_inode, name);
+    ext2_slot_release(slot);
+    return result;
+}
+
+private fn ext2_create_empty_file_in_with(slot: borrow Ext2Slot[0],
+        mount: Ext2Mount, directory_inode: usize, name: borrow []const u8)
+        -> Ext2CreateEmptyResult !{unsafe} {
+    if (ext2_fenced) { return Ext2CreateEmptyResult::Invalid; }
+    match ext2_lookup_directory_with(slot, mount, directory_inode, name) {
+        Ext2LookupResult::Invalid => { return Ext2CreateEmptyResult::Invalid; }
+        Ext2LookupResult::Found(existing) => {
+            return Ext2CreateEmptyResult::Invalid;
+        }
+        Ext2LookupResult::NotFound => { }
+    }
+    match ext2_allocate_inode(slot, mount) {
+        Ext2InodeAllocResult::Failed => { return Ext2CreateEmptyResult::Invalid; }
+        Ext2InodeAllocResult::NoSpace => {
+            return Ext2CreateEmptyResult::NoSpace;
+        }
+        Ext2InodeAllocResult::Allocated(inode_owner) => {
+            let mut no_space: bool = false;
+            match ext2_initialize_empty_regular_inode(slot, mount,
+                                                      inode_owner) {
+                Ext2DirectoryResult::Invalid => { }
+                Ext2DirectoryResult::Updated => {
+                    let inode_number: usize = inode_owner.inode_number;
+                    match ext2_directory_add(slot, mount, directory_inode,
+                                             inode_number, name) {
+                        Ext2DirectoryAddResult::Invalid => { }
+                        Ext2DirectoryAddResult::NoSpace => { no_space = true; }
+                        Ext2DirectoryAddResult::Updated => {
+                            ext2_inode_keep(inode_owner);
+                            return Ext2CreateEmptyResult::Created(inode_number);
+                        }
+                    }
+                }
+            }
+            match ext2_release_inode(slot, mount, inode_owner) {
+                Ext2OwnerReleaseResult::Invalid => { }
+                Ext2OwnerReleaseResult::Released => { }
+            }
+            if (no_space) { return Ext2CreateEmptyResult::NoSpace; }
+            return Ext2CreateEmptyResult::Invalid;
+        }
+    }
+}
+
 fn ext2_unlink_file_in(mount: Ext2Mount, directory_inode: usize,
                        linked: sink Ext2LinkedFile[inode, block],
                        name: []const u8) -> Ext2UnlinkResult {
