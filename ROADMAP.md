@@ -102,8 +102,8 @@ safety and multicore backbone only. Taken in order whenever the numbered
 trunk items below have no step ready; an item that reaches a decision is
 parked and the next one taken: #957 (an RPi5 lane for the hung-core BREAK),
 #958 (longest IRQ-masked span outside profile sessions), #959 (DDB's
-lock-free NIC RX pending), #966 (recover #920's +20 ns per masking lock
-pair; after #742 stage 1's baseline), and last, at low priority, #980
+lock-free NIC RX pending), #966's follow-up (unmask the Mutex-based locks
+no interrupt reaches; #966 itself unmasked the fd and TCP pools), and last, at low priority, #980
 (reboot: Linux-style ordering, then escalate a partial world stop to the
 debug stop). #799 waits under #954 until a site needs it.
 
