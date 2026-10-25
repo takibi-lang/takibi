@@ -16,12 +16,8 @@ would be useful; `lib/parser.mly` is the authoritative grammar. This file
 describes behavior in prose instead.
 
 File extension: `.tkb`. Compiler invocation: `takibi <file1.tkb>
-[file2.tkb ...] [-o out.o] [--target <triple>] [--cpu <cpu>] [--features
-<features>] [-g] [--forbid-trap] [--forbid-unsafe] [--confine-raw-authority] [--raw-mint-file <path>]
-[--require-execution-model <path>]
-[--device-semantics-file <path>] [--reject-unused-functions]
-[--external-entry <function>] [--check-unused-file <path>] [--explain-inference]
-[--emit-effect-matrix] [--emit-held-guards <path>] [--emit-protocol-source <dir>] [--version]`. Multiple `.tkb` files are
+[file2.tkb ...] [flags]`; [`CLI.md`](CLI.md) is the generated list of every flag
+(`takibi --emit-doc cli`). Multiple `.tkb` files are
 concatenated (flat global namespace) before compilation -- there is no
 module/import system beyond `use` (see "Known Limitations" below).
 
@@ -43,19 +39,12 @@ without `-g`.
 For AArch64, the backend preserves each source access's scalar alignment but
 does not promise that a combined pair/vector instruction is aligned to its
 total transfer width. For example, two adjacent 8-byte stores may become one
-16-byte `stp` at an address that is 8 modulo 16. Passing `+strict-align` through
-`--features` does not change that legal instruction selection: each component
-access is still naturally aligned. A kernel using Normal memory must configure
+16-byte `stp` at an address that is 8 modulo 16. A strict-alignment target feature would not change that
+legal instruction selection either: each component access is still naturally
+aligned. A kernel using Normal memory must configure
 its architectural alignment policy accordingly. Code that runs before the MMU
 is enabled must separately satisfy Device-memory alignment; this is a target
 boot contract, not a stronger source-level struct-member alignment guarantee.
-
-`--explain-inference` augments a failed generic function type-argument
-inference diagnostic with an argument-by-argument structural trace. It shows
-the declared template type, the locally derived concrete type, wrapper types
-peeled during matching, bindings contributed to generic parameters, and the
-pair of internal type constructors where matching stopped. Without the flag,
-the concise diagnostic is unchanged.
 
 The implementation still has a Hindley-Milner-style inference core for
 ordinary values, but the language is no longer a pure HM type system:
@@ -99,10 +88,11 @@ function colliding with a non-function kind, is rejected.
 
 ## Compiler-Owned Words and Names
 
-Source words have four distinct classifications. The compiler's complete,
-machine-checked inventory is `lib/language_words.ml`; lexer and name-resolution
-tests fail if its categories overlap or a hard keyword is tokenized as an
-ordinary identifier.
+Source words have four distinct classifications. The complete inventory is
+[`WORDS.md`](WORDS.md), generated from `lib/language_words.ml` by `takibi
+--emit-doc words` and kept fresh by `language-words-control` in `make
+langcheck`; lexer and name-resolution tests fail if its categories overlap or
+a hard keyword is tokenized as an ordinary identifier.
 
 - **Hard keywords** always introduce or delimit grammar and can never be used
   as identifiers. This includes declaration/control-flow words, type spellings,

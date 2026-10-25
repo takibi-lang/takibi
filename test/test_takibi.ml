@@ -1597,6 +1597,46 @@ let parser_tests = [
         | _ -> ()
       ) Language_words.hard_keywords);
 
+  Alcotest.test_case
+    "issue #1003: WORDS.md rows come from the inventory, sub-lists are builtins"
+    `Quick
+    (fun () ->
+      let doc = Words_doc.markdown () in
+      List.iter (fun word ->
+        if not (contains_substring doc ("| `" ^ word ^ "` |")) then
+          Alcotest.failf "%S has no WORDS.md row" word)
+        (Language_words.hard_keywords @ Language_words.compiler_builtins
+         @ Language_words.contextual_keywords);
+      List.iter (fun word ->
+        if not (Language_words.is_compiler_builtin word) then
+          Alcotest.failf "%S is marked but is not a compiler builtin" word)
+        (Language_words.instruction_builtins @ Language_words.removed_builtins
+         @ Device_protocol_registry.builtins));
+
+  Alcotest.test_case
+    "issue #1027: the flag table rejects an unknown or argument-less flag"
+    `Quick
+    (fun () ->
+      let seen = ref [] in
+      let flags = Cli_flags.[
+        flag "--on" Policy (No_arg (fun () -> seen := "on" :: !seen)) "on";
+        flag "--set" Facts ~arg:("<path>", "a path")
+          (Arg (fun v -> seen := v :: !seen)) "set";
+      ] in
+      (match Cli_flags.parse flags ["a.tkb"; "--on"; "--set"; "p"; "b.tkb"] with
+       | Ok files ->
+           Alcotest.(check (list string)) "files in order" ["a.tkb"; "b.tkb"] files;
+           Alcotest.(check (list string)) "handlers" ["p"; "on"] !seen
+       | Error e -> Alcotest.fail e);
+      (match Cli_flags.parse flags ["a.tkb"; "--profile-functions"] with
+       | Error e ->
+           Alcotest.(check bool) "names the flag" true
+             (contains_substring e "unknown flag '--profile-functions'")
+       | Ok _ -> Alcotest.fail "an unknown flag was taken as an input file");
+      (match Cli_flags.parse flags ["--set"] with
+       | Error e -> Alcotest.(check string) "noun" "--set requires a path" e
+       | Ok _ -> Alcotest.fail "a missing argument was accepted"));
+
   Alcotest.test_case "builtin namespace parses known calls and diagnoses unknown names" `Quick
     (fun () ->
       (match parse
