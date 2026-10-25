@@ -40,7 +40,9 @@ def movk(rd: int, imm: int, hw: int) -> int:
 def build(span: int) -> bytes:
     if span <= DATA_BASE + 0x1000 or span >= 1 << 32:
         raise ValueError("span out of range")
-    message = b"nested: %d KiB span ran\n" % (span // 1024)
+    # A str, not a bytes literal: this is what the fixture prints, not a
+    # line a host script waits for (check_kernel_log_expectations.py).
+    message = ("nested: %d KiB span ran\n" % (span // 1024)).encode("ascii")
     entry = ELF_HEADER_SIZE + 2 * PROGRAM_HEADER_SIZE
     target = span - 1 - entry
     code = [
