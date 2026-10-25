@@ -182,12 +182,13 @@ decide-then-sleep question (GitHub issue #550): a wait decides in one
 critical section and publishes Blocked in a later one, so an event can
 arrive between them and find no Blocked waiter. Each reason either
 re-checks its event there, under the lock its waker takes -- UartRx,
-UartTx, ChildExit (the awaited child, by the pid wait4 recorded), Signal --
-or names what delivers the event again: core 0's tick wakes every NetRx
+UartTx, ChildExit (the awaited child, by the pid wait4 recorded), Signal,
+Pipe (whether the pipe's wake already took the name, "Pipes on any CPU"
+below) -- or names what delivers the event again: core 0's tick wakes every NetRx
 waiter and every waiter whose deadline has passed. The function is one
 `match` with no default arm, so a wait reason added later does not compile
 until its answer is written there. `kernel/models/Wait4Block.tla` checks
-the ChildExit re-check.
+the ChildExit re-check, and `kernel/models/PipeWait.tla` the Pipe one.
 
 A timer tick taken from EL0 idles a CPU too, on any core, when the
 interrupted process's mask no longer names that CPU and nothing else Ready
@@ -539,6 +540,37 @@ The rest of the group, and what each relies on (GitHub issue #598):
   `kernel/kernel/syscall_test_evidence.tkb`, and the listener-ready flag in
   `syscall_test_lifecycle.tkb`, are read and written under the process-run
   lock, since the fixture's own calls may now run on any CPU.
+
+## Pipes on any CPU
+
+A pipe (GitHub issue #1042, `kernel/kernel/pipe.tkb`) is read and written
+from any CPU, and a pipeline's reader and writer usually run on two. Every
+field of a pipe -- the ring, both ends' open flags and the waiting flag -- is
+read and written under the pipe's own `TaskMutex`, taken through a linear
+`PipeOwner` that a pin and the lock make together, and held across the user
+copy. The wait is the decide-then-sleep shape of #550, closed the same way:
+
+- A read that finds nothing, or a write that finds no room, names the pipe in
+  its own process record and sets the pipe's waiting flag while it still
+  holds the pipe lock (`pipe_put_waiting`), then lets go and blocks on
+  `ProcessWaitReason::Pipe`.
+- Every change -- bytes consumed or produced, an end closed -- returns a
+  linear `PipeChange` that only `pipe_put_changed` discharges, so a change
+  that skips its wake does not compile. It reads and clears the waiting flag
+  under the pipe lock and, when it was set, walks the process records under
+  the run lock (`kernel_process_pipe_wake`): each record naming the pipe
+  loses the name, and one Blocked on it becomes Ready and reruns its call.
+- The Blocked publication asks whether a wake already took the name
+  (`kernel_process_block_would_miss`); if it did, the call reruns instead of
+  sleeping. `kernel/models/PipeWait.tla` checks this, and each of the two
+  defects -- naming after the lock is let go, and no re-check -- loses a
+  wake there.
+
+Lock order: the pipe lock (rank 30, the TaskMutex class) is taken before the
+run lock and the pool locks (40), never under them, and no interrupt handler
+takes it. An end is closed when its shared object's last reference goes
+(`unified_object_release`), outside the refcount lock, so the close of a
+descriptor on one CPU and a read on another serialize on the pipe lock.
 
 ## Lock classes
 

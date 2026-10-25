@@ -238,6 +238,7 @@ pipe-cloexec: execve closed the O_CLOEXEC pair at 5 and 6 and kept the plain pai
 y
 y
 sub: inner
+16
 / # / # / # smp placement: BusyBox sleep applet ran on a peer without affinity
 / # two-jobs-ok
 repl-ok

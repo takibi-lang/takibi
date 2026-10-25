@@ -31,3 +31,7 @@ UartServe gated TryLockBusy: the active gate keeps a second core out until the s
 WorldStopRetry debugstop LongExit: the variant keeps one CPU masked for good (LONG_ENDS false), which the debug stop must still reach
 WorldStopRetry debugstop NeedLocked: only variant holdlock begins a stop while holding the lock
 WorldStopRetry debugstop Timeout: the debug stop reaches every target, so no target is masked past the budget (#920)
+
+# The pipe named after its lock is let go: only the unlocked variant has
+# that window.
+PipeWait fixed Name: only the unlocked naming of variant unlocked has a section of its own

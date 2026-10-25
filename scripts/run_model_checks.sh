@@ -132,6 +132,13 @@ check_model TickWake ListsMatchBlocked 6 \
     core0only:CInitCore0Only:temporal:ok \
     nounlink:CInitNoUnlink:ListsMatchBlocked:violated
 
+# GitHub issue #1042: a pipe's wait and wake across two CPUs. Each unfixed
+# variant sleeps beside what it waits for.
+check_model PipeWait NoLostWakeup 10 \
+    fixed:CInitFixed:pass:ok \
+    unlocked:CInitUnlocked:NoLostWakeup:violated \
+    norecheck:CInitNoRecheck:NoLostWakeup:violated
+
 check_model RecordLifetime RecordInvariants 6 \
     fixed:CInitFixed:pass:ok \
     unfixed:CInitUnfixed:ReadsOnlyLiveRecords:violated \

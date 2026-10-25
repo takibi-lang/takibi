@@ -312,6 +312,42 @@ Properties:
   core 1 is woken although core 0 is masked for good, under weak fairness
   of each core's tick.
 
+## PipeWait.tla -- a pipe's reader and writer on two CPUs (#1042)
+
+One pipe of `CAP` = 1 byte, a writer that writes `ITEMS` = 2 one-byte writes
+and then closes its end, and a reader that reads until end of file. A look
+at the pipe is one critical section under the pipe's own lock; one that must
+wait names the pipe in its process record and sets the pipe's waiting flag
+before the lock is let go (`pipe_put_waiting`), and the syscall publishes
+Blocked in a later critical section under the run lock. A change reads and
+clears the flag under the pipe lock and, when it was set, walks the records
+under the run lock (`pipe_put_changed`, `kernel_process_pipe_wake`). That a
+change cannot skip its wake is the compiler's: a change returns a linear
+`PipeChange`, and only `pipe_put_changed` discharges it.
+
+`NAMED_UNDER_LOCK = FALSE` names the pipe after the lock is let go: a change
+between the look and the name finds the flag clear, and the waiter sleeps
+beside a byte (`unlocked` breaks `NoLostWakeup`). `RECHECK = FALSE` is a
+Blocked publication that does not ask whether a wake already took the name:
+a change between the name and the block clears it while the waiter is still
+Running (`norecheck` breaks `NoLostWakeup`).
+
+| Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
+| --- | --- | --- | --- | --- |
+| `ReaderLook` | `syscall_pipe_read`, `pipe_take`, `pipe_consume`, `pipe_put_waiting`, `pipe_put_changed`, `kernel_process_pipe_wait_prepare` | one look under the pipe lock: a byte taken (a change, which reads and clears the waiting flag), end of file once the write end is closed, or the pipe named and the flag set before the lock is let go | the user copy and its fault -- irrelevant to `NoLostWakeup`: a faulted read changes nothing and so owes no wake; the byte count -- irrelevant to `NoLostWakeup`: a read takes what is buffered up to its request, and the model's one-byte reads take all of it; the ppoll look of one pipe end (`syscall_pipe_poll_wait`) -- irrelevant to `NoLostWakeup`: it names the pipe through the same `pipe_put_waiting` under the same lock, and names none when it is ready, which reruns the call at once | `8e3137bb2e3b` |
+| `WriterLook` | `syscall_pipe_write`, `pipe_write_amount`, `pipe_produce`, `pipe_end_close`, `pipe_end_mark`, `pipe_put_waiting`, `pipe_put_changed` | one write under the pipe lock: a byte put, or the pipe named for room; after the last byte the write end's close, which is a change too | writes of more than one byte -- irrelevant to `NoLostWakeup`: one that does not fit decides to wait exactly as the model's full pipe does, and room comes only from a consume, which wakes it; EPIPE and the read end's close -- irrelevant to `NoLostWakeup`: a writer that finds the reader gone does not wait, and the model's reader never closes | `d6c5a542ae9c` |
+| `Name` | negative variant only: the name written after the pipe lock is let go | the window between the look and the name | nothing | `e3b0c44298fc` |
+| `Block` | `kernel_syscall_block_return`, `kernel_process_block_pipe`, `kernel_process_block_current`, `kernel_process_block_would_miss` | the Blocked publication under the run lock; with `RECHECK`, a name a wake already took reruns the call instead | the successor choice and the switch -- modelled elsewhere: `Wait4Block.Wait4Block`; a caught signal pending at the publication -- modelled elsewhere: `Wait4Block.SendSignal` | `6beca77586af` |
+| `Walk` | `kernel_process_pipe_wake`, `scheduled_process_wake` | under the run lock every record naming the pipe loses the name, and one Blocked on `Pipe` becomes Ready to look again | records naming another pipe or none -- irrelevant to `NoLostWakeup`: the walk leaves them alone; Free and Constructing records -- irrelevant to `NoLostWakeup`: neither can have named a pipe | `ce5709a9abaa` |
+
+Properties:
+
+- `NoLostWakeup`: a sleeper beside what it waits for -- a byte or end of file
+  for the reader, room for the writer -- is still named, and the other side
+  is on its way to the walk that wakes it.
+- `AllRead` (liveness, TLC only): every byte written is read, then end of
+  file, under weak fairness of every step.
+
 ## RecordLifetime.tla -- a process record read while another CPU reaps it (#482)
 
 One record, one reader, one reaper, and the process's own execve. The
