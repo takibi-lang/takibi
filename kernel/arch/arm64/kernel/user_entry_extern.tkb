@@ -24,6 +24,10 @@ extern fn kernel_idle_boot_enter() !{noreturn};
 // optional diagnostic context, not proof of a synchronous exception.
 // Assembly captures the incoming LR before making any call.
 extern fn kernel_invariant_stop() !{noreturn};
+// GitHub issue #638 stage 2: TPIDR_EL1, this core's index times the
+// per-core stack group stride. Called only by cpu_authority.tkb's
+// preempt_slot() (scripts/buildcheck_cpu_offset_callers.py).
+extern fn kernel_cpu_offset() -> usize;
 extern fn kernel_invariant_stop_with_frame(frame: borrow FrameRef[process]) !{noreturn};
 
 extern fn kernel_ddb_breakpoint();

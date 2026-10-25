@@ -247,6 +247,19 @@ el0_context_retry_syscall:
 // below (kernel/arch/arm64/kernel/user_entry_extern.tkb) is unchanged --
 // that is still what lets ordinary .tkb code call it.
 
+/* GitHub issue #638 stage 2: kernel_cpu_offset() -> usize, this core's
+ * TPIDR_EL1 (its index times the per-core stack group stride, set by each
+ * core's entry path). One register move and no logic: the compiler has no
+ * builtin for TPIDR_EL1 (DECISIONS 2026-10-25, after the 2026-10-19 rule),
+ * and everything decided from the value is in cpu_authority.tkb's
+ * preempt_slot(), its one caller (scripts/buildcheck_cpu_offset_callers.py). */
+    .global kernel_cpu_offset
+    .type kernel_cpu_offset, %function
+kernel_cpu_offset:
+    mrs     x0, tpidr_el1
+    ret
+
+
 // Explicit invariant stops capture the incoming return PC before any BL.
 // FrameRef is a one-word ABI: optional context arrives in x0, never an
 // exception-origin claim. Tail transfer preserves the original caller.

@@ -565,7 +565,7 @@ struct_intro:
       ($3, false, None, false) }
   | STRUCT CPU_AUTHORITY IDENT
     { Type_layout.begin_struct $3;
-      Per_cpu_registry.mark_authority $3 $startpos;
+      Per_cpu_registry.mark_authority $3;
       ($3, false, None, false) }
   | STRUCT DMA_FIXED IDENT
     { Type_layout.begin_struct $3;

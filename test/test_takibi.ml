@@ -20449,7 +20449,7 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
          expect_type_error "compiler builtin"
            (Printf.sprintf "fn %s() {}" name) ())
          ["mrs_cntfrq_el0"; "mrs_cntpct_el0"; "mrs_sctlr_el1"; "mrs_mpidr_el1";
-          "mrs_id_aa64mmfr0_el1"; "mrs_tpidr_el1";
+          "mrs_id_aa64mmfr0_el1";
           "msr_daifclr_irq"; "msr_daifset_irq"; "tlbi_vmalle1";
           "tlbi_vmalle1is";
           "dsb_ish"; "dsb_ishst"; "isb"; "wfi"];
@@ -28240,19 +28240,11 @@ let preempt_off_tests =
     bad "the private exit cannot be called directly"
       "'preempt_off_exit' is a private function"
       "fn bad638() { preempt_off_exit(); }";
-    bad "TPIDR_EL1 is read only in the authority's file"
-      "mrs_tpidr_el1() may only be called in the file that declares the struct cpu_authority"
-      "fn bad638() -> usize { return mrs_tpidr_el1(); }";
-    Alcotest.test_case "the authority's file reads TPIDR_EL1" `Quick
-      (expect_codegen_ok (mint ^ "fn slot638() -> usize { return mrs_tpidr_el1() >> 16; }"));
     Alcotest.test_case "an authority file without the exit is rejected" `Quick
       (expect_type_error "Undefined function: preempt_off_exit"
         "struct cpu_authority C638 { private id: {0..<1 as usize}; }
          private fn preempt_off_enter() -> C638 { let mut c: C638 = { 0 }; return c; }
          fn f638() { preempt_off (c) { } }");
-    Alcotest.test_case "TPIDR_EL1 is unreadable without an authority" `Quick
-      (expect_type_error "may only be called in the file that declares"
-        "fn bad638() -> usize { return mrs_tpidr_el1(); }");
     Alcotest.test_case "the exit is called at every exit of the block" `Quick
       (fun () ->
         let exits body =

@@ -25,8 +25,10 @@
 // - TPIDR_EL1 is this core's index times the per-core stack group stride
 //   (each core's entry path sets it once, before any Takibi code runs; the
 //   linker scripts assert the stride is 1 << PERCPU_STACK_GROUP_SHIFT), so
-//   preempt_slot() names this core's count. Only this file may read it
-//   (the compiler rejects mrs_tpidr_el1 elsewhere). With
+//   preempt_slot() names this core's count. It is read by the assembly
+//   helper kernel_cpu_offset (user_entry.S; no compiler builtin, DECISIONS
+//   2026-10-25), and preempt_slot() is its one caller
+//   (scripts/buildcheck_cpu_offset_callers.py). With
 //   KERNEL_PREEMPT_ASSERTS, every region entry checks the two agree;
 // - cpu_here_for_boot_probe names another CPU's slot, for the boot probe
 //   that holds every CPU's handoff at once; nothing else calls it.
@@ -74,7 +76,7 @@ private let mut preempt_counts: [PreemptCount; KERNEL_MAX_CORES];
 // This CPU's slot, from TPIDR_EL1 alone: no cpu_id() and no CpuHere, so a
 // blocking point (and later the EL1 IRQ return) can find it.
 private fn preempt_slot() -> CpuHere {
-    let slot: usize = mrs_tpidr_el1() >> PERCPU_STACK_GROUP_SHIFT;
+    let slot: usize = kernel_cpu_offset() >> PERCPU_STACK_GROUP_SHIFT;
     if (slot < KERNEL_MAX_CORES) {
         let id: {0..<KERNEL_MAX_CORES as usize} = slot;
         let mut cpu: CpuHere = { id };

@@ -10,10 +10,6 @@
 let stores : (string, unit) Hashtbl.t = Hashtbl.create 4
 let authority : (string * (string * Ast.type_expr) list) option ref = ref None
 let pending_authority : string option ref = ref None
-(* The file that declares the authority: the only file that may read
-   TPIDR_EL1 (`mrs_tpidr_el1`), the register through which it finds this
-   CPU's preempt count without an authority in hand (#638 stage 2). *)
-let authority_file : string option ref = ref None
 let globals : (string, string) Hashtbl.t = Hashtbl.create 4
 let rewritten : (string * int, string) Hashtbl.t = Hashtbl.create 8
 
@@ -37,7 +33,6 @@ let reset () =
   Hashtbl.reset stores;
   authority := None;
   pending_authority := None;
-  authority_file := None;
   Hashtbl.reset globals;
   Hashtbl.reset rewritten;
   Hashtbl.reset preempt_off_mints;
@@ -45,9 +40,7 @@ let reset () =
 
 let mark_store name = Hashtbl.replace stores name ()
 let is_store name = Hashtbl.mem stores name
-let mark_authority name (loc : Ast.loc) =
-  pending_authority := Some name;
-  authority_file := Some (Ast.source_file_of_loc loc)
+let mark_authority name = pending_authority := Some name
 
 let finish name fields =
   if !pending_authority = Some name then begin

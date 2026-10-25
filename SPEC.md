@@ -2204,8 +2204,9 @@ entry and consumed at every exit; a later step exposes the token for regions
 that are not lexical. The kernel's pair raises and lowers a per-CPU preempt
 count, as Linux's `preempt_disable`/`preempt_enable`, independent of the IRQ
 mask. It finds the count through TPIDR_EL1 rather than through an
-authority: `mrs_tpidr_el1()` reads that register, and only the file that
-declares the `struct cpu_authority` may call it. While
+authority, read by a one-instruction assembly helper
+(`kernel_cpu_offset`, in `user_entry.S`); the compiler has no builtin for
+that register. While
 `KERNEL_PREEMPTIBLE == 0` nothing consults the count to decide a switch, and
 the mint file asserts the constant; that dependency is trusted, not checked. The mint
 file may also publish mints that bypass a block; their callers are fixed by
@@ -3656,8 +3657,7 @@ at codegen time rather than silently lowering to a racy `wfi`.
 the register chosen by LLVM's allocator rather than by the caller:
 `mrs_cntfrq_el0`, `mrs_cntpct_el0`, `mrs_sctlr_el1`, `mrs_esr_el1`,
 `mrs_far_el1`, `mrs_elr_el1`, `mrs_spsr_el1`, `mrs_id_aa64mmfr0_el1`,
-`mrs_mpidr_el1`, `mrs_tpidr_el1` (only in the file declaring the
-`struct cpu_authority`; see "Preemption-disabled regions"), `mrs_daif`;
+`mrs_mpidr_el1`, `mrs_daif`;
 `msr_cntp_tval_el0`, `msr_cntp_ctl_el0`, `msr_sctlr_el1`, `msr_mair_el1`,
 `msr_tcr_el1`, `msr_ttbr0_el1`, `msr_daifclr_irq`, `msr_daifset_irq`;
 `tlbi_vmalle1`, `tlbi_vmalle1is`, `tlbi_vaae1is`, `tlbi_vae1is`,

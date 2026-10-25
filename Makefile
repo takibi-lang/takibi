@@ -1531,6 +1531,7 @@ $(KERNEL_RPI5_MAIN_O): $(KERNEL_RPI5_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(
 	python3 scripts/buildcheck_kernel_unused_coverage.py rpi5 $@.d
 	python3 scripts/buildcheck_ext2_mutation_guard.py $@.callgraph.tsv
 	python3 scripts/buildcheck_ext2_reader_self_wait.py $@.callgraph.tsv
+	python3 scripts/buildcheck_cpu_offset_callers.py $@.callgraph.tsv
 	$(NICE_HEAVY) python3 scripts/buildcheck_range_obligations.py $@.rangeobl
 	python3 scripts/measure_trusted_base.py --check-raw-deref rpi5 $@.rawderef.tsv $@.d
 
@@ -1666,6 +1667,7 @@ $(KERNEL_QEMU_MAIN_O): $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(
 	python3 scripts/buildcheck_kernel_unused_coverage.py qemu $@.d
 	python3 scripts/buildcheck_ext2_mutation_guard.py $@.callgraph.tsv
 	python3 scripts/buildcheck_ext2_reader_self_wait.py $@.callgraph.tsv
+	python3 scripts/buildcheck_cpu_offset_callers.py $@.callgraph.tsv
 	$(NICE_HEAVY) python3 scripts/buildcheck_range_obligations.py $@.rangeobl
 	python3 scripts/buildcheck_compile_alloc_budget.py qemu $@.allocwords
 	python3 scripts/measure_trusted_base.py --check-raw-deref qemu $@.rawderef.tsv $@.d

@@ -5194,23 +5194,6 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | _ -> raise (TypeError (e.loc,
            Printf.sprintf "%s expects no arguments: %s()" fname fname)))
 
-  | Call ("mrs_tpidr_el1", args) ->
-      (* GitHub issue #638 stage 2: TPIDR_EL1 holds this CPU's per-core
-         offset, which the CPU-authority file uses to reach this CPU's
-         preempt count without an authority in hand. Reading it anywhere
-         else would be a second, unreviewed way to name the current CPU, so
-         only the file that declares the `struct cpu_authority` may. *)
-      let here = Ast.source_file_of_loc e.loc in
-      (match !Per_cpu_registry.authority_file with
-       | Some file when file = here -> ()
-       | _ -> raise (TypeError (e.loc,
-           "mrs_tpidr_el1() may only be called in the file that declares \
-            the struct cpu_authority")));
-      (match args with
-       | [] -> TUsize
-       | _ -> raise (TypeError (e.loc,
-           "mrs_tpidr_el1 expects no arguments: mrs_tpidr_el1()")))
-
   | Call (("mrs_cntfrq_el0" | "mrs_cntpct_el0" | "mrs_sctlr_el1"
           | "mrs_esr_el1" | "mrs_far_el1" | "mrs_elr_el1" | "mrs_spsr_el1"
           | "mrs_id_aa64mmfr0_el1" | "mrs_mpidr_el1"

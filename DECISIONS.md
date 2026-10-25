@@ -338,6 +338,10 @@ condition below applies, and reports the land afterwards.
 - 2026-10-25 #638 stage 2: preempt_off is a per-CPU count reached through
   TPIDR_EL1, with a debug-build runtime assert; the follow-up questions take
   the recommended answers. [active] #638
+- 2026-10-25 #638: TPIDR_EL1 is read through a one-move .S helper
+  (`kernel_cpu_offset`, its caller fixed by a call-graph build check), under
+  the 2026-10-19 rule; no `mrs_tpidr_el1` builtin is added. The runtime
+  preempt-count checks stay on in every image. [active] #638
 - 2026-10-25 #987: check_model_function_map.py runs as a buildcheck over both
   kernels' call-graph tables (option A). [active] #987
 - 2026-10-25 #994: DMA and cache-maintenance builtins move toward #637's

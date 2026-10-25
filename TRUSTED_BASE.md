@@ -378,9 +378,10 @@ rules globally.
   (the compiler places the exits); the file finds the count through
   TPIDR_EL1, which is trusted to hold the core index times the per-core
   stack group stride (each core's entry path sets it before any Takibi code
-  runs; both linker scripts assert the stride; the compiler confines
-  `mrs_tpidr_el1` to this file; each region entry checks it against
-  `cpu_id()` at run time). `cpu_here_for_boot_probe`
+  runs; both linker scripts assert the stride; it is read by the one-move
+  assembly helper `kernel_cpu_offset`, whose one caller
+  `scripts/buildcheck_cpu_offset_callers.py` fixes; each region entry
+  checks it against `cpu_id()` at run time). `cpu_here_for_boot_probe`
   (the boot probe only) mints outside a block;
   `scripts/check_cpu_authority_mints.py` fixes its caller.
 - ext2's operation scratch is a pool of `KERNEL_MAX_CORES` slots, each

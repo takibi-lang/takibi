@@ -5109,7 +5109,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
 
   | Call (("mrs_cntfrq_el0" | "mrs_cntpct_el0" | "mrs_sctlr_el1"
           | "mrs_esr_el1" | "mrs_far_el1" | "mrs_elr_el1" | "mrs_spsr_el1"
-          | "mrs_id_aa64mmfr0_el1" | "mrs_mpidr_el1" | "mrs_tpidr_el1"
+          | "mrs_id_aa64mmfr0_el1" | "mrs_mpidr_el1"
           | "mrs_daif") as name, []) ->
       (* GitHub issue #226/#227: one `mrs` each, register chosen by LLVM's
          own allocator via the "=r" output constraint -- never named by the
@@ -5135,10 +5135,6 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            per-platform and belongs in kernel/platform/*/init.tkb's
            cpu_id(); this intrinsic is only the register read. *)
         | "mrs_mpidr_el1"  -> "mpidr_el1"
-        (* GitHub issue #638 stage 2: this core's per-core offset, set once
-           by each core's entry path; the type checker confines the read to
-           the CPU-authority file. *)
-        | "mrs_tpidr_el1"  -> "tpidr_el1"
         (* GitHub issue #351: reading the interrupt mask is what lets a
            lock RESTORE it rather than unconditionally enabling -- the
            local_irq_save half that msr_daifset_irq alone cannot express. *)
