@@ -1,5 +1,91 @@
 # takibi Engineering History
 
+## 2026-10-25: the 2026-10-23 queues' done record, and the design review
+
+ROADMAP.md was re-cut on 2026-10-25 (Territories, re-cut 2026-10-25). The
+done record of the queues it replaced is kept here; the issues the review
+of 2026-10-24/25 filed are listed at the end.
+
+**Territory B, the 2026-10-23 queue.** Ahead of everything (maintainer,
+2026-10-24, from #567's re-measurement: the build checks take more than
+twice the commits of the compiler they guard): #987 (--emit-call-graph),
+#988 and #989 done; the model map check runs from the kernel build on both
+kernels' call-graph tables (buildcheck_model_function_map.py, restamped by
+`make model-map-restamp`). The verification direction (#954, maintainer
+2026-10-23; B owns the refinement code): #960 (obligations carry a
+constant's expression, range format v2), #990 (no-wrap guards re-checked
+by z3), #983 (init_flow terms are machine values), #984 (min/max range
+obligations) and #991 (literal index diagnostic) done 2026-10-24; the thin
+slice of function-boundary initialization contracts (#954 step 2,
+docs/VERIFICATION_DESIGN.md) and step 3, the design review, done; step 4:
+#975 (branch conditions as linear facts), its follow-ups #977 and #978, and
+#985 (batched z3 for the init budget) done 2026-10-24, #974 (the execve
+staging requires) and #976 (--trace-init-flow) done 2026-10-24; from the
+rest of stage 2, #798 (index bounds from one width check) done 2026-10-25,
+index bounds from versioned locals closed 2026-10-25 (nothing left without
+loop invariants, which are deferred), the runtime order graph retired for
+immutable slice indexes (#1007) and its --forbid-trap report naming
+Init_flow's facts (#1011) done 2026-10-25. Compiler time: #921 (front-end
+scans and overlay local types instead of a shared multi-variant run, which
+the profile showed not worth it), #995 (the region planner reads the AST
+instead of printing every item), #996 (one reset, Compilation_state.reset,
+for every per-compilation table) done 2026-10-24; #997 (scope Hashtbl.copy
+calls, measured at 0.01% of the kernel compile) left and closed 2026-10-24;
+#908 (fixed QEMU lane budget), #916 (compiler GC tuning) and #893
+(redundant csel in variant match) closed. ext2: #967 (O_CREAT) done
+2026-10-25. Earlier B items the old file still carried: #740 steps 1-2 (the
+TCP retransmit queue keeps the sent packet, net_transmit_keep; done
+2026-10-16), the U2-full path, the xHCI work under #720 (producer rings,
+session tables, input context, event ring and output context as
+device-protocol owners; usb_xhci.tkb off kernel/RAW_MINT_FILES, its
+bus-address export in usb_xhci_bus.tkb; only the DCBAA stays legacy, D3),
+and one section per function and data object with --gc-sections on every
+kernel link (2026-10-13; QEMU text -17.6 KB, RPi5 -12.2 KB). #720's
+decision history (B+C selected 2026-10-11; protocol declarations parsed,
+validated and emitted as TLA+; sealed linear owners generated per state;
+generated read/write access; option (a) slice 1 with decisions D1 P1, D2 Q1,
+D3 S1, D4 exists-b slots) is on the issue and in
+docs/XHCI_SHARED_DMA_DESIGN.md.
+
+**Territory A, the trunk.** #935 and #819 closed. #637 stage 3, the mint
+list: step A (MMIO through IoHandles), B1, B2 and B3 (process records as
+RegionPool records; IntrusivePool, intrusive_pool.tkb and pool_lock.tkb
+gone, 2026-10-12), freelist.tkb (checked indexing only), ext2.tkb (per-CPU
+scratch and checked positions; checking a field's width once since #798),
+the network files through header overlays (2026-10-13; a raw reinterpreting
+cast to a type with a refined, bool or exhaustive-enum field needs `unsafe`
+since 2026-10-15), stack_poison.tkb split out of process.tkb, elf64.tkb
+through header overlays, process stack runs behind a PageRunOwner in the
+process record (#672, 2026-10-14; about +80 ns per tick on RPi5), the
+context-stride product's run-time guard gone (#807, 2026-10-23). Per-CPU
+scratch (#981, #982) done 2026-10-25: every [T; KERNEL_MAX_CORES] global is
+a per_cpu store, a pool, or listed with its reader
+(scripts/check_per_cpu_arrays.py); process_image's target root is a
+parameter rather than state; the PMR shadow's non-stopping mint waits for
+#638. #1015 done 2026-10-25. Preemption (#638): slices 1-3 done 2026-10-16
+and 2026-10-17 (lexical `preempt_off (cpu) { ... }` blocks mint CpuHere;
+ext2's scratch behind a linear `Ext2Slot`; the block layer's run, cache and
+counters behind a `BlockSlot` pool); flip plan stage 1 done 2026-10-24:
+`scripts/check_raw_cpu_id_sites.py` inventories the raw `cpu_id()` calls
+(157 in 34 files) that assume no migration.
+
+**The design review of 2026-10-24/25** (maintainer and Claude Code, in
+one session) looked at the trusted base, the build checks, the effect
+system, preemption, signals, the language surface, modules, syntax,
+globals, confinement of unsafe, the compiler CLI, runtime checks and the
+ext2 driver's equivalence with Linux. Its findings are on the issues it
+filed, each with the measurements that led to it: #986 (the trusted-base
+ledger), #567's re-measurement and #987, #988, #989 (checks from the
+compiler's call graph), #992 and #993 (preemption's EL1 frames and slot
+capacity), #998, #999, #1000 (signals: tiers, host oracle, one
+chokepoint), #1001 (job control), #1002, #1003, #1004, #1005 (the language
+surface: words, dead builtins, one instruction table), #1006, #1009, #1010
+(the syntax review, the edition, the lossless printer), #1008 (privacy
+modules), #1012, #1013, #1014 (globals), #1017, #1018 (the frame and its
+API rule), #1027 (the CLI), #1031, #1032 (runtime checks and hardware
+isolation), #1033, #1034, #1035 (ext2 oracles), and #850's stop-gap. The
+maintainer's decisions from it are in DECISIONS.md under 2026-10-25.
+
 ## 2026-10-20: PID 1 is a pooled process; slot 0 names none (#831)
 
 The remainder of #775 item 2-1. Slot value 0 had named a static bootstrap

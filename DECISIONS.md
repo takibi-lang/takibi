@@ -58,6 +58,16 @@ condition below applies, and reports the land afterwards.
   integration test. Not absolute, but the audit names the rung taken and why
   higher rungs were not; this loop is how Takibi reaches stronger
   compile-time checking in a practical Unix-like kernel. [active] #753
+- 2026-10-25 Rung 5 of the ladder, a run-time check, is admitted for its
+  value over a stop, not as a way to shrink the trusted base: a check that
+  stops the kernel only pays when it guards a frame site (#1017) or a
+  premise no model covers, and every firing is a defect to work back up the
+  ladder (a followup, never a tolerated stop). The 119
+  `kernel_invariant_stop` sites are classified and ratcheted (#1031);
+  generated traps stay forbidden (--forbid-trap). Hardware isolation (WXN,
+  PXN, PAN, the IOMMU; #1032) is adopted freely, because it narrows what a
+  defect can reach rather than detecting one, and it is not a ratchet
+  item. [active] #1031 #1032
 - 2026-10-16 Prevention an audit finds at the rung the ladder picks (plus a
   failure-only log) is added before land, not filed; cheapness alone does
   not pick the rung. [active] #753 #772 #789
@@ -292,6 +302,25 @@ condition below applies, and reports the land afterwards.
   more urgent than it was: #567's Stage 1 (--emit-call-graph, #987) and the
   first two retirements (#988, #989) go to the head of Territory B's queue,
   ahead of #954 stage 2. [active] #567 #987
+- 2026-10-25 The pillars need their support lanes: multicore and memory
+  safety stay the near-term goal, but they do not grow soundly alone (the
+  z3 second judge found existing defects within days; the build checks
+  outgrew the compiler they guard; equivalence oracles turn review chains
+  into tests). Territory B's queue is ordered by what serves the pillars,
+  and A adopts each support result at its next work boundary. [active]
+- 2026-10-25 #742 stage 1 (multicore load with programs Linux distributions
+  ship, as a make target outside every aggregate) runs now, before #638's
+  stage 2 and #966, which need its baseline; #1014 is measured on that load
+  and nowhere else; stages 2 and 3 wait for the #638 flip. [active] #742
+- 2026-10-25 The consolidation umbrellas filed by the 2026-10-24/25 review
+  (#986, #998, #1002, #1008, #1012, #1027) are decided direction and stay
+  off the queues except their stop-gaps in Territory B's band 0; #1009, the
+  syntax edition, is done last of them, after #1010 (a lossless printer and
+  `takibi fmt`), its only prerequisite. [active] #1009 #1010
+- 2026-10-25 The syntax review (#1006) is held until before #789's token
+  design starts, and before the next split of `process.tkb` or
+  `syscall.tkb` that #1008's `module` line would otherwise have to
+  retract. [active] #1006
 - 2026-10-19 A rebase conflict confined to docs/SPACE_CHECKPOINT.json is
   resolved by code (scripts/checkpoint_rebase.py, used by land.sh and the
   coordinator): main's side, then the branch's own review, current for its
