@@ -103,9 +103,8 @@ trunk items below have no step ready; an item that reaches a decision is
 parked and the next one taken:
 #958 (longest IRQ-masked span outside profile sessions), #959 (DDB's
 lock-free NIC RX pending), #966's follow-up (unmask the Mutex-based locks
-no interrupt reaches; #966 itself unmasked the fd and TCP pools), and last, at low priority, #980
-(reboot: Linux-style ordering, then escalate a partial world stop to the
-debug stop). #799 waits under #954 until a site needs it.
+no interrupt reaches; #966 itself unmasked the fd and TCP pools). #980
+(reboot through the debug stop) is done (HISTORY.md). #799 waits under #954 until a site needs it.
 
 1. **Stored authority and the mint list (#637 stage 3).** Done since
    2026-10-09 through 2026-10-25 (HISTORY.md): places, per-CPU storage,
