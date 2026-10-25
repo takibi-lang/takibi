@@ -46,7 +46,7 @@ write overwrite/f abcdefgh
 write overwrite/src XY
 overwrite overwrite/f overwrite/src
 
-row unlink_indirect differ #1020
+row unlink_indirect match #1020
 mkdir unlink_indirect
 fill unlink_indirect/f 14
 unlink unlink_indirect/f

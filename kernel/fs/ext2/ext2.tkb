@@ -3667,8 +3667,9 @@ private inline fn ext2_claim_directory_with(slot: borrow Ext2Slot[0],
 // and the inode. Their pointers are read before anything is written, because
 // once the inode is released they read as zero.
 //
-// A symlink, or the last link of a file reaching an indirect block, is
-// Unsupported: releasing those is more code than any caller asks for yet.
+// A symlink, or a file larger than the doubly-indirect reach, is
+// Unsupported. The last link of a file reaching an indirect block releases
+// its blocks through the O_TRUNC walk (GitHub issue #1020).
 fn ext2_unlink_name(mount: Ext2Mount, parent_inode: usize,
                     name: borrow []const u8) -> Ext2UnlinkNameResult !{unsafe} {
     let slot: Ext2Slot[0] = ext2_slot_acquire();
@@ -3730,8 +3731,35 @@ private fn ext2_unlink_name_with(slot: borrow Ext2Slot[0], mount: Ext2Mount,
                     }
                 }
             }
-            if (file.size > ext2_direct_file_size()) {
+            if (file.size > ext2_max_regular_file_size()) {
                 return Ext2UnlinkNameResult::Unsupported;
+            }
+            // GitHub issue #1020: a last link reaching an indirect block
+            // releases through #1016's O_TRUNC walk, which zeroes the
+            // inode's pointers first and then frees every data and pointer
+            // block, then the inode goes. The entry goes first, as below.
+            if (file.size > ext2_direct_file_size()) {
+                match ext2_directory_remove(slot, mount, parent_inode,
+                        inode_number, name) {
+                    Ext2DirectoryResult::Invalid => {
+                        return Ext2UnlinkNameResult::Invalid;
+                    }
+                    Ext2DirectoryResult::Updated => { }
+                }
+                let mut freed: bool = true;
+                match ext2_truncate_regular_file_with(slot, mount,
+                        inode_number) {
+                    Ext2TruncateResult::Invalid => { freed = false; }
+                    Ext2TruncateResult::Truncated => { }
+                }
+                match ext2_release_inode(slot,
+                        mount, ext2_inode_owner_new(inode_number - 1,
+                                inode_number, inode_number)) {
+                    Ext2OwnerReleaseResult::Invalid => { freed = false; }
+                    Ext2OwnerReleaseResult::Released => { }
+                }
+                if (freed) { return Ext2UnlinkNameResult::Unlinked; }
+                return Ext2UnlinkNameResult::Invalid;
             }
             let blocks: usize =
                 (file.size + KERNEL_BLOCK_SIZE - 1) / KERNEL_BLOCK_SIZE;
