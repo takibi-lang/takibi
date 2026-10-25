@@ -1,3 +1,5 @@
+k -> 0
+  k file size=1024
 row base
 1 mkdir base -> 0
   base dir
@@ -43,19 +45,4 @@ row dir_indirect
   dir_indirect dir
 2 files dir_indirect 52 -> 0 created=52
   dir_indirect dir
-row probe
-1 mkdir probe -> 0
-  probe dir
-2 zeros probe/a 100 -> 0
-  probe/a file size=100
-3 zeros probe/b 1023 -> 0
-  probe/b file size=1023
-4 zeros probe/c 1024 -> 0
-  probe/c file size=1024
-5 zeros probe/d 1025 -> 0
-  probe/d file size=1025
-6 zeros probe/e 3000 -> 0
-  probe/e file size=3000
-7 zeros probe/k 1024 -> 0
-  probe/k file size=1024
 eq done

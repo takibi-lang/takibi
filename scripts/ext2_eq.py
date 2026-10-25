@@ -74,7 +74,6 @@ OPS = {
     "rmdir": (("path",), 'rmdir "$R/{0}"'),
     "write": (("path", "text"), '$B echo -n {1} >"$R/{0}"'),
     "fill": (("path", "count"), None),
-    "zeros": (("path", "count"), '$B printf %0{1}d 0 >"$R/{0}"'),
     "overwrite": (("path", "path"), '$B dd if="$R/{1}" of="$R/{0}" conv=notrunc 2>/dev/null'),
     "unlink": (("path",), 'rm "$R/{0}"'),
     "rename": (("path", "path"), 'mv "$R/{0}" "$R/{1}"'),
@@ -137,10 +136,14 @@ def gen_sh(rows):
         # the guest; on the host BusyBox runs them in-process (B empty)
         'B="${2-/bin/busybox}"',
         'mkdir "$R"',
-        # one 1 KiB block of zeros, the unit `fill` concatenates
-        '$B printf %01024d 0 >"$R/k"',
+        # one 1 KiB block, the unit `fill` concatenates: the script's own
+        # first KiB, so it does not depend on printf (which fails on the
+        # guest, #1067); its status is logged so a failed copy shows
+        '$B dd if="$0" of="$R/k" bs=1024 count=1 2>/dev/null',
+        'echo "k -> $?"',
         "t() { if [ -d \"$1\" ]; then echo \"  $2 dir\"; elif [ -f \"$1\" ]; "
         "then $B stat -c \"  $2 file size=%s\" \"$1\"; else echo \"  $2 absent\"; fi; }",
+        't "$R/k" k',
     ]
     for name, _expect, _issue, ops in rows:
         out.append(f"echo 'row {name}'")
@@ -158,7 +161,7 @@ def gen_sh(rows):
                 continue
             else:
                 cmd = OPS[op][1].format(*args)
-            out.append(cmd if op == "zeros" else f"{cmd} 2>/dev/null")
+            out.append(f"{cmd} 2>/dev/null")
             out.append(f'echo "{label} -> $?"')
             for arg, kind in zip(args, OPS[op][0]):
                 if kind == "path":

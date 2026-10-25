@@ -8,7 +8,7 @@
 # Operations (paths are under the row's own directory, /eq/NAME):
 #   mkdir P | rmdir P | unlink P | rename A B
 #   write P TEXT        open(O_CREAT|O_TRUNC) and write TEXT
-#   fill P N            write N KiB of '0' in 1 KiB writes
+#   fill P N            write N KiB in 1 KiB writes (the script's first KiB)
 #   overwrite P SRC     write SRC's bytes at offset 0 without O_TRUNC
 #   files D N           create N empty files with 200-byte names in D
 #
@@ -55,11 +55,3 @@ row dir_indirect differ #968
 mkdir dir_indirect
 files dir_indirect 52
 
-row probe match -
-mkdir probe
-zeros probe/a 100
-zeros probe/b 1023
-zeros probe/c 1024
-zeros probe/d 1025
-zeros probe/e 3000
-zeros probe/k 1024
