@@ -2248,8 +2248,7 @@ fn syscall_pipe_read(current_authority: borrow ProcessCurrent[current_process, P
             pipe_put(owner);
             return SyscallIoResult::Transferred(0);
         }
-        kernel_process_pipe_wait_prepare(pipe_address);
-        pipe_put(owner);
+        pipe_put_waiting(owner);
         return SyscallIoResult::PipeWait;
     }
     let (offset, first, second) = pipe_read_plan(pipe_of(owner), requested);
@@ -2285,9 +2284,8 @@ fn syscall_pipe_read(current_authority: borrow ProcessCurrent[current_process, P
             }
         }
     }
-    pipe_consume(pipe_of(owner), delivered);
-    pipe_put(owner);
-    kernel_process_pipe_wake(pipe_address);
+    let consumed = pipe_consume(owner, delivered);
+    pipe_put_changed(owner, consumed);
     return SyscallIoResult::Transferred(delivered);
 }
 
@@ -2307,8 +2305,7 @@ fn syscall_pipe_write(current_authority: borrow ProcessCurrent[current_process, 
     }
     let amount: usize = pipe_write_amount(pipe_of(owner), length);
     if (amount == 0) {
-        kernel_process_pipe_wait_prepare(pipe_address);
-        pipe_put(owner);
+        pipe_put_waiting(owner);
         return SyscallIoResult::PipeWait;
     }
     let (offset, first, second) = pipe_write_plan(pipe_of(owner), amount);
@@ -2340,9 +2337,8 @@ fn syscall_pipe_write(current_authority: borrow ProcessCurrent[current_process, 
             }
         }
     }
-    pipe_produce(pipe_of(owner), accepted);
-    pipe_put(owner);
-    kernel_process_pipe_wake(pipe_address);
+    let produced = pipe_produce(owner, accepted);
+    pipe_put_changed(owner, produced);
     return SyscallIoResult::Transferred(accepted);
 }
 
@@ -2387,11 +2383,10 @@ fn syscall_pipe_poll_wait(current_authority: borrow ProcessCurrent[current_proce
     };
     let mask: usize = syscall_pipe_poll_mask_owned(owner, reader);
     if ((mask & (events | POLLERR | POLLHUP)) != 0) {
-        kernel_process_pipe_wait_prepare(0);
+        pipe_put_ready(owner);
     } else {
-        kernel_process_pipe_wait_prepare(pipe_address);
+        pipe_put_waiting(owner);
     }
-    pipe_put(owner);
     kernel_process_current_set_pending_block(current_authority, ProcessWaitReason::Pipe, 0);
     return SyscallAction::Block;
 }
@@ -7237,7 +7232,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     if (number == 142) { return syscall_finish_current(frame, syscall_reboot(x0, x1, x2), current_authority); }
 
     if (number == AARCH64_NR_WRITE) {
-        return syscall_finish_current(frame, syscall_io_action(current_authority, syscall_write_segment(current_authority, x0, x1, x2)), current_authority);
+        return syscall_finish_write(frame, syscall_io_action(current_authority, syscall_write_segment(current_authority, x0, x1, x2)), current_authority);
     }
 
     // sendto(fd, buf, len, flags, dest_addr, addrlen) with no destination is
@@ -7246,7 +7241,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     // (MSG_NOSIGNAL aside) changes what a connected write does here. A
     // destination address on a stream socket is left to ENOSYS below.
     if (number == 206 && x4 == 0) {
-        return syscall_finish_current(frame, syscall_io_action(current_authority, syscall_write_segment(current_authority, x0, x1, x2)), current_authority);
+        return syscall_finish_write(frame, syscall_io_action(current_authority, syscall_write_segment(current_authority, x0, x1, x2)), current_authority);
     }
 
     if (number == 56 && (x2 & LINUX_O_MUTATING) != 0) {
@@ -8281,7 +8276,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         return syscall_finish_current(frame, syscall_readv_current(current_authority, x0, x1, x2), current_authority);
     }
     if (number == AARCH64_NR_WRITEV) {
-        return syscall_finish_current(frame, syscall_writev_current(current_authority, x0, x1, x2), current_authority);
+        return syscall_finish_write(frame, syscall_writev_current(current_authority, x0, x1, x2), current_authority);
     }
     if (number == AARCH64_NR_PPOLL) {
         return syscall_finish_current(frame, syscall_ppoll_dispatch(current_authority, x0, x1, x2, x3), current_authority);
@@ -8790,6 +8785,35 @@ private fn syscall_finish_current(
         current_authority: ProcessCurrent[process, ProcessState::Running])
         -> SyscallAction !{unsafe} {
     return syscall_signal_deliver(current_authority, frame, action);
+}
+
+// GitHub issue #1042: the write family's return. A write that met a pipe
+// with no reader answers EPIPE and has raised SIGPIPE (syscall_io_action);
+// when that signal ends the writer, it ends it here, on the way out of the
+// write, as Linux does and as kill(2) of oneself does above -- not at the
+// writer's next syscall or tick. EPIPE comes from nowhere else.
+private fn syscall_finish_write(
+        frame: MaybeFrame, action: SyscallAction,
+        current_authority: ProcessCurrent[process, ProcessState::Running])
+        -> SyscallAction !{unsafe} {
+    match action {
+        SyscallAction::Resume(value) => {
+            if (value == LINUX_EPIPE &&
+                kernel_process_current_signal_terminates(LINUX_SIGPIPE)) {
+                return kernel_syscall_exit_current_process(
+                    current_authority, process_end_signaled(LINUX_SIGPIPE));
+            }
+            return syscall_finish_current(frame, SyscallAction::Resume(value), current_authority);
+        }
+        SyscallAction::Unreachable => { return syscall_finish_current(frame, SyscallAction::Unreachable, current_authority); }
+        SyscallAction::Exit(status) => { return syscall_finish_current(frame, SyscallAction::Exit(status), current_authority); }
+        SyscallAction::CloneChild(pid) => { return syscall_finish_current(frame, SyscallAction::CloneChild(pid), current_authority); }
+        SyscallAction::CloneParent(sp) => { return syscall_finish_current(frame, SyscallAction::CloneParent(sp), current_authority); }
+        SyscallAction::Block => { return syscall_finish_current(frame, SyscallAction::Block, current_authority); }
+        SyscallAction::WaitInterrupt => { return syscall_finish_current(frame, SyscallAction::WaitInterrupt, current_authority); }
+        SyscallAction::ChildExec => { return syscall_finish_current(frame, SyscallAction::ChildExec, current_authority); }
+        SyscallAction::Migrate => { return syscall_finish_current(frame, SyscallAction::Migrate, current_authority); }
+    }
 }
 
 // Clone owns the parent's authority and returns only after consuming/restoring it.

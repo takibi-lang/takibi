@@ -53,6 +53,10 @@ struct Pipe {
     retired: bool;
     reader_open: bool;
     writer_open: bool;
+    // Whether a reader or writer named this pipe for a wait since the last
+    // change (pipe_put_waiting); the change that finds it set wakes them
+    // (pipe_put_changed). A change nobody waits for walks no process.
+    waiting: bool;
     // The ring: `length` bytes starting at `start`, wrapping at the end.
     start: usize;
     length: usize;
@@ -67,6 +71,16 @@ const PIPE_CHUNK_PAGES: usize = 3;
 
 linear struct PipeOwner[pool: addr, pipe: usize] {
     private pin: RegionPin(Pipe)[pool, pipe];
+}
+
+// A change a reader or writer may be waiting for: bytes consumed, bytes
+// produced, an end closed. Minted only by the changes below and discharged
+// only by pipe_put_changed, which wakes the pipe's waiters, so a change that
+// forgot its wake does not compile: the token cannot be dropped, and
+// pipe_put does not take it. Indexed by the pipe, so a change to one pipe
+// cannot be discharged by releasing another.
+linear struct PipeChange[pipe: usize] {
+    private changed: bool;
 }
 
 must_use variant PipeTakeResult {
@@ -239,13 +253,45 @@ fn pipe_take(address: usize, generation: usize) -> PipeTakeResult !{unsafe} {
 
 // The release. Linear, so every path that took a pipe reaches exactly one
 // of these or the free. The lock goes first: the pin keeps its memory there.
+// For a look that changed nothing; a change goes through pipe_put_changed.
 fn pipe_put(owner: sink PipeOwner[p, pipe]) !{unsafe} {
     let pin = pipe_owner_release(owner);
     task_mutex_release(&region_pin_record(pin).lock);
     pipe_unpin(pin);
 }
 
-private fn pipe_free(owner: sink PipeOwner[p, pipe]) !{unsafe} {
+// The release after a change: whoever waited on this pipe looks again. The
+// waiting flag is read and cleared under the lock, so a waiter that named
+// the pipe before this change is woken by this call, and one that names it
+// after is seen by the next change.
+fn pipe_put_changed(owner: sink PipeOwner[p, pipe], change: sink PipeChange[pipe]) !{unsafe} {
+    let changed: bool = change.changed;
+    let address: usize = region_pin_address(owner.pin);
+    let wake: bool = changed && pipe_of(owner).waiting;
+    pipe_of(owner).waiting = false;
+    pipe_put(owner);
+    if (wake) { kernel_process_pipe_wake(address); }
+}
+
+// The release after a look that must wait: this process names the pipe in
+// its record while the lock is still held, so any change after the look
+// finds the name (kernel/models/PipeWait.tla). The syscall then blocks on
+// ProcessWaitReason::Pipe.
+fn pipe_put_waiting(owner: sink PipeOwner[p, pipe]) !{unsafe} {
+    pipe_of(owner).waiting = true;
+    kernel_process_pipe_wait_prepare(region_pin_address(owner.pin));
+    pipe_put(owner);
+}
+
+// The release after a look that found what a ppoll asked for after all:
+// no name, so the block that follows reruns the ppoll at once.
+fn pipe_put_ready(owner: sink PipeOwner[p, pipe]) !{unsafe} {
+    kernel_process_pipe_wait_prepare(0);
+    pipe_put(owner);
+}
+
+private fn pipe_free(owner: sink PipeOwner[p, pipe], change: sink PipeChange[pipe]) !{unsafe} {
+    let changed: bool = change.changed;
     region_pin_record(owner.pin).retired = true;
     let pin = pipe_owner_release(owner);
     task_mutex_release(&region_pin_record(pin).lock);
@@ -264,16 +310,22 @@ fn pipe_end_close(address: usize, generation: usize, reader: bool) !{unsafe} {
             kernel_boot_log("pipe: an end closed on a pipe already freed\n");
         }
         PipeTakeResult::Ready(owner) => {
-            let pipe: &mut Pipe = pipe_of(owner);
-            if (reader) { pipe.reader_open = false; } else { pipe.writer_open = false; }
-            if (pipe.reader_open == false && pipe.writer_open == false) {
-                pipe_free(owner);
+            let closed = pipe_end_mark(owner, reader);
+            if (pipe_of(owner).reader_open == false && pipe_of(owner).writer_open == false) {
+                // Nobody can wait on a pipe with no end left to wait through.
+                pipe_free(owner, closed);
             } else {
-                pipe_put(owner);
+                pipe_put_changed(owner, closed);
             }
-            kernel_process_pipe_wake(address);
         }
     }
+}
+
+private fn pipe_end_mark(owner: borrow PipeOwner[p, pipe], reader: bool)
+        -> PipeChange[pipe] !{unsafe} {
+    if (reader) { pipe_of(owner).reader_open = false; } else { pipe_of(owner).writer_open = false; }
+    let mut closed: PipeChange[pipe] = { true };
+    return closed;
 }
 
 // Where the next `wanted` bytes to read are: the offset of the first run,
@@ -290,16 +342,19 @@ fn pipe_read_plan(pipe: borrow &mut Pipe, wanted: usize) -> (usize, usize, usize
 }
 
 // The bytes the plan above named were copied out: drop them.
-fn pipe_consume(pipe: borrow &mut Pipe, amount: usize) {
-    if (amount > pipe.length) { return; }
-    pipe.length = pipe.length - amount;
-    let moved: usize = pipe.start + amount;
+fn pipe_consume(owner: borrow PipeOwner[p, pipe], amount: usize) -> PipeChange[pipe] !{unsafe} {
+    let record: &mut Pipe = pipe_of(owner);
+    let mut change: PipeChange[pipe] = { amount != 0 };
+    if (amount > record.length) { return change; }
+    record.length = record.length - amount;
+    let moved: usize = record.start + amount;
     if (moved >= PIPE_BUFFER_BYTES) {
-        pipe.start = moved - PIPE_BUFFER_BYTES;
+        record.start = moved - PIPE_BUFFER_BYTES;
     } else {
-        pipe.start = moved;
+        record.start = moved;
     }
-    if (pipe.length == 0) { pipe.start = 0; }
+    if (record.length == 0) { record.start = 0; }
+    return change;
 }
 
 fn pipe_room(pipe: borrow &mut Pipe) -> usize {
@@ -320,9 +375,12 @@ fn pipe_write_plan(pipe: borrow &mut Pipe, amount: usize) -> (usize, usize, usiz
 }
 
 // The bytes the plan above named were copied in: keep them.
-fn pipe_produce(pipe: borrow &mut Pipe, amount: usize) {
-    if (amount > pipe_room(pipe)) { return; }
-    pipe.length = pipe.length + amount;
+fn pipe_produce(owner: borrow PipeOwner[p, pipe], amount: usize) -> PipeChange[pipe] !{unsafe} {
+    let record: &mut Pipe = pipe_of(owner);
+    let mut change: PipeChange[pipe] = { amount != 0 };
+    if (amount > pipe_room(record)) { return change; }
+    record.length = record.length + amount;
+    return change;
 }
 
 // How much of a write of `requested` bytes to do now: all of it, none of it
