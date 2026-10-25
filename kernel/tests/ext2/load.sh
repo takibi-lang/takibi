@@ -15,9 +15,9 @@
 #              each, for SECONDS seconds (its own metrics follow),
 #   hackbench  hackbench's process mode over pipes, LOOPS loops (it prints
 #              `Time:`).
-# The harness itself uses no pipe and no command substitution: the kernel
-# has no pipe(2) yet (GitHub issue #1042), and the load must not depend on
-# what one of its phases is there to find.
+# The harness itself uses no pipe and no command substitution: pipes are
+# what the pipe and hackbench phases load (GitHub issue #1042), and the
+# harness must not depend on what one of its phases is there to find.
 # The last line is the verdict the runner reads.
 #
 # LOAD_ROOT (empty on Takibi) prefixes every path, so the runner's Linux

@@ -9288,10 +9288,15 @@ fn kernel_process_pipe_wake(pipe: usize) !{unsafe} {
             ProcessSlotCursor::Done => { walking = false; }
             ProcessSlotCursor::At(slot) => {
                 let next = scheduled_process_next_slot(slot);
-                if (scheduled_process_record_locked(guard, slot).pipe_wait == pipe) {
+                // A record being built or torn down is its builder's; only a
+                // process that can have prepared a wait is looked at.
+                let state: ProcessSlotState =
+                    scheduled_process_record_state_locked(guard, slot);
+                if (state != ProcessSlotState::Free &&
+                    state != ProcessSlotState::Constructing &&
+                    scheduled_process_record_locked(guard, slot).pipe_wait == pipe) {
                     scheduled_process_record_locked(guard, slot).pipe_wait = 0;
-                    if (scheduled_process_record_state_locked(guard, slot) ==
-                            ProcessSlotState::Blocked &&
+                    if (state == ProcessSlotState::Blocked &&
                         scheduled_process_record_wait_reason_locked(guard, slot) ==
                             ProcessWaitReason::Pipe) {
                         match scheduled_process_blocked_take_slot(guard, slot) {

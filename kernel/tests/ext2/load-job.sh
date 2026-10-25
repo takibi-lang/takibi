@@ -1,7 +1,8 @@
 #!/bin/sh
 # One job of /bin/load.sh's xargs phase (GitHub issue #742). Job 0 writes
 # the reference digests; every other job writes its own and compares them,
-# then removes them. No pipe: the kernel has none yet (GitHub issue #1042).
+# then removes them. No pipe: the xargs phase loads exec and the file
+# system, and leaves pipes to the phases that load them (GitHub issue #1042).
 # LOAD_ROOT is load.sh's path prefix (empty on Takibi).
 root=${LOAD_ROOT:-}
 busybox sha256sum "$root/bin/busybox.static" "$root/bin/taskset" \

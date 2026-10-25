@@ -1,0 +1,369 @@
+/* pipe2(2) from EL0 (GitHub issue #1042): two static-PIE programs linked
+ * from this one object, kept free of writable globals and compiled with
+ * --forbid-trap, run from the shared ash transcript.
+ *
+ * /bin/pipe-probe checks, in order, and prints one line per group:
+ *   - the refusals: an unknown flag is EINVAL, an unwritable array EFAULT;
+ *   - one process alone: the ends take the lowest free descriptors, ppoll
+ *     reports POLLOUT on the write end and POLLIN once a byte is buffered,
+ *     the wrong end of each is EBADF, and after the last writer closes the
+ *     read end reports POLLHUP and reads end of file;
+ *   - the broken pipe: with SIGPIPE ignored a write after the last reader
+ *     closed is EPIPE and the write end reports POLLERR; a child that does
+ *     not ignore it is ended by SIGPIPE, as wait4 reports;
+ *   - two CPUs: a child pinned to CPU 1 writes PIPE_PROBE_STREAM bytes in
+ *     100-byte writes (hackbench's message size) while this process, pinned
+ *     to CPU 0, reads them; ten times the buffer, so the writer waits for
+ *     room and the reader for bytes, and the ring wraps. Every byte is
+ *     checked in order;
+ *   - a ppoll with no timeout on an empty pipe sleeps until a child on
+ *     CPU 1 writes, hackbench's wait for its start signal;
+ *   - O_CLOEXEC: a plain pair at 3 and 4 and an O_CLOEXEC pair at 5 and 6,
+ *     then an execve of /bin/pipe-cloexec-check, which finds 3 and 4 open
+ *     and 5 and 6 closed.
+ * Any check that fails prints a line naming it and exits 1, so the
+ * transcript differs.
+ */
+
+const READ_SYSCALL: usize = 63;
+const WRITE_SYSCALL: usize = 64;
+const CLOSE_SYSCALL: usize = 57;
+const PIPE2_SYSCALL: usize = 59;
+const FCNTL_SYSCALL: usize = 25;
+const PPOLL_SYSCALL: usize = 73;
+const EXIT_SYSCALL: usize = 93;
+const NANOSLEEP_SYSCALL: usize = 101;
+const SETAFFINITY_SYSCALL: usize = 122;
+const RT_SIGACTION_SYSCALL: usize = 134;
+const GETCPU_SYSCALL: usize = 168;
+const CLONE_SYSCALL: usize = 220;
+const EXECVE_SYSCALL: usize = 221;
+const WAIT4_SYSCALL: usize = 260;
+const CLONE_FORK_SIGCHLD: usize = 0x11;
+const F_SETFD: usize = 2;
+const O_CLOEXEC: usize = 0x80000;
+// Not a pipe2 flag on Linux either (O_WRONLY), so EINVAL on both.
+const PIPE_PROBE_BAD_FLAG: usize = 0x1;
+const SIGPIPE: usize = 13;
+const POLLIN: u8 = 0x01;
+const POLLOUT: u8 = 0x04;
+const POLLERR: u8 = 0x08;
+const POLLHUP: u8 = 0x10;
+const LINUX_EBADF: usize = 0xFFFFFFFFFFFFFFF7;
+const LINUX_EFAULT: usize = 0xFFFFFFFFFFFFFFF2;
+const LINUX_EINVAL: usize = 0xFFFFFFFFFFFFFFEA;
+const LINUX_EPIPE: usize = 0xFFFFFFFFFFFFFFE0;
+const PIPE_PROBE_ERROR_FLOOR: usize = 0xFFFFFFFFFFFFF000;
+const PIPE_PROBE_STREAM: usize = 40000;
+const PIPE_PROBE_MESSAGE: usize = 100;
+const PIPE_PROBE_READ: usize = 512;
+const PIPE_PROBE_ARRIVAL_POLLS: usize = 1000000;
+const PIPE_PROBE_HIGHEST_FD: usize = 63;
+
+private fn pipe_probe_say(line: borrow []const u8) !{unsafe} {
+    // Raw ABI input only: these syscalls read the readonly bytes.
+    // The bridge exposes no writable slice or checked mutation.
+    svc5(WRITE_SYSCALL, 1, (unsafe { line as *u8 }) as usize, line.len, 0, 0);
+}
+
+private fn pipe_probe_fail(line: borrow []const u8) !{unsafe} {
+    pipe_probe_say(line);
+    svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
+}
+
+// The byte at stream position `at`: not periodic in the 4096-byte ring, so a
+// lost, repeated or reordered run is seen.
+private fn pipe_probe_byte(at: usize) -> u8 {
+    return ((at * 7 + (at >> 8)) & 0xFF) as u8;
+}
+
+private fn pipe_probe_cpu() -> u8 {
+    let mut cpu_bytes: [u8; 4];
+    cpu_bytes[0] = 99;
+    if (svc5(GETCPU_SYSCALL, cpu_bytes as *u8 as usize, 0, 0, 0, 0) != 0) {
+        return 99;
+    }
+    return cpu_bytes[0];
+}
+
+// Pin to one CPU and wait until this process is running there.
+private fn pipe_probe_move_to(cpu: u8) {
+    let mut mask: [u8; 8];
+    for index: usize in 0..<8 { mask[index] = 0; }
+    mask[0] = (1 << cpu) as u8;
+    if (svc5(SETAFFINITY_SYSCALL, 0, 8, mask as *u8 as usize, 0, 0) != 0) {
+        pipe_probe_fail(bs"pipe-probe: the affinity mask was refused\n");
+    }
+    let mut here: u8 = pipe_probe_cpu();
+    for poll: usize in 0..<PIPE_PROBE_ARRIVAL_POLLS {
+        if (here != cpu) { here = pipe_probe_cpu(); }
+    }
+    if (here != cpu) {
+        pipe_probe_fail(bs"pipe-probe: never arrived on the pinned cpu\n");
+    }
+}
+
+// pipe2 into a fresh pair; (read end, write end), or a failure line.
+private fn pipe_probe_pipe(flags: usize) -> (usize, usize) {
+    let mut fds: [u8; 8];
+    for index: usize in 0..<8 { fds[index] = 0xFF; }
+    if (svc5(PIPE2_SYSCALL, fds as *u8 as usize, flags, 0, 0, 0) != 0) {
+        pipe_probe_fail(bs"pipe-probe: pipe2 failed\n");
+    }
+    let read_end: usize = fds[0] as usize | (fds[1] as usize << 8) |
+                          (fds[2] as usize << 16) | (fds[3] as usize << 24);
+    let write_end: usize = fds[4] as usize | (fds[5] as usize << 8) |
+                           (fds[6] as usize << 16) | (fds[7] as usize << 24);
+    return (read_end, write_end);
+}
+
+// One pollfd for `fd` asking `events`, polled with no timeout (`zero` false)
+// or a zero one: (ppoll's answer, revents).
+private fn pipe_probe_poll(fd: usize, events: u8, zero: bool) -> (usize, u8) {
+    let mut pollfd: [u8; 8];
+    for index: usize in 0..<8 { pollfd[index] = 0; }
+    pollfd[0] = (fd & 0xFF) as u8;
+    pollfd[4] = events;
+    let mut timeout: [u8; 16];
+    for index: usize in 0..<16 { timeout[index] = 0; }
+    let mut timeout_address: usize = 0;
+    if (zero) { timeout_address = timeout as *u8 as usize; }
+    let answer: usize = svc5(PPOLL_SYSCALL, pollfd as *u8 as usize, 1,
+                             timeout_address, 0, 8);
+    return (answer, pollfd[6]);
+}
+
+// SIGPIPE's action: SIG_IGN (1) or SIG_DFL (0).
+private fn pipe_probe_sigpipe(handler: u8) {
+    let mut action: [u8; 32];
+    for index: usize in 0..<32 { action[index] = 0; }
+    action[0] = handler;
+    if (svc5(RT_SIGACTION_SYSCALL, SIGPIPE, action as *u8 as usize, 0, 8, 0) != 0) {
+        pipe_probe_fail(bs"pipe-probe: rt_sigaction(SIGPIPE) was refused\n");
+    }
+}
+
+private fn pipe_probe_close(fd: usize) {
+    svc5(CLOSE_SYSCALL, fd, 0, 0, 0, 0);
+}
+
+private fn pipe_probe_refusals() {
+    let mut fds: [u8; 8];
+    for index: usize in 0..<8 { fds[index] = 0; }
+    if (svc5(PIPE2_SYSCALL, fds as *u8 as usize, PIPE_PROBE_BAD_FLAG, 0, 0, 0) != LINUX_EINVAL) {
+        pipe_probe_fail(bs"pipe-probe: an unknown flag was not EINVAL\n");
+    }
+    if (svc5(PIPE2_SYSCALL, 0, 0, 0, 0, 0) != LINUX_EFAULT) {
+        pipe_probe_fail(bs"pipe-probe: a null array was not EFAULT\n");
+    }
+    pipe_probe_say(bs"pipe-probe: pipe2 refuses an unknown flag (EINVAL) and a null array (EFAULT)\n");
+}
+
+private fn pipe_probe_alone() {
+    let (read_end, write_end) = pipe_probe_pipe(0);
+    if (read_end != 3 || write_end != 4) {
+        pipe_probe_fail(bs"pipe-probe: the ends were not the lowest free descriptors 3 and 4\n");
+    }
+    let (out_answer, out_events) = pipe_probe_poll(write_end, POLLOUT, false);
+    if (out_answer != 1 || out_events != POLLOUT) {
+        pipe_probe_fail(bs"pipe-probe: an empty pipe's write end did not poll POLLOUT\n");
+    }
+    let (empty_answer, empty_events) = pipe_probe_poll(read_end, POLLIN, true);
+    if (empty_answer != 0 || empty_events != 0) {
+        pipe_probe_fail(bs"pipe-probe: an empty pipe's read end polled ready\n");
+    }
+    if (svc5(WRITE_SYSCALL, write_end, "abc" as *u8 as usize, 3, 0, 0) != 3) {
+        pipe_probe_fail(bs"pipe-probe: a 3-byte write did not complete\n");
+    }
+    let (in_answer, in_events) = pipe_probe_poll(read_end, POLLIN, false);
+    if (in_answer != 1 || in_events != POLLIN) {
+        pipe_probe_fail(bs"pipe-probe: a buffered byte did not poll POLLIN\n");
+    }
+    let mut buffer: [u8; 8];
+    for index: usize in 0..<8 { buffer[index] = 0; }
+    if (svc5(WRITE_SYSCALL, read_end, "x" as *u8 as usize, 1, 0, 0) != LINUX_EBADF ||
+        svc5(READ_SYSCALL, write_end, buffer as *u8 as usize, 8, 0, 0) != LINUX_EBADF) {
+        pipe_probe_fail(bs"pipe-probe: the wrong end of a pipe was not EBADF\n");
+    }
+    if (svc5(READ_SYSCALL, read_end, buffer as *u8 as usize, 8, 0, 0) != 3 ||
+        buffer[0] != 0x61 || buffer[1] != 0x62 || buffer[2] != 0x63) {
+        pipe_probe_fail(bs"pipe-probe: the read did not return the 3 bytes written\n");
+    }
+    pipe_probe_close(write_end);
+    let (hup_answer, hup_events) = pipe_probe_poll(read_end, POLLIN, false);
+    if (hup_answer != 1 || hup_events != POLLHUP) {
+        pipe_probe_fail(bs"pipe-probe: the read end did not poll POLLHUP after the last writer\n");
+    }
+    if (svc5(READ_SYSCALL, read_end, buffer as *u8 as usize, 8, 0, 0) != 0) {
+        pipe_probe_fail(bs"pipe-probe: the read end did not read end of file\n");
+    }
+    pipe_probe_close(read_end);
+    pipe_probe_say(bs"pipe-probe: lowest free descriptors, POLLOUT and POLLIN, EBADF on the wrong end, POLLHUP and end of file after the last writer\n");
+}
+
+private fn pipe_probe_broken_child(write_end: usize) {
+    svc5(WRITE_SYSCALL, write_end, "x" as *u8 as usize, 1, 0, 0);
+    svc5(EXIT_SYSCALL, 2, 0, 0, 0, 0);
+}
+
+private fn pipe_probe_broken() {
+    let (read_end, write_end) = pipe_probe_pipe(0);
+    pipe_probe_close(read_end);
+    pipe_probe_sigpipe(1);
+    if (svc5(WRITE_SYSCALL, write_end, "x" as *u8 as usize, 1, 0, 0) != LINUX_EPIPE) {
+        pipe_probe_fail(bs"pipe-probe: a write with no reader was not EPIPE\n");
+    }
+    let (err_answer, err_events) = pipe_probe_poll(write_end, POLLOUT, false);
+    if (err_answer != 1 || (err_events & POLLERR) == 0) {
+        pipe_probe_fail(bs"pipe-probe: the write end did not poll POLLERR with no reader\n");
+    }
+    pipe_probe_sigpipe(0);
+    let child: usize = svc5(CLONE_SYSCALL, CLONE_FORK_SIGCHLD, 0, 0, 0, 0);
+    if (child == 0) { pipe_probe_broken_child(write_end); }
+    if (child >= PIPE_PROBE_ERROR_FLOOR) {
+        pipe_probe_fail(bs"pipe-probe: fork failed\n");
+    }
+    pipe_probe_close(write_end);
+    let mut status: [u8; 4];
+    for index: usize in 0..<4 { status[index] = 0xFF; }
+    let reaped: usize = svc5(WAIT4_SYSCALL, child, status as *u8 as usize, 0, 0, 0);
+    // Linux's status word for a SIGPIPE end: the signal in the low byte.
+    if (reaped != child || status[0] as usize != SIGPIPE || status[1] != 0) {
+        pipe_probe_fail(bs"pipe-probe: a writer that did not ignore SIGPIPE was not ended by it\n");
+    }
+    pipe_probe_say(bs"pipe-probe: EPIPE and POLLERR with no reader, and SIGPIPE ends a writer that does not ignore it\n");
+}
+
+private fn pipe_probe_stream_child(read_end: usize, write_end: usize) {
+    pipe_probe_close(read_end);
+    pipe_probe_move_to(1);
+    let mut message: [u8; PIPE_PROBE_MESSAGE];
+    let mut sent: usize = 0;
+    while (sent < PIPE_PROBE_STREAM) {
+        for index: usize in 0..<PIPE_PROBE_MESSAGE {
+            message[index] = pipe_probe_byte(sent + index);
+        }
+        if (svc5(WRITE_SYSCALL, write_end, message as *u8 as usize,
+                 PIPE_PROBE_MESSAGE, 0, 0) != PIPE_PROBE_MESSAGE) {
+            svc5(EXIT_SYSCALL, 3, 0, 0, 0, 0);
+        }
+        sent = sent + PIPE_PROBE_MESSAGE;
+    }
+    svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
+}
+
+private fn pipe_probe_stream() {
+    let (read_end, write_end) = pipe_probe_pipe(0);
+    pipe_probe_move_to(0);
+    let child: usize = svc5(CLONE_SYSCALL, CLONE_FORK_SIGCHLD, 0, 0, 0, 0);
+    if (child == 0) { pipe_probe_stream_child(read_end, write_end); }
+    if (child >= PIPE_PROBE_ERROR_FLOOR) {
+        pipe_probe_fail(bs"pipe-probe: fork failed\n");
+    }
+    pipe_probe_close(write_end);
+    let mut buffer: [u8; PIPE_PROBE_READ];
+    let mut received: usize = 0;
+    let mut reading: bool = true;
+    let mut ordered: bool = true;
+    while (reading) {
+        let got: usize = svc5(READ_SYSCALL, read_end, buffer as *u8 as usize,
+                              PIPE_PROBE_READ, 0, 0);
+        if (got == 0 || got > PIPE_PROBE_READ) {
+            reading = false;
+        } else {
+            for index: usize in 0..<PIPE_PROBE_READ {
+                if (index < got && buffer[index] != pipe_probe_byte(received + index)) {
+                    ordered = false;
+                }
+            }
+            received = received + got;
+        }
+    }
+    pipe_probe_close(read_end);
+    let mut status: [u8; 4];
+    for index: usize in 0..<4 { status[index] = 0xFF; }
+    let reaped: usize = svc5(WAIT4_SYSCALL, child, status as *u8 as usize, 0, 0, 0);
+    if (reaped != child || status[0] != 0 || status[1] != 0) {
+        pipe_probe_fail(bs"pipe-probe: the writer on cpu 1 did not exit 0\n");
+    }
+    if (received != PIPE_PROBE_STREAM || ordered == false) {
+        pipe_probe_fail(bs"pipe-probe: the stream from cpu 1 arrived short or out of order\n");
+    }
+    pipe_probe_say(bs"pipe-probe: 40000 bytes written on cpu 1 in 100-byte writes were read on cpu 0 whole and in order\n");
+}
+
+private fn pipe_probe_wake_child(read_end: usize, write_end: usize) {
+    pipe_probe_close(read_end);
+    pipe_probe_move_to(1);
+    // 50 ms, long enough that the parent's ppoll is asleep by then.
+    let mut delay: [u8; 16];
+    for index: usize in 0..<16 { delay[index] = 0; }
+    delay[8] = 0x80; delay[9] = 0xF0; delay[10] = 0xFA; delay[11] = 0x02;
+    svc5(NANOSLEEP_SYSCALL, delay as *u8 as usize, 0, 0, 0, 0);
+    if (svc5(WRITE_SYSCALL, write_end, "R" as *u8 as usize, 1, 0, 0) != 1) {
+        svc5(EXIT_SYSCALL, 3, 0, 0, 0, 0);
+    }
+    svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
+}
+
+private fn pipe_probe_wake() {
+    let (read_end, write_end) = pipe_probe_pipe(0);
+    let child: usize = svc5(CLONE_SYSCALL, CLONE_FORK_SIGCHLD, 0, 0, 0, 0);
+    if (child == 0) { pipe_probe_wake_child(read_end, write_end); }
+    if (child >= PIPE_PROBE_ERROR_FLOOR) {
+        pipe_probe_fail(bs"pipe-probe: fork failed\n");
+    }
+    pipe_probe_close(write_end);
+    let (answer, events) = pipe_probe_poll(read_end, POLLIN, false);
+    let mut byte: [u8; 1];
+    byte[0] = 0;
+    if (answer != 1 || events != POLLIN ||
+        svc5(READ_SYSCALL, read_end, byte as *u8 as usize, 1, 0, 0) != 1 ||
+        byte[0] != 0x52) {
+        pipe_probe_fail(bs"pipe-probe: a ppoll on an empty pipe did not wake for the write on cpu 1\n");
+    }
+    pipe_probe_close(read_end);
+    let mut status: [u8; 4];
+    for index: usize in 0..<4 { status[index] = 0xFF; }
+    let reaped: usize = svc5(WAIT4_SYSCALL, child, status as *u8 as usize, 0, 0, 0);
+    if (reaped != child || status[0] != 0 || status[1] != 0) {
+        pipe_probe_fail(bs"pipe-probe: the waking writer did not exit 0\n");
+    }
+    pipe_probe_say(bs"pipe-probe: a ppoll with no timeout slept on an empty pipe until cpu 1 wrote\n");
+}
+
+fn pipe_probe() {
+    // Whatever the shell left open above stderr goes, so the pairs below
+    // take known numbers.
+    for fd: usize in 3..<PIPE_PROBE_HIGHEST_FD { pipe_probe_close(fd); }
+    pipe_probe_refusals();
+    pipe_probe_alone();
+    pipe_probe_broken();
+    pipe_probe_stream();
+    pipe_probe_wake();
+    let (kept_read, kept_write) = pipe_probe_pipe(0);
+    let (gone_read, gone_write) = pipe_probe_pipe(O_CLOEXEC);
+    if (kept_read != 3 || kept_write != 4 || gone_read != 5 || gone_write != 6) {
+        pipe_probe_fail(bs"pipe-probe: the two pairs were not at 3, 4 and 5, 6\n");
+    }
+    let mut argv: [usize; 2];
+    argv[0] = "/bin/pipe-cloexec-check" as *u8 as usize;
+    argv[1] = 0;
+    svc5(EXECVE_SYSCALL, "/bin/pipe-cloexec-check" as *u8 as usize,
+         argv as *usize as usize, 0, 0, 0);
+    pipe_probe_fail(bs"pipe-probe: execve returned\n");
+}
+
+fn pipe_cloexec_check() {
+    let kept_read: usize = svc5(FCNTL_SYSCALL, 3, F_SETFD, 0, 0, 0);
+    let kept_write: usize = svc5(FCNTL_SYSCALL, 4, F_SETFD, 0, 0, 0);
+    let gone_read: usize = svc5(FCNTL_SYSCALL, 5, F_SETFD, 0, 0, 0);
+    let gone_write: usize = svc5(FCNTL_SYSCALL, 6, F_SETFD, 0, 0, 0);
+    if (kept_read == 0 && kept_write == 0 &&
+        gone_read == LINUX_EBADF && gone_write == LINUX_EBADF) {
+        pipe_probe_say(bs"pipe-cloexec: execve closed the O_CLOEXEC pair at 5 and 6 and kept the plain pair at 3 and 4\n");
+        svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
+    }
+    pipe_probe_say(bs"pipe-cloexec: execve did not honor pipe2's O_CLOEXEC\n");
+    svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
+}

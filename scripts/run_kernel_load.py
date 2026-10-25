@@ -54,8 +54,7 @@ PHASES = ("xargs", "fork", "exec", "pipe", "hackbench")
 PHASE_WAITS = {
     "fork": "#1041 (stress-ng's 8 MiB image span)",
     "exec": "#1041 (stress-ng's 8 MiB image span)",
-    "pipe": "#1041 and #1042 (pipe2)",
-    "hackbench": "#1042 (pipe2)",
+    "pipe": "#1041 (stress-ng's 8 MiB image span)",
 }
 
 

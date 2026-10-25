@@ -1023,6 +1023,11 @@ KERNEL_CLOEXEC_CHECK_ELF := $(KERNEL_BUILD_DIR)/cloexec_check.elf
 KERNEL_PPOLL_PROBE_TKB   := $(KERNEL_DIR)/arch/arm64/kernel/ppoll_probe.tkb
 KERNEL_PPOLL_PROBE_O     := $(KERNEL_BUILD_DIR)/ppoll_probe.o
 KERNEL_PPOLL_PROBE_ELF   := $(KERNEL_BUILD_DIR)/ppoll_probe.elf
+# GitHub issue #1042: pipe2 from EL0, and its O_CLOEXEC check after execve.
+KERNEL_PIPE_PROBE_TKB    := $(KERNEL_DIR)/arch/arm64/kernel/pipe_probe.tkb
+KERNEL_PIPE_PROBE_O      := $(KERNEL_BUILD_DIR)/pipe_probe.o
+KERNEL_PIPE_PROBE_ELF    := $(KERNEL_BUILD_DIR)/pipe_probe.elf
+KERNEL_PIPE_CLOEXEC_CHECK_ELF := $(KERNEL_BUILD_DIR)/pipe_cloexec_check.elf
 KERNEL_AFFINITY_TKB      := $(KERNEL_DIR)/arch/arm64/kernel/affinity_probe.tkb
 KERNEL_AFFINITY_O        := $(KERNEL_BUILD_DIR)/affinity_probe.o
 KERNEL_AFFINITY_ELF      := $(KERNEL_BUILD_DIR)/affinity.elf
@@ -1127,7 +1132,7 @@ $(KERNEL_EXT2_EQ_SH): $(KERNEL_EXT2_EQ_OPS) scripts/ext2_eq.py | $(KERNEL_USER_B
 KERNEL_EXT2_IMAGES := $(KERNEL_EXT2_IMAGE) $(KERNEL_SHELL_EXT2_IMAGE)
 $(KERNEL_EXT2_IMAGES): export E2FSPROGS_FAKE_TIME := $(KERNEL_EXT2_FAKE_TIME)
 
-$(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT2_FIXTURE_DIR)/mutable.txt $(KERNEL_EXT2_FIXTURE_DIR)/index.html $(KERNEL_EXT2_FIXTURE_DIR)/about.html $(KERNEL_EXT2_FIXTURE_DIR)/icon.png $(KERNEL_EXT2_FIXTURE_DIR)/init.sh $(KERNEL_EXT2_FIXTURE_DIR)/httpd.sh $(KERNEL_EXT2_FIXTURE_DIR)/churn.sh $(KERNEL_EXT2_FIXTURE_DIR)/script-shebang.sh $(KERNEL_EXT2_FIXTURE_DIR)/script-interpreter-argument.sh $(KERNEL_EXT2_FIXTURE_DIR)/not-a-program $(KERNEL_EXT2_FIXTURE_DIR)/bad-interpreter.sh $(KERNEL_EXT2_FIXTURE_DIR)/crlf.sh $(KERNEL_EXT2_FIXTURE_DIR)/no-newline.sh $(KERNEL_EXT2_FIXTURE_DIR)/long-shebang.sh $(KERNEL_EXT2_FIXTURE_DIR)/inittab $(KERNEL_EXT2_FIXTURE_DIR)/large.txt $(KERNEL_EXT2_EQ_SH) $(KERNEL_RPI5_USER_PAYLOAD_ELF) $(KERNEL_BUSY_LOOP_A_ELF) $(KERNEL_BUSY_LOOP_B_ELF) $(KERNEL_BUSY_LOOP_PLACEMENT_REPORT_ELF) $(KERNEL_BUSY_LOOP_PLACEMENT_GUARD_ELF) $(KERNEL_BUSY_LOOP_PEER_SPIN_ELF) $(KERNEL_BUSY_LOOP_PEER_NET_WAKE_ELF) $(KERNEL_PEER_READ_ELF) $(KERNEL_CORE_READ_ELF) $(KERNEL_PEER_CONSOLE_ELF) $(KERNEL_PEER_TTY_ELF) $(KERNEL_PEER_SETTINGS_ELF) $(KERNEL_CLOEXEC_ELF) $(KERNEL_CLOEXEC_CHECK_ELF) $(KERNEL_PPOLL_PROBE_ELF) $(KERNEL_AFFINITY_ELF) $(KERNEL_SPREAD_ELF) $(KERNEL_MOVECOST_ELF) $(KERNEL_PEER_MUTATE_ELF) $(KERNEL_PROTOCOL_TRACE_ELF) $(KERNEL_PEER_EXEC_ELF) $(KERNEL_PEER_EXEC_IMAGE_ELF) $(KERNEL_PEER_FORK_ELF) $(KERNEL_PEER_SLEEP_ELF) $(KERNEL_SIGNAL_BOUNDARY_ELF) $(KERNEL_NESTED_EXEC_ELF) $(KERNEL_NESTED_WRONG_IMAGE_ELF) $(KERNEL_EXEC_ENOMEM_ELFS) $(KERNEL_SESSION_ELF) $(KERNEL_SESSION_CHECK_ELF) $(KERNEL_TERMINAL_ELF) $(KERNEL_NESTED_FIXTURES) $(KERNEL_BUSYBOX_STATIC) $(KERNEL_BUSYBOX_EXTRAS) $(KERNEL_MUSL_LOADER) $(KERNEL_TASKSET) $(KERNEL_LOAD_PROGRAMS)/stress-ng $(KERNEL_LOAD_PROGRAMS)/hackbench scripts/make_interp_probe_elf.py | $(KERNEL_USER_BUILD_DIR)
+$(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT2_FIXTURE_DIR)/mutable.txt $(KERNEL_EXT2_FIXTURE_DIR)/index.html $(KERNEL_EXT2_FIXTURE_DIR)/about.html $(KERNEL_EXT2_FIXTURE_DIR)/icon.png $(KERNEL_EXT2_FIXTURE_DIR)/init.sh $(KERNEL_EXT2_FIXTURE_DIR)/httpd.sh $(KERNEL_EXT2_FIXTURE_DIR)/churn.sh $(KERNEL_EXT2_FIXTURE_DIR)/script-shebang.sh $(KERNEL_EXT2_FIXTURE_DIR)/script-interpreter-argument.sh $(KERNEL_EXT2_FIXTURE_DIR)/not-a-program $(KERNEL_EXT2_FIXTURE_DIR)/bad-interpreter.sh $(KERNEL_EXT2_FIXTURE_DIR)/crlf.sh $(KERNEL_EXT2_FIXTURE_DIR)/no-newline.sh $(KERNEL_EXT2_FIXTURE_DIR)/long-shebang.sh $(KERNEL_EXT2_FIXTURE_DIR)/inittab $(KERNEL_EXT2_FIXTURE_DIR)/large.txt $(KERNEL_EXT2_EQ_SH) $(KERNEL_RPI5_USER_PAYLOAD_ELF) $(KERNEL_BUSY_LOOP_A_ELF) $(KERNEL_BUSY_LOOP_B_ELF) $(KERNEL_BUSY_LOOP_PLACEMENT_REPORT_ELF) $(KERNEL_BUSY_LOOP_PLACEMENT_GUARD_ELF) $(KERNEL_BUSY_LOOP_PEER_SPIN_ELF) $(KERNEL_BUSY_LOOP_PEER_NET_WAKE_ELF) $(KERNEL_PEER_READ_ELF) $(KERNEL_CORE_READ_ELF) $(KERNEL_PEER_CONSOLE_ELF) $(KERNEL_PEER_TTY_ELF) $(KERNEL_PEER_SETTINGS_ELF) $(KERNEL_CLOEXEC_ELF) $(KERNEL_CLOEXEC_CHECK_ELF) $(KERNEL_PPOLL_PROBE_ELF) $(KERNEL_PIPE_PROBE_ELF) $(KERNEL_PIPE_CLOEXEC_CHECK_ELF) $(KERNEL_AFFINITY_ELF) $(KERNEL_SPREAD_ELF) $(KERNEL_MOVECOST_ELF) $(KERNEL_PEER_MUTATE_ELF) $(KERNEL_PROTOCOL_TRACE_ELF) $(KERNEL_PEER_EXEC_ELF) $(KERNEL_PEER_EXEC_IMAGE_ELF) $(KERNEL_PEER_FORK_ELF) $(KERNEL_PEER_SLEEP_ELF) $(KERNEL_SIGNAL_BOUNDARY_ELF) $(KERNEL_NESTED_EXEC_ELF) $(KERNEL_NESTED_WRONG_IMAGE_ELF) $(KERNEL_EXEC_ENOMEM_ELFS) $(KERNEL_SESSION_ELF) $(KERNEL_SESSION_CHECK_ELF) $(KERNEL_TERMINAL_ELF) $(KERNEL_NESTED_FIXTURES) $(KERNEL_BUSYBOX_STATIC) $(KERNEL_BUSYBOX_EXTRAS) $(KERNEL_MUSL_LOADER) $(KERNEL_TASKSET) $(KERNEL_LOAD_PROGRAMS)/stress-ng $(KERNEL_LOAD_PROGRAMS)/hackbench scripts/make_interp_probe_elf.py | $(KERNEL_USER_BUILD_DIR)
 	rm -f $@.tmp
 	truncate -s 6291456 $@.tmp
 	E2FSPROGS_FAKE_TIME=1700000000 mke2fs -q -t ext2 -b 1024 -I 128 -N 1024 -O none -F -U 00000000-0000-0000-0000-000000000177 -E hash_seed=00000000-0000-0000-0000-000000000890 $@.tmp 6144
@@ -1198,6 +1203,8 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_CLOEXEC_ELF) $@.tmp:/bin/cloexec
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_CLOEXEC_CHECK_ELF) $@.tmp:/bin/cloexec-check
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_PPOLL_PROBE_ELF) $@.tmp:/bin/ppoll-probe
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_PIPE_PROBE_ELF) $@.tmp:/bin/pipe-probe
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_PIPE_CLOEXEC_CHECK_ELF) $@.tmp:/bin/pipe-cloexec-check
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_AFFINITY_ELF) $@.tmp:/bin/affinity
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_SPREAD_ELF) $@.tmp:/bin/spread
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_MOVECOST_ELF) $@.tmp:/bin/movecost
@@ -1280,6 +1287,8 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 	debugfs -w -R 'set_inode_field /bin/cloexec mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /bin/cloexec-check mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /bin/ppoll-probe mode 0100755' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/pipe-probe mode 0100755' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/pipe-cloexec-check mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /bin/affinity mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /bin/spread mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /bin/movecost mode 0100755' $@.tmp >/dev/null 2>&1
@@ -1291,6 +1300,10 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 	debugfs -w -R 'set_inode_field /bin/peer-sleep mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /bin/signal-boundary mode 0100755' $@.tmp >/dev/null 2>&1
 	E2FSPROGS_FAKE_TIME=1700000000 debugfs -w -R 'symlink /latest hello.txt' $@.tmp >/dev/null 2>&1
+	# /bin outgrew its one block with /bin/pipe-probe (GitHub issue #1042), and
+	# debugfs's link does not grow a directory. Grown here, after every file
+	# is in place, so no earlier allocation moves.
+	debugfs -w -R 'expand /bin' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'link /bin/busybox.static /bin/busybox' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'link /bin/busybox.static /bin/sh' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'link /bin/busybox.static /bin/cat' $@.tmp >/dev/null 2>&1
@@ -1478,6 +1491,19 @@ $(KERNEL_PPOLL_PROBE_O): $(KERNEL_PPOLL_PROBE_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_
 
 $(KERNEL_PPOLL_PROBE_ELF): $(KERNEL_PPOLL_PROBE_O)
 	$(LLD) -pie --no-dynamic-linker -e ppoll_probe $< -o $@
+	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
+
+$(KERNEL_PIPE_PROBE_O): $(KERNEL_PIPE_PROBE_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) | $(KERNEL_BUILD_DIR)
+	$(call KERNEL_EL0_COMPILE,pipe_probe pipe_cloexec_check)
+
+-include $(KERNEL_PIPE_PROBE_O).d
+
+$(KERNEL_PIPE_PROBE_ELF): $(KERNEL_PIPE_PROBE_O)
+	$(LLD) -pie --no-dynamic-linker -e pipe_probe $< -o $@
+	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
+
+$(KERNEL_PIPE_CLOEXEC_CHECK_ELF): $(KERNEL_PIPE_PROBE_O)
+	$(LLD) -pie --no-dynamic-linker -e pipe_cloexec_check $< -o $@
 	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
 
 $(KERNEL_AFFINITY_O): $(KERNEL_AFFINITY_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) | $(KERNEL_BUILD_DIR)

@@ -79,6 +79,14 @@ mv /etc/mva /kept /etc/moved
 # line like this one, newline included, and the shell waited for it until the
 # lane's budget ran out. echo is a shell builtin, so this costs no exec.
 echo uart-rx-ring-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+# GitHub issue #1042: pipe2. /bin/pipe-probe checks its edges, then BusyBox
+# pipelines: seq pinned to CPU 0 writes more than the 4096-byte pipe holds to
+# wc pinned to CPU 1, so each end waits for the other; yes is ended by SIGPIPE
+# once head has its two lines; a command substitution reads to end of file.
+/bin/pipe-probe
+/bin/taskset -c 0 /bin/busybox seq 1 3000 | /bin/taskset -c 1 /bin/busybox wc -l
+/bin/busybox yes | /bin/busybox head -n 2
+echo "sub: $(/bin/echo inner)"
 # Pin one background child to CPU 0 before the actual BusyBox sleep applet
 # runs in the foreground. The kernel records the applet's nanosleep entry on
 # the peer before applying the peer-safety table. Ash's normal foreground
