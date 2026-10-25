@@ -148,15 +148,14 @@ private let mut fd_block_pool: RegionPool(FdBlock);
 const FD_BLOCK_CHUNK_PAGES: usize = 1;
 
 private fn fd_block_pool_lock(pool: *RegionPool(FdBlock) @ blocks)
-        -> RegionPoolGuard(FdBlock)[blocks] !{unsafe, acquires_lock_40_fd_block_pool, single_instance_lock,
-          lock_guard_40_fd_block_pool} {
-    let flags: usize = mutex_irq_save();
+        -> RegionPoolGuard(FdBlock)[blocks] !{unsafe, acquires_lock_39_fd_block_pool, single_instance_lock, may_block,
+          lock_guard_39_fd_block_pool} {
     if (region_pool_lock_contended_hint(pool)) { pool_lock_wait_contended(PoolLockWaitPool::FdBlock); }
-    return region_pool_lock_saving(pool, flags);
+    return region_pool_lock(pool);
 }
 
 private fn fd_block_pool_unlock(guard: sink RegionPoolGuard(FdBlock)[blocks]) {
-    mutex_irq_restore(region_pool_unlock_saved(guard));
+    region_pool_unlock(guard);
 }
 
 // Keeps one empty chunk, as intrusive_pool's default did (#346's
@@ -281,16 +280,15 @@ private let mut fd_context_pool: RegionPool(ProcessFdContext);
 const FD_CONTEXT_CHUNK_PAGES: usize = 1;
 
 private fn fd_context_pool_lock(pool: *RegionPool(ProcessFdContext) @ contexts)
-        -> RegionPoolGuard(ProcessFdContext)[contexts] !{unsafe, acquires_lock_40_fd_context_pool, single_instance_lock,
-          lock_guard_40_fd_context_pool} {
-    let flags: usize = mutex_irq_save();
+        -> RegionPoolGuard(ProcessFdContext)[contexts] !{unsafe, acquires_lock_39_fd_context_pool, single_instance_lock, may_block,
+          lock_guard_39_fd_context_pool} {
     if (region_pool_lock_contended_hint(pool)) { pool_lock_wait_contended(PoolLockWaitPool::FdContext); }
-    return region_pool_lock_saving(pool, flags);
+    return region_pool_lock(pool);
 }
 
 private fn fd_context_pool_unlock(
         guard: sink RegionPoolGuard(ProcessFdContext)[contexts]) {
-    mutex_irq_restore(region_pool_unlock_saved(guard));
+    region_pool_unlock(guard);
 }
 
 private fn fd_context_return_empty(
@@ -830,15 +828,14 @@ private let mut object_pool: RegionPool(SharedObject);
 const OBJECT_CHUNK_PAGES: usize = 1;
 
 private fn object_pool_lock(pool: *RegionPool(SharedObject) @ objects)
-        -> RegionPoolGuard(SharedObject)[objects] !{unsafe, acquires_lock_40_object_pool, single_instance_lock,
-          lock_guard_40_object_pool} {
-    let flags: usize = mutex_irq_save();
+        -> RegionPoolGuard(SharedObject)[objects] !{unsafe, acquires_lock_39_object_pool, single_instance_lock, may_block,
+          lock_guard_39_object_pool} {
     if (region_pool_lock_contended_hint(pool)) { pool_lock_wait_contended(PoolLockWaitPool::Object); }
-    return region_pool_lock_saving(pool, flags);
+    return region_pool_lock(pool);
 }
 
 private fn object_pool_unlock(guard: sink RegionPoolGuard(SharedObject)[objects]) {
-    mutex_irq_restore(region_pool_unlock_saved(guard));
+    region_pool_unlock(guard);
 }
 
 // Keeps one empty chunk, as intrusive_pool's default did (#346).
@@ -1040,7 +1037,7 @@ private let mut object_double_release_count: usize = 0;
 // a field of every object in a pool. That is the RetxEntry shape issue
 // #452 verified first: the guard is separate from the data, and a
 // guard-derived accessor is what relates them.
-private let mut object_refcount_lock: Mutex;
+private let mut object_refcount_lock: TaskMutex;
 
 // GitHub issue #452. The guard and the accessor are
 // kernel/lib/locked_cell.tkb's, deliberately, and not a pair declared

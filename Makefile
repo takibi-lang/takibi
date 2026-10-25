@@ -708,8 +708,8 @@ $(LINUX_USER_DIR)/spinlock/spinlock_exe.o: LINUX_USER_EXTRA_SRCS := kernel/lib/s
 # cannot be named without its guard. It needs the same stand-ins the pool
 # prototypes take -- spinlock for the exchange, pool_lock_check for the
 # mutex_irq_save/_restore pair a hosted build has no interrupts to mask.
-$(LINUX_USER_DIR)/locked_cell/locked_cell_exe.o: kernel/lib/spinlock.tkb kernel/lib/mutex.tkb kernel/lib/locked_cell.tkb $(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb
-$(LINUX_USER_DIR)/locked_cell/locked_cell_exe.o: LINUX_USER_EXTRA_SRCS := kernel/lib/spinlock.tkb kernel/lib/mutex.tkb $(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb
+$(LINUX_USER_DIR)/locked_cell/locked_cell_exe.o: kernel/lib/spinlock.tkb kernel/lib/mutex.tkb kernel/lib/task_mutex.tkb kernel/lib/locked_cell.tkb $(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb
+$(LINUX_USER_DIR)/locked_cell/locked_cell_exe.o: LINUX_USER_EXTRA_SRCS := kernel/lib/spinlock.tkb kernel/lib/mutex.tkb kernel/lib/task_mutex.tkb $(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb
 
 # GitHub issue #217 (2026-08-15) closed the array-field-decay gap this
 # comment used to describe for the four targets below: FreelistCore(N)'s

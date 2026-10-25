@@ -524,7 +524,14 @@ Takibi does not currently establish all of the following:
 
 - validity or lifetime of arbitrary raw pointers;
 - freedom from data races, deadlocks, priority inversion, or memory-ordering
-  mistakes across CPUs, interrupts, and devices;
+  mistakes across CPUs, interrupts, and devices. One interrupt deadlock class
+  is checked (#966): an unmasked lock declares `may_block`, so no
+  `!{interrupt}` root reaches it, and ranks below every masking lock, so it
+  never nests under one. What stays trusted is that each wrapper's band
+  matches whether it masks (a lexical build check,
+  `scripts/check_lock_rank_wrappers.py`), that every masking guard carries a
+  `lock_guard_` annotation the rank check can see, and that the kernel is not
+  preemptible (a `static_assert`);
 - absence of stack overflow, resource exhaustion, or nontermination;
 - correctness of linker scripts, memory maps, ABI declarations, assembly, LLVM,
   firmware, peripherals, or silicon;

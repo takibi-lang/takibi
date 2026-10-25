@@ -664,15 +664,14 @@ const TCP_FRAME_CHUNK_PAGES: usize = 2;
 // name (#370), so it comes in through the pointer: callers pass
 // &tcp_frame_pool.
 private fn tcp_frame_pool_lock(pool: *RegionPool(NetFrame) @ frames)
-        -> RegionPoolGuard(NetFrame)[frames] !{unsafe, acquires_lock_40_tcp_frame_pool, single_instance_lock,
-          lock_guard_40_tcp_frame_pool} {
-    let flags: usize = mutex_irq_save();
+        -> RegionPoolGuard(NetFrame)[frames] !{unsafe, acquires_lock_39_tcp_frame_pool, single_instance_lock, may_block,
+          lock_guard_39_tcp_frame_pool} {
     if (region_pool_lock_contended_hint(pool)) { pool_lock_wait_contended(PoolLockWaitPool::TcpFrame); }
-    return region_pool_lock_saving(pool, flags);
+    return region_pool_lock(pool);
 }
 
 private fn tcp_frame_pool_unlock(guard: sink RegionPoolGuard(NetFrame)[frames]) {
-    mutex_irq_restore(region_pool_unlock_saved(guard));
+    region_pool_unlock(guard);
 }
 
 fn tcp_frame_live_count() -> usize !{unsafe} {
@@ -1434,13 +1433,13 @@ must_use variant PinSharingSetupResult { NoMemory; InvalidLayout; Ready; }
 must_use variant PinSharingCleanupResult { Busy; InvalidChunk; Released; }
 
 private fn pin_sharing_lock() -> RegionPoolGuard(PinSharingCell)[&pin_sharing_pool]
-        !{unsafe, acquires_lock_40_pin_sharing_pool, single_instance_lock,
-          lock_guard_40_pin_sharing_pool} {
-    return region_pool_lock_saving(&pin_sharing_pool, mutex_irq_save());
+        !{unsafe, acquires_lock_39_pin_sharing_pool, single_instance_lock, may_block,
+          lock_guard_39_pin_sharing_pool} {
+    return region_pool_lock(&pin_sharing_pool);
 }
 
 private fn pin_sharing_unlock(guard: sink RegionPoolGuard(PinSharingCell)[&pin_sharing_pool]) {
-    mutex_irq_restore(region_pool_unlock_saved(guard));
+    region_pool_unlock(guard);
 }
 
 fn pin_sharing_setup() -> PinSharingSetupResult !{unsafe} {
@@ -1902,15 +1901,14 @@ fn retx_kept_free(slot: usize) {
 }
 
 private fn tcp_retx_pool_lock(pool: *RegionPool(RetxEntry) @ entries)
-        -> RegionPoolGuard(RetxEntry)[entries] !{unsafe, acquires_lock_40_tcp_retx_pool, single_instance_lock,
-          lock_guard_40_tcp_retx_pool} {
-    let flags: usize = mutex_irq_save();
+        -> RegionPoolGuard(RetxEntry)[entries] !{unsafe, acquires_lock_39_tcp_retx_pool, single_instance_lock, may_block,
+          lock_guard_39_tcp_retx_pool} {
     if (region_pool_lock_contended_hint(pool)) { pool_lock_wait_contended(PoolLockWaitPool::TcpRetx); }
-    return region_pool_lock_saving(pool, flags);
+    return region_pool_lock(pool);
 }
 
 private fn tcp_retx_pool_unlock(guard: sink RegionPoolGuard(RetxEntry)[entries]) {
-    mutex_irq_restore(region_pool_unlock_saved(guard));
+    region_pool_unlock(guard);
 }
 
 fn tcp_retx_live_count() -> usize !{unsafe} {

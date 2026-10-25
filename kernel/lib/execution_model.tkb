@@ -95,3 +95,15 @@ const KERNEL_MAX_CORES: usize = 4;
 // preemption alone would make two PROCESSES interleave inside the kernel
 // on one core, which most of the state below is equally unready for.
 const KERNEL_PREEMPTIBLE: usize = 0;
+
+// GitHub issue #966: the pool locks that no interrupt handler reaches do not
+// mask interrupts (their wrappers declare `may_block`, which keeps every
+// `!{interrupt}` root away from them). That is safe only while an interrupt
+// cannot switch a holder off its core: with a preemptible kernel a second
+// task on the same core would spin on a holder that cannot run. Making the
+// kernel preemptible needs those wrappers to disable preemption first, as
+// Linux's spin_lock does.
+fn unmasked_pool_locks_assume_no_preemption() {
+    static_assert(KERNEL_PREEMPTIBLE == 0,
+                  "the unmasked pool locks (#966) assume an interrupt never switches a holder off its core; disable preemption in their wrappers first");
+}

@@ -90,8 +90,11 @@
 //   hold.
 // - THE GUARD IS 8 STACK BYTES while held, carrying the interrupt state
 //   the release must restore -- issue #451's `flags`, which is where
-//   Linux's `unsigned long flags` lives too.
+//   Linux's `unsigned long flags` lives too. GuardedField below is the
+//   other class since #966: a TaskMutex, unmasked, so no interrupt
+//   handler may reach it and it may not nest inside a masking lock.
 use "kernel/lib/mutex.tkb";
+use "kernel/lib/task_mutex.tkb";
 
 generic struct LockedCell(T: type) {
     // First, on purpose. See "WHY THE VALUE IS THE FIRST FIELD" above.
@@ -201,19 +204,26 @@ generic struct GuardedField(T: type) {
 }
 
 private linear struct GuardedFieldGuard[lock: addr] {
-    private flags: usize;
+    private held: usize;
 }
 
-// mutex_acquire, not pool_lock_acquire, for the reason at the top of this
-// file.
-fn guarded_field_take(m: &mut Mutex @ id) -> GuardedFieldGuard[id]
-        !{acquires_lock_40_guarded_field, lock_guard_40_guarded_field} {
-    let mut g: GuardedFieldGuard[id] = { mutex_acquire(m) };
+// GitHub issue #966: a TaskMutex, which does not mask interrupts. The one
+// adopter (fd_table.tkb's object refcount) is reached from no interrupt
+// handler, and `may_block` keeps it that way: an `!{interrupt}` root that
+// reaches this is a compile error naming the path. Its rank, below every
+// masking lock's 40, makes taking it while a masking guard is live a lock
+// order error too -- the lockdep rule that an interrupt-safe lock never
+// nests an interrupt-unsafe one (kernel/CONCURRENCY.md, "Lock classes").
+fn guarded_field_take(m: &mut TaskMutex @ id) -> GuardedFieldGuard[id]
+        !{may_block, acquires_lock_38_guarded_field, lock_guard_38_guarded_field} {
+    task_mutex_acquire(m);
+    let mut g: GuardedFieldGuard[id] = { 1 };
     return g;
 }
 
-fn guarded_field_give(g: sink GuardedFieldGuard[id], m: &mut Mutex @ id) {
-    mutex_release(m, g.flags);
+fn guarded_field_give(g: sink GuardedFieldGuard[id], m: &mut TaskMutex @ id) {
+    let held: usize = g.held;
+    task_mutex_release(m);
 }
 
 // Value operations keep the field loan at the call boundary. The enclosing

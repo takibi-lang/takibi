@@ -2282,8 +2282,9 @@ the lock, not of the call site, and it is why
 `linux_user/intrusive_pool` carries an `!{interrupt}` probe that takes a
 pool guard. A lock whose acquire does NOT mask is a different matter and
 says so with `may_block`, which is forbidden there --
-`kernel/lib/task_mutex.tkb` is the one, and an interrupt handler reaching
-it is rejected with the call path.
+`kernel/lib/task_mutex.tkb` and the kernel's unmasked pool wrappers (#966)
+are these, and an interrupt handler reaching one is rejected with the call
+path.
 
 `nmi` is the one root that forbids it (GitHub issue #920). The kernel's
 world-stop interrupt is a pseudo-NMI: it is raised above the interrupt

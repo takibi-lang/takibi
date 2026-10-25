@@ -554,6 +554,36 @@ Two, and the distinction is which contexts may take them.
   held across a user copy or a frame transmit, where masking for the duration
   would bound interrupt latency by the longest such operation.
 
+Since #966 a pool or field lock that no interrupt handler reaches does not mask
+either: the fd context, fd block and shared-object pools, the object refcount
+(`GuardedField`, a `TaskMutex`), and the TCP frame, retransmit-entry and
+pin-sharing pools. On RPi5 the mask is the GIC priority register, an MMIO
+write each way (about 20 ns per pair, #920), and these sit on every
+fd-using syscall and every TCP segment. Three rules keep that safe, and the
+build enforces each:
+
+1. **No handler reaches it.** Each unmasked acquire declares `may_block`, so an
+   `!{interrupt}` root that reaches one is a compile error naming the path;
+   `scripts/check_lock_rank_wrappers.py` refuses an unmasked pool wrapper
+   without it.
+2. **It never nests inside a masking lock.** Unmasked locks rank below 40 and
+   masking locks at 40 or above (the same script checks the bands), so the
+   compiler's lock-order check rejects taking an unmasked lock under a masking
+   guard. That is lockdep's interrupt-safe/unsafe rule: otherwise core A holds
+   the unmasked lock, an interrupt on A spins on a masking lock core B holds,
+   and B spins on A's lock. The process-image pool stays masked for exactly
+   this reason (a diagnostic reads it under the run lock), as do the pools and
+   locks an interrupt reaches (process, address-space backing, TCP connection,
+   page allocator, run, console, ASID, profile).
+3. **Nothing preempts the holder.** A holder can now take an interrupt, which
+   only lengthens its hold while `KERNEL_PREEMPTIBLE` is 0;
+   `kernel/lib/execution_model.tkb` asserts that, since a preemptible kernel
+   would need these wrappers to disable preemption first.
+
+A world stop's window cannot wait on one either: a peer that holds an
+unmasked lock acknowledges the stop, but the stop's guard ranks 40, so an
+unmasked acquire inside the window is the same lock-order error.
+
 A global `Mutex` needs no `mutex_init`: `.bss` is zeroed by both entry paths
 and a zeroed word is free. Calling `mutex_init` on one is worse than
 redundant, because it FORCE-FREES -- on two cores it releases a lock somebody

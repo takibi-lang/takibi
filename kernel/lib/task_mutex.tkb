@@ -36,6 +36,11 @@
 //   Taking the same one twice on one core hangs.
 // - NO LEVEL, and unlike Mutex this one will never need one. A level
 //   exists to mask fewer interrupts; this masks none.
+// - THE RANK IS FIXED HERE at 30 (connection), so every adopter's
+//   minimum reachable rank is 30 whatever its own wrapper declares. All
+//   adopters rank below 40, the floor of the masking locks, which is the
+//   band rule kernel/CONCURRENCY.md states (2026-10-25, #966: the ext2
+//   mutation lock, the block device, TCP connections and GuardedField).
 // - THE RELEASE IS THE CALLER'S OBLIGATION, and nothing here makes it
 //   mandatory. What makes it mandatory at the one call site that exists is
 //   that the caller holds a LINEAR token minted only by the acquire --
