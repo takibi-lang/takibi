@@ -634,7 +634,9 @@ private fn syscall_script_line_here(slot: borrow SyscallSlot[0]) -> [u8; 256..]
 // The token cannot cross the user_entry.S return (#1080), so it is parked
 // as bits in the process record between the syscall and the prepare; that
 // round trip -- syscall_exec_inode_store below and this reload -- is the
-// remaining trusted base, and both halves are in this file.
+// remaining trusted base, and both halves are in this file. The store's
+// process.tkb setter takes a bare usize, so scripts/
+// buildcheck_exec_inode_writer.py pins its one caller to the store (#1106).
 struct SyscallExecInode { private inode: usize; }
 
 private fn syscall_exec_inode_none() -> SyscallExecInode {
