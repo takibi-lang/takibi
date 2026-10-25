@@ -75,6 +75,9 @@ quiescent-only, maintainer 2026-10-24). #680 (region_pool handle validation with
 one when its reopen condition is met (scripts/validate_parked_triggers.py,
 #953). #798, #954 stage 2's first item, is done (2026-10-25), and so is #1007 (the order graph retired for immutable slice indexes, 2026-10-25); #799 waits under #954 until a site
 needs it.
+#1015 (a build check over the call-graph table refuses any path from a
+registered ext2 reader's window to ext2_mutation_take, the self-wait #967
+avoided) is done (2026-10-25).
 
 Done on the stored-authority route (2026-10-09): #637 stage 1's
 type-checker work and #731 step 1; #131's first slices -- field places
