@@ -165,8 +165,8 @@ next one taken. The done record of the previous queue is in HISTORY.md
    DECISIONS.md); #1003 (`WORDS.md`) and #1027 step 1 (`CLI.md`, the dead
    flags out, an internal namespace) land together; #1004 (dead builtins,
    `stable_replace` to a removed-words table, the generated-only names
-   hidden); #994 and #1028 (DMA builtins and address-taking intrinsics
-   counted as raw sites); #1031 slice 1 (classify the 119
+   hidden); #994 (address-taking DMA cache builtins counted as raw sites;
+   done 2026-10-25) and #1028 (other address-taking intrinsics); #1031 slice 1 (classify the 119
    `kernel_invariant_stop` sites and ratchet them); #1018 (the frame API
    rule as a list-file check).
 1. **Verification (#954; B owns the refinement code).** The rest of #954
