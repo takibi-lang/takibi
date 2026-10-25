@@ -26,6 +26,22 @@ same size after the dead record is reused. It removes every probe directory
 but leaves `/etc` grown on disk. The QEMU runner checks the guest's whole disk
 with `e2fsck` after the session.
 
+## ext2 equivalence with Linux (tier B)
+
+`kernel/tests/ext2_eq/ops.eq` lists rows of file operations, each recorded
+as matching Linux or as a known divergence naming its issue (GitHub issue
+#1034). `scripts/ext2_eq.py gen-sh` turns it into `/lib/ext2-eq.sh`, which
+`/etc/init.sh` runs after `/bin/user_payload`, logging to `/eq-log`. The
+expected log is host Linux's: `make linuxcheck` runs the same script under
+the pinned BusyBox in qemu-aarch64 user mode and refuses a committed
+`host.expected` that differs. After the qemu-main session the runner writes
+the tree host Linux left onto a pristine image with `debugfs -w` and
+compares the two disks logically (types, modes, sizes, link counts,
+`i_blocks`, contents, directory entries, counters against bitmaps, and no
+unreachable allocated block or inode). A row whose outcome differs from the
+one recorded fails, so a fix flips its row in the same commit. Host Linux is
+not loop-mounted: the host offers no loop device and no root.
+
 RPi5 provisions the ext2 root onto the USB medium, verifies the copy, and
 mounts that same device as the root filesystem. The shared userspace checks
 therefore exercise the USB backend directly; there is no separate unmounted

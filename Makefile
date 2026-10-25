@@ -859,7 +859,7 @@ compiler-fuzz-long: $(TAKIBI)
 	@$(NICE_HEAVY) python3 scripts/fuzz_compiler.py --cases $(FUZZ_CASES) --seconds $(FUZZ_SECONDS) --seed $(FUZZ_SEED)
 
 ## linuxcheck: run linux_user/'s tests natively and diff stdout against each .expected
-linuxcheck: linuxbuild compiler-fuzz
+linuxcheck: linuxbuild compiler-fuzz kernel/build/user/busybox-static
 	@bash scripts/lane_timing.sh begin linuxcheck
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash -c ' \
 		fail=0; \
@@ -877,6 +877,13 @@ linuxcheck: linuxbuild compiler-fuzz
 		done; \
 		exit $$fail \
 	'
+	@# GitHub issue #1034: the ext2 equivalence rows' syscall half. Host
+	@# Linux runs the generated script (pinned BusyBox, qemu-aarch64 user
+	@# mode); the committed log the QEMU lane compares with must be exactly
+	@# what it prints, so a hand edit fails here.
+	@python3 scripts/ext2_eq.py self-test
+	@python3 scripts/ext2_eq.py check-expected kernel/tests/ext2_eq/ops.eq \
+		kernel/build/user/busybox-static kernel/tests/ext2_eq/host.expected
 	@bash scripts/lane_timing.sh end linuxcheck 0
 
 # -- Raspberry Pi 5 (BCM2712) -------------------------------------------------
