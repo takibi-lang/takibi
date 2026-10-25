@@ -71,7 +71,7 @@ def main():
             b"ddb: world-stop complete mask=0x000000000000000b\n"
             b"ddb: break seq=9 cpu=2 elr=0x00000000400103a0 "
             b"sp_el0=0x000000007ffffdf0\n" + fixture.PROMPT +
-            b"continue\nddb: continuing\n")
+            b"continue\n" + continuing)
     hung_cases = (
         ("hung-core session", healthy + hung, None),
         ("no hung-core session", healthy, "no second DDB entry"),
