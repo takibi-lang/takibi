@@ -2031,9 +2031,12 @@ fn kernel_syscall_socket_evidence() -> bool !{unsafe} {
            // GitHub issue #761 added B's long and short reads and its
            // one-byte answer between them; #842 the blocked read on A.
            // #846 one more of each: A's unread byte and B's read.
-           syscall_test_evidence_connected_read_calls() == 8 &&
-           // #1112 one more write: the zero-length one on A.
-           syscall_test_evidence_connected_write_calls() == 8 &&
+           // #1121 five more reads: three EOF reads on B after its FIN,
+           // and ECONNRESET then EOF on A after its reset.
+           syscall_test_evidence_connected_read_calls() == 13 &&
+           // #1112 one more write: the zero-length one on A. #1121 three
+           // more: the trigger bytes on B and A, and the EPIPE one on A.
+           syscall_test_evidence_connected_write_calls() == 11 &&
            syscall_test_evidence_socket_close_calls() == 1 &&
            kernel_listener_state(4) == UnifiedListenerState::Closed;
     syscall_test_evidence_finish_socket_fixture();
@@ -2985,11 +2988,19 @@ fn syscall_read_segment_with(slot: borrow SyscallSlot[0],
                    match tcp_connection_peer_read_answer(conn) {
                        TcpPeerReadAnswer::Open => {}
                        TcpPeerReadAnswer::Eof => {
+                           // A new logical read counts once, as below.
+                           if (conn.receive_waiting == false) {
+                               syscall_test_evidence_record_connected_read();
+                           }
                            conn.receive_waiting = false;
                            tcp_connection_put(owner);
                            return SyscallIoResult::Transferred(0);
                        }
                        TcpPeerReadAnswer::Reset => {
+                           // A new logical read counts once, as below.
+                           if (conn.receive_waiting == false) {
+                               syscall_test_evidence_record_connected_read();
+                           }
                            conn.receive_waiting = false;
                            tcp_connection_put(owner);
                            return SyscallIoResult::Errno(LINUX_ECONNRESET);
