@@ -591,6 +591,8 @@ fn kernel_syscall_exec_clear() {
 // each call is checked rather than trusted (they replaced assume_init).
 private fn syscall_exec_argv_here(slot: borrow SyscallSlot[0]) -> [u8; 512..]
         requires init(syscall_scratch[slot.index].file_buffer) {
+    static_assert(PROCESS_EXEC_ARGV_BYTES == 512,
+                  "#1039: the argv staging area is execve's argv limit");
     let scratch: [u8; KERNEL_BLOCK_SIZE..] =
         syscall_scratch[slot.index].file_buffer as [u8; KERNEL_BLOCK_SIZE..];
     return scratch[0..<512];
