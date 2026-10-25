@@ -394,23 +394,16 @@ fn ext2_put_u16(slot: borrow Ext2Slot[0], bytes: Ext2Bytes, offset: usize,
 // Little-endian fields of a directory entry already copied into a slice
 // (the getdents path); 0 when the field does not fit.
 fn ext2_slice_u16(bytes: borrow []const u8, offset: usize) -> u16 {
+    // One width check proves both reads (#798, path facts).
     if (offset >= bytes.len || bytes.len - offset < 2) { return 0; }
-    let b0: usize = offset;
-    let b1: usize = offset + 1;
-    if (b1 >= bytes.len) { return 0; }
-    return (bytes[b0] as u16) | ((bytes[b1] as u16) << 8);
+    return (bytes[offset] as u16) | ((bytes[offset + 1] as u16) << 8);
 }
 
 fn ext2_slice_u32(bytes: borrow []const u8, offset: usize) -> u32 {
+    // One width check proves all four reads (#798, path facts).
     if (offset >= bytes.len || bytes.len - offset < 4) { return 0; }
-    let b0: usize = offset;
-    let b3: usize = offset + 3;
-    if (b3 >= bytes.len) { return 0; }
-    let b1: usize = offset + 1;
-    let b2: usize = offset + 2;
-    if (b1 >= bytes.len || b2 >= bytes.len) { return 0; }
-    return (bytes[b0] as u32) | ((bytes[b1] as u32) << 8) |
-           ((bytes[b2] as u32) << 16) | ((bytes[b3] as u32) << 24);
+    return (bytes[offset] as u32) | ((bytes[offset + 1] as u32) << 8) |
+           ((bytes[offset + 2] as u32) << 16) | ((bytes[offset + 3] as u32) << 24);
 }
 
 fn ext2_mount(device: KernelBlockDevice) -> Ext2MountResult {

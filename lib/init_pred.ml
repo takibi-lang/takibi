@@ -266,6 +266,16 @@ let nowrap_obligation ~claim ~facts eqs ~bits (kind : nowrap) (t : lin) =
   line "(check-sat)";
   Buffer.contents buf
 
+(* GitHub issue #798: an index [j] into a slice of length [len] that the
+   runtime order graph could not prove, discharged by [entails] from the
+   path facts (len - j - 1 >= 0). The obligation asserts the same facts and
+   asks z3 for a path where the index is not below the length. *)
+let index_obligation ~claim ~facts eqs ~(index : lin) ~(len : lin) =
+  let buf, line = prelude ~rule:"index" ~claim ~facts eqs [index; len] in
+  line (Printf.sprintf "(assert (not (< %s %s)))" (smt index) (smt len));
+  line "(check-sat)";
+  Buffer.contents buf
+
 (* GitHub issue #960: the checker's reading of a literal or const leaf
    against the literal itself. [pattern] is the source's 64-bit pattern;
    this obligation spells it as the unsigned value at [bits] (usize), never

@@ -2954,8 +2954,14 @@ satisfies `lo >= 0 && hi <= minimum`, or the bounded order-contract checker
 proves `i < s.len` for the current bindings. The latter also covers
 `prefix.len <= s.len && i < prefix.len`, an equality such as the
 fallthrough of `if (n != s.len) { return; }` followed by `i < n`, and
-immutable aliases of numeric values/lengths. Index loads, stores and element addresses consume the same
-proof. Otherwise a runtime check against the actual `.len` is generated.
+immutable aliases of numeric values/lengths. When neither proves it, an index
+into an immutable slice binding is still trap-free when the linear path facts
+of "Initialization contracts" (branch conditions, loop counters, `min`
+bindings) entail `i < s.len`, with `i` a term whose steps do not wrap
+(GitHub issue #798): after `if (off >= s.len || s.len - off < 4) { return; }`
+the reads `s[off]` through `s[off + 3]` need no check. z3 re-checks each such
+proof as an index obligation under `--emit-range-obligations`. Index loads,
+stores and element addresses consume the same proof. Otherwise a runtime check against the actual `.len` is generated.
 See "where constraints" for the supported relations and invalidation rules.
 
 **Length narrowing**: `if (s.len >= K) { ... }` upgrades the binding's
@@ -5371,8 +5377,10 @@ investigations behind any of these, see `HISTORY.md`.
   is not supported. The bounded order-contract graph supports the direct
   comparisons described under "where constraints", without a solver or
   runtime refinement bounds. `while (u < s.len) { s[u]; u = u + 1; }` is
-  proved by that graph (GitHub issue #797), but an offset expression is
-  not: `if (s.len - off >= 2) { s[off + 1] }` keeps its check.
+  proved by that graph (GitHub issue #797), and an offset expression by
+  the linear path facts (GitHub issue #798): `if (s.len - off >= 2)
+  { s[off + 1] }` is trap-free once `off <= s.len` is a fact too. A
+  nonlinear index or a mutable slice binding keeps its check.
   `for x in s { ... }` sidesteps the question by never materializing an
   index variable, and is the preferred form (see "Slices" above).
 - **`match` on a primitive integer type supports only literal and

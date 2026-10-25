@@ -54,6 +54,10 @@ HEADER = "; takibi-range-obligation v2"
 INIT_HEADER = "; takibi-init-obligation v1"
 INIT_BUDGET_SECONDS = 5.0
 INIT_STATS = {"count": 0, "seconds": 0.0}
+# GitHub issue #798: the index obligations' share of the same budget, on
+# its own report line (DECISIONS.md 2026-10-25).
+INDEX_RULE = "\n; rule: index\n"
+INDEX_STATS = {"count": 0, "seconds": 0.0}
 TIMEOUT_SECONDS = 20
 
 
@@ -216,6 +220,8 @@ def check_dir(directory: pathlib.Path, z3: str,
             continue
         if is_init:
             INIT_STATS["count"] += 1
+            if INDEX_RULE in text:
+                INDEX_STATS["count"] += 1
         key = hashlib.md5(
             ("canonical-v1\n" + canonical(body)).encode()).hexdigest()
         groups.setdefault(key, []).append((path, sites, body))
@@ -225,8 +231,10 @@ def check_dir(directory: pathlib.Path, z3: str,
             if members[0][2].startswith(INIT_HEADER):
                 # The cache entry of an init obligation holds its cold time.
                 try:
-                    INIT_STATS["seconds"] += float(
-                        (cache / key).read_text() or "0")
+                    cold = float((cache / key).read_text() or "0")
+                    INIT_STATS["seconds"] += cold
+                    if INDEX_RULE in members[0][2]:
+                        INDEX_STATS["seconds"] += cold
                 except ValueError:
                     pass
             continue
@@ -251,6 +259,8 @@ def check_dir(directory: pathlib.Path, z3: str,
     for (key, members), (verdict, seconds) in solved:
         if members[0][2].startswith(INIT_HEADER):
             INIT_STATS["seconds"] += seconds
+            if INDEX_RULE in members[0][2]:
+                INDEX_STATS["seconds"] += seconds
         if verdict == "unsat":
             if cache is not None:
                 (cache / key).write_text(
@@ -324,6 +334,10 @@ fn whole983(o: borrow uninit [u8; 8..]) ensures init(o[0..<8]) {
 fn sub990(o: borrow uninit [u8; 8..], m: usize) ensures init(o[0..<8]) {
     tail983(o, m - 1);
     zero_fill(o[0..<8]);
+}
+
+fn planted798(s: borrow []const u8, i: usize) -> u8 {
+    return s[i];
 }
 
 fn main() -> i32 {
@@ -471,11 +485,21 @@ def control(takibi: str) -> int:
         print("FAIL range-obligation control: #990's planted no-wrap "
               "judgement was not reported with k = -1")
         return 1
+    # GitHub issue #798: a planted index proof, `s[i]` with no fact on i.
+    # The index obligation must be sat.
+    index_planted = [f for f in failures
+                     if ": sat " in f and "rule: index" in f
+                     and "i < s.len" in f]
+    if not index_planted:
+        print("\n".join(failures))
+        print("FAIL range-obligation control: #798's planted index proof "
+              "was not reported sat")
+        return 1
     report_pass("range-obligation-control",
                 "z3 reports #935's planted unsigned-Sub range, #961's "
                 "planted min/max range (#984), the three planted native "
                 "constant readings of #956, #961 and #983 (#960), a planted "
-                "no-wrap judgement (#990), a planted "
+                "no-wrap judgement (#990), a planted index proof (#798), a planted "
                 "init coverage claim (#954) and a planted path-fact claim "
                 "(#975) with counterexamples",
                 obligations=len(failures) + len(init_planted)
@@ -512,6 +536,14 @@ def main(argv: list[str]) -> int:
                     f"{INIT_STATS['seconds']:.2f} s cold z3 time, "
                     f"{share:.0f}% of the {INIT_BUDGET_SECONDS:.1f} s budget",
                     obligations=INIT_STATS["count"])
+    if INDEX_STATS["count"]:
+        index_share = 100.0 * INDEX_STATS["seconds"] / INIT_BUDGET_SECONDS
+        report_pass("index-obligation-budget",
+                    f"{INDEX_STATS['seconds']:.2f} s of the init budget's "
+                    f"cold z3 time ({index_share:.0f}% of "
+                    f"{INIT_BUDGET_SECONDS:.1f} s), slice indexes proved "
+                    f"from path facts (#798)",
+                    obligations=INDEX_STATS["count"])
     return 0
 
 

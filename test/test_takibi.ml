@@ -15930,6 +15930,54 @@ let codegen_tests = [
           return true;
         }");
 
+  (* GitHub issue #798: one width check proves s[off + k]. The runtime
+     order graph cannot (it has no arithmetic); the path facts (#975) give
+     `len - off - K >= 0`, and Init_flow discharges each index from them.
+     Positive: ext2_slice_u32's shape, reads and an indexed store. *)
+  Alcotest.test_case "#798 one width check proves s[off + k]" `Quick
+    (expect_trap_sites 0
+       "fn f798(bytes: []const u8, offset: usize) -> u32 {
+          if (offset >= bytes.len || bytes.len - offset < 4) { return 0; }
+          return (bytes[offset] as u32) | ((bytes[offset + 1] as u32) << 8) |
+                 ((bytes[offset + 2] as u32) << 16) | ((bytes[offset + 3] as u32) << 24);
+        }
+        fn g798(out: []u8, offset: usize) {
+          if (offset >= out.len || out.len - offset < 2) { return; }
+          out[offset + 1] = 7;
+        }");
+
+  (* Negative controls: a check one byte short, a mutable slice binding
+     (its length is not an atom) and a fact lost to a loop write keep the
+     index's trap site. *)
+  Alcotest.test_case "#798 a width check one short keeps the last index" `Quick
+    (expect_trap_sites 1
+       "fn f798_short(bytes: []const u8, offset: usize) -> u32 {
+          if (offset >= bytes.len || bytes.len - offset < 3) { return 0; }
+          return (bytes[offset + 1] as u32) | ((bytes[offset + 3] as u32) << 8);
+        }");
+
+  Alcotest.test_case "#798 a rebindable slice gets no index proof" `Quick
+    (expect_trap_sites 1
+       "fn f798_mut(a: []const u8, b: []const u8, offset: usize) -> u8 {
+          let mut s: []const u8 = a;
+          if (offset >= s.len || s.len - offset < 2) { return 0; }
+          s = b;
+          return s[offset + 1];
+        }");
+
+  Alcotest.test_case "#798 a fact on an older version proves no index" `Quick
+    (expect_trap_sites 1
+       "fn f798_loop(bytes: []const u8) -> u8 {
+          let mut i: usize = 0;
+          let mut t: u8 = 0;
+          while (i < bytes.len) {
+            if (bytes.len - i < 2) { return t; }
+            i = i + 1;
+            t = t + bytes[i + 1];
+          }
+          return t;
+        }");
+
   (* Negative controls: each keeps exactly one trap site (the slice
      index). Without the per-statement invalidation (facts kept for the
      whole body) the write-first and rebind controls report 0 and fail;

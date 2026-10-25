@@ -1304,7 +1304,8 @@ let record_runtime_slice_index tyenv base idx =
               "no runtime fact `%s < %s.len` reaches this index; the \
                runtime_bounds family is carried only from an if or while \
                condition joined by && (or the fallthrough of an early-return \
-               guard), not from a || condition or past a write" i b
+               guard), not from a || condition or past a write, and the \
+               linear path facts do not entail it either (#798)" i b
           | _ -> "the runtime_bounds family covers only a plain local index \
                into a plain local slice"))
 
@@ -11325,7 +11326,15 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                   ~scratch:init_scratch
                   ~variant_cases:(Hashtbl.find_opt init_variants)
                   ~variant_payload:(fun v c -> Hashtbl.find_opt init_payloads (v, c))
-                  ~linear_owner:(Hashtbl.mem init_linear) finfo fdef
+                  ~linear_owner:(Hashtbl.mem init_linear)
+                  ~index_proven:(fun loc ->
+                    Hashtbl.mem runtime_slice_index_proven_at
+                      (overload_key fdef.name fdef.params, loc))
+                  ~prove_index:(fun loc ->
+                    let key = (overload_key fdef.name fdef.params, loc) in
+                    Hashtbl.replace runtime_slice_index_proven_at key ();
+                    Hashtbl.remove range_fact_unavailable_at key)
+                  finfo fdef
               with
               | Types.TypeError (loc, msg) ->
                   collected_type_errors := (loc, msg) :: !collected_type_errors

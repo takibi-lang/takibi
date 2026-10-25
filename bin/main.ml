@@ -194,7 +194,9 @@ let () =
          Takibi.Range_obligation.fault_native_fold := true;
          Takibi.Range_obligation.fault_native_leaf := true;
          Takibi.Range_obligation.fault_native_init_leaf := true;
-         Takibi.Range_obligation.fault_init_nowrap := true
+         Takibi.Range_obligation.fault_init_nowrap := true;
+         (* #798: and every slice index proved from the path facts. *)
+         Takibi.Range_obligation.fault_index := true
      | "--trace-init-flow" ->
          (* GitHub issue #976: print FUNC's init state after each
             statement (docs/VERIFICATION_DESIGN.md). *)

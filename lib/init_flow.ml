@@ -139,6 +139,8 @@ let check
     ?(linear_owner : string -> bool = fun _ -> false)
     ?(variant_payload : string -> string -> Ast.type_expr option = fun _ _ -> None)
     ?(callee_ret : string -> Ast.type_expr option = fun _ -> None)
+    ?(index_proven : Ast.loc -> bool = fun _ -> true)
+    ?(prove_index : Ast.loc -> unit = fun _ -> ())
     (finfo : Types.func_info) (fdef : Ast.func) =
   let bindings = finfo.Types.bindings in
   (* GitHub issue #763: every independent error is recorded, in traversal
@@ -146,6 +148,7 @@ let check
      afterwards, so reads derived from it do not cascade. Recording never
      changes a verdict: any recorded error rejects the function. *)
   let errors = ref [] in
+  let in_trial = ref false in
   let error loc msg = errors := (loc, msg) :: !errors in
   let size_of t = !layout_size t in
   (* Unknown layout counts as padded: viewing it as bytes then needs a
@@ -1042,8 +1045,41 @@ let check
         cur_vers := st.vers;
         finish st (side st rhs) in
   (* ---- expressions ------------------------------------------------------ *)
+  (* GitHub issue #798: an index into an immutable slice binding that the
+     runtime order graph (type_inf, lib/runtime_bounds.ml) left unproven is
+     discharged here when the path facts entail `j < b.len`, with [j] a
+     machine-value term (lin: no step wraps). Only the real check proves;
+     a loop's trial runs (in_trial) never do, since their head state is a
+     candidate. Each proof writes an index obligation z3 re-checks. *)
+  let slice_index (st : state) (b : Ast.expr) (j : Ast.expr) =
+    if not !in_trial && not (index_proven j.Ast.loc) then
+      match b.desc, Local_bindings.id_for_expr bindings b with
+      | Ast.Var x, Some id
+        when immutable_var x id
+             && (match Option.map strip (id_type id) with
+                 | Some (Ast.TypeSlice _) -> true | _ -> false) ->
+          (match checked (fun () -> lin st j) with
+           | Some t ->
+               let len = len_atom id in
+               let f = Init_pred.normalize_facts st.eqs st.facts in
+               let goal = Init_pred.normalize st.eqs
+                   (Init_pred.sub (Init_pred.sub len t) (Init_pred.const 1)) in
+               if !Range_obligation.fault_index || Init_pred.entails f goal then begin
+                 prove_index j.Ast.loc;
+                 Range_obligation.record_text j.Ast.loc
+                   (Init_pred.index_obligation
+                      ~claim:(Printf.sprintf "%s < %s.len" (show t) x)
+                      ~facts:st.facts st.eqs ~index:t ~len)
+               end
+           | None -> ())
+      | _ -> ()
+  in
   let rec expr st (e : Ast.expr) : state =
     cur_vers := st.vers;
+    (match e.desc with
+     | Ast.Index (b, j) | Ast.Assign ({ desc = Ast.Index (b, j); _ }, _) ->
+         slice_index st b j
+     | _ -> ());
     if is_len_of st e then st else
     match e.desc with
     | Ast.Assign (({ desc = Ast.Var x; _ } as v), rhs) when var_id v x <> None ->
@@ -1872,8 +1908,10 @@ let check
     let quiet f =
       let saved_errors = !errors and saved_obl = !Range_obligation.enabled
       and saved_trace = !trace_func in
-      Range_obligation.enabled := false; trace_func := None;
+      let saved_trial = !in_trial in
+      Range_obligation.enabled := false; trace_func := None; in_trial := true;
       let r = f () in
+      in_trial := saved_trial;
       errors := saved_errors; Range_obligation.enabled := saved_obl;
       trace_func := saved_trace; r in
     let cands =

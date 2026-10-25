@@ -277,6 +277,11 @@ lib/runtime_bounds.ml. Stage 2 covers index bounds as well as init.
    obligation (facts => `off + k < s.len`). Kernel sites:
    `ext2_slice_u16` and `ext2_slice_u32` (kernel/fs/ext2/ext2.tkb) lose
    their `b1`/`b2`/`b3` re-checks.
+   Done: Init_flow.slice_index asks `entails` for `len - j - 1 >= 0` at
+   every index into an immutable slice binding left unproven, only in the
+   real check (never a loop's trial run), and writes rule `index` under
+   the init header; `--range-obligation-fault-control` plants a wrong
+   proof that z3 must refute.
 2. **Index bounds from versioned locals (#978).** Committed; item 1's site
    count decides when it runs, not whether. Cursors held in `let mut`
    locals are already atoms per version, so `s[cursor]` after

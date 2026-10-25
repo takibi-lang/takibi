@@ -235,6 +235,11 @@ let fault_native_init_leaf = ref false
    refutes a wrong judgement. *)
 let fault_init_nowrap = ref false
 
+(* Fault control only, same flag (GitHub issue #798): init_flow proves
+   every slice index it can read as a term, so the control shows the index
+   obligation refutes a wrong proof. *)
+let fault_index = ref false
+
 (* GitHub issue #954: an obligation whose text another module built (an
    initialization coverage claim, Init_pred.obligation). It shares the
    directory, digest naming and site lines of the range obligations. *)
