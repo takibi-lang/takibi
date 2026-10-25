@@ -65,11 +65,34 @@ def main():
         ("partial world stop", healthy.replace(b"mask=0x000000000000000e", b"mask=0x0000000000000002"),
          "stop and acknowledge all online peers"),
     )
+    # GitHub issue #957: the hung-core session after the resume, entered on
+    # cpu 2 while cpu 1 spins masked; the world stop must include cpu 1.
+    hung = (b"\nddb: interrupt-safe UART debugger\n"
+            b"ddb: world-stop complete mask=0x000000000000000b\n"
+            b"ddb: break seq=9 cpu=2 elr=0x00000000400103a0 "
+            b"sp_el0=0x000000007ffffdf0\n" + fixture.PROMPT +
+            b"continue\nddb: continuing\n")
+    hung_cases = (
+        ("hung-core session", healthy + hung, None),
+        ("no hung-core session", healthy, "no second DDB entry"),
+        ("hung-core partial stop",
+         healthy + hung.replace(b"complete mask=0x000000000000000b",
+                                b"partial mask=0x0000000000000009"),
+         "did not reach the masked cpu 1"),
+        ("hung-core entered on the masked cpu",
+         healthy + hung.replace(b"cpu=2 elr", b"cpu=1 elr"),
+         "entered on the masked cpu 1"),
+        ("hung-core stop without cpu 1",
+         healthy + hung.replace(b"mask=0x000000000000000b", b"mask=0x0000000000000009"),
+         "did not include cpu 1"),
+    )
     count = CaseCount()
-    for name, capture, expected in cases:
+    for name, capture, expected, hung_core in ([(n, c, e, False) for n, c, e in cases] +
+                                    [(n, c, e, True) for n, c, e in hung_cases]):
         count.note()
         try:
-            driver.validate_capture(capture, capture.count(fixture.PROMPT), Evidence())
+            driver.validate_capture(capture, capture.count(fixture.PROMPT), Evidence(),
+                                    hung_core=hung_core)
         except SystemExit as error:
             if expected is None or expected not in str(error):
                 raise SystemExit(f"FAIL ddb-rpi5 capture control {name}: {error}")
@@ -170,7 +193,7 @@ def main():
         count.note()
         if software.shell_resumed(capture) != expected:
             raise SystemExit("FAIL software DDB capture control: prompt or output ordering")
-    report_pass("ddb-rpi5 capture controls", "LF/CRLF pass; missing hold, missing release, timeout-only evidence, unheld mutex or phase, an unreached hold (QUIET) and a stalled guest (inconclusive), echoed commands and invalid stopped-world evidence fail",
+    report_pass("ddb-rpi5 capture controls", "LF/CRLF pass; missing hold, missing release, timeout-only evidence, unheld mutex or phase, an unreached hold (QUIET) and a stalled guest (inconclusive), echoed commands, invalid stopped-world evidence and a missing, partial, wrongly entered or incomplete hung-core stop (#957) fail",
                 cases=count.ran)
     return 0
 

@@ -425,7 +425,8 @@ is released; the maintained UART-BREAK lanes exercise this case on QEMU and
 RPi5. The IRQ mask is the GIC priority mask (GitHub issue #920), and DDB's
 world stop escalates to a pseudo-NMI SGI above it, so a peer that spins with
 IRQs masked -- in a lock, or hung inside an interrupt handler -- is still
-stopped and inspected (the DDB lane's hung-core BREAK). What still prevents a
+stopped and inspected (the hung-core BREAK of the QEMU DDB lane and, on
+GIC-400 with its shifted non-secure priorities, of the RPi5 DDB lane, #957). What still prevents a
 complete stop is a peer with DAIF.I set for good: a fault loop at EL1 or a
 core that never came up. DDB does not inspect shared state without the
 required acknowledgements; use external SWD or QEMU host diagnostics then.
@@ -1575,7 +1576,9 @@ python3 scripts/run_kernel_ddb_rpi5_driver.py --validate-log _build/kernel-hwtes
 
 This runs the same final capture predicates as the live driver. It does not
 reproduce IRQ timing or the live retry loop; the saved event order and record
-contents are the evidence it checks.
+contents are the evidence it checks. Since GitHub issue #957 an archive must
+also hold the hung-core session after the resume; an older archive fails
+that requirement.
 
 ### Init-managed HTTPd lifecycle
 

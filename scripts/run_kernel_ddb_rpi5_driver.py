@@ -47,11 +47,13 @@ import time
 
 import serial
 from await_timing import AwaitTiming
+from ddb_qemu_checks import HUNG_CORE, hung_core_problems
 from typed_marker import typed_marker
 
 # The milestones, in the order the session reaches them.
 MILESTONES = ("wake-sent", "wake-acked", "break-sent", "first-prompt",
-              "continuing", "resume-sent", "resume-echoed")
+              "continuing", "resume-sent", "resume-echoed", "hang-armed",
+              "hang-break-sent", "hang-prompt", "hang-continuing")
 
 # A response is useful pacing, but not required: the DDB peer-console
 # fixture is armed after this wake. The retained events, rather than a
@@ -95,6 +97,53 @@ def entry_cpu(text: str) -> int:
     found = re.search(r"^ddb: break seq=\d+ cpu=(\d+) ",
                       text.replace("\r", ""), re.MULTILINE)
     return int(found.group(1)) if found else 0
+
+
+# GitHub issue #957: the hung-core BREAK on hardware. After the shell has
+# resumed, HUNG_CORE is armed (uart_irq_hang_request, written through
+# OpenOCD) to spin with interrupts masked at its next interrupt for
+# UART_IRQ_HANG_SECONDS (8 s), and a second BREAK is sent. The QEMU DDB lane
+# proves this against QEMU's single-security GIC; GIC-400 with security
+# extensions shifts non-secure priorities, so only this lane proves that the
+# pseudo-NMI SGI (#920) reaches a masked core on the board. The second
+# session must enter on another core and complete its world stop including
+# HUNG_CORE (ddb_qemu_checks.hung_core_problems, shared with QEMU).
+HUNG_CORE_ARM_SETTLE_SECONDS = 0.5
+HUNG_CORE_BUDGET_SECONDS = 30.0
+
+
+def hung_core_break(uart, log, received: bytearray, elf: str, timeline) -> None:
+    """Arm HUNG_CORE, send the second BREAK, and continue its session."""
+    subprocess.run([str(Path(__file__).with_name("rpi5_set_kernel_byte.sh")),
+                    elf, "uart_irq_hang_request", str(HUNG_CORE + 1)],
+                   check=True, timeout=30)
+    timeline.mark("hang-armed")
+    # The armed core spins at its next interrupt: a tick.
+    time.sleep(HUNG_CORE_ARM_SETTLE_SECONDS)
+    offset = len(received)
+    uart.send_break(0.25)
+    timeline.mark("hang-break-sent")
+    deadline = time.monotonic() + HUNG_CORE_BUDGET_SECONDS
+    continue_sent = False
+    while time.monotonic() < deadline:
+        chunk = uart.read(4096)
+        if chunk:
+            received.extend(chunk)
+            log.write(chunk)
+            log.flush()
+        after = bytes(received[offset:])
+        if b"inspection refused\n" in after:
+            return
+        if b"ddb> " in after and not continue_sent:
+            uart.write(b"continue\n")
+            uart.flush()
+            continue_sent = True
+            timeline.mark("hang-prompt")
+        if continue_sent and b"ddb: continuing\n" in after:
+            timeline.mark("hang-continuing")
+            return
+    raise timeline.bail("RPi5 hung-core BREAK: no DDB session completed "
+                        "within its budget")
 
 
 # How long a resume command may draw no echo before it is sent again. A
@@ -185,8 +234,11 @@ def resumed(normalized: bytes) -> bool:
                for line in tail.splitlines())
 
 
-def validate_capture(received: bytes, prompt_count: int, timeline: Timeline) -> None:
-    """Validate live and archived UART captures with the same predicates."""
+def validate_capture(received: bytes, prompt_count: int, timeline: Timeline,
+                     hung_core: bool = False) -> None:
+    """Validate live and archived UART captures with the same predicates.
+
+    `hung_core` also requires the second, hung-core session (#957)."""
     text = received.decode("ascii", errors="replace").replace("\r", "")
     if "oops: fail-stop" in text:
         raise timeline.bail(
@@ -286,6 +338,10 @@ def validate_capture(received: bytes, prompt_count: int, timeline: Timeline) -> 
             f"RPi5 workload did not resume after DDB continue: "
             f"{timeline.resume_attempts} resume command(s) went out and no "
             "echo came back")
+    if hung_core:
+        problems = hung_core_problems(text)
+        if problems:
+            raise timeline.bail("RPi5 " + "; ".join(problems))
 
 
 def main() -> int:
@@ -302,7 +358,8 @@ def main() -> int:
                         args.log + ".await-timing.jsonl" if args.port and args.log else None)
     if args.validate_log is not None:
         received = args.validate_log.read_bytes()
-        validate_capture(received, received.count(b"ddb> "), timeline)
+        validate_capture(received, received.count(b"ddb> "), timeline,
+                         hung_core=True)
         print("PASS ddb-rpi5 capture validation: archived UART log")
         return 0
     if args.log is None:
@@ -395,10 +452,16 @@ def main() -> int:
                     timeline.mark("resume-sent")
                     resume_command_sent = True
 
-    validate_capture(received, prompt_count, timeline)
+        # The pty controls pass no ELF and so cannot arm a core.
+        if args.elf is not None and resumed(bytes(received).replace(b"\r", b"")):
+            hung_core_break(uart, log, received, args.elf, timeline)
+
+    validate_capture(received, prompt_count, timeline,
+                     hung_core=args.elf is not None)
     timeline.finish()
     print("PASS kernel/rpi5 ddb: guarded fault recovered, inspected, and "
-          "resumed")
+          "resumed" + ("; hung-core BREAK stopped the masked cpu"
+                       if args.elf is not None else ""))
     print(timeline.render())
     return 0
 
