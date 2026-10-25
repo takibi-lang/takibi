@@ -192,8 +192,8 @@ next one taken. The done record of the previous queue is in HISTORY.md
    `scripts/ext2_postcheck.py`), #1035 (tier C,
    the ext2 driver as a host process over a RAM disk, #909 slice 2's first
    instance; seeded sequences, fault injection, hostile images). The ext2
-   fix #968 is a `differ` row of ops.eq and lands with
-   its row flipped; #1021 becomes a row when the kernel offers the free
+   fixes #1019 and #968 flipped their ops.eq rows to `match` when they
+   landed (2026-10-25); #1021 becomes a row when the kernel offers the free
    space it needs (#1022's truncate row and #1023's `peer` row, a held fd
    across O_TRUNC, match since 2026-10-25), and #1067
    (printf) and #1070 (sendfile to a file) are writers the rows avoid.
