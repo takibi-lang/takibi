@@ -166,7 +166,7 @@ next one taken. The done record of the previous queue is in HISTORY.md
    done (EFFECTS.md lists the checker-only effect words from the table
    `dynamic_rule` reads; no new such word, DECISIONS.md; the migration
    stays in band 2); #1003 (`WORDS.md`) and #1027 step 1 (`CLI.md`, the dead
-   flags out, an internal namespace) land together; #1004 (dead builtins,
+   flags out, the `--internal-*` namespace) done 2026-10-25; #1004 (dead builtins,
    `stable_replace` to a removed-words table, the generated-only names
    hidden); #994 (address-taking DMA cache builtins counted as raw sites;
    done 2026-10-25) and #1028 (other address-taking intrinsics); #1031 slice 1 (classify the 119
