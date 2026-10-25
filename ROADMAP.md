@@ -170,7 +170,9 @@ next one taken. The done record of the previous queue is in HISTORY.md
    `stable_replace` to a removed-words table, the generated-only names
    hidden) done 2026-10-25; #994 (address-taking DMA cache builtins counted as raw sites;
    done 2026-10-25) and #1028 (other address-taking intrinsics); #1031 slice 1 (classify the 119
-   `kernel_invariant_stop` sites and ratchet them); #1018 (the frame API
+   `kernel_invariant_stop` sites and ratchet them; done 2026-10-25,
+   `scripts/invariant_stop_sites.tsv`: 120 sites, frame 31, unmodelled 18,
+   ladder 71); #1018 (the frame API
    rule as a list-file check); #986 slice 1 (the trust ledger as a dated
    checkpoint series, each row attributed to the rule that retired it).
 1. **Verification (#954; B owns the refinement code).** The rest of #954

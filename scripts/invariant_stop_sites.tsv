@@ -1,0 +1,107 @@
+# Explicit invariant stops (kernel_invariant_stop / _with_frame) per kernel
+# function: GitHub issue #1031 slice 1, DECISIONS 2026-10-25 (rung 5).
+# scripts/check_invariant_stop_sites.py counts the calls in maintained kernel/
+# Takibi code (comments blanked, kernel/tests excluded) and fails on a
+# function with no row, a count over or UNDER its rows, an unknown class, or
+# a ladder row without an issue. Rows of one function may split its sites
+# across classes; their counts add up. Lowering or removing a row is the edit
+# a retired stop makes; adding or raising one is a decision about a new stop
+# and is made by hand with its class and reason written here.
+#
+# Classes (the rule a stop is admitted under):
+#   frame       the stop runs at a frame site (#1017): exception entry/return
+#               or the assembly stack handoff, where no Takibi caller exists
+#               to take a value and the saved frame is the only report.
+#   unmodelled  the stop guards a premise no model or type covers: a hardware
+#               or firmware fact, a boot layout fact, a device's answer.
+#   ladder      a candidate to move up the ladder: the premise could be a
+#               compile-time rule (rung 1) or is already stated by a model
+#               (rung 2) whose conformance the stop only spot-checks. The
+#               issue column names where the move is tracked; "unfiled:" is
+#               not accepted, so the coordinator files it first.
+# value: "handler" when the function already returns a fallible value on the
+# stop's path (rule 2 candidate: the stop could become that value), "-" else.
+# Measured 2026-10-25 at 322e52a3: 120 sites (#1031 counted 119 at 4c50f5da).
+# Columns: file, function, class, count, value, issue, reason (tab separated).
+kernel/drivers/block/virtio_blk_dma.tkb	virtio_blk_receive_take	ladder	1	-	#131	owner Place empty on take: an unbalanced take/park, a linear global owner the type system does not yet track (FixedDmaOwnership.tla states the protocol)
+kernel/drivers/block/virtio_blk_dma.tkb	virtio_blk_receive_fail_cpu	ladder	1	-	#131	stale CPU-side authority handed back: FixedDmaOwnership.tla excludes it, the code only spot-checks it
+kernel/drivers/block/virtio_blk_dma.tkb	virtio_blk_receive_fail_device	ladder	1	-	#131	stale device-side authority handed back: as the CPU side
+kernel/drivers/block/virtio_blk_dma.tkb	virtio_blk_request_take	ladder	1	-	#131	owner Place empty on take, as virtio_blk_receive_take
+kernel/drivers/block/virtio_blk_dma.tkb	virtio_blk_request_fail_cpu	ladder	1	-	#131	stale CPU-side authority, as virtio_blk_receive_fail_cpu
+kernel/drivers/block/virtio_blk_dma.tkb	virtio_blk_request_fail_device	ladder	1	-	#131	stale device-side authority, as virtio_blk_receive_fail_device
+kernel/drivers/block/virtio_blk_dma.tkb	virtio_blk_data_take	ladder	1	-	#131	owner Place empty on take, as virtio_blk_receive_take
+kernel/drivers/block/virtio_blk_dma.tkb	virtio_blk_data_fail_cpu	ladder	1	-	#131	stale CPU-side authority, as virtio_blk_receive_fail_cpu
+kernel/drivers/block/virtio_blk_dma.tkb	virtio_blk_data_fail_device	ladder	1	-	#131	stale device-side authority, as virtio_blk_receive_fail_device
+kernel/drivers/net/rp1_gem.tkb	gem_rx_ring_ready	ladder	1	-	#131	RX ring owner slot empty: every taker parks one back, a place discipline the compiler does not track across calls
+kernel/drivers/net/rp1_gem.tkb	gem_rearm_rx	ladder	1	-	#131	RX ring Armed where Ready is required: a typestate on a global owner slot
+kernel/drivers/net/rp1_gem.tkb	net_rx_acquire	ladder	1	handler	#131	packet pool slot empty on take; the function already returns NetRxAcquire::None after the stop
+kernel/drivers/net/rp1_gem.tkb	net_rx_acquire	unmodelled	1	handler	#1031	GEM reported a completed RX descriptor whose buffer the generated protocol calls empty: the device's answer, no model of GEM; NetRxAcquire::None follows
+kernel/drivers/net/rp1_gem.tkb	gem_tx_ring_write	ladder	2	-	#131	TX ring owner slot empty, or Sending where Ready is required: owner-slot typestate
+kernel/drivers/net/rp1_gem.tkb	gem_tx_start	ladder	2	-	#131	TX ring owner slot empty, or Sending where Ready is required: owner-slot typestate
+kernel/drivers/net/rp1_gem.tkb	gem_tx_pkt	ladder	1	-	#131	packet pool slot empty where TxPosted is required
+kernel/drivers/net/rp1_gem.tkb	gem_tx_unconfirmed	unmodelled	1	-	#1031	a halted GEM TX ring that does not settle: a hardware behaviour no model covers
+kernel/drivers/net/rp1_gem_desc.tkb	gem_rx_ring_lost	ladder	1	-	#131	a displaced RX ring owner: a slot never holds two owners
+kernel/drivers/net/rp1_gem_desc.tkb	gem_tx_ring_lost	ladder	1	-	#131	a displaced TX ring owner: a slot never holds two owners
+kernel/drivers/net/rp1_gem_desc.tkb	gem_pkt_lost	ladder	1	-	#131	a displaced or misplaced packet owner: a slot never holds two owners
+kernel/drivers/net/virtio_net.tkb	net_rx_acquire	ladder	1	handler	#131	packet pool slot empty on take; NetRxAcquire::None follows the stop
+kernel/drivers/net/virtio_net.tkb	net_rx_acquire	unmodelled	1	handler	#1031	a used entry naming a descriptor whose buffer the protocol calls empty: the device's answer; NetRxAcquire::None follows
+kernel/drivers/net/virtio_net.tkb	virtio_net_tx_finish	ladder	1	handler	#740	TX packet slot empty after the completion wait; returns false after the stop
+kernel/drivers/net/virtio_net_tx_dma.tkb	virtio_pkt_lost	ladder	1	-	#131	a displaced or misplaced packet owner: a slot never holds two owners
+kernel/drivers/virtio_used.tkb	virtio_used_lost	ladder	1	-	#131	a displaced used-ring owner: a slot never holds two owners
+kernel/kernel/cpu_authority.tkb	preempt_slot	unmodelled	1	-	#638	TPIDR_EL1's per-CPU offset names a slot below KERNEL_MAX_CORES: a register the boot path sets, no type states it
+kernel/kernel/cpu_authority.tkb	preempt_off_enter	unmodelled	2	-	#638	TPIDR_EL1 and MPIDR name the same CPU, and the CPU is active: register facts no type states
+kernel/kernel/cpu_authority.tkb	preempt_off_exit	ladder	1	-	#638	an exit with no open region: the compiler emits enter/exit pairs, so the count is balanced by construction and the stop restates a compile-time fact
+kernel/kernel/cpu_authority.tkb	preempt_assert_blockable	ladder	1	-	#638	blocking inside a preempt_off region: the may_block effect inside a preempt_off block could be refused by the compiler
+kernel/kernel/process.tkb	scheduled_process_pin_release	ladder	1	-	#652	a pin released while a CPU owns the stack: StackOwnership.tla states the rule; trace conformance (#652) would take it over
+kernel/kernel/process.tkb	scheduled_process_exited_take	ladder	1	-	#652	a reap of a zombie whose stack a CPU still stands on (#609): StackOwnership.tla states the rule
+kernel/kernel/process.tkb	scheduled_process_start	ladder	1	-	#652	a start on a stack another CPU owns (#609): StackOwnership.tla states the rule
+kernel/kernel/process.tkb	kernel_process_root_authorities_check	frame	1	-	#1017	the root authorities disagree with TTBR0 at EL0 return: checked at the frame, the saved frame is the report
+kernel/kernel/process.tkb	kernel_process_stack_switch_complete	frame	4	-	#1017	the physical stack handoff called from assembly: CPU index, outgoing owner, current_live, incoming state disagree
+kernel/kernel/process.tkb	kernel_process_stack_idle_complete	frame	2	-	#1017	the exit-to-idle stack handoff called from assembly: execution state and the outgoing record disagree
+kernel/kernel/process.tkb	kernel_process_stack_idle_yield	frame	3	-	#1017	the yield-to-idle stack handoff called from assembly: execution state, outgoing record or the yield publication disagree
+kernel/kernel/process.tkb	kernel_process_stack_idle_blocked	frame	2	-	#1017	the block-to-idle stack handoff called from assembly: execution state and the outgoing record disagree
+kernel/kernel/process.tkb	kernel_process_spread_timer_progress	ladder	1	-	#1031	fixture: its own process is never pinned; an affinity write without a Pinned arm for fixture-owned processes would make it static (unfiled: fixture affinity write that cannot answer Pinned)
+kernel/kernel/process.tkb	kernel_process_spread_timer_enter	ladder	1	-	#1031	fixture's own process is never pinned, as kernel_process_spread_timer_progress
+kernel/kernel/process.tkb	kernel_process_activate_stable_root	unmodelled	2	-	#1031	the address-space root fails prepare (Invalid) or commit: a page-table and ASID fact no model covers
+kernel/kernel/process.tkb	kernel_process_tick_leave_excluded	frame	1	-	#1017	the yield publication fails while leaving on the timer frame
+kernel/kernel/process.tkb	kernel_process_block_reserved	ladder	1	-	#652	another core stands on the stack this CPU blocked on: the scheduled_process_start rule, StackOwnership.tla
+kernel/kernel/process.tkb	kernel_process_exit_waiter_probe	ladder	1	-	#1031	fixture's own process is never pinned, as kernel_process_spread_timer_progress
+kernel/kernel/process.tkb	kernel_process_scheduler_probe	ladder	1	-	#1031	fixture's own process is never pinned, as kernel_process_spread_timer_progress
+kernel/kernel/process.tkb	kernel_process_exit_reserved	frame	1	-	#1017	a second deferred reap while one is live, on the successor's frame
+kernel/kernel/process.tkb	kernel_process_child_exit	ladder	1	-	#131	a second deferred reap while one is live: a one-entry slot the place discipline could hold
+kernel/kernel/syscall.tkb	exec_args_put	ladder	1	-	#131	the per-CPU exec argv handoff slot is already Full: a one-entry place, a second ChildExec before the first prepare
+kernel/kernel/syscall.tkb	kernel_syscall_clone_child_return	frame	3	-	#1017	clone child return: no child stack, a failed context install, an invalid current root; the parent frame is the report
+kernel/kernel/syscall.tkb	kernel_syscall_child_exec_return	frame	12	-	#1017	child exec return: each KernelChildExecPrepareResult failure arm and the debugger switch; recorded in exec_failure, then the frame is the report
+kernel/kernel/syscall.tkb	kernel_syscall_migrate_return	frame	1	-	#1017	migration of the current process fails on its syscall frame
+kernel/kernel/syscall.tkb	signal_return_exit	frame	1	-	#1017	the exit tail answered nothing or Unreachable (its file reap failed); the frame is the report
+kernel/mm/page.tkb	page_meta_at	ladder	1	-	#216	an index past the metadata region: a refined index type would make it static
+kernel/mm/page.tkb	page_extent_at	ladder	1	-	#216	an index past the extent region: a refined index type would make it static
+kernel/mm/page.tkb	page_allocator_init	unmodelled	1	-	#799	the memory map's empty extent region is misaligned: a linker and memory-map layout fact
+kernel/mm/page.tkb	page_allocator_init_frames	unmodelled	4	-	#799	the bootstrap frame tags gone, frames misaligned, too few places, extent slots misaligned: boot layout facts
+kernel/mm/page.tkb	page_allocator_apply_memory	unmodelled	4	handler	#799	extent slots misaligned, frame build failed, empty frames misaligned or too few: boot layout facts; the function returns PageAllocatorMemoryResult::Invalid on one path already
+kernel/platform/qemu/device_map.tkb	qemu_uart_attach_bootstrap	ladder	1	-	#799	the fixed UART window is refused (too small): constant base and size against sizeof, decidable at compile time
+kernel/platform/rpi5/device_map.tkb	rpi5_uart_attach_bootstrap	ladder	1	-	#799	the fixed UART window is refused: constant size against sizeof
+kernel/platform/rpi5/device_map.tkb	rpi5_gem_attach_bootstrap	ladder	1	-	#799	the fixed GEM window is too small: constant size against sizeof
+kernel/platform/rpi5/device_map.tkb	rpi5_pcie_windows_attach	ladder	3	-	#799	the PCIe bridge, rescal and reset windows are too small: constant sizes against sizeof
+kernel/platform/rpi5/device_map.tkb	rpi5_xhci_attach_bootstrap	ladder	4	-	#799	the xHCI capability, operational, runtime and doorbell windows are too small: each size is sizeof of its register block, so TooSmall cannot fire
+kernel/platform/rpi5/device_map.tkb	rpi5_xhci_refuse	unmodelled	1	-	#1031	the controller reported a register block outside the device window: a hardware answer
+kernel/platform/rpi5/device_map.tkb	rpi5_irq_windows_attach_bootstrap	ladder	4	-	#799	the GIC, MIP0 and MSI-X windows are refused: constant sizes against sizeof
+kernel/platform/rpi5/usb_xhci_dma.tkb	msc_csw_take	ladder	1	-	#720	owner Place empty on take, as virtio_blk_receive_take
+kernel/platform/rpi5/usb_xhci_dma.tkb	msc_csw_fail_cpu	ladder	1	-	#720	stale CPU-side authority, as virtio_blk_receive_fail_cpu
+kernel/platform/rpi5/usb_xhci_dma.tkb	msc_csw_fail_device	ladder	1	-	#720	stale device-side authority, as virtio_blk_receive_fail_device
+kernel/platform/rpi5/usb_xhci_dma.tkb	xhci_control_take	ladder	1	-	#720	owner Place empty on take, as virtio_blk_receive_take
+kernel/platform/rpi5/usb_xhci_dma.tkb	xhci_control_fail_cpu	ladder	1	-	#720	stale CPU-side authority, as virtio_blk_receive_fail_cpu
+kernel/platform/rpi5/usb_xhci_dma.tkb	xhci_control_fail_device	ladder	1	-	#720	stale device-side authority, as virtio_blk_receive_fail_device
+kernel/platform/rpi5/usb_xhci_dma.tkb	msc_data_take	ladder	1	-	#720	owner Place empty on take, as virtio_blk_receive_take
+kernel/platform/rpi5/usb_xhci_dma.tkb	msc_data_fail_cpu	ladder	1	-	#720	stale CPU-side authority, as virtio_blk_receive_fail_cpu
+kernel/platform/rpi5/usb_xhci_dma.tkb	msc_data_fail_device	ladder	1	-	#720	stale device-side authority, as virtio_blk_receive_fail_device
+kernel/platform/rpi5/usb_xhci_dma.tkb	msc_cbw_take	ladder	1	-	#720	owner Place empty on take, as virtio_blk_receive_take
+kernel/platform/rpi5/usb_xhci_dma.tkb	msc_cbw_fail_cpu	ladder	1	-	#720	stale CPU-side authority, as virtio_blk_receive_fail_cpu
+kernel/platform/rpi5/usb_xhci_dma.tkb	msc_cbw_fail_device	ladder	1	-	#720	stale device-side authority, as virtio_blk_receive_fail_device
+kernel/platform/rpi5/usb_xhci_dma.tkb	msc_data_out_take	ladder	1	-	#720	owner Place empty on take, as virtio_blk_receive_take
+kernel/platform/rpi5/usb_xhci_dma.tkb	msc_data_out_fail_cpu	ladder	1	-	#720	stale CPU-side authority, as virtio_blk_receive_fail_cpu
+kernel/platform/rpi5/usb_xhci_dma.tkb	msc_data_out_fail_device	ladder	1	-	#720	stale device-side authority, as virtio_blk_receive_fail_device
+kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_ring_lost	ladder	1	-	#720	a displaced ring owner: a slot never holds two owners
+kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_input_lost	ladder	1	-	#720	a displaced input-context owner
+kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_table_lost	ladder	1	-	#720	a displaced session-table owner
+kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_live_lost	ladder	1	-	#720	a displaced live events/output owner
