@@ -101,16 +101,25 @@ if [ -e /lib/ext2-eq.enable ]; then
     # same marker, because
     # these 74 directory operations cost seconds per boot and only the
     # comparing lane's postcheck reads the row (#1085).
-    g=nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnggggggggggggggggggggggggggggggggggggggggggggggggg
-    set --
-    i=10
-    while [ "$i" -lt 47 ]; do
-        set -- "$@" "/grow/$g$i"
-        i=$((i + 1))
-    done
-    /bin/mkdir /grow "$@" 2>/dev/null
-    /bin/rmdir "$@" 2>/dev/null
-    set --
+    # One name per exec: execve admits 15 argv entries and 512 bytes
+    # (kernel/SYSCALLS.md), so the single 38-argument mkdir this used to be
+    # was E2BIG and /grow was never made (#968's first land). Relative names
+    # in a subshell keep each path short of any path limit.
+    g=nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnggggggggggggggggggggggggggggggggggggggggggggggggg
+    /bin/mkdir /grow 2>/dev/null
+    (
+        cd /grow || exit 1
+        i=10
+        while [ "$i" -lt 47 ]; do
+            /bin/mkdir "$g$i" 2>/dev/null
+            i=$((i + 1))
+        done
+        i=10
+        while [ "$i" -lt 47 ]; do
+            /bin/rmdir "$g$i" 2>/dev/null
+            i=$((i + 1))
+        done
+    )
 fi
 
 # GitHub issue #503: what one move between cores costs. Silent on success;
