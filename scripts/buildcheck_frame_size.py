@@ -20,6 +20,8 @@ import re
 import subprocess
 import sys
 
+from pass_line import report_pass
+
 CEILING = 2048
 
 # Functions above the ceiling when it was introduced, with their frame in
@@ -116,9 +118,11 @@ def main(argv):
                 print(f"FAIL frame-size: {path}: {p}", file=sys.stderr)
         else:
             largest = max(measured.items(), key=lambda kv: kv[1])
-            print(f"PASS frame-size: {path}: {len(measured)} functions, largest "
-                  f"{largest[0]} {largest[1]} B, ceiling {CEILING} B, "
-                  f"{len(BUDGET)} budgeted")
+            report_pass("frame-size",
+                        f"{path}: {len(measured)} functions, largest "
+                        f"{largest[0]} {largest[1]} B, ceiling {CEILING} B, "
+                        f"{len(BUDGET)} budgeted",
+                        functions=len(measured))
     return 1 if failed else 0
 
 

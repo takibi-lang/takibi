@@ -4,6 +4,7 @@ import sys
 
 sys.path.insert(0, __file__.rsplit("/", 1)[0])
 from buildcheck_frame_size import frames, problems  # noqa: E402
+from pass_line import report_pass  # noqa: E402
 
 LISTING = """
 0000000000000000 <small>:
@@ -46,7 +47,10 @@ def main():
         for name in bad:
             print(f"FAIL frame-size controls: {name}", file=sys.stderr)
         return 1
-    print(f"PASS frame-size controls: {len(checks)} controls")
+    report_pass("frame-size controls",
+                f"{len(checks)} controls: the #1081 frame and an over-budget one are "
+                f"refused, stale entries are refused, small frames pass",
+                controls=len(checks))
     return 0
 
 
