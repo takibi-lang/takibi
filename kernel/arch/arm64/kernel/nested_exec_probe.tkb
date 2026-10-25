@@ -5,12 +5,15 @@ const NESTED_EXEC: usize = 221;
 const NESTED_WRITE: usize = 64;
 const NESTED_EXIT: usize = 93;
 
-private fn nested_fail() !{unsafe} {
-    let line: []const u8 = bs"nested: FAIL refused exec result\n";
+private fn nested_fail_line(line: borrow []const u8) !{unsafe} {
     // Raw ABI input only: these syscalls read the readonly bytes.
     // The bridge exposes no writable slice or checked mutation.
     svc5(NESTED_WRITE, 1, (unsafe { line as *u8 }) as usize, line.len, 0, 0);
     svc5(NESTED_EXIT, 1, 0, 0, 0, 0);
+}
+
+private fn nested_fail() !{unsafe} {
+    nested_fail_line(bs"nested: FAIL refused exec result\n");
 }
 
 fn nested_exec_probe() !{unsafe} {
@@ -75,7 +78,5 @@ fn nested_exec_probe() !{unsafe} {
 
 // /nested/sh: the image an argv[0]-chosen exec would run (#1065).
 fn nested_exec_wrong_image() !{unsafe} {
-    let line: []const u8 = bs"nested: FAIL image chosen by argv[0]\n";
-    svc5(NESTED_WRITE, 1, (unsafe { line as *u8 }) as usize, line.len, 0, 0);
-    svc5(NESTED_EXIT, 1, 0, 0, 0, 0);
+    nested_fail_line(bs"nested: FAIL image chosen by argv[0]\n");
 }
