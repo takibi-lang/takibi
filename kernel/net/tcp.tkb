@@ -196,6 +196,16 @@ struct TcpConnection {
     // is nothing else to record.
     self_address: usize;
     connection_open: bool;
+    // GitHub issue #1121: how the peer ended its side. peer_fin is a FIN
+    // taken in sequence (Linux's SOCK_DONE: every later read is EOF, 0);
+    // peer_reset is an in-sequence RST (the connection is gone: reads are
+    // 0, writes EPIPE). reset_error_pending is Linux's sk_err =
+    // ECONNRESET, set by a reset that came before any FIN and reported
+    // once, by whichever of read or write meets it first. All three are
+    // zero (false) in a freshly zeroed slot.
+    peer_fin: bool;
+    peer_reset: bool;
+    reset_error_pending: bool;
     // GitHub issue #672 layer 3: set by tcp_connection_free before it lets
     // go of the lock, so a taker that was waiting for the lock and finds
     // this gives up instead of minting an owner for a freed connection.
@@ -591,6 +601,9 @@ must_use variant KernelTcpReceiveResult {
     Routed(NetRxCanAcquire);
     TimedOut(NetRxCanAcquire);
     Received(NetRxCanAcquire);
+    // GitHub issue #1121: the peer's FIN or RST was taken; the flags on
+    // the connection say which, and the read re-decides from them.
+    PeerClosed(NetRxCanAcquire);
 }
 
 must_use variant KernelTcpSendResult {
@@ -604,6 +617,8 @@ variant TcpReceiveDisposition {
     Payload(usize);
     Routed;
     RoutedAck;
+    PeerReset;
+    PeerFinAck;
 }
 
 variant TcpRxPlan {
@@ -1090,8 +1105,12 @@ fn tcp_connection_has_pending_read(address: usize) -> bool !{unsafe} {
         RegionPinned(TcpConnection)::Stale => { return false; }
         RegionPinned(TcpConnection)::Pinned(pin) => {
             let conn: &mut TcpConnection = region_pin_record(pin);
+            // GitHub issue #1121: a FIN or RST makes the next read return
+            // at once (EOF or ECONNRESET), so poll calls it readable, as
+            // Linux's tcp_poll does.
             let pending: bool = conn.connection_open &&
-                   conn.socket_buffer_offset < conn.socket_buffer_length;
+                   (conn.socket_buffer_offset < conn.socket_buffer_length ||
+                    conn.peer_fin || conn.peer_reset);
             tcp_connection_unpin(pin);
             return pending;
         }
@@ -3477,6 +3496,45 @@ fn kernel_tcp_accept_resume_or_begin(ready: borrow NetRxCanAcquire,
 
 must_use variant TcpReceiveRouteResult { NoReceiver; Routed; Ack; }
 
+// GitHub issue #1121: an in-sequence RST, as Linux's tcp_reset. Before a
+// FIN it leaves ECONNRESET to report once; after one (CLOSE_WAIT) Linux's
+// error is EPIPE, which the write path reports from peer_reset alone.
+fn tcp_connection_take_reset(conn: borrow &mut TcpConnection) {
+    conn.peer_reset = true;
+    if (conn.peer_fin == false) {
+        conn.reset_error_pending = true;
+    }
+}
+
+must_use variant TcpPeerReadAnswer { Open; Eof; Reset; }
+must_use variant TcpPeerWriteAnswer { Open; Reset; Broken; }
+
+// GitHub issue #1121: what a read finds once the buffered bytes are gone,
+// in tcp_recvmsg's order: SOCK_DONE (a FIN) is EOF before sk_err is
+// looked at; a pending ECONNRESET is reported once (sock_error clears
+// it); after that a reset connection, shut down both ways, is EOF too.
+fn tcp_connection_peer_read_answer(conn: borrow &mut TcpConnection) -> TcpPeerReadAnswer {
+    if (conn.peer_fin) { return TcpPeerReadAnswer::Eof; }
+    if (conn.reset_error_pending) {
+        conn.reset_error_pending = false;
+        return TcpPeerReadAnswer::Reset;
+    }
+    if (conn.peer_reset) { return TcpPeerReadAnswer::Eof; }
+    return TcpPeerReadAnswer::Open;
+}
+
+// GitHub issue #1121 (#1117): tcp_sendmsg's do_error after a reset: the
+// pending ECONNRESET once, with no SIGPIPE, then EPIPE with SIGPIPE. A
+// peer FIN alone leaves the write side open (CLOSE_WAIT).
+fn tcp_connection_peer_write_answer(conn: borrow &mut TcpConnection) -> TcpPeerWriteAnswer {
+    if (conn.reset_error_pending) {
+        conn.reset_error_pending = false;
+        return TcpPeerWriteAnswer::Reset;
+    }
+    if (conn.peer_reset) { return TcpPeerWriteAnswer::Broken; }
+    return TcpPeerWriteAnswer::Open;
+}
+
 // The physical receiver may not own the socket named by a valid data frame.
 // Route only after checksum and IP/TCP shape validation, then take the target
 // connection's owner before touching its sequence or read-buffer state. The
@@ -3576,9 +3634,35 @@ fn tcp_route_received_segment(current_address: usize,
                                 tcp_connection_put(target_owner);
                                 return TcpReceiveRouteResult::Routed;
                             }
+                            // GitHub issue #1121: the peer's bare FIN or
+                            // RST for a connection whose reader is not the
+                            // one holding RX. Only one at exactly rcv_nxt.
                             if (tuple_matches &&
                                 target.state == ConnState::Established &&
                                 target.connection_open &&
+                                target.peer_fin == false &&
+                                target.peer_reset == false &&
+                                payload_length == 0 &&
+                                header.seq == target.rcv_nxt) {
+                                if ((header.flags & TCP_FLAG_RST) != 0) {
+                                    tcp_connection_take_reset(target);
+                                    tcp_connection_put(target_owner);
+                                    return TcpReceiveRouteResult::Routed;
+                                }
+                                if ((header.flags & TCP_FLAG_FIN) != 0) {
+                                    target.rcv_nxt = target.rcv_nxt + 1;
+                                    target.peer_fin = true;
+                                    build_receive_ack(
+                                        target, frame, header.ihl);
+                                    tcp_connection_put(target_owner);
+                                    return TcpReceiveRouteResult::Ack;
+                                }
+                            }
+                            if (tuple_matches &&
+                                target.state == ConnState::Established &&
+                                target.connection_open &&
+                                target.peer_fin == false &&
+                                target.peer_reset == false &&
                                 payload_length > 0) {
                                 let source_payload_end: usize =
                                     54 + payload_length;
@@ -3603,6 +3687,16 @@ fn tcp_route_received_segment(current_address: usize,
                                         target.received_length = payload_length;
                                         target.socket_buffer_length = payload_length;
                                         target.socket_buffer_offset = 0;
+                                        // GitHub issue #1121: a FIN on the
+                                        // data ends the stream after it.
+                                        if ((header.flags & TCP_FLAG_FIN) != 0) {
+                                            target.rcv_nxt = target.rcv_nxt + 1;
+                                            target.peer_fin = true;
+                                            build_receive_ack(
+                                                target, frame, header.ihl);
+                                            tcp_connection_put(target_owner);
+                                            return TcpReceiveRouteResult::Ack;
+                                        }
                                     }
                                 }
                                 if (tcp_ack_each_stream_segment) {
@@ -3659,6 +3753,7 @@ fn kernel_tcp_receive_once(owner: borrow TcpConnectionOwner[connection_pool, con
             }
             let mut disposition: TcpReceiveDisposition =
                 TcpReceiveDisposition::ProtocolDrop;
+            let mut payload_fin: bool = false;
             match tcp_parse_segment(frame, len) {
                 TcpSegmentParseResult::Reject => {}
                 TcpSegmentParseResult::Parsed(header) => {
@@ -3669,7 +3764,33 @@ fn kernel_tcp_receive_once(owner: borrow TcpConnectionOwner[connection_pool, con
                         header.dst_port == conn.local_port &&
                         slice_eq(ip[IP_SRC..<IP_DST],
                                  remote_ip_bytes[0..<4]);
+                    let peer_open: bool =
+                        conn.peer_fin == false && conn.peer_reset == false;
                     if (matches_current &&
+                        (header.flags & TCP_FLAG_RST) != 0) {
+                        // GitHub issue #1121: only an RST at exactly
+                        // rcv_nxt is taken (RFC 5961's strict case); any
+                        // other is dropped, as a blind reset must be.
+                        if (header.seq == conn.rcv_nxt && peer_open) {
+                            tcp_connection_take_reset(conn);
+                            disposition = TcpReceiveDisposition::PeerReset;
+                        }
+                    } else if (matches_current && peer_open &&
+                        (header.flags & TCP_FLAG_FIN) != 0 &&
+                        header.tcp_len == header.tcp_hdr_len &&
+                        header.seq == conn.rcv_nxt) {
+                        // GitHub issue #1121: a bare FIN in sequence ends
+                        // the peer's stream; it takes one sequence number
+                        // and is acknowledged at once.
+                        conn.rcv_nxt = conn.rcv_nxt + 1;
+                        conn.peer_fin = true;
+                        disposition = TcpReceiveDisposition::PeerFinAck;
+                    } else if (matches_current && conn.peer_fin &&
+                        (header.flags & TCP_FLAG_FIN) != 0 &&
+                        header.seq + 1 == conn.rcv_nxt) {
+                        // A retransmitted FIN: our ACK was lost.
+                        disposition = TcpReceiveDisposition::AckOnly;
+                    } else if (matches_current && peer_open &&
                         (header.flags & TCP_FLAG_ACK) != 0 &&
                         header.tcp_hdr_len == 20 &&
                         header.tcp_len > 20) {
@@ -3688,6 +3809,12 @@ fn kernel_tcp_receive_once(owner: borrow TcpConnectionOwner[connection_pool, con
                                        frame[54..<source_payload_end]);
                             disposition = TcpReceiveDisposition::Payload(
                                 payload_length);
+                            // GitHub issue #1121: a FIN riding on the data
+                            // ends the stream after it; the next read,
+                            // once these bytes are taken, is EOF.
+                            if ((header.flags & TCP_FLAG_FIN) != 0) {
+                                payload_fin = true;
+                            }
                         }
                     } else {
                         match tcp_route_received_segment(
@@ -3718,6 +3845,14 @@ fn kernel_tcp_receive_once(owner: borrow TcpConnectionOwner[connection_pool, con
                     conn.rcv_nxt = conn.rcv_nxt + (payload_length as u32);
                     conn.received_length = payload_length;
                     conn.receive_waiting = false;
+                    if (payload_fin) {
+                        conn.rcv_nxt = conn.rcv_nxt + 1;
+                        conn.peer_fin = true;
+                        build_receive_ack(conn, frame, 20);
+                        return KernelTcpReceiveResult::Received(
+                            net_rx_send_reply(
+                                net_rx_reply_ready(acquired, 54)));
+                    }
                     if (tcp_ack_each_stream_segment) {
                         tcp_split_request_segments =
                             tcp_split_request_segments + 1;
@@ -3738,6 +3873,18 @@ fn kernel_tcp_receive_once(owner: borrow TcpConnectionOwner[connection_pool, con
                 }
                 TcpReceiveDisposition::RoutedAck => {
                     return KernelTcpReceiveResult::Routed(
+                        net_rx_send_reply(
+                            net_rx_reply_ready(acquired, 54)));
+                }
+                TcpReceiveDisposition::PeerReset => {
+                    conn.receive_waiting = false;
+                    return KernelTcpReceiveResult::PeerClosed(
+                        net_rx_release(acquired));
+                }
+                TcpReceiveDisposition::PeerFinAck => {
+                    conn.receive_waiting = false;
+                    build_receive_ack(conn, frame, 20);
+                    return KernelTcpReceiveResult::PeerClosed(
                         net_rx_send_reply(
                             net_rx_reply_ready(acquired, 54)));
                 }

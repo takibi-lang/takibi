@@ -5,5 +5,6 @@ userspace socket vectored io: split, empty, short ok
 userspace socket read: a blocked read retransmits its own dropped segment ok
 userspace socket read: a short segment after a long one returns only its own bytes ok
 userspace socket retransmit: a connection nobody reads resends its dropped segment ok
+userspace socket read: EOF after FIN, ECONNRESET then EOF after reset ok
 linux socket syscalls: two overlapping connections fd=5,6 independent ok port=8080
 linux socket retransmit queue: a sent segment kept in its driver buffer ok

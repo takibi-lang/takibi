@@ -190,6 +190,7 @@ SILENCE_TIMEOUT_SECS = 1.0
 
 FLAG_FIN = 0x01
 FLAG_SYN = 0x02
+FLAG_RST = 0x04
 FLAG_PSH = 0x08
 FLAG_ACK = 0x10
 
@@ -235,6 +236,10 @@ INIT_BLOCKED_READ_REPLY = b"r"
 # it blocks reading B, and the byte B gets only once A's has arrived.
 INIT_UNREAD_A = b"p"
 INIT_UNREAD_B_REPLY = b"q"
+# GitHub issue #1121: the fixture's byte on B that the peer answers with a
+# FIN, and its byte on A that the peer answers with an RST.
+INIT_FIN_TRIGGER_B = b"y"
+INIT_RESET_TRIGGER_A = b"z"
 
 
 def checksum_add(data: bytes, sum_in: int = 0) -> int:
@@ -580,10 +585,15 @@ def init_script_fixture(sock: socket.socket) -> bool:
     fin_b = False
     fin_a = False
     reply_a_sent = False
+    fin_sent_b = False
+    reset_sent_a = False
+    after_fin_b = expected_b + INIT_FIN_TRIGGER_B
+    after_reset_a = expected_a + INIT_RESET_TRIGGER_A
     deadline = time.monotonic() + 10.0
-    while (len(received_b) < len(expected_b) or
-           len(received_a) < len(expected_a) or
-           not fin_b or not fin_a) and time.monotonic() < deadline:
+    # A is reset, so its close sends no FIN: the reset stands for fin_a.
+    while (len(received_b) < len(after_fin_b) or
+           len(received_a) < len(after_reset_a) or
+           not fin_b or not reset_sent_a) and time.monotonic() < deadline:
         frame = recv_matching(
             sock,
             lambda candidate: (
@@ -616,6 +626,12 @@ def init_script_fixture(sock: socket.socket) -> bool:
             elif not short_sent and bytes(received_b) == expected_b:
                 init_send(sock, second, INIT_RX_STALE_SHORT)
                 short_sent = True
+            elif not fin_sent_b and bytes(received_b) == after_fin_b:
+                sock.sendto(build_tcp_frame(
+                    dst_port, second[1], next_b, FLAG_FIN | FLAG_ACK,
+                    server_port=INIT_SERVER_PORT), (QEMU_HOST, QEMU_PORT))
+                second[1] += 1
+                fin_sent_b = True
         else:
             if sequence == next_a:
                 received_a.extend(payload)
@@ -634,16 +650,24 @@ def init_script_fixture(sock: socket.socket) -> bool:
                   bytes(received_a) == expected_a):
                 init_send(sock, second, INIT_UNREAD_B_REPLY)
                 unread_reply_sent = True
-    ok = (bytes(received_b) == expected_b and
-          bytes(received_a) == expected_a and reply_a_sent and
-          unread_reply_sent)
+            elif (not reset_sent_a and fin_sent_b and
+                  bytes(received_a) == after_reset_a):
+                sock.sendto(build_tcp_frame(
+                    dst_port, first[1], next_a, FLAG_RST | FLAG_ACK,
+                    server_port=INIT_SERVER_PORT), (QEMU_HOST, QEMU_PORT))
+                reset_sent_a = True
+    ok = (bytes(received_b) == after_fin_b and
+          bytes(received_a) == after_reset_a and reply_a_sent and
+          unread_reply_sent and fin_sent_b and reset_sent_a and
+          not fin_a)
     if not ok:
         print("  init.sh fixture: 10 s budget ended with A %d/%d bytes "
-              "(reply sent=%s, unread reply sent=%s, fin=%s) and B %d/%d "
-              "bytes (fin=%s)" % (
-                  len(received_a), len(expected_a), reply_a_sent,
-                  unread_reply_sent, fin_a,
-                  len(received_b), len(expected_b), fin_b))
+              "(reply sent=%s, unread reply sent=%s, reset sent=%s, "
+              "fin after reset=%s) and B %d/%d bytes (peer fin sent=%s, "
+              "fin=%s)" % (
+                  len(received_a), len(after_reset_a), reply_a_sent,
+                  unread_reply_sent, reset_sent_a, fin_a,
+                  len(received_b), len(after_fin_b), fin_sent_b, fin_b))
     print("  init.sh connected I/O fixture: %s" % ("PASS" if ok else "FAIL"))
     return ok
 

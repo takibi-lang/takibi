@@ -435,6 +435,11 @@ def test_connected_large_response(client_mac: bytes) -> bool:
     # on A, dropped once, and blocks reading B; B gets its byte only once
     # A's has arrived, which only the stack-wide retransmit pass can send.
     unread_ok = False
+    # GitHub issue #1121: then the fixture sends "y" on B, which this peer
+    # answers with a FIN, and "z" on A, answered with an RST. A reset
+    # connection's close sends no FIN, so the reset stands in for A's.
+    fin_sent_b = False
+    reset_sent_a = False
     # Generous but bounded: the kernel's own retry budget for one dropped
     # segment is TCP_RETRY_LIMIT(3) * retry_ticks(~200ms) =~ 600ms (see
     # kernel/net/tcp.tkb's accept retry comment) -- 10s covers
@@ -448,8 +453,8 @@ def test_connected_large_response(client_mac: bytes) -> bool:
     # requires a real peer ACK, not merely a retransmit attempt.
     deadline = time.monotonic() + 10.0
     while (len(collected) < want or not second_response_ok or
-           not rx_stale_ready_ok or not unread_ok or
-           not fin_acked or not second_fin_acked) and time.monotonic() < deadline:
+           not rx_stale_ready_ok or not unread_ok or not fin_sent_b or
+           not reset_sent_a or not second_fin_acked) and time.monotonic() < deadline:
         reply = recv_reply(sock, req, 2.0)
         if reply is None:
             continue
@@ -494,6 +499,17 @@ def test_connected_large_response(client_mac: bytes) -> bool:
                         second_client_seq, second_server_seq,
                         FLAG_ACK | FLAG_PSH, data=rx_stale_short))
                     second_client_seq += len(rx_stale_short)
+                continue
+            if payload_len > 0 and not fin_sent_b:
+                payload = reply[54:54 + payload_len]
+                if rseq == second_server_seq and payload == b"y":
+                    second_server_seq += payload_len
+                    fin_sent_b = True
+                    sock.send(build_frame(
+                        client_mac, RECONNECT_CLIENT_PORT,
+                        second_client_seq, second_server_seq,
+                        FLAG_FIN | FLAG_ACK))
+                    second_client_seq += 1
                 continue
             if ((flags & FLAG_FIN) != 0 and not second_fin_acked and
                     rseq == second_server_seq):
@@ -542,6 +558,14 @@ def test_connected_large_response(client_mac: bytes) -> bool:
                     second_client_seq, second_server_seq,
                     FLAG_ACK | FLAG_PSH, data=b"q"))
                 second_client_seq += 1
+            elif (unread_ok and fin_sent_b and not reset_sent_a and
+                  rseq == server_seq and payload == b"z"):
+                server_seq += payload_len
+                reset_sent_a = True
+                sock.send(build_frame(client_mac, HANDSHAKE_CLIENT_PORT,
+                                      client_seq, server_seq,
+                                      FLAG_RST | FLAG_ACK))
+                continue
             sock.send(build_frame(client_mac, HANDSHAKE_CLIENT_PORT,
                                   client_seq, server_seq, FLAG_ACK))
             continue
@@ -572,11 +596,17 @@ def test_connected_large_response(client_mac: bytes) -> bool:
     if not unread_ok:
         print("  connection A's unread byte never arrived (#846)")
         return False
+    if not fin_sent_b:
+        print("  connection B's FIN trigger byte never arrived (#1121)")
+        return False
+    if not reset_sent_a:
+        print("  connection A's reset trigger byte never arrived (#1121)")
+        return False
     if not second_fin_acked:
         print("  second overlapping connection FIN was never acknowledged")
         return False
-    if not fin_acked:
-        print("  server FIN was never observed/acknowledged")
+    if fin_acked:
+        print("  connection A sent a FIN after the peer reset it (#1121)")
         return False
     return True
 

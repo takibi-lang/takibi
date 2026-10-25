@@ -101,6 +101,8 @@ const LINUX_O_CLOEXEC: usize = 0x80000;
 const LINUX_EPIPE: usize = 0xFFFFFFFFFFFFFFE0;
 // GitHub issue #1116: read on a listening or never-connected TCP socket.
 const LINUX_ENOTCONN: usize = 0xFFFFFFFFFFFFFF95;
+// GitHub issue #1121: read or write on a connection the peer reset.
+const LINUX_ECONNRESET: usize = 0xFFFFFFFFFFFFFF98;
 const LINUX_SIGPIPE: usize = 13;
 // GitHub issue #1113: send/sendto's flag for EPIPE without SIGPIPE.
 const LINUX_MSG_NOSIGNAL: usize = 0x4000;
@@ -1828,6 +1830,19 @@ fn kernel_connected_transport_release_owned(
             return KernelTransportReleaseResult::Failed;
         }
         NetworkCapabilityWaitResult::Ready(ready) => {
+            // GitHub issue #1121: a connection the peer reset is gone
+            // (Linux's TCP_CLOSE); closing it sends no FIN.
+            if (tcp_connection_of(owner).peer_reset) {
+                tcp_connection_free(ready, owner);
+                match network_capability_put(ready) {
+                    NetworkCapabilityPutResult::Conflict => {
+                        return KernelTransportReleaseResult::Failed;
+                    }
+                    NetworkCapabilityPutResult::Stored => {
+                        return KernelTransportReleaseResult::Released;
+                    }
+                }
+            }
             match kernel_tcp_close_stream(owner, ready) {
                 KernelTcpCloseResult::Closed(after_close) => {
                     // GitHub issue #838: freed while the capability is
@@ -2691,6 +2706,21 @@ fn syscall_write_segment_with(slot: borrow SyscallSlot[0],
                       tcp_connection_put(owner);
                       return SyscallIoResult::PipeBroken;
                   }
+                  // GitHub issue #1121 (#1117): after a peer reset the
+                  // first write is ECONNRESET without SIGPIPE, unless a
+                  // read reported it first; every later one is EPIPE with
+                  // SIGPIPE, for any length, as tcp_sendmsg's do_error.
+                  match tcp_connection_peer_write_answer(tcp_connection_of(owner)) {
+                      TcpPeerWriteAnswer::Open => {}
+                      TcpPeerWriteAnswer::Reset => {
+                          tcp_connection_put(owner);
+                          return SyscallIoResult::Errno(LINUX_ECONNRESET);
+                      }
+                      TcpPeerWriteAnswer::Broken => {
+                          tcp_connection_put(owner);
+                          return SyscallIoResult::PipeBroken;
+                      }
+                  }
                   // GitHub issue #1112: Linux's tcp_sendmsg checks the
                   // connection state first, then sends nothing and returns
                   // 0 for an empty buffer; it is not EINVAL.
@@ -2947,6 +2977,25 @@ fn syscall_read_segment_with(slot: borrow SyscallSlot[0],
                    tcp_connection_put(owner);
                    return SyscallIoResult::Errno(LINUX_EBADF);
                }
+               // GitHub issue #1121: with nothing buffered, a peer FIN is
+               // EOF and a peer reset is ECONNRESET once, then EOF, for
+               // any length (tcp_recvmsg's rcvlowat is at least 1). It
+               // used to wait out the 30-second receive timeout.
+               if (conn.socket_buffer_offset >= conn.socket_buffer_length) {
+                   match tcp_connection_peer_read_answer(conn) {
+                       TcpPeerReadAnswer::Open => {}
+                       TcpPeerReadAnswer::Eof => {
+                           conn.receive_waiting = false;
+                           tcp_connection_put(owner);
+                           return SyscallIoResult::Transferred(0);
+                       }
+                       TcpPeerReadAnswer::Reset => {
+                           conn.receive_waiting = false;
+                           tcp_connection_put(owner);
+                           return SyscallIoResult::Errno(LINUX_ECONNRESET);
+                       }
+                   }
+               }
                // GitHub issue #1116: Linux's tcp_recvmsg copies nothing
                // and returns 0 for a zero-length read on an open
                // connection; it was EBADF.
@@ -3049,6 +3098,31 @@ fn syscall_read_segment_with(slot: borrow SyscallSlot[0],
                         NetworkCapabilityPutResult::Stored => {
                             tcp_connection_put(owner);
                             return SyscallIoResult::NetWait;
+                        }
+                        NetworkCapabilityPutResult::Conflict => {
+                            kernel_connection_free_capped(owner);
+                            return SyscallIoResult::Errno(LINUX_EINVAL);
+                        }
+                    }
+                }
+                KernelTcpReceiveResult::PeerClosed(next) => {
+                    match network_capability_put(next) {
+                        NetworkCapabilityPutResult::Stored => {
+                            let answer: TcpPeerReadAnswer =
+                                tcp_connection_peer_read_answer(
+                                    tcp_connection_of(owner));
+                            tcp_connection_put(owner);
+                            match answer {
+                                TcpPeerReadAnswer::Open => {
+                                    return SyscallIoResult::NetWait;
+                                }
+                                TcpPeerReadAnswer::Eof => {
+                                    return SyscallIoResult::Transferred(0);
+                                }
+                                TcpPeerReadAnswer::Reset => {
+                                    return SyscallIoResult::Errno(LINUX_ECONNRESET);
+                                }
+                            }
                         }
                         NetworkCapabilityPutResult::Conflict => {
                             kernel_connection_free_capped(owner);
