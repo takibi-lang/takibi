@@ -565,7 +565,7 @@ struct_intro:
       ($3, false, None, false) }
   | STRUCT CPU_AUTHORITY IDENT
     { Type_layout.begin_struct $3;
-      Per_cpu_registry.mark_authority $3;
+      Per_cpu_registry.mark_authority $3 $startpos;
       ($3, false, None, false) }
   | STRUCT DMA_FIXED IDENT
     { Type_layout.begin_struct $3;
@@ -1018,8 +1018,16 @@ stmt:
       Per_cpu_registry.mark_preempt_off_mint call_loc;
       let mint = { desc = Call (Per_cpu_registry.preempt_off_mint_name, []);
                    loc = call_loc } in
+      (* Stage 2: the region ends with the private `preempt_off_exit()`,
+         recorded at the closing brace; code generation repeats it before
+         every early exit of the block. *)
+      let exit_loc = $endpos in
+      Per_cpu_registry.mark_preempt_off_exit exit_loc;
+      let exit = { desc = Expr { desc = Call (Per_cpu_registry.preempt_off_exit_name, []);
+                                 loc = exit_loc };
+                   loc = exit_loc } in
       { desc = Block ({ desc = Let (true, id, None, Some mint, None);
-                        loc = $startpos(id) } :: b);
+                        loc = $startpos(id) } :: b @ [exit]);
         loc = $symbolstartpos } }
   | IF LPAREN c = expr RPAREN LBRACE t = stmts RBRACE p = else_part
     { { desc = If(c, t, p); loc = $symbolstartpos } }

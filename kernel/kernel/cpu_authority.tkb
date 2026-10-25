@@ -11,16 +11,36 @@
 // a block that can reach may_block. The block is sugar over a linear
 // PreemptOff token that a later step will expose (#638 option A).
 //
+// Stage 2 (#638, maintainer 2026-10-25): the region is a per-CPU preempt
+// count, as Linux's preempt_disable/preempt_enable. preempt_off_enter
+// raises this CPU's count and preempt_off_exit lowers it; the compiler
+// calls preempt_off_exit at the closing brace and before every return,
+// break or continue that leaves the block, so regions nest. The count is
+// reached through TPIDR_EL1, not through a CpuHere, because the places
+// that must read it (a blocking point here, the EL1 IRQ return later)
+// hold no authority. Independent of the IRQ mask.
+//
 // Trusted here, and only here:
 // - preempt_off_enter reads cpu_id() (MPIDR) and is the CPU it says;
+// - TPIDR_EL1 is this core's index times the per-core stack group stride
+//   (each core's entry path sets it once, before any Takibi code runs; the
+//   linker scripts assert the stride is 1 << PERCPU_STACK_GROUP_SHIFT), so
+//   preempt_slot() names this core's count. Only this file may read it
+//   (the compiler rejects mrs_tpidr_el1 elsewhere). With
+//   KERNEL_PREEMPT_ASSERTS, every region entry checks the two agree;
 // - cpu_here_for_boot_probe names another CPU's slot, for the boot probe
 //   that holds every CPU's handoff at once; nothing else calls it.
 //
-// Current limitations (2026-10-16):
-// - The block lowers to no disable/enable pair: while KERNEL_PREEMPTIBLE
-//   is 0 (static_assert below) the kernel is never preempted, so entering
-//   the region needs no instruction. The flip must add the pair, with the
-//   enable on every exit of the block.
+// Current limitations (2026-10-25):
+// - The count is not yet consulted by any switch: KERNEL_PREEMPTIBLE is 0
+//   (static_assert below), the EL1 IRQ return never switches, and no lock
+//   holder raises it yet (#638 stages 7 and 8).
+// - The raise is a plain read-modify-write of this CPU's slot. That is
+//   sound while nothing preempts: an interrupt on this CPU that enters a
+//   region leaves the count as it found it. Once the IRQ return can switch
+//   at count 0, a migration between the TPIDR_EL1 read and the store would
+//   raise the old CPU's count; the flip must close that window (mask IRQs
+//   across the raise, or make it one instruction on this CPU's slot).
 // - The compiler cannot tell cpu_here_for_boot_probe from the mint at a
 //   call; scripts/check_cpu_authority_mints.py fixes its one caller.
 
@@ -31,11 +51,51 @@ struct cpu_authority CpuHere {
     private id: {0..<KERNEL_MAX_CORES as usize};
 }
 
+// The runtime checks of the preempt count: that every region entry finds
+// TPIDR_EL1 naming the CPU cpu_id() names, that no exit lowers a count of
+// zero, and that a blocking point is reached at count zero. The compiler
+// already rejects a region that can reach may_block; the last check is
+// the runtime witness of that rule (maintainer, 2026-10-25). The kernel has
+// no separate release build, so the checks are on in every image.
+const KERNEL_PREEMPT_ASSERTS: usize = 1;
+
+// log2 of the per-core stack group stride that TPIDR_EL1 is a multiple of
+// (see link.ld and link_qemu.ld, which assert it).
+const PERCPU_STACK_GROUP_SHIFT: usize = 16;
+
+// This CPU's preempt count: how many preempt_off regions (and, later,
+// PreemptOff tokens) are open on it. Reached only through preempt_slot().
+struct per_cpu PreemptCount {
+    private depth: usize;
+}
+
+private let mut preempt_counts: [PreemptCount; KERNEL_MAX_CORES];
+
+// This CPU's slot, from TPIDR_EL1 alone: no cpu_id() and no CpuHere, so a
+// blocking point (and later the EL1 IRQ return) can find it.
+private fn preempt_slot() -> CpuHere {
+    let slot: usize = mrs_tpidr_el1() >> PERCPU_STACK_GROUP_SHIFT;
+    if (slot < KERNEL_MAX_CORES) {
+        let id: {0..<KERNEL_MAX_CORES as usize} = slot;
+        let mut cpu: CpuHere = { id };
+        return cpu;
+    }
+    kernel_invariant_stop();
+    let mut unreachable: CpuHere = { 0 };
+    return unreachable;
+}
+
 private fn preempt_off_enter() -> CpuHere {
     static_assert(KERNEL_PREEMPTIBLE == 0,
-                  "preempt_off blocks lower no disable/enable pair yet");
+                  "preempt_off's raise is not yet migration-safe and no IRQ return consults the count");
     let core: usize = cpu_id();
+    let mut slot: CpuHere = preempt_slot();
+    preempt_counts[slot].depth = preempt_counts[slot].depth + 1;
     if (core < KERNEL_MAX_CORES) {
+        if (KERNEL_PREEMPT_ASSERTS != 0 && slot.id != core) {
+            // TPIDR_EL1 names another CPU than MPIDR does.
+            kernel_invariant_stop();
+        }
         let id: {0..<KERNEL_MAX_CORES as usize} = core;
         let mut cpu: CpuHere = { id };
         return cpu;
@@ -44,6 +104,32 @@ private fn preempt_off_enter() -> CpuHere {
     kernel_invariant_stop();
     let mut unreachable: CpuHere = { 0 };
     return unreachable;
+}
+
+// Called by the compiler at every exit of a preempt_off block.
+private fn preempt_off_exit() {
+    let mut slot: CpuHere = preempt_slot();
+    let depth: usize = preempt_counts[slot].depth;
+    if (depth == 0) {
+        // An exit with no open region: the count would wrap.
+        kernel_invariant_stop();
+    }
+    preempt_counts[slot].depth = depth - 1;
+}
+
+// This CPU's preempt count.
+private fn preempt_count_here() -> usize {
+    let mut slot: CpuHere = preempt_slot();
+    return preempt_counts[slot].depth;
+}
+
+// A blocking point's runtime check: nothing may block inside a region.
+// Called first by every function the kernel declares the leaves of
+// may_block (the interrupt wait and the slot-pool acquires).
+fn preempt_assert_blockable() {
+    if (KERNEL_PREEMPT_ASSERTS != 0 && preempt_count_here() != 0) {
+        kernel_invariant_stop();
+    }
 }
 
 fn cpu_here_for_boot_probe(core: {0..<KERNEL_MAX_CORES as usize}) -> CpuHere {

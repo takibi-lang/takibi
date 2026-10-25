@@ -680,6 +680,7 @@ fn workload_profile_el0_enter() { workload_profile_transition(WorkloadCpuMode::E
 fn workload_profile_idle_enter() { workload_profile_transition(WorkloadCpuMode::Idle); }
 
 fn workload_profile_interrupt_wait() !{may_block} {
+    preempt_assert_blockable();
     workload_profile_idle_enter();
     interrupt_wait();
     workload_profile_el1_enter();

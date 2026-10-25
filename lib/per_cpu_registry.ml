@@ -10,6 +10,10 @@
 let stores : (string, unit) Hashtbl.t = Hashtbl.create 4
 let authority : (string * (string * Ast.type_expr) list) option ref = ref None
 let pending_authority : string option ref = ref None
+(* The file that declares the authority: the only file that may read
+   TPIDR_EL1 (`mrs_tpidr_el1`), the register through which it finds this
+   CPU's preempt count without an authority in hand (#638 stage 2). *)
+let authority_file : string option ref = ref None
 let globals : (string, string) Hashtbl.t = Hashtbl.create 4
 let rewritten : (string * int, string) Hashtbl.t = Hashtbl.create 8
 
@@ -18,21 +22,32 @@ let rewritten : (string * int, string) Hashtbl.t = Hashtbl.create 8
    that call's location here, and only a recorded call may reach the private
    mint across files. The block is the region in which preemption is
    disabled: the checker forbids may_block in it and keeps the authority
-   from leaving it. *)
+   from leaving it.
+
+   Stage 2 (#638): the block also ends with `preempt_off_exit();`, recorded
+   the same way, and code generation repeats that call before every
+   `return`, `break` or `continue` that leaves the block, so the per-CPU
+   preempt count the mint raised is lowered on every exit. *)
 let preempt_off_mint_name = "preempt_off_enter"
+let preempt_off_exit_name = "preempt_off_exit"
 let preempt_off_mints : (string * int, unit) Hashtbl.t = Hashtbl.create 32
+let preempt_off_exits : (string * int, unit) Hashtbl.t = Hashtbl.create 32
 
 let reset () =
   Hashtbl.reset stores;
   authority := None;
   pending_authority := None;
+  authority_file := None;
   Hashtbl.reset globals;
   Hashtbl.reset rewritten;
-  Hashtbl.reset preempt_off_mints
+  Hashtbl.reset preempt_off_mints;
+  Hashtbl.reset preempt_off_exits
 
 let mark_store name = Hashtbl.replace stores name ()
 let is_store name = Hashtbl.mem stores name
-let mark_authority name = pending_authority := Some name
+let mark_authority name (loc : Ast.loc) =
+  pending_authority := Some name;
+  authority_file := Some (Ast.source_file_of_loc loc)
 
 let finish name fields =
   if !pending_authority = Some name then begin
@@ -54,3 +69,23 @@ let mark_rewritten loc global = Hashtbl.replace rewritten (loc_key loc) global
 let rewritten_global loc = Hashtbl.find_opt rewritten (loc_key loc)
 let mark_preempt_off_mint loc = Hashtbl.replace preempt_off_mints (loc_key loc) ()
 let is_preempt_off_mint loc = Hashtbl.mem preempt_off_mints (loc_key loc)
+let mark_preempt_off_exit loc = Hashtbl.replace preempt_off_exits (loc_key loc) ()
+let is_preempt_off_exit loc = Hashtbl.mem preempt_off_exits (loc_key loc)
+
+(* A call the parser wrote for a preempt_off block: the mint or the exit.
+   Only these reach the authority file's private pair from another file. *)
+let is_preempt_off_call name loc =
+  (name = preempt_off_mint_name && is_preempt_off_mint loc)
+  || (name = preempt_off_exit_name && is_preempt_off_exit loc)
+
+(* The block a `preempt_off` statement parses to: its first statement binds
+   the recorded mint and its last calls the recorded exit. *)
+let preempt_off_block (stmts : Ast.stmt list) =
+  match stmts with
+  | { Ast.desc = Ast.Let (_, _, _, Some { Ast.desc = Ast.Call (m, []); loc = ml }, _); _ }
+    :: (_ :: _ as rest) when m = preempt_off_mint_name && is_preempt_off_mint ml ->
+      (match List.rev rest with
+       | ({ Ast.desc = Ast.Expr { Ast.desc = Ast.Call (x, []); loc = xl }; _ } as exit) :: _
+         when x = preempt_off_exit_name && is_preempt_off_exit xl -> Some exit
+       | _ -> None)
+  | _ -> None

@@ -336,6 +336,7 @@ linear struct SyscallSlot[unit: usize] {
 // A free slot, waiting for one if every slot is held. The compare-exchange
 // is an acquire, pairing with the release store in syscall_slot_release.
 private fn syscall_slot_acquire() -> SyscallSlot[0] !{may_block} {
+    preempt_assert_blockable();
     let mut index: {0..<KERNEL_MAX_CORES as usize} = 0;
     let mut held: bool = false;
     while (held == false) {

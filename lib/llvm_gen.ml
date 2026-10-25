@@ -5109,7 +5109,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
 
   | Call (("mrs_cntfrq_el0" | "mrs_cntpct_el0" | "mrs_sctlr_el1"
           | "mrs_esr_el1" | "mrs_far_el1" | "mrs_elr_el1" | "mrs_spsr_el1"
-          | "mrs_id_aa64mmfr0_el1" | "mrs_mpidr_el1"
+          | "mrs_id_aa64mmfr0_el1" | "mrs_mpidr_el1" | "mrs_tpidr_el1"
           | "mrs_daif") as name, []) ->
       (* GitHub issue #226/#227: one `mrs` each, register chosen by LLVM's
          own allocator via the "=r" output constraint -- never named by the
@@ -5135,6 +5135,10 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            per-platform and belongs in kernel/platform/*/init.tkb's
            cpu_id(); this intrinsic is only the register read. *)
         | "mrs_mpidr_el1"  -> "mpidr_el1"
+        (* GitHub issue #638 stage 2: this core's per-core offset, set once
+           by each core's entry path; the type checker confines the read to
+           the CPU-authority file. *)
+        | "mrs_tpidr_el1"  -> "tpidr_el1"
         (* GitHub issue #351: reading the interrupt mask is what lets a
            lock RESTORE it rather than unconditionally enabling -- the
            local_irq_save half that msr_daifset_irq alone cannot express. *)
@@ -6980,8 +6984,19 @@ let gen_func ?prog_types fdef =
      Pushed when entering While/For, popped on exit. *)
   let loop_stack : (llbasicblock * llbasicblock) Stack.t = Stack.create () in
 
+  (* GitHub issue #638 stage 2: the preempt_off blocks the statement being
+     generated is inside, innermost first, each with its exit call and the
+     loop depth at its entry. A `return` leaves all of them; a `break` or
+     `continue` leaves those entered inside the innermost loop. Each one
+     left gets its exit call before the branch, so the preempt count is
+     lowered on every exit, not only at the closing brace. *)
+  let region_stack : (Ast.stmt * int) list ref = ref [] in
+
   (* -- Statement codegen (defined here to access `res` for immutable lets) -- *)
-  let rec gen_stmt (s : Ast.stmt) =
+  let rec leave_regions left =
+    List.iter (fun (exit, entry_depth) ->
+        if left entry_depth then gen_stmt exit) !region_stack
+  and gen_stmt (s : Ast.stmt) =
     (* DWARF: every build_* call after set_current_debug_location auto-attaches
        this location, until the next call changes it -- so one call per statement
        here is enough to tag the whole statement, including nested If/While/For/
@@ -6998,9 +7013,13 @@ let gen_func ?prog_types fdef =
     else
     match s.desc with
     | Return None ->
+        leave_regions (fun _ -> true);
         emit_profile_return key (fun () -> ignore (build_ret_void builder))
     | Return (Some e) ->
         let (_, v) = gen_expr ~expected_ty:ret_ast locals e in
+        (* The value is computed inside the region; the region ends after
+           it and before the return. *)
+        leave_regions (fun _ -> true);
         if is_erased_view_type ret_ast then
           emit_profile_return key (fun () -> ignore (build_ret_void builder))
         else if sret then begin
@@ -7091,7 +7110,13 @@ let gen_func ?prog_types fdef =
         ) names
 
     | Block stmts ->
-        run_scoped_stmts stmts
+        (match Per_cpu_registry.preempt_off_block stmts with
+         | Some exit ->
+             region_stack := (exit, Stack.length loop_stack) :: !region_stack;
+             Fun.protect ~finally:(fun () ->
+                 region_stack := List.tl !region_stack)
+               (fun () -> run_scoped_stmts stmts)
+         | None -> run_scoped_stmts stmts)
 
     | UnsafeBlock stmts ->
         (* GitHub issue #315: mirrors type_inf.ml's UnsafeBlock case (sync
@@ -7203,10 +7228,14 @@ let gen_func ?prog_types fdef =
 
     | Break ->
         let (break_bb, _) = Stack.top loop_stack in
+        let depth = Stack.length loop_stack in
+        leave_regions (fun entry_depth -> entry_depth >= depth);
         ignore (build_br break_bb builder)
 
     | Continue ->
         let (_, continue_bb) = Stack.top loop_stack in
+        let depth = Stack.length loop_stack in
+        leave_regions (fun entry_depth -> entry_depth >= depth);
         ignore (build_br continue_bb builder)
 
     | While (cond, body) ->

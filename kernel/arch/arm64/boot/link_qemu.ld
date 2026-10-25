@@ -147,3 +147,10 @@ SECTIONS {
     . = ALIGN(4096);
     usable_ram_start = .;
 }
+/* GitHub issue #638 stage 2: TPIDR_EL1 is a core's index times this
+   stride, and kernel/kernel/cpu_authority.tkb recovers the index with a
+   shift by PERCPU_STACK_GROUP_SHIFT (16) to reach that core's preempt
+   count. A different group size would make it name another core's count. */
+ASSERT(percpu_stack_group_end - percpu_stack_base == 0x10000,
+       "per-core stack group stride must be 1 << PERCPU_STACK_GROUP_SHIFT")
+

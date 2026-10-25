@@ -7,6 +7,7 @@ use "kernel/fs/elf64.tkb";
 use "kernel/fs/ext2/ext2.tkb";
 use "kernel/lib/mutex.tkb";
 use "kernel/lib/atomic_word.tkb";
+use "kernel/kernel/cpu_authority.tkb";
 
 
 // User-page ownership is recorded only in the page tables. Address-space
@@ -73,6 +74,7 @@ linear struct ProcessImageSlot[unit: usize] {
 // before this holder's first read. A new holder starts with both sources
 // Absent.
 private fn process_image_slot_acquire() -> ProcessImageSlot[0] !{may_block} {
+    preempt_assert_blockable();
     let mut index: {0..<KERNEL_MAX_CORES as usize} = 0;
     let mut held: bool = false;
     while (held == false) {

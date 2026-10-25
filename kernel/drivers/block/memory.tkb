@@ -1,6 +1,7 @@
 use "kernel/drivers/block/block_cache.tkb";
 use "kernel/lib/task_mutex.tkb";
 use "kernel/lib/atomic_word.tkb";
+use "kernel/kernel/cpu_authority.tkb";
 
 const KERNEL_BLOCK_SIZE: usize = 1024;
 // 64 1 KiB filesystem blocks = 128 USB sectors = 64 KiB. This is the
@@ -102,6 +103,7 @@ linear struct BlockSlot[unit: usize] {
 // is an acquire, pairing with the release store in block_slot_release, so
 // the previous holder's last writes happen before this holder's first read.
 private fn block_slot_acquire() -> BlockSlot[0] !{may_block} {
+    preempt_assert_blockable();
     let mut index: {0..<KERNEL_MAX_CORES as usize} = 0;
     let mut held: bool = false;
     let hint: usize = cpu_id();

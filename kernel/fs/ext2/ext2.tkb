@@ -3,6 +3,7 @@ use "kernel/fs/ext2/mutation_lock.tkb";
 use "kernel/lib/execution_model.tkb";
 use "kernel/lib/byte_slice.tkb";
 use "kernel/lib/atomic_word.tkb";
+use "kernel/kernel/cpu_authority.tkb";
 
 const EXT2_SUPERBLOCK_BLOCK: usize = 1;
 const EXT2_MAGIC: u16 = 0xEF53;
@@ -72,6 +73,7 @@ linear struct Ext2Slot[unit: usize] {
 // the previous holder's last scratch writes happen before this holder's
 // first read.
 private fn ext2_slot_acquire() -> Ext2Slot[0] !{may_block} {
+    preempt_assert_blockable();
     let mut index: {0..<KERNEL_MAX_CORES as usize} = 0;
     let mut held: bool = false;
     while (held == false) {
