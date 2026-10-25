@@ -670,6 +670,72 @@ fn initial_user_payload() !{unsafe} {
                              0, 0, 0) != 0);
             }
         }
+        // GitHub issue #1016: O_TRUNC frees a file's blocks, counted on
+        // the full volume. Every directory above goes, so their blocks are
+        // the only free ones; a three-block file takes some; mkdirat counts
+        // the rest until ENOSPC. After O_TRUNC it must count exactly three
+        // more. fstat and read say size 0. The directories are made again
+        // for the cleanup below.
+        for attempt: usize in 0..<32 {
+            if (attempt < made) {
+                dir_path[9] = (0x41 + attempt) as u8;
+                fail_if(svc5(35, 0xFFFFFFFFFFFFFF9C, dir_path as *u8 as usize,
+                             0x200, 0, 0) != 0);
+            }
+        }
+        let mut trunc_content: [u8; 3072];
+        for byte: usize in 0..<3072 {
+            trunc_content[byte] = (byte / 1024 + 0x61) as u8;
+        }
+        let trunc_fd: usize = svc5(56, 0xFFFFFFFFFFFFFF9C,
+                                   "/trunc-file" as *u8 as usize,
+                                   O_CREAT_EXCL_RDWR, 0x1A4, 0);
+        fail_if(trunc_fd >= 64);
+        // One write per block: a write(2) moves at most 1024 bytes here.
+        for block: usize in 0..<3 {
+            fail_if(svc5(64, trunc_fd, ptr_of(trunc_content as *u8,
+                         block * 1024), 1024, 0, 0) != 1024);
+        }
+        fail_if(svc5(57, trunc_fd, 0, 0, 0, 0) != 0);
+        let mut trunc_stat: [u8; 128];
+        let trunc_stat_base: *u8 = trunc_stat as *u8;
+        fail_if(svc5(79, 0xFFFFFFFFFFFFFF9C, "/trunc-file" as *u8 as usize,
+                     ptr_of(trunc_stat_base, 0), 0, 0) != 0);
+        fail_if(payload_read_u64(trunc_stat_base, 48) != 3072);
+        let free_before: usize = free_blocks_by_mkdir();
+        let truncated_fd: usize = svc5(56, 0xFFFFFFFFFFFFFF9C,
+                                       "/trunc-file" as *u8 as usize,
+                                       O_TRUNC_RDWR, 0, 0);
+        fail_if(truncated_fd >= 64);
+        fail_if(svc5(63, truncated_fd, read_block as *u8 as usize,
+                     1, 0, 0) != 0);
+        fail_if(svc5(57, truncated_fd, 0, 0, 0, 0) != 0);
+        fail_if(svc5(79, 0xFFFFFFFFFFFFFF9C, "/trunc-file" as *u8 as usize,
+                     ptr_of(trunc_stat_base, 0), 0, 0) != 0);
+        fail_if(payload_read_u64(trunc_stat_base, 48) != 0);
+        fail_if(free_blocks_by_mkdir() != free_before + 3);
+        // An empty file truncates again; a missing name without O_CREAT is
+        // ENOENT and creates nothing; a directory is EISDIR.
+        let again_fd: usize = svc5(56, 0xFFFFFFFFFFFFFF9C,
+                                   "/trunc-file" as *u8 as usize,
+                                   O_TRUNC_RDONLY, 0, 0);
+        fail_if(again_fd >= 64);
+        fail_if(svc5(57, again_fd, 0, 0, 0, 0) != 0);
+        fail_if(svc5(56, 0xFFFFFFFFFFFFFF9C, "/trunc-none" as *u8 as usize,
+                     O_TRUNC_RDWR, 0, 0) != ENOENT_RC);
+        fail_if(svc5(56, 0xFFFFFFFFFFFFFF9C, "/trunc-none" as *u8 as usize,
+                     0, 0, 0) != ENOENT_RC);
+        fail_if(svc5(56, 0xFFFFFFFFFFFFFF9C, "/" as *u8 as usize,
+                     O_TRUNC_RDONLY, 0, 0) != EISDIR_RC);
+        fail_if(svc5(35, 0xFFFFFFFFFFFFFF9C,
+                     "/trunc-file" as *u8 as usize, 0, 0, 0) != 0);
+        for attempt: usize in 0..<32 {
+            if (attempt < made) {
+                dir_path[9] = (0x41 + attempt) as u8;
+                fail_if(svc5(34, 0xFFFFFFFFFFFFFF9C, dir_path as *u8 as usize,
+                             0x1ED, 0, 0) != 0);
+            }
+        }
         for attempt: usize in 0..<32 {
             if (attempt < made) {
                 dir_path[9] = (0x41 + attempt) as u8;
@@ -721,54 +787,6 @@ fn initial_user_payload() !{unsafe} {
                      O_CREAT_WRONLY, 0x1A4, 0) != EISDIR_RC);
         fail_if(svc5(35, 0xFFFFFFFFFFFFFF9C,
                      "/creat-file" as *u8 as usize, 0, 0, 0) != 0);
-        // GitHub issue #1016: O_TRUNC frees a file's blocks. A three-block
-        // file is truncated by openat; afterwards fstat and read say size 0
-        // and the volume has exactly three more free blocks, counted by
-        // mkdirat (one block each) until ENOSPC before and after.
-        let trunc_fd: usize = svc5(56, 0xFFFFFFFFFFFFFF9C,
-                                   "/trunc-file" as *u8 as usize,
-                                   O_CREAT_EXCL_RDWR, 0x1A4, 0);
-        fail_if(trunc_fd >= 64);
-        for block: usize in 0..<3 {
-            for byte: usize in 0..<1024 {
-                write_block[byte] = (block + 0x61) as u8;
-            }
-            fail_if(svc5(64, trunc_fd, write_block as *u8 as usize,
-                         1024, 0, 0) != 1024);
-        }
-        fail_if(svc5(57, trunc_fd, 0, 0, 0, 0) != 0);
-        let mut trunc_stat: [u8; 128];
-        let trunc_stat_base: *u8 = trunc_stat as *u8;
-        fail_if(svc5(79, 0xFFFFFFFFFFFFFF9C, "/trunc-file" as *u8 as usize,
-                     ptr_of(trunc_stat_base, 0), 0, 0) != 0);
-        fail_if(payload_read_u64(trunc_stat_base, 48) != 3072);
-        let free_before: usize = free_blocks_by_mkdir();
-        let truncated_fd: usize = svc5(56, 0xFFFFFFFFFFFFFF9C,
-                                       "/trunc-file" as *u8 as usize,
-                                       O_TRUNC_RDWR, 0, 0);
-        fail_if(truncated_fd >= 64);
-        fail_if(svc5(63, truncated_fd, read_block as *u8 as usize,
-                     1, 0, 0) != 0);
-        fail_if(svc5(57, truncated_fd, 0, 0, 0, 0) != 0);
-        fail_if(svc5(79, 0xFFFFFFFFFFFFFF9C, "/trunc-file" as *u8 as usize,
-                     ptr_of(trunc_stat_base, 0), 0, 0) != 0);
-        fail_if(payload_read_u64(trunc_stat_base, 48) != 0);
-        fail_if(free_blocks_by_mkdir() != free_before + 3);
-        // An empty file truncates again; a missing name without O_CREAT is
-        // ENOENT and creates nothing; a directory is EISDIR.
-        let again_fd: usize = svc5(56, 0xFFFFFFFFFFFFFF9C,
-                                   "/trunc-file" as *u8 as usize,
-                                   O_TRUNC_RDONLY, 0, 0);
-        fail_if(again_fd >= 64);
-        fail_if(svc5(57, again_fd, 0, 0, 0, 0) != 0);
-        fail_if(svc5(56, 0xFFFFFFFFFFFFFF9C, "/trunc-none" as *u8 as usize,
-                     O_TRUNC_RDWR, 0, 0) != ENOENT_RC);
-        fail_if(svc5(56, 0xFFFFFFFFFFFFFF9C, "/trunc-none" as *u8 as usize,
-                     0, 0, 0) != ENOENT_RC);
-        fail_if(svc5(56, 0xFFFFFFFFFFFFFF9C, "/" as *u8 as usize,
-                     O_TRUNC_RDONLY, 0, 0) != EISDIR_RC);
-        fail_if(svc5(35, 0xFFFFFFFFFFFFFF9C,
-                     "/trunc-file" as *u8 as usize, 0, 0, 0) != 0);
         // Retrying on the SAME fd appends at 7168. A failure that moved its
         // offset would create a zero-filled gap, caught by the read and EOF.
         write_block[0] = 0x21;
@@ -823,18 +841,21 @@ fn initial_user_payload() !{unsafe} {
                      1, 0, 0) != 0);
         fail_if(svc5(57, read_fd, 0, 0, 0, 0) != 0);
         // GitHub issue #1016: thirteen blocks reach the singly-indirect
-        // block, so O_TRUNC frees fourteen: the data and the pointer block.
-        let indirect_free: usize = free_blocks_by_mkdir();
+        // block, which O_TRUNC releases with the data. Counting the free
+        // blocks here would cost hundreds of mkdirat calls (the volume has
+        // room again), so the count is the host's e2fsck -fn after the
+        // lane: a block left marked or freed twice fails its pass 5.
         let indirect_fd: usize = svc5(56, 0, mutable_path as usize,
                                       O_TRUNC_RDONLY, 0, 0);
         fail_if(indirect_fd >= 64);
         fail_if(svc5(63, indirect_fd, read_block as *u8 as usize,
                      1, 0, 0) != 0);
         fail_if(svc5(57, indirect_fd, 0, 0, 0, 0) != 0);
+        let mut indirect_stat: [u8; 128];
+        let indirect_stat_base: *u8 = indirect_stat as *u8;
         fail_if(svc5(79, 0xFFFFFFFFFFFFFF9C, mutable_path as usize,
-                     ptr_of(trunc_stat_base, 0), 0, 0) != 0);
-        fail_if(payload_read_u64(trunc_stat_base, 48) != 0);
-        fail_if(free_blocks_by_mkdir() != indirect_free + 14);
+                     ptr_of(indirect_stat_base, 0), 0, 0) != 0);
+        fail_if(payload_read_u64(indirect_stat_base, 48) != 0);
         let restore_fd: usize = svc5(56, 0, mutable_path as usize, 1, 0, 0);
         fail_if(restore_fd >= 64);
         let restore_content: []const u8 = bs"before\n";
@@ -855,22 +876,21 @@ fn initial_user_payload() !{unsafe} {
 // GitHub issue #1016: the free block count as userspace can see it, with no
 // statfs. mkdirat takes one block (and one inode) per directory, so the
 // number made before ENOSPC is the free block count while inodes outnumber
-// blocks; every one is removed again. The volume has about 225 free blocks
-// at the call (QEMU, 2026-10-25); more than 676 fails the probe. If inodes
-// ran out first, both counts would be the inode count and the caller's
-// "three more" check would fail rather than pass vacuously.
+// blocks; every one is removed again. Called only on the nearly full volume
+// (a few blocks free): it is a few dozen syscalls there, and hundreds on a
+// volume with room, which the debug lane's budget cannot afford. More than
+// 32 fails the probe.
 fn free_blocks_by_mkdir() -> usize !{unsafe} {
-    let mut probe_path: [u8; 12];
-    let probe_stem: []const u8 = bs"/trunc-p";
-    for byte: usize in 0..<8 { probe_path[byte] = probe_stem[byte]; }
+    let mut probe_path: [u8; 11];
+    let probe_stem: []const u8 = bs"/trunc-pA";
+    for byte: usize in 0..<9 { probe_path[byte] = probe_stem[byte]; }
+    probe_path[9] = 0;
     probe_path[10] = 0;
-    probe_path[11] = 0;
     let mut made: usize = 0;
     let mut refused: bool = false;
-    for attempt: usize in 0..<676 {
+    for attempt: usize in 0..<32 {
         if (refused == false) {
-            probe_path[8] = (0x41 + attempt / 26) as u8;
-            probe_path[9] = (0x41 + attempt % 26) as u8;
+            probe_path[8] = (0x41 + attempt) as u8;
             let answer: usize = svc5(34, 0xFFFFFFFFFFFFFF9C,
                                      probe_path as *u8 as usize, 0x1ED, 0, 0);
             if (answer == 0) { made = made + 1; }
@@ -881,10 +901,9 @@ fn free_blocks_by_mkdir() -> usize !{unsafe} {
         }
     }
     fail_if(refused == false);
-    for attempt: usize in 0..<676 {
+    for attempt: usize in 0..<32 {
         if (attempt < made) {
-            probe_path[8] = (0x41 + attempt / 26) as u8;
-            probe_path[9] = (0x41 + attempt % 26) as u8;
+            probe_path[8] = (0x41 + attempt) as u8;
             fail_if(svc5(35, 0xFFFFFFFFFFFFFF9C, probe_path as *u8 as usize,
                          0x200, 0, 0) != 0);
         }
