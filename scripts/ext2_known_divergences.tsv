@@ -1,0 +1,9 @@
+# GitHub issue #1033: ext2 divergences from Linux that show in the structure
+# a guest leaves on its disk. scripts/ext2_postcheck.py stats each row's path
+# with debugfs after every writing QEMU lane; when the path is present and
+# the regex (what the stat prints once the issue is fixed) matches, the lane
+# FAILS, so the fix removes its row here rather than passing silently.
+# Columns, tab-separated: issue, path, regex of the fixed stat, reason.
+# The ash script (kernel/tests/common/ash/ash.stdin) makes /grow.
+# Content and size divergences (#1019, #1023) are tier B, #1034.
+#968	/grow	\(IND\)	/grow is asked for a 13th entry block; Linux grows it through an indirect block, Takibi returns ENOSPC
