@@ -178,8 +178,9 @@ next one taken. The done record of the previous queue is in HISTORY.md
    (tier A, fsck after every writing lane, counters against the kernel's
    own), #1035 (tier C, the ext2 driver as a host process over a RAM disk,
    #909 slice 2's first instance; seeded sequences, fault injection,
-   hostile images). The ext2 fixes #1016, #1019, #1020, #1021, #1022,
-   #1023 and #968 are rows of #1034 and land with their row flipped.
+   hostile images). #1016 (O_TRUNC) landed 2026-10-25 ahead of #1034
+   (maintainer); the ext2 fixes #1019, #1020, #1021, #1022, #1023 and #968
+   are rows of #1034 and land with their row flipped.
    Signals: #999 (host-Linux conformance suite), #1000 (one delivery
    chokepoint and `SignalDelivery.tla`, designed with #992), #948 (the
    terminal-read EINTR fixture), #432 (timed blocking).
