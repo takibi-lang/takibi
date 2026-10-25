@@ -149,7 +149,16 @@ struct Ext2ExecImage {
     inode: usize;
     file_length: usize;
 }
-must_use variant ExecResolveResult { NotFound; Resolved(Ext2ExecImage); }
+// GitHub issue #1040: NotFound is "no regular file by this name", the one
+// case the static-BusyBox fallback exists for. Invalid is a file that is
+// there but is no image this kernel maps (unreadable, a length out of range,
+// or refused by the ELF validator); it used to be NotFound too, so an
+// ET_EXEC binary ran BusyBox. Every caller now says what Invalid means.
+must_use variant ExecResolveResult {
+    NotFound;
+    Invalid;
+    Resolved(Ext2ExecImage);
+}
 struct DynamicExt2ExecImages {
     primary: Ext2ExecImage;
     interpreter: Ext2ExecImage;
@@ -163,9 +172,9 @@ must_use variant DynamicExecResolveResult {
 // argv[0] (minus its leading slash) directly against the mounted ext2
 // filesystem. Only the ELF header/program-table window is read into the
 // shared scratch buffer; PT_LOAD bytes are streamed later by
-// process_image_map_ext2_in_root(). Any failure at any step (name not
-// found, read failure, or invalid ELF) returns NotFound and preserves the
-// static-BusyBox fallback.
+// process_image_map_ext2_in_root(). A name that does not resolve is
+// NotFound; a file that resolves but is not a mappable image is Invalid
+// (#1040).
 fn kernel_exec_resolve_ext2_name_at(mount: Ext2Mount, name: borrow []const u8,
                                     metadata: [u8; EXEC_METADATA_SIZE..])
         -> ExecResolveResult !{unsafe} {
@@ -186,18 +195,18 @@ fn kernel_exec_resolve_ext2_inode_at(mount: Ext2Mount, inode: usize,
         ext2_regular_file_size(mount, inode);
     if (file_length == 0 ||
         file_length > ext2_max_regular_file_size()) {
-        return ExecResolveResult::NotFound;
+        return ExecResolveResult::Invalid;
     }
     match ext2_read_file_chunk(mount, inode, 0, metadata) {
         Ext2ReadResult::Invalid => {
-            return ExecResolveResult::NotFound;
+            return ExecResolveResult::Invalid;
         }
         Ext2ReadResult::Read(length) => {
             match distro_elf_validate_with_length(
                     exec_metadata_prefix(metadata, length),
                     file_length) {
                 DistroElfResult::Invalid => {
-                    return ExecResolveResult::NotFound;
+                    return ExecResolveResult::Invalid;
                 }
                 DistroElfResult::Valid(mut plan) => {
                     plan.image_length = file_length;
@@ -255,6 +264,9 @@ fn kernel_exec_resolve_musl_pair(primary: Ext2ExecImage, mount: Ext2Mount,
         ExecResolveResult::NotFound => {
             return DynamicExecResolveResult::Invalid;
         }
+        ExecResolveResult::Invalid => {
+            return DynamicExecResolveResult::Invalid;
+        }
         ExecResolveResult::Resolved(interpreter) => {
             let mut images: DynamicExt2ExecImages = {
                 primary, interpreter
@@ -273,6 +285,9 @@ fn kernel_exec_resolve_dynamic_ext2_images(mount: Ext2Mount,
             windows[EXEC_WINDOW_PRIMARY..<
                     EXEC_WINDOW_PRIMARY + EXEC_METADATA_SIZE]) {
         ExecResolveResult::NotFound => {
+            return DynamicExecResolveResult::Invalid;
+        }
+        ExecResolveResult::Invalid => {
             return DynamicExecResolveResult::Invalid;
         }
         ExecResolveResult::Resolved(primary) => {
@@ -296,6 +311,14 @@ fn kernel_exec_resolve_dynamic_ext2(mount: Ext2Mount,
                     EXEC_WINDOW_PRIMARY + EXEC_METADATA_SIZE]) {
         ExecResolveResult::NotFound => {
             return DynamicExecResolveResult::NotRequested;
+        }
+        // GitHub issue #1040: syscall_exec_format already refused this
+        // inode with ENOEXEC unless it validated, against the same window
+        // and the same validator, so reaching here is an invariant break
+        // and fail-stops (DynamicResolveInvalid) rather than running
+        // another program.
+        ExecResolveResult::Invalid => {
+            return DynamicExecResolveResult::Invalid;
         }
         ExecResolveResult::Resolved(primary) => {
             if (primary.plan.interpreter_length == 0) {
@@ -874,6 +897,12 @@ private fn kernel_process_child_exec_prepare_with(current_authority: borrow Proc
     let mut target: BootRootImageState = boot_execution.root_image;
     match kernel_exec_resolve_argv0(mount, argv, windows) {
         ExecResolveResult::NotFound => {}
+        // GitHub issue #1040: argv[0] is not the pathname. The pathname
+        // execve was called with was already judged at syscall time (an
+        // image it cannot map is ENOEXEC there), so an argv[0] naming some
+        // other non-image file -- `execve("/bin/busybox", {"/etc/init.sh"})`
+        // -- says nothing about the image and keeps the fallback, as before.
+        ExecResolveResult::Invalid => {}
         ExecResolveResult::Resolved(image) => {
             target = BootRootImageState::Ready(image);
         }
@@ -1400,6 +1429,9 @@ fn kernel_test_driver_run() {
                     rootfs_metadata as []u8) {
                 ExecResolveResult::NotFound => {
                     kernel_boot_log("rootfs image: /bin/busybox.static not found\n");
+                }
+                ExecResolveResult::Invalid => {
+                    kernel_boot_log("rootfs image: /bin/busybox.static invalid\n");
                 }
                 ExecResolveResult::Resolved(image) => {
                     boot_execution.root_image = BootRootImageState::Ready(image);

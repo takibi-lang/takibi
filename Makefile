@@ -1143,9 +1143,13 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_TASKSET) $@.tmp:/bin/taskset
 	python3 scripts/make_interp_probe_elf.py /lib/ld-none-aarch64.so.1 $@.interp_absent.tmp
 	python3 scripts/make_interp_probe_elf.py /bin/busybox.static $@.interp_other.tmp
+	python3 scripts/make_interp_probe_elf.py --et-exec /bin/busybox.static $@.et_exec.tmp
+	python3 scripts/make_interp_probe_elf.py --span 0x300000 /bin/busybox.static $@.wide_span.tmp
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $@.interp_absent.tmp $@.tmp:/etc/interp-absent
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $@.interp_other.tmp $@.tmp:/etc/interp-other
-	rm -f $@.interp_absent.tmp $@.interp_other.tmp
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $@.et_exec.tmp $@.tmp:/etc/et-exec
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $@.wide_span.tmp $@.tmp:/etc/wide-span
+	rm -f $@.interp_absent.tmp $@.interp_other.tmp $@.et_exec.tmp $@.wide_span.tmp
 	truncate -s 0 $@.devnull.tmp
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $@.devnull.tmp $@.tmp:/dev/null
 	rm -f $@.devnull.tmp
@@ -1224,6 +1228,8 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 	# Execute-only file for the maintained access/faccessat R_OK and W_OK checks.
 	debugfs -w -R 'set_inode_field /etc/interp-absent mode 0100111' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /etc/interp-other mode 0100755' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /etc/et-exec mode 0100755' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /etc/wide-span mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /etc/init.sh mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /bin/httpd.sh mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /bin/churn.sh mode 0100755' $@.tmp >/dev/null 2>&1

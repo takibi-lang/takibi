@@ -951,9 +951,12 @@ private fn syscall_exec_script_prefix(slot: borrow SyscallSlot[0], path_length: 
 // can act on has to be decided here.
 // GitHub issue #591: decide an ELF's interpreter at syscall time, where a
 // refusal can still be an errno. Past this point the exec is committed and
-// a failure to map fail-stops the caller. An ELF this validator rejects is
-// left to the mapping path exactly as before; only a valid PT_INTERP is
-// judged here.
+// a failure to map fail-stops the caller.
+// GitHub issue #1040: an ELF this validator rejects (ET_EXEC, or a PT_LOAD
+// span over the 2 MiB this kernel maps) is ENOEXEC here. It used to be
+// passed on as Executable, and the mapping path, which runs the same
+// validator over the same 1 KiB window and could not tell "invalid" from
+// "not found", ran the static BusyBox in its place.
 const SYSCALL_EXEC_INTERPRETER_MAX: usize = 64;
 
 private fn syscall_exec_elf_interpreter(slot: borrow SyscallSlot[0], mount: Ext2Mount, inode: usize)
@@ -963,6 +966,12 @@ private fn syscall_exec_elf_interpreter(slot: borrow SyscallSlot[0], mount: Ext2
     let window: [u8; KERNEL_BLOCK_SIZE..] =
         syscall_scratch[slot.index].elf_buffer as [u8; KERNEL_BLOCK_SIZE..];
     let file_length: usize = ext2_regular_file_size(mount, inode);
+    // The mapping path refuses the same lengths (kernel_exec_resolve_ext2_
+    // inode_at); refusing them here is what keeps that refusal reachable
+    // only as an invariant break.
+    if (file_length == 0 || file_length > ext2_max_regular_file_size()) {
+        return SyscallExecFormatResult::NotExecutable;
+    }
     let length: usize = match ext2_read_file_chunk(
             mount, inode, 0, window) {
         Ext2ReadResult::Invalid => {
@@ -978,7 +987,7 @@ private fn syscall_exec_elf_interpreter(slot: borrow SyscallSlot[0], mount: Ext2
         match distro_elf_validate_with_length(window[0..<bounded],
                                               file_length) {
             DistroElfResult::Invalid => {
-                return SyscallExecFormatResult::Executable(inode);
+                return SyscallExecFormatResult::NotExecutable;
             }
             DistroElfResult::Valid(valid) => { valid }
         };
