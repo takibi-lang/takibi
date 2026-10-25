@@ -1859,7 +1859,13 @@ run, not a specification.
   the repair itself could not complete (`EROFS`). In the last case the mount
   is fenced: every further ext2 write is refused until `ext2_recover` clears
   the blocks the failed operation had staged or was releasing and rewrites the
-  free counts from the bitmaps. Allocation exhaustion with successful rollback
+  free counts from the bitmaps. `O_TRUNC`, the last unlink of a file,
+  rename over a regular file and `rmdir` are all or nothing under a rejected
+  write (#1088): they log every range they rewrite and free their blocks last,
+  in one block-bitmap write; a failure before that write puts the log back and
+  the call answers `EIO` with the disk as it was, and a rollback that itself
+  fails fences the mount, which `ext2_recover` finishes before it recounts.
+  Allocation exhaustion with successful rollback
   instead returns `ENOSPC` and logs the ext2 block pool. The old allocation
   stays live until publication, so peak space includes both versions.
   Bitmaps are the truth and the counters are derived from them. A rejected write is assumed to leave its block as it

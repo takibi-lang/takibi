@@ -940,6 +940,318 @@ private fn ext2_io_failure_check(mount: Ext2Mount) -> bool {
                          large_writes - 3, base_blocks, base_inodes);
 }
 
+// GitHub issue #1088: O_TRUNC, the last unlink, rename over a file and rmdir
+// under a rejected write. Each operation runs with one write failing at
+// every position it reaches, and then with every write failing from that
+// position on, and must leave either its whole effect or none of it: the
+// names, the file's size, the counters agreeing with the bitmaps, and --
+// when it did nothing -- the free counts and the block bitmap exactly as
+// they were. A sticky failure fences the mount; ext2_recover must then
+// finish the rollback (or the recount) on its own.
+must_use variant Ext2ReleaseCase { Broken; Clean; RolledBack; Committed; }
+
+const EXT2_RELEASE_OP_TRUNCATE: usize = 0;
+const EXT2_RELEASE_OP_UNLINK: usize = 1;
+const EXT2_RELEASE_OP_RENAME: usize = 2;
+const EXT2_RELEASE_OP_RMDIR: usize = 3;
+const EXT2_RELEASE_SWEEP_LIMIT: usize = 64;
+
+// The inodes of release.bin and release.new as the setup made them.
+private let mut ext2_release_first: usize;
+private let mut ext2_release_second: usize;
+// Sticky cases that fenced the mount, so the check knows recover ran.
+private let mut ext2_release_fenced: usize;
+
+private fn ext2_release_lookup(mount: Ext2Mount, name: []const u8) -> usize {
+    match ext2_lookup_root(mount, name) {
+        Ext2LookupResult::Invalid => { return 1; }
+        Ext2LookupResult::NotFound => { return 0; }
+        Ext2LookupResult::Found(inode) => { return inode; }
+    }
+}
+
+// A new file of `length` payload bytes, or 0.
+private fn ext2_release_file(mount: Ext2Mount, name: []const u8,
+                             length: usize) -> usize {
+    match ext2_create_empty_file_in(mount, 2, name) {
+        Ext2CreateEmptyResult::Invalid => { return 0; }
+        Ext2CreateEmptyResult::NoSpace => { return 0; }
+        Ext2CreateEmptyResult::Created(inode) => {
+            if (length == 0 || length > EXT2_WRITE_FIXTURE_BYTES) { return 0; }
+            match ext2_write_regular_file_range(
+                    mount, inode, 0, ext2_write_fixture_source[0..<length]) {
+                Ext2ResizeResult::Resized => { return inode; }
+                Ext2ResizeResult::NoSpace => { return 0; }
+                Ext2ResizeResult::Invalid => { return 0; }
+                Ext2ResizeResult::Fenced => { return 0; }
+            }
+        }
+    }
+}
+
+private fn ext2_release_setup(mount: Ext2Mount, op: usize) -> bool {
+    ext2_release_first = 0;
+    ext2_release_second = 0;
+    if (op == EXT2_RELEASE_OP_RMDIR) {
+        match ext2_make_directory_in(mount, 2, bs"release.dir") {
+            Ext2MkdirResult::NoSpace => { return false; }
+            Ext2MkdirResult::Invalid => { return false; }
+            Ext2MkdirResult::Created(directory) => {
+                ext2_directory_keep(directory);
+                return true;
+            }
+        }
+    }
+    ext2_release_first = ext2_release_file(mount, bs"release.bin",
+                                           EXT2_WRITE_FIXTURE_BYTES);
+    if (ext2_release_first == 0) { return false; }
+    if (op == EXT2_RELEASE_OP_RENAME) {
+        ext2_release_second = ext2_release_file(mount, bs"release.new",
+                                                KERNEL_BLOCK_SIZE);
+        if (ext2_release_second == 0) { return false; }
+    }
+    return true;
+}
+
+private fn ext2_release_rmdir(mount: Ext2Mount) -> bool {
+    match ext2_claim_directory(mount, 2, bs"release.dir") {
+        Ext2ClaimResult::Invalid => { return false; }
+        Ext2ClaimResult::NotFound => { return false; }
+        Ext2ClaimResult::NotDirectory => { return false; }
+        Ext2ClaimResult::Claimed(directory) => {
+            match ext2_remove_directory_in(mount, 2, directory,
+                                           bs"release.dir") {
+                Ext2RmdirResult::Removed => { return true; }
+                Ext2RmdirResult::Invalid => { return false; }
+                Ext2RmdirResult::NotEmpty(kept) => {
+                    ext2_directory_keep(kept);
+                    return false;
+                }
+                Ext2RmdirResult::Refused(kept) => {
+                    ext2_directory_keep(kept);
+                    return false;
+                }
+            }
+        }
+    }
+}
+
+private fn ext2_release_run(mount: Ext2Mount, op: usize) -> bool {
+    if (op == EXT2_RELEASE_OP_TRUNCATE) {
+        match ext2_truncate_regular_file(mount, ext2_release_first) {
+            Ext2TruncateResult::Invalid => { return false; }
+            Ext2TruncateResult::Truncated => { return true; }
+        }
+    }
+    if (op == EXT2_RELEASE_OP_UNLINK) {
+        match ext2_unlink_name(mount, 2, bs"release.bin") {
+            Ext2UnlinkNameResult::Unlinked => { return true; }
+            Ext2UnlinkNameResult::Invalid => { return false; }
+            Ext2UnlinkNameResult::NotFound => { return false; }
+            Ext2UnlinkNameResult::IsDirectory => { return false; }
+            Ext2UnlinkNameResult::Unsupported => { return false; }
+        }
+    }
+    if (op == EXT2_RELEASE_OP_RENAME) {
+        match ext2_rename_in(mount, 2, bs"release.new", 2, bs"release.bin") {
+            Ext2RenameResult::Renamed => { return true; }
+            Ext2RenameResult::Invalid => { return false; }
+            Ext2RenameResult::NoSpace => { return false; }
+            Ext2RenameResult::NotFound => { return false; }
+            Ext2RenameResult::IsDirectory => { return false; }
+            Ext2RenameResult::NotDirectory => { return false; }
+            Ext2RenameResult::Unsupported => { return false; }
+        }
+    }
+    return ext2_release_rmdir(mount);
+}
+
+// release.bin as the setup wrote it: thirteen blocks through the
+// singly-indirect block, and its first block's bytes.
+private fn ext2_release_full_file(mount: Ext2Mount, inode: usize) -> bool {
+    if (ext2_regular_file_size(mount, inode) != EXT2_WRITE_FIXTURE_BYTES ||
+        ext2_write_fixture_sectors_match(mount, inode, 28) == false) {
+        return false;
+    }
+    match ext2_read_file_chunk(mount, inode, 0,
+                               ext2_write_fixture_readback as []u8) {
+        Ext2ReadResult::Invalid => { return false; }
+        Ext2ReadResult::Read(length) => {
+            if (length != KERNEL_BLOCK_SIZE) { return false; }
+        }
+    }
+    for byte: usize in 0..<KERNEL_BLOCK_SIZE {
+        if (ext2_write_fixture_readback[byte] !=
+            ext2_write_fixture_source[byte]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The names and the file as the operation leaves them: done or not done.
+private fn ext2_release_names_are(mount: Ext2Mount, op: usize,
+                                  done: bool) -> bool {
+    if (op == EXT2_RELEASE_OP_RMDIR) {
+        let directory: usize = ext2_release_lookup(mount, bs"release.dir");
+        if (done) { return directory == 0; }
+        return directory > 1;
+    }
+    let bin: usize = ext2_release_lookup(mount, bs"release.bin");
+    if (op == EXT2_RELEASE_OP_TRUNCATE) {
+        if (bin != ext2_release_first) { return false; }
+        if (done) {
+            return ext2_regular_file_size(mount, bin) == 0 &&
+                   ext2_write_fixture_sectors_match(mount, bin, 0);
+        }
+        return ext2_release_full_file(mount, bin);
+    }
+    if (op == EXT2_RELEASE_OP_UNLINK) {
+        if (done) { return bin == 0; }
+        return bin == ext2_release_first &&
+               ext2_release_full_file(mount, bin);
+    }
+    let fresh: usize = ext2_release_lookup(mount, bs"release.new");
+    if (done) { return bin == ext2_release_second && fresh == 0; }
+    return bin == ext2_release_first && fresh == ext2_release_second &&
+           ext2_release_full_file(mount, bin);
+}
+
+// Back to the state before the setup, with the device healthy.
+private fn ext2_release_teardown(mount: Ext2Mount) -> bool {
+    if (ext2_release_lookup(mount, bs"release.dir") > 1 &&
+        ext2_release_rmdir(mount) == false) {
+        return false;
+    }
+    match ext2_unlink_name(mount, 2, bs"release.bin") {
+        Ext2UnlinkNameResult::Unlinked => { }
+        Ext2UnlinkNameResult::NotFound => { }
+        Ext2UnlinkNameResult::Invalid => { return false; }
+        Ext2UnlinkNameResult::IsDirectory => { return false; }
+        Ext2UnlinkNameResult::Unsupported => { return false; }
+    }
+    match ext2_unlink_name(mount, 2, bs"release.new") {
+        Ext2UnlinkNameResult::Unlinked => { return true; }
+        Ext2UnlinkNameResult::NotFound => { return true; }
+        Ext2UnlinkNameResult::Invalid => { return false; }
+        Ext2UnlinkNameResult::IsDirectory => { return false; }
+        Ext2UnlinkNameResult::Unsupported => { return false; }
+    }
+}
+
+private fn ext2_release_case(mount: Ext2Mount, op: usize, skip: usize,
+                             sticky: bool, base_blocks: usize,
+                             base_inodes: usize) -> Ext2ReleaseCase {
+    if (ext2_release_setup(mount, op) == false) {
+        return Ext2ReleaseCase::Broken;
+    }
+    let mut before_blocks: usize = 0;
+    let mut before_inodes: usize = 0;
+    match ext2_free_counts(mount) {
+        Ext2FreeCountsResult::Invalid => { return Ext2ReleaseCase::Broken; }
+        Ext2FreeCountsResult::Counts(counts) => {
+            let (blocks, inodes) = counts;
+            before_blocks = blocks;
+            before_inodes = inodes;
+        }
+    }
+    match ext2_block_bitmap_snapshot(
+            mount, ext2_write_fixture_bitmap as [u8; KERNEL_BLOCK_SIZE..]) {
+        Ext2ReadResult::Invalid => { return Ext2ReleaseCase::Broken; }
+        Ext2ReadResult::Read(length) => { }
+    }
+    // What the operation frees: the file's thirteen blocks and its pointer
+    // block, or the directory's one block, and the inode unless O_TRUNC.
+    let mut freed_blocks: usize = 14;
+    let mut freed_inodes: usize = 1;
+    if (op == EXT2_RELEASE_OP_TRUNCATE) { freed_inodes = 0; }
+    if (op == EXT2_RELEASE_OP_RMDIR) { freed_blocks = 1; }
+    block_fault_arm(true, skip, sticky);
+    let done: bool = ext2_release_run(mount, op);
+    let injected: usize = block_fault_disarm();
+    if (ext2_is_fenced()) {
+        ext2_release_fenced = ext2_release_fenced + 1;
+        match ext2_recover(mount) {
+            Ext2RecoverResult::Failed => { return Ext2ReleaseCase::Broken; }
+            Ext2RecoverResult::Recovered => { }
+        }
+    }
+    if (ext2_release_names_are(mount, op, done) == false ||
+        ext2_counters_match_bitmaps(mount) == false) {
+        return Ext2ReleaseCase::Broken;
+    }
+    if (done) {
+        if (ext2_write_fixture_counts_match(mount, before_blocks + freed_blocks,
+                before_inodes + freed_inodes) == false) {
+            return Ext2ReleaseCase::Broken;
+        }
+    } else {
+        if (injected == 0 ||
+            ext2_write_fixture_counts_match(mount, before_blocks,
+                                            before_inodes) == false ||
+            ext2_io_bitmap_matches(mount) == false) {
+            return Ext2ReleaseCase::Broken;
+        }
+    }
+    if (ext2_release_teardown(mount) == false ||
+        ext2_write_fixture_counts_match(mount, base_blocks,
+                                        base_inodes) == false) {
+        return Ext2ReleaseCase::Broken;
+    }
+    if (injected == 0) { return Ext2ReleaseCase::Clean; }
+    if (done) { return Ext2ReleaseCase::Committed; }
+    return Ext2ReleaseCase::RolledBack;
+}
+
+// Fail the write at each position from 0 on until a run finishes before
+// reaching it. False on a broken verdict, or when no position rolled back.
+private fn ext2_release_sweep(mount: Ext2Mount, op: usize, sticky: bool,
+                              base_blocks: usize, base_inodes: usize)
+        -> bool {
+    let mut done: bool = false;
+    let mut rolled_back: bool = false;
+    for skip: usize in 0..<EXT2_RELEASE_SWEEP_LIMIT {
+        if (done == false) {
+            match ext2_release_case(mount, op, skip, sticky, base_blocks,
+                                    base_inodes) {
+                Ext2ReleaseCase::Broken => { return false; }
+                Ext2ReleaseCase::Clean => { done = true; }
+                Ext2ReleaseCase::RolledBack => { rolled_back = true; }
+                Ext2ReleaseCase::Committed => { }
+            }
+        }
+    }
+    return done && rolled_back;
+}
+
+fn ext2_release_failure_check(mount: Ext2Mount) -> bool {
+    let mut base_blocks: usize = 0;
+    let mut base_inodes: usize = 0;
+    match ext2_free_counts(mount) {
+        Ext2FreeCountsResult::Invalid => { return false; }
+        Ext2FreeCountsResult::Counts(counts) => {
+            let (blocks, inodes) = counts;
+            base_blocks = blocks;
+            base_inodes = inodes;
+        }
+    }
+    for index: usize in 0..<EXT2_WRITE_FIXTURE_BYTES {
+        ext2_write_fixture_source[index] = ((index * 31 + 3) % 251) as u8;
+    }
+    ext2_release_fenced = 0;
+    for op: usize in 0..<4 {
+        if (ext2_release_sweep(mount, op, false, base_blocks,
+                               base_inodes) == false ||
+            ext2_release_sweep(mount, op, true, base_blocks,
+                               base_inodes) == false) {
+            return false;
+        }
+    }
+    // Every sticky failure before a commit leaves a rollback that cannot
+    // land, so recover must have finished at least one per operation.
+    return ext2_release_fenced >= 4;
+}
+
 fn kernel_ext2_fixture_run(mount: Ext2Mount) !{logs, unsafe} {
     // GitHub issue #249: save the mount for
     // the exec prepare (kernel_exec_resolve_ext2_exec), which runs later, from
@@ -1056,6 +1368,12 @@ fn kernel_ext2_fixture_run(mount: Ext2Mount) !{logs, unsafe} {
         kernel_boot_log("ext2 full: block+inode NoSpace for mkdir+create, rolled back, control ok\n");
     } else {
         kernel_boot_log("ext2 full: failed\n");
+    }
+    // GitHub issue #1088. After the full check, so its counts are untouched.
+    if (ext2_release_failure_check(mount)) {
+        kernel_boot_log("ext2 release failure: truncate+unlink+rename+rmdir all or nothing, fence+recover ok\n");
+    } else {
+        kernel_boot_log("ext2 release failure: failed\n");
     }
     match ext2_exhaustion_mode(mount) {
         Ext2ExhaustionMode::Invalid => {

@@ -7,4 +7,5 @@ ext2 nested: create+lookup+unlink in /etc ok
 ext2 write indirect: rollback+grow+zero+restore ok
 ext2 io failure: every phase rolled back or committed, fence+recover ok
 ext2 full: block+inode NoSpace for mkdir+create, rolled back, control ok
+ext2 release failure: truncate+unlink+rename+rmdir all or nothing, fence+recover ok
 ext2 exhaustion: indirect NoSpace rollback, EL0 fillers ready

@@ -4447,7 +4447,6 @@ fn ext2_truncate_regular_file(mount: Ext2Mount, inode_number: usize)
     return result;
 }
 
-
 private fn ext2_truncate_regular_file_with(slot: borrow Ext2Slot[0],
         mount: Ext2Mount, inode_number: usize)
         -> Ext2TruncateResult !{unsafe} {
