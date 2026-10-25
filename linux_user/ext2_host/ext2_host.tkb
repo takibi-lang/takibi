@@ -1,0 +1,575 @@
+// GitHub issue #1035: the kernel's ext2 driver as a host process.
+//
+// kernel/fs/ext2/ext2.tkb, its mutation lock, the block layer
+// (kernel/drivers/block/memory.tkb and block_cache.tkb) and the syscalls'
+// ext2 halves (kernel/fs/ext2/ext2_syscall.tkb) are compiled here as the
+// kernel compiles them, over ram_disk.tkb. This is NetBSD's rump-kernel
+// idea done with the kernel's own source: the filesystem runs against a
+// disk image in user space, where scripts/ext2_host.py can run thousands of
+// operation sequences, replay any of them exactly, and fail any write.
+//
+// Protocol. File descriptor 3 is the image file, KERNEL_EXT2_IMAGE_LEN
+// bytes, read whole at start. Standard input is the operation script, one
+// operation per line; each answers one line on standard output:
+//
+//   N OP ARGS -> ERRNO        (0, or the errno's name)
+//
+// Paths are relative to the root and their directory part must name an
+// existing directory: resolving it is syscall.tkb's path walk, which is not
+// what this runs. The operations are the syscall sequences the shell's
+// commands make (scripts/ext2_eq.py OPS), each through ext2_syscall.tkb:
+//
+//   mkdir P | rmdir P | unlink P | rename A B
+//   trunc P                 openat(O_CREAT|O_TRUNC), no write
+//   write P TEXT            openat(O_CREAT|O_TRUNC), one write(2) of TEXT
+//   pwrite P OFF LEN SEED   openat(O_CREAT), then write(2)s of at most
+//                           1 KiB (the kernel's limit) from OFF, of LEN
+//                           pattern bytes (pattern_byte below)
+//   overwrite P SRC         openat(O_CREAT) P, then write SRC's bytes from
+//                           offset 0 without O_TRUNC (dd conv=notrunc)
+//   fault K torn|reject     the next operation's write number K (from 0)
+//                           to the disk fails, torn or rejected; after it
+//                           the line `fault injected=N` follows
+//   walk                    read every directory and file reachable from
+//                           the root, and print what was read
+//   sync                    write the image back to fd 3
+//
+// Every operation takes the mutation guard as the syscall does, so the
+// lock's asserts run too. A broken invariant ends the process through
+// host_stubs.S's kernel_invariant_stop with status 86.
+
+use "kernel/fs/ext2/ext2_syscall.tkb";
+
+extern fn linux_syscall(nr: usize, a0: usize, a1: usize, a2: usize, a3: usize) -> isize;
+
+const X86_64_NR_READ: usize = 0;
+const X86_64_NR_PREAD64: usize = 17;
+const X86_64_NR_PWRITE64: usize = 18;
+const IMAGE_FD: usize = 3;
+const SCRIPT_MAX: usize = 4194304;
+const WORDS_MAX: usize = 6;
+const WRITE_CHUNK: usize = 1024;
+const WALK_DIRS_MAX: usize = 4096;
+
+let mut script: [u8; SCRIPT_MAX];
+let mut script_len: usize = 0;
+let mut chunk: [u8; WRITE_CHUNK];
+let mut leaf_buffer: [u8; 256];
+let mut leaf_buffer_new: [u8; 256];
+let mut walk_stack: [usize; WALK_DIRS_MAX];
+let mut walk_block: [u8; 1024];
+let mut walk_file: [u8; 1024];
+
+// The bytes `pwrite` writes, a function of the file offset and the seed so
+// that scripts/ext2_host.py's oracle writes the same ones.
+fn pattern_byte(offset: usize, seed: usize) -> u8 {
+    return ((offset * 31 + (offset >> 8) + seed * 101 + 7) & 0xFF) as u8;
+}
+
+// LEAF copied into BUFFER: the syscalls hand ext2 a mutable name from
+// their path buffer, so the host does too.
+fn host_copy(buffer: []u8, leaf: borrow []const u8) -> HostSpan {
+    match host_span(buffer, 0, leaf.len) {
+        HostSpan::Outside => { return HostSpan::Outside; }
+        HostSpan::Inside(target) => {
+            let copied: usize = slice_copy(target, leaf);
+            return HostSpan::Inside(target);
+        }
+    }
+}
+
+fn put_slice(text: borrow []const u8) {
+    let mut i: usize = 0;
+    while (i < text.len) {
+        uart_putc(text[i]);
+        i = i + 1;
+    }
+}
+
+fn errno_name(answer: usize) -> *u8 {
+    if (answer == 0) { return "0"; }
+    if (answer == LINUX_ENOENT) { return "ENOENT"; }
+    if (answer == LINUX_EINVAL) { return "EINVAL"; }
+    if (answer == LINUX_ENOSPC) { return "ENOSPC"; }
+    if (answer == LINUX_EIO) { return "EIO"; }
+    if (answer == LINUX_EROFS) { return "EROFS"; }
+    if (answer == LINUX_EEXIST) { return "EEXIST"; }
+    if (answer == LINUX_ENOTDIR) { return "ENOTDIR"; }
+    if (answer == LINUX_ENOTEMPTY) { return "ENOTEMPTY"; }
+    if (answer == LINUX_EISDIR) { return "EISDIR"; }
+    if (answer == LINUX_EPERM) { return "EPERM"; }
+    return "EUNKNOWN";
+}
+
+fn parse_number(word: borrow []const u8) -> usize {
+    let mut value: usize = 0;
+    let mut i: usize = 0;
+    while (i < word.len) {
+        let digit: u8 = word[i];
+        if (digit >= 0x30 && digit <= 0x39 && value < 0x0FFFFFFFFFFFFFFF / 10) {
+            value = value * 10 + ((digit - 0x30) as usize);
+        }
+        i = i + 1;
+    }
+    return value;
+}
+
+// A path's directory, resolved, and where its last component starts.
+must_use variant HostParent { Missing; Found((usize, usize)); }
+
+fn host_parent(mount: Ext2Mount, path: borrow []const u8) -> HostParent !{unsafe} {
+    let mut slash: usize = path.len;
+    let mut i: usize = 0;
+    while (i < path.len) {
+        if (path[i] == 0x2F) { slash = i; }
+        i = i + 1;
+    }
+    if (slash == path.len) { return HostParent::Found((EXT2_ROOT_INODE, 0)); }
+    if (slash == 0 || slash >= path.len) { return HostParent::Missing; }
+    match ext2_lookup_path(mount, path[0..<slash]) {
+        Ext2LookupResult::Found(inode) => {
+            if ((ext2_inode_mode(mount, inode) & 0xF000) != 0x4000) {
+                return HostParent::Missing;
+            }
+            return HostParent::Found((inode, slash + 1));
+        }
+        Ext2LookupResult::NotFound => { return HostParent::Missing; }
+        Ext2LookupResult::Invalid => { return HostParent::Missing; }
+    }
+}
+
+// openat(2) of PATH for writing: its inode, or the errno.
+must_use variant HostOpen { Errno(usize); Opened(usize); }
+
+fn host_open(mount: Ext2Mount, guard: borrow Ext2MutationGuard[ext2_mutation_lock],
+             path: borrow []const u8, truncate: bool) -> HostOpen !{unsafe} {
+    match host_parent(mount, path) {
+        HostParent::Missing => { return HostOpen::Errno(LINUX_ENOENT); }
+        HostParent::Found(found) => {
+            let (parent, leaf_start) = found;
+            if (leaf_start >= path.len) { return HostOpen::Errno(LINUX_ENOENT); }
+
+            let leaf = path[leaf_start..<path.len];
+            let target: []u8 = match host_copy(leaf_buffer as []u8, leaf) {
+                HostSpan::Outside => { return HostOpen::Errno(LINUX_EINVAL); }
+                HostSpan::Inside(copy) => { copy }
+            };
+            match ext2_syscall_open_leaf(mount, guard, parent, target,
+                                         true, false, truncate) {
+                Ext2SyscallOpenResult::Errno(errno) => { return HostOpen::Errno(errno); }
+                Ext2SyscallOpenResult::Opened(inode) => { return HostOpen::Opened(inode); }
+            }
+        }
+    }
+}
+
+// The directory-entry operations: resolve the parent, copy the leaf into a
+// mutable buffer (the syscalls hand ext2 a []u8 from the path buffer).
+fn host_leaf_op(mount: Ext2Mount, guard: borrow Ext2MutationGuard[ext2_mutation_lock],
+                op: usize, path: borrow []const u8) -> usize !{unsafe} {
+    match host_parent(mount, path) {
+        HostParent::Missing => { return LINUX_ENOENT; }
+        HostParent::Found(found) => {
+            let (parent, leaf_start) = found;
+            if (leaf_start >= path.len) { return LINUX_ENOENT; }
+            let leaf = path[leaf_start..<path.len];
+
+            let target: []u8 = match host_copy(leaf_buffer as []u8, leaf) {
+                HostSpan::Outside => { return LINUX_EINVAL; }
+                HostSpan::Inside(copy) => { copy }
+            };
+            if (op == 0) { return ext2_syscall_mkdir(mount, guard, parent, target); }
+            if (op == 1) { return ext2_syscall_rmdir(mount, guard, parent, target); }
+            return ext2_syscall_unlink(mount, guard, parent, target);
+        }
+    }
+}
+
+fn host_rename(mount: Ext2Mount, guard: borrow Ext2MutationGuard[ext2_mutation_lock],
+               old_path: borrow []const u8, new_path: borrow []const u8) -> usize !{unsafe} {
+    let mut old_parent: usize = 0;
+    let mut old_start: usize = 0;
+    match host_parent(mount, old_path) {
+        HostParent::Missing => { return LINUX_ENOENT; }
+        HostParent::Found(found) => {
+            let (parent, start) = found;
+            old_parent = parent;
+            old_start = start;
+        }
+    }
+    let mut new_parent: usize = 0;
+    let mut new_start: usize = 0;
+    match host_parent(mount, new_path) {
+        HostParent::Missing => { return LINUX_ENOENT; }
+        HostParent::Found(found) => {
+            let (parent, start) = found;
+            new_parent = parent;
+            new_start = start;
+        }
+    }
+    if (old_start >= old_path.len || new_start >= new_path.len) { return LINUX_ENOENT; }
+    let old_leaf = old_path[old_start..<old_path.len];
+    let new_leaf = new_path[new_start..<new_path.len];
+
+
+    let old_name: []u8 = match host_copy(leaf_buffer as []u8, old_leaf) {
+        HostSpan::Outside => { return LINUX_EINVAL; }
+        HostSpan::Inside(copy) => { copy }
+    };
+    let new_name: []u8 = match host_copy(leaf_buffer_new as []u8, new_leaf) {
+        HostSpan::Outside => { return LINUX_EINVAL; }
+        HostSpan::Inside(copy) => { copy }
+    };
+    return ext2_syscall_rename(mount, guard, old_parent, old_name, new_parent, new_name);
+}
+
+// write(2)s of LEN pattern bytes from OFF, at most WRITE_CHUNK each.
+fn host_pwrite(mount: Ext2Mount, guard: borrow Ext2MutationGuard[ext2_mutation_lock],
+               inode: usize, offset: usize, length: usize, seed: usize) -> usize !{unsafe} {
+    let mut done: usize = 0;
+    let buffer = chunk as []u8;
+    while (done < length) {
+        let mut piece: usize = length - done;
+        if (piece > WRITE_CHUNK) { piece = WRITE_CHUNK; }
+        let content: []u8 = match host_span(buffer, 0, piece) {
+            HostSpan::Outside => { return LINUX_EINVAL; }
+            HostSpan::Inside(span) => { span }
+        };
+        for i: usize in 0..<content.len {
+            content[i] = pattern_byte(offset + done + i, seed);
+        }
+        let answer: usize = ext2_syscall_write_at(mount, guard, inode,
+                                                  offset + done, content);
+        if (answer != 0) { return answer; }
+        done = done + piece;
+    }
+    return 0;
+}
+
+// dd if=SRC of=DST conv=notrunc: read SRC a block at a time, write each at
+// the same offset of DST.
+fn host_overwrite(mount: Ext2Mount, guard: borrow Ext2MutationGuard[ext2_mutation_lock],
+                  inode: usize, source_path: borrow []const u8) -> usize !{unsafe} {
+    let source: usize = match ext2_lookup_path(mount, source_path) {
+        Ext2LookupResult::Found(found) => { found }
+        Ext2LookupResult::NotFound => { return LINUX_ENOENT; }
+        Ext2LookupResult::Invalid => { return LINUX_EIO; }
+    };
+    let buffer = chunk as []u8;
+    let mut offset: usize = 0;
+    while (true) {
+        let got: usize = match ext2_read_file_chunk(mount, source, offset, buffer) {
+            Ext2ReadResult::Invalid => { return LINUX_EIO; }
+            Ext2ReadResult::Read(n) => { n }
+        };
+        if (got == 0) { return 0; }
+        let content: []u8 = match host_span(buffer, 0, got) {
+            HostSpan::Outside => { return LINUX_EIO; }
+            HostSpan::Inside(span) => { span }
+        };
+        let answer: usize = ext2_syscall_write_at(mount, guard, inode, offset,
+                                                  content);
+        if (answer != 0) { return answer; }
+        offset = offset + got;
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- walk
+
+let mut walk_dirs: usize = 0;
+let mut walk_files: usize = 0;
+let mut walk_errors: usize = 0;
+let mut walk_bytes: usize = 0;
+let mut walk_sum: usize = 0;
+
+fn walk_read_file(mount: Ext2Mount, inode: usize) !{unsafe} {
+    let buffer = walk_file as []u8;
+    let mut offset: usize = 0;
+    let limit: usize = ext2_max_regular_file_size();
+    while (offset < limit) {
+        let got: usize = match ext2_read_file_chunk(mount, inode, offset, buffer) {
+            Ext2ReadResult::Invalid => { walk_errors = walk_errors + 1; 0 }
+            Ext2ReadResult::Read(n) => { n }
+        };
+        if (got == 0 || got > buffer.len) { return; }
+        for i: usize in 0..<buffer.len {
+            if (i < got) {
+                walk_sum = (walk_sum * 33 + (buffer[i] as usize)) & 0xFFFFFFFF;
+            }
+        }
+        walk_bytes = walk_bytes + got;
+        offset = offset + got;
+    }
+}
+
+fn walk_le16(bytes: borrow []const u8, at: usize) -> usize {
+    if (at >= bytes.len || bytes.len - at < 2) { return 0; }
+    return (bytes[at] as usize) | ((bytes[at + 1] as usize) << 8);
+}
+
+fn walk_le32(bytes: borrow []const u8, at: usize) -> usize {
+    if (at >= bytes.len || bytes.len - at < 4) { return 0; }
+    return (bytes[at] as usize) | ((bytes[at + 1] as usize) << 8) |
+           ((bytes[at + 2] as usize) << 16) | ((bytes[at + 3] as usize) << 24);
+}
+
+// Every directory reachable from the root, each read once (a directory
+// is pushed only when first seen; a cycle of directory entries is a
+// corrupt image, bounded by WALK_DIRS_MAX), every regular file read whole.
+fn host_walk(mount: Ext2Mount) !{unsafe} {
+    walk_dirs = 0; walk_files = 0; walk_errors = 0; walk_bytes = 0; walk_sum = 0;
+    let stack = walk_stack as []usize;
+    let block = walk_block as []u8;
+    let mut depth: usize = 0;
+    let mut pushed: usize = 1;
+    stack[0] = EXT2_ROOT_INODE;
+    depth = 1;
+    while (depth > 0) {
+        depth = depth - 1;
+        if (depth >= stack.len) { return; }
+        let directory: usize = stack[depth];
+        walk_dirs = walk_dirs + 1;
+        let mut offset: usize = 0;
+        let size: usize = ext2_inode_size(mount, directory);
+        while (offset < size) {
+            let got: usize = match ext2_read_directory_chunk(mount, directory, offset, block) {
+                Ext2ReadResult::Invalid => { walk_errors = walk_errors + 1; 0 }
+                Ext2ReadResult::Read(n) => { n }
+            };
+            if (got == 0 || got > block.len) { break; }
+            let mut at: usize = 0;
+            while (at + 8 <= got) {
+                let entry_inode: usize = walk_le32(block, at);
+                let rec_len: usize = walk_le16(block, at + 4);
+                let name_len: usize = walk_le16(block, at + 6) & 0xFF;
+                if (rec_len < 8 || at + rec_len > got) {
+                    walk_errors = walk_errors + 1;
+                    break;
+                }
+                let first: usize = walk_le16(block, at + 8);
+                let dot: bool = (name_len == 1 && (first & 0xFF) == 0x2E) ||
+                    (name_len == 2 && first == 0x2E2E);
+                if (entry_inode != 0 && dot == false) {
+                    let mode: usize = ext2_inode_mode(mount, entry_inode) & 0xF000;
+                    if (mode == 0x4000) {
+                        if (pushed < WALK_DIRS_MAX && depth < stack.len) {
+                            stack[depth] = entry_inode;
+                            depth = depth + 1;
+                            pushed = pushed + 1;
+                        } else {
+                            walk_errors = walk_errors + 1;
+                        }
+                    } else if (mode == 0x8000) {
+                        walk_files = walk_files + 1;
+                        walk_read_file(mount, entry_inode);
+                    }
+                }
+                at = at + rec_len;
+            }
+            offset = offset + got;
+        }
+    }
+}
+
+// ---------------------------------------------------------------- driver
+
+fn load_image() -> bool {
+    let image = ram_disk_image as []u8;
+    let mut done: usize = 0;
+    while (done < image.len) {
+        let got: isize = linux_syscall(X86_64_NR_PREAD64, IMAGE_FD,
+                                       (&image[done]) as usize, image.len - done, done);
+        if (got <= 0) { return false; }
+        done = done + (got as usize);
+    }
+    return true;
+}
+
+fn store_image() -> bool {
+    let image = ram_disk_image as []u8;
+    let mut done: usize = 0;
+    while (done < image.len) {
+        let put: isize = linux_syscall(X86_64_NR_PWRITE64, IMAGE_FD,
+                                       (&image[done]) as usize, image.len - done, done);
+        if (put <= 0) { return false; }
+        done = done + (put as usize);
+    }
+    return true;
+}
+
+fn load_script() -> bool {
+    let text = script as []u8;
+    let mut used: usize = 0;
+    while (used < text.len) {
+        let got: isize = linux_syscall(X86_64_NR_READ, 0,
+                                       (&text[used]) as usize, text.len - used, 0);
+        if (got < 0) { return false; }
+        if (got == 0) { script_len = used; return true; }
+        used = used + (got as usize);
+    }
+    return false;
+}
+
+fn run_line(mount: Ext2Mount, number: usize, line: []const u8) !{unsafe} {
+    let mut words: [[]const u8; WORDS_MAX];
+    let mut count: usize = 0;
+    let mut rest: []const u8 = line;
+    for w: usize in 0..<WORDS_MAX {
+        words[w] = bs"";
+    }
+    for w: usize in 0..<WORDS_MAX {
+        match byte_slice_split_first(rest, 0x20) {
+            ByteSliceSplitResult::Absent => {
+                if (rest.len > 0) { words[w] = rest; count = w + 1; }
+                rest = bs"";
+                break;
+            }
+            ByteSliceSplitResult::Found(split) => {
+                words[w] = split.before;
+                count = w + 1;
+                rest = split.after;
+            }
+        }
+    }
+    if (count == 0) { return; }
+    let op = words[0];
+    let a = words[1];
+    let b = words[2];
+    let c = words[3];
+    let d = words[4];
+
+    match op {
+        bs"walk" => {
+            host_walk(mount);
+            uart_puts("walk dirs="); uart_print(walk_dirs);
+            uart_puts(" files="); uart_print(walk_files);
+            uart_puts(" errors="); uart_print(walk_errors);
+            uart_puts(" bytes="); uart_print(walk_bytes);
+            uart_puts(" sum="); uart_print(walk_sum);
+            uart_puts("\n");
+            return;
+        }
+        bs"sync" => {
+            if (store_image()) { uart_puts("sync ok\n"); } else { uart_puts("sync failed\n"); }
+            return;
+        }
+        bs"fault" => {
+            let mut torn: bool = false;
+            if (slice_eq(b, bs"torn")) { torn = true; }
+            ram_disk_fault_arm(parse_number(a), torn);
+            uart_puts("fault armed\n");
+            return;
+        }
+        _ => { }
+    }
+
+    let guard = ext2_mutation_take();
+    let mut answer: usize = LINUX_EINVAL;
+    match op {
+        bs"mkdir" => { answer = host_leaf_op(mount, guard, 0, a); }
+        bs"rmdir" => { answer = host_leaf_op(mount, guard, 1, a); }
+        bs"unlink" => { answer = host_leaf_op(mount, guard, 2, a); }
+        bs"rename" => { answer = host_rename(mount, guard, a, b); }
+        bs"trunc" => {
+            match host_open(mount, guard, a, true) {
+                HostOpen::Errno(errno) => { answer = errno; }
+                HostOpen::Opened(inode) => { answer = 0; }
+            }
+        }
+        bs"write" => {
+            match host_open(mount, guard, a, true) {
+                HostOpen::Errno(errno) => { answer = errno; }
+                HostOpen::Opened(inode) => {
+                    let buffer = chunk as []u8;
+                    match host_copy(buffer, b) {
+                        HostSpan::Outside => { answer = LINUX_EINVAL; }
+                        HostSpan::Inside(text) => {
+                            answer = 0;
+                            if (text.len > 0) {
+                                answer = ext2_syscall_write_at(mount, guard, inode, 0, text);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        bs"pwrite" => {
+            match host_open(mount, guard, a, false) {
+                HostOpen::Errno(errno) => { answer = errno; }
+                HostOpen::Opened(inode) => {
+                    answer = host_pwrite(mount, guard, inode, parse_number(b),
+                                         parse_number(c), parse_number(d));
+                }
+            }
+        }
+        bs"overwrite" => {
+            match host_open(mount, guard, a, false) {
+                HostOpen::Errno(errno) => { answer = errno; }
+                HostOpen::Opened(inode) => {
+                    answer = host_overwrite(mount, guard, inode, b);
+                }
+            }
+        }
+        _ => { answer = LINUX_EINVAL; }
+    }
+    ext2_mutation_give(guard);
+    uart_print(number);
+    uart_puts(" ");
+    put_slice(line);
+    uart_puts(" -> ");
+    uart_puts(errno_name(answer));
+    uart_puts("\n");
+    let injected: usize = ram_disk_fault_disarm();
+    if (slice_eq(op, bs"fault") == false && injected > 0) {
+        uart_puts("fault injected="); uart_print(injected); uart_puts("\n");
+    }
+}
+
+fn app_main() !{unsafe} {
+    if (load_image() == false) {
+        uart_puts("ext2-host: cannot read the image on fd 3\n");
+        linux_exit(2);
+    }
+    if (load_script() == false) {
+        uart_puts("ext2-host: cannot read the script on stdin\n");
+        linux_exit(2);
+    }
+    let device: KernelBlockDevice = match usb_mass_storage_block_device() {
+        KernelBlockDeviceResult::Invalid => {
+            uart_puts("ext2-host: no device\n");
+            linux_exit(2);
+            return;
+        }
+        KernelBlockDeviceResult::Ready(found) => { found }
+    };
+    let mount: Ext2Mount = match ext2_mount(device) {
+        Ext2MountResult::Invalid => {
+            uart_puts("mount invalid\n");
+            linux_exit(3);
+            return;
+        }
+        Ext2MountResult::Mounted(found) => { found }
+    };
+    uart_puts("mounted\n");
+    let all: []const u8 = match host_span(script as []u8, 0, script_len) {
+        HostSpan::Outside => { return; }
+        HostSpan::Inside(span) => { span }
+    };
+    let mut rest: []const u8 = all;
+    let mut number: usize = 1;
+    while (rest.len > 0) {
+        match byte_slice_split_first(rest, 0x0A) {
+            ByteSliceSplitResult::Absent => {
+                run_line(mount, number, rest);
+                rest = bs"";
+            }
+            ByteSliceSplitResult::Found(split) => {
+                run_line(mount, number, split.before);
+                rest = split.after;
+            }
+        }
+        number = number + 1;
+    }
+    uart_puts("done\n");
+}

@@ -1,0 +1,7 @@
+const KERNEL_STACK_SHIFT: usize = 14;
+fn cpu_id() -> usize { return 0; }
+fn virtio_blk_capacity_sectors() -> usize { return 0; }
+fn virtio_blk_read_block(sector: u32, buf: []u8) -> bool { return false; }
+fn virtio_blk_write_block(sector: u32, buf: []u8) -> bool { return false; }
+fn workload_profile_note_block_read(bytes: usize) { }
+fn workload_profile_note_block_write(bytes: usize) { }

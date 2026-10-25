@@ -1,0 +1,111 @@
+// GitHub issue #1035: the host's block device, a RAM disk.
+//
+// kernel/drivers/block/memory.tkb's USB backend names three functions of
+// the board's xHCI driver -- disk_status, disk_read_sectors and
+// disk_write_sectors -- and this file supplies them, same names and shapes
+// as kernel/platform/rpi5/usb_xhci.tkb (and the QEMU stand-in
+// kernel/platform/qemu/usb_disk_absent.tkb), over a byte array the driver
+// program loads from an image file. So the block layer, its cache and ext2
+// above it run as they are; only the device is the host's. It exists in
+// linux_user only: the kernel removed its embedded-image backend on purpose
+// (a board ran from it), and nothing here can reach a kernel image.
+//
+// The array is KERNEL_EXT2_IMAGE_LEN bytes, the extent memory.tkb's USB
+// device exposes.
+//
+// Fail points (#909 slice 1's shape, at disk_write_sectors): arm one, and
+// the write that many writes later fails. A rejected write leaves its
+// sectors as they were; a torn one writes its first sector and fails, which
+// is what a device that lost power or a link mid-command can leave. One
+// fault at a time, non-sticky: the next write after it reaches the disk.
+
+use "kernel/drivers/block/memory.tkb";
+
+must_use variant DiskIoResult {
+    Ok;
+    Err(i32);
+}
+
+const RAM_DISK_SECTOR: usize = 512;
+
+let mut ram_disk_image: [u8; KERNEL_EXT2_IMAGE_LEN];
+let mut ram_disk_writes: usize = 0;
+private let mut ram_disk_fault_armed: bool = false;
+private let mut ram_disk_fault_skip: usize = 0;
+private let mut ram_disk_fault_torn: bool = false;
+private let mut ram_disk_fault_hits: usize = 0;
+
+fn ram_disk_fault_arm(skip: usize, torn: bool) {
+    ram_disk_fault_armed = true;
+    ram_disk_fault_skip = skip;
+    ram_disk_fault_torn = torn;
+}
+
+// Stop injecting; answer how many writes were failed since arming.
+fn ram_disk_fault_disarm() -> usize {
+    let hits: usize = ram_disk_fault_hits;
+    ram_disk_fault_armed = false;
+    ram_disk_fault_hits = 0;
+    return hits;
+}
+
+// The N bytes of S from FROM, when they are inside it.
+must_use variant HostSpan { Outside; Inside([]u8); }
+
+fn host_span(s: []u8, from: usize, n: usize) -> HostSpan {
+    if (from <= s.len) {
+        let tail = s[from..<s.len];
+        if (n <= tail.len) { return HostSpan::Inside(tail[0..<n]); }
+    }
+    return HostSpan::Outside;
+}
+
+fn disk_status() -> DiskIoResult { return DiskIoResult::Ok; }
+
+private fn ram_disk_span(sector: u32, length: usize) -> bool {
+    let start: usize = (sector as usize) * RAM_DISK_SECTOR;
+    return start <= KERNEL_EXT2_IMAGE_LEN && length <= KERNEL_EXT2_IMAGE_LEN - start;
+}
+
+fn disk_read_sectors(sector: u32, buf: []u8) -> DiskIoResult {
+    if (ram_disk_span(sector, buf.len) == false) { return DiskIoResult::Err(-5); }
+    let start: usize = (sector as usize) * RAM_DISK_SECTOR;
+    match host_span(ram_disk_image as []u8, start, buf.len) {
+        HostSpan::Outside => { return DiskIoResult::Err(-5); }
+        HostSpan::Inside(sectors) => {
+            let copied: usize = slice_copy(buf, sectors);
+            return DiskIoResult::Ok;
+        }
+    }
+}
+
+fn disk_write_sectors(sector: u32, buf: []u8) -> DiskIoResult {
+    if (ram_disk_span(sector, buf.len) == false) { return DiskIoResult::Err(-5); }
+    let start: usize = (sector as usize) * RAM_DISK_SECTOR;
+    ram_disk_writes = ram_disk_writes + 1;
+    let mut length: usize = buf.len;
+    let mut failed: bool = false;
+    if (ram_disk_fault_armed) {
+        if (ram_disk_fault_skip > 0) {
+            ram_disk_fault_skip = ram_disk_fault_skip - 1;
+        } else {
+            ram_disk_fault_armed = false;
+            ram_disk_fault_hits = ram_disk_fault_hits + 1;
+            failed = true;
+            length = 0;
+            if (ram_disk_fault_torn && buf.len > RAM_DISK_SECTOR) {
+                length = RAM_DISK_SECTOR;
+            }
+        }
+    }
+    if (length > 0 && length <= buf.len) {
+        match host_span(ram_disk_image as []u8, start, length) {
+            HostSpan::Outside => { return DiskIoResult::Err(-5); }
+            HostSpan::Inside(sectors) => {
+                let copied: usize = slice_copy(sectors, buf[0..<length]);
+            }
+        }
+    }
+    if (failed) { return DiskIoResult::Err(-5); }
+    return DiskIoResult::Ok;
+}
