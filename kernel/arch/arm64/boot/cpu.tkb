@@ -35,7 +35,11 @@
 // that the shadow is written BEFORE the register, in both directions:
 //   masking -- an interrupt taken between the two finds the shadow masked,
 //     and its handler restores masked on the way out; the GIC answers its
-//     IAR with the spurious 1023 if the mask got there first;
+//     IAR with the spurious 1023 if the mask got there first. The window
+//     does not close at the store: the PMR write is posted, so an IRQ can
+//     still be taken a few instructions INTO the masked section. Such an
+//     entry reads 1023, and gic_irq_dispatch returns before any ordinary
+//     handler state for it (GitHub issue #1119);
 //   unmasking -- nothing ordinary can arrive until the register is written,
 //     by which time the shadow already says unmasked.
 // The stop's handler writes neither.

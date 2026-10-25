@@ -153,8 +153,13 @@ def collect(args):
         classified = (values["el0_cycles"] + values["el1_cycles"] +
                       values["irq_cycles"] + values["idle_cycles"])
         if classified != values["wall_cycles"]:
+            # GitHub issue #1119: say which way and by how much. An excess
+            # is the same span charged twice -- a nested entry inside a
+            # masked charge -- and a shortfall a span charged to nobody.
             raise ValueError(
-                f"CPU {expected_cpu} classified cycles do not equal wall cycles")
+                f"CPU {expected_cpu} classified cycles do not equal wall cycles"
+                f" (classified={classified} wall={values['wall_cycles']}"
+                f" difference={classified - values['wall_cycles']:+d})")
         running = (values["el0_cycles"] + values["el1_cycles"] +
                    values["irq_cycles"])
         aggregate_running += running

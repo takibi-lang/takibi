@@ -100,6 +100,9 @@ fn platform_gic_sgi_send(targets: u32, sgi: u32) !{unsafe} {
 // running ordinary handler.
 const GIC_WORLD_STOP_SGI: u32 = 1;
 const GIC_DEBUG_STOP_SGI: u32 = 2;
+// GICv2 INTIDs 1020..1023 are not interrupts: the CPU interface answers
+// GICC_IAR with one of them when nothing it may signal is pending.
+const GIC_SPURIOUS_INTID_FIRST: u32 = 1020;
 const GIC_PRIORITY_NMI: u8 = 0x80;
 const GIC_PRIORITY_IRQ: u8 = 0xA0;
 const GIC_PMR_MASKED: u32 = 0xA0;
@@ -177,6 +180,20 @@ fn gic_irq_dispatch(frame: sink FrameRef[process], lower_el: bool)
         gicc.eoir = iar;
         return frame_any(frame);
     }
+    // GitHub issue #1119: a spurious acknowledgement is no interrupt, so it
+    // touches nothing an ordinary handler owns -- no profile accounting, no
+    // EOI (GICv2 ignores one for these INTIDs). It is common, not rare: the
+    // PMR write that masks IRQs (irq_priority_mask_write) is a posted MMIO
+    // store, so a core with DAIF.I clear can still take an IRQ for a few
+    // instructions after disable_irq, and by the time this handler reads
+    // IAR the mask has arrived and the GIC answers 1023. That entry lands
+    // INSIDE the masked section it interrupted. On RPi5 it landed inside
+    // workload_profile_charge, whose read-modify-write of last_tick the
+    // nested irq_enter/irq_exit then charged a second time: CPU 0's
+    // classified cycles came out 876 above its wall cycles.
+    if (id >= GIC_SPURIOUS_INTID_FIRST) {
+        return frame_any(frame);
+    }
     // GitHub issue #920: every other source hands this handler's mask to
     // the GIC priority mask and clears DAIF.I, so the stop above can still
     // nest into the handler if it never returns; the mask it interrupted is
@@ -190,8 +207,10 @@ fn gic_irq_dispatch(frame: sink FrameRef[process], lower_el: bool)
 
 // The quiescent stop is an ordinary source: taken only where ordinary IRQs
 // were open, so this core holds no masking lock while it waits in the pen.
+// `id` is refined below GIC_SPURIOUS_INTID_FIRST (1020): the compiler refuses
+// a caller that has not returned on a spurious IAR first (GitHub issue #1119).
 fn gic_irq_dispatch_after_open(frame: sink FrameRef[process], lower_el: bool,
-        iar: u32, id: u32) -> AnyFrame !{interrupt, unsafe} {
+        iar: u32, id: {0..<1020 as u32}) -> AnyFrame !{interrupt, unsafe} {
     if (id == GIC_WORLD_STOP_SGI) {
         kernel_world_stop_serve(frame);
         gicc.eoir = iar;

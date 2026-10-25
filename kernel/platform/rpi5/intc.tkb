@@ -247,7 +247,7 @@ fn gic_pmu_core_enable() {
 // does not come back to the caller's restore; the idle loop's enable_irq
 // puts the mask back instead.
 fn platform_irq_dispatch_ordinary(frame: sink FrameRef[process], lower_el: bool,
-        iar: u32, id: u32) -> AnyFrame !{interrupt, unsafe} {
+        iar: u32, id: {0..<1020 as u32}) -> AnyFrame !{interrupt, unsafe} {
     workload_profile_irq_enter();
 
     // GitHub issue #497: a PMU overflow, on any core, before the tick path

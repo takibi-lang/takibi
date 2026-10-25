@@ -178,6 +178,24 @@ def main():
                 "classified cycles do not equal wall cycles" not in result.stderr):
             raise RuntimeError("time-partition negative control did not reject")
 
+        # GitHub issue #1119: the shape the RPi5 board produced -- a busy
+        # CPU with no idle time whose classes sum ABOVE its wall cycles,
+        # because a spurious IRQ nested inside a masked charge counted one
+        # span twice. Every other CPU partitions exactly.
+        uart.write_text(good_text.replace(
+            "el0_cycles=6 el1_cycles=2 irq_cycles=1 idle_cycles=1",
+            "el0_cycles=7 el1_cycles=2 irq_cycles=2 idle_cycles=0", 1),
+            encoding="ascii")
+        result = run(
+            "collect", "--uart-log", str(uart), "--output", str(artifact),
+            "--target", "rpi5", "--commit", "test")
+        if (result.returncode == 0 or
+                "CPU 0 classified cycles do not equal wall cycles "
+                "(classified=11 wall=10 difference=+1)" not in result.stderr):
+            raise RuntimeError(
+                "double-charged time-partition negative control did not "
+                "reject: " + result.stderr)
+
         uart.write_text(good_text.replace("wall_cycles=10", "wall_cycles=11", 1)
                         .replace("idle_cycles=1", "idle_cycles=2", 1),
                         encoding="ascii")
