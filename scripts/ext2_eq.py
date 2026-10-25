@@ -37,7 +37,7 @@ where a block leaked by an unlink or truncate shows.
 
 Usage:
   ext2_eq.py gen-sh OPS OUT                 the guest/host shell script
-  ext2_eq.py host OPS BUSYBOX WORKDIR       run it on host Linux; prints log
+  ext2_eq.py host OPS BUSYBOX               run it on host Linux; prints log
   ext2_eq.py check-expected OPS BUSYBOX EXPECTED
   ext2_eq.py replay OPS BUSYBOX PRISTINE OUT
   ext2_eq.py compare OPS EXPECTED KERNEL_IMAGE HOST_IMAGE
@@ -74,6 +74,7 @@ OPS = {
     "rmdir": (("path",), 'rmdir "$R/{0}"'),
     "write": (("path", "text"), '$B echo -n {1} >"$R/{0}"'),
     "fill": (("path", "count"), None),
+    "zeros": (("path", "count"), '$B printf %0{1}d 0 >"$R/{0}"'),
     "overwrite": (("path", "path"), '$B dd if="$R/{1}" of="$R/{0}" conv=notrunc 2>/dev/null'),
     "unlink": (("path",), 'rm "$R/{0}"'),
     "rename": (("path", "path"), 'mv "$R/{0}" "$R/{1}"'),
@@ -157,7 +158,7 @@ def gen_sh(rows):
                 continue
             else:
                 cmd = OPS[op][1].format(*args)
-            out.append(f"{cmd} 2>/dev/null")
+            out.append(cmd if op == "zeros" else f"{cmd} 2>/dev/null")
             out.append(f'echo "{label} -> $?"')
             for arg, kind in zip(args, OPS[op][0]):
                 if kind == "path":
@@ -502,8 +503,9 @@ def main(argv):
         if command == "gen-sh" and len(args) == 2:
             with open(args[1], "w") as handle:
                 handle.write(gen_sh(rows))
-        elif command == "host" and len(args) == 3:
-            log, _tree = run_host(rows, args[1], args[2])
+        elif command == "host" and len(args) == 2:
+            with tempfile.TemporaryDirectory() as work:
+                log, _tree = run_host(rows, args[1], work)
             sys.stdout.write(log)
         elif command == "check-expected" and len(args) == 3:
             with tempfile.TemporaryDirectory() as work:

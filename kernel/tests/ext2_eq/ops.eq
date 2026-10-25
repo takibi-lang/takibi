@@ -54,3 +54,12 @@ unlink unlink_indirect/f
 row dir_indirect differ #968
 mkdir dir_indirect
 files dir_indirect 52
+
+row probe match -
+mkdir probe
+zeros probe/a 100
+zeros probe/b 1023
+zeros probe/c 1024
+zeros probe/d 1025
+zeros probe/e 3000
+zeros probe/k 1024
