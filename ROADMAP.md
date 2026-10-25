@@ -186,14 +186,16 @@ next one taken. The done record of the previous queue is in HISTORY.md
    stage 2 (docs/VERIFICATION_DESIGN.md, "Stage 2 scope"), then #955's
    evidence log; #986 slice 2 (region arithmetic and overlay length as
    z3-checked obligations) once the maintainer authorizes it (Awaiting).
-2. **Equivalence oracles.** ext2: #1034 (tier B, differential replay
-   against `debugfs -w` and host Linux, logical image comparison), #1033
-   (tier A, fsck after every writing lane, counters against the kernel's
-   own), #1035 (tier C, the ext2 driver as a host process over a RAM disk,
-   #909 slice 2's first instance; seeded sequences, fault injection,
-   hostile images). #1016 (O_TRUNC) landed 2026-10-25 ahead of #1034
-   (maintainer); the ext2 fixes #1019, #1020, #1021, #1022, #1023 and #968
-   are rows of #1034 and land with their row flipped.
+2. **Equivalence oracles.** ext2: tier B (#1034, landed 2026-10-25:
+   `kernel/tests/ext2_eq/ops.eq` replayed on host Linux and libext2fs,
+   compared logically in kernelcheck-qemu-main), #1033 (tier A, fsck after
+   every writing lane, counters against the kernel's own), #1035 (tier C,
+   the ext2 driver as a host process over a RAM disk, #909 slice 2's first
+   instance; seeded sequences, fault injection, hostile images). The ext2
+   fixes #1019, #1020 and #968 are `differ` rows of ops.eq and land with
+   their row flipped; #1021, #1022 and #1023 become rows when the kernel
+   offers what they need (free space, truncate(2), dup2), and #1067
+   (printf) and #1070 (sendfile to a file) are writers the rows avoid.
    Signals: #999 (host-Linux conformance suite), #1000 (one delivery
    chokepoint and `SignalDelivery.tla`, designed with #992), #948 (the
    terminal-read EINTR fixture), #432 (timed blocking).
