@@ -100,6 +100,8 @@ const AARCH64_NR_PIPE2: usize = 59;
 const LINUX_O_CLOEXEC: usize = 0x80000;
 const LINUX_EPIPE: usize = 0xFFFFFFFFFFFFFFE0;
 const LINUX_SIGPIPE: usize = 13;
+// GitHub issue #1113: send/sendto's flag for EPIPE without SIGPIPE.
+const LINUX_MSG_NOSIGNAL: usize = 0x4000;
 // lseek: BusyBox head gives back the input it read past its last line with
 // lseek(0, -n, SEEK_CUR), which on a pipe is ESPIPE (GitHub issue #1042).
 const AARCH64_NR_LSEEK: usize = 62;
@@ -2186,7 +2188,8 @@ must_use variant SyscallIoResult {
     TerminalWait;
     // GitHub issue #1042: the call named a pipe in its record under the
     // pipe lock and must wait on it; or it wrote to a pipe whose read end
-    // is closed, which is EPIPE and a SIGPIPE to the writer.
+    // is closed, which is EPIPE and a SIGPIPE to the writer. #1113: a TCP
+    // socket that is listening, never connected or closed answers the same.
     PipeWait;
     PipeBroken;
 }
@@ -2658,14 +2661,17 @@ fn syscall_write_segment_with(slot: borrow SyscallSlot[0],
             // snapshot are taken under the connection's owner, not before
             // it, so a peer's write cannot act on a state the owning core
             // is changing.
+            // GitHub issue #1113: a connection that is gone (retired, or
+            // no longer open) is Linux's EPIPE with SIGPIPE, as for a pipe
+            // with no reader; it was EINVAL.
             match tcp_connection_take(write_slot, write_generation) {
                 TcpConnectionTakeResult::Missing => {
-                    return SyscallIoResult::Errno(LINUX_EINVAL);
+                    return SyscallIoResult::PipeBroken;
                 }
                 TcpConnectionTakeResult::Ready(owner) => {
                   if (tcp_connection_of(owner).connection_open == false) {
                       tcp_connection_put(owner);
-                      return SyscallIoResult::Errno(LINUX_EINVAL);
+                      return SyscallIoResult::PipeBroken;
                   }
                   // GitHub issue #1112: Linux's tcp_sendmsg checks the
                   // connection state first, then sends nothing and returns
@@ -2756,6 +2762,16 @@ fn syscall_write_segment_with(slot: borrow SyscallSlot[0],
                     }
                   }
                 }
+            }
+        }
+        // GitHub issue #1113: a socket that is listening or never
+        // connected is Linux's LISTEN or CLOSE state, where tcp_sendmsg's
+        // sk_stream_wait_connect answers EPIPE (with SIGPIPE) for any
+        // length, 0 included; it was EBADF.
+        match kernel_listener_fd_lookup(fd) {
+            KernelListenerLookupResult::Missing => {}
+            KernelListenerLookupResult::Found(listener_fd) => {
+                return SyscallIoResult::PipeBroken;
             }
         }
         match unified_pipe_lookup(kernel_syscall_process_key(), fd) {
@@ -7307,11 +7323,41 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
 
     // sendto(fd, buf, len, flags, dest_addr, addrlen) with no destination is
     // write(fd, buf, len): musl's send() is exactly that call, and every
-    // socket here is a connected stream. flags are ignored, as no flag
-    // (MSG_NOSIGNAL aside) changes what a connected write does here. A
-    // destination address on a stream socket is left to ENOSYS below.
+    // socket here is a stream. Other flags are ignored, as none changes what
+    // a write does here. GitHub issue #1113: MSG_NOSIGNAL keeps the EPIPE
+    // of a broken socket but raises no SIGPIPE, as Linux's sk_stream_error.
+    // A destination address on a stream socket is left to ENOSYS below.
     if (number == 206 && x4 == 0) {
-        return syscall_finish_write(frame, syscall_io_action(current_authority, syscall_write_segment(current_authority, x0, x1, x2)), current_authority);
+        let sent: SyscallIoResult = syscall_write_segment(current_authority, x0, x1, x2);
+        if ((x3 & LINUX_MSG_NOSIGNAL) != 0) {
+            match sent {
+                SyscallIoResult::PipeBroken => {
+                    return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EPIPE), current_authority);
+                }
+                SyscallIoResult::Errno(e) => {
+                    return syscall_finish_write(frame, syscall_io_action(current_authority, SyscallIoResult::Errno(e)), current_authority);
+                }
+                SyscallIoResult::Transferred(n) => {
+                    return syscall_finish_write(frame, syscall_io_action(current_authority, SyscallIoResult::Transferred(n)), current_authority);
+                }
+                SyscallIoResult::NetWait => {
+                    return syscall_finish_write(frame, syscall_io_action(current_authority, SyscallIoResult::NetWait), current_authority);
+                }
+                SyscallIoResult::UartWait => {
+                    return syscall_finish_write(frame, syscall_io_action(current_authority, SyscallIoResult::UartWait), current_authority);
+                }
+                SyscallIoResult::InterruptWait => {
+                    return syscall_finish_write(frame, syscall_io_action(current_authority, SyscallIoResult::InterruptWait), current_authority);
+                }
+                SyscallIoResult::TerminalWait => {
+                    return syscall_finish_write(frame, syscall_io_action(current_authority, SyscallIoResult::TerminalWait), current_authority);
+                }
+                SyscallIoResult::PipeWait => {
+                    return syscall_finish_write(frame, syscall_io_action(current_authority, SyscallIoResult::PipeWait), current_authority);
+                }
+            }
+        }
+        return syscall_finish_write(frame, syscall_io_action(current_authority, sent), current_authority);
     }
 
     if (number == 56 && (x2 & LINUX_O_MUTATING) != 0) {
@@ -8865,7 +8911,8 @@ private fn syscall_finish_current(
 // with no reader answers EPIPE and has raised SIGPIPE (syscall_io_action);
 // when that signal ends the writer, it ends it here, on the way out of the
 // write, as Linux does and as kill(2) of oneself does above -- not at the
-// writer's next syscall or tick. EPIPE comes from nowhere else.
+// writer's next syscall or tick. EPIPE comes from nowhere else (a broken
+// TCP socket, #1113, takes the same PipeBroken path).
 private fn syscall_finish_write(
         frame: MaybeFrame, action: SyscallAction,
         current_authority: ProcessCurrent[process, ProcessState::Running])

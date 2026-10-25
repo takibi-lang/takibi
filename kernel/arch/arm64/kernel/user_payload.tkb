@@ -58,6 +58,7 @@ const SCHEDULER_PARENT_POLL_BUSY: usize = 0x00989680;
 const WAIT_POLL_MAX: usize = 10000;
 const WNOHANG: usize = 1;
 const EINTR_RC: usize = 0xFFFFFFFFFFFFFFFC;
+const EPIPE_RC: usize = 0xFFFFFFFFFFFFFFE0;
 const SIGCHLD: usize = 17;
 const SIGTERM: usize = 15;
 const SA_SIGINFO: usize = 4;
@@ -431,8 +432,25 @@ fn initial_user_payload() !{unsafe} {
     // GitHub issue #1112: a zero-length write on a connected TCP socket
     // returns 0 and sends nothing, as on Linux; it was EINVAL.
     fail_if(svc5(64, 5, ptr_of(large_base, 0), 0, 0, 0) != 0);
+    // GitHub issue #1113: fd 4 is listening, Linux's LISTEN state, where a
+    // write is EPIPE with SIGPIPE for any length (it was EBADF). Blocked,
+    // the SIGPIPE stays pending for rt_sigtimedwait; sendto's MSG_NOSIGNAL
+    // keeps the EPIPE and raises none, so the last wait finds nothing.
+    payload_write_u64(signal_base, 0, 1 << 12);
+    fail_if(svc5(135, 2, ptr_of(signal_base, 0), 0, 8, 0) != 0);
+    fail_if(svc5(64, 4, ptr_of(large_base, 0), 1, 0, 0) != EPIPE_RC);
+    fail_if(svc5(137, ptr_of(signal_base, 0), 0, 0, 8, 0) != 13);
+    fail_if(svc5(64, 4, ptr_of(large_base, 0), 0, 0, 0) != EPIPE_RC);
+    fail_if(svc5(137, ptr_of(signal_base, 0), 0, 0, 8, 0) != 13);
+    fail_if(svc5(206, 4, ptr_of(large_base, 0), 1, 0x4000, 0) != EPIPE_RC);
+    payload_write_u64(time_base, 0, 0);
+    payload_write_u64(time_base, 8, 0);
+    fail_if(svc5(137, ptr_of(signal_base, 0), 0,
+                 ptr_of(time_base, 0), 8, 0) != EAGAIN_RC);
+    payload_write_u64(signal_base, 0, 0);
+    fail_if(svc5(135, 2, ptr_of(signal_base, 0), 0, 8, 0) != 0);
     let socket_write_success: []const u8 =
-        bs"userspace socket partial write: 1460+1, empty ok\nuserspace socket vectored io: split, empty, short ok\n";
+        bs"userspace socket partial write: 1460+1, empty ok\nuserspace socket write on a listener: EPIPE, SIGPIPE, MSG_NOSIGNAL ok\nuserspace socket vectored io: split, empty, short ok\n";
     fail_if(svc5(64, 1, ((unsafe { socket_write_success as *u8 })) as usize,
                  socket_write_success.len, 0, 0) !=
             socket_write_success.len);
