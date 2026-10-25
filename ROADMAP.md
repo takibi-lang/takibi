@@ -81,7 +81,9 @@ lane (`kernelcheck-race-window-*-qemu`) before its issue closes.
   never the evidence a defect is fixed; time verdicts decided on the
   RPi5). It is scheduled before #638's stage 2 and #966 because both need
   a load baseline, and #1014 (run-lock contention, parked) is measured on
-  this load and nowhere else. Each program is recorded beside the same
+  this load and nowhere else. Its first find, an admitted execve argv that
+  overflowed the initial-stack block and fail-stopped the kernel, is fixed
+  (#1039, done 2026-10-25). Each program is recorded beside the same
   program under Linux on the same machine (maintainer, 2026-10-25): a
   reference column, never a verdict. Stages 2 and 3 (threads: CLONE_VM, futex,
   TLS, TLB shootdown, #202's sibling-thread case) wait for the #638 flip.
