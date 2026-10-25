@@ -2013,7 +2013,8 @@ fn kernel_syscall_socket_evidence() -> bool !{unsafe} {
            // one-byte answer between them; #842 the blocked read on A.
            // #846 one more of each: A's unread byte and B's read.
            syscall_test_evidence_connected_read_calls() == 8 &&
-           syscall_test_evidence_connected_write_calls() == 7 &&
+           // #1112 one more write: the zero-length one on A.
+           syscall_test_evidence_connected_write_calls() == 8 &&
            syscall_test_evidence_socket_close_calls() == 1 &&
            kernel_listener_state(4) == UnifiedListenerState::Closed;
     syscall_test_evidence_finish_socket_fixture();
@@ -2651,9 +2652,6 @@ fn syscall_write_segment_with(slot: borrow SyscallSlot[0],
                     KernelConnectionLookupResult::Found(found) => { found }
                 };
             let write_generation: usize = kernel_connection_fd_identity(fd);
-            if (length == 0) {
-                return SyscallIoResult::Errno(LINUX_EINVAL);
-            }
             let mut amount: usize = length;
             if (amount > 1460) { amount = 1460; }
             // GitHub issue #581: the open check and the received-length
@@ -2668,6 +2666,13 @@ fn syscall_write_segment_with(slot: borrow SyscallSlot[0],
                   if (tcp_connection_of(owner).connection_open == false) {
                       tcp_connection_put(owner);
                       return SyscallIoResult::Errno(LINUX_EINVAL);
+                  }
+                  // GitHub issue #1112: Linux's tcp_sendmsg checks the
+                  // connection state first, then sends nothing and returns
+                  // 0 for an empty buffer; it is not EINVAL.
+                  if (length == 0) {
+                      tcp_connection_put(owner);
+                      return SyscallIoResult::Transferred(0);
                   }
                   let received_length: usize =
                       tcp_connection_of(owner).socket_buffer_length;

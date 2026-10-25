@@ -428,8 +428,11 @@ fn initial_user_payload() !{unsafe} {
     payload_write_u64(vectors_base, 24, 1);
     fail_if(svc5(66, 5, ptr_of(vectors_base, 0), 2, 0, 0) != 1460);
     fail_if(svc5(64, 5, ptr_of(large_base, 1460), 1, 0, 0) != 1);
+    // GitHub issue #1112: a zero-length write on a connected TCP socket
+    // returns 0 and sends nothing, as on Linux; it was EINVAL.
+    fail_if(svc5(64, 5, ptr_of(large_base, 0), 0, 0, 0) != 0);
     let socket_write_success: []const u8 =
-        bs"userspace socket partial write: 1460+1 ok\nuserspace socket vectored io: split, empty, short ok\n";
+        bs"userspace socket partial write: 1460+1, empty ok\nuserspace socket vectored io: split, empty, short ok\n";
     fail_if(svc5(64, 1, ((unsafe { socket_write_success as *u8 })) as usize,
                  socket_write_success.len, 0, 0) !=
             socket_write_success.len);
