@@ -410,7 +410,7 @@ rules globally.
   stack group stride (each core's entry path sets it before any Takibi code
   runs; both linker scripts assert the stride; it is read by the one-move
   assembly helper `kernel_cpu_offset`, whose one caller
-  `scripts/buildcheck_cpu_offset_callers.py` fixes; each region entry
+  `scripts/buildcheck_allowed_callers.py` fixes; each region entry
   checks it against `cpu_id()` at run time). `cpu_here_for_boot_probe`
   (the boot probe only) mints outside a block;
   `scripts/check_cpu_authority_mints.py` fixes its caller.

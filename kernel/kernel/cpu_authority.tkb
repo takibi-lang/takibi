@@ -28,7 +28,7 @@
 //   preempt_slot() names this core's count. It is read by the assembly
 //   helper kernel_cpu_offset (user_entry.S; no compiler builtin, DECISIONS
 //   2026-10-25), and preempt_slot() is its one caller
-//   (scripts/buildcheck_cpu_offset_callers.py). With
+//   (scripts/buildcheck_allowed_callers.py). With
 //   KERNEL_PREEMPT_ASSERTS, every region entry checks the two agree;
 // - cpu_here_for_boot_probe names another CPU's slot, for the boot probe
 //   that holds every CPU's handoff at once; nothing else calls it.

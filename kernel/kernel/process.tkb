@@ -2143,7 +2143,7 @@ fn scheduled_process_exec_inode(guard: borrow ProcessRunGuard[lock], slot: Proce
 }
 
 // Called only by syscall.tkb's syscall_exec_inode_store, from a judged
-// SyscallExecInode token; scripts/buildcheck_exec_inode_writer.py refuses
+// SyscallExecInode token; scripts/buildcheck_allowed_callers.py refuses
 // any other caller (#1106).
 fn scheduled_process_set_exec_inode(guard: borrow ProcessRunGuard[lock],
                                     slot: ProcessSlot, inode: usize) {
