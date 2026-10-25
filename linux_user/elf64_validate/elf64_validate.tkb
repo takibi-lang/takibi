@@ -143,6 +143,47 @@ fn kernel_mapper_agreement_probe() {
     print_kernel_result("straddling shared page: ", false);
 }
 
+// GitHub issue #1081: the plan carries each accepted PT_LOAD as the
+// validator decided it -- access, page span -- so the mapper reads no
+// program header. Editing the image after validation (the metadata window
+// rewritten) must not change what the plan hands the mapper.
+fn kernel_plan_segments_probe() {
+    second_load_init(0x1080);
+    put_u32(68, 5);       // first PT_LOAD: PF_R|PF_X
+    match distro_elf_validate_with_length(image as []u8, 256) {
+        DistroElfResult::Invalid => {
+            uart_puts("kernel plan segments: FAIL\n");
+        }
+        DistroElfResult::Valid(plan) => {
+            put_u32(68, 7);
+            put_u64(80, 0x5000);
+            let mut text: DistroElfSegment = distro_elf_plan_segment(plan, 0);
+            let mut data: DistroElfSegment = distro_elf_plan_segment(plan, 1);
+            let mut text_ok: bool = false;
+            match text.access {
+                DistroElfAccess::ReadExecute => { text_ok = true; }
+                DistroElfAccess::Read => {}
+                DistroElfAccess::ReadWrite => {}
+            }
+            let mut data_ok: bool = false;
+            match data.access {
+                DistroElfAccess::ReadWrite => { data_ok = true; }
+                DistroElfAccess::Read => {}
+                DistroElfAccess::ReadExecute => {}
+            }
+            if (distro_elf_plan_segment_count(plan) == 2 && text_ok &&
+                data_ok && text.first_page == 0 && text.last_page == 1 &&
+                text.virtual_address == 0 && data.first_page == 1 &&
+                data.last_page == 2 && data.offset == 128 &&
+                data.file_size == 16) {
+                uart_puts("kernel plan segments: PASS\n");
+            } else {
+                uart_puts("kernel plan segments: FAIL\n");
+            }
+        }
+    }
+}
+
 // Execute the production mint's packed record copies and prove that later
 // source edits cannot change the returned header values.
 fn kernel_header_copy_probe() {
@@ -211,4 +252,5 @@ fn app_main() {
     print_result("unit alignment: ", true, 256);
     kernel_header_copy_probe();
     kernel_mapper_agreement_probe();
+    kernel_plan_segments_probe();
 }

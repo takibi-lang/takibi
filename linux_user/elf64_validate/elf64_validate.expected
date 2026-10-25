@@ -32,3 +32,4 @@ kernel write+execute flags: PASS
 kernel disjoint pages: PASS
 kernel shared page: PASS
 kernel straddling shared page: PASS
+kernel plan segments: PASS

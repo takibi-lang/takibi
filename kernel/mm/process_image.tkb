@@ -1835,7 +1835,7 @@ fn process_dynamic_prepare_stack(page: borrow PageOwner[page],
 private fn process_image_load_page(slot: borrow ProcessImageSlot[0],
                            page: borrow PageOwner[page],
                            plan: DistroElfLoadPlan,
-                           header: KernelElf64ProgramHeader,
+                           header: DistroElfSegment,
                            load_bias: usize,
                            l3_index: usize)
         -> ProcessImagePageLoadResult !{unsafe} {
@@ -1851,9 +1851,8 @@ private fn process_image_load_page(slot: borrow ProcessImageSlot[0],
 
     let page_start: usize = l3_index * PAGE_SIZE;
     let page_end: usize = page_start + PAGE_SIZE;
-    let segment_start: usize =
-        (header.virtual_address as usize) + load_bias;
-    let file_size: usize = header.file_size as usize;
+    let segment_start: usize = header.virtual_address + load_bias;
+    let file_size: usize = header.file_size;
     let file_end: usize = segment_start + file_size;
     let mut copy_start: usize = page_start;
     if (copy_start < segment_start) { copy_start = segment_start; }
@@ -1867,7 +1866,7 @@ private fn process_image_load_page(slot: borrow ProcessImageSlot[0],
     }
 
     let destination_offset: usize = copy_start - page_start;
-    let source_offset: usize = (header.offset as usize) +
+    let source_offset: usize = header.offset +
                                (copy_start - segment_start);
     let copy_length: usize = copy_end - copy_start;
     let source = plan.image;
@@ -1919,7 +1918,7 @@ private fn process_image_load_page(slot: borrow ProcessImageSlot[0],
 private fn process_image_load_page_ext2(slot: borrow ProcessImageSlot[0],
                                 page: borrow PageOwner[page],
                                 plan: DistroElfLoadPlan,
-                                header: KernelElf64ProgramHeader,
+                                header: DistroElfSegment,
                                 load_bias: usize,
                                 l3_index: usize)
         -> ProcessImagePageLoadResult !{unsafe} {
@@ -1934,8 +1933,8 @@ private fn process_image_load_page_ext2(slot: borrow ProcessImageSlot[0],
     for i: usize in 0..<4096 { bytes[i] = 0; }
     let page_start: usize = l3_index * PAGE_SIZE;
     let page_end: usize = page_start + PAGE_SIZE;
-    let segment_start: usize = (header.virtual_address as usize) + load_bias;
-    let file_size: usize = header.file_size as usize;
+    let segment_start: usize = header.virtual_address + load_bias;
+    let file_size: usize = header.file_size;
     let file_end: usize = segment_start + file_size;
     let mut copy_start: usize = page_start;
     if (copy_start < segment_start) { copy_start = segment_start; }
@@ -1949,7 +1948,7 @@ private fn process_image_load_page_ext2(slot: borrow ProcessImageSlot[0],
     }
     if (copy_start < copy_end) {
         let mut destination_offset: usize = copy_start - page_start;
-        let mut source_offset: usize = (header.offset as usize) +
+        let mut source_offset: usize = header.offset +
                                        (copy_start - segment_start);
         let mut remaining: usize = copy_end - copy_start;
         while (remaining != 0) {
@@ -2152,41 +2151,22 @@ private fn process_image_map_segments(slot: borrow ProcessImageSlot[0],
         return ProcessImageSegmentsResult::OutOfMemory;
     }
     let mut mapped: usize = already_mapped;
-    let image = plan.image;
-    if (plan.program_offset > image.len) {
-        process_image_cleanup_root(target);
-        return ProcessImageSegmentsResult::Invalid;
-    }
-    for segment_index: usize in 0..<plan.program_count {
-        let header_offset: usize = plan.program_offset +
-                                   segment_index * ELF_PROGRAM_HEADER_SIZE;
-        if (header_offset > image.len) {
-            process_image_cleanup_root(target);
-            return ProcessImageSegmentsResult::Invalid;
-        }
-        let header_tail = image[header_offset..<image.len];
-        if (header_tail.len < sizeof(KernelElf64ProgramHeader)) {
-            process_image_cleanup_root(target);
-            return ProcessImageSegmentsResult::Invalid;
-        }
-        let header_bytes =
-            header_tail[0..<sizeof(KernelElf64ProgramHeader)];
-        let mut header: KernelElf64ProgramHeader =
-            kernel_elf_program_header_copy(header_bytes);
-        if (header.segment_type == ELF_PT_LOAD) {
-            // PF_R=4 (rodata), PF_R|PF_X=5 (text), PF_R|PF_W=6 (data). A
-            // writable+executable combination is never accepted.
-            if (header.flags != 4 && header.flags != 5 && header.flags != 6) {
-                process_image_cleanup_root(target);
-                return ProcessImageSegmentsResult::Invalid;
-            }
-            let virtual_address: usize =
-                (header.virtual_address as usize) + load_bias;
-            let memory_size: usize = header.memory_size as usize;
-            let first_page: usize = virtual_address / PAGE_SIZE;
-            let last_byte: usize = virtual_address + memory_size;
-            let last_page: usize = (last_byte + 4095) / PAGE_SIZE;
-            if (last_page > USER_SPACE_PAGE_COUNT) {
+    // GitHub issue #1081: the mapper walks the segments the validator
+    // accepted (DistroElfSegment), not the program header bytes, so it has
+    // no ELF acceptance rule of its own to disagree with. What it can still
+    // refuse is the address space (an occupied page: the validator proved a
+    // plan's spans disjoint and process_image_pair_probe proves the two
+    // plans' biased spans disjoint, so only a non-fresh target reaches it)
+    // and its sources (page allocation, the image read).
+    let count: usize = distro_elf_plan_segment_count(plan);
+    for segment_index: usize in 0..<16 {
+        if (segment_index < count) {
+            let mut header: DistroElfSegment =
+                distro_elf_plan_segment(plan, segment_index);
+            let first_page: usize = header.first_page + load_bias / PAGE_SIZE;
+            let last_page: usize = header.last_page + load_bias / PAGE_SIZE;
+            if (load_bias % PAGE_SIZE != 0 ||
+                last_page > USER_SPACE_PAGE_COUNT) {
                 process_image_cleanup_root(target);
                 return ProcessImageSegmentsResult::OutOfMemory;
             }
@@ -2210,13 +2190,17 @@ private fn process_image_map_segments(slot: borrow ProcessImageSlot[0],
                             }
                             ProcessImagePageLoadResult::Loaded => {
                                 let mut flags: usize = USER_RW_XN_FLAGS;
-                                if (header.flags == 5) {
-                                    flags = USER_TEXT_RX_FLAGS;
-                                    user_code_sync(page_physical_address(page),
-                                                   PAGE_SIZE);
-                                }
-                                if (header.flags == 4) {
-                                    flags = USER_RODATA_R_FLAGS;
+                                match header.access {
+                                    DistroElfAccess::ReadExecute => {
+                                        flags = USER_TEXT_RX_FLAGS;
+                                        user_code_sync(
+                                            page_physical_address(page),
+                                            PAGE_SIZE);
+                                    }
+                                    DistroElfAccess::Read => {
+                                        flags = USER_RODATA_R_FLAGS;
+                                    }
+                                    DistroElfAccess::ReadWrite => {}
                                 }
                                 if (process_image_install_page(target,
                                         page, l3_index, flags) == false) {
@@ -2227,9 +2211,9 @@ private fn process_image_map_segments(slot: borrow ProcessImageSlot[0],
                             }
                         }
                     }
+                }
             }
         }
-    }
     }
     return ProcessImageSegmentsResult::Mapped(mapped);
 }
