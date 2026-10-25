@@ -21,6 +21,32 @@
       "changes": {
         "*": "first entry: #986 slice 1; earlier figures are the manual table in #986 body (2026-09-29 baseline, 2026-10-24 grep)"
       }
+    },
+    {
+      "date": "2026-10-25",
+      "head": "3863ae58",
+      "counts": {
+        "raw_mint_files": 15,
+        "frame_lines": 12856,
+        "device_semantics_files": 4,
+        "raw_deref_plain": 232,
+        "raw_deref_io": 16,
+        "raw_deref_builtin_region": 113,
+        "unsafe_blocks": 140,
+        "extern_fns": 55,
+        "invariant_stop_sites": 120,
+        "assembly_lines": 2369,
+        "per_cpu_ordinary_arrays": 72,
+        "per_cpu_stores": 7,
+        "raw_cpu_id_calls": 156,
+        "frame_api_ratchet": 8
+      },
+      "changes": {
+        "raw_cpu_id_calls": "#980 uart_irq_hang_arm refuses a self-hang by comparing the target with the caller core",
+        "unsafe_blocks": "#980 /lib/hang-core fail helper writes a readonly line through the raw syscall ABI, the peer-sleep pattern",
+        "frame_lines": "code removed upstream since the last entry; #980 changes no RAW_MINT_FILES file",
+        "frame_api_ratchet": "frame API #1018 category, first recorded at this append"
+      }
     }
   ]
 }
