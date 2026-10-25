@@ -626,12 +626,39 @@ private fn syscall_script_line_here(slot: borrow SyscallSlot[0]) -> [u8; 256..]
 // through any `#!` chain -- the one input that decides the image an exec
 // maps. argv[0] cannot: a shell passes `httpd` for `/bin/httpd`. Zero only
 // when execve ran before the root filesystem was configured.
-fn kernel_syscall_exec_inode() -> usize {
+//
+// GitHub issue #1082: the inode travels as a SyscallExecInode, whose one
+// field is private to this file, so outside it the only way to hold one is
+// to be handed it: every value the exec prepare can see was minted by
+// syscall_exec_elf_interpreter's verdict (or is the zero "none" token).
+// The token cannot cross the user_entry.S return (#1080), so it is parked
+// as bits in the process record between the syscall and the prepare; that
+// round trip -- syscall_exec_inode_store below and this reload -- is the
+// remaining trusted base, and both halves are in this file.
+struct SyscallExecInode { private inode: usize; }
+
+private fn syscall_exec_inode_none() -> SyscallExecInode {
+    let mut token: SyscallExecInode = { 0 };
+    return token;
+}
+
+fn syscall_exec_inode_number(token: SyscallExecInode) -> usize {
+    return token.inode;
+}
+
+private fn syscall_exec_inode_store(guard: borrow ProcessRunGuard[lock],
+                                    token: SyscallExecInode) {
+    scheduled_process_set_exec_inode(guard,
+        kernel_syscall_process_slot(), token.inode);
+}
+
+fn kernel_syscall_exec_inode() -> SyscallExecInode {
     let mut slot: ProcessSlot = kernel_syscall_process_slot();
     let guard = process_run_lock();
     let value: usize = scheduled_process_exec_inode(guard, slot);
     process_run_unlock(guard);
-    return value;
+    let mut token: SyscallExecInode = { value };
+    return token;
 }
 
 // A `#!` script is executed by naming an interpreter, so the image execve(2)
@@ -641,7 +668,7 @@ fn kernel_syscall_exec_inode() -> usize {
 struct SyscallScriptPrefix {
     argc: usize;
     length: usize;
-    inode: usize;
+    inode: SyscallExecInode;
 }
 
 // Each case below was measured against Linux rather than assumed, because
@@ -659,7 +686,7 @@ must_use variant SyscallExecFormatResult {
     Absent;
     NotPermitted;
     Unreadable;
-    Executable(usize);
+    Executable(SyscallExecInode);
     NotExecutable;
     // GitHub issue #591: an ELF whose PT_INTERP names a file that is not
     // there -- ENOENT, as on Linux -- and one naming a file that is, but is
@@ -950,7 +977,9 @@ private fn syscall_exec_script_prefix(slot: borrow SyscallSlot[0], path_length: 
     }
     // The next bounded resolution step checks this interpreter's own
     // permissions and format before any process-image state is committed.
-    let mut prefix: SyscallScriptPrefix = { argc, offset, 0 };
+    let mut prefix: SyscallScriptPrefix = {
+        argc, offset, syscall_exec_inode_none()
+    };
     return SyscallExecFormatResult::Script(prefix);
 }
 
@@ -1004,7 +1033,8 @@ private fn syscall_exec_elf_interpreter(slot: borrow SyscallSlot[0], mount: Ext2
         };
     let named: usize = plan.interpreter_length;
     if (named == 0) {
-        return SyscallExecFormatResult::Executable(inode);
+        let mut judged: SyscallExecInode = { inode };
+        return SyscallExecFormatResult::Executable(judged);
     }
     // The string less its leading slash and its NUL is the relative name
     // ext2_lookup_path takes. Copied out of the window by walking the
@@ -1054,7 +1084,8 @@ private fn syscall_exec_elf_interpreter(slot: borrow SyscallSlot[0], mount: Ext2
         Ext2LookupResult::Found(found) => {}
     }
     if (slice_eq(relative, bs"lib/ld-musl-aarch64.so.1")) {
-        return SyscallExecFormatResult::Executable(inode);
+        let mut judged: SyscallExecInode = { inode };
+        return SyscallExecFormatResult::Executable(judged);
     }
     return SyscallExecFormatResult::InterpreterUnsupported;
 }
@@ -8913,7 +8944,7 @@ private inline fn syscall_execve_current_with(slot: borrow SyscallSlot[0],
     // caller's argv[0] still belongs in the result.
     let mut script_argc: usize = 0;
     let mut script_offset: usize = 0;
-    let mut exec_inode: usize = 0;
+    let mut exec_inode: SyscallExecInode = syscall_exec_inode_none();
     if (exec_path_absolute) {
         match syscall_exec_format(slot, path_length) {
             SyscallExecFormatResult::NotMounted => {}
@@ -9070,8 +9101,7 @@ private inline fn syscall_execve_current_with(slot: borrow SyscallSlot[0],
         diagnostic_argv, output_offset);
     scheduled_process_set_exec_argc(exec_guard,
         kernel_syscall_process_slot(), packed_argc);
-    scheduled_process_set_exec_inode(exec_guard,
-        kernel_syscall_process_slot(), exec_inode);
+    syscall_exec_inode_store(exec_guard, exec_inode);
     scheduled_process_set_exec_pending(exec_guard,
         kernel_syscall_process_slot(), true);
     process_run_unlock(exec_guard);

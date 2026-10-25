@@ -308,7 +308,7 @@ must_use variant ExecImageResolveResult {
 fn kernel_exec_resolve_ext2_exec(mount: Ext2Mount,
                                  windows: [u8; EXEC_WINDOWS_SIZE..])
         -> ExecImageResolveResult !{unsafe} {
-    let inode: usize = kernel_syscall_exec_inode();
+    let inode: usize = syscall_exec_inode_number(kernel_syscall_exec_inode());
     // Zero only when execve ran before the root was mounted, and the
     // prepare has no mount then either.
     if (inode == 0) { return ExecImageResolveResult::NoInode; }
