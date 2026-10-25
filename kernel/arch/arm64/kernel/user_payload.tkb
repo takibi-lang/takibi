@@ -691,12 +691,22 @@ fn initial_user_payload() !{unsafe} {
                                    "/trunc-file" as *u8 as usize,
                                    O_CREAT_EXCL_RDWR, 0x1A4, 0);
         fail_if(trunc_fd >= 64);
-        // One write per block: a write(2) moves at most 1024 bytes here.
-        for block: usize in 0..<3 {
-            fail_if(svc5(64, trunc_fd, ptr_of(trunc_content as *u8,
-                         block * 1024), 1024, 0, 0) != 1024);
-        }
+        // GitHub issue #1036: one write(2) of three blocks transfers all
+        // of them, though the kernel stages one block at a time; one read
+        // gives every byte back.
+        fail_if(svc5(64, trunc_fd, trunc_content as *u8 as usize,
+                     3072, 0, 0) != 3072);
         fail_if(svc5(57, trunc_fd, 0, 0, 0, 0) != 0);
+        for byte: usize in 0..<3072 { trunc_content[byte] = 0; }
+        let back_fd: usize = svc5(56, 0xFFFFFFFFFFFFFF9C,
+                                  "/trunc-file" as *u8 as usize, 0, 0, 0);
+        fail_if(back_fd >= 64);
+        fail_if(svc5(63, back_fd, trunc_content as *u8 as usize,
+                     3072, 0, 0) != 3072);
+        fail_if(svc5(57, back_fd, 0, 0, 0, 0) != 0);
+        for byte: usize in 0..<3072 {
+            fail_if(trunc_content[byte] != (byte / 1024 + 0x61) as u8);
+        }
         let mut trunc_stat: [u8; 128];
         let trunc_stat_base: *u8 = trunc_stat as *u8;
         fail_if(svc5(79, 0xFFFFFFFFFFFFFF9C, "/trunc-file" as *u8 as usize,

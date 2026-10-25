@@ -2375,41 +2375,93 @@ fn syscall_write_segment_with(slot: borrow SyscallSlot[0],
             if (kernel_syscall_file_writable(fd) == false) {
                 return SyscallIoResult::Errno(LINUX_EBADF);
             }
-            if (length == 0 || length > KERNEL_BLOCK_SIZE) {
+            if (length == 0) {
                 return SyscallIoResult::Errno(LINUX_EINVAL);
             }
-            // GitHub issue #975: the content read below is the span that
-            // copy_from_user_span initialized; no zero fill.
-            match user_range_check_read(current_authority, address, length) {
-                UserReadRangeResult::Fault => { return SyscallIoResult::Errno(LINUX_EFAULT); }
-                UserReadRangeResult::Ok(range) => {
-                    if (copy_from_user_span(
-                            range,
-                            syscall_scratch[slot.index].file_buffer as []u8,
-                            0, length) == false) {
-                        return SyscallIoResult::Errno(LINUX_EFAULT);
-                    }
-                }
-            }
-            let content_buffer = syscall_scratch[slot.index].file_buffer as []u8;
-            if (length > content_buffer.len) {
-                return SyscallIoResult::Errno(LINUX_EINVAL);
-            }
-            let content = content_buffer[0..<length];
             // GitHub issue #497: /proc/takibi/profile, the one writable
-            // procfs node, takes a command rather than file data.
+            // procfs node, takes a command rather than file data; a command
+            // longer than the staging block is not one.
             let written_inode: usize = kernel_syscall_file_inode(fd);
             if (procfs_inode_is_ours(written_inode)) {
+                if (length > KERNEL_BLOCK_SIZE) {
+                    return SyscallIoResult::Errno(LINUX_EINVAL);
+                }
+                // GitHub issue #975: the content read below is the span that
+                // copy_from_user_span initialized; no zero fill.
+                match user_range_check_read(current_authority, address, length) {
+                    UserReadRangeResult::Fault => {
+                        return SyscallIoResult::Errno(LINUX_EFAULT);
+                    }
+                    UserReadRangeResult::Ok(range) => {
+                        if (copy_from_user_span(
+                                range,
+                                syscall_scratch[slot.index].file_buffer as []u8,
+                                0, length) == false) {
+                            return SyscallIoResult::Errno(LINUX_EFAULT);
+                        }
+                    }
+                }
+                let content_buffer = syscall_scratch[slot.index].file_buffer as []u8;
+                if (length > content_buffer.len) {
+                    return SyscallIoResult::Errno(LINUX_EINVAL);
+                }
+                let content = content_buffer[0..<length];
                 let control_answer: usize = procfs_write(written_inode, content);
                 if (control_answer != 0) {
                     return SyscallIoResult::Errno(control_answer);
                 }
                 return SyscallIoResult::Transferred(length);
             }
-            let answer: usize = syscall_ext2_write_locked(fd, content);
-            if (answer != 0) { return SyscallIoResult::Errno(answer); }
-            workload_peer_mutation_note(8);
-            return SyscallIoResult::Transferred(length);
+            // GitHub issue #1036: an ext2 write longer than the staging block
+            // goes one block at a time, as the read path does; a failure
+            // after a transferred prefix reports that prefix (a short write).
+            let mut written: usize = 0;
+            while (written < length) {
+                let chunk: usize = min(length - written, KERNEL_BLOCK_SIZE);
+                let source: usize = match checked_add_usize(address, written) {
+                    CheckedUsize::Overflow => {
+                        if (written != 0) {
+                            return SyscallIoResult::Transferred(written);
+                        }
+                        return SyscallIoResult::Errno(LINUX_EFAULT);
+                    }
+                    CheckedUsize::Value(value) => { value }
+                };
+                match user_range_check_read(current_authority, source, chunk) {
+                    UserReadRangeResult::Fault => {
+                        if (written != 0) {
+                            return SyscallIoResult::Transferred(written);
+                        }
+                        return SyscallIoResult::Errno(LINUX_EFAULT);
+                    }
+                    UserReadRangeResult::Ok(range) => {
+                        if (copy_from_user_span(
+                                range,
+                                syscall_scratch[slot.index].file_buffer as []u8,
+                                0, chunk) == false) {
+                            if (written != 0) {
+                                return SyscallIoResult::Transferred(written);
+                            }
+                            return SyscallIoResult::Errno(LINUX_EFAULT);
+                        }
+                    }
+                }
+                let content_buffer = syscall_scratch[slot.index].file_buffer as []u8;
+                if (chunk > content_buffer.len) {
+                    return SyscallIoResult::Errno(LINUX_EINVAL);
+                }
+                let content = content_buffer[0..<chunk];
+                let answer: usize = syscall_ext2_write_locked(fd, content);
+                if (answer != 0) {
+                    if (written != 0) {
+                        return SyscallIoResult::Transferred(written);
+                    }
+                    return SyscallIoResult::Errno(answer);
+                }
+                workload_peer_mutation_note(8);
+                written = written + chunk;
+            }
+            return SyscallIoResult::Transferred(written);
         }
         if (kernel_syscall_terminal_is_open(fd) == false) {
             return SyscallIoResult::Errno(LINUX_EBADF);
