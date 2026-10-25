@@ -112,6 +112,10 @@ REQUIREMENTS = (
     ('profile dump without a session', '^ddb: profile nothing to dump$', 1, None, 'both'),
     ('profile usage', '^ddb: usage: profile stop \\| profile dump \\(start: write to /proc/takibi/profile\\)$', 1, None, 'both'),
     ('live wait current fields', '^ddb: wait current=[0-9]+ state=[a-z-]+ reason=[a-z-]+( queued=[0-9]+( low-water=[0-9]+)?| frame-pending=(yes|no|unknown) connection-pending=(yes|no|unknown))? awaited=[01]$', 1, None, 'both'),
+    # GitHub issue #959: virtio-net's lock-free RX-pending read answers yes or
+    # no once the queue is live; unknown here means the read regressed to
+    # #920's placeholder.
+    ('no unknown frame-pending on virtio', '^ddb: .*frame-pending=unknown', 0, 0, 'both'),
     ('live wait graph summary', '^ddb: wait edges=[0-9]+ blocked=[0-9]+ unknown=[0-9]+ truncated=[01]$', 1, None, 'both'),
     ('synthetic current net wait', '^ddb: wait current=3 state=running reason=net-rx frame-pending=no connection-pending=unknown awaited=1$', 1, None, 'both'),
     ('synthetic grandparent wait', '^ddb: wait pid=1 state=blocked waits-for child pid=2 state=blocked$', 1, None, 'both'),

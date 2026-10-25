@@ -133,6 +133,8 @@ fn gem_span_bus_address(span: borrow DmaDeviceSpan) -> usize !{unsafe} {
 // The descriptor rings are protocol owners in rp1_gem_desc.tkb (#740).
 private let mut net_init_once: InitOnce;
 private let mut rp1_gem_net_ready: bool = false;
+// The RX ring's CPU address, recorded when the ring is programmed (#959).
+private let mut gem_rx_ring_cpu_address: usize = 0;
 let mut gem_tx_next: i32 = 0;
 // Set once a TX completion went unconfirmed: gem_halt() has stopped the MAC
 // (or failed to), so no later frame is submitted this boot.
@@ -261,7 +263,6 @@ fn gem_rearm_rx() -> bool !{unsafe} {
         }
     }
     let address: usize = gem_pkt_published_address();
-    gem_rx_pkt = index;
     let GemRxRingHeld::Ready(ready) = gem_rx_ring_ready() else {
         GemRxRingHeld::Armed(armed) => {
             gem_rx_ring_park(GemRxRingHeld::Armed(armed));
@@ -277,6 +278,10 @@ fn gem_rearm_rx() -> bool !{unsafe} {
             gem_rx_ring_park(GemRxRingHeld::Armed(armed));
         }
     }
+    // Set only once the new descriptor is written and armed: DDB's
+    // lock-free look (kernel_net_rx_frame_pending) trusts the descriptor's
+    // ownership bit only while this names a posted buffer (#959).
+    gem_rx_pkt = index;
     return true;
 }
 
@@ -290,6 +295,7 @@ private fn gem_pkt_recycle_at(index: usize, pkt: GemPkt_Filled[pb, po, 1]) !{uns
 // A ring's bus address, from its Ready owner's span (`addressed`).
 private fn gem_rx_ring_bus(r: borrow GemRxRing_Ready[b, o, 4]) -> usize !{unsafe} {
     let mut span: DmaDeviceSpan = GemRxRing_Ready_span(r);
+    gem_rx_ring_cpu_address = unsafe { dma_span_address(span) };
     return gem_span_bus_address(span);
 }
 private fn gem_tx_ring_bus(r: borrow GemTxRing_Ready[b, o, 4]) -> usize !{unsafe} {
@@ -418,6 +424,23 @@ fn net_init() -> NetInitResult !{unsafe} {
     rp1_gem_net_ready = true;
     init_once_commit(&net_init_once, init_guard);
     return NetInitResult::Ready(view NetRxCanAcquire);
+}
+
+// GitHub issue #959: DDB's lock-free reading of RX pending, under the
+// debug stop (#920): no ring owner, no lock, no cache maintenance. The
+// descriptor word is loaded with acquire ordering as the CPU's cache holds
+// it. The CPU may hold that line dirty while the ring is Ready, so DDB must
+// not invalidate it, and a clear ownership bit may be a stale line from
+// before GEM's write: that reads Unknown, not No. A set bit is trusted only
+// while gem_rx_pkt names the posted buffer, which gem_rearm_rx sets after
+// the new descriptor is armed and net_rx_acquire clears after the take.
+fn kernel_net_rx_frame_pending() -> NetPendingState !{unsafe} {
+    if (rp1_gem_net_ready == false) { return NetPendingState::No; }
+    if (gem_rx_pkt >= GEM_PKTS) { return NetPendingState::No; }
+    if (gem_rx_ring_cpu_address == 0) { return NetPendingState::Unknown; }
+    let word: usize = unsafe { atomic_load_acquire(gem_rx_ring_cpu_address) };
+    if ((word & 1) != 0) { return NetPendingState::Yes; }
+    return NetPendingState::Unknown;
 }
 
 // Queue-0 status can be clear-on-read or W1C (DCFG1.IRQCOR). Read the

@@ -346,6 +346,24 @@ fn net_init() -> NetInitResult {
     return NetInitResult::Ready(view NetRxCanAcquire);
 }
 
+// GitHub issue #959: DDB's lock-free reading of RX pending, under the
+// debug stop (#920): no ring owner and no lock. Once the queue is live only
+// the device writes the used ring (virtio_used_go wrote and cleaned it
+// before publishing), so invalidating its lines discards no CPU store. The
+// index is then loaded with acquire ordering and compared with the
+// driver's shadow as the stopped core left it.
+fn kernel_net_rx_frame_pending() -> NetPendingState !{unsafe} {
+    if (virtio_net_ready == false) { return NetPendingState::No; }
+    let address: usize = virtio_net_used_addr[0];
+    if (address == 0) { return NetPendingState::Unknown; }
+    let used: *align(64) VirtqUsedRing = unsafe { address as *align(64) VirtqUsedRing };
+    dma_finish_rx(used, 128);
+    let word: usize = unsafe { atomic_load_acquire(address) };
+    let idx: usize = (word >> 16) & 0xFFFF;
+    if (idx == ((rx_used_seen as u16) as usize)) { return NetPendingState::No; }
+    return NetPendingState::Yes;
+}
+
 // GitHub issue #237 M4: exactly ONE interrupt_wait() call, not a retry
 // loop -- unlike examples/common_qemu/virtio_mmio.tkb's own net_rx_wait()
 // (which this was first copied from), this driver's callers
