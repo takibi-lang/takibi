@@ -908,7 +908,25 @@ const PROCESS_STACK_LOW_DYNAMIC: usize = 504;
 // kernel/mm/address_space.tkb's USER_SPACE_PAGE_COUNT comment -- issue
 // #253 briefly conflated the two by reusing this name as a table bound;
 // issue #258 separated them again).
-const PROCESS_STACK_LAYOUT_BYTES: usize = 512;
+// GitHub issue #1039: execve admits at most PROCESS_EXEC_ARGC_MAX strings
+// totalling PROCESS_EXEC_ARGV_BYTES (NULs included), and the layout below
+// is derived from those two limits, so every argv execve admits fits in
+// both builders' stack blocks. Before, the layout was a separate 512 that
+// left the strings only 512 minus the header, and an admitted argv
+// fail-stopped the kernel after execve's point of no return.
+const PROCESS_EXEC_ARGV_BYTES: usize = 512;
+const PROCESS_EXEC_ARGC_MAX: usize = 15;
+// Words before the auxv vector: argc and the two NULL terminators (argv[]
+// itself is counted per argument).
+const PROCESS_STACK_HEAD_WORDS: usize = 3;
+// auxv words, AT_NULL included: static image, dynamic image.
+const PROCESS_STACK_AUXV_WORDS_STATIC: usize = 18;
+const PROCESS_STACK_AUXV_WORDS_DYNAMIC: usize = 28;
+const PROCESS_STACK_RANDOM_BYTES: usize = 16;
+const PROCESS_STACK_LAYOUT_BYTES: usize =
+    (PROCESS_EXEC_ARGC_MAX + PROCESS_STACK_HEAD_WORDS +
+     PROCESS_STACK_AUXV_WORDS_DYNAMIC) * 8 +
+    PROCESS_STACK_RANDOM_BYTES + PROCESS_EXEC_ARGV_BYTES;
 const PROCESS_STACK_WORDS: usize = PROCESS_STACK_LAYOUT_BYTES / 8;
 // Seed for ProcessImageRecord.heap_page_count (see PROCESS_STACK_LOW_*
 // above): consulted only where an image is mapped, never as a
@@ -1593,8 +1611,20 @@ fn process_image_prepare_stack(page: borrow PageOwner[page],
                                argv: borrow []const u8,
                                argc: usize)
         -> ProcessImageStackResult !{unsafe} {
-    if (argc < 1 || argc > 32) { return ProcessImageStackResult::Invalid; }
-    let argument_count: {1..<33 as usize} = argc;
+    static_assert((PROCESS_EXEC_ARGC_MAX + PROCESS_STACK_HEAD_WORDS +
+                   PROCESS_STACK_AUXV_WORDS_STATIC) * 8 +
+                  PROCESS_STACK_RANDOM_BYTES + PROCESS_EXEC_ARGV_BYTES <=
+                  PROCESS_STACK_LAYOUT_BYTES,
+                  "#1039: every argv execve admits fits the static stack block");
+    static_assert((PROCESS_EXEC_ARGC_MAX + PROCESS_STACK_HEAD_WORDS +
+                   PROCESS_STACK_AUXV_WORDS_DYNAMIC) * 8 +
+                  PROCESS_STACK_RANDOM_BYTES + PROCESS_EXEC_ARGV_BYTES <=
+                  PROCESS_STACK_LAYOUT_BYTES,
+                  "#1039: every argv execve admits fits the dynamic stack block");
+    if (argc < 1 || argc > PROCESS_EXEC_ARGC_MAX) {
+        return ProcessImageStackResult::Invalid;
+    }
+    let argument_count: {1..<16 as usize} = argc;
     let bytes = page_bytes(page);
     for i: usize in 0..<4096 { bytes[i] = 0; }
     let stack = bytes[PAGE_SIZE - PROCESS_STACK_LAYOUT_BYTES..<PAGE_SIZE];
@@ -1604,9 +1634,9 @@ fn process_image_prepare_stack(page: borrow PageOwner[page],
                               PAGE_SIZE - PROCESS_STACK_LAYOUT_BYTES;
     // argc, argv[], argv terminator, envp terminator, then eight auxv
     // key/value pairs and AT_NULL. The random bytes immediately follow.
-    let auxv_start: usize = argument_count + 3;
-    let random_offset: usize = (auxv_start + 18) * 8;
-    let mut string_offset: usize = random_offset + 16;
+    let auxv_start: usize = argument_count + PROCESS_STACK_HEAD_WORDS;
+    let random_offset: usize = (auxv_start + PROCESS_STACK_AUXV_WORDS_STATIC) * 8;
+    let mut string_offset: usize = random_offset + PROCESS_STACK_RANDOM_BYTES;
     if (string_offset > PROCESS_STACK_LAYOUT_BYTES) {
         return ProcessImageStackResult::Invalid;
     }
@@ -1693,8 +1723,20 @@ fn process_dynamic_prepare_stack(page: borrow PageOwner[page],
                                  argv: borrow []const u8,
                                  argc: usize)
         -> ProcessImageStackResult !{unsafe} {
-    if (argc < 1 || argc > 32) { return ProcessImageStackResult::Invalid; }
-    let argument_count: {1..<33 as usize} = argc;
+    static_assert((PROCESS_EXEC_ARGC_MAX + PROCESS_STACK_HEAD_WORDS +
+                   PROCESS_STACK_AUXV_WORDS_STATIC) * 8 +
+                  PROCESS_STACK_RANDOM_BYTES + PROCESS_EXEC_ARGV_BYTES <=
+                  PROCESS_STACK_LAYOUT_BYTES,
+                  "#1039: every argv execve admits fits the static stack block");
+    static_assert((PROCESS_EXEC_ARGC_MAX + PROCESS_STACK_HEAD_WORDS +
+                   PROCESS_STACK_AUXV_WORDS_DYNAMIC) * 8 +
+                  PROCESS_STACK_RANDOM_BYTES + PROCESS_EXEC_ARGV_BYTES <=
+                  PROCESS_STACK_LAYOUT_BYTES,
+                  "#1039: every argv execve admits fits the dynamic stack block");
+    if (argc < 1 || argc > PROCESS_EXEC_ARGC_MAX) {
+        return ProcessImageStackResult::Invalid;
+    }
+    let argument_count: {1..<16 as usize} = argc;
     let bytes = page_bytes(page);
     for i: usize in 0..<4096 { bytes[i] = 0; }
     let stack = bytes[PAGE_SIZE - PROCESS_STACK_LAYOUT_BYTES..<PAGE_SIZE];
@@ -1702,9 +1744,9 @@ fn process_dynamic_prepare_stack(page: borrow PageOwner[page],
     let virtual_base: usize = USER_TEXT_VA +
                               process_stack_top_page() * PAGE_SIZE +
                               PAGE_SIZE - PROCESS_STACK_LAYOUT_BYTES;
-    let auxv_start: usize = argument_count + 3;
-    let random_offset: usize = (auxv_start + 28) * 8;
-    let mut string_offset: usize = random_offset + 16;
+    let auxv_start: usize = argument_count + PROCESS_STACK_HEAD_WORDS;
+    let random_offset: usize = (auxv_start + PROCESS_STACK_AUXV_WORDS_DYNAMIC) * 8;
+    let mut string_offset: usize = random_offset + PROCESS_STACK_RANDOM_BYTES;
     if (string_offset > PROCESS_STACK_LAYOUT_BYTES) {
         return ProcessImageStackResult::Invalid;
     }

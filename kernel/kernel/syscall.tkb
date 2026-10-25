@@ -8800,7 +8800,8 @@ private inline fn syscall_execve_current_with(slot: borrow SyscallSlot[0],
                                 return SyscallAction::Resume(LINUX_E2BIG);
                             }
                             CheckedUsize::Value(end) => {
-                                if (end > 512 || argc >= 15) {
+                                if (end > PROCESS_EXEC_ARGV_BYTES ||
+                                    argc >= PROCESS_EXEC_ARGC_MAX) {
                                     return SyscallAction::Resume(LINUX_E2BIG);
                                 }
                                 let copy_length: usize = string_length + 1;
