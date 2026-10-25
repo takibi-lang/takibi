@@ -354,6 +354,14 @@ condition below applies, and reports the land afterwards.
   Lean outside the trusted base. No in-house prover. Object-level proofs
   (.tkb programs) still wait for a defect in #955 that needs induction or
   a quantifier. [active] #1054 #955
+- 2026-10-25 #742 stage 1: one rootfs image for QEMU and the RPi5, sized
+  from its content (6 MiB, KERNEL_EXT2_IMAGE_LEN) so the board runs the
+  same load; no second RPi5 build variant. The load programs are built
+  from SHA-256-pinned sources into ~/.takibi-sessions/cache, so an image
+  build on a cold cache needs the network; that is accepted. #638 stage 2
+  landed before #742's baseline, which is taken at the commit before it
+  (9860071e). ext2 fixes may land ahead of #1034, whose rows flip after.
+  [active] #742 #638 #1034
 - 2026-10-19 A rebase conflict confined to docs/SPACE_CHECKPOINT.json is
   resolved by code (scripts/checkpoint_rebase.py, used by land.sh and the
   coordinator): main's side, then the branch's own review, current for its
