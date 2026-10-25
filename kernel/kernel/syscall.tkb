@@ -5859,7 +5859,8 @@ private fn syscall_system_stop_stopped(marker: *u8) -> usize
             // GitHub issue #933: name the initiating core, so a test that
             // pins the caller to a peer can tell a local stop from a rerun
             // on core 0. Printed before the marker drivers wait for.
-            ddb_puts("\nsystem stop: initiator cpu=" as *u8);
+            ddb_puts("\n" as *u8);
+            ddb_puts("system stop: initiator cpu=" as *u8);
             ddb_put_udec(cpu_id());
             ddb_puts("\n" as *u8);
             // GitHub issue #980: the cores the stop holds, and the one the
