@@ -20449,7 +20449,7 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
          expect_type_error "compiler builtin"
            (Printf.sprintf "fn %s() {}" name) ())
          ["mrs_cntfrq_el0"; "mrs_cntpct_el0"; "mrs_sctlr_el1"; "mrs_mpidr_el1";
-          "mrs_id_aa64mmfr0_el1";
+          "mrs_id_aa64mmfr0_el1"; "mrs_tpidr_el1";
           "msr_daifclr_irq"; "msr_daifset_irq"; "tlbi_vmalle1";
           "tlbi_vmalle1is";
           "dsb_ish"; "dsb_ishst"; "isb"; "wfi"];
@@ -28179,6 +28179,7 @@ let preempt_off_tests =
     private fn preempt_off_enter() -> Cpu638 {
       let mut cpu: Cpu638 = { 0 }; return cpu;
     }
+    private fn preempt_off_exit() { }
     fn bump638(cpu: Cpu638) { stores638[cpu].value = stores638[cpu].value + 1; }
     extern fn sleep638() !{may_block};" in
   let files body = ["mint638.tkb", mint; "user638.tkb", body] in
@@ -28235,6 +28236,62 @@ let preempt_off_tests =
     bad "the private mint cannot be taken as a function pointer"
       "'preempt_off_enter' is a private function"
       "fn bad638() { let f = preempt_off_enter; }";
+    (* Stage 2: the region's exit is the mint file's private pair too. *)
+    bad "the private exit cannot be called directly"
+      "'preempt_off_exit' is a private function"
+      "fn bad638() { preempt_off_exit(); }";
+    bad "TPIDR_EL1 is read only in the authority's file"
+      "mrs_tpidr_el1() may only be called in the file that declares the struct cpu_authority"
+      "fn bad638() -> usize { return mrs_tpidr_el1(); }";
+    Alcotest.test_case "the authority's file reads TPIDR_EL1" `Quick
+      (expect_codegen_ok (mint ^ "fn slot638() -> usize { return mrs_tpidr_el1() >> 16; }"));
+    Alcotest.test_case "an authority file without the exit is rejected" `Quick
+      (expect_type_error "Undefined function: preempt_off_exit"
+        "struct cpu_authority C638 { private id: {0..<1 as usize}; }
+         private fn preempt_off_enter() -> C638 { let mut c: C638 = { 0 }; return c; }
+         fn f638() { preempt_off (c) { } }");
+    Alcotest.test_case "TPIDR_EL1 is unreadable without an authority" `Quick
+      (expect_type_error "may only be called in the file that declares"
+        "fn bad638() -> usize { return mrs_tpidr_el1(); }");
+    Alcotest.test_case "the exit is called at every exit of the block" `Quick
+      (fun () ->
+        let exits body =
+          ignore (gen_codegen (mint ^ body));
+          let ir = Llvm.string_of_llmodule !Llvm_gen.the_module in
+          let needle = "call void @preempt_off_exit(" in
+          let n = String.length needle in
+          let rec count i acc =
+            if i + n > String.length ir then acc
+            else if String.sub ir i n = needle then count (i + n) (acc + 1)
+            else count (i + 1) acc in
+          count 0 0 in
+        let check label expected body =
+          Alcotest.(check int) label expected (exits body) in
+        check "fall-through" 1 "fn f638() { preempt_off (cpu) { bump638(cpu); } }";
+        check "early return and the closing brace" 2
+          "fn f638(flag: bool) -> usize {
+             preempt_off (cpu) { if (flag) { return 1; } bump638(cpu); }
+             return 0; }";
+        check "a return leaves both nested blocks" 4
+          "fn f638(flag: bool) -> usize {
+             preempt_off (a) { preempt_off (b) { if (flag) { return 1; } } }
+             return 0; }";
+        check "break and continue leave a block inside the loop" 3
+          "fn f638(n: usize) {
+             for i: usize in 0..<n {
+               preempt_off (cpu) {
+                 if (i == 1) { continue; }
+                 if (i == 3) { break; }
+                 bump638(cpu);
+               }
+             } }";
+        check "break out of a loop inside the block leaves no block" 1
+          "fn f638(n: usize) {
+             preempt_off (cpu) {
+               for i: usize in 0..<n { if (i == 2) { break; } bump638(cpu); }
+             } }";
+        check "a body that always returns has no fall-through exit" 1
+          "fn f638() -> usize { preempt_off (cpu) { return stores638[cpu].value; } }");
   ]
 
 (* Default construction must obey the existing private ownership boundary. *)

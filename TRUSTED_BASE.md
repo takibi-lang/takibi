@@ -372,9 +372,15 @@ rules globally.
   value) is checked by the compiler. Trusted: `kernel/kernel/cpu_authority.tkb`
   reports the CPU it runs on (`cpu_id()`), and a `preempt_off` block, which
   the compiler keeps free of `may_block` and does not let the authority
-  leave (#638), stays on that CPU because the block lowers to no
-  disable/enable pair while the kernel is not preemptible
-  (`KERNEL_PREEMPTIBLE == 0`, asserted there). `cpu_here_for_boot_probe`
+  leave (#638), stays on that CPU because nothing switches a CPU at EL1
+  while the kernel is not preemptible (`KERNEL_PREEMPTIBLE == 0`, asserted
+  there). The block raises and lowers a per-CPU preempt count on every exit
+  (the compiler places the exits); the file finds the count through
+  TPIDR_EL1, which is trusted to hold the core index times the per-core
+  stack group stride (each core's entry path sets it before any Takibi code
+  runs; both linker scripts assert the stride; the compiler confines
+  `mrs_tpidr_el1` to this file; each region entry checks it against
+  `cpu_id()` at run time). `cpu_here_for_boot_probe`
   (the boot probe only) mints outside a block;
   `scripts/check_cpu_authority_mints.py` fixes its caller.
 - ext2's operation scratch is a pool of `KERNEL_MAX_CORES` slots, each

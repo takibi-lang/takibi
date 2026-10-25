@@ -1,0 +1,120 @@
+// GitHub issue #638 stage 2: every exit of a preempt_off block ends the
+// region. The compiler calls the authority file's private preempt_off_exit
+// at the closing brace and before each return, break or continue that
+// leaves the block; this program counts those calls at run time.
+//
+// The kernel's mint reaches its count through TPIDR_EL1. Here the mint is a
+// stand-in with one global count, because what is under test is where the
+// compiler places the exits, not how the kernel finds its CPU.
+//
+// Each line is the open-region count after one shape returns, then (where a
+// shape computes a value inside the region) the count seen while the value
+// was computed:
+//   1. fall-through                         -> 0
+//   2. early return, value computed inside  -> 0, then 1
+//   3. nested blocks, return from the inner -> 0, then 2
+//   4. break and continue out of a block in a loop (5 iterations) -> 0
+//   5. a loop inside a block, break leaves the loop only -> 0, then 1
+//   6. a block whose body always returns    -> 0, then 1
+// and finally the total number of exits taken (one per region entered).
+
+struct cpu_authority Cpu638 {
+    private id: {0..<1 as usize};
+}
+
+struct per_cpu Slot638 {
+    value: u64;
+}
+
+private let mut slots638: [Slot638; 1];
+let mut open638: u64 = 0;
+let mut entered638: u64 = 0;
+let mut exited638: u64 = 0;
+
+private fn preempt_off_enter() -> Cpu638 {
+    open638 = open638 + 1;
+    entered638 = entered638 + 1;
+    let mut cpu: Cpu638 = { 0 };
+    return cpu;
+}
+
+private fn preempt_off_exit() {
+    open638 = open638 - 1;
+    exited638 = exited638 + 1;
+}
+
+fn seen638(cpu: Cpu638) -> u64 {
+    slots638[cpu].value = open638;
+    return open638;
+}
+
+fn fall_through638() {
+    preempt_off (cpu) { seen638(cpu); }
+}
+
+fn early_return638(flag: bool) -> u64 {
+    preempt_off (cpu) {
+        if (flag) { return seen638(cpu); }
+        seen638(cpu);
+    }
+    return 99;
+}
+
+fn nested638(flag: bool) -> u64 {
+    preempt_off (outer) {
+        seen638(outer);
+        preempt_off (inner) {
+            if (flag) { return seen638(inner); }
+        }
+    }
+    return 99;
+}
+
+fn loop_exits638() {
+    for i: u64 in 0..<5 {
+        preempt_off (cpu) {
+            seen638(cpu);
+            if (i == 1) { continue; }
+            if (i == 3) { break; }
+        }
+    }
+}
+
+fn inner_loop638() -> u64 {
+    let mut seen: u64 = 0;
+    preempt_off (cpu) {
+        for i: u64 in 0..<4 {
+            if (i == 2) { break; }
+            seen = seen638(cpu);
+        }
+    }
+    return seen;
+}
+
+fn always_returns638() -> u64 {
+    preempt_off (cpu) { return seen638(cpu); }
+}
+
+fn app_main() {
+    fall_through638();
+    uart_println(open638);
+    let a: u64 = early_return638(true);
+    uart_println(open638);
+    uart_println(a);
+    let b: u64 = nested638(true);
+    uart_println(open638);
+    uart_println(b);
+    loop_exits638();
+    uart_println(open638);
+    let c: u64 = inner_loop638();
+    uart_println(open638);
+    uart_println(c);
+    let d: u64 = always_returns638();
+    uart_println(open638);
+    uart_println(d);
+    if (entered638 == exited638) {
+        uart_println(exited638);
+    } else {
+        uart_println(0 as u64);
+    }
+}
