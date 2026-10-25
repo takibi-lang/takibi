@@ -171,10 +171,12 @@ fn kernel_plan_segments_probe() {
                 DistroElfAccess::Read => {}
                 DistroElfAccess::ReadExecute => {}
             }
+            let (text_first, text_last) = distro_elf_segment_pages(text);
+            let (data_first, data_last) = distro_elf_segment_pages(data);
             if (distro_elf_plan_segment_count(plan) == 2 && text_ok &&
-                data_ok && text.first_page == 0 && text.last_page == 1 &&
-                text.virtual_address == 0 && data.first_page == 1 &&
-                data.last_page == 2 && data.offset == 128 &&
+                data_ok && text_first == 0 && text_last == 1 &&
+                text.virtual_address == 0 && data_first == 1 &&
+                data_last == 2 && data.offset == 128 &&
                 data.file_size == 16) {
                 uart_puts("kernel plan segments: PASS\n");
             } else {

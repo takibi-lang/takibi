@@ -62,17 +62,18 @@ variant DistroElfAccess { Read; ReadExecute; ReadWrite; }
 // The mapper copies from and maps these values and never re-reads the
 // program header, so an acceptance rule exists in one place only, and the
 // values the mapper uses are the values that were checked (the metadata
-// window is not read a second time). first_page..<last_page is the page
-// span (distro_elf_load_page_span) the validator proved disjoint from
-// every other segment's.
+// window is not read a second time). distro_elf_segment_pages gives the
+// page span the validator proved disjoint from every other segment's.
+// p_vaddr and p_memsz are held in 32 bits: the validator accepts only an
+// extent under 2 MiB, so both fit, and the smaller record keeps the plan,
+// which is copied by value along the exec path, from growing by more than
+// it must (16 segments at 32 bytes).
 struct DistroElfSegment {
-    access: DistroElfAccess;
     offset: usize;
     file_size: usize;
-    virtual_address: usize;
-    memory_size: usize;
-    first_page: usize;
-    last_page: usize;
+    virtual_address: u32;
+    memory_size: u32;
+    access: DistroElfAccess;
 }
 
 struct DistroElfLoadPlan {
@@ -102,14 +103,12 @@ must_use variant DistroElfResult { Invalid; Valid(DistroElfLoadPlan); }
 let mut ELF_IDENT_MAGIC: [u8; 7] = {0x7F, 0x45, 0x4C, 0x46, 2, 1, 1};
 
 // A PT_LOAD's page span as process_image_map_segments maps it: from the
-// page holding p_vaddr to the page after p_vaddr + p_memsz.
-private fn distro_elf_load_page_span(item: KernelElf64ProgramHeader)
-        -> (usize, usize) {
-    let first: usize = (item.virtual_address as usize) / 4096;
-    let last: usize =
-        ((item.virtual_address as usize) + (item.memory_size as usize) +
-         4095) / 4096;
-    return (first, last);
+// page holding p_vaddr to the page after p_vaddr + p_memsz. The one
+// definition both the validator's disjointness check and the mapper use.
+fn distro_elf_segment_pages(segment: DistroElfSegment) -> (usize, usize) {
+    let start: usize = segment.virtual_address as usize;
+    let end: usize = start + (segment.memory_size as usize);
+    return (start / 4096, (end + 4095) / 4096);
 }
 
 // GitHub issue #1058: no two PT_LOAD segments may share a page. The mapper
@@ -122,12 +121,11 @@ private fn distro_elf_load_pages_disjoint(plan: DistroElfLoadPlan) -> bool {
     let count: usize = plan.segment_count;
     for i: usize in 0..<16 {
         if (i < count) {
-            let i_first: usize = plan.segments[i].first_page;
-            let i_last: usize = plan.segments[i].last_page;
+            let (i_first, i_last) = distro_elf_segment_pages(plan.segments[i]);
             for j: usize in 0..<16 {
                 if (j < i) {
-                    let j_first: usize = plan.segments[j].first_page;
-                    let j_last: usize = plan.segments[j].last_page;
+                    let (j_first, j_last) =
+                        distro_elf_segment_pages(plan.segments[j]);
                     if (i_first < j_last && j_first < i_last) {
                         return false;
                     }
@@ -187,7 +185,7 @@ fn distro_elf_validate_with_length(image: []u8,
         // written as each PT_LOAD is accepted.
         let mut plan: DistroElfLoadPlan;
         let mut empty: DistroElfSegment = {
-            DistroElfAccess::Read, 0, 0, 0, 0, 0, 0
+            0, 0, 0, 0, DistroElfAccess::Read
         };
         for k: usize in 0..<16 { plan.segments[k] = empty; }
         let mut maximum: usize = 0;
@@ -240,12 +238,13 @@ fn distro_elf_validate_with_length(image: []u8,
                 }
                 let end_address: usize = virtual_address + memory_size;
                 if (end_address > maximum) { maximum = end_address; }
-                let (first_page, last_page) = distro_elf_load_page_span(item);
                 let index: usize = load_count;
-                if (index >= 16) { return DistroElfResult::Invalid; }
+                if (index >= 16 || end_address > 0x1FFFFF) {
+                    return DistroElfResult::Invalid;
+                }
                 let mut segment: DistroElfSegment = {
-                    access, offset, file_size, virtual_address, memory_size,
-                    first_page, last_page
+                    offset, file_size, virtual_address as u32,
+                    memory_size as u32, access
                 };
                 plan.segments[index] = segment;
                 load_count = load_count + 1;

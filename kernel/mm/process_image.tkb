@@ -1851,7 +1851,7 @@ private fn process_image_load_page(slot: borrow ProcessImageSlot[0],
 
     let page_start: usize = l3_index * PAGE_SIZE;
     let page_end: usize = page_start + PAGE_SIZE;
-    let segment_start: usize = header.virtual_address + load_bias;
+    let segment_start: usize = (header.virtual_address as usize) + load_bias;
     let file_size: usize = header.file_size;
     let file_end: usize = segment_start + file_size;
     let mut copy_start: usize = page_start;
@@ -1933,7 +1933,7 @@ private fn process_image_load_page_ext2(slot: borrow ProcessImageSlot[0],
     for i: usize in 0..<4096 { bytes[i] = 0; }
     let page_start: usize = l3_index * PAGE_SIZE;
     let page_end: usize = page_start + PAGE_SIZE;
-    let segment_start: usize = header.virtual_address + load_bias;
+    let segment_start: usize = (header.virtual_address as usize) + load_bias;
     let file_size: usize = header.file_size;
     let file_end: usize = segment_start + file_size;
     let mut copy_start: usize = page_start;
@@ -2163,8 +2163,9 @@ private fn process_image_map_segments(slot: borrow ProcessImageSlot[0],
         if (segment_index < count) {
             let mut header: DistroElfSegment =
                 distro_elf_plan_segment(plan, segment_index);
-            let first_page: usize = header.first_page + load_bias / PAGE_SIZE;
-            let last_page: usize = header.last_page + load_bias / PAGE_SIZE;
+            let (span_first, span_last) = distro_elf_segment_pages(header);
+            let first_page: usize = span_first + load_bias / PAGE_SIZE;
+            let last_page: usize = span_last + load_bias / PAGE_SIZE;
             if (load_bias % PAGE_SIZE != 0 ||
                 last_page > USER_SPACE_PAGE_COUNT) {
                 process_image_cleanup_root(target);
