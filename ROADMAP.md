@@ -160,9 +160,10 @@ next one taken. The done record of the previous queue is in HISTORY.md
 (2026-10-25).
 
 0. **Stop the silent growth (now).** The remaining `.tkb`-reading checks
-   move to #987's call-graph table one by one (#567); #850's stop-gap
-   (EFFECTS.md lists the checker-only effect words; no new such word,
-   DECISIONS.md); #1003 (`WORDS.md`) and #1027 step 1 (`CLI.md`, the dead
+   move to #987's call-graph table one by one (#567); #850's stop-gap is
+   done (EFFECTS.md lists the checker-only effect words from the table
+   `dynamic_rule` reads; no new such word, DECISIONS.md; the migration
+   stays in band 2); #1003 (`WORDS.md`) and #1027 step 1 (`CLI.md`, the dead
    flags out, an internal namespace) land together; #1004 (dead builtins,
    `stable_replace` to a removed-words table, the generated-only names
    hidden); #994 (address-taking DMA cache builtins counted as raw sites;
