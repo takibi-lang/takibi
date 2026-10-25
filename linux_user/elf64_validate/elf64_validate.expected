@@ -25,3 +25,10 @@ kernel zero alignment: PASS
 unit alignment: PASS
 kernel unit alignment: PASS
 kernel header copies: PASS
+kernel text flags: PASS
+kernel data flags: PASS
+kernel no flags: PASS
+kernel write+execute flags: PASS
+kernel disjoint pages: PASS
+kernel shared page: PASS
+kernel straddling shared page: PASS

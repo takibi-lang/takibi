@@ -72,6 +72,57 @@ must_use variant DistroElfResult { Invalid; Valid(DistroElfLoadPlan); }
 // endian), EI_VERSION(1=EV_CURRENT).
 let mut ELF_IDENT_MAGIC: [u8; 7] = {0x7F, 0x45, 0x4C, 0x46, 2, 1, 1};
 
+// A PT_LOAD's page span as process_image_map_segments maps it: from the
+// page holding p_vaddr to the page after p_vaddr + p_memsz.
+private fn distro_elf_load_page_span(item: KernelElf64ProgramHeader)
+        -> (usize, usize) {
+    let first: usize = (item.virtual_address as usize) / 4096;
+    let last: usize =
+        ((item.virtual_address as usize) + (item.memory_size as usize) +
+         4095) / 4096;
+    return (first, last);
+}
+
+// GitHub issue #1058: no two PT_LOAD segments may share a page. The mapper
+// refuses a page that is already mapped, and it does so after execve's point
+// of no return, where a refusal can only stop the kernel; an image whose
+// segments overlap is refused here instead, while execve can still answer
+// ENOEXEC. Called once every header has passed the checks above, so each
+// span ends below the 2 MiB extent and the sums cannot wrap.
+private fn distro_elf_load_pages_disjoint(image: []u8, program_offset: usize,
+                                          program_count: usize) -> bool {
+    for i: usize in 0..<program_count {
+        let i_offset: usize = program_offset + i * ELF_PROGRAM_HEADER_SIZE;
+        if (i_offset > image.len) { return false; }
+        let i_tail = image[i_offset..<image.len];
+        if (i_tail.len < sizeof(KernelElf64ProgramHeader)) { return false; }
+        let mut i_item: KernelElf64ProgramHeader = kernel_elf_program_header_copy(
+            i_tail[0..<sizeof(KernelElf64ProgramHeader)]);
+        if (i_item.segment_type == ELF_PT_LOAD) {
+            let (i_first, i_last) = distro_elf_load_page_span(i_item);
+            for j: usize in 0..<i {
+                let j_offset: usize =
+                    program_offset + j * ELF_PROGRAM_HEADER_SIZE;
+                if (j_offset > image.len) { return false; }
+                let j_tail = image[j_offset..<image.len];
+                if (j_tail.len < sizeof(KernelElf64ProgramHeader)) {
+                    return false;
+                }
+                let mut j_item: KernelElf64ProgramHeader =
+                    kernel_elf_program_header_copy(
+                        j_tail[0..<sizeof(KernelElf64ProgramHeader)]);
+                if (j_item.segment_type == ELF_PT_LOAD) {
+                    let (j_first, j_last) = distro_elf_load_page_span(j_item);
+                    if (i_first < j_last && j_first < i_last) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    return true;
+}
+
 // The slice parameter is intentionally retaining rather than `borrow`:
 // a successful plan carries this exact checked metadata view to the mapper.
 // Stack- or owner-derived slices therefore cannot enter this API, while the
@@ -119,6 +170,13 @@ fn distro_elf_validate_with_length(image: []u8,
             let mut item: KernelElf64ProgramHeader =
                 kernel_elf_program_header_copy(item_bytes);
             if (item.segment_type == ELF_PT_LOAD) {
+                // GitHub issue #1058: the mapper accepts only these three
+                // permission sets (PF_R, PF_R|PF_X, PF_R|PF_W) and fails
+                // after the old image is gone, so they are refused here,
+                // before execve's point of no return.
+                if (item.flags != 4 && item.flags != 5 && item.flags != 6) {
+                    return DistroElfResult::Invalid;
+                }
                 let offset: usize = item.offset as usize;
                 let file_size: usize = item.file_size as usize;
                 let virtual_address: usize = item.virtual_address as usize;
@@ -155,6 +213,10 @@ fn distro_elf_validate_with_length(image: []u8,
         }
         let entry: usize = header.entry as usize;
         if (load_count == 0 || entry >= maximum || maximum > 0x1FFFFF) {
+            return DistroElfResult::Invalid;
+        }
+        if (distro_elf_load_pages_disjoint(image, program_offset,
+                program_count) == false) {
             return DistroElfResult::Invalid;
         }
         let mut plan: DistroElfLoadPlan = {

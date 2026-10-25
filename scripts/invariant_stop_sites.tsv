@@ -71,7 +71,7 @@ kernel/kernel/process.tkb	kernel_process_exit_reserved	frame	1	-	#1017	a second 
 kernel/kernel/process.tkb	kernel_process_child_exit	ladder	1	-	#131	a second deferred reap while one is live: a one-entry slot the place discipline could hold
 kernel/kernel/syscall.tkb	exec_args_put	ladder	1	-	#131	the per-CPU exec argv handoff slot is already Full: a one-entry place, a second ChildExec before the first prepare
 kernel/kernel/syscall.tkb	kernel_syscall_clone_child_return	frame	3	-	#1017	clone child return: no child stack, a failed context install, an invalid current root; the parent frame is the report
-kernel/kernel/syscall.tkb	kernel_syscall_child_exec_return	frame	12	-	#1017	child exec return: each KernelChildExecPrepareResult failure arm and the debugger switch; recorded in exec_failure, then the frame is the report
+kernel/kernel/syscall.tkb	kernel_syscall_child_exec_return	frame	12	-	#1017	child exec return: each KernelChildExecPrepareResult failure arm and the debugger switch; recorded in exec_failure, then the frame is the report; which arms EL0 can reach is classified at the match (#1058): out of memory and a read error remain
 kernel/kernel/syscall.tkb	kernel_syscall_migrate_return	frame	1	-	#1017	migration of the current process fails on its syscall frame
 kernel/kernel/syscall.tkb	signal_return_exit	frame	1	-	#1017	the exit tail answered nothing or Unreachable (its file reap failed); the frame is the report
 kernel/mm/page.tkb	page_meta_at	ladder	1	-	#216	an index past the metadata region: a refined index type would make it static

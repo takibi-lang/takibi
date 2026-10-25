@@ -3929,6 +3929,29 @@ fn kernel_syscall_child_exec_return(frame_sp: usize) !{unsafe} {
         ext2_read_leave();
     }
     let mut user_entry: ExecUserEntry = { 0, 0 };
+    // GitHub issue #1058: which of these EL0 can reach. The point of no
+    // return is the old image's teardown inside the prepare; execve itself
+    // has already returned ChildExec, so every arm below stops the kernel.
+    // - Unreachable by construction: NotChildOrPending and ArgvPageMissing
+    //   (execve sets the pending mark and reserves the argv page just before
+    //   ChildExec, and refuses a second exec with EAGAIN), NoImageResolved
+    //   (boot mounts ext2 and resolves the fallback image before EL0 runs),
+    //   CloneVmMissing (a process has an installed image or an outstanding
+    //   fork clone), ImageAlreadyInstalled and ImageNoTargetRoot (the
+    //   teardown just cleared the image, and the map already checked the
+    //   root), DynamicResolveInvalid (execve validated the same inode with
+    //   the same validator, and its ext2 reader registration, held from
+    //   dispatch to here, keeps writers out).
+    // - Reachable through ELF contents, moved before the point of no return
+    //   by #1058: StaticImageInvalid and DynamicPairInvalid for a PT_LOAD
+    //   with flags other than R, RX or RW, or two PT_LOADs sharing a page.
+    //   distro_elf_validate_with_length now refuses both, so execve answers
+    //   ENOEXEC for the pathname and argv[0] keeps the fallback.
+    // - Still reachable: StaticMapOutOfMemory, ImageRecordOutOfMemory and
+    //   the out-of-memory half of DynamicPairInvalid under memory pressure,
+    //   and the Invalid results on an ext2 or block read error (a device's
+    //   answer). Tracked as a followup: reserve before the teardown, or end
+    //   the process as Linux does after its point of no return.
     match result {
         KernelChildExecPrepareResult::Prepared(prepared) => { user_entry = prepared; }
         KernelChildExecPrepareResult::NotChildOrPending => {

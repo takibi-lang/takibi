@@ -47,6 +47,7 @@ fn valid_image_init() {
     put_u16(56, 1);
 
     put_u32(64, 1);       // PT_LOAD
+    put_u32(68, 4);       // PF_R
     put_u64(72, 128);     // p_offset
     put_u64(80, 0);       // p_vaddr
     put_u64(96, 16);      // p_filesz
@@ -86,6 +87,60 @@ fn print_result(label: *u8, expected_valid: bool, image_len: usize) {
             else { uart_puts("FAIL\n"); }
         }
     }
+}
+
+// GitHub issue #1058: inputs only the maintained kernel validator refuses,
+// because its mapper would otherwise refuse them after execve's point of no
+// return. The common validator does not judge them.
+fn print_kernel_result(label: *u8, expected_valid: bool) {
+    uart_puts("kernel ");
+    uart_puts(label);
+    match distro_elf_validate_with_length(image as []u8, 256) {
+        DistroElfResult::Invalid => {
+            if (expected_valid == false) { uart_puts("PASS\n"); }
+            else { uart_puts("FAIL\n"); }
+        }
+        DistroElfResult::Valid(plan) => {
+            if (expected_valid) { uart_puts("PASS\n"); }
+            else { uart_puts("FAIL\n"); }
+        }
+    }
+}
+
+// A second PT_LOAD at 120, file offset 128 like the first, whose p_vaddr
+// the caller picks.
+fn second_load_init(virtual_address: u64) {
+    valid_image_init();
+    put_u16(56, 2);
+    put_u32(120, 1);      // PT_LOAD
+    put_u32(124, 6);      // PF_R|PF_W
+    put_u64(128, 128);    // p_offset
+    put_u64(136, virtual_address);
+    put_u64(152, 16);     // p_filesz
+    put_u64(160, 16);     // p_memsz
+    put_u64(168, 8);      // p_align
+}
+
+fn kernel_mapper_agreement_probe() {
+    valid_image_init();
+    put_u32(68, 5);
+    print_kernel_result("text flags: ", true);
+    valid_image_init();
+    put_u32(68, 6);
+    print_kernel_result("data flags: ", true);
+    valid_image_init();
+    put_u32(68, 0);
+    print_kernel_result("no flags: ", false);
+    valid_image_init();
+    put_u32(68, 7);
+    print_kernel_result("write+execute flags: ", false);
+    second_load_init(0x1080);
+    print_kernel_result("disjoint pages: ", true);
+    second_load_init(0x800);
+    print_kernel_result("shared page: ", false);
+    // Starts in page 0, the first segment's page, and ends in page 1.
+    second_load_init(0xFF8);
+    print_kernel_result("straddling shared page: ", false);
 }
 
 // Execute the production mint's packed record copies and prove that later
@@ -155,4 +210,5 @@ fn app_main() {
     put_u64(112, 1);
     print_result("unit alignment: ", true, 256);
     kernel_header_copy_probe();
+    kernel_mapper_agreement_probe();
 }
