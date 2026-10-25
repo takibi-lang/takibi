@@ -1,6 +1,6 @@
 # Space: #981 process_image target root as a parameter, process claim per_cpu (2026-10-25)
 
-Measured with `python3 scripts/space_delta.py origin/main` (base aab3d783),
+Measured with `python3 scripts/space_delta.py origin/main` (base aab3d783; re-measured against b980adfe after the rebase, identical numbers),
 both production kernels linked in the working tree and at the base.
 
 | | qemu base | qemu change | rpi5 base | rpi5 change |
