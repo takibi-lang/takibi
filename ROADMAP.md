@@ -123,13 +123,11 @@ list (maintainer, 2026-10-09).
    decision): the linker-bounded stacks and the DTB blob as regions, which
    would take stack_poison.tkb's last integer ranges away. `make
    raw-site-counts` prints each listed file's raw sites to choose the next
-   one to migrate. Per-CPU scratch is #981: slice 1 done (2026-10-24:
-   address_space_active and the idle-starvation pair are `struct per_cpu`
-   stores); slice 2 too: test_driver.tkb has left the list -- an exec's ELF
-   metadata windows are an ExecWindowSlot pool and its entry and stack
-   ride in the prepare's result (2026-10-24). address_space.tkb has left
-   the list too: its boot probe reaches EL0 test VAs through user_memory's
-   probe accessors (2026-10-24). Consolidating the kernel-driven built-ins into general features
+   one to migrate. Per-CPU scratch (#981) is done (2026-10-25): every
+   [T; KERNEL_MAX_CORES] global is a per_cpu store, a pool, or listed with
+   its reader (scripts/check_per_cpu_arrays.py); process_image's target root
+   is a parameter rather than state, and the PMR shadow's non-stopping mint
+   waits for #638. Consolidating the kernel-driven built-ins into general features
    is #750 (holder-tied identities, option C, is its central item; a
    shrink protocol for RegionPools walked with no lock belongs there). For #720
    (B): the doorbell, ERDP-release and stop/reset boundaries are in place;
