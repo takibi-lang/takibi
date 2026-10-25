@@ -31,8 +31,12 @@
 //   pending does not replace it: the first is the one whose wait4 result is
 //   delivered.
 
+// Pipe (GitHub issue #1042) is a reader waiting for bytes or the last
+// writer's close, or a writer waiting for room or the last reader's close,
+// on the pipe its record's pipe_wait names. Added at the end so the codes
+// the DDB and crash reports print for the others are unchanged.
 enum ProcessWaitReason: u8 {
-    None; UartRx; ChildExit; NetRx; Deadline; Signal; UartTx;
+    None; UartRx; ChildExit; NetRx; Deadline; Signal; UartTx; Pipe;
 }
 
 // The kind of state, as readers compare it.

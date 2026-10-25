@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 POOLS = {'process', 'tcp', 'retx', 'frame', 'backing', 'image',
-         'fd_context', 'fd_block', 'object'}
+         'fd_context', 'fd_block', 'object', 'pipe'}
 FIELDS = ('object', 'pool', 'slot', 'chunk', 'chunks', 'capacity', 'nonfree', 'bytes')
 ROW = re.compile(r'pool space: name=(\w+)' + ''.join(
     rf' {field}=(\d+)' for field in FIELDS))
@@ -36,7 +36,7 @@ def parse_capture(text):
             if phase is None or line != f'pool space: end={phase}':
                 raise ValueError('mismatched phase end')
             if set(samples[phase]) != POOLS:
-                raise ValueError('phase must contain all nine production pools')
+                raise ValueError('phase must contain all ten production pools')
             phase = None
         else:
             match = ROW.fullmatch(line)

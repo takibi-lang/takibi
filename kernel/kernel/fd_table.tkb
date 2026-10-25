@@ -5,6 +5,7 @@ use "kernel/lib/peer_round.tkb";
 use "kernel/lib/execution_model.tkb";
 use "kernel/lib/pool_lock.tkb";
 use "kernel/lib/locked_cell.tkb";
+use "kernel/kernel/pipe.tkb";
 
 // Current limitations (2026-08-24, issues #295/#392/#391). Keep this list
 // current as call sites change; a limitation that goes stale here is
@@ -116,6 +117,9 @@ enum UnifiedFdKind: u8 {
     Directory;
     Listener;
     Connection;
+    // GitHub issue #1042: the two ends of a pipe (kernel/kernel/pipe.tkb).
+    PipeRead;
+    PipeWrite;
 }
 enum UnifiedListenerState: u8 { Closed; Created; Bound; Listening; }
 // GitHub issue #393: one descriptor. What used to be four parallel arrays
@@ -793,6 +797,12 @@ struct SharedObject {
     // costs sixteen bytes on an object this kernel has few of.
     pending_accept_slot: usize;
     pending_accept_generation: usize;
+    // GitHub issue #1042: the pipe a PipeRead or PipeWrite end belongs to,
+    // as the (address, generation) its pool minted. Written once, by
+    // unified_pipe_end_create before the end is installed, and read by the
+    // descriptor lookup and by the release that closes the end.
+    pipe_address: usize;
+    pipe_generation: usize;
     // GitHub issue #391: the reference count lives in the object, the way
     // Linux's `struct file.f_count` does, rather than in a parallel slot
     // of a refcounting container. Retained by unified_fd_install /
@@ -1104,11 +1114,45 @@ fn unified_object_double_release_count() -> usize {
 private fn unified_object_release(handle: UnifiedObjectHandle)
         -> UnifiedObjectReleaseResult
         !{unsafe, invalidates_UnifiedObjectHandle} {
+    // GitHub issue #1042: what a pipe end's release must close once the
+    // object is gone. Read before the release, since the release frees the
+    // record; written once at creation, so it cannot change in between.
+    let (kind, pipe_address, pipe_generation) = unified_object_pipe_of(handle);
     let guard = guarded_field_take(&object_refcount_lock);
     let result: UnifiedObjectReleaseResult =
         unified_object_release_locked(guard, handle);
     guarded_field_give(guard, &object_refcount_lock);
-    return result;
+    match result {
+        UnifiedObjectReleaseResult::Invalid => { return UnifiedObjectReleaseResult::Invalid; }
+        UnifiedObjectReleaseResult::StillHeld => { return UnifiedObjectReleaseResult::StillHeld; }
+        UnifiedObjectReleaseResult::Freed => {
+            // Every holder of this end is gone: close the end, outside the
+            // refcount lock (the pipe lock is a TaskMutex, taken by no
+            // holder of that lock). An end freed without a release -- a
+            // failed install -- is closed by its creator instead.
+            if (kind == UnifiedFdKind::PipeRead || kind == UnifiedFdKind::PipeWrite) {
+                pipe_end_close(pipe_address, pipe_generation,
+                               kind == UnifiedFdKind::PipeRead);
+            }
+            return UnifiedObjectReleaseResult::Freed;
+        }
+    }
+}
+
+// An object's kind and, for a pipe end, its pipe; (Empty, 0, 0) when stale.
+private fn unified_object_pipe_of(handle: UnifiedObjectHandle)
+        -> (UnifiedFdKind, usize, usize) !{unsafe} {
+    match object_pin_handle(&object_pool, handle) {
+        RegionPinned(SharedObject)::Stale => { return (UnifiedFdKind::Empty, 0, 0); }
+        RegionPinned(SharedObject)::Pinned(pin) => {
+            let object: &mut SharedObject = region_pin_record(pin);
+            let kind: UnifiedFdKind = object.kind;
+            let address: usize = object.pipe_address;
+            let generation: usize = object.pipe_generation;
+            object_unpin(pin);
+            return (kind, address, generation);
+        }
+    }
 }
 
 private fn unified_object_release_locked(
@@ -2067,6 +2111,90 @@ fn unified_connection_create(process: usize, fd: usize,
             }
         }
     }
+}
+
+// GitHub issue #1042: one end of a pipe, installed at `fd`. On anything but
+// Ok the end's object is gone again and the pipe end is NOT closed: the
+// caller still owns that end of the pipe and closes it (pipe_end_close), as
+// it closes the other end when that one fails.
+fn unified_pipe_end_create(process: usize, fd: usize, pipe_address: usize,
+                           pipe_generation: usize, reader: bool)
+        -> UnifiedOpenResult {
+    let mut kind: UnifiedFdKind = UnifiedFdKind::PipeWrite;
+    if (reader) { kind = UnifiedFdKind::PipeRead; }
+    match unified_object_alloc_first(kind) {
+        UnifiedObjectResult::Invalid => { return UnifiedOpenResult::Invalid; }
+        UnifiedObjectResult::Full => { return UnifiedOpenResult::Full; }
+        UnifiedObjectResult::Allocated(handle) => {
+            let RegionPinned(SharedObject)::Pinned(object_pin) =
+                    object_pin_handle(&object_pool, handle) else {
+                RegionPinned(SharedObject)::Stale => { return UnifiedOpenResult::Full; }
+            };
+            let object: &mut SharedObject = region_pin_record(object_pin);
+            object.pipe_address = pipe_address;
+            object.pipe_generation = pipe_generation;
+            object.readable = reader;
+            object.writable = reader == false;
+            match unified_fd_install(process, fd, handle.slot,
+                                     handle.generation) {
+                UnifiedFdInstallResult::Invalid => {
+                    unified_object_free(handle.slot, handle.generation);
+                    { let __object_result: UnifiedOpenResult = UnifiedOpenResult::Invalid; object_unpin(object_pin); return __object_result; }
+                }
+                UnifiedFdInstallResult::NoMemory => {
+                    unified_object_free(handle.slot, handle.generation);
+                    { let __object_result: UnifiedOpenResult = UnifiedOpenResult::Full; object_unpin(object_pin); return __object_result; }
+                }
+                UnifiedFdInstallResult::RefOverflow => {
+                    unified_object_free(handle.slot, handle.generation);
+                    { let __object_result: UnifiedOpenResult = UnifiedOpenResult::Invalid; object_unpin(object_pin); return __object_result; }
+                }
+                UnifiedFdInstallResult::Ok => { let __object_result: UnifiedOpenResult = UnifiedOpenResult::Ok; object_unpin(object_pin); return __object_result; }
+            }
+        }
+    }
+}
+
+// A pipe end at `fd`: its pipe's (address, generation) and whether it is
+// the read end.
+must_use variant UnifiedPipeResult { Missing; Found((usize, usize, bool)); }
+
+fn unified_pipe_lookup(process: usize, fd: usize) -> UnifiedPipeResult !{unsafe} {
+    let ctx_address: usize = fd_context_address(process);
+    if (ctx_address == 0) { return UnifiedPipeResult::Missing; }
+    let RegionPinned(ProcessFdContext)::Pinned(ctx_pin) =
+            fd_context_pin(&fd_context_pool, process) else {
+        RegionPinned(ProcessFdContext)::Stale => { return UnifiedPipeResult::Missing; }
+    };
+    let ctx: &mut ProcessFdContext = region_pin_record(ctx_pin);
+    let (block, block_generation) = fd_block_lookup(ctx, fd);
+    if (block == 0) { { let __ctx_result: UnifiedPipeResult = UnifiedPipeResult::Missing; fd_context_unpin(ctx_pin); return __ctx_result; } }
+    let RegionPinned(FdBlock)::Pinned(entries_pin) =
+            fd_block_pin(&fd_block_pool, block, block_generation) else {
+        RegionPinned(FdBlock)::Stale => { let __ctx_result: UnifiedPipeResult = UnifiedPipeResult::Missing; fd_context_unpin(ctx_pin); return __ctx_result; }
+    };
+    let entries: &mut FdBlock = region_pin_record(entries_pin);
+    let index: {0..<FD_BLOCK_SLOTS as usize} = fd_slot_index(fd);
+    let entry_read: bool = entries.slot[index].kind == UnifiedFdKind::PipeRead;
+    let entry_write: bool = entries.slot[index].kind == UnifiedFdKind::PipeWrite;
+    let mut handle: UnifiedObjectHandle = {
+        entries.slot[index].object, entries.slot[index].generation
+    };
+    fd_block_unpin(entries_pin);
+    fd_context_unpin(ctx_pin);
+    if (entry_read == false && entry_write == false) {
+        return UnifiedPipeResult::Missing;
+    }
+    // The pool's own check on the descriptor's pair, then the object's kind
+    // against the entry's: the record is read only through a pin.
+    let (kind, address, generation) = unified_object_pipe_of(handle);
+    if (entry_read && kind == UnifiedFdKind::PipeRead) {
+        return UnifiedPipeResult::Found((address, generation, true));
+    }
+    if (entry_write && kind == UnifiedFdKind::PipeWrite) {
+        return UnifiedPipeResult::Found((address, generation, false));
+    }
+    return UnifiedPipeResult::Missing;
 }
 
 fn unified_fd_duplicate(process: usize, old_fd: usize, new_fd: usize)

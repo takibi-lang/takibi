@@ -2477,6 +2477,7 @@ private fn ddb_wait_reason_name(reason: usize) -> *u8 {
         4 => { return "deadline"; }
         5 => { return "signal"; }
         6 => { return "uart-tx"; }
+        7 => { return "pipe"; }
         _ => { return "unknown"; }
     }
 }
@@ -2749,6 +2750,8 @@ private fn diagnostic_fd_kind_code(kind: UnifiedFdKind) -> usize {
         UnifiedFdKind::Directory => { return 3; }
         UnifiedFdKind::Listener => { return 4; }
         UnifiedFdKind::Connection => { return 5; }
+        UnifiedFdKind::PipeRead => { return 6; }
+        UnifiedFdKind::PipeWrite => { return 7; }
     }
 }
 

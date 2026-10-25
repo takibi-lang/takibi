@@ -5,6 +5,7 @@ use "kernel/kernel/fd_table.tkb";
 use "kernel/mm/address_space.tkb";
 use "kernel/mm/process_image.tkb";
 use "kernel/net/tcp.tkb";
+use "kernel/kernel/pipe.tkb";
 use "kernel/printk/log.tkb";
 
 private fn kernel_pool_space_row(name: *u8, object_bytes: usize,
@@ -78,6 +79,12 @@ fn kernel_pool_space_report(phase: *u8) !{unsafe} {
         let (chunks, capacity, live, bytes) = object_pool_space_stats();
         kernel_pool_space_row("object", sizeof(SharedObject),
             sizeof(RegionPool(SharedObject)), sizeof(SharedObject), OBJECT_CHUNK_PAGES * PAGE_SIZE,
+            chunks, capacity, live, bytes);
+    }
+    {
+        let (chunks, capacity, live, bytes) = pipe_pool_space_stats();
+        kernel_pool_space_row("pipe", sizeof(Pipe),
+            sizeof(RegionPool(Pipe)), sizeof(Pipe), PIPE_CHUNK_PAGES * PAGE_SIZE,
             chunks, capacity, live, bytes);
     }
     kernel_boot_log("pool space: end="); kernel_boot_log(phase);

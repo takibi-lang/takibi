@@ -21,13 +21,13 @@
 //   count while its deliberately dense fixtures run (the tcp pool cost
 //   fixture alone takes the TCP pool lock ~100k times from every core); a
 //   real acquire on another core during that window is not counted either.
-// - ONLY THE NINE PRODUCTION POOLS listed below are counted; fixture-private
+// - ONLY THE TEN PRODUCTION POOLS listed below are counted; fixture-private
 //   pools (pin sharing, pool walk, pool contention) are not.
 
 use "kernel/lib/atomic_word.tkb";
 use "kernel/lib/execution_model.tkb";
 
-const POOL_LOCK_WAIT_POOLS: usize = 9;
+const POOL_LOCK_WAIT_POOLS: usize = 10;
 
 variant PoolLockWaitPool {
     Process;
@@ -39,6 +39,7 @@ variant PoolLockWaitPool {
     TcpConnection;
     TcpFrame;
     TcpRetx;
+    Pipe;
 }
 
 inline fn pool_lock_wait_index(pool: PoolLockWaitPool) -> {0..<POOL_LOCK_WAIT_POOLS as usize} {
@@ -52,6 +53,7 @@ inline fn pool_lock_wait_index(pool: PoolLockWaitPool) -> {0..<POOL_LOCK_WAIT_PO
         PoolLockWaitPool::TcpConnection => { return 6; }
         PoolLockWaitPool::TcpFrame => { return 7; }
         PoolLockWaitPool::TcpRetx => { return 8; }
+        PoolLockWaitPool::Pipe => { return 9; }
     }
 }
 
@@ -100,6 +102,7 @@ fn pool_lock_wait_log() !{unsafe} {
     pool_lock_wait_log_one(" tcp_connection=", PoolLockWaitPool::TcpConnection);
     pool_lock_wait_log_one(" tcp_frame=", PoolLockWaitPool::TcpFrame);
     pool_lock_wait_log_one(" tcp_retx=", PoolLockWaitPool::TcpRetx);
+    pool_lock_wait_log_one(" pipe=", PoolLockWaitPool::Pipe);
     kernel_boot_log("\n");
 }
 

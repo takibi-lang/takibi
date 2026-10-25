@@ -1,0 +1,341 @@
+// GitHub issue #1042: the pipe behind pipe2(2). One Pipe is the bounded
+// buffer both ends share; each end is a SharedObject of kind PipeRead or
+// PipeWrite in kernel/kernel/fd_table.tkb, so dup, fork and close count an
+// end's holders exactly as they count any open file description's, and the
+// end's last release is what closes it here (pipe_end_close). That is
+// Linux's shape -- one pipe_inode_info, two struct files -- and it means the
+// reader and writer counts Linux keeps are never kept twice: an end is open
+// while its SharedObject exists.
+//
+// The buffer is PIPE_BUFFER_BYTES, which is PIPE_BUF: a write of at most that
+// many bytes is atomic (it waits until the whole of it fits), as POSIX
+// requires. Linux's default capacity is sixteen pages; one is the least that
+// keeps PIPE_BUF atomic, and the measured users (an ash pipeline, hackbench's
+// 100-byte messages) never fill more.
+//
+// Current limitations (2026-10-25). Keep this list current as call sites
+// change; a limitation that goes stale here is worse than none.
+// - EVERY FIELD IS UNDER THE PIPE'S OWN TaskMutex, through a linear
+//   PipeOwner minted by pipe_take and discharged by pipe_put or the free in
+//   pipe_end_close. The lock is held across the user copy (that is why it is
+//   a TaskMutex, kernel/lib/task_mutex.tkb), so no interrupt handler may
+//   take it, and nothing here is reached from one. A preempted holder and a
+//   same-core waiter would deadlock, which is what the KERNEL_PREEMPTIBLE
+//   assertion at the end keeps checked.
+// - A WRITE LARGER THAN THE ROOM IS SHORT. A write of more than
+//   PIPE_BUFFER_BYTES writes what fits and returns that count, where Linux
+//   blocks until the whole of it is written; musl's stdio, BusyBox's
+//   full_write and hackbench all loop on a short count. A write of at most
+//   PIPE_BUFFER_BYTES that does not fit waits instead, as Linux's does.
+// - THE WAIT IS THE CALLER'S. Nothing here sleeps: a read or write that must
+//   wait names the pipe in its process record under the pipe lock
+//   (kernel_process_pipe_wait_prepare) and the syscall blocks on
+//   ProcessWaitReason::Pipe after letting go; every change wakes the pipe's
+//   waiters after it (kernel_process_pipe_wake). The decisive re-check is in
+//   the Blocked publication (kernel/models/PipeWait.tla).
+// - O_NONBLOCK, F_SETPIPE_SZ, splice and FIONREAD are not implemented; the
+//   syscall layer refuses the flag with EINVAL.
+
+use "kernel/kernel/pool_lock_wait.tkb";
+use "kernel/kernel/process.tkb";
+use "kernel/mm/page.tkb";
+use "kernel/lib/execution_model.tkb";
+use "kernel/lib/mutex.tkb";
+use "kernel/lib/task_mutex.tkb";
+
+const PIPE_BUFFER_BYTES: usize = 4096;
+
+struct Pipe {
+    // Zeroed is free; a slot is zeroed before it is published.
+    lock: TaskMutex;
+    // Set by the free before it lets go of the lock, so a taker that waited
+    // for the lock gives up instead of minting an owner for a freed pipe.
+    retired: bool;
+    reader_open: bool;
+    writer_open: bool;
+    // The ring: `length` bytes starting at `start`, wrapping at the end.
+    start: usize;
+    length: usize;
+    buffer: [u8; PIPE_BUFFER_BYTES];
+}
+private let mut pipe_pool: RegionPool(Pipe);
+
+// Three pages hold two pipes, where two pages would hold one: a pipe is a
+// page of buffer plus a few words, so a chunk of two pages leaves most of
+// its second page empty.
+const PIPE_CHUNK_PAGES: usize = 3;
+
+linear struct PipeOwner[pool: addr, pipe: usize] {
+    private pin: RegionPin(Pipe)[pool, pipe];
+}
+
+must_use variant PipeTakeResult {
+    Missing;
+    Ready(exists pool: addr. exists pipe: usize. PipeOwner[pool, pipe]);
+}
+
+must_use variant PipeAllocResult {
+    Full;
+    Allocated((usize, usize));
+}
+
+private fn pipe_pool_lock(pool: *RegionPool(Pipe) @ pipes)
+        -> RegionPoolGuard(Pipe)[pipes] !{unsafe, acquires_lock_40_pipe_pool, single_instance_lock,
+          lock_guard_40_pipe_pool} {
+    let flags: usize = mutex_irq_save();
+    if (region_pool_lock_contended_hint(pool)) { pool_lock_wait_contended(PoolLockWaitPool::Pipe); }
+    return region_pool_lock_saving(pool, flags);
+}
+
+private fn pipe_pool_unlock(guard: sink RegionPoolGuard(Pipe)[pipes]) {
+    mutex_irq_restore(region_pool_unlock_saved(guard));
+}
+
+// Gives every empty chunk back: a pipe lives for one pipeline, and the
+// `resources` view checks that nothing is held at rest.
+private fn pipe_pool_return_empty(guard: borrow RegionPoolGuard(Pipe)[pipes])
+        !{unsafe} {
+    let mut more: bool = true;
+    while (more) {
+        match region_pool_shrink(guard) {
+            RegionShrink(Pipe)::Nothing => { more = false; }
+            RegionShrink(Pipe)::Chunk(bytes) => {
+                let address: usize = region_bytes_address(bytes);
+                region_release(bytes);
+                page_run_transferred_release_physical(address, PIPE_CHUNK_PAGES);
+            }
+        }
+    }
+}
+
+private fn pipe_slot_free(slot: sink RegionReleaseSlot(Pipe)[p, k]) !{unsafe} {
+    let guard = pipe_pool_lock(&pipe_pool);
+    match region_slot_adopt(guard, slot) {
+        RegionReleaseAdopt(Pipe)::Foreign(stray) => {
+            kernel_boot_log("pipe: a freed pipe is not this pool's\n");
+            region_slot_abandon(stray);
+        }
+        RegionReleaseAdopt(Pipe)::Adopted(mine) => {
+            region_free(guard, mine);
+            pipe_pool_return_empty(guard);
+        }
+    }
+    pipe_pool_unlock(guard);
+}
+
+private fn pipe_unpin(pin: sink RegionPin(Pipe)[p, k]) !{unsafe} {
+    match region_unpin(pin) {
+        RegionUnpin(Pipe)::Unpinned => {}
+        RegionUnpin(Pipe)::Last(slot) => { pipe_slot_free(slot); }
+    }
+}
+
+private fn pipe_pin(pool: *RegionPool(Pipe) @ pipes, address: usize,
+                    generation: usize) -> RegionPinned(Pipe)[pipes] !{unsafe} {
+    let guard = pipe_pool_lock(pool);
+    let mut handle: RegionHandle(Pipe) = region_handle_from(guard, address, generation);
+    let pinned = region_pin(guard, handle);
+    pipe_pool_unlock(guard);
+    return pinned;
+}
+
+private fn pipe_pool_grow(guard: borrow RegionPoolGuard(Pipe)[pipes]) -> bool !{unsafe} {
+    match page_alloc_contiguous(PIPE_CHUNK_PAGES, PageOwnerTag::PoolChunk) {
+        PageRunAllocResult::OutOfMemory => { return false; }
+        PageRunAllocResult::Allocated(run_owner) => {
+            let base: usize = page_run_physical_address(run_owner);
+            let RegionBytes::Assumed(chunk) = page_run_into_region(run_owner) else {};
+            match region_pool_grow(guard, chunk) {
+                RegionGrow(Pipe)::Grown => { return true; }
+                RegionGrow(Pipe)::TooSmall(back) => {
+                    region_release(back);
+                    page_run_transferred_release_physical(base, PIPE_CHUNK_PAGES);
+                    return false;
+                }
+            }
+        }
+    }
+}
+
+// A new pipe with both ends open and nothing buffered, as its (address,
+// generation). Full when the page allocator has nothing for a chunk.
+fn pipe_alloc() -> PipeAllocResult !{unsafe} {
+    let guard = pipe_pool_lock(&pipe_pool);
+    match region_alloc(guard) {
+        RegionPoolAlloc(Pipe)::Allocated(slot) => {
+            pipe_pool_unlock(guard);
+            return pipe_open_slot(&pipe_pool, slot);
+        }
+        RegionPoolAlloc(Pipe)::Exhausted => { pipe_pool_unlock(guard); return PipeAllocResult::Full; }
+        RegionPoolAlloc(Pipe)::Full => {}
+    }
+    if (pipe_pool_grow(guard)) {
+        match region_alloc(guard) {
+            RegionPoolAlloc(Pipe)::Allocated(slot) => {
+                pipe_pool_unlock(guard);
+                return pipe_open_slot(&pipe_pool, slot);
+            }
+            RegionPoolAlloc(Pipe)::Exhausted => { pipe_pool_unlock(guard); return PipeAllocResult::Full; }
+            RegionPoolAlloc(Pipe)::Full => {}
+        }
+    }
+    pipe_pool_unlock(guard);
+    kernel_boot_log_resource_exhausted("pipe pool (out of pages)" as *u8, 0);
+    return PipeAllocResult::Full;
+}
+
+// Zeroed (a recycled slot holds its last occupant's bytes, and a zero
+// TaskMutex is a free one), both ends open, then published.
+private fn pipe_open_slot(pool: *RegionPool(Pipe) @ pipes,
+                          slot: sink RegionSlot(Pipe)[pipes, k])
+        -> PipeAllocResult !{unsafe} {
+    region_slot_zero(slot);
+    let pipe: &mut Pipe = region_slot_record(slot);
+    pipe.reader_open = true;
+    pipe.writer_open = true;
+    let opening = pipe_pool_lock(pool);
+    let mut handle: RegionHandle(Pipe) = region_give(opening, slot);
+    pipe_pool_unlock(opening);
+    return PipeAllocResult::Allocated(
+        (region_handle_address(handle), region_handle_generation(handle)));
+}
+
+fn pipe_pool_space_stats() -> (usize, usize, usize, usize) !{unsafe} {
+    let guard = pipe_pool_lock(&pipe_pool);
+    let sample = region_pool_space_stats(guard);
+    pipe_pool_unlock(guard);
+    return sample;
+}
+
+private fn pipe_owner_new(pin: sink RegionPin(Pipe)[p, k])
+        -> PipeOwner[p, k] !{lock_guard_30_connection} {
+    let mut owner: PipeOwner[p, k] = { pin };
+    return owner;
+}
+
+private fn pipe_owner_release(owner: sink PipeOwner[p, k]) -> RegionPin(Pipe)[p, k] {
+    return owner.pin;
+}
+
+// The pipe an owner holds; it dies with the borrow of the owner.
+fn pipe_of(owner: borrow PipeOwner[p, pipe]) -> &mut Pipe @ pipe !{unsafe} {
+    return region_pin_record(owner.pin);
+}
+
+// A pin and the pipe's lock make an owner. No pool lock is held while the
+// pipe lock is taken: the free holds the pipe lock and then takes the pool's.
+fn pipe_take(address: usize, generation: usize) -> PipeTakeResult !{unsafe} {
+    let RegionPinned(Pipe)::Pinned(pin) = pipe_pin(&pipe_pool, address, generation) else {
+        RegionPinned(Pipe)::Stale => { return PipeTakeResult::Missing; }
+    };
+    task_mutex_acquire(&region_pin_record(pin).lock);
+    if (region_pin_record(pin).retired) {
+        task_mutex_release(&region_pin_record(pin).lock);
+        pipe_unpin(pin);
+        return PipeTakeResult::Missing;
+    }
+    return PipeTakeResult::Ready(pipe_owner_new(pin));
+}
+
+// The release. Linear, so every path that took a pipe reaches exactly one
+// of these or the free. The lock goes first: the pin keeps its memory there.
+fn pipe_put(owner: sink PipeOwner[p, pipe]) !{unsafe} {
+    let pin = pipe_owner_release(owner);
+    task_mutex_release(&region_pin_record(pin).lock);
+    pipe_unpin(pin);
+}
+
+private fn pipe_free(owner: sink PipeOwner[p, pipe]) !{unsafe} {
+    region_pin_record(owner.pin).retired = true;
+    let pin = pipe_owner_release(owner);
+    task_mutex_release(&region_pin_record(pin).lock);
+    match region_retire(pin) {
+        RegionRetire(Pipe)::Pending => {}
+        RegionRetire(Pipe)::Retired(slot) => { pipe_slot_free(slot); }
+    }
+}
+
+// One end's last holder is gone: its SharedObject was freed. The pipe goes
+// back once both ends have, and either way the waiters on it look again --
+// a reader finds end of file, a writer EPIPE.
+fn pipe_end_close(address: usize, generation: usize, reader: bool) !{unsafe} {
+    match pipe_take(address, generation) {
+        PipeTakeResult::Missing => {
+            kernel_boot_log("pipe: an end closed on a pipe already freed\n");
+        }
+        PipeTakeResult::Ready(owner) => {
+            let pipe: &mut Pipe = pipe_of(owner);
+            if (reader) { pipe.reader_open = false; } else { pipe.writer_open = false; }
+            if (pipe.reader_open == false && pipe.writer_open == false) {
+                pipe_free(owner);
+            } else {
+                pipe_put(owner);
+            }
+            kernel_process_pipe_wake(address);
+        }
+    }
+}
+
+// Where the next `wanted` bytes to read are: the offset of the first run,
+// its length, and the length of the wrapped second run from offset 0.
+// `wanted` is clamped to what is buffered.
+fn pipe_read_plan(pipe: borrow &mut Pipe, wanted: usize) -> (usize, usize, usize) {
+    let mut amount: usize = wanted;
+    if (amount > pipe.length) { amount = pipe.length; }
+    let start: usize = pipe.start;
+    if (start >= PIPE_BUFFER_BYTES) { return (0, 0, 0); }
+    let to_end: usize = PIPE_BUFFER_BYTES - start;
+    if (amount <= to_end) { return (start, amount, 0); }
+    return (start, to_end, amount - to_end);
+}
+
+// The bytes the plan above named were copied out: drop them.
+fn pipe_consume(pipe: borrow &mut Pipe, amount: usize) {
+    if (amount > pipe.length) { return; }
+    pipe.length = pipe.length - amount;
+    let moved: usize = pipe.start + amount;
+    if (moved >= PIPE_BUFFER_BYTES) {
+        pipe.start = moved - PIPE_BUFFER_BYTES;
+    } else {
+        pipe.start = moved;
+    }
+    if (pipe.length == 0) { pipe.start = 0; }
+}
+
+fn pipe_room(pipe: borrow &mut Pipe) -> usize {
+    if (pipe.length >= PIPE_BUFFER_BYTES) { return 0; }
+    return PIPE_BUFFER_BYTES - pipe.length;
+}
+
+// Where `amount` new bytes go, as pipe_read_plan's three numbers. The caller
+// has already clamped `amount` to pipe_room.
+fn pipe_write_plan(pipe: borrow &mut Pipe, amount: usize) -> (usize, usize, usize) {
+    if (amount > pipe_room(pipe)) { return (0, 0, 0); }
+    let mut tail: usize = pipe.start + pipe.length;
+    if (tail >= PIPE_BUFFER_BYTES) { tail = tail - PIPE_BUFFER_BYTES; }
+    if (tail >= PIPE_BUFFER_BYTES) { return (0, 0, 0); }
+    let to_end: usize = PIPE_BUFFER_BYTES - tail;
+    if (amount <= to_end) { return (tail, amount, 0); }
+    return (tail, to_end, amount - to_end);
+}
+
+// The bytes the plan above named were copied in: keep them.
+fn pipe_produce(pipe: borrow &mut Pipe, amount: usize) {
+    if (amount > pipe_room(pipe)) { return; }
+    pipe.length = pipe.length + amount;
+}
+
+// How much of a write of `requested` bytes to do now: all of it, none of it
+// (a write of at most PIPE_BUFFER_BYTES that does not fit waits whole), or
+// what fits of a larger one.
+fn pipe_write_amount(pipe: borrow &mut Pipe, requested: usize) -> usize {
+    let room: usize = pipe_room(pipe);
+    if (requested <= room) { return requested; }
+    if (requested <= PIPE_BUFFER_BYTES) { return 0; }
+    return room;
+}
+
+fn pipe_execution_model_assumption() {
+    static_assert(KERNEL_PREEMPTIBLE == 0,
+                  "a preempted pipe-lock holder and its same-core waiter cannot both make progress");
+}

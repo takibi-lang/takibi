@@ -392,6 +392,13 @@ struct ProcessRecord {
     // re-checks THAT child: "is any child a zombie" would spin a wait4(X)
     // beside an uncollected sibling Y.
     wait4_pid: usize;
+    // GitHub issue #1042: the pipe (its pool address) this process decided
+    // to wait on, recorded while it held that pipe's lock
+    // (kernel_process_pipe_wait_prepare), and 0 once a wake for that pipe
+    // has found it (kernel_process_pipe_wake). Read and written only under
+    // the process-run lock. The Blocked publication re-checks it: 0 there
+    // means the wake came first, and the call reruns instead of sleeping.
+    pipe_wait: usize;
     parent: ProcessHandle;
     has_parent: bool;
     // GitHub issue #437: FIRST child, and the sibling link beside it.
@@ -1520,6 +1527,7 @@ private fn scheduled_process_ddb_record(
         ProcessWaitReason::Deadline => { result.wait_reason = 4; }
         ProcessWaitReason::Signal => { result.wait_reason = 5; }
         ProcessWaitReason::UartTx => { result.wait_reason = 6; }
+        ProcessWaitReason::Pipe => { result.wait_reason = 7; }
     }
     result.saved_sp = record.saved_sp;
     result.stack_bottom = 0;
@@ -1647,6 +1655,7 @@ private fn kernel_process_protocol_reason(reason: ProcessWaitReason)
         ProcessWaitReason::Deadline => { return 4; }
         ProcessWaitReason::Signal => { return 5; }
         ProcessWaitReason::UartTx => { return 6; }
+        ProcessWaitReason::Pipe => { return 7; }
     }
 }
 
@@ -2521,6 +2530,7 @@ fn kernel_process_monitor_proc(stopped: borrow MachineStopped[&kernel_world_stop
         ProcessWaitReason::Deadline => { ddb_put_udec(4); }
         ProcessWaitReason::Signal => { ddb_put_udec(5); }
         ProcessWaitReason::UartTx => { ddb_put_udec(6); }
+        ProcessWaitReason::Pipe => { ddb_put_udec(7); }
     }
     ddb_puts(" saved_sp=");
     ddb_put_hex(scheduled_process_record_stopped(stopped, stopped, slot).saved_sp);
@@ -3138,6 +3148,7 @@ private fn scheduled_process_record_reset(guard: borrow ProcessRunGuard[lock],
     record.deadline_result = 0;
     record.wait4_status_ptr = 0;
     record.wait4_pid = 0;
+    record.pipe_wait = 0;
     record.has_parent = false;
     record.has_first_child = false;
     record.has_next_sibling = false;
@@ -7745,6 +7756,16 @@ private fn kernel_process_block_would_miss(
         // it (#829). A frame that arrives inside the window costs at most
         // one tick, not the wait.
         ProcessWaitReason::NetRx => { return false; }
+        // GitHub issue #1042: the pipe's waker clears pipe_wait under this
+        // lock after the change it wakes for, and the waiter set it while
+        // holding the pipe's lock, before it let anyone else change the
+        // pipe. So a change that came after the waiter's look has either
+        // cleared it already -- rerun -- or will find this process Blocked.
+        // kernel/models/PipeWait.tla checks this re-check and the defect
+        // without it.
+        ProcessWaitReason::Pipe => {
+            return scheduled_process_record_of_locked(guard, from).pipe_wait == 0;
+        }
         // Delivered again: the same list's next tick
         // (kernel_process_tick_wake_scan) wakes a Blocked waiter whose
         // deadline has passed, whenever it passed.
@@ -8689,6 +8710,7 @@ private fn kernel_process_signal_deliver_traced(
         let rewound: bool =
             reason == ProcessWaitReason::NetRx ||
             reason == ProcessWaitReason::UartTx ||
+            reason == ProcessWaitReason::Pipe ||
             (reason == ProcessWaitReason::UartRx &&
              record.uart_block_delivery == UartBlockDelivery::Read);
         match scheduled_process_blocked_take(guard, target) {
@@ -9224,6 +9246,69 @@ fn kernel_process_uart_tx_wake_all(guard: borrow ProcessRunGuard[lock])
             }
         }
     }
+}
+
+// GitHub issue #1042: a pipe read found nothing to read with a writer still
+// open, or a pipe write found no room with a reader still open. The frame was
+// rewound before this, so the woken process runs the same call again.
+fn kernel_process_block_pipe(current: borrow FrameRef[process])
+        -> BlockSwitch {
+    return kernel_process_block_current(
+        current, ProcessWaitReason::Pipe, 7);
+}
+
+// The waiter's half of the pipe wait, called while it holds the pipe's lock
+// and has just found it must wait: name the pipe in its own record. Whoever
+// changes the pipe next takes the pipe lock after this, so its wake below
+// finds the name. 0 when there is no current process, which leaves nothing
+// recorded and makes the block rerun the call.
+fn kernel_process_pipe_wait_prepare(pipe: usize) !{unsafe} {
+    if (execution_state[execution_cpu_index()].current_live == false) { return; }
+    let guard = process_run_lock();
+    scheduled_process_record_of_locked(
+        guard, execution_state[execution_cpu_index()].current_handle)
+        .pipe_wait = pipe;
+    process_run_unlock(guard);
+}
+
+// The waker's half: every process that named `pipe` stops waiting on it.
+// One Blocked on it becomes Ready and reruns its call; one that has named it
+// but not yet published Blocked loses the name, so its Blocked publication
+// (kernel_process_block_would_miss) reruns the call instead of sleeping. A
+// process whose stale name is left from a wait a signal ended is not Blocked
+// on Pipe and only loses the name. Called after the change, with or without
+// the pipe's lock; the walk is over every record, as the UART TX wake's is.
+fn kernel_process_pipe_wake(pipe: usize) !{unsafe} {
+    if (pipe == 0) { return; }
+    let guard = process_run_lock();
+    let mut cursor = scheduled_process_first_slot();
+    let mut walking: bool = true;
+    while (walking) {
+        match cursor {
+            ProcessSlotCursor::Done => { walking = false; }
+            ProcessSlotCursor::At(slot) => {
+                let next = scheduled_process_next_slot(slot);
+                if (scheduled_process_record_locked(guard, slot).pipe_wait == pipe) {
+                    scheduled_process_record_locked(guard, slot).pipe_wait = 0;
+                    if (scheduled_process_record_state_locked(guard, slot) ==
+                            ProcessSlotState::Blocked &&
+                        scheduled_process_record_wait_reason_locked(guard, slot) ==
+                            ProcessWaitReason::Pipe) {
+                        match scheduled_process_blocked_take_slot(guard, slot) {
+                            ScheduledProcessBlockedTakeResult::Missing => {}
+                            ScheduledProcessBlockedTakeResult::Blocked(resources) => {
+                                let (owner, blocked) = resources;
+                                let ready = scheduled_process_wake(guard, owner, blocked);
+                                scheduled_process_release(owner, ready);
+                            }
+                        }
+                    }
+                }
+                cursor = next;
+            }
+        }
+    }
+    process_run_unlock(guard);
 }
 
 fn kernel_process_block_uart(current: borrow FrameRef[process])
@@ -10720,6 +10805,7 @@ fn kernel_process_crash_wait_reason() -> usize !{unsafe} {
         ProcessWaitReason::Deadline => { return 4; }
         ProcessWaitReason::Signal => { return 5; }
         ProcessWaitReason::UartTx => { return 6; }
+        ProcessWaitReason::Pipe => { return 7; }
     }
 }
 

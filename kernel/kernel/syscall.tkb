@@ -94,6 +94,12 @@ const AARCH64_NR_EXECVE: usize = 221;
 const AARCH64_NR_EXECVEAT: usize = 281;
 const AARCH64_NR_WAIT4: usize = 260;
 const AARCH64_NR_FCNTL: usize = 25;
+// GitHub issue #1042: pipe2. AArch64 has no pipe(2); musl's pipe() is
+// pipe2(fds, 0).
+const AARCH64_NR_PIPE2: usize = 59;
+const LINUX_O_CLOEXEC: usize = 0x80000;
+const LINUX_EPIPE: usize = 0xFFFFFFFFFFFFFFE0;
+const LINUX_SIGPIPE: usize = 13;
 const AARCH64_NR_TAKIBI_UART_RX_WAIT: usize = 451;
 const AARCH64_NR_TAKIBI_PARENT_PROGRESS: usize = 452;
 const AARCH64_NR_TAKIBI_WORKLOAD_PROGRESS: usize = 453;
@@ -226,6 +232,8 @@ struct packed Pollfd {
 
 const POLLIN: usize = 0x0001;
 const POLLOUT: usize = 0x0004;
+const POLLERR: usize = 0x0008;
+const POLLHUP: usize = 0x0010;
 const POLLNVAL: usize = 0x0020;
 
 // Linux's own iovec-count cap (UIO_MAXIOV, include/uapi/linux/uio.h) --
@@ -1718,15 +1726,11 @@ fn kernel_connected_fd_duplicate(old_fd: usize, new_fd: usize) -> bool !{unsafe}
 // socket ownership. dup3 uses this path when replacing a standard descriptor
 // with another non-socket object.
 fn kernel_regular_fd_duplicate(old_fd: usize, new_fd: usize) -> bool {
-    if ((kernel_syscall_terminal_is_open(old_fd) == false &&
-         kernel_syscall_file_is_open(old_fd) == false &&
-         kernel_syscall_directory_is_open(old_fd) == false)) {
+    if (syscall_fd_is_plain(old_fd) == false) {
         return false;
     }
     if (old_fd == new_fd) { return true; }
-    if (kernel_syscall_terminal_is_open(new_fd) ||
-        kernel_syscall_file_is_open(new_fd) ||
-        kernel_syscall_directory_is_open(new_fd)) {
+    if (syscall_fd_is_plain(new_fd)) {
         match unified_fd_close(kernel_syscall_process_key(), new_fd) {
             UnifiedFdResult::Invalid => { return false; }
             UnifiedFdResult::Ok => {}
@@ -2175,6 +2179,11 @@ must_use variant SyscallIoResult {
     UartWait;
     InterruptWait;
     TerminalWait;
+    // GitHub issue #1042: the call named a pipe in its record under the
+    // pipe lock and must wait on it; or it wrote to a pipe whose read end
+    // is closed, which is EPIPE and a SIGPIPE to the writer.
+    PipeWait;
+    PipeBroken;
 }
 
 // Install a wait only when the syscall has transferred no bytes. A vectored
@@ -2198,6 +2207,288 @@ fn syscall_io_action(current_authority: borrow ProcessCurrent[current_process, P
         }
         SyscallIoResult::InterruptWait => { return SyscallAction::WaitInterrupt; }
         SyscallIoResult::TerminalWait => { return syscall_terminal_write_wait(current_authority); }
+        SyscallIoResult::PipeWait => {
+            kernel_process_current_set_pending_block(current_authority, ProcessWaitReason::Pipe, 0);
+            return SyscallAction::Block;
+        }
+        SyscallIoResult::PipeBroken => {
+            // Linux's pipe_write: SIGPIPE to the writer, then EPIPE. A
+            // writer that ignores, blocks or catches it sees the errno; one
+            // that does not ends by the signal at this call's return.
+            let self_pid: usize = kernel_process_current_pid();
+            match kernel_process_signal_send(self_pid, LINUX_SIGPIPE, self_pid) {
+                ProcessSignalSendResult::Missing => {}
+                ProcessSignalSendResult::Delivered => {}
+            }
+            return SyscallAction::Resume(LINUX_EPIPE);
+        }
+    }
+}
+
+// GitHub issue #1042: a pipe end at `fd` in the calling process.
+fn kernel_syscall_pipe_is_open(fd: usize) -> bool {
+    match unified_pipe_lookup(kernel_syscall_process_key(), fd) {
+        UnifiedPipeResult::Missing => { return false; }
+        UnifiedPipeResult::Found(found) => { return true; }
+    }
+}
+
+// One read of a pipe's read end: what is buffered, up to `requested`; end of
+// file once it is empty and the write end is closed; otherwise a wait,
+// named under the pipe lock so that any write after this look wakes it.
+fn syscall_pipe_read(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
+                     address: usize, requested: usize, pipe_address: usize,
+                     pipe_generation: usize) -> SyscallIoResult !{unsafe} {
+    if (requested == 0) { return SyscallIoResult::Transferred(0); }
+    let PipeTakeResult::Ready(owner) = pipe_take(pipe_address, pipe_generation) else {
+        PipeTakeResult::Missing => { return SyscallIoResult::Errno(LINUX_EBADF); }
+    };
+    if (pipe_of(owner).length == 0) {
+        if (pipe_of(owner).writer_open == false) {
+            pipe_put(owner);
+            return SyscallIoResult::Transferred(0);
+        }
+        kernel_process_pipe_wait_prepare(pipe_address);
+        pipe_put(owner);
+        return SyscallIoResult::PipeWait;
+    }
+    let (offset, first, second) = pipe_read_plan(pipe_of(owner), requested);
+    match user_range_check_write(current_authority, address, first) {
+        UserWriteRangeResult::Fault => {
+            pipe_put(owner);
+            return SyscallIoResult::Errno(LINUX_EFAULT);
+        }
+        UserWriteRangeResult::Ok(range) => {
+            match copy_to_user_span(range, pipe_of(owner).buffer as []u8, offset, first) {
+                UserWriteResult::Fault => {
+                    pipe_put(owner);
+                    return SyscallIoResult::Errno(LINUX_EFAULT);
+                }
+                UserWriteResult::Written => {}
+            }
+        }
+    }
+    let mut delivered: usize = first;
+    if (second != 0) {
+        match checked_add_usize(address, first) {
+            CheckedUsize::Overflow => {}
+            CheckedUsize::Value(wrapped_address) => {
+                match user_range_check_write(current_authority, wrapped_address, second) {
+                    UserWriteRangeResult::Fault => {}
+                    UserWriteRangeResult::Ok(wrapped) => {
+                        match copy_to_user_span(wrapped, pipe_of(owner).buffer as []u8, 0, second) {
+                            UserWriteResult::Fault => {}
+                            UserWriteResult::Written => { delivered = first + second; }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    pipe_consume(pipe_of(owner), delivered);
+    pipe_put(owner);
+    kernel_process_pipe_wake(pipe_address);
+    return SyscallIoResult::Transferred(delivered);
+}
+
+// One write to a pipe's write end: EPIPE when the read end is closed; the
+// whole of a write of at most PIPE_BUFFER_BYTES once it fits, else a wait;
+// what fits of a larger one (kernel/kernel/pipe.tkb, limitations).
+fn syscall_pipe_write(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
+                      address: usize, length: usize, pipe_address: usize,
+                      pipe_generation: usize) -> SyscallIoResult !{unsafe} {
+    if (length == 0) { return SyscallIoResult::Transferred(0); }
+    let PipeTakeResult::Ready(owner) = pipe_take(pipe_address, pipe_generation) else {
+        PipeTakeResult::Missing => { return SyscallIoResult::Errno(LINUX_EBADF); }
+    };
+    if (pipe_of(owner).reader_open == false) {
+        pipe_put(owner);
+        return SyscallIoResult::PipeBroken;
+    }
+    let amount: usize = pipe_write_amount(pipe_of(owner), length);
+    if (amount == 0) {
+        kernel_process_pipe_wait_prepare(pipe_address);
+        pipe_put(owner);
+        return SyscallIoResult::PipeWait;
+    }
+    let (offset, first, second) = pipe_write_plan(pipe_of(owner), amount);
+    match user_range_check_read(current_authority, address, first) {
+        UserReadRangeResult::Fault => {
+            pipe_put(owner);
+            return SyscallIoResult::Errno(LINUX_EFAULT);
+        }
+        UserReadRangeResult::Ok(range) => {
+            if (copy_from_user_span(range, pipe_of(owner).buffer as []u8, offset, first) == false) {
+                pipe_put(owner);
+                return SyscallIoResult::Errno(LINUX_EFAULT);
+            }
+        }
+    }
+    let mut accepted: usize = first;
+    if (second != 0) {
+        match checked_add_usize(address, first) {
+            CheckedUsize::Overflow => {}
+            CheckedUsize::Value(wrapped_address) => {
+                match user_range_check_read(current_authority, wrapped_address, second) {
+                    UserReadRangeResult::Fault => {}
+                    UserReadRangeResult::Ok(wrapped) => {
+                        if (copy_from_user_span(wrapped, pipe_of(owner).buffer as []u8, 0, second)) {
+                            accepted = first + second;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    pipe_produce(pipe_of(owner), accepted);
+    pipe_put(owner);
+    kernel_process_pipe_wake(pipe_address);
+    return SyscallIoResult::Transferred(accepted);
+}
+
+// ppoll's view of a pipe end: POLLIN with bytes to read, POLLHUP once the
+// write end is closed; POLLOUT with room, POLLERR once the read end is.
+// Linux's pipe_poll reports the same four.
+fn syscall_pipe_poll_mask(pipe_address: usize, pipe_generation: usize, reader: bool)
+        -> (bool, usize) !{unsafe} {
+    let PipeTakeResult::Ready(owner) = pipe_take(pipe_address, pipe_generation) else {
+        PipeTakeResult::Missing => { return (false, POLLNVAL); }
+    };
+    let mask: usize = syscall_pipe_poll_mask_owned(owner, reader);
+    pipe_put(owner);
+    return (true, mask);
+}
+
+private fn syscall_pipe_poll_mask_owned(owner: borrow PipeOwner[p, pipe], reader: bool)
+        -> usize !{unsafe} {
+    let mut mask: usize = 0;
+    if (reader) {
+        if (pipe_of(owner).length != 0) { mask = mask | POLLIN; }
+        if (pipe_of(owner).writer_open == false) { mask = mask | POLLHUP; }
+    } else {
+        if (pipe_room(pipe_of(owner)) != 0) { mask = mask | POLLOUT; }
+        if (pipe_of(owner).reader_open == false) { mask = mask | POLLERR; }
+    }
+    return mask;
+}
+
+// A ppoll of one pipe end with no timeout found nothing it asked for: look
+// again under the pipe lock, and either name the pipe for the wait or, when
+// it became ready since, name none, so the block reruns the ppoll at once.
+fn syscall_pipe_poll_wait(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
+                          fd: usize, events: usize) -> SyscallAction !{unsafe} {
+    let UnifiedPipeResult::Found(found) =
+            unified_pipe_lookup(kernel_syscall_process_key(), fd) else {
+        UnifiedPipeResult::Missing => { return SyscallAction::Resume(0); }
+    };
+    let (pipe_address, pipe_generation, reader) = found;
+    let PipeTakeResult::Ready(owner) = pipe_take(pipe_address, pipe_generation) else {
+        PipeTakeResult::Missing => { return SyscallAction::Resume(0); }
+    };
+    let mask: usize = syscall_pipe_poll_mask_owned(owner, reader);
+    if ((mask & (events | POLLERR | POLLHUP)) != 0) {
+        kernel_process_pipe_wait_prepare(0);
+    } else {
+        kernel_process_pipe_wait_prepare(pipe_address);
+    }
+    pipe_put(owner);
+    kernel_process_current_set_pending_block(current_authority, ProcessWaitReason::Pipe, 0);
+    return SyscallAction::Block;
+}
+
+// pipe2(fds, flags): a pipe, its read end at the lowest free descriptor and
+// its write end at the next, both close-on-exec under O_CLOEXEC. The array
+// is checked before anything is made; a store into it that still faults
+// closes both descriptors again, as Linux's does.
+fn syscall_pipe2(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
+                 fds_address: usize, flags: usize) -> SyscallAction !{unsafe} {
+    if ((flags | LINUX_O_CLOEXEC) != LINUX_O_CLOEXEC) {
+        return SyscallAction::Resume(LINUX_EINVAL);
+    }
+    let UserWriteRangeResult::Ok(range) = user_range_check_write(current_authority, fds_address, 8) else {
+        UserWriteRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
+    };
+    let PipeAllocResult::Allocated(made) = pipe_alloc() else {
+        PipeAllocResult::Full => { return SyscallAction::Resume(LINUX_ENFILE); }
+    };
+    let (pipe_address, pipe_generation) = made;
+    let process: usize = kernel_syscall_process_key();
+    let UnifiedFdAllocResult::Allocated(read_fd) = unified_fd_alloc(process, 0) else {
+        UnifiedFdAllocResult::Full => {
+            pipe_end_close(pipe_address, pipe_generation, true);
+            pipe_end_close(pipe_address, pipe_generation, false);
+            kernel_boot_log_resource_exhausted("process fd table" as *u8,
+                                               kernel_syscall_fd_limit_soft());
+            return SyscallAction::Resume(LINUX_EMFILE);
+        }
+    };
+    match unified_pipe_end_create(process, read_fd, pipe_address, pipe_generation, true) {
+        UnifiedOpenResult::Ok => {}
+        UnifiedOpenResult::Invalid => {
+            pipe_end_close(pipe_address, pipe_generation, true);
+            pipe_end_close(pipe_address, pipe_generation, false);
+            return SyscallAction::Resume(LINUX_EMFILE);
+        }
+        UnifiedOpenResult::Full => {
+            pipe_end_close(pipe_address, pipe_generation, true);
+            pipe_end_close(pipe_address, pipe_generation, false);
+            kernel_boot_log_resource_exhausted("shared object pool" as *u8,
+                                               unified_object_max_files());
+            return SyscallAction::Resume(LINUX_ENFILE);
+        }
+    }
+    // From here the read end belongs to read_fd: closing that descriptor
+    // closes the end (unified_object_release).
+    let UnifiedFdAllocResult::Allocated(write_fd) = unified_fd_alloc(process, 0) else {
+        UnifiedFdAllocResult::Full => {
+            syscall_pipe2_close(process, read_fd);
+            pipe_end_close(pipe_address, pipe_generation, false);
+            kernel_boot_log_resource_exhausted("process fd table" as *u8,
+                                               kernel_syscall_fd_limit_soft());
+            return SyscallAction::Resume(LINUX_EMFILE);
+        }
+    };
+    match unified_pipe_end_create(process, write_fd, pipe_address, pipe_generation, false) {
+        UnifiedOpenResult::Ok => {}
+        UnifiedOpenResult::Invalid => {
+            syscall_pipe2_close(process, read_fd);
+            pipe_end_close(pipe_address, pipe_generation, false);
+            return SyscallAction::Resume(LINUX_EMFILE);
+        }
+        UnifiedOpenResult::Full => {
+            syscall_pipe2_close(process, read_fd);
+            pipe_end_close(pipe_address, pipe_generation, false);
+            kernel_boot_log_resource_exhausted("shared object pool" as *u8,
+                                               unified_object_max_files());
+            return SyscallAction::Resume(LINUX_ENFILE);
+        }
+    }
+    if ((flags & LINUX_O_CLOEXEC) != 0) {
+        match unified_fd_set_close_on_exec(process, read_fd, true) {
+            UnifiedFdResult::Invalid => {}
+            UnifiedFdResult::Ok => {}
+        }
+        match unified_fd_set_close_on_exec(process, write_fd, true) {
+            UnifiedFdResult::Invalid => {}
+            UnifiedFdResult::Ok => {}
+        }
+    }
+    match user_write_join(user_write_u32(range, 0, read_fd as u32),
+                          user_write_u32(range, 4, write_fd as u32)) {
+        UserWriteResult::Fault => {
+            syscall_pipe2_close(process, read_fd);
+            syscall_pipe2_close(process, write_fd);
+            return SyscallAction::Resume(LINUX_EFAULT);
+        }
+        UserWriteResult::Written => {}
+    }
+    return SyscallAction::Resume(0);
+}
+
+private fn syscall_pipe2_close(process: usize, fd: usize) !{unsafe} {
+    match unified_fd_close(process, fd) {
+        UnifiedFdResult::Invalid => {}
+        UnifiedFdResult::Ok => {}
     }
 }
 
@@ -2405,6 +2696,15 @@ fn syscall_write_segment_with(slot: borrow SyscallSlot[0],
                     }
                   }
                 }
+            }
+        }
+        match unified_pipe_lookup(kernel_syscall_process_key(), fd) {
+            UnifiedPipeResult::Missing => {}
+            UnifiedPipeResult::Found(found) => {
+                let (pipe_address, pipe_generation, reader) = found;
+                if (reader) { return SyscallIoResult::Errno(LINUX_EBADF); }
+                return syscall_pipe_write(current_authority, address, length,
+                                          pipe_address, pipe_generation);
             }
         }
         if (kernel_syscall_file_is_open(fd)) {
@@ -2745,6 +3045,15 @@ fn syscall_read_segment_with(slot: borrow SyscallSlot[0],
         if (fd == 0 && kernel_syscall_terminal_is_open(fd)) {
             return syscall_read_uart(current_authority, address, requested);
         }
+        match unified_pipe_lookup(kernel_syscall_process_key(), fd) {
+            UnifiedPipeResult::Missing => {}
+            UnifiedPipeResult::Found(found) => {
+                let (pipe_address, pipe_generation, reader) = found;
+                if (reader == false) { return SyscallIoResult::Errno(LINUX_EBADF); }
+                return syscall_pipe_read(current_authority, address, requested,
+                                         pipe_address, pipe_generation);
+            }
+        }
         if (kernel_syscall_file_is_open(fd) == false ||
             kernel_syscall_file_readable(fd) == false) {
             return SyscallIoResult::Errno(LINUX_EBADF);
@@ -2904,6 +3213,13 @@ fn syscall_poll_fd_ready(fd: usize) -> (bool, usize) {
     }
     if (kernel_syscall_terminal_is_open(fd)) {
         return (true, 0);
+    }
+    match unified_pipe_lookup(kernel_syscall_process_key(), fd) {
+        UnifiedPipeResult::Missing => {}
+        UnifiedPipeResult::Found(found) => {
+            let (pipe_address, pipe_generation, reader) = found;
+            return syscall_pipe_poll_mask(pipe_address, pipe_generation, reader);
+        }
     }
     return (false, POLLNVAL);
 }
@@ -3117,6 +3433,10 @@ fn syscall_ppoll_dispatch(current_authority: borrow ProcessCurrent[current_proce
         UserWriteRangeResult::Ok(array_range) => {
             let mut ready_count: usize = 0;
             let mut uart_wait: bool = false;
+            // GitHub issue #1042: hackbench's shape, poll(&one_pipe, 1, -1).
+            let mut pipe_wait_fd: usize = 0;
+            let mut pipe_wait_events: usize = 0;
+            let mut pipe_wait: bool = false;
             for index: usize in 0..<nfds {
                 let (fd_ok, fd_raw) = user_read_u32(
                     user_write_range_as_read(array_range),
@@ -3150,6 +3470,16 @@ fn syscall_ppoll_dispatch(current_authority: borrow ProcessCurrent[current_proce
                     (events_raw as usize & POLLIN) != 0) {
                     uart_wait = true;
                 }
+                if (nfds == 1 && valid && kernel_syscall_pipe_is_open(fd)) {
+                    pipe_wait = true;
+                    pipe_wait_fd = fd;
+                    pipe_wait_events = events_raw as usize;
+                }
+            }
+            if (ready_count == 0 && pipe_wait && timeout_address == 0 &&
+                sigmask_address == 0) {
+                return syscall_pipe_poll_wait(current_authority, pipe_wait_fd,
+                                              pipe_wait_events);
             }
             if (ready_count == 0 && uart_wait && timeout_address == 0 &&
                 sigmask_address == 0) {
@@ -3825,6 +4155,17 @@ fn kernel_syscall_block_return(frame_sp: usize) {
         rewound = true;
         switch = kernel_process_block_net(frame);
     } else if (reason ==
+                   ProcessWaitReason::Pipe) {
+        process_current_end(current_authority);
+        // GitHub issue #1042: as accept and a blocked write, the woken
+        // reader or writer runs this same call again. The look that decides
+        // whether it sleeps is the Blocked publication's
+        // (kernel_process_block_would_miss), under the lock the waker's
+        // wake takes too.
+        el0_context_retry_syscall(frame);
+        rewound = true;
+        switch = kernel_process_block_pipe(frame);
+    } else if (reason ==
                    ProcessWaitReason::UartTx) {
         process_current_end(current_authority);
         // GitHub issue #544: as with accept above, the woken writer runs
@@ -3914,7 +4255,8 @@ fn kernel_syscall_block_return(frame_sp: usize) {
                 reason ==
                     ProcessWaitReason::UartRx &&
                 retry_delivery == UartBlockDelivery::Read;
-            // Rewound above: rt_sigsuspend, accept and a blocked write.
+            // Rewound above: rt_sigsuspend, accept, a blocked write and a
+            // pipe wait.
             if (uart_read_prepared == false && rewound == false) {
                 el0_context_retry_syscall(frame);
             }
@@ -5011,9 +5353,14 @@ fn syscall_peer_safe(number: usize, fd: usize, second: usize) -> bool {
     // An ext2 file since GitHub issue #602: the write, its position and
     // its bound are one section under the mutation guard, which waits for
     // every CPU's counted readers.
+    // A pipe since GitHub issue #1042: every field of a pipe is read and
+    // written under its own TaskMutex, and its wait and wake under the run
+    // lock (kernel/kernel/pipe.tkb), so a reader and a writer on two CPUs
+    // serialize there.
     if (number == AARCH64_NR_WRITE || number == AARCH64_NR_WRITEV) {
         return kernel_syscall_terminal_is_open(fd) ||
-            kernel_syscall_file_is_open(fd);
+            kernel_syscall_file_is_open(fd) ||
+            kernel_syscall_pipe_is_open(fd);
     }
     // GitHub issue #581: the filesystem READ path, which is the first
     // subsystem in this table rather than another per-process word.
@@ -5043,6 +5390,7 @@ fn syscall_peer_safe(number: usize, fd: usize, second: usize) -> bool {
     }
     if (number == 63 || number == AARCH64_NR_READV) {
         if (fd == 0 && kernel_syscall_terminal_is_open(fd)) { return true; }
+        if (kernel_syscall_pipe_is_open(fd)) { return true; }
         return kernel_syscall_file_readable(fd);
     }
     // GitHub issue #583, second increment: the descriptor table.
@@ -5146,12 +5494,15 @@ fn syscall_reaches_filesystem(number: usize, fd: usize, flags: usize) -> bool {
     return false;
 }
 
-// A terminal, ext2 file or directory descriptor: the kinds whose table
-// entries fcntl and dup3 edit without reaching a socket's state.
+// A terminal, ext2 file, directory or pipe descriptor: the kinds whose
+// table entries fcntl, dup3 and close edit without reaching a socket's
+// state. A pipe end's last close reaches the pipe through the object
+// release (GitHub issue #1042), under the pipe's own lock.
 fn syscall_fd_is_plain(fd: usize) -> bool {
     return kernel_syscall_terminal_is_open(fd) ||
         kernel_syscall_file_is_open(fd) ||
-        kernel_syscall_directory_is_open(fd);
+        kernel_syscall_directory_is_open(fd) ||
+        kernel_syscall_pipe_is_open(fd);
 }
 
 fn syscall_fd_is_socket(fd: usize) -> bool {
@@ -6962,13 +7313,15 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         return syscall_finish_current(frame, syscall_io_action(current_authority, syscall_read_segment(current_authority, x0, x1, x2)), current_authority);
     }
 
+    if (number == AARCH64_NR_PIPE2) {
+        return syscall_finish_current(frame, syscall_pipe2(current_authority, x0, x1), current_authority);
+    }
+
     if (number == AARCH64_NR_FCNTL) {
         // Descriptor duplication remains real and shares the open-file offset.
         let fd: usize = x0;
         let command: usize = x1;
-        if (kernel_syscall_terminal_is_open(fd) == false &&
-            kernel_syscall_file_is_open(fd) == false &&
-            kernel_syscall_directory_is_open(fd) == false) {
+        if (syscall_fd_is_plain(fd) == false) {
             return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EBADF), current_authority);
         }
         if (command == LINUX_F_SETFD) {
@@ -7044,9 +7397,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             }
             return syscall_finish_current(frame, SyscallAction::Resume(new_fd), current_authority);
         }
-        if (kernel_syscall_terminal_is_open(new_fd) ||
-            kernel_syscall_file_is_open(new_fd) ||
-            kernel_syscall_directory_is_open(new_fd)) {
+        if (syscall_fd_is_plain(new_fd)) {
             match unified_fd_close(kernel_syscall_process_key(), new_fd) {
                 UnifiedFdResult::Invalid => {
                     return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EBADF), current_authority);
@@ -7089,9 +7440,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             return syscall_finish_current(frame, SyscallAction::Resume(0), current_authority);
           }
         }
-        if (kernel_syscall_terminal_is_open(x0) == false &&
-            kernel_syscall_file_is_open(x0) == false &&
-            kernel_syscall_directory_is_open(x0) == false) {
+        if (syscall_fd_is_plain(x0) == false) {
             return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EBADF), current_authority);
         }
         match unified_fd_close(kernel_syscall_process_key(), x0) {
@@ -8818,7 +9167,12 @@ private inline fn syscall_sendfile_current_with(slot: borrow SyscallSlot[0],
     let input_fd: usize = x1;
     let offset_address: usize = x2;
     let requested: usize = x3;
+    // GitHub issue #1042: the output must BE the terminal, not merely fd 1
+    // or 2. BusyBox cat's stdout in a pipeline is a pipe, and this path
+    // used to queue its bytes on the UART instead; refused, BusyBox falls
+    // back to read and write.
     if ((output_fd != 1 && output_fd != 2) ||
+        kernel_syscall_terminal_is_open(output_fd) == false ||
         kernel_syscall_file_is_open(input_fd) == false ||
         kernel_syscall_file_readable(input_fd) == false) {
         return SyscallAction::Resume(LINUX_EBADF);
@@ -9198,6 +9552,14 @@ private inline fn syscall_readv_current(
                             if (total != 0) { return SyscallAction::Resume(total); }
                             return syscall_io_action(current_authority, SyscallIoResult::TerminalWait);
                         }
+                        SyscallIoResult::PipeWait => {
+                            if (total != 0) { return SyscallAction::Resume(total); }
+                            return syscall_io_action(current_authority, SyscallIoResult::PipeWait);
+                        }
+                        SyscallIoResult::PipeBroken => {
+                            if (total != 0) { return SyscallAction::Resume(total); }
+                            return syscall_io_action(current_authority, SyscallIoResult::PipeBroken);
+                        }
                         SyscallIoResult::Transferred(n) => {
                             match checked_add_usize(total, n) {
                                 CheckedUsize::Overflow => { return SyscallAction::Resume(total); }
@@ -9266,6 +9628,14 @@ private inline fn syscall_writev_current(
                         SyscallIoResult::TerminalWait => {
                             if (total != 0) { return SyscallAction::Resume(total); }
                             return syscall_io_action(current_authority, SyscallIoResult::TerminalWait);
+                        }
+                        SyscallIoResult::PipeWait => {
+                            if (total != 0) { return SyscallAction::Resume(total); }
+                            return syscall_io_action(current_authority, SyscallIoResult::PipeWait);
+                        }
+                        SyscallIoResult::PipeBroken => {
+                            if (total != 0) { return SyscallAction::Resume(total); }
+                            return syscall_io_action(current_authority, SyscallIoResult::PipeBroken);
                         }
                         SyscallIoResult::Transferred(n) => {
                             match checked_add_usize(total, n) {
