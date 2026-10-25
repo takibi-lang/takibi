@@ -133,12 +133,12 @@ fn initial_user_payload() !{unsafe} {
     fail_if(svc5(64, 1, 0, 1, 0, 0) != EFAULT_RC);
 
     /* GitHub issue #542: keep the truncate/extend regression on the real
-     * openat/write/read ABI. Each write reopens the file because this
-     * kernel accepts writes only at offset zero; the first shrinks it, the
-     * second grows it, and readback proves no old suffix survived. */
+     * openat/write/read ABI. The first open truncates (O_TRUNC|O_WRONLY:
+     * since #1019 a write only overwrites, as on Linux) and shrinks it,
+     * the second grows it, and readback proves no old suffix survived. */
     let mutable_path: *u8 = "/mutable.txt" as *u8;
     let short_content: []const u8 = bs"tiny\n";
-    let fd3: usize = svc5(56, 0, mutable_path as usize, 1, 0, 0);
+    let fd3: usize = svc5(56, 0, mutable_path as usize, 0x201, 0, 0);
     fail_if(fd3 != 3);
     // Raw ABI input only: these syscalls read the readonly bytes.
     // The bridge exposes no writable slice or checked mutation.
@@ -199,6 +199,21 @@ fn initial_user_payload() !{unsafe} {
     }
     fail_if(svc5(63, fd6, long_readback as *u8 as usize, 1, 0, 0) != 0);
     fail_if(svc5(57, fd6, 0, 0, 0, 0) != 0);
+    /* GitHub issue #1019: a write at offset zero without O_TRUNC overwrites
+     * the bytes it covers and keeps the rest, size included. */
+    let fd7: usize = svc5(56, 0, mutable_path as usize, 1, 0, 0);
+    fail_if(fd7 != 3);
+    fail_if(svc5(64, fd7, "EX" as *u8 as usize, 2, 0, 0) != 2);
+    fail_if(svc5(57, fd7, 0, 0, 0, 0) != 0);
+    let fd8: usize = svc5(56, 0, mutable_path as usize, 0, 0, 0);
+    fail_if(fd8 != 3);
+    let overwritten: []const u8 = bs"EXtended ext2\n";
+    fail_if(svc5(63, fd8, long_readback as *u8 as usize, 14, 0, 0) != 14);
+    for i: usize in 0..<14 {
+        fail_if(long_readback[i] != overwritten[i]);
+    }
+    fail_if(svc5(63, fd8, long_readback as *u8 as usize, 1, 0, 0) != 0);
+    fail_if(svc5(57, fd8, 0, 0, 0, 0) != 0);
     let write_success: []const u8 = bs"userspace file syscalls: open/write/read/close and truncate+extend ok\n";
     fail_if(svc5(64, 1, ((unsafe { write_success as *u8 })) as usize,
                  write_success.len, 0, 0) != write_success.len);
@@ -792,15 +807,15 @@ fn initial_user_payload() !{unsafe} {
                              0x200, 0, 0) != 0);
             }
         }
-        // Last-link unlink supports direct files today. Shrink both fillers
-        // through write(2) first: replacement releases their indirect blocks,
-        // and unlinkat then releases the one remaining block and inode.
+        // Last-link unlink supports direct files today (#1020). Shrink both
+        // fillers first: O_TRUNC releases their indirect blocks, the one-byte
+        // write takes one block, and unlinkat releases it and the inode.
         write_block[0] = 0x78;
-        let filler_a: usize = svc5(56, 0, "/enospc-a" as *u8 as usize, 1, 0, 0);
+        let filler_a: usize = svc5(56, 0, "/enospc-a" as *u8 as usize, 0x201, 0, 0);
         fail_if(filler_a >= 64);
         fail_if(svc5(64, filler_a, write_block as *u8 as usize, 1, 0, 0) != 1);
         fail_if(svc5(57, filler_a, 0, 0, 0, 0) != 0);
-        let filler_b: usize = svc5(56, 0, "/enospc-b" as *u8 as usize, 1, 0, 0);
+        let filler_b: usize = svc5(56, 0, "/enospc-b" as *u8 as usize, 0x201, 0, 0);
         fail_if(filler_b >= 64);
         fail_if(svc5(64, filler_b, write_block as *u8 as usize, 1, 0, 0) != 1);
         fail_if(svc5(57, filler_b, 0, 0, 0, 0) != 0);

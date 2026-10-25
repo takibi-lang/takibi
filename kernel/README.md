@@ -1839,8 +1839,9 @@ run, not a specification.
   double-indirect blocks; the maximum is derived from the 1-KiB block
   geometry rather than a file-size literal. Kernel ext2 replacement and
   truncation cover direct and single-indirect blocks; each regular-file
-  `write(2)` call accepts at most one block, advancing its file offset. The
-  first write at offset zero replaces the old contents. A block-device
+  `write(2)` call accepts at most one block, advancing its file offset. A
+  write overwrites the bytes it covers, at offset zero too, and extends the
+  file only past EOF (#1019); only `O_TRUNC` shrinks it. A block-device
   read or write that fails part-way through such a mutation ends in one of
   three states, and `write(2)` answers each differently: the file is
   unchanged and the bitmaps and counters are back where they were (`EINVAL`),

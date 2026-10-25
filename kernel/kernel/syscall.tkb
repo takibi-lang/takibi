@@ -4233,14 +4233,11 @@ private fn syscall_ext2_write_locked(fd: usize, content: []u8) -> usize {
         return LINUX_EINVAL;
     }
     let inode: usize = kernel_syscall_file_inode(fd);
-    let mut answer: usize = LINUX_EINVAL;
-    if (offset == 0) {
-        answer = syscall_ext2_write_errno(
-            ext2_resize_small_file(mount, inode, content));
-    } else {
-        answer = syscall_ext2_write_errno(
-            ext2_write_regular_file_range(mount, inode, offset, content));
-    }
+    // GitHub issue #1019: every write, at offset 0 too, overwrites the
+    // bytes it covers and extends only past EOF, as Linux does; shrinking
+    // is O_TRUNC's (#1016), not a write's.
+    let mut answer: usize = syscall_ext2_write_errno(
+        ext2_write_regular_file_range(mount, inode, offset, content));
     if (answer == 0 &&
         kernel_syscall_file_set_offset(fd, offset + length) == false) {
         answer = LINUX_EBADF;

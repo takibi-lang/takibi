@@ -39,7 +39,7 @@ mkdir otrunc
 write otrunc/f 0123456789
 write otrunc/f ab
 
-row overwrite differ #1019
+row overwrite match #1019
 mkdir overwrite
 write overwrite/f abcdefgh
 write overwrite/src XY

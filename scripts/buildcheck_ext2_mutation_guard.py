@@ -54,7 +54,20 @@ MUTATORS = (
     "ext2_unlink_name",
     "ext2_rename_in",
     "ext2_remove_directory_in",
+    "ext2_write_regular_file_range",
+    "ext2_replace_regular_file",
+    "ext2_bitmap_fill",
+    "ext2_bitmap_roundtrip_check",
+    "ext2_owner_roundtrip_check",
+    "ext2_write_allocations_roundtrip_check",
 )
+# GitHub issue #1019: write(2)'s own mutator, ext2_write_regular_file_range,
+# was missing from the list above, so the check proved nothing about the
+# write path once it stopped going through ext2_resize_small_file. The list
+# is now closed against the compiler's table: every function of MUTATOR_FILE
+# that reaches BLOCK_WRITE there and is called from outside DEFINING must be
+# named in MUTATORS.
+BLOCK_WRITE = "ext2_block_write"
 MUTATOR_FILE = "kernel/fs/ext2/ext2.tkb"
 TAKE = "ext2_mutation_take"
 LOCK_FILE = "kernel/fs/ext2/mutation_lock.tkb"
@@ -73,9 +86,9 @@ UNGUARDED_ALLOWED = {
 }
 
 
-def mutators_called(row: dict) -> list[str]:
+def mutators_called(row: dict, mutators=MUTATORS) -> list[str]:
     return [call_graph_table.callee_name(entry) for entry in row["callees"]
-            if call_graph_table.callee_name(entry) in MUTATORS
+            if call_graph_table.callee_name(entry) in mutators
             and call_graph_table.callee_file(entry) == MUTATOR_FILE]
 
 
@@ -85,12 +98,47 @@ def takes_guard(row: dict) -> bool:
                for entry in row["callees"]) or HELD in row["params"]
 
 
-def guard_problems(rows: list[dict]) -> tuple[list[str], int]:
+def block_writers(rows: list[dict]) -> set[str]:
+    """The MUTATOR_FILE functions whose calls there reach BLOCK_WRITE."""
+    callees = {row["name"]: [call_graph_table.callee_name(entry)
+                             for entry in row["callees"]
+                             if call_graph_table.callee_file(entry) == MUTATOR_FILE]
+               for row in rows if row["file"] == MUTATOR_FILE}
+    writers = {BLOCK_WRITE}
+    grew = True
+    while grew:
+        grew = False
+        for name, called in callees.items():
+            if name not in writers and any(c in writers for c in called):
+                writers.add(name)
+                grew = True
+    return writers
+
+
+def unlisted_mutators(rows: list[dict], mutators) -> list[str]:
+    writers = block_writers(rows)
+    found = set()
+    for row in rows:
+        if row["file"] in DEFINING:
+            continue
+        for entry in row["callees"]:
+            name = call_graph_table.callee_name(entry)
+            if (call_graph_table.callee_file(entry) == MUTATOR_FILE
+                    and name in writers and name not in mutators):
+                found.add(name)
+    return sorted(found)
+
+
+def guard_problems(rows: list[dict], mutators=MUTATORS) -> tuple[list[str], int]:
     """Problems found, and how many guarded mutating functions were seen."""
     problems = []
+    for name in unlisted_mutators(rows, mutators):
+        problems.append(f"{name} in {MUTATOR_FILE} reaches {BLOCK_WRITE} and is "
+                        "called from outside it, but is not in MUTATORS: its "
+                        "callers are not checked for the guard (GitHub issue #1019)")
     defined = {row["name"] for row in rows if row["file"] == MUTATOR_FILE}
     defined_take = any(row["name"] == TAKE and row["file"] == LOCK_FILE for row in rows)
-    for name in MUTATORS:
+    for name in mutators:
         if name not in defined:
             problems.append(f"mutator {name} is not defined in {MUTATOR_FILE}; "
                             "a renamed mutator would leave this check matching nothing")
@@ -100,7 +148,7 @@ def guard_problems(rows: list[dict]) -> tuple[list[str], int]:
     for row in rows:
         if row["file"] in DEFINING:
             continue
-        called = mutators_called(row)
+        called = mutators_called(row, mutators)
         if not called:
             continue
         if takes_guard(row):
@@ -116,7 +164,8 @@ def guard_problems(rows: list[dict]) -> tuple[list[str], int]:
             "two owners of one block. Take the guard, or add this file to "
             "UNGUARDED_ALLOWED in this script with the reason it cannot race a peer")
     for name in UNGUARDED_ALLOWED:
-        if not any(row["file"] == name and mutators_called(row) for row in rows):
+        if not any(row["file"] == name and mutators_called(row, mutators)
+                   for row in rows):
             problems.append(
                 f"{name} is allowed to mutate without the guard but no longer "
                 "does (or is not compiled): remove the entry rather than "
@@ -154,6 +203,10 @@ def controls_fail(rows: list[dict]) -> list[str]:
     renamed = planted(rows, "ext2_claim_directory", "name", lambda _: "ext2_claim_dir")
     if not guard_problems(renamed)[0]:
         failed.append("a renamed mutator")
+    # A block-writing mutator dropped from MUTATORS (#1019's shape).
+    dropped = tuple(m for m in MUTATORS if m != "ext2_write_regular_file_range")
+    if not guard_problems(rows, dropped)[0]:
+        failed.append("a block-writing mutator missing from MUTATORS")
     return failed
 
 

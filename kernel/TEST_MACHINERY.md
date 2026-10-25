@@ -16,7 +16,7 @@ BusyBox in the shared ash fixture, `kernel/tests/common/ash/ash.stdin`:
 | `renameat` for `mv` | Renames files and a directory, replaces a file, and checks refused cases |
 | Directory growth, enumeration, and dead-record reuse | Creates five 200-byte child names directly in `/etc`, lists all five, removes the last one, recreates that same 200-byte name, and lists again. BusyBox `stat` observes `/etc` at `st_size=2048` before and after reuse through `newfstatat` |
 | File reads, including multiple data blocks | BusyBox `cat` checks `/hello.txt` and the complete 3200-byte `/large.txt` |
-| File truncation and extension | `/bin/user_payload` opens `/mutable.txt`, writes `tiny\n`, reads it back and checks EOF, then writes and reads `extended ext2\n` and checks EOF again |
+| File truncation and extension | `/bin/user_payload` opens `/mutable.txt` with `O_TRUNC`, writes `tiny\n`, reads it back and checks EOF, then writes and reads `extended ext2\n` and checks EOF again, then writes `EX` at offset 0 without `O_TRUNC` and reads `EXtended ext2\n` (#1019) |
 
 The shell outputs for the long directory names are compared exactly. This
 proves `ls` walks both directory blocks and that userspace can remove an
