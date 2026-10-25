@@ -81,6 +81,7 @@ OPS = {
     "unlink": (("path",), 'rm "$R/{0}"'),
     "rename": (("path", "path"), 'mv "$R/{0}" "$R/{1}"'),
     "files": (("path", "count"), None),
+    "peer": (("path",), None),
 }
 
 
@@ -157,6 +158,21 @@ def gen_sh(rows):
             label = f"{step} {op} {' '.join(args)}"
             if op == "fill":
                 cmd = f'$B dd if="$S" of="$R/{args[0]}" bs=1024 count={args[1]}'
+            elif op == "peer":
+                # GitHub issue #1023: fd 3 holds P open at offset 6 while
+                # another open truncates P to 2 bytes. Reads through fd 3
+                # then return 0 (the log shows `[]`), and a write through
+                # it lands at offset 6, so P reads ab, four zero bytes, Z.
+                # The external dd and echo reach fd 3 through dup3.
+                p = f'"$R/{args[0]}"'
+                out.append(f'$B echo -n 0123456789 >{p}; exec 3<>{p}')
+                out.append('echo -n "  held ["; $B dd bs=1 count=6 <&3 2>/dev/null; echo "]"')
+                out.append(f'$B echo -n ab >{p}')
+                out.append('echo -n "  past ["; $B dd bs=1 count=4 <&3 2>/dev/null; echo "]"')
+                out.append('$B echo -n Z >&3; s=$?; exec 3>&-; [ $s -eq 0 ]')
+                out.append(f'echo "{label} -> $?"')
+                out.append(f't {p} {args[0]}')
+                continue
             elif op == "files":
                 cmd = (f'i=0; ok=0; while [ $i -lt {args[1]} ]; do '
                        f'$B true >"$R/{args[0]}/{LONG}$i" 2>/dev/null && ok=$((ok+1)); '
@@ -491,14 +507,16 @@ def self_test():
             continue
         raise AssertionError(f"accepted {bad!r}")
     # Every file the script writes is written by an external /bin/busybox
-    # applet: a redirected builtin or NOFORK applet (`cat`, `printf`) writes
-    # nothing on the guest (dup3 serves only stdin/stdout aliasing), so a
-    # row would differ for the wrong reason (#1034's first fill, #1067, #1070).
+    # applet: `printf` writes nothing on the guest (#1067) and `cat`'s
+    # sendfile reaches the console whatever fd 1 is (#1070), so a row would
+    # differ for the wrong reason (#1034's first fill). Not dup3: it serves
+    # any descriptor (#1023's peer row shares fd 3 through it).
     every = parse("row a match -\nmkdir a\nwrite a/f x\nfill a/g 13\n"
-                  "overwrite a/f a/g\ntruncate a/g\nfiles a 2\n")
+                  "overwrite a/f a/g\ntruncate a/g\nfiles a 2\npeer a/p\n")
     for line in gen_sh(every).splitlines():
         for part in re.split(r";|&&|\bdo\b", line):
-            if re.search(r'>"\$R/', part) and not part.strip().startswith("$B "):
+            # `exec 3<>` only opens the file the external writers then use
+            if re.search(r'>"\$R/', part) and not part.strip().startswith(("$B ", "exec 3<>")):
                 raise AssertionError(f"a file written by a non-external command: {line!r}")
             if re.search(r'\b(cat|printf)\b', part):
                 raise AssertionError(f"cat (sendfile, #1070) or printf (#1067): {line!r}")

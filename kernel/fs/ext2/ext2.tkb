@@ -2147,6 +2147,17 @@ private fn ext2_update_regular_file(slot: borrow Ext2Slot[0], mount: Ext2Mount,
                                     }
                                     BlockIoResult::Ok => { }
                                 }
+                                // GitHub issue #1023: a write past EOF (a
+                                // peer fd's offset after a truncate) leaves
+                                // a gap that reads as zeros; the old last
+                                // block's bytes past the old size are not
+                                // file data, whatever they hold.
+                                let kept: usize = index * KERNEL_BLOCK_SIZE;
+                                for byte: usize in 0..<KERNEL_BLOCK_SIZE {
+                                    if (kept + byte >= inode.size) {
+                                        ext2_scratch[slot.index].file[byte] = 0;
+                                    }
+                                }
                             } else {
                                 for byte: usize in 0..<KERNEL_BLOCK_SIZE {
                                     ext2_scratch[slot.index].file[byte] = 0;

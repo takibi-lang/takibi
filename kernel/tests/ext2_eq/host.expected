@@ -50,4 +50,11 @@ row truncate
   truncate/f file size=14336
 3 truncate truncate/f -> 0
   truncate/f file size=0
+row peer
+1 mkdir peer -> 0
+  peer dir
+  held [012345]
+  past []
+2 peer peer/f -> 0
+  peer/f file size=7
 eq done

@@ -12,16 +12,18 @@
 #   overwrite P SRC     write SRC's bytes at offset 0 without O_TRUNC
 #   files D N           create N empty files with 200-byte names in D
 #   truncate P          truncate -s 0: ftruncate(2) to length 0
+#   peer P              write 0123456789 to P, hold it open as fd 3 and read
+#                       6 bytes, truncate P to "ab" through another open,
+#                       then read and write "Z" through fd 3 (#1023)
 #
 # The script runs from /etc/init.sh after /bin/user_payload has released its
 # ENOSPC fillers; the rows share the image's free space (about 230 blocks).
-# Every command writing a file is an external one (/bin/busybox APPLET): the
-# kernel's dup3 serves only stdin/stdout aliasing, so a redirected shell
-# builtin cannot write a file.
+# Every command writing a file is an external one (/bin/busybox APPLET):
+# printf writes nothing on the guest (#1067) and cat's sendfile goes to the
+# console (#1070). (dup3 duplicates any file descriptor; the earlier note
+# here that it served only stdin/stdout was wrong, #1023.)
 #
 # Not rows yet (GitHub issue #1034 records why):
-#   #1023 needs one fd's offset kept across an O_TRUNC through another; the
-#         shell can only share an fd through dup2, which the kernel refuses.
 #   #1021 needs a doubly-indirect file (over 268 KiB), more than the image's
 #         free space.
 
@@ -58,3 +60,7 @@ row truncate match #1022
 mkdir truncate
 fill truncate/f 14
 truncate truncate/f
+
+row peer match #1023
+mkdir peer
+peer peer/f
