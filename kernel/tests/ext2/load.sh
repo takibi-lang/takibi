@@ -19,33 +19,39 @@
 # has no pipe(2) yet (GitHub issue #1042), and the load must not depend on
 # what one of its phases is there to find.
 # The last line is the verdict the runner reads.
+#
+# LOAD_ROOT (empty on Takibi) prefixes every path, so the runner's Linux
+# reference column runs this same script on the host, with the host-built
+# programs under LOAD_ROOT/bin and BusyBox first in PATH.
 seconds=$1
 jobs=$2
 loops=$3
 shift 3
 failed=0
 count=0
+root=${LOAD_ROOT:-}
+export LOAD_ROOT
 
-busybox mkdir -p /load
+busybox mkdir -p "$root/load"
 for phase in "$@"; do
     count=$((count + 1))
     echo "load: begin $phase"
     case "$phase" in
         xargs)
             # The job is a script, not an inline `sh -c '...'`: a long argv
-            # used to fail-stop the kernel in execve (GitHub issue #1039),
-            # and that is a lane's to find, not this phase's.
-            busybox rm -f /load/*.sum
-            busybox seq 1 "$jobs" >/load/jobs
-            /bin/load-job.sh 0 &&
-                busybox xargs -P 4 -n 1 /bin/load-job.sh </load/jobs
+            # fail-stops the kernel in execve (GitHub issue #1039), and
+            # that is a lane's to find, not this phase's.
+            busybox rm -f "$root"/load/*.sum
+            busybox seq 1 "$jobs" >"$root/load/jobs"
+            "$root/bin/load-job.sh" 0 &&
+                busybox xargs -P 4 -n 1 "$root/bin/load-job.sh" <"$root/load/jobs"
             ;;
         fork|exec|pipe)
-            /bin/stress-ng --"$phase" 4 --timeout "${seconds}s" \
-                --metrics-brief --temp-path /load </dev/null 2>&1
+            "$root/bin/stress-ng" --"$phase" 4 --timeout "${seconds}s" \
+                --metrics-brief --temp-path "$root/load" </dev/null 2>&1
             ;;
         hackbench)
-            /bin/hackbench -P -p -g 4 -l "$loops" </dev/null 2>&1
+            "$root/bin/hackbench" -P -p -g 4 -l "$loops" </dev/null 2>&1
             ;;
         *)
             echo "load: unknown phase $phase"

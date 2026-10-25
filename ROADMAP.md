@@ -73,20 +73,22 @@ lane (`kernelcheck-race-window-*-qemu`) before its issue closes.
 
 ### Evidence for the pillars (shared, scheduled by A)
 
-- **#742 stage 1 now** (maintainer, 2026-10-25): multicore load with
-  programs Linux distributions ship -- BusyBox parallel jobs already in the
-  rootfs, `stress-ng` statically linked against musl (process, pipe, fork
-  stressors), `hackbench` -- on QEMU with four vCPUs and on the four-core
-  RPi5, as a make target outside every aggregate (#742's rules: a finder,
-  never the evidence a defect is fixed; time verdicts decided on the
-  RPi5). It is scheduled before #638's stage 2 and #966 because both need
-  a load baseline, and #1014 (run-lock contention, parked) is measured on
-  this load and nowhere else. Its first find, an admitted execve argv that
-  overflowed the initial-stack block and fail-stopped the kernel, is fixed
-  (#1039, done 2026-10-25). Each program is recorded beside the same
-  program under Linux on the same machine (maintainer, 2026-10-25): a
-  reference column, never a verdict. Stages 2 and 3 (threads: CLONE_VM, futex,
-  TLS, TLB shootdown, #202's sibling-thread case) wait for the #638 flip.
+- **#742 stage 1 done** (2026-10-25): `make load-qemu` (four vCPUs) and
+  `make hwcheck-load-rpi5`, in no aggregate (#742's rules: a finder, never
+  the evidence a defect is fixed; time verdicts decided on the RPi5).
+  stress-ng 0.20.01 and hackbench 2.9 are built as musl static PIEs by
+  `scripts/build_load_programs.sh` into a cache outside the repository.
+  Today only the BusyBox `xargs -P 4` phase runs; the load found #1039 (an
+  execve argv that fail-stops the kernel; done 2026-10-25) and #1040 (an unmappable ELF runs
+  BusyBox), and its other phases wait for #1041 (images over a 2 MiB span:
+  stress-ng) and #1042 (pipe2: stress-ng `--pipe`, hackbench). The board
+  runs the BusyBox phase only until its 2.75 MiB rootfs extent grows (a
+  decision). Each program is recorded beside the same program under Linux
+  on the same machine (maintainer, 2026-10-25): a reference column, never
+  a verdict -- the host, natively, on four CPUs, since this tree builds no
+  Linux guest. #1014 (run-lock contention, parked) is measured on this load
+  and nowhere else. Stages 2 and 3 (threads: CLONE_VM, futex, TLS, TLB
+  shootdown, #202's sibling-thread case) wait for the #638 flip.
 - #584's soak at natural boundaries; #702 (dedicated soak hardware) is the
   maintainer's decision. Every QEMU lane runs four vCPUs since 2026-10-11.
 - The parked triggers #680 and #812 are watched by the RPi5 lane

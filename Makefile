@@ -939,8 +939,10 @@ KERNEL_TASKSET            := $(KERNEL_USER_BUILD_DIR)/taskset
 KERNEL_EXT2_FIXTURE_DIR  := $(KERNEL_DIR)/tests/ext2
 KERNEL_EXT2_IMAGE        := $(KERNEL_USER_BUILD_DIR)/ext2.img
 KERNEL_SHELL_EXT2_IMAGE  := $(KERNEL_USER_BUILD_DIR)/ext2-shell.img
-# GitHub issue #742 stage 1: the shell image grown to one full 8 MiB block
-# group, with stress-ng, hackbench and /bin/load.sh added. Built only by the
+# GitHub issue #742 stage 1: the shell image (which carries /bin/load.sh and
+# /bin/load-job.sh, so the RPi5 shell has them too) grown to one full 8 MiB
+# block group, with stress-ng and hackbench added; the board's rootfs
+# extent is 2.75 MiB, so they are QEMU's only. Built only by the
 # load targets; the programs come from scripts/build_load_programs.sh, which
 # keeps its downloads in TAKIBI_LOAD_CACHE, outside the repository.
 KERNEL_LOAD_EXT2_IMAGE   := $(KERNEL_USER_BUILD_DIR)/ext2-load.img
@@ -1282,7 +1284,8 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 	mv $@.tmp $@
 
 $(KERNEL_SHELL_EXT2_IMAGE): $(KERNEL_EXT2_IMAGE) \
-	$(KERNEL_EXT2_FIXTURE_DIR)/inittab.shell $(KERNEL_EXT2_FIXTURE_DIR)/restart.sh
+	$(KERNEL_EXT2_FIXTURE_DIR)/inittab.shell $(KERNEL_EXT2_FIXTURE_DIR)/restart.sh \
+	$(KERNEL_EXT2_FIXTURE_DIR)/load.sh $(KERNEL_EXT2_FIXTURE_DIR)/load-job.sh
 	cp $(KERNEL_EXT2_IMAGE) $@.tmp
 	debugfs -w -R 'rm /etc/inittab' $@.tmp >/dev/null 2>&1
 	E2FSPROGS_FAKE_TIME=1700000000 \
@@ -1290,6 +1293,10 @@ $(KERNEL_SHELL_EXT2_IMAGE): $(KERNEL_EXT2_IMAGE) \
 	E2FSPROGS_FAKE_TIME=1700000000 \
 		e2cp $(KERNEL_EXT2_FIXTURE_DIR)/restart.sh $@.tmp:/etc/restart.sh
 	debugfs -w -R 'set_inode_field /etc/restart.sh mode 0100755' $@.tmp >/dev/null 2>&1
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/load.sh $@.tmp:/bin/load.sh
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/load-job.sh $@.tmp:/bin/load-job.sh
+	debugfs -w -R 'set_inode_field /bin/load.sh mode 0100755' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/load-job.sh mode 0100755' $@.tmp >/dev/null 2>&1
 	python3 scripts/ext2_fixed_times.py $@.tmp $(KERNEL_EXT2_FAKE_TIME)
 	e2fsck -fn $@.tmp >/dev/null
 	mv $@.tmp $@
@@ -1297,18 +1304,13 @@ $(KERNEL_SHELL_EXT2_IMAGE): $(KERNEL_EXT2_IMAGE) \
 $(KERNEL_LOAD_PROGRAMS)/stress-ng $(KERNEL_LOAD_PROGRAMS)/hackbench &: scripts/build_load_programs.sh
 	bash scripts/build_load_programs.sh $(KERNEL_LOAD_PROGRAMS)
 
-$(KERNEL_LOAD_EXT2_IMAGE): $(KERNEL_SHELL_EXT2_IMAGE) $(KERNEL_EXT2_FIXTURE_DIR)/load.sh \
-	$(KERNEL_EXT2_FIXTURE_DIR)/load-job.sh \
+$(KERNEL_LOAD_EXT2_IMAGE): $(KERNEL_SHELL_EXT2_IMAGE) \
 	$(KERNEL_LOAD_PROGRAMS)/stress-ng $(KERNEL_LOAD_PROGRAMS)/hackbench
 	cp $(KERNEL_SHELL_EXT2_IMAGE) $@.tmp
 	truncate -s 8388608 $@.tmp
 	resize2fs -f $@.tmp 8192 >/dev/null 2>&1
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/load.sh $@.tmp:/bin/load.sh
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/load-job.sh $@.tmp:/bin/load-job.sh
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_LOAD_PROGRAMS)/stress-ng $@.tmp:/bin/stress-ng
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_LOAD_PROGRAMS)/hackbench $@.tmp:/bin/hackbench
-	debugfs -w -R 'set_inode_field /bin/load.sh mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/load-job.sh mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /bin/stress-ng mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /bin/hackbench mode 0100755' $@.tmp >/dev/null 2>&1
 	python3 scripts/ext2_fixed_times.py $@.tmp $(KERNEL_EXT2_FAKE_TIME)
@@ -2448,14 +2450,18 @@ churn-qemu: kernelbuild-qemu $(KERNEL_SHELL_EXT2_IMAGE)
 hwcheck-churn-rpi5: kernelbuild-rpi5
 	@RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" RPI5_SWD_SPEED="$(RPI5_SWD_SPEED)" python3 scripts/run_kernel_churn.py --platform rpi5 --rounds $(CHURN_ROUNDS)
 
-## load-qemu: GitHub issue #742 stage 1, one sample of the multicore load
+## load-qemu / hwcheck-load-rpi5: GitHub issue #742 stage 1, one sample of
+## the multicore load
 ## with programs Linux distributions ship (BusyBox xargs -P, stress-ng's
 ## fork/pipe/exec stressors, hackbench) under four vCPUs, through the
 ## interactive shell. A finder in no aggregate, like churn-qemu: what it
 ## finds gets a deterministic lane; its times are RECORDED, never judged on
 ## QEMU. LOAD_SECONDS is each stressor's run, LOAD_JOBS the xargs jobs,
 ## LOAD_LOOPS hackbench's loops. The report lands in
-## _build/kernel-load-qemu/load-report.txt.
+## _build/kernel-load-<platform>/load-report.txt. The board runs the BusyBox
+## phase only: its rootfs extent is 2.75 MiB, and stress-ng alone is 3 MiB.
+## Time verdicts are the board's, over repeated samples
+## (scripts/repeat_kernel_lane.sh N make hwcheck-load-rpi5).
 LOAD_SECONDS ?= 10
 LOAD_JOBS ?= 64
 LOAD_LOOPS ?= 200
@@ -2466,6 +2472,10 @@ LOAD_PHASES ?=
 load-qemu: kernelbuild-qemu
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) $(KERNEL_LOAD_EXT2_IMAGE)
 	@KERNEL_QEMU_SHELL_SMP=4 python3 scripts/run_kernel_load.py --platform qemu --seconds $(LOAD_SECONDS) --jobs $(LOAD_JOBS) --loops $(LOAD_LOOPS) $(if $(LOAD_PHASES),--phases $(LOAD_PHASES))
+
+.PHONY: hwcheck-load-rpi5
+hwcheck-load-rpi5: kernelbuild-rpi5
+	@RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" RPI5_SWD_SPEED="$(RPI5_SWD_SPEED)" python3 scripts/run_kernel_load.py --platform rpi5 --seconds $(LOAD_SECONDS) --jobs $(LOAD_JOBS) --loops $(LOAD_LOOPS) $(if $(LOAD_PHASES),--phases $(LOAD_PHASES))
 
 ## churn-long-qemu / hwcheck-churn-long-rpi5: the single long boot, for what
 ## only accumulates. Two phases of CHURN_LONG_ROUNDS with DDB `vm` readings
