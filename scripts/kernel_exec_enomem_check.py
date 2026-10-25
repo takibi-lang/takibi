@@ -178,12 +178,74 @@ def run():
         replaced = f"exec-enomem: cpu {cpu} retry replaced the image\n".encode()
         await_uart(lambda data: kept in data and replaced in data and
                    data.count(b"\x1b[6n") > queries, f"cpu-{cpu}-preserved-and-retried")
+    reserve_refused(serial)
+    read_error_after_commit(serial)
     serial.close()
+
+
+def exec_after_marker(serial, phase):
+    """Start /bin/exenom0 on CPU 0 and stop at its execve's dispatch."""
+    gdb.execute(f"target remote 127.0.0.1:{os.environ['AFFINITY_GDB_GDB_PORT']}")
+    marker = gdb.Breakpoint("*kernel_syscall_dispatch")
+    marker.condition = "$x1 == 172 && $x2 == 0x700 && $x3 == 0"
+    serial.sendall(b"/bin/exenom0\n")
+    reach(marker, f"{phase}-marker")
+    if gdb.selected_thread().global_num != 1:
+        raise RuntimeError(f"{phase}: marker ran on the wrong vCPU")
+    frame = register("x7")
+    marker.delete()
+    execute = gdb.Breakpoint("*kernel_syscall_dispatch")
+    execute.condition = f"$x1 == 221 && $x7 == {frame} && $_thread == 1"
+    reach(execute, f"{phase}-execve")
+    execute.delete()
+
+
+def reserve_refused(serial):
+    """GitHub issue #1079: the new image's page reservation, refused before
+    the teardown, is ENOMEM to a caller that keeps running."""
+    kept = b"exec-enomem: cpu 0 returned ENOMEM and this image kept running\n"
+    replaced = b"exec-enomem: cpu 0 retry replaced the image\n"
+    before = (text().count(kept), text().count(replaced))
+    exec_after_marker(serial, "reserve")
+    reserve = gdb.Breakpoint("page_reserve")
+    reserve.thread = 1
+    reach(reserve, "reserve-call")
+    reserve.delete()
+    gdb.execute("takibi-force-variant-return PageReserveResult Refused")
+    print("exec-enomem: page reservation refused before the teardown", flush=True)
+    gdb.execute("detach")
+    await_uart(lambda data: data.count(kept) > before[0] and
+               data.count(replaced) > before[1], "reserve-preserved-and-retried")
+
+
+def read_error_after_commit(serial):
+    """GitHub issue #1079: an image read error after the point of no return
+    ends the process by SIGSEGV; the kernel and the shell run on."""
+    kept = b"exec-enomem: cpu 0 returned ENOMEM and this image kept running\n"
+    before = text().count(kept)
+    exec_after_marker(serial, "read-error")
+    mapped = gdb.Breakpoint("process_image_map_ext2_in_root")
+    mapped.thread = 1
+    reach(mapped, "read-error-map")
+    mapped.delete()
+    read = gdb.Breakpoint("ext2_read_file_chunk")
+    read.thread = 1
+    reach(read, "read-error-image-read")
+    read.delete()
+    gdb.execute("takibi-force-variant-return Ext2ReadResult Invalid")
+    print("exec-enomem: image read refused after the teardown", flush=True)
+    gdb.execute("detach")
+    # The terminal holds the line until ash has reaped the child.
+    serial.sendall(b"echo lost=$?\n")
+    await_uart(lambda data: b"lost=139\n" in data, "read-error-sigsegv")
+    if text().count(kept) != before:
+        raise RuntimeError("read error: the caller ran on after its point of no return")
 
 
 try:
     run()
-    message = "both CPUs returned ENOMEM with an empty handoff, preserved their EL0 image and placement, then completed an unforced exec"
+    message = ("both CPUs returned ENOMEM with an empty handoff, preserved their EL0 image and placement, then completed an unforced exec; "
+               "a refused page reservation was ENOMEM before the teardown (#1079); an image read error after it ended the caller by SIGSEGV (status 139) and the shell ran on")
     passed = True
 except Exception as error:
     message = str(error)

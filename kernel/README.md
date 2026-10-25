@@ -292,6 +292,8 @@ make kernelcheck-oops-qemu  # verify parked QEMU oops records and the retained l
 make kernelcheck-ddb-qemu  # enter DDB through a real UART BREAK, inspect, and resume
 make kernelcheck-uart-wake-qemu  # type into ash while gdb holds each read inside its way to sleep
 make kernelcheck-affinity-gdb-qemu  # force exec argv ENOMEM on both CPUs and verify EL0 retry,
+                                   # refuse an exec's page reservation (ENOMEM) and fail
+                                   # its image read after the teardown (SIGSEGV, #1079),
                                    # see a peer's unaudited syscall handed to core 0,
                                    # hold core 0 between wait4's two child-list walks
                                    # while a peer child exits in between
