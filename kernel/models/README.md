@@ -776,7 +776,7 @@ Variants (`make modelcheck` requires each verdict):
   compiler rejects this shape: `world_stop_machine_begin` declares
   `acquires_lock_10_world_stop`, below every other lock class, so calling it
   while any ranked guard is live is a lock-order error.
-  `scripts/check_world_stop_refusals.py` keeps that rank the lowest and
+  `scripts/buildcheck_world_stop_rank.py` keeps that rank the lowest and
   allows the unranked `world_stop_machine_begin_holding_probe` only in the
   single-attempt `*_probe` functions that hold a pool guard on purpose.
 - `stuck`, `shortbudget`: assumptions 2 and 1 dropped, as above.
