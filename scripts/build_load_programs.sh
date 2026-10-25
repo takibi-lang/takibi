@@ -56,36 +56,53 @@ fi
 cc=$cache/$toolchain/bin/aarch64-linux-gcc
 strip=$cache/$toolchain/bin/aarch64-linux-strip
 
+# A build is reused only while the recipe that made it is unchanged: each
+# records its flags in a stamp, and a different stamp rebuilds from a clean
+# extraction.
+stress_flags='CFLAGS=-fPIE -DBUILD_STATIC LDFLAGS=-static-pie -Wl,--gc-sections'
+hackbench_flags='-static-pie -fPIE -O2 -Wno-incompatible-pointer-types -D_GNU_SOURCE -DVERSION=2.9'
 stress_bin=$cache/src/$stress_ng/stress-ng
-if [ ! -x "$stress_bin" ]; then
+if [ ! -x "$stress_bin" ] ||
+   [ "$(cat "$cache/src/$stress_ng.stamp" 2>/dev/null)" != "$stress_flags" ]; then
     rm -rf "$cache/src/$stress_ng"
     tar -C "$cache/src" -xzf "$cache/dl/$stress_ng.tar.gz"
-    # STATIC=1 is stress-ng's own switch for a static link. Its configure
-    # step probes the toolchain, so optional libraries the cross sysroot
-    # lacks (libbsd, libjpeg, ...) are simply left out.
-    make -C "$cache/src/$stress_ng" CC="$cc" STATIC=1 \
+    # A static PIE, as Alpine builds its static packages (busybox-static
+    # too): the kernel maps ET_DYN images only. stress-ng's own STATIC=1
+    # adds a plain -static, which would win over -static-pie, so its other
+    # half (-DBUILD_STATIC) is passed by hand. Its configure step probes the
+    # toolchain, so optional libraries the cross sysroot lacks (libbsd,
+    # libjpeg, ...) are simply left out.
+    make -C "$cache/src/$stress_ng" CC="$cc" \
+        CFLAGS="-fPIE -DBUILD_STATIC" LDFLAGS="-static-pie -Wl,--gc-sections" \
         -j"$(nproc)" >"$cache/src/$stress_ng.build.log" 2>&1 || {
         echo "[load-programs] stress-ng build failed; see $cache/src/$stress_ng.build.log" >&2
         exit 1
     }
+    printf '%s\n' "$stress_flags" >"$cache/src/$stress_ng.stamp"
 fi
 
 hackbench_bin=$cache/src/$rt_tests/hackbench
-if [ ! -x "$hackbench_bin" ]; then
+if [ ! -x "$hackbench_bin" ] ||
+   [ "$(cat "$cache/src/$rt_tests.stamp" 2>/dev/null)" != "$hackbench_flags" ]; then
     rm -rf "$cache/src/$rt_tests"
     tar -C "$cache/src" -xJf "$cache/dl/$rt_tests.tar.xz"
     # hackbench is one file; rt-tests' Makefile would build every tool and
-    # needs libnuma for some of them. GCC 14 makes its sockaddr_in casts errors.
-    "$cc" -static -O2 -w -Wno-error=incompatible-pointer-types -D_GNU_SOURCE -DVERSION=2.9 \
-        -I"$cache/src/$rt_tests/src/include" \
+    # needs libnuma for some of them. GCC 14 makes its sockaddr_in casts
+    # errors, and they are upstream's.
+    # $hackbench_flags is split into words on purpose.
+    # shellcheck disable=SC2086
+    "$cc" $hackbench_flags -I"$cache/src/$rt_tests/src/include" \
         -o "$hackbench_bin" "$cache/src/$rt_tests/src/hackbench/hackbench.c" -lpthread
+    printf '%s\n' "$hackbench_flags" >"$cache/src/$rt_tests.stamp"
 fi
 
 "$strip" -o "$out/stress-ng" "$stress_bin"
 "$strip" -o "$out/hackbench" "$hackbench_bin"
 for program in stress-ng hackbench; do
-    if file "$out/$program" | grep -q 'dynamically linked'; then
-        echo "[load-programs] $program is not statically linked" >&2
+    # `file` calls a static PIE "static-pie linked"; anything else is
+    # either dynamic or an ET_EXEC the kernel would not map.
+    if ! file "$out/$program" | grep -q 'static-pie linked'; then
+        echo "[load-programs] $program is not a static PIE" >&2
         exit 1
     fi
 done

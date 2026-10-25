@@ -939,6 +939,12 @@ KERNEL_TASKSET            := $(KERNEL_USER_BUILD_DIR)/taskset
 KERNEL_EXT2_FIXTURE_DIR  := $(KERNEL_DIR)/tests/ext2
 KERNEL_EXT2_IMAGE        := $(KERNEL_USER_BUILD_DIR)/ext2.img
 KERNEL_SHELL_EXT2_IMAGE  := $(KERNEL_USER_BUILD_DIR)/ext2-shell.img
+# GitHub issue #742 stage 1: the shell image grown to one full 8 MiB block
+# group, with stress-ng, hackbench and /bin/load.sh added. Built only by the
+# load targets; the programs come from scripts/build_load_programs.sh, which
+# keeps its downloads in TAKIBI_LOAD_CACHE, outside the repository.
+KERNEL_LOAD_EXT2_IMAGE   := $(KERNEL_USER_BUILD_DIR)/ext2-load.img
+KERNEL_LOAD_PROGRAMS     := $(KERNEL_USER_BUILD_DIR)/load-programs
 KERNEL_RPI5_LINK_LD     := $(KERNEL_DIR)/arch/arm64/boot/link.ld
 KERNEL_INIT_TEST_DRIVER_TKB := $(KERNEL_DIR)/init/test_driver.tkb
 KERNEL_RPI5_MAIN_TKB    := $(KERNEL_DIR)/platform/rpi5/init.tkb
@@ -1284,6 +1290,27 @@ $(KERNEL_SHELL_EXT2_IMAGE): $(KERNEL_EXT2_IMAGE) \
 	E2FSPROGS_FAKE_TIME=1700000000 \
 		e2cp $(KERNEL_EXT2_FIXTURE_DIR)/restart.sh $@.tmp:/etc/restart.sh
 	debugfs -w -R 'set_inode_field /etc/restart.sh mode 0100755' $@.tmp >/dev/null 2>&1
+	python3 scripts/ext2_fixed_times.py $@.tmp $(KERNEL_EXT2_FAKE_TIME)
+	e2fsck -fn $@.tmp >/dev/null
+	mv $@.tmp $@
+
+$(KERNEL_LOAD_PROGRAMS)/stress-ng $(KERNEL_LOAD_PROGRAMS)/hackbench &: scripts/build_load_programs.sh
+	bash scripts/build_load_programs.sh $(KERNEL_LOAD_PROGRAMS)
+
+$(KERNEL_LOAD_EXT2_IMAGE): $(KERNEL_SHELL_EXT2_IMAGE) $(KERNEL_EXT2_FIXTURE_DIR)/load.sh \
+	$(KERNEL_EXT2_FIXTURE_DIR)/load-job.sh \
+	$(KERNEL_LOAD_PROGRAMS)/stress-ng $(KERNEL_LOAD_PROGRAMS)/hackbench
+	cp $(KERNEL_SHELL_EXT2_IMAGE) $@.tmp
+	truncate -s 8388608 $@.tmp
+	resize2fs -f $@.tmp 8192 >/dev/null 2>&1
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/load.sh $@.tmp:/bin/load.sh
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/load-job.sh $@.tmp:/bin/load-job.sh
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_LOAD_PROGRAMS)/stress-ng $@.tmp:/bin/stress-ng
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_LOAD_PROGRAMS)/hackbench $@.tmp:/bin/hackbench
+	debugfs -w -R 'set_inode_field /bin/load.sh mode 0100755' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/load-job.sh mode 0100755' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/stress-ng mode 0100755' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/hackbench mode 0100755' $@.tmp >/dev/null 2>&1
 	python3 scripts/ext2_fixed_times.py $@.tmp $(KERNEL_EXT2_FAKE_TIME)
 	e2fsck -fn $@.tmp >/dev/null
 	mv $@.tmp $@
@@ -2420,6 +2447,25 @@ churn-qemu: kernelbuild-qemu $(KERNEL_SHELL_EXT2_IMAGE)
 
 hwcheck-churn-rpi5: kernelbuild-rpi5
 	@RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" RPI5_SWD_SPEED="$(RPI5_SWD_SPEED)" python3 scripts/run_kernel_churn.py --platform rpi5 --rounds $(CHURN_ROUNDS)
+
+## load-qemu: GitHub issue #742 stage 1, one sample of the multicore load
+## with programs Linux distributions ship (BusyBox xargs -P, stress-ng's
+## fork/pipe/exec stressors, hackbench) under four vCPUs, through the
+## interactive shell. A finder in no aggregate, like churn-qemu: what it
+## finds gets a deterministic lane; its times are RECORDED, never judged on
+## QEMU. LOAD_SECONDS is each stressor's run, LOAD_JOBS the xargs jobs,
+## LOAD_LOOPS hackbench's loops. The report lands in
+## _build/kernel-load-qemu/load-report.txt.
+LOAD_SECONDS ?= 10
+LOAD_JOBS ?= 64
+LOAD_LOOPS ?= 200
+# Empty means the runner's default: the phases this kernel can run today.
+# The others, and the issue each waits for, are named in every report.
+LOAD_PHASES ?=
+.PHONY: load-qemu
+load-qemu: kernelbuild-qemu
+	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) $(KERNEL_LOAD_EXT2_IMAGE)
+	@KERNEL_QEMU_SHELL_SMP=4 python3 scripts/run_kernel_load.py --platform qemu --seconds $(LOAD_SECONDS) --jobs $(LOAD_JOBS) --loops $(LOAD_LOOPS) $(if $(LOAD_PHASES),--phases $(LOAD_PHASES))
 
 ## churn-long-qemu / hwcheck-churn-long-rpi5: the single long boot, for what
 ## only accumulates. Two phases of CHURN_LONG_ROUNDS with DDB `vm` readings

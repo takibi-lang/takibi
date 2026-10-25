@@ -13,7 +13,9 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # KERNEL_QEMU_SHELL_ELF runs another QEMU kernel through the same session, for
 # a race-window kernel under the churn workload (GitHub issue #615).
 ELF="${KERNEL_QEMU_SHELL_ELF:-$REPO_ROOT/kernel/build/qemu/kernel.elf}"
-EXT2_IMAGE="$REPO_ROOT/kernel/build/user/ext2-shell.img"
+# KERNEL_QEMU_SHELL_EXT2_IMAGE boots another root image, for the larger
+# load image of GitHub issue #742 (make load-qemu).
+EXT2_IMAGE="${KERNEL_QEMU_SHELL_EXT2_IMAGE:-$REPO_ROOT/kernel/build/user/ext2-shell.img}"
 ARTIFACT_DIR="${KERNEL_QEMU_SHELL_ARTIFACT_DIR:-${TAKIBI_LANE_ARTIFACT_ROOT:-$REPO_ROOT/_build}/kernel-shell-qemu}"
 SHELL_EXT2_IMAGE="$ARTIFACT_DIR/ext2.img"
 QMP_SOCKET="$ARTIFACT_DIR/qmp.sock"
