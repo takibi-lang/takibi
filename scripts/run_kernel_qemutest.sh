@@ -93,6 +93,22 @@ rm -f "$INTERACTIVE_HTTPD_LISTENER" "$INTERACTIVE_HTTPD_READY" \
     "$FOREGROUND_HTTPD_LISTENER" "$INIT_LISTENER" \
     "$NETWORK_READY" "$ARTIFACT_DIR/console-state.log"
 cp "$EXT2_IMAGE" "$QEMU_EXT2_IMAGE"
+# GitHub issue #1075: the #1034 equivalence rows cost every boot that runs
+# them, so kernel/tests/ext2/init.sh runs them only when /eq-enable exists.
+# This runner is the one that compares them, and it plants the marker in its
+# own copy of the disk; KERNEL_QEMU_EXT2_EQ=off (the race-window lanes, whose
+# verdict is the window, not the disk) leaves it out and skips the compare.
+EXT2_EQ="${KERNEL_QEMU_EXT2_EQ:-on}"
+case "$EXT2_EQ" in
+    on) debugfs -w -R 'write /dev/null /eq-enable' "$QEMU_EXT2_IMAGE" >/dev/null 2>&1
+        if ! debugfs -R 'stat /eq-enable' "$QEMU_EXT2_IMAGE" 2>/dev/null | grep -q '^Inode:'; then
+            echo "FAIL $RUN_LABEL: could not plant /eq-enable on the guest's disk" >&2
+            exit 1
+        fi ;;
+    off) ;;
+    *) echo "error: KERNEL_QEMU_EXT2_EQ must be on or off, not '$EXT2_EQ'" >&2
+       exit 1 ;;
+esac
 exec 9>"$ARTIFACT_DIR/runner.lock"
 if ! flock -n 9; then
     echo "FAIL $RUN_LABEL: another QEMU runner already owns $ARTIFACT_DIR" >&2
@@ -396,17 +412,19 @@ fi
 # script (qemu-aarch64 user mode, the same BusyBox), libext2fs writes the
 # tree it left onto a pristine image, and the two disks are compared
 # logically, row by row, each row's outcome against the one ops.eq records.
-python3 "$REPO_ROOT/scripts/ext2_eq.py" replay "$REPO_ROOT/kernel/tests/ext2_eq/ops.eq" \
-    "$REPO_ROOT/kernel/build/user/busybox-static" "$EXT2_IMAGE" "$ARTIFACT_DIR/ext2-eq-host.img"
-if ! python3 "$REPO_ROOT/scripts/ext2_eq.py" compare "$REPO_ROOT/kernel/tests/ext2_eq/ops.eq" \
-        "$REPO_ROOT/kernel/tests/ext2_eq/host.expected" "$QEMU_EXT2_IMAGE" \
-        "$ARTIFACT_DIR/ext2-eq-host.img" >"$ARTIFACT_DIR/ext2-eq.log" 2>&1; then
-    sed 's/^/  /' "$ARTIFACT_DIR/ext2-eq.log" >&2
-    echo "FAIL $RUN_LABEL: ext2 equivalence rows (kernel/tests/ext2_eq/ops.eq)" >&2
-    archive_reason="ext2 equivalence"
-    exit 1
+if [ "$EXT2_EQ" = on ]; then
+    python3 "$REPO_ROOT/scripts/ext2_eq.py" replay "$REPO_ROOT/kernel/tests/ext2_eq/ops.eq" \
+        "$REPO_ROOT/kernel/build/user/busybox-static" "$EXT2_IMAGE" "$ARTIFACT_DIR/ext2-eq-host.img"
+    if ! python3 "$REPO_ROOT/scripts/ext2_eq.py" compare "$REPO_ROOT/kernel/tests/ext2_eq/ops.eq" \
+            "$REPO_ROOT/kernel/tests/ext2_eq/host.expected" "$QEMU_EXT2_IMAGE" \
+            "$ARTIFACT_DIR/ext2-eq-host.img" >"$ARTIFACT_DIR/ext2-eq.log" 2>&1; then
+        sed 's/^/  /' "$ARTIFACT_DIR/ext2-eq.log" >&2
+        echo "FAIL $RUN_LABEL: ext2 equivalence rows (kernel/tests/ext2_eq/ops.eq)" >&2
+        archive_reason="ext2 equivalence"
+        exit 1
+    fi
+    tail -n 1 "$ARTIFACT_DIR/ext2-eq.log"
 fi
-tail -n 1 "$ARTIFACT_DIR/ext2-eq.log"
 
 python3 "$REPO_ROOT/scripts/profile_kernel_workload.py" collect \
     --uart-log "$UART_LOG" --output "$ARTIFACT_DIR/busy-pair-profile.json" \

@@ -87,7 +87,11 @@ fi
 # the QEMU lane compares the disk with host Linux and libext2fs afterwards.
 # Here, after user_payload has released its ENOSPC fillers, so the rows have
 # the image's free space. Silent: its verdict is the lane's comparison.
-/bin/sh /lib/ext2-eq.sh >/eq-log 2>&1
+# Only the comparing lane's runner plants /eq-enable (#1075): every other
+# boot would pay for rows nothing reads.
+if [ -e /eq-enable ]; then
+    /bin/sh /lib/ext2-eq.sh >/eq-log 2>&1
+fi
 
 # GitHub issue #503: what one move between cores costs. Silent on success;
 # its numbers are the kernel's `profile: move-cost` records, collected by the

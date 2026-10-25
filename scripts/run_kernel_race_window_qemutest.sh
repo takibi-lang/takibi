@@ -67,6 +67,7 @@ run_variant() {
         TAKIBI_CONSOLE_EXTRA_GDB="$REPO_ROOT/scripts/stall_probe.gdb" \
         KERNEL_QEMU_LABEL="qemu-race-$WINDOW-$variant" \
         KERNEL_QEMU_HWTEST_ARTIFACT_DIR="$ROOT/$variant" \
+        KERNEL_QEMU_EXT2_EQ=off \
         bash "$REPO_ROOT/scripts/run_kernel_qemutest.sh" \
         >"$ROOT/$variant.log" 2>&1
 }
