@@ -59,6 +59,8 @@ private fn preempt_off_enter() -> CpuHere {
     return cpu;
 }
 
+private fn preempt_off_exit() { }
+
 struct per_cpu Scratch { bytes: [u8; 64]; }
 private let mut scratch: [Scratch; 4];
 
@@ -91,6 +93,8 @@ private fn preempt_off_enter() -> CpuHere {
     let mut cpu: CpuHere = { 0 };
     return cpu;
 }
+
+private fn preempt_off_exit() { }
 
 struct per_cpu Scratch { bytes: [u8; 64]; }
 private let mut scratch: [Scratch; 4];
