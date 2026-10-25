@@ -2267,12 +2267,6 @@ let inferred_effect_location key = StringMap.find_opt key !inferred_effect_locs
 let global_align_bytes_baseline : int StringMap.t ref = ref StringMap.empty
 let var_align_bytes : int StringMap.t ref = ref StringMap.empty
 
-(* Declarations used by the symbolic live-DMA refresh builtin. The call
-   names a global allocation, not a local expression that can shadow it. *)
-let live_dma_global_defs :
-    (Ast.type_expr * int option * bool * bool * Ast.loc) StringMap.t ref =
-  ref StringMap.empty
-
 (* GitHub issue #108: `private let` global name -> the source file (loc.pos_fname)
    it was declared in. Populated once, early in infer_program (globals are visible
    everywhere and already uniqueness-checked by claim_toplevel_name), then consulted
@@ -5183,7 +5177,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | _ -> raise (TypeError (e.loc,
            ("BUG: " ^ op ^ " reached the checker without its replacement"))))
 
-  | Call (("dma_publish" | "dma_consume" | "device_fence" | "signal_fence"
+  | Call (("dma_publish" | "dma_consume" | "signal_fence"
           | "interrupt_wait" | "interrupt_notify") as fname, args) ->
       (* Target-independent DMA/device ordering builtins. Their hardware
          lowering is selected in llvm_gen.ml; keeping them zero-argument
@@ -5218,7 +5212,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
 
   | Call (("msr_cntp_tval_el0" | "msr_cntp_ctl_el0" | "msr_sctlr_el1"
           | "msr_mair_el1" | "msr_tcr_el1" | "msr_ttbr0_el1"
-          | "tlbi_vaae1is" | "tlbi_vae1is" | "tlbi_aside1is") as fname, args) ->
+          | "tlbi_vae1is" | "tlbi_aside1is") as fname, args) ->
       (* GitHub issue #226: closed system-register write / TLBI intrinsics
          taking the one usize value the instruction's Xt operand carries. *)
       (match args with
@@ -5511,7 +5505,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | _ -> raise (TypeError (e.loc,
            Printf.sprintf "%s expects six arguments: %s(nr, x0, x1, x2, x3, x4)" fname fname)))
 
-  | Call (("dma_cpu_ptr" | "dma_cpu_slice") as operation,
+  | Call ("dma_cpu_slice" as operation,
           [({ desc = (Ast.Var _ | Ast.FieldGet ({ desc = Ast.Var _; _ }, _)); _ } as owner);
            { desc = Ast.Var record; _ }]) ->
       (match Dma_fixed_registry.fields_of record,
@@ -5521,15 +5515,14 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            (match repr owner_ty with
             | TPtr (TStruct token)
               when token = Dma_fixed_registry.cpu_token record ->
-                if operation = "dma_cpu_ptr" then TPtr (of_ast elem)
-                else TSlice (of_ast elem, count, Ast.SliceWritable)
+                TSlice (of_ast elem, count, Ast.SliceWritable)
             | _ -> raise (TypeError (owner.loc, Printf.sprintf
                 "%s for '%s' requires its CPU authority token"
                 operation record)))
        | _ -> raise (TypeError (e.loc, Printf.sprintf
            "%s requires a registered fixed DMA record type, got '%s'"
            operation record)))
-  | Call (("dma_cpu_ptr" | "dma_cpu_slice") as operation, _) ->
+  | Call ("dma_cpu_slice" as operation, _) ->
       raise (TypeError (e.loc, Printf.sprintf
         "%s expects a CPU token and a fixed DMA record type" operation))
 
@@ -5543,10 +5536,12 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
      and fixed count (it has the target layout this pass lacks for an
      unpacked struct), checks the line ownership, and the address. *)
   | Call (name, (r :: rest)) when List.mem name Device_protocol_registry.builtins ->
+      (* GitHub issue #1004: generator-private, so from user source the
+         name does not exist. *)
       (match Device_protocol_registry.of_loc e.loc with
         | Some _ -> ()
         | None -> raise (TypeError (e.loc, Printf.sprintf
-            "%s is called only by a device protocol's generated code" name)));
+            "Undefined function: %s" name)));
       let rt = infer_expr senv eenv tyenv fenv r in
       (match repr rt with
        | TIndexedStruct (n, _) | TStruct n
@@ -5567,7 +5562,9 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | _ -> raise (TypeError (e.loc, Printf.sprintf
            "%s has the wrong number of arguments" name)))
   | Call (name, []) when List.mem name Device_protocol_registry.builtins ->
-      raise (TypeError (e.loc, Printf.sprintf "%s expects a region" name))
+      (match Device_protocol_registry.of_loc e.loc with
+       | Some _ -> raise (TypeError (e.loc, Printf.sprintf "%s expects a region" name))
+       | None -> raise (TypeError (e.loc, Printf.sprintf "Undefined function: %s" name)))
 
   (* GitHub issue #623: a device span binds one submitted range to one
      allocation. Both ends must have a static bound -- a constant k is
@@ -5721,37 +5718,6 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
         "%s expects an authority token and a fixed DMA record type"
         operation))
 
-  | Call ("dma_refresh_live", [{ desc = Ast.Var name; _ }]) ->
-      (match StringMap.find_opt name !live_dma_global_defs with
-       | Some (_, Some alignment, true, true, loc)
-         when not (StringSet.mem name !locally_bound_names) ->
-           check_private_global_access e.loc name;
-           let bytes = match repr (lookup e.loc name tyenv) with
-             | TArray (elem, count) when count > 0 ->
-                 const_type_size senv (Ast.TypeArray (to_ast elem, count))
-             | _ -> raise (TypeError (loc, Printf.sprintf
-                 "dma_refresh_live allocation '%s' has no fixed byte extent"
-                 name)) in
-           (match Target_info.dma_cache_contract () with
-            | Target_info.Cache_line line ->
-                if alignment mod line <> 0
-                   || Option.fold ~none:false
-                        ~some:(fun n -> n mod line <> 0) bytes then
-                  raise (TypeError (e.loc, Printf.sprintf
-                    "dma_refresh_live allocation '%s' must own complete cache lines"
-                    name))
-            | Target_info.Coherent -> ()
-            | Target_info.Unsupported ->
-                raise (TypeError (e.loc,
-                  "dma_refresh_live is unavailable on this target")));
-           TVoid
-       | _ -> raise (TypeError (e.loc, Printf.sprintf
-           "dma_refresh_live requires a private mutable aligned fixed-array global, got '%s'"
-           name)))
-  | Call ("dma_refresh_live", _) ->
-      raise (TypeError (e.loc,
-        "dma_refresh_live expects one fixed-array global name"))
-
   | Call (("dma_prepare_tx" | "dma_prepare_rx" | "dma_finish_rx") as fname, args) ->
       let required_alignment =
         match Target_info.dma_cache_contract () with
@@ -5818,11 +5784,11 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | _ -> raise (TypeError (e.loc, Printf.sprintf
            "%s expects two arguments: %s(ptr, len)" fname fname)))
 
-  | Call (("i32_min" | "i32_max") as fname, args) ->
+  | Call ("i32_min" as fname, args) ->
       if args <> [] then
         raise (TypeError (e.loc, Printf.sprintf
           "%s expects no arguments: builtin::%s()" fname fname));
-      let value = if fname = "i32_min" then -2147483648 else 2147483647 in
+      let value = -2147483648 in
       TRefinedInt (value, value + 1, TI32)
 
   | Call ("wrapping_mul_u32" as fname, args) ->
@@ -8757,7 +8723,6 @@ let reset_compilation_state () =
   resolved_call_targets := StringMap.empty;
   resolved_function_values := StringMap.empty;
   resolved_indirect_call_effects := StringMap.empty;
-  live_dma_global_defs := StringMap.empty;
   global_address_names := StringSet.empty;
   (* Reset every module-scoped per-program table up front. Some are reset
      again immediately before their population below; this single preamble
@@ -9125,10 +9090,6 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.LetDef (name, _, _, Some n, _, _, _) -> StringMap.add name n m
     | _ -> m
   ) StringMap.empty prog;
-  live_dma_global_defs := List.fold_left (fun m -> function
-    | Ast.LetDef (name, Some ty, _, align, is_mutable, is_private, loc) ->
-        StringMap.add name (ty, align, is_mutable, is_private, loc) m
-    | _ -> m) StringMap.empty prog;
   Hashtbl.reset private_globals;
   List.iter (function
     | Ast.LetDef (name, _, _, _, _, true, loc) ->
@@ -10828,7 +10789,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
      BEFORE consulting fenv, so a same-named user/extern function would be
      silently unreachable -- reject the definition instead. *)
   let check_reserved_fn loc name =
-    if is_compiler_builtin name then
+    if Language_words.is_reserved_function_name name then
       raise (TypeError (loc,
         Printf.sprintf "'%s' is a compiler builtin and cannot be redefined" name))
   in
@@ -12622,13 +12583,13 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                    | Ast.Bor | Ast.Bxor | Ast.Band | Ast.Shr | Ast.Shl),
                    left, right) ->
           PathSet.union (expr_taint taints left) (expr_taint taints right)
-      | Ast.Call (("dma_cpu_ptr" | "dma_cpu_slice"),
+      | Ast.Call ("dma_cpu_slice",
                   [{ Ast.desc = Ast.Var owner; _ }; _]) ->
           PathSet.singleton (pvar owner)
       (* #131 place rule: a token borrowed in place lives in its holder's
          field, so the derived memory dies with the holder or with a take
          of that field. *)
-      | Ast.Call (("dma_cpu_ptr" | "dma_cpu_slice"),
+      | Ast.Call ("dma_cpu_slice",
                   [{ Ast.desc = Ast.FieldGet (({ Ast.desc = Ast.Var holder; _ } as base), fld); _ }; _]) ->
           (match pvar_expr base holder with
            | PVar (id, _) as hp -> PathSet.of_list [hp; PField (id, holder, fld)]
@@ -12697,7 +12658,6 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.Cast (target, _) -> ast_region_kind target
       | Ast.Deref _ | Ast.Index _ | Ast.FieldGet _ ->
           Option.bind (expr_ast_type e) ast_region_kind
-      | Ast.Call ("dma_cpu_ptr", _) -> Some RegionPointer
       | Ast.Call ("dma_cpu_slice", _) -> Some RegionSlice
       | Ast.Call (name, _) ->
           let target = Option.value
@@ -13260,7 +13220,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             let param = match params with p :: _ -> p | [] -> None in
             let arg_taint = expr_taint taints arg in
             if not (PathSet.is_empty arg_taint)
-               && not (is_compiler_builtin target)
+               && not (Language_words.is_reserved_function_name target)
                && not (accepts_region_borrow param)
                && not (PathSet.subset arg_taint handoff_authorities) then begin
               let value_kind = Option.value
@@ -14352,7 +14312,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               ~default:name in
             if StringSet.mem target callable_keys then
               callees := StringSet.add target !callees
-            else if not (is_compiler_builtin name) then
+            else if not (Language_words.is_reserved_function_name name) then
               (match StringMap.find_opt (loc_key e.loc)
                !resolved_indirect_call_effects with
                | Some (Some effects) ->

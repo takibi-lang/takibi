@@ -486,8 +486,8 @@ parameter value, or top-level declaration name.
   lower bound, similarly. When both arguments have a known bound, the
   tighter combined range is proven; an unconstrained operand falls back
   to a wide (but not unsound) sentinel range.
-- `builtin::i32_min()` / `builtin::i32_max()` -- exact `i32` limits. They
-  carry singleton value facts, so they can be used directly in comparisons
+- `builtin::i32_min()` -- the exact `i32` minimum. It
+  carries a singleton value fact, so they can be used directly in comparisons
   and overflow guards without repeating width-dependent decimal literals.
   The explicit namespace is preferred at call sites for these constant-like
   zero-argument builtins. Other primitive widths are added only when a
@@ -3517,7 +3517,7 @@ project's usual practice.
   unlike an ordinary (non-kinded) pointer, which still keeps one (#218).
 
 **DMA / synchronization builtins** (no user-callable `extern fn`
-needed): `dma_publish()`, `dma_consume()`, `device_fence()` (ARM/AArch64
+needed): `dma_publish()`, `dma_consume()` (ARM/AArch64
 lower to `DSB SY`; AMD64 to `MFENCE`; RISC-V uses direction-preserving
 fences). Cache-aware: `dma_prepare_tx(ptr, len)`, `dma_prepare_rx(ptr,
 len)`, `dma_finish_rx(ptr, len)` (Cortex-M7 rounds to 32-byte cache
@@ -3538,15 +3538,9 @@ pointer casts and chains of immutable local aliases retain the extent proof;
 pointer arithmetic, mutable aliases, calls, returned pointers, and dynamic
 lengths do not. This check does not establish CPU/device ownership.
 
-`dma_refresh_live(name)` accepts only the name of a private mutable aligned
-fixed-array global whose entire byte extent consists of complete target
-cache lines. It performs the receive-side cache invalidation and consume
-barrier over that whole allocation while the device may still write it.
-The operation returns no pointer, slice, or ownership token. A caller may
-inspect live completion metadata under its device-specific completion-marker
-protocol; the refresh neither makes a data buffer CPU-owned nor proves that
-multiple metadata fields form one atomic snapshot. The compiler rejects a
-local alias, partial range, or unsupported cache-maintenance target.
+A live metadata refresh is a device protocol's `refresh` step (see
+"Protocol Declarations"); the former `dma_refresh_live` builtin was removed
+with no remaining use (GitHub issue #1004).
 
 **Protected fixed DMA allocations.** `struct dma_fixed Name { private
 data: [T; N]; }` marks a record with exactly one nonempty fixed array
@@ -3580,10 +3574,9 @@ real lock acquisition supplied by the caller, as for other stable slots.
 
 Ordinary reads, writes, address-taking, field access, and casts of the
 protected record are rejected, including through a pointer to that record.
-`dma_cpu_ptr(cpu, Name)` borrows a live `*NameCpu` token and returns a pointer
-to the first array element. `dma_cpu_slice(cpu, Name)` borrows the same token
-and returns a slice with the array's static minimum length. The returned
-pointer or slice and its pointer/integer
+`dma_cpu_slice(cpu, Name)` borrows a live `*NameCpu` token and returns a
+slice with the array's static minimum length. The returned slice and its
+pointer/integer
 aliases are tied to the CPU token: they cannot be returned, retained by a
 call, stored durably, or used after the token is consumed. Calls may use a
 derived pointer through an explicitly nonretaining borrowed parameter while
@@ -3650,7 +3643,7 @@ the register chosen by LLVM's allocator rather than by the caller:
 `mrs_mpidr_el1`, `mrs_daif`;
 `msr_cntp_tval_el0`, `msr_cntp_ctl_el0`, `msr_sctlr_el1`, `msr_mair_el1`,
 `msr_tcr_el1`, `msr_ttbr0_el1`, `msr_daifclr_irq`, `msr_daifset_irq`;
-`tlbi_vmalle1`, `tlbi_vmalle1is`, `tlbi_vaae1is`, `tlbi_vae1is`,
+`tlbi_vmalle1`, `tlbi_vmalle1is`, `tlbi_vae1is`,
 `tlbi_aside1is`;
 `dsb_ish`, `dsb_ishst`, `isb`, `wfi`; and the call gates `smc4`, `hvc4`,
 `svc5`. These are AArch64-only, but nothing rejects them during type

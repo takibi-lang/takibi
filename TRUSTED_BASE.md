@@ -263,7 +263,7 @@ rules globally.
   lowerings only through generated wrappers (`__protocol_dma_*`) on their
   checked publish/finish edges. Under `--confine-raw-authority` each direct
   call is a counted raw site, an error outside `kernel/RAW_MINT_FILES`. (b) Zero-argument ordering (`dma_publish`,
-  `dma_consume`, `signal_fence`, `device_fence`, `dsb_ish`, `dsb_ishst`,
+  `dma_consume`, `signal_fence`, `dsb_ish`, `dsb_ishst`,
   `isb`): called in virtio_blk, virtio_blk_dma, virtio_net (submit and
   used-ring observation), uart_rx_ring, mmu, gicv2, timer, tcp, ext2
   mutation_lock and log_ring_trace; a call names no address and cannot

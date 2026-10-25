@@ -109,7 +109,6 @@ let rec const_expr ~signed w (e : Ast.expr) =
        | Some n -> bv64 n w
        | None -> failwith ("range obligation: constant '" ^ name ^ "' has no literal"))
   | Ast.Call ("i32_min", []) -> bv64 (-2147483648L) w
-  | Ast.Call ("i32_max", []) -> bv64 2147483647L w
   | Ast.BinOp (Ast.Add, a, b) -> Printf.sprintf "(bvadd %s %s)" (go a) (go b)
   | Ast.BinOp (Ast.Sub, a, b) -> Printf.sprintf "(bvsub %s %s)" (go a) (go b)
   | Ast.BinOp (Ast.Mul, a, b) -> Printf.sprintf "(bvmul %s %s)" (go a) (go b)

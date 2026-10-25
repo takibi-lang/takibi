@@ -330,6 +330,13 @@ condition below applies, and reports the land afterwards.
   row attributed to the rule that retired it (#986 slice 1); #742 stage 1
   records each program beside the same program under Linux on the same
   machine. No comparison rewrite is scheduled. [active] #1043 #986 #742
+- 2026-10-25 The generated-only `__protocol_dma_*` builtins are hidden from
+  user code (a call is an undefined function, `builtin::` does not name
+  them, the names stay reserved), the five zero-use builtins are deleted,
+  and `stable_replace` moves to a removed-words table. [active] #1004
+- 2026-10-25 #1027 step 1's compiler-development flags are spelled
+  `--internal-*` (`--internal-range-obligation-fault-control`,
+  `--internal-trace-init-flow`). [active] #1027
 - 2026-10-19 A rebase conflict confined to docs/SPACE_CHECKPOINT.json is
   resolved by code (scripts/checkpoint_rebase.py, used by land.sh and the
   coordinator): main's side, then the branch's own review, current for its

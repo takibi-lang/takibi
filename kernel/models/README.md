@@ -989,7 +989,7 @@ semantics above are assumed, not derived; an abstract interleaving model
 can show that each barrier the lowering emits is needed under them, but
 not that they describe the silicon. An architecture-level check (for
 example an axiomatic Arm model extended with cache maintenance) would be
-the evidence for that part. Live metadata refresh (`dma_refresh_live`) is
+the evidence for that part. Live metadata refresh (a protocol `refresh` step) is
 not modelled; transmit cleaning is DmaTxReadBorrow.tla's.
 
 ## DmaTxReadBorrow.tla -- reading a buffer the device is transmitting (#740)

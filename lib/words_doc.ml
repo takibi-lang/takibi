@@ -8,11 +8,7 @@
 let code s = "`" ^ s ^ "`"
 
 let builtin_kind name =
-  if List.mem name Language_words.removed_builtins then
-    "removed (diagnostic only; #1004)"
-  else if List.mem name Device_protocol_registry.builtins then
-    "generated-only (device protocol wrappers; #1004)"
-  else if List.mem name Language_words.instruction_builtins then
+  if List.mem name Language_words.instruction_builtins then
     "instruction"
   else if List.mem name Atomic_spec.names
        || List.mem_assoc name Atomic_spec.cell_ops then
@@ -39,6 +35,15 @@ let markdown () =
   p "| Builtin | Kind |\n| --- | --- |\n";
   List.iter (fun w -> p "| %s | %s |\n" (code w) (builtin_kind w))
     Language_words.compiler_builtins;
+  p "\n## Reserved, not public (%d)\n\n"
+    (List.length Language_words.generator_builtins
+     + List.length Language_words.removed_words);
+  p "No user source may call or define these.\n\n";
+  p "| Name | Why |\n| --- | --- |\n";
+  List.iter (fun w -> p "| %s | generated-only (device protocol wrappers) |\n" (code w))
+    Language_words.generator_builtins;
+  List.iter (fun w -> p "| %s | removed (a use gets a diagnostic) |\n" (code w))
+    Language_words.removed_words;
   p "\n## Compiler-owned types (%d)\n\n" (List.length Language_words.compiler_owned_types);
   p "| Type | Owner |\n| --- | --- |\n";
   List.iter (fun (w, m) -> p "| %s | `lib/%s` |\n" (code w) m)

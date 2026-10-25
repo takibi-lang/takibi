@@ -89,7 +89,7 @@ The complete inventory of source words the compiler gives a meaning, generated f
 | --- |
 | `protocol` |
 
-## Compiler builtins (92)
+## Compiler builtins (80)
 
 | Builtin | Kind |
 | --- | --- |
@@ -97,7 +97,6 @@ The complete inventory of source words the compiler gives a meaning, generated f
 | `slice_eq` | general |
 | `zero_fill` | general |
 | `assume_init` | general |
-| `stable_replace` | removed (diagnostic only; #1004) |
 | `place_take` | general |
 | `place_put` | general |
 | `place_borrow` | general |
@@ -105,19 +104,15 @@ The complete inventory of source words the compiler gives a meaning, generated f
 | `min` | general |
 | `max` | general |
 | `i32_min` | general |
-| `i32_max` | general |
 | `wrapping_mul_u32` | general |
 | `dma_publish` | general |
 | `dma_consume` | general |
-| `device_fence` | general |
 | `signal_fence` | general |
 | `interrupt_wait` | general |
 | `interrupt_notify` | general |
 | `dma_prepare_tx` | general |
 | `dma_prepare_rx` | general |
 | `dma_finish_rx` | general |
-| `dma_refresh_live` | general |
-| `dma_cpu_ptr` | general |
 | `dma_cpu_slice` | general |
 | `dma_begin_rx` | general |
 | `dma_finish_owned_rx` | general |
@@ -126,12 +121,6 @@ The complete inventory of source words the compiler gives a meaning, generated f
 | `dma_device_span` | general |
 | `dma_span_address` | general |
 | `dma_span_length` | general |
-| `__protocol_dma_clean` | generated-only (device protocol wrappers; #1004) |
-| `__protocol_dma_prepare_rx` | generated-only (device protocol wrappers; #1004) |
-| `__protocol_dma_finish_rx` | generated-only (device protocol wrappers; #1004) |
-| `__protocol_dma_span` | generated-only (device protocol wrappers; #1004) |
-| `__protocol_dma_own_lines` | generated-only (device protocol wrappers; #1004) |
-| `__protocol_dma_refresh_at` | generated-only (device protocol wrappers; #1004) |
 | `checked_add_usize` | general |
 | `checked_mul_usize` | general |
 | `mrs_cntfrq_el0` | instruction |
@@ -154,7 +143,6 @@ The complete inventory of source words the compiler gives a meaning, generated f
 | `mrs_daif` | instruction |
 | `tlbi_vmalle1` | instruction |
 | `tlbi_vmalle1is` | instruction |
-| `tlbi_vaae1is` | instruction |
 | `tlbi_vae1is` | instruction |
 | `tlbi_aside1is` | instruction |
 | `dsb_ish` | instruction |
@@ -185,6 +173,20 @@ The complete inventory of source words the compiler gives a meaning, generated f
 | `publish_copy` | general |
 | `field_take` | general |
 | `field_put` | general |
+
+## Reserved, not public (7)
+
+No user source may call or define these.
+
+| Name | Why |
+| --- | --- |
+| `__protocol_dma_clean` | generated-only (device protocol wrappers) |
+| `__protocol_dma_prepare_rx` | generated-only (device protocol wrappers) |
+| `__protocol_dma_finish_rx` | generated-only (device protocol wrappers) |
+| `__protocol_dma_span` | generated-only (device protocol wrappers) |
+| `__protocol_dma_own_lines` | generated-only (device protocol wrappers) |
+| `__protocol_dma_refresh_at` | generated-only (device protocol wrappers) |
+| `stable_replace` | removed (a use gets a diagnostic) |
 
 ## Compiler-owned types (12)
 

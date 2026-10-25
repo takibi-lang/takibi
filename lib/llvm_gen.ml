@@ -971,7 +971,7 @@ let restore_slice_endpoint_narrowing saved =
     | Some old -> Hashtbl.replace slice_endpoint_ctx v old
   ) saved
 
-type device_barrier_kind = DmaPublish | DmaConsume | DeviceFence
+type device_barrier_kind = DmaPublish | DmaConsume
 
 let starts_with s prefix =
   let n = String.length prefix in
@@ -1012,7 +1012,6 @@ let emit_device_barrier kind =
     let asm = match kind with
       | DmaPublish -> "fence w, o"
       | DmaConsume -> "fence i, r"
-      | DeviceFence -> "fence iorw, iorw"
     in
     let inline = const_inline_asm void_fn asm "~{memory}" true false in
     ignore (build_call void_fn inline [||] "" builder)
@@ -4732,10 +4731,6 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       emit_device_barrier DmaConsume;
       (TypeVoid, const_null (i1_type context))
 
-  | Call ("device_fence", []) ->
-      emit_device_barrier DeviceFence;
-      (TypeVoid, const_null (i1_type context))
-
   | Call ("signal_fence", []) ->
       let fty = function_type (void_type context) [||] in
       let inline = const_inline_asm fty "" "~{memory}" true false in
@@ -4819,7 +4814,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
 
   | Call (("msr_cntp_tval_el0" | "msr_cntp_ctl_el0" | "msr_sctlr_el1"
           | "msr_mair_el1" | "msr_tcr_el1" | "msr_ttbr0_el1"
-          | "tlbi_vaae1is" | "tlbi_vae1is" | "tlbi_aside1is") as name,
+          | "tlbi_vae1is" | "tlbi_aside1is") as name,
           [arg_e]) ->
       (* GitHub issue #226: one instruction each, taking the caller's value
          through an ordinary "r" input constraint -- LLVM picks which GPR,
@@ -4834,7 +4829,6 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
         | "msr_mair_el1"      -> "msr mair_el1, $0"
         | "msr_tcr_el1"       -> "msr tcr_el1, $0"
         | "msr_ttbr0_el1"     -> "msr ttbr0_el1, $0"
-        | "tlbi_vaae1is"      -> "tlbi vaae1is, $0"
         | "tlbi_vae1is"       -> "tlbi vae1is, $0"
         | "tlbi_aside1is"     -> "tlbi aside1is, $0"
         | _ -> assert false
@@ -5002,7 +4996,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
               | Atomic_spec.Compare_swap -> "compare_swap")
              (Atomic_spec.ordering_name spec.ordering) name)))
 
-  | Call (("dma_cpu_ptr" | "dma_cpu_slice") as operation,
+  | Call ("dma_cpu_slice" as operation,
           [owner; { desc = Var record; _ }]) ->
       let _ = gen_expr locals owner in
       (match Dma_fixed_registry.allocation_of record,
@@ -5015,9 +5009,8 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
              [| const_int (i32_type context) 0;
                 const_int (i32_type context) field_index |]
              "dma.cpu.ptr" builder in
-           if operation = "dma_cpu_ptr" then (TypePtr elem, ptr)
-           else (TypeSlice (elem, count, SliceWritable),
-                 make_slice ptr (const_int (usize_lltype ()) count))
+           (TypeSlice (elem, count, SliceWritable),
+            make_slice ptr (const_int (usize_lltype ()) count))
        | _ -> raise (Error (Printf.sprintf
            "%s has no fixed allocation for '%s'" operation record)))
 
@@ -5148,30 +5141,6 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
   | Call (("dma_span_address" | "dma_span_length") as operation, [span]) ->
       let field = if operation = "dma_span_address" then "address" else "length" in
       gen_expr locals { desc = FieldGet (span, field); loc = e.loc }
-
-  | Call ("dma_refresh_live", [{ desc = Var name; _ }]) ->
-      (match Hashtbl.find_opt global_vars name with
-       | Some ((TypeArray _ as array_ty), _) ->
-           let dl = match !target_data with
-             | Some dl -> dl
-             | None -> raise (Error "dma_refresh_live: target data layout not initialized") in
-           let bytes = Int64.to_int
-             (Llvm_target.DataLayout.abi_size (ltype_of_ast array_ty) dl) in
-           (match Target_info.dma_cache_contract () with
-            | Target_info.Cache_line line when bytes mod line <> 0 ->
-                raise (Error (Printf.sprintf
-                  "dma_refresh_live allocation '%s' must own complete cache lines"
-                  name))
-            | _ -> ());
-           let var = { desc = Var name; loc = e.loc } in
-           let ptr = { desc = Cast (TypePtr TypeU8,
-             { desc = AddrOf var; loc = e.loc }); loc = e.loc } in
-           let len = { desc = IntLit (Int64.of_int bytes); loc = e.loc } in
-           ignore (gen_expr locals { desc = Call ("dma_finish_rx", [ptr; len]);
-             loc = e.loc });
-           (TypeVoid, const_null (i1_type context))
-       | _ -> raise (Error (Printf.sprintf
-           "dma_refresh_live has no fixed array global '%s'" name)))
 
   | Call (("dma_begin_rx" | "dma_finish_owned_rx"
           | "dma_begin_tx" | "dma_finish_owned_tx") as operation,
@@ -5500,8 +5469,8 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       if is_volatile then set_volatile true store;
       (value_ty, old_value)
 
-  | Call (("i32_min" | "i32_max") as name, []) ->
-      let value = if name = "i32_min" then -2147483648L else 2147483647L in
+  | Call ("i32_min", []) ->
+      let value = -2147483648L in
       (TypeRefined
          (Int64.to_int value, Int64.to_int value + 1, TypeI32),
        const_of_int64 (i32_type context) value true)

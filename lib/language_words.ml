@@ -110,21 +110,15 @@ let hard_keywords = List.map fst classified_hard_keywords
 let contextual_keywords = ["protocol"]
 
 let compiler_builtins = [
-  "slice_copy"; "slice_eq"; "zero_fill"; "assume_init"; "stable_replace"; "place_take"; "place_put"; "place_borrow"; "place_is_full"; "min"; "max";
-  "i32_min"; "i32_max";
+  "slice_copy"; "slice_eq"; "zero_fill"; "assume_init"; "place_take"; "place_put"; "place_borrow"; "place_is_full"; "min"; "max";
+  "i32_min";
   "wrapping_mul_u32";
-  "dma_publish"; "dma_consume"; "device_fence"; "signal_fence";
+  "dma_publish"; "dma_consume"; "signal_fence";
   "interrupt_wait"; "interrupt_notify";
   "dma_prepare_tx"; "dma_prepare_rx"; "dma_finish_rx";
-  "dma_refresh_live";
-  "dma_cpu_ptr"; "dma_cpu_slice"; "dma_begin_rx"; "dma_finish_owned_rx";
+  "dma_cpu_slice"; "dma_begin_rx"; "dma_finish_owned_rx";
   "dma_begin_tx"; "dma_finish_owned_tx";
   "dma_device_span"; "dma_span_address"; "dma_span_length";
-  (* GitHub issue #720 option a: called only by a device protocol's
-     generated code (Device_protocol_registry.builtins). *)
-  "__protocol_dma_clean"; "__protocol_dma_prepare_rx";
-  "__protocol_dma_finish_rx"; "__protocol_dma_span";
-  "__protocol_dma_own_lines"; "__protocol_dma_refresh_at";
   "checked_add_usize"; "checked_mul_usize";
   "mrs_cntfrq_el0"; "mrs_cntpct_el0"; "mrs_sctlr_el1";
   "mrs_esr_el1"; "mrs_far_el1"; "mrs_elr_el1"; "mrs_spsr_el1";
@@ -133,7 +127,7 @@ let compiler_builtins = [
   "msr_mair_el1"; "msr_tcr_el1"; "msr_ttbr0_el1";
   "msr_daifclr_irq"; "msr_daifset_irq"; "mrs_daif";
   "tlbi_vmalle1"; "tlbi_vmalle1is";
-  "tlbi_vaae1is"; "tlbi_vae1is"; "tlbi_aside1is";
+  "tlbi_vae1is"; "tlbi_aside1is";
   "dsb_ish"; "dsb_ishst"; "isb"; "wfi"; "smc4"; "hvc4"; "svc5";
   (* GitHub issue #17/#467: the closed atomic set comes from Atomic_spec,
      the same source used by typing, effect inference, and code generation.
@@ -159,9 +153,21 @@ let instruction_builtins = List.filter (fun name ->
     || List.mem name ["isb"; "wfi"; "smc4"; "hvc4"; "svc5"])
   compiler_builtins
 
-(* GitHub issue #1003: words that remain builtins only so a use gets a
-   targeted diagnostic; #1004 moves them out of compiler_builtins. *)
-let removed_builtins = ["stable_replace"]
+(* GitHub issue #1004: words removed from the language. A use gets a
+   targeted diagnostic (type_inf.ml) and the name stays reserved, but it is
+   not a builtin: `builtin::stable_replace` is an unknown builtin. *)
+let removed_words = ["stable_replace"]
+
+(* GitHub issue #1004: builtins only a device protocol's generated code
+   calls (Device_protocol_registry.builtins; a test keeps the two lists
+   equal). They are not public: `builtin::` does not name them, a call from
+   user source is an unresolved identifier, and the names stay reserved so
+   a user function cannot shadow them. *)
+let generator_builtins = [
+  "__protocol_dma_clean"; "__protocol_dma_prepare_rx";
+  "__protocol_dma_finish_rx"; "__protocol_dma_span";
+  "__protocol_dma_own_lines"; "__protocol_dma_refresh_at";
+]
 
 (* GitHub issue #1003: type and function names the compiler supplies from
    its own templates rather than from a library, with the module that owns
@@ -220,6 +226,12 @@ let checker_intrinsic_set = StringSet.of_list checker_intrinsics
 let is_hard_keyword name = StringSet.mem name hard_keyword_set
 let is_contextual_keyword name = StringSet.mem name contextual_keyword_set
 let is_compiler_builtin name = StringSet.mem name compiler_builtin_set
+let is_generator_builtin name = List.mem name generator_builtins
+(* A name no user function may define: infer_expr dispatches on these
+   before it consults fenv. *)
+let is_reserved_function_name name =
+  is_compiler_builtin name || is_generator_builtin name
+  || List.mem name removed_words
 let is_predeclared_name name = StringSet.mem name predeclared_name_set
 let is_checker_intrinsic name = StringSet.mem name checker_intrinsic_set
 

@@ -1610,8 +1610,37 @@ let parser_tests = [
       List.iter (fun word ->
         if not (Language_words.is_compiler_builtin word) then
           Alcotest.failf "%S is marked but is not a compiler builtin" word)
-        (Language_words.instruction_builtins @ Language_words.removed_builtins
-         @ Device_protocol_registry.builtins));
+        Language_words.instruction_builtins;
+      (* #1004: the generator-private list is the registry's list. *)
+      Alcotest.(check (list string)) "generator builtins"
+        Device_protocol_registry.builtins Language_words.generator_builtins;
+      List.iter (fun word ->
+        if Language_words.is_compiler_builtin word then
+          Alcotest.failf "%S is reserved but listed as a public builtin" word;
+        if not (Language_words.is_reserved_function_name word) then
+          Alcotest.failf "%S is not reserved" word)
+        (Language_words.generator_builtins @ Language_words.removed_words));
+
+  Alcotest.test_case
+    "issue #1004: dead, removed and generator-private words are not public builtins"
+    `Quick
+    (fun () ->
+      List.iter (fun name ->
+        expect_type_error ("Undefined function: " ^ name)
+          (Printf.sprintf "fn f() { %s(); }" name) ())
+        ["i32_max"; "device_fence"; "dma_refresh_live"; "dma_cpu_ptr";
+         "tlbi_vaae1is"; "__protocol_dma_clean"];
+      List.iter (fun name ->
+        expect_type_error ("unknown compiler builtin '" ^ name ^ "'")
+          (Printf.sprintf "fn f() { builtin::%s(); }" name) ())
+        ["stable_replace"; "__protocol_dma_span"];
+      (* Still reserved: infer_expr would dispatch on the name first. *)
+      List.iter (fun name ->
+        expect_type_error "cannot be redefined"
+          (Printf.sprintf "fn %s() {}" name) ())
+        ["stable_replace"; "__protocol_dma_own_lines"];
+      expect_type_error "stable_replace was removed"
+        "fn f() { stable_replace(); }" ());
 
   Alcotest.test_case
     "issue #1027: the flag table rejects an unknown or argument-less flag"
@@ -13278,26 +13307,6 @@ linear struct Owner746b[page: usize] {
         struct dma_fixed DmaFixed596 { private bytes: [u8; 64]; }
         private let mut dma_fixed596: DmaFixed596 align(64);");
 
-  Alcotest.test_case "live DMA refresh requires private fixed global" `Quick
-    (expect_type_error
-       "dma_refresh_live requires a private mutable aligned fixed-array global"
-       "let mut public_ring596: [u32; 16] align(64);
-        fn poll() { dma_refresh_live(public_ring596); }");
-
-  Alcotest.test_case "live DMA refresh rejects a local alias" `Quick
-    (expect_type_error
-       "dma_refresh_live requires a private mutable aligned fixed-array global"
-       "fn poll() {
-          let mut local_ring596: [u32; 16] align(64);
-          dma_refresh_live(local_ring596);
-        }");
-
-  Alcotest.test_case "live DMA refresh requires complete cache lines" `Quick
-    (expect_type_error
-       "must own complete cache lines"
-       "private let mut short_ring596: [u32; 15] align(64);
-        fn poll() { dma_refresh_live(short_ring596); }");
-
   Alcotest.test_case "fixed DMA allocation refuses direct array access" `Quick
     (expect_type_error
        "fixed DMA allocation 'dma_fixed596' cannot be accessed directly"
@@ -13459,19 +13468,6 @@ linear struct Owner746b[page: usize] {
         private let mut dma_fixed596: DmaFixed596 align(64);
         private let mut forged_cpu596: *DmaFixed596Cpu;");
 
-  Alcotest.test_case "fixed DMA pointer alias expires at handoff" `Quick
-    (expect_type_error
-       "pointer 'ptr' is derived from linear value 'cpu' and cannot be used after 'cpu' is consumed"
-       "struct no_copy Mutex { private word: usize; }
-        struct dma_fixed DmaFixed596 { private bytes: [u8; 64]; }
-        private let mut dma_fixed596: DmaFixed596 align(64);
-        fn bad(cpu: sink *DmaFixed596Cpu) -> *DmaFixed596Device {
-          let ptr = dma_cpu_ptr(cpu, DmaFixed596);
-          let device = dma_begin_rx(cpu, DmaFixed596);
-          let value = ptr[0];
-          return device;
-        }");
-
   Alcotest.test_case "fixed DMA slice alias expires at handoff" `Quick
     (expect_type_error
        "derived from linear value 'cpu' and cannot be used after 'cpu' is consumed"
@@ -13482,19 +13478,6 @@ linear struct Owner746b[page: usize] {
           let bytes = dma_cpu_slice(cpu, DmaFixed596);
           let device = dma_begin_rx(cpu, DmaFixed596);
           let value = bytes[0];
-          return device;
-        }");
-
-  Alcotest.test_case "fixed DMA integer alias expires at handoff" `Quick
-    (expect_type_error
-       "value 'address' is derived from linear value 'cpu' and cannot be used after 'cpu' is consumed"
-       "struct no_copy Mutex { private word: usize; }
-        struct dma_fixed DmaFixed596 { private bytes: [u8; 64]; }
-        private let mut dma_fixed596: DmaFixed596 align(64);
-        fn bad(cpu: sink *DmaFixed596Cpu) -> *DmaFixed596Device {
-          let address = dma_cpu_ptr(cpu, DmaFixed596) as usize;
-          let device = dma_begin_rx(cpu, DmaFixed596);
-          let value = address;
           return device;
         }");
 
@@ -13867,14 +13850,6 @@ let codegen_tests = [
                p = { 2 };
                return p.value;
              }")));
-  Alcotest.test_case "live DMA refresh codegens over the full private array" `Quick
-    (expect_codegen_ok
-       "private let mut live_ring596: [u32; 16] align(64);
-        fn poll() -> u32 {
-          dma_refresh_live(live_ring596);
-          return live_ring596[0];
-        }");
-
   Alcotest.test_case "fixed DMA generated owner slot exchanges with a lock guard" `Quick
     (expect_codegen_ok
        "struct no_copy Mutex { private word: usize; }
@@ -13914,15 +13889,15 @@ let codegen_tests = [
           Alcotest.(check bool) "slot global has the Full tag" true
             (contains_substring l "i32 1"));
 
-  Alcotest.test_case "fixed DMA CPU pointer and ownership transitions codegen" `Quick
+  Alcotest.test_case "fixed DMA CPU slice and ownership transitions codegen" `Quick
     (expect_codegen_ok
        "struct no_copy Mutex { private word: usize; }
         struct dma_fixed DmaCodegen596 { private bytes: [u8; 64]; }
         private let mut dma_codegen596: DmaCodegen596 align(64);
         fn dma_roundtrip596(cpu: sink *DmaCodegen596Cpu)
             -> *DmaCodegen596Cpu !{unsafe} {
-          let ptr = dma_cpu_ptr(cpu, DmaCodegen596);
-          let value = ptr[0];
+          let bytes = dma_cpu_slice(cpu, DmaCodegen596);
+          let value = bytes[0];
           let device = dma_begin_rx(cpu, DmaCodegen596);
           let mut span = dma_device_span(device, DmaCodegen596, 0, 64);
           let address = unsafe { dma_span_address(span) };
@@ -15533,7 +15508,6 @@ let codegen_tests = [
          "fn codegen_barriers_aarch64() {
             dma_publish();
             dma_consume();
-            device_fence();
             signal_fence();
             interrupt_wait();
             interrupt_notify();
@@ -15544,7 +15518,7 @@ let codegen_tests = [
          | None -> Alcotest.fail "codegen_barriers_aarch64 was not emitted"
        in
        let ir = Llvm.string_of_llvalue fn in
-       Alcotest.(check int) "three dsb calls" 3
+       Alcotest.(check int) "two dsb calls" 2
          (count_substring ir "llvm.aarch64.dsb");
        Alcotest.(check bool) "event wait" true (contains_substring ir "wfe");
        Alcotest.(check bool) "event notify" true (contains_substring ir "sev"));
@@ -16431,13 +16405,10 @@ let codegen_tests = [
   Alcotest.test_case "namespaced i32 limit builtins lower as exact constants" `Quick
     (fun () ->
       ignore (gen_codegen
-        "fn min_limit65() -> i32 { return builtin::i32_min(); }
-         fn max_limit65() -> i32 { return builtin::i32_max(); }");
+        "fn min_limit65() -> i32 { return builtin::i32_min(); }");
       let ir = Llvm.string_of_llmodule !Llvm_gen.the_module in
       Alcotest.(check bool) "minimum constant" true
         (contains_substring ir "ret i32 -2147483648");
-      Alcotest.(check bool) "maximum constant" true
-        (contains_substring ir "ret i32 2147483647");
       expect_type_error "expects no arguments"
         "fn bad_limit65() -> i32 { return builtin::i32_min(0); }" ());
 
@@ -17728,7 +17699,6 @@ let codegen_tests = [
          "fn barrier_calls() {
             dma_publish();
             dma_consume();
-            device_fence();
           }" ();
        expect_type_error "expects no arguments"
          "fn bad_barrier_call() { dma_publish(1); }" ();
@@ -17739,7 +17709,7 @@ let codegen_tests = [
     "DMA/device barrier builtin names cannot be redefined" `Quick
     (fun () ->
        expect_type_error "compiler builtin" "fn dma_publish() {}" ();
-       expect_type_error "compiler builtin" "extern fn device_fence();" ();
+       expect_type_error "compiler builtin" "extern fn dma_consume();" ();
        expect_type_error "compiler builtin" "fn signal_fence() {}" ();
        expect_type_error "compiler builtin" "fn interrupt_wait() {}" ();
        expect_type_error "compiler builtin" "extern fn interrupt_notify();" ());
@@ -19591,7 +19561,6 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
             msr_mair_el1(v);
             msr_tcr_el1(v);
             msr_ttbr0_el1(v);
-            tlbi_vaae1is(v);
             tlbi_vae1is(v);
             tlbi_aside1is(v);
           }" ();
@@ -20515,7 +20484,7 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
            (Printf.sprintf "extern fn %s(v: usize);" name) ())
          ["msr_cntp_tval_el0"; "msr_cntp_ctl_el0"; "msr_sctlr_el1";
           "msr_mair_el1"; "msr_tcr_el1"; "msr_ttbr0_el1";
-          "tlbi_vaae1is"; "tlbi_vae1is"; "tlbi_aside1is"];
+          "tlbi_vae1is"; "tlbi_aside1is"];
        expect_type_error "compiler builtin"
          "extern fn smc4(a: usize, b: usize, c: usize, d: usize) -> usize;" ();
        expect_type_error "compiler builtin"
@@ -20528,7 +20497,7 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
        let _ = gen_codegen
          "fn codegen_issue226_regs(v: usize) -> usize {
             msr_ttbr0_el1(v);
-            tlbi_vaae1is(v);
+            tlbi_vae1is(v);
             tlbi_vmalle1is();
             wfi();
             dsb_ish();
@@ -20547,8 +20516,8 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
        (* GitHub issue #402 *)
        Alcotest.(check bool) "mrs id_aa64mmfr0_el1" true
          (contains_substring ir "mrs $0, id_aa64mmfr0_el1");
-       Alcotest.(check bool) "tlbi vaae1is" true
-         (contains_substring ir "tlbi vaae1is, $0");
+       Alcotest.(check bool) "tlbi vae1is" true
+         (contains_substring ir "tlbi vae1is, $0");
        (* GitHub issue #446: the broadcast whole-TLB form, which the local
           one is a textual prefix of -- so this checks the trailing `is`
           is actually there rather than that a `vmalle1` appears. *)
@@ -22378,7 +22347,6 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
          "fn codegen_barriers_cortexm() {
             dma_publish();
             dma_consume();
-            device_fence();
           }"
        in
        let fn = match Hashtbl.find_opt Llvm_gen.functions "codegen_barriers_cortexm" with
@@ -22386,7 +22354,7 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
          | None -> Alcotest.fail "codegen_barriers_cortexm was not emitted"
        in
        let ir = Llvm.string_of_llvalue fn in
-       Alcotest.(check int) "three dsb calls" 3
+       Alcotest.(check int) "two dsb calls" 2
          (count_substring ir "llvm.arm.dsb"));
 
   Alcotest.test_case
@@ -23764,14 +23732,14 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
        in
        let _ = gen_codegen
          "fn codegen_barriers_x86() {
-            dma_publish(); dma_consume(); device_fence();
+            dma_publish(); dma_consume();
           }"
        in
        let fn = match Hashtbl.find_opt Llvm_gen.functions "codegen_barriers_x86" with
          | Some (_, fn) -> fn
          | None -> Alcotest.fail "codegen_barriers_x86 was not emitted"
        in
-       Alcotest.(check int) "three mfence calls" 3
+       Alcotest.(check int) "two mfence calls" 2
          (count_substring (Llvm.string_of_llvalue fn) "llvm.x86.sse2.mfence"));
 
   Alcotest.test_case "opaque handle pointers codegen without a concrete layout" `Quick
@@ -23790,7 +23758,7 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
        in
        let _ = gen_codegen
          "fn codegen_barriers_riscv() {
-            dma_publish(); dma_consume(); device_fence();
+            dma_publish(); dma_consume();
           }"
        in
        let fn = match Hashtbl.find_opt Llvm_gen.functions "codegen_barriers_riscv" with
@@ -23800,9 +23768,7 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
        let ir = Llvm.string_of_llvalue fn in
        Alcotest.(check bool) "publish fence w,o" true (contains_substring ir "fence w, o");
        Alcotest.(check bool) "consume fence i,r" true (contains_substring ir "fence i, r");
-       Alcotest.(check bool) "full fence iorw" true
-         (contains_substring ir "fence iorw, iorw");
-       expect_codegen_error "interrupt event wait/notify is not implemented"
+        expect_codegen_error "interrupt event wait/notify is not implemented"
          "fn riscv_event_wait_is_rejected() { interrupt_wait(); }" ());
 
   Alcotest.test_case
@@ -29375,7 +29341,7 @@ let device_protocol_tests = [
   Alcotest.test_case "device protocol: the cache builtins are the generator's" `Quick
     (expect_device_error ~sub:"let ready = Rx_init(memory);"
        ~by:"__protocol_dma_clean(memory); let ready = Rx_init(memory);"
-       "is called only by a device protocol's generated code");
+       "Undefined function: __protocol_dma_clean");
   (* GitHub issue #740: virtio-net's scratch TX shape. An unconfirmed send
      parks the owner in a terminal device state, so the CPU can never write
      the payload again; nor can it while the device owns the buffer. *)
