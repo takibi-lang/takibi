@@ -73,7 +73,7 @@ then escalate a partial world stop to the debug stop; #933 left reboot
 quiescent-only, maintainer 2026-10-24). #680 (region_pool handle validation without the lock) and #812
 (contiguous page run search) are parked; the RPi5 lane fails naming either
 one when its reopen condition is met (scripts/validate_parked_triggers.py,
-#953). #798 is #954 stage 2's first item; #799 waits under #954 until a site
+#953). #798, #954 stage 2's first item, is done (2026-10-25); #799 waits under #954 until a site
 needs it.
 
 Done on the stored-authority route (2026-10-09): #637 stage 1's
@@ -104,7 +104,7 @@ list (maintainer, 2026-10-09).
    bounds its body, and the local re-check is gone). ext2.tkb has
    left it as well: its scratch is per-CPU storage and every byte access a
    checked (buffer, offset) position (2026-10-12; text +4 KiB, checking a
-   field's width once is #798). The network files (arp, icmp, tcp) have
+   field's width once is done since #798, 2026-10-25). The network files (arp, icmp, tcp) have
    left it too, through header overlays: `bytes as &mut TcpHdr` is checked
    when every byte pattern is a valid packed header and the slice covers it
    (2026-10-13); a raw reinterpreting cast to a type with a refined, bool,
@@ -195,7 +195,7 @@ step 4 runs #975 (branch conditions as linear facts; done 2026-10-24,
 follow-ups #977 and #978 done 2026-10-24, and #985, batched z3 for the init budget, done 2026-10-24), then #974 (the execve staging requires; done 2026-10-24),
 then #976 (--trace-init-flow, done 2026-10-24), which completes step 4;
 then the rest of #954 stage 2 (docs/VERIFICATION_DESIGN.md, "Stage 2
-scope"): #798 (index bounds from one width check), index bounds from
+scope"): #798 (index bounds from one width check; done 2026-10-25), index bounds from
 versioned locals, then retiring the runtime order graph. Then: #908 (fixed
 QEMU lane budget), #916 (compiler GC tuning), #921 (front-end scans and
 overlay local types instead of a shared multi-variant run, which the profile
