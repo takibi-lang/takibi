@@ -100,7 +100,7 @@ lane (`kernelcheck-race-window-*-qemu`) before its issue closes.
 **Assigned queue (maintainer, 2026-10-23, pruned 2026-10-25).** Memory
 safety and multicore backbone only. Taken in order whenever the numbered
 trunk items below have no step ready; an item that reaches a decision is
-parked and the next one taken: #957 (an RPi5 lane for the hung-core BREAK),
+parked and the next one taken:
 #958 (longest IRQ-masked span outside profile sessions), #959 (DDB's
 lock-free NIC RX pending), #966's follow-up (unmask the Mutex-based locks
 no interrupt reaches; #966 itself unmasked the fd and TCP pools), and last, at low priority, #980
