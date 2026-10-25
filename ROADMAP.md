@@ -80,7 +80,7 @@ lane (`kernelcheck-race-window-*-qemu`) before its issue closes.
   `scripts/build_load_programs.sh` into a cache outside the repository.
   Today only the BusyBox `xargs -P 4` phase runs; the load found #1039 (an
   execve argv that fail-stops the kernel; done 2026-10-25) and #1040 (an unmappable ELF ran
-  BusyBox; done 2026-10-25), and its other phases wait for #1041 (images over a 2 MiB span:
+  BusyBox; done 2026-10-25; #1065 then removed the argv[0] image choice), and its other phases wait for #1041 (images over a 2 MiB span:
   stress-ng) and #1042 (pipe2: stress-ng `--pipe`, hackbench). The fixture
   rootfs grew from 2816 to 6144 blocks to hold both programs, so QEMU and
   the board boot the same image (maintainer, option b: one board build,
