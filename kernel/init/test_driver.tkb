@@ -1610,7 +1610,8 @@ private fn kernel_init_process_start(mount: Ext2Mount, image: Ext2ExecImage) !{u
             let entry: usize = process_image_entry(script_pages);
             let stack: usize = process_image_stack_pointer(script_pages);
             if (entry == USER_TEXT_VA + 0x4524 &&
-                stack == USER_TEXT_VA + USER_SPACE_PAGE_COUNT * PAGE_SIZE - 512) {
+                stack == USER_TEXT_VA + USER_SPACE_PAGE_COUNT * PAGE_SIZE -
+                         PROCESS_STACK_LAYOUT_BYTES) {
                 kernel_boot_log("distro stack: argc=2 argv auxv ready\n");
                 kernel_ddb_breakpoint_test_checkpoint();
             }

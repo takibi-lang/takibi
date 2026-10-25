@@ -43,9 +43,19 @@ fn nested_exec_probe() !{unsafe} {
              vector, 0, 0, 0) != 0xFFFFFFFFFFFFFFF9) { nested_fail(); }
     let line: []const u8 = bs"nested: ELOOP, ENOEXEC, ENOENT, EACCES, E2BIG ok\n";
     svc5(NESTED_WRITE, 1, (unsafe { line as *u8 }) as usize, line.len, 0, 0);
-    args[0] = "/bin/echo" as *u8 as usize;
-    args[1] = "nested: child reexec survived" as *u8 as usize;
-    args[2] = 0;
-    svc5(NESTED_EXEC, "/bin/echo" as *u8 as usize, vector, 0, 0, 0);
+    // GitHub issue #1039: a 448-byte, five-string argv is within execve's
+    // limits but left the old 512-byte stack block only 288 bytes for
+    // strings, so this exec fail-stopped the kernel after the point of no
+    // return. sh ignores the two pads ($0 and $1 of the -c script).
+    let mut pad: [u8; 201];
+    for index: usize in 0..<200 { pad[index] = 0x70; }
+    pad[200] = 0;
+    args[0] = "/bin/sh" as *u8 as usize;
+    args[1] = "-c" as *u8 as usize;
+    args[2] = "echo nested: child reexec survived" as *u8 as usize;
+    args[3] = pad as *u8 as usize;
+    args[4] = pad as *u8 as usize;
+    args[5] = 0;
+    svc5(NESTED_EXEC, "/bin/sh" as *u8 as usize, vector, 0, 0, 0);
     nested_fail();
 }
