@@ -54,28 +54,29 @@ let ELF_PROGRAM_HEADER_SIZE: usize = sizeof(KernelElf64ProgramHeader);
 
 // GitHub issue #1081: a PT_LOAD's permission set, closed to the three the
 // mapper installs. There is no case for any other p_flags value, so the
-// mapper has nothing to refuse: the validator is the only place an ELF's
-// permission bits are judged.
+// mapper has nothing to refuse: distro_elf_load_accept is the only place an
+// ELF's permission bits are judged.
 variant DistroElfAccess { Read; ReadExecute; ReadWrite; }
 
-// GitHub issue #1081: one PT_LOAD exactly as the validator accepted it.
-// The mapper copies from and maps these values and never re-reads the
-// program header, so an acceptance rule exists in one place only, and the
-// values the mapper uses are the values that were checked (the metadata
-// window is not read a second time). distro_elf_segment_pages gives the
-// page span the validator proved disjoint from every other segment's.
-// p_vaddr and p_memsz are held in 32 bits: the validator accepts only an
-// extent under 2 MiB, so both fit, and the smaller record keeps the plan,
-// which is copied by value along the exec path, from growing by more than
-// it must (16 segments at 32 bytes).
+// GitHub issue #1081: one PT_LOAD as distro_elf_load_accept accepted it.
+// Only that function produces one from program-header bytes; the validator
+// and the mapper both obtain their segments through it, so an acceptance
+// rule is written once. distro_elf_segment_pages gives the page span the
+// validator proved disjoint from every other segment's.
 struct DistroElfSegment {
     offset: usize;
     file_size: usize;
-    virtual_address: u32;
-    memory_size: u32;
+    virtual_address: usize;
+    memory_size: usize;
     access: DistroElfAccess;
 }
 
+// GitHub issue #1081: the plan stays small on purpose. It is copied by
+// value along the exec path, and every copy is a stack temporary: a first
+// version that carried the 16 accepted segments inline (+520 B a copy)
+// overflowed the 16 KiB boot stack in the debug images. The segments are
+// therefore decoded on demand from the plan's metadata window, through the
+// same accept function the validator ran.
 struct DistroElfLoadPlan {
     image: []u8;
     image_length: usize;
@@ -88,15 +89,20 @@ struct DistroElfLoadPlan {
     // including its NUL. Zero length means a static image.
     interpreter_offset: usize;
     interpreter_length: usize;
-    // GitHub issue #1081: the accepted PT_LOAD segments, in program-table
-    // order. Private, so only this file's validator can fill them: a plan
-    // built or edited anywhere else cannot hand the mapper a segment the
-    // validator did not accept. Read through distro_elf_plan_segment.
-    private segments: [DistroElfSegment; 16];
-    private segment_count: usize;
 }
 
 must_use variant DistroElfResult { Invalid; Valid(DistroElfLoadPlan); }
+
+must_use variant DistroElfLoadAccept { Refused; Accepted(DistroElfSegment); }
+
+// GitHub issue #1081: what program-header slot `index` of a plan holds.
+// Refused is reachable only if the plan's metadata window no longer holds
+// the bytes the validator accepted; a slot that is not PT_LOAD is NotLoad.
+must_use variant DistroElfPlanSegment {
+    Refused;
+    NotLoad;
+    Load(DistroElfSegment);
+}
 
 // EI_MAG0..EI_MAG3 ("\x7FELF"), EI_CLASS(2=ELFCLASS64), EI_DATA(1=little
 // endian), EI_VERSION(1=EV_CURRENT).
@@ -105,48 +111,121 @@ let mut ELF_IDENT_MAGIC: [u8; 7] = {0x7F, 0x45, 0x4C, 0x46, 2, 1, 1};
 // A PT_LOAD's page span as process_image_map_segments maps it: from the
 // page holding p_vaddr to the page after p_vaddr + p_memsz. The one
 // definition both the validator's disjointness check and the mapper use.
+// Accepted segments end below the 2 MiB extent, so the sum cannot wrap.
 fn distro_elf_segment_pages(segment: DistroElfSegment) -> (usize, usize) {
-    let start: usize = segment.virtual_address as usize;
-    let end: usize = start + (segment.memory_size as usize);
+    let start: usize = segment.virtual_address;
+    let end: usize = start + segment.memory_size;
     return (start / 4096, (end + 4095) / 4096);
+}
+
+// GitHub issue #1081: every per-segment PT_LOAD rule, in one place. The
+// validator calls it while it accepts an image and the mapper calls it
+// (through distro_elf_plan_segment) for each segment it maps, so the mapper
+// cannot refuse a segment the validator accepted.
+private fn distro_elf_load_accept(item: KernelElf64ProgramHeader,
+                                  length: usize) -> DistroElfLoadAccept {
+    // GitHub issue #1058: the mapper installs only these three permission
+    // sets (PF_R, PF_R|PF_X, PF_R|PF_W); any other is refused here, before
+    // execve's point of no return.
+    let mut access: DistroElfAccess = DistroElfAccess::Read;
+    if (item.flags == 5) {
+        access = DistroElfAccess::ReadExecute;
+    } else if (item.flags == 6) {
+        access = DistroElfAccess::ReadWrite;
+    } else if (item.flags != 4) {
+        return DistroElfLoadAccept::Refused;
+    }
+    let offset: usize = item.offset as usize;
+    let file_size: usize = item.file_size as usize;
+    let virtual_address: usize = item.virtual_address as usize;
+    let memory_size: usize = item.memory_size as usize;
+    let alignment: usize = item.alignment as usize;
+    if (file_size > memory_size || offset > length ||
+        file_size > length - offset ||
+        memory_size > 0xFFFFFFFFFFFFFFFF - virtual_address) {
+        return DistroElfLoadAccept::Refused;
+    }
+    // ELF permits 0/1 (no requirement); otherwise the file and virtual
+    // offsets must agree modulo a power-of-two alignment.
+    if (alignment > 1) {
+        let mask: usize = alignment - 1;
+        if ((alignment & mask) != 0 ||
+            (virtual_address & mask) != (offset & mask)) {
+            return DistroElfLoadAccept::Refused;
+        }
+    }
+    // The image extent bound, applied per segment so that every accepted
+    // segment's page span is small; the validator applies it to the
+    // maximum again, which this implies.
+    if (virtual_address + memory_size > 0x1FFFFF) {
+        return DistroElfLoadAccept::Refused;
+    }
+    let mut segment: DistroElfSegment = {
+        offset, file_size, virtual_address, memory_size, access
+    };
+    return DistroElfLoadAccept::Accepted(segment);
+}
+
+// GitHub issue #1081: program-header slot `index` of a plan, decoded and
+// judged by distro_elf_load_accept. Slots at or past program_count are
+// NotLoad.
+fn distro_elf_plan_segment(plan: DistroElfLoadPlan,
+                           index: usize) -> DistroElfPlanSegment {
+    if (index >= plan.program_count || index >= 16) {
+        return DistroElfPlanSegment::NotLoad;
+    }
+    let image = plan.image;
+    let offset: usize = plan.program_offset + index * ELF_PROGRAM_HEADER_SIZE;
+    if (offset > image.len) { return DistroElfPlanSegment::Refused; }
+    let tail = image[offset..<image.len];
+    if (tail.len < sizeof(KernelElf64ProgramHeader)) {
+        return DistroElfPlanSegment::Refused;
+    }
+    let mut item: KernelElf64ProgramHeader = kernel_elf_program_header_copy(
+        tail[0..<sizeof(KernelElf64ProgramHeader)]);
+    if (item.segment_type != ELF_PT_LOAD) {
+        return DistroElfPlanSegment::NotLoad;
+    }
+    match distro_elf_load_accept(item, plan.image_length) {
+        DistroElfLoadAccept::Refused => { return DistroElfPlanSegment::Refused; }
+        DistroElfLoadAccept::Accepted(segment) => {
+            return DistroElfPlanSegment::Load(segment);
+        }
+    }
 }
 
 // GitHub issue #1058: no two PT_LOAD segments may share a page. The mapper
 // refuses a page that is already mapped, and it does so after execve's point
 // of no return, where a refusal can only stop the kernel; an image whose
 // segments overlap is refused here instead, while execve can still answer
-// ENOEXEC. GitHub issue #1081: decided over the accepted segment spans the
-// plan carries, the same spans the mapper maps.
+// ENOEXEC. GitHub issue #1081: decided over the segments
+// distro_elf_plan_segment yields, the same ones the mapper maps.
 private fn distro_elf_load_pages_disjoint(plan: DistroElfLoadPlan) -> bool {
-    let count: usize = plan.segment_count;
     for i: usize in 0..<16 {
-        if (i < count) {
-            let (i_first, i_last) = distro_elf_segment_pages(plan.segments[i]);
-            for j: usize in 0..<16 {
-                if (j < i) {
-                    let (j_first, j_last) =
-                        distro_elf_segment_pages(plan.segments[j]);
-                    if (i_first < j_last && j_first < i_last) {
-                        return false;
+        match distro_elf_plan_segment(plan, i) {
+            DistroElfPlanSegment::Refused => { return false; }
+            DistroElfPlanSegment::NotLoad => {}
+            DistroElfPlanSegment::Load(i_segment) => {
+                let (i_first, i_last) = distro_elf_segment_pages(i_segment);
+                for j: usize in 0..<16 {
+                    if (j < i) {
+                        match distro_elf_plan_segment(plan, j) {
+                            DistroElfPlanSegment::Refused => { return false; }
+                            DistroElfPlanSegment::NotLoad => {}
+                            DistroElfPlanSegment::Load(j_segment) => {
+                                let (j_first, j_last) =
+                                    distro_elf_segment_pages(j_segment);
+                                if (i_first < j_last && j_first < i_last) {
+                                    return false;
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
     }
     return true;
-}
-
-// GitHub issue #1081: the number of accepted PT_LOAD segments, at most 16.
-fn distro_elf_plan_segment_count(plan: DistroElfLoadPlan) -> usize {
-    return plan.segment_count;
-}
-
-// GitHub issue #1081: one accepted segment. An index at or past
-// distro_elf_plan_segment_count reads a zeroed slot (no pages), never a
-// header the validator did not accept.
-fn distro_elf_plan_segment(plan: DistroElfLoadPlan,
-                           index: {0..<16 as usize}) -> DistroElfSegment {
-    return plan.segments[index];
 }
 
 // The slice parameter is intentionally retaining rather than `borrow`:
@@ -181,13 +260,6 @@ fn distro_elf_validate_with_length(image: []u8,
         if (table_size > length - program_offset) { return DistroElfResult::Invalid; }
         if (program_offset > image.len) { return DistroElfResult::Invalid; }
 
-        // Filled field by field: every segment slot starts empty, and one is
-        // written as each PT_LOAD is accepted.
-        let mut plan: DistroElfLoadPlan;
-        let mut empty: DistroElfSegment = {
-            0, 0, 0, 0, DistroElfAccess::Read
-        };
-        for k: usize in 0..<16 { plan.segments[k] = empty; }
         let mut maximum: usize = 0;
         let mut load_count: usize = 0;
         let mut interpreter_offset: usize = 0;
@@ -203,51 +275,17 @@ fn distro_elf_validate_with_length(image: []u8,
             let mut item: KernelElf64ProgramHeader =
                 kernel_elf_program_header_copy(item_bytes);
             if (item.segment_type == ELF_PT_LOAD) {
-                // GitHub issue #1058: the mapper accepts only these three
-                // permission sets (PF_R, PF_R|PF_X, PF_R|PF_W) and fails
-                // after the old image is gone, so they are refused here,
-                // before execve's point of no return.
-                // GitHub issue #1081: the decision is recorded as a
-                // DistroElfAccess, so the mapper never sees p_flags.
-                let mut access: DistroElfAccess = DistroElfAccess::Read;
-                if (item.flags == 5) {
-                    access = DistroElfAccess::ReadExecute;
-                } else if (item.flags == 6) {
-                    access = DistroElfAccess::ReadWrite;
-                } else if (item.flags != 4) {
-                    return DistroElfResult::Invalid;
-                }
-                let offset: usize = item.offset as usize;
-                let file_size: usize = item.file_size as usize;
-                let virtual_address: usize = item.virtual_address as usize;
-                let memory_size: usize = item.memory_size as usize;
-                let alignment: usize = item.alignment as usize;
-                if (file_size > memory_size || offset > length ||
-                    file_size > length - offset ||
-                    memory_size > 0xFFFFFFFFFFFFFFFF - virtual_address) {
-                    return DistroElfResult::Invalid;
-                }
-                // ELF permits 0/1 (no requirement); otherwise the file and
-                // virtual offsets must agree modulo a power-of-two alignment.
-                if (alignment > 1) {
-                    let mask: usize = alignment - 1;
-                    if ((alignment & mask) != 0 ||
-                        (virtual_address & mask) != (offset & mask)) {
+                match distro_elf_load_accept(item, length) {
+                    DistroElfLoadAccept::Refused => {
                         return DistroElfResult::Invalid;
                     }
+                    DistroElfLoadAccept::Accepted(segment) => {
+                        let end_address: usize =
+                            segment.virtual_address + segment.memory_size;
+                        if (end_address > maximum) { maximum = end_address; }
+                        load_count = load_count + 1;
+                    }
                 }
-                let end_address: usize = virtual_address + memory_size;
-                if (end_address > maximum) { maximum = end_address; }
-                let index: usize = load_count;
-                if (index >= 16 || end_address > 0x1FFFFF) {
-                    return DistroElfResult::Invalid;
-                }
-                let mut segment: DistroElfSegment = {
-                    offset, file_size, virtual_address as u32,
-                    memory_size as u32, access
-                };
-                plan.segments[index] = segment;
-                load_count = load_count + 1;
             }
             if (item.segment_type == ELF_PT_INTERP) {
                 let offset: usize = item.offset as usize;
@@ -264,16 +302,11 @@ fn distro_elf_validate_with_length(image: []u8,
         if (load_count == 0 || entry >= maximum || maximum > 0x1FFFFF) {
             return DistroElfResult::Invalid;
         }
-        plan.image = image;
-        plan.image_length = length;
-        plan.program_offset = program_offset;
-        plan.program_count = program_count;
-        plan.entry = entry;
-        plan.extent = maximum;
-        plan.load_segments = load_count;
-        plan.interpreter_offset = interpreter_offset;
-        plan.interpreter_length = interpreter_length;
-        plan.segment_count = load_count;
+        let mut plan: DistroElfLoadPlan = {
+            image, length, program_offset, program_count,
+            entry, maximum, load_count,
+            interpreter_offset, interpreter_length
+        };
         if (distro_elf_load_pages_disjoint(plan) == false) {
             return DistroElfResult::Invalid;
         }

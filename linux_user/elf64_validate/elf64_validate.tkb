@@ -143,10 +143,31 @@ fn kernel_mapper_agreement_probe() {
     print_kernel_result("straddling shared page: ", false);
 }
 
-// GitHub issue #1081: the plan carries each accepted PT_LOAD as the
-// validator decided it -- access, page span -- so the mapper reads no
-// program header. Editing the image after validation (the metadata window
-// rewritten) must not change what the plan hands the mapper.
+// GitHub issue #1081: whether plan slot `index` is a PT_LOAD with this
+// access and page span, as the mapper would receive it.
+fn kernel_plan_slot_is(plan: DistroElfLoadPlan, index: usize, access: usize,
+                       first: usize, last: usize) -> bool {
+    match distro_elf_plan_segment(plan, index) {
+        DistroElfPlanSegment::Refused => { return false; }
+        DistroElfPlanSegment::NotLoad => { return false; }
+        DistroElfPlanSegment::Load(segment) => {
+            let mut code: usize = 0;
+            match segment.access {
+                DistroElfAccess::Read => { code = 4; }
+                DistroElfAccess::ReadExecute => { code = 5; }
+                DistroElfAccess::ReadWrite => { code = 6; }
+            }
+            let (span_first, span_last) = distro_elf_segment_pages(segment);
+            return code == access && span_first == first && span_last == last;
+        }
+    }
+}
+
+// GitHub issue #1081: the mapper's segments come from the validator's own
+// accept rule: an accepted plan yields each PT_LOAD with its access and
+// page span, a slot past the table is NotLoad, and a header rewritten
+// after validation into one the rule refuses comes back Refused rather
+// than being mapped under a rule of the mapper's own.
 fn kernel_plan_segments_probe() {
     second_load_init(0x1080);
     put_u32(68, 5);       // first PT_LOAD: PF_R|PF_X
@@ -155,29 +176,22 @@ fn kernel_plan_segments_probe() {
             uart_puts("kernel plan segments: FAIL\n");
         }
         DistroElfResult::Valid(plan) => {
+            let mut past_ok: bool = false;
+            match distro_elf_plan_segment(plan, 2) {
+                DistroElfPlanSegment::NotLoad => { past_ok = true; }
+                DistroElfPlanSegment::Refused => {}
+                DistroElfPlanSegment::Load(segment) => {}
+            }
+            let accepted: bool = kernel_plan_slot_is(plan, 0, 5, 0, 1) &&
+                kernel_plan_slot_is(plan, 1, 6, 1, 2) && past_ok;
             put_u32(68, 7);
-            put_u64(80, 0x5000);
-            let mut text: DistroElfSegment = distro_elf_plan_segment(plan, 0);
-            let mut data: DistroElfSegment = distro_elf_plan_segment(plan, 1);
-            let mut text_ok: bool = false;
-            match text.access {
-                DistroElfAccess::ReadExecute => { text_ok = true; }
-                DistroElfAccess::Read => {}
-                DistroElfAccess::ReadWrite => {}
+            let mut refused_ok: bool = false;
+            match distro_elf_plan_segment(plan, 0) {
+                DistroElfPlanSegment::Refused => { refused_ok = true; }
+                DistroElfPlanSegment::NotLoad => {}
+                DistroElfPlanSegment::Load(segment) => {}
             }
-            let mut data_ok: bool = false;
-            match data.access {
-                DistroElfAccess::ReadWrite => { data_ok = true; }
-                DistroElfAccess::Read => {}
-                DistroElfAccess::ReadExecute => {}
-            }
-            let (text_first, text_last) = distro_elf_segment_pages(text);
-            let (data_first, data_last) = distro_elf_segment_pages(data);
-            if (distro_elf_plan_segment_count(plan) == 2 && text_ok &&
-                data_ok && text_first == 0 && text_last == 1 &&
-                text.virtual_address == 0 && data_first == 1 &&
-                data_last == 2 && data.offset == 128 &&
-                data.file_size == 16) {
+            if (accepted && refused_ok) {
                 uart_puts("kernel plan segments: PASS\n");
             } else {
                 uart_puts("kernel plan segments: FAIL\n");
@@ -185,6 +199,7 @@ fn kernel_plan_segments_probe() {
         }
     }
 }
+
 
 // Execute the production mint's packed record copies and prove that later
 // source edits cannot change the returned header values.

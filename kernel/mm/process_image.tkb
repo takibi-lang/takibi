@@ -2151,18 +2151,23 @@ private fn process_image_map_segments(slot: borrow ProcessImageSlot[0],
         return ProcessImageSegmentsResult::OutOfMemory;
     }
     let mut mapped: usize = already_mapped;
-    // GitHub issue #1081: the mapper walks the segments the validator
-    // accepted (DistroElfSegment), not the program header bytes, so it has
-    // no ELF acceptance rule of its own to disagree with. What it can still
-    // refuse is the address space (an occupied page: the validator proved a
-    // plan's spans disjoint and process_image_pair_probe proves the two
-    // plans' biased spans disjoint, so only a non-fresh target reaches it)
-    // and its sources (page allocation, the image read).
-    let count: usize = distro_elf_plan_segment_count(plan);
+    // GitHub issue #1081: the mapper takes its segments from
+    // distro_elf_plan_segment, which judges each program header with the
+    // validator's own distro_elf_load_accept, so it has no ELF acceptance
+    // rule of its own to disagree with. Refused there means the metadata
+    // window changed after validation. What else it can refuse is the
+    // address space (an occupied page: the validator proved a plan's spans
+    // disjoint and process_image_pair_probe proves the two plans' biased
+    // spans disjoint, so only a non-fresh target reaches it) and its
+    // sources (page allocation, the image read).
     for segment_index: usize in 0..<16 {
-        if (segment_index < count) {
-            let mut header: DistroElfSegment =
-                distro_elf_plan_segment(plan, segment_index);
+        match distro_elf_plan_segment(plan, segment_index) {
+          DistroElfPlanSegment::Refused => {
+            process_image_cleanup_root(target);
+            return ProcessImageSegmentsResult::Invalid;
+          }
+          DistroElfPlanSegment::NotLoad => {}
+          DistroElfPlanSegment::Load(header) => {
             let (span_first, span_last) = distro_elf_segment_pages(header);
             let first_page: usize = span_first + load_bias / PAGE_SIZE;
             let last_page: usize = span_last + load_bias / PAGE_SIZE;
@@ -2213,6 +2218,7 @@ private fn process_image_map_segments(slot: borrow ProcessImageSlot[0],
                         }
                     }
                 }
+            }
             }
         }
     }
