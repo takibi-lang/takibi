@@ -410,3 +410,26 @@ condition below applies, and reports the land afterwards.
   default (abstract interpretation, z3 Spacer where its cost fits the 5 s
   budget), and the programmer writes an invariant or a proof only where
   inference fails. Evidence for #955. [active] #954 #955
+- 2026-10-25 #1079 option (c): an execve reserves the new image's pages
+  (extent, heap, stack, tables) before the old image is torn down, so memory
+  exhaustion is refused with ENOMEM before the point of no return; an image
+  read error after that point ends the calling process with a fatal signal,
+  as Linux does, never the kernel. Exhaustion found by the load programs is
+  welcome test evidence. [active] #1079 #1084
+- 2026-10-25 #1041 option (A): DISTRO_ELF_SPAN_MAX is 256 MiB. With #1079
+  in place a large image fails before commit or ends only its own process,
+  so the bound is a sanity limit, not the OOM defence. [active] #1041 #1079
+- 2026-10-25 #1035: hostile ext2 images are generated from seeds; the
+  e2fsprogs f_* images (GPL data) are not downloaded. The compiler lowers
+  dsb_ish/dsb_ishst to mfence on x86-64 for the host build, as the existing
+  x86-64 atomics do. [active] #1035
+- 2026-10-25 #1095: DDB's precise "no RX pending" on GEM uses a logic-free
+  .S helper (dc civac; dsb) called through extern, restricted to DDB by a
+  build check like the MPIDR read; no compiler builtin. Ask again if the
+  work grows large. [active] #1095
+- 2026-10-25 #1096: add the effect exec args needs (a spin that interrupts
+  must not reach, apart from may_block). Effects with a clear need are added
+  now, before the effect system is reviewed as a whole. [active] #1096
+- 2026-10-25 #1021/#1100 option (b): /pad stays #742's MiB rounding; the
+  comparing lane's runner plants a dedicated doubly-indirect fixture on its
+  own disk copy with debugfs. [active] #1021 #1100
