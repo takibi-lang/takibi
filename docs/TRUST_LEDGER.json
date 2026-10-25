@@ -47,6 +47,30 @@
         "frame_lines": "code removed upstream since the last entry; #980 changes no RAW_MINT_FILES file",
         "frame_api_ratchet": "frame API #1018 category, first recorded at this append"
       }
+    },
+    {
+      "date": "2026-10-25",
+      "head": "5527a41b",
+      "counts": {
+        "raw_mint_files": 15,
+        "frame_lines": 12895,
+        "device_semantics_files": 4,
+        "raw_deref_plain": 232,
+        "raw_deref_io": 16,
+        "raw_deref_builtin_region": 113,
+        "unsafe_blocks": 143,
+        "extern_fns": 55,
+        "invariant_stop_sites": 120,
+        "assembly_lines": 2369,
+        "per_cpu_ordinary_arrays": 72,
+        "per_cpu_stores": 7,
+        "raw_cpu_id_calls": 156,
+        "frame_api_ratchet": 8
+      },
+      "changes": {
+        "frame_lines": "#959 lock-free DDB RX-pending reads in virtio_net and rp1_gem, with their ordering and coherence comments",
+        "unsafe_blocks": "#959 two acquire loads of device-written ring words and the RX ring CPU address from its span"
+      }
     }
   ]
 }
