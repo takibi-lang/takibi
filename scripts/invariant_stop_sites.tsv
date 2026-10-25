@@ -60,13 +60,13 @@ kernel/kernel/process.tkb	kernel_process_stack_switch_complete	frame	4	-	#1017	t
 kernel/kernel/process.tkb	kernel_process_stack_idle_complete	frame	2	-	#1017	the exit-to-idle stack handoff called from assembly: execution state and the outgoing record disagree
 kernel/kernel/process.tkb	kernel_process_stack_idle_yield	frame	3	-	#1017	the yield-to-idle stack handoff called from assembly: execution state, outgoing record or the yield publication disagree
 kernel/kernel/process.tkb	kernel_process_stack_idle_blocked	frame	2	-	#1017	the block-to-idle stack handoff called from assembly: execution state and the outgoing record disagree
-kernel/kernel/process.tkb	kernel_process_spread_timer_progress	ladder	1	-	#1031	fixture: its own process is never pinned; an affinity write without a Pinned arm for fixture-owned processes would make it static (unfiled: fixture affinity write that cannot answer Pinned)
-kernel/kernel/process.tkb	kernel_process_spread_timer_enter	ladder	1	-	#1031	fixture's own process is never pinned, as kernel_process_spread_timer_progress
+kernel/kernel/process.tkb	kernel_process_spread_timer_progress	ladder	1	-	#1050	fixture: its own process is never pinned; an affinity write without a Pinned arm for fixture-owned processes would make it static
+kernel/kernel/process.tkb	kernel_process_spread_timer_enter	ladder	1	-	#1050	fixture's own process is never pinned, as kernel_process_spread_timer_progress
 kernel/kernel/process.tkb	kernel_process_activate_stable_root	unmodelled	2	-	#1031	the address-space root fails prepare (Invalid) or commit: a page-table and ASID fact no model covers
 kernel/kernel/process.tkb	kernel_process_tick_leave_excluded	frame	1	-	#1017	the yield publication fails while leaving on the timer frame
 kernel/kernel/process.tkb	kernel_process_block_reserved	ladder	1	-	#652	another core stands on the stack this CPU blocked on: the scheduled_process_start rule, StackOwnership.tla
-kernel/kernel/process.tkb	kernel_process_exit_waiter_probe	ladder	1	-	#1031	fixture's own process is never pinned, as kernel_process_spread_timer_progress
-kernel/kernel/process.tkb	kernel_process_scheduler_probe	ladder	1	-	#1031	fixture's own process is never pinned, as kernel_process_spread_timer_progress
+kernel/kernel/process.tkb	kernel_process_exit_waiter_probe	ladder	1	-	#1050	fixture's own process is never pinned, as kernel_process_spread_timer_progress
+kernel/kernel/process.tkb	kernel_process_scheduler_probe	ladder	1	-	#1050	fixture's own process is never pinned, as kernel_process_spread_timer_progress
 kernel/kernel/process.tkb	kernel_process_exit_reserved	frame	1	-	#1017	a second deferred reap while one is live, on the successor's frame
 kernel/kernel/process.tkb	kernel_process_child_exit	ladder	1	-	#131	a second deferred reap while one is live: a one-entry slot the place discipline could hold
 kernel/kernel/syscall.tkb	exec_args_put	ladder	1	-	#131	the per-CPU exec argv handoff slot is already Full: a one-entry place, a second ChildExec before the first prepare
@@ -79,13 +79,13 @@ kernel/mm/page.tkb	page_extent_at	ladder	1	-	#216	an index past the extent regio
 kernel/mm/page.tkb	page_allocator_init	unmodelled	1	-	#799	the memory map's empty extent region is misaligned: a linker and memory-map layout fact
 kernel/mm/page.tkb	page_allocator_init_frames	unmodelled	4	-	#799	the bootstrap frame tags gone, frames misaligned, too few places, extent slots misaligned: boot layout facts
 kernel/mm/page.tkb	page_allocator_apply_memory	unmodelled	4	handler	#799	extent slots misaligned, frame build failed, empty frames misaligned or too few: boot layout facts; the function returns PageAllocatorMemoryResult::Invalid on one path already
-kernel/platform/qemu/device_map.tkb	qemu_uart_attach_bootstrap	ladder	1	-	#799	the fixed UART window is refused (too small): constant base and size against sizeof, decidable at compile time
-kernel/platform/rpi5/device_map.tkb	rpi5_uart_attach_bootstrap	ladder	1	-	#799	the fixed UART window is refused: constant size against sizeof
-kernel/platform/rpi5/device_map.tkb	rpi5_gem_attach_bootstrap	ladder	1	-	#799	the fixed GEM window is too small: constant size against sizeof
-kernel/platform/rpi5/device_map.tkb	rpi5_pcie_windows_attach	ladder	3	-	#799	the PCIe bridge, rescal and reset windows are too small: constant sizes against sizeof
-kernel/platform/rpi5/device_map.tkb	rpi5_xhci_attach_bootstrap	ladder	4	-	#799	the xHCI capability, operational, runtime and doorbell windows are too small: each size is sizeof of its register block, so TooSmall cannot fire
+kernel/platform/qemu/device_map.tkb	qemu_uart_attach_bootstrap	ladder	1	-	#1049	the fixed UART window is refused (too small): constant base and size against sizeof, decidable at compile time
+kernel/platform/rpi5/device_map.tkb	rpi5_uart_attach_bootstrap	ladder	1	-	#1049	the fixed UART window is refused: constant size against sizeof
+kernel/platform/rpi5/device_map.tkb	rpi5_gem_attach_bootstrap	ladder	1	-	#1049	the fixed GEM window is too small: constant size against sizeof
+kernel/platform/rpi5/device_map.tkb	rpi5_pcie_windows_attach	ladder	3	-	#1049	the PCIe bridge, rescal and reset windows are too small: constant sizes against sizeof
+kernel/platform/rpi5/device_map.tkb	rpi5_xhci_attach_bootstrap	ladder	4	-	#1049	the xHCI capability, operational, runtime and doorbell windows are too small: each size is sizeof of its register block, so TooSmall cannot fire
 kernel/platform/rpi5/device_map.tkb	rpi5_xhci_refuse	unmodelled	1	-	#1031	the controller reported a register block outside the device window: a hardware answer
-kernel/platform/rpi5/device_map.tkb	rpi5_irq_windows_attach_bootstrap	ladder	4	-	#799	the GIC, MIP0 and MSI-X windows are refused: constant sizes against sizeof
+kernel/platform/rpi5/device_map.tkb	rpi5_irq_windows_attach_bootstrap	ladder	4	-	#1049	the GIC, MIP0 and MSI-X windows are refused: constant sizes against sizeof
 kernel/platform/rpi5/usb_xhci_dma.tkb	msc_csw_take	ladder	1	-	#720	owner Place empty on take, as virtio_blk_receive_take
 kernel/platform/rpi5/usb_xhci_dma.tkb	msc_csw_fail_cpu	ladder	1	-	#720	stale CPU-side authority, as virtio_blk_receive_fail_cpu
 kernel/platform/rpi5/usb_xhci_dma.tkb	msc_csw_fail_device	ladder	1	-	#720	stale device-side authority, as virtio_blk_receive_fail_device
