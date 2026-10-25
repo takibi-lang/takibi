@@ -312,7 +312,7 @@ must_use variant Ext2RmdirResult {
             Ext2LinkedDirectory[inode, block]);
 }
 
-must_use variant Ext2RmdirStep { Refused; NotEmpty; Unlinked; }
+must_use variant Ext2RmdirStep { Refused; NotEmpty; Empty(Ext2Inode); }
 
 must_use variant Ext2UnlinkNameResult {
     Invalid;
@@ -1549,6 +1549,12 @@ fn ext2_recover(mount: Ext2Mount) -> Ext2RecoverResult !{unsafe} {
 
 private inline fn ext2_recover_with(slot: borrow Ext2Slot[0],
         mount: Ext2Mount) -> Ext2RecoverResult !{unsafe} {
+    // GitHub issue #1088: a release whose rollback failed finishes it first.
+    let owed: usize = ext2_undo_owed;
+    if (owed > 0) {
+        ext2_undo_owed = ext2_undo_replay(slot, mount, owed);
+        if (ext2_undo_owed != 0) { return Ext2RecoverResult::Failed; }
+    }
     for pending: usize in 0..<EXT2_FENCE_PENDING_MAX {
         if (pending < ext2_fence_pending_count) {
             let block: usize = ext2_fence_pending[pending];
@@ -1568,6 +1574,499 @@ private inline fn ext2_recover_with(slot: borrow Ext2Slot[0],
     ext2_fence_pending_count = 0;
     ext2_fenced = false;
     return Ext2RecoverResult::Recovered;
+}
+
+// GitHub issue #1088: the release operations -- O_TRUNC, the last unlink of
+// a file, rename over a file and rmdir -- are all or nothing under a
+// rejected write. Every write that detaches a name, an inode or a link goes
+// through this undo log, and the blocks are freed last, by one write of the
+// block bitmap. That write is the commit. A rejected write before it puts
+// every logged range back, newest first, with the raw block_write, and the
+// call fails with the disk as it was. After it only the counters, recounted
+// from the bitmaps, and the scrub of the freed blocks remain: a failed
+// recount fences (ext2_recover recounts), and a failed scrub is ignored,
+// because an allocation zeroes a block before handing it out.
+//
+// Current limitations (2026-10-25):
+// - ONE LOG, KERNEL-WIDE, like ext2_fenced: its users are mutators, which
+//   callers serialize under ext2_mutation_lock (the boot fixture runs alone
+//   on core 0).
+// - A FAILED ROLLBACK FENCES AND KEEPS THE LOG. The rows not yet put back
+//   stay in it, ext2_undo_save refuses on a fenced mount so nothing
+//   overwrites them, and ext2_recover finishes the rollback before it
+//   recounts. A reboot in between loses them, as it loses the pending
+//   blocks above.
+// - A ROW HOLDS AT MOST EXT2_UNDO_BYTES, one inode record, and an operation
+//   logs at most EXT2_UNDO_ROWS rows (rmdir's five).
+// - The rejected-write model above: a torn write is not undone.
+const EXT2_UNDO_ROWS: usize = 5;
+const EXT2_UNDO_BYTES: usize = 128;
+
+struct Ext2UndoRow {
+    block: usize;
+    offset: usize;
+    length: usize;
+    bytes: [u8; EXT2_UNDO_BYTES];
+}
+
+private let mut ext2_undo_rows: [Ext2UndoRow; EXT2_UNDO_ROWS];
+// Rows a fenced mount still owes the disk; ext2_recover puts them back.
+private let mut ext2_undo_owed: usize;
+
+// The rows this operation has written. It ends in ext2_undo_commit, or in
+// ext2_undo_abort, which puts them back.
+private linear struct Ext2Undo[unit: usize] {
+    private count: usize;
+}
+
+private fn ext2_undo_begin() -> Ext2Undo[0] {
+    let mut undo: Ext2Undo[0] = { 0 };
+    return undo;
+}
+
+// Keep bytes [offset, offset + length) of a buffer (the file one when
+// `in_file`) as they are now, before the caller changes them for a write of
+// `block` through ext2_undo_write. False when the log is full, the range
+// does not fit a row, or the mount is fenced.
+private fn ext2_undo_save(slot: borrow Ext2Slot[0],
+        undo: borrow mut Ext2Undo[0], block: usize, in_file: bool,
+        offset: usize, length: usize) -> bool {
+    if (ext2_fenced) { return false; }
+    let row: usize = undo.count;
+    if (row >= EXT2_UNDO_ROWS || length > EXT2_UNDO_BYTES ||
+        offset > KERNEL_BLOCK_SIZE - length) {
+        return false;
+    }
+    let mut bytes: Ext2Bytes = ext2_metadata();
+    if (in_file) { bytes = ext2_file(); }
+    ext2_undo_rows[row].block = block;
+    ext2_undo_rows[row].offset = offset;
+    ext2_undo_rows[row].length = length;
+    for i: usize in 0..<EXT2_UNDO_BYTES {
+        if (i < length) {
+            ext2_undo_rows[row].bytes[i] = ext2_byte(slot, bytes, offset + i);
+        }
+    }
+    return true;
+}
+
+// Write `block` from the buffer whose range ext2_undo_save just kept. The
+// row joins the log only when the write landed: a rejected write left the
+// block as it was, so there is nothing of it to put back.
+private fn ext2_undo_write(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+        undo: borrow mut Ext2Undo[0], block: usize, in_file: bool)
+        -> bool !{unsafe} {
+    let row: usize = undo.count;
+    if (row >= EXT2_UNDO_ROWS) { return false; }
+    if (ext2_undo_rows[row].block != block) { return false; }
+    let mut written: bool = false;
+    if (in_file) {
+        match ext2_block_write(mount, block,
+                               ext2_scratch[slot.index].file as []u8) {
+            BlockIoResult::Invalid => { }
+            BlockIoResult::Ok => { written = true; }
+        }
+    } else {
+        match ext2_block_write(mount, block,
+                               ext2_scratch[slot.index].metadata as []u8) {
+            BlockIoResult::Invalid => { }
+            BlockIoResult::Ok => { written = true; }
+        }
+    }
+    if (written) { undo.count = row + 1; }
+    return written;
+}
+
+// Put row `row` back with the raw block_write, a repair a fenced mount still
+// allows. Uses the metadata buffer.
+private fn ext2_undo_put_back(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+        row: usize) -> bool !{unsafe} {
+    if (row >= EXT2_UNDO_ROWS) { return false; }
+    let block: usize = ext2_undo_rows[row].block;
+    let offset: usize = ext2_undo_rows[row].offset;
+    let length: usize = ext2_undo_rows[row].length;
+    if (block == 0 || block >= mount.filesystem_blocks ||
+        length > EXT2_UNDO_BYTES || offset > KERNEL_BLOCK_SIZE - length) {
+        return false;
+    }
+    match block_read(mount.device, block,
+                     ext2_scratch[slot.index].metadata as []u8) {
+        BlockIoResult::Invalid => { return false; }
+        BlockIoResult::Ok => { }
+    }
+    for i: usize in 0..<EXT2_UNDO_BYTES {
+        if (i < length) {
+            ext2_set_byte(slot, ext2_metadata(), offset + i,
+                          ext2_undo_rows[row].bytes[i]);
+        }
+    }
+    match block_write(mount.device, block,
+                      ext2_scratch[slot.index].metadata as []u8) {
+        BlockIoResult::Invalid => { return false; }
+        BlockIoResult::Ok => { return true; }
+    }
+}
+
+// Put the first `rows` rows back, newest first, and answer how many are
+// still owed: zero when all landed, otherwise the rows up to and including
+// the first that did not. Putting a row back twice writes the same bytes,
+// so replaying rows already put back is harmless.
+private fn ext2_undo_replay(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+        rows: usize) -> usize !{unsafe} {
+    let mut remaining: usize = rows;
+    for step: usize in 0..<EXT2_UNDO_ROWS {
+        let current: usize = remaining;
+        if (current > 0 && current <= EXT2_UNDO_ROWS) {
+            let row: usize = current - 1;
+            if (ext2_undo_put_back(slot, mount, row) == false) {
+                return current;
+            }
+            remaining = row;
+        }
+    }
+    return remaining;
+}
+
+private fn ext2_undo_commit(undo: sink Ext2Undo[0]) {}
+
+// The operation failed: put its rows back. False when a row could not be,
+// in which case the mount is fenced and owes the rest (see above).
+private fn ext2_undo_abort(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+        undo: sink Ext2Undo[0]) -> bool !{unsafe} {
+    let owed: usize = ext2_undo_replay(slot, mount, undo.count);
+    if (owed == 0) { return true; }
+    ext2_undo_owed = owed;
+    ext2_fenced = true;
+    return false;
+}
+
+// What a release (#1088) ends in. RolledBack: the disk is as it was.
+// Fenced: the rollback could not finish, and ext2_recover will. Committed:
+// the operation happened (the mount is fenced too when the recount failed).
+must_use variant Ext2ReleaseResult { RolledBack; Fenced; Committed; }
+
+private fn ext2_release_abort(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+        undo: sink Ext2Undo[0]) -> Ext2ReleaseResult !{unsafe} {
+    if (ext2_undo_abort(slot, mount, undo)) {
+        return Ext2ReleaseResult::RolledBack;
+    }
+    return Ext2ReleaseResult::Fenced;
+}
+
+// The blocks a file or directory names, read from its inode record before
+// anything is written: i_block and how many blocks its size covers.
+struct Ext2BlockMap {
+    direct: [usize; EXT2_MAX_DIRECT_BLOCKS];
+    single: usize;
+    double: usize;
+    blocks: usize;
+}
+
+must_use variant Ext2BlockMapResult { Invalid; Map(Ext2BlockMap); }
+
+private fn ext2_block_map_read(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+        file: Ext2Inode) -> Ext2BlockMapResult {
+    if (file.size > ext2_max_regular_file_size()) {
+        return Ext2BlockMapResult::Invalid;
+    }
+    match block_read(mount.device, file.table_block,
+                     ext2_scratch[slot.index].metadata as []u8) {
+        BlockIoResult::Invalid => { return Ext2BlockMapResult::Invalid; }
+        BlockIoResult::Ok => { }
+    }
+    let mut inode_bytes: Ext2Bytes =
+        ext2_at(ext2_metadata(), file.table_offset);
+    let mut map: Ext2BlockMap;
+    map.single = ext2_u32(slot, inode_bytes, 88) as usize;
+    map.double = ext2_u32(slot, inode_bytes, 92) as usize;
+    map.blocks = (file.size + KERNEL_BLOCK_SIZE - 1) / KERNEL_BLOCK_SIZE;
+    for index: usize in 0..<EXT2_MAX_DIRECT_BLOCKS {
+        map.direct[index] =
+            ext2_u32(slot, inode_bytes, 40 + index * 4) as usize;
+    }
+    return Ext2BlockMapResult::Map(map);
+}
+
+// What a walk of a map does with each block. Check and Clear work on the
+// block bitmap held in the file buffer: both ask that the block's bit be
+// set, and Clear clears it. Scrub zeroes the block on the device, best
+// effort, after the commit.
+variant Ext2WalkMode { Check; Clear; Scrub; }
+
+private fn ext2_walk_visit(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+        mode: Ext2WalkMode, block: usize) -> bool !{unsafe} {
+    if (block < 2 || block >= mount.filesystem_blocks) { return false; }
+    let index: usize = block - 1;
+    let byte_index: usize = index / 8;
+    let mask: u8 = (1 << ((index % 8) as u8)) as u8;
+    let value: u8 = ext2_byte(slot, ext2_file(), byte_index);
+    match mode {
+        Ext2WalkMode::Scrub => {
+            for i: usize in 0..<KERNEL_BLOCK_SIZE {
+                ext2_scratch[slot.index].file[i] = 0;
+            }
+            match ext2_block_write(mount, block,
+                                   ext2_scratch[slot.index].file as []u8) {
+                BlockIoResult::Invalid => { }
+                BlockIoResult::Ok => { }
+            }
+            return true;
+        }
+        Ext2WalkMode::Check => { return (value & mask) != 0; }
+        Ext2WalkMode::Clear => {
+            if ((value & mask) == 0) { return false; }
+            return ext2_set_byte(slot, ext2_file(), byte_index,
+                                 value & (mask ^ 0xFF));
+        }
+    }
+}
+
+// Entry `index` of pointer block `block`, read afresh into the metadata
+// buffer: a scrub in between overwrites the file buffer, and the visits of
+// Check and Clear read the file buffer only.
+private fn ext2_walk_entry(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+        block: usize, index: usize) -> Ext2CountResult {
+    match block_read(mount.device, block,
+                     ext2_scratch[slot.index].metadata as []u8) {
+        BlockIoResult::Invalid => { return Ext2CountResult::Invalid; }
+        BlockIoResult::Ok => { }
+    }
+    return Ext2CountResult::Counted(
+        ext2_u32(slot, ext2_metadata(), index * 4) as usize);
+}
+
+// The data blocks of one pointer block, `count` of them at most, then the
+// pointer block itself, so a scrub reads every entry before it zeroes them.
+private fn ext2_walk_pointer_block(slot: borrow Ext2Slot[0],
+        mount: Ext2Mount, mode: Ext2WalkMode, block: usize, count: usize)
+        -> bool !{unsafe} {
+    if (block < 2 || block >= mount.filesystem_blocks) { return false; }
+    for index: usize in 0..<ext2_pointer_count() {
+        if (index < count) {
+            match ext2_walk_entry(slot, mount, block, index) {
+                Ext2CountResult::Invalid => { return false; }
+                Ext2CountResult::Counted(data) => {
+                    // A hole (pointer 0) has nothing to visit.
+                    if (data != 0 &&
+                        ext2_walk_visit(slot, mount, mode, data) == false) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    return ext2_walk_visit(slot, mount, mode, block);
+}
+
+// Every block the map names -- data blocks, the singly-indirect block, and
+// the doubly-indirect block with its second-level blocks. False on the
+// first block that fails its visit or pointer block that cannot be read.
+private fn ext2_walk_map(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+        map: Ext2BlockMap, mode: Ext2WalkMode) -> bool !{unsafe} {
+    let pointers: usize = ext2_pointer_count();
+    let blocks: usize = map.blocks;
+    for index: usize in 0..<EXT2_MAX_DIRECT_BLOCKS {
+        let block: usize = map.direct[index];
+        if (index < blocks && block != 0 &&
+            ext2_walk_visit(slot, mount, mode, block) == false) {
+            return false;
+        }
+    }
+    if (blocks > EXT2_MAX_DIRECT_BLOCKS && map.single != 0 &&
+        ext2_walk_pointer_block(slot, mount, mode, map.single,
+                                blocks - EXT2_MAX_DIRECT_BLOCKS) == false) {
+        return false;
+    }
+    if (blocks > EXT2_MAX_DIRECT_BLOCKS + pointers && map.double != 0) {
+        let remaining: usize = blocks - EXT2_MAX_DIRECT_BLOCKS - pointers;
+        for outer: usize in 0..<ext2_pointer_count() {
+            if (outer * pointers < remaining) {
+                match ext2_walk_entry(slot, mount, map.double, outer) {
+                    Ext2CountResult::Invalid => { return false; }
+                    Ext2CountResult::Counted(second) => {
+                        if (second != 0 &&
+                            ext2_walk_pointer_block(slot, mount, mode, second,
+                                    remaining - outer * pointers) == false) {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        if (ext2_walk_visit(slot, mount, mode, map.double) == false) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The commit of a release: every block of `map` is freed by one write of the
+// block bitmap, then the counters are recounted from the bitmaps and the
+// freed blocks scrubbed. A failed read, a block whose bit is already clear,
+// or a rejected bitmap write rolls the log back instead.
+private fn ext2_release_commit(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+        undo: sink Ext2Undo[0], map: Ext2BlockMap)
+        -> Ext2ReleaseResult !{unsafe} {
+    let mut cleared: bool = false;
+    match block_read(mount.device, mount.block_bitmap_block,
+                     ext2_scratch[slot.index].file as []u8) {
+        BlockIoResult::Invalid => { }
+        BlockIoResult::Ok => {
+            if (ext2_walk_map(slot, mount, map, Ext2WalkMode::Clear)) {
+                match ext2_block_write(mount, mount.block_bitmap_block,
+                                       ext2_scratch[slot.index].file as []u8) {
+                    BlockIoResult::Invalid => { }
+                    BlockIoResult::Ok => { cleared = true; }
+                }
+            }
+        }
+    }
+    if (cleared == false) { return ext2_release_abort(slot, mount, undo); }
+    ext2_undo_commit(undo);
+    if (ext2_recount(slot, mount) == false) { ext2_fenced = true; }
+    if (ext2_walk_map(slot, mount, map, Ext2WalkMode::Scrub)) { }
+    return Ext2ReleaseResult::Committed;
+}
+
+// The blocks of `map` all marked allocated: a release checks this before its
+// first write, so a corrupt map is refused with nothing written.
+private fn ext2_release_check(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+        map: Ext2BlockMap) -> bool !{unsafe} {
+    match block_read(mount.device, mount.block_bitmap_block,
+                     ext2_scratch[slot.index].file as []u8) {
+        BlockIoResult::Invalid => { return false; }
+        BlockIoResult::Ok => { }
+    }
+    return ext2_walk_map(slot, mount, map, Ext2WalkMode::Check);
+}
+
+// Logged: the whole inode record zeroed, as ext2_release_inode does.
+private fn ext2_inode_clear_logged(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+        undo: borrow mut Ext2Undo[0], file: Ext2Inode) -> bool !{unsafe} {
+    match block_read(mount.device, file.table_block,
+                     ext2_scratch[slot.index].metadata as []u8) {
+        BlockIoResult::Invalid => { return false; }
+        BlockIoResult::Ok => { }
+    }
+    if (ext2_undo_save(slot, undo, file.table_block, false, file.table_offset,
+                       128) == false) {
+        return false;
+    }
+    let mut inode_bytes: Ext2Bytes =
+        ext2_at(ext2_metadata(), file.table_offset);
+    for i: usize in 0..<128 { ext2_set_byte(slot, inode_bytes, i, 0); }
+    return ext2_undo_write(slot, mount, undo, file.table_block, false);
+}
+
+// Logged: O_TRUNC's inode -- size 0, no sectors, no block pointers.
+private fn ext2_inode_truncate_logged(slot: borrow Ext2Slot[0],
+        mount: Ext2Mount, undo: borrow mut Ext2Undo[0], file: Ext2Inode)
+        -> bool !{unsafe} {
+    match block_read(mount.device, file.table_block,
+                     ext2_scratch[slot.index].metadata as []u8) {
+        BlockIoResult::Invalid => { return false; }
+        BlockIoResult::Ok => { }
+    }
+    if (ext2_undo_save(slot, undo, file.table_block, false, file.table_offset,
+                       128) == false) {
+        return false;
+    }
+    let mut inode_bytes: Ext2Bytes =
+        ext2_at(ext2_metadata(), file.table_offset);
+    if (ext2_put_u32(slot, inode_bytes, 4, 0) == false ||
+        ext2_put_u32(slot, inode_bytes, 28, 0) == false) {
+        return false;
+    }
+    // i_block[0..15]: twelve direct, single, double, triple.
+    for index: usize in 0..<15 {
+        if (ext2_put_u32(slot, inode_bytes, 40 + index * 4, 0) == false) {
+            return false;
+        }
+    }
+    return ext2_undo_write(slot, mount, undo, file.table_block, false);
+}
+
+// Logged: an inode's link count.
+private fn ext2_inode_links_logged(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+        undo: borrow mut Ext2Undo[0], file: Ext2Inode, links: usize)
+        -> bool !{unsafe} {
+    if (links > 0xFFFF) { return false; }
+    match block_read(mount.device, file.table_block,
+                     ext2_scratch[slot.index].metadata as []u8) {
+        BlockIoResult::Invalid => { return false; }
+        BlockIoResult::Ok => { }
+    }
+    if (file.table_offset > KERNEL_BLOCK_SIZE - 28 ||
+        ext2_undo_save(slot, undo, file.table_block, false,
+                       file.table_offset + 26, 2) == false ||
+        ext2_put_u16(slot, ext2_at(ext2_metadata(), file.table_offset), 26,
+                     links as u16) == false) {
+        return false;
+    }
+    return ext2_undo_write(slot, mount, undo, file.table_block, false);
+}
+
+// Logged: an inode's bitmap bit cleared. The counters move at the recount.
+private fn ext2_inode_bitmap_clear_logged(slot: borrow Ext2Slot[0],
+        mount: Ext2Mount, undo: borrow mut Ext2Undo[0], inode_number: usize)
+        -> bool !{unsafe} {
+    if (inode_number < 2 || inode_number > mount.inode_count) { return false; }
+    match block_read(mount.device, mount.inode_bitmap_block,
+                     ext2_scratch[slot.index].metadata as []u8) {
+        BlockIoResult::Invalid => { return false; }
+        BlockIoResult::Ok => { }
+    }
+    let index: usize = inode_number - 1;
+    let byte_index: usize = index / 8;
+    let mask: u8 = (1 << ((index % 8) as u8)) as u8;
+    let value: u8 = ext2_byte(slot, ext2_metadata(), byte_index);
+    if ((value & mask) == 0 ||
+        ext2_undo_save(slot, undo, mount.inode_bitmap_block, false,
+                       byte_index, 1) == false ||
+        ext2_set_byte(slot, ext2_metadata(), byte_index,
+                      value & (mask ^ 0xFF)) == false) {
+        return false;
+    }
+    return ext2_undo_write(slot, mount, undo, mount.inode_bitmap_block, false);
+}
+
+// Logged: the group's used-directories count, down by one.
+private fn ext2_used_directories_logged(slot: borrow Ext2Slot[0],
+        mount: Ext2Mount, undo: borrow mut Ext2Undo[0]) -> bool !{unsafe} {
+    match block_read(mount.device, 2, ext2_scratch[slot.index].file as []u8) {
+        BlockIoResult::Invalid => { return false; }
+        BlockIoResult::Ok => { }
+    }
+    let used: usize = ext2_u16(slot, ext2_file(), 16) as usize;
+    if (used == 0 ||
+        ext2_undo_save(slot, undo, 2, true, 16, 2) == false ||
+        ext2_put_u16(slot, ext2_file(), 16, (used - 1) as u16) == false) {
+        return false;
+    }
+    return ext2_undo_write(slot, mount, undo, 2, true);
+}
+
+// Free an inode none of whose names is left once the log commits: its
+// record is zeroed and its bit cleared, logged, and its blocks are freed by
+// the commit. The caller has logged the removal of its last name.
+private fn ext2_release_file_logged(slot: borrow Ext2Slot[0],
+        mount: Ext2Mount, undo: sink Ext2Undo[0], file: Ext2Inode,
+        inode_number: usize) -> Ext2ReleaseResult !{unsafe} {
+    let mut log: Ext2Undo[0] = undo;
+    match ext2_block_map_read(slot, mount, file) {
+        Ext2BlockMapResult::Invalid => {
+            return ext2_release_abort(slot, mount, log);
+        }
+        Ext2BlockMapResult::Map(map) => {
+            if (ext2_release_check(slot, mount, map) == false ||
+                ext2_inode_clear_logged(slot, mount, log, file) == false ||
+                ext2_inode_bitmap_clear_logged(slot, mount, log,
+                        inode_number) == false) {
+                return ext2_release_abort(slot, mount, log);
+            }
+            return ext2_release_commit(slot, mount, log, map);
+        }
+    }
 }
 
 fn ext2_bitmap_claim(slot: borrow Ext2Slot[0], mount: Ext2Mount,
@@ -2926,6 +3425,22 @@ fn ext2_directory_remove(slot: borrow Ext2Slot[0], mount: Ext2Mount,
         directory_inode: usize,
                          inode_number: usize,
                          name: borrow []const u8) -> Ext2DirectoryResult !{unsafe} {
+    let mut undo: Ext2Undo[0] = ext2_undo_begin();
+    let result: Ext2DirectoryResult = ext2_directory_rewrite_logged(slot, mount,
+            undo, directory_inode, inode_number, name, 0);
+    ext2_undo_commit(undo);
+    return result;
+}
+
+// The entry `name` naming `inode_number` in the directory, through the undo
+// log: removed when `replacement` is 0, otherwise made to name `replacement`
+// in place, which is rename's replacement of an existing target (GitHub
+// issue #1088) -- one write, so the target name never goes missing.
+private fn ext2_directory_rewrite_logged(slot: borrow Ext2Slot[0],
+        mount: Ext2Mount, undo: borrow mut Ext2Undo[0],
+        directory_inode: usize, inode_number: usize,
+        name: borrow []const u8, replacement: usize)
+        -> Ext2DirectoryResult !{unsafe} {
     if (name.len == 0 || name.len > 255 || inode_number == 0 ||
         directory_inode == 0) {
         return Ext2DirectoryResult::Invalid;
@@ -2996,38 +3511,43 @@ fn ext2_directory_remove(slot: borrow Ext2Slot[0], mount: Ext2Mount,
                         // getdents64 already skip and ext2_directory_add
                         // reuses. That is what Linux's ext2 does. Block 0
                         // opens with `.`, which is never removed by name.
-                        if (has_previous == false) {
-                            if (index == 0 ||
-                                ext2_put_u32(slot, entry, 0, 0) == false) {
+                        // A replacement rewrites the inode field the same
+                        // way, and the type byte to 0, as
+                        // ext2_directory_add writes it.
+                        if (replacement != 0 || has_previous == false) {
+                            if ((replacement == 0 && index == 0) ||
+                                ext2_undo_save(slot, undo, block, true,
+                                               entry_start, 8) == false ||
+                                ext2_put_u32(slot, entry, 0,
+                                             replacement as u32) == false) {
                                 return Ext2DirectoryResult::Invalid;
                             }
-                            match ext2_block_write(mount, block,
-                                              ext2_scratch[slot.index].file as []u8) {
-                                BlockIoResult::Invalid => {
-                                    return Ext2DirectoryResult::Invalid;
-                                }
-                                BlockIoResult::Ok => {
-                                    return Ext2DirectoryResult::Updated;
-                                }
+                            if (replacement != 0) {
+                                ext2_set_byte(slot, entry, 7, 0);
                             }
+                            if (ext2_undo_write(slot, mount, undo, block,
+                                                true)) {
+                                return Ext2DirectoryResult::Updated;
+                            }
+                            return Ext2DirectoryResult::Invalid;
                         }
-                        let mut previous_entry: Ext2Bytes = ext2_at(base, previous);
+                        let previous_start: usize = previous;
+                        let mut previous_entry: Ext2Bytes =
+                            ext2_at(base, previous_start);
                         let previous_length: usize =
                             ext2_u16(slot, previous_entry, 4) as usize;
                         if (previous_length > 0xFFFF - record_length ||
+                            previous_start > KERNEL_BLOCK_SIZE - 8 ||
+                            ext2_undo_save(slot, undo, block, true,
+                                           previous_start + 4, 2) == false ||
                             ext2_put_u16(slot, previous_entry, 4,
                                          (previous_length + record_length) as u16) == false) {
                             return Ext2DirectoryResult::Invalid;
                         }
-                        match ext2_block_write(mount, block,
-                                          ext2_scratch[slot.index].file as []u8) {
-                            BlockIoResult::Invalid => {
-                                return Ext2DirectoryResult::Invalid;
-                            }
-                            BlockIoResult::Ok => {
-                                return Ext2DirectoryResult::Updated;
-                            }
+                        if (ext2_undo_write(slot, mount, undo, block, true)) {
+                            return Ext2DirectoryResult::Updated;
                         }
+                        return Ext2DirectoryResult::Invalid;
                     }
                     previous = cursor;
                     has_previous = true;
@@ -3375,32 +3895,33 @@ private fn ext2_unlink_file_in_with(slot: borrow Ext2Slot[0], mount: Ext2Mount,
         directory_inode: usize,
                        linked: sink Ext2LinkedFile[inode, block],
                        name: []const u8) -> Ext2UnlinkResult {
+    // GitHub issue #1088: the same all-or-nothing release as unlink(2),
+    // for the name this owner's create made.
     let inode_number: usize = linked.inode_number;
-    let inode_owner = ext2_inode_owner_new(
-        linked.inode_bitmap_index, inode_number, linked.inode_number);
-    let block_owner = ext2_block_owner_new(
-        linked.block_bitmap_index, linked.block_number, linked.block_number);
-    let mut directory_ok: bool = false;
-    match ext2_directory_remove(slot, mount, directory_inode, inode_number,
-            name) {
-        Ext2DirectoryResult::Invalid => { }
-        Ext2DirectoryResult::Updated => { directory_ok = true; }
+    ext2_linked_file_spent(linked);
+    match ext2_lookup_directory_with(slot, mount, directory_inode, name) {
+        Ext2LookupResult::Invalid => { return Ext2UnlinkResult::Invalid; }
+        Ext2LookupResult::NotFound => { return Ext2UnlinkResult::Invalid; }
+        Ext2LookupResult::Found(found) => {
+            if (found != inode_number) { return Ext2UnlinkResult::Invalid; }
+        }
     }
-    let mut inode_ok: bool = false;
-    match ext2_release_inode(slot, mount, inode_owner) {
-        Ext2OwnerReleaseResult::Invalid => { }
-        Ext2OwnerReleaseResult::Released => { inode_ok = true; }
+    match ext2_unlink_name_with(slot, mount, directory_inode, name) {
+        Ext2UnlinkNameResult::Unlinked => { return Ext2UnlinkResult::Unlinked; }
+        Ext2UnlinkNameResult::Invalid => { return Ext2UnlinkResult::Invalid; }
+        Ext2UnlinkNameResult::NotFound => { return Ext2UnlinkResult::Invalid; }
+        Ext2UnlinkNameResult::IsDirectory => {
+            return Ext2UnlinkResult::Invalid;
+        }
+        Ext2UnlinkNameResult::Unsupported => {
+            return Ext2UnlinkResult::Invalid;
+        }
     }
-    let mut block_ok: bool = false;
-    match ext2_release_block(slot, mount, block_owner) {
-        Ext2OwnerReleaseResult::Invalid => { }
-        Ext2OwnerReleaseResult::Released => { block_ok = true; }
-    }
-    if (directory_ok && inode_ok && block_ok) {
-        return Ext2UnlinkResult::Unlinked;
-    }
-    return Ext2UnlinkResult::Invalid;
 }
+
+// The file's owner ends here: the unlink above, through the log, decides
+// whether its inode and block go.
+private fn ext2_linked_file_spent(linked: sink Ext2LinkedFile[inode, block]) {}
 
 // GitHub issue #537: nested directories.
 //
@@ -3657,15 +4178,10 @@ private inline fn ext2_make_directory_in_with(slot: borrow Ext2Slot[0],
     }
 }
 
-// Everything short of releasing: the directory must be the one-block
-// directory this owner made, it must hold nothing but `.` and `..`, and its
-// entry must come out of the parent. Nothing is written before the last of
-// those, so Refused and NotEmpty leave the tree exactly as it was.
-private fn ext2_rmdir_unlink_entry(slot: borrow Ext2Slot[0], mount: Ext2Mount,
-        parent_inode: usize,
-                                   inode_number: usize, block_number: usize,
-                                   name: borrow []const u8)
-        -> Ext2RmdirStep !{unsafe} {
+// Everything short of writing: the directory must be the one-block
+// directory this owner made and must hold nothing but `.` and `..`.
+private fn ext2_rmdir_check(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+        inode_number: usize, block_number: usize) -> Ext2RmdirStep !{unsafe} {
     match ext2_read_inode(slot, mount, inode_number) {
         Ext2InodeResult::Invalid => { return Ext2RmdirStep::Refused; }
         Ext2InodeResult::Inode(directory) => {
@@ -3674,48 +4190,65 @@ private fn ext2_rmdir_unlink_entry(slot: borrow Ext2Slot[0], mount: Ext2Mount,
                 directory.direct_block0 != block_number) {
                 return Ext2RmdirStep::Refused;
             }
+            match ext2_directory_live_entries(slot, mount, inode_number) {
+                Ext2CountResult::Invalid => { return Ext2RmdirStep::Refused; }
+                Ext2CountResult::Counted(live) => {
+                    if (live != 2) { return Ext2RmdirStep::NotEmpty; }
+                }
+            }
+            return Ext2RmdirStep::Empty(directory);
         }
-    }
-    match ext2_directory_live_entries(slot, mount, inode_number) {
-        Ext2CountResult::Invalid => { return Ext2RmdirStep::Refused; }
-        Ext2CountResult::Counted(live) => {
-            if (live != 2) { return Ext2RmdirStep::NotEmpty; }
-        }
-    }
-    match ext2_directory_remove(slot, mount, parent_inode, inode_number, name) {
-        Ext2DirectoryResult::Invalid => { return Ext2RmdirStep::Refused; }
-        Ext2DirectoryResult::Updated => { return Ext2RmdirStep::Unlinked; }
     }
 }
 
-// The directory is unreachable once its entry is gone, so from here on
-// releasing is the only way forward, and every step is attempted even when
-// an earlier one failed.
+// The directory's owner ends here: from now on the tree, through the log,
+// decides whether it stays.
+private fn ext2_linked_directory_spent(
+        linked: sink Ext2LinkedDirectory[inode, block]) {}
+
+// GitHub issue #1088: the entry, the parent's link, the group's
+// used-directories count, the inode record and its bit, all logged, then the
+// block freed by the commit. A rejected write puts every one back.
 private fn ext2_rmdir_release(slot: borrow Ext2Slot[0], mount: Ext2Mount,
-        parent_inode: usize,
-                              linked: sink Ext2LinkedDirectory[inode, block])
-        -> Ext2RmdirResult {
-    let inode_owner = ext2_inode_owner_new(
-        linked.inode_bitmap_index, linked.inode_number, linked.inode_number);
-    let block_owner = ext2_block_owner_new(
-        linked.block_bitmap_index, linked.block_number, linked.block_number);
-    let mut links_ok: bool = false;
-    match ext2_adjust_parent_links(slot, mount, parent_inode, false) {
-        Ext2DirectoryResult::Invalid => { }
-        Ext2DirectoryResult::Updated => { links_ok = true; }
+        parent_inode: usize, linked: sink Ext2LinkedDirectory[inode, block],
+        directory: Ext2Inode, name: borrow []const u8)
+        -> Ext2RmdirResult !{unsafe} {
+    let inode_number: usize = linked.inode_number;
+    ext2_linked_directory_spent(linked);
+    let mut undo: Ext2Undo[0] = ext2_undo_begin();
+    let mut unlinked: bool = false;
+    match ext2_read_inode(slot, mount, parent_inode) {
+        Ext2InodeResult::Invalid => { }
+        Ext2InodeResult::Inode(parent) => {
+            // A directory's own `.` and its entry in its parent mean it never
+            // has fewer than two links.
+            if ((parent.mode & 0xF000) == 0x4000 && parent.links > 2) {
+                match ext2_directory_rewrite_logged(slot, mount, undo,
+                        parent_inode, inode_number, name, 0) {
+                    Ext2DirectoryResult::Invalid => { }
+                    Ext2DirectoryResult::Updated => {
+                        unlinked = ext2_inode_links_logged(slot, mount, undo,
+                                parent, parent.links - 1) &&
+                            ext2_used_directories_logged(slot, mount, undo);
+                    }
+                }
+            }
+        }
     }
-    let mut inode_ok: bool = false;
-    match ext2_release_inode(slot, mount, inode_owner) {
-        Ext2OwnerReleaseResult::Invalid => { }
-        Ext2OwnerReleaseResult::Released => { inode_ok = true; }
+    if (unlinked == false) {
+        match ext2_release_abort(slot, mount, undo) {
+            Ext2ReleaseResult::RolledBack => { }
+            Ext2ReleaseResult::Fenced => { }
+            Ext2ReleaseResult::Committed => { }
+        }
+        return Ext2RmdirResult::Invalid;
     }
-    let mut block_ok: bool = false;
-    match ext2_release_block(slot, mount, block_owner) {
-        Ext2OwnerReleaseResult::Invalid => { }
-        Ext2OwnerReleaseResult::Released => { block_ok = true; }
+    match ext2_release_file_logged(slot, mount, undo, directory,
+                                   inode_number) {
+        Ext2ReleaseResult::Committed => { return Ext2RmdirResult::Removed; }
+        Ext2ReleaseResult::RolledBack => { return Ext2RmdirResult::Invalid; }
+        Ext2ReleaseResult::Fenced => { return Ext2RmdirResult::Invalid; }
     }
-    if (links_ok && inode_ok && block_ok) { return Ext2RmdirResult::Removed; }
-    return Ext2RmdirResult::Invalid;
 }
 
 private fn ext2_linked_directory_mint(inode_bitmap_index: usize,
@@ -3846,111 +4379,63 @@ private fn ext2_unlink_name_with(slot: borrow Ext2Slot[0], mount: Ext2Mount,
             // A file that keeps another link keeps its blocks, so its size
             // is no reason to refuse -- removing a BusyBox applet name is a
             // 1 MiB file losing one of its links.
-            if (file.links > 1) {
-                match ext2_directory_remove(slot, mount, parent_inode,
-                        inode_number,
-                                            name) {
-                    Ext2DirectoryResult::Invalid => {
-                        return Ext2UnlinkNameResult::Invalid;
-                    }
-                    Ext2DirectoryResult::Updated => { }
-                }
-                match ext2_write_inode_links(slot, mount, file,
-                        file.links - 1) {
-                    Ext2DirectoryResult::Invalid => {
-                        return Ext2UnlinkNameResult::Invalid;
-                    }
-                    Ext2DirectoryResult::Updated => {
-                        return Ext2UnlinkNameResult::Unlinked;
-                    }
-                }
-            }
-            if (file.size > ext2_max_regular_file_size()) {
+            if (file.links == 1 && file.size > ext2_max_regular_file_size()) {
                 return Ext2UnlinkNameResult::Unsupported;
             }
-            // GitHub issue #1020: a last link reaching an indirect block
-            // releases through #1016's O_TRUNC walk, which zeroes the
-            // inode's pointers first and then frees every data and pointer
-            // block, then the inode goes. The entry goes first, as below.
-            if (file.size > ext2_direct_file_size()) {
-                match ext2_directory_remove(slot, mount, parent_inode,
-                        inode_number, name) {
-                    Ext2DirectoryResult::Invalid => {
-                        return Ext2UnlinkNameResult::Invalid;
-                    }
-                    Ext2DirectoryResult::Updated => { }
-                }
-                let mut freed: bool = true;
-                match ext2_truncate_regular_file_with(slot, mount,
-                        inode_number) {
-                    Ext2TruncateResult::Invalid => { freed = false; }
-                    Ext2TruncateResult::Truncated => { }
-                }
-                match ext2_release_inode(slot,
-                        mount, ext2_inode_owner_new(inode_number - 1,
-                                inode_number, inode_number)) {
-                    Ext2OwnerReleaseResult::Invalid => { freed = false; }
-                    Ext2OwnerReleaseResult::Released => { }
-                }
-                if (freed) { return Ext2UnlinkNameResult::Unlinked; }
-                return Ext2UnlinkNameResult::Invalid;
-            }
-            let blocks: usize =
-                (file.size + KERNEL_BLOCK_SIZE - 1) / KERNEL_BLOCK_SIZE;
-            let mut pointers: [usize; EXT2_MAX_DIRECT_BLOCKS];
-            for index: usize in 0..<EXT2_MAX_DIRECT_BLOCKS {
-                pointers[index] = 0;
-                if (index < blocks) {
-                    let block: usize =
-                        ext2_inode_block_pointer(slot, mount, file, index);
-                    if (block < 2 || block >= mount.filesystem_blocks) {
-                        return Ext2UnlinkNameResult::Invalid;
-                    }
-                    pointers[index] = block;
-                }
-            }
-            match ext2_directory_remove(slot, mount, parent_inode, inode_number,
-                                        name) {
+            // GitHub issue #1088: the entry goes first, then the inode or
+            // its link, all logged, so a rejected write puts the name back.
+            let mut undo: Ext2Undo[0] = ext2_undo_begin();
+            match ext2_directory_rewrite_logged(slot, mount, undo,
+                    parent_inode, inode_number, name, 0) {
                 Ext2DirectoryResult::Invalid => {
+                    match ext2_release_abort(slot, mount, undo) {
+                        Ext2ReleaseResult::RolledBack => { }
+                        Ext2ReleaseResult::Fenced => { }
+                        Ext2ReleaseResult::Committed => { }
+                    }
                     return Ext2UnlinkNameResult::Invalid;
                 }
                 Ext2DirectoryResult::Updated => { }
             }
-            // The entry is gone and it was the last one, so releasing is the
-            // only way forward: every step is attempted.
-            let mut released: bool = true;
-            for index: usize in 0..<EXT2_MAX_DIRECT_BLOCKS {
-                if (index < blocks) {
-                    let block: usize = pointers[index];
-                    match ext2_release_block(slot, 
-                            mount, ext2_block_owner_new(block - 1, block,
-                                                        block)) {
-                        Ext2OwnerReleaseResult::Invalid => { released = false; }
-                        Ext2OwnerReleaseResult::Released => { }
-                    }
-                }
-            }
-            match ext2_release_inode(slot, 
-                    mount, ext2_inode_owner_new(inode_number - 1, inode_number,
-                                                inode_number)) {
-                Ext2OwnerReleaseResult::Invalid => { released = false; }
-                Ext2OwnerReleaseResult::Released => { }
-            }
-            if (released) { return Ext2UnlinkNameResult::Unlinked; }
-            return Ext2UnlinkNameResult::Invalid;
+            return ext2_unlink_release(slot, mount, undo, file, inode_number);
         }
     }
 }
 
+// The rest of an unlink whose entry the log holds removed: one link fewer,
+// or, for the last, the file released (GitHub issues #1020, #1088).
+private fn ext2_unlink_release(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+        undo: sink Ext2Undo[0], file: Ext2Inode, inode_number: usize)
+        -> Ext2UnlinkNameResult !{unsafe} {
+    let mut log: Ext2Undo[0] = undo;
+    if (file.links > 1) {
+        if (ext2_inode_links_logged(slot, mount, log, file,
+                                    file.links - 1) == false) {
+            match ext2_release_abort(slot, mount, log) {
+                Ext2ReleaseResult::RolledBack => { }
+                Ext2ReleaseResult::Fenced => { }
+                Ext2ReleaseResult::Committed => { }
+            }
+            return Ext2UnlinkNameResult::Invalid;
+        }
+        ext2_undo_commit(log);
+        return Ext2UnlinkNameResult::Unlinked;
+    }
+    match ext2_release_file_logged(slot, mount, log, file, inode_number) {
+        Ext2ReleaseResult::Committed => { return Ext2UnlinkNameResult::Unlinked; }
+        Ext2ReleaseResult::RolledBack => { return Ext2UnlinkNameResult::Invalid; }
+        Ext2ReleaseResult::Fenced => { return Ext2UnlinkNameResult::Invalid; }
+    }
+}
+
 // GitHub issue #1016: openat's O_TRUNC. A regular file loses its data:
-// size 0, no block pointers, no sectors, then every block it named goes
+// size 0, no block pointers, no sectors, and every block it named goes
 // back to the bitmap -- data blocks, the singly-indirect block, and the
-// doubly-indirect block with its second-level blocks. The inode is written
-// first, so a failure part way leaks blocks (e2fsck reclaims them) rather
-// than leaving the inode naming a freed block; the pointer blocks are read
-// after that write, which is safe because nothing else mutates under the
-// guard the caller holds. A hole (pointer 0) has nothing to release. A
-// file already empty is Truncated with nothing written.
+// doubly-indirect block with its second-level blocks. GitHub issue #1088:
+// the inode write is logged and the blocks are freed after it by the one
+// bitmap write that commits, so a rejected write leaves the file as it was.
+// A hole (pointer 0) has nothing to release. A file already empty is
+// Truncated with nothing written.
 must_use variant Ext2TruncateResult { Invalid; Truncated; }
 
 fn ext2_truncate_regular_file(mount: Ext2Mount, inode_number: usize)
@@ -3962,51 +4447,6 @@ fn ext2_truncate_regular_file(mount: Ext2Mount, inode_number: usize)
     return result;
 }
 
-// Entry `index` of pointer block `block`, or 0 when it cannot be read. Read
-// afresh each time: a release in between overwrites both scratch buffers.
-private fn ext2_pointer_entry(slot: borrow Ext2Slot[0], mount: Ext2Mount,
-        block: usize, index: usize) -> usize {
-    match block_read(mount.device, block,
-                     ext2_scratch[slot.index].metadata as []u8) {
-        BlockIoResult::Invalid => { return 0; }
-        BlockIoResult::Ok => { }
-    }
-    return ext2_u32(slot, ext2_metadata(), index * 4) as usize;
-}
-
-// Release one block a truncated inode named. False for a block number no
-// file could own, or a failed release.
-private fn ext2_truncate_release(slot: borrow Ext2Slot[0], mount: Ext2Mount,
-        block: usize) -> bool {
-    if (block < 2 || block >= mount.filesystem_blocks) { return false; }
-    match ext2_release_block(slot, mount,
-            ext2_block_owner_new(block - 1, block, block)) {
-        Ext2OwnerReleaseResult::Invalid => { return false; }
-        Ext2OwnerReleaseResult::Released => { return true; }
-    }
-}
-
-// The data blocks of one pointer block, `count` of them at most, then the
-// pointer block itself.
-private fn ext2_truncate_pointer_block(slot: borrow Ext2Slot[0],
-        mount: Ext2Mount, block: usize, count: usize) -> bool {
-    if (block < 2 || block >= mount.filesystem_blocks) { return false; }
-    let mut released: bool = true;
-    for index: usize in 0..<ext2_pointer_count() {
-        if (index < count) {
-            let data: usize = ext2_pointer_entry(slot, mount, block, index);
-            if (data != 0) {
-                if (ext2_truncate_release(slot, mount, data) == false) {
-                    released = false;
-                }
-            }
-        }
-    }
-    if (ext2_truncate_release(slot, mount, block) == false) {
-        released = false;
-    }
-    return released;
-}
 
 private fn ext2_truncate_regular_file_with(slot: borrow Ext2Slot[0],
         mount: Ext2Mount, inode_number: usize)
@@ -4023,77 +4463,37 @@ private fn ext2_truncate_regular_file_with(slot: borrow Ext2Slot[0],
             if (file.size > ext2_max_regular_file_size()) {
                 return Ext2TruncateResult::Invalid;
             }
-            let pointers: usize = ext2_pointer_count();
-            let blocks: usize =
-                (file.size + KERNEL_BLOCK_SIZE - 1) / KERNEL_BLOCK_SIZE;
-            match block_read(mount.device, file.table_block,
-                             ext2_scratch[slot.index].metadata as []u8) {
-                BlockIoResult::Invalid => { return Ext2TruncateResult::Invalid; }
-                BlockIoResult::Ok => { }
-            }
-            let mut inode_pointer: Ext2Bytes =
-                ext2_at(ext2_metadata(), file.table_offset);
-            let mut direct: [usize; EXT2_MAX_DIRECT_BLOCKS];
-            for index: usize in 0..<EXT2_MAX_DIRECT_BLOCKS {
-                direct[index] =
-                    ext2_u32(slot, inode_pointer, 40 + index * 4) as usize;
-            }
-            let single: usize = ext2_u32(slot, inode_pointer, 88) as usize;
-            let double: usize = ext2_u32(slot, inode_pointer, 92) as usize;
-            if (ext2_put_u32(slot, inode_pointer, 4, 0) == false ||
-                ext2_put_u32(slot, inode_pointer, 28, 0) == false) {
-                return Ext2TruncateResult::Invalid;
-            }
-            // i_block[0..15]: twelve direct, single, double, triple.
-            for index: usize in 0..<15 {
-                if (ext2_put_u32(slot, inode_pointer, 40 + index * 4,
-                                 0) == false) {
+            match ext2_block_map_read(slot, mount, file) {
+                Ext2BlockMapResult::Invalid => {
                     return Ext2TruncateResult::Invalid;
                 }
-            }
-            match ext2_block_write(mount, file.table_block,
-                              ext2_scratch[slot.index].metadata as []u8) {
-                BlockIoResult::Invalid => { return Ext2TruncateResult::Invalid; }
-                BlockIoResult::Ok => { }
-            }
-            // The inode names nothing now: every release is tried.
-            let mut released: bool = true;
-            for index: usize in 0..<EXT2_MAX_DIRECT_BLOCKS {
-                if (index < blocks && direct[index] != 0) {
-                    if (ext2_truncate_release(slot, mount,
-                                              direct[index]) == false) {
-                        released = false;
+                Ext2BlockMapResult::Map(map) => {
+                    if (ext2_release_check(slot, mount, map) == false) {
+                        return Ext2TruncateResult::Invalid;
                     }
-                }
-            }
-            if (blocks > EXT2_MAX_DIRECT_BLOCKS && single != 0) {
-                if (ext2_truncate_pointer_block(slot, mount, single,
-                        blocks - EXT2_MAX_DIRECT_BLOCKS) == false) {
-                    released = false;
-                }
-            }
-            if (blocks > EXT2_MAX_DIRECT_BLOCKS + pointers && double != 0) {
-                let remaining: usize =
-                    blocks - EXT2_MAX_DIRECT_BLOCKS - pointers;
-                for outer: usize in 0..<pointers {
-                    if (outer * pointers < remaining) {
-                        let second: usize = ext2_pointer_entry(slot, mount,
-                                double, outer);
-                        if (second != 0) {
-                            if (ext2_truncate_pointer_block(slot, mount,
-                                    second,
-                                    remaining - outer * pointers) == false) {
-                                released = false;
-                            }
+                    let mut undo: Ext2Undo[0] = ext2_undo_begin();
+                    if (ext2_inode_truncate_logged(slot, mount, undo,
+                                                   file) == false) {
+                        match ext2_release_abort(slot, mount, undo) {
+                            Ext2ReleaseResult::RolledBack => { }
+                            Ext2ReleaseResult::Fenced => { }
+                            Ext2ReleaseResult::Committed => { }
+                        }
+                        return Ext2TruncateResult::Invalid;
+                    }
+                    match ext2_release_commit(slot, mount, undo, map) {
+                        Ext2ReleaseResult::Committed => {
+                            return Ext2TruncateResult::Truncated;
+                        }
+                        Ext2ReleaseResult::RolledBack => {
+                            return Ext2TruncateResult::Invalid;
+                        }
+                        Ext2ReleaseResult::Fenced => {
+                            return Ext2TruncateResult::Invalid;
                         }
                     }
                 }
-                if (ext2_truncate_release(slot, mount, double) == false) {
-                    released = false;
-                }
             }
-            if (released) { return Ext2TruncateResult::Truncated; }
-            return Ext2TruncateResult::Invalid;
         }
     }
 }
@@ -4108,6 +4508,70 @@ private fn ext2_name_is_dot_entry(name: borrow []const u8) -> bool {
     return false;
 }
 
+// GitHub issue #1088: rename over an existing regular file. The target's
+// entry is made to name the source in place, the source's entry goes, and
+// the target loses a link or, for its last, is released -- all through the
+// undo log, so a rejected write leaves both names as they were. The old
+// order (unlink the target, then add the new name) lost the target when the
+// add failed.
+private fn ext2_rename_over(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+        old_parent: usize, old_name: borrow []const u8,
+        new_parent: usize, new_name: borrow []const u8,
+        inode_number: usize, target: usize) -> Ext2RenameResult !{unsafe} {
+    match ext2_read_inode(slot, mount, target) {
+        Ext2InodeResult::Invalid => { return Ext2RenameResult::Invalid; }
+        Ext2InodeResult::Inode(file) => {
+            if ((file.mode & 0xF000) != 0x8000) {
+                return Ext2RenameResult::Unsupported;
+            }
+            if (file.links == 0 || target < 2) {
+                return Ext2RenameResult::Invalid;
+            }
+            if (file.links == 1 && file.size > ext2_max_regular_file_size()) {
+                return Ext2RenameResult::Unsupported;
+            }
+            let mut undo: Ext2Undo[0] = ext2_undo_begin();
+            let mut moved: bool = false;
+            match ext2_directory_rewrite_logged(slot, mount, undo, new_parent,
+                    target, new_name, inode_number) {
+                Ext2DirectoryResult::Invalid => { }
+                Ext2DirectoryResult::Updated => {
+                    match ext2_directory_rewrite_logged(slot, mount, undo,
+                            old_parent, inode_number, old_name, 0) {
+                        Ext2DirectoryResult::Invalid => { }
+                        Ext2DirectoryResult::Updated => { moved = true; }
+                    }
+                }
+            }
+            if (moved == false) {
+                match ext2_release_abort(slot, mount, undo) {
+                    Ext2ReleaseResult::RolledBack => { }
+                    Ext2ReleaseResult::Fenced => { }
+                    Ext2ReleaseResult::Committed => { }
+                }
+                return Ext2RenameResult::Invalid;
+            }
+            match ext2_unlink_release(slot, mount, undo, file, target) {
+                Ext2UnlinkNameResult::Unlinked => {
+                    return Ext2RenameResult::Renamed;
+                }
+                Ext2UnlinkNameResult::Invalid => {
+                    return Ext2RenameResult::Invalid;
+                }
+                Ext2UnlinkNameResult::NotFound => {
+                    return Ext2RenameResult::Invalid;
+                }
+                Ext2UnlinkNameResult::IsDirectory => {
+                    return Ext2RenameResult::Invalid;
+                }
+                Ext2UnlinkNameResult::Unsupported => {
+                    return Ext2RenameResult::Invalid;
+                }
+            }
+        }
+    }
+}
+
 // GitHub issue #538: rename, composed from the add and remove the directory
 // operations already have. The inode keeps its links: one name is added and
 // one taken away, so no link count moves.
@@ -4116,7 +4580,7 @@ private fn ext2_name_is_dot_entry(name: borrow []const u8) -> bool {
 // right. Moving one to another parent means rewriting its `..`, both
 // parents' link counts, and refusing a move into its own subtree, and
 // nothing calls for that yet, so it is Unsupported. An existing regular-file
-// target is replaced, as rename(2) specifies, through ext2_unlink_name; an
+// target is replaced, as rename(2) specifies, through ext2_rename_over; an
 // existing directory target is refused. A target that already names the
 // source is left alone and counts as done, as POSIX says.
 fn ext2_rename_in(mount: Ext2Mount, old_parent: usize, old_name: borrow []const u8,
@@ -4166,21 +4630,9 @@ private inline fn ext2_rename_in_with(slot: borrow Ext2Slot[0], mount: Ext2Mount
                 return Ext2RenameResult::IsDirectory;
             }
             if (source_is_directory) { return Ext2RenameResult::NotDirectory; }
-            match ext2_unlink_name_with(slot, mount, new_parent, new_name) {
-                Ext2UnlinkNameResult::Unlinked => { }
-                Ext2UnlinkNameResult::NotFound => {
-                    return Ext2RenameResult::Invalid;
-                }
-                Ext2UnlinkNameResult::IsDirectory => {
-                    return Ext2RenameResult::IsDirectory;
-                }
-                Ext2UnlinkNameResult::Unsupported => {
-                    return Ext2RenameResult::Unsupported;
-                }
-                Ext2UnlinkNameResult::Invalid => {
-                    return Ext2RenameResult::Invalid;
-                }
-            }
+            return ext2_rename_over(slot, mount, old_parent, old_name,
+                                    new_parent, new_name, inode_number,
+                                    target);
         }
     }
     match ext2_directory_add(slot, mount, new_parent, inode_number, new_name) {
@@ -4217,13 +4669,13 @@ private inline fn ext2_remove_directory_in_with(slot: borrow Ext2Slot[0],
         mount: Ext2Mount, parent_inode: usize,
                             linked: sink Ext2LinkedDirectory[inode, block],
                             name: borrow []const u8) -> Ext2RmdirResult {
-    match ext2_rmdir_unlink_entry(slot, mount, parent_inode,
-            linked.inode_number,
-                                  linked.block_number, name) {
+    match ext2_rmdir_check(slot, mount, linked.inode_number,
+                           linked.block_number) {
         Ext2RmdirStep::Refused => { return Ext2RmdirResult::Refused(linked); }
         Ext2RmdirStep::NotEmpty => { return Ext2RmdirResult::NotEmpty(linked); }
-        Ext2RmdirStep::Unlinked => {
-            return ext2_rmdir_release(slot, mount, parent_inode, linked);
+        Ext2RmdirStep::Empty(directory) => {
+            return ext2_rmdir_release(slot, mount, parent_inode, linked,
+                                      directory, name);
         }
     }
 }
