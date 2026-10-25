@@ -2622,6 +2622,76 @@ fn process_image_map_ext2_in_root(plan: DistroElfLoadPlan,
     return result;
 }
 
+// GitHub issue #1079: how many pages an exec's map can allocate, so execve
+// can reserve them (page_reserve) before the old image is torn down. Every
+// page the static and pair mappers allocate is a page of one of these
+// spans -- each PT_LOAD span, the heap, the eager stack -- plus at most one
+// lazily allocated L3 table per 2 MiB branch a span touches (a branch two
+// spans share is counted twice, which only over-reserves). The argv page
+// is reserved by execve itself (#700), and the image record exists before
+// the exec (clone_vm_begin or an earlier exec made it). Every PT_LOAD page
+// is reserved: .bss is still allocated eagerly (#1084).
+private fn process_image_span_bound(first: usize, last: usize) -> usize {
+    if (last <= first || last > USER_SPACE_PAGE_COUNT) { return 0; }
+    let tables: usize = (last - 1) / USER_L3_PAGE_COUNT -
+                        first / USER_L3_PAGE_COUNT + 1;
+    return (last - first) + tables;
+}
+
+private fn process_image_segments_bound(plan: DistroElfLoadPlan,
+                                        load_bias: usize) -> usize {
+    let mut total: usize = 0;
+    if (load_bias % PAGE_SIZE != 0 || load_bias > USER_SPACE_BYTES) {
+        return 0;
+    }
+    let bias_pages: usize = load_bias / PAGE_SIZE;
+    for segment_index: usize in 0..<16 {
+        match distro_elf_plan_segment(plan, segment_index) {
+            DistroElfPlanSegment::Refused => {}
+            DistroElfPlanSegment::NotLoad => {}
+            DistroElfPlanSegment::Load(header) => {
+                let (span_first, span_last) = distro_elf_segment_pages(header);
+                if (span_last <= USER_SPACE_PAGE_COUNT &&
+                    bias_pages <= USER_SPACE_PAGE_COUNT - span_last) {
+                    total = total + process_image_span_bound(
+                        span_first + bias_pages, span_last + bias_pages);
+                }
+            }
+        }
+    }
+    return total;
+}
+
+private fn process_image_heap_bound(extent: usize) -> usize {
+    if (extent > USER_SPACE_BYTES) { return 0; }
+    let heap_first_page: usize = (extent + PAGE_SIZE - 1) / PAGE_SIZE;
+    return process_image_span_bound(heap_first_page,
+        heap_first_page + PROCESS_HEAP_PAGES_DEFAULT);
+}
+
+fn process_image_exec_bound_static(plan: DistroElfLoadPlan) -> usize {
+    return process_image_segments_bound(plan, 0) +
+           process_image_heap_bound(plan.extent) +
+           process_image_span_bound(process_stack_top_page(),
+                                    process_stack_top_page() + 1);
+}
+
+fn process_image_exec_bound_pair(primary: DistroElfLoadPlan,
+                                 interpreter: DistroElfLoadPlan,
+                                 interpreter_bias: usize) -> usize {
+    if (interpreter_bias > USER_SPACE_BYTES ||
+        interpreter.extent > USER_SPACE_BYTES - interpreter_bias) {
+        return 0;
+    }
+    return process_image_segments_bound(primary, 0) +
+           process_image_segments_bound(interpreter, interpreter_bias) +
+           process_image_heap_bound(interpreter_bias + interpreter.extent) +
+           process_image_span_bound(
+               process_stack_top_page() -
+                   (PROCESS_DYNAMIC_STACK_INITIAL_PAGES - 1),
+               process_stack_top_page() + 1);
+}
+
 fn process_image_page_count(pages: borrow ProcessImagePages[image]) -> usize {
     return pages.count;
 }

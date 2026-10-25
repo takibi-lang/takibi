@@ -4549,32 +4549,48 @@ fn kernel_syscall_child_exec_return(frame_sp: usize) !{unsafe} {
     if (syscall_ext2_reader_take()) {
         ext2_read_leave();
     }
-    let mut user_entry: ExecUserEntry = { 0, 0 };
-    // GitHub issue #1058: which of these EL0 can reach. The point of no
-    // return is the old image's teardown inside the prepare; execve itself
-    // has already returned ChildExec, so every arm below stops the kernel.
-    // - Unreachable by construction: NotChildOrPending and ArgvPageMissing
-    //   (execve sets the pending mark and reserves the argv page just before
-    //   ChildExec, and refuses a second exec with EAGAIN), NoImageResolved
-    //   (boot mounts ext2 and resolves the fallback image before EL0 runs),
-    //   CloneVmMissing (a process has an installed image or an outstanding
-    //   fork clone), ImageAlreadyInstalled and ImageNoTargetRoot (the
-    //   teardown just cleared the image, and the map already checked the
-    //   root), DynamicResolveInvalid (execve validated the same inode with
-    //   the same validator, and its ext2 reader registration, held from
-    //   dispatch to here, keeps writers out).
-    // - Reachable through ELF contents, moved before the point of no return
-    //   by #1058: StaticImageInvalid and DynamicPairInvalid for a PT_LOAD
-    //   with flags other than R, RX or RW, or two PT_LOADs sharing a page.
-    //   distro_elf_validate_with_length now refuses both, so execve answers
-    //   ENOEXEC for the pathname and argv[0] keeps the fallback.
-    // - Still reachable: StaticMapOutOfMemory, ImageRecordOutOfMemory and
-    //   the out-of-memory half of DynamicPairInvalid under memory pressure,
-    //   and the Invalid results on an ext2 or block read error (a device's
-    //   answer). Tracked as a followup: reserve before the teardown, or end
-    //   the process as Linux does after its point of no return.
+    // GitHub issue #1058 classified these arms; #1079 (maintainer decision
+    // 2026-10-25, option c) retired the reachable ones. The point of no
+    // return is the old image's teardown inside the prepare.
+    // - Before it: ReserveOutOfMemory. The prepare resolves the image and
+    //   reserves every page its map can allocate (page_reserve) first, so
+    //   memory exhaustion is execve's ENOMEM and the old image runs on.
+    // - After it, reachable from EL0: StaticImageInvalid and
+    //   DynamicPairInvalid on an ext2 or block read error (a device's
+    //   answer), and StaticMapOutOfMemory, ImageRecordOutOfMemory and the
+    //   out-of-memory half of DynamicPairInvalid only if the reservation's
+    //   bound undercounted (counted in kernel_exec_reserve_undercount).
+    //   These end the process by SIGSEGV, as Linux's bprm_execve does past
+    //   its point of no return; the kernel runs on.
+    // - Unreachable by construction, still stops: NotChildOrPending and
+    //   ArgvPageMissing (execve sets the pending mark and reserves the argv
+    //   page just before ChildExec, and refuses a second exec with EAGAIN),
+    //   NoImageResolved (boot mounts ext2 and resolves the fallback image
+    //   before EL0 runs), CloneVmMissing (a process has an installed image
+    //   or an outstanding fork clone), ImageAlreadyInstalled and
+    //   ImageNoTargetRoot (the teardown just cleared the image, and the map
+    //   already checked the root), DynamicResolveInvalid (execve validated
+    //   the same inode with the same validator, and its ext2 reader
+    //   registration, held from dispatch to here, keeps writers out).
     match result {
-        KernelChildExecPrepareResult::Prepared(prepared) => { user_entry = prepared; }
+        KernelChildExecPrepareResult::Prepared(prepared) => {
+            kernel_syscall_child_exec_enter(frame, current_authority, prepared);
+        }
+        KernelChildExecPrepareResult::ReserveOutOfMemory => {
+            kernel_syscall_child_exec_refused(frame, current_authority);
+        }
+        KernelChildExecPrepareResult::StaticImageInvalid => {
+            kernel_syscall_child_exec_lost(frame, current_authority);
+        }
+        KernelChildExecPrepareResult::DynamicPairInvalid => {
+            kernel_syscall_child_exec_lost(frame, current_authority);
+        }
+        KernelChildExecPrepareResult::StaticMapOutOfMemory => {
+            kernel_syscall_child_exec_lost(frame, current_authority);
+        }
+        KernelChildExecPrepareResult::ImageRecordOutOfMemory => {
+            kernel_syscall_child_exec_lost(frame, current_authority);
+        }
         KernelChildExecPrepareResult::NotChildOrPending => {
             kernel_process_exec_failure_set(KernelChildExecPrepareResult::NotChildOrPending);
             process_current_end(current_authority);
@@ -4587,11 +4603,6 @@ fn kernel_syscall_child_exec_return(frame_sp: usize) !{unsafe} {
         }
         KernelChildExecPrepareResult::DynamicResolveInvalid => {
             kernel_process_exec_failure_set(KernelChildExecPrepareResult::DynamicResolveInvalid);
-            process_current_end(current_authority);
-            kernel_invariant_stop_with_frame(frame);
-        }
-        KernelChildExecPrepareResult::DynamicPairInvalid => {
-            kernel_process_exec_failure_set(KernelChildExecPrepareResult::DynamicPairInvalid);
             process_current_end(current_authority);
             kernel_invariant_stop_with_frame(frame);
         }
@@ -4613,27 +4624,18 @@ fn kernel_syscall_child_exec_return(frame_sp: usize) !{unsafe} {
             process_current_end(current_authority);
             kernel_invariant_stop_with_frame(frame);
         }
-        KernelChildExecPrepareResult::StaticImageInvalid => {
-            kernel_process_exec_failure_set(KernelChildExecPrepareResult::StaticImageInvalid);
-            process_current_end(current_authority);
-            kernel_invariant_stop_with_frame(frame);
-        }
-        KernelChildExecPrepareResult::StaticMapOutOfMemory => {
-            kernel_process_exec_failure_set(KernelChildExecPrepareResult::StaticMapOutOfMemory);
-            process_current_end(current_authority);
-            kernel_invariant_stop_with_frame(frame);
-        }
-        KernelChildExecPrepareResult::ImageRecordOutOfMemory => {
-            kernel_process_exec_failure_set(KernelChildExecPrepareResult::ImageRecordOutOfMemory);
-            process_current_end(current_authority);
-            kernel_invariant_stop_with_frame(frame);
-        }
         KernelChildExecPrepareResult::ArgvPageMissing => {
             kernel_process_exec_failure_set(KernelChildExecPrepareResult::ArgvPageMissing);
             process_current_end(current_authority);
             kernel_invariant_stop_with_frame(frame);
         }
     }
+}
+
+// The new image is installed: the tail of a successful exec.
+private fn kernel_syscall_child_exec_enter(frame: sink FrameRef[process],
+        current_authority: ProcessCurrent[current_process, ProcessState::Running],
+        user_entry: ExecUserEntry) !{unsafe} {
     // The new image is committed, so this is execve's point of no return,
     // and Linux closes every descriptor marked close-on-exec here. Only the
     // kernel-driven exec that 73988b03 retired ever made this call, so from
@@ -4646,7 +4648,7 @@ fn kernel_syscall_child_exec_return(frame_sp: usize) !{unsafe} {
     if (kernel_process_trace_fail_after_exec_requested()) {
         kernel_process_exec_failure_debugger_after_commit();
         process_current_end(current_authority);
-            kernel_invariant_stop_with_frame(frame);
+        kernel_invariant_stop_with_frame(frame);
     }
     let entry: usize = user_entry.entry;
     let stack: usize = user_entry.stack;
@@ -4659,6 +4661,44 @@ fn kernel_syscall_child_exec_return(frame_sp: usize) !{unsafe} {
     workload_profile_el0_enter();
     process_current_end(current_authority);
     el0_context_resume(frame);
+}
+
+// GitHub issue #1079: the new image's pages could not be reserved, so the
+// prepare stopped before the teardown and the caller's image is intact.
+// execve returns ENOMEM to it, as for the argv page (#700).
+private fn kernel_syscall_child_exec_refused(frame: sink FrameRef[process],
+        current_authority: ProcessCurrent[current_process, ProcessState::Running]) !{unsafe} {
+    kernel_syscall_exec_clear();
+    kernel_syscall_exec_refused_count = kernel_syscall_exec_refused_count + 1;
+    el0_context_set_x0(frame, LINUX_ENOMEM);
+    workload_profile_el0_enter();
+    process_current_end(current_authority);
+    el0_context_resume(frame);
+}
+
+// GitHub issue #1079: an exec that failed past its point of no return (an
+// image read error, or a map past an undercounted reservation). The caller
+// has no image left to return to; Linux's bprm_execve forces SIGSEGV here,
+// and so does this: the process ends, its parent reaps a SIGSEGV status,
+// and the kernel runs on. PID 1 ending stops the kernel as any PID 1 exit
+// does (#831).
+private fn kernel_syscall_child_exec_lost(frame: borrow FrameRef[process],
+        current_authority: ProcessCurrent[current_process, ProcessState::Running]) !{unsafe} {
+    kernel_syscall_exec_clear();
+    kernel_syscall_exec_lost_count = kernel_syscall_exec_lost_count + 1;
+    kernel_process_child_exec_lost(current_authority);
+    // The same exit tail a refused sigreturn takes: it does not return.
+    signal_return_exit(current_authority, frame,
+                       process_end_signaled(LINUX_SIGSEGV));
+}
+
+// Evidence for the #1079 paths: execs refused with ENOMEM before the
+// teardown, and execs that ended their process after it.
+private let mut kernel_syscall_exec_refused_count: usize;
+private let mut kernel_syscall_exec_lost_count: usize;
+
+fn kernel_syscall_exec_reserve_evidence() -> (usize, usize) {
+    return (kernel_syscall_exec_refused_count, kernel_syscall_exec_lost_count);
 }
 
 // GitHub issue #831 (maintainer decision 2026-10-20, item 2-1 A): PID 1

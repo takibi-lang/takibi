@@ -5047,6 +5047,9 @@ must_use variant KernelChildExecPrepareResult {
     // No page for the exec's own copy of its argv.
     ArgvPageMissing;
     ImageRecordOutOfMemory;
+    // GitHub issue #1079: the new image's pages could not be reserved. The
+    // old image is still intact, so execve answers ENOMEM.
+    ReserveOutOfMemory;
 }
 private let mut kernel_process_trace_enabled: bool;
 // GitHub issue #652: debugger-owned filters, set from DDB (`trace omit N`,
@@ -5270,6 +5273,7 @@ fn kernel_process_exec_failure_set(result: KernelChildExecPrepareResult) {
         KernelChildExecPrepareResult::StaticMapOutOfMemory => { kernel_process_exec_failure_reason = KernelExecFailureReason::StaticMapOutOfMemory; }
         KernelChildExecPrepareResult::ArgvPageMissing => { kernel_process_exec_failure_reason = KernelExecFailureReason::ArgvPageMissing; }
         KernelChildExecPrepareResult::ImageRecordOutOfMemory => { kernel_process_exec_failure_reason = KernelExecFailureReason::ImageRecordOutOfMemory; }
+        KernelChildExecPrepareResult::ReserveOutOfMemory => { kernel_process_exec_failure_reason = KernelExecFailureReason::None; }
     }
 }
 
@@ -11788,6 +11792,17 @@ private fn kernel_process_child_exit_status_for_locked(
 // names it directly, no switch has happened yet.
 // GitHub issue #693 step 5: the execing process's own record, reached
 // through ProcessCurrent.
+// GitHub issue #1079: an exec that failed after its point of no return.
+// Its old image or fork clone is gone and no new image was installed; the
+// process is about to end by a fatal signal. Marked as an exec'd process,
+// its exit takes the exec'd path: no clone left to reap, and the parent's
+// root goes back in TTBR0 at the reap (kernel_process_child_exec_reap).
+fn kernel_process_child_exec_lost(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running]) {
+    if (execution_state[execution_cpu_index()].current_live) {
+        scheduled_process_record_current(current_authority).exec_image_live = true;
+    }
+}
+
 fn kernel_process_child_exec_mark(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running]) {
     workload_exec_commit_note();
     if (execution_state[execution_cpu_index()].current_live) {

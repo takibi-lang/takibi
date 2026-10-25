@@ -307,6 +307,17 @@ struct BootPagePool align(16) {
     // #771 counters, so zero until applied.
     available_pages: usize;
     available_walk_ticks: usize;
+    // GitHub issue #1079: pages on the runtime free list, kept by the two
+    // functions that link and unlink it and by the head pop, and checked
+    // against a walk by page_free_list_consistent. Pages promised to an
+    // execve that has not torn its old image down yet (reserved_total,
+    // per CPU in reserved_by_cpu): an allocation on another CPU may not
+    // take the free count below them. In .bss, zero until applied.
+    runtime_free_count: usize;
+    reserved_total: usize;
+    reserved_by_cpu: [usize; KERNEL_MAX_CORES];
+    reserve_active: [bool; KERNEL_MAX_CORES];
+    reserve_overdrawn: [usize; KERNEL_MAX_CORES];
 }
 
 // GitHub issue #479. Everything below this line is shared mutable
@@ -643,6 +654,7 @@ private fn page_physical_for_index(pool: borrow &mut BootPagePool, metas: borrow
 private fn page_runtime_freelist_rebuild(pool: borrow &mut BootPagePool, metas: borrow region(PageMeta)[mb, mn], extents: borrow region(PageExtent)[eb, en]) !{unsafe} {
     let capacity: usize = page_capacity(pool, metas, extents);
     pool.runtime_free_head = capacity;
+    pool.runtime_free_count = 0;
     let mut index: usize = capacity;
     while (index > 0) {
         index = index - 1;
@@ -666,6 +678,7 @@ private fn page_runtime_link_head(pool: borrow &mut BootPagePool, metas: borrow 
         page_meta_at(metas, head).prev_free = index as u32;
     }
     pool.runtime_free_head = index;
+    pool.runtime_free_count = pool.runtime_free_count + 1;
 }
 
 // `index` out of the runtime list in O(1). false, changing nothing, when
@@ -694,6 +707,9 @@ private fn page_runtime_unlink(pool: borrow &mut BootPagePool, metas: borrow reg
     }
     page_meta_at(metas, index).next_free = capacity as u32;
     page_meta_at(metas, index).prev_free = capacity as u32;
+    if (pool.runtime_free_count > 0) {
+        pool.runtime_free_count = pool.runtime_free_count - 1;
+    }
     return true;
 }
 
@@ -840,7 +856,7 @@ fn page_alloc_contiguous(count: usize, owner: PageOwnerTag)
                 Place::Full(extents) => {
                     let framed: PageRunAllocResult = match place_borrow(guard, page_meta_store.frames) {
                         Place::Empty => { PageRunAllocResult::OutOfMemory }
-                        Place::Full(frames) => { page_alloc_contiguous_locked(frames, pool, metas, extents, count, owner) }
+                        Place::Full(frames) => { page_alloc_contiguous_admitted(frames, pool, metas, extents, count, owner) }
                     };
                     framed
                 }
@@ -854,6 +870,128 @@ fn page_alloc_contiguous(count: usize, owner: PageOwnerTag)
     if (spent > pool.run_max_ticks) { pool.run_max_ticks = spent; }
     locked_cell_give(&boot_page_pool_cell, guard);
     return result;
+}
+
+// GitHub issue #1079: a run is refused when it would take the free list
+// below what other CPUs' execs have reserved, and drawn from this CPU's
+// own reservation first.
+private fn page_alloc_contiguous_admitted(frames: borrow PageFrameStore[fbc, fbo, fbn, fsc, fso, fsn], pool: borrow &mut BootPagePool, metas: borrow region(PageMeta)[mb, mn], extents: borrow region(PageExtent)[eb, en], count: usize,
+                                          owner: PageOwnerTag)
+        -> PageRunAllocResult !{allocates, requires_mmu, unsafe} {
+    if (page_reserve_admits(pool, count) == false) {
+        return PageRunAllocResult::OutOfMemory;
+    }
+    match page_alloc_contiguous_locked(frames, pool, metas, extents, count, owner) {
+        PageRunAllocResult::OutOfMemory => { return PageRunAllocResult::OutOfMemory; }
+        PageRunAllocResult::Allocated(run) => {
+            page_reserve_consume(pool, count);
+            return PageRunAllocResult::Allocated(run);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// GitHub issue #1079 (maintainer decision 2026-10-25, option c): execve
+// reserves the new image's pages before it tears the old image down, so
+// exhaustion is ENOMEM while the caller can still see it. A reservation is
+// a count, not a set of pages: the allocator refuses an allocation that
+// would leave fewer free pages than the OTHER CPUs' reservations, and an
+// allocation on the reserving CPU draws its own reservation down first.
+// An exec's prepare is one non-preemptible EL1 action on one CPU, and the
+// effect checker keeps the allocator out of interrupt context (see the
+// lock comment above), so every allocation the reserving CPU makes while
+// the reservation is held is the exec's. One reservation per CPU.
+//
+// Invariant: runtime_free_count >= reserved_total, as long as every
+// reservation was admitted against the free count and every allocation is
+// admitted below. An allocation past its own reservation is counted in
+// reserve_overdrawn, which page_reservation_release returns: an exec whose
+// bound undercounted its allocations is visible, not silent.
+// `[unit]` is always 0: a linear struct needs a static parameter.
+linear struct PageReservation[unit: usize] {
+    private cpu: {0..<KERNEL_MAX_CORES as usize};
+    private count: usize;
+}
+
+must_use variant PageReserveResult {
+    Refused;
+    Reserved(PageReservation[0]);
+}
+
+private fn page_reserve_cpu() -> {0..<KERNEL_MAX_CORES as usize} {
+    let core: usize = cpu_id();
+    if (core < KERNEL_MAX_CORES) { return core; }
+    return 0;
+}
+
+private fn page_reserve_admits(pool: borrow &mut BootPagePool, count: usize) -> bool {
+    if (pool.runtime_applied == false) { return true; }
+    let cpu: {0..<KERNEL_MAX_CORES as usize} = page_reserve_cpu();
+    let own: usize = pool.reserved_by_cpu[cpu];
+    if (own > pool.reserved_total) { return false; }
+    let others: usize = pool.reserved_total - own;
+    if (pool.runtime_free_count < others) { return false; }
+    return pool.runtime_free_count - others >= count;
+}
+
+private fn page_reserve_consume(pool: borrow &mut BootPagePool, count: usize) {
+    if (pool.runtime_applied == false) { return; }
+    let cpu: {0..<KERNEL_MAX_CORES as usize} = page_reserve_cpu();
+    if (pool.reserve_active[cpu] == false) { return; }
+    let own: usize = pool.reserved_by_cpu[cpu];
+    let mut drawn: usize = count;
+    if (drawn > own) {
+        drawn = own;
+        pool.reserve_overdrawn[cpu] = pool.reserve_overdrawn[cpu] + (count - own);
+    }
+    pool.reserved_by_cpu[cpu] = own - drawn;
+    if (drawn <= pool.reserved_total) {
+        pool.reserved_total = pool.reserved_total - drawn;
+    } else {
+        pool.reserved_total = 0;
+    }
+}
+
+// Refused when the free list cannot cover `count` beside every other
+// CPU's reservation, or this CPU already holds one.
+fn page_reserve(count: usize) -> PageReserveResult !{unsafe} {
+    let guard = locked_cell_take(&boot_page_pool_cell);
+    let pool = memory_map_pool_record(guard, &boot_page_pool_cell);
+    let cpu: {0..<KERNEL_MAX_CORES as usize} = page_reserve_cpu();
+    let mut granted: bool = false;
+    if (pool.runtime_applied && pool.reserve_active[cpu] == false &&
+        pool.reserved_total <= pool.runtime_free_count &&
+        pool.runtime_free_count - pool.reserved_total >= count) {
+        pool.reserved_by_cpu[cpu] = count;
+        pool.reserved_total = pool.reserved_total + count;
+        pool.reserve_active[cpu] = true;
+        pool.reserve_overdrawn[cpu] = 0;
+        granted = true;
+    }
+    locked_cell_give(&boot_page_pool_cell, guard);
+    if (granted == false) { return PageReserveResult::Refused; }
+    let mut reservation: PageReservation[0] = { cpu, count };
+    return PageReserveResult::Reserved(reservation);
+}
+
+// Gives back what is left of a reservation. Returns how many pages the
+// reserving CPU allocated past it (0 when the bound held).
+fn page_reservation_release(reservation: sink PageReservation[0]) -> usize !{unsafe} {
+    let cpu: {0..<KERNEL_MAX_CORES as usize} = reservation.cpu;
+    let guard = locked_cell_take(&boot_page_pool_cell);
+    let pool = memory_map_pool_record(guard, &boot_page_pool_cell);
+    let left: usize = pool.reserved_by_cpu[cpu];
+    if (left <= pool.reserved_total) {
+        pool.reserved_total = pool.reserved_total - left;
+    } else {
+        pool.reserved_total = 0;
+    }
+    pool.reserved_by_cpu[cpu] = 0;
+    pool.reserve_active[cpu] = false;
+    let overdrawn: usize = pool.reserve_overdrawn[cpu];
+    pool.reserve_overdrawn[cpu] = 0;
+    locked_cell_give(&boot_page_pool_cell, guard);
+    return overdrawn;
 }
 
 private fn page_alloc_contiguous_locked(frames: borrow PageFrameStore[fbc, fbo, fbn, fsc, fso, fsn], pool: borrow &mut BootPagePool, metas: borrow region(PageMeta)[mb, mn], extents: borrow region(PageExtent)[eb, en], count: usize,
@@ -2153,10 +2291,15 @@ private fn page_alloc_locked(frames: borrow PageFrameStore[fbc, fbo, fbn, fsc, f
     }
     let index: usize = pool.runtime_free_head;
     if (index >= page_capacity(pool, metas, extents)) { return PageAllocResult::OutOfMemory; }
+    if (page_reserve_admits(pool, 1) == false) { return PageAllocResult::OutOfMemory; }
+    page_reserve_consume(pool, 1);
     let capacity: usize = page_capacity(pool, metas, extents);
     let meta: &mut PageMeta = page_meta_at(metas, index);
     let next: usize = meta.next_free as usize;
     pool.runtime_free_head = next;
+    if (pool.runtime_free_count > 0) {
+        pool.runtime_free_count = pool.runtime_free_count - 1;
+    }
     if (next < capacity) {
         page_meta_at(metas, next).prev_free = capacity as u32;
     }
@@ -2966,6 +3109,8 @@ private fn page_free_list_consistent_locked(pool: borrow &mut BootPagePool, meta
         previous = node;
         node = meta.next_free as usize;
     }
+    // GitHub issue #1079: the count the reservation check trusts.
+    if (linked != pool.runtime_free_count) { return false; }
     return linked == free_pages;
 }
 

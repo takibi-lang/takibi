@@ -887,6 +887,73 @@ private fn kernel_process_child_exec_prepare_with(current_authority: borrow Proc
     // user_payload's own fork of a UART-block/scheduler-preempt child)
     // needs its own current root here instead.
     let mut child_space: AddressSpaceRoot = kernel_process_current_root(current_authority);
+    // GitHub issue #1079 (maintainer decision 2026-10-25, option c): the
+    // image is resolved and its pages reserved BEFORE the old image is torn
+    // down, so a shortage is ENOMEM to a caller that still exists. The
+    // resolve reads only the exec metadata windows, never the old image.
+    match kernel_exec_resolve_ext2_exec(mount, windows) {
+        // From the pathname's inode only (#1065).
+        ExecImageResolveResult::NoInode => {
+            return KernelChildExecPrepareResult::NoImageResolved;
+        }
+        ExecImageResolveResult::Invalid => {
+            return KernelChildExecPrepareResult::DynamicResolveInvalid;
+        }
+        ExecImageResolveResult::Static(image) => {
+            let bound: usize = process_image_exec_bound_static(image.plan);
+            return kernel_process_child_exec_reserved(current_authority,
+                argv, mount, child_space, bound,
+                ExecImageResolveResult::Static(image));
+        }
+        ExecImageResolveResult::Dynamic(images) => {
+            let bound: usize = process_image_exec_bound_pair(
+                images.primary.plan, images.interpreter.plan,
+                kernel_exec_interpreter_bias(images.primary.plan));
+            return kernel_process_child_exec_reserved(current_authority,
+                argv, mount, child_space, bound,
+                ExecImageResolveResult::Dynamic(images));
+        }
+    }
+}
+
+private fn kernel_process_child_exec_reserved(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], argv: borrow []u8,
+        mount: Ext2Mount, child_space: AddressSpaceRoot, bound: usize,
+        resolved: ExecImageResolveResult)
+        -> KernelChildExecPrepareResult {
+    match page_reserve(bound) {
+        PageReserveResult::Refused => {
+            match resolved {
+                ExecImageResolveResult::NoInode => {}
+                ExecImageResolveResult::Invalid => {}
+                ExecImageResolveResult::Static(_) => {}
+                ExecImageResolveResult::Dynamic(_) => {}
+            }
+            return KernelChildExecPrepareResult::ReserveOutOfMemory;
+        }
+        PageReserveResult::Reserved(reservation) => {
+            let result: KernelChildExecPrepareResult =
+                kernel_process_child_exec_commit(current_authority, argv,
+                    mount, child_space, resolved);
+            if (page_reservation_release(reservation) != 0) {
+                kernel_exec_reserve_undercount =
+                    kernel_exec_reserve_undercount + 1;
+            }
+            return result;
+        }
+    }
+}
+
+// GitHub issue #1079: an exec whose map allocated past its reservation,
+// which means process_image_exec_bound_* undercounted. Expected 0; the boot
+// report's exec reserve line prints it.
+private let mut kernel_exec_reserve_undercount: usize;
+
+// Past the reservation: the point of no return is the teardown below, and
+// every failure after it ends the process (kernel_syscall_child_exec_return).
+private fn kernel_process_child_exec_commit(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], argv: borrow []u8,
+        mount: Ext2Mount, child_space: AddressSpaceRoot,
+        resolved: ExecImageResolveResult)
+        -> KernelChildExecPrepareResult {
     let child_root: usize = root_slot_word(address_space_root_slot(child_space));
     // Which VM this exec replaces depends on how the process got the one it
     // has. A forked child is still running on the clone of its parent's, so
@@ -901,14 +968,19 @@ private fn kernel_process_child_exec_prepare_with(current_authority: borrow Proc
     } else {
         match process_image_clone_vm_reap(child_space) {
             ProcessCloneVmReapResult::Missing => {
+                match resolved {
+                    ExecImageResolveResult::NoInode => {}
+                    ExecImageResolveResult::Invalid => {}
+                    ExecImageResolveResult::Static(_) => {}
+                    ExecImageResolveResult::Dynamic(_) => {}
+                }
                 return KernelChildExecPrepareResult::CloneVmMissing;
             }
             ProcessCloneVmReapResult::Reaped => {}
         }
     }
 
-    // From the pathname's inode only (#1065).
-    match kernel_exec_resolve_ext2_exec(mount, windows) {
+    match resolved {
         ExecImageResolveResult::NoInode => {
             return KernelChildExecPrepareResult::NoImageResolved;
         }
@@ -1049,6 +1121,13 @@ fn kernel_init_script_success_evidence(current_authority: borrow ProcessCurrent[
         process_image_exec_reap_evidence();
     if (exec_reaps >= 1 && exec_reaps_clean == exec_reaps) {
         kernel_boot_log("child exec unmap: clean\n");
+    }
+    // GitHub issue #1079: every exec of the boot mapped within the pages
+    // it reserved before its teardown, and none was refused or lost.
+    let (exec_refused, exec_lost) = kernel_syscall_exec_reserve_evidence();
+    if (exec_reaps >= 1 && kernel_exec_reserve_undercount == 0 &&
+        exec_refused == 0 && exec_lost == 0) {
+        kernel_boot_log("child exec reserve: every map within its pages\n");
     }
     if (exec_stack_growths >= 1) {
         kernel_boot_log("shell stack: demand-grown\n");

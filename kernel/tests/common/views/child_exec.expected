@@ -1,3 +1,4 @@
 child-exec-ok
 child exec: shell exit: 0
 child exec unmap: clean
+child exec reserve: every map within its pages
