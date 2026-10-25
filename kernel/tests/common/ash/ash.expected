@@ -14,6 +14,7 @@ lost+found
 many
 mutable.txt
 nested
+pad
 peer-read.bin
 read_indirect.txt
 .
@@ -34,6 +35,7 @@ lost+found
 many
 mutable.txt
 nested
+pad
 peer-read.bin
 read_indirect.txt
 affinity
@@ -52,6 +54,7 @@ dmesg
 echo
 exenom0
 exenom1
+hackbench
 httpd
 httpd.sh
 ls
@@ -84,6 +87,7 @@ sh
 signal-boundary
 sleep
 spread
+stress-ng
 taskset
 termios
 uname

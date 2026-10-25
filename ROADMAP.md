@@ -81,9 +81,10 @@ lane (`kernelcheck-race-window-*-qemu`) before its issue closes.
   Today only the BusyBox `xargs -P 4` phase runs; the load found #1039 (an
   execve argv that fail-stops the kernel; done 2026-10-25) and #1040 (an unmappable ELF runs
   BusyBox), and its other phases wait for #1041 (images over a 2 MiB span:
-  stress-ng) and #1042 (pipe2: stress-ng `--pipe`, hackbench). The board
-  runs the BusyBox phase only until its 2.75 MiB rootfs extent grows (a
-  decision). Each program is recorded beside the same program under Linux
+  stress-ng) and #1042 (pipe2: stress-ng `--pipe`, hackbench). The fixture
+  rootfs grew from 2816 to 6144 blocks to hold both programs, so QEMU and
+  the board boot the same image (maintainer, option b: one board build,
+  sized from content; about 18 s more SWD per RPi5 lane run). Each program is recorded beside the same program under Linux
   on the same machine (maintainer, 2026-10-25): a reference column, never
   a verdict -- the host, natively, on four CPUs, since this tree builds no
   Linux guest. #1014 (run-lock contention, parked) is measured on this load

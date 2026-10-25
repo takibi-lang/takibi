@@ -1214,6 +1214,13 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_LOAD_PROGRAMS)/hackbench $@.tmp:/bin/hackbench
 	debugfs -w -R 'set_inode_field /bin/stress-ng mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /bin/hackbench mode 0100755' $@.tmp >/dev/null 2>&1
+	# The 6 MiB extent is the content rounded up to a MiB (#742). /pad holds
+	# the rounding, so the boot fixture that fills the free blocks before its
+	# ENOSPC checks does the same work as on the 2816-block image; shrink it
+	# when a program is added.
+	head -c 286720 /dev/zero >$@.pad.tmp
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $@.pad.tmp $@.tmp:/pad
+	rm -f $@.pad.tmp
 	# Execute-only file for the maintained access/faccessat R_OK and W_OK checks.
 	debugfs -w -R 'set_inode_field /etc/interp-absent mode 0100111' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /etc/interp-other mode 0100755' $@.tmp >/dev/null 2>&1
