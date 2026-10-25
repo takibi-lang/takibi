@@ -11,6 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import check_invariant_stop_sites as check  # noqa: E402
+from control_patch import replace_once  # noqa: E402
 from pass_line import report_pass  # noqa: E402
 
 FILE = "kernel/kernel/syscall.tkb"
@@ -35,8 +36,8 @@ def main():
                "fn kernel_invariant_stop() {}\n")
     # One more stop inside a listed function (exec_args_put has one row of 1).
     anchor = 'kernel_boot_log("exec argv: occupied CPU handoff slot\\n");'
-    exec_grown = files[FILE].replace(
-        anchor, anchor + " kernel_invariant_stop();", 1)
+    exec_grown = replace_once(files[FILE], anchor,
+                              anchor + " kernel_invariant_stop();", FILE)
     cases = {
         "a stop in a function with no row is refused":
             (refused, {**files, FILE: files[FILE] + planted}, tsv),
@@ -58,8 +59,6 @@ def main():
             (accepted, {**files, FILE: files[FILE] + planted}, tsv + ROW),
     }
     failures = []
-    if exec_grown == files[FILE]:
-        failures.append("the grown-count plant did not apply; update the anchor")
     for label, (verdict, tree, text) in cases.items():
         result = check.problems_in(tree, text)
         if not verdict(result):
