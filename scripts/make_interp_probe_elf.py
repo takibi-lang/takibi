@@ -10,7 +10,7 @@ the size, and the fixture image has no room for that.
 
 GitHub issue #1040: the same file, with `--et-exec` or `--span BYTES`, is the
 fixture for an ELF the validator refuses (an ET_EXEC image, or a PT_LOAD
-span over the 2 MiB the kernel maps). An empty interpreter path leaves the
+span over DISTRO_ELF_SPAN_MAX, 256 MiB since #1041). An empty interpreter path leaves the
 PT_INTERP out. execve must answer such a file with ENOEXEC; it used to run
 BusyBox in its place.
 

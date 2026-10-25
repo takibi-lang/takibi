@@ -892,15 +892,32 @@ fn process_stack_top_page() -> usize {
 // as decision points from a dozen scattered sites; every reader goes
 // through process_image_record_read(root).stack_low_page.
 //
-// Static path: 256 KiB is a bounded virtual reservation, not an eager
+// Static path: the floor is a bounded virtual reservation, not an eager
 // allocation. It leaves the static BusyBox heap (ending at page 419)
-// below the reservation. The unmapped page immediately below it is the
+// below the reservation; an image whose heap ends higher moves the floor
+// (process_stack_floor, #1041). The unmapped page immediately below it is the
 // guard page; #198 only maps pages in this interval after an EL0
 // translation fault.
 const PROCESS_STACK_LOW_STATIC: usize = 448;
 // Dynamic/musl path: a smaller reservation, since that image's own heap
 // reaches higher.
 const PROCESS_STACK_LOW_DYNAMIC: usize = 504;
+
+// GitHub issue #1041: the floor an image's own heap leaves. A seed above is
+// the floor for any image whose heap ends below it; a larger image (an
+// 8 MiB stress-ng) moves the floor to one page past its heap, and that page
+// is the guard between the two. The validator's DISTRO_ELF_SPAN_MAX keeps
+// the result below the initial stack pages, for both a static image and a
+// dynamic pair (two images, each at most that span, plus the 64 KiB
+// alignment gap between them).
+fn process_stack_floor(seed: usize, heap_last_page: usize) -> usize {
+    static_assert((2 * DISTRO_ELF_SPAN_MAX + 0x10000) / PAGE_SIZE +
+                  PROCESS_HEAP_PAGES_DEFAULT + 1 +
+                  PROCESS_DYNAMIC_STACK_INITIAL_PAGES < USER_SPACE_PAGE_COUNT - 1,
+                  "#1041: two images of the largest span, the heap, the guard and the initial stack fit the 1 GiB space");
+    if (heap_last_page + 1 > seed) { return heap_last_page + 1; }
+    return seed;
+}
 // BYTES, not pages: how much room at the very top of the initial stack
 // page is reserved for the argv/envp/auxv block. Unrelated to the address
 // space's own page count despite both having been 512 (see
@@ -2291,13 +2308,20 @@ private fn process_image_pair_probe(slot: borrow ProcessImageSlot[0],
                     let heap_last_page: usize =
                         heap_first_page +
                         process_image_record_read(root).heap_page_count;
+                    // GitHub issue #1041: as the static path's floor.
+                    process_image_set_stack_low_page(root, evidence,
+                        process_stack_floor(PROCESS_STACK_LOW_DYNAMIC,
+                                            heap_last_page));
                     // The exact page counts that used to be asserted here
                     // were busybox-extras + musl's; any musl binary maps
                     // through this path since #591, so the layout is what
                     // is checked, and the boot's httpd_loader view keeps
                     // the measured numbers for that pair.
                     if (heap_last_page >=
-                        process_image_record_read(root).stack_low_page) {
+                        process_image_record_read(root).stack_low_page ||
+                        process_image_record_read(root).stack_low_page >=
+                            process_stack_top_page() -
+                            PROCESS_DYNAMIC_STACK_INITIAL_PAGES) {
                         process_image_cleanup_root(target);
                         return ProcessImagePairProbeResult::Invalid;
                     }
@@ -2485,7 +2509,14 @@ private fn process_image_map_current(slot: borrow ProcessImageSlot[0],
     let heap_first_page: usize = (plan.extent + PAGE_SIZE - 1) / PAGE_SIZE;
     let heap_last_page: usize =
         heap_first_page + process_image_record_read(root).heap_page_count;
-    if (heap_last_page >= process_image_record_read(root).stack_low_page) {
+    // GitHub issue #1041: the stack floor moves up past a large image's
+    // heap rather than refusing it; the seed is kept for every image small
+    // enough to fit below it, so their layout is unchanged.
+    process_image_set_stack_low_page(root, evidence,
+        process_stack_floor(PROCESS_STACK_LOW_STATIC, heap_last_page));
+    if (heap_last_page >= process_image_record_read(root).stack_low_page ||
+        process_image_record_read(root).stack_low_page >=
+            process_stack_top_page()) {
         process_image_cleanup_root(target);
         return ProcessImageMapResult::OutOfMemory;
     }

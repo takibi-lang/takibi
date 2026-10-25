@@ -2,6 +2,13 @@ const ELF_ET_DYN: u16 = 3;
 const ELF_EM_AARCH64: u16 = 183;
 const ELF_PT_LOAD: u32 = 1;
 const ELF_PT_INTERP: u32 = 3;
+// GitHub issue #1041: the largest PT_LOAD span execve maps, 256 MiB, a
+// quarter of the 1 GiB user space, so a dynamic pair of two such images, the
+// heap and the stack still fit (process_stack_floor's static_assert). It was
+// 2 MiB, one L3 table, a leftover of the address space before #254; static
+// stress-ng spans 8 MiB. Every PT_LOAD page is still allocated at exec, so
+// a span near this bound is refused by the page allocator (ENOMEM) first.
+const DISTRO_ELF_SPAN_MAX: usize = 0x10000000;
 
 struct packed KernelElf64Header {
     ident: [u8; 16];
@@ -299,7 +306,7 @@ fn distro_elf_validate_with_length(image: []u8,
             }
         }
         let entry: usize = header.entry as usize;
-        if (load_count == 0 || entry >= maximum || maximum > 0x1FFFFF) {
+        if (load_count == 0 || entry >= maximum || maximum > DISTRO_ELF_SPAN_MAX) {
             return DistroElfResult::Invalid;
         }
         let mut plan: DistroElfLoadPlan = {

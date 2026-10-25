@@ -32,7 +32,8 @@ fn nested_exec_probe() !{unsafe} {
     if (svc5(NESTED_EXEC, "/nested/denied.sh" as *u8 as usize,
              vector, 0, 0, 0) != 0xFFFFFFFFFFFFFFF3) { nested_fail(); }
     // GitHub issue #1040: an executable ELF the validator refuses -- an
-    // ET_EXEC image, and a PT_LOAD span over 2 MiB -- is ENOEXEC. Both
+    // ET_EXEC image, and a PT_LOAD span over 256 MiB (2 MiB before #1041)
+    // -- is ENOEXEC. Both
     // differ from /etc/interp-other (ELIBBAD) in that one field, so a
     // validator that accepted them would answer ELIBBAD; the old kernel
     // answered by running BusyBox here, and this probe never printed ok.
@@ -55,7 +56,7 @@ fn nested_exec_probe() !{unsafe} {
              vector, 0, 0, 0) != 0xFFFFFFFFFFFFFFF9) { nested_fail(); }
     let line: []const u8 = bs"nested: ELOOP, ENOEXEC, ENOENT, EACCES, E2BIG ok\n";
     svc5(NESTED_WRITE, 1, (unsafe { line as *u8 }) as usize, line.len, 0, 0);
-    // GitHub issue #1039: a 448-byte, five-string argv is within execve's
+    // GitHub issue #1039: a 469-byte (448 before #1041), five-string argv is within execve's
     // limits but left the old 512-byte stack block only 288 bytes for
     // strings, so this exec fail-stopped the kernel after the point of no
     // return. sh ignores the two pads ($0 and $1 of the -c script).
@@ -68,7 +69,10 @@ fn nested_exec_probe() !{unsafe} {
     // BusyBox dispatches on argv[0]'s basename, `sh`, so the shell runs.
     args[0] = "/nested/sh" as *u8 as usize;
     args[1] = "-c" as *u8 as usize;
-    args[2] = "echo nested: child reexec survived" as *u8 as usize;
+    // GitHub issue #1041: /nested/wide-run spans 3 MiB, past the old
+    // 2 MiB bound, and prints its line only if its last .bss byte is
+    // mapped, zero and writable.
+    args[2] = "/nested/wide-run && echo nested: child reexec survived" as *u8 as usize;
     args[3] = pad as *u8 as usize;
     args[4] = pad as *u8 as usize;
     args[5] = 0;

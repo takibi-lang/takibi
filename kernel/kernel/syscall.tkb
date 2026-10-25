@@ -1012,7 +1012,7 @@ private fn syscall_exec_script_prefix(slot: borrow SyscallSlot[0], path_length: 
 // refusal can still be an errno. Past this point the exec is committed and
 // a failure to map fail-stops the caller.
 // GitHub issue #1040: an ELF this validator rejects (ET_EXEC, or a PT_LOAD
-// span over the 2 MiB this kernel maps) is ENOEXEC here. It used to be
+// span over DISTRO_ELF_SPAN_MAX, 2 MiB before #1041) is ENOEXEC here. It used to be
 // passed on as Executable, and the mapping path, which runs the same
 // validator over the same 1 KiB window and could not tell "invalid" from
 // "not found", ran the static BusyBox in its place.
