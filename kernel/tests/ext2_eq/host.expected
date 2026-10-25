@@ -1,0 +1,60 @@
+row base
+1 mkdir base -> 0
+  base dir
+2 mkdir base/d -> 0
+  base/d dir
+3 write base/d/a hello -> 0
+  base/d/a file
+4 rename base/d/a base/b -> 0
+  base/d/a absent
+  base/b file
+5 write base/c one -> 0
+  base/c file
+6 unlink base/c -> 0
+  base/c absent
+7 rmdir base/d -> 0
+  base/d absent
+row otrunc
+1 mkdir otrunc -> 0
+  otrunc dir
+2 write otrunc/f 0123456789 -> 0
+  otrunc/f file
+3 write otrunc/f ab -> 0
+  otrunc/f file
+row overwrite
+1 mkdir overwrite -> 0
+  overwrite dir
+2 write overwrite/f abcdefgh -> 0
+  overwrite/f file
+3 write overwrite/src XY -> 0
+  overwrite/src file
+4 overwrite overwrite/f overwrite/src -> 0
+  overwrite/f file
+  overwrite/src file
+row unlink_indirect
+1 mkdir unlink_indirect -> 0
+  unlink_indirect dir
+2 fill unlink_indirect/f 14 -> 0
+  unlink_indirect/f file
+3 unlink unlink_indirect/f -> 0
+  unlink_indirect/f absent
+row truncate
+1 mkdir truncate -> 0
+  truncate dir
+2 write truncate/f hello -> 0
+  truncate/f file
+3 truncate truncate/f 0 -> 0
+  truncate/f file
+row peer_offset
+1 mkdir peer_offset -> 0
+  peer_offset dir
+2 write peer_offset/f abcdefgh -> 0
+  peer_offset/f file
+3 peer peer_offset/f ab -> 1 read=[]
+  peer_offset/f file
+row dir_indirect
+1 mkdir dir_indirect -> 0
+  dir_indirect dir
+2 files dir_indirect 52 -> 0 created=52
+  dir_indirect dir
+eq done
