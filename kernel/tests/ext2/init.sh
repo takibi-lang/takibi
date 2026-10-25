@@ -82,6 +82,13 @@ fi
 # way any other external command here is: ash forks and execve()s it.
 /bin/user_payload
 
+# GitHub issue #1034: ext2 equivalence, tier B. The script generated from
+# kernel/tests/ext2_eq/ops.eq runs its rows under /eq and logs to /eq-log;
+# the QEMU lane compares the disk with host Linux and libext2fs afterwards.
+# Here, after user_payload has released its ENOSPC fillers, so the rows have
+# the image's free space. Silent: its verdict is the lane's comparison.
+/bin/sh /lib/ext2-eq.sh >/eq-log 2>&1
+
 # GitHub issue #503: what one move between cores costs. Silent on success;
 # its numbers are the kernel's `profile: move-cost` records, collected by the
 # lane runners. Here, before the busy pair starts, so nothing else computes.

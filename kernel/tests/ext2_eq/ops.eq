@@ -10,13 +10,21 @@
 #   write P TEXT        open(O_CREAT|O_TRUNC) and write TEXT
 #   fill P N            write N KiB of '0' in 1 KiB writes
 #   overwrite P SRC     write SRC's bytes at offset 0 without O_TRUNC
-#   truncate P LEN      truncate(2)
 #   files D N           create N empty files with 200-byte names in D
-#   peer P TEXT         read 3 bytes through one fd, rewrite P through
-#                       another with O_TRUNC, then read through the first
 #
-# Only the image's free space bounds a row: the fixture keeps about a
-# hundred free blocks at the point the ash script runs this.
+# The script runs from /etc/init.sh after /bin/user_payload has released its
+# ENOSPC fillers; the rows share the image's free space (about 230 blocks).
+# Every command writing a file is an external one (/bin/busybox APPLET): the
+# kernel's dup3 serves only stdin/stdout aliasing, so a redirected shell
+# builtin cannot write a file.
+#
+# Not rows yet (GitHub issue #1034 records why):
+#   #1022 truncate(2)/ftruncate(2) are unimplemented syscalls, and the
+#         qemu-main view unimplemented_syscalls requires that none is reached.
+#   #1023 needs one fd's offset kept across an O_TRUNC through another; the
+#         shell can only share an fd through dup2, which the kernel refuses.
+#   #1021 needs a doubly-indirect file (over 268 KiB), more than the image's
+#         free space.
 
 row base match -
 mkdir base
@@ -42,16 +50,6 @@ row unlink_indirect differ #1020
 mkdir unlink_indirect
 fill unlink_indirect/f 14
 unlink unlink_indirect/f
-
-row truncate differ #1022
-mkdir truncate
-write truncate/f hello
-truncate truncate/f 0
-
-row peer_offset differ #1023
-mkdir peer_offset
-write peer_offset/f abcdefgh
-peer peer_offset/f ab
 
 row dir_indirect differ #968
 mkdir dir_indirect

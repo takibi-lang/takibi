@@ -4,12 +4,12 @@ row base
 2 mkdir base/d -> 0
   base/d dir
 3 write base/d/a hello -> 0
-  base/d/a file
+  base/d/a file size=5
 4 rename base/d/a base/b -> 0
   base/d/a absent
-  base/b file
+  base/b file size=5
 5 write base/c one -> 0
-  base/c file
+  base/c file size=3
 6 unlink base/c -> 0
   base/c absent
 7 rmdir base/d -> 0
@@ -18,40 +18,26 @@ row otrunc
 1 mkdir otrunc -> 0
   otrunc dir
 2 write otrunc/f 0123456789 -> 0
-  otrunc/f file
+  otrunc/f file size=10
 3 write otrunc/f ab -> 0
-  otrunc/f file
+  otrunc/f file size=2
 row overwrite
 1 mkdir overwrite -> 0
   overwrite dir
 2 write overwrite/f abcdefgh -> 0
-  overwrite/f file
+  overwrite/f file size=8
 3 write overwrite/src XY -> 0
-  overwrite/src file
+  overwrite/src file size=2
 4 overwrite overwrite/f overwrite/src -> 0
-  overwrite/f file
-  overwrite/src file
+  overwrite/f file size=8
+  overwrite/src file size=2
 row unlink_indirect
 1 mkdir unlink_indirect -> 0
   unlink_indirect dir
 2 fill unlink_indirect/f 14 -> 0
-  unlink_indirect/f file
+  unlink_indirect/f file size=14336
 3 unlink unlink_indirect/f -> 0
   unlink_indirect/f absent
-row truncate
-1 mkdir truncate -> 0
-  truncate dir
-2 write truncate/f hello -> 0
-  truncate/f file
-3 truncate truncate/f 0 -> 0
-  truncate/f file
-row peer_offset
-1 mkdir peer_offset -> 0
-  peer_offset dir
-2 write peer_offset/f abcdefgh -> 0
-  peer_offset/f file
-3 peer peer_offset/f ab -> 1 read=[]
-  peer_offset/f file
 row dir_indirect
 1 mkdir dir_indirect -> 0
   dir_indirect dir
