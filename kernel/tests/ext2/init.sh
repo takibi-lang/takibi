@@ -93,33 +93,33 @@ fi
 if [ -e /lib/ext2-eq.enable ]; then
     /bin/sh /lib/ext2-eq.sh >/eq-log 2>&1
     # GitHub issues #968, #1033 and #1085: ask /grow for a thirteenth entry
-    # block. Each 250-byte name takes a 260-byte record, three to a block, so
-    # the 37th mkdir needs block 13, which /grow reaches through its
-    # singly-indirect block, as on Linux. The children go again, the last
-    # from the indirect-named block; /grow stays thirteen blocks long, and
-    # the runner's postcheck asserts it with --indirect-dir. Here, under the
-    # same marker, because
-    # these 74 directory operations cost seconds per boot and only the
-    # comparing lane's postcheck reads the row (#1085).
-    # One name per exec: execve admits 15 argv entries and 512 bytes
-    # (kernel/SYSCALLS.md), so the single 38-argument mkdir this used to be
-    # was E2BIG and /grow was never made (#968's first land). Relative names
-    # in a subshell keep each path short of any path limit.
-    g=nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnggggggggggggggggggggggggggggggggggggggggggggggggg
+    # block. Each 202-byte name takes a 212-byte record, four to a block (the
+    # first block keeps four beside `.` and `..`), so the 49th mkdir needs
+    # block 13, which /grow reaches through its singly-indirect block, as on
+    # Linux. Every child is made first and only then removed, the last from
+    # the indirect-named block; /grow stays thirteen blocks (13312 bytes)
+    # long, and the runner's postcheck asserts it with --indirect-dir. Here,
+    # under the same marker, because these 98 directory operations cost
+    # seconds per boot and only the comparing lane's postcheck reads it
+    # (#1085).
+    # Absolute paths, one per exec: execve admits 15 argv entries and 512
+    # bytes, chdir accepts only `/` and `.`, and a path is at most 255 bytes
+    # (kernel/SYSCALLS.md, the syscall path buffer), so "/grow/" plus a
+    # 202-byte name fits. A 38-argument mkdir was E2BIG, and a `cd /grow`
+    # was ENOENT: they left /grow unmade, then empty, in #968's first two
+    # lands.
+    g=nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
     /bin/mkdir /grow 2>/dev/null
-    (
-        cd /grow || exit 1
-        i=10
-        while [ "$i" -lt 47 ]; do
-            /bin/mkdir "$g$i" 2>/dev/null
-            i=$((i + 1))
-        done
-        i=10
-        while [ "$i" -lt 47 ]; do
-            /bin/rmdir "$g$i" 2>/dev/null
-            i=$((i + 1))
-        done
-    )
+    i=10
+    while [ "$i" -lt 59 ]; do
+        /bin/mkdir "/grow/$g$i" 2>/dev/null
+        i=$((i + 1))
+    done
+    i=10
+    while [ "$i" -lt 59 ]; do
+        /bin/rmdir "/grow/$g$i" 2>/dev/null
+        i=$((i + 1))
+    done
 fi
 
 # GitHub issue #503: what one move between cores costs. Silent on success;
