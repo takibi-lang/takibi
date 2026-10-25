@@ -280,6 +280,13 @@ const SYSCALL_SCRIPT_LINE_MAX: usize = 256;
 // so its size does not limit the file size userspace can consume. execve uses
 // three disjoint regions of that same invocation-local buffer for argv, path,
 // and script-header staging; it never overlaps a file-data syscall.
+// GitHub issue #1066: the ELF header/program-table window execve validates
+// at syscall time. The mapping path's EXEC_METADATA_SIZE
+// (kernel/init/test_driver.tkb) is defined as this constant, so both run
+// distro_elf_validate_with_length over the same prefix and refuse the same
+// files; a change to one size is a change to both.
+const SYSCALL_EXEC_ELF_WINDOW_SIZE: usize = 1024;
+
 struct SyscallScratch {
     file_buffer: [u8; KERNEL_BLOCK_SIZE];
     path_buffer: [u8; 256];
@@ -293,7 +300,7 @@ struct SyscallScratch {
     interpreter_buffer: [u8; 64];
     // The ELF plan retains its metadata view. Keep this per-core window
     // separate from argv/path staging while resolving script interpreters.
-    elf_buffer: [u8; KERNEL_BLOCK_SIZE];
+    elf_buffer: [u8; SYSCALL_EXEC_ELF_WINDOW_SIZE];
 }
 
 // GitHub issue #203: per-call scratch. Every function that touches it sees
@@ -963,8 +970,9 @@ private fn syscall_exec_elf_interpreter(slot: borrow SyscallSlot[0], mount: Ext2
         -> SyscallExecFormatResult !{unsafe} {
     // ELF probing must not overwrite the collected script argv or path.
     zero_fill(syscall_scratch[slot.index].elf_buffer as []u8);
-    let window: [u8; KERNEL_BLOCK_SIZE..] =
-        syscall_scratch[slot.index].elf_buffer as [u8; KERNEL_BLOCK_SIZE..];
+    let window: [u8; SYSCALL_EXEC_ELF_WINDOW_SIZE..] =
+        syscall_scratch[slot.index].elf_buffer
+            as [u8; SYSCALL_EXEC_ELF_WINDOW_SIZE..];
     let file_length: usize = ext2_regular_file_size(mount, inode);
     // The mapping path refuses the same lengths (kernel_exec_resolve_ext2_
     // inode_at); refusing them here is what keeps that refusal reachable
@@ -979,10 +987,10 @@ private fn syscall_exec_elf_interpreter(slot: borrow SyscallSlot[0], mount: Ext2
         }
         Ext2ReadResult::Read(read) => { read }
     };
-    if (length > KERNEL_BLOCK_SIZE) {
+    if (length > SYSCALL_EXEC_ELF_WINDOW_SIZE) {
         return SyscallExecFormatResult::Unreadable;
     }
-    let bounded: {0..<KERNEL_BLOCK_SIZE + 1 as usize} = length;
+    let bounded: {0..<SYSCALL_EXEC_ELF_WINDOW_SIZE + 1 as usize} = length;
     let plan: DistroElfLoadPlan =
         match distro_elf_validate_with_length(window[0..<bounded],
                                               file_length) {
@@ -1012,7 +1020,7 @@ private fn syscall_exec_elf_interpreter(slot: borrow SyscallSlot[0], mount: Ext2
     // the segment.
     let mut target: usize = 0;
     let mut ended: bool = false;
-    for position: usize in 0..<KERNEL_BLOCK_SIZE {
+    for position: usize in 0..<SYSCALL_EXEC_ELF_WINDOW_SIZE {
         if (position > offset && position < offset + named - 1 &&
             ended == false) {
             let byte: u8 = window[position];

@@ -52,7 +52,10 @@ fn kernel_boot_mount_configure(mount: Ext2Mount) {
 // ordinary exec has one reusable window, while a dynamic application/
 // interpreter pair needs two concurrent windows. PT_LOAD data itself always
 // streams from ext2.
-const EXEC_METADATA_SIZE: usize = 1024;
+// GitHub issue #1066: the same window syscall_exec_elf_interpreter
+// validates, by definition, so syscall time and the mapping path refuse the
+// same files.
+const EXEC_METADATA_SIZE: usize = SYSCALL_EXEC_ELF_WINDOW_SIZE;
 let mut rootfs_metadata: [u8; EXEC_METADATA_SIZE];
 // GitHub issue #610: an execve's ELF metadata windows -- the image the
 // pathname's inode names (#1065) and a dynamic exec's interpreter. A resolved plan's
