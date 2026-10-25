@@ -323,8 +323,9 @@ condition below applies, and reports the land afterwards.
   retract. [active] #1006
 - 2026-10-25 The evidence a later write-up of Takibi's additions over Rust
   would need is collected as a by-product of ordinary work, never as a
-  project: every defect followup answers whether safe Rust, klint, Kani or
-  Flux would have caught the defect (#1043, question 9 of the
+  project: every defect followup answers whether safe Rust, klint, Kani,
+  Verus or Flux would have caught the defect (bounded and deductive
+  verifiers apart) (#1043, question 9 of the
   defect-followup skill); the trust ledger is a dated series with each
   row attributed to the rule that retired it (#986 slice 1); #742 stage 1
   records each program beside the same program under Linux on the same

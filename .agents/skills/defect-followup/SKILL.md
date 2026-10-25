@@ -39,12 +39,16 @@ answer on the diff and the tests actually run.
 9. **Rust baseline.** Would the Rust toolchain as a kernel uses it have
    caught the defect, and by what: safe Rust's type system (R-type), a
    run-time panic only when the path executes (R-panic), a lint outside
-   rustc such as klint or clippy (R-lint), a bounded verifier such as
-   Kani, Miri, Verus or Flux (R-verify), nothing (R-none, naming the Takibi
-   rule or token that does), or not applicable because the defect is in
-   Takibi's own compiler or tooling (N/A)? Add one row to the log on #1043
-   with the verdict and one line of reasoning; an uncertain verdict says
-   so in its Notes cell. Record only; do not implement.
+   rustc such as klint or clippy (R-lint), a bounded or execution-based
+   tool that explores a limited set of runs such as Kani or Miri
+   (R-bounded), a deductive verifier that proves all runs from written
+   pre/postconditions and invariants such as Verus or Flux (R-deductive;
+   name in one line the specification it would have needed), nothing
+   (R-none, naming the Takibi rule or token that does), or not applicable
+   because the defect is in Takibi's own compiler or tooling (N/A)? Add one
+   row to the log on #1043 with the verdict and one line of reasoning; an
+   uncertain verdict says so in its Notes cell. Record only; do not
+   implement.
 
 ## Ask the maintainer
 
