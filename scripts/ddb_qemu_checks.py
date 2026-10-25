@@ -14,6 +14,8 @@ SIGNALS = (r"(none|sig(hup|int|quit|ill|trap|abrt|bus|fpe|kill|usr1|segv|usr2|pi
 
 # name, expression, minimum count, maximum count, applicable BREAK source.
 # Entries are kept in the old shell chain's order for reviewability.
+# GitHub issue #959: frame-pending is yes or no on QEMU: virtio-net's
+# lock-free read never answers unknown once the queue is live.
 REQUIREMENTS = (
     ('debugger banner', '^ddb: interrupt-safe UART debugger$', 1, None, 'both'),
     ('world stop acknowledgement', '^ddb: world-stop complete mask=0x{stopmask}$', 1, None, 'both'),
@@ -37,14 +39,14 @@ REQUIREMENTS = (
     ('page run counters', '^ddb: page-runs calls=[1-9][0-9]* visits=[1-9][0-9]* ticks=[0-9]+ max-ticks=[0-9]+ freq=[1-9][0-9]*$', 1, None, 'both'),
     ('fd table fields', '^ddb: fds pid=[0-9]+ slots=[0-9]+$', 1, None, 'both'),
     ('process count', '^ddb: ps count=[1-9][0-9]* truncated=[01]$', 1, None, 'both'),
-    ('PID 1 signal fields in ps', '^ddb: ps pid=1 ppid=0 state=[0-9]+ wait=[0-9]+( waker=[a-z-]+( queued=[0-9]+( low-water=[0-9]+)?| frame-pending=(yes|no|unknown) connection-pending=(yes|no|unknown))?)? root=[1-9][0-9]* sp=0x[0-9a-f]+ pending={sigset} masked={sigset} owner=(none|[0-9]+) mask=0x[0-9a-f]+ core0=[01] cmd="[^"]*"\\+?$', 1, None, 'both'),
+    ('PID 1 signal fields in ps', '^ddb: ps pid=1 ppid=0 state=[0-9]+ wait=[0-9]+( waker=[a-z-]+( queued=[0-9]+( low-water=[0-9]+)?| frame-pending=(yes|no) connection-pending=(yes|no|unknown))?)? root=[1-9][0-9]* sp=0x[0-9a-f]+ pending={sigset} masked={sigset} owner=(none|[0-9]+) mask=0x[0-9a-f]+ core0=[01] cmd="[^"]*"\\+?$', 1, None, 'both'),
     # GitHub issue #887: ps names each process's image, and the kernel log
     # names each exit of an init child, so a respawn loop (#881) shows as
     # one image under new pids.
     ('init child command in ps', '^ddb: ps pid=[1-9][0-9]* ppid=1 .* cmd="/bin/[^"]+"\\+?$', 1, None, 'uart'),
     ('init child exit logged', '^exit: init child pid=[1-9][0-9]* image="/bin/peer-read" code=0 withheld=[0-9]+$', 1, None, 'uart'),
     ('stack count', '^ddb: stacks cpus={cpus} processes=', 1, None, 'both'),
-    ('PID 1 signal fields in proc', '^ddb: proc pid=1 ppid=0 state=[0-9]+ wait=[0-9]+( waker=[a-z-]+( queued=[0-9]+( low-water=[0-9]+)?| frame-pending=(yes|no|unknown) connection-pending=(yes|no|unknown))?)? root=[1-9][0-9]* sp=0x[0-9a-f]+ pending={sigset} masked={sigset} owner=(none|[0-9]+) mask=0x[0-9a-f]+ core0=[01] cmd="[^"]*"\\+?$', 1, None, 'both'),
+    ('PID 1 signal fields in proc', '^ddb: proc pid=1 ppid=0 state=[0-9]+ wait=[0-9]+( waker=[a-z-]+( queued=[0-9]+( low-water=[0-9]+)?| frame-pending=(yes|no) connection-pending=(yes|no|unknown))?)? root=[1-9][0-9]* sp=0x[0-9a-f]+ pending={sigset} masked={sigset} owner=(none|[0-9]+) mask=0x[0-9a-f]+ core0=[01] cmd="[^"]*"\\+?$', 1, None, 'both'),
     ('backtrace sources', '^ddb: bt source=(cpu cpu=[0-9]+|saved) pid=[0-9]+ stack=0x[0-9a-f]+\\.\\.0x[0-9a-f]+$', 2, None, 'both'),
     ('backtrace roots', '^ddb: bt frame=0 pc=0x[0-9a-f]+ boundary=(exception|user|assembly|assembly-bridge)$', 2, None, 'both'),
     ('backtrace termination', '^ddb: bt (complete frames=[1-9][0-9]*|stop=(assembly-boundary|depth-limit|invalid-return-pc|nonmonotonic-frame|out-of-range) fp=0x[0-9a-f]+)$', 1, None, 'both'),
@@ -111,11 +113,7 @@ REQUIREMENTS = (
     ('command inventory', '^commands: oops regs intr sched current vm fds ps stacks wait proc PID bt \\[PID\\|cpu N\\] trace \\[on\\|off\\|all\\|omit EVENT\\|pid PID\\|pid none\\] events unimpl log xk ADDRESS \\[COUNT\\] xp PHYSICAL \\[COUNT\\] xu PID ADDRESS \\[COUNT\\] profile stop\\|dump help continue$', 1, None, 'both'),
     ('profile dump without a session', '^ddb: profile nothing to dump$', 1, None, 'both'),
     ('profile usage', '^ddb: usage: profile stop \\| profile dump \\(start: write to /proc/takibi/profile\\)$', 1, None, 'both'),
-    ('live wait current fields', '^ddb: wait current=[0-9]+ state=[a-z-]+ reason=[a-z-]+( queued=[0-9]+( low-water=[0-9]+)?| frame-pending=(yes|no|unknown) connection-pending=(yes|no|unknown))? awaited=[01]$', 1, None, 'both'),
-    # GitHub issue #959: virtio-net's lock-free RX-pending read answers yes or
-    # no once the queue is live; unknown here means the read regressed to
-    # #920's placeholder.
-    ('no unknown frame-pending on virtio', '^ddb: .*frame-pending=unknown', 0, 0, 'both'),
+    ('live wait current fields', '^ddb: wait current=[0-9]+ state=[a-z-]+ reason=[a-z-]+( queued=[0-9]+( low-water=[0-9]+)?| frame-pending=(yes|no) connection-pending=(yes|no|unknown))? awaited=[01]$', 1, None, 'both'),
     ('live wait graph summary', '^ddb: wait edges=[0-9]+ blocked=[0-9]+ unknown=[0-9]+ truncated=[01]$', 1, None, 'both'),
     ('synthetic current net wait', '^ddb: wait current=3 state=running reason=net-rx frame-pending=no connection-pending=unknown awaited=1$', 1, None, 'both'),
     ('synthetic grandparent wait', '^ddb: wait pid=1 state=blocked waits-for child pid=2 state=blocked$', 1, None, 'both'),
