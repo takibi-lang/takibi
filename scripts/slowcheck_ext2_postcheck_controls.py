@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 
+from check_ext2_postcheck_lanes import problems as lane_problems
 from pass_line import CaseCount, report_pass
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
@@ -108,6 +109,19 @@ def main():
         expect("report-only", group, 0, "ext2 postcheck report-only: FAIL",
                "--report-only")
         expect("no-image", work / "absent.img", 1, "no disk image at")
+
+    # The lane check: a writable drive without the postcheck is refused; a
+    # read-only drive, a commented one, and a runner that calls it are not.
+    drive = '    -drive "file=$IMAGE,if=none,format=raw,id=vd0" \\\n'
+    for name, text, want in (
+            ("lane-missing", drive, 1),
+            ("lane-readonly", drive.replace("raw,", "raw,readonly=on,"), 0),
+            ("lane-comment", "# " + drive, 0),
+            ("lane-calls", drive + 'python3 scripts/ext2_postcheck.py\n', 0)):
+        CASES.note()
+        got = len(lane_problems(name, text)[0])
+        if got != want:
+            failures.append(f"{name}: {got} problems, wanted {want}")
 
     for failure in failures:
         print(f"ERROR\text2-postcheck-controls: {failure}")

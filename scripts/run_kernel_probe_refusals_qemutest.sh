@@ -83,6 +83,11 @@ with (artifacts / 'qemu.log').open('wb') as log:
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait()
+# GitHub issue #1033: QEMU has stopped; the host's e2fsprogs judge the disk.
+if subprocess.run([sys.executable, str(root / 'scripts/ext2_postcheck.py'),
+                   '--label', 'kernel/qemu probe-refusals', '--image', str(disk),
+                   '--out', str(artifacts), '--uart-log', str(uart)]).returncode:
+    raise SystemExit('FAIL probe-refusals: the guest\'s ext2 disk failed its postcheck')
 text = uart.read_text(errors='replace').replace('\r', '')
 names = ('console contention', 'schedule contention',
          'pid contention', 'fd refcount contention', 'asid contention',

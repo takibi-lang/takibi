@@ -100,4 +100,9 @@ python3 "$REPO_ROOT/scripts/run_kernel_uart_driver.py" \
     --network-ready-file "$NETWORK_READY" \
     --stdin "$ASH_DIR/ash.stdin" --expected "$ASH_DIR/ash.expected" \
     --timeout "$TIMEOUT_SECS" --ash-only --validate-ash
+# GitHub issue #1033: the guest wrote this disk; stop QEMU so nothing is
+# mid-write, then judge it with the host's e2fsprogs.
+cleanup
+python3 "$REPO_ROOT/scripts/ext2_postcheck.py" --label "$RUN_LABEL ash" \
+    --image "$QEMU_EXT2_IMAGE" --out "$ARTIFACT_DIR" --uart-log "${KERNEL_QEMU_ASH_UART_LOG:-$ARTIFACT_DIR/uart.log}"
 echo "PASS $RUN_LABEL ash TCP integration"

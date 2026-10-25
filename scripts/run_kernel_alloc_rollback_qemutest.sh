@@ -337,4 +337,9 @@ if [ -n "$missing" ]; then
     exit 1
 fi
 
+# GitHub issue #1033: the guest wrote this disk; stop QEMU so nothing is
+# mid-write, then judge it with the host's e2fsprogs.
+stop_qemu
+python3 "$REPO_ROOT/scripts/ext2_postcheck.py" --label "kernel/qemu alloc-rollback-$ALLOC_ROLLBACK_POINT" \
+    --image "$QEMU_EXT2_IMAGE" --out "$ARTIFACT_POINT_DIR" --uart-log "$UART_LOG"
 echo "PASS kernel/qemu alloc-rollback ($ALLOC_ROLLBACK_POINT): the caller reported the refusal and every record and page came back"

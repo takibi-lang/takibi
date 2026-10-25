@@ -167,6 +167,14 @@ cleanup_and_archive() {
     archive_on_failure "$status"
     return "$status"
 }
+# GitHub issue #1033: the guest wrote this disk; stop QEMU so nothing is
+# mid-write, then judge it with the host's e2fsprogs. Called before
+# every PASS this runner prints.
+ext2_postcheck_after_stop() {
+    cleanup
+    python3 "$REPO_ROOT/scripts/ext2_postcheck.py" --label "kernel/qemu oops-$MODE" \
+        --image "$QEMU_EXT2_IMAGE" --out "$ARTIFACT_DIR" --uart-log "$UART_LOG"
+}
 trap cleanup_and_archive EXIT
 trap 'cleanup; exit 130' INT TERM HUP
 
@@ -474,6 +482,7 @@ if [ "$MODE" = peer_fault ] || [ "$MODE" = peer_fault_start_window ] || [ "$MODE
         sed 's/^/  /' "$UART_LOG" >&2 || true
         exit 1
     fi
+    ext2_postcheck_after_stop
     echo "PASS kernel/qemu oops: the peer's fail-stop stopped core 0 and reported alone"
     exit 0
 fi
@@ -523,6 +532,7 @@ if [ "$MODE" = concurrent_fault ]; then
         sed 's/^/  /' "$UART_LOG" >&2 || true
         exit 1
     fi
+    ext2_postcheck_after_stop
     echo "PASS kernel/qemu oops: two concurrent faults both reported, in fault order"
     exit 0
 fi
@@ -740,4 +750,5 @@ assert report["symbol"]["function"] == "kernel_syscall_child_exec_return", repor
 PY_CAPTURE
 fi
 
+ext2_postcheck_after_stop
 echo "PASS kernel/qemu oops: UART report and CrashSnapshot valid"

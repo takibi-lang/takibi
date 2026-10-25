@@ -151,3 +151,8 @@ if [ ! -f "$VERDICT" ]; then
 fi
 cat "$VERDICT"
 grep -q '^PASS ' "$VERDICT"
+# GitHub issue #1033: the guest wrote this disk; stop QEMU so nothing is
+# mid-write, then judge it with the host's e2fsprogs.
+cleanup
+python3 "$REPO_ROOT/scripts/ext2_postcheck.py" --label "kernel/qemu uart-wake-$MODE" \
+    --image "$QEMU_EXT2_IMAGE" --out "$ARTIFACT_DIR" --uart-log "$ARTIFACT_DIR/uart.log"

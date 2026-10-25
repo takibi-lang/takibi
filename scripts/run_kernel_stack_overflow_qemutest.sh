@@ -155,4 +155,9 @@ if [ "$parked_sp" -le "$overflow_bottom" ] || [ "$parked_sp" -gt "$overflow_top"
     exit 1
 fi
 
+# GitHub issue #1033: the guest wrote this disk; stop QEMU so nothing is
+# mid-write, then judge it with the host's e2fsprogs.
+cleanup
+python3 "$REPO_ROOT/scripts/ext2_postcheck.py" --label "kernel/qemu stack-overflow-$1" \
+    --image "$QEMU_EXT2_IMAGE" --out "$ARTIFACT_DIR" --uart-log "$UART_LOG"
 echo "PASS kernel/qemu stack-overflow ($1): entry guard reported the overflowed stack, from a stack of its own"

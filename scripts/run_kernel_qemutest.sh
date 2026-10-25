@@ -378,33 +378,18 @@ fi
 # lengths, dead records, a grown block, i_size and i_blocks -- and reading it
 # back through the same code that wrote it cannot judge whether it is ext2.
 # The disk this lane handed QEMU is a file, so the host's own e2fsck reads
-# what the guest left on it. /etc is asserted grown, and the directories the
-# fixture made and kept are asserted present, so the check is known to be
-# reading the structure it exists for rather than passing an untouched image.
-debugfs -R 'stat /etc' "$QEMU_EXT2_IMAGE" >"$ARTIFACT_DIR/etc-stat.log" 2>&1
-etc_size="$(sed -n 's/^User:.*Size: \([0-9][0-9]*\)$/\1/p' \
-    "$ARTIFACT_DIR/etc-stat.log")"
-if [ -z "$etc_size" ] || [ "$etc_size" -le 1024 ]; then
-    echo "FAIL $RUN_LABEL: /etc on the guest's disk is not past one block (size '${etc_size}')" >&2
-    archive_reason="ext2 /etc not grown"
-    exit 1
-fi
-# /etc/moved and /kept are the ones the ash script made through mkdirat and
-# kept -- /etc/moved being /etc/made after its renameat -- so e2fsck judges
-# directories made and renamed through the syscalls.
-for kept_directory in /etc/moved /kept; do
-    debugfs -R "stat $kept_directory" "$QEMU_EXT2_IMAGE" \
-        >"$ARTIFACT_DIR/kept-stat.log" 2>&1
-    if ! grep -q 'Type: directory' "$ARTIFACT_DIR/kept-stat.log"; then
-        echo "FAIL $RUN_LABEL: $kept_directory is not a directory on the guest's disk" >&2
-        archive_reason="ext2 kept directory absent: $kept_directory"
-        exit 1
-    fi
-done
-if ! e2fsck -fn "$QEMU_EXT2_IMAGE" >"$ARTIFACT_DIR/e2fsck.log" 2>&1; then
-    sed 's/^/  /' "$ARTIFACT_DIR/e2fsck.log" >&2
-    echo "FAIL $RUN_LABEL: e2fsck rejected the disk the guest wrote" >&2
-    archive_reason="e2fsck"
+# what the guest left on it (scripts/ext2_postcheck.py, #1033: also the free
+# counters against the bitmaps and the known divergences). /etc is asserted
+# grown, and /etc/moved and /kept -- made through mkdirat and kept, /etc/moved
+# being /etc/made after its renameat -- asserted present, so the check is
+# known to be reading the structure it exists for rather than passing an
+# untouched image.
+if ! python3 "$REPO_ROOT/scripts/ext2_postcheck.py" --label "$RUN_LABEL" \
+        --image "$QEMU_EXT2_IMAGE" --out "$ARTIFACT_DIR" \
+        --uart-log "$UART_LOG" --grown-dir /etc \
+        --dir /etc/moved --dir /kept; then
+    echo "FAIL $RUN_LABEL: the guest's ext2 disk failed its postcheck" >&2
+    archive_reason="ext2 postcheck"
     exit 1
 fi
 

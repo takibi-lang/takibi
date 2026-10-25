@@ -2438,7 +2438,7 @@ _kernelcheck-debug-return-abi-per-field-registers:
 ## its TCP-backed UART console, and forward localhost:18080 to guest httpd.
 ## Exit miniterm with Ctrl-].
 kernelsh-qemu: kernelbuild-qemu $(KERNEL_SHELL_EXT2_IMAGE)
-	@bash scripts/run_kernel_shell_qemu.sh
+	@TAKIBI_EXT2_POSTCHECK=report-only bash scripts/run_kernel_shell_qemu.sh
 
 ## kernelsh-rpi5: inject the standalone kernel over SWD and attach the current
 ## terminal to the RPi5 Debug Probe UART. Requires python3-serial (the Debian

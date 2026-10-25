@@ -251,4 +251,9 @@ python3 "$REPO_ROOT/scripts/validate_kernel_gdb_state.py" \
 python3 "$REPO_ROOT/scripts/validate_kernel_ddb_qemu.py" \
     --log "$UART_LOG" --metadata "$ARTIFACT_DIR/validation.json"
 
+# GitHub issue #1033: the guest wrote this disk; stop QEMU so nothing is
+# mid-write, then judge it with the host's e2fsprogs.
+cleanup
+python3 "$REPO_ROOT/scripts/ext2_postcheck.py" --label "kernel/qemu ddb-$BREAK_SOURCE" \
+    --image "$QEMU_EXT2_IMAGE" --out "$ARTIFACT_DIR" --uart-log "$UART_LOG"
 echo "PASS kernel/qemu ddb: $BREAK_SOURCE BREAK inspected and resumed"

@@ -158,12 +158,27 @@ cleanup() {
 cleanup_and_archive() {
     local status=$?
     cleanup
+    # GitHub issue #1033: QEMU is stopped, so the host's e2fsprogs judge the
+    # disk the guest wrote. kernelsh-qemu sets the report-only mode: a person
+    # may quit the console while a write is in flight.
+    if [ "$status" -eq 0 ]; then
+        local postcheck_mode=()
+        if [ "${TAKIBI_EXT2_POSTCHECK:-}" = report-only ]; then
+            postcheck_mode=(--report-only)
+        fi
+        python3 "$REPO_ROOT/scripts/ext2_postcheck.py" \
+            --label "kernel-shell-qemu" --image "$SHELL_EXT2_IMAGE" \
+            --out "$ARTIFACT_DIR" --uart-log "$TRANSCRIPT" \
+            "${postcheck_mode[@]}" || status=$?
+    fi
     if [ "$status" -ne 0 ]; then
         KERNEL_QEMU_LABEL="kernel-shell-qemu" KERNEL_QEMU_ELF="${ELF:-unknown}" \
             bash "$REPO_ROOT/scripts/archive_kernel_failure.sh" "$ARTIFACT_DIR" \
             "$REPO_ROOT/_build/kernel-shell-qemu-failures" "exit status $status" || true
     fi
-    return "$status"
+    # exit, not return: an EXIT trap's return leaves the script's status as
+    # it was, and a postcheck failure has to become the status.
+    exit "$status"
 }
 trap cleanup_and_archive EXIT
 trap 'cleanup; exit 130' INT TERM HUP
