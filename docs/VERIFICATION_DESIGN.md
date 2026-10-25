@@ -118,7 +118,7 @@ the walk decides it exactly. A separate bitmask would duplicate it.
 
 ### Tracing the state (#976)
 
-`takibi --trace-init-flow FUNC` writes, to stderr, the state after each
+`takibi --internal-trace-init-flow FUNC` writes, to stderr, the state after each
 statement of every function named `FUNC` (nested statements included, in
 check order), one line per tracked leaf:
 
@@ -280,7 +280,7 @@ lib/runtime_bounds.ml. Stage 2 covers index bounds as well as init.
    Done: Init_flow.slice_index asks `entails` for `len - j - 1 >= 0` at
    every index into an immutable slice binding left unproven, only in the
    real check (never a loop's trial run), and writes rule `index` under
-   the init header; `--range-obligation-fault-control` plants a wrong
+   the init header; `--internal-range-obligation-fault-control` plants a wrong
    proof that z3 must refute.
 2. **Index bounds from versioned locals (#978).** Closed without new code
    (maintainer, 2026-10-25): #978, #798 and #1007 already decide indexes

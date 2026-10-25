@@ -54,7 +54,7 @@ end)
 
 let pad = "#pad"
 
-(* GitHub issue #976: --trace-init-flow FUNC. When [trace_func] names the
+(* GitHub issue #976: --internal-trace-init-flow FUNC. When [trace_func] names the
    function being checked, the state after each top-level-or-nested
    statement is written to [trace_out] as lines of the stable form
 
@@ -1054,7 +1054,7 @@ let check
      only when every visit entails it. Each proof writes an index
      obligation z3 re-checks. *)
   (* GitHub issue #1011: a site's decision is None (proven) or the reason
-     it is not, worded like --trace-init-flow (#976): the claim that failed
+     it is not, worded like --internal-trace-init-flow (#976): the claim that failed
      and the path facts at the first visit that failed. *)
   let index_decisions : (Ast.loc, string option) Hashtbl.t = Hashtbl.create 8 in
   let slice_index (st : state) (b : Ast.expr) (j : Ast.expr) =

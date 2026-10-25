@@ -16061,7 +16061,7 @@ let codegen_tests = [
 
   (* GitHub issue #1011: the --forbid-trap report for an unproven index
      into an immutable slice binding names the claim Init_flow failed and
-     its path facts, worded like --trace-init-flow (#976), and not the
+     its path facts, worded like --internal-trace-init-flow (#976), and not the
      runtime order graph's reason (the second shape is one the graph had a
      reason for: the index was written after the guard). *)
   Alcotest.test_case "#1011 unproven immutable slice index names init-flow facts" `Quick
@@ -26330,7 +26330,7 @@ scratch let mut sb: S975;
            (contains_substring text "(assert (>= (+ x_x (- 16)) 0))");
          Alcotest.(check bool) "min defined" true
            (contains_substring text "(assert (= x_s (ite (<= x_x 28) x_x 28)))"));
-    t "issue #976: --trace-init-flow shows where coverage was lost"
+    t "issue #976: --internal-trace-init-flow shows where coverage was lost"
       (fun () ->
          let buf = Buffer.create 256 in
          Init_flow.trace_func := Some "f";

@@ -366,7 +366,7 @@ def control(takibi: str) -> int:
         out_dir = tmp_path / "obligations"
         run = subprocess.run(
             [takibi, str(src), "-o", str(tmp_path / "control.o"),
-             "--range-obligation-fault-control",
+             "--internal-range-obligation-fault-control",
              "--emit-range-obligations", str(out_dir)],
             text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         if run.returncode != 0:

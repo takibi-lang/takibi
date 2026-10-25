@@ -180,12 +180,12 @@ let () =
     flag "--emit-protocol-source" Generated ~arg:dir (set emit_protocol_source)
       "write each protocol's generated source and exit";
     (* GitHub issue #976 (docs/VERIFICATION_DESIGN.md). *)
-    flag "--trace-init-flow" Development ~arg:("<function>", "a function name")
+    flag "--internal-trace-init-flow" Development ~arg:("<function>", "a function name")
       (Arg (fun f -> Takibi.Init_flow.trace_func := Some f))
       "print a function's init state after each statement";
     (* GitHub issue #952: plants the unsound rules the z3 check must catch;
        never used in a real build. *)
-    flag "--range-obligation-fault-control" Development
+    flag "--internal-range-obligation-fault-control" Development
       (No_arg (fun () ->
          Takibi.Range_obligation.fault_unsigned_negative_lo := true;
          Takibi.Range_obligation.fault_min_max_placeholder := true;

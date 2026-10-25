@@ -210,7 +210,7 @@ let write_dir dir =
       close_out oc)
     table
 
-(* Fault control only (--range-obligation-fault-control): plants #935's
+(* Fault control only (--internal-range-obligation-fault-control): plants #935's
    rule, an unsigned base keeping a negative lower bound, so
    scripts/buildcheck_range_obligations.py can show it reports the
    counterexample. Never set in a real build. *)

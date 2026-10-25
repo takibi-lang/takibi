@@ -66,5 +66,5 @@
 
 | Flag | Argument | Meaning |
 | --- | --- | --- |
-| `--trace-init-flow` | `<function>` | print a function's init state after each statement |
-| `--range-obligation-fault-control` | - | plant known-unsound range rules (z3 check's failing control) |
+| `--internal-trace-init-flow` | `<function>` | print a function's init state after each statement |
+| `--internal-range-obligation-fault-control` | - | plant known-unsound range rules (z3 check's failing control) |

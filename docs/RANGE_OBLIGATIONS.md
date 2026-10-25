@@ -16,7 +16,7 @@ of its interval arithmetic, at the machine's own bit width.
   the check. On the QEMU kernel (2026-10-23): 513 distinct obligations from
   1790 sites; 3.6 s cold on 8 threads, 0.1 s with the verdict cache.
 - `make range-obligation-control` (in `modelcheck`) compiles a Sub with #935's
-  rule planted (`--range-obligation-fault-control`: an unsigned base keeps a
+  rule planted (`--internal-range-obligation-fault-control`: an unsigned base keeps a
   negative lower bound) and a `max` with #961's placeholder planted (an
   unknown u64 bound read as 10^9, #984), and requires z3 to report each
   counterexample. GitHub issue #960: the same flag plants the three historical
