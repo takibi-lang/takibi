@@ -16002,6 +16002,38 @@ let codegen_tests = [
           return 0;
         }");
 
+  (* GitHub issue #1011: the --forbid-trap report for an unproven index
+     into an immutable slice binding names the claim Init_flow failed and
+     its path facts, worded like --trace-init-flow (#976), and not the
+     runtime order graph's reason (the second shape is one the graph had a
+     reason for: the index was written after the guard). *)
+  Alcotest.test_case "#1011 unproven immutable slice index names init-flow facts" `Quick
+    (expect_single_trap_reason
+       "; init-flow cannot show n + 1 < s.len; path facts: s.len + -1*n - 1 >= 0 (#1007"
+       "fn f1011_short(s: []const u8, m: usize) -> u8 {
+          let n: usize = m;
+          if (n < s.len) { return s[n + 1]; }
+          return 0;
+        }");
+
+  Alcotest.test_case "#1011 init-flow reason replaces the order graph's" `Quick
+    (fun () ->
+      expect_single_trap_reason "; init-flow cannot show index@"
+        "fn f1011_write(text: []const u8) -> u8 {
+           let mut index: usize = 0;
+           let mut total: u8 = 0;
+           while (index < text.len) {
+             index = index + 1;
+             total = total + text[index];
+           }
+           return total;
+         }" ();
+      match !Llvm_gen.trap_sites with
+      | [ (_, what) ] ->
+          let n = List.length (String.split_on_char ';' what) in
+          Alcotest.(check int) "exactly the init-flow reason and its facts" 3 n
+      | _ -> ());
+
   Alcotest.test_case "#798 a fact on an older version proves no index" `Quick
     (expect_trap_sites 1
        "fn f798_loop(bytes: []const u8) -> u8 {

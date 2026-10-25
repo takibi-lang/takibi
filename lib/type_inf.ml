@@ -11327,20 +11327,21 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                   ~variant_cases:(Hashtbl.find_opt init_variants)
                   ~variant_payload:(fun v c -> Hashtbl.find_opt init_payloads (v, c))
                   ~linear_owner:(Hashtbl.mem init_linear)
-                  ~decide_index:(fun loc ok ->
+                  ~decide_index:(fun loc reason ->
                     let key = (overload_key fdef.name fdef.params, loc) in
-                    if ok then begin
-                      Hashtbl.replace runtime_slice_index_proven_at key ();
-                      Hashtbl.remove range_fact_unavailable_at key
-                    end else begin
-                      Hashtbl.remove runtime_slice_index_proven_at key;
-                      if not (Hashtbl.mem range_fact_unavailable_at key) then
+                    match reason with
+                    | None ->
+                        Hashtbl.replace runtime_slice_index_proven_at key ();
+                        Hashtbl.remove range_fact_unavailable_at key
+                    | Some r ->
+                        (* GitHub issue #1011: Init_flow alone decides this
+                           shape (#1007), so its reason replaces any the
+                           runtime order graph recorded. *)
+                        Hashtbl.remove runtime_slice_index_proven_at key;
                         Hashtbl.replace range_fact_unavailable_at key
-                          "the linear path facts do not entail the index below \
-                           the slice length (#1007: an index into an immutable \
-                           slice binding is decided by the init-flow checker \
-                           alone)"
-                    end)
+                          (r ^ " (#1007: an index into an immutable slice \
+                                binding is decided by the init-flow checker \
+                                alone)"))
                   finfo fdef
               with
               | Types.TypeError (loc, msg) ->

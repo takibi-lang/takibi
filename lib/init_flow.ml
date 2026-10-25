@@ -139,7 +139,7 @@ let check
     ?(linear_owner : string -> bool = fun _ -> false)
     ?(variant_payload : string -> string -> Ast.type_expr option = fun _ _ -> None)
     ?(callee_ret : string -> Ast.type_expr option = fun _ -> None)
-    ?(decide_index : Ast.loc -> bool -> unit = fun _ _ -> ())
+    ?(decide_index : Ast.loc -> string option -> unit = fun _ _ -> ())
     (finfo : Types.func_info) (fdef : Ast.func) =
   let bindings = finfo.Types.bindings in
   (* GitHub issue #763: every independent error is recorded, in traversal
@@ -1053,7 +1053,10 @@ let check
      head state is a candidate. A site visited more than once is proven
      only when every visit entails it. Each proof writes an index
      obligation z3 re-checks. *)
-  let index_decisions : (Ast.loc, bool) Hashtbl.t = Hashtbl.create 8 in
+  (* GitHub issue #1011: a site's decision is None (proven) or the reason
+     it is not, worded like --trace-init-flow (#976): the claim that failed
+     and the path facts at the first visit that failed. *)
+  let index_decisions : (Ast.loc, string option) Hashtbl.t = Hashtbl.create 8 in
   let slice_index (st : state) (b : Ast.expr) (j : Ast.expr) =
     if not !in_trial then
       match b.desc, Local_bindings.id_for_expr bindings b with
@@ -1069,13 +1072,19 @@ let check
                    (Init_pred.sub (Init_pred.sub len t) (Init_pred.const 1)) in
                let ok = !Range_obligation.fault_index || Init_pred.entails f goal in
                let loc = j.Ast.loc in
-               let prior = Option.value ~default:true
-                   (Hashtbl.find_opt index_decisions loc) in
-               Hashtbl.replace index_decisions loc (prior && ok);
+               let claim = Printf.sprintf "%s < %s.len" (show t) x in
+               (match Hashtbl.find_opt index_decisions loc with
+                | Some (Some _) -> ()
+                | _ ->
+                    Hashtbl.replace index_decisions loc
+                      (if ok then None
+                       else Some (Printf.sprintf
+                                    "init-flow cannot show %s%s" claim
+                                    (path_facts st))));
                if ok then
                  Range_obligation.record_text loc
                    (Init_pred.index_obligation
-                      ~claim:(Printf.sprintf "%s < %s.len" (show t) x)
+                      ~claim
                       ~facts:st.facts st.eqs ~index:t ~len)
            | None -> ())
       | _ -> ()
