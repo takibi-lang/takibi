@@ -5902,8 +5902,7 @@ private fn syscall_openat_with(slot: borrow SyscallSlot[0],
 // existing regular file loses its blocks and its size before it opens, as
 // Linux does whatever the access mode; without O_CREAT a missing name is
 // ENOENT and O_EXCL means nothing. O_TRUNC asks for write access, so a
-// directory is EISDIR. A file reaching an indirect block is EPERM, as
-// unlinkat answers for one: releasing those is not written yet.
+// directory is EISDIR.
 private fn syscall_openat_create_under(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
         guard: borrow Ext2MutationGuard[ext2_mutation_lock],
         x0: usize, x1: usize, x2: usize) -> SyscallAction !{unsafe} {
@@ -5969,9 +5968,6 @@ private fn syscall_openat_create_under_with(slot: borrow SyscallSlot[0],
                 match ext2_truncate_regular_file(mount, existing) {
                     Ext2TruncateResult::Invalid => {
                         return SyscallAction::Resume(LINUX_EIO);
-                    }
-                    Ext2TruncateResult::Unsupported => {
-                        return SyscallAction::Resume(LINUX_EPERM);
                     }
                     Ext2TruncateResult::Truncated => { }
                 }

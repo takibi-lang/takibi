@@ -3781,13 +3781,15 @@ private fn ext2_unlink_name_with(slot: borrow Ext2Slot[0], mount: Ext2Mount,
 }
 
 // GitHub issue #1016: openat's O_TRUNC. A regular file loses its data:
-// size 0, no block pointers, no sectors, then its blocks go back to the
-// bitmap. The inode is written first, so a failure between the two leaks
-// blocks (e2fsck reclaims them) rather than leaving the inode naming a
-// freed block. A file reaching an indirect block is Unsupported, as for
-// the last-link unlink; a file already empty is Truncated with nothing
-// written. The caller holds the ext2 mutation guard.
-must_use variant Ext2TruncateResult { Invalid; Unsupported; Truncated; }
+// size 0, no block pointers, no sectors, then every block it named goes
+// back to the bitmap -- data blocks, the singly-indirect block, and the
+// doubly-indirect block with its second-level blocks. The inode is written
+// first, so a failure part way leaks blocks (e2fsck reclaims them) rather
+// than leaving the inode naming a freed block; the pointer blocks are read
+// after that write, which is safe because nothing else mutates under the
+// guard the caller holds. A hole (pointer 0) has nothing to release. A
+// file already empty is Truncated with nothing written.
+must_use variant Ext2TruncateResult { Invalid; Truncated; }
 
 fn ext2_truncate_regular_file(mount: Ext2Mount, inode_number: usize)
         -> Ext2TruncateResult !{unsafe} {
@@ -3796,6 +3798,52 @@ fn ext2_truncate_regular_file(mount: Ext2Mount, inode_number: usize)
             mount, inode_number);
     ext2_slot_release(slot);
     return result;
+}
+
+// Entry `index` of pointer block `block`, or 0 when it cannot be read. Read
+// afresh each time: a release in between overwrites both scratch buffers.
+private fn ext2_pointer_entry(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+        block: usize, index: usize) -> usize {
+    match block_read(mount.device, block,
+                     ext2_scratch[slot.index].metadata as []u8) {
+        BlockIoResult::Invalid => { return 0; }
+        BlockIoResult::Ok => { }
+    }
+    return ext2_u32(slot, ext2_metadata(), index * 4) as usize;
+}
+
+// Release one block a truncated inode named. False for a block number no
+// file could own, or a failed release.
+private fn ext2_truncate_release(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+        block: usize) -> bool {
+    if (block < 2 || block >= mount.filesystem_blocks) { return false; }
+    match ext2_release_block(slot, mount,
+            ext2_block_owner_new(block - 1, block, block)) {
+        Ext2OwnerReleaseResult::Invalid => { return false; }
+        Ext2OwnerReleaseResult::Released => { return true; }
+    }
+}
+
+// The data blocks of one pointer block, `count` of them at most, then the
+// pointer block itself.
+private fn ext2_truncate_pointer_block(slot: borrow Ext2Slot[0],
+        mount: Ext2Mount, block: usize, count: usize) -> bool {
+    if (block < 2 || block >= mount.filesystem_blocks) { return false; }
+    let mut released: bool = true;
+    for index: usize in 0..<ext2_pointer_count() {
+        if (index < count) {
+            let data: usize = ext2_pointer_entry(slot, mount, block, index);
+            if (data != 0) {
+                if (ext2_truncate_release(slot, mount, data) == false) {
+                    released = false;
+                }
+            }
+        }
+    }
+    if (ext2_truncate_release(slot, mount, block) == false) {
+        released = false;
+    }
+    return released;
 }
 
 private fn ext2_truncate_regular_file_with(slot: borrow Ext2Slot[0],
@@ -3810,23 +3858,12 @@ private fn ext2_truncate_regular_file_with(slot: borrow Ext2Slot[0],
                 return Ext2TruncateResult::Invalid;
             }
             if (file.size == 0) { return Ext2TruncateResult::Truncated; }
-            if (file.size > ext2_direct_file_size()) {
-                return Ext2TruncateResult::Unsupported;
+            if (file.size > ext2_max_regular_file_size()) {
+                return Ext2TruncateResult::Invalid;
             }
+            let pointers: usize = ext2_pointer_count();
             let blocks: usize =
                 (file.size + KERNEL_BLOCK_SIZE - 1) / KERNEL_BLOCK_SIZE;
-            let mut pointers: [usize; EXT2_MAX_DIRECT_BLOCKS];
-            for index: usize in 0..<EXT2_MAX_DIRECT_BLOCKS {
-                pointers[index] = 0;
-                if (index < blocks) {
-                    let block: usize =
-                        ext2_inode_block_pointer(slot, mount, file, index);
-                    if (block < 2 || block >= mount.filesystem_blocks) {
-                        return Ext2TruncateResult::Invalid;
-                    }
-                    pointers[index] = block;
-                }
-            }
             match block_read(mount.device, file.table_block,
                              ext2_scratch[slot.index].metadata as []u8) {
                 BlockIoResult::Invalid => { return Ext2TruncateResult::Invalid; }
@@ -3834,11 +3871,19 @@ private fn ext2_truncate_regular_file_with(slot: borrow Ext2Slot[0],
             }
             let mut inode_pointer: Ext2Bytes =
                 ext2_at(ext2_metadata(), file.table_offset);
+            let mut direct: [usize; EXT2_MAX_DIRECT_BLOCKS];
+            for index: usize in 0..<EXT2_MAX_DIRECT_BLOCKS {
+                direct[index] =
+                    ext2_u32(slot, inode_pointer, 40 + index * 4) as usize;
+            }
+            let single: usize = ext2_u32(slot, inode_pointer, 88) as usize;
+            let double: usize = ext2_u32(slot, inode_pointer, 92) as usize;
             if (ext2_put_u32(slot, inode_pointer, 4, 0) == false ||
                 ext2_put_u32(slot, inode_pointer, 28, 0) == false) {
                 return Ext2TruncateResult::Invalid;
             }
-            for index: usize in 0..<EXT2_MAX_DIRECT_BLOCKS {
+            // i_block[0..15]: twelve direct, single, double, triple.
+            for index: usize in 0..<15 {
                 if (ext2_put_u32(slot, inode_pointer, 40 + index * 4,
                                  0) == false) {
                     return Ext2TruncateResult::Invalid;
@@ -3849,17 +3894,40 @@ private fn ext2_truncate_regular_file_with(slot: borrow Ext2Slot[0],
                 BlockIoResult::Invalid => { return Ext2TruncateResult::Invalid; }
                 BlockIoResult::Ok => { }
             }
-            // The inode no longer names the blocks: every release is tried.
+            // The inode names nothing now: every release is tried.
             let mut released: bool = true;
             for index: usize in 0..<EXT2_MAX_DIRECT_BLOCKS {
-                if (index < blocks) {
-                    let block: usize = pointers[index];
-                    match ext2_release_block(slot,
-                            mount, ext2_block_owner_new(block - 1, block,
-                                                        block)) {
-                        Ext2OwnerReleaseResult::Invalid => { released = false; }
-                        Ext2OwnerReleaseResult::Released => { }
+                if (index < blocks && direct[index] != 0) {
+                    if (ext2_truncate_release(slot, mount,
+                                              direct[index]) == false) {
+                        released = false;
                     }
+                }
+            }
+            if (blocks > EXT2_MAX_DIRECT_BLOCKS && single != 0) {
+                if (ext2_truncate_pointer_block(slot, mount, single,
+                        blocks - EXT2_MAX_DIRECT_BLOCKS) == false) {
+                    released = false;
+                }
+            }
+            if (blocks > EXT2_MAX_DIRECT_BLOCKS + pointers && double != 0) {
+                let remaining: usize =
+                    blocks - EXT2_MAX_DIRECT_BLOCKS - pointers;
+                for outer: usize in 0..<pointers {
+                    if (outer * pointers < remaining) {
+                        let second: usize = ext2_pointer_entry(slot, mount,
+                                double, outer);
+                        if (second != 0) {
+                            if (ext2_truncate_pointer_block(slot, mount,
+                                    second,
+                                    remaining - outer * pointers) == false) {
+                                released = false;
+                            }
+                        }
+                    }
+                }
+                if (ext2_truncate_release(slot, mount, double) == false) {
+                    released = false;
                 }
             }
             if (released) { return Ext2TruncateResult::Truncated; }

@@ -37,7 +37,6 @@ const O_CREAT_EXCL_RDWR: usize = 0xC2;
 // GitHub issue #1016: O_TRUNC is 0x200.
 const O_TRUNC_RDWR: usize = 0x202;
 const O_TRUNC_RDONLY: usize = 0x200;
-const EPERM_RC: usize = 0xFFFFFFFFFFFFFFFF;
 const EINVAL_RC: usize = 0xFFFFFFFFFFFFFFEA;
 const EACCES_RC: usize = 0xFFFFFFFFFFFFFFF3;
 const EAGAIN_RC: usize = 0xFFFFFFFFFFFFFFF5;
@@ -791,7 +790,7 @@ fn initial_user_payload() !{unsafe} {
         fail_if(svc5(63, retry_read, read_block as *u8 as usize, 1, 0, 0) != 0);
         fail_if(svc5(57, retry_read, 0, 0, 0, 0) != 0);
         let exhaustion_message: []const u8 =
-            bs"userspace ext2 exhaustion: write+mkdir+creat ENOSPC, data+offset unchanged, unlink+retry ok, creat excl+reopen ok, trunc frees blocks\n";
+            bs"userspace ext2 exhaustion: write+mkdir+creat ENOSPC, data+offset unchanged, unlink+retry ok, creat excl+reopen ok, trunc frees direct blocks\n";
         fail_if(svc5(64, 1, (unsafe { exhaustion_message as *u8 }) as usize,
                      exhaustion_message.len, 0, 0) != exhaustion_message.len);
         let write_fd: usize = svc5(56, 0, mutable_path as usize, 1, 0, 0);
@@ -810,11 +809,6 @@ fn initial_user_payload() !{unsafe} {
             fail_if(answer != 1024);
         }
         fail_if(svc5(57, write_fd, 0, 0, 0, 0) != 0);
-        // GitHub issue #1016: thirteen blocks reach the indirect block,
-        // which O_TRUNC does not release yet: EPERM, and the readback
-        // below shows every block still there.
-        fail_if(svc5(56, 0, mutable_path as usize, O_TRUNC_RDONLY,
-                     0, 0) != EPERM_RC);
         let read_fd: usize = svc5(56, 0, mutable_path as usize, 0, 0, 0);
         fail_if(read_fd >= 64);
         for block: usize in 0..<13 {
@@ -828,6 +822,19 @@ fn initial_user_payload() !{unsafe} {
         fail_if(svc5(63, read_fd, read_block as *u8 as usize,
                      1, 0, 0) != 0);
         fail_if(svc5(57, read_fd, 0, 0, 0, 0) != 0);
+        // GitHub issue #1016: thirteen blocks reach the singly-indirect
+        // block, so O_TRUNC frees fourteen: the data and the pointer block.
+        let indirect_free: usize = free_blocks_by_mkdir();
+        let indirect_fd: usize = svc5(56, 0, mutable_path as usize,
+                                      O_TRUNC_RDONLY, 0, 0);
+        fail_if(indirect_fd >= 64);
+        fail_if(svc5(63, indirect_fd, read_block as *u8 as usize,
+                     1, 0, 0) != 0);
+        fail_if(svc5(57, indirect_fd, 0, 0, 0, 0) != 0);
+        fail_if(svc5(79, 0xFFFFFFFFFFFFFF9C, mutable_path as usize,
+                     ptr_of(trunc_stat_base, 0), 0, 0) != 0);
+        fail_if(payload_read_u64(trunc_stat_base, 48) != 0);
+        fail_if(free_blocks_by_mkdir() != indirect_free + 14);
         let restore_fd: usize = svc5(56, 0, mutable_path as usize, 1, 0, 0);
         fail_if(restore_fd >= 64);
         let restore_content: []const u8 = bs"before\n";

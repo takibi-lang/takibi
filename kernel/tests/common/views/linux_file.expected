@@ -1,4 +1,4 @@
 userspace file syscalls: open/write/read/close and truncate+extend ok
 resource exhausted: ext2 blocks capacity=2816
-userspace ext2 exhaustion: write+mkdir+creat ENOSPC, data+offset unchanged, unlink+retry ok, creat excl+reopen ok, trunc frees blocks
+userspace ext2 exhaustion: write+mkdir+creat ENOSPC, data+offset unchanged, unlink+retry ok, creat excl+reopen ok, trunc frees direct blocks
 userspace SIGCHLD siginfo: CLD_KILLED, CLD_EXITED, pending keeps first, kill SI_USER names first sender ok
