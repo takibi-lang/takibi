@@ -6,7 +6,6 @@ The trace verifies which make/git operations the shell really requests.
 """
 from control_patch import replace_once
 import os
-import re
 from pathlib import Path
 import subprocess
 import sys
@@ -78,17 +77,18 @@ def run_case(source, fail='', equal=False, real_model=False, diff='compiler/main
             script.chmod(0o755)
         model_runner = ''
         if real_model:
+            # A real langcheck member with a stale input. It was the model
+            # map until GitHub issue #987 moved that check to the kernel
+            # build, where it reads the compiler's call-graph tables.
             repo = Path(__file__).resolve().parents[1]
-            readme = (repo / 'kernel/models/README.md').read_text()
-            stale, changed = re.subn(r"\| `[0-9a-f]{12}` \|", '| `000000000000` |', readme, count=1)
-            assert changed == 1
-            (root / 'stale-readme.md').write_text(stale)
+            table = (repo / 'docs/KNOWN_INTERMITTENTS.md').read_text()
+            (root / 'stale-readme.md').write_text(table + '| zz-stale-row |\n')
             runner = root / 'real-model-check.py'
             runner.write_text('import sys, pathlib\n'
                               'sys.dont_write_bytecode = True\n'
                               'sys.path.insert(0, ' + repr(str(repo / 'scripts')) + ')\n'
-                              'import check_model_function_map as check\n'
-                              'check.README = pathlib.Path(sys.argv[1])\n'
+                              'import check_known_intermittents as check\n'
+                              'check.TABLE = pathlib.Path(sys.argv[1])\n'
                               'raise SystemExit(check.main())\n')
             model_runner = str(runner)
         env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ['PATH'],
@@ -151,7 +151,7 @@ def verify(source):
     # reported as the first quick lane failure before any long operation.
     status, output, trace, log, kept = run_case(source, real_model=True)
     assert status == 1 and 'land: FAIL precheck langcheck' in output, output
-    assert 'FAIL model-function-map' in log and '000000000000' in log, log
+    assert 'FAIL known-intermittents' in log and 'zz-stale-row' in log, log
     assert [call[1] for call in trace if call[0] == 'make'] == ['langcheck'], trace
     assert not any(call[:2] == ['git', 'push'] for call in trace), trace
     cases += 1

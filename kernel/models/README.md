@@ -477,7 +477,7 @@ is one of three checkable forms:
   affect it. A dropped restriction (affinity) is the common case: the model
   already allows every step it would forbid.
 
-`scripts/check_model_function_map.py` fails the build when a function or
+`scripts/buildcheck_model_function_map.py` fails the kernel build when a function or
 action named in these tables no longer exists, or when a dropped entry has
 none of the three forms or names something that does not exist. A rename or
 removal forces the table, and a look at the model, to be updated.
@@ -697,11 +697,12 @@ together. Three things keep them in step:
    justified** (in place). It catches a rename, a removal and a path left
    out with no reason, not a change of behaviour.
 3. **A review stamp per row** (in place). The Reviewed column is a hash of
-   the bodies of the functions the row maps and of the guards its dropped
-   paths name, comments and whitespace stripped. Any change to that code
-   fails the build until someone re-reads the row against the model and runs
-   `python3 scripts/check_model_function_map.py --restamp`; the commit that
-   restamps says what was reviewed. A comment-only edit keeps the stamp. The
+   the compiler's `body_hash` (docs/CALL_GRAPH.md) of every definition, in
+   either kernel, of the functions the row maps and of the guards its
+   dropped paths name. Any token change to that code fails the kernel build
+   until someone re-reads the row against the model and runs
+   `make model-map-restamp`; the commit that restamps says what was
+   reviewed. A comment-only edit keeps the stamp. The
    stamp says only "look again", not what is wrong, and it fires whether or
    not any test exercises the change.
 

@@ -176,7 +176,7 @@ def report_path(root: Path, path: str, old: str | None,
         if mapped:
             out.append("AFTER BUILD kernel/models/README.md maps "
                        f"{', '.join(mapped)}; a moved or renamed one needs "
-                       "its row re-stamped (check_model_function_map.py)")
+                       "its row re-stamped (make model-map-restamp)")
     if kind == "runner":
         if Path(path).name in makefile:
             out.append("ok       Makefile runs it")

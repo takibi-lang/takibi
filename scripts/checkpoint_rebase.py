@@ -20,9 +20,12 @@ A conflict in kernel/models/README.md is resolved too when it is
 review-stamp-only (GitHub issue #833): the three stages, with every row's
 Reviewed cell blanked, merge cleanly. Merged rows keep upstream's stamp
 (else the branch's); after the rebase finishes,
-scripts/check_model_function_map.py --restamp runs on the rebased tree and
-its result is committed. That happens before the checkpoint re-record, so
-the re-recorded review covers the final tree. Any other README conflict is
+`make model-map-restamp` runs on the rebased tree and its result is
+committed: it compiles both kernels' main.o for their --emit-call-graph
+tables (GitHub issue #987; the stamps are the compiler's body hashes) and
+runs scripts/buildcheck_model_function_map.py --restamp over them. That
+happens before the checkpoint re-record, so the re-recorded review covers
+the final tree. Any other README conflict is
 a conflict like any other: exit 4.
 
 Exit status: 0 rebased (and re-recorded if needed); 2 the checkpoint needs a
@@ -152,7 +155,7 @@ def rebase(onto, env):
 
 def restamp_map(env, upstream):
     """Restamp the model map on the rebased tree and commit it; False when it does not check."""
-    result = subprocess.run([sys.executable, 'scripts/check_model_function_map.py', '--restamp'],
+    result = subprocess.run(['make', '--no-print-directory', 'model-map-restamp'],
                             text=True, capture_output=True, env=env)
     if result.returncode != 0:
         sys.stderr.write(result.stdout + result.stderr)

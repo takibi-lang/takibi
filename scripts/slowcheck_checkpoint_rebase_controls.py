@@ -176,9 +176,14 @@ FAKE_MAP_CHECK = '''import hashlib, pathlib, re, sys
 root = pathlib.Path(__file__).resolve().parent.parent
 digest = hashlib.sha256(b''.join(p.read_bytes() for p in sorted((root / 'kernel').glob('*.tkb')))).hexdigest()[:12]
 readme = root / 'kernel/models/README.md'
-if sys.argv[1:] == ['--restamp']:
+if sys.argv[1:2] == ['--restamp']:
     readme.write_text(re.sub(r'`[0-9a-f]+` \\|$', '`' + digest + '` |', readme.read_text(), flags=re.M))
 '''
+
+
+# The real target builds both kernels' call-graph tables first (#987).
+FAKE_MAKEFILE = ('model-map-restamp:\n'
+                 '\t@python3 scripts/buildcheck_model_function_map.py --restamp q.tsv r.tsv\n')
 
 
 def fake_stamp(root):
@@ -197,7 +202,8 @@ def map_scenario(tmp, kept=None):
     repo = Repo(Path(tmp))
     repo.write('kernel/a.tkb', 'a0\n')
     repo.write('docs/evidence.tsv', 'measured\n')
-    repo.write('scripts/check_model_function_map.py', FAKE_MAP_CHECK)
+    repo.write('scripts/buildcheck_model_function_map.py', FAKE_MAP_CHECK)
+    repo.write('Makefile', FAKE_MAKEFILE)
     repo.write(MAP, map_text('aaaa'))
     repo.commit('base', review='base review')
     repo.git('switch', '-q', '-c', 'topic')

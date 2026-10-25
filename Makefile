@@ -1888,8 +1888,26 @@ kernelbuild-rpi5-debug: build
 kernel-memory-map-check: _kernelbuild-rpi5 _kernelbuild-qemu
 	python3 scripts/buildcheck_kernel_memory_map.py
 
+## kernel/models/README.md's action rows against both kernels' call-graph
+## tables (GitHub issue #987, option A): a mapped function may be defined in
+## either kernel, so the check needs both main.o tables and runs once here.
+## `make model-map-restamp` rewrites the Reviewed stamps from the same
+## tables (scripts/checkpoint_rebase.py runs it after a stamp-only conflict).
+MODEL_MAP_TABLES = $(KERNEL_QEMU_MAIN_O).callgraph.tsv $(KERNEL_RPI5_MAIN_O).callgraph.tsv
+MODEL_MAP_STAMP  = $(KERNEL_DIR)/build/model_function_map.ok
+$(MODEL_MAP_STAMP): $(KERNEL_QEMU_MAIN_O) $(KERNEL_RPI5_MAIN_O) $(KERNEL_DIR)/models/README.md $(wildcard $(KERNEL_DIR)/models/*.tla) scripts/buildcheck_model_function_map.py scripts/call_graph_table.py
+	python3 scripts/buildcheck_model_function_map.py $(MODEL_MAP_TABLES)
+	@touch $@
+
+.PHONY: _model-map-restamp model-map-restamp
+_model-map-restamp: $(KERNEL_QEMU_MAIN_O) $(KERNEL_RPI5_MAIN_O)
+	python3 scripts/buildcheck_model_function_map.py --restamp $(MODEL_MAP_TABLES)
+
+model-map-restamp: build
+	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) _model-map-restamp
+
 .PHONY: _kernelbuild
-_kernelbuild: _kernelbuild-rpi5 _kernelbuild-qemu _kernelbuild-dma-qemu _kernelbuild-invariant-qemu kernel-memory-map-check
+_kernelbuild: _kernelbuild-rpi5 _kernelbuild-qemu _kernelbuild-dma-qemu _kernelbuild-invariant-qemu kernel-memory-map-check $(MODEL_MAP_STAMP)
 
 kernelbuild: build
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) _kernelbuild
