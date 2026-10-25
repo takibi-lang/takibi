@@ -191,15 +191,16 @@ syscall, exec preparation, and exec commit. The host can locate the last
 completed kernel boundary when a lane stalls; a shell's output cannot report
 which internal transition it reached.
 
-## BusyBox exec image fallback
+## Exec image selection
 
-When an exec path has already resolved but `argv[0]` is not an ext2 image
-name, the kernel maps the saved static BusyBox image. BusyBox ash can find a
-bare applet name through `PATH` while passing that bare name as `argv[0]`;
-reusing the BusyBox image preserves its multi-call dispatch. A missing exec
-pathname is still reported as `ENOENT` before this fallback is considered.
-This is required launch behavior for the selected userspace, not a test-only
-syscall.
+execve maps the ELF that its pathname's inode names, resolved through any
+`#!` chain at syscall time, and nothing else (#1065). `argv[0]` is the
+caller's to choose and never picks the image: there is no BusyBox fallback.
+BusyBox ash finds a bare applet name through `PATH` and execs the applet's
+path, an ext2 hard link to BusyBox, while passing the bare name as `argv[0]`;
+BusyBox's multi-call dispatch reads that `argv[0]`. The nested exec view
+checks it: `execve("/bin/sh", {"/nested/sh", ...})` runs the shell, not the
+distinct ELF at `/nested/sh`.
 
 ## Build-check decision
 

@@ -942,7 +942,7 @@ private fn ext2_io_failure_check(mount: Ext2Mount) -> bool {
 
 fn kernel_ext2_fixture_run(mount: Ext2Mount) !{logs, unsafe} {
     // GitHub issue #249: save the mount for
-    // kernel_exec_resolve_argv0(), which runs later, from
+    // the exec prepare (kernel_exec_resolve_ext2_exec), which runs later, from
     // a syscall-return path outside fn main()'s own scope.
     kernel_boot_mount_configure(mount);
     // This mount is the root filesystem every process runs

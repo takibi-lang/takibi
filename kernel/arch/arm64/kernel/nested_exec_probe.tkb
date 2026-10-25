@@ -59,7 +59,11 @@ fn nested_exec_probe() !{unsafe} {
     let mut pad: [u8; 201];
     for index: usize in 0..<200 { pad[index] = 0x70; }
     pad[200] = 0;
-    args[0] = "/bin/sh" as *u8 as usize;
+    // GitHub issue #1065: argv[0] names /nested/sh, a different ELF (the
+    // entry below), while the pathname is /bin/sh. The image is the
+    // pathname's: the old kernel picked it from argv[0] and printed FAIL.
+    // BusyBox dispatches on argv[0]'s basename, `sh`, so the shell runs.
+    args[0] = "/nested/sh" as *u8 as usize;
     args[1] = "-c" as *u8 as usize;
     args[2] = "echo nested: child reexec survived" as *u8 as usize;
     args[3] = pad as *u8 as usize;
@@ -67,4 +71,11 @@ fn nested_exec_probe() !{unsafe} {
     args[5] = 0;
     svc5(NESTED_EXEC, "/bin/sh" as *u8 as usize, vector, 0, 0, 0);
     nested_fail();
+}
+
+// /nested/sh: the image an argv[0]-chosen exec would run (#1065).
+fn nested_exec_wrong_image() !{unsafe} {
+    let line: []const u8 = bs"nested: FAIL image chosen by argv[0]\n";
+    svc5(NESTED_WRITE, 1, (unsafe { line as *u8 }) as usize, line.len, 0, 0);
+    svc5(NESTED_EXIT, 1, 0, 0, 0, 0);
 }

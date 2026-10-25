@@ -37,10 +37,9 @@ let mut ext2_read_fixture: [u8; 32];
 let mut ext2_symlink_fixture: [u8; 64];
 // GitHub issue #249: the mounted ext2 filesystem, saved once at boot
 // (wherever fn main() already successfully mounts it) so
-// kernel_exec_resolve_argv0() below -- which runs later, on a syscall's
-// own return path, not from fn main()'s scope -- can look up an
-// arbitrary exec target by name instead of matching a closed,
-// hand-registered list.
+// the exec prepare below -- which runs later, on a syscall's
+// own return path, not from fn main()'s scope -- can read the inode execve
+// resolved.
 variant BootMountState { Unconfigured; Mounted(Ext2Mount); }
 
 // Boot configures this before syscall-return readers can run. The closed
@@ -55,8 +54,8 @@ fn kernel_boot_mount_configure(mount: Ext2Mount) {
 // streams from ext2.
 const EXEC_METADATA_SIZE: usize = 1024;
 let mut rootfs_metadata: [u8; EXEC_METADATA_SIZE];
-// GitHub issue #610: an execve's ELF metadata windows -- the image argv[0]
-// names, a dynamic exec's primary, and its interpreter. A resolved plan's
+// GitHub issue #610: an execve's ELF metadata windows -- the image the
+// pathname's inode names (#1065) and a dynamic exec's interpreter. A resolved plan's
 // `image` is a slice of one of them, mapped before the prepare ends; the
 // entry point and stack pointer leave in KernelChildExecPrepareResult's
 // Prepared payload, so nothing outlives the prepare.
@@ -69,9 +68,9 @@ let mut rootfs_metadata: [u8; EXEC_METADATA_SIZE];
 // no other live ExecWindowSlot names; its compare-exchange over
 // exec_window_words is what makes that so. The one entry point is
 // kernel_process_child_exec_prepare (scripts/check_slot_pool_entries.py).
-const EXEC_WINDOWS_SIZE: usize = 3 * EXEC_METADATA_SIZE;
-const EXEC_WINDOW_PRIMARY: usize = EXEC_METADATA_SIZE;
-const EXEC_WINDOW_INTERPRETER: usize = 2 * EXEC_METADATA_SIZE;
+const EXEC_WINDOWS_SIZE: usize = 2 * EXEC_METADATA_SIZE;
+const EXEC_WINDOW_PRIMARY: usize = 0;
+const EXEC_WINDOW_INTERPRETER: usize = EXEC_METADATA_SIZE;
 struct ExecWindows {
     bytes: [u8; EXEC_WINDOWS_SIZE];
 }
@@ -168,8 +167,8 @@ must_use variant DynamicExecResolveResult {
     Invalid;
     Resolved(DynamicExt2ExecImages);
 }
-// GitHub issue #249: genuine execve() path resolution -- looks up
-// argv[0] (minus its leading slash) directly against the mounted ext2
+// GitHub issue #249: genuine execve() path resolution -- looks up a name
+// (no leading slash) directly against the mounted ext2
 // filesystem. Only the ELF header/program-table window is read into the
 // shared scratch buffer; PT_LOAD bytes are streamed later by
 // process_image_map_ext2_in_root(). A name that does not resolve is
@@ -218,13 +217,6 @@ fn kernel_exec_resolve_ext2_inode_at(mount: Ext2Mount, inode: usize,
             }
         }
     }
-}
-
-fn kernel_exec_resolve_ext2_name(mount: Ext2Mount, name: borrow []const u8,
-                                 windows: [u8; EXEC_WINDOWS_SIZE..])
-        -> ExecResolveResult !{unsafe} {
-    return kernel_exec_resolve_ext2_name_at(
-        mount, name, windows[0..<EXEC_METADATA_SIZE]);
 }
 
 // The one interpreter this kernel maps: the musl loader. Its PT_INTERP
@@ -296,35 +288,56 @@ fn kernel_exec_resolve_dynamic_ext2_images(mount: Ext2Mount,
     }
 }
 
-// GitHub issue #591: an exec is dynamic when the ELF execve named carries a
-// PT_INTERP, whatever its path. One that does not is left to the argv[0] and
-// static path below; one naming an interpreter other than musl's is refused
-// rather than mapped as if it were static.
-fn kernel_exec_resolve_dynamic_ext2(mount: Ext2Mount,
-                                    windows: [u8; EXEC_WINDOWS_SIZE..])
-        -> DynamicExecResolveResult !{unsafe} {
+// GitHub issue #1065: the image an exec maps is the ELF the pathname's
+// inode names -- the inode syscall_exec_format resolved, through any `#!`
+// chain, and saved with the pending exec -- and nothing else. argv[0] is
+// the caller's to choose (`execve("/bin/busybox", {"/etc/init.sh"})`, or
+// `httpd` for `/bin/httpd`) and used to pick the image here, with the
+// rootfs BusyBox as a fallback when it named no file. A static ELF maps
+// alone; one carrying PT_INTERP maps with the musl loader (#591), and one
+// naming any other interpreter is refused rather than mapped as static.
+must_use variant ExecImageResolveResult {
+    NoInode;
+    Invalid;
+    Static(Ext2ExecImage);
+    Dynamic(DynamicExt2ExecImages);
+}
+fn kernel_exec_resolve_ext2_exec(mount: Ext2Mount,
+                                 windows: [u8; EXEC_WINDOWS_SIZE..])
+        -> ExecImageResolveResult !{unsafe} {
     let inode: usize = kernel_syscall_exec_inode();
-    if (inode == 0) { return DynamicExecResolveResult::NotRequested; }
+    // Zero only when execve ran before the root was mounted, and the
+    // prepare has no mount then either.
+    if (inode == 0) { return ExecImageResolveResult::NoInode; }
     match kernel_exec_resolve_ext2_inode_at(
             mount, inode,
             windows[EXEC_WINDOW_PRIMARY..<
                     EXEC_WINDOW_PRIMARY + EXEC_METADATA_SIZE]) {
         ExecResolveResult::NotFound => {
-            return DynamicExecResolveResult::NotRequested;
+            return ExecImageResolveResult::Invalid;
         }
         // GitHub issue #1040: syscall_exec_format already refused this
         // inode with ENOEXEC unless it validated, against the same window
         // and the same validator, so reaching here is an invariant break
-        // and fail-stops (DynamicResolveInvalid) rather than running
-        // another program.
+        // and fail-stops rather than running another program.
         ExecResolveResult::Invalid => {
-            return DynamicExecResolveResult::Invalid;
+            return ExecImageResolveResult::Invalid;
         }
         ExecResolveResult::Resolved(primary) => {
             if (primary.plan.interpreter_length == 0) {
-                return DynamicExecResolveResult::NotRequested;
+                return ExecImageResolveResult::Static(primary);
             }
-            return kernel_exec_resolve_musl_pair(primary, mount, windows);
+            match kernel_exec_resolve_musl_pair(primary, mount, windows) {
+                DynamicExecResolveResult::NotRequested => {
+                    return ExecImageResolveResult::Invalid;
+                }
+                DynamicExecResolveResult::Invalid => {
+                    return ExecImageResolveResult::Invalid;
+                }
+                DynamicExecResolveResult::Resolved(images) => {
+                    return ExecImageResolveResult::Dynamic(images);
+                }
+            }
         }
     }
 }
@@ -346,34 +359,6 @@ fn kernel_exec_primary_is_busybox_extras(inode: usize) -> bool !{unsafe} {
 // extent 0x304b8 gives the 0x40000 the boot check measures.
 fn kernel_exec_interpreter_bias(primary: DistroElfLoadPlan) -> usize {
     return (primary.extent + 0xFFFF) & ~0xFFFF;
-}
-
-// GitHub issue #249: argv[0] is the same path ash passes to execve() for
-// an ordinary external-command invocation -- the only path information
-// this needs, from the exec's own argv copy. Requires a leading '/'
-// (relative paths unsupported, same as every existing scenario) and looks
-// the name up with that slash stripped. The name stays a local slice of
-// argv: it is tied to the exec's argv page and cannot ride in a variant.
-fn kernel_exec_resolve_argv0(mount: Ext2Mount, argv: borrow []u8,
-                             windows: [u8; EXEC_WINDOWS_SIZE..])
-        -> ExecResolveResult !{unsafe} {
-    if (argv.len < 2) { return ExecResolveResult::NotFound; }
-    let first_byte: u8 = argv[0];
-    if (first_byte != 0x2F) { return ExecResolveResult::NotFound; }
-    let name_bytes: []u8 = argv[1..<argv.len];
-    let mut end: usize = name_bytes.len;
-    for position: usize in 0..<name_bytes.len {
-        let current: u8 = name_bytes[position];
-        if (current == 0) {
-            end = position;
-            break;
-        }
-    }
-    if (end < name_bytes.len) {
-        return kernel_exec_resolve_ext2_name(mount, name_bytes[0..<end],
-                                             windows);
-    }
-    return ExecResolveResult::NotFound;
 }
 
 fn kernel_process_child_exec_map_result(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
@@ -883,30 +868,12 @@ private fn kernel_process_child_exec_prepare_with(current_authority: borrow Proc
         kernel_syscall_persistent_shell_checkpoint_exec_prepare(
             kernel_process_current_pid());
     }
-    // BusyBox is the rootfs interpreter/fallback for paths that ash asks the
-    // kernel to execute but that are not separate regular files in this
-    // small image. Keep the fallback on ext2 too: the plan describes the
-    // saved rootfs BusyBox metadata, while process_image_map_ext2_in_root()
-    // streams its PT_LOAD bytes from the saved inode.
     let mount: Ext2Mount = match boot_execution.mount {
         BootMountState::Unconfigured => {
             return KernelChildExecPrepareResult::NoImageResolved;
         }
         BootMountState::Mounted(found) => { found }
     };
-    let mut target: BootRootImageState = boot_execution.root_image;
-    match kernel_exec_resolve_argv0(mount, argv, windows) {
-        ExecResolveResult::NotFound => {}
-        // GitHub issue #1040: argv[0] is not the pathname. The pathname
-        // execve was called with was already judged at syscall time (an
-        // image it cannot map is ENOEXEC there), so an argv[0] naming some
-        // other non-image file -- `execve("/bin/busybox", {"/etc/init.sh"})`
-        // -- says nothing about the image and keeps the fallback, as before.
-        ExecResolveResult::Invalid => {}
-        ExecResolveResult::Resolved(image) => {
-            target = BootRootImageState::Ready(image);
-        }
-    }
     // GitHub issue #245: this used to always be root 1, the only root the
     // old two-process model's single forked child could ever occupy. A
     // child running deeper than one level under its own parent (e.g.
@@ -933,12 +900,21 @@ private fn kernel_process_child_exec_prepare_with(current_authority: borrow Proc
         }
     }
 
-    match kernel_exec_resolve_dynamic_ext2(mount, windows) {
-        DynamicExecResolveResult::NotRequested => {}
-        DynamicExecResolveResult::Invalid => {
+    // From the pathname's inode only (#1065).
+    match kernel_exec_resolve_ext2_exec(mount, windows) {
+        ExecImageResolveResult::NoInode => {
+            return KernelChildExecPrepareResult::NoImageResolved;
+        }
+        ExecImageResolveResult::Invalid => {
             return KernelChildExecPrepareResult::DynamicResolveInvalid;
         }
-        DynamicExecResolveResult::Resolved(images) => {
+        ExecImageResolveResult::Static(image) => {
+            return kernel_process_child_exec_map_result(current_authority,
+                process_image_map_ext2_in_root(
+                    image.plan, mount, image.inode, image.file_length, argv,
+                    kernel_syscall_exec_argc(), child_space), child_space);
+        }
+        ExecImageResolveResult::Dynamic(images) => {
             match process_image_pair_map_ext2_in_root(
                     images.primary.plan,
                     mount,
@@ -1003,17 +979,6 @@ private fn kernel_process_child_exec_prepare_with(current_authority: borrow Proc
                     return KernelChildExecPrepareResult::Prepared(user_entry);
                 }
             }
-        }
-    }
-    match target {
-        BootRootImageState::Unavailable => {
-            return KernelChildExecPrepareResult::NoImageResolved;
-        }
-        BootRootImageState::Ready(image) => {
-            return kernel_process_child_exec_map_result(current_authority,
-                process_image_map_ext2_in_root(
-                    image.plan, mount, image.inode, image.file_length, argv,
-                    kernel_syscall_exec_argc(), child_space), child_space);
         }
     }
 }

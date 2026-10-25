@@ -612,10 +612,10 @@ private fn syscall_script_line_here(slot: borrow SyscallSlot[0]) -> [u8; 256..]
     return scratch[768..<1024];
 }
 
-// GitHub issue #591: the inode execve resolved its pathname to, which is
-// what decides a dynamic image. argv[0] cannot: a shell passes `httpd` for
-// `/bin/httpd`. Zero when no ELF inode was resolved (no filesystem yet, or
-// a `#!` script, whose image is the interpreter argv[0] names).
+// GitHub issue #591, #1065: the inode execve resolved its pathname to,
+// through any `#!` chain -- the one input that decides the image an exec
+// maps. argv[0] cannot: a shell passes `httpd` for `/bin/httpd`. Zero only
+// when execve ran before the root filesystem was configured.
 fn kernel_syscall_exec_inode() -> usize {
     let mut slot: ProcessSlot = kernel_syscall_process_slot();
     let guard = process_run_lock();
