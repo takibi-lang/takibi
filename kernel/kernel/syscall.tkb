@@ -147,6 +147,9 @@ const LINUX_ENOSPC: usize = 0xFFFFFFFFFFFFFFE4;
 const LINUX_O_CREAT: usize = 0x40;
 const LINUX_O_EXCL: usize = 0x80;
 const LINUX_O_TRUNC: usize = 0x200;
+// GitHub issue #1022.
+const AARCH64_NR_TRUNCATE: usize = 45;
+const AARCH64_NR_FTRUNCATE: usize = 46;
 // The openat flags that mutate ext2 and so take the guard (#967, #1016).
 const LINUX_O_MUTATING: usize = 0x240;
 // A regular file whose bytes cannot be read. Linux answers execve(2) with
@@ -6113,6 +6116,66 @@ private fn syscall_openat_create_under_with(slot: borrow SyscallSlot[0],
     }
 }
 
+// GitHub issue #1022: truncate(path, length) and ftruncate(fd, length), to
+// length 0 only, through openat O_TRUNC's walk (#1016) and under the
+// mutation guard their caller holds; any other length is EINVAL, which
+// Linux also answers for a negative one. truncate looks the path up as
+// faccessat does, from `/` (the one cwd) or absolutely: a directory is
+// EISDIR, anything else not regular EINVAL, a missing path ENOENT.
+// ftruncate wants an ext2 file open for writing (EINVAL otherwise, as
+// Linux; EBADF for no descriptor at all) and leaves its offset alone.
+private fn syscall_truncate_under(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
+        guard: borrow Ext2MutationGuard[ext2_mutation_lock],
+        number: usize, x0: usize, x1: usize) -> usize !{unsafe} {
+    let slot: SyscallSlot[0] = syscall_slot_acquire();
+    let answer: usize = syscall_truncate_under_with(slot, current_authority,
+            guard, number, x0, x1);
+    syscall_slot_release(slot);
+    return answer;
+}
+
+private fn syscall_truncate_under_with(slot: borrow SyscallSlot[0],
+        current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
+        guard: borrow Ext2MutationGuard[ext2_mutation_lock],
+        number: usize, x0: usize, x1: usize) -> usize !{unsafe} {
+    let mount: Ext2Mount = match syscall_filesystem_lookup() {
+        SyscallFilesystemReady::Unconfigured => { return LINUX_EBADF; }
+        SyscallFilesystemReady::Configured(found) => { found }
+    };
+    let mut inode_number: usize = 0;
+    if (number == AARCH64_NR_FTRUNCATE) {
+        if (kernel_syscall_file_is_open(x0) == false) {
+            if (kernel_syscall_directory_is_open(x0) ||
+                kernel_syscall_terminal_is_open(x0)) {
+                return LINUX_EINVAL;
+            }
+            return LINUX_EBADF;
+        }
+        if (kernel_syscall_file_writable(x0) == false) { return LINUX_EINVAL; }
+        inode_number = kernel_syscall_file_inode(x0);
+    } else {
+        let path_name: []u8 = match kernel_syscall_path_name(slot,
+                current_authority, x0) {
+            SyscallPathResult::Fault => { return LINUX_EFAULT; }
+            SyscallPathResult::Invalid => { return LINUX_ENOENT; }
+            SyscallPathResult::Name(path) => { path }
+        };
+        match ext2_lookup_path_from(mount, 2, path_name) {
+            Ext2LookupResult::Invalid => { return LINUX_EINVAL; }
+            Ext2LookupResult::NotFound => { return LINUX_ENOENT; }
+            Ext2LookupResult::Found(found) => { inode_number = found; }
+        }
+    }
+    if (x1 != 0) { return LINUX_EINVAL; }
+    let mode: usize = ext2_inode_mode(mount, inode_number) & 0xF000;
+    if (mode == 0x4000) { return LINUX_EISDIR; }
+    if (mode != 0x8000) { return LINUX_EINVAL; }
+    match ext2_truncate_regular_file(mount, inode_number) {
+        Ext2TruncateResult::Invalid => { return LINUX_EIO; }
+        Ext2TruncateResult::Truncated => { return 0; }
+    }
+}
+
 private fn syscall_openat(current_authority: borrow ProcessCurrent[process, ProcessState::Running],
         x0: usize, x1: usize, x2: usize)
         -> SyscallAction !{unsafe} {
@@ -6838,6 +6901,14 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         let answer: usize = syscall_renameat_under(current_authority, guard, x0, x1, x2, x3);
         ext2_mutation_give(guard);
         if (answer == 0) { workload_peer_mutation_note(2); }
+        return syscall_finish_current(frame, SyscallAction::Resume(answer), current_authority);
+    }
+
+    if (number == AARCH64_NR_TRUNCATE || number == AARCH64_NR_FTRUNCATE) {
+        let guard = ext2_mutation_take();
+        let answer: usize = syscall_truncate_under(current_authority, guard,
+                number, x0, x1);
+        ext2_mutation_give(guard);
         return syscall_finish_current(frame, SyscallAction::Resume(answer), current_authority);
     }
 

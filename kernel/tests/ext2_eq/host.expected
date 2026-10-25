@@ -43,4 +43,11 @@ row dir_indirect
   dir_indirect dir
 2 files dir_indirect 52 -> 0 created=52
   dir_indirect dir
+row truncate
+1 mkdir truncate -> 0
+  truncate dir
+2 fill truncate/f 14 -> 0
+  truncate/f file size=14336
+3 truncate truncate/f -> 0
+  truncate/f file size=0
 eq done

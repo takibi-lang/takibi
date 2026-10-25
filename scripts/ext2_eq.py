@@ -76,6 +76,8 @@ OPS = {
     "write": (("path", "text"), '$B echo -n {1} >"$R/{0}"'),
     "fill": (("path", "count"), None),
     "overwrite": (("path", "path"), '$B dd if="$R/{1}" of="$R/{0}" conv=notrunc 2>/dev/null'),
+    # ftruncate(fd, 0) after open(O_WRONLY|O_CREAT|O_NONBLOCK) (#1022)
+    "truncate": (("path",), '$B truncate -s 0 "$R/{0}"'),
     "unlink": (("path",), 'rm "$R/{0}"'),
     "rename": (("path", "path"), 'mv "$R/{0}" "$R/{1}"'),
     "files": (("path", "count"), None),
@@ -493,7 +495,7 @@ def self_test():
     # nothing on the guest (dup3 serves only stdin/stdout aliasing), so a
     # row would differ for the wrong reason (#1034's first fill, #1067, #1070).
     every = parse("row a match -\nmkdir a\nwrite a/f x\nfill a/g 13\n"
-                  "overwrite a/f a/g\nfiles a 2\n")
+                  "overwrite a/f a/g\ntruncate a/g\nfiles a 2\n")
     for line in gen_sh(every).splitlines():
         for part in re.split(r";|&&|\bdo\b", line):
             if re.search(r'>"\$R/', part) and not part.strip().startswith("$B "):

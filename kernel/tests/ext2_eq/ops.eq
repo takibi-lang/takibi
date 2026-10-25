@@ -11,6 +11,7 @@
 #   fill P N            write the BusyBox binary's first N KiB (N <= 1024), dd bs=1024
 #   overwrite P SRC     write SRC's bytes at offset 0 without O_TRUNC
 #   files D N           create N empty files with 200-byte names in D
+#   truncate P          truncate -s 0: ftruncate(2) to length 0
 #
 # The script runs from /etc/init.sh after /bin/user_payload has released its
 # ENOSPC fillers; the rows share the image's free space (about 230 blocks).
@@ -19,8 +20,6 @@
 # builtin cannot write a file.
 #
 # Not rows yet (GitHub issue #1034 records why):
-#   #1022 truncate(2)/ftruncate(2) are unimplemented syscalls, and the
-#         qemu-main view unimplemented_syscalls requires that none is reached.
 #   #1023 needs one fd's offset kept across an O_TRUNC through another; the
 #         shell can only share an fd through dup2, which the kernel refuses.
 #   #1021 needs a doubly-indirect file (over 268 KiB), more than the image's
@@ -55,3 +54,7 @@ row dir_indirect differ #968
 mkdir dir_indirect
 files dir_indirect 52
 
+row truncate match #1022
+mkdir truncate
+fill truncate/f 14
+truncate truncate/f

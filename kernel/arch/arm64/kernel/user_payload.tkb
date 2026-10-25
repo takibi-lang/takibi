@@ -737,6 +737,45 @@ fn initial_user_payload() !{unsafe} {
                      0, 0, 0) != ENOENT_RC);
         fail_if(svc5(56, 0xFFFFFFFFFFFFFF9C, "/" as *u8 as usize,
                      O_TRUNC_RDONLY, 0, 0) != EISDIR_RC);
+        // GitHub issue #1022: ftruncate(fd, 0) and truncate(path, 0) take
+        // the same walk. ftruncate gives the three blocks back, counted as
+        // above; any other length is EINVAL, a read-only descriptor EINVAL,
+        // no descriptor EBADF. truncate empties a one-block file by name,
+        // and refuses a directory and a missing name.
+        let ft_fd: usize = svc5(56, 0xFFFFFFFFFFFFFF9C,
+                                "/trunc-file" as *u8 as usize, 2, 0, 0);
+        fail_if(ft_fd >= 64);
+        for block: usize in 0..<3 {
+            fail_if(svc5(64, ft_fd, ptr_of(trunc_content as *u8,
+                         block * 1024), 1024, 0, 0) != 1024);
+        }
+        fail_if(svc5(46, ft_fd, 1, 0, 0, 0) != EINVAL_RC);
+        let ft_free_before: usize = free_blocks_by_mkdir();
+        fail_if(svc5(46, ft_fd, 0, 0, 0, 0) != 0);
+        fail_if(free_blocks_by_mkdir() != ft_free_before + 3);
+        fail_if(svc5(57, ft_fd, 0, 0, 0, 0) != 0);
+        fail_if(svc5(79, 0xFFFFFFFFFFFFFF9C, "/trunc-file" as *u8 as usize,
+                     ptr_of(trunc_stat_base, 0), 0, 0) != 0);
+        fail_if(payload_read_u64(trunc_stat_base, 48) != 0);
+        let ft_read_fd: usize = svc5(56, 0xFFFFFFFFFFFFFF9C,
+                                     "/trunc-file" as *u8 as usize, 0, 0, 0);
+        fail_if(ft_read_fd >= 64);
+        fail_if(svc5(46, ft_read_fd, 0, 0, 0, 0) != EINVAL_RC);
+        fail_if(svc5(57, ft_read_fd, 0, 0, 0, 0) != 0);
+        fail_if(svc5(46, 63, 0, 0, 0, 0) != EBADF_RC);
+        let tr_fd: usize = svc5(56, 0xFFFFFFFFFFFFFF9C,
+                                "/trunc-file" as *u8 as usize, 2, 0, 0);
+        fail_if(tr_fd >= 64);
+        fail_if(svc5(64, tr_fd, trunc_content as *u8 as usize, 1024,
+                     0, 0) != 1024);
+        fail_if(svc5(57, tr_fd, 0, 0, 0, 0) != 0);
+        fail_if(svc5(45, "/trunc-file" as *u8 as usize, 0, 0, 0, 0) != 0);
+        fail_if(svc5(79, 0xFFFFFFFFFFFFFF9C, "/trunc-file" as *u8 as usize,
+                     ptr_of(trunc_stat_base, 0), 0, 0) != 0);
+        fail_if(payload_read_u64(trunc_stat_base, 48) != 0);
+        fail_if(svc5(45, "/" as *u8 as usize, 0, 0, 0, 0) != EISDIR_RC);
+        fail_if(svc5(45, "/trunc-none" as *u8 as usize, 0, 0, 0, 0) !=
+                ENOENT_RC);
         fail_if(svc5(35, 0xFFFFFFFFFFFFFF9C,
                      "/trunc-file" as *u8 as usize, 0, 0, 0) != 0);
         for attempt: usize in 0..<32 {

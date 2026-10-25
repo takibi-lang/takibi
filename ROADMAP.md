@@ -193,8 +193,9 @@ next one taken. The done record of the previous queue is in HISTORY.md
    the ext2 driver as a host process over a RAM disk, #909 slice 2's first
    instance; seeded sequences, fault injection, hostile images). The ext2
    fixes #1019 and #968 are `differ` rows of ops.eq and land with
-   their row flipped; #1021, #1022 and #1023 become rows when the kernel
-   offers what they need (free space, truncate(2), dup2), and #1067
+   their row flipped; #1021 and #1023 become rows when the kernel offers
+   what they need (free space, dup2; #1022's truncate row matches since
+   2026-10-25), and #1067
    (printf) and #1070 (sendfile to a file) are writers the rows avoid.
    Signals: #999 (host-Linux conformance suite), #1000 (one delivery
    chokepoint and `SignalDelivery.tla`, designed with #992), #948 (the
