@@ -6,7 +6,7 @@
  *   - the refusals: an unknown flag is EINVAL, an unwritable array EFAULT;
  *   - one process alone: the ends take the lowest free descriptors, ppoll
  *     reports POLLOUT on the write end and POLLIN once a byte is buffered,
- *     the wrong end of each is EBADF, and after the last writer closes the
+ *     the wrong end of each is EBADF, lseek is ESPIPE, and after the last writer closes the
  *     read end reports POLLHUP and reads end of file;
  *   - the broken pipe: with SIGPIPE ignored a write after the last reader
  *     closed is EPIPE and the write end reports POLLERR; a child that does
@@ -39,6 +39,9 @@ const GETCPU_SYSCALL: usize = 168;
 const CLONE_SYSCALL: usize = 220;
 const EXECVE_SYSCALL: usize = 221;
 const WAIT4_SYSCALL: usize = 260;
+const LSEEK_SYSCALL: usize = 62;
+const LINUX_ESPIPE: usize = 0xFFFFFFFFFFFFFFE3;
+const SEEK_CUR: usize = 1;
 const CLONE_FORK_SIGCHLD: usize = 0x11;
 const F_SETFD: usize = 2;
 const O_CLOEXEC: usize = 0x80000;
@@ -185,6 +188,10 @@ private fn pipe_probe_alone() {
         svc5(READ_SYSCALL, write_end, buffer as *u8 as usize, 8, 0, 0) != LINUX_EBADF) {
         pipe_probe_fail(bs"pipe-probe: the wrong end of a pipe was not EBADF\n");
     }
+    // BusyBox head gives back what it read past its last line this way.
+    if (svc5(LSEEK_SYSCALL, read_end, 0xFFFFFFFFFFFFFFFE, SEEK_CUR, 0, 0) != LINUX_ESPIPE) {
+        pipe_probe_fail(bs"pipe-probe: lseek on a pipe was not ESPIPE\n");
+    }
     if (svc5(READ_SYSCALL, read_end, buffer as *u8 as usize, 8, 0, 0) != 3 ||
         buffer[0] != 0x61 || buffer[1] != 0x62 || buffer[2] != 0x63) {
         pipe_probe_fail(bs"pipe-probe: the read did not return the 3 bytes written\n");
@@ -198,7 +205,7 @@ private fn pipe_probe_alone() {
         pipe_probe_fail(bs"pipe-probe: the read end did not read end of file\n");
     }
     pipe_probe_close(read_end);
-    pipe_probe_say(bs"pipe-probe: lowest free descriptors, POLLOUT and POLLIN, EBADF on the wrong end, POLLHUP and end of file after the last writer\n");
+    pipe_probe_say(bs"pipe-probe: lowest free descriptors, POLLOUT and POLLIN, EBADF on the wrong end, ESPIPE, POLLHUP and end of file after the last writer\n");
 }
 
 private fn pipe_probe_broken_child(write_end: usize) {

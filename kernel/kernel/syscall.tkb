@@ -100,6 +100,10 @@ const AARCH64_NR_PIPE2: usize = 59;
 const LINUX_O_CLOEXEC: usize = 0x80000;
 const LINUX_EPIPE: usize = 0xFFFFFFFFFFFFFFE0;
 const LINUX_SIGPIPE: usize = 13;
+// lseek: BusyBox head gives back the input it read past its last line with
+// lseek(0, -n, SEEK_CUR), which on a pipe is ESPIPE (GitHub issue #1042).
+const AARCH64_NR_LSEEK: usize = 62;
+const LINUX_ESPIPE: usize = 0xFFFFFFFFFFFFFFE3;
 const AARCH64_NR_TAKIBI_UART_RX_WAIT: usize = 451;
 const AARCH64_NR_TAKIBI_PARENT_PROGRESS: usize = 452;
 const AARCH64_NR_TAKIBI_WORKLOAD_PROGRESS: usize = 453;
@@ -2478,6 +2482,62 @@ fn syscall_pipe2(current_authority: borrow ProcessCurrent[current_process, Proce
         UserWriteResult::Written => {}
     }
     return SyscallAction::Resume(0);
+}
+
+// lseek(fd, offset, whence): an ext2 or procfs file moves its shared offset
+// (SEEK_SET, SEEK_CUR, and SEEK_END from the inode's size); a directory
+// accepts a rewind to 0 only; a pipe, socket or terminal is ESPIPE, as on
+// Linux. A position below 0 or past 2^63 is EINVAL. SEEK_DATA/SEEK_HOLE
+// are EINVAL.
+fn syscall_lseek(fd: usize, offset: usize, whence: usize) -> SyscallAction !{unsafe} {
+    if (kernel_syscall_pipe_is_open(fd) || kernel_syscall_terminal_is_open(fd) ||
+        syscall_fd_is_socket(fd)) {
+        return SyscallAction::Resume(LINUX_ESPIPE);
+    }
+    if (kernel_syscall_directory_is_open(fd)) {
+        if (whence == 0 && offset == 0) {
+            if (kernel_syscall_file_set_offset(fd, 0) == false) {
+                return SyscallAction::Resume(LINUX_EBADF);
+            }
+            return SyscallAction::Resume(0);
+        }
+        return SyscallAction::Resume(LINUX_EINVAL);
+    }
+    if (kernel_syscall_file_is_open(fd) == false) {
+        return SyscallAction::Resume(LINUX_EBADF);
+    }
+    let mut base: usize = 0;
+    if (whence == 1) {
+        base = kernel_syscall_file_offset(fd);
+    } else if (whence == 2) {
+        let inode: usize = kernel_syscall_file_inode(fd);
+        if (procfs_inode_is_ours(inode)) { return SyscallAction::Resume(LINUX_EINVAL); }
+        let mount: Ext2Mount = match syscall_filesystem_lookup() {
+            SyscallFilesystemReady::Unconfigured => { return SyscallAction::Resume(LINUX_EBADF); }
+            SyscallFilesystemReady::Configured(found) => { found }
+        };
+        base = ext2_inode_size(mount, inode);
+    } else if (whence != 0) {
+        return SyscallAction::Resume(LINUX_EINVAL);
+    }
+    let limit: usize = 0x7FFFFFFFFFFFFFFF;
+    let mut position: usize = 0;
+    if (offset > limit) {
+        // A negative offset, as two's complement: its magnitude.
+        let back: usize = (~offset) + 1;
+        if (back > base) { return SyscallAction::Resume(LINUX_EINVAL); }
+        position = base - back;
+    } else {
+        match checked_add_usize(base, offset) {
+            CheckedUsize::Overflow => { return SyscallAction::Resume(LINUX_EINVAL); }
+            CheckedUsize::Value(value) => { position = value; }
+        }
+        if (position > limit) { return SyscallAction::Resume(LINUX_EINVAL); }
+    }
+    if (kernel_syscall_file_set_offset(fd, position) == false) {
+        return SyscallAction::Resume(LINUX_EBADF);
+    }
+    return SyscallAction::Resume(position);
 }
 
 private fn syscall_pipe2_close(process: usize, fd: usize) !{unsafe} {
@@ -5480,6 +5540,8 @@ fn syscall_reaches_filesystem(number: usize, fd: usize, flags: usize) -> bool {
     }
     // sendfile reads its input file from ext2 (GitHub issue #598).
     if (number == 71) { return true; }
+    // lseek's SEEK_END reads an ext2 inode's size.
+    if (number == AARCH64_NR_LSEEK) { return kernel_syscall_file_is_open(fd); }
     if (number == 63 || number == AARCH64_NR_READV) {
         return kernel_syscall_file_readable(fd);
     }
@@ -7310,6 +7372,10 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
 
     if (number == AARCH64_NR_PIPE2) {
         return syscall_finish_current(frame, syscall_pipe2(current_authority, x0, x1), current_authority);
+    }
+
+    if (number == AARCH64_NR_LSEEK) {
+        return syscall_finish_current(frame, syscall_lseek(x0, x1, x2), current_authority);
     }
 
     if (number == AARCH64_NR_FCNTL) {
