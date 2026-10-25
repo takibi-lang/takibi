@@ -47,7 +47,7 @@
 //   call; scripts/check_cpu_authority_mints.py fixes its one caller.
 
 use "kernel/lib/execution_model.tkb";
-use "kernel/arch/arm64/kernel/user_entry_extern.tkb";
+use "kernel/arch/arm64/kernel/cpu_stop_extern.tkb";
 
 struct cpu_authority CpuHere {
     private id: {0..<KERNEL_MAX_CORES as usize};

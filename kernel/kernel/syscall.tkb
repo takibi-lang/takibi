@@ -4,6 +4,7 @@ use "kernel/mm/user_memory.tkb";
 use "kernel/arch/arm64/kernel/user_entry_extern.tkb";
 use "kernel/arch/arm64/kernel/frame_ref.tkb";
 use "kernel/fs/ext2/ext2.tkb";
+use "kernel/fs/ext2/ext2_syscall.tkb";
 use "kernel/fs/procfs.tkb";
 use "kernel/drivers/serial/uart_rx_ring.tkb";
 use "kernel/drivers/serial/terminal.tkb";
@@ -116,8 +117,6 @@ const AARCH64_NR_TAKIBI_WORKLOAD_PROGRESS: usize = 453;
 const LINUX_EBADF: usize = 0xFFFFFFFFFFFFFFF7;
 const LINUX_EFAULT: usize = 0xFFFFFFFFFFFFFFF2;
 const LINUX_ENOSYS: usize = 0xFFFFFFFFFFFFFFDA;
-const LINUX_ENOENT: usize = 0xFFFFFFFFFFFFFFFE;
-const LINUX_EINVAL: usize = 0xFFFFFFFFFFFFFFEA;
 const LINUX_ENOTTY: usize = 0xFFFFFFFFFFFFFFE7;
 const LINUX_EAGAIN: usize = 0xFFFFFFFFFFFFFFF5;
 const LINUX_EACCES: usize = 0xFFFFFFFFFFFFFFF3;
@@ -159,7 +158,6 @@ const LINUX_ELOOP: usize = 0xFFFFFFFFFFFFFFD8;
 const LINUX_ENOEXEC: usize = 0xFFFFFFFFFFFFFFF8;
 // Linux's answer for an ELF interpreter that exists but cannot be used.
 const LINUX_ELIBBAD: usize = 0xFFFFFFFFFFFFFFB0;
-const LINUX_ENOSPC: usize = 0xFFFFFFFFFFFFFFE4;
 const LINUX_O_CREAT: usize = 0x40;
 const LINUX_O_EXCL: usize = 0x80;
 const LINUX_O_TRUNC: usize = 0x200;
@@ -168,17 +166,8 @@ const AARCH64_NR_TRUNCATE: usize = 45;
 const AARCH64_NR_FTRUNCATE: usize = 46;
 // The openat flags that mutate ext2 and so take the guard (#967, #1016).
 const LINUX_O_MUTATING: usize = 0x240;
-// A regular file whose bytes cannot be read. Linux answers execve(2) with
-// this when the header read itself fails, rather than with a verdict about a
-// format it never saw.
-const LINUX_EIO: usize = 0xFFFFFFFFFFFFFFFB;
-const LINUX_EROFS: usize = 0xFFFFFFFFFFFFFFE2;
-// GitHub issue #538: the errnos BusyBox mkdir and rmdir tell apart.
-const LINUX_EEXIST: usize = 0xFFFFFFFFFFFFFFEF;
-const LINUX_ENOTDIR: usize = 0xFFFFFFFFFFFFFFEC;
-const LINUX_ENOTEMPTY: usize = 0xFFFFFFFFFFFFFFD9;
-const LINUX_EISDIR: usize = 0xFFFFFFFFFFFFFFEB;
-const LINUX_EPERM: usize = 0xFFFFFFFFFFFFFFFF;
+// LINUX_ENOENT, EINVAL, ENOSPC, EIO, EROFS, EEXIST, ENOTDIR, ENOTEMPTY,
+// EISDIR and EPERM: kernel/fs/ext2/ext2_syscall.tkb (GitHub issue #1035).
 const LINUX_EBUSY: usize = 0xFFFFFFFFFFFFFFF0;
 const LINUX_ENODEV: usize = 0xFFFFFFFFFFFFFFED;
 const LINUX_AT_REMOVEDIR: usize = 0x200;
@@ -4722,16 +4711,6 @@ fn kernel_syscall_clone_parent_return(parent_sp: usize) {
         frame_ref_from_entry(parent_sp, kernel_process_entry_generation()));
 }
 
-// Preserve the filesystem's closed outcome at the Linux ABI boundary.
-private fn syscall_ext2_write_errno(result: Ext2ResizeResult) -> usize {
-    match result {
-        Ext2ResizeResult::NoSpace => { return LINUX_ENOSPC; }
-        Ext2ResizeResult::Invalid => { return LINUX_EINVAL; }
-        Ext2ResizeResult::Fenced => { return LINUX_EROFS; }
-        Ext2ResizeResult::Resized => { return 0; }
-    }
-}
-
 // GitHub issue #9: peer-safety. Since #583 a syscall runs where it is
 // called unless syscall_peer_refused names it or syscall_peer_safe narrows
 // it by descriptor; the migration gate reruns those on core 0. read and
@@ -4746,6 +4725,9 @@ private fn syscall_ext2_write_errno(result: Ext2ResizeResult) -> usize {
 // linear: a `return` past it is a compile error, so the helper is what makes
 // "exactly one release on every path" checkable instead of reviewed. Each
 // answers an errno (0 on success) and leaves SyscallAction to its caller.
+// What each does to the filesystem under the guard is
+// kernel/fs/ext2/ext2_syscall.tkb's, which linux_user/ext2_host runs too
+// (GitHub issue #1035).
 //
 // A lookup that decides whether a mutation may proceed belongs INSIDE the
 // same guard as the mutation it gates -- mkdir's existence check is the
@@ -4766,16 +4748,9 @@ private fn syscall_ext2_write_locked(fd: usize, content: []u8) -> usize {
     let guard = ext2_mutation_take();
     let offset: usize = kernel_syscall_file_offset(fd);
     let length: usize = content.len;
-    if (offset > EXT2_MAX_SINGLE_FILE_BLOCKS * KERNEL_BLOCK_SIZE - length) {
-        ext2_mutation_give(guard);
-        return LINUX_EINVAL;
-    }
     let inode: usize = kernel_syscall_file_inode(fd);
-    // GitHub issue #1019: every write, at offset 0 too, overwrites the
-    // bytes it covers and extends only past EOF, as Linux does; shrinking
-    // is O_TRUNC's (#1016), not a write's.
-    let mut answer: usize = syscall_ext2_write_errno(
-        ext2_write_regular_file_range(mount, inode, offset, content));
+    let mut answer: usize =
+        ext2_syscall_write_at(mount, guard, inode, offset, content);
     if (answer == 0 &&
         kernel_syscall_file_set_offset(fd, offset + length) == false) {
         answer = LINUX_EBADF;
@@ -4785,99 +4760,6 @@ private fn syscall_ext2_write_locked(fd: usize, content: []u8) -> usize {
         kernel_boot_log_resource_exhausted("ext2 blocks" as *u8,
                                           ext2_block_capacity(mount));
     }
-    return answer;
-}
-
-private fn syscall_ext2_mkdir_under(mount: Ext2Mount,
-        guard: borrow Ext2MutationGuard[ext2_mutation_lock],
-        parent_inode: usize, leaf: borrow []u8) -> usize {
-    let mut answer: usize = 0;
-    match ext2_lookup_directory(mount, parent_inode, leaf) {
-        Ext2LookupResult::Found(existing) => { answer = LINUX_EEXIST; }
-        Ext2LookupResult::Invalid => { answer = LINUX_EIO; }
-        Ext2LookupResult::NotFound => { }
-    }
-    if (answer == 0) {
-        // The directory stays, so its owner ends here: the tree names it
-        // from now on, and a later rmdir claims it back from the tree.
-        match ext2_make_directory_in(mount, parent_inode, leaf) {
-            Ext2MkdirResult::Invalid => { answer = LINUX_EIO; }
-            Ext2MkdirResult::NoSpace => { answer = LINUX_ENOSPC; }
-            Ext2MkdirResult::Created(directory) => {
-                ext2_directory_keep(directory);
-            }
-        }
-    }
-    return answer;
-}
-
-// Unsupported is a symlink or a file reaching an indirect block, which the
-// ext2 layer does not release; EPERM is Linux's word for a filesystem that
-// does not allow the unlink.
-private fn syscall_ext2_unlink_under(mount: Ext2Mount,
-        guard: borrow Ext2MutationGuard[ext2_mutation_lock],
-        parent_inode: usize, leaf: borrow []u8) -> usize {
-    let answer: usize = match ext2_unlink_name(
-            mount, parent_inode, leaf) {
-        Ext2UnlinkNameResult::Unlinked => { 0 }
-        Ext2UnlinkNameResult::NotFound => { LINUX_ENOENT }
-        Ext2UnlinkNameResult::IsDirectory => { LINUX_EISDIR }
-        Ext2UnlinkNameResult::Unsupported => { LINUX_EPERM }
-        Ext2UnlinkNameResult::Invalid => { LINUX_EIO }
-    };
-    return answer;
-}
-
-// The claim and the removal are one section: the owner minted from the tree
-// lives across both, and handing it back is what ext2_directory_keep does on
-// every path that does not remove.
-private fn syscall_ext2_rmdir_under(mount: Ext2Mount,
-        guard: borrow Ext2MutationGuard[ext2_mutation_lock],
-        parent_inode: usize, leaf: borrow []u8) -> usize {
-    let mut answer: usize = 0;
-    match ext2_claim_directory(mount, parent_inode, leaf) {
-        Ext2ClaimResult::Invalid => { answer = LINUX_EIO; }
-        Ext2ClaimResult::NotFound => { answer = LINUX_ENOENT; }
-        Ext2ClaimResult::NotDirectory => { answer = LINUX_ENOTDIR; }
-        Ext2ClaimResult::Claimed(directory) => {
-            match ext2_remove_directory_in(mount,
-                                           parent_inode, directory, leaf) {
-                Ext2RmdirResult::Removed => { }
-                Ext2RmdirResult::Invalid => { answer = LINUX_EIO; }
-                Ext2RmdirResult::NotEmpty(kept) => {
-                    ext2_directory_keep(kept);
-                    answer = LINUX_ENOTEMPTY;
-                }
-                Ext2RmdirResult::Refused(kept) => {
-                    ext2_directory_keep(kept);
-                    answer = LINUX_EIO;
-                }
-            }
-        }
-    }
-    return answer;
-}
-
-// Unsupported is a directory moved to another parent, which the ext2 layer
-// does not do; EPERM is Linux's word for a filesystem that does not allow
-// the rename.
-private fn syscall_ext2_rename_under(mount: Ext2Mount,
-        guard: borrow Ext2MutationGuard[ext2_mutation_lock],
-        old_directory: usize,
-                                      old_name: borrow []u8,
-                                      new_parent_inode: usize,
-                                      new_leaf: borrow []u8) -> usize {
-    let answer: usize = match ext2_rename_in(
-            mount, old_directory, old_name,
-            new_parent_inode, new_leaf) {
-        Ext2RenameResult::Renamed => { 0 }
-        Ext2RenameResult::NotFound => { LINUX_ENOENT }
-        Ext2RenameResult::IsDirectory => { LINUX_EISDIR }
-        Ext2RenameResult::NotDirectory => { LINUX_ENOTDIR }
-        Ext2RenameResult::Unsupported => { LINUX_EPERM }
-        Ext2RenameResult::Invalid => { LINUX_EIO }
-        Ext2RenameResult::NoSpace => { LINUX_ENOSPC }
-    };
     return answer;
 }
 
@@ -4925,7 +4807,7 @@ private fn syscall_mkdirat_under_with(slot: borrow SyscallSlot[0],
         return LINUX_EEXIST;
     }
     return
-        syscall_ext2_mkdir_under(mount, guard, parent.inode, leaf);
+        ext2_syscall_mkdir(mount, guard, parent.inode, leaf);
 }
 
 // GitHub issue #597: unlinkat's whole arm, lookup included, under the
@@ -4971,7 +4853,7 @@ private fn syscall_unlinkat_under_with(slot: borrow SyscallSlot[0],
     if (leaf.len == 0) { return LINUX_ENOENT; }
     if (x2 == 0) {
         return
-            syscall_ext2_unlink_under(mount, guard, parent.inode, leaf);
+            ext2_syscall_unlink(mount, guard, parent.inode, leaf);
     }
     // Linux's own answers: rmdir(".") is EINVAL, rmdir("..") ENOTEMPTY.
     if (kernel_syscall_leaf_is_dot(leaf)) {
@@ -4981,7 +4863,7 @@ private fn syscall_unlinkat_under_with(slot: borrow SyscallSlot[0],
         return LINUX_ENOTEMPTY;
     }
     return
-        syscall_ext2_rmdir_under(mount, guard, parent.inode, leaf);
+        ext2_syscall_rmdir(mount, guard, parent.inode, leaf);
 }
 
 // GitHub issue #597: renameat's whole arm, lookup included, under the
@@ -5060,7 +4942,7 @@ private fn syscall_renameat_under_with(slot: borrow SyscallSlot[0],
         return LINUX_EBUSY;
     }
     return
-        syscall_ext2_rename_under(mount, guard, old_directory, old_name,
+        ext2_syscall_rename(mount, guard, old_directory, old_name,
                                    new_parent.inode, new_leaf);
 }
 
@@ -6660,34 +6542,12 @@ private fn syscall_openat_create_under_with(slot: borrow SyscallSlot[0],
         if (exclusive) { return SyscallAction::Resume(LINUX_EEXIST); }
         return SyscallAction::Resume(LINUX_EISDIR);
     }
-    match ext2_lookup_directory(mount, parent.inode, leaf) {
-        Ext2LookupResult::Invalid => { return SyscallAction::Resume(LINUX_EIO); }
-        Ext2LookupResult::Found(existing) => {
-            if (exclusive) { return SyscallAction::Resume(LINUX_EEXIST); }
-            let mode: usize = ext2_inode_mode(mount, existing) & 0xF000;
-            if (mode == 0x4000) {
-                return SyscallAction::Resume(LINUX_EISDIR);
-            }
-            if (truncate && mode == 0x8000) {
-                match ext2_truncate_regular_file(mount, existing) {
-                    Ext2TruncateResult::Invalid => {
-                        return SyscallAction::Resume(LINUX_EIO);
-                    }
-                    Ext2TruncateResult::Truncated => { }
-                }
-            }
-            return syscall_openat_inode(mount, existing, x2);
+    match ext2_syscall_open_leaf(mount, guard, parent.inode, leaf,
+                                 create, exclusive, truncate) {
+        Ext2SyscallOpenResult::Errno(errno) => {
+            return SyscallAction::Resume(errno);
         }
-        Ext2LookupResult::NotFound => {
-            if (create == false) { return SyscallAction::Resume(LINUX_ENOENT); }
-        }
-    }
-    match ext2_create_empty_file_in(mount, parent.inode, leaf) {
-        Ext2CreateEmptyResult::Invalid => { return SyscallAction::Resume(LINUX_EIO); }
-        Ext2CreateEmptyResult::NoSpace => {
-            return SyscallAction::Resume(LINUX_ENOSPC);
-        }
-        Ext2CreateEmptyResult::Created(inode_number) => {
+        Ext2SyscallOpenResult::Opened(inode_number) => {
             return syscall_openat_inode(mount, inode_number, x2);
         }
     }

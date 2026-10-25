@@ -1,0 +1,8 @@
+// The two assembly helpers kernel/kernel/cpu_authority.tkb needs, apart
+// from the rest of user_entry_extern.tkb (which uses this file). Split out
+// for GitHub issue #1035: the ext2 driver runs as a host process
+// (linux_user/ext2_host) over cpu_authority.tkb, and the host supplies
+// these two without the exception-frame layout user_entry_extern.tkb
+// carries.
+extern fn kernel_invariant_stop() !{noreturn};
+extern fn kernel_cpu_offset() -> usize;

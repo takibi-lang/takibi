@@ -4790,7 +4790,16 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       (* GitHub issue #226: zero-argument barrier/TLBI/DAIF-immediate
          instructions, same shape as signal_fence above. *)
       let fty = function_type (void_type context) [||] in
+      (* GitHub issue #1035: the two data barriers also lower on x86-64,
+         for the same reason the atomics do (see the atomic case below):
+         kernel/fs/ext2/mutation_lock.tkb runs host-natively under
+         linux_user/ext2_host. `mfence` is x86-64's full barrier, the
+         store-load ordering the lock's Dekker half needs. The other
+         instructions here have no host meaning and stay AArch64's. *)
+      let triple = target_triple !the_module in
+      let host_x86_64 = starts_with triple "x86_64" in
       let asm = match name with
+        | ("dsb_ish" | "dsb_ishst") when host_x86_64 -> "mfence"
         | "msr_daifclr_irq" -> "msr DAIFClr, #0x2"
         | "msr_daifset_irq" -> "msr DAIFSet, #0x2"
         | "tlbi_vmalle1"    -> "tlbi vmalle1"

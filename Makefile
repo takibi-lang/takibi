@@ -425,6 +425,7 @@ KERNEL_UNUSED_CHECKED := \
 	kernel/fs/elf64.tkb \
 	kernel/fs/ext2/ext2.tkb \
 	kernel/fs/ext2/mutation_lock.tkb \
+	kernel/fs/ext2/ext2_syscall.tkb \
 	kernel/fs/procfs.tkb \
 	kernel/init/boot_memory.tkb \
 	kernel/init/boot_prologue.tkb \

@@ -194,8 +194,8 @@ def controls_fail(rows: list[dict]) -> list[str]:
                                        if call_graph_table.callee_name(c) != TAKE])
     if not guard_problems(untaken)[0]:
         failed.append("a helper that no longer takes the guard")
-    # syscall_ext2_mkdir_under is handed it.
-    unborrowed = planted(rows, "syscall_ext2_mkdir_under", "params",
+    # ext2_syscall_mkdir (kernel/fs/ext2/ext2_syscall.tkb, #1035) is handed it.
+    unborrowed = planted(rows, "ext2_syscall_mkdir", "params",
                          lambda params: [p.replace(HELD, "guard: usize") for p in params])
     if not guard_problems(unborrowed)[0]:
         failed.append("a helper whose guard parameter is a plain word")
