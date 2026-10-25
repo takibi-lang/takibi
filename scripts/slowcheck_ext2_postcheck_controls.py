@@ -64,8 +64,15 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix="t1033-postcheck-") as name:
         work = pathlib.Path(name)
+        # The shipped table has no open row since #968 was fixed, so the row
+        # machinery is driven by a table of its own: #968's former row.
+        rows = work / "divergences.tsv"
+        rows.write_text("#968\t/grow\t\\(IND\\)\tcontrol row: /grow past "
+                        "twelve blocks\n")
+        table = ("--divergences", str(rows))
         clean = fresh(work, "clean")
-        expect("clean", clean, 0, "")
+        expect("clean", clean, 0, "", *table)
+        expect("shipped-table", clean, 0, "")
         summary = (work / "clean.out/ext2-postcheck.txt").read_text()
         if "#968 /grow: not reached" not in summary:
             failures.append(f"clean: the absent /grow row was not reported "
@@ -74,7 +81,8 @@ def main():
         grown = fresh(work, "grown")
         debugfs(grown, "expand_dir /etc", "mkdir /grow",
                 *["expand_dir /grow"] * 3)
-        expect("grown", grown, 0, "", "--grown-dir", "/etc", "--dir", "/kept")
+        expect("grown", grown, 0, "", "--grown-dir", "/etc", "--dir", "/kept",
+               *table)
         summary = (work / "grown.out/ext2-postcheck.txt").read_text()
         if "#968 /grow: still divergent" not in summary:
             failures.append(f"grown: the direct-only /grow row was not "
@@ -88,7 +96,11 @@ def main():
         fixed = fresh(work, "fixed")
         debugfs(fixed, "mkdir /grow", *["expand_dir /grow"] * 13)
         expect("divergence-fixed", fixed, 1,
-               "#968 /grow: the known divergence no longer shows")
+               "#968 /grow: the known divergence no longer shows", *table)
+        expect("indirect", fixed, 0, "", "--indirect-dir", "/grow")
+        expect("not-indirect", grown, 1, "/grow on the guest's disk is not a "
+               "directory grown through an indirect block",
+               "--indirect-dir", "/grow")
 
         group = fresh(work, "group")
         debugfs(group, "set_bg 0 free_blocks_count 1")
@@ -132,7 +144,7 @@ def main():
         "ext2-postcheck controls",
         "a clean disk passes; a descriptor or superblock counter apart from "
         "its bitmap, a capacity line the superblock does not back, an "
-        "ungrown or absent directory, a missing image and a known divergence "
+        "ungrown, not indirect or absent directory, a missing image and a known divergence "
         "that no longer shows are each refused",
         cases=CASES.ran)
     return 0

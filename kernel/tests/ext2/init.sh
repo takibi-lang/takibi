@@ -94,10 +94,11 @@ if [ -e /lib/ext2-eq.enable ]; then
     /bin/sh /lib/ext2-eq.sh >/eq-log 2>&1
     # GitHub issues #968, #1033 and #1085: ask /grow for a thirteenth entry
     # block. Each 250-byte name takes a 260-byte record, three to a block, so
-    # the 37th mkdir needs block 13: Linux grows /grow through an indirect
-    # block, Takibi refuses with ENOSPC and changes nothing. The children go
-    # again; /grow stays twelve blocks long for the known-divergence row of
-    # scripts/ext2_known_divergences.tsv. Here, under the same marker, because
+    # the 37th mkdir needs block 13, which /grow reaches through its
+    # singly-indirect block, as on Linux. The children go again, the last
+    # from the indirect-named block; /grow stays thirteen blocks long, and
+    # the runner's postcheck asserts it with --indirect-dir. Here, under the
+    # same marker, because
     # these 74 directory operations cost seconds per boot and only the
     # comparing lane's postcheck reads the row (#1085).
     g=nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnggggggggggggggggggggggggggggggggggggggggggggggggg

@@ -387,10 +387,15 @@ fi
 # grown, and /etc/moved and /kept -- made through mkdirat and kept, /etc/moved
 # being /etc/made after its renameat -- asserted present, so the check is
 # known to be reading the structure it exists for rather than passing an
-# untouched image.
+# untouched image. In the comparing boots /etc/init.sh also grows /grow to a
+# thirteenth block, which must be named through the singly-indirect block
+# (#968, #1085).
+grow_fact=""
+if [ "$EXT2_EQ" = on ]; then grow_fact="--indirect-dir /grow"; fi
+# shellcheck disable=SC2086 # grow_fact is zero or two words
 if ! python3 "$REPO_ROOT/scripts/ext2_postcheck.py" --label "$RUN_LABEL" \
         --image "$QEMU_EXT2_IMAGE" --out "$ARTIFACT_DIR" \
-        --uart-log "$UART_LOG" --grown-dir /etc \
+        --uart-log "$UART_LOG" --grown-dir /etc $grow_fact \
         --dir /etc/moved --dir /kept; then
     echo "FAIL $RUN_LABEL: the guest's ext2 disk failed its postcheck" >&2
     archive_reason="ext2 postcheck"

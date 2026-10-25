@@ -52,7 +52,7 @@ mkdir unlink_indirect
 fill unlink_indirect/f 14
 unlink unlink_indirect/f
 
-row dir_indirect differ #968
+row dir_indirect match #968
 mkdir dir_indirect
 files dir_indirect 52
 

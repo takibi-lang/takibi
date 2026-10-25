@@ -19,6 +19,13 @@ fn ext2_pointer_count() -> usize { return KERNEL_BLOCK_SIZE / 4; }
 fn ext2_direct_file_size() -> usize {
     return EXT2_MAX_DIRECT_BLOCKS * KERNEL_BLOCK_SIZE;
 }
+// GitHub issue #968: a directory grows through the direct blocks and then
+// the singly-indirect block, which is 268 blocks (268 KiB) at 1 KiB blocks.
+// Past that Linux would go on into the doubly-indirect block; this answers
+// ENOSPC there instead.
+fn ext2_max_directory_size() -> usize {
+    return EXT2_MAX_SINGLE_FILE_BLOCKS * KERNEL_BLOCK_SIZE;
+}
 fn ext2_max_regular_file_size() -> usize {
     let pointers: usize = ext2_pointer_count();
     return (EXT2_MAX_DIRECT_BLOCKS + pointers + pointers * pointers) *
@@ -506,12 +513,13 @@ fn ext2_read_inode(slot: borrow Ext2Slot[0], mount: Ext2Mount,
     // Symlinks retain the inline fast-symlink limit.
     let mut max_size: usize = KERNEL_BLOCK_SIZE;
     if (file_type == 0x8000) { max_size = ext2_max_regular_file_size(); }
-    if (file_type == 0x4000) { max_size = ext2_direct_file_size(); }
+    if (file_type == 0x4000) { max_size = ext2_max_directory_size(); }
     if (mode == 0 || size > max_size ||
         (file_type != 0x8000 && file_type != 0x4000 && file_type != 0xA000) ||
         ((file_type == 0x4000 || (file_type == 0x8000 && size > 0)) &&
          (direct_block0 == 0 || direct_block0 >= mount.filesystem_blocks)) ||
-        (file_type == 0x8000 && size > ext2_direct_file_size() &&
+        ((file_type == 0x8000 || file_type == 0x4000) &&
+         size > ext2_direct_file_size() &&
          (indirect_block == 0 || indirect_block >= mount.filesystem_blocks)) ||
         (file_type == 0x8000 &&
          size > ext2_direct_file_size() +
@@ -551,7 +559,7 @@ private fn ext2_lookup_directory_with(slot: borrow Ext2Slot[0],
         Ext2InodeResult::Invalid => { return Ext2LookupResult::Invalid; }
         Ext2InodeResult::Inode(directory) => {
             if ((directory.mode & 0xF000) != 0x4000 ||
-                directory.size < 8 || directory.size > ext2_direct_file_size()) {
+                directory.size < 8 || directory.size > ext2_max_directory_size()) {
                 return Ext2LookupResult::Invalid;
             }
             let mut cursor: usize = 0;
@@ -935,7 +943,7 @@ private inline fn ext2_read_directory_chunk_with(slot: borrow Ext2Slot[0],
         Ext2InodeResult::Invalid => { return Ext2ReadResult::Invalid; }
         Ext2InodeResult::Inode(inode) => {
             if ((inode.mode & 0xF000) != 0x4000 ||
-                inode.size > ext2_direct_file_size()) {
+                inode.size > ext2_max_directory_size()) {
                 return Ext2ReadResult::Invalid;
             }
             if (offset >= inode.size || destination.len == 0) {
@@ -2574,9 +2582,9 @@ private inline fn ext2_owner_roundtrip_check_with(slot: borrow Ext2Slot[0],
 // this a per-block scan rather than a flat one over `size`, and it is why the
 // modified block is the only one written back.
 //
-// Bounded by the direct blocks. When no block has room the directory grows by
-// one, up to twelve; a directory past 12 KiB is refused rather than
-// half-handled.
+// Bounded by the singly-indirect reach (GitHub issue #968). When no block has
+// room the directory grows by one, up to 268; a larger directory is refused
+// rather than half-handled.
 private fn ext2_directory_block_count(directory: Ext2Inode) -> usize {
     return directory.size / KERNEL_BLOCK_SIZE;
 }
@@ -2590,11 +2598,11 @@ private fn ext2_directory_block_at(slot: borrow Ext2Slot[0], mount: Ext2Mount,
 }
 
 // A directory this code will mutate: a real directory, block-sized, and
-// within the direct blocks.
+// within the singly-indirect reach.
 private fn ext2_directory_mutable(directory: Ext2Inode) -> bool {
     return (directory.mode & 0xF000) == 0x4000 &&
            directory.size >= KERNEL_BLOCK_SIZE &&
-           directory.size <= ext2_direct_file_size() &&
+           directory.size <= ext2_max_directory_size() &&
            directory.size % KERNEL_BLOCK_SIZE == 0;
 }
 
@@ -2610,12 +2618,24 @@ private fn ext2_block_owner_linked(owner: sink Ext2BlockOwner[block]) {}
 // The block is written before the inode. Until the inode write lands, the old
 // i_size is the only visible extent and the new block is merely allocated,
 // which is the same order ext2_resize_small_file publishes in.
+//
+// GitHub issue #968: block 12 onward is named by the singly-indirect block,
+// as Linux's ext2 does. The thirteenth block brings that pointer block with
+// it (`indirect`, zero otherwise): it is written whole, naming only the new
+// block, before the inode names it in i_block[12], and i_blocks counts both.
+// A later block is entered into the existing pointer block, whose slot must
+// still be empty, before the inode's size covers it. A failed inode write
+// after that leaves the pointer block naming a block the caller releases;
+// it lies past i_size, where no reader looks, and e2fsck repairs it.
 private fn ext2_directory_grow_publish(slot: borrow Ext2Slot[0],
         mount: Ext2Mount, directory: Ext2Inode,
                                        blocks: usize, block: usize,
+                                       indirect: usize,
                                        inode_number: usize, name: borrow []const u8)
         -> Ext2DirectoryResult !{unsafe} {
-    if (blocks >= EXT2_MAX_DIRECT_BLOCKS || name.len == 0 || name.len > 255) {
+    if (blocks >= EXT2_MAX_SINGLE_FILE_BLOCKS || name.len == 0 ||
+        name.len > 255 ||
+        (blocks == EXT2_MAX_DIRECT_BLOCKS) != (indirect != 0)) {
         return Ext2DirectoryResult::Invalid;
     }
     for i: usize in 0..<KERNEL_BLOCK_SIZE { ext2_scratch[slot.index].file[i] = 0; }
@@ -2643,22 +2663,66 @@ private fn ext2_directory_grow_publish(slot: borrow Ext2Slot[0],
     }
     let mut inode_pointer: Ext2Bytes =
         ext2_at(ext2_metadata(), directory.table_offset);
-    let pointer_offset: usize = 40 + blocks * 4;
     let sectors: u32 = ext2_u32(slot, inode_pointer, 28);
-    // The slot past the last block must be empty, and the size on disk must
-    // still be the one this walk was sized from: anything else means the
-    // inode is not the directory that was just read.
-    if (ext2_u32(slot, inode_pointer, pointer_offset) != 0 ||
-        ext2_u32(slot, inode_pointer, 4) as usize != directory.size ||
-        sectors > 0xFFFFFFFF - 2) {
+    // The size on disk must still be the one this walk was sized from:
+    // anything else means the inode is not the directory that was just read.
+    if (ext2_u32(slot, inode_pointer, 4) as usize != directory.size ||
+        sectors > 0xFFFFFFFF - 4) {
         return Ext2DirectoryResult::Invalid;
     }
     // i_blocks counts 512-byte sectors, so one 1 KiB block is two.
+    let mut added_sectors: u32 = 2;
+    if (blocks < EXT2_MAX_DIRECT_BLOCKS) {
+        // The slot past the last block must be empty.
+        let pointer_offset: usize = 40 + blocks * 4;
+        if (ext2_u32(slot, inode_pointer, pointer_offset) != 0 ||
+            ext2_put_u32(slot, inode_pointer, pointer_offset,
+                         block as u32) == false) {
+            return Ext2DirectoryResult::Invalid;
+        }
+    } else if (blocks == EXT2_MAX_DIRECT_BLOCKS) {
+        if (ext2_u32(slot, inode_pointer, 88) != 0 ||
+            indirect >= mount.filesystem_blocks ||
+            ext2_put_u32(slot, inode_pointer, 88, indirect as u32) == false) {
+            return Ext2DirectoryResult::Invalid;
+        }
+        added_sectors = 4;
+        for i: usize in 0..<KERNEL_BLOCK_SIZE {
+            ext2_scratch[slot.index].file[i] = 0;
+        }
+        if (ext2_put_u32(slot, ext2_file(), 0, block as u32) == false) {
+            return Ext2DirectoryResult::Invalid;
+        }
+        match ext2_block_write(mount, indirect,
+                               ext2_scratch[slot.index].file as []u8) {
+            BlockIoResult::Invalid => { return Ext2DirectoryResult::Invalid; }
+            BlockIoResult::Ok => { }
+        }
+    } else {
+        let existing: usize = ext2_u32(slot, inode_pointer, 88) as usize;
+        let entry: usize = (blocks - EXT2_MAX_DIRECT_BLOCKS) * 4;
+        if (existing < 2 || existing >= mount.filesystem_blocks) {
+            return Ext2DirectoryResult::Invalid;
+        }
+        match block_read(mount.device, existing,
+                         ext2_scratch[slot.index].file as []u8) {
+            BlockIoResult::Invalid => { return Ext2DirectoryResult::Invalid; }
+            BlockIoResult::Ok => { }
+        }
+        if (ext2_u32(slot, ext2_file(), entry) != 0 ||
+            ext2_put_u32(slot, ext2_file(), entry, block as u32) == false) {
+            return Ext2DirectoryResult::Invalid;
+        }
+        match ext2_block_write(mount, existing,
+                               ext2_scratch[slot.index].file as []u8) {
+            BlockIoResult::Invalid => { return Ext2DirectoryResult::Invalid; }
+            BlockIoResult::Ok => { }
+        }
+    }
     if (ext2_put_u32(slot, inode_pointer, 4,
                      (directory.size + KERNEL_BLOCK_SIZE) as u32) == false ||
-        ext2_put_u32(slot, inode_pointer, 28, sectors + 2) == false ||
-        ext2_put_u32(slot, inode_pointer, pointer_offset,
-                block as u32) == false) {
+        ext2_put_u32(slot, inode_pointer, 28,
+                     sectors + added_sectors) == false) {
         return Ext2DirectoryResult::Invalid;
     }
     match ext2_block_write(mount, directory.table_block,
@@ -2668,35 +2732,90 @@ private fn ext2_directory_grow_publish(slot: borrow Ext2Slot[0],
     }
 }
 
+// The new block goes back when the publish did not land.
+private fn ext2_directory_grow_with(slot: borrow Ext2Slot[0],
+        mount: Ext2Mount, directory: Ext2Inode, blocks: usize,
+        owner: sink Ext2BlockOwner[block], indirect: usize,
+        inode_number: usize, name: borrow []const u8)
+        -> Ext2DirectoryResult !{unsafe} {
+    match ext2_directory_grow_publish(slot, mount, directory, blocks,
+                                      owner.block_number, indirect,
+                                      inode_number, name) {
+        Ext2DirectoryResult::Invalid => {
+            match ext2_release_block(slot, mount, owner) {
+                Ext2OwnerReleaseResult::Invalid => { }
+                Ext2OwnerReleaseResult::Released => { }
+            }
+            return Ext2DirectoryResult::Invalid;
+        }
+        Ext2DirectoryResult::Updated => {
+            ext2_block_owner_linked(owner);
+            return Ext2DirectoryResult::Updated;
+        }
+    }
+}
+
 // Every block was walked and none had room.
 //
-// Past twelve blocks (this implementation's limit) or on a volume with no
-// free block this answers NoSpace, before anything is written; a malformed
-// directory or a device failure stays Invalid (GitHub issue #698).
+// Past the singly-indirect reach (this implementation's limit) or on a
+// volume with no free block this answers NoSpace, before anything is
+// written; a malformed directory or a device failure stays Invalid (GitHub
+// issues #698, #968). The thirteenth block needs a second free block for
+// the pointer block, and the first goes back when there is none.
 private fn ext2_directory_grow(slot: borrow Ext2Slot[0], mount: Ext2Mount,
         directory: Ext2Inode,
                                blocks: usize, inode_number: usize,
                                name: borrow []const u8) -> Ext2DirectoryAddResult !{unsafe} {
-    if (blocks >= EXT2_MAX_DIRECT_BLOCKS) {
+    if (blocks >= EXT2_MAX_SINGLE_FILE_BLOCKS) {
         return Ext2DirectoryAddResult::NoSpace;
     }
     match ext2_allocate_block(slot, mount) {
         Ext2BlockAllocResult::NoSpace => { return Ext2DirectoryAddResult::NoSpace; }
         Ext2BlockAllocResult::Failed => { return Ext2DirectoryAddResult::Invalid; }
         Ext2BlockAllocResult::Allocated(owner) => {
-            match ext2_directory_grow_publish(slot, mount, directory, blocks,
-                                              owner.block_number,
-                                              inode_number, name) {
-                Ext2DirectoryResult::Invalid => {
+            if (blocks != EXT2_MAX_DIRECT_BLOCKS) {
+                match ext2_directory_grow_with(slot, mount, directory, blocks,
+                                               owner, 0, inode_number, name) {
+                    Ext2DirectoryResult::Invalid => {
+                        return Ext2DirectoryAddResult::Invalid;
+                    }
+                    Ext2DirectoryResult::Updated => {
+                        return Ext2DirectoryAddResult::Updated;
+                    }
+                }
+            }
+            match ext2_allocate_block(slot, mount) {
+                Ext2BlockAllocResult::NoSpace => {
+                    match ext2_release_block(slot, mount, owner) {
+                        Ext2OwnerReleaseResult::Invalid => { }
+                        Ext2OwnerReleaseResult::Released => { }
+                    }
+                    return Ext2DirectoryAddResult::NoSpace;
+                }
+                Ext2BlockAllocResult::Failed => {
                     match ext2_release_block(slot, mount, owner) {
                         Ext2OwnerReleaseResult::Invalid => { }
                         Ext2OwnerReleaseResult::Released => { }
                     }
                     return Ext2DirectoryAddResult::Invalid;
                 }
-                Ext2DirectoryResult::Updated => {
-                    ext2_block_owner_linked(owner);
-                    return Ext2DirectoryAddResult::Updated;
+                Ext2BlockAllocResult::Allocated(pointer_owner) => {
+                    match ext2_directory_grow_with(slot, mount, directory,
+                            blocks, owner, pointer_owner.block_number,
+                            inode_number, name) {
+                        Ext2DirectoryResult::Invalid => {
+                            match ext2_release_block(slot, mount,
+                                                     pointer_owner) {
+                                Ext2OwnerReleaseResult::Invalid => { }
+                                Ext2OwnerReleaseResult::Released => { }
+                            }
+                            return Ext2DirectoryAddResult::Invalid;
+                        }
+                        Ext2DirectoryResult::Updated => {
+                            ext2_block_owner_linked(pointer_owner);
+                            return Ext2DirectoryAddResult::Updated;
+                        }
+                    }
                 }
             }
         }
@@ -2719,7 +2838,7 @@ fn ext2_directory_add(slot: borrow Ext2Slot[0], mount: Ext2Mount,
             }
             let needed: usize = (8 + name.len + 3) & 0xFFFFFFFFFFFFFFFC;
             let blocks: usize = ext2_directory_block_count(directory);
-            for index: usize in 0..<EXT2_MAX_DIRECT_BLOCKS {
+            for index: usize in 0..<EXT2_MAX_SINGLE_FILE_BLOCKS {
                 if (index >= blocks) { break; }
                 let block: usize =
                     ext2_directory_block_at(slot, mount, directory, index);
@@ -2818,7 +2937,7 @@ fn ext2_directory_remove(slot: borrow Ext2Slot[0], mount: Ext2Mount,
                 return Ext2DirectoryResult::Invalid;
             }
             let blocks: usize = ext2_directory_block_count(directory);
-            for index: usize in 0..<EXT2_MAX_DIRECT_BLOCKS {
+            for index: usize in 0..<EXT2_MAX_SINGLE_FILE_BLOCKS {
                 if (index >= blocks) { break; }
                 let block: usize =
                     ext2_directory_block_at(slot, mount, directory, index);
@@ -2934,7 +3053,7 @@ fn ext2_directory_live_entries(slot: borrow Ext2Slot[0], mount: Ext2Mount,
             }
             let blocks: usize = ext2_directory_block_count(directory);
             let mut live: usize = 0;
-            for index: usize in 0..<EXT2_MAX_DIRECT_BLOCKS {
+            for index: usize in 0..<EXT2_MAX_SINGLE_FILE_BLOCKS {
                 if (index >= blocks) { break; }
                 let block: usize =
                     ext2_directory_block_at(slot, mount, directory, index);

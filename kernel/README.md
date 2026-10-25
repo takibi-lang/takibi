@@ -1867,8 +1867,10 @@ run, not a specification.
   replacement, and across the pointer-block, inode and release writes of a
   thirteen-block one, and reads each verdict back through a fresh mount
   (`block_fault_arm` in `kernel/drivers/block/memory.tkb` is the injector;
-  nothing else may arm it). A directory grows a block at a time when none of its blocks has room, up to its twelve
-  direct blocks; removing the first entry of a block leaves a dead record
+  nothing else may arm it). A directory grows a block at a time when none of its blocks has room,
+  through its twelve direct blocks and then its singly-indirect block, 268
+  blocks in all, past which it is `ENOSPC` where Linux would go on into the
+  doubly-indirect block (#968); removing the first entry of a block leaves a dead record
   there, as Linux's ext2 does, and a
   later add reuses it. A directory can be made in any directory, with `.`,
   `..`, the parent's link count and the group's used-directories count, and
@@ -1885,8 +1887,9 @@ run, not a specification.
   counters are its own accounting), any `ext2 blocks capacity=` line against
   the superblock, and the known divergences in
   `scripts/ext2_known_divergences.tsv`, each a fact that must not yet hold
-  (#968: in the comparing lane, `/etc/init.sh` asks `/grow` for a
-  thirteenth block). qemu-main also
+  (none is open; in the comparing lane `/etc/init.sh` grows `/grow` to a
+  thirteenth block, asserted named through the indirect block, #968).
+  qemu-main also
   checks that the fixture's grown `/etc` and the directories the shell made
   through `mkdirat`, `/etc/moved` and `/kept`, are on it.
   Block reads go through a write-through, least-recently-used cache of

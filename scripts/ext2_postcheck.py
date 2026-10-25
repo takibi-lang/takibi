@@ -19,8 +19,10 @@ It checks, in order:
    shape of #1020 / #1021 -- is caught as a number even when it is named.
 3. Every `resource exhausted: ext2 blocks capacity=N` line the guest printed
    names the block count the host reads from the superblock.
-4. The lane's own presence facts (`--grown-dir`, `--dir`), so a lane that
-   asserts its workload ran is known to be reading the structure it wrote.
+4. The lane's own presence facts (`--grown-dir`, `--indirect-dir`, `--dir`),
+   so a lane that asserts its workload ran is known to be reading the
+   structure it wrote. `--indirect-dir` is a directory grown past its twelve
+   direct blocks into the singly-indirect block (#968).
 5. The known divergences in scripts/ext2_known_divergences.tsv: a fact that
    holds only once the named issue is fixed. A row whose subject is on the
    disk and whose fact now holds FAILS, so the fix flips the row instead of
@@ -134,6 +136,9 @@ def main(argv=None):
     parser.add_argument("--uart-log", type=pathlib.Path)
     parser.add_argument("--grown-dir", action="append", default=[],
                         help="a directory the workload grew past one block")
+    parser.add_argument("--indirect-dir", action="append", default=[],
+                        help="a directory the workload grew through an "
+                             "indirect block")
     parser.add_argument("--dir", action="append", default=[],
                         help="a directory the workload made and kept")
     parser.add_argument("--divergences", type=pathlib.Path,
@@ -179,6 +184,15 @@ def main(argv=None):
             if not present or size is None or int(size.group(1)) <= 1024:
                 failures.append(f"{path} on the guest's disk is not past one "
                                 f"block (size {size.group(1) if size else '?'})")
+        for path in args.indirect_dir:
+            present, text = stat(args.image, path)
+            size = re.search(r"^User:.*Size: (\d+)$", text, re.M)
+            if (not present or "Type: directory" not in text
+                    or size is None or int(size.group(1)) <= 12 * 1024
+                    or "(IND)" not in text):
+                failures.append(f"{path} on the guest's disk is not a "
+                                "directory grown through an indirect block "
+                                f"(size {size.group(1) if size else '?'})")
         for path in args.dir:
             present, text = stat(args.image, path)
             if not present or "Type: directory" not in text:
