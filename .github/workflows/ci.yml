@@ -94,10 +94,11 @@ jobs:
             # of qemu-system-arm, which --no-install-recommends drops, and
             # without it a lane using a virtio PCI device dies at
             # `failed to find romfile "efi-virtio.rom"` before the guest
-            # runs at all.
+            # runs at all. qemu-user carries qemu-aarch64, the host oracle
+            # of scripts/ext2_eq.py and scripts/busybox_reference.sh (#1131).
             sudo apt-get install -y --no-install-recommends \
               llvm-19 llvm-19-dev lld-19 libzstd-dev cmake \
-              qemu-system-arm ipxe-qemu gdb-multiarch \
+              qemu-system-arm qemu-user ipxe-qemu gdb-multiarch \
               mtools cpio e2fsprogs e2tools python3-serial
           '
 
