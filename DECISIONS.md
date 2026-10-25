@@ -302,3 +302,22 @@ condition below applies, and reports the land afterwards.
 - 2026-10-15 RX capability split is option A (detached kept owner, holder refills,
   spare reserve with copy fallback; ring never fully drained, TLA+-checked);
   socket receive zero-copy waits for #497 measurement. [active] #740
+- 2026-10-25 #981's remaining scratch: process_image_contexts becomes an
+  explicit parameter (global state kept minimal), and
+  kernel_process_claimed_pid takes option 1 so struct per_cpu does not
+  grow. [active] #981
+- 2026-10-25 #638 stage 2: preempt_off is a per-CPU count reached through
+  TPIDR_EL1, with a debug-build runtime assert; the follow-up questions take
+  the recommended answers. [active] #638
+- 2026-10-25 #987: check_model_function_map.py runs as a buildcheck over both
+  kernels' call-graph tables (option A). [active] #987
+- 2026-10-25 #994: DMA and cache-maintenance builtins move toward #637's
+  direction (trust confined to named mint sites), after their relation to the
+  DMA ownership model (#740 and related) is checked. [active] #994 #637
+- 2026-10-25 #954 stage 2 is scoped by a stage-2 review first; its first item
+  is #798 rebuilt inside the confirmed skeleton as linear facts the checker
+  decides and z3 re-checks. [active] #954 #798
+- 2026-10-25 #921 closes on the measured front-end speedups; the shared
+  multi-variant run is not built. #922 (domain-parallel codegen, at most ~25%
+  on a solo build and nothing on a land) leaves ROADMAP and stays open until
+  compile time is felt again. [active] #921 #922

@@ -194,9 +194,9 @@ step 4 runs #975 (branch conditions as linear facts; done 2026-10-24,
 follow-ups #977 and #978 done 2026-10-24, and #985, batched z3 for the init budget, done 2026-10-24), then #974 (the execve staging requires; done 2026-10-24),
 then #976 (--trace-init-flow, done 2026-10-24), which completes step 4;
 then the rest of #954 stage 2. Then: #908 (fixed
-QEMU lane budget), #916 (compiler GC tuning), #921 and #922
-(variant reuse, domain-parallel codegen; both wait on the land-span
-measurement after #917's front-end fixes), #995 (the region
+QEMU lane budget), #916 (compiler GC tuning), #921 (front-end scans and
+overlay local types instead of a shared multi-variant run, which the profile
+showed not worth it; done 2026-10-24), #995 (the region
 planner reads the AST instead of printing every item; done 2026-10-24), #996 (one reset,
 Compilation_state.reset, for every per-compilation table; done 2026-10-24), #997 (scope
 Hashtbl.copy calls measured at 0.01% of the kernel compile and left; closed 2026-10-24), #893 (redundant csel in variant match),
