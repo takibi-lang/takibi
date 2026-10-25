@@ -101,8 +101,7 @@ lane (`kernelcheck-race-window-*-qemu`) before its issue closes.
 safety and multicore backbone only. Taken in order whenever the numbered
 trunk items below have no step ready; an item that reaches a decision is
 parked and the next one taken:
-#958 (longest IRQ-masked span outside profile sessions), #959 (DDB's
-lock-free NIC RX pending), #1096 (the three locks #1071 left masked --
+#958 (longest IRQ-masked span outside profile sessions), #1096 (the three locks #1071 left masked --
 spare stack, exec args, generated DMA owners -- and the RPi5 cost
 measurement; #966 and #1071 unmasked the rest). #980
 (reboot through the debug stop) is done (HISTORY.md). #799 waits under #954 until a site needs it.
