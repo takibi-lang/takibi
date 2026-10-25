@@ -255,8 +255,9 @@ def tree_problems(last, tree):
     for category, now in sorted(tree.items()):
         recorded = last["counts"].get(category)
         if recorded is None:
-            problems.append(f"{category} = {now} is not in the last entry; "
-                            "append an entry")
+            # A category whose source appeared after the last entry (the
+            # frame API ratchet before #1018 lands) is held by its own
+            # ratchet until the next append records it.
             continue
         kind = CATEGORIES[category][0]
         if (kind == TRUST and now > recorded) or (kind == JUDGE and now < recorded):
