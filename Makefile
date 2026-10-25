@@ -1047,6 +1047,9 @@ KERNEL_PEER_FORK_ELF     := $(KERNEL_BUILD_DIR)/peer_fork.elf
 KERNEL_PEER_SLEEP_TKB    := $(KERNEL_DIR)/arch/arm64/kernel/peer_sleep_probe.tkb
 KERNEL_PEER_SLEEP_O      := $(KERNEL_BUILD_DIR)/peer_sleep_probe.o
 KERNEL_PEER_SLEEP_ELF    := $(KERNEL_BUILD_DIR)/peer_sleep.elf
+KERNEL_HANG_CORE_TKB     := $(KERNEL_DIR)/arch/arm64/kernel/hang_core_probe.tkb
+KERNEL_HANG_CORE_O       := $(KERNEL_BUILD_DIR)/hang_core_probe.o
+KERNEL_HANG_CORE_ELF     := $(KERNEL_BUILD_DIR)/hang_core.elf
 KERNEL_SIGNAL_BOUNDARY_TKB := $(KERNEL_DIR)/arch/arm64/kernel/signal_boundary_probe.tkb
 KERNEL_SIGNAL_BOUNDARY_O := $(KERNEL_BUILD_DIR)/signal_boundary_probe.o
 KERNEL_SIGNAL_BOUNDARY_ASM_O := $(KERNEL_BUILD_DIR)/signal_boundary_asm.o
@@ -1320,7 +1323,8 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 
 $(KERNEL_SHELL_EXT2_IMAGE): $(KERNEL_EXT2_IMAGE) \
 	$(KERNEL_EXT2_FIXTURE_DIR)/inittab.shell $(KERNEL_EXT2_FIXTURE_DIR)/restart.sh \
-	$(KERNEL_EXT2_FIXTURE_DIR)/load.sh $(KERNEL_EXT2_FIXTURE_DIR)/load-job.sh
+	$(KERNEL_EXT2_FIXTURE_DIR)/load.sh $(KERNEL_EXT2_FIXTURE_DIR)/load-job.sh \
+	$(KERNEL_HANG_CORE_ELF)
 	cp $(KERNEL_EXT2_IMAGE) $@.tmp
 	debugfs -w -R 'rm /etc/inittab' $@.tmp >/dev/null 2>&1
 	E2FSPROGS_FAKE_TIME=1700000000 \
@@ -1332,6 +1336,9 @@ $(KERNEL_SHELL_EXT2_IMAGE): $(KERNEL_EXT2_IMAGE) \
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/load-job.sh $@.tmp:/bin/load-job.sh
 	debugfs -w -R 'set_inode_field /bin/load.sh mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /bin/load-job.sh mode 0100755' $@.tmp >/dev/null 2>&1
+	# GitHub issue #980: in /lib, which no ash listing shows.
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_HANG_CORE_ELF) $@.tmp:/lib/hang-core
+	debugfs -w -R 'set_inode_field /lib/hang-core mode 0100755' $@.tmp >/dev/null 2>&1
 	python3 scripts/ext2_fixed_times.py $@.tmp $(KERNEL_EXT2_FAKE_TIME)
 	e2fsck -fn $@.tmp >/dev/null
 	mv $@.tmp $@
@@ -1602,6 +1609,16 @@ $(KERNEL_PEER_FORK_ELF): $(KERNEL_PEER_FORK_O)
 
 $(KERNEL_PEER_SLEEP_ELF): $(KERNEL_PEER_SLEEP_O)
 	$(LLD) -pie --no-dynamic-linker -e peer_sleep $< -o $@
+	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
+
+# GitHub issue #980: the hung-core reboot probe, on the shell image only.
+$(KERNEL_HANG_CORE_O): $(KERNEL_HANG_CORE_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) | $(KERNEL_BUILD_DIR)
+	$(call KERNEL_EL0_COMPILE,hang_core)
+
+-include $(KERNEL_HANG_CORE_O).d
+
+$(KERNEL_HANG_CORE_ELF): $(KERNEL_HANG_CORE_O)
+	$(LLD) -pie --no-dynamic-linker -e hang_core $< -o $@
 	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
 
 $(KERNEL_RPI5_MAIN_O): $(KERNEL_RPI5_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(KERNEL_FREELIST_TKB) $(KERNEL_SLOTMAP_TKB) $(KERNEL_REFCOUNT_SLOTMAP_TKB) $(KERNEL_PAGE_TKB) $(KERNEL_ADDRESS_SPACE_TKB) $(KERNEL_USER_MEMORY_TKB) $(KERNEL_PROCESS_IMAGE_TKB) $(KERNEL_PROCESS_TKB) $(KERNEL_SYSCALL_TKB) $(KERNEL_ELF64_TKB) $(KERNEL_MEMORY_BLOCK_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_EXT2_TKB) $(KERNEL_EXT2_MUTATION_LOCK_TKB) $(KERNEL_EXT2_MUTATION_PROBE_TKB) $(KERNEL_LOG_TKB) $(KERNEL_RPI5_MMU_TKB) $(KERNEL_RPI5_ASID_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_USER_EXTERN) $(KERNEL_RPI5_BOOT_EXTERN) $(KERNEL_RPI5_FPSIMD_EXTERN) $(KERNEL_PMU_EXTERN) $(KERNEL_CACHE_GEOMETRY_EXTERN) $(KERNEL_EXT2_IMAGE) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_NETCONFIG_TKB) $(KERNEL_ARP_TKB) $(KERNEL_CHECKSUM_TKB) $(KERNEL_ICMP_TKB) $(KERNEL_WIRE_TKB) $(KERNEL_TCP_TKB) $(KERNEL_SOCKET_CAP_TKB) $(KERNEL_RPI5_MEMORY_TKB) $(KERNEL_FDT_TKB) \

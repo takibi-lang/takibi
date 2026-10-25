@@ -2035,11 +2035,22 @@ UART line is `system stop: halt (all cores parked)`,
 `system stop: poweroff (all cores parked)`, or
 `system stop: restart (all cores parked)`. On both QEMU and RPi5, restart
 parks rather than re-entering boot, and poweroff does not remove physical
-power. The host runner ends its capture on the marker. A partial stop is
-released and returns `EAGAIN`, without printing a success marker.
+power. The host runner ends its capture on the marker.
+
+The order is Linux's (#980): the console drain, which takes locks, runs
+first; then the debug stop (`world_stop_debug_begin`), which escalates to
+the pseudo-NMI, so a peer spinning with IRQs masked is stopped too; then
+only lock-free work, checked by the compiler (`debug_stopped`). Before the
+marker the kernel prints `system stop: mask=0x... masked-spin=none|cpuN`:
+the cores held and the core the hung-core lane made spin. A stop that is
+still partial after the escalation is released and returns `EAGAIN`,
+without printing a success marker.
 
 The normal QEMU integration suite tests all three commands in separate
-interactive boots, after HTTP and DDB resume checks. The RPi5 suite tests
+interactive boots, after HTTP and DDB resume checks. The restart boot runs
+`/lib/hang-core` instead of BusyBox: it makes CPU 2 spin with IRQs masked
+and reboots from CPU 1, and the run requires the stop to hold CPU 2 while
+it spins. The RPi5 suite tests
 poweroff on its existing integration boot after DDB resumes. The common
 EL0 payload checks invalid magic, unsupported commands, all four magic2
 values, CAD no-ops, and the 32-bit argument boundary without stopping.

@@ -5851,6 +5851,7 @@ private fn syscall_system_stop_stopped(marker: *u8) -> usize
         }
         MachineStopResult::Complete(stopped) => {
             disable_irq();
+            let mask: usize = machine_stopped_mask(stopped);
             machine_stop_keep_forever(stopped);
             // Output queued between the drain above and the stop goes out
             // only if the console lock is free (a held core may own it).
@@ -5861,6 +5862,18 @@ private fn syscall_system_stop_stopped(marker: *u8) -> usize
             ddb_puts("\nsystem stop: initiator cpu=" as *u8);
             ddb_put_udec(cpu_id());
             ddb_puts("\n" as *u8);
+            // GitHub issue #980: the cores the stop holds, and the one the
+            // hung-core lane made spin with IRQs masked (none outside it).
+            ddb_puts("system stop: mask=" as *u8);
+            ddb_put_hex(mask);
+            let spinning: usize = uart_irq_hang_active_cpu();
+            if (spinning == 0) {
+                ddb_puts(" masked-spin=none\n" as *u8);
+            } else {
+                ddb_puts(" masked-spin=cpu" as *u8);
+                ddb_put_udec(spinning - 1);
+                ddb_puts("\n" as *u8);
+            }
             ddb_puts(marker);
             platform_shutdown();
             while (true) { wfi(); }
@@ -6701,6 +6714,16 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         if (x0 == 11) {
             return syscall_finish_current(frame, SyscallAction::Resume(
                 workload_peer_read_peer_ready()), current_authority);
+        }
+        // /lib/hang-core (GitHub issue #980): step 0 arms core x2's masked
+        // spin, step 1 reads which core spins (1 + core, or 0).
+        if (x0 == 24) {
+            if (x1 == 0) {
+                return syscall_finish_current(frame, SyscallAction::Resume(
+                    uart_irq_hang_arm(x2)), current_authority);
+            }
+            return syscall_finish_current(frame, SyscallAction::Resume(
+                uart_irq_hang_active_cpu()), current_authority);
         }
         // /bin/peer-sleep (GitHub issue #829).
         if (x0 == 23) {

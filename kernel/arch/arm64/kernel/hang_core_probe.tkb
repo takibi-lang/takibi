@@ -1,0 +1,77 @@
+/* Reboot while a peer core spins with IRQs masked (GitHub issue #980).
+ * A static-PIE EL0 program, kept free of writable globals and compiled with
+ * --forbid-trap. Only the shell image carries it, at /lib/hang-core (no ash
+ * listing shows /lib), and only the PTY smoke test's restart run starts it.
+ *
+ * It pins itself to CPU 1, asks the kernel (workload tag 24, step 0) to make
+ * CPU 2 spin with interrupts masked at its next interrupt, polls step 1 until
+ * that spin has begun, and calls reboot(2) RESTART. The kernel's debug stop
+ * must reach the masked core: the reboot never returns, and the kernel
+ * prints the stop mask and the spinning core before its marker. Before #980
+ * the stop was the quiescent one and this reboot returned EAGAIN.
+ */
+
+const WRITE_SYSCALL: usize = 64;
+const EXIT_SYSCALL: usize = 93;
+const SETAFFINITY_SYSCALL: usize = 122;
+const REBOOT_SYSCALL: usize = 142;
+const GETCPU_SYSCALL: usize = 168;
+const WORKLOAD_PROGRESS_SYSCALL: usize = 453;
+const HANG_CORE_TAG: usize = 24;
+const HANG_CORE_ARM: usize = 0;
+const HANG_CORE_SPINNING: usize = 1;
+const HANG_CORE_INITIATOR: u8 = 1;
+const HANG_CORE_TARGET: usize = 2;
+const HANG_CORE_POLLS: usize = 50000000;
+const HANG_CORE_ARRIVAL_POLLS: usize = 1000000;
+const LINUX_REBOOT_MAGIC1: usize = 0xFEE1DEAD;
+const LINUX_REBOOT_MAGIC2: usize = 672274793;
+const LINUX_REBOOT_CMD_RESTART: usize = 0x01234567;
+
+private fn hang_core_fail(line: borrow []const u8) !{unsafe} {
+    // Raw ABI input only: these syscalls read the readonly bytes.
+    svc5(WRITE_SYSCALL, 1, (unsafe { line as *u8 }) as usize, line.len, 0, 0);
+    svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
+}
+
+private fn hang_core_cpu() -> u8 {
+    let mut cpu_bytes: [u8; 4];
+    cpu_bytes[0] = 99;
+    if (svc5(GETCPU_SYSCALL, cpu_bytes as *u8 as usize, 0, 0, 0, 0) != 0) {
+        return 99;
+    }
+    return cpu_bytes[0];
+}
+
+fn hang_core() {
+    let mut mask: [u8; 8];
+    for index: usize in 0..<8 { mask[index] = 0; }
+    mask[0] = (1 << HANG_CORE_INITIATOR) as u8;
+    if (svc5(SETAFFINITY_SYSCALL, 0, 8, mask as *u8 as usize, 0, 0) != 0) {
+        hang_core_fail(bs"hang-core: the affinity mask was refused\n");
+    }
+    let mut here: u8 = hang_core_cpu();
+    for poll: usize in 0..<HANG_CORE_ARRIVAL_POLLS {
+        if (here != HANG_CORE_INITIATOR) { here = hang_core_cpu(); }
+    }
+    if (here != HANG_CORE_INITIATOR) {
+        hang_core_fail(bs"hang-core: never arrived on cpu 1\n");
+    }
+    if (svc5(WORKLOAD_PROGRESS_SYSCALL, HANG_CORE_TAG, HANG_CORE_ARM,
+             HANG_CORE_TARGET, 0, 0) != 1) {
+        hang_core_fail(bs"hang-core: the kernel refused to arm the masked spin\n");
+    }
+    let mut spinning: bool = false;
+    let mut polls: usize = 0;
+    while (spinning == false && polls < HANG_CORE_POLLS) {
+        spinning = svc5(WORKLOAD_PROGRESS_SYSCALL, HANG_CORE_TAG,
+                        HANG_CORE_SPINNING, 0, 0, 0) == HANG_CORE_TARGET + 1;
+        polls = polls + 1;
+    }
+    if (spinning == false) {
+        hang_core_fail(bs"hang-core: cpu 2 never began its masked spin\n");
+    }
+    svc5(REBOOT_SYSCALL, LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2,
+         LINUX_REBOOT_CMD_RESTART, 0, 0);
+    hang_core_fail(bs"hang-core: reboot returned while cpu 2 spun masked\n");
+}

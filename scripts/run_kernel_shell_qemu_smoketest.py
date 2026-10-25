@@ -17,6 +17,7 @@ from qemu_vcpu_lease import lease, shell_vcpus
 from progress_timeout import ProgressTimeout
 from await_timing import AwaitTiming
 from typed_marker import typed_marker
+from reboot_hung_core import hung_core_stop_problems
 
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -155,6 +156,10 @@ def verify_uart_transcript(pid, terminal_transcript, stop_marker, command):
             fail(pid, terminal_transcript, f"UART transcript missed {description}")
     if uart.count(b"ddb: break seq=") < 2:
         fail(pid, terminal_transcript, "UART transcript missed oops command output")
+    # GitHub issue #980: the restart run reboots while a core spins masked.
+    if command == "reboot":
+        for problem in hung_core_stop_problems(uart):
+            fail(pid, terminal_transcript, f"hung-core reboot: {problem}")
 
 
 def verify_http(url):
@@ -182,6 +187,11 @@ def run_one(command, http_offset):
         # tells a local stop from a rerun on core 0.
         stop_line = (f"x=; /bin/taskset -c 1 /bin/busybox {command} -f\n"
                      .encode("ascii"))
+        # GitHub issue #980: restart from /lib/hang-core, which pins to
+        # CPU 1, makes CPU 2 spin with IRQs masked and calls reboot(2); the
+        # debug stop must reach CPU 2. Halt and poweroff keep BusyBox's path.
+        if command == "reboot":
+            stop_line = b"x=; /lib/hang-core\n"
     startup_path = os.path.join(ARTIFACT_DIR, f"await-{command}.jsonl")
     exit_path = os.path.join(ARTIFACT_DIR, f"await-{command}-exit.jsonl")
     try:
