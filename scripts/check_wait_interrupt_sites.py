@@ -46,6 +46,9 @@ ALLOWED = {
     "syscall_finish_write": (
         1, "pass-through: hands a write's own WaitInterrupt on unchanged "
            "(#1042)"),
+    "syscall_io_action_nosignal": (
+        1, "pass-through: hands a send's own InterruptWait to "
+           "syscall_io_action unchanged (#1113)"),
     "syscall_execve_current": (
         2, "pass-through of an exit with no successor"),
     "syscall_signal_deliver": (

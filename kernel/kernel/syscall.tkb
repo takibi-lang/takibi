@@ -2233,6 +2233,22 @@ fn syscall_io_action(current_authority: borrow ProcessCurrent[current_process, P
     }
 }
 
+// GitHub issue #1113: syscall_io_action for send/sendto with MSG_NOSIGNAL:
+// a broken socket answers EPIPE and raises no SIGPIPE (Linux's
+// sk_stream_error); every other result is mapped as for write.
+fn syscall_io_action_nosignal(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], result: SyscallIoResult) -> SyscallAction {
+    match result {
+        SyscallIoResult::PipeBroken => { return SyscallAction::Resume(LINUX_EPIPE); }
+        SyscallIoResult::Errno(errno) => { return SyscallAction::Resume(errno); }
+        SyscallIoResult::Transferred(count) => { return SyscallAction::Resume(count); }
+        SyscallIoResult::NetWait => { return syscall_io_action(current_authority, SyscallIoResult::NetWait); }
+        SyscallIoResult::UartWait => { return syscall_io_action(current_authority, SyscallIoResult::UartWait); }
+        SyscallIoResult::InterruptWait => { return syscall_io_action(current_authority, SyscallIoResult::InterruptWait); }
+        SyscallIoResult::TerminalWait => { return syscall_io_action(current_authority, SyscallIoResult::TerminalWait); }
+        SyscallIoResult::PipeWait => { return syscall_io_action(current_authority, SyscallIoResult::PipeWait); }
+    }
+}
+
 // GitHub issue #1042: a pipe end at `fd` in the calling process.
 fn kernel_syscall_pipe_is_open(fd: usize) -> bool {
     match unified_pipe_lookup(kernel_syscall_process_key(), fd) {
@@ -7330,32 +7346,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     if (number == 206 && x4 == 0) {
         let sent: SyscallIoResult = syscall_write_segment(current_authority, x0, x1, x2);
         if ((x3 & LINUX_MSG_NOSIGNAL) != 0) {
-            match sent {
-                SyscallIoResult::PipeBroken => {
-                    return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EPIPE), current_authority);
-                }
-                SyscallIoResult::Errno(e) => {
-                    return syscall_finish_write(frame, syscall_io_action(current_authority, SyscallIoResult::Errno(e)), current_authority);
-                }
-                SyscallIoResult::Transferred(n) => {
-                    return syscall_finish_write(frame, syscall_io_action(current_authority, SyscallIoResult::Transferred(n)), current_authority);
-                }
-                SyscallIoResult::NetWait => {
-                    return syscall_finish_write(frame, syscall_io_action(current_authority, SyscallIoResult::NetWait), current_authority);
-                }
-                SyscallIoResult::UartWait => {
-                    return syscall_finish_write(frame, syscall_io_action(current_authority, SyscallIoResult::UartWait), current_authority);
-                }
-                SyscallIoResult::InterruptWait => {
-                    return syscall_finish_write(frame, syscall_io_action(current_authority, SyscallIoResult::InterruptWait), current_authority);
-                }
-                SyscallIoResult::TerminalWait => {
-                    return syscall_finish_write(frame, syscall_io_action(current_authority, SyscallIoResult::TerminalWait), current_authority);
-                }
-                SyscallIoResult::PipeWait => {
-                    return syscall_finish_write(frame, syscall_io_action(current_authority, SyscallIoResult::PipeWait), current_authority);
-                }
-            }
+            return syscall_finish_current(frame, syscall_io_action_nosignal(current_authority, sent), current_authority);
         }
         return syscall_finish_write(frame, syscall_io_action(current_authority, sent), current_authority);
     }
