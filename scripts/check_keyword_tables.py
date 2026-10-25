@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Keep the lexer's keyword table and Language_words.hard_keywords equal.
+"""Keep the lexer's keyword table and Language_words.classified_hard_keywords equal.
 
 lib/lexer.mll turns an identifier into a keyword token only when
 Language_words.is_hard_keyword says it is one, then maps it with
@@ -26,7 +26,8 @@ def lexer_words(text):
 
 
 def list_words(text):
-    start = text.index("let hard_keywords = [")
+    # #1003: the list is (word, class) pairs.
+    start = text.index("let classified_hard_keywords = [")
     end = text.index("]", start)
     return set(re.findall(r'"([a-z_0-9]+)"', text[start:end]))
 
