@@ -56,6 +56,12 @@ point, one more GDB stop in affinity-gdb), not to a lane of its own.
 Totals: 13 integration QEMU lanes, 1792 s; 12 error-case lanes, 3807 s, which
 is about 68 % of QEMU lane-seconds and the most a simulation could save.
 
+Every lane whose runner hands QEMU a writable disk judges that disk after the
+guest stops with `scripts/ext2_postcheck.py` (#1033: `e2fsck -fn`, free
+counters against the bitmaps, known divergences), a few seconds inside the
+lane rather than a lane of its own; `check_ext2_postcheck_lanes.py` refuses a
+runner that skips it.
+
 Caveats. An error-case lane boots a real kernel too, so it incidentally
 re-proves boot; that is not why it exists, and qemu-main proves it. QEMU's
 TCG does not model the weak memory ordering of the Cortex-A76, so none of

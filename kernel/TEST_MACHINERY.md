@@ -24,7 +24,9 @@ entry from the newly allocated block. `newfstatat` exposes the
 directory's `st_size`; the ash fixture verifies the second block remains the
 same size after the dead record is reused. It removes every probe directory
 but leaves `/etc` grown on disk. The QEMU runner checks the guest's whole disk
-with `e2fsck` after the session.
+after the session with `scripts/ext2_postcheck.py` (`e2fsck`, free counters
+against the bitmaps, known divergences; #1033), as every runner with a
+writable disk does.
 
 ## ext2 equivalence with Linux (tier B)
 

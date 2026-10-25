@@ -1865,9 +1865,16 @@ run, not a specification.
   is BusyBox `mkdir`, `rmdir` and `rm`; `unlinkat` releases a regular file's
   direct blocks and refuses a symlink or a file reaching an indirect block.
   Symlinks remain fast symlinks, and there are no additional block groups.
-  The QEMU lane runs the host's `e2fsck -fn` over the disk the guest wrote,
-  after checking that the fixture's grown `/etc` and the directories the
-  shell made through `mkdirat`, `/etc/made` and `/kept`, are on it.
+  Every QEMU runner that gives the guest a writable disk runs
+  `scripts/ext2_postcheck.py` over it once QEMU has stopped (#1033): the
+  host's `e2fsck -fn`, the superblock and group-descriptor free counts
+  against the bitmaps (the kernel keeps no cached copy, so those on-disk
+  counters are its own accounting), any `ext2 blocks capacity=` line against
+  the superblock, and the known divergences in
+  `scripts/ext2_known_divergences.tsv`, each a fact that must not yet hold
+  (#968: the shell asks `/grow` for a thirteenth block). qemu-main also
+  checks that the fixture's grown `/etc` and the directories the shell made
+  through `mkdirat`, `/etc/moved` and `/kept`, are on it.
   Block reads go through a write-through, least-recently-used cache of
   sixteen 1 KiB blocks per core (`kernel/drivers/block/block_cache.tkb`),
   which is what keeps ext2's per-chunk metadata re-reads from reaching the

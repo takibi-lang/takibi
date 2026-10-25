@@ -169,7 +169,8 @@ data, sectors, bitmap and counters must remain unchanged. The existing EL0
 syscall fixture then writes seven 1 KiB chunks and requires the eighth to
 return `-28`. It checks the committed data, shrinks and unlinks the fillers,
 and retries on the same descriptor to verify its offset did not advance.
-The existing QEMU lane checks the resulting disk with host `e2fsck`.
+The existing QEMU lane checks the resulting disk with host `e2fsck` and its
+free counters against the bitmaps (`scripts/ext2_postcheck.py`, #1033).
 No new guest, lane or persistent source buffer is added. Boot records the
 filler preparation's timer ticks, timer frequency and logical I/O call
 counts; real elapsed time is measured on the RPi5.
