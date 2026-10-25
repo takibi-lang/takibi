@@ -1865,6 +1865,11 @@ run, not a specification.
   in one block-bitmap write; a failure before that write puts the log back and
   the call answers `EIO` with the disk as it was, and a rollback that itself
   fails fences the mount, which `ext2_recover` finishes before it recounts.
+  Create (`O_CREAT`), `mkdir` and rename to a new name are all or nothing
+  the same way (#1120): the inode record, its bit, the directory entry, a
+  grown directory's inode and pointer block and the parent's link are
+  logged, a block they claim is written while its bit is still clear, and
+  the bits of those blocks are set last, in one block-bitmap write.
   Allocation exhaustion with successful rollback
   instead returns `ENOSPC` and logs the ext2 block pool. The old allocation
   stays live until publication, so peak space includes both versions.

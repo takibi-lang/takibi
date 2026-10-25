@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Every ext2 release writes through the undo log.
+"""Every ext2 release and create writes through the undo log.
 
 Usage: buildcheck_ext2_release_log.py <kernel>.callgraph.tsv
 
@@ -9,7 +9,11 @@ rejected write part way leaked blocks or an inode, left the free counts
 disagreeing with the bitmaps, or -- for rename -- lost the target name. They
 now log every range they rewrite (ext2_undo_save + ext2_undo_write) and free
 their blocks last, in the one bitmap write of ext2_release_commit, so a
-rejected write before that puts the log back. The linear Ext2Undo token
+rejected write before that puts the log back. GitHub issue #1120 put the
+operations that add a name -- create, mkdir and rename to a new name --
+on the same log: they write the blocks they claim while those blocks' bits
+are still clear (ext2_claimed_write) and set the bits last, in the one
+bitmap write of ext2_create_commit. The linear Ext2Undo token
 makes every path end in a commit or an abort; what the compiler does NOT
 check is that a release writes only through the log. A helper added later
 that calls ext2_block_write itself would compile and silently reopen #1088.
@@ -43,6 +47,10 @@ ROOTS = (
     "ext2_unlink_name_with",
     "ext2_rename_over",
     "ext2_rmdir_release",
+    "ext2_create_file_in_with",
+    "ext2_create_empty_file_in_with",
+    "ext2_make_directory_in_with",
+    "ext2_rename_new",
 )
 
 WRITERS = {
@@ -52,6 +60,11 @@ WRITERS = {
                            "and the scrub that follow it",
     "ext2_walk_visit": "only its Scrub mode writes, and only "
                        "ext2_release_commit runs it, after the commit",
+    "ext2_claimed_write": "a block the create claims, whose bit stays clear "
+                          "until the commit, so nothing reads it and a "
+                          "rollback leaves it free",
+    "ext2_create_commit": "the create's commit: one bitmap write marking "
+                          "the claimed blocks, then the recount",
 }
 
 
@@ -92,9 +105,10 @@ def problems_in(rows: list[dict]) -> tuple[list[str], int]:
             problems.append(
                 f"{FILE}:{row['line']} {name} is reached from a release and "
                 f"calls {', '.join(sorted(set(found)))} itself. A release "
-                "writes through ext2_undo_save/ext2_undo_write and frees its "
-                "blocks in ext2_release_commit, so a rejected write can be "
-                "put back (GitHub issue #1088); route the write through the "
+                "or create writes through ext2_undo_save/ext2_undo_write and "
+                "frees or claims its blocks in ext2_release_commit or "
+                "ext2_create_commit, so a rejected write can be put back "
+                "(GitHub issues #1088, #1120); route the write through the "
                 "log, or name the function in WRITERS with the reason")
         if name not in ROOTS and any(
                 call_graph_table.callee_name(entry) == BEGIN
