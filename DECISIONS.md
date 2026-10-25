@@ -433,3 +433,8 @@ condition below applies, and reports the land afterwards.
 - 2026-10-25 #1021/#1100 option (b): /pad stays #742's MiB rounding; the
   comparing lane's runner plants a dedicated doubly-indirect fixture on its
   own disk copy with debugfs. [active] #1021 #1100
+- 2026-10-25 #1072 option 1: an unmasked pool lock says so where the lock
+  is declared, and the compiler derives may_block for its acquire from that
+  declaration (explicit at the declaration, not implicit in the builtin);
+  the declaration also fixes its rank band (#966). Per-function may_block
+  annotations for those acquires go away. [active] #1072 #966
