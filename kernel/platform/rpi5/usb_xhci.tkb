@@ -883,7 +883,7 @@ fn xhci_setup_rings_and_start() -> bool !{unsafe} {
     let dcbaa_dma: usize = dcbaa_base + rp1_dma_pci_offset;
     xhci_dcbaa[0] = (scratchpad_array_dma & 0xFFFFFFFF) as u32;
     xhci_dcbaa[1] = ((scratchpad_array_dma >> 32) & 0xFFFFFFFF) as u32;
-    dma_prepare_tx(xhci_dcbaa as *u8, 65 * 8);
+    xhci_dcbaa_clean();
 
     let mut cmd_ring_dma: usize = 0;
     match xhci_ring_dma(XHCI_RING_CMD) {
@@ -972,7 +972,7 @@ fn xhci_address_device() -> XhciAddressOutcome !{unsafe} {
     xhci_dcbaa[slot * 2] = (device_ctx_dma & 0xFFFFFFFF) as u32;
     xhci_dcbaa[slot * 2 + 1] =
         ((device_ctx_dma >> 32) & 0xFFFFFFFF) as u32;
-    dma_prepare_tx(xhci_dcbaa as *u8, 65 * 8);
+    xhci_dcbaa_clean();
 
     let mut ep0_ring_dma: usize = 0;
     match xhci_ring_dma(XHCI_RING_EP0) {

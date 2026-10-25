@@ -197,8 +197,8 @@ condition below applies, and reports the land afterwards.
 
 - 2026-10-13 Only files in kernel/DEVICE_SEMANTICS_FILES may declare device
   protocols. [active] #720
-- 2026-10-13 usb_xhci_bus.tkb (one function) replaces usb_xhci.tkb on the
-  mint list. [active] #637 #720
+- 2026-10-13 usb_xhci_bus.tkb (one function; two since #994) replaces
+  usb_xhci.tkb on the mint list. [active] #637 #720
 - 2026-10-13 Generated `<protocol ...>` files are exempt from raw-authority
   confinement; recorded in TRUSTED_BASE.md. [active] #720
 - 2026-10-13 Process stack runs keep their PageRunOwner in the process
@@ -347,6 +347,10 @@ condition below applies, and reports the land afterwards.
 - 2026-10-25 #994: DMA and cache-maintenance builtins move toward #637's
   direction (trust confined to named mint sites), after their relation to the
   DMA ownership model (#740 and related) is checked. [active] #994 #637
+- 2026-10-25 #994: only raw-pointer cache maintenance (dma_prepare_tx/_rx,
+  dma_finish_rx) is a counted raw site; ordering builtins and the dma_fixed
+  finishes (check_dma_mint_files.py) stay as they are. usb_xhci_bus.tkb now
+  holds two functions, the span export and the DCBAA clean. [active] #994 #637 #720
 - 2026-10-25 #954 stage 2 is scoped by a stage-2 review first; its first item
   is #798 rebuilt inside the confirmed skeleton as linear facts the checker
   decides and z3 re-checks. [active] #954 #798

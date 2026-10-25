@@ -253,16 +253,16 @@ rules globally.
   and the chosen protocol remain trusted unless represented by separate
   checked types and state transitions.
   Relation to the DMA ownership model (GitHub issue #994 step 1,
-  2026-10-25; not yet confined): three groups, by what a call can break.
+  2026-10-25): three groups, by what a call can break; only (a) is confined.
   (a) Raw-pointer cache maintenance, `dma_prepare_tx` (clean) and
   `dma_prepare_rx`/`dma_finish_rx` (invalidate): direct calls only in
-  `exception_evidence.tkb` (crash-snapshot writeback, mint-listed, no DMA
-  transition) and `usb_xhci.tkb` (two DCBAA cleans before the doorbell,
-  outside every ownership model by the #720 "DCBAA stays legacy" decision,
-  and not mint-listed); protocol and dma_fixed cache work reaches the same
+  `exception_evidence.tkb` (crash-snapshot writeback, no DMA transition)
+  and `usb_xhci_bus.tkb`'s `xhci_dcbaa_clean` (the DCBAA, outside every
+  ownership model by the #720 "DCBAA stays legacy" decision), both
+  mint-listed; protocol and dma_fixed cache work reaches the same
   lowerings only through generated wrappers (`__protocol_dma_*`) on their
-  checked publish/finish edges. This group is the address-taking authority
-  #637 would confine. (b) Zero-argument ordering (`dma_publish`,
+  checked publish/finish edges. Under `--confine-raw-authority` each direct
+  call is a counted raw site, an error outside `kernel/RAW_MINT_FILES`. (b) Zero-argument ordering (`dma_publish`,
   `dma_consume`, `signal_fence`, `device_fence`, `dsb_ish`, `dsb_ishst`,
   `isb`): called in virtio_blk, virtio_blk_dma, virtio_net (submit and
   used-ring observation), uart_rx_ring, mmu, gicv2, timer, tcp, ext2

@@ -108,6 +108,17 @@ let address_mint_sites program =
 
 let atomic_intrinsic_sites program = named_call_sites Atomic_spec.is_intrinsic program
 
+(* GitHub issue #994: a raw-pointer cache clean or invalidate names an
+   address the compiler does not tie to an owner, so each direct call is a
+   counted site. Zero-argument ordering builtins and the dma_fixed/protocol
+   ownership transitions are not: the first cannot break a claim, and the
+   second are the checked capability split (generated wrappers call the
+   __protocol_dma_* names, not these). *)
+let cache_maintenance_builtins = [ "dma_prepare_tx"; "dma_prepare_rx"; "dma_finish_rx" ]
+
+let cache_maintenance_sites program =
+  named_call_sites (fun callee -> List.mem callee cache_maintenance_builtins) program
+
 module Sites = Map.Make (struct
   type t = string * int * int
   let compare = compare
@@ -153,10 +164,15 @@ let check ?(source_program = []) ~mint_files () =
       Some (Ast.source_loc loc, Printf.sprintf
         "raw-authority confinement: raw atomic intrinsic '%s' called in '%s' (%s) is outside a declared mint file; use AtomicWord (kernel/lib/atomic_word.tkb) or the lock, or add the file to the mint list by a reviewed decision"
         callee name (Ast.source_file_of_loc loc))) in
+  let caches = cache_maintenance_sites source_program |> List.filter_map (fun (loc, name, callee) ->
+    if declared (Ast.source_file_of_loc loc) then None else
+      Some (Ast.source_loc loc, Printf.sprintf
+        "raw-authority confinement: raw cache maintenance '%s' called in '%s' (%s) is outside a declared mint file; use a device protocol or dma_fixed record, or add the file to the mint list by a reviewed decision"
+        callee name (Ast.source_file_of_loc loc))) in
   List.sort_uniq (fun (left, a) (right, b) ->
     compare (Ast.source_file_of_loc left, left.pos_lnum, left.pos_cnum, a)
       (Ast.source_file_of_loc right, right.pos_lnum, right.pos_cnum, b))
-      (raw @ unsafe @ references @ address_mints @ atomics)
+      (raw @ unsafe @ references @ address_mints @ atomics @ caches)
 
 (* GitHub issue #739: every counted raw site, declared or not, keyed by its
    normalized source file. The compiler's own virtual files are left out:
@@ -175,7 +191,9 @@ let site_counts ?(source_program = []) () =
     @ List.map (fun (loc, _) -> Ast.source_file_of_loc loc)
         (address_mint_sites source_program)
     @ List.map (fun (loc, _, _) -> Ast.source_file_of_loc loc)
-        (atomic_intrinsic_sites source_program) in
+        (atomic_intrinsic_sites source_program)
+    @ List.map (fun (loc, _, _) -> Ast.source_file_of_loc loc)
+        (cache_maintenance_sites source_program) in
   let counts = List.fold_left (fun counts file ->
     if file = Ast.builtin_region_file || String.starts_with ~prefix:"<protocol " file
     then counts else

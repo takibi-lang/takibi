@@ -3,9 +3,17 @@
 // owner -- carries an address the type system proved inside its
 // allocation; exporting it as a bus address is the trusted step, and RP1's
 // inbound window offset (rp1_dma_pci_offset) is applied here, once. This
-// file is a raw mint file (kernel/RAW_MINT_FILES) for exactly this
-// function, so that usb_xhci.tkb itself holds no raw site.
+// file is a raw mint file (kernel/RAW_MINT_FILES) for exactly these two
+// functions, so that usb_xhci.tkb itself holds no raw site.
 
 fn xhci_span_bus_address(span: borrow DmaDeviceSpan) -> usize !{unsafe} {
     return unsafe { dma_span_address(span) } + rp1_dma_pci_offset;
+}
+
+// The DCBAA's writeback before the controller reads it (GitHub issue #994).
+// A raw-pointer cache clean is a counted raw site; the DCBAA stays outside
+// the ownership model until sub-region authority (#720), so its clean is
+// trusted here, over the whole table.
+fn xhci_dcbaa_clean() !{unsafe} {
+    dma_prepare_tx(xhci_dcbaa as *u8, sizeof([u32; 65 * 2]));
 }

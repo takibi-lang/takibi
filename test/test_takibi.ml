@@ -25643,6 +25643,38 @@ let raw_authority_policy_tests = [
           (Atomic_spec.is_intrinsic name))
         ["atomic_word_load"; "atomic_word_store"; "atomic_word_swap"]);
 
+  (* GitHub issue #994: a raw-pointer cache clean or invalidate is a counted
+     site; the zero-argument ordering builtins are not. *)
+  Alcotest.test_case "raw cache maintenance call requires a declared mint file" `Quick
+    (fun () ->
+      let cache_errors source_program mint_files =
+        List.filter (fun (_, message) -> contains_substring message "raw cache maintenance")
+          (Raw_authority_policy.check ~source_program ~mint_files ()) in
+      List.iter (fun callee ->
+        let source = "let mut buf: [u8; 64] align(64); fn flush() !{unsafe} { " ^ callee
+                     ^ "(buf as *u8, 64); } fn main() -> usize { return 42; }" in
+        let source_program = parse source in
+        (match cache_errors source_program [] with
+         | [(loc, message)] ->
+             Alcotest.(check bool) (callee ^ ": names the builtin") true
+               (contains_substring message ("'" ^ callee ^ "'"));
+             Alcotest.(check bool) (callee ^ ": names the function") true
+               (contains_substring message "'flush'");
+             let file = Ast.source_file_of_loc loc in
+             Alcotest.(check int) (callee ^ ": wrong file cannot authorize") 1
+               (List.length (cache_errors source_program ["elsewhere.tkb"]));
+             Alcotest.(check int) (callee ^ ": declared file accepted") 0
+               (List.length (cache_errors source_program [file]));
+             Alcotest.(check (option int)) (callee ^ ": counted once") (Some 1)
+               (List.assoc_opt (Raw_authority_policy.normalize file)
+                  (Raw_authority_policy.site_counts ~source_program ()))
+         | errors -> Alcotest.failf "%s: expected one error, got %d" callee
+                       (List.length errors)))
+        ["dma_prepare_tx"; "dma_prepare_rx"; "dma_finish_rx"];
+      let fences = parse "fn order() { dma_publish(); dma_consume(); dsb_ish(); isb(); } fn main() -> usize { return 42; }" in
+      Alcotest.(check int) "ordering builtins not counted" 0
+        (List.length (cache_errors fences [])));
+
   (* GitHub issue #739: the mint list is a ratchet; a stale entry fails. *)
   Alcotest.test_case "stale mint-list entries are rejected" `Quick
     (fun () ->
