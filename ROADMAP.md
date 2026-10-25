@@ -81,7 +81,9 @@ lane (`kernelcheck-race-window-*-qemu`) before its issue closes.
   never the evidence a defect is fixed; time verdicts decided on the
   RPi5). It is scheduled before #638's stage 2 and #966 because both need
   a load baseline, and #1014 (run-lock contention, parked) is measured on
-  this load and nowhere else. Stages 2 and 3 (threads: CLONE_VM, futex,
+  this load and nowhere else. Each program is recorded beside the same
+  program under Linux on the same machine (maintainer, 2026-10-25): a
+  reference column, never a verdict. Stages 2 and 3 (threads: CLONE_VM, futex,
   TLS, TLB shootdown, #202's sibling-thread case) wait for the #638 flip.
 - #584's soak at natural boundaries; #702 (dedicated soak hardware) is the
   maintainer's decision. Every QEMU lane runs four vCPUs since 2026-10-11.
@@ -169,7 +171,8 @@ next one taken. The done record of the previous queue is in HISTORY.md
    hidden); #994 (address-taking DMA cache builtins counted as raw sites;
    done 2026-10-25) and #1028 (other address-taking intrinsics); #1031 slice 1 (classify the 119
    `kernel_invariant_stop` sites and ratchet them); #1018 (the frame API
-   rule as a list-file check).
+   rule as a list-file check); #986 slice 1 (the trust ledger as a dated
+   checkpoint series, each row attributed to the rule that retired it).
 1. **Verification (#954; B owns the refinement code).** The rest of #954
    stage 2 (docs/VERIFICATION_DESIGN.md, "Stage 2 scope"), then #955's
    evidence log; #986 slice 2 (region arithmetic and overlay length as

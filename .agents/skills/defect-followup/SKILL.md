@@ -36,6 +36,15 @@ answer on the diff and the tests actually run.
    once, or a property of the .tkb program? If yes, add a comment on #955
    with the defect, the level, what would have been proved, and a rough proof
    size. Say "no" with the reason otherwise. Record only; do not implement.
+9. **Rust baseline.** Would the Rust toolchain as a kernel uses it have
+   caught the defect, and by what: safe Rust's type system (R-type), a
+   run-time panic only when the path executes (R-panic), a lint outside
+   rustc such as klint or clippy (R-lint), a bounded verifier such as
+   Kani, Miri, Verus or Flux (R-verify), nothing (R-none, naming the Takibi
+   rule or token that does), or not applicable because the defect is in
+   Takibi's own compiler or tooling (N/A)? Add one row to the log on #1043
+   with the verdict and one line of reasoning; an uncertain verdict says
+   so in its Notes cell. Record only; do not implement.
 
 ## Ask the maintainer
 
