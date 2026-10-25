@@ -29,6 +29,7 @@
 //   decision).
 
 use "kernel/lib/mutex.tkb";
+use "kernel/lib/task_mutex.tkb";
 use "kernel/drivers/virtio_used.tkb";
 
 const VIRTIO_PKT_ONE: usize = 1;
@@ -128,21 +129,23 @@ variant VirtioPktHeld {
 }
 
 struct VirtioPktSlot {
-    private mutex: Mutex;
+    private mutex: TaskMutex;
     private value: Place(VirtioPktHeld);
 }
 private let mut virtio_pkt_slots: [VirtioPktSlot; 10];
 
-private linear struct VirtioPktGuard[lock: addr] { private flags: usize; }
+private linear struct VirtioPktGuard[lock: addr] { private held: usize; }
 
-private fn virtio_pkt_lock(lock: *Mutex @ address) -> VirtioPktGuard[address]
-        !{acquires_lock_40_virtio_pkt, lock_guard_40_virtio_pkt} {
-    let mut guard: VirtioPktGuard[address] = { mutex_acquire(lock) };
+private fn virtio_pkt_lock(lock: *TaskMutex @ address) -> VirtioPktGuard[address]
+        !{may_block, acquires_lock_30_virtio_pkt, lock_guard_30_virtio_pkt} {
+    task_mutex_acquire(lock);
+    let mut guard: VirtioPktGuard[address] = { 1 };
     return guard;
 }
 
-private fn virtio_pkt_unlock(guard: sink VirtioPktGuard[address], lock: *Mutex @ address) {
-    mutex_release(lock, guard.flags);
+private fn virtio_pkt_unlock(guard: sink VirtioPktGuard[address], lock: *TaskMutex @ address) {
+    let held: usize = guard.held;
+    task_mutex_release(lock);
 }
 
 // A slot never holds two owners; a displaced or misplaced one is an

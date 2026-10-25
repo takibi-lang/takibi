@@ -1,18 +1,21 @@
 // A typed one-shot gate for initialization that may be reached concurrently.
 // Exactly one caller receives the linear right to initialize.
 //
-// Current limitations (2026-09-10): the gate holds an IRQ-masking Mutex until
-// commit or cancel, so it is for bounded boot-time initialization. It does not
+// Current limitations (2026-10-25): the gate holds a TaskMutex until commit or
+// cancel, so it is for bounded boot-time initialization. Since #1071 that lock
+// does not mask interrupts: `may_block` makes an `!{interrupt}` root reaching
+// init_once_begin a compile error, and its rank (30, below every masking lock)
+// makes beginning one under a masking guard a lock-order error. It does not
 // publish a value and waiters do not sleep. Cancel leaves it available.
-use "kernel/lib/mutex.tkb";
+use "kernel/lib/task_mutex.tkb";
 
 struct InitOnce {
     private complete: bool;
-    private mutex: Mutex;
+    private mutex: TaskMutex;
 }
 
 linear struct InitOnceGuard[once: addr] {
-    private flags: usize;
+    private held: usize;
 }
 
 must_use variant InitOnceBegin[once: addr] {
@@ -21,23 +24,25 @@ must_use variant InitOnceBegin[once: addr] {
 }
 
 fn init_once_begin(once: &mut InitOnce @ id) -> InitOnceBegin[id]
-        !{acquires_lock_40_init_once, lock_guard_40_init_once} {
-    let flags: usize = mutex_acquire(&(*once).mutex);
+        !{may_block, acquires_lock_30_init_once, lock_guard_30_init_once} {
+    task_mutex_acquire(&(*once).mutex);
     if ((*once).complete) {
-        mutex_release(&(*once).mutex, flags);
+        task_mutex_release(&(*once).mutex);
         return InitOnceBegin::AlreadyComplete;
     }
-    let mut guard: InitOnceGuard[id] = { flags };
+    let mut guard: InitOnceGuard[id] = { 1 };
     return InitOnceBegin::Start(guard);
 }
 
 fn init_once_commit(once: &mut InitOnce @ id,
                     guard: sink InitOnceGuard[id]) {
     (*once).complete = true;
-    mutex_release(&(*once).mutex, guard.flags);
+    let held: usize = guard.held;
+    task_mutex_release(&(*once).mutex);
 }
 
 fn init_once_cancel(once: &mut InitOnce @ id,
                     guard: sink InitOnceGuard[id]) {
-    mutex_release(&(*once).mutex, guard.flags);
+    let held: usize = guard.held;
+    task_mutex_release(&(*once).mutex);
 }

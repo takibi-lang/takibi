@@ -571,10 +571,10 @@ build enforces each:
    compiler's lock-order check rejects taking an unmasked lock under a masking
    guard. That is lockdep's interrupt-safe/unsafe rule: otherwise core A holds
    the unmasked lock, an interrupt on A spins on a masking lock core B holds,
-   and B spins on A's lock. The process-image pool stays masked for exactly
-   this reason (a diagnostic reads it under the run lock), as do the pools and
-   locks an interrupt reaches (process, address-space backing, TCP connection,
-   page allocator, run, console, ASID, profile).
+   and B spins on A's lock. The spare-stack cell stays masked for exactly
+   this reason (it is taken under the run lock), as do the pools and locks an
+   interrupt reaches (process, address-space backing, TCP connection, page
+   allocator, run, console, ASID, profile).
 3. **Nothing preempts the holder.** A holder can now take an interrupt, which
    only lengthens its hold while `KERNEL_PREEMPTIBLE` is 0;
    `kernel/lib/execution_model.tkb` asserts that, since a preemptible kernel
@@ -583,6 +583,25 @@ build enforces each:
 A world stop's window cannot wait on one either: a peer that holds an
 unmasked lock acknowledges the stop, but the stop's guard ranks 40, so an
 unmasked acquire inside the window is the same lock-order error.
+
+#1071 extends this to the `Mutex`-based locks no interrupt reaches, which
+became `TaskMutex` (rank 30, the band's floor, so they may still nest under
+one another and under a TCP connection): the TCP connection frames lock, the
+retransmit entry and chain locks, the GEM descriptor rings, the virtio used
+rings and packet slots, the xHCI ring and context slots, and `InitOnce`. The
+process-image pool is unmasked too: the procfs snapshot now reads the resident
+page count after the run unlock, from handle words copied under it, whose
+generation makes a freed image read as 0 pages. Still masked, each for a
+reason the build reports if it is undone:
+
+- the spare-stack cell, taken under the run lock (a lock-order error);
+- the per-CPU exec-args slot, taken inside a `preempt_off` block, where
+  `may_block` is refused -- `may_block` stands for "no interrupt reaches this"
+  here but means "may sleep" to `preempt_off`, so this one needs an acquire
+  that is interrupt-unsafe without being a block;
+- the compiler-generated `dma_owner_*` slots (the virtio-blk receive buffer and
+  the xHCI mass-storage DMA buffers), whose lock field the compiler declares as
+  `Mutex`.
 
 A global `Mutex` needs no `mutex_init`: `.bss` is zeroed by both entry paths
 and a zeroed word is free. Calling `mutex_init` on one is worse than

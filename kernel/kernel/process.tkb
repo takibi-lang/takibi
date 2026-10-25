@@ -2310,12 +2310,20 @@ private fn scheduled_process_slot_for_pid_stopped(
 
 // Allocation-free procfs copying retains the run guard from lookup through
 // the final command byte. The returned snapshot contains values only.
+//
+// GitHub issue #1071: the resident page count is read AFTER the run unlock,
+// from the image handle words copied under it. The process-image pool lock
+// does not mask interrupts, so it ranks below the run lock and may not be
+// taken under it (kernel/CONCURRENCY.md, "Lock classes"). The words carry the
+// record's generation, so an image freed in between reads as 0 pages, never
+// as another process's count.
 fn scheduled_process_diagnostic_snapshot(pid: usize)
         -> ProcessDiagnosticResult !{unsafe} {
     // Zeroed so the Missing path, on which the fill never runs, still
     // leaves a definitely initialized value (GitHub issue #203).
     let mut snapshot: ProcessDiagnosticSnapshot;
     zero_fill(&snapshot);
+    let mut words: ProcessPoolHandleWords = { 0, 0 };
     let guard = process_run_lock();
     let found: bool = match scheduled_process_slot_for_pid_locked(guard, pid) {
         ProcessSlotForPidResult::Missing => { false }
@@ -2325,14 +2333,14 @@ fn scheduled_process_diagnostic_snapshot(pid: usize)
             if (record.has_parent) {
                 parent_pid = scheduled_process_record_of_locked(guard, record.parent).pid;
             }
-            let mut words: ProcessPoolHandleWords = process_image_record_words(record);
-            let pages: usize = process_image_active_page_count_words(words);
-            scheduled_process_diagnostic_record_fill(record, parent_pid, pages, &snapshot);
+            words = process_image_record_words(record);
+            scheduled_process_diagnostic_record_fill(record, parent_pid, 0, &snapshot);
             true
         }
     };
     process_run_unlock(guard);
     if (found == false) { return ProcessDiagnosticResult::Missing; }
+    snapshot.resident_pages = process_image_active_page_count_words(words);
     return ProcessDiagnosticResult::Found(snapshot);
 }
 

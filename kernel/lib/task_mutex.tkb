@@ -40,7 +40,11 @@
 //   minimum reachable rank is 30 whatever its own wrapper declares. All
 //   adopters rank below 40, the floor of the masking locks, which is the
 //   band rule kernel/CONCURRENCY.md states (2026-10-25, #966: the ext2
-//   mutation lock, the block device, TCP connections and GuardedField).
+//   mutation lock, the block device, TCP connections and GuardedField;
+//   #1071: the TCP frames and retransmit locks, the GEM, virtio and xHCI
+//   ring slots, and InitOnce). A wrapper over this that declares a higher
+//   rank still reaches 30, so its guard may not be held while another
+//   TaskMutex is taken: those wrappers declare 30 too.
 // - THE RELEASE IS THE CALLER'S OBLIGATION, and nothing here makes it
 //   mandatory. What makes it mandatory at the one call site that exists is
 //   that the caller holds a LINEAR token minted only by the acquire --

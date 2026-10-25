@@ -28,6 +28,7 @@
 // - QNUM is 8 for every queue; the ring layout below fixes it.
 
 use "kernel/lib/mutex.tkb";
+use "kernel/lib/task_mutex.tkb";
 use "kernel/drivers/virtio_ring.tkb";
 
 const VIRTIO_USED_ONE: usize = 1;
@@ -89,21 +90,23 @@ variant VirtioUsedHeld {
 }
 
 struct VirtioUsedSlot {
-    private mutex: Mutex;
+    private mutex: TaskMutex;
     private value: Place(VirtioUsedHeld);
 }
 private let mut virtio_used_slots: [VirtioUsedSlot; 3];
 
-private linear struct VirtioUsedGuard[lock: addr] { private flags: usize; }
+private linear struct VirtioUsedGuard[lock: addr] { private held: usize; }
 
-private fn virtio_used_lock(lock: *Mutex @ address) -> VirtioUsedGuard[address]
-        !{acquires_lock_40_virtio_used, lock_guard_40_virtio_used} {
-    let mut guard: VirtioUsedGuard[address] = { mutex_acquire(lock) };
+private fn virtio_used_lock(lock: *TaskMutex @ address) -> VirtioUsedGuard[address]
+        !{may_block, acquires_lock_30_virtio_used, lock_guard_30_virtio_used} {
+    task_mutex_acquire(lock);
+    let mut guard: VirtioUsedGuard[address] = { 1 };
     return guard;
 }
 
-private fn virtio_used_unlock(guard: sink VirtioUsedGuard[address], lock: *Mutex @ address) {
-    mutex_release(lock, guard.flags);
+private fn virtio_used_unlock(guard: sink VirtioUsedGuard[address], lock: *TaskMutex @ address) {
+    let held: usize = guard.held;
+    task_mutex_release(lock);
 }
 
 // A slot never holds two owners.

@@ -25,6 +25,7 @@
 // no other code can reach their storage.
 
 use "kernel/lib/mutex.tkb";
+use "kernel/lib/task_mutex.tkb";
 
 const XHCI_RING_TRBS: usize = 16;
 const XHCI_RING_CMD: usize = 0;
@@ -88,22 +89,24 @@ variant XhciRingHeld {
 }
 
 struct XhciRingSlot {
-    private mutex: Mutex;
+    private mutex: TaskMutex;
     private value: Place(XhciRingHeld);
 }
 private let mut xhci_ring_slots: [XhciRingSlot; 4];
 
-private linear struct XhciRingGuard[lock: addr] { private flags: usize; }
+private linear struct XhciRingGuard[lock: addr] { private held: usize; }
 
-private fn xhci_ring_lock(lock: *Mutex @ address) -> XhciRingGuard[address]
-        !{acquires_lock_40_xhci_ring, lock_guard_40_xhci_ring} {
-    let mut guard: XhciRingGuard[address] = { mutex_acquire(lock) };
+private fn xhci_ring_lock(lock: *TaskMutex @ address) -> XhciRingGuard[address]
+        !{may_block, acquires_lock_30_xhci_ring, lock_guard_30_xhci_ring} {
+    task_mutex_acquire(lock);
+    let mut guard: XhciRingGuard[address] = { 1 };
     return guard;
 }
 
 private fn xhci_ring_unlock(guard: sink XhciRingGuard[address],
-                            lock: *Mutex @ address) {
-    mutex_release(lock, guard.flags);
+                            lock: *TaskMutex @ address) {
+    let held: usize = guard.held;
+    task_mutex_release(lock);
 }
 
 // A slot never holds two owners; a displaced one is an invariant breach.
@@ -490,16 +493,16 @@ fn xhci_input_reclaim(s: borrow XhciInput_Read[b, o, 528, r]) {}
 // One slot per session table (only its Live owner is ever stored), and one
 // for the input context (Ready or Read).
 struct XhciErstSlot {
-    private mutex: Mutex;
+    private mutex: TaskMutex;
     private value: Place(exists b: addr. exists o: usize. exists r: usize. XhciErst_Live[b, o, 4, r]);
 }
 struct XhciScratchArraySlot {
-    private mutex: Mutex;
+    private mutex: TaskMutex;
     private value: Place(exists b: addr. exists o: usize. exists r: usize.
                          XhciScratchArray_Live[b, o, 8, r]);
 }
 struct XhciScratchBufSlot {
-    private mutex: Mutex;
+    private mutex: TaskMutex;
     private value: Place(exists b: addr. exists o: usize. exists r: usize.
                          XhciScratchBuf_Live[b, o, 4096, r]);
 }
@@ -508,7 +511,7 @@ variant XhciInputHeld {
     Read(exists b: addr. exists o: usize. exists r: usize. XhciInput_Read[b, o, 528, r]);
 }
 struct XhciInputSlot {
-    private mutex: Mutex;
+    private mutex: TaskMutex;
     private value: Place(XhciInputHeld);
 }
 private let mut xhci_erst_slot: XhciErstSlot;
@@ -908,12 +911,12 @@ fn xhci_out_reset(s: borrow XhciOutput_Live[b, o, 512, r]) -> XhciOutput_xhci_ou
 fn xhci_out_reclaim(s: borrow XhciOutput_Live[b, o, 512, r]) {}
 
 struct XhciEventsSlot {
-    private mutex: Mutex;
+    private mutex: TaskMutex;
     private value: Place(exists b: addr. exists o: usize. exists r: usize.
                          XhciEvents_Live[b, o, 16, r]);
 }
 struct XhciOutputSlot {
-    private mutex: Mutex;
+    private mutex: TaskMutex;
     private value: Place(exists b: addr. exists o: usize. exists r: usize.
                          XhciOutput_Live[b, o, 512, r]);
 }

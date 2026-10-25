@@ -219,16 +219,15 @@ fn process_image_record_missing_uses() -> usize {
 }
 
 private fn process_image_pool_lock(pool: *RegionPool(ProcessImageRecord) @ images)
-        -> RegionPoolGuard(ProcessImageRecord)[images] !{unsafe, acquires_lock_40_process_image_pool, single_instance_lock,
-          lock_guard_40_process_image_pool} {
-    let flags: usize = mutex_irq_save();
+        -> RegionPoolGuard(ProcessImageRecord)[images] !{unsafe, acquires_lock_39_process_image_pool, single_instance_lock, may_block,
+          lock_guard_39_process_image_pool} {
     if (region_pool_lock_contended_hint(pool)) { pool_lock_wait_contended(PoolLockWaitPool::ProcessImage); }
-    return region_pool_lock_saving(pool, flags);
+    return region_pool_lock(pool);
 }
 
 private fn process_image_pool_unlock(
         guard: sink RegionPoolGuard(ProcessImageRecord)[images]) {
-    mutex_irq_restore(region_pool_unlock_saved(guard));
+    region_pool_unlock(guard);
 }
 
 // The initiator retains the allocator guard across a complete stop. The

@@ -43,6 +43,7 @@
 //   Unconfirmed for the rest of the boot.
 
 use "kernel/lib/mutex.tkb";
+use "kernel/lib/task_mutex.tkb";
 
 const GEM_DESC_COUNT: usize = 4;
 
@@ -154,26 +155,28 @@ variant GemTxRingHeld {
 }
 
 struct GemRxRingSlot {
-    private mutex: Mutex;
+    private mutex: TaskMutex;
     private value: Place(GemRxRingHeld);
 }
 struct GemTxRingSlot {
-    private mutex: Mutex;
+    private mutex: TaskMutex;
     private value: Place(GemTxRingHeld);
 }
 private let mut gem_rx_ring_slot: GemRxRingSlot;
 private let mut gem_tx_ring_slot: GemTxRingSlot;
 
-private linear struct GemRingGuard[lock: addr] { private flags: usize; }
+private linear struct GemRingGuard[lock: addr] { private held: usize; }
 
-private fn gem_ring_lock(lock: *Mutex @ address) -> GemRingGuard[address]
-        !{acquires_lock_40_gem_ring, lock_guard_40_gem_ring} {
-    let mut guard: GemRingGuard[address] = { mutex_acquire(lock) };
+private fn gem_ring_lock(lock: *TaskMutex @ address) -> GemRingGuard[address]
+        !{may_block, acquires_lock_30_gem_ring, lock_guard_30_gem_ring} {
+    task_mutex_acquire(lock);
+    let mut guard: GemRingGuard[address] = { 1 };
     return guard;
 }
 
-private fn gem_ring_unlock(guard: sink GemRingGuard[address], lock: *Mutex @ address) {
-    mutex_release(lock, guard.flags);
+private fn gem_ring_unlock(guard: sink GemRingGuard[address], lock: *TaskMutex @ address) {
+    let held: usize = guard.held;
+    task_mutex_release(lock);
 }
 
 // A slot never holds two owners, and every taker parks one back.
@@ -371,7 +374,7 @@ variant GemPktHeld {
 }
 
 struct GemPktSlot {
-    private mutex: Mutex;
+    private mutex: TaskMutex;
     private value: Place(GemPktHeld);
 }
 private let mut gem_pkt_slots: [GemPktSlot; 4];
