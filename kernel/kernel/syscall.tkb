@@ -5828,28 +5828,44 @@ fn syscall_reboot_request(magic1: usize, magic2: usize, command: usize)
 // does not re-enter boot, and poweroff does not remove physical power. The
 // complete WorldStopped token is required before any success marker appears.
 // A failed request releases its partial stop and lets userspace retry.
+//
+// GitHub issue #980: Linux's order. Everything that takes a lock (here the
+// console drain, Linux's kernel_restart_prepare) runs before the stop, and
+// the stop is the debug stop, which escalates to the pseudo-NMI so a core
+// hung with IRQs masked no longer blocks reboot. A core it holds may own any
+// lock, so what follows the stop is a debug_stopped root: lock-free output
+// and platform_shutdown only (Linux's machine_restart, PSCI only).
 fn syscall_system_stop(marker: *u8) -> SyscallAction !{unsafe} {
-    match world_stop_machine_begin(10000000) {
-        MachineStopResult::Busy => { return SyscallAction::Resume(LINUX_EAGAIN); }
+    uart_tx_flush();
+    return SyscallAction::Resume(syscall_system_stop_stopped(marker));
+}
+
+// The errno of a refused stop; a complete stop never returns.
+private fn syscall_system_stop_stopped(marker: *u8) -> usize
+        !{unsafe, debug_stopped} {
+    match world_stop_debug_begin(10000000) {
+        MachineStopResult::Busy => { return LINUX_EAGAIN; }
         MachineStopResult::Partial(partial) => {
             machine_stop_partial_release(partial, &kernel_world_stop);
-            return SyscallAction::Resume(LINUX_EAGAIN);
+            return LINUX_EAGAIN;
         }
         MachineStopResult::Complete(stopped) => {
             disable_irq();
             machine_stop_keep_forever(stopped);
+            // Output queued between the drain above and the stop goes out
+            // only if the console lock is free (a held core may own it).
+            uart_tx_flush_stopped();
             // GitHub issue #933: name the initiating core, so a test that
             // pins the caller to a peer can tell a local stop from a rerun
             // on core 0. Printed before the marker drivers wait for.
-            kernel_boot_log("system stop: initiator cpu=" as *u8);
-            uart_put_udec(cpu_id());
-            kernel_boot_log("\n" as *u8);
-            kernel_boot_log(marker);
-            uart_tx_flush();
+            ddb_puts("\nsystem stop: initiator cpu=" as *u8);
+            ddb_put_udec(cpu_id());
+            ddb_puts("\n" as *u8);
+            ddb_puts(marker);
             platform_shutdown();
-            while (true) { interrupt_wait(); }
+            while (true) { wfi(); }
             // Variant-return checking does not treat a terminal loop as a return.
-            return SyscallAction::Resume(LINUX_EAGAIN);
+            return LINUX_EAGAIN;
         }
     }
 }
