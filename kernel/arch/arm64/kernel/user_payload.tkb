@@ -59,6 +59,7 @@ const WAIT_POLL_MAX: usize = 10000;
 const WNOHANG: usize = 1;
 const EINTR_RC: usize = 0xFFFFFFFFFFFFFFFC;
 const EPIPE_RC: usize = 0xFFFFFFFFFFFFFFE0;
+const ENOTCONN_RC: usize = 0xFFFFFFFFFFFFFF95;
 const SIGCHLD: usize = 17;
 const SIGTERM: usize = 15;
 const SA_SIGINFO: usize = 4;
@@ -449,8 +450,17 @@ fn initial_user_payload() !{unsafe} {
                  ptr_of(time_base, 0), 8, 0) != EAGAIN_RC);
     payload_write_u64(signal_base, 0, 0);
     fail_if(svc5(135, 2, ptr_of(signal_base, 0), 0, 8, 0) != 0);
+    // GitHub issue #1116: a read or readv on the listening fd 4 is Linux's
+    // ENOTCONN (it was EBADF), and a zero-length read on the connected fd 5
+    // returns 0 without waiting (it was EBADF).
+    fail_if(svc5(63, 4, ptr_of(rx_base, 0), 8, 0, 0) != ENOTCONN_RC);
+    fail_if(svc5(63, 4, ptr_of(rx_base, 0), 0, 0, 0) != ENOTCONN_RC);
+    payload_write_u64(vectors_base, 0, ptr_of(rx_base, 0));
+    payload_write_u64(vectors_base, 8, 8);
+    fail_if(svc5(65, 4, ptr_of(vectors_base, 0), 1, 0, 0) != ENOTCONN_RC);
+    fail_if(svc5(63, 5, ptr_of(rx_base, 0), 0, 0, 0) != 0);
     let socket_write_success: []const u8 =
-        bs"userspace socket partial write: 1460+1, empty ok\nuserspace socket write on a listener: EPIPE, SIGPIPE, MSG_NOSIGNAL ok\nuserspace socket vectored io: split, empty, short ok\n";
+        bs"userspace socket partial write: 1460+1, empty ok\nuserspace socket write on a listener: EPIPE, SIGPIPE, MSG_NOSIGNAL ok\nuserspace socket read on a listener: ENOTCONN, empty read ok\nuserspace socket vectored io: split, empty, short ok\n";
     fail_if(svc5(64, 1, ((unsafe { socket_write_success as *u8 })) as usize,
                  socket_write_success.len, 0, 0) !=
             socket_write_success.len);

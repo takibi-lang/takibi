@@ -99,6 +99,8 @@ const AARCH64_NR_FCNTL: usize = 25;
 const AARCH64_NR_PIPE2: usize = 59;
 const LINUX_O_CLOEXEC: usize = 0x80000;
 const LINUX_EPIPE: usize = 0xFFFFFFFFFFFFFFE0;
+// GitHub issue #1116: read on a listening or never-connected TCP socket.
+const LINUX_ENOTCONN: usize = 0xFFFFFFFFFFFFFF95;
 const LINUX_SIGPIPE: usize = 13;
 // GitHub issue #1113: send/sendto's flag for EPIPE without SIGPIPE.
 const LINUX_MSG_NOSIGNAL: usize = 0x4000;
@@ -2945,9 +2947,12 @@ fn syscall_read_segment_with(slot: borrow SyscallSlot[0],
                    tcp_connection_put(owner);
                    return SyscallIoResult::Errno(LINUX_EBADF);
                }
+               // GitHub issue #1116: Linux's tcp_recvmsg copies nothing
+               // and returns 0 for a zero-length read on an open
+               // connection; it was EBADF.
                if (requested == 0) {
                    tcp_connection_put(owner);
-                   return SyscallIoResult::Errno(LINUX_EBADF);
+                   return SyscallIoResult::Transferred(0);
                }
                // A NetRx wake retries this same EL0 read syscall. Keep the
                // evidence count and timeout window attached to that logical
@@ -3135,6 +3140,15 @@ fn syscall_read_segment_with(slot: borrow SyscallSlot[0],
                 }
                }
               }
+            }
+        }
+        // GitHub issue #1116: a socket that is listening or never
+        // connected is Linux's LISTEN or CLOSE state, where tcp_recvmsg
+        // answers ENOTCONN for any length; it was EBADF.
+        match kernel_listener_fd_lookup(fd) {
+            KernelListenerLookupResult::Missing => {}
+            KernelListenerLookupResult::Found(listener_fd) => {
+                return SyscallIoResult::Errno(LINUX_ENOTCONN);
             }
         }
         if (fd == 0 && kernel_syscall_terminal_is_open(fd)) {

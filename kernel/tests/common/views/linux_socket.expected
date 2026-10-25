@@ -1,5 +1,6 @@
 userspace socket partial write: 1460+1, empty ok
 userspace socket write on a listener: EPIPE, SIGPIPE, MSG_NOSIGNAL ok
+userspace socket read on a listener: ENOTCONN, empty read ok
 userspace socket vectored io: split, empty, short ok
 userspace socket read: a blocked read retransmits its own dropped segment ok
 userspace socket read: a short segment after a long one returns only its own bytes ok
