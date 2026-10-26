@@ -72,6 +72,15 @@ if [ "$target" = aarch64 ]; then
     fi
     cc=$cache/$toolchain/bin/aarch64-linux-gcc
     strip=$cache/$toolchain/bin/aarch64-linux-strip
+    # stress-ng probes optional C++ features (Eigen) with $(CXX) and, once
+    # one C++ object exists, links with $(CXX). Left unset, CXX is the
+    # host's g++: on a host with Eigen headers (libeigen3-dev) it compiles
+    # stress-eigen-ops.cpp for the host and then links the AArch64 objects
+    # with the host linker ("Relocations in generic ELF (EM: 183)"). The
+    # cross g++ keeps every probe on the target's sysroot; without one,
+    # `false` makes the C++ probes fail and the link stay with $(CC).
+    cxx=$cache/$toolchain/bin/aarch64-linux-g++
+    [ -x "$cxx" ] || cxx=false
 else
     fetch "$host_busybox_url" "$host_busybox.apk" "$host_busybox_sha"
     # Alpine packages carry APK-TOOLS pax headers GNU tar names and skips.
@@ -79,13 +88,14 @@ else
         >"$out/busybox" 2>/dev/null
     chmod +x "$out/busybox"
     cc=gcc
+    cxx=g++
     strip=strip
 fi
 
 # A build is reused only while the recipe that made it is unchanged: each
 # records its flags in a stamp, and a different stamp rebuilds from a clean
 # extraction.
-stress_flags='CFLAGS=-fPIE -DBUILD_STATIC LDFLAGS=-static-pie -Wl,--gc-sections'
+stress_flags="CXX=${cxx##*/} CFLAGS=-fPIE -DBUILD_STATIC LDFLAGS=-static-pie -Wl,--gc-sections"
 hackbench_flags='-static-pie -fPIE -O2 -Wno-incompatible-pointer-types -D_GNU_SOURCE -DVERSION=2.9'
 stress_bin=$src/$stress_ng/stress-ng
 if [ ! -x "$stress_bin" ] ||
@@ -98,7 +108,7 @@ if [ ! -x "$stress_bin" ] ||
     # half (-DBUILD_STATIC) is passed by hand. Its configure step probes the
     # toolchain, so optional libraries the cross sysroot lacks (libbsd,
     # libjpeg, ...) are simply left out.
-    make -C "$src/$stress_ng" CC="$cc" \
+    make -C "$src/$stress_ng" CC="$cc" CXX="$cxx" \
         CFLAGS="-fPIE -DBUILD_STATIC" LDFLAGS="-static-pie -Wl,--gc-sections" \
         -j"$(nproc)" >"$src/$stress_ng.build.log" 2>&1 || {
         echo "[load-programs] stress-ng build failed; see $src/$stress_ng.build.log" >&2
