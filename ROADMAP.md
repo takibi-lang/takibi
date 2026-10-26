@@ -191,9 +191,10 @@ next one taken. The done record of the previous queue is in HISTORY.md
    `kernel/tests/ext2_eq/ops.eq` replayed on host Linux and libext2fs,
    compared logically in kernelcheck-qemu-main), #1033 (tier A, fsck after
    every writing lane, counters against the kernel's own; done 2026-10-25,
-   `scripts/ext2_postcheck.py`), #1035 (tier C,
-   the ext2 driver as a host process over a RAM disk, #909 slice 2's first
-   instance; seeded sequences, fault injection, hostile images). The ext2
+   `scripts/ext2_postcheck.py`), #1035 (tier C, done 2026-10-26: the ext2
+   driver as a host process over a RAM disk, `scripts/ext2_host.py` in
+   linuxcheck and `make ext2-host-long`; what it found open: #1086 whole-file
+   copy per write, #1087 holes allocated, #1089 torn writes). The ext2
    fixes #1019 and #968 flipped their ops.eq rows to `match` when they
    landed (2026-10-25); #1021 becomes a row when the kernel offers the free
    space it needs (#1022's truncate row and #1023's `peer` row, a held fd
