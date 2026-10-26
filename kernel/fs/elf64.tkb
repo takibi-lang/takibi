@@ -118,7 +118,8 @@ let mut ELF_IDENT_MAGIC: [u8; 7] = {0x7F, 0x45, 0x4C, 0x46, 2, 1, 1};
 // A PT_LOAD's page span as process_image_map_segments maps it: from the
 // page holding p_vaddr to the page after p_vaddr + p_memsz. The one
 // definition both the validator's disjointness check and the mapper use.
-// Accepted segments end below the 2 MiB extent, so the sum cannot wrap.
+// Accepted segments end at or below DISTRO_ELF_SPAN_MAX, so the sum cannot
+// wrap.
 fn distro_elf_segment_pages(segment: DistroElfSegment) -> (usize, usize) {
     let start: usize = segment.virtual_address;
     let end: usize = start + segment.memory_size;
@@ -161,10 +162,10 @@ private fn distro_elf_load_accept(item: KernelElf64ProgramHeader,
             return DistroElfLoadAccept::Refused;
         }
     }
-    // The image extent bound, applied per segment so that every accepted
-    // segment's page span is small; the validator applies it to the
-    // maximum again, which this implies.
-    if (virtual_address + memory_size > 0x1FFFFF) {
+    // The image extent bound, DISTRO_ELF_SPAN_MAX (#1041), applied per
+    // segment so that every accepted segment's page span is small; the
+    // validator applies it to the maximum again, which this implies.
+    if (virtual_address + memory_size > DISTRO_ELF_SPAN_MAX) {
         return DistroElfLoadAccept::Refused;
     }
     let mut segment: DistroElfSegment = {
