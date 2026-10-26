@@ -95,8 +95,6 @@ el0_sync_body:
     b.eq    .Lsyscall_block
     cmp     x6, #6
     b.eq    .Lsyscall_wait_interrupt
-    cmp     x6, #8
-    b.eq    .Lsyscall_child_exec
     cmp     x6, #9
     b.eq    .Lsyscall_migrate
     mov     x0, #8
@@ -171,13 +169,10 @@ el0_sync_body:
     wfe
     b       .Lsyscall_dispatch
 
-.Lsyscall_child_exec:
-    // GitHub issue #221 Step 5: moved to kernel_syscall_child_exec_return
-    // (.tkb) -- this is the exact bug fixed in commit 8db27e3 (see that
-    // function's own comment for why the field-write-then-resume ordering
-    // here matters).
-    mov     x0, sp
-    b       kernel_syscall_child_exec_return
+    /* GitHub issue #1080: action 8, execve's child exec, is gone from this
+     * table. kernel_syscall_dispatch runs that tail itself
+     * (kernel_syscall_child_exec_return) and never returns here with it, so
+     * the argv page it carries never becomes a bare register. */
 
 .Lsyscall_resume:
     // GitHub issue #221 Step 3: moved to kernel_syscall_resume_return (.tkb).

@@ -411,9 +411,10 @@ rules globally.
   runs; both linker scripts assert the stride; it is read by the one-move
   assembly helper `kernel_cpu_offset`, whose one caller
   `scripts/buildcheck_allowed_callers.py` fixes; each region entry
-  checks it against `cpu_id()` at run time). `cpu_here_for_boot_probe`
-  (the boot probe only) mints outside a block;
-  `scripts/check_cpu_authority_mints.py` fixes its caller.
+  checks it against `cpu_id()` at run time). Nothing mints one outside a
+  block: `scripts/check_cpu_authority_mints.py` refuses a public function
+  of that file returning the authority (the boot probe's any-CPU mint was
+  retired with execve's per-CPU argv slot, #1080).
 - ext2's operation scratch is a pool of `KERNEL_MAX_CORES` slots, each
   reached only through a linear `Ext2Slot` (#638). The compiler checks that
   an operation releases its slot on every path, never twice, and never uses

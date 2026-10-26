@@ -28,3 +28,14 @@ frame layout or maintain offsets independently. Preserve the distinction
 between an IRQ entry, restoring an existing saved frame, and constructing the
 synthetic state for an initial user entry; they do not share identical
 interrupt-masking order.
+
+## Assembly is a leaf
+
+A value that crosses hand-written assembly loses its type (DECISIONS
+2026-10-25). Assembly called from Takibi returns to its caller; a path that
+must start in assembly saves state and enters Takibi at a declared entry
+(the Makefile's `KERNEL_ASM_ENTRIES`), and Takibi decides from there. Do not
+add an assembly branch that calls back into a Takibi function to finish a
+decision Takibi already made: run that tail on the Takibi side, as execve's
+child exec does. `scripts/buildcheck_kernel_asm_invariants.py` refuses an
+undeclared entry and a declared entry nothing calls any more.

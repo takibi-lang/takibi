@@ -2115,15 +2115,15 @@ struct cpu_authority CpuHere {
     private id: {0..<KERNEL_MAX_CORES as usize};
 }
 
-struct per_cpu ExecArgsStore {
+struct per_cpu HandoffStore {
     private mutex: Mutex;
     private value: Place(exists page: usize. PageOwner[page]);
 }
 
-private let mut exec_args_store: [ExecArgsStore; KERNEL_MAX_CORES];
+private let mut handoff_store: [HandoffStore; KERNEL_MAX_CORES];
 
-fn exec_args_take(cpu: CpuHere) -> Place(exists page: usize. PageOwner[page]) {
-    let guard = exec_args_lock(&exec_args_store[cpu].mutex);
+fn handoff_take(cpu: CpuHere) -> Place(exists page: usize. PageOwner[page]) {
+    let guard = handoff_lock(&handoff_store[cpu].mutex);
     ...
 }
 ```
@@ -2160,7 +2160,7 @@ fn exec_args_take(cpu: CpuHere) -> Place(exists page: usize. PageOwner[page]) {
 
 ```takibi
 preempt_off (cpu) {
-    exec_args_put(cpu, page);
+    handoff_put(cpu, page);
 }
 ```
 

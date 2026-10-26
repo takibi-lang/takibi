@@ -97,6 +97,7 @@ RULES = {
     "AtomicWord": "#637",
     "value over stop": "#1031",
     "frame API": "#1018",
+    "assembly is a leaf": "#1133",
     "code removed": "dead code deleted with no replacement",
 }
 

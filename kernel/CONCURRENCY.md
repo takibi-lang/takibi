@@ -107,14 +107,11 @@ change what it is about.
 
 ## Exec argument handoff
 
-A child's exec reserves its argv page before committing to ChildExec. The
-linear PageOwner crosses the assembly action boundary through a stable slot
-for the executing CPU; exec is admitted on every active CPU. Each slot has
-its own mutex and owner field, and the compile-time stable-place check ties
-an exchange to that same slot's guard. The slots' distinct identities are
-also exercised by a boot probe that holds all CPU reservations simultaneously
-and checks every page and emptied slot. This is regression evidence rather
-than a static proof that an arbitrary handoff layout separates CPUs.
+A child's exec reserves its argv page before committing to ChildExec, and
+the linear PageOwner travels in execve's own result to the exec's tail, which
+the dispatcher runs on the same CPU without returning to assembly (#1080).
+Nothing is shared: there is no slot, lock or per-CPU store, and the compiler
+checks that the page is consumed exactly once on every path.
 
 Reserve and prepare are one non-preemptible EL1 action. Prepare takes the
 page before returning to EL0, so the process cannot migrate while the page

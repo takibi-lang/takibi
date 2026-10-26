@@ -367,7 +367,7 @@ KERNEL_ASM_ENTRIES := main kernel_secondary_main \
 	kernel_idle_yield_reenter kernel_idle_block_reenter \
 	kernel_idle_tick_reenter kernel_idle_boot_reenter \
 	kernel_syscall_migrate_return kernel_syscall_init_exit \
-	kernel_syscall_block_return kernel_syscall_child_exec_return \
+	kernel_syscall_block_return \
 	kernel_syscall_clone_child_return kernel_syscall_clone_parent_return \
 	kernel_syscall_dispatch kernel_syscall_resume_return \
 	kernel_process_handle_el0_data_abort
@@ -1707,7 +1707,7 @@ $(KERNEL_RPI5_MAIN_O): $(KERNEL_RPI5_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(
 
 $(KERNEL_RPI5_ELF): $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_CALLER_FRAME_O) $(KERNEL_RPI5_CACHE_GEOMETRY_O) $(KERNEL_RPI5_MAIN_O) $(KERNEL_RPI5_LINK_LD) $(KERNEL_DIR)/arch/arm64/boot/link_qemu.ld
 	$(LLD) $(KERNEL_LDFLAGS) -T $(KERNEL_RPI5_LINK_LD) $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_CALLER_FRAME_O) $(KERNEL_RPI5_CACHE_GEOMETRY_O) $(KERNEL_RPI5_MAIN_O) -o $@ $(KERNEL_GC_LIST)
-	python3 scripts/buildcheck_kernel_asm_invariants.py $@ 2
+	python3 scripts/buildcheck_kernel_asm_invariants.py $@ 2 --asm-entries "$(KERNEL_ASM_ENTRIES)" --takibi-object $(KERNEL_RPI5_MAIN_O) $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_CALLER_FRAME_O) $(KERNEL_RPI5_CACHE_GEOMETRY_O)
 	python3 scripts/buildcheck_elf_symbol_alignment.py $@ boot_page_pool_cell 16
 	python3 scripts/buildcheck_kernel_same_operand_csel.py $@ 10
 	python3 scripts/buildcheck_kernel_byte_copy.py $@ 0
@@ -1878,7 +1878,7 @@ $(KERNEL_QEMU_NET_WAKE_CONTROL_ELF): $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_E
 
 $(KERNEL_QEMU_ELF): $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_CALLER_FRAME_O) $(KERNEL_QEMU_CACHE_GEOMETRY_O) $(KERNEL_QEMU_MAIN_O) $(KERNEL_QEMU_LINK_LD) $(KERNEL_RPI5_LINK_LD)
 	$(LLD) $(KERNEL_LDFLAGS) -T $(KERNEL_QEMU_LINK_LD) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_CALLER_FRAME_O) $(KERNEL_QEMU_CACHE_GEOMETRY_O) $(KERNEL_QEMU_MAIN_O) -o $@ $(KERNEL_GC_LIST)
-	python3 scripts/buildcheck_kernel_asm_invariants.py $@ 1
+	python3 scripts/buildcheck_kernel_asm_invariants.py $@ 1 --asm-entries "$(KERNEL_ASM_ENTRIES)" --takibi-object $(KERNEL_QEMU_MAIN_O) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_CALLER_FRAME_O) $(KERNEL_QEMU_CACHE_GEOMETRY_O)
 	python3 scripts/buildcheck_elf_symbol_alignment.py $@ boot_page_pool_cell 16
 	python3 scripts/buildcheck_kernel_same_operand_csel.py $@ 6
 	python3 scripts/buildcheck_kernel_byte_copy.py $@ 0

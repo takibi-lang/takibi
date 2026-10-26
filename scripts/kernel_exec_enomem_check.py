@@ -4,6 +4,9 @@ Run by the maintained affinity GDB runner in exec-enomem mode. Select the
 caller by its register-only marker and exception-frame address, then refuse
 only its ExecArgs allocation using compiler-owned variant return metadata.
 No kernel injection switch, allocator corruption or MMIO read is needed.
+The refused exec holds no argv page afterwards by construction: since #1080
+the page exists only inside execve's ChildExec result, and there is no
+per-CPU slot left for this script to read.
 """
 
 import json
@@ -134,8 +137,6 @@ def run():
     metadata = json.loads(METADATA.read_text())
     owner = next(item for item in metadata["enums"] if item["name"] == "PageOwnerTag")
     owner_tag = next(case["value"] for case in owner["cases"] if case["name"] == "ExecArgs")
-    slot = next(item for item in metadata["variants"] if item["name"] == "Place$PageOwner")
-    empty = next(case["tag"] for case in slot["cases"] if case["name"] == "Empty")
     gdb.execute("set pagination off")
     gdb.execute("set confirm off")
     gdb.execute(f"source {SCRIPT_DIR / 'kernel_debug_metadata.gdb'}")
@@ -168,12 +169,7 @@ def run():
         returned.delete()
         if register("x1") != ENOMEM:
             raise RuntimeError(f"cpu {cpu}: execve did not return ENOMEM, value={register('x1'):#x}")
-        # Read only the compiler-described tag in ordinary kernel RAM.
-        address = int(gdb.parse_and_eval(f"&exec_args_store[{cpu}].value"))
-        tag = bytes(gdb.selected_inferior().read_memory(address + slot["tag_offset"], slot["tag_size"]))  # gdb-memory-read: static kernel RAM in the shared kernel mapping; no user VA or MMIO.
-        if int.from_bytes(tag, "little") != empty:
-            raise RuntimeError(f"cpu {cpu}: refused exec left an owned argv page")
-        print(f"exec-enomem: cpu={cpu} caller-return=ENOMEM slot=Empty", flush=True)
+        print(f"exec-enomem: cpu={cpu} caller-return=ENOMEM", flush=True)
         gdb.execute("detach")
         kept = f"exec-enomem: cpu {cpu} returned ENOMEM and this image kept running\n".encode()
         replaced = f"exec-enomem: cpu {cpu} retry replaced the image\n".encode()
@@ -245,7 +241,7 @@ def read_error_after_commit(serial):
 
 try:
     run()
-    message = ("both CPUs returned ENOMEM with an empty handoff, preserved their EL0 image and placement, then completed an unforced exec; "
+    message = ("both CPUs returned ENOMEM, preserved their EL0 image and placement, then completed an unforced exec; "
                "a refused page reservation was ENOMEM before the teardown (#1079); an image read error after it ended the caller by SIGSEGV (status 139) and the shell ran on")
     passed = True
 except Exception as error:

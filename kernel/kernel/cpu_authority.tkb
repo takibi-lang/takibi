@@ -29,9 +29,9 @@
 //   helper kernel_cpu_offset (user_entry.S; no compiler builtin, DECISIONS
 //   2026-10-25), and preempt_slot() is its one caller
 //   (scripts/buildcheck_allowed_callers.py). With
-//   KERNEL_PREEMPT_ASSERTS, every region entry checks the two agree;
-// - cpu_here_for_boot_probe names another CPU's slot, for the boot probe
-//   that holds every CPU's handoff at once; nothing else calls it.
+//   KERNEL_PREEMPT_ASSERTS, every region entry checks the two agree.
+//   No public function mints one (scripts/check_cpu_authority_mints.py);
+//   the boot probe's any-CPU mint went with the exec argv slot (#1080).
 //
 // Current limitations (2026-10-25):
 // - The count is not yet consulted by any switch: KERNEL_PREEMPTIBLE is 0
@@ -43,8 +43,6 @@
 //   at count 0, a migration between the TPIDR_EL1 read and the store would
 //   raise the old CPU's count; the flip must close that window (mask IRQs
 //   across the raise, or make it one instruction on this CPU's slot).
-// - The compiler cannot tell cpu_here_for_boot_probe from the mint at a
-//   call; scripts/check_cpu_authority_mints.py fixes its one caller.
 
 use "kernel/lib/execution_model.tkb";
 use "kernel/arch/arm64/kernel/cpu_stop_extern.tkb";
@@ -134,7 +132,3 @@ fn preempt_assert_blockable() {
     }
 }
 
-fn cpu_here_for_boot_probe(core: {0..<KERNEL_MAX_CORES as usize}) -> CpuHere {
-    let mut cpu: CpuHere = { core };
-    return cpu;
-}

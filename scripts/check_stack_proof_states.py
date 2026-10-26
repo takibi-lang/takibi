@@ -68,7 +68,6 @@ FRAME_MINT_CALLERS = {
         # The assembly and generated entries, which receive a frame in x0.
         "kernel_syscall_block_return", "kernel_syscall_resume_return",
         "kernel_syscall_clone_child_return",
-        "kernel_syscall_child_exec_return",
         "kernel_syscall_clone_parent_return", "kernel_syscall_migrate_return",
         "kernel_process_stack_switch_complete", "platform_irq_dispatch",
         "platform_el0_irq_dispatch", "maybe_frame_from_entry",
@@ -108,7 +107,7 @@ FRAME_DEFAULT_RE = re.compile(
     r"\blet\s+(?:mut\s+)?\w+\s*:\s*FrameRef(?:\s*\[[^\]]+\])?\s*;")
 FRAME_USIZE_SEAMS = {
     "kernel_syscall_block_return", "kernel_syscall_resume_return",
-    "kernel_syscall_clone_child_return", "kernel_syscall_child_exec_return",
+    "kernel_syscall_clone_child_return",
     "kernel_syscall_clone_parent_return", "kernel_syscall_migrate_return",
     "kernel_process_stack_switch_complete", "platform_irq_dispatch",
     "platform_el0_irq_dispatch", "kernel_syscall_dispatch",

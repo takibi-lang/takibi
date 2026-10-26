@@ -30,12 +30,14 @@ def main():
     files = check.source_files()
     tsv = check.LIST.read_text(encoding="utf-8")
     planted = "\nfn planted_stop() {\n    kernel_invariant_stop();\n}\n"
-    grown = ("\nfn exec_args_put_extra() {}\n")
+    grown = ("\nfn kernel_syscall_migrate_return_extra() {}\n")
     comment = ("\n// fn planted_comment() { kernel_invariant_stop(); }\n"
                "/* kernel_invariant_stop_with_frame(f); */\n"
                "fn kernel_invariant_stop() {}\n")
-    # One more stop inside a listed function (exec_args_put has one row of 1).
-    anchor = 'kernel_boot_log("exec argv: occupied CPU handoff slot\\n");'
+    # One more stop inside a listed function (kernel_syscall_migrate_return
+    # has one row of 1).
+    anchor = ('el0_context_retry_syscall(frame);\n'
+              '    if (kernel_process_migrate_current(frame) == false) {')
     exec_grown = replace_once(files[FILE], anchor,
                               anchor + " kernel_invariant_stop();", FILE)
     cases = {

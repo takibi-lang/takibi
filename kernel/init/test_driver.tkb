@@ -840,31 +840,22 @@ fn kernel_init_boot_fixture_poll(current_authority: borrow ProcessCurrent[curren
 // since #700, before it decides ChildExec. The map path
 // takes the run lock, so argv cannot be the process record's command line
 // read under a guard held across it.
-fn kernel_process_child_exec_prepare(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running]) -> KernelChildExecPrepareResult {
-    if (kernel_syscall_exec_pending() == false) {
-        return KernelChildExecPrepareResult::NotChildOrPending;
-    }
-    // GitHub issue #700: execve allocated this page before deciding
-    // ChildExec and returned ENOMEM if it could not; finding none is an
-    // invariant break.
-    match kernel_syscall_exec_args_take() {
-        Place::Empty => {
-            return KernelChildExecPrepareResult::ArgvPageMissing;
-        }
-        Place::Full(args_page) => {
-            let args: [u8; PAGE_SIZE..] = page_bytes(args_page);
-            let argv: [u8; 512..] = args[0..<512];
-            kernel_syscall_exec_argv_copy(argv);
-            let slot: ExecWindowSlot[0] = exec_window_slot_acquire();
-            let result: KernelChildExecPrepareResult =
-                kernel_process_child_exec_prepare_with(
-                    current_authority, argv,
-                    exec_windows[slot.index].bytes as []u8);
-            exec_window_slot_release(slot);
-            page_free(args_page);
-            return result;
-        }
-    }
+// GitHub issue #1080: the page is the one execve allocated, carried here in
+// ChildExec. Only execve builds one, and it does so after setting the
+// pending mark, so neither a missing page nor a missing mark can reach here.
+fn kernel_process_child_exec_prepare(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
+        args_page: sink PageOwner[page]) -> KernelChildExecPrepareResult {
+    let args: [u8; PAGE_SIZE..] = page_bytes(args_page);
+    let argv: [u8; 512..] = args[0..<512];
+    kernel_syscall_exec_argv_copy(argv);
+    let slot: ExecWindowSlot[0] = exec_window_slot_acquire();
+    let result: KernelChildExecPrepareResult =
+        kernel_process_child_exec_prepare_with(
+            current_authority, argv,
+            exec_windows[slot.index].bytes as []u8);
+    exec_window_slot_release(slot);
+    page_free(args_page);
+    return result;
 }
 
 private fn kernel_process_child_exec_prepare_with(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], argv: borrow []u8,

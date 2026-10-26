@@ -477,115 +477,12 @@ fn kernel_syscall_exec_argc() -> usize {
 // GitHub issue #700: the page a child's exec copies its argv into is taken
 // before execve decides ChildExec, so a shortage is the caller's ENOMEM
 // rather than a fail-stop after the point of no return (Linux allocates
-// linux_binprm before begin_new_exec for the same reason). The page crosses
-// the return to user_entry.S's child-exec branch in this stable owner slot:
-// execve puts it, kernel_process_child_exec_prepare takes it, and a slot
-// found full or empty is an invariant break, not a shortage. Execve runs on
-// every active CPU, so each CPU owns a separate slot: a per-CPU store
-// (#704), reached only as exec_args_store[cpu] with the CPU authority that
-// cpu_authority.tkb mints. Reserve and prepare stay on that CPU in one
-// non-preemptible EL1 action; the page is taken before returning to EL0.
-struct per_cpu ExecArgsStore {
-    private mutex: Mutex;
-    private value: Place(exists page: usize. PageOwner[page]);
-}
-
-private let mut exec_args_store: [ExecArgsStore; KERNEL_MAX_CORES];
-
-private linear struct ExecArgsGuard[lock: addr] {
-    private flags: usize;
-}
-
-private fn exec_args_lock(lock: *Mutex @ address) -> ExecArgsGuard[address]
-        !{acquires_lock_40_exec_args, lock_guard_40_exec_args} {
-    let mut guard: ExecArgsGuard[address] = { mutex_acquire(lock) };
-    return guard;
-}
-
-private fn exec_args_unlock(guard: sink ExecArgsGuard[address],
-                            lock: *Mutex @ address) {
-    mutex_release(lock, guard.flags);
-}
-
-private fn exec_args_put(cpu: CpuHere, page: sink PageOwner[p]) {
-    let guard = exec_args_lock(&exec_args_store[cpu].mutex);
-    let previous: Place(exists page: usize. PageOwner[page]) = place_put(
-        guard, &exec_args_store[cpu].mutex, exec_args_store[cpu].value, page);
-    exec_args_unlock(guard, &exec_args_store[cpu].mutex);
-    match previous {
-        Place::Empty => {}
-        Place::Full(stale) => {
-            // A second ChildExec before the first prepare took its page.
-            page_free(stale);
-            kernel_boot_log("exec argv: occupied CPU handoff slot\n");
-            kernel_invariant_stop();
-        }
-    }
-}
-
-// The reservation as one step from an allocation result, so the boot probe
-// can hand it a refused allocation without exhausting the page allocator.
-must_use variant ExecArgsReserve { OutOfMemory; Reserved; }
-
-private fn kernel_syscall_exec_args_reserve(allocated: sink PageAllocResult)
-        -> ExecArgsReserve {
-    match allocated {
-        PageAllocResult::OutOfMemory => { return ExecArgsReserve::OutOfMemory; }
-        PageAllocResult::Allocated(args_page) => {
-            preempt_off (cpu) { exec_args_put(cpu, args_page); }
-            return ExecArgsReserve::Reserved;
-        }
-    }
-}
-
-fn kernel_syscall_exec_args_take() -> Place(exists page: usize. PageOwner[page]) {
-    preempt_off (cpu) { return kernel_syscall_exec_args_take_for(cpu); }
-}
-
-private fn kernel_syscall_exec_args_take_for(cpu: CpuHere)
-        -> Place(exists page: usize. PageOwner[page]) {
-    let guard = exec_args_lock(&exec_args_store[cpu].mutex);
-    let taken: Place(exists page: usize. PageOwner[page]) = place_take(
-        guard, &exec_args_store[cpu].mutex, exec_args_store[cpu].value);
-    exec_args_unlock(guard, &exec_args_store[cpu].mutex);
-    return taken;
-}
-
-// Hold every CPU's reservation at once, then consume each exact owner.
-// This boot-only control makes a singleton handoff fail deterministically,
-// without depending on two execs reaching the window by chance.
-private fn kernel_syscall_exec_args_overlap_probe() -> bool !{unsafe} {
-    let mut expected: [usize; KERNEL_MAX_CORES];
-    let mut ok: bool = true;
-    for core: usize in 0..<KERNEL_MAX_CORES {
-        expected[core] = 0;
-        match page_alloc(PageOwnerTag::ExecArgs) {
-            PageAllocResult::OutOfMemory => { ok = false; }
-            PageAllocResult::Allocated(page) => {
-                expected[core] = page_physical_address(page);
-                let bytes: [u8; PAGE_SIZE..] = page_bytes(page);
-                bytes[0] = core as u8;
-                exec_args_put(cpu_here_for_boot_probe(core), page);
-            }
-        }
-    }
-    for core: usize in 0..<KERNEL_MAX_CORES {
-        match kernel_syscall_exec_args_take_for(cpu_here_for_boot_probe(core)) {
-            Place::Empty => { ok = false; }
-            Place::Full(page) => {
-                let bytes: [u8; PAGE_SIZE..] = page_bytes(page);
-                if (page_physical_address(page) != expected[core] ||
-                    bytes[0] != core as u8) { ok = false; }
-                page_free(page);
-            }
-        }
-        match kernel_syscall_exec_args_take_for(cpu_here_for_boot_probe(core)) {
-            Place::Empty => {}
-            Place::Full(stray) => { page_free(stray); ok = false; }
-        }
-    }
-    return ok;
-}
+// linux_binprm before begin_new_exec for the same reason).
+// GitHub issue #1080: execve returns the page in its own result
+// (SyscallExecveResult::ChildExec), and dispatch hands it straight to
+// kernel_syscall_child_exec_return before anything reaches user_entry.S, so
+// no slot holds it in between, and a prepare without a page, or a second
+// page beside it, cannot be written.
 
 fn kernel_syscall_exec_argv_copy(destination: borrow [u8; 512..]) !{unsafe} {
     let mut slot: ProcessSlot = kernel_syscall_process_slot();
@@ -3951,7 +3848,7 @@ fn uname_write_field(
 }
 
 // Mirrors user_entry.S's .Lsyscall_dispatch branch table exactly (action
-// numbers 0/1/2/.../8 there correspond one-to-one to the variants below,
+// numbers 0/1/2/.../9 there correspond one-to-one to the variants below,
 // via syscall_action_encode). Kept as a real sum type internally so a
 // mistyped numeric action code -- the shape of bug class this file's
 // syscall handling cannot otherwise catch at compile time -- is a type
@@ -3969,7 +3866,10 @@ must_use variant SyscallAction {
     WaitInterrupt;             // 6: wfe, then run this syscall again
     // 7 was the parent-only execve, which returned PID 1 to its EL1 caller;
     // PID 1 execs like every process since #831.
-    ChildExec;                   // 8: execve pending
+    // 8 was ChildExec, whose branch called back into this file's
+    // kernel_syscall_child_exec_return and found the argv page in a per-CPU
+    // slot. Execve's success never leaves Takibi now (#1080, the first
+    // instance of "assembly is a leaf", #1133): see SyscallExecveResult.
     Migrate;                      // 9: rerun this syscall on core 0
 }
 
@@ -3982,7 +3882,6 @@ fn syscall_action_encode(action: SyscallAction) -> (usize, usize) {
         SyscallAction::CloneParent(value) => { return (4, value); }
         SyscallAction::Block => { return (5, 0); }
         SyscallAction::WaitInterrupt => { return (6, 0); }
-        SyscallAction::ChildExec => { return (8, 8); }
         SyscallAction::Migrate => { return (9, 0); }
     }
 }
@@ -4531,20 +4430,25 @@ fn kernel_syscall_clone_child_return(parent_frame_sp: usize, child_pid: usize)
     }
 }
 
-// Step 5/8: action 8 (.Lsyscall_child_exec). This is the exact bug fixed in
-// commit 8db27e3: the replacement entry/stack must be published through the
+// Step 5/8: once action 8 (.Lsyscall_child_exec). This is the exact bug
+// fixed in commit 8db27e3: the replacement entry/stack must be published through the
 // saved frame's own fields, not via a direct msr, since el0_context_resume
 // (like the EXC_CONTEXT_RESTORE it replaces) always reloads elr_el1/sp_el0
 // from this same frame. Writing through el0_context_set_elr_el1/
 // el0_context_set_sp_el0 and then calling el0_context_resume makes that
 // class of bug structurally impossible now: there is no second code path
 // left that could reload and silently discard these two field writes.
-fn kernel_syscall_child_exec_return(frame_sp: usize) !{unsafe} {
+//
+// GitHub issue #1080: called from the dispatcher with the frame the syscall
+// entered on and the argv page execve allocated. It used to be user_entry.S's
+// action 8, which found the page again in a per-CPU slot. Every path ends in
+// el0_context_resume or a fail-stop.
+fn kernel_syscall_child_exec_return(frame: FrameRef[process],
+        args_page: sink PageOwner[page]) !{unsafe} {
     let ProcessRunningHere::Running(current_authority) = process_running_here() else {};
-    let frame =
-        frame_ref_from_entry(frame_sp, kernel_process_entry_generation());
     kernel_process_exec_failure_clear();
-    let result: KernelChildExecPrepareResult = kernel_process_child_exec_prepare(current_authority);
+    let result: KernelChildExecPrepareResult =
+        kernel_process_child_exec_prepare(current_authority, args_page);
     // GitHub issue #597: the prepare was the last ext2 read of this execve.
     if (syscall_ext2_reader_take()) {
         ext2_read_leave();
@@ -4562,10 +4466,11 @@ fn kernel_syscall_child_exec_return(frame_sp: usize) !{unsafe} {
     //   bound undercounted (counted in kernel_exec_reserve_undercount).
     //   These end the process by SIGSEGV, as Linux's bprm_execve does past
     //   its point of no return; the kernel runs on.
-    // - Unreachable by construction, still stops: NotChildOrPending and
-    //   ArgvPageMissing (execve sets the pending mark and reserves the argv
-    //   page just before ChildExec, and refuses a second exec with EAGAIN),
-    //   NoImageResolved (boot mounts ext2 and resolves the fallback image
+    // - Retired by #1080: NotChildOrPending and ArgvPageMissing. Execve's
+    //   ChildExec carries the argv page here, so a prepare with none cannot
+    //   be written.
+    // - Unreachable by construction, still stops: NoImageResolved (boot
+    //   mounts ext2 and resolves the fallback image
     //   before EL0 runs), CloneVmMissing (a process has an installed image
     //   or an outstanding fork clone), ImageAlreadyInstalled and
     //   ImageNoTargetRoot (the teardown just cleared the image, and the map
@@ -4590,11 +4495,6 @@ fn kernel_syscall_child_exec_return(frame_sp: usize) !{unsafe} {
         }
         KernelChildExecPrepareResult::ImageRecordOutOfMemory => {
             kernel_syscall_child_exec_lost(frame, current_authority);
-        }
-        KernelChildExecPrepareResult::NotChildOrPending => {
-            kernel_process_exec_failure_set(KernelChildExecPrepareResult::NotChildOrPending);
-            process_current_end(current_authority);
-            kernel_invariant_stop_with_frame(frame);
         }
         KernelChildExecPrepareResult::CloneVmMissing => {
             kernel_process_exec_failure_set(KernelChildExecPrepareResult::CloneVmMissing);
@@ -4621,11 +4521,6 @@ fn kernel_syscall_child_exec_return(frame_sp: usize) !{unsafe} {
         }
         KernelChildExecPrepareResult::NoImageResolved => {
             kernel_process_exec_failure_set(KernelChildExecPrepareResult::NoImageResolved);
-            process_current_end(current_authority);
-            kernel_invariant_stop_with_frame(frame);
-        }
-        KernelChildExecPrepareResult::ArgvPageMissing => {
-            kernel_process_exec_failure_set(KernelChildExecPrepareResult::ArgvPageMissing);
             process_current_end(current_authority);
             kernel_invariant_stop_with_frame(frame);
         }
@@ -5788,7 +5683,6 @@ fn syscall_signal_deliver(current_authority: ProcessCurrent[current_process, Pro
         }
         SyscallAction::Block => { return syscall_block_interrupt(current_authority, frame); }
         SyscallAction::WaitInterrupt => { process_current_end(current_authority); return SyscallAction::WaitInterrupt; }
-        SyscallAction::ChildExec => { process_current_end(current_authority); return SyscallAction::ChildExec; }
         SyscallAction::Migrate => { process_current_end(current_authority); return SyscallAction::Migrate; }
     };
     match frame {
@@ -6266,12 +6160,10 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
             maybe_frame_from_entry(frame_sp, kernel_process_entry_generation())));
     // GitHub issue #559: the ext2 reader registered at entry is done with
     // ext2 by the time the handler has chosen what happens next, whatever
-    // that is -- Block and Migrate included. ChildExec is the exception
-    // (#597): its exec prepare reads the image after this returns, and
-    // kernel_syscall_child_exec_return releases the registration then.
-    if (action_code != 8) {
-        if (syscall_ext2_reader_take()) { ext2_read_leave(); }
-    }
+    // that is -- Block and Migrate included. An execve that succeeded is the
+    // exception (#597) and never returns here: its prepare reads the image,
+    // and kernel_syscall_child_exec_return releases the registration then.
+    if (syscall_ext2_reader_take()) { ext2_read_leave(); }
     // A call that completed no longer needs core 0 (GitHub issue #9). A
     // blocked or waiting one keeps the mark until it completes, and a
     // migrated one has only just been given it.
@@ -6293,6 +6185,19 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         kernel_boot_log_syscall_unreachable(number);
     }
     return (action_code, action_value);
+}
+
+// GitHub issue #1080: execve succeeded and is past its point of no return.
+// The call completed, so it gets kernel_syscall_dispatch's completion
+// bookkeeping here, and then the exec's tail runs on the Takibi side instead
+// of in user_entry.S. Its ext2 reader registration is still held; the tail
+// releases it after the prepare. The frame is the one the syscall entered
+// on: an in-kernel probe, which has none, was answered ENOSYS before execve.
+private fn kernel_syscall_dispatch_child_exec(number: usize,
+        frame: FrameRef[process], args_page: sink PageOwner[page]) !{unsafe} {
+    kernel_process_clear_core0_for_call(kernel_syscall_process_slot());
+    workload_profile_syscall_complete(number);
+    kernel_syscall_child_exec_return(frame, args_page);
 }
 
 // Linux's reboot ABI is decoded before any world-stop request. Alternate
@@ -7178,10 +7083,6 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                     let delivered: usize = taken_signal_delivered(taken);
                     return SyscallAction::CloneParent(value);
                 }
-                SyscallAction::ChildExec => {
-                    let delivered: usize = taken_signal_delivered(taken);
-                    return SyscallAction::ChildExec;
-                }
             }
         }
     }
@@ -7676,7 +7577,30 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     }
 
     if (number == AARCH64_NR_EXECVE || number == AARCH64_NR_EXECVEAT) {
-        return syscall_finish_current(frame, syscall_execve_current(current_authority, number, x0, x1, x2), current_authority);
+        // GitHub issue #1080: an exec starts its image in the frame the
+        // syscall entered on. An in-kernel probe has none, so it is answered
+        // before anything is decided; no probe issues execve.
+        let entry_frame = match frame {
+            MaybeFrame::NoFrame => {
+                return syscall_finish_current(MaybeFrame::NoFrame,
+                    SyscallAction::Resume(LINUX_ENOSYS), current_authority);
+            }
+            MaybeFrame::Frame(found) => { found }
+        };
+        match syscall_execve_current(current_authority, number, x0, x1, x2) {
+            SyscallExecveResult::Refused(errno) => {
+                return syscall_finish_current(MaybeFrame::Frame(entry_frame),
+                    SyscallAction::Resume(errno), current_authority);
+            }
+            SyscallExecveResult::ChildExec(args_page) => {
+                process_current_end(current_authority);
+                kernel_syscall_dispatch_child_exec(number, entry_frame,
+                                                   args_page);
+                // Not reached: the tail resumes EL0 or stops. If it ever
+                // returned, user_entry.S fail-stops on Unreachable.
+                return SyscallAction::Unreachable;
+            }
+        }
     }
 
     if (number == AARCH64_NR_CLONE || number == AARCH64_NR_VFORK ||
@@ -8806,30 +8730,6 @@ fn kernel_syscall_subset_probe() -> bool !{unsafe} {
                 ok = false;
             }
 
-            // GitHub issue #700: a refused argv page is ENOMEM before the
-            // exec is recorded -- the slot stays empty -- and a granted one
-            // is held for the prepare to take.
-            match kernel_syscall_exec_args_reserve(PageAllocResult::OutOfMemory) {
-                ExecArgsReserve::OutOfMemory => {}
-                ExecArgsReserve::Reserved => { ok = false; }
-            }
-            match kernel_syscall_exec_args_take() {
-                Place::Empty => {}
-                Place::Full(stray) => { page_free(stray); ok = false; }
-            }
-            match kernel_syscall_exec_args_reserve(
-                    page_alloc(PageOwnerTag::ExecArgs)) {
-                ExecArgsReserve::OutOfMemory => { ok = false; }
-                ExecArgsReserve::Reserved => {
-                    match kernel_syscall_exec_args_take() {
-                        Place::Empty => { ok = false; }
-                        Place::Full(args_page) => { page_free(args_page); }
-                    }
-                }
-            }
-
-            if (kernel_syscall_exec_args_overlap_probe() == false) { ok = false; }
-
             // mmap: PROT_EXEC is always rejected.
             let (action1, value1) = kernel_syscall_dispatch(
                 SYSCALL_TRAP_ESR, 222, 0, 4096, 0x4, 0x22,
@@ -8922,7 +8822,6 @@ private fn syscall_finish_write(
         SyscallAction::CloneParent(sp) => { return syscall_finish_current(frame, SyscallAction::CloneParent(sp), current_authority); }
         SyscallAction::Block => { return syscall_finish_current(frame, SyscallAction::Block, current_authority); }
         SyscallAction::WaitInterrupt => { return syscall_finish_current(frame, SyscallAction::WaitInterrupt, current_authority); }
-        SyscallAction::ChildExec => { return syscall_finish_current(frame, SyscallAction::ChildExec, current_authority); }
         SyscallAction::Migrate => { return syscall_finish_current(frame, SyscallAction::Migrate, current_authority); }
     }
 }
@@ -9376,11 +9275,25 @@ private inline fn syscall_sendfile_current_with(slot: borrow SyscallSlot[0],
 }
 
 // Borrow current through the execve operation; ownership stays at dispatch.
+// What execve answers (GitHub issue #1080). A refusal is an errno for the
+// caller, which returns through the ordinary signal-delivering Resume. A
+// success has passed the point where the caller's image survives and holds
+// the argv page execve allocated; dispatch runs the exec's tail with it
+// (kernel_syscall_dispatch_child_exec) and never returns to user_entry.S.
+// This is its own type rather than a SyscallAction arm: a page owner is
+// five words, and a SyscallAction that large is returned through memory at
+// each of the dispatcher's several hundred inlined return sites, which
+// grew kernel_syscall_dispatch_action's frame from 240 B to 21 KiB.
+must_use variant SyscallExecveResult {
+    Refused(usize);
+    ChildExec(exists page: usize. PageOwner[page]);
+}
+
 private fn syscall_execve_current(
         current_authority: borrow ProcessCurrent[process, ProcessState::Running], number: usize, x0: usize, x1: usize, x2: usize)
-        -> SyscallAction !{unsafe} {
+        -> SyscallExecveResult !{unsafe} {
     let slot: SyscallSlot[0] = syscall_slot_acquire();
-    let result: SyscallAction = syscall_execve_current_with(slot, current_authority, number, x0, x1, x2);
+    let result: SyscallExecveResult = syscall_execve_current_with(slot, current_authority, number, x0, x1, x2);
     syscall_slot_release(slot);
     return result;
 }
@@ -9388,12 +9301,12 @@ private fn syscall_execve_current(
 private inline fn syscall_execve_current_with(slot: borrow SyscallSlot[0],
         
         current_authority: borrow ProcessCurrent[process, ProcessState::Running], number: usize, x0: usize, x1: usize, x2: usize)
-        -> SyscallAction !{unsafe} {
+        -> SyscallExecveResult !{unsafe} {
     // First handoff slice: only the current parent image may request an
     // exec. The child path still needs a process-owned image token and is
     // deliberately rejected until the general child lifecycle lands.
     if (kernel_syscall_exec_pending()) {
-        return SyscallAction::Resume(LINUX_EAGAIN);
+        return SyscallExecveResult::Refused(LINUX_EAGAIN);
     }
     // GitHub issue #610: an exec runs where it is called, PID 1's included
     // (#775, #831).
@@ -9404,16 +9317,16 @@ private inline fn syscall_execve_current_with(slot: borrow SyscallSlot[0],
         argv_address = x2;
     }
     let exec_lookup_name: []u8 = match kernel_syscall_path_name(slot, current_authority, path_address) {
-        SyscallPathResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
-        SyscallPathResult::Invalid => { return SyscallAction::Resume(LINUX_ENOENT); }
+        SyscallPathResult::Fault => { return SyscallExecveResult::Refused(LINUX_EFAULT); }
+        SyscallPathResult::Invalid => { return SyscallExecveResult::Refused(LINUX_ENOENT); }
         SyscallPathResult::Name(path) => { path }
     };
     let mut path_length: usize = exec_lookup_name.len;
     let path_view: [u8; 256..] = syscall_path_view_here(slot);
     if (path_view[0] == 0x2F) { path_length = path_length + 1; }
-    if (path_length == 0 || argv_address == 0) { return SyscallAction::Resume(LINUX_EINVAL); }
+    if (path_length == 0 || argv_address == 0) { return SyscallExecveResult::Refused(LINUX_EINVAL); }
     let exec_path_absolute: bool = path_view[0] == 0x2F;
-    if (path_length > 256) { return SyscallAction::Resume(LINUX_EINVAL); }
+    if (path_length > 256) { return SyscallExecveResult::Refused(LINUX_EINVAL); }
     // GitHub issue #974: the staging helpers and every function between
     // here and them require file_buffer initialized; this fill is what
     // shows it, checked at each call.
@@ -9424,7 +9337,7 @@ private inline fn syscall_execve_current_with(slot: borrow SyscallSlot[0],
         exec_path[0..<path_length],
         path_view[0..<path_length]);
     if (saved_path != path_length) {
-        return SyscallAction::Resume(LINUX_EFAULT);
+        return SyscallExecveResult::Refused(LINUX_EFAULT);
     }
     // The executable format is decided from the file, before the
     // caller's argv is copied: a `#!` target replaces argv[0] with its
@@ -9440,31 +9353,31 @@ private inline fn syscall_execve_current_with(slot: borrow SyscallSlot[0],
                 exec_inode = inode;
             }
             SyscallExecFormatResult::Absent => {
-                return SyscallAction::Resume(LINUX_ENOENT);
+                return SyscallExecveResult::Refused(LINUX_ENOENT);
             }
             SyscallExecFormatResult::NotPermitted => {
-                return SyscallAction::Resume(LINUX_EACCES);
+                return SyscallExecveResult::Refused(LINUX_EACCES);
             }
             SyscallExecFormatResult::Unreadable => {
-                return SyscallAction::Resume(LINUX_EIO);
+                return SyscallExecveResult::Refused(LINUX_EIO);
             }
             SyscallExecFormatResult::NotExecutable => {
-                return SyscallAction::Resume(LINUX_ENOEXEC);
+                return SyscallExecveResult::Refused(LINUX_ENOEXEC);
             }
             SyscallExecFormatResult::InterpreterAbsent => {
-                return SyscallAction::Resume(LINUX_ENOENT);
+                return SyscallExecveResult::Refused(LINUX_ENOENT);
             }
             SyscallExecFormatResult::InterpreterUnsupported => {
-                return SyscallAction::Resume(LINUX_ELIBBAD);
+                return SyscallExecveResult::Refused(LINUX_ELIBBAD);
             }
             SyscallExecFormatResult::Invalid => {
-                return SyscallAction::Resume(LINUX_EINVAL);
+                return SyscallExecveResult::Refused(LINUX_EINVAL);
             }
             SyscallExecFormatResult::TooBig => {
-                return SyscallAction::Resume(LINUX_E2BIG);
+                return SyscallExecveResult::Refused(LINUX_E2BIG);
             }
             SyscallExecFormatResult::TooDeep => {
-                return SyscallAction::Resume(LINUX_ELOOP);
+                return SyscallExecveResult::Refused(LINUX_ELOOP);
             }
             SyscallExecFormatResult::Script(prefix) => {
                 script_argc = prefix.argc;
@@ -9486,24 +9399,24 @@ private inline fn syscall_execve_current_with(slot: borrow SyscallSlot[0],
         let entry_offset: usize = index * 8;
         let entry_address: usize = match checked_add_usize(
             argv_address, entry_offset) {
-            CheckedUsize::Overflow => { return SyscallAction::Resume(LINUX_EFAULT); }
+            CheckedUsize::Overflow => { return SyscallExecveResult::Refused(LINUX_EFAULT); }
             CheckedUsize::Value(v) => { v }
         };
         match user_range_check_read(current_authority, entry_address, 8) {
-            UserReadRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
+            UserReadRangeResult::Fault => { return SyscallExecveResult::Refused(LINUX_EFAULT); }
             UserReadRangeResult::Ok(range) => {
                 let (ok, string_address) = user_read_u64(range, 0);
-                if (ok == false) { return SyscallAction::Resume(LINUX_EFAULT); }
+                if (ok == false) { return SyscallExecveResult::Refused(LINUX_EFAULT); }
                 if (string_address == 0) {
                     vector_terminated = true;
                 } else {
                     let argument_name: []u8 = match kernel_syscall_path_name(slot, current_authority,
                         string_address as usize) {
                         SyscallPathResult::Fault => {
-                            return SyscallAction::Resume(LINUX_EFAULT);
+                            return SyscallExecveResult::Refused(LINUX_EFAULT);
                         }
                         SyscallPathResult::Invalid => {
-                            return SyscallAction::Resume(LINUX_E2BIG);
+                            return SyscallExecveResult::Refused(LINUX_E2BIG);
                         }
                         SyscallPathResult::Name(path) => { path }
                     };
@@ -9521,35 +9434,35 @@ private inline fn syscall_execve_current_with(slot: borrow SyscallSlot[0],
                         match checked_add_usize(output_offset,
                             string_length + 1) {
                             CheckedUsize::Overflow => {
-                                return SyscallAction::Resume(LINUX_E2BIG);
+                                return SyscallExecveResult::Refused(LINUX_E2BIG);
                             }
                             CheckedUsize::Value(end) => {
                                 if (end > PROCESS_EXEC_ARGV_BYTES ||
                                     argc >= PROCESS_EXEC_ARGC_MAX) {
-                                    return SyscallAction::Resume(LINUX_E2BIG);
+                                    return SyscallExecveResult::Refused(LINUX_E2BIG);
                                 }
                                 let copy_length: usize = string_length + 1;
                                 let destination_start: usize = output_offset;
                                 let exec_argv_view: []u8 =
                                     syscall_exec_argv_here(slot);
                                 if (destination_start > exec_argv_view.len) {
-                                    return SyscallAction::Resume(LINUX_E2BIG);
+                                    return SyscallExecveResult::Refused(LINUX_E2BIG);
                                 }
                                 let destination_tail = exec_argv_view[
                                 destination_start..<exec_argv_view.len];
                                 if (copy_length > destination_tail.len) {
-                                    return SyscallAction::Resume(LINUX_E2BIG);
+                                    return SyscallExecveResult::Refused(LINUX_E2BIG);
                                 }
                                 let destination =
                                     destination_tail[0..<copy_length];
                                 if (copy_length > path_view.len) {
-                                    return SyscallAction::Resume(LINUX_E2BIG);
+                                    return SyscallExecveResult::Refused(LINUX_E2BIG);
                                 }
                                 let source = path_view[0..<copy_length];
                                 let copied: usize = slice_copy(
                                     destination, source);
                                 if (copied != copy_length) {
-                                    return SyscallAction::Resume(LINUX_EFAULT);
+                                    return SyscallExecveResult::Refused(LINUX_EFAULT);
                                 }
                                 output_offset = end;
                                 argc = argc + 1;
@@ -9561,24 +9474,23 @@ private inline fn syscall_execve_current_with(slot: borrow SyscallSlot[0],
         }
         if (vector_terminated) { break; }
     }
-    if (vector_terminated == false) { return SyscallAction::Resume(LINUX_E2BIG); }
+    if (vector_terminated == false) { return SyscallExecveResult::Refused(LINUX_E2BIG); }
     if (argc == 0 || path_length == 0) {
-        return SyscallAction::Resume(LINUX_EINVAL);
+        return SyscallExecveResult::Refused(LINUX_EINVAL);
     }
     // Keep the path validation explicit even though this first image
     // registry currently contains one static BusyBox ELF.
-    if (exec_path_absolute == false) { return SyscallAction::Resume(LINUX_ENOENT); }
-    if (argc >= 16) { return SyscallAction::Resume(LINUX_EINVAL); }
+    if (exec_path_absolute == false) { return SyscallExecveResult::Refused(LINUX_ENOENT); }
+    if (argc >= 16) { return SyscallExecveResult::Refused(LINUX_EINVAL); }
     let packed_argc: {0..<16 as usize} = argc;
     // GitHub issue #700: the last fallible step, before anything below
-    // records the exec as pending.
-    match kernel_syscall_exec_args_reserve(
-        page_alloc(PageOwnerTag::ExecArgs)) {
-        ExecArgsReserve::OutOfMemory => {
-            return SyscallAction::Resume(LINUX_ENOMEM);
+    // records the exec as pending. The page leaves in the result (#1080).
+    let args_page = match page_alloc(PageOwnerTag::ExecArgs) {
+        PageAllocResult::OutOfMemory => {
+            return SyscallExecveResult::Refused(LINUX_ENOMEM);
         }
-        ExecArgsReserve::Reserved => {}
-    }
+        PageAllocResult::Allocated(page) => { page }
+    };
     let diagnostic_argv: []u8 = syscall_exec_argv_here(slot);
     // GitHub issue #618: one critical section, so a procfs snapshot on
     // another CPU copies the old command line or the new one, never
@@ -9593,7 +9505,7 @@ private inline fn syscall_execve_current_with(slot: borrow SyscallSlot[0],
     scheduled_process_set_exec_pending(exec_guard,
         kernel_syscall_process_slot(), true);
     process_run_unlock(exec_guard);
-    return SyscallAction::ChildExec;
+    return SyscallExecveResult::ChildExec(args_page);
 }
 
 // Borrow current through the mprotect operation; ownership stays at dispatch.

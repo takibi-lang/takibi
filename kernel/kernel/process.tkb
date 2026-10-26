@@ -5009,7 +5009,6 @@ private let mut kernel_process_clone_rollover_busy_injections: usize;
 // without teaching the exception renderer about it a compile error.
 enum KernelExecFailureReason: u8 {
     None;
-    NotChildOrPending;
     CloneVmMissing;
     DynamicResolveInvalid;
     DynamicPairInvalid;
@@ -5018,7 +5017,6 @@ enum KernelExecFailureReason: u8 {
     NoImageResolved;
     StaticImageInvalid;
     StaticMapOutOfMemory;
-    ArgvPageMissing;
     DebuggerAfterCommit;
     ImageRecordOutOfMemory;
 }
@@ -5033,7 +5031,6 @@ struct ExecUserEntry {
 
 must_use variant KernelChildExecPrepareResult {
     Prepared(ExecUserEntry);
-    NotChildOrPending;
     CloneVmMissing;
     DynamicResolveInvalid;
     DynamicPairInvalid;
@@ -5044,8 +5041,6 @@ must_use variant KernelChildExecPrepareResult {
     NoImageResolved;
     StaticImageInvalid;
     StaticMapOutOfMemory;
-    // No page for the exec's own copy of its argv.
-    ArgvPageMissing;
     ImageRecordOutOfMemory;
     // GitHub issue #1079: the new image's pages could not be reserved. The
     // old image is still intact, so execve answers ENOMEM.
@@ -5262,7 +5257,6 @@ fn kernel_process_exec_failure_clear() {
 fn kernel_process_exec_failure_set(result: KernelChildExecPrepareResult) {
     match result {
         KernelChildExecPrepareResult::Prepared(_) => { kernel_process_exec_failure_reason = KernelExecFailureReason::None; }
-        KernelChildExecPrepareResult::NotChildOrPending => { kernel_process_exec_failure_reason = KernelExecFailureReason::NotChildOrPending; }
         KernelChildExecPrepareResult::CloneVmMissing => { kernel_process_exec_failure_reason = KernelExecFailureReason::CloneVmMissing; }
         KernelChildExecPrepareResult::DynamicResolveInvalid => { kernel_process_exec_failure_reason = KernelExecFailureReason::DynamicResolveInvalid; }
         KernelChildExecPrepareResult::DynamicPairInvalid => { kernel_process_exec_failure_reason = KernelExecFailureReason::DynamicPairInvalid; }
@@ -5271,7 +5265,6 @@ fn kernel_process_exec_failure_set(result: KernelChildExecPrepareResult) {
         KernelChildExecPrepareResult::NoImageResolved => { kernel_process_exec_failure_reason = KernelExecFailureReason::NoImageResolved; }
         KernelChildExecPrepareResult::StaticImageInvalid => { kernel_process_exec_failure_reason = KernelExecFailureReason::StaticImageInvalid; }
         KernelChildExecPrepareResult::StaticMapOutOfMemory => { kernel_process_exec_failure_reason = KernelExecFailureReason::StaticMapOutOfMemory; }
-        KernelChildExecPrepareResult::ArgvPageMissing => { kernel_process_exec_failure_reason = KernelExecFailureReason::ArgvPageMissing; }
         KernelChildExecPrepareResult::ImageRecordOutOfMemory => { kernel_process_exec_failure_reason = KernelExecFailureReason::ImageRecordOutOfMemory; }
         KernelChildExecPrepareResult::ReserveOutOfMemory => { kernel_process_exec_failure_reason = KernelExecFailureReason::None; }
     }
@@ -5288,7 +5281,6 @@ fn kernel_process_exec_failure_render() {
     ddb_puts("oops: exec prepare=");
     match kernel_process_exec_failure_reason {
         KernelExecFailureReason::None => { ddb_puts("none\n"); }
-        KernelExecFailureReason::NotChildOrPending => { ddb_puts("not-child-or-pending\n"); }
         KernelExecFailureReason::CloneVmMissing => { ddb_puts("clone-vm-missing\n"); }
         KernelExecFailureReason::DynamicResolveInvalid => { ddb_puts("dynamic-resolve-invalid\n"); }
         KernelExecFailureReason::DynamicPairInvalid => { ddb_puts("dynamic-pair-invalid\n"); }
@@ -5297,7 +5289,6 @@ fn kernel_process_exec_failure_render() {
         KernelExecFailureReason::NoImageResolved => { ddb_puts("no-image-resolved\n"); }
         KernelExecFailureReason::StaticImageInvalid => { ddb_puts("static-image-invalid\n"); }
         KernelExecFailureReason::StaticMapOutOfMemory => { ddb_puts("static-map-out-of-memory\n"); }
-        KernelExecFailureReason::ArgvPageMissing => { ddb_puts("argv-page-missing\n"); }
         KernelExecFailureReason::ImageRecordOutOfMemory => { ddb_puts("image-record-out-of-memory\n"); }
         KernelExecFailureReason::DebuggerAfterCommit => { ddb_puts("debugger-after-commit\n"); }
     }

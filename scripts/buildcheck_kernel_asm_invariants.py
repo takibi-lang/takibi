@@ -828,19 +828,139 @@ def check_mmu_off_vector_stores(insns):
     return failures
 
 
+# GitHub issue #1133 ("assembly is a leaf", DECISIONS 2026-10-25): a value
+# that crosses hand-written assembly loses its type, so assembly may enter
+# Takibi only at a declared entry point -- the Makefile's KERNEL_ASM_ENTRIES,
+# the same list the compiler's unused-function check is given. Read from the
+# assembly objects' own relocations: every symbol an assembly object
+# references and no assembly object defines, that the Takibi object defines
+# as a function, must be declared; and every declared entry must still be
+# referenced, so retiring a call from assembly retires its entry too (the
+# shape #1080 left behind: user_entry.S's action 8 called back into
+# kernel_syscall_child_exec_return, and the entry would otherwise have
+# outlived the call). The symbols below are compiler-generated assembly,
+# not Takibi functions, and are referenced by name for that reason.
+ASM_GENERATED_SYMBOLS = {
+    # The exception vector table exception_frame.tkb declares; entry.S
+    # installs it in VBAR_EL1.
+    "el1_vectors",
+}
+
+
+def nm_symbols(obj):
+    """(defined function names, defined names, undefined names) of `obj`."""
+    out = subprocess.run(["llvm-nm-19", obj], check=True,
+                         capture_output=True, text=True).stdout
+    functions, defined, undefined = set(), set(), set()
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0] == "U":
+            undefined.add(parts[1])
+        elif len(parts) == 3:
+            defined.add(parts[2])
+            if parts[1] in ("T", "t"):
+                functions.add(parts[2])
+    return functions, defined, undefined
+
+
+def asm_takibi_entry_problems(entries, takibi_symbols, asm_symbols):
+    """Problems with assembly's calls into Takibi.
+
+    `takibi_symbols` is the Takibi object's function names; `asm_symbols`
+    maps each assembly object to its (defined, undefined) names."""
+    asm_defined = set()
+    for defined, _ in asm_symbols.values():
+        asm_defined |= defined
+    problems = []
+    referenced = set()
+    for obj, (_, undefined) in sorted(asm_symbols.items()):
+        for name in sorted(undefined - asm_defined):
+            if name not in takibi_symbols or name in ASM_GENERATED_SYMBOLS:
+                continue
+            referenced.add(name)
+            if name not in entries:
+                problems.append(
+                    f"{obj} enters Takibi at {name}, which is not a declared "
+                    "assembly entry (KERNEL_ASM_ENTRIES): assembly is a leaf "
+                    "(#1133); declare it only after review")
+    for name in sorted(entries - referenced):
+        problems.append(
+            f"{name} is a declared assembly entry (KERNEL_ASM_ENTRIES) that "
+            "no assembly object references any more; remove it")
+    return problems
+
+
+def check_asm_takibi_entries(entries, takibi_object, asm_objects):
+    takibi_functions, _, _ = nm_symbols(takibi_object)
+    asm_symbols = {}
+    for obj in asm_objects:
+        _, defined, undefined = nm_symbols(obj)
+        asm_symbols[obj] = (defined, undefined)
+    return asm_takibi_entry_problems(set(entries), takibi_functions,
+                                     asm_symbols)
+
+
+def asm_takibi_entry_controls():
+    """The entry rule must refuse both shapes it exists for."""
+    asm = {"user_entry.o": ({"el0_sync_body"},
+                            {"kernel_syscall_dispatch", "boot_stack_top"})}
+    takibi = {"kernel_syscall_dispatch", "kernel_syscall_child_exec_return"}
+    failures = []
+    if asm_takibi_entry_problems({"kernel_syscall_dispatch"}, takibi, asm):
+        failures.append("asm-entry control: a declared entry was refused")
+    undeclared = {"user_entry.o": ({"el0_sync_body"},
+                                   {"kernel_syscall_dispatch",
+                                    "kernel_syscall_child_exec_return"})}
+    if not asm_takibi_entry_problems({"kernel_syscall_dispatch"}, takibi,
+                                     undeclared):
+        failures.append("asm-entry control: an undeclared entry was accepted")
+    if not asm_takibi_entry_problems(
+            {"kernel_syscall_dispatch", "kernel_syscall_child_exec_return"},
+            takibi, asm):
+        failures.append("asm-entry control: a stale entry was accepted")
+    return failures
+
+
 def main():
-    if len(sys.argv) != 3:
+    args = sys.argv[1:]
+    entries = None
+    takibi_object = None
+    asm_objects = []
+    if "--asm-entries" in args:
+        at = args.index("--asm-entries")
+        tail = args[at:]
+        args = args[:at]
+        try:
+            entries = tail[1].split()
+            if tail[2] != "--takibi-object":
+                raise IndexError
+            takibi_object = tail[3]
+            asm_objects = tail[4:]
+        except IndexError:
+            asm_objects = []
+        if not asm_objects:
+            print("usage: ... --asm-entries \"NAMES\" --takibi-object "
+                  "MAIN.o ASM.o...", file=sys.stderr)
+            return 1
+    if len(args) != 2:
         print(
             "usage: buildcheck_kernel_asm_invariants.py <kernel.elf> "
-            "<expected_device_block_uxn_pxn_count>",
+            "<expected_device_block_uxn_pxn_count> "
+            "[--asm-entries \"NAMES\" --takibi-object MAIN.o ASM.o...]",
             file=sys.stderr,
         )
         return 1
-    elf_path = sys.argv[1]
-    expected_uxn_and_pxn_count = int(sys.argv[2])
+    elf_path = args[0]
+    expected_uxn_and_pxn_count = int(args[1])
     insns = parse_instructions(objdump_lines(elf_path))
+    entry_failures = []
+    if entries is not None:
+        entry_failures = (asm_takibi_entry_controls() +
+                          check_asm_takibi_entries(entries, takibi_object,
+                                                   asm_objects))
     failures = (
-        check_invariant_stop_capture(insns)
+        entry_failures
+        + check_invariant_stop_capture(insns)
         + check_uxn(insns, expected_uxn_and_pxn_count)
         + check_eret_daif_mask(insns)
         + check_spinlock_is_atomic(insns, elf_path)
@@ -864,7 +984,9 @@ def main():
           "switching to a stack of its own core, with every EL0 process "
           "return crossing the physical stack-handoff hook and resetting the GIC priority mask (only the interrupt return reaching the TCP retransmit pass), and no misaligned "
           "q-register store in the MMU-off page allocator, all verified "
-          "statically",
+          "statically" + (", and assembly entering Takibi only at its %d "
+          "declared entries (#1133)" % len(entries) if entries is not None
+          else ""),
                 insns=len(insns))
     return 0
 
