@@ -51,12 +51,13 @@ PHASES = ("xargs", "fork", "exec", "pipe", "hackbench")
 # They are left out of the default list and named in every report, so a
 # clean sample never reads as covering them; ask for one with --phases to
 # watch it fail. Remove an entry when its issue lands.
-# Since #1041 stress-ng's 8 MiB image execs (`stress-ng --version` runs);
-# every stressor then fails its setup on sigaltstack, which is ENOSYS here.
+# Since #1138 (sigaltstack) every stressor gets past its setup; stress-ng
+# then stops at its shared memory region, a MAP_SHARED|MAP_ANONYMOUS mmap
+# this kernel refuses with EINVAL.
 PHASE_WAITS = {
-    "fork": "#1138 (sigaltstack, nr 132, ENOSYS at stress-ng's stressor setup)",
-    "exec": "#1138 (sigaltstack, nr 132, ENOSYS at stress-ng's stressor setup)",
-    "pipe": "#1138 (sigaltstack, nr 132, ENOSYS at stress-ng's stressor setup)",
+    "fork": "shared anonymous mmap (MAP_SHARED|MAP_ANONYMOUS is EINVAL at stress-ng's shared region)",
+    "exec": "shared anonymous mmap (MAP_SHARED|MAP_ANONYMOUS is EINVAL at stress-ng's shared region)",
+    "pipe": "shared anonymous mmap (MAP_SHARED|MAP_ANONYMOUS is EINVAL at stress-ng's shared region)",
 }
 
 
