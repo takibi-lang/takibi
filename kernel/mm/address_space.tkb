@@ -20,12 +20,19 @@ const USER_TEXT_RX_FLAGS: usize = 0x0020000000000FC7;
 const USER_RW_XN_FLAGS: usize = 0x0060000000000F47;
 const USER_RODATA_R_FLAGS: usize = 0x0060000000000FC7;
 // Excludes USER_COW_BIT: COW pages are still readable user mappings even
-// though their software marker must make them non-writable.
-const USER_PTE_PERMISSION_MASK: usize = 0xFF60000000000FFF;
+// though their software marker must make them non-writable. Excludes
+// USER_SHARED_BIT too: a shared page is an ordinary writable mapping.
+const USER_PTE_PERMISSION_MASK: usize = 0xFE60000000000FFF;
 const USER_PAGE_PHYS_MASK: usize = 0x0000FFFFFFFFF000;
 // Bits 58:55 are ignored by the AArch64 stage-1 translation hardware and
 // available to software. COW is meaningful only with a read-only user PTE.
 const USER_COW_BIT: usize = 0x0080000000000000;
+// GitHub issue #1147: a page of a MAP_SHARED|MAP_ANONYMOUS mapping. fork
+// maps the same physical page writable into the child instead of marking
+// both views copy-on-write, and the page's mapping reference count (one per
+// address space, page.tkb) frees it when the last mapping goes. Only a
+// writable PTE carries it; mprotect's downgrade drops it.
+const USER_SHARED_BIT: usize = 0x0100000000000000;
 
 // PTE mutation is serialized by process ownership today: a process is never
 // scheduled on two cores at once, and clone/exec/reap mutate only roots which
@@ -1162,6 +1169,14 @@ fn address_space_resolve_cow(root: AddressSpaceRoot, index: usize) -> bool !{uns
             }
         }
     }
+    return address_space_replace_with_copy(root, index, old_physical);
+}
+
+// Map a private copy of the page at `old_physical` read-write at `index`,
+// then release this root's reference to the old page. The new mapping is
+// complete before the release, so a failure leaves the old PTE in place.
+fn address_space_replace_with_copy(root: AddressSpaceRoot, index: usize,
+                                   old_physical: usize) -> bool !{unsafe} {
     match page_alloc(PageOwnerTag::PageTable) {
         PageAllocResult::OutOfMemory => { return false; }
         PageAllocResult::Allocated(page) => {
@@ -1188,6 +1203,41 @@ fn address_space_resolve_cow(root: AddressSpaceRoot, index: usize) -> bool !{uns
             }
         }
     }
+}
+
+fn address_space_pte_is_shared(pte: usize) -> bool {
+    return (pte & USER_SHARED_BIT) != 0;
+}
+
+// GitHub issue #1147: mark the writable page at `index` as a shared
+// mapping's. False when it is not a writable page.
+fn address_space_mark_shared(root: AddressSpaceRoot, index: usize) -> bool {
+    let pte: usize = address_space_pte_read(root, index);
+    if (address_space_pte_is_writable(pte) == false) { return false; }
+    match address_space_pte_write(root, index, pte | USER_SHARED_BIT) {
+        AddressSpacePteWriteResult::Invalid => { return false; }
+        AddressSpacePteWriteResult::OutOfMemory => { return false; }
+        AddressSpacePteWriteResult::Written => { return true; }
+    }
+}
+
+// GitHub issue #1147: munmap of a shared page. This root stops sharing it:
+// it gets a private copy (the arena keeps every page mapped, and the next
+// mmap zeroes what it takes, which must not reach a peer), and its
+// reference to the shared page goes, freeing it if this was the last. True
+// when the page at `index` is private afterwards.
+fn address_space_unshare(root: AddressSpaceRoot, index: usize) -> bool !{unsafe} {
+    let pte: usize = address_space_pte_read(root, index);
+    if (address_space_pte_is_shared(pte) == false) { return true; }
+    let physical: usize = pte & USER_PAGE_PHYS_MASK;
+    if (page_mapping_refcount_physical(physical) == 1) {
+        match address_space_pte_write(root, index, pte & ~USER_SHARED_BIT) {
+            AddressSpacePteWriteResult::Invalid => { return false; }
+            AddressSpacePteWriteResult::OutOfMemory => { return false; }
+            AddressSpacePteWriteResult::Written => { return true; }
+        }
+    }
+    return address_space_replace_with_copy(root, index, physical);
 }
 
 // Each mapped user page transferred its PageOwner when it was installed.

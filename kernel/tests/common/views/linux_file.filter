@@ -4,3 +4,5 @@
 ^userspace SIGCHLD siginfo:
 ^userspace sigaltstack:
 ^userspace sigaltstack SS_AUTODISARM:
+^userspace shared mmap:
+^userspace statfs and umask:

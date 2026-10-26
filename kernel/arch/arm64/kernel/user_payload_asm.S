@@ -167,3 +167,19 @@ altstack_probe_handler:
     svc     #0
     str     x0, [x9, #24]
     ret
+
+/* GitHub issue #1147: mmap(NULL, length, prot, flags, -1, 0) for
+ * user_payload's shared-mapping probe. svc5 sets x0-x4 only, and Linux
+ * refuses an offset (x5) that is not page-aligned, so x5 is zeroed here. */
+    .global shared_probe_mmap
+    .type shared_probe_mmap, %function
+shared_probe_mmap:
+    mov     x3, x2
+    mov     x2, x1
+    mov     x1, x0
+    mov     x0, #0
+    mov     x4, #-1
+    mov     x5, #0
+    mov     x8, #222
+    svc     #0
+    ret

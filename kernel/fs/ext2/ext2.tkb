@@ -1206,6 +1206,71 @@ fn ext2_update_free_counts(slot: borrow Ext2Slot[0], mount: Ext2Mount,
     }
 }
 
+// GitHub issue #1147: statfs(2)'s ext2 numbers, as Linux's ext2_statfs
+// computes them without minixdf: the blocks less the metadata overhead,
+// the free blocks, those less the root-reserved ones, the inodes, the free
+// inodes, and the fsid folded from s_uuid.
+struct Ext2Statfs {
+    blocks: usize;
+    free_blocks: usize;
+    available_blocks: usize;
+    inodes: usize;
+    free_inodes: usize;
+    fsid: usize;
+}
+
+must_use variant Ext2StatfsResult { Invalid; Counts(Ext2Statfs); }
+
+fn ext2_statfs(mount: Ext2Mount) -> Ext2StatfsResult {
+    let slot: Ext2Slot[0] = ext2_slot_acquire();
+    let result: Ext2StatfsResult = ext2_statfs_with(slot, mount);
+    ext2_slot_release(slot);
+    return result;
+}
+
+private fn ext2_statfs_with(slot: borrow Ext2Slot[0], mount: Ext2Mount)
+        -> Ext2StatfsResult {
+    match block_read(mount.device, EXT2_SUPERBLOCK_BLOCK,
+                     ext2_scratch[slot.index].metadata as []u8) {
+        BlockIoResult::Invalid => { return Ext2StatfsResult::Invalid; }
+        BlockIoResult::Ok => { }
+    }
+    let mut superblock: Ext2Bytes = ext2_metadata();
+    let blocks: usize = ext2_u32(slot, superblock, 4) as usize;
+    let reserved: usize = ext2_u32(slot, superblock, 8) as usize;
+    let free_blocks: usize = ext2_u32(slot, superblock, 12) as usize;
+    let free_inodes: usize = ext2_u32(slot, superblock, 16) as usize;
+    let first_data_block: usize = ext2_u32(slot, superblock, 20) as usize;
+    let blocks_per_group: usize = ext2_u32(slot, superblock, 32) as usize;
+    let mut fsid: usize = 0;
+    for word: usize in 0..<2 {
+        let low: usize = ext2_u32(slot, superblock, 104 + word * 8) as usize;
+        let high: usize = ext2_u32(slot, superblock, 108 + word * 8) as usize;
+        fsid = fsid ^ (low | (high << 32));
+    }
+    if (blocks_per_group == 0 || blocks <= first_data_block) {
+        return Ext2StatfsResult::Invalid;
+    }
+    // Every group holds a superblock copy and the descriptor blocks (the
+    // mount accepts no sparse_super), two bitmaps and its inode table.
+    let groups: usize = (blocks - first_data_block + blocks_per_group - 1) /
+                        blocks_per_group;
+    let descriptor_blocks: usize = (groups * 32 + KERNEL_BLOCK_SIZE - 1) /
+                                   KERNEL_BLOCK_SIZE;
+    let table_blocks: usize = (mount.inodes_per_group * mount.inode_size +
+                               KERNEL_BLOCK_SIZE - 1) / KERNEL_BLOCK_SIZE;
+    let overhead: usize = first_data_block +
+                          groups * (1 + descriptor_blocks + 2 + table_blocks);
+    if (overhead > blocks) { return Ext2StatfsResult::Invalid; }
+    let mut available: usize = 0;
+    if (free_blocks > reserved) { available = free_blocks - reserved; }
+    let mut counts: Ext2Statfs = {
+        blocks - overhead, free_blocks, available, mount.inode_count,
+        free_inodes, fsid
+    };
+    return Ext2StatfsResult::Counts(counts);
+}
+
 fn ext2_free_counts(mount: Ext2Mount) -> Ext2FreeCountsResult {
     let slot: Ext2Slot[0] = ext2_slot_acquire();
     let result: Ext2FreeCountsResult = ext2_free_counts_with(slot, mount);
@@ -3947,18 +4012,21 @@ private fn ext2_create_file_in_with(slot: borrow Ext2Slot[0], mount: Ext2Mount,
 // here on, as a mkdirat directory is.
 must_use variant Ext2CreateEmptyResult { Invalid; NoSpace; Created(usize); }
 
+// GitHub issue #1147: `permissions` is the new inode's permission bits
+// (the low 12 of i_mode), the caller's mode with its umask applied.
 fn ext2_create_empty_file_in(mount: Ext2Mount, directory_inode: usize,
-                             name: borrow []const u8)
+                             name: borrow []const u8, permissions: usize)
         -> Ext2CreateEmptyResult !{unsafe} {
     let slot: Ext2Slot[0] = ext2_slot_acquire();
     let result: Ext2CreateEmptyResult = ext2_create_empty_file_in_with(slot,
-            mount, directory_inode, name);
+            mount, directory_inode, name, permissions);
     ext2_slot_release(slot);
     return result;
 }
 
 private fn ext2_create_empty_file_in_with(slot: borrow Ext2Slot[0],
-        mount: Ext2Mount, directory_inode: usize, name: borrow []const u8)
+        mount: Ext2Mount, directory_inode: usize, name: borrow []const u8,
+        permissions: usize)
         -> Ext2CreateEmptyResult !{unsafe} {
     if (ext2_fenced) { return Ext2CreateEmptyResult::Invalid; }
     match ext2_lookup_directory_with(slot, mount, directory_inode, name) {
@@ -3980,8 +4048,8 @@ private fn ext2_create_empty_file_in_with(slot: borrow Ext2Slot[0],
     let mut undo: Ext2Undo[0] = ext2_undo_begin();
     let mut linked: bool = false;
     let mut no_space: bool = false;
-    if (ext2_inode_init_logged(slot, mount, undo, inode_number, 0x81A4, 0, 1,
-                               0, 0) &&
+    if (ext2_inode_init_logged(slot, mount, undo, inode_number,
+                               0x8000 | (permissions & 0xFFF), 0, 1, 0, 0) &&
         ext2_inode_bitmap_logged(slot, mount, undo, inode_number, true)) {
         match ext2_directory_add_logged(slot, mount, undo, claims,
                 directory_inode, inode_number, name) {
@@ -4064,18 +4132,21 @@ private fn ext2_linked_directory_new(block_owner: sink Ext2BlockOwner[block],
 // file that is never unlinked.
 fn ext2_directory_keep(linked: sink Ext2LinkedDirectory[inode, block]) {}
 
+// `permissions` as ext2_create_empty_file_in's (GitHub issue #1147).
 fn ext2_make_directory_in(mount: Ext2Mount, parent_inode: usize,
-                          name: borrow []const u8) -> Ext2MkdirResult {
+                          name: borrow []const u8, permissions: usize)
+        -> Ext2MkdirResult {
     let slot: Ext2Slot[0] = ext2_slot_acquire();
     let result: Ext2MkdirResult = ext2_make_directory_in_with(slot, mount,
-            parent_inode, name);
+            parent_inode, name, permissions);
     ext2_slot_release(slot);
     return result;
 }
 
 private fn ext2_make_directory_in_with(slot: borrow Ext2Slot[0],
         mount: Ext2Mount, parent_inode: usize,
-                          name: borrow []const u8) -> Ext2MkdirResult {
+                          name: borrow []const u8, permissions: usize)
+        -> Ext2MkdirResult {
     match ext2_lookup_directory_with(slot, mount, parent_inode, name) {
         Ext2LookupResult::Invalid => { return Ext2MkdirResult::Invalid; }
         Ext2LookupResult::Found(existing) => { return Ext2MkdirResult::Invalid; }
@@ -4113,7 +4184,8 @@ private fn ext2_make_directory_in_with(slot: borrow Ext2Slot[0],
     let mut undo: Ext2Undo[0] = ext2_undo_begin();
     let mut linked: bool = false;
     let mut no_space: bool = false;
-    if (ext2_inode_init_logged(slot, mount, undo, inode_number, 0x41ED,
+    if (ext2_inode_init_logged(slot, mount, undo, inode_number,
+                               0x4000 | (permissions & 0xFFF),
                                KERNEL_BLOCK_SIZE, 2, 2, block) &&
         ext2_inode_bitmap_logged(slot, mount, undo, inode_number, true) &&
         ext2_directory_init_claimed(slot, mount, claims, block, inode_number,

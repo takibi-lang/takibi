@@ -73,6 +73,16 @@ const AARCH64_NR_CHDIR: usize = 49;
 const AARCH64_NR_SETITIMER: usize = 103;
 const AARCH64_NR_RT_SIGACTION: usize = 134;
 const AARCH64_NR_SIGALTSTACK: usize = 132;
+// GitHub issue #1147.
+const AARCH64_NR_STATFS: usize = 43;
+const AARCH64_NR_GETRUSAGE: usize = 165;
+const AARCH64_NR_UMASK: usize = 166;
+// mmap(2) flags (uapi asm-generic/mman-common.h, mman.h).
+const LINUX_MAP_SHARED: usize = 0x01;
+const LINUX_MAP_PRIVATE: usize = 0x02;
+const LINUX_MAP_TYPE: usize = 0x0F;
+const LINUX_MAP_FIXED: usize = 0x10;
+const LINUX_MAP_ANONYMOUS: usize = 0x20;
 const AARCH64_NR_SET_TID_ADDRESS: usize = 96;
 const AARCH64_NR_UNAME: usize = 160;
 const AARCH64_NR_SYSINFO: usize = 179;
@@ -1317,13 +1327,135 @@ fn syscall_munmap_pages(current_authority: borrow ProcessCurrent[current_process
     let slot: usize = root_slot_word(address_space_root_slot(root));
     let mut index: usize = first;
     while (index <= last) {
-        if (user_page_writable(address_space_pte_read(root, index))) {
+        // GitHub issue #1147: a shared page is unshared first, so the arena
+        // never holds a page a peer still maps; one that cannot be (no page
+        // for the private copy) stays held, as a read-only page does.
+        if (user_page_writable(address_space_pte_read(root, index)) &&
+            address_space_unshare(root, index)) {
             unified_process_mmap_release_page(
                 process, evidence,
                 USER_TEXT_VA + index * PAGE_SIZE);
         }
         index = index + 1;
     }
+}
+
+// GitHub issue #1147: getrusage(2). This kernel accounts no CPU time,
+// faults, I/O or context switches per process, so every field of the
+// 144-byte struct rusage is 0, as Linux reports a field it does not keep;
+// `who` is checked as Linux checks it.
+fn syscall_getrusage(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
+                     who: usize, usage: usize) -> usize {
+    // RUSAGE_SELF 0, RUSAGE_THREAD 1, RUSAGE_CHILDREN -1 (an int).
+    let who_word: usize = who & 0xFFFFFFFF;
+    if (who_word != 0 && who_word != 1 && who_word != 0xFFFFFFFF) {
+        return LINUX_EINVAL;
+    }
+    match user_range_check_write(current_authority, usage, 144) {
+        UserWriteRangeResult::Fault => { return LINUX_EFAULT; }
+        UserWriteRangeResult::Ok(range) => {
+            match user_zero_fill(range) {
+                UserWriteResult::Fault => { return LINUX_EFAULT; }
+                UserWriteResult::Written => { return 0; }
+            }
+        }
+    }
+}
+
+// GitHub issue #1147: statfs(2), struct statfs as arm64's generic 64-bit
+// layout (120 bytes). A path on the ext2 root reports that filesystem as
+// Linux's ext2_statfs does; one under /proc reports procfs's magic and
+// block size with no counts, as Linux's simple_statfs.
+const LINUX_EXT2_SUPER_MAGIC: usize = 0xEF53;
+const LINUX_PROC_SUPER_MAGIC: usize = 0x9FA0;
+const LINUX_ST_VALID: usize = 0x20;
+
+fn syscall_statfs(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
+                  path: usize, buffer: usize) -> usize !{unsafe} {
+    let slot: SyscallSlot[0] = syscall_slot_acquire();
+    let answer: usize = syscall_statfs_with(slot, current_authority, path, buffer);
+    syscall_slot_release(slot);
+    return answer;
+}
+
+private fn syscall_statfs_with(slot: borrow SyscallSlot[0],
+        current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
+        path: usize, buffer: usize) -> usize !{unsafe} {
+    let mount: Ext2Mount = match syscall_filesystem_lookup() {
+        SyscallFilesystemReady::Unconfigured => { return LINUX_ENOENT; }
+        SyscallFilesystemReady::Configured(found) => { found }
+    };
+    let path_name: []u8 = match kernel_syscall_path_name(slot, current_authority, path) {
+        SyscallPathResult::Fault => { return LINUX_EFAULT; }
+        SyscallPathResult::Invalid => { return LINUX_ENOENT; }
+        SyscallPathResult::Name(name) => { name }
+    };
+    let mut procfs: bool = false;
+    match procfs_lookup(path_name) {
+        ProcfsLookupResult::Missing => {
+            match ext2_lookup_path_from(mount, 2, path_name) {
+                Ext2LookupResult::Invalid => { return LINUX_EIO; }
+                Ext2LookupResult::NotFound => { return LINUX_ENOENT; }
+                Ext2LookupResult::Found(found) => { }
+            }
+        }
+        ProcfsLookupResult::Found(node) => { procfs = true; }
+    }
+    let mut counts: Ext2Statfs = { 0, 0, 0, 0, 0, 0 };
+    if (procfs == false) {
+        match ext2_statfs(mount) {
+            Ext2StatfsResult::Invalid => { return LINUX_EIO; }
+            Ext2StatfsResult::Counts(found) => { counts = found; }
+        }
+    }
+    match user_range_check_write(current_authority, buffer, 120) {
+        UserWriteRangeResult::Fault => { return LINUX_EFAULT; }
+        UserWriteRangeResult::Ok(range) => {
+            let mut written = user_zero_fill(range);
+            if (procfs) {
+                written = user_write_join(written, user_write_u64(range, 0, LINUX_PROC_SUPER_MAGIC as u64));
+                written = user_write_join(written, user_write_u64(range, 8, PAGE_SIZE as u64));
+                written = user_write_join(written, user_write_u64(range, 64, 255));
+                written = user_write_join(written, user_write_u64(range, 72, PAGE_SIZE as u64));
+            } else {
+                written = user_write_join(written, user_write_u64(range, 0, LINUX_EXT2_SUPER_MAGIC as u64));
+                written = user_write_join(written, user_write_u64(range, 8, KERNEL_BLOCK_SIZE as u64));
+                written = user_write_join(written, user_write_u64(range, 16, counts.blocks as u64));
+                written = user_write_join(written, user_write_u64(range, 24, counts.free_blocks as u64));
+                written = user_write_join(written, user_write_u64(range, 32, counts.available_blocks as u64));
+                written = user_write_join(written, user_write_u64(range, 40, counts.inodes as u64));
+                written = user_write_join(written, user_write_u64(range, 48, counts.free_inodes as u64));
+                written = user_write_join(written, user_write_u64(range, 56, counts.fsid as u64));
+                written = user_write_join(written, user_write_u64(range, 64, 255));
+                written = user_write_join(written, user_write_u64(range, 72, KERNEL_BLOCK_SIZE as u64));
+            }
+            written = user_write_join(written, user_write_u64(range, 80, LINUX_ST_VALID as u64));
+            match written {
+                UserWriteResult::Fault => { return LINUX_EFAULT; }
+                UserWriteResult::Written => { return 0; }
+            }
+        }
+    }
+}
+
+// GitHub issue #1147: a create call's `mode` as the new inode gets it, the
+// bits `keep` names less the caller's umask.
+fn syscall_umasked(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
+                   mode: usize, keep: usize) -> usize {
+    return mode & keep & ~kernel_process_current_umask(current_authority);
+}
+
+// GitHub issue #1147: mark every page of a fresh MAP_SHARED mapping.
+fn syscall_mmap_mark_shared(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], address: usize, length: usize) -> bool {
+    let (span_ok, first, last) = user_range_l3_span(address, length);
+    if (span_ok == false) { return false; }
+    let mut root: AddressSpaceRoot = kernel_process_current_root(current_authority);
+    let mut index: usize = first;
+    while (index <= last) {
+        if (address_space_mark_shared(root, index) == false) { return false; }
+        index = index + 1;
+    }
+    return true;
 }
 
 fn kernel_syscall_heap_start() -> usize {
@@ -4705,19 +4837,19 @@ private fn syscall_ext2_write_locked(fd: usize, content: []u8) -> usize {
 // core before the mutation it gates -- the atomicity core 0's
 // non-preemptible dispatch used to give for free.
 private fn syscall_mkdirat_under(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], guard: borrow Ext2MutationGuard[ext2_mutation_lock],
-        x0: usize, x1: usize) -> usize !{unsafe} {
+        x0: usize, x1: usize, permissions: usize) -> usize !{unsafe} {
     let slot: SyscallSlot[0] = syscall_slot_acquire();
-    let result: usize = syscall_mkdirat_under_with(slot, current_authority, guard, x0, x1);
+    let result: usize = syscall_mkdirat_under_with(slot, current_authority, guard, x0, x1, permissions);
     syscall_slot_release(slot);
     return result;
 }
 
 private fn syscall_mkdirat_under_with(slot: borrow SyscallSlot[0],
         current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], guard: borrow Ext2MutationGuard[ext2_mutation_lock],
-        x0: usize, x1: usize) -> usize !{unsafe} {
-    // mkdirat(dirfd, pathname, mode), GitHub issue #538. The mode is not
-    // applied: every directory is 0755 and every process is root, which
-    // is the whole of this kernel's permission model today.
+        x0: usize, x1: usize, permissions: usize) -> usize !{unsafe} {
+    // mkdirat(dirfd, pathname, mode), GitHub issue #538. `permissions` is
+    // the mode with the umask applied (GitHub issue #1147); every process
+    // is root, so nothing else in this kernel reads it.
     let mount: Ext2Mount = match syscall_filesystem_lookup() {
         SyscallFilesystemReady::Unconfigured => { return LINUX_EBADF; }
         SyscallFilesystemReady::Configured(found) => { found }
@@ -4743,7 +4875,7 @@ private fn syscall_mkdirat_under_with(slot: borrow SyscallSlot[0],
         return LINUX_EEXIST;
     }
     return
-        ext2_syscall_mkdir(mount, guard, parent.inode, leaf);
+        ext2_syscall_mkdir(mount, guard, parent.inode, leaf, permissions);
 }
 
 // GitHub issue #597: unlinkat's whole arm, lookup included, under the
@@ -6577,10 +6709,10 @@ private fn syscall_openat_with(slot: borrow SyscallSlot[0],
 // directory is EISDIR.
 private fn syscall_openat_create_under(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
         guard: borrow Ext2MutationGuard[ext2_mutation_lock],
-        x0: usize, x1: usize, x2: usize) -> SyscallAction !{unsafe} {
+        x0: usize, x1: usize, x2: usize, permissions: usize) -> SyscallAction !{unsafe} {
     let slot: SyscallSlot[0] = syscall_slot_acquire();
     let action: SyscallAction = syscall_openat_create_under_with(slot,
-            current_authority, guard, x0, x1, x2);
+            current_authority, guard, x0, x1, x2, permissions);
     syscall_slot_release(slot);
     return action;
 }
@@ -6588,7 +6720,7 @@ private fn syscall_openat_create_under(current_authority: borrow ProcessCurrent[
 private fn syscall_openat_create_under_with(slot: borrow SyscallSlot[0],
         current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
         guard: borrow Ext2MutationGuard[ext2_mutation_lock],
-        x0: usize, x1: usize, x2: usize) -> SyscallAction !{unsafe} {
+        x0: usize, x1: usize, x2: usize, permissions: usize) -> SyscallAction !{unsafe} {
     let create: bool = (x2 & LINUX_O_CREAT) != 0;
     let exclusive: bool = create && (x2 & LINUX_O_EXCL) != 0;
     let truncate: bool = (x2 & LINUX_O_TRUNC) != 0;
@@ -6629,7 +6761,7 @@ private fn syscall_openat_create_under_with(slot: borrow SyscallSlot[0],
         return SyscallAction::Resume(LINUX_EISDIR);
     }
     match ext2_syscall_open_leaf(mount, guard, parent.inode, leaf,
-                                 create, exclusive, truncate) {
+                                 create, exclusive, truncate, permissions) {
         Ext2SyscallOpenResult::Errno(errno) => {
             return SyscallAction::Resume(errno);
         }
@@ -7395,7 +7527,8 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     if (number == 56 && (x2 & LINUX_O_MUTATING) != 0) {
         let guard = ext2_mutation_take();
         let action: SyscallAction =
-            syscall_openat_create_under(current_authority, guard, x0, x1, x2);
+            syscall_openat_create_under(current_authority, guard, x0, x1, x2,
+                syscall_umasked(current_authority, x3, 0xFFF));
         ext2_mutation_give(guard);
         return syscall_finish_current(frame, action, current_authority);
     }
@@ -7406,7 +7539,9 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
 
     if (number == 34) {
         let guard = ext2_mutation_take();
-        let answer: usize = syscall_mkdirat_under(current_authority, guard, x0, x1);
+        // Linux's vfs_mkdir keeps the permission bits and S_ISVTX.
+        let answer: usize = syscall_mkdirat_under(current_authority, guard, x0, x1,
+            syscall_umasked(current_authority, x2, 0x3FF));
         ext2_mutation_give(guard);
         if (answer == 0) { workload_peer_mutation_note(1); }
         return syscall_finish_current(frame, SyscallAction::Resume(answer), current_authority);
@@ -7987,6 +8122,23 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         }
         return syscall_finish_current(frame, SyscallAction::Resume(0), current_authority);
     }
+    if (number == AARCH64_NR_UMASK) {
+        // GitHub issue #1147: umask(2) returns the old mask and keeps the
+        // permission bits of the new one.
+        let previous: usize = kernel_process_current_umask(current_authority);
+        kernel_process_current_set_umask(current_authority, x0);
+        return syscall_finish_current(frame, SyscallAction::Resume(previous), current_authority);
+    }
+    if (number == AARCH64_NR_GETRUSAGE) {
+        return syscall_finish_current(frame,
+            SyscallAction::Resume(syscall_getrusage(current_authority, x0, x1)),
+            current_authority);
+    }
+    if (number == AARCH64_NR_STATFS) {
+        return syscall_finish_current(frame,
+            SyscallAction::Resume(syscall_statfs(current_authority, x0, x1)),
+            current_authority);
+    }
     if (number == AARCH64_NR_SYSINFO) {
         // Linux aarch64 struct sysinfo. BusyBox ps consumes uptime; keep the
         // rest zero until a concrete consumer needs accounted values.
@@ -8384,14 +8536,23 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         let prot: usize = x2;
         let flags: usize = x3;
         let fd: usize = x4;
-        // This kernel has no file-backed or shared mapping and no
-        // executable anonymous memory (issue #174's W^X story): only a
-        // private anonymous request with fd=-1 and no PROT_EXEC is
-        // supported. mallocng's call shapes (fixed
+        // This kernel has no file-backed mapping and no executable
+        // anonymous memory (issue #174's W^X story): only an anonymous
+        // request with fd=-1 and no PROT_EXEC is supported, MAP_PRIVATE or
+        // (GitHub issue #1147) MAP_SHARED. mallocng's call shapes (fixed
         // MAP_FIXED guard page, PROT_NONE meta-area pool, PROT_READ|WRITE
-        // growth) already satisfies this.
-        if ((flags & 0x22) != 0x22 || fd != 0xFFFFFFFFFFFFFFFF ||
-                (prot & 0x4) != 0) {
+        // growth) already satisfy this.
+        let map_type: usize = flags & LINUX_MAP_TYPE;
+        let shared: bool = map_type == LINUX_MAP_SHARED;
+        if ((flags & LINUX_MAP_ANONYMOUS) == 0 ||
+                (map_type != LINUX_MAP_PRIVATE && shared == false) ||
+                fd != 0xFFFFFFFFFFFFFFFF || (prot & 0x4) != 0) {
+            return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINVAL), current_authority);
+        }
+        // A shared mapping's pages are marked as such, which the fixed
+        // form below never does: it names pages already in the arena.
+        // Linux would replace them; this kernel refuses instead.
+        if (shared && (flags & LINUX_MAP_FIXED) != 0) {
             return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINVAL), current_authority);
         }
         if (length == 0 || length > 0xFFFFFFFFFFFFF000) {
@@ -8402,7 +8563,9 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // guard page. The pages are already present in this prototype's
         // eagerly mapped process arena, so preserve the requested address
         // without consuming space from the independent anonymous-map cursor.
-        if (x0 != 0) {
+        // A hint without MAP_FIXED is only a hint; a shared mapping takes
+        // fresh arena pages wherever they are.
+        if (x0 != 0 && shared == false) {
             if (x0 < kernel_syscall_heap_start() ||
                 x0 > kernel_syscall_heap_limit() ||
                 rounded > kernel_syscall_heap_limit() - x0) {
@@ -8444,6 +8607,13 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                             UserWriteResult::Written => {}
                         }
                     }
+                }
+                // The zero fill resolved any copy-on-write view, so every
+                // page is this root's own and writable to mark.
+                if (shared &&
+                        syscall_mmap_mark_shared(current_authority, address, rounded) == false) {
+                    syscall_munmap_pages(current_authority, address, rounded);
+                    return syscall_finish_current(frame, SyscallAction::Resume(LINUX_ENOMEM), current_authority);
                 }
                 return syscall_finish_current(frame, SyscallAction::Resume(address), current_authority);
             }

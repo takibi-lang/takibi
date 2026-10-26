@@ -4,3 +4,5 @@ userspace ext2 exhaustion: write+mkdir+creat ENOSPC, data+offset unchanged, unli
 userspace SIGCHLD siginfo: CLD_KILLED, CLD_EXITED, pending keeps first, kill SI_USER names first sender ok
 userspace sigaltstack: EINVAL, ENOMEM, EFAULT, SA_ONSTACK runs on it with SS_ONSTACK and EPERM, fork keeps it, SS_DISABLE ok
 userspace sigaltstack SS_AUTODISARM: disarmed in the handler, restored by rt_sigreturn ok
+userspace shared mmap: fork shares MAP_SHARED and copies MAP_PRIVATE, munmap ok; umask keeps 0777 and forks; getrusage and statfs EINVAL, ENOENT, EFAULT ok
+userspace statfs and umask: ext2 0xEF53 and procfs 0x9FA0, umask 077 gives 0600 and 0700 ok

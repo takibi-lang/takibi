@@ -24,6 +24,7 @@ extern fn sigchld_probe_arm(record: usize);
 extern fn sigchld_probe_handler_address() -> usize;
 extern fn sigchld_probe_restorer_address() -> usize;
 extern fn altstack_probe_handler_address() -> usize;
+extern fn shared_probe_mmap(length: usize, prot: usize, flags: usize) -> usize;
 
 const EBADF_RC: usize = 0xFFFFFFFFFFFFFFF7;
 const EFAULT_RC: usize = 0xFFFFFFFFFFFFFFF2;
@@ -995,6 +996,8 @@ fn initial_user_payload() !{unsafe} {
         sigchld_siginfo_probe();
         sigaltstack_probe();
         sigaltstack_autodisarm_probe();
+        shared_mapping_probe();
+        statfs_umask_kernel_probe();
         svc5(93, 0, 0, 0, 0, 0);
     }
 }
@@ -1315,6 +1318,156 @@ fn altstack_probe_expect_run(record_base: *u8, runs: usize, alt_base: usize,
     fail_if((payload_read_u64(record_base, 64) & 0xFFFFFFFF) != flags);
     fail_if(payload_read_u64(record_base, 72) != size);
     fail_if(payload_read_u64(record_base, 24) != change);
+}
+
+/* GitHub issue #1147: MAP_SHARED|MAP_ANONYMOUS stays shared across fork
+ * while MAP_PRIVATE is copied, munmap; umask(2) set and read back;
+ * getrusage(2) and statfs(2) checks and faults. Every answer is Linux's:
+ * `shared_mapping_probe_alone` is the same code as its own static-PIE
+ * entry, which `make linuxcheck` runs under qemu-aarch64 and compares with
+ * this line of the linux_file view. The kernel-only half, which needs the
+ * ext2 root, is statfs_umask_kernel_probe. */
+const MMAP_SYSCALL: usize = 222;
+const MUNMAP_SYSCALL: usize = 215;
+const STATFS_SYSCALL: usize = 43;
+const GETRUSAGE_SYSCALL: usize = 165;
+const UMASK_SYSCALL: usize = 166;
+const PROT_READ_WRITE: usize = 3;
+const MAP_SHARED_ANONYMOUS: usize = 0x21;
+const MAP_PRIVATE_ANONYMOUS: usize = 0x22;
+const SHARED_PROBE_LENGTH: usize = 8192;
+
+fn shared_mapping_probe_alone() !{unsafe} {
+    shared_mapping_probe();
+    svc5(93, 0, 0, 0, 0, 0);
+}
+
+fn shared_mapping_probe() !{unsafe} {
+    // Neither shared nor private is EINVAL.
+    fail_if(shared_probe_mmap(SHARED_PROBE_LENGTH, PROT_READ_WRITE, 0x20) != EINVAL_RC);
+    let shared: usize = shared_probe_mmap(SHARED_PROBE_LENGTH, PROT_READ_WRITE,
+                                          MAP_SHARED_ANONYMOUS);
+    fail_if(shared >= 0xFFFFFFFFFFFFF000 || shared % 4096 != 0);
+    let own: usize = shared_probe_mmap(4096, PROT_READ_WRITE,
+                                           MAP_PRIVATE_ANONYMOUS);
+    fail_if(own >= 0xFFFFFFFFFFFFF000 || own % 4096 != 0);
+    let shared_base: *u8 = unsafe { shared as *u8 };
+    let own_base: *u8 = unsafe { own as *u8 };
+    // Anonymous memory reads as zero.
+    fail_if(payload_read_u64(shared_base, 0) != 0);
+    fail_if(payload_read_u64(shared_base, 4096) != 0);
+    payload_write_u64(shared_base, 0, 0x1147A);
+    payload_write_u64(own_base, 0, 0x1147B);
+    let child: usize = svc5(220, SIGCHLD, 0, 0, 0, 0);
+    if (child == 0) {
+        let mut code: usize = 1;
+        if (payload_read_u64(shared_base, 0) == 0x1147A &&
+            payload_read_u64(own_base, 0) == 0x1147B) {
+            code = 0;
+        }
+        payload_write_u64(shared_base, 0, 0x1147C);
+        payload_write_u64(shared_base, 4096, 0x1147D);
+        payload_write_u64(own_base, 0, 0x1147E);
+        svc5(93, code, 0, 0, 0, 0);
+    }
+    fail_if(child >= 0x8000000000000000);
+    let mut status: [u8; 8];
+    let status_base: *u8 = status as *u8;
+    payload_write_u64(status_base, 0, 0xFF);
+    fail_if(svc5(260, child, ptr_of(status_base, 0), 0, 0, 0) != child);
+    fail_if((payload_read_u64(status_base, 0) & 0xFFFFFFFF) != 0);
+    // The child's stores reached the shared pages and not the private one.
+    fail_if(payload_read_u64(shared_base, 0) != 0x1147C);
+    fail_if(payload_read_u64(shared_base, 4096) != 0x1147D);
+    fail_if(payload_read_u64(own_base, 0) != 0x1147B);
+    fail_if(svc5(MUNMAP_SYSCALL, shared, SHARED_PROBE_LENGTH, 0, 0, 0) != 0);
+    fail_if(svc5(MUNMAP_SYSCALL, own, 4096, 0, 0, 0) != 0);
+    // A new shared mapping reads as zero again, whatever it reuses.
+    let again: usize = shared_probe_mmap(4096, PROT_READ_WRITE, MAP_SHARED_ANONYMOUS);
+    fail_if(again >= 0xFFFFFFFFFFFFF000);
+    fail_if(payload_read_u64(unsafe { again as *u8 }, 0) != 0);
+    fail_if(svc5(MUNMAP_SYSCALL, again, 4096, 0, 0, 0) != 0);
+
+    // umask returns the old mask and keeps only the permission bits.
+    svc5(UMASK_SYSCALL, 0x17, 0, 0, 0, 0);
+    fail_if(svc5(UMASK_SYSCALL, 0xFFF, 0, 0, 0, 0) != 0x17);
+    fail_if(svc5(UMASK_SYSCALL, 0x12, 0, 0, 0, 0) != 0x1FF);
+    // A fork child inherits it.
+    let umask_child: usize = svc5(220, SIGCHLD, 0, 0, 0, 0);
+    if (umask_child == 0) {
+        let mut code: usize = 1;
+        if (svc5(UMASK_SYSCALL, 0x12, 0, 0, 0, 0) == 0x12) { code = 0; }
+        svc5(93, code, 0, 0, 0, 0);
+    }
+    fail_if(umask_child >= 0x8000000000000000);
+    payload_write_u64(status_base, 0, 0xFF);
+    fail_if(svc5(260, umask_child, ptr_of(status_base, 0), 0, 0, 0) != umask_child);
+    fail_if((payload_read_u64(status_base, 0) & 0xFFFFFFFF) != 0);
+
+    let mut usage: [u8; 144];
+    let usage_base: *u8 = usage as *u8;
+    fail_if(svc5(GETRUSAGE_SYSCALL, 0, ptr_of(usage_base, 0), 0, 0, 0) != 0);
+    fail_if(svc5(GETRUSAGE_SYSCALL, 0xFFFFFFFFFFFFFFFF, ptr_of(usage_base, 0), 0, 0, 0) != 0);
+    fail_if(svc5(GETRUSAGE_SYSCALL, 5, ptr_of(usage_base, 0), 0, 0, 0) != EINVAL_RC);
+    fail_if(svc5(GETRUSAGE_SYSCALL, 0, 1, 0, 0, 0) != EFAULT_RC);
+
+    let mut fs: [u8; 120];
+    let fs_base: *u8 = fs as *u8;
+    for index: usize in 0..<120 { fs[index] = 0; }
+    fail_if(svc5(STATFS_SYSCALL, "/" as *u8 as usize, ptr_of(fs_base, 0), 0, 0, 0) != 0);
+    fail_if(payload_read_u64(fs_base, 8) == 0);
+    fail_if(payload_read_u64(fs_base, 24) > payload_read_u64(fs_base, 16));
+    fail_if(payload_read_u64(fs_base, 32) > payload_read_u64(fs_base, 24));
+    fail_if(svc5(STATFS_SYSCALL, "/takibi-1147-absent" as *u8 as usize,
+                 ptr_of(fs_base, 0), 0, 0, 0) != ENOENT_RC);
+    fail_if(svc5(STATFS_SYSCALL, 1, ptr_of(fs_base, 0), 0, 0, 0) != EFAULT_RC);
+    fail_if(svc5(STATFS_SYSCALL, "/" as *u8 as usize, 1, 0, 0, 0) != EFAULT_RC);
+    let message: []const u8 =
+        bs"userspace shared mmap: fork shares MAP_SHARED and copies MAP_PRIVATE, munmap ok; umask keeps 0777 and forks; getrusage and statfs EINVAL, ENOENT, EFAULT ok\n";
+    fail_if(svc5(64, 1, (unsafe { message as *u8 }) as usize,
+                 message.len, 0, 0) != message.len);
+}
+
+// The half that needs this kernel's ext2 root and /proc: statfs reports
+// ext2 (0xEF53, 1 KiB blocks, counts within each other) and procfs
+// (0x9FA0), and openat and mkdirat apply the umask to the new inode's mode,
+// as Linux's vfs_create and vfs_mkdir do.
+fn statfs_umask_kernel_probe() !{unsafe} {
+    let mut fs: [u8; 120];
+    let fs_base: *u8 = fs as *u8;
+    for index: usize in 0..<120 { fs[index] = 0; }
+    fail_if(svc5(STATFS_SYSCALL, "/" as *u8 as usize, ptr_of(fs_base, 0), 0, 0, 0) != 0);
+    fail_if(payload_read_u64(fs_base, 0) != 0xEF53);
+    fail_if(payload_read_u64(fs_base, 8) != 1024);
+    fail_if(payload_read_u64(fs_base, 16) == 0);
+    fail_if(payload_read_u64(fs_base, 24) > payload_read_u64(fs_base, 16));
+    fail_if(payload_read_u64(fs_base, 48) > payload_read_u64(fs_base, 40));
+    fail_if(payload_read_u64(fs_base, 64) != 255);
+    fail_if(payload_read_u64(fs_base, 72) != 1024);
+    fail_if(svc5(STATFS_SYSCALL, "/proc" as *u8 as usize, ptr_of(fs_base, 0), 0, 0, 0) != 0);
+    fail_if(payload_read_u64(fs_base, 0) != 0x9FA0);
+
+    fail_if(svc5(UMASK_SYSCALL, 0x3F, 0, 0, 0, 0) != 0x12);
+    let file: usize = svc5(56, 0xFFFFFFFFFFFFFF9C, "/umask-file" as *u8 as usize,
+                           O_CREAT_EXCL_RDWR, 0x1B6, 0);
+    fail_if(file >= 64);
+    fail_if(svc5(57, file, 0, 0, 0, 0) != 0);
+    fail_if(svc5(34, 0xFFFFFFFFFFFFFF9C, "/umask-dir" as *u8 as usize, 0x1FF, 0, 0) != 0);
+    let mut stat: [u8; 128];
+    let stat_base: *u8 = stat as *u8;
+    fail_if(svc5(79, 0xFFFFFFFFFFFFFF9C, "/umask-file" as *u8 as usize,
+                 ptr_of(stat_base, 0), 0, 0) != 0);
+    fail_if((payload_read_u64(stat_base, 16) & 0xFFFFFFFF) != 0x8180);
+    fail_if(svc5(79, 0xFFFFFFFFFFFFFF9C, "/umask-dir" as *u8 as usize,
+                 ptr_of(stat_base, 0), 0, 0) != 0);
+    fail_if((payload_read_u64(stat_base, 16) & 0xFFFFFFFF) != 0x41C0);
+    fail_if(svc5(35, 0xFFFFFFFFFFFFFF9C, "/umask-file" as *u8 as usize, 0, 0, 0) != 0);
+    fail_if(svc5(35, 0xFFFFFFFFFFFFFF9C, "/umask-dir" as *u8 as usize, 0x200, 0, 0) != 0);
+    fail_if(svc5(UMASK_SYSCALL, 0x12, 0, 0, 0, 0) != 0x3F);
+    let message: []const u8 =
+        bs"userspace statfs and umask: ext2 0xEF53 and procfs 0x9FA0, umask 077 gives 0600 and 0700 ok\n";
+    fail_if(svc5(64, 1, (unsafe { message as *u8 }) as usize,
+                 message.len, 0, 0) != message.len);
 }
 
 // Fork a child that exits with `code`, or kills itself with SIGTERM when

@@ -171,7 +171,7 @@ fn host_open(mount: Ext2Mount, guard: borrow Ext2MutationGuard[ext2_mutation_loc
                 HostSpan::Inside(copy) => { copy }
             };
             match ext2_syscall_open_leaf(mount, guard, parent, target,
-                                         true, false, truncate) {
+                                         true, false, truncate, 0x1A4) {
                 Ext2SyscallOpenResult::Errno(errno) => { return HostOpen::Errno(errno); }
                 Ext2SyscallOpenResult::Opened(inode) => { return HostOpen::Opened(inode); }
             }
@@ -194,7 +194,7 @@ fn host_leaf_op(mount: Ext2Mount, guard: borrow Ext2MutationGuard[ext2_mutation_
                 HostSpan::Outside => { return LINUX_EINVAL; }
                 HostSpan::Inside(copy) => { copy }
             };
-            if (op == 0) { return ext2_syscall_mkdir(mount, guard, parent, target); }
+            if (op == 0) { return ext2_syscall_mkdir(mount, guard, parent, target, 0x1ED); }
             if (op == 1) { return ext2_syscall_rmdir(mount, guard, parent, target); }
             return ext2_syscall_unlink(mount, guard, parent, target);
         }

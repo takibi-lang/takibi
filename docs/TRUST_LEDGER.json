@@ -243,6 +243,31 @@
         "extern_fns": "#1095 kernel_ddb_dcache_clean_invalidate, one caller fixed by buildcheck_allowed_callers",
         "frame_lines": "#1095 rp1_gem.tkb (a raw mint file): the DDB RX look calls the clean+invalidate helper and answers No for a clear ownership bit"
       }
+    },
+    {
+      "date": "2026-10-26",
+      "head": "53c6b8ba",
+      "counts": {
+        "raw_mint_files": 15,
+        "frame_lines": 12900,
+        "device_semantics_files": 4,
+        "raw_deref_plain": 232,
+        "raw_deref_io": 16,
+        "raw_deref_builtin_region": 113,
+        "unsafe_blocks": 152,
+        "extern_fns": 58,
+        "invariant_stop_sites": 113,
+        "assembly_lines": 2434,
+        "per_cpu_ordinary_arrays": 73,
+        "per_cpu_stores": 6,
+        "raw_cpu_id_calls": 157,
+        "frame_api_ratchet": 8
+      },
+      "changes": {
+        "assembly_lines": "#1147 user_payload_asm.S: shared_probe_mmap, a six-argument mmap with x5 zeroed for the EL0 shared-mapping probe (EL0 test code)",
+        "extern_fns": "#1147 shared_probe_mmap, the EL0 probe mmap gate",
+        "unsafe_blocks": "#1147 EL0 probe: the shared/private mapping pointers, the reused mapping read, and two result lines through the raw write ABI (user_payload)"
+      }
     }
   ]
 }

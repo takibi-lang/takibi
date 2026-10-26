@@ -220,7 +220,7 @@ private fn ext2_full_names_absent(mount: Ext2Mount) -> bool {
 
 private fn ext2_full_refuses(mount: Ext2Mount) -> bool {
     let mut refused: bool = true;
-    match ext2_make_directory_in(mount, 2, bs"full-dir") {
+    match ext2_make_directory_in(mount, 2, bs"full-dir", 0x1ED) {
         Ext2MkdirResult::NoSpace => { }
         Ext2MkdirResult::Invalid => { refused = false; }
         Ext2MkdirResult::Created(directory) => {
@@ -249,7 +249,7 @@ private fn ext2_full_refuses(mount: Ext2Mount) -> bool {
 
 private fn ext2_full_control(mount: Ext2Mount) -> bool {
     let mut ok: bool = false;
-    match ext2_make_directory_in(mount, 2, bs"full-dir") {
+    match ext2_make_directory_in(mount, 2, bs"full-dir", 0x1ED) {
         Ext2MkdirResult::NoSpace => { }
         Ext2MkdirResult::Invalid => { }
         Ext2MkdirResult::Created(directory) => {
@@ -991,7 +991,7 @@ private fn ext2_release_lookup(mount: Ext2Mount, name: []const u8) -> usize {
 // A new file of `length` payload bytes, or 0.
 private fn ext2_release_file(mount: Ext2Mount, name: []const u8,
                              length: usize) -> usize {
-    match ext2_create_empty_file_in(mount, 2, name) {
+    match ext2_create_empty_file_in(mount, 2, name, 0x1A4) {
         Ext2CreateEmptyResult::Invalid => { return 0; }
         Ext2CreateEmptyResult::NoSpace => { return 0; }
         Ext2CreateEmptyResult::Created(inode) => {
@@ -1014,7 +1014,7 @@ private fn ext2_release_setup(mount: Ext2Mount, op: usize) -> bool {
         return true;
     }
     if (op == EXT2_RELEASE_OP_MOVE) {
-        match ext2_create_empty_file_in(mount, 2, bs"release.bin") {
+        match ext2_create_empty_file_in(mount, 2, bs"release.bin", 0x1A4) {
             Ext2CreateEmptyResult::Invalid => { return false; }
             Ext2CreateEmptyResult::NoSpace => { return false; }
             Ext2CreateEmptyResult::Created(inode) => {
@@ -1024,7 +1024,7 @@ private fn ext2_release_setup(mount: Ext2Mount, op: usize) -> bool {
         }
     }
     if (op == EXT2_RELEASE_OP_RMDIR) {
-        match ext2_make_directory_in(mount, 2, bs"release.dir") {
+        match ext2_make_directory_in(mount, 2, bs"release.dir", 0x1ED) {
             Ext2MkdirResult::NoSpace => { return false; }
             Ext2MkdirResult::Invalid => { return false; }
             Ext2MkdirResult::Created(directory) => {
@@ -1084,14 +1084,14 @@ private fn ext2_release_run(mount: Ext2Mount, op: usize) -> bool {
         }
     }
     if (op == EXT2_RELEASE_OP_CREATE) {
-        match ext2_create_empty_file_in(mount, 2, bs"release.new") {
+        match ext2_create_empty_file_in(mount, 2, bs"release.new", 0x1A4) {
             Ext2CreateEmptyResult::Invalid => { return false; }
             Ext2CreateEmptyResult::NoSpace => { return false; }
             Ext2CreateEmptyResult::Created(inode) => { return true; }
         }
     }
     if (op == EXT2_RELEASE_OP_MKDIR) {
-        match ext2_make_directory_in(mount, 2, bs"release.dir") {
+        match ext2_make_directory_in(mount, 2, bs"release.dir", 0x1ED) {
             Ext2MkdirResult::NoSpace => { return false; }
             Ext2MkdirResult::Invalid => { return false; }
             Ext2MkdirResult::Created(directory) => {

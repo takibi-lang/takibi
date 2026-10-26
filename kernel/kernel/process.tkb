@@ -388,6 +388,11 @@ struct ProcessRecord {
     // sigaltstack, its signal delivery and rt_sigreturn) and copied into a
     // fork child while that child is still Constructing, so no lock.
     signal_altstack: SignalAltStack;
+    // GitHub issue #1147: umask(2)'s mask, stored XORed with Linux's
+    // initial 0022 so a zeroed record (process_pool_alloc_held) reads as
+    // that. Read and written only by the process itself and copied into a
+    // fork child while it is Constructing, so no lock; execve keeps it.
+    umask_from_default: usize;
     // rt_sigsuspend's mask swap, as Linux's saved_sigmask: the mask the
     // caller had, put back into the signal frame (and so restored by
     // rt_sigreturn) or restored directly when nothing is delivered.
@@ -2617,6 +2622,10 @@ private fn scheduled_process_copy_signal_mask(parent: borrow ProcessCurrent[p, P
     let mut altstack: SignalAltStack =
         scheduled_process_record_current(parent).signal_altstack;
     scheduled_process_record_owned(child).signal_altstack = altstack;
+    // Linux: fork keeps the umask.
+    let umask_word: usize =
+        scheduled_process_record_current(parent).umask_from_default;
+    scheduled_process_record_owned(child).umask_from_default = umask_word;
 }
 
 // Linux: a child inherits its parent's affinity mask across fork, and
@@ -3169,6 +3178,7 @@ private fn scheduled_process_record_reset(guard: borrow ProcessRunGuard[lock],
     }
     let mut no_altstack: SignalAltStack = { 0, 0, SIGNAL_SS_DISABLE };
     record.signal_altstack = no_altstack;
+    record.umask_from_default = 0;
     record.sigsuspend_saved_mask = 0;
     record.sigsuspend_mask_saved = false;
     record.sigwait_suspend = false;
@@ -8440,6 +8450,28 @@ fn kernel_process_current_signal_altstack(
         altstack.flags = altstack.flags | SIGNAL_SS_DISABLE;
     }
     return altstack;
+}
+
+// GitHub issue #1147: the current process's umask, 0022 until it sets one.
+const PROCESS_UMASK_DEFAULT: usize = 0x12;
+
+fn kernel_process_current_umask(
+        current_authority: borrow ProcessCurrent[current_process, ProcessState::Running])
+        -> usize {
+    if (execution_state[execution_cpu_index()].current_live) {
+        return (scheduled_process_record_current(current_authority)
+            .umask_from_default ^ PROCESS_UMASK_DEFAULT) & 0x1FF;
+    }
+    return PROCESS_UMASK_DEFAULT;
+}
+
+fn kernel_process_current_set_umask(
+        current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
+        mask: usize) {
+    if (execution_state[execution_cpu_index()].current_live) {
+        scheduled_process_record_current(current_authority)
+            .umask_from_default = (mask & 0x1FF) ^ PROCESS_UMASK_DEFAULT;
+    }
 }
 
 fn kernel_process_current_set_signal_altstack(

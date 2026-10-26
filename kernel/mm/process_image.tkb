@@ -1110,8 +1110,12 @@ fn process_image_clone_vm_begin(source_space: AddressSpaceRoot,
                     return ProcessCloneVmResult::OutOfMemory;
                 }
             }
+            // GitHub issue #1147: a shared mapping's page stays writable in
+            // both, the same physical page; only private pages go COW.
+            let cow: bool = address_space_pte_is_writable(parent_pte) &&
+                            address_space_pte_is_shared(parent_pte) == false;
             let mut child_pte: usize = parent_pte;
-            if (address_space_pte_is_writable(parent_pte)) {
+            if (cow) {
                 child_pte = address_space_pte_cow_value(parent_pte);
             }
             match address_space_pte_write(dest_space, l3_index, child_pte) {
@@ -1126,7 +1130,7 @@ fn process_image_clone_vm_begin(source_space: AddressSpaceRoot,
                     return ProcessCloneVmResult::OutOfMemory;
                 }
                 AddressSpacePteWriteResult::Written => {
-                    if (address_space_pte_is_writable(parent_pte)) {
+                    if (cow) {
                         match address_space_pte_write(
                                 source_space, l3_index,
                                 address_space_pte_cow_value(parent_pte)) {

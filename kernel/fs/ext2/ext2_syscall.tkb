@@ -65,6 +65,9 @@ fn ext2_syscall_write_at(mount: Ext2Mount,
         ext2_write_regular_file_range(mount, inode, offset, content));
 }
 
+// `permissions`, here and in ext2_syscall_mkdir, is the new inode's
+// permission bits: the call's mode with the caller's umask applied (GitHub
+// issue #1147).
 // openat(2)'s filesystem part for a name LEAF in directory PARENT that is
 // not a directory name: find it, truncate it (O_TRUNC on a regular file), or
 // create it (O_CREAT). Opened carries the inode the caller installs.
@@ -73,7 +76,7 @@ must_use variant Ext2SyscallOpenResult { Errno(usize); Opened(usize); }
 fn ext2_syscall_open_leaf(mount: Ext2Mount,
         guard: borrow Ext2MutationGuard[ext2_mutation_lock],
         parent_inode: usize, leaf: borrow []u8,
-        create: bool, exclusive: bool, truncate: bool)
+        create: bool, exclusive: bool, truncate: bool, permissions: usize)
         -> Ext2SyscallOpenResult !{unsafe} {
     match ext2_lookup_directory(mount, parent_inode, leaf) {
         Ext2LookupResult::Invalid => { return Ext2SyscallOpenResult::Errno(LINUX_EIO); }
@@ -97,7 +100,7 @@ fn ext2_syscall_open_leaf(mount: Ext2Mount,
             if (create == false) { return Ext2SyscallOpenResult::Errno(LINUX_ENOENT); }
         }
     }
-    match ext2_create_empty_file_in(mount, parent_inode, leaf) {
+    match ext2_create_empty_file_in(mount, parent_inode, leaf, permissions) {
         Ext2CreateEmptyResult::Invalid => { return Ext2SyscallOpenResult::Errno(LINUX_EIO); }
         Ext2CreateEmptyResult::NoSpace => {
             return Ext2SyscallOpenResult::Errno(LINUX_ENOSPC);
@@ -110,7 +113,8 @@ fn ext2_syscall_open_leaf(mount: Ext2Mount,
 
 fn ext2_syscall_mkdir(mount: Ext2Mount,
         guard: borrow Ext2MutationGuard[ext2_mutation_lock],
-        parent_inode: usize, leaf: borrow []u8) -> usize !{unsafe} {
+        parent_inode: usize, leaf: borrow []u8, permissions: usize)
+        -> usize !{unsafe} {
     let mut answer: usize = 0;
     match ext2_lookup_directory(mount, parent_inode, leaf) {
         Ext2LookupResult::Found(existing) => { answer = LINUX_EEXIST; }
@@ -120,7 +124,7 @@ fn ext2_syscall_mkdir(mount: Ext2Mount,
     if (answer == 0) {
         // The directory stays, so its owner ends here: the tree names it
         // from now on, and a later rmdir claims it back from the tree.
-        match ext2_make_directory_in(mount, parent_inode, leaf) {
+        match ext2_make_directory_in(mount, parent_inode, leaf, permissions) {
             Ext2MkdirResult::Invalid => { answer = LINUX_EIO; }
             Ext2MkdirResult::NoSpace => { answer = LINUX_ENOSPC; }
             Ext2MkdirResult::Created(directory) => {
