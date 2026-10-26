@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """Negative controls for check_frame_api.py (GitHub issue #1018)."""
 
-from check_frame_api import RATCHET, load, problems
+from check_frame_api import RATCHET, load, mint_files, problems
 from pass_line import report_pass
 
-PATH = "kernel/drivers/block/memory.tkb"
+# The control file is taken from the mint list rather than named: a fixed
+# name broke this control when that file left the list (#637, 2026-10-26).
+SHRUNK = "kernel/drivers/net/rp1_gem.tkb"
 
 
 def main():
     sources, mint_text = load()
+    PATH = next(path for path in mint_files(mint_text) if path != SHRUNK)
     assert not problems(sources, mint_text)[0], "production passes"
     original = sources[PATH]
     planted = {
@@ -33,7 +36,7 @@ def main():
     stale = {**RATCHET, (PATH, "block_gone_address"): ("#637", "control")}
     assert problems(sources, mint_text, stale)[0], "stale entry"
     # A file that leaves the mint list takes its entries' staleness with it.
-    shrunk = mint_text.replace("kernel/drivers/net/rp1_gem.tkb\n", "")
+    shrunk = mint_text.replace(SHRUNK + "\n", "")
     assert shrunk != mint_text
     assert problems(sources, shrunk)[0], "entry for an unlisted file"
     # A mint file that is listed but absent is refused, not skipped.
