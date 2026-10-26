@@ -427,9 +427,12 @@ condition below applies, and reports the land afterwards.
   .S helper (dc civac; dsb) called through extern, restricted to DDB by a
   build check like the MPIDR read; no compiler builtin. Ask again if the
   work grows large. [active] #1095
-- 2026-10-25 #1096: add the effect exec args needs (a spin that interrupts
-  must not reach, apart from may_block). Effects with a clear need are added
-  now, before the effect system is reviewed as a whole. [active] #1096
+- 2026-10-25 #1096 new effect [superseded 2026-10-26 by the next line].
+- 2026-10-26 #1096 adds no effect: #1080 removed exec_args_store, its only
+  adopter. #1096 is rescoped to the generator emitting TaskMutex for
+  dma_owner slots (with a negative compiler test) and to the spare stack
+  (moved out from under the run lock, or recorded as staying masked). A spin
+  effect waits for the effect review (#789, #1135). [active] #1096 #789
 - 2026-10-25 #1021/#1100 option (b): /pad stays #742's MiB rounding; the
   comparing lane's runner plants a dedicated doubly-indirect fixture on its
   own disk copy with debugfs. [active] #1021 #1100
