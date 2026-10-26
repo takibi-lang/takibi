@@ -438,3 +438,7 @@ condition below applies, and reports the land afterwards.
   declaration (explicit at the declaration, not implicit in the builtin);
   the declaration also fixes its rank band (#966). Per-function may_block
   annotations for those acquires go away. [active] #1072 #966
+- 2026-10-26 QEMU lanes from a worktree do not run while a land's allcheck
+  runs: host CPU contention inflates busy lane-seconds and trips silence
+  watchdogs. Until #1145 makes the lanes wait on the land's lease, the
+  coordinator holds workers' QEMU runs during a land. [active] #1145
