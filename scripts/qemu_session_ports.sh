@@ -61,9 +61,17 @@ qemu_session_registry_dir() {
 }
 
 # Claim this session's block, or report the one it already holds.
+#
+# $2 and $3, when given, are this container's base name and the names of the
+# linked worktrees that exist right now. A row "<base>-wt-<name>" whose
+# worktree is gone is dropped here: a worktree removed without
+# qemu_session_release_block (an agent's isolated worktree cleaned up by its
+# harness, a `git worktree remove` by hand) otherwise kept its block for
+# good, and the registry filled until every lane failed with "all blocks are
+# claimed" (2026-10-26). Rows of other containers are never touched.
 qemu_session_claim_block() {
-    local session="$1"
-    local dir registry lock tmp block line used
+    local session="$1" base="${2-}" live="${3-}"
+    local dir registry lock tmp block line used name kept pruned
 
     dir="$(qemu_session_registry_dir)"
     registry="$dir/blocks"
@@ -78,6 +86,9 @@ qemu_session_claim_block() {
         [ -e "$registry" ] || : >"$registry"
 
         used=""
+        kept=""
+        pruned=0
+        block=""
         while IFS= read -r line; do
             [ -n "$line" ] || continue
             case "$line" in
@@ -88,12 +99,34 @@ qemu_session_claim_block() {
                     exit 1
                     ;;
             esac
-            if [ "${line#* }" = "$session" ]; then
-                printf '%s\n' "${line%% *}"
-                exit 0
+            name="${line#* }"
+            if [ -n "$base" ] && [ "$name" != "$session" ]; then
+                case "$name" in
+                    "$base-wt-"*)
+                        case " $live " in
+                            *" ${name#"$base-wt-"} "*) ;;
+                            *) pruned=1; continue ;;
+                        esac
+                        ;;
+                esac
+            fi
+            kept="$kept$line
+"
+            if [ "$name" = "$session" ]; then
+                block="${line%% *}"
             fi
             used="$used ${line%% *}"
         done <"$registry"
+
+        if [ "$pruned" -eq 1 ]; then
+            tmp="$registry.tmp.$$"
+            printf '%s' "$kept" >"$tmp"
+            mv "$tmp" "$registry"
+        fi
+        if [ -n "$block" ]; then
+            printf '%s\n' "$block"
+            exit 0
+        fi
 
         block=0
         while [ "$block" -lt "$QEMU_SESSION_PORT_BLOCKS" ]; do
@@ -135,6 +168,21 @@ qemu_session_name() {
         base="$base-wt-$(basename "$root" | tr -c 'A-Za-z0-9._\n-' '_')"
     fi
     printf '%s\n' "$base"
+}
+
+# The names, as qemu_session_name spells them, of this repository's linked
+# worktrees that exist now. Empty outside a git checkout, which prunes
+# nothing: a row is dropped only when this repository can say it is gone.
+qemu_session_live_worktrees() {
+    local root path
+    root="${QEMU_SESSION_REPO_ROOT:-$(dirname "${BASH_SOURCE[0]}")/..}"
+    git -C "$root" rev-parse --git-dir >/dev/null 2>&1 || return 0
+    git -C "$root" worktree list --porcelain 2>/dev/null |
+        sed -n 's/^worktree //p' |
+        while IFS= read -r path; do
+            [ -d "$path" ] || continue
+            basename "$path" | tr -c 'A-Za-z0-9._\n-' '_'
+        done | tr '\n' ' '
 }
 
 # Release a session's block, for the coordinator after it removes a worktree
@@ -184,7 +232,8 @@ qemu_session_port_offset() {
             ;;
     esac
 
-    block="$(qemu_session_claim_block "$session")" || return 1
+    block="$(qemu_session_claim_block "$session" "${TAKIBI_SESSION:-}" \
+        "$(qemu_session_live_worktrees)")" || return 1
     printf '%s\n' "$((block * QEMU_SESSION_PORT_STRIDE))"
 }
 

@@ -78,6 +78,21 @@ env TAKIBI_SESSION_REGISTRY="$worktrees" \
 grep -qx "[0-9]* box" "$worktrees/blocks" && ! grep -q "wt-linked" "$worktrees/blocks" \
     && claim || fail "releasing a worktree's block did not remove exactly its row"
 
+# A worktree removed without a release keeps no block: the next claim from
+# this container drops rows of its own worktrees that no longer exist, and
+# leaves live worktrees and other containers alone (2026-10-26: eleven stale
+# worktree rows filled the registry and every lane failed).
+stale="$tmp_dir/stale"
+mkdir -p "$stale"
+printf '0 box-wt-gone-1\n1 box-wt-wt-linked\n2 other-wt-gone-2\n3 box-wt-gone-3\n' \
+    >"$stale/blocks"
+stale_offset="$(QEMU_SESSION_REPO_ROOT="$tmp_dir/wt-main" offset_for "$stale" box)"
+! grep -q "gone-1\|gone-3" "$stale/blocks" \
+    && grep -qx "1 box-wt-wt-linked" "$stale/blocks" \
+    && grep -qx "2 other-wt-gone-2" "$stale/blocks" \
+    && [ "$stale_offset" = 0 ] \
+    && claim || fail "a claim did not drop exactly this container's vanished worktrees ($(tr '\n' ';' <"$stale/blocks"))"
+
 # Concurrent claims are serialised: every session gets a block of its own.
 concurrent="$tmp_dir/concurrent"
 mkdir -p "$concurrent"
