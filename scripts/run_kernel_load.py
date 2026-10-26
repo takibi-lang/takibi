@@ -54,9 +54,9 @@ PHASES = ("xargs", "fork", "exec", "pipe", "hackbench")
 # Since #1041 stress-ng's 8 MiB image execs (`stress-ng --version` runs);
 # every stressor then fails its setup on sigaltstack, which is ENOSYS here.
 PHASE_WAITS = {
-    "fork": "sigaltstack (nr 132, ENOSYS: stress-ng's stressor setup)",
-    "exec": "sigaltstack (nr 132, ENOSYS: stress-ng's stressor setup)",
-    "pipe": "sigaltstack (nr 132, ENOSYS: stress-ng's stressor setup)",
+    "fork": "#1138 (sigaltstack, nr 132, ENOSYS at stress-ng's stressor setup)",
+    "exec": "#1138 (sigaltstack, nr 132, ENOSYS at stress-ng's stressor setup)",
+    "pipe": "#1138 (sigaltstack, nr 132, ENOSYS at stress-ng's stressor setup)",
 }
 
 
