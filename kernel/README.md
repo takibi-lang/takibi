@@ -450,7 +450,11 @@ The existing TCP UART/miniterm data path is unchanged. The kernel prints
 <!-- DDB-COMMAND-INVENTORY-END -->
 `wait` derives who is waiting for what from that same snapshot: a blocked
 parent names the child it can collect, and a UART, network, deadline or signal
-wait is shown as an event node rather than as a guessed producer. Use
+wait is shown as an event node rather than as a guessed producer. A network
+wait carries `frame-pending=yes|no`, read lock-free from the NIC's RX ring:
+virtio-net compares the used index with the driver's shadow, and GEM cleans
+and invalidates the descriptor line (`dc civac`) before reading its
+ownership bit, so neither answers `unknown` once a buffer is posted. Use
 `continue` to return through the saved exception frame. The debugger writes
 every byte by spinning on the UART FIFO -- it is entered with interrupts
 masked, so it has nothing to drain a transmit queue with -- and `continue`
