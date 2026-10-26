@@ -18,6 +18,13 @@
  * child Blocked in the wait and end it. A kernel that kept the pause Running
  * in an EL1 wait never says it blocked, and the parent waits for a byte
  * nobody sends.
+ *
+ * GitHub issue #1153: then a timed ppoll on a pipe that receives a byte
+ * while the ppoll sleeps. The child sleeps 50 ms and writes; the parent's
+ * ppoll has a 300 ms timeout. At expiry the kernel has to look at the pipe
+ * again and report it readable. A kernel that completed the timeout with 0
+ * regardless made BusyBox's line editor lose the ESC of a terminal's
+ * cursor report and hand the rest to the shell as typed text.
  */
 
 const READ_SYSCALL: usize = 63;
@@ -25,6 +32,9 @@ const WRITE_SYSCALL: usize = 64;
 const PPOLL_SYSCALL: usize = 73;
 const EXIT_SYSCALL: usize = 93;
 const CLONE_SYSCALL: usize = 220;
+const CLOSE_SYSCALL: usize = 57;
+const PIPE2_SYSCALL: usize = 59;
+const NANOSLEEP_SYSCALL: usize = 101;
 const WAIT4_SYSCALL: usize = 260;
 const KILL_SYSCALL: usize = 129;
 const SIGTERM: usize = 15;
@@ -91,6 +101,55 @@ private fn ppoll_probe_pause() {
     svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
 }
 
+private fn ppoll_probe_timed() {
+    let mut fds: [u8; 8];
+    for index: usize in 0..<8 { fds[index] = 0; }
+    if (svc5(PIPE2_SYSCALL, fds as *u8 as usize, 0, 0, 0, 0) != 0) {
+        ppoll_probe_say(bs"ppoll-probe: timed pipe2 failed\n");
+        svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
+    }
+    let read_fd: usize = fds[0] as usize;
+    let write_fd: usize = fds[4] as usize;
+    let child: usize = svc5(CLONE_SYSCALL, CLONE_FORK_SIGCHLD, 0, 0, 0, 0);
+    if (child == 0) {
+        // struct timespec {0 s, 50000000 ns}, little-endian.
+        let mut nap: [u8; 16];
+        for index: usize in 0..<16 { nap[index] = 0; }
+        nap[8] = 0x80; nap[9] = 0xF0; nap[10] = 0xFA; nap[11] = 0x02;
+        svc5(NANOSLEEP_SYSCALL, nap as *u8 as usize, 0, 0, 0, 0);
+        let mut byte: [u8; 1];
+        byte[0] = 0x61;
+        svc5(WRITE_SYSCALL, write_fd, byte as *u8 as usize, 1, 0, 0);
+        svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
+    }
+    if (child >= PPOLL_PROBE_ERROR_FLOOR) {
+        ppoll_probe_say(bs"ppoll-probe: timed fork failed\n");
+        svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
+    }
+    svc5(CLOSE_SYSCALL, write_fd, 0, 0, 0, 0);
+    let mut pollfd: [u8; 8];
+    for index: usize in 0..<8 { pollfd[index] = 0; }
+    pollfd[0] = read_fd as u8;
+    pollfd[4] = POLLIN;
+    // struct timespec {0 s, 300000000 ns}, little-endian.
+    let mut timeout: [u8; 16];
+    for index: usize in 0..<16 { timeout[index] = 0; }
+    timeout[9] = 0xA3; timeout[10] = 0xE1; timeout[11] = 0x11;
+    let ready: usize = svc5(PPOLL_SYSCALL, pollfd as *u8 as usize, 1,
+                            timeout as *u8 as usize, 0, 0);
+    let mut status: [u8; 4];
+    for index: usize in 0..<4 { status[index] = 0; }
+    svc5(WAIT4_SYSCALL, child, status as *u8 as usize, 0, 0, 0);
+    if (ready == 1 && (pollfd[6] & POLLIN) != 0) {
+        ppoll_probe_say(
+            bs"ppoll-probe: a byte written during a timed ppoll was reported\n");
+        return;
+    }
+    ppoll_probe_say(
+        bs"ppoll-probe: a timed ppoll reported 0 with a byte in its pipe\n");
+    svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
+}
+
 fn ppoll_probe() {
     let child: usize = svc5(CLONE_SYSCALL, CLONE_FORK_SIGCHLD, 0, 0, 0, 0);
     if (child == 0) { ppoll_probe_child(); }
@@ -121,6 +180,7 @@ fn ppoll_probe() {
     if (reaped == child && status[0] == 0 && status[1] == 0) {
         ppoll_probe_say(
             bs"ppoll-probe: fd 0 became readable and the child read its byte\n");
+        ppoll_probe_timed();
         ppoll_probe_pause();
     }
     ppoll_probe_say(bs"ppoll-probe: the child's ppoll or read failed\n");

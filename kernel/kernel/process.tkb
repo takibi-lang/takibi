@@ -8069,6 +8069,20 @@ fn kernel_process_current_arm_deadline(current_authority: borrow ProcessCurrent[
     }
 }
 
+// A deadline whose expiry reruns the syscall instead of completing it with
+// a result. ppoll arms its timeout this way: what was ready when the time
+// ran out is the answer (#1153), not a blind 0, and the rerun meets the
+// expired deadline through the pending Deadline reason, as a rerun after a
+// caught signal does.
+const PROCESS_DEADLINE_RERUN: usize = 0xFFFFFFFFFFFFFFFF;
+
+fn kernel_process_current_deadline_rerun(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running]) {
+    if (execution_state[execution_cpu_index()].current_live) {
+        scheduled_process_record_current(current_authority)
+            .deadline_result = PROCESS_DEADLINE_RERUN;
+    }
+}
+
 fn kernel_process_current_deadline_ticks(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running]) -> usize {
     if (execution_state[execution_cpu_index()].current_live) {
         return scheduled_process_record_current(current_authority)
@@ -9199,7 +9213,13 @@ private fn kernel_process_tick_wake_one(
         ScheduledProcessBlockedTakeResult::Missing => {}
         ScheduledProcessBlockedTakeResult::Blocked(resources) => {
             let (owner, blocked) = resources;
-            if (reason != ProcessWaitReason::NetRx) {
+            let rerun: bool = reason == ProcessWaitReason::Deadline &&
+                scheduled_process_record_locked(guard, process_slot_of(owner.pool_index))
+                    .deadline_result == PROCESS_DEADLINE_RERUN;
+            if (rerun) {
+                let parked = scheduled_process_saved_frame(owner);
+                el0_context_retry_syscall(parked);
+            } else if (reason != ProcessWaitReason::NetRx) {
                 let parked = scheduled_process_saved_frame(owner);
                 el0_context_set_x0(
                     parked,
@@ -9221,7 +9241,14 @@ private fn kernel_process_tick_wake_one(
                 }
             }
             let ready = scheduled_process_wake(guard, owner, blocked);
-            if (reason != ProcessWaitReason::NetRx) {
+            if (rerun) {
+                // The rerun finds the deadline expired (its ticks kept) and
+                // answers from what is ready then.
+                scheduled_process_record_locked(guard, process_slot_of(owner.pool_index))
+                    .pending_block_reason = ProcessWaitReason::Deadline;
+                scheduled_process_record_locked(guard, process_slot_of(owner.pool_index))
+                    .deadline_result = 0;
+            } else if (reason != ProcessWaitReason::NetRx) {
                 scheduled_process_record_locked(guard, process_slot_of(owner.pool_index))
                     .deadline_ticks = 0;
                 scheduled_process_record_locked(guard, process_slot_of(owner.pool_index))

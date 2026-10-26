@@ -3689,6 +3689,17 @@ fn syscall_ppoll_dispatch(current_authority: borrow ProcessCurrent[current_proce
                     pipe_wait_events = events_raw as usize;
                 }
             }
+            // GitHub issue #1153: a timed ppoll is rerun with its Deadline
+            // wait still pending -- after expiry, and after a caught signal
+            // -- and syscall_deadline_wait clears it only on its own Ready
+            // path. A rerun that finds an fd ready clears it here, or the
+            // next timed ppoll would take the stale expired deadline as its
+            // own and return 0 at once.
+            if (ready_count != 0 && timeout_address != 0 &&
+                kernel_process_current_pending_block_reason(current_authority) ==
+                    ProcessWaitReason::Deadline) {
+                kernel_process_current_clear_deadline(current_authority);
+            }
             if (ready_count == 0 && pipe_wait && timeout_address == 0 &&
                 sigmask_address == 0) {
                 return syscall_pipe_poll_wait(current_authority, pipe_wait_fd,
@@ -3742,6 +3753,10 @@ fn syscall_ppoll_dispatch(current_authority: borrow ProcessCurrent[current_proce
                         return SyscallAction::Resume(0);
                     }
                     SyscallDeadlineResult::Block => {
+                        // At expiry the tick reruns this ppoll rather than
+                        // returning 0: a byte that arrived while it slept is
+                        // reported, as Linux reports it (#1153).
+                        kernel_process_current_deadline_rerun(current_authority);
                         return SyscallAction::Block;
                     }
                 }
