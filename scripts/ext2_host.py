@@ -42,23 +42,23 @@ Modes:
                     seeded corruptions of a populated image, each mounted
                     and walked: every read ends, nothing stops the program
   control           a planted rollback bug (one staged block not freed) must
-                    fail the campaign
+                    fail the campaign or, failing that, the fault run
   self-test         the parsers and the oracle, without the program
 
 The default sizes are the linuxcheck member's; the long campaign is
 `make ext2-host-long`.
 
 Divergences the generator does not produce, each an open issue with its
-tier-B row or a note there: #1019 (write at offset 0 replaces the file;
-generated only on an empty one), #1020 (unlink or rename over a
-file with an indirect block; generated only for files under 12 KiB),
-#968 (directories past 12 blocks; names are short), #1021 (doubly indirect
-files; files stay within 268 KiB), #1022 (truncate(2) to a length),
-COPY_ISSUE (every write(2) copies the whole file to newly claimed blocks,
-so it fails with ENOSPC while a file's size in blocks is not free; the
-ENOSPC check accepts that), HOLE_ISSUE (a write past end of file allocates the skipped blocks, where
-Linux leaves a hole: same bytes, more i_blocks; writes start at or before
-end of file; the campaign writes with seekwrite, which never does), and link(2), which the kernel does not implement.
+tier-B row or a note there: #1021 (doubly indirect files; files stay
+within 268 KiB), #1086 (every write(2) copies the whole file to newly
+claimed blocks, so it fails with ENOSPC while a file's size in blocks is
+not free; the ENOSPC check accepts that), #1087 (a write past end of file
+allocates the skipped blocks, where Linux leaves a hole: same bytes, more
+i_blocks; the campaign writes with seekwrite, which never does), #1089 (a
+torn write is outside the recovery model; `faults --torn` shows it), and
+link(2), which the kernel does not implement. A rejected write may fence
+the mount; the fault run then recovers it (ext2_recover, as the boot
+fixture does) and compares the recovered image.
 """
 
 import argparse
@@ -86,17 +86,11 @@ FAKE_TIME = ext2_eq.FAKE_TIME
 ROOT = ext2_eq.ROOT          # every operation is under /eq
 WRITE_CHUNK = 1024           # the kernel's write(2) limit (syscall.tkb)
 MAX_FILE = (12 + 256) * 1024  # single indirect; #1021 beyond
-UNLINK_MAX = 12 * 1024       # #1020 beyond
 ENOSPC_SLACK = 4             # blocks one write(2) or create can need
-# Operations the fault run does not fail, each an open issue. The release
-# paths -- O_TRUNC (trunc, and write, which opens with it) and unlink --
-# publish the inode or the directory entry first and release after, so a
-# failed write part way leaks blocks or an inode and can leave the free
-# counts disagreeing with the bitmaps, unfenced, while the call answers EIO
-# (RELEASE_ISSUE). A rename over an existing file releases the old one the
-# same way, and is not failed either.
-FAULT_KNOWN = {"trunc": "RELEASE_ISSUE", "write": "RELEASE_ISSUE",
-               "unlink": "RELEASE_ISSUE"}
+# Operations the fault run does not fail, each an open issue. None since
+# #1088 and #1120 made O_TRUNC, unlink, rename and rmdir, create and mkdir
+# all or nothing through the undo log.
+FAULT_KNOWN = {}
 FAULT_DENSE = 12             # every one of an operation's first writes
 FAULT_LARGEST = 4000         # bytes per generated write in the fault run
 STOP_STATUS = 86             # host_stubs.S's kernel_invariant_stop
@@ -190,7 +184,7 @@ def write_need(path, offset, length, written):
     """The blocks the kernel claims for the write(2) of a pwrite that
     failed: every block of the file as it would be after that write, plus
     the indirect block, because ext2_update_regular_file writes the whole
-    file to new blocks before it frees the old ones (COPY_ISSUE). Linux
+    file to new blocks before it frees the old ones (#1086). Linux
     needs the new blocks only."""
     size = os.path.getsize(path) if os.path.exists(path) else 0
     if written:
@@ -327,9 +321,13 @@ def compare_run(pristine, lines, work, exe=EXE, fault=None):
     if fault is not None:
         program.insert(fault[0], fault[1])
     status, mount_free, results, out = run_program(kernel, program, exe)
-    if fault is not None and not re.search(r"^fault injected=1$", out, re.M):
+    injected = re.search(r"^fault injected=1( fenced recover=(\w+))?$", out, re.M) \
+        if fault is not None else None
+    if fault is not None and not injected:
         return None, results       # the operation made fewer writes
     problems = []
+    if injected and injected.group(1) and injected.group(2) != "ok":
+        problems.append(f"fenced, and ext2_recover answered {injected.group(2)}")
     if status != 0:
         problems.append(f"program status {status}" +
                         (" (kernel_invariant_stop)" if status == STOP_STATUS else "") +
@@ -370,6 +368,7 @@ def eq_lines(rows):
     """ops.eq's rows as program operations, each row's span recorded."""
     lines = []
     spans = []
+    skipped = []
     for name, _expect, _issue, ops in rows:
         first = len(lines)
         for _lineno, op, args in ops:
@@ -386,18 +385,28 @@ def eq_lines(rows):
                 lines.append(f"pwrite {p[0]} 0 {int(args[1]) * 1024} 1")
             elif op == "overwrite":
                 lines.append(f"overwrite {p[0]} {p[1]}")
+            elif op == "truncate":
+                # truncate -s 0: open(O_CREAT) and ftruncate(2) to 0, the
+                # same filesystem calls as O_TRUNC's (#1022)
+                lines.append(f"trunc {p[0]}")
+            elif op == "peer":
+                # what the row tests is the descriptor (#1023): a position
+                # kept across another open's truncate, which is syscall.tkb's
+                # and not run here. The row's file is then absent on both
+                # sides, and the row reports so.
+                skipped.append(name)
             elif op == "files":
                 for i in range(int(args[1])):
                     lines.append(f"trunc {p[0]}/{ext2_eq.LONG}{i}")
             else:
                 raise HostError(f"ops.eq operation {op} has no host form")
         spans.append((first, len(lines)))
-    return lines, spans
+    return lines, spans, skipped
 
 
 def run_eq(ops_path):
     rows = ext2_eq.parse(open(ops_path).read())
-    lines, spans = eq_lines(rows)
+    lines, spans, skipped = eq_lines(rows)
     with tempfile.TemporaryDirectory(prefix="ext2_host_eq.") as work:
         pristine = os.path.join(work, "pristine.img")
         # the fixture's size: the rows were written against its free space
@@ -406,7 +415,9 @@ def run_eq(ops_path):
     if problems:
         raise HostError("ops.eq rows: " + "; ".join(problems))
     report_pass("ext2-host eq", f"{len(rows)} ops.eq rows as the QEMU lane records them, "
-                f"{len(lines)} operations through the kernel's ext2 on the host",
+                f"{len(lines)} operations through the kernel's ext2 on the host"
+                + (f" (descriptor-only operations not run: rows {', '.join(skipped)})"
+                   if skipped else ""),
                 rows=len(rows), operations=len(lines))
 
 
@@ -448,8 +459,8 @@ def compare_run_rows(pristine, lines, spans, rows, work):
             problems.append(f"row {name} {outcome}, recorded {expect}")
     if not counters_agree(kcounts):
         problems.append(f"counters {kcounts}")
-    # Conservation is not a row here: the differ rows leave the two trees
-    # different by design (#1020 keeps a file Linux removed).
+    # Conservation is not a row here: a differ row leaves the two trees
+    # different by design.
     return problems, results
 
 
@@ -461,8 +472,7 @@ def name_for(rng):
 
 class Model:
     """What the generator believes the tree holds. ENOSPC can only leave a
-    file shorter or absent than believed, never longer, which is what the
-    #1019/#1020 guards below rely on."""
+    file shorter or absent than believed, never longer."""
 
     def __init__(self):
         self.dirs = {ROOT}
@@ -474,9 +484,8 @@ class Model:
                 if p.startswith(prefix) and "/" not in p[len(prefix):]]
 
 
-def generate(seed, count, largest=80000, replacing=None):
-    """COUNT operations from SEED. REPLACING, when given, collects the
-    indexes of the renames whose target the model holds (RELEASE_ISSUE)."""
+def generate(seed, count, largest=80000):
+    """COUNT operations from SEED."""
     rng = random.Random(seed)
     model = Model()
     lines = []
@@ -511,13 +520,9 @@ def generate(seed, count, largest=80000, replacing=None):
                                  rng.randrange(1, 20000), rng.randrange(20000, 80000)])
             length = min(length, largest)
             # seekwrite never writes past EOF, whatever the file's real size:
-            # the kernel allocates a hole's blocks (HOLE_ISSUE)
+            # the kernel allocates a hole's blocks (#1087)
             offset = rng.choice([0, size, rng.randrange(0, size + 1)])
             if offset + length > MAX_FILE:
-                continue
-            # #1019: a write(2) at offset 0 replaces the file, so the first
-            # 1 KiB of a longer write shortens it until the rest lands
-            if offset == 0 and size > 0:
                 continue
             lines.append(f"seekwrite {target} {offset} {length} {rng.randrange(256)}")
             model.files[target] = max(size, offset + length)
@@ -531,8 +536,6 @@ def generate(seed, count, largest=80000, replacing=None):
             if not files:
                 continue
             target = rng.choice(files)
-            if model.files[target] > UNLINK_MAX:   # #1020
-                continue
             lines.append(f"unlink {target}")
             del model.files[target]
         elif kind == "rmdir":
@@ -550,10 +553,6 @@ def generate(seed, count, largest=80000, replacing=None):
             target = rng.choice(files + [fresh])
             if target in model.dirs or target == source:
                 continue
-            if target in model.files and model.files[target] > UNLINK_MAX:   # #1020
-                continue
-            if replacing is not None and target in model.files:
-                replacing.add(len(lines))
             lines.append(f"rename {source} {target}")
             model.files[target] = model.files.pop(source)
         elif kind == "rename_dir":
@@ -625,12 +624,11 @@ def run_faults(seeds, ops, first=0, exe=EXE, modes=("reject",)):
         pristine = os.path.join(work, "pristine.img")
         make_image(pristine)
         for seed in range(first, first + seeds):
-            # small files: every write(2) copies the whole file (COPY_ISSUE),
+            # small files: every write(2) copies the whole file (#1086),
             # so a large one makes thousands of disk writes to fail
-            replacing = set()
-            lines = generate(seed, ops, largest=FAULT_LARGEST, replacing=replacing)
+            lines = generate(seed, ops, largest=FAULT_LARGEST)
             for index in range(len(lines)):
-                if lines[index].split()[0] in FAULT_KNOWN or index in replacing:
+                if lines[index].split()[0] in FAULT_KNOWN:
                     continue
                 for mode in modes:
                     k = 0
@@ -755,17 +753,25 @@ def build_mutant(work):
 
 
 def run_control(seeds, ops, every):
+    """The planted rollback bug must fail the campaign or the fault run.
+    Since #1036 a write(2) claims its blocks one at a time, so ENOSPC alone
+    seldom reaches the rollback; a rejected disk write does."""
     with tempfile.TemporaryDirectory(prefix="ext2_host_control.") as work:
         exe = build_mutant(work)
         failure, checks = campaign(seeds, ops, every, exe=exe, quiet=True)
+        if failure is None:
+            faulted, failures = run_faults(1, 40, exe=exe)
+            checks += faulted
+            if failures:
+                failure = (0, "fault run", failures)
     if failure is None:
-        raise HostError(f"the planted rollback bug passed {checks} checkpoints: "
-                        "the campaign does not reach the rollback, or does not see a "
-                        "leaked block")
+        raise HostError(f"the planted rollback bug passed {checks} checks: "
+                        "neither the campaign nor the fault run reaches the "
+                        "rollback, or sees a leaked block")
     seed, prefix, problems = failure
     report_pass("ext2-host control",
-                f"a rollback that forgets one block fails seed {seed} at prefix "
-                f"{prefix}: {problems[0][:120]}", checkpoints=checks)
+                f"a rollback that forgets one block fails seed {seed} at {prefix}: "
+                f"{problems[0][:120]}", checks=checks)
 
 
 # --------------------------------------------------------------- self-test
@@ -799,7 +805,7 @@ def self_test():
         assert linux_apply(tree, f"pwrite {ROOT}/g 0 4000 2", kernel) == "ENOSPC"
         assert os.path.getsize(os.path.join(tree, ROOT, "g")) == 1024
     rows = ext2_eq.parse("row r match -\nmkdir r\nfill r/f 2\nfiles r 2\n")
-    lines, spans = eq_lines(rows)
+    lines, spans, skipped = eq_lines(rows)
     assert lines == [f"mkdir {ROOT}/r", f"trunc {ROOT}/r/f", f"pwrite {ROOT}/r/f 0 2048 1",
                      f"trunc {ROOT}/r/{ext2_eq.LONG}0", f"trunc {ROOT}/r/{ext2_eq.LONG}1"], lines
     assert spans == [(0, 5)]
@@ -820,7 +826,7 @@ def main(argv):
         p.add_argument("--first", type=int, default=0)
         if name == "faults":
             p.add_argument("--torn", action="store_true",
-                           help="also torn writes (TORN_ISSUE: outside the claimed model)")
+                           help="also torn writes (#1089: outside the claimed model)")
     p = sub.add_parser("replay")
     p.add_argument("seed", type=int)
     p.add_argument("length", type=int)
@@ -862,9 +868,11 @@ def main(argv):
                     print(f"    {failure}", file=sys.stderr)
                 return 1
             report_pass("ext2-host faults",
-                        f"{checked} failed writes (rejected and torn) across "
+                        f"{checked} failed writes "
+                        f"({'rejected and torn' if args.torn else 'rejected'}) across "
                         f"{args.seeds} x {args.ops} operations: each failed its "
-                        "operation and left the image fsck-clean and as before",
+                        "operation and left the image fsck-clean and as before "
+                        "(after ext2_recover where it fenced)",
                         failed_writes=checked)
         elif args.mode == "hostile":
             walked, refused, failures = run_hostile(args.images, args.first)

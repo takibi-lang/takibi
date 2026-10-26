@@ -38,7 +38,9 @@
 //                           offset 0 without O_TRUNC (dd conv=notrunc)
 //   fault K torn|reject     the next operation's write number K (from 0)
 //                           to the disk fails, torn or rejected; after it
-//                           the line `fault injected=N` follows
+//                           the line `fault injected=N` follows, with
+//                           ` fenced recover=ok|failed` when the failure
+//                           fenced the mount and ext2_recover then ran
 //   walk                    read every directory and file reachable from
 //                           the root, and print what was read
 //   sync                    write the image back to fd 3
@@ -570,7 +572,19 @@ fn run_line(mount: Ext2Mount, number: usize, line: []const u8) !{unsafe} {
     uart_puts("\n");
     let injected: usize = ram_disk_fault_disarm();
     if (slice_eq(op, bs"fault") == false && injected > 0) {
-        uart_puts("fault injected="); uart_print(injected); uart_puts("\n");
+        uart_puts("fault injected="); uart_print(injected);
+        // A failure the operation could not undo fences the mount (the
+        // counters on disk may then disagree with the bitmaps); recovering
+        // it, as kernel/init/ext2_fixture.tkb does, must leave the image
+        // clean, so the script compares the image after the recovery.
+        if (ext2_is_fenced()) {
+            uart_puts(" fenced recover=");
+            match ext2_recover(mount) {
+                Ext2RecoverResult::Recovered => { uart_puts("ok"); }
+                Ext2RecoverResult::Failed => { uart_puts("failed"); }
+            }
+        }
+        uart_puts("\n");
     }
 }
 
