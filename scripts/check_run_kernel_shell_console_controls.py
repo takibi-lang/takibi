@@ -6,6 +6,10 @@ the detector has to search each whole read and carry only the overlap a split
 could hide. Retaining a fixed window of the marker's own length instead loses
 any marker that arrives with something after it in the same read: that is the
 ordinary case for a marker inside a line, and it silently reported nothing.
+
+It also holds the console to no local echo: the guest's terminal echoes what
+it reads, and miniterm's echo=True printed every typed character twice ("cal"
+as "ccaall", 2026-10-26).
 """
 
 import importlib.util
@@ -64,18 +68,43 @@ def check(name, detect, line):
     return not failures
 
 
+def echo_is_off(console) -> bool:
+    """Construct the console's Miniterm with miniterm's own constructor
+    replaced, and read the echo it asked for."""
+    CASES.note()
+    asked = {}
+    base = console.miniterm.Miniterm
+    original = base.__init__
+
+    def capture(self, serial_instance, echo=False, eol="crlf", filters=()):
+        asked["echo"] = echo
+
+    base.__init__ = capture
+    try:
+        console.TimingMiniterm(None, 0, None)
+    finally:
+        base.__init__ = original
+    if asked.get("echo") is not False:
+        print("ERROR\tconsole: miniterm is started with local echo; the "
+              "guest already echoes, so every typed character shows twice")
+        return False
+    return True
+
+
 def main() -> int:
     console = load_console()
     ok = check("listener marker", console.listener_seen, LISTENER_LINE)
     ok = check("ash readiness marker", console.ready_seen, READY_LINE) and ok
+    ok = echo_is_off(console) and ok
     if not ok:
-        print("FAIL shell-console-markers: a UART marker is not detected reliably")
+        print("FAIL shell-console-markers: a UART marker is not detected "
+              "reliably, or the console echoes locally")
         return 1
     report_pass(
         "shell-console-markers",
         "the listener and readiness markers are found whole, followed "
         "by more output, split at every boundary, and not in unrelated "
-        "traffic",
+        "traffic; the console does not echo locally",
         cases=CASES.ran)
     return 0
 
