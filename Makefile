@@ -2562,7 +2562,8 @@ _kernelcheck-debug-return-abi-per-field-registers:
 ## kernelsh-qemu: boot the standalone kernel, attach the current terminal to
 ## its TCP-backed UART console, and forward localhost:18080 to guest httpd.
 ## Exit miniterm with Ctrl-].
-kernelsh-qemu: kernelbuild-qemu $(KERNEL_SHELL_EXT2_IMAGE)
+kernelsh-qemu: kernelbuild-qemu
+	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) $(KERNEL_SHELL_EXT2_IMAGE)
 	@TAKIBI_EXT2_POSTCHECK=report-only bash scripts/run_kernel_shell_qemu.sh
 
 ## kernelsh-rpi5: inject the standalone kernel over SWD and attach the current
@@ -2586,7 +2587,8 @@ _kernelcheck-shell-rpi5:
 ## `scripts/repeat_kernel_lane.sh N make churn-qemu`. CHURN_ROUNDS sets the
 ## rounds per sample. The RPi5 one takes the board lease like any other.
 CHURN_ROUNDS ?= 100
-churn-qemu: kernelbuild-qemu $(KERNEL_SHELL_EXT2_IMAGE)
+churn-qemu: kernelbuild-qemu
+	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) $(KERNEL_SHELL_EXT2_IMAGE)
 	@python3 scripts/run_kernel_churn.py --platform qemu --rounds $(CHURN_ROUNDS)
 
 hwcheck-churn-rpi5: kernelbuild-rpi5
@@ -2625,7 +2627,8 @@ hwcheck-load-rpi5: kernelbuild-rpi5
 ## QEMU, a round assigns about 4 ASIDs, so 2 x 9000 rounds pass the 65533
 ## numbers of a 16-bit generation once. About two hours on QEMU.
 CHURN_LONG_ROUNDS ?= 9000
-churn-long-qemu: kernelbuild-qemu $(KERNEL_SHELL_EXT2_IMAGE)
+churn-long-qemu: kernelbuild-qemu
+	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) $(KERNEL_SHELL_EXT2_IMAGE)
 	@python3 scripts/run_kernel_churn.py --platform qemu --long --rounds $(CHURN_LONG_ROUNDS)
 
 # Four-core shortened rollover finder, deliberately in no aggregate.
