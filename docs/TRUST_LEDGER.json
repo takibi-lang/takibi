@@ -168,6 +168,31 @@
         "raw_cpu_id_calls": "#1079 page_reserve_cpu in kernel/mm/page.tkb: the exec page reservation is per CPU and page_alloc has no CpuHere; read only under the pool's IRQ-masking lock in a non-preemptible kernel",
         "invariant_stop_sites": "value over stop: #1079 kernel_syscall_child_exec_return's four post-teardown exec failure stops became ENOMEM (a page reservation before the teardown) and SIGSEGV (a failure after it)"
       }
+    },
+    {
+      "date": "2026-10-26",
+      "head": "135a8f03",
+      "counts": {
+        "raw_mint_files": 15,
+        "frame_lines": 12898,
+        "device_semantics_files": 4,
+        "raw_deref_plain": 232,
+        "raw_deref_io": 16,
+        "raw_deref_builtin_region": 113,
+        "unsafe_blocks": 145,
+        "extern_fns": 55,
+        "invariant_stop_sites": 113,
+        "assembly_lines": 2364,
+        "per_cpu_ordinary_arrays": 73,
+        "per_cpu_stores": 6,
+        "raw_cpu_id_calls": 157,
+        "frame_api_ratchet": 8
+      },
+      "changes": {
+        "per_cpu_stores": "#1080: execve per-CPU argv slot retired; the page travels in the execve result, so no store is needed",
+        "assembly_lines": "assembly is a leaf: #1080 removed user_entry.S action 8, which called back into Takibi",
+        "invariant_stop_sites": "value over stop: #1080 ChildExec carries the argv page, retiring NotChildOrPending, ArgvPageMissing and the occupied-slot stop"
+      }
     }
   ]
 }
