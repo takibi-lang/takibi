@@ -914,6 +914,14 @@ linuxcheck: linuxbuild compiler-fuzz
 	@python3 scripts/ext2_host.py faults
 	@python3 scripts/ext2_host.py hostile
 	@python3 scripts/ext2_host.py control
+	@# GitHub issue #1138: user_payload's sigaltstack probe under host Linux
+	@# (qemu-aarch64 user mode) prints the line the QEMU lane's linux_file
+	@# view expects from the kernel, so each answer it checks is Linux's.
+	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) --no-print-directory $(KERNEL_SIGALTSTACK_LINUX_ELF)
+	@got=$$(qemu-aarch64 $(KERNEL_SIGALTSTACK_LINUX_ELF)); \
+	 exp=$$(grep '^userspace sigaltstack: ' kernel/tests/common/views/linux_file.expected); \
+	 if [ -n "$$exp" ] && [ "$$got" = "$$exp" ]; then echo "PASS  sigaltstack probe (host Linux)"; \
+	 else echo "FAIL  sigaltstack probe (host Linux)"; echo "  expected: $$exp"; echo "  got:      $$got"; exit 1; fi
 	@bash scripts/lane_timing.sh end linuxcheck 0
 
 # GitHub issue #1035: the long ext2 tier C runs, outside every lane:
@@ -1036,6 +1044,8 @@ KERNEL_RPI5_USER_PAYLOAD_ASM_S := $(KERNEL_DIR)/arch/arm64/kernel/user_payload_a
 KERNEL_RPI5_USER_PAYLOAD_TKB_O := $(KERNEL_BUILD_DIR)/user_payload_tkb.o
 KERNEL_RPI5_USER_PAYLOAD_ASM_O := $(KERNEL_BUILD_DIR)/user_payload_asm.o
 KERNEL_RPI5_USER_PAYLOAD_ELF := $(KERNEL_BUILD_DIR)/user_payload.elf
+# GitHub issue #1138: user_payload's sigaltstack probe alone, for host Linux.
+KERNEL_SIGALTSTACK_LINUX_ELF := $(KERNEL_BUILD_DIR)/sigaltstack_probe.elf
 KERNEL_BUSY_LOOP_TKB     := $(KERNEL_DIR)/arch/arm64/kernel/busy_loop.tkb
 KERNEL_BUSY_LOOP_O       := $(KERNEL_BUILD_DIR)/busy_loop.o
 KERNEL_BUSY_LOOP_A_ELF   := $(KERNEL_BUILD_DIR)/busy_a.elf
@@ -1438,13 +1448,17 @@ endef
 # so the resulting ET_DYN ELF has zero dynamic relocations -- verified
 # empirically before this rule existed (see HISTORY.md's #241 entry).
 $(KERNEL_RPI5_USER_PAYLOAD_TKB_O): $(KERNEL_RPI5_USER_PAYLOAD_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) | $(KERNEL_BUILD_DIR)
-	$(call KERNEL_EL0_COMPILE,initial_user_payload)
+	$(call KERNEL_EL0_COMPILE,initial_user_payload sigaltstack_probe_alone)
 
 $(KERNEL_RPI5_USER_PAYLOAD_ASM_O): $(KERNEL_RPI5_USER_PAYLOAD_ASM_S) | $(KERNEL_BUILD_DIR)
 	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
 
 $(KERNEL_RPI5_USER_PAYLOAD_ELF): $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O)
 	$(LLD) -pie --no-dynamic-linker -e initial_user_payload $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O) -o $@
+	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
+
+$(KERNEL_SIGALTSTACK_LINUX_ELF): $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O)
+	$(LLD) -pie --no-dynamic-linker -e sigaltstack_probe_alone $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O) -o $@
 	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
 
 # GitHub issue #448: the CPU-bound pair /etc/inittab starts. One source and

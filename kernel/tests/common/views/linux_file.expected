@@ -2,3 +2,5 @@ userspace file syscalls: open/write/read/close and truncate+extend ok
 resource exhausted: ext2 blocks capacity=6144
 userspace ext2 exhaustion: write+mkdir+creat ENOSPC, data+offset unchanged, unlink+retry ok, creat excl+reopen ok, trunc frees direct blocks
 userspace SIGCHLD siginfo: CLD_KILLED, CLD_EXITED, pending keeps first, kill SI_USER names first sender ok
+userspace sigaltstack: EINVAL, ENOMEM, EFAULT, SA_ONSTACK runs on it with SS_ONSTACK and EPERM, fork keeps it, SS_DISABLE ok
+userspace sigaltstack SS_AUTODISARM: disarmed in the handler, restored by rt_sigreturn ok

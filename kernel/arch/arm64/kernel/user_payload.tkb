@@ -23,6 +23,7 @@ extern fn busy_spin(count: usize);
 extern fn sigchld_probe_arm(record: usize);
 extern fn sigchld_probe_handler_address() -> usize;
 extern fn sigchld_probe_restorer_address() -> usize;
+extern fn altstack_probe_handler_address() -> usize;
 
 const EBADF_RC: usize = 0xFFFFFFFFFFFFFFF7;
 const EFAULT_RC: usize = 0xFFFFFFFFFFFFFFF2;
@@ -992,6 +993,8 @@ fn initial_user_payload() !{unsafe} {
                      restore_content.len, 0, 0) != restore_content.len);
         fail_if(svc5(57, restore_fd, 0, 0, 0, 0) != 0);
         sigchld_siginfo_probe();
+        sigaltstack_probe();
+        sigaltstack_autodisarm_probe();
         svc5(93, 0, 0, 0, 0, 0);
     }
 }
@@ -1112,6 +1115,206 @@ fn sigchld_siginfo_probe() !{unsafe} {
         bs"userspace SIGCHLD siginfo: CLD_KILLED, CLD_EXITED, pending keeps first, kill SI_USER names first sender ok\n";
     fail_if(svc5(64, 1, (unsafe { message as *u8 }) as usize,
                  message.len, 0, 0) != message.len);
+}
+
+/* GitHub issue #1138: sigaltstack(2) and SA_ONSTACK delivery. Every
+ * answer is Linux's: `sigaltstack_probe_alone` is the same code as its own
+ * static-PIE entry, which `make linuxcheck` runs under qemu-aarch64 and
+ * compares with this line of the linux_file view. The alternate stack is
+ * this function's own 16 KiB array, zeroed so every page is there. */
+const SIGALTSTACK_SYSCALL: usize = 132;
+const SIGUSR1: usize = 10;
+const SA_ONSTACK: usize = 0x08000000;
+const SS_ONSTACK: usize = 1;
+const SS_DISABLE: usize = 2;
+const SS_AUTODISARM: usize = 0x80000000;
+const ALTSTACK_PROBE_SIZE: usize = 16384;
+const EPERM_RC: usize = 0xFFFFFFFFFFFFFFFF;
+const ENOMEM_RC: usize = 0xFFFFFFFFFFFFFFF4;
+
+fn sigaltstack_probe_alone() !{unsafe} {
+    sigaltstack_probe();
+    svc5(93, 0, 0, 0, 0, 0);
+}
+
+fn sigaltstack_probe() !{unsafe} {
+    let mut alt: [u8; ALTSTACK_PROBE_SIZE];
+    for index: usize in 0..<ALTSTACK_PROBE_SIZE { alt[index] = 0; }
+    let alt_base: usize = alt as *u8 as usize;
+    let mut record: [u8; 104];
+    let record_base: *u8 = record as *u8;
+    for index: usize in 0..<104 { record[index] = 0; }
+    sigchld_probe_arm(ptr_of(record_base, 0));
+    let mut stack: [u8; 24];
+    let stack_base: *u8 = stack as *u8;
+    // The change the handler tries: the stack as installed below, so it is
+    // refused on that stack (EPERM) and a no-op off it.
+    altstack_probe_set(record_base, 80, alt_base, 0, ALTSTACK_PROBE_SIZE);
+
+    // None yet: SS_DISABLE, no stack. Bad mode, small size, bad pointer.
+    altstack_probe_expect_query(stack_base, 0, SS_DISABLE, 0);
+    altstack_probe_set(stack_base, 0, alt_base, 4, ALTSTACK_PROBE_SIZE);
+    fail_if(svc5(SIGALTSTACK_SYSCALL, ptr_of(stack_base, 0), 0, 0, 0, 0) != EINVAL_RC);
+    // 1024: below arm64's MINSIGSTKSZ (5120) and qemu-user's own (2048).
+    altstack_probe_set(stack_base, 0, alt_base, 0, 1024);
+    fail_if(svc5(SIGALTSTACK_SYSCALL, ptr_of(stack_base, 0), 0, 0, 0, 0) != ENOMEM_RC);
+    fail_if(svc5(SIGALTSTACK_SYSCALL, 1, 0, 0, 0, 0) != EFAULT_RC);
+    fail_if(svc5(SIGALTSTACK_SYSCALL, 0, 1, 0, 0, 0) != EFAULT_RC);
+    altstack_probe_expect_query(stack_base, 0, SS_DISABLE, 0);
+
+    // Installed: the query reports it, off it.
+    altstack_probe_set(stack_base, 0, alt_base, 0, ALTSTACK_PROBE_SIZE);
+    fail_if(svc5(SIGALTSTACK_SYSCALL, ptr_of(stack_base, 0), 0, 0, 0, 0) != 0);
+    altstack_probe_expect_query(stack_base, alt_base, 0, ALTSTACK_PROBE_SIZE);
+
+    // SA_ONSTACK: the handler runs on it, sees SS_ONSTACK, cannot change
+    // it, and its frame's uc_stack is the stack as set.
+    altstack_probe_raise(SA_ONSTACK);
+    altstack_probe_expect_run(record_base, 1, alt_base, true, 0,
+                              SS_ONSTACK, alt_base, ALTSTACK_PROBE_SIZE, EPERM_RC);
+    fail_if(payload_read_u64(record_base, 32) != alt_base);
+    fail_if(payload_read_u64(record_base, 40) != 0);
+    fail_if(payload_read_u64(record_base, 48) != ALTSTACK_PROBE_SIZE);
+
+    // Without SA_ONSTACK the handler stays on the process stack.
+    altstack_probe_raise(0);
+    altstack_probe_expect_run(record_base, 2, alt_base, false, 0,
+                              0, alt_base, ALTSTACK_PROBE_SIZE, 0);
+
+    // A fork child inherits it.
+    let child: usize = svc5(220, SIGCHLD, 0, 0, 0, 0);
+    if (child == 0) {
+        let mut child_stack: [u8; 24];
+        let child_base: *u8 = child_stack as *u8;
+        let mut code: usize = 1;
+        if (svc5(SIGALTSTACK_SYSCALL, 0, ptr_of(child_base, 0), 0, 0, 0) == 0 &&
+            payload_read_u64(child_base, 0) == alt_base &&
+            payload_read_u64(child_base, 16) == ALTSTACK_PROBE_SIZE) {
+            code = 0;
+        }
+        svc5(93, code, 0, 0, 0, 0);
+    }
+    fail_if(child >= 0x8000000000000000);
+    let mut status: [u8; 8];
+    let status_base: *u8 = status as *u8;
+    payload_write_u64(status_base, 0, 0xFF);
+    fail_if(svc5(260, child, ptr_of(status_base, 0), 0, 0, 0) != child);
+    fail_if((payload_read_u64(status_base, 0) & 0xFFFFFFFF) != 0);
+
+    // SS_DISABLE removes it: an SA_ONSTACK handler runs on the process
+    // stack, and uc_stack says SS_DISABLE.
+    altstack_probe_set(stack_base, 0, 0, SS_DISABLE, 0);
+    fail_if(svc5(SIGALTSTACK_SYSCALL, ptr_of(stack_base, 0), 0, 0, 0, 0) != 0);
+    altstack_probe_expect_query(stack_base, 0, SS_DISABLE, 0);
+    altstack_probe_raise(SA_ONSTACK);
+    fail_if(payload_read_u64(record_base, 0) != 3);
+    fail_if(altstack_probe_on(payload_read_u64(record_base, 8), alt_base));
+    fail_if(payload_read_u64(record_base, 32) != 0);
+    fail_if(payload_read_u64(record_base, 40) != SS_DISABLE);
+    fail_if(payload_read_u64(record_base, 48) != 0);
+    // The handler's own change installed a stack, and rt_sigreturn put
+    // back the disabled one its frame recorded.
+    fail_if(payload_read_u64(record_base, 24) != 0);
+    altstack_probe_expect_query(stack_base, 0, SS_DISABLE, 0);
+
+    altstack_probe_reset();
+    let message: []const u8 =
+        bs"userspace sigaltstack: EINVAL, ENOMEM, EFAULT, SA_ONSTACK runs on it with SS_ONSTACK and EPERM, fork keeps it, SS_DISABLE ok\n";
+    fail_if(svc5(64, 1, (unsafe { message as *u8 }) as usize,
+                 message.len, 0, 0) != message.len);
+}
+
+// SS_AUTODISARM, which qemu-aarch64 8.2 refuses with EINVAL, so this half
+// runs only in the kernel's payload and its expectations are read from
+// Linux's do_sigaltstack, on_sig_stack and signal_setup_done: delivery
+// disarms the stack, so the handler sees none and may set one, and
+// rt_sigreturn puts back the stack its frame recorded.
+fn sigaltstack_autodisarm_probe() !{unsafe} {
+    let mut alt: [u8; ALTSTACK_PROBE_SIZE];
+    for index: usize in 0..<ALTSTACK_PROBE_SIZE { alt[index] = 0; }
+    let alt_base: usize = alt as *u8 as usize;
+    let mut record: [u8; 104];
+    let record_base: *u8 = record as *u8;
+    for index: usize in 0..<104 { record[index] = 0; }
+    sigchld_probe_arm(ptr_of(record_base, 0));
+    let mut stack: [u8; 24];
+    let stack_base: *u8 = stack as *u8;
+    altstack_probe_set(record_base, 80, alt_base, 0, ALTSTACK_PROBE_SIZE);
+    altstack_probe_set(stack_base, 0, alt_base, SS_AUTODISARM, ALTSTACK_PROBE_SIZE);
+    fail_if(svc5(SIGALTSTACK_SYSCALL, ptr_of(stack_base, 0), 0, 0, 0, 0) != 0);
+    altstack_probe_expect_query(stack_base, alt_base, SS_AUTODISARM, ALTSTACK_PROBE_SIZE);
+    altstack_probe_raise(SA_ONSTACK);
+    altstack_probe_expect_run(record_base, 1, alt_base, true, 0,
+                              SS_DISABLE, 0, 0, 0);
+    fail_if(payload_read_u64(record_base, 40) != SS_AUTODISARM);
+    altstack_probe_expect_query(stack_base, alt_base, SS_AUTODISARM, ALTSTACK_PROBE_SIZE);
+    altstack_probe_reset();
+    let message: []const u8 =
+        bs"userspace sigaltstack SS_AUTODISARM: disarmed in the handler, restored by rt_sigreturn ok\n";
+    fail_if(svc5(64, 1, (unsafe { message as *u8 }) as usize,
+                 message.len, 0, 0) != message.len);
+}
+
+// No alternate stack, and SIGUSR1 back to SIG_DFL.
+fn altstack_probe_reset() !{unsafe} {
+    let mut stack: [u8; 24];
+    let stack_base: *u8 = stack as *u8;
+    altstack_probe_set(stack_base, 0, 0, SS_DISABLE, 0);
+    fail_if(svc5(SIGALTSTACK_SYSCALL, ptr_of(stack_base, 0), 0, 0, 0, 0) != 0);
+    let mut action: [u8; 32];
+    for index: usize in 0..<32 { action[index] = 0; }
+    fail_if(svc5(134, SIGUSR1, action as *u8 as usize, 0, 8, 0) != 0);
+}
+
+// A stack_t at `offset`: ss_sp, ss_flags (int), ss_size.
+fn altstack_probe_set(base: *u8, offset: usize, sp: usize, flags: usize,
+                      size: usize) {
+    payload_write_u64(base, offset, sp);
+    payload_write_u64(base, offset + 8, flags);
+    payload_write_u64(base, offset + 16, size);
+}
+
+fn altstack_probe_expect_query(base: *u8, sp: usize, flags: usize,
+                               size: usize) !{unsafe} {
+    altstack_probe_set(base, 0, 0xAA, 0xAAAA, 0xAA);
+    fail_if(svc5(SIGALTSTACK_SYSCALL, 0, ptr_of(base, 0), 0, 0, 0) != 0);
+    fail_if(payload_read_u64(base, 0) != sp);
+    // ss_flags is an int; the padding after it is not the kernel's.
+    fail_if((payload_read_u64(base, 8) & 0xFFFFFFFF) != flags);
+    fail_if(payload_read_u64(base, 16) != size);
+}
+
+// `sp` lies in the probe's alternate stack.
+fn altstack_probe_on(sp: usize, alt_base: usize) -> bool {
+    return sp > alt_base && sp - alt_base <= ALTSTACK_PROBE_SIZE;
+}
+
+// SIGUSR1's handler, with SA_SIGINFO, SA_RESTORER and `flags`, sent to
+// this process; it runs at the kill's return.
+fn altstack_probe_raise(flags: usize) !{unsafe} {
+    let mut action: [u8; 32];
+    let action_base: *u8 = action as *u8;
+    payload_write_u64(action_base, 0, altstack_probe_handler_address());
+    payload_write_u64(action_base, 8, SA_SIGINFO | SA_RESTORER | flags);
+    payload_write_u64(action_base, 16, sigchld_probe_restorer_address());
+    payload_write_u64(action_base, 24, 0);
+    fail_if(svc5(134, SIGUSR1, ptr_of(action_base, 0), 0, 8, 0) != 0);
+    fail_if(svc5(129, svc5(172, 0, 0, 0, 0, 0), SIGUSR1, 0, 0, 0) != 0);
+}
+
+// The handler ran `runs` times in all, the last on (`on`) or off the
+// alternate stack; its query answered `query` with { sp, flags, size },
+// and its change `change`.
+fn altstack_probe_expect_run(record_base: *u8, runs: usize, alt_base: usize,
+                             on: bool, query: usize, flags: usize,
+                             sp: usize, size: usize, change: usize) {
+    fail_if(payload_read_u64(record_base, 0) != runs);
+    fail_if(altstack_probe_on(payload_read_u64(record_base, 8), alt_base) != on);
+    fail_if(payload_read_u64(record_base, 16) != query);
+    fail_if(payload_read_u64(record_base, 56) != sp);
+    fail_if((payload_read_u64(record_base, 64) & 0xFFFFFFFF) != flags);
+    fail_if(payload_read_u64(record_base, 72) != size);
+    fail_if(payload_read_u64(record_base, 24) != change);
 }
 
 // Fork a child that exits with `code`, or kills itself with SIGTERM when

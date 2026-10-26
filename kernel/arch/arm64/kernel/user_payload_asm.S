@@ -127,3 +127,43 @@ sigchld_probe_handler:
 sigchld_probe_restorer:
     mov     x8, #139
     svc     #0
+
+/* GitHub issue #1138: a SIGUSR1 handler for user_payload's sigaltstack
+ * probe, found like the SIGCHLD one through TPIDR_EL0. Its record (the
+ * caller's, 104 bytes): +0 runs (incremented), +8 the handler's SP, +16
+ * what sigaltstack(NULL, record+56) answered there, +24 what
+ * sigaltstack(record+80, NULL) answered, +32/+40/+48 the frame's uc_stack
+ * ss_sp, ss_flags and ss_size, +56 the stack_t that query wrote, +80 the
+ * stack_t the caller prepared for the change. Returns through
+ * sigchld_probe_restorer. */
+    .global altstack_probe_handler_address
+    .type altstack_probe_handler_address, %function
+altstack_probe_handler_address:
+    adr     x0, altstack_probe_handler
+    ret
+
+/* x0 = signum, x1 = siginfo, x2 = ucontext. Clobbers x0, x1, x8-x10. */
+altstack_probe_handler:
+    mrs     x9, tpidr_el0
+    ldr     x10, [x9]
+    add     x10, x10, #1
+    str     x10, [x9]
+    mov     x10, sp
+    str     x10, [x9, #8]
+    ldr     x10, [x2, #16]
+    str     x10, [x9, #32]
+    ldr     w10, [x2, #24]
+    str     x10, [x9, #40]
+    ldr     x10, [x2, #32]
+    str     x10, [x9, #48]
+    mov     x0, #0
+    add     x1, x9, #56
+    mov     x8, #132
+    svc     #0
+    str     x0, [x9, #16]
+    add     x0, x9, #80
+    mov     x1, #0
+    mov     x8, #132
+    svc     #0
+    str     x0, [x9, #24]
+    ret

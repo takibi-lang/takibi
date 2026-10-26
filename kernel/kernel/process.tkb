@@ -284,6 +284,19 @@ struct SignalAction {
     mask: usize;
 }
 
+// GitHub issue #1138: sigaltstack(2)'s alternate signal stack, as Linux's
+// task_struct sas_ss_sp, sas_ss_size and sas_ss_flags. `flags` is what the
+// last successful call set (SS_DISABLE when there is none, as Linux starts
+// every task; a zeroed record reads as that too), so SS_AUTODISARM
+// survives a query.
+const SIGNAL_SS_DISABLE: usize = 2;
+
+struct SignalAltStack {
+    sp: usize;
+    size: usize;
+    flags: usize;
+}
+
 // GitHub issue #264 first stage: keep the scheduler/lifecycle bookkeeping
 // for one process slot together. This is deliberately a plain data struct:
 // the linear ScheduledProcessOwner/state protocol, stable store, SlotMap,
@@ -371,6 +384,10 @@ struct ProcessRecord {
     // lifecycle meaning); anything larger is an EL0 entry point, reached at
     // a syscall return.
     signal_actions: [SignalAction; PROCESS_SIGNAL_ACTIONS];
+    // GitHub issue #1138: read and written only by the process itself (its
+    // sigaltstack, its signal delivery and rt_sigreturn) and copied into a
+    // fork child while that child is still Constructing, so no lock.
+    signal_altstack: SignalAltStack;
     // rt_sigsuspend's mask swap, as Linux's saved_sigmask: the mask the
     // caller had, put back into the signal frame (and so restored by
     // rt_sigreturn) or restored directly when nothing is delivered.
@@ -2595,6 +2612,11 @@ private fn scheduled_process_copy_signal_mask(parent: borrow ProcessCurrent[p, P
             scheduled_process_record_current(parent).signal_actions[index];
         scheduled_process_record_owned(child).signal_actions[index] = inherited;
     }
+    // Linux: fork and vfork keep the alternate signal stack (only a
+    // CLONE_VM thread drops it, and there are none here).
+    let mut altstack: SignalAltStack =
+        scheduled_process_record_current(parent).signal_altstack;
+    scheduled_process_record_owned(child).signal_altstack = altstack;
 }
 
 // Linux: a child inherits its parent's affinity mask across fork, and
@@ -3145,6 +3167,8 @@ private fn scheduled_process_record_reset(guard: borrow ProcessRunGuard[lock],
         record.signal_actions[index] = cleared;
         record.signal_sender[index] = 0;
     }
+    let mut no_altstack: SignalAltStack = { 0, 0, SIGNAL_SS_DISABLE };
+    record.signal_altstack = no_altstack;
     record.sigsuspend_saved_mask = 0;
     record.sigsuspend_mask_saved = false;
     record.sigwait_suspend = false;
@@ -8401,6 +8425,32 @@ fn kernel_process_current_signal_action(
     return action;
 }
 
+// GitHub issue #1138: the current process's alternate signal stack.
+fn kernel_process_current_signal_altstack(
+        current_authority: borrow ProcessCurrent[current_process, ProcessState::Running])
+        -> SignalAltStack {
+    let mut altstack: SignalAltStack = { 0, 0, SIGNAL_SS_DISABLE };
+    if (execution_state[execution_cpu_index()].current_live) {
+        altstack = scheduled_process_record_current(current_authority)
+            .signal_altstack;
+    }
+    // A record starts zeroed (process_pool_alloc_held), and every task
+    // without an alternate stack has Linux's SS_DISABLE in sas_ss_flags.
+    if (altstack.size == 0) {
+        altstack.flags = altstack.flags | SIGNAL_SS_DISABLE;
+    }
+    return altstack;
+}
+
+fn kernel_process_current_set_signal_altstack(
+        current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
+        altstack: SignalAltStack) {
+    if (execution_state[execution_cpu_index()].current_live) {
+        scheduled_process_record_current(current_authority)
+            .signal_altstack = altstack;
+    }
+}
+
 fn kernel_process_current_set_signal_action(
         current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
         signum: usize, action: SignalAction) {
@@ -11815,6 +11865,10 @@ fn kernel_process_child_exec_mark(current_authority: borrow ProcessCurrent[curre
             scheduled_process_record_current(current_authority)
                 .signal_actions[index] = reset;
         }
+        // sigaltstack(2): a successful execve removes the alternate stack.
+        let mut no_altstack: SignalAltStack = { 0, 0, SIGNAL_SS_DISABLE };
+        scheduled_process_record_current(current_authority)
+            .signal_altstack = no_altstack;
         let mut current: ProcessHandle = execution_state[execution_cpu_index()].current_handle;
         kernel_process_trace_record(
             ProcessTraceExecCommit,

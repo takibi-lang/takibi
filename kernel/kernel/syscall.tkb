@@ -72,6 +72,7 @@ const AARCH64_NR_NEWFSTATAT: usize = 79;
 const AARCH64_NR_CHDIR: usize = 49;
 const AARCH64_NR_SETITIMER: usize = 103;
 const AARCH64_NR_RT_SIGACTION: usize = 134;
+const AARCH64_NR_SIGALTSTACK: usize = 132;
 const AARCH64_NR_SET_TID_ADDRESS: usize = 96;
 const AARCH64_NR_UNAME: usize = 160;
 const AARCH64_NR_SYSINFO: usize = 179;
@@ -5340,6 +5341,10 @@ fn syscall_peer_safe(number: usize, fd: usize, second: usize) -> bool {
     // take (#589), so the sender's CPU is not part of the argument. A
     // self-directed SIGTERM exits, and a peer exit is admitted already.
     if (number == 135 || number == AARCH64_NR_KILL) { return true; }
+    // GitHub issue #1138: sigaltstack reads and writes only the caller's
+    // own record (signal_altstack, which nothing else on any CPU touches)
+    // and the caller's own memory.
+    if (number == AARCH64_NR_SIGALTSTACK) { return true; }
     // GitHub issue #581: read and write on a connected TCP descriptor. Every
     // field of the connection is read and written under its owner
     // (tcp_connection_take's TaskMutex, revalidated by generation after the
@@ -5580,18 +5585,117 @@ const SIGFRAME_PSTATE_USER_BITS: usize = 0xF0000000;
 // A lower-EL data abort (EC 0x24), level-3 translation fault (FSC 0x07).
 const SIGFRAME_STACK_GROWTH_ESR: usize = 0x90000007;
 
-// Write the frame for `signum` below the interrupted user stack. The frame
-// records x0 as `value`, the result the interrupted syscall returns once the
-// handler is done. False when the user stack cannot take it.
+// GitHub issue #1138: sigaltstack(2), as Linux's do_sigaltstack. stack_t is
+// { ss_sp (u64), ss_flags (int), ss_size (u64) }: 24 bytes.
+const LINUX_SA_ONSTACK: usize = 0x08000000;
+const LINUX_SS_ONSTACK: usize = 1;
+const LINUX_SS_DISABLE: usize = 2;
+const LINUX_SS_AUTODISARM: usize = 0x80000000;
+// arm64's MINSIGSTKSZ (uapi asm/signal.h), the smallest stack accepted.
+const LINUX_MINSIGSTKSZ: usize = 5120;
+const SIGFRAME_UC_STACK: usize = 144;
+
+// Linux's on_sig_stack: `sp` lies on the alternate stack. A stack armed
+// with SS_AUTODISARM never counts, since delivery disarms it.
+fn signal_altstack_holds(altstack: SignalAltStack, sp: usize) -> bool {
+    if ((altstack.flags & LINUX_SS_AUTODISARM) != 0) { return false; }
+    return sp > altstack.sp && sp - altstack.sp <= altstack.size;
+}
+
+// Linux's sas_ss_flags: SS_DISABLE with no stack, SS_ONSTACK while `sp`
+// is on it, else 0.
+fn signal_altstack_state(altstack: SignalAltStack, sp: usize) -> usize {
+    if (altstack.size == 0) { return LINUX_SS_DISABLE; }
+    if (signal_altstack_holds(altstack, sp)) { return LINUX_SS_ONSTACK; }
+    return 0;
+}
+
+// Install { new_sp, new_flags, new_size } for a caller whose SP is `sp`:
+// 0, or EPERM while on the current stack, EINVAL for an unknown mode,
+// ENOMEM below MINSIGSTKSZ. SS_DISABLE stores no stack.
+fn signal_altstack_change(
+        current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
+        sp: usize, new_sp: usize, new_flags: usize, new_size: usize) -> usize {
+    let mut current: SignalAltStack =
+        kernel_process_current_signal_altstack(current_authority);
+    if (signal_altstack_holds(current, sp)) { return LINUX_EPERM; }
+    let mode: usize = new_flags & ~LINUX_SS_AUTODISARM;
+    if (mode != LINUX_SS_DISABLE && mode != LINUX_SS_ONSTACK && mode != 0) {
+        return LINUX_EINVAL;
+    }
+    if (current.sp == new_sp && current.size == new_size &&
+        current.flags == new_flags) {
+        return 0;
+    }
+    let mut installed: SignalAltStack = { new_sp, new_size, new_flags };
+    if (mode == LINUX_SS_DISABLE) {
+        installed.sp = 0;
+        installed.size = 0;
+    } else if (new_size < LINUX_MINSIGSTKSZ) {
+        return LINUX_ENOMEM;
+    }
+    kernel_process_current_set_signal_altstack(current_authority, installed);
+    return 0;
+}
+
+// sigaltstack(ss, old_ss) for a caller whose SP is `sp`. The old stack is
+// the one before any change, and is written only when the change (if any)
+// succeeded, as Linux does.
+fn syscall_sigaltstack(
+        current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
+        sp: usize, new_address: usize, old_address: usize) -> usize !{unsafe} {
+    let mut old: SignalAltStack =
+        kernel_process_current_signal_altstack(current_authority);
+    if (new_address != 0) {
+        match user_range_check_read(current_authority, new_address, 24) {
+            UserReadRangeResult::Fault => { return LINUX_EFAULT; }
+            UserReadRangeResult::Ok(range) => {
+                let (sp_ok, new_sp) = user_read_u64(range, 0);
+                let (flags_ok, new_flags) = user_read_u32(range, 8);
+                let (size_ok, new_size) = user_read_u64(range, 16);
+                if (sp_ok == false || flags_ok == false || size_ok == false) {
+                    return LINUX_EFAULT;
+                }
+                let changed: usize = signal_altstack_change(current_authority,
+                    sp, new_sp as usize, new_flags as usize, new_size as usize);
+                if (changed != 0) { return changed; }
+            }
+        }
+    }
+    if (old_address != 0) {
+        match user_range_check_write(current_authority, old_address, 24) {
+            UserWriteRangeResult::Fault => { return LINUX_EFAULT; }
+            UserWriteRangeResult::Ok(range) => {
+                let flags: usize = signal_altstack_state(old, sp) |
+                    (old.flags & LINUX_SS_AUTODISARM);
+                let mut written = user_zero_fill(range);
+                written = user_write_join(written, user_write_u64(range, 0, old.sp as u64));
+                written = user_write_join(written, user_write_u32(range, 8, flags as u32));
+                written = user_write_join(written, user_write_u64(range, 16, old.size as u64));
+                match written {
+                    UserWriteResult::Fault => { return LINUX_EFAULT; }
+                    UserWriteResult::Written => {}
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+// Write the frame for `signum` below `top`: the interrupted user stack, or
+// the top of the alternate stack (GitHub issue #1138). The frame records x0
+// as `value`, the result the interrupted syscall returns once the handler
+// is done, and uc_stack as `altstack`. False when the stack cannot take it.
 fn syscall_signal_frame_write(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], frame: borrow FrameRef[process], value: usize,
                               signum: usize,
                               restore_mask: usize, child_pid: usize,
-                              child_status: ProcessEnd, sender_pid: usize)
+                              child_status: ProcessEnd, sender_pid: usize,
+                              top: usize, altstack: SignalAltStack)
         -> (bool, usize)
         !{unsafe} {
     let user_sp: usize = frame_sp_el0(frame);
-    if (user_sp < SIGFRAME_SIZE + 16) { return (false, 0); }
-    let base: usize = (user_sp - SIGFRAME_SIZE) & ~15;
+    if (top < SIGFRAME_SIZE + 16) { return (false, 0); }
+    let base: usize = (top - SIGFRAME_SIZE) & ~15;
     // The stack below SP may not be populated yet: EL0 grows it by
     // faulting, and this write is the kernel's. Ask the same growth path a
     // translation fault on the frame's lowest byte would, with interrupts
@@ -5634,6 +5738,14 @@ fn syscall_signal_frame_write(current_authority: borrow ProcessCurrent[current_p
             }
             written = user_write_join(written, user_write_u64(range, SIGFRAME_UC_SIGMASK,
                                       restore_mask as u64));
+            // uc_stack, as Linux's __save_altstack: the stack as set, which
+            // rt_sigreturn installs again.
+            written = user_write_join(written, user_write_u64(range, SIGFRAME_UC_STACK,
+                                      altstack.sp as u64));
+            written = user_write_join(written, user_write_u32(range, SIGFRAME_UC_STACK + 8,
+                                      altstack.flags as u32));
+            written = user_write_join(written, user_write_u64(range, SIGFRAME_UC_STACK + 16,
+                                      altstack.size as u64));
             for index: usize in 0..<31 {
                 let register: usize = frame_general(frame, index);
                 let mut saved: usize = register;
@@ -5828,14 +5940,28 @@ private fn signal_handler_enter(current_authority: borrow ProcessCurrent[current
     let mut handler: SignalAction =
         kernel_process_current_signal_action(current_authority, signum);
     let restore_mask: usize = kernel_process_current_frame_mask_take();
+    // GitHub issue #1138, Linux's sigsp: an SA_ONSTACK handler runs from
+    // the top of an enabled alternate stack the process is not already on;
+    // on it, the frame stacks below the interrupted SP as usual.
+    let mut altstack: SignalAltStack =
+        kernel_process_current_signal_altstack(current_authority);
+    let mut top: usize = frame_sp_el0(here);
+    if ((handler.flags & LINUX_SA_ONSTACK) != 0 &&
+        signal_altstack_state(altstack, top) == 0) {
+        top = altstack.sp + altstack.size;
+    }
     let (written, base) = syscall_signal_frame_write(current_authority,
         here, value, signum, restore_mask,
         taken_signal_child_pid(taken),
         taken_signal_child_status(taken),
-        taken_signal_sender_pid(taken));
+        taken_signal_sender_pid(taken), top, altstack);
     if (written == false) {
         kernel_process_trace_signal_take(signum, ProcessTraceSignalFrameFault);
         return false;
+    }
+    if ((altstack.flags & LINUX_SS_AUTODISARM) != 0) {
+        let mut disarmed: SignalAltStack = { 0, 0, LINUX_SS_DISABLE };
+        kernel_process_current_set_signal_altstack(current_authority, disarmed);
     }
     kernel_process_trace_signal_take(signum, ProcessTraceSignalHandler);
     let mut handler_mask: usize = restore_mask | handler.mask;
@@ -6058,6 +6184,14 @@ private fn syscall_signal_return_into(current_authority: ProcessCurrent[current_
             let (sp_ok, sp) = user_read_u64(range, SIGFRAME_SP);
             let (pstate_ok, pstate) = user_read_u64(range, SIGFRAME_PSTATE);
             let (mask_ok, mask) = user_read_u64(range, SIGFRAME_UC_SIGMASK);
+            let (stack_sp_ok, stack_sp) = user_read_u64(range, SIGFRAME_UC_STACK);
+            let (stack_flags_ok, stack_flags) = user_read_u32(range, SIGFRAME_UC_STACK + 8);
+            let (stack_size_ok, stack_size) = user_read_u64(range, SIGFRAME_UC_STACK + 16);
+            if (stack_sp_ok == false || stack_flags_ok == false ||
+                stack_size_ok == false) {
+                return kernel_syscall_exit_current_process(current_authority,
+                    process_end_signaled(LINUX_SIGSEGV));
+            }
             if (magic_ok == false || size_ok == false || pc_ok == false ||
                 sp_ok == false || pstate_ok == false || mask_ok == false ||
                 magic as usize != SIGFRAME_FPSIMD_MAGIC ||
@@ -6089,6 +6223,13 @@ private fn syscall_signal_return_into(current_authority: ProcessCurrent[current_
             frame_sp_el0_set(here, sp as usize);
             frame_elr_el1_set(here, pc as usize);
             kernel_process_current_set_signal_mask(mask as usize);
+            // GitHub issue #1138, Linux's restore_altstack: uc_stack goes
+            // back in as a sigaltstack call from the restored SP would put
+            // it, and a refusal (EPERM on that stack, EINVAL, ENOMEM) is
+            // ignored as Linux ignores it.
+            let restored: usize = signal_altstack_change(current_authority,
+                sp as usize, stack_sp as usize, stack_flags as usize,
+                stack_size as usize);
             return syscall_signal_deliver_into(current_authority, here, x0);
         }
     }
@@ -7867,6 +8008,21 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             }
         }
         return syscall_finish_current(frame, SyscallAction::Resume(0), current_authority);
+    }
+    if (number == AARCH64_NR_SIGALTSTACK) {
+        // Whether the caller runs on its alternate stack is a question
+        // about its SP, which an in-kernel probe has none of.
+        let altstack_frame = match frame {
+            MaybeFrame::NoFrame => {
+                return syscall_finish_current(MaybeFrame::NoFrame,
+                    SyscallAction::Resume(LINUX_ENOSYS), current_authority);
+            }
+            MaybeFrame::Frame(found) => { found }
+        };
+        let answer: usize = syscall_sigaltstack(current_authority,
+            frame_sp_el0(altstack_frame), x0, x1);
+        return syscall_finish_current(MaybeFrame::Frame(altstack_frame),
+            SyscallAction::Resume(answer), current_authority);
     }
     if (number == AARCH64_NR_RT_SIGACTION) {
         // rt_sigaction(signum, act, oldact, sigsetsize). Every standard

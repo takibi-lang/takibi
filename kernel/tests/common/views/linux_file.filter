@@ -2,3 +2,5 @@
 ^userspace ext2 exhaustion:
 ^resource exhausted: ext2 blocks
 ^userspace SIGCHLD siginfo:
+^userspace sigaltstack:
+^userspace sigaltstack SS_AUTODISARM:
