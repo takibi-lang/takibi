@@ -83,7 +83,7 @@ lane (`kernelcheck-race-window-*-qemu`) before its issue closes.
   BusyBox; done 2026-10-25; #1065 then removed the argv[0] image choice), #1041 (images over
   a 2 MiB span: stress-ng; done 2026-10-26, `stress-ng --version` runs) and #1042 (pipe2,
   done 2026-10-25, unblocks hackbench and stress-ng `--pipe`). #1138 (sigaltstack, done
-  2026-10-26) took every stressor past its setup; the stress-ng phases now wait for a
+  2026-10-26) took every stressor past its setup; the stress-ng phases now wait for #1147, a
   shared anonymous mmap (MAP_SHARED|MAP_ANONYMOUS, EINVAL at stress-ng's shared region). The fixture
   rootfs grew from 2816 to 6144 blocks to hold both programs, so QEMU and
   the board boot the same image (maintainer, option b: one board build,
