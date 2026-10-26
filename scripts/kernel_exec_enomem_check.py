@@ -21,6 +21,7 @@ from await_timing import AwaitTiming  # noqa: E402
 from gdb_progress import (DONE, QUIET, all_threads,  # noqa: E402
                           continue_by_ticks)
 from progress_timeout import ProgressTimeout  # noqa: E402
+from typed_marker import typed_marker  # noqa: E402
 
 LABEL = "kernel/qemu exec-enomem"
 UART_LOG = Path(os.environ["AFFINITY_GDB_UART_LOG"])
@@ -236,7 +237,7 @@ def read_error_after_commit(serial):
     print("exec-enomem: image read refused after the teardown", flush=True)
     gdb.execute("detach")
     # The terminal holds the line until ash has reaped the child.
-    serial.sendall(b"echo lost=$?\n")
+    serial.sendall(b"echo " + typed_marker(b"lost=") + b"$?\n")
     await_uart(lambda data: b"lost=139\n" in data, "read-error-sigsegv")
     if text().count(kept) != before:
         raise RuntimeError("read error: the caller ran on after its point of no return")
