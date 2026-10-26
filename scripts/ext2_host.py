@@ -395,6 +395,11 @@ def eq_lines(rows):
                 # and not run here. The row's file is then absent on both
                 # sides, and the row reports so.
                 skipped.append(name)
+            elif op == "adopt":
+                # mv of the doubly-indirect fixture (#1021): run_eq plants
+                # the same sparse file on the pristine image and in the
+                # Linux tree, so the row's O_TRUNC releases the same tree
+                lines.append(f"rename {ext2_eq.DIND_FIXTURE} {p[0]}")
             elif op == "files":
                 for i in range(int(args[1])):
                     lines.append(f"trunc {p[0]}/{ext2_eq.LONG}{i}")
@@ -411,6 +416,8 @@ def run_eq(ops_path):
         pristine = os.path.join(work, "pristine.img")
         # the fixture's size: the rows were written against its free space
         make_image(pristine, blocks=6144, inodes=1024)
+        if ext2_eq.adopted(rows):
+            plant_fixture(pristine, work)
         problems, results = compare_run_rows(pristine, lines, spans, rows, work)
     if problems:
         raise HostError("ops.eq rows: " + "; ".join(problems))
@@ -419,6 +426,15 @@ def run_eq(ops_path):
                 + (f" (descriptor-only operations not run: rows {', '.join(skipped)})"
                    if skipped else ""),
                 rows=len(rows), operations=len(lines))
+
+
+def plant_fixture(image, work):
+    """The comparing QEMU runner's /lib/ext2-eq-dind, planted the same way."""
+    source = os.path.join(work, "ext2-eq-dind")
+    ext2_eq.write_fixture(source)
+    directory = os.path.dirname(ext2_eq.DIND_FIXTURE)
+    ext2_eq.debugfs(image, [f"mkdir /{directory}",
+                            f"write {source} /{ext2_eq.DIND_FIXTURE}"], write=True)
 
 
 def compare_run_rows(pristine, lines, spans, rows, work):
@@ -431,6 +447,9 @@ def compare_run_rows(pristine, lines, spans, rows, work):
     os.mkdir(tree)
     os.mkdir(os.path.join(tree, ROOT))
     os.chmod(os.path.join(tree, ROOT), 0o755)
+    if ext2_eq.adopted(rows):
+        os.makedirs(os.path.join(tree, os.path.dirname(ext2_eq.DIND_FIXTURE)))
+        ext2_eq.write_fixture(os.path.join(tree, ext2_eq.DIND_FIXTURE))
     klog, hlog = {}, {}
     old = os.umask(0o022)
     try:
