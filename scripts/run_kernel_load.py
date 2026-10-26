@@ -55,9 +55,9 @@ PHASES = ("xargs", "fork", "exec", "pipe", "hackbench")
 # then stops at its shared memory region, a MAP_SHARED|MAP_ANONYMOUS mmap
 # this kernel refuses with EINVAL.
 PHASE_WAITS = {
-    "fork": "#1147 (MAP_SHARED|MAP_ANONYMOUS is EINVAL at stress-ng's shared region)",
-    "exec": "#1147 (MAP_SHARED|MAP_ANONYMOUS is EINVAL at stress-ng's shared region)",
-    "pipe": "#1147 (MAP_SHARED|MAP_ANONYMOUS is EINVAL at stress-ng's shared region)",
+    "fork": "#1151 (the 128-page mmap arena refuses stress-ng's shared cache buffer, ENOMEM)",
+    "exec": "#1151 (the 128-page mmap arena refuses stress-ng's shared cache buffer, ENOMEM)",
+    "pipe": "#1151 (the 128-page mmap arena refuses stress-ng's shared cache buffer, ENOMEM)",
 }
 
 

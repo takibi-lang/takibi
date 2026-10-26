@@ -6698,7 +6698,7 @@ private fn syscall_openat_with(slot: borrow SyscallSlot[0],
 // section under the mutation guard its caller holds, as mkdirat's are
 // (#597). An existing name opens as without O_CREAT (EEXIST under O_EXCL,
 // EISDIR for a directory, as Linux says); a missing one becomes an empty
-// regular file, mode 0644 whatever the mode argument says, since every
+// regular file with the mode argument less the umask (#1147); every
 // process is root. ENOSPC when the inode bitmap has no clear bit or the
 // parent would have to grow and cannot; nothing is changed then.
 //
@@ -7016,7 +7016,9 @@ private fn syscall_newfstatat_with(slot: borrow SyscallSlot[0],
                 UserWriteRangeResult::Ok(range) => {
                     let mut written = user_zero_fill(range);
                     written = user_write_join(written, user_write_u64(range, 8, inode_number as u64));
-                    written = user_write_join(written, user_write_u32(range, 16, 0x81A4 as u32));
+                    // GitHub issue #1147: the inode's own mode, which a
+                    // create's mode and umask decide; it read 0644 always.
+                    written = user_write_join(written, user_write_u32(range, 16, inode_mode as u32));
                     written = user_write_join(written, user_write_u32(range, 20, 1));
                     written = user_write_join(written, user_write_u64(range, 48,
                                    ext2_inode_size(
