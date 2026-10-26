@@ -2356,7 +2356,9 @@ ends the held-lock fact. Shadowing its source name does not end that fact:
 the checker follows the original binding until it is consumed or its scope
 ends. Ranks therefore increase with nesting;
 for example, a connection guard at rank 30 may nest a pool guard at rank 40,
-while the reverse order is rejected. Equal-rank acquisitions are allowed: a
+while the reverse order is rejected. Rank 40 is the IRQ level (#966): kernel
+locks that leave interrupts unmasked rank below it and masking locks at or
+above it, a band `scripts/check_lock_rank_wrappers.py` checks. Equal-rank acquisitions are allowed: a
 rank identifies a lock class rather than a particular instance, and the
 kernel deliberately holds several independent connections in its pool probe.
 A lock class with exactly one instance is declared by adding

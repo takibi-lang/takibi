@@ -38,8 +38,8 @@
 //   exists to mask fewer interrupts; this masks none.
 // - THE RANK IS FIXED HERE at 30 (connection), so every adopter's
 //   minimum reachable rank is 30 whatever its own wrapper declares. All
-//   adopters rank below 40, the floor of the masking locks, which is the
-//   band rule kernel/CONCURRENCY.md states (2026-10-25, #966: the ext2
+//   adopters rank below the IRQ level (rank 40), the floor of the
+//   masking locks, which is the band rule kernel/CONCURRENCY.md states (2026-10-25, #966: the ext2
 //   mutation lock, the block device, TCP connections and GuardedField;
 //   #1071: the TCP frames and retransmit locks, the GEM, virtio and xHCI
 //   ring slots, and InitOnce). A wrapper over this that declares a higher

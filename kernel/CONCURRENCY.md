@@ -567,7 +567,7 @@ copy. The wait is the decide-then-sleep shape of #550, closed the same way:
   wake there.
 
 Lock order: the pipe lock (rank 30, the TaskMutex class) is taken before the
-run lock and the pool locks (40), never under them, and no interrupt handler
+run lock and the pool locks (the IRQ level, 40), never under them, and no interrupt handler
 takes it. An end is closed when its shared object's last reference goes
 (`unified_object_release`), outside the refcount lock, so the close of a
 descriptor on one CPU and a read on another serialize on the pipe lock.
@@ -598,8 +598,8 @@ build enforces each:
    `!{interrupt}` root that reaches one is a compile error naming the path;
    `scripts/check_lock_rank_wrappers.py` refuses an unmasked pool wrapper
    without it.
-2. **It never nests inside a masking lock.** Unmasked locks rank below 40 and
-   masking locks at 40 or above (the same script checks the bands), so the
+2. **It never nests inside a masking lock.** Unmasked locks rank below the IRQ
+   level (rank 40) and masking locks at or above it (the same script checks the bands), so the
    compiler's lock-order check rejects taking an unmasked lock under a masking
    guard. That is lockdep's interrupt-safe/unsafe rule: otherwise core A holds
    the unmasked lock, an interrupt on A spins on a masking lock core B holds,
@@ -613,7 +613,7 @@ build enforces each:
    would need these wrappers to disable preemption first.
 
 A world stop's window cannot wait on one either: a peer that holds an
-unmasked lock acknowledges the stop, but the stop's guard ranks 40, so an
+unmasked lock acknowledges the stop, but the stop's guard ranks at the IRQ level (40), so an
 unmasked acquire inside the window is the same lock-order error.
 
 #1071 extends this to the `Mutex`-based locks no interrupt reaches, which

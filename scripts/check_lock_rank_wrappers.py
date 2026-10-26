@@ -13,7 +13,7 @@ The rule: a kernel function whose body calls `region_pool_lock`,
 `acquires_lock_<rank>_<name>` effect, or is listed in EXEMPT below with the
 reason it needs none. The built-in `region_pool_lock*` carry no rank of their
 own, so the wrapper is the only place one can be stated; `mutex_acquire`
-carries the generic rank 40 `mutex`, which names no lock class and so cannot
+carries the generic `mutex` at the IRQ level (rank 40), which names no lock class and so cannot
 make a single-instance re-acquire an error.
 
 GitHub issue #966 adds the interrupt half. A pool wrapper that takes the
@@ -27,7 +27,7 @@ calls `region_pool_lock_saving` must save the mask in the same body
 Ranks come in two bands, so the compiler's lock-order check is also the
 interrupt-safety check Linux's lockdep runs at run time: a lock that does not
 mask (it calls `region_pool_lock` or `task_mutex_acquire`) holds a guard
-ranked below MASKING_RANK_FLOOR, and a lock that masks (`mutex_irq_save`,
+ranked below the IRQ level (IRQ_LEVEL_RANK, rank 40), and a lock that masks (`mutex_irq_save`,
 `mutex_acquire`, `region_pool_lock_saving`) holds one ranked at or above it.
 Taking an unmasked lock while a masking guard is live is then a lock-order
 error. It has to be: a handler interrupting the unmasked holder may spin on
@@ -56,7 +56,9 @@ MAY_BLOCK_RE = re.compile(r"\bmay_block\b")
 GUARD_RANK_RE = re.compile(r"\block_guard_([0-9]+)_[A-Za-z_0-9]+\b")
 UNMASKED_TAKE_RE = re.compile(r"\b(region_pool_lock|task_mutex_acquire)\s*\(")
 MASKED_TAKE_RE = re.compile(r"\b(mutex_irq_save|mutex_acquire|region_pool_lock_saving)\s*\(")
-MASKING_RANK_FLOOR = 40
+# The IRQ level (#966, #1072): the one place the band boundary is named.
+# Unmasked locks rank below it, masking locks at or above it.
+IRQ_LEVEL_RANK = 40
 RANK_RE = re.compile(r"\bacquires_lock_[0-9]+_[A-Za-z_0-9]+\b")
 
 # function name -> why it needs no rank of its own. Reviewed entries only.
@@ -140,12 +142,12 @@ def file_scan(text: str):
                              "interrupts, but declares no may_block (#966: without it an "
                              "!{interrupt} root may reach this lock unchecked)"))
         for rank in (int(r) for r in GUARD_RANK_RE.findall(header)):
-            if UNMASKED_TAKE_RE.search(body) and rank >= MASKING_RANK_FLOOR:
+            if UNMASKED_TAKE_RE.search(body) and rank >= IRQ_LEVEL_RANK:
                 unmasked.append((name, f"holds an unmasked lock at guard rank {rank}; "
-                                 f"unmasked locks rank below {MASKING_RANK_FLOOR} (#966)"))
-            elif MASKED_TAKE_RE.search(body) and rank < MASKING_RANK_FLOOR:
+                                 f"unmasked locks rank below the IRQ level (rank {IRQ_LEVEL_RANK}) (#966)"))
+            elif MASKED_TAKE_RE.search(body) and rank < IRQ_LEVEL_RANK:
                 unmasked.append((name, f"holds a masking lock at guard rank {rank}; "
-                                 f"masking locks rank {MASKING_RANK_FLOOR} or above (#966)"))
+                                 f"masking locks rank at or above the IRQ level (rank {IRQ_LEVEL_RANK}) (#966)"))
         if SAVING_RE.search(body) and not MASK_SAVE_RE.search(body):
             unmasked.append((name, "calls region_pool_lock_saving without mutex_irq_save "
                              "in the same body (#966: use region_pool_lock and may_block "
