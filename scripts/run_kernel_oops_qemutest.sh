@@ -720,14 +720,15 @@ if [ "$MODE" = child_exec ] &&
 fi
 
 if [ "$MODE" = child_exec ] || [ "$MODE" = child_exec_prepare_failure ]; then
-    python3 - "$ELF" "$UART_LOG" "$ARTIFACT_DIR" <<'PY_CAPTURE'
+    python3 - "$ELF" "$UART_LOG" "$ARTIFACT_DIR" "$MODE" <<'PY_CAPTURE'
 import hashlib
 import json
 from pathlib import Path
 import re
 import subprocess
 import sys
-elf, uart, out = map(Path, sys.argv[1:])
+elf, uart, out = map(Path, sys.argv[1:4])
+mode = sys.argv[4]
 raw = uart.read_bytes()
 text = raw.decode("ascii").replace("\r", "")
 origin = re.search(r"^oops: origin=explicit caller_return_pc=(0x[0-9a-f]+) ", text, re.M)
@@ -746,7 +747,14 @@ source.write_text(json.dumps(capture, indent=2) + "\n", encoding="ascii")
 subprocess.run([sys.executable, "scripts/symbolize_invariant_stop.py", "--capture", str(source),
                 "--elf", str(elf), "--out", str(out / "symbols")], check=True)
 report = json.loads((out / "symbols/symbols.json").read_text())
-assert report["symbol"]["function"] == "kernel_syscall_child_exec_return", report
+# The stop each mode reaches (scripts/invariant_stop_sites.tsv): the forced
+# CloneVmMissing prepare result stops in the return's match; the debugger
+# switch after a committed exec stops in the success tail, which #1079 moved
+# into kernel_syscall_child_exec_enter.
+expected = {  # invariant-stop-expectations
+            "child_exec": "kernel_syscall_child_exec_enter",
+            "child_exec_prepare_failure": "kernel_syscall_child_exec_return"}[mode]
+assert report["symbol"]["function"] == expected, report
 PY_CAPTURE
 fi
 
