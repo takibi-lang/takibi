@@ -51,10 +51,12 @@ PHASES = ("xargs", "fork", "exec", "pipe", "hackbench")
 # They are left out of the default list and named in every report, so a
 # clean sample never reads as covering them; ask for one with --phases to
 # watch it fail. Remove an entry when its issue lands.
+# Since #1041 stress-ng's 8 MiB image execs (`stress-ng --version` runs);
+# every stressor then fails its setup on sigaltstack, which is ENOSYS here.
 PHASE_WAITS = {
-    "fork": "#1041 (stress-ng's 8 MiB image span)",
-    "exec": "#1041 (stress-ng's 8 MiB image span)",
-    "pipe": "#1041 (stress-ng's 8 MiB image span)",
+    "fork": "sigaltstack (nr 132, ENOSYS: stress-ng's stressor setup)",
+    "exec": "sigaltstack (nr 132, ENOSYS: stress-ng's stressor setup)",
+    "pipe": "sigaltstack (nr 132, ENOSYS: stress-ng's stressor setup)",
 }
 
 

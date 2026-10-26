@@ -78,10 +78,12 @@ lane (`kernelcheck-race-window-*-qemu`) before its issue closes.
   the evidence a defect is fixed; time verdicts decided on the RPi5).
   stress-ng 0.20.01 and hackbench 2.9 are built as musl static PIEs by
   `scripts/build_load_programs.sh` into a cache outside the repository.
-  Today only the BusyBox `xargs -P 4` phase runs; the load found #1039 (an
-  execve argv that fail-stops the kernel; done 2026-10-25) and #1040 (an unmappable ELF ran
-  BusyBox; done 2026-10-25; #1065 then removed the argv[0] image choice), and its other phases wait for #1041 (images over a 2 MiB span:
-  stress-ng; #1042, pipe2, done 2026-10-25, unblocks hackbench and stress-ng `--pipe`). The fixture
+  Today the BusyBox `xargs -P 4` and hackbench phases run; the load found #1039 (an
+  execve argv that fail-stops the kernel; done 2026-10-25), #1040 (an unmappable ELF ran
+  BusyBox; done 2026-10-25; #1065 then removed the argv[0] image choice), #1041 (images over
+  a 2 MiB span: stress-ng; done 2026-10-26, `stress-ng --version` runs) and #1042 (pipe2,
+  done 2026-10-25, unblocks hackbench and stress-ng `--pipe`). The stress-ng phases now
+  wait for sigaltstack (nr 132, ENOSYS at stressor setup). The fixture
   rootfs grew from 2816 to 6144 blocks to hold both programs, so QEMU and
   the board boot the same image (maintainer, option b: one board build,
   sized from content; about 18 s more SWD per RPi5 lane run). Each program is recorded beside the same program under Linux
