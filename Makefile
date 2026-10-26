@@ -903,7 +903,27 @@ linuxcheck: linuxbuild compiler-fuzz
 	@python3 scripts/ext2_eq.py self-test
 	@python3 scripts/ext2_eq.py check-expected kernel/tests/ext2_eq/ops.eq \
 		kernel/build/user/busybox-static kernel/tests/ext2_eq/host.expected
+	@# GitHub issue #1035: ext2 tier C, the kernel's ext2 driver as a host
+	@# process (linux_user/ext2_host) against host Linux: the ops.eq rows,
+	@# a seeded campaign, every write of one sequence rejected, seeded
+	@# hostile images, and the planted rollback bug. About 35 s; the long
+	@# runs are `make ext2-host-long`.
+	@python3 scripts/ext2_host.py self-test
+	@python3 scripts/ext2_host.py eq kernel/tests/ext2_eq/ops.eq
+	@python3 scripts/ext2_host.py campaign
+	@python3 scripts/ext2_host.py faults
+	@python3 scripts/ext2_host.py hostile
+	@python3 scripts/ext2_host.py control
 	@bash scripts/lane_timing.sh end linuxcheck 0
+
+# GitHub issue #1035: the long ext2 tier C runs, outside every lane:
+# 200 seeds x 300 operations, the fault run over four sequences of 60, and
+# 2000 hostile images.
+.PHONY: ext2-host-long
+ext2-host-long: linuxbuild
+	python3 scripts/ext2_host.py campaign --seeds 200 --ops 300 --every 100
+	python3 scripts/ext2_host.py faults --seeds 4 --ops 60
+	python3 scripts/ext2_host.py hostile --images 2000
 
 # -- Raspberry Pi 5 (BCM2712) -------------------------------------------------
 RPI5_TARGET := aarch64-none-elf

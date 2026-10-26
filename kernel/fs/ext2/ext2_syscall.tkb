@@ -13,6 +13,13 @@
 // scripts/buildcheck_ext2_mutation_guard.py accepts: the guard is linear
 // and minted only by ext2_mutation_take, so a caller cannot produce one it
 // does not hold.
+//
+// Current limitations (2026-10-26):
+// - NOT EVERY SYSCALL'S EXT2 PART IS HERE. truncate(2)/ftruncate(2)
+//   (#1022) and the read side stay in syscall.tkb; the host program runs
+//   O_TRUNC's truncate through ext2_syscall_open_leaf instead.
+// - THE ERRNO CONSTANTS ARE THIS FILE'S. syscall.tkb answers them from
+//   here; a second copy there would fail to compile (one name, one value).
 
 use "kernel/fs/ext2/ext2.tkb";
 

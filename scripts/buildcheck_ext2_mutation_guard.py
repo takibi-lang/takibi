@@ -188,10 +188,18 @@ def planted(rows: list[dict], name: str, column: str, change) -> list[dict]:
 def controls_fail(rows: list[dict]) -> list[str]:
     """Defects planted in the table that must be refused; the ones that are not."""
     failed = []
-    # syscall_ext2_write_locked takes the guard itself.
+    # syscall_ext2_write_locked takes the guard itself. Since #1035 it hands
+    # it to ext2_syscall_write_at rather than calling the mutator, so the
+    # plant also makes it call that mutator directly: a helper that calls a
+    # mutator and no longer takes the guard.
+    mutator_call = next(entry for row in rows
+                        if row["name"] == "ext2_syscall_write_at"
+                        for entry in row["callees"]
+                        if call_graph_table.callee_name(entry) in MUTATORS)
     untaken = planted(rows, "syscall_ext2_write_locked", "callees",
                       lambda callees: [c for c in callees
-                                       if call_graph_table.callee_name(c) != TAKE])
+                                       if call_graph_table.callee_name(c) != TAKE]
+                      + [mutator_call])
     if not guard_problems(untaken)[0]:
         failed.append("a helper that no longer takes the guard")
     # ext2_syscall_mkdir (kernel/fs/ext2/ext2_syscall.tkb, #1035) is handed it.
