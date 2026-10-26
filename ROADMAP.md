@@ -103,9 +103,8 @@ lane (`kernelcheck-race-window-*-qemu`) before its issue closes.
 safety and multicore backbone only. Taken in order whenever the numbered
 trunk items below have no step ready; an item that reaches a decision is
 parked and the next one taken:
-#1096 (the three locks #1071 left masked --
-spare stack, exec args, generated DMA owners -- and the RPi5 cost
-measurement; #966 and #1071 unmasked the rest). #980
+#1096 (the locks #1071 left masked) is done (HISTORY.md: the generated DMA
+owners are TaskMutex, the spare stack stays masked). #980
 (reboot through the debug stop) is done (HISTORY.md). #799 waits under #954 until a site needs it.
 
 1. **Stored authority and the mint list (#637 stage 3).** Done since
