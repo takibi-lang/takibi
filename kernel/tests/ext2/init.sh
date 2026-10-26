@@ -92,6 +92,11 @@ fi
 # fixture lists /, /bin, /many and /etc, and a marker there changes them.
 if [ -e /lib/ext2-eq.enable ]; then
     /bin/sh /lib/ext2-eq.sh >/eq-log 2>&1
+    # GitHub issue #1021: the rows and /grow below take about a minute of
+    # block I/O, near the runner's silence watchdog on a loaded host (a land
+    # stopped at 80 s of silence here); one line between them keeps each
+    # stretch well inside it.
+    echo "ext2-eq: rows ran"
     # GitHub issues #968, #1033 and #1085: ask /grow for a thirteenth entry
     # block. Each 202-byte name takes a 212-byte record, four to a block (the
     # first block keeps four beside `.` and `..`), so the 49th mkdir needs
@@ -120,6 +125,7 @@ if [ -e /lib/ext2-eq.enable ]; then
         /bin/rmdir "/grow/$g$i" 2>/dev/null
         i=$((i + 1))
     done
+    echo "ext2-eq: /grow ran"
 fi
 
 # GitHub issue #503: what one move between cores costs. Silent on success;
