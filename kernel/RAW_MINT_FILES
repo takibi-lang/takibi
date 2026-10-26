@@ -8,7 +8,6 @@
 kernel/arch/arm64/kernel/frame_ref.tkb
 kernel/arch/arm64/mm/mmu.tkb
 kernel/boot/fdt.tkb
-kernel/drivers/block/memory.tkb
 kernel/drivers/block/virtio_blk.tkb
 kernel/drivers/net/rp1_gem.tkb
 kernel/drivers/net/virtio_net.tkb
@@ -19,6 +18,10 @@ kernel/platform/qemu/device_map.tkb
 kernel/platform/rpi5/device_map.tkb
 # page.tkb is also the one place a page run becomes a region
 # (page_run_into_region, #743); it leaves with #744.
+
+# kernel/drivers/block/memory.tkb left (2026-10-26, #637): its one raw
+# site, the USB run read's pointer-arithmetic slice of block_run_data, is a
+# checked slice whose bounds the compiler proves from the slot and count.
 
 # kernel/drivers/block/virtio_blk_dma.tkb left (2026-10-15, #739): after the
 # virtio-mmio IoHandle move (#740) it held no raw site, and the compiler now

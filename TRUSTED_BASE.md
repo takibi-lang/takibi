@@ -357,6 +357,8 @@ rules globally.
   is taken by a pointer cast. With that, `usb_xhci.tkb` holds no raw site
   and is off `kernel/RAW_MINT_FILES`; the one raw step left, the bus-address
   export of a device span, is `kernel/platform/rpi5/usb_xhci_bus.tkb`.
+  `kernel/drivers/block/memory.tkb` left the list too (2026-10-26, #637):
+  its USB run read slices `block_run_data` with a compiler-proved bound.
   A snapshot observation (decision E1) trusts its lowering's validity test:
   that an element whose ownership marker says "written" (for an xHCI event
   ring, a Cycle bit equal to the consumer cycle state) was completely

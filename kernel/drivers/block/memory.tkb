@@ -478,13 +478,12 @@ private fn block_run_transfer_locked(
     if (block_fault_hits(guard, false)) { return false; }
     if (device.backend == 1) {
         if (count > BLOCK_RUN_BLOCKS) { return false; }
-        let target: *u8 = (block_run_data as *u8) +
-            ((here * BLOCK_RUN_BLOCKS * KERNEL_BLOCK_SIZE) as isize);
+        // A checked slice of this slot's run: the slot index and the count
+        // check above bound it inside block_run_data (#637 stage 3).
+        let base: usize = here * BLOCK_RUN_BLOCKS * KERNEL_BLOCK_SIZE;
         let length: usize = count * KERNEL_BLOCK_SIZE;
-        // This is the one raw storage boundary: the slot and count checks
-        // above prove that the asserted slice stays inside this slot's run.
-        let run = unsafe { target[0..<length as isize] };
-        match disk_read_sectors((first * 2) as u32, run) {
+        match disk_read_sectors((first * 2) as u32,
+                                block_run_data[base..<base + length]) {
             DiskIoResult::Err(error) => { return false; }
             DiskIoResult::Ok => { return true; }
         }
