@@ -454,3 +454,11 @@ condition below applies, and reports the land afterwards.
   Untrusted FFI re-validates what it returns (#1134). A pseudo-.tkb model of
   assembly is YAGNI: checking it would shake the trusted base.
   [active] #1080 #1133 #1134
+- 2026-10-26 Licensing: Takibi stays GPLv3, with an additional permission
+  for the compiler's output and the listed Linux runtime support files
+  (COMPILER_OUTPUT_EXCEPTION.md) so compiled programs are not GPLv3 works
+  by compilation alone; the kernel and the compiler keep the GPLv3.
+  Commercial licenses are offered on request. External contributions come
+  under CLA.md (a broad license grant, copyright kept by the
+  contributor), in place before the first external contribution. Sponsors
+  go to the parent organization, Metasepi. [active]

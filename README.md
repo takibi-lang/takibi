@@ -366,4 +366,23 @@ have no value.
 
 ## License
 
-Takibi is distributed under the [GNU General Public License version 3](LICENSE).
+Takibi is distributed under the [GNU General Public License version 3](LICENSE),
+with an additional permission, the
+[Takibi Compiler Output Exception](COMPILER_OUTPUT_EXCEPTION.md): programs
+compiled with the Takibi compiler may be distributed under terms of their
+own choice. The compiler, the kernel and every other file stay under the
+GPLv3.
+
+Commercial licenses for Takibi, for uses the GPLv3 does not fit, are
+available on request; please contact the maintainer, Kiwamu Okabe
+<kiwamu@metasepi.org>.
+
+Contributions are accepted under the
+[Takibi Contributor License Agreement](CLA.md).
+
+## Sponsoring
+
+Takibi is developed under [Metasepi](https://github.com/metasepi), a
+long-running project to redesign a Unix-like operating system with strong
+compile-time checking. You can support the work through
+[GitHub Sponsors](https://github.com/sponsors/metasepi/).
