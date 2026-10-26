@@ -13303,14 +13303,14 @@ linear struct Owner746b[page: usize] {
 
   Alcotest.test_case "fixed DMA declaration names one private allocation" `Quick
     (expect_ok
-       "struct no_copy Mutex { private word: usize; }
+       "struct no_copy TaskMutex { private word: usize; }
         struct dma_fixed DmaFixed596 { private bytes: [u8; 64]; }
         private let mut dma_fixed596: DmaFixed596 align(64);");
 
   Alcotest.test_case "fixed DMA allocation refuses direct array access" `Quick
     (expect_type_error
        "fixed DMA allocation 'dma_fixed596' cannot be accessed directly"
-       "struct no_copy Mutex { private word: usize; }
+       "struct no_copy TaskMutex { private word: usize; }
         struct dma_fixed DmaFixed596 { private bytes: [u8; 64]; }
         private let mut dma_fixed596: DmaFixed596 align(64);
         fn bad() -> u8 { return dma_fixed596.bytes[0]; }");
@@ -13318,7 +13318,7 @@ linear struct Owner746b[page: usize] {
   Alcotest.test_case "fixed DMA field refuses pointer alias access" `Quick
     (expect_type_error
        "fixed DMA record 'DmaFixed596' cannot be read through a field"
-       "struct no_copy Mutex { private word: usize; }
+       "struct no_copy TaskMutex { private word: usize; }
         struct dma_fixed DmaFixed596 { private bytes: [u8; 64]; }
         private let mut dma_fixed596: DmaFixed596 align(64);
         fn bad(p: *DmaFixed596) -> u8 { return p.bytes[0]; }");
@@ -13326,7 +13326,7 @@ linear struct Owner746b[page: usize] {
   Alcotest.test_case "fixed DMA allocation refuses address alias" `Quick
     (expect_type_error
        "cannot take the address of fixed DMA allocation 'dma_fixed596'"
-       "struct no_copy Mutex { private word: usize; }
+       "struct no_copy TaskMutex { private word: usize; }
         struct dma_fixed DmaFixed596 { private bytes: [u8; 64]; }
         private let mut dma_fixed596: DmaFixed596 align(64);
         fn bad() -> *DmaFixed596 { return &dma_fixed596; }");
@@ -13334,7 +13334,7 @@ linear struct Owner746b[page: usize] {
   Alcotest.test_case "fixed DMA pointer refuses raw cast escape" `Quick
     (expect_type_error
        "fixed DMA record values and pointers cannot be cast"
-       "struct no_copy Mutex { private word: usize; }
+       "struct no_copy TaskMutex { private word: usize; }
         struct dma_fixed DmaFixed596 { private bytes: [u8; 64]; }
         private let mut dma_fixed596: DmaFixed596 align(64);
         fn bad(p: *DmaFixed596) -> *u8 {
@@ -13344,7 +13344,7 @@ linear struct Owner746b[page: usize] {
   Alcotest.test_case "fixed DMA declaration refuses a second allocation" `Quick
     (expect_type_error
        "requires exactly one fixed global allocation"
-       "struct no_copy Mutex { private word: usize; }
+       "struct no_copy TaskMutex { private word: usize; }
         struct dma_fixed DmaFixed596 { private bytes: [u8; 64]; }
         private let mut first596: DmaFixed596 align(64);
         private let mut second596: DmaFixed596 align(64);");
@@ -13380,7 +13380,7 @@ linear struct Owner746b[page: usize] {
   Alcotest.test_case "fixed DMA allocation keeps its line alignment in LLVM" `Quick
     (fun () ->
       ignore (gen_codegen
-        "struct no_copy Mutex { private word: usize; }
+        "struct no_copy TaskMutex { private word: usize; }
          struct dma_fixed DmaLayout626 { private bytes: [u8; 128]; }
          private let mut dma_layout626: DmaLayout626 align(64);
          fn dma_layout626_touch(cpu: sink *DmaLayout626Cpu)
@@ -13399,7 +13399,7 @@ linear struct Owner746b[page: usize] {
   Alcotest.test_case "fixed DMA allocation rejects alignment below a cache line" `Quick
     (expect_type_error
        "must have cache-line-aligned storage and extent"
-       "struct no_copy Mutex { private word: usize; }
+       "struct no_copy TaskMutex { private word: usize; }
         struct dma_fixed DmaFixed626 { private bytes: [u8; 128]; }
         private let mut dma_fixed626: DmaFixed626 align(16);
         fn touch626(cpu: sink *DmaFixed626Cpu) -> *DmaFixed626Device {
@@ -13409,14 +13409,14 @@ linear struct Owner746b[page: usize] {
   Alcotest.test_case "fixed DMA allocation requires isolated cache lines" `Quick
     (expect_type_error
        "must have cache-line-aligned storage and extent"
-       "struct no_copy Mutex { private word: usize; }
+       "struct no_copy TaskMutex { private word: usize; }
         struct dma_fixed DmaFixed596 { private bytes: [u8; 65]; }
         private let mut dma_fixed596: DmaFixed596 align(64);");
 
   Alcotest.test_case "fixed DMA authority cast cannot forge a CPU token" `Quick
     (expect_type_error
        "fixed DMA authority 'DmaFixed596Cpu' for 'DmaFixed596' cannot be constructed by a cast"
-       "struct no_copy Mutex { private word: usize; }
+       "struct no_copy TaskMutex { private word: usize; }
         struct dma_fixed DmaFixed596 { private bytes: [u8; 64]; }
         private let mut dma_fixed596: DmaFixed596 align(64);
         fn forge() -> *DmaFixed596Cpu {
@@ -13426,7 +13426,7 @@ linear struct Owner746b[page: usize] {
   Alcotest.test_case "fixed DMA integer literal cannot forge a CPU token" `Quick
     (expect_type_error
        "fixed DMA authority 'DmaFixed596Cpu' cannot be constructed from an integer literal"
-       "struct no_copy Mutex { private word: usize; }
+       "struct no_copy TaskMutex { private word: usize; }
         struct dma_fixed DmaFixed596 { private bytes: [u8; 64]; }
         private let mut dma_fixed596: DmaFixed596 align(64);
         fn forge() -> *DmaFixed596Cpu {
@@ -13437,7 +13437,7 @@ linear struct Owner746b[page: usize] {
   Alcotest.test_case "fixed DMA authority variant cannot forge a CPU token" `Quick
     (expect_type_error
        "fixed DMA authority 'DmaFixed596Cpu' cannot be constructed from an integer literal"
-       "struct no_copy Mutex { private word: usize; }
+       "struct no_copy TaskMutex { private word: usize; }
         struct dma_fixed DmaFixed596 { private bytes: [u8; 64]; }
         private let mut dma_fixed596: DmaFixed596 align(64);
         fn forge() -> DmaFixed596Authority {
@@ -13447,7 +13447,7 @@ linear struct Owner746b[page: usize] {
   Alcotest.test_case "fixed DMA authority cannot arrive from an extern" `Quick
     (expect_type_error
        "extern function 'forge' cannot carry fixed DMA authority"
-       "struct no_copy Mutex { private word: usize; }
+       "struct no_copy TaskMutex { private word: usize; }
         struct dma_fixed DmaFixed596 { private bytes: [u8; 64]; }
         private let mut dma_fixed596: DmaFixed596 align(64);
         extern fn forge() -> *DmaFixed596Cpu;");
@@ -13455,7 +13455,7 @@ linear struct Owner746b[page: usize] {
   Alcotest.test_case "fixed DMA authority variant cannot arrive from an extern" `Quick
     (expect_type_error
        "extern function 'forge' cannot carry fixed DMA authority"
-       "struct no_copy Mutex { private word: usize; }
+       "struct no_copy TaskMutex { private word: usize; }
         struct dma_fixed DmaFixed596 { private bytes: [u8; 64]; }
         private let mut dma_fixed596: DmaFixed596 align(64);
         extern fn forge() -> DmaFixed596Authority;");
@@ -13463,7 +13463,7 @@ linear struct Owner746b[page: usize] {
   Alcotest.test_case "fixed DMA authority cannot be zero initialized in another global" `Quick
     (expect_type_error
        "global 'forged_cpu596' cannot carry fixed DMA authority"
-       "struct no_copy Mutex { private word: usize; }
+       "struct no_copy TaskMutex { private word: usize; }
         struct dma_fixed DmaFixed596 { private bytes: [u8; 64]; }
         private let mut dma_fixed596: DmaFixed596 align(64);
         private let mut forged_cpu596: *DmaFixed596Cpu;");
@@ -13471,7 +13471,7 @@ linear struct Owner746b[page: usize] {
   Alcotest.test_case "fixed DMA slice alias expires at handoff" `Quick
     (expect_type_error
        "derived from linear value 'cpu' and cannot be used after 'cpu' is consumed"
-       "struct no_copy Mutex { private word: usize; }
+       "struct no_copy TaskMutex { private word: usize; }
         struct dma_fixed DmaFixed596 { private bytes: [u8; 64]; }
         private let mut dma_fixed596: DmaFixed596 align(64);
         fn bad(cpu: sink *DmaFixed596Cpu) -> *DmaFixed596Device {
@@ -13484,7 +13484,7 @@ linear struct Owner746b[page: usize] {
   Alcotest.test_case "fixed DMA CPU slice cannot enter a retaining call" `Quick
     (expect_type_error
        "authority-derived and cannot be passed to retaining parameter"
-       "struct no_copy Mutex { private word: usize; }
+       "struct no_copy TaskMutex { private word: usize; }
         struct dma_fixed DmaFixed596 { private bytes: [u8; 64]; }
         private let mut dma_fixed596: DmaFixed596 align(64);
         fn retain(bytes: []u8) {}
@@ -13501,7 +13501,7 @@ linear struct Owner746b[page: usize] {
   Alcotest.test_case "fixed DMA span address needs a trusted boundary" `Quick
     (expect_type_error
        "dma_span_address exports a raw bus address; use unsafe"
-       "struct no_copy Mutex { private word: usize; }
+       "struct no_copy TaskMutex { private word: usize; }
         struct dma_fixed DmaFixed596 { private bytes: [u8; 64]; }
         private let mut dma_fixed596: DmaFixed596 align(64);
         fn bad(span: borrow DmaDeviceSpan) -> usize {
@@ -13510,7 +13510,7 @@ linear struct Owner746b[page: usize] {
 
   Alcotest.test_case "fixed DMA span accepts virtio-blk data and status descriptors" `Quick
     (expect_codegen_ok
-       "struct no_copy Mutex { private word: usize; }
+       "struct no_copy TaskMutex { private word: usize; }
         struct dma_fixed Span623 { private bytes: [u8; 1088]; }
         private let mut span623: Span623 align(64);
         fn desc623(span: borrow DmaDeviceSpan) -> usize !{unsafe} {
@@ -13524,7 +13524,7 @@ linear struct Owner746b[page: usize] {
 
   Alcotest.test_case "fixed DMA span accepts the exact extent and a zero length" `Quick
     (expect_codegen_ok
-       "struct no_copy Mutex { private word: usize; }
+       "struct no_copy TaskMutex { private word: usize; }
         struct dma_fixed Span623 { private bytes: [u8; 1088]; }
         private let mut span623: Span623 align(64);
         fn desc623(span: borrow DmaDeviceSpan) -> usize !{unsafe} {
@@ -13538,7 +13538,7 @@ linear struct Owner746b[page: usize] {
 
   Alcotest.test_case "fixed DMA span accepts a refined length within the extent" `Quick
     (expect_codegen_ok
-       "struct no_copy Mutex { private word: usize; }
+       "struct no_copy TaskMutex { private word: usize; }
         struct dma_fixed Span623 { private bytes: [u8; 1088]; }
         private let mut span623: Span623 align(64);
         fn desc623(span: borrow DmaDeviceSpan) -> usize !{unsafe} {
@@ -13552,7 +13552,7 @@ linear struct Owner746b[page: usize] {
   Alcotest.test_case "fixed DMA span rejects one byte beyond the extent" `Quick
     (expect_type_error
        "may reach byte 1089 (offset up to 1024, length up to 65) but 'Span623' is 1088 bytes"
-       "struct no_copy Mutex { private word: usize; }
+       "struct no_copy TaskMutex { private word: usize; }
         struct dma_fixed Span623 { private bytes: [u8; 1088]; }
         private let mut span623: Span623 align(64);
         fn desc623(span: borrow DmaDeviceSpan) -> usize !{unsafe} {
@@ -13565,7 +13565,7 @@ linear struct Owner746b[page: usize] {
   Alcotest.test_case "fixed DMA span rejects a refined length one beyond" `Quick
     (expect_type_error
        "may reach byte 1089"
-       "struct no_copy Mutex { private word: usize; }
+       "struct no_copy TaskMutex { private word: usize; }
         struct dma_fixed Span623 { private bytes: [u8; 1088]; }
         private let mut span623: Span623 align(64);
         fn desc623(span: borrow DmaDeviceSpan) -> usize !{unsafe} {
@@ -13578,7 +13578,7 @@ linear struct Owner746b[page: usize] {
   Alcotest.test_case "fixed DMA span rejects an unbounded length" `Quick
     (expect_type_error
        "dma_device_span length needs a static bound"
-       "struct no_copy Mutex { private word: usize; }
+       "struct no_copy TaskMutex { private word: usize; }
         struct dma_fixed Span623 { private bytes: [u8; 1088]; }
         private let mut span623: Span623 align(64);
         fn desc623(span: borrow DmaDeviceSpan) -> usize !{unsafe} {
@@ -13591,7 +13591,7 @@ linear struct Owner746b[page: usize] {
   Alcotest.test_case "fixed DMA span requires the device token" `Quick
     (expect_type_error
        "dma_device_span for 'Span623' requires its device authority token"
-       "struct no_copy Mutex { private word: usize; }
+       "struct no_copy TaskMutex { private word: usize; }
         struct dma_fixed Span623 { private bytes: [u8; 1088]; }
         private let mut span623: Span623 align(64);
         fn desc623(span: borrow DmaDeviceSpan) -> usize !{unsafe} {
@@ -13604,7 +13604,7 @@ linear struct Owner746b[page: usize] {
   Alcotest.test_case "fixed DMA span cannot be forged" `Quick
     (expect_type_error
        "cannot construct struct 'DmaDeviceSpan' with a literal"
-       "struct no_copy Mutex { private word: usize; }
+       "struct no_copy TaskMutex { private word: usize; }
         struct dma_fixed Span623 { private bytes: [u8; 1088]; }
         private let mut span623: Span623 align(64);
         fn desc623(span: borrow DmaDeviceSpan) -> usize !{unsafe} {
@@ -13615,7 +13615,7 @@ linear struct Owner746b[page: usize] {
   Alcotest.test_case "fixed DMA span fields are private" `Quick
     (expect_type_error
        "field 'DmaDeviceSpan.length' is private"
-       "struct no_copy Mutex { private word: usize; }
+       "struct no_copy TaskMutex { private word: usize; }
         struct dma_fixed Span623 { private bytes: [u8; 1088]; }
         private let mut span623: Span623 align(64);
         fn desc623(span: borrow DmaDeviceSpan) -> usize !{unsafe} {
@@ -13626,7 +13626,7 @@ linear struct Owner746b[page: usize] {
   Alcotest.test_case "fixed DMA span expires with its device token" `Quick
     (expect_type_error
        "value 'span' is derived from linear value 'device' and cannot be used after 'device' is consumed"
-       "struct no_copy Mutex { private word: usize; }
+       "struct no_copy TaskMutex { private word: usize; }
         struct dma_fixed Span623 { private bytes: [u8; 1088]; }
         private let mut span623: Span623 align(64);
         fn desc623(span: borrow DmaDeviceSpan) -> usize !{unsafe} {
@@ -13643,7 +13643,7 @@ linear struct Owner746b[page: usize] {
   Alcotest.test_case "fixed DMA span cannot be retained" `Quick
     (expect_type_error
        "cannot be stored into a global"
-       "struct no_copy Mutex { private word: usize; }
+       "struct no_copy TaskMutex { private word: usize; }
         struct dma_fixed Span623 { private bytes: [u8; 1088]; }
         private let mut span623: Span623 align(64);
         fn desc623(span: borrow DmaDeviceSpan) -> usize !{unsafe} {
@@ -13655,7 +13655,7 @@ linear struct Owner746b[page: usize] {
   Alcotest.test_case "fixed DMA span needs a nonretaining parameter" `Quick
     (expect_type_error
        "cannot be passed to retaining parameter"
-       "struct no_copy Mutex { private word: usize; }
+       "struct no_copy TaskMutex { private word: usize; }
         struct dma_fixed Span623 { private bytes: [u8; 1088]; }
         private let mut span623: Span623 align(64);
         fn desc623(span: borrow DmaDeviceSpan) -> usize !{unsafe} {
@@ -13672,7 +13672,7 @@ linear struct Owner746b[page: usize] {
   Alcotest.test_case "fixed DMA finish is safe in the declaring file" `Quick
     (fun () ->
        ignore (infer_files [
-         "mint.tkb", "struct no_copy Mutex { private word: usize; }
+         "mint.tkb", "struct no_copy TaskMutex { private word: usize; }
           struct dma_fixed DmaFixed716 { private bytes: [u8; 64]; }
           private let mut dma_fixed716: DmaFixed716 align(64);
           fn settle(device: sink *DmaFixed716Device) -> *DmaFixed716Cpu {
@@ -13683,7 +13683,7 @@ linear struct Owner746b[page: usize] {
   Alcotest.test_case "fixed DMA finish is refused outside the declaring file" `Quick
     (fun () ->
        match infer_files [
-         "mint.tkb", "struct no_copy Mutex { private word: usize; }
+         "mint.tkb", "struct no_copy TaskMutex { private word: usize; }
           struct dma_fixed DmaFixed716 { private bytes: [u8; 64]; }
           private let mut dma_fixed716: DmaFixed716 align(64);";
          "driver.tkb", "fn bad(device: sink *DmaFixed716Device) -> *DmaFixed716Cpu {
@@ -13701,7 +13701,7 @@ linear struct Owner746b[page: usize] {
   (* GitHub issue #717: transmit allocations use the same tokens. *)
   Alcotest.test_case "fixed DMA transmit round trip compiles" `Quick
     (expect_codegen_ok
-       "struct no_copy Mutex { private word: usize; }
+       "struct no_copy TaskMutex { private word: usize; }
         struct dma_fixed DmaTx717 { private bytes: [u8; 64]; }
         private let mut dma_tx717: DmaTx717 align(64);
         fn send717(cpu: sink *DmaTx717Cpu) -> *DmaTx717Cpu !{unsafe} {
@@ -13716,7 +13716,7 @@ linear struct Owner746b[page: usize] {
   Alcotest.test_case "fixed DMA transmit refuses a CPU write while the device reads" `Quick
     (expect_type_error
        "derived from linear value 'cpu' and cannot be used after 'cpu' is consumed"
-       "struct no_copy Mutex { private word: usize; }
+       "struct no_copy TaskMutex { private word: usize; }
         struct dma_fixed DmaTx717 { private bytes: [u8; 64]; }
         private let mut dma_tx717: DmaTx717 align(64);
         fn bad(cpu: sink *DmaTx717Cpu) -> *DmaTx717Device {
@@ -13732,7 +13732,7 @@ linear struct Owner746b[page: usize] {
   Alcotest.test_case "fixed DMA transmit refuses an overwrite after an unconfirmed wait" `Quick
     (expect_type_error
        "derived from linear value 'cpu' and cannot be used after 'cpu' is consumed"
-       "struct no_copy Mutex { private word: usize; }
+       "struct no_copy TaskMutex { private word: usize; }
         struct dma_fixed GemTx707 { private bytes: [u8; 64]; }
         private let mut gem_tx707: GemTx707 align(64);
         fn wait707() -> bool { return false; }
@@ -13749,7 +13749,7 @@ linear struct Owner746b[page: usize] {
   Alcotest.test_case "fixed DMA transmit cannot reuse a buffer without its mint file" `Quick
     (fun () ->
        match infer_files [
-         "mint.tkb", "struct no_copy Mutex { private word: usize; }
+         "mint.tkb", "struct no_copy TaskMutex { private word: usize; }
           struct dma_fixed DmaTx717 { private bytes: [u8; 64]; }
           private let mut dma_tx717: DmaTx717 align(64);";
          "driver.tkb", "fn bad(device: sink *DmaTx717Device) -> *DmaTx717Cpu {
@@ -13765,7 +13765,7 @@ linear struct Owner746b[page: usize] {
   Alcotest.test_case "fixed DMA record has one direction" `Quick
     (expect_type_error
        "fixed DMA record 'DmaTx717' is used for receive here but for transmit"
-       "struct no_copy Mutex { private word: usize; }
+       "struct no_copy TaskMutex { private word: usize; }
         struct dma_fixed DmaTx717 { private bytes: [u8; 64]; }
         private let mut dma_tx717: DmaTx717 align(64);
         fn send(cpu: sink *DmaTx717Cpu) -> *DmaTx717Device {
@@ -13778,7 +13778,7 @@ linear struct Owner746b[page: usize] {
   Alcotest.test_case "fixed DMA slot cannot be replicated by zero initialization" `Quick
     (expect_type_error
        "must have only its compiler-created owner slot"
-       "struct no_copy Mutex { private word: usize; }
+       "struct no_copy TaskMutex { private word: usize; }
         struct dma_fixed DmaFixed596 { private bytes: [u8; 64]; }
         private let mut dma_fixed596: DmaFixed596 align(64);
         private let mut second_slot596: DmaFixed596Slot;");
@@ -13852,15 +13852,15 @@ let codegen_tests = [
              }")));
   Alcotest.test_case "fixed DMA generated owner slot exchanges with a lock guard" `Quick
     (expect_codegen_ok
-       "struct no_copy Mutex { private word: usize; }
+       "struct no_copy TaskMutex { private word: usize; }
         struct dma_fixed DmaSlot596 { private bytes: [u8; 64]; }
         private let mut dma_slot596: DmaSlot596 align(64);
         linear struct DmaGuard596[lock: addr] { private flags: usize; }
-        fn dma_lock596(m: *Mutex @ lock) -> DmaGuard596[lock] {
+        fn dma_lock596(m: *TaskMutex @ lock) -> DmaGuard596[lock] {
           let mut guard: DmaGuard596[lock] = { 0 };
           return guard;
         }
-        fn dma_unlock596(guard: sink DmaGuard596[lock], m: *Mutex @ lock) {}
+        fn dma_unlock596(guard: sink DmaGuard596[lock], m: *TaskMutex @ lock) {}
         fn dma_exchange596(replacement: DmaSlot596Authority)
             -> Place(DmaSlot596Authority) {
           let guard = dma_lock596(&dma_owner_DmaSlot596.mutex);
@@ -13871,13 +13871,58 @@ let codegen_tests = [
           return previous;
         }");
 
+  (* GitHub issue #1096: the generated owner slot's lock is a TaskMutex, so
+     the only blocking take of it is task_mutex_acquire, whose may_block
+     the effect checker refuses on an !{interrupt} path. The first case is
+     that refusal through a dma_owner take; the second pins the field type,
+     since a Mutex wrapper (which masks and is not may_block) would make the
+     first case vacuous. *)
+  Alcotest.test_case "fixed DMA owner slot take is refused on an interrupt path (issue #1096)" `Quick
+    (expect_type_error "dma_irq1096 -> dma_take1096 -> dma_lock1096 -> task_mutex_acquire"
+       "struct no_copy TaskMutex { private word: usize; }
+        extern fn task_mutex_acquire(m: *TaskMutex) !{may_block};
+        struct dma_fixed DmaSlot1096 { private bytes: [u8; 64]; }
+        private let mut dma_slot1096: DmaSlot1096 align(64);
+        linear struct DmaGuard1096[lock: addr] { private held: usize; }
+        fn dma_lock1096(m: *TaskMutex @ lock) -> DmaGuard1096[lock] {
+          task_mutex_acquire(m);
+          let mut guard: DmaGuard1096[lock] = { 1 };
+          return guard;
+        }
+        fn dma_unlock1096(guard: sink DmaGuard1096[lock], m: *TaskMutex @ lock) {
+          let held: usize = guard.held;
+        }
+        fn dma_take1096() -> Place(DmaSlot1096Authority) {
+          let guard = dma_lock1096(&dma_owner_DmaSlot1096.mutex);
+          let previous: Place(DmaSlot1096Authority) = place_take(
+              guard, &dma_owner_DmaSlot1096.mutex, dma_owner_DmaSlot1096.value);
+          dma_unlock1096(guard, &dma_owner_DmaSlot1096.mutex);
+          return previous;
+        }
+        fn dma_irq1096() !{interrupt} {
+          let Place::Full(authority) = dma_take1096() else {
+            Place::Empty => { return; }
+          };
+          dma_keep1096(authority);
+        }
+        fn dma_keep1096(a: sink DmaSlot1096Authority) {}");
+
+  Alcotest.test_case "fixed DMA owner slot lock is not a masking Mutex (issue #1096)" `Quick
+    (expect_type_error "struct type mismatch: TaskMutex vs Mutex"
+       "struct no_copy Mutex { private word: usize; }
+        struct no_copy TaskMutex { private word: usize; }
+        struct dma_fixed DmaMask1096 { private bytes: [u8; 64]; }
+        private let mut dma_mask1096: DmaMask1096 align(64);
+        fn dma_mask_lock1096(m: *Mutex) {}
+        fn dma_mask_bad1096() { dma_mask_lock1096(&dma_owner_DmaMask1096.mutex); }");
+
   (* GitHub issue #131: a fixed DMA record's owner slot is created full --
      its global's place tag is Full (1) with the CPU token inside, rather
      than relying on the authority's case order for a zeroed start. *)
   Alcotest.test_case "fixed DMA owner slot is created holding the CPU token" `Quick
     (fun () ->
       ignore (gen_codegen
-        "struct no_copy Mutex { private word: usize; }
+        "struct no_copy TaskMutex { private word: usize; }
          struct dma_fixed DmaFull131 { private bytes: [u8; 64]; }
          private let mut dma_full131: DmaFull131 align(64);");
       let ir = Llvm.string_of_llmodule !Llvm_gen.the_module in
@@ -13891,7 +13936,7 @@ let codegen_tests = [
 
   Alcotest.test_case "fixed DMA CPU slice and ownership transitions codegen" `Quick
     (expect_codegen_ok
-       "struct no_copy Mutex { private word: usize; }
+       "struct no_copy TaskMutex { private word: usize; }
         struct dma_fixed DmaCodegen596 { private bytes: [u8; 64]; }
         private let mut dma_codegen596: DmaCodegen596 align(64);
         fn dma_roundtrip596(cpu: sink *DmaCodegen596Cpu)
@@ -13906,7 +13951,7 @@ let codegen_tests = [
 
   Alcotest.test_case "fixed DMA CPU slice copies a bounded array" `Quick
     (expect_codegen_ok
-       "struct no_copy Mutex { private word: usize; }
+       "struct no_copy TaskMutex { private word: usize; }
         struct dma_fixed DmaSlice596 { private bytes: [u8; 64]; }
         private let mut dma_slice596: DmaSlice596 align(64);
         fn dma_slice_copy596(cpu: sink *DmaSlice596Cpu,

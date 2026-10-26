@@ -754,6 +754,9 @@ private let mut scheduled_process_stale_first_generation: usize = 0;
 // `resources: pages=0` still means what it says because that is a constant
 // eight pages on both sides of its comparison, not because nothing is
 // held; its own comment says so where the baseline is taken.
+// A masking Mutex, not a TaskMutex (GitHub issue #1096, 2026-10-26): it is
+// taken under the rank-40 run lock by scheduled_process_slot_remove, and by
+// kernel_stack_owner_name on the stack-overflow fail-stop path.
 struct SpareStackRunCell {
     private mutex: Mutex;
     private value: Place(exists run: usize. PageRunOwner[run]);

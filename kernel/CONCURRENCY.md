@@ -617,20 +617,24 @@ unmasked acquire inside the window is the same lock-order error.
 became `TaskMutex` (rank 30, the band's floor, so they may still nest under
 one another and under a TCP connection): the TCP connection frames lock, the
 retransmit entry and chain locks, the GEM descriptor rings, the virtio used
-rings and packet slots, the xHCI ring and context slots, and `InitOnce`. The
+rings and packet slots, the xHCI ring and context slots, and `InitOnce`.
+#1096 adds the compiler-generated `dma_owner_*` slots (the virtio-blk receive
+buffer and the xHCI mass-storage DMA buffers): `lib/dma_fixed_record.ml`
+declares their lock field `TaskMutex`, so the only blocking take is
+`task_mutex_acquire` and an `!{interrupt}` path that reaches a slot is a
+compile error (the "fixed DMA owner slot" tests in `test/test_takibi.ml`). The
 process-image pool is unmasked too: the procfs snapshot now reads the resident
 page count after the run unlock, from handle words copied under it, whose
-generation makes a freed image read as 0 pages. Still masked, each for a
-reason the build reports if it is undone:
+generation makes a freed image read as 0 pages. The per-CPU exec-args slot is
+gone (#1080). Still masked:
 
-- the spare-stack cell, taken under the run lock (a lock-order error);
-- the per-CPU exec-args slot, taken inside a `preempt_off` block, where
-  `may_block` is refused -- `may_block` stands for "no interrupt reaches this"
-  here but means "may sleep" to `preempt_off`, so this one needs an acquire
-  that is interrupt-unsafe without being a block;
-- the compiler-generated `dma_owner_*` slots (the virtio-blk receive buffer and
-  the xHCI mass-storage DMA buffers), whose lock field the compiler declares as
-  `Mutex`.
+- the spare-stack cell. It is taken under the run lock (rank 40), at nine
+  `scheduled_process_slot_remove` call sites, which is a lock-order error for
+  a rank-30 lock; and `kernel_stack_owner_name` takes it on the
+  stack-overflow fail-stop path, an exception context no blocking acquire may
+  reach. Moving the park out from under the run lock would change all nine
+  sites to carry the run out and still leave the fail-stop taker, so it stays
+  a masking `Mutex` (#1096, 2026-10-26).
 
 A global `Mutex` needs no `mutex_init`: `.bss` is zeroed by both entry paths
 and a zeroed word is free. Calling `mutex_init` on one is worse than

@@ -15,7 +15,7 @@
 // Every other function here only moves the tokens between the owner slots
 // and their callers. Keep anything else out of this file.
 
-use "kernel/lib/mutex.tkb";
+use "kernel/lib/task_mutex.tkb";
 use "kernel/drivers/virtio_used.tkb";
 
 // The used ring's own backing global (modern transport, GitHub issue #740).
@@ -37,22 +37,26 @@ fn virtio_blk_used_claim() -> bool {
 struct dma_fixed VirtioBlkReceive { private bytes: [u8; 1088]; }
 private let mut virtio_blk_receive: VirtioBlkReceive align(64);
 
+// GitHub issue #1096: a TaskMutex, rank 30, below the IRQ level; no
+// interrupt handler moves the receive authority.
 private linear struct VirtioBlkReceiveGuard[lock: addr] {
-    private flags: usize;
+    private held: usize;
 }
 
-private fn virtio_blk_receive_lock(lock: *Mutex @ address)
+private fn virtio_blk_receive_lock(lock: *TaskMutex @ address)
         -> VirtioBlkReceiveGuard[address]
-        !{acquires_lock_40_virtio_blk_receive,
-          lock_guard_40_virtio_blk_receive} {
-    let mut guard: VirtioBlkReceiveGuard[address] = { mutex_acquire(lock) };
+        !{may_block, acquires_lock_30_virtio_blk_receive,
+          lock_guard_30_virtio_blk_receive} {
+    task_mutex_acquire(lock);
+    let mut guard: VirtioBlkReceiveGuard[address] = { 1 };
     return guard;
 }
 
 private fn virtio_blk_receive_unlock(
         guard: sink VirtioBlkReceiveGuard[address],
-        lock: *Mutex @ address) {
-    mutex_release(lock, guard.flags);
+        lock: *TaskMutex @ address) {
+    let held: usize = guard.held;
+    task_mutex_release(lock);
 }
 
 fn virtio_blk_receive_take() -> VirtioBlkReceiveAuthority {

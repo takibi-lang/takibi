@@ -28,7 +28,7 @@ let run (prog : toplevel list) : toplevel list =
              "Device", Some (TypePtr (TypeNamed device))],
             false, loc) ::
           StructDef (slot,
-            ["mutex", TypeNamed "Mutex";
+            ["mutex", TypeNamed "TaskMutex";
              "value", TypeGenericInst (Generic_variant.place_name,
                                        [TypeNamed authority])],
             false, None, ["value"], loc) ::

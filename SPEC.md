@@ -3569,8 +3569,10 @@ full: its place holds `Full(Cpu(token))`, the only initial CPU token. The
 token's runtime pointer payload is zero and must never be dereferenced. No claim function can mint a
 second token. Casts to either token, extern functions carrying a token, and
 additional zero-initialized authority globals are rejected. The declaring
-program must provide a zero-initializable `Mutex` type for the slot's lock
-field. A `place_take` or
+program must provide a zero-initializable `TaskMutex` type for the slot's
+lock field (GitHub issue #1096): the kernel's `TaskMutex` does not mask and
+its blocking acquire is `!{may_block}`, so no `!{interrupt}` path may take a
+slot. A `place_take` or
 `place_put` on this slot must spell the compiler-created global directly
 for both the mutex and the place field. The guard still represents a
 real lock acquisition supplied by the caller, as for other stable slots.

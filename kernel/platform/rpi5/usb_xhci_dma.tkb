@@ -18,7 +18,7 @@
 // moves the tokens between the owner slots and their callers. Keep
 // anything else out of this file.
 
-use "kernel/lib/mutex.tkb";
+use "kernel/lib/task_mutex.tkb";
 
 struct dma_fixed XhciControlReceive { private bytes: [u8; 256]; }
 private let mut xhci_control_receive: XhciControlReceive align(64);
@@ -36,17 +36,22 @@ private let mut msc_cbw_transmit: MscCbwTransmit align(64);
 struct dma_fixed MscDataTransmit { private bytes: [u8; 65536]; }
 private let mut msc_data_transmit: MscDataTransmit align(64);
 
-private linear struct MscDmaGuard[lock: addr] { private flags: usize; }
+// GitHub issue #1096: the slots' lock is a TaskMutex, rank 30, below the
+// IRQ level. No interrupt handler moves a DMA authority, and
+// task_mutex_acquire's may_block makes one that tried a compile error.
+private linear struct MscDmaGuard[lock: addr] { private held: usize; }
 
-private fn msc_dma_lock(lock: *Mutex @ address) -> MscDmaGuard[address]
-        !{acquires_lock_40_msc_dma, lock_guard_40_msc_dma} {
-    let mut guard: MscDmaGuard[address] = { mutex_acquire(lock) };
+private fn msc_dma_lock(lock: *TaskMutex @ address) -> MscDmaGuard[address]
+        !{may_block, acquires_lock_30_msc_dma, lock_guard_30_msc_dma} {
+    task_mutex_acquire(lock);
+    let mut guard: MscDmaGuard[address] = { 1 };
     return guard;
 }
 
 private fn msc_dma_unlock(guard: sink MscDmaGuard[address],
-                          lock: *Mutex @ address) {
-    mutex_release(lock, guard.flags);
+                          lock: *TaskMutex @ address) {
+    let held: usize = guard.held;
+    task_mutex_release(lock);
 }
 
 fn msc_csw_take() -> MscCswReceiveAuthority {
