@@ -215,7 +215,10 @@ def announce_url() -> None:
 
 class TimingMiniterm(miniterm.Miniterm):
     def __init__(self, serial_instance, launch_ns, transcript):
-        super().__init__(serial_instance, echo=True, eol="lf")
+        # No local echo: the guest's terminal echoes (canonical ECHO, or
+        # ash's line editor in raw mode), and a second copy from miniterm
+        # printed every typed character twice ("cal" as "ccaall").
+        super().__init__(serial_instance, echo=False, eol="lf")
         self.launch_ns = launch_ns
         self.transcript = transcript
         self.pending = b""
