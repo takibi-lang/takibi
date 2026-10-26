@@ -433,11 +433,12 @@ condition below applies, and reports the land afterwards.
 - 2026-10-25 #1021/#1100 option (b): /pad stays #742's MiB rounding; the
   comparing lane's runner plants a dedicated doubly-indirect fixture on its
   own disk copy with debugfs. [active] #1021 #1100
-- 2026-10-25 #1072 option 1: an unmasked pool lock says so where the lock
-  is declared, and the compiler derives may_block for its acquire from that
-  declaration (explicit at the declaration, not implicit in the builtin);
-  the declaration also fixes its rank band (#966). Per-function may_block
-  annotations for those acquires go away. [active] #1072 #966
+- 2026-10-25 #1072 option 1 [superseded 2026-10-26 by the next line].
+- 2026-10-26 #1072 adds no declaration syntax: #789's ranked capability
+  tokens will place masking and unmasked locks relative to a named IRQ level
+  and derive may_block from it. #1072 only names the rank-40 band as one
+  constant with matching docs and messages; newcomer-readable levels are
+  #1135. [active] #1072 #789 #1135
 - 2026-10-26 QEMU lanes from a worktree do not run while a land's allcheck
   runs: host CPU contention inflates busy lane-seconds and trips silence
   watchdogs. Until #1145 makes the lanes wait on the land's lease, the
