@@ -19,6 +19,10 @@ fn frame_any_resume(any: sink AnyFrame) {
 extern fn kernel_idle_exit_enter() !{noreturn};
 extern fn kernel_idle_yield_enter() !{noreturn};
 extern fn kernel_idle_block_enter() !{noreturn};
+// GitHub issue #1095: dc civac; dsb ish on the line holding `address`
+// (user_entry.S). DDB-only: its one caller is fixed by
+// scripts/buildcheck_allowed_callers.py.
+extern fn kernel_ddb_dcache_clean_invalidate(address: usize);
 extern fn kernel_idle_tick_enter() !{noreturn};
 extern fn kernel_idle_boot_enter() !{noreturn};
 // Both entries report an explicit invariant stop. A borrowed frame is

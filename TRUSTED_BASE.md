@@ -415,6 +415,15 @@ rules globally.
   block: `scripts/check_cpu_authority_mints.py` refuses a public function
   of that file returning the authority (the boot probe's any-CPU mint was
   retired with execve's per-CPU argv slot, #1080).
+- DDB's lock-free GEM RX look (`kernel_net_rx_frame_pending` in
+  `kernel/drivers/net/rp1_gem.tkb`) answers no only after cleaning and
+  invalidating the descriptor line to the point of coherency (#1095).
+  Trusted: the three-instruction assembly helper
+  `kernel_ddb_dcache_clean_invalidate` in `user_entry.S` (`dc civac`,
+  `dsb ish`, `ret`; the compiler has no builtin for it), and that
+  clean+invalidate is safe whichever side owns the line. Its one caller is
+  fixed by `scripts/buildcheck_allowed_callers.py`; the `debug_stopped`
+  effect check still keeps the look lock-free.
 - ext2's operation scratch is a pool of `KERNEL_MAX_CORES` slots, each
   reached only through a linear `Ext2Slot` (#638). The compiler checks that
   an operation releases its slot on every path, never twice, and never uses

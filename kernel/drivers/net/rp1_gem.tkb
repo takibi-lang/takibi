@@ -427,20 +427,22 @@ fn net_init() -> NetInitResult !{unsafe} {
 }
 
 // GitHub issue #959: DDB's lock-free reading of RX pending, under the
-// debug stop (#920): no ring owner, no lock, no cache maintenance. The
-// descriptor word is loaded with acquire ordering as the CPU's cache holds
-// it. The CPU may hold that line dirty while the ring is Ready, so DDB must
-// not invalidate it, and a clear ownership bit may be a stale line from
-// before GEM's write: that reads Unknown, not No. A set bit is trusted only
-// while gem_rx_pkt names the posted buffer, which gem_rearm_rx sets after
-// the new descriptor is armed and net_rx_acquire clears after the take.
+// debug stop (#920): no ring owner and no lock. The CPU may hold the
+// descriptor line dirty while the ring is Ready, so DDB must not merely
+// invalidate it; it cleans and invalidates the line (dc civac, safe
+// whichever side owns it, #1095) and then loads the word with acquire
+// ordering from the point of coherency, so a clear ownership bit is GEM's
+// current answer: No. The bit is trusted only while gem_rx_pkt names the
+// posted buffer, which gem_rearm_rx sets after the new descriptor is armed
+// and net_rx_acquire clears after the take.
 fn kernel_net_rx_frame_pending() -> NetPendingState !{unsafe} {
     if (rp1_gem_net_ready == false) { return NetPendingState::No; }
     if (gem_rx_pkt >= GEM_PKTS) { return NetPendingState::No; }
     if (gem_rx_ring_cpu_address == 0) { return NetPendingState::Unknown; }
+    kernel_ddb_dcache_clean_invalidate(gem_rx_ring_cpu_address);
     let word: usize = unsafe { atomic_load_acquire(gem_rx_ring_cpu_address) };
     if ((word & 1) != 0) { return NetPendingState::Yes; }
-    return NetPendingState::Unknown;
+    return NetPendingState::No;
 }
 
 // Queue-0 status can be clear-on-read or W1C (DCFG1.IRQCOR). Read the

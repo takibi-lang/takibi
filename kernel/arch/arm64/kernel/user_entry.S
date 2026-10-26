@@ -254,6 +254,20 @@ kernel_cpu_offset:
     mrs     x0, tpidr_el1
     ret
 
+/* GitHub issue #1095: kernel_ddb_dcache_clean_invalidate(address), clean
+ * and invalidate the data-cache line holding `address` to the point of
+ * coherency, then wait for it. No logic: the compiler has no builtin for
+ * dc civac (DECISIONS 2026-10-25). Clean+invalidate is safe whichever side
+ * owns the line: a dirty CPU line is written back rather than discarded.
+ * Its one caller is rp1_gem.tkb's kernel_net_rx_frame_pending(), DDB's
+ * lock-free RX look (scripts/buildcheck_allowed_callers.py). */
+    .global kernel_ddb_dcache_clean_invalidate
+    .type kernel_ddb_dcache_clean_invalidate, %function
+kernel_ddb_dcache_clean_invalidate:
+    dc      civac, x0
+    dsb     ish
+    ret
+
 
 // Explicit invariant stops capture the incoming return PC before any BL.
 // FrameRef is a one-word ABI: optional context arrives in x0, never an

@@ -10,3 +10,4 @@
 # Adding a caller is a review: write why it may name the function here.
 cpu-offset-callers	kernel_cpu_offset	kernel/kernel/cpu_authority.tkb:preempt_slot	#638	TPIDR_EL1 is read only by cpu_authority.tkb's preempt_slot(); any other caller is a second, unreviewed way to name the current CPU
 exec-inode-writer	scheduled_process_set_exec_inode	kernel/kernel/syscall.tkb:syscall_exec_inode_store	#1106	the exec inode is stored only from a SyscallExecInode by syscall.tkb's syscall_exec_inode_store; any other caller would store an inode the format check never judged
+ddb-dcache-civac-callers	kernel_ddb_dcache_clean_invalidate	kernel/drivers/net/rp1_gem.tkb:kernel_net_rx_frame_pending	#1095	dc civac is DDB-only: rp1_gem.tkb's kernel_net_rx_frame_pending() is its one reviewed caller; any other caller is cache maintenance outside the DMA owners

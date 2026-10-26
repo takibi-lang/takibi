@@ -17,10 +17,18 @@ Every row also runs three negative controls on the real table: a planted
 call, a planted function-pointer reference, and the allowed calls removed;
 each must be refused, or the check fails.
 
+A caller file that a kernel does not compile (rp1_gem.tkb is RPi5-only)
+is not built there: on that table the row allows no caller at all, and the
+removed-call control is skipped. Every caller file must exist in the tree,
+so a rename cannot make a row vacuous on every kernel.
+
 Rows today: kernel_cpu_offset, the user_entry.S helper that reads TPIDR_EL1
 (#638 stage 2; the compiler has no builtin for it, DECISIONS 2026-10-25), and
 process.tkb's scheduled_process_set_exec_inode, the bare-usize store of the
-judged exec inode (#1106; the token cannot cross the user_entry.S return).
+judged exec inode (#1106; the token cannot cross the user_entry.S return),
+and kernel_ddb_dcache_clean_invalidate, the user_entry.S dc civac helper
+used only by rp1_gem.tkb's DDB RX look (#1095; no compiler builtin,
+DECISIONS 2026-10-25).
 Lexically, scripts/check_mpidr_reads.py is the sibling for MPIDR_EL1.
 
 Exit code only (0 = pass, 1 = fail).
@@ -32,7 +40,8 @@ import sys
 import call_graph_table
 from pass_line import report_pass
 
-LIST = pathlib.Path(__file__).resolve().parent / "allowed_callers.tsv"
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+LIST = ROOT / "scripts" / "allowed_callers.tsv"
 
 
 class ListError(Exception):
@@ -56,6 +65,9 @@ def read_list(path: pathlib.Path = LIST) -> list[dict]:
             if not sep or not file or not function:
                 raise ListError(f"{path.name}:{number}: caller {caller!r} "
                                 "is not file:function")
+            if not (ROOT / file).is_file():
+                raise ListError(f"{path.name}:{number}: caller file {file} "
+                                "does not exist")
             allowed.add((file, function))
         if name in names:
             raise ListError(f"{path.name}:{number}: duplicate check {name}")
@@ -67,8 +79,14 @@ def read_list(path: pathlib.Path = LIST) -> list[dict]:
     return rules
 
 
+def built_allowed(rule: dict, table: list[dict]) -> set:
+    """The allowed callers whose file this kernel compiles."""
+    files = {row["file"] for row in table}
+    return {pair for pair in rule["allowed"] if pair[0] in files}
+
+
 def problems_in(rule: dict, table: list[dict]) -> list[str]:
-    helper, allowed = rule["helper"], rule["allowed"]
+    helper, allowed = rule["helper"], built_allowed(rule, table)
     problems = []
     seen = set()
     for row in table:
@@ -86,7 +104,7 @@ def problems_in(rule: dict, table: list[dict]) -> list[str]:
 
 
 def controls_fail(rule: dict, table: list[dict]) -> list[str]:
-    helper, allowed = rule["helper"], rule["allowed"]
+    helper, allowed = rule["helper"], built_allowed(rule, table)
     failed = []
     for field, label in (("callees", "a planted call"),
                          ("values", "a planted function-pointer reference")):
@@ -97,6 +115,8 @@ def controls_fail(rule: dict, table: list[dict]) -> list[str]:
         victim[field] = victim[field] + [helper + "@-"]
         if not problems_in(rule, planted):
             failed.append(f"{label} from {victim['name']}")
+    if not allowed:
+        return failed
     gone = [dict(row) for row in table]
     for row in gone:
         if (row["file"], row["name"]) in allowed:
@@ -136,7 +156,7 @@ def main() -> int:
             failed = True
     if failed:
         return 1
-    callers = sum(len(rule["allowed"]) for rule in rules)
+    callers = sum(len(built_allowed(rule, table)) for rule in rules)
     report_pass("allowed-callers",
                 f"{len(rules)} guarded functions "
                 f"({', '.join(r['helper'] for r in rules)}) are called only "

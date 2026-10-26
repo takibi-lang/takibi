@@ -296,10 +296,12 @@ def validate_capture(received: bytes, prompt_count: int, timeline: Timeline,
     # GitHub issue #529. The synthetic topology is a QEMU control; what only
     # this lane can say is that the derivation runs on the board's own
     # snapshot and decodes it the same way -- same header, same trailer, no
-    # platform-specific numbers.
+    # platform-specific numbers. GitHub issue #1095: GEM's lock-free RX
+    # look cleans and invalidates the descriptor line, so frame-pending is
+    # yes or no on the board too, never unknown.
     if re.search(r"^ddb: wait current=\d+ state=[a-z-]+ reason=[a-z-]+"
                  r"( queued=\d+( low-water=\d+)?|"
-                 r" frame-pending=(yes|no|unknown) "
+                 r" frame-pending=(yes|no) "
                  r"connection-pending=(yes|no|unknown))? awaited=[01]$",
                  text, re.MULTILINE) is None:
         raise timeline.bail("RPi5 DDB did not render the wait header")
