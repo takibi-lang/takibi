@@ -193,6 +193,31 @@
         "assembly_lines": "assembly is a leaf: #1080 removed user_entry.S action 8, which called back into Takibi",
         "invariant_stop_sites": "value over stop: #1080 ChildExec carries the argv page, retiring NotChildOrPending, ArgvPageMissing and the occupied-slot stop"
       }
+    },
+    {
+      "date": "2026-10-26",
+      "head": "7af4f816",
+      "counts": {
+        "raw_mint_files": 15,
+        "frame_lines": 12898,
+        "device_semantics_files": 4,
+        "raw_deref_plain": 232,
+        "raw_deref_io": 16,
+        "raw_deref_builtin_region": 113,
+        "unsafe_blocks": 147,
+        "extern_fns": 56,
+        "invariant_stop_sites": 113,
+        "assembly_lines": 2404,
+        "per_cpu_ordinary_arrays": 73,
+        "per_cpu_stores": 6,
+        "raw_cpu_id_calls": 157,
+        "frame_api_ratchet": 8
+      },
+      "changes": {
+        "assembly_lines": "#1138 user_payload_asm.S: the SA_ONSTACK probe handler that records its SP, uc_stack and two sigaltstack answers (EL0 test code)",
+        "extern_fns": "#1138 altstack_probe_handler_address, the EL0 probe handler's address",
+        "unsafe_blocks": "#1138 two EL0 probe result lines written through the raw write ABI (user_payload)"
+      }
     }
   ]
 }
