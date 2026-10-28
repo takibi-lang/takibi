@@ -268,6 +268,31 @@
         "extern_fns": "#1147 shared_probe_mmap, the EL0 probe mmap gate",
         "unsafe_blocks": "#1147 EL0 probe: the shared/private mapping pointers, the reused mapping read, and two result lines through the raw write ABI (user_payload)"
       }
+    },
+    {
+      "date": "2026-10-28",
+      "head": "f53524df",
+      "counts": {
+        "raw_mint_files": 14,
+        "frame_lines": 12246,
+        "device_semantics_files": 4,
+        "raw_deref_plain": 232,
+        "raw_deref_io": 16,
+        "raw_deref_builtin_region": 113,
+        "unsafe_blocks": 151,
+        "extern_fns": 58,
+        "invariant_stop_sites": 113,
+        "assembly_lines": 2434,
+        "per_cpu_ordinary_arrays": 73,
+        "per_cpu_stores": 6,
+        "raw_cpu_id_calls": 157,
+        "frame_api_ratchet": 8
+      },
+      "changes": {
+        "frame_lines": "checked indexing: drivers/block/memory.tkb off the mint list",
+        "raw_mint_files": "checked indexing: drivers/block/memory.tkb off the mint list",
+        "unsafe_blocks": "checked indexing: the run read's raw slice is a checked slice"
+      }
     }
   ]
 }
