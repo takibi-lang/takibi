@@ -468,3 +468,10 @@ condition below applies, and reports the land afterwards.
   mmap region is outside #1079's exec-time page reservation (lazy, as on
   Linux). Cheap multicore and memory safety come first; the memory map is
   cheap to revisit later. [active] #1151 #1079
+- 2026-10-28 #637 stage 3 order: virtio_net keeps its one DDB site in
+  RAW_MINT_FILES (option d); then #1161 (virtio_blk typed queue), #1162 (one
+  mint for device-visible addresses), #1163 (rp1_gem's writes), the IOMMU
+  (#1032), and last #1164, the stopped-machine observation for DDB's ring
+  reads (DDB is irregular; the IOMMU matters more). The file count is a
+  proxy: the trusted core should end as protocol codegen, one address mint
+  and MMU/IOMMU configuration. [active] #637 #1161 #1162 #1163 #1032 #1164
