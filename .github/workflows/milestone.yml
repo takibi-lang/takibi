@@ -1,0 +1,56 @@
+# When the last issue of a milestone closes, open one issue that names the
+# action the maintainer takes at that moment, and assign it to the
+# maintainer (GitHub notifies an assignee by mail). ROADMAP.md, "Two
+# milestones", says which milestones exist and why; the milestone's own
+# description carries the action text. The repository holds only the neutral
+# action; who is written to, and what, stays with the maintainer.
+#
+# Idempotent: an open or closed issue titled "Milestone reached: <title>"
+# means the moment was already announced, and nothing is opened again. The
+# token needs issues: write for that one issue; nothing else is written.
+name: milestone
+
+on:
+  issues:
+    types: [closed]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  announce:
+    if: github.event.issue.milestone != null
+    runs-on: ubuntu-latest
+    steps:
+      - name: Announce a completed milestone
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          MILESTONE_NUMBER: ${{ github.event.issue.milestone.number }}
+          MILESTONE_TITLE: ${{ github.event.issue.milestone.title }}
+          ASSIGNEE: master-q
+        run: |
+          set -euo pipefail
+          open_issues="$(gh api "repos/$REPO/milestones/$MILESTONE_NUMBER" --jq .open_issues)"
+          if [ "$open_issues" != 0 ]; then
+            echo "milestone '$MILESTONE_TITLE' still has $open_issues open issue(s)"
+            exit 0
+          fi
+          export TITLE="Milestone reached: $MILESTONE_TITLE"
+          existing="$(gh api -X GET "repos/$REPO/issues" -f state=all -f per_page=100 \
+            -f "milestone=$MILESTONE_NUMBER" \
+            --jq '[.[] | select(.title == env.TITLE)] | length')"
+          if [ "$existing" != 0 ]; then
+            echo "'$TITLE' already exists; nothing to announce"
+            exit 0
+          fi
+          description="$(gh api "repos/$REPO/milestones/$MILESTONE_NUMBER" --jq .description)"
+          body="$(printf '%s\n\n%s\n\n%s\n\n%s\n' \
+            "Every issue of the milestone \"$MILESTONE_TITLE\" is closed (the last one: #${{ github.event.issue.number }})." \
+            "$description" \
+            "This issue was opened by .github/workflows/milestone.yml; it is the maintainer's reminder and closes when the action has been taken. See ROADMAP.md, \"Two milestones\"." \
+            "Found-by: design")"
+          gh api -X POST "repos/$REPO/issues" \
+            -f title="$TITLE" -f body="$body" -f "assignees[]=$ASSIGNEE" \
+            -F milestone="$MILESTONE_NUMBER" --jq .html_url

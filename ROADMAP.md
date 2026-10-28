@@ -245,6 +245,28 @@ next one taken. The done record of the previous queue is in HISTORY.md
 
 Items are ordered within each band as well as between bands.
 
+### Two milestones (maintainer, 2026-10-28)
+
+Two moments on this roadmap are the maintainer's to act on, not a
+territory's, and each is a GitHub milestone so that the moment is announced
+by the repository (`.github/workflows/milestone.yml` opens one issue,
+assigned to the maintainer, when a milestone's last issue closes) rather
+than noticed by whoever happens to be reading.
+
+- **kernel landed** (milestone 1): #638 and its stages #992 and #993 (the
+  preemption flip), on #1159 (the globals ratchet at zero, the flip's
+  precondition); #1157 (the trusted-base ledger as a dated series, #986
+  slice 1); #1160 (verification stage 2 complete, #954); #1158 (the
+  distribution-benchmark load recorded beside Linux, #742 stage 1). When
+  all are closed: the maintainer posts the kernel to Hacker News and starts
+  the first paper.
+- **language settled** (milestone 2): #1010 (the lossless printer and
+  `takibi fmt`), then #1009 (the syntax edition). When both are closed: the
+  maintainer starts looking for co-authors and co-developers in earnest.
+
+A worker that closes one of these issues says so on the issue; the
+coordinator checks the milestone after the land (`coordinate` skill).
+
 ### Awaiting the maintainer
 
 Decisions the queues above stop at; each is recorded in DECISIONS.md when

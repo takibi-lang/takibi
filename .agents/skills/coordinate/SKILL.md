@@ -114,6 +114,12 @@ refuses any branch but `main`).
    where `<name>` is `$TAKIBI_SESSION-wt-<worktree directory name>`.
    Move the batch file's reviewed sections under a `reviewed` heading or
    start a new batch.
+   If the landed branch closed an issue that belongs to a GitHub milestone
+   (ROADMAP.md, "Two milestones"), read the milestone's open count
+   (`gh api repos/takibi-lang/takibi/milestones --jq '.[] | "\(.title) \(.open_issues)"'`)
+   and, at zero, tell the maintainer in the conversation which milestone was
+   reached and the action its description names; the workflow opens the
+   reminder issue, this is the same news said at once.
 
 ## 4. Pause and restart (for example a host reboot)
 
