@@ -3257,3 +3257,28 @@ fn mmap_region_pool_space_stats() -> (usize, usize, usize, usize) !{unsafe} {
     mmap_region_pool_unlock(guard);
     return sample;
 }
+
+// GitHub issue #1151: the boot suite's end-of-run page accounting. The
+// region pages `target` has mapped with the L3 tables that map them, and the
+// pages the bitmap pool holds.
+fn mmap_region_resident_pages(target: AddressSpaceRoot) -> usize {
+    let mut count: usize = 0;
+    for branch: usize in 0..<USER_L2_BRANCH_COUNT {
+        if (branch >= MMAP_REGION_FIRST_PAGE / USER_L3_PAGE_COUNT &&
+            branch < (MMAP_REGION_FIRST_PAGE + MMAP_REGION_PAGES) / USER_L3_PAGE_COUNT &&
+            address_space_l3_branch_physical(target, branch) != 0) {
+            count = count + 1;
+        }
+    }
+    for k: usize in 0..<MMAP_REGION_PAGES {
+        if (process_image_pte_read(target, MMAP_REGION_FIRST_PAGE + k) != 0) {
+            count = count + 1;
+        }
+    }
+    return count;
+}
+
+fn mmap_region_pool_pages() -> usize !{unsafe} {
+    let (chunks, capacity, live, bytes) = mmap_region_pool_space_stats();
+    return bytes / PAGE_SIZE;
+}

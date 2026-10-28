@@ -141,6 +141,24 @@ private let mut address_space_baseline: usize;
 private let mut image_record_baseline: usize;
 private let mut fd_context_baseline: usize;
 private let mut page_baseline: usize;
+// GitHub issue #1151: PID 1's root key, for the pages its mmap region holds
+// at the end of the run. PID 1 is permanent, and its mappings are taken
+// after the baseline: mmap used to hand out pages of the heap arena exec had
+// already mapped, and now maps region pages on first touch.
+private let mut page_baseline_init_root: usize;
+
+// What PID 1's mmap region holds: its resident region pages and the bitmap
+// pool's chunks (PID 1's bitmap is the only one left once every fixture
+// process is reaped; a chunk held for another would still count as a leak
+// through the pool-space view's nonfree count).
+private fn kernel_init_mmap_region_pages() -> usize !{unsafe} {
+    if (page_baseline_init_root == 0 ||
+        address_space_root_key_valid(page_baseline_init_root) == false) {
+        return mmap_region_pool_pages();
+    }
+    return mmap_region_resident_pages(address_space_root_of_key(page_baseline_init_root)) +
+           mmap_region_pool_pages();
+}
 private let mut init_boot_fixture_reported: bool;
 // The reaped child's exit status, printed by kernel_init_script_success_evidence.
 private let mut init_boot_fixture_status: ProcessEnd;
@@ -818,8 +836,8 @@ fn kernel_init_boot_fixture_poll(current_authority: borrow ProcessCurrent[curren
     kernel_boot_log("\n");
     kernel_console_measure_report();
     kernel_log_ring_report();
-    if (page_allocator_live_count() - kernel_process_spare_stack_run_pages() ==
-            page_baseline) {
+    if (page_allocator_live_count() - kernel_process_spare_stack_run_pages() -
+            kernel_init_mmap_region_pages() == page_baseline) {
         kernel_boot_log("resources: pages=0\n");
         // GitHub issue #376: reported beside the other
         // end-of-run resource facts, and for the same
@@ -829,6 +847,17 @@ fn kernel_init_boot_fixture_poll(current_authority: borrow ProcessCurrent[curren
         kernel_stack_watermark_report();
     } else {
         kernel_boot_log("resources: pages leaked\n");
+        // GitHub issue #1151: by how much, so a leak is sized before it is
+        // looked for.
+        kernel_boot_log("resources: live=");
+        uart_put_udec(page_allocator_live_count());
+        kernel_boot_log(" spare=");
+        uart_put_udec(kernel_process_spare_stack_run_pages());
+        kernel_boot_log(" init_mmap=");
+        uart_put_udec(kernel_init_mmap_region_pages());
+        kernel_boot_log(" baseline=");
+        uart_put_udec(page_baseline);
+        kernel_boot_log("\n");
     }
     kernel_pool_space_report("bounded_end");
     kernel_syscall_persistent_shell_start();
@@ -1731,6 +1760,8 @@ private fn kernel_init_process_start(mount: Ext2Mount, image: Ext2ExecImage) !{u
             // thread runs on root 0), so one of each is added.
             page_baseline = page_allocator_live_count() -
                 kernel_process_spare_stack_run_pages();
+            page_baseline_init_root = root_slot_word(address_space_root_slot(
+                scheduled_process_address_space_root_lookup(init_slot)));
             address_space_baseline = address_space_baseline + 1;
             image_record_baseline = image_record_baseline + 1;
             kernel_process_boot_handoff();
