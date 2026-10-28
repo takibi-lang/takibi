@@ -8,6 +8,9 @@ import subprocess
 import sys
 import tempfile
 
+sys.dont_write_bytecode = True
+from pass_line import report_pass
+
 SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prune_worktrees.py")
 ENV = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
            GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
@@ -25,8 +28,10 @@ def write(path, text, mode="w"):
 
 def main():
     failures = []
+    checked = [0]
 
     def expect(cond, what):
+        checked[0] += 1
         if not cond:
             failures.append(what)
 
@@ -98,7 +103,9 @@ def main():
         print(f"FAIL prune-worktrees control: {f}", file=sys.stderr)
     if failures:
         return 1
-    print("PASS prune-worktrees controls")
+    report_pass("prune-worktrees-controls",
+                f"{checked[0]} expectations: landed removed; unmerged, dirty, busy kept",
+                expectations=checked[0])
     return 0
 
 
