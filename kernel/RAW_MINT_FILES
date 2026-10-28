@@ -11,6 +11,8 @@ kernel/boot/fdt.tkb
 kernel/drivers/block/virtio_blk.tkb
 kernel/drivers/net/rp1_gem.tkb
 kernel/drivers/net/virtio_net.tkb
+# virtio_net: 1 site left, DDB used-index read, #1164 (its queues are a
+# typed global written through checked indexes since 2026-10-28, #637).
 kernel/kernel/stack_poison.tkb
 kernel/mm/memory_map.tkb
 kernel/mm/user_memory.tkb

@@ -359,6 +359,11 @@ rules globally.
   export of a device span, is `kernel/platform/rpi5/usb_xhci_bus.tkb`.
   `kernel/drivers/block/memory.tkb` left the list too (2026-10-26, #637):
   its USB run read slices `block_run_data` with a compiler-proved bound.
+  `kernel/drivers/net/virtio_net.tkb` keeps one raw site (2026-10-28, #637):
+  its descriptor tables and avail rings are a typed global written through
+  checked indexes, and its span export is virtio_blk.tkb's
+  `virtio_span_address`; what stays is DDB's lock-free acquire load of the
+  RX used index, which #1164 (a stopped device observation) retires.
   A snapshot observation (decision E1) trusts its lowering's validity test:
   that an element whose ownership marker says "written" (for an xHCI event
   ring, a Cycle bit equal to the consumer cycle state) was completely
