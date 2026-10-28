@@ -321,6 +321,14 @@ slowcheck:
 	@$(NICE_HEAVY) bash scripts/run_check_lane.sh slowcheck
 	@bash scripts/lane_timing.sh end slowcheck 0
 
+## prune-worktrees: remove finished worker worktrees under .claude/worktrees
+## whose branch is fully in origin/main, whose tree has no tracked changes,
+## and that no process uses (GitHub issue #1165). Coordinator-run only, after
+## a worker reports done and its work landed; WORKTREES="a b" limits it.
+.PHONY: prune-worktrees
+prune-worktrees:
+	@python3 scripts/prune_worktrees.py $(WORKTREES)
+
 # -- linux_user/ (host-native Linux/AMD64 environment-independent tests) -----
 # See AGENTS.md's "Where Should a New Test Go?": this directory holds
 # compiled-AND-EXECUTED integration tests whose pass/fail does not depend on

@@ -107,11 +107,15 @@ refuses any branch but `main`).
    to the worker: `git switch -C main origin/main` (main is clean during a
    land, and the branch keeps its commits). Do not use `git reset --hard`;
    user and project settings deny it.
-6. After a green land: `git worktree remove <worktree>` (agent worktrees
-   are locked, so this needs `-f -f`, which the maintainer may have to run), delete the branch,
-   and release its port block:
-   `bash -c '. scripts/qemu_session_ports.sh; qemu_session_release_block <name>'`
-   where `<name>` is `$TAKIBI_SESSION-wt-<worktree directory name>`.
+6. After a worker reports done and its work landed, run
+   `make prune-worktrees WORKTREES=<worktree directory name>` (#1165;
+   without `WORKTREES` it considers every worktree under .claude/worktrees).
+   It unlocks and removes the worktree and deletes its branch only when the
+   branch has no patch outside origin/main, the tree has no tracked changes,
+   and no process has its cwd or an open file inside it, and prints what it
+   kept and why. Not after a land alone: a worker may land one slice and go
+   on in the same worktree. The port block needs no step: the next
+   `qemu_session_claim_block` drops the row of a worktree that is gone.
    Move the batch file's reviewed sections under a `reviewed` heading or
    start a new batch.
    If the landed branch closed an issue that belongs to a GitHub milestone
