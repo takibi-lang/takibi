@@ -462,3 +462,9 @@ condition below applies, and reports the land afterwards.
   under CLA.md (a broad license grant, copyright kept by the
   contributor), in place before the first external contribution. Sponsors
   go to the parent organization, Metasepi. [active]
+- 2026-10-28 #1151 option (A): mmap gets its own region apart from the brk
+  heap, MMAP_REGION_PAGES = 4096 (16 MiB), mapped on first touch, with its
+  own per-process bitmap held by reference; brk keeps its 128 pages. The
+  mmap region is outside #1079's exec-time page reservation (lazy, as on
+  Linux). Cheap multicore and memory safety come first; the memory map is
+  cheap to revisit later. [active] #1151 #1079
