@@ -293,6 +293,32 @@
         "raw_mint_files": "checked indexing: drivers/block/memory.tkb off the mint list",
         "unsafe_blocks": "checked indexing: the run read's raw slice is a checked slice"
       }
+    },
+    {
+      "date": "2026-10-28",
+      "head": "dec46e25",
+      "counts": {
+        "raw_mint_files": 14,
+        "frame_lines": 12241,
+        "device_semantics_files": 4,
+        "raw_deref_plain": 227,
+        "raw_deref_io": 16,
+        "raw_deref_builtin_region": 113,
+        "unsafe_blocks": 150,
+        "extern_fns": 58,
+        "invariant_stop_sites": 113,
+        "assembly_lines": 2434,
+        "per_cpu_ordinary_arrays": 73,
+        "per_cpu_stores": 6,
+        "raw_cpu_id_calls": 157,
+        "frame_api_ratchet": 7
+      },
+      "changes": {
+        "frame_api_ratchet": "frame API: virtio_net_span_address retired, callers use virtio_blk.tkb's virtio_span_address",
+        "frame_lines": "checked indexing: virtio_net's queues are a typed global, its span export removed",
+        "raw_deref_plain": "checked indexing: virtio_net's five descriptor and avail-ring pointer writes",
+        "unsafe_blocks": "frame API: virtio_net_span_address's dma_span_address assertion removed"
+      }
     }
   ]
 }
