@@ -44,8 +44,6 @@ use "kernel/drivers/net/virtio_net_tx_wait.tkb";
 use "kernel/drivers/net/virtio_net_tx_dma.tkb";
 
 
-// The descriptor table (8 x 16 bytes) and the avail ring (22 bytes).
-const VIRTIO_QUEUE_BYTES: usize = 256;
 
 const QNUM: isize = 8; // virtqueue depth for both the RX and TX queues
 
@@ -134,6 +132,16 @@ struct packed VirtqAvail {
     ring: [u16; QNUM];
 }
 
+// One queue's descriptor table (8 x 16 bytes) and avail ring (20 bytes),
+// padded to the 256 bytes the queue has always taken. The driver writes
+// both through checked indexes; the device reads them at the addresses
+// virtio_queue_setup programs (#637: no pointer arithmetic).
+struct packed VirtqNetQueue {
+    desc: [VirtqDesc; QNUM];
+    avail: VirtqAvail;
+    reserved: [u8; 108];
+}
+
 const VIRTQ_DESC_F_WRITE: i32 = 2; // device writes into this buffer (RX only)
 
 const VIRTIO_NET_F_MAC: u32 = 32; // bit 5: device exposes its MAC in Config space
@@ -168,8 +176,8 @@ const RX_BUF_SIZE_USIZE: usize = 1536;
 // 1.x, 5.1.6): 12 bytes, not the legacy 10.
 const VIRTIO_NET_HDR_LEN: usize = 12;
 
-let mut rx_queue_mem: [u8; VIRTIO_QUEUE_BYTES] align(64);
-let mut tx_queue_mem: [u8; VIRTIO_QUEUE_BYTES] align(64);
+// The RX (0) and TX (1) queues.
+let mut virtio_net_queues: [VirtqNetQueue; 2] align(64);
 // The used rings' addresses as programmed (RX, TX), for DDB and the native
 // fixture's stand-in device.
 let mut virtio_net_used_addr: [usize; 2];
@@ -242,14 +250,14 @@ fn virtio_negotiate(features_low: u32) -> bool {
 
 // Queue `queue_idx` at its descriptor/avail array and its used ring; false
 // when the device offers fewer than QNUM entries or the ring is not Ready.
-fn virtio_queue_setup(queue_idx: i32, queue_mem: *u8, used_queue: usize) -> bool !{unsafe} {
-    virtio_net_regs.queue_sel = queue_idx;
+fn virtio_queue_setup(queue: {0..<2 as usize}, used_queue: usize) -> bool !{unsafe} {
+    virtio_net_regs.queue_sel = queue as i32;
     if (virtio_net_regs.queue_num_max < QNUM as u32) { return false; }
     virtio_net_regs.queue_num = QNUM as i32;
     let used: usize = virtio_used_go(used_queue);
     if (used == 0) { return false; }
-    let desc: usize = queue_mem as usize;
-    let avail: usize = desc + (QNUM as usize) * sizeof(VirtqDesc);
+    let desc: usize = &virtio_net_queues[queue].desc as usize;
+    let avail: usize = &virtio_net_queues[queue].avail as usize;
     virtio_net_regs.queue_desc_low = (desc & 0xFFFFFFFF) as u32;
     virtio_net_regs.queue_desc_high = (desc >> 32) as u32;
     virtio_net_regs.queue_driver_low = (avail & 0xFFFFFFFF) as u32;
@@ -257,8 +265,7 @@ fn virtio_queue_setup(queue_idx: i32, queue_mem: *u8, used_queue: usize) -> bool
     virtio_net_regs.queue_device_low = (used & 0xFFFFFFFF) as u32;
     virtio_net_regs.queue_device_high = (used >> 32) as u32;
     virtio_net_regs.queue_ready = 1;
-    if (queue_idx == 0) { virtio_net_used_addr[0] = used; }
-    else { virtio_net_used_addr[1] = used; }
+    virtio_net_used_addr[queue] = used;
     return true;
 }
 
@@ -271,24 +278,18 @@ fn virtio_notify(queue_idx: i32) {
     virtio_net_regs.queue_notify = queue_idx;
 }
 
-fn desc_set(queue_mem: *u8, i: isize, addr: usize, len: isize, flags: i32) {
-    let descs: *VirtqDesc = queue_mem as *VirtqDesc;
-    descs[i].addr = addr;
-    descs[i].len = len as u32;
-    descs[i].flags = flags as u16;
+fn desc_set(queue: {0..<2 as usize}, i: {0..<8 as usize}, addr: usize, len: isize, flags: i32) {
+    virtio_net_queues[queue].desc[i].addr = addr;
+    virtio_net_queues[queue].desc[i].len = len as u32;
+    virtio_net_queues[queue].desc[i].flags = flags as u16;
 }
 
-fn avail_ring_set(queue_mem: *u8, slot: isize, desc_idx: isize) {
-    let avail_off: isize = QNUM * (sizeof(VirtqDesc) as isize);
-    let ring: *u16 = (queue_mem + avail_off
-        + (offsetof(VirtqAvail, ring) as isize)) as *u16;
-    ring[slot] = desc_idx as u16;
+fn avail_ring_set(queue: {0..<2 as usize}, slot: {0..<8 as usize}, desc_idx: {0..<8 as usize}) {
+    virtio_net_queues[queue].avail.ring[slot] = desc_idx as u16;
 }
 
-fn avail_publish(queue_mem: *u8, new_idx: VirtioRingIndex) {
-    let avail_off: isize = QNUM * (sizeof(VirtqDesc) as isize);
-    let avail: *VirtqAvail = (queue_mem + avail_off) as *VirtqAvail;
-    avail.idx = new_idx;
+fn avail_publish(queue: {0..<2 as usize}, new_idx: VirtioRingIndex) {
+    virtio_net_queues[queue].avail.idx = new_idx;
     dma_publish();
 }
 
@@ -322,8 +323,8 @@ fn net_init() -> NetInitResult {
     if (virtio_net_regs.version != VIRTIO_MMIO_VERSION_MODERN ||
         virtio_pkts_claim() == false ||
         virtio_negotiate(VIRTIO_NET_F_MAC) == false ||
-        virtio_queue_setup(0, rx_queue_mem as *u8, VIRTIO_USED_NET_RX) == false ||
-        virtio_queue_setup(1, tx_queue_mem as *u8, VIRTIO_USED_NET_TX) == false) {
+        virtio_queue_setup(0, VIRTIO_USED_NET_RX) == false ||
+        virtio_queue_setup(1, VIRTIO_USED_NET_TX) == false) {
         virtio_net_regs.status = VIRTIO_STATUS_FAILED;
         init_once_cancel(&net_init_once, init_guard);
         return NetInitResult::Failed;
@@ -335,10 +336,10 @@ fn net_init() -> NetInitResult {
             init_once_cancel(&net_init_once, init_guard);
             return NetInitResult::Failed;
         }
-        avail_ring_set(rx_queue_mem as *u8, i as isize, i as isize);
+        avail_ring_set(0, i, i);
     }
     rx_avail_idx = (QNUM as u16) as VirtioRingIndex;
-    avail_publish(rx_queue_mem as *u8, rx_avail_idx);
+    avail_publish(0, rx_avail_idx);
     virtio_notify(0);
 
     virtio_net_ready = true;
@@ -444,14 +445,14 @@ private fn virtio_net_rx_refill() {
     for i: usize in 0..<8 {
         let index: {0..<8 as usize} = i % 8;
         if (rx_desc_pkt[index] == VIRTIO_PKT_NONE && virtio_net_rx_post(index)) {
-            let rx_slot: isize = ((rx_avail_idx as u16) as isize) % QNUM;
-            avail_ring_set(rx_queue_mem as *u8, rx_slot, index as isize);
+            let rx_slot: {0..<8 as usize} = ((rx_avail_idx as u16) as usize) % 8;
+            avail_ring_set(0, rx_slot, index);
             rx_avail_idx = virtio_ring_index_next(rx_avail_idx);
             posted = true;
         }
     }
     if (posted) {
-        avail_publish(rx_queue_mem as *u8, rx_avail_idx);
+        avail_publish(0, rx_avail_idx);
         virtio_notify(0);
     }
 }
@@ -475,16 +476,10 @@ private fn virtio_net_rx_post(index: {0..<8 as usize}) -> bool {
             virtio_pkt_park(pool_slot, VirtioPktHeld::RxPosted(posted));
         }
     }
-    desc_set(rx_queue_mem as *u8, index as isize, virtio_pkt_published_address(),
+    desc_set(0, index, virtio_pkt_published_address(),
              RX_BUF_SIZE, VIRTQ_DESC_F_WRITE);
     rx_desc_pkt[index] = pool_slot;
     return true;
-}
-
-// A device span's address for a descriptor: QEMU virt's DMA addresses are
-// physical, with no bus offset.
-fn virtio_net_span_address(span: borrow DmaDeviceSpan) -> usize !{unsafe} {
-    return unsafe { dma_span_address(span) };
 }
 
 fn net_rx_len(packet: borrow NetPacket[pb, po]) -> {0..<1515 as i32} {
@@ -730,10 +725,10 @@ private fn virtio_net_send_built(slot: usize, keep: bool,
 // tx publication took from its TxPosted owner's span.
 fn virtio_net_tx_ring(length: usize) {
     let address: usize = virtio_pkt_published_address();
-    desc_set(tx_queue_mem as *u8, 0, address, length as isize, 0);
-    avail_ring_set(tx_queue_mem as *u8, 0, 0);
+    desc_set(1, 0, address, length as isize, 0);
+    avail_ring_set(1, 0, 0);
     tx_avail_idx = virtio_ring_index_next(tx_avail_idx);
-    avail_publish(tx_queue_mem as *u8, tx_avail_idx);
+    avail_publish(1, tx_avail_idx);
     atomic_word_store(&virtio_tx_irq_flag, 0);
     virtio_notify(1);
 }

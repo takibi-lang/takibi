@@ -1086,7 +1086,7 @@ left).
 
 | Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
 | --- | --- | --- | --- | --- |
-| `Acquire`, `Poll` | `net_rx_acquire`, `virtio_net_rx_refill`, `gem_rearm_rx` | a used entry's buffer becomes the turn's packet and the ring is refilled in the same call; with no frame, the call still refills | the used-ring snapshot and descriptor ids -- irrelevant to `RingNeverDrains`: only how many buffers are posted matters; `gem_rearm_rx` recording the posted index only after the arm (#959) -- irrelevant to `RingNeverDrains`: the count posted per call is unchanged | `8e390cce08d7` |
+| `Acquire`, `Poll` | `net_rx_acquire`, `virtio_net_rx_refill`, `gem_rearm_rx` | a used entry's buffer becomes the turn's packet and the ring is refilled in the same call; with no frame, the call still refills | the used-ring snapshot and descriptor ids -- irrelevant to `RingNeverDrains`: only how many buffers are posted matters; `gem_rearm_rx` recording the posted index only after the arm (#959) -- irrelevant to `RingNeverDrains`: the count posted per call is unchanged | `3e6d42001a39` |
 | `Release` | `net_rx_release` | the buffer returns Free and the ring is refilled | nothing | `666fb798b7de` |
 | `Reply`, `TxComplete` | `net_rx_send_reply`, `net_tx_complete`, `virtio_net_tx_finish`, `gem_tx_finish` | the turn's packet goes out as TX; completion returns it Free, or Kept for a kept send, and refills | the transmit itself and its bounded wait -- modelled elsewhere: `FixedDmaOwnership.Timeout` | `7c1db1dae4c3` |
 | `SendBuilt` | `net_transmit_ready` | a kernel-built frame takes a Free buffer; completion refills | the payload copy -- irrelevant to `RingNeverDrains`: it does not move a buffer | `eaed3f557a5d` |

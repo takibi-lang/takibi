@@ -57,8 +57,6 @@ RATCHET = {
         (EXPORT, "bus-address export of a DMA span to the device"),
     ("kernel/drivers/net/rp1_gem.tkb", "gem_span_bus_address"):
         (EXPORT, "bus-address export of a DMA span to the device"),
-    ("kernel/drivers/net/virtio_net.tkb", "virtio_net_span_address"):
-        (EXPORT, "bus-address export of a DMA span to the device"),
     ("kernel/platform/rpi5/usb_xhci_bus.tkb", "xhci_span_bus_address"):
         (EXPORT, "bus-address export of a DMA span to the device"),
     # Physical addresses that callers turn back into access: these move to

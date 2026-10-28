@@ -75,7 +75,7 @@ private let mut virtio_pkt_rx_seen: bool = false;
 
 fn virtio_pkt_post_rx(s: borrow VirtioPkt_RxPosted[b, o, 1, r]) !{unsafe} {
     let mut span: DmaDeviceSpan = VirtioPkt_RxPosted_span(s);
-    virtio_pkt_addr = virtio_net_span_address(span);
+    virtio_pkt_addr = virtio_span_address(span);
     virtio_pkt_rx_seen = false;
 }
 fn virtio_pkt_received(s: borrow VirtioPkt_RxPosted[b, o, 1, r])
@@ -95,7 +95,7 @@ fn virtio_pkt_send(s: borrow VirtioPkt_TxPosted[b, o, 1, r]) !{unsafe} {
 }
 private fn virtio_pkt_tx_posted(s: borrow VirtioPkt_TxPosted[b, o, 1, r]) !{unsafe} {
     let mut span: DmaDeviceSpan = VirtioPkt_TxPosted_span(s);
-    virtio_pkt_addr = virtio_net_span_address(span);
+    virtio_pkt_addr = virtio_span_address(span);
 }
 fn virtio_pkt_sent(s: borrow VirtioPkt_TxPosted[b, o, 1, r]) -> VirtioPkt_virtio_pkt_sent_Raw {
     if (virtio_net_tx_used_pending()) {
