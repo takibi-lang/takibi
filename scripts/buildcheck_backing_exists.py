@@ -104,7 +104,6 @@ private fn fd_exists_control() {
         UnifiedFdResult::Invalid => {}
         UnifiedFdResult::Ok => {}
     }
-    unified_process_mmap_release_page(0, evidence, 0);
 }
 """, None),
         ("FD wrong process", fd, """
@@ -113,7 +112,10 @@ private fn fd_exists_control() {
         ProcessFdContextReady::Missing => { return; }
         ProcessFdContextReady::Ready(ready) => { ready }
     };
-    unified_process_mmap_release_page(1, evidence, 0);
+    match unified_process_heap_configure(1, evidence, 0) {
+        UnifiedFdResult::Invalid => {}
+        UnifiedFdResult::Ok => {}
+    }
 }
 """, ("static value mismatch",)),
         ("foreign FD view mint", Path(args.sources[-1]), """
@@ -124,9 +126,7 @@ private fn fd_exists_control() -> ProcessFdContextExists[0] {
     ])
     for function, extra, result in [
             ("unified_process_heap_range_configure", "0, 0", "UnifiedFdResult"),
-            ("unified_process_heap_configure", "0", "UnifiedFdResult"),
-            ("unified_process_mmap_take", "1", "UnifiedMmapResult"),
-            ("unified_process_mmap_release_page", "0", None)]:
+            ("unified_process_heap_configure", "0", "UnifiedFdResult")]:
         count = 4 if "range" in function else 3
         signature = "" if result is None else f" -> {result}"
         statement = "" if result is None else "return "

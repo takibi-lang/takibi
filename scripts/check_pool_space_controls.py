@@ -25,7 +25,7 @@ def main():
     samples = parse_capture(text)
     assert accounting('backing', samples['boot']['backing']) == (40, 3320, 672, 24, 8, 32, 4112)
     assert accounting('process', samples['boot']['process']) == (872, 6976, 72, 24, 0, 248, 8216)
-    assert len(render_tsv(samples).splitlines()) == 21
+    assert len(render_tsv(samples).splitlines()) == 23
     # Retained-log replays must not double-count allocator observations.
     assert parse_capture(text + '[0.123] pool space: begin=boot\n') == samples
     empty = text.replace('chunks=1 capacity=84 nonfree=1 bytes=4096',

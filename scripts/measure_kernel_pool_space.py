@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 POOLS = {'process', 'tcp', 'retx', 'frame', 'backing', 'image',
-         'fd_context', 'fd_block', 'object', 'pipe'}
+         'fd_context', 'fd_block', 'object', 'pipe', 'mmap_region'}
 FIELDS = ('object', 'pool', 'slot', 'chunk', 'chunks', 'capacity', 'nonfree', 'bytes')
 ROW = re.compile(r'pool space: name=(\w+)' + ''.join(
     rf' {field}=(\d+)' for field in FIELDS))

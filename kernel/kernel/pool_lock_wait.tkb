@@ -27,7 +27,7 @@
 use "kernel/lib/atomic_word.tkb";
 use "kernel/lib/execution_model.tkb";
 
-const POOL_LOCK_WAIT_POOLS: usize = 10;
+const POOL_LOCK_WAIT_POOLS: usize = 11;
 
 variant PoolLockWaitPool {
     Process;
@@ -40,6 +40,7 @@ variant PoolLockWaitPool {
     TcpFrame;
     TcpRetx;
     Pipe;
+    MmapRegion;
 }
 
 inline fn pool_lock_wait_index(pool: PoolLockWaitPool) -> {0..<POOL_LOCK_WAIT_POOLS as usize} {
@@ -54,6 +55,7 @@ inline fn pool_lock_wait_index(pool: PoolLockWaitPool) -> {0..<POOL_LOCK_WAIT_PO
         PoolLockWaitPool::TcpFrame => { return 7; }
         PoolLockWaitPool::TcpRetx => { return 8; }
         PoolLockWaitPool::Pipe => { return 9; }
+        PoolLockWaitPool::MmapRegion => { return 10; }
     }
 }
 
@@ -103,6 +105,7 @@ fn pool_lock_wait_log() !{unsafe} {
     pool_lock_wait_log_one(" tcp_frame=", PoolLockWaitPool::TcpFrame);
     pool_lock_wait_log_one(" tcp_retx=", PoolLockWaitPool::TcpRetx);
     pool_lock_wait_log_one(" pipe=", PoolLockWaitPool::Pipe);
+    pool_lock_wait_log_one(" mmap_region=", PoolLockWaitPool::MmapRegion);
     kernel_boot_log("\n");
 }
 

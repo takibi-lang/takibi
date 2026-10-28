@@ -294,8 +294,9 @@ State: **HAND**. The numbers behind it are CHECKED (const) below.
 | `USER_SPACE_PAGE_COUNT` | 262144 | `kernel/mm/address_space.tkb` | CHECKED (const) |
 | `USER_RANGE_WINDOW` | `0x40000000` | `kernel/mm/user_memory.tkb` | CHECKED (const) |
 | `PROCESS_HEAP_PAGES_DEFAULT` | 128 | `kernel/mm/process_image.tkb` | CHECKED (const) |
-| `PROCESS_STACK_LOW_STATIC` | 448 | `kernel/mm/process_image.tkb` | CHECKED (const) |
-| `PROCESS_STACK_LOW_DYNAMIC` | 504 | `kernel/mm/process_image.tkb` | CHECKED (const) |
+| `MMAP_REGION_FIRST_PAGE` | 196608 | `kernel/mm/process_image.tkb` | CHECKED (const) |
+| `MMAP_REGION_PAGES` | 4096 | `kernel/mm/process_image.tkb` | CHECKED (const) |
+| `PROCESS_STACK_LOW` | 200705 | `kernel/mm/process_image.tkb` | CHECKED (const) |
 
 Derived, so **HAND** -- each is arithmetic on the rows above, stated here
 because these are the numbers people actually quote:
@@ -349,18 +350,23 @@ State: **HAND** throughout; the constants are CHECKED (const) above.
 | Window size | `USER_RANGE_WINDOW` = 1 GiB | what `user_range_check` accepts |
 | Window pages | `USER_SPACE_PAGE_COUNT` = 262144 | 1 GiB at `PAGE_SIZE` |
 | Text / rodata / rw | from page 0 upward | laid out by the ELF loader, `kernel/mm/process_image.tkb` |
-| Heap | above the image | `PROCESS_HEAP_PAGES_DEFAULT` = 128 pages, one arena: `brk` grows up from its bottom, anonymous `mmap` takes free pages from its top down, and `munmap` returns them to it (a per-process bitmap in `kernel/kernel/fd_table.tkb`) |
-| Stack guard | one unmapped page below `stack_low_page` | the only genuinely unmapped guard in this kernel |
-| Stack, lowest page | `stack_low_page` | 448 (static) or 504 (dynamic/musl), per image |
+| Heap | above the image | `PROCESS_HEAP_PAGES_DEFAULT` = 128 pages, mapped at exec; `brk` moves inside it and nothing else takes from it |
+| mmap region | pages `MMAP_REGION_FIRST_PAGE` (196608, 768 MiB in) to 200703 | `MMAP_REGION_PAGES` = 4096 pages, 16 MiB: anonymous `mmap` takes free pages from its top down and `munmap` gives them back, one bit each in a per-root 512-byte bitmap (`MmapRegionBitmap`, `kernel/mm/process_image.tkb`); a private page is mapped zeroed on its first touch, a shared one at `mmap` |
+| Stack guard | page 200704, unmapped, below `stack_low_page` | between the region and the stack |
+| Stack, lowest page | `stack_low_page` = `PROCESS_STACK_LOW` | 200705 for every image, one guard page above the region |
 | Stack, top page | `USER_SPACE_PAGE_COUNT - 1` | `process_stack_top_page()` |
 
 A page index in this table becomes an address as
 `USER_TEXT_VA + index * PAGE_SIZE`.
 
-The static and dynamic paths differ only in `stack_low_page`, because the
-musl image's own heap reaches higher. Both are bounded virtual
-reservations, not eager allocations: pages inside the interval are mapped
-on an EL0 translation fault.
+The layout is the same for a static image and a dynamic pair:
+`process_layout_assumption` asserts that two images of
+`DISTRO_ELF_SPAN_MAX` and the heap end below the mmap region, and that the
+region, the guard page and the initial stack pages fit below the window's
+last page. The region and the stack are virtual reservations, not eager
+allocations: their pages are mapped on an EL0 translation fault (and, for a
+held mmap page, when a syscall's user range reaches it). Neither is part of
+execve's page reservation (#1079), which counts only what exec maps.
 
 ## Device MMIO
 

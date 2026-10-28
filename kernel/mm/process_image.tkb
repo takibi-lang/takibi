@@ -180,6 +180,12 @@ struct ProcessImageRecord {
     clone_vm_outstanding: bool;
     clone_vm_source_root: usize;
     clone_vm_page_count: usize;
+    // GitHub issue #1151: the (address, generation) of this root's mmap
+    // region bitmap, or 0 while no mmap has taken a page. A reference, not
+    // the 512 bytes themselves: this record is copied by value on every
+    // read (#1103/#1108).
+    mmap_bitmap: usize;
+    mmap_bitmap_generation: usize;
 }
 
 // GitHub issue #392: pooled, not an array keyed by process slot. See
@@ -380,7 +386,7 @@ private fn process_image_record_value(
         pinned: sink RegionPinned(ProcessImageRecord)[images],
         note_missing: bool) -> ProcessImageRecord !{unsafe} {
     let mut value: ProcessImageRecord = {
-        0, 0, false, 0, 0, 0, false, 0, false, 0, 0
+        0, 0, false, 0, 0, 0, false, 0, false, 0, 0, 0, 0
     };
     match pinned {
         RegionPinned(ProcessImageRecord)::Stale => {
@@ -410,6 +416,8 @@ private fn process_image_record_copy(record: borrow &mut ProcessImageRecord)
     value.clone_vm_outstanding = record.clone_vm_outstanding;
     value.clone_vm_source_root = record.clone_vm_source_root;
     value.clone_vm_page_count = record.clone_vm_page_count;
+    value.mmap_bitmap = record.mmap_bitmap;
+    value.mmap_bitmap_generation = record.mmap_bitmap_generation;
     return value;
 }
 
@@ -639,7 +647,7 @@ private fn process_image_record_reset(record: borrow &mut ProcessImageRecord) {
     record.stack_growth_active = false;
     record.stack_lowest_l3 = process_stack_top_page();
     record.stack_top_page = process_stack_top_page();
-    record.stack_low_page = PROCESS_STACK_LOW_STATIC;
+    record.stack_low_page = PROCESS_STACK_LOW;
     record.heap_page_count = PROCESS_HEAP_PAGES_DEFAULT;
     record.exec_image_installed = false;
     record.exec_image_page_count = 0;
@@ -759,6 +767,14 @@ fn process_image_record_release_words(root: usize,
             kernel_boot_log("process image: releasing a stale root record handle\n");
         }
         RegionPinned(ProcessImageRecord)::Pinned(pin) => {
+            // GitHub issue #1151: the root's mmap bitmap goes with it.
+            let image_record: &mut ProcessImageRecord = region_pin_record(pin);
+            let mut bitmap: ProcessPoolHandleWords = {
+                image_record.mmap_bitmap, image_record.mmap_bitmap_generation
+            };
+            image_record.mmap_bitmap = 0;
+            image_record.mmap_bitmap_generation = 0;
+            mmap_region_free_words(bitmap);
             match region_retire(pin) {
                 RegionRetire(ProcessImageRecord)::Pending => {}
                 RegionRetire(ProcessImageRecord)::Retired(record) => {
@@ -885,38 +901,39 @@ fn process_stack_top_page() -> usize {
     return USER_SPACE_PAGE_COUNT - 1;
 }
 
-// Seeds for ProcessImageRecord.stack_low_page -- the lowest page the stack may
-// ever occupy, and the ONLY part of the layout that genuinely differs
-// between the two loader paths. These are now defaults consulted once
-// each, where an image is mapped, rather than global constants consulted
-// as decision points from a dozen scattered sites; every reader goes
-// through process_image_record_read(root).stack_low_page.
+// The user window's fixed layout, in pages from USER_TEXT_VA (GitHub issue
+// #1151, maintainer option (A)): the image and its brk heap from page 0 up,
+// then a gap, the mmap region at MMAP_REGION_FIRST_PAGE, one unmapped guard
+// page, and the stack from PROCESS_STACK_LOW up to the window's last page.
+// Nothing above the heap is mapped until it is touched: the region's pages
+// on the fault of a page an mmap holds, the stack's on the fault of a page
+// inside its reservation (#198).
 //
-// Static path: the floor is a bounded virtual reservation, not an eager
-// allocation. It leaves the static BusyBox heap (ending at page 419)
-// below the reservation; an image whose heap ends higher moves the floor
-// (process_stack_floor, #1041). The unmapped page immediately below it is the
-// guard page; #198 only maps pages in this interval after an EL0
-// translation fault.
-const PROCESS_STACK_LOW_STATIC: usize = 448;
-// Dynamic/musl path: a smaller reservation, since that image's own heap
-// reaches higher.
-const PROCESS_STACK_LOW_DYNAMIC: usize = 504;
+// The mmap region: 4096 pages (16 MiB) at a fixed base three quarters into
+// the window, above the largest image pair DISTRO_ELF_SPAN_MAX admits and
+// its heap. Its pages are taken and given back one bit each in a per-root
+// bitmap (MmapRegionBitmap, below); brk never reaches it.
+const MMAP_REGION_FIRST_PAGE: usize = 196608;
+const MMAP_REGION_PAGES: usize = 4096;
+// The lowest page the stack may ever occupy, one guard page above the mmap
+// region: MMAP_REGION_FIRST_PAGE + MMAP_REGION_PAGES + 1 (asserted below).
+// The same for every image -- the static and dynamic paths used to differ
+// here (448 and 504) only because their heaps ended at different pages,
+// which a floor above every heap no longer cares about. Seeds
+// ProcessImageRecord.stack_low_page, which every reader goes through.
+const PROCESS_STACK_LOW: usize = 200705;
 
-// GitHub issue #1041: the floor an image's own heap leaves. A seed above is
-// the floor for any image whose heap ends below it; a larger image (an
-// 8 MiB stress-ng) moves the floor to one page past its heap, and that page
-// is the guard between the two. The validator's DISTRO_ELF_SPAN_MAX keeps
-// the result below the initial stack pages, for both a static image and a
-// dynamic pair (two images, each at most that span, plus the 64 KiB
-// alignment gap between them).
-fn process_stack_floor(seed: usize, heap_last_page: usize) -> usize {
+fn process_layout_assumption() {
+    static_assert(PROCESS_STACK_LOW == MMAP_REGION_FIRST_PAGE + MMAP_REGION_PAGES + 1,
+                  "#1151: the stack floor sits one guard page above the mmap region");
     static_assert((2 * DISTRO_ELF_SPAN_MAX + 0x10000) / PAGE_SIZE +
-                  PROCESS_HEAP_PAGES_DEFAULT + 1 +
-                  PROCESS_DYNAMIC_STACK_INITIAL_PAGES < USER_SPACE_PAGE_COUNT - 1,
-                  "#1041: two images of the largest span, the heap, the guard and the initial stack fit the 1 GiB space");
-    if (heap_last_page + 1 > seed) { return heap_last_page + 1; }
-    return seed;
+                  PROCESS_HEAP_PAGES_DEFAULT <= MMAP_REGION_FIRST_PAGE,
+                  "#1041/#1151: two images of the largest span and the heap end below the mmap region");
+    static_assert(PROCESS_STACK_LOW + PROCESS_DYNAMIC_STACK_INITIAL_PAGES <
+                  USER_SPACE_PAGE_COUNT - 1,
+                  "#1151: the initial stack pages fit above the stack floor");
+    static_assert(MMAP_REGION_PAGES == MMAP_REGION_WORDS * 64,
+                  "#1151: the mmap bitmap has one bit per region page");
 }
 // BYTES, not pages: how much room at the very top of the initial stack
 // page is reserved for the argv/envp/auxv block. Unrelated to the address
@@ -1015,6 +1032,8 @@ fn process_clone_vm_rollback(dest_space: AddressSpaceRoot) {
         process_image_set_stack_lowest_l3(root, evidence, process_stack_top_page());
         process_image_set_clone_vm_outstanding(root, evidence, false);
         process_image_set_clone_vm_page_count(root, evidence, 0);
+        // GitHub issue #1151: its region's pages went with the mappings.
+        mmap_region_clear(root, evidence);
     }
 }
 
@@ -1071,6 +1090,11 @@ fn process_image_clone_vm_begin(source_space: AddressSpaceRoot,
         process_image_record_read(clone_src).stack_low_page);
     process_image_set_heap_page_count(dest, evidence,
         process_image_record_read(clone_src).heap_page_count);
+    // GitHub issue #1151: the child holds the parent's mmap pages.
+    if (mmap_region_clone(clone_src, dest, evidence) == false) {
+        process_clone_vm_rollback(dest_space);
+        return ProcessCloneVmResult::OutOfMemory;
+    }
     // Tracks the lowest growth-region L3 index actually copied below, so the
     // child's watermark reflects its real page table rather than being
     // inherited verbatim from the parent's own
@@ -1318,7 +1342,7 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
     process_image_set_active_page_count(0, evidence, 1);
     process_image_set_stack_lowest_l3(0, evidence, process_stack_top_page());
     process_image_set_stack_top_page(0, evidence, process_stack_top_page());
-    process_image_set_stack_low_page(0, evidence, PROCESS_STACK_LOW_STATIC);
+    process_image_set_stack_low_page(0, evidence, PROCESS_STACK_LOW);
     process_image_set_heap_page_count(0, evidence, PROCESS_HEAP_PAGES_DEFAULT);
 
     let mut ok: bool = true;
@@ -2075,6 +2099,14 @@ fn process_image_handle_data_abort(target: AddressSpaceRoot, esr: usize,
         let index: usize = (fault_address - USER_TEXT_VA) / PAGE_SIZE;
         return address_space_resolve_cow(target, index);
     }
+    // GitHub issue #1151: the first touch of a page an mmap holds maps it.
+    if (exception_class == 0x24 &&
+        (fault_status == 0x06 || fault_status == 0x07) &&
+        fault_address >= USER_TEXT_VA &&
+        mmap_region_contains((fault_address - USER_TEXT_VA) / PAGE_SIZE)) {
+        return mmap_region_fault_in(
+            target, (fault_address - USER_TEXT_VA) / PAGE_SIZE);
+    }
     // A missing PTE inside an existing L3 is a level-3 translation fault
     // (0x07). A stack expansion into an unpopulated lazy-L3 branch faults
     // one level earlier (0x06); both are valid only after the range checks
@@ -2279,7 +2311,7 @@ private fn process_image_pair_probe(slot: borrow ProcessImageSlot[0],
         ProcessImageRecordReady::Ready(ready) => { ready }
     };
     process_image_set_stack_top_page(root, evidence, process_stack_top_page());
-    process_image_set_stack_low_page(root, evidence, PROCESS_STACK_LOW_DYNAMIC);
+    process_image_set_stack_low_page(root, evidence, PROCESS_STACK_LOW);
     process_image_set_heap_page_count(root, evidence, PROCESS_HEAP_PAGES_DEFAULT);
     match process_image_map_segments(slot, target, primary, 0, 0) {
         ProcessImageSegmentsResult::Invalid => {
@@ -2312,17 +2344,14 @@ private fn process_image_pair_probe(slot: borrow ProcessImageSlot[0],
                     let heap_last_page: usize =
                         heap_first_page +
                         process_image_record_read(root).heap_page_count;
-                    // GitHub issue #1041: as the static path's floor.
-                    process_image_set_stack_low_page(root, evidence,
-                        process_stack_floor(PROCESS_STACK_LOW_DYNAMIC,
-                                            heap_last_page));
+                    // GitHub issue #1151: as the static path's region.
+                    mmap_region_clear(root, evidence);
                     // The exact page counts that used to be asserted here
                     // were busybox-extras + musl's; any musl binary maps
                     // through this path since #591, so the layout is what
                     // is checked, and the boot's httpd_loader view keeps
                     // the measured numbers for that pair.
-                    if (heap_last_page >=
-                        process_image_record_read(root).stack_low_page ||
+                    if (heap_last_page > MMAP_REGION_FIRST_PAGE ||
                         process_image_record_read(root).stack_low_page >=
                             process_stack_top_page() -
                             PROCESS_DYNAMIC_STACK_INITIAL_PAGES) {
@@ -2495,7 +2524,7 @@ private fn process_image_map_current(slot: borrow ProcessImageSlot[0],
     process_image_set_active_page_count(root, evidence, 0);
     process_image_set_stack_lowest_l3(root, evidence, process_stack_top_page());
     process_image_set_stack_top_page(root, evidence, process_stack_top_page());
-    process_image_set_stack_low_page(root, evidence, PROCESS_STACK_LOW_STATIC);
+    process_image_set_stack_low_page(root, evidence, PROCESS_STACK_LOW);
     process_image_set_heap_page_count(root, evidence, PROCESS_HEAP_PAGES_DEFAULT);
     if (plan.extent > USER_SPACE_BYTES) {
         return ProcessImageMapResult::OutOfMemory;
@@ -2513,12 +2542,12 @@ private fn process_image_map_current(slot: borrow ProcessImageSlot[0],
     let heap_first_page: usize = (plan.extent + PAGE_SIZE - 1) / PAGE_SIZE;
     let heap_last_page: usize =
         heap_first_page + process_image_record_read(root).heap_page_count;
-    // GitHub issue #1041: the stack floor moves up past a large image's
-    // heap rather than refusing it; the seed is kept for every image small
-    // enough to fit below it, so their layout is unchanged.
-    process_image_set_stack_low_page(root, evidence,
-        process_stack_floor(PROCESS_STACK_LOW_STATIC, heap_last_page));
-    if (heap_last_page >= process_image_record_read(root).stack_low_page ||
+    // GitHub issue #1151: a fresh image has no mmap; the old image's region
+    // pages went with its root's mappings. The heap ends below the region
+    // (process_layout_assumption for the largest image DISTRO_ELF_SPAN_MAX
+    // admits; checked here as well, since a refusal costs one compare).
+    mmap_region_clear(root, evidence);
+    if (heap_last_page > MMAP_REGION_FIRST_PAGE ||
         process_image_record_read(root).stack_low_page >=
             process_stack_top_page()) {
         process_image_cleanup_root(target);
@@ -2774,5 +2803,457 @@ fn process_image_pool_space_stats() -> (usize, usize, usize, usize) !{unsafe} {
     let guard = process_image_pool_lock(&process_image_pool);
     let sample = region_pool_space_stats(guard);
     process_image_pool_unlock(guard);
+    return sample;
+}
+
+// GitHub issue #1151: the mmap region's bitmap, one bit per region page
+// (bit k of word k / 64 is page MMAP_REGION_FIRST_PAGE + k), set while an
+// mmap holds the page. A held page with no PTE has not been touched yet and
+// reads as zero; the fault, or a syscall's user range, maps it then
+// (mmap_region_fault_in). munmap clears the bit and the PTE.
+//
+// Current limitations (2026-10-28). Keep this list current as call sites
+// change.
+// - ONE WRITER PER ROOT, NOT A LOCK. A root's bitmap is changed only by the
+//   process running on it (mmap, munmap, its own faults), by fork into a
+//   not-yet-runnable child (mmap_region_clone), and by exec and reap of
+//   that process. There are no CLONE_VM threads, so no two cores ever work
+//   on one root's bitmap; a thread that shared a root would need a lock
+//   here first.
+// - PROT IS NOT RECORDED. A held, untouched page faults in read-write, as
+//   every mapping here did before (mmap ignores PROT_NONE and PROT_READ,
+//   and mprotect only downgrades a present page; it populates the range
+//   first).
+// - A SHARED MAPPING IS POPULATED AT MMAP. Its pages must exist before a
+//   fork so that both roots map the same physical page; a page first
+//   touched after the fork would be private to each.
+const MMAP_REGION_WORDS: usize = 64;
+struct MmapRegionBitmap {
+    word: [usize; MMAP_REGION_WORDS];
+}
+private let mut mmap_region_pool: RegionPool(MmapRegionBitmap);
+// Eight 512-byte bitmaps to a page.
+const MMAP_REGION_CHUNK_PAGES: usize = 1;
+
+private fn mmap_region_pool_lock(pool: *RegionPool(MmapRegionBitmap) @ bitmaps)
+        -> RegionPoolGuard(MmapRegionBitmap)[bitmaps] !{unsafe, acquires_lock_39_mmap_region_pool, single_instance_lock, may_block,
+          lock_guard_39_mmap_region_pool} {
+    if (region_pool_lock_contended_hint(pool)) { pool_lock_wait_contended(PoolLockWaitPool::MmapRegion); }
+    return region_pool_lock(pool);
+}
+
+private fn mmap_region_pool_unlock(
+        guard: sink RegionPoolGuard(MmapRegionBitmap)[bitmaps]) {
+    region_pool_unlock(guard);
+}
+
+// Gives every empty chunk back: a bitmap lives as long as one image that
+// mmaps, and the boot's end-of-run accounting checks nothing is held.
+private fn mmap_region_pool_return_empty(
+        guard: borrow RegionPoolGuard(MmapRegionBitmap)[bitmaps]) !{unsafe} {
+    let mut more: bool = true;
+    while (more) {
+        match region_pool_shrink(guard) {
+            RegionShrink(MmapRegionBitmap)::Nothing => { more = false; }
+            RegionShrink(MmapRegionBitmap)::Chunk(bytes) => {
+                let address: usize = region_bytes_address(bytes);
+                region_release(bytes);
+                page_run_transferred_release_physical(
+                    address, MMAP_REGION_CHUNK_PAGES);
+            }
+        }
+    }
+}
+
+private fn mmap_region_slot_free(
+        slot: sink RegionReleaseSlot(MmapRegionBitmap)[p, k]) !{unsafe} {
+    let guard = mmap_region_pool_lock(&mmap_region_pool);
+    match region_slot_adopt(guard, slot) {
+        RegionReleaseAdopt(MmapRegionBitmap)::Foreign(stray) => {
+            process_image_record_missing_note();
+            region_slot_abandon(stray);
+        }
+        RegionReleaseAdopt(MmapRegionBitmap)::Adopted(mine) => {
+            region_free(guard, mine);
+            mmap_region_pool_return_empty(guard);
+        }
+    }
+    mmap_region_pool_unlock(guard);
+}
+
+private fn mmap_region_unpin(pin: sink RegionPin(MmapRegionBitmap)[p, k]) !{unsafe} {
+    match region_unpin(pin) {
+        RegionUnpin(MmapRegionBitmap)::Unpinned => {}
+        RegionUnpin(MmapRegionBitmap)::Last(slot) => { mmap_region_slot_free(slot); }
+    }
+}
+
+private fn mmap_region_pin_words(pool: *RegionPool(MmapRegionBitmap) @ bitmaps,
+                                 words: ProcessPoolHandleWords)
+        -> RegionPinned(MmapRegionBitmap)[bitmaps] !{unsafe} {
+    let guard = mmap_region_pool_lock(pool);
+    let mut handle: RegionHandle(MmapRegionBitmap) =
+        region_handle_from(guard, words.address, words.generation);
+    let pinned = region_pin(guard, handle);
+    mmap_region_pool_unlock(guard);
+    return pinned;
+}
+
+private fn mmap_region_pool_grow(
+        guard: borrow RegionPoolGuard(MmapRegionBitmap)[bitmaps]) -> bool !{unsafe} {
+    match page_alloc_contiguous(MMAP_REGION_CHUNK_PAGES, PageOwnerTag::PoolChunk) {
+        PageRunAllocResult::OutOfMemory => { return false; }
+        PageRunAllocResult::Allocated(run_owner) => {
+            let base: usize = page_run_physical_address(run_owner);
+            let RegionBytes::Assumed(chunk) =
+                page_run_into_region(run_owner) else {};
+            match region_pool_grow(guard, chunk) {
+                RegionGrow(MmapRegionBitmap)::Grown => { return true; }
+                RegionGrow(MmapRegionBitmap)::TooSmall(back) => {
+                    region_release(back);
+                    page_run_transferred_release_physical(
+                        base, MMAP_REGION_CHUNK_PAGES);
+                    return false;
+                }
+            }
+        }
+    }
+}
+
+// A fresh, all-clear bitmap's (address, generation), or (0, 0) when the page
+// allocator has nothing for a chunk.
+private fn mmap_region_alloc() -> ProcessPoolHandleWords !{unsafe} {
+    let mut words: ProcessPoolHandleWords = { 0, 0 };
+    let guard = mmap_region_pool_lock(&mmap_region_pool);
+    let mut grown: bool = true;
+    match region_alloc(guard) {
+        RegionPoolAlloc(MmapRegionBitmap)::Allocated(fresh) => {
+            region_slot_zero(fresh);
+            let mut handle: RegionHandle(MmapRegionBitmap) = region_give(guard, fresh);
+            words.address = region_handle_address(handle);
+            words.generation = region_handle_generation(handle);
+            mmap_region_pool_unlock(guard);
+            return words;
+        }
+        RegionPoolAlloc(MmapRegionBitmap)::Exhausted => { grown = false; }
+        RegionPoolAlloc(MmapRegionBitmap)::Full => {}
+    }
+    if (grown && mmap_region_pool_grow(guard)) {
+        match region_alloc(guard) {
+            RegionPoolAlloc(MmapRegionBitmap)::Allocated(fresh) => {
+                region_slot_zero(fresh);
+                let mut handle: RegionHandle(MmapRegionBitmap) = region_give(guard, fresh);
+                words.address = region_handle_address(handle);
+                words.generation = region_handle_generation(handle);
+            }
+            RegionPoolAlloc(MmapRegionBitmap)::Exhausted => {}
+            RegionPoolAlloc(MmapRegionBitmap)::Full => {}
+        }
+    }
+    mmap_region_pool_unlock(guard);
+    return words;
+}
+
+// Retires the bitmap `words` names; the last pin frees it.
+private fn mmap_region_free_words(words: ProcessPoolHandleWords) !{unsafe} {
+    if (words.address == 0) { return; }
+    match mmap_region_pin_words(&mmap_region_pool, words) {
+        RegionPinned(MmapRegionBitmap)::Stale => { process_image_record_missing_note(); }
+        RegionPinned(MmapRegionBitmap)::Pinned(pin) => {
+            match region_retire(pin) {
+                RegionRetire(MmapRegionBitmap)::Pending => {}
+                RegionRetire(MmapRegionBitmap)::Retired(slot) => {
+                    mmap_region_slot_free(slot);
+                }
+            }
+        }
+    }
+}
+
+fn process_image_set_mmap_bitmap(root: usize @ identity,
+        evidence: borrow ProcessImageRecordExists[identity],
+        value: ProcessPoolHandleWords) !{unsafe} {
+    let RegionPinned(ProcessImageRecord)::Pinned(pin) =
+            process_image_record_pin(&process_image_pool, root) else {
+        RegionPinned(ProcessImageRecord)::Stale => {
+            process_image_record_missing_note();
+            return;
+        }
+    };
+    let record: &mut ProcessImageRecord = region_pin_record(pin);
+    record.mmap_bitmap = value.address;
+    record.mmap_bitmap_generation = value.generation;
+    process_image_record_unpin(pin);
+}
+
+private fn mmap_region_words_of(root: usize) -> ProcessPoolHandleWords !{unsafe} {
+    let mut value: ProcessImageRecord = process_image_record_read(root);
+    let mut words: ProcessPoolHandleWords = {
+        value.mmap_bitmap, value.mmap_bitmap_generation
+    };
+    return words;
+}
+
+inline fn mmap_region_contains(page: usize) -> bool {
+    return page >= MMAP_REGION_FIRST_PAGE &&
+           page < MMAP_REGION_FIRST_PAGE + MMAP_REGION_PAGES;
+}
+
+private fn mmap_bitmap_held(bitmap: borrow &mut MmapRegionBitmap, offset: usize) -> bool {
+    let at: usize = offset / 64;
+    if (at < MMAP_REGION_WORDS) {
+        return ((bitmap.word[at] >> (offset % 64)) & 1) == 1;
+    }
+    return false;
+}
+
+private fn mmap_bitmap_set(bitmap: borrow &mut MmapRegionBitmap, offset: usize,
+                           held: bool) {
+    let at: usize = offset / 64;
+    if (at < MMAP_REGION_WORDS) {
+        let bit: usize = 1 << (offset % 64);
+        if (held) { bitmap.word[at] = bitmap.word[at] | bit; }
+        else { bitmap.word[at] = bitmap.word[at] & ~bit; }
+    }
+}
+
+// The root's bitmap, allocated by the first mmap that needs one.
+private fn mmap_region_words_ensured(root: usize @ identity,
+        evidence: borrow ProcessImageRecordExists[identity])
+        -> ProcessPoolHandleWords !{unsafe} {
+    let mut words: ProcessPoolHandleWords = mmap_region_words_of(root);
+    if (words.address != 0) { return words; }
+    let mut fresh: ProcessPoolHandleWords = mmap_region_alloc();
+    if (fresh.address != 0) { process_image_set_mmap_bitmap(root, evidence, fresh); }
+    return fresh;
+}
+
+must_use variant MmapRegionTake {
+    Full;
+    // The first page of the run, an index into the user window.
+    Taken(usize);
+}
+
+// Takes `pages` contiguous free region pages, as high as they fit (Linux
+// maps top-down too). The pages hold no PTE: munmap and exec cleared them.
+fn mmap_region_take(root: usize @ identity, pages: usize) -> MmapRegionTake !{unsafe} {
+    if (pages == 0 || pages > MMAP_REGION_PAGES) { return MmapRegionTake::Full; }
+    let evidence = match process_image_record_ensure(root) {
+        ProcessImageRecordReady::Missing => { return MmapRegionTake::Full; }
+        ProcessImageRecordReady::Ready(ready) => { ready }
+    };
+    let mut words: ProcessPoolHandleWords = mmap_region_words_ensured(root, evidence);
+    if (words.address == 0) { return MmapRegionTake::Full; }
+    let RegionPinned(MmapRegionBitmap)::Pinned(pin) =
+            mmap_region_pin_words(&mmap_region_pool, words) else {
+        RegionPinned(MmapRegionBitmap)::Stale => { return MmapRegionTake::Full; }
+    };
+    let bitmap: &mut MmapRegionBitmap = region_pin_record(pin);
+    // `run` free pages end at `offset + run`, counting down from the top.
+    let mut run: usize = 0;
+    let mut offset: usize = MMAP_REGION_PAGES;
+    while (offset > 0) {
+        offset = offset - 1;
+        if (mmap_bitmap_held(bitmap, offset)) {
+            run = 0;
+        } else {
+            run = run + 1;
+            if (run == pages) {
+                for k: usize in 0..<MMAP_REGION_PAGES {
+                    if (k >= offset && k < offset + pages) {
+                        mmap_bitmap_set(bitmap, k, true);
+                    }
+                }
+                mmap_region_unpin(pin);
+                return MmapRegionTake::Taken(MMAP_REGION_FIRST_PAGE + offset);
+            }
+        }
+    }
+    mmap_region_unpin(pin);
+    return MmapRegionTake::Full;
+}
+
+// MAP_FIXED inside the region: the pages [first, first + pages) become
+// held, whatever held them before (the caller cleared their PTEs, as
+// Linux's MAP_FIXED unmaps what it replaces). False when the range leaves
+// the region or no bitmap can be had.
+fn mmap_region_take_fixed(root: usize @ identity, first: usize, pages: usize) -> bool !{unsafe} {
+    if (pages == 0 || mmap_region_contains(first) == false ||
+        pages > MMAP_REGION_FIRST_PAGE + MMAP_REGION_PAGES - first) {
+        return false;
+    }
+    let evidence = match process_image_record_ensure(root) {
+        ProcessImageRecordReady::Missing => { return false; }
+        ProcessImageRecordReady::Ready(ready) => { ready }
+    };
+    let mut words: ProcessPoolHandleWords = mmap_region_words_ensured(root, evidence);
+    if (words.address == 0) { return false; }
+    let RegionPinned(MmapRegionBitmap)::Pinned(pin) =
+            mmap_region_pin_words(&mmap_region_pool, words) else {
+        RegionPinned(MmapRegionBitmap)::Stale => { return false; }
+    };
+    let bitmap: &mut MmapRegionBitmap = region_pin_record(pin);
+    let offset: usize = first - MMAP_REGION_FIRST_PAGE;
+    for k: usize in 0..<MMAP_REGION_PAGES {
+        if (k >= offset && k < offset + pages) { mmap_bitmap_set(bitmap, k, true); }
+    }
+    mmap_region_unpin(pin);
+    return true;
+}
+
+// Whether an mmap holds region page `page` of this root.
+fn mmap_region_holds(root: usize, page: usize) -> bool !{unsafe} {
+    if (mmap_region_contains(page) == false) { return false; }
+    let mut words: ProcessPoolHandleWords = mmap_region_words_of(root);
+    if (words.address == 0) { return false; }
+    let RegionPinned(MmapRegionBitmap)::Pinned(pin) =
+            mmap_region_pin_words(&mmap_region_pool, words) else {
+        RegionPinned(MmapRegionBitmap)::Stale => { return false; }
+    };
+    let bitmap: &mut MmapRegionBitmap = region_pin_record(pin);
+    let held: bool = mmap_bitmap_held(bitmap, page - MMAP_REGION_FIRST_PAGE);
+    mmap_region_unpin(pin);
+    return held;
+}
+
+// munmap of region pages [first, last]: each held page's PTE goes (its
+// reference to the physical page with it, so a shared page is freed by its
+// last holder), then its bit. A page outside the region is not this
+// function's.
+fn mmap_region_unmap(target: AddressSpaceRoot, first: usize, last: usize) !{unsafe} {
+    let root: usize = root_slot_word(address_space_root_slot(target));
+    let mut words: ProcessPoolHandleWords = mmap_region_words_of(root);
+    if (words.address == 0) { return; }
+    let RegionPinned(MmapRegionBitmap)::Pinned(pin) =
+            mmap_region_pin_words(&mmap_region_pool, words) else {
+        RegionPinned(MmapRegionBitmap)::Stale => { return; }
+    };
+    let bitmap: &mut MmapRegionBitmap = region_pin_record(pin);
+    for k: usize in 0..<MMAP_REGION_PAGES {
+        let page: usize = MMAP_REGION_FIRST_PAGE + k;
+        if (page >= first && page <= last && mmap_bitmap_held(bitmap, k)) {
+            address_space_pte_clear(target, page);
+            mmap_bitmap_set(bitmap, k, false);
+        }
+    }
+    mmap_region_unpin(pin);
+}
+
+// The root's whole region given up: exec (the old image's PTEs went with
+// its mappings) and the record's release.
+fn mmap_region_clear(root: usize @ identity,
+        evidence: borrow ProcessImageRecordExists[identity]) !{unsafe} {
+    let mut words: ProcessPoolHandleWords = mmap_region_words_of(root);
+    if (words.address == 0) { return; }
+    let mut absent: ProcessPoolHandleWords = { 0, 0 };
+    process_image_set_mmap_bitmap(root, evidence, absent);
+    mmap_region_free_words(words);
+}
+
+// fork: the child holds what the parent holds. Its PTEs are the clone's
+// copies; an untouched page is untouched in both and faults in privately in
+// each, as a private mapping should. False when no bitmap can be had.
+fn mmap_region_clone(source: usize, dest: usize @ identity,
+        evidence: borrow ProcessImageRecordExists[identity]) -> bool !{unsafe} {
+    mmap_region_clear(dest, evidence);
+    let mut from: ProcessPoolHandleWords = mmap_region_words_of(source);
+    if (from.address == 0) { return true; }
+    let mut to: ProcessPoolHandleWords = mmap_region_alloc();
+    if (to.address == 0) { return false; }
+    process_image_set_mmap_bitmap(dest, evidence, to);
+    let RegionPinned(MmapRegionBitmap)::Pinned(from_pin) =
+            mmap_region_pin_words(&mmap_region_pool, from) else {
+        RegionPinned(MmapRegionBitmap)::Stale => { return false; }
+    };
+    let RegionPinned(MmapRegionBitmap)::Pinned(to_pin) =
+            mmap_region_pin_words(&mmap_region_pool, to) else {
+        RegionPinned(MmapRegionBitmap)::Stale => {
+            mmap_region_unpin(from_pin);
+            return false;
+        }
+    };
+    let source_bitmap: &mut MmapRegionBitmap = region_pin_record(from_pin);
+    let dest_bitmap: &mut MmapRegionBitmap = region_pin_record(to_pin);
+    for w: usize in 0..<MMAP_REGION_WORDS {
+        dest_bitmap.word[w] = source_bitmap.word[w];
+    }
+    mmap_region_unpin(to_pin);
+    mmap_region_unpin(from_pin);
+    return true;
+}
+
+// Maps a zeroed page read-write at region page `page`, which an mmap holds
+// and which has no PTE. False otherwise, or when there is no page.
+private fn mmap_region_page_in(target: AddressSpaceRoot,
+        bitmap: borrow &mut MmapRegionBitmap, page: usize) -> bool {
+    if (mmap_region_contains(page) == false ||
+        mmap_bitmap_held(bitmap, page - MMAP_REGION_FIRST_PAGE) == false ||
+        process_image_pte_read(target, page) != 0) {
+        return false;
+    }
+    match page_alloc(PageOwnerTag::UserPage) {
+        PageAllocResult::OutOfMemory => { return false; }
+        PageAllocResult::Allocated(fresh) => {
+            let bytes = page_bytes(fresh);
+            for i: usize in 0..<4096 { bytes[i] = 0; }
+            return process_image_install_page(target, fresh, page, USER_RW_XN_FLAGS);
+        }
+    }
+}
+
+// The EL0 translation fault of region page `page`. False (a SIGSEGV for
+// the caller to deliver) when no mmap holds the page.
+fn mmap_region_fault_in(target: AddressSpaceRoot, page: usize) -> bool !{unsafe} {
+    let root: usize = root_slot_word(address_space_root_slot(target));
+    let mut words: ProcessPoolHandleWords = mmap_region_words_of(root);
+    if (words.address == 0) { return false; }
+    let RegionPinned(MmapRegionBitmap)::Pinned(pin) =
+            mmap_region_pin_words(&mmap_region_pool, words) else {
+        RegionPinned(MmapRegionBitmap)::Stale => { return false; }
+    };
+    let bitmap: &mut MmapRegionBitmap = region_pin_record(pin);
+    let mapped: bool = mmap_region_page_in(target, bitmap, page);
+    mmap_region_unpin(pin);
+    return mapped;
+}
+
+// Maps every held, untouched region page of the user range [address,
+// address + length), as the EL0 faults would have: a syscall's user range
+// check, mprotect, a shared mmap and MADV_POPULATE_* call it before they
+// read the PTEs. False when a page could not be had; a range that misses
+// the region costs two compares.
+fn mmap_region_populate(target: AddressSpaceRoot, address: usize,
+                        length: usize) -> bool !{unsafe} {
+    if (length == 0 || address < USER_TEXT_VA) { return true; }
+    let (span_ok, first, last) = user_range_l3_span(address, length);
+    if (span_ok == false || last < MMAP_REGION_FIRST_PAGE ||
+        first >= MMAP_REGION_FIRST_PAGE + MMAP_REGION_PAGES) {
+        return true;
+    }
+    let root: usize = root_slot_word(address_space_root_slot(target));
+    let mut words: ProcessPoolHandleWords = mmap_region_words_of(root);
+    if (words.address == 0) { return true; }
+    let RegionPinned(MmapRegionBitmap)::Pinned(pin) =
+            mmap_region_pin_words(&mmap_region_pool, words) else {
+        RegionPinned(MmapRegionBitmap)::Stale => { return false; }
+    };
+    let bitmap: &mut MmapRegionBitmap = region_pin_record(pin);
+    let mut complete: bool = true;
+    for k: usize in 0..<MMAP_REGION_PAGES {
+        let page: usize = MMAP_REGION_FIRST_PAGE + k;
+        if (complete && page >= first && page <= last &&
+            mmap_bitmap_held(bitmap, k) &&
+            process_image_pte_read(target, page) == 0) {
+            complete = mmap_region_page_in(target, bitmap, page);
+        }
+    }
+    mmap_region_unpin(pin);
+    return complete;
+}
+
+fn mmap_region_pool_space_stats() -> (usize, usize, usize, usize) !{unsafe} {
+    let guard = mmap_region_pool_lock(&mmap_region_pool);
+    let sample = region_pool_space_stats(guard);
+    mmap_region_pool_unlock(guard);
     return sample;
 }

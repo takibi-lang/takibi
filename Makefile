@@ -937,6 +937,12 @@ linuxcheck: linuxbuild compiler-fuzz
 	 exp=$$(grep '^userspace shared mmap: ' kernel/tests/common/views/linux_file.expected); \
 	 if [ -n "$$exp" ] && [ "$$got" = "$$exp" ]; then echo "PASS  shared mapping probe (host Linux)"; \
 	 else echo "FAIL  shared mapping probe (host Linux)"; echo "  expected: $$exp"; echo "  got:      $$got"; exit 1; fi
+	@# GitHub issue #1151: the mmap region probe, the same way.
+	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) --no-print-directory $(KERNEL_MMAP_REGION_LINUX_ELF)
+	@got=$$(qemu-aarch64 $(KERNEL_MMAP_REGION_LINUX_ELF)); \
+	 exp=$$(grep '^userspace mmap region: ' kernel/tests/common/views/linux_file.expected); \
+	 if [ -n "$$exp" ] && [ "$$got" = "$$exp" ]; then echo "PASS  mmap region probe (host Linux)"; \
+	 else echo "FAIL  mmap region probe (host Linux)"; echo "  expected: $$exp"; echo "  got:      $$got"; exit 1; fi
 	@bash scripts/lane_timing.sh end linuxcheck 0
 
 # GitHub issue #1035: the long ext2 tier C runs, outside every lane:
@@ -1063,6 +1069,8 @@ KERNEL_RPI5_USER_PAYLOAD_ELF := $(KERNEL_BUILD_DIR)/user_payload.elf
 KERNEL_SIGALTSTACK_LINUX_ELF := $(KERNEL_BUILD_DIR)/sigaltstack_probe.elf
 # GitHub issue #1147: its shared-mapping probe alone, for host Linux.
 KERNEL_SHARED_MAPPING_LINUX_ELF := $(KERNEL_BUILD_DIR)/shared_mapping_probe.elf
+# GitHub issue #1151: its mmap region probe alone, for host Linux.
+KERNEL_MMAP_REGION_LINUX_ELF := $(KERNEL_BUILD_DIR)/mmap_region_probe.elf
 KERNEL_BUSY_LOOP_TKB     := $(KERNEL_DIR)/arch/arm64/kernel/busy_loop.tkb
 KERNEL_BUSY_LOOP_O       := $(KERNEL_BUILD_DIR)/busy_loop.o
 KERNEL_BUSY_LOOP_A_ELF   := $(KERNEL_BUILD_DIR)/busy_a.elf
@@ -1465,7 +1473,7 @@ endef
 # so the resulting ET_DYN ELF has zero dynamic relocations -- verified
 # empirically before this rule existed (see HISTORY.md's #241 entry).
 $(KERNEL_RPI5_USER_PAYLOAD_TKB_O): $(KERNEL_RPI5_USER_PAYLOAD_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) | $(KERNEL_BUILD_DIR)
-	$(call KERNEL_EL0_COMPILE,initial_user_payload sigaltstack_probe_alone shared_mapping_probe_alone)
+	$(call KERNEL_EL0_COMPILE,initial_user_payload sigaltstack_probe_alone shared_mapping_probe_alone mmap_region_probe_alone)
 
 $(KERNEL_RPI5_USER_PAYLOAD_ASM_O): $(KERNEL_RPI5_USER_PAYLOAD_ASM_S) | $(KERNEL_BUILD_DIR)
 	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
@@ -1480,6 +1488,10 @@ $(KERNEL_SIGALTSTACK_LINUX_ELF): $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5
 
 $(KERNEL_SHARED_MAPPING_LINUX_ELF): $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O)
 	$(LLD) -pie --no-dynamic-linker -e shared_mapping_probe_alone $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O) -o $@
+	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
+
+$(KERNEL_MMAP_REGION_LINUX_ELF): $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O)
+	$(LLD) -pie --no-dynamic-linker -e mmap_region_probe_alone $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O) -o $@
 	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
 
 # GitHub issue #448: the CPU-bound pair /etc/inittab starts. One source and

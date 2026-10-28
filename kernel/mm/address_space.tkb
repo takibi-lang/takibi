@@ -1221,23 +1221,39 @@ fn address_space_mark_shared(root: AddressSpaceRoot, index: usize) -> bool {
     }
 }
 
-// GitHub issue #1147: munmap of a shared page. This root stops sharing it:
-// it gets a private copy (the arena keeps every page mapped, and the next
-// mmap zeroes what it takes, which must not reach a peer), and its
-// reference to the shared page goes, freeing it if this was the last. True
-// when the page at `index` is private afterwards.
-fn address_space_unshare(root: AddressSpaceRoot, index: usize) -> bool !{unsafe} {
-    let pte: usize = address_space_pte_read(root, index);
-    if (address_space_pte_is_shared(pte) == false) { return true; }
-    let physical: usize = pte & USER_PAGE_PHYS_MASK;
-    if (page_mapping_refcount_physical(physical) == 1) {
-        match address_space_pte_write(root, index, pte & ~USER_SHARED_BIT) {
-            AddressSpacePteWriteResult::Invalid => { return false; }
-            AddressSpacePteWriteResult::OutOfMemory => { return false; }
-            AddressSpacePteWriteResult::Written => { return true; }
+// GitHub issue #1151: MADV_DONTNEED of a private page that must stay
+// mapped (a brk heap or stack page, or a read-only one): a zeroed page takes
+// its place with the same permission, write permission for a COW view, and
+// this root's reference to the old page goes. The new mapping is complete
+// before the release, so a failure leaves the old PTE in place.
+fn address_space_replace_with_zero(root: AddressSpaceRoot, index: usize) -> bool !{unsafe} {
+    let old_pte: usize = address_space_pte_read(root, index);
+    if (old_pte == 0) { return true; }
+    let mut flags: usize = old_pte & USER_PTE_PERMISSION_MASK;
+    if (address_space_pte_is_cow(old_pte)) { flags = USER_RW_XN_FLAGS; }
+    match page_alloc(PageOwnerTag::UserPage) {
+        PageAllocResult::OutOfMemory => { return false; }
+        PageAllocResult::Allocated(page) => {
+            let bytes = page_bytes(page);
+            for i: usize in 0..<4096 { bytes[i] = 0; }
+            let new_physical: usize = page_physical_address(page);
+            match address_space_pte_write(root, index, new_physical | flags) {
+                AddressSpacePteWriteResult::Invalid => {
+                    page_free(page);
+                    return false;
+                }
+                AddressSpacePteWriteResult::OutOfMemory => {
+                    page_free(page);
+                    return false;
+                }
+                AddressSpacePteWriteResult::Written => {
+                    page_mapping_install(page);
+                    page_mapping_release_physical(old_pte & USER_PAGE_PHYS_MASK);
+                    return true;
+                }
+            }
         }
     }
-    return address_space_replace_with_copy(root, index, physical);
 }
 
 // Each mapped user page transferred its PageOwner when it was installed.

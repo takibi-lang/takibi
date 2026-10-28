@@ -6,3 +6,5 @@
 ^userspace sigaltstack SS_AUTODISARM:
 ^userspace shared mmap:
 ^userspace statfs and umask:
+^userspace mmap region: 
+^userspace mmap region limits: 

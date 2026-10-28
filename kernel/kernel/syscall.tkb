@@ -85,6 +85,7 @@ const LINUX_MAP_FIXED: usize = 0x10;
 const LINUX_MAP_ANONYMOUS: usize = 0x20;
 const AARCH64_NR_SET_TID_ADDRESS: usize = 96;
 const AARCH64_NR_UNAME: usize = 160;
+const AARCH64_NR_MADVISE: usize = 233;
 const AARCH64_NR_SYSINFO: usize = 179;
 const AARCH64_NR_GETCPU: usize = 168;
 const AARCH64_NR_SCHED_SETAFFINITY: usize = 122;
@@ -1312,32 +1313,160 @@ fn kernel_syscall_heap_set(value: usize) -> bool {
     }
 }
 
-// Give `length` bytes of mapping at `address` back to the arena. A page
-// mprotect made read-only stays held: handing it to a later mapping would
-// need the permission widened again, which this kernel refuses to do.
-fn syscall_munmap_pages(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], address: usize, length: usize) {
+// GitHub issue #1151: munmap of `length` bytes at `address`. The mmap
+// region's held pages lose their PTE and their bit; a page outside the
+// region (the image, the brk heap, the stack) stays mapped, as it did
+// before the region existed.
+fn syscall_munmap_pages(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], address: usize, length: usize) !{unsafe} {
     let (span_ok, first, last) = user_range_l3_span(address, length);
     if (span_ok == false) { return; }
-    let process: usize = kernel_syscall_process_key();
-    let evidence = match unified_fd_context_lookup(process) {
-        ProcessFdContextReady::Missing => { return; }
-        ProcessFdContextReady::Ready(ready) => { ready }
-    };
-    let mut root: AddressSpaceRoot = kernel_process_current_root(current_authority);
-    let slot: usize = root_slot_word(address_space_root_slot(root));
+    mmap_region_unmap(kernel_process_current_root(current_authority), first, last);
+}
+
+// GitHub issue #1151: an anonymous mmap of `rounded` bytes, already checked
+// for its flags. A private mapping takes region pages and maps none of them:
+// each is mapped zeroed on its first touch. A shared one is mapped now (see
+// kernel/mm/process_image.tkb's MmapRegionBitmap limitations) and marked.
+fn syscall_mmap_anonymous(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
+                          hint: usize, rounded: usize, shared: bool,
+                          fixed: bool) -> SyscallAction !{unsafe} {
+    // A shared mapping's pages are marked as such, which the fixed form
+    // below never does. Linux would replace them; this kernel refuses.
+    if (shared && fixed) { return SyscallAction::Resume(LINUX_EINVAL); }
+    let mut root_space: AddressSpaceRoot = kernel_process_current_root(current_authority);
+    let root: usize = root_slot_word(address_space_root_slot(root_space));
+    let pages: usize = rounded / PAGE_SIZE;
+    if (hint != 0 && shared == false) {
+        // musl uses MAP_FIXED to turn the first page of its brk arena into
+        // a guard page. The arena's pages are mapped eagerly, so the
+        // requested address is kept as it is.
+        if (hint >= kernel_syscall_heap_start() &&
+            hint <= kernel_syscall_heap_limit() &&
+            rounded <= kernel_syscall_heap_limit() - hint) {
+            return SyscallAction::Resume(hint);
+        }
+        if (fixed) {
+            if (hint % PAGE_SIZE != 0) { return SyscallAction::Resume(LINUX_EINVAL); }
+            let (span_ok, first, last) = user_range_l3_span(hint, rounded);
+            if (span_ok == false) { return SyscallAction::Resume(LINUX_ENOMEM); }
+            // MAP_FIXED replaces what the range held, as on Linux.
+            mmap_region_unmap(root_space, first, last);
+            if (mmap_region_take_fixed(root, first, pages)) {
+                return SyscallAction::Resume(hint);
+            }
+            return SyscallAction::Resume(LINUX_ENOMEM);
+        }
+        // Without MAP_FIXED a hint is only a hint.
+    }
+    match mmap_region_take(root, pages) {
+        MmapRegionTake::Full => { return SyscallAction::Resume(LINUX_ENOMEM); }
+        MmapRegionTake::Taken(first) => {
+            let address: usize = USER_TEXT_VA + first * PAGE_SIZE;
+            if (shared) {
+                if (mmap_region_populate(root_space, address, rounded) == false ||
+                    syscall_mmap_mark_shared(current_authority, address, rounded) == false) {
+                    syscall_munmap_pages(current_authority, address, rounded);
+                    return SyscallAction::Resume(LINUX_ENOMEM);
+                }
+            }
+            return SyscallAction::Resume(address);
+        }
+    }
+}
+
+// GitHub issue #1151: madvise(2) advice values (include/uapi/asm-generic/
+// mman-common.h).
+const LINUX_MADV_DONTNEED: usize = 4;
+const LINUX_MADV_REMOVE: usize = 9;
+const LINUX_MADV_WIPEONFORK: usize = 18;
+const LINUX_MADV_POPULATE_READ: usize = 22;
+const LINUX_MADV_POPULATE_WRITE: usize = 23;
+const LINUX_MADV_DONTNEED_LOCKED: usize = 24;
+const LINUX_MADV_COLLAPSE: usize = 25;
+
+// Advice this kernel accepts. NORMAL, RANDOM, SEQUENTIAL, WILLNEED, FREE,
+// DONTFORK, DOFORK, MERGEABLE, UNMERGEABLE, HUGEPAGE, NOHUGEPAGE,
+// DONTDUMP, DODUMP, KEEPONFORK, COLD, PAGEOUT and COLLAPSE change nothing a
+// process can observe here, and are taken as no-ops, as a Linux built
+// without the feature behind each takes them (FREE may keep the pages;
+// DONTFORK is the one a child could observe, by reading the page Linux
+// would not have mapped). REMOVE and WIPEONFORK are EINVAL: one needs a
+// shared file mapping, the other a per-page fork flag this kernel does not
+// keep; anything else is EINVAL, as Linux's madvise_behavior_valid says.
+fn syscall_madvise_known(advice: usize) -> bool {
+    if (advice == LINUX_MADV_REMOVE || advice == LINUX_MADV_WIPEONFORK) {
+        return false;
+    }
+    return (advice <= 3) || (advice >= LINUX_MADV_DONTNEED && advice <= 17) ||
+           (advice >= 19 && advice <= LINUX_MADV_COLLAPSE);
+}
+
+// Whether page `index` is anonymous memory of this process: the mmap
+// region, the brk heap, the stack. Image pages are file-backed, and
+// MADV_DONTNEED on them would re-read the file on Linux, which this kernel
+// cannot; it leaves them.
+fn syscall_madvise_anonymous(root: usize, index: usize) -> bool !{unsafe} {
+    if (mmap_region_contains(index)) { return true; }
+    let heap_start: usize = kernel_syscall_heap_start();
+    let heap_limit: usize = kernel_syscall_heap_limit();
+    if (heap_start >= USER_TEXT_VA && heap_limit > heap_start &&
+        index >= (heap_start - USER_TEXT_VA) / PAGE_SIZE &&
+        index < (heap_limit - USER_TEXT_VA) / PAGE_SIZE) {
+        return true;
+    }
+    return index >= process_image_record_read(root).stack_low_page &&
+           index <= process_stack_top_page();
+}
+
+// madvise(addr, len, advice), as Linux's: the advice and the alignment are
+// checked first, a zero length is 0, MADV_DONTNEED leaves every private
+// anonymous page of the range reading zero, the POPULATE pair maps
+// untouched mmap pages, and a range with an unmapped page is ENOMEM after
+// the mapped pages took the advice.
+fn syscall_madvise(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
+                   address: usize, length: usize, advice: usize) -> SyscallAction !{unsafe} {
+    if (syscall_madvise_known(advice) == false || address % PAGE_SIZE != 0) {
+        return SyscallAction::Resume(LINUX_EINVAL);
+    }
+    if (length == 0) { return SyscallAction::Resume(0); }
+    if (length > 0xFFFFFFFFFFFFF000) { return SyscallAction::Resume(LINUX_EINVAL); }
+    let rounded: usize = (length + PAGE_SIZE - 1) & 0xFFFFFFFFFFFFF000;
+    if (address > 0xFFFFFFFFFFFFFFFF - rounded) {
+        return SyscallAction::Resume(LINUX_EINVAL);
+    }
+    let (span_ok, first, last) = user_range_l3_span(address, rounded);
+    if (span_ok == false) { return SyscallAction::Resume(LINUX_ENOMEM); }
+    let mut root_space: AddressSpaceRoot = kernel_process_current_root(current_authority);
+    let root: usize = root_slot_word(address_space_root_slot(root_space));
+    if (advice == LINUX_MADV_POPULATE_READ || advice == LINUX_MADV_POPULATE_WRITE) {
+        if (mmap_region_populate(root_space, address, rounded) == false) {
+            return SyscallAction::Resume(LINUX_ENOMEM);
+        }
+    }
+    let dontneed: bool = advice == LINUX_MADV_DONTNEED ||
+                         advice == LINUX_MADV_DONTNEED_LOCKED;
+    let mut unmapped: bool = false;
     let mut index: usize = first;
     while (index <= last) {
-        // GitHub issue #1147: a shared page is unshared first, so the arena
-        // never holds a page a peer still maps; one that cannot be (no page
-        // for the private copy) stays held, as a read-only page does.
-        if (user_page_writable(address_space_pte_read(root, index)) &&
-            address_space_unshare(root, index)) {
-            unified_process_mmap_release_page(
-                process, evidence,
-                USER_TEXT_VA + index * PAGE_SIZE);
+        let pte: usize = address_space_pte_read(root_space, index);
+        if (pte == 0) {
+            if (mmap_region_holds(root, index) == false) { unmapped = true; }
+        } else if (dontneed && address_space_pte_is_shared(pte) == false &&
+                   syscall_madvise_anonymous(root, index)) {
+            // A shared page keeps its bytes: on Linux the next touch finds
+            // them again in the shared object.
+            if (mmap_region_contains(index) &&
+                (address_space_pte_is_writable(pte) || address_space_pte_is_cow(pte))) {
+                // Untouched again: the next touch maps a zeroed page.
+                address_space_pte_clear(root_space, index);
+            } else if (address_space_replace_with_zero(root_space, index) == false) {
+                return SyscallAction::Resume(LINUX_ENOMEM);
+            }
         }
         index = index + 1;
     }
+    if (unmapped) { return SyscallAction::Resume(LINUX_ENOMEM); }
+    return SyscallAction::Resume(0);
 }
 
 // GitHub issue #1147: getrusage(2). This kernel accounts no CPU time,
@@ -8535,13 +8664,11 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     }
     if (number == 214) {
         if (x0 == 0) { return syscall_finish_current(frame, SyscallAction::Resume(kernel_syscall_heap_break()), current_authority); }
-        // GitHub issue #630: a break that would run into a page an
-        // anonymous mapping holds is refused, and the old break returned,
-        // as Linux does when brk meets a mapping.
+        // GitHub issue #1151: no mapping lives in the heap arena any more
+        // (the mmap region is apart from it), so any break inside it is
+        // granted; one outside is refused and the old break returned.
         if (x0 >= kernel_syscall_heap_start() &&
-            x0 <= kernel_syscall_heap_limit() &&
-            unified_process_brk_blocked(kernel_syscall_process_key(), x0)
-                == false) {
+            x0 <= kernel_syscall_heap_limit()) {
             if (kernel_syscall_heap_set(x0) == false) {
                 return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINVAL), current_authority);
             }
@@ -8566,80 +8693,15 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 fd != 0xFFFFFFFFFFFFFFFF || (prot & 0x4) != 0) {
             return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINVAL), current_authority);
         }
-        // A shared mapping's pages are marked as such, which the fixed
-        // form below never does: it names pages already in the arena.
-        // Linux would replace them; this kernel refuses instead.
-        if (shared && (flags & LINUX_MAP_FIXED) != 0) {
+        if (length == 0 || length > 0xFFFFFFFFFFFFF000) {
             return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINVAL), current_authority);
         }
-        if (length == 0 || length > 0xFFFFFFFFFFFFF000) {
-            return syscall_finish_current(frame, SyscallAction::Resume(0xFFFFFFFFFFFFFFFF), current_authority);
-        }
         let rounded: usize = (length + PAGE_SIZE - 1) & 0xFFFFFFFFFFFFF000;
-        // musl uses MAP_FIXED to turn the first page of its brk arena into a
-        // guard page. The pages are already present in this prototype's
-        // eagerly mapped process arena, so preserve the requested address
-        // without consuming space from the independent anonymous-map cursor.
-        // A hint without MAP_FIXED is only a hint; a shared mapping takes
-        // fresh arena pages wherever they are.
-        if (x0 != 0 && shared == false) {
-            if (x0 < kernel_syscall_heap_start() ||
-                x0 > kernel_syscall_heap_limit() ||
-                rounded > kernel_syscall_heap_limit() - x0) {
-                return syscall_finish_current(frame, SyscallAction::Resume(0xFFFFFFFFFFFFFFFF), current_authority);
-            }
-            return syscall_finish_current(frame, SyscallAction::Resume(x0), current_authority);
-        }
-        // GitHub issue #630: a mapping takes free arena pages from the top
-        // down, apart from the break, and munmap gives them back. It used
-        // to advance the break itself and munmap did nothing, so every
-        // mapping was permanent and a long-lived process ran out of arena
-        // with almost nothing live.
-        let process: usize = kernel_syscall_process_key();
-        let evidence = match unified_fd_context_lookup(process) {
-            ProcessFdContextReady::Missing => {
-                return syscall_finish_current(frame, SyscallAction::Resume(LINUX_ENOMEM), current_authority);
-            }
-            ProcessFdContextReady::Ready(ready) => { ready }
-        };
-        match unified_process_mmap_take(process, evidence,
-                                        rounded / PAGE_SIZE) {
-            UnifiedMmapResult::Full => {
-                return syscall_finish_current(frame, SyscallAction::Resume(LINUX_ENOMEM), current_authority);
-            }
-            UnifiedMmapResult::Mapped(address) => {
-                // Anonymous memory reads as zero; a reused page still holds
-                // what its previous mapping wrote.
-                match user_range_check_write(current_authority, address, rounded) {
-                    UserWriteRangeResult::Fault => {
-                        syscall_munmap_pages(current_authority, address, rounded);
-                        return syscall_finish_current(frame, SyscallAction::Resume(LINUX_ENOMEM), current_authority);
-                    }
-                    UserWriteRangeResult::Ok(range) => {
-                        match user_zero_fill(range) {
-                            UserWriteResult::Fault => {
-                                syscall_munmap_pages(current_authority, address, rounded);
-                                return syscall_finish_current(frame, SyscallAction::Resume(LINUX_ENOMEM), current_authority);
-                            }
-                            UserWriteResult::Written => {}
-                        }
-                    }
-                }
-                // The zero fill resolved any copy-on-write view, so every
-                // page is this root's own and writable to mark.
-                if (shared &&
-                        syscall_mmap_mark_shared(current_authority, address, rounded) == false) {
-                    syscall_munmap_pages(current_authority, address, rounded);
-                    return syscall_finish_current(frame, SyscallAction::Resume(LINUX_ENOMEM), current_authority);
-                }
-                return syscall_finish_current(frame, SyscallAction::Resume(address), current_authority);
-            }
-        }
+        return syscall_finish_current(frame, syscall_mmap_anonymous(
+            current_authority, x0, rounded, shared, (flags & LINUX_MAP_FIXED) != 0), current_authority);
     }
     if (number == 215) {
-        // munmap(addr, len). The arena's pages stay mapped -- it is
-        // reclaimed as a unit at exit -- but they go back to the pool the
-        // next mmap takes from (GitHub issue #630).
+        // munmap(addr, len): see syscall_munmap_pages.
         if (x0 % PAGE_SIZE != 0 || x1 == 0 || x1 > 0xFFFFFFFFFFFFF000) {
             return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINVAL), current_authority);
         }
@@ -8648,6 +8710,9 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     }
     if (number == 226) {
         return syscall_finish_current(frame, syscall_mprotect_current(current_authority, x0, x1, x2), current_authority);
+    }
+    if (number == AARCH64_NR_MADVISE) {
+        return syscall_finish_current(frame, syscall_madvise(current_authority, x0, x1, x2), current_authority);
     }
     if (number == AARCH64_NR_READV) {
         return syscall_finish_current(frame, syscall_readv_current(current_authority, x0, x1, x2), current_authority);
@@ -9864,6 +9929,10 @@ private inline fn syscall_mprotect_current(
     let (span_ok, first, last) = user_range_l3_span(addr, len);
     if (span_ok == false) {
         return SyscallAction::Resume(LINUX_EINVAL);
+    }
+    // GitHub issue #1151: an untouched mmap page has no PTE to change yet.
+    if (mmap_region_populate(kernel_process_current_root(current_authority), addr, len) == false) {
+        return SyscallAction::Resume(LINUX_ENOMEM);
     }
     let class: usize = user_page_class_at(kernel_process_current_root(current_authority), first);
     let mut index: usize = first;

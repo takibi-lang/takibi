@@ -87,6 +87,12 @@ fn kernel_pool_space_report(phase: *u8) !{unsafe} {
             sizeof(RegionPool(Pipe)), sizeof(Pipe), PIPE_CHUNK_PAGES * PAGE_SIZE,
             chunks, capacity, live, bytes);
     }
+    {
+        let (chunks, capacity, live, bytes) = mmap_region_pool_space_stats();
+        kernel_pool_space_row("mmap_region", sizeof(MmapRegionBitmap),
+            sizeof(RegionPool(MmapRegionBitmap)), sizeof(MmapRegionBitmap), MMAP_REGION_CHUNK_PAGES * PAGE_SIZE,
+            chunks, capacity, live, bytes);
+    }
     kernel_boot_log("pool space: end="); kernel_boot_log(phase);
     kernel_boot_log("\n");
 }

@@ -998,6 +998,8 @@ fn initial_user_payload() !{unsafe} {
         sigaltstack_autodisarm_probe();
         shared_mapping_probe();
         statfs_umask_kernel_probe();
+        mmap_region_probe();
+        mmap_region_kernel_probe();
         svc5(93, 0, 0, 0, 0, 0);
     }
 }
@@ -1424,6 +1426,126 @@ fn shared_mapping_probe() !{unsafe} {
     fail_if(svc5(STATFS_SYSCALL, "/" as *u8 as usize, 1, 0, 0, 0) != EFAULT_RC);
     let message: []const u8 =
         bs"userspace shared mmap: fork shares MAP_SHARED and copies MAP_PRIVATE, munmap ok; umask keeps 0777 and forks; getrusage and statfs EINVAL, ENOENT, EFAULT ok\n";
+    fail_if(svc5(64, 1, (unsafe { message as *u8 }) as usize,
+                 message.len, 0, 0) != message.len);
+}
+
+/* GitHub issue #1151: the mmap region. stress-ng's shared cache buffer
+ * (2 MiB, core-shared-cache.c's MEM_CACHE_SIZE with one NUMA node) is
+ * mapped and stays shared across fork; an 8 MiB private mapping, beyond
+ * the 128-page arena mmap used to share with brk, reads as zero on first
+ * touch, also when a syscall's user range reaches an untouched page first;
+ * MADV_DONTNEED zeroes a private page and keeps a shared one; and the
+ * region's pages come back on munmap. Every answer is Linux's:
+ * `mmap_region_probe_alone` is the same code as its own static-PIE entry,
+ * which `make linuxcheck` runs under qemu-aarch64 and compares with this
+ * line of the linux_file view. mmap_region_kernel_probe is the half
+ * qemu-user does not answer as Linux does. */
+const MADVISE_SYSCALL: usize = 233;
+const MADV_RANDOM: usize = 1;
+const MADV_WILLNEED: usize = 3;
+const MADV_DONTNEED: usize = 4;
+const MADV_REMOVE: usize = 9;
+const MADV_NOHUGEPAGE: usize = 15;
+const REGION_SHARED_LENGTH: usize = 0x200000;
+const REGION_PRIVATE_LENGTH: usize = 0x800000;
+
+fn mmap_region_probe_alone() !{unsafe} {
+    mmap_region_probe();
+    svc5(93, 0, 0, 0, 0, 0);
+}
+
+fn mmap_region_probe() !{unsafe} {
+    let shared: usize = shared_probe_mmap(REGION_SHARED_LENGTH, PROT_READ_WRITE,
+                                          MAP_SHARED_ANONYMOUS);
+    fail_if(shared >= 0xFFFFFFFFFFFFF000 || shared % 4096 != 0);
+    let own: usize = shared_probe_mmap(REGION_PRIVATE_LENGTH, PROT_READ_WRITE,
+                                       MAP_PRIVATE_ANONYMOUS);
+    fail_if(own >= 0xFFFFFFFFFFFFF000 || own % 4096 != 0);
+    let shared_base: *u8 = unsafe { shared as *u8 };
+    let own_base: *u8 = unsafe { own as *u8 };
+    let shared_last: usize = REGION_SHARED_LENGTH - 8;
+    let own_last: usize = REGION_PRIVATE_LENGTH - 8;
+    fail_if(payload_read_u64(shared_base, shared_last) != 0);
+    fail_if(payload_read_u64(own_base, own_last) != 0);
+    payload_write_u64(shared_base, 0, 0x1151A);
+    payload_write_u64(own_base, 0, 0x1151B);
+    // A syscall writes an untouched private page first: getrusage's 144
+    // bytes land in the middle of the mapping.
+    let middle: usize = REGION_PRIVATE_LENGTH / 2;
+    fail_if(svc5(GETRUSAGE_SYSCALL, 0, own + middle, 0, 0, 0) != 0);
+    fail_if(payload_read_u64(own_base, middle) != 0);
+    let child: usize = svc5(220, SIGCHLD, 0, 0, 0, 0);
+    if (child == 0) {
+        let mut code: usize = 1;
+        if (payload_read_u64(shared_base, 0) == 0x1151A &&
+            payload_read_u64(own_base, 0) == 0x1151B &&
+            payload_read_u64(own_base, own_last) == 0) {
+            code = 0;
+        }
+        payload_write_u64(shared_base, shared_last, 0x1151C);
+        payload_write_u64(own_base, 0, 0x1151D);
+        payload_write_u64(own_base, own_last, 0x1151E);
+        svc5(93, code, 0, 0, 0, 0);
+    }
+    fail_if(child >= 0x8000000000000000);
+    let mut status: [u8; 8];
+    let status_base: *u8 = status as *u8;
+    payload_write_u64(status_base, 0, 0xFF);
+    fail_if(svc5(260, child, ptr_of(status_base, 0), 0, 0, 0) != child);
+    fail_if((payload_read_u64(status_base, 0) & 0xFFFFFFFF) != 0);
+    fail_if(payload_read_u64(shared_base, shared_last) != 0x1151C);
+    fail_if(payload_read_u64(own_base, 0) != 0x1151B);
+    fail_if(payload_read_u64(own_base, own_last) != 0);
+
+    // madvise: an unaligned start is EINVAL, a zero length is 0, a hint
+    // changes nothing, DONTNEED zeroes the private page and keeps the
+    // shared one.
+    fail_if(svc5(MADVISE_SYSCALL, own + 1, 4096, MADV_DONTNEED, 0, 0) != EINVAL_RC);
+    fail_if(svc5(MADVISE_SYSCALL, own, 0, MADV_DONTNEED, 0, 0) != 0);
+    fail_if(svc5(MADVISE_SYSCALL, own, REGION_PRIVATE_LENGTH, MADV_RANDOM, 0, 0) != 0);
+    fail_if(svc5(MADVISE_SYSCALL, own, 4096, MADV_WILLNEED, 0, 0) != 0);
+    fail_if(svc5(MADVISE_SYSCALL, own, 4096, MADV_NOHUGEPAGE, 0, 0) != 0);
+    fail_if(payload_read_u64(own_base, 0) != 0x1151B);
+    fail_if(svc5(MADVISE_SYSCALL, own, 4096, MADV_DONTNEED, 0, 0) != 0);
+    fail_if(payload_read_u64(own_base, 0) != 0);
+    payload_write_u64(own_base, 0, 0x1151F);
+    fail_if(payload_read_u64(own_base, 0) != 0x1151F);
+    fail_if(svc5(MADVISE_SYSCALL, shared, 4096, MADV_DONTNEED, 0, 0) != 0);
+    fail_if(payload_read_u64(shared_base, 0) != 0x1151A);
+
+    fail_if(svc5(MUNMAP_SYSCALL, shared, REGION_SHARED_LENGTH, 0, 0, 0) != 0);
+    fail_if(svc5(MUNMAP_SYSCALL, own, REGION_PRIVATE_LENGTH, 0, 0, 0) != 0);
+    // What munmap gave back holds a larger mapping, which reads as zero.
+    let larger: usize = shared_probe_mmap(REGION_PRIVATE_LENGTH + REGION_SHARED_LENGTH,
+                                          PROT_READ_WRITE, MAP_PRIVATE_ANONYMOUS);
+    fail_if(larger >= 0xFFFFFFFFFFFFF000);
+    fail_if(payload_read_u64(unsafe { larger as *u8 }, 0) != 0);
+    fail_if(svc5(MUNMAP_SYSCALL, larger, REGION_PRIVATE_LENGTH + REGION_SHARED_LENGTH,
+                 0, 0, 0) != 0);
+    let message: []const u8 =
+        bs"userspace mmap region: 2 MiB MAP_SHARED shared across fork, 8 MiB MAP_PRIVATE zero on first touch and by syscall, madvise EINVAL, hints, DONTNEED zeroes private and keeps shared, munmap reuse ok\n";
+    fail_if(svc5(64, 1, (unsafe { message as *u8 }) as usize,
+                 message.len, 0, 0) != message.len);
+}
+
+// The half qemu-user answers differently from Linux (it takes any advice
+// and does not look for an unmapped page): an unknown advice and
+// MADV_REMOVE on a private mapping are EINVAL (madvise_behavior_valid,
+// madvise_remove), a range with an unmapped page is ENOMEM; and this
+// kernel's own limit, a mapping larger than the 16 MiB region is ENOMEM.
+fn mmap_region_kernel_probe() !{unsafe} {
+    let own: usize = shared_probe_mmap(8192, PROT_READ_WRITE, MAP_PRIVATE_ANONYMOUS);
+    fail_if(own >= 0xFFFFFFFFFFFFF000);
+    fail_if(svc5(MADVISE_SYSCALL, own, 4096, 1000, 0, 0) != EINVAL_RC);
+    fail_if(svc5(MADVISE_SYSCALL, own, 4096, MADV_REMOVE, 0, 0) != EINVAL_RC);
+    fail_if(svc5(MUNMAP_SYSCALL, own + 4096, 4096, 0, 0, 0) != 0);
+    fail_if(svc5(MADVISE_SYSCALL, own, 8192, MADV_DONTNEED, 0, 0) != ENOMEM_RC);
+    fail_if(svc5(MUNMAP_SYSCALL, own, 4096, 0, 0, 0) != 0);
+    fail_if(shared_probe_mmap(0x1001000, PROT_READ_WRITE, MAP_PRIVATE_ANONYMOUS)
+            != ENOMEM_RC);
+    let message: []const u8 =
+        bs"userspace mmap region limits: madvise unknown and MADV_REMOVE EINVAL, unmapped ENOMEM, over 16 MiB ENOMEM ok\n";
     fail_if(svc5(64, 1, (unsafe { message as *u8 }) as usize,
                  message.len, 0, 0) != message.len);
 }

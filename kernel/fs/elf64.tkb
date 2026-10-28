@@ -4,7 +4,7 @@ const ELF_PT_LOAD: u32 = 1;
 const ELF_PT_INTERP: u32 = 3;
 // GitHub issue #1041: the largest PT_LOAD span execve maps, 256 MiB, a
 // quarter of the 1 GiB user space, so a dynamic pair of two such images, the
-// heap and the stack still fit (process_stack_floor's static_assert). It was
+// heap end below the mmap region (process_layout_assumption). It was
 // 2 MiB, one L3 table, a leftover of the address space before #254; static
 // stress-ng spans 8 MiB. Every PT_LOAD page is still allocated at exec, so
 // a span near this bound is refused by the page allocator (ENOMEM) first.

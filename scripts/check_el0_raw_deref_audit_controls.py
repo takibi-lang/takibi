@@ -21,7 +21,7 @@ def check(source, needle=None):
 
 
 check(text)
-check(text.replace("$(call KERNEL_EL0_COMPILE,initial_user_payload sigaltstack_probe_alone shared_mapping_probe_alone)",
+check(text.replace("$(call KERNEL_EL0_COMPILE,initial_user_payload sigaltstack_probe_alone shared_mapping_probe_alone mmap_region_probe_alone)",
                    "$(TAKIBI) $< -o $@"), "KERNEL_RPI5_USER_PAYLOAD_TKB_O must use")
 check(text.replace("--emit-raw-deref-audit $@.rawderef.tsv", ""), "must contain --emit-raw-deref-audit")
 check(text.replace("--check-raw-deref el0 $@.rawderef.tsv $@.d", "--verbose"), "must contain python3")

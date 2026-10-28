@@ -6,3 +6,5 @@ userspace sigaltstack: EINVAL, ENOMEM, EFAULT, SA_ONSTACK runs on it with SS_ONS
 userspace sigaltstack SS_AUTODISARM: disarmed in the handler, restored by rt_sigreturn ok
 userspace shared mmap: fork shares MAP_SHARED and copies MAP_PRIVATE, munmap ok; umask keeps 0777 and forks; getrusage and statfs EINVAL, ENOENT, EFAULT ok
 userspace statfs and umask: ext2 0xEF53 and procfs 0x9FA0, umask 077 gives 0600 and 0700 ok
+userspace mmap region: 2 MiB MAP_SHARED shared across fork, 8 MiB MAP_PRIVATE zero on first touch and by syscall, madvise EINVAL, hints, DONTNEED zeroes private and keeps shared, munmap reuse ok
+userspace mmap region limits: madvise unknown and MADV_REMOVE EINVAL, unmapped ENOMEM, over 16 MiB ENOMEM ok
