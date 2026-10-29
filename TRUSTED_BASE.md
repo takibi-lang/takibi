@@ -574,6 +574,18 @@ Takibi does not currently establish all of the following:
 - absence of every architectural exception. `--forbid-trap` covers only the
   compiler-recorded checks described above.
 
+What the hardware enforces rather than trusts (#1032, 2026-10-29): no page is
+both writable and executable at EL1 or EL0. SCTLR_EL1.WXN is set on every
+core (`kernel_mmu_activate`), the kernel identity maps only
+`[kernel_text_start, kernel_text_end)` read-only executable and everything
+else in its GiB UXN+PXN, and every user mapping carries PXN, so EL1 never
+executes a user page. A kernel or user jump into written bytes faults; the
+QEMU oops lane's `el1_exec_writable` and `el1_exec_user` modes are the
+negative controls. What stays trusted is the descriptor construction itself
+(`mmu_init_kernel_identity_tables`, `scripts/buildcheck_kernel_asm_invariants.py`
+pins its UXN/PXN constants and the WXN bit in the linked image) and the
+linker scripts' text-alignment assertions.
+
 Tests and hardware integration checks provide evidence for these properties;
 they do not convert them into language theorems.
 

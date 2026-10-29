@@ -65,6 +65,20 @@ enables the MMU without a post-enable jump, so the running PC's VA must
 already equal its PA at that instant. Index 1 must be the identity block
 there, and the user window moves to index 2.
 
+The kernel-identity GiB is not one block (#1032). Its L1 entry points to one
+shared L2 page of 2 MiB blocks, Normal memory, EL1 read-write, UXN+PXN;
+the block holding the text points to one shared L3 page instead, which maps
+`[kernel_text_start, kernel_text_end)` read-only and EL1-executable and the
+rest of the block read-write, UXN+PXN. Both pages are
+`kernel_identity_l2_table` and `kernel_identity_l3_table`, linker-reserved at
+the end of `.bss`; every root's L1 shares them. `.rodata` starts page-aligned
+so the last text page holds no data, and the linker scripts assert that the
+text starts 2 MiB-aligned and fits in one 2 MiB block. With SCTLR_EL1.WXN
+set, no page is writable and executable.
+
+State: **HAND** for the descriptor values; the alignment is CHECKED by the
+linker's `ASSERT`s and the constants by `buildcheck_kernel_asm_invariants.py`.
+
 Both primary and secondary entry paths call an `!{mmu_off}` root before
 enabling translation. The compiler rejects any reachable operation marked
 `requires_mmu`, including intrusive-pool growth, and reports the call path.

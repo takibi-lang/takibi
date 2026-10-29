@@ -614,7 +614,7 @@ fixture, obtains the pinned Alpine packages, compiles all Takibi
 code under `--forbid-trap`, assembles the minimal AArch64 files, and links the
 ELF, then runs `scripts/buildcheck_kernel_asm_invariants.py` against the linked
 `kernel.elf` -- a static, hardware-free disassembly check verifying the
-kernel identity block's UXN permission bits and the EL0 `eret` path's
+kernel identity's UXN/PXN permission bits, SCTLR_EL1.WXN, and the EL0 `eret` path's
 DAIF.I masking, catching a class of past hand-written-assembly regression
 without needing a board or a probabilistic real-hardware race to
 reproduce it. It also links `kernel/arch/arm64/kernel/user_payload.tkb`/

@@ -163,7 +163,9 @@ owners are TaskMutex, the spare stack stays masked). #980
    or allow-listed with its reader named; 406 of 500 production globals
    are outside that set today; the ratchet (slice 1) lands first, the
    migration follows the order the flip breaks things. #1032: WXN and PXN
-   first (configuration; a B-sized slice), then PAN with a typed
+   first (configuration; a B-sized slice; done 2026-10-29: the identity
+   is split so only the text is executable, WXN is set, and two QEMU oops
+   modes are the negative controls), then PAN with a typed
    `user_access` window, then the IOMMU (QEMU `smmuv3`, then BCM2712's
    PCIe IOMMU for RP1), which turns the device-semantics claims of
    `kernel/DEVICE_SEMANTICS_FILES` from trusted into enforced. Each step

@@ -124,6 +124,17 @@ case "$MODE" in
         expected_ec=3c
         expected_detail=''
         ;;
+    el1_exec_writable|el1_exec_user)
+        # GitHub issue #1032: EL1 jumps to a page it must not execute -- a
+        # writable kernel page (the current kernel stack, below SP), or the
+        # user's entry page (PXN). GDB writes BRK #0 there first and moves
+        # the PC: an unprotected page runs the BRK (ec 0x3c), a protected
+        # one takes an instruction abort at the current EL (ec 0x21) with
+        # FAR and ELR at the target. No EL1 fault recovery: it fail-stops.
+        fault_instruction=0xd4200000
+        expected_ec=21
+        expected_detail='^oops: access=instruction-fetch$'
+        ;;
     *)
         echo "error: unknown KERNEL_QEMU_OOPS_MODE: $MODE" >&2
         exit 1
@@ -314,6 +325,30 @@ PYLINE
             -ex "set scheduler-locking off"
             -ex "detach"
         )
+    elif [ "$MODE" = el1_exec_writable ] || [ "$MODE" = el1_exec_user ]; then
+        # At PID 1's first el0_context_resume the MMU is on and PID 1's root
+        # is active, so both targets are mapped: $sp - 0x400 is unused live
+        # stack (writable, so WXN and the identity's PXN make it
+        # execute-never), and the frame's ELR word is the user entry (PXN).
+        if [ "$MODE" = el1_exec_writable ]; then
+            target_expr='($sp - 0x400)'
+        else
+            target_expr='(*(long *)($x0 + 0x100))'
+        fi
+        gdb_commands=(
+            -ex "target remote :$GDB_PORT"
+            -ex "break kernel_process_boot_handoff"
+            -ex "continue"
+            -ex "disable 1"
+            -ex "break *el0_context_resume thread 1"
+            -ex "continue"
+            -ex "disable 2"
+            -ex "set \$takibi_target = $target_expr"
+            -ex "set {int}\$takibi_target = $fault_instruction"
+            -ex "printf \"takibi-exec-target=0x%016lx\\n\", \$takibi_target"
+            -ex "set \$pc = \$takibi_target"
+            -ex "detach"
+        )
     elif [ "$MODE" = concurrent_fault ]; then
         # QEMU's gdbstub numbers vCPUs from 1: thread 1 is core 0, thread 2
         # is core 1. With scheduler-locking on, `continue` resumes only the
@@ -484,6 +519,28 @@ if [ "$MODE" = peer_fault ] || [ "$MODE" = peer_fault_start_window ] || [ "$MODE
     fi
     ext2_postcheck_after_stop
     echo "PASS kernel/qemu oops: the peer's fail-stop stopped core 0 and reported alone"
+    exit 0
+fi
+
+# GitHub issue #1032: the EL1 fetch from a non-executable page is the
+# verdict. ELR and FAR are the target, the ESR's IFSC is a permission
+# fault (0b0011xx, any level), and the BRK written there never ran.
+if [ "$MODE" = el1_exec_writable ] || [ "$MODE" = el1_exec_user ]; then
+    target="$(sed -n 's/^takibi-exec-target=0x\([0-9a-f]*\)$/\1/p' "$ARTIFACT_DIR/arm-gdb.log" | head -1)"
+    line="$(grep -aE "^oops: fail-stop seq=1 cpu=0 slot=[0-9]+ ec=0x0*$expected_ec " "$UART_LOG" | head -1 || true)"
+    esr="$(printf '%s\n' "$line" | sed -n 's/.* esr=0x\([0-9a-f]*\) .*/\1/p')"
+    if [ -z "$target" ] || [ -z "$line" ] || [ -z "$esr" ] ||
+            [ $(( 0x$esr & 0x3c )) -ne $(( 0x0c )) ] ||
+            ! printf '%s\n' "$line" | grep -q " far=0x$target elr=0x$target\$" ||
+            ! grep -Eq "$expected_detail" "$UART_LOG" ||
+            grep -Eq '^oops: fail-stop seq=[0-9]+ cpu=[0-9]+ slot=[0-9]+ ec=0x0*3c ' "$UART_LOG"; then
+        echo "FAIL kernel/qemu oops: EL1 executed, or did not report a permission fault at, the $MODE target 0x${target:-unknown}" >&2
+        sed 's/^/  /' "$UART_LOG" >&2 || true
+        sed 's/^/  /' "$ARTIFACT_DIR/arm-gdb.log" >&2 || true
+        exit 1
+    fi
+    ext2_postcheck_after_stop
+    echo "PASS kernel/qemu oops: EL1 instruction fetch from the $MODE target faulted (permission, esr=0x$esr)"
     exit 0
 fi
 
