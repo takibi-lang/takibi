@@ -641,6 +641,30 @@
       "changes": {
         "unsafe_blocks": "#999 the signal conformance probe prints its line (user_payload EL0 code, the idiom of every probe)"
       }
+    },
+    {
+      "date": "2026-10-29",
+      "head": "5723fd88",
+      "counts": {
+        "raw_mint_files": 14,
+        "frame_lines": 12174,
+        "device_semantics_files": 4,
+        "raw_deref_plain": 214,
+        "raw_deref_io": 7,
+        "raw_deref_builtin_region": 113,
+        "unsafe_blocks": 151,
+        "extern_fns": 61,
+        "invariant_stop_sites": 118,
+        "assembly_lines": 2503,
+        "per_cpu_ordinary_arrays": 73,
+        "per_cpu_stores": 6,
+        "raw_cpu_id_calls": 157,
+        "unprotected_globals": 439,
+        "frame_api_ratchet": 7
+      },
+      "changes": {
+        "assembly_lines": "#948 signal_terminal_handler: the terminal-read probe handler counts itself and prints its line (EL0 fixture asm)"
+      }
     }
   ]
 }
