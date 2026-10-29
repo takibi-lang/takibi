@@ -3710,8 +3710,12 @@ fn syscall_read_segment_with(slot: borrow SyscallSlot[0],
 fn syscall_poll_fd_ready(fd: usize) -> (bool, usize) {
     // GitHub issue #902: any descriptor of the terminal, not fd 0 alone.
     if (kernel_syscall_terminal_is_open(fd)) {
-        if (kernel_uart_rx_pending()) { return (true, POLLIN); }
-        return (true, 0);
+        // GitHub issue #1221: POLLOUT when a write would not block -- the
+        // same room syscall_terminal_write asks (#544).
+        let mut ready: usize = 0;
+        if (kernel_uart_rx_pending()) { ready = POLLIN; }
+        if (uart_user_write_room() != 0) { ready = ready | POLLOUT; }
+        return (true, ready);
     }
     if (kernel_connected_fd_is_open(fd)) {
         match kernel_connection_fd_lookup(fd) {

@@ -43,6 +43,7 @@ const SIGTERM: usize = 15;
 const CLONE_FORK_SIGCHLD: usize = 0x11;
 const WNOHANG: usize = 1;
 const POLLIN: u8 = 1;
+const POLLOUT: u8 = 4;
 const PPOLL_PROBE_ERROR_FLOOR: usize = 0xFFFFFFFFFFFFF000;
 const PPOLL_PROBE_PAUSE: usize = 65536;
 
@@ -110,6 +111,27 @@ private fn ppoll_probe_pause() {
     }
     ppoll_probe_say(bs"ppoll-probe: pause() did not end by SIGTERM\n");
     svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
+}
+
+// GitHub issue #1221: the terminal is writable when its transmit queue has
+// room, and poll says so. fd 1 is the console here; a 1 s timeout gives the
+// queue time to drain should a burst of boot output have filled it. A
+// kernel that never reported POLLOUT answered 0 after the timeout.
+private fn ppoll_probe_writable() {
+    let mut pollfd: [u8; 8];
+    for index: usize in 0..<8 { pollfd[index] = 0; }
+    pollfd[0] = 1;
+    pollfd[4] = POLLOUT;
+    let mut timeout: [usize; 2];
+    timeout[0] = 1;
+    timeout[1] = 0;
+    let ready: usize = svc5(PPOLL_SYSCALL, pollfd as *u8 as usize, 1,
+                            timeout as *usize as usize, 0, 0);
+    if (ready != 1 || (pollfd[6] & POLLOUT) == 0) {
+        ppoll_probe_say(bs"ppoll-probe: the terminal did not report POLLOUT\n");
+        svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
+    }
+    ppoll_probe_say(bs"ppoll-probe: the terminal reported POLLOUT\n");
 }
 
 private fn ppoll_probe_timed() {
@@ -191,6 +213,7 @@ fn ppoll_probe() {
     if (reaped == child && status[0] == 0 && status[1] == 0) {
         ppoll_probe_say(
             bs"ppoll-probe: a dup of fd 0 became readable and the child read its byte\n");
+        ppoll_probe_writable();
         ppoll_probe_timed();
         ppoll_probe_pause();
     }
