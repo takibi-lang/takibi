@@ -4,14 +4,16 @@
 from check_frame_api import RATCHET, load, mint_files, problems
 from pass_line import report_pass
 
-# The control file is taken from the mint list rather than named: a fixed
-# name broke this control when that file left the list (#637, 2026-10-26).
-SHRUNK = "kernel/drivers/net/rp1_gem.tkb"
+# The control files are taken from the mint list and RATCHET rather than
+# named: a fixed name broke this control when that file left the list (#637,
+# 2026-10-26), and again when its ratchet entry moved to another file (#1162).
 
 
 def main():
     sources, mint_text = load()
-    PATH = next(path for path in mint_files(mint_text) if path != SHRUNK)
+    listed = mint_files(mint_text)
+    SHRUNK = next(path for path, _ in sorted(RATCHET) if path in listed)
+    PATH = next(path for path in listed if path != SHRUNK)
     assert not problems(sources, mint_text)[0], "production passes"
     original = sources[PATH]
     planted = {
