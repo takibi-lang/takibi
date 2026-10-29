@@ -198,7 +198,7 @@ next one taken. The done record of the previous queue is in HISTORY.md
    flags out, the `--internal-*` namespace) and #1004 (dead builtins,
    `stable_replace` to a removed-words table, the generated-only names
    hidden) done 2026-10-25; #994 (address-taking DMA cache builtins counted as raw sites;
-   done 2026-10-25) and #1028 (other address-taking intrinsics); #1031 slice 1 (classify the 119
+   done 2026-10-25) and #1028 (other address-taking intrinsics: the one-argument translation intrinsics counted; done 2026-10-29); #1031 slice 1 (classify the 119
    `kernel_invariant_stop` sites and ratchet them; done 2026-10-25,
    `scripts/invariant_stop_sites.tsv`: 120 sites, frame 31, unmodelled 18,
    ladder 71); #1018 (the frame API rule as a list-file check; done
