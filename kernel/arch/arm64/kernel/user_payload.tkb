@@ -661,36 +661,62 @@ fn initial_user_payload() !{unsafe} {
         let mut write_block: [u8; 1024];
         let mut read_block: [u8; 1024];
         // The boot fixture leaves thirteen free blocks in ordinary files.
-        // Seven sequential replacements fit; the eighth cannot stage its
-        // data. This is the real write(2) path, with a nonzero fd offset.
+        // GitHub issue #1086: a write(2) claims only the blocks it changes,
+        // as on Linux, so a six-block spare file is made first and given
+        // back after the ENOSPC; the checks below then start, as before,
+        // with six blocks free. Appends of one block each then go on until
+        // one finds the volume full (seven fit on QEMU's image; the count
+        // is what the volume held, so it is measured, not assumed). This
+        // is the real write(2) path, with a nonzero fd offset.
+        let spare_fd: usize = svc5(56, 0xFFFFFFFFFFFFFF9C,
+                                   "/enospc-spare" as *u8 as usize,
+                                   O_CREAT_WRONLY, 0x1A4, 0);
+        fail_if(spare_fd >= 64);
+        for block: usize in 0..<6 {
+            fail_if(svc5(64, spare_fd, write_block as *u8 as usize,
+                         1024, 0, 0) != 1024);
+        }
+        fail_if(svc5(57, spare_fd, 0, 0, 0, 0) != 0);
         let exhaustion_fd: usize = svc5(56, 0, mutable_path as usize, 1, 0, 0);
         fail_if(exhaustion_fd >= 64);
-        for block: usize in 0..<8 {
-            for byte: usize in 0..<1024 {
-                write_block[byte] =
-                    (((block * 1024 + byte) * 37 + 11) % 251) as u8;
+        let mut committed: usize = 0;
+        let mut full: bool = false;
+        for block: usize in 0..<12 {
+            if (full == false) {
+                for byte: usize in 0..<1024 {
+                    write_block[byte] =
+                        (((block * 1024 + byte) * 37 + 11) % 251) as u8;
+                }
+                let answer: usize = svc5(64, exhaustion_fd,
+                                          write_block as *u8 as usize, 1024, 0, 0);
+                if (answer == 1024) { committed = committed + 1; }
+                else {
+                    fail_if(answer != ENOSPC_RC);
+                    full = true;
+                }
             }
-            let answer: usize = svc5(64, exhaustion_fd,
-                                      write_block as *u8 as usize, 1024, 0, 0);
-            if (block < 7) { fail_if(answer != 1024); }
-            else { fail_if(answer != ENOSPC_RC); }
         }
+        fail_if(full == false || committed < 2);
+        fail_if(svc5(35, 0xFFFFFFFFFFFFFF9C, "/enospc-spare" as *u8 as usize,
+                     0, 0, 0) != 0);
         // Reopening sees only the committed prefix, byte for byte.
         let exhaustion_read: usize = svc5(56, 0, mutable_path as usize, 0, 0, 0);
         fail_if(exhaustion_read >= 64);
-        for block: usize in 0..<7 {
-            fail_if(svc5(63, exhaustion_read, read_block as *u8 as usize,
-                         1024, 0, 0) != 1024);
-            for byte: usize in 0..<1024 {
-                fail_if(read_block[byte] !=
-                    (((block * 1024 + byte) * 37 + 11) % 251) as u8);
+        for block: usize in 0..<12 {
+            if (block < committed) {
+                fail_if(svc5(63, exhaustion_read, read_block as *u8 as usize,
+                             1024, 0, 0) != 1024);
+                for byte: usize in 0..<1024 {
+                    fail_if(read_block[byte] !=
+                        (((block * 1024 + byte) * 37 + 11) % 251) as u8);
+                }
             }
         }
         fail_if(svc5(63, exhaustion_read, read_block as *u8 as usize,
                      1, 0, 0) != 0);
         fail_if(svc5(57, exhaustion_read, 0, 0, 0, 0) != 0);
-        // GitHub issue #698: the write above failed because it stages a
-        // copy of every block, so a few blocks are still free. mkdirat
+        // GitHub issue #698: the spare file's six blocks are free again.
+        // mkdirat
         // takes one block and one inode each: make directories until the
         // bitmap is empty, and the one that finds it empty must say ENOSPC
         // (it said EIO) and leave no entry. All of them go again below.
@@ -918,20 +944,23 @@ fn initial_user_payload() !{unsafe} {
                      O_CREAT_WRONLY, 0x1A4, 0) != EISDIR_RC);
         fail_if(svc5(35, 0xFFFFFFFFFFFFFF9C,
                      "/creat-file" as *u8 as usize, 0, 0, 0) != 0);
-        // Retrying on the SAME fd appends at 7168. A failure that moved its
-        // offset would create a zero-filled gap, caught by the read and EOF.
+        // Retrying on the SAME fd appends just past the committed blocks. A
+        // failure that moved its offset would create a zero-filled gap,
+        // caught by the read and EOF.
         write_block[0] = 0x21;
         fail_if(svc5(64, exhaustion_fd, write_block as *u8 as usize,
                      1, 0, 0) != 1);
         fail_if(svc5(57, exhaustion_fd, 0, 0, 0, 0) != 0);
         let retry_read: usize = svc5(56, 0, mutable_path as usize, 0, 0, 0);
         fail_if(retry_read >= 64);
-        for block: usize in 0..<7 {
-            fail_if(svc5(63, retry_read, read_block as *u8 as usize,
-                         1024, 0, 0) != 1024);
-            for byte: usize in 0..<1024 {
-                fail_if(read_block[byte] !=
-                    (((block * 1024 + byte) * 37 + 11) % 251) as u8);
+        for block: usize in 0..<12 {
+            if (block < committed) {
+                fail_if(svc5(63, retry_read, read_block as *u8 as usize,
+                             1024, 0, 0) != 1024);
+                for byte: usize in 0..<1024 {
+                    fail_if(read_block[byte] !=
+                        (((block * 1024 + byte) * 37 + 11) % 251) as u8);
+                }
             }
         }
         fail_if(svc5(63, retry_read, read_block as *u8 as usize, 1, 0, 0) != 1);
