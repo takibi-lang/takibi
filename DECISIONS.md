@@ -392,6 +392,11 @@ condition below applies, and reports the land afterwards.
   dma_finish_rx) is a counted raw site; ordering builtins and the dma_fixed
   finishes (check_dma_mint_files.py) stay as they are. usb_xhci_bus.tkb now
   holds two functions, the span export and the DCBAA clean. [active] #994 #637 #720
+- 2026-10-29 #1028: the one-argument translation intrinsics (tlbi_vae1is,
+  tlbi_aside1is, msr_ttbr0/tcr/mair/sctlr_el1) are counted raw sites, like
+  #994's cache maintenance; zero-argument TLBI and msr_cntp_* are not.
+  Chosen by the worker in the authorized B queue; open to the TCB review.
+  [active] #1028 #994 #637
 - 2026-10-25 #954 stage 2 is scoped by a stage-2 review first; its first item
   is #798 rebuilt inside the confirmed skeleton as linear facts the checker
   decides and z3 re-checks. [active] #954 #798

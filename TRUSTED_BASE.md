@@ -284,6 +284,18 @@ rules globally.
   calls are already confined per function by
   `scripts/check_dma_mint_files.py`, so counting them would duplicate that
   list.
+- Translation system intrinsics (GitHub issue #1028). `tlbi_vae1is` and
+  `tlbi_aside1is` (an operand selecting a VA or ASID) and `msr_ttbr0_el1`,
+  `msr_tcr_el1`, `msr_mair_el1` and `msr_sctlr_el1` (the table base and the
+  translation, attribute and MMU control words) take an unchecked `usize`
+  that decides which memory every later access reaches, so each direct
+  call is a counted raw site under `--confine-raw-authority`, an error
+  outside `kernel/RAW_MINT_FILES`. All six are called only in
+  `kernel/arch/arm64/mm/mmu.tkb` (already a K mint file). Zero-argument
+  TLBI (`tlbi_vmalle1`, `tlbi_vmalle1is`), the DAIF immediates and the
+  timer writes (`msr_cntp_*`) name no address and are not counted; what an
+  operand is set to (page-table contents, the TLBI-after-unmap order)
+  stays reviewed in mmu.tkb.
 - Fixed DMA records (`struct dma_fixed`) carry buffer ownership in CPU and
   Device tokens, so the checker rejects CPU access while the device may
   use the buffer. What stays trusted is the observation that returns

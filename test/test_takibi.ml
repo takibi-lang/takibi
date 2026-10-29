@@ -25836,6 +25836,35 @@ let raw_authority_policy_tests = [
       Alcotest.(check int) "ordering builtins not counted" 0
         (List.length (cache_errors fences [])));
 
+  (* GitHub issue #1028: the one-argument translation intrinsics are counted
+     sites; zero-argument TLBI and the timer writes are not. *)
+  Alcotest.test_case "raw translation intrinsic call requires a declared mint file" `Quick
+    (fun () ->
+      let tr_errors source_program mint_files =
+        List.filter (fun (_, message) -> contains_substring message "raw translation intrinsic")
+          (Raw_authority_policy.check ~source_program ~mint_files ()) in
+      List.iter (fun callee ->
+        let source_program = parse ("fn remap(v: usize) { " ^ callee
+                     ^ "(v); } fn main() -> usize { return 42; }") in
+        (match tr_errors source_program [] with
+         | [(loc, message)] ->
+             Alcotest.(check bool) (callee ^ ": names the builtin") true
+               (contains_substring message ("'" ^ callee ^ "'"));
+             let file = Ast.source_file_of_loc loc in
+             Alcotest.(check int) (callee ^ ": wrong file cannot authorize") 1
+               (List.length (tr_errors source_program ["elsewhere.tkb"]));
+             Alcotest.(check int) (callee ^ ": declared file accepted") 0
+               (List.length (tr_errors source_program [file]));
+             Alcotest.(check (option int)) (callee ^ ": counted once") (Some 1)
+               (List.assoc_opt (Raw_authority_policy.normalize file)
+                  (Raw_authority_policy.site_counts ~source_program ()))
+         | errors -> Alcotest.failf "%s: expected one error, got %d" callee
+                       (List.length errors)))
+        Raw_authority_policy.translation_builtins;
+      let others = parse "fn other(v: usize) { tlbi_vmalle1is(); tlbi_vmalle1(); msr_cntp_tval_el0(v); msr_cntp_ctl_el0(v); } fn main() -> usize { return 42; }" in
+      Alcotest.(check int) "zero-argument TLBI and timer writes not counted" 0
+        (List.length (tr_errors others [])));
+
   (* GitHub issue #739: the mint list is a ratchet; a stale entry fails. *)
   Alcotest.test_case "stale mint-list entries are rejected" `Quick
     (fun () ->

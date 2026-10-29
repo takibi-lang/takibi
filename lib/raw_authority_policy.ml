@@ -119,6 +119,19 @@ let cache_maintenance_builtins = [ "dma_prepare_tx"; "dma_prepare_rx"; "dma_fini
 let cache_maintenance_sites program =
   named_call_sites (fun callee -> List.mem callee cache_maintenance_builtins) program
 
+(* GitHub issue #1028: the one-argument system intrinsics whose operand
+   names translation state -- a TLB entry by VA/ASID, the table base, or the
+   MMU/attribute/translation-control word -- can break every claim a type
+   makes about memory, and the compiler does not check the operand. Each
+   direct call is a counted site. Zero-argument TLBI, barriers and the
+   timer writes msr_cntp_tval_el0 and msr_cntp_ctl_el0 cannot select an address and are not counted. *)
+let translation_builtins =
+  [ "tlbi_vae1is"; "tlbi_aside1is";
+    "msr_ttbr0_el1"; "msr_tcr_el1"; "msr_mair_el1"; "msr_sctlr_el1" ]
+
+let translation_sites program =
+  named_call_sites (fun callee -> List.mem callee translation_builtins) program
+
 module Sites = Map.Make (struct
   type t = string * int * int
   let compare = compare
@@ -169,10 +182,15 @@ let check ?(source_program = []) ~mint_files () =
       Some (Ast.source_loc loc, Printf.sprintf
         "raw-authority confinement: raw cache maintenance '%s' called in '%s' (%s) is outside a declared mint file; use a device protocol or dma_fixed record, or add the file to the mint list by a reviewed decision"
         callee name (Ast.source_file_of_loc loc))) in
+  let translations = translation_sites source_program |> List.filter_map (fun (loc, name, callee) ->
+    if declared (Ast.source_file_of_loc loc) then None else
+      Some (Ast.source_loc loc, Printf.sprintf
+        "raw-authority confinement: raw translation intrinsic '%s' called in '%s' (%s) is outside a declared mint file; keep translation changes in kernel/arch/arm64/mm/mmu.tkb, or add the file to the mint list by a reviewed decision"
+        callee name (Ast.source_file_of_loc loc))) in
   List.sort_uniq (fun (left, a) (right, b) ->
     compare (Ast.source_file_of_loc left, left.pos_lnum, left.pos_cnum, a)
       (Ast.source_file_of_loc right, right.pos_lnum, right.pos_cnum, b))
-      (raw @ unsafe @ references @ address_mints @ atomics @ caches)
+      (raw @ unsafe @ references @ address_mints @ atomics @ caches @ translations)
 
 (* GitHub issue #739: every counted raw site, declared or not, keyed by its
    normalized source file. The compiler's own virtual files are left out:
@@ -193,7 +211,9 @@ let site_counts ?(source_program = []) () =
     @ List.map (fun (loc, _, _) -> Ast.source_file_of_loc loc)
         (atomic_intrinsic_sites source_program)
     @ List.map (fun (loc, _, _) -> Ast.source_file_of_loc loc)
-        (cache_maintenance_sites source_program) in
+        (cache_maintenance_sites source_program)
+    @ List.map (fun (loc, _, _) -> Ast.source_file_of_loc loc)
+        (translation_sites source_program) in
   let counts = List.fold_left (fun counts file ->
     if file = Ast.builtin_region_file || String.starts_with ~prefix:"<protocol " file
     then counts else
