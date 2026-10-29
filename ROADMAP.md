@@ -226,9 +226,9 @@ next one taken. The done record of the previous queue is in HISTORY.md
    Signals: #999 (host-Linux conformance suite), #1000 (one delivery
    chokepoint and `SignalDelivery.tla`, designed with #992); #948 (the
    terminal-read EINTR fixture) and #432 (timed blocking) done 2026-10-30.
-3. **Compiler consolidation.** #1005 (one instruction table), #1027 steps
-   2-3 (`--facts DIR` for the `--emit-*` family; strict defaults with
-   opt-outs), #750 after #732.
+3. **Compiler consolidation.** #1027 steps 2-3 (`--facts DIR` for the
+   `--emit-*` family; strict defaults with opt-outs), #750 after #732;
+   #1005 (one instruction table, `lib/instr_spec.ml`) done 2026-10-30.
 4. **Fixed DMA lifecycle, finishing the drivers.** #720's remaining xHCI
    item (the DCBAA stays legacy until sub-region authority; #783, the
    batched TD write path), #740's step 3 (a socket's receive queue keeping
