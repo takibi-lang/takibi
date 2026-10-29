@@ -149,7 +149,9 @@ owners are TaskMutex, the spare stack stays masked). #980
    `!{interrupt}` deriving `PreemptOff` with `nmi` and `debug_stopped`
    apart); (3) an EL1
    frame in `saved_sp` (#992: `FrameRef` carries its exception level,
-   deliveries take El0 only, `StackOwnership.tla` gains `PreemptEL1`); (4)
+   deliveries take El0 only, `StackOwnership.tla` gains `PreemptEL1`;
+   done 2026-10-29 in QEMU, `FrameRef[process, ExceptionLevel]` provisional
+   until #1006, RPi5 evidence at the land); (4)
    a non-stopping CPU-authority mint and the `!{interrupt}`-derives-
    `PreemptOff` rule (#641 item 1); (5) site migration (process_image's
    target root, the log's partial line per #613 option b,
