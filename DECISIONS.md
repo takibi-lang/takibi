@@ -481,3 +481,11 @@ condition below applies, and reports the land afterwards.
   ScheduledProcessState already uses; a provisional spelling #1006 may rename
   mechanically. The Pending/Delivered index waits for #1000. [active] #992
   #1006 #1000
+- 2026-10-30 #1032: every QEMU lane moves to -cpu cortex-a76, the RPi5's
+  core, in its own slice before PAN. PAN uses a typed user_access window
+  (option A): the window type is portable, and only its open/close assembly
+  leaves are per-architecture (ARM PAN, x86-64 SMAP STAC/CLAC, RISC-V
+  sstatus.SUM), keeping a later RISC-V or AMD64 port in view. Alongside PAN,
+  a compile-time check that a kernel raw dereference cannot target a user
+  address (refinements) is wanted; its feasibility is assessed first.
+  [active] #1032
