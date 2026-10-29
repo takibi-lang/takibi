@@ -195,13 +195,7 @@ kernel/kernel/process.tkb	kernel_process_clone_rollover_busy_injections	unreview
 kernel/kernel/process.tkb	kernel_process_core0_idle_seen	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
 kernel/kernel/process.tkb	kernel_process_cpus_that_ran	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
 kernel/kernel/process.tkb	kernel_process_exec_failure_reason	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
-kernel/kernel/process.tkb	kernel_process_reap_unlinked_count	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
 kernel/kernel/process.tkb	kernel_process_rollover_busy_injections	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
-kernel/kernel/process.tkb	kernel_process_stable_retry_busy	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
-kernel/kernel/process.tkb	kernel_process_stable_retry_partial	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
-kernel/kernel/process.tkb	kernel_process_start_refused_busy	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
-kernel/kernel/process.tkb	kernel_process_start_refused_invalid	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
-kernel/kernel/process.tkb	kernel_process_start_refused_partial	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
 kernel/kernel/process.tkb	kernel_process_tick_wake_head	unreviewed
 kernel/kernel/process.tkb	kernel_process_tick_wake_tick_before	unreviewed
 kernel/kernel/process.tkb	kernel_process_tick_wake_tick_now	unreviewed
@@ -228,14 +222,10 @@ kernel/kernel/process.tkb	scheduled_process_missing_reason	unreviewed; 2026-10-0
 kernel/kernel/process.tkb	scheduled_process_missing_site	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
 kernel/kernel/process.tkb	scheduled_process_peer_dispatch_enabled	unreviewed; 2026-10-06 retain-authority: machine process namespace and scheduler / run guard; typed record makers; pooled records; bootstrap and assembly continuations
 kernel/kernel/process.tkb	scheduled_process_pool_ready	unreviewed; 2026-10-06 retain-authority: machine process namespace and scheduler / run guard; typed record makers; pooled records; bootstrap and assembly continuations
-kernel/kernel/process.tkb	scheduled_process_reaped_current_count	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
 kernel/kernel/process.tkb	scheduled_process_record_absent	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
-kernel/kernel/process.tkb	scheduled_process_record_missing_count	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
-kernel/kernel/process.tkb	scheduled_process_recycled_reads	unreviewed
 kernel/kernel/process.tkb	scheduled_process_stack_deepest_reaped	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
 kernel/kernel/process.tkb	scheduled_process_stale_first_generation	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
 kernel/kernel/process.tkb	scheduled_process_stale_first_slot	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
-kernel/kernel/process.tkb	scheduled_process_stale_handle_reads	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
 kernel/kernel/process.tkb	spread_timer_child	unreviewed; 2026-10-06 retain-fixture: EL0 spread timer fixture / timer enter/left publication and fixture progress hooks
 kernel/kernel/process.tkb	spread_timer_parent	unreviewed; 2026-10-06 retain-fixture: EL0 spread timer fixture / timer enter/left publication and fixture progress hooks
 kernel/kernel/process.tkb	spread_timer_phase	unreviewed; 2026-10-06 retain-fixture: EL0 spread timer fixture / timer enter/left publication and fixture progress hooks

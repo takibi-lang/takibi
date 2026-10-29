@@ -85,3 +85,8 @@ by a source scan with different edges).
   watched pids, the event ring and its cursor) become `AtomicWord`; the
   ring cursor is one `fetch_add`, so two cores no longer take one slot.
   475 -> 462 unprotected.
+- 2026-10-29: ten diagnostic counters in `kernel/kernel/process.tkb`
+  (recycled/stale reads, missing records, reaped-current, start refusals
+  and stable-root retries, reap-unlinked) become `AtomicWord` with
+  `fetch_add`, so increments from different cores are no longer lost.
+  462 -> 452 unprotected.
