@@ -368,6 +368,33 @@ def replace_once(path: Path, before: str, after: str) -> None:
             f"expected exactly one race-window edit in {path}, found {count}")
     path.write_text(source.replace(before, after), encoding="ascii")
 
+# GitHub issue #1211/#1216: the RX handler's line end has woken the reader
+# and queued the echo under the run lock; the echo leaves only in
+# uart_terminal_resume_output, after the lock is let go. Held here, the
+# reader on its own core finishes the read and writes, finds the echo
+# pending, and sleeps on UartTx; the resume drain then gives it its room
+# outside the TX interrupt. --revert removes the owed wake's TXIM enable,
+# and the writer sleeps beside an empty queue.
+WINDOWS["1211"] = {
+    "spin": None,
+    "prepare": [
+        ("init/test_driver.tkb",
+         "    terminal_io_receive(guard, c);\n"
+         "    process_run_unlock(guard);\n",
+         "    terminal_io_receive(guard, c);\n"
+         "    process_run_unlock(guard);\n"
+         "    // race window 1211 (scripts/build_qemu_race_window.py)\n"
+         "    if ((c == 10 || c == 13) && terminal_echo_pending()) {\n"
+         "        let race_window_start: i64 = read_cntpct();\n"
+         "        while (read_cntpct() - race_window_start <\n"
+         "               (read_cntfrq() >> 4)) {}\n"
+         "    }\n"),
+    ],
+    "check": ("printk/log.tkb",
+              "    if (atomic_word_load(&kernel_log_tx_writer_wake_owed) != 0) { uart_tx_irq_enable(); }\n",
+              ""),
+}
+
 
 def main() -> None:
     args = sys.argv[1:]

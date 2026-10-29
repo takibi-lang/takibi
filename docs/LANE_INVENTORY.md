@@ -42,7 +42,7 @@ point, one more GDB stop in affinity-gdb), not to a lane of its own.
 | kernelcheck-race-window-603-qemu | 388 | error-case | wait4 pending-block window, armed and reverted |
 | kernelcheck-race-window-609-qemu | 350 | error-case | peer publishes Blocked in wait4 (#609) |
 | kernelcheck-race-window-633-qemu | 425 | error-case | child exit vs parent record (#633) |
-| kernelcheck-race-window-635-qemu | 164 | error-case | race window #635, armed and reverted |
+| kernelcheck-race-window-635-qemu | 164 | error-case | race window #635 reverted; #1211 RX-resume drain lost wake, armed and reverted (#1216) |
 | kernelcheck-race-window-678-qemu | 330 | error-case | race window #678, armed and reverted |
 | kernelcheck-race-window-705-qemu | 353 | error-case | removing ToIdle must be observed as failure (#705) |
 | kernelcheck-race-window-761-qemu | 100 | error-case | connected read copying the wrong length must fail (#761) |
