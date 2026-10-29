@@ -56,12 +56,12 @@ let write_table (out : out_channel) (prog : toplevel list) =
     | StructDef (name, fs, _, _, _, loc) ->
         Hashtbl.replace fields name fs;
         if String.starts_with ~prefix:Device_protocol_registry.prefix
-             loc.Lexing.pos_fname
+             (source_file_of_loc loc)
         then Hashtbl.replace protocol name ()
     | OwnedStructDef (name, _, _, fs, _, _, _, _, loc) ->
         Hashtbl.replace fields name fs;
         if String.starts_with ~prefix:Device_protocol_registry.prefix
-             loc.Lexing.pos_fname
+             (source_file_of_loc loc)
         then Hashtbl.replace protocol name ()
     | _ -> ()) prog;
   let rec protection seen = function
@@ -98,6 +98,6 @@ let write_table (out : out_channel) (prog : toplevel list) =
           else if Init_state.is_scratch name then "scratch" else "-" in
         let prot = if qualifier = "region" then "region" else protection [] ty in
         Printf.fprintf out "%s\t%d\t%s\t%s\t%s\t%s\t%s\n"
-          (Call_graph.relative loc.Lexing.pos_fname) loc.Lexing.pos_lnum name
+          (Call_graph.relative (source_file_of_loc loc)) loc.Lexing.pos_lnum name
           (if priv then "private" else "public") qualifier (spell ty) prot
     | _ -> ()) prog
