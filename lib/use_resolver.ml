@@ -147,19 +147,46 @@ let resolve
    after 94f1c36 removed a used file. With them a deleted prerequisite is
    simply out of date, and the rebuild that follows writes a depfile that
    no longer names it. *)
-let depfile_contents (output : string) (deps : string list) : string =
+let depfile_contents ?(policy = []) (output : string) (deps : string list)
+    : string =
   let buf = Buffer.create 256 in
   Buffer.add_string buf output;
   Buffer.add_char buf ':';
   List.iter (fun dep -> Buffer.add_char buf ' '; Buffer.add_string buf dep) deps;
   Buffer.add_char buf '\n';
+  if policy <> [] then begin
+    Buffer.add_string buf output;
+    Buffer.add_char buf ':';
+    List.iter (fun dep -> Buffer.add_char buf ' '; Buffer.add_string buf dep)
+      policy;
+    Buffer.add_char buf '\n'
+  end;
   List.iter (fun dep ->
     Buffer.add_char buf '\n';
     Buffer.add_string buf dep;
-    Buffer.add_string buf ":\n") deps;
+    Buffer.add_string buf ":\n") (deps @ policy);
   Buffer.contents buf
 
-let write_depfile (path : string) (output : string) (deps : string list) : unit =
+(* GitHub issue #1214: the prerequisites a compile reads besides its `use`
+   closure -- the policy files named by --device-semantics-file,
+   --raw-mint-file and --require-execution-model. Each is a real input: a
+   device-semantics file's protocols are checked and its rows change what
+   another file may do, so a change to one alone must rebuild every object
+   that named it (the QEMU kernel was left stale by an edit to
+   usb_xhci_rings.tkb, which only the RPi5 kernel compiles). They go on a
+   rule line of their own, after the closure's: the first line stays the
+   compiled set, which build checks read as such
+   (scripts/measure_trusted_base.py, inventory_kernel_globals.py), and Make
+   merges the two. In the order given; a file in the closure, or named
+   twice, is listed once. *)
+let policy_inputs ~(closure : string list) ~(policy_files : string list)
+    : string list =
+  List.fold_left (fun deps file ->
+    if List.mem file deps || List.mem file closure then deps
+    else deps @ [file]) [] policy_files
+
+let write_depfile ?(policy = []) (path : string) (output : string)
+    (deps : string list) : unit =
   let chan = open_out path in
-  output_string chan (depfile_contents output deps);
+  output_string chan (depfile_contents ~policy output deps);
   close_out chan

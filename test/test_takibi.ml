@@ -25017,6 +25017,55 @@ let use_resolver_tests =
    split use_resolver_tests already uses for resolve vs. parse_file. *)
 let depfile_tests =
   [
+    (* GitHub issue #1214: policy files are prerequisites too. *)
+    Alcotest.test_case "policy_inputs: a policy file outside the closure is \
+                         listed once, one in it not at all" `Quick (fun () ->
+      Alcotest.(check (list string)) "inputs"
+        ["dev.tkb"; "mint.tkb"; "EXECUTION_MODEL"]
+        (Use_resolver.policy_inputs ~closure:["b.tkb"; "a.tkb"]
+           ~policy_files:["dev.tkb"; "a.tkb"; "mint.tkb"; "dev.tkb";
+                          "EXECUTION_MODEL"]));
+
+    Alcotest.test_case "depfile_contents: policy inputs on a rule line of \
+                         their own, with empty rules" `Quick (fun () ->
+      Alcotest.(check string) "text"
+        "main.o: a.tkb\nmain.o: dev.tkb\n\na.tkb:\n\ndev.tkb:\n"
+        (Use_resolver.depfile_contents ~policy:["dev.tkb"] "main.o" ["a.tkb"]));
+
+    Alcotest.test_case "issue #1214: the compiler's depfile names a \
+                         --device-semantics-file and a --raw-mint-file the \
+                         use closure does not reach" `Quick (fun () ->
+      let dir = Filename.temp_dir "takibi-depfile-" "" in
+      let write name text =
+        let path = Filename.concat dir name in
+        let oc = open_out path in
+        output_string oc text; close_out oc; path in
+      let main = write "main.tkb" "fn main() {}" in
+      let device = write "device.tkb" "fn device_only() {}" in
+      let mint = write "mint.tkb" "fn mint_only() {}" in
+      let depfile = Filename.concat dir "main.o.d" in
+      let obj = Filename.concat dir "main.o" in
+      let compiler = takibi_cli_path () in
+      let args = [| compiler; main; "--target"; "aarch64-none-elf";
+                    "--device-semantics-file"; device;
+                    "--raw-mint-file"; mint;
+                    "--emit-depfile"; depfile; "-o"; obj |] in
+      let (o, i, e) = Unix.open_process_args_full compiler args
+                        (Unix.environment ()) in
+      close_out_noerr i;
+      let _ = read_all o and _ = read_all e in
+      ignore (Unix.close_process_full (o, i, e));
+      let ic = open_in depfile in
+      let first = input_line ic in
+      let second = input_line ic in
+      close_in ic;
+      Alcotest.(check bool) "the first line is the compiled closure" false
+        (contains_substring first device || contains_substring first mint);
+      Alcotest.(check bool) "names the device-semantics file" true
+        (contains_substring second device);
+      Alcotest.(check bool) "names the raw-mint file" true
+        (contains_substring second mint));
+
     Alcotest.test_case "depfile_contents: no deps still names the output" `Quick (fun () ->
       Alcotest.(check string) "line"
         "main.o:\n" (Use_resolver.depfile_contents "main.o" []));

@@ -46,7 +46,10 @@ ATOMIC_RE = re.compile(r"\b(?:" + "|".join(ATOMIC_NAMES) + r")\b")
 def read_depfile_sources(depfile: Path) -> list[str]:
     if not depfile.exists():
         sys.exit(f"error: {depfile} does not exist -- run `make kernelbuild` first")
-    text = depfile.read_text().replace("\\\n", " ")
+    # The first rule line is the compiled `use` closure; the policy inputs
+    # (device semantics, raw mint, execution model) follow on a line of
+    # their own (GitHub issue #1214) and are not compiled sources.
+    text = depfile.read_text().replace("\\\n", " ").split("\n", 1)[0]
     _, _, prereqs = text.partition(":")
     return sorted(set(p for p in prereqs.split() if p.endswith(".tkb")))
 

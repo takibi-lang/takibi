@@ -270,8 +270,13 @@ let () =
        depending on a file that caused a real compile error the next time
        that file changes. *)
     if !emit_depfile <> "" then
-      Use_resolver.write_depfile !emit_depfile !output_file
-        (List.map fst resolved);
+      Use_resolver.write_depfile
+        ~policy:(Use_resolver.policy_inputs ~closure:(List.map fst resolved)
+                   ~policy_files:(List.rev !device_semantics_files
+                                  @ List.rev !raw_mint_files
+                                  @ (if !execution_model_file = "" then []
+                                     else [!execution_model_file])))
+        !emit_depfile !output_file (List.map fst resolved);
 
     let compiled_files = List.map fst resolved in
     let prog = List.concat_map snd resolved in

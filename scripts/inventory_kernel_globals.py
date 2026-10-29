@@ -128,7 +128,10 @@ def render():
         depfile = ROOT / f'kernel/build/{target}/main.o.d'
         if not depfile.exists():
             raise ValueError(f'missing {depfile}; run make kernelbuild first')
-        main[target] = set(re.findall(r'kernel/[A-Za-z_0-9/.-]+\.tkb', depfile.read_text()))
+        # The first line only: the compiled closure, not the policy inputs
+        # on the second (GitHub issue #1214).
+        main[target] = set(re.findall(r'kernel/[A-Za-z_0-9/.-]+\.tkb',
+                                      depfile.read_text().split('\n', 1)[0]))
     by_name = {}
     for name, site, address, store in references:
         by_name.setdefault(name, []).append((site, address, store))
