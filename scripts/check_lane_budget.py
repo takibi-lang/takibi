@@ -47,7 +47,9 @@ Two bounds:
                    measured about 4570 (4368 over 33 receipts, plus langcheck
                    about 84 s and the RPi5 lane about 126 s, which failed in
                    that run). The limit is 5900 s: that plus about 30 %,
-                   the same headroom as before (margin 1330 s).
+                   the same headroom as before (margin 1330 s). A second,
+                   fully green quiet run on 19f25bbb confirmed 4655 over 34
+                   receipts (span 804 s, pre-lane 65 s): margin 1245 s, 27 %.
                    Only a GREEN allcheck's receipts are read (#1123): land.sh
                    copies _build/lane-timing, after allcheck passed, to
                    <git common dir>/takibi-land/lane-timing-green
