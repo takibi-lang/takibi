@@ -145,6 +145,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_kernel_log_expectations_controls.py` | a `b"` inside a word (a plain string's closing quote) is not read as an expectation; real byte strings after a space, comma or paren are (#817) |
 | `check_kernel_memory_map_controls.py` | Linked-image growth, exact QEMU boot views, invalid rendering inputs, and allocator layout controls |
 | `check_kernel_views_controls.sh` | Controls for the shared view comparison (GitHub issue #530) |
+| `check_kernel_init_failure_controls.py` | `kernel_init_failure.py`, which the QEMU and RPi5 lanes run before the dmesg verdict, names the step `/etc/init.sh` stopped at when it exits nonzero (the #1086 shape), and prints nothing for a clean or absent exit or another program's exit (#1209) |
 | `check_kernel_view_filters.sh` | every line of each kernel view `.expected` (common, platform, and the `qemu-debug` overlay) is selected by the `.filter` its lane resolves, using the lanes' own `kernel_views_select`; an `.expected` no lane compares is refused (#834) |
 | `check_kernel_view_filters_controls.sh` | Controls for the view filter/expected check: an unselected line, a platform or overlay expected, an orphan expected and an empty tree fail; a platform filter override passes (#834) |
 | `check_oops_await_timing_controls.py` | Deterministic crash-console arrival, common-deadline and half-budget controls, including partial markers, failures and unavailable artifacts |

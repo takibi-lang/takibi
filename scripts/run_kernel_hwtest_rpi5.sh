@@ -582,6 +582,8 @@ if [ "$uart_driver_status" -ne 0 ]; then
 fi
 echo "[kernel/rpi5] init-managed HTTPd passed"
 
+# GitHub issue #1209: name init.sh's own failure first. Prints only.
+python3 "$REPO_ROOT/scripts/kernel_init_failure.py" "$UART_LOG"
 python3 "$REPO_ROOT/scripts/validate_kernel_dmesg_timestamps.py" \
     --platform rpi5 --timing-log "$UART_TIMING_LOG" "$UART_LOG"
 # GitHub issue #606: /bin/protocol-trace's window of the stack-ownership

@@ -352,6 +352,9 @@ if [ ! -s "$UART_LOG" ]; then
 fi
 kernel_views_normalize "$UART_LOG"
 
+# GitHub issue #1209: name init.sh's own failure first; the verdicts that
+# follow are about steps it never reached. Prints only; decides nothing.
+python3 "$REPO_ROOT/scripts/kernel_init_failure.py" "$UART_LOG"
 python3 "$REPO_ROOT/scripts/validate_kernel_dmesg_timestamps.py" "$UART_LOG" \
     --timing-log "$UART_TIMING_LOG" \
     --timing-profile "${KERNEL_QEMU_TIMING_PROFILE:-local}" \
