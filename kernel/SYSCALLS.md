@@ -80,7 +80,7 @@ runs: pinned Alpine `busybox-static`/`busybox-extras` 1.37.0-r31 (ash +
 | 174-177 | getuid/geteuid/getgid/getegid | Implemented | the caller's real or effective uid or gid (GitHub issue #1176); 0 for init and whatever has not changed them |
 | 178 | gettid | Implemented | returns the real current pid |
 | 179 | sysinfo | Partial | writes a zero-filled Linux aarch64 `struct sysinfo` with real generic-counter uptime; other accounting fields remain zero because the pinned BusyBox `ps` consumer uses only uptime |
-| 198 | socket | Implemented | `AF_INET`/`AF_INET6`, `SOCK_STREAM` only |
+| 198 | socket | Implemented | `AF_INET`/`AF_INET6`, `SOCK_STREAM` only; any other family is `EAFNOSUPPORT`, as from a Linux built without it (musl's nscd lookup needs that answer, #1176), another type or protocol `EINVAL` |
 | 200 | bind | Implemented | IPv4/IPv6 sockaddr validated through the user-memory boundary |
 | 201 | listen | Implemented | |
 | 202/242 | accept/accept4 | Implemented | takes one bounded step toward the three-way handshake, then returns the physical RX capability. An incomplete handshake remains on the listener; the caller blocks on `ProcessWaitReason::NetRx` and retries the same syscall after a timer wake. This lets a child on another CPU use the RX capability while the parent waits. An incomplete handshake does not return `EAGAIN` to userspace |

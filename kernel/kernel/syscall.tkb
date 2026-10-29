@@ -1573,6 +1573,8 @@ private fn syscall_statfs_with(slot: borrow SyscallSlot[0],
 // (CAP_SETUID / CAP_SETGID) is an effective uid of 0: with no capability
 // sets here, that is what Linux's root-compatible capability rules give.
 // An id argument is the low 32 bits; 0xFFFFFFFF (-1) leaves an id alone.
+// asm-generic/errno.h: EAFNOSUPPORT 97.
+const LINUX_EAFNOSUPPORT: usize = 0xFFFFFFFFFFFFFF9F;
 const AARCH64_NR_SETREGID: usize = 143;
 const AARCH64_NR_SETGID: usize = 144;
 const AARCH64_NR_SETREUID: usize = 145;
@@ -8213,7 +8215,14 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // socket(AF_INET, SOCK_STREAM, 0). Flags in the high type bits are
         // accepted; only the underlying stream type is relevant here.
         syscall_test_evidence_record_socket();
-        if ((x0 != 2 && x0 != 10) || (x1 & 0xF) != 1 || x2 != 0) {
+        // GitHub issue #1176: a family this kernel has no socket layer for
+        // is EAFNOSUPPORT, as Linux answers one it was built without. musl's
+        // nscd lookup (getpwnam, initgroups) treats exactly that error as
+        // "no nscd" and reads /etc; EINVAL made BusyBox su fail.
+        if (x0 != 2 && x0 != 10) {
+            return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EAFNOSUPPORT), current_authority);
+        }
+        if ((x1 & 0xF) != 1 || x2 != 0) {
             return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINVAL), current_authority);
         }
         match kernel_socket_fd_alloc(4) {

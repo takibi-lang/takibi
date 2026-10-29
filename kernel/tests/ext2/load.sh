@@ -40,9 +40,8 @@ busybox mkdir -p "$root/load"
 # substitution, carries the uid (see above).
 busybox id -u >"$root/load/uid"
 read uid <"$root/load/uid"
-if [ "$uid" -eq 0 ]; then
-    busybox chmod 1777 "$root/load"
-fi
+# No chmod of $root/load for `load`: Takibi has no fchmodat (nr 53) and no
+# uid permission model, so the root-made directory is writable to it.
 for phase in "$@"; do
     count=$((count + 1))
     echo "load: begin $phase"

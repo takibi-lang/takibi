@@ -1839,7 +1839,8 @@ fn fail_halt() !{unsafe} {
  * checks what Linux lets a non-root process do: getresuid/getresgid agree
  * with getuid/geteuid/getgid/getegid, -1 keeps an id, its own ids are
  * allowed and others EPERM, setuid(-1) EINVAL, setgroups EPERM, a bad
- * pointer EFAULT, and a fork grandchild inherits the ids. Root may change
+ * pointer EFAULT, a fork grandchild inherits the ids, and an unknown
+ * socket family is EAFNOSUPPORT (what su's /etc lookups need). Root may change
  * freely: the drop itself is that case. The child exits with the number of
  * the first check that fails. `credentials_probe_alone` runs under
  * qemu-aarch64 in `make linuxcheck` against this line of the linux_file
@@ -1853,6 +1854,7 @@ const GETRESGID_SYSCALL: usize = 150;
 const SETGROUPS_SYSCALL: usize = 159;
 const ID_KEEP: usize = 0xFFFFFFFF;
 const CREDENTIALS_DROP_ID: usize = 1000;
+const EAFNOSUPPORT_RC: usize = 0xFFFFFFFFFFFFFF9F;
 
 fn credentials_probe_alone() !{unsafe} {
     credentials_probe();
@@ -1922,6 +1924,10 @@ fn credentials_probe_child() -> usize !{unsafe} {
     payload_write_u64(ids_base, 0, 0xFF);
     if (svc5(260, grandchild, ptr_of(ids_base, 0), 0, 0, 0) != grandchild) { return 23; }
     if ((payload_read_u64(ids_base, 0) & 0xFFFFFFFF) != 0) { return 24; }
+    // An unknown socket family is EAFNOSUPPORT: musl's getpwnam and
+    // initgroups read /etc only after that answer from their nscd socket,
+    // and BusyBox su failed on EINVAL. (AF_UNIX itself exists on Linux.)
+    if (svc5(198, 255, 1, 0, 0, 0) != EAFNOSUPPORT_RC) { return 25; }
     return 0;
 }
 
@@ -1941,7 +1947,7 @@ fn credentials_probe() !{unsafe} {
     fail_if(credentials_probe_res(false, ids_base,
                                   svc5(174, 0, 0, 0, 0, 0)) == false);
     let mut message: []const u8 =
-        bs"userspace credentials: a non-root child gets EPERM for other ids, EINVAL for setuid(-1), EFAULT, and its ids across fork ok\n";
+        bs"userspace credentials: a non-root child gets EPERM for other ids, EINVAL for setuid(-1), EFAULT, and its ids across fork, unknown socket family EAFNOSUPPORT ok\n";
     if ((payload_read_u64(status_base, 0) & 0xFFFF) != 0) {
         message = bs"userspace credentials: FAILED, the child's exit status names the check\n";
     }
