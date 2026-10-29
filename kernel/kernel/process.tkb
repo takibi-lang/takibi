@@ -9045,6 +9045,12 @@ private fn kernel_process_signal_deliver_traced(
                     el0_context_retry_syscall(parked);
                 }
                 let ready = scheduled_process_wake(guard, owner, blocked);
+                // GitHub issue #948: a terminal read ended by a signal was
+                // woken too; kernel_process_uart_block_evidence matches
+                // every UART block with a wake.
+                if (reason == ProcessWaitReason::UartRx) {
+                    process_test_evidence_record_uart_wake();
+                }
                 if (reason == ProcessWaitReason::Deadline ||
                     reason == ProcessWaitReason::Signal) {
                     let resumed: &mut ProcessRecord =

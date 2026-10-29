@@ -13,6 +13,7 @@ extern fn signal_spin_stray(pid: usize, signum: usize) -> usize;
 extern symbol signal_spin_handler;
 extern fn signal_spin_forever(set: usize, bad_sp: usize) -> usize;
 extern symbol signal_exit_handler;
+extern symbol signal_terminal_handler;
 
 private fn boundary_fail(line: borrow []const u8) !{unsafe} {
     // Raw ABI input only: these syscalls read the readonly bytes.
@@ -450,11 +451,10 @@ private fn boundary_spin_end() !{unsafe} {
 // with data instead and take a byte the shell expects. The board runs
 // /bin/signal-terminal-skip, which says so.
 //
-// The kernel prints "signal-terminal: read blocked" each time this
-// program's terminal read blocks. The SA_RESTART row's sender prints
-// "signal-terminal: read signal sent" after its kill; the driver types
-// the byte at the first blocked line after that, so the byte can only
-// reach the read once the handler has run and the read has blocked again.
+// The SA_RESTART row's handler prints "signal-terminal: handler ran", and
+// the driver types the byte only after that line, so the byte cannot come
+// before the signal: the read the handler restarted is the one that
+// returns it, whether the byte is already queued or arrives later.
 fn signal_terminal_probe() !{unsafe} {
     let mut action: [usize; 4];
     action[0] = signal_interrupt_handler as usize;
@@ -465,6 +465,7 @@ fn signal_terminal_probe() !{unsafe} {
         boundary_fail(bs"signal-terminal: FAIL interrupt sigaction\n");
         return;
     }
+    action[0] = signal_terminal_handler as usize;
     action[1] = 0x14000000;
     if (svc5(134, 12, action as *usize as usize, 0, 8, 0) != 0) {
         boundary_fail(bs"signal-terminal: FAIL restart sigaction\n");
@@ -495,7 +496,6 @@ fn signal_terminal_probe() !{unsafe} {
         pause[1] = 100000000;
         svc5(101, pause as *usize as usize, 0, 0, 0, 0);
         svc5(129, me, 12, 0, 0, 0);
-        boundary_line(bs"signal-terminal: read signal sent\n");
         svc5(93, 0, 0, 0, 0, 0);
         return;
     }

@@ -63,8 +63,8 @@ def shell_prompt_ready(output: bytes, setup: str) -> bool:
 # each platform's signal_terminal view, not to the shared ash transcript.
 TERMINAL_READ_PROBE = "/bin/signal-terminal"
 TERMINAL_READ_SKIP = "/bin/signal-terminal-skip"
-TERMINAL_READ_SENT = b"signal-terminal: read signal sent\n"
-TERMINAL_READ_BLOCKED = b"signal-terminal: read blocked\n"
+# A user write: the terminal may end it with CR LF, so no newline here.
+TERMINAL_READ_RAN = b"signal-terminal: handler ran"
 
 
 def ash_command_results(transcript, commands, setup):
@@ -826,14 +826,12 @@ def main() -> int:
                     ppoll_pause_byte_sent = True
 
                 # GitHub issue #948: /bin/signal-terminal's SA_RESTART row
-                # reads one byte. It goes out once the sender has signalled
-                # and the kernel has said the read blocked a third time --
-                # the EINTR row's block, this row's first, and the block of
-                # the read the handler restarted. The two lines can reach
-                # the UART in either order.
+                # reads one byte. Its handler prints this line, so the byte
+                # cannot arrive before the signal: the read either finds it
+                # in the ring when the handler restarts it, or sleeps until
+                # it comes. Either way only a restarted read returns it.
                 if (args.terminal_read_rows and not terminal_read_byte_sent and
-                        TERMINAL_READ_SENT in output and
-                        output.count(TERMINAL_READ_BLOCKED) >= 3):
+                        TERMINAL_READ_RAN in output):
                     write_uart_line(connection, b"")
                     terminal_read_byte_sent = True
 

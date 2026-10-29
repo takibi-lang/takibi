@@ -4221,24 +4221,6 @@ private fn syscall_terminal_ppoll_probe() -> bool {
     return matches;
 }
 
-// GitHub issue #948: /bin/signal-terminal's terminal read. The ash lane's
-// driver types the byte its SA_RESTART row waits for only after this
-// line follows the row's "signal sent", so the byte can reach the read
-// only once the handler has run and the read has blocked again.
-private fn syscall_terminal_signal_probe() -> bool {
-    let mut slot: ProcessSlot = kernel_syscall_process_slot();
-    if (scheduled_process_slot_valid(slot) == false) { return false; }
-    let guard = process_run_lock();
-    let command = scheduled_process_command_line(guard, slot);
-    let expected = bs"/bin/signal-terminal\0";
-    let mut matches: bool = true;
-    for index: usize in 0..<21 {
-        if (command[index] != expected[index]) { matches = false; }
-    }
-    process_run_unlock(guard);
-    return matches;
-}
-
 fn syscall_read_uart(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], address: usize, requested: usize) -> SyscallIoResult {
     if (requested == 0) { return SyscallIoResult::Transferred(0); }
     match user_range_check_write(current_authority, address, requested) {
@@ -4272,9 +4254,6 @@ fn syscall_read_uart(current_authority: borrow ProcessCurrent[current_process, P
                 // nothing.
                 let mut process_slot: ProcessSlot = kernel_syscall_process_slot();
                 if (scheduled_process_slot_valid(process_slot)) {
-                    if (syscall_terminal_signal_probe()) {
-                        kernel_boot_log("signal-terminal: read blocked\n");
-                    }
                     return SyscallIoResult::UartWait;
                 }
                 return SyscallIoResult::InterruptWait;

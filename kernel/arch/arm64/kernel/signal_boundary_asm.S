@@ -531,3 +531,33 @@ signal_exit_handler:
 .Lexit_handler_failed:
     b .Lexit_handler_failed
 .size signal_exit_handler, .-signal_exit_handler
+
+/* GitHub issue #948: signal_interrupt_handler's count, then one line on
+ * stdout. The ash lane's driver types its byte only after the line, so the
+ * byte can reach only the read this handler restarted. The string sits in
+ * .text: the probe keeps no writable data. */
+.global signal_terminal_handler
+.type signal_terminal_handler, %function
+signal_terminal_handler:
+    ldr x9, [x1, #568]
+    adr x10, .Linterrupt_counting
+    cmp x9, x10
+    b.lo .Lterminal_stray
+    adr x10, .Linterrupt_counted
+    cmp x9, x10
+    b.hs .Lterminal_stray
+    ldr x9, [x1, #480]
+    add x9, x9, #1
+    str x9, [x1, #480]
+.Lterminal_stray:
+    mov x0, #1
+    adr x1, .Lterminal_ran
+    mov x2, #(.Lterminal_ran_end - .Lterminal_ran)
+    mov x8, #64
+    svc #0
+    ret
+.Lterminal_ran:
+    .ascii "signal-terminal: handler ran\n"
+.Lterminal_ran_end:
+    .balign 4
+.size signal_terminal_handler, .-signal_terminal_handler
