@@ -65,6 +65,12 @@ LLVM_OBJDUMP = "llvm-objdump-19"
 UXN_ONLY = 1 << 54
 UXN_AND_PXN = (1 << 54) | (1 << 53)
 EXPECTED_UXN_ONLY_COUNT = 1
+# GitHub issue #1032: the kernel identity is no longer one init_root block
+# but a shared L2/L3 pair built by this function. Its text pages carry UXN
+# only (0x787, read-only, EL1-executable); every other block and page
+# carries UXN+PXN. One constant of each, as built today.
+KERNEL_IDENTITY_FUNCTION = "mmu_init_kernel_identity_tables"
+EXPECTED_IDENTITY_UXN_AND_PXN_COUNT = 1
 DEVICE_BLOCK_FUNCTIONS = {"init_root", "platform_mmu_init_device_blocks"}
 
 ORR_IMM_RE = re.compile(r"^orr\s+x\d+,\s*x\d+,\s*#(0x[0-9a-f]+)$")
@@ -144,7 +150,8 @@ def check_uxn(insns, expected_uxn_and_pxn_count):
     # dozen unrelated functions (map_user_data, map_user_stack,
     # user_page_writable, ...). Only these two functions' own instructions
     # are relevant to this check.
-    root_insns = [(a, t) for a, t, fn in insns if fn == "init_root"]
+    root_insns = [(a, t) for a, t, fn in insns
+                  if fn == KERNEL_IDENTITY_FUNCTION]
     device_insns = [
         (a, t) for a, t, fn in insns if fn in DEVICE_BLOCK_FUNCTIONS
     ]
@@ -155,9 +162,9 @@ def check_uxn(insns, expected_uxn_and_pxn_count):
     if not root_insns:
         failures.append(
             "issue #231 regression: no instructions found in a function "
-            "named 'init_root' -- kernel/arch/arm64/mm/mmu.tkb's page-table "
+            "named '%s' -- kernel/arch/arm64/mm/mmu.tkb's page-table "
             "construction function was renamed or removed, and this check "
-            "was not updated to match"
+            "was not updated to match" % KERNEL_IDENTITY_FUNCTION
         )
     if not device_insns:
         failures.append(
@@ -166,13 +173,23 @@ def check_uxn(insns, expected_uxn_and_pxn_count):
             "moved to a differently-named function, and this check was not "
             "updated to match" % sorted(DEVICE_BLOCK_FUNCTIONS)
         )
+    count_identity_xn = sum(1 for b in bits if b == UXN_AND_PXN)
+    if root_insns and count_identity_xn != EXPECTED_IDENTITY_UXN_AND_PXN_COUNT:
+        failures.append(
+            "issue #1032 regression: expected %d occurrence(s) of the "
+            "UXN+PXN bits (0x%x) inside %s, found %d -- the kernel "
+            "identity's data blocks and pages must be execute-never at both "
+            "ELs" % (EXPECTED_IDENTITY_UXN_AND_PXN_COUNT, UXN_AND_PXN,
+                     KERNEL_IDENTITY_FUNCTION, count_identity_xn)
+        )
     if count_uxn_only != EXPECTED_UXN_ONLY_COUNT:
         failures.append(
             "issue #231 regression: expected %d occurrence(s) of an "
             "instruction contributing the kernel identity block's UXN-only "
-            "bit (0x%x) inside init_root(), found %d -- init_root()'s "
-            "first descriptor (kernel .text, 0x705) must OR in UXN (bit 54)"
-            % (EXPECTED_UXN_ONLY_COUNT, UXN_ONLY, count_uxn_only)
+            "bit (0x%x) inside %s(), found %d -- the kernel text pages "
+            "(0x787) must OR in UXN (bit 54)"
+            % (EXPECTED_UXN_ONLY_COUNT, UXN_ONLY, KERNEL_IDENTITY_FUNCTION,
+               count_uxn_only)
         )
     if count_uxn_and_pxn != expected_uxn_and_pxn_count:
         failures.append(
@@ -350,6 +367,62 @@ def check_sctlr_allows_normal_memory_unaligned_access(insns):
         )
     return failures
 
+
+
+# GitHub issue #1032: SCTLR_EL1.WXN (bit 19) makes every writable mapping
+# execute-never at EL1 and EL0, so code written into a data page can never
+# run. The one SCTLR_EL1 write in kernel_mmu_activate must OR it in. LLVM
+# folds the source's constant bits into one register built by mov/movk (or
+# an orr immediate), so this reconstructs each register's constant from
+# those and collects every bit an `orr` contributes before the write.
+SCTLR_WXN = 1 << 19
+CONST_MOV_RE = re.compile(
+    r"^mov[z]?\s+[wx](\d+),\s*#(-?0x[0-9a-f]+|-?\d+)(?:,\s*lsl\s*#(\d+))?$")
+CONST_MOVK_RE = re.compile(
+    r"^movk\s+[wx](\d+),\s*#(0x[0-9a-f]+|\d+)(?:,\s*lsl\s*#(\d+))?$")
+ORR_REG_RE = re.compile(r"^orr\s+[wx]\d+,\s*[wx](\d+),\s*[wx](\d+)$")
+ORR_ANY_IMM_RE = re.compile(
+    r"^orr\s+[wx]\d+,\s*[wx]\d+,\s*#(0x[0-9a-f]+|\d+)$")
+
+
+def check_sctlr_sets_wxn(insns):
+    body = [text.split("//")[0].strip() for _, text, fn in insns
+            if fn == "kernel_mmu_activate"]
+    writes = [i for i, text in enumerate(body) if SCTLR_WRITE_RE.match(text)]
+    if len(writes) != 1:
+        return [
+            "issue #1032 regression: expected exactly one SCTLR_EL1 write in "
+            "kernel_mmu_activate, found %d, so SCTLR_EL1.WXN is unverified"
+            % len(writes)
+        ]
+    consts = {}
+    ored = 0
+    for text in body[:writes[0]]:
+        m = CONST_MOV_RE.match(text)
+        if m:
+            consts[m.group(1)] = (int(m.group(2), 0)
+                                  << int(m.group(3) or 0)) & (2**64 - 1)
+            continue
+        m = CONST_MOVK_RE.match(text)
+        if m:
+            shift = int(m.group(3) or 0)
+            old = consts.get(m.group(1), 0) & ~(0xFFFF << shift)
+            consts[m.group(1)] = old | (int(m.group(2), 0) << shift)
+            continue
+        m = ORR_ANY_IMM_RE.match(text)
+        if m:
+            ored |= int(m.group(1), 0)
+            continue
+        m = ORR_REG_RE.match(text)
+        if m:
+            ored |= consts.get(m.group(1), 0) | consts.get(m.group(2), 0)
+    if ored & SCTLR_WXN == 0:
+        return [
+            "issue #1032 regression: no orr before the SCTLR_EL1 write in "
+            "kernel_mmu_activate contributes SCTLR_EL1.WXN (bit 19); a "
+            "writable kernel or user page could be executed"
+        ]
+    return []
 
 
 # GitHub issue #451/#449: mutex_acquire must MASK BEFORE IT TAKES.
@@ -965,6 +1038,7 @@ def main():
         + check_eret_daif_mask(insns)
         + check_spinlock_is_atomic(insns, elf_path)
         + check_sctlr_allows_normal_memory_unaligned_access(insns)
+        + check_sctlr_sets_wxn(insns)
         + check_mutex_masks_before_taking(insns)
         + check_tlb_invalidate_all_is_broadcast(insns)
         + check_exception_stacks_are_per_core(insns)
@@ -977,7 +1051,7 @@ def main():
             print("FAIL kernel/asm-invariants: %s" % f, file=sys.stderr)
         return 1
     report_pass("kernel/asm-invariants", "UXN identity-block bits, eret DAIF.I "
-          "masking, SCTLR_EL1.A clear for Normal memory, the spinlock's "
+          "masking, SCTLR_EL1.A clear and WXN set, the spinlock's "
           "target-selected compare-exchange, mutex_acquire masking "
           "before it takes, the whole-TLB invalidate broadcasting "
           "while MMU activation stays local, and every exception entry "

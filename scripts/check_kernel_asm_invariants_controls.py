@@ -54,6 +54,31 @@ def main():
         print("FAIL kernel-asm-alignment control: missing function passed")
         return 1
 
+    # GitHub issue #1032: SCTLR_EL1.WXN reconstructed through mov/movk.
+    def wxn_body(movk):
+        return [
+            (0x5000, "mov w9, #0x1005             // =4101", "kernel_mmu_activate"),
+            (0x5004, movk, "kernel_mmu_activate"),
+            (0x5008, "mrs x8, SCTLR_EL1", "kernel_mmu_activate"),
+            (0x500C, "orr x8, x8, x9", "kernel_mmu_activate"),
+            (0x5010, "and x8, x8, #0xfffffffffffffffd", "kernel_mmu_activate"),
+            (0x5014, "msr SCTLR_EL1, x8", "kernel_mmu_activate"),
+        ]
+    CASES.note()
+    if checker.check_sctlr_sets_wxn(wxn_body("movk w9, #0x8, lsl #16")):
+        print("FAIL kernel-asm-wxn control: a WXN-setting write was refused")
+        return 1
+    CASES.note()
+    failures = checker.check_sctlr_sets_wxn(wxn_body("movk w9, #0x0, lsl #16"))
+    if len(failures) != 1 or "WXN" not in failures[0]:
+        print("FAIL kernel-asm-wxn control: a write without WXN passed")
+        return 1
+    CASES.note()
+    failures = checker.check_sctlr_sets_wxn([])
+    if len(failures) != 1 or "unverified" not in failures[0]:
+        print("FAIL kernel-asm-wxn control: missing function passed")
+        return 1
+
     # GitHub issue #920: every EL0 eret resets the GIC priority mask.
     pmr_ok = [
         (0x3000, "bl 0x4000 <irq_mask_reset_el0>", "kernel_process_stack_switch_complete"),

@@ -145,10 +145,67 @@ fn mmu_asid_bits() -> usize {
 fn init_root(l1_physical: usize, l2_physical: usize) {
     mmu_table_entry_write(
         l1_physical, KERNEL_IDENTITY_L1_INDEX,
-        (KERNEL_IDENTITY_L1_INDEX << 30) | 0x705 | UXN_BIT);
+        kernel_identity_l2_table | 3);
     mmu_table_entry_write(l1_physical, USER_TEXT_VA >> 30,
                           l2_physical | 3);
     platform_mmu_init_device_blocks(l1_physical);
+}
+
+// GitHub issue #1032: the kernel identity GiB is no longer one W+X block.
+// SCTLR_EL1.WXN (kernel_mmu_activate) makes every writable page
+// execute-never, so the kernel text must be mapped read-only to stay
+// executable, and everything else in the GiB is writable and therefore
+// execute-never at both ELs -- PXN is set explicitly rather than left to WXN,
+// so the mapping says what it is even with WXN clear.
+//
+// One shared L2 page splits the GiB into 2 MiB blocks; the block holding the
+// text is split again by one shared L3 page. Both pages are linker-reserved
+// in .bss (link.ld, link_qemu.ld), which also asserts that the text starts
+// 2 MiB-aligned and fits in one 2 MiB block, so one L3 page covers all of
+// it. Every root's L1 points at the same L2 (init_root): the identity is a
+// kernel fact, not a per-process one. Built once, MMU off, before the first
+// root (address_space_allocate_boot_root).
+//
+// Descriptor low bits: 0x705 is a 2 MiB block, 0x707 a 4 KiB page, both
+// Normal WB (AttrIndx 1), inner shareable, AF set, AP[2:1]=00 (EL1 RW, no
+// EL0 access). 0x787 sets AP[2] (EL1 read-only). Bit 54 is UXN, bit 53
+// PXN (UXN_BIT, PXN_BIT).
+extern symbol kernel_identity_l2_table;
+extern symbol kernel_identity_l3_table;
+// kernel_text_start and kernel_text_end are declared in
+// kernel/arch/arm64/kernel/exception_evidence.tkb.
+
+const KERNEL_BLOCK_RW_XN: usize = 0x0060000000000705;
+const KERNEL_PAGE_RW_XN: usize = 0x0060000000000707;
+const KERNEL_PAGE_TEXT_RX: usize = 0x0040000000000787;
+
+fn mmu_init_kernel_identity_tables() {
+    let gib_base: usize = KERNEL_IDENTITY_L1_INDEX << 30;
+    let text_block: usize = (kernel_text_start - gib_base) >> 21;
+    let text_block_base: usize = gib_base + (text_block << 21);
+    for i: usize in 0..<MMU_TABLE_ENTRY_COUNT {
+        if (i == text_block) {
+            mmu_table_entry_write(kernel_identity_l2_table, i,
+                                  kernel_identity_l3_table | 3);
+        } else {
+            mmu_table_entry_write(kernel_identity_l2_table, i,
+                                  (gib_base + (i << 21)) | KERNEL_BLOCK_RW_XN);
+        }
+    }
+    for i: usize in 0..<MMU_TABLE_ENTRY_COUNT {
+        let pa: usize = text_block_base + (i << 12);
+        // [kernel_text_start, kernel_text_end) rounded out to whole pages;
+        // .rodata starts on the next page boundary (ALIGN(4096)), so the
+        // last text page holds no data.
+        if (pa >= kernel_text_start && pa < kernel_text_end) {
+            mmu_table_entry_write(kernel_identity_l3_table, i,
+                                  pa | KERNEL_PAGE_TEXT_RX);
+        } else {
+            mmu_table_entry_write(kernel_identity_l3_table, i,
+                                  pa | KERNEL_PAGE_RW_XN);
+        }
+    }
+    dsb_ishst();
 }
 
 // A reused physical page contains arbitrary old page-table contents, unlike
@@ -208,8 +265,17 @@ fn kernel_mmu_activate(l1_physical: usize, asid: usize) {
     // Before M becomes active all data is Device memory, whose stricter
     // alignment applies regardless of A; pre-MMU aggregate storage therefore
     // keeps exact final-ELF alignment guards such as boot_page_pool's.
+    // GitHub issue #1032: WXN (bit 19) makes every writable mapping
+    // execute-never at EL1 and EL0, so "write code, then jump to it" faults
+    // whatever a descriptor says. The kernel identity is split so its text
+    // is read-only (mmu_init_kernel_identity_tables).
+    //
+    // The A mask is spelled with a usize operand: `~(1 << 1)` alone was
+    // lowered as a 32-bit complement and zero-extended, which cleared
+    // SCTLR_EL1[63:32] on every boot (found with #1032).
     let sctlr_enabled: usize =
-        (sctlr | 1 | (1 << 2) | (1 << 12)) & ~(1 << 1);
+        (sctlr | 1 | (1 << 2) | (1 << 12) | (1 << 19))
+        & ~((1 as usize) << 1);
     msr_sctlr_el1(sctlr_enabled);
     isb();
 }

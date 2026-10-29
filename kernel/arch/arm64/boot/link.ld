@@ -16,7 +16,10 @@ SECTIONS {
     }
     kernel_text_end = .;
 
-    .rodata : ALIGN(8) {
+    /* GitHub issue #1032: the text's last page is mapped read-only
+       executable (kernel/arch/arm64/mm/mmu.tkb), so nothing else may share
+       it. */
+    .rodata : ALIGN(4096) {
         *(.rodata .rodata.*)
     }
 
@@ -30,6 +33,14 @@ SECTIONS {
     .bss (NOLOAD) : ALIGN(4096) {
         __bss_start = .;
         *(.bss .bss.*) *(COMMON)
+        /* GitHub issue #1032: the kernel identity's shared L2 and L3
+           pages (mmu_init_kernel_identity_tables), zeroed with .bss and
+           fully written before the MMU is on. */
+        . = ALIGN(4096);
+        kernel_identity_l2_table = .;
+        . += 4096;
+        kernel_identity_l3_table = .;
+        . += 4096;
         . = ALIGN(16);
         __bss_end = .;
     }
@@ -151,3 +162,11 @@ SECTIONS {
 ASSERT(percpu_stack_group_end - percpu_stack_base == 0x10000,
        "per-core stack group stride must be 1 << PERCPU_STACK_GROUP_SHIFT")
 
+
+/* GitHub issue #1032: one L3 page (512 x 4 KiB) maps the text; it covers
+   the 2 MiB block the text starts in, so the text must start on that
+   block's boundary and end inside it. */
+ASSERT(kernel_text_start % 0x200000 == 0,
+       "kernel text must start 2 MiB-aligned for the identity L3 split")
+ASSERT(kernel_text_end - kernel_text_start <= 0x200000,
+       "kernel text must fit in one 2 MiB block for the identity L3 split")
