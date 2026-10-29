@@ -152,49 +152,48 @@ private fn block_slot_release(slot: sink BlockSlot[0]) {
 // too, so one shared counter would lose increments to a race and understate
 // the very diff #208 is to be judged by.
 //
-// Per-slot storage rather than an atomic: scripts/check_lock_discipline.py
-// refused the atomic and was right to. A raw intrinsic for a diagnostic
-// counter is a trusted-base entry bought to avoid arithmetic, and the
-// profiler beside it already counts this way.
-private let mut block_read_calls: [usize; KERNEL_MAX_CORES];
-private let mut block_write_calls: [usize; KERNEL_MAX_CORES];
-private let mut block_device_waits: [usize; KERNEL_MAX_CORES];
+// Per-slot AtomicWords (GitHub issue #1012). The raw atomic intrinsic that
+// scripts/check_lock_discipline.py once refused here is not involved:
+// AtomicWord's operations need no unsafe and no address, and a slot shared
+// by two holders (the flip) still counts every increment.
+private let mut block_read_calls: [AtomicWord; KERNEL_MAX_CORES];
+private let mut block_write_calls: [AtomicWord; KERNEL_MAX_CORES];
+private let mut block_device_waits: [AtomicWord; KERNEL_MAX_CORES];
 // The reads= blocks that were single-block device reads, not read-ahead
 // (GitHub issue #553: what a per-block cache retirement is judged by).
-private let mut block_single_reads: [usize; KERNEL_MAX_CORES];
+private let mut block_single_reads: [AtomicWord; KERNEL_MAX_CORES];
 
-private fn block_call_total(counters: borrow [usize; KERNEL_MAX_CORES..])
-        -> usize {
+private fn block_call_total(counters: borrow [AtomicWord; KERNEL_MAX_CORES..]) -> usize {
     let mut total: usize = 0;
     for cpu: usize in 0..<KERNEL_MAX_CORES {
-        total = total + counters[cpu];
+        total = total + atomic_word_load(&counters[cpu]);
     }
     return total;
 }
 
 private fn block_note_call(slot: borrow BlockSlot[0],
-                           counters: borrow [usize; KERNEL_MAX_CORES..]) {
-    counters[slot.index] = counters[slot.index] + 1;
+                           counters: borrow [AtomicWord; KERNEL_MAX_CORES..]) {
+    atomic_word_fetch_add(&counters[slot.index], 1);
 }
 
 fn block_read_call_total() -> usize {
-    return block_call_total(block_read_calls as []usize);
+    return block_call_total(block_read_calls as []AtomicWord);
 }
 // By slot number, which is the core number while KERNEL_PREEMPTIBLE is 0
 // (see BlockSlot).
 fn block_read_call_count(slot: usize) -> usize {
     if (slot >= KERNEL_MAX_CORES) { return 0; }
     let index: {0..<KERNEL_MAX_CORES as usize} = slot;
-    return block_read_calls[index];
+    return atomic_word_load(&block_read_calls[index]);
 }
 fn block_write_call_total() -> usize {
-    return block_call_total(block_write_calls as []usize);
+    return block_call_total(block_write_calls as []AtomicWord);
 }
 
 fn block_device_wait_count(slot: usize) -> usize {
     if (slot >= KERNEL_MAX_CORES) { return 0; }
     let index: {0..<KERNEL_MAX_CORES as usize} = slot;
-    return block_device_waits[index];
+    return atomic_word_load(&block_device_waits[index]);
 }
 
 // GitHub issue #533: one command at a time on the device.
@@ -225,17 +224,17 @@ linear struct BlockDeviceGuard[lock: addr] {
 }
 
 private fn block_device_take(slot: borrow BlockSlot[0])
-        -> BlockDeviceGuard[block_device_lock]
+        -> BlockDeviceGuard[&block_device_lock]
         !{acquires_lock_30_block_device, lock_guard_30_block_device} {
     if (task_mutex_trylock(&block_device_lock) == false) {
-        block_note_call(slot, block_device_waits as []usize);
+        block_note_call(slot, block_device_waits as []AtomicWord);
         task_mutex_acquire(&block_device_lock);
     }
-    let mut guard: BlockDeviceGuard[block_device_lock] = { slot.index };
+    let mut guard: BlockDeviceGuard[&block_device_lock] = { slot.index };
     return guard;
 }
 
-private fn block_device_give(guard: sink BlockDeviceGuard[block_device_lock]) {
+private fn block_device_give(guard: sink BlockDeviceGuard[&block_device_lock]) {
     task_mutex_release(&block_device_lock);
 }
 
@@ -258,22 +257,37 @@ private fn block_device_give(guard: sink BlockDeviceGuard[block_device_lock]) {
 //   which a non-sticky fault does not repeat.
 // - ONE FAULT AT A TIME, armed and read under the device lock. Nothing arms
 //   it outside the boot fixture, and nothing but a test may.
-private let mut block_fault_armed: bool;
-private let mut block_fault_on_write: bool;
-private let mut block_fault_skip: usize;
-private let mut block_fault_sticky: bool;
-private let mut block_fault_injected: usize;
+//
+// GitHub issue #1012: the scenario is one record in a Place guarded by
+// block_device_lock, so the type says what the comment above says: no
+// access without the device guard. The place is Full from the first arm
+// on; Empty means never armed. Linear, as a guarded place's content must
+// be: each access takes the plan out and puts its successor back.
+linear struct BlockFaultPlan[unit: usize] {
+    armed: bool;
+    on_write: bool;
+    skip: usize;
+    sticky: bool;
+    injected: usize;
+}
+struct BlockFaultScenario {
+    private plan: Place(BlockFaultPlan[0]) guarded_by(block_device_lock);
+}
+private let mut block_fault: BlockFaultScenario;
+
+private fn block_fault_plan_retire(plan: sink BlockFaultPlan[0]) {}
 
 // Let `skip` accesses of the chosen kind through, then fail the next one, or
 // every one from then on when `sticky`.
 fn block_fault_arm(on_write: bool, skip: usize, sticky: bool) {
     let slot: BlockSlot[0] = block_slot_acquire();
     let guard = block_device_take(slot);
-    block_fault_armed = true;
-    block_fault_on_write = on_write;
-    block_fault_skip = skip;
-    block_fault_sticky = sticky;
-    block_fault_injected = 0;
+    let mut plan: BlockFaultPlan[0] = { true, on_write, skip, sticky, 0 };
+    match place_take(guard, block_fault.plan) {
+        Place::Empty => {}
+        Place::Full(old) => { block_fault_plan_retire(old); }
+    }
+    let Place::Empty = place_put(guard, block_fault.plan, plan);
     block_device_give(guard);
     block_slot_release(slot);
 }
@@ -282,27 +296,46 @@ fn block_fault_arm(on_write: bool, skip: usize, sticky: bool) {
 fn block_fault_disarm() -> usize {
     let slot: BlockSlot[0] = block_slot_acquire();
     let guard = block_device_take(slot);
-    block_fault_armed = false;
-    let injected: usize = block_fault_injected;
-    block_fault_injected = 0;
+    let mut injected: usize = 0;
+    match place_take(guard, block_fault.plan) {
+        Place::Empty => {}
+        Place::Full(plan) => {
+            injected = plan.injected;
+            let mut disarmed: BlockFaultPlan[0] = { false, plan.on_write, 0, plan.sticky, 0 };
+            block_fault_plan_retire(plan);
+            let Place::Empty = place_put(guard, block_fault.plan, disarmed);
+        }
+    }
     block_device_give(guard);
     block_slot_release(slot);
     return injected;
 }
 
 private fn block_fault_hits(
-        guard: borrow BlockDeviceGuard[block_device_lock],
+        guard: borrow BlockDeviceGuard[&block_device_lock],
         on_write: bool) -> bool {
-    if (block_fault_armed == false || block_fault_on_write != on_write) {
-        return false;
+    let mut hit: bool = false;
+    match place_take(guard, block_fault.plan) {
+        Place::Empty => {}
+        Place::Full(plan) => {
+            let mut armed: bool = plan.armed;
+            let mut skip: usize = plan.skip;
+            let mut injected: usize = plan.injected;
+            if (armed && plan.on_write == on_write) {
+                if (skip > 0) {
+                    skip = skip - 1;
+                } else {
+                    injected = injected + 1;
+                    if (plan.sticky == false) { armed = false; }
+                    hit = true;
+                }
+            }
+            let mut next: BlockFaultPlan[0] = { armed, plan.on_write, skip, plan.sticky, injected };
+            block_fault_plan_retire(plan);
+            let Place::Empty = place_put(guard, block_fault.plan, next);
+        }
     }
-    if (block_fault_skip > 0) {
-        block_fault_skip = block_fault_skip - 1;
-        return false;
-    }
-    block_fault_injected = block_fault_injected + 1;
-    if (block_fault_sticky == false) { block_fault_armed = false; }
-    return true;
+    return hit;
 }
 
 // GitHub issue #208: block_read and block_write go through the per-slot
@@ -388,8 +421,8 @@ private let mut block_run_epoch: [usize; KERNEL_MAX_CORES];
 // on that block is a sequential read.
 private let mut block_run_next: [usize; KERNEL_MAX_CORES];
 private let mut block_run_next_backend: [u8; KERNEL_MAX_CORES];
-private let mut block_run_reads: [usize; KERNEL_MAX_CORES];
-private let mut block_run_hits: [usize; KERNEL_MAX_CORES];
+private let mut block_run_reads: [AtomicWord; KERNEL_MAX_CORES];
+private let mut block_run_hits: [AtomicWord; KERNEL_MAX_CORES];
 
 // Whether this slot's run holds (device, block) at the current epoch.
 private fn block_run_hit_here(slot: borrow BlockSlot[0],
@@ -417,7 +450,7 @@ private fn block_run_take(slot: borrow BlockSlot[0], device: KernelBlockDevice,
     let base: usize = row * KERNEL_BLOCK_SIZE;
     slice_copy(destination[0..<KERNEL_BLOCK_SIZE],
                block_run_data[base..<base + KERNEL_BLOCK_SIZE]);
-    block_run_hits[here] = block_run_hits[here] + 1;
+    atomic_word_fetch_add(&block_run_hits[here], 1);
     return true;
 }
 
@@ -457,7 +490,7 @@ private fn block_run_read(slot: borrow BlockSlot[0], device: KernelBlockDevice,
     if (transferred == false) { return false; }
     for offset: usize in 0..<BLOCK_RUN_BLOCKS {
         if (offset < count) {
-            block_note_call(slot, block_read_calls as []usize);
+            block_note_call(slot, block_read_calls as []AtomicWord);
         }
     }
     workload_profile_note_block_read(count * KERNEL_BLOCK_SIZE);
@@ -467,12 +500,12 @@ private fn block_run_read(slot: borrow BlockSlot[0], device: KernelBlockDevice,
     block_run_count[here] = count;
     block_run_next[here] = first + count;
     block_run_next_backend[here] = device.backend;
-    block_run_reads[here] = block_run_reads[here] + 1;
+    atomic_word_fetch_add(&block_run_reads[here], 1);
     return true;
 }
 
 private fn block_run_transfer_locked(
-        guard: borrow BlockDeviceGuard[block_device_lock],
+        guard: borrow BlockDeviceGuard[&block_device_lock],
         here: {0..<KERNEL_MAX_CORES as usize}, device: KernelBlockDevice,
         first: usize, count: usize) -> bool !{unsafe} {
     if (block_fault_hits(guard, false)) { return false; }
@@ -507,15 +540,15 @@ private fn block_run_transfer_locked(
 }
 
 fn block_single_read_total() -> usize {
-    return block_call_total(block_single_reads as []usize);
+    return block_call_total(block_single_reads as []AtomicWord);
 }
 
 fn block_run_read_total() -> usize {
-    return block_call_total(block_run_reads as []usize);
+    return block_call_total(block_run_reads as []AtomicWord);
 }
 
 fn block_run_hit_total() -> usize {
-    return block_call_total(block_run_hits as []usize);
+    return block_call_total(block_run_hits as []AtomicWord);
 }
 
 fn block_write(device: KernelBlockDevice, block: usize,
@@ -570,15 +603,15 @@ private fn block_write_device(slot: borrow BlockSlot[0],
 
 private fn block_read_device_locked(
         slot: borrow BlockSlot[0],
-        guard: borrow BlockDeviceGuard[block_device_lock],
+        guard: borrow BlockDeviceGuard[&block_device_lock],
         device: KernelBlockDevice, block: usize,
         destination: [u8; KERNEL_BLOCK_SIZE..]) -> BlockIoResult !{unsafe} {
     if (block >= device.length / KERNEL_BLOCK_SIZE) {
         return BlockIoResult::Invalid;
     }
     if (block_fault_hits(guard, false)) { return BlockIoResult::Invalid; }
-    block_note_call(slot, block_read_calls as []usize);
-    block_note_call(slot, block_single_reads as []usize);
+    block_note_call(slot, block_read_calls as []AtomicWord);
+    block_note_call(slot, block_single_reads as []AtomicWord);
     workload_profile_note_block_read(KERNEL_BLOCK_SIZE);
     if (device.backend == 1) {
         // Both sectors of the block in one READ(10): a command costs the
@@ -600,14 +633,14 @@ private fn block_read_device_locked(
 
 private fn block_write_device_locked(
         slot: borrow BlockSlot[0],
-        guard: borrow BlockDeviceGuard[block_device_lock],
+        guard: borrow BlockDeviceGuard[&block_device_lock],
         device: KernelBlockDevice, block: usize,
         source: [u8; KERNEL_BLOCK_SIZE..]) -> BlockIoResult !{unsafe} {
     if (block >= device.length / KERNEL_BLOCK_SIZE) {
         return BlockIoResult::Invalid;
     }
     if (block_fault_hits(guard, true)) { return BlockIoResult::Invalid; }
-    block_note_call(slot, block_write_calls as []usize);
+    block_note_call(slot, block_write_calls as []AtomicWord);
     workload_profile_note_block_write(KERNEL_BLOCK_SIZE);
     if (device.backend == 1) {
         // GitHub issue #281, as measured: both sectors of the block in one

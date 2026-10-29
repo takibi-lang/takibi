@@ -40,24 +40,13 @@ kernel/drivers/block/block_cache.tkb	block_cache_hits	unreviewed; 2026-10-06 can
 kernel/drivers/block/block_cache.tkb	block_cache_tick	unreviewed; 2026-10-06 candidate-context: one read cache per CPU / bounded caller-supplied CPU; release/acquire write epoch; local synchronous access
 kernel/drivers/block/block_cache.tkb	block_cache_used	unreviewed; 2026-10-06 candidate-context: one read cache per CPU / bounded caller-supplied CPU; release/acquire write epoch; local synchronous access
 kernel/drivers/block/block_cache.tkb	block_cache_valid	unreviewed; 2026-10-06 candidate-context: one read cache per CPU / bounded caller-supplied CPU; release/acquire write epoch; local synchronous access
-kernel/drivers/block/memory.tkb	block_device_waits	unreviewed; 2026-10-06 candidate-context: block I/O service and per-CPU read-ahead / TaskMutex for device commands; local read-ahead before device lock; epoch invalidation
-kernel/drivers/block/memory.tkb	block_fault_armed	unreviewed; 2026-10-06 candidate-fixture: one device fault-injection scenario / block-device TaskMutex; arm/disarm/hits entry functions
-kernel/drivers/block/memory.tkb	block_fault_injected	unreviewed; 2026-10-06 candidate-fixture: one device fault-injection scenario / block-device TaskMutex; arm/disarm/hits entry functions
-kernel/drivers/block/memory.tkb	block_fault_on_write	unreviewed; 2026-10-06 candidate-fixture: one device fault-injection scenario / block-device TaskMutex; arm/disarm/hits entry functions
-kernel/drivers/block/memory.tkb	block_fault_skip	unreviewed; 2026-10-06 candidate-fixture: one device fault-injection scenario / block-device TaskMutex; arm/disarm/hits entry functions
-kernel/drivers/block/memory.tkb	block_fault_sticky	unreviewed; 2026-10-06 candidate-fixture: one device fault-injection scenario / block-device TaskMutex; arm/disarm/hits entry functions
-kernel/drivers/block/memory.tkb	block_read_calls	unreviewed; 2026-10-06 candidate-context: block I/O service and per-CPU read-ahead / TaskMutex for device commands; local read-ahead before device lock; epoch invalidation
 kernel/drivers/block/memory.tkb	block_run_backend	unreviewed; 2026-10-06 candidate-context: one read-ahead stream/cache per CPU / CPU-selected synchronous operation; device lock only for transfer; write-epoch checks
 kernel/drivers/block/memory.tkb	block_run_count	unreviewed; 2026-10-06 candidate-context: one read-ahead stream/cache per CPU / CPU-selected synchronous operation; device lock only for transfer; write-epoch checks
 kernel/drivers/block/memory.tkb	block_run_data	unreviewed; 2026-10-06 candidate-context: one read-ahead stream/cache per CPU / CPU-selected synchronous operation; device lock only for transfer; write-epoch checks
 kernel/drivers/block/memory.tkb	block_run_epoch	unreviewed; 2026-10-06 candidate-context: one read-ahead stream/cache per CPU / CPU-selected synchronous operation; device lock only for transfer; write-epoch checks
 kernel/drivers/block/memory.tkb	block_run_first	unreviewed; 2026-10-06 candidate-context: one read-ahead stream/cache per CPU / CPU-selected synchronous operation; device lock only for transfer; write-epoch checks
-kernel/drivers/block/memory.tkb	block_run_hits	unreviewed; 2026-10-06 candidate-context: one read-ahead stream/cache per CPU / CPU-selected synchronous operation; device lock only for transfer; write-epoch checks
 kernel/drivers/block/memory.tkb	block_run_next	unreviewed; 2026-10-06 candidate-context: one read-ahead stream/cache per CPU / CPU-selected synchronous operation; device lock only for transfer; write-epoch checks
 kernel/drivers/block/memory.tkb	block_run_next_backend	unreviewed; 2026-10-06 candidate-context: one read-ahead stream/cache per CPU / CPU-selected synchronous operation; device lock only for transfer; write-epoch checks
-kernel/drivers/block/memory.tkb	block_run_reads	unreviewed; 2026-10-06 candidate-context: one read-ahead stream/cache per CPU / CPU-selected synchronous operation; device lock only for transfer; write-epoch checks
-kernel/drivers/block/memory.tkb	block_single_reads	unreviewed
-kernel/drivers/block/memory.tkb	block_write_calls	unreviewed; 2026-10-06 candidate-context: block I/O service and per-CPU read-ahead / TaskMutex for device commands; local read-ahead before device lock; epoch invalidation
 kernel/drivers/block/virtio_blk.tkb	virtio_blk_base	unreviewed; 2026-10-06 review-device-layout: one virtio block controller / boot DTB; command TaskMutex; fixed DMA receive authority and reset ownership
 kernel/drivers/block/virtio_blk.tkb	virtio_blk_disabled	unreviewed; 2026-10-06 review-device-layout: one virtio block controller / boot DTB; command TaskMutex; fixed DMA receive authority and reset ownership
 kernel/drivers/block/virtio_blk.tkb	virtio_blk_queue	unreviewed; 2026-10-06 review-device-layout: one virtio block controller / boot DTB; command TaskMutex; fixed DMA receive authority and reset ownership

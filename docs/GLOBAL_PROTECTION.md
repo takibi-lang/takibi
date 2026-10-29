@@ -96,3 +96,8 @@ by a source scan with different edges).
   record claimed by a compare-and-swap of its slot word from 0). 452 -> 439
   unprotected. The `_site` and timeout-snapshot structs beside them stay
   listed.
+- 2026-10-30 (slice 4): `kernel/drivers/block/memory.tkb`. The fault
+  injection scenario's five words become one linear record in a `Place`
+  guarded by `block_device_lock` (`composite`), so it cannot be reached
+  without the device guard; the six per-slot counter arrays become
+  `[AtomicWord; KERNEL_MAX_CORES]`. 439 -> 428 unprotected (708 globals).
