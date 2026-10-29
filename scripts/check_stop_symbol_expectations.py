@@ -75,13 +75,13 @@ def controls(stops):
     for text, refused in cases:
         found, _ = problems_in("control", text, stops)
         if bool(found) != refused:
-            return f"control {'not refused' if refused else 'refused'}: {text!r}"
-    return None
+            return f"control {'not refused' if refused else 'refused'}: {text!r}", 0
+    return None, len(cases)
 
 
 def main():
     stops = stopping_functions(LIST.read_text(encoding="utf-8"))
-    failed = controls(stops)
+    failed, control_count = controls(stops)
     if failed:
         print(f"ERROR\tstop-symbol-expectations: {failed}")
         print("FAIL stop-symbol-expectations")
@@ -105,7 +105,7 @@ def main():
         return 1
     report_pass("stop-symbol-expectations",
                 f"{total} expected stop function(s) in {scanned} scripts, each with a row "
-                "in invariant_stop_sites.tsv; 3 controls",
+                f"in invariant_stop_sites.tsv; {control_count} controls",
                 expectations=total, scripts=scanned)
     return 0
 

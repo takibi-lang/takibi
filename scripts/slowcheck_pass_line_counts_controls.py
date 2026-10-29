@@ -129,6 +129,14 @@ def main():
               'from pass_line import report_pass\n\n\n'
               'def main():\n    report_pass("scratch", "one", files=1)\n'},
              1, "is the literal 1"),
+            # GitHub issue #1220: a count spelled in the wording.
+            ("a literal count in the wording",
+             {"check_wording.py":
+              'from pass_line import report_pass\n\n\n'
+              'def main():\n    cases = [1, 2]\n'
+              '    report_pass("scratch", "13 controls ran", '
+              'cases=len(cases))\n'},
+             1, "spells the literal count '13 controls'"),
             ("counts hidden behind **kwargs",
              {"check_splat.py":
               'from pass_line import report_pass\n\n\n'
@@ -164,7 +172,7 @@ def main():
 
     report_pass(
         "pass-line-counts controls",
-        "the repository passes, seven planted defects are caught, the "
+        "the repository passes, eight planted defects are caught, the "
         "declared exemption is honoured, and report_pass refuses a "
         "zero, negative, and missing count",
         cases=CASES.ran)

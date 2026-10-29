@@ -2347,6 +2347,9 @@ kernelcheck-qemu-main: kernelbuild-check
 	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-qemu-main
 
 _kernelcheck-qemu-main:
+	@# GitHub issue #1205/#834: a view line its filter cannot select fails
+	@# here in seconds, before the boot that would fail on it.
+	@bash scripts/check_kernel_view_filters.sh
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_qemutest.sh
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" python3 scripts/run_kernel_shell_qemu_smoketest.py
 

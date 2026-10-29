@@ -21,7 +21,12 @@ no verdict goes around it:
   1. a check script prints its PASS line only through `report_pass`;
   2. every `report_pass` call names at least one count;
   3. that count is an expression, not an integer literal, because a literal
-     is the same silence in a shape that satisfies rule 2.
+     is the same silence in a shape that satisfies rule 2;
+  4. the PASS wording itself carries no literal count of what the check
+     ran ("13 controls", "3 cases"): such a number goes stale the first
+     time a case is added, and reads as a verified count (GitHub issue
+     #1220; #769 found "13" over 14 controls). Put the computed count in
+     the wording through the f-string instead.
 
 What this does NOT establish is that the count is the RIGHT one, or that the
 scanned set was complete. `report_pass`'s docstring carries that part; it is
@@ -47,6 +52,7 @@ from __future__ import annotations
 
 import ast
 import pathlib
+import re
 import sys
 
 from pass_line import report_pass
@@ -75,6 +81,18 @@ def leading_text(node: ast.AST) -> str:
     if isinstance(node, ast.BinOp):
         return leading_text(node.left)
     return ""
+
+
+# GitHub issue #1220: a literal count of what the check itself ran.
+LITERAL_COUNT = re.compile(
+    r"\b(\d+)\s+(controls?|checks?|cases?|claims?|tests?|members?|scenarios?)\b")
+
+
+def literal_counts(node: ast.AST) -> list[str]:
+    """The literal text of a PASS message that spells a count."""
+    texts = [n.value for n in ast.walk(node)
+             if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+    return [m.group(0) for text in texts for m in LITERAL_COUNT.finditer(text)]
 
 
 def called_name(node: ast.Call) -> str:
@@ -127,6 +145,12 @@ def problems_in(path: pathlib.Path) -> list[str]:
                 "the number that is zero when the check examined nothing -- "
                 "usually the size of the set it scanned, not the number of "
                 "findings."
+            )
+        for spelled in (literal_counts(node.args[1]) if len(node.args) > 1 else []):
+            found.append(
+                f"{path.name}:{node.lineno}: the PASS wording spells the "
+                f"literal count {spelled!r}, which goes stale when a case is "
+                "added. Interpolate the computed count instead (#1220)."
             )
         for word in counts:
             if isinstance(word.value, ast.Constant):
