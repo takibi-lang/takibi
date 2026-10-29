@@ -55,9 +55,9 @@ PHASES = ("xargs", "fork", "exec", "pipe", "hackbench")
 # then stops at its shared memory region, a MAP_SHARED|MAP_ANONYMOUS mmap
 # this kernel refuses with EINVAL.
 PHASE_WAITS = {
-    "fork": "#1151 (the 128-page mmap arena refuses stress-ng's shared cache buffer, ENOMEM)",
-    "exec": "#1151 (the 128-page mmap arena refuses stress-ng's shared cache buffer, ENOMEM)",
-    "pipe": "#1151 (the 128-page mmap arena refuses stress-ng's shared cache buffer, ENOMEM)",
+    "fork": "the next blocker after #1151, to be filed: stress-ng's four fork stressor children block in a deadline wait and never return, so the phase hangs (load-qemu 2026-10-29)",
+    "exec": "not reached: the fork phase before it hangs (the next blocker after #1151, to be filed: stress-ng's four fork stressor children block in a deadline wait and never return, so the phase hangs (load-qemu 2026-10-29))",
+    "pipe": "not reached: the fork phase before it hangs (the next blocker after #1151, to be filed: stress-ng's four fork stressor children block in a deadline wait and never return, so the phase hangs (load-qemu 2026-10-29))",
 }
 
 
