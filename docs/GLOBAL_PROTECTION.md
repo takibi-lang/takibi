@@ -73,7 +73,7 @@ migrates it out of the list.
 
 ## Measured, 2026-10-29
 
-Both kernels, 711 production `let mut` globals: atomic 131, composite 53,
+Both kernels, 712 production `let mut` globals (711 before #1172 added one AtomicWord): atomic 132, composite 53,
 lock 18, region 20, dma_fixed 8, per_cpu 6, scratch 1, none 474, so 475
 unprotected. Outside files whose name contains `evidence` or `probe`: 519
 globals, 391 unprotected (the issue's 2026-10-25 hand count was 406 of 500,
