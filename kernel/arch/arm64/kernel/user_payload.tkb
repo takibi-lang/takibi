@@ -2090,8 +2090,8 @@ fn signal_conformance_probe() !{unsafe} {
         payload_write_u64(pause_base, 0, 0);
         payload_write_u64(pause_base, 8, 200000000);
         svc5(101, ptr_of(pause_base, 0), 0, 0, 0, 0);
-        let one: []const u8 = bs"r";
-        svc5(64, write_fd, (unsafe { one as *u8 }) as usize, 1, 0, 0);
+        byte[0] = 0x72;
+        svc5(64, write_fd, byte as *u8 as usize, 1, 0, 0);
         svc5(93, 0, 0, 0, 0, 0);
     }
     fail_if(writer >= 0x8000000000000000);
