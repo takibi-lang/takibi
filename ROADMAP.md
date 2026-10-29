@@ -88,8 +88,10 @@ lane (`kernelcheck-race-window-*-qemu`) before its issue closes.
   apart from brk, madvise; done 2026-10-29) past its 2 MiB shared cache buffer, and #1166
   (CLOCK_REALTIME advances; done 2026-10-29) past the startup sleep its stressors hung in;
   and #1172 (setitimer's ITIMER_REAL; done 2026-10-29) let the fork and pipe stressors
-  stop at --timeout; the exec phase now waits for a non-root uid (stress-ng's exec
-  stressor refuses root, and every process is uid 0; #1176). The fixture
+  stop at --timeout; #1176 (per-process uids and gids, setresuid; done 2026-10-29) runs
+  the stressors as a non-root `load` user through BusyBox su, so the exec stressor no longer
+  refuses root; it now skips because readlinkat (nr 78) of /proc/self/exe is unimplemented and
+  it cannot name its own executable (to file). The fixture
   rootfs grew from 2816 to 6144 blocks to hold both programs, so QEMU and
   the board boot the same image (maintainer, option b: one board build,
   sized from content; about 18 s more SWD per RPi5 lane run). Each program is recorded beside the same program under Linux

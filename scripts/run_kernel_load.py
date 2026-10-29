@@ -53,7 +53,7 @@ PHASES = ("xargs", "fork", "exec", "pipe", "hackbench")
 # watch it fail. Remove an entry when its issue lands.
 # Since #1172 (setitimer) the fork and pipe stressors stop at --timeout.
 PHASE_WAITS = {
-    "exec": "#1176: stress-ng's exec stressor refuses to run as root (\"exec stressor must not run as root, skipping\", seen 2026-10-29 after #1172) and every process here is uid 0; it needs a non-root uid (setresuid) for load.sh to drop to",
+    "exec": "the next blocker after #1176 (seen 2026-10-29): stress-ng's exec stressor skips with \"can't determine stress-ng executable name\" -- readlinkat (nr 78) of /proc/self/exe is unimplemented",
 }
 
 
