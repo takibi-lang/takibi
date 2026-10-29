@@ -665,6 +665,30 @@
       "changes": {
         "assembly_lines": "#948 signal_terminal_handler: the terminal-read probe handler counts itself and prints its line (EL0 fixture asm)"
       }
+    },
+    {
+      "date": "2026-10-29",
+      "head": "290bac87",
+      "counts": {
+        "raw_mint_files": 14,
+        "frame_lines": 12174,
+        "device_semantics_files": 4,
+        "raw_deref_plain": 214,
+        "raw_deref_io": 7,
+        "raw_deref_builtin_region": 113,
+        "unsafe_blocks": 151,
+        "extern_fns": 61,
+        "invariant_stop_sites": 118,
+        "assembly_lines": 2503,
+        "per_cpu_ordinary_arrays": 73,
+        "per_cpu_stores": 6,
+        "raw_cpu_id_calls": 157,
+        "unprotected_globals": 428,
+        "frame_api_ratchet": 7
+      },
+      "changes": {
+        "unprotected_globals": "typed protection: memory.tkb fault scenario into a guarded_by Place, per-slot block counters into AtomicWord (#1012 slice 4)"
+      }
     }
   ]
 }
