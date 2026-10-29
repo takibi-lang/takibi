@@ -231,7 +231,7 @@ next one taken. The done record of the previous queue is in HISTORY.md
    #1005 (one instruction table, `lib/instr_spec.ml`) done 2026-10-30.
 4. **Fixed DMA lifecycle, finishing the drivers.** #720's remaining xHCI
    item (the DCBAA stays legacy until sub-region authority; #783, the
-   batched TD write path), #740's step 3 (a socket's receive queue keeping
+   batched TD write path, done 2026-10-30), #740's step 3 (a socket's receive queue keeping
    the packet, after the profiler's copy-cost measurement), #779 (line
    ownership of split or converted regions), #790 (size review).
 5. **Independent pillar issues, moved from A (2026-10-16).** #789 (lock
