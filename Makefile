@@ -1841,6 +1841,7 @@ $(KERNEL_RPI5_SHELL_ELF): $(KERNEL_RPI5_ELF) $(KERNEL_EXT2_IMAGE) \
 $(KERNEL_RPI5_MAIN_DEBUG_O): $(KERNEL_RPI5_MAIN_O)
 	$(NICE_HEAVY) $(TAKIBI) $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_FDT_TKB) $(KERNEL_RPI5_MAIN_TKB) $(KERNEL_RPI5_COMPILE_FLAGS) $(KERNEL_UNUSED_CHECK_RPI5) -g --emit-depfile $@.d -o $@
 	python3 scripts/buildcheck_kernel_unused_coverage.py rpi5 $@.d
+	python3 scripts/buildcheck_frame_size.py $@
 
 -include $(KERNEL_RPI5_MAIN_DEBUG_O).d
 
@@ -2002,7 +2003,10 @@ $(KERNEL_QEMU_ELF): $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_
 	python3 scripts/buildcheck_kernel_byte_copy.py $@ 0
 
 .PHONY: _kernelbuild-qemu
-_kernelbuild-qemu: kernel-lib-check kernel-verify-exception-frame $(KERNEL_QEMU_ELF) $(KERNEL_DEBUG_METADATA) $(KERNEL_CONSOLE_LAYOUT)
+# GitHub issue #1210: the debug objects too, so a frame that only the -g
+# build pushes past its budget (#1087, ext2_update_regular_file) fails here
+# rather than first inside a kernelcheck lane.
+_kernelbuild-qemu: kernel-lib-check kernel-verify-exception-frame $(KERNEL_QEMU_ELF) $(KERNEL_DEBUG_METADATA) $(KERNEL_CONSOLE_LAYOUT) $(KERNEL_QEMU_MAIN_DEBUG_O)
 
 kernelbuild-qemu: build
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) _kernelbuild-qemu
@@ -2148,7 +2152,7 @@ kernel-verify-exception-frame: $(KERNEL_EXC_CONTEXT_OFFSETS)
 
 .PHONY: _kernelbuild-rpi5
 _kernelbuild-rpi5: kernel-lib-check kernel-verify-exception-frame \
-	$(KERNEL_RPI5_ELF) $(KERNEL_RPI5_SHELL_ELF)
+	$(KERNEL_RPI5_ELF) $(KERNEL_RPI5_SHELL_ELF) $(KERNEL_RPI5_MAIN_DEBUG_O)
 
 kernelbuild-rpi5: build
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) _kernelbuild-rpi5
