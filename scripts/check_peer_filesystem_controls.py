@@ -36,7 +36,7 @@ def problems(tree: dict[str, str]) -> list[str]:
 
     lock_shape = (
         "if (task_mutex_trylock(&block_device_lock) == false) {\n"
-        "        block_note_call(slot, block_device_waits as []usize);\n"
+        "        block_note_call(slot, block_device_waits as []AtomicWord);\n"
         "        task_mutex_acquire(&block_device_lock);\n"
         "    }"
     )
