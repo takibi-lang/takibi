@@ -276,6 +276,7 @@ inline fn process_slot_same(a: ProcessSlot, b: ProcessSlot) -> bool {
 // Real-time signals (32..64) have none; rt_sigaction refuses them.
 const PROCESS_SIGNAL_ACTIONS: usize = 31;
 const PROCESS_SIGKILL_BIT: usize = 256; // 1 << (SIGKILL - 1)
+const PROCESS_SIGALRM: usize = 14; // ITIMER_REAL's signal (#1172)
 
 struct SignalAction {
     handler: usize;
@@ -393,6 +394,17 @@ struct ProcessRecord {
     // that. Read and written only by the process itself and copied into a
     // fork child while it is Constructing, so no lock; execve keeps it.
     umask_from_default: usize;
+    // GitHub issue #1172: setitimer's ITIMER_REAL. itimer_real_due is the
+    // absolute generic-counter time of the next SIGALRM, 0 while disarmed;
+    // the interval is kept in ticks for the rearm and in microseconds for
+    // getitimer, so the value reported is the value set. Written by the
+    // process's own setitimer and by whichever core's tick fires it, both
+    // under the process-run lock. A zeroed record is disarmed, so a fork
+    // child starts without a timer, as on Linux; execve keeps it, as on
+    // Linux.
+    itimer_real_due: usize;
+    itimer_real_interval_ticks: usize;
+    itimer_real_interval_us: usize;
     // rt_sigsuspend's mask swap, as Linux's saved_sigmask: the mask the
     // caller had, put back into the signal frame (and so restored by
     // rt_sigreturn) or restored directly when nothing is delivered.
@@ -3179,6 +3191,9 @@ private fn scheduled_process_record_reset(guard: borrow ProcessRunGuard[lock],
     let mut no_altstack: SignalAltStack = { 0, 0, SIGNAL_SS_DISABLE };
     record.signal_altstack = no_altstack;
     record.umask_from_default = 0;
+    record.itimer_real_due = 0;
+    record.itimer_real_interval_ticks = 0;
+    record.itimer_real_interval_us = 0;
     record.sigsuspend_saved_mask = 0;
     record.sigsuspend_mask_saved = false;
     record.sigwait_suspend = false;
@@ -8495,6 +8510,122 @@ fn kernel_process_current_set_signal_altstack(
         scheduled_process_record_current(current_authority)
             .signal_altstack = altstack;
     }
+}
+
+// -- ITIMER_REAL (GitHub issue #1172) -----------------------------------
+//
+// Each record's own timer (itimer_real_* above), fired by the tick:
+// kernel_process_itimer_due is the earliest armed due time of any record,
+// 0 when none is armed. It is lowered under the run lock by every arm and
+// recomputed by the walk that fires; a disarm leaves it as it was, which
+// costs one walk that finds nothing due, never a missed expiry.
+//
+// Current limitations (2026-10-29):
+// - THE WALK IS OVER EVERY RECORD, as the pipe and UART TX wakes are, and
+//   runs only when something is due. Resolution is the tick (1/64 s).
+// - ITIMER_VIRTUAL and ITIMER_PROF do not exist (setitimer answers EINVAL).
+private let mut kernel_process_itimer_due: AtomicWord;
+
+struct ProcessItimerReal {
+    due: usize;
+    interval_ticks: usize;
+    interval_us: usize;
+}
+
+// Replace the caller's ITIMER_REAL with `timer` (due 0 disarms) and answer
+// the one it had. Called by setitimer; getitimer passes `replace` false.
+fn kernel_process_current_itimer_real_swap(
+        current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
+        timer: ProcessItimerReal, replace: bool) -> ProcessItimerReal !{unsafe} {
+    let mut old: ProcessItimerReal = { 0, 0, 0 };
+    if (execution_state[execution_cpu_index()].current_live == false) { return old; }
+    let guard = process_run_lock();
+    let record: &mut ProcessRecord = scheduled_process_record_of_locked(
+        guard, execution_state[execution_cpu_index()].current_handle);
+    old.due = record.itimer_real_due;
+    old.interval_ticks = record.itimer_real_interval_ticks;
+    old.interval_us = record.itimer_real_interval_us;
+    if (replace) {
+        record.itimer_real_due = timer.due;
+        record.itimer_real_interval_ticks = timer.interval_ticks;
+        record.itimer_real_interval_us = timer.interval_us;
+        if (timer.due != 0) {
+            let earliest: usize = atomic_word_load(&kernel_process_itimer_due);
+            if (earliest == 0 || timer.due < earliest) {
+                atomic_word_store(&kernel_process_itimer_due, timer.due);
+            }
+        }
+    }
+    process_run_unlock(guard);
+    return old;
+}
+
+// Fire every armed timer that is due: SIGALRM through the ordinary signal
+// path (sender 0, so SI_KERNEL as Linux's it_real_fn), then the interval's
+// rearm or the disarm. Every core's tick calls this; it takes the run lock
+// only when the earliest timer is due.
+fn kernel_process_itimer_fire_if_due() !{interrupt, unsafe} {
+    let due: usize = atomic_word_load(&kernel_process_itimer_due);
+    if (due == 0) { return; }
+    if ((read_cntpct() as usize) < due) { return; }
+    let guard = process_run_lock();
+    let now: usize = read_cntpct() as usize;
+    let mut next_due: usize = 0;
+    let mut cursor = scheduled_process_first_slot();
+    let mut walking: bool = true;
+    while (walking) {
+        match cursor {
+            ProcessSlotCursor::Done => { walking = false; }
+            ProcessSlotCursor::At(slot) => {
+                let next = scheduled_process_next_slot(slot);
+                let state: ProcessSlotState =
+                    scheduled_process_record_state_locked(guard, slot);
+                let armed: usize = scheduled_process_record_locked(guard, slot).itimer_real_due;
+                if (state != ProcessSlotState::Free &&
+                    state != ProcessSlotState::Constructing &&
+                    state != ProcessSlotState::Exited && armed != 0) {
+                    let mut rearmed: usize = armed;
+                    if (now >= armed) {
+                        match scheduled_process_handle_of_slot(guard, slot) {
+                            ProcessHandleOfSlot::Absent => {}
+                            ProcessHandleOfSlot::Live(handle) => {
+                                match kernel_process_signal_deliver_to(
+                                        guard, handle, PROCESS_SIGALRM, 0) {
+                                    ProcessSignalSendResult::Missing => {}
+                                    ProcessSignalSendResult::Delivered => {}
+                                }
+                            }
+                        }
+                        let interval: usize =
+                            scheduled_process_record_locked(guard, slot).itimer_real_interval_ticks;
+                        rearmed = 0;
+                        if (interval != 0) {
+                            // Missed periods are not queued: a standard
+                            // signal does not queue either.
+                            match checked_add_usize(armed, interval) {
+                                CheckedUsize::Overflow => {}
+                                CheckedUsize::Value(value) => { rearmed = value; }
+                            }
+                            if (rearmed != 0 && rearmed <= now) {
+                                rearmed = 0;
+                                match checked_add_usize(now, interval) {
+                                    CheckedUsize::Overflow => {}
+                                    CheckedUsize::Value(value) => { rearmed = value; }
+                                }
+                            }
+                        }
+                        scheduled_process_record_locked(guard, slot).itimer_real_due = rearmed;
+                    }
+                    if (rearmed != 0 && (next_due == 0 || rearmed < next_due)) {
+                        next_due = rearmed;
+                    }
+                }
+                cursor = next;
+            }
+        }
+    }
+    atomic_word_store(&kernel_process_itimer_due, next_due);
+    process_run_unlock(guard);
 }
 
 fn kernel_process_current_set_signal_action(

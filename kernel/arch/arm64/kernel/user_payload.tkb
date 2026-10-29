@@ -1001,6 +1001,7 @@ fn initial_user_payload() !{unsafe} {
         mmap_region_probe();
         mmap_region_kernel_probe();
         realtime_clock_probe();
+        itimer_probe();
         svc5(93, 0, 0, 0, 0, 0);
     }
 }
@@ -1596,6 +1597,149 @@ fn realtime_clock_probe() !{unsafe} {
     fail_if(svc5(CLOCK_GETTIME_SYSCALL, 0x7FFF, ptr_of(ts as *u8, 0), 0, 0, 0) != EINVAL_RC);
     let message: []const u8 =
         bs"userspace clocks: CLOCK_REALTIME and CLOCK_MONOTONIC advance across a 20 ms nanosleep, unknown clock EINVAL ok\n";
+    fail_if(svc5(64, 1, (unsafe { message as *u8 }) as usize,
+                 message.len, 0, 0) != message.len);
+}
+
+/* GitHub issue #1172: setitimer's ITIMER_REAL. It armed nothing, so
+ * alarm() never sent SIGALRM and stress-ng's --timeout never ended a
+ * stressor. getitimer and setitimer's old value, a one-shot timer that
+ * fires once, an interval timer that fires again, invalid `which` and
+ * tv_usec EINVAL, a fork child without its parent's timer, and a default
+ * SIGALRM ending a sleeper. SIGALRM is blocked and taken by
+ * rt_sigtimedwait, so no handler (and no writable global) is needed.
+ * `itimer_probe_alone` runs under qemu-aarch64 in `make linuxcheck`
+ * against this line of the linux_file view. */
+const GETITIMER_SYSCALL: usize = 102;
+const ITIMER_SET_SYSCALL: usize = 103;
+const SIGALRM: usize = 14;
+const ITIMER_WHICH_REAL: usize = 0;
+
+fn itimer_probe_alone() !{unsafe} {
+    itimer_probe();
+    svc5(93, 0, 0, 0, 0, 0);
+}
+
+// A struct itimerval from two microsecond counts.
+fn itimer_probe_store(base: *u8, interval_us: usize, value_us: usize) {
+    payload_write_u64(base, 0, interval_us / 1000000);
+    payload_write_u64(base, 8, interval_us % 1000000);
+    payload_write_u64(base, 16, value_us / 1000000);
+    payload_write_u64(base, 24, value_us % 1000000);
+}
+
+fn itimer_probe_us(base: *u8, offset: usize) -> usize {
+    let micros: usize = payload_read_u64(base, offset + 8);
+    fail_if(micros >= 1000000);
+    return payload_read_u64(base, offset) * 1000000 + micros;
+}
+
+// The caller's ITIMER_REAL as (interval, remaining) microseconds.
+fn itimer_probe_get(base: *u8) -> (usize, usize) !{unsafe} {
+    for word: usize in 0..<4 { payload_write_u64(base, word * 8, 0xFFFFFFFFFFFFFFFF); }
+    fail_if(svc5(GETITIMER_SYSCALL, ITIMER_WHICH_REAL, ptr_of(base, 0), 0, 0, 0) != 0);
+    return (itimer_probe_us(base, 0), itimer_probe_us(base, 16));
+}
+
+// rt_sigtimedwait for SIGALRM alone, at most `seconds`.
+fn itimer_probe_wait(seconds: usize) -> usize !{unsafe} {
+    let mut set: [u8; 8];
+    let set_base: *u8 = set as *u8;
+    payload_write_u64(set_base, 0, 1 << (SIGALRM - 1));
+    let mut timeout: [u8; 16];
+    let timeout_base: *u8 = timeout as *u8;
+    payload_write_u64(timeout_base, 0, seconds);
+    payload_write_u64(timeout_base, 8, 0);
+    return svc5(137, ptr_of(set_base, 0), 0, ptr_of(timeout_base, 0), 8, 0);
+}
+
+fn itimer_probe() !{unsafe} {
+    let mut value: [u8; 32];
+    let value_base: *u8 = value as *u8;
+    let mut old: [u8; 32];
+    let old_base: *u8 = old as *u8;
+    // Nothing armed.
+    let (idle_interval, idle_left) = itimer_probe_get(old_base);
+    fail_if(idle_interval != 0 || idle_left != 0);
+    // A one-shot 500 ms timer: the old value is zero, and getitimer reports
+    // no interval and at most 500 ms left.
+    itimer_probe_store(value_base, 0, 500000);
+    for index: usize in 0..<32 { old[index] = 0xFF; }
+    fail_if(svc5(ITIMER_SET_SYSCALL, ITIMER_WHICH_REAL, ptr_of(value_base, 0),
+                 ptr_of(old_base, 0), 0, 0) != 0);
+    fail_if(itimer_probe_us(old_base, 0) != 0 || itimer_probe_us(old_base, 16) != 0);
+    let (armed_interval, armed_left) = itimer_probe_get(old_base);
+    fail_if(armed_interval != 0 || armed_left == 0 || armed_left > 500000);
+    // Disarming answers the time that was left.
+    itimer_probe_store(value_base, 0, 0);
+    fail_if(svc5(ITIMER_SET_SYSCALL, ITIMER_WHICH_REAL, ptr_of(value_base, 0),
+                 ptr_of(old_base, 0), 0, 0) != 0);
+    let left: usize = itimer_probe_us(old_base, 16);
+    fail_if(left == 0 || left > 500000);
+    let (off_interval, off_left) = itimer_probe_get(old_base);
+    fail_if(off_interval != 0 || off_left != 0);
+    // An unknown `which` and a tv_usec of a whole second are EINVAL.
+    fail_if(svc5(ITIMER_SET_SYSCALL, 3, ptr_of(value_base, 0), 0, 0, 0) != EINVAL_RC);
+    fail_if(svc5(GETITIMER_SYSCALL, 3, ptr_of(old_base, 0), 0, 0, 0) != EINVAL_RC);
+    itimer_probe_store(value_base, 0, 0);
+    payload_write_u64(value_base, 24, 1000000);
+    fail_if(svc5(ITIMER_SET_SYSCALL, ITIMER_WHICH_REAL, ptr_of(value_base, 0), 0, 0, 0) != EINVAL_RC);
+
+    // With SIGALRM blocked, a 20 ms one-shot timer fires once and disarms.
+    let mut mask: [u8; 8];
+    let mask_base: *u8 = mask as *u8;
+    payload_write_u64(mask_base, 0, 1 << (SIGALRM - 1));
+    fail_if(svc5(135, 0, ptr_of(mask_base, 0), 0, 8, 0) != 0);
+    itimer_probe_store(value_base, 0, 20000);
+    fail_if(svc5(ITIMER_SET_SYSCALL, ITIMER_WHICH_REAL, ptr_of(value_base, 0), 0, 0, 0) != 0);
+    fail_if(itimer_probe_wait(2) != SIGALRM);
+    let (fired_interval, fired_left) = itimer_probe_get(old_base);
+    fail_if(fired_interval != 0 || fired_left != 0);
+    // A 10 ms interval timer fires again and again, and keeps its interval.
+    itimer_probe_store(value_base, 10000, 10000);
+    fail_if(svc5(ITIMER_SET_SYSCALL, ITIMER_WHICH_REAL, ptr_of(value_base, 0), 0, 0, 0) != 0);
+    for round: usize in 0..<3 { fail_if(itimer_probe_wait(2) != SIGALRM); }
+    itimer_probe_store(value_base, 0, 0);
+    fail_if(svc5(ITIMER_SET_SYSCALL, ITIMER_WHICH_REAL, ptr_of(value_base, 0),
+                 ptr_of(old_base, 0), 0, 0) != 0);
+    fail_if(itimer_probe_us(old_base, 0) != 10000);
+    // An expiry before the disarm may still be pending; take it.
+    let drained: usize = itimer_probe_wait(0);
+    fail_if(drained != SIGALRM && drained != EAGAIN_RC);
+    fail_if(svc5(135, 1, ptr_of(mask_base, 0), 0, 8, 0) != 0);
+
+    // A fork child does not inherit the parent's timer, and a default
+    // SIGALRM ends it in its sleep.
+    itimer_probe_store(value_base, 0, 5000000);
+    fail_if(svc5(ITIMER_SET_SYSCALL, ITIMER_WHICH_REAL, ptr_of(value_base, 0), 0, 0, 0) != 0);
+    let child: usize = svc5(220, SIGCHLD, 0, 0, 0, 0);
+    if (child == 0) {
+        let mut child_value: [u8; 32];
+        let child_base: *u8 = child_value as *u8;
+        let (child_interval, child_left) = itimer_probe_get(child_base);
+        if (child_interval != 0 || child_left != 0) { svc5(93, 2, 0, 0, 0, 0); }
+        itimer_probe_store(child_base, 0, 20000);
+        svc5(ITIMER_SET_SYSCALL, ITIMER_WHICH_REAL, ptr_of(child_base, 0), 0, 0, 0);
+        let mut sleep: [u8; 16];
+        let sleep_base: *u8 = sleep as *u8;
+        payload_write_u64(sleep_base, 0, 2);
+        payload_write_u64(sleep_base, 8, 0);
+        svc5(NANOSLEEP_SYSCALL, ptr_of(sleep_base, 0), 0, 0, 0, 0);
+        svc5(93, 1, 0, 0, 0, 0);
+    }
+    fail_if(child >= 0x8000000000000000);
+    let mut status: [u8; 8];
+    let status_base: *u8 = status as *u8;
+    payload_write_u64(status_base, 0, 0xFF);
+    fail_if(svc5(260, child, ptr_of(status_base, 0), 0, 0, 0) != child);
+    fail_if((payload_read_u64(status_base, 0) & 0xFFFFFFFF) != SIGALRM);
+    // The parent's own timer survived the fork; disarm it.
+    itimer_probe_store(value_base, 0, 0);
+    fail_if(svc5(ITIMER_SET_SYSCALL, ITIMER_WHICH_REAL, ptr_of(value_base, 0),
+                 ptr_of(old_base, 0), 0, 0) != 0);
+    fail_if(itimer_probe_us(old_base, 16) == 0);
+    let message: []const u8 =
+        bs"userspace itimer: ITIMER_REAL one-shot and interval SIGALRM, getitimer and old value, bad which and usec EINVAL, fork child unarmed, default SIGALRM ends a sleeper ok\n";
     fail_if(svc5(64, 1, (unsafe { message as *u8 }) as usize,
                  message.len, 0, 0) != message.len);
 }

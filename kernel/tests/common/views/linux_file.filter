@@ -9,3 +9,4 @@
 ^userspace mmap region: 
 ^userspace mmap region limits: 
 ^userspace clocks:
+^userspace itimer:

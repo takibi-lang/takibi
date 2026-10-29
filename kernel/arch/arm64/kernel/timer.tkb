@@ -61,6 +61,9 @@ fn timer_irq_handler() !{interrupt, unsafe} {
     // publishes Blocked under; it masks interrupts, so this core cannot
     // interrupt its own holder).
     kernel_process_tick_wake_if_due();
+    // GitHub issue #1172: setitimer's ITIMER_REAL, one load while no
+    // timer is due.
+    kernel_process_itimer_fire_if_due();
     // GitHub issue #497: arm or disarm this core's profile counter.
     profile_session_sync();
     // GitHub issue #572: a tick on a CPU where a busy worker waits.

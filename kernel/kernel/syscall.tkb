@@ -70,6 +70,7 @@ const AARCH64_NR_OPENAT: usize = 56;
 const AARCH64_NR_CLOSE: usize = 57;
 const AARCH64_NR_NEWFSTATAT: usize = 79;
 const AARCH64_NR_CHDIR: usize = 49;
+const AARCH64_NR_GETITIMER: usize = 102;
 const AARCH64_NR_SETITIMER: usize = 103;
 const AARCH64_NR_RT_SIGACTION: usize = 134;
 const AARCH64_NR_SIGALTSTACK: usize = 132;
@@ -5594,15 +5595,18 @@ fn syscall_peer_safe(number: usize, fd: usize, second: usize) -> bool {
     //                 compares them against `/` and `.`, and stores nothing.
     //                 This kernel has one directory, so there is no cwd to
     //                 move.
-    //   setitimer     zero-fills the caller's old-timer struct. No itimer is
-    //                 armed here, so there is nothing per-record to arm.
     //   rt_sigaction  validates signum and zero-fills a non-null oldact.
     //                 Handlers are never installed, so nothing is stored.
     //
     // Each crosses the user-memory boundary against its own root, which a
     // peer terminal write has crossed since #534.
-    if (number == AARCH64_NR_CHDIR || number == AARCH64_NR_SETITIMER ||
-        number == AARCH64_NR_RT_SIGACTION) {
+    if (number == AARCH64_NR_CHDIR || number == AARCH64_NR_RT_SIGACTION) {
+        return true;
+    }
+    // GitHub issue #1172: setitimer and getitimer read and write the
+    // caller's own ITIMER_REAL under the process-run lock, which the tick
+    // that fires it takes too, so the caller's CPU is not part of it.
+    if (number == AARCH64_NR_SETITIMER || number == AARCH64_NR_GETITIMER) {
         return true;
     }
     // rt_sigprocmask (GitHub issue #570). The process's own signal_mask is
@@ -5873,6 +5877,159 @@ const SIGFRAME_UC_STACK: usize = 144;
 
 // Linux's on_sig_stack: `sp` lies on the alternate stack. A stack armed
 // with SS_AUTODISARM never counts, since delivery disarms it.
+// -- setitimer and getitimer (GitHub issue #1172) ------------------------
+//
+// ITIMER_REAL only: its SIGALRM goes through the ordinary signal path from
+// the tick (kernel_process_itimer_fire_if_due). ITIMER_VIRTUAL and
+// ITIMER_PROF would need per-process CPU-time accounting this kernel does
+// not keep, so they are EINVAL, as is any other `which`.
+const LINUX_ITIMER_REAL: usize = 0;
+const ITIMERVAL_BYTES: usize = 32;
+const MICROS_PER_SECOND: usize = 1000000;
+// A time too large to count in ticks is never reached; a saturated due
+// time stands for it.
+const ITIMER_NEVER: usize = 0xFFFFFFFFFFFFFFFF;
+
+// One struct timeval of a user itimerval as microseconds, saturated; false
+// when it is not a valid timeval (negative, or tv_usec past a second), as
+// Linux's timeval_valid.
+fn itimer_timeval_us(range: borrow UserReadRange[process], offset: usize)
+        -> (bool, usize) !{unsafe} {
+    let (seconds_ok, seconds_raw) = user_read_u64(range, offset);
+    let (micros_ok, micros_raw) = user_read_u64(range, offset + 8);
+    if (seconds_ok == false || micros_ok == false) { return (false, 0); }
+    let seconds: usize = seconds_raw as usize;
+    let micros: usize = micros_raw as usize;
+    if (seconds >= 0x8000000000000000 || micros >= MICROS_PER_SECOND) {
+        return (false, 0);
+    }
+    let mut whole: usize = ITIMER_NEVER;
+    match checked_mul_usize(seconds, MICROS_PER_SECOND) {
+        CheckedUsize::Overflow => {}
+        CheckedUsize::Value(value) => { whole = value; }
+    }
+    match checked_add_usize(whole, micros) {
+        CheckedUsize::Overflow => { return (true, ITIMER_NEVER); }
+        CheckedUsize::Value(value) => { return (true, value); }
+    }
+}
+
+// Microseconds as generic-counter ticks, rounded up so a timer never fires
+// early; saturated.
+fn itimer_us_ticks(micros: usize) -> usize {
+    let frequency: usize = read_cntfrq() as usize;
+    let whole: usize = match checked_mul_usize(micros / MICROS_PER_SECOND, frequency) {
+        CheckedUsize::Overflow => { return ITIMER_NEVER; }
+        CheckedUsize::Value(value) => { value }
+    };
+    // Below 10^6 * 2^32, so the product does not overflow for any counter
+    // frequency under 2^32 Hz; checked all the same.
+    let part: usize = match checked_mul_usize(micros % MICROS_PER_SECOND, frequency) {
+        CheckedUsize::Overflow => { return ITIMER_NEVER; }
+        CheckedUsize::Value(value) => { value }
+    };
+    match checked_add_usize(whole, (part + MICROS_PER_SECOND - 1) / MICROS_PER_SECOND) {
+        CheckedUsize::Overflow => { return ITIMER_NEVER; }
+        CheckedUsize::Value(value) => { return value; }
+    }
+}
+
+// Write `timer` as a struct itimerval: the interval as set, the time left
+// until the next expiry (0 when disarmed).
+fn itimer_write_value(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
+                      address: usize, timer: ProcessItimerReal) -> bool !{unsafe} {
+    let mut remaining_us: usize = 0;
+    if (timer.due != 0) {
+        let now: usize = read_cntpct() as usize;
+        if (timer.due > now) {
+            let frequency: usize = read_cntfrq() as usize;
+            let left: usize = timer.due - now;
+            if (frequency == 0) { return false; }
+            let seconds: usize = left / frequency;
+            // The remainder is below the frequency, so the product fits.
+            let mut part: usize = 0;
+            match checked_mul_usize(left % frequency, MICROS_PER_SECOND) {
+                CheckedUsize::Overflow => {}
+                CheckedUsize::Value(value) => { part = value / frequency; }
+            }
+            remaining_us = ITIMER_NEVER - MICROS_PER_SECOND;
+            match checked_mul_usize(seconds, MICROS_PER_SECOND) {
+                CheckedUsize::Overflow => {}
+                CheckedUsize::Value(value) => {
+                    if (value < ITIMER_NEVER - MICROS_PER_SECOND) { remaining_us = value + part; }
+                }
+            }
+        }
+    }
+    match user_range_check_write(current_authority, address, ITIMERVAL_BYTES) {
+        UserWriteRangeResult::Fault => { return false; }
+        UserWriteRangeResult::Ok(range) => {
+            let mut written = user_write_u64(range, 0, (timer.interval_us / MICROS_PER_SECOND) as u64);
+            written = user_write_join(written, user_write_u64(range, 8, (timer.interval_us % MICROS_PER_SECOND) as u64));
+            written = user_write_join(written, user_write_u64(range, 16, (remaining_us / MICROS_PER_SECOND) as u64));
+            written = user_write_join(written, user_write_u64(range, 24, (remaining_us % MICROS_PER_SECOND) as u64));
+            match written {
+                UserWriteResult::Fault => { return false; }
+                UserWriteResult::Written => { return true; }
+            }
+        }
+    }
+}
+
+// Linux's setitimer: the new value is read and validated first (a NULL one
+// disarms, as Linux has accepted since 2.6.x), the timer replaced, and only
+// then the old value written, so an unwritable old_value is EFAULT after
+// the timer changed.
+fn syscall_setitimer(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
+                     which: usize, value_address: usize, old_address: usize)
+        -> SyscallAction !{unsafe} {
+    if (which != LINUX_ITIMER_REAL) { return SyscallAction::Resume(LINUX_EINVAL); }
+    let mut interval_us: usize = 0;
+    let mut value_us: usize = 0;
+    if (value_address != 0) {
+        match user_range_check_read(current_authority, value_address, ITIMERVAL_BYTES) {
+            UserReadRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
+            UserReadRangeResult::Ok(range) => {
+                let (interval_ok, interval) = itimer_timeval_us(range, 0);
+                let (value_ok, value) = itimer_timeval_us(range, 16);
+                if (interval_ok == false || value_ok == false) {
+                    return SyscallAction::Resume(LINUX_EINVAL);
+                }
+                interval_us = interval;
+                value_us = value;
+            }
+        }
+    }
+    let mut timer: ProcessItimerReal = { 0, 0, 0 };
+    if (value_us != 0) {
+        timer.due = ITIMER_NEVER;
+        match checked_add_usize(read_cntpct() as usize, itimer_us_ticks(value_us)) {
+            CheckedUsize::Overflow => {}
+            CheckedUsize::Value(value) => { timer.due = value; }
+        }
+        timer.interval_us = interval_us;
+        if (interval_us != 0) { timer.interval_ticks = itimer_us_ticks(interval_us); }
+    }
+    let mut old: ProcessItimerReal =
+        kernel_process_current_itimer_real_swap(current_authority, timer, true);
+    if (old_address != 0 && itimer_write_value(current_authority, old_address, old) == false) {
+        return SyscallAction::Resume(LINUX_EFAULT);
+    }
+    return SyscallAction::Resume(0);
+}
+
+fn syscall_getitimer(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
+                     which: usize, value_address: usize) -> SyscallAction !{unsafe} {
+    if (which != LINUX_ITIMER_REAL) { return SyscallAction::Resume(LINUX_EINVAL); }
+    let mut none: ProcessItimerReal = { 0, 0, 0 };
+    let mut current: ProcessItimerReal =
+        kernel_process_current_itimer_real_swap(current_authority, none, false);
+    if (itimer_write_value(current_authority, value_address, current) == false) {
+        return SyscallAction::Resume(LINUX_EFAULT);
+    }
+    return SyscallAction::Resume(0);
+}
+
 fn signal_altstack_holds(altstack: SignalAltStack, sp: usize) -> bool {
     if ((altstack.flags & LINUX_SS_AUTODISARM) != 0) { return false; }
     return sp > altstack.sp && sp - altstack.sp <= altstack.size;
@@ -8223,20 +8380,10 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         return syscall_finish_current(frame, syscall_chdir(current_authority, x0), current_authority);
     }
     if (number == AARCH64_NR_SETITIMER) {
-        // setitimer(): HTTPd's request timeout is unnecessary for the single
-        // bounded integration request. Return an all-zero previous timer.
-        if (x2 != 0) {
-            match user_range_check_write(current_authority, x2, 32) {
-                UserWriteRangeResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
-                UserWriteRangeResult::Ok(range) => {
-                    match user_zero_fill(range) {
-                        UserWriteResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
-                        UserWriteResult::Written => {}
-                    }
-                }
-            }
-        }
-        return syscall_finish_current(frame, SyscallAction::Resume(0), current_authority);
+        return syscall_finish_current(frame, syscall_setitimer(current_authority, x0, x1, x2), current_authority);
+    }
+    if (number == AARCH64_NR_GETITIMER) {
+        return syscall_finish_current(frame, syscall_getitimer(current_authority, x0, x1), current_authority);
     }
     if (number == AARCH64_NR_SYSLOG) {
         return syscall_finish_current(frame, syscall_syslog(current_authority, x0, x1, x2), current_authority);
