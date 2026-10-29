@@ -418,6 +418,36 @@
       "changes": {
         "unsafe_blocks": "#1166 the EL0 clock probe writes its line through one unsafe slice-to-pointer cast, as every user_payload probe does"
       }
+    },
+    {
+      "date": "2026-10-29",
+      "head": "39debadc",
+      "counts": {
+        "raw_mint_files": 14,
+        "frame_lines": 11953,
+        "device_semantics_files": 4,
+        "raw_deref_plain": 214,
+        "raw_deref_io": 7,
+        "raw_deref_builtin_region": 113,
+        "unsafe_blocks": 148,
+        "extern_fns": 58,
+        "invariant_stop_sites": 117,
+        "assembly_lines": 2434,
+        "per_cpu_ordinary_arrays": 73,
+        "per_cpu_stores": 6,
+        "raw_cpu_id_calls": 157,
+        "frame_api_ratchet": 7,
+        "raw_sites_qemu": 312,
+        "raw_sites_rpi5": 322,
+        "range_obligations_qemu": 1090
+      },
+      "changes": {
+        "frame_lines": "#1163 rp1_gem RP1 clock and GPIO registers become four io structs, attached in the rpi5 device map (+4 attaches); rp1_gem keeps only its DDB read (#1164)",
+        "invariant_stop_sites": "#1163 the four new RP1 clock and GPIO window attaches stop on TooSmall, as every device-map attach does",
+        "raw_deref_io": "IoHandle: rp1_gem clock and GPIO registers",
+        "unsafe_blocks": "IoHandle: rp1_gem clock and GPIO register casts",
+        "raw_sites_rpi5": "IoHandle: rp1_gem clock and GPIO registers"
+      }
     }
   ]
 }
