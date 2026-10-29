@@ -1032,6 +1032,7 @@ fn initial_user_payload() !{unsafe} {
         realtime_clock_probe();
         itimer_probe();
         credentials_probe();
+        signal_conformance_probe();
         svc5(93, 0, 0, 0, 0, 0);
     }
 }
@@ -1980,6 +1981,134 @@ fn credentials_probe() !{unsafe} {
     if ((payload_read_u64(status_base, 0) & 0xFFFF) != 0) {
         message = bs"userspace credentials: FAILED, the child's exit status names the check\n";
     }
+    fail_if(svc5(64, 1, (unsafe { message as *u8 }) as usize,
+                 message.len, 0, 0) != message.len);
+}
+
+/* GitHub issue #999: signal conformance rows whose expected values are
+ * Linux's. `signal_conformance_probe_alone` is the same code as its own
+ * static-PIE entry, which `make linuxcheck` runs under qemu-aarch64 on the
+ * host and compares with this line of the linux_file view, so an
+ * expectation written by hand from the kernel's behaviour fails there.
+ * Rows: the wait4 status word of a signal-killed child (#882); a
+ * terminating signal ends a child spinning without syscalls (#949);
+ * ppoll(nfds 0, no timeout) sleeps until a handler runs, then EINTR (#870);
+ * a pipe read interrupted by a handler is EINTR without SA_RESTART and
+ * restarts with it (#726). The SIGCHLD siginfo rows (#885, #894) stay in
+ * sigchld_siginfo_probe: under qemu-aarch64 its kill-sent case fails, a
+ * word the Linux kernel zeroes (siginfo offset 24 for SI_USER, checked on
+ * the x86-64 host) apparently not zeroed by qemu's siginfo translation, so
+ * qemu user mode is not a faithful oracle for that row. */
+const SA_RESTART: usize = 0x10000000;
+const PPOLL_SYSCALL: usize = 73;
+
+fn signal_conformance_probe_alone() !{unsafe} {
+    signal_conformance_probe();
+    svc5(93, 0, 0, 0, 0, 0);
+}
+
+// SIGALRM to the counting handler, with or without SA_RESTART.
+fn signal_conformance_alarm_action(flags: usize) !{unsafe} {
+    let mut action: [u8; 32];
+    let action_base: *u8 = action as *u8;
+    payload_write_u64(action_base, 0, sigchld_probe_handler_address());
+    payload_write_u64(action_base, 8, SA_SIGINFO | SA_RESTORER | flags);
+    payload_write_u64(action_base, 16, sigchld_probe_restorer_address());
+    payload_write_u64(action_base, 24, 0);
+    fail_if(svc5(134, SIGALRM, ptr_of(action_base, 0), 0, 8, 0) != 0);
+}
+
+// A one-shot ITIMER_REAL of `us` microseconds.
+fn signal_conformance_alarm(us: usize) !{unsafe} {
+    let mut value: [u8; 32];
+    let value_base: *u8 = value as *u8;
+    itimer_probe_store(value_base, 0, us);
+    fail_if(svc5(ITIMER_SET_SYSCALL, ITIMER_WHICH_REAL, ptr_of(value_base, 0),
+                 0, 0, 0) != 0);
+}
+
+// wait4 for `pid`, retried across handler runs; returns the status word.
+fn signal_conformance_status(pid: usize) -> usize !{unsafe} {
+    let mut status: [u8; 8];
+    let status_base: *u8 = status as *u8;
+    payload_write_u64(status_base, 0, 0);
+    let mut reaped: usize = EINTR_RC;
+    while (reaped == EINTR_RC) {
+        reaped = svc5(260, pid, ptr_of(status_base, 0), 0, 0, 0);
+    }
+    fail_if(reaped != pid);
+    return payload_read_u64(status_base, 0) & 0xFFFFFFFF;
+}
+
+fn signal_conformance_probe() !{unsafe} {
+    let mut record: [u8; 40];
+    let record_base: *u8 = record as *u8;
+    for index: usize in 0..<40 { record[index] = 0; }
+    sigchld_probe_arm(ptr_of(record_base, 0));
+
+    // #882: a child killed by SIGTERM has status SIGTERM, no 128 offset and
+    // no core bit.
+    let killed: usize = sigchld_probe_child(0);
+    fail_if(signal_conformance_status(killed) != SIGTERM);
+
+    // #949: a child spinning in user mode, never entering the kernel, is
+    // ended by a terminating signal at its next return to user.
+    let spinner: usize = svc5(220, SIGCHLD, 0, 0, 0, 0);
+    if (spinner == 0) {
+        let spinning: bool = true;
+        while (spinning) { busy_spin(1000000); }
+        svc5(93, 98, 0, 0, 0, 0);
+    }
+    fail_if(spinner >= 0x8000000000000000);
+    fail_if(svc5(129, spinner, SIGTERM, 0, 0, 0) != 0);
+    fail_if(signal_conformance_status(spinner) != SIGTERM);
+
+    // #870: ppoll with no descriptors and no timeout sleeps as pause()
+    // does; the alarm's handler runs, then it answers EINTR.
+    signal_conformance_alarm_action(0);
+    signal_conformance_alarm(20000);
+    fail_if(svc5(PPOLL_SYSCALL, 0, 0, 0, 0, 8) != EINTR_RC);
+    fail_if(payload_read_u64(record_base, 0) != 1);
+    fail_if(payload_read_u64(record_base, 8) != SIGALRM);
+
+    // #726: a read of an empty pipe is EINTR after a handler without
+    // SA_RESTART, and restarts (and reads what a child writes later) with it.
+    let mut fds: [u8; 8];
+    let fds_base: *u8 = fds as *u8;
+    fail_if(svc5(59, ptr_of(fds_base, 0), 0, 0, 0, 0) != 0);
+    let read_fd: usize = payload_read_u64(fds_base, 0) & 0xFFFFFFFF;
+    let write_fd: usize = payload_read_u64(fds_base, 0) >> 32;
+    let mut byte: [u8; 1];
+    signal_conformance_alarm(20000);
+    fail_if(svc5(63, read_fd, byte as *u8 as usize, 1, 0, 0) != EINTR_RC);
+    fail_if(payload_read_u64(record_base, 0) != 2);
+    signal_conformance_alarm_action(SA_RESTART);
+    let writer: usize = svc5(220, SIGCHLD, 0, 0, 0, 0);
+    if (writer == 0) {
+        let mut pause: [u8; 16];
+        let pause_base: *u8 = pause as *u8;
+        payload_write_u64(pause_base, 0, 0);
+        payload_write_u64(pause_base, 8, 200000000);
+        svc5(101, ptr_of(pause_base, 0), 0, 0, 0, 0);
+        let one: []const u8 = bs"r";
+        svc5(64, write_fd, (unsafe { one as *u8 }) as usize, 1, 0, 0);
+        svc5(93, 0, 0, 0, 0, 0);
+    }
+    fail_if(writer >= 0x8000000000000000);
+    signal_conformance_alarm(20000);
+    fail_if(svc5(63, read_fd, byte as *u8 as usize, 1, 0, 0) != 1);
+    fail_if(byte[0] != 0x72);
+    fail_if(payload_read_u64(record_base, 0) != 3);
+    fail_if(signal_conformance_status(writer) != 0);
+    fail_if(svc5(57, read_fd, 0, 0, 0, 0) != 0);
+    fail_if(svc5(57, write_fd, 0, 0, 0, 0) != 0);
+
+    let mut action: [u8; 32];
+    let action_base: *u8 = action as *u8;
+    for index: usize in 0..<32 { action[index] = 0; }
+    fail_if(svc5(134, SIGALRM, ptr_of(action_base, 0), 0, 8, 0) != 0);
+    let message: []const u8 =
+        bs"userspace signal conformance: wait4 killed status, spinning child killed, ppoll pause EINTR, pipe read EINTR and SA_RESTART ok\n";
     fail_if(svc5(64, 1, (unsafe { message as *u8 }) as usize,
                  message.len, 0, 0) != message.len);
 }

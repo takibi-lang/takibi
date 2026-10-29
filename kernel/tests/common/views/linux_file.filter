@@ -11,3 +11,4 @@
 ^userspace clocks:
 ^userspace itimer:
 ^userspace credentials:
+^userspace signal conformance:
