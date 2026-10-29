@@ -277,6 +277,23 @@ private fn boundary_interrupts() !{unsafe} {
         return;
     }
     boundary_line(bs"boundary: ppoll interrupted: EINTR despite SA_RESTART\n");
+
+    // GitHub issue #901 (c): a sigmask with descriptors is refused, not
+    // ignored: the mask is not applied to a descriptor wait yet (#1225).
+    let mut pollfd: [u8; 8];
+    for index: usize in 0..<8 { pollfd[index] = 0; }
+    pollfd[4] = 1;
+    let mut poll_mask: [usize; 1];
+    poll_mask[0] = 0;
+    let mut no_wait: [usize; 2];
+    no_wait[0] = 0;
+    no_wait[1] = 0;
+    if (svc5(73, pollfd as *u8 as usize, 1, no_wait as *usize as usize,
+             poll_mask as *usize as usize, 8) != 0xFFFFFFFFFFFFFFEA) {
+        boundary_fail(bs"boundary: FAIL ppoll with fds and a sigmask not refused\n");
+        return;
+    }
+    boundary_line(bs"boundary: ppoll with descriptors and a sigmask: EINVAL until the mask is applied\n");
 }
 
 // Run on `cpu` alone: sched_setaffinity, then getcpu to see it took.

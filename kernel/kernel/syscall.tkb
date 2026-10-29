@@ -3945,6 +3945,15 @@ fn syscall_ppoll_dispatch(current_authority: borrow ProcessCurrent[current_proce
             SyscallDeadlineResult::Block => { return SyscallAction::Block; }
         }
     }
+    // GitHub issue #901, option (c) (maintainer 2026-10-29): with
+    // descriptors, the sigmask argument is not applied for the wait --
+    // the pipe and terminal waits run under the caller's own mask -- so a
+    // non-NULL one is refused rather than ignored, which would let a call
+    // that should sleep spin. Applying it is #1225, with #1000's delivery
+    // chokepoint.
+    if (raw_nfds > 0 && sigmask_address != 0) {
+        return SyscallAction::Resume(LINUX_EINVAL);
+    }
     if (raw_nfds >= 0 && raw_nfds < POLL_MAX) {
       let nfds: {0..<POLL_MAX as usize} = raw_nfds;
       let array_bytes: usize = match checked_mul_usize(nfds, sizeof(Pollfd)) {
