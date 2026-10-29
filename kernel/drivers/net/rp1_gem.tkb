@@ -12,6 +12,7 @@ use "kernel/net/netconfig.tkb";
 use "kernel/lib/init_once.tkb";
 use "kernel/drivers/net/gem_tx_wait.tkb";
 use "kernel/drivers/net/rp1_gem_desc.tkb";
+use "kernel/drivers/dma_address.tkb";
 
 const RP1_GEM_BASE: usize = 0x1F00100000;
 const RP1_CLOCKS_BASE: usize = 0x1F00018000;
@@ -124,11 +125,6 @@ fn net_rx_packet(len: {0..<1515 as i32}, index: usize,
 
 // The pool slot whose buffer is posted for receive; GEM_PKTS when none is.
 private let mut gem_rx_pkt: usize = 4;
-
-// A device span's RP1 bus address, for a descriptor.
-fn gem_span_bus_address(span: borrow DmaDeviceSpan) -> usize !{unsafe} {
-    return unsafe { dma_span_address(span) } + rp1_dma_pci_offset;
-}
 
 // The descriptor rings are protocol owners in rp1_gem_desc.tkb (#740).
 private let mut net_init_once: InitOnce;
@@ -295,12 +291,12 @@ private fn gem_pkt_recycle_at(index: usize, pkt: GemPkt_Filled[pb, po, 1]) !{uns
 // A ring's bus address, from its Ready owner's span (`addressed`).
 private fn gem_rx_ring_bus(r: borrow GemRxRing_Ready[b, o, 4]) -> usize !{unsafe} {
     let mut span: DmaDeviceSpan = GemRxRing_Ready_span(r);
-    gem_rx_ring_cpu_address = unsafe { dma_span_address(span) };
-    return gem_span_bus_address(span);
+    gem_rx_ring_cpu_address = dma_span_cpu_address(span);
+    return rp1_span_bus_address(span);
 }
 private fn gem_tx_ring_bus(r: borrow GemTxRing_Ready[b, o, 4]) -> usize !{unsafe} {
     let mut span: DmaDeviceSpan = GemTxRing_Ready_span(r);
-    return gem_span_bus_address(span);
+    return rp1_span_bus_address(span);
 }
 
 // Program both descriptor rings: RBQP/TBQP take the rings' addresses and

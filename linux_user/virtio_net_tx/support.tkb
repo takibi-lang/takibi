@@ -321,8 +321,7 @@ fn run_initialized_case(ready: sink NetRxCanAcquire, reply_timeout: bool) !{may_
     net_shutdown(ready);
 }
 
-// The kernel defines this in virtio_blk.tkb, which this fixture does not
-// compile; the same one-line address export.
-fn virtio_span_address(span: borrow DmaDeviceSpan) -> usize !{unsafe} {
-    return unsafe { dma_span_address(span) };
-}
+// The kernel's address mint (kernel/drivers/dma_address.tkb, which
+// virtio_used.tkb uses) names RP1's inbound offset; the kernel defines it in
+// rpi5/pcie.tkb, which this fixture does not compile.
+let mut rp1_dma_pci_offset: usize = 0;

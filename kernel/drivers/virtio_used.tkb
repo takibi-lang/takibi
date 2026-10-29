@@ -30,6 +30,7 @@
 use "kernel/lib/mutex.tkb";
 use "kernel/lib/task_mutex.tkb";
 use "kernel/drivers/virtio_ring.tkb";
+use "kernel/drivers/dma_address.tkb";
 
 const VIRTIO_USED_ONE: usize = 1;
 const VIRTIO_USED_BLK: usize = 0;

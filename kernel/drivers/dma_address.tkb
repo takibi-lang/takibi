@@ -1,0 +1,37 @@
+// The one place a device-visible address leaves a DMA span (GitHub issues
+// #1162, #637 stage 3). A device span -- from a dma_fixed allocation or a
+// device protocol owner's `_span` -- carries an address the type system
+// proved inside its allocation; turning it into a number a device (or a
+// CPU-side cache operation) is given is the trusted step, and it is taken
+// only here. This file is a raw mint file (kernel/RAW_MINT_FILES); its
+// callers are fixed by scripts/allowed_callers.tsv.
+//
+// The rule, reviewed once: a span's CPU physical address is
+// dma_span_address(span) (the kernel maps RAM at identity); a device sees
+// that address plus the inbound offset of the bus it sits behind --
+//   - QEMU virt's virtio-mmio devices: offset 0 (virtio_span_address);
+//   - RP1's devices (GEM, xHCI) behind the RPi5 PCIe root complex:
+//     rp1_dma_pci_offset, validated from the boot DTB's dma-ranges
+//     (pcie_address_map_dtb.tkb) (rp1_span_bus_address);
+//   - a CPU-side cache or DDB read of the span: no offset
+//     (dma_span_cpu_address).
+// Trusted, not checked: that each driver names the function of its own bus,
+// and that a device given the address touches only the span's bytes. The
+// IOMMU (#1032) will make that second trust hardware-enforced: the device
+// will be able to reach only the spans mapped for it.
+
+// A device span's address for a QEMU virt virtio-mmio queue or descriptor:
+// QEMU virt's DMA addresses are physical, with no bus offset.
+fn virtio_span_address(span: borrow DmaDeviceSpan) -> usize !{unsafe} {
+    return unsafe { dma_span_address(span) };
+}
+
+// A device span's RP1 bus address, for a GEM or xHCI descriptor or register.
+fn rp1_span_bus_address(span: borrow DmaDeviceSpan) -> usize !{unsafe} {
+    return unsafe { dma_span_address(span) } + rp1_dma_pci_offset;
+}
+
+// A device span's CPU physical address, for a CPU-side cache operation on it.
+fn dma_span_cpu_address(span: borrow DmaDeviceSpan) -> usize !{unsafe} {
+    return unsafe { dma_span_address(span) };
+}

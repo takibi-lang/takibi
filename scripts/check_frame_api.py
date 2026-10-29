@@ -53,12 +53,13 @@ RATCHET = {
     ("kernel/arch/arm64/kernel/frame_ref.tkb", "frame_any_address"):
         (EXPORT, "assembly ABI export: the frame sp the vector restores"),
     # Device bus addresses: written to a descriptor, never dereferenced.
-    ("kernel/drivers/block/virtio_blk.tkb", "virtio_span_address"):
+    # One mint for every device-visible address (#1162).
+    ("kernel/drivers/dma_address.tkb", "virtio_span_address"):
         (EXPORT, "bus-address export of a DMA span to the device"),
-    ("kernel/drivers/net/rp1_gem.tkb", "gem_span_bus_address"):
+    ("kernel/drivers/dma_address.tkb", "rp1_span_bus_address"):
         (EXPORT, "bus-address export of a DMA span to the device"),
-    ("kernel/platform/rpi5/usb_xhci_bus.tkb", "xhci_span_bus_address"):
-        (EXPORT, "bus-address export of a DMA span to the device"),
+    ("kernel/drivers/dma_address.tkb", "dma_span_cpu_address"):
+        (EXPORT, "CPU physical address of a DMA span, for a DDB cache read"),
     # Physical addresses that callers turn back into access: these move to
     # owners.
     ("kernel/arch/arm64/mm/mmu.tkb", "mmu_user_l3_physical"):

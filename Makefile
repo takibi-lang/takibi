@@ -351,7 +351,8 @@ LINUX_UNUSED_CHECK       := --reject-unused-functions --external-entry main
 # files named below, and scripts/buildcheck_kernel_unused_coverage.py fails
 # the build when a compiled file is in neither kind of list. The files QEMU
 # links only so the program resolves -- rpi5/pcie.tkb, the USB drivers and
-# the block cache -- are checked on RPi5, and the page allocator's QEMU-only
+# the block cache, and the address mint drivers/dma_address.tkb, whose RP1
+# functions only RPi5 calls -- are checked on RPi5, and the page allocator's QEMU-only
 # discontiguous probe and virtio block capacity keep page.tkb and
 # virtio_blk.tkb on QEMU's list.
 #
@@ -548,7 +549,8 @@ KERNEL_UNUSED_CHECKED_RPI5 := \
 	kernel/platform/rpi5/usb_xhci_dma.tkb \
 	kernel/platform/rpi5/xhci_irq_affinity.tkb \
 	kernel/platform/rpi5/usb_xhci_rings.tkb \
-	kernel/platform/rpi5/usb_xhci_bus.tkb
+	kernel/platform/rpi5/usb_xhci_bus.tkb \
+	kernel/drivers/dma_address.tkb
 KERNEL_UNUSED_CHECK      := --reject-unused-functions \
 	$(foreach entry,$(KERNEL_ASM_ENTRIES) $(KERNEL_DEBUGGER_ENTRIES),--external-entry $(entry)) \
 	$(foreach file,$(KERNEL_UNUSED_CHECKED),--check-unused-file $(file))
@@ -614,7 +616,7 @@ $(LINUX_USER_DIR)/cache_geometry/cache_geometry_exe.o: kernel/arch/arm64/kernel/
 $(LINUX_USER_DIR)/cache_geometry/cache_geometry_exe.o: LINUX_USER_EXTRA_SRCS := kernel/arch/arm64/kernel/cache_geometry.tkb
 _build/virtio-net-native/driver.tkb: kernel/drivers/net/virtio_net.tkb scripts/build_virtio_net_native_fixture.py
 	python3 scripts/build_virtio_net_native_fixture.py $< $@
-$(LINUX_USER_DIR)/virtio_net_tx/virtio_net_tx_exe.o $(LINUX_USER_DIR)/virtio_net_reply/virtio_net_reply_exe.o: _build/virtio-net-native/driver.tkb kernel/drivers/net/virtio_net.tkb kernel/drivers/net/virtio_net_tx_wait.tkb kernel/drivers/net/virtio_net_tx_dma.tkb kernel/drivers/virtio_ring.tkb kernel/drivers/virtio_used.tkb kernel/lib/init_once.tkb kernel/lib/mutex.tkb kernel/lib/spinlock.tkb $(LINUX_USER_DIR)/virtio_net_tx/support.tkb
+$(LINUX_USER_DIR)/virtio_net_tx/virtio_net_tx_exe.o $(LINUX_USER_DIR)/virtio_net_reply/virtio_net_reply_exe.o: _build/virtio-net-native/driver.tkb kernel/drivers/net/virtio_net.tkb kernel/drivers/net/virtio_net_tx_wait.tkb kernel/drivers/net/virtio_net_tx_dma.tkb kernel/drivers/virtio_ring.tkb kernel/drivers/virtio_used.tkb kernel/drivers/dma_address.tkb kernel/lib/init_once.tkb kernel/lib/mutex.tkb kernel/lib/spinlock.tkb $(LINUX_USER_DIR)/virtio_net_tx/support.tkb
 $(LINUX_USER_DIR)/virtio_net_tx/virtio_net_tx_exe.o $(LINUX_USER_DIR)/virtio_net_reply/virtio_net_reply_exe.o: LINUX_USER_EXTRA_SRCS := _build/virtio-net-native/driver.tkb $(LINUX_USER_DIR)/virtio_net_tx/support.tkb
 $(LINUX_USER_DIR)/virtio_net_tx/virtio_net_tx_exe.o $(LINUX_USER_DIR)/virtio_net_reply/virtio_net_reply_exe.o: LINUX_USER_EXTRA_FLAGS := --regions --device-semantics-file kernel/drivers/net/virtio_net_tx_dma.tkb --device-semantics-file kernel/drivers/virtio_used.tkb
 $(LINUX_USER_DIR)/tcp_parse/tcp_parse_exe.o: $(LINUX_USER_DIR)/common/inet_checksum.tkb $(LINUX_USER_DIR)/common/netutil.tkb

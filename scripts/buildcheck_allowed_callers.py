@@ -28,7 +28,10 @@ process.tkb's scheduled_process_set_exec_inode, the bare-usize store of the
 judged exec inode (#1106; the token cannot cross the user_entry.S return),
 and kernel_ddb_dcache_clean_invalidate, the user_entry.S dc civac helper
 used only by rp1_gem.tkb's DDB RX look (#1095; no compiler builtin,
-DECISIONS 2026-10-25).
+DECISIONS 2026-10-25), and the three functions of the device-address
+mint kernel/drivers/dma_address.tkb (virtio_span_address,
+rp1_span_bus_address, dma_span_cpu_address; #1162), whose writers are each
+a reviewed place a device or the DDB look is given a span's address.
 Lexically, scripts/check_mpidr_reads.py is the sibling for MPIDR_EL1.
 
 Exit code only (0 = pass, 1 = fail).

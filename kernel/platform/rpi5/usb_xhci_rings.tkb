@@ -26,6 +26,7 @@
 
 use "kernel/lib/mutex.tkb";
 use "kernel/lib/task_mutex.tkb";
+use "kernel/drivers/dma_address.tkb";
 
 const XHCI_RING_TRBS: usize = 16;
 const XHCI_RING_CMD: usize = 0;
@@ -141,7 +142,7 @@ private fn xhci_ring_park(i: usize, held: XhciRingHeld) {
 // The ring's bus address, from its own span.
 private fn xhci_ring_base_dma(r: borrow XhciRing_Ready[b, o, 16]) -> usize !{unsafe} {
     let mut span: DmaDeviceSpan = XhciRing_Ready_span(r);
-    return xhci_span_bus_address(span);
+    return rp1_span_bus_address(span);
 }
 
 // Every TRB zeroed (no stale Cycle bit survives a reset) and the Link TRB
@@ -577,7 +578,7 @@ private fn xhci_erst_go(r: XhciErst_Ready[b, o, 4]) -> usize !{unsafe} {
     match XhciErst_xhci_erst_publish(r) {
         XhciErst_xhci_erst_publish_Result::Live(live) => {
             let mut span: DmaDeviceSpan = XhciErst_Live_span(live);
-            let dma: usize = xhci_span_bus_address(span);
+            let dma: usize = rp1_span_bus_address(span);
             xhci_erst_park(live);
             return dma;
         }
@@ -587,7 +588,7 @@ private fn xhci_scratch_array_go(r: XhciScratchArray_Ready[b, o, 8]) -> usize !{
     match XhciScratchArray_xhci_scratch_array_publish(r) {
         XhciScratchArray_xhci_scratch_array_publish_Result::Live(live) => {
             let mut span: DmaDeviceSpan = XhciScratchArray_Live_span(live);
-            let dma: usize = xhci_span_bus_address(span);
+            let dma: usize = rp1_span_bus_address(span);
             xhci_scratch_array_park(live);
             return dma;
         }
@@ -597,7 +598,7 @@ private fn xhci_scratch_buf_go(i: usize, r: XhciScratchBuf_Ready[b, o, 4096]) ->
     match XhciScratchBuf_xhci_scratch_buf_publish(r) {
         XhciScratchBuf_xhci_scratch_buf_publish_Result::Live(live) => {
             let mut span: DmaDeviceSpan = XhciScratchBuf_Live_span(live);
-            let dma: usize = xhci_span_bus_address(span);
+            let dma: usize = rp1_span_bus_address(span);
             xhci_scratch_buf_park(i, live);
             return dma;
         }
@@ -822,7 +823,7 @@ fn xhci_input_submit(r: XhciInput_Ready[b, o, 528]) -> usize !{unsafe} {
     match XhciInput_xhci_input_publish(r) {
         XhciInput_xhci_input_publish_Result::Read(read) => {
             let mut span: DmaDeviceSpan = XhciInput_Read_span(read);
-            let dma: usize = xhci_span_bus_address(span);
+            let dma: usize = rp1_span_bus_address(span);
             xhci_input_park(XhciInputHeld::Read(read));
             return dma;
         }
@@ -891,7 +892,7 @@ fn xhci_evt_poll_release(s: borrow XhciEvents_Live[b, o, 16, r]) !{unsafe} {
         xhci_evt_cycle = 1 - xhci_evt_cycle;
     }
     let mut span: DmaDeviceSpan = XhciEvents_Live_span(s);
-    xhci_event_dequeue_release(xhci_span_bus_address(span) + xhci_evt_idx * 16);
+    xhci_event_dequeue_release(rp1_span_bus_address(span) + xhci_evt_idx * 16);
 }
 fn xhci_evt_reset(s: borrow XhciEvents_Live[b, o, 16, r]) -> XhciEvents_xhci_evt_reset_Raw {
     if (xhci_rings_quiesced) { return XhciEvents_xhci_evt_reset_Raw::EvtQuiet; }
@@ -960,7 +961,7 @@ private fn xhci_events_go(r: XhciEvents_Ready[b, o, 16]) -> usize !{unsafe} {
     match XhciEvents_xhci_evt_publish(r) {
         XhciEvents_xhci_evt_publish_Result::Live(live) => {
             let mut span: DmaDeviceSpan = XhciEvents_Live_span(live);
-            let dma: usize = xhci_span_bus_address(span);
+            let dma: usize = rp1_span_bus_address(span);
             xhci_events_park(live);
             return dma;
         }
@@ -1031,7 +1032,7 @@ fn xhci_event_next() -> XhciEventPoll {
                     // value is the consumer's own dequeue pointer, not a
                     // read-modify-write, so no other core's write is lost.
                     let mut span: DmaDeviceSpan = XhciEvents_Live_span(live);
-                    xhci_event_dequeue_release(xhci_span_bus_address(span) + index * 16);
+                    xhci_event_dequeue_release(rp1_span_bus_address(span) + index * 16);
                     xhci_events_park(live);
                     return XhciEventPoll::NoEvent;
                 }
@@ -1044,7 +1045,7 @@ private fn xhci_output_go(r: XhciOutput_Ready[b, o, 512]) -> usize !{unsafe} {
     match XhciOutput_xhci_out_publish(r) {
         XhciOutput_xhci_out_publish_Result::Live(live) => {
             let mut span: DmaDeviceSpan = XhciOutput_Live_span(live);
-            let dma: usize = xhci_span_bus_address(span);
+            let dma: usize = rp1_span_bus_address(span);
             xhci_output_park(live);
             return dma;
         }
@@ -1075,7 +1076,7 @@ fn xhci_output_start() -> usize !{unsafe} {
                     // Still the controller's: the same context serves the
                     // same slot again.
                     let mut span: DmaDeviceSpan = XhciOutput_Live_span(live);
-                    let dma: usize = xhci_span_bus_address(span);
+                    let dma: usize = rp1_span_bus_address(span);
                     xhci_output_park(live);
                     return dma;
                 }

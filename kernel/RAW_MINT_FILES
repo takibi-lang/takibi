@@ -8,10 +8,11 @@
 kernel/arch/arm64/kernel/frame_ref.tkb
 kernel/arch/arm64/mm/mmu.tkb
 kernel/boot/fdt.tkb
-kernel/drivers/block/virtio_blk.tkb
-# virtio_blk: 1 site left, the shared DMA span address export
-# virtio_span_address, which #1162 moves (its queue is a typed global
-# written through checked indexes since 2026-10-29, #1161).
+kernel/drivers/dma_address.tkb
+# dma_address: the one mint for device-visible addresses (#1162): a span's
+# CPU physical address is dma_span_address, a device sees it plus its bus's
+# inbound offset (0 on QEMU virt, rp1_dma_pci_offset behind RP1). Callers
+# are fixed in scripts/allowed_callers.tsv; the IOMMU (#1032) enforces it.
 kernel/drivers/net/rp1_gem.tkb
 kernel/drivers/net/virtio_net.tkb
 # virtio_net: 1 site left, DDB used-index read, #1164 (its queues are a
@@ -23,6 +24,10 @@ kernel/platform/qemu/device_map.tkb
 kernel/platform/rpi5/device_map.tkb
 # page.tkb is also the one place a page run becomes a region
 # (page_run_into_region, #743); it leaves with #744.
+
+# kernel/drivers/block/virtio_blk.tkb left (2026-10-29, #1162): after its
+# typed queue (#1161) its one raw site was the span address export, which
+# moved to kernel/drivers/dma_address.tkb.
 
 # kernel/drivers/block/memory.tkb left (2026-10-26, #637): its one raw
 # site, the USB run read's pointer-arithmetic slice of block_run_data, is a

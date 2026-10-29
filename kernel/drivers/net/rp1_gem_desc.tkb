@@ -44,6 +44,7 @@
 
 use "kernel/lib/mutex.tkb";
 use "kernel/lib/task_mutex.tkb";
+use "kernel/drivers/dma_address.tkb";
 
 const GEM_DESC_COUNT: usize = 4;
 
@@ -324,7 +325,7 @@ private let mut gem_pkt_tx_seen: bool = false;
 
 fn gem_pkt_post_rx(s: borrow GemPkt_RxPosted[b, o, 1, r]) !{unsafe} {
     let mut span: DmaDeviceSpan = GemPkt_RxPosted_span(s);
-    gem_pkt_addr = gem_span_bus_address(span);
+    gem_pkt_addr = rp1_span_bus_address(span);
     gem_pkt_rx_seen = false;
 }
 fn gem_pkt_received(s: borrow GemPkt_RxPosted[b, o, 1, r]) -> GemPkt_gem_pkt_received_Raw {
@@ -339,7 +340,7 @@ fn gem_pkt_post_tx(s: borrow GemPkt_TxPosted[b, o, 1, r]) !{unsafe} { gem_pkt_tx
 fn gem_pkt_send(s: borrow GemPkt_TxPosted[b, o, 1, r]) !{unsafe} { gem_pkt_tx_posted(s); }
 private fn gem_pkt_tx_posted(s: borrow GemPkt_TxPosted[b, o, 1, r]) !{unsafe} {
     let mut span: DmaDeviceSpan = GemPkt_TxPosted_span(s);
-    gem_pkt_addr = gem_span_bus_address(span);
+    gem_pkt_addr = rp1_span_bus_address(span);
     gem_pkt_tx_seen = false;
 }
 fn gem_pkt_sent(s: borrow GemPkt_TxPosted[b, o, 1, r]) -> GemPkt_gem_pkt_sent_Raw {

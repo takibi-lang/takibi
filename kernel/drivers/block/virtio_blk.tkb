@@ -5,6 +5,7 @@
 // GitHub issue #740).
 
 use "kernel/drivers/virtio_ring.tkb";
+use "kernel/drivers/dma_address.tkb";
 use "kernel/lib/mutex.tkb";
 use "kernel/drivers/block/virtio_blk_dma.tkb";
 
@@ -173,13 +174,6 @@ fn virtio_blk_init() -> bool !{unsafe} {
 // The only writer of a descriptor's address and length: both
 // come from one span, which dma_device_span proved inside its
 // allocation (GitHub issue #623).
-// A device span's address for a virtio queue register: QEMU virt's DMA
-// addresses are physical, with no bus offset. Shared with
-// kernel/drivers/virtio_used.tkb, which builds on both targets.
-fn virtio_span_address(span: borrow DmaDeviceSpan) -> usize !{unsafe} {
-    return unsafe { dma_span_address(span) };
-}
-
 private fn virtio_blk_desc_span(index: {0..<8 as usize},
                                    span: borrow DmaDeviceSpan) !{unsafe} {
     virtio_blk_queue.desc[index].addr = virtio_span_address(span);

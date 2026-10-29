@@ -47,6 +47,7 @@
 use "kernel/platform/rpi5/usb_xhci_dma.tkb";
 use "kernel/platform/rpi5/usb_xhci_rings.tkb";
 use "kernel/platform/rpi5/usb_xhci_bus.tkb";
+use "kernel/drivers/dma_address.tkb";
 use "kernel/drivers/usb/config_descriptor.tkb";
 use "kernel/drivers/usb/init_report.tkb";
 use "kernel/drivers/usb/xhci_event_match.tkb";
@@ -1591,7 +1592,7 @@ fn disk_write_sectors(sector: u32, buf: []u8) -> DiskIoResult {
 // inside its allocation; RP1's bus translation is applied here, once.
 fn usb_ctrl_in(bm_request_type: u32, b_request: u32, w_value: u32,
                w_index: u32, span: borrow DmaDeviceSpan) -> u32 !{unsafe} {
-    let bus: usize = xhci_span_bus_address(span);
+    let bus: usize = rp1_span_bus_address(span);
     return usb_ctrl_xfer(bm_request_type, b_request, w_value, w_index,
                          dma_span_length(span) as u32, bus, true);
 }
@@ -1603,11 +1604,11 @@ fn usb_ctrl_no_data(bm_request_type: u32, b_request: u32, w_value: u32,
 }
 
 fn usb_bulk_in(span: borrow DmaDeviceSpan) -> u32 !{unsafe} {
-    let bus: usize = xhci_span_bus_address(span);
+    let bus: usize = rp1_span_bus_address(span);
     return usb_bulk_xfer(true, bus, dma_span_length(span) as u32);
 }
 
 fn usb_bulk_out(span: borrow DmaDeviceSpan) -> u32 !{unsafe} {
-    let bus: usize = xhci_span_bus_address(span);
+    let bus: usize = rp1_span_bus_address(span);
     return usb_bulk_xfer(false, bus, dma_span_length(span) as u32);
 }
