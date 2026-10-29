@@ -51,13 +51,9 @@ PHASES = ("xargs", "fork", "exec", "pipe", "hackbench")
 # They are left out of the default list and named in every report, so a
 # clean sample never reads as covering them; ask for one with --phases to
 # watch it fail. Remove an entry when its issue lands.
-# Since #1138 (sigaltstack) every stressor gets past its setup; stress-ng
-# then stops at its shared memory region, a MAP_SHARED|MAP_ANONYMOUS mmap
-# this kernel refuses with EINVAL.
+# Since #1172 (setitimer) the fork and pipe stressors stop at --timeout.
 PHASE_WAITS = {
-    "fork": "#1172, the next blocker after #1166 (read from stress-ng's source, not yet seen in a run): setitimer arms no timer, so alarm() never sends SIGALRM and no stressor stops at --timeout",
-    "exec": "not reached: the fork phase before it hangs (#1172, the next blocker after #1166 (read from stress-ng's source, not yet seen in a run): setitimer arms no timer, so alarm() never sends SIGALRM and no stressor stops at --timeout)",
-    "pipe": "not reached: the fork phase before it hangs (#1172, the next blocker after #1166 (read from stress-ng's source, not yet seen in a run): setitimer arms no timer, so alarm() never sends SIGALRM and no stressor stops at --timeout)",
+    "exec": "unfiled: stress-ng's exec stressor refuses to run as root (\"exec stressor must not run as root, skipping\", seen 2026-10-29 after #1172) and every process here is uid 0; it needs a non-root uid (setresuid) for load.sh to drop to",
 }
 
 
