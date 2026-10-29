@@ -2505,6 +2505,19 @@ let frame_handle_fixture =
    extern fn resume(frame: sink FrameRef[process]) !{noreturn};
    "
 
+(* GitHub issue #992: the FrameRef level index, as frame_ref.tkb spells it. *)
+let frame_level_fixture =
+  "enum ExceptionLevel { El0; El1; }
+   affine struct FrameRef[process: usize, level: ExceptionLevel] { private sp: usize; }
+   variant LeveledFrame[process: usize] {
+     El0(FrameRef[process, ExceptionLevel::El0]);
+     El1(FrameRef[process, ExceptionLevel::El1]);
+   }
+   fn frame_general_set(frame: borrow FrameRef[process, ExceptionLevel::El0],
+                        value: usize) {
+   }
+   "
+
 let slot_index_fixture =
   "linear struct Region[base: usize, len: usize] {
      private address: usize;
@@ -5118,6 +5131,47 @@ fn stored_release(holder: sink StoredHolder[k]) { stored_drop(holder.token); }
          \  resume(parked);\n\
          \  set_x0(parked, 1);\n\
          }\n" ]);
+
+  (* GitHub issue #992 (#638 stage 3): a frame also carries the level it
+     returns to, so a delivery -- a register written into a parked
+     process's frame -- cannot be aimed at an El1 frame, the saved context
+     of a process preempted inside the kernel. docs/wont-compile/0008. *)
+  Alcotest.test_case "frame level: a delivery into an El1 frame is rejected"
+    `Quick
+    (expect_type_error
+      "static value mismatch: ExceptionLevel::El1 vs ExceptionLevel::El0"
+      (frame_level_fixture ^
+       "fn deliver_status(frame: borrow FrameRef[process, ExceptionLevel::El1],
+                          status: usize) {
+          frame_general_set(frame, status);
+        }"));
+
+  Alcotest.test_case "frame level: a delivery after matching the level is accepted"
+    `Quick
+    (fun () ->
+      ignore (infer (frame_level_fixture ^
+        "fn deliver_status(frame: sink LeveledFrame[process], status: usize)
+             -> bool {
+           match frame {
+             LeveledFrame::El0(user_frame) => {
+               frame_general_set(user_frame, status);
+               return true;
+             }
+             LeveledFrame::El1(kernel_frame) => { return false; }
+           }
+         }")));
+
+  Alcotest.test_case "frame level: a level-generic reader takes either level"
+    `Quick
+    (fun () ->
+      ignore (infer (frame_level_fixture ^
+        "fn address(frame: borrow FrameRef[process, level]) -> usize {
+           return frame.sp;
+         }
+         fn both(low: borrow FrameRef[p, ExceptionLevel::El0],
+                 high: borrow FrameRef[q, ExceptionLevel::El1]) -> usize {
+           return address(low) + address(high);
+         }")));
 
   Alcotest.test_case
     "stack proof: a woken process is started only through the check" `Quick

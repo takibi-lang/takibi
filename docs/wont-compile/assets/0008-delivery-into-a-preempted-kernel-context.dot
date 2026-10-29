@@ -1,0 +1,30 @@
+// Figure for docs/wont-compile/0008-delivery-into-a-preempted-kernel-context.md
+digraph delivery_into_a_preempted_kernel_context {
+  graph [bgcolor="#fffaf0", rankdir=TB, pad=0.35, nodesep=0.55, ranksep=0.9,
+         fontname="Helvetica", fontsize=15, fontcolor="#596078"];
+  node  [fontname="Helvetica", fontsize=15, shape=box, style="rounded,filled",
+         fillcolor="#ffffff", color="#17213f", fontcolor="#17213f",
+         penwidth=2, margin="0.26,0.18"];
+  edge  [fontname="Helvetica", fontsize=13, color="#17213f", penwidth=2,
+         fontcolor="#596078", arrowsize=0.9];
+
+  subgraph cluster_rejected {
+    label="Takibi: rejected at compile time";
+    labelloc="t"; fontname="Helvetica"; fontsize=16; fontcolor="#c9360d";
+    color="#f05a24"; penwidth=2.5; style="rounded,dashed"; margin=18;
+
+    parked [label="saved frame of a process\npreempted inside a syscall (EL1)",
+            fillcolor="#fff3df", color="#f05a24"];
+    write  [label="wait4 result written\ninto its x0", fillcolor="#fff3df",
+            color="#f05a24"];
+
+    { rank=same; parked; write; }
+    parked -> write [label="  a delivery aimed at it"];
+  }
+
+  board [label="On the board\l\lThe kernel resumes mid-syscall with x0 overwritten.\lA pointer or a length it held is now a pid.\l",
+         fillcolor="#f1f2f6", color="#17213f", fontcolor="#17213f"];
+
+  write -> board [label="  C: a pt_regs pointer, any context", style=dashed,
+                  color="#c9360d", fontcolor="#c9360d", penwidth=2.5];
+}

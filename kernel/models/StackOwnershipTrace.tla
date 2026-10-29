@@ -42,6 +42,7 @@ CONSTANTS
     EXIT_IDLES,
     LEAVE_CHECKS_STACK,
     WAKE_START_CHECKS_STACK,
+    PREEMPT_EL1_KEEPS_STACK,
     \* An action left out of the next-state relation, or "none": the
     \* negative control that a path the model lacked fails a passing run.
     WITHOUT,
@@ -125,6 +126,7 @@ ModelStep(o) ==
         \/ Allowed("InterruptDepart") /\ act' = "InterruptDepart"
            /\ Step!InterruptDepart(c)
         \/ Allowed("TickLeave") /\ act' = "TickLeave" /\ Step!TickLeave(c)
+        \/ Allowed("PreemptEL1") /\ act' = "PreemptEL1" /\ Step!PreemptEL1(c)
         \/ Allowed("SwitchAway") /\ act' = "SwitchAway"
            /\ \E how \in {"Ready", "Napping", "Blocked"} : Step!SwitchAway(c, how)
 

@@ -1148,7 +1148,7 @@ fn kernel_ddb_stopped_root_publish(frame_sp: usize, pid: usize,
 // GitHub issue #920: an `nmi` root. The stop SGI is above the GIC priority
 // mask, so it can arrive while this core holds any masking lock; the
 // compiler holds everything reachable from here to taking none.
-fn kernel_world_stop_serve(frame: borrow FrameRef[process]) !{nmi, unsafe} {
+fn kernel_world_stop_serve(frame: borrow FrameRef[process, level]) !{nmi, unsafe} {
     kernel_ddb_stopped_root_publish(
         frame_ref_address(frame), kernel_process_frame_pid_or_zero(frame),
         kernel_process_claimed_pid_or_zero());
@@ -1299,7 +1299,7 @@ private fn ddb_current_unwind_root() -> DdbUnwindRoot !{unsafe} {
     let mut root: DdbUnwindRoot = {
         1,
         ddb_snapshot.cpu,
-        kernel_process_frame_pid_or_zero(
+        kernel_process_leveled_frame_pid_or_zero(
             frame_ref_from_entry(ddb_snapshot.frame_sp,
                                  kernel_process_entry_generation())),
         frame.elr_el1,
@@ -3139,7 +3139,7 @@ fn kernel_ddb_sync_dispatch(frame_sp: usize) -> usize !{interrupt, unsafe} {
         frame.elr_el1 = frame.elr_el1 + 4;
         return frame_sp;
     }
-    kernel_current_sync_fail_stop(
+    kernel_current_sync_fail_stop_leveled(
         frame_ref_from_entry(frame_sp, kernel_process_entry_generation()));
 }
 
@@ -3464,7 +3464,7 @@ private fn crash_world_stop_report(origin: usize, frame_sp: usize)
             ddb_puts("\n"); crash_report_release();
             if (origin == 1 && frame_sp != 0 &&
                 kernel_process_crash_frame_usable(stopped, frame_sp)) {
-                crash_snapshot_copy_saved_frame(
+                crash_snapshot_copy_leveled_frame(
                     frame_ref_from_entry(frame_sp, kernel_process_entry_generation()),
                     &snapshot.saved_sp_el0);
                 crash_snapshot_here().saved_frame_available = 1;
@@ -3750,7 +3750,7 @@ private fn crash_snapshot_capture(slot: usize, frame_sp: usize, origin: usize, c
     crash_snapshot_here().activity = kernel_activity_code_here();
     crash_snapshot_here().saved_frame_available = 0;
     if (origin == 0 && frame_sp != 0) {
-        crash_snapshot_copy_saved_frame(
+        crash_snapshot_copy_leveled_frame(
             frame_ref_from_entry(frame_sp, kernel_process_entry_generation()),
             &snapshot.saved_sp_el0);
         crash_snapshot_here().saved_frame_available = 1;

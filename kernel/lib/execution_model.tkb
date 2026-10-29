@@ -14,7 +14,7 @@
 //   2. KERNEL MODE DOES NOT PREEMPT. A timer interrupt taken at EL1 --
 //      inside a syscall -- only sets a flag; the switch happens on the way
 //      out, in kernel_process_syscall_return_schedule. The line that does
-//      it is `if (lower_el)` in each platform's irq dispatch. So a syscall
+//      it is kernel_tick's El1 branch (the frame's level, #992). So a syscall
 //      handler runs to completion. This is Linux's CONFIG_PREEMPT_NONE.
 //
 //   3. INTERRUPT HANDLERS ENTER NO LOCKED SUBSYSTEM. Device handlers

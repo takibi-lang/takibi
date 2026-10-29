@@ -41,6 +41,17 @@
 (*   whether another core still stands on the parent's stack. TLC reports *)
 (*   StartsOnFreeStack violated.                                           *)
 (*                                                                         *)
+(* PREEMPT_EL1_KEEPS_STACK = FALSE -- the wrong way to preempt a kernel  *)
+(*   context (GitHub issue #992, #638 stage 3). A tick taken at EL1 inside *)
+(*   a syscall interrupts code on the process's own stack, which still     *)
+(*   holds the syscall's frames. PreemptEL1 leaves that process Ready while *)
+(*   this core still owns and stands on its stack; SwitchComplete releases  *)
+(*   it when the core moves to the successor, and the core that later     *)
+(*   takes the process takes the stack with it. Releasing the stack at the *)
+(*   EL1 entry, as the lower-EL entry does (InterruptDepart), lets another  *)
+(*   core take a stack this core still runs on. TLC reports StackSafety    *)
+(*   violated.                                                             *)
+(*                                                                         *)
 (* The actions name no process: who is whose child is ParentOf, so the  *)
 (* same actions describe the model's two (or three) processes and every   *)
 (* process of a real run. StackOwnershipTrace.tla instantiates them with  *)
@@ -58,6 +69,8 @@ CONSTANTS
     LEAVE_CHECKS_STACK,
     \* @type: Bool;
     WAKE_START_CHECKS_STACK,
+    \* @type: Bool;
+    PREEMPT_EL1_KEEPS_STACK,
     \* @type: Set(Str);
     Cores,
     \* @type: Set(Str);
@@ -389,6 +402,27 @@ InterruptDepart(c) ==
     /\ interrupted' = [interrupted EXCEPT ![c] = TRUE]
     /\ UNCHANGED <<state, current, reserved, reapPending>>
 
+\* GitHub issue #992: a tick taken at EL1, inside a syscall the current
+\* process runs on its own stack, switches to the reserved successor. The
+\* preempted process is Ready while its stack holds live kernel frames:
+\* this core keeps owning it and still stands on it, and SwitchComplete
+\* releases it at the exception return into the successor. Unlike
+\* InterruptDepart the EL1 entry does not release the stack. No EL1 frame
+\* is produced until the route's stage 8 (KERNEL_PREEMPTIBLE stays 0);
+\* the action is the design the kernel's El1 frame type is built for.
+PreemptEL1(c) ==
+    /\ reserved[c] # None
+    /\ current[c] # None
+    /\ Settled(c, current[c])
+    /\ ~interrupted[c]
+    /\ state[current[c]] = "Running"
+    /\ state' = [state EXCEPT ![current[c]] = "Ready"]
+    /\ current' = [current EXCEPT ![c] = reserved[c]]
+    /\ reserved' = [reserved EXCEPT ![c] = None]
+    /\ owner' = IF PREEMPT_EL1_KEEPS_STACK THEN owner
+                ELSE [owner EXCEPT ![current[c]] = None]
+    /\ UNCHANGED <<stands, interrupted, reapPending>>
+
 \* Inside that interrupt, the tick finds the process may no longer run
 \* here and nothing else may: it is made Ready, its stack already free, and
 \* the core idles.
@@ -432,6 +466,7 @@ Next ==
         \/ LeaveComplete(c)
         \/ InterruptDepart(c)
         \/ TickLeave(c)
+        \/ PreemptEL1(c)
         \/ \E p \in Procs : Reserve(c, p)
         \/ \E how \in {"Ready", "Napping", "Blocked"} : SwitchAway(c, how)
 
@@ -539,20 +574,29 @@ TwoProcs ==
     /\ ParentOf = [p \in {"parent", "child"} |-> IF p = "child" THEN "parent" ELSE "none"]
 CInitFixed ==
     EXIT_IDLES = TRUE /\ LEAVE_CHECKS_STACK = TRUE /\ WAKE_START_CHECKS_STACK = TRUE
+    /\ PREEMPT_EL1_KEEPS_STACK = TRUE
     /\ TwoProcs
 CInitOther ==
     EXIT_IDLES = TRUE /\ LEAVE_CHECKS_STACK = TRUE /\ WAKE_START_CHECKS_STACK = TRUE
+    /\ PREEMPT_EL1_KEEPS_STACK = TRUE
     /\ Cores = {"c0", "c1"}
     /\ Procs = {"parent", "child", "other"}
     /\ ParentOf = [p \in {"parent", "child", "other"} |-> IF p = "child" THEN "parent" ELSE "none"]
 CInitExitWaits ==
     EXIT_IDLES = FALSE /\ LEAVE_CHECKS_STACK = TRUE /\ WAKE_START_CHECKS_STACK = TRUE
+    /\ PREEMPT_EL1_KEEPS_STACK = TRUE
     /\ TwoProcs
 CInitLeaveUnchecked ==
     EXIT_IDLES = TRUE /\ LEAVE_CHECKS_STACK = FALSE /\ WAKE_START_CHECKS_STACK = TRUE
+    /\ PREEMPT_EL1_KEEPS_STACK = TRUE
+    /\ TwoProcs
+CInitPreemptReleases ==
+    EXIT_IDLES = TRUE /\ LEAVE_CHECKS_STACK = TRUE /\ WAKE_START_CHECKS_STACK = TRUE
+    /\ PREEMPT_EL1_KEEPS_STACK = FALSE
     /\ TwoProcs
 CInitWakeStartUnchecked ==
     EXIT_IDLES = TRUE /\ LEAVE_CHECKS_STACK = TRUE /\ WAKE_START_CHECKS_STACK = FALSE
+    /\ PREEMPT_EL1_KEEPS_STACK = TRUE
     /\ TwoProcs
 
 =============================================================================

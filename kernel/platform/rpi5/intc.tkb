@@ -246,7 +246,7 @@ fn gic_pmu_core_enable() {
 // and DAIF.I clear (see the caller). A path that leaves for the idle loop
 // does not come back to the caller's restore; the idle loop's enable_irq
 // puts the mask back instead.
-fn platform_irq_dispatch_ordinary(frame: sink FrameRef[process], lower_el: bool,
+fn platform_irq_dispatch_ordinary(frame: sink FrameRef[process, level],
         iar: u32, id: {0..<1020 as u32}) -> AnyFrame !{interrupt, unsafe} {
     workload_profile_irq_enter();
 
@@ -310,7 +310,7 @@ fn platform_irq_dispatch_ordinary(frame: sink FrameRef[process], lower_el: bool,
     // read above: acknowledging is the interrupted core's own job on its
     // own banked interface.
     if (id == rpi5_timer_gic_intid) {
-        let switch: TimerSwitch = kernel_tick(frame, lower_el);
+        let switch: TimerSwitch = kernel_tick(frame);
         gicc.eoir = iar;
         workload_profile_irq_exit();
         return kernel_timer_tick_leave(switch);

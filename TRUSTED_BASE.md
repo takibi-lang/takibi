@@ -679,6 +679,21 @@ caller, `scheduled_process_saved_frame`, which takes the process's
 and pid, a signal wake, a UART byte, a deadline result) writes a frame whose
 index is that owner's, and a frame of another process is a static mismatch.
 `el0_context_resume` consumes its frame, so a frame used after it is refused.
+A frame also carries the level it returns to (`FrameRef[process, level]`,
+`ExceptionLevel::El0` or `El1`, GitHub issue #992; the spelling is
+provisional until #1006). The level is defined as the mode field of the SPSR
+word in the frame: `frame_ref_from_entry`, `frame_ref_from_saved` and
+`frame_level` read that word and return a `LeveledFrame`, so a process
+preempted inside the kernel comes back from its record as an El1 frame.
+Every writer of a frame word takes the El0 form, and the SPSR writer keeps
+M at EL0t, so no write moves a frame between levels and a delivery into an
+El1 frame is a static mismatch; deliveries reach a parked frame through
+`scheduled_process_parked_frame`, which fail-stops on an El1 one. What the
+index trusts: that the SPSR word is what `el0_context_resume` restores
+(its generated restore), that `frame_ref_from_el0_entry`'s callers are the
+syscall entry's lower-EL vector or a probe's stand-in, and that
+`frame_ref_fresh`'s two callers write the frame whole before it is resumed;
+`check_stack_proof_states.py` holds the callers of all five mints.
 What the index does not say is where it comes from at an entry: the entry
 mint is given the CPU's current generation, so that a frame entering on this
 CPU is indexed by whichever process this CPU runs, and the scheduler, which

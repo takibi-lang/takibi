@@ -28,6 +28,7 @@ second specification.
 | [0005](0005-wire-endian-field-read-as-a-host-integer.md) | A wire-endian field used as a host integer | Enforced |
 | [0006](0006-blocking-call-while-preemption-is-disabled.md) | A blocking call while preemption is disabled | Enforced |
 | [0007](0007-cpu-local-index-used-after-preemption-is-enabled.md) | A CPU-local index used after preemption is enabled again | Enforced |
+| [0008](0008-delivery-into-a-preempted-kernel-context.md) | A delivery written into a preempted kernel context | Enforced |
 
 ## Conventions
 

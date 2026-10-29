@@ -4494,7 +4494,7 @@ private fn syscall_wait4_resume(frame: MaybeFrame, value: usize,
 fn kernel_syscall_wait4_deliver(
         parent: borrow ScheduledProcessOwner[process],
         resuming: borrow ProcessCurrent[process, ProcessState::Running],
-        frame: borrow FrameRef[process], reaped_pid: usize) !{unsafe} {
+        frame: borrow FrameRef[process, ExceptionLevel::El0], reaped_pid: usize) !{unsafe} {
     let mut parent_slot: ProcessSlot = scheduled_process_owner_slot(parent);
     let wait4_status_ptr: usize =
         scheduled_process_record_wait4_status_ptr_owned(parent);
@@ -4622,7 +4622,7 @@ must_use variant KernelUartDeliveryResult { Consumed; RetryRead; }
 fn kernel_syscall_uart_deliver(
         guard: borrow ProcessRunGuard[lock],
         waiter: borrow ScheduledProcessOwner[process],
-        frame: borrow FrameRef[process], value: usize)
+        frame: borrow FrameRef[process, ExceptionLevel::El0], value: usize)
         -> KernelUartDeliveryResult !{interrupt} {
     let mut process_slot: ProcessSlot = scheduled_process_owner_slot(waiter);
     if (scheduled_process_slot_valid(process_slot)) {
@@ -4642,7 +4642,7 @@ fn kernel_syscall_uart_deliver(
     return KernelUartDeliveryResult::Consumed;
 }
 
-fn kernel_syscall_uart_block_prepare(frame: borrow FrameRef[process]) {
+fn kernel_syscall_uart_block_prepare(frame: borrow FrameRef[process, ExceptionLevel::El0]) {
     let mut process_slot: ProcessSlot = kernel_syscall_process_slot();
     if (scheduled_process_slot_valid(process_slot)) {
         let guard = process_run_lock();
@@ -4668,7 +4668,7 @@ fn kernel_syscall_uart_block_prepare(frame: borrow FrameRef[process]) {
 fn kernel_syscall_block_return(frame_sp: usize) {
     let ProcessRunningHere::Running(current_authority) = process_running_here() else {};
     let frame =
-        frame_ref_from_entry(frame_sp, kernel_process_entry_generation());
+        frame_ref_from_el0_entry(frame_sp, kernel_process_entry_generation());
     let mut switch: BlockSwitch = BlockSwitch::Retry;
     let mut rewound: bool = false;
     let reason: ProcessWaitReason = kernel_process_current_pending_block_reason(current_authority);
@@ -4820,7 +4820,7 @@ fn kernel_syscall_block_return(frame_sp: usize) {
 // skipped just because it arrived via clone rather than an ordinary return.
 fn kernel_syscall_resume_return(frame_sp: usize, value: usize) {
     let frame =
-        frame_ref_from_entry(frame_sp, kernel_process_entry_generation());
+        frame_ref_from_el0_entry(frame_sp, kernel_process_entry_generation());
     el0_context_set_x0(frame, value);
     kernel_stack_guard_check(frame_sp);  // issue #375
     match kernel_process_syscall_return_schedule(frame) {
@@ -4850,7 +4850,7 @@ fn kernel_syscall_resume_return(frame_sp: usize, value: usize) {
 // syscall return, and must not skip the same reschedule check.
 fn kernel_syscall_clone_child_return(parent_frame_sp: usize, child_pid: usize)
         !{unsafe} {
-    let parent_frame = frame_ref_from_entry(
+    let parent_frame = frame_ref_from_el0_entry(
         parent_frame_sp, kernel_process_entry_generation());
     // The suspended parent observes clone() == child PID whenever it is
     // first selected; the copied child frame's own X0 is overwritten to 0
@@ -4864,7 +4864,7 @@ fn kernel_syscall_clone_child_return(parent_frame_sp: usize, child_pid: usize)
     // stack allocator supplies where the child's frame goes. The copy is
     // between two ABI-owned exception-frame bounds, not ordinary slice
     // provenance, and frame_copy is where that is said.
-    let child_frame = frame_ref_from_saved(
+    let child_frame = frame_ref_fresh(
         child_stack_top - EXC_CONTEXT_SIZE, kernel_process_entry_generation());
     frame_copy(child_frame, parent_frame);
     let ProcessConstructingHere::Constructing(child_authority) = process_constructing_here() else {};
@@ -4897,7 +4897,7 @@ fn kernel_syscall_clone_child_return(parent_frame_sp: usize, child_pid: usize)
 // entered on and the argv page execve allocated. It used to be user_entry.S's
 // action 8, which found the page again in a per-CPU slot. Every path ends in
 // el0_context_resume or a fail-stop.
-fn kernel_syscall_child_exec_return(frame: FrameRef[process],
+fn kernel_syscall_child_exec_return(frame: FrameRef[process, ExceptionLevel::El0],
         args_page: sink PageOwner[page]) !{unsafe} {
     let ProcessRunningHere::Running(current_authority) = process_running_here() else {};
     kernel_process_exec_failure_clear();
@@ -4982,7 +4982,7 @@ fn kernel_syscall_child_exec_return(frame: FrameRef[process],
 }
 
 // The new image is installed: the tail of a successful exec.
-private fn kernel_syscall_child_exec_enter(frame: sink FrameRef[process],
+private fn kernel_syscall_child_exec_enter(frame: sink FrameRef[process, ExceptionLevel::El0],
         current_authority: ProcessCurrent[current_process, ProcessState::Running],
         user_entry: ExecUserEntry) !{unsafe} {
     // The new image is committed, so this is execve's point of no return,
@@ -5015,7 +5015,7 @@ private fn kernel_syscall_child_exec_enter(frame: sink FrameRef[process],
 // GitHub issue #1079: the new image's pages could not be reserved, so the
 // prepare stopped before the teardown and the caller's image is intact.
 // execve returns ENOMEM to it, as for the argv page (#700).
-private fn kernel_syscall_child_exec_refused(frame: sink FrameRef[process],
+private fn kernel_syscall_child_exec_refused(frame: sink FrameRef[process, ExceptionLevel::El0],
         current_authority: ProcessCurrent[current_process, ProcessState::Running]) !{unsafe} {
     kernel_syscall_exec_clear();
     kernel_syscall_exec_refused_count = kernel_syscall_exec_refused_count + 1;
@@ -5031,7 +5031,7 @@ private fn kernel_syscall_child_exec_refused(frame: sink FrameRef[process],
 // and so does this: the process ends, its parent reaps a SIGSEGV status,
 // and the kernel runs on. PID 1 ending stops the kernel as any PID 1 exit
 // does (#831).
-private fn kernel_syscall_child_exec_lost(frame: borrow FrameRef[process],
+private fn kernel_syscall_child_exec_lost(frame: borrow FrameRef[process, ExceptionLevel::El0],
         current_authority: ProcessCurrent[current_process, ProcessState::Running]) !{unsafe} {
     kernel_syscall_exec_clear();
     kernel_syscall_exec_lost_count = kernel_syscall_exec_lost_count + 1;
@@ -5096,8 +5096,9 @@ fn kernel_syscall_clone_parent_return(parent_sp: usize) {
         kernel_idle_exit_enter();
     }
     workload_profile_el0_enter();
-    el0_context_resume(
-        frame_ref_from_entry(parent_sp, kernel_process_entry_generation()));
+    // GitHub issue #992: the frame ExitSwitch named, of whichever level.
+    frame_any_resume(frame_leveled_any(
+        frame_ref_from_entry(parent_sp, kernel_process_entry_generation())));
 }
 
 // GitHub issue #9: peer-safety. Since #583 a syscall runs where it is
@@ -5994,7 +5995,7 @@ fn syscall_fd_is_socket(fd: usize) -> bool {
 // core is off its stack (kernel_process_stack_idle_yield).
 fn kernel_syscall_migrate_return(frame_sp: usize) {
     let frame =
-        frame_ref_from_entry(frame_sp, kernel_process_entry_generation());
+        frame_ref_from_el0_entry(frame_sp, kernel_process_entry_generation());
     el0_context_retry_syscall(frame);
     if (kernel_process_migrate_current(frame) == false) {
         kernel_invariant_stop_with_frame(frame);
@@ -6296,7 +6297,7 @@ fn syscall_sigaltstack(
 // the top of the alternate stack (GitHub issue #1138). The frame records x0
 // as `value`, the result the interrupted syscall returns once the handler
 // is done, and uc_stack as `altstack`. False when the stack cannot take it.
-fn syscall_signal_frame_write(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], frame: borrow FrameRef[process], value: usize,
+fn syscall_signal_frame_write(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], frame: borrow FrameRef[process, ExceptionLevel::El0], value: usize,
                               signum: usize,
                               restore_mask: usize, child_pid: usize,
                               child_status: ProcessEnd, sender_pid: usize,
@@ -6515,7 +6516,7 @@ private fn syscall_sleep_remaining_write(
     }
 }
 
-private fn syscall_signal_deliver_into(current_authority: ProcessCurrent[current_process, ProcessState::Running], here: borrow FrameRef[process],
+private fn syscall_signal_deliver_into(current_authority: ProcessCurrent[current_process, ProcessState::Running], here: borrow FrameRef[process, ExceptionLevel::El0],
                                        value: usize)
         -> SyscallAction !{unsafe} {
     match kernel_process_current_caught_signal_take() {
@@ -6543,7 +6544,7 @@ private fn syscall_signal_deliver_into(current_authority: ProcessCurrent[current
 // syscall return sets it from its result. False, with `here` and the
 // handler table unchanged, when the frame cannot be written.
 private fn signal_handler_enter(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
-                                here: borrow FrameRef[process], value: usize,
+                                here: borrow FrameRef[process, ExceptionLevel::El0], value: usize,
                                 taken: borrow TakenSignal[signal])
         -> bool !{unsafe} {
     let signum: usize = taken_signal_number(taken);
@@ -6627,7 +6628,7 @@ private fn signal_handler_enter(current_authority: borrow ProcessCurrent[current
 //   always). It is taken first, whether or not the frame resumes at an
 //   SVC: the syscall there would end the process at its entry anyway.
 // - A caught signal whose frame cannot be written: Linux forces SIGSEGV.
-fn kernel_signal_return_deliver(frame: borrow FrameRef[process]) !{unsafe} {
+fn kernel_signal_return_deliver(frame: borrow FrameRef[process, ExceptionLevel::El0]) !{unsafe} {
     let ProcessRunningHere::Running(current_authority) = process_running_here() else {};
     match kernel_process_current_termination_signal_take() {
         ProcessSignalPendingResult::Missing => {}
@@ -6712,6 +6713,13 @@ fn kernel_net_retransmit_pass() !{may_block, unsafe} {
 // returns.
 fn kernel_irq_return_complete(frame_sp: usize) !{unsafe} {
     kernel_process_stack_switch_complete(frame_sp);
+    // GitHub issue #992: only a return to EL0 runs the pass; an El1 frame
+    // resumes a kernel path that was preempted, which may hold what the pass
+    // would take, and keeps the priority mask it had.
+    match frame_ref_from_entry(frame_sp, kernel_process_entry_generation()) {
+        LeveledFrame::El1(kernel_frame) => { return; }
+        LeveledFrame::El0(user_frame) => {}
+    }
     if (tcp_retx_pass_due() == false) { return; }
     enable_irq();
     kernel_net_retransmit_pass();
@@ -6733,7 +6741,7 @@ fn kernel_irq_return_complete(frame_sp: usize) !{unsafe} {
 // successor or idles (kernel_syscall_clone_parent_return), PID 1 stops the
 // kernel. Neither returns; the frame on this stack is abandoned with it.
 private fn signal_return_exit(current_authority: ProcessCurrent[current_process, ProcessState::Running],
-                              frame: borrow FrameRef[process],
+                              frame: borrow FrameRef[process, ExceptionLevel::El0],
                               status: ProcessEnd) !{unsafe} {
     kernel_activity_set(KernelActivity::Syscall);
     enable_irq();
@@ -6756,7 +6764,7 @@ const AARCH64_SVC: u32 = 0xD4000001;
 // True when the instruction `frame` resumes at is an SVC. An unreadable PC
 // is not one: the process faults there before it can make a syscall.
 private fn signal_resumes_at_svc(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
-                                 frame: borrow FrameRef[process]) -> bool !{unsafe} {
+                                 frame: borrow FrameRef[process, ExceptionLevel::El0]) -> bool !{unsafe} {
     match user_range_check_read(current_authority, frame_elr_el1(frame), 4) {
         UserReadRangeResult::Fault => { return false; }
         UserReadRangeResult::Ok(range) => {
@@ -6779,7 +6787,7 @@ fn syscall_signal_return(current_authority: ProcessCurrent[current_process, Proc
     }
 }
 
-private fn syscall_signal_return_into(current_authority: ProcessCurrent[current_process, ProcessState::Running], here: borrow FrameRef[process])
+private fn syscall_signal_return_into(current_authority: ProcessCurrent[current_process, ProcessState::Running], here: borrow FrameRef[process, ExceptionLevel::El0])
         -> SyscallAction !{unsafe} {
     let base: usize = frame_sp_el0(here);
     match user_range_check_read(current_authority, base,
@@ -6945,7 +6953,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
 // releases it after the prepare. The frame is the one the syscall entered
 // on: an in-kernel probe, which has none, was answered ENOSYS before execve.
 private fn kernel_syscall_dispatch_child_exec(number: usize,
-        frame: FrameRef[process], args_page: sink PageOwner[page]) !{unsafe} {
+        frame: FrameRef[process, ExceptionLevel::El0], args_page: sink PageOwner[page]) !{unsafe} {
     kernel_process_clear_core0_for_call(kernel_syscall_process_slot());
     workload_profile_syscall_complete(number);
     kernel_syscall_child_exec_return(frame, args_page);

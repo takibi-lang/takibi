@@ -20,10 +20,11 @@ new place without reading the owner. This check pins the shape:
 
 The same file also pins the frame handle (GitHub issue #661, #637 stage 1 group
 C). A saved exception frame is a `FrameRef`, made only by `frame_ref_from_entry`
-(an assembly or generated entry hands over the address, or a probe stands one
-in), `frame_ref_from_saved` (rebuilt from a process record's saved_sp, for the
-process whose owner the one caller `scheduled_process_saved_frame` holds) and
-`maybe_frame_from_entry`; the callers of each are a declared set, and a
+(an entry hands over the address; the level is read from the frame),
+`frame_ref_from_el0_entry` (the syscall entry's frame, or a probe's stand-in),
+`frame_ref_fresh` (a frame written whole first), `frame_ref_from_saved`
+(rebuilt from a process record's saved_sp, for the process whose owner the one
+caller `scheduled_process_saved_frame` holds) and `maybe_frame_from_entry`; the callers of each are a declared set, and a
 parameter named for a frame address (`frame_sp`, `current_sp`, ...) is a bare
 `usize` only in the declared seams, where an assembly ABI or a stack-bound
 comparison needs an integer.
@@ -64,19 +65,26 @@ FUNCTION_RE = re.compile(r"^(?:private )?(?:inline |noinline )?fn (\w+)\(", re.M
 
 # The callers of each frame mint, by function name, with why each is one.
 FRAME_MINT_CALLERS = {
+    # GitHub issue #992: the entry mint reads the frame's level from its
+    # SPSR, so it serves every entry that may see an EL1 frame.
     "frame_ref_from_entry": {
-        # The assembly and generated entries, which receive a frame in x0.
-        "kernel_syscall_block_return", "kernel_syscall_resume_return",
-        "kernel_syscall_clone_child_return",
-        "kernel_syscall_clone_parent_return", "kernel_syscall_migrate_return",
-        "kernel_process_stack_switch_complete", "platform_irq_dispatch",
-        "platform_el0_irq_dispatch", "maybe_frame_from_entry",
+        # The generated IRQ entries and return hooks, which receive a frame
+        # of either level in x0; the exit path's successor frame.
+        "kernel_process_stack_switch_complete", "kernel_irq_return_complete",
+        "platform_irq_dispatch", "platform_el0_irq_dispatch",
+        "kernel_syscall_clone_parent_return",
         # The debugger and the crash reporter, declared mint code by design.
         "ddb_current_unwind_root", "kernel_ddb_sync_dispatch",
         "crash_snapshot_capture",
         # GitHub issue #920: the crash path's debug-stop root, split out of
         # crash_snapshot_capture so the compiler can hold it to no lock.
         "crash_world_stop_report",
+    },
+    # The syscall entry's frame, El0 by the vector it came through.
+    "frame_ref_from_el0_entry": {
+        "kernel_syscall_block_return", "kernel_syscall_resume_return",
+        "kernel_syscall_clone_child_return", "kernel_syscall_migrate_return",
+        "maybe_frame_from_entry",
         # Boot-time probes that stand in frames which are not real ones.
         "kernel_process_probe_tick_address",
         "kernel_process_trace_block_wake_probe",
@@ -85,8 +93,12 @@ FRAME_MINT_CALLERS = {
     "frame_ref_from_saved": {
         # A frame rebuilt from a process record's saved_sp, indexed by the
         # owner of that record: every delivery into another process's frame
-        # and every scheduler pickup goes through this one function.
+        # (through scheduled_process_parked_frame, El0 only) and every
+        # scheduler pickup goes through this one function.
         "scheduled_process_saved_frame",
+    },
+    # A frame written whole before it is resumed, El0 by what is written.
+    "frame_ref_fresh": {
         # A child's frame, placed at the top of its new stack and then copied.
         "kernel_syscall_clone_child_return",
         # PID 1's first frame, built at the top of its own new stack before
@@ -117,6 +129,7 @@ FRAME_USIZE_SEAMS = {
     "kernel_stack_guard_check", "kernel_stack_guard_check_interrupt",
     "kernel_stack_guard_inspect", "maybe_frame_from_entry",
     "frame_ref_from_entry", "frame_ref_from_saved",
+    "frame_ref_from_el0_entry", "frame_ref_fresh",
     # The debugger and crash reporter read frames as integers by design.
     "kernel_ddb_enter", "kernel_ddb_sync_dispatch",
     "kernel_ddb_stopped_root_publish", "el1_exception_evidence_from_frame",

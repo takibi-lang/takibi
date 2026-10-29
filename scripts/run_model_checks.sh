@@ -103,6 +103,7 @@ check_model StackOwnership CoreInvariants 6 \
     other:CInitOther:pass:ok \
     exitwaits:CInitExitWaits:deadlock:ok \
     leaveunchecked:CInitLeaveUnchecked:RunningMatchesCores:violated \
+    preemptreleases:CInitPreemptReleases:StackSafety:ok \
     wakestartunchecked:CInitWakeStartUnchecked:StartsOnFreeStack:violated:8
 
 # GitHub issue #613: the multi-writer log ring, option B with records of up

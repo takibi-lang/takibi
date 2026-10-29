@@ -153,7 +153,7 @@ fn platform_pmu_irq_debug() -> usize {
 // set, otherwise hand the mask to the GIC priority mask for the rest of the
 // handler. The platform's own sources are platform_irq_dispatch_ordinary,
 // defined once in each kernel/platform/<target>/intc.tkb.
-fn gic_irq_dispatch(frame: sink FrameRef[process], lower_el: bool)
+fn gic_irq_dispatch(frame: sink FrameRef[process, level])
         -> AnyFrame !{interrupt, unsafe} {
     // GitHub issue #632: GICC_IAR is not the interrupt number alone. For an
     // SGI, bits [12:10] name the CPU that sent it, so the world-stop SGI from
@@ -199,7 +199,7 @@ fn gic_irq_dispatch(frame: sink FrameRef[process], lower_el: bool)
     // nest into the handler if it never returns; the mask it interrupted is
     // put back, DAIF.I first, on the way out.
     let interrupted: usize = irq_nest_open();
-    let resumed: AnyFrame = gic_irq_dispatch_after_open(frame, lower_el, iar, id);
+    let resumed: AnyFrame = gic_irq_dispatch_after_open(frame, iar, id);
     irq_nest_close(interrupted);
     return resumed;
 }
@@ -209,26 +209,34 @@ fn gic_irq_dispatch(frame: sink FrameRef[process], lower_el: bool)
 // were open, so this core holds no masking lock while it waits in the pen.
 // `id` is refined below GIC_SPURIOUS_INTID_FIRST (1020): the compiler refuses
 // a caller that has not returned on a spurious IAR first (GitHub issue #1119).
-fn gic_irq_dispatch_after_open(frame: sink FrameRef[process], lower_el: bool,
+fn gic_irq_dispatch_after_open(frame: sink FrameRef[process, level],
         iar: u32, id: {0..<1020 as u32}) -> AnyFrame !{interrupt, unsafe} {
     if (id == GIC_WORLD_STOP_SGI) {
         kernel_world_stop_serve(frame);
         gicc.eoir = iar;
         return frame_any(frame);
     }
-    return platform_irq_dispatch_ordinary(frame, lower_el, iar, id);
+    return platform_irq_dispatch_ordinary(frame, iar, id);
 }
 
 // The exception_entry dispatch targets (kernel/arch/arm64/kernel/
 // exception_frame.tkb), one for each entry vector.
+// GitHub issue #992: both read the frame's level from its SPSR; the
+// dispatch is the same for either, and only the tick branches on it.
 fn platform_irq_dispatch(frame_sp: usize) -> usize !{interrupt} {
-    return frame_any_address(gic_irq_dispatch(
-        frame_ref_from_entry(frame_sp, kernel_process_entry_generation()),
-        false));
+    return frame_any_address(gic_irq_dispatch_leveled(
+        frame_ref_from_entry(frame_sp, kernel_process_entry_generation())));
 }
 
 fn platform_el0_irq_dispatch(frame_sp: usize) -> usize !{interrupt} {
-    return frame_any_address(gic_irq_dispatch(
-        frame_ref_from_entry(frame_sp, kernel_process_entry_generation()),
-        true));
+    return frame_any_address(gic_irq_dispatch_leveled(
+        frame_ref_from_entry(frame_sp, kernel_process_entry_generation())));
+}
+
+fn gic_irq_dispatch_leveled(frame: sink LeveledFrame[process])
+        -> AnyFrame !{interrupt} {
+    match frame {
+        LeveledFrame::El0(user_frame) => { return gic_irq_dispatch(user_frame); }
+        LeveledFrame::El1(kernel_frame) => { return gic_irq_dispatch(kernel_frame); }
+    }
 }

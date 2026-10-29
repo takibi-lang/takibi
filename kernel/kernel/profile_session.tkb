@@ -333,7 +333,7 @@ fn profile_session_sync() !{unsafe} {
 
 // The PMU overflow interrupt while a session samples. `frame` is the
 // interrupted context.
-fn profile_session_irq(frame: borrow FrameRef[process]) !{interrupt, unsafe} {
+fn profile_session_irq(frame: borrow FrameRef[process, level]) !{interrupt, unsafe} {
     if (pmu_sample_pending() != 1) { return; }
     let raw_cpu: usize = cpu_id();
     if (atomic_word_load(&profile_session_mode) != 1 ||
@@ -808,7 +808,7 @@ private fn profile_frame_store(record: borrow &mut ProfileRecord, index: usize, 
 }
 
 private fn profile_record_fill(record: borrow &mut ProfileRecord,
-                               frame: borrow FrameRef[process], skid: usize,
+                               frame: borrow FrameRef[process, level], skid: usize,
                                pid: usize)
         !{interrupt, unsafe} {
     record.timestamp = read_cntpct() as usize;
