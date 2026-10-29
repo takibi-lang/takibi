@@ -224,8 +224,8 @@ next one taken. The done record of the previous queue is in HISTORY.md
    across O_TRUNC, match since 2026-10-25), and #1067
    (printf) and #1070 (sendfile to a file) are writers the rows avoid.
    Signals: #999 (host-Linux conformance suite), #1000 (one delivery
-   chokepoint and `SignalDelivery.tla`, designed with #992), #948 (the
-   terminal-read EINTR fixture), #432 (timed blocking).
+   chokepoint and `SignalDelivery.tla`, designed with #992), #432 (timed
+   blocking); #948 (the terminal-read EINTR fixture) done 2026-10-30.
 3. **Compiler consolidation.** #1005 (one instruction table), #1027 steps
    2-3 (`--facts DIR` for the `--emit-*` family; strict defaults with
    opt-outs), #750 after #732.
