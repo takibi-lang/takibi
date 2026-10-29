@@ -21,6 +21,7 @@
 # Exit code only (0 = pass, 1 = fail); intended to run as part of
 # `make kernelbuild-rpi5`, right after the ELF is linked.
 
+import os
 import re
 import subprocess
 import sys
@@ -980,14 +981,53 @@ MMU_OFF_ALLOCATOR_FUNCTIONS = (
     "page_alloc_locked", "page_free_boot", "page_free_locked",
     "page_freelist_push",
 )
+
+
+# GitHub issue #762: every function an `!{mmu_off}` root reaches, read from
+# the compiler's call graph (main.o.callgraph.tsv, docs/CALL_GRAPH.md):
+# the compiler compiles these +strict-align, and this check is the
+# backstop over the same set rather than over a hand list.
+def mmu_off_reachable(callgraph_path):
+    rows = {}
+    with open(callgraph_path) as handle:
+        lines = [line.rstrip("\n") for line in handle if not line.startswith("#")]
+    header = lines[0].split("\t")
+    name_at = header.index("name")
+    declared_at = header.index("declared")
+    callees_at = header.index("callees")
+    roots = []
+    for line in lines[1:]:
+        fields = line.split("\t")
+        callees = [] if fields[callees_at] == "-" else [
+            c.split("@", 1)[0] for c in fields[callees_at].split(",")]
+        rows[fields[name_at]] = callees
+        if "mmu_off" in fields[declared_at].split(","):
+            roots.append(fields[name_at])
+    seen = set()
+    stack = list(roots)
+    while stack:
+        name = stack.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        stack.extend(rows.get(name, []))
+    return roots, seen
 Q_STORE_RE = re.compile(r"^(?:str|stur|stp|stnp)\s+q\d+,(?:\s*q\d+,)?\s*\[(.*?)\]")
 
 
-def check_mmu_off_vector_stores(insns):
+def check_mmu_off_vector_stores(insns, mmu_off_functions=None):
     failures = []
     seen = set()
+    checked = set(MMU_OFF_ALLOCATOR_FUNCTIONS)
+    if mmu_off_functions is not None:
+        missing = checked - mmu_off_functions
+        if missing:
+            failures.append(
+                "issue #762: the call graph's MMU-off set lacks %s, which the "
+                "#746 list names" % ", ".join(sorted(missing)))
+        checked |= mmu_off_functions
     for address, text, function in insns:
-        if function not in MMU_OFF_ALLOCATOR_FUNCTIONS:
+        if function not in checked:
             continue
         seen.add(function)
         m = Q_STORE_RE.match(text)
@@ -1107,6 +1147,18 @@ def asm_takibi_entry_controls():
     return failures
 
 
+def check_mmu_off_from_graph(insns, takibi_object):
+    """The #762 set: every MMU-off-reachable function in the Takibi
+    object's call graph, which must include the #746 list."""
+    graph = takibi_object + ".callgraph.tsv"
+    if not os.path.exists(graph):
+        return [f"issue #762: {graph} is missing; the MMU-off set comes from it"]
+    roots, reachable = mmu_off_reachable(graph)
+    if not roots:
+        return [f"issue #762: {graph} names no !{{mmu_off}} root"]
+    return check_mmu_off_vector_stores(insns, reachable)
+
+
 def main():
     args = sys.argv[1:]
     entries = None
@@ -1159,7 +1211,9 @@ def main():
         + check_exception_stacks_are_per_core(insns)
         + check_process_stack_handoff_hook(insns)
         + check_el0_return_resets_pmr(insns)
-        + check_mmu_off_vector_stores(insns)
+        + (check_mmu_off_from_graph(insns, takibi_object)
+           if takibi_object is not None
+           else check_mmu_off_vector_stores(insns))
     )
     if failures:
         for f in failures:

@@ -1038,8 +1038,58 @@ let emit_interrupt_event notify =
   let inline = const_inline_asm fty asm "~{memory}" true false in
   ignore (build_call fty inline [||] "" builder)
 
+(* GitHub issue #762: the target's own feature string, so a per-function
+   "target-features" attribute adds to it rather than replacing it. *)
+let configured_features = ref ""
+
+(* GitHub issue #762: with the MMU off every access is Device memory, where
+   an unaligned access faults; LLVM merged two 8-byte zero stores into a
+   128-bit `str q0` at an address 8 mod 16 (#746). Every function an
+   `!{mmu_off}` root reaches -- the roots and every function they call,
+   followed through the emitted calls -- gets +strict-align, so LLVM forms
+   no unaligned access there. Aligned accesses, which Device memory
+   permits, are unaffected. A helper also called with the MMU on is strict
+   everywhere. *)
+let mmu_off_roots : string list ref = ref []
+
+let mmu_off_reachable () =
+  let seen = Hashtbl.create 64 in
+  let rec visit fn =
+    let name = value_name fn in
+    if not (Hashtbl.mem seen name) && not (is_declaration fn) then begin
+      Hashtbl.replace seen name fn;
+      iter_blocks (fun block ->
+        iter_instrs (fun instr ->
+          if instr_opcode instr = Opcode.Call then begin
+            let callee = operand instr (num_operands instr - 1) in
+            match classify_value callee with
+            | ValueKind.Function -> visit callee
+            | _ -> ()
+          end) block) fn
+    end
+  in
+  List.iter (fun name ->
+    match lookup_function name !the_module with
+    | Some fn -> visit fn
+    | None -> ()) !mmu_off_roots;
+  Hashtbl.fold (fun name _ acc -> name :: acc) seen []
+  |> List.sort compare
+
+let apply_mmu_off_strict_align () =
+  let features =
+    if !configured_features = "" then "+strict-align"
+    else !configured_features ^ ",+strict-align" in
+  List.iter (fun name ->
+    match lookup_function name !the_module with
+    | Some fn ->
+        add_function_attr fn
+          (create_string_attr context "target-features" features)
+          AttrIndex.Function
+    | None -> ()) (mmu_off_reachable ())
+
 let setup_target ?(triple = "") ?(cpu = "") ?(features = "") () =
   let _ = Llvm_all_backends.initialize () in
+  configured_features := features;
   let triple = if triple = "" then Llvm_target.Target.default_triple () else triple in
   Target_info.configure triple;
   set_target_triple triple !the_module;
@@ -8729,6 +8779,13 @@ let gen_program ?prog_types prog =
   ) prog;
   if Buffer.length raw_asm_buf > 0 then
     set_module_inline_asm !the_module (Buffer.contents raw_asm_buf);
+  mmu_off_roots := List.filter_map (function
+    | FuncDef fdef when (match fdef.effects with
+                         | Some effects -> List.mem "mmu_off" effects
+                         | None -> false) -> Some fdef.name
+    | _ -> None) prog;
+  if starts_with (target_triple !the_module) "aarch64" then
+    apply_mmu_off_strict_align ();
   if !frame_pointers_enabled then
     iter_functions (fun fn ->
       add_function_attr fn

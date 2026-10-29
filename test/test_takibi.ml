@@ -23920,6 +23920,33 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
            "fn x86_counter() -> usize { return mrs_cntpct_el0(); }" ();
          expect_codegen_ok "fn x86_barrier() { dsb_ish(); dsb_ishst(); }" ()));
 
+  (* GitHub issue #762: every function an !{mmu_off} root reaches is
+     compiled +strict-align, so LLVM forms no unaligned (merged vector)
+     access where all memory is Device memory; the rest are not. *)
+  Alcotest.test_case "issue #762: MMU-off roots and their callees get +strict-align" `Quick
+    (fun () ->
+       with_codegen_target "aarch64-none-elf" (fun () ->
+         let _ = gen_codegen
+           "fn i762_helper(p: *usize) !{unsafe} { unsafe { *p = 0; } }
+            fn i762_root(p: *usize) !{mmu_off, unsafe} { i762_helper(p); }
+            fn i762_other(p: *usize) !{unsafe} { unsafe { *p = 1; } }" in
+         let features name =
+           match Llvm.lookup_function name !Llvm_gen.the_module with
+           | None -> Alcotest.failf "%s was not emitted" name
+           | Some fn ->
+               Array.fold_left (fun acc attr ->
+                 match Llvm.repr_of_attr attr with
+                 | Llvm.AttrRepr.String ("target-features", v) -> Some v
+                 | _ -> acc) None
+                 (Llvm.function_attrs fn Llvm.AttrIndex.Function) in
+         let strict name =
+           match features name with
+           | Some v -> contains_substring v "+strict-align"
+           | None -> false in
+         Alcotest.(check bool) "the root" true (strict "i762_root");
+         Alcotest.(check bool) "its callee" true (strict "i762_helper");
+         Alcotest.(check bool) "an unrelated function" false (strict "i762_other")));
+
   Alcotest.test_case "opaque handle pointers codegen without a concrete layout" `Quick
     (expect_codegen_ok
        "opaque struct DmaOwned;
