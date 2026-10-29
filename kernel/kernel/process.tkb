@@ -10146,9 +10146,16 @@ private fn kernel_process_probe_run_to_exit_locked(
         ScheduledProcessConstructingTakeResult::Constructing(resources) => {
             let (owner, constructing) = resources;
             // This bookkeeping fixture never restores its synthetic frame.
-            let synthetic = scheduled_process_parked_frame(owner);
-            let running = scheduled_process_finish_clone(
-                owner, constructing, synthetic);
+            // Its saved_sp is whatever the fixture left, so its level is
+            // whatever that word says; either is installed unread (#992).
+            let running = match scheduled_process_saved_frame(owner) {
+                LeveledFrame::El0(synthetic) => {
+                    scheduled_process_finish_clone(owner, constructing, synthetic)
+                }
+                LeveledFrame::El1(synthetic) => {
+                    scheduled_process_finish_clone(owner, constructing, synthetic)
+                }
+            };
             let exited = scheduled_process_exit(owner, running);
             scheduled_process_release(owner, exited);
         }
